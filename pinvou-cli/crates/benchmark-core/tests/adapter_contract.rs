@@ -60,12 +60,11 @@ impl BenchmarkAdapter for ContractAdapter {
 fn native_task() -> BenchmarkTask {
     BenchmarkTask::new(
         "task-1",
-        Some("search".into()),
         Some("1".into()),
         ExecutionRequest::native_turn(
             PrivateInputHandle::new("private-prompt-1"),
             vec![AttachmentHandle::new("attachment-1")],
-            Duration::from_secs(30),
+            Some(Duration::from_secs(30)),
             ToolPolicyId::new("gaia/v1"),
             OutputContract::new("final-answer/v1"),
         ),

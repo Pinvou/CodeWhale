@@ -4,7 +4,7 @@ import { ChevronLeft, ChevronRight, Plus, Sparkles, User, X } from '../../compon
 import { IosSearchField } from '../../components/IosControls.jsx';
 import { bridge } from '../../hooks/useBridge.js';
 import { getSyntaxHighlightVersion, subscribeSyntaxHighlight } from '../../shared/syntax-highlighter.js';
-import { deptLabelFor, personaText, DEPT_ORDER, ALL_DEPT, DEPT_OPTIONS, deptColor, AppIcon } from './persona-shared.jsx';
+import { deptLabelFor, personaText, DEPT_ORDER, ALL_DEPT, DEPT_OPTIONS, deptColor, AppIcon, IOS_FONT_STACK } from './persona-shared.jsx';
 
     // 双击卡片打开的详情 modal —— FLIP 转场 + 拉取并展示完整人设正文(body)。
     // 唯一消费方是本文件,留在卡池 chunk;不进 persona-shared(主 chunk 常驻,
@@ -35,7 +35,7 @@ import { deptLabelFor, personaText, DEPT_ORDER, ALL_DEPT, DEPT_OPTIONS, deptColo
       const tc = deptColor(card.dept);
       const cd = personaText(card, t);
       return (
-        <div className="fixed inset-0 z-50 flex items-end md:items-center justify-center md:p-6" style={{ background:'rgba(0,0,0,.6)', backdropFilter:'blur(2px)', WebkitBackdropFilter:'blur(2px)', fontFamily:'-apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif' }} onClick={onClose}>
+        <div className="fixed inset-0 z-50 flex items-end md:items-center justify-center md:p-6" style={{ background:'rgba(0,0,0,.6)', backdropFilter:'blur(2px)', WebkitBackdropFilter:'blur(2px)', fontFamily: IOS_FONT_STACK }} onClick={onClose}>
           <div ref={panelRef} onClick={(e)=>e.stopPropagation()}
             className="w-full h-[88vh] md:h-auto md:max-h-[84vh] md:max-w-[560px] flex flex-col rounded-t-[14px] md:rounded-[14px] overflow-hidden bg-[#F2F2F7] dark:bg-[#1C1C1E] text-[#000] dark:text-[#fff]">
             {/* 顶部:头像 + 名称/部门 + 关闭 */}
@@ -89,7 +89,7 @@ import { deptLabelFor, personaText, DEPT_ORDER, ALL_DEPT, DEPT_OPTIONS, deptColo
         if (!name.trim()) { setErr(t.cpErrName); return; }
         if (!body.trim()) { setErr(t.cpErrBody); return; }
         setSaving(true); setErr('');
-        var input = { name: name.trim(), dept: dept, emoji: emoji || '🃏', color: init.color || deptColor(dept), description: description.trim(), body: body };
+        var input = { name: name.trim(), dept: dept, emoji: emoji, color: init.color || deptColor(dept), description: description.trim(), body: body };
         try {
           var sum = isEdit ? await bridge.personas.updatePersona(init.id, input) : await bridge.personas.createPersona(input);
           if (onSaved) onSaved(sum);
@@ -98,7 +98,7 @@ import { deptLabelFor, personaText, DEPT_ORDER, ALL_DEPT, DEPT_OPTIONS, deptColo
       }
       return (
         <div className="fixed inset-0 z-[60] flex items-end md:items-center justify-center md:p-4"
-          style={{ background:'rgba(0,0,0,.6)', backdropFilter:'blur(2px)', WebkitBackdropFilter:'blur(2px)', fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif' }} onClick={onClose}>
+          style={{ background:'rgba(0,0,0,.6)', backdropFilter:'blur(2px)', WebkitBackdropFilter:'blur(2px)', fontFamily: IOS_FONT_STACK }} onClick={onClose}>
           <div onClick={(e)=>e.stopPropagation()} className="w-full h-[90vh] md:h-auto md:max-h-[85vh] md:max-w-md flex flex-col rounded-t-[14px] md:rounded-[14px] overflow-hidden bg-[#F2F2F7] dark:bg-[#1C1C1E] text-[#000] dark:text-[#fff]">
             {/* 导航栏 */}
             <div className="flex justify-between items-center px-4 h-14 shrink-0 border-b border-[rgba(198,198,200,.5)] dark:border-[#38383A]">
@@ -169,6 +169,9 @@ import { deptLabelFor, personaText, DEPT_ORDER, ALL_DEPT, DEPT_OPTIONS, deptColo
               ? '0 2px 8px rgba(0,0,0,.45), 0 24px 60px rgba(0,0,0,.65)'
               : '0 8px 28px rgba(83,74,183,.16)',
             border: isDark ? '1px solid rgba(255,255,255,.18)' : '1px solid rgba(83,74,183,.14)', // isDark dynamic-value: 保留 (rgba border + banner 整体 isDark 同深浅)
+            // Promo banner keeps its shorter 4-font stack from main on purpose
+            // (adding "SF Pro Text"/"Microsoft YaHei" here changes Windows
+            // rendering); do not unify onto IOS_FONT_STACK.
             fontFamily:'-apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif' }}>
           <div className="absolute rounded-full" style={{ width:240, height:240, background:'#AFA9EC', opacity:.16, top:-80, right:-40 }} />
           <div className="absolute rounded-full" style={{ width:150, height:150, background:'#9FE1CB', opacity:.15, bottom:-50, right:120 }} />
@@ -265,7 +268,7 @@ import { deptLabelFor, personaText, DEPT_ORDER, ALL_DEPT, DEPT_OPTIONS, deptColo
 
       return (
         <div className="flex-1 flex flex-col w-full h-full relative z-10 overflow-hidden animate-in fade-in duration-300 bg-[#fff] dark:bg-[#131314]"
-          style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif' }}>
+          style={{ fontFamily: IOS_FONT_STACK }}>
           <div className="relative z-10 flex-1 min-h-0 overflow-y-auto p-4 custom-scrollbar sm:p-6 lg:p-10">
             <div className="max-w-[1400px] mx-auto">
 
