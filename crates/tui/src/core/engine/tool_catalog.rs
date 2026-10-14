@@ -490,7 +490,7 @@ pub(crate) fn bounded_toolbox_eviction_note(
         && crate::core::session::TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES == usize::MAX / 2
     {
         return format!(
-            "This {} evicted tools from the bounded conversation toolbox; the evicted tools \
+            "This {} evicted tools from the conversation toolbox; the evicted tools \
              are no longer callable until a later search re-activates them: {}",
             trigger.label(),
             evicted.join(", ")

@@ -529,7 +529,7 @@ fn toolbox_note_rendering_nets_re_admitted_names_at_ride_time() {
     );
     assert_eq!(
         rendered
-            .matches("evicted tools from the bounded conversation toolbox")
+            .matches("evicted tools from the conversation toolbox")
             .count(),
         1,
         "a companion note the netting empties must contribute no prose: {rendered}"
@@ -648,8 +648,9 @@ fn toolbox_note_rendering_nets_re_admitted_names_at_ride_time() {
 
 /// Pinvou fork: the toolbox bounds are sentinel-disabled
 /// (`TOOL_ACTIVATION_CACHE_MAX_*` are `usize::MAX / 2`), so no activation can
-/// ever hit them and the oversize and eviction prose must claim no numeric
-/// bound — a bound that never fires is a false statement about the runtime.
+/// ever hit them and the oversize and eviction prose must claim no bound,
+/// numeric or otherwise — a bound that never fires is a false statement
+/// about the runtime.
 #[test]
 fn forkguard_toolbox_prose_claims_no_bound_under_the_disabled_sentinel() {
     let reason = super::toolbox_oversize_reason();
@@ -668,7 +669,11 @@ fn forkguard_toolbox_prose_claims_no_bound_under_the_disabled_sentinel() {
         super::bounded_toolbox_eviction_note(ToolboxEvictionTrigger::Step, &["x".to_string()]);
     assert_eq!(
         note,
-        "This step evicted tools from the bounded conversation toolbox; the evicted tools are \
+        "This step evicted tools from the conversation toolbox; the evicted tools are \
          no longer callable until a later search re-activates them: x"
+    );
+    assert!(
+        !note.contains("bounded"),
+        "the disabled-sentinel note must not claim a bound the fork disabled: {note}"
     );
 }
