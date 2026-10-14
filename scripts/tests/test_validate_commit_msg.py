@@ -73,6 +73,18 @@ class ValidateCommitTextTests(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("description is too vague: 修改代码", errors[0])
 
+    def test_empty_description_after_pr_suffix_fails_cleanly(self) -> None:
+        # `fix:  (#1)`: the GitHub suffix stripper leaves an empty description;
+        # the guard must report a validation error, not crash with IndexError
+        # (the pre-#1518 behavior that broke the commit-message CI leg).
+        errors = validate_commit_msg.validate_text(
+            "fix:  (#1)",
+            "squash commit",
+        )
+
+        self.assertNotEqual(errors, [])
+        self.assertIn("description must use Chinese", errors[0])
+
     def test_subject_only_file_accepts_pr_title_without_signoff(self) -> None:
         with patch.object(Path, "read_text", return_value="ci(pr): 修复标题校验"):
             errors = validate_commit_msg.validate_file(
@@ -167,6 +179,35 @@ class ValidateCommitRangeTests(unittest.TestCase):
             "log",
             "--format=%H%x00%P%x00%an%x00%ae%x00%B%x1e",
             "head",
+        )
+
+    def test_missing_base_with_present_cutoff_still_excludes_cutoff(self) -> None:
+        # Shallow-clone combo (F, T): base absent but the legacy cutoff object
+        # present — validate `head` alone while still excluding the cutoff.
+        with (
+            patch.object(
+                validate_commit_msg, "git_commit_exists", side_effect=[False, True]
+            ),
+            patch.object(validate_commit_msg, "git") as git_mock,
+        ):
+            git_mock.return_value = self.commit_record(
+                "0123456789abcdef",
+                "parent",
+                "Test User",
+                "test@example.com",
+                "fix: 修复提交门禁范围\n\nSigned-off-by: Test User <test@example.com>",
+            )
+
+            self.assertEqual(
+                validate_commit_msg.validate_range("missing-base", "head"), []
+            )
+
+        git_mock.assert_called_once_with(
+            "log",
+            "--format=%H%x00%P%x00%an%x00%ae%x00%B%x1e",
+            "head",
+            "--not",
+            validate_commit_msg.LEGACY_HISTORY_CUTOFF,
         )
 
     def test_range_still_rejects_new_nonconforming_commit(self) -> None:
