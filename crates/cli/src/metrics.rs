@@ -310,6 +310,7 @@ fn read_audit_log(path: &Path, since: Option<DateTime<Utc>>, rollup: &mut Rollup
                 let tool_name = v
                     .pointer("/details/tool_name")
                     .or_else(|| v.pointer("/payload/tool_name"))
+                    .or_else(|| v.get("tool_name"))
                     .and_then(|t| t.as_str())
                     .unwrap_or("unknown");
                 let stats = rollup.tool_mut(tool_name);
@@ -330,19 +331,29 @@ fn read_audit_log(path: &Path, since: Option<DateTime<Utc>>, rollup: &mut Rollup
                 // oversize-hydration refusal) answered the call without the
                 // tool ever running, so it counts as neither — counting it
                 // as a success would inflate the tool's real execution rate.
+                // The fields are read from every placement a writer uses:
+                // the sensitive audit log nests them under `details`, while
+                // the engine's opt-in tool-audit log
+                // (`CODEWHALE_TOOL_AUDIT_LOG`) writes them at the top level
+                // of the line.
                 let success = v
                     .pointer("/details/success")
                     .or_else(|| v.pointer("/payload/success"))
+                    .or_else(|| v.get("success"))
                     .and_then(|b| b.as_bool())
                     .unwrap_or(true);
                 let executed = v
                     .pointer("/details/executed")
                     .or_else(|| v.pointer("/payload/executed"))
+                    .or_else(|| v.get("executed"))
                     .and_then(|b| b.as_bool())
                     .unwrap_or(true);
                 if success && executed {
                     stats.successes += 1;
-                } else if !success {
+                } else if executed {
+                    // Only a receipt whose tool actually ran can be a
+                    // failure; an unexecuted one is neither, whatever its
+                    // success flag says.
                     stats.failures += 1;
                 }
             }
@@ -1036,6 +1047,14 @@ mod tests {
             r#"{"event":"tool.result","ts":"2026-04-01T10:01:00+00:00","details":{"tool_name":"exec_shell","success":false}}"#,
             r#"{"event":"tool.result","ts":"2026-04-01T10:02:00+00:00","details":{"tool_name":"deferred_tool","success":true,"executed":false}}"#,
             r#"{"event":"tool.result","ts":"2026-04-01T10:03:00+00:00","details":{"tool_name":"other_tool","success":true,"executed":true}}"#,
+            // The engine's opt-in tool-audit log
+            // (`CODEWHALE_TOOL_AUDIT_LOG`) writes the same fields at the top
+            // level of the line instead of under `details`.
+            r#"{"event":"tool.result","ts":"2026-04-01T10:04:00+00:00","tool_name":"flat_tool","success":true}"#,
+            r#"{"event":"tool.result","ts":"2026-04-01T10:05:00+00:00","tool_name":"flat_refusal","success":true,"executed":false}"#,
+            // An unexecuted receipt is neither success nor failure whatever
+            // its success flag says — the tool never ran.
+            r#"{"event":"tool.result","ts":"2026-04-01T10:06:00+00:00","tool_name":"flat_failed_refusal","success":false,"executed":false}"#,
         ];
         for line in lines {
             writeln!(tmp, "{line}").unwrap();
@@ -1055,6 +1074,16 @@ mod tests {
         assert_eq!(rollup.tools["deferred_tool"].failures, 0);
         assert_eq!(rollup.tools["other_tool"].calls, 1);
         assert_eq!(rollup.tools["other_tool"].successes, 1);
+        // The flat placement is read: dropping the top-level fallback
+        // defaults these to executed successes.
+        assert_eq!(rollup.tools["flat_tool"].calls, 1);
+        assert_eq!(rollup.tools["flat_tool"].successes, 1);
+        assert_eq!(rollup.tools["flat_refusal"].successes, 0);
+        assert_eq!(rollup.tools["flat_refusal"].failures, 0);
+        // Deleting the `executed` guard on the failure arm turns this pin
+        // red: an unexecuted receipt is never a failure.
+        assert_eq!(rollup.tools["flat_failed_refusal"].successes, 0);
+        assert_eq!(rollup.tools["flat_failed_refusal"].failures, 0);
     }
 
     #[test]
