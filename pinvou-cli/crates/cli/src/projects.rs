@@ -761,6 +761,12 @@ fn move_session(
                  scheduled-run sessions are managed from Scheduled"
             )));
         }
+        SessionKind::RemoteProxy => {
+            return Err(CliError::failed(format!(
+                "projects move: session {session_id} is a remote proxy; \
+                 remote sessions are managed from Remote Control"
+            )));
+        }
         SessionKind::Chat => {}
     }
     sessions.load(session_id).map_err(|error| {
@@ -1580,6 +1586,41 @@ fn rebind_report(
 mod tests {
     use super::*;
     use pinvou3_lib::features::codex_acp::{AgentBackend, CodexWorkspaceKind};
+
+    #[test]
+    fn projects_move_refuses_remote_proxy_before_assignment_mutation() {
+        let _env_lock = crate::support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = crate::support::test_support::TempHome::new("projects-remote-refusal");
+        let id = home.seed_remote_proxy();
+        let sessions = SessionStore::boot().expect("boot remote registry");
+        assert_eq!(sessions.session_kind(id).unwrap(), SessionKind::RemoteProxy);
+        let project = open_store()
+            .unwrap()
+            .create_project("Synthetic project".into(), vec![])
+            .unwrap();
+        let project_path = home.join("projects/projects.json");
+        let remote_path = home.join("sessions/_remote_proxies.json");
+        let before_project = std::fs::read(&project_path).unwrap();
+        let before_remote = std::fs::read(&remote_path).unwrap();
+        for project_id in [Some(project.id.clone()), None] {
+            let error = execute(
+                ProjectsCommand::Move {
+                    session_id: id.into(),
+                    project_id,
+                    yes: true,
+                },
+                OutputMode::Json,
+            )
+            .expect_err("remote proxies cannot receive local project assignments");
+            assert_eq!(error.exit_code(), crate::ExitCode::Failed);
+            assert!(error.to_string().contains("is a remote proxy"), "{error}");
+            assert_eq!(std::fs::read(&project_path).unwrap(), before_project);
+            assert_eq!(std::fs::read(&remote_path).unwrap(), before_remote);
+            assert!(!home.join(format!("sessions/{id}.json")).exists());
+        }
+    }
 
     /// Round-45 review: the codex fence must see bindings persisted to disk
     /// after an earlier in-process load — a GUI bind landing between the

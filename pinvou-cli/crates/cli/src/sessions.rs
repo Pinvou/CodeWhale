@@ -337,6 +337,7 @@ fn kind_label(store: &SessionStore, id: &str) -> &'static str {
     match store.session_kind(id) {
         Ok(SessionKind::Chat) => "chat",
         Ok(SessionKind::ScheduledRun) => "scheduled-run",
+        Ok(SessionKind::RemoteProxy) => "remote-proxy",
         // A transient profiles-file error must not mislabel a chat session
         // as a scheduled run; surface it as unknown instead.
         Err(_) => "unknown",
@@ -1267,6 +1268,23 @@ fn folder(id: &str, output: OutputMode) -> Result<CliOutcome, CliError> {
 mod tests {
     use super::*;
     use crate::{CliCommand, parse_args};
+
+    #[test]
+    fn remote_proxy_kind_label_uses_the_real_remote_registry() {
+        let _env_lock = crate::support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = crate::support::test_support::TempHome::new("sessions-remote-kind");
+        let id = home.seed_remote_proxy();
+        let store = SessionStore::boot().expect("boot remote registry");
+        assert_eq!(store.session_kind(id).unwrap(), SessionKind::RemoteProxy);
+        assert_eq!(kind_label(&store, id), "remote-proxy");
+        let local = store
+            .create_new("synthetic-model".into(), None, home.to_path_buf())
+            .unwrap();
+        assert_eq!(kind_label(&store, &local.metadata.id), "chat");
+        assert_eq!(kind_label(&store, "remote-missing"), "unknown");
+    }
 
     fn parse(arguments: &[&str]) -> Result<SessionsCommand, CliError> {
         let mut owned: Vec<String> = arguments.iter().map(|value| value.to_string()).collect();

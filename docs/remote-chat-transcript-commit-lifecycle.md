@@ -13,3 +13,5 @@
 ```sh
 cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib transcript_commit_tests -- --test-threads=1
 ```
+
+远控集成基线还新增了 `SessionKind::RemoteProxy`。CLI 的类型标签现在显式覆盖该类型，`projects move` 则像桌面端一样，在写项目归属前拒绝远端代理会话，包括带 `--yes` 的迁出操作。此为恢复跨平台 CLI 编译的穷举兼容修复；`sessions list/show` 仍使用既有本地记录入口，不新增远控会话读取能力。合成 v3 registry 回归验证标签分类和项目迁入/迁出拒绝后文件保持不变。
