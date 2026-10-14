@@ -618,9 +618,18 @@ fn carve_out_target_allowed(workspace: &Path, workspace_canonical: &Path, raw: &
 /// get a real-path check. Round-45 R45-4: the walk itself is delegated to
 /// the single core implementation (`codewhale_core::walk_deepest_existing`,
 /// DeepestAncestor fallback) so this lane can never drift from the intake
-/// gate's copy again; the Option survives only for the walked-past-root
-/// corner, where the composed root-anchored spelling fails the caller's
-/// containment check exactly like the old `None` denial did.
+/// gate's copy again.
+///
+/// Round-46 P2-1 (behavior flip, disclosed and pinned): the delegation
+/// composes a path for EVERY spelling where the old loop returned `None` —
+/// notably a ghost component + `..` (`<ws>/ghost_dir/../target`), which the
+/// old `file_name()? == None` corner walked past and DENIED modally. The
+/// composed spelling lands on the eligible parent (`<canonical-ws>/target`),
+/// so the carve-out answers on the true landing path — a false-denial fix,
+/// visible even single-root (pinned by
+/// `carve_out_admits_a_ghost_dotdot_shape_composed_onto_the_parent`). The
+/// `Option` return is retained for signature stability; the walked-past-root
+/// corner now yields a root-anchored spelling that containment judges.
 pub(crate) fn resolve_deepest_existing(candidate: &Path) -> Option<PathBuf> {
     Some(
         codewhale_core::walk_deepest_existing(
@@ -839,6 +848,25 @@ mod tests {
                 "{paths:?} must keep the modal"
             );
         }
+    }
+
+    #[test]
+    fn carve_out_admits_a_ghost_dotdot_shape_composed_onto_the_parent() {
+        // Round-46 P2-1: a target spelled through a ghost component + `..`
+        // (`ghost_dir/../src/main.rs`, ghost_dir nonexistent) used to hit the
+        // walk's `file_name()? == None` corner and DENY modally; the shared
+        // core walk composes it onto the deepest existing ancestor (the
+        // workspace), so the carve-out now answers on the true landing path.
+        // Single-root-visible behavior (pinned for the body's list).
+        let tmp = carve_out_workspace();
+        assert!(
+            paths_within_workspace_write_carve_out(
+                tmp.path(),
+                &[],
+                &["ghost_dir/../src/main.rs".to_string()]
+            ),
+            "the ghost+dotdot spelling lands in the workspace and qualifies"
+        );
     }
 
     #[test]

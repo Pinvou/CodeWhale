@@ -474,10 +474,12 @@ fn comparison_contains(haystack: &str, needle: &str) -> bool {
 /// that does not exist yet keeps the lexical judgment: materialization
 /// stays the delivery lane's job, and the same-disk TOCTOU between this
 /// check and enforcement is the disclosed inherent residual. A not-yet-
-/// materialized PRIMARY also keeps its lexical spelling, so on hosts where
-/// the primary's canonical form differs from its spelling (macOS
-/// `/tmp` ↔ `/private/tmp`) the ancestor guard is existence-dependent on
-/// the primary — disclosed residual (round-38 minor).
+/// materialized PRIMARY resolves through its deepest EXISTING ancestor
+/// (`walk_deepest_existing`, round-44 R44-1): every component that exists
+/// compares on canonical spellings, so the macOS `/tmp` ↔ `/private/tmp`
+/// ghost-primary shape is rejected like any other ancestor — the former
+/// existence-dependent residual is closed (pinned by
+/// `intake_rejects_a_canonical_ancestor_under_a_ghost_primary`).
 ///
 /// The per-turn sandbox copies this set verbatim into
 /// `WorkspaceWrite.writable_roots`, so three classes of declared entry widen
