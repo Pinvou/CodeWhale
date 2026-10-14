@@ -14265,7 +14265,10 @@ impl SubAgentToolSurface {
         };
         match result.as_mut() {
             Ok(rich) => rich.result.content.push_str(&format!("\n\n{rendered}")),
-            Err(error) => *error = anyhow!("{error}\n\n{rendered}"),
+            // `{error:#}` renders the source chain into the message: the
+            // rebuild replaces the error wholesale, and a bare `{error}`
+            // would silently drop everything but its top cause.
+            Err(error) => *error = anyhow!("{error:#}\n\n{rendered}"),
         }
     }
 

@@ -117,7 +117,9 @@ pub(crate) enum ToolboxEvictionTrigger {
     /// A `tool_search` result naming the evictions in its own payload.
     ToolSearch,
     /// A non-search activation step: a hydration batch, a retrieval
-    /// admission, or an executed tool's refresh.
+    /// admission, an executed tool's refresh, or — on the child surface —
+    /// a request-rebuild revalidation or a warm-start overflow, which have
+    /// no turn boundary of their own to attribute.
     Step,
     /// The turn-entry revalidation.
     TurnStart,
