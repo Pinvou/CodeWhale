@@ -230,6 +230,26 @@ class CiGatePolicyTests(unittest.TestCase):
                                 else linux in ("success", "skipped") and windows in ("success", "skipped"))
                     self.assertEqual(result.returncode == 0, accepted, (required, linux, windows, result.stderr))
 
+    def test_required_gate_requires_actual_success_for_applicable_windows_dacl(self):
+        gate = self.workflow.split("\n  required-gate:", 1)[1]
+        body = gate.split("        run: |\n", 1)[1]
+        shell = "\n".join(line[10:] for line in body.splitlines())
+        environment = {**os.environ, "BACKFLOW_MODE": "full",
+                       "WINDOWS_RUST_REQUIRED_BY_POLICY": "false"}
+        for name in re.findall(r"^          ([A-Z_]+_RESULT):", gate, re.MULTILINE):
+            environment[name] = "success"
+        for event in ("pull_request", "merge_group"):
+            for required in ("true", "false"):
+                for status in ("success", "skipped", "failure", "cancelled", ""):
+                    result = subprocess.run(["bash", "-c", shell], capture_output=True, timeout=10,
+                        env={**environment, "GITHUB_EVENT_NAME": event,
+                             "RELAY_REQUIRED_BY_POLICY": required,
+                             "WINDOWS_RELAY_DACL_RESULT": status})
+                    accepted = (status == "success" if required == "true"
+                                else status in ("success", "skipped"))
+                    self.assertEqual(result.returncode == 0, accepted,
+                                     (event, required, status, result.stderr))
+
     def test_release_workflow_does_not_reference_retired_web_template(self):
         for retired_reference in (
             "test:web-template-packaging",
