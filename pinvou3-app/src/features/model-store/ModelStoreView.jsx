@@ -32,6 +32,7 @@ import {
 } from './model-store-api.js';
 import {
   cardIdFromLifecycleKey,
+  canStopRetainedProcess,
   downloadTaskKey,
   filterModels,
   formatBytes,
@@ -142,6 +143,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
   const [localResourcesOpen, setLocalResourcesOpen] = useState(false);
   // 二次内存确认只在“已有模型运行且风险/预算未知”时出现。首个模型不拦截。
   const [memoryConfirm, setMemoryConfirm] = useState(null);
+  const [retainedStop, setRetainedStop] = useState(null);
 
   // 这里原来有一整套「测试模型商店」的状态:开关、数据源胶囊、口令框、以及连点
   // 计数的 ref。内置测试商店 2026-09-30 整体拿掉,数据源只剩生产商店一个。
@@ -510,6 +512,26 @@ const ModelStoreView = ({ theme, t, bs }) => {
     }),
     [copy, runLifecycle]
   );
+
+  const requestRetainedStop = useCallback((task) => {
+    if (!canStopRetainedProcess(task)) return;
+    const cardId = cardIdFromLifecycleKey(task.key);
+    const record = library.models.find((item) => item.card_id === cardId);
+    if (!record || record.status !== 'deployed') {
+      showToast(copy.stopRetainedUnavailable);
+      loadAll();
+      return;
+    }
+    setRetainedStop({ record, taskId: task.id });
+  }, [copy, library.models, loadAll, showToast]);
+
+  const confirmRetainedStop = useCallback(async () => {
+    const pending = retainedStop;
+    setRetainedStop(null);
+    if (!pending) return;
+    const result = await handleStop(pending.record);
+    if (result?.ok) dismissTask(pending.taskId);
+  }, [handleStop, retainedStop]);
 
   /**
    * 卸载 / 删除。`purgeWeights` 就是用户在对话框上按的那个按钮：
@@ -1172,6 +1194,19 @@ const ModelStoreView = ({ theme, t, bs }) => {
         ) : null}
       </MsDialog>
 
+      <MsDialog open={!!retainedStop} onClose={() => setRetainedStop(null)} theme={theme} labelledBy="model-store-retained-stop-title">
+        {retainedStop ? (
+          <>
+            <MsDialogTitle id="model-store-retained-stop-title">{copy.stopRetainedProcess}</MsDialogTitle>
+            <p className={`mt-3 text-[13px] leading-6 ${TEXT_SECONDARY}`}>{copy.stopRetainedConfirm(retainedStop.record.card_name)}</p>
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
+              <MsButton tone="ghost" onClick={() => setRetainedStop(null)}>{copy.detailClose}</MsButton>
+              <MsButton onClick={confirmRetainedStop}>{copy.stopRetainedProcess}</MsButton>
+            </div>
+          </>
+        ) : null}
+      </MsDialog>
+
       <ModelStoreTaskPanel
         tasks={tasks}
         copy={copy}
@@ -1180,6 +1215,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
         onToggle={toggleTaskExpand}
         onAnswer={answerTask}
         onForceRemove={requestForceRemove}
+        onStopRetained={requestRetainedStop}
       />
 
       <MsToast toast={toast} />

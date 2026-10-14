@@ -336,6 +336,7 @@ function reduceLogChunk(state, chunk, now) {
   let stage = state.stage ?? null;
   let step = state.step ?? null;
   let layers = state.layers ?? null;
+  let retainedNativeProcess = state.retainedNativeProcess === true;
   const lines = [...state.lines];
 
   const sample = (done) => {
@@ -345,6 +346,10 @@ function reduceLogChunk(state, chunk, now) {
 
   for (const raw of chunk || []) {
     const line = String(raw ?? '');
+    if (line === 'LMM_RETAINED_NATIVE_PROCESS=1') {
+      retainedNativeProcess = true;
+      continue;
+    }
     const parsedPrompt = parsePromptLine(line);
     if (parsedPrompt) {
       prompt = parsedPrompt;
@@ -399,6 +404,7 @@ function reduceLogChunk(state, chunk, now) {
     stage,
     step,
     layers,
+    retainedNativeProcess,
   };
 }
 
@@ -767,6 +773,17 @@ function canForceRemove(task) {
 }
 
 /**
+ * A card may offer explicit stop after failed readiness; this is not a running/
+ * healthy assertion or signal authorization. The stop script rechecks identity.
+ * @param {object} task - Lifecycle task.
+ * @returns {boolean} Whether the user can request a confirmed recovery stop.
+ */
+function canStopRetainedProcess(task) {
+  return !!task && task.kind === 'enable' && task.status === 'error'
+    && task.retainedNativeProcess === true && !!cardIdFromLifecycleKey(task.key);
+}
+
+/**
  * 表单提交前的必填校验。字段里 `required` 默认为真 —— 脚本问了就是要用的,
  * 空着提交只会让它在后面某一步以更难懂的方式失败。
  * @param {Array<object>} fields - 表单字段。
@@ -847,5 +864,6 @@ export {
   lifecycleTaskKey,
   cardIdFromLifecycleKey,
   canForceRemove,
+  canStopRetainedProcess,
   missingFormFields,
 };

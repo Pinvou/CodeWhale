@@ -466,6 +466,9 @@ export const dictZh = {
           // 卸载失败后的逃生路径。措辞的全部重点是「不会删掉什么」——用户在这一步
           // 最容易误以为磁盘终于清干净了。
           forceRemoveEntry:'强制从列表移除',
+          stopRetainedProcess:'停用残留进程',
+          stopRetainedConfirm:(name)=>`「${name}」的启用检查未通过，但卡片报告仍有自己的引擎进程。停用会中断该实例可能正在处理的请求，不会删除权重、引擎或日志。仅在重新核对进程身份成功后才会执行；确定停用吗？`,
+          stopRetainedUnavailable:'模型记录已变化，请刷新模型列表后处理；未执行停用。',
           forceRemoveTitle:'强制从列表移除？',
           forceRemoveIntro:(n,s)=>`「${n}」的卸载没有完成，记录还留在模型库里，所以这张卡还显示在列表上。强制移除会把这条记录删掉，让它从列表消失。卡片登记的体积是 ${s}——这个空间不会被释放。`,
           forceRemovePointRecordOnly:'只删除模型库里的这条记录和这个模型的 API Key，磁盘上一个字节都不会被删除。',

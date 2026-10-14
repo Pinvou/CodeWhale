@@ -10,6 +10,7 @@ import { copyClipboardText } from '../../shared/clipboard.js';
 import { exportRunLog, revealRunLogsDir } from './model-store-api.js';
 import {
   canForceRemove,
+  canStopRetainedProcess,
   formatBytes,
   layerSummary,
   missingFormFields,
@@ -202,7 +203,7 @@ function taskSubtitle(task, copy) {
  * 单个任务卡。
  * @returns {React.ReactElement} 任务卡。
  */
-function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswer, onForceRemove }) {
+function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswer, onForceRemove, onStopRetained }) {
   const logRef = useRef(null);
   // 要不要跟着新行滚到底。**初值是 false**:用户的原话是「不要滚动的闪日志,这样很乱」。
   // 原来每来一行就无条件 `scrollTop = scrollHeight`,而装引擎时日志是一秒几十行——
@@ -396,7 +397,7 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
         </div>
       ) : null}
 
-      <div className="relative flex min-w-0 items-center justify-end gap-2 px-4 py-2.5">
+      <div className="relative flex min-w-0 flex-wrap items-center justify-end gap-2 px-4 py-2.5">
         {/* 展开时才提供日志工具；收进「更多」后不再挤坏底栏。这个菜单是支持工具，
             不是把「取消/关闭/继续处理」藏起来：用户的当前主动作始终常驻在右侧。 */}
         {task.expanded ? (
@@ -457,6 +458,16 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
             用户刚好正对着失败日志——他是在看清了「为什么删不掉」之后才做这个
             决定的,而不是在列表里随手点到。任务一关,入口就跟着消失。
             文案也刻意不叫「卸载」:那个词已经被真删文件的操作占了。 */}
+        {canStopRetainedProcess(task) && onStopRetained ? (
+          <MsButton
+            tone="neutral"
+            className="h-8 px-2.5 text-[12px]"
+            onClick={() => onStopRetained(task)}
+            data-testid="model-store-task-stop-retained"
+          >
+            {copy.stopRetainedProcess}
+          </MsButton>
+        ) : null}
         {canForceRemove(task) ? (
           <MsButton
             tone="danger"
@@ -490,7 +501,7 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
  * 限高 + 内部滚动。
  * @returns {React.ReactElement|null} 面板。
  */
-function ModelStoreTaskPanel({ tasks, copy, onCancel, onDismiss, onToggle, onAnswer, onForceRemove }) {
+function ModelStoreTaskPanel({ tasks, copy, onCancel, onDismiss, onToggle, onAnswer, onForceRemove, onStopRetained }) {
   if (tasks.length === 0) return null;
   // 有任务在等用户输入时，把面板抬到弹窗遮罩（z-[200]）之上。
   //
@@ -521,6 +532,7 @@ function ModelStoreTaskPanel({ tasks, copy, onCancel, onDismiss, onToggle, onAns
           onToggle={onToggle}
           onAnswer={onAnswer}
           onForceRemove={onForceRemove}
+          onStopRetained={onStopRetained}
         />
       ))}
     </div>

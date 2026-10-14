@@ -8,6 +8,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   MAX_LOG_LINES,
+  canStopRetainedProcess,
+  lifecycleTaskKey,
   computeSpeed,
   etaSeconds,
   filterStoreCards,
@@ -35,6 +37,22 @@ import {
 } from '../src/features/model-store/model-store-logic.js';
 
 const emptyState = () => ({ lines: [], progress: null, speed: null, prompt: null, samples: [] });
+
+test('残留实例标记独立于截断日志保留，只对失败启用提供明确停用入口', () => {
+  let state = reduceLogChunk(emptyState(), ['LMM_RETAINED_NATIVE_PROCESS=1'], 0);
+  assert.equal(state.retainedNativeProcess, true);
+  assert.deepEqual(state.lines, []);
+  state = reduceLogChunk(state, Array.from({ length: MAX_LOG_LINES + 10 }, (_, i) => `line ${i}`), 1);
+  assert.equal(state.retainedNativeProcess, true);
+  const failed = { ...state, kind: 'enable', status: 'error', key: lifecycleTaskKey('card-a') };
+  assert.equal(canStopRetainedProcess(failed), true);
+  for (const change of [{ kind: 'download' }, { status: 'running' }, { status: 'success' }, { key: '' }, { retainedNativeProcess: false }]) {
+    assert.equal(canStopRetainedProcess({ ...failed, ...change }), false);
+  }
+  for (const line of ['example LMM_RETAINED_NATIVE_PROCESS=1', 'LMM_RETAINED_NATIVE_PROCESS=0', 'LMM_RETAINED_NATIVE_PROCESS=1 trailing']) {
+    assert.equal(reduceLogChunk(emptyState(), [line], 0).retainedNativeProcess, false);
+  }
+});
 
 test('formatBytes：按 1024 进位，B 取整、其余保留一位小数', () => {
   assert.equal(formatBytes(0), '0B');

@@ -142,6 +142,7 @@ function createTask({ key, kind, title, reattached = false }) {
       stage: null,
       step: null,
       layers: null,
+      retainedNativeProcess: false,
       speed: null,
       prompt: null,
       samples: [],
