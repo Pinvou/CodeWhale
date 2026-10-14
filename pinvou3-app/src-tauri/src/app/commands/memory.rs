@@ -52,10 +52,6 @@ pub struct MemoryOrganizeState {
     pub warnings: Vec<MemoryWarning>,
 }
 
-fn resolve_memory_session_id(session_id: Option<String>, store: &SessionStore) -> Option<String> {
-    session_id.or_else(|| store.active_id())
-}
-
 fn emit_memory_write_events(
     app: &AppHandle,
     session_id: &str,
@@ -93,7 +89,7 @@ fn refresh_memory_runtime_for_command(
     store: &SessionStore,
     app: &AppHandle,
 ) -> Result<Option<crate::features::memory::RuntimeMemorySnapshot>, String> {
-    match resolve_memory_session_id(session_id, store) {
+    match resolve_session_id(session_id, store) {
         Some(sid) => {
             let snapshot = crate::features::memory::runtime_snapshot(&sid)
                 .map_err(|e| format!("render runtime memory: {e}"))?;
@@ -250,7 +246,7 @@ fn refresh_memory_snapshot_document(
         never,
     } = sources;
     let mut runtime_available = !runtime_render_failed;
-    let runtime = match (runtime, resolve_memory_session_id(session_id, store)) {
+    let runtime = match (runtime, resolve_session_id(session_id, store)) {
         (Some(snapshot), _) => Some(snapshot.clone()),
         (None, Some(sid)) if !runtime_render_failed => {
             match crate::features::memory::runtime_snapshot(&sid) {
@@ -369,7 +365,7 @@ pub async fn get_memory_profile(
 ) -> Result<MemoryProfileState, String> {
     let profile =
         crate::features::memory::load_profile().map_err(|e| format!("load profile: {e}"))?;
-    let (runtime, warnings) = match resolve_memory_session_id(session_id, &store) {
+    let (runtime, warnings) = match resolve_session_id(session_id, &store) {
         Some(sid) => match crate::features::memory::runtime_snapshot(&sid) {
             Ok(snapshot) => (Some(snapshot), Vec::new()),
             Err(error) => (
@@ -440,7 +436,7 @@ pub async fn get_memory_overview(
         never,
     } = sources_loaded;
     let authoritative_sources_available = sources.values().all(|status| status.available);
-    let runtime = match resolve_memory_session_id(session_id, &store) {
+    let runtime = match resolve_session_id(session_id, &store) {
         Some(sid) => match crate::features::memory::runtime_snapshot(&sid) {
             Ok(snapshot) => {
                 sources.insert(
@@ -558,7 +554,7 @@ pub async fn suggest_memory(
 ) -> Result<MemoryWriteState<crate::features::memory::PendingMemoryItem>, String> {
     let item = crate::features::memory::enqueue_memory_candidate(suggestion)
         .map_err(|e| format!("suggest memory: {e}"))?;
-    if let Some(sid) = resolve_memory_session_id(session_id.clone(), &store) {
+    if let Some(sid) = resolve_session_id(session_id.clone(), &store) {
         emit_memory_write_events(
             &app,
             &sid,
@@ -596,7 +592,7 @@ pub async fn organize_memory(
     // preparation). Without an active session yet (e.g. a brand-new draft),
     // degrade to the pool's shared bridge with global prefs loaded directly,
     // the same `get_image_input_capability` fallback.
-    let bridge = match resolve_memory_session_id(None, &store) {
+    let bridge = match resolve_session_id(None, &store) {
         Some(sid) => pool.fresh_bridge_for(&sid).await.map_err(|error| {
             // The `fresh_bridge_for` error chain can carry endpoint/credential
             // probing details; pass it through `redact_secret` before returning
@@ -660,7 +656,7 @@ pub async fn confirm_pending_memory(
     let event = crate::features::memory::confirm_pending_memory(&id)
         .map_err(|e| format!("confirm pending memory: {e}"))?;
     if let (Some(sid), Some(event)) = (
-        resolve_memory_session_id(session_id.clone(), &store),
+        resolve_session_id(session_id.clone(), &store),
         event.as_ref(),
     ) {
         emit_memory_write_events(&app, &sid, std::slice::from_ref(event));
@@ -691,7 +687,7 @@ pub async fn ignore_pending_memory(
         | crate::features::memory::PendingIgnoreOutcome::NotFound => None,
     };
     if let (Some(sid), Some(event)) = (
-        resolve_memory_session_id(session_id.clone(), &store),
+        resolve_session_id(session_id.clone(), &store),
         event.as_ref(),
     ) {
         emit_memory_write_events(&app, &sid, std::slice::from_ref(event));
@@ -715,7 +711,7 @@ pub async fn never_pending_memory(
     let event = crate::features::memory::never_pending_memory(&id, reason)
         .map_err(|e| format!("never pending memory: {e}"))?;
     if let (Some(sid), Some(event)) = (
-        resolve_memory_session_id(session_id.clone(), &store),
+        resolve_session_id(session_id.clone(), &store),
         event.as_ref(),
     ) {
         emit_memory_write_events(&app, &sid, std::slice::from_ref(event));
@@ -743,7 +739,7 @@ pub async fn upsert_recent_work_memory(
 ) -> Result<MemoryWriteState<crate::features::memory::RecentWorkItem>, String> {
     let item = crate::features::memory::upsert_recent_work(patch)
         .map_err(|e| format!("upsert recent work: {e}"))?;
-    if let Some(sid) = resolve_memory_session_id(session_id.clone(), &store) {
+    if let Some(sid) = resolve_session_id(session_id.clone(), &store) {
         emit_memory_write_events(
             &app,
             &sid,
@@ -773,7 +769,7 @@ pub async fn archive_recent_work_memory(
     let changed = crate::features::memory::archive_recent_work(&id)
         .map_err(|e| format!("archive recent work: {e}"))?;
     if changed {
-        if let Some(sid) = resolve_memory_session_id(session_id.clone(), &store) {
+        if let Some(sid) = resolve_session_id(session_id.clone(), &store) {
             emit_memory_write_events(
                 &app,
                 &sid,
@@ -804,7 +800,7 @@ pub async fn delete_memory_preference(
     let changed = crate::features::memory::delete_preference(&id)
         .map_err(|e| format!("delete preference: {e}"))?;
     if changed {
-        if let Some(sid) = resolve_memory_session_id(session_id.clone(), &store) {
+        if let Some(sid) = resolve_session_id(session_id.clone(), &store) {
             emit_memory_write_events(
                 &app,
                 &sid,
@@ -847,7 +843,7 @@ pub async fn update_memory_preference(
         mutation.value
     });
     if let (Some(sid), Some(item)) = (
-        resolve_memory_session_id(session_id.clone(), &store),
+        resolve_session_id(session_id.clone(), &store),
         item.as_ref(),
     ) {
         emit_memory_write_events(
@@ -892,7 +888,7 @@ pub async fn update_work_context_memory(
         mutation.value
     });
     if let (Some(sid), Some(item)) = (
-        resolve_memory_session_id(session_id.clone(), &store),
+        resolve_session_id(session_id.clone(), &store),
         item.as_ref(),
     ) {
         emit_memory_write_events(
@@ -925,7 +921,7 @@ pub async fn delete_work_context_memory(
     let changed = crate::features::memory::delete_work_context(&id)
         .map_err(|e| format!("delete work context: {e}"))?;
     if changed {
-        if let Some(sid) = resolve_memory_session_id(session_id.clone(), &store) {
+        if let Some(sid) = resolve_session_id(session_id.clone(), &store) {
             emit_memory_write_events(
                 &app,
                 &sid,
@@ -958,7 +954,7 @@ pub async fn update_timed_memory(
     let item = crate::features::memory::update_timed_memory(&kind, &id, patch)
         .map_err(|e| format!("update timed memory: {e}"))?;
     if let (Some(sid), Some(item)) = (
-        resolve_memory_session_id(session_id.clone(), &store),
+        resolve_session_id(session_id.clone(), &store),
         item.as_ref(),
     ) {
         emit_memory_write_events(
@@ -991,7 +987,7 @@ pub async fn delete_timed_memory(
     let changed = crate::features::memory::delete_timed_memory(&kind, &id)
         .map_err(|e| format!("delete timed memory: {e}"))?;
     if changed {
-        if let Some(sid) = resolve_memory_session_id(session_id.clone(), &store) {
+        if let Some(sid) = resolve_session_id(session_id.clone(), &store) {
             emit_memory_write_events(
                 &app,
                 &sid,

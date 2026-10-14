@@ -23,7 +23,7 @@ function buildDesignRuntimeScript() {
       DESTROY: 'pinvou:design-runtime-destroy',
       DESTROYED: 'pinvou:design-runtime-destroyed',
     };
-    var STYLE_FIELDS = ['color','backgroundColor','fontSize','fontWeight','margin','padding','width','height','minWidth','maxWidth','minHeight','maxHeight','display','position','top','right','bottom','left','zIndex','opacity','lineHeight','letterSpacing','textAlign','fontFamily','backgroundImage','backgroundSize','backgroundPosition','backgroundRepeat','marginTop','marginRight','marginBottom','marginLeft','paddingTop','paddingRight','paddingBottom','paddingLeft','gap','rowGap','columnGap','flexDirection','justifyContent','alignItems','alignSelf','overflow','borderTopWidth','borderRightWidth','borderBottomWidth','borderLeftWidth','borderTopStyle','borderRightStyle','borderBottomStyle','borderLeftStyle','borderTopColor','borderRightColor','borderBottomColor','borderLeftColor','borderTopLeftRadius','borderTopRightRadius','borderBottomRightRadius','borderBottomLeftRadius','borderRadius','visibility','cursor'];
+    var STYLE_FIELDS = ['color','backgroundColor','fontSize','fontWeight','width','height','minWidth','maxWidth','minHeight','maxHeight','display','position','top','right','bottom','left','zIndex','opacity','lineHeight','letterSpacing','textAlign','fontFamily','backgroundImage','backgroundSize','backgroundPosition','backgroundRepeat','marginTop','marginRight','marginBottom','marginLeft','paddingTop','paddingRight','paddingBottom','paddingLeft','gap','rowGap','columnGap','flexDirection','justifyContent','alignItems','overflow','borderTopColor','borderTopLeftRadius','borderRadius','visibility','cursor'];
     var DATA_ID = 'data-pinvou-design-id';
     var nextId = 1;
     var MIN_SIZE = 8;

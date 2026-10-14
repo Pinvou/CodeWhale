@@ -54,27 +54,38 @@ test("custom routes and independent ports target only the guarded gateway", () =
 });
 
 test("unsafe or inconsistent deployment inputs reject without emitting configuration", async () => {
-  for (const override of [
-    { PINVOU_REMOTE_PUBLIC_BASE_PATH: "/x;proxy_pass" },
-    { PINVOU_REMOTE_PUBLIC_BASE_PATH: "/x\n}" },
-    { PINVOU_REMOTE_GATEWAY_PORT: "8790;" }, { PINVOU_REMOTE_GATEWAY_PORT: "80" },
-    { PINVOU_REMOTE_GATEWAY_HOST: "0.0.0.0" },
-    { PINVOU_REMOTE_GATEWAY_HOST: "0.0.0.0", PINVOU_REMOTE_GATEWAY_TRUSTED_PROXY_IPS: "0.0.0.0" },
-    { PINVOU_REMOTE_LEGACY_RELAY_URL: "ws://localhost:8787/pinvou3/remote/ws" },
-    { PINVOU_REMOTE_LEGACY_RELAY_URL: "ws://127.0.0.1:8787/old/ws" },
-    { PINVOU_REMOTE_LEGACY_RELAY_URL: "ws://private-material@127.0.0.1:8787/pinvou3/remote/ws" },
-    { PORT: "9321" }, { PINVOU_REMOTE_HOST: "0.0.0.0" },
-    { PINVOU_REMOTE_LEGACY_RELAY_BIND_HOST: "::1" },
-    { PINVOU_REMOTE_GATEWAY_PORT: "8787" },
-    { PINVOU_REMOTE_GATEWAY_TRUSTED_PROXY_IPS: "" },
-    { PINVOU_REMOTE_PUBLIC_ENTRYPOINTS_JSON: "[]" },
-    { PINVOU_REMOTE_PUBLIC_ENTRYPOINTS_JSON: '["https://example.invalid/stale"]' },
+  for (const [override, code] of [
+    [{ PINVOU_REMOTE_PUBLIC_BASE_PATH: "/x;proxy_pass" }, "gateway_base_path_invalid"],
+    [{ PINVOU_REMOTE_PUBLIC_BASE_PATH: "/x\n}" }, "gateway_base_path_invalid"],
+    [{ PINVOU_REMOTE_GATEWAY_PORT: "8790;" }, "gateway_port_invalid"],
+    [{ PINVOU_REMOTE_GATEWAY_PORT: "80" }, "gateway_port_invalid"],
+    [{ PINVOU_REMOTE_GATEWAY_PORT: "65536" }, "gateway_port_invalid"],
+    [{ PINVOU_REMOTE_GATEWAY_HOST: undefined }, "gateway_host_not_loopback"],
+    [{ PINVOU_REMOTE_GATEWAY_HOST: "0.0.0.0" }, "gateway_host_not_loopback"],
+    [{ PINVOU_REMOTE_GATEWAY_HOST: "0.0.0.0", PINVOU_REMOTE_GATEWAY_TRUSTED_PROXY_IPS: "0.0.0.0" }, "gateway_host_not_loopback"],
+    [{ PINVOU_REMOTE_LEGACY_RELAY_URL: "ws://localhost:8787/pinvou3/remote/ws" }, "gateway_upstream_not_loopback"],
+    [{ PINVOU_REMOTE_LEGACY_RELAY_URL: "ws://127.0.0.1:8787/old/ws" }, "gateway_legacy_route_mismatch"],
+    [{ PINVOU_REMOTE_LEGACY_RELAY_URL: "ws://private-material@127.0.0.1:8787/pinvou3/remote/ws" }, "gateway_upstream_invalid"],
+    [{ PORT: "9321" }, "gateway_legacy_route_mismatch"],
+    [{ PORT: "65536" }, "gateway_legacy_port_invalid"],
+    [{ PORT: "not-a-port" }, "gateway_legacy_port_invalid"],
+    [{ PINVOU_REMOTE_HOST: undefined }, "gateway_legacy_bind_mismatch"],
+    [{ PINVOU_REMOTE_HOST: "0.0.0.0" }, "gateway_legacy_bind_mismatch"],
+    [{ PINVOU_REMOTE_LEGACY_RELAY_BIND_HOST: undefined }, "gateway_legacy_bind_mismatch"],
+    [{ PINVOU_REMOTE_LEGACY_RELAY_BIND_HOST: "::1" }, "gateway_legacy_bind_mismatch"],
+    [{ PINVOU_REMOTE_GATEWAY_PORT: "8787" }, "gateway_listener_collision"],
+    [{ PINVOU_REMOTE_GATEWAY_TRUSTED_PROXY_IPS: "" }, "gateway_proxy_not_trusted"],
+    [{ PINVOU_REMOTE_PUBLIC_ENTRYPOINTS_JSON: "[]" }, "gateway_public_entrypoints_invalid"],
+    [{ PINVOU_REMOTE_PUBLIC_ENTRYPOINTS_JSON: "{}" }, "gateway_public_entrypoints_invalid"],
+    [{ PINVOU_REMOTE_PUBLIC_ENTRYPOINTS_JSON: "null" }, "gateway_public_entrypoints_invalid"],
+    [{ PINVOU_REMOTE_PUBLIC_ENTRYPOINTS_JSON: "[" }, "gateway_public_entrypoints_invalid"],
+    [{ PINVOU_REMOTE_PUBLIC_ENTRYPOINTS_JSON: '["https://example.invalid/stale"]' }, "gateway_public_route_mismatch"],
   ]) {
     const logs = [], errors = [];
     assert.equal(await main([], env(override), { log: (x) => logs.push(x), error: (x) => errors.push(x) }), 1);
     assert.equal(logs.length, 0);
     assert.equal(errors.length, 1);
-    assert.match(JSON.parse(errors[0]).code, /^gateway_[a-z_]+$/u);
+    assert.equal(JSON.parse(errors[0]).code, code);
     assert.doesNotMatch(errors[0], /private-material|proxy_pass|localhost/u);
   }
 });
