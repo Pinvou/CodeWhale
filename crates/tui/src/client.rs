@@ -1587,7 +1587,18 @@ impl DeepSeekClient {
         let model_aware = self.api_provider.metadata().is_some_and(|provider| {
             provider.wire_policy() == codewhale_config::provider::WirePolicy::ModelAware
         });
-        if !model_aware && request.model.trim() == self.default_model {
+        // A request for the exact model this client was bound to rides the
+        // candidate the client was constructed from: its frozen limits —
+        // including host-declared facts the embedder planned onto the route
+        // (`limit_overrides` on the resolution pass) — are the authoritative
+        // envelope. The static re-resolve below carries no host overrides, so
+        // routing a model-aware same-model request through it would silently
+        // drop those facts and re-clamp an uncatalogued wire id back to the
+        // 8192 fail-close. Same rule as `effective_max_output_tokens`, which
+        // already resolves same-model limits from the frozen state without a
+        // wire-policy gate. Cross-model dispatch still re-resolves: another
+        // model may need a different protocol or wire id.
+        if request.model.trim() == self.default_model {
             return Ok((request, self.route_limits));
         }
 
@@ -12414,6 +12425,63 @@ mod tests {
         assert_eq!(prepared.endpoint.url, "https://api.deepseek.com/responses");
         assert_eq!(prepared.body["model"], "deepseek-v4-flash");
         assert_eq!(prepared.body["reasoning"]["effort"], "max");
+    }
+
+    #[test]
+    fn model_aware_same_model_request_keeps_host_declared_route_limits() {
+        // The wire-policy gate must not drop the frozen route envelope for
+        // the model the client is bound to: the static re-resolve carries no
+        // host limit overrides, so an embedder-declared output fact (here
+        // 384K for an uncatalogued wire id) would be re-clamped to the 8192
+        // uncatalogued fail-close on the way out — or, on an official
+        // endpoint whose static policy picks a different protocol, fail the
+        // prepare outright. Same-model limits must come from the frozen
+        // state, exactly like `effective_max_output_tokens`.
+        let config = Config {
+            provider: Some("deepseek".to_string()),
+            api_key: Some("wire-cap-test".to_string()),
+            ..Config::default()
+        };
+        let client = DeepSeekClient::from_parts(
+            "https://api.deepseek.com".to_string(),
+            "deepseek-flash".to_string(),
+            WireFormat::ChatCompletions,
+            Some(RouteLimits {
+                context_tokens: Some(1_000_000),
+                output_tokens: Some(384_000),
+                ..RouteLimits::default()
+            }),
+            &config,
+        )
+        .expect("model-aware client with host-declared limits");
+
+        let prepared = client
+            .prepare_outbound_request(
+                MessageRequest {
+                    model: "deepseek-flash".to_string(),
+                    messages: vec![Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::Text {
+                            text: "hello".to_string(),
+                            cache_control: None,
+                        }],
+                    }],
+                    max_tokens: 64_000,
+                    system: None,
+                    tools: None,
+                    tool_choice: None,
+                    metadata: None,
+                    thinking: None,
+                    reasoning_effort: None,
+                    stream: Some(true),
+                    temperature: None,
+                    top_p: None,
+                },
+                true,
+            )
+            .expect("same-model request prepares with the frozen envelope");
+
+        assert_eq!(prepared.body["max_tokens"], json!(64_000));
     }
 
     #[test]
