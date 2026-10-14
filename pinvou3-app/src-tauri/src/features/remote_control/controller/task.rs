@@ -1529,11 +1529,12 @@ impl RemoteSessionMap {
 /// top of `SessionStore`/`EnginePool`; tests use a deterministic double.
 pub(crate) trait RemoteSessionProvisioner: Send + Sync {
     /// Create only the transcript owner; no authenticated lane is selected yet.
+    /// A provisioner must explicitly support this path, never select chat by default.
     fn create_unclaimed_authoritative_session(
         &self,
-        title: &str,
+        _title: &str,
     ) -> std::result::Result<String, String> {
-        self.create_authoritative_session(title, false)
+        Err("task_permission_mode_unsupported".to_owned())
     }
     fn create_authoritative_session(
         &self,
@@ -3803,15 +3804,28 @@ mod tests {
         fail_claim: AtomicBool,
     }
 
+    impl FakeSessions {
+        fn create_neutral_session(&self) -> std::result::Result<String, String> {
+            let id = format!("session-{:04}", self.created.lock().len() + 1);
+            self.created.lock().push(id.clone());
+            Ok(id)
+        }
+    }
+
     impl RemoteSessionProvisioner for FakeSessions {
+        fn create_unclaimed_authoritative_session(
+            &self,
+            _title: &str,
+        ) -> std::result::Result<String, String> {
+            self.create_neutral_session()
+        }
+
         fn create_authoritative_session(
             &self,
             _title: &str,
             _code_mode: bool,
         ) -> std::result::Result<String, String> {
-            let id = format!("session-{:04}", self.created.lock().len() + 1);
-            self.created.lock().push(id.clone());
-            Ok(id)
+            self.create_neutral_session()
         }
 
         fn session_exists(&self, session_id: &str) -> std::result::Result<bool, String> {
@@ -3835,6 +3849,50 @@ mod tests {
                 Ok(())
             }
         }
+    }
+
+    #[test]
+    fn unclaimed_default_provisioner_refuses_without_selecting_chat_or_binding() {
+        #[derive(Default)]
+        struct Unsupported {
+            creates: AtomicUsize,
+        }
+        impl RemoteSessionProvisioner for Unsupported {
+            fn create_authoritative_session(
+                &self,
+                _title: &str,
+                _code_mode: bool,
+            ) -> std::result::Result<String, String> {
+                self.creates.fetch_add(1, Ordering::SeqCst);
+                Ok("must-not-select-a-lane".into())
+            }
+            fn session_exists(&self, _: &str) -> std::result::Result<bool, String> {
+                Ok(true)
+            }
+        }
+        let provisioner = Arc::new(Unsupported::default());
+        assert_eq!(
+            provisioner
+                .create_unclaimed_authoritative_session("Unknown")
+                .unwrap_err(),
+            "task_permission_mode_unsupported"
+        );
+        let service = RemoteTaskService::new(Arc::new(RemoteTaskLedger::in_memory()));
+        service.set_session_provisioner(provisioner.clone());
+        assert_eq!(
+            service
+                .ensure_unclaimed_remote_session("unclaimed-ref", "Unknown", "generation-0001")
+                .unwrap_err()
+                .code,
+            "task_permission_mode_unsupported"
+        );
+        assert_eq!(provisioner.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(service.sessions.len(), 0);
+        assert!(
+            service
+                .session_for("unclaimed-ref", "generation-0001")
+                .is_none()
+        );
     }
 
     struct NoopSink;
@@ -7183,6 +7241,12 @@ mod tests {
             sessions: FakeSessions,
         }
         impl RemoteSessionProvisioner for Resolver {
+            fn create_unclaimed_authoritative_session(
+                &self,
+                title: &str,
+            ) -> std::result::Result<String, String> {
+                self.sessions.create_unclaimed_authoritative_session(title)
+            }
             fn create_authoritative_session(
                 &self,
                 title: &str,

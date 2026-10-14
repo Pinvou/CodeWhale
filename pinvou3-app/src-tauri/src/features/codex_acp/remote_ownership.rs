@@ -502,7 +502,7 @@ fn reserve_configured_remote_turn(
     runtime: Weak<AcpSession>,
     busy: &AtomicBool,
     configuring: &AtomicBool,
-    configuration: Option<operation_gate::ConfigurationGuard<'_>>,
+    configuration: Option<operation_gate::ConfigurationGuard<Arc<AtomicBool>>>,
     validate: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     let configuration =
@@ -599,9 +599,9 @@ mod tests {
             let mut registry = RemoteTurnRegistry::default();
             let identity = Arc::new(RuntimeIdentity::default());
             let busy = AtomicBool::new(false);
-            let configuring = AtomicBool::new(false);
+            let configuring = Arc::new(AtomicBool::new(false));
             let configuration =
-                operation_gate::begin_configuration(&busy, &configuring, "busy").unwrap();
+                operation_gate::begin_configuration(&busy, configuring.clone(), "busy").unwrap();
             let options = vec![serde_json::from_value::<super::super::SessionConfigOption>(serde_json::json!({
                 "id":"mode", "name":"Mode", "type":"select", "currentValue":current,
                 "options":[{"value":"read-only","name":"Read-only"},{"value":"agent","name":"Agent"},{"value":"agent-full-access","name":"Full access"}]
@@ -656,9 +656,12 @@ mod tests {
             let mut registry = RemoteTurnRegistry::default();
             let identity = Arc::new(RuntimeIdentity::default());
             let busy = AtomicBool::new(false);
-            let configuring = AtomicBool::new(false);
+            let configuring = Arc::new(AtomicBool::new(false));
             let other_guard = if other_configuration {
-                Some(operation_gate::begin_configuration(&busy, &configuring, "busy").unwrap())
+                Some(
+                    operation_gate::begin_configuration(&busy, configuring.clone(), "busy")
+                        .unwrap(),
+                )
             } else {
                 None
             };
@@ -704,9 +707,9 @@ mod tests {
         let mut registry = RemoteTurnRegistry::default();
         let identity = Arc::new(RuntimeIdentity::default());
         let busy = AtomicBool::new(false);
-        let configuring = AtomicBool::new(false);
+        let configuring = Arc::new(AtomicBool::new(false));
         let configuration =
-            operation_gate::begin_configuration(&busy, &configuring, "busy").unwrap();
+            operation_gate::begin_configuration(&busy, configuring.clone(), "busy").unwrap();
         let selected = owner("remote-configured");
         let error = reserve_configured_remote_turn(
             &mut registry,
