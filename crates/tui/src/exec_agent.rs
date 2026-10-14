@@ -202,10 +202,41 @@ pub(crate) async fn run_exec_agent(
         ..crate::tools::spec::RuntimeToolServices::default()
     };
 
+    // Roots enter exec only through the persisted session metadata (Runtime
+    // API / headless), so capture them once at resume: the engine starts with
+    // this set and the save path must write the same set back, or a follow-up
+    // `exec --resume` silently degrades the thread to single-root.
+    // Round-35 M2: a PERSISTED set is validated before arming — every sibling
+    // lane consuming one (ACP session/load, REST resume-thread, fork,
+    // /cd, fork_from_session) hard-refuses a hand-edited/poisoned row, and
+    // normalize-only here silently granted a filesystem-writable sandbox in
+    // headless runs (the review's sibling-parity finding).
+    // Round-37 B37-1: the row validates against its OWN saved primary — the
+    // CLI `--workspace`/cwd is informational here and never re-anchors a
+    // resumed row. The r35 shape misjudged cross-directory resumes against
+    // the launch dir (killing legitimate rows whose launch cwd sat inside a
+    // declared root, passing poisoned rows from an unrelated cwd) and let
+    // the launch dir leak into the persisted row as a moved primary. The
+    // stored-row strip keeps a legal full-load row's head from counting
+    // against the intake cap (B37-2), so the SAME validated set arms the
+    // engine, rides `Op::SyncSession`, and reaches the persistence stamp.
+    let resume_workspace_roots: Vec<PathBuf> = match resume_session.as_ref() {
+        None => Vec::new(),
+        Some(saved) => {
+            let stored = saved.metadata.workspace_roots.clone();
+            if stored.is_empty() {
+                Vec::new()
+            } else {
+                validate_resume_workspace_roots(&saved.metadata.workspace, &stored)?
+            }
+        }
+    };
+
     let engine_config = EngineConfig {
         model: effective_model.clone(),
         active_route_limits,
         workspace: workspace.clone(),
+        workspace_roots: resume_workspace_roots.clone(),
         session_id: None,
         subagent_state_root: None,
         plugin_registry: Some(std::sync::Arc::clone(&engine_plugin_registry)),
@@ -356,15 +387,36 @@ pub(crate) async fn run_exec_agent(
     let mode = AppMode::Agent;
 
     let resuming_session = resume_session.is_some();
+    let latest_workspace_roots = resume_workspace_roots;
     let mut loaded_session_id = None;
     if let Some(saved) = resume_session {
         let saved_id = saved.metadata.id.clone();
-        if saved.metadata.workspace != workspace && output_format == ExecOutputFormat::Text {
-            eprintln!(
-                "Warning: session {} was created in a different workspace ({}). Resuming anyway.",
-                truncate_id(&saved_id),
-                saved.metadata.workspace.display(),
-            );
+        if saved.metadata.workspace != workspace {
+            // The engine runs the SAVED workspace/root pair, so the CLI
+            // `--workspace` does not re-anchor a resumed session: the
+            // validated set above is anchored at the saved primary, flows to
+            // `Op::SyncSession` unchanged, and the persistence stamp writes
+            // the same pair back — the lane never mints a moved row
+            // (round-37 B37-1 keeps this comment's claim true). The warning
+            // only tells the user which directory the session actually runs
+            // in (round-22 SF22-3 retires the round-21 hard block, which
+            // refused legitimate resumes against a workspace the lane never
+            // adopts and named a `--workspace-roots` flag that does not
+            // exist).
+            // Round-24 P3 + round-41 minor 9: the gate stays — the
+            // warning goes to stderr and never touches the stdout JSON
+            // stream, but JSON consumers parse that stream precisely
+            // because they want machine-clean output, so an unasked-for
+            // stderr warning is noise there (recorded in the round-41
+            // disposition's single-root-visible list).
+            if output_format == ExecOutputFormat::Text && !json_output {
+                eprintln!(
+                    "Warning: session {} was created in a different workspace ({}). \
+                     Resuming in the session's own workspace.",
+                    truncate_id(&saved_id),
+                    saved.metadata.workspace.display(),
+                );
+            }
         }
 
         engine_handle
@@ -375,6 +427,11 @@ pub(crate) async fn run_exec_agent(
                 system_prompt_override: false,
                 model: saved.metadata.model,
                 workspace: saved.metadata.workspace,
+                // The SAME validated, saved-primary-anchored set that armed
+                // the engine and will reach the persistence stamp — sending
+                // the raw row here would let the handler's normalize-only
+                // re-arm overwrite the validated set (round-37 B37-1).
+                workspace_roots: latest_workspace_roots.clone(),
                 mode,
             })
             .await?;
@@ -929,6 +986,7 @@ pub(crate) async fn run_exec_agent(
                             id: effective_provider_id.as_deref(),
                         },
                         &latest_workspace,
+                        &latest_workspace_roots,
                         &latest_system_prompt,
                         latest_session_id.as_deref(),
                         u64::from(usage.input_tokens) + u64::from(usage.output_tokens),
@@ -1133,4 +1191,79 @@ pub(crate) async fn run_exec_agent(
     }
 
     Ok(())
+}
+
+/// Validate a persisted exec session's root row for resume (round-37
+/// B37-1/B37-2): the row validates against its OWN saved primary — the CLI
+/// `--workspace`/cwd is informational on this lane and never re-anchors a
+/// resumed row — and the stored cwd-first head does not count against the
+/// intake cap, so a legal full-load row resumes whole. The returned set is
+/// what arms the engine, rides `Op::SyncSession`, and reaches the
+/// persistence stamp: one validated set, no moved-row mint.
+fn validate_resume_workspace_roots(
+    saved_primary: &std::path::Path,
+    stored: &[std::path::PathBuf],
+) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    codewhale_core::validate_stored_workspace_roots(saved_primary, stored).map_err(|error| {
+        anyhow::anyhow!(
+            "persisted workspace_roots failed validation on resume \
+             (session row is corrupt or hand-edited): {error}"
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_resume_workspace_roots;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn exec_resume_validates_against_the_saved_primary_not_the_cli_cwd() {
+        // Round-37 B37-1: a cross-directory resume (session saved in /repo,
+        // `codewhale exec --resume` launched from an unrelated cwd) must
+        // judge the row against the SAVED primary. The r35 shape validated
+        // against the CLI cwd, which minted moved rows — roots[0] became
+        // the launch dir while the row's workspace stayed the saved
+        // primary, accumulating a permanent writable root per resume.
+        let saved_primary = Path::new("/repo");
+        let stored = vec![PathBuf::from("/repo"), PathBuf::from("/shared")];
+        let validated = validate_resume_workspace_roots(saved_primary, &stored)
+            .expect("a clean row anchored at its own primary validates");
+        assert_eq!(
+            validated,
+            vec![PathBuf::from("/repo"), PathBuf::from("/shared")],
+            "the validated set keeps the saved primary as its head — the CLI \
+             cwd is not part of this signature and cannot re-anchor it"
+        );
+    }
+
+    #[test]
+    fn exec_resume_arms_a_legal_full_load_row_whole() {
+        // Round-37 B37-2: the save path mints the 65-entry cwd-first full
+        // form for a 64-root declaration; resume must not miscount the
+        // row's own head against the intake cap (that false "corrupt"
+        // verdict would brick every later `exec --resume` of the row).
+        let saved_primary = Path::new("/repo");
+        let mut stored = vec![PathBuf::from("/repo")];
+        stored.extend(
+            (0..codewhale_core::MAX_WORKSPACE_ROOTS)
+                .map(|index| PathBuf::from(format!("/repo/r{index}"))),
+        );
+        let validated = validate_resume_workspace_roots(saved_primary, &stored)
+            .expect("a legal full-load row resumes whole");
+        assert_eq!(validated.len(), codewhale_core::MAX_WORKSPACE_ROOTS + 1);
+        assert_eq!(validated[0], PathBuf::from("/repo"));
+    }
+
+    #[test]
+    fn exec_resume_refuses_a_poisoned_row_with_the_intake_reason() {
+        let saved_primary = Path::new("/repo");
+        let stored = vec![PathBuf::from("/repo"), PathBuf::from("/")];
+        let err = validate_resume_workspace_roots(saved_primary, &stored)
+            .expect_err("the strip must not launder a poisoned entry");
+        assert!(
+            err.to_string().contains("corrupt or hand-edited"),
+            "the refusal names the row state: {err}"
+        );
+    }
 }

@@ -543,6 +543,7 @@ impl RuntimeChatRelayHost {
                 task_id: None,
                 dynamic_tools: Vec::new(),
                 environments: Vec::new(),
+                workspace_roots: Vec::new(),
             })
             .await
             .map_err(|_| "Runtime Chat could not create its replay fixture.".to_string())?
@@ -669,6 +670,7 @@ impl RuntimeChatRelayHost {
                     task_id: None,
                     dynamic_tools: Vec::new(),
                     environments: Vec::new(),
+                    workspace_roots: Vec::new(),
                 })
                 .await
                 .map_err(|_| {

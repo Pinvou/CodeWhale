@@ -296,6 +296,7 @@ fn saved_session_with_blocks(blocks: Vec<crate::models::ContentBlock>) -> SavedS
             model_provider: "deepseek".to_string(),
             model_provider_id: None,
             workspace: PathBuf::from("."),
+            workspace_roots: Vec::new(),
             mode: None,
             cost: Default::default(),
             parent_session_id: None,
@@ -433,6 +434,7 @@ fn messages_from_thread_detail_batches_tool_results() {
         reasoning_effort: None,
         allowed_tools: None,
         workspace: PathBuf::from("."),
+        workspace_roots: Vec::new(),
         mode: "agent".to_string(),
         permission_posture: Some("ask".to_string()),
         allow_shell: false,
@@ -623,6 +625,7 @@ fn legacy_exact_thread_export_normalizes_provider_kind_and_id() {
             reasoning_effort: None,
             allowed_tools: None,
             workspace: PathBuf::from("."),
+            workspace_roots: Vec::new(),
             mode: "agent".to_string(),
             permission_posture: None,
             allow_shell: false,
@@ -4376,6 +4379,778 @@ async fn session_resume_thread_creates_thread_from_saved_session() -> Result<()>
 }
 
 #[tokio::test]
+async fn session_resume_thread_carries_persisted_workspace_roots() -> Result<()> {
+    let root =
+        std::env::temp_dir().join(format!("deepseek-session-resume-roots-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    fs::create_dir_all(&sessions_dir)?;
+    let session = json!({
+        "schema_version": 1,
+        "metadata": {
+            "id": "sess_roots_resume",
+            "title": "Roots resume session",
+            "created_at": "2025-01-01T00:00:00Z",
+            "updated_at": "2025-01-01T00:10:00Z",
+            "message_count": 1,
+            "total_tokens": 10,
+            "model": "deepseek-v4-pro",
+            "workspace": "/tmp/test",
+            "workspace_roots": ["/tmp/shared"],
+            "mode": "agent"
+        },
+        "messages": [
+            {
+                "role": "user",
+                "content": [{ "type": "text", "text": "Hello, roots!" }]
+            }
+        ],
+        "system_prompt": null
+    });
+    fs::write(
+        sessions_dir.join("sess_roots_resume.json"),
+        serde_json::to_string_pretty(&session)?,
+    )?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_root(root.clone(), sessions_dir.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let resp = client
+        .post(format!(
+            "http://{addr}/v1/sessions/sess_roots_resume/resume-thread"
+        ))
+        .json(&json!({ "model": "deepseek-v4-pro" }))
+        .send()
+        .await?;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let resumed: serde_json::Value = resp.json().await?;
+    let thread_id = resumed["thread_id"]
+        .as_str()
+        .context("missing resumed thread id")?;
+
+    // The HTTP resume must carry the session's persisted roots into the
+    // created thread: resuming a multi-root session and saving once must
+    // not launder it back to single-root.
+    let detail: serde_json::Value = client
+        .get(format!("http://{addr}/v1/threads/{thread_id}"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(detail["thread"]["workspace"], "/tmp/test");
+    assert_eq!(
+        detail["thread"]["workspace_roots"],
+        json!(["/tmp/test", "/tmp/shared"]),
+        "resume must normalize the persisted set with the workspace leading"
+    );
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_export_degrades_a_refused_thread_root_set_to_the_sanitized_remainder() -> Result<()>
+{
+    // Round-42 minor 7: the export mint's degrade leg — a thread row whose
+    // set fails the validating intake keeps its LEGAL additions (the
+    // sanitized remainder) instead of collapsing to the bare primary.
+    let root = std::env::temp_dir().join(format!("deepseek-export-degrade-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    fs::create_dir_all(&sessions_dir)?;
+
+    let Some((addr, runtime_threads, handle)) =
+        spawn_test_server_with_root(root.clone(), sessions_dir.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    // Seed a thread whose stored set carries poison (the fs root) beside a
+    // legal additional root — poisoned directly in the store, the shape
+    // every validating face refuses but a tolerant row can carry.
+    let workspace = root.join("ws");
+    fs::create_dir_all(&workspace)?;
+    let shared = root.join("shared");
+    fs::create_dir_all(&shared)?;
+    let created: serde_json::Value = client
+        .post(format!("http://{addr}/v1/threads"))
+        .json(&json!({ "workspace": workspace, "workspace_roots": [shared] }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let thread_id = created["id"].as_str().context("thread id")?.to_string();
+    {
+        let mut row = runtime_threads.get_thread(&thread_id).await?;
+        row.workspace_roots = vec![workspace.clone(), shared.clone(), "/".into()];
+        runtime_threads.test_store().save_thread(&row)?;
+    }
+
+    // Seed one completed user/assistant turn directly in the store — the
+    // export needs message content, not a live engine.
+    {
+        use crate::runtime_threads::{
+            RuntimeTurnStatus, TurnItemKind, TurnItemLifecycleStatus, TurnItemRecord, TurnRecord,
+        };
+        let now = chrono::Utc::now();
+        let turn_id = "turn_seed_0";
+        runtime_threads.test_store().save_item(&TurnItemRecord {
+            schema_version: crate::runtime_threads::CURRENT_RUNTIME_SCHEMA_VERSION,
+            id: "item_user_0".to_string(),
+            turn_id: turn_id.to_string(),
+            kind: TurnItemKind::UserMessage,
+            status: TurnItemLifecycleStatus::Completed,
+            summary: "seed".to_string(),
+            detail: Some("seed".to_string()),
+            metadata: None,
+            artifact_refs: Vec::new(),
+            started_at: Some(now),
+            ended_at: Some(now),
+        })?;
+        let record = TurnRecord {
+            schema_version: crate::runtime_threads::CURRENT_RUNTIME_SCHEMA_VERSION,
+            id: turn_id.to_string(),
+            thread_id: thread_id.clone(),
+            status: RuntimeTurnStatus::Completed,
+            created_at: now,
+            started_at: Some(now),
+            ended_at: Some(now),
+            duration_ms: Some(0),
+            usage: None,
+            permission_posture: None,
+            effective_provider: None,
+            effective_provider_id: None,
+            effective_billing_surface: None,
+            effective_endpoint_fingerprint: None,
+            effective_billing_mode: None,
+            effective_dispatched_at: None,
+            effective_model: None,
+            routed_usage: Vec::new(),
+            routed_usage_source_ids: Vec::new(),
+            routed_usage_dropped_records: 0,
+            error: None,
+            input_summary: "seed".to_string(),
+            item_ids: vec!["item_user_0".to_string()],
+            steer_count: 0,
+            agent_mail_message_id: None,
+        };
+        runtime_threads.test_store().save_turn(&record)?;
+    }
+
+    let resp: serde_json::Value = client
+        .post(format!("http://{addr}/v1/sessions"))
+        .json(&json!({ "thread_id": thread_id }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let session_id = resp["session_id"]
+        .as_str()
+        .context("session id")?
+        .to_string();
+
+    let detail: serde_json::Value = client
+        .get(format!("http://{addr}/v1/sessions/{session_id}"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let roots = detail["metadata"]["workspace_roots"]
+        .as_array()
+        .context("exported roots")?;
+    assert!(
+        !roots.iter().any(|r| r == "/"),
+        "the poison never reaches the minted row"
+    );
+    assert!(
+        roots
+            .iter()
+            .any(|r| r.as_str() == Some(shared.to_str().unwrap())),
+        "the legal additional root survives the degrade: {roots:?}"
+    );
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_resume_thread_answers_400_for_an_empty_workspace_row() -> Result<()> {
+    // Round-39 minor 11: a legacy/hand-edited row with an EMPTY workspace
+    // is a client-side record defect — the face's own doctrine is 400 with
+    // the reason (round-38 fixed the mapping; this pins it).
+    let root = std::env::temp_dir().join(format!("deepseek-session-empty-ws-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    fs::create_dir_all(&sessions_dir)?;
+    let session = json!({
+        "schema_version": 1,
+        "metadata": {
+            "id": "sess_empty_ws",
+            "title": "Empty workspace",
+            "created_at": "2025-01-01T00:00:00Z",
+            "updated_at": "2025-01-01T00:10:00Z",
+            "message_count": 1,
+            "total_tokens": 10,
+            "model": "deepseek-v4-pro",
+            "workspace": "",
+            "mode": "agent"
+        },
+        "messages": [
+            { "role": "user", "content": [{ "type": "text", "text": "hi" }] }
+        ],
+        "system_prompt": null
+    });
+    fs::write(
+        sessions_dir.join("sess_empty_ws.json"),
+        serde_json::to_string_pretty(&session)?,
+    )?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_root(root.clone(), sessions_dir.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let resp = client
+        .post(format!(
+            "http://{addr}/v1/sessions/sess_empty_ws/resume-thread"
+        ))
+        .json(&json!({ "model": "deepseek-v4-pro" }))
+        .send()
+        .await?;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "an empty-workspace row is a client defect, not a server fault"
+    );
+    let body: serde_json::Value = resp.json().await?;
+    assert!(
+        body.to_string().contains("non-empty absolute path"),
+        "the 400 carries the face's unified refusal: {body}"
+    );
+
+    // Round-41 M41-1 endpoint-level regression: the RELATIVE spelling
+    // refuses on the same face — forwarding it used to collapse the
+    // declared set to empty and mint a relative-primary thread (201).
+    let relative = json!({
+        "schema_version": 1,
+        "metadata": {
+            "id": "sess_relative_ws",
+            "title": "Relative workspace",
+            "created_at": "2025-01-01T00:00:00Z",
+            "updated_at": "2025-01-01T00:10:00Z",
+            "message_count": 1,
+            "total_tokens": 10,
+            "model": "deepseek-v4-pro",
+            "workspace": "relative/dir",
+            "workspace_roots": ["/srv/data"],
+            "mode": "agent"
+        },
+        "messages": [
+            { "role": "user", "content": [{ "type": "text", "text": "hi" }] }
+        ],
+        "system_prompt": null
+    });
+    fs::write(
+        sessions_dir.join("sess_relative_ws.json"),
+        serde_json::to_string_pretty(&relative)?,
+    )?;
+    let resp = client
+        .post(format!(
+            "http://{addr}/v1/sessions/sess_relative_ws/resume-thread"
+        ))
+        .json(&json!({ "model": "deepseek-v4-pro" }))
+        .send()
+        .await?;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "a relative-workspace row must not mint a collapsed thread"
+    );
+    let body: serde_json::Value = resp.json().await?;
+    assert!(
+        body.to_string().contains("non-empty absolute path"),
+        "the 400 names the relative-workspace refusal: {body}"
+    );
+
+    // Round-42 minor 6: the refused row mints nothing — no session file
+    // exists for either rejected spelling (the store is the durable
+    // evidence; the guard fires before any create).
+    let mut entries = fs::read_dir(&sessions_dir)?;
+    let mut session_files = 0usize;
+    while let Some(Ok(entry)) = entries.next() {
+        if entry.file_name().to_string_lossy().ends_with(".json") {
+            session_files += 1;
+        }
+    }
+    assert_eq!(
+        session_files, 2,
+        "only the two fixture rows exist — no minted session: {sessions_dir:?}"
+    );
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_resume_thread_survives_a_legal_full_load_row() -> Result<()> {
+    // Round-37 B37-2, the resume-thread face: a session saved with a 64-root
+    // declaration persists the 65-entry cwd-first full form. Re-declaring
+    // that row verbatim into create_thread would miscount its own head
+    // against the intake cap and strand the resume at a 400 with no repair
+    // path; the face strips the head before declaring.
+    let root = std::env::temp_dir().join(format!(
+        "deepseek-session-resume-full-load-{}",
+        Uuid::new_v4()
+    ));
+    let sessions_dir = root.join("sessions");
+    fs::create_dir_all(&sessions_dir)?;
+    let full_load_roots: Vec<String> = (0..codewhale_core::MAX_WORKSPACE_ROOTS)
+        .map(|index| format!("/tmp/test/r{index}"))
+        .collect();
+    let stored_full_form: Vec<String> = std::iter::once("/tmp/test".to_string())
+        .chain(full_load_roots.iter().cloned())
+        .collect();
+    let session = json!({
+        "schema_version": 1,
+        "metadata": {
+            "id": "sess_full_load_resume",
+            "title": "Full-load resume session",
+            "created_at": "2025-01-01T00:00:00Z",
+            "updated_at": "2025-01-01T00:10:00Z",
+            "message_count": 1,
+            "total_tokens": 10,
+            "model": "deepseek-v4-pro",
+            "workspace": "/tmp/test",
+            // The stored full form: the head plus 64 additions.
+            "workspace_roots": stored_full_form,
+            "mode": "agent"
+        },
+        "messages": [
+            {
+                "role": "user",
+                "content": [{ "type": "text", "text": "Hello, full load!" }]
+            }
+        ],
+        "system_prompt": null
+    });
+    fs::write(
+        sessions_dir.join("sess_full_load_resume.json"),
+        serde_json::to_string_pretty(&session)?,
+    )?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_root(root.clone(), sessions_dir.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let resp = client
+        .post(format!(
+            "http://{addr}/v1/sessions/sess_full_load_resume/resume-thread"
+        ))
+        .json(&json!({ "model": "deepseek-v4-pro" }))
+        .send()
+        .await?;
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "a legal full-load row must resume, not trip the intake cap"
+    );
+    let resumed: serde_json::Value = resp.json().await?;
+    let thread_id = resumed["thread_id"]
+        .as_str()
+        .context("missing resumed thread id")?;
+
+    let detail: serde_json::Value = client
+        .get(format!("http://{addr}/v1/threads/{thread_id}"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let armed = detail["thread"]["workspace_roots"]
+        .as_array()
+        .context("thread workspace_roots")?;
+    assert_eq!(
+        armed.len(),
+        codewhale_core::MAX_WORKSPACE_ROOTS + 1,
+        "the resumed thread arms the full-load set whole, head re-anchored"
+    );
+    assert_eq!(detail["thread"]["workspace_roots"][0], "/tmp/test");
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn saved_sessions_carry_thread_workspace_roots_through_save_and_resave() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("deepseek-session-roots-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    let Some((addr, runtime_threads, handle)) =
+        spawn_test_server_with_root(root.clone(), sessions_dir.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let created: serde_json::Value = client
+        .post(format!("http://{addr}/v1/threads"))
+        .json(&json!({
+            "model": "deepseek-v4-pro",
+            "workspace": root.join("workspace"),
+            "workspace_roots": ["/shared"]
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let thread_id = created["id"]
+        .as_str()
+        .context("missing thread id")?
+        .to_string();
+
+    runtime_threads
+        .seed_thread_from_messages(
+            &thread_id,
+            &[
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: "Persist these roots".to_string(),
+                        cache_control: None,
+                    }],
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: "Roots should survive the save.".to_string(),
+                        cache_control: None,
+                    }],
+                },
+            ],
+        )
+        .await?;
+
+    // Save the thread as a session: the session metadata must carry the
+    // thread's root set, or a later `exec --resume` silently degrades the
+    // thread to single-root.
+    let resp = client
+        .post(format!("http://{addr}/v1/sessions"))
+        .json(&json!({ "thread_id": thread_id }))
+        .send()
+        .await?;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let saved: serde_json::Value = resp.json().await?;
+    let session_handle = saved["session_id"]
+        .as_str()
+        .context("missing session id")?
+        .to_string();
+
+    let session_manager = crate::session_manager::SessionManager::new(sessions_dir.clone())?;
+    let stored = session_manager.load_session_by_prefix(&session_handle)?;
+    let expected_roots = json!([root.join("workspace"), "/shared"]);
+    assert_eq!(
+        serde_json::to_value(&stored.metadata.workspace_roots)?,
+        expected_roots,
+        "save-thread-as-session must stamp the thread's workspace_roots"
+    );
+
+    // Change the thread's set before the re-save. The POST above already
+    // wrote `expected_roots` to the file, so asserting the same value after
+    // the PUT would pass with the PUT stamp deleted; the newer set is what
+    // makes the snapshot save path load-bearing.
+    let patched: serde_json::Value = client
+        .patch(format!("http://{addr}/v1/threads/{thread_id}"))
+        .json(&json!({ "workspace_roots": ["/later"] }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        patched["workspace_roots"],
+        json!([root.join("workspace"), "/later"])
+    );
+
+    // Re-saving through the snapshot path must write the thread's *current*
+    // roots: the engine builds from the thread and the save copies the
+    // snapshot roots over the metadata.
+    client
+        .put(format!("http://{addr}/v1/sessions"))
+        .json(&json!({
+            "thread_id": thread_id,
+            "session_id": session_handle
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+    let resaved = session_manager.load_session_by_prefix(&session_handle)?;
+    assert_eq!(
+        serde_json::to_value(&resaved.metadata.workspace_roots)?,
+        json!([root.join("workspace"), "/later"]),
+        "the snapshot save path must write the thread's current roots"
+    );
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn put_empty_session_id_and_patch_invalid_path_id_answer_400() -> Result<()> {
+    // Round-24 P3 pin: the two boundary-validation 400 arms whose pins were
+    // lost with the 409-guard removal — an explicit-but-empty `session_id`
+    // on PUT /v1/sessions is a client error (not "create new"), and a
+    // session PATCH addressed at an invalid id shape answers 400, not 500.
+    let root = std::env::temp_dir().join(format!("deepseek-put-400-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_root(root.clone(), sessions_dir.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    // PUT with an explicit empty session_id: rejected at the boundary.
+    let rejected = client
+        .put(format!("http://{addr}/v1/sessions"))
+        .json(&json!({ "session_id": "" }))
+        .send()
+        .await?;
+    assert_eq!(
+        rejected.status(),
+        StatusCode::BAD_REQUEST,
+        "an explicit empty session_id must be a 400, not a silent create"
+    );
+
+    // Session PATCH addressed at an invalid id shape: 400 with the reason.
+    let invalid = client
+        .patch(format!("http://{addr}/v1/sessions/not a valid id!"))
+        .json(&json!({ "title": "x" }))
+        .send()
+        .await?;
+    assert_eq!(
+        invalid.status(),
+        StatusCode::BAD_REQUEST,
+        "an invalid session id in the path must answer 400, not 500"
+    );
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_resave_after_workspace_move_keeps_workspace_and_roots_paired() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("deepseek-session-move-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    let Some((addr, runtime_threads, handle)) =
+        spawn_test_server_with_root(root.clone(), sessions_dir.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let w1 = root.join("w1");
+    let w2 = root.join("w2");
+    let created: serde_json::Value = client
+        .post(format!("http://{addr}/v1/threads"))
+        .json(&json!({
+            "model": "deepseek-v4-pro",
+            "workspace": w1,
+            "workspace_roots": ["/shared"]
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let thread_id = created["id"]
+        .as_str()
+        .context("missing thread id")?
+        .to_string();
+
+    runtime_threads
+        .seed_thread_from_messages(
+            &thread_id,
+            &[Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "Save me at w1, then move me.".to_string(),
+                    cache_control: None,
+                }],
+            }],
+        )
+        .await?;
+
+    // Save at w1, then move the thread to w2. The PATCH evicts the engine,
+    // so the re-save snapshots a fresh engine built from the moved thread.
+    let resp = client
+        .post(format!("http://{addr}/v1/sessions"))
+        .json(&json!({ "thread_id": thread_id }))
+        .send()
+        .await?;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let saved: serde_json::Value = resp.json().await?;
+    let session_handle = saved["session_id"]
+        .as_str()
+        .context("missing session id")?
+        .to_string();
+
+    let patched: serde_json::Value = client
+        .patch(format!("http://{addr}/v1/threads/{thread_id}"))
+        .json(&json!({ "workspace": w2 }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(patched["workspace"], json!(w2));
+    assert_eq!(patched["workspace_roots"], json!([w2, "/shared"]));
+
+    client
+        .put(format!("http://{addr}/v1/sessions"))
+        .json(&json!({
+            "thread_id": thread_id,
+            "session_id": session_handle
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // The persisted pair must be internally consistent: `workspace` is w2
+    // and the abandoned w1 is nowhere in the root set, or a later
+    // resume-thread would re-admit w1 as a writable primary root.
+    let session_manager = crate::session_manager::SessionManager::new(sessions_dir.clone())?;
+    let resaved = session_manager.load_session_by_prefix(&session_handle)?;
+    assert_eq!(
+        resaved.metadata.workspace, w2,
+        "re-save must stamp the moved workspace beside the roots"
+    );
+    assert_eq!(
+        serde_json::to_value(&resaved.metadata.workspace_roots)?,
+        json!([w2, "/shared"]),
+        "re-save must not leave the abandoned w1 in the persisted root set"
+    );
+
+    handle.abort();
+    Ok(())
+}
+
+/// Declared root sets are validated at intake, not silently reshaped. The
+/// per-turn sandbox copies the set into `WorkspaceWrite.writable_roots`
+/// verbatim, so attaching `/` (or `/..`, or the workspace's parent — the
+/// same reach one spelling at a time) would make the sandboxed exec lane
+/// filesystem-writable, and a non-absolute entry like `~/shared` used to be
+/// silently dropped, shrinking the declared set without a word. All four are
+/// rejected now; a normal sibling root still attaches.
+#[tokio::test]
+async fn thread_create_rejects_super_root_ancestor_and_non_absolute_roots() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("deepseek-thread-root-intake-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    let workspace = root.join("workspace");
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_root_token_mobile_workspace(
+            root.clone(),
+            sessions_dir,
+            None,
+            false,
+            workspace.clone(),
+        )
+        .await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    // The filesystem root, in the spelling a client would type and in the
+    // `..` spelling that normalizes to it.
+    for declared in ["/", "/.."] {
+        let rejected = client
+            .post(format!("http://{addr}/v1/threads"))
+            .json(&json!({ "workspace_roots": [declared] }))
+            .send()
+            .await?;
+        assert_eq!(
+            rejected.status(),
+            StatusCode::BAD_REQUEST,
+            "attaching {declared:?} must be rejected at intake"
+        );
+    }
+
+    // The workspace's parent contains the primary: the same widening, one
+    // spelling at a time.
+    let parent = workspace
+        .parent()
+        .and_then(|dir| dir.to_str())
+        .context("test workspace must have a parent")?
+        .to_string();
+    let rejected = client
+        .post(format!("http://{addr}/v1/threads"))
+        .json(&json!({ "workspace_roots": [parent] }))
+        .send()
+        .await?;
+    assert_eq!(
+        rejected.status(),
+        StatusCode::BAD_REQUEST,
+        "attaching the primary's parent must be rejected at intake"
+    );
+
+    // A `~` spelling is non-absolute: rejected instead of silently dropped
+    // from the declared set.
+    let rejected = client
+        .post(format!("http://{addr}/v1/threads"))
+        .json(&json!({ "workspace_roots": ["~/shared"] }))
+        .send()
+        .await?;
+    assert_eq!(
+        rejected.status(),
+        StatusCode::BAD_REQUEST,
+        "a non-absolute root must be rejected, not silently dropped"
+    );
+
+    // A normal sibling root still attaches, and the PATCH lane reuses the
+    // same validation for an explicit replacement set.
+    let sibling = root.join("sibling-lib");
+    let created: serde_json::Value = client
+        .post(format!("http://{addr}/v1/threads"))
+        .json(&json!({ "workspace_roots": [sibling.to_string_lossy()] }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let thread_id = created["id"].as_str().context("missing thread id")?;
+    assert_eq!(
+        created["workspace_roots"],
+        json!([workspace.to_string_lossy(), sibling.to_string_lossy()]),
+        "a sibling root attaches beside the absolute primary"
+    );
+
+    let rejected = client
+        .patch(format!("http://{addr}/v1/threads/{thread_id}"))
+        .json(&json!({ "workspace_roots": ["/deep/../../.."] }))
+        .send()
+        .await?;
+    assert_eq!(
+        rejected.status(),
+        StatusCode::BAD_REQUEST,
+        "PATCH re-declares the set and must reject a super-root spelling too"
+    );
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn session_create_from_completed_thread_saves_messages() -> Result<()> {
     let root = std::env::temp_dir().join(format!("deepseek-thread-session-{}", Uuid::new_v4()));
     let sessions_dir = root.join("sessions");
@@ -4685,12 +5460,12 @@ fn patch_undo_helper_restores_only_the_bound_session() -> Result<()> {
     repo.snapshot_with_session("pre-turn:foreign", Some("session-foreign"))?;
     fs::write(&file, "current-after")?;
 
-    let restored = patch_undo_workspace_files(&workspace, Some("session-current"));
+    let restored = patch_undo_workspace_files(&workspace, &[], Some("session-current"));
     assert!(restored.files_restored, "{:?}", restored.summary);
     assert_eq!(fs::read_to_string(&file)?, "current-before");
 
     fs::write(&file, "must-stay")?;
-    let unbound = patch_undo_workspace_files(&workspace, None);
+    let unbound = patch_undo_workspace_files(&workspace, &[], None);
     assert!(!unbound.files_restored);
     assert_eq!(fs::read_to_string(&file)?, "must-stay");
     Ok(())
@@ -4741,8 +5516,9 @@ fn restore_snapshot_endpoint_helper_restores_workspace_files() -> Result<()> {
     let snapshot_id = repo.snapshot("pre-turn:1")?;
     fs::write(workspace.join("a.txt"), "v2")?;
 
-    restore_snapshot_for_workspace(&workspace, snapshot_id.as_str())
-        .expect("snapshot restore should succeed");
+    let snapshot =
+        snapshot_for_workspace(&workspace, snapshot_id.as_str()).expect("membership lookup");
+    restore_snapshot_for_workspace(&workspace, &snapshot).expect("snapshot restore should succeed");
     assert_eq!(fs::read_to_string(workspace.join("a.txt"))?, "v1");
     Ok(())
 }
@@ -4762,10 +5538,11 @@ fn restore_snapshot_endpoint_helper_rejects_unknown_snapshot_id() -> Result<()> 
     repo.snapshot("pre-turn:1")?;
 
     // An id the side repo does not know must 404 without reaching git,
-    // instead of being handed over as an arbitrary treeish.
-    let err =
-        restore_snapshot_for_workspace(&workspace, "0123456789abcdef0123456789abcdef01234567")
-            .expect_err("an unknown snapshot id must be rejected");
+    // instead of being handed over as an arbitrary treeish. (Round-24 P3:
+    // the membership gate lives in the read half — the restore half now
+    // takes the fetched snapshot — so this pins the read half's 404.)
+    let err = snapshot_for_workspace(&workspace, "0123456789abcdef0123456789abcdef01234567")
+        .expect_err("an unknown snapshot id must be rejected");
     assert_eq!(err.status, StatusCode::NOT_FOUND);
     assert!(
         err.message.contains("no such snapshot"),
@@ -4773,6 +5550,203 @@ fn restore_snapshot_endpoint_helper_rejects_unknown_snapshot_id() -> Result<()> 
         err.message
     );
     assert_eq!(fs::read_to_string(workspace.join("a.txt"))?, "v1");
+    Ok(())
+}
+
+#[tokio::test]
+async fn restore_route_names_the_attached_roots_boundary_for_multi_root_threads() -> Result<()> {
+    // Round-22 B22-4: the restore face reported a bare `{"restored": id}`
+    // while every sibling rollback face carried the attached-roots clause.
+    // The snapshot's `[sid=...]` tag joins it to the owning thread record,
+    // whose declared root set decides whether the clause is added.
+    let _lock = lock_test_env();
+    let root = tempfile::tempdir()?;
+    let home = root.path().join("home");
+    fs::create_dir_all(&home)?;
+    let _home = EnvVarGuard::set("HOME", &home);
+
+    let sessions_dir = root.path().join("sessions");
+    let workspace = root.path().join("workspace");
+    let Some((addr, runtime_threads, handle)) = spawn_test_server_with_root_token_mobile_workspace(
+        root.path().to_path_buf(),
+        sessions_dir,
+        None,
+        false,
+        workspace.clone(),
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let multi = runtime_threads
+        .create_thread(CreateThreadRequest {
+            workspace: Some(workspace.clone()),
+            workspace_roots: vec![root.path().join("attached")],
+            ..CreateThreadRequest::default()
+        })
+        .await?;
+    runtime_threads
+        .set_thread_session_id(&multi.id, "sess-multi")
+        .await?;
+    let single = runtime_threads
+        .create_thread(CreateThreadRequest {
+            workspace: Some(workspace.clone()),
+            ..CreateThreadRequest::default()
+        })
+        .await?;
+    runtime_threads
+        .set_thread_session_id(&single.id, "sess-single")
+        .await?;
+
+    let repo = crate::snapshot::SnapshotRepo::open_or_init(&workspace)?;
+    fs::write(workspace.join("a.txt"), "v1")?;
+    let multi_snap = repo.snapshot_with_session("pre-turn:1", Some("sess-multi"))?;
+    fs::write(workspace.join("a.txt"), "v2")?;
+    let single_snap = repo.snapshot_with_session("pre-turn:2", Some("sess-single"))?;
+    fs::write(workspace.join("a.txt"), "v3")?;
+
+    // Multi-root: the clause names what the restore does NOT revert.
+    let response = client
+        .post(format!(
+            "http://{addr}/v1/snapshots/{}/restore",
+            multi_snap.0
+        ))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = response.json().await?;
+    assert_eq!(body["restored"], multi_snap.0.as_str());
+    assert_eq!(
+        body["boundary"]["attached_roots_not_reverted"],
+        json!(true),
+        "a disjoint attached root persists past the restore: {body}"
+    );
+    assert!(
+        body["boundary"]["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("attached workspace roots")),
+        "{body}"
+    );
+
+    // Single-root: the legacy response shape stays byte-identical.
+    let response = client
+        .post(format!(
+            "http://{addr}/v1/snapshots/{}/restore",
+            single_snap.0
+        ))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = response.json().await?;
+    assert!(
+        body.get("boundary").is_none(),
+        "a single-root restore must not grow the clause: {body}"
+    );
+
+    // Round-23 B23-2: the ordinary save/re-key sequence — a `PUT /v1/sessions`
+    // moves the multi-root thread to a NEW session handle after the snapshot
+    // was tagged with the old one. The clause must survive the re-key: the
+    // tagged snapshot proves an interactive owner existed and proves nothing
+    // about the roots, so the boundary is named even though no live thread
+    // matches the old sid any more.
+    let rekey: serde_json::Value = client
+        .put(format!("http://{addr}/v1/sessions"))
+        .json(&json!({
+            "thread_id": multi.id,
+            "session_id": "sess-multi-rekeyed",
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(rekey["session_id"], "sess-multi-rekeyed", "{rekey}");
+    let response = client
+        .post(format!(
+            "http://{addr}/v1/snapshots/{}/restore",
+            multi_snap.0
+        ))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = response.json().await?;
+    assert_eq!(
+        body["boundary"]["attached_roots_not_reverted"],
+        json!(true),
+        "the re-keyed owner must not drop the boundary clause: {body}"
+    );
+
+    // Round-23 B23-1 legs: a `..`-spelled root and an inward-symlink root
+    // component-wise "nest" under the primary over raw spellings while
+    // consumers canonicalize them outside — the clause must fire for both
+    // (the old predicate withheld it, fail-unsafe).
+    let dotdot_thread = runtime_threads
+        .create_thread(CreateThreadRequest {
+            workspace: Some(workspace.join("ws")),
+            workspace_roots: vec![workspace.join("ws").join("..").join("shared2")],
+            ..CreateThreadRequest::default()
+        })
+        .await?;
+    runtime_threads
+        .set_thread_session_id(&dotdot_thread.id, "sess-dotdot")
+        .await?;
+    let dotdot_snap = repo.snapshot_with_session("pre-turn:3", Some("sess-dotdot"))?;
+    let response = client
+        .post(format!(
+            "http://{addr}/v1/snapshots/{}/restore",
+            dotdot_snap.0
+        ))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = response.json().await?;
+    assert_eq!(
+        body["boundary"]["attached_roots_not_reverted"],
+        json!(true),
+        "a ..-spelled attached root must still fire the boundary: {body}"
+    );
+
+    // Round-24 B24-1: the symlink leg the round-23 commit message claimed
+    // but never built — an inward-symlink root (`ws3/link → elsewhere3`)
+    // lexically nests under `ws3` while the predicate's consumers resolve
+    // it outside, so the clause must fire through the canonical spelling.
+    #[cfg(unix)]
+    {
+        let symlink_workspace = workspace.join("ws3");
+        fs::create_dir_all(&symlink_workspace)?;
+        let outside = workspace.join("elsewhere3");
+        fs::create_dir_all(&outside)?;
+        std::os::unix::fs::symlink(&outside, symlink_workspace.join("link"))?;
+        let symlink_thread = runtime_threads
+            .create_thread(CreateThreadRequest {
+                workspace: Some(symlink_workspace.clone()),
+                workspace_roots: vec![symlink_workspace.join("link")],
+                ..CreateThreadRequest::default()
+            })
+            .await?;
+        runtime_threads
+            .set_thread_session_id(&symlink_thread.id, "sess-symlink")
+            .await?;
+        let symlink_snap = repo.snapshot_with_session("pre-turn:4", Some("sess-symlink"))?;
+        let response = client
+            .post(format!(
+                "http://{addr}/v1/snapshots/{}/restore",
+                symlink_snap.0
+            ))
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response.json().await?;
+        assert_eq!(
+            body["boundary"]["attached_roots_not_reverted"],
+            json!(true),
+            "an inward-symlink attached root must fire the boundary: {body}"
+        );
+    }
+
+    handle.abort();
     Ok(())
 }
 
@@ -5094,41 +6068,6 @@ async fn session_patch_route_renames_archives_and_reports_real_changes() -> Resu
         .send()
         .await?;
     assert_eq!(blank.status(), StatusCode::BAD_REQUEST);
-
-    handle.abort();
-    Ok(())
-}
-
-/// A session the TUI holds open is refused with a typed 409 rather than
-/// written behind its back.
-#[tokio::test]
-async fn session_patch_route_refuses_a_live_session_with_a_conflict() -> Result<()> {
-    // The live-session claim is process-global by construction (the embedded
-    // API runs inside the TUI process), so this test must not run alongside
-    // anything else that claims or clears it.
-    let _lock = lock_test_env();
-    let Some((addr, _dir, handle)) =
-        spawn_server_with_saved_sessions(&[("sess-live", "Held open", false)]).await?
-    else {
-        return Ok(());
-    };
-    let client = crate::tls::reqwest_client();
-
-    crate::session_manager::set_live_session(Some("sess-live"));
-    let conflict = client
-        .patch(format!("http://{addr}/v1/sessions/sess-live"))
-        .json(&json!({ "title": "Renamed from the dashboard" }))
-        .send()
-        .await?;
-    assert_eq!(conflict.status(), StatusCode::CONFLICT);
-
-    crate::session_manager::set_live_session(None);
-    let allowed = client
-        .patch(format!("http://{addr}/v1/sessions/sess-live"))
-        .json(&json!({ "title": "Renamed from the dashboard" }))
-        .send()
-        .await?;
-    assert_eq!(allowed.status(), StatusCode::OK);
 
     handle.abort();
     Ok(())
@@ -11471,4 +12410,28 @@ async fn marketplace_add_rejects_symlink_documents_over_http() -> Result<()> {
 
     handle.abort();
     Ok(())
+}
+
+#[test]
+fn sanitize_belt_drop_receipts_are_surfaced_on_every_api_face() {
+    // Round-45 R45-5: every production `sanitize_workspace_roots` call in
+    // the sessions API must consume its drop receipt (`warn_sanitized_dropped`)
+    // — a site that rebinds `_dropped` discards the shrink silently and the
+    // shrunk set is then re-persisted (permanent, undisclosed loss). This
+    // source pin goes red the moment a call site regresses to `_dropped` or
+    // drops the warn (same shape as the composer-bang call-site pin).
+    let src = include_str!("sessions.rs");
+    assert!(
+        !src.contains(", _dropped)"),
+        "a sanitize_workspace_roots call site discards its drop receipt"
+    );
+    let call_sites = src.matches("sanitize_workspace_roots(").count();
+    let surfaced = src.matches("warn_sanitized_dropped(").count();
+    // One warn per call site plus the helper's own definition doc-free name
+    // (the helper body is the definition; call sites = surfaced - 1).
+    assert_eq!(
+        call_sites,
+        surfaced - 1,
+        "every sanitize_workspace_roots call site must surface its receipt"
+    );
 }

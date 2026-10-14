@@ -313,6 +313,18 @@ pub struct ExecPolicyContext<'a> {
     pub ask_for_approval: AskForApproval,
     /// The sandbox mode in effect, if any (e.g. `"workspace-write"`).
     pub sandbox_mode: Option<&'a str>,
+    /// Additional workspace roots for ask/deny path and scope matching;
+    /// `cwd` remains the primary root. Ask/deny rules may span every root
+    /// (they only add prompts or blocks), while Allow rules narrow to the
+    /// judged-cwd slot only, so an attached root never widens
+    /// auto-approval. Caveat recorded for accuracy (round-24 P3): the
+    /// judged-cwd slot is `cwd` — where the call RUNS — so a `cwd:`/
+    /// working-dir redirect that lands the call inside an attached root
+    /// judges an unscoped Allow there ("judged where it runs", the opposite
+    /// policy of the session-grant re-key, which keeps grants pinned to the
+    /// spelling the user approved). Empty preserves the historical
+    /// single-root matching.
+    pub workspace_roots: Vec<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -428,9 +440,24 @@ impl ExecPolicyEngine {
 
     fn matching_ask_rule(&self, ctx: &ExecPolicyContext<'_>) -> Option<ToolAskRule> {
         let tool = ctx.tool.unwrap_or("exec_shell");
-        let normalized_path = ctx
-            .path
-            .and_then(|path| normalize_workspace_relative_path(path, ctx.cwd));
+        // Boundary roots for path/scope matching: the primary cwd plus any
+        // additional roots. An ask/deny rule path or scope that resolves
+        // against any single root matches — that only adds prompts or blocks;
+        // an empty root set keeps single-root behavior.
+        let mut roots: Vec<String> = vec![ctx.cwd.to_string()];
+        for root in &ctx.workspace_roots {
+            let root = root.to_string_lossy().into_owned();
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
+        }
+        let normalized_paths: Vec<Option<String>> = roots
+            .iter()
+            .map(|root| {
+                ctx.path
+                    .and_then(|path| normalize_workspace_relative_path(path, root))
+            })
+            .collect();
 
         let rulesets = self.read_rulesets();
         let matched = rulesets
@@ -443,36 +470,92 @@ impl ExecPolicyEngine {
             })
             .filter(|(_, rule)| rule.tool == tool)
             .filter(|(_, rule)| {
-                rule.workspace
-                    .as_deref()
-                    .is_none_or(|workspace| workspace_scope_matches(workspace, ctx.cwd))
-            })
-            .filter(|(_, rule)| match rule.command.as_deref() {
-                Some(command) if rule.command_exact => command.trim() == ctx.command.trim(),
-                Some(command) => self.arity_dict.allow_rule_matches(command, ctx.command),
-                None => true,
-            })
-            .filter(|(_, rule)| match (rule.path.as_deref(), ctx.path) {
-                (Some(pattern), Some(call_path)) => {
-                    let ws_rule = normalize_workspace_relative_path(pattern, ctx.cwd);
-                    match (ws_rule, normalized_path.as_deref()) {
-                        // Workspace-relative normalization fails for a call
-                        // outside the workspace or a rule that names one, and
-                        // on a POSIX host a Windows-spelled rule/call pair
-                        // parses as unrelated relative forms. A rule spelling
-                        // an ABSOLUTE path must still be able to match such a
-                        // call exactly, or pinned locations (a real home,
-                        // `/root`, a Windows profile) are unmatchable. The
-                        // helper only fires for rooted rules, so relative
-                        // semantics are unchanged.
-                        (Some(ws_rule), Some(ws_call)) => {
-                            ws_rule == ws_call || absolute_path_rule_matches(pattern, call_path)
+                // Which roots is this rule eligible against? A workspace-
+                // scoped rule is evaluated only against roots inside its
+                // scope; an Allow rule additionally keeps the primary-only
+                // narrowing on every filter (it widens auto-approval, so it
+                // may never reach into an attached root - exec is judged
+                // where it runs: the session cwd, or the resolved
+                // cwd:/working_dir: operand when the call redirects).
+                // Round-24 P3 perf: the dominant shapes (every Allow rule,
+                // and unscoped ask/deny on the single-root sessions that
+                // are the norm) borrow a static candidate slice instead of
+                // allocating a Vec per rule per call; only scoped
+                // ask/deny over a multi-root set allocates.
+                let scoped_candidates: Vec<usize>;
+                let candidate_idx: &[usize] =
+                    if rule.action == PermissionAction::Allow {
+                        // An Allow rule keeps the primary-only narrowing on
+                        // every filter regardless of whether it carries a
+                        // workspace: its rooted path and scope may never reach
+                        // into an attached root. Round-38 M38-1: the scope
+                        // check here is EXACT — an allow scoped to the primary
+                        // must not auto-approve a `cwd:`-operand call judged
+                        // inside the primary's subtree (the subtree matcher
+                        // exists for ask/deny, where it closes a fail-open;
+                        // widening auto-approval is the wrong direction).
+                        if rule.workspace.as_deref().is_none_or(|workspace| {
+                            workspace_scope_matches_exact(workspace, ctx.cwd)
+                        }) {
+                            &[0]
+                        } else {
+                            &[]
                         }
-                        _ => absolute_path_rule_matches(pattern, call_path),
-                    }
+                    } else if rule.workspace.is_none() && roots.len() == 1 {
+                        &[0]
+                    } else {
+                        scoped_candidates = match rule.workspace.as_deref() {
+                            None => (0..roots.len()).collect(),
+                            Some(workspace) => roots
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, root)| workspace_scope_matches(workspace, root))
+                                .map(|(idx, _)| idx)
+                                .collect(),
+                        };
+                        &scoped_candidates
+                    };
+                if candidate_idx.is_empty() {
+                    return false;
                 }
-                (Some(_), None) => false,
-                (None, _) => true,
+
+                let command_ok = match rule.command.as_deref() {
+                    Some(command) if rule.command_exact => command.trim() == ctx.command.trim(),
+                    Some(command) => self.arity_dict.allow_rule_matches(command, ctx.command),
+                    None => true,
+                };
+                if !command_ok {
+                    return false;
+                }
+                // The path filter runs against the SAME scoped candidate
+                // roots, not independently over every root: a rule scoped to
+                // repo R with a relative path fires only on a call that
+                // normalizes under R, never on the same relative path
+                // materialized under an unrelated root. Workspace-relative
+                // normalization fails for a call outside every candidate
+                // root, for a rule that names none, and on a POSIX host for
+                // a Windows-spelled rule/call pair. A rule spelling an
+                // ABSOLUTE path must still be able to match such a call
+                // exactly, or pinned locations (a real home, `/root`, a
+                // Windows profile) are unmatchable - the fallback runs on
+                // the original call path regardless of the per-root outcome,
+                // so relative semantics and single-root behavior are
+                // unchanged.
+                match (rule.path.as_deref(), ctx.path) {
+                    (Some(pattern), Some(call_path)) => {
+                        candidate_idx.iter().any(|&idx| {
+                            match (
+                                normalize_workspace_relative_path(pattern, &roots[idx]),
+                                normalized_paths[idx].as_deref(),
+                            ) {
+                                (Some(ws_rule), Some(ws_call)) => ws_rule == ws_call,
+                                _ => false,
+                            }
+                        }) || absolute_path_rule_matches(pattern, call_path)
+                    }
+                    (Some(_), None) => false,
+                    (None, _) => true,
+                }
             })
             .max_by_key(|(layer, rule)| (*layer, rule.action, ask_rule_specificity(rule)))
             .map(|(_, rule)| (*rule).clone());
@@ -1058,12 +1141,33 @@ pub fn normalize_workspace_scope(value: &str) -> Option<String> {
     ))
 }
 
-fn workspace_scope_matches(rule_workspace: &str, cwd: &str) -> bool {
+fn workspace_scope_matches_exact(rule_workspace: &str, cwd: &str) -> bool {
     match (
         normalize_workspace_scope(rule_workspace),
         normalize_workspace_scope(cwd),
     ) {
         (Some(rule_workspace), Some(cwd)) => rule_workspace == cwd,
+        _ => false,
+    }
+}
+
+fn workspace_scope_matches(rule_workspace: &str, cwd: &str) -> bool {
+    match (
+        normalize_workspace_scope(rule_workspace),
+        normalize_workspace_scope(cwd),
+    ) {
+        (Some(rule_workspace), Some(cwd)) => {
+            // Round-37 M37-10 + round-38 M38-1: ask/deny candidate roots
+            // own the whole scope SUBTREE — the exact-equality form let a
+            // scoped deny be filtered out for a call judged inside its
+            // scope (a `cwd: "sub"` operand judges as /repo/sub while the
+            // rule's scope is /repo), so the denied command ran. ALLOW
+            // eligibility deliberately keeps the exact matcher: subtree
+            // reach there would auto-approve operand redirects inside the
+            // scope, a widening the standing body disclosures promise
+            // never happens.
+            rule_workspace == cwd || cwd.starts_with(&format!("{rule_workspace}/"))
+        }
         _ => false,
     }
 }
@@ -1196,6 +1300,7 @@ mod tests {
             path: None,
             ask_for_approval,
             sandbox_mode: Some("workspace-write"),
+            workspace_roots: Vec::new(),
         }
     }
 
@@ -2158,6 +2263,7 @@ mod tests {
                 path: Some("tmp/project"),
                 ask_for_approval: AskForApproval::Never,
                 sandbox_mode: Some("workspace-write"),
+                workspace_roots: Vec::new(),
             })
             .unwrap();
 
@@ -2182,6 +2288,7 @@ mod tests {
                 path: Some("/workspace/src/a.rs"),
                 ask_for_approval: AskForApproval::OnFailure,
                 sandbox_mode: Some("workspace-write"),
+                workspace_roots: Vec::new(),
             })
             .unwrap();
         assert!(absolute_path.requires_approval);
@@ -2198,6 +2305,7 @@ mod tests {
                 path: Some("src/a.rs"),
                 ask_for_approval: AskForApproval::OnFailure,
                 sandbox_mode: Some("workspace-write"),
+                workspace_roots: Vec::new(),
             })
             .unwrap();
         assert!(relative_path.requires_approval);
@@ -2224,6 +2332,7 @@ mod tests {
                     path: Some(path),
                     ask_for_approval: AskForApproval::OnFailure,
                     sandbox_mode: Some("workspace-write"),
+                    workspace_roots: Vec::new(),
                 })
                 .unwrap();
             assert_eq!(
@@ -2248,6 +2357,7 @@ mod tests {
                 path: Some(r"C:\workspace\src\a.rs"),
                 ask_for_approval: AskForApproval::OnFailure,
                 sandbox_mode: Some("workspace-write"),
+                workspace_roots: Vec::new(),
             })
             .unwrap();
 
@@ -2278,6 +2388,7 @@ mod tests {
                 path: Some("/root/.ssh/config"),
                 ask_for_approval: AskForApproval::OnFailure,
                 sandbox_mode: Some("workspace-write"),
+                workspace_roots: Vec::new(),
             })
             .unwrap();
         assert_eq!(decision.matched_action, Some(PermissionAction::Deny));
@@ -2291,6 +2402,7 @@ mod tests {
                 path: Some("/root/.ssh/known_hosts"),
                 ask_for_approval: AskForApproval::OnFailure,
                 sandbox_mode: Some("workspace-write"),
+                workspace_roots: Vec::new(),
             })
             .unwrap();
         assert_eq!(decision.matched_rule, None);
@@ -2307,6 +2419,7 @@ mod tests {
                 path: Some("/root/../root/.ssh/config"),
                 ask_for_approval: AskForApproval::OnFailure,
                 sandbox_mode: Some("workspace-write"),
+                workspace_roots: Vec::new(),
             })
             .unwrap();
         assert_eq!(decision.matched_rule, None);
@@ -2334,6 +2447,7 @@ mod tests {
                 path: Some("~/.ssh/config"),
                 ask_for_approval: AskForApproval::OnFailure,
                 sandbox_mode: Some("workspace-write"),
+                workspace_roots: Vec::new(),
             })
             .unwrap();
         assert_eq!(decision.matched_action, Some(PermissionAction::Deny));
@@ -2348,6 +2462,7 @@ mod tests {
                 path: Some("~/.ssh/../ssh/config"),
                 ask_for_approval: AskForApproval::OnFailure,
                 sandbox_mode: Some("workspace-write"),
+                workspace_roots: Vec::new(),
             })
             .unwrap();
         assert_eq!(decision.matched_rule, None);
@@ -2371,9 +2486,49 @@ mod tests {
                 path: Some("/src/a.rs"),
                 ask_for_approval: AskForApproval::OnFailure,
                 sandbox_mode: Some("workspace-write"),
+                workspace_roots: Vec::new(),
             })
             .unwrap();
         assert_eq!(decision.matched_rule, None);
+    }
+
+    #[test]
+    fn typed_ask_absolute_path_rule_matches_a_call_outside_every_root() {
+        // Round-24 P3 pin bounding the absolute-path fallback: a rule
+        // spelling an ABSOLUTE location no root can normalize (`/root`,
+        // a real home) stays matchable for a call whose path sits outside
+        // every candidate root — the fallback compares the original call
+        // spelling regardless of the per-root outcome. The sibling test
+        // above pins the other side (a RELATIVE rule never reaches an
+        // absolute call through the same fallback).
+        let engine =
+            ExecPolicyEngine::with_rulesets(vec![Ruleset::user(vec![], vec![]).with_ask_rules(
+                vec![ToolAskRule {
+                    tool: "edit_file".into(),
+                    command: None,
+                    command_exact: false,
+                    path: Some("/root/.ssh/authorized_keys".into()),
+                    workspace: None,
+                    action: PermissionAction::Deny,
+                }],
+            )]);
+
+        let decision = engine
+            .check(ExecPolicyContext {
+                command: "",
+                cwd: "/workspace",
+                tool: Some("edit_file"),
+                path: Some("/root/.ssh/authorized_keys"),
+                ask_for_approval: AskForApproval::OnFailure,
+                sandbox_mode: Some("workspace-write"),
+                workspace_roots: vec![std::path::PathBuf::from("/other/root")],
+            })
+            .unwrap();
+        assert!(
+            decision.matched_rule.is_some(),
+            "the deny on the pinned absolute location must fire even though the \
+             call path normalizes under no candidate root"
+        );
     }
 
     #[test]
@@ -2398,6 +2553,7 @@ mod tests {
                 path: Some(r"C:\Users\U\.AWS\credentials"),
                 ask_for_approval: AskForApproval::OnFailure,
                 sandbox_mode: Some("workspace-write"),
+                workspace_roots: Vec::new(),
             })
             .unwrap();
         // The rule folds `C:/Users/u/...` and the call folds `C:\Users\U\...`
@@ -2408,6 +2564,253 @@ mod tests {
         } else {
             assert_eq!(decision.matched_rule, None);
         }
+    }
+
+    #[test]
+    fn typed_ask_path_matching_spans_additional_workspace_roots() {
+        // A relative rule path matches an invocation path under any root.
+        let engine = ExecPolicyEngine::with_rulesets(vec![
+            Ruleset::user(vec![], vec![])
+                .with_ask_rules(vec![ToolAskRule::file_path("edit_file", "src/a.rs")]),
+        ]);
+        let decision = engine
+            .check(ExecPolicyContext {
+                command: "",
+                cwd: "/workspace",
+                tool: Some("edit_file"),
+                path: Some("/shared/src/a.rs"),
+                ask_for_approval: AskForApproval::OnFailure,
+                sandbox_mode: Some("workspace-write"),
+                workspace_roots: vec![std::path::PathBuf::from("/shared")],
+            })
+            .unwrap();
+        assert!(
+            decision.requires_approval,
+            "relative rule path must match under the additional root: {decision:?}"
+        );
+
+        // The same path with no additional root configured must not match.
+        let decision = engine
+            .check(ExecPolicyContext {
+                command: "",
+                cwd: "/workspace",
+                tool: Some("edit_file"),
+                path: Some("/shared/src/a.rs"),
+                ask_for_approval: AskForApproval::OnFailure,
+                sandbox_mode: Some("workspace-write"),
+                workspace_roots: Vec::new(),
+            })
+            .unwrap();
+        assert_eq!(decision.matched_rule, None);
+
+        // An absolute rule anchored at the additional root matches there but
+        // does not leak onto the same relative path under the primary root.
+        let anchored =
+            ExecPolicyEngine::with_rulesets(vec![Ruleset::user(vec![], vec![]).with_ask_rules(
+                vec![ToolAskRule::file_path("edit_file", "/shared/src/a.rs")],
+            )]);
+        let under_shared = anchored
+            .check(ExecPolicyContext {
+                command: "",
+                cwd: "/workspace",
+                tool: Some("edit_file"),
+                path: Some("/shared/src/a.rs"),
+                ask_for_approval: AskForApproval::OnFailure,
+                sandbox_mode: Some("workspace-write"),
+                workspace_roots: vec![std::path::PathBuf::from("/shared")],
+            })
+            .unwrap();
+        assert!(under_shared.requires_approval);
+        let under_primary = anchored
+            .check(ExecPolicyContext {
+                command: "",
+                cwd: "/workspace",
+                tool: Some("edit_file"),
+                path: Some("/workspace/src/a.rs"),
+                ask_for_approval: AskForApproval::OnFailure,
+                sandbox_mode: Some("workspace-write"),
+                workspace_roots: vec![std::path::PathBuf::from("/shared")],
+            })
+            .unwrap();
+        assert_eq!(under_primary.matched_rule, None);
+    }
+
+    #[test]
+    fn workspace_scoped_allow_rule_stays_primary_root_scoped() {
+        let rule = ToolAskRule::exec_shell("git push").into_exact_workspace_allow("/shared");
+        let engine = ExecPolicyEngine::with_rulesets(vec![
+            Ruleset::user(vec![], vec![]).with_ask_rules(vec![rule]),
+        ]);
+
+        // Inside the scope the rule auto-approves as before.
+        let scoped = engine
+            .check(ExecPolicyContext {
+                command: "git push",
+                cwd: "/shared",
+                tool: Some("exec_shell"),
+                path: None,
+                ask_for_approval: AskForApproval::UnlessTrusted,
+                sandbox_mode: Some("workspace-write"),
+                workspace_roots: Vec::new(),
+            })
+            .unwrap();
+        assert!(
+            scoped.allow && !scoped.requires_approval,
+            "rule scoped to the primary root must apply: {scoped:?}"
+        );
+
+        // An attached root must not widen the auto-approval to a session
+        // running against a different root: exec always runs in the session
+        // cwd, so the same command there may target a different repository.
+        let unscoped = engine
+            .check(ExecPolicyContext {
+                command: "git push",
+                cwd: "/workspace",
+                tool: Some("exec_shell"),
+                path: None,
+                ask_for_approval: AskForApproval::UnlessTrusted,
+                sandbox_mode: Some("workspace-write"),
+                workspace_roots: vec![std::path::PathBuf::from("/shared")],
+            })
+            .unwrap();
+        assert_eq!(unscoped.matched_rule, None);
+    }
+
+    #[test]
+    fn scoped_relative_path_rule_does_not_fire_under_unrelated_root() {
+        // Scope and path must pair per root: a rule scoped to /shared with
+        // a relative path fires only on a call under /shared, never on the
+        // same relative path materialized under an unrelated root. With two
+        // independent filters this matched via scope=/shared + path=/shared
+        // under the primary - over-blocking outside the rule's repo.
+        let rule = ToolAskRule {
+            tool: "edit_file".into(),
+            command: None,
+            command_exact: false,
+            path: Some("deploy/config.yaml".into()),
+            workspace: Some("/shared".into()),
+            action: PermissionAction::Deny,
+        };
+        let engine = ExecPolicyEngine::with_rulesets(vec![
+            Ruleset::user(vec![], vec![]).with_ask_rules(vec![rule]),
+        ]);
+
+        // Negative: the same relative path under the unrelated primary root
+        // must not fire the /shared-scoped rule.
+        let decision = engine
+            .check(ExecPolicyContext {
+                command: "",
+                cwd: "/workspace",
+                tool: Some("edit_file"),
+                path: Some("/workspace/deploy/config.yaml"),
+                ask_for_approval: AskForApproval::OnFailure,
+                sandbox_mode: Some("workspace-write"),
+                workspace_roots: vec![std::path::PathBuf::from("/shared")],
+            })
+            .unwrap();
+        assert_eq!(
+            decision.matched_rule, None,
+            "scope + relative path must pair per root, not match independently: {decision:?}"
+        );
+
+        // Control: the same call under the scoped root fires the rule.
+        let decision = engine
+            .check(ExecPolicyContext {
+                command: "",
+                cwd: "/workspace",
+                tool: Some("edit_file"),
+                path: Some("/shared/deploy/config.yaml"),
+                ask_for_approval: AskForApproval::OnFailure,
+                sandbox_mode: Some("workspace-write"),
+                workspace_roots: vec![std::path::PathBuf::from("/shared")],
+            })
+            .unwrap();
+        assert_eq!(decision.matched_action, Some(PermissionAction::Deny));
+    }
+
+    #[test]
+    fn allow_relative_path_rule_does_not_auto_approve_under_attached_root() {
+        // The Allow narrowing covers rooted path matching, not just the
+        // workspace scope: an allow rule whose relative path resolves only
+        // under an attached root must not auto-approve a call landing
+        // there. Without this, a refactor could silently regress the path
+        // direction while the scope direction stays pinned.
+        let engine =
+            ExecPolicyEngine::with_rulesets(vec![Ruleset::user(vec![], vec![]).with_ask_rules(
+                vec![ToolAskRule {
+                    tool: "edit_file".into(),
+                    command: None,
+                    command_exact: false,
+                    path: Some("src/a.rs".into()),
+                    workspace: None,
+                    action: PermissionAction::Allow,
+                }],
+            )]);
+
+        // Control: the same relative rule auto-approves under the primary.
+        let under_primary = engine
+            .check(ExecPolicyContext {
+                command: "",
+                cwd: "/workspace",
+                tool: Some("edit_file"),
+                path: Some("/workspace/src/a.rs"),
+                ask_for_approval: AskForApproval::UnlessTrusted,
+                sandbox_mode: Some("workspace-write"),
+                workspace_roots: Vec::new(),
+            })
+            .unwrap();
+        assert!(under_primary.allow && !under_primary.requires_approval);
+
+        // Negative: attached root must not widen the auto-approval.
+        let under_attached = engine
+            .check(ExecPolicyContext {
+                command: "",
+                cwd: "/workspace",
+                tool: Some("edit_file"),
+                path: Some("/shared/src/a.rs"),
+                ask_for_approval: AskForApproval::UnlessTrusted,
+                sandbox_mode: Some("workspace-write"),
+                workspace_roots: vec![std::path::PathBuf::from("/shared")],
+            })
+            .unwrap();
+        assert_eq!(
+            under_attached.matched_rule, None,
+            "the Allow rule must not match via the attached root"
+        );
+    }
+
+    #[test]
+    fn workspace_scoped_ask_rule_matches_any_workspace_root() {
+        // Unlike Allow, a prompting rule scoped to an attached root still
+        // fires there: multi-root matching for ask/deny only ever adds a
+        // prompt or a block, never an auto-approval.
+        let rule = ToolAskRule {
+            tool: "exec_shell".into(),
+            command: Some("git push".into()),
+            command_exact: true,
+            path: None,
+            workspace: Some("/shared".into()),
+            action: PermissionAction::Ask,
+        };
+        let engine = ExecPolicyEngine::with_rulesets(vec![
+            Ruleset::user(vec![], vec![]).with_ask_rules(vec![rule]),
+        ]);
+        let decision = engine
+            .check(ExecPolicyContext {
+                command: "git push",
+                cwd: "/workspace",
+                tool: Some("exec_shell"),
+                path: None,
+                ask_for_approval: AskForApproval::UnlessTrusted,
+                sandbox_mode: Some("workspace-write"),
+                workspace_roots: vec![std::path::PathBuf::from("/shared")],
+            })
+            .unwrap();
+        assert_eq!(decision.matched_action, Some(PermissionAction::Ask));
+        assert!(
+            decision.requires_approval,
+            "ask rule scoped to an attached root must prompt: {decision:?}"
+        );
     }
 
     // ── deny / allow action tests ──────────────────────────────────────────
@@ -2434,6 +2837,7 @@ mod tests {
                 path: None,
                 ask_for_approval: AskForApproval::UnlessTrusted,
                 sandbox_mode: None,
+                workspace_roots: Vec::new(),
             })
             .unwrap();
 
@@ -2445,6 +2849,114 @@ mod tests {
             decision.reason().contains("explicitly denies"),
             "expected deny reason, got: {}",
             decision.reason()
+        );
+    }
+
+    #[test]
+    fn workspace_scoped_deny_fires_for_a_call_judged_inside_its_scope() {
+        // Round-37 M37-10: a `cwd: "sub"` operand judges as /repo/sub (the
+        // canonical operand judging this topic introduced), while the
+        // persisted rule's scope names the repository root. The exact-
+        // equality eligibility filtered the deny out for the subdirectory
+        // call — the denied command ran (fail-open, undisclosed). The scope
+        // must own its whole subtree.
+        let engine =
+            ExecPolicyEngine::with_rulesets(vec![Ruleset::user(vec![], vec![]).with_ask_rules(
+                vec![ToolAskRule {
+                    tool: "exec_shell".into(),
+                    command: Some("sed".into()),
+                    path: None,
+                    action: PermissionAction::Deny,
+                    workspace: Some("/repo".into()),
+                    ..ToolAskRule::new("")
+                }],
+            )]);
+
+        let inside = engine
+            .check(ExecPolicyContext {
+                command: "sed -i 's/foo/bar/' file.txt",
+                cwd: "/repo/sub",
+                tool: Some("exec_shell"),
+                path: None,
+                ask_for_approval: AskForApproval::OnRequest,
+                sandbox_mode: None,
+                workspace_roots: Vec::new(),
+            })
+            .unwrap();
+        assert!(
+            !inside.allow,
+            "a deny scoped to /repo must still fire for a call judged at /repo/sub: {:?}",
+            inside.reason()
+        );
+        assert_eq!(inside.matched_action, Some(PermissionAction::Deny));
+
+        // A call OUTSIDE the scope keeps the scope's meaning: the rule is
+        // not global.
+        let outside = engine
+            .check(ExecPolicyContext {
+                command: "sed -i 's/foo/bar/' file.txt",
+                cwd: "/elsewhere",
+                tool: Some("exec_shell"),
+                path: None,
+                ask_for_approval: AskForApproval::OnRequest,
+                sandbox_mode: None,
+                workspace_roots: Vec::new(),
+            })
+            .unwrap();
+        assert_ne!(outside.matched_action, Some(PermissionAction::Deny));
+    }
+
+    #[test]
+    fn workspace_scoped_allow_stays_exact_for_subdirectory_operands() {
+        // Round-38 M38-1: the subtree matcher widened ALLOW eligibility —
+        // an allow scoped to the primary auto-approved any cwd-operand call
+        // judged inside the primary's subtree, contradicting the body's
+        // standing fail-closed disclosure. Allow keeps the exact matcher;
+        // only ask/deny own the subtree (their fail-open was the bug).
+        let engine =
+            ExecPolicyEngine::with_rulesets(vec![Ruleset::user(vec![], vec![]).with_ask_rules(
+                vec![ToolAskRule {
+                    tool: "exec_shell".into(),
+                    command: Some("git status".into()),
+                    path: None,
+                    action: PermissionAction::Allow,
+                    workspace: Some("/repo".into()),
+                    ..ToolAskRule::new("")
+                }],
+            )]);
+
+        let at_root = engine
+            .check(ExecPolicyContext {
+                command: "git status",
+                cwd: "/repo",
+                tool: Some("exec_shell"),
+                path: None,
+                ask_for_approval: AskForApproval::OnRequest,
+                sandbox_mode: None,
+                workspace_roots: Vec::new(),
+            })
+            .unwrap();
+        assert_eq!(
+            at_root.matched_action,
+            Some(PermissionAction::Allow),
+            "an allow scoped to /repo fires at /repo itself"
+        );
+
+        let in_subdir = engine
+            .check(ExecPolicyContext {
+                command: "git status",
+                cwd: "/repo/sub",
+                tool: Some("exec_shell"),
+                path: None,
+                ask_for_approval: AskForApproval::OnRequest,
+                sandbox_mode: None,
+                workspace_roots: Vec::new(),
+            })
+            .unwrap();
+        assert_ne!(
+            in_subdir.matched_action,
+            Some(PermissionAction::Allow),
+            "a scoped allow must NOT auto-approve a subdirectory operand"
         );
     }
 
@@ -2470,6 +2982,7 @@ mod tests {
                 path: None,
                 ask_for_approval: AskForApproval::OnRequest,
                 sandbox_mode: None,
+                workspace_roots: Vec::new(),
             })
             .unwrap();
 
@@ -2495,6 +3008,7 @@ mod tests {
                 path: None,
                 ask_for_approval: AskForApproval::UnlessTrusted,
                 sandbox_mode: None,
+                workspace_roots: Vec::new(),
             })
             .unwrap();
 
@@ -2529,6 +3043,7 @@ mod tests {
                 path: None,
                 ask_for_approval: AskForApproval::OnRequest,
                 sandbox_mode: None,
+                workspace_roots: Vec::new(),
             })
             .unwrap();
 
@@ -2790,6 +3305,7 @@ mod tests {
                 path: Some("/workspace/src/secrets.rs"),
                 ask_for_approval: UnlessTrusted,
                 sandbox_mode: None,
+                workspace_roots: Vec::new(),
             })
             .unwrap();
 
@@ -3124,6 +3640,7 @@ mod tests {
                 path: Some("/workspace/src/main.rs"),
                 ask_for_approval: UnlessTrusted,
                 sandbox_mode: None,
+                workspace_roots: Vec::new(),
             })
             .unwrap();
         // write_file should not be affected by exec_shell deny
@@ -3186,6 +3703,7 @@ mod tests {
                 path: None,
                 ask_for_approval: OnRequest,
                 sandbox_mode: Some("workspace-write"),
+                workspace_roots: Vec::new(),
             })
             .unwrap();
         assert!(
@@ -3259,6 +3777,7 @@ mod tests {
                 path: None,
                 ask_for_approval: OnRequest,
                 sandbox_mode: Some("workspace-write"),
+                workspace_roots: Vec::new(),
             })
             .unwrap();
 
@@ -3327,6 +3846,7 @@ mod tests {
             path: Some(path),
             ask_for_approval,
             sandbox_mode: Some("workspace-write"),
+            workspace_roots: Vec::new(),
         }
     }
 }

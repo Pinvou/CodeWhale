@@ -79,6 +79,704 @@ pub enum InitialHistory {
     },
 }
 
+/// Normalizes a workspace root set: `cwd` is the primary root at position 0,
+/// followed by `roots` in their original order with duplicates removed. An
+/// empty `roots` degenerates to `[cwd]`.
+///
+/// Entries that are empty or relative are dropped, not normalized: every
+/// containment check downstream is `Path::starts_with`-shaped, where an empty
+/// root contains *every* path and a relative root is meaningless against the
+/// absolute candidates the boundary checks resolve. The `cwd` argument is
+/// filtered by the same rule, and there the filter fails closed: an empty or
+/// relative cwd cannot head a root set (its normalized form is the vacuous
+/// root), so the whole set collapses to empty and the thread has no writable
+/// roots at all. Intake surfaces reject an empty cwd/workspace outright; this
+/// filter is the last line for values that bypass a surface (legacy or
+/// hand-edited records). This is the single chokepoint every consumer routes
+/// through, so intake validation lives here rather than at each protocol
+/// surface.
+///
+/// Deduplication is lexical, not filesystem-aware: two spellings of the same
+/// directory (a symlinked `/var/x` beside its `/private/var/x` target) both
+/// survive here. Callers that enumerate writable roots canonicalize per root
+/// for exactly that reason; a future canonicalizing intake would remove the
+/// residue, at the cost of filesystem access on every normalization.
+///
+/// This function stays a *shape* normalizer, not a validator, because it also
+/// runs on sets that never passed an intake surface (restored sessions, legacy
+/// or hand-edited records): those degrade by dropping the meaningless entries
+/// rather than failing the whole load. Intake surfaces that receive a
+/// caller-declared set route through [`validate_workspace_roots`] instead,
+/// which rejects rather than drops.
+///
+/// The additional entries are capped at [`MAX_WORKSPACE_ROOTS`], earliest
+/// declared wins (review #484/CodeWhale round-24 B24-4). Validating intakes
+/// reject an over-cap declaration with an error, but the load faces (the
+/// state reader's resume resolution, engine init, `Op::SyncSession`,
+/// `exec --resume`, ACP `session/load`) consume sets that never passed one —
+/// an unbounded hand-edited row turned every write-tool call into O(n²) dedup
+/// plus per-root canonicalization, a permanent stall the cap exists to bound.
+/// A declaration that passed intake can never be truncated here: the intake
+/// cap counts declared roots and this cap counts the same entries, so a
+/// full 64-root declaration survives whole behind the primary.
+pub fn normalize_workspace_roots(cwd: &Path, roots: &[PathBuf]) -> Vec<PathBuf> {
+    if cwd.as_os_str().is_empty() || !cwd.is_absolute() {
+        return Vec::new();
+    }
+    let mut normalized = vec![cwd.to_path_buf()];
+    for root in roots {
+        if normalized.len() > MAX_WORKSPACE_ROOTS {
+            break;
+        }
+        if root.as_os_str().is_empty() || !root.is_absolute() {
+            continue;
+        }
+        if !normalized.contains(root) {
+            normalized.push(root.clone());
+        }
+    }
+    normalized
+}
+
+/// Lexically collapse CurDir and ParentDir components of `path` into the
+/// landing path the tool boundary resolves: a `..` at the filesystem root
+/// (or a Windows drive root) CLAMPS, it does not fail, and a `..` a relative
+/// spelling cannot pop is KEPT. This is the single implementation behind the
+/// tools layer's landing normalizer (`tools::spec::normalize_path`), shared
+/// so the judgment lanes can never drift from the gate
+/// (review #484/CodeWhale round-22 B22-5).
+pub fn normalize_path_lexically(path: &Path) -> PathBuf {
+    let mut prefix: Option<std::ffi::OsString> = None;
+    let mut is_root = false;
+    let mut stack: Vec<std::ffi::OsString> = Vec::new();
+
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix_component) => {
+                prefix = Some(prefix_component.as_os_str().to_owned());
+            }
+            std::path::Component::RootDir => {
+                is_root = true;
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                let parent = std::path::Component::ParentDir.as_os_str();
+                if let Some(last) = stack.pop() {
+                    if last == parent {
+                        stack.push(last);
+                        stack.push(parent.to_owned());
+                    }
+                } else if !is_root {
+                    stack.push(parent.to_owned());
+                }
+            }
+            std::path::Component::Normal(part) => {
+                stack.push(part.to_owned());
+            }
+        }
+    }
+
+    let mut normalized = PathBuf::new();
+    if let Some(prefix) = prefix {
+        normalized.push(prefix);
+    }
+    if is_root {
+        normalized.push(Path::new(std::path::MAIN_SEPARATOR_STR));
+    }
+    for part in stack {
+        normalized.push(part);
+    }
+    normalized
+}
+
+/// Outcome of the deepest-existing-ancestor walk (round-45 R45-4): the one
+/// core implementation every security-adjacent comparison lane delegates
+/// to. `ancestor` is the deepest existing prefix, canonicalized through
+/// symlinks when possible (spelling per the caller's
+/// [`DeepestExistingFallback`] choice when even it cannot canonicalize);
+/// `existing` is that same ancestor's RAW pre-canonicalization spelling
+/// (callers whose leniency gates compare declared spellings — the tools'
+/// follow-symlinks fast path — consume it instead); `tail` holds the
+/// nonexistent components in deepest-first order — re-append with
+/// [`DeepestExistingWalk::compose`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeepestExistingWalk {
+    pub ancestor: PathBuf,
+    pub existing: PathBuf,
+    pub tail: Vec<std::ffi::OsString>,
+}
+
+impl DeepestExistingWalk {
+    /// The composed resolution: canonical ancestor plus the re-appended
+    /// nonexistent tail.
+    pub fn compose(&self) -> PathBuf {
+        let mut composed = self.ancestor.clone();
+        for part in self.tail.iter().rev() {
+            composed.push(part);
+        }
+        composed
+    }
+}
+
+/// What spelling [`walk_deepest_existing`] keeps when even the deepest
+/// walked-to ancestor cannot canonicalize (e.g. an EACCES wall above it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeepestExistingFallback {
+    /// Keep the ORIGINAL input spelling and drop the tail — the round-44
+    /// R44-1 comparison shape, where a wrong-but-existing ancestor must
+    /// never substitute for the declared ghost path.
+    OriginalPath,
+    /// Keep the deepest walked-to ANCESTOR spelling plus the tail — the
+    /// operand/spec shapes, where the walk's own result is the closest
+    /// statable truth and must survive.
+    DeepestAncestor,
+}
+
+/// Walk `path` up to its deepest EXISTING ancestor and canonicalize that
+/// prefix through symlinks (round-45 R45-4). This is the single source for
+/// the deepest-existing walk — `resolve_operand_cwd`'s Err branch, the
+/// ghost-primary comparison (`resolve_deepest_existing_canonical`), the
+/// TUI's carve-out `resolve_deepest_existing`, and the tools'
+/// `resolve_nonexistent_path` all delegate here so their fallback semantics
+/// can never drift apart again (the round-45 finding was four copies with
+/// two independent divergence axes: the fallback target and whether the
+/// composed result is lexically normalized — both are now explicit at each
+/// call site).
+pub fn walk_deepest_existing(
+    path: &Path,
+    fallback: DeepestExistingFallback,
+) -> DeepestExistingWalk {
+    if let Ok(canonical) = path.canonicalize() {
+        return DeepestExistingWalk {
+            ancestor: canonical,
+            existing: path.to_path_buf(),
+            tail: Vec::new(),
+        };
+    }
+    let mut existing = path.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    while !existing.exists() {
+        // A `..` (or `.`) final component yields no `file_name`: the engine
+        // lane's pinned behavior (round-20 B20-1, moved verbatim) pops it
+        // WITHOUT recording it and keeps walking — the walk terminates via
+        // the existing check or the root, never here.
+        if let Some(name) = existing.file_name() {
+            tail.push(name.to_owned());
+        }
+        match existing.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => existing = parent.to_path_buf(),
+            _ => break,
+        }
+    }
+    let raw_existing = existing.clone();
+    match existing.canonicalize() {
+        Ok(canonical) => DeepestExistingWalk {
+            ancestor: canonical,
+            existing: raw_existing,
+            tail,
+        },
+        Err(_) => match fallback {
+            DeepestExistingFallback::OriginalPath => DeepestExistingWalk {
+                ancestor: path.to_path_buf(),
+                existing: raw_existing,
+                tail: Vec::new(),
+            },
+            DeepestExistingFallback::DeepestAncestor => DeepestExistingWalk {
+                existing: raw_existing.clone(),
+                ancestor: raw_existing,
+                tail,
+            },
+        },
+    }
+}
+
+/// Resolve a `cwd:`/`working_dir:`-style operand the way the exec lane does,
+/// so a policy judgment sees the directory execution actually runs in
+/// (review #484/CodeWhale round-22 B22-5): a relative spelling joins onto
+/// `workspace`; an existing result canonicalizes through any symlink; a
+/// genuinely-missing operand walks to the deepest existing ancestor,
+/// canonicalizes it through any symlink, re-appends the popped tail, and
+/// normalizes — the same walk the engine's judged-cwd applies (round-20
+/// B20-1, round-21 B21-3). Both the headless `Runtime::invoke_tool` lane and
+/// the TUI engine lane call this one implementation. Round-45 P2-10: only
+/// `ErrorKind::NotFound` walks — an EACCES/ELOOP operand exists but cannot
+/// be canonicalized, and walking it up to the deepest statable ancestor
+/// would judge policy against the WRONG directory; such operands keep their
+/// own lexically normalized spelling so containment fails closed.
+pub fn resolve_operand_cwd(workspace: &Path, raw: &str) -> PathBuf {
+    let raw_path = Path::new(raw);
+    let joined = if raw_path.is_absolute() {
+        raw_path.to_path_buf()
+    } else {
+        workspace.join(raw_path)
+    };
+    match joined.canonicalize() {
+        Ok(canonical) => canonical,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let walked = walk_deepest_existing(&joined, DeepestExistingFallback::DeepestAncestor);
+            normalize_path_lexically(&walked.compose())
+        }
+        Err(_) => normalize_path_lexically(&joined),
+    }
+}
+
+/// A caller-supplied value failed an intake validation rule: a declared
+/// workspace root set (or a workspace/cwd that cannot head one) was refused.
+///
+/// The distinct type (not just an `anyhow!` string) lets HTTP lanes classify
+/// the rejection as the caller's mistake — HTTP 400 — instead of a server
+/// fault (review #484/CodeWhale round-22 SF22-4). The `Display` text is the
+/// rejection reason, unchanged from the plain `anyhow!` strings these sites
+/// used before, so message-based classifiers keep working.
+#[derive(Debug)]
+pub struct IntakeValidationError {
+    message: String,
+}
+
+impl std::fmt::Display for IntakeValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for IntakeValidationError {}
+
+impl IntakeValidationError {
+    /// Build the rejection as an `anyhow::Error` so existing `anyhow::Result`
+    /// signatures carry it transparently.
+    fn err(message: impl Into<String>) -> anyhow::Error {
+        anyhow::Error::new(Self {
+            message: message.into(),
+        })
+    }
+}
+
+/// Ceiling on one declared root set (review #484/CodeWhale round-22 SF22-8).
+/// Every boundary consumer scales with the set length — the intake dedup,
+/// per-turn sandbox materialization, per-operand `boundary_roots`
+/// canonicalization, and repo law's per-root constitution loads — so an
+/// unbounded declaration from a hostile or buggy client converts per-turn
+/// work into a permanent stall. 64 is far above any legitimate multi-repo
+/// session and bounds that work to a constant.
+pub const MAX_WORKSPACE_ROOTS: usize = 64;
+
+/// Comparison-local spelling normalization (round-39 B39-2): on Windows,
+/// `std::fs::canonicalize` returns verbatim `\\?\`-prefixed paths while
+/// lexical spellings keep the DOS form, and the two prefix components never
+/// compare equal — so a comparison mixing one canonicalized side with one
+/// lexical side silently skips the ancestor/filesystem-root guard (the
+/// fail-open). Strip the verbatim prefix (mapping `\\?\UNC\` to `\\`) and
+/// case-fold, mirroring the repo's existing
+/// `normalize_windows_path_for_comparison` precedent in codewhale-config.
+/// A no-op on Unix, where case is significant and no verbatim prefix
+/// exists.
+/// Ancestor test for the intake/sanitizer guards, split by platform
+/// (round-39 B39-2, its P2 correction, rounds 42/44): Unix resolves each
+/// side through its deepest EXISTING ancestor before the native component
+/// comparison — the walk closes the ghost-primary hole (a
+/// not-yet-materialized primary keeps a lexical spelling whose canonical
+/// prefix diverges on macOS `/var` ↔ `/private/var` shapes) while
+/// component semantics keep legal `:`/`\`-bearing filenames distinct (a
+/// sibling named `data:` is never the ancestor of `data:archive/ws`).
+/// Windows compares through the spelling normalizer, where the
+/// verbatim-vs-DOS divergence is real.
+#[cfg(not(target_os = "windows"))]
+fn comparison_is_ancestor_of(primary: &Path, judged: &Path) -> bool {
+    // Round-44 R44-1: a NOT-YET-MATERIALIZED primary cannot canonicalize,
+    // so a plain canonicalize-with-fallback mixes the primary's LEXICAL
+    // spelling against the ancestor's CANONICAL one — on macOS-default
+    // shapes (/var vs /private/var) the comparison silently skips the
+    // ancestor guard and arms the primary's parent as writable. Resolve
+    // the primary through its deepest EXISTING ancestor (the
+    // resolve_operand_cwd walk), canonicalize that, and re-append the
+    // nonexistent tail — both sides then carry canonical spellings for
+    // every component that exists. Component semantics stay native: a
+    // sibling named `data:` never contains `data:archive`.
+    let primary_real = resolve_deepest_existing_canonical(primary);
+    let judged_real = judged
+        .canonicalize()
+        .unwrap_or_else(|_| judged.to_path_buf());
+    primary_real.starts_with(&judged_real)
+}
+
+/// Canonical spelling of `path` with its nonexistent tail resolved through
+/// the deepest EXISTING ancestor (round-44 R44-1): the existing prefix
+/// canonicalizes (through symlinks and platform aliases like macOS's
+/// /var → /private/var) and the nonexistent tail re-appends verbatim, so a
+/// ghost primary and an existing ancestor compare on canonical spellings
+/// for every component that exists. Round-45 R45-4: the walk itself is the
+/// shared [`walk_deepest_existing`] (OriginalPath fallback — a failed
+/// ancestor canonicalization keeps the declared spelling instead of
+/// substituting any walked-to ancestor).
+#[cfg(not(target_os = "windows"))]
+fn resolve_deepest_existing_canonical(path: &Path) -> PathBuf {
+    walk_deepest_existing(path, DeepestExistingFallback::OriginalPath).compose()
+}
+
+#[cfg(target_os = "windows")]
+fn comparison_is_ancestor_of(primary: &Path, judged: &Path) -> bool {
+    let haystack = comparison_spelling(primary);
+    let needle = comparison_spelling(judged);
+    haystack.starts_with(&needle) && comparison_contains(&haystack, &needle)
+}
+
+/// Windows-only comparison-local spelling normalization (round-39 B39-2):
+/// `std::fs::canonicalize` returns verbatim `\\?\`-prefixed paths while
+/// lexical spellings keep the DOS form, and the two prefix components never
+/// compare equal — so a comparison mixing one canonicalized side with one
+/// lexical side silently skips the ancestor/filesystem-root guard (the
+/// fail-open). Strip the verbatim prefix (mapping `\\?\UNC\` to `\\`) and
+/// case-fold, mirroring the repo's existing
+/// `normalize_windows_path_for_comparison` precedent in codewhale-config.
+#[cfg(target_os = "windows")]
+fn comparison_spelling(path: &Path) -> String {
+    let spelling = path.to_string_lossy().replace('/', "\\");
+    let folded = spelling.to_ascii_lowercase();
+    if let Some(rest) = folded.strip_prefix(r"\\?\unc\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = folded.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        folded
+    }
+}
+
+/// Windows-only separator-boundary prefix test over
+/// [`comparison_spelling`] output: true when `haystack` equals `needle` or
+/// extends it by one path component (a root-ending needle — `/`, a drive
+/// root like `d:`, a UNC share root — contains everything below it).
+#[cfg(target_os = "windows")]
+fn comparison_contains(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() || !haystack.starts_with(needle) {
+        return false;
+    }
+    if haystack.len() == needle.len() {
+        return true;
+    }
+    if needle.ends_with('/') || needle.ends_with('\\') || needle.ends_with(':') {
+        return true;
+    }
+    matches!(
+        haystack.as_bytes().get(needle.len()),
+        Some(b'/') | Some(b'\\')
+    )
+}
+
+/// Intake validation for a caller-declared root set: admit it whole or reject
+/// it with an error, never silently reshape it.
+///
+/// CANONICAL+LEXICAL (round-37 M37-3 promoted the round-20 B20-4 shape):
+/// an EXISTING declared root canonicalizes before the filesystem-root and
+/// ancestor comparisons, so a symlink spelling — and, on case-insensitive
+/// filesystems, a case-folded spelling — of the primary's ancestor is
+/// rejected here instead of widening the boundary at the canonicalizing
+/// enforcement (`get_writable_roots`, seatbelt, bwrap). A declared root
+/// that does not exist yet keeps the lexical judgment: materialization
+/// stays the delivery lane's job, and the same-disk TOCTOU between this
+/// check and enforcement is the disclosed inherent residual. A not-yet-
+/// materialized PRIMARY resolves through its deepest EXISTING ancestor
+/// (`walk_deepest_existing`, round-44 R44-1): every component that exists
+/// compares on canonical spellings, so the macOS `/tmp` ↔ `/private/tmp`
+/// ghost-primary shape is rejected like any other ancestor — the former
+/// existence-dependent residual is closed (pinned by
+/// `intake_rejects_a_canonical_ancestor_under_a_ghost_primary`).
+///
+/// The per-turn sandbox copies this set verbatim into
+/// `WorkspaceWrite.writable_roots`, so three classes of declared entry widen
+/// the boundary past anything the caller saw, and each is rejected here:
+///
+/// - a non-absolute root (`~/shared`, `relative/dir`) is meaningless against
+///   the absolute candidates every containment check resolves —
+///   [`normalize_workspace_roots`] would silently drop it, shrinking the
+///   declared set without telling the caller, so intake refuses it instead;
+/// - a root that normalizes to the filesystem root (`/`, `/..`) makes the
+///   sandboxed exec lane filesystem-writable in one attachment;
+/// - a root that is a proper ancestor of the primary root (the primary's
+///   parent) grants the same reach one spelling at a time.
+///
+/// `..` spellings are caught by the same lexical normalization the landing
+/// checks apply, so `/shared/..` rejects exactly where `/` does. A root that
+/// merely lives *under* the primary is fine — it is already writable through
+/// the primary — and a root equal to the primary dedups in
+/// [`normalize_workspace_roots`].
+///
+/// The degenerate primary keeps the normalizer's fail-closed collapse rather
+/// than an error: an empty or relative primary cannot head a root set (its
+/// normalized form is the vacuous root), which is the round-17 decision the
+/// intake surfaces already pin — an empty workspace is rejected outright
+/// there, and this collapse is the last line for values that bypass a
+/// surface.
+pub fn validate_workspace_roots(cwd: &Path, roots: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    if cwd.as_os_str().is_empty() || !cwd.is_absolute() {
+        return Ok(Vec::new());
+    }
+    if roots.len() > MAX_WORKSPACE_ROOTS {
+        return Err(IntakeValidationError::err(format!(
+            "workspace root set declares {} roots; the intake cap is {MAX_WORKSPACE_ROOTS}, \
+             and an oversized declaration stalls every per-turn boundary computation",
+            roots.len()
+        )));
+    }
+    let primary = normalize_lexical_components(cwd);
+    // Round-37 M37-3: judge against the paths the FILESYSTEM actually
+    // resolves, not only the lexical spellings. A declared ancestor that
+    // differs by case (case-insensitive filesystems) or rides a symlink
+    // canonicalizes INTO the primary's real parent chain, and the
+    // canonicalizing boundaries (get_writable_roots, seatbelt, bwrap) arm
+    // the widened root as-is — the rejection must fire here, at the one
+    // intake every declared set crosses. A declared root that does not
+    // exist yet keeps the lexical judgment (the soft-keep/delivery lane
+    // owns materialization; the same-disk TOCTOU is the disclosed
+    // inherent one).
+    let primary_real = cwd.canonicalize().unwrap_or_else(|_| primary.clone());
+    for root in roots {
+        if root.as_os_str().is_empty() || !root.is_absolute() {
+            return Err(IntakeValidationError::err(format!(
+                "workspace root must be an absolute path; got {root:?}"
+            )));
+        }
+        let normalized = normalize_lexical_components(root);
+        let judged = root.canonicalize().unwrap_or_else(|_| normalized.clone());
+        if is_filesystem_root(&judged) {
+            return Err(IntakeValidationError::err(format!(
+                "workspace root {root:?} normalizes to the filesystem root; \
+                 attaching it would make the whole filesystem writable"
+            )));
+        }
+        // Round-39 B39-2 + P2: the platform-split ancestor predicate —
+        // native component comparison on Unix, spelling-normalized on
+        // Windows (the verbatim fail-open).
+        if primary_real != judged && comparison_is_ancestor_of(&primary_real, &judged) {
+            return Err(IntakeValidationError::err(format!(
+                "workspace root {root:?} contains the primary root {cwd:?}; \
+                 attaching an ancestor of the primary would widen the sandbox \
+                 past the primary"
+            )));
+        }
+    }
+    Ok(normalize_workspace_roots(cwd, roots))
+}
+
+/// Strip a stored row's own head: entries whose lexical collapse equals
+/// `primary` (the cwd-first head itself, INCLUDING a `..`-spelled copy the
+/// raw-equality dedup in [`normalize_workspace_roots`] admits) are the
+/// row's primary slot, not declared additions. Every face that converts a
+/// stored row into a declaration — a re-declaring resume/fork/load, a
+/// primary move's carried set, a bridged wire body — goes through this one
+/// strip, or a `..`-spelled copy of the OLD primary survives the move and
+/// keeps the abandoned directory writable (review #484/CodeWhale round-38
+/// M38-3).
+pub fn strip_workspace_roots_head(primary: &Path, stored: &[PathBuf]) -> Vec<PathBuf> {
+    let head = normalize_lexical_components(primary);
+    // Round-41 M41-2 + the zhuowp Windows follow-up: the head comparison
+    // runs CANONICALLY (existing paths canonicalize with a lexical
+    // fallback; the strip runs on the cold move/load faces AND the
+    // per-turn turn_meta/preview paths — the canonicalize legs are
+    // bounded by the 64-root cap, round-42 minor 1's ledger), and when
+    // BOTH sides fall back to lexical spellings — the old directory has
+    // disappeared — the comparison goes through the platform's comparison
+    // spelling (case-fold + verbatim strip on Windows, identity on Unix),
+    // so a stored case alias of the vanished old primary still drops
+    // instead of riding the move.
+    let head_real = primary.canonicalize().unwrap_or_else(|_| head.clone());
+    stored
+        .iter()
+        .filter(|root| {
+            let lexical = normalize_lexical_components(root.as_path());
+            if lexical != head {
+                let real = root.canonicalize().unwrap_or_else(|_| lexical.clone());
+                return !strip_head_equivalent(&real, &head_real);
+            }
+            false
+        })
+        .cloned()
+        .collect()
+}
+
+/// Head-equivalence for the strip's fallback legs: the Windows comparison
+/// spelling (case-fold, verbatim-prefix strip) on Windows — where a case
+/// alias and the primary are the same path whether or not either still
+/// exists — and the native comparison on Unix, where distinct spellings of
+/// a vanished directory remain distinct paths.
+#[cfg(target_os = "windows")]
+fn strip_head_equivalent(real: &Path, head_real: &Path) -> bool {
+    comparison_spelling(real) == comparison_spelling(head_real)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn strip_head_equivalent(real: &Path, head_real: &Path) -> bool {
+    real == head_real
+}
+
+/// Validate a STORED root row — the cwd-first full form
+/// [`normalize_workspace_roots`] persists (primary first, additional entries
+/// after) — for re-declaration through [`validate_workspace_roots`].
+///
+/// The stored head is the row's own primary slot, not a declared addition,
+/// so it must not count against the intake cap when the row is fed back
+/// through a validating resume/fork/load face: a legal full-load row (64
+/// additional entries plus the stored head, minted by this build's own save
+/// path) would otherwise be miscounted as an over-cap declaration and
+/// permanently rejected as "corrupt or hand-edited" by exactly the gate
+/// that admits its creation (review #484/CodeWhale round-37 B37-2/B37-3).
+/// The head strip is [`strip_workspace_roots_head`] — lexical plus the
+/// canonical fallback legs.
+pub fn validate_stored_workspace_roots(primary: &Path, stored: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    validate_workspace_roots(primary, &strip_workspace_roots_head(primary, stored))
+}
+
+/// Tolerant-load companion to [`validate_workspace_roots`] (round-38
+/// M38-2): instead of rejecting a legacy or hand-edited row, DROP the
+/// entries the validating intake would refuse — a filesystem root or an
+/// ancestor of the primary, judged with the same canonical+lexical
+/// comparison — and return the clean set plus how many entries dropped.
+/// The load faces use this to strip-and-warn explicitly instead of arming
+/// the poison: an in-process file tool's containment boundary IS its root
+/// set, and a live row carrying `/` contained every path on disk.
+pub fn sanitize_workspace_roots(cwd: &Path, stored: &[PathBuf]) -> (Vec<PathBuf>, usize) {
+    let normalized = normalize_workspace_roots(cwd, stored);
+    if cwd.as_os_str().is_empty() || !cwd.is_absolute() {
+        return (Vec::new(), stored.len());
+    }
+    // Round-39 minors 2+3: the count is the difference between the stored
+    // candidates (every non-head entry) and what the tolerant load actually
+    // arms — covering the shape normalizer's drops (relative/empty
+    // spellings), its cap truncation, and the poison loop below in one
+    // number, or the strip-and-warn receipt stays silent for part of its
+    // input (a relative entry stripped with dropped == 0; a hand-edited
+    // 70-root row silently truncating to 65).
+    let additional_in = stored.iter().filter(|root| root.as_path() != cwd).count();
+    let primary_real = cwd
+        .canonicalize()
+        .unwrap_or_else(|_| normalize_lexical_components(cwd));
+    let mut clean = Vec::with_capacity(normalized.len());
+    for (index, root) in normalized.into_iter().enumerate() {
+        // The cwd-first head is the primary slot itself.
+        if index == 0 {
+            clean.push(root);
+            continue;
+        }
+        let judged = normalize_lexical_components(&root);
+        let real = root.canonicalize().unwrap_or_else(|_| judged.clone());
+        if is_filesystem_root(&real)
+            || (primary_real != real && comparison_is_ancestor_of(&primary_real, &real))
+        {
+            continue;
+        }
+        clean.push(root);
+    }
+    let dropped = additional_in.saturating_sub(clean.len().saturating_sub(1));
+    (clean, dropped)
+}
+
+/// Lexically collapse CurDir and ParentDir components of `path`, clamping a
+/// `..` at the filesystem root rather than failing: `/a/..` judges as `/`,
+/// the path the filesystem would actually resolve. Comparison-local, so a
+/// self-consistent collapse of the two sides is exactly what the root-vs-root
+/// checks need; the landing-path normalizer execution uses lives behind the
+/// tool boundary and stays there.
+fn normalize_lexical_components(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
+}
+
+/// True when `path` is a filesystem root — no named component left after
+/// normalization (`/`, a Windows drive root, or a `..`-clamped spelling of
+/// either).
+fn is_filesystem_root(path: &Path) -> bool {
+    !path
+        .components()
+        .any(|component| matches!(component, std::path::Component::Normal(_)))
+}
+
+/// Resolves the cwd and workspace roots for a resume request, aligned with
+/// codex semantics: an explicit root set replaces the whole set (`Some([])`
+/// clears back to the bare cwd); an explicit cwd alone takes over the
+/// primary slot while additional roots are preserved; neither falls back to
+/// the persisted values. An explicit empty cwd is rejected, not defaulted:
+/// persisting it would null containment on every later resume, the same
+/// poison the intake filter drops from the roots list.
+///
+/// A caller-declared replacement set goes through
+/// [`validate_workspace_roots`], so a super-root or an ancestor of the
+/// primary is rejected here rather than admitted into the persisted row.
+/// The same holds for the cwd-only move: moving the primary is a caller
+/// decision, and re-basing the persisted additional roots onto it must not
+/// durably mint a set whose entries are ancestors of (or super-roots for)
+/// the new primary — the semantically identical PATCH workspace-only move
+/// rejects, and a widened row would also strand a later bare fork, which
+/// validates the inherited set. Only the pure-load branch (no overrides)
+/// keeps the tolerant normalizer: a legacy or hand-edited row must stay
+/// loadable, not strand its owner at resume time.
+fn resolve_resume_roots(
+    persisted_cwd: &Path,
+    persisted_roots: &[PathBuf],
+    params_cwd: Option<&PathBuf>,
+    params_roots: Option<&[PathBuf]>,
+) -> Result<(PathBuf, Vec<PathBuf>)> {
+    // A28-1: a RELATIVE cwd is rejected like the empty spelling — the
+    // validator's degenerate collapse would otherwise silently destroy the
+    // whole declared root set AND persist the relative primary, bricking
+    // every later resume of the row (the empty guard's own rationale,
+    // verbatim, covers this spelling).
+    if let Some(cwd) = params_cwd
+        && (cwd.as_os_str().is_empty() || !cwd.is_absolute())
+    {
+        return Err(IntakeValidationError::err(
+            "cwd must be a non-empty absolute path",
+        ));
+    }
+    if let Some(roots) = params_roots {
+        let cwd = params_cwd
+            .cloned()
+            .unwrap_or_else(|| persisted_cwd.to_path_buf());
+        // Round-37 minor: the same A28-1 destruction applies when the
+        // replacement set anchors on the row's own persisted primary — a
+        // relative persisted primary collapses the validator to the empty
+        // set and silently destroys the caller's declared replacement
+        // instead of erroring.
+        if cwd.as_os_str().is_empty() || !cwd.is_absolute() {
+            return Err(IntakeValidationError::err(
+                "cwd must be a non-empty absolute path",
+            ));
+        }
+        // An explicit set replaces the persisted one wholesale — including
+        // the explicit empty set, which clears back to the bare cwd. The
+        // replacement is a caller decision, so it validates instead of
+        // degrading: a super-root must not slip in through the resume lane.
+        let roots = validate_workspace_roots(&cwd, roots)?;
+        return Ok((cwd, roots));
+    }
+    if let Some(new_cwd) = params_cwd {
+        // The head comparison is lexical (the stored-row strip's rule): a
+        // `..`-spelled copy of the OLD primary must drop with the primary
+        // itself, or it survives the move as a phantom additional root the
+        // re-validation then judges as a widening entry.
+        // Round-39 minor 8: the one shared strip — the primitive's
+        // "one implementation" doc holds for the move arm too.
+        let additional: Vec<PathBuf> = strip_workspace_roots_head(persisted_cwd, persisted_roots);
+        // The persisted entries were admitted under the OLD primary; after
+        // the caller moves it they must satisfy the same intake rules the
+        // replacement set does, or the persisted row would grow a widening
+        // entry this topic's intake exists to refuse.
+        let roots = validate_workspace_roots(new_cwd, &additional)?;
+        return Ok((new_cwd.clone(), roots));
+    }
+    let roots = normalize_workspace_roots(persisted_cwd, persisted_roots);
+    Ok((persisted_cwd.to_path_buf(), roots))
+}
+
 /// Result of spawning or resuming a thread.
 #[derive(Debug, Clone)]
 pub struct NewThread {
@@ -497,12 +1195,17 @@ impl ThreadManager {
         &mut self,
         model_provider: String,
         cwd: PathBuf,
+        workspace_roots: &[PathBuf],
         initial_history: InitialHistory,
         persist_extended_history: bool,
     ) -> Result<NewThread> {
         let id = format!("thread-{}", Uuid::new_v4());
         let now = chrono::Utc::now().timestamp();
         let preview = preview_from_initial_history(&initial_history);
+        // Caller-declared set: validate, don't degrade. A super-root, an
+        // ancestor of the primary, or a non-absolute entry is an error, not
+        // a silent reshape of what the caller asked for.
+        let workspace_roots = validate_workspace_roots(&cwd, workspace_roots)?;
         let source = match initial_history {
             InitialHistory::New => SessionSource::Interactive,
             InitialHistory::Forked(_) => SessionSource::Fork,
@@ -518,6 +1221,7 @@ impl ThreadManager {
             status: ThreadStatus::Running,
             path: None,
             cwd: cwd.clone(),
+            workspace_roots,
             cli_version: self.cli_version.clone(),
             source: match source {
                 SessionSource::Interactive => codewhale_protocol::SessionSource::Interactive,
@@ -568,16 +1272,50 @@ impl ThreadManager {
     pub fn resume_thread_with_history(
         &mut self,
         params: &ThreadResumeParams,
-        fallback_cwd: &Path,
         model_provider: String,
     ) -> Result<Option<NewThread>> {
         if params.history.is_none()
-            && let Some(thread) = self.running_threads.get(&params.thread_id).cloned()
+            && let Some(mut thread) = self.running_threads.get(&params.thread_id).cloned()
         {
+            let (cwd, workspace_roots) = resolve_resume_roots(
+                &thread.cwd,
+                &thread.workspace_roots,
+                params.cwd.as_ref(),
+                params.workspace_roots.as_deref(),
+            )?;
+            thread.cwd = cwd;
+            thread.workspace_roots = workspace_roots;
+            // Write the override back to both the cache and the persisted row.
+            // The cache alone is not enough in-process: a later resume that
+            // carries history bypasses this branch entirely, re-reads the
+            // stored row, and would silently reinstate the pre-override set.
+            // Only an override pays that write: base neither persisted nor
+            // bumped `updated_at` on a parameterless cached resume, and doing
+            // it unconditionally reordered recency listings, refreshed
+            // archived threads to active timestamps, and taxed every resume
+            // with a read+write for no state change.
+            if params.cwd.is_some() || params.workspace_roots.is_some() {
+                thread.updated_at = chrono::Utc::now().timestamp();
+                // Targeted write, not persist_thread: the cache snapshot is
+                // stale in every column another process may have written, and
+                // the upsert's preserving arms cover only policy and the
+                // archive stamp — a full upsert would let the stale snapshot
+                // revert concurrent updates to the passthrough columns (even
+                // resurrecting a concurrently archived thread). The override
+                // owns exactly cwd, the root set, and the recency stamp.
+                self.store.update_thread_root_set(
+                    &thread.id,
+                    &thread.cwd,
+                    &thread.workspace_roots,
+                    thread.updated_at,
+                )?;
+            }
+            self.running_threads
+                .insert(params.thread_id.clone(), thread.clone());
             return Ok(Some(NewThread {
                 model: params.model.clone().unwrap_or_else(|| "auto".to_string()),
                 model_provider: params.model_provider.clone().unwrap_or(model_provider),
-                cwd: params.cwd.clone().unwrap_or_else(|| thread.cwd.clone()),
+                cwd: thread.cwd.clone(),
                 approval_policy: params.approval_policy.clone(),
                 sandbox: params.sandbox.clone(),
                 thread,
@@ -591,10 +1329,14 @@ impl ThreadManager {
         let mut thread = to_protocol_thread(metadata);
         thread.status = ThreadStatus::Running;
         thread.updated_at = chrono::Utc::now().timestamp();
-        thread.cwd = params
-            .cwd
-            .clone()
-            .unwrap_or_else(|| fallback_cwd.to_path_buf());
+        let (cwd, workspace_roots) = resolve_resume_roots(
+            &thread.cwd,
+            &thread.workspace_roots,
+            params.cwd.as_ref(),
+            params.workspace_roots.as_deref(),
+        )?;
+        thread.cwd = cwd;
+        thread.workspace_roots = workspace_roots;
         self.persist_thread(&thread, None)?;
         self.running_threads
             .insert(thread.id.clone(), thread.clone());
@@ -640,26 +1382,56 @@ impl ThreadManager {
         }))
     }
 
-    /// Forks an existing thread into a new one, inheriting the parent's provider.
-    pub fn fork_thread(
-        &mut self,
-        params: &ThreadForkParams,
-        fallback_cwd: &Path,
-    ) -> Result<Option<NewThread>> {
+    /// Forks an existing thread into a new one, inheriting the parent's
+    /// provider and — when the request does not carry a root set — its
+    /// accessible roots. A fork without a `cwd` stays anchored at the
+    /// parent's cwd.
+    pub fn fork_thread(&mut self, params: &ThreadForkParams) -> Result<Option<NewThread>> {
+        // An explicit empty cwd would persist a vacuous primary root
+        // (`starts_with("")` is true for every path); reject it like the
+        // resume lane does instead of poisoning the fork durably. A28-1: a
+        // relative cwd is rejected for the same reason — the collapse would
+        // destroy the carried root set and persist the broken primary.
+        if let Some(cwd) = params.cwd.as_ref()
+            && (cwd.as_os_str().is_empty() || !cwd.is_absolute())
+        {
+            return Err(IntakeValidationError::err(
+                "cwd must be a non-empty absolute path",
+            ));
+        }
         let parent = self.store.get_thread(&params.thread_id)?;
         let Some(parent) = parent else {
             return Ok(None);
         };
         let parent_thread = to_protocol_thread(parent);
+        // `None` inherits the parent's set: the fork's cwd takes the primary
+        // slot and the parent's additional roots survive, the same
+        // primary-swap rule a cwd-only resume applies. A bare `thread/fork`
+        // is the historical shape, so reading an absent field as "no roots"
+        // would silently degrade a multi-root parent to `[cwd]`. `Some([])`
+        // stays an explicit clear.
+        let workspace_roots = match params.workspace_roots.as_deref() {
+            Some(roots) => roots.to_vec(),
+            // Round-39 B39-1: the shared LEXICAL head strip, like every
+            // other face converting a stored row into a declaration — a
+            // `..`-spelled copy of the parent's primary must drop with the
+            // head, or the abandoned directory stays writable in the
+            // fork's inherited set.
+            None => strip_workspace_roots_head(&parent_thread.cwd, &parent_thread.workspace_roots),
+        };
         let new = self.spawn_thread_with_history(
             params
                 .model_provider
                 .clone()
                 .unwrap_or_else(|| parent_thread.model_provider.clone()),
+            // A bare `thread/fork` carries no cwd: anchor the fork at the
+            // parent's cwd, not the process cwd, so the parent's main
+            // directory stays the primary root of the set it inherits.
             params
                 .cwd
                 .clone()
-                .unwrap_or_else(|| fallback_cwd.to_path_buf()),
+                .unwrap_or_else(|| parent_thread.cwd.clone()),
+            &workspace_roots,
             InitialHistory::Forked(vec![json!({
                 "type": "fork",
                 "from_thread_id": parent_thread.id
@@ -816,38 +1588,40 @@ impl ThreadManager {
     }
 
     fn persist_thread(&self, thread: &Thread, rollout_path: Option<PathBuf>) -> Result<()> {
-        // This update payload carries no per-thread policy, so preserve any
-        // policy already stored for the thread rather than erasing it with
-        // NULLs on every persist/resume.
-        let existing = self.store.get_thread(&thread.id)?;
-        self.store.upsert_thread(&ThreadMetadata {
-            id: thread.id.clone(),
-            rollout_path,
-            preview: thread.preview.clone(),
-            ephemeral: thread.ephemeral,
-            model_provider: thread.model_provider.clone(),
-            created_at: thread.created_at,
-            updated_at: thread.updated_at,
-            status: to_persisted_status(&thread.status),
-            path: thread.path.clone(),
-            cwd: thread.cwd.clone(),
-            cli_version: thread.cli_version.clone(),
-            source: to_persisted_source(&thread.source),
-            name: thread.name.clone(),
-            sandbox_policy: existing
-                .as_ref()
-                .and_then(|metadata| metadata.sandbox_policy.clone()),
-            approval_mode: existing
-                .as_ref()
-                .and_then(|metadata| metadata.approval_mode.clone()),
-            archived: matches!(thread.status, ThreadStatus::Archived),
-            archived_at: None,
-            git_sha: None,
-            git_branch: None,
-            git_origin_url: None,
-            memory_mode: None,
-            current_leaf_id: None,
-        })
+        // This update payload carries no per-thread policy or archive
+        // timestamp, and the preserved values must survive concurrently
+        // applied clears: the state layer keeps them inside the upsert
+        // statement itself (policy fields while the payload carries none,
+        // the stamp only while the thread stays archived). A get-then-upsert
+        // here would resurrect a concurrently unarchived or detached record
+        // from a stale snapshot, and forced-Running resumes would ghost
+        // `archived=0` rows with a stamp set.
+        self.store
+            .upsert_thread_preserving_policy_and_archive(&ThreadMetadata {
+                id: thread.id.clone(),
+                rollout_path,
+                preview: thread.preview.clone(),
+                ephemeral: thread.ephemeral,
+                model_provider: thread.model_provider.clone(),
+                created_at: thread.created_at,
+                updated_at: thread.updated_at,
+                status: to_persisted_status(&thread.status),
+                path: thread.path.clone(),
+                cwd: thread.cwd.clone(),
+                workspace_roots: thread.workspace_roots.clone(),
+                cli_version: thread.cli_version.clone(),
+                source: to_persisted_source(&thread.source),
+                name: thread.name.clone(),
+                sandbox_policy: None,
+                approval_mode: None,
+                archived: matches!(thread.status, ThreadStatus::Archived),
+                archived_at: None,
+                git_sha: None,
+                git_branch: None,
+                git_origin_url: None,
+                memory_mode: None,
+                current_leaf_id: None,
+            })
     }
 }
 
@@ -988,6 +1762,7 @@ impl Runtime {
                 let new = self.thread_manager.spawn_thread_with_history(
                     "deepseek".to_string(),
                     cwd,
+                    &[],
                     InitialHistory::New,
                     false,
                 )?;
@@ -996,6 +1771,17 @@ impl Runtime {
                 Ok(response)
             }
             ThreadRequest::Start(params) => {
+                // Same empty-cwd rejection as resume/fork: an explicit `""`
+                // would otherwise persist a vacuous primary root. A28-1: a
+                // relative cwd is the same destruction class (the collapse
+                // drops the declared roots and persists the broken primary).
+                if let Some(cwd) = params.cwd.as_ref()
+                    && (cwd.as_os_str().is_empty() || !cwd.is_absolute())
+                {
+                    return Err(IntakeValidationError::err(
+                        "cwd must be a non-empty absolute path",
+                    ));
+                }
                 let cwd = params.cwd.clone().unwrap_or_else(|| {
                     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
                 });
@@ -1005,6 +1791,7 @@ impl Runtime {
                         .clone()
                         .unwrap_or_else(|| "deepseek".to_string()),
                     cwd,
+                    &params.workspace_roots,
                     InitialHistory::New,
                     params.persist_extended_history,
                 )?;
@@ -1013,12 +1800,10 @@ impl Runtime {
                 Ok(response)
             }
             ThreadRequest::Resume(params) => {
-                let fallback_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                if let Some(new) = self.thread_manager.resume_thread_with_history(
-                    &params,
-                    &fallback_cwd,
-                    "deepseek".to_string(),
-                )? {
+                if let Some(new) = self
+                    .thread_manager
+                    .resume_thread_with_history(&params, "deepseek".to_string())?
+                {
                     let mut response = thread_response_from_new("resumed", new);
                     response.data = self.persisted_thread_data(&response.thread_id)?;
                     Ok(response)
@@ -1040,8 +1825,7 @@ impl Runtime {
                 }
             }
             ThreadRequest::Fork(params) => {
-                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                if let Some(new) = self.thread_manager.fork_thread(&params, &cwd)? {
+                if let Some(new) = self.thread_manager.fork_thread(&params)? {
                     let mut response = thread_response_from_new("forked", new);
                     response.data = self.persisted_thread_data(&response.thread_id)?;
                     Ok(response)
@@ -1267,14 +2051,60 @@ impl Runtime {
     }
 
     /// Evaluates execution policy and dispatches a tool call.
+    ///
+    /// This lane is a roots intake like any other (review #484/CodeWhale
+    /// round-24 B24-3): a caller-declared set is admitted whole or rejected
+    /// with an error, never silently reshaped — the old `take(64)`
+    /// truncated the tail, and `/` or a primary-ancestor root reached the
+    /// policy context unvalidated. The cwd slot gets the same doctrine: the
+    /// `null → current_dir() → "."` fallback chain upstream can hand a
+    /// relative or empty spelling here, and a relative workspace cannot
+    /// head a root set.
     pub async fn invoke_tool(
         &self,
         call: ToolCall,
         approval_mode: AskForApproval,
         cwd: &Path,
+        workspace_roots: &[PathBuf],
     ) -> Result<Value> {
+        if cwd.as_os_str().is_empty() || !cwd.is_absolute() {
+            // M27-4: typed as an intake error so the app-server maps it to
+            // HTTP 400 like every other IntakeValidationError (the bare
+            // anyhow made it a 500, contradicting the lane's own comment).
+            return Err(IntakeValidationError::err(
+                "invoke_tool workspace slot must be an absolute directory; \
+                 got an empty or relative cwd",
+            ));
+        }
+        let workspace_roots = validate_workspace_roots(cwd, workspace_roots)?;
         let fallback_cwd = cwd.display().to_string();
-        let (command, policy_cwd, execution_kind) = call.execution_subject(&fallback_cwd);
+        // `raw_policy_cwd` is superseded by the operand-aware resolution
+        // below; `command` and the kind label still come from the subject.
+        let (command, _raw_policy_cwd, execution_kind) = call.execution_subject(&fallback_cwd);
+        // Judge the same effective cwd execution resolves (review
+        // #484/CodeWhale round-22 B22-5): this lane used to hand the RAW
+        // `params.cwd` operand to the policy check while execution resolved
+        // the same operand roots-aware and canonically — a symlink-spelled
+        // operand evaded a deny scoped to the canonical target, and any
+        // relative/`..` operand made `normalize_workspace_scope` reject the
+        // judgment side, silently disarming every scoped rule for the call.
+        // Round-24 P3 accuracy fix: canonical resolution applies ONLY to
+        // operand-carrying calls, matching the engine lane — a no-operand
+        // call executes at the declared workspace spelling, so judging its
+        // canonical form (the old unconditional resolve) made every
+        // declared-spelling scoped rule inert lane-wide on symlinked
+        // systems (macOS `/tmp` sessions), the opposite divergence from the
+        // one B22-5 fixed.
+        let operand_cwd = match &call.payload {
+            ToolPayload::LocalShell { params } => params.cwd.clone(),
+            _ => None,
+        };
+        let policy_cwd = match operand_cwd {
+            Some(dir) => resolve_operand_cwd(cwd, &dir)
+                .to_string_lossy()
+                .into_owned(),
+            None => fallback_cwd.clone(),
+        };
         let policy_tool = match &call.payload {
             ToolPayload::LocalShell { .. } => "exec_shell",
             _ => call.name.as_str(),
@@ -1287,6 +2117,13 @@ impl Runtime {
             path: policy_path.as_deref(),
             ask_for_approval: approval_mode,
             sandbox_mode: None,
+            // Validated intake (round-24 B24-3): over-cap, filesystem-root,
+            // primary-ancestor, and non-absolute declarations are rejected
+            // with an error before any policy work; the surviving set comes
+            // back normalized — primary prepended, deduped, capped exactly
+            // like every other consumer. An empty slice still keeps the
+            // byte-identical single-root posture for callers that have none.
+            workspace_roots,
         })?;
         let precheck = policy_precheck_payload(&decision, &command, &policy_cwd, execution_kind);
         let response_id = format!("tool-{}", Uuid::new_v4());
@@ -1777,19 +2614,26 @@ fn preview_from_initial_history(initial_history: &InitialHistory) -> String {
 }
 
 fn permission_path_for_call(call: &ToolCall) -> Option<String> {
+    // Round-23 SF23-5: the alias set mirrors the tools layer's
+    // `PATH_ALIASES` (file_path / filePath fold onto `path`) so a
+    // camelCase-spelled file call cannot enter exec policy with `path:
+    // None` — path-scoped deny/ask would be silently blind on this lane.
+    // DEPENDENCY: if the tools layer grows another alias, this set must
+    // move with it (the lane currently dispatches against an empty
+    // registry, which is the only mitigation keeping this latent).
+    fn path_from(value: &Value) -> Option<String> {
+        ["path", "file_path", "filePath"]
+            .iter()
+            .find_map(|name| value.get(name).and_then(Value::as_str))
+            .map(str::to_string)
+    }
     match &call.payload {
         ToolPayload::Function { arguments } => serde_json::from_str::<Value>(arguments)
             .ok()
-            .and_then(|value| {
-                value
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            }),
-        ToolPayload::Mcp { raw_arguments, .. } => raw_arguments
-            .get("path")
-            .and_then(Value::as_str)
-            .map(str::to_string),
+            .and_then(|value| path_from(&value)),
+        ToolPayload::Mcp { raw_arguments, .. } => {
+            path_from(raw_arguments).as_deref().map(str::to_string)
+        }
         ToolPayload::Custom { .. } | ToolPayload::LocalShell { .. } => None,
     }
 }
@@ -1816,6 +2660,7 @@ fn to_protocol_thread(thread: ThreadMetadata) -> Thread {
         },
         path: thread.path,
         cwd: thread.cwd,
+        workspace_roots: thread.workspace_roots,
         cli_version: thread.cli_version,
         source: match thread.source {
             SessionSource::Interactive => codewhale_protocol::SessionSource::Interactive,
@@ -2162,6 +3007,22 @@ fn job_state_status_to_runtime(status: JobStateStatus) -> JobStatus {
 
 #[cfg(test)]
 mod tests {
+    /// Round-43 P2-3: fixtures spell absolute paths the way each platform
+    /// accepts them — a POSIX `/tmp/...` spelling is NOT absolute on
+    /// Windows, and the intake guards now (correctly) refuse it, so every
+    /// hand-written fixture root goes through this helper instead.
+    fn abs_fixture(raw: &str) -> std::path::PathBuf {
+        #[cfg(target_os = "windows")]
+        {
+            let trimmed = raw.trim_start_matches('/');
+            std::path::PathBuf::from(format!(r"C:\{}", trimmed.replace('/', r"\")))
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            std::path::PathBuf::from(raw)
+        }
+    }
+
     use super::*;
     use codewhale_protocol::ThreadResumeParams;
     use codewhale_tools::ToolCallSource;
@@ -2184,7 +3045,8 @@ mod tests {
             updated_at: 10,
             status: PersistedThreadStatus::Running,
             path: None,
-            cwd: PathBuf::from("/tmp/codewhale"),
+            cwd: abs_fixture("/tmp/codewhale"),
+            workspace_roots: Vec::new(),
             cli_version: "0.0.0-test".to_string(),
             source: SessionSource::Interactive,
             name: None,
@@ -2720,7 +3582,7 @@ mod tests {
         let preview = preview_from_initial_history(&InitialHistory::Resumed {
             conversation_id: "test".to_string(),
             history: vec![json!("world")],
-            rollout_path: PathBuf::from("/tmp/test"),
+            rollout_path: abs_fixture("/tmp/test"),
         });
         assert!(preview.contains("world"));
     }
@@ -2820,7 +3682,8 @@ mod tests {
         let spawned = manager
             .spawn_thread_with_history(
                 "deepseek".to_string(),
-                PathBuf::from("/tmp/codewhale"),
+                abs_fixture("/tmp/codewhale"),
+                &[],
                 InitialHistory::New,
                 true,
             )
@@ -2839,16 +3702,13 @@ mod tests {
             base_instructions: None,
             developer_instructions: None,
             personality: None,
+            workspace_roots: None,
             persist_extended_history: false,
         };
 
         manager.archive_thread(&thread_id).expect("archive thread");
         let archived = manager
-            .resume_thread_with_history(
-                &resume_params,
-                Path::new("/tmp/codewhale"),
-                "deepseek".to_string(),
-            )
+            .resume_thread_with_history(&resume_params, "deepseek".to_string())
             .expect("resume archived thread")
             .expect("thread in cache");
         assert_eq!(archived.thread.status, ThreadStatus::Archived);
@@ -2857,14 +3717,200 @@ mod tests {
             .unarchive_thread(&thread_id)
             .expect("unarchive thread");
         let restored = manager
-            .resume_thread_with_history(
-                &resume_params,
-                Path::new("/tmp/codewhale"),
-                "deepseek".to_string(),
-            )
+            .resume_thread_with_history(&resume_params, "deepseek".to_string())
             .expect("resume unarchived thread")
             .expect("thread in cache");
         assert_eq!(restored.thread.status, ThreadStatus::Idle);
+    }
+
+    /// The cached-resume persist must not null the archive timestamp the
+    /// store recorded, the same way it already preserves the per-thread
+    /// policy fields.
+    #[test]
+    fn cached_resume_preserves_the_persisted_archive_timestamp() {
+        let store = temp_core_state("cached-resume-archived-at");
+        let mut manager = ThreadManager::new(store);
+        let spawned = manager
+            .spawn_thread_with_history(
+                "deepseek".to_string(),
+                abs_fixture("/tmp/codewhale"),
+                &[],
+                InitialHistory::New,
+                true,
+            )
+            .expect("spawn thread");
+        let thread_id = spawned.thread.id.clone();
+        manager.archive_thread(&thread_id).expect("archive thread");
+        let archived_at = manager
+            .state_store()
+            .get_thread(&thread_id)
+            .expect("read thread")
+            .expect("thread persisted")
+            .archived_at;
+        assert!(archived_at.is_some(), "archiving stamps archived_at");
+
+        let resumed = manager
+            .resume_thread_with_history(
+                &ThreadResumeParams {
+                    thread_id: thread_id.clone(),
+                    history: None,
+                    path: None,
+                    model: None,
+                    model_provider: None,
+                    cwd: None,
+                    approval_policy: None,
+                    sandbox: None,
+                    config: None,
+                    base_instructions: None,
+                    developer_instructions: None,
+                    personality: None,
+                    workspace_roots: None,
+                    persist_extended_history: false,
+                },
+                "deepseek".to_string(),
+            )
+            .expect("resume archived thread")
+            .expect("thread in cache");
+        assert_eq!(resumed.thread.status, ThreadStatus::Archived);
+        let persisted = manager
+            .state_store()
+            .get_thread(&thread_id)
+            .expect("read thread")
+            .expect("thread persisted");
+        assert_eq!(
+            persisted.archived_at, archived_at,
+            "a parameterless cached resume must not null the archive timestamp"
+        );
+    }
+
+    #[test]
+    fn parameterless_cached_resume_does_not_rewrite_the_row() {
+        // Base neither persisted nor bumped `updated_at` on a parameterless
+        // cached resume; the override writeback is gated the same way. Without
+        // the gate every parameterless resume reordered recency listings,
+        // refreshed archived rows to active timestamps, and paid a read+write
+        // for no state change.
+        let store = temp_core_state("cached-resume-no-writeback");
+        let mut manager = ThreadManager::new(store);
+        let spawned = manager
+            .spawn_thread_with_history(
+                "deepseek".to_string(),
+                abs_fixture("/tmp/codewhale"),
+                &[],
+                InitialHistory::New,
+                true,
+            )
+            .expect("spawn thread");
+        let thread_id = spawned.thread.id.clone();
+        let mut aged = manager
+            .state_store()
+            .get_thread(&thread_id)
+            .expect("read thread")
+            .expect("thread persisted");
+        aged.updated_at = 1_000;
+        manager
+            .state_store()
+            .upsert_thread(&aged)
+            .expect("age the stored row");
+
+        manager
+            .resume_thread_with_history(
+                &ThreadResumeParams {
+                    thread_id: thread_id.clone(),
+                    history: None,
+                    path: None,
+                    model: None,
+                    model_provider: None,
+                    cwd: None,
+                    approval_policy: None,
+                    sandbox: None,
+                    config: None,
+                    base_instructions: None,
+                    developer_instructions: None,
+                    personality: None,
+                    workspace_roots: None,
+                    persist_extended_history: false,
+                },
+                "deepseek".to_string(),
+            )
+            .expect("resume thread")
+            .expect("thread in cache");
+
+        let row = manager
+            .state_store()
+            .get_thread(&thread_id)
+            .expect("read thread")
+            .expect("thread persisted");
+        assert_eq!(
+            row.updated_at, 1_000,
+            "a parameterless cached resume must not rewrite the stored row"
+        );
+    }
+
+    #[test]
+    fn resumed_archived_thread_does_not_ghost_an_archive_stamp() {
+        // Resuming a persisted archived thread forces it back to Running.
+        // Persisting that reactivation must produce `archived=0` with no
+        // stamp — base never produced the `archived=0` + stamp-set pair, and
+        // unconditionally preserving the stored stamp recreated exactly that
+        // ghost.
+        let store = temp_core_state("resume-archived-no-ghost");
+        let mut manager = ThreadManager::new(store);
+        let spawned = manager
+            .spawn_thread_with_history(
+                "deepseek".to_string(),
+                abs_fixture("/tmp/codewhale"),
+                &[],
+                InitialHistory::New,
+                true,
+            )
+            .expect("spawn thread");
+        let thread_id = spawned.thread.id.clone();
+        manager.archive_thread(&thread_id).expect("archive thread");
+        assert!(
+            manager
+                .state_store()
+                .get_thread(&thread_id)
+                .expect("read thread")
+                .expect("thread persisted")
+                .archived_at
+                .is_some(),
+            "archiving stamps archived_at"
+        );
+
+        manager
+            .resume_thread_with_history(
+                &ThreadResumeParams {
+                    thread_id: thread_id.clone(),
+                    history: Some(Vec::new()),
+                    path: None,
+                    model: None,
+                    model_provider: None,
+                    cwd: None,
+                    approval_policy: None,
+                    sandbox: None,
+                    config: None,
+                    base_instructions: None,
+                    developer_instructions: None,
+                    personality: None,
+                    workspace_roots: None,
+                    persist_extended_history: false,
+                },
+                "deepseek".to_string(),
+            )
+            .expect("resume thread")
+            .expect("thread resumed");
+
+        let row = manager
+            .state_store()
+            .get_thread(&thread_id)
+            .expect("read thread")
+            .expect("thread persisted");
+        assert!(!row.archived, "the resume reactivates the thread");
+        assert_eq!(
+            row.archived_at, None,
+            "reactivation must not ghost an archive stamp"
+        );
     }
 
     #[test]
@@ -2881,7 +3927,8 @@ mod tests {
         let spawned = manager
             .spawn_thread_with_history(
                 "deepseek".to_string(),
-                PathBuf::from("/tmp/codewhale"),
+                abs_fixture("/tmp/codewhale"),
+                &[],
                 InitialHistory::Forked(history.clone()),
                 true,
             )
@@ -2909,17 +3956,14 @@ mod tests {
             base_instructions: None,
             developer_instructions: None,
             personality: None,
+            workspace_roots: None,
             persist_extended_history: false,
         };
 
         // Resuming twice with the same history must be idempotent.
         for _ in 0..2 {
             manager
-                .resume_thread_with_history(
-                    &resume_params,
-                    Path::new("/tmp/codewhale"),
-                    "deepseek".to_string(),
-                )
+                .resume_thread_with_history(&resume_params, "deepseek".to_string())
                 .expect("resume thread")
                 .expect("thread found");
         }
@@ -2937,11 +3981,7 @@ mod tests {
             ..resume_params
         };
         manager
-            .resume_thread_with_history(
-                &resume_params,
-                Path::new("/tmp/codewhale"),
-                "deepseek".to_string(),
-            )
+            .resume_thread_with_history(&resume_params, "deepseek".to_string())
             .expect("resume thread")
             .expect("thread found");
         assert_eq!(message_count(&manager), 3);
@@ -2974,14 +4014,11 @@ mod tests {
             base_instructions: None,
             developer_instructions: None,
             personality: None,
+            workspace_roots: None,
             persist_extended_history: false,
         };
         manager
-            .resume_thread_with_history(
-                &resume_params,
-                Path::new("/tmp/codewhale"),
-                "deepseek".to_string(),
-            )
+            .resume_thread_with_history(&resume_params, "deepseek".to_string())
             .expect("resume thread")
             .expect("thread found");
 
@@ -2992,6 +4029,1158 @@ mod tests {
             .expect("thread persisted");
         assert_eq!(persisted.sandbox_policy.as_deref(), Some("workspace-write"));
         assert_eq!(persisted.approval_mode.as_deref(), Some("on-request"));
+    }
+
+    // ── workspace roots ────────────────────────────────────────────────
+
+    fn resume_params(thread_id: &str) -> ThreadResumeParams {
+        ThreadResumeParams {
+            thread_id: thread_id.to_string(),
+            history: None,
+            path: None,
+            model: None,
+            model_provider: None,
+            cwd: None,
+            approval_policy: None,
+            sandbox: None,
+            config: None,
+            base_instructions: None,
+            developer_instructions: None,
+            personality: None,
+            workspace_roots: None,
+            persist_extended_history: false,
+        }
+    }
+
+    #[test]
+    fn normalize_workspace_roots_puts_cwd_first_and_dedups() {
+        let cwd = abs_fixture("/repo/main");
+        let cwd = cwd.as_path();
+        assert_eq!(normalize_workspace_roots(cwd, &[]), vec![cwd.to_path_buf()]);
+        assert_eq!(
+            normalize_workspace_roots(
+                cwd,
+                &[
+                    abs_fixture("/repo/lib"),
+                    abs_fixture("/repo/main"),
+                    abs_fixture("/repo/lib"),
+                    abs_fixture("/repo/docs"),
+                ],
+            ),
+            vec![
+                abs_fixture("/repo/main"),
+                abs_fixture("/repo/lib"),
+                abs_fixture("/repo/docs"),
+            ],
+            "cwd moves to the front and later roots dedup in original order"
+        );
+    }
+
+    #[test]
+    fn normalize_workspace_roots_drops_empty_and_relative_entries() {
+        let cwd = abs_fixture("/repo/main");
+        let cwd = cwd.as_path();
+        assert_eq!(
+            normalize_workspace_roots(
+                cwd,
+                &[
+                    PathBuf::from(""),
+                    PathBuf::from("relative/dir"),
+                    PathBuf::from("~/home-dir"),
+                    abs_fixture("/repo/lib"),
+                ],
+            ),
+            vec![abs_fixture("/repo/main"), abs_fixture("/repo/lib")],
+            "an empty entry would contain every path under starts_with, and a \
+             relative entry is meaningless against absolute candidates"
+        );
+        // The cwd argument is filtered by the same rule, and there the
+        // filter fails closed: an empty or relative cwd cannot head a root
+        // set (its normalized form is the vacuous root `starts_with("")`
+        // accepts every path under), so the whole set collapses to empty
+        // rather than passing the poison through to boundary_roots().
+        assert!(normalize_workspace_roots(Path::new(""), &[]).is_empty());
+        assert!(normalize_workspace_roots(Path::new(""), &[abs_fixture("/repo/lib")]).is_empty());
+        assert!(normalize_workspace_roots(Path::new("relative/dir"), &[]).is_empty());
+    }
+
+    #[test]
+    fn normalize_workspace_roots_caps_additional_entries_earliest_declared_wins() {
+        // Round-24 B24-4: the load faces consume sets that never passed an
+        // intake, so the shape normalizer itself must bound them — an
+        // unbounded hand-edited row made every write-tool call an O(n²)
+        // dedup plus per-root canonicalization.
+        let cwd = abs_fixture("/repo/main");
+        let cwd = cwd.as_path();
+        let roots: Vec<PathBuf> = (0..MAX_WORKSPACE_ROOTS + 10)
+            .map(|index| abs_fixture(format!("/repo/r{index}").as_str()))
+            .collect();
+        let normalized = normalize_workspace_roots(cwd, &roots);
+        assert_eq!(
+            normalized.len(),
+            MAX_WORKSPACE_ROOTS + 1,
+            "the primary plus at most MAX_WORKSPACE_ROOTS additional entries survive"
+        );
+        assert_eq!(normalized[0], cwd.to_path_buf());
+        assert_eq!(normalized[1], abs_fixture("/repo/r0"));
+        assert_eq!(
+            normalized[MAX_WORKSPACE_ROOTS],
+            abs_fixture(format!("/repo/r{}", MAX_WORKSPACE_ROOTS - 1).as_str()),
+            "earliest declared wins; the tail past the cap is dropped"
+        );
+    }
+
+    #[test]
+    fn a_full_validated_declaration_is_never_truncated_by_the_normalizer() {
+        // Round-24 B24-4: the intake cap counts declared roots, the
+        // normalizer cap counts the same entries — a declaration that
+        // passed intake must survive the shape normalizer byte-identical.
+        let cwd = abs_fixture("/repo/main");
+        let cwd = cwd.as_path();
+        let roots: Vec<PathBuf> = (0..MAX_WORKSPACE_ROOTS)
+            .map(|index| abs_fixture(format!("/repo/r{index}").as_str()))
+            .collect();
+        let validated = validate_workspace_roots(cwd, &roots)
+            .expect("a full MAX_WORKSPACE_ROOTS declaration is admitted whole");
+        assert_eq!(validated.len(), MAX_WORKSPACE_ROOTS + 1);
+        assert_eq!(
+            normalize_workspace_roots(cwd, &roots),
+            validated,
+            "the intake's returned set and the raw normalizer must agree at the cap"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sanitize_drops_a_symlink_spelled_ancestor_via_the_canonical_leg() {
+        // Round-39 minor 11: the canonical leg of the sanitizer — every
+        // other fixture uses nonexistent paths (lexical fallback); here the
+        // stored ancestor EXISTS and reaches the comparison as a canonical
+        // spelling.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let real = temp.path().join("real");
+        let workspace = real.join("ws");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let link = temp.path().join("ancestor-link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink ancestor");
+        let keep = temp.path().join("keep");
+        std::fs::create_dir_all(&keep).expect("keep dir");
+
+        let (clean, dropped) =
+            sanitize_workspace_roots(&workspace, &[workspace.clone(), link, keep.clone()]);
+        assert_eq!(clean, vec![workspace.clone(), keep]);
+        assert_eq!(dropped, 1, "the canonical ancestor drop is counted");
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn comparison_contains_respects_component_boundaries() {
+        // Round-39 B39-2: the Windows boundary rule — a needle is contained
+        // only at a path-component edge, never mid-component (/repo must
+        // not contain /rep.ro or /repository); the boundary helpers are
+        // Windows-only after the round-39 P2 correction.
+        assert!(comparison_contains("/repo/main", "/repo"));
+        assert!(comparison_contains("/repo", "/repo"));
+        assert!(comparison_contains("/repo", "/"));
+        assert!(!comparison_contains("/repository", "/repo"));
+        assert!(!comparison_contains("/repo", "/repo/main"));
+        assert!(!comparison_contains("/repo", ""));
+        assert!(comparison_contains("d:\\work\\proj", "d:\\work"));
+        assert!(!comparison_contains("d:\\worksheet", "d:\\work"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unix_filenames_with_colons_or_backslashes_stay_unrelated_roots() {
+        // Round-39 P2 (reviewer-reproduced regression): `:` and `\` are
+        // legal Unix filename characters — a string boundary heuristic
+        // made validate_workspace_roots REJECT and sanitize_workspace_roots
+        // DROP legal sibling attachments (data: vs data:archive/ws;
+        // data vs a sibling literally named data\archive). The guards keep
+        // the native component comparison on Unix.
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let colon_sibling = temp.path().join("data:");
+        let colon_ws = temp.path().join("data:archive").join("ws");
+        std::fs::create_dir_all(&colon_sibling).expect("colon sibling");
+        std::fs::create_dir_all(&colon_ws).expect("colon workspace");
+        validate_workspace_roots(&colon_ws, std::slice::from_ref(&colon_sibling))
+            .expect("a colon-named sibling is not the workspace's ancestor");
+        let (clean, dropped) =
+            sanitize_workspace_roots(&colon_ws, &[colon_ws.clone(), colon_sibling.clone()]);
+        assert_eq!(clean, vec![colon_ws.clone(), colon_sibling]);
+        assert_eq!(dropped, 0);
+
+        let plain = temp.path().join("data");
+        let backslash_ws = temp.path().join("data\\archive").join("ws");
+        std::fs::create_dir_all(&plain).expect("plain sibling");
+        std::fs::create_dir_all(&backslash_ws).expect("backslash workspace");
+        validate_workspace_roots(&backslash_ws, std::slice::from_ref(&plain))
+            .expect("a backslash-named sibling is not the workspace's ancestor");
+        let (clean, dropped) =
+            sanitize_workspace_roots(&backslash_ws, &[backslash_ws.clone(), plain.clone()]);
+        assert_eq!(clean, vec![backslash_ws.clone(), plain]);
+        assert_eq!(dropped, 0);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn intake_and_sanitize_reject_mixed_spelling_ancestors_on_windows() {
+        // Round-41 M41-6 rework (review-corrected): the REALIZABLE
+        // mixed-existence shape is a nonexistent primary (lexical DOS
+        // fallback) under an existing ancestor (canonical verbatim) —
+        // the pre-fix comparison skipped the guard there. An existing
+        // primary plus a not-yet-created SIBLING is a legal declaration,
+        // not an ancestor, and the first draft wrongly expected its
+        // rejection.
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        // The realizable mixed-existence shape (round-41 review): a
+        // NONEXISTENT primary keeps its lexical DOS spelling while its
+        // EXISTING ancestor canonicalizes to the verbatim form — the
+        // pre-fix verbatim-vs-DOS comparison silently skipped the guard
+        // and admitted the ancestor.
+        let ghost_primary = temp.path().join("ghost").join("ws");
+        let real_ancestor = temp.path().to_path_buf();
+        let err = validate_workspace_roots(&ghost_primary, std::slice::from_ref(&real_ancestor))
+            .expect_err("the mixed-existence ancestor must be rejected on Windows");
+        assert!(
+            err.to_string().contains("contains the primary root"),
+            "the rejection names the widening: {err}"
+        );
+
+        // The sanitize leg on the same mixed shape: the poison entry drops
+        // and the count names it (the round-39 sanitizer silently kept it).
+        let (clean, dropped) =
+            sanitize_workspace_roots(&ghost_primary, &[ghost_primary.clone(), real_ancestor]);
+        assert_eq!(clean, vec![ghost_primary.clone()]);
+        assert_eq!(dropped, 1, "the drop is counted, not silent");
+    }
+
+    #[test]
+    fn stored_row_revalidation_round_trips_a_legal_full_load_row() {
+        // Round-37 B37-2: the stored row persists the cwd-first full form —
+        // the `validated` set above IS the stored shape. Feeding it back
+        // through the plain declared-count validator miscounts its own head
+        // as an over-cap declaration; the stored-row strip must revalidate
+        // the row whole, or every resume/fork/load face using it would
+        // brick the row its own save path minted.
+        let cwd = abs_fixture("/repo/main");
+        let cwd = cwd.as_path();
+        let roots: Vec<PathBuf> = (0..MAX_WORKSPACE_ROOTS)
+            .map(|index| abs_fixture(format!("/repo/r{index}").as_str()))
+            .collect();
+        let stored =
+            validate_workspace_roots(cwd, &roots).expect("a full declaration is admitted whole");
+        assert_eq!(stored.len(), MAX_WORKSPACE_ROOTS + 1);
+        let revalidated = validate_stored_workspace_roots(cwd, &stored)
+            .expect("a legal full-load row revalidates whole");
+        assert_eq!(revalidated, stored, "the round trip is lossless");
+        assert!(
+            validate_workspace_roots(cwd, &stored).is_err(),
+            "the plain validator is the miscounting control this primitive exists to bypass"
+        );
+    }
+
+    #[test]
+    fn stored_row_revalidation_strips_a_dot_dot_spelled_head_copy() {
+        // Round-37 minor: the strip comparison is lexical, so a `..`-spelled
+        // copy of the primary drops with the head instead of surviving as a
+        // phantom additional root (the raw-equality dedup above lets the
+        // spelling through; re-validation would then judge it a widening
+        // entry and brick the row).
+        let cwd = abs_fixture("/repo");
+        let cwd = cwd.as_path();
+        let stored = vec![
+            abs_fixture("/repo"),
+            abs_fixture("/repo/sub/.."),
+            abs_fixture("/shared"),
+        ];
+        let revalidated = validate_stored_workspace_roots(cwd, &stored)
+            .expect("the lexical head strip keeps the row loadable");
+        assert_eq!(
+            revalidated,
+            vec![abs_fixture("/repo"), abs_fixture("/shared")]
+        );
+    }
+
+    #[test]
+    fn stored_row_revalidation_still_refuses_a_poisoned_entry() {
+        // The strip must not launder: a row carrying the filesystem root
+        // under any spelling is refused exactly like a fresh declaration.
+        let cwd = abs_fixture("/repo");
+        let cwd = cwd.as_path();
+        let stored = vec![abs_fixture("/repo"), abs_fixture("/")];
+        let err = validate_stored_workspace_roots(cwd, &stored)
+            .expect_err("the head strip is not an amnesty for poisoned entries");
+        assert!(
+            err.to_string().contains("filesystem root"),
+            "the refusal names the poison: {err}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn intake_rejects_a_canonical_ancestor_under_a_ghost_primary() {
+        // Round-44 R44-1: the primary does not EXIST yet, so a plain
+        // canonicalize-with-fallback mixed its lexical spelling against the
+        // ancestor's canonical one — on macOS-default shapes (/var vs
+        // /private/var) the guard silently skipped. On Linux the same class
+        // reproduces with a symlink-alias ancestor: the alias canonicalizes
+        // onto the real parent, the ghost primary keeps its spelling under
+        // the ALIAS, and the pre-fix comparison judged them unrelated.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let real_parent = temp.path().join("real");
+        std::fs::create_dir_all(&real_parent).expect("real parent");
+        let alias_parent = temp.path().join("alias");
+        std::os::unix::fs::symlink(&real_parent, &alias_parent).expect("alias parent");
+        // Ghost primary: spelled through the ALIAS, never materialized.
+        let ghost_primary = alias_parent.join("ws");
+
+        let err = validate_workspace_roots(&ghost_primary, std::slice::from_ref(&real_parent))
+            .expect_err("an existing canonical ancestor must be rejected under a ghost primary");
+        assert!(
+            err.to_string().contains("contains the primary root"),
+            "the rejection names the widening: {err}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn intake_rejects_a_symlink_spelled_ancestor_that_canonicalizes_into_the_primary() {
+        // Round-37 M37-3: the ancestor rejection judges against the path
+        // the filesystem resolves. A declared root that differs lexically
+        // but canonicalizes into the primary's real parent chain — here via
+        // a symlink, on case-insensitive filesystems via case-fold — used
+        // to pass intake and then widen the sandbox at the canonicalizing
+        // boundaries (get_writable_roots, seatbelt, bwrap arm the
+        // canonicalized root as-is).
+        let temp = tempfile::tempdir().expect("tempdir");
+        let real = temp.path().join("real");
+        let workspace = real.join("ws");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let link = temp.path().join("link-ancestor");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink to the real ancestor");
+
+        let err = validate_workspace_roots(&workspace, &[link])
+            .expect_err("a symlink spelling of the primary's ancestor must be rejected");
+        assert!(
+            err.to_string().contains("contains the primary root"),
+            "the rejection names the widening: {err}"
+        );
+
+        // A symlink pointing OUTSIDE the primary's chain stays admissible:
+        // only ancestors are rejected, not symlinks per se.
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("outside dir");
+        let outside_link = temp.path().join("link-outside");
+        std::os::unix::fs::symlink(&outside, &outside_link).expect("symlink outside");
+        let validated = validate_workspace_roots(&workspace, &[outside_link])
+            .expect("a non-ancestor symlink is admissible");
+        assert_eq!(validated.len(), 2);
+    }
+
+    #[test]
+    fn spawn_thread_rejects_a_non_absolute_root_instead_of_dropping_it() {
+        // Regression pin, round-17: an empty-string root accepted at intake
+        // used to reach the persisted set and then boundary_roots(), where
+        // Path::starts_with("") is true for every path — read_file's
+        // containment check passed for arbitrary filesystem reads. Round-19
+        // tightened the decision from "silently drop the entry" to "reject
+        // the declared set": a silent drop shrinks the set the caller asked
+        // for without telling it, and `~/shared` dies by the same rule.
+        let store = temp_core_state("spawn-empty-root");
+        let mut manager = ThreadManager::new(store);
+        for root in ["", "~/shared", "relative/dir"] {
+            let err = manager
+                .spawn_thread_with_history(
+                    "deepseek".to_string(),
+                    abs_fixture("/repo/main"),
+                    &[PathBuf::from(root)],
+                    InitialHistory::New,
+                    true,
+                )
+                .expect_err("a non-absolute root must be rejected at intake");
+            assert!(
+                err.to_string().contains("absolute path"),
+                "unexpected error for {root:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn spawn_thread_rejects_a_super_root_and_the_primarys_ancestor() {
+        // Round-19: the per-turn sandbox copies the set verbatim into
+        // WorkspaceWrite.writable_roots, so attaching `/` (or `/..`, which
+        // normalizes to it) made the sandboxed exec lane filesystem-writable,
+        // and the primary's parent granted the same reach one spelling at a
+        // time. Both are rejected at intake now; a sibling still attaches.
+        let store = temp_core_state("spawn-super-root");
+        let mut manager = ThreadManager::new(store);
+        for root in ["/", "/..", "/shared/..", "/repo"] {
+            let err = manager
+                .spawn_thread_with_history(
+                    "deepseek".to_string(),
+                    abs_fixture("/repo/main"),
+                    &[PathBuf::from(root)],
+                    InitialHistory::New,
+                    true,
+                )
+                .expect_err("a super-root or ancestor must be rejected at intake");
+            assert!(
+                err.to_string().contains("filesystem root")
+                    || err.to_string().contains("ancestor of the primary"),
+                "unexpected error for {root:?}: {err}"
+            );
+        }
+        let spawned = manager
+            .spawn_thread_with_history(
+                "deepseek".to_string(),
+                abs_fixture("/repo/main"),
+                &[abs_fixture("/repo/lib"), abs_fixture("/repo/main/crates")],
+                InitialHistory::New,
+                true,
+            )
+            .expect("a sibling and a subdirectory of the primary are fine");
+        assert_eq!(
+            spawned.thread.workspace_roots,
+            vec![
+                abs_fixture("/repo/main"),
+                abs_fixture("/repo/lib"),
+                abs_fixture("/repo/main/crates"),
+            ]
+        );
+    }
+
+    #[test]
+    fn validate_workspace_roots_keeps_the_degenerate_primary_collapse() {
+        // Round-17 decision, unchanged: an empty or relative primary cannot
+        // head a root set, so the set collapses to empty — the intake
+        // surfaces reject an empty workspace outright; this is the last line
+        // for values that bypass a surface.
+        assert!(
+            validate_workspace_roots(Path::new(""), &[abs_fixture("/")])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            validate_workspace_roots(Path::new("relative/dir"), &[])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn resume_with_a_super_root_set_is_rejected_at_intake() {
+        let store = temp_core_state("resume-super-root");
+        let mut metadata = test_thread_metadata("thread-super-root");
+        metadata.cwd = abs_fixture("/old");
+        metadata.workspace_roots = vec![abs_fixture("/old")];
+        store.upsert_thread(&metadata).expect("seed thread");
+        let mut manager = ThreadManager::new(store);
+
+        let mut params = resume_params("thread-super-root");
+        params.workspace_roots = Some(vec![abs_fixture("/..")]);
+        let err = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect_err("an explicit super-root replacement must be rejected");
+        assert!(
+            err.to_string().contains("filesystem root"),
+            "unexpected error: {err}"
+        );
+
+        // The persisted row is untouched: the caller can retry with a real
+        // set, and a parameterless resume still loads the stored one.
+        let mut params = resume_params("thread-super-root");
+        params.workspace_roots = Some(vec![abs_fixture("/new-a")]);
+        let resumed = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+        assert_eq!(
+            resumed.thread.workspace_roots,
+            vec![abs_fixture("/old"), abs_fixture("/new-a")]
+        );
+    }
+
+    #[test]
+    fn spawn_thread_with_workspace_roots_persists_normalized_set() {
+        let store = temp_core_state("spawn-roots");
+        let mut manager = ThreadManager::new(store);
+        let spawned = manager
+            .spawn_thread_with_history(
+                "deepseek".to_string(),
+                abs_fixture("/repo/main"),
+                &[abs_fixture("/repo/lib"), abs_fixture("/repo/main")],
+                InitialHistory::New,
+                true,
+            )
+            .expect("spawn thread");
+        let expected = vec![abs_fixture("/repo/main"), abs_fixture("/repo/lib")];
+        assert_eq!(spawned.thread.workspace_roots, expected);
+        assert_eq!(spawned.thread.cwd, spawned.thread.workspace_roots[0]);
+
+        let persisted = manager
+            .state_store()
+            .get_thread(&spawned.thread.id)
+            .expect("read thread")
+            .expect("thread persisted");
+        assert_eq!(persisted.workspace_roots, expected);
+    }
+
+    #[test]
+    fn resume_with_workspace_roots_replaces_root_set() {
+        let store = temp_core_state("resume-roots-replace");
+        let mut metadata = test_thread_metadata("thread-roots");
+        metadata.cwd = abs_fixture("/old");
+        metadata.workspace_roots = vec![abs_fixture("/old"), abs_fixture("/keep")];
+        store.upsert_thread(&metadata).expect("seed thread");
+
+        // A fresh manager forces the persisted path.
+        let mut manager = ThreadManager::new(store);
+        let mut params = resume_params("thread-roots");
+        params.workspace_roots = Some(vec![abs_fixture("/new-a"), abs_fixture("/new-b")]);
+        let resumed = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+
+        // Explicit roots replace the whole set; the persisted cwd stays primary.
+        assert_eq!(resumed.thread.cwd, abs_fixture("/old"));
+        assert_eq!(
+            resumed.thread.workspace_roots,
+            vec![
+                abs_fixture("/old"),
+                abs_fixture("/new-a"),
+                abs_fixture("/new-b"),
+            ]
+        );
+        let persisted = manager
+            .state_store()
+            .get_thread("thread-roots")
+            .expect("read thread")
+            .expect("thread persisted");
+        assert_eq!(persisted.workspace_roots, resumed.thread.workspace_roots);
+    }
+
+    #[test]
+    fn resume_roots_override_writes_back_to_running_cache() {
+        let store = temp_core_state("resume-roots-writeback");
+        let mut manager = ThreadManager::new(store);
+        let spawned = manager
+            .spawn_thread_with_history(
+                "deepseek".to_string(),
+                abs_fixture("/repo/main"),
+                &[],
+                InitialHistory::New,
+                true,
+            )
+            .expect("spawn thread");
+        let thread_id = spawned.thread.id.clone();
+
+        // Resume with an explicit set: the override lands on the returned
+        // thread and must be written back to the running-thread cache.
+        let mut params = resume_params(&thread_id);
+        params.workspace_roots = Some(vec![abs_fixture("/repo/shared")]);
+        let first = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+        assert_eq!(
+            first.thread.workspace_roots,
+            vec![abs_fixture("/repo/main"), abs_fixture("/repo/shared")]
+        );
+
+        // A later parameterless resume reads the same cache entry: without
+        // the writeback it would resurrect the stale pre-override set.
+        let second = manager
+            .resume_thread_with_history(&resume_params(&thread_id), "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+        assert_eq!(
+            second.thread.workspace_roots,
+            vec![abs_fixture("/repo/main"), abs_fixture("/repo/shared")],
+            "the roots override must stick in the running-thread cache"
+        );
+    }
+
+    #[test]
+    fn resume_override_survives_a_later_history_carrying_resume() {
+        let store = temp_core_state("resume-roots-history-bypass");
+        let mut manager = ThreadManager::new(store);
+        let spawned = manager
+            .spawn_thread_with_history(
+                "deepseek".to_string(),
+                abs_fixture("/repo/main"),
+                &[],
+                InitialHistory::New,
+                true,
+            )
+            .expect("spawn thread");
+        let thread_id = spawned.thread.id.clone();
+
+        // Prime the running cache, then take the cached history-free branch
+        // with an explicit roots override: that branch used to update the
+        // cache only.
+        let primed = manager
+            .resume_thread_with_history(&resume_params(&thread_id), "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+        assert_eq!(
+            primed.thread.workspace_roots,
+            vec![abs_fixture("/repo/main")]
+        );
+        let mut params = resume_params(&thread_id);
+        params.workspace_roots = Some(vec![abs_fixture("/repo/shared")]);
+        let overridden = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+        assert_eq!(
+            overridden.thread.workspace_roots,
+            vec![abs_fixture("/repo/main"), abs_fixture("/repo/shared")]
+        );
+
+        // A history-carrying resume bypasses the running cache and reads the
+        // stored row, so a cache-only override is silently undone here.
+        let mut params = resume_params(&thread_id);
+        params.history = Some(vec![json!({"type": "message", "role": "user"})]);
+        let second = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+        assert_eq!(
+            second.thread.workspace_roots,
+            vec![abs_fixture("/repo/main"), abs_fixture("/repo/shared")],
+            "a history-carrying resume must not reinstate the pre-override set"
+        );
+    }
+
+    #[test]
+    fn cached_resume_override_writeback_cannot_clobber_concurrent_row_updates() {
+        // Cross-process race pin: the cached-resume override writeback used
+        // to route through the full upsert, whose preserving arms cover only
+        // policy and the archive stamp — the stale cache snapshot reverted
+        // every other passthrough column, even resurrecting a concurrently
+        // archived thread.
+        let store = temp_core_state("resume-roots-writeback-stale");
+        let mut manager = ThreadManager::new(store);
+        let spawned = manager
+            .spawn_thread_with_history(
+                "deepseek".to_string(),
+                abs_fixture("/repo/main"),
+                &[],
+                InitialHistory::New,
+                true,
+            )
+            .expect("spawn thread");
+        let thread_id = spawned.thread.id.clone();
+
+        // A concurrent process attaches a policy and archives the thread;
+        // the in-process cache still carries the pre-archive snapshot.
+        manager
+            .state_store()
+            .upsert_thread(&ThreadMetadata {
+                sandbox_policy: Some("workspace-write".to_string()),
+                approval_mode: Some("on-request".to_string()),
+                ..manager
+                    .state_store()
+                    .get_thread(&thread_id)
+                    .expect("read thread")
+                    .expect("thread persisted")
+            })
+            .expect("attach policy");
+        manager
+            .state_store()
+            .mark_archived(&thread_id)
+            .expect("archive thread");
+
+        // The override writeback must land the roots without touching the
+        // concurrently written columns.
+        let mut params = resume_params(&thread_id);
+        params.workspace_roots = Some(vec![abs_fixture("/repo/shared")]);
+        let resumed = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+        assert_eq!(
+            resumed.thread.workspace_roots,
+            vec![abs_fixture("/repo/main"), abs_fixture("/repo/shared")]
+        );
+
+        let persisted = manager
+            .state_store()
+            .get_thread(&thread_id)
+            .expect("read thread")
+            .expect("thread persisted");
+        assert_eq!(
+            persisted.workspace_roots,
+            vec![abs_fixture("/repo/main"), abs_fixture("/repo/shared")],
+            "the override still owns the root set"
+        );
+        assert!(
+            persisted.archived,
+            "a concurrently archived thread must not be resurrected"
+        );
+        assert!(persisted.archived_at.is_some());
+        assert_eq!(persisted.sandbox_policy.as_deref(), Some("workspace-write"));
+        assert_eq!(persisted.approval_mode.as_deref(), Some("on-request"));
+    }
+
+    #[test]
+    fn resume_with_empty_roots_clears_back_to_bare_cwd() {
+        let store = temp_core_state("resume-roots-clear");
+        let mut metadata = test_thread_metadata("thread-roots");
+        metadata.cwd = abs_fixture("/old");
+        metadata.workspace_roots = vec![abs_fixture("/old"), abs_fixture("/keep")];
+        store.upsert_thread(&metadata).expect("seed thread");
+
+        let mut manager = ThreadManager::new(store);
+        let mut params = resume_params("thread-roots");
+        params.workspace_roots = Some(Vec::new());
+        let resumed = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+        assert_eq!(resumed.thread.cwd, abs_fixture("/old"));
+        assert_eq!(
+            resumed.thread.workspace_roots,
+            vec![abs_fixture("/old")],
+            "Some([]) is an explicit clear, distinct from None (inherit)"
+        );
+    }
+
+    #[test]
+    fn resume_with_cwd_only_keeps_additional_roots() {
+        let store = temp_core_state("resume-roots-cwd-slot");
+        let mut metadata = test_thread_metadata("thread-roots");
+        metadata.cwd = abs_fixture("/old");
+        metadata.workspace_roots = vec![
+            abs_fixture("/old"),
+            abs_fixture("/keep"),
+            abs_fixture("/also"),
+        ];
+        store.upsert_thread(&metadata).expect("seed thread");
+
+        let mut manager = ThreadManager::new(store);
+        let mut params = resume_params("thread-roots");
+        params.cwd = Some(abs_fixture("/new"));
+        let resumed = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+
+        // The new cwd takes over the primary slot; the old cwd leaves the set
+        // while additional roots survive in order.
+        assert_eq!(resumed.thread.cwd, abs_fixture("/new"));
+        assert_eq!(
+            resumed.thread.workspace_roots,
+            vec![
+                abs_fixture("/new"),
+                abs_fixture("/keep"),
+                abs_fixture("/also")
+            ]
+        );
+    }
+
+    #[test]
+    fn resume_cwd_move_strips_a_dot_dot_spelled_old_primary_copy() {
+        // Round-37 minor: the move-arm strip is lexical — a `..`-spelled
+        // copy of the OLD primary must drop with the primary itself, or it
+        // survives the move as a phantom additional root and the
+        // re-validation then judges it a widening entry against the new
+        // primary, bricking the move the plain-spelling copy survives.
+        let store = temp_core_state("resume-roots-cwd-dotdot");
+        let mut metadata = test_thread_metadata("thread-roots-dotdot");
+        metadata.cwd = abs_fixture("/old");
+        metadata.workspace_roots = vec![
+            abs_fixture("/old"),
+            abs_fixture("/old/sub/.."),
+            abs_fixture("/keep"),
+        ];
+        store.upsert_thread(&metadata).expect("seed thread");
+
+        let mut manager = ThreadManager::new(store);
+        let mut params = resume_params("thread-roots-dotdot");
+        params.cwd = Some(abs_fixture("/new"));
+        let resumed = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect("the lexical strip keeps the move loadable")
+            .expect("thread found");
+
+        assert_eq!(resumed.thread.cwd, abs_fixture("/new"));
+        assert_eq!(
+            resumed.thread.workspace_roots,
+            vec![abs_fixture("/new"), abs_fixture("/keep")],
+            "the dot-dot-spelled old primary drops with the head"
+        );
+    }
+
+    #[test]
+    fn resume_cwd_only_rejects_a_rebased_ancestor_root() {
+        // Moving the primary is a caller decision, so the re-based set meets
+        // the same intake rules as a replacement set: a persisted additional
+        // root that becomes an ancestor of (or a super-root for) the new
+        // primary must error, not durably widen the persisted row — a
+        // widened row would also strand a later bare fork, which validates
+        // the inherited set.
+        let store = temp_core_state("resume-roots-cwd-ancestor");
+        let mut metadata = test_thread_metadata("thread-roots");
+        metadata.cwd = abs_fixture("/p/x");
+        metadata.workspace_roots = vec![abs_fixture("/p/x"), abs_fixture("/p")];
+        store.upsert_thread(&metadata).expect("seed thread");
+
+        let mut manager = ThreadManager::new(store);
+        let mut params = resume_params("thread-roots");
+        params.cwd = Some(abs_fixture("/p/x/deep"));
+        let err = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect_err("an additional root that turns ancestor must be rejected");
+        assert!(
+            err.to_string().contains("ancestor of the primary"),
+            "unexpected error: {err}"
+        );
+
+        // The persisted row is untouched by the failed attempt.
+        let persisted = manager
+            .state_store()
+            .get_thread("thread-roots")
+            .expect("read thread")
+            .expect("thread persisted");
+        assert_eq!(persisted.cwd, abs_fixture("/p/x"));
+        assert_eq!(
+            persisted.workspace_roots,
+            vec![abs_fixture("/p/x"), abs_fixture("/p")]
+        );
+    }
+
+    #[test]
+    fn resume_without_overrides_restores_persisted_cwd_and_roots() {
+        let store = temp_core_state("resume-roots-restore");
+        let mut metadata = test_thread_metadata("thread-roots");
+        metadata.cwd = abs_fixture("/persisted");
+        metadata.workspace_roots = vec![abs_fixture("/persisted"), abs_fixture("/keep")];
+        store.upsert_thread(&metadata).expect("seed thread");
+
+        let mut manager = ThreadManager::new(store);
+        let resumed = manager
+            .resume_thread_with_history(&resume_params("thread-roots"), "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+
+        // Regression: the persisted-path resume used to overwrite the cwd read
+        // back from the database with a current_dir fallback.
+        assert_eq!(resumed.thread.cwd, abs_fixture("/persisted"));
+        assert_eq!(
+            resumed.thread.workspace_roots,
+            vec![abs_fixture("/persisted"), abs_fixture("/keep")]
+        );
+
+        // Legacy rows with no stored roots degenerate to [cwd].
+        let store = temp_core_state("resume-roots-legacy");
+        let mut metadata = test_thread_metadata("thread-legacy");
+        metadata.cwd = abs_fixture("/persisted");
+        metadata.workspace_roots = Vec::new();
+        store.upsert_thread(&metadata).expect("seed legacy thread");
+        let mut manager = ThreadManager::new(store);
+        let resumed = manager
+            .resume_thread_with_history(&resume_params("thread-legacy"), "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+        assert_eq!(resumed.thread.cwd, abs_fixture("/persisted"));
+        assert_eq!(
+            resumed.thread.workspace_roots,
+            vec![abs_fixture("/persisted")]
+        );
+    }
+
+    fn fork_params(thread_id: &str) -> ThreadForkParams {
+        ThreadForkParams {
+            thread_id: thread_id.to_string(),
+            path: None,
+            model: None,
+            model_provider: None,
+            cwd: None,
+            approval_policy: None,
+            sandbox: None,
+            config: None,
+            base_instructions: None,
+            developer_instructions: None,
+            workspace_roots: None,
+            persist_extended_history: false,
+        }
+    }
+
+    fn seed_multi_root_parent(name: &str) -> ThreadManager {
+        let store = temp_core_state(name);
+        let mut metadata = test_thread_metadata("thread-parent");
+        metadata.cwd = abs_fixture("/repo/main");
+        metadata.workspace_roots = vec![abs_fixture("/repo/main"), abs_fixture("/repo/lib")];
+        store.upsert_thread(&metadata).expect("seed thread");
+        ThreadManager::new(store)
+    }
+
+    #[test]
+    fn fork_without_roots_inherits_the_parent_set() {
+        let mut manager = seed_multi_root_parent("fork-roots-inherit");
+        let forked = manager
+            .fork_thread(&fork_params("thread-parent"))
+            .expect("fork thread")
+            .expect("parent found");
+
+        // The historical bare `thread/fork` shape: the parent record is the
+        // only source of the set, so an absent field must inherit it — and an
+        // absent cwd keeps the parent's cwd as primary rather than
+        // re-anchoring the set under the process cwd.
+        assert_eq!(forked.thread.cwd, abs_fixture("/repo/main"));
+        assert_eq!(
+            forked.thread.workspace_roots,
+            vec![abs_fixture("/repo/main"), abs_fixture("/repo/lib")],
+        );
+        let persisted = manager
+            .state_store()
+            .get_thread(&forked.thread.id)
+            .expect("read fork")
+            .expect("fork persisted");
+        assert_eq!(persisted.workspace_roots, forked.thread.workspace_roots);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn workspace_move_strips_a_case_alias_of_a_vanished_old_primary() {
+        // Round-41 zhuowp follow-up: the old directory has DISAPPEARED, so
+        // both canonicalize calls fail and the comparison falls back to the
+        // lexical spellings — a stored case alias of the old primary is
+        // still the same path on a case-insensitive filesystem and must
+        // drop with the head, not ride the move into the new primary's set.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let old_ws = temp.path().join("Repo");
+        let alias = temp.path().join("rEPO");
+        let new_ws = temp.path().join("moved");
+        std::fs::create_dir_all(&new_ws).expect("new workspace");
+        let keep = temp.path().join("keep");
+        std::fs::create_dir_all(&keep).expect("keep root");
+        // Neither old_ws nor alias is created: the vanished-directory leg.
+
+        let stripped = strip_workspace_roots_head(&old_ws, &[old_ws.clone(), alias, keep.clone()]);
+        assert_eq!(
+            stripped,
+            vec![keep.clone()],
+            "a case alias of the vanished old primary drops with the head"
+        );
+
+        let moved = validate_workspace_roots(&new_ws, &stripped).expect("re-validate");
+        assert_eq!(moved, vec![new_ws.clone(), keep]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn workspace_move_strips_a_symlink_alias_of_the_old_primary() {
+        // Round-41 M41-2: intake admits a root canonicalizing EQUAL to the
+        // primary (the ancestor rejection exempts equality; the normalizer
+        // dedups raw only) — a symlink alias of the primary rides the stored
+        // set, and a pure lexical strip let it survive the move, re-arming
+        // the abandoned directory. The canonical leg drops it.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let old_ws = temp.path().join("repo");
+        std::fs::create_dir_all(&old_ws).expect("old workspace");
+        let alias = temp.path().join("repo-alias");
+        std::os::unix::fs::symlink(&old_ws, &alias).expect("primary alias");
+        let new_ws = temp.path().join("moved");
+        std::fs::create_dir_all(&new_ws).expect("new workspace");
+        let keep = temp.path().join("keep");
+        std::fs::create_dir_all(&keep).expect("keep root");
+
+        let stripped = strip_workspace_roots_head(&old_ws, &[old_ws.clone(), alias, keep.clone()]);
+        assert_eq!(
+            stripped,
+            vec![keep.clone()],
+            "the symlink alias of the old primary drops with the head"
+        );
+
+        // And through a real move face: the re-validated set on the new
+        // primary carries keep, never the abandoned directory.
+        let moved = validate_workspace_roots(&new_ws, &stripped).expect("re-validate");
+        assert_eq!(moved, vec![new_ws.clone(), keep]);
+        assert!(
+            !moved.contains(&old_ws),
+            "the abandoned primary is not re-armed through any spelling"
+        );
+    }
+
+    #[test]
+    fn fork_without_roots_strips_a_dot_dot_spelled_parent_head_copy() {
+        // Round-39 B39-1: the None-inherit arm is the sixth conversion
+        // face — a `..`-spelled copy of the parent's primary (admitted by
+        // intake, deduped raw-only by the normalizer) must drop with the
+        // head, or the abandoned directory stays writable in the fork's
+        // inherited set.
+        let store = temp_core_state("fork-roots-dotdot");
+        let mut metadata = test_thread_metadata("thread-parent");
+        metadata.cwd = abs_fixture("/w/repo");
+        metadata.workspace_roots = vec![
+            abs_fixture("/w/repo"),
+            abs_fixture("/w/repo/sub/.."),
+            abs_fixture("/repo/lib"),
+        ];
+        store.upsert_thread(&metadata).expect("seed thread");
+        let mut manager = ThreadManager::new(store);
+
+        let forked = manager
+            .fork_thread(&fork_params("thread-parent"))
+            .expect("fork thread")
+            .expect("parent found");
+
+        assert_eq!(
+            forked.thread.workspace_roots,
+            vec![abs_fixture("/w/repo"), abs_fixture("/repo/lib")],
+            "the dot-dot-spelled head copy drops with the head on inheritance"
+        );
+    }
+
+    #[test]
+    fn fork_with_cwd_only_swaps_primary_and_keeps_additional_roots() {
+        let mut manager = seed_multi_root_parent("fork-roots-cwd");
+        let mut params = fork_params("thread-parent");
+        params.cwd = Some(abs_fixture("/repo/topic"));
+
+        let forked = manager
+            .fork_thread(&params)
+            .expect("fork thread")
+            .expect("parent found");
+
+        // Primary-swap semantics, matching a cwd-only resume: the parent's
+        // cwd leaves the set and its additional roots survive.
+        assert_eq!(forked.thread.cwd, abs_fixture("/repo/topic"));
+        assert_eq!(
+            forked.thread.workspace_roots,
+            vec![abs_fixture("/repo/topic"), abs_fixture("/repo/lib")],
+        );
+    }
+
+    #[test]
+    fn fork_with_explicit_empty_roots_clears_to_the_bare_cwd() {
+        let mut manager = seed_multi_root_parent("fork-roots-clear");
+        let mut params = fork_params("thread-parent");
+        params.workspace_roots = Some(Vec::new());
+
+        let forked = manager
+            .fork_thread(&params)
+            .expect("fork thread")
+            .expect("parent found");
+
+        assert_eq!(
+            forked.thread.workspace_roots,
+            vec![abs_fixture("/repo/main")],
+            "Some([]) is an explicit clear, distinct from None (inherit)"
+        );
+    }
+
+    #[test]
+    fn resume_with_empty_cwd_is_rejected() {
+        // Regression pin: a stdio resume carrying `cwd: ""` used to persist
+        // the empty string into the primary slot, where boundary_roots()
+        // turns it into the vacuous containment root on every later resume.
+        let store = temp_core_state("resume-empty-cwd");
+        let mut metadata = test_thread_metadata("thread-empty-cwd");
+        metadata.cwd = abs_fixture("/persisted");
+        metadata.workspace_roots = vec![abs_fixture("/persisted")];
+        store.upsert_thread(&metadata).expect("seed thread");
+        let mut manager = ThreadManager::new(store);
+        let mut params = resume_params("thread-empty-cwd");
+        params.cwd = Some(PathBuf::from(""));
+
+        let err = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect_err("empty cwd must be rejected");
+        assert!(
+            format!("{err:#}").contains("non-empty absolute"),
+            "unexpected error: {err:#}"
+        );
+        let persisted = manager
+            .state_store()
+            .get_thread("thread-empty-cwd")
+            .expect("read thread")
+            .expect("thread persisted");
+        assert_eq!(
+            persisted.cwd,
+            abs_fixture("/persisted"),
+            "a rejected resume must not touch the persisted root set"
+        );
+    }
+
+    #[test]
+    fn fork_with_empty_cwd_is_rejected() {
+        let mut manager = seed_multi_root_parent("fork-empty-cwd");
+        let mut params = fork_params("thread-parent");
+        params.cwd = Some(PathBuf::from(""));
+
+        let err = manager
+            .fork_thread(&params)
+            .expect_err("empty cwd must be rejected");
+        assert!(
+            format!("{err:#}").contains("non-empty absolute"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn resume_with_a_relative_cwd_is_rejected_like_the_empty_spelling() {
+        // A28-1: a relative cwd used to pass the guard and hit the
+        // validator's degenerate collapse — the declared root set was
+        // silently destroyed, the relative primary persisted, and every
+        // later resume of the row failed (invoke_tool hard-rejects a
+        // relative workspace). The empty guard's own rationale applies
+        // verbatim; both spellings are now refused at the same gate.
+        let mut manager = seed_multi_root_parent("resume-relative-cwd");
+        let mut params = resume_params("thread-parent");
+        params.cwd = Some(PathBuf::from("."));
+        params.workspace_roots = Some(vec![abs_fixture("/a"), abs_fixture("/b")]);
+        let err = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect_err("a relative cwd must be rejected");
+        assert!(
+            format!("{err:#}").contains("non-empty absolute"),
+            "unexpected error: {err:#}"
+        );
+        // The persisted row is untouched — no destroyed root set, no
+        // relative primary minted.
+        let persisted = manager
+            .state_store()
+            .get_thread("thread-parent")
+            .expect("read thread")
+            .expect("thread persisted");
+        assert_eq!(
+            persisted.cwd,
+            abs_fixture("/repo/main"),
+            "a rejected resume must not mint the relative primary"
+        );
+    }
+
+    #[test]
+    fn spawn_thread_with_empty_cwd_persists_no_roots() {
+        // Fail closed at the chokepoint: a thread whose cwd slot is empty
+        // gets an empty root set, so boundary_roots() holds nothing and
+        // every containment check denies — never the vacuous `[""]`.
+        let store = temp_core_state("spawn-empty-cwd");
+        let mut manager = ThreadManager::new(store);
+        let spawned = manager
+            .spawn_thread_with_history(
+                "deepseek".to_string(),
+                PathBuf::from(""),
+                &[],
+                InitialHistory::New,
+                true,
+            )
+            .expect("spawn thread");
+        assert!(spawned.thread.workspace_roots.is_empty());
+
+        let persisted = manager
+            .state_store()
+            .get_thread(&spawned.thread.id)
+            .expect("read thread")
+            .expect("thread persisted");
+        assert!(persisted.workspace_roots.is_empty());
     }
 
     #[tokio::test]
@@ -3059,7 +5248,8 @@ mod tests {
                     raw_tool_call_id: None,
                 },
                 AskForApproval::Never,
-                Path::new("/tmp/codewhale"),
+                abs_fixture("/tmp/codewhale").as_path(),
+                &[],
             )
             .await
             .expect("invoke tool");
@@ -3088,7 +5278,8 @@ mod tests {
             .thread_manager
             .spawn_thread_with_history(
                 "deepseek".to_string(),
-                PathBuf::from("/tmp/codewhale"),
+                abs_fixture("/tmp/codewhale"),
+                &[],
                 InitialHistory::New,
                 true,
             )
@@ -3117,5 +5308,370 @@ mod tests {
             history.is_empty(),
             "a refused message must leave no history rows: {history:?}"
         );
+    }
+
+    /// Round-22 B22-5: the headless `/tool` + stdio tool-call lane must judge
+    /// exec policy on the same resolved effective cwd execution uses.
+    fn local_shell_call(command: &str, cwd: Option<&str>) -> ToolCall {
+        ToolCall {
+            name: "shell".to_string(),
+            payload: ToolPayload::LocalShell {
+                params: codewhale_protocol::LocalShellParams {
+                    command: command.to_string(),
+                    cwd: cwd.map(str::to_string),
+                    timeout_ms: None,
+                },
+            },
+            source: ToolCallSource::Direct,
+            raw_tool_call_id: None,
+        }
+    }
+
+    fn runtime_with_exec_rules(rules: Vec<codewhale_execpolicy::ToolAskRule>) -> Runtime {
+        Runtime::new(
+            ConfigToml::default(),
+            ModelRegistry::default(),
+            temp_core_state("invoke-tool-judged-cwd"),
+            Arc::new(ToolRegistry::default()),
+            Arc::new(McpManager::default()),
+            ExecPolicyEngine::with_rulesets(vec![
+                codewhale_execpolicy::Ruleset::user(vec![], vec![]).with_ask_rules(rules),
+            ]),
+            HookDispatcher::default(),
+        )
+    }
+
+    fn exec_deny_scoped_to(workspace: &Path) -> codewhale_execpolicy::ToolAskRule {
+        codewhale_execpolicy::ToolAskRule {
+            tool: "exec_shell".into(),
+            command: Some("git push".into()),
+            command_exact: false,
+            path: None,
+            workspace: Some(workspace.to_string_lossy().into_owned()),
+            action: codewhale_execpolicy::PermissionAction::Deny,
+        }
+    }
+
+    #[tokio::test]
+    async fn invoke_tool_judges_a_relative_operand_cwd_like_execution() {
+        // The raw relative operand made `normalize_workspace_scope` reject
+        // the judgment side, so every scope matched against the judged cwd
+        // was silently inert for the call — including a deny scoped to the
+        // very directory execution lands in. The deny here is scoped to the
+        // subdirectory the operands resolve to (it is deliberately NOT in
+        // the declared root set, so the root-set spanning cannot mask the
+        // judged-cwd leg).
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("ws");
+        std::fs::create_dir_all(workspace.join("sub/x")).expect("fixture dirs");
+        let workspace_canonical = workspace.canonicalize().expect("canonical workspace");
+        let sub_canonical = workspace.join("sub").canonicalize().expect("canonical sub");
+
+        let runtime = runtime_with_exec_rules(vec![exec_deny_scoped_to(&sub_canonical)]);
+
+        for operand in ["sub/.", "./sub", "sub/x/.."] {
+            let result = runtime
+                .invoke_tool(
+                    local_shell_call("git push origin main", Some(operand)),
+                    AskForApproval::OnRequest,
+                    &workspace_canonical,
+                    // Single-root posture: an empty declared set.
+                    &[],
+                )
+                .await
+                .expect("invoke tool");
+            assert_eq!(
+                result["status"], "denied",
+                "operand {operand:?} resolves into the denied subdirectory, so the deny \
+                 must fire instead of every scoped rule being inert: {result}"
+            );
+        }
+
+        // Control: an operand resolving outside the denied scope keeps the
+        // ordinary approval gate — the deny is exact, not blanket.
+        let result = runtime
+            .invoke_tool(
+                local_shell_call(
+                    "git push origin main",
+                    Some(workspace_canonical.to_string_lossy().as_ref()),
+                ),
+                AskForApproval::OnRequest,
+                &workspace_canonical,
+                &[],
+            )
+            .await
+            .expect("invoke tool");
+        assert_eq!(result["status"], "approval_required", "{result}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn invoke_tool_judges_a_no_operand_call_at_the_declared_spelling() {
+        // Round-24 P3 accuracy fix: canonical resolution used to apply to
+        // EVERY call on this lane, so a symlink-spelled session workspace
+        // (macOS `/tmp`) judged its canonical form and a deny scoped to the
+        // DECLARED spelling went inert lane-wide — the opposite divergence
+        // from the operand one B22-5 fixed, and wider (every call, not just
+        // redirected ones). A no-operand call executes at the declared
+        // spelling, so it must judge there; an operand-carrying call keeps
+        // the canonical resolution (the B22-5 pin above covers that leg).
+        let temp = tempfile::tempdir().expect("tempdir");
+        let real = temp.path().join("real");
+        std::fs::create_dir_all(&real).expect("real dir");
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+        let declared = link.to_string_lossy().into_owned();
+        let canonical = real.canonicalize().expect("canonical real");
+
+        // Deny scoped to the DECLARED spelling fires for a no-operand call.
+        let runtime = runtime_with_exec_rules(vec![exec_deny_scoped_to(Path::new(&declared))]);
+        let result = runtime
+            .invoke_tool(
+                local_shell_call("git push origin main", None),
+                AskForApproval::OnRequest,
+                &link,
+                &[],
+            )
+            .await
+            .expect("invoke tool");
+        assert_eq!(
+            result["status"], "denied",
+            "a no-operand call judges at the declared spelling, so the declared-scoped \
+             deny must fire: {result}"
+        );
+
+        // The canonical-spelling scope no longer matches a no-operand call
+        // (judgment sits at the declared spelling); it keeps firing for an
+        // operand-carrying call that resolves there.
+        let runtime = runtime_with_exec_rules(vec![exec_deny_scoped_to(&canonical)]);
+        let result = runtime
+            .invoke_tool(
+                local_shell_call("git push origin main", None),
+                AskForApproval::OnRequest,
+                &link,
+                &[],
+            )
+            .await
+            .expect("invoke tool");
+        assert_eq!(
+            result["status"], "approval_required",
+            "the canonical-spelling scope stays inert for a no-operand call judged at \
+             the declared spelling: {result}"
+        );
+        let result = runtime
+            .invoke_tool(
+                local_shell_call("git push origin main", Some(&declared)),
+                AskForApproval::OnRequest,
+                &link,
+                &[],
+            )
+            .await
+            .expect("invoke tool");
+        assert_eq!(
+            result["status"], "denied",
+            "an operand-carrying call still judges canonically (B22-5): {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn invoke_tool_rejects_degenerate_root_intake_declarations() {
+        // Round-24 B24-3: this face was the one roots intake with no
+        // validator in front of it — an over-cap declaration was silently
+        // truncated and `/` (or a primary ancestor) reached the policy
+        // context; a relative cwd slot fell back to the process directory
+        // spelling. All three classes now fail loud before any policy work.
+        let runtime = runtime_with_exec_rules(vec![]);
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let cwd = workspace.path().join("ws");
+        std::fs::create_dir_all(&cwd).expect("workspace dir");
+        let cwd = cwd.canonicalize().expect("canonical cwd");
+
+        let err = runtime
+            .invoke_tool(
+                local_shell_call("echo hi", None),
+                AskForApproval::Never,
+                Path::new("."),
+                &[],
+            )
+            .await
+            .expect_err("a relative cwd slot must be rejected");
+        assert!(
+            err.to_string().contains("absolute"),
+            "the rejection names the absolute-cwd requirement: {err}"
+        );
+
+        let err = runtime
+            .invoke_tool(
+                local_shell_call("echo hi", None),
+                AskForApproval::Never,
+                &cwd,
+                &[abs_fixture("/")],
+            )
+            .await
+            .expect_err("a filesystem-root declaration must be rejected");
+        assert!(
+            err.to_string().contains("filesystem"),
+            "the rejection names the filesystem-root hazard: {err}"
+        );
+
+        let over_cap: Vec<PathBuf> = (0..MAX_WORKSPACE_ROOTS + 1)
+            .map(|index| cwd.join(format!("r{index}")))
+            .collect();
+        let err = runtime
+            .invoke_tool(
+                local_shell_call("echo hi", None),
+                AskForApproval::Never,
+                &cwd,
+                &over_cap,
+            )
+            .await
+            .expect_err("an over-cap declaration must be rejected");
+        assert!(
+            err.to_string().contains("cap"),
+            "the rejection names the intake cap: {err}"
+        );
+
+        // A full validated declaration survives: the same set at exactly
+        // the cap goes through and reaches the ordinary approval gate.
+        let at_cap: Vec<PathBuf> = (0..MAX_WORKSPACE_ROOTS)
+            .map(|index| cwd.join(format!("r{index}")))
+            .collect();
+        let result = runtime
+            .invoke_tool(
+                local_shell_call("echo hi", None),
+                AskForApproval::OnRequest,
+                &cwd,
+                &at_cap,
+            )
+            .await
+            .expect("a full validated declaration is admitted whole");
+        assert_eq!(result["status"], "approval_required", "{result}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn invoke_tool_judges_a_symlink_spelled_operand_like_execution() {
+        // A deny scoped to the canonical spelling of the directory execution
+        // lands in was evaded by a symlink-spelled operand: judgment compared
+        // the raw lexical spelling while execution canonicalized through the
+        // link. The denied scope is deliberately absent from the declared
+        // root set so the root-set spanning cannot mask the judged-cwd leg.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("ws");
+        let real = temp.path().join("real");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        std::fs::create_dir_all(&real).expect("real dir");
+        let real_canonical = real.canonicalize().expect("canonical real");
+        std::os::unix::fs::symlink(&real_canonical, workspace.join("link")).expect("symlink");
+
+        let runtime = runtime_with_exec_rules(vec![exec_deny_scoped_to(&real_canonical)]);
+        let link = workspace.join("link");
+        let result = runtime
+            .invoke_tool(
+                local_shell_call(
+                    "git push origin main",
+                    Some(link.to_string_lossy().as_ref()),
+                ),
+                AskForApproval::OnRequest,
+                &workspace.canonicalize().expect("canonical workspace"),
+                &[],
+            )
+            .await
+            .expect("invoke tool");
+        assert_eq!(
+            result["status"], "denied",
+            "the symlink resolves into the denied root, so the deny must fire: {result}"
+        );
+    }
+
+    #[test]
+    fn normalize_path_lexically_clamps_and_keeps_like_the_tool_boundary() {
+        // The shared normalizer behind the tools boundary's landing
+        // normalize: an overshoot `..` clamps at the filesystem root; a `..`
+        // a relative spelling cannot pop is kept.
+        assert_eq!(
+            normalize_path_lexically(abs_fixture("/w/x/../../../att/vendor/lib.rs").as_path()),
+            abs_fixture("/att/vendor/lib.rs")
+        );
+        assert_eq!(
+            normalize_path_lexically(abs_fixture("/a/..").as_path()),
+            abs_fixture("/")
+        );
+        assert_eq!(
+            normalize_path_lexically(Path::new("a/../../b")),
+            PathBuf::from("../b")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_operand_cwd_walks_symlinks_like_execution() {
+        // Existing operands canonicalize through the link; a nonexistent
+        // operand resolves through the deepest existing ancestor and
+        // re-appends the popped tail — the walk the engine's judged-cwd
+        // applies (round-20 B20-1 / round-21 B21-3), now shared.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ws = temp.path().join("ws");
+        let attached = temp.path().join("att/repo");
+        std::fs::create_dir_all(&ws).expect("ws");
+        std::fs::create_dir_all(&attached).expect("attached");
+        std::os::unix::fs::symlink(&attached, ws.join("link")).expect("symlink");
+        let ws_canonical = ws.canonicalize().expect("canonical ws");
+        let attached_canonical = attached.canonicalize().expect("canonical attached");
+
+        assert_eq!(
+            resolve_operand_cwd(&ws_canonical, "link"),
+            attached_canonical,
+            "an existing operand canonicalizes through the symlink"
+        );
+        assert_eq!(
+            resolve_operand_cwd(&ws_canonical, "link/absent"),
+            attached_canonical.join("absent"),
+            "a nonexistent tail resolves through the deepest existing ancestor"
+        );
+        assert_eq!(
+            resolve_operand_cwd(&ws_canonical, "link/absent/../.."),
+            attached_canonical.join("absent"),
+            "`..` is not a Normal component, so `file_name` skips it and the walk \
+             keeps the last named segment — the engine lane's exact behavior, \
+             moved verbatim"
+        );
+    }
+
+    #[test]
+    fn validate_workspace_roots_caps_the_declared_set_size() {
+        // Round-22 SF22-8: every boundary consumer scales with the set
+        // length, so an oversized declaration must be refused at intake
+        // rather than stalling every turn.
+        let cwd = abs_fixture("/repo");
+        let root = |i: usize| abs_fixture(format!("/att{i}").as_str());
+        let at_cap: Vec<PathBuf> = (0..MAX_WORKSPACE_ROOTS).map(root).collect();
+        assert!(validate_workspace_roots(&cwd, &at_cap).is_ok());
+        let over_cap: Vec<PathBuf> = (0..=MAX_WORKSPACE_ROOTS).map(root).collect();
+        let err = validate_workspace_roots(&cwd, &over_cap).expect_err("over-cap must reject");
+        assert!(
+            err.downcast_ref::<IntakeValidationError>().is_some(),
+            "the cap is an intake rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn intake_rejections_carry_the_typed_validation_error() {
+        // The distinct type is what lets HTTP lanes answer 400 instead of a
+        // server-fault 500 (SF22-4); the Display text is unchanged.
+        let cwd = abs_fixture("/repo");
+        for roots in [
+            vec![PathBuf::from("relative/dir")],
+            vec![abs_fixture("/..")],
+            vec![cwd.parent().expect("repo parent").to_path_buf()],
+        ] {
+            let err =
+                validate_workspace_roots(&cwd, &roots).expect_err("intake rejection expected");
+            assert!(
+                err.downcast_ref::<IntakeValidationError>().is_some(),
+                "rejection for {roots:?} must be typed: {err}"
+            );
+        }
+        assert!(validate_workspace_roots(&cwd, &[abs_fixture("/shared")]).is_ok());
     }
 }

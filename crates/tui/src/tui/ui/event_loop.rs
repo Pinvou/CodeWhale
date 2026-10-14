@@ -652,6 +652,28 @@ pub async fn run_tui(
                 Ok(goal) => {
                     match apply_loaded_session_with_goal(&mut app, config, &saved, goal.as_ref()) {
                         Ok(()) => {
+                            // The engine below is built and synced from App
+                            // state: without this seed, a multi-root session
+                            // resumed from the CLI runs single-root for the
+                            // whole process lifetime. Seeded under the RECORD
+                            // primary (B27-1/B27-2): the restore re-homes the
+                            // app onto it, so this is a pure load and the
+                            // launch directory never enters the set.
+                            crate::tui::ui::session_state::seed_loaded_workspace_roots_into(
+                                &mut app,
+                                &saved.metadata.workspace,
+                                &saved.metadata.workspace_roots,
+                            );
+                            // Name the inherited set in the transcript: the
+                            // roots arrived from another host and no header
+                            // chrome reports them.
+                            if let Some(notice) = workspace_roots_notice(
+                                app.ui_locale,
+                                &app.workspace,
+                                &app.workspace_roots,
+                            ) {
+                                app.add_message(HistoryCell::System { content: notice });
+                            }
                             app.status_message = Some(format!(
                                 "Resumed session: {}",
                                 crate::session_manager::truncate_id(&saved.metadata.id)
@@ -796,6 +818,7 @@ pub async fn run_tui(
                 system_prompt_override: false,
                 model: app.model.clone(),
                 workspace: app.workspace.clone(),
+                workspace_roots: app.workspace_roots.clone(),
                 mode: app.mode,
             })
             .await;
@@ -1211,6 +1234,7 @@ async fn submit_decided_composer_input(
                     system_prompt_override: false,
                     model: app.model.clone(),
                     workspace: app.workspace.clone(),
+                    workspace_roots: app.workspace_roots.clone(),
                     mode: app.mode,
                 })
                 .await;
@@ -2757,6 +2781,13 @@ pub(crate) async fn run_event_loop(
                                 next = %session_id,
                                 "engine session id diverged from the host session id"
                             );
+                            // Round-40 minor 8: a different conversation id
+                            // with an UNCHANGED workspace skipped the
+                            // workspace-move clear — grants belong to the
+                            // conversation they were approved in (round-37
+                            // M37-6's rule), so clear them here too.
+                            app.approval_session_approved.clear();
+                            app.approval_session_denied.clear();
                         }
                         app.current_session_id = Some(session_id.clone());
                         if app.last_known_goal_state.is_some()
@@ -3744,6 +3775,7 @@ pub(crate) async fn run_event_loop(
                         system_prompt_override: false,
                         model: app.model.clone(),
                         workspace: app.workspace.clone(),
+                        workspace_roots: app.workspace_roots.clone(),
                         mode: app.mode,
                     })
                     .await;

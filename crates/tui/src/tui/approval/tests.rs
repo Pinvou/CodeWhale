@@ -195,6 +195,54 @@ fn risk_dangerous_shell_command_stays_destructive() {
     );
 }
 
+#[test]
+fn approval_card_previews_the_working_dir_redirect() {
+    // Round-37 M37-9: the card's Dir preview must read the SAME operand
+    // keys the shell tool and the approval cache key read (["cwd",
+    // "working_dir"]). The old ["workdir", "cwd"] preview left a
+    // `working_dir` redirect invisible on the card while the grant it
+    // approved was keyed by that very operand.
+    let details = build_prominent_details(
+        "exec_shell",
+        ToolCategory::Shell,
+        &json!({
+            "command": "cargo test",
+            "working_dir": "/repo/subdir"
+        }),
+    );
+    let dir = details
+        .iter()
+        .find(|detail| detail.label == "Dir")
+        .expect("a working_dir redirect must be visible on the card");
+    assert_eq!(dir.value, "/repo/subdir");
+
+    // The legacy `cwd` spelling stays previewed too.
+    let details = build_prominent_details(
+        "exec_shell",
+        ToolCategory::Shell,
+        &json!({"command": "cargo test", "cwd": "/repo/other"}),
+    );
+    let dir = details
+        .iter()
+        .find(|detail| detail.label == "Dir")
+        .expect("the cwd spelling stays previewed");
+    assert_eq!(dir.value, "/repo/other");
+
+    // Round-38 minor: `cwd: null` does not shadow the working_dir operand
+    // with a literal "null" — the preview skips Null like the key and
+    // execution sides.
+    let details = build_prominent_details(
+        "exec_shell",
+        ToolCategory::Shell,
+        &json!({"command": "cargo test", "cwd": null, "working_dir": "/repo/redirect"}),
+    );
+    let dir = details
+        .iter()
+        .find(|detail| detail.label == "Dir")
+        .expect("the working_dir operand must be the visible one");
+    assert_eq!(dir.value, "/repo/redirect");
+}
+
 // ========================================================================
 // ApprovalRequest Tests
 // ========================================================================
@@ -2243,7 +2291,7 @@ fn test_elevation_render_zh_hant_has_translated_copy() {
 fn test_elevation_option_to_policy() {
     let cwd = PathBuf::from("/tmp/test");
 
-    let policy = ElevationOption::WithNetwork.to_policy(&cwd);
+    let policy = ElevationOption::WithNetwork.to_policy(&cwd, &[]);
     assert!(matches!(
         policy,
         SandboxPolicy::WorkspaceWrite {
@@ -2252,12 +2300,50 @@ fn test_elevation_option_to_policy() {
         }
     ));
 
-    let policy = ElevationOption::FullAccess.to_policy(&cwd);
+    let policy = ElevationOption::FullAccess.to_policy(&cwd, &[]);
     assert!(matches!(policy, SandboxPolicy::DangerFullAccess));
 
     let paths = vec![PathBuf::from("/tmp/test/src")];
-    let policy = ElevationOption::WithWriteAccess(paths).to_policy(&cwd);
+    let policy = ElevationOption::WithWriteAccess(paths).to_policy(&cwd, &[]);
     assert!(matches!(policy, SandboxPolicy::WorkspaceWrite { .. }));
+}
+
+/// The retry policy must materialize the session's live root set (round-15):
+/// a denied call retried WithNetwork keeps every attached root writable,
+/// matching the per-turn policy instead of shrinking to the bare cwd.
+#[test]
+fn elevation_retry_policy_keeps_the_sessions_attached_roots() {
+    let cwd = PathBuf::from("/work/primary");
+    let attached = PathBuf::from("/work/attached");
+    let session_roots = vec![cwd.clone(), attached.clone()];
+
+    let SandboxPolicy::WorkspaceWrite {
+        writable_roots,
+        network_access,
+        ..
+    } = ElevationOption::WithNetwork.to_policy(&cwd, &session_roots)
+    else {
+        panic!("WithNetwork stays workspace-write");
+    };
+    assert!(network_access);
+    assert_eq!(writable_roots, session_roots);
+
+    let extra = PathBuf::from("/work/extra");
+    let SandboxPolicy::WorkspaceWrite {
+        writable_roots,
+        network_access,
+        ..
+    } = ElevationOption::WithWriteAccess(vec![extra.clone()]).to_policy(&cwd, &session_roots)
+    else {
+        panic!("WithWriteAccess stays workspace-write");
+    };
+    assert!(!network_access);
+    for root in [&extra, &cwd, &attached] {
+        assert!(
+            writable_roots.contains(root),
+            "retry must keep {root:?} writable: {writable_roots:?}"
+        );
+    }
 }
 
 // ========================================================================

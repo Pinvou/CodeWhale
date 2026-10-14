@@ -294,6 +294,12 @@ pub struct EngineConfig {
     pub active_route_limits: Option<codewhale_config::route::RouteLimits>,
     /// Workspace root for tool execution and file operations.
     pub workspace: PathBuf,
+    /// Additional workspace roots for this engine session; `workspace` stays
+    /// the primary root. Materialized into the per-turn sandbox policy, tool
+    /// context boundary, and exec-policy checks on every turn, so a root-set
+    /// change takes effect on the next turn. Empty preserves single-root
+    /// behavior exactly.
+    pub workspace_roots: Vec<PathBuf>,
     /// Host-owned conversation id the engine adopts at construction.
     ///
     /// Interactive hosts claim a session id before the engine exists: the
@@ -562,6 +568,7 @@ impl Default for EngineConfig {
             model: DEFAULT_TEXT_MODEL.to_string(),
             active_route_limits: None,
             workspace: PathBuf::from("."),
+            workspace_roots: Vec::new(),
             session_id: None,
             subagent_state_root: None,
             allow_shell: true,
@@ -1837,6 +1844,9 @@ impl Engine {
         {
             session.id = session_id.to_string();
         }
+        config.workspace_roots =
+            codewhale_core::normalize_workspace_roots(&config.workspace, &config.workspace_roots);
+        session.workspace_roots = config.workspace_roots.clone();
         // Set up stable system prompt with project context (default to agent mode).
         // Per-turn working-set metadata is injected into the latest user
         // message at request time so file churn does not rewrite this prefix.
@@ -2202,6 +2212,7 @@ impl Engine {
                 &tool_name,
                 &tool_input,
                 &self.session.workspace,
+                &self.session.workspace_roots,
                 self.session.approval_mode,
             );
             if let Some(ToolAskRuleDecision::Block(reason)) = ask_rule_decision {
@@ -3401,6 +3412,7 @@ impl Engine {
                         system_prompt_override,
                         model,
                         workspace,
+                        workspace_roots,
                         mode,
                     } => {
                         self.drop_all_steers().await;
@@ -3495,9 +3507,12 @@ impl Engine {
                         self.session.auto_model = model.trim().eq_ignore_ascii_case("auto");
                         self.session.model = model;
                         self.session.workspace = workspace.clone();
+                        self.session.workspace_roots =
+                            codewhale_core::normalize_workspace_roots(&workspace, &workspace_roots);
                         self.current_mode = mode;
                         self.config.model.clone_from(&self.session.model);
                         self.config.workspace = workspace.clone();
+                        self.config.workspace_roots = self.session.workspace_roots.clone();
                         if plugin_workspace_changed {
                             self.plugin_registry =
                                 self.plugin_registry.rediscover_for_workspace(&workspace);
@@ -3514,6 +3529,10 @@ impl Engine {
                             // conversation (see the method).
                             self.invalidate_mcp_boot_for_workspace_change();
                         }
+                        // Base reloads the project context on every session
+                        // sync; keep that unconditional so mid-session
+                        // instruction edits are picked up on same-workspace
+                        // re-syncs. The loader reads the primary root only.
                         let ctx =
                             crate::project_context::load_project_context_with_parents(&workspace);
                         self.session.project_context = if ctx.has_instructions() {
@@ -3558,6 +3577,7 @@ impl Engine {
                             model_provider: self.api_provider.as_str().to_string(),
                             model_provider_id: self.api_provider_id.clone(),
                             workspace: self.session.workspace.clone(),
+                            workspace_roots: self.session.workspace_roots.clone(),
                             system_prompt: self.session.system_prompt.clone(),
                             mode: self.current_mode.as_setting().to_string(),
                         };
@@ -4142,6 +4162,7 @@ impl Engine {
             approval_mode,
             self.api_config.sandbox_mode.as_deref(),
             &self.config.workspace,
+            &self.session.workspace_roots,
             crate::core::authority::SandboxNetworkAccess::from_config(
                 self.api_config.sandbox_network_access,
             ),
@@ -4152,6 +4173,44 @@ impl Engine {
             // the static system prefix stays byte-stable across sessions (see
             // `render_environment_block` for the prefix-cache rationale).
             format!("Current workspace: {}", self.config.workspace.display()),
+        ];
+        // The channel by which a multi-root session's model learns it may touch
+        // the attached roots: restricted postures need it for the permission
+        // boundary, full-access postures for plain visibility. The primary root
+        // is already named by the workspace line above. Order is the normalized
+        // storage order, never re-sorted per turn, so a stable root set keeps
+        // the line byte-identical; long sets are truncated to a bound.
+        // Round-41 minor 14 + round-42 minor 1: the shared head strip —
+        // the model sees the same attached set the human surfaces list (a
+        // `..`-spelled or otherwise head-equal copy is the head, not an
+        // attachment). NOTE: this runs PER TURN (turn_meta construction
+        // and preview requests), so the strip's canonicalize legs run
+        // here too — 1 realpath for the head plus one per existing
+        // additional root, bounded by the 64-root cap (ledgered).
+        let attached_roots = codewhale_core::strip_workspace_roots_head(
+            &self.session.workspace,
+            &self.session.workspace_roots,
+        );
+        if !attached_roots.is_empty() {
+            const MAX_LISTED_ROOTS: usize = 5;
+            // Round-40 minor 8: escape the separator so a root spelling
+            // cannot forge the list boundary (a root ending in ", " would
+            // otherwise splice the model's view of the set).
+            let listed = attached_roots
+                .iter()
+                .take(MAX_LISTED_ROOTS)
+                .map(|root| root.display().to_string().replace(',', "\\,"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let remainder = attached_roots.len().saturating_sub(MAX_LISTED_ROOTS);
+            let suffix = if remainder > 0 {
+                format!(" … (+{remainder} more)")
+            } else {
+                String::new()
+            };
+            lines.push(format!("Accessible folders: {listed}{suffix}"));
+        }
+        lines.extend([
             format!(
                 "Current permission posture: {}",
                 approval_mode.permission_chip_label()
@@ -4165,7 +4224,7 @@ impl Engine {
                     crate::sandbox::process_hardening::no_new_privs_active(),
                 )
             ),
-        ];
+        ]);
         if approval_mode == crate::tui::approval::ApprovalMode::Never {
             lines.push(
                 "Approval prompts are disabled; do not request escalation for this turn."
@@ -6696,11 +6755,20 @@ impl Engine {
             self.session.auto_approve,
             self.session.approval_mode,
         );
+        // Round-26 B26-1 (latent site made safe): the per-turn live context
+        // re-assigns the pair on a clone that may share a memo Arc with an
+        // earlier turn's context — even a same-set assignment goes through
+        // `rebase_roots` so the memo can never outlive its pair.
+        context.rebase_roots(
+            self.session.workspace.clone(),
+            self.session.workspace_roots.clone(),
+        );
         context.trust_mode = authority.trust_mode;
         context.auto_approve = authority.auto_approve;
         context.set_shell_policy(self.effective_turn_shell_policy(authority.shell_policy()));
         context.elevated_sandbox_policy = Some(authority.sandbox_policy(
             &self.session.workspace,
+            &self.session.workspace_roots,
             self.api_config.sandbox_mode.as_deref(),
             crate::core::authority::SandboxNetworkAccess::from_config(
                 self.api_config.sandbox_network_access,
@@ -6748,6 +6816,7 @@ impl Engine {
             self.session.mcp_config_path.clone(),
             authority.auto_approve,
         )
+        .with_workspace_roots(self.session.workspace_roots.clone())
         .with_state_namespace(self.session.id.clone())
         .with_route_context_window(crate::route_budget::route_context_window_tokens(
             route.provider,
@@ -6819,6 +6888,7 @@ impl Engine {
 
         let policy = authority.sandbox_policy(
             &self.session.workspace,
+            &self.session.workspace_roots,
             self.api_config.sandbox_mode.as_deref(),
             crate::core::authority::SandboxNetworkAccess::from_config(
                 self.api_config.sandbox_network_access,
@@ -8122,6 +8192,7 @@ pub(super) fn exec_shell_ask_rule_decision(
     tool_name: &str,
     tool_input: &Value,
     workspace: &Path,
+    workspace_roots: &[PathBuf],
     approval_mode: crate::tui::approval::ApprovalMode,
 ) -> Option<ToolAskRuleDecision> {
     exec_shell_ask_rule_decision_for_policy(
@@ -8129,6 +8200,7 @@ pub(super) fn exec_shell_ask_rule_decision(
         tool_name,
         tool_input,
         workspace,
+        workspace_roots,
         approval_mode,
     )
 }
@@ -8141,6 +8213,7 @@ pub(crate) fn exec_shell_ask_rule_decision_for_policy(
     tool_name: &str,
     tool_input: &Value,
     workspace: &Path,
+    workspace_roots: &[PathBuf],
     approval_mode: crate::tui::approval::ApprovalMode,
 ) -> Option<ToolAskRuleDecision> {
     let policy_tool_name =
@@ -8149,12 +8222,33 @@ pub(crate) fn exec_shell_ask_rule_decision_for_policy(
         return None;
     }
     let command = tool_input.get("command").and_then(Value::as_str)?;
+    // The exec lane resolves a `cwd:`/`working_dir:` operand through the
+    // roots-aware `ToolContext::resolve_path` and executes there, so the
+    // approval context must judge the same effective cwd: an allow rule
+    // scoped to the primary repo must not auto-approve the same command
+    // redirected into an attached root. Execution canonicalizes existing
+    // components (symlinks included) before its boundary check, so the
+    // judgment canonicalizes the same way: the lexical join alone let
+    // `link/..` normalize back into the primary while execution landed in
+    // the symlink target, firing a primary-scoped allow across the boundary
+    // (review #484/CodeWhale round-20 B20-1). A nonexistent operand
+    // resolves through the deepest existing ancestor (symlinks included),
+    // matching resolve_nonexistent_path's behavior (round-21 B21-3). The
+    // walk lives in core (`resolve_operand_cwd`) so the headless
+    // `Runtime::invoke_tool` lane judges the identical effective cwd with
+    // one shared implementation (round-22 B22-5).
+    let effective_cwd = ["cwd", "working_dir"]
+        .iter()
+        .find_map(|name| tool_input.get(name).and_then(Value::as_str))
+        .map(|dir| codewhale_core::resolve_operand_cwd(workspace, dir));
     tool_ask_rule_decision_for_context(
         exec_policy_engine,
         policy_tool_name,
         command,
         None,
+        effective_cwd.as_deref().unwrap_or(workspace),
         workspace,
+        workspace_roots,
         approval_mode,
     )
 }
@@ -8164,6 +8258,7 @@ pub(super) fn file_tool_ask_rule_decision(
     tool_name: &str,
     tool_input: &Value,
     workspace: &Path,
+    workspace_roots: &[PathBuf],
     approval_mode: crate::tui::approval::ApprovalMode,
 ) -> Option<ToolAskRuleDecision> {
     file_tool_ask_rule_decision_for_policy(
@@ -8171,6 +8266,7 @@ pub(super) fn file_tool_ask_rule_decision(
         tool_name,
         tool_input,
         workspace,
+        workspace_roots,
         approval_mode,
     )
 }
@@ -8178,11 +8274,22 @@ pub(super) fn file_tool_ask_rule_decision(
 /// Evaluate the persisted file ask/allow/deny rules without requiring a full
 /// [`EngineConfig`]. This keeps protocol adapters on the canonical path and
 /// preserves the all-targets-must-match rule for multi-file patches.
+///
+/// Disclosed residual (pre-existing at base, round-24 P3): the file lane
+/// judges the operand's RAW spelling against the declared workspace — it
+/// canonicalizes nothing — while execution canonicalizes. A `..`-spelled
+/// operand that execution lands outside the declared roots therefore keeps
+/// an ABSOLUTE-path deny rule inert here (the per-root relative
+/// normalization cannot spell it, and the absolute fallback compares the
+/// raw spelling). Fail-closed in practice through the other gate layers
+/// (sandbox boundary + repo law judge the landing path); pinned as known
+/// behavior, not silently shipped.
 pub(crate) fn file_tool_ask_rule_decision_for_policy(
     exec_policy_engine: &codewhale_execpolicy::ExecPolicyEngine,
     tool_name: &str,
     tool_input: &Value,
     workspace: &Path,
+    workspace_roots: &[PathBuf],
     approval_mode: crate::tui::approval::ApprovalMode,
 ) -> Option<ToolAskRuleDecision> {
     let policy_tool_name =
@@ -8195,6 +8302,8 @@ pub(crate) fn file_tool_ask_rule_decision_for_policy(
             "",
             None,
             workspace,
+            workspace,
+            workspace_roots,
             approval_mode,
         );
     }
@@ -8208,6 +8317,8 @@ pub(crate) fn file_tool_ask_rule_decision_for_policy(
             "",
             Some(&path),
             workspace,
+            workspace,
+            workspace_roots,
             approval_mode,
         ) {
             Some(ToolAskRuleDecision::Block(reason)) => {
@@ -8235,10 +8346,12 @@ fn tool_ask_rule_decision_for_context(
     tool_name: &str,
     command: &str,
     path: Option<&str>,
+    cwd: &Path,
     workspace: &Path,
+    workspace_roots: &[PathBuf],
     approval_mode: crate::tui::approval::ApprovalMode,
 ) -> Option<ToolAskRuleDecision> {
-    let cwd = workspace.to_string_lossy();
+    let judged_cwd = cwd.to_string_lossy();
     let ask_for_approval = match approval_mode {
         crate::tui::approval::ApprovalMode::Never => AskForApproval::Never,
         crate::tui::approval::ApprovalMode::Auto
@@ -8248,11 +8361,17 @@ fn tool_ask_rule_decision_for_context(
     let decision = exec_policy_engine
         .check(ExecPolicyContext {
             command,
-            cwd: cwd.as_ref(),
+            cwd: judged_cwd.as_ref(),
             tool: Some(tool_name),
             path,
             ask_for_approval,
             sandbox_mode: None,
+            // `check` prepends the judged cwd itself and dedupes, so pass the
+            // full normalized session set (primary included): ask/deny scope
+            // matching keeps spanning every declared root even when the
+            // judged cwd differs from the session primary (an exec `cwd:`
+            // operand), while allow rules stay narrowed to the judged cwd.
+            workspace_roots: codewhale_core::normalize_workspace_roots(workspace, workspace_roots),
         })
         .ok()?;
     if !decision.allow {
@@ -8272,12 +8391,18 @@ fn tool_ask_rule_decision_for_context(
 }
 
 fn file_tool_permission_paths(tool_name: &str, input: &Value) -> Option<Vec<String>> {
+    // Alias-aware (`file_path`/`filePath`): the ask-rule and carve-out
+    // judgments run before execution folds `PATH_ALIASES` onto `path`, so
+    // an alias-spelled call was invisible to every persisted rule and to
+    // the write carve-out (round-22 B22-2).
     match tool_name {
-        "read_file" | "write_file" | "edit_file" | "file_search" | "grep_files" => {
-            Some(string_field(input, "path").into_iter().collect())
-        }
+        "read_file" | "write_file" | "edit_file" | "file_search" | "grep_files" => Some(
+            crate::tools::file::path_param_value(input)
+                .into_iter()
+                .collect(),
+        ),
         "list_dir" => Some(vec![
-            string_field(input, "path").unwrap_or_else(|| ".".to_string()),
+            crate::tools::file::path_param_value(input).unwrap_or_else(|| ".".to_string()),
         ]),
         "apply_patch" => Some(apply_patch_permission_paths(input)),
         _ => None,
@@ -8293,15 +8418,6 @@ fn file_write_tool_target_paths(tool_name: &str, input: &Value) -> Option<Vec<St
         return None;
     }
     file_tool_permission_paths(canonical, input)
-}
-
-fn string_field(input: &Value, key: &str) -> Option<String> {
-    input
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
 }
 
 fn apply_patch_permission_paths(input: &Value) -> Vec<String> {

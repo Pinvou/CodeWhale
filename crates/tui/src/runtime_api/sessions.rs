@@ -22,6 +22,22 @@ use crate::session_projection::{SessionQuery, SessionSortMode, SessionSummary, p
 use super::{ApiError, RuntimeApiState, map_thread_err, truncate_text};
 use crate::models::Role;
 
+/// Round-45 R45-5: the sanitize belt's drop receipt must be surfaced
+/// EXPLICITLY on every API face that runs it — a root-set shrink (cap
+/// truncation, refused/poison entries) silently re-persisted is permanent,
+/// undisclosed loss of declared roots, exactly what the sanitize contract's
+/// "strip-and-warn" half exists to prevent. The TUI load face already notes
+/// it through `SanitizedLoadedRoots`; these faces warn through the log so
+/// the laundering boundary stays observable.
+fn warn_sanitized_dropped(surface: &str, dropped: usize) {
+    if dropped > 0 {
+        tracing::warn!(
+            "{surface}: {dropped} stored workspace root(s) dropped by the sanitize belt \
+             (cap truncation or refused entries) and NOT re-persisted as declared roots"
+        );
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub(super) struct SessionsResponse {
     sessions: Vec<SessionMetadata>,
@@ -198,6 +214,16 @@ pub(super) async fn patch_session(
     Path(id): Path<String>,
     Json(req): Json<PatchSessionRequest>,
 ) -> Result<Json<PatchSessionResponse>, ApiError> {
+    // Normalize the id once at the boundary: the store judges the trimmed
+    // value, so a padded id (`"%20sess…"` in the path) is one session to the
+    // store, not two rows distinguished by whitespace. An empty id has no
+    // target.
+    let id = id.trim().to_string();
+    if id.is_empty() {
+        return Err(ApiError::bad_request(
+            "PATCH /v1/sessions/{id} requires a non-empty session id",
+        ));
+    }
     if req.title.is_none() && req.archived.is_none() {
         return Err(ApiError::bad_request(
             "PATCH /v1/sessions/{id} requires at least one of `title` or `archived`",
@@ -305,6 +331,33 @@ pub(super) async fn resume_session_thread(
             .unwrap_or_else(|| "agent".to_string())
     });
 
+    // Round-41 M41-1: a RELATIVE workspace row refuses here like every
+    // sibling intake (ACP session/load, session/new, the core resume/fork
+    // lanes) — forwarding it verbatim lets create_thread's degenerate
+    // collapse silently destroy the declared root set and persist a
+    // relative-primary thread no other intake will load (A28-1's class).
+    if session.metadata.workspace.as_os_str().is_empty()
+        || !session.metadata.workspace.is_absolute()
+    {
+        return Err(ApiError::bad_request(
+            "Failed to create thread: session workspace must be a non-empty absolute path",
+        ));
+    }
+
+    // The session row persists the cwd-first full form (primary included),
+    // but `create_thread` validates its `workspace_roots` as DECLARED
+    // additional entries under the intake cap — re-declaring the row's own
+    // head would miscount a legal full-load row (64 additions + head) as
+    // over-cap and strand the resume at a 400 with no repair path. Strip the
+    // head before declaring; create_thread re-anchors it as the primary
+    // (round-37 B37-2, the fifth face; round-38 M38-3: the strip is the
+    // shared LEXICAL primitive, so a `..`-spelled copy of the head drops
+    // with it).
+    let declared_roots: Vec<PathBuf> = codewhale_core::strip_workspace_roots_head(
+        &session.metadata.workspace,
+        &session.metadata.workspace_roots,
+    );
+
     let thread = state
         .runtime_threads
         .create_thread(CreateThreadRequest {
@@ -312,6 +365,7 @@ pub(super) async fn resume_session_thread(
             model_provider: Some(session.metadata.model_provider.clone()),
             model_provider_id: session.metadata.model_provider_id.clone(),
             workspace: Some(session.metadata.workspace.clone()),
+            workspace_roots: declared_roots,
             mode: Some(mode),
             allow_shell: None,
             trust_mode: None,
@@ -418,6 +472,27 @@ pub(super) async fn create_session_from_thread(
         )?;
     }
     session.system_prompt = detail.thread.system_prompt.clone();
+    // Round-40 minor 1 + round-41 minor 1: the one row-minting lane that
+    // skipped intake — downstream is fail-closed (resume re-validates), but
+    // a tolerant thread row would propagate its poison one row deeper. A
+    // refused set now degrades to the SANITIZED remainder (matching the
+    // tolerant-load faces: cap-truncate, drop the refused entries) instead
+    // of a bare empty set that silently discards legal additions too.
+    session.metadata.workspace_roots = match codewhale_core::validate_stored_workspace_roots(
+        &session.metadata.workspace,
+        &detail.thread.workspace_roots,
+    ) {
+        Ok(roots) => roots,
+        Err(reason) => {
+            tracing::warn!("session export degraded the source thread's root set: {reason}");
+            let (sanitized, dropped) = codewhale_core::sanitize_workspace_roots(
+                &session.metadata.workspace,
+                &detail.thread.workspace_roots,
+            );
+            warn_sanitized_dropped("session export", dropped);
+            sanitized
+        }
+    };
 
     if let Some(title) =
         session_title_override(req.title.as_deref(), detail.thread.title.as_deref())
@@ -719,8 +794,22 @@ async fn persist_thread_cost(
 /// token counts and message ordering are authoritative.
 pub(super) async fn save_current_session(
     State(state): State<RuntimeApiState>,
-    Json(req): Json<SaveSessionRequest>,
+    Json(mut req): Json<SaveSessionRequest>,
 ) -> Result<Json<SaveSessionResponse>, ApiError> {
+    // Normalize the id once at the boundary: the store judges the trimmed
+    // value, so a padded id (`" sess… "`) is one session to the store, not
+    // two rows distinguished by whitespace. An explicit-but-empty id has no
+    // target at all and is rejected, not silently turned into "create new".
+    if let Some(raw) = req.session_id.as_deref() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(ApiError::bad_request(
+                "`session_id` must not be empty when provided",
+            ));
+        }
+        req.session_id = Some(trimmed.to_string());
+    }
+
     // Find the thread to save.
     let thread_id = match req.thread_id {
         Some(id) => id,
@@ -739,6 +828,14 @@ pub(super) async fn save_current_session(
         }
     };
 
+    // Round-20 B20-3: the live-session guard was removed. The static
+    // registry is process-local and the runtime HTTP server never coexists
+    // with an interactive TUI surface in any shipped topology, so the guard
+    // could never engage — it headlined a breaking change that is
+    // unobservable (the registry itself stays: same-process retention
+    // pruning consults it). A concurrent writer in the same process is
+    // still arbitrated by last-write-wins at the store layer.
+
     // Get the engine handle (loads the thread into an engine if needed),
     // then request a session snapshot. This reuses the same code path as
     // TUI's `build_session_snapshot`: the engine holds the authoritative
@@ -747,7 +844,17 @@ pub(super) async fn save_current_session(
         .runtime_threads
         .get_engine(&thread_id)
         .await
-        .map_err(|e| ApiError::internal(format!("Failed to get engine for thread: {e}")))?;
+        .map_err(|e| {
+            // Round-39 minor 4: the arming gate's poison refusal is a
+            // client-side record defect — the identical row answers 400 on
+            // `/v1/threads/{id}/resume`; 500 here was a within-PR
+            // inconsistency.
+            if e.to_string().contains("corrupt or hand-edited") {
+                ApiError::bad_request(format!("Failed to get engine for thread: {e}"))
+            } else {
+                ApiError::internal(format!("Failed to get engine for thread: {e}"))
+            }
+        })?;
 
     let snapshot = engine
         .get_session_snapshot()
@@ -776,6 +883,23 @@ pub(super) async fn save_current_session(
                     snapshot.model_provider_id.as_deref(),
                 );
                 updated.metadata.mode = Some(snapshot.mode.clone());
+                // The paired set travels with the workspace it belongs to,
+                // exactly as in `/rename` and `/fork`: a PATCH may have moved
+                // the thread since this session was last saved, and stamping
+                // only the roots would persist `workspace: <abandoned>` next
+                // to a set led by the new directory — a later resume-thread
+                // then re-admits the abandoned directory as a writable
+                // primary root. Both fields come from the same snapshot,
+                // re-normalized so the pair is consistent by construction.
+                updated.metadata.workspace = snapshot.workspace.clone();
+                // Round-41 minor 2: the sanitize belt the TUI autosave runs
+                // (launder prevention) instead of the bare normalizer.
+                let (sanitized_put_roots, dropped) = codewhale_core::sanitize_workspace_roots(
+                    &snapshot.workspace,
+                    &snapshot.workspace_roots,
+                );
+                warn_sanitized_dropped("session update from a live snapshot", dropped);
+                updated.metadata.workspace_roots = sanitized_put_roots;
                 updated
             }
             Err(e) => {
@@ -793,6 +917,14 @@ pub(super) async fn save_current_session(
                         &snapshot.model_provider,
                         snapshot.model_provider_id.as_deref(),
                     );
+                    // Round-42 minor 8: the sanitize belt on every mint arm (the update arm
+                    // already runs it — the create/recover arms cloned verbatim).
+                    let (sanitized_roots, dropped) = codewhale_core::sanitize_workspace_roots(
+                        &snapshot.workspace,
+                        &snapshot.workspace_roots,
+                    );
+                    warn_sanitized_dropped("session recovery mint", dropped);
+                    session.metadata.workspace_roots = sanitized_roots;
                     session
                 } else {
                     return Err(ApiError::internal(format!(
@@ -814,6 +946,14 @@ pub(super) async fn save_current_session(
             &snapshot.model_provider,
             snapshot.model_provider_id.as_deref(),
         );
+        // Round-42 minor 8: the sanitize belt on every mint arm (the update arm
+        // already runs it — the create/recover arms cloned verbatim).
+        let (sanitized_roots, dropped) = codewhale_core::sanitize_workspace_roots(
+            &snapshot.workspace,
+            &snapshot.workspace_roots,
+        );
+        warn_sanitized_dropped("session mint", dropped);
+        session.metadata.workspace_roots = sanitized_roots;
         session
     };
 
@@ -972,9 +1112,9 @@ fn map_session_err(id: &str, err: std::io::Error, action: &str) -> ApiError {
         std::io::ErrorKind::InvalidInput => {
             ApiError::bad_request(format!("Invalid session id '{id}'"))
         }
-        // The session is open in an interactive Codewhale session, which holds
-        // the authoritative copy in memory. Fail closed with a typed conflict
-        // rather than write something its next autosave would revert.
+        // Round-20 B20-3 retired the producing live-session guard, so this
+        // kind has no producer left on Unix; the mapping is retained
+        // defensively (a future io producer must not surface as a 500).
         std::io::ErrorKind::ResourceBusy => ApiError {
             status: StatusCode::CONFLICT,
             message: err.to_string(),
@@ -984,12 +1124,29 @@ fn map_session_err(id: &str, err: std::io::Error, action: &str) -> ApiError {
 }
 
 fn map_resume_thread_create_err(err: anyhow::Error) -> ApiError {
+    // Intake validation failures are client errors (round-24 P3): the
+    // resume lane forwards the SAVED session's workspace/roots into
+    // `create_thread`, whose validating intake can reject them — a
+    // hand-edited or migrated session row with a `/`-rooted or over-cap
+    // root set must answer 400 with the reason, exactly like the `/thread`
+    // and `/tool` lanes, not a server-fault 500.
+    if err
+        .downcast_ref::<codewhale_core::IntakeValidationError>()
+        .is_some()
+    {
+        return ApiError::bad_request(format!("Failed to create thread: {err}"));
+    }
     let reason = err.to_string();
     let message = format!("Failed to create thread: {reason}");
     if reason.starts_with("saved session has an empty provider identity")
         || reason.starts_with("saved session requires custom provider")
         || reason.starts_with("legacy session records only the generic `custom` provider kind")
         || reason.starts_with("legacy `provider = \"custom\"`")
+        // Round-38 minor: a legacy/hand-edited row with an EMPTY workspace
+        // is a client-side record defect (create_thread's own guard
+        // refuses it); the face's doctrine is 400 with the reason, not a
+        // 500 — the ACP lane refuses the same row with invalid_params.
+        || reason.starts_with("workspace must not be empty")
     {
         ApiError::bad_request(message)
     } else {
@@ -1099,5 +1256,26 @@ mod resume_thread_error_tests {
             "Failed to save runtime thread: permission denied"
         ));
         assert_eq!(storage.status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn intake_validation_errors_answer_400_like_the_thread_lane() {
+        // Round-24 P3: the resume lane forwards the saved session's root
+        // set into create_thread's validating intake; a rejected row (here
+        // a `/`-rooted set read back from a hand-edited session file) is a
+        // client-fixable record, not a server fault — the mapping must
+        // match the /thread and /tool lanes instead of the old 500.
+        let err = codewhale_core::validate_workspace_roots(
+            std::path::Path::new("/ws"),
+            &[std::path::PathBuf::from("/")],
+        )
+        .expect_err("a filesystem-root declaration is rejected at intake");
+        let mapped = map_resume_thread_create_err(err);
+        assert_eq!(mapped.status, StatusCode::BAD_REQUEST);
+        assert!(
+            mapped.message.contains("filesystem root"),
+            "the 400 body carries the intake reason: {}",
+            mapped.message
+        );
     }
 }

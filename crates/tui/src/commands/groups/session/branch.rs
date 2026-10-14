@@ -65,6 +65,11 @@ fn branch(app: &mut App, arg: Option<&str>) -> CommandResult {
         .unwrap_or(0);
     match session.journal_branch_to(entry_id) {
         Ok(()) => {
+            // Deliberately NOT stamping the live workspace/root set here
+            // (round-24 P3, enumerated against the "interactive lanes stamp"
+            // claim): this is a pure disk round-trip — load, move the
+            // journal leaf, save — and the leaf move cannot change the
+            // sandbox. The next autosave stamps the live set if it diverged.
             if let Err(e) = manager.save_session(&session) {
                 return CommandResult::error(format!("branch saved but persist failed: {e}"));
             }

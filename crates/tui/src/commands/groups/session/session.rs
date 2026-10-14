@@ -40,6 +40,27 @@ pub fn save(app: &mut App, path: Option<&str>) -> CommandResult {
         Err(err) => return CommandResult::error(format!("Failed to snapshot Work state: {err}")),
     };
     session.last_auto_route = app.auto_route_for_persistence();
+    // Stamp the live root set before the write, exactly like the fork paths
+    // and `build_session_snapshot`: the freshly built metadata carries an
+    // empty set, and an explicit-path `/save` has no later autosave to heal
+    // it — `/save` followed by quit durably degrades a multi-root session.
+    // Round-37 M37-4: the live set is validated before it is stamped — the
+    // tolerant-load lane can seed App with a hand-edited row's set, and
+    // persisting it verbatim would launder the poison past the intake every
+    // resume lane enforces. A clean live set passes unchanged.
+    session.metadata.workspace_roots =
+        match codewhale_core::validate_stored_workspace_roots(&app.workspace, &app.workspace_roots)
+        {
+            Ok(roots) => roots,
+            Err(err) => {
+                // Round-38 minor: localized like the sibling /cd and /fork <id>
+                // refusals (M37-8's doctrine applies to this wave's own copy).
+                return CommandResult::error(
+                    app.tr(crate::localization::MessageId::SaveLiveSetRefused)
+                        .replace("{reason}", &format!("{err:#}")),
+                );
+            }
+        };
     let save_path = explicit_save_path.unwrap_or_else(|| {
         let dir = crate::session_manager::default_sessions_dir()
             .unwrap_or_else(|_| app.workspace.clone());
@@ -147,6 +168,35 @@ pub fn fork_from_session(app: &mut App, session_id_or_prefix: &str) -> CommandRe
     forked.artifacts = source_session.artifacts.clone();
     forked.work_state = source_session.work_state.clone();
     forked.last_auto_route = source_session.last_auto_route.clone();
+    // The fork is anchored to the current workspace, so it takes the same
+    // primary-swap semantics `/cd` and the runtime PATCH workspace-only
+    // branch apply: the source's primary directory leaves the set — it is
+    // not this fork's directory — and the source's additional roots survive,
+    // re-normalized against the fork's own workspace. Stamping the source
+    // set verbatim would persist `workspace: <current>` next to a set led by
+    // the abandoned directory, which engine-side normalization then re-admits
+    // as a writable root on the next resume.
+    // Round-38 M38-3: the lexical head strip — a `..`-spelled copy of the
+    // abandoned primary must not ride the fork into the re-based set.
+    let additional_roots: Vec<std::path::PathBuf> = codewhale_core::strip_workspace_roots_head(
+        &source_session.metadata.workspace,
+        &source_session.metadata.workspace_roots,
+    );
+    // Round-20 should-fix 1: same intake rule as /cd and the runtime lanes —
+    // a re-based set that widens past the fork's primary must not persist.
+    forked.metadata.workspace_roots =
+        match codewhale_core::validate_workspace_roots(&app.workspace, &additional_roots) {
+            Ok(roots) => roots,
+            Err(err) => {
+                // Round-37 M37-8: the refusal is localized like its sibling
+                // messages (the /cd widening refusal ships in all 15 packs).
+                return CommandResult::error(
+                    app.tr(crate::localization::MessageId::ForkSourceSetRefused)
+                        .replace("{workspace}", &app.workspace.display().to_string())
+                        .replace("{reason}", &format!("{err:#}")),
+                );
+            }
+        };
     if let Err(err) = manager.save_session(&forked) {
         return CommandResult::error(format!("Failed to save forked session: {err}"));
     }
@@ -171,6 +221,7 @@ pub fn fork_from_session(app: &mut App, session_id_or_prefix: &str) -> CommandRe
                 .map(|s| crate::models::SystemPrompt::Text(s.clone())),
             model: forked.metadata.model.clone(),
             workspace: app.workspace.clone(),
+            workspace_roots: forked.metadata.workspace_roots.clone(),
             mode: app.mode,
         },
     )
@@ -223,6 +274,25 @@ pub fn fork(app: &mut App) -> CommandResult {
             .clone_from(&cached.parent_session_id);
         parent.metadata.forked_from_message_count = cached.forked_from_message_count;
     }
+    // The freshly constructed metadata has empty roots; the live App state
+    // is the current set for this session (it supersedes the cached copy,
+    // which the App itself wrote at the last snapshot). Stamp it before the
+    // save for the same durable-erasure reason as above. Round-37 M37-4:
+    // like every other fork face, the mint runs the validating intake — a
+    // tolerant-load seed's forbidden entries must not ride the plain fork
+    // into durable propagation across BOTH rows. A clean live set passes
+    // unchanged.
+    parent.metadata.workspace_roots =
+        match codewhale_core::validate_stored_workspace_roots(&app.workspace, &app.workspace_roots)
+        {
+            Ok(roots) => roots,
+            Err(err) => {
+                return CommandResult::error(
+                    app.tr(crate::localization::MessageId::ForkLiveSetRefused)
+                        .replace("{reason}", &format!("{err:#}")),
+                );
+            }
+        };
     app.sync_cost_to_metadata(&mut parent.metadata);
     parent.context_references = app.session_context_references.clone();
     parent.artifacts = app.session_artifacts.clone();
@@ -258,6 +328,7 @@ pub fn fork(app: &mut App) -> CommandResult {
         j.spawn_depth = parent.metadata.spawn_depth;
     }
     forked.metadata.mark_forked_from(&parent.metadata);
+    forked.metadata.workspace_roots = parent.metadata.workspace_roots.clone();
     forked.context_references = app.session_context_references.clone();
     forked.artifacts = app.session_artifacts.clone();
     forked.work_state = work_state;
@@ -289,6 +360,7 @@ pub fn fork(app: &mut App) -> CommandResult {
             system_prompt: app.system_prompt.clone(),
             model: app.model.clone(),
             workspace: app.workspace.clone(),
+            workspace_roots: parent.metadata.workspace_roots.clone(),
             mode: app.mode,
         },
     )
@@ -351,6 +423,7 @@ pub fn new_session(app: &mut App, arg: Option<&str>) -> CommandResult {
             system_prompt: None,
             model: app.model.clone(),
             workspace: app.workspace.clone(),
+            workspace_roots: Vec::new(),
             mode: app.mode,
         },
     )
@@ -665,6 +738,73 @@ mod tests {
     }
 
     #[test]
+    fn save_stamps_the_live_workspace_roots() {
+        let tmpdir = TempDir::new().unwrap();
+        let mut app = create_test_app_with_tmpdir(&tmpdir);
+        let save_path = tmpdir.path().join("roots_session.json");
+        app.workspace_roots = vec![app.workspace.clone(), tmpdir.path().join("shared")];
+
+        let result = save(&mut app, Some(save_path.to_str().unwrap()));
+
+        assert!(!result.is_error, "{:?}", result.message);
+        let saved: crate::session_manager::SavedSession =
+            serde_json::from_str(&std::fs::read_to_string(&save_path).unwrap()).unwrap();
+        assert_eq!(
+            saved.metadata.workspace_roots,
+            vec![app.workspace.clone(), tmpdir.path().join("shared")],
+            "an explicit-path /save must persist the live set, or /save-then-quit degrades it"
+        );
+        assert_eq!(saved.metadata.workspace, app.workspace);
+    }
+
+    #[test]
+    fn fork_from_session_swaps_the_primary_and_keeps_additional_roots() {
+        let tmpdir = TempDir::new().unwrap();
+        let _lock = crate::test_support::lock_test_env();
+        let home = tmpdir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let home_guard = EnvVarGuard::set("HOME", &home);
+        let mut app = create_test_app_with_tmpdir(&tmpdir);
+        app.workspace = tmpdir.path().join("current");
+        app.workspace_roots = vec![app.workspace.clone()];
+
+        let manager = crate::session_manager::SessionManager::default_location().unwrap();
+        let abandoned = tmpdir.path().join("abandoned");
+        let shared = tmpdir.path().join("shared");
+        let mut source = create_saved_session_with_id_and_mode(
+            "source-session".to_string(),
+            &[crate::models::Message {
+                role: Role::User,
+                content: vec![crate::models::ContentBlock::Text {
+                    text: "fork me elsewhere".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            &app.model,
+            &abandoned,
+            0,
+            None,
+            Some(app.mode.label()),
+        );
+        source.metadata.workspace_roots = vec![abandoned.clone(), shared.clone()];
+        manager.save_session(&source).unwrap();
+
+        let result = fork_from_session(&mut app, "source-session");
+
+        assert!(!result.is_error, "{:?}", result.message);
+        let fork = manager
+            .load_session(app.current_session_id.as_deref().expect("fork id"))
+            .expect("fork persisted");
+        assert_eq!(fork.metadata.workspace, app.workspace);
+        assert_eq!(
+            fork.metadata.workspace_roots,
+            vec![app.workspace.clone(), shared],
+            "the fork's primary is its own workspace; the abandoned primary must not re-enter"
+        );
+        drop(home_guard);
+    }
+
+    #[test]
     fn fork_saves_parent_and_switches_to_child_session() {
         let tmpdir = TempDir::new().unwrap();
         let _lock = crate::test_support::lock_test_env();
@@ -775,6 +915,56 @@ mod tests {
     }
 
     #[test]
+    fn fork_stamps_the_live_workspace_roots() {
+        let tmpdir = TempDir::new().unwrap();
+        let _lock = crate::test_support::lock_test_env();
+        let home = tmpdir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let home_guard = EnvVarGuard::set("HOME", &home);
+        let mut app = create_test_app_with_tmpdir(&tmpdir);
+        app.current_session_id = Some("parent-roots".to_string());
+        let shared = tmpdir.path().join("shared");
+        app.workspace_roots = vec![app.workspace.clone(), shared.clone()];
+        app.api_messages.push(crate::models::Message {
+            role: Role::User,
+            content: vec![crate::models::ContentBlock::Text {
+                text: "fork with roots".to_string(),
+                cache_control: None,
+            }],
+        });
+
+        let result = fork(&mut app);
+
+        assert!(!result.is_error, "{:?}", result.message);
+        let manager = crate::session_manager::SessionManager::default_location().unwrap();
+        let expected = vec![app.workspace.clone(), shared];
+        let parent = manager.load_session("parent-roots").expect("parent saved");
+        assert_eq!(
+            parent.metadata.workspace_roots, expected,
+            "the /fork parent save must persist the live set, or the fork's own \
+             save degrades it on the next snapshot"
+        );
+        let fork_id = app.current_session_id.clone().expect("fork session id");
+        let child = manager.load_session(&fork_id).expect("child saved");
+        assert_eq!(
+            child.metadata.workspace_roots, expected,
+            "the forked session inherits the parent's live set"
+        );
+        match result.action {
+            Some(AppAction::SyncSession {
+                workspace_roots, ..
+            }) => {
+                assert_eq!(
+                    workspace_roots, expected,
+                    "the SyncSession handoff carries the same set the fork persisted"
+                );
+            }
+            other => panic!("fork must hand off a SyncSession, got {other:?}"),
+        }
+        drop(home_guard);
+    }
+
+    #[test]
     fn fork_rejects_active_runtime_without_switching_sessions() {
         let tmpdir = TempDir::new().unwrap();
         let mut app = create_test_app_with_tmpdir(&tmpdir);
@@ -847,6 +1037,127 @@ mod tests {
             }
             other => panic!("expected SyncSession action, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn fork_from_session_refuses_a_poisoned_source_row() {
+        // Round-38 minor 9: the ForkSourceSetRefused arm stays validating
+        // and persists nothing — the base behavior persisted the raw
+        // source set, so the pin must hold both directions.
+        let tmpdir = TempDir::new().unwrap();
+        let _lock = crate::test_support::lock_test_env();
+        let home = tmpdir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let home_guard = EnvVarGuard::set("HOME", &home);
+        let mut app = create_test_app_with_tmpdir(&tmpdir);
+        app.workspace = tmpdir.path().join("current");
+        app.workspace_roots = vec![app.workspace.clone()];
+
+        let manager = crate::session_manager::SessionManager::default_location().unwrap();
+        let abandoned = tmpdir.path().join("abandoned");
+        let mut source = create_saved_session_with_id_and_mode(
+            "poisoned-source".to_string(),
+            &[crate::models::Message {
+                role: Role::User,
+                content: vec![crate::models::ContentBlock::Text {
+                    text: "poisoned source".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            &app.model,
+            &abandoned,
+            0,
+            None,
+            Some(app.mode.label()),
+        );
+        source.metadata.workspace_roots = vec![abandoned.clone(), std::path::PathBuf::from("/")];
+        manager.save_session(&source).unwrap();
+
+        let result = fork_from_session(&mut app, "poisoned-source");
+        drop(home_guard);
+
+        assert!(
+            result.is_error,
+            "a poisoned source row must not ride the /fork <id> re-base"
+        );
+        let msg = result.message.expect("refusal message");
+        assert!(
+            msg.contains("The fork is refused") && msg.contains("filesystem root"),
+            "the refusal names the widening and the remedy: {msg}"
+        );
+        assert_eq!(
+            app.current_session_id.as_deref(),
+            None,
+            "the refused fork must not switch the active session"
+        );
+        // Nothing was minted: the store still holds exactly the source row
+        // (a persisted fork would add a second session file).
+        let rows = manager.list_sessions().unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "the refusal must not persist a fork row: {rows:?}"
+        );
+        assert_eq!(rows[0].id, "poisoned-source");
+    }
+
+    #[test]
+    fn save_and_plain_fork_refuse_a_poisoned_live_root_set() {
+        // Round-37 M37-4: /save and the plain /fork stamped the live set
+        // with no intake, while every other fork face validates its mint —
+        // a fault-tolerant seed's forbidden entries (here the filesystem
+        // root) would durably propagate across both rows.
+        let tmpdir = TempDir::new().unwrap();
+        let mut app = create_test_app_with_tmpdir(&tmpdir);
+        let save_path = tmpdir.path().join("poisoned_session.json");
+        app.workspace_roots = vec![app.workspace.clone(), std::path::PathBuf::from("/")];
+
+        let result = save(&mut app, Some(save_path.to_str().unwrap()));
+        assert!(
+            result.is_error,
+            "a poisoned live set must not be persisted by /save"
+        );
+        let msg = result.message.expect("refusal message");
+        assert!(
+            msg.contains("no longer passes intake"),
+            "the refusal names the intake reason: {msg}"
+        );
+        assert!(
+            !save_path.exists(),
+            "the poisoned row must not reach the disk"
+        );
+
+        let _lock = crate::test_support::lock_test_env();
+        let home = tmpdir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let home_guard = EnvVarGuard::set("HOME", &home);
+        let mut app = create_test_app_with_tmpdir(&tmpdir);
+        app.current_session_id = Some("parent-poisoned".to_string());
+        app.workspace_roots = vec![app.workspace.clone(), std::path::PathBuf::from("/")];
+        app.api_messages.push(crate::models::Message {
+            role: Role::User,
+            content: vec![crate::models::ContentBlock::Text {
+                text: "fork with poison".to_string(),
+                cache_control: None,
+            }],
+        });
+
+        let result = fork(&mut app);
+        drop(home_guard);
+        assert!(
+            result.is_error,
+            "a poisoned live set must not ride the plain /fork into two rows"
+        );
+        let msg = result.message.expect("refusal message");
+        assert!(
+            msg.contains("no longer passes intake"),
+            "the refusal names the intake reason: {msg}"
+        );
+        assert_eq!(
+            app.current_session_id.as_deref(),
+            Some("parent-poisoned"),
+            "the refused fork must not switch the active session"
+        );
     }
 
     #[test]

@@ -3870,6 +3870,93 @@ fn create_test_app() -> App {
 }
 
 #[test]
+fn autosave_snapshot_sanitizes_a_poisoned_live_root_set() {
+    // Round-39 minor 11: the autosave belt's non-identity case — a live set
+    // carrying poison (which the seed strips; this is the defense in depth)
+    // is sanitized onto the persisted snapshot instead of laundered.
+    let tmpdir = tempfile::TempDir::new().unwrap();
+    let mut app = create_test_app();
+    app.workspace = tmpdir.path().join("ws");
+    std::fs::create_dir_all(&app.workspace).unwrap();
+    let keep = tmpdir.path().join("keep");
+    std::fs::create_dir_all(&keep).unwrap();
+    app.workspace_roots = vec![
+        app.workspace.clone(),
+        std::path::PathBuf::from("/"),
+        keep.clone(),
+    ];
+
+    let manager =
+        crate::session_manager::SessionManager::new(tmpdir.path().join("sessions")).unwrap();
+    let snapshot =
+        super::frame::build_session_snapshot(&mut app, &manager).expect("snapshot builds");
+
+    assert_eq!(
+        snapshot.metadata.workspace_roots,
+        vec![app.workspace.clone(), keep],
+        "the belt strips the poison from the persisted snapshot"
+    );
+}
+
+#[test]
+fn sanitized_roots_receipt_is_localized_and_names_the_count() {
+    // Round-39 minor 1: the user-visible half of strip-and-warn — the
+    // receipt renders the localized message with the count substituted,
+    // carries no folded-source space runs, and names the actionable remedy
+    // (/workspace re-attach), not the unactionable "repair outside the
+    // TUI" (the next autosave persists the reduced set regardless).
+    let mut app = create_test_app();
+    super::session_state::note_sanitized_loaded_roots(&mut app, 3);
+    let message = app.status_message.expect("receipt surfaced");
+    assert!(message.contains('3'), "the count is substituted: {message}");
+    assert!(
+        !message.contains("  "),
+        "no folded-source space runs ship in the receipt: {message:?}"
+    );
+    assert!(
+        !message.contains("/workspace"),
+        "the remedy must not name a producer the TUI does not have: {message}"
+    );
+    assert!(
+        message.contains("reload") || message.contains("Reload"),
+        "the remedy names the reload path that actually drops the refused roots: {message}"
+    );
+
+    // Zero drops stay silent.
+    let mut app = create_test_app();
+    super::session_state::note_sanitized_loaded_roots(&mut app, 0);
+    assert!(app.status_message.is_none(), "a clean load gets no receipt");
+}
+
+#[test]
+fn workspace_move_and_conversation_change_clear_session_approval_sets() {
+    // Round-37 M37-6: session grants/denials are keyed to the primary the
+    // approval was judged under (operand resolution + patch root binding),
+    // so installing a different workspace or a different conversation must
+    // drop the stale set instead of letting it auto-approve the same
+    // spellings re-resolved under the new root.
+    let mut app = create_test_app();
+    app.approval_session_approved
+        .insert("shell:2:sh@cwd:8:/old/sub".to_string());
+    app.approval_session_denied
+        .insert("file:edit_file:abc".to_string());
+    assert_eq!(app.approval_session_approved.len(), 1);
+    assert_eq!(app.approval_session_denied.len(), 1);
+
+    let config = crate::config::Config::default();
+    let moved = std::env::temp_dir().join(format!("m37-6-move-{}", std::process::id()));
+    super::apply::apply_workspace_runtime_state(&mut app, &config, moved);
+    assert!(
+        app.approval_session_approved.is_empty(),
+        "a workspace move orphans every root-bound grant"
+    );
+    assert!(
+        app.approval_session_denied.is_empty(),
+        "the denial receipts move with the same anchor"
+    );
+}
+
+#[test]
 fn runtime_chat_short_circuits_inline_voice_and_cache_actions_before_ui_mutation() {
     let mut app = create_test_app();
     app.remote_control.block_runtime_chat_dispatch_for_tests();
@@ -6598,6 +6685,7 @@ fn saved_session_with_messages(messages: Vec<Message>) -> SavedSession {
             model_provider: "deepseek".to_string(),
             model_provider_id: None,
             workspace: PathBuf::from("/tmp/resume-recovery"),
+            workspace_roots: Vec::new(),
             mode: Some("yolo".to_string()),
             cost: crate::session_manager::SessionCostSnapshot::default(),
             parent_session_id: None,
@@ -6638,6 +6726,43 @@ fn named_custom_session_config(name: &str, base_url: &str, model: &str) -> Confi
         }),
         ..Config::default()
     }
+}
+
+#[test]
+fn apply_loaded_session_refuses_a_relative_workspace_with_localized_copy() {
+    // Round-45 R45-3: the refusal surfaces through "Failed to restore
+    // session: {err}", so it is user-facing copy and must ride the
+    // localized MessageId — asserting on a non-English locale also pins
+    // that no hardcoded English leak survives. The localization lookup
+    // needs the larger debug-build stack (R45-1/P2-8), so the body runs on
+    // an explicitly sized thread.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let mut app = create_test_app();
+            app.ui_locale = crate::localization::Locale::Ja;
+            let mut session = saved_session_with_messages(Vec::new());
+            session.metadata.workspace = std::path::PathBuf::from("relative/ws");
+            let err = apply_loaded_session(&mut app, &mut Config::default(), &session)
+                .expect_err("a relative saved workspace must be refused");
+            assert_eq!(
+                err,
+                crate::localization::tr(
+                    crate::localization::Locale::Ja,
+                    crate::localization::MessageId::SessionRestoreWorkspaceInvalid
+                )
+            );
+            assert_ne!(
+                err,
+                crate::localization::tr(
+                    crate::localization::Locale::En,
+                    crate::localization::MessageId::SessionRestoreWorkspaceInvalid
+                )
+            );
+        })
+        .expect("spawn localized-refusal test thread")
+        .join()
+        .expect("localized-refusal test thread panicked");
 }
 
 #[test]
@@ -17609,6 +17734,14 @@ fn session_snapshot_and_resume_round_trip_work_state() {
     let manager =
         crate::session_manager::SessionManager::new(tmp.path().join("sessions")).expect("manager");
     let mut app = create_test_app();
+    // Round-42 minor 9: absolute fixture workspace (the restore lane
+    // refuses relative primaries now).
+    app.workspace = std::env::temp_dir()
+        .join(format!("snapshot-roundtrip-{}", std::process::id()))
+        .canonicalize()
+        .unwrap_or_else(|_| {
+            std::env::temp_dir().join(format!("snapshot-roundtrip-{}", std::process::id()))
+        });
     app.api_messages.push(text_message("user", "keep my work"));
     app.api_messages
         .push(text_message("assistant", "continuity captured"));
@@ -17823,6 +17956,28 @@ fn legacy_session_without_work_state_clears_previous_todo_on_load() {
 
     apply_loaded_session(&mut app, &mut Config::default(), &session).expect("restore session");
     assert_eq!(app.work_state_snapshot().expect("snapshot"), None);
+}
+
+#[test]
+fn empty_workspace_session_restore_is_rejected_and_leaves_current_session_intact() {
+    // Regression pin: a legacy or hand-edited record with `workspace: ""`
+    // used to resume unchallenged, seeding the vacuous containment root
+    // (`starts_with("")` accepts every path) into the restored session.
+    let mut app = create_test_app();
+    app.api_messages
+        .push(text_message("user", "current conversation"));
+    app.current_session_id = Some("current-session".to_string());
+    let mut session = saved_session_with_messages(vec![text_message("user", "legacy")]);
+    session.metadata.workspace = PathBuf::new();
+
+    let err = apply_loaded_session(&mut app, &mut Config::default(), &session).unwrap_err();
+
+    assert!(
+        err.contains("workspace must be a non-empty absolute path"),
+        "{err}"
+    );
+    assert_eq!(app.api_messages.len(), 1);
+    assert_eq!(app.current_session_id.as_deref(), Some("current-session"));
 }
 
 #[test]
@@ -18425,6 +18580,9 @@ fn auto_route_receipt_survives_session_snapshot_and_restore() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let manager =
         crate::session_manager::SessionManager::new(tmp.path().join("sessions")).expect("manager");
+    // Round-42 minor 9: the restore lane refuses relative primaries now —
+    // pin the app to the absolute fixture workspace real sessions carry.
+    let workspace = tmp.path().canonicalize().expect("canonical workspace");
     let receipt = crate::model_routing::AutoRouteReceipt {
         tier: crate::model_routing::AutoRouteTier::Strong,
         pair: crate::model_routing::AutoRoutePair {
@@ -18438,6 +18596,7 @@ fn auto_route_receipt_survives_session_snapshot_and_restore() {
         ),
     };
     let mut app = create_test_app();
+    app.workspace = workspace.clone();
     app.set_model_selection("auto".to_string());
     app.last_effective_provider = Some(ApiProvider::Zai);
     app.last_effective_provider_identity = Some("zai".to_string());
@@ -20862,6 +21021,7 @@ async fn approval_decision_persists_ask_rules_to_permissions_file() {
             path: None,
             ask_for_approval: codewhale_execpolicy::AskForApproval::OnFailure,
             sandbox_mode: None,
+            workspace_roots: Vec::new(),
         })
         .expect("check persisted runtime policy");
     assert!(decision.requires_approval);
@@ -20918,6 +21078,7 @@ async fn approval_decision_persists_exact_workspace_allow_rule() {
             path: None,
             ask_for_approval: codewhale_execpolicy::AskForApproval::OnRequest,
             sandbox_mode: None,
+            workspace_roots: Vec::new(),
         })
         .expect("check persisted allow");
     assert_eq!(
@@ -20935,6 +21096,7 @@ async fn approval_decision_persists_exact_workspace_allow_rule() {
             path: None,
             ask_for_approval: codewhale_execpolicy::AskForApproval::OnRequest,
             sandbox_mode: None,
+            workspace_roots: Vec::new(),
         })
         .expect("check expanded command");
     assert!(expanded.requires_approval);

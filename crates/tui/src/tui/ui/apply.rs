@@ -1101,6 +1101,7 @@ pub(crate) async fn apply_provider_fallback_switch(
                 system_prompt_override: false,
                 model: app.model.clone(),
                 workspace: app.workspace.clone(),
+                workspace_roots: app.workspace_roots.clone(),
                 mode: app.mode,
             })
             .await;
@@ -1215,6 +1216,19 @@ pub(crate) async fn apply_command_result(
                         return Ok(false);
                     }
                 };
+                // The persisted metadata is the only roots source in the TUI
+                // (no multi-root UI): seed the app state only after every
+                // fallible restore step has succeeded, so a failed load
+                // cannot leave the *current* session's engine inheriting a
+                // foreign root set through the next routine re-sync. Seeded
+                // under the RECORD primary (B27-1/B27-2): the restore has
+                // already re-homed the app there, so this is a pure load and
+                // the launch directory never enters the set.
+                crate::tui::ui::session_state::seed_loaded_workspace_roots_into(
+                    app,
+                    &session.metadata.workspace,
+                    &session.metadata.workspace_roots,
+                );
                 sync_runtime_workspace_state(task_manager, app.workspace.clone()).await;
                 if respawn {
                     let _ = engine_handle.send(Op::Shutdown).await;
@@ -1236,6 +1250,7 @@ pub(crate) async fn apply_command_result(
                         system_prompt_override: false,
                         model: app.model.clone(),
                         workspace: app.workspace.clone(),
+                        workspace_roots: app.workspace_roots.clone(),
                         mode: app.mode,
                     })
                     .await;
@@ -1254,6 +1269,13 @@ pub(crate) async fn apply_command_result(
                     content: success_message.clone(),
                 });
                 app.status_message = Some(success_message);
+                // The imported record's root set arrived from another host;
+                // name it in the transcript beside the load receipt.
+                if let Some(notice) =
+                    workspace_roots_notice(app.ui_locale, &app.workspace, &app.workspace_roots)
+                {
+                    app.add_message(HistoryCell::System { content: notice });
+                }
                 // A loaded session is the working screen. The launch card's
                 // recent rows reach here through `/resume`-shaped dispatch;
                 // leaving the launch stage visible over the restored
@@ -1267,19 +1289,53 @@ pub(crate) async fn apply_command_result(
                 system_prompt,
                 model,
                 workspace,
+                workspace_roots,
                 mode,
             } => {
                 let mut session_id = session_id;
                 let is_full_reset = messages.is_empty() && system_prompt.is_none();
+                let previous_session_id = app.current_session_id.clone();
                 if is_full_reset && session_id.is_none() {
                     let new_session_id = uuid::Uuid::new_v4().to_string();
                     app.current_session_id = Some(new_session_id.clone());
                     session_id = Some(new_session_id);
                 }
+                // Round-37 M37-6: a session grant/denial belongs to the
+                // conversation it was approved in. A fork, a full reset, or
+                // a different session's load installs a NEW conversation —
+                // even over the same workspace — so the sets reset here too
+                // (a workspace move clears them inside
+                // `apply_workspace_runtime_state`). Same-session re-syncs
+                // keep their grants.
+                if is_full_reset || session_id != previous_session_id {
+                    app.approval_session_approved.clear();
+                    app.approval_session_denied.clear();
+                }
                 let workspace_changed = task_manager.default_workspace().await != workspace;
                 if workspace_changed {
                     apply_workspace_runtime_state(app, config, workspace.clone());
                     sync_runtime_workspace_state(task_manager, workspace.clone()).await;
+                }
+                // The action is the roots authority for this transition (a
+                // fork carries the parent's set, a new session carries an
+                // empty one). Record it in the same step as the workspace
+                // above: the provider restore below can fail and return
+                // early, and leaving the previous session's set paired with
+                // the new workspace would make every later re-sync send a
+                // workspace whose primary root is the old directory.
+                let previous_workspace_roots = app.workspace_roots.clone();
+                app.workspace_roots = workspace_roots.clone();
+                // Round-37 M37-8: a SyncSession that INSTALLS a different
+                // root set (a fork carrying the parent's set, a loaded
+                // conversation) discloses it like every other loading face —
+                // the bare "Forked <id>" receipt must not be the only trace
+                // of a silently swapped live set. The notice renders only for
+                // a set with additional roots.
+                if workspace_roots != previous_workspace_roots
+                    && let Some(notice) =
+                        workspace_roots_notice(app.ui_locale, &app.workspace, &app.workspace_roots)
+                {
+                    app.add_message(HistoryCell::System { content: notice });
                 }
                 let provider_changed = config.api_provider() != app.api_provider
                     || config.provider_identity_for(config.api_provider())
@@ -1327,6 +1383,7 @@ pub(crate) async fn apply_command_result(
                         system_prompt_override: false,
                         model,
                         workspace,
+                        workspace_roots,
                         mode,
                     })
                     .await;
@@ -1404,6 +1461,7 @@ pub(crate) async fn apply_command_result(
                             system_prompt_override: false,
                             model: app.model.clone(),
                             workspace: app.workspace.clone(),
+                            workspace_roots: app.workspace_roots.clone(),
                             mode: app.mode,
                         })
                         .await;
@@ -2291,6 +2349,7 @@ pub(crate) async fn apply_command_result(
                                     system_prompt_override: false,
                                     model: app.model.clone(),
                                     workspace: app.workspace.clone(),
+                                    workspace_roots: app.workspace_roots.clone(),
                                     mode: app.mode,
                                 })
                                 .await;
@@ -2427,6 +2486,14 @@ fn edit_project_hooks_from_tui(terminal: &mut AppTerminal, app: &mut App, config
 
 pub(crate) fn apply_workspace_runtime_state(app: &mut App, config: &Config, workspace: PathBuf) {
     app.workspace = workspace.clone();
+    // Round-37 M37-6: session approval grants/denials are keyed to the
+    // primary the approval was judged under (shell operand resolution and
+    // the patch family both bind the root). The whole set is stale the
+    // moment the workspace moves — an approved `cwd: "sub"` family or patch
+    // path set must not auto-approve the same spellings re-resolved under
+    // the new root.
+    app.approval_session_approved.clear();
+    app.approval_session_denied.clear();
     app.coordination_detail = None;
     app.plugin_registry = app.plugin_registry.rediscover_for_workspace(&workspace);
     for error in crate::commands::user_registry::install_plugin_registry(
@@ -3300,6 +3367,24 @@ pub(crate) fn apply_loaded_session_with_goal(
         return Err(
             "runtime work is active; wait for the current turn, maintenance, and background tasks to finish, or cancel that specific work before switching sessions".to_string(),
         );
+    }
+    if session.metadata.workspace.as_os_str().is_empty()
+        || !session.metadata.workspace.is_absolute()
+    {
+        // A legacy or hand-edited record with an empty or RELATIVE
+        // workspace would seed the vacuous containment root
+        // (`starts_with("")` accepts every path; a relative primary leaves
+        // every file tool answering PathEscape forever). Refuse the restore
+        // like any other invalid saved state — the same rule ACP
+        // session/load and (since round-41 M41-1) the REST resume-thread
+        // lane apply (round-42 minor 9). Round-45 R45-3: user-facing copy
+        // ships as a localized MessageId (it surfaces through "Failed to
+        // restore session: {err}"), not hardcoded English.
+        return Err(crate::localization::tr(
+            app.ui_locale,
+            crate::localization::MessageId::SessionRestoreWorkspaceInvalid,
+        )
+        .into_owned());
     }
     if let Some(goal) = goal {
         goal.validate()

@@ -937,6 +937,29 @@ pub trait CommandSkillGroupContext {
     /// `/restore <N>`: host restores by snapshot id; handler composes the
     /// exact success message from its list entry.
     fn restore_snapshot(&mut self, id: &str) -> Result<(), String>;
+    /// `/restore` rollback scope: true when the session root set has entries
+    /// beyond the primary workspace. Snapshots are primary-bound, so the
+    /// handler must name the boundary instead of implying every accessible
+    /// root was reverted.
+    fn restore_covers_primary_only(&self) -> bool;
     /// `/restore` trust gate posture (yolo / trust_mode).
     fn approval_state(&self) -> CommandApprovalState;
+    /// `/restore` rollback-boundary disclosure text. The default is the
+    /// stable English sentence shared verbatim with the model/API lanes
+    /// ([`ATTACHED_ROOTS_NOT_REVERTED_NOTE`]); hosts with a localized
+    /// human-facing surface (the TUI) override it with their translated
+    /// form so the same disclosure is not English-only on one face
+    /// (round-45 R45-3).
+    fn attached_roots_not_reverted_note(&self) -> String {
+        ATTACHED_ROOTS_NOT_REVERTED_NOTE.to_string()
+    }
 }
+
+/// Honesty clause for revert/undo/restore reports when the session root set
+/// extends beyond the primary workspace: the snapshot side-repo is rooted at
+/// the primary, so a restore rolls back only the primary while attached-root
+/// writes persist. Owned here (single source) so the portable `/restore`
+/// handler and the host's model/API lanes can never drift; the TUI re-exports
+/// it from `crate::snapshot` and layers the localized form on top.
+pub const ATTACHED_ROOTS_NOT_REVERTED_NOTE: &str =
+    "Only the primary workspace was reverted; attached workspace roots were not rolled back.";

@@ -5,6 +5,45 @@ use std::os::unix::fs::symlink;
 use tempfile::tempdir;
 
 #[test]
+#[cfg(unix)]
+fn new_target_through_an_alias_of_another_declared_root_resolves() {
+    // Round-43 P2-1: primary/link is a symlink into the attached root
+    // (a declared root). Creating link/new.txt — a target that does not
+    // exist yet, spelled through the alias — must resolve like the
+    // direct attached-root/new.txt spelling: the deepest-existing
+    // walk lands under the attached root and the containment check
+    // accepts every declared root, not only the workspace pair.
+    let temp = tempdir().expect("tempdir");
+    let primary = temp.path().join("primary");
+    let attached = temp.path().join("attached");
+    std::fs::create_dir_all(&primary).expect("primary");
+    std::fs::create_dir_all(&attached).expect("attached root");
+    let alias = primary.join("link");
+    symlink(&attached, &alias).expect("alias into the attached root");
+
+    let context = ToolContext::new(primary.clone())
+        .with_workspace_roots(vec![primary.clone(), attached.clone()]);
+    let resolved = context
+        .resolve_path(alias.join("new.txt").to_str().expect("utf8"))
+        .expect("a new target inside a declared root resolves through the alias spelling");
+    let normalized = normalize_path(&resolved);
+    // R44-2: the expected prefix canonicalizes through the same walk — on
+    // macOS the tempdir's /var spelling resolves to /private/var and
+    // comparing a canonical result against the raw spelling fails.
+    let attached_real = attached.canonicalize().unwrap_or_else(|_| attached.clone());
+    assert!(
+        normalized.starts_with(normalize_path(&attached_real)),
+        "the alias-spelled creation resolves under the attached root: {normalized:?}"
+    );
+
+    // The direct spelling resolves to the same containment.
+    let direct = context
+        .resolve_path(attached.join("new.txt").to_str().expect("utf8"))
+        .expect("the direct spelling resolves");
+    assert_eq!(normalize_path(&direct), normalized);
+}
+
+#[test]
 fn test_tool_result_success() {
     let result = ToolResult::success("hello");
     assert!(result.success);
@@ -72,6 +111,144 @@ fn test_tool_context_resolve_path_normalizes_parent() {
 
     let result = ctx.resolve_path("new/../safe.txt");
     assert!(result.is_ok());
+}
+
+#[test]
+fn test_tool_context_resolve_path_allows_additional_workspace_roots() {
+    let workspace = tempdir().expect("workspace tempdir");
+    let shared = tempdir().expect("shared root tempdir");
+    std::fs::write(shared.path().join("lib.rs"), "// shared\n").expect("write");
+    let ctx = ToolContext::new(workspace.path().to_path_buf())
+        .with_workspace_roots(vec![shared.path().to_path_buf()]);
+
+    // Existing and not-yet-existing files under an additional root resolve.
+    let existing = ctx
+        .resolve_path(shared.path().join("lib.rs").to_string_lossy().as_ref())
+        .expect("existing file under additional root");
+    assert!(existing.ends_with("lib.rs"));
+    let created = ctx
+        .resolve_path(
+            shared
+                .path()
+                .join("new/dir/file.rs")
+                .to_string_lossy()
+                .as_ref(),
+        )
+        .expect("new file under additional root");
+    assert!(created.ends_with("file.rs"));
+
+    // A genuine escape is still denied, and the same path is denied when the
+    // root set is empty (the historical single-root boundary).
+    let escape = ctx.resolve_path("/etc/passwd");
+    assert!(matches!(escape, Err(ToolError::PathEscape { .. })));
+    let single_root = ToolContext::new(workspace.path().to_path_buf());
+    let denied = single_root.resolve_path(shared.path().join("lib.rs").to_string_lossy().as_ref());
+    assert!(matches!(denied, Err(ToolError::PathEscape { .. })));
+}
+
+#[test]
+fn test_tool_context_resolve_path_empty_string_root_stays_fail_closed() {
+    // Regression pin: an empty-string root accepted at intake used to reach
+    // boundary_roots() as ("", "") — Path::starts_with("") is true for every
+    // path, so both containment checks passed and read_file (approval Auto,
+    // no prompt in any posture) could read arbitrary filesystem paths.
+    let workspace = tempdir().expect("workspace tempdir");
+    let ctx = ToolContext::new(workspace.path().to_path_buf())
+        .with_workspace_roots(vec![PathBuf::from("")]);
+
+    let escape = ctx.resolve_path("/etc/passwd");
+    assert!(
+        matches!(escape, Err(ToolError::PathEscape { .. })),
+        "an empty-string declared root must not null containment"
+    );
+    // The primary root still works: the filter drops the poison entry, not
+    // the set.
+    let inside = workspace.path().join("ok.txt");
+    std::fs::write(&inside, "ok").expect("write");
+    assert!(ctx.resolve_path(inside.to_string_lossy().as_ref()).is_ok());
+}
+
+#[test]
+fn forkguard_workspace_roots_resolve_path_spans_attached_roots() {
+    let workspace = tempdir().expect("workspace tempdir");
+    let attached = tempdir().expect("attached root tempdir");
+    std::fs::write(attached.path().join("lib.rs"), "// attached\n").expect("write");
+    let ctx = ToolContext::new(workspace.path().to_path_buf())
+        .with_workspace_roots(vec![attached.path().to_path_buf()]);
+
+    // Attached root: existing and not-yet-existing targets resolve.
+    assert!(
+        ctx.resolve_path(attached.path().join("lib.rs").to_string_lossy().as_ref())
+            .is_ok()
+    );
+    assert!(
+        ctx.resolve_path(
+            attached
+                .path()
+                .join("new/file.rs")
+                .to_string_lossy()
+                .as_ref()
+        )
+        .is_ok()
+    );
+
+    // A path outside every root still fails closed.
+    assert!(matches!(
+        ctx.resolve_path("/etc/passwd"),
+        Err(ToolError::PathEscape { .. })
+    ));
+
+    // Empty root set = the exact historical single-root boundary: the same
+    // attached-root path is rejected.
+    let single_root = ToolContext::new(workspace.path().to_path_buf());
+    assert!(matches!(
+        single_root.resolve_path(attached.path().join("lib.rs").to_string_lossy().as_ref()),
+        Err(ToolError::PathEscape { .. })
+    ));
+}
+
+#[test]
+fn forkguard_workspace_roots_relative_target_resolves_against_primary_root() {
+    // Execution-layer pin: a relative target joins onto the PRIMARY root
+    // even when attached roots exist (ToolContext::resolve_path), never
+    // onto an attached root that happens to carry the same name. The
+    // approval layers rely on exactly this join.
+    let workspace = tempdir().expect("workspace tempdir");
+    let attached = tempdir().expect("attached root tempdir");
+    std::fs::write(workspace.path().join("note.txt"), "primary").expect("write");
+    std::fs::write(attached.path().join("note.txt"), "attached").expect("write");
+    let ctx = ToolContext::new(workspace.path().to_path_buf())
+        .with_workspace_roots(vec![attached.path().to_path_buf()]);
+
+    let resolved = ctx.resolve_path("note.txt").expect("resolve");
+    assert_eq!(
+        resolved,
+        workspace
+            .path()
+            .join("note.txt")
+            .canonicalize()
+            .expect("canonical"),
+        "a relative target must resolve against the primary root"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_tool_context_resolve_path_follow_symlinks_spans_additional_roots() {
+    let workspace = tempdir().expect("workspace tempdir");
+    let shared = tempdir().expect("shared root tempdir");
+    let outside = tempdir().expect("outside tempdir");
+    symlink(outside.path(), shared.path().join("link-out")).expect("symlink");
+    let ctx = ToolContext::new(workspace.path().to_path_buf())
+        .with_workspace_roots(vec![shared.path().to_path_buf()])
+        .with_follow_symlinks(true);
+
+    // In follow-symlinks mode the symlink's location is the gate; a link
+    // inside an additional root is accepted just like one in the primary.
+    let resolved = ctx
+        .resolve_path(shared.path().join("link-out").to_string_lossy().as_ref())
+        .expect("symlink inside additional root");
+    assert!(resolved.ends_with("link-out") || resolved == outside.path().canonicalize().unwrap());
 }
 
 #[test]
@@ -525,4 +702,80 @@ fn test_tool_error_display() {
 fn test_approval_requirement_default() {
     let level = ApprovalRequirement::default();
     assert_eq!(level, ApprovalRequirement::Auto);
+}
+
+#[test]
+fn rebased_roots_drop_the_parent_filled_boundary_memo() {
+    // Round-26 B26-1: a cloned context shares the parent's boundary memo
+    // Arc. The worktree spawn/resume sites used to clear/replace the root
+    // pair IN PLACE, so a parent that had already called resolve_path
+    // (filling the memo with the PARENT's boundary) left the child judging
+    // file-tool containment against the parent workspace plus its attached
+    // roots — the child could read the whole parent checkout through the
+    // exact isolation the worktree contract promises. `rebase_roots` swaps
+    // the pair AND the memo; this pin fills the parent memo first, exactly
+    // the shape the production probes showed was falsely covered before.
+    let base = tempfile::tempdir().expect("base tempdir");
+    let parent_ws = base.path().join("parent-ws");
+    std::fs::create_dir_all(&parent_ws).expect("parent dir");
+    let attached = base.path().join("attached");
+    std::fs::create_dir_all(&attached).expect("attached dir");
+    let secret = attached.join("secret.txt");
+    std::fs::write(&secret, "x").expect("secret");
+
+    // Parent: primary + attached root; one resolve_path FILLS the memo.
+    let parent = ToolContext::new(parent_ws.clone()).with_workspace_roots(vec![attached.clone()]);
+    let ok = parent
+        .resolve_path(secret.to_string_lossy().as_ref())
+        .expect("the attached root admits the path for the parent");
+    // M27-1: resolve_path canonicalizes its return — compare against the
+    // canonical spelling so the pin survives a symlinked temp root (macOS
+    // /var vs /private/var), instead of aborting before the isolation
+    // assertions on every stock macOS box.
+    let attached_canonical = attached.canonicalize().expect("canonical attached");
+    assert!(ok.starts_with(&attached_canonical));
+
+    // Child: a clone of the parent runtime's context, rebased onto a fresh
+    // worktree (the production spawn/resume shape).
+    let worktree = base.path().join("wt");
+    std::fs::create_dir_all(&worktree).expect("worktree dir");
+    let mut child = parent.clone();
+    child.rebase_roots(worktree.clone(), Vec::new());
+
+    let inside = worktree.join("file.txt");
+    std::fs::write(&inside, "x").expect("inside file");
+    assert!(
+        child
+            .resolve_path(inside.to_string_lossy().as_ref())
+            .is_ok(),
+        "the rebased child still resolves inside its own worktree"
+    );
+    assert!(
+        matches!(
+            child.resolve_path(secret.to_string_lossy().as_ref()),
+            Err(ToolError::PathEscape { .. })
+        ),
+        "the parent-filled memo must NOT survive the rebase: the parent's attached root is outside the child boundary"
+    );
+    assert!(
+        matches!(
+            child.resolve_path(
+                parent_ws
+                    .join("src")
+                    .join("lib.rs")
+                    .to_string_lossy()
+                    .as_ref()
+            ),
+            Err(ToolError::PathEscape { .. })
+        ),
+        "the parent's own workspace is outside the worktree child's boundary"
+    );
+
+    // Control: the untouched parent still admits the attached root (the
+    // rebase did not mutate the shared-clone parent's judgment).
+    assert!(
+        parent
+            .resolve_path(secret.to_string_lossy().as_ref())
+            .is_ok()
+    );
 }

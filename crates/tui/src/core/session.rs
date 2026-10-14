@@ -352,6 +352,12 @@ pub struct Session {
     /// Workspace directory
     pub workspace: PathBuf,
 
+    /// Additional workspace roots for this session; `workspace` is always the
+    /// primary root. Read on every turn when the sandbox policy, tool
+    /// boundary, and exec-policy context are materialized, so a root-set
+    /// change takes effect on the next turn. Empty means single-root.
+    pub workspace_roots: Vec<PathBuf>,
+
     /// System prompt (optional)
     pub system_prompt: Option<SystemPrompt>,
     /// True when `system_prompt` is a persisted/runtime-supplied prefix that
@@ -501,6 +507,7 @@ impl Session {
             reasoning_effort_auto: false,
             auto_model: false,
             workspace,
+            workspace_roots: Vec::new(),
             system_prompt: None,
             system_prompt_override: false,
             compaction_summary_prompt: None,

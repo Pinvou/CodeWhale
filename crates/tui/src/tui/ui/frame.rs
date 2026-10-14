@@ -713,6 +713,7 @@ pub(crate) fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         model: app.model.clone(),
         active_route_limits: app.active_route_limits,
         workspace: app.workspace.clone(),
+        workspace_roots: app.workspace_roots.clone(),
         // The App owns the session id (claimed before the Runtime store lock
         // and used for every checkpoint/autosave); the engine adopts it so the
         // engine conversation and the persisted session are the same record.
@@ -908,6 +909,18 @@ pub(crate) fn build_session_snapshot(
             Some(app.mode.as_setting()),
         )
     };
+    // Autosave must rewrite the roots the session runs with, not an empty
+    // set: an erased `workspace_roots` here durably degrades a multi-root
+    // session on disk. Round-38 M38-2: the stamp runs through the SAME
+    // sanitize the load faces use — a live set that somehow carries poison
+    // (the seed strips it; this is the belt) is stripped here instead of
+    // laundered onto disk, and the drop is logged for the record.
+    let (sanitized_roots, dropped_roots) =
+        codewhale_core::sanitize_workspace_roots(&app.workspace, &app.workspace_roots);
+    if dropped_roots > 0 {
+        tracing::warn!("autosave dropped {dropped_roots} workspace root(s) that failed the intake");
+    }
+    session.metadata.workspace_roots = sanitized_roots;
     let computed_title = session.metadata.title.clone();
     if let Some(cached) = app
         .current_session_metadata
@@ -971,15 +984,16 @@ pub(crate) fn build_session_snapshot(
     session.last_auto_route = app.auto_route_for_persistence();
     session.window_title.clone_from(&app.window_title);
     app.current_session_metadata = Some(session.metadata.clone());
-    // Claim ownership of this session for the process. From here on the
-    // Runtime API refuses external renames/archives of it with a typed 409
-    // rather than writing something the next snapshot would revert.
+    // Claim ownership of this session for the process. The registry's
+    // remaining consumer is the orphan-reclamation keep-chain: a live
+    // owner's session directory is never swept while the TUI holds it.
     //
     // Claiming here rather than at each of the ten `current_session_id`
     // assignment sites is deliberate: this is the function that establishes
     // "the TUI holds the authoritative copy", which is exactly the condition
-    // the conflict protects. A session that has never been snapshotted has no
-    // in-memory state to lose, so leaving it unclaimed is correct, not a gap.
+    // the keep-chain protects. A session that has never been snapshotted has
+    // no in-memory state to lose, so leaving it unclaimed is correct, not a
+    // gap.
     crate::session_manager::set_live_session(Some(&session.metadata.id));
     Ok(session)
 }
@@ -2036,6 +2050,32 @@ pub(crate) fn workflow_tool_is_running(app: &App) -> bool {
 mod tests {
     use super::{register_info_interaction_targets, render_info_row, short_title_truncate};
     use ratatui::{Terminal, backend::TestBackend};
+
+    /// The autosave chokepoint is a roots writer like any other: an erased
+    /// `workspace_roots` here durably degrades a multi-root session on disk,
+    /// so the stamp needs a behavior test of its own.
+    #[test]
+    fn autosave_snapshot_stamps_the_live_root_set() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path().join("work");
+        let attached = tmp.path().join("attached");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        std::fs::create_dir_all(&attached).expect("attached dir");
+        let mut app = crate::test_support::test_app_with_options(
+            crate::test_support::test_tui_options(&workspace),
+        );
+        app.workspace_roots = vec![workspace.clone(), attached.clone()];
+
+        let manager = crate::session_manager::SessionManager::new(tmp.path().join("sessions"))
+            .expect("manager");
+        let session = super::build_session_snapshot(&mut app, &manager).expect("snapshot");
+
+        assert_eq!(
+            session.metadata.workspace_roots,
+            vec![workspace, attached],
+            "the autosave chokepoint must persist the live set, not an empty one"
+        );
+    }
 
     /// Chrome that answers a click must also answer the pointer, or the app
     /// teaches people that pointing at things does not work here.
