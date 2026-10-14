@@ -1520,9 +1520,12 @@ impl DeepSeekClient {
     }
 
     /// Resolve `model` through the central route resolver and rebuild this
-    /// client whenever its exact wire identity, limits, or protocol differs
-    /// from the route bound at construction (#5042). `Ok(None)` means the
-    /// existing binding is already exact for `model`. This includes
+    /// client whenever its exact wire identity or protocol differs from the
+    /// route bound at construction (#5042). `Ok(None)` means the existing
+    /// binding is already exact for `model` — including a limits mismatch for
+    /// the same wire id, where the frozen state can only carry facts (host or
+    /// plan declarations) that the override-less static resolve lacks, so a
+    /// rebuild could only downgrade the envelope. This includes
     /// same-protocol switches: an OpenAI-compatible client for model A must not
     /// carry A's route limits into model B merely because both speak Chat.
     pub(crate) fn rebound_for_model_protocol(
@@ -1549,8 +1552,16 @@ impl DeepSeekClient {
         let candidate_limits = crate::route_budget::known_route_limits(candidate.limits());
         if candidate.protocol() == self.wire_format
             && candidate.wire_model_id().as_str() == self.default_model
-            && candidate_limits == self.route_limits
         {
+            // Same wire id and protocol: the binding is already exact, and a
+            // limits mismatch can only mean the frozen state carries host or
+            // plan facts the override-less static resolve above lacks.
+            // Subagent/fleet children reach this path after cloning the
+            // session client, so rebuilding could only downgrade their
+            // envelope — e.g. re-clamp an uncatalogued host-declared wire id
+            // to the 8192 fail-close through the very early return
+            // `bind_request_to_protocol` now takes. Cross-model dispatch
+            // still falls through and rebuilds below.
             return Ok(None);
         }
         if candidate.protocol() == self.wire_format {
@@ -1587,7 +1598,18 @@ impl DeepSeekClient {
         let model_aware = self.api_provider.metadata().is_some_and(|provider| {
             provider.wire_policy() == codewhale_config::provider::WirePolicy::ModelAware
         });
-        if !model_aware && request.model.trim() == self.default_model {
+        // A request for the exact model this client was bound to rides the
+        // candidate the client was constructed from: its frozen limits —
+        // including host-declared facts the embedder planned onto the route
+        // (`limit_overrides` on the resolution pass) — are the authoritative
+        // envelope. The static re-resolve below carries no host overrides, so
+        // routing a model-aware same-model request through it would silently
+        // drop those facts and re-clamp an uncatalogued wire id back to the
+        // 8192 fail-close. Same rule as `effective_max_output_tokens`, which
+        // already resolves same-model limits from the frozen state without a
+        // wire-policy gate. Cross-model dispatch still re-resolves: another
+        // model may need a different protocol or wire id.
+        if request.model.trim() == self.default_model {
             return Ok((request, self.route_limits));
         }
 
@@ -12414,6 +12436,103 @@ mod tests {
         assert_eq!(prepared.endpoint.url, "https://api.deepseek.com/responses");
         assert_eq!(prepared.body["model"], "deepseek-v4-flash");
         assert_eq!(prepared.body["reasoning"]["effort"], "max");
+    }
+
+    #[test]
+    fn model_aware_same_model_request_keeps_host_declared_route_limits() {
+        // The wire-policy gate must not drop the frozen route envelope for
+        // the model the client is bound to: the static re-resolve carries no
+        // host limit overrides, so an embedder-declared output fact (here
+        // 384K for an uncatalogued wire id) would be re-clamped to the 8192
+        // uncatalogued fail-close on the way out. (For an id whose static
+        // row picks a different protocol — catalog `deepseek-v4-flash` — the
+        // stale gate would instead fail the prepare outright; this fixture's
+        // id statically resolves to a no-limits ChatCompletions candidate,
+        // so the clamp is the failure mode it pins.) Same-model limits must
+        // come from the frozen state, exactly like
+        // `effective_max_output_tokens`.
+        let _env_lock = crate::test_support::lock_test_env();
+        let config = Config {
+            provider: Some("deepseek".to_string()),
+            api_key: Some("wire-cap-test".to_string()),
+            ..Config::default()
+        };
+        let client = DeepSeekClient::from_parts(
+            "https://api.deepseek.com".to_string(),
+            "deepseek-flash".to_string(),
+            WireFormat::ChatCompletions,
+            Some(RouteLimits {
+                context_tokens: Some(1_000_000),
+                output_tokens: Some(384_000),
+                ..RouteLimits::default()
+            }),
+            &config,
+        )
+        .expect("model-aware client with host-declared limits");
+
+        let prepared = client
+            .prepare_outbound_request(
+                MessageRequest {
+                    model: "deepseek-flash".to_string(),
+                    messages: vec![Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::Text {
+                            text: "hello".to_string(),
+                            cache_control: None,
+                        }],
+                    }],
+                    max_tokens: 64_000,
+                    system: None,
+                    tools: None,
+                    tool_choice: None,
+                    metadata: None,
+                    thinking: None,
+                    reasoning_effort: None,
+                    stream: Some(true),
+                    temperature: None,
+                    top_p: None,
+                },
+                true,
+            )
+            .expect("same-model request prepares with the frozen envelope");
+
+        assert_eq!(prepared.body["max_tokens"], json!(64_000));
+    }
+
+    #[test]
+    fn rebinding_the_same_model_keeps_host_declared_route_limits() {
+        // Subagent/fleet children clone the session client and rebind for the
+        // session model before dispatch. The static re-resolve carries no
+        // host overrides, so a limits mismatch for the exact same wire id
+        // must keep the frozen envelope instead of rebuilding with the
+        // override-less candidate — otherwise every child send clamps an
+        // uncatalogued host-declared id back to the 8192 fail-close through
+        // the very early return `bind_request_to_protocol` now takes.
+        let config = Config {
+            provider: Some("deepseek".to_string()),
+            api_key: Some("wire-cap-test".to_string()),
+            ..Config::default()
+        };
+        let client = DeepSeekClient::from_parts(
+            "https://api.deepseek.com".to_string(),
+            "deepseek-flash".to_string(),
+            WireFormat::ChatCompletions,
+            Some(RouteLimits {
+                context_tokens: Some(1_000_000),
+                output_tokens: Some(384_000),
+                ..RouteLimits::default()
+            }),
+            &config,
+        )
+        .expect("model-aware client with host-declared limits");
+
+        let rebound = client
+            .rebound_for_model_protocol(Some(&config), "deepseek-flash")
+            .expect("same-model rebind resolves");
+        assert!(
+            rebound.is_none(),
+            "same wire id and protocol must keep the frozen host-declared limits"
+        );
     }
 
     #[test]
