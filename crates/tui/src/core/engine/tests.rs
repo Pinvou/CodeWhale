@@ -28325,6 +28325,55 @@ async fn mid_turn_refresh_honors_the_turn_policy() {
         !active.contains("mcp_probe_authenticate"),
         "a build-stripped name must not re-enter the active set on a refresh: {active:?}"
     );
+
+    // The arm's positive side, against the same pool: under a policy that
+    // does not strip the tool, the refresh must actually admit it — into
+    // the catalog with the pool's own definition and into the active set.
+    // The deny asserts above hold vacuously if the `mcp_catalog_changed`
+    // arm never runs at all; these do not.
+    let mut admitted_catalog = Vec::new();
+    let mut admitted_active = HashSet::new();
+    engine
+        .process_tool_results(
+            vec![Some(synthetic_toolbox_outcome(
+                "call-auth-allowed",
+                "unrelated",
+                Ok(ToolResult::success("payload").with_metadata(json!({
+                    "mcp_catalog_changed": true,
+                }))),
+            ))],
+            &mut admitted_catalog,
+            &mut admitted_active,
+            &HashMap::new(),
+            &permissive_turn_policy(),
+        )
+        .await;
+
+    assert!(
+        admitted_catalog
+            .iter()
+            .any(|tool| tool.name == "mcp_probe_authenticate"),
+        "an allowed pool tool must enter the catalog on a refresh: {admitted_catalog:?}"
+    );
+    let expected = {
+        let pool = engine.mcp_pool.as_ref().expect("pool").lock().await;
+        pool.to_api_tools()
+            .into_iter()
+            .find(|tool| tool.name == "mcp_probe_authenticate")
+            .expect("premise: the needs-auth pool serves the synthetic login tool")
+    };
+    let entered = admitted_catalog
+        .iter()
+        .find(|tool| tool.name == "mcp_probe_authenticate")
+        .expect("premise: the tool entered the catalog");
+    assert_eq!(
+        entered.description, expected.description,
+        "the admitted entry must carry the pool's definition, not a stale one"
+    );
+    assert!(
+        admitted_active.contains("mcp_probe_authenticate"),
+        "the eager synthetic login tool must be re-advertised onto the wire: {admitted_active:?}"
+    );
 }
 
 #[tokio::test]
