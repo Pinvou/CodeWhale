@@ -9015,14 +9015,17 @@ fn model_persist_keeps_entries_written_after_boot() {
     store
         .set_session_model_id("headless-c", Some("headless-model".to_string()))
         .expect("persist headless model");
-    let durable: std::collections::HashMap<String, String> =
+    let durable: std::collections::HashMap<String, ModelSelectionRef> =
         serde_json::from_str(&std::fs::read_to_string(&file).expect("read model file"))
             .expect("durable model file must stay valid JSON");
     assert_eq!(
         durable,
         std::collections::HashMap::from([
-            ("gui-a".to_string(), "gui-model".to_string()),
-            ("headless-c".to_string(), "headless-model".to_string()),
+            ("gui-a".to_string(), ModelSelectionRef::local("gui-model")),
+            (
+                "headless-c".to_string(),
+                ModelSelectionRef::local("headless-model"),
+            ),
         ]),
         "a model persist from this process must not revert entries persisted after boot"
     );

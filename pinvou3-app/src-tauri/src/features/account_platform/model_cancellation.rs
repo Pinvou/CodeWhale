@@ -53,7 +53,7 @@ impl Calls {
     pub(super) fn incarnation(&self, session: &str) -> Arc<Incarnation> {
         self.0
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .incarnations
             .entry(session.into())
             .or_insert_with(|| {
@@ -68,7 +68,10 @@ impl Calls {
     }
     pub(super) fn forget_session(&self, session: &str) {
         let entries = {
-            let mut registry = self.0.lock().unwrap();
+            let mut registry = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(incarnation) = registry.incarnations.remove(session) {
                 incarnation.retired.store(true, Ordering::Release);
             }
@@ -92,7 +95,10 @@ impl Calls {
         key: &str,
         client: Client,
     ) -> anyhow::Result<Delivery> {
-        let mut registry = self.0.lock().unwrap();
+        let mut registry = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if registry.entries.len() >= 4096
             || incarnation.retired.load(Ordering::Acquire)
             || generation <= incarnation.cancelled_through.load(Ordering::Acquire)
@@ -131,7 +137,10 @@ impl Calls {
     }
     pub(super) fn reclaim_session(&self, session: &str, preserved: Option<u64>) {
         let entries = {
-            let registry = self.0.lock().unwrap();
+            let registry = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let entries = registry
                 .entries
                 .values()
@@ -153,7 +162,7 @@ impl Calls {
     pub(super) fn cancellation_scope(&self, session: &str) -> Option<String> {
         self.0
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .incarnations
             .get(session)
             .map(|incarnation| incarnation.id.to_string())
@@ -166,7 +175,10 @@ impl Calls {
     }
     pub(super) fn cancel_turn_bound(&self, session: &str, generation: u64, scope: &str) {
         let entries = {
-            let registry = self.0.lock().unwrap();
+            let registry = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let Some(incarnation) = registry.incarnations.get(session) else {
                 return;
             };
@@ -198,7 +210,10 @@ impl Invocation {
         self.stopped.cancel();
         let invocation = self.clone();
         tokio::spawn(async move {
-            let initially_known = *invocation.usage_id.lock().unwrap();
+            let initially_known = *invocation
+                .usage_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if !invocation.reconcile_cancel().await {
                 // Never expose a bearer, original key, URL, payload, or provider error.
                 log::warn!("account model cancellation remains unconfirmed");
@@ -210,7 +225,11 @@ impl Invocation {
                 // without issuing another model invocation.
                 if initially_known.is_none()
                     && invocation.late_identity_observed.load(Ordering::Acquire)
-                    && invocation.usage_id.lock().unwrap().is_some()
+                    && invocation
+                        .usage_id
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .is_some()
                 {
                     invocation.recover_late_identity();
                 }
@@ -228,18 +247,20 @@ impl Invocation {
             }
         });
     }
-    fn endpoint(&self, resource: &str) -> Url {
-        Url::parse(&format!(
+    fn endpoint(&self, resource: &str) -> anyhow::Result<Url> {
+        Ok(Url::parse(&format!(
             "{}/{}",
             self.origin.as_str().trim_end_matches('/'),
             resource
-        ))
-        .expect("validated origin")
+        ))?)
     }
     async fn reconcile_cancel(&self) -> bool {
         // Missing headers and lost ACKs are observations, not evidence of no effect.
         for _ in 0..8 {
-            let known = *self.usage_id.lock().unwrap();
+            let known = *self
+                .usage_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let id = match known {
                 Some(id) => Some(id),
                 None => self
@@ -256,7 +277,10 @@ impl Invocation {
             };
             if let Some(id) = id {
                 let matches_binding = {
-                    let mut bound = self.usage_id.lock().unwrap();
+                    let mut bound = self
+                        .usage_id
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     if bound.is_some_and(|saved| saved != id) {
                         false
                     } else {
@@ -267,9 +291,12 @@ impl Invocation {
                 if !matches_binding {
                     return false;
                 }
+                let Ok(endpoint) = self.endpoint(&format!("usage-requests/{id}/cancel")) else {
+                    return false;
+                };
                 let response = self
                     .client
-                    .post(self.endpoint(&format!("usage-requests/{id}/cancel")))
+                    .post(endpoint)
                     .header("Authorization", &self.bearer)
                     .header("Idempotency-Key", &self.cancel_key)
                     .timeout(Duration::from_secs(5))
@@ -312,7 +339,7 @@ impl Invocation {
     async fn read_usage(&self, resource: &str, key: Option<&str>) -> Option<serde_json::Value> {
         let mut request = self
             .client
-            .get(self.endpoint(resource))
+            .get(self.endpoint(resource).ok()?)
             .header("Authorization", &self.bearer)
             .timeout(Duration::from_secs(5));
         if let Some(key) = key {
@@ -341,7 +368,11 @@ impl Delivery {
     pub(super) fn observe_usage(&self, header: Option<&str>) {
         if let Some(id) = header.and_then(|value| uuid::Uuid::parse_str(value).ok()) {
             let newly_bound = {
-                let mut bound = self.invocation.usage_id.lock().unwrap();
+                let mut bound = self
+                    .invocation
+                    .usage_id
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if bound.is_some() {
                     false
                 } else {
@@ -381,7 +412,7 @@ impl Drop for Delivery {
         self.calls
             .0
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entries
             .remove(&self.invocation.id);
         if !self.completed {
@@ -426,6 +457,93 @@ mod tests {
         routing::get,
     };
     use serde_json::json;
+
+    #[tokio::test]
+    async fn poisoned_cancellation_locks_preserve_frozen_call_and_usage_identity() {
+        let calls = Calls::default();
+        let incarnation = calls.incarnation("poisoned-cancellation");
+        let mut delivery = calls
+            .track(
+                &incarnation,
+                1,
+                Url::parse("https://example.invalid/gateway/v1/").unwrap(),
+                "Bearer frozen-user",
+                "original-stable-invocation-key",
+                Client::new(),
+            )
+            .unwrap();
+        let invocation = delivery.invocation.clone();
+        let usage_id = uuid::Uuid::new_v4();
+        *invocation.usage_id.lock().unwrap() = Some(usage_id);
+
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = calls.0.lock().unwrap();
+                panic!("simulate registry lock poisoning");
+            }))
+            .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = invocation.usage_id.lock().unwrap();
+                panic!("simulate usage identity lock poisoning");
+            }))
+            .is_err()
+        );
+
+        assert!(Arc::ptr_eq(
+            &incarnation,
+            &calls.incarnation("poisoned-cancellation")
+        ));
+        assert_eq!(
+            calls.cancellation_scope("poisoned-cancellation"),
+            Some(incarnation.id.to_string())
+        );
+        assert!(Arc::ptr_eq(
+            calls
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entries
+                .get(&invocation.id)
+                .unwrap(),
+            &invocation
+        ));
+        delivery.observe_usage(Some(&uuid::Uuid::new_v4().to_string()));
+        assert_eq!(
+            *invocation
+                .usage_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            Some(usage_id)
+        );
+        assert_eq!(
+            invocation
+                .endpoint("usage-requests/by-idempotency-key")
+                .unwrap()
+                .path(),
+            "/gateway/v1/usage-requests/by-idempotency-key"
+        );
+
+        delivery.complete();
+        drop(delivery);
+        assert!(
+            calls
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entries
+                .is_empty()
+        );
+        assert!(!invocation.stopped.is_cancelled());
+        calls.forget_session("poisoned-cancellation");
+        assert!(incarnation.is_retired());
+        assert!(!Arc::ptr_eq(
+            &incarnation,
+            &calls.incarnation("poisoned-cancellation")
+        ));
+    }
+
     #[derive(Default)]
     struct Captures {
         posts: Vec<(String, String, String)>,
