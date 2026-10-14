@@ -487,10 +487,31 @@ impl ScriptsSource {
         script_runner::materialize_assets(&dir, &assets)?;
 
         // 入口脚本也按固定文件名写进包里，这样包内其它脚本也能互相引用
-        let entry_content = self.entry_content(script_type, policy)?;
-        let mut one = BTreeMap::new();
-        one.insert(entry_name.clone(), entry_content);
-        script_runner::materialize_assets(&dir, &one)?;
+        let mut entries = BTreeMap::new();
+        if let Self::Local { blobs, .. } = self {
+            // Sibling scripts (enable -> stop, deploy -> enable) must come from
+            // the same DB snapshot as common.sh, not an older materialization.
+            for (kind, blob) in blobs {
+                if ![
+                    "install_engine",
+                    "download_model",
+                    "deploy",
+                    "enable",
+                    "stop",
+                    "uninstall",
+                    "uninstall_engine",
+                ]
+                .contains(&kind.as_str())
+                {
+                    return Err(ModelManagerError::new(
+                        "本地卡片包含未知脚本入口，请检查卡片更新；未执行任何脚本。",
+                    ));
+                }
+                entries.insert(format!("{kind}.sh"), blob.content.clone());
+            }
+        }
+        entries.insert(entry_name.clone(), self.entry_content(script_type, policy)?);
+        script_runner::materialize_assets(&dir, &entries)?;
 
         Ok(PreparedScript {
             entry: dir.join(&entry_name),
@@ -1767,18 +1788,9 @@ impl ModelManager {
     /// 跟商店同步一次目录状态：哪些卡片是新上架的、哪些已下架、以及**已下载
     /// 的模型有没有更新的脚本**。
     ///
-    /// **目前没有任何调用点**（命令未注册、界面上也没有入口），留待后续分期
-    /// 接线。这里原来写的是"在打开应用和打开模型商店时自动调用"——那句话从来
-    /// 没有成立过，而它会让读代码的人以为这个能力已经在跑。
-    ///
-    /// 因此要如实交代当前的实际后果：**远端商店卡片的固化脚本副本永远不会
-    /// 过期刷新**——商店那边修好的脚本只有在用户重新下载这个模型时才会下来。
-    /// （内置测试商店那边原来有 `refresh_builtin_cards` 在启动时兜底刷新，
-    /// 2026-09-30 随整个测试商店一起拿掉了，所以现在一个数据源都没有兜底。）
-    /// 连带地，
-    /// `OutdatedCard`、`StoreSyncResult` 以及 `refresh_card_scripts` 目前都到
-    /// 不了；`needs_redeploy`（service.rs）虽然活着，但对远端卡片实际上恒为
-    /// false，因为它比的那份 `scripts_content` 不会变。
+    /// Catalog-wide update notifications are not wired yet. Explicit updates
+    /// are available in model details through `change_card_scripts`; merely
+    /// opening the store never replaces a cached script package.
     ///
     /// 设计意图保持不变：只读，不改任何本地副本——检测到有更新只是提醒用户，
     /// 换不换由用户点「检查卡片更新」决定，免得他正用着的部署脚本在背后被悄悄
@@ -1834,31 +1846,192 @@ impl ModelManager {
         })
     }
 
-    /// 用户主动点「检查卡片更新」：去商店比对脚本哈希，有变化就把新脚本固化
-    /// 到本地。返回是否真的更新了。
-    ///
-    /// **目前没有任何调用点**：命令未注册，界面上也没有「检查卡片更新」这个
-    /// 按钮和对应的 i18n 文案，留待后续分期接线。本文件别处（`entry_content`
-    /// 的报错、`local_scripts_source` 的注释）已经在让用户"点一下检查卡片
-    /// 更新"，那句话现在还无处可点——接线时要一起把入口补上。
-    pub fn refresh_card_scripts(&self, card_id: &str) -> Result<bool, ModelManagerError> {
+    /// Explicit, non-executing update/rollback. Caller holds card and startup
+    /// locks; complete fetch/validation precedes one atomic DB transaction.
+    pub fn change_card_scripts(
+        &self,
+        card_id: &str,
+        rollback: bool,
+        control: &script_runner::RunControl,
+    ) -> Result<bool, ModelManagerError> {
         let rec = self.get_record(card_id)?;
-        let card = self.store.get_card(card_id)?;
-        let pkg = self.fetch_and_store_scripts(&card)?;
-        let changed =
-            pkg.scripts.len() != rec.scripts_content.len()
-                || pkg.assets.len() != rec.assets_content.len()
-                || pkg.scripts.iter().any(|(k, v)| {
-                    rec.scripts_content.get(k).map(|old| &old.sha256) != Some(&v.sha256)
-                })
-                || pkg.assets.iter().any(|(k, v)| {
-                    rec.assets_content.get(k).map(|old| &old.sha256) != Some(&v.sha256)
-                });
-        if changed {
-            db::set_scripts_content(card_id, &pkg.scripts, &pkg.assets)
-                .map_err(|e| ModelManagerError::new(format!("保存脚本副本失败：{e}")))?;
+        self.require_stopped_for_script_update(&rec)?;
+        if control.cancelled() {
+            return Err(ModelManagerError::new("已取消，原脚本未修改。"));
         }
-        Ok(changed)
+        let pkg = if rollback {
+            let (scripts, assets) =
+                db::card_package_backup(card_id).map_err(ModelManagerError::new)?;
+            CardPackage { scripts, assets }
+        } else {
+            let card = self.store.get_card(card_id)?;
+            let empty = BTreeMap::new();
+            super::card_update::validate_inventory(
+                &card.scripts,
+                card.script_sha256.as_ref().unwrap_or(&empty),
+                &card.assets,
+                card.asset_sha256.as_ref().unwrap_or(&empty),
+            )
+            .map_err(ModelManagerError::new)?;
+            // Updating scripts is not an implicit migration to different weights,
+            // engines or profiles. Those require a separate deployment workflow.
+            if card.summary.id != rec.card_id
+                || card.source_repo_id != rec.source_repo_id
+                || card.source_filename != rec.source_filename
+                || card.summary.size_bytes != rec.size_bytes.max(0) as u64
+                || card.summary.deploy_topology != rec.deploy_topology
+                || serde_json::to_value(&card.profiles).ok()
+                    != serde_json::to_value(&rec.profiles).ok()
+            {
+                return Err(ModelManagerError::new(
+                    "卡片的权重或部署方案已改变，不能仅更新脚本。已保留本地资源，请联系维护者提供兼容升级。",
+                ));
+            }
+            let pkg = self.fetch_and_store_scripts(&card)?;
+            if rec.assets_content.get("weights.sha256").is_some_and(|old| {
+                pkg.assets.get("weights.sha256").map(|new| &new.sha256) != Some(&old.sha256)
+            }) {
+                return Err(ModelManagerError::new(
+                    "卡片权重校验清单已改变，不能仅更新脚本。已保留原版本和权重，请联系维护者提供兼容升级。",
+                ));
+            }
+            let native = |scripts: &BTreeMap<String, db::ScriptBlob>,
+                          assets: &BTreeMap<String, db::ScriptBlob>,
+                          version: Option<&str>| {
+                scripts
+                    .get("install_engine")
+                    .and_then(|install| {
+                        native_tachyon_identity(
+                            &install.content,
+                            assets.get("common.sh").map(|blob| blob.content.as_str()),
+                            version,
+                        )
+                    })
+                    .map(|(_, hash)| hash)
+            };
+            let old_native = native(
+                &rec.scripts_content,
+                &rec.assets_content,
+                rec.engine_version.as_deref(),
+            );
+            let new_native = native(
+                &pkg.scripts,
+                &pkg.assets,
+                card.summary.engine_version.as_deref(),
+            );
+            let same_engine = match (&old_native, &new_native) {
+                (Some(old), Some(new)) => old == new,
+                (None, None) => {
+                    rec.engine_name == card.summary.engine_name
+                        && rec.engine_version == card.summary.engine_version
+                }
+                _ => false,
+            };
+            if !same_engine {
+                return Err(ModelManagerError::new(
+                    "卡片引擎版本已改变，不能仅更新脚本。已保留原版本和权重。",
+                ));
+            }
+            pkg
+        };
+        let urls = |files: &BTreeMap<String, db::ScriptBlob>| {
+            files
+                .keys()
+                .map(|key| (key.clone(), "https://local.invalid/validated-cache".into()))
+                .collect()
+        };
+        let hashes = |files: &BTreeMap<String, db::ScriptBlob>| {
+            files
+                .iter()
+                .map(|(key, blob)| (key.clone(), blob.sha256.clone()))
+                .collect()
+        };
+        super::card_update::validate_inventory(
+            &urls(&pkg.scripts),
+            &hashes(&pkg.scripts),
+            &urls(&pkg.assets),
+            &hashes(&pkg.assets),
+        )
+        .map_err(ModelManagerError::new)?;
+        for blob in pkg.scripts.values().chain(pkg.assets.values()) {
+            if script_runner::sha256_hex(&blob.content) != blob.sha256 {
+                return Err(ModelManagerError::new("脚本包校验失败，已保留原版本。"));
+            }
+        }
+        if control.cancelled() {
+            return Err(ModelManagerError::new("已取消，原脚本未修改。"));
+        }
+        self.require_stopped_for_script_update(&rec)?;
+        db::replace_card_package(&rec, &pkg.scripts, &pkg.assets).map_err(ModelManagerError::new)
+    }
+
+    fn require_stopped_for_script_update(
+        &self,
+        rec: &db::StoreModelRecord,
+    ) -> Result<(), ModelManagerError> {
+        if rec.running {
+            return Err(ModelManagerError::new(
+                "请先停用此模型，再更新或回退卡片脚本；不会自动停止模型。",
+            ));
+        }
+        if let Some(name) = rec.container_name.as_deref() {
+            match proc_timeout::query(
+                "docker",
+                &["inspect", "--format", "{{.State.Running}}", name],
+            ) {
+                Some(state) if state.trim() == "false" => return Ok(()),
+                _ => {
+                    return Err(ModelManagerError::new(
+                        "模型容器仍在运行或无法确认已停止，请先检查并停用，再更新脚本。",
+                    ));
+                }
+            }
+        }
+        if let Some((_, fingerprint)) =
+            rec.scripts_content
+                .get("install_engine")
+                .and_then(|install| {
+                    native_tachyon_identity(
+                        &install.content,
+                        rec.assets_content
+                            .get("common.sh")
+                            .map(|b| b.content.as_str()),
+                        rec.engine_version.as_deref(),
+                    )
+                })
+        {
+            let snapshot = super::native_process::discover();
+            if !snapshot.complete
+                || snapshot.processes.iter().any(|process| {
+                    process
+                        .executable
+                        .parent()
+                        .and_then(std::path::Path::file_name)
+                        .and_then(|p| p.to_str())
+                        == fingerprint.get(..8)
+                })
+            {
+                return Err(ModelManagerError::new(
+                    "此原生引擎仍有运行实例或状态无法确认，请先停用使用该引擎的模型再更新脚本。",
+                ));
+            }
+        } else if rec.status == "deployed" {
+            // Unknown deployment must not be treated as safely stopped just
+            // because a stale database flag says false.
+            return Err(ModelManagerError::new(
+                "无法可靠确认此部署已停止。请先卸载部署（保留权重），再更新卡片脚本。",
+            ));
+        }
+        if rec
+            .endpoint_url
+            .as_deref()
+            .is_some_and(openai_compatible_endpoint_alive)
+        {
+            return Err(ModelManagerError::new(
+                "模型端口仍有服务或状态无法确认，请先停用后再更新脚本。",
+            ));
+        }
+        Ok(())
     }
 
     fn get_record(&self, card_id: &str) -> Result<db::StoreModelRecord, ModelManagerError> {
@@ -1981,9 +2154,8 @@ impl ModelManager {
                 ));
             }
             Err(error) if engine_startup_failed(&error.to_string()) => {
-                // 同机另一张驭光卡正在运行时，第二张卡会在“权重已加载”之后才因
-                // 运行资源不足退出。若仍报笼统的“服务初始化失败”，用户只会无效
-                // 重试或重下权重；这里把已经知道的冲突对象和可执行动作直接说清。
+                // Other running models are context, not proof of an OOM. Keep
+                // the actual error and qualify the resource-pressure suggestion.
                 let running = db::list_store_models()
                     .map_err(|db_error| {
                         ModelManagerError::new(format!("读取运行模型失败：{db_error}"))
@@ -2001,8 +2173,8 @@ impl ModelManager {
                     .collect::<Vec<_>>()
                     .join("、");
                 return Err(ModelManagerError::new(format!(
-                    "无法启用「{}」：当前{}正在运行。该模型的权重已加载完成，但设备没有足够的运行资源同时启动两个模型。请先停用{}后再试；无需重新下载模型或引擎。",
-                    rec.card_name, names, names
+                    "无法启用「{}」：{}。同时检测到{}正在运行，可能增加运行资源压力，但尚不能据此确定失败原因。请检查诊断日志；如内存紧张，可先停用其他模型后重试，不要直接重新下载权重。",
+                    rec.card_name, error, names
                 )));
             }
             Err(error) => return Err(error),
@@ -3166,6 +3338,7 @@ fn engine_startup_failed(message: &str) -> bool {
     lower.contains("server failed during startup")
         || lower.contains("startup failed")
         || message.contains("推理服务启动失败")
+        || message.contains("推理服务启动未完成")
 }
 
 /// 卡片报上来的对外调用地址是不是指向**本机**。

@@ -233,22 +233,41 @@ pub fn materialize_assets(
     dir: &Path,
     files: &std::collections::BTreeMap<String, String>,
 ) -> Result<(), ScriptError> {
+    let root = crate::platform::filesystem::open_private_file_directory(dir)
+        .map_err(|e| ScriptError::new(format!("无法安全打开卡片目录：{e}")))?;
     for (rel, content) in files {
         let safe = sanitize_relative_path(rel)?;
-        let target = dir.join(&safe);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                ScriptError::new(format!("创建目录 {} 失败：{e}", parent.display()))
-            })?;
+        let mut child = None;
+        if let Some(path) = safe.parent() {
+            for part in path.components() {
+                let parent = child.as_ref().unwrap_or(&root);
+                child = Some(
+                    parent
+                        .create_private_child_directory(part.as_os_str())
+                        .map_err(|e| ScriptError::new(format!("无法安全创建卡片子目录：{e}")))?,
+                );
+            }
         }
-        std::fs::write(&target, content)
-            .map_err(|e| ScriptError::new(format!("写入 {} 失败：{e}", target.display())))?;
+        let parent = child.as_ref().unwrap_or(&root);
+        let name = safe
+            .file_name()
+            .ok_or_else(|| ScriptError::new("卡片文件名无效"))?;
+        // Reject an existing symlink/special file rather than silently replacing
+        // user-managed entries. The following rename is anchored to the same
+        // directory handle and cannot follow a swapped-in symlink either.
+        parent
+            .open_plain_file(name)
+            .map_err(|e| ScriptError::new(format!("卡片目标文件不安全：{e}")))?;
+        parent
+            .atomic_write_private_file(name, content.as_bytes())
+            .map_err(|e| ScriptError::new(format!("安全写入卡片文件失败：{e}")))?;
         if safe.extension().and_then(|e| e.to_str()) == Some("sh") {
-            let mut perms = std::fs::metadata(&target)
-                .map_err(|e| ScriptError::new(format!("读取 {} 权限失败：{e}", target.display())))?
-                .permissions();
-            perms.set_mode(perms.mode() | 0o111);
-            let _ = std::fs::set_permissions(&target, perms);
+            let file = parent
+                .open_plain_file(name)
+                .map_err(|e| ScriptError::new(format!("安全打开卡片脚本失败：{e}")))?
+                .ok_or_else(|| ScriptError::new("卡片脚本落盘后消失，请重试"))?;
+            file.set_permissions(std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| ScriptError::new(format!("设置脚本权限失败：{e}")))?;
         }
     }
     Ok(())
@@ -1970,6 +1989,23 @@ echo hi
             .permissions()
             .mode();
         assert_ne!(mode & 0o111, 0, "megacube.sh 没有可执行位");
+    }
+
+    #[test]
+    fn materialization_refuses_symlink_files_and_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.sh");
+        std::fs::write(&victim, "untouched").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.path().join("enable.sh")).unwrap();
+        let files = std::collections::BTreeMap::from([("enable.sh".into(), "replacement".into())]);
+        assert!(materialize_assets(dir.path(), &files).is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("nested")).unwrap();
+        let files =
+            std::collections::BTreeMap::from([("nested/victim.sh".into(), "replacement".into())]);
+        assert!(materialize_assets(dir.path(), &files).is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
     }
 
     #[test]

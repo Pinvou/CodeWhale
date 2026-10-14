@@ -2008,6 +2008,7 @@ pub fn run() {
             commands::model_store::model_store_local_resources,
             commands::model_store::model_store_memory_admission,
             commands::model_store::model_store_delete_engine,
+            commands::model_store::model_store_start_card_scripts,
             commands::model_store::model_store_start_download,
             commands::model_store::model_store_start_deploy,
             commands::model_store::model_store_start_lifecycle,

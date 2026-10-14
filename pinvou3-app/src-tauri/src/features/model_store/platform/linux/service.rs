@@ -430,6 +430,7 @@ fn library_payload(models: Vec<db::StoreModelRecord>) -> Value {
 /// panic 就一件都不做：卡片在 `ActiveCardOps` 里被**永久锁死**（此后一律拒绝）、
 /// `RunLog::finish` 不被调用导致长轮询永远不返回、下载名额不释放、运行记录也清不掉。
 struct OpCleanup {
+    _card_guard: Option<super::runtime_guard::StartupGuard>,
     registry_owner: Arc<ModelStoreService>,
     card: String,
     run_id: String,
@@ -477,6 +478,7 @@ where
     // 但登记表之外的东西一律等占坑成功再建——占不到坑就直接返回，不能留下一条
     // 没人会去读、也没人会去收的运行记录。
     let run_id = new_run_id();
+    let card_guard = super::runtime_guard::StartupGuard::for_card(card_id)?;
     // 卡片级互斥：同一张卡不许被两处同时操作。
     service.active.try_begin(card_id, op, Some(&run_id))?;
 
@@ -493,6 +495,7 @@ where
     // Construct before spawning: if the OS cannot allocate a worker, dropping
     // the closure must still release the card slot and finish the run log.
     let guard = OpCleanup {
+        _card_guard: Some(card_guard),
         registry_owner: svc,
         card,
         run_id: rid,
@@ -704,6 +707,35 @@ pub fn start_download(service: &Arc<ModelStoreService>, card_id: String) -> Resu
                 .map_err(|e| e.to_string())
         },
     )
+}
+
+pub fn start_card_scripts(
+    service: &Arc<ModelStoreService>,
+    card_id: String,
+    rollback: bool,
+    confirmed: bool,
+) -> Result<Value, String> {
+    if !confirmed {
+        return Err("更新或回退卡片脚本需要明确确认；不会下载或删除模型权重。".into());
+    }
+    let card = card_id.clone();
+    let op = CardOp {
+        kind: "card_scripts",
+        label: "更新卡片脚本",
+    };
+    spawn_op(service, &card_id, op, move |log, control, _run_id| {
+        let _startup_guard = super::runtime_guard::StartupGuard::acquire()?;
+        log.push("检查模型运行状态及完整脚本包；不修改权重或引擎文件…");
+        let changed = ModelManager::new(None, None)
+            .change_card_scripts(&card, rollback, &control)
+            .map_err(|e| e.to_string())?;
+        log.push(if changed {
+            "脚本包已安全保存。已部署模型请重新部署后再启用；如有问题可回退上次脚本。"
+        } else {
+            "本地脚本包已是当前版本，没有修改。"
+        });
+        Ok(json!({"changed": changed, "rollback": rollback}))
+    })
 }
 
 pub async fn start_deploy(
@@ -1130,6 +1162,7 @@ pub fn force_remove(
     }
     // 还是要过卡片互斥：真有一个卸载正在删文件时把记录抽走，脚本删到一半就会
     // 对着一个不存在的记录继续跑。
+    let _card_guard = super::runtime_guard::StartupGuard::for_card(&card_id)?;
     service.active.try_begin(&card_id, OP_FORCE_REMOVE, None)?;
     let result = ModelManager::new(None, None)
         .force_remove_record(&card_id)
@@ -1153,6 +1186,7 @@ mod tests {
         let log = Arc::new(RunLog::new_memory_only());
         let control = service.registry.register("run");
         let guard = OpCleanup {
+            _card_guard: None,
             registry_owner: Arc::clone(&service),
             card: "card".into(),
             run_id: "run".into(),

@@ -71,6 +71,15 @@ pub async fn delete_engine(
     nope()
 }
 
+pub fn start_card_scripts(
+    _service: &Arc<ModelStoreService>,
+    _card_id: String,
+    _rollback: bool,
+    _confirmed: bool,
+) -> Result<Value, String> {
+    nope()
+}
+
 pub fn start_download(
     _service: &Arc<ModelStoreService>,
     _card_id: String,

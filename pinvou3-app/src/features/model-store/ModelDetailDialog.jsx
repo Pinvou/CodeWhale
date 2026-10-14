@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { KeyRound, Plus } from '../../components/icons.jsx';
 import { EmptyState } from '../../components/EmptyState.jsx';
 import { Spinner } from '../../components/Spinner.jsx';
+import { CardScriptsActions } from './CardScriptsActions.jsx';
 import { createApiKey, fetchApiKeys, fetchModelDetail } from './model-store-api.js';
 import { tryGetTauriBridge } from '../../platform/tauri/client.js';
 import { buildSavedModel, checkLinkable, findLinkedRows, pickApiKey } from './pinvou-model-link.js';
@@ -65,7 +66,7 @@ function CopyRow({ label, value, hint, copyLabel, onCopy, testId }) {
  * 按 `none` 处理——宁可多出一条黄条,不能少出一条。
  * @returns {React.ReactElement} 弹窗。
  */
-function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onToast, savedModels }) {
+function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onToast, savedModels, onCardScripts, cardBusy }) {
   const [detail, setDetail] = useState(null);
   const [keys, setKeys] = useState([]);
   const [error, setError] = useState(null);
@@ -263,6 +264,7 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
           {/* 紧跟在「这个模型是什么」那几行后面:权重完整性跟引擎、体积是同一类
               事实,不是一条飘在页尾的免责声明。达标的卡这里什么都不长。 */}
           <WeightVerifyNotice card={card} copy={copy} />
+          {onCardScripts ? <CardScriptsActions key={record.card_id} record={record} copy={copy} busy={cardBusy} onAction={onCardScripts} /> : null}
 
           <div className="mt-5">
             <h3 className={`mb-2 text-[13px] font-medium ${TEXT_PRIMARY}`}>{copy.runtimeTitle}</h3>

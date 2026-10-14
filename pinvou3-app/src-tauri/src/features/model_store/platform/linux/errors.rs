@@ -28,6 +28,14 @@ impl AppError {
 /// 中文前缀 + 原始简短提示，而不是整段英文。这个函数是所有卡片脚本失败时的通用
 /// 摘要逻辑，不是只给 Ollama 用的，命名/文案不要带 Ollama 字样。
 const SCRIPT_ERROR_PATTERNS: &[(&str, &str)] = &[
+    (
+        "curl_multi_notify_enable",
+        "健康检查工具与引擎附带的网络库不兼容，不能据此判断模型是否启动成功。请先停用模型，在模型详情中更新卡片脚本后重新部署；无需重新下载权重",
+    ),
+    (
+        "cuda_error_system_driver_mismatch",
+        "引擎使用的 CUDA 驱动库与系统驱动不匹配。请更新卡片脚本后重新部署；若仍失败，请导出诊断日志检查系统驱动，无需重新下载权重",
+    ),
     // pkexec 的几种结局要分开说，而且必须排在最前面：下面那条笼统的 "unauthorized"
     // 和 "permission denied" 会把它们全盖成「检查凭据配置」，而真正的原因跟凭据毫无
     // 关系，照着那句话排查永远修不好。
@@ -62,20 +70,18 @@ const SCRIPT_ERROR_PATTERNS: &[(&str, &str)] = &[
         "connection refused",
         "无法连接到推理服务，请确认服务正在运行",
     ),
-    // 有些引擎会先完整加载权重，再在 HTTP/RPC 服务初始化阶段退出。这里绝不能
-    // 误报成“下载失败”或“权重不完整”：截图中的 `Weights ready` 已经说明下载、
-    // 读取权重和引擎进程都走通了。真正的根因仍应以诊断日志里的最后一条引擎错误
-    // 为准，因此只陈述已知事实并引导导出日志。
+    // A startup failure alone says nothing about weight completeness or root
+    // cause. Keep CUDA/ABI signatures above this generic fallback.
     (
         "server failed during startup",
-        "推理服务启动失败：模型权重已加载完成，但服务初始化未完成。请导出诊断日志反馈给我们",
+        "推理服务启动未完成，尚不能确定原因。请导出诊断日志检查驱动、内存和服务初始化信息；暂不需要重新下载模型",
     ),
     // 驭光引擎当前版本在完成 `weights ready` 后可能打印
     // `ERROR startup failed [finalizing target]`。这是同一类“服务初始化阶段退出”，
     // 不能退回成泛化的脚本错误，更不能误导用户重新下载二十多 GB 权重。
     (
         "startup failed",
-        "推理服务启动失败：模型权重已加载完成，但服务初始化未完成。请导出诊断日志反馈给我们",
+        "推理服务启动未完成，尚不能确定原因。请导出诊断日志检查驱动、内存和服务初始化信息；暂不需要重新下载模型",
     ),
     ("manifest unknown", "在远端找不到该模型/量化版本"),
     ("unauthorized", "没有访问权限，请检查凭据配置"),
@@ -424,13 +430,30 @@ mod tests {
         );
         assert_eq!(
             humanize_script_message("2026-10-13 08:56:52 FATAL server failed during startup"),
-            "推理服务启动失败：模型权重已加载完成，但服务初始化未完成。请导出诊断日志反馈给我们"
+            "推理服务启动未完成，尚不能确定原因。请导出诊断日志检查驱动、内存和服务初始化信息；暂不需要重新下载模型"
         );
         assert_eq!(
             humanize_script_message(
                 "2026-10-13 13:32:38.936 ERROR startup failed [finalizing target]"
             ),
-            "推理服务启动失败：模型权重已加载完成，但服务初始化未完成。请导出诊断日志反馈给我们"
+            "推理服务启动未完成，尚不能确定原因。请导出诊断日志检查驱动、内存和服务初始化信息；暂不需要重新下载模型"
+        );
+    }
+
+    #[test]
+    fn startup_failure_does_not_invent_weight_or_memory_diagnosis() {
+        let generic = humanize_script_message("startup failed");
+        assert!(!generic.contains("权重已加载完成"));
+        assert!(!generic.contains("内存不足"));
+        assert!(
+            humanize_script_message("startup failed: CUDA_ERROR_SYSTEM_DRIVER_MISMATCH")
+                .contains("驱动库与系统驱动不匹配")
+        );
+        assert!(
+            humanize_script_message(
+                "curl: undefined symbol: curl_multi_notify_enable, version CURL_OPENSSL_4"
+            )
+            .contains("健康检查工具")
         );
     }
 

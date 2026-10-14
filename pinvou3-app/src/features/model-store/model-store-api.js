@@ -97,6 +97,10 @@ function createApiKey(cardId, label = null) {
  * @param {string} cardId - 卡片 ID。
  * @returns {Promise<{run_id:string}>} 运行句柄。
  */
+function startCardScripts(cardId, rollback = false, confirmed = false) {
+  return invokeTauri('model_store_start_card_scripts', { cardId, rollback: rollback === true, confirmed: confirmed === true });
+}
+
 function startDownload(cardId) {
   return invokeTauri('model_store_start_download', { cardId });
 }
@@ -292,6 +296,7 @@ export {
   fetchApiKeys,
   createApiKey,
   startDownload,
+  startCardScripts,
   startDeploy,
   startEnable,
   startStop,

@@ -336,6 +336,12 @@ fn migrate_engine_primary_key(conn: &Connection) -> rusqlite::Result<()> {
 pub fn init_db() -> rusqlite::Result<()> {
     let conn = connect()?;
     conn.execute_batch(SCHEMA)?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS card_script_backup (
+        card_id TEXT PRIMARY KEY REFERENCES store_models(card_id) ON DELETE CASCADE,
+        scripts_json TEXT NOT NULL, assets_json TEXT NOT NULL
+    );",
+    )?;
     migrate(&conn)?;
     // 顺序要紧：先把缺的列补齐（老表可能还没有 docker_image），再重建主键，
     // 否则搬数据那句 SELECT 会因为列不存在而失败。
@@ -725,7 +731,7 @@ pub struct StoreModelRecord {
 
 /// 一份固化下来的脚本：正文 + 它的 sha256（来源哈希，用于"检查卡片更新"时
 /// 跟商店当前的哈希比对，判断有没有新版本）。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ScriptBlob {
     pub content: String,
     pub sha256: String,
@@ -815,6 +821,84 @@ pub fn set_scripts_content(
         params![json, assets_json, now_iso(), card_id],
     )?;
     Ok(())
+}
+
+/// Replace the complete cached package and its one-step rollback snapshot in a
+/// single SQLite transaction. No weights, engine files or runtime state change.
+pub fn replace_card_package(
+    expected: &StoreModelRecord,
+    scripts: &std::collections::BTreeMap<String, ScriptBlob>,
+    assets: &std::collections::BTreeMap<String, ScriptBlob>,
+) -> Result<bool, String> {
+    let mut conn = connect().map_err(|e| e.to_string())?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let current = tx
+        .query_row(
+            "SELECT * FROM store_models WHERE card_id = ?1",
+            [&expected.card_id],
+            StoreModelRecord::from_row,
+        )
+        .map_err(|e| format!("读取卡片失败，原版本未修改：{e}"))?;
+    if current.running
+        || serde_json::to_value(&current).map_err(|e| e.to_string())?
+            != serde_json::to_value(expected).map_err(|e| e.to_string())?
+    {
+        return Err("卡片状态在更新期间发生变化，已保留原版本。请刷新后重试。".into());
+    }
+    if &current.scripts_content == scripts && &current.assets_content == assets {
+        return Ok(false);
+    }
+    let encode = |value: &std::collections::BTreeMap<String, ScriptBlob>| {
+        serde_json::to_string(value).map_err(|e| e.to_string())
+    };
+    tx.execute("INSERT INTO card_script_backup(card_id, scripts_json, assets_json) VALUES (?1, ?2, ?3)
+        ON CONFLICT(card_id) DO UPDATE SET scripts_json=excluded.scripts_json, assets_json=excluded.assets_json",
+        params![expected.card_id, encode(&current.scripts_content)?, encode(&current.assets_content)?])
+        .map_err(|e| e.to_string())?;
+    // Any asset/entry can affect deployment; comparing only deploy.sh misses
+    // common.sh fixes. Empty fingerprint explicitly requires a redeploy.
+    tx.execute(
+        "UPDATE store_models SET scripts_content_json=?1, assets_content_json=?2,
+        scripts_fetched_at=?3, deployed_script_sha256='' WHERE card_id=?4",
+        params![
+            encode(scripts)?,
+            encode(assets)?,
+            now_iso(),
+            expected.card_id
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit()
+        .map_err(|e| format!("保存更新失败，已保留原版本：{e}"))?;
+    Ok(true)
+}
+
+pub fn card_package_backup(
+    card_id: &str,
+) -> Result<
+    (
+        std::collections::BTreeMap<String, ScriptBlob>,
+        std::collections::BTreeMap<String, ScriptBlob>,
+    ),
+    String,
+> {
+    let conn = connect().map_err(|e| e.to_string())?;
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT scripts_json, assets_json FROM card_script_backup WHERE card_id=?1",
+            [card_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let (scripts, assets) =
+        row.ok_or("没有可回退的脚本版本。可以先检查卡片更新；模型和权重不会被删除。")?;
+    Ok((
+        serde_json::from_str(&scripts).map_err(|e| format!("回退副本无法读取：{e}"))?,
+        serde_json::from_str(&assets).map_err(|e| format!("回退副本无法读取：{e}"))?,
+    ))
 }
 
 pub struct AddStoreModelParams<'a> {
@@ -1530,6 +1614,94 @@ mod tests {
         delete_store_model("card-1").unwrap();
         assert!(get_store_model("card-1").unwrap().is_none());
         assert!(list_api_keys_for_card("card-1").unwrap().is_empty());
+    }
+
+    fn script_update_record() -> StoreModelRecord {
+        add_store_model(AddStoreModelParams {
+            card_id: "script-update-test",
+            model_name: "model",
+            card_name: "Model",
+            org: None,
+            description: None,
+            engine_name: "engine",
+            engine_version: None,
+            size_bytes: 1234,
+            quantization: None,
+            source_repo_id: None,
+            source_filename: None,
+            scripts: &std::collections::BTreeMap::new(),
+            status: "deployed",
+            profiles: &[],
+            deploy_topology: DeployTopology::Single,
+        })
+        .unwrap()
+    }
+
+    fn test_package(content: &str) -> std::collections::BTreeMap<String, ScriptBlob> {
+        std::collections::BTreeMap::from([(
+            "deploy".into(),
+            ScriptBlob {
+                content: content.into(),
+                sha256: super::super::script_runner::sha256_hex(content),
+            },
+        )])
+    }
+
+    #[test]
+    fn package_update_backup_and_rollback_preserve_model_data() {
+        let _ctx = setup_temp_db();
+        let rec = script_update_record();
+        let old = test_package("old");
+        let new = test_package("new");
+        let assets = std::collections::BTreeMap::new();
+        set_scripts_content(&rec.card_id, &old, &assets).unwrap();
+        let expected = get_store_model(&rec.card_id).unwrap().unwrap();
+        assert!(replace_card_package(&expected, &new, &assets).unwrap());
+        let updated = get_store_model(&rec.card_id).unwrap().unwrap();
+        assert_eq!(updated.size_bytes, expected.size_bytes);
+        assert_eq!(updated.status, expected.status);
+        assert_eq!(updated.weights_ready_at, expected.weights_ready_at);
+        assert_eq!(updated.deployed_script_sha256.as_deref(), Some(""));
+        assert_eq!(card_package_backup(&rec.card_id).unwrap().0, old);
+        assert!(!replace_card_package(&updated, &new, &assets).unwrap());
+        assert_eq!(card_package_backup(&rec.card_id).unwrap().0, old);
+        assert!(replace_card_package(&updated, &old, &assets).unwrap());
+        assert_eq!(card_package_backup(&rec.card_id).unwrap().0, new);
+        delete_store_model(&rec.card_id).unwrap();
+        assert!(card_package_backup(&rec.card_id).is_err());
+    }
+
+    #[test]
+    fn package_update_rejects_concurrent_running_change() {
+        let _ctx = setup_temp_db();
+        let rec = script_update_record();
+        set_running(&rec.card_id, true).unwrap();
+        assert!(replace_card_package(&rec, &test_package("new"), &Default::default()).is_err());
+        assert!(
+            get_store_model(&rec.card_id)
+                .unwrap()
+                .unwrap()
+                .scripts_content
+                .is_empty()
+        );
+        assert!(card_package_backup(&rec.card_id).is_err());
+    }
+
+    #[test]
+    fn failed_package_commit_leaves_original_and_backup_unchanged() {
+        let _ctx = setup_temp_db();
+        let rec = script_update_record();
+        connect().unwrap().execute_batch("CREATE TRIGGER reject_package BEFORE UPDATE OF scripts_content_json ON store_models
+            BEGIN SELECT RAISE(ABORT, 'test write failure'); END;").unwrap();
+        assert!(replace_card_package(&rec, &test_package("new"), &Default::default()).is_err());
+        assert!(
+            get_store_model(&rec.card_id)
+                .unwrap()
+                .unwrap()
+                .scripts_content
+                .is_empty()
+        );
+        assert!(card_package_backup(&rec.card_id).is_err());
     }
 
     #[test]
