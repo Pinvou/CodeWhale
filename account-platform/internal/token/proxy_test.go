@@ -56,6 +56,9 @@ func (r *streamRepositoryFake) MarkReview(_ context.Context, _ uuid.UUID, reason
 }
 
 func (r *streamRepositoryFake) MarkUpstream(context.Context, uuid.UUID) error { return nil }
+func (r *streamRepositoryFake) RenewDispatchLease(context.Context, uuid.UUID, string) (bool, error) {
+	return true, nil
+}
 
 func (r *streamRepositoryFake) SaveReplayResult(_ context.Context, _ uuid.UUID, result ReplayResult) error {
 	if r.saveResultErr != nil {
@@ -654,7 +657,7 @@ func TestNonStreamingResultPersistsReconcilerSnapshotBeforeCommit(t *testing.T) 
 	usageID := uuid.New()
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	recorder := httptest.NewRecorder()
-	service.dispatchUsage(recorder, request, UsageRequest{ID: usageID, HoldID: &holdID, RequestSnapshot: json.RawMessage(`{"provider_id":"test","adapter_version":"openai-compatible-v1"}`)}, DispatchEnvelope{BaseURL: server.URL, Provider: "test", AdapterVersion: "openai-compatible-v1", Credential: []byte("credential"), RequestBody: []byte(`{"model":"test"}`), Price: PriceVersion{OutputPerMillion: 1_000_000}, MaximumCost: 10, ContextType: "PERSONAL"})
+	service.dispatchUsage(recorder, request, UsageRequest{ID: usageID, HoldID: &holdID, RequestSnapshot: json.RawMessage(`{"provider_id":"test","adapter_version":"openai-compatible-v1"}`)}, DispatchEnvelope{leaseOwner: "controlled-worker", BaseURL: server.URL, Provider: "test", AdapterVersion: "openai-compatible-v1", Credential: []byte("credential"), RequestBody: []byte(`{"model":"test"}`), Price: PriceVersion{OutputPerMillion: 1_000_000}, MaximumCost: 10, ContextType: "PERSONAL"})
 
 	if recorder.Code != http.StatusServiceUnavailable || !repository.resultSaved || repository.savedResult.Kind != "JSON" || repository.savedResult.FinalUsage == nil || repository.savedResult.ActualMicrocredits == nil || repository.savedResult.SettlementSnapshot == nil {
 		t.Fatalf("non-stream settlement evidence was not durable before commit: code=%d result=%#v", recorder.Code, repository.savedResult)
@@ -675,7 +678,7 @@ func TestNonStreamingReplayFailureLeavesNoSplitResponseState(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	recorder := httptest.NewRecorder()
 
-	service.dispatchUsage(recorder, request, UsageRequest{ID: uuid.New(), HoldID: &holdID, RequestSnapshot: json.RawMessage(`{"provider_id":"test","adapter_version":"openai-compatible-v1"}`)}, DispatchEnvelope{BaseURL: server.URL, Provider: "test", AdapterVersion: "openai-compatible-v1", Credential: []byte("credential"), RequestBody: []byte(`{"model":"test"}`), Price: PriceVersion{OutputPerMillion: 1_000_000}, MaximumCost: 10, ContextType: "PERSONAL"})
+	service.dispatchUsage(recorder, request, UsageRequest{ID: uuid.New(), HoldID: &holdID, RequestSnapshot: json.RawMessage(`{"provider_id":"test","adapter_version":"openai-compatible-v1"}`)}, DispatchEnvelope{leaseOwner: "controlled-worker", BaseURL: server.URL, Provider: "test", AdapterVersion: "openai-compatible-v1", Credential: []byte("credential"), RequestBody: []byte(`{"model":"test"}`), Price: PriceVersion{OutputPerMillion: 1_000_000}, MaximumCost: 10, ContextType: "PERSONAL"})
 
 	if recorder.Code != http.StatusServiceUnavailable || repository.responseSaved || repository.resultSaved || repository.committed || billing.commitCalls != 0 {
 		t.Fatalf("non-stream response escaped the failed atomic replay transaction: code=%d repository=%#v billing=%#v", recorder.Code, repository, billing)
@@ -698,7 +701,7 @@ func TestNonStreamingMissingUsagePersistsProviderEvidenceRecoveryState(t *testin
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	recorder := httptest.NewRecorder()
 
-	service.dispatchUsage(recorder, request, UsageRequest{ID: usageID, HoldID: &holdID, RequestSnapshot: json.RawMessage(`{"provider_id":"test","adapter_version":"openai-compatible-v1"}`)}, DispatchEnvelope{BaseURL: server.URL, Provider: "test", AdapterVersion: "openai-compatible-v1", Credential: []byte("credential"), RequestBody: []byte(`{"model":"test"}`), Price: PriceVersion{OutputPerMillion: 1_000_000}, MaximumCost: 10})
+	service.dispatchUsage(recorder, request, UsageRequest{ID: usageID, HoldID: &holdID, RequestSnapshot: json.RawMessage(`{"provider_id":"test","adapter_version":"openai-compatible-v1"}`)}, DispatchEnvelope{leaseOwner: "controlled-worker", BaseURL: server.URL, Provider: "test", AdapterVersion: "openai-compatible-v1", Credential: []byte("credential"), RequestBody: []byte(`{"model":"test"}`), Price: PriceVersion{OutputPerMillion: 1_000_000}, MaximumCost: 10})
 
 	if recorder.Code != http.StatusOK || !repository.resultSaved || repository.savedResult.ResponseDisposition != responseDispositionUsageEvidenceRequired || repository.reviewReason != "" || billing.commitCalls != 0 {
 		t.Fatalf("missing usage was not frozen for provider evidence recovery: code=%d repository=%#v billing=%#v", recorder.Code, repository, billing)
@@ -720,7 +723,7 @@ func TestPreGenerationRejectionSurvivesReleaseFailureForReconciliation(t *testin
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	recorder := httptest.NewRecorder()
 
-	service.dispatchUsage(recorder, request, UsageRequest{ID: usageID, HoldID: &holdID, RequestSnapshot: json.RawMessage(`{"provider_id":"test","adapter_version":"openai-compatible-v1"}`)}, DispatchEnvelope{BaseURL: server.URL, Provider: "test", AdapterVersion: "openai-compatible-v1", Credential: []byte("credential"), RequestBody: []byte(`{"model":"test"}`)})
+	service.dispatchUsage(recorder, request, UsageRequest{ID: usageID, HoldID: &holdID, RequestSnapshot: json.RawMessage(`{"provider_id":"test","adapter_version":"openai-compatible-v1"}`)}, DispatchEnvelope{leaseOwner: "controlled-worker", BaseURL: server.URL, Provider: "test", AdapterVersion: "openai-compatible-v1", Credential: []byte("credential"), RequestBody: []byte(`{"model":"test"}`)})
 
 	if recorder.Code != http.StatusBadRequest || repository.savedResult.ResponseDisposition != responseDispositionRejectedBeforeGeneration || repository.released || billing.releaseCalls != 1 {
 		t.Fatalf("pre-generation rejection lost its retryable release state: code=%d repository=%#v billing=%#v", recorder.Code, repository, billing)
