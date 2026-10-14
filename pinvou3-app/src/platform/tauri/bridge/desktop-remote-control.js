@@ -31,6 +31,7 @@
 
     var unlisten = [];
     var channelRegistrations = Object.create(null);
+    var subscriptionOwner = null;
     var capabilityWaiters = Object.create(null);
     var capabilityOutcomes = Object.create(null);
     var capabilityOutcomeOrder = [];
@@ -108,18 +109,36 @@
 
     function subscribeChannel(name, start) {
       if (channelRegistrations[name]) return;
+      var owner = subscriptionOwner;
       var attempt = {};
       channelRegistrations[name] = attempt;
+      function isLive() {
+        return subscriptionOwner === owner && channelRegistrations[name] === attempt;
+      }
       function registrationFailed() {
-        // A late failure only releases its own registration attempt, never a
-        // replacement created after stop. This is registration bookkeeping;
-        // callback/off lifecycle ownership remains a separate contract.
+        // Retire only this attempt. Other channels and replacement owners keep
+        // their registrations and can retry independently.
         if (channelRegistrations[name] === attempt) delete channelRegistrations[name];
       }
-      try {
-        Promise.resolve(start()).then(function (off) {
+      function listenOwned(eventName, callback) {
+        return listen(eventName, function (event) {
+          if (isLive()) callback(event);
+        });
+      }
+      function retainUnlisten(off) {
+        if (typeof off !== "function") {
+          registrationFailed();
+          return;
+        }
+        if (isLive()) {
           unlisten.push(off);
-        }, registrationFailed);
+        } else {
+          // A late registration owns only its old off, never a replacement.
+          try { off(); } catch (_) {}
+        }
+      }
+      try {
+        Promise.resolve(start(listenOwned)).then(retainUnlisten, registrationFailed);
       } catch (_) {
         registrationFailed();
       }
@@ -127,23 +146,31 @@
 
     function subscribe() {
       if (typeof listen !== "function") return;
-      subscribeChannel("desktop-remote-controlled-status", function () {
-        return listen("desktop-remote-controlled-status", function (event) {
+      if (!subscriptionOwner) subscriptionOwner = {};
+      var owner = subscriptionOwner;
+      function subscribeOwnedChannel(name, start) {
+        // listen can retire or replace this round synchronously. Its remaining
+        // channels must not reserve dead attempts or borrow a replacement owner.
+        if (subscriptionOwner !== owner) return;
+        subscribeChannel(name, start);
+      }
+      subscribeOwnedChannel("desktop-remote-controlled-status", function (listenOwned) {
+        return listenOwned("desktop-remote-controlled-status", function (event) {
           var payload = event && event.payload ? event.payload : event || {};
           noteControlledTerminal(payload);
           clientEvent("controlled_status", controlledDiagnosticDetail(payload.status));
           publish(logic.applyControlledStatus(current(), controlledStatusPayload(payload)));
         });
       });
-      subscribeChannel("desktop-remote-controller-status", function () {
-        return listen("desktop-remote-controller-status", function (event) {
+      subscribeOwnedChannel("desktop-remote-controller-status", function (listenOwned) {
+        return listenOwned("desktop-remote-controller-status", function (event) {
           var payload = event && event.payload ? event.payload : event || {};
           noteControllerTerminal(payload);
           publish(logic.applyControllerStatus(current(), payload));
         });
       });
-      subscribeChannel("desktop-remote-task-status", function () {
-        return listen("desktop-remote-task-status", function (event) {
+      subscribeOwnedChannel("desktop-remote-task-status", function (listenOwned) {
+        return listenOwned("desktop-remote-task-status", function (event) {
           var payload = event && event.payload ? event.payload : event || {};
           var state = current();
           var controlledSession = state.controlledSession || {};
@@ -155,26 +182,26 @@
           }
         });
       });
-      subscribeChannel("desktop-remote-task-event", function () {
-        return listen("desktop-remote-task-event", function (event) {
+      subscribeOwnedChannel("desktop-remote-task-event", function (listenOwned) {
+        return listenOwned("desktop-remote-task-event", function (event) {
           var payload = event && event.payload ? event.payload : event || {};
           publish(logic.applyControlledTaskEvent(current(), payload));
         });
       });
-      subscribeChannel("desktop-remote-controlled-session", function () {
-        return listen("desktop-remote-controlled-session", function (event) {
+      subscribeOwnedChannel("desktop-remote-controlled-session", function (listenOwned) {
+        return listenOwned("desktop-remote-controlled-session", function (event) {
           var payload = event && event.payload ? event.payload : event || {};
           publish(logic.applyControlledSession(current(), payload));
         });
       });
-      subscribeChannel("desktop-remote-controlled-journal", function () {
-        return listen("desktop-remote-controlled-journal", function (event) {
+      subscribeOwnedChannel("desktop-remote-controlled-journal", function (listenOwned) {
+        return listenOwned("desktop-remote-controlled-journal", function (event) {
           var payload = event && event.payload ? event.payload : event || {};
           publish(logic.applyControlledJournalEvent(current(), payload));
         });
       });
-      subscribeChannel("desktop-remote-task-content", function () {
-        return listen("desktop-remote-task-content", function (event) {
+      subscribeOwnedChannel("desktop-remote-task-content", function (listenOwned) {
+        return listenOwned("desktop-remote-task-content", function (event) {
           var payload = event && event.payload ? event.payload : event || {};
           publish(logic.applyTaskContent(current(), payload));
         });
@@ -184,14 +211,14 @@
       // 看到一次性命令返回值，窗口重载后会误以为 A 端仍然空闲。
       // Rust authenticates this narrow result against the live RemoteProxy.
       // The WebView still checks its exact local/ref/session/lease binding.
-      subscribeChannel("desktop-remote-proxy-capability", function () {
-        return listen("desktop-remote-proxy-capability", function (event) {
+      subscribeOwnedChannel("desktop-remote-proxy-capability", function (listenOwned) {
+        return listenOwned("desktop-remote-proxy-capability", function (event) {
           var payload = event && event.payload ? event.payload : event || {};
           settleCapabilityResponse(payload);
         });
       });
-      subscribeChannel("desktop_remote_proxy", function () {
-        return listen("desktop_remote_proxy", function (event) {
+      subscribeOwnedChannel("desktop_remote_proxy", function (listenOwned) {
+        return listenOwned("desktop_remote_proxy", function (event) {
           var payload = event && event.payload ? event.payload : event || {};
           var before = current();
           var after = logic.applyRemoteProxyNotice(before, payload);
@@ -204,12 +231,11 @@
     }
 
     function stop() {
-      unlisten.splice(0).forEach(function (off) {
-        try {
-          off();
-        } catch (_) {}
-      });
+      subscriptionOwner = null;
       channelRegistrations = Object.create(null);
+      var retiredUnlisten = unlisten.splice(0);
+      var retiredWaiters = capabilityWaiters;
+      capabilityWaiters = Object.create(null);
       if (proxyRefreshTimer) clearTimeout(proxyRefreshTimer);
       proxyRefreshTimer = null;
       ++proxyListIntent;
@@ -217,14 +243,26 @@
       proxyReadIntents = Object.create(null);
       if (capabilityRenewalTimer) clearTimeout(capabilityRenewalTimer);
       capabilityRenewalTimer = null;
-      Object.keys(capabilityWaiters).forEach(function (requestId) {
-        var waiter = capabilityWaiters[requestId];
-        clearTimeout(waiter.timer);
-        waiter.reject(asBoundedError("capability_snapshot_unavailable"));
-        delete capabilityWaiters[requestId];
-      });
       uncertainActionRequests = Object.create(null);
       uncertainActionOrder = [];
+      Object.keys(retiredWaiters).forEach(function (requestId) {
+        clearTimeout(retiredWaiters[requestId].timer);
+      });
+      try {
+        Object.keys(retiredWaiters).forEach(function (requestId) {
+          var waiter = retiredWaiters[requestId];
+          delete retiredWaiters[requestId];
+          waiter.reject(asBoundedError("capability_snapshot_unavailable"));
+        });
+      } finally {
+        // Retire every old resource before an external cleanup can synchronously
+        // start a new owner and its requests. Only the old off snapshot is used.
+        retiredUnlisten.forEach(function (off) {
+          try {
+            off();
+          } catch (_) {}
+        });
+      }
     }
 
     function controlledIntent(openNewGeneration) {
