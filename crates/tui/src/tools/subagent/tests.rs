@@ -7669,6 +7669,103 @@ async fn small_surface_successful_cached_use_touches_lru() {
     assert!(model_tool_names(model_request_tools(&mut surface)).contains("get_goal"));
 }
 
+/// The child's ride channel mirrors the parent's: parked notes ride success
+/// and error results alike (a note held back on `Err` would strand until a
+/// later `Ok` — or forever if the child ends first), and names the ride
+/// re-admits are netted out against the child's live cache.
+#[test]
+fn child_parked_note_rides_success_and_error_results_and_nets_re_admissions() {
+    // A parked eviction note names cache members, and cache members are
+    // catalog members — the premise the ride-time catalog check relies on.
+    // The eager lead defeats `initial_active_tools`' single-tool fallback,
+    // which would otherwise force-activate `big-a` and the ride would net
+    // it out of the note.
+    let mut lead = synthetic_deferred_tool("lead", 8);
+    lead.defer_loading = Some(false);
+    let catalog = vec![
+        lead,
+        synthetic_deferred_tool("big-a", 8),
+        synthetic_deferred_tool("big-b", 8),
+        synthetic_deferred_tool("big-c", 8),
+    ];
+    let mut surface = SubAgentToolSurface::new(catalog, &[]);
+    surface.park_eviction_note(
+        ToolboxEvictionTrigger::Step,
+        vec!["big-a".to_string(), "big-b".to_string()].as_slice(),
+    );
+
+    let mut ok = Ok(RichToolResult::plain(ToolResult::success("payload")));
+    surface.ride_pending_eviction_notes(&mut ok);
+    let ok = ok.expect("stays ok");
+    assert!(
+        ok.result.content.contains("payload")
+            && ok.result.content.contains("no longer callable")
+            && ok.result.content.contains("big-a")
+            && ok.result.content.contains("big-b"),
+        "the note rides a success result: {}",
+        ok.result.content
+    );
+
+    surface.park_eviction_note(ToolboxEvictionTrigger::Step, &["big-c".to_string()]);
+    let mut failure: Result<RichToolResult> = Err(anyhow::anyhow!("boom"));
+    surface.ride_pending_eviction_notes(&mut failure);
+    let message = failure.expect_err("stays an error").to_string();
+    assert!(
+        message.contains("boom")
+            && message.contains("no longer callable")
+            && message.contains("big-c"),
+        "the note must ride an error result too: {message}"
+    );
+    assert!(surface.pending_eviction_notes.is_empty());
+
+    // A name the ride hands back is netted out; a fully netted note does
+    // not ride at all.
+    let deferred = synthetic_deferred_tool("big-a", 8);
+    surface.cache.activate(&[deferred], &["big-a".to_string()]);
+    surface.park_eviction_note(ToolboxEvictionTrigger::Step, &["big-a".to_string()]);
+    let mut netted = Ok(RichToolResult::plain(ToolResult::success("clean")));
+    surface.ride_pending_eviction_notes(&mut netted);
+    let netted = netted.expect("stays ok");
+    assert!(
+        netted.result.content == "clean",
+        "a note naming only re-admitted tools must be absorbed: {}",
+        netted.result.content
+    );
+}
+
+/// The park side is covered above; this pin is the consumption side —
+/// `execute_from_surface` must hand parked notes to the child's recorded
+/// result, the production edge that once discarded every report. Driven
+/// through the same wrapper a real child tool call takes.
+#[tokio::test]
+async fn parked_note_rides_through_the_execute_from_surface_glue() {
+    let registry = small_surface_registry(FleetRole::Builder);
+    let catalog = registry.deferred_catalog_for_model(&FleetRole::Builder);
+    let mut surface = SubAgentToolSurface::new(catalog, &["get_goal".to_string()]);
+    // A parked eviction note names a cache member, and a cache member is a
+    // catalog member — the premise the ride-time catalog check relies on.
+    surface
+        .catalog
+        .push(synthetic_deferred_tool("ghost-tool", 8));
+    surface.park_eviction_note(
+        ToolboxEvictionTrigger::TurnStart,
+        &["ghost-tool".to_string()],
+    );
+
+    let content = execute_surface_tool(&registry, &mut surface, "get_goal", json!({}))
+        .await
+        .expect("cached read tool executes");
+    assert!(
+        content.contains("no longer callable") && content.contains("ghost-tool"),
+        "the production ride glue must attach the parked note to the recorded result: {content}"
+    );
+    assert!(
+        surface.pending_eviction_notes.is_empty(),
+        "the ride consumes the parked notes: {:?}",
+        surface.pending_eviction_notes
+    );
+}
+
 #[test]
 fn small_surface_depth_cap_removes_only_agent() {
     let mut runtime =
