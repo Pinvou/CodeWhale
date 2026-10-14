@@ -1083,8 +1083,22 @@ pub(super) fn replace_runtime_mcp_tools(
         .collect();
     // The wire list is the eager head plus the activated deferred tail;
     // that identity — not the catalog's length — is what a declared re-pin
-    // answers for.
+    // answers for. Membership alone is still not the whole story: a
+    // same-name refresh can change what a served tool *says* (description,
+    // schema), which the C5 content fingerprint sees as wire bytes without
+    // any name moving. When the name set ties, the replaced entries' wire
+    // JSON — the exact bytes the fingerprint hashes — decides.
     let wire_before = wire_visible_tool_names(tool_catalog, active_tool_names);
+    let previous_wire_json: std::collections::HashMap<String, Option<String>> = tool_catalog
+        .iter()
+        .filter(|tool| universe.contains(&tool.name))
+        .map(|tool| {
+            (
+                tool.name.clone(),
+                crate::prefix_cache::tool_to_api_json(tool),
+            )
+        })
+        .collect();
     let mut slot_by_name: std::collections::HashMap<String, usize> = tool_catalog
         .iter()
         .enumerate()
@@ -1115,7 +1129,21 @@ pub(super) fn replace_runtime_mcp_tools(
     }
     tool_catalog.retain(|tool| !departed.contains(&tool.name));
     tool_catalog.extend(arrivals);
-    wire_visible_tool_names(tool_catalog, active_tool_names) != wire_before
+    if wire_visible_tool_names(tool_catalog, active_tool_names) != wire_before {
+        return true;
+    }
+    // Same membership: declare only when a served tool's wire JSON changed
+    // under its name. A name without a predecessor is a new arrival —
+    // eager arrivals already moved the name set above, and a deferred one
+    // is invisible on the wire.
+    tool_catalog
+        .iter()
+        .filter(|tool| universe.contains(&tool.name))
+        .any(|tool| {
+            previous_wire_json
+                .get(&tool.name)
+                .is_some_and(|before| *before != crate::prefix_cache::tool_to_api_json(tool))
+        })
 }
 
 /// Every name the next request would serialize: the eager head plus the

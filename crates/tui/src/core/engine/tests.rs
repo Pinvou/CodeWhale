@@ -9494,6 +9494,37 @@ fn runtime_mcp_refresh_replaces_the_pool_slice() {
         !active.contains("mcp_old_name") && active.contains("mcp_new_name"),
         "the renamed surface must be reflected in the active set: {active:?}"
     );
+
+    // A same-name refresh that changes what the tool *says* (a description
+    // or schema update) moves wire bytes without moving any name: the C5
+    // content fingerprint sees drift the name-set identity cannot. When
+    // the name set ties, the declaration must fall back to the replaced
+    // entries' serialized bytes.
+    let mut stale_definition = api_tool("mcp_static_read");
+    stale_definition.description = "a stale description".to_string();
+    let mut catalog = vec![stale_definition, api_tool("exec_shell")];
+    let mut active = HashSet::new();
+    let universe: HashSet<String> = ["mcp_static_read"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let wire_changed = replace_runtime_mcp_tools(
+        &mut catalog,
+        &mut active,
+        &universe,
+        vec![api_tool("mcp_static_read")],
+        &cache,
+    );
+    assert!(
+        wire_changed,
+        "a same-name refresh that changes the served definition must be declared"
+    );
+    let names: Vec<&str> = catalog.iter().map(|tool| tool.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["mcp_static_read", "exec_shell"],
+        "the content-drift declaration still splices in place"
+    );
 }
 
 #[test]
