@@ -515,7 +515,11 @@ async fn forward(
         if delivery.as_ref().is_some_and(|delivery| delivery.stopped()) {
             return proxy_error(StatusCode::CONFLICT, "model delivery cancelled");
         }
-        let mut builder = state.client.request(method.clone(), target_url.clone());
+        let mut builder = model_request_budget(
+            state.client.request(method.clone(), target_url.clone()),
+            resource,
+            &method,
+        );
         for name in [
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
@@ -667,10 +671,10 @@ async fn forward(
                 _ = delivery.cancelled() => {
                     return proxy_error(StatusCode::CONFLICT, "model delivery cancelled");
                 }
-                result = upstream_response.bytes() => result,
+                result = super::bounded_response_bytes(upstream_response) => result,
             }
         } else {
-            upstream_response.bytes().await
+            super::bounded_response_bytes(upstream_response).await
         };
         let payload = match payload {
             Ok(payload) => payload,
@@ -707,6 +711,21 @@ async fn forward(
     response
         .body(body)
         .unwrap_or_else(|_| proxy_error(StatusCode::BAD_GATEWAY, "invalid gateway response"))
+}
+
+// AccountPlatformState already applies this read budget to token GET /v1/models.
+// The same catalog through the engine proxy must not wait without a budget.
+// Chat has its existing cancellation/operation contract; no new total deadline.
+fn model_request_budget(
+    builder: reqwest::RequestBuilder,
+    resource: &str,
+    method: &reqwest::Method,
+) -> reqwest::RequestBuilder {
+    if resource == "models" && *method == reqwest::Method::GET {
+        builder.timeout(super::ACCOUNT_API_REQUEST_TIMEOUT)
+    } else {
+        builder
+    }
 }
 
 fn chat_request_expects_sse(body: &[u8]) -> bool {
@@ -1292,6 +1311,130 @@ mod tests {
         let explicit_error = require_sse_done(explicit_error).collect::<Vec<_>>().await;
         assert_eq!(explicit_error.len(), 1);
         assert!(explicit_error[0].is_ok());
+    }
+
+    #[test]
+    fn catalog_proxy_uses_existing_account_read_budget_without_shortening_chat() {
+        let client = reqwest::Client::new();
+        for (resource, method, expected) in [
+            (
+                "models",
+                reqwest::Method::GET,
+                Some(super::super::ACCOUNT_API_REQUEST_TIMEOUT),
+            ),
+            ("chat/completions", reqwest::Method::POST, None),
+        ] {
+            let request = super::model_request_budget(
+                client.request(method.clone(), "http://127.0.0.1/v1/models"),
+                resource,
+                &method,
+            )
+            .build()
+            .unwrap();
+            assert_eq!(request.timeout().copied(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn real_proxy_payment_body_enforces_existing_bound_and_completeness() {
+        let notice = br#"{"code":"WALLET_INSUFFICIENT","billing_notice":{"schema_version":1,"code":"WALLET_INSUFFICIENT","stage":"INITIAL_RESERVATION","turn_outcome":"REJECTED","settlement_status":"NOT_STARTED","action":"OPEN_RECHARGE","context_type":"PERSONAL","usage_request_id":"0199a100-0001-7000-8000-000000000106"}}"#;
+        let bound = super::super::MAX_RESPONSE_BYTES;
+        for (size, chunked, broken, expected) in [
+            (notice.len(), false, false, StatusCode::PAYMENT_REQUIRED),
+            (bound, false, false, StatusCode::PAYMENT_REQUIRED),
+            (bound + 1, false, false, StatusCode::BAD_GATEWAY),
+            (bound + 1, true, false, StatusCode::BAD_GATEWAY),
+            (notice.len(), true, true, StatusCode::BAD_GATEWAY),
+        ] {
+            let mut payload = notice.to_vec();
+            payload.resize(size, b' ');
+            let expected_payload = payload.clone();
+            let upstream = Router::new().route(
+                "/v1/chat/completions",
+                post(move || {
+                    let payload = payload.clone();
+                    async move {
+                        let body = if broken {
+                            Body::from_stream(stream::unfold(0, move |phase| {
+                                let payload = payload.clone();
+                                async move {
+                                    match phase {
+                                        0 => Some((Ok::<_, io::Error>(Bytes::from(payload)), 1)),
+                                        1 => {
+                                            tokio::time::sleep(std::time::Duration::from_millis(
+                                                20,
+                                            ))
+                                            .await;
+                                            Some((
+                                                Err(io::Error::new(
+                                                    io::ErrorKind::UnexpectedEof,
+                                                    "controlled incomplete body",
+                                                )),
+                                                2,
+                                            ))
+                                        }
+                                        _ => None,
+                                    }
+                                }
+                            }))
+                        } else if chunked {
+                            let chunks = payload
+                                .chunks(8192)
+                                .map(Bytes::copy_from_slice)
+                                .collect::<Vec<_>>();
+                            Body::from_stream(stream::iter(
+                                chunks.into_iter().map(Ok::<_, io::Error>),
+                            ))
+                        } else {
+                            Body::from(payload)
+                        };
+                        Response::builder()
+                            .status(StatusCode::PAYMENT_REQUIRED)
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .body(body)
+                            .unwrap()
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let task = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+            let proxy = ModelGatewayProxy::default();
+            let authority = Arc::new(TestTurnAuthority::default());
+            authority.set(Some(1));
+            proxy.bind_turn_authority(authority).unwrap();
+            let base = proxy
+                .register_session(
+                    "bounded-payment-session",
+                    &format!("http://{address}/v1"),
+                    "11111111-1111-4111-8111-111111111111",
+                    128,
+                )
+                .await
+                .unwrap();
+            let response = reqwest::Client::new()
+                .post(format!("{base}/chat/completions"))
+                .bearer_auth("controlled-user")
+                .header("Idempotency-Key", "bounded-payment-invocation-key")
+                .json(&serde_json::json!({"model":"model","messages":[],"stream":false}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                expected,
+                "size={size} chunked={chunked} broken={broken}"
+            );
+            let delivered = response.bytes().await.unwrap();
+            if expected == StatusCode::PAYMENT_REQUIRED {
+                assert_eq!(delivered.as_ref(), expected_payload.as_slice());
+                assert!(billing_notice_from_body(&delivered).is_some());
+            } else {
+                assert_ne!(delivered.as_ref(), expected_payload.as_slice());
+                assert!(billing_notice_from_body(&delivered).is_none());
+            }
+            task.abort();
+        }
     }
 
     #[test]
