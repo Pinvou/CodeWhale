@@ -5990,7 +5990,12 @@ impl RuntimeThreadManager {
                     (true, false) => "workspace",
                     (false, true) => "workspace_roots",
                 };
-                bail!("{what} cannot be changed while the thread has an active turn");
+                // Round-47 item 1 (P2-5): the wording must carry the conflict substring
+                // `map_thread_err` keys 409 on ("already has an active turn"),
+                // matching the four sibling turn-start guards — an IDE client
+                // treating 400 as "fix your body" would retry a mid-turn PATCH
+                // forever.
+                bail!("{what} cannot be changed while the thread already has an active turn");
             }
 
             // A posture/mode edit must reach the live engine even while a

@@ -620,12 +620,16 @@ fn carve_out_target_allowed(workspace: &Path, workspace_canonical: &Path, raw: &
 /// DeepestAncestor fallback) so this lane can never drift from the intake
 /// gate's copy again.
 ///
-/// Round-46 P2-1 (behavior flip, disclosed and pinned): the delegation
-/// composes a path for EVERY spelling where the old loop returned `None` —
-/// notably a ghost component + `..` (`<ws>/ghost_dir/../target`), which the
-/// old `file_name()? == None` corner walked past and DENIED modally. The
-/// composed spelling lands on the eligible parent (`<canonical-ws>/target`),
-/// so the carve-out answers on the true landing path — a false-denial fix,
+/// Round-46 P2-1 (behavior flip, disclosed and pinned; doc corrected in
+/// round-47 item 3): the delegation composes a path for EVERY spelling
+/// where the old loop returned `None` — notably a ghost component + `..`
+/// (`<ws>/ghost_dir/../target`), which the old `file_name()? == None`
+/// corner walked past and DENIED modally. For that shape the walk composes
+/// `<canonical-ws>/ghost_dir/target` (the trailing `..` pops without
+/// canceling the ghost component, which re-appends into the tail); the
+/// LEXICAL landing is `<ws>/target`, and the composed spelling is the
+/// execution-materialized path — judging it is exactly why the carve-out
+/// admits (both spellings sit inside the workspace). A false-denial fix,
 /// visible even single-root (pinned by
 /// `carve_out_admits_a_ghost_dotdot_shape_composed_onto_the_parent`). The
 /// `Option` return is retained for signature stability; the walked-past-root
@@ -852,12 +856,14 @@ mod tests {
 
     #[test]
     fn carve_out_admits_a_ghost_dotdot_shape_composed_onto_the_parent() {
-        // Round-46 P2-1: a target spelled through a ghost component + `..`
-        // (`ghost_dir/../src/main.rs`, ghost_dir nonexistent) used to hit the
-        // walk's `file_name()? == None` corner and DENY modally; the shared
-        // core walk composes it onto the deepest existing ancestor (the
-        // workspace), so the carve-out now answers on the true landing path.
-        // Single-root-visible behavior (pinned for the body's list).
+        // Round-46 P2-1 (doc corrected in round-47 item 3): a target spelled
+        // through a ghost component + `..` (`ghost_dir/../src/main.rs`,
+        // ghost_dir nonexistent) used to hit the walk's `file_name()? ==
+        // None` corner and DENY modally; the shared core walk composes
+        // `<canonical-ws>/ghost_dir/src/main.rs` (the ghost component
+        // re-appends into the tail) while the lexical landing is
+        // `<ws>/src/main.rs` — both inside the workspace, so the carve-out
+        // admits. Single-root-visible behavior (pinned for the body's list).
         let tmp = carve_out_workspace();
         assert!(
             paths_within_workspace_write_carve_out(
