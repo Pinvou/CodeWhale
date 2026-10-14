@@ -43,6 +43,19 @@ Set these variables before opening the registry:
 | `PINVOU_REMOTE_ENROLLMENT_HMAC_PREVIOUS_KEYS_JSON` | Optional secret JSON array of `{ "key_id": "...", "key": "..." }` for verification-only old keys. At most seven, unique IDs distinct from the active ID; each secret has the same 32–4096 UTF-8 byte bounds. Maximum JSON input is 65536 bytes. |
 | `PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU` | Optional `1`/`true`; accepted only with `deployment=development` and `NODE_ENV=development` or `test`. |
 
+The example defaults for both HMAC secrets are empty and fail validation. The two
+old public `replace-with-at-least-32-...` placeholder values are also rejected,
+including when copied into the other role. Generate each secret independently
+with a cryptographic random generator (for example, 32 random bytes encoded as
+base64), import it directly into the deployment secret manager, and inject it at
+startup. Do not reuse enrollment/pairing secrets or capture secret output in logs,
+shell history, PRs or repository files. The 32–4096 UTF-8 byte check and placeholder
+rejection do not establish entropy for arbitrary administrator-supplied values.
+
+The same public examples are rejected for the independent coverage-control
+secret; deployment preflight rejects them for enrollment and pairing before
+runtime startup. Errors report only the validation code, never the secret.
+
 `official` and `self_hosted` always reject an unknown endpoint. A production
 runtime refuses both development deployment mode and the development TOFU
 switch. Self-hosted production therefore uses an explicit administrator import
@@ -349,6 +362,13 @@ active key. Every existing digest is verified with its exact persisted `key_id`;
 unknown keys still fail closed. A new key ID must identify new independently
 generated key material; never replace bytes under an existing ID. Endpoint IDs,
 role domains, CAS revisions, revoked entries and migration history are preserved.
+
+Public example values are also rejected in retained enrollment keys. A deployment
+that used one cannot use the phased procedure below to retain that key: replacing
+it immediately invalidates digests made with it. Do not delete registry history
+or silently re-enroll endpoints to work around this refusal. Record the affected
+key IDs and coordinate a separately reviewed credential recovery before changing
+such a deployment; no automatic migration or compatibility bypass is provided.
 
 1. Before the change, back up the protected primary/backup pair and secret-manager
    key versions using the documented stopped-service procedure. Record only key

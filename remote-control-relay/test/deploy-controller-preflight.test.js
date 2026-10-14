@@ -61,6 +61,20 @@ test("production controller environment matches the supported secure runtime pro
   );
 });
 
+test("production preflight rejects public HMAC examples in either role without disclosing them", () => {
+  for (const name of ["PINVOU_REMOTE_ENROLLMENT_HMAC_KEY", "PINVOU_REMOTE_PAIRING_HMAC_KEY"]) {
+    for (const example of [
+      "replace-with-at-least-32-random-bytes",
+      "replace-with-at-least-32-independent-random-bytes",
+    ]) {
+      const entries = parseControllerEnvironment(VALID_ENV);
+      entries.set(name, example);
+      assert.throws(() => validateControllerEnvironment(entries),
+        error => error.code === "controller_env_hmac_key_invalid" && error.message === error.code && !error.cause);
+    }
+  }
+});
+
 test("production controller environment rejects undeclared keys", () => {
   assert.throws(
     () => validateControllerEnvironment(parseControllerEnvironment(`${VALID_ENV}\nPINVOU_UNREVIEWED_ESCAPE_HATCH=enabled\n`)),
