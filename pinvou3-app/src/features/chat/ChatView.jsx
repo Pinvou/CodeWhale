@@ -1285,7 +1285,19 @@ const openChatExternalUrl = (url) => {
       // state operation), so during the async refresh window the old session's consent
       // dialogs are no longer clickable.
       useEffect(() => {
-        if (!COMPUTER_USE_ENABLED || !bridge.available || !bridge.computerUse || !activeSessionId) return;
+        if (!COMPUTER_USE_ENABLED || !bridge.available || !bridge.computerUse) return;
+        // Leaving to the draft screen must run the session-less refresh:
+        // createNewSession/leaveSessionView/applyDeletedSession all null
+        // activeSessionId without touching the computer-use slice, so a
+        // granted session's control banner (and any unanswered consent
+        // dialog) used to stay rendered on the welcome composer — the
+        // r2/r3 session-less branch fixed the state but had no production
+        // caller on this transition. Switching back re-serves the real
+        // state from the server truth via the mount refresh below.
+        if (!activeSessionId) {
+          bridge.computerUse.refreshStatus(null).catch(() => {});
+          return;
+        }
         bridge.computerUse.refreshStatus(activeSessionId).catch(() => {});
         // Missed-event fallback: if grant/stop events were missed by the frontend (e.g. a
         // refresh or a backgrounded window), the banner would drift from the real
@@ -2557,7 +2569,7 @@ const openChatExternalUrl = (url) => {
         const requestKey = [
           remoteConnection?.connectionId,
           remoteConnection?.leaseEpoch,
-          remoteConnection?.remoteControlGeneration,
+          remoteConnection?.generation,
           sessionRef,
         ].map((part) => String(part || '')).join(':');
         requester.update({
@@ -2576,7 +2588,7 @@ const openChatExternalUrl = (url) => {
         remoteConnection?.capabilityStatus,
         remoteConnection?.connectionId,
         remoteConnection?.leaseEpoch,
-        remoteConnection?.remoteControlGeneration,
+        remoteConnection?.generation,
         remoteConnection?.sessionRef,
         remoteConnection?.status,
       ]);

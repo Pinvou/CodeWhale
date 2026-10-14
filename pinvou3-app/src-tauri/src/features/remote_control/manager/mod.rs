@@ -608,14 +608,6 @@ impl Drop for ControllerRelayChannel {
     }
 }
 
-#[derive(Debug)]
-struct WebSessionUpload {
-    session_id: String,
-    expected_revision: String,
-    total: usize,
-    data: Vec<u8>,
-    last_touched: Instant,
-}
 /// 浏览器本机文件分块上传的内存累积缓冲。落盘与 ingest 只发生在最后一块提交时。
 #[derive(Debug)]
 struct WebAttachmentUpload {
@@ -3635,15 +3627,6 @@ mod tests {
 
     const TEST_ENDPOINT_ID: &str = "ep_test";
     const TEST_LEASE_ID: &str = "lease_000000000000000000000000";
-
-    #[test]
-    fn event_delivery_requires_current_web_subscription() {
-        let mut subscriptions = HashSet::new();
-        subscriptions.insert("session:deleted".to_string());
-
-        assert!(subscriptions.contains("session:deleted"));
-        assert!(!subscriptions.contains("session:list_changed"));
-    }
 
     #[test]
     fn controller_messages_have_a_dedicated_relay_lane() {

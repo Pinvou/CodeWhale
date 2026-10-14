@@ -52,6 +52,10 @@ startup. Do not reuse enrollment/pairing secrets or capture secret output in log
 shell history, PRs or repository files. The 32–4096 UTF-8 byte check and placeholder
 rejection do not establish entropy for arbitrary administrator-supplied values.
 
+The same public examples are rejected for the independent coverage-control
+secret; deployment preflight rejects them for enrollment and pairing before
+runtime startup. Errors report only the validation code, never the secret.
+
 `official` and `self_hosted` always reject an unknown endpoint. A production
 runtime refuses both development deployment mode and the development TOFU
 switch. Self-hosted production therefore uses an explicit administrator import
@@ -259,6 +263,10 @@ it.
 
 ## Enrollment data and API
 
+Live writer capacity can be observed with `enrollment-migrate.js --capacity`
+through the existing private HMAC control listener. It never opens an offline
+copy or initializes a missing store. See [capacity and retained request evidence](../docs/remote-enrollment-capacity.md).
+
 The `endpoint_enrollment` namespace schema is version 3. It stores sorted
 endpoint records with status (`active` or terminal `revoked`), endpoint
 revision, ordered timestamps, role-domain-separated HMAC-SHA-256 digests in
@@ -355,6 +363,13 @@ unknown keys still fail closed. A new key ID must identify new independently
 generated key material; never replace bytes under an existing ID. Endpoint IDs,
 role domains, CAS revisions, revoked entries and migration history are preserved.
 
+Public example values are also rejected in retained enrollment keys. A deployment
+that used one cannot use the phased procedure below to retain that key: replacing
+it immediately invalidates digests made with it. Do not delete registry history
+or silently re-enroll endpoints to work around this refusal. Record the affected
+key IDs and coordinate a separately reviewed credential recovery before changing
+such a deployment; no automatic migration or compatibility bypass is provided.
+
 1. Before the change, back up the protected primary/backup pair and secret-manager
    key versions using the documented stopped-service procedure. Record only key
    IDs, revisions and backup checksums in the operational record, never keys or
@@ -439,8 +454,9 @@ and compared before an active-to-revoked transition. An already revoked entry
 is a read-only idempotent result even if a retry supplies an old or future
 well-formed revision: no endpoint/namespace revision or persisted bytes change.
 
-The registry's 100,000-entry ceiling and the store's default 16 MiB serialized
-state budget are separate from the store's 32-namespace ceiling. Creating the
+The registry's 100,000-entry ceiling, the store's 32-namespace ceiling and its
+default 16 MiB serialized state budget are independent safety limits, not a
+promise to store 100,000 entries. Creating the
 32nd namespace is allowed; a 33rd returns `relay_state_capacity_reached` without
 changing durable primary/backup bytes or any revision. CAS updates of existing
 namespaces remain available at that ceiling and survive reopening the store.
@@ -448,9 +464,7 @@ The namespace-boundary regression covers this contract independently of the
 implementation constant. Dedicated-directory alien-entry rejection is a
 separate test-coverage follow-up; this regression does not qualify that path.
 
-The registry's 100,000-entry ceiling and the store's default 16 MiB serialized
-size ceiling are independent safety limits, not a promise to store 100,000
-entries. Other namespaces and record sizes consume the same byte budget; the
+Other namespaces and record sizes consume the same byte budget; the
 first applicable limit bounds effective capacity. Set production capacity
 targets from deployment-specific load tests, not these hard ceilings.
 
@@ -530,6 +544,10 @@ at 16 KiB, while later valid business frames retain the legacy Relay's 4 MiB
 default payload range. The gateway also enforces browser Origin policy,
 connection/ingress limits, a bounded source bucket table and a strict trusted
 proxy allowlist; untrusted forwarding headers are rejected. Use
+the [two-hop Host/Origin contract](../docs/windows-desktop-remote-control-a05-gateway-origin.md)
+to configure the same exact browser origin allowlist in both gateway and legacy
+Relay processes. Public same-origin at the gateway does not make the preserved
+browser Origin same-origin with the new loopback upstream Host. Use
 `nginx-enrollment-gateway.conf` for the public route and run
 `scripts/enrollment-gateway-preflight.js` with every public entrypoint. The
 preflight fails if a route lacks the gateway marker, is unavailable, the

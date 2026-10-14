@@ -2,6 +2,7 @@ import { lstat, readFile, realpath } from "node:fs/promises";
 import { isIP } from "node:net";
 import { resolve } from "node:path";
 import { isDirectCliEntry } from "../cli-entrypoint.js";
+import { isExampleHmacKey } from "../hmac-key-config.js";
 
 const REQUIRED_KEYS = Object.freeze([
   "NODE_ENV",
@@ -18,11 +19,14 @@ const REQUIRED_KEYS = Object.freeze([
   "PINVOU_REMOTE_STATE_PATH",
   "PINVOU_REMOTE_ALLOWED_PROXY_IPS",
   "PINVOU_REMOTE_TRUSTED_PROXY_IPS",
+  "PINVOU_TELEMETRY_ENROLLMENT_TOKEN",
+  "PINVOU_TELEMETRY_DEVICE_PEPPER",
+  "PINVOU_STATS_ADMIN_PASSWORD",
+  "PINVOU_TELEMETRY_DATA_DIR",
 ]);
 
 const EXACT_VALUES = Object.freeze({
   NODE_ENV: "production",
-  PINVOU_DESKTOP_CONTROLLER_ENABLED: "1",
   PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "self_hosted",
   PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: "false",
   PINVOU_REMOTE_CONTROLLER_STATE_PATH:
@@ -58,12 +62,20 @@ export function parseControllerEnvironment(source) {
   return entries;
 }
 
-export function validateControllerEnvironment(entries) {
+export function validateControllerEnvironment(entries, { expectedFeatureFlag = "1" } = {}) {
   if (!(entries instanceof Map)) fail("controller_env_entries_invalid");
+  if (!new Set(["0", "1"]).has(expectedFeatureFlag)) fail("controller_env_expected_feature_flag_invalid");
+  const allowedKeys = new Set(REQUIRED_KEYS);
+  if ([...entries.keys()].some((key) => !allowedKeys.has(key))) {
+    fail("controller_env_unknown_key");
+  }
   for (const key of REQUIRED_KEYS) {
     if (!entries.has(key) || entries.get(key).length === 0) {
       fail("controller_env_required_value_missing");
     }
+  }
+  for (const name of ["PINVOU_REMOTE_ENROLLMENT_HMAC_KEY", "PINVOU_REMOTE_PAIRING_HMAC_KEY"]) {
+    if (isExampleHmacKey(entries.get(name))) fail("controller_env_hmac_key_invalid");
   }
   // Match the implemented server dispatcher; official live claims are not wired.
   if (entries.get("PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT") === "official") {
@@ -72,6 +84,9 @@ export function validateControllerEnvironment(entries) {
   for (const [key, expected] of Object.entries(EXACT_VALUES)) {
     if (entries.get(key) !== expected) fail("controller_env_required_value_invalid");
   }
+  if (entries.get("PINVOU_DESKTOP_CONTROLLER_ENABLED") !== expectedFeatureFlag) {
+    fail("controller_env_required_value_invalid");
+  }
   const allowed = parseProxyIps(entries.get("PINVOU_REMOTE_ALLOWED_PROXY_IPS"));
   const trusted = parseProxyIps(entries.get("PINVOU_REMOTE_TRUSTED_PROXY_IPS"));
   if (
@@ -79,6 +94,17 @@ export function validateControllerEnvironment(entries) {
     || [...allowed].some((address) => !trusted.has(address))
   ) {
     fail("controller_env_proxy_ips_mismatch");
+  }
+  if (
+    entries.get("PINVOU_TELEMETRY_ENROLLMENT_TOKEN").length < 24
+    || entries.get("PINVOU_TELEMETRY_DEVICE_PEPPER").length < 24
+    || entries.get("PINVOU_STATS_ADMIN_PASSWORD").length < 12
+  ) {
+    fail("controller_env_telemetry_credentials_invalid");
+  }
+  const telemetryDataDir = entries.get("PINVOU_TELEMETRY_DATA_DIR");
+  if (!telemetryDataDir.startsWith("/") || telemetryDataDir.includes("\0")) {
+    fail("controller_env_telemetry_data_dir_invalid");
   }
 }
 
@@ -112,7 +138,7 @@ export function validateControllerEnvironmentMetadata({
 
 export async function validateControllerEnvironmentFile(
   filePath,
-  { expectedUid = 0, expectedGid = 0 } = {},
+  { expectedUid = 0, expectedGid = 0, expectedFeatureFlag = "1" } = {},
 ) {
   const expectedPath = resolve(filePath);
   const metadata = await lstat(expectedPath);
@@ -134,7 +160,7 @@ export async function validateControllerEnvironmentFile(
     resolvedPath,
   });
   const source = await readFile(expectedPath, "utf8");
-  validateControllerEnvironment(parseControllerEnvironment(source));
+  validateControllerEnvironment(parseControllerEnvironment(source), { expectedFeatureFlag });
 }
 
 // Check every ancestor before install -d can follow links or change ownership.
@@ -166,7 +192,8 @@ export async function validateControllerStateDirectories(
 }
 
 if (isDirectCliEntry(import.meta.url)) {
-  validateControllerEnvironmentFile(process.argv[2] || "")
+  const expectedFeatureFlag = process.argv.includes("--expect-feature-off") ? "0" : "1";
+  validateControllerEnvironmentFile(process.argv[2] || "", { expectedFeatureFlag })
     .then(() => validateControllerStateDirectories())
     .catch((error) => {
       // Never print file contents or variable values: this file contains production secrets.

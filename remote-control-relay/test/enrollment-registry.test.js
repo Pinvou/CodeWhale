@@ -2364,6 +2364,39 @@ test("unreleased registry formats fail closed without lazy upgrades", async (t) 
     { code: "enrollment_registry_unsupported" });
 });
 
+test("registry closed schema independently rejects future version and extra field without rewriting evidence", async (t) => {
+  for (const [label, corrupt, code] of [
+    ["future-version-only", (value) => { value.version = ENROLLMENT_REGISTRY_VERSION + 1; }, "enrollment_registry_unsupported"],
+    ["extra-field-only", (value) => { value.unrecognized_registry_field = true; }, "enrollment_registry_malformed"],
+  ]) {
+    await t.test(label, async (t) => {
+      const { statePath, store, registry } = await openRegistry(t);
+      await registry.enroll({ endpointId: "closed-schema-endpoint", credential: FIRST_CREDENTIAL,
+        desktopCredential: SECOND_CREDENTIAL });
+      await registry.authorizeWebRegistration({ endpointId: "closed-schema-endpoint", accessToken: FIRST_CREDENTIAL });
+      const valid = store.readNamespace(ENROLLMENT_NAMESPACE);
+      assert.equal(valid.value.version, 3, "fixture must begin with the complete current v3 schema");
+      assert.ok(Array.isArray(valid.value.migration_requests));
+      const changed = structuredClone(valid.value);
+      corrupt(changed);
+      // Write only the malformed namespace through the real generic StateStore;
+      // the surrounding durable state format remains valid and authoritative.
+      await store.compareAndSwap(ENROLLMENT_NAMESPACE, valid.namespace_revision, changed);
+      const primary = await fs.readFile(statePath);
+      const backup = await fs.readFile(`${statePath}.bak`);
+      const revision = store.readNamespaceRevision(ENROLLMENT_NAMESPACE);
+      assert.throws(() => EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) }), { code });
+      await assert.rejects(registry.authorizeWebRegistration({ endpointId: "closed-schema-endpoint", accessToken: FIRST_CREDENTIAL }), { code });
+      await assert.rejects(registry.authorizeDesktopRegistration({ endpointId: "closed-schema-endpoint",
+        accessToken: FIRST_CREDENTIAL, desktopSecret: SECOND_CREDENTIAL }), { code });
+      assert.deepEqual(store.readNamespaceRevision(ENROLLMENT_NAMESPACE), revision);
+      assert.deepEqual(store.readNamespace(ENROLLMENT_NAMESPACE).value, changed);
+      assert.deepEqual(await fs.readFile(statePath), primary);
+      assert.deepEqual(await fs.readFile(`${statePath}.bak`), backup);
+    });
+  }
+});
+
 test("migration ledger survives a crash after pending and seals a secret-free terminal outcome", async (t) => {
   const { statePath, store, registry } = await openRegistry(t);
   const input = {

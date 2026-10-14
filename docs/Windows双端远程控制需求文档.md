@@ -2,7 +2,7 @@
 
 > 文档状态：需求确认稿
 >
-> 文档版本：1.10
+> 文档版本：1.11
 >
 > 更新日期：2026-10-07
 >
@@ -23,12 +23,15 @@
 | 1.8 | 2026-10-01 | 记录 Finished receipt 固定向量勘误，澄清 reservation 原子提升、模块落位与模型路由判别符，并登记生产容量定标门禁 |
 | 1.9 | 2026-10-07 | 补录 2026-09-26 架构收口：不引入统一 Runtime，薄用例协调并列组件，RemoteProxy 保存 A 投影，B 保持唯一权威；统一废弃未发布桌面旧格式迁移/兼容窗口，已发布 Web v2 迁移不变 |
 | 1.10 | 2026-10-07 | 补录 A20 的 feature application 用例边界、宿主投影端口和架构门禁；保持 SessionStore 状态/投影职责与三种后端能力的独立所有权，不恢复未发布旧接口或迁移窗口 |
+| 1.11 | 2026-10-07 | 追加 A22 当前命令/事件、统一 ChatView 与 RemoteProxy 单一供数说明；补明废弃实验文件不能重新成为数据源，保留既有原子持久化、崩溃恢复与已发布 Web v2 约束 |
 
 以上版本 1.6～1.8 合并原开发记录与前序勘误：前序文档中 2026-10-01 的“1.6”勘误现列为 1.8，内容仍保留。1.6/1.7 为对应功能的历史补录，不代表 A18 部署波次新增这些实现或取得当前测试/发布证据。
 
 A19 原草稿把前序 1.8 勘误重编号为 1.10，并用 1.8/1.9 回填运行时设计过程；这些草稿编号现废弃。保留已审 A18 的版本条目，只追加本次 1.9；曾提出的 ConversationRuntime 与兼容迁移计划不是现行需求或后续技术债。
 
 A20 原草稿中的 1.10/1.11/1.12 编号现废弃：职责与用例边界说明并入本次 1.10，Finished receipt 勘误仍保留为已审 1.8；原提交历史不改写。
+
+A22 原草稿把前序 Finished receipt 勘误从 1.12 再编号为 1.13，并回填 1.12；这些草稿编号现废弃。沿用已审 1.8～1.10 原条目，仅追加本次 1.11；该桌面功能尚未发布，这些编号不是已发布版本，原提交历史仍保留。
 
 ## 1. 背景
 
@@ -486,7 +489,7 @@ React UI / ChatView
 }
 
 RouteV1 = {
-  display_name: string,                                // 必填，非空白，至多 128 Unicode 字符；仅展示
+  display_name: string,                                // 必填，非空白，仅展示，不参与路由；最多128个Unicode scalar（UTF-8最多512字节）
   preset: "local_vllm" | "deepseek" | "kimi" | "openai_compatible" |
           "qwen" | "doubao" | "minimax" | "glm" | "mimo" | "openai" |
           "openai_responses" | "anthropic" | "gemini" | "xai",
@@ -563,6 +566,12 @@ RouteV1 = {
 | RC-F-006 | 成果访问必须绑定当前连接、B Session 和成果 ID，禁止仅凭路径读取 | P0 |
 | RC-F-007 | A 的本地历史只保存成果元数据和已下载副本位置，不保存 B 绝对路径 | P1 |
 | RC-F-008 | 大文件或不支持预览的成果必须明确提示下载，不得截断后伪装完整预览 | P1 |
+
+Windows 附件发布必须由进程内只读文件租约保护：公开凭据前，以同一只读句柄重新认证原对象身份、单链接、长度和内容；目录整链与文件租约持续到解析及后续图片读取结束，禁止将裸路径作为读取权威。本地控制附件复用该发布方式，其他平台明确返回 unsupported，不改变 Legacy Web 摄入流程。清理须先撤销凭据，等待活跃读取者释放后重试；删除时重新核对原对象身份，仅删除该对象与空目录，外来文件或清理失败必须保留并明确诊断。
+
+原子发布后的认证或只读打开失败必须先精确清理；若临时占用等原因阻止清理，远程上传必须保留原文件删除句柄或锚定目录与对象身份作为独立清理权，由现有回收器重试，不能仅保留文件名或记录日志后丢失清理权。清理权不授予读取权限，替换对象始终保留；完成清理后方可释放暂存容量。
+
+Engine 提交只表示排队，不是任务终态。普通聊天的外层 turn port 须持有附件读取租约，直到终态等待或取消/错误收尾、技能恢复和模型释放全部完成；断线或代际清理撤销上传凭据不得使仍在执行的大文本分页读取提前失去文件保护。
 
 ### 7.9 双端同步与独立历史
 
@@ -1083,6 +1092,13 @@ A 禁止持久化：
 17. 当前远程正文只由 `SessionStore.RemoteProxy` 供数，不实施旧历史基线构建、high-water cursor 补齐或新旧供数指针切换；任何时刻禁止双写、两个业务数据源或重复执行。当前 outbox/投影的原子持久化、幂等与崩溃恢复必须独立验收，不因废弃旧格式迁移而免除。
 18. 功能开关不能恢复已删除的旧远控存储、UI 或 Command；不保留旧源只读恢复窗口或稳定版本兼容期。已发布 Web v2、endpoint/registry 迁移与安全回滚仍按第 5.4 节及本节前述要求执行，不得删除其数据或绕过 enrollment。
 19. 统一 `ChatView` 上线前必须覆盖本地普通对话、本地 ACP 代码会话、远程 B 模型、远程 A 临时模型以及连接中断恢复；清理第二套远程正文 UI、旧入口和旧数据源须通过调用方扫描和回归证明无残余消费者/双写，不为未发布旧桌面接口保留版本兼容窗口。
+20. 首次发布的全新安装与包含废弃实验文件的升级目录均只注册和使用 `SessionStore.RemoteProxy`；不读取、迁移、改写或重新暴露旧 `RemoteHistoryStore` 文件，不为它添加 sidecar、供数指针或 migration revision。功能开关回退只能关闭新入口，不能恢复旧源。
+21. 首版生产 release evidence 的 Ed25519 attestor 只允许受保护远程签名服务中的不可导出 key，不声明任何本机硬件密钥提供者或其他签名算法能力。独立 provider verifier 必须在本次 run nonce 产生后出具由 allowlist vendor 证书链签名的新鲜证明，绑定 nonce、provider/key ID、角色策略、ACL、measurement 与 driver SHA；driver 只能消费远程 key handle 做 artifact 签名，不能自行生成 provider 证明。驱动安装包不得内嵌、读取文件形式或导出私钥；缺少真实服务证明时发布门禁必须 BLOCKED。
+22. 双机使用的安装包必须由受保护构建 workflow 从当前 commit 产生，并携带可由 GitHub artifact attestation/Sigstore 实际验签的 bundle 与 SPDX 2.3；门禁必须核对 repository、workflow、run、head、installer 原始 subject 名称与摘要。SBOM 必须从最终 NSIS staging manifest 生成，逐文件覆盖 package-lock、Cargo.lock、所有公开/私有 runtime 映射、最终 resources、生成配置/hooks、主 binary 和 installer，并验证 namespace/creation/source commit/package/file/relationship；不能接受人工 SHA-256、自报 `verified=true`、漏项或重复映射。
+23. 真实旧 Relay 回滚证据必须形成可复核因果链：受保护 inventory/config 使用拒绝额外字段的严格结构并各有且仅有一个启用 route；只将经敏感扫描的最小 route spec 传入 A，实际激活指定公网 gateway 到该进程拥有的 loopback listener。原状态摘要必须同时绑定完整规范化 inventory/config 与 driver 实际读取的 gateway control-plane 全状态，撤销后重新读取实际全状态并交叉验证；配置/探测还需绑定 run nonce、route ID、`no_bypass`、配置摘要和 route state。随机请求 nonce 的关联响应令独立读取的 traffic counter 增长，裸 v2 拒绝单独签名归档。启动后立即登记 PID，任何后续失败都必须在 `finally` 撤销 owned route、验证公网 route 消失并恢复原配置，再验证进程退出；任一清理失败阻断发布。
+24. 审批和附件自动化必须以真实 UI 状态的 exact coordination ID 驱动，零个或多个 pending 都失败；journey、UI artifact 和 manifest 交叉核对 coordination digest。附件接收必须由 B 独立生成并签名回执，绑定同一 coordination 与文件摘要。
+25. 双机自动化的远端 helper 必须使用本次随机 run nonce 的独占 staging，拒绝已有目录、普通路径越界和任一重解析点；复制前后核对安装包、driver、provider verifier、UI smoke、process guard、orchestrator helper 与回滚输入的逐文件摘要，Node 使用受保护环境配置的固定绝对可执行路径。清理只能删除带本次 nonce owner marker 的目录，且各清理动作独立执行、聚合失败阻断。
+26. 发布资格自动化运行在 GitHub 受保护 environment 的受控 self-hosted runner 上；runner OS、同一 SID 进程、受保护 secrets/vars 以及预配置 Git/GH/Node 工具链属于可信执行基座。本需求不要求抵御该基座上的管理员、同 SID 恶意常驻进程、运行中 junction/TOCTOU 替换或 PID 复用，也不为其自建第二套可信启动链。自动化仍必须抵御不可信网络/Relay、外部下载产物、用户或部署配置、伪造/过期/错 commit 证据、普通路径逃逸与敏感信息泄露，并在校验或清理失败时关闭；缺少真实双机、生产等价 Relay、旧 Relay 二进制或生产遥测等外部证据时，资格结论必须为 `BLOCKED`，不得以本地 fixture 或 mock 宣布通过。
 
 ## 16. 埋点与审计边界
 
@@ -1245,7 +1261,7 @@ A 禁止持久化：
 8. 上传附件并由 B 处理；
 9. B 生成成果，A 预览并下载；
 10. 任务运行中断网并由 A/B 独立 token 双端恢复，验证 pending-liveness 前无业务、首个 B liveness 被双方确认后才 connected；
-11. 隔离 B 网络超过 30 秒并持续制造重连流量，验证本地 watchdog 不被延长、B 取消任务、拒绝审批并清理临时模型，旧令牌无法恢复；
+11. 隔离 B 网络并持续制造重连流量，验证本地 watchdog 的候选 deadline 不晚于 `30000 - 实测 RTT - 1000`，终态不晚于该候选 deadline，重连不得延长预算；B 取消任务、拒绝审批并清理临时模型，旧令牌无法恢复；
 12. 第二个 A 尝试接入并收到设备忙；
 13. 分别以 WebUI 已连接和桌面已连接状态尝试交叉接入，验证不顶替；另验证 Web-to-Web 既有接管；
 14. 在 B 查看权限请求并确认没有 Allow，制造 A 决定/超时/B stop 竞态并验证唯一终态；
