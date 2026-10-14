@@ -76,20 +76,20 @@ const isRestrictedExternalAuthTool = (tool) => !!tool && !!(
 );
 
 const PlatformToolAction = ({ copy, t, ...props }) => {
+  const isRestricted = isRestrictedExternalAuthTool(props.tool);
+  // 无变更权限(Web 只读)或无法发起外部登录时,动作退化为纯状态徽标:
+  // 受限工具显示「已连接」,其余显示「已安装」;未安装则不渲染任何动作。
+  let statusLabel = null;
   if (!can('toolStoreMutations')) {
-    if (!props.tool?.installed) return null;
-    const label = isRestrictedExternalAuthTool(props.tool) ? copy.connected : copy.installed;
-    return (
-      <span className={`${props.size === 'lg' ? 'px-6 py-2.5 text-[15px]' : 'px-4 py-1.5 text-[13px]'} rounded-full font-bold bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 whitespace-nowrap`}>
-        {label}
-      </span>
-    );
+    statusLabel = isRestricted ? copy.connected : copy.installed;
+  } else if (!canStartExternalAuth() && isRestricted) {
+    statusLabel = copy.connected;
   }
-  if (!canStartExternalAuth() && isRestrictedExternalAuthTool(props.tool)) {
-    if (!props.tool.installed) return null;
+  if (statusLabel && !props.tool?.installed) return null;
+  if (statusLabel) {
     return (
       <span className={`${props.size === 'lg' ? 'px-6 py-2.5 text-[15px]' : 'px-4 py-1.5 text-[13px]'} rounded-full font-bold bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 whitespace-nowrap`}>
-        {copy.connected}
+        {statusLabel}
       </span>
     );
   }
@@ -2078,6 +2078,11 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         } catch (e) {
           if (t?.oauthMcp && !isCurrentOAuthRequest(backendId, oauthRequestId)) return;
           console.error('install failed:', e);
+          // A post-landing consent failure returns after the pack committed:
+          // refresh so the card shows the real (installed) state instead of
+          // staying stale until the next mount or pinvou:tools-changed.
+          await loadBackendState();
+          if (t?.oauthMcp && !isCurrentOAuthRequest(backendId, oauthRequestId)) return;
           setAlert({ visible: true, loading: false, title: detailCopy.actions.operationFailed, subtitle: String(e && e.message ? e.message : e).slice(0, 240), isInstall: false, isError: true });
         } finally {
           if (tracksConfiguration) finishToolConfiguration(backendId, configurationSucceeded);
@@ -2243,6 +2248,10 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           }
         } catch (e) {
           console.error('import skill failed:', e);
+          // Post-landing consent failures return after the pack committed:
+          // refresh so the new card shows instead of staying stale until the
+          // next mount or pinvou:tools-changed.
+          loadBackendState();
           setAlert({ visible: true, loading: false, title: storeCopy.importFailedWith(String(e)), isInstall: false, isError: true });
         } finally {
           setBusyId(busy => releaseBusy(busy, '__upload__'));
@@ -2284,12 +2293,18 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         } catch (e) {
           reportConnectorFailure('ima', e, 'connect');
           // Round-25 minor 5 + round-30 m9 (review #455), merged with #615's
-          // reportConnectorFailure routing: the consent-sync failure copy
-          // (with its "turn them off in the tools list" guidance) must still
-          // surface through the localized template — the generic
-          // operationFailed copy would swallow actionable guidance. The
-          // matcher keys on the backend marker pinned by
-          // ima::consent_failure_message_keeps_the_frontend_marker.
+          // reportConnectorFailure routing. Since the deny-first consent gate
+          // (PR #517) the connect flow registers consent BEFORE credentials or
+          // skill content, so today no ima_connect error carries the consent
+          // marker — a refused connect lands nothing and the generic
+          // operationFailed copy is the honest state. The localized template
+          // branch stays defensive: if a post-landing consent leg ever emits
+          // the marker again, its "turn them off in the tools list" guidance
+          // must surface through it instead of the generic copy. The matcher
+          // keys on the backend marker pinned by
+          // skill_gate::skill_gate_consent_failure_message_keeps_the_frontend_marker
+          // and cross-compared against the Rust constant by
+          // consent_marker_frontend.test.mjs.
           const msg = String(e && e.message ? e.message : e);
           const consentFailure = msg.includes(CONSENT_SYNC_FAILURE_MARKER);
           setAlert({
@@ -2548,7 +2563,10 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           notifyComposerToolsChanged();
         } catch (e) {
           console.error('uninstall failed:', e);
-          setAlert({ visible: true, loading: false, title: detailCopy.actions.operationFailed, isInstall: false, isError: true });
+          // Surface the refusal detail (companion-teardown abort, recycle
+          // preflight, scope-lock refusal) — the sibling install path does;
+          // a bare title hides actionable guidance.
+          setAlert({ visible: true, loading: false, title: detailCopy.actions.operationFailed, subtitle: String(e && e.message ? e.message : e).slice(0, 240), isInstall: false, isError: true });
         } finally {
           // 收尾只释放自己的槽位,防误清异步期间接手的别的操作(同 releaseBusy)。
           setBusyId(busy => releaseBusy(busy, backendId));
@@ -3197,10 +3215,6 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         </div>
       );
     };
-
-    // ==========================================
-    // Shared Components
-    // ==========================================
 
 export { ToolStoreView };
 /* eslint-enable sonarjs/cognitive-complexity -- tool store main view;legacy view */

@@ -450,7 +450,17 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
         self.assertEqual(65, expected["assistant->marketplace"])
         self.assertEqual(61, expected["runtime_bundle->marketplace"])
         expected["assistant->marketplace"] = 64
-        self.assertEqual(expected, baseline["rules"]["rust_cyclic_feature_dependencies"])
+        # The frozen calibration is a ceiling, not permission to retain debt
+        # forever. Real responsibility refactors must tighten the baseline.
+        # Require the live source to match it exactly, so neither fresh edges
+        # nor stale allowances can pass by changing this calibration assertion.
+        current_limits = baseline["rules"]["rust_cyclic_feature_dependencies"]
+        for edge, count in current_limits.items():
+            self.assertLessEqual(count, expected.get(edge, 0), edge)
+        actual = self.guard.current_state(REPO_ROOT)
+        self.assertEqual(
+            actual["rules"]["rust_cyclic_feature_dependencies"], current_limits
+        )
         self.assertEqual(
             dict(migration_limits["rust_platform_depends_on_upper_layer"]),
             baseline["rules"]["rust_platform_depends_on_upper_layer"],
@@ -463,8 +473,12 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
         # Target debt cleanup must reduce the three-way allowance, not be
         # hidden by resetting the marker/anchor or trusting the candidate JSON.
         stale_target_edges = Counter(target_state[2])
-        stale_target_edges[("assistant", "marketplace")] -= 2
-        stale_target_edges[("runtime_bundle", "marketplace")] -= 1
+        stale_target_edges[("assistant", "marketplace")] = (
+            current_limits["assistant->marketplace"] - 1
+        )
+        stale_target_edges[("runtime_bundle", "marketplace")] = (
+            current_limits["runtime_bundle->marketplace"] - 1
+        )
         stale_failures = self.guard.compare_baseline_ratchet(
             baseline, previous, merge_state, anchor_state,
             (target_state[0], target_state[1], stale_target_edges),
@@ -473,12 +487,22 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
             self.assertTrue(any(edge in failure for failure in stale_failures))
 
         expanded = json.loads(json.dumps(baseline))
-        expanded["rules"]["rust_cyclic_feature_dependencies"]["runtime_bundle->marketplace"] += 1
+        expanded["rules"]["rust_cyclic_feature_dependencies"]["runtime_bundle->marketplace"] = (
+            expected["runtime_bundle->marketplace"] + 1
+        )
         self.assertTrue(any(
             "runtime_bundle->marketplace" in item
             for item in self.guard.compare_baseline_ratchet(
                 expanded, previous, merge_state, anchor_state, target_state
             )
+        ))
+        # A completed migration cannot restore retired debt even when that
+        # value was inside its original frozen allowance.
+        expanded = json.loads(json.dumps(baseline))
+        expanded["rules"]["rust_cyclic_feature_dependencies"]["runtime_bundle->marketplace"] += 1
+        self.assertTrue(any(
+            "runtime_bundle->marketplace" in item
+            for item in self.guard.compare_baseline_ratchet(expanded, baseline)
         ))
         expanded = json.loads(json.dumps(baseline))
         expanded["rules"]["rust_cyclic_feature_dependencies"]["assistant->knowledge"] += 1
