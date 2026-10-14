@@ -2014,6 +2014,10 @@ fn mfjs_schema_can_terminate(
             Ok(true)
         }
         Some("array") => {
+            // An absent or non-integer `minItems` reads as 0. Non-integer
+            // values are unreachable here only because `validate_mfjs_bounds`
+            // rejects them (InvalidRange) on every node before the terminator
+            // runs — keep that call order if the walkers are reordered.
             if obj.get("minItems").and_then(Value::as_u64).unwrap_or(0) == 0 {
                 return Ok(true);
             }
@@ -2694,6 +2698,33 @@ mod kimi_tests {
         assert!(
             matches!(error, KimiParameterSchemaError::InvalidSchemaNode),
             "the anyOf branch's variant is InvalidSchemaNode: {error:?}"
+        );
+
+        // The anyOf check is branch-order dependent: the terminator stops
+        // at the first terminating branch, so a terminating branch ahead
+        // of the offending one lets the tool ship — the repaired schema is
+        // instance-set-equivalent (the empty `items` was a no-op
+        // constraint), which is the desired outcome, but it means the
+        // fail-closed guarantee for anyOf holds only when the offending
+        // branch is reached.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "a": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {}, "minItems": 1}
+                    ]
+                }
+            },
+            "required": ["a"]
+        });
+        sanitize_for_kimi_parameters(&mut schema)
+            .expect("a terminating branch ahead of the offending one ships the tool");
+        assert_eq!(
+            schema["properties"]["a"]["anyOf"][1],
+            json!({"type": "array", "minItems": 1}),
+            "the shipped branch is the repaired, instance-set-equivalent form"
         );
 
         let mut schema = json!({
