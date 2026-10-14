@@ -1093,8 +1093,10 @@ pub(super) fn replace_runtime_mcp_tools(
     // answers for. Membership alone is still not the whole story: a
     // same-name refresh can change what a served tool *says* (description,
     // schema), which the C5 content fingerprint sees as wire bytes without
-    // any name moving. When the name set ties, the replaced entries' wire
-    // JSON — the exact bytes the fingerprint hashes — decides.
+    // any name moving. When the visible name set ties, the wire-visible
+    // replaced entries' JSON — the exact bytes the fingerprint hashes —
+    // decides; a tool the conversation never ships is skipped so its drift
+    // cannot declare what no request will see.
     let wire_before = wire_visible_tool_names(tool_catalog, active_tool_names);
     let previous_wire_json: std::collections::HashMap<String, Option<String>> = tool_catalog
         .iter()
@@ -1136,16 +1138,25 @@ pub(super) fn replace_runtime_mcp_tools(
     }
     tool_catalog.retain(|tool| !departed.contains(&tool.name));
     tool_catalog.extend(arrivals);
-    if wire_visible_tool_names(tool_catalog, active_tool_names) != wire_before {
+    let wire_after = wire_visible_tool_names(tool_catalog, active_tool_names);
+    if wire_after != wire_before {
         return true;
     }
-    // Same membership: declare only when a served tool's wire JSON changed
-    // under its name. A name without a predecessor is a new arrival —
-    // eager arrivals already moved the name set above, and a deferred one
-    // is invisible on the wire.
+    // Same visible membership: declare only when a wire-visible tool's
+    // served JSON changed under its name. Because the visible sets tie,
+    // every visible-after name was visible before and so has a snapshot
+    // entry; a name outside the visible set never ships, so its content
+    // drift moves no wire bytes and must not declare. A name without a
+    // predecessor is a new arrival — an eager arrival already moved the
+    // name set above, and a deferred one is invisible on the wire.
+    // `tool_to_api_json` is the exact serializer the fingerprint hashes
+    // for the non-strict request shape; under strict mode the fingerprint
+    // hashes sanitized copies, and raw-identical definitions stay
+    // sanitized-identical, so this compare can only over-declare there,
+    // never miss.
     tool_catalog
         .iter()
-        .filter(|tool| universe.contains(&tool.name))
+        .filter(|tool| universe.contains(&tool.name) && wire_after.contains(&tool.name))
         .any(|tool| {
             previous_wire_json
                 .get(&tool.name)

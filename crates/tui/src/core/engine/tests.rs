@@ -9525,6 +9525,40 @@ fn runtime_mcp_refresh_replaces_the_pool_slice() {
         vec!["mcp_static_read", "exec_shell"],
         "the content-drift declaration still splices in place"
     );
+
+    // The same content change on a tool the conversation never ships must
+    // NOT declare: a deferred tool that was never activated is invisible on
+    // the wire, so its description drift moves no wire bytes. The deferral
+    // flag survives the splice (the refresh restores the prior flag), and
+    // the empty activation cache keeps it out of the active set.
+    let mut deferred_stale = api_tool("mcp_static_read");
+    deferred_stale.description = "another stale description".to_string();
+    deferred_stale.defer_loading = Some(true);
+    let mut catalog = vec![deferred_stale, api_tool("exec_shell")];
+    let mut active = HashSet::new();
+    let wire_changed = replace_runtime_mcp_tools(
+        &mut catalog,
+        &mut active,
+        &universe,
+        vec![api_tool("mcp_static_read")],
+        &cache,
+    );
+    assert!(
+        !wire_changed,
+        "content drift on a wire-invisible tool moves no wire bytes and must stay silent"
+    );
+    assert!(
+        !active.contains("mcp_static_read"),
+        "the deferred entry must stay off the wire: {active:?}"
+    );
+    assert_eq!(
+        catalog
+            .iter()
+            .find(|tool| tool.name == "mcp_static_read")
+            .and_then(|tool| tool.defer_loading),
+        Some(true),
+        "the splice restores the pre-existing deferral flag"
+    );
 }
 
 #[test]
