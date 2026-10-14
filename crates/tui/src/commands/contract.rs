@@ -1613,6 +1613,14 @@ impl CommandSkillGroupContext for SkillGroupAdapter<'_> {
         crate::snapshot::restore_covers_primary_only(&app.workspace, &app.workspace_roots)
     }
 
+    fn attached_roots_not_reverted_note(&self) -> String {
+        // Round-45 R45-3: `/restore` is a human-facing TUI surface, so the
+        // boundary disclosure rides the localized form (the model/API lanes
+        // keep the stable English constant).
+        let app = self.host.app.borrow();
+        crate::snapshot::attached_roots_not_reverted_note(app.ui_locale)
+    }
+
     fn approval_state(&self) -> CommandApprovalState {
         let app = self.host.app.borrow();
         CommandApprovalState {

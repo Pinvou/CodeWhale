@@ -1309,6 +1309,19 @@ fn test_patch_undo_requests_session_resync_after_restore() {
 
 #[test]
 fn test_patch_undo_with_attached_roots_names_rollback_boundary() {
+    // Round-45 R45-1/P2-8: the snapshot/restore machinery in this pin is
+    // deep enough to overflow the default 2 MiB test-thread stack (CI sets
+    // RUST_MIN_STACK=8 MiB, which had silently become load-bearing). Run the
+    // body on an explicitly sized stack so the pin holds at any default.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(test_patch_undo_with_attached_roots_names_rollback_boundary_body)
+        .expect("spawn rollback-boundary test thread")
+        .join()
+        .expect("rollback-boundary test thread panicked");
+}
+
+fn test_patch_undo_with_attached_roots_names_rollback_boundary_body() {
     // Snapshots are primary-bound (M15-3): with attached roots the /undo
     // report and transcript cell must name the boundary instead of implying
     // every accessible root was reverted. Single-root wording is untouched.
@@ -1366,10 +1379,11 @@ fn test_patch_undo_with_attached_roots_names_rollback_boundary() {
 
     assert!(!result.is_error);
     let message = result.message.expect("undo summary");
-    assert!(
-        message.contains(crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE),
-        "{message}"
-    );
+    // Round-45 R45-1: /undo renders the LOCALIZED boundary note, so the pin
+    // asserts that form (locale-following, not the English const the way the
+    // model/API lanes spell it).
+    let boundary_note = crate::snapshot::attached_roots_not_reverted_note(app.ui_locale);
+    assert!(message.contains(&boundary_note), "{message}");
     let cell = app
         .history
         .iter()
@@ -1378,10 +1392,7 @@ fn test_patch_undo_with_attached_roots_names_rollback_boundary() {
             _ => None,
         })
         .expect("transcript cell");
-    assert!(
-        cell.contains(crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE),
-        "{cell}"
-    );
+    assert!(cell.contains(&boundary_note), "{cell}");
     assert!(!cell.contains("/undo reverted workspace to"), "{cell}");
 
     // Single-root report stays byte-identical: no boundary clause.
@@ -1394,7 +1405,9 @@ fn test_patch_undo_with_attached_roots_names_rollback_boundary() {
     assert!(!single_result.is_error);
     let single_message = single_result.message.expect("undo summary");
     assert!(
-        !single_message.contains(crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE),
+        !single_message.contains(&crate::snapshot::attached_roots_not_reverted_note(
+            single.ui_locale
+        )),
         "{single_message}"
     );
     let single_cell = single

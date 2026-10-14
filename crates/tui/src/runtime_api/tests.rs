@@ -12411,3 +12411,27 @@ async fn marketplace_add_rejects_symlink_documents_over_http() -> Result<()> {
     handle.abort();
     Ok(())
 }
+
+#[test]
+fn sanitize_belt_drop_receipts_are_surfaced_on_every_api_face() {
+    // Round-45 R45-5: every production `sanitize_workspace_roots` call in
+    // the sessions API must consume its drop receipt (`warn_sanitized_dropped`)
+    // — a site that rebinds `_dropped` discards the shrink silently and the
+    // shrunk set is then re-persisted (permanent, undisclosed loss). This
+    // source pin goes red the moment a call site regresses to `_dropped` or
+    // drops the warn (same shape as the composer-bang call-site pin).
+    let src = include_str!("sessions.rs");
+    assert!(
+        !src.contains(", _dropped)"),
+        "a sanitize_workspace_roots call site discards its drop receipt"
+    );
+    let call_sites = src.matches("sanitize_workspace_roots(").count();
+    let surfaced = src.matches("warn_sanitized_dropped(").count();
+    // One warn per call site plus the helper's own definition doc-free name
+    // (the helper body is the definition; call sites = surfaced - 1).
+    assert_eq!(
+        call_sites,
+        surfaced - 1,
+        "every sanitize_workspace_roots call site must surface its receipt"
+    );
+}

@@ -1587,6 +1587,7 @@ pub enum MessageId {
     WorkspaceSwitchSnapshotFailed,
     WorkspaceSwitchSessionsDirFailed,
     WorkspaceSwitchSetRefused,
+    SessionRestoreWorkspaceInvalid,
     ForkSourceSetRefused,
     SaveLiveSetRefused,
     ForkLiveSetRefused,
@@ -3724,6 +3725,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::WorkspaceSwitchSnapshotFailed,
     MessageId::WorkspaceSwitchSessionsDirFailed,
     MessageId::WorkspaceSwitchSetRefused,
+    MessageId::SessionRestoreWorkspaceInvalid,
     MessageId::ForkSourceSetRefused,
     MessageId::SaveLiveSetRefused,
     MessageId::ForkLiveSetRefused,
@@ -4883,6 +4885,51 @@ mod tests {
                     "{} changed placeholders for {key}",
                     locale.tag()
                 );
+            }
+        }
+    }
+
+    /// Round-45 R45-2: a REAL segment-level no-duplication gate over every
+    /// complete pack and every message (the round-44 claim of one covered
+    /// only a prefix family that did not include SaveLiveSetRefused). The
+    /// round-44 hi.json defect was a remedy clause pasted twice with
+    /// drifting punctuation ("…करें।सेशन…"), which an exact-repeat check
+    /// misses — so this gate compares word skeletons: every value is split
+    /// on whitespace and sentence/punctuation delimiters, and any
+    /// 6-word window that occurs twice inside the SAME value is a
+    /// containment-shape duplicate. Developed against the broken hi.json
+    /// (it went red there before the dedup landed).
+    #[test]
+    fn complete_packs_have_no_duplicated_segments() {
+        const MIN_WINDOW_WORDS: usize = 6;
+        let delimiters: &[char] = &[
+            '.', ',', ';', ':', '!', '?', '(', ')', '{', '}', '"', '\'', '-', '–', '—', '।', '॥',
+            '。', '、', '，', '；', '：', '！', '？', '（', '）',
+        ];
+        for locale in Locale::shipped_complete() {
+            let pack = raw_locale_messages(*locale);
+            for (key, value) in &pack {
+                let Some(text) = value.as_str() else {
+                    continue;
+                };
+                let words: Vec<&str> = text
+                    .split(|c: char| c.is_whitespace() || delimiters.contains(&c))
+                    .filter(|word| !word.is_empty())
+                    .collect();
+                if words.len() < MIN_WINDOW_WORDS * 2 {
+                    continue;
+                }
+                let skeleton = words.join(" ");
+                for window in words.windows(MIN_WINDOW_WORDS) {
+                    let segment = window.join(" ");
+                    if skeleton.matches(&segment).count() > 1 {
+                        panic!(
+                            "{} key {key} repeats the segment \"{segment}\" inside one message \
+                             — a pasted-twice remedy clause shape (R45-2)",
+                            locale.tag()
+                        );
+                    }
+                }
             }
         }
     }

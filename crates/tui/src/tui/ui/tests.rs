@@ -6729,6 +6729,43 @@ fn named_custom_session_config(name: &str, base_url: &str, model: &str) -> Confi
 }
 
 #[test]
+fn apply_loaded_session_refuses_a_relative_workspace_with_localized_copy() {
+    // Round-45 R45-3: the refusal surfaces through "Failed to restore
+    // session: {err}", so it is user-facing copy and must ride the
+    // localized MessageId — asserting on a non-English locale also pins
+    // that no hardcoded English leak survives. The localization lookup
+    // needs the larger debug-build stack (R45-1/P2-8), so the body runs on
+    // an explicitly sized thread.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let mut app = create_test_app();
+            app.ui_locale = crate::localization::Locale::Ja;
+            let mut session = saved_session_with_messages(Vec::new());
+            session.metadata.workspace = std::path::PathBuf::from("relative/ws");
+            let err = apply_loaded_session(&mut app, &mut Config::default(), &session)
+                .expect_err("a relative saved workspace must be refused");
+            assert_eq!(
+                err,
+                crate::localization::tr(
+                    crate::localization::Locale::Ja,
+                    crate::localization::MessageId::SessionRestoreWorkspaceInvalid
+                )
+            );
+            assert_ne!(
+                err,
+                crate::localization::tr(
+                    crate::localization::Locale::En,
+                    crate::localization::MessageId::SessionRestoreWorkspaceInvalid
+                )
+            );
+        })
+        .expect("spawn localized-refusal test thread")
+        .join()
+        .expect("localized-refusal test thread panicked");
+}
+
+#[test]
 fn apply_loaded_session_keeps_submitted_user_tail_in_history() {
     let mut app = create_test_app();
     let submitted = authoritative_user_message("finish the Qthresh proof bundle");

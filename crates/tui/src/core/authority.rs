@@ -4,7 +4,6 @@
 //! in one place so prompt metadata, tool catalogs, and runtime gates cannot
 //! drift independently.
 
-use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
 use crate::sandbox::SandboxPolicy;
@@ -616,21 +615,20 @@ fn carve_out_target_allowed(workspace: &Path, workspace_canonical: &Path, raw: &
 
 /// Canonicalize the deepest existing ancestor of `candidate` and re-append
 /// the not-yet-existing tail, so write targets that do not exist yet still
-/// get a real-path check.
+/// get a real-path check. Round-45 R45-4: the walk itself is delegated to
+/// the single core implementation (`codewhale_core::walk_deepest_existing`,
+/// DeepestAncestor fallback) so this lane can never drift from the intake
+/// gate's copy again; the Option survives only for the walked-past-root
+/// corner, where the composed root-anchored spelling fails the caller's
+/// containment check exactly like the old `None` denial did.
 pub(crate) fn resolve_deepest_existing(candidate: &Path) -> Option<PathBuf> {
-    let mut ancestor = candidate;
-    let mut suffix: Vec<&OsStr> = Vec::new();
-    loop {
-        if let Ok(canonical) = ancestor.canonicalize() {
-            let mut resolved = canonical;
-            for part in suffix.iter().rev() {
-                resolved.push(part);
-            }
-            return Some(resolved);
-        }
-        suffix.push(ancestor.file_name()?);
-        ancestor = ancestor.parent()?;
-    }
+    Some(
+        codewhale_core::walk_deepest_existing(
+            candidate,
+            codewhale_core::DeepestExistingFallback::DeepestAncestor,
+        )
+        .compose(),
+    )
 }
 
 fn carve_out_relative_path_allowed(relative: &Path) -> bool {

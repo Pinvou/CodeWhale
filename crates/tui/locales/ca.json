@@ -1759,6 +1759,7 @@
   "WorkspaceSwitchSnapshotFailed": "Ha fallat la instantània del canvi del workspace: {error}",
   "WorkspaceSwitchSessionsDirFailed": "No s'ha pogut obrir el directori de sessions: {error}",
   "WorkspaceSwitchSetRefused": "No es pot canviar el workspace a {workspace}: el conjunt d'arrels transportat s'ampliaria més enllà del directori nou ({reason}). El canvi s'ha rebutjat; inicia una sessió nova en aquest directori o elimina les arrels que amplien del conjunt d'arrels desat d'aquesta sessió fora del TUI.",
+  "SessionRestoreWorkspaceInvalid": "L'espai de treball de la sessió desada ha de ser un camí absolut no buit",
   "ForkSourceSetRefused": "No es pot bifurcar: el conjunt d'arrels de l'origen reubicat a {workspace} s'ampliaria més enllà d'ell ({reason}). La bifurcació s'ha rebutjat; comença-la des d'un directori que el conjunt no ampliï, o elimina les arrels que amplien del registre desat fora del TUI.",
   "SaveLiveSetRefused": "No es pot desar: el conjunt d'arrels actual del workspace ja no passa l'entrada ({reason}); Torneu a carregar la sessió (les arrels rebutjades es descarten en carregar) o repareu el registre fora del TUI.",
   "ForkLiveSetRefused": "No es pot bifurcar: el conjunt d'arrels actual del workspace ja no passa l'entrada ({reason}); Torneu a carregar la sessió (les arrels rebutjades es descarten en carregar) o repareu el registre fora del TUI.",

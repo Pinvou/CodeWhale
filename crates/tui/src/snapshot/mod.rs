@@ -56,9 +56,11 @@ pub const DEFAULT_MAX_SNAPSHOTS: usize = 50;
 /// beyond the primary workspace: the snapshot side-repo is rooted at the
 /// primary, so a restore rolls back only the primary while attached-root
 /// writes persist. Appended verbatim so single-root reports stay
-/// byte-identical (the clause is simply never added there).
-pub const ATTACHED_ROOTS_NOT_REVERTED_NOTE: &str =
-    "Only the primary workspace was reverted; attached workspace roots were not rolled back.";
+/// byte-identical (the clause is simply never added there). Owned by the
+/// command contract since round-45 (single source shared with the portable
+/// `/restore` handler); re-exported so the model/API lanes keep one stable
+/// spelling.
+pub use codewhale_command_contract::ATTACHED_ROOTS_NOT_REVERTED_NOTE;
 
 /// Round-43 P2-5: the localized form for human-facing TUI surfaces (the
 /// model/API lanes keep the stable English constant above).

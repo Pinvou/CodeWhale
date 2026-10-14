@@ -133,11 +133,14 @@ fn restore(group: &mut dyn CommandSkillGroupContext, arg: Option<&str>) -> Comma
     }
 
     CommandResult::message(if group.restore_covers_primary_only() {
+        // Round-45 R45-3: the disclosure rides the host's localized form
+        // (the TUI overrides it with the translated sentence); the stable
+        // English constant remains the model/API lane spelling.
         format!(
             "Restored snapshot #{n} ('{}', {}). {} Conversation history is unchanged.",
             target.label,
             short_sha(target.id.as_str()),
-            crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE,
+            group.attached_roots_not_reverted_note(),
         )
     } else {
         format!(
@@ -222,6 +225,9 @@ mod tests {
         restore: Result<(), String>,
         approval: CommandApprovalState,
         primary_only: bool,
+        /// Host-provided localized boundary note (round-45 R45-3); `None`
+        /// exercises the contract default (the stable English sentence).
+        note: Option<String>,
     }
     impl FakeSkillGroup {
         fn new(snapshots: Vec<SnapshotEntry>) -> Self {
@@ -233,6 +239,7 @@ mod tests {
                     trust_mode: false,
                 },
                 primary_only: false,
+                note: None,
             }
         }
     }
@@ -300,6 +307,11 @@ mod tests {
         }
         fn restore_covers_primary_only(&self) -> bool {
             self.primary_only
+        }
+        fn attached_roots_not_reverted_note(&self) -> String {
+            self.note
+                .clone()
+                .unwrap_or_else(|| crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE.to_string())
         }
         fn approval_state(&self) -> CommandApprovalState {
             self.approval
@@ -420,6 +432,43 @@ mod tests {
         assert!(
             !single_msg.contains(crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE),
             "{single_msg}"
+        );
+    }
+
+    #[test]
+    fn restore_boundary_note_rides_the_host_localized_form() {
+        // The localization store's generated lookup has a large debug-build
+        // stack frame; the default 2 MiB test thread overflows (round-45
+        // R45-1/P2-8 — CI's 8 MiB RUST_MIN_STACK is load-bearing), so the
+        // body runs on an explicitly sized stack.
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(restore_boundary_note_rides_the_host_localized_form_body)
+            .expect("spawn localized-note test thread")
+            .join()
+            .expect("localized-note test thread panicked");
+    }
+
+    fn restore_boundary_note_rides_the_host_localized_form_body() {
+        // Round-45 R45-3: the disclosure must come from the host facet, not
+        // be hardcoded English — a localized host surface (the TUI adapter
+        // passes `snapshot::attached_roots_not_reverted_note(ui_locale)`)
+        // must reach the report verbatim.
+        let zh_note =
+            crate::snapshot::attached_roots_not_reverted_note(crate::localization::Locale::ZhHans);
+        assert_ne!(
+            zh_note,
+            crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE,
+            "fixture locale must actually translate the note"
+        );
+        let mut group = FakeSkillGroup::new(vec![snap("pre-turn:1", "11111111", 1_700_000_000)]);
+        group.primary_only = true;
+        group.note = Some(zh_note.clone());
+        let msg = restore(&mut group, Some("1")).message.unwrap();
+        assert!(msg.contains(&zh_note), "{msg}");
+        assert!(
+            !msg.contains(crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE),
+            "{msg}"
         );
     }
 

@@ -1759,6 +1759,7 @@
   "WorkspaceSwitchSnapshotFailed": "Die Momentaufnahme des Arbeitsbereichswechsels ist fehlgeschlagen: {error}",
   "WorkspaceSwitchSessionsDirFailed": "Das Sitzungsverzeichnis konnte nicht geöffnet werden: {error}",
   "WorkspaceSwitchSetRefused": "Workspace kann nicht zu {workspace} gewechselt werden: der mitgeführte Root-Satz würde über das neue Verzeichnis hinaus erweitert ({reason}). Der Wechsel wurde abgelehnt; starte in dem Verzeichnis eine neue Session oder entferne die erweiternden Roots außerhalb des TUI aus dem gespeicherten Root-Satz dieser Session.",
+  "SessionRestoreWorkspaceInvalid": "Der Arbeitsbereich der gespeicherten Sitzung muss ein nicht leerer absoluter Pfad sein",
   "ForkSourceSetRefused": "Fork nicht möglich: der auf {workspace} neu verankerte Quell-Root-Satz würde darüber hinaus erweitert ({reason}). Der Fork wurde abgelehnt; starte ihn aus einem Verzeichnis, über das der Satz nicht hinaus erweitert, oder entferne die erweiternden Roots außerhalb des TUI aus dem gespeicherten Datensatz.",
   "SaveLiveSetRefused": "Speichern nicht möglich: der aktuelle Root-Satz des Workspace besteht die Aufnahme nicht mehr ({reason}); Laden Sie die Session neu (die abgelehnten Roots entfallen beim Laden) oder reparieren Sie den Datensatz außerhalb des TUI.",
   "ForkLiveSetRefused": "Fork nicht möglich: der aktuelle Root-Satz des Workspace besteht die Aufnahme nicht mehr ({reason}); Laden Sie die Session neu (die abgelehnten Roots entfallen beim Laden) oder reparieren Sie den Datensatz außerhalb des TUI.",

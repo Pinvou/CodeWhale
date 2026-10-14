@@ -189,15 +189,120 @@ pub fn normalize_path_lexically(path: &Path) -> PathBuf {
     normalized
 }
 
+/// Outcome of the deepest-existing-ancestor walk (round-45 R45-4): the one
+/// core implementation every security-adjacent comparison lane delegates
+/// to. `ancestor` is the deepest existing prefix, canonicalized through
+/// symlinks when possible (spelling per the caller's
+/// [`DeepestExistingFallback`] choice when even it cannot canonicalize);
+/// `existing` is that same ancestor's RAW pre-canonicalization spelling
+/// (callers whose leniency gates compare declared spellings — the tools'
+/// follow-symlinks fast path — consume it instead); `tail` holds the
+/// nonexistent components in deepest-first order — re-append with
+/// [`DeepestExistingWalk::compose`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeepestExistingWalk {
+    pub ancestor: PathBuf,
+    pub existing: PathBuf,
+    pub tail: Vec<std::ffi::OsString>,
+}
+
+impl DeepestExistingWalk {
+    /// The composed resolution: canonical ancestor plus the re-appended
+    /// nonexistent tail.
+    pub fn compose(&self) -> PathBuf {
+        let mut composed = self.ancestor.clone();
+        for part in self.tail.iter().rev() {
+            composed.push(part);
+        }
+        composed
+    }
+}
+
+/// What spelling [`walk_deepest_existing`] keeps when even the deepest
+/// walked-to ancestor cannot canonicalize (e.g. an EACCES wall above it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeepestExistingFallback {
+    /// Keep the ORIGINAL input spelling and drop the tail — the round-44
+    /// R44-1 comparison shape, where a wrong-but-existing ancestor must
+    /// never substitute for the declared ghost path.
+    OriginalPath,
+    /// Keep the deepest walked-to ANCESTOR spelling plus the tail — the
+    /// operand/spec shapes, where the walk's own result is the closest
+    /// statable truth and must survive.
+    DeepestAncestor,
+}
+
+/// Walk `path` up to its deepest EXISTING ancestor and canonicalize that
+/// prefix through symlinks (round-45 R45-4). This is the single source for
+/// the deepest-existing walk — `resolve_operand_cwd`'s Err branch, the
+/// ghost-primary comparison (`resolve_deepest_existing_canonical`), the
+/// TUI's carve-out `resolve_deepest_existing`, and the tools'
+/// `resolve_nonexistent_path` all delegate here so their fallback semantics
+/// can never drift apart again (the round-45 finding was four copies with
+/// two independent divergence axes: the fallback target and whether the
+/// composed result is lexically normalized — both are now explicit at each
+/// call site).
+pub fn walk_deepest_existing(
+    path: &Path,
+    fallback: DeepestExistingFallback,
+) -> DeepestExistingWalk {
+    if let Ok(canonical) = path.canonicalize() {
+        return DeepestExistingWalk {
+            ancestor: canonical,
+            existing: path.to_path_buf(),
+            tail: Vec::new(),
+        };
+    }
+    let mut existing = path.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    while !existing.exists() {
+        // A `..` (or `.`) final component yields no `file_name`: the engine
+        // lane's pinned behavior (round-20 B20-1, moved verbatim) pops it
+        // WITHOUT recording it and keeps walking — the walk terminates via
+        // the existing check or the root, never here.
+        if let Some(name) = existing.file_name() {
+            tail.push(name.to_owned());
+        }
+        match existing.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => existing = parent.to_path_buf(),
+            _ => break,
+        }
+    }
+    let raw_existing = existing.clone();
+    match existing.canonicalize() {
+        Ok(canonical) => DeepestExistingWalk {
+            ancestor: canonical,
+            existing: raw_existing,
+            tail,
+        },
+        Err(_) => match fallback {
+            DeepestExistingFallback::OriginalPath => DeepestExistingWalk {
+                ancestor: path.to_path_buf(),
+                existing: raw_existing,
+                tail: Vec::new(),
+            },
+            DeepestExistingFallback::DeepestAncestor => DeepestExistingWalk {
+                existing: raw_existing.clone(),
+                ancestor: raw_existing,
+                tail,
+            },
+        },
+    }
+}
+
 /// Resolve a `cwd:`/`working_dir:`-style operand the way the exec lane does,
 /// so a policy judgment sees the directory execution actually runs in
 /// (review #484/CodeWhale round-22 B22-5): a relative spelling joins onto
 /// `workspace`; an existing result canonicalizes through any symlink; a
-/// nonexistent operand walks lexically to the deepest existing ancestor,
+/// genuinely-missing operand walks to the deepest existing ancestor,
 /// canonicalizes it through any symlink, re-appends the popped tail, and
 /// normalizes — the same walk the engine's judged-cwd applies (round-20
 /// B20-1, round-21 B21-3). Both the headless `Runtime::invoke_tool` lane and
-/// the TUI engine lane call this one implementation.
+/// the TUI engine lane call this one implementation. Round-45 P2-10: only
+/// `ErrorKind::NotFound` walks — an EACCES/ELOOP operand exists but cannot
+/// be canonicalized, and walking it up to the deepest statable ancestor
+/// would judge policy against the WRONG directory; such operands keep their
+/// own lexically normalized spelling so containment fails closed.
 pub fn resolve_operand_cwd(workspace: &Path, raw: &str) -> PathBuf {
     let raw_path = Path::new(raw);
     let joined = if raw_path.is_absolute() {
@@ -207,29 +312,11 @@ pub fn resolve_operand_cwd(workspace: &Path, raw: &str) -> PathBuf {
     };
     match joined.canonicalize() {
         Ok(canonical) => canonical,
-        Err(_) => {
-            let mut ancestor = joined.clone();
-            let mut suffix: Vec<std::ffi::OsString> = Vec::new();
-            loop {
-                if ancestor.exists() {
-                    break;
-                }
-                if let Some(name) = ancestor.file_name() {
-                    suffix.push(name.to_owned());
-                }
-                match ancestor.parent() {
-                    Some(parent) if !parent.as_os_str().is_empty() => {
-                        ancestor = parent.to_path_buf();
-                    }
-                    _ => break,
-                }
-            }
-            let mut resolved = ancestor.canonicalize().unwrap_or_else(|_| ancestor.clone());
-            for part in suffix.iter().rev() {
-                resolved.push(part);
-            }
-            normalize_path_lexically(&resolved)
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let walked = walk_deepest_existing(&joined, DeepestExistingFallback::DeepestAncestor);
+            normalize_path_lexically(&walked.compose())
         }
+        Err(_) => normalize_path_lexically(&joined),
     }
 }
 
@@ -317,35 +404,13 @@ fn comparison_is_ancestor_of(primary: &Path, judged: &Path) -> bool {
 /// canonicalizes (through symlinks and platform aliases like macOS's
 /// /var → /private/var) and the nonexistent tail re-appends verbatim, so a
 /// ghost primary and an existing ancestor compare on canonical spellings
-/// for every component that exists.
+/// for every component that exists. Round-45 R45-4: the walk itself is the
+/// shared [`walk_deepest_existing`] (OriginalPath fallback — a failed
+/// ancestor canonicalization keeps the declared spelling instead of
+/// substituting any walked-to ancestor).
 #[cfg(not(target_os = "windows"))]
 fn resolve_deepest_existing_canonical(path: &Path) -> PathBuf {
-    if let Ok(canonical) = path.canonicalize() {
-        return canonical;
-    }
-    let mut existing = path.to_path_buf();
-    let mut tail: Vec<std::ffi::OsString> = Vec::new();
-    while !existing.exists() {
-        match existing.file_name() {
-            Some(name) => tail.push(name.to_owned()),
-            None => break,
-        }
-        match existing.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() => {
-                existing = parent.to_path_buf();
-            }
-            _ => break,
-        }
-    }
-    match existing.canonicalize() {
-        Ok(mut canonical) => {
-            for part in tail.into_iter().rev() {
-                canonical.push(part);
-            }
-            canonical
-        }
-        Err(_) => path.to_path_buf(),
-    }
+    walk_deepest_existing(path, DeepestExistingFallback::OriginalPath).compose()
 }
 
 #[cfg(target_os = "windows")]

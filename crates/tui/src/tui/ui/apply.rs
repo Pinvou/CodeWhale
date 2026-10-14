@@ -3377,8 +3377,14 @@ pub(crate) fn apply_loaded_session_with_goal(
         // every file tool answering PathEscape forever). Refuse the restore
         // like any other invalid saved state — the same rule ACP
         // session/load and (since round-41 M41-1) the REST resume-thread
-        // lane apply (round-42 minor 9).
-        return Err("saved session workspace must be a non-empty absolute path".to_string());
+        // lane apply (round-42 minor 9). Round-45 R45-3: user-facing copy
+        // ships as a localized MessageId (it surfaces through "Failed to
+        // restore session: {err}"), not hardcoded English.
+        return Err(crate::localization::tr(
+            app.ui_locale,
+            crate::localization::MessageId::SessionRestoreWorkspaceInvalid,
+        )
+        .into_owned());
     }
     if let Some(goal) = goal {
         goal.validate()

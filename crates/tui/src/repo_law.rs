@@ -89,9 +89,14 @@ pub(crate) fn repo_law_plan_decision(
     for root in codewhale_core::normalize_workspace_roots(workspace, workspace_roots) {
         // Round-44 R44-3: key discovery AND the strips on the LEXICALLY
         // RESOLVED spelling — `normalize_path_lexically` folds `..` and `.`
-        // the same way execution's containment identity does. The old
-        // raw-canonicalize fallback let a `ghost/../att` declaration keep
-        // its unresolved spelling: discovery stats
+        // the way execution's containment identity does for NOT-FULLY-
+        // EXISTING declarations (round-45 P2-14 correction: for a root
+        // declared through an EXISTING symlink + `..`, execution's
+        // boundary_roots canonicalize the raw spelling kernel-true while
+        // this fold keys the symlink-adjacent path — the mirror residual
+        // is pinned by the symlink_dotdot mirror test below and scheduled
+        // for the deepest-existing-canonical re-keying). The old raw-canonicalize fallback let a `ghost/../att`
+        // declaration keep its unresolved spelling: discovery stats
         // `<parent>/ghost/../att/.codewhale/constitution.json` (ENOENT —
         // the mid-component does not exist), every strip compares the
         // unresolved prefix, and the root's law silently never loads while
@@ -565,6 +570,81 @@ mod tests {
                 Some(crate::repo_law::RepoLawPlanDecision::Block(_))
             ),
             "the folded spelling must load the resolved root's constitution: {decision:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn symlink_dotdot_root_declaration_keys_the_fold_not_the_kernel_truth() {
+        // Round-45 P2-14: a root declared through an EXISTING symlink +
+        // `..` (`<parent>/link/../x`, link -> elsewhere) is keyed by the
+        // LEXICAL fold (`<parent>/x`), while execution's boundary_roots
+        // canonicalize the raw declaration kernel-true (`elsewhere/x`).
+        // This pin documents the CURRENT residual honestly: the law
+        // discovered under the fold does not key a write spelled kernel-
+        // true — discovery and the strips miss, the hold never fires. The
+        // proper fix (key discovery+strips on the deepest-existing-
+        // canonical identity) is scheduled; until then this is the
+        // disclosed divergence between the two identities.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let parent = tmp.path().canonicalize().unwrap();
+        let elsewhere = parent.join("elsewhere");
+        let kernel_true = elsewhere.join("x");
+        std::fs::create_dir_all(kernel_true.join("vendor")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, parent.join("link")).unwrap();
+        // The fold identity gets the constitution (this is where discovery
+        // stats it), the kernel-true tree is where execution writes land.
+        let folded_identity = parent.join("x");
+        std::fs::create_dir_all(folded_identity.join("vendor")).unwrap();
+        write_law(
+            &folded_identity,
+            r#"{ "protected_invariants": [
+                { "text": "Vendored tree is read-only", "paths": ["vendor/**"], "action": "block" }
+            ] }"#,
+        );
+        let declared = parent.join("link").join("..").join("x");
+
+        let decision = crate::repo_law::repo_law_plan_decision(
+            &parent,
+            &[declared],
+            "write_file",
+            &serde_json::json!({
+                "path": kernel_true.join("vendor").join("lib.rs"),
+                "content": "x"
+            }),
+        );
+        assert!(
+            decision.is_none(),
+            "the kernel-true write must NOT match the fold-keyed law (documented \
+             residual): {decision:?}"
+        );
+    }
+
+    #[test]
+    fn a_genuinely_nonexistent_root_stays_lawless_for_raw_spellings() {
+        // Round-45 P2-15: the R44-3 comment's fail-closed direction — a
+        // root whose declaration cannot resolve on disk never loads a law
+        // and never strips any write, including writes spelled under the
+        // raw declaration itself. No law from ANY source may appear for a
+        // root that does not exist.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let parent = tmp.path().canonicalize().unwrap();
+        let ghost_root = parent.join("no-such-dir").join("att");
+        // A same-named directory under the FOLD of a ghost/../att spelling
+        // must not be reached either: the ghost component does not exist,
+        // so even the folded identity stays on disk absent here.
+        let decision = crate::repo_law::repo_law_plan_decision(
+            &parent,
+            &[ghost_root.clone()],
+            "write_file",
+            &serde_json::json!({
+                "path": ghost_root.join("vendor").join("lib.rs"),
+                "content": "x"
+            }),
+        );
+        assert!(
+            decision.is_none(),
+            "a genuinely nonexistent root must judge raw spellings with no law: {decision:?}"
         );
     }
 

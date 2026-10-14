@@ -22,6 +22,22 @@ use crate::session_projection::{SessionQuery, SessionSortMode, SessionSummary, p
 use super::{ApiError, RuntimeApiState, map_thread_err, truncate_text};
 use crate::models::Role;
 
+/// Round-45 R45-5: the sanitize belt's drop receipt must be surfaced
+/// EXPLICITLY on every API face that runs it — a root-set shrink (cap
+/// truncation, refused/poison entries) silently re-persisted is permanent,
+/// undisclosed loss of declared roots, exactly what the sanitize contract's
+/// "strip-and-warn" half exists to prevent. The TUI load face already notes
+/// it through `SanitizedLoadedRoots`; these faces warn through the log so
+/// the laundering boundary stays observable.
+fn warn_sanitized_dropped(surface: &str, dropped: usize) {
+    if dropped > 0 {
+        tracing::warn!(
+            "{surface}: {dropped} stored workspace root(s) dropped by the sanitize belt \
+             (cap truncation or refused entries) and NOT re-persisted as declared roots"
+        );
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub(super) struct SessionsResponse {
     sessions: Vec<SessionMetadata>,
@@ -469,10 +485,11 @@ pub(super) async fn create_session_from_thread(
         Ok(roots) => roots,
         Err(reason) => {
             tracing::warn!("session export degraded the source thread's root set: {reason}");
-            let (sanitized, _dropped) = codewhale_core::sanitize_workspace_roots(
+            let (sanitized, dropped) = codewhale_core::sanitize_workspace_roots(
                 &session.metadata.workspace,
                 &detail.thread.workspace_roots,
             );
+            warn_sanitized_dropped("session export", dropped);
             sanitized
         }
     };
@@ -877,10 +894,11 @@ pub(super) async fn save_current_session(
                 updated.metadata.workspace = snapshot.workspace.clone();
                 // Round-41 minor 2: the sanitize belt the TUI autosave runs
                 // (launder prevention) instead of the bare normalizer.
-                let (sanitized_put_roots, _dropped) = codewhale_core::sanitize_workspace_roots(
+                let (sanitized_put_roots, dropped) = codewhale_core::sanitize_workspace_roots(
                     &snapshot.workspace,
                     &snapshot.workspace_roots,
                 );
+                warn_sanitized_dropped("session update from a live snapshot", dropped);
                 updated.metadata.workspace_roots = sanitized_put_roots;
                 updated
             }
@@ -901,10 +919,11 @@ pub(super) async fn save_current_session(
                     );
                     // Round-42 minor 8: the sanitize belt on every mint arm (the update arm
                     // already runs it — the create/recover arms cloned verbatim).
-                    let (sanitized_roots, _dropped) = codewhale_core::sanitize_workspace_roots(
+                    let (sanitized_roots, dropped) = codewhale_core::sanitize_workspace_roots(
                         &snapshot.workspace,
                         &snapshot.workspace_roots,
                     );
+                    warn_sanitized_dropped("session recovery mint", dropped);
                     session.metadata.workspace_roots = sanitized_roots;
                     session
                 } else {
@@ -929,10 +948,11 @@ pub(super) async fn save_current_session(
         );
         // Round-42 minor 8: the sanitize belt on every mint arm (the update arm
         // already runs it — the create/recover arms cloned verbatim).
-        let (sanitized_roots, _dropped) = codewhale_core::sanitize_workspace_roots(
+        let (sanitized_roots, dropped) = codewhale_core::sanitize_workspace_roots(
             &snapshot.workspace,
             &snapshot.workspace_roots,
         );
+        warn_sanitized_dropped("session mint", dropped);
         session.metadata.workspace_roots = sanitized_roots;
         session
     };

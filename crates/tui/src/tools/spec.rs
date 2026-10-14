@@ -1228,7 +1228,11 @@ impl ToolContext {
 
     /// Resolve a non-existent path by canonicalizing its deepest existing
     /// ancestor and validating the result is under the workspace or a
-    /// trusted external path.
+    /// trusted external path. Round-45 R45-4: the walk itself is delegated
+    /// to the single core implementation (`codewhale_core::walk_deepest_existing`,
+    /// DeepestAncestor fallback) so this lane can never drift from the
+    /// intake gate's copy again; the local `normalize_path` layer stays
+    /// because the containment comparisons below consume its spellings.
     fn resolve_nonexistent_path(
         &self,
         candidate: PathBuf,
@@ -1236,39 +1240,15 @@ impl ToolContext {
     ) -> Result<PathBuf, ToolError> {
         let workspace_normalized = normalize_path(workspace_canonical);
         let workspace_plain = normalize_path(&self.workspace);
-        let mut existing_ancestor = candidate.clone();
-        let mut suffix_parts: Vec<std::ffi::OsString> = Vec::new();
-
-        while !existing_ancestor.exists() {
-            if let Some(file_name) = existing_ancestor.file_name() {
-                suffix_parts.push(file_name.to_owned());
-            }
-            match existing_ancestor.parent() {
-                Some(parent) if !parent.as_os_str().is_empty() => {
-                    existing_ancestor = parent.to_path_buf();
-                }
-                _ => {
-                    // No existing parent found; fall back to simple check
-                    break;
-                }
-            }
-        }
-        let ancestor_normalized = normalize_path(&existing_ancestor);
-
-        let canonical_ancestor = if existing_ancestor.exists() {
-            existing_ancestor
-                .canonicalize()
-                .unwrap_or(existing_ancestor)
-        } else {
-            existing_ancestor
-        };
-
-        // Rebuild the full path from canonicalized ancestor
-        let mut canonical = canonical_ancestor;
-        for part in suffix_parts.into_iter().rev() {
-            canonical.push(part);
-        }
-        let canonical = normalize_path(&canonical);
+        let walked = codewhale_core::walk_deepest_existing(
+            &candidate,
+            codewhale_core::DeepestExistingFallback::DeepestAncestor,
+        );
+        // The leniency fast path compares the RAW walked spelling (a
+        // workspace-local symlink name) against the raw workspace — the
+        // canonicalized ancestor feeds the composed containment path only.
+        let ancestor_normalized = normalize_path(&walked.existing);
+        let canonical = normalize_path(&walked.compose());
 
         if self.follow_symlinks
             && (ancestor_normalized.starts_with(&workspace_plain)

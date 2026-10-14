@@ -1759,6 +1759,7 @@
   "WorkspaceSwitchSnapshotFailed": "Falha no instantâneo da mudança de workspace: {error}",
   "WorkspaceSwitchSessionsDirFailed": "Falha ao abrir o diretório de sessões: {error}",
   "WorkspaceSwitchSetRefused": "Não é possível trocar o workspace para {workspace}: o conjunto de raízes carregado se expandiria além do novo diretório ({reason}). A troca foi recusada; inicie uma nova sessão nesse diretório ou remova as raízes que ampliam do conjunto de raízes salvo desta sessão fora do TUI.",
+  "SessionRestoreWorkspaceInvalid": "O espaço de trabalho da sessão salva deve ser um caminho absoluto não vazio",
   "ForkSourceSetRefused": "Não é possível bifurcar: o conjunto de raízes da origem rebaseado em {workspace} se expandiria além dele ({reason}). A bifurcação foi recusada; inicie-a em um diretório que o conjunto não amplie, ou limpe as raízes que ampliam do registro salvo fora do TUI.",
   "SaveLiveSetRefused": "Não é possível salvar: o conjunto de raízes atual do workspace não passa mais na entrada ({reason}); Recarregue a sessão (as raízes recusadas são descartadas no carregamento) ou repare o registro fora do TUI.",
   "ForkLiveSetRefused": "Não é possível bifurcar: o conjunto de raízes atual do workspace não passa mais na entrada ({reason}); Recarregue a sessão (as raízes recusadas são descartadas no carregamento) ou repare o registro fora do TUI.",
