@@ -105,6 +105,12 @@ controller 环境文件使用本预检支持的裸 `KEY=value`：值不加引号
 
 硬化文件必须显式指定为本地受控输入，可按仓库 `remote-control-relay/10-hardening.conf` 的无实例通用模板准备；仅接受八项通用限制，禁止代理条款和其他未知条款。代理允许/信任地址唯一来源为服务器受权限保护的 controller 环境文件，保留 IPv4/IPv6 非空且相同集合的远端预检，不在硬化文件中重复配置。数量/字节/认证等待不能超过模板上限，两项限流窗口固定为模板的 60000ms（缩短会弱化限流）。文件或父目录不能是链接。缺失、重复/未知条款或不合法限制在任何网络操作前拒绝。上传使用验证后的私有快照，回滚仍恢复原 drop-in；实例值、文件内容与路径不写入提交或 PR。
 
+硬化输入统一使用主线名称 `MAX_ENDPOINTS`、`ENDPOINT_CREATE_LIMIT`、`ENDPOINT_CREATE_WINDOW_MS`。
+已有私有配置须分别将 `MAX_ROOMS`、`ROOM_CREATE_LIMIT`、`ROOM_CREATE_WINDOW_MS` 改为上述新名称，
+保留原限制值（上限分别为 2000、20，窗口固定为 60000ms），并在上传前重新通过部署校验。
+旧名称及新旧混合输入均拒绝，不增加部署兼容分支；Relay 自身既有别名解析不因此扩展。
+本迁移不修改代理地址来源、服务启动或生产部署状态，脚本不会自动改写服务器上的私有配置。
+
 测试脚本必须同时配置 `RELAY_SERVER`、`EXPECTED_RELAY_SERVER`、`PROXY_SERVER`、`EXPECTED_PROXY_SERVER` 和 `SSH_KEY`；目标为 SSH 账号与字面 IPv4，登记值从运维清单独立取得，不能从实际目标自动赋值。有跳板时同时配置 `PROXY_SSH_JUMP` 与 `EXPECTED_PROXY_SSH_JUMP`。参见 [测试端点操作说明](remote-e2e-test-endpoint.md)。
 
 ## 4. 云端测试端点历史记录（2026-09-19，非当前验收）
