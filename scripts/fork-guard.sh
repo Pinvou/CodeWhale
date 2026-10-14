@@ -6,8 +6,8 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CODEWHALE="$REPO/CodeWhale"
 APP="$REPO/pinvou3-app/src-tauri"
 EXPECTED_UPSTREAM="dcd4c200f72f0c1ffd60d8e7f6850313db879fc5"
-EXPECTED_HEAD="3118c36b8a73a91e97378a13bc6c623c1123efce"
-EXPECTED_COMMITS=62
+EXPECTED_HEAD="480bebf616212e790ff722c92fb165c8d4a2511d"
+EXPECTED_COMMITS=68
 # 过渡期锚点：不可变 r1 tag 的收口 commit。层 0 断言它是当前 head 的祖先，
 # 即维护分支自 r1 收口线性前进而非另起分叉（r3 收口后 gitlink=分支头=tag）。
 R1_CLOSURE="1fafee7e26b60a59457a43bce50c63aa2ad9dbaf"
@@ -234,14 +234,6 @@ fingerprints=(
   "APP|turn gate 持锁副作用 await 上界   |pinvou3-app/src-tauri/src/features/assistant/engine.rs|fn forkguard_reclaimed_persistence_join_detaches_task_that_outlives_budget"
   "APP|turn gate 持锁副作用 await 上界   |pinvou3-app/src-tauri/src/features/assistant/engine_pool.rs|async fn bounded_teardown_shutdown<S, Fut>"
   "APP|turn gate 持锁副作用 await 上界   |pinvou3-app/src-tauri/src/features/assistant/engine_pool.rs|fn forkguard_spawn_failure_teardown_shutdown_bounded_and_retried"
-  "APP|未公开引擎拆除实际有界接线       |pinvou3-app/src-tauri/src/features/assistant/engine_pool.rs|fn spawn_failure_teardown_is_bounded_in_production"
-  "APP|未公开引擎拆除托管旧资源回归     |pinvou3-app/src-tauri/src/features/assistant/engine_pool_remote_tests.rs|fn cold_custody_shutdown_only_retry_retains_old_resources_and_never_blocks_drop"
-  "APP|未公开引擎拆除保持 FIFO 回归    |pinvou3-app/src-tauri/src/features/assistant/engine_pool_remote_tests.rs|fn cold_custody_full_mailbox_keeps_cancel_shutdown_fifo_and_spares_resident"
-  "APP|临时模型真实 wire 统一闭集       |pinvou3-app/src-tauri/src/core/model_wire.rs|pub(crate) fn model_route_uses_responses("
-  "APP|临时主模型 Responses 真实接纳    |pinvou3-app/src-tauri/src/features/remote_control/controller/temporary_model.rs|fn implicit_responses_primary_is_wire_true_and_forged_chat_is_rejected"
-  "APP|Responses 主模型隔离 Chat 图片工具 |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|fn locked_responses_primary_keeps_native_images_but_does_not_reuse_chat_vision_tool"
-  "APP|临时模型旧 Chat 正控              |pinvou3-app/src-tauri/src/features/remote_control/controller/temporary_model.rs|fn legacy_and_aggregator_chat_routes_remain_exportable_and_materializable"
-  "APP|冻结路线协议隔离宿主环境         |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|fn locked_runtime_responses_wire_ignores_environment_suppression"
   "APP|resolved route 由宿主统一解析     |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|pub fn resolve_runtime_route_for_model("
   "APP|GLM 小写存量配置解析到规范模型    |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|fn forkguard_zai_direct_route_survives_model_casing_mismatch"
   "APP|128K/256K compaction 合约        |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|fn forkguard_compaction_128k_scenarios"
