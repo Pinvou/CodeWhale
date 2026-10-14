@@ -63,6 +63,13 @@ member. OWNER implies ordinary membership and independently managed UNIT_ADMIN
 grants remain intact. An accepted receipt still returns the current membership
 after later changes without restoring its original roles or attachments.
 
+Member response states are `ACTIVE`, `SUSPENDED` and `REVOKED`; disabling an
+organization suspends its active memberships. Role binding responses also
+include `SCHEDULED` before their start time. The UI preserves these protocol
+states while localizing display labels; scheduled non-owner bindings retain the
+existing authorized revoke operation and confirmation. Read-only HTTP 403 shows
+the permission message, without changing mutation acknowledgement or retry keys.
+
 Account migration 900003 adds nullable invitation scope and the closed
 `UNITS_REPLACE` command type. Its normal public down operation fails closed to
 preserve invitation and command history. Existing migrations remain unchanged.

@@ -17,6 +17,7 @@ export function PersonalUsageWorkspace({ client, me, language }) {
   const [next, setNext] = useState(null);
   const [busy, setBusy] = useState(false);
   const [unavailable, setUnavailable] = useState(false);
+  const [readDenied, setReadDenied] = useState(false);
   const generation = useRef(0);
   const cancelIntents = useRef(new Map());
   const organizational = me.active_context?.context_type === 'ORGANIZATION';
@@ -24,15 +25,20 @@ export function PersonalUsageWorkspace({ client, me, language }) {
   const canRead = hasPermission(me, organizational ? 'org.usage.read.self' : 'personal.usage.read');
   const canCancel = !organizational && hasPermission(me, 'personal.usage.cancel');
   const load = async (cursor, targetPage, stamp, signal) => {
-    const result = requirePage(await client.usageHistory(cursor, signal));
-    if (stamp !== generation.current) return;
-    setRecords(result.items); setNext(result.next_cursor || null); setPage(targetPage); setUnavailable(false);
-    setCursors(current => [...current.slice(0, targetPage - 1), cursor]);
+    try {
+      const result = requirePage(await client.usageHistory(cursor, signal));
+      if (stamp !== generation.current) return;
+      setRecords(result.items); setNext(result.next_cursor || null); setPage(targetPage); setUnavailable(false); setReadDenied(false);
+      setCursors(current => [...current.slice(0, targetPage - 1), cursor]);
+    } catch (error) {
+      if (stamp === generation.current && error.name !== 'AbortError') setReadDenied(error.status === 403);
+      throw error;
+    }
   };
   useEffect(() => {
     const controller = new AbortController();
     const stamp = ++generation.current;
-    cancelIntents.current.clear(); setRecords([]); setCursors(['']); setPage(1); setNext(null); setUnavailable(false); setBusy(canRead);
+    cancelIntents.current.clear(); setRecords([]); setCursors(['']); setPage(1); setNext(null); setUnavailable(false); setReadDenied(false); setBusy(canRead);
     if (canRead) void load('', 1, stamp, controller.signal).catch(error => {
       if (stamp === generation.current && error.name !== 'AbortError') setUnavailable(true);
     }).finally(() => { if (stamp === generation.current) setBusy(false); });
@@ -49,6 +55,7 @@ export function PersonalUsageWorkspace({ client, me, language }) {
   };
   const cancel = id => run(async stamp => {
     if (!canCancel) return;
+    setReadDenied(false);
     const key = cancelIntents.current.get(id) || `usage-cancel-${secureRequestID()}`;
     cancelIntents.current.set(id, key);
     try {
@@ -66,8 +73,8 @@ export function PersonalUsageWorkspace({ client, me, language }) {
   return <section className="ap-personal-usage">
     <button disabled={busy} onClick={() => void run(stamp => load('', 1, stamp))}>{copy.refresh}</button>
     {busy && <p role="status">{copy.loading}</p>}
-    {unavailable && records.length > 0 && <p role="alert">{copy.usageUnavailable}</p>}
-    <Usage copy={copy} language={language} records={records} unavailable={unavailable && records.length === 0} page={page} hasPrevious={page > 1} hasMore={Boolean(next)} busy={busy} canCancel={canCancel}
+    {unavailable && records.length > 0 && <p role="alert">{readDenied ? copy.permissionDenied : copy.usageUnavailable}</p>}
+    <Usage copy={{ ...copy, usageUnavailable: readDenied ? copy.permissionDenied : copy.usageUnavailable }} language={language} records={records} unavailable={unavailable && records.length === 0} page={page} hasPrevious={page > 1} hasMore={Boolean(next)} busy={busy} canCancel={canCancel}
       onPrevious={() => void run(stamp => load(cursors[page - 2], page - 1, stamp))}
       onNext={() => void run(stamp => load(next, page + 1, stamp))} onCancel={id => void cancel(id)} />
   </section>;
