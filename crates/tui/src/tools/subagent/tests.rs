@@ -7707,14 +7707,19 @@ fn child_parked_note_rides_success_and_error_results_and_nets_re_admissions() {
     );
 
     surface.park_eviction_note(ToolboxEvictionTrigger::Step, &["big-c".to_string()]);
-    let mut failure: Result<RichToolResult> = Err(anyhow::anyhow!("boom"));
+    // The error rebuild renders the full source chain (`{error:#}`): the
+    // context is the top level and "boom" its source, so a bare-display
+    // rebuild would keep "outer" and silently drop "boom".
+    use anyhow::Context as _;
+    let mut failure: Result<RichToolResult> = Err(anyhow::anyhow!("boom")).context("outer");
     surface.ride_pending_eviction_notes(&mut failure);
     let message = failure.expect_err("stays an error").to_string();
     assert!(
-        message.contains("boom")
+        message.contains("outer")
+            && message.contains("boom")
             && message.contains("no longer callable")
             && message.contains("big-c"),
-        "the note must ride an error result too: {message}"
+        "the note must ride an error result with its full source chain: {message}"
     );
     assert!(surface.pending_eviction_notes.is_empty());
 
