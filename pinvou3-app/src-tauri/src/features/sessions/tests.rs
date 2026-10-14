@@ -79,6 +79,32 @@ fn assistant_text(text: &str) -> Message {
     }
 }
 
+/// Retention/list-suite fixtures: an empty transcript with the suite's fixed
+/// model and workspace; callers only adjust `updated_at` afterwards.
+fn chat_model_session(id: String) -> deepseek_tui::session_manager::SavedSession {
+    create_saved_session_with_id_and_mode(
+        id,
+        &[],
+        "/chat-model",
+        &std::env::temp_dir(),
+        0,
+        None,
+        None,
+    )
+}
+
+fn retention_model_session(id: String) -> deepseek_tui::session_manager::SavedSession {
+    create_saved_session_with_id_and_mode(
+        id,
+        &[],
+        "/retention-model",
+        &std::env::temp_dir(),
+        0,
+        None,
+        None,
+    )
+}
+
 fn assistant_tool_use(id: &str) -> Message {
     Message {
         role: "assistant".into(),
@@ -970,6 +996,38 @@ fn create_empty_with_id_preserves_requested_identity() {
     assert_eq!(
         store.load(requested_id).expect("load session").metadata.id,
         requested_id
+    );
+}
+
+/// Headless sessions persist by default and show up in the GUI history, so
+/// they must carry the same trilingual placeholder GUI-created sessions do.
+/// An eval-internal label would render untranslated for en/ja users, and the
+/// command layer's auto-rename triggers on exactly this value — a different
+/// title would also freeze an adopted session's name forever. The agentic
+/// runner reads the same sentinel as its adoption marker, so this assertion
+/// guards both.
+#[test]
+fn create_empty_with_id_carries_the_localizable_new_chat_placeholder() {
+    let (store, _g) = isolated_store();
+
+    let session = store
+        .create_empty_with_id(
+            "eval_placeholder_title".to_string(),
+            "/model".into(),
+            None,
+            std::env::temp_dir(),
+        )
+        .expect("create session with requested id");
+
+    assert_eq!(session.metadata.title, super::store::NEW_CHAT_TITLE);
+    assert_eq!(
+        store
+            .load("eval_placeholder_title")
+            .expect("load session")
+            .metadata
+            .title,
+        super::store::NEW_CHAT_TITLE,
+        "the persisted record is what the GUI list renders"
     );
 }
 
@@ -2113,15 +2171,7 @@ fn retention_notifies_hook_when_record_commit_precedes_cleanup_error() {
         } else {
             format!("retention-live-{index}")
         };
-        let mut session = create_saved_session_with_id_and_mode(
-            id,
-            &[],
-            "/retention-model",
-            &std::env::temp_dir(),
-            0,
-            None,
-            None,
-        );
+        let mut session = retention_model_session(id);
         session.metadata.updated_at = now - chrono::Duration::seconds(index as i64);
         store
             .save_session_atomic(&session)
@@ -5026,15 +5076,7 @@ fn retention_evicts_main_session_together_with_its_aux() {
     let main_id = "retention-main-with-aux";
     // The oldest main session (with its auxiliary conversation) sits on the
     // eviction line; the other MAX_SESSIONS_PER_KIND entries are newer.
-    let mut oldest = create_saved_session_with_id_and_mode(
-        main_id.to_string(),
-        &[],
-        "/retention-model",
-        &std::env::temp_dir(),
-        0,
-        None,
-        None,
-    );
+    let mut oldest = retention_model_session(main_id.to_string());
     oldest.metadata.updated_at = now - chrono::Duration::seconds(MAX_SESSIONS_PER_KIND as i64 + 1);
     store
         .save_session_atomic(&oldest)
@@ -5052,15 +5094,7 @@ fn retention_evicts_main_session_together_with_its_aux() {
         .save_session_atomic(&aux_record)
         .expect("backdate the aux record");
     for index in 0..MAX_SESSIONS_PER_KIND {
-        let mut session = create_saved_session_with_id_and_mode(
-            format!("retention-aux-peer-{index}"),
-            &[],
-            "/retention-model",
-            &std::env::temp_dir(),
-            0,
-            None,
-            None,
-        );
+        let mut session = retention_model_session(format!("retention-aux-peer-{index}"));
         session.metadata.updated_at = now - chrono::Duration::seconds(index as i64);
         store
             .save_session_atomic(&session)
@@ -5104,15 +5138,7 @@ fn aux_sessions_do_not_consume_chat_retention_budget() {
     let mut pairs = Vec::new();
     for index in 0..MAX_SESSIONS_PER_KIND {
         let main_id = format!("retention-budget-main-{index}");
-        let mut session = create_saved_session_with_id_and_mode(
-            main_id.clone(),
-            &[],
-            "/retention-model",
-            &std::env::temp_dir(),
-            0,
-            None,
-            None,
-        );
+        let mut session = retention_model_session(main_id.clone());
         session.metadata.updated_at = now - chrono::Duration::seconds(index as i64);
         store.save_session_atomic(&session).expect("seed main");
         let aux = store.create_aux_session(&main_id).expect("create aux");
@@ -5158,15 +5184,7 @@ fn retention_aux_activity_protects_main_session_from_eviction() {
     let main_id = "retention-liveness-main";
     // The oldest main session owns the freshest aux conversation: without
     // liveness protection it is the first eviction victim.
-    let mut oldest = create_saved_session_with_id_and_mode(
-        main_id.to_string(),
-        &[],
-        "/retention-model",
-        &std::env::temp_dir(),
-        0,
-        None,
-        None,
-    );
+    let mut oldest = retention_model_session(main_id.to_string());
     oldest.metadata.updated_at = now - chrono::Duration::seconds(MAX_SESSIONS_PER_KIND as i64 + 1);
     store
         .save_session_atomic(&oldest)
@@ -5190,15 +5208,7 @@ fn retention_aux_activity_protects_main_session_from_eviction() {
         if index == MAX_SESSIONS_PER_KIND - 1 {
             stalest_peer = peer_id.clone();
         }
-        let mut session = create_saved_session_with_id_and_mode(
-            peer_id,
-            &[],
-            "/retention-model",
-            &std::env::temp_dir(),
-            0,
-            None,
-            None,
-        );
+        let mut session = retention_model_session(peer_id);
         session.metadata.updated_at = now - chrono::Duration::seconds(index as i64);
         store
             .save_session_atomic(&session)
@@ -5253,15 +5263,7 @@ fn retention_aux_freshness_survives_a_listing_parse_blind_spot() {
     let main_id = "retention-blind-main";
     // The oldest main session owns the freshest side chat: without the
     // stat fallback it is the first eviction victim.
-    let mut oldest = create_saved_session_with_id_and_mode(
-        main_id.to_string(),
-        &[],
-        "/retention-model",
-        &std::env::temp_dir(),
-        0,
-        None,
-        None,
-    );
+    let mut oldest = retention_model_session(main_id.to_string());
     oldest.metadata.updated_at = now - chrono::Duration::seconds(MAX_SESSIONS_PER_KIND as i64 + 1);
     store
         .save_session_atomic(&oldest)
@@ -5286,15 +5288,7 @@ fn retention_aux_freshness_survives_a_listing_parse_blind_spot() {
         if index == MAX_SESSIONS_PER_KIND - 1 {
             stalest_peer = peer_id.clone();
         }
-        let mut session = create_saved_session_with_id_and_mode(
-            peer_id,
-            &[],
-            "/retention-model",
-            &std::env::temp_dir(),
-            0,
-            None,
-            None,
-        );
+        let mut session = retention_model_session(peer_id);
         session.metadata.updated_at = now - chrono::Duration::seconds(index as i64);
         store
             .save_session_atomic(&session)
@@ -5338,15 +5332,7 @@ fn retention_eviction_aborts_the_pair_when_the_aux_delete_fails() {
     let main_id = "retention-pinned-pair-main";
     // Same seeding as the cascade test above: the pair is stale on BOTH
     // sides, so it is the first eviction victim.
-    let mut oldest = create_saved_session_with_id_and_mode(
-        main_id.to_string(),
-        &[],
-        "/retention-model",
-        &std::env::temp_dir(),
-        0,
-        None,
-        None,
-    );
+    let mut oldest = retention_model_session(main_id.to_string());
     oldest.metadata.updated_at = now - chrono::Duration::seconds(MAX_SESSIONS_PER_KIND as i64 + 1);
     store
         .save_session_atomic(&oldest)
@@ -5359,15 +5345,7 @@ fn retention_eviction_aborts_the_pair_when_the_aux_delete_fails() {
         .save_session_atomic(&aux_record)
         .expect("backdate the aux record");
     for index in 0..MAX_SESSIONS_PER_KIND {
-        let mut session = create_saved_session_with_id_and_mode(
-            format!("retention-pinned-peer-{index}"),
-            &[],
-            "/retention-model",
-            &std::env::temp_dir(),
-            0,
-            None,
-            None,
-        );
+        let mut session = retention_model_session(format!("retention-pinned-peer-{index}"));
         session.metadata.updated_at = now - chrono::Duration::seconds(index as i64);
         store
             .save_session_atomic(&session)
@@ -5554,15 +5532,7 @@ fn retention_cascade_covers_aux_records_the_listing_drops() {
     // retention_evicts_main_session_together_with_its_aux: the main is the
     // oldest, the aux is backdated so pair-liveness does not protect it, and
     // MAX_SESSIONS_PER_KIND peers are newer.
-    let mut oldest = create_saved_session_with_id_and_mode(
-        main_id.to_string(),
-        &[],
-        "/retention-model",
-        &std::env::temp_dir(),
-        0,
-        None,
-        None,
-    );
+    let mut oldest = retention_model_session(main_id.to_string());
     oldest.metadata.updated_at = now - chrono::Duration::seconds(MAX_SESSIONS_PER_KIND as i64 + 1);
     store
         .save_session_atomic(&oldest)
@@ -5575,15 +5545,7 @@ fn retention_cascade_covers_aux_records_the_listing_drops() {
         .save_session_atomic(&aux_record)
         .expect("backdate the aux record");
     for index in 0..MAX_SESSIONS_PER_KIND {
-        let mut session = create_saved_session_with_id_and_mode(
-            format!("retention-fault-peer-{index}"),
-            &[],
-            "/retention-model",
-            &std::env::temp_dir(),
-            0,
-            None,
-            None,
-        );
+        let mut session = retention_model_session(format!("retention-fault-peer-{index}"));
         session.metadata.updated_at = now - chrono::Duration::seconds(index as i64);
         store
             .save_session_atomic(&session)
@@ -5699,15 +5661,7 @@ fn create_aux_session_sweep_protects_parent_via_pair_liveness() {
     // Seed MAX+1 chats through `save_session_atomic` (no eager retention), so
     // the parent is oldest and the population the aux save sweeps over is
     // already over the cap.
-    let mut oldest = create_saved_session_with_id_and_mode(
-        main_id.to_string(),
-        &[],
-        "/retention-model",
-        &std::env::temp_dir(),
-        0,
-        None,
-        None,
-    );
+    let mut oldest = retention_model_session(main_id.to_string());
     oldest.metadata.updated_at = now - chrono::Duration::seconds(MAX_SESSIONS_PER_KIND as i64 + 1);
     store
         .save_session_atomic(&oldest)
@@ -5718,15 +5672,7 @@ fn create_aux_session_sweep_protects_parent_via_pair_liveness() {
         if index == MAX_SESSIONS_PER_KIND - 1 {
             stalest_peer = peer_id.clone();
         }
-        let mut session = create_saved_session_with_id_and_mode(
-            peer_id,
-            &[],
-            "/retention-model",
-            &std::env::temp_dir(),
-            0,
-            None,
-            None,
-        );
+        let mut session = retention_model_session(peer_id);
         session.metadata.updated_at = now - chrono::Duration::seconds(index as i64);
         store
             .save_session_atomic(&session)
@@ -5766,29 +5712,13 @@ fn create_aux_session_rolls_back_when_parent_is_deleted_mid_create() {
     // Same seeding as the pair-liveness test: MAX+1 chats with the parent
     // oldest, so the aux save's sweep evicts exactly one peer — the hook's
     // trigger point inside the create window.
-    let mut oldest = create_saved_session_with_id_and_mode(
-        main_id.to_string(),
-        &[],
-        "/retention-model",
-        &std::env::temp_dir(),
-        0,
-        None,
-        None,
-    );
+    let mut oldest = retention_model_session(main_id.to_string());
     oldest.metadata.updated_at = now - chrono::Duration::seconds(MAX_SESSIONS_PER_KIND as i64 + 1);
     store
         .save_session_atomic(&oldest)
         .expect("seed eviction-line parent");
     for index in 0..MAX_SESSIONS_PER_KIND {
-        let mut session = create_saved_session_with_id_and_mode(
-            format!("mid-create-peer-{index}"),
-            &[],
-            "/retention-model",
-            &std::env::temp_dir(),
-            0,
-            None,
-            None,
-        );
+        let mut session = retention_model_session(format!("mid-create-peer-{index}"));
         session.metadata.updated_at = now - chrono::Duration::seconds(index as i64);
         store
             .save_session_atomic(&session)
@@ -5845,29 +5775,13 @@ fn create_aux_session_propagates_transient_parent_recheck_error() {
     let (store, _g) = isolated_store();
     let now = Utc::now();
     let main_id = "recheck-fault-parent";
-    let mut oldest = create_saved_session_with_id_and_mode(
-        main_id.to_string(),
-        &[],
-        "/retention-model",
-        &std::env::temp_dir(),
-        0,
-        None,
-        None,
-    );
+    let mut oldest = retention_model_session(main_id.to_string());
     oldest.metadata.updated_at = now - chrono::Duration::seconds(MAX_SESSIONS_PER_KIND as i64 + 1);
     store
         .save_session_atomic(&oldest)
         .expect("seed eviction-line parent");
     for index in 0..MAX_SESSIONS_PER_KIND {
-        let mut session = create_saved_session_with_id_and_mode(
-            format!("recheck-fault-peer-{index}"),
-            &[],
-            "/retention-model",
-            &std::env::temp_dir(),
-            0,
-            None,
-            None,
-        );
+        let mut session = retention_model_session(format!("recheck-fault-peer-{index}"));
         session.metadata.updated_at = now - chrono::Duration::seconds(index as i64);
         store
             .save_session_atomic(&session)
@@ -8998,15 +8912,7 @@ fn retention_rechecks_a_pin_that_lands_mid_sweep() {
     // oldest first.
     let mut ids = Vec::new();
     for index in 0..MAX_SESSIONS_PER_KIND {
-        let mut session = create_saved_session_with_id_and_mode(
-            format!("midpin-{index}"),
-            &[],
-            "/chat-model",
-            &std::env::temp_dir(),
-            0,
-            None,
-            None,
-        );
+        let mut session = chat_model_session(format!("midpin-{index}"));
         session.metadata.updated_at = now - chrono::Duration::seconds(1000 - index as i64);
         store.save(&session).expect("seed session");
         ids.push(session.metadata.id.clone());
@@ -9019,15 +8925,7 @@ fn retention_rechecks_a_pin_that_lands_mid_sweep() {
     // order victims[3] → victims[2] → victims[1] → victims[0].
     let mut victims = Vec::new();
     for index in 0..4 {
-        let mut session = create_saved_session_with_id_and_mode(
-            format!("midpin-victim-{index}"),
-            &[],
-            "/chat-model",
-            &std::env::temp_dir(),
-            0,
-            None,
-            None,
-        );
+        let mut session = chat_model_session(format!("midpin-victim-{index}"));
         session.metadata.updated_at = now - chrono::Duration::seconds(2000 - index as i64);
         let record = serde_json::to_vec(&session).expect("serialize candidate");
         std::fs::write(
@@ -9098,30 +8996,14 @@ fn retention_pin_seen_by_an_earlier_reread_survives_a_later_pin_file_fault() {
     // victims[0].
     let mut ids = Vec::new();
     for index in 0..MAX_SESSIONS_PER_KIND {
-        let mut session = create_saved_session_with_id_and_mode(
-            format!("pinfault-{index}"),
-            &[],
-            "/chat-model",
-            &std::env::temp_dir(),
-            0,
-            None,
-            None,
-        );
+        let mut session = chat_model_session(format!("pinfault-{index}"));
         session.metadata.updated_at = now - chrono::Duration::seconds(1000 - index as i64);
         store.save(&session).expect("seed session");
         ids.push(session.metadata.id.clone());
     }
     let mut victims = Vec::new();
     for index in 0..4 {
-        let mut session = create_saved_session_with_id_and_mode(
-            format!("pinfault-victim-{index}"),
-            &[],
-            "/chat-model",
-            &std::env::temp_dir(),
-            0,
-            None,
-            None,
-        );
+        let mut session = chat_model_session(format!("pinfault-victim-{index}"));
         session.metadata.updated_at = now - chrono::Duration::seconds(2000 - index as i64);
         let record = serde_json::to_vec(&session).expect("serialize candidate");
         std::fs::write(
@@ -9192,30 +9074,14 @@ fn retention_purge_removes_durable_mode_entries_written_after_boot() {
     // Seed exactly the cap via save() (no sweep can fire at or under it).
     let mut ids = Vec::new();
     for index in 0..MAX_SESSIONS_PER_KIND {
-        let mut session = create_saved_session_with_id_and_mode(
-            format!("modeghost-{index}"),
-            &[],
-            "/chat-model",
-            &std::env::temp_dir(),
-            0,
-            None,
-            None,
-        );
+        let mut session = chat_model_session(format!("modeghost-{index}"));
         session.metadata.updated_at = now - chrono::Duration::seconds(1000 - index as i64);
         store.save(&session).expect("seed session");
         ids.push(session.metadata.id.clone());
     }
     // One oldest candidate written DIRECTLY to the store directory (51st
     // record, so the next sweep takes exactly it).
-    let mut session = create_saved_session_with_id_and_mode(
-        "modeghost-victim".to_string(),
-        &[],
-        "/chat-model",
-        &std::env::temp_dir(),
-        0,
-        None,
-        None,
-    );
+    let mut session = chat_model_session("modeghost-victim".to_string());
     session.metadata.updated_at = now - chrono::Duration::seconds(2000);
     let record = serde_json::to_vec(&session).expect("serialize candidate");
     std::fs::write(
