@@ -173,6 +173,11 @@ async function ensureWindowsRustToolchain(
   return { ...toolchain, source: "isolated" };
 }
 
+// Windows 上以默认 2 MiB 编译器线程栈编译 codewhale-tui 会栈溢出
+// (STATUS_STACK_OVERFLOW)。run-dev.sh 与 CI 会自行注入 rustc stack wrapper,
+// 但从 PowerShell 或 cmd 直接运行的 `npm run dev` / `npm run build*` 绕开了
+// 它们。这里编译(或复用)原生 .exe wrapper 并经 RUSTC_WRAPPER 注入,使
+// RUST_MIN_STACK 只作用于编译器子进程;应用运行时永不继承该变量。
 function prepareWindowsRustcStackWrapper(
   {
     environment = process.env,
@@ -185,14 +190,26 @@ function prepareWindowsRustcStackWrapper(
   if (platform !== "win32") return null;
 
   const configuredWrapper = environment.RUSTC_WRAPPER?.trim();
+  const stackWrapperPath = path.join(scriptsPath, "rustc-stack-wrapper.exe");
   if (configuredWrapper) {
+    // 调用方显式指定的 wrapper 优先(与 run-dev.sh 相同的优先级)。run-dev.sh
+    // 与 release-packages 的 Windows job 传回来的正是本 stack wrapper,只有
+    // 其它 wrapper(sccache 等)会放弃 RUST_MIN_STACK 注入,保留默认 2 MiB
+    // 编译器栈——已知会在 codewhale-tui 上溢出。
     environment.RUSTC_WRAPPER = configuredWrapper;
-    log(`[build] Reusing configured rustc stack wrapper: ${configuredWrapper}`);
+    const isStackWrapper = path.win32.resolve(configuredWrapper).toLowerCase()
+      === path.win32.resolve(stackWrapperPath).toLowerCase();
+    log(
+      isStackWrapper
+        ? `[build] Reusing caller-provided RUSTC_WRAPPER (the Windows rustc stack wrapper): ${configuredWrapper}`
+        : `[build] Reusing caller-provided RUSTC_WRAPPER: ${configuredWrapper}; ` +
+          "the 16 MiB compiler stack fix is NOT applied to compiler children.",
+    );
     return { path: configuredWrapper, source: "environment" };
   }
 
   const sourcePath = path.join(scriptsPath, "rustc-stack-wrapper.rs");
-  const wrapperPath = path.join(scriptsPath, "rustc-stack-wrapper.exe");
+  const wrapperPath = stackWrapperPath;
   if (!fs.existsSync(sourcePath)) {
     throw new Error(`Windows rustc stack wrapper source is missing: ${sourcePath}`);
   }
@@ -200,23 +217,40 @@ function prepareWindowsRustcStackWrapper(
   const needsCompilation = !fs.existsSync(wrapperPath)
     || fs.statSync(sourcePath).mtimeMs > fs.statSync(wrapperPath).mtimeMs;
   if (needsCompilation) {
-    const result = spawnCompiler(
-      "rustc",
-      ["-O", sourcePath, "-o", wrapperPath],
-      {
-        cwd: APP_ROOT,
-        env: { ...environment },
-        stdio: "inherit",
-        windowsHide: true,
-      },
-    );
-    if (result.error) {
-      throw new Error(`Failed to compile Windows rustc stack wrapper: ${result.error.message}`);
-    }
-    if (result.status !== 0 || !fs.existsSync(wrapperPath)) {
-      throw new Error(
-        `Failed to compile Windows rustc stack wrapper (exit ${result.status ?? "unknown"})`,
+    // 先编译到唯一临时名再原子改名:被中断的构建(Ctrl-C、CI kill)绝不能
+    // 留下半个可执行文件被 mtime 缓存永久复用。
+    const tempWrapperPath = `${wrapperPath}.${process.pid}.tmp`;
+    // MSVC 链接带 /DEBUG,临时编译还会在临时可执行文件旁写一个同名 .pdb;
+    // 两个双胞胎一起清理。
+    const tempPdbPath = `${wrapperPath}.${process.pid}.pdb`;
+    let result;
+    try {
+      result = spawnCompiler(
+        "rustc",
+        ["-O", sourcePath, "-o", tempWrapperPath],
+        {
+          cwd: APP_ROOT,
+          env: { ...environment },
+          stdio: "inherit",
+          windowsHide: true,
+        },
       );
+      // 绝不回落到无 wrapper 的编译器:已知会栈溢出。
+      if (result.error) {
+        throw new Error(`Failed to compile Windows rustc stack wrapper: ${result.error.message}`);
+      }
+      if (result.status !== 0 || !fs.existsSync(tempWrapperPath)) {
+        throw new Error(
+          `Failed to compile Windows rustc stack wrapper (exit ${result.status ?? "unknown"})`,
+        );
+      }
+      fs.renameSync(tempWrapperPath, wrapperPath);
+    } finally {
+      for (const leftover of [tempWrapperPath, tempPdbPath]) {
+        if (fs.existsSync(leftover)) {
+          fs.rmSync(leftover, { force: true });
+        }
+      }
     }
   }
 
@@ -614,6 +648,8 @@ function formatElapsed(milliseconds) {
 }
 
 function tauriPhase(preparedArgs) {
+  // dev 必须报告自己的阶段,而不是落进泛化的 "command" 标签。
+  if (preparedArgs[0] === "dev") return "dev";
   const commandIndex = tauriCommandIndex(preparedArgs);
   return commandIndex >= 0 ? preparedArgs[commandIndex] : "command";
 }
@@ -748,7 +784,9 @@ async function main() {
   const skipLinuxAsr = process.env.PINVOU3_SKIP_LINUX_ASR === "1";
   const skipKnowledgeHost = process.env.PINVOU3_SKIP_KNOWLEDGE_HOST === "1";
   const additionalConfigs = [];
-  if (hasTauriBuildCommand && process.platform === "win32") {
+  // dev 与 build/bundle 一样经由 cargo 编译,所以半安装的工具链也必须在
+  // `tauri dev` 之前修复;下方的 wrapper 注入对两条路径一视同仁。
+  if (process.platform === "win32" && (hasTauriBuildCommand || isDev)) {
     await ensureWindowsRustToolchain();
   }
   const windowsRuntime = hasTauriBuildCommand && process.platform === "win32"
