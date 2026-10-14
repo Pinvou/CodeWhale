@@ -2,5 +2,5 @@
 // remain unchanged in requests, comparisons and responses.
 export function organizationLabel(copy, group, value) {
   const key = `enum${group}_${value}`;
-  return Object.hasOwn(copy, key) ? copy[key] : value;
+  return Object.prototype.hasOwnProperty.call(copy, key) ? copy[key] : value;
 }

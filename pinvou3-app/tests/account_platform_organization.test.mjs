@@ -5,9 +5,16 @@ import { AccountPlatformBffClient } from '../src/features/account-platform/bff-c
 import { AccountPlatformDesktopClient } from '../src/features/account-platform/desktop-client.js';
 import { organizationCopy } from '../src/shared/i18n.js';
 import { hasPermission } from '../src/features/account-platform/authorization-ui.js';
+import { organizationLabel } from '../src/features/account-platform/organization-labels.js';
 const org='11111111-1111-4111-8111-111111111111',user='22222222-2222-4222-8222-222222222222',other='33333333-3333-4333-8333-333333333333',grantID='44444444-4444-4444-8444-444444444444';
 const grant={grant_id:grantID,organization_id:org,member_user_id:user,package_id:org,component_id:other,status:'ACTIVE',membership_version:2,allocation_version:1,original_microcredits:'9007199254740993',available_microcredits:'9007199254740993',reserved_microcredits:'0',used_microcredits:'0',expired_microcredits:'0',revoked_microcredits:'0'};
 const facts={items:[{member_user_id:user,package_id:org,component_id:other,membership_version:2,component_type:'BASE',amount_microcredits:'9007199254740993'}]};
+
+test('organization display labels use own locale values and preserve unknown or inherited diagnostics',()=>{
+ for(const language of ['zh','en','ja'])assert.equal(organizationLabel(organizationCopy[language],'Role','MEMBER'),organizationCopy[language].enumRole_MEMBER);
+ assert.equal(organizationLabel(Object.create({enumRole_MEMBER:'inherited label'}),'Role','MEMBER'),'MEMBER');
+ for(const value of ['CONTROLLED_UNKNOWN_STATE','__proto__','constructor'])assert.equal(organizationLabel(organizationCopy.en,'Status',value),value);
+});
 
 test('installed membership states include suspended members and reject non-domain states', async () => {
  const member={user_id:user,membership_id:grantID,version:2,roles:['MEMBER'],unit_ids:[]};
