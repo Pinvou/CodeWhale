@@ -44,6 +44,19 @@ try {
     assert.ok(await page.evaluate(() => document.querySelector('.ap-usage-row').textContent.includes('CONTROLLED_UNKNOWN_EXECUTION') && document.querySelector('.ap-usage-row').textContent.includes('CONTROLLED_UNKNOWN_SETTLEMENT'))); }
     assert.ok(await page.evaluate(() => window.f05.calls.every(call => call.method === 'GET')));
   });
+  await run('organization usage remains readable but personal cancellation permission cannot authorize it', async () => {
+    await fresh();
+    await page.evaluate(() => { window.f05.organizational = true; window.f05.active = true; window.f05.cancel = true; window.f05.version++; window.f05.render(); });
+    await page.waitForFunction(() => document.querySelector('.ap-usage-row')?.textContent.includes('public-user-a') && [...document.querySelectorAll('button')].some(button => button.textContent === window.f05.copy().stopDelivery && button.disabled));
+    await settled();
+    assert.ok(await page.evaluate(() => { const stop = [...document.querySelectorAll('button')].find(button => button.textContent === window.f05.copy().stopDelivery); stop.click(); return stop.disabled && !window.f05.calls.some(call => call.method === 'POST'); }));
+  });
+  await run('personal read permission does not grant organization usage read access', async () => {
+    await fresh(); const count = await page.evaluate(() => window.f05.calls.length);
+    await page.evaluate(() => { window.f05.organizational = true; window.f05.orgRead = false; window.f05.version++; window.f05.render(); });
+    await page.waitForFunction(() => !document.querySelector('.ap-personal-usage'));
+    assert.equal(await page.evaluate(() => window.f05.calls.length), count);
+  });
   console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
 } catch (error) { console.error(`FAIL after ${passed} PASS: ${error.name}`); process.exitCode = 1; }
 finally { if (browser) await browser.close(); if (vite) await vite.close(); if (fs.existsSync(profile)) fs.rmSync(profile, { recursive: true, force: true }); }
