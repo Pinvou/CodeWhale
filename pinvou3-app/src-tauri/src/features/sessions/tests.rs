@@ -4,7 +4,7 @@
 //! `sessions/mod.rs`. These tests exercise the full store across every
 //! submodule, so they live next to the facade and pull in the re-exported
 //! public surface plus the few crate-visible helpers they need directly.
-// architecture-guard: allow-target-cfg -- the legacy-table sync-failure regression needs POSIX permission modes to make the atomic rewrite fail deterministically; PermissionsExt/from_mode do not exist on Windows, so the test is cfg(unix)-gated and no platform behavior leaks into shared code.
+// architecture-guard: allow-target-cfg -- the legacy-table sync-failure regression needs POSIX permission modes to make the atomic rewrite fail deterministically, and the symlink-alias regression needs a real directory symlink to emulate macOS /var → /private/var ancestor resolution; PermissionsExt/from_mode and std::os::unix::fs::symlink do not exist on Windows, so those tests are cfg(unix)-gated and no platform behavior leaks into shared code.
 
 use super::*;
 use crate::platform::paths;
@@ -609,6 +609,83 @@ fn rebound_plain_chat_binding_failure_keeps_old_path_and_reports() {
 
     let _ = std::fs::remove_dir_all(&sidecar);
     let _ = std::fs::remove_dir_all(&from);
+    let _ = std::fs::remove_dir_all(&to);
+}
+
+/// Symlink-alias regression for the plain-chat lane (review #464 follow-up
+/// minor 12), analogous to the projects lane's two cfg(unix) tests: this lane
+/// folds LEXICALLY and never resolves symlinks itself — an alias caller works
+/// only because the command entry normalizes `from` through
+/// `rebind_source_display` before any lane sees it: for a path that still
+/// exists, `root_display`'s `fs::canonicalize` resolves the alias directly
+/// (the deepest-existing-ancestor fallback covers a vanished leaf behind a
+/// symlinked ancestor). Pin that contract: a binding stored in the canonical
+/// spelling (as the command entry's `validate_user_workspace_path`
+/// canonicalization writes it — `bind_session_workspace` itself stores the
+/// caller's path verbatim) is invisible to the raw alias, matches once `from`
+/// is normalized, and the suffix cut lands exactly on the nested component.
+/// cfg(unix)-gated under the file-top
+/// allow-target-cfg exception: std::os::unix::fs::symlink does not exist on
+/// Windows.
+#[cfg(unix)]
+#[test]
+fn rebind_workspace_bindings_via_symlink_alias_needs_normalized_from() {
+    let (store, _g) = isolated_store();
+    let root = unique_temp_dir("rebind-symlink-alias");
+    let real = root.join("real");
+    let alias = root.join("alias");
+    std::fs::create_dir_all(real.join("proj").join("nested")).expect("create real dir");
+    std::os::unix::fs::symlink(&real, &alias).expect("symlink");
+
+    let session = store
+        .create_new("/model".into(), None, std::env::temp_dir())
+        .expect("create");
+    // The command entry canonicalizes through `validate_user_workspace_path`
+    // before binding (`bind_session_workspace` stores its argument verbatim),
+    // and the rebind folds `from` in that canonical domain — so the test must
+    // bind the canonical spelling too. On macOS the temp root itself sits
+    // behind the /var → /private/var alias; without this canonicalize the
+    // stored binding and the normalized `from` land in different domains and
+    // the lexical fold matches nothing.
+    let bound = std::fs::canonicalize(real.join("proj").join("nested"))
+        .expect("canonicalize the bound path into the domain `from` normalizes into");
+    store
+        .bind_session_workspace(&session.metadata.id, bound.clone())
+        .expect("bind");
+
+    // The raw alias spelling does not match the lexical fold — the lane
+    // deliberately does not resolve symlinks, so an unnormalized caller
+    // half-misses instead of half-migrating.
+    let from_alias = alias.join("proj");
+    assert!(
+        store.workspace_bindings_under(&from_alias).is_empty(),
+        "the raw alias spelling must not match a canonicalized binding"
+    );
+
+    // The command entry normalizes `from` (here via `root_display`'s
+    // `fs::canonicalize`, which resolves the alias because the path still
+    // exists), landing on the stored spelling; the rebind then cuts the
+    // suffix in that domain.
+    let from = crate::features::projects::rebind_source_display(&from_alias);
+    assert_eq!(
+        store.workspace_bindings_under(&from),
+        vec![(session.metadata.id.clone(), bound.clone())]
+    );
+    let to = unique_temp_dir("rebind-symlink-alias-to");
+    std::fs::create_dir_all(&to).expect("create to dir");
+    let outcome = store.rebind_workspace_bindings(&from, &to).expect("rebind");
+    assert!(outcome.failed_session_ids.is_empty());
+    assert_eq!(
+        outcome.rebound,
+        vec![(session.metadata.id.clone(), to.join("nested"))],
+        "the suffix cut lands exactly on the nested component"
+    );
+    assert_eq!(
+        store.session_workspace_binding(&session.metadata.id),
+        Some(to.join("nested"))
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&to);
 }
 
@@ -6039,6 +6116,47 @@ fn forkguard_session_archive_export_via_store_keeps_full_context() {
     let escape = output_dir.join("escape.tar.xz");
     assert!(store.export_archive("../escape", &escape, true).is_err());
     assert!(!escape.exists());
+
+    let _ = std::fs::remove_dir_all(&output_dir);
+}
+
+/// ADR-0024 read-surface register: `export_session` keeps its deliberate
+/// any-id read stance for auxiliary side chats too — an `aux-<parent>` record
+/// is a persisted session like any other, and the export path must not grow
+/// an id-class rejection. Pins the store leg the command layer delegates to;
+/// the command fn itself takes an AppHandle and a native save dialog (the
+/// repo has no mock-app precedent), so the thin glue between this leg and
+/// the dialog is the disclosed residual — a command-body id-class guard
+/// would need e2e coverage, it is not unit-reachable here (round-2 m3).
+#[test]
+fn aux_session_archive_export_reads_any_id_class() {
+    let (store, _g) = isolated_store();
+    let parent = store
+        .create_new("/model".into(), None, std::env::temp_dir())
+        .expect("create parent chat");
+    let aux = store
+        .get_or_create_aux_session(&parent.metadata.id)
+        .expect("create derived aux session");
+    store
+        .update_messages(
+            &aux.id,
+            vec![user_text("side question"), assistant_text("side answer")],
+        )
+        .expect("seed aux transcript");
+
+    let output_dir =
+        std::env::temp_dir().join(format!("pinvou3-aux-export-test-{}", std::process::id()));
+    std::fs::create_dir_all(&output_dir).expect("output dir");
+    let output = output_dir.join("aux.tar.xz");
+    let summary = store
+        .export_archive(&aux.id, &output, false)
+        .expect("aux id must export like any persisted session");
+    assert_eq!(summary.session_id, aux.id);
+    assert!(
+        summary.members.iter().any(|m| m.name == "session.json"),
+        "the aux transcript member must land in the archive"
+    );
+    assert!(output.is_file(), "archive must be written");
 
     let _ = std::fs::remove_dir_all(&output_dir);
 }

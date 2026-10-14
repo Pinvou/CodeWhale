@@ -424,6 +424,7 @@
     scheduledTaskPendingGuide: null,
   };
   var initPromise = null;
+  var uiDictionary = null;
 
   // 卡片池 1078 张卡的前端缓存。只读,通过 getPersonas() 取引用,不走 notify 快照。
 
@@ -789,6 +790,11 @@
   };
   function bt(key) {
     var lang = state.settings && state.settings.language;
+    // Shared UI copy is loaded before render; normalize the backend Chinese tag too.
+    if (key === "steerFailedLost" && uiDictionary) {
+      var copy = uiDictionary[lang === "en" ? "en" : lang === "ja" ? "ja" : "zh"];
+      if (copy && copy[key] !== undefined) return copy[key];
+    }
     var m = lang === "en" ? BT_TABLE.en : lang === "ja" ? BT_TABLE.ja : BT_TABLE.zh;
     return m[key] !== undefined ? m[key] : BT_TABLE.zh[key];
   }
@@ -1765,21 +1771,34 @@
       ancestors.delete(value);
     }
   }
-  var subscriptionSliceRevision = 0;
+  // Slice caches are invalidated by the domains that actually changed. The
+  // legacy notify() path still invalidates every domain, so features can move
+  // to precise publication one audited boundary at a time without risking a
+  // stale snapshot in untouched call sites.
+  var subscriptionSliceRevisions = Object.create(null);
   var subscriptionSliceCache = Object.create(null);
   function subscriptionStateSlice(domain) {
     var fields = STATE_SLICE_FIELDS[domain];
     if (!fields) throw new Error("Unknown Tauri bridge state slice: " + domain);
     var cached = subscriptionSliceCache[domain];
-    if (cached && cached.revision === subscriptionSliceRevision) return cached.snapshot;
+    var revision = subscriptionSliceRevisions[domain] || 0;
+    if (cached && cached.revision === revision) return cached.snapshot;
     var current = {};
     for (var i = 0; i < fields.length; i++) {
       current[fields[i]] = state[fields[i]];
     }
     var snapshot = subscriptionStateValue(current, cached && cached.snapshot);
-    subscriptionSliceCache[domain] = { revision: subscriptionSliceRevision, snapshot: snapshot };
+    subscriptionSliceCache[domain] = { revision: revision, snapshot: snapshot };
     return snapshot;
   }
+  // Multi-domain reads go through the same per-domain slice cache as
+  // single-domain reads; the combined object is frozen fresh per call. This
+  // function runs once per subscription (the warm-up below) — the
+  // per-notification snapshot is the closure's own lastSlices/lastResult
+  // identity cache, so no per-call memoization belongs here. (A keyed
+  // multi-domain cache stood here briefly and was removed: it is cold-path
+  // code, and the identity contract it pinned is already enforced by the
+  // closure and pinned in tauri_bridge_state_identity.test.mjs.)
   function subscriptionStateSlices(domains) {
     if (!Array.isArray(domains) || domains.length === 0) {
       throw new Error("Tauri bridge state.subscribeMany requires at least one domain");
@@ -1802,13 +1821,38 @@
   // re-render the root once per completed IPC. Keep their state ownership and
   // parallelism, but publish the initialized state as one coherent revision.
   var startupNotificationBatching = false;
-  function notify() {
+  function invalidatedSubscriptionDomains(changedDomains) {
+    var domains = changedDomains === undefined ? Object.keys(STATE_SLICE_FIELDS) : changedDomains;
+    if (!Array.isArray(domains) || domains.length === 0) {
+      throw new Error("Tauri bridge notify domains must be a non-empty array");
+    }
+    var invalidated = Object.create(null);
+    for (var i = 0; i < domains.length; i++) {
+      var domain = domains[i];
+      if (!STATE_SLICE_FIELDS[domain]) {
+        throw new Error("Unknown Tauri bridge notify domain: " + domain);
+      }
+      invalidated[domain] = true;
+    }
+    // chat busy is projected into sessions.sessionBusy. Any precise chat
+    // publication must therefore refresh the sessions slice as well.
+    if (invalidated.chat) invalidated.sessions = true;
+    return Object.keys(invalidated);
+  }
+  function notify(changedDomains) {
     if (suppressNotify || startupNotificationBatching) return;
-    // 会话列表「工作中」指示:active 取活动工作集 state.busy,其余取各自 buffer.busy
-    state.sessionBusy = {};
-    for (var id in sessionStates) state.sessionBusy[id] = !!sessionStates[id].busy;
-    if (state.activeSessionId) state.sessionBusy[state.activeSessionId] = !!state.busy;
-    subscriptionSliceRevision += 1;
+    var invalidatedDomains = invalidatedSubscriptionDomains(changedDomains);
+    if (invalidatedDomains.indexOf("sessions") >= 0) {
+      // 会话列表「工作中」指示:active 取活动工作集 state.busy,其余取各自 buffer.busy
+      state.sessionBusy = {};
+      for (var id in sessionStates) state.sessionBusy[id] = !!sessionStates[id].busy;
+      if (state.activeSessionId) state.sessionBusy[state.activeSessionId] = !!state.busy;
+    }
+    for (var domainIndex = 0; domainIndex < invalidatedDomains.length; domainIndex++) {
+      var invalidatedDomain = invalidatedDomains[domainIndex];
+      subscriptionSliceRevisions[invalidatedDomain] =
+        (subscriptionSliceRevisions[invalidatedDomain] || 0) + 1;
+    }
     // Membership and state are fixed when a round is queued. Subscribe or
     // unsubscribe during a callback affects only rounds queued afterwards.
     var members = subscribers.slice();
@@ -1831,6 +1875,9 @@
     } finally {
       notificationDispatching = false;
     }
+  }
+  function notifyDomains(domains) {
+    notify(domains);
   }
   function subscribe(snapshot, callback) {
     var subscriber = { snapshot: snapshot, callback: callback };
@@ -2473,7 +2520,7 @@
     set toolMeta(value) { toolMeta = value; },
   });
 
-  var monitorFeature = installBridgeFeature("monitor", { state: state, notify: notify, invoke: invoke, bt: bt, safeConsoleInfo: safeConsoleInfo, sessionStates: sessionStates });
+  var monitorFeature = installBridgeFeature("monitor", { state: state, notify: notify, notifyDomains: notifyDomains, invoke: invoke, bt: bt, safeConsoleInfo: safeConsoleInfo, sessionStates: sessionStates });
   var startMonitorPolling = monitorFeature.startMonitorPolling;
   var stopMonitorPolling = monitorFeature.stopMonitorPolling;
   var clearMonitorStats = monitorFeature.clearMonitorStats;
@@ -2783,7 +2830,8 @@
   var revealTeamRelayPreparedMaterial = teamRelayFeature.revealPreparedMaterial;
   var disconnectTeamRelay = teamRelayFeature.disconnect;
   // ── Init ─────────────────────────────────────────────────────────
-  async function init() {
+  async function init(options) {
+    if (options && options.uiDictionary) uiDictionary = options.uiDictionary;
     if (initPromise) return initPromise;
     initPromise = (async function () {
     startupMark("bridge:init_start");
@@ -3126,6 +3174,7 @@
       deny: computerUseFeature.deny,
       setEnabled: computerUseFeature.setEnabled,
       requestPermissions: computerUseFeature.requestPermissions,
+      permissionStatus: computerUseFeature.permissionStatus,
     },
     files: {
       pickFiles,
