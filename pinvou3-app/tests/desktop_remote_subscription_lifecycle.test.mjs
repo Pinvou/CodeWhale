@@ -28,7 +28,11 @@ function install(invoke = () => Promise.resolve({ status: 'idle' }), timers = { 
       return pending.promise;
     },
   });
-  return { feature, state, registrations, notifications: () => notifications,
+  const initialChannelNames = registrations.map(entry => entry.name);
+  assert.ok(initialChannelNames.length >= 2, 'the real bridge must register a nonempty multi-channel round');
+  assert.equal(new Set(initialChannelNames).size, initialChannelNames.length);
+  return { feature, state, registrations, initialChannelNames, channelCount: initialChannelNames.length,
+    notifications: () => notifications,
     logic: root.__PINVOU_REMOTE_CONTROL_STATE__ };
 }
 
@@ -51,14 +55,14 @@ test('synchronous stop during listen retires the registration round without stra
     f.feature.stop();
     stopNext = true;
     f.feature.subscribe();
-    const retired = f.registrations.slice(9);
-    assert.equal(retired.length, 1, 'a retired round must not register its remaining eight channels');
+    const retired = f.registrations.slice(f.channelCount);
+    assert.equal(retired.length, 1, 'a retired round must not register its remaining channels');
     await complete(retired);
     assert.equal(retired[0].releases, 1, 'its late cleanup belongs only to that retired round');
     f.feature.subscribe();
     f.feature.subscribe();
-    const current = f.registrations.slice(10);
-    assert.equal(current.length, 9, 'the next owner must register every channel exactly once');
+    const current = f.registrations.slice(f.channelCount + 1);
+    assert.equal(current.length, f.channelCount, 'the next owner must register every channel exactly once');
     await complete(current);
     const before = f.notifications();
     retired[0].callback({ payload: { status: 'idle' } });
@@ -66,7 +70,7 @@ test('synchronous stop during listen retires the registration round without stra
     current[0].callback({ payload: { status: 'idle' } });
     assert.equal(f.notifications(), before + 1, 'the replacement callback remains live');
     f.feature.stop();
-    assert.deepEqual(current.map(entry => entry.releases), Array(9).fill(1));
+    assert.deepEqual(current.map(entry => entry.releases), Array(f.channelCount).fill(1));
     assert.equal(retired[0].releases, 1);
   } finally {
     f.feature.stop();
@@ -88,22 +92,22 @@ test('synchronous listen retirement and replacement cannot let the old round reg
     f.feature.stop();
     replaceNext = true;
     f.feature.subscribe();
-    const retired = f.registrations[9];
-    const current = f.registrations.slice(10);
-    assert.equal(current.length, 9);
+    const retired = f.registrations[f.channelCount];
+    const current = f.registrations.slice(f.channelCount + 1);
+    assert.equal(current.length, f.channelCount);
     f.feature.subscribe();
-    assert.equal(f.registrations.length, 19, 'old continuation and explicit retry add no duplicate registration');
+    assert.equal(f.registrations.length, f.channelCount * 2 + 1, 'old continuation and explicit retry add no duplicate registration');
     await complete(current);
     await complete([retired]);
     assert.equal(retired.releases, 1);
-    assert.deepEqual(current.map(entry => entry.releases), Array(9).fill(0));
+    assert.deepEqual(current.map(entry => entry.releases), Array(f.channelCount).fill(0));
     const before = f.notifications();
     retired.callback({ payload: { status: 'idle' } });
     assert.equal(f.notifications(), before);
     current[0].callback({ payload: { status: 'idle' } });
     assert.equal(f.notifications(), before + 1);
     f.feature.stop();
-    assert.deepEqual(current.map(entry => entry.releases), Array(9).fill(1));
+    assert.deepEqual(current.map(entry => entry.releases), Array(f.channelCount).fill(1));
     assert.equal(retired.releases, 1);
   } finally {
     f.feature.stop();
@@ -111,44 +115,94 @@ test('synchronous listen retirement and replacement cannot let the old round reg
   }
 });
 
+for (const cutoffKind of ['first', 'middle', 'last']) {
+  for (const order of ['retired-first', 'replacement-first']) {
+    test(`listen stop at the ${cutoffKind} channel permits a later replacement (${order})`, async () => {
+      let armed = false;
+      let calls = 0;
+      let cutoff;
+      const f = install(undefined, undefined, () => {
+        if (armed && ++calls === cutoff) {
+          armed = false;
+          f.feature.stop();
+        }
+      });
+      try {
+        await complete(f.registrations.slice());
+        f.feature.stop();
+        cutoff = cutoffKind === 'first' ? 1
+          : cutoffKind === 'last' ? f.channelCount : Math.ceil(f.channelCount / 2);
+        armed = true;
+        f.feature.subscribe();
+        const retired = f.registrations.slice(f.channelCount);
+        assert.equal(retired.length, cutoff, 'the old loop must stop before attempting any later channel');
+        assert.deepEqual(retired.map(entry => entry.name), f.initialChannelNames.slice(0, cutoff));
+        // Start the replacement only after the old synchronous loop returned.
+        const replacementStart = f.registrations.length;
+        f.feature.subscribe();
+        f.feature.subscribe();
+        const current = f.registrations.slice(replacementStart);
+        assert.deepEqual(current.map(entry => entry.name), f.initialChannelNames);
+        const [early, late] = order === 'retired-first' ? [retired, current] : [current, retired];
+        await complete(early);
+        await complete(late);
+        assert.deepEqual(retired.map(entry => entry.releases), Array(cutoff).fill(1));
+        assert.deepEqual(current.map(entry => entry.releases), Array(f.channelCount).fill(0));
+        const before = f.notifications();
+        retired[0].callback({ payload: { status: 'idle' } });
+        assert.equal(f.notifications(), before, 'late old callbacks remain fenced');
+        current[0].callback({ payload: { status: 'idle' } });
+        assert.equal(f.notifications(), before + 1, 'the later owner remains usable');
+        f.feature.stop();
+        assert.deepEqual(current.map(entry => entry.releases), Array(f.channelCount).fill(1));
+        assert.deepEqual(retired.map(entry => entry.releases), Array(cutoff).fill(1));
+      } finally {
+        armed = false;
+        f.feature.stop();
+        await complete(f.registrations);
+      }
+    });
+  }
+}
+
 test('stop releases listeners that finish registration late exactly once', async () => {
-  const { feature, registrations } = install();
+  const { feature, registrations, channelCount } = install();
   feature.subscribe();
-  assert.equal(registrations.length, 9);
+  assert.equal(registrations.length, channelCount);
   feature.stop();
   feature.stop();
   await complete(registrations);
-  assert.deepEqual(registrations.map(entry => entry.releases), Array(9).fill(1));
+  assert.deepEqual(registrations.map(entry => entry.releases), Array(channelCount).fill(1));
   feature.stop();
-  assert.deepEqual(registrations.map(entry => entry.releases), Array(9).fill(1));
+  assert.deepEqual(registrations.map(entry => entry.releases), Array(channelCount).fill(1));
 });
 
 test('old late registrations cannot attach to or publish into the replacement lifecycle', async () => {
-  const { feature, registrations, notifications } = install();
+  const { feature, registrations, notifications, channelCount } = install();
   feature.subscribe();
   const old = registrations.slice();
   await complete(old.slice(0, 2));
   feature.stop();
   feature.subscribe();
-  const current = registrations.slice(9);
+  const current = registrations.slice(channelCount);
   feature.subscribe();
-  assert.equal(registrations.length, 18);
+  assert.equal(registrations.length, channelCount * 2);
   const before = notifications();
   old[0].callback({ payload: { status: 'idle' } });
   old[1].callback({ payload: { status: 'idle' } });
   assert.equal(notifications(), before);
   await complete(old.slice(2));
   await complete(current);
-  assert.deepEqual(old.map(entry => entry.releases), Array(9).fill(1));
-  assert.deepEqual(current.map(entry => entry.releases), Array(9).fill(0));
+  assert.deepEqual(old.map(entry => entry.releases), Array(channelCount).fill(1));
+  assert.deepEqual(current.map(entry => entry.releases), Array(channelCount).fill(0));
   current[0].callback({ payload: { status: 'idle' } });
   assert.equal(notifications(), before + 1);
   feature.stop();
-  assert.deepEqual(current.map(entry => entry.releases), Array(9).fill(1));
+  assert.deepEqual(current.map(entry => entry.releases), Array(channelCount).fill(1));
 });
 
 test('partial registration rejection does not retain successful late listeners after stop', async () => {
-  const { feature, registrations } = install();
+  const { feature, registrations, channelCount } = install();
   feature.subscribe();
   registrations[0].pending.reject(new Error('registration unavailable'));
   registrations[1].off = () => { registrations[1].releases++; throw new Error('already removed'); };
@@ -156,13 +210,13 @@ test('partial registration rejection does not retain successful late listeners a
   feature.stop();
   await complete(registrations.slice(4));
   assert.equal(registrations[0].releases, 0);
-  assert.deepEqual(registrations.slice(1).map(entry => entry.releases), Array(8).fill(1));
+  assert.deepEqual(registrations.slice(1).map(entry => entry.releases), Array(channelCount - 1).fill(1));
   feature.stop();
-  assert.deepEqual(registrations.slice(1).map(entry => entry.releases), Array(8).fill(1));
+  assert.deepEqual(registrations.slice(1).map(entry => entry.releases), Array(channelCount - 1).fill(1));
 });
 
 test('a cleanup callback can create a replacement without inheriting the retired channel attempts', async () => {
-  const { feature, registrations, notifications } = install();
+  const { feature, registrations, notifications, channelCount } = install();
   registrations[0].off = () => {
     registrations[0].releases++;
     feature.subscribe();
@@ -171,18 +225,18 @@ test('a cleanup callback can create a replacement without inheriting the retired
     const old = registrations.slice();
     await complete(old);
     feature.stop();
-    assert.equal(registrations.length, 18, 'replacement registers all nine retired channels');
-    const replacement = registrations.slice(9);
+    assert.equal(registrations.length, channelCount * 2, 'replacement registers all retired channels');
+    const replacement = registrations.slice(channelCount);
     await complete(replacement);
     const before = notifications();
     old[0].callback({ payload: { status: 'idle' } });
     assert.equal(notifications(), before);
     replacement[0].callback({ payload: { status: 'idle' } });
     assert.equal(notifications(), before + 1);
-    assert.deepEqual(old.map(entry => entry.releases), Array(9).fill(1));
+    assert.deepEqual(old.map(entry => entry.releases), Array(channelCount).fill(1));
     feature.stop();
-    assert.deepEqual(replacement.map(entry => entry.releases), Array(9).fill(1));
-    assert.deepEqual(old.map(entry => entry.releases), Array(9).fill(1));
+    assert.deepEqual(replacement.map(entry => entry.releases), Array(channelCount).fill(1));
+    assert.deepEqual(old.map(entry => entry.releases), Array(channelCount).fill(1));
   } finally {
     feature.stop();
   }
@@ -190,7 +244,7 @@ test('a cleanup callback can create a replacement without inheriting the retired
 
 test('old stop does not invalidate a new-owner proxy request started by a cleanup callback', async () => {
   const pending = Promise.withResolvers();
-  const { feature, registrations, logic } = install(command => {
+  const { feature, registrations, logic, channelCount } = install(command => {
     if (command === 'desktop_remote_proxy_history_list') return pending.promise;
     assert.equal(command, 'desktop_remote_controller_status');
     return Promise.resolve({ status: 'idle' });
@@ -213,7 +267,7 @@ test('old stop does not invalidate a new-owner proxy request started by a cleanu
     pending.resolve([]);
     await request;
     assert.equal(projections, 1, 'retired stop cannot invalidate the new owner list intent');
-    await complete(registrations.slice(9));
+    await complete(registrations.slice(channelCount));
   } finally {
     feature.stop();
   }
@@ -231,7 +285,7 @@ test('stop retires waiting timers before offs and preserves replacement capabili
     clearTimeout(id) { scheduled.delete(id); },
   };
   const requests = [];
-  const { feature, state, logic, registrations, notifications } = install((command, args) => {
+  const { feature, state, logic, registrations, notifications, channelCount } = install((command, args) => {
     if (command === 'desktop_remote_controller_status') return Promise.resolve({ status: 'idle' });
     if (command === 'desktop_remote_client_event') return Promise.resolve();
     assert.equal(command, 'desktop_remote_controller_capability_send');
@@ -298,7 +352,7 @@ test('stop retires waiting timers before offs and preserves replacement capabili
     if (cleanupFailure) throw cleanupFailure;
     assert.equal(retired[0].releases, 1);
     assert.ok(replacement, 'actual retained off created a new-owner capability request');
-    await complete(registrations.slice(9));
+    await complete(registrations.slice(channelCount));
     await flush();
     assert.deepEqual(requests.map(request => request.remoteRef), ['ref-old', 'ref-new']);
     assert.ok([...scheduled.values()].some(timer => timer.delay === 500),
