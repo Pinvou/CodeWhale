@@ -118,6 +118,13 @@ for (const method of Object.keys(api.device)) {
     `web device.${method} stub must reject, never fake success`,
   );
 }
+// 桌面/双端 device 切片键集交叉锁定（round-5 review P3）：桌面加第 6 个字段
+// 漏改 web 时切片缺键返回 undefined，静默漂移——把 5 键集合钉死。
+assert.deepEqual(
+  Object.keys(api.state.get('device')).sort(),
+  ['device', 'deviceError', 'deviceServices', 'deviceServicesError', 'externalModels'],
+  'web device slice must carry the exact 5-key contract',
+);
 assert.equal(api.sendMessage, undefined, 'Web flat command facade must stay private');
 
 snapshotReads = 0;

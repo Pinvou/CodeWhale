@@ -1,5 +1,5 @@
 // MegaCube 设备管理 bridge（src/platform/tauri/bridge/device.js）格式化与轮询契约。
-// 仿 monitor_bridge_format.test.mjs 的定位：锁 _fmt 的显示口径（GiB/MiB、
+// 仿 monitor_bridge_format.test.mjs 的定位：锁 _fmt 的显示口径（GB/MB、
 // KB-GB/s、°C/RPM/V/A/W、告警档位），防止单侧漂移。可本地化的词（接口类型、
 // 传感器 chip 名）在 bridge 里只给稳定 key + 原文，中文文案由视图 i18n 负责，
 // 这里额外锁「bridge 不新增中文字面量」。
@@ -135,16 +135,16 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   assert.equal(fmt.arch, 'aarch64');
   assert.equal(fmt.updatedAt, 1700000000000);
 
-  // 字节：1610612736 → '1.5 GiB'；768 MiB 以下保持 MiB；非法值回退 —。
-  assert.equal(fmt.disks[0].totalText, '1.5 GiB');
-  assert.equal(fmt.disks[0].availableText, '768.0 MiB');
+  // 字节：1610612736 → '1.5 GB'（GB/MB 标签 = 二进制换算，与 monitor/内嵌卡同口径）；非法值回退 —。
+  assert.equal(fmt.disks[0].totalText, '1.5 GB');
+  assert.equal(fmt.disks[0].availableText, '768.0 MB');
   // 用量百分比的 50% 路径必须钉死：公式算反（分母换成 available）或封顶丢失
   // 这类显示回归此前全绿通过（变异存活，第三轮评审 P2）。
   assert.equal(fmt.disks[0].usedPct, 50);
   // usageKnown：视图凭它决定画用量条还是"容量未知"占位，不再耦合 em-dash
   // 展示串（第四轮评审 P3）。
   assert.equal(fmt.disks[0].usageKnown, true);
-  assert.equal(fmt.disks[1].totalText, '3.0 GiB');
+  assert.equal(fmt.disks[1].totalText, '3.0 GB');
   assert.equal(fmt.disks[1].usedPct, 0);
   assert.equal(fmt.disks[2].totalText, '—');
   assert.equal(fmt.disks[2].usedPct, 0);
@@ -179,7 +179,7 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   assert.equal(fan.chipKey, 'acpi_fan');
   assert.equal(fan.entries[0].valueText, '1200 RPM');
   assert.equal(fan.entries[0].level, 'ok');
-  assert.equal(wifi.chipKey, 'mt7925');
+  assert.equal(wifi.chipKey, 'wifi');
   assert.equal(wifi.entries[0].valueText, '52°C');
   // 79.4 四舍五入后是 79，但告警档位必须用原始值判定（≥ max-10 前 52.3 未达 70）。
   assert.equal(wifi.entries[0].level, 'ok');
@@ -200,7 +200,7 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 
   // 网络：typeKey 白名单校验、累计与速率文本；非法/负速率按 0。
   assert.equal(fmt.network[0].typeKey, 'loopback');
-  assert.equal(fmt.network[0].rxTotalText, '1.5 GiB');
+  assert.equal(fmt.network[0].rxTotalText, '1.5 GB');
   assert.equal(fmt.network[0].rxRateText, '2.5 MB/s');
   assert.equal(fmt.network[0].txRateText, '0.0 KB/s');
   assert.equal(fmt.network[1].typeKey, 'wifi');
@@ -218,14 +218,14 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   assert.equal(fmt.processes.topCpu[0].cpuPctText, '250%');
   assert.equal(fmt.processes.topCpu[1].pid, 1234);
   assert.equal(fmt.processes.topCpu[1].cpuPctText, '92%');
-  assert.equal(fmt.processes.topCpu[1].memText, '1.5 GiB');
+  assert.equal(fmt.processes.topCpu[1].memText, '1.5 GB');
   assert.equal(fmt.processes.topMemory[0].name.length, 41);
   assert.ok(fmt.processes.topMemory[0].name.endsWith('…'));
 
   // GPU 扩展：驱动/CUDA 透传，显存占用走同一字节口径；无 GPU → null。
   assert.equal(fmt.gpuExt.driverVersion, '580.02');
   assert.equal(fmt.gpuExt.cudaVersion, '13.0');
-  assert.equal(fmt.gpuExt.computeProcesses[0].usedText, '1.5 GiB');
+  assert.equal(fmt.gpuExt.computeProcesses[0].usedText, '1.5 GB');
 
   env.setRespond(async () => ({ generated_at_ms: 1700000000001, os: {} }));
   await env.api.pollDevice();
@@ -296,7 +296,7 @@ assert.doesNotMatch(
   env.setRespond(async () => changed);
   await env.api.pollDevice();
   assert.notEqual(env.state.device, first);
-  assert.equal(env.state.device._fmt.disks[0].availableText, '764.0 MiB');
+  assert.equal(env.state.device._fmt.disks[0].availableText, '764.0 MB');
   assert.equal(env.notifyCount(), notifiesAfterFirst + 1);
 
   // 封顶：异常负的 available（损坏的盘报数）不得把占用推过 100。
@@ -314,6 +314,16 @@ assert.doesNotMatch(
   const nullEntry = env.state.device._fmt.sensors[0].entries.at(-1);
   assert.equal(nullEntry.valueText, '—');
   assert.equal(nullEntry.level, 'ok');
+
+  // critical/max 与 valueText 同口径取整后进抑制比较：视图按整数渲染阈值，
+  // 12.4→12.6 这类被舍入抹平的抖动不得击穿显示等价抑制（round-5 review P3）。
+  const frac = fixtureSnapshot();
+  frac.sensors[0].entries.push({ kind: 'temperature', name: 'frac-crit', value: 50, critical: 84.4, max: 74.6 });
+  env.setRespond(async () => frac);
+  await env.api.pollDevice();
+  const fracEntry = env.state.device._fmt.sensors[0].entries.at(-1);
+  assert.equal(fracEntry.critical, 84);
+  assert.equal(fracEntry.max, 75);
 }
 
 // ── 错误轮与 in-flight 守卫 ───────────────────────────────────────

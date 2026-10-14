@@ -8,6 +8,7 @@
  * - 模型商店行呈锁定态（由模型商店管理 + 禁用），外部模型行显示类别/状态徽标
  * - 外部模型「移除」的两段式确认：先登记（ollama 未登记行）再走守卫移除命令
  * - 故障排查快捷卡：device_doctor_prompt → 新建普通会话（create_session）→ chat 携带提示词
+ * - 商店库/外部模型读取失败面：常驻错误行 + 前往商店/重试恢复（第五轮评审）
  * 依赖:puppeteer-core + 系统 chromium（或 env CHROME 指定）。缺依赖 → exit 2（SKIP 行）。
  */
 const fs = require('fs');
@@ -195,9 +196,14 @@ function injectSource() {
           if (window.__DEVICE_MGR_TEST__.failSnapshot) return Promise.reject(new Error('snapshot down (smoke)'));
           return Promise.resolve(${JSON.stringify(deviceSnapshotFixture())});
         case 'get_device_services': return Promise.resolve([{ key: 'ollama', running: false, detail: 'probe timeout' }, { key: 'docker', running: true, detail: null }]);
-        case 'get_external_models': return Promise.resolve(${JSON.stringify(externalModelsFixture())});
+        case 'get_external_models':
+          if (window.__DEVICE_MGR_TEST__.failExternalModels) return Promise.reject(new Error('external models down (smoke)'));
+          if (window.__DEVICE_MGR_TEST__.emptyExternalModels) return Promise.resolve({ models: [], warnings: [] });
+          return Promise.resolve(${JSON.stringify(externalModelsFixture())});
         case 'model_store_availability': return Promise.resolve({ available: true, reason: null });
-        case 'model_store_library': return Promise.resolve({
+        case 'model_store_library':
+          if (window.__DEVICE_MGR_TEST__.failStoreLibrary) return Promise.reject(new Error('store library down (smoke)'));
+          return Promise.resolve({
           models: [
             {
               card_id: 'card-1', card_name: '驭光 14B', running: true, status: 'deployed',
@@ -456,13 +462,17 @@ async function clickTestId(page, testId) {
   const removeCalls = await page.evaluate(() => ({
     registered: window.__DEVICE_MGR_TEST__.callsOf('device_register_external_model')[0]?.args,
     removed: window.__DEVICE_MGR_TEST__.callsOf('device_remove_external_model')[0]?.args,
+    // ⑤-b 已把同一行接入品悟：移除必须回收接入的模型行（cleanLinkedRows 契约）。
+    // 整段删掉清理循环此前全测试照绿（round-5 review P3）。
+    deleteModelCalls: window.__DEVICE_MGR_TEST__.callsOf('delete_model').length,
   }));
   rec('⑥ ollama 行移除先登记再走守卫命令且带二次确认（无权重勾选框）',
     confirmDisabledAtFirstSight && armedState.intro && !armedState.weightsToggle
     && removeCalls.registered && removeCalls.registered.name === 'qwen3:30b' && removeCalls.registered.kind === 'ollama'
     && removeCalls.removed && removeCalls.removed.id === 'm-registered-new'
     && removeCalls.removed.confirmName === 'qwen3:30b'
-    && removeCalls.removed.deleteWeights === false,
+    && removeCalls.removed.deleteWeights === false
+    && removeCalls.deleteModelCalls === 1,
     JSON.stringify({ confirmDisabledAtFirstSight, armedState, removeCalls }));
 
   // ⑥-d 聚合 toast：后端警告与移除结果必须同屏（单槽 toast 曾只显示最后一条，
@@ -478,13 +488,36 @@ async function clickTestId(page, testId) {
 
   // ⑥-b 带权重的登记行：armed 态回显权重目录完整路径 + 显示删除勾选框 +
   //     勾选后出现不可撤销提示（删除后果必须让用户看见，评审 P2）。
-  await page.evaluate(() => {
+  // 点击与首见观察放在同一个 in-page Promise 里：React 离散事件同步渲染后
+  // 5ms 粒度轮询，确定性地抓到 400ms 死区内的禁用态——跨 CDP 往返的两次
+  // evaluate 会错过窗口（evaluate 返回时门禁可能已开）。
+  const checkboxGatedAtFirstSight = await page.evaluate(() => new Promise(resolve => {
     const rows = [...document.querySelectorAll('[data-testid="device-manager-external-row"]')];
     const target = rows.find(candidate => (candidate.innerText || '').includes('my-endpoint'));
     target?.querySelector('[data-testid="device-manager-remove"]')?.click();
-  });
+    let tries = 0;
+    const timer = setInterval(() => {
+      tries += 1;
+      const armed = [...document.querySelectorAll('[data-testid="device-manager-external-row"]')]
+        .find(candidate => (candidate.innerText || '').includes('my-endpoint'));
+      const toggle = armed?.querySelector('[data-testid="device-manager-delete-weights"]');
+      const confirm = armed?.querySelector('[data-testid="device-manager-remove-confirm"]');
+      if (toggle && confirm) {
+        clearInterval(timer);
+        resolve({ toggleDisabled: toggle.disabled, confirmDisabled: confirm.disabled });
+      } else if (tries > 400) {
+        clearInterval(timer);
+        resolve(null);
+      }
+    }, 5);
+  }));
+  // 勾选框受 400ms 死区门禁（round-5 P3）：先等门禁放开再点击。
   await page.waitForFunction(
-    () => !!document.querySelector('[data-testid="device-manager-remove-weights-path"]'),
+    () => {
+      const rows = [...document.querySelectorAll('[data-testid="device-manager-external-row"]')];
+      const target = rows.find(candidate => (candidate.innerText || '').includes('my-endpoint'));
+      return target?.querySelector('[data-testid="device-manager-delete-weights"]')?.disabled === false;
+    },
     { timeout: 4000 },
   );
   await page.evaluate(() => {
@@ -526,8 +559,9 @@ async function clickTestId(page, testId) {
     removeCallsStillOne: window.__DEVICE_MGR_TEST__.callsOf('device_remove_external_model').length === 1,
   }));
   rec('⑥-b 登记行 armed 态回显权重路径+勾选框+不可撤销提示',
-    armedEndpoint.pathEcho && armedEndpoint.weightsToggle && armedEndpoint.irreversibleShown,
-    JSON.stringify({ armedEndpoint }));
+    armedEndpoint.pathEcho && armedEndpoint.weightsToggle && armedEndpoint.irreversibleShown
+    && checkboxGatedAtFirstSight,
+    JSON.stringify({ armedEndpoint, checkboxGatedAtFirstSight }));
   rec('⑥-c 取消移除收起 armed 面板且不发起删除命令',
     cancelOutcome.armedClosed && cancelOutcome.removeCallsStillOne,
     JSON.stringify({ cancelOutcome }));
@@ -605,6 +639,49 @@ async function clickTestId(page, testId) {
     && failedSend.toast.includes('没有发出去') && failedSend.keptQuestion.includes('风扇一直响正常吗')
     && customQuestionDelivered,
     JSON.stringify({ customReady, failedSend, customQuestionDelivered }));
+
+  // ⑩-b 商店库读取失败：错误行 + 前往商店入口 + 重试恢复——不得降级成
+  // "还没有可管理的模型"假空态（round-5 review P3；离开再回来触发 remount
+  // 重新拉取）。
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.failStoreLibrary = true; });
+  await clickNavByLabel(page, '设备管理');
+  await page.waitForFunction(() => document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view') === 'monitor', { timeout: 8000 });
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-store-error"]'), { timeout: 8000 });
+  const storeErrorState = await page.evaluate(() => {
+    const row = document.querySelector('[data-testid="device-manager-store-error"]');
+    const buttons = [...(row?.querySelectorAll('button') || [])];
+    return {
+      text: row?.innerText || '',
+      retryButton: buttons.length >= 2,
+      gotoStore: buttons.some(button => (button.innerText || '').includes('前往模型商店')),
+    };
+  });
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.failStoreLibrary = false; });
+  await page.evaluate(() => document.querySelector('[data-testid="device-manager-store-error"] button')?.click());
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-store-row"]'), { timeout: 8000 });
+  rec('⑩-b 商店库读取失败出错误行+前往商店入口+重试恢复',
+    storeErrorState.text.includes('加载失败') && storeErrorState.retryButton && storeErrorState.gotoStore,
+    JSON.stringify(storeErrorState));
+
+  // ⑩-c 外部模型读取失败（商店行仍在、外部区块为空）：失败此前只剩 3.2s 的
+  // toast，外部区块需要自己的常驻错误行 + 重试（round-5 review P3）。先把外部
+  // 列表刷空（错误行只在区块为空时呈现——列表尚有旧行时旧行继续展示 + toast）。
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.emptyExternalModels = true; });
+  await clickTestId(page, 'device-manager-models-refresh');
+  await page.waitForFunction(() => ![...document.querySelectorAll('[data-testid="device-manager-external-row"]')].length, { timeout: 8000 });
+  await page.evaluate(() => {
+    window.__DEVICE_MGR_TEST__.emptyExternalModels = false;
+    window.__DEVICE_MGR_TEST__.failExternalModels = true;
+  });
+  await clickTestId(page, 'device-manager-models-refresh');
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-external-error"]'), { timeout: 8000 });
+  const externalErrorShown = await page.evaluate(() =>
+    (document.querySelector('[data-testid="device-manager-external-error"]')?.innerText || '').includes('刷新失败'));
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.failExternalModels = false; });
+  await page.evaluate(() => document.querySelector('[data-testid="device-manager-external-error"] button')?.click());
+  await page.waitForFunction(() => !document.querySelector('[data-testid="device-manager-external-error"]'), { timeout: 8000 });
+  rec('⑩-c 外部模型读取失败常驻错误行+重试恢复', externalErrorShown,
+    JSON.stringify({ externalErrorShown }));
 
   // ⑨ 故意注入了发送失败：transition 基建会把这次拒绝 console.error（预期内
   // 噪音），清空后再断言"无意外运行时报错"。

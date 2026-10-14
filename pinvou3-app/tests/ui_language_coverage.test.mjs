@@ -216,7 +216,7 @@ for (const language of ['zh', 'en', 'ja']) {
     23,
     `${language}.uiAuxChat must hold exactly the 23 pinned keys`,
   );
-    // All 98 uiDeviceMgr keys are pinned (PR #1661 评审跟进：三语**同时**删掉一个
+    // All 99 uiDeviceMgr keys are pinned (PR #1661 评审跟进：三语**同时**删掉一个
     // key 时 parity 检查全绿、视图渲染 undefined——uiAuxChat round-14 事故的同款
     // 洞；chipGpuTemp→chipMaxTemp 与评审新增键随本清单一起钉死。任何键面
     // 变更必须同提交更新此清单与计数)。
@@ -239,7 +239,7 @@ for (const language of ['zh', 'en', 'ja']) {
       'linked', 'link', 'linkDone', 'linkDisabledRemote', 'linkFailed',
       'remove', 'removeArmed', 'removeCancel', 'removeConfirmIntro', 'deleteWeights',
       'removeWeightsPath', 'removeIrreversible', 'linkDisabledUnreachable',
-      'doctorSendFailed', 'refreshFailed', 'linkRowStale', 'removeDone', 'removeFailed', 'warn',
+      'doctorSendFailed', 'doctorFailed', 'refreshFailed', 'linkRowStale', 'removeDone', 'removeFailed', 'warn',
       'ollamaOfflineHint', 'localSourceHint',
       'doctorPackages', 'doctorPackagesDesc', 'doctorDependencies', 'doctorDependenciesDesc',
       'doctorCuda', 'doctorCudaDesc', 'doctorServices', 'doctorServicesDesc',
@@ -250,8 +250,8 @@ for (const language of ['zh', 'en', 'ja']) {
     // Count guard：清单看不到新增——加键必须同步更新计数（见 uiAuxChat round-36 同款）。
     assert.equal(
       Object.keys(dict[language].uiDeviceMgr).length,
-      98,
-      `${language}.uiDeviceMgr must hold exactly the 98 pinned keys`,
+      99,
+      `${language}.uiDeviceMgr must hold exactly the 99 pinned keys`,
     );
     // Nav key pin: uiDeviceMgr pins cannot see the sibling nav key — deleting
     // `deviceMgr` from all three dicts would render an undefined entry label.
