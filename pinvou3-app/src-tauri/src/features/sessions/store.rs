@@ -443,6 +443,13 @@ impl SessionStore {
         self.load_with_context(id, || format!("load_session({id})"))
     }
 
+    /// Engine replacement must observe every already-admitted writer from
+    /// the retired incarnation, including its commit notification.
+    pub(crate) fn load_for_engine_spawn(&self, id: &str) -> Result<SavedSession> {
+        let _mutation = self.scheduled_mutation.lock();
+        self.load(id)
+    }
+
     fn load_with_context(
         &self,
         id: &str,
@@ -1278,7 +1285,26 @@ impl SessionStore {
         id: &str,
         state: &ChatEngineState,
     ) -> Result<SavedSession> {
+        self.persist_chat_engine_state_with_commit(id, state, || true, |_| {})?
+            .context("chat engine persistence was retired")
+    }
+
+    /// The notification runs in the same blocking transaction as the write.
+    /// Aborting its async waiter cannot abandon a durable commit's marker.
+    /// `admit` is checked under the mutation gate: queued writers from a
+    /// retired engine cannot run after its replacement reads its baseline.
+    /// Neither callback may re-enter a mutating SessionStore method.
+    pub(crate) fn persist_chat_engine_state_with_commit(
+        &self,
+        id: &str,
+        state: &ChatEngineState,
+        admit: impl FnOnce() -> bool,
+        committed: impl FnOnce(&SavedSession),
+    ) -> Result<Option<SavedSession>> {
         let _mutation = self.scheduled_mutation.lock();
+        if !admit() {
+            return Ok(None);
+        }
         if self.scheduled_profiles.read().contains_key(id) {
             bail!("Session '{id}' is a scheduled-run session");
         }
@@ -1300,7 +1326,8 @@ impl SessionStore {
             || format!("persist chat engine state for {id}"),
             "committed engine state save",
         )?;
-        Ok(session)
+        committed(&session);
+        Ok(Some(session))
     }
 
     /// Whether a durable chat record already exists for `id`. The headless
