@@ -58,6 +58,7 @@ import {
   appendNativeSystemItem,
   createNativeLane,
   hydrateNativeLane,
+  refreshNativeTurnTimeline,
   nativeModelServiceContext,
   projectNativeLane,
   removeLocalUserMessage,
@@ -979,6 +980,28 @@ export function CodexAcpView({
   // session 缓存在 lane Map 里（后台会话的 turn 也能继续推进，切回不丢流式内容）。
   const isNativeAgent = activeAgentId === 'pinvou';
   const nativeLanesRef = useRef(new Map());
+  const nativeTimelineMountedRef = useRef(true);
+  useEffect(() => {
+    nativeTimelineMountedRef.current = true;
+    const unsubscribe = bridge.sessions?.onSessionDeleted?.(id => {
+      nativeSessionIdsRef.current.delete(id);
+      nativeLanesRef.current.delete(id);
+    });
+    return () => {
+      nativeTimelineMountedRef.current = false;
+      unsubscribe?.();
+      nativeLanesRef.current.clear();
+    };
+  }, []);
+
+  async function refreshNativeAuthoritativeTimeline(sessionId, lane) {
+    const changed = await refreshNativeTurnTimeline(lane,
+      () => invoke('get_session_timeline', { sessionId }),
+      () => nativeTimelineMountedRef.current && nativeSessionIdsRef.current.has(sessionId)
+        && nativeLanesRef.current.get(sessionId) === lane,
+    );
+    if (changed && sessionId === activeIdRef.current) setNativeLaneTick(tick => tick + 1);
+  }
   const [nativeLaneTick, setNativeLaneTick] = useState(0);
   const nativeSessionIdsRef = useRef(new Set());
   useEffect(() => {
@@ -1796,13 +1819,18 @@ export function CodexAcpView({
       // 原生（品悟）会话：历史与 turn timeline 来自 SavedSession / timing_events，
       // 不走 ACP 的 timeline / pending / session_info 命令。
       if (nativeSessionIdsRef.current.has(id)) {
+        const lane = getNativeLane(id);
+        const laneEpoch = lane.timelineReadEpoch || 0;
         const [saved, sessionTimeline] = await Promise.all([
           invoke('load_session', { id, setActive: false }),
           invoke('get_session_timeline', { sessionId: id }).catch(() => []),
         ]);
         if (sessionLoadRequestRef.current !== requestId) return null;
-        const lane = getNativeLane(id);
-        hydrateNativeLane(lane, saved, sessionTimeline || []);
+        if (!nativeTimelineMountedRef.current || !nativeSessionIdsRef.current.has(id)
+            || nativeLanesRef.current.get(id) !== lane) return null;
+        // A newer live turn/read keeps its timeline while the original SavedSession hydrate proceeds.
+        hydrateNativeLane(lane, saved, (lane.timelineReadEpoch || 0) === laneEpoch
+          ? sessionTimeline || [] : lane.timeline);
         // lane 随组件卸载销毁，chat:user_input_required 不重发：经后端 pending
         // 登记还原挂起的确认卡（applyNativeChatEvent 按 toolCallId 幂等去重），
         // 并顺带恢复 turn 进行中的 busy 展示。
@@ -2571,6 +2599,7 @@ export function CodexAcpView({
         language: eventContext.language,
         modelServiceState: sessionId === activeIdRef.current ? eventContext.modelServiceState : null,
       });
+      if (name === 'chat:done') void refreshNativeAuthoritativeTimeline(sessionId, lane);
       if (name === 'chat:turn_started' || name === 'chat:done') {
         refreshSessions().catch(() => {});
       }
@@ -3047,8 +3076,9 @@ export function CodexAcpView({
         notifyChatRoundCommitted('code');
         if (voiceOperationId) bridge.voice.completeVoiceSubmission(voiceOperationId, targetId, true);
       } catch (sendError) {
-        removeLocalUserMessage(lane, optimisticId);
+        removeLocalUserMessage(lane, optimisticId, { preserveFailedTurn: true });
         setNativeLaneTick(tick => tick + 1);
+        void refreshNativeAuthoritativeTimeline(targetId, lane);
         throw sendError;
       }
       updateAttachments(targetId, current => current.filter(

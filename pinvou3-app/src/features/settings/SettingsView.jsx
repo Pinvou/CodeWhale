@@ -2122,7 +2122,6 @@ const formatMemoryTime = (item, copy) => {
         setPlatformDefaultBusy(modelId);
         try {
           await accountPlatformClient.selectCatalogModel(modelId);
-          setPlatformCatalog(current => ({ ...current, selected_model_id: modelId }));
           if (bridge.available && !await refreshModelAccessAfterAuthentication(bridge.models)) {
             throw new Error('model_configuration_refresh_unavailable');
           }
