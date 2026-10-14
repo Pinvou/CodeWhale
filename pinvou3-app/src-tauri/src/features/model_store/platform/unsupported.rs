@@ -78,15 +78,16 @@ pub fn start_download(
     nope()
 }
 
-pub fn start_deploy(
+pub async fn start_deploy(
     _service: &Arc<ModelStoreService>,
     _card_id: String,
     _profile_id: Option<String>,
+    _memory_confirmed: bool,
 ) -> Result<Value, String> {
     nope()
 }
 
-pub fn start_lifecycle(
+pub async fn start_lifecycle(
     _service: &Arc<ModelStoreService>,
     _card_id: String,
     _action: String,

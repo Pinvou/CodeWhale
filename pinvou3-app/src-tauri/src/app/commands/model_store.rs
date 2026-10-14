@@ -84,12 +84,19 @@ pub fn model_store_start_download(
 }
 
 #[tauri::command]
-pub fn model_store_start_deploy(
+pub async fn model_store_start_deploy(
     service: State<'_, Arc<ModelStoreService>>,
     card_id: String,
     profile_id: Option<String>,
+    memory_confirmed: Option<bool>,
 ) -> Result<Value, String> {
-    model_store::start_deploy(&service, card_id, profile_id)
+    model_store::start_deploy(
+        &service,
+        card_id,
+        profile_id,
+        memory_confirmed.unwrap_or(false),
+    )
+    .await
 }
 
 /// 启用 / 停用 / 卸载。
@@ -98,7 +105,7 @@ pub fn model_store_start_deploy(
 /// 参数缺席命中。「卸载」保留权重并把卡片退回「已下载」，「删除」才连权重一起清掉
 /// 并把卡片移出模型库。
 #[tauri::command]
-pub fn model_store_start_lifecycle(
+pub async fn model_store_start_lifecycle(
     service: State<'_, Arc<ModelStoreService>>,
     card_id: String,
     action: String,
@@ -112,6 +119,7 @@ pub fn model_store_start_lifecycle(
         purge_weights.unwrap_or(false),
         memory_confirmed.unwrap_or(false),
     )
+    .await
 }
 
 #[tauri::command]

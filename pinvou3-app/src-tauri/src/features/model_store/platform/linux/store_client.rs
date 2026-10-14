@@ -55,7 +55,9 @@ pub struct ResourceRequirements {
 impl ResourceRequirements {
     /// 当前启用准入应扣减的内存预算。统一内存优先，避免把同一块内存算两遍。
     pub fn admission_peak_mib(&self) -> Option<u64> {
-        self.unified_memory_peak_mib.or(self.host_ram_peak_mib)
+        self.unified_memory_peak_mib
+            .filter(|value| *value > 0)
+            .or(self.host_ram_peak_mib.filter(|value| *value > 0))
     }
 }
 
@@ -475,6 +477,16 @@ mod tests {
         // 旧卡没有运行内存档位时，必须显式返回未知；调用方据此请求用户确认，
         // 而不是把下载后的权重文件大小编造成内存需求。
         assert_eq!(ResourceRequirements::default().admission_peak_mib(), None);
+        assert_eq!(
+            ResourceRequirements {
+                unified_memory_peak_mib: Some(0),
+                host_ram_peak_mib: Some(0),
+                gpu_vram_peak_mib: Some(24 * 1024),
+            }
+            .admission_peak_mib(),
+            None,
+            "zero is unknown, not a zero-cost model"
+        );
     }
 
     #[test]

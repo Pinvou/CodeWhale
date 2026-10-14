@@ -160,15 +160,22 @@ pub struct RunningModelMemory {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MemoryAdmission {
     pub card_id: String,
-    pub total_bytes: u64,
-    pub available_bytes: u64,
-    pub safety_reserve_bytes: u64,
-    pub hard_reserve_bytes: u64,
+    /// None means system sampling failed, never zero bytes of physical RAM.
+    pub total_bytes: Option<u64>,
+    pub available_bytes: Option<u64>,
+    pub safety_reserve_bytes: Option<u64>,
+    pub hard_reserve_bytes: Option<u64>,
     pub candidate_peak_bytes: Option<u64>,
     pub projected_available_bytes: Option<u64>,
+    /// Conservative reserve for running models. RSS is not a unified-memory
+    /// accounting metric, so it must not be subtracted from a unified budget.
+    /// None means at least one workload has no usable budget.
+    pub running_growth_bytes: Option<u64>,
     pub running_models: Vec<RunningModelMemory>,
     /// green / caution / warning / unknown。unknown 是“卡片尚未给出可信峰值”，不是 0。
     pub level: String,
+    /// Stable reason for the translated UI; message remains for older clients.
+    pub reason: String,
     pub requires_confirmation: bool,
     /// 直接可显示给用户的一句话，不暴露 docker / /proc 等实现细节。
     pub message: String,
@@ -2571,43 +2578,71 @@ impl ModelManager {
 
     /// 启用前读取一次真实系统内存与当前受本模型商店管理的运行模型。
     ///
-    /// 第一台模型不做准入拦截——用户买设备最基本的预期是至少能跑起一个模型。已有
-    /// 模型时才按卡片实测峰值做风险分级；卡片尚未提供峰值时，明确要求确认而不是用
-    /// 权重体积瞎算。
+    /// 首个模型不因缺少峰值元数据被拦截；系统已处于低内存或已知预算超出余量时
+    /// 仍提示风险并允许用户确认继续。已有模型但预算不全时必须确认，不用权重
+    /// 体积冒充运行内存，也不拿进程树 RSS 抵扣统一内存预算。
     pub fn memory_admission(&self, card_id: &str) -> Result<MemoryAdmission, ModelManagerError> {
         let candidate = db::get_store_model(card_id)
             .map_err(|e| ModelManagerError::new(format!("读取模型记录失败：{e}")))?
             .ok_or_else(|| ModelManagerError::new("模型不存在，请先下载并部署"))?;
-        let ram = current_ram_snapshot().ok_or_else(|| {
-            ModelManagerError::new("暂时无法读取设备内存状态，请稍后重试后再启用模型")
-        })?;
-        let total_bytes = ram.total_kib.saturating_mul(1024);
-        let available_bytes = ram
-            .total_kib
-            .saturating_sub(ram.used_kib)
-            .saturating_mul(1024);
+        let ram =
+            current_ram_snapshot().filter(|ram| ram.total_kib > 0 && ram.used_kib <= ram.total_kib);
+        let total_bytes = ram.as_ref().map(|ram| ram.total_kib.saturating_mul(1024));
+        let available_bytes = ram.as_ref().map(|ram| {
+            ram.total_kib
+                .saturating_sub(ram.used_kib)
+                .saturating_mul(1024)
+        });
         const GIB: u64 = 1024 * 1024 * 1024;
-        let safety_reserve_bytes = (total_bytes / 100 * 15).max(12 * GIB);
-        let hard_reserve_bytes = (total_bytes / 100 * 10).max(6 * GIB);
+        let safety_reserve_bytes = total_bytes.map(|total| (total / 100 * 15).max(12 * GIB));
+        let hard_reserve_bytes = total_bytes.map(|total| (total / 100 * 10).max(6 * GIB));
 
-        // 首先纠正可能在上次异常退出后遗留的 running 标志，随后只统计我们自己记录
-        // 过 container_name 的模型；绝不凭镜像名把用户手工起的容器算进来。
+        // Reconcile store ownership, then sample container trees and native
+        // engines by executable fingerprint/model ID, never by a stale PID file.
         self.reconcile_running_status();
         let running_records = db::list_store_models()
             .map_err(|e| ModelManagerError::new(format!("读取运行模型失败：{e}")))?
             .into_iter()
             .filter(|model| model.running && model.card_id != candidate.card_id)
             .collect::<Vec<_>>();
+        let native_snapshot = super::native_process::discover();
+        let native_processes = &native_snapshot.processes;
         let roots = running_records
             .iter()
             .filter_map(|model| {
-                let name = model.container_name.as_deref()?;
-                docker_container_pid(name).map(|pid| (model.card_id.clone(), pid))
+                let pid = if let Some(name) = model.container_name.as_deref() {
+                    docker_container_pid(name)
+                } else {
+                    let install = &model.scripts_content.get("install_engine")?.content;
+                    let (_, fingerprint) = native_tachyon_identity(
+                        install,
+                        model
+                            .assets_content
+                            .get("common.sh")
+                            .map(|blob| blob.content.as_str()),
+                        model.engine_version.as_deref(),
+                    )?;
+                    super::native_process::matching_pid(
+                        native_processes,
+                        &fingerprint,
+                        model.endpoint_model.as_deref(),
+                        model
+                            .endpoint_url
+                            .as_deref()
+                            .and_then(|url| reqwest::Url::parse(url).ok())
+                            .and_then(|url| url.port_or_known_default()),
+                    )
+                };
+                pid.map(|pid| (model.card_id.clone(), pid))
             })
             .collect::<Vec<_>>();
         let mut sampler = ProcessResourceSampler::default();
-        let sampled = sampler.sample_trees(&roots.iter().map(|(_, pid)| *pid).collect::<Vec<_>>());
-        let running_models = running_records
+        let mut sample_roots = roots.iter().map(|(_, pid)| *pid).collect::<Vec<_>>();
+        sample_roots.extend(native_processes.iter().map(|process| process.pid));
+        sample_roots.sort_unstable();
+        sample_roots.dedup();
+        let sampled = sampler.sample_trees(&sample_roots);
+        let mut running_models = running_records
             .iter()
             .map(|model| {
                 let pid = roots
@@ -2617,60 +2652,72 @@ impl ModelManager {
                 RunningModelMemory {
                     card_id: model.card_id.clone(),
                     card_name: model.card_name.clone(),
-                    rss_bytes: pid.and_then(|pid| sampled.get(&pid).map(|usage| usage.rss_bytes)),
+                    rss_bytes: pid.and_then(|pid| {
+                        sampled
+                            .get(&pid)
+                            .filter(|usage| usage.process_count > 0 && usage.rss_bytes > 0)
+                            .map(|usage| usage.rss_bytes)
+                    }),
                 }
             })
             .collect::<Vec<_>>();
+        // External native inference is still a competing workload, not a reason
+        // to report "first model". Do not adopt it into the model-store database.
+        for process in native_processes {
+            if roots.iter().any(|(_, pid)| *pid == process.pid) {
+                continue;
+            }
+            // A matching model name alone is NOT identity: another instance
+            // may use the same weights/name on a different port. Include every
+            // unmatched process conservatively instead of hiding its load.
+            running_models.push(RunningModelMemory {
+                card_id: format!("native-{}-{}", process.pid, process.start_ticks),
+                card_name: process
+                    .model_id
+                    .clone()
+                    .unwrap_or_else(|| "tachyon-serve".into()),
+                rss_bytes: sampled
+                    .get(&process.pid)
+                    .filter(|usage| usage.process_count > 0 && usage.rss_bytes > 0)
+                    .map(|usage| usage.rss_bytes),
+            });
+        }
         let candidate_peak_bytes = candidate
             .resource_requirements
             .admission_peak_mib()
             .map(|mib| mib.saturating_mul(1024 * 1024));
-        let projected_available_bytes =
-            candidate_peak_bytes.map(|peak| available_bytes.saturating_sub(peak));
-
-        let (level, requires_confirmation, message) = if running_models.is_empty() {
-            (
-                "green".to_string(),
-                false,
-                "当前没有其他模型在运行，可以启用此模型。".to_string(),
-            )
-        } else if let Some(projected) = projected_available_bytes {
-            if projected < hard_reserve_bytes {
-                (
-                    "warning".to_string(),
-                    true,
-                    "启用后可用内存将低于安全下限，可能导致设备卡顿或服务退出。建议先停用其他模型。"
-                        .to_string(),
-                )
-            } else if projected < safety_reserve_bytes {
-                (
-                    "caution".to_string(),
-                    true,
-                    "启用后可用内存余量较小。建议先停用其他模型；如继续，请留意设备响应。"
-                        .to_string(),
-                )
-            } else {
-                (
-                    "green".to_string(),
-                    false,
-                    "当前内存余量充足，可以启用此模型。".to_string(),
-                )
-            }
-        } else {
-            let names = running_models
-                .iter()
-                .map(|model| format!("「{}」", model.card_name))
-                .collect::<Vec<_>>()
-                .join("、");
-            (
-                "unknown".to_string(),
-                true,
-                format!(
-                    "当前{}正在运行，但待启用模型尚未提供可信的运行内存档位，无法可靠预测能否同时运行。建议先停用{}；如仍继续，服务可能会启动失败。",
-                    names, names
-                ),
-            )
+        let running_growth_bytes = running_records
+            .iter()
+            .try_fold(0u64, |sum, record| {
+                let peak = record
+                    .resource_requirements
+                    .admission_peak_mib()?
+                    .checked_mul(1024 * 1024)?;
+                // RSS can double-count shared pages and omit GPU allocations.
+                // Until a comparable, isolated accounting source is available,
+                // reserve the whole budget rather than underestimating growth.
+                sum.checked_add(peak)
+            })
+            .filter(|_| native_snapshot.complete && running_models.len() == running_records.len());
+        let decision = match (available_bytes, safety_reserve_bytes, hard_reserve_bytes) {
+            (Some(available), Some(safety), Some(hard)) => super::memory_policy::evaluate(
+                available,
+                safety,
+                hard,
+                candidate_peak_bytes,
+                running_models.len(),
+                running_growth_bytes,
+            ),
+            _ => super::memory_policy::Decision::sampling_unavailable(),
         };
+        let message = match decision.reason {
+            "measurement_unavailable" => "暂时无法读取系统内存，不能评估本次启动的风险。建议稍后重试；如仍要继续，请明确确认。",
+            "insufficient" => "当前或预计内存低于安全下限，可能导致设备卡顿或服务退出。建议先停用其他模型。",
+            "limited" => "启用后内存余量较小，已为正在运行的模型预留后续增长空间。建议先停用其他模型。",
+            "sufficient" => "按当前模型配置和内存预算，设备余量充足。",
+            "first_unverified" => "允许尝试启用首个模型；尚无可信峰值预算，不能保证所有负载下均有足够内存。",
+            _ => "模型峰值预算或当前占用数据不完整，无法可靠预测多模型能否同时运行。建议先停用其他模型。",
+        }.to_string();
 
         Ok(MemoryAdmission {
             card_id: candidate.card_id,
@@ -2679,10 +2726,12 @@ impl ModelManager {
             safety_reserve_bytes,
             hard_reserve_bytes,
             candidate_peak_bytes,
-            projected_available_bytes,
+            projected_available_bytes: decision.projected_available,
+            running_growth_bytes,
             running_models,
-            level,
-            requires_confirmation,
+            level: decision.level.into(),
+            reason: decision.reason.into(),
+            requires_confirmation: decision.confirmation,
             message,
         })
     }

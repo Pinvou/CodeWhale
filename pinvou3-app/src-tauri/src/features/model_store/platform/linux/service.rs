@@ -490,37 +490,45 @@ where
     // 留一份给结束后回查：control 本身要 move 进 job
     let control_probe = control.clone();
     let rid_for_job = run_id.clone();
-    std::thread::spawn(move || {
-        let mut guard = OpCleanup {
-            registry_owner: svc,
-            card,
-            run_id: rid,
-            log: Arc::clone(&log_for_thread),
-            control: control_probe,
-            outcome: None,
-        };
-        // catch_unwind 只负责把 panic 变成一句人话，"一定会收尾"是守卫保证的。
-        // AssertUnwindSafe：job 只被调用一次，panic 之后我们不再碰它捕获的任何
-        // 状态，唯一跨过边界的 RunLog / ActiveCardOps 都在锁后面（parking_lot
-        // 的锁不会因为持锁线程 panic 而中毒，拿到的是已写完的一致状态）。
-        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            job(&log_for_thread, control, &rid_for_job)
-        }));
-        guard.outcome = Some(match caught {
-            Ok(outcome) => outcome,
-            Err(payload) => {
-                let detail = panic_text(payload.as_ref());
-                let line = format!("内部错误：{}任务线程崩溃（{detail}）", op.label);
-                // 崩溃原因也塞进日志正文：调用方长轮询到的是日志，让它跟 error
-                // 字段对得上，用户不用去翻应用的 stderr。
-                log_for_thread.push(&line);
-                Err(format!(
-                    "{line}。这是模型商店自身的缺陷，请把日志反馈给我们；\
+    // Construct before spawning: if the OS cannot allocate a worker, dropping
+    // the closure must still release the card slot and finish the run log.
+    let guard = OpCleanup {
+        registry_owner: svc,
+        card,
+        run_id: rid,
+        log: Arc::clone(&log_for_thread),
+        control: control_probe,
+        outcome: Some(Err("无法创建模型操作线程，请稍后重试。".into())),
+    };
+    std::thread::Builder::new()
+        .name("model-store-job".into())
+        .spawn(move || {
+            // Move the complete Drop guard, not just the outcome field through
+            // disjoint closure capture. Cleanup belongs to this worker's scope.
+            let mut guard = guard;
+            // catch_unwind 只负责把 panic 变成一句人话，"一定会收尾"是守卫保证的。
+            // AssertUnwindSafe：job 只被调用一次，panic 之后我们不再碰它捕获的任何
+            // 状态，唯一跨过边界的 RunLog / ActiveCardOps 都在锁后面（parking_lot
+            // 的锁不会因为持锁线程 panic 而中毒，拿到的是已写完的一致状态）。
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                job(&log_for_thread, control, &rid_for_job)
+            }));
+            guard.outcome = Some(match caught {
+                Ok(outcome) => outcome,
+                Err(payload) => {
+                    let detail = panic_text(payload.as_ref());
+                    let line = format!("内部错误：{}任务线程崩溃（{detail}）", op.label);
+                    // 崩溃原因也塞进日志正文：调用方长轮询到的是日志，让它跟 error
+                    // 字段对得上，用户不用去翻应用的 stderr。
+                    log_for_thread.push(&line);
+                    Err(format!(
+                        "{line}。这是模型商店自身的缺陷，请把日志反馈给我们；\
                      该模型现在可以重新操作。"
-                ))
-            }
-        });
-    });
+                    ))
+                }
+            });
+        })
+        .map_err(|error| format!("无法创建模型操作线程，请稍后重试：{error}"))?;
 
     Ok(json!({ "run_id": run_id }))
 }
@@ -698,17 +706,36 @@ pub fn start_download(service: &Arc<ModelStoreService>, card_id: String) -> Resu
     )
 }
 
-pub fn start_deploy(
+pub async fn start_deploy(
     service: &Arc<ModelStoreService>,
     card_id: String,
     profile_id: Option<String>,
+    memory_confirmed: bool,
 ) -> Result<Value, String> {
+    let service = Arc::clone(service);
+    tokio::task::spawn_blocking(move || {
+        start_deploy_checked(&service, card_id, profile_id, memory_confirmed)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn start_deploy_checked(
+    service: &Arc<ModelStoreService>,
+    card_id: String,
+    profile_id: Option<String>,
+    memory_confirmed: bool,
+) -> Result<Value, String> {
+    // Some deployment scripts start the runtime themselves. They must use the
+    // same admission/startup slot as enable; otherwise deploy bypasses the gate.
+    let startup_guard = prepare_model_start(&card_id, memory_confirmed)?;
     let card = card_id.clone();
     spawn_op(
         service,
         &card_id,
         OP_DEPLOY,
         move |log, control, _run_id| {
+            let _startup_guard = startup_guard;
             let log_cb = Arc::clone(log);
             let mut cb = move |line: &str| log_cb.push(line);
             ModelManager::new(None, None)
@@ -719,11 +746,43 @@ pub fn start_deploy(
     )
 }
 
+fn prepare_model_start(
+    card_id: &str,
+    memory_confirmed: bool,
+) -> Result<super::runtime_guard::StartupGuard, String> {
+    let guard = super::runtime_guard::StartupGuard::acquire()?;
+    let admission = ModelManager::new(None, None)
+        .memory_admission(card_id)
+        .map_err(|e| e.to_string())?;
+    if admission.requires_confirmation && !memory_confirmed {
+        return Err(format!(
+            "启动前需要确认内存风险：{} 请重新发起操作，确认后继续。",
+            admission.message
+        ));
+    }
+    Ok(guard)
+}
+
 /// 启用 / 停用 / 卸载三个动作形状一样，只差调哪个方法，合并成一个入口。
 ///
 /// `purge_weights` 只对卸载有意义，而且**缺省是保留**——不可逆的那一侧绝不能靠
 /// "没写"命中。
-pub fn start_lifecycle(
+pub async fn start_lifecycle(
+    service: &Arc<ModelStoreService>,
+    card_id: String,
+    action: String,
+    purge_weights: bool,
+    memory_confirmed: bool,
+) -> Result<Value, String> {
+    let service = Arc::clone(service);
+    tokio::task::spawn_blocking(move || {
+        start_lifecycle_checked(&service, card_id, action, purge_weights, memory_confirmed)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn start_lifecycle_checked(
     service: &Arc<ModelStoreService>,
     card_id: String,
     action: String,
@@ -735,6 +794,14 @@ pub fn start_lifecycle(
         "stop" => OP_STOP,
         "uninstall" => OP_UNINSTALL,
         other => return Err(format!("未知操作：{other}")),
+    };
+
+    // Acquire before reading memory/running state, and carry into the job. A
+    // per-card mutex cannot stop two different cards both observing zero models.
+    let startup_guard = if op == OP_ENABLE {
+        Some(prepare_model_start(&card_id, memory_confirmed)?)
+    } else {
+        None
     };
 
     // 正在跑的模型不许直接卸载，先停用。
@@ -764,20 +831,9 @@ pub fn start_lifecycle(
         }
     }
 
-    if op == OP_ENABLE {
-        let admission = ModelManager::new(None, None)
-            .memory_admission(&card_id)
-            .map_err(|e| e.to_string())?;
-        if admission.requires_confirmation && !memory_confirmed {
-            return Err(format!(
-                "启用前需要确认内存风险：{} 请重新点击“启用”，确认后继续。",
-                admission.message
-            ));
-        }
-    }
-
     let card = card_id.clone();
     spawn_op(service, &card_id, op, move |log, control, _run_id| {
+        let _startup_guard = startup_guard;
         let log_cb = Arc::clone(log);
         let mut cb = move |line: &str| log_cb.push(line);
         let mgr = ModelManager::new(None, None);
@@ -1086,6 +1142,34 @@ pub fn force_remove(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropping_an_unstarted_worker_releases_its_card_and_finishes_the_log() {
+        let service = Arc::new(ModelStoreService::new());
+        service
+            .active
+            .try_begin("card", OP_ENABLE, Some("run"))
+            .unwrap();
+        let log = Arc::new(RunLog::new_memory_only());
+        let control = service.registry.register("run");
+        let guard = OpCleanup {
+            registry_owner: Arc::clone(&service),
+            card: "card".into(),
+            run_id: "run".into(),
+            log: Arc::clone(&log),
+            control,
+            outcome: Some(Err("worker unavailable".into())),
+        };
+        // Builder::spawn drops its captured closure when thread creation fails.
+        // Simulate that path without exhausting the host's thread quota.
+        let worker = move || {
+            let _guard = guard;
+        };
+        drop(worker);
+        assert!(service.active.run_for_card("card").is_none());
+        assert!(log.finished_at.lock().is_some());
+        assert!(log.outcome.lock().as_ref().unwrap().is_err());
+    }
 
     #[test]
     fn docker_layer_refreshes_are_recognized_without_hiding_real_messages() {

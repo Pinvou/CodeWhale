@@ -105,10 +105,11 @@ function startDownload(cardId) {
  * 发起部署。
  * @param {string} cardId - 卡片 ID。
  * @param {string|null} [profileId] - 部署方案 ID；单方案卡片传 null。
+ * @param {boolean} [memoryConfirmed] - 用户是否明确确认了本次操作的内存风险。
  * @returns {Promise<{run_id:string}>} 运行句柄。
  */
-function startDeploy(cardId, profileId = null) {
-  return invokeTauri('model_store_start_deploy', { cardId, profileId });
+function startDeploy(cardId, profileId = null, memoryConfirmed = false) {
+  return invokeTauri('model_store_start_deploy', { cardId, profileId, memoryConfirmed: memoryConfirmed === true });
 }
 
 /**
@@ -120,7 +121,7 @@ function startEnable(cardId, memoryConfirmed = false) {
   return invokeTauri('model_store_start_lifecycle', {
     cardId,
     action: 'enable',
-    memoryConfirmed: !!memoryConfirmed,
+    memoryConfirmed: memoryConfirmed === true,
   });
 }
 

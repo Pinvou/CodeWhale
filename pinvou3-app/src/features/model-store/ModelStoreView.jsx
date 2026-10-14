@@ -64,6 +64,7 @@ import { StoreCardDialog } from './StoreCardDialog.jsx';
 import { StorageSettingsDialog } from './StorageSettingsDialog.jsx';
 import { EngineManagementDialog } from './EngineManagementDialog.jsx';
 import { LocalResourcesDialog } from './LocalResourcesDialog.jsx';
+import { MemoryAdmissionDialog } from './MemoryAdmissionDialog.jsx';
 import {
   BTN_NEUTRAL,
   HOVER_SURFACE,
@@ -428,16 +429,29 @@ const ModelStoreView = ({ theme, t, bs }) => {
     [loadAll, showToast]
   );
 
-  const deployWithProfile = useCallback(
-    (record, profileId) => runLifecycle({
+  const executeDeploy = useCallback(
+    (record, profileId, memoryConfirmed = false) => runLifecycle({
       record,
       kind: 'deploy',
       title: copy.taskDeploy(record.card_name),
-      start: () => startDeploy(record.card_id, profileId),
+      start: () => startDeploy(record.card_id, profileId, memoryConfirmed),
       doneText: copy.deployDone(record.card_name),
     }),
     [copy, runLifecycle]
   );
+
+  const deployWithProfile = useCallback(async (record, profileId) => {
+    try {
+      const admission = await fetchMemoryAdmission(record.card_id);
+      if (admission?.requires_confirmation) {
+        setMemoryConfirm({ record, admission, action: 'deploy', profileId });
+        return;
+      }
+      await executeDeploy(record, profileId, false);
+    } catch (error) {
+      showToast(copy.memoryCheckFailed(String(error?.message || error)));
+    }
+  }, [copy, executeDeploy, showToast]);
 
   const handleDeploy = useCallback(
     (record) => {
@@ -472,15 +486,18 @@ const ModelStoreView = ({ theme, t, bs }) => {
       }
       await startEnabledModel(record, false);
     } catch (error) {
-      showToast(`无法检查启用条件：${String(error?.message || error)}`);
+      showToast(copy.memoryCheckFailed(String(error?.message || error)));
     }
-  }, [showToast, startEnabledModel]);
+  }, [copy, showToast, startEnabledModel]);
 
   const confirmMemoryEnable = useCallback(async () => {
     const pending = memoryConfirm;
     setMemoryConfirm(null);
-    if (pending?.record) await startEnabledModel(pending.record, true);
-  }, [memoryConfirm, startEnabledModel]);
+    if (pending?.record) {
+      if (pending.action === 'deploy') await executeDeploy(pending.record, pending.profileId, true);
+      else await startEnabledModel(pending.record, true);
+    }
+  }, [executeDeploy, memoryConfirm, startEnabledModel]);
 
   const handleStop = useCallback(
     (record) => runLifecycle({
@@ -928,41 +945,8 @@ const ModelStoreView = ({ theme, t, bs }) => {
         theme={theme}
       />
 
-      <MsDialog
-        open={!!memoryConfirm}
-        onClose={() => setMemoryConfirm(null)}
-        theme={theme}
-        labelledBy="model-store-memory-confirm-title"
-        testId="model-store-memory-confirm"
-      >
-        {memoryConfirm ? (
-          <>
-            <MsDialogTitle id="model-store-memory-confirm-title">确认启用模型</MsDialogTitle>
-            <p className={`text-[13px] leading-6 ${TEXT_PRIMARY}`}>{memoryConfirm.admission.message}</p>
-            <div className={`mt-4 rounded-[14px] bg-[#F0F4F9] p-3 text-[12px] leading-6 dark:bg-[#282A2C] ${TEXT_SECONDARY}`}>
-              <div>设备内存：{formatBytes(memoryConfirm.admission.total_bytes || 0)}</div>
-              <div>当前可用：{formatBytes(memoryConfirm.admission.available_bytes || 0)}</div>
-              {memoryConfirm.admission.candidate_peak_bytes == null ? (
-                <div>待启用模型：卡片尚未提供可信的峰值内存档位</div>
-              ) : (
-                <>
-                  <div>待启用模型峰值：约 {formatBytes(memoryConfirm.admission.candidate_peak_bytes)}</div>
-                  <div>启用后预计可用：约 {formatBytes(memoryConfirm.admission.projected_available_bytes || 0)}</div>
-                </>
-              )}
-              {(memoryConfirm.admission.running_models || []).map((model) => (
-                <div key={model.card_id}>
-                  正在运行：{model.card_name}（当前占用 {model.rss_bytes == null ? '暂无法读取' : formatBytes(model.rss_bytes)}）
-                </div>
-              ))}
-            </div>
-            <div className="mt-5 flex justify-end gap-2">
-              <MsButton tone="ghost" onClick={() => setMemoryConfirm(null)}>暂不启用</MsButton>
-              <MsButton tone="danger" onClick={confirmMemoryEnable}>仍要启用</MsButton>
-            </div>
-          </>
-        ) : null}
-      </MsDialog>
+      <MemoryAdmissionDialog pending={memoryConfirm} onClose={() => setMemoryConfirm(null)}
+        onConfirm={confirmMemoryEnable} copy={copy} theme={theme} />
 
       <StoreCardDialog
         card={detailCard}
