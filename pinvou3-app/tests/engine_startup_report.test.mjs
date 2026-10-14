@@ -11,7 +11,7 @@ import {
   summarizeEngineStartup,
 } from '../scripts/engine-startup-report.mjs';
 
-function turnEvents(turn, kind, total, start = 1_000) {
+function turnEvents(turn, kind, total, start = 1_000, { includeTurnStarted = true } = {}) {
   return [
     { event: 'user_start', turn_id: turn, timestamp: start },
     {
@@ -20,6 +20,7 @@ function turnEvents(turn, kind, total, start = 1_000) {
       timestamp: start + total + 100,
       engine_startup: {
         engine_ready_timestamp: start + total + 5,
+        ...(includeTurnStarted ? { engine_turn_started_timestamp: start + total + 15 } : {}),
         first_output_timestamp: start + total + 45,
         engine_acquire: {
           kind,
@@ -42,12 +43,17 @@ test('collects fixed startup phases without exposing turn identifiers', async ()
       turnEvents('secret-turn', 'cold', 420),
       '{broken json',
       turnEvents('warm-turn', 'reused', 20, 2_000),
+      turnEvents('legacy-turn', 'reused', 30, 3_000, { includeTurnStarted: false }),
     ].join('\n'));
 
     const samples = await collectEngineStartupSamples(root);
-    assert.deepEqual(samples.map(sample => sample.kind), ['cold', 'reused']);
+    assert.deepEqual(samples.map(sample => sample.kind), ['cold', 'reused', 'reused']);
     assert.equal(samples[0].send_to_ready_ms, 425);
     assert.equal(samples[0].ready_to_first_output_ms, 40);
+    assert.equal(samples[0].ready_to_turn_started_ms, 10);
+    assert.equal(samples[0].turn_started_to_first_output_ms, 30);
+    assert.equal(samples[2].ready_to_turn_started_ms, null);
+    assert.equal(samples[2].turn_started_to_first_output_ms, null);
     assert.equal(JSON.stringify(samples).includes('secret-turn'), false);
     assert.equal(JSON.stringify(samples).includes('private-session-id'), false);
   } finally {
@@ -61,6 +67,8 @@ test('requires enough cold and reused samples before confirming an issue', () =>
     total_ms,
     send_to_ready_ms: total_ms,
     ready_to_first_output_ms: 50,
+    ready_to_turn_started_ms: 10,
+    turn_started_to_first_output_ms: 40,
     send_to_first_output_ms: total_ms + 50,
     stages: {},
   });
@@ -107,6 +115,8 @@ test('computes max without spreading an unbounded sample array', () => {
     total_ms: index,
     send_to_ready_ms: index,
     ready_to_first_output_ms: 1,
+    ready_to_turn_started_ms: 0,
+    turn_started_to_first_output_ms: 1,
     send_to_first_output_ms: index + 1,
     stages: {},
   }));
