@@ -233,26 +233,9 @@ fn quarantine_broken_config(cfg_file: &Path, reason: &str) {
     }
 }
 
-pub fn load_settings() -> Settings {
-    let mut settings = Settings::default();
-    let cfg_file = config_file();
-    match fs::read_to_string(&cfg_file) {
-        // 整体反序列化。老配置文件里缺掉的字段靠结构体上的 `#[serde(default)]`
-        // （见 `Settings` 定义）取 Default 给的值，而不是各类型的零值——注意这
-        // **不是**逐字段合并：任一字段类型不符，整个文件就废掉，走下面的留存分支。
-        Ok(text) => match serde_json::from_str::<Settings>(&text) {
-            Ok(parsed) => settings = parsed,
-            Err(e) => quarantine_broken_config(&cfg_file, &format!("解析失败（{e}）")),
-        },
-        // 没有配置文件是全新安装的正常状态，不出声。
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        // 文件在、却读不出来（权限、磁盘错误）：**不**改名——内容未必是坏的，而且
-        // 连读都读不了多半也 rename 不了。但同样必须出声，否则又是一次无声重置。
-        Err(e) => eprintln!(
-            "[model-store] 配置文件 {} 读取失败（{e}），本次回退默认设置",
-            cfg_file.display()
-        ),
-    }
+/// 回填派生默认值（staging_dir / models_dir / 商店地址迁移），读取出与默认回退
+/// 两条路径共用。
+fn apply_settings_defaults(mut settings: Settings) -> Settings {
     if settings.staging_dir.trim().is_empty() {
         settings.staging_dir = data_dir().join("staging").to_string_lossy().to_string();
     }
@@ -266,6 +249,46 @@ pub fn load_settings() -> Settings {
         settings.store_url = Settings::default().store_url;
     }
     settings
+}
+
+/// 读取设置（可失败版）：配置文件存在但读不出/解析坏时 `Err`（隔离改名、日志等
+/// 副作用照旧发生），文件缺失（全新安装的正常态）回 `Ok(默认)`。**破坏性消费方
+/// 必须走本函数 fail-closed**——设备移除的商店权重根静默回退默认值，会让自定义
+/// `models_dir` 的保护恰在配置读取失败的一拍失效（五轮评审 P3）；宽松消费方
+/// 继续用 [`load_settings`]。
+pub fn try_load_settings() -> Result<Settings, String> {
+    let mut settings = Settings::default();
+    let cfg_file = config_file();
+    match fs::read_to_string(&cfg_file) {
+        // 整体反序列化。老配置文件里缺掉的字段靠结构体上的 `#[serde(default)]`
+        // （见 `Settings` 定义）取 Default 给的值，而不是各类型的零值——注意这
+        // **不是**逐字段合并：任一字段类型不符，整个文件就废掉，走下面的留存分支。
+        Ok(text) => match serde_json::from_str::<Settings>(&text) {
+            Ok(parsed) => settings = parsed,
+            Err(e) => {
+                quarantine_broken_config(&cfg_file, &format!("解析失败（{e}）"));
+                return Err(format!("配置文件解析失败（{e}）"));
+            }
+        },
+        // 没有配置文件是全新安装的正常状态，不出声。
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        // 文件在、却读不出来（权限、磁盘错误）：**不**改名——内容未必是坏的，而且
+        // 连读都读不了多半也 rename 不了。但同样必须出声，否则又是一次无声重置。
+        Err(e) => {
+            eprintln!(
+                "[model-store] 配置文件 {} 读取失败（{e}），本次回退默认设置",
+                cfg_file.display()
+            );
+            return Err(format!("配置文件读取失败（{e}）"));
+        }
+    }
+    Ok(apply_settings_defaults(settings))
+}
+
+pub fn load_settings() -> Settings {
+    // 宽松消费方（商店页 / ollama_base_url 等）：读取失败回默认设置，历史行为
+    // 不变；隔离改名与日志副作用已在 [`try_load_settings`] 内发生。
+    try_load_settings().unwrap_or_else(|_| apply_settings_defaults(Settings::default()))
 }
 
 /// 写配置。**先写临时文件再 rename**，并且一开始就以 0600 创建。

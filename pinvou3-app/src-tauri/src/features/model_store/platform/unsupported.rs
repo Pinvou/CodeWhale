@@ -166,6 +166,11 @@ pub(crate) fn store_weights_roots() -> Vec<std::path::PathBuf> {
     vec![crate::platform::paths::pinvou3_home().join("model-store")]
 }
 
+/// 非 Linux 无 settings 可读失败：恒 Ok（与上方宽松/可失败两版同根集合）。
+pub(crate) fn store_weights_roots_checked() -> Result<Vec<std::path::PathBuf>, String> {
+    Ok(store_weights_roots())
+}
+
 pub(crate) fn ollama_base_url() -> String {
     "http://127.0.0.1:11434".to_string()
 }

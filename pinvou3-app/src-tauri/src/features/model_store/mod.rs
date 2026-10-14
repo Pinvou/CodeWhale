@@ -43,7 +43,10 @@
 //!
 //! 只在 Linux 上真正编译，见 `platform/mod.rs` 的说明。
 
-mod platform;
+// pub(crate) 而非私有：features/device 的移除 fail-closed 端到端测试（住在
+// device/platform/linux.rs——linux 门控区）需要经由本路径拿 linux::config::TempHome
+// 做 HOME 隔离。测试依赖方向是 device→model_store（与运行时同向，不构成环）。
+pub(crate) mod platform;
 
 /// 非 Linux 平台上给用户看的原因。放在这里而不是桩文件里，是为了让
 /// 「为什么没有这个功能」只有一处定义。
@@ -90,6 +93,9 @@ pub(crate) use platform::store_model_name;
 // 操作而不是当未命中放行。见 platform::store_model_name_checked 的说明。
 pub(crate) use platform::store_model_name_checked;
 pub(crate) use platform::store_weights_roots;
+// 可失败版：settings 读取失败时 Err。设备移除路径用（fail-closed，见
+// platform::store_weights_roots_checked 的说明）。
+pub(crate) use platform::store_weights_roots_checked;
 // 本机 Ollama 守护进程基地址：设备管理的外部模型探测/标签/删除与商店生命周期
 // 对齐到同一实例。见 platform::ollama_base_url 的说明。
 pub(crate) use platform::ollama_base_url;

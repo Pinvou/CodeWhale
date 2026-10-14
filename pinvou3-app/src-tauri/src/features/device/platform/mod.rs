@@ -35,6 +35,6 @@ pub(crate) use unsupported::{
 };
 // 权限收敛按 unix/not(unix) 二分，而不是按目标 OS——macOS 同样享受 0700/0600。
 #[cfg(unix)]
-pub(crate) use owner_only::{harden_dir_owner_only, set_file_owner_only};
+pub(crate) use owner_only::{harden_dir_owner_only, set_file_owner_only, sync_directory};
 #[cfg(not(unix))]
-pub(crate) use unsupported::{harden_dir_owner_only, set_file_owner_only};
+pub(crate) use unsupported::{harden_dir_owner_only, set_file_owner_only, sync_directory};

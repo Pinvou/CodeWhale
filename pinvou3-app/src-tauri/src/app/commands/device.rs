@@ -81,17 +81,7 @@ async fn build_doctor_context(device: &DeviceState, monitor: &MonitorState) -> V
         crate::features::monitor::sample_all(monitor),
         device::probe_services(),
     );
-    let active_model = monitor_snapshot.vllm.as_ref().map(|model| {
-        json!({
-            "model_id": model.model_id,
-            "provider": model.provider,
-            "model": model.model,
-            "configured_model": model.configured_model,
-            "target_kind": model.target_kind,
-            "health_status": model.health_status,
-            "max_model_len": model.max_model_len,
-        })
-    });
+    let active_model = monitor_snapshot.vllm.as_ref().map(active_model_projection);
     let mut context = assemble_doctor_context(
         json!(device_snapshot),
         json!(monitor_snapshot.gpu),
@@ -105,6 +95,22 @@ async fn build_doctor_context(device: &DeviceState, monitor: &MonitorState) -> V
         &crate::platform::paths::user_home_dir().to_string_lossy(),
     );
     context
+}
+
+/// `active_model` 的字段投影（纯函数，测试直打）：TASK_SERVICES 模板按
+/// `active_model.health_status` 等键取数，投影键名笔误会让模型拿到 null 并如实
+/// 回答"上下文里没有"——顶层键有拼装契约测试盯着，这一层内联 json! 时漏了同一刀
+/// （五轮评审 P3），抽出后键集可直接断言。
+fn active_model_projection(model: &crate::features::monitor::VllmSnapshot) -> Value {
+    json!({
+        "model_id": model.model_id,
+        "provider": model.provider,
+        "model": model.model,
+        "configured_model": model.configured_model,
+        "target_kind": model.target_kind,
+        "health_status": model.health_status,
+        "max_model_len": model.max_model_len,
+    })
 }
 
 /// 上下文拼装（纯函数，测试直打键名契约）：提示词模板与前端都按这些键取数，
@@ -227,6 +233,54 @@ mod tests {
             assert!(context.get(key).is_some(), "missing context key: {key}");
         }
         assert_eq!(context["device"]["os"]["arch"], "aarch64");
+    }
+
+    #[test]
+    fn active_model_projection_exposes_the_documented_keys() {
+        // TASK_SERVICES 模板按 active_model.health_status 等键取数；投影键名
+        // 漂移只会让模型拿到 null 并如实回答"上下文里没有"——键集钉在这里
+        // （五轮评审 P3：内层投影是顶层键契约测试漏掉的同一刀）。
+        let snapshot = crate::features::monitor::VllmSnapshot {
+            status: crate::features::monitor::VllmStatus::Ready,
+            model_id: Some("preset-1".to_string()),
+            provider: "vllm".to_string(),
+            model: Some("qwen3".to_string()),
+            configured_model: Some("qwen3".to_string()),
+            target_kind: "local".to_string(),
+            metrics_applicable: true,
+            health_status: "verified".to_string(),
+            diagnostic: None,
+            metric_diagnostics: Vec::new(),
+            max_model_len: Some(32768),
+            num_requests_running: None,
+            num_requests_waiting: None,
+            prefix_cache_hit_pct: None,
+            prefix_cache_hits: None,
+            prefix_cache_queries: None,
+            ttft_sum_s: None,
+            ttft_count: None,
+            tpot_sum_s: None,
+            tpot_count: None,
+            generation_tokens_total: None,
+            prompt_tokens_total: None,
+        };
+        let projection = active_model_projection(&snapshot);
+        for key in [
+            "model_id",
+            "provider",
+            "model",
+            "configured_model",
+            "target_kind",
+            "health_status",
+            "max_model_len",
+        ] {
+            assert!(
+                projection.get(key).is_some(),
+                "missing projection key: {key}"
+            );
+        }
+        assert_eq!(projection["health_status"], "verified");
+        assert_eq!(projection["max_model_len"], 32768);
     }
 
     #[test]

@@ -228,6 +228,27 @@ command_protocol!(
         "device_doctor_prompt"
     ]
 );
+
+/// 命令清单（上一测试）必须真的注册进 `generate_handler!`：protocol 宏只读
+/// device.rs 源码，从 lib.rs 删掉注册行不会红、运行时才炸。这里做弱文本包含
+/// 检查兜住该缝（五轮评审 P3；全仓既有模式，聊胜于无）。
+#[test]
+fn device_commands_are_registered_in_the_handler() {
+    let lib = include_str!("../../lib.rs");
+    for command in [
+        "get_device_snapshot",
+        "get_device_services",
+        "get_external_models",
+        "device_register_external_model",
+        "device_remove_external_model",
+        "device_doctor_prompt",
+    ] {
+        assert!(
+            lib.contains(command),
+            "device 命令 {command} 未注册进 lib.rs 的 generate_handler!"
+        );
+    }
+}
 command_protocol!(
     files_protocol,
     "files.rs",

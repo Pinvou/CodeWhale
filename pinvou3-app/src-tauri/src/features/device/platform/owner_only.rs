@@ -20,6 +20,12 @@ pub(crate) fn set_file_owner_only(file: &std::fs::File) {
     let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
 }
 
+/// rename 落盘后对目录做 fsync：文件内容已 sync，但目录项（rename 本身）还在
+/// 页缓存里——掉电可能记录文件整个消失（五轮评审 P3；失败不致命，调用方忽略）。
+pub(crate) fn sync_directory(path: &Path) -> std::io::Result<()> {
+    std::fs::File::open(path)?.sync_all()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -117,7 +117,8 @@ pub async fn get_external_models() -> Result<ExternalModelsView, String> {
         Ok(names) => {
             for model in &mut models {
                 if model.kind == "ollama" {
-                    model.status = ollama_status(model, &names);
+                    let expected = model.model.as_deref().unwrap_or(model.name.as_str());
+                    model.status = ollama_status(expected, &names);
                 }
             }
             for name in names {
@@ -174,9 +175,10 @@ pub async fn get_external_models() -> Result<ExternalModelsView, String> {
     Ok(ExternalModelsView { models, warnings })
 }
 
-fn ollama_status(model: &ExternalModel, names: &[String]) -> String {
-    let expected = model.model.as_deref().unwrap_or(model.name.as_str());
-    if names.iter().any(|name| name == expected) {
+fn ollama_status(expected: &str, names: &[String]) -> String {
+    // daemon 标签按小写归一（与商店边界 Ollama 臂的 NOCASE 同一事实）：记录里
+    // 手写 "Qwen3:30B" 时精确比较会恒判 unreachable（五轮评审 P3）。
+    if names.iter().any(|name| name.eq_ignore_ascii_case(expected)) {
         "available".to_string()
     } else {
         "unreachable".to_string()
@@ -220,6 +222,11 @@ pub async fn register_external_model(
     if name.chars().count() > 200 {
         return Err("模型名过长（最多 200 字符）".to_string());
     }
+    // 控制字符/换行：JSON 转义能保证文件合法，但换行名会击穿 warnings、错误
+    // 文案与 UI 行展示（五轮评审 P3）。
+    if name.chars().any(char::is_control) {
+        return Err("模型名包含控制字符或换行，请改用普通文本".to_string());
+    }
     let kind = kind.trim().to_string();
     if !MODEL_KINDS.contains(&kind.as_str()) {
         return Err(format!(
@@ -230,6 +237,20 @@ pub async fn register_external_model(
     let base_url = normalize_optional(&base_url);
     if let Some(url) = &base_url {
         validate_http_url(url)?;
+    }
+    // Ollama 记录由**本机**守护进程托管：探测/标签/删除全部走设置里的
+    // `ollama_base()`（与商店同一实例），record.base_url 不参与任何生命周期。
+    // 放行非回环地址会造出"展示指向远程、删除却打本机"的记录——别名命中本机
+    // 同名 tag 时会把本机模型真删掉（五轮评审 P3）。与前端 isLocalGatewayUrl、
+    // model_store lifecycle 的 endpoint_url_is_loopback 同一把回环尺子。
+    if kind == "ollama" {
+        if let Some(url) = &base_url {
+            if !endpoint_url_is_loopback(url) {
+                return Err(
+                    "Ollama 模型由本机守护进程托管，不接受指向远程主机的服务地址".to_string(),
+                );
+            }
+        }
     }
     if matches!(kind.as_str(), "openai_endpoint" | "vllm" | "llamacpp") && base_url.is_none() {
         return Err(format!("类别“{kind}”需要提供服务地址（base_url）"));
@@ -349,6 +370,9 @@ pub async fn register_external_model(
                 };
                 write_record_file(&mut file, json.as_bytes())?;
                 std::fs::rename(&tmp, &path).map_err(|error| format!("注册表写入失败：{error}"))?;
+                // rename 的目录项还在页缓存里，掉电可能记录整个消失；失败不致命
+                // （最坏重新登记一次），忽略（五轮评审 P3）。
+                let _ = super::platform::sync_directory(&dir);
                 return Ok(id);
             }
             Err("注册表 id 生成冲突，请重试".to_string())
@@ -357,7 +381,17 @@ pub async fn register_external_model(
     .await
     .map_err(|error| format!("注册表写入失败：{error}"))??;
 
-    let status = probe_status_for(&kind, base_url.as_deref(), weights_path.as_deref()).await;
+    // 登记响应里的状态如实探测：ollama 臂原先硬编码 unreachable，刚装好的本机
+    // 模型即使守护进程在跑也显示"未运行"直到下次刷新（五轮评审 P3）。
+    let status = if kind == "ollama" {
+        let expected = effective_ollama_name.unwrap_or_else(|| name.clone());
+        match fetch_ollama_model_names().await {
+            Ok(names) => ollama_status(&expected, &names),
+            Err(_) => "unreachable".to_string(),
+        }
+    } else {
+        probe_status_for(&kind, base_url.as_deref(), weights_path.as_deref()).await
+    };
     Ok(ExternalModel {
         id,
         name,
@@ -376,6 +410,28 @@ fn normalize_optional(raw: &Option<String>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+/// 回环判定：`IpAddr::is_loopback()`（整个 127.0.0.0/8 与 ::1，不止字面量）+
+/// `localhost`（剥一个 FQDN 尾点）。与 model_store lifecycle 的
+/// `endpoint_url_is_loopback`、前端 pinvou-model-link 的 `isLocalGatewayUrl`
+/// 同判据——"各自一份 + 注释互指"是仓库既有惯例（三处必须同一把尺子）。
+fn endpoint_url_is_loopback(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+        .is_some_and(|host| {
+            // IPv6 的 host_str 带方括号；末尾剥**一个**点（合法 FQDN 至多一个）。
+            let host = host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .strip_suffix('.')
+                .unwrap_or(&host);
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        })
 }
 
 /// URL 可解析且是 http(s)。
@@ -465,10 +521,17 @@ pub async fn remove_external_model(
                 Some(name) => crate::features::model_store::store_model_name_checked(name, true)?,
                 None => None,
             };
-            let weights_hit = weights_path
-                .as_deref()
-                .map(weights_in_store)
-                .unwrap_or(false);
+            let weights_hit = match weights_path.as_deref() {
+                // 权重根来自 settings（models_dir 可配）：settings 读取失败按
+                // Err 拒绝——静默回退默认根会让自定义根的保护在这一拍失效，
+                // 深度守卫照常放行（五轮评审 P3，与名字臂 fail-closed 同口径；
+                // 登记端维持宽松版 weights_in_store）。
+                Some(weights) => {
+                    let roots = crate::features::model_store::store_weights_roots_checked()?;
+                    path_under_any(Path::new(weights), &roots)
+                }
+                None => false,
+            };
             Ok((name_hit, ollama_model_hit, weights_hit))
         }
     })
@@ -513,10 +576,28 @@ pub async fn remove_external_model(
                         Some(&protected),
                         Path::new(&weights_for_task),
                     )?;
-                    std::fs::remove_dir_all(&target).map_err(|error| {
-                        format!("权重目录删除失败（{}）：{error}", target.display())
+                    // canonicalize（守卫）与 remove_dir_all（删除）之间存在窗口：
+                    // 本地进程可把路径的中间分量换成符号链接让删除落到别处。
+                    // 删除前重新解析并比对，收窄最后一跳。剩余的亚毫秒级精确
+                    // 竞速不在承诺内——能写 HOME 的本地进程本就可以直接 rm -rf，
+                    // 守卫防的是"守卫时刻判断正确、删除时刻路径已被换走"的
+                    // 构造场景（五轮评审对抗实测）。
+                    let recheck = target.canonicalize().map_err(|error| {
+                        format!(
+                            "拒绝删除：目标目录在删除前变得不可解析（{}）：{error}",
+                            target.display()
+                        )
                     })?;
-                    Ok(target)
+                    if recheck != target {
+                        return Err(format!(
+                            "拒绝删除：目标目录在守卫后被改动（{}），请刷新后重试",
+                            target.display()
+                        ));
+                    }
+                    std::fs::remove_dir_all(&recheck).map_err(|error| {
+                        format!("权重目录删除失败（{}）：{error}", recheck.display())
+                    })?;
+                    Ok(recheck)
                 })
                 .await
                 .map_err(|error| format!("权重目录删除失败（{weights}）：{error}"))??;
@@ -625,13 +706,20 @@ pub(crate) fn weights_deletion_guard(
         ));
     }
     if let Some(protected) = protected_root {
-        if let Ok(protected_canonical) = protected.canonicalize() {
-            if target == protected_canonical || target.starts_with(&protected_canonical) {
-                return Err(format!(
-                    "拒绝删除：目标位于应用数据目录（{}）之内，请到设置或模型商店操作",
-                    protected_canonical.display()
-                ));
-            }
+        // 解析失败不能跳过保护：注册表目录就在保护根内，正常机器上必可解析，
+        // 解析不了说明环境异常——按拒绝处理（与"无法解析家目录"臂同口径，
+        // 五轮评审 P3；原先的 `if let Ok` 会静默放行整棵应用树）。
+        let protected_canonical = protected.canonicalize().map_err(|_| {
+            format!(
+                "拒绝删除：无法解析应用数据目录（{}），为防误删已拒绝",
+                protected.display()
+            )
+        })?;
+        if target == protected_canonical || target.starts_with(&protected_canonical) {
+            return Err(format!(
+                "拒绝删除：目标位于应用数据目录（{}）之内，请到设置或模型商店操作",
+                protected_canonical.display()
+            ));
         }
     }
     let home_canonical = home
@@ -793,6 +881,15 @@ fn read_registry(dir: &Path) -> (Vec<ExternalModel>, Vec<String>) {
                 } else {
                     record.id.clone()
                 };
+                // 内容 id 形状不合法（含 :/超长/控制字符）：照常展示，但移除被
+                // is_safe_id 一票挡死——不说破的话用户面对的是"永远删不掉"的
+                // 僵尸记录（五轮评审 P3）。
+                if !record.id.trim().is_empty() && !is_safe_id(record.id.trim()) {
+                    warnings.push(format!(
+                        "注册表记录 id 形状不合法（{}），无法从页面移除，请手工处理文件",
+                        path.display()
+                    ));
+                }
                 let model = ExternalModel {
                     id,
                     name: record.name,
@@ -1209,29 +1306,24 @@ mod tests {
 
     #[test]
     fn ollama_status_matches_model_then_name() {
-        let mut model = ExternalModel {
-            id: "m-1".to_string(),
-            name: "qwen3-30b".to_string(),
-            kind: "ollama".to_string(),
-            base_url: None,
-            model: Some("qwen3:30b".to_string()),
-            weights_path: None,
-            status: String::new(),
-            registered: true,
-            source: "registry".to_string(),
-        };
+        // 有效删除名由调用方解析（model 字段缺省回退 name），本函数只做归一匹配。
         assert_eq!(
-            ollama_status(&model, &["qwen3:30b".to_string()]),
+            ollama_status("qwen3:30b", &["qwen3:30b".to_string()]),
             "available"
         );
         assert_eq!(
-            ollama_status(&model, &["other:8b".to_string()]),
+            ollama_status("qwen3:30b", &["other:8b".to_string()]),
             "unreachable"
         );
-        model.model = None;
-        // 无 model 字段时回退按 name 匹配。
+        // daemon 标签按小写归一：记录里手写大小写变体不再恒判 unreachable
+        // （五轮评审 P3，与商店边界 Ollama 臂的 NOCASE 同一事实）。
         assert_eq!(
-            ollama_status(&model, &["qwen3-30b".to_string()]),
+            ollama_status("Qwen3:30B", &["qwen3:30b".to_string()]),
+            "available"
+        );
+        // 无 model 字段时由调用方回退按 name 传入。
+        assert_eq!(
+            ollama_status("qwen3-30b", &["qwen3-30b".to_string()]),
             "available"
         );
     }

@@ -44,3 +44,9 @@ pub(crate) fn harden_dir_owner_only(_path: &std::path::Path) {}
 
 #[cfg(not(unix))]
 pub(crate) fn set_file_owner_only(_file: &std::fs::File) {}
+
+/// 非 unix 平台没有目录 fsync 语义：显式 no-op（落盘纪律随平台能力降级）。
+#[cfg(not(unix))]
+pub(crate) fn sync_directory(_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
+}

@@ -35,17 +35,24 @@ fn parse_os_release_pretty_name(text: &str) -> Option<String> {
     None
 }
 
+/// operstate 文本 → 是否 up 的判定（纯函数，测试直打；读取见
+/// [`iface_operstate_up`]）。**"unknown" 不算 down**——回环口恒为 unknown，
+/// tun/wg 等 VPN 口也多为 unknown，判成 down 会给用户持续的假"断开"信号；
+/// 只有内核明确报告 down 家族（down/lowerLayerDown/notPresent）或 dormant
+/// （无链路）才判断开。
+fn operstate_text_is_up(text: &str) -> bool {
+    !matches!(
+        text.trim(),
+        "down" | "lowerlayerdown" | "notpresent" | "dormant"
+    )
+}
+
 /// 网口是否 up：读 `/sys/class/net/<name>/operstate`。读不到返回 None（调用方
-/// 默认 true）。**"unknown" 不算 down**——回环口恒为 unknown，tun/wg 等 VPN 口
-/// 也多为 unknown，判成 down 会给用户持续的假"断开"信号；只有内核明确报告
-/// down 家族（down/lowerLayerDown/notPresent）或 dormant（无链路）才判断开。
+/// 默认 true）。
 pub(crate) fn iface_operstate_up(name: &str) -> Option<bool> {
     let text =
         std::fs::read_to_string(Path::new("/sys/class/net").join(name).join("operstate")).ok()?;
-    Some(!matches!(
-        text.trim(),
-        "down" | "lowerlayerdown" | "notpresent" | "dormant"
-    ))
+    Some(operstate_text_is_up(&text))
 }
 
 /// 网口是否为无线网卡：存在 `wireless` 子目录（/proc/net/wireless 的旧式暴露，
@@ -383,5 +390,72 @@ mod tests {
             assert!(!name.is_empty());
             assert!(value.is_finite());
         }
+    }
+
+    /// 移除路径 fail-closed 的**端到端接线**：商店库损坏时设备侧
+    /// `remove_external_model` 必须整单拒绝、注册记录原样保留。helper 自身的
+    /// Err 语义已由 model_store boundary.rs 的
+    /// `checked_reports_query_failure_instead_of_miss` 直打，这里钉的是调用点的
+    /// `?` 传播——把调用点退回宽松 `.ok().flatten()`，本测试必须变红（五轮评审
+    /// P3）。住在 linux 门控区是因为 TempHome 随 linux 模块编译，且依赖方向
+    /// 保持 device→model_store 不构成环。
+    #[test]
+    fn device_removal_is_fail_closed_on_corrupt_store_db() {
+        use crate::features::device::{
+            get_external_models, register_external_model, remove_external_model,
+        };
+        use crate::features::model_store::platform::linux::config;
+        let _ctx = config::TempHome::new();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async move {
+            let id = register_external_model(
+                "guard-e2e-model".to_string(),
+                "other".to_string(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("register external model");
+            // 登记成功后把商店库覆写成垃圾字节：connect 能打开、查询必然失败。
+            std::fs::create_dir_all(config::data_dir()).expect("store data dir");
+            std::fs::write(
+                config::data_dir().join("models.db"),
+                b"not a sqlite db at all",
+            )
+            .expect("corrupt db");
+            let result =
+                remove_external_model(id.clone(), false, "guard-e2e-model".to_string()).await;
+            let error = result.expect_err("corrupt store db must reject the removal");
+            assert!(
+                error.contains("已被拒绝"),
+                "rejection must say so, got: {error}"
+            );
+            // 记录必须原样保留（经列表接口读回，而不是直查文件——registry_dir
+            // 不跨 feature re-export）。
+            let view = get_external_models().await.expect("list external models");
+            assert!(
+                view.models.iter().any(|model| model.id == id),
+                "registry record must survive the rejected removal"
+            );
+        });
+    }
+
+    /// operstate 判定表：unknown（回环/VPN 口）必须算 up，down 家族与 dormant
+    /// 判 down。此前这段 matches! 长在 /sys 读取里零覆盖——把它改成 "down" 会
+    /// 让 lo/tun 口持续假"断开"而测试全绿（五轮评审 P3）。
+    #[test]
+    fn operstate_text_unknown_is_up_and_down_family_is_down() {
+        assert!(operstate_text_is_up("unknown"));
+        assert!(operstate_text_is_up("up"));
+        assert!(operstate_text_is_up("up\n"));
+        assert!(!operstate_text_is_up("down"));
+        assert!(!operstate_text_is_up("lowerlayerdown"));
+        assert!(!operstate_text_is_up("notpresent"));
+        assert!(!operstate_text_is_up("dormant"));
+        assert!(!operstate_text_is_up(" down "));
     }
 }

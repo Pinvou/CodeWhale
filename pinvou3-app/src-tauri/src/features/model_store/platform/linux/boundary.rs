@@ -33,7 +33,16 @@ pub(crate) fn store_model_name_checked(
     }
 }
 
-/// 商店权重的**全部**可能根目录。默认根是 store 数据根（`~/.pinjou3/model-store/`，
+fn weights_roots_from(settings: &config::Settings) -> Vec<std::path::PathBuf> {
+    let mut roots = vec![config::data_dir()];
+    let custom = std::path::PathBuf::from(&settings.models_dir);
+    if !roots.contains(&custom) {
+        roots.push(custom);
+    }
+    roots
+}
+
+/// 商店权重的**全部**可能根目录。默认根是 store 数据根（`~/.pinvou3/model-store/`，
 /// 默认 `models_dir` 即其下的 `models/`）；用户可在设置里把 `models_dir` 改到别处
 ///（几十上百 GB 的权重常被挪去别的盘），那个目录同样是商店管理的权重根。
 ///
@@ -45,13 +54,15 @@ pub(crate) fn store_model_name_checked(
 /// 建出空库与 WAL 边车。调用方（features/device）已在 blocking 池中调用并接受
 /// 这些副作用；修改副作用语义前先核对这两个调用点。
 pub(crate) fn store_weights_roots() -> Vec<std::path::PathBuf> {
-    let mut roots = vec![config::data_dir()];
-    let custom = config::load_settings().models_dir;
-    let custom = std::path::PathBuf::from(custom);
-    if !roots.contains(&custom) {
-        roots.push(custom);
-    }
-    roots
+    weights_roots_from(&config::load_settings())
+}
+
+/// [`store_weights_roots`] 的可失败版：settings 读取失败时 `Err` 而不是静默回退
+/// 默认根。**破坏性的移除路径必须走本函数**——静默回退会让"自定义 models_dir"
+/// 的保护恰在配置读取失败的一拍失效，深度守卫照常放行、商店权重被删（五轮评审
+/// P3，与商店名单查询的 fail-closed 同口径）；宽松的登记端继续用原函数。
+pub(crate) fn store_weights_roots_checked() -> Result<Vec<std::path::PathBuf>, String> {
+    Ok(weights_roots_from(&config::try_load_settings()?))
 }
 
 /// 本机 Ollama 守护进程基地址：默认 `http://127.0.0.1:11434`，可被商店设置里的
@@ -74,6 +85,7 @@ mod tests {
     use super::config::{self, TempHome};
     use super::{
         db, ollama_base_url, store_model_name, store_model_name_checked, store_weights_roots,
+        store_weights_roots_checked,
     };
 
     fn insert_store_model(card_id: &str, model_name: &str) {
@@ -167,6 +179,17 @@ mod tests {
         assert_eq!(ollama_base_url(), "http://192.168.1.5:11434");
         write_config(r#"{"ollama_host": " http://10.0.0.2:11434 "}"#);
         assert_eq!(ollama_base_url(), "http://10.0.0.2:11434");
+    }
+
+    #[test]
+    fn checked_weights_roots_reject_when_settings_unreadable() {
+        let _ctx = TempHome::new();
+        // 配置文件存在但解析坏：try_load_settings 走隔离改名并返回 Err——移除
+        // 路径据此拒绝，而不是静默回退默认根放行删除（五轮评审 P3）。
+        write_config("not json at all");
+        assert!(store_weights_roots_checked().is_err());
+        // 宽松版同场景维持历史行为：默认根集合（隔离改名后按默认设置回填）。
+        assert!(!store_weights_roots().is_empty());
     }
 
     #[test]

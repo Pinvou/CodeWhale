@@ -31,7 +31,7 @@ pub use external_models::{
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use sysinfo::{Components, Disks, Networks, ProcessRefreshKind, ProcessesToUpdate, System};
 
@@ -530,16 +530,30 @@ fn truncate_name(raw: &str) -> String {
 /// GPU 扩展快照（3s 缓存，monitor::gpu_snapshot 同款结构）。nvidia-smi 探测
 /// 失败/超时按"本机无 NVIDIA"降级返回 None。
 ///
-/// 预算注记（第四轮评审）：缓存互斥锁在子进程探测期间持有——一次刷新 =
-/// 表头 + 计算进程两次 nvidia-smi，每次至多 3 个候选路径 × 10s 超时，最坏
-/// ~60s；期间整份设备快照（温度/磁盘/网络/进程均已采好）在 blocking 池排队。
-/// 有界且自愈（超时会 kill 子进程），与 monitor「挂起期间结果缓存互斥量被
-/// 持有，后续轮询在 blocking 池里排队」是同一取舍，这里显式写明。
+/// 并发口径（第五轮评审）：探测锁（`SAMPLER`）在子进程探测期间持有——一次刷新 =
+/// 表头 + 计算进程两次 nvidia-smi，每次至多 3 个候选路径 × 10s 超时，最坏 ~60s。
+/// 与 monitor「挂起期间缓存互斥量被持有」不同的是，这里**绝不排队等锁**：
+/// `try_lock` 抢不到（上一轮探测仍在飞）直接返回 `LAST` 里的最后已知值——否则
+/// 挂死的 nvidia-smi 会把整份设备快照（温度/磁盘/网络/进程均已采好）在
+/// `sample_snapshot` 的 `join!` 上冻结同样长的时间，而不是只让 GPU 区块降级。
+/// 首拍就被并发踩上时 `LAST` 为空，返回 None（与"本机无 NVIDIA"同形，探测结束
+/// 后下一拍自愈）。有界且自愈：探测内部超时会 kill 子进程。
 fn gpu_ext_cached() -> Option<GpuExtSnapshot> {
-    static CACHE: OnceLock<Mutex<GpuExtCache>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(GpuExtCache::default()));
-    let mut guard = cache.lock();
-    refresh_gpu_ext_cache(&mut guard, Instant::now(), gpu_ext_snapshot)
+    static SAMPLER: OnceLock<Mutex<GpuExtCache>> = OnceLock::new();
+    static LAST: OnceLock<RwLock<Option<GpuExtSnapshot>>> = OnceLock::new();
+    let last = LAST.get_or_init(|| RwLock::new(None));
+    match SAMPLER
+        .get_or_init(|| Mutex::new(GpuExtCache::default()))
+        .try_lock()
+    {
+        Some(mut guard) => {
+            let value = refresh_gpu_ext_cache(&mut guard, Instant::now(), gpu_ext_snapshot);
+            *last.write() = value.clone();
+            value
+        }
+        // 探测在飞：返回最后已知值，不排队（见上方并发口径）。
+        None => last.read().clone(),
+    }
 }
 
 /// 缓存刷新的纯逻辑（测试直打）：TTL 内直接返回旧值不触发采样；过期后采样，
@@ -618,13 +632,20 @@ pub(crate) fn parse_cuda_toolkit_version(json_text: &str) -> Option<String> {
 }
 
 /// 表头键值对的公共解析：定位 `<Key>:` 取首个空白分隔 token（表头列以 `|` 收边）。
+/// 驱动不支持对应查询时表头就是 `CUDA Version: N/A`——按"字段缺失"处理（None），
+/// 让 `gpu_ext_snapshot` 的回退链继续走，不把字面 "N/A" 当版本号展示（五轮评审 P3）。
 fn parse_nvidia_smi_header_value(text: &str, key: &str) -> Option<String> {
     let rest = text.split(key).nth(1)?;
     let token = rest.split_whitespace().next()?;
-    if token.ends_with('|') {
-        return Some(token.trim_end_matches('|').to_string()).filter(|s| !s.is_empty());
+    let value = if token.ends_with('|') {
+        token.trim_end_matches('|')
+    } else {
+        token
+    };
+    if value.is_empty() || value.eq_ignore_ascii_case("N/A") {
+        return None;
     }
-    Some(token.to_string())
+    Some(value.to_string())
 }
 
 /// 兜底：`nvidia-smi` 表头的 `CUDA Version: N.N`。
@@ -701,7 +722,7 @@ async fn probe_ollama_service() -> ServiceStatus {
         Err(reason) => ServiceStatus {
             key: "ollama".to_string(),
             running: false,
-            detail: Some(reason),
+            detail: Some(reason.message()),
         },
     }
 }
@@ -709,7 +730,8 @@ async fn probe_ollama_service() -> ServiceStatus {
 /// vllm / lmstudio → 对候选端口逐个探测 `/v1/models`，任一 200 即 running。
 async fn probe_openai_ports(key: &str, ports: &[u16]) -> ServiceStatus {
     // 端口被占用但对不上协议的服务会回 HTTP 4xx：这时"连接被拒绝或超时"是
-    // 误导，把最具体的 HTTP 状态透给用户（第四轮评审 P3）。
+    // 误导，把最具体的 HTTP 状态透给用户（第四轮评审 P3）。可判别分支见
+    // [`ProbeFailure`]——字符串前缀判断会被措辞改动静默击穿（五轮评审 P3）。
     let mut http_error: Option<String> = None;
     for port in ports {
         match http_get_success(&format!("http://127.0.0.1:{port}/v1/models")).await {
@@ -720,11 +742,12 @@ async fn probe_openai_ports(key: &str, ports: &[u16]) -> ServiceStatus {
                     detail: None,
                 };
             }
-            Err(reason) => {
-                if http_error.is_none() && reason.starts_with("服务响应异常") {
-                    http_error = Some(reason);
+            Err(ProbeFailure::HttpStatus(status)) => {
+                if http_error.is_none() {
+                    http_error = Some(ProbeFailure::HttpStatus(status).message());
                 }
             }
+            Err(ProbeFailure::Transport(_)) => {}
         }
     }
     ServiceStatus {
@@ -809,22 +832,39 @@ pub(crate) fn probe_client() -> Option<&'static reqwest::Client> {
         .as_ref()
 }
 
-/// GET 一个 URL，2xx 即 Ok；非 2xx / 连接失败 / 超时 → 人话 Err。
-pub(crate) async fn http_get_success(url: &str) -> Result<(), String> {
-    let client = probe_client().ok_or_else(|| "HTTP 客户端初始化失败".to_string())?;
+/// 探测失败的可判别原因：HTTP 状态透传 vs 传输层失败。字符串化延迟到展示层——
+/// 原先用中文文案前缀 `starts_with("服务响应异常")` 做程序判断，措辞一改，
+/// "最具体 HTTP 状态"臂就会静默退化（五轮评审 P3）。
+pub(crate) enum ProbeFailure {
+    /// 服务有响应但状态码非 2xx。
+    HttpStatus(u16),
+    /// 连接失败/超时/客户端初始化失败（附带人话原因）。
+    Transport(String),
+}
+
+impl ProbeFailure {
+    pub(crate) fn message(&self) -> String {
+        match self {
+            ProbeFailure::HttpStatus(status) => format!("服务响应异常（HTTP {status}）"),
+            ProbeFailure::Transport(reason) => reason.clone(),
+        }
+    }
+}
+
+/// GET 一个 URL，2xx 即 Ok；非 2xx / 连接失败 / 超时 → 可判别的 [`ProbeFailure`]。
+pub(crate) async fn http_get_success(url: &str) -> Result<(), ProbeFailure> {
+    let client = probe_client()
+        .ok_or_else(|| ProbeFailure::Transport("HTTP 客户端初始化失败".to_string()))?;
     let response = client
         .get(url)
         .timeout(PROBE_TIMEOUT)
         .send()
         .await
-        .map_err(human_probe_error)?;
+        .map_err(|error| ProbeFailure::Transport(human_probe_error(error)))?;
     if response.status().is_success() {
         Ok(())
     } else {
-        Err(format!(
-            "服务响应异常（HTTP {}）",
-            response.status().as_u16()
-        ))
+        Err(ProbeFailure::HttpStatus(response.status().as_u16()))
     }
 }
 
@@ -853,7 +893,6 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sysinfo::Pid;
 
     #[test]
     fn split_component_label_splits_first_token_as_chip() {
@@ -1220,10 +1259,16 @@ mod tests {
         }
     }
 
+    /// 表头 "N/A"（驱动不支持对应查询）按字段缺失处理，不把字面 "N/A" 当版本号。
     #[test]
-    fn pid_wrapper_maps_sysinfo_pid() {
-        // ProcInfo.pid 是 u32：锁死 sysinfo Pid → u32 的转换路径（aarch64 上 Pid 为 i32）。
-        let pid: Pid = Pid::from_u32(4242);
-        assert_eq!(pid.as_u32(), 4242);
+    fn nvidia_smi_header_na_is_treated_as_missing() {
+        let header = "CUDA Version: N/A | Driver Version: 580.02 |";
+        assert_eq!(parse_nvidia_smi_cuda_version(header), None);
+        assert_eq!(
+            parse_nvidia_smi_driver_version(header),
+            Some("580.02".to_string())
+        );
+        // 紧贴收边竖线的 N/A 同样不吃。
+        assert_eq!(parse_nvidia_smi_cuda_version("CUDA Version: N/A|"), None);
     }
 }

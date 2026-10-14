@@ -32,4 +32,5 @@ pub(crate) use unsupported as backend;
 // 转发——第四轮评审前这里曾内联两套 #[cfg] fn，与模块级约定并存成第二套写法。
 pub(crate) use backend::{
     ollama_base_url, store_model_name, store_model_name_checked, store_weights_roots,
+    store_weights_roots_checked,
 };
