@@ -1077,6 +1077,22 @@
     return next;
   }
 
+  // Admission is published before dispatch, and each controlled session has
+  // at most one active task. Copy its identity onto the live user bubble;
+  // display-array positions cannot stand in for raw transcript positions.
+  function controlledTaskAdmissionIdentity(tasks, sessionId, content) {
+    var active = (Array.isArray(tasks) ? tasks : []).filter(function (task) {
+      return task && task.taskId && String(task.sessionId || "") === String(sessionId || "")
+        && !TASK_TERMINAL[task.status];
+    });
+    if (active.length !== 1) return null;
+    var task = active[0];
+    if (!task.text || String(task.text) !== String(content || "").slice(0, 8192)) return null;
+    var identity = { remoteTaskId: String(task.taskId) };
+    if (Number.isInteger(task.messageIndex)) identity.messageIndex = task.messageIndex;
+    return identity;
+  }
+
   /** True when the envelope still belongs to the live connection context. */
   function matchesLiveContext(state, envelope) {
     var payload = envelope || {};
@@ -1117,6 +1133,7 @@
     hideRemoteProxyHistory: hideRemoteProxyHistory,
     applyControlledTaskEvent: applyControlledTaskEvent,
     applyTaskContent: applyTaskContent,
+    controlledTaskAdmissionIdentity: controlledTaskAdmissionIdentity,
     matchesLiveContext: matchesLiveContext,
     isTaskTerminal: function (status) {
       return !!TASK_TERMINAL[status];
