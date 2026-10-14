@@ -469,6 +469,7 @@ export const dictZh = {
           // 「估算」不是客套：这一档的分母是 docker 已经露面的那些镜像层之和，会随 pull
           // 推进往上长，百分比因此会往回跳。不标出来，用户会以为进度条坏了。
           taskProgressEstimated:'估算', taskStep:(i,n)=>`第 ${i} 步 / 共 ${n} 步`,
+          taskAwaitingCompletion:'任务仍在执行，等待完成确认',
           taskLayers:(done,total)=>`镜像层 ${done}/${total}`, taskCopyLog:'复制详情',
           taskOpenLogDir:'打开日志目录', taskOpenLogDirFailed:(m)=>`打不开日志目录：${m}`,
           // 「可外发」不是修饰词：导出那份比落盘那份多抹掉内网地址和路径，就是为了能发出去。

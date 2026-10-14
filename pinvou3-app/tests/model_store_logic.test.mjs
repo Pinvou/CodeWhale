@@ -458,3 +458,12 @@ test('taskProgressView：三档按可信度排，绝不编假分母', () => {
   assert.equal(taskProgressView(null), null);
 });
 
+test('达到字节上限不代表任务完成；仅后端成功才退出等待态', () => {
+  const progress = { done: 100, total: 100 };
+  assert.equal(taskProgressView({ status: 'running', progress }).awaitingCompletion, true);
+  assert.equal(taskProgressView({ status: 'done', progress }).awaitingCompletion, false);
+  assert.equal(taskProgressView({ status: 'running', step: { index: 4, total: 4 } }).awaitingCompletion, true);
+  assert.equal(taskProgressView({ status: 'running', progress: { done: 90, total: 100 } }).awaitingCompletion, false);
+  assert.equal(taskProgressView({ status: 'running', progress: { done: 99999, total: 100000 } }).awaitingCompletion, true, 'rounding must not resurrect 100.0%');
+});
+

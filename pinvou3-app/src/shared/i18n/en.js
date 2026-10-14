@@ -437,6 +437,7 @@ export const dictEn = {
           taskCancel:'Cancel', taskClose:'Close', taskMore:'More', taskExpand:'Show log', taskCollapse:'Hide log', taskNoOutput:'(No output)', taskCancelFailed:(m)=>`Cancel did not take effect: ${m}`, taskAnswerFailed:(m)=>`That answer did not get through: ${m}`,
           taskProgress:(done,total)=>`${done} / ${total}`, taskSpeed:s=>`${s}/s`, taskEta:d=>`${d} left`,
           taskProgressEstimated:'estimated', taskStep:(i,n)=>`Step ${i} of ${n}`,
+          taskAwaitingCompletion:'Still working; awaiting completion confirmation',
           taskLayers:(done,total)=>`Image layers ${done}/${total}`, taskCopyLog:'Copy details',
           taskOpenLogDir:'Open log folder', taskOpenLogDirFailed:(m)=>`Cannot open the log folder: ${m}`,
           taskExportLog:'Export log (safe to share)', taskExportLogDone:(p)=>`Exported to ${p}`,

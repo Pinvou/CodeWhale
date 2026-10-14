@@ -178,6 +178,7 @@ function taskSubtitle(task, copy) {
   if (task.status === 'cancelling') return copy.taskCancelling;
   if (task.prompt) return copy.taskWaitingInput;
   const view = taskProgressView(task);
+  if (view?.awaitingCompletion) return copy.taskAwaitingCompletion;
   const parts = [];
   if (task.stage) parts.push(task.stage);
   if (view?.kind === 'bytes') {
@@ -332,11 +333,15 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
               data-testid="model-store-progress-bar"
               data-progress-kind={view.kind}
               data-progress-estimated={view.estimated ? 'true' : undefined}
-              className="h-full rounded-full bg-[#0B57D0] transition-[width] duration-500 dark:bg-[#A8C7FA]"
-              style={{ width: `${view.percent}%` }}
+              data-progress-pending={view.awaitingCompletion ? 'true' : undefined}
+              role="progressbar"
+              aria-label={view.awaitingCompletion ? copy.taskAwaitingCompletion : copy.taskRunning}
+              aria-valuenow={view.awaitingCompletion ? undefined : view.percent}
+              className={`h-full rounded-full bg-[#0B57D0] transition-[width] duration-500 dark:bg-[#A8C7FA] ${view.awaitingCompletion ? 'animate-pulse' : ''}`}
+              style={{ width: view.awaitingCompletion ? '60%' : `${view.percent}%` }}
             />
           </div>
-          <div className={`mt-1 text-right text-[10px] ${TEXT_SECONDARY}`}>{`${view.percent.toFixed(1)}%`}</div>
+          <div className={`mt-1 text-right text-[10px] ${TEXT_SECONDARY}`}>{view.awaitingCompletion ? copy.taskAwaitingCompletion : `${view.percent.toFixed(1)}%`}</div>
         </div>
       )}
 

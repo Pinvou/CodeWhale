@@ -429,14 +429,20 @@ function progressPercent(progress) {
  *
  * 三档都不成立就返回 null,界面退化成不确定态(转圈 + 阶段名),这也是诚实的。
  * @param {object|null} task - 任务。
- * @returns {{kind:'bytes'|'step', percent:number, estimated:boolean, done?:number, total?:number, index?:number, layers?:object}|null} 进度视图。
+ * @returns {{kind:'bytes'|'step', percent:number, awaitingCompletion:boolean, estimated:boolean, done?:number, total?:number, index?:number, layers?:object}|null} 进度视图。
  */
 function taskProgressView(task) {
+  // Byte counters describe transfer, not successful completion. Old scripts
+  // can reach their advertised size early (e.g. by counting stale partials).
+  // Keep the raw counter available, but let the UI switch to an indeterminate
+  // state until the backend actually finishes instead of promising 100% / 0s.
+  const pendingCompletion = (percent) => Number(percent.toFixed(1)) >= 100 && task?.status !== 'done';
   const percent = progressPercent(task?.progress);
   if (percent !== null) {
     return {
       kind: 'bytes',
       percent,
+      awaitingCompletion: pendingCompletion(percent),
       estimated: false,
       done: Number(task.progress.done),
       total: Number(task.progress.total),
@@ -447,6 +453,7 @@ function taskProgressView(task) {
     return {
       kind: 'bytes',
       percent: Math.min(100, (summary.done / summary.total) * 100),
+      awaitingCompletion: pendingCompletion((summary.done / summary.total) * 100),
       estimated: true,
       done: summary.done,
       total: summary.total,
@@ -458,6 +465,7 @@ function taskProgressView(task) {
     return {
       kind: 'step',
       percent: Math.min(100, (Number(step.index) / Number(step.total)) * 100),
+      awaitingCompletion: pendingCompletion((Number(step.index) / Number(step.total)) * 100),
       estimated: false,
       index: Number(step.index),
       total: Number(step.total),

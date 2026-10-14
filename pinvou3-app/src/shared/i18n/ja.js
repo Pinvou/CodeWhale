@@ -435,6 +435,7 @@ const jaBase = {
           taskCancel:'キャンセル', taskClose:'閉じる', taskMore:'その他', taskExpand:'ログを表示', taskCollapse:'ログを閉じる', taskNoOutput:'（出力はありません）', taskCancelFailed:(m)=>`キャンセルが反映されませんでした：${m}`, taskAnswerFailed:(m)=>`この回答は送信されませんでした：${m}`,
           taskProgress:(done,total)=>`${done} / ${total}`, taskSpeed:s=>`${s}/s`, taskEta:d=>`残り約 ${d}`,
           taskProgressEstimated:'推定', taskStep:(i,n)=>`ステップ ${i} / ${n}`,
+          taskAwaitingCompletion:'処理は継続中です。完了の確認を待っています',
           taskLayers:(done,total)=>`イメージレイヤー ${done}/${total}`, taskCopyLog:'詳細をコピー',
           taskOpenLogDir:'ログフォルダーを開く', taskOpenLogDirFailed:(m)=>`ログフォルダーを開けません：${m}`,
           taskExportLog:'ログを書き出す（共有可）', taskExportLogDone:(p)=>`${p} に書き出しました`,
