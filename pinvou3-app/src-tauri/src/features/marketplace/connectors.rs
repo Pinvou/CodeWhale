@@ -7,12 +7,13 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
 
+use crate::platform::filesystem::read_private_data_file;
 use crate::platform::paths;
 
 use super::MarketplaceManager;
 use super::bundle;
+use super::file_lock;
 use super::python_dependencies;
 use super::secrets::{
     SecretResolveError, is_sensitive_key_name, mcp_secret_env_var, mcp_secret_missing_error,
@@ -20,9 +21,19 @@ use super::secrets::{
 };
 use super::types::ToolManifest;
 
-/// mcp.json 读-改-写的进程内串行化（四轮评审 M-8）：add/remove 是裸读-改-写，
-/// 并发安装/卸载会交错丢更新；与 store.rs 的 BUNDLES_FILE_LOCK 同一范式。
-static MCP_JSON_LOCK: Mutex<()> = Mutex::new(());
+/// Runs `f` holding the mcp.json cross-process file lock (in-process mutex +
+/// OS lock on `mcp.lock`, `file_lock.rs`, #521): add/remove are bare
+/// read-modify-writes, and concurrent install/uninstall across the GUI and
+/// headless hosts (sharing one `~/.pinvou3`) used to interleave and silently
+/// drop each other's writes (四轮评审 M-8, cross-process half #515). A write
+/// that cannot establish serialization returns `Err` and must be retried by
+/// the caller's transaction — never run unsynchronized.
+pub(crate) fn with_mcp_json_lock<F, R>(f: F) -> Result<R, String>
+where
+    F: FnOnce() -> Result<R, String>,
+{
+    file_lock::with_file_lock(&paths::mcp_config_path(), f)
+}
 
 #[cfg(test)]
 static NEXT_PIP_INSTALL_RESULT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
@@ -52,12 +63,6 @@ fn pip_index_rounds() -> [(&'static str, &'static [&'static str]); 2] {
     ]
 }
 
-pub(crate) fn mcp_json_lock() -> MutexGuard<'static, ()> {
-    MCP_JSON_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 /// 中途崩溃不得留下半写的 mcp.json（幽灵 server，四轮评审 M-8）。
 pub(crate) fn write_json_pretty(path: &Path, value: &serde_json::Value) -> Result<(), String> {
     if let Some(parent) = path.parent() {
@@ -65,7 +70,7 @@ pub(crate) fn write_json_pretty(path: &Path, value: &serde_json::Value) -> Resul
             .map_err(|e| format!("创建 {} 失败: {e}", parent.display()))?;
     }
     let json = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
-    deepseek_tui::utils::write_atomic(path, json.as_bytes())
+    crate::platform::filesystem::atomic_write_private(path, json.as_bytes())
         .map_err(|e| format!("写入 {} 失败: {e}", path.display()))
 }
 
@@ -93,11 +98,11 @@ pub(super) fn load_mcp_json_for_reconcile() -> Result<(PathBuf, serde_json::Valu
     if !mcp_path.is_file() {
         return Ok((mcp_path, default_mcp_json()));
     }
-    let content = std::fs::read_to_string(&mcp_path).map_err(|e| format!("读取 mcp.json: {e}"))?;
+    let content = read_private_data_file(&mcp_path).map_err(|e| format!("读取 mcp.json: {e}"))?;
     match serde_json::from_str(&content) {
         Ok(mcp) => Ok((mcp_path, mcp)),
         Err(error) => {
-            backup_corrupt_mcp_json(&mcp_path, &content);
+            super::backup_corrupt_json_file(&mcp_path, "mcp.json.corrupt", &content);
             Err(format!(
                 "mcp.json is unparseable; the original file was backed up next to it \
                  (mcp.json.corrupt.<unix-time>) and left untouched — fix or remove it and \
@@ -109,27 +114,29 @@ pub(super) fn load_mcp_json_for_reconcile() -> Result<(PathBuf, serde_json::Valu
 
 /// Whether mcp.json exists on disk but cannot currently be parsed (or read).
 /// The startup maintenance keeps every writer off such a file — in
-/// particular the builtin upsert's repair loader, which would otherwise
-/// reset it to a builtin-only skeleton in the same boot that the reconcile
-/// just backed it up. Sessions degrade to an empty MCP pool instead
-/// (engine `load_config` failure → empty pool), so preserving the file never
-/// blocks a session; the recovery path is the backup plus the timeline note.
+/// particular the builtin repair loader reads through `unwrap_or_default`, so a
+/// permission failure would reset the file to an empty skeleton. Sessions
+/// degrade to an empty MCP pool instead (engine `load_config` failure → empty
+/// pool), so preserving the file never blocks a session; the recovery path is
+/// the backup plus the timeline note.
+/// try 锁读取（#521）：锁被占用/不可用时退化为不落盘的解锁快照——探测本身
+/// 永远只读，竞态下与既有解锁读同口径，bounded，绝不阻塞在 peer 临界区上。
 pub(crate) fn mcp_json_unparseable() -> bool {
     let mcp_path = paths::mcp_config_path();
-    if !mcp_path.is_file() {
-        return false;
-    }
-    // An unreadable file is treated like an unparseable one: the builtin
-    // repair loader reads through `unwrap_or_default`, so a permission
-    // failure would reset the file to an empty skeleton.
-    std::fs::read_to_string(&mcp_path)
-        .ok()
-        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
-        .is_none()
-}
-
-fn backup_corrupt_mcp_json(mcp_path: &Path, content: &str) {
-    super::backup_corrupt_json_file(mcp_path, "mcp.json.corrupt", content);
+    file_lock::try_file_lock_for_read(&mcp_path, || {
+        if !mcp_path.is_file() {
+            return Ok(false);
+        }
+        // An unreadable file is treated like an unparseable one: the builtin
+        // repair loader reads through `unwrap_or_default`, so a permission
+        // failure would reset the file to an empty skeleton.
+        // Hardened read — family rationale on `open_private_data_file_within`.
+        Ok(read_private_data_file(&mcp_path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+            .is_none())
+    })
+    .unwrap_or(false)
 }
 
 impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S> {
@@ -182,7 +189,7 @@ impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S
         //    the official source at pypi.org. The default index going first is
         //    deliberate — it respects the user's own pip.conf/corporate index;
         //    the mirror is only the last fallback.
-        let run = |extra: &[&str]| -> std::io::Result<std::process::Output> {
+        let run = |extra: &[&str], index_args: &[&str]| -> std::io::Result<std::process::Output> {
             let mut cmd = std::process::Command::new(python_cmd);
             cmd.args([
                 "-m",
@@ -192,6 +199,7 @@ impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S
                 "--no-input",
             ]);
             cmd.args(extra);
+            cmd.args(index_args);
             cmd.args(deps);
             cmd.output()
         };
@@ -213,10 +221,7 @@ impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S
         for (round_label, index_args) in pip_index_rounds() {
             let mut last_err = String::new();
             for extra in attempts {
-                let mut args: Vec<&str> = Vec::with_capacity(extra.len() + index_args.len());
-                args.extend(extra.iter().copied());
-                args.extend(index_args.iter().copied());
-                match run(&args) {
+                match run(extra, index_args) {
                     Ok(o) if o.status.success() => return Ok(()),
                     Ok(o) => {
                         last_err = String::from_utf8_lossy(&o.stderr)
@@ -250,32 +255,33 @@ impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S
         server_dir: &std::path::Path,
         python_environment: Option<&python_dependencies::InstalledPythonEnvironment>,
     ) -> Result<(), String> {
-        let _guard = mcp_json_lock();
-        // An unparseable mcp.json is backed up and refused, never reset: an
-        // install that silently reset the file would destroy the custom
-        // entries and preserved user fields the startup reconcile exists to
-        // heal. The transaction in `install_inner` rolls the install back, so
-        // the user fixes or removes the file and retries.
-        let (mcp_path, mut mcp) = load_mcp_json_for_reconcile()?;
+        with_mcp_json_lock(|| {
+            // An unparseable mcp.json is backed up and refused, never reset: an
+            // install that silently reset the file would destroy the custom
+            // entries and preserved user fields the startup reconcile exists to
+            // heal. The transaction in `install_inner` rolls the install back, so
+            // the user fixes or removes the file and retries.
+            let (mcp_path, mut mcp) = load_mcp_json_for_reconcile()?;
 
-        let servers = mcp
-            .get_mut("servers")
-            .and_then(|s| s.as_object_mut())
-            .ok_or("mcp.json 格式错误")?;
+            let servers = mcp
+                .get_mut("servers")
+                .and_then(|s| s.as_object_mut())
+                .ok_or("mcp.json 格式错误")?;
 
-        if !manifest.servers.is_empty() {
-            self.add_remote_to_mcp_json(manifest, user_config, servers)?;
-        } else {
-            self.add_local_to_mcp_json(
-                manifest,
-                user_config,
-                server_dir,
-                python_environment,
-                servers,
-            )?;
-        }
+            if !manifest.servers.is_empty() {
+                self.add_remote_to_mcp_json(manifest, user_config, servers)?;
+            } else {
+                self.add_local_to_mcp_json(
+                    manifest,
+                    user_config,
+                    server_dir,
+                    python_environment,
+                    servers,
+                )?;
+            }
 
-        write_json_pretty(&mcp_path, &mcp)
+            write_json_pretty(&mcp_path, &mcp)
+        })
     }
 
     /// 远程工具路径:遍历 manifest.servers[],写 url/headers/oauth/env_headers/bearer。
@@ -291,6 +297,32 @@ impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S
             servers.insert(server.name.clone(), entry);
         }
         Ok(())
+    }
+
+    /// Shared arm of the mcp.json entry builders for one secret placeholder.
+    /// `Ok(Some(placeholder))` — wire it; `Ok(None)` — the credential is
+    /// absent and `degrade_unresolved_secrets` allows skipping the wiring
+    /// (startup reconcile); `Err` — a required secret is missing (install
+    /// mode) or the credential store itself failed (both modes) — the caller
+    /// refuses the build so a transiently locked keyring is never baked into
+    /// a permanently unwired entry. Collapses the per-site 4-arm match over
+    /// `try_resolve_secret_placeholder`, which carries the
+    /// error-classification doctrine.
+    fn resolve_entry_secret(
+        &self,
+        tool_id: &str,
+        target: &str,
+        key: &str,
+        user_config: &HashMap<String, String>,
+        legacy_env: &HashMap<String, String>,
+        degrade_unresolved_secrets: bool,
+    ) -> Result<Option<String>, String> {
+        match self.try_resolve_secret_placeholder(tool_id, target, key, user_config, legacy_env) {
+            Ok(Some(placeholder)) => Ok(Some(placeholder)),
+            Ok(None) if degrade_unresolved_secrets => Ok(None),
+            Ok(None) => Err(mcp_secret_missing_error(tool_id, key)),
+            Err(error) => Err(error.to_string()),
+        }
     }
 
     /// Build the fresh-install mcp.json entry for one remote server (url/headers/oauth).
@@ -426,22 +458,19 @@ impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S
 
         // 2. manifest.secret_headers 声明的敏感 header（不落明文）
         for secret in &manifest.secret_headers {
-            match self.try_resolve_secret_placeholder(
+            match self.resolve_entry_secret(
                 &manifest.id,
                 bundle::keyring_target(bundle::CredentialTarget::Bearer),
                 &secret.source_key,
                 user_config,
                 &manifest.env,
+                degrade_unresolved_secrets,
             ) {
                 // The user's current input must still be persisted to the
                 // store; the resolved placeholder value itself is unused here.
                 Ok(Some(_)) => {}
-                // An absent credential degrades at startup; a store failure
-                // propagates in both modes so a locked keyring is never baked
-                // into an unwired entry.
-                Ok(None) if degrade_unresolved_secrets => continue,
-                Ok(None) => return Err(mcp_secret_missing_error(&manifest.id, &secret.source_key)),
-                Err(error) => return Err(error.to_string()),
+                Ok(None) => continue,
+                Err(error) => return Err(error),
             }
             set_remote_secret_header(
                 &mut env_headers,
@@ -460,12 +489,13 @@ impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S
         if headers.is_empty() && env_headers.is_empty() && bearer_token_env_var.is_none() {
             for k in manifest.env.keys() {
                 if is_sensitive_key_name(k) {
-                    match self.try_resolve_secret_placeholder(
+                    match self.resolve_entry_secret(
                         &manifest.id,
                         bundle::keyring_target(bundle::CredentialTarget::Bearer),
                         k,
                         user_config,
                         &manifest.env,
+                        degrade_unresolved_secrets,
                     ) {
                         // The resolved value is persisted to the store/registry
                         // inside `try_resolve_secret_placeholder`; the entry
@@ -479,9 +509,8 @@ impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S
                                 k,
                             )?;
                         }
-                        Ok(None) if degrade_unresolved_secrets => continue,
-                        Ok(None) => return Err(mcp_secret_missing_error(&manifest.id, k)),
-                        Err(error) => return Err(error.to_string()),
+                        Ok(None) => continue,
+                        Err(error) => return Err(error),
                     }
                     break;
                 }
@@ -591,26 +620,30 @@ impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S
     ) -> Result<(), String> {
         let (command, args) =
             Self::managed_python_runtime_fields(manifest, server_dir, environment)?;
-        let _guard = mcp_json_lock();
-        let mcp_path = paths::mcp_config_path();
-        let content = std::fs::read_to_string(&mcp_path)
-            .map_err(|error| format!("read mcp.json: {error}"))?;
-        let mut mcp: serde_json::Value =
-            serde_json::from_str(&content).map_err(|error| format!("parse mcp.json: {error}"))?;
-        let entry = mcp
-            .get_mut("servers")
-            .and_then(serde_json::Value::as_object_mut)
-            .and_then(|servers| servers.get_mut(&manifest.id))
-            .and_then(serde_json::Value::as_object_mut)
-            .ok_or_else(|| format!("mcp.json has no local server entry for '{}'", manifest.id))?;
-        let command = serde_json::Value::String(command);
-        let args = serde_json::to_value(args).map_err(|error| error.to_string())?;
-        if entry.get("command") == Some(&command) && entry.get("args") == Some(&args) {
-            return Ok(());
-        }
-        entry.insert("command".to_string(), command);
-        entry.insert("args".to_string(), args);
-        write_json_pretty(&mcp_path, &mcp)
+        with_mcp_json_lock(|| {
+            let mcp_path = paths::mcp_config_path();
+            // Hardened read — family rationale on `open_private_data_file_within`.
+            let content = read_private_data_file(&mcp_path)
+                .map_err(|error| format!("read mcp.json: {error}"))?;
+            let mut mcp: serde_json::Value = serde_json::from_str(&content)
+                .map_err(|error| format!("parse mcp.json: {error}"))?;
+            let entry = mcp
+                .get_mut("servers")
+                .and_then(serde_json::Value::as_object_mut)
+                .and_then(|servers| servers.get_mut(&manifest.id))
+                .and_then(serde_json::Value::as_object_mut)
+                .ok_or_else(|| {
+                    format!("mcp.json has no local server entry for '{}'", manifest.id)
+                })?;
+            let command = serde_json::Value::String(command);
+            let args = serde_json::to_value(args).map_err(|error| error.to_string())?;
+            if entry.get("command") == Some(&command) && entry.get("args") == Some(&args) {
+                return Ok(());
+            }
+            entry.insert("command".to_string(), command);
+            entry.insert("args".to_string(), args);
+            write_json_pretty(&mcp_path, &mcp)
+        })
     }
 
     /// Local tool layout: command/args/env. Python tools use the bundled python (Windows)
@@ -691,54 +724,56 @@ impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S
                     // the install writer filled from the user's input. An
                     // absent credential degrades; a store failure fails the
                     // rebuild so the next startup retries instead of silently
-                    // dropping the wiring.
-                    match self.try_resolve_secret_placeholder(
+                    // dropping the wiring. (The enclosing if guarantees
+                    // `degrade`, so `Ok(None)` always skips the wiring.)
+                    match self.resolve_entry_secret(
                         &manifest.id,
                         "env",
                         &field.key,
                         user_config,
                         &manifest.env,
+                        degrade_unresolved_secrets,
                     ) {
                         Ok(Some(placeholder)) => {
                             env.insert(field.key.clone(), placeholder);
                         }
                         Ok(None) => {}
-                        Err(error) => return Err(error.to_string()),
+                        Err(error) => return Err(error),
                     }
                 }
             }
         }
         for secret in &manifest.secret_env {
-            match self.try_resolve_secret_placeholder(
+            match self.resolve_entry_secret(
                 &manifest.id,
                 "env",
                 &secret.key,
                 user_config,
                 &manifest.env,
+                degrade_unresolved_secrets,
             ) {
                 Ok(Some(placeholder)) => {
                     env.insert(secret.key.clone(), placeholder);
                 }
-                Ok(None) if degrade_unresolved_secrets => continue,
-                Ok(None) => return Err(mcp_secret_missing_error(&manifest.id, &secret.key)),
-                Err(error) => return Err(error.to_string()),
+                Ok(None) => continue,
+                Err(error) => return Err(error),
             }
         }
         for key in manifest.env.keys().filter(|k| is_sensitive_key_name(k)) {
             if !env.contains_key(key) {
-                match self.try_resolve_secret_placeholder(
+                match self.resolve_entry_secret(
                     &manifest.id,
                     "env",
                     key,
                     user_config,
                     &manifest.env,
+                    degrade_unresolved_secrets,
                 ) {
                     Ok(Some(placeholder)) => {
                         env.insert(key.clone(), placeholder);
                     }
-                    Ok(None) if degrade_unresolved_secrets => continue,
-                    Ok(None) => return Err(mcp_secret_missing_error(&manifest.id, key)),
-                    Err(error) => return Err(error.to_string()),
+                    Ok(None) => continue,
+                    Err(error) => return Err(error),
                 }
             }
         }
@@ -774,49 +809,51 @@ impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S
                 object.insert(key, value);
             }
         }
-        let _guard = mcp_json_lock();
-        let (mcp_path, mut mcp) = load_mcp_json_for_reconcile()?;
-        let servers = mcp
-            .get_mut("servers")
-            .and_then(|s| s.as_object_mut())
-            .ok_or("mcp.json 格式错误")?;
-        servers.insert(manifest.id.clone(), entry);
-        write_json_pretty(&mcp_path, &mcp)
+        with_mcp_json_lock(|| {
+            let (mcp_path, mut mcp) = load_mcp_json_for_reconcile()?;
+            let servers = mcp
+                .get_mut("servers")
+                .and_then(|s| s.as_object_mut())
+                .ok_or("mcp.json 格式错误")?;
+            servers.insert(manifest.id.clone(), entry);
+            write_json_pretty(&mcp_path, &mcp)
+        })
     }
 
     /// 升级迁移：为已安装的内置 Python MCP 刷新依赖 bootstrap。只改 command/args，
     /// 保留既有 env/凭据占位及未知字段，避免用空 user_config 重建条目时丢用户配置。
     /// 返回是否实际改写了 mcp.json：条目已是目标形态时不写盘（Ok(false)），避免每次
     pub(super) fn remove_from_mcp_json(&self, tool_id: &str) -> Result<(), String> {
-        let _guard = mcp_json_lock();
-        let mcp_path = paths::mcp_config_path();
-        if !mcp_path.is_file() {
-            return Ok(());
-        }
-        // An unparseable mcp.json is backed up and refused, never reset. This
-        // writer is reachable at boot from the retired-tool cleanup and the
-        // Python-repair downgrade, and from the UI uninstall: a reset there
-        // would destroy the file before (cleanup) or despite (downgrade,
-        // uninstall) the reconcile's backup — the callers' transactions roll
-        // back instead, and the cleanup simply retries on a later boot.
-        let (mcp_path, mut mcp) = load_mcp_json_for_reconcile()?;
+        with_mcp_json_lock(|| {
+            let mcp_path = paths::mcp_config_path();
+            if !mcp_path.is_file() {
+                return Ok(());
+            }
+            // An unparseable mcp.json is backed up and refused, never reset. This
+            // writer is reachable at boot from the retired-tool cleanup and the
+            // Python-repair downgrade, and from the UI uninstall: a reset there
+            // would destroy the file before (cleanup) or despite (downgrade,
+            // uninstall) the reconcile's backup — the callers' transactions roll
+            // back instead, and the cleanup simply retries on a later boot.
+            let (mcp_path, mut mcp) = load_mcp_json_for_reconcile()?;
 
-        if let Some(servers) = mcp.get_mut("servers").and_then(|s| s.as_object_mut()) {
-            // 先尝试加载 manifest 看是否有 servers 字段（远程工具有多条目）
-            if let Some(manifest) = self.load_manifest(tool_id) {
-                if !manifest.servers.is_empty() {
-                    for server in &manifest.servers {
-                        servers.remove(&server.name);
+            if let Some(servers) = mcp.get_mut("servers").and_then(|s| s.as_object_mut()) {
+                // 先尝试加载 manifest 看是否有 servers 字段（远程工具有多条目）
+                if let Some(manifest) = self.load_manifest(tool_id) {
+                    if !manifest.servers.is_empty() {
+                        for server in &manifest.servers {
+                            servers.remove(&server.name);
+                        }
+                    } else {
+                        servers.remove(tool_id);
                     }
                 } else {
                     servers.remove(tool_id);
                 }
-            } else {
-                servers.remove(tool_id);
             }
-        }
 
-        write_json_pretty(&mcp_path, &mcp)
+            write_json_pretty(&mcp_path, &mcp)
+        })
     }
 
     /// Startup reconciliation for the given remote servers of one tool (callers pass
@@ -840,68 +877,73 @@ impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S
         manifest: &ToolManifest,
         servers: &[&super::types::RemoteServer],
     ) -> Result<Option<String>, String> {
-        let _guard = mcp_json_lock();
-        let (mcp_path, mut mcp) = load_mcp_json_for_reconcile()?;
-        let servers_map = mcp
-            .get_mut("servers")
-            .and_then(|s| s.as_object_mut())
-            .ok_or("mcp.json 格式错误")?;
+        with_mcp_json_lock(|| {
+            let (mcp_path, mut mcp) = load_mcp_json_for_reconcile()?;
+            let servers_map = mcp
+                .get_mut("servers")
+                .and_then(|s| s.as_object_mut())
+                .ok_or("mcp.json 格式错误")?;
 
-        let mut changed: Vec<String> = Vec::new();
-        for server in servers {
-            if super::ENGINE_OWNED_MCP_SERVER_KEYS.contains(&server.name.as_str()) {
-                // Unreachable via reconcile_installed_mcp_entries (the caller
-                // filters these with a timeline note); kept as defense in depth
-                // so a direct caller can never fight the boot-time builtin upsert.
-                continue;
-            }
-            match servers_map
-                .get_mut(&server.name)
-                .and_then(|entry| entry.as_object_mut())
-            {
-                // Present as an object: realign in place when the manifest-derived
-                // shape drifted. A non-object value takes the restore branch below.
-                Some(object) => {
-                    if !remote_entry_matches_manifest(object, server) {
-                        align_remote_entry_fields(object, server);
-                        changed.push(format!("realigned remote entry '{}'", server.name));
+            let mut changed: Vec<String> = Vec::new();
+            for server in servers {
+                if super::ENGINE_OWNED_MCP_SERVER_KEYS.contains(&server.name.as_str()) {
+                    // Unreachable via reconcile_installed_mcp_entries (the caller
+                    // filters these with a timeline note); kept as defense in depth
+                    // so a direct caller can never fight the boot-time builtin upsert.
+                    continue;
+                }
+                match servers_map
+                    .get_mut(&server.name)
+                    .and_then(|entry| entry.as_object_mut())
+                {
+                    // Present as an object: realign in place when the manifest-derived
+                    // shape drifted. A non-object value takes the restore branch below.
+                    Some(object) => {
+                        if !remote_entry_matches_manifest(object, server) {
+                            align_remote_entry_fields(object, server);
+                            changed.push(format!("realigned remote entry '{}'", server.name));
+                        }
+                    }
+                    _ => {
+                        let entry = self.build_remote_server_entry(
+                            manifest,
+                            server,
+                            &HashMap::new(),
+                            true,
+                        )?;
+                        servers_map.insert(server.name.clone(), entry.clone());
+                        // Say what the restore could not do instead of reporting an
+                        // unqualified success that 401s on first use.
+                        let mut note = format!("restored missing remote entry '{}'", server.name);
+                        if manifest
+                            .config_fields
+                            .iter()
+                            .any(|field| field.target == "bearer" && !field.secret)
+                        {
+                            note.push_str(
+                                "; its non-secret bearer key is not stored and could not be \
+                                 re-derived — reinstall the tool to re-enter it",
+                            );
+                        }
+                        let missing_secrets = entry_secret_keys_without_wiring(manifest, &entry);
+                        if !missing_secrets.is_empty() {
+                            note.push_str(&format!(
+                                "; no stored credential for {} — restored without that auth \
+                                 wiring; reinstall the tool to re-enter it",
+                                missing_secrets.join(", ")
+                            ));
+                        }
+                        changed.push(note);
                     }
                 }
-                _ => {
-                    let entry =
-                        self.build_remote_server_entry(manifest, server, &HashMap::new(), true)?;
-                    servers_map.insert(server.name.clone(), entry.clone());
-                    // Say what the restore could not do instead of reporting an
-                    // unqualified success that 401s on first use.
-                    let mut note = format!("restored missing remote entry '{}'", server.name);
-                    if manifest
-                        .config_fields
-                        .iter()
-                        .any(|field| field.target == "bearer" && !field.secret)
-                    {
-                        note.push_str(
-                            "; its non-secret bearer key is not stored and could not be \
-                             re-derived — reinstall the tool to re-enter it",
-                        );
-                    }
-                    let missing_secrets = entry_secret_keys_without_wiring(manifest, &entry);
-                    if !missing_secrets.is_empty() {
-                        note.push_str(&format!(
-                            "; no stored credential for {} — restored without that auth \
-                             wiring; reinstall the tool to re-enter it",
-                            missing_secrets.join(", ")
-                        ));
-                    }
-                    changed.push(note);
-                }
             }
-        }
 
-        if changed.is_empty() {
-            return Ok(None);
-        }
-        write_json_pretty(&mcp_path, &mcp)?;
-        Ok(Some(changed.join("; ")))
+            if changed.is_empty() {
+                return Ok(None);
+            }
+            write_json_pretty(&mcp_path, &mcp)?;
+            Ok(Some(changed.join("; ")))
+        })
     }
 
     // Preserved user fields are folded into the rebuild itself
@@ -911,16 +953,19 @@ impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S
 }
 
 /// Read-only snapshot of the current mcp.json `servers` map for reconciliation
-/// decisions, taken without `mcp_json_lock`. It gates *whether* a repair is
+/// decisions, taken without `with_mcp_json_lock`. It gates *whether* a repair is
 /// attempted and sources the user fields preserved across a rebuilt local
 /// entry; the writes themselves re-read the file under the lock, and every
 /// concurrent marketplace writer is excluded by
 /// MARKETPLACE_TRANSACTION_LOCK (the boot-path writers run sequentially on the
-/// same thread), so the merge cannot clobber a concurrent change.
+/// same thread), so the merge cannot clobber a concurrent change to *other*
+/// entries — the rebuilt entry's preserved user fields still come from this
+/// snapshot, so a peer's concurrent edit of that same entry can be overwritten
+/// (same-entry last-writer-wins).
 pub(super) fn read_mcp_servers_snapshot() -> serde_json::Map<String, serde_json::Value> {
     let mcp_path = paths::mcp_config_path();
     let parsed: serde_json::Value = if mcp_path.is_file() {
-        std::fs::read_to_string(&mcp_path)
+        read_private_data_file(&mcp_path)
             .ok()
             .and_then(|content| serde_json::from_str(&content).ok())
             .unwrap_or_else(default_mcp_json)

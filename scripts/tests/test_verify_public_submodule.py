@@ -15,7 +15,7 @@ OTHER_COMMIT = "2222222222222222222222222222222222222222"
 TAG_OBJECT = "3333333333333333333333333333333333333333"
 # 与 verify-public-submodule.sh 的常量保持一致：2026-10-02 起处于两次 rN 收口
 # 之间的过渡期，TRANSITION_BASELINE 钉在 r3 收口 commit（与脚本同值）；默认发布
-# 检查要求 gitlink 等于维护头且领先 tag，登记快照另有真实 Git 历史测试。下一次 rN 收口时，把此处的 tag 名/钉点与脚本
+# 检查要求 gitlink 等于维护头且领先 tag，不支持登记快照豁免。下一次 rN 收口时，把此处的 tag 名/钉点与脚本
 # 常量同步推进（新 tag、清空 TRANSITION_BASELINE），并恢复三方相等断言。
 BASELINE = "61cb769be5b33abc64f64da4272f5b39a8b6c1fd"
 
@@ -31,6 +31,7 @@ class PublicSubmoduleVerifierTests(unittest.TestCase):
             bin_dir = temp / "bin"
             bin_dir.mkdir()
             state_file = temp / "ls-remote-attempts"
+            calls_file = temp / "git-calls"
 
             fake_git = bin_dir / "git"
             fake_git.write_text(
@@ -38,6 +39,7 @@ class PublicSubmoduleVerifierTests(unittest.TestCase):
                     f"""\
                     #!/usr/bin/env bash
                     set -euo pipefail
+                    printf '%s\\n' git >> "$PINVOU_FAKE_GIT_CALLS"
 
                     while [[ "${{1:-}}" == "-c" ]]; do shift 2; done
 
@@ -45,7 +47,7 @@ class PublicSubmoduleVerifierTests(unittest.TestCase):
                       shift 2
                     fi
 
-                    if [[ "$PINVOU_FAKE_GIT_SCENARIO" == "snapshot_ambient_askpass" && ( "${{1:-}}" == "ls-remote" || "${{1:-}}" == "fetch" ) ]]; then
+                    if [[ "$PINVOU_FAKE_GIT_SCENARIO" == "ambient_askpass" && ( "${{1:-}}" == "ls-remote" || "${{1:-}}" == "fetch" ) ]]; then
                       if [[ -n "${{GIT_ASKPASS:-}}" || -n "${{SSH_ASKPASS:-}}" ]]; then exit 128; fi
                     fi
 
@@ -64,9 +66,6 @@ class PublicSubmoduleVerifierTests(unittest.TestCase):
                         gitlink='{GITLINK}'
                         if [[ "$PINVOU_FAKE_GIT_SCENARIO" == "tag_caught_up" ]]; then
                           gitlink='{BASELINE}'
-                        fi
-                        if [[ "$PINVOU_FAKE_GIT_SCENARIO" == "snapshot_unregistered" ]]; then
-                          gitlink='{OTHER_COMMIT}'
                         fi
                         printf '160000 %s 0\\tCodeWhale\\n' "$gitlink"
                         ;;
@@ -91,7 +90,7 @@ class PublicSubmoduleVerifierTests(unittest.TestCase):
                         tag='{BASELINE}'
                         case "$PINVOU_FAKE_GIT_SCENARIO" in
                           branch_mismatch) branch='{OTHER_COMMIT}' ;;
-                          snapshot_advanced|closed_advanced) branch='{OTHER_COMMIT}' ;;
+                          maintenance_advanced|closed_advanced) branch='{OTHER_COMMIT}' ;;
                           closed_aligned) tag='{GITLINK}' ;;
                           annotated) tag='{TAG_OBJECT}' ;;
                           tag_drifted) tag='{OTHER_COMMIT}' ;;
@@ -109,24 +108,6 @@ class PublicSubmoduleVerifierTests(unittest.TestCase):
                           printf '%s\\trefs/tags/pinvou-v0.9.12-r3^{{}}\\n' '{BASELINE}'
                         fi
                         ;;
-                      init) exit 0 ;;
-                      fetch)
-                        if [[ "$PINVOU_FAKE_GIT_SCENARIO" == "snapshot_transport" ]]; then exit 128; fi
-                        exit 0 ;;
-                      rev-parse)
-                        if [[ "$PINVOU_FAKE_GIT_SCENARIO" == "snapshot_fetched_tag_drift" ]]; then
-                          printf '%s\\n' '{OTHER_COMMIT}'
-                        else printf '%s\\n' '{BASELINE}'; fi
-                        ;;
-                      cat-file)
-                        if [[ "$PINVOU_FAKE_GIT_SCENARIO" == "snapshot_noncommit" ]]; then
-                          printf 'tree\\n'
-                        else printf 'commit\\n'; fi
-                        ;;
-                      merge-base)
-                        if [[ "$PINVOU_FAKE_GIT_SCENARIO" == "snapshot_candidate" && "${{3:-}}" == '{GITLINK}' ]]; then exit 1; fi
-                        if [[ "$PINVOU_FAKE_GIT_SCENARIO" == "snapshot_wrong_history" && "${{3:-}}" == '{BASELINE}' ]]; then exit 1; fi
-                        exit 0 ;;
                       *)
                         exit 2
                         ;;
@@ -155,11 +136,12 @@ class PublicSubmoduleVerifierTests(unittest.TestCase):
             else:
                 env["PATH"] = f"{bin_dir}:{env['PATH']}"
                 command = [BASH, str(verifier), *arguments]
-            if scenario == "snapshot_ambient_askpass":
+            if scenario == "ambient_askpass":
                 env["GIT_ASKPASS"] = "unused-test-credential-helper"
                 env["SSH_ASKPASS"] = "unused-test-credential-helper"
             env["PINVOU_FAKE_GIT_SCENARIO"] = scenario
             env["PINVOU_FAKE_GIT_STATE"] = str(state_file)
+            env["PINVOU_FAKE_GIT_CALLS"] = str(calls_file)
             result = subprocess.run(
                 command,
                 cwd=ROOT,
@@ -170,7 +152,8 @@ class PublicSubmoduleVerifierTests(unittest.TestCase):
                 capture_output=True,
                 check=False,
             )
-            attempts = int(state_file.read_text(encoding="utf-8").strip())
+            attempts = int(state_file.read_text(encoding="utf-8").strip()) if state_file.exists() else 0
+            result.git_calls = len(calls_file.read_text(encoding="utf-8").splitlines()) if calls_file.exists() else 0
             return result, attempts
 
     def test_transition_gitlink_tracks_branch_and_aheads_of_pinned_tag(self):
@@ -225,26 +208,36 @@ class PublicSubmoduleVerifierTests(unittest.TestCase):
         self.assertEqual(attempts, 3)
         self.assertIn("3 次尝试", result.stderr)
 
-    def test_registered_snapshot_allows_maintenance_to_advance(self):
-        result, _ = self._run("snapshot_advanced", ("--registered-snapshot",))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("冻结审核校验通过", result.stdout)
+    def test_default_strict_check_rejects_advanced_maintenance_head(self):
+        result, attempts = self._run("maintenance_advanced")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(attempts, 1)
+        self.assertIn("pinvou3-clean", result.stderr)
+        self.assertIn(OTHER_COMMIT, result.stderr)
+        self.assertIn(GITLINK, result.stderr)
 
-    def test_public_operations_ignore_ambient_askpass(self):
-        result, _ = self._run("snapshot_ambient_askpass", ("--registered-snapshot",))
+    def test_public_operations_ignore_ambient_askpass_by_default(self):
+        result, attempts = self._run("ambient_askpass")
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(attempts, 1)
+        self.assertIn("过渡期校验通过", result.stdout)
 
-    def test_snapshot_rejects_unregistered_or_unproven_public_history(self):
-        for scenario in ["snapshot_unregistered", "snapshot_candidate", "snapshot_wrong_history", "snapshot_noncommit", "snapshot_fetched_tag_drift", "snapshot_transport"]:
-            with self.subTest(scenario=scenario):
-                result, _ = self._run(scenario, ("--registered-snapshot",))
-                self.assertNotEqual(result.returncode, 0, result.stdout)
+    def test_registered_snapshot_argument_is_rejected_before_any_git_call(self):
+        result, attempts = self._run("aligned", ("--registered-snapshot",))
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(attempts, 0)
+        self.assertEqual(result.git_calls, 0)
+        self.assertIn("unknown argument: --registered-snapshot", result.stderr)
 
-    def test_closed_release_keeps_three_way_equality_in_snapshot_mode(self):
-        result, _ = self._run("closed_aligned", ("--registered-snapshot",), closed=True)
+    def test_closed_release_keeps_default_three_way_equality(self):
+        result, attempts = self._run("closed_aligned", closed=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        result, _ = self._run("closed_advanced", ("--registered-snapshot",), closed=True)
-        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(attempts, 1)
+        self.assertIn(f"pinvou3-clean = pinvou-v0.9.12-r3 = {GITLINK}", result.stdout)
+        result, attempts = self._run("closed_advanced", closed=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(attempts, 1)
+        self.assertIn("pinvou3-clean", result.stderr)
 
 
 if __name__ == "__main__":

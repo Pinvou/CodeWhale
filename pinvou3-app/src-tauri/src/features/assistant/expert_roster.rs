@@ -121,7 +121,13 @@ impl ExpertRosterSnapshot {
                     // 对存储描述的子串匹配永远失配（字面 `<` 查询匹配不到
                     // `\u003c` 文本），还往 overlay 塞 `\u003c` 噪声。正文
                     // （instructions）是卡片的产品本体，不动。
-                    description: Some(bounded_with_ellipsis(
+                    // Both parts of `composed` already had invisible chars
+                    // stripped, so the strip inside bounded_visible is an
+                    // idempotent no-op here — equivalent to a pure
+                    // length-capped truncation; route through the personas
+                    // bounded_visible helper (same as mcp_inventory) instead
+                    // of keeping a local copy.
+                    description: Some(crate::features::personas::bounded_visible(
                         &composed,
                         PROFILE_DESCRIPTION_CHAR_LIMIT,
                     )),
@@ -210,17 +216,6 @@ const EXPERT_QUERY_CHAR_LIMIT: usize = 4096;
 const EXPERT_QUERY_HEAD_CHARS: usize = 3072;
 const EXPERT_QUERY_TAIL_CHARS: usize = EXPERT_QUERY_CHAR_LIMIT - EXPERT_QUERY_HEAD_CHARS;
 
-/// 按 char 计数限长并如实标注：超出 `limit` 个字符截断并追加 `…`。
-fn bounded_with_ellipsis(value: &str, limit: usize) -> String {
-    let truncated = value.chars().count() > limit;
-    let text: String = value.chars().take(limit).collect();
-    if truncated {
-        format!("{text}…")
-    } else {
-        text
-    }
-}
-
 /// 名册投影文本（专家描述）的统一出口：剥不可见字符、限长并如实标注
 /// 截断。这条文本经底座名册 payload（数据通道）与 spawn 的 prompt
 /// overlay（无信封的普通子提示）外发，二者都不在 `<system-reminder>`
@@ -231,8 +226,7 @@ fn bounded_with_ellipsis(value: &str, limit: usize) -> String {
 /// `<` 查询匹配不到 `\u003c` 文本），还往 overlay 塞 `\u003c` 噪声。
 /// 不可见字符剥除与限长如实标注仍然生效。
 fn bounded_profile_text(value: &str) -> String {
-    let sanitized = crate::features::personas::strip_invisible_chars(value);
-    bounded_with_ellipsis(&sanitized, PROFILE_DESCRIPTION_CHAR_LIMIT)
+    crate::features::personas::bounded_visible(value, PROFILE_DESCRIPTION_CHAR_LIMIT)
 }
 
 /// 专家角色 id：`exp-<slug>`。前缀自成命名空间（也与旧版默认角色隔开）；

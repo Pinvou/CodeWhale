@@ -6,17 +6,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use parking_lot::{Mutex, RwLock};
-use sha2::{Digest, Sha256};
 
 use crate::client::normalize_endpoint;
 use crate::model::*;
 use crate::parser::parse_document;
 use crate::store::{DeviceMutationError, DocumentIndexUpdate, RestoreDocumentOutcome, Store};
 use crate::tls::TlsIdentity;
-use crate::{Embedder, MAX_UPLOAD_BYTES, MAX_VECTOR_DIMENSIONS, chunk_text};
+use crate::{
+    Embedder, MAX_UPLOAD_BYTES, MAX_VECTOR_DIMENSIONS, chunk_text, random_secret, sha256_hex,
+};
 
 pub const MODEL_NAME: &str = "bge-m3";
 
@@ -278,22 +277,21 @@ impl KnowledgeService {
             version: env!("CARGO_PKG_VERSION").to_string(),
             protocol_version: 2,
             tls_ca: self.tls.ca_encoded.clone(),
-            initialized: self.initialized(),
+            // initialized/model 是 2026-10 前客户端的 serde 必需字段,必须继续
+            // 下发真实值(见 model.rs 的兼容说明与 wire_compat_tests)。
+            initialized: self
+                .store
+                .list_devices()
+                .map(|devices| {
+                    devices
+                        .iter()
+                        .any(|device| device.scope.is_owner() && !device.revoked)
+                })
+                .unwrap_or(false),
             ready: self.ready(),
             model_present: self.model_directory_complete(),
             model: MODEL_NAME.to_string(),
         })
-    }
-
-    pub fn initialized(&self) -> bool {
-        self.store
-            .list_devices()
-            .map(|devices| {
-                devices
-                    .iter()
-                    .any(|device| device.scope.is_owner() && !device.revoked)
-            })
-            .unwrap_or(false)
     }
 
     pub fn ready(&self) -> bool {
@@ -334,6 +332,7 @@ impl KnowledgeService {
         self.model_downloading.store(false, Ordering::Release);
     }
 
+    #[cfg(test)]
     pub fn ensure_host_owner(&self, device_name: &str, token: &str) -> Result<DeviceGrant, String> {
         let device_name = normalized_required_name(device_name)?;
         if token.len() < 32 || token.chars().any(char::is_control) {
@@ -453,6 +452,7 @@ impl KnowledgeService {
             .ok_or_else(|| "恢复本机所有者失败".to_string())
     }
 
+    #[cfg(test)]
     pub fn set_owner_device(&self, device_id: &str, owner: bool) -> Result<DeviceGrant, String> {
         Self::set_owner_device_in_store(&self.store, device_id, owner)
     }
@@ -705,6 +705,7 @@ impl KnowledgeService {
             .map_err(|error| error.to_string())
     }
 
+    #[cfg(test)]
     pub fn list_devices(&self) -> Result<Vec<DeviceGrant>, String> {
         self.store.list_devices().map_err(|error| error.to_string())
     }
@@ -766,21 +767,6 @@ impl KnowledgeService {
         self.store
             .create_collection(&name, request.description.as_deref())
             .map_err(|error| error.to_string())
-    }
-
-    pub fn update_collection(
-        &self,
-        id: i64,
-        request: CreateCollectionRequest,
-    ) -> Result<Collection, String> {
-        let name = normalized_name(&request.name, "知识集")?;
-        self.store
-            .update_collection(id, &name, request.description.as_deref())
-            .map_err(|_| "知识集不存在或已删除".to_string())?;
-        self.store
-            .collection(id, false)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "知识集不存在或已删除".to_string())
     }
 
     pub fn trash_collection(&self, id: i64) -> Result<(), String> {
@@ -852,7 +838,7 @@ impl KnowledgeService {
             ));
         }
         let filename = safe_filename(filename)?;
-        let sha256 = hash_bytes(&bytes);
+        let sha256 = sha256_hex(&bytes);
         let relative = PathBuf::from(random_secret(18)).join(&filename);
         let absolute = self.documents_dir.join(&relative);
         write_atomic(&absolute, &bytes)?;
@@ -960,7 +946,7 @@ impl KnowledgeService {
                 ext: ext.as_deref(),
                 storage_path: &relative.to_string_lossy(),
                 size: bytes.len() as i64,
-                sha256: &hash_bytes(&bytes),
+                sha256: &sha256_hex(&bytes),
                 chunks: &prepared.0,
                 vectors: &prepared.1,
             },
@@ -1406,24 +1392,8 @@ impl KnowledgeService {
     }
 }
 
-fn random_secret(bytes: usize) -> String {
-    URL_SAFE_NO_PAD.encode(random_bytes(bytes))
-}
-
-fn random_bytes(bytes: usize) -> Vec<u8> {
-    use rand::Rng;
-    let mut value = vec![0u8; bytes];
-    rand::rng().fill_bytes(&mut value);
-    value
-}
-
 fn hash_secret(value: &str) -> String {
-    hash_bytes(value.as_bytes())
-}
-
-fn hash_bytes(value: &[u8]) -> String {
-    let digest = Sha256::digest(value);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    crate::sha256_hex(value.as_bytes())
 }
 
 fn normalized_name(value: &str, fallback: &str) -> Result<String, String> {
@@ -1448,17 +1418,16 @@ fn is_private_share_endpoint(endpoint: &str) -> bool {
         return false;
     };
     match url.host() {
+        // Share endpoints reject loopback (loopback-rejecting semantics);
+        // the rest of the private-network classification is shared with the
+        // join-source check.
         Some(url::Host::Ipv4(address)) => {
-            let value = u32::from(address);
-            let tailnet = value >= u32::from_be_bytes([100, 64, 0, 0])
-                && value <= u32::from_be_bytes([100, 127, 255, 255]);
-            (address.is_private() || address.is_link_local() || tailnet) && !address.is_loopback()
+            crate::net_policy::is_private_network_ip(IpAddr::V4(address), false)
         }
         Some(url::Host::Ipv6(address)) => {
-            let first = address.segments()[0];
-            !address.is_loopback() && ((first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80)
+            crate::net_policy::is_private_network_ip(IpAddr::V6(address), false)
         }
-        Some(url::Host::Domain(host)) => [".local", ".lan", ".internal", ".home.arpa", ".ts.net"]
+        Some(url::Host::Domain(host)) => crate::net_policy::PRIVATE_HOST_SUFFIXES
             .iter()
             .any(|suffix| host.trim_end_matches('.').ends_with(suffix)),
         None => false,
@@ -1592,6 +1561,24 @@ mod tests {
         ] {
             assert!(!is_private_share_endpoint(endpoint), "{endpoint}");
         }
+        // IPv4-mapped addresses classify by their mapped v4 private-network
+        // form (same semantics as the join source).
+        assert!(is_private_share_endpoint(
+            "https://[::ffff:192.168.1.10]:3210"
+        ));
+        assert!(!is_private_share_endpoint("https://[::ffff:8.8.8.8]:3210"));
+        // Mapped boundary classes: link-local and tailnet literals stay
+        // private; a mapped loopback must keep the share gate's reject (only
+        // the join gate accepts loopback sources).
+        assert!(is_private_share_endpoint(
+            "https://[::ffff:169.254.1.5]:3210"
+        ));
+        assert!(is_private_share_endpoint(
+            "https://[::ffff:100.64.0.1]:3210"
+        ));
+        assert!(!is_private_share_endpoint(
+            "https://[::ffff:127.0.0.1]:3210"
+        ));
     }
 
     #[test]
