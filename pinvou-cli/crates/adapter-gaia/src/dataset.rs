@@ -11,10 +11,13 @@ use parquet::record::Field;
 use parquet::schema::types::Type;
 use sha2::{Digest, Sha256};
 
-use crate::{GAIA_DATASET_REVISION, GAIA_LEVEL, GAIA_PARQUET_SIZE};
+use crate::fs_guard::{FileIdentity, is_link_or_reparse};
+use crate::{
+    GAIA_DATASET_REVISION, GAIA_LEVEL, GAIA_PARQUET_PATH, GAIA_PARQUET_SHA256_BYTES,
+    GAIA_PARQUET_SIZE,
+};
 
 pub const GAIA_REVISION_MARKER: &str = ".pinvou-gaia-dataset-revision-v1";
-const GAIA_PARQUET_PATH: &str = "2023/validation/metadata.level1.parquet";
 const MAX_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_PARQUET_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PARQUET_ROWS: usize = 128;
@@ -172,41 +175,6 @@ impl fmt::Debug for GaiaAttachment {
     }
 }
 
-#[cfg(unix)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FileIdentity {
-    device: u64,
-    inode: u64,
-}
-
-#[cfg(windows)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FileIdentity {
-    volume: u32,
-    index: u64,
-}
-
-#[cfg(not(any(unix, windows)))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FileIdentity;
-
-impl FileIdentity {
-    #[cfg(unix)]
-    fn is_valid(self) -> bool {
-        self.inode != 0
-    }
-
-    #[cfg(windows)]
-    fn is_valid(self) -> bool {
-        self.index != 0
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    fn is_valid(self) -> bool {
-        true
-    }
-}
-
 fn same_file_snapshot(
     expected_identity: FileIdentity,
     expected_size: u64,
@@ -269,15 +237,7 @@ pub struct GaiaDataset {
 
 impl GaiaDataset {
     pub fn verify(snapshot_root: &Path) -> Result<Self, GaiaDatasetError> {
-        Self::verify_expected(
-            snapshot_root,
-            GAIA_PARQUET_SIZE,
-            [
-                0x5e, 0x57, 0x4b, 0x0f, 0xae, 0xb4, 0x60, 0x3b, 0x81, 0x6e, 0x42, 0x6c, 0xf7, 0xc7,
-                0xae, 0xfb, 0x1f, 0xe3, 0x98, 0xd3, 0x2f, 0x9c, 0x48, 0x61, 0xe1, 0xa4, 0xe3, 0x30,
-                0x4f, 0x2b, 0x12, 0x81,
-            ],
-        )
+        Self::verify_expected(snapshot_root, GAIA_PARQUET_SIZE, GAIA_PARQUET_SHA256_BYTES)
     }
 
     #[cfg(feature = "test-support")]
@@ -871,34 +831,16 @@ fn ensure_no_link_components(root: &Path, relative: &Path) -> Result<(), GaiaDat
     Ok(())
 }
 
-#[cfg(windows)]
-fn is_link_or_reparse(metadata: &Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-
-    metadata.file_type().is_symlink()
-        || windows_attributes_indicate_reparse(metadata.file_attributes())
-}
-
-#[cfg(windows)]
-fn windows_attributes_indicate_reparse(attributes: u32) -> bool {
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-    attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
-}
-
-#[cfg(not(windows))]
-fn is_link_or_reparse(metadata: &Metadata) -> bool {
-    metadata.file_type().is_symlink()
-}
-
 #[cfg(test)]
 mod level_schema_contract_tests {
     use super::*;
     use std::sync::Arc;
 
-    use arrow_array::{ArrayRef, BinaryArray, Int64Array, RecordBatch, StringArray, StructArray};
-    use arrow_schema::{DataType, Field as ArrowField, Fields, Schema};
-    use parquet::arrow::ArrowWriter;
+    use arrow_array::{ArrayRef, BinaryArray, Int64Array, StringArray, StructArray};
+    use arrow_schema::{DataType, Field as ArrowField, Fields};
     use rand::random;
+
+    use crate::test_fixtures::{FixtureRow, FixtureSchema, write_fixture_schema};
 
     fn write_schema_fixture(level: ArrayRef) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
@@ -907,52 +849,25 @@ mod level_schema_contract_tests {
             random::<u64>()
         ));
         fs::create_dir_all(&root).unwrap();
-        let metadata_names = [
-            "Steps",
-            "Number of steps",
-            "How long did this take?",
-            "Tools",
-            "Number of tools",
-        ];
-        let metadata: ArrayRef = Arc::new(StructArray::new(
-            Fields::from(
-                metadata_names
-                    .iter()
-                    .map(|name| ArrowField::new(*name, DataType::Utf8, true))
-                    .collect::<Vec<_>>(),
-            ),
-            metadata_names
-                .iter()
-                .map(|_| Arc::new(StringArray::from(vec![Some("x")])) as ArrayRef)
-                .collect(),
-            None,
-        ));
-        let columns: Vec<(&str, ArrayRef)> = vec![
-            ("task_id", Arc::new(StringArray::from(vec!["task-1"]))),
-            ("Question", Arc::new(StringArray::from(vec!["question"]))),
-            ("Level", level),
-            ("Final answer", Arc::new(StringArray::from(vec!["answer"]))),
-            ("file_name", Arc::new(StringArray::from(vec![None::<&str>]))),
-            ("file_path", Arc::new(StringArray::from(vec![None::<&str>]))),
-            ("Annotator Metadata", metadata),
-        ];
-        let schema = Arc::new(Schema::new(
-            columns
-                .iter()
-                .map(|(name, array)| ArrowField::new(*name, array.data_type().clone(), true))
-                .collect::<Vec<_>>(),
-        ));
-        let batch = RecordBatch::try_new(
-            schema,
-            columns.into_iter().map(|(_, array)| array).collect(),
-        )
-        .unwrap();
-        let path = root.join("level.parquet");
-        let mut writer =
-            ArrowWriter::try_new(File::create(&path).unwrap(), batch.schema(), None).unwrap();
-        writer.write(&batch).unwrap();
-        writer.close().unwrap();
-        path
+        // The Level column stays parameterized so the verifier's physical-type
+        // contract is exercised directly (Utf8, Int64, Binary, group).
+        write_fixture_schema(
+            &root,
+            "schema-only",
+            &[FixtureRow {
+                task_id: "task-1",
+                question: "question",
+                level: 1,
+                reference: "answer",
+                file_name: None,
+                file_path: None,
+            }],
+            FixtureSchema {
+                level_override: Some(level),
+                ..FixtureSchema::default()
+            },
+        );
+        root.join(GAIA_PARQUET_PATH)
     }
 
     fn level_schema_result(level: ArrayRef) -> Result<(), GaiaDatasetError> {
@@ -985,7 +900,8 @@ mod level_schema_contract_tests {
 
 #[cfg(all(test, windows))]
 mod tests {
-    use super::{FileIdentity, same_file_snapshot, windows_attributes_indicate_reparse};
+    use super::same_file_snapshot;
+    use crate::fs_guard::{FileIdentity, windows_attributes_indicate_reparse};
 
     #[test]
     fn dataset_windows_reparse_attribute_detection_includes_junctions() {
