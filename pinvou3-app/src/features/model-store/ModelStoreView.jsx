@@ -29,7 +29,6 @@ import {
   startDeploy,
   startCardUpdate,
   startDownload,
-  startCardScripts,
   startEnable,
   startStop,
   startUninstall,
@@ -1115,13 +1114,6 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
       <ModelDetailDialog
         onVersions={(record) => { setDetailCardId(null); setVersionsRecord(record); }}
         cardId={detailCardId}
-        cardBusy={!!runningTask(lifecycleTaskKey(detailCardId)) || !!runningTask(downloadTaskKey(detailCardId))}
-        onCardScripts={(record, rollback) => {
-          setDetailCardId(null);
-          runLifecycle({ record, kind: 'card_scripts', title: copy.cardScriptsTask(record.card_name),
-            start: () => startCardScripts(record.card_id, rollback, true),
-            doneText: (result) => result?.changed ? copy.cardScriptsDone : copy.cardScriptsCurrent });
-        }}
         // 只为了权重校验档位：那是卡片元数据，库记录（弹窗自己 fetch 的那份）里
         // 没有这一列。找不到时传 null，弹窗会按最不安全那一档出提示。
         card={mergedModels.find((m) => m.id === detailCardId) ?? null}

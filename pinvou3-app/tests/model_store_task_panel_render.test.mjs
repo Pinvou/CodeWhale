@@ -20,7 +20,7 @@ import { renderToString } from 'react-dom/server';
 import { loadJsx } from './fixtures/jsx-module-hooks.mjs';
 
 const { ModelStoreTaskPanel } = await loadJsx('../src/features/model-store/ModelStoreTaskPanel.jsx', import.meta.url);
-const { dict } = await import('../src/shared/i18n.js');
+const { dict } = await import('./helpers/i18n-all.js');
 
 // 用**真实词典**，不用手搓的桩：这一条崩溃的根因之一就是「errorKey 过词典之后
 // 非空、而 task.error 是 null」这个组合，桩词典很容易把它抹平掉。
@@ -76,6 +76,7 @@ function render(one) {
       onToggle: noop,
       onAnswer: noop,
       onForceRemove: noop,
+      onStopRetained: noop,
     }),
   );
 }
@@ -174,6 +175,20 @@ test('展开后：docker 的几十层聚合成一行，日志工具收进「更�
 test('收起状态下不出「复制详情」——没有日志可看，多一个按钮只是噪声', () => {
   assert.doesNotMatch(render(task({ expanded: false })), /model-store-task-copy-log/);
   assert.doesNotMatch(render(task({ expanded: false })), /model-store-task-tools/);
+});
+
+test('启用失败且明确保留实例时提供停用入口；其他失败不臆测有进程', () => {
+  const retained = task({ kind: 'enable', key: 'card:card-a', status: 'error', retainedNativeProcess: true });
+  const html = render(retained);
+  assert.match(html, /model-store-task-stop-retained/);
+  assert.ok(html.includes(copy.stopRetainedProcess));
+  assert.match(html, /flex-wrap items-center justify-end/);
+  assert.doesNotMatch(render({ ...retained, retainedNativeProcess: false }), /model-store-task-stop-retained/);
+  assert.doesNotMatch(render({ ...retained, status: 'running' }), /model-store-task-stop-retained/);
+  for (const language of ['zh', 'en', 'ja']) {
+    assert.ok(dict[language].uiModelStore.stopRetainedConfirm('MODEL').includes('MODEL'));
+    assert.equal(typeof dict[language].uiModelStore.stopRetainedUnavailable, 'string');
+  }
 });
 
 test('「导出日志（可外发）」只在失败的卡片上给', () => {
