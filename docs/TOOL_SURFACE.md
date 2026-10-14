@@ -75,9 +75,9 @@ user explicitly names them in `[tools].always_load`.
 ### Conversation toolbox cache
 
 A successful search activation is remembered by name for the current
-conversation. Upstream bounds the cache to eight deferred names and 16 KiB of
-serialized schemas with least-recently-used eviction; this fork disables that
-bound (effectively unbounded), so every activation stays
+conversation. Upstream bounds the cache to eight deferred names and 16 KiB
+of serialized tool definitions with least-recently-used eviction; this fork
+disables that bound (effectively unbounded), so every activation stays
 advertised for the conversation's lifetime — under provider prompt-cache
 pricing, an eviction re-prefills the entire prefix while saving only the ~0.1x
 cached-read cost of the schemas it frees (see codewhale-hq/Codewhale#6969).
@@ -98,7 +98,9 @@ error), a retrieval activation or a refresh of an executed tool rides the
 triggering result, and a turn's start revalidation parks its note on the
 session so the turn's first recorded result carries it (a refresh only
 evicts when a cached tool's serialized definition grew since its last
-activation enough that the collective budget overflows). A note that never reaches a recorded result is dropped rather
+activation enough that the collective budget overflows). With the size bounds
+disabled in this fork no bounds eviction ever fires, so this channel stays
+silent — it is upstream-parity machinery. A note that never reaches a recorded result is dropped rather
 than riding an unrelated later result: a session sync clears it at the
 conversation edge, and a turn that ends without a recorded result has it
 swept at the next turn's entry. Child agents report the same way on their
@@ -125,12 +127,17 @@ the model cannot get back by searching are reported differently:
 whether the tool left the catalog (a disconnect, a changed allow/deny rule,
 a mode switch — any catalog-shrink cause) or outgrew the per-tool
 serialized-size budget. A cached tool that became
-eager is not reported at all — it stays directly callable. Unavailable drops
-observed by non-search paths are absorbed silently: an oversize drop is
-re-reported with its reason the next time a search returns the tool (a
-match ranked past the result cap re-reports nothing), while a
-catalog-shrink drop left the catalog entirely and no later search can name
-it — the model learns of those only when a search for the capability misses.
+eager is not reported at all — it stays directly callable. A catalog-shrink
+drop is reported when a search observes it first: every search revalidates
+the cache before admitting its matches, so a cached-but-departed name
+surfaces in that result's unavailable references with the catalog-shrink
+reason, whether or not the query would have matched it. Only a shrink
+first observed at a turn boundary is absorbed silently — the name leaves
+the cache there, so no later search can name it and the model learns of it
+only when a search for the capability misses. An oversize drop observed by
+a non-search path is likewise silent in the moment but re-reported with
+its reason the next time a search returns the tool (a match ranked past
+the result cap re-reports nothing).
 
 Each subagent gets its own policy-filtered deferred catalog, always-present
 `tool_search`, and activation cache (unbounded in this fork, like the parent

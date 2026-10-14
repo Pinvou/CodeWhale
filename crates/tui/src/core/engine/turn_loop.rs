@@ -1060,15 +1060,22 @@ fn registered_tool_requires_non_bypassable_approval(tool_name: &str) -> bool {
 /// marking across the refresh: adopting the pool's flag would flip deferred
 /// tools back onto the head of the wire list and bust the cached prefix.
 /// A name the conversation has never seen (the synthetic login tool a
-/// mid-turn 401 just started offering, or a server-side rename) arrives
-/// with the pool's eager flag and joins the active set: the 401 result's
-/// auth hint points straight at that tool, so deferring it would strand
-/// the recovery path behind a search. Replaced entries are spliced back
-/// into their own catalog slot, so a refresh that serves the same names
-/// reorders nothing and the caller's declaration (this return value: did
-/// the model-visible wire list change?) stays false — a same-count
-/// refresh moves no wire bytes and must not trip the C5 undeclared-drift
-/// guard as a false positive.
+/// mid-turn 401 just started offering, a server-side rename, or a server's
+/// full real tool set after a completed login) arrives with the pool's
+/// eager flag and joins the active set. The auth-hint case needs it: the
+/// 401 result's auth hint points straight at that tool, so deferring it
+/// would strand the recovery path behind a search. Bulk arrivals after a
+/// login follow the same rule deliberately: the graceful direct-call
+/// hydration path bounds what deferring would cost, but a fresh login's
+/// tools are advertised at once. Replaced entries are spliced back into
+/// their own catalog slot, so a refresh that serves the same names reorders
+/// nothing. The caller's declaration (this return value: did the
+/// model-visible wire list change?) then rests on content, not on the name
+/// count: a same-name refresh with byte-identical served definitions moves
+/// no wire bytes and stays false; one whose served definition changed under
+/// the same name splices new wire bytes and declares — the wire-JSON
+/// compare below exists so that drift is declared rather than tripping the
+/// C5 undeclared-drift guard.
 pub(super) fn replace_runtime_mcp_tools(
     tool_catalog: &mut Vec<Tool>,
     active_tool_names: &mut std::collections::HashSet<String>,
@@ -5172,8 +5179,10 @@ impl Engine {
     }
 
     /// Park a bounded-toolbox eviction note for the next recorded tool
-    /// result, combining with any note already parked — turn-start
+    /// result, queueing beside any note already parked — turn-start
     /// revalidation and a hydration batch can both evict in the same turn.
+    /// Names repeated across notes are netted when the notes render onto a
+    /// result.
     pub(super) fn park_toolbox_eviction_note(
         &mut self,
         trigger: crate::core::session::ToolboxEvictionTrigger,
