@@ -1537,6 +1537,21 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("| sha256sum --check -", step)
         self.assertNotIn("download-actionlint.bash", step)
 
+    def test_fast_gate_lock_registry_guard_is_pinned(self):
+        # PR #1518: the lockfile registry-hygiene guard runs in fast-gate on
+        # every PR — pin the exact command so deleting the step (or
+        # neutralizing it to `|| true`) fails here instead of silently
+        # letting mirror URLs and npm-10 libc strips back into the locks.
+        fast_gate = self.pr_workflow.split("\n  fast-gate:", maxsplit=1)[1].split(
+            "\n  frontend-test:", maxsplit=1
+        )[0]
+        step = fast_gate.split(
+            "- name: 锁文件 registry 卫生门禁", maxsplit=1
+        )[1].split("\n      - name:", maxsplit=1)[0]
+        self.assertIn("python3 scripts/check-lock-registry.py", step)
+        self.assertNotIn("|| true", step)
+        self.assertNotIn("continue-on-error", step)
+
     def test_fast_gate_runner_line_is_pinned(self):
         # Round-47 review: this one line is the ONLY place the gate-policy
         # suite itself executes in CI. Deleting it (or narrowing the `-p`
@@ -2791,6 +2806,15 @@ class CiGatePolicyTests(unittest.TestCase):
             "workflow policy changes must not link the full application tests",
         )
 
+        # PR #1518: the test-registry guard script is executed by the
+        # rust-test leg, so a guard-script-only change must route to that leg
+        # (round-47 class: a script the leg runs must select the leg itself).
+        self.assertIn(
+            "scripts/test-registry-guard.py",
+            rust_full_paths,
+            "registry guard script edits must trigger the rust-test leg that executes it",
+        )
+
         literal_feature_files = [
             path
             for path in rust_full_paths
@@ -2821,6 +2845,16 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn(
             "cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --locked -- --test-threads=1",
             rust_test,
+        )
+        # PR #1518 closed the last unlocked repo-workspace cargo-test leg:
+        # all four src-tauri cargo-test run lines in this job carry --locked
+        # (lib --no-run on PR and push, --lib execution, behavior_telemetry
+        # harness). Pin the count so silently dropping any single --locked
+        # (e.g. while editing the surrounding command) goes red here.
+        self.assertEqual(
+            rust_test.count("--locked"),
+            4,
+            "every src-tauri cargo test invocation in rust-test must stay --locked",
         )
         # push(main) 只编译暖 cache,不执行测试:MQ 已对同一组合树跑过全量测试;
         # push 恢复暖 cache 后跑全量测试曾连续触发 hosted runner 失联(见 workflow 注释)。

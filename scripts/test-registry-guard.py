@@ -14,22 +14,25 @@ because the inflation and the deflation cancel. Against
 
 Platform caveat (review #455 round-30 m10): two REQUIRED_PINS are
 `#[cfg(unix)]`-gated (they need an unreadable-file fixture), so a local run
-only goes green on Linux — exactly where the CI rust-test leg wires this
-guard; on macOS/Windows the missing unix pins are expected misses, not
-thefts. The registry scope is the pinvou3-app/src-tauri crate; covering the
-other test manifests (e.g. pinvou-cli) is a registered follow-up.
+only misses them on Windows — `cfg(unix)` holds on macOS too (12/12 verified
+there); the CI rust-test leg that wires this guard is Linux, where every
+configuration resolves. The registry scope is the pinvou3-app/src-tauri
+crate; covering the other test manifests (e.g. pinvou-cli) is a registered
+follow-up.
 
-Run it wherever the lib test binary is already built (it reuses cargo's
-artifacts); CI wires it into the linux rust-test leg right after
-`cargo test --lib --no-run`.
+Run it from anywhere (paths are anchored to this script's repo location);
+it reuses cargo's artifacts, and CI wires it into the linux rust-test leg
+right after `cargo test --lib --no-run`.
 """
 
 import collections
 import os
+import re
 import subprocess
 import sys
 
-MANIFEST = os.path.join("pinvou3-app", "src-tauri", "Cargo.toml")
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MANIFEST = os.path.join(REPO_ROOT, "pinvou3-app", "src-tauri", "Cargo.toml")
 
 # Consent/rollback-critical regression pins. A missing entry here means the
 # pin's `#[test]` attribute was lost to an edit — the exact failure this
@@ -105,8 +108,15 @@ def list_tests():
 def ignored_source_pins():
     """Round-35 minor 10 (review #455): libtest's stable `--list` output cannot
     distinguish an #[ignore]d test from a live one, so scan the crate sources:
-    any `fn <pin>` whose preceding attribute lines contain `#[ignore` is a
-    silenced required pin."""
+    any `fn <name>` whose directly attached attribute block contains `ignore`
+    (covers `#[ignore]`, `#[ignore = "..."]` and `#[cfg_attr(..., ignore)]`)
+    is a silenced test.
+
+    Only the contiguous run of attribute (`#[`) lines directly above the `fn`
+    is inspected: a doc comment (`///`), plain `//` comment or any code line
+    stops the walk, so a comment that merely mentions `#[ignore` (or an
+    `#[ignore]` on the *previous* function) cannot smear onto this one.
+    """
     src_root = os.path.join(os.path.dirname(MANIFEST), "src")
     hits = {}
     for root, _dirs, files in os.walk(src_root):
@@ -121,11 +131,18 @@ def ignored_source_pins():
             for i, line in enumerate(lines):
                 stripped = line.lstrip()
                 body = stripped[6:] if stripped.startswith("async ") else stripped
-                if body.startswith("fn ") and "{" in body:
-                    fn_name = body[3:].split("(")[0].strip()
-                    window = "\n".join(lines[max(0, i - 4):i])
-                    if "#[ignore" in window:
-                        hits.setdefault(fn_name, path)
+                if not (body.startswith("fn ") and "{" in body):
+                    continue
+                fn_name = body[3:].split("(")[0].strip()
+                attr_block = []
+                for j in range(i - 1, -1, -1):
+                    above = lines[j].lstrip()
+                    if above.startswith("#["):
+                        attr_block.append(above)
+                    else:
+                        break
+                if any(re.search(r"\bignore\b", item) for item in attr_block):
+                    hits.setdefault(fn_name, f"{path}:{j + 2}")
     return hits
 
 
@@ -142,12 +159,14 @@ def main():
             + "\n".join(f"  {p} x{counts[p]}" for p in duplicates)
         )
 
-    # Pin matching (round-35 minor 10, review #455): per full-path match
-    # count — exactly once — plus a source-level #[ignore] scan (stable
-    # libtest --list cannot flag ignored tests). A name-collision test
-    # elsewhere no longer satisfies a pin whose real test was deleted, and an
-    # ignored pin is reported instead of passing silently.
-    full_path_matches = collections.Counter(paths)
+    # Pin matching (round-35 minor 10, review #455): pins match on the test
+    # path's last segment — more than one registry hit for a pin name is an
+    # immediate failure, so a collision is loud. Known limitation (documented
+    # rather than pretended away): a same-named test planted in a *different*
+    # module could satisfy a pin whose real test lost its attribute in that
+    # other module; policing that would require full-path pins, a follow-up.
+    # A source-level scan flags pins silenced by #[ignore] (stable libtest
+    # --list cannot flag ignored tests).
     ignored_src = ignored_source_pins()
     for pin in REQUIRED_PINS:
         matches = [p for p in paths if p.rsplit("::", 1)[-1] == pin]
@@ -156,7 +175,7 @@ def main():
         elif len(matches) > 1:
             failures.append(f"required pin registered more than once: {matches}")
         elif pin in ignored_src:
-            failures.append(f"required pin is #[ignore]d at {ignored_src[pin]}")
+            failures.append(f"required pin {pin} is #[ignore]d at {ignored_src[pin]}")
 
     if failures:
         print("test-registry-guard: FAILED", file=sys.stderr)
