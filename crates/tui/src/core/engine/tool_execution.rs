@@ -199,9 +199,13 @@ pub(crate) fn emit_tool_audit(event: serde_json::Value) {
     emit_tool_audit_to_path(&PathBuf::from(path), event);
 }
 
-/// Preserve only non-private identity fields for restricted embedded turns.
-/// Tool inputs, outputs, paths, ids, policy details, and future payload keys
-/// are omitted by construction instead of relying on every caller to redact.
+/// Preserve only non-private fields for restricted embedded turns. Tool
+/// inputs, outputs, paths, ids, policy details, and future payload keys are
+/// omitted by construction instead of relying on every caller to redact.
+/// `success` and `executed` are non-private booleans and survive: the
+/// `codewhale metrics` rollup defaults a missing flag to `true`, so
+/// stripping them would bucket every restricted receipt — failures
+/// included — as an executed success.
 pub(crate) fn tool_audit_event_for_policy(
     restricted: bool,
     event: serde_json::Value,
@@ -215,6 +219,11 @@ pub(crate) fn tool_audit_event_for_policy(
     }
     if let Some(tool_name) = event.get("tool_name").and_then(serde_json::Value::as_str) {
         projected["tool_name"] = serde_json::json!(tool_name);
+    }
+    for flag in ["success", "executed"] {
+        if let Some(value) = event.get(flag).and_then(serde_json::Value::as_bool) {
+            projected[flag] = serde_json::json!(value);
+        }
     }
     projected
 }
@@ -1039,18 +1048,27 @@ mod tests {
         let event = tool_audit_event_for_policy(
             true,
             json!({
-                "event": "tool.error",
+                "event": "tool.result",
                 "tool_name": "File",
                 "tool_input": private,
                 "error": format!("failed at C:/private/{private}"),
+                "path": format!("/private/{private}"),
+                "success": false,
+                "executed": false,
             }),
         );
         let encoded = serde_json::to_string(&event).expect("audit json");
         assert!(!encoded.contains(private));
-        assert_eq!(event["event"], "tool.error");
+        assert_eq!(event["event"], "tool.result");
         assert_eq!(event["tool_name"], "File");
         assert_eq!(event["restricted"], true);
+        // Non-private booleans survive: the metrics rollup defaults a
+        // missing flag to `true`, so dropping them would misbucket this
+        // restricted failure as an executed success.
+        assert_eq!(event["success"], false);
+        assert_eq!(event["executed"], false);
         assert!(event.get("tool_input").is_none());
         assert!(event.get("error").is_none());
+        assert!(event.get("path").is_none());
     }
 }

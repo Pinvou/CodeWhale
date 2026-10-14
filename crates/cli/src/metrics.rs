@@ -3,6 +3,7 @@
 //!
 //! Data sources:
 //! - `~/.deepseek/audit.log`   — one JSON line per event (approvals, credentials)
+//! - `$CODEWHALE_TOOL_AUDIT_LOG` (opt-in) — engine tool receipts (`tool.result`)
 //! - `~/.deepseek/sessions/`   — saved session JSON files (tool call history)
 //! - `~/.deepseek/tasks/runtime/events/` — runtime thread JSONL event streams
 
@@ -31,7 +32,15 @@ pub fn run(args: MetricsArgs) -> Result<()> {
 
     // Collect data from every source; treat missing files as empty.
     let mut rollup = Rollup::default();
-    read_audit_log(&base.join("audit.log"), args.since, &mut rollup);
+    // The engine's only in-repo `tool.result` writer is the opt-in
+    // tool-audit log; it has no default path, so it is read only when the
+    // variable is set. Precedence mirrors the writer's: CODEWHALE first,
+    // then the legacy DEEPSEEK spelling.
+    let tool_audit_log = std::env::var_os("CODEWHALE_TOOL_AUDIT_LOG")
+        .or_else(|| std::env::var_os("DEEPSEEK_TOOL_AUDIT_LOG"));
+    for path in audit_log_paths(&base, tool_audit_log.as_deref()) {
+        read_audit_log(&path, args.since, &mut rollup);
+    }
     read_session_files(&base.join("sessions"), args.since, &mut rollup);
     read_runtime_events(
         &base.join("tasks").join("runtime").join("events"),
@@ -240,6 +249,23 @@ impl Rollup {
 // Source readers
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Audit-log files the rollup reads: the default `base/audit.log` first,
+/// then the engine's opt-in tool-audit log when one is configured. That
+/// writer (`CODEWHALE_TOOL_AUDIT_LOG`, falling back to
+/// `DEEPSEEK_TOOL_AUDIT_LOG`) is the only in-repo source of `tool.result`
+/// receipts. An opt-in path equal to the default collapses to one entry —
+/// reading the same file twice would double-count every line.
+fn audit_log_paths(base: &Path, opt_in: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
+    let default = base.join("audit.log");
+    let mut paths = vec![default.clone()];
+    if let Some(opt_in) = opt_in.map(PathBuf::from)
+        && opt_in != default
+    {
+        paths.push(opt_in);
+    }
+    paths
+}
+
 /// Read one-JSON-line-per-event audit log.
 fn read_audit_log(path: &Path, since: Option<DateTime<Utc>>, rollup: &mut Rollup) {
     let content = match std::fs::read_to_string(path) {
@@ -331,11 +357,12 @@ fn read_audit_log(path: &Path, since: Option<DateTime<Utc>>, rollup: &mut Rollup
                 // oversize-hydration refusal) answered the call without the
                 // tool ever running, so it counts as neither — counting it
                 // as a success would inflate the tool's real execution rate.
-                // The fields are read from every placement a writer uses:
-                // the sensitive audit log nests them under `details`, while
-                // the engine's opt-in tool-audit log
-                // (`CODEWHALE_TOOL_AUDIT_LOG`) writes them at the top level
-                // of the line.
+                // The engine's opt-in tool-audit log
+                // (`CODEWHALE_TOOL_AUDIT_LOG`) — the only in-repo
+                // `tool.result` writer — writes these fields at the top
+                // level of the line. The nested `details`/`payload`
+                // placements are tolerated for foreign or hand-written
+                // lines; no in-repo writer nests them.
                 let success = v
                     .pointer("/details/success")
                     .or_else(|| v.pointer("/payload/success"))
@@ -944,6 +971,45 @@ mod tests {
         assert_eq!(fmt_num(1_000), "1,000");
         assert_eq!(fmt_num(12_453), "12,453");
         assert_eq!(fmt_num(1_000_000), "1,000,000");
+    }
+
+    // ── audit_log_paths ──
+
+    #[test]
+    fn audit_log_paths_unset_reads_default_only() {
+        let paths = audit_log_paths(Path::new("/home/user/.codewhale"), None);
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("/home/user/.codewhale/audit.log")]
+        );
+    }
+
+    #[test]
+    fn audit_log_paths_opt_in_appends_after_default() {
+        let paths = audit_log_paths(
+            Path::new("/home/user/.codewhale"),
+            Some(std::ffi::OsStr::new("/tmp/tool-audit.log")),
+        );
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/home/user/.codewhale/audit.log"),
+                PathBuf::from("/tmp/tool-audit.log"),
+            ]
+        );
+    }
+
+    #[test]
+    fn audit_log_paths_opt_in_equal_to_default_is_read_once() {
+        // Reading the same file twice would double-count every line.
+        let paths = audit_log_paths(
+            Path::new("/home/user/.codewhale"),
+            Some(std::ffi::OsStr::new("/home/user/.codewhale/audit.log")),
+        );
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("/home/user/.codewhale/audit.log")]
+        );
     }
 
     // ── Rollup from audit log ──
