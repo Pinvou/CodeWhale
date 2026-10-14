@@ -1,10 +1,28 @@
-# Windows runtime manifest contract library (schema 2 stagedFiles exactness +
-# canonical relative paths). Currently exercised only by
-# test-runtime-manifest-contract.ps1 via `npm run test:windows-runtime-manifest`
-# (wired into pr-check's windows-codex-runtime-test job). Production staging
-# validation still lives in resolve-runtime.ps1's own checks; wiring this
-# contract into that flow is an upstream-parity follow-up.
 $ErrorActionPreference = "Stop"
+
+# A Windows PowerShell 5.1 process spawned under a pwsh 7 parent (a CI step
+# shell or a pwsh terminal) inherits pwsh's PSModulePath and then cannot load
+# its own built-in modules: Get-FileHash raises CommandNotFound and Get-Acl
+# resolves the unloadable PowerShell 7 module. Rebuild the host default
+# module path whenever the process path is missing the system module
+# directory or carries pwsh entries; plain 5.1 consoles and the NSIS install
+# context already match and are left untouched.
+if ($PSVersionTable.PSVersion.Major -lt 6) {
+  $systemModulePath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\Modules"
+  $modulePathEntries = @(
+    [System.Environment]::GetEnvironmentVariable("PSModulePath", "Process") -split ";"
+  ) | Where-Object { $_ }
+  $pwshModuleEntries = $modulePathEntries | Where-Object {
+    $_ -like "*\PowerShell\7\Modules" -or $_ -like "*\PowerShell\Modules"
+  }
+  if (($modulePathEntries -notcontains $systemModulePath) -or $pwshModuleEntries) {
+    $env:PSModulePath = @(
+      (Join-Path $HOME "Documents\WindowsPowerShell\Modules"),
+      (Join-Path $env:ProgramFiles "WindowsPowerShell\Modules"),
+      $systemModulePath
+    ) -join ";"
+  }
+}
 
 function Get-CanonicalWindowsRuntimeManifestPath {
   param([string]$Path)

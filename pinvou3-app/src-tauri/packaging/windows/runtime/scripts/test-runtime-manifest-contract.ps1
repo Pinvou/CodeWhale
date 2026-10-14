@@ -1,3 +1,9 @@
+# Windows runtime manifest contract suite. Scope note (keeps the lib itself
+# byte-identical to upstream): the contract library is currently exercised
+# ONLY here, via `npm run test:windows-runtime-manifest` in pr-check's
+# windows-codex-runtime-test job. Production staging validation still lives
+# in resolve-runtime.ps1's own checks; wiring this contract into that flow
+# is the upstream-parity follow-up.
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "runtime-manifest-contract.ps1")
@@ -122,19 +128,33 @@ try {
       -StageRoot $schema2Root
   }
 
-  foreach ($invalidPath in @(
+  # Pattern is per-throw-site (not the shared word "canonical") so a regression
+  # in one guard cannot be masked by the other one throwing instead.
+  foreach ($wholePathViolation in @(
     "/absolute.txt",
     "C:/absolute.txt",
-    "payload//archive.zip",
-    "payload/./archive.zip",
-    "payload/../archive.zip",
     "payload\archive.zip"
   )) {
-    Assert-Throws -Name "schema2 non-canonical path $invalidPath" -MessagePattern "canonical" -Action {
+    Assert-Throws -Name "schema2 non-canonical path $wholePathViolation" -MessagePattern "must be a canonical relative path" -Action {
       Assert-WindowsRuntimeStagedFilesExact `
         -Manifest ([pscustomobject]@{
           schemaVersion = 2
-          stagedFiles = @([pscustomobject]@{ path = $invalidPath; bytes = 1; sha256 = ("0" * 64) })
+          stagedFiles = @([pscustomobject]@{ path = $wholePathViolation; bytes = 1; sha256 = ("0" * 64) })
+        }) `
+        -StageRoot $schema2Root
+    }
+  }
+
+  foreach ($segmentViolation in @(
+    "payload//archive.zip",
+    "payload/./archive.zip",
+    "payload/../archive.zip"
+  )) {
+    Assert-Throws -Name "schema2 non-canonical segment $segmentViolation" -MessagePattern "non-canonical segment" -Action {
+      Assert-WindowsRuntimeStagedFilesExact `
+        -Manifest ([pscustomobject]@{
+          schemaVersion = 2
+          stagedFiles = @([pscustomobject]@{ path = $segmentViolation; bytes = 1; sha256 = ("0" * 64) })
         }) `
         -StageRoot $schema2Root
     }
