@@ -170,6 +170,14 @@ export async function main(argv = process.argv.slice(2), env = process.env, io =
       io.log(JSON.stringify(await requestEnrollmentCapacity({ env })));
       return 0;
     }
+    // Reject malformed maintenance requests before configuration or opening a writer.
+    if (args.mode === "list-self-registrations" && (!args.output || args.input)) {
+      throw cliError("self_registration_list_arguments_invalid");
+    }
+    if (["check-self-registration-cleanup", "apply-self-registration-cleanup"].includes(args.mode)
+      && (!args.input || args.output)) {
+      throw cliError("self_registration_cleanup_arguments_invalid");
+    }
     const config = loadEnrollmentRegistryConfig(env);
     if (["dry-run", "apply", "list-self-registrations", "check-self-registration-cleanup", "apply-self-registration-cleanup"].includes(args.mode)
       && config.deployment !== "self_hosted") {
@@ -182,13 +190,11 @@ export async function main(argv = process.argv.slice(2), env = process.env, io =
     const registry = EnrollmentRegistry.open({ stateStore: store, config });
     let result;
     if (args.mode === "list-self-registrations") {
-      if (!args.output || args.input) throw cliError("self_registration_list_arguments_invalid");
       const inventory = registry.listSelfRegistrations();
       await atomicWriteJson(args.output, inventory);
       result = { ok: true, inventory_written: true, namespace_revision: inventory.namespace_revision,
         capacity: registry.getSelfRegistrationCapacity() };
     } else if (["check-self-registration-cleanup", "apply-self-registration-cleanup"].includes(args.mode)) {
-      if (!args.input || args.output) throw cliError("self_registration_cleanup_arguments_invalid");
       result = { ok: true, ...(await registry.cleanupSelfRegistrations({
         inventory: await secureReadJson(args.input), dryRun: args.mode === "check-self-registration-cleanup",
       })), capacity: registry.getSelfRegistrationCapacity() };

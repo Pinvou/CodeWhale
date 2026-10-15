@@ -115,7 +115,9 @@ before writing. Their queued store CAS must also leave 1 MiB for other writers
 uses the actual queued state, so a concurrent pairing writer cannot make a stale
 capacity measurement admit another anonymous write. Rejection leaves the store
 writable: known credentials reconnect and administrators/pairing may use the
-reserved capacity. This bounds anonymous durable growth; it does not promise
+reserved capacity. This exemption concerns the persistent new-entry quota:
+after a Relay restart, even a known identity must pass per-IP creation admission
+while the in-memory endpoint table is empty. This bounds anonymous durable growth; it does not promise
 unlimited trusted writes or fair admission for unknown devices during a Sybil flood.
 Operators still need connection/source limits, storage monitoring and upstream
 abuse controls. Historical entries recorded as `self_hosted` cannot be reliably
@@ -148,6 +150,30 @@ desktop may register again under the public policy, so cleanup alone is not an
 abuse-blocking mechanism. Revoked records remain
 intact and consume quota to prevent resurrection. Neither cleanup nor quota
 rejection deletes unrelated registrations, migration records or pairing state.
+
+#### Recovering quota after a device self-revokes
+
+There are two distinct revocation authorities. The public
+`desktop_endpoint_revoke` message writes a permanent endpoint denial to the
+separate legacy Relay state; it does **not** call `EnrollmentRegistry.revoke`
+or change the registration's `active` status. That registration still consumes
+an anonymous slot, but remains eligible for the selected cleanup above. Only
+privileged registry operations create a registry `revoked` row; those rows are
+deliberately ineligible for cleanup. A device's own desktop secret does not
+authorize that privileged operation.
+
+For a registration/self-revocation flood, pause new admission in the protected
+environment and stop the store owner. Back up both state files, export the
+private inventory and explicitly select the unwanted `active` anonymous rows,
+including self-revoked devices. Run check then apply using the commands above.
+Keep the separate Relay revocation file unchanged, restart with the same state
+paths, and verify that a removed self-revoked ID still receives `endpoint_revoked`
+while a new random ID can register when admission is restored. Cleaning these
+rows releases anonymous slots without reviving the denied IDs. Do not erase
+either authority's tombstones or restore a stale whole-store backup. Privileged
+registry revocations are not a remotely available quota-burning path and remain
+retained; this procedure does not reclaim their slots or promise unlimited
+storage for repeated attacks.
 
 The new audit origin is an extension of the v3 entry format. Existing entries are
 unchanged and still readable by this version; binaries predating this origin

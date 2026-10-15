@@ -66,6 +66,21 @@ test("public registration retries authenticate existing roles without extra writ
   assert.equal(writes(), 1);
 });
 
+test("missing or invalid capacity metadata refuses only unknown registration without durable writes", async () => {
+  const { registry, store, writes } = fixture();
+  const known = { admitSelfRegistration: true, endpointId: ENDPOINT, accessToken: ACCESS, desktopSecret: DESKTOP };
+  await registry.authorizeDesktopRegistration(known);
+  for (const readCapacity of [undefined, () => ({}), () => ({ max_bytes: 1023 }), () => ({ max_bytes: NaN })]) {
+    store.readCapacity = readCapacity;
+    const before = writes();
+    await assert.rejects(registry.authorizeDesktopRegistration({ ...known, endpointId: "ep_zyxwvutsrqponmlkjihgfedc" }),
+      { code: "self_registration_capacity_unavailable" });
+    await registry.authorizeDesktopRegistration(known);
+    assert.equal(writes(), before);
+    assert.equal(registry.exportSnapshot().registry.entries.length, 1);
+  }
+});
+
 test("public first registration requires the native random-ID format and distinct complete credentials", async () => {
   const { registry, writes } = fixture();
   for (const endpointId of ["short", "ep_abcdefghijklmnopqrstuvw", "chosen_device_name"]) {

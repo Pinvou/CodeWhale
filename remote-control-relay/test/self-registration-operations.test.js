@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -56,6 +56,11 @@ test("anonymous quota rejects a distributed identity flood without blocking know
   const capacity = registry.getSelfRegistrationCapacity();
   assert.equal(capacity.entries, SELF_REGISTRATION_LIMITS.max_entries);
   assert.ok(capacity.bytes <= capacity.max_bytes);
+  const inventory = registry.listSelfRegistrations();
+  await registry.cleanupSelfRegistrations({ inventory: { ...inventory, entries: [inventory.entries[0]] }, dryRun: false });
+  await register(registry, 9999);
+  assert.equal(registry.getSelfRegistrationCapacity().entries, SELF_REGISTRATION_LIMITS.max_entries);
+  assert.equal(registry.getControllerReadiness("administrator-device").desktop_ready, true);
 });
 
 test("inventory and cleanup are explicit, revision checked, atomic and never remove administrator or revoked identities", async () => {
@@ -86,7 +91,7 @@ test("inventory and cleanup are explicit, revision checked, atomic and never rem
 });
 
 async function diskFixture(t, maxBytes = 16384, nativePermissions = false) {
-  const root = await mkdtemp(join(tmpdir(), "pinvou-self-registration-"));
+  const root = await mkdtemp(join(await realpath(tmpdir()), "pinvou-self-registration-"));
   if (process.platform === "win32" && nativePermissions) await protectWindowsPath(root, "directory");
   const env = environment(root);
   const store = await RelayStateStore.open({ statePath: env.PINVOU_REMOTE_CONTROLLER_STATE_PATH,
@@ -122,6 +127,24 @@ test("anonymous saturation leaves real shared-store capacity for an existing use
   assert.equal(response.result.type, "desktop_pairing_registered");
   await registry.enroll({ endpointId: "new-administrator-device", credential: ACCESS });
   assert.equal(registry.getControllerReadiness("new-administrator-device").web_ready, true);
+});
+
+test("malformed self-registration maintenance arguments fail before configuration or opening the store", async () => {
+  for (const [argv, code] of [
+    [["--list-self-registrations"], "self_registration_list_arguments_invalid"],
+    [["--list-self-registrations", "--input", "selected.json", "--output", "inventory.json"], "self_registration_list_arguments_invalid"],
+    [["--check-self-registration-cleanup"], "self_registration_cleanup_arguments_invalid"],
+    [["--apply-self-registration-cleanup", "--input", "selected.json", "--output", "inventory.json"], "self_registration_cleanup_arguments_invalid"],
+    [["--list-self-registrations", "--apply-self-registration-cleanup"], "mode_conflict"],
+    [["--list-self-registrations", "--output"], "argument_invalid"],
+    [["--apply-self-registration-cleanup", "--input", "--output"], "argument_invalid"],
+    [["--list-self-registrations", "--request-id", "unrelated-request"], "restore_request_id_only"],
+  ]) {
+    const errors = [];
+    assert.equal(await migrationCli(argv, {}, { log: () => assert.fail("invalid CLI must not report success"),
+      error: value => errors.push(JSON.parse(value)) }), 1);
+    assert.deepEqual(errors, [{ ok: false, code }], argv.join(" "));
+  }
 });
 
 test("capacity reserve is enforced against the queued store state and refusal does not degrade the writer", async t => {

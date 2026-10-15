@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { after, before, test } from "node:test";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -16,6 +16,8 @@ import {
   CONTROLLER_SUBPROTOCOL,
 } from "../protocol-controller.js";
 import { smokeControllerRoute } from "../scripts/controller-route-smoke.mjs";
+import { main as migrationCli } from "../scripts/enrollment-migrate.js";
+import { protectWindowsPath } from "../relay-state-store.js";
 
 const X25519_SPKI_PREFIX = Buffer.from("302a300506032b656e032100", "hex");
 
@@ -498,13 +500,13 @@ test("public production: a closing socket holds capacity until pending authoriza
   }
 });
 
-test("public production: relay-level revocation rejects re-enrollment before anonymous registry writes", { timeout: 90_000 }, async () => {
+test("public production: self-revocation permits offline quota recovery while retaining the permanent Relay denial", { timeout: 300_000 }, async () => {
   const env = selfRegistrationEnvironment("relay-revoked");
-  const isolated = await spawnRelay(env);
+  let isolated = await spawnRelay(env);
   const id = `ep_${crypto.randomBytes(12).toString("hex")}`;
   const access = crypto.randomBytes(32).toString("base64url");
   const secret = crypto.randomBytes(32).toString("base64url");
-  let desktop, denied;
+  let desktop, denied, fresh;
   try {
     desktop = await registerDesktop(id, access, secret, isolated.wsUrl, 15_000, true);
     const before = await enrollmentSnapshot(env.PINVOU_REMOTE_CONTROLLER_STATE_PATH);
@@ -517,8 +519,37 @@ test("public production: relay-level revocation rejects re-enrollment before ano
       access_token: access, desktop_secret: secret }));
     assert.equal((await response).code, "endpoint_revoked");
     assert.deepEqual(await enrollmentSnapshot(env.PINVOU_REMOTE_CONTROLLER_STATE_PATH), before);
+    assert.equal(before.value.entries[0].status, "active", "socket self-revocation does not invoke registry revocation");
+    closeSocket(desktop.ws); closeSocket(denied);
+    await stopRelay(isolated.child);
+    const legacyBefore = await readFile(env.PINVOU_REMOTE_STATE_PATH);
+    const inventoryDir = join(testRoot, "self-revocation-cleanup");
+    await mkdir(inventoryDir, { mode: 0o700 });
+    if (process.platform === "win32") await protectWindowsPath(inventoryDir, "directory");
+    const inventoryPath = join(inventoryDir, "selected.json");
+    const output = [], errors = [];
+    const io = { log: value => output.push(JSON.parse(value)), error: value => errors.push(JSON.parse(value)) };
+    assert.equal(await migrationCli(["--list-self-registrations", "--output", inventoryPath], env, io), 0, JSON.stringify(errors));
+    const inventory = JSON.parse(await readFile(inventoryPath, "utf8"));
+    assert.deepEqual(inventory.entries.map(entry => [entry.endpoint_id, entry.status]), [[id, "active"]]);
+    assert.equal(await migrationCli(["--check-self-registration-cleanup", "--input", inventoryPath], env, io), 0);
+    assert.equal(output.at(-1).selected, 1);
+    assert.equal(output.at(-1).removed, 0);
+    assert.equal(await migrationCli(["--apply-self-registration-cleanup", "--input", inventoryPath], env, io), 0);
+    assert.equal(output.at(-1).removed, 1);
+    assert.equal(output.at(-1).capacity.entries, 0);
+    assert.deepEqual(await readFile(env.PINVOU_REMOTE_STATE_PATH), legacyBefore, "cleanup must retain the separate Relay tombstone");
+    isolated = await spawnRelay(env);
+    denied = await openControllerSocket(isolated.wsUrl);
+    const afterRestart = nextMessage(denied, "error", 15_000);
+    denied.send(JSON.stringify({ v: 2, type: "desktop_endpoint_register", endpoint_id: id,
+      access_token: access, desktop_secret: secret }));
+    assert.equal((await afterRestart).code, "endpoint_revoked");
+    assert.equal((await enrollmentSnapshot(env.PINVOU_REMOTE_CONTROLLER_STATE_PATH)).value.entries.length, 0);
+    fresh = await registerDesktop(`ep_${crypto.randomBytes(12).toString("hex")}`, access, secret, isolated.wsUrl, 15_000, true);
+    assert.equal((await enrollmentSnapshot(env.PINVOU_REMOTE_CONTROLLER_STATE_PATH)).value.entries.length, 1);
   } finally {
-    closeSocket(desktop?.ws); closeSocket(denied); await stopRelay(isolated.child);
+    closeSocket(desktop?.ws); closeSocket(denied); closeSocket(fresh?.ws); await stopRelay(isolated.child);
   }
 });
 
@@ -660,7 +691,7 @@ function openPairingCode(privateKey, registered) {
 }
 
 before(async () => {
-  testRoot = await mkdtemp(join(tmpdir(), "pinvou-relay-v2-test-"));
+  testRoot = await mkdtemp(join(await realpath(tmpdir()), "pinvou-relay-v2-test-"));
   telemetryDir = join(testRoot, "telemetry");
   webDir = join(testRoot, "web-dist");
   relayStatePath = join(testRoot, "relay-state.json");
