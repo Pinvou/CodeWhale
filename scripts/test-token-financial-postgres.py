@@ -33,6 +33,13 @@ REQUIRED = {
     "TestManagementCancellationFundsRemainTruthful",
     "TestManagementEmergencyCancellationRecoversLostReserveACK",
     "TestManagementCancellationHoldRecoveryRequiresRecordedProof",
+    "TestF05AdditionalReservationProjectionPublicPostgres",
+}
+BILLING_REQUIRED = {
+    "TestHoldExtensionIdempotencePostgres",
+    "TestPersonalUsageHoldBoundaries",
+    "TestPersonalUsageHoldClockBoundaries",
+    "TestF05ExpiredHoldRenewalIsConflictAndUnprovenFundsStayReserved",
 }
 
 
@@ -53,21 +60,24 @@ def local_database_url(raw):
     return raw
 
 
-def verify_results(events):
+def verify_results(events, required=None, package=None):
+    required = REQUIRED if required is None else required
     passed = set()
     count = 0
     for event in events:
         name = event.get("Test", "")
+        if event.get("Action") == "fail":
+            raise RuntimeError("Go financial contract failed")
+        if package is not None and event.get("Package") != package:
+            continue
         if name and event.get("Action") == "pass":
             count += 1
             if "/" not in name:
                 passed.add(name)
-        if event.get("Action") == "fail":
-            raise RuntimeError("Go financial contract failed")
-        if event.get("Action") == "skip" and name.split("/", 1)[0] in REQUIRED:
+        if event.get("Action") == "skip" and name.split("/", 1)[0] in required:
             raise RuntimeError("required financial contract or subcase skipped")
-    if REQUIRED - passed:
-        raise RuntimeError("required financial contracts did not execute: " + ", ".join(sorted(REQUIRED - passed)))
+    if required - passed:
+        raise RuntimeError("required financial contracts did not execute: " + ", ".join(sorted(required - passed)))
     return count
 
 
@@ -107,24 +117,46 @@ GRANT billing_service,billing_schema_owner TO billing_migrator;
 GRANT billing_service TO billing_schema_owner WITH INHERIT TRUE,SET TRUE;
 COMMIT;
 """)
+    def phase_boundary_clean():
+        return (
+            query("SELECT datname FROM pg_database ORDER BY datname") == databases
+            and set(query("SELECT rolname FROM pg_roles WHERE rolname !~ '^pg_' ORDER BY rolname").splitlines()) == ACTORS | {user}
+            and query("SELECT count(*) FROM pg_stat_activity WHERE backend_type='client backend' AND pid<>pg_backend_pid()") == "0"
+            and query("""SELECT
+                (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                 WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema') +
+                (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+                 WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema')""") == "0"
+        )
+
     try:
         env = {key: value for key, value in os.environ.items() if not key.startswith("PINVOU_TEST_")}
         env.update(PINVOU_TEST_TOKEN_DATABASE_URL=raw, PINVOU_TEST_BILLING_DATABASE_URL=raw)
-        result = subprocess.run(
-            [go, "test", "-p=1", "-race", "-tags=nomsgpack", "-mod=readonly", "-count=1", "-timeout=20m", "-json", "./internal/token"],
-            cwd=ROOT / "account-platform", env=env, capture_output=True, text=True, encoding="utf-8", check=False,
-        )
-        # Preserve genuine Go output, including optional external-service skips.
-        sys.stdout.write(result.stdout)
-        sys.stderr.write(result.stderr)
-        if result.returncode:
-            raise RuntimeError("Go financial contracts failed")
-        count = verify_results([json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")])
-        print(f"Token contracts: {count} named passes; all {len(REQUIRED)} required top-level suites executed without skipped subcases")
+        for target, required, selection in (
+            ("token", REQUIRED, []),
+            ("billing", BILLING_REQUIRED, ["-run", "^(" + "|".join(sorted(BILLING_REQUIRED)) + ")$"]),
+        ):
+            # Each fixture owns and removes its UUID database. Never pass
+            # leftovers or another client's database into the next phase.
+            if not phase_boundary_clean():
+                raise RuntimeError("financial phase did not restore its database/actor/client boundary")
+            result = subprocess.run(
+                [go, "test", "-p=1", "-race", "-tags=nomsgpack", "-mod=readonly", "-count=1", "-timeout=20m", "-json", *selection, "./internal/" + target],
+                cwd=ROOT / "account-platform", env=env, capture_output=True, text=True, encoding="utf-8", check=False,
+            )
+            # Preserve genuine Go output, including optional external skips.
+            sys.stdout.write(result.stdout)
+            sys.stderr.write(result.stderr)
+            if result.returncode:
+                raise RuntimeError("Go financial contracts failed: " + target)
+            count = verify_results(
+                [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")],
+                required=required, package="github.com/Pinvou/pinvou3/account-platform/internal/" + target,
+            )
+            print(f"{target} contracts: {count} named passes; all {len(required)} required top-level suites executed without skipped subcases")
     finally:
         # Do not force-delete remnants from failed fixtures or unknown actors.
-        current = set(query("SELECT rolname FROM pg_roles WHERE rolname !~ '^pg_' ORDER BY rolname").splitlines())
-        if query("SELECT datname FROM pg_database ORDER BY datname") != databases or current != ACTORS | {user}:
+        if not phase_boundary_clean():
             raise RuntimeError("fixture cleanup incomplete; actors retained for diagnosis")
         query("BEGIN; DROP ROLE billing_migrator; DROP ROLE billing_schema_owner; DROP ROLE billing_service; COMMIT;")
         if query("SELECT rolname FROM pg_roles WHERE rolname !~ '^pg_' ORDER BY rolname") != roles:

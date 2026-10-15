@@ -70,15 +70,35 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             len(RUNNER.REQUIRED),
         )
 
-    def run_main_fixture(self, *, existing_roles=False, user_objects=False, leftover=False):
+    def run_main_fixture(self, *, existing_roles=False, user_objects=False, leftover=False,
+                         missing_target=None, skipped_target=None, failed_target=None, wrong_package=False):
         writes = []
+        targets = []
         state = {"bootstrapped": False, "go_done": False}
         def run(argv, **kwargs):
             if argv[0] == "go":
                 state["go_done"] = True
+                target = argv[-1].removeprefix("./internal/")
+                targets.append(target)
                 self.assertNotIn("PINVOU_TEST_SCHEMA_DATABASE_URL", kwargs["env"])
                 self.assertIn("-race", argv)
-                return SimpleNamespace(returncode=0, stdout="\n".join(json.dumps(x) for x in self.events()), stderr="")
+                required = RUNNER.REQUIRED if target == "token" else RUNNER.BILLING_REQUIRED
+                events = [{"Action": "pass", "Test": name,
+                           "Package": "github.com/Pinvou/pinvou3/account-platform/internal/" + ("other" if wrong_package else target)}
+                          for name in sorted(required)]
+                if missing_target == target:
+                    events = events[1:]
+                if skipped_target == target:
+                    events.append({"Action": "skip", "Test": sorted(required)[0] + "/funds",
+                                   "Package": "github.com/Pinvou/pinvou3/account-platform/internal/" + target})
+                if target == "billing":
+                    self.assertIn("-run", argv)
+                    for name in required:
+                        self.assertIn(name, argv[argv.index("-run") + 1])
+                else:
+                    self.assertNotIn("-run", argv)
+                return SimpleNamespace(returncode=1 if failed_target == target else 0,
+                                       stdout="\n".join(json.dumps(x) for x in events), stderr="")
             sql = argv[-1]
             if "CREATE ROLE" in sql:
                 writes.append("create")
@@ -104,6 +124,8 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 value = "1" if user_objects else "0"
             elif "SHOW server_version_num" in sql:
                 value = "170000"
+            elif "FROM pg_stat_activity" in sql:
+                value = "0"
             else:
                 raise AssertionError("unexpected SQL")
             return SimpleNamespace(returncode=0, stdout=value, stderr="")
@@ -115,6 +137,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 RUNNER.main()
             finally:
                 self.fixture_writes = writes
+                self.fixture_targets = targets
 
     def test_existing_roles_prevent_bootstrap(self):
         with self.assertRaises(RuntimeError):
@@ -134,6 +157,33 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_owned_fixture_restores_only_its_actors(self):
         self.run_main_fixture()
         self.assertEqual(self.fixture_writes, ["create", "drop"])
+        self.assertEqual(self.fixture_targets, ["token", "billing"])
+
+    def test_positive_extension_suites_are_mandatory(self):
+        self.assertIn("TestF05AdditionalReservationProjectionPublicPostgres", RUNNER.REQUIRED)
+        self.assertIn("TestHoldExtensionIdempotencePostgres", RUNNER.BILLING_REQUIRED)
+        for target in ("token", "billing"):
+            with self.subTest(target=target), self.assertRaises(RuntimeError):
+                self.run_main_fixture(missing_target=target)
+
+    def test_billing_skipped_child_cannot_be_hidden_by_parent_pass(self):
+        with self.assertRaises(RuntimeError):
+            self.run_main_fixture(skipped_target="billing")
+
+    def test_unrelated_package_cannot_satisfy_required_suite_names(self):
+        with self.assertRaises(RuntimeError):
+            self.run_main_fixture(wrong_package=True)
+        self.assertEqual(self.fixture_targets, ["token"])
+
+    def test_failed_token_phase_stops_before_billing(self):
+        with self.assertRaises(RuntimeError):
+            self.run_main_fixture(failed_target="token")
+        self.assertEqual(self.fixture_targets, ["token"])
+
+    def test_failed_billing_phase_fails_the_runner(self):
+        with self.assertRaises(RuntimeError):
+            self.run_main_fixture(failed_target="billing")
+        self.assertEqual(self.fixture_targets, ["token", "billing"])
 
 
 if __name__ == "__main__":

@@ -554,7 +554,7 @@
         "parameters": [],
         "responses": {
           "200": {
-            "description": "Actual current success projection.",
+            "description": "Hold projection; a successful positive-extension replay returns the original operation snapshot, without a new reservation or lease renewal. This historical snapshot is not current hold-expiry or release evidence.",
             "content": {
               "application/json": {
                 "schema": {
@@ -595,9 +595,63 @@
                     "type": "integer",
                     "format": "int64",
                     "minimum": 0
+                  },
+                  "operation_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "format": "uuid",
+                    "description": "Required nonzero stable logical-operation UUID for positive additional_microcredits. Reuse for retries; an independent addition uses a different ID even when the amount matches. Zero-only lease renewal omits this field or uses null/zero UUID."
                   }
                 },
-                "additionalProperties": false
+                "additionalProperties": false,
+                "oneOf": [
+                  {
+                    "required": [
+                      "additional_microcredits",
+                      "operation_id"
+                    ],
+                    "properties": {
+                      "additional_microcredits": {
+                        "type": "integer",
+                        "format": "int64",
+                        "minimum": 1
+                      },
+                      "operation_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "not": {
+                          "enum": [
+                            "00000000-0000-0000-0000-000000000000"
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "additional_microcredits": {
+                        "type": "integer",
+                        "format": "int64",
+                        "enum": [
+                          0
+                        ]
+                      },
+                      "operation_id": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "format": "uuid",
+                        "enum": [
+                          null,
+                          "00000000-0000-0000-0000-000000000000"
+                        ]
+                      }
+                    }
+                  }
+                ]
               }
             }
           }
