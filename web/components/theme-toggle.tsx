@@ -49,6 +49,9 @@ export function ThemeToggle({
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
+    // Mount-time sync with localStorage; SSR must render the "auto" fallback,
+    // so the stored mode can only be read after hydration.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setMounted(true);
     const stored = (typeof localStorage !== "undefined" && localStorage.getItem(KEY)) as Mode | null;
     if (stored && ORDER.includes(stored)) setMode(stored);

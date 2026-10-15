@@ -3960,8 +3960,8 @@ fn exec_shell_input_is_parallel_readonly_shape(input: &serde_json::Value) -> boo
 }
 
 fn hardened_readonly_argv(command: &str) -> Result<(String, Vec<String>)> {
-    let mut argv = shell_words::split(&normalize_windows_command_paths(command))
-        .map_err(|error| anyhow!("could not parse classifier-approved read command: {error}"))?;
+    let mut argv = shlex::split(&normalize_windows_command_paths(command))
+        .ok_or_else(|| anyhow!("could not parse classifier-approved read command"))?;
     if argv.is_empty() {
         return Err(anyhow!("classifier-approved read command was empty"));
     }
@@ -4055,10 +4055,8 @@ fn enforce_readonly_workspace_operands(
     roots: &[PathBuf],
     effective_cwd: &std::path::Path,
 ) -> Result<(), ToolError> {
-    let argv = shell_words::split(&normalize_windows_command_paths(command)).map_err(|error| {
-        ToolError::invalid_input(format!(
-            "Could not parse read-only command arguments: {error}"
-        ))
+    let argv = shlex::split(&normalize_windows_command_paths(command)).ok_or_else(|| {
+        ToolError::invalid_input("Could not parse read-only command arguments".to_string())
     })?;
     if argv.first().is_some_and(|program| program == "gh") {
         // High-level gh reads do not consume local path operands. Their host

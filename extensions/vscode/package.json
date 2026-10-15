@@ -119,9 +119,9 @@
     "package": "vsce package --no-dependencies"
   },
   "devDependencies": {
-    "@types/node": "^20.19.27",
-    "@types/vscode": "^1.90.0",
-    "@vscode/vsce": "^3.7.0",
-    "typescript": "^5.9.3"
+    "@types/node": "^20.19.43",
+    "@types/vscode": "~1.90.0",
+    "@vscode/vsce": "^4.0.0",
+    "typescript": "^7.0.2"
   }
 }

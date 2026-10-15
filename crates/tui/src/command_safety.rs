@@ -406,7 +406,7 @@ const GITHUB_READONLY_PREFIXES: &[&str] = &[
 ];
 
 /// Normalize Windows absolute path spellings before any POSIX-style splitter
-/// (`shlex` / `shell_words`) or glob-charset gate in this module:
+/// (`shlex`) or glob-charset gate in this module:
 ///
 /// - `Path::canonicalize` on Windows embeds the verbatim prefix `\\?\C:\...`
 ///   whose `?` trips the glob-charset gates and whose backslashes the POSIX

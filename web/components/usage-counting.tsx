@@ -116,8 +116,12 @@ export function UsagePreferenceControl({ locale, appVersion }: { locale: string;
   const t = (text: { en: string; zh: string }) => pickText(text, locale);
 
   useEffect(() => {
+    // Mount-time sync with the recorder (an external, non-reactive store);
+    // SSR renders the "loading" state, so the preference can only be read
+    // after hydration. Cross-tab changes arrive via the storage listener.
     const current = getRecorder(appVersion);
     if (!current) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setPreference("unavailable");
       return;
     }

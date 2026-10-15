@@ -1185,7 +1185,7 @@ fn forkguard_workspace_roots_readonly_shell_operands_span_attached_roots() {
 
 #[test]
 fn windows_verbatim_and_drive_operands_survive_posix_split() {
-    // `shell_words` splits with POSIX backslash-escaping, which silently eats
+    // `shlex` splits with POSIX backslash-escaping, which silently eats
     // the separators of Windows absolute paths (`C:\Users\...` becomes
     // `C:Users...`) and mangles the `\\?\` verbatim prefix before operand
     // classification can see it. The protection doubles those backslashes so
@@ -1198,7 +1198,7 @@ fn windows_verbatim_and_drive_operands_survive_posix_split() {
         (r"\\.\device\path", r"\\.\device\path"),
     ] {
         let protected = normalize_windows_command_paths(&format!("cat {raw}"));
-        let argv = shell_words::split(&protected).expect("split must succeed");
+        let argv = shlex::split(&protected).expect("split must succeed");
         assert_eq!(
             argv,
             vec!["cat".to_string(), expected.to_string()],
@@ -3157,8 +3157,9 @@ async fn exec_shell_cancel_kills_descendant_process_group() {
     let test_binary = std::env::current_exe().expect("current test binary");
     let command = format!(
         "{} --exact {} --nocapture",
-        shell_words::quote(&test_binary.display().to_string()),
-        shell_words::quote("tools::shell::tests::shell_descendant_helper_process"),
+        shlex::try_quote(&test_binary.display().to_string())
+            .expect("test binary path contains a NUL byte"),
+        shlex::try_quote("tools::shell::tests::shell_descendant_helper_process").unwrap(),
     );
     let ctx = ToolContext::new(tmp.path());
     let mut env = std::collections::HashMap::new();
@@ -3777,9 +3778,11 @@ async fn foreground_timeout_kills_sigterm_ignoring_command_within_grace() {
     let test_binary = std::env::current_exe().expect("current test binary");
     let command = format!(
         "{SHELL_SIGTERM_HELPER_ENV}=1 {SHELL_DESCENDANT_PID_FILE_ENV}={} exec {} --exact {} --nocapture",
-        shell_words::quote(&pid_file.display().to_string()),
-        shell_words::quote(&test_binary.display().to_string()),
-        shell_words::quote("tools::shell::tests::shell_sigterm_ignoring_helper_process"),
+        shlex::try_quote(&pid_file.display().to_string())
+            .expect("pid file path contains a NUL byte"),
+        shlex::try_quote(&test_binary.display().to_string())
+            .expect("test binary path contains a NUL byte"),
+        shlex::try_quote("tools::shell::tests::shell_sigterm_ignoring_helper_process").unwrap(),
     );
     let ctx = ToolContext::new(tmp.path());
 
@@ -3816,9 +3819,11 @@ async fn kill_returns_promptly_when_escaped_descendant_holds_pipe_open() {
     let test_binary = std::env::current_exe().expect("current test binary");
     let command = format!(
         "{SHELL_ESCAPE_HELPER_ENV}=1 {SHELL_DESCENDANT_PID_FILE_ENV}={} {} --exact {} --nocapture & sleep 60",
-        shell_words::quote(&pid_file.display().to_string()),
-        shell_words::quote(&test_binary.display().to_string()),
-        shell_words::quote("tools::shell::tests::shell_group_escape_helper_process"),
+        shlex::try_quote(&pid_file.display().to_string())
+            .expect("pid file path contains a NUL byte"),
+        shlex::try_quote(&test_binary.display().to_string())
+            .expect("test binary path contains a NUL byte"),
+        shlex::try_quote("tools::shell::tests::shell_group_escape_helper_process").unwrap(),
     );
     let mut manager = ShellManager::new(tmp.path().to_path_buf());
     let started_bg =

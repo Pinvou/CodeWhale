@@ -74,7 +74,6 @@ ansi-to-tui = { version = "8.0.1", default-features = false }
 syntect = { version = "5.2", default-features = false, features = ["default-fancy"] }
 serde.workspace = true
 serde_json = { workspace = true, features = ["preserve_order"] }
-schemars = { version = "1.2.1", features = ["derive", "preserve_order"] }
 shellexpand = "3"
 toml.workspace = true
 toml_edit.workspace = true
@@ -93,7 +92,7 @@ tracing-subscriber.workspace = true
 tower-http.workspace = true
 wait-timeout = "0.2"
 webbrowser = "1.0"
-shlex = "1.3.0"
+shlex = "2"
 globset = "0.4"
 ignore = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
@@ -110,7 +109,6 @@ liblzma = { version = "0.4", features = ["static"] }
 sha2.workspace = true
 semver.workspace = true
 rust-i18n = "4.1.0"
-shell-words = "1.1.1"
 mimalloc.workspace = true
 
 [build-dependencies]

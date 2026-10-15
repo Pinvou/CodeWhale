@@ -630,14 +630,21 @@ fn acp_shell_command_requests_detach(command: &str) -> bool {
         }
     }
 
-    shell_words::split(command).is_ok_and(|words| {
-        words.iter().any(|word| {
+    // shlex 2 refuses input a real shell may still accept: a trailing
+    // backslash parses in bash/sh/dash as a literal `\` inside the last
+    // word, and a program literally named `foo\` runs when a file with
+    // that name exists. An unparseable command therefore fails closed —
+    // it is treated as a detach request and hits the foreground-only
+    // block instead of falling through to ordinary approval.
+    match shlex::split(command) {
+        Some(words) => words.iter().any(|word| {
             matches!(
                 word.to_ascii_lowercase().as_str(),
                 "nohup" | "disown" | "setsid" | "daemonize"
             )
-        })
-    })
+        }),
+        None => true,
+    }
 }
 
 #[derive(Debug)]
@@ -4375,6 +4382,20 @@ mod tests {
             ));
         }
         assert!(!acp_shell_command_requests_detach("echo '&' && echo done"));
+    }
+
+    #[test]
+    fn acp_detach_scan_fails_closed_on_unparseable_input() {
+        // `nohup cmd\` cannot be split as shell words (trailing backslash),
+        // so the keyword scan cannot classify it. A real `sh -c` does NOT
+        // reject this input: bash, sh, and dash all parse it and exec a
+        // program literally named `cmd\` (a file whose name ends in a
+        // backslash is creatable by an earlier allowed command), so it can
+        // still background. shell-words 1.1 split it (keeping the literal
+        // `\`) and blocked it; shlex 2 refuses it, so the gate treats
+        // unparseable input as a detach request and fails closed.
+        assert!(acp_shell_command_requests_detach(r"nohup ./agent\"));
+        assert!(acp_shell_command_requests_detach("nohup ./agent"));
     }
 
     #[test]
