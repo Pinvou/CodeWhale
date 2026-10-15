@@ -428,6 +428,7 @@ export const lazyChunkContracts = {
   cardpool: ['features/personas/Personas.jsx', 'Personas'],
   toolStore: ['features/tools/ToolStoreView.jsx', 'ToolStoreView'],
   scheduled: ['features/scheduled/ScheduledTasksView.jsx', 'ScheduledTasksView'],
+  browser: ['features/browser/BrowserView.jsx', 'BrowserView'],
   knowledge: ['features/knowledge/KnowledgeView.jsx', 'KnowledgeView'],
   modelStore: ['features/model-store/ModelStoreView.jsx', 'ModelStoreView'],
   monitor: ['features/monitor/MonitorView.jsx', 'MonitorView'],

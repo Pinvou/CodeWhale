@@ -247,14 +247,21 @@ class RustDiskTests(unittest.TestCase):
                 self.assertEqual(DISK.main(["--min-free-gib", "10"]), 1)
         self.assertTrue(self.keep.exists())
 
-    def test_workflow_prepares_disk_after_swap_and_before_both_harnesses(self):
+    def test_workflow_prepares_disk_before_swap_and_rechecks_after_caches(self):
         workflow = (ROOT / ".github/workflows/pr-check.yml").read_text(encoding="utf-8")
-        job = workflow.split("\n  rust-test:", 1)[1].split("\n  windows-rust-test:", 1)[0]
-        prepare = job.index("python3 scripts/ci-rust-disk.py")
-        self.assertLess(job.index("Set up zram and swap"), prepare)
-        self.assertLess(job.index("- name: Cargo test cache"), prepare)
-        self.assertLess(prepare, job.index("- name: cargo test --lib --no-run"))
-        self.assertLess(prepare, job.index("- name: cargo test --test behavior_telemetry"))
+        job = workflow.split("\n  rust-test:", 1)[1].split("\n  cli-test:", 1)[0]
+        preflight = job.index("- name: 在 swap 与缓存前准备 Rust 磁盘空间")
+        swap = job.index("- name: Set up zram and swap")
+        cache = job.index("- name: Cargo test cache")
+        recheck = job.index("- name: 在缓存后确认两轮 Rust 测试磁盘空间")
+
+        self.assertEqual(job.count("python3 scripts/ci-rust-disk.py"), 2)
+        self.assertLess(preflight, swap)
+        self.assertLess(swap, cache)
+        self.assertLess(cache, recheck)
+        self.assertIn("--min-free-gib 24", job[preflight:swap])
+        self.assertLess(recheck, job.index("- name: cargo test --lib --no-run"))
+        self.assertLess(recheck, job.index("- name: cargo test --test behavior_telemetry"))
         self.assertIn('RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT"', job)
         self.assertNotIn("continue-on-error", job)
 
