@@ -193,11 +193,12 @@ def validate_range(
 ) -> list[str]:
     # Shallow clones may not have the base or the legacy cutoff object; fall
     # back to the `head^!` revision (head with all parents excluded — exactly
-    # the one commit) and skip the cutoff exclusion rather than letting
-    # `git log` fail on a missing revision. A bare `head` would walk every
-    # reachable ancestor and mis-flag old nonconforming commits that the
-    # cutoff would have grandfathered. `^!` also works on a parentless root
-    # commit (verified: selects the root alone).
+    # the one commit) rather than letting `git log` fail on a missing
+    # revision. A bare `head` would walk every reachable ancestor and, when
+    # the cutoff object is missing too, mis-flag old nonconforming commits
+    # the cutoff would have grandfathered; `^!` validates head alone in both
+    # subcases. `^!` also works on a parentless root commit (verified:
+    # selects the root alone).
     revision = f"{base}..{head}" if git_commit_exists(base) else f"{head}^!"
     log_args = [
         "log",

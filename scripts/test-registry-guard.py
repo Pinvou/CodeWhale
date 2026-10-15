@@ -116,22 +116,107 @@ def list_tests():
     return paths
 
 
+_FN_RE = re.compile(
+    r"^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?"
+    r"fn\s+([A-Za-z_][A-Za-z0-9_]*)"
+)
+_IGNORE_RE = re.compile(r"\bignore\b")
+
+
+def _outside_strings(line, in_str):
+    """Strip double-quoted string contents from `line` (backslash escapes
+    honoured), carrying the in-string state across lines. Returns
+    (text, in_str)."""
+    out = []
+    k = 0
+    while k < len(line):
+        ch = line[k]
+        if in_str:
+            if ch == "\\":
+                k += 2
+                continue
+            if ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        else:
+            out.append(ch)
+        k += 1
+    return "".join(out), in_str
+
+
+def _parse_attribute(lines, i):
+    """Consume one `#[...]` attribute entry starting at line `i` (whose
+    stripped text starts with `#[`); the entry may span lines (rustfmt-
+    wrapped `#[cfg_attr(...)]`). Bracket depth is counted OUTSIDE string
+    literals, so `#[ignore = "a[b]"]` terminates correctly and a
+    `#[cfg_attr(feature = "ignore-me", ...)]` is judged by its tokens, not
+    its prose. Returns (end_idx_exclusive, ignore_line_idx_or_None) — the
+    reported location is the `ignore`-bearing line itself, not the block
+    top."""
+    depth = 0
+    in_str = False
+    ignore_line = None
+    j = i
+    n = len(lines)
+    while j < n:
+        outside, in_str = _outside_strings(lines[j], in_str)
+        if ignore_line is None and _IGNORE_RE.search(outside):
+            ignore_line = j
+        depth += outside.count("[") - outside.count("]")
+        if depth <= 0:
+            return j + 1, ignore_line
+        j += 1
+    return n, ignore_line
+
+
+def _fn_after(lines, idx):
+    """If the first non-blank line at/after `idx` declares a function,
+    return (fn_name, line_idx), else (None, None). Blank lines do not break
+    attachment; a comment line does — an `#[ignore]` mentioned in a comment
+    must not smear onto the next function. `pub`/`async`/`unsafe` prefixes,
+    generics (`fn g<T: Clone>()`) and rustfmt-wrapped signatures
+    (`fn long(` with the parens on the following lines) all resolve; the
+    paren must open on the name's line.
+    """
+    j = idx
+    n = len(lines)
+    while j < n and not lines[j].strip():
+        j += 1
+    if j >= n:
+        return None, None
+    stripped = lines[j].lstrip()
+    if stripped.startswith("//"):
+        return None, None
+    match = _FN_RE.match(stripped)
+    if match is None or "(" not in stripped:
+        return None, None
+    return match.group(1), j
+
+
 def ignored_source_pins():
     """Round-35 minor 10 (review #455): libtest's stable `--list` output cannot
     distinguish an #[ignore]d test from a live one, so scan the crate sources:
-    any `fn <name>` whose directly attached attribute block contains `ignore`
-    (covers `#[ignore]`, `#[ignore = "..."]` and `#[cfg_attr(..., ignore)]`)
-    is a silenced test.
+    any `fn <name>` whose directly attached attribute run contains an
+    `ignore` token (covers `#[ignore]`, `#[ignore = "..."]`,
+    `#[cfg_attr(..., ignore)]` in single- and multi-line form) is a
+    silenced test.
 
-    Only the contiguous run of attribute (`#[`) lines directly above the `fn`
-    is inspected: a doc comment (`///`), plain `//` comment or any code line
-    stops the walk, so a comment that merely mentions `#[ignore` (or an
-    `#[ignore]` on the *previous* function) cannot smear onto this one.
+    The scan is attribute-run based (round-6 review): starting from each
+    `#[` line, whole bracket-balanced attribute entries are consumed (so
+    wrapped cfg_attr forms resolve), and the run attaches to the function
+    declared on the next non-blank, non-comment line. A doc (`///`) or
+    plain comment terminates the run, so a comment that merely mentions
+    `#[ignore` cannot smear onto this one. The map is keyed by bare
+    function name to ALL locations; pin attribution is module-aware (see
+    main), so a same-named ignored test in an unrelated module does not
+    shadow or frame the pin.
     """
     src_root = os.path.join(os.path.dirname(MANIFEST), "src")
     hits = {}
-    for root, _dirs, files in os.walk(src_root):
-        for name in files:
+    for root, dirs, files in os.walk(src_root):
+        dirs.sort()
+        for name in sorted(files):
             if not name.endswith(".rs"):
                 continue
             path = os.path.join(root, name)
@@ -139,25 +224,65 @@ def ignored_source_pins():
                 lines = open(path, encoding="utf-8", errors="replace").read().splitlines()
             except OSError:
                 continue
-            for i, line in enumerate(lines):
-                stripped = line.lstrip()
-                body = stripped[6:] if stripped.startswith("async ") else stripped
-                if not (body.startswith("fn ") and "{" in body):
+            i = 0
+            n = len(lines)
+            while i < n:
+                if not lines[i].lstrip().startswith("#["):
+                    i += 1
                     continue
-                fn_name = body[3:].split("(")[0].strip()
-                attr_block = []
-                for j in range(i - 1, -1, -1):
-                    above = lines[j].lstrip()
-                    if above.startswith("#["):
-                        attr_block.append(above)
-                    else:
+                run = []
+                j = i
+                while j < n:
+                    stripped = lines[j].lstrip()
+                    if not stripped:
+                        j += 1  # blank lines are transparent within the run
+                        continue
+                    if not stripped.startswith("#["):
                         break
-                if any(re.search(r"\bignore\b", item) for item in attr_block):
-                    hits.setdefault(fn_name, f"{path}:{j + 2}")
+                    j, ignore_line = _parse_attribute(lines, j)
+                    if ignore_line is not None:
+                        run.append(ignore_line)
+                fn_name, fn_idx = _fn_after(lines, j)
+                if run and fn_name is not None:
+                    hits.setdefault(fn_name, []).extend(
+                        f"{path}:{line + 1}" for line in run
+                    )
+                i = fn_idx + 1 if fn_idx is not None else max(j, i + 1)
     return hits
 
 
+def _candidate_pin_files(pin):
+    """Source files that could directly contain the pinned test, derived
+    from its libtest module path under the standard layouts: the test's
+    parent module either lives in its own file (`a/b/tests.rs`,
+    `a/b/tests/mod.rs`) or is declared inline in the grandparent's file
+    (`a/b.rs`, `a/b/mod.rs`). Returns only files that exist; an empty
+    result (unconventional layout) makes callers fall back to the bare-name
+    match — fail closed."""
+    parts = pin.split("::")
+    parent, leaf = parts[:-1], parts[-1]
+    src = os.path.join(os.path.dirname(MANIFEST), "src")
+    if not parent:
+        candidates = [
+            os.path.join(src, leaf + ".rs"),
+            os.path.join(src, leaf, "mod.rs"),
+        ]
+    else:
+        base = os.path.join(src, *parent)
+        candidates = [
+            os.path.join(base, leaf + ".rs"),
+            os.path.join(base, leaf, "mod.rs"),
+            base + ".rs",
+            os.path.join(os.path.dirname(base), "mod.rs"),
+        ]
+    return [c for c in candidates if os.path.isfile(c)]
+
+
 def main():
+    if len(sys.argv) > 1:
+        raise SystemExit(
+            f"test-registry-guard: takes no arguments (got {sys.argv[1:]!r})"
+        )
     paths = list_tests()
     failures = []
 
@@ -175,7 +300,12 @@ def main():
     # its own message — that shape is a module move, not a stolen attribute,
     # and naming the new location makes the fix a one-liner. A pin silenced
     # by #[ignore] (stable libtest --list cannot flag ignored tests) is
-    # caught by the source-level scan below.
+    # caught by the source-level scan below, attributed MODULE-AWARELY
+    # (round-6 review): the pin's module path maps to the standard files
+    # that could host it, and only an ignored fn in one of those files flags
+    # the pin. A same-named ignored test in an unrelated module therefore
+    # stays silent; when the layout admits no candidate file the bare-name
+    # match applies to every hit — fail closed.
     ignored_src = ignored_source_pins()
     by_segment = collections.defaultdict(list)
     for p in paths:
@@ -183,8 +313,22 @@ def main():
     for pin in REQUIRED_PINS:
         if pin in counts and counts[pin] == 1:
             segment = pin.rsplit("::", 1)[-1]
-            if segment in ignored_src:
-                failures.append(f"required pin {pin} is #[ignore]d at {ignored_src[segment]}")
+            seg_hits = ignored_src.get(segment)
+            if seg_hits:
+                candidates = _candidate_pin_files(pin)
+                if candidates:
+                    matched = [
+                        loc
+                        for loc in seg_hits
+                        if loc.rsplit(":", 1)[0] in candidates
+                    ]
+                else:
+                    matched = seg_hits
+                if matched:
+                    failures.append(
+                        f"required pin {pin} is #[ignore]d at "
+                        + ", ".join(matched)
+                    )
             continue
         if pin in counts:
             failures.append(f"required pin registered more than once: {pin} x{counts[pin]}")

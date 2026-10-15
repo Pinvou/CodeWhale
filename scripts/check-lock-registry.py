@@ -10,13 +10,20 @@ Two failure classes are pinned here:
    codex-bridge-runtime) carried 134 such URLs in total before the #1518
    cleanup; this keeps them from creeping back in.
 
-2. Missing `libc` fields on the @img/* platform packages in
+2. Missing or wrong `libc` fields on the @img/* platform packages in
    team-relay-hub/package-lock.json — npm 10's arborist does not serialize
    `libc` (pkgMetaKeys gained the key only in npm 11), so a single local
    `npm install` on node 22 silently strips the filtering fields; without
    them every Linux environment installs BOTH the glibc and the musl
-   native binaries. The count is pinned so the strip turns red here
-   instead of being discovered as install-bloat later.
+   native binaries. The exact pkg→libc mapping is pinned (round-6 review:
+   a bare count survives a glibc/musl value swap, which installs the
+   wrong-ABI binary), so both the strip and the swap turn red here instead
+   of being discovered as install-bloat or odd crashes later. If the @img
+   platform set legitimately changes, update EXPECTED_TEAM_RELAY_HUB_LIBC.
+
+3. Lockfile format downgrades — the mirror scan walks the v3 `packages`
+   map; a lock rewritten at lockfileVersion != 3 (an npm-old regen) would
+   otherwise skip every check silently. Version 3 is pinned.
 
 Coverage note: the CI fast-gate checks out with `submodules: false` and runs
 this guard BEFORE the CodeWhale submodule init, so it sees the repo's own
@@ -30,7 +37,29 @@ import os
 import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EXPECTED_TEAM_RELAY_HUB_LIBC_ENTRIES = 16
+
+# team-relay-hub's @img/* platform packages and their serialized `libc`
+# values (registry metadata for sharp 0.35.5 / @img/libvips 1.3.4). Keys are
+# the package suffix starting at "@img/" so both v3 keys
+# ("node_modules/@img/…") and bare "@img/…" keys map onto one constant.
+EXPECTED_TEAM_RELAY_HUB_LIBC = {
+    "@img/sharp-linux-arm": ["glibc"],
+    "@img/sharp-linux-arm64": ["glibc"],
+    "@img/sharp-linux-ppc64": ["glibc"],
+    "@img/sharp-linux-riscv64": ["glibc"],
+    "@img/sharp-linux-s390x": ["glibc"],
+    "@img/sharp-linux-x64": ["glibc"],
+    "@img/sharp-linuxmusl-arm64": ["musl"],
+    "@img/sharp-linuxmusl-x64": ["musl"],
+    "@img/sharp-libvips-linux-arm": ["glibc"],
+    "@img/sharp-libvips-linux-arm64": ["glibc"],
+    "@img/sharp-libvips-linux-ppc64": ["glibc"],
+    "@img/sharp-libvips-linux-riscv64": ["glibc"],
+    "@img/sharp-libvips-linux-s390x": ["glibc"],
+    "@img/sharp-libvips-linux-x64": ["glibc"],
+    "@img/sharp-libvips-linuxmusl-arm64": ["musl"],
+    "@img/sharp-libvips-linuxmusl-x64": ["musl"],
+}
 
 
 def iter_lock_files():
@@ -48,7 +77,7 @@ def main():
     lock_files = sorted(iter_lock_files())
     if not lock_files:
         failures.append("no package-lock.json found — guard ran against the wrong tree?")
-    hub_libc_count = None
+    hub_libc = None
     for path in lock_files:
         rel = os.path.relpath(path, REPO_ROOT)
         try:
@@ -57,6 +86,14 @@ def main():
         except (OSError, ValueError) as exc:
             failures.append(f"{rel}: unreadable lockfile: {exc}")
             continue
+        version = lock.get("lockfileVersion")
+        if version != 3:
+            failures.append(
+                f"{rel}: unsupported lockfileVersion {version!r} (expected 3) — "
+                "the mirror scan walks the v3 `packages` map, so a "
+                "format-downgraded lock would skip every check silently; "
+                "regenerate the lock with a current npm"
+            )
         mirror_urls = sorted(
             f"{pkg}: {entry.get('resolved')}"
             for pkg, entry in lock.get("packages", {}).items()
@@ -70,35 +107,50 @@ def main():
                 + "\n  ".join(mirror_urls)
             )
         if rel == os.path.join("team-relay-hub", "package-lock.json"):
-            hub_libc_count = sum(
-                1
-                for pkg, entry in lock.get("packages", {}).items()
-                # lock v3 keys are "node_modules/@img/<pkg>"; match the scope
-                # anywhere so bare "@img/<pkg>" keys keep working too.
-                if isinstance(entry, dict) and "@img/" in pkg and "libc" in entry
-            )
-    if hub_libc_count is None:
+            hub_libc = {}
+            for pkg, entry in lock.get("packages", {}).items():
+                if not isinstance(entry, dict) or "libc" not in entry:
+                    continue
+                marker = pkg.find("@img/")
+                if marker < 0:
+                    continue
+                hub_libc[pkg[marker:]] = entry["libc"]
+    if hub_libc is None:
         failures.append(
             "team-relay-hub/package-lock.json not found — guard ran against the wrong tree?"
         )
-    elif hub_libc_count != EXPECTED_TEAM_RELAY_HUB_LIBC_ENTRIES:
-        failures.append(
-            f"team-relay-hub/package-lock.json: expected "
-            f"{EXPECTED_TEAM_RELAY_HUB_LIBC_ENTRIES} @img/* libc fields, found "
-            f"{hub_libc_count} — fewer means a lock rewrite on npm 10 "
-            f"(arborist does not serialize libc there) stripped them: "
-            f"regenerate with npm 11+ or restore the fields; MORE means the "
-            f"@img platform package set legitimately changed: update "
-            f"EXPECTED_TEAM_RELAY_HUB_LIBC_ENTRIES"
-        )
+    else:
+        expected = EXPECTED_TEAM_RELAY_HUB_LIBC
+        for pkg in sorted(set(expected) - set(hub_libc)):
+            failures.append(
+                f"team-relay-hub/package-lock.json: @img/* libc field stripped: "
+                f"{pkg} is missing (npm 10 arborist does not serialize libc — "
+                f"regenerate with npm 11+ or restore the fields)"
+            )
+        for pkg in sorted(set(hub_libc) - set(expected)):
+            failures.append(
+                f"team-relay-hub/package-lock.json: unexpected @img/* libc "
+                f"package {pkg} (libc={hub_libc[pkg]}) — if the @img platform "
+                f"set legitimately changed, update EXPECTED_TEAM_RELAY_HUB_LIBC"
+            )
+        for pkg in sorted(set(expected) & set(hub_libc)):
+            if hub_libc[pkg] != expected[pkg]:
+                failures.append(
+                    f"team-relay-hub/package-lock.json: @img/* libc value drift: "
+                    f"{pkg} libc={hub_libc[pkg]}, expected {expected[pkg]} — a "
+                    f"swapped value installs the wrong-ABI binary; restore the "
+                    f"registry metadata (or update EXPECTED_TEAM_RELAY_HUB_LIBC "
+                    f"if the platform set legitimately changed)"
+                )
     if failures:
         print("check-lock-registry: FAILED", file=sys.stderr)
         for failure in failures:
             print(f"\n{failure}", file=sys.stderr)
         return 1
     print(
-        f"check-lock-registry: ok — {len(lock_files)} lockfiles mirror-free, "
-        f"team-relay-hub @img/* libc fields intact ({hub_libc_count})"
+        f"check-lock-registry: ok — {len(lock_files)} lockfiles mirror-free "
+        f"(lockfileVersion 3), team-relay-hub @img/* libc mapping intact "
+        f"({len(hub_libc)} pkgs)"
     )
     return 0
 

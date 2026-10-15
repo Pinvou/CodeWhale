@@ -647,10 +647,14 @@ GATE_JOB_LEVEL_IFS = {
 # windows-rust-test 不在表内:它的步骤名唯一性已由
 # test_windows_rust_test_parallel_phases_preserve_routing_and_coverage 的
 # round-45 duplicate-step 断言覆盖。
+# Round-6 review (#1518): 本 PR 新钉的三枚步骤(锁文件 registry 卫生门禁/
+# test-registry guard/Prepare Rust disk capacity)同样按 name+if 钉住,
+# 一并登记;rust-lint 的磁盘与 zram 步骤为本 PR 新增,同表钉住防诱饵替换。
 PINNED_GATE_STEP_NAMES = {
     "fast-gate": (
         "Checkout (含 submodule,fork 为 public 直接拉)",
         "workflow lint (actionlint)",
+        "锁文件 registry 卫生门禁",
     ),
     "cli-test": (
         "Install Tauri Linux system dependencies",
@@ -667,6 +671,11 @@ PINNED_GATE_STEP_NAMES = {
         "cargo test --lib --no-run（编译链接测试二进制）",
         "cargo test --lib（含 strict_mode 回归；真 bge-m3/vLLM 测试已 #[ignore]）",
         "cargo test --lib --no-run (push main 仅编译暖 cache)",
+        "test-registry guard (duplicates + required pins)",
+    ),
+    "rust-lint": (
+        "Prepare Rust disk capacity",
+        "Set up zram and swap",
     ),
     "knowledge-rust": (
         "cargo clippy (hard gate, lib/bins/tests + server)",
@@ -1542,15 +1551,32 @@ class CiGatePolicyTests(unittest.TestCase):
         # every PR — pin the exact command so deleting the step (or
         # neutralizing it to `|| true`) fails here instead of silently
         # letting mirror URLs and npm-10 libc strips back into the locks.
+        # Round-6 review: the command must appear as an executable
+        # (non-comment) line — a commented-out command otherwise satisfies
+        # assertIn while the guard never runs — and the step must carry no
+        # `if:` at all (a decoy replacement with `if: false` would otherwise
+        # pass every assertion here while never executing).
         fast_gate = self.pr_workflow.split("\n  fast-gate:", maxsplit=1)[1].split(
             "\n  frontend-test:", maxsplit=1
         )[0]
         step = fast_gate.split(
             "- name: 锁文件 registry 卫生门禁", maxsplit=1
         )[1].split("\n      - name:", maxsplit=1)[0]
-        self.assertIn("python3 scripts/check-lock-registry.py", step)
+        self.assertTrue(
+            any(
+                "python3 scripts/check-lock-registry.py" in line
+                for line in step.splitlines()
+                if not line.lstrip().startswith("#")
+            ),
+            "pinned command must appear as an executable (non-comment) line",
+        )
         self.assertNotIn("|| true", step)
         self.assertNotIn("continue-on-error", step)
+        self.assertNotIn(
+            "if:",
+            step,
+            "the lock-guard step must run unconditionally in fast-gate",
+        )
 
     def test_rust_test_registry_guard_step_is_pinned(self):
         # PR #1518 round-5 review: the test-registry guard step runs inside
@@ -1558,11 +1584,30 @@ class CiGatePolicyTests(unittest.TestCase):
         # pinned its existence — deleting or neutralizing the step would keep
         # every test here green. Pin name + command + the push exclusion (the
         # push leg is compile-only warm-cache and must not run the guard).
+        # Round-6 review: also pin its POSITION after the PR-leg build step —
+        # the guard reuses that step's artifacts, so moving it before the
+        # build keeps every assertion here green while silently paying a
+        # full ~7-minute recompile on every PR.
+        build_step = "cargo test --lib --no-run（编译链接测试二进制）"
+        guard_step = "test-registry guard (duplicates + required pins)"
         rust_test = _extract_job_block(self.pr_workflow, "rust-test")
+        self.assertLess(
+            rust_test.find(build_step),
+            rust_test.find(guard_step),
+            "test-registry guard must run after the PR-leg build step "
+            "(artifact reuse); moving it earlier silently recompiles",
+        )
         step = rust_test.split(
             "- name: test-registry guard (duplicates + required pins)", maxsplit=1
         )[1].split("\n      - name:", maxsplit=1)[0]
-        self.assertIn("python3 scripts/test-registry-guard.py", step)
+        self.assertTrue(
+            any(
+                "python3 scripts/test-registry-guard.py" in line
+                for line in step.splitlines()
+                if not line.lstrip().startswith("#")
+            ),
+            "pinned command must appear as an executable (non-comment) line",
+        )
         self.assertNotIn("|| true", step)
         self.assertNotIn("continue-on-error", step)
         self.assertIn("if: ${{ github.event_name != 'push' }}", step)
@@ -1589,7 +1634,14 @@ class CiGatePolicyTests(unittest.TestCase):
             disk_step,
             "rust-lint disk cleanup must stay draft-gated (RUN_HEAVY_RUST_CHECKS)",
         )
-        self.assertIn("python3 scripts/ci-rust-disk.py", disk_step)
+        self.assertTrue(
+            any(
+                "python3 scripts/ci-rust-disk.py" in line
+                for line in disk_step.splitlines()
+                if not line.lstrip().startswith("#")
+            ),
+            "pinned command must appear as an executable (non-comment) line",
+        )
         self.assertNotIn("|| true", disk_step)
 
     def test_fast_gate_runner_line_is_pinned(self):
@@ -1602,9 +1654,15 @@ class CiGatePolicyTests(unittest.TestCase):
         fast_gate = self.pr_workflow.split("\n  fast-gate:", maxsplit=1)[1].split(
             "\n  frontend-test:", maxsplit=1
         )[0]
-        self.assertIn(
-            "python3 -m unittest discover -s scripts/tests -p 'test_*.py'",
-            fast_gate,
+        # Round-6 review: assert the runner line is EXECUTABLE, not merely
+        # present — a commented-out runner satisfies assertIn while the whole
+        # suite silently stops running in CI (the meta-bypass of this file).
+        self.assertTrue(
+            any(
+                "python3 -m unittest discover -s scripts/tests -p 'test_*.py'" in line
+                for line in fast_gate.splitlines()
+                if not line.lstrip().startswith("#")
+            ),
             "the gate-policy suite's only CI runner must not be deletable in "
             "silence",
         )
