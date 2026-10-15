@@ -119,6 +119,14 @@ reserved capacity. This exemption concerns the persistent new-entry quota:
 after a Relay restart, even a known identity must pass per-IP creation admission
 while the in-memory endpoint table is empty. This bounds anonymous durable growth; it does not promise
 unlimited trusted writes or fair admission for unknown devices during a Sybil flood.
+The in-memory active-endpoint ceiling is separate from this persistent quota.
+Anonymous identities can retain their slots by reconnecting before the offline
+TTL expires; those slots do not expire merely because the persistent quota is
+full. With `MAX_ENDPOINTS` below 512, anonymous identities can occupy all active
+slots, including slots needed by previously enrolled devices after a Relay
+restart. Known registry credentials do not bypass this admission ceiling.
+The reserved persistent-state headroom does not reserve active-endpoint slots
+for trusted devices; operators must also control aggregate connection pressure.
 Operators still need connection/source limits, storage monitoring and upstream
 abuse controls. Historical entries recorded as `self_hosted` cannot be reliably
 reclassified and are never guessed or automatically removed.
