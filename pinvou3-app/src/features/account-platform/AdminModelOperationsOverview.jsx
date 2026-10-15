@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { modelOperationsOverviewDrilldown, modelOperationsWindow, validateModelOperationsOverview, readAdminModelOperationsWindow } from './admin-usage-overview.js';
+import { formatUsageOverviewTimestamp } from './usage-time.js';
 
 const groups = Object.freeze({
   models: ['published_model_count', 'deprecated_model_count', 'model_draft_count'],
@@ -7,7 +8,7 @@ const groups = Object.freeze({
   reconciliation: ['usage_request_count', 'reconciliation_pending_count', 'reconciliation_stopped_count'],
 });
 
-export function AdminModelOperationsOverview({ client, copy, routeVersion, onRouteChange, onNavigate }) {
+export function AdminModelOperationsOverview({ client, copy, language, routeVersion, onRouteChange, onNavigate }) {
   const windowValue = useMemo(() => readAdminModelOperationsWindow(), [routeVersion]);
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [state, setState] = useState({ loading: true, data: null, error: null });
@@ -49,8 +50,8 @@ export function AdminModelOperationsOverview({ client, copy, routeVersion, onRou
     {state.error && <div className="adm-model-overview-state error" role="alert"><span>{labels.unavailable}{state.error.code ? ` · ${state.error.code}` : ''}{state.error.requestID ? ` · ${copy.requestID}: ${state.error.requestID}` : ''}</span><button type="button" onClick={() => setRefreshVersion((value) => value + 1)}>{copy.retry}</button></div>}
     {data && !state.error && <>
       <div className="adm-model-overview-groups">{Object.entries(groups).map(([group, keys]) => <article key={group}><h3>{labels.groups[group]}</h3><div>{keys.map((key) => { const metric = data.metrics.get(key); const target = modelOperationsOverviewDrilldown(key, data.window); const content = <><span>{labels.metrics[key]}</span><strong>{metric.value.toLocaleString()}</strong><small>{metric.denominator_key ? labels.denominator(metric.denominator_key, data.metrics.get(metric.denominator_key)?.value || 0) : metric.aggregation === 'WINDOW' ? labels.windowMetric : labels.pointMetric}</small></>; return target ? <button type="button" key={key} onClick={() => openMetric(key)}>{content}<em>{target.exact ? labels.exactDrilldown : labels.relatedDrilldown}</em></button> : <div key={key}>{content}</div>; })}</div></article>)}</div>
-      <section className="adm-model-overview-trend" aria-labelledby="model-overview-trend-title"><div><h3 id="model-overview-trend-title">{labels.trendTitle}</h3><p>{labels.trendLead}</p></div><div className="adm-model-trend-legend"><span className="usage">{labels.usageTrend}</span><span className="reconciliation">{labels.reconciliationTrend}</span></div>{data.trendHasData ? <div className="adm-model-trend-chart" role="img" aria-label={labels.trendAria(data.window.from, data.window.to)}>{data.trend.points.map((point) => <div key={point.from} title={`${new Date(point.from).toLocaleString()} · ${labels.usageTrend} ${point.usage_request_count} · ${labels.reconciliationTrend} ${point.reconciliation_attention_count}`}><i className="usage" style={{ height: `${point.usage_request_count === 0 ? 0 : Math.max(2, point.usage_request_count / maxTrend * 100)}%` }} /><i className="reconciliation" style={{ height: `${point.reconciliation_attention_count === 0 ? 0 : Math.max(2, point.reconciliation_attention_count / maxTrend * 100)}%` }} /></div>)}</div> : <p className="adm-model-trend-empty" role="status">{labels.trendEmpty}</p>}<small>{labels.bucket(data.trend.bucket_seconds)} · {labels.halfOpenWindow(new Date(data.window.from).toLocaleString(), new Date(data.window.to).toLocaleString(), data.window.timezone)}</small></section>
-      <footer>{labels.asOf}: {new Date(data.as_of).toLocaleString()} · {labels.zeroKnown} · {labels.crossDomain}</footer>
+      <section className="adm-model-overview-trend" aria-labelledby="model-overview-trend-title"><div><h3 id="model-overview-trend-title">{labels.trendTitle}</h3><p>{labels.trendLead}</p></div><div className="adm-model-trend-legend"><span className="usage">{labels.usageTrend}</span><span className="reconciliation">{labels.reconciliationTrend}</span></div>{data.trendHasData ? <div className="adm-model-trend-chart" role="img" aria-label={labels.trendAria(data.window.from, data.window.to)}>{data.trend.points.map((point) => <div key={point.from} title={`${formatUsageOverviewTimestamp(point.from, language)} · ${labels.usageTrend} ${point.usage_request_count} · ${labels.reconciliationTrend} ${point.reconciliation_attention_count}`}><i className="usage" style={{ height: `${point.usage_request_count === 0 ? 0 : Math.max(2, point.usage_request_count / maxTrend * 100)}%` }} /><i className="reconciliation" style={{ height: `${point.reconciliation_attention_count === 0 ? 0 : Math.max(2, point.reconciliation_attention_count / maxTrend * 100)}%` }} /></div>)}</div> : <p className="adm-model-trend-empty" role="status">{labels.trendEmpty}</p>}<small>{labels.bucket(data.trend.bucket_seconds)} · {labels.halfOpenWindow(formatUsageOverviewTimestamp(data.window.from, language), formatUsageOverviewTimestamp(data.window.to, language), data.window.timezone)}</small></section>
+      <footer>{labels.asOf}: {formatUsageOverviewTimestamp(data.as_of, language)} · {labels.zeroKnown} · {labels.crossDomain}</footer>
     </>}
   </section>;
 }

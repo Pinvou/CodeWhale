@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -13,11 +14,12 @@ import {
 } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import test from 'node:test';
 import { spawnNdjsonChild, stopNdjsonChild } from './helpers/ndjson-child-driver.mjs';
+import { cleanupBrowserFixture, confirmedChildStopper, confirmedProcessExited, readPendingHostRequest } from './helpers/browser-wrapper-fixture-cleanup.mjs';
 
 const WRAPPER = fileURLToPath(new URL(
   '../src-tauri/resources/common/bundle/mcp-servers/browser-wrapper.mjs',
@@ -491,15 +493,8 @@ function createFakeHost(fixture) {
     try {
       for (const name of readdirSync(requestDirectory)) {
         if (!name.endsWith('.json') || handled.has(name)) continue;
-        let raw;
-        try {
-          raw = readFileSync(join(requestDirectory, name), 'utf8');
-        } catch (error) {
-          // The wrapper renames a request file (claim/cancel tombstone) between
-          // our readdir and read; a vanished file has nothing left to handle.
-          if (error?.code !== 'ENOENT') throw error;
-          continue;
-        }
+        const raw = readPendingHostRequest(join(requestDirectory, name));
+        if (raw === null) continue;
         const request = JSON.parse(raw);
         if (state.deferredOperations.has(request.operation)) continue;
         handled.add(name);
@@ -613,6 +608,7 @@ function driveWrapper(fixture) {
   });
   return {
     ...driver,
+    stopConfirmed: confirmedChildStopper(driver.child, stopNdjsonChild),
     abandonRequest(id) {
       driver.dropRequest(id, { abandoned: true });
     },
@@ -630,12 +626,27 @@ async function initializeWrapper(wrapper, clientName) {
 }
 
 async function cleanupFixture(fixture, host, ...wrappers) {
-  host.close();
-  for (const wrapper of wrappers.filter(Boolean)) {
-    await stopNdjsonChild(wrapper.child);
-  }
-  await new Promise((resolve) => fixture.cdp.close(resolve));
-  rmSync(fixture.root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  await cleanupBrowserFixture({
+    closeHost: () => host.close(),
+    stopChildren: [
+      ...wrappers.filter(Boolean).map(wrapper => () => wrapper.stopConfirmed()),
+      () => waitUntil(
+        () => readAudit(fixture.auditPath).filter(entry => entry.kind === 'start')
+          .every(entry => confirmedProcessExited(entry.pid)),
+        'owned fake MCP children did not exit; preserving fixture files',
+      ),
+    ],
+    closeServer: () => new Promise((resolveClose, reject) => fixture.cdp.close(error => {
+      if (error) reject(error); else resolveClose();
+    })),
+    removeFiles: () => {
+      const target = resolve(fixture.root);
+      assert.equal(dirname(target), resolve(tmpdir()), 'cleanup must stay within this fixture temp parent');
+      assert.ok(basename(target).startsWith('pinvou-windows-lifecycle-'), 'cleanup must target the owned fixture');
+      assert.equal(lstatSync(target).isSymbolicLink(), false, 'cleanup refuses a replaced fixture link');
+      rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    },
+  });
 }
 
 function processIsAlive(pid) {

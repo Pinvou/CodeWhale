@@ -176,7 +176,11 @@ const expectedProtocolHashes = {
   // display-equality gate — listener body-internal edits only, no new invoke
   // or listen entries (capture-text refresh). Recomputed for per-frame stream
   // notification coalescing; event names and invoke shapes remain unchanged.
-  chat: '0938816c42c74d4019fb99fa1e8e8c20ec75fe815f5d64a89bb0357444275a33',
+  // Recomputed for the F05 model lifecycle receipt: the existing chat listener
+  // preserves the typed rejection only for its exact current timing owner.
+  // Commands, event names and invoke payloads retain their existing shapes;
+  // listener callback text is included in this source fingerprint.
+  chat: 'edfc4b697f186523956810c027ee790576db0d2c9e108c34998fb3c1758c9f9e',
   dependencies: '257468e4f9e2e9270de6ef75f685d5eafcd000226d44cfb81a1b04c0e7615707',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.

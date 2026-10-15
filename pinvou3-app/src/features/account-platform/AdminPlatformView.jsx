@@ -109,9 +109,10 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     const query = new URLSearchParams(globalThis.location?.search || '');
     if (query.has('approval_view')) return 'approvals';
     const requested = query.get('section');
-    return ['operations', 'closures', 'entitlement-correction'].includes(requested) ? requested : 'users';
+    return ['operations', 'closures', 'entitlement-correction', 'finance'].includes(requested) ? requested : 'users';
   });
-  const [financeTab, setFinanceTab] = useState('orders');
+  const [financeTab, setFinanceTab] = useState(() =>
+    new URLSearchParams(globalThis.location?.search || '').get('finance_tab') === 'ledger' ? 'ledger' : 'orders');
   const authorizationRefreshRef = useRef({ active: false, generation: 0, settled: Promise.resolve() });
   const generation = useRef(0);
   const [authorizationRefreshing, setAuthorizationRefreshing] = useState(false);

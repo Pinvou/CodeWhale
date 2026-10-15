@@ -231,14 +231,27 @@ func checksum(value string) string {
 	return hex.EncodeToString(digest[:])
 }
 
+// DownHooks preserve the packaged migration identity while allowing a trusted
+// domain wrapper to execute an exact checksum-pinned compatibility statement.
+// Both callbacks run as the original migration role in the same transaction
+// as the Down SQL and ledger removal; any failure rolls everything back.
+type DownHooks struct {
+	Guard    func(context.Context, pgx.Tx, Migration) error
+	ApplySQL func(context.Context, pgx.Tx, Migration) error
+}
+
 func DownOne(ctx context.Context, connection *pgx.Conn, migrations []Migration) error {
-	return DownOneWithGuard(ctx, connection, migrations, nil)
+	return DownOneWithHooks(ctx, connection, migrations, DownHooks{})
 }
 
 // DownOneWithGuard checks domain-owned rollback invariants in the same
 // transaction as the original Down SQL and ledger removal. A rejected guard
 // leaves both data and migration history unchanged.
 func DownOneWithGuard(ctx context.Context, connection *pgx.Conn, migrations []Migration, guard func(context.Context, pgx.Tx, Migration) error) error {
+	return DownOneWithHooks(ctx, connection, migrations, DownHooks{Guard: guard})
+}
+
+func DownOneWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Migration, hooks DownHooks) error {
 	if err := prepare(ctx, connection); err != nil {
 		return err
 	}
@@ -265,18 +278,23 @@ func DownOneWithGuard(ctx context.Context, connection *pgx.Conn, migrations []Mi
 		if err != nil {
 			return fmt.Errorf("begin rollback %d: %w", version, err)
 		}
-		if err = setMigrationRole(ctx, tx, role); err == nil && guard != nil {
-			err = guard(ctx, tx, migration)
+		if err = setMigrationRole(ctx, tx, role); err == nil && hooks.Guard != nil {
+			err = hooks.Guard(ctx, tx, migration)
 		}
 		// A trusted guard must not choose the identity of the original SQL.
 		if err == nil {
 			err = setMigrationRole(ctx, tx, role)
 		}
 		if err == nil {
-			if _, err = tx.Exec(ctx, migration.DownSQL); err == nil {
-				if err = setMigrationRole(ctx, tx, role); err == nil {
-					_, err = tx.Exec(ctx, `DELETE FROM schema_migrations WHERE version = $1`, version)
-				}
+			if hooks.ApplySQL != nil {
+				err = hooks.ApplySQL(ctx, tx, migration)
+			} else {
+				_, err = tx.Exec(ctx, migration.DownSQL)
+			}
+		}
+		if err == nil {
+			if err = setMigrationRole(ctx, tx, role); err == nil {
+				_, err = tx.Exec(ctx, `DELETE FROM schema_migrations WHERE version = $1`, version)
 			}
 		}
 		if err != nil {

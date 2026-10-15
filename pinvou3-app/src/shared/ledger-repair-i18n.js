@@ -195,7 +195,7 @@ export const ledgerRepairCopy = {
     "frozenFacts": "サーバー固定事実",
     "criticalFacts": "クリティカル版",
     "financialFacts": "財務スナップショット",
-    "factsUnavailable": "この対象では証明可能な固定事実がありません。修復コマンドが未激活か、前提条件を満たしていない可能性があります。",
+    "factsUnavailable": "この対象では証明可能な固定事実がありません。修復コマンドがまだ有効化されていないか、前提条件を満たしていない可能性があります。",
     "factsFailed": "固定事実の読み込みに失敗しました。後でもう一度お試しください。",
     "invalidInput": "対象参照を所定の形式（UUID または日付）で入力してください。",
     "reason": "申請理由",

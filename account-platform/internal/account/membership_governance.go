@@ -16,6 +16,22 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// Compare only grants that ordinary member creation or invitations manage.
+// OWNER implies MEMBER; unit administration remains independently managed.
+func managedMembershipRoles(roles []string) []string {
+	managed := make([]string, 0, len(roles))
+	for _, role := range roles {
+		if role != "OWNER" && role != "UNIT_ADMIN" {
+			managed = append(managed, role)
+		}
+	}
+	if slices.Contains(roles, "OWNER") && !slices.Contains(managed, "MEMBER") {
+		managed = append(managed, "MEMBER")
+	}
+	sort.Strings(managed)
+	return managed
+}
+
 func membershipRequestHash(commandType string, targetUserID uuid.UUID, roles []string, unitIDs []uuid.UUID) string {
 	roleCopy := append([]string(nil), roles...)
 	sort.Strings(roleCopy)
@@ -153,18 +169,7 @@ func (r *PostgresRepository) AdminAddMemberWithUnits(ctx context.Context, princi
 		if err != nil {
 			return MembershipMutationResult{}, err
 		}
-		currentRoles := make([]string, 0, len(member.Roles))
-		for _, role := range member.Roles {
-			if role != "OWNER" && role != "UNIT_ADMIN" {
-				currentRoles = append(currentRoles, role)
-			}
-		}
-		// Organization creation grants OWNER alone. Its basic membership is
-		// implicit; comparing it must neither revoke OWNER nor add a grant.
-		if slices.Contains(member.Roles, "OWNER") && !slices.Contains(currentRoles, "MEMBER") {
-			currentRoles = append(currentRoles, "MEMBER")
-		}
-		sort.Strings(currentRoles)
+		currentRoles := managedMembershipRoles(member.Roles)
 		currentUnits := append([]uuid.UUID(nil), member.UnitAdminIDs...)
 		sort.Slice(currentUnits, func(i, j int) bool { return currentUnits[i].String() < currentUnits[j].String() })
 		currentUnits = slices.Compact(currentUnits)

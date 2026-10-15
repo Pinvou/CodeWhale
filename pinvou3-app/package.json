@@ -168,6 +168,7 @@
     "test:admin-registration-bonus-ui": "node tests/admin_registration_bonus_ui_smoke.mjs && node tests/admin_registration_bonus_precision_ui_smoke.mjs",
     "test:account-platform-registration-bonus-ui": "node tests/admin_registration_bonus_ui_smoke.mjs && node tests/admin_registration_bonus_precision_ui_smoke.mjs",
     "test:account-platform-model-selection-ui": "node tests/account_platform_f05_model_selection_ui_smoke.mjs",
+    "test:account-platform-model-lifecycle-ui": "node tests/account_platform_f05_model_lifecycle_ui_smoke.mjs",
     "test:account-platform-native-code-ui": "node tests/account_platform_f05_native_code_ui_smoke.mjs",
     "test:account-platform-billing-notice-ui": "node tests/account_platform_f05_billing_notice_ui_smoke.mjs",
     "test:account-platform-usage-ui": "node tests/account_platform_f05_usage_ui_smoke.mjs && node tests/account_platform_usage_overview_ui_smoke.mjs",
