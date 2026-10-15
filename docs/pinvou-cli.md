@@ -18,6 +18,25 @@ Build:
 cargo build --manifest-path pinvou-cli/Cargo.toml --bin pinvou
 ```
 
+## Remote proxy boundary
+
+Remote proxy sessions belong to the authenticated remote route, not the local
+Engine/ACP, project, persona or artifact commands. The internal kind label is
+`remote-proxy`; this does not add proxy records to the local session/index list.
+Local session commands, code inspection/checkpoints, persona equip state and
+artifact read/write refuse the reserved `remote-` namespace. Windows also refuses
+ASCII case aliases of that prefix, so changing case cannot select the same local
+directory. Other platforms retain differently cased local names; generated local
+session IDs are UUIDs.
+An unavailable proxy keeps its original classification error, rather than
+falling back to a local directory or being reported as an authenticated proxy.
+Ordinary non-remote history, corrupt-record deletion and artifact directories
+without a session JSON retain their existing checks. This is not a zero-I/O
+guarantee: existing store boot/retention and artifact input checks still run.
+The agent backend's existing proxy refusal, scheduled/profile ownership,
+local-only bulk rebind/index scans and already unsupported host-only commands
+are unchanged; this does not add remote task dispatch or automatic retries.
+
 ## Conventions
 
 - `--output human|json` (global flag): `human` prints short labeled lines;
