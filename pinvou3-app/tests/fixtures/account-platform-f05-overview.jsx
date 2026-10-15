@@ -13,7 +13,7 @@ globalThis.fetch=async(target,options={})=>{
  const url=new URL(target,location.href);const path=url.pathname;
  control.calls.push({path,query:url.search,method:options.method||'GET',owner:control.owner});
  if(path==='/api/session')return json({authenticated:true,csrf_token:'controlled-csrf',feature_flags:{admin_model_token_page_overviews:control.page,admin_model_operations_overview:control.aggregate}});
- if(path==='/api/account/v1/account/bootstrap')return json({user_id:control.owner,status:'ACTIVE',personal_permissions:[],platform_permissions:[...(control.token?['platform.tokens.read']:[]),...(control.usage?['platform.usage.read']:[]),...(control.models?['platform.models.read']:[])],authorization_version:control.version});
+ if(path==='/api/account/v1/account/bootstrap')return json({user_id:control.owner,status:'ACTIVE',personal_permissions:[],platform_permissions:[...(control.token?['platform.tokens.read']:[]),...(control.usage?['platform.usage.read']:[]),...(control.models?['platform.models.read']:[])],active_context:{context_type:'PERSONAL',context_version:1,authorization_version:1,platform_authorization_version:control.version,permissions:[]}});
  if(path.endsWith('/overviews/model-operations')||path.endsWith('/operations-overview')){
   const view=control.token&&control.usage?'TOKEN_AND_USAGE':control.token?'TOKEN_ONLY':'USAGE_ONLY';
   const aggregate=path.endsWith('/operations-overview');

@@ -134,6 +134,39 @@ export function organizationFinanceRoutes(source, handlers) {
   return sorted(routes);
 }
 
+// F06 delivers exactly these ordinary and Admin member-unit PUT contracts.
+// Admin is an AuditOnly command; ordinary authority remains in the member handler.
+function checkMemberUnitsContract(document, source) {
+  const suffix = '/organizations/:organization_id/members/:user_id/units';
+  const definitions = [
+    { group: 'protected', path: '/v1' + suffix.replace(/\/:([a-z_]+)/g, '/{$1}'), handler: 'replaceMemberUnits', permission: 'org.members.manage' },
+    { group: 'admin', path: '/admin/v1' + suffix.replace(/\/:([a-z_]+)/g, '/{$1}'), handler: 'adminReplaceMemberUnits', permission: 'platform.organizations.members.manage', policy: { command: 'ACCOUNT_MEMBER_UNITS_REPLACE', mode: 'AuditOnly' } },
+  ];
+  const actual = [];
+  for (const line of routeDeclarationLines(source)) {
+    if (!line.includes(suffix) && !/s\.(?:adminReplaceMemberUnits|replaceMemberUnits)\b/.test(line)) continue;
+    const match = line.match(/^\s*(protected|admin)\.PUT\("([^"]+)",\s*(.*)\)$/);
+    assert.ok(match && match[2] === (match[1] === 'protected' ? '/v1' : '') + suffix, 'member unit route drift');
+    const definition = definitions.find(item => item.group === match[1]);
+    const prefix = definition.policy ? 's.requirePermission(PermissionPlatformOrganizationsMembersManage), approvalpolicy.Require("ACCOUNT_MEMBER_UNITS_REPLACE", approvalpolicy.AuditOnly), ' : '';
+    assert.equal(match[3], prefix + `httpserver.AdaptFunc(s.${definition.handler})`, 'member unit handler or policy drift');
+    actual.push(definition);
+  }
+  assert.deepEqual(sorted(actual), sorted(definitions), 'member unit route coverage drift');
+  const ops = operations(document);
+  assert.deepEqual(ops.map(({ method, path }) => ({ method, path })), sorted(definitions.map(({ path }) => ({ method: 'put', path }))), 'member unit contract route drift');
+  for (const { path: url, op } of ops) {
+    const definition = definitions.find(item => item.path === url);
+    assert.equal(op['x-service'], 'account', 'member unit service drift');
+    assert.equal(op.operationId, `account_${definition.handler}`, 'member unit operation drift');
+    assert.equal(op['x-go-handler'], definition.handler, 'member unit handler drift');
+    assert.equal(op['x-permission'], definition.permission, 'member unit permission drift');
+    assert.deepEqual(op['x-approval-policy'], definition.policy, 'member unit approval policy drift');
+    assert.deepEqual(op.security, [{ UserBearer: [] }], 'member unit authentication drift');
+  }
+  assert.doesNotThrow(() => validateRefs(document), 'member unit schema reference drift');
+}
+
 export function commandSpecs(source, handlers) {
   const block = source.match(/var tokenCommandSpecs = map\[string\]tokenCommandSpec\{([\s\S]*?)\n\}/)?.[1];
   if (!block) fail('missing command specs');
@@ -196,7 +229,8 @@ const requiredParameters = {
   adminTokenCredentialImpact: ['query:action'],
 };
 
-export function checkCoverage({ routeSource, specSource, handlerSource, credentialSource, dtoSources, manifest, management, credential, organizationFinanceSource, organizationHandlerSource, organizationFinance }) {
+export function checkCoverage({ routeSource, specSource, handlerSource, credentialSource, dtoSources, manifest, management, credential, organizationFinanceSource, organizationHandlerSource, organizationFinance, organizationAccountSource, memberUnits }) {
+  checkMemberUnitsContract(memberUnits, organizationAccountSource);
   const routes = managementRoutes(routeSource);
   const organization = organizationFinanceRoutes(organizationFinanceSource, organizationHandlerSource);
   assert.deepEqual(sorted(manifest.organizationFinanceRoutes), organization, 'organization route authority coverage drift');
@@ -222,6 +256,7 @@ export function checkCoverage({ routeSource, specSource, handlerSource, credenti
 
   }
   validateRefs(organizationFinance);
+  assert.deepEqual(organizationFinance.components.schemas.QuotaItem?.properties?.component_type?.enum, ['BASE', 'BONUS'], 'organization quota component contract drift');
   const commands = commandSpecs(specSource, handlerSource);
   const isolated = credentialRoutes(credentialSource);
   assert.deepEqual(sorted(manifest.routes), routes, 'management authority/handler coverage drift');
@@ -286,6 +321,8 @@ export function loadInputs(base = root) {
     organizationFinanceSource: read('account-platform/internal/token/organization_finance_routes.go'),
     organizationHandlerSource: read('account-platform/internal/token/organization_billing.go') + '\n' + read('account-platform/internal/token/organization_model_policy.go'),
     organizationFinance: json('account-platform/contracts/openapi/organization-finance.yaml'),
+    organizationAccountSource: read('account-platform/internal/account/organization_routes.go'),
+    memberUnits: json('account-platform/contracts/openapi/organization-member-units.yaml'),
     specSource: read('account-platform/internal/token/command_governance.go'),
     handlerSource: read('account-platform/internal/token/governance_handlers.go'),
     credentialSource: read('account-platform/internal/token/credential_origin.go'),

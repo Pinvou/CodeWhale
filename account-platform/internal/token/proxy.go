@@ -503,13 +503,20 @@ func (s *Service) dispatchUsage(w http.ResponseWriter, r *http.Request, usageReq
 	if terminal, err := s.recordTerminalFinalUsage(background, usageRequest.ID, usage); err != nil || terminal {
 		if err != nil {
 			api.WriteError(w, http.StatusServiceUnavailable, "RESULT_PERSISTENCE_FAILED", "the provider usage evidence could not be retained", httpserver.RequestID(r.Context()))
+		} else {
+			s.replayTerminalUsage(w, r, usageRequest.ID)
 		}
 		return
 	}
 	_, insufficientCode, ok := s.authorizeAdditional(background, usageRequest.ID, holdID, envelope.Price, usage, envelope.MaximumCost)
 	if !ok {
 		// A concurrent deadline may have completed while extension was attempted.
-		if terminal, _ := s.recordTerminalFinalUsage(background, usageRequest.ID, usage); terminal {
+		if terminal, err := s.recordTerminalFinalUsage(background, usageRequest.ID, usage); terminal || err != nil {
+			if err != nil {
+				api.WriteError(w, http.StatusServiceUnavailable, "RESULT_PERSISTENCE_FAILED", "the provider usage evidence could not be retained", httpserver.RequestID(r.Context()))
+			} else {
+				s.replayTerminalUsage(w, r, usageRequest.ID)
+			}
 			return
 		}
 		api.WriteError(w, http.StatusServiceUnavailable, "SETTLEMENT_PENDING", "the final response is awaiting usage settlement", httpserver.RequestID(r.Context()))
@@ -674,6 +681,24 @@ func (s *Service) replayUsage(w http.ResponseWriter, r *http.Request, usage Usag
 		s.replayLiveStream(w, r, usage.ID, after)
 		return
 	}
+	s.replayStoredUsage(w, r, usage, after)
+}
+
+// A financial terminal race can leave an older execution phase visible. Read
+// only the existing replay/status projection; never resume dispatch or persist
+// the new late response body through the general recovery entry point.
+func (s *Service) replayTerminalUsage(w http.ResponseWriter, r *http.Request, usageID uuid.UUID) {
+	usage, err := s.repository.GetUsage(r.Context(), usageID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	s.replayStoredUsage(w, r, usage, 0)
+}
+
+func (s *Service) replayStoredUsage(w http.ResponseWriter, r *http.Request, usage UsageRequest, after int64) {
+	w.Header().Set("X-Pinvou-Usage-Request-ID", usage.ID.String())
+	w.Header().Set("Cache-Control", "no-store")
 	snapshot, err := s.repository.LoadReplay(r.Context(), usage.ID, after)
 	if err != nil {
 		s.writeError(w, r, err)

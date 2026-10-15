@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseRegistrationBonusJSON, encodeRegistrationBonusJSON, bonusRevision, MAX_BONUS_POINTS } from '../src/features/account-platform/registration-bonus-contract.js';
+import { parseRegistrationBonusJSON, encodeRegistrationBonusJSON, bonusRevision, MAX_BONUS_POINTS, registrationBonusReasonIsValid } from '../src/features/account-platform/registration-bonus-contract.js';
 import { readBonusPending, persistBonusPending, clearBonusPending, bonusAttemptProvesNoWrite } from '../src/features/account-platform/registration-bonus-recovery.js';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
 import { adminPlatformCopy } from '../src/shared/i18n.js';
@@ -38,6 +38,28 @@ test('unknown request preserves the original actor, key, payload and revision ac
 });
 test('unverifiable storage prevents creating recovery evidence', () => {
   assert.throws(() => persistBonusPending({ actor: 'actor-a', key: 'registration-bonus-0199a100-0001-4000-8000-000000000101', body }, { setItem() {}, getItem() { return null; } }));
+});
+
+test('reason bounds use trimmed Unicode code points, matching the existing wire contract', () => {
+  for (const [reason, valid] of [
+    ['😀'.repeat(5), false], ['😀'.repeat(9), false],
+    ['😀'.repeat(10), true], ['😀'.repeat(500), true], ['😀'.repeat(501), false],
+    ['  ' + '😀'.repeat(9) + 'a  ', true], ['  ' + 'a'.repeat(9) + '  ', false],
+    ['', false], [null, false], [10, false],
+  ]) {
+    assert.equal(registrationBonusReasonIsValid(reason), valid);
+    if (valid) assert.equal(JSON.parse(encodeRegistrationBonusJSON({ ...body, reason })).reason, reason.trim());
+    else assert.throws(() => encodeRegistrationBonusJSON({ ...body, reason }), /INVALID_REGISTRATION_BONUS_REQUEST/);
+  }
+});
+
+test('legal non-BMP recovery preserves the original actor, request key and complete reason', () => {
+  const storage = memory();
+  const pending = { actor: 'actor-a', key: 'registration-bonus-0199a100-0001-4000-8000-000000000101', body: { ...body, reason: '😀'.repeat(500) } };
+  persistBonusPending(pending, storage);
+  assert.deepEqual(readBonusPending('actor-a', storage), pending);
+  assert.equal(readBonusPending('actor-b', storage), null);
+  assert.equal([...JSON.parse(encodeRegistrationBonusJSON(readBonusPending('actor-a', storage).body)).reason].length, 500);
 });
 test('a denied replay cannot erase the original unknown receipt, and generic HTTP errors prove nothing', () => {
   for (const error of [{ code: 'RECENT_AUTHENTICATION_REQUIRED', status: 401 }, { code: 'PERMISSION_DENIED', status: 403 }, { code: 'REGISTRATION_BONUS_CONFLICT', status: 409 }]) {
