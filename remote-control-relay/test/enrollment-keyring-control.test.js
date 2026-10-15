@@ -91,3 +91,14 @@ test("coverage without retained keys preserves the legacy v1 binding", async () 
   delete env.PINVOU_REMOTE_ENROLLMENT_HMAC_PREVIOUS_KEYS_JSON;
   assert.equal(await binding(env), expected);
 });
+
+test("coverage binding distinguishes enabled anonymous registration and preserves disabled defaults", async () => {
+  const env = environment([]);
+  const original = await binding(env);
+  for (const value of ["false", "0"]) {
+    assert.equal(await binding({ ...env, PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION: value }), original);
+  }
+  const enabled = await binding({ ...env, PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION: "true" });
+  assert.notEqual(enabled, original);
+  assert.equal(await binding({ ...env, PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION: "1" }), enabled);
+});
