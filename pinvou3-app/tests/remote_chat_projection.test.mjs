@@ -2,11 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { dict } from './helpers/i18n-all.js';
 import {
   controlledTaskChatItems,
   isRemoteChatActive,
   mergeControlledTaskChatItems,
   remoteChatItems,
+  remotePermissionFailureText,
 } from '../src/features/remote-control/chat-transcript-projection.mjs';
 
 const connection = { status: 'connected', sessionId: 'session-1' };
@@ -15,6 +17,60 @@ const projectControlled = tasks => {
   return controlledTaskChatItems(sessionTasks,
     { statusCancelled: 'Cancelled', statusFailed: 'Failed' }, 'session-b');
 };
+
+test('translated permission errors reconcile only the matching durable turn without discarding raw evidence', () => {
+  const code = 'task_permission_mode_changed';
+  const copy = dict.zh.remoteConversation;
+  const history = [
+    { id: 'old-user', type: 'user', text: 'same prompt', messageIndex: 0 },
+    { id: 'old-error', type: 'assistant', text: code, messageIndex: 1 },
+    { id: 'current-user', type: 'user', text: 'same prompt', messageIndex: 2 },
+    { id: 'current-error', type: 'assistant', text: code, messageIndex: 3 },
+  ];
+  const snapshot = structuredClone(history);
+  for (const errorText of ['', code]) {
+    const projected = controlledTaskChatItems([{
+      sessionId: 'session-1', taskId: 'current-task', status: 'failed',
+      text: 'same prompt', messageIndex: 2, terminalReason: code, errorText,
+    }], copy, 'session-1');
+    const merged = mergeControlledTaskChatItems(history, projected);
+    assert.equal(merged.length, 4);
+    assert.deepEqual(merged.slice(0, 2), snapshot.slice(0, 2));
+    assert.equal(merged[3].id, 'current-error');
+    assert.equal(merged[3].controlledFailureReason, code);
+    assert.ok(merged[3].text.includes(copy.permissionModeChanged));
+    assert.ok(merged[3].text.includes(code));
+    assert.deepEqual(history, snapshot);
+  }
+});
+
+test('controlled permission failures show explicit local guidance in every language while retaining the evidence code', () => {
+  const keys = {
+    task_permission_mode_required: 'permissionModeRequired',
+    task_permission_mode_changed: 'permissionModeChanged',
+    task_permission_mode_unsupported: 'permissionModeUnsupported',
+  };
+  for (const language of ['zh', 'en', 'ja']) {
+    const copy = dict[language].remoteConversation;
+    for (const [code, key] of Object.entries(keys)) {
+      assert.ok(Object.hasOwn(copy, key));
+      assert.ok(copy[key]);
+      for (const errorText of ['', code]) {
+        const items = controlledTaskChatItems([{
+          sessionId: 'session-1', taskId: 'permission-task', status: 'failed',
+          text: 'accepted task', terminalReason: code, errorText,
+        }], copy, 'session-1');
+        const failure = items.find(item => /:terminal$|:error$/.test(item.id));
+        assert.ok(failure.text.includes(copy[key]));
+        assert.ok(failure.text.includes(code));
+        if (!errorText) assert.equal(failure.controlledFailureReason, code);
+      }
+    }
+    for (const unknown of ['constructor', '__proto__', 'provider_failure', null, {}]) {
+      assert.equal(remotePermissionFailureText(unknown, copy), null);
+    }
+  }
+});
 const transcript = [
   { sessionId: 'session-1', epoch: 'e1', sequence: 1, role: 'user', text: 'hello' },
   { sessionId: 'session-1', epoch: 'e1', sequence: 2, role: 'assistant', text: 'a' },
@@ -655,6 +711,51 @@ test('a middle hydration gap preserves unproven output and converges when filled
     ['inspect', 'A', undefined, 'C', 'ABC']);
   const hydrated = [...partial.slice(0, 3), { type: 'assistant', text: 'B' }, partial[3]];
   assert.deepEqual(mergeControlledTaskChatItems(hydrated, task), hydrated);
+});
+
+for (const type of ['assistant', 'tool']) {
+  test(`an unanchored prompt ignores ${type} items as raw-position fallback anchors`, () => {
+    const history = [
+      { id: 'previous-user', type: 'user', text: 'previous prompt', messageIndex: 0 },
+      { id: 'non-user', type, text: 'previous event', messageIndex: 11 },
+      { id: 'next-user', type: 'user', text: 'next prompt', messageIndex: 20 },
+    ];
+    const snapshot = structuredClone(history);
+    const projected = projectControlled([
+      { taskId: 'missing-task', text: 'missing prompt', messageIndex: 10, status: 'running' },
+    ]);
+    const merged = mergeControlledTaskChatItems(history, projected);
+    assert.deepEqual(merged.map(item => item.text),
+      ['previous prompt', 'previous event', 'missing prompt', 'next prompt']);
+    assert.equal(merged[1], history[1], 'non-user evidence retains its original position');
+    assert.equal(merged[2].controlledTaskId, 'missing-task');
+    assert.equal(merged[3], history[2], 'the next durable user is the fallback boundary');
+    assert.deepEqual(history, snapshot);
+  });
+}
+
+test('permission label enrichment preserves existing raw evidence and all durable identity fields', () => {
+  const code = 'task_permission_mode_changed';
+  const copy = dict.zh.remoteConversation;
+  const failure = {
+    id: 'durable-failure', type: 'assistant', text: code,
+    messageIndex: 1, createdAt: 123, remoteTaskId: 't1',
+    controlled: false, controlledFailureReason: 'original-durable-evidence',
+  };
+  const history = [{ type: 'user', text: 'first', messageIndex: 0 }, failure];
+  const snapshot = structuredClone(history);
+  const projected = controlledTaskChatItems([{
+    sessionId: 'session-b', taskId: 't1', text: 'first', messageIndex: 0,
+    status: 'failed', errorText: code,
+  }], copy, 'session-b');
+  const merged = mergeControlledTaskChatItems(history, projected);
+  assert.equal(merged.length, 2);
+  assert.deepEqual(merged[1], {
+    ...failure, text: `${copy.permissionModeChanged} (${code})`,
+  });
+  assert.equal(merged[1].controlledContentLane, undefined);
+  assert.equal(merged[1].controlledTaskId, undefined);
+  assert.deepEqual(history, snapshot);
 });
 
 test('identical model output and failure text require distinct persisted lane coverage', () => {

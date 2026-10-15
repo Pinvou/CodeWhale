@@ -713,6 +713,11 @@ impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
         if cancel.is_cancelled() {
             return Err(TASK_CANCELLED_CODE.to_owned());
         }
+        let permission_mode = crate::features::remote_control::task_permissions::for_session(
+            &self.pool.session_store,
+            session_id,
+            true,
+        )?;
         if !self.authorizations.is_authorized(
             session_id,
             workspace_id,
@@ -760,12 +765,21 @@ impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
         };
         // Reserve the actual idle runtime before expensive preflight. This is
         // not yet a permission owner; Drop rolls back every failure/yield path.
-        let reservation = self.pool.reserve_remote_turn(owner.clone());
+        let reservation = self
+            .pool
+            .reserve_remote_turn(owner.clone(), permission_mode);
         let mut reservation = budget
             .run(&cancel, async {
-                reservation
-                    .await
-                    .map_err(|_| "task_session_backend_unavailable".to_owned())
+                reservation.await.map_err(|error| {
+                    let code =
+                        crate::features::assistant::remote_turn::remote_engine_error_code(&error);
+                    match code {
+                        "task_permission_mode_required"
+                        | "task_permission_mode_changed"
+                        | "task_permission_mode_unsupported" => code.to_owned(),
+                        _ => "task_session_backend_unavailable".to_owned(),
+                    }
+                })
             })
             .await?;
         let skill_path = authorized_path.clone();
@@ -856,11 +870,14 @@ impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
             .run(&cancel, async {
                 reservation
                     .submit(&actual_content, &content, &attachments, &cancel, budget)
-                    .map_err(|_| {
+                    .map_err(|error| {
                         if cancel.is_cancelled() {
                             TASK_CANCELLED_CODE.to_owned()
                         } else {
-                            "task_engine_unavailable".to_owned()
+                            crate::features::assistant::remote_turn::remote_engine_error_code(
+                                &error,
+                            )
+                            .to_owned()
                         }
                     })?;
                 let mut registered = HashMap::new();

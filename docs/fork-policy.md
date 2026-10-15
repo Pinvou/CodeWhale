@@ -11,7 +11,7 @@
 - r1 已成为可消费的受保护基线；rN 收口时父仓 gitlink、维护分支和不可变 tag 指向同一 commit。
 - 过渡期豁免（2026-09-11 起）：两次 rN 收口之间，父仓 gitlink 可沿 `pinvou3-clean` 领先不可变 tag 前进；期间 `scripts/verify-public-submodule.sh` 断言 gitlink 等于公开维护分支头、不可变 tag 仍钉在其收口 commit，rN 收口时在合并头切新不可变 tag 并恢复三方相等。
 - `.gitmodules` 不配置浮动 `branch`；发布后父仓 gitlink、维护分支和不可变标签必须指向同一 commit。
-- 当前维护 4 个长期主题、3 个追加减量主题与 1 个已合入维护分支的主题：
+- 当前维护 4 个长期主题、3 个追加减量主题与 2 个已合入维护分支的主题：
 
   1. 宿主嵌入与路由边界
   2. 工具兼容与命令执行安全
@@ -21,6 +21,7 @@
   6. 蜂群限流治理（T6，追加减量）
   7. 压缩检查点角色兼容（T7，已合入维护分支）
   8. roster 宿主 profiles 呈现（T8，追加减量）
+  9. Custom wire 运行时路线（T9，已合入维护分支）
 
 精确 commit、文件、理由和验证见 `docs/fork-modifications.md`。新增需求优先归入既有主题；只有形成新的稳定状态、验证和回退边界时才增加主题。
 
@@ -43,6 +44,7 @@ Pinvou 的产品工具白名单、UI、工作区选择和业务策略留在 app�
 - 总 drift 软上限：净增 1500 行（净增 = 新增 − 删除行数，与下方基线表述同口径）。
 - 单文件 fork-distinct 改动软上限：200 行。
 - 超过不是自动拒绝，但必须记录保留原因和减量顺序。
+- 当前维护头及 drift 以 `docs/fork-modifications.md` 第 0 节为准，本轮只继承集成分支 gitlink，不独立追齐底座。历史 #107 维护头 `f27672935` 相对上游 v0.9.12 为 `397 files, +53709/-21547`，净增 32162 行；其相对 `480bebf61` 的 `client.rs` +124/-5 保留同模型宿主 route limits 及两条结果式回归，归入既有 T1，不增加主题。
 - v0.9.12 r1 相对上游为 `94 files, +5022/-944`，净增 4078 行；相对 v0.9.5 r13 的 `110 files, +10895/-1195` 已收敛。新增触达文件包含当前 Rust/rustdoc 发布 lint 的等价调整、评审要求的生命周期与评测结果式回归、API 搜索后备链可达性与错误提示修复、无调用上游比较 helper 的删除、精确登记官方 v0.9.12 与 Pinvou r1 模型可见工具契约的预算收口、有界的 macOS 冷启动构建超时和 overdue one-shot 投递，不增加 fork 行为主题。基线仍超总量与个别文件软上限，因为可靠 steer、受限轮最终分发、宿主 prompt/profile/Skills 所有权、Automation 生命周期和对应安全回归必须在 Engine/Task 原子边界内实现。减量顺序是：先上游化通用 steer 与逐轮安全，再上游化 Automation 生命周期，父仓迁移到窄 re-export API 后分批收窄 18 个 `pub mod` 兼容 facade，最后评估 prompt/profile/Skills ownership 是否能由稳定 host API 完全替代。
 
 ### 1.3 主题提交

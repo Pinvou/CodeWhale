@@ -71,6 +71,7 @@ import {
   controlledTaskChatItems as projectControlledTaskChatItems,
   mergeControlledTaskChatItems,
   remoteChatItems as projectRemoteChatItems,
+  remotePermissionFailureText,
 } from '../remote-control/chat-transcript-projection.mjs';
 import {
   liveRemoteProxyBinding,
@@ -2765,7 +2766,8 @@ const openChatExternalUrl = (url) => {
           setRemoteDispatchAction(null);
         }
       }
-      const remoteSendMessage = currentRemoteSendError === 'remote_proxy_byte_budget'
+      const remoteSendMessage = remotePermissionFailureText(currentRemoteSendError, t.remoteConversation)
+        ?? (currentRemoteSendError === 'remote_proxy_byte_budget'
         ? t.remoteArchive.byteBudget
         : currentRemoteSendError === 'task_session_busy'
         ? t.remoteConversation.sessionBusy
@@ -2775,7 +2777,7 @@ const openChatExternalUrl = (url) => {
             ? t.remoteConversation.modelRequired
             : (currentRemoteSendError === 'model_credential_unavailable'
               ? t.remoteConversation.controlledModelCredentialUnavailable
-              : (currentRemoteSendError ? t.remoteConversation.errorGeneric : null))));
+              : (currentRemoteSendError ? t.remoteConversation.errorGeneric : null)))));
       const sendChatMessage = useCallback(async (text, voiceContext) => {
         const operationId = voiceContext?.operationId
           || (bridge.voice?.getVoiceOperationId

@@ -260,6 +260,7 @@ class RustDiskTests(unittest.TestCase):
         self.assertLess(job.index("Set up zram and swap"), job.index(pre))
         self.assertLess(job.index(pre), job.index("- name: 恢复 Rust lint 暖缓存"))
         self.assertLess(job.index(pre), job.index("- name: Cargo test cache"))
+        self.assertLess(job.index("- name: 恢复 Rust lint 暖缓存"), job.index(post))
         self.assertLess(job.index("- name: Cargo test cache"), job.index(post))
         self.assertLess(job.index(post), job.index("- name: cargo test --lib --no-run"))
         self.assertLess(job.index(post), job.index("- name: cargo test --test behavior_telemetry"))
@@ -298,6 +299,21 @@ class RustDiskTests(unittest.TestCase):
 
     def test_workflow_prepares_disk_before_cache_restore_and_rechecks_after_it(self):
         self._assert_disk_preparation_recipe(self._rust_test_job())
+
+    def test_workflow_rejects_cache_restore_after_post_restore_check(self):
+        job = self._rust_test_job()
+        post = "      - name: 在缓存后确认两轮 Rust 测试磁盘空间"
+        for cache in ("恢复 Rust lint 暖缓存", "Cargo test cache"):
+            marker = "      - name: " + cache
+            start = job.index(marker)
+            end = job.index("\n      - name:", start + len(marker))
+            block = job[start:end]
+            without_cache = job[:start] + job[end:]
+            post_start = without_cache.index(post)
+            after_post = without_cache.index("\n      - name:", post_start + len(post))
+            changed = without_cache[:after_post] + "\n" + block + without_cache[after_post:]
+            with self.subTest(cache=cache), self.assertRaises(AssertionError):
+                self._assert_disk_preparation_recipe(changed)
 
     def test_workflow_rejects_missing_or_reordered_disk_preparation(self):
         job = self._rust_test_job()

@@ -32,6 +32,12 @@ pub(super) struct RuntimeIdentity {
     flights: AtomicUsize,
 }
 
+impl RuntimeIdentity {
+    pub(super) fn has_live_prompt(&self) -> bool {
+        self.flights.load(Ordering::Acquire) != 0
+    }
+}
+
 pub(super) struct PromptFlight(Arc<RuntimeIdentity>);
 
 impl PromptFlight {
@@ -283,14 +289,29 @@ pub(super) struct RemoteTurnReservation {
     submitted: bool,
     released: bool,
     turn_id: String,
+    permission_mode: crate::core::mode_state::SerializableMode,
 }
 
 impl AcpPool {
     pub(super) async fn reserve_remote_turn(
         &self,
         owner: RemotePermissionOwner,
+        permission_mode: crate::core::mode_state::SerializableMode,
     ) -> Result<RemoteTurnReservation> {
+        if self.backend(&owner.session_id) != super::AgentBackend::CodexAcp
+            || !self.resolve_adapter().is_some_and(|adapter| {
+                super::install::supports_remote_permission_contract(&adapter)
+            })
+        {
+            bail!("task_permission_mode_unsupported");
+        }
+        verify_frozen_remote_mode(&self.session_store, &owner.session_id, permission_mode)?;
         let runtime = self.get_or_spawn(&owner.session_id).await?;
+        let admission = super::PromptAdmissionGuard::new(&runtime.prompt_pending);
+        let mut configuration = Some(
+            self.configure_remote_permission_mode(&owner.session_id, &runtime, permission_mode)
+                .await?,
+        );
         let sessions = self.sessions.lock().await;
         if !sessions
             .get(&owner.session_id)
@@ -307,17 +328,36 @@ impl AcpPool {
                 {
                     bail!("remote_turn_runtime_retired");
                 }
-                owners.reserve(
+                // Configuration ACK -> idle reservation is atomic under the
+                // captured runtime's lifecycle gate. Interactive defaults stay unchanged.
+                reserve_configured_remote_turn(
+                    &mut owners,
                     owner.clone(),
                     &runtime.identity,
                     Arc::downgrade(&runtime),
                     &runtime.busy,
                     &runtime.configuring,
+                    configuration.take(),
+                    || {
+                        verify_frozen_remote_mode(
+                            &self.session_store,
+                            &owner.session_id,
+                            permission_mode,
+                        )?;
+                        operation_gate::verify_remote_mode_ack(
+                            &runtime.config_options.read(),
+                            crate::features::remote_control::task_permissions::codex_mode(
+                                permission_mode,
+                            ),
+                        )
+                    },
                 )
             })
             .context("remote_turn_runtime_retired")??;
         drop(owners);
         drop(sessions);
+        drop(configuration);
+        drop(admission);
         Ok(RemoteTurnReservation {
             pool: self.clone(),
             runtime,
@@ -325,6 +365,7 @@ impl AcpPool {
             submitted: false,
             released: false,
             turn_id: format!("remote-turn-{}", uuid::Uuid::new_v4().simple()),
+            permission_mode,
         })
     }
 
@@ -352,6 +393,11 @@ impl RemoteTurnReservation {
         cancel: &tokio_util::sync::CancellationToken,
         budget: crate::features::remote_control::controller::turn_budget::TurnBudget,
     ) -> Result<()> {
+        verify_frozen_remote_mode(
+            &self.pool.session_store,
+            &self.owner.session_id,
+            self.permission_mode,
+        )?;
         let prepared = super::prepare_codex_prompt(
             content,
             attachments,
@@ -371,6 +417,17 @@ impl RemoteTurnReservation {
                 .bridge
                 .with_active_runtime(|| -> Result<_> {
                     budget.checkpoint(cancel).map_err(anyhow::Error::msg)?;
+                    verify_frozen_remote_mode(
+                        &self.pool.session_store,
+                        &self.owner.session_id,
+                        self.permission_mode,
+                    )?;
+                    operation_gate::verify_remote_mode_ack(
+                        &self.runtime.config_options.read(),
+                        crate::features::remote_control::task_permissions::codex_mode(
+                            self.permission_mode,
+                        ),
+                    )?;
                     let flight = owners
                         .bind(&self.owner, &self.runtime.identity, &self.turn_id, cancel)
                         .context("remote_turn_reservation_stale")?;
@@ -419,6 +476,40 @@ impl RemoteTurnReservation {
         self.pool.release_remote_permission_owner(&self.owner).await;
         self.released = true;
     }
+}
+
+fn verify_frozen_remote_mode(
+    store: &crate::features::sessions::SessionStore,
+    session_id: &str,
+    expected: crate::core::mode_state::SerializableMode,
+) -> Result<()> {
+    let current =
+        crate::features::remote_control::task_permissions::for_session(store, session_id, true)
+            .map_err(anyhow::Error::msg)?;
+    if current != expected {
+        bail!("task_permission_mode_changed");
+    }
+    Ok(())
+}
+
+/// Called under the captured bridge lifecycle gate and owner registry lock.
+/// Consume the ACK/configuration slot only after the final policy validation;
+/// no await permits a local configuration or prompt between these transitions.
+fn reserve_configured_remote_turn(
+    registry: &mut RemoteTurnRegistry,
+    owner: RemotePermissionOwner,
+    identity: &Arc<RuntimeIdentity>,
+    runtime: Weak<AcpSession>,
+    busy: &AtomicBool,
+    configuring: &AtomicBool,
+    configuration: Option<operation_gate::ConfigurationGuard<Arc<AtomicBool>>>,
+    validate: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let configuration =
+        configuration.ok_or_else(|| anyhow::anyhow!("task_permission_mode_unsupported"))?;
+    validate()?;
+    drop(configuration);
+    registry.reserve(owner, identity, runtime, busy, configuring)
 }
 
 impl Drop for RemoteTurnReservation {
@@ -500,6 +591,142 @@ mod tests {
                 remote_control_generation: "generation-custody".into(),
             },
         }
+    }
+
+    #[test]
+    fn configured_remote_admission_rejects_bad_ack_without_custody_or_prompt() {
+        for current in ["agent-full-access", "read-only", "agent"] {
+            let mut registry = RemoteTurnRegistry::default();
+            let identity = Arc::new(RuntimeIdentity::default());
+            let busy = AtomicBool::new(false);
+            let configuring = Arc::new(AtomicBool::new(false));
+            let configuration =
+                operation_gate::begin_configuration(&busy, configuring.clone(), "busy").unwrap();
+            let options = vec![serde_json::from_value::<super::super::SessionConfigOption>(serde_json::json!({
+                "id":"mode", "name":"Mode", "type":"select", "currentValue":current,
+                "options":[{"value":"read-only","name":"Read-only"},{"value":"agent","name":"Agent"},{"value":"agent-full-access","name":"Full access"}]
+            })).unwrap()];
+            let selected = owner("remote-configured");
+            let result = reserve_configured_remote_turn(
+                &mut registry,
+                selected.clone(),
+                &identity,
+                Weak::new(),
+                &busy,
+                &configuring,
+                Some(configuration),
+                || operation_gate::verify_remote_mode_ack(&options, "agent"),
+            );
+            assert!(!configuring.load(Ordering::Acquire));
+            if current == "agent" {
+                result.unwrap();
+                assert!(busy.load(Ordering::Acquire));
+                assert!(registry.has_custody(&selected.session_id));
+                assert!(
+                    registry
+                        .admit_local(&selected.session_id, &identity, &busy, &configuring)
+                        .is_err()
+                );
+                registry.rollback_reserved(&selected, &identity, &busy);
+            } else {
+                assert_eq!(
+                    result.unwrap_err().to_string(),
+                    "task_permission_mode_unsupported"
+                );
+                assert!(!busy.load(Ordering::Acquire));
+                assert!(registry.0.is_empty());
+                assert!(
+                    registry
+                        .bind(
+                            &selected,
+                            &identity,
+                            "never-started",
+                            &tokio_util::sync::CancellationToken::new()
+                        )
+                        .is_none()
+                );
+            }
+            assert!(!identity.has_live_prompt());
+        }
+    }
+
+    #[test]
+    fn missing_configuration_guard_cannot_admit_or_release_another_configuration() {
+        for other_configuration in [false, true] {
+            let mut registry = RemoteTurnRegistry::default();
+            let identity = Arc::new(RuntimeIdentity::default());
+            let busy = AtomicBool::new(false);
+            let configuring = Arc::new(AtomicBool::new(false));
+            let other_guard = if other_configuration {
+                Some(
+                    operation_gate::begin_configuration(&busy, configuring.clone(), "busy")
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
+            let validated = std::cell::Cell::new(false);
+            let selected = owner("missing-configuration");
+            let error = reserve_configured_remote_turn(
+                &mut registry,
+                selected.clone(),
+                &identity,
+                Weak::new(),
+                &busy,
+                &configuring,
+                None,
+                || {
+                    validated.set(true);
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "task_permission_mode_unsupported");
+            assert!(!validated.get());
+            assert!(!busy.load(Ordering::Acquire));
+            assert_eq!(configuring.load(Ordering::Acquire), other_configuration);
+            assert!(registry.0.is_empty());
+            assert!(!identity.has_live_prompt());
+            assert!(
+                registry
+                    .bind(
+                        &selected,
+                        &identity,
+                        "never-started",
+                        &tokio_util::sync::CancellationToken::new()
+                    )
+                    .is_none()
+            );
+            drop(other_guard);
+            assert!(!configuring.load(Ordering::Acquire));
+        }
+    }
+
+    #[test]
+    fn policy_change_during_configuration_rolls_back_before_remote_admission() {
+        let mut registry = RemoteTurnRegistry::default();
+        let identity = Arc::new(RuntimeIdentity::default());
+        let busy = AtomicBool::new(false);
+        let configuring = Arc::new(AtomicBool::new(false));
+        let configuration =
+            operation_gate::begin_configuration(&busy, configuring.clone(), "busy").unwrap();
+        let selected = owner("remote-configured");
+        let error = reserve_configured_remote_turn(
+            &mut registry,
+            selected,
+            &identity,
+            Weak::new(),
+            &busy,
+            &configuring,
+            Some(configuration),
+            || bail!("task_permission_mode_changed"),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "task_permission_mode_changed");
+        assert!(!configuring.load(Ordering::Acquire));
+        assert!(!busy.load(Ordering::Acquire));
+        assert!(registry.0.is_empty());
+        assert!(!identity.has_live_prompt());
     }
 
     #[test]

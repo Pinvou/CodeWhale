@@ -4,6 +4,7 @@ pub(crate) mod manager;
 mod platform;
 mod protocol;
 mod relay_client;
+pub(crate) mod task_permissions;
 
 pub use manager::{RelaySettingsInfo, RemoteControlManager};
 pub use protocol::{WebAccessInfo, WebAccessStatus};

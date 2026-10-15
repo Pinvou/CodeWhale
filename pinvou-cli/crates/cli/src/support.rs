@@ -1972,6 +1972,41 @@ pub(crate) mod test_support {
     }
 
     impl TempHome {
+        /// Seed the public persisted v3 format without claiming a live remote
+        /// connection or creating a local Engine transcript for its identity.
+        pub(crate) fn seed_remote_proxy(&self) -> &'static str {
+            let id = "remote-cli-fixture";
+            let file = serde_json::json!({
+                "schema_version": 3,
+                "records": [{
+                    "schema_version": 3,
+                    "local_session_id": id,
+                    "peer_id": "synthetic-peer",
+                    "remote_session_ref": "synthetic-reference",
+                    "controlled_session_id": null,
+                    "ui": {
+                        "title": "Synthetic remote session",
+                        "pinned": false,
+                        "hidden": false,
+                        "last_opened_at": null
+                    },
+                    "authenticated_cursor": null,
+                    "retired_epochs": [],
+                    "projection": {"schema_version": 1, "entries": []},
+                    "pending": [],
+                    "retired_requests": []
+                }]
+            });
+            let sessions = self.join("sessions");
+            std::fs::create_dir_all(&sessions).expect("create synthetic remote registry directory");
+            std::fs::write(
+                sessions.join("_remote_proxies.json"),
+                serde_json::to_vec(&file).unwrap(),
+            )
+            .expect("seed synthetic remote registry");
+            id
+        }
+
         /// Creates `<temp>/pinvou-cli-{label}-{pid}-{nanos}` and points
         /// `PINVOU3_HOME` at it. The pid+nanos suffix makes concurrent test
         /// binaries and retried runs unable to collide on the directory.
