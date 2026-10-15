@@ -6,6 +6,11 @@ import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path
 export const ENROLLMENT_NAMESPACE = "endpoint_enrollment";
 export const ENROLLMENT_REGISTRY_SCHEMA = "pinvou-endpoint-enrollment-registry";
 export const ENROLLMENT_REGISTRY_VERSION = 3;
+export const SELF_REGISTRATION_LIMITS = Object.freeze({
+  max_entries: 512,
+  max_bytes: 512 * 1024,
+  reserve_bytes: 1024 * 1024,
+});
 
 const CONFIG = new WeakMap();
 const KEY_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
@@ -172,7 +177,7 @@ function validateEntry(raw) {
   validateTimestamp(entry.rotated_at, true, "rotated_at");
   validateTimestamp(entry.revoked_at, true, "revoked_at");
   const audit = exactObject(entry.audit, ["source", "last_action"], "enrollment_audit");
-  if (!["official", "self_hosted", "development", "development_tofu"].includes(audit.source)
+  if (!["official", "self_hosted", "self_registration", "development", "development_tofu"].includes(audit.source)
     || !["enrolled", "rotated", "revoked"].includes(audit.last_action)) {
     fail("enrollment_audit_malformed");
   }
@@ -602,6 +607,8 @@ export function loadEnrollmentRegistryConfig(env = process.env) {
     fail("enrollment_runtime_environment_invalid");
   }
   const developmentTofu = parseBoolean(env.PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU, "development_tofu");
+  const selfRegistration = parseBoolean(env.PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION, "self_registration");
+  if (selfRegistration && deployment !== "self_hosted") fail("self_registration_forbidden");
   if (developmentTofu && (deployment !== "development" || runtimeEnvironment === "production")) {
     fail("development_tofu_forbidden");
   }
@@ -653,6 +660,7 @@ export function loadEnrollmentRegistryConfig(env = process.env) {
     deployment,
     runtime_environment: runtimeEnvironment,
     development_tofu: developmentTofu,
+    self_registration: selfRegistration,
     controller_state_path: controllerStatePath,
     legacy_web_state_path: legacyWebStatePath,
   });
@@ -788,13 +796,14 @@ export class EnrollmentRegistry {
     return replayed === undefined ? result : deepFreeze({ ...result, replayed });
   }
 
-  async #write(snapshot, registry) {
+  async #write(snapshot, registry, options = {}) {
     try {
       this.#cache = null;
       const result = await this.#store.compareAndSwap(
         ENROLLMENT_NAMESPACE,
         snapshot.namespace_revision,
         validateRegistry(registry),
+        options,
       );
       return { ...result, registry: validateRegistry(result.value) };
     } catch (error) {
@@ -812,6 +821,50 @@ export class EnrollmentRegistry {
       namespace_revision: snapshot.namespace_revision,
       registry: structuredClone(snapshot.registry),
     });
+  }
+
+  getSelfRegistrationCapacity() {
+    const entries = this.#read().registry.entries.filter(entry => entry.audit.source === "self_registration");
+    return Object.freeze({ entries: entries.length, bytes: Buffer.byteLength(JSON.stringify(entries)),
+      max_entries: SELF_REGISTRATION_LIMITS.max_entries, max_bytes: SELF_REGISTRATION_LIMITS.max_bytes });
+  }
+
+  listSelfRegistrations() {
+    const snapshot = this.#read();
+    return deepFreeze({ schema: "pinvou-self-registration-inventory", version: 1,
+      namespace_revision: snapshot.namespace_revision,
+      entries: snapshot.registry.entries.filter(entry => entry.audit.source === "self_registration")
+        .map(entry => ({ endpoint_id: entry.endpoint_id, revision: entry.revision, status: entry.status })) });
+  }
+
+  async cleanupSelfRegistrations({ inventory, dryRun = true } = {}) {
+    if (this.#config.deployment !== "self_hosted") fail("self_hosted_mode_required");
+    exactObject(inventory, ["schema", "version", "namespace_revision", "entries"], "self_registration_inventory");
+    if (inventory.schema !== "pinvou-self-registration-inventory" || inventory.version !== 1
+      || !Array.isArray(inventory.entries) || inventory.entries.length > SELF_REGISTRATION_LIMITS.max_entries) {
+      fail("self_registration_inventory_invalid");
+    }
+    const snapshot = this.#read();
+    if (validateRevision(inventory.namespace_revision, "expected_namespace_revision") !== snapshot.namespace_revision) {
+      fail("enrollment_revision_conflict");
+    }
+    const selected = new Set();
+    for (const item of inventory.entries) {
+      exactObject(item, ["endpoint_id", "revision", "status"], "self_registration_inventory_entry");
+      const id = validateEndpointId(item.endpoint_id);
+      const entry = this.#find(snapshot.registry, id);
+      if (selected.has(id) || !entry || entry.audit.source !== "self_registration"
+        || item.revision !== entry.revision || item.status !== entry.status) fail("self_registration_cleanup_conflict");
+      // Permanent revocation is never erased to reclaim an anonymous quota slot.
+      if (entry.status === "revoked") fail("self_registration_cleanup_revoked");
+      selected.add(id);
+    }
+    if (dryRun !== true && dryRun !== false) fail("self_registration_cleanup_mode_invalid");
+    if (!dryRun && selected.size) {
+      await this.#write(snapshot, { ...snapshot.registry,
+        entries: snapshot.registry.entries.filter(entry => !selected.has(entry.endpoint_id)) });
+    }
+    return Object.freeze({ dry_run: dryRun, selected: selected.size, removed: dryRun ? 0 : selected.size });
   }
 
   async importSnapshot({ snapshot, expectedNamespaceRevision } = {}) {
@@ -993,7 +1046,7 @@ export class EnrollmentRegistry {
     return this.#enroll(options, false);
   }
 
-  async #enroll({ endpointId, credential, desktopCredential, expectedNamespaceRevision }, tofu) {
+  async #enroll({ endpointId, credential, desktopCredential, expectedNamespaceRevision }, tofu, selfRegistration = false) {
     endpointId = validateEndpointId(endpointId);
     validateCredential(credential);
     if (desktopCredential !== undefined) validateCredential(desktopCredential, "desktop_credential");
@@ -1018,14 +1071,25 @@ export class EnrollmentRegistry {
       enrolled_at: timestamp,
       rotated_at: null,
       revoked_at: null,
-      audit: { source: sourceForDeployment(this.#config.deployment, tofu), last_action: "enrolled" },
+      audit: { source: selfRegistration ? "self_registration" : sourceForDeployment(this.#config.deployment, tofu), last_action: "enrolled" },
     };
     const registry = {
       ...snapshot.registry,
       entries: [...snapshot.registry.entries, entry]
         .sort((left, right) => compareEnrollmentIdentifiers(left.endpoint_id, right.endpoint_id)),
     };
-    await this.#write(snapshot, registry);
+    let capacityReserveBytes = 0;
+    if (selfRegistration) {
+      const anonymous = registry.entries.filter(item => item.audit.source === "self_registration");
+      if (anonymous.length > SELF_REGISTRATION_LIMITS.max_entries
+        || Buffer.byteLength(JSON.stringify(anonymous)) > SELF_REGISTRATION_LIMITS.max_bytes) {
+        fail("self_registration_capacity_reached");
+      }
+      const capacity = this.#store.readCapacity?.();
+      if (!Number.isSafeInteger(capacity?.max_bytes) || capacity.max_bytes < 1024) fail("self_registration_capacity_unavailable");
+      capacityReserveBytes = Math.min(SELF_REGISTRATION_LIMITS.reserve_bytes, Math.floor(capacity.max_bytes / 4));
+    }
+    await this.#write(snapshot, registry, { capacityReserveBytes });
     return publicEntry(entry);
   }
 
@@ -1056,17 +1120,23 @@ export class EnrollmentRegistry {
     return this.#authorize({ endpointId, credential: desktopSecret, role: "desktop" });
   }
 
-  async authorizeDesktopRegistration({ endpointId, accessToken, desktopSecret } = {}) {
+  async authorizeDesktopRegistration({ endpointId, accessToken, desktopSecret, admitSelfRegistration = false } = {}) {
     endpointId = validateEndpointId(endpointId);
     validateCredential(accessToken);
     validateCredential(desktopSecret, "desktop_credential");
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const snapshot = this.#read();
       const entry = this.#find(snapshot.registry, endpointId);
-      if (!entry && this.#config.development_tofu) {
+      if (!entry && (this.#config.development_tofu || (this.#config.self_registration && admitSelfRegistration === true))) {
+        // Anonymous production enrollment claims only a new random native ID.
+        // Bind both independent roles in one CAS before publishing readiness.
+        if (this.#config.self_registration) {
+          if (!/^ep_[A-Za-z0-9]{24}$/u.test(endpointId)) fail("endpoint_id_invalid");
+          if (accessToken === desktopSecret) fail("invalid_enrollment_credential");
+        }
         try {
           await this.#enroll({ endpointId, credential: accessToken, desktopCredential: desktopSecret,
-            expectedNamespaceRevision: snapshot.namespace_revision }, true);
+            expectedNamespaceRevision: snapshot.namespace_revision }, this.#config.development_tofu, this.#config.self_registration);
           continue;
         } catch (error) {
           if (error?.code === "enrollment_revision_conflict") continue;

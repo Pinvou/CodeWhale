@@ -39,7 +39,8 @@ function parseArguments(argv) {
   const result = { mode: null, input: null, output: null, requestId: undefined };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
-    if (["--dry-run", "--apply", "--backup", "--restore", "--coverage", "--capacity"].includes(argument)) {
+    if (["--dry-run", "--apply", "--backup", "--restore", "--coverage", "--capacity",
+      "--list-self-registrations", "--check-self-registration-cleanup", "--apply-self-registration-cleanup"].includes(argument)) {
       if (result.mode) throw cliError("mode_conflict");
       result.mode = argument.slice(2);
     } else if (argument === "--input" || argument === "--output") {
@@ -157,7 +158,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, io =
     const args = parseArguments(argv);
     if (args.mode === "help") {
       io.log(JSON.stringify({
-        usage: "enrollment-migrate.js (--dry-run|--apply|--backup|--restore|--coverage|--capacity) [--input FILE] [--output FILE] [--request-id RESTORE_OPERATION_ID]",
+        usage: "enrollment-migrate.js (--dry-run|--apply|--backup|--restore|--coverage|--capacity|--list-self-registrations|--check-self-registration-cleanup|--apply-self-registration-cleanup) [--input FILE] [--output FILE] [--request-id RESTORE_OPERATION_ID]",
         note: "credentials are accepted only in a mode-0600 input file, never as command arguments",
       }));
       return 0;
@@ -169,8 +170,17 @@ export async function main(argv = process.argv.slice(2), env = process.env, io =
       io.log(JSON.stringify(await requestEnrollmentCapacity({ env })));
       return 0;
     }
+    // Reject malformed maintenance requests before configuration or opening a writer.
+    if (args.mode === "list-self-registrations" && (!args.output || args.input)) {
+      throw cliError("self_registration_list_arguments_invalid");
+    }
+    if (["check-self-registration-cleanup", "apply-self-registration-cleanup"].includes(args.mode)
+      && (!args.input || args.output)) {
+      throw cliError("self_registration_cleanup_arguments_invalid");
+    }
     const config = loadEnrollmentRegistryConfig(env);
-    if (["dry-run", "apply"].includes(args.mode) && config.deployment !== "self_hosted") {
+    if (["dry-run", "apply", "list-self-registrations", "check-self-registration-cleanup", "apply-self-registration-cleanup"].includes(args.mode)
+      && config.deployment !== "self_hosted") {
       throw cliError("self_hosted_mode_required");
     }
     store = await RelayStateStore.open({
@@ -179,7 +189,16 @@ export async function main(argv = process.argv.slice(2), env = process.env, io =
     });
     const registry = EnrollmentRegistry.open({ stateStore: store, config });
     let result;
-    if (args.mode === "coverage") {
+    if (args.mode === "list-self-registrations") {
+      const inventory = registry.listSelfRegistrations();
+      await atomicWriteJson(args.output, inventory);
+      result = { ok: true, inventory_written: true, namespace_revision: inventory.namespace_revision,
+        capacity: registry.getSelfRegistrationCapacity() };
+    } else if (["check-self-registration-cleanup", "apply-self-registration-cleanup"].includes(args.mode)) {
+      result = { ok: true, ...(await registry.cleanupSelfRegistrations({
+        inventory: await secureReadJson(args.input), dryRun: args.mode === "check-self-registration-cleanup",
+      })), capacity: registry.getSelfRegistrationCapacity() };
+    } else if (args.mode === "coverage") {
       if (!args.input || args.output) throw cliError("coverage_arguments_invalid");
       const document = await readEnrollmentInventory(args.input);
       const handler = new EnrollmentMigrationHandler({ registry });
