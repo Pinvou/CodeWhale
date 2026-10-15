@@ -60,6 +60,7 @@ GitHub protected environment/self-hosted runner、runner OS 与同一 SID 进程
 2. 官方环境由已认证旧 socket 完成 challenge/proof 认领，保留 endpoint ID/token/Web 链接；身份冲突必须重新分享。
 3. 自托管先 `--dry-run`，再用稳定 request ID 执行批量 allowlist/re-enroll；re-enroll 会明确使旧 Web 链接失效。
 4. 生产只允许 `NODE_ENV=production`、独立验证过的 `self_hosted`，且 `PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=false`。当前 `official` live claim 尚未接线，预检及启动明确失败关闭；不得以开发 TOFU 作为生产降级。
+   公开服务可显式启用 `PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION=true`，让新原生设备在首次完整注册时原子绑定两组凭据，无需账号或管理员导入。上线前须验证首次连接码、重启恢复、凭据冲突、撤销、限流和容量拒绝；配置指纹须绑定该策略。回滚必须使用理解 `self_registration` 来源的兼容构建，关闭新设备自动登记并保留注册表；旧二进制会拒绝该来源，不能直接换回。已登记身份继续按原凭据验证。匿名策略的身份、两种撤销及满额恢复流程见 [ENROLLMENT.md](../remote-control-relay/ENROLLMENT.md#recovering-quota-after-a-device-self-revokes)。
 5. 先验证开关关闭组合门禁，再在 Relay、A、B 同时设为 `1`；按 registry 覆盖率和 endpoint allowlist 小范围灰度，而不是删除持久状态。
 6. 观察 DEV-24 固定枚举指标；任何敏感面哨兵、未 enrolled 注册、裸 v2 路由或旁路出现即停止。
 
@@ -100,6 +101,7 @@ GitHub protected environment/self-hosted runner、runner OS 与同一 SID 进程
 
 - 首选回滚是把 Relay、A、B 的统一开关关闭；入口隐藏/拒绝，但 registry、tombstone、digest keyring 和 state schema 原样保留。
 - 最低回滚版本必须 registry-aware。真实旧 v2 二进制只能监听 literal loopback，并置于唯一 enrollment gateway 后；nginx 所有公开 websocket 路径必须指向 gateway，不能直达旧 Relay。
+- 已写入 `self_registration` 来源时，读取注册表的 Relay/gateway/维护工具都须理解该来源；旧 parser 不能直接读取。使用兼容构建关闭自动登记，不删除撤销记录或恢复陈旧整库来绕过格式检查。兼容及自行撤销后的额度恢复步骤见 [ENROLLMENT.md](../remote-control-relay/ENROLLMENT.md#recovering-quota-after-a-device-self-revokes)。
 - 发布前执行 `scripts/check-enrollment-gated-v2-rollback.mjs`：要求 endpoint inventory 覆盖率 100%、逐个公网入口 marker/升级/匿名拒绝通过、OS 监听检查无 wildcard；任一步失败都输出 `safe_to_run_legacy_v2=false`。
 - 裸 v2、`localhost` 作为监听证明、无 inventory、TOFU、无法确认全入口或 gateway 可旁路时，回滚必须被拒绝。
 - 回滚演练保存旧二进制哈希、gateway 配置指纹、入口检查和旧 Web 链接结果，不保存任何凭证或业务正文。

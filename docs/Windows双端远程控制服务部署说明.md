@@ -59,6 +59,7 @@ PINVOU_REMOTE_RUNTIME_RELAY_WS_URL = ws://127.0.0.1:8787/pinvou3/remote/ws
 | `NODE_ENV` | 生产部署必须显式为 `production` |
 | `PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT` | 当前已实现的生产 controller dispatcher 仅支持 `self_hosted`；`official` live claim 尚未接线，预检及启动均失败关闭，不得宣称可部署 |
 | `PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU` | 生产部署必须显式为 `false`；拒绝 development/test 环境、development 部署及 TOFU 降级 |
+| `PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION` | 可选，默认 `false`。设为 `true` 后，新原生设备首次开启时自动原子登记 Web/桌面两组凭据，无需账号登录或管理员导入；已登记或已撤销身份仍严格验证。仅支持 `self_hosted`，并保持生产 TOFU 关闭 |
 | `PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID` / `PINVOU_REMOTE_ENROLLMENT_HMAC_KEY` | registry HMAC（32–4096 字节） |
 | `PINVOU_REMOTE_PAIRING_HMAC_KEY_ID` / `PINVOU_REMOTE_PAIRING_HMAC_KEY` | 连接码摘要 keyring（轮换规则见 `remote-control-relay/ENROLLMENT.md`；发布验收见发布文档第 3 节旅程 20、第 5 节回滚） |
 | `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID` / `PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64` | Ed25519 PKCS#8 DER base64，签名 pairing transcript |
