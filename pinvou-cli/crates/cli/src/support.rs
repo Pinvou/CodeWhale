@@ -1974,7 +1974,6 @@ pub(crate) mod test_support {
     impl TempHome {
         /// Seed the public persisted v3 format without claiming a live remote
         /// connection or creating a local Engine transcript for its identity.
-        #[cfg(feature = "product-backend")]
         pub(crate) fn seed_remote_proxy(&self) -> &'static str {
             let id = "remote-cli-fixture";
             let file = serde_json::json!({
