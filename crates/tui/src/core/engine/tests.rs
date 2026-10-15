@@ -3935,6 +3935,229 @@ fn current_runtime_route_does_not_carry_limits_across_model_drift() {
     );
 }
 
+#[test]
+fn install_routes_rewrite_declared_limits_in_lockstep() {
+    // Every install must pair the effective limits with the host-declared
+    // subset: a declared install records the declaration (and the next
+    // re-derivation carries it), while a catalog-only install — a host turn
+    // whose route arrived without declarations — clears the stale one so
+    // catalog and operator facts keep refreshing instead of being pinned
+    // under host provenance.
+    let declared = codewhale_config::route::RouteLimits {
+        context_tokens: Some(2_000_000),
+        input_tokens: None,
+        output_tokens: Some(200_000),
+    };
+    let config = goal_custom_route_config();
+    let mut engine = engine_with_declared_local_model_limits(None);
+
+    let declared_route = crate::route_runtime::resolve_runtime_route_with_limits(
+        &config,
+        ApiProvider::Custom,
+        Some("local-model"),
+        declared,
+    )
+    .expect("resolve declared route");
+    engine
+        .install_resolved_runtime_route(declared_route)
+        .expect("install declared route");
+    assert_eq!(engine.active_route_declared_limits, Some(declared));
+
+    let route = engine
+        .current_runtime_route()
+        .expect("re-derived route resolves");
+    assert_eq!(
+        route.candidate.limits(),
+        declared,
+        "re-derivation must carry the host-declared subset the install recorded"
+    );
+    assert!(
+        route
+            .candidate
+            .applied_limit_overrides()
+            .iter()
+            .any(|item| item.source == codewhale_config::route::OverrideSource::EmbeddingHost)
+    );
+
+    let catalog_route = crate::route_runtime::resolve_runtime_route(
+        &config,
+        ApiProvider::Custom,
+        Some("local-model"),
+    )
+    .expect("resolve catalog route");
+    engine
+        .install_resolved_runtime_route(catalog_route)
+        .expect("install catalog route");
+    assert_eq!(
+        engine.active_route_declared_limits, None,
+        "a catalog-only install must clear the stale declaration"
+    );
+    let route = engine
+        .current_runtime_route()
+        .expect("re-derived route resolves");
+    assert!(
+        route
+            .candidate
+            .applied_limit_overrides()
+            .iter()
+            .all(|item| item.source != codewhale_config::route::OverrideSource::EmbeddingHost),
+        "the re-derivation after a catalog-only install must stay catalog-only, got {:?}",
+        route.candidate.applied_limit_overrides()
+    );
+}
+
+#[test]
+fn injected_client_install_also_records_declared_limits() {
+    // The injected-client branch of `install_resolved_runtime_route` writes
+    // the same lockstep pair as the validated branch; a re-derivation after
+    // its install must carry the declared budget too.
+    let declared = declared_local_model_limits();
+    let config = goal_custom_route_config();
+    let mut engine = engine_with_declared_local_model_limits(None);
+    engine.model_client_injected = true;
+
+    let route = crate::route_runtime::resolve_runtime_route_with_limits(
+        &config,
+        ApiProvider::Custom,
+        Some("local-model"),
+        declared,
+    )
+    .expect("resolve declared route");
+    engine
+        .install_resolved_runtime_route(route)
+        .expect("install declared route");
+    assert_eq!(engine.active_route_declared_limits, Some(declared));
+
+    let route = engine
+        .current_runtime_route()
+        .expect("re-derived route resolves");
+    assert_eq!(
+        route.candidate.limits(),
+        declared,
+        "the injected-branch install must feed the re-derivation's carry"
+    );
+}
+
+#[tokio::test]
+async fn set_model_installs_declaration_for_later_re_derivation() {
+    // `Op::SetModel` carries the host's route payload without an executable
+    // candidate, so its lockstep writes are what let a later engine
+    // self-started turn still carry the declared budget.
+    let mut engine = engine_with_declared_local_model_limits(None);
+    let declared = declared_local_model_limits();
+
+    engine
+        .apply_set_model("local-model".to_string(), Some(declared))
+        .await;
+    assert_eq!(engine.active_route_declared_limits, Some(declared));
+
+    let route = engine
+        .current_runtime_route()
+        .expect("re-derived route resolves");
+    assert_eq!(
+        route.candidate.limits(),
+        declared,
+        "the declaration installed by SetModel must survive re-derivation"
+    );
+    assert!(
+        route
+            .candidate
+            .applied_limit_overrides()
+            .iter()
+            .any(|item| item.source == codewhale_config::route::OverrideSource::EmbeddingHost)
+    );
+}
+
+#[tokio::test]
+async fn sync_session_leaves_installed_route_limits_untouched() {
+    // The op carries no route, so its handler must not touch the installed
+    // route state: a budget declared for the previous conversation's model
+    // must not adopt the restored one.
+    let declared = declared_local_model_limits();
+    let mut engine = engine_with_declared_local_model_limits(Some(declared));
+    let tmp = tempdir().expect("tempdir");
+
+    engine
+        .apply_synced_session(
+            None,
+            Vec::new(),
+            None,
+            false,
+            "restored-other-model".to_string(),
+            tmp.path().to_path_buf(),
+            Vec::new(),
+            AppMode::Agent,
+        )
+        .await;
+
+    assert_eq!(engine.session.model, "restored-other-model");
+    assert_eq!(
+        engine.active_route_limits,
+        Some(declared),
+        "SyncSession must not touch the installed effective limits"
+    );
+    assert_eq!(
+        engine.active_route_limits_model,
+        Some("local-model".to_string()),
+        "SyncSession must not retarget the installed limits' model"
+    );
+    assert_eq!(
+        engine.active_route_declared_limits,
+        Some(declared),
+        "SyncSession must not touch the installed declaration"
+    );
+
+    let route = engine
+        .current_runtime_route()
+        .expect("re-derived route resolves");
+    assert_eq!(route.model, "restored-other-model");
+    assert!(
+        route
+            .candidate
+            .applied_limit_overrides()
+            .iter()
+            .all(|item| item.source != codewhale_config::route::OverrideSource::EmbeddingHost),
+        "the restored model's re-derivation must stay catalog-only, got {:?}",
+        route.candidate.applied_limit_overrides()
+    );
+}
+
+#[test]
+fn current_runtime_route_sanitizes_out_of_range_declared_context() {
+    // Declarations are stored verbatim from embedder payloads; the carry
+    // must degrade out-of-range context values the way every other limit
+    // read point does instead of failing the self-started turn.
+    for context_tokens in [Some(0u64), Some(u64::from(u32::MAX) + 1)] {
+        let engine =
+            engine_with_declared_local_model_limits(Some(codewhale_config::route::RouteLimits {
+                context_tokens,
+                input_tokens: None,
+                output_tokens: Some(384_000),
+            }));
+
+        let route = engine
+            .current_runtime_route()
+            .expect("out-of-range declared context must degrade, not fail the turn");
+        assert_eq!(
+            route.candidate.limits().output_tokens,
+            Some(384_000),
+            "the valid declared output budget must still be carried"
+        );
+        assert!(
+            route
+                .candidate
+                .applied_limit_overrides()
+                .iter()
+                .all(|item| {
+                    item.source != codewhale_config::route::OverrideSource::EmbeddingHost
+                        || item.field != codewhale_config::route::LimitField::ContextTokens
+                }),
+            "the out-of-range declared context must not be re-stated, got {:?}",
+            route.candidate.applied_limit_overrides()
+        );
+    }
+}
+
 #[tokio::test]
 async fn exhausted_goal_reaches_route_failure_without_budget_pause() {
     let config = goal_custom_route_config();
