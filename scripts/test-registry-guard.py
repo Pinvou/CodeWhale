@@ -221,7 +221,8 @@ def ignored_source_pins():
                 continue
             path = os.path.join(root, name)
             try:
-                lines = open(path, encoding="utf-8", errors="replace").read().splitlines()
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    lines = fh.read().splitlines()
             except OSError:
                 continue
             i = 0
@@ -255,10 +256,15 @@ def _candidate_pin_files(pin):
     """Source files that could directly contain the pinned test, derived
     from its libtest module path under the standard layouts: the test's
     parent module either lives in its own file (`a/b/tests.rs`,
-    `a/b/tests/mod.rs`) or is declared inline in the grandparent's file
-    (`a/b.rs`, `a/b/mod.rs`). Returns only files that exist; an empty
-    result (unconventional layout) makes callers fall back to the bare-name
-    match — fail closed."""
+    `a/b/tests/mod.rs`) or is declared inline in the grandparent's module —
+    both its file form (`a/b.rs`) and its directory form (`a/b/mod.rs`).
+    (Round-7 review: the grandparent FILE form was documented but missing
+    from the list, which emptied the candidates for pins whose `tests` sits
+    inline in a file module like `marketplace/scope.rs` and silently pushed
+    them onto the bare-name fallback — reopening the cross-module
+    false-positive hole for those pins.) Returns only files that exist; an
+    empty result (unconventional layout) makes callers fall back to the
+    bare-name match — fail closed."""
     parts = pin.split("::")
     parent, leaf = parts[:-1], parts[-1]
     src = os.path.join(os.path.dirname(MANIFEST), "src")
@@ -273,9 +279,30 @@ def _candidate_pin_files(pin):
             os.path.join(base, leaf + ".rs"),
             os.path.join(base, leaf, "mod.rs"),
             base + ".rs",
+            os.path.join(base, "mod.rs"),
+            os.path.dirname(base) + ".rs",
             os.path.join(os.path.dirname(base), "mod.rs"),
         ]
     return [c for c in candidates if os.path.isfile(c)]
+
+
+def _pin_ignored_locations(pin, ignored_src):
+    """Locations where the pin's own function is #[ignore]d, attributed
+    module-awarely (round-6 review): the pin's module path maps to the
+    standard files that could host it (`_candidate_pin_files`), and only an
+    ignored fn in one of those files flags the pin — a same-named ignored
+    test in an unrelated module stays silent. When the layout admits no
+    candidate file the bare-name match applies to every hit: fail closed.
+    Kept a pure function so the attribution is unit-testable without cargo
+    (review #1518: the cross-module same-name positive control must be
+    pinned by a committed regression, not a one-off manual run)."""
+    seg_hits = ignored_src.get(pin.rsplit("::", 1)[-1])
+    if not seg_hits:
+        return []
+    candidates = _candidate_pin_files(pin)
+    if candidates:
+        return [loc for loc in seg_hits if loc.rsplit(":", 1)[0] in candidates]
+    return seg_hits
 
 
 def main():
@@ -300,35 +327,20 @@ def main():
     # its own message — that shape is a module move, not a stolen attribute,
     # and naming the new location makes the fix a one-liner. A pin silenced
     # by #[ignore] (stable libtest --list cannot flag ignored tests) is
-    # caught by the source-level scan below, attributed MODULE-AWARELY
-    # (round-6 review): the pin's module path maps to the standard files
-    # that could host it, and only an ignored fn in one of those files flags
-    # the pin. A same-named ignored test in an unrelated module therefore
-    # stays silent; when the layout admits no candidate file the bare-name
-    # match applies to every hit — fail closed.
+    # caught by the source-level scan below; `_pin_ignored_locations` does
+    # the module-aware attribution.
     ignored_src = ignored_source_pins()
     by_segment = collections.defaultdict(list)
     for p in paths:
         by_segment[p.rsplit("::", 1)[-1]].append(p)
     for pin in REQUIRED_PINS:
         if pin in counts and counts[pin] == 1:
-            segment = pin.rsplit("::", 1)[-1]
-            seg_hits = ignored_src.get(segment)
-            if seg_hits:
-                candidates = _candidate_pin_files(pin)
-                if candidates:
-                    matched = [
-                        loc
-                        for loc in seg_hits
-                        if loc.rsplit(":", 1)[0] in candidates
-                    ]
-                else:
-                    matched = seg_hits
-                if matched:
-                    failures.append(
-                        f"required pin {pin} is #[ignore]d at "
-                        + ", ".join(matched)
-                    )
+            matched = _pin_ignored_locations(pin, ignored_src)
+            if matched:
+                failures.append(
+                    f"required pin {pin} is #[ignore]d at "
+                    + ", ".join(matched)
+                )
             continue
         if pin in counts:
             failures.append(f"required pin registered more than once: {pin} x{counts[pin]}")

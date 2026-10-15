@@ -2912,6 +2912,14 @@ class CiGatePolicyTests(unittest.TestCase):
             rust_full_paths,
             "registry guard script edits must trigger the rust-test leg that executes it",
         )
+        # Same class, review #1518 round-7: the guard's behavior regression
+        # suite pins the module-aware ignore attribution; a change confined
+        # to the suite must still run the leg that executes the guard.
+        self.assertIn(
+            "scripts/tests/test_registry_guard.py",
+            rust_full_paths,
+            "registry guard behavior tests must trigger the rust-test leg that executes the guard",
+        )
 
         literal_feature_files = [
             path

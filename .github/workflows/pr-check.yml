@@ -284,6 +284,10 @@ jobs:
               # below; the push leg is compile-only and never runs the guard
               # regardless of path filters).
               - 'scripts/test-registry-guard.py'
+              # The guard's behavior regression suite (module-aware ignore
+              # attribution positive control); a change confined to it must
+              # run the leg that executes the guard it pins.
+              - 'scripts/tests/test_registry_guard.py'
               - 'pinvou3-app/src-tauri/**/*.rs'
               # diagnostics.rs 在生产校验中 include_str! v1 schema，
               # behavior_telemetry_tests.rs 同时嵌入 schema 与 registries。
