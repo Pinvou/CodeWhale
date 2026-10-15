@@ -770,6 +770,77 @@ struct SidecarRecoverySummary {
     backfilled: usize,
     /// 已被 ACP 会话占用、作为残留清理的 sidecar 数。
     cleaned: usize,
+    /// Dead index entries removed: code entries whose durable session record
+    /// (`sessions/<id>.json`) is gone.
+    pruned_dead_entries: usize,
+    /// Ghost sidecars removed: sidecar files of record-less dirs whose owner
+    /// record is also gone (the emptied dir is then removed best-effort; a
+    /// dir holding other content survives).
+    cleaned_ghost_sidecars: usize,
+}
+
+/// Owner liveness probe for deletions: does the durable record
+/// `sessions/<id>.json` still exist? Delegates to the shared
+/// `SessionAgentStore::owner_record_state` core (same path and stat judgment
+/// as the private store.rs probe `binding_owner_exists`, enforced by code),
+/// with a more conservative disposition: invalid ids and probe errors count
+/// as ALIVE — the caller decides deletions from this probe, and a deletion
+/// must never rest on "uncertain"; the read side's "invalid id ⇒ no owner"
+/// disposition does not apply to deletion. Only a genuine NotFound (including
+/// a non-file entry at the record path) counts as dead.
+fn code_session_owner_alive(agents: &SessionAgentStore, session_id: &str) -> bool {
+    match agents.owner_record_state(session_id) {
+        store::OwnerRecordState::Live => true,
+        // Only a real NotFound counts as dead: it is better to miss a
+        // deletion than to make a wrong one.
+        store::OwnerRecordState::NotFound => false,
+        store::OwnerRecordState::InvalidId => true,
+        store::OwnerRecordState::ProbeError(kind) => {
+            eprintln!(
+                "[pinvou3-app] code session owner probe failed, treating {session_id} as live (io kind: {kind})"
+            );
+            true
+        }
+    }
+}
+
+/// Boot-time prune of dead index entries: retention evictions delete the
+/// `sessions/<id>.json` record and the `<id>/` directory but never touch
+/// `session-agents.json`, so code entries in the index can outlive their
+/// owner — the backfill would rebuild a sidecar dir for them on every boot,
+/// and a sidecar surviving next to a lost index entry would be restored
+/// into the index again: a ghost factory repeating on every boot. Code
+/// entries whose owner is dead (only a real NotFound counts as dead, see
+/// `code_session_owner_alive`) are removed together with their sidecar/dir:
+/// `remove` does index removal + persist + sidecar cleanup in one step
+/// (NotFound tolerated). Only code-mode entries are handled: ACP leftovers
+/// are cleaned by the scan's existing branch. Returns the number of removed
+/// entries. Iteration runs over the in-memory index (see
+/// `SessionAgentStore::session_ids`), so an unparsable index file simply
+/// leaves nothing to iterate and no deletion is ever based on a state that
+/// would not be persisted.
+fn prune_dead_code_index_entries(agents: &SessionAgentStore) -> usize {
+    let mut pruned = 0usize;
+    for session_id in agents.session_ids() {
+        if !agents.get(&session_id).mode.is_code() {
+            continue;
+        }
+        if code_session_owner_alive(agents, &session_id) {
+            continue;
+        }
+        match agents.remove(&session_id) {
+            Ok(()) => {
+                pruned += 1;
+                eprintln!(
+                    "[pinvou3-app] pruned dead native code session index record for {session_id}"
+                );
+            }
+            Err(error) => eprintln!(
+                "[pinvou3-app] native code session {session_id} index prune failed: {error:#}"
+            ),
+        }
+    }
+    pruned
 }
 
 /// 扫描 session 私有目录中的原生代码会话权威 sidecar，恢复辅助索引缺失的
@@ -780,36 +851,71 @@ struct SidecarRecoverySummary {
 /// （均由辅助索引路径派生，见 `store::code_session_sidecar_root`），避免两处
 /// 根定义漂移。对每个 sidecar：索引已持有 code 模式记录时跳过（不误报
 /// 恢复）；会话已被 ACP 占用时 sidecar 属历史残留，直接清理而非反复重试；
-/// 其余情况据 sidecar 恢复索引。
+/// a record-less dir whose owner record is also gone is deletion leftover —
+/// disposed as a ghost without resurrecting the index (once the owner is
+/// gone, the sidecar's readability does not matter). The dead-index prune
+/// (see `prune_dead_code_index_entries`) runs before the scan so the scan
+/// and the backfill cannot resurrect deleted sessions' index entries or
+/// rebuild their sidecar dirs.
 fn restore_code_native_sessions_from_sidecars(
     agents: &SessionAgentStore,
 ) -> SidecarRecoverySummary {
     let mut summary = SidecarRecoverySummary::default();
+    // Dead index entries go first: retention deletes records and dirs but
+    // never the agents index, so pruning first cuts the backfill's "rebuild
+    // a sidecar dir for a dead entry" leg of the ghost-factory loop.
+    summary.pruned_dead_entries = prune_dead_code_index_entries(agents);
     // Shared iterator (review #463 round-8 elegance): the scan root, the
     // "no sessions directory is normal" case and the unreadable-entry logging
     // are defined once next to the sidecar readers, so the boot restore and
     // both rebind scans cannot drift apart again.
     for session_id in store::code_session_dir_ids(agents.path(), "native code session restore") {
-        // Round-44 review: the sidecar content is re-read under the section
-        // lock inside the restore (the enumeration snapshot can be stale in
-        // both directions), so the scan only needs its existence as a
-        // pre-filter.
-        if store::read_code_session_sidecar(agents.path(), &session_id).is_none() {
-            continue;
-        }
         let record = agents.get(&session_id);
         if record.mode.is_code() {
             // 索引完好无需恢复：不计入 restored，避免每次启动误报恢复信号。
             continue;
         }
         if record.backend.is_acp() {
-            // 会话已被 ACP 绑定：sidecar 是历史残留，恢复必然被拒，直接清理并
-            // 如实记日志，而不是每次启动重复报 degraded。
-            store::remove_code_session_sidecar(agents.path(), &session_id);
-            summary.cleaned += 1;
-            eprintln!(
-                "[pinvou3-app] removed leftover native code session sidecar for ACP session {session_id}"
-            );
+            // The session is already ACP-bound: the sidecar is a historical
+            // leftover, restoring it would be rejected, so dispose of it and
+            // log truthfully instead of re-reporting degraded on every boot.
+            // Count and log only when the sidecar file was really removed: a
+            // normal ACP session's dir holds no code-session.json, so an
+            // unconditional count would turn every boot into a false cleanup
+            // report.
+            if store::remove_code_session_sidecar(agents.path(), &session_id) {
+                summary.cleaned += 1;
+                eprintln!(
+                    "[pinvou3-app] removed leftover native code session sidecar for ACP session {session_id}"
+                );
+            }
+            continue;
+        }
+        // Ghost dir: no index record and the durable record is gone —
+        // deletion leftover. Restoring from it would only resurrect a ghost
+        // index entry; like the ACP-leftover branch above, dispose instead
+        // of resurrecting. Checked before the sidecar read on purpose: a
+        // corrupt or future-version `code-session.json` in a dead owner's
+        // dir must converge too, not log a parse error every boot forever.
+        // Only the sidecar file plus the now-empty dir are removed, so a
+        // leftover dir holding other content survives untouched. The count
+        // and log fire only when the sidecar file was really removed: a
+        // dead owner's bare dir (no sidecar) removes nothing, and counting
+        // it would repeat a false report on every boot forever.
+        if !code_session_owner_alive(agents, &session_id) {
+            if store::remove_code_session_sidecar(agents.path(), &session_id) {
+                summary.cleaned_ghost_sidecars += 1;
+                eprintln!(
+                    "[pinvou3-app] removed ghost native code session sidecar for deleted session {session_id}"
+                );
+            }
+            continue;
+        }
+        // Round-44 review: the sidecar content is re-read under the section
+        // lock inside the restore (the enumeration snapshot can be stale in
+        // both directions), so the scan only needs its existence as a
+        // pre-filter.
+        if store::read_code_session_sidecar(agents.path(), &session_id).is_none() {
             continue;
         }
         match agents.restore_missing_code_session_record(&session_id) {
@@ -843,6 +949,18 @@ fn restore_code_native_sessions_from_sidecars(
         eprintln!(
             "[pinvou3-app] backfilled {} missing native code session sidecar(s) from index",
             summary.backfilled
+        );
+    }
+    if summary.pruned_dead_entries > 0 {
+        eprintln!(
+            "[pinvou3-app] pruned {} dead native code session index record(s)",
+            summary.pruned_dead_entries
+        );
+    }
+    if summary.cleaned_ghost_sidecars > 0 {
+        eprintln!(
+            "[pinvou3-app] removed {} ghost native code session sidecar(s)",
+            summary.cleaned_ghost_sidecars
         );
     }
     summary
@@ -1589,11 +1707,11 @@ pub struct AcpPool {
     config_defaults: AcpConfigDefaultsStore,
     acp_metadata_backends: Arc<parking_lot::RwLock<HashMap<String, AgentBackend>>>,
     session_store: SessionStore,
-    installing_agents: Arc<parking_lot::RwLock<HashSet<AgentBackend>>>,
-    /// 安装子进程 pid 注册表：取消安装时按 pid 杀进程树。
-    install_children: Arc<parking_lot::Mutex<HashMap<AgentBackend, u32>>>,
-    /// 取消标记：取消命令写入，安装等待侧在失败出口消费并以「安装已取消」收尾。
-    install_cancelled: Arc<parking_lot::Mutex<HashSet<AgentBackend>>>,
+    install_operations: InstallOperationStore,
+    /// 安装进程树注册表：取消时使用创建阶段持有的内核归属 guard 终止整树。
+    install_children: Arc<
+        parking_lot::Mutex<HashMap<AgentBackend, crate::platform::process::ManagedProcessTree>>,
+    >,
     login_states: Arc<parking_lot::RwLock<HashMap<AgentBackend, AgentLoginState>>>,
     login_inputs: Arc<Mutex<HashMap<AgentBackend, ChildStdin>>>,
     codex_upgrade_required: Arc<AtomicBool>,
@@ -1641,21 +1759,96 @@ impl Drop for IdleReaperGuard {
 /// 同一 Agent 的安装/升级互斥，不同 Agent 的状态与任务彼此隔离。
 /// guard 在外部命令完成后显式 drop，使随后返回的 status 已恢复 installing=false；
 /// 提前返回或 panic 时 Drop 仍会兜底清理。
+#[derive(Default)]
+struct InstallOperationState {
+    active: HashSet<AgentBackend>,
+    cancelled: HashSet<AgentBackend>,
+}
+
+impl InstallOperationState {
+    fn begin(&mut self, backend: AgentBackend) -> bool {
+        if !self.active.insert(backend) {
+            return false;
+        }
+        // This cleanup and publishing `active` share one lock. A cancellation
+        // that observes the new operation can only run after this point and
+        // therefore can never be mistaken for a stale marker and removed.
+        self.cancelled.remove(&backend);
+        true
+    }
+
+    fn request_cancel(&mut self, backend: AgentBackend) -> bool {
+        if !self.active.contains(&backend) {
+            return false;
+        }
+        self.cancelled.insert(backend);
+        true
+    }
+
+    fn is_active(&self, backend: AgentBackend) -> bool {
+        self.active.contains(&backend)
+    }
+
+    fn is_cancelled(&self, backend: AgentBackend) -> bool {
+        self.cancelled.contains(&backend)
+    }
+
+    fn take_cancelled(&mut self, backend: AgentBackend) -> bool {
+        self.cancelled.remove(&backend)
+    }
+
+    fn finish(&mut self, backend: AgentBackend) {
+        self.active.remove(&backend);
+        self.cancelled.remove(&backend);
+    }
+}
+
+type InstallOperationStore = Arc<parking_lot::Mutex<InstallOperationState>>;
+
+/// Mark cancellation and capture the exact currently owned tree under one
+/// operation lock. The tree is terminated after both locks are released, so a
+/// completed operation/new start cannot redirect a late cancel to the new tree.
+fn capture_cancelled_install_tree(
+    operations: &InstallOperationStore,
+    children: &Arc<
+        parking_lot::Mutex<HashMap<AgentBackend, crate::platform::process::ManagedProcessTree>>,
+    >,
+    backend: AgentBackend,
+) -> Result<Option<crate::platform::process::ManagedProcessTree>> {
+    capture_cancelled_install_tree_at_boundary(operations, children, backend, || {})
+}
+
+fn capture_cancelled_install_tree_at_boundary(
+    operations: &InstallOperationStore,
+    children: &Arc<
+        parking_lot::Mutex<HashMap<AgentBackend, crate::platform::process::ManagedProcessTree>>,
+    >,
+    backend: AgentBackend,
+    before_tree_capture: impl FnOnce(),
+) -> Result<Option<crate::platform::process::ManagedProcessTree>> {
+    let mut state = operations.lock();
+    if !state.request_cancel(backend) {
+        bail!("{} 当前没有正在进行的安装", backend.display_name());
+    }
+    // Sole nested lock order: operations -> children. Registration and child
+    // cleanup take only children; operation start/finish take only operations.
+    before_tree_capture();
+    let tree = children.lock().get(&backend).cloned();
+    Ok(tree)
+}
+
 struct AgentInstallGuard {
-    installing_agents: Arc<parking_lot::RwLock<HashSet<AgentBackend>>>,
+    operations: InstallOperationStore,
     backend: AgentBackend,
 }
 
 impl AgentInstallGuard {
-    fn try_start(
-        installing_agents: &Arc<parking_lot::RwLock<HashSet<AgentBackend>>>,
-        backend: AgentBackend,
-    ) -> Option<Self> {
-        if !installing_agents.write().insert(backend) {
+    fn try_start(operations: &InstallOperationStore, backend: AgentBackend) -> Option<Self> {
+        if !operations.lock().begin(backend) {
             return None;
         }
         Some(Self {
-            installing_agents: installing_agents.clone(),
+            operations: operations.clone(),
             backend,
         })
     }
@@ -1663,36 +1856,56 @@ impl AgentInstallGuard {
 
 impl Drop for AgentInstallGuard {
     fn drop(&mut self) {
-        self.installing_agents.write().remove(&self.backend);
+        self.operations.lock().finish(self.backend);
     }
 }
 
-/// 安装子进程 pid 登记 guard：spawn 成功后登记，drop 时（完成/失败/超时/取消
-/// 任意出口）统一注销，避免残留 pid 在后续取消时误杀被系统复用的进程。
+/// 安装进程树登记 guard：spawn 成功并建立平台归属后登记，drop 时（完成/失败/
+/// 超时/取消任意出口）统一注销；只有明确成功才解除异常回收。Windows 保存 Job
+/// Object，而非可复用的裸 PID。
 struct InstallChildGuard {
-    install_children: Arc<parking_lot::Mutex<HashMap<AgentBackend, u32>>>,
+    install_children: Arc<
+        parking_lot::Mutex<HashMap<AgentBackend, crate::platform::process::ManagedProcessTree>>,
+    >,
     backend: AgentBackend,
+    process_tree: crate::platform::process::ManagedProcessTree,
+    armed: bool,
 }
 
 impl InstallChildGuard {
     fn register(
-        install_children: &Arc<parking_lot::Mutex<HashMap<AgentBackend, u32>>>,
+        install_children: &Arc<
+            parking_lot::Mutex<HashMap<AgentBackend, crate::platform::process::ManagedProcessTree>>,
+        >,
         backend: AgentBackend,
-        pid: Option<u32>,
+        process_tree: crate::platform::process::ManagedProcessTree,
     ) -> Self {
-        if let Some(pid) = pid {
-            install_children.lock().insert(backend, pid);
-        }
+        install_children
+            .lock()
+            .insert(backend, process_tree.clone());
         Self {
             install_children: install_children.clone(),
             backend,
+            process_tree,
+            armed: true,
         }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
     }
 }
 
 impl Drop for InstallChildGuard {
     fn drop(&mut self) {
         self.install_children.lock().remove(&self.backend);
+        // The own tree survives unregistering. Future abort, panic and every
+        // unsuccessful exit reclaim descendants outside the registry lock.
+        if self.armed {
+            if let Err(error) = self.process_tree.terminate() {
+                eprintln!("[pinvou3-app] failed to reclaim aborted install tree: {error:#}");
+            }
+        }
     }
 }
 
@@ -1922,9 +2135,8 @@ impl AcpPool {
             config_defaults,
             acp_metadata_backends: Arc::new(parking_lot::RwLock::new(acp_metadata_backends)),
             session_store,
-            installing_agents: Arc::new(parking_lot::RwLock::new(HashSet::new())),
+            install_operations: Arc::new(parking_lot::Mutex::new(InstallOperationState::default())),
             install_children: Arc::new(parking_lot::Mutex::new(HashMap::new())),
-            install_cancelled: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             login_states: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             login_inputs: Arc::new(Mutex::new(HashMap::new())),
             codex_upgrade_required: Arc::new(AtomicBool::new(false)),
@@ -2214,7 +2426,7 @@ impl AcpPool {
             .unwrap_or_default();
         if backend == AgentBackend::KimiAcp {
             let kimi = self.cli_probe_for(backend);
-            let installing = self.installing_agents.read().contains(&backend);
+            let installing = self.install_operations.lock().is_active(backend);
             let kimi_path = kimi
                 .as_ref()
                 .map(|cli| cli.path.to_string_lossy().into_owned());
@@ -2363,7 +2575,7 @@ impl AcpPool {
         };
         // 登录命令运行期间不要再启动同一 CLI 的 auth status。部分 CLI 会让两条
         // 命令争用凭证锁，原来的 750ms 状态轮询因此可能拖住 Tauri 的 IPC/UI。
-        let installing = self.installing_agents.read().contains(&backend);
+        let installing = self.install_operations.lock().is_active(backend);
         let authenticated = !login.in_progress
             && !installing
             && match backend {
@@ -2648,7 +2860,7 @@ impl AcpPool {
                 backend.display_name()
             );
         }
-        let Some(install_guard) = AgentInstallGuard::try_start(&self.installing_agents, backend)
+        let Some(install_guard) = AgentInstallGuard::try_start(&self.install_operations, backend)
         else {
             diagnostics::write(
                 &operation_id,
@@ -2657,15 +2869,14 @@ impl AcpPool {
             );
             bail!("{} 正在通过 Homebrew 安装，请稍候", backend.display_name());
         };
-        // 清掉上一次安装可能残留的取消标记：本次失败语义只来自本次取消。
-        self.install_cancelled.lock().remove(&backend);
+        // try_start 在发布 active 的同一临界区清理旧取消标记；发布后的取消不会丢失。
         diagnostics::write(
             &operation_id,
             "homebrew:start",
             format!("agent={}", backend.agent_id().unwrap_or("unknown")),
         );
         // The brew list probe is a blocking subprocess, so keep spawn_blocking; the subprocess execution
-        // skeleton (register pid / cancel recheck / streaming output / 600s timeout / cancel rewrite) is
+        // skeleton (register tree / cancel recheck / streaming output / 600s timeout / cancel rewrite) is
         // install.rs's run_managed_install, which run_brew_install shares with the script/npm channels.
         // brew previously had no timeout, and a hang would hold the install mutex guard forever.
         let result = match tokio::task::spawn_blocking(move || {
@@ -2684,7 +2895,7 @@ impl AcpPool {
                     backend,
                     &operation_id,
                     &self.install_children,
-                    &self.install_cancelled,
+                    &self.install_operations,
                     &args,
                     command,
                 )
@@ -3001,13 +3212,12 @@ impl AcpPool {
             diagnostics::write(&operation_id, "npm:unsupported", "result=rejected");
             bail!("{} 不支持 npm 全局升级", backend.display_name());
         }
-        let Some(install_guard) = AgentInstallGuard::try_start(&self.installing_agents, backend)
+        let Some(install_guard) = AgentInstallGuard::try_start(&self.install_operations, backend)
         else {
             diagnostics::write(&operation_id, "npm:already_installing", "result=rejected");
             bail!("{} 正在升级，请稍候", backend.display_name());
         };
-        // 清掉上一次安装可能残留的取消标记：本次失败语义只来自本次取消。
-        self.install_cancelled.lock().remove(&backend);
+        // try_start 在发布 active 的同一临界区清理旧取消标记；发布后的取消不会丢失。
         // Rename the old binary installed by the official script and move it
         // aside first: only when the script path is the currently resolved,
         // effective CLI is the new version npm installs into the global
@@ -3080,7 +3290,7 @@ impl AcpPool {
             backend,
             &operation_id,
             &self.install_children,
-            &self.install_cancelled,
+            &self.install_operations,
         )
         .await;
         if result.is_err() && !moved_backups.is_empty() {
@@ -3140,7 +3350,7 @@ impl AcpPool {
                 backend.display_name()
             );
         }
-        let Some(install_guard) = AgentInstallGuard::try_start(&self.installing_agents, backend)
+        let Some(install_guard) = AgentInstallGuard::try_start(&self.install_operations, backend)
         else {
             diagnostics::write(
                 &operation_id,
@@ -3149,8 +3359,7 @@ impl AcpPool {
             );
             bail!("{} 正在安装，请稍候", backend.display_name());
         };
-        // 清掉上一次安装可能残留的取消标记：本次失败语义只来自本次取消。
-        self.install_cancelled.lock().remove(&backend);
+        // try_start 在发布 active 的同一临界区清理旧取消标记；发布后的取消不会丢失。
         // 升级前把官方脚本目标路径的旧二进制改名移开：Claude 官方 install
         // 子命令检测到「已存在 native installation」时会跳过覆盖却仍输出成功
         // （假成功，实测）。移开后脚本走全新安装路径；脚本失败时恢复旧文件，
@@ -3193,7 +3402,7 @@ impl AcpPool {
             backend,
             &operation_id,
             &self.install_children,
-            &self.install_cancelled,
+            &self.install_operations,
         )
         .await;
         if result.is_err() && !moved_backups.is_empty() {
@@ -3241,19 +3450,25 @@ impl AcpPool {
         }
     }
 
-    /// 取消正在进行的 Agent CLI 安装：写入取消标记并按登记的 pid 杀进程树。
+    /// 取消正在进行的 Agent CLI 安装：写入取消标记并终止登记的 managed tree。
     /// 等待侧检测到取消标记后以「安装已取消」收尾，installing 随其出口恢复 false。
     pub async fn cancel_agent_install(&self, agent_id: &str) -> Result<CodexAcpStatus> {
         let backend = AgentBackend::parse(Some(agent_id))?;
         if !backend.is_acp() {
             bail!("Agent 不是 ACP 后端: {agent_id}");
         }
-        if !self.installing_agents.read().contains(&backend) {
-            bail!("{} 当前没有正在进行的安装", backend.display_name());
-        }
-        self.install_cancelled.lock().insert(backend);
-        if let Some(pid) = self.install_children.lock().get(&backend).copied() {
-            kill_install_process_tree(pid);
+        let process_tree = capture_cancelled_install_tree(
+            &self.install_operations,
+            &self.install_children,
+            backend,
+        )?;
+        if let Some(process_tree) = process_tree {
+            if let Err(error) = process_tree.terminate() {
+                eprintln!(
+                    "[pinvou3-app] failed to terminate {} install process tree: {error:#}",
+                    backend.display_name()
+                );
+            }
         }
         Ok(self.status_for_async(backend).await)
     }
@@ -8034,6 +8249,10 @@ mod tests {
         writer
             .bind_code_native_session("code-1", CodexWorkspaceKind::Project, Some(root.clone()))
             .unwrap();
+        // code-1's durable record exists on disk (any live session has one in
+        // reality; the owner probe and the backfill gate only stat existence
+        // and never parse content, so a stub file stands in for "alive").
+        std::fs::write(root.join("sessions").join("code-1.json"), b"{}").unwrap();
         // 模拟辅助索引丢失。Round-43 review：恢复臂现在在 section 锁下重读
         // 磁盘索引，所以“索引丢失”的前提必须落在磁盘上（记录从索引文件中
         // 移除、权威 sidecar 保留），而不仅是空内存表——否则重载后记录仍在，
@@ -8052,7 +8271,9 @@ mod tests {
             SidecarRecoverySummary {
                 restored: 1,
                 backfilled: 0,
-                cleaned: 0
+                cleaned: 0,
+                pruned_dead_entries: 0,
+                cleaned_ghost_sidecars: 0
             }
         );
         assert!(agents.is_code_session("code-1"));
@@ -8075,7 +8296,9 @@ mod tests {
             SidecarRecoverySummary {
                 restored: 0,
                 backfilled: 1,
-                cleaned: 0
+                cleaned: 0,
+                pruned_dead_entries: 0,
+                cleaned_ghost_sidecars: 0
             }
         );
         assert!(sidecar_path.is_file());
@@ -8107,12 +8330,134 @@ mod tests {
             SidecarRecoverySummary {
                 restored: 0,
                 backfilled: 0,
-                cleaned: 1
+                cleaned: 1,
+                pruned_dead_entries: 0,
+                cleaned_ghost_sidecars: 0
             }
         );
         assert!(!leftover_dir.join("code-session.json").exists());
         assert_eq!(agents.get("acp-1").backend, AgentBackend::CodexAcp);
         // 残留已清理：再次启动扫描无任何动作。
+        let summary = restore_code_native_sessions_from_sidecars(&agents);
+        assert_eq!(summary, SidecarRecoverySummary::default());
+        // Dead index entry: the index holds the entry but the durable record
+        // (sessions/<id>.json) is gone — retention deletes records and dirs,
+        // never the index. Boot must drop the entry together with its
+        // sidecar dir instead of backfilling a sidecar that keeps the ghost
+        // alive. dead-2.json is deliberately not created: a missing owner
+        // record means "dead".
+        agents
+            .bind_code_native_session("dead-2", CodexWorkspaceKind::Temporary, None)
+            .unwrap();
+        let summary = restore_code_native_sessions_from_sidecars(&agents);
+        assert_eq!(
+            summary,
+            SidecarRecoverySummary {
+                restored: 0,
+                backfilled: 0,
+                cleaned: 0,
+                pruned_dead_entries: 1,
+                cleaned_ghost_sidecars: 0
+            }
+        );
+        let index: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(index["sessions"].get("dead-2").is_none());
+        assert!(!root.join("sessions").join("dead-2").exists());
+        // Dead-entry pruning must not touch live entries: code-1 stays a
+        // code session, acp-1 stays ACP.
+        assert!(agents.is_code_session("code-1"));
+        assert_eq!(agents.get("acp-1").backend, AgentBackend::CodexAcp);
+        // Ghost sidecar: no index record and no durable record (deletion
+        // leftover). Restoring from it would only resurrect a ghost index
+        // entry — the dir must be disposed without creating any index
+        // record.
+        let ghost_dir = root.join("sessions").join("ghost-1");
+        std::fs::create_dir_all(&ghost_dir).unwrap();
+        std::fs::write(
+            ghost_dir.join("code-session.json"),
+            serde_json::to_vec(&store::CodeSessionSidecar {
+                version: 1,
+                workspace_kind: CodexWorkspaceKind::Temporary,
+                workspace_path: None,
+                bound_at: None,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let summary = restore_code_native_sessions_from_sidecars(&agents);
+        assert_eq!(
+            summary,
+            SidecarRecoverySummary {
+                restored: 0,
+                backfilled: 0,
+                cleaned: 0,
+                pruned_dead_entries: 0,
+                cleaned_ghost_sidecars: 1
+            }
+        );
+        assert!(!ghost_dir.exists());
+        let index: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(index["sessions"].get("ghost-1").is_none());
+        assert!(!agents.is_code_session("ghost-1"));
+        // Ghost convergence must not depend on a readable sidecar: a dead
+        // owner's dir with a corrupt code-session.json (crash of a
+        // pre-atomic-write build, disk damage) is disposed too, instead of
+        // logging a parse error on every boot forever.
+        let corrupt_dir = root.join("sessions").join("corrupt-1");
+        std::fs::create_dir_all(&corrupt_dir).unwrap();
+        std::fs::write(corrupt_dir.join("code-session.json"), b"{not json").unwrap();
+        let summary = restore_code_native_sessions_from_sidecars(&agents);
+        assert_eq!(
+            summary,
+            SidecarRecoverySummary {
+                restored: 0,
+                backfilled: 0,
+                cleaned: 0,
+                pruned_dead_entries: 0,
+                cleaned_ghost_sidecars: 1
+            }
+        );
+        assert!(!corrupt_dir.exists());
+        let index: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(index["sessions"].get("corrupt-1").is_none());
+        assert!(!agents.is_code_session("corrupt-1"));
+        // A live ACP session's normal dir shape: session data under
+        // sessions/<id>/ with NO code-session.json (ACP bindings never write
+        // one). The ACP-leftover branch must stay silent for it — no cleaned
+        // count, no log — and the dir must survive. Before the count was
+        // gated on an actual removal, this shape fired a false "removed
+        // leftover sidecar" report on every boot for every ACP session.
+        agents
+            .set_acp_workspace(
+                "acp-live",
+                AgentBackend::CodexAcp,
+                CodexWorkspaceKind::Temporary,
+                None,
+            )
+            .unwrap();
+        let acp_live_dir = root.join("sessions").join("acp-live");
+        std::fs::create_dir_all(&acp_live_dir).unwrap();
+        std::fs::write(acp_live_dir.join("events.jsonl"), b"{}").unwrap();
+        let summary = restore_code_native_sessions_from_sidecars(&agents);
+        assert_eq!(summary, SidecarRecoverySummary::default());
+        assert!(acp_live_dir.is_dir());
+        assert!(acp_live_dir.join("events.jsonl").is_file());
+        // A dead owner's bare dir (no sidecar — crash between durable-record
+        // deletion and dir removal): the ghost branch removes nothing, so it
+        // must count and log nothing; otherwise the report would repeat on
+        // every boot forever. The dir holding other content survives
+        // untouched.
+        let bare_dead_dir = root.join("sessions").join("bare-dead");
+        std::fs::create_dir_all(&bare_dead_dir).unwrap();
+        std::fs::write(bare_dead_dir.join("events.jsonl"), b"{}").unwrap();
+        let summary = restore_code_native_sessions_from_sidecars(&agents);
+        assert_eq!(summary, SidecarRecoverySummary::default());
+        assert!(bare_dead_dir.is_dir());
+        assert!(bare_dead_dir.join("events.jsonl").is_file());
+        // Ghosts fully converged: a second boot scan is a no-op.
         let summary = restore_code_native_sessions_from_sidecars(&agents);
         assert_eq!(summary, SidecarRecoverySummary::default());
         std::fs::remove_dir_all(&root).unwrap();
@@ -8182,11 +8527,49 @@ mod tests {
     }
 
     fn production_source(src: &str) -> String {
-        let normalized = src.replace("\r\n", "\n");
-        let end = normalized
+        // include_str! embeds checkout bytes; Windows autocrlf must not change
+        // which production code the probe inspects.
+        let mut src = src.replace("\r\n", "\n");
+        // Round-26 MAJOR-3: cut at the test module exactly like projects.rs's
+        // `production_source` (round-18) — an unanchored find over the WHOLE
+        // file lands on this probe's own string argument once the production
+        // function is deleted or renamed, and the span then contains the
+        // probe's own assertion text, which can never fail.
+        let end = src
             .find("#[cfg(test)]\nmod tests {")
             .expect("the test module marker must exist");
-        normalized[..end].to_owned()
+        src.truncate(end);
+        src
+    }
+
+    #[test]
+    fn rebind_production_source_accepts_lf_and_crlf() {
+        let production = "struct Production;\n";
+        let src = format!("{production}#[cfg(test)]\nmod tests {{\nprobe\n}}");
+        assert_eq!(production_source(&src), production);
+        assert_eq!(production_source(&src.replace('\n', "\r\n")), production);
+    }
+
+    #[test]
+    #[should_panic(expected = "the test module marker must exist")]
+    fn rebind_production_source_requires_test_module_marker() {
+        production_source("struct Production;");
+    }
+
+    #[test]
+    fn rebind_production_source_cannot_borrow_probe_signature() {
+        let src = "struct MissingProduction;\n#[cfg(test)]\nmod tests {\n\
+            pub async fn rebind_blocking_sessions() { prompt_pending(); }\n}";
+        for src in [src.to_string(), src.replace('\n', "\r\n")] {
+            let production = production_source(&src);
+            assert!(
+                std::panic::catch_unwind(|| {
+                    production_body(&production, "pub async fn rebind_blocking_sessions")
+                })
+                .is_err(),
+                "a missing production function must not match the test probe",
+            );
+        }
     }
 
     #[test]
@@ -8211,11 +8594,6 @@ mod tests {
 
     #[test]
     fn rebind_acp_production_closures_read_prompt_pending() {
-        // Round-26 MAJOR-3: cut at the test module exactly like projects.rs's
-        // `production_source` (round-18) — an unanchored find over the WHOLE
-        // file lands on this probe's own string argument once the production
-        // function is deleted or renamed, and the span then contains the
-        // probe's own assertion text, which can never fail.
         let src = production_source(include_str!("mod.rs"));
         let fence = production_body(&src, "pub async fn rebind_blocking_sessions");
         assert!(
