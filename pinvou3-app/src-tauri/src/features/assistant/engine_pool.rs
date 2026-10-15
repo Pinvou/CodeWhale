@@ -1674,6 +1674,9 @@ impl Drop for ColdEngineCustody {
             return;
         };
         engine.cancel_current();
+        engine
+            .transcript_writer_active
+            .store(false, Ordering::Release);
         forwarder.abort();
         let mut pending = Vec::new();
         let mut blocked = false;
@@ -3039,10 +3042,14 @@ impl EnginePool {
         let spawn_engine_started = Instant::now();
         // Load before spawning: no fallible disk read may strand a cold engine.
         let load_session_started = Instant::now();
-        let saved = self
-            .store
-            .load(session_id)
-            .with_context(|| format!("load session {session_id} before spawning its engine"))?;
+        let store_for_load = self.store.clone();
+        let session_for_load = session_id.to_owned();
+        let saved = tokio::task::spawn_blocking(move || {
+            store_for_load.load_for_engine_spawn(&session_for_load)
+        })
+        .await
+        .context("engine baseline read task failed")?
+        .with_context(|| format!("load session {session_id} before spawning its engine"))?;
         let load_session_ms = elapsed_ms(load_session_started);
         let (engine, forwarder) = AppEngine::spawn_for_session(
             self.app.clone(),
@@ -3610,6 +3617,9 @@ impl EnginePool {
         let EngineEntry {
             engine, forwarder, ..
         } = entry;
+        engine
+            .transcript_writer_active
+            .store(false, Ordering::Release);
         let shell_reclaim = self.turn_shell_tasks.begin_reclaim(session_id);
         let shell_reclaim_for_drain = shell_reclaim.clone();
         let shell_reclaim_for_terminal = shell_reclaim.clone();
@@ -10573,7 +10583,7 @@ mod scheduled_model_tests {
             .expect("the test module marker must exist")];
         let body = production_body(src, "async fn get_or_spawn_with_policy(");
         let load = body
-            .find(".load(session_id)")
+            .find(".load_for_engine_spawn(&session_for_load)")
             .expect("load must precede spawn");
         let spawn = body
             .find("AppEngine::spawn_for_session(")
@@ -10599,6 +10609,13 @@ mod scheduled_model_tests {
         assert!(drop_body.contains("let engine = engine.clone();"));
         assert!(drop_body.contains("matches!(pending.as_slice(), [Op::Shutdown])"));
         assert!(drop_body.contains("retry_shutdown_sends("));
+        let retire = drop_body
+            .find(".store(false, Ordering::Release)")
+            .expect("cold writers retire");
+        let abort = drop_body
+            .find("forwarder.abort()")
+            .expect("cold forwarder aborts");
+        assert!(retire < abort, "cold persistence must retire before abort");
         assert!(
             !body.contains("engine.handle.send(Op::Shutdown)"),
             "no direct unbounded Shutdown send may remain in the spawn-failure teardown"

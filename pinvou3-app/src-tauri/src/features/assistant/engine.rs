@@ -75,6 +75,8 @@ pub struct AppEngine {
     turn_lifecycle: Arc<TurnLifecycle>,
     turn_shell_tasks: Option<TurnShellTaskRegistry>,
     scheduled_disallowed_tools: Vec<String>,
+    /// Reclaim retires queued transcript writers before aborting the forwarder.
+    pub(crate) transcript_writer_active: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Default)]
@@ -1835,6 +1837,7 @@ impl AppEngine {
         let handle = spawn_engine(engine_config, &dt_config);
         let (turn_events, _) = broadcast::channel(32);
         let scheduled_unattended = Arc::new(AtomicBool::new(false));
+        let transcript_writer_active = Arc::new(AtomicBool::new(true));
         let forwarder = spawn_event_forwarder(
             app,
             handle.clone(),
@@ -1850,6 +1853,7 @@ impl AppEngine {
             shell_manager,
             turn_shell_tasks.clone(),
             steer_id_generation,
+            transcript_writer_active.clone(),
         );
 
         Ok((
@@ -1864,6 +1868,7 @@ impl AppEngine {
                 turn_lifecycle,
                 turn_shell_tasks: Some(turn_shell_tasks),
                 scheduled_disallowed_tools,
+                transcript_writer_active,
             },
             forwarder,
         ))
@@ -1907,6 +1912,7 @@ impl AppEngine {
             turn_lifecycle: Arc::new(TurnLifecycle::default()),
             turn_shell_tasks: None,
             scheduled_disallowed_tools,
+            transcript_writer_active: Arc::new(AtomicBool::new(true)),
         })
     }
 

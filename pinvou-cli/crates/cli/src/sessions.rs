@@ -1275,6 +1275,23 @@ mod tests {
     use crate::{CliCommand, parse_args};
 
     #[test]
+    fn remote_proxy_kind_label_uses_the_real_remote_registry() {
+        let _env_lock = crate::support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = crate::support::test_support::TempHome::new("sessions-remote-kind");
+        let id = home.seed_remote_proxy();
+        let store = SessionStore::boot().expect("boot remote registry");
+        assert_eq!(store.session_kind(id).unwrap(), SessionKind::RemoteProxy);
+        assert_eq!(kind_label(&store, id), "remote-proxy");
+        let local = store
+            .create_new("synthetic-model".into(), None, home.to_path_buf())
+            .unwrap();
+        assert_eq!(kind_label(&store, &local.metadata.id), "chat");
+        assert_eq!(kind_label(&store, "remote-missing"), "unknown");
+    }
+
+    #[test]
     fn kind_label_distinguishes_remote_proxy_local_chat_and_missing_record() {
         let _env_lock = crate::support::ENV_LOCK
             .lock()
