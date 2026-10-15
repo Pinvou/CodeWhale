@@ -1326,7 +1326,7 @@ func (s *Service) renewHold(ctx context.Context, cancel context.CancelFunc, usag
 				return
 			case <-ticker.C:
 				renewalContext, stop := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-				err := client.Extend(renewalContext, usageID, holdID, 0)
+				err := client.Extend(renewalContext, usageID, holdID, 0, uuid.Nil)
 				stop()
 				if err != nil {
 					close(failed)
@@ -1412,6 +1412,13 @@ func (s *Service) settlePrepared(ctx context.Context, usageID, holdID uuid.UUID,
 	return ""
 }
 
+// Final usage has one reservation-extension slot per persisted usage/hold pair.
+// Neither mutable maximum, amount nor wall-clock time is part of its identity:
+// a repeated slot with different facts must conflict at Billing, not charge twice.
+func finalUsageReservationOperationID(usageID, holdID uuid.UUID) uuid.UUID {
+	return uuid.NewSHA1(usageID, []byte("final-usage-reservation-v1\n"+holdID.String()))
+}
+
 func (s *Service) authorizeAdditional(ctx context.Context, usageID, holdID uuid.UUID, price PriceVersion, usage Usage, maximum int64) (int64, string, bool) {
 	// A deadline decision freezes the original hold before any financial RPC.
 	// Late usage remains evidence; it cannot extend that customer's reservation.
@@ -1433,7 +1440,8 @@ func (s *Service) authorizeAdditional(ctx context.Context, usageID, holdID uuid.
 	if !ok {
 		return actual, "", true
 	}
-	if err := client.Extend(ctx, usageID, holdID, additional); err != nil {
+	operationID := finalUsageReservationOperationID(usageID, holdID)
+	if err := client.Extend(ctx, usageID, holdID, additional, operationID); err != nil {
 		// Trusted final usage still converges through the idempotent Commit.
 		// Only a definite wallet-insufficient response becomes a user notice;
 		// uncertain failures become SETTLEMENT_PENDING only if Commit also fails.
@@ -1446,9 +1454,9 @@ func (s *Service) authorizeAdditional(ctx context.Context, usageID, holdID uuid.
 		return actual, "", true
 	}
 	if repository, ok := s.repository.(interface {
-		IncreaseMaximum(context.Context, uuid.UUID, int64) error
+		EnsureMaximumAtLeast(context.Context, uuid.UUID, int64) error
 	}); ok {
-		if err := repository.IncreaseMaximum(ctx, usageID, additional); err != nil {
+		if err := repository.EnsureMaximumAtLeast(ctx, usageID, actual); err != nil {
 			return actual, "", true
 		}
 	}

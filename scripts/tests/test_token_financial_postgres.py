@@ -266,6 +266,45 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         self.assertEqual(self.fixture_writes, ["create", "drop"])
         self.assertEqual(self.fixture_trace, ["owner-account", "owner-wallet", "create", "retained-token", "retained-billing", "drop"])
 
+    def test_positive_extension_suites_are_mandatory(self):
+        self.assertIn("TestF05AdditionalReservationProjectionPublicPostgres", RUNNER.REQUIRED)
+        billing = {"TestHoldExtensionIdempotencePostgres", "TestPersonalUsageHoldBoundaries",
+                   "TestPersonalUsageHoldClockBoundaries", "TestF05ExpiredHoldRenewalIsConflictAndUnprovenFundsStayReserved"}
+        self.assertTrue(billing <= RUNNER.RETAINED_REQUIRED)
+        self.assertIn("TestMemberHoldIdentityMutationBoundaries", RUNNER.RETAINED_REQUIRED)
+        for required, package in [(RUNNER.REQUIRED, RUNNER.TOKEN_PACKAGE),
+                                  (RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE)]:
+            for name in required:
+                events = [event for event in self.events(required, package) if event.get("Test") != name]
+                with self.subTest(name=name), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(events, required, package=package)
+
+    def test_only_original_expiry_leaf_can_omit_children(self):
+        leaf = "TestF05ExpiredHoldRenewalIsConflictAndUnprovenFundsStayReserved"
+        self.assertEqual(RUNNER.BILLING_CHILD_REQUIRED, RUNNER.RETAINED_REQUIRED - {leaf})
+        valid = [event for event in self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
+                 if not event.get("Test", "").startswith(leaf + "/")]
+        self.assertGreater(RUNNER.verify_results(valid, RUNNER.RETAINED_REQUIRED,
+                           package=RUNNER.BILLING_PACKAGE, require_children=True, exact_roots=True,
+                           children_required=RUNNER.BILLING_CHILD_REQUIRED), 0)
+        for name in RUNNER.BILLING_CHILD_REQUIRED:
+            without_child = [event for event in valid if not event.get("Test", "").startswith(name + "/")]
+            with self.subTest(name=name), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(without_child, RUNNER.RETAINED_REQUIRED, package=RUNNER.BILLING_PACKAGE,
+                                      require_children=True, exact_roots=True, children_required=RUNNER.BILLING_CHILD_REQUIRED)
+        for event in [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": leaf},
+                      {"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": leaf + "/unexpected"}]:
+            with self.subTest(event=event), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(valid + [event], RUNNER.RETAINED_REQUIRED, package=RUNNER.BILLING_PACKAGE,
+                                      require_children=True, exact_roots=True, children_required=RUNNER.BILLING_CHILD_REQUIRED)
+
+    def test_required_suites_cannot_be_supplied_by_another_package(self):
+        for required, package in [(RUNNER.REQUIRED, RUNNER.TOKEN_PACKAGE),
+                                  (RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE)]:
+            wrong = self.events(required, "unrelated/package", children=True)
+            with self.subTest(package=package), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(wrong, required, package=package)
+
 
 if __name__ == "__main__":
     unittest.main()

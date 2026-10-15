@@ -472,7 +472,7 @@ func TestF05MissingReferenceDeadlineFundsPublicPostgres(t *testing.T) {
 				}
 			}
 			if scenario == "frozenMaximumDrift" {
-				if err := r.IncreaseMaximum(ctx, c.usage.ID, 1); err != nil {
+				if err := r.EnsureMaximumAtLeast(ctx, c.usage.ID, c.usage.MaximumMicrocredits+1); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -881,7 +881,7 @@ func TestF05MissingReferenceDeadlineFundsPublicPostgres(t *testing.T) {
 		// to Token, the deadline writer records its original immutable maximum.
 		// No fabricated Billing receipt or database UPDATE stands in for Extend.
 		extends := extendCalls.Load()
-		if err := client.Extend(ctx, c.usage.ID, *c.usage.HoldID, 1); err != nil {
+		if err := client.Extend(ctx, c.usage.ID, *c.usage.HoldID, 1, finalUsageReservationOperationID(c.usage.ID, *c.usage.HoldID)); err != nil {
 			t.Fatal("actual Billing extension must commit before delayed ACK processing", err)
 		}
 		if extendCalls.Load() != extends+1 {
@@ -896,7 +896,7 @@ func TestF05MissingReferenceDeadlineFundsPublicPostgres(t *testing.T) {
 			t.Fatal("deadline did not freeze original Token maximum", handled, err)
 		}
 		before := f05DeadlineBillingFacts(t, ctx, pool)
-		if err := r.IncreaseMaximum(ctx, c.usage.ID, 1); !errors.Is(err, ErrForbidden) {
+		if err := r.EnsureMaximumAtLeast(ctx, c.usage.ID, c.usage.MaximumMicrocredits+1); !errors.Is(err, ErrForbidden) {
 			t.Fatal("late Extend ACK changed immutable Token maximum", err)
 		}
 		current, err := r.GetUsage(ctx, c.usage.ID)

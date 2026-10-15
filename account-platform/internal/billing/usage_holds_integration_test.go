@@ -50,7 +50,7 @@ func TestPersonalUsageHoldBoundaries(t *testing.T) {
 				return value
 			}
 			before = facts()
-			_, err = r.ExtendHold(ctx, id, h.ID, h.ExpiresAt.Add(time.Minute), 10001)
+			_, err = r.ExtendHold(ctx, HoldExtension{UsageRequestID: id, HoldID: h.ID, OperationID: uuid.New(), LeaseSeconds: 900, AdditionalMicrocredits: 10001})
 			want := ErrInsufficientBalance
 			if frozen {
 				want = ErrWalletUnavailable
@@ -195,7 +195,10 @@ func TestPersonalUsageHoldBoundaries(t *testing.T) {
 			t.Fatal(err)
 		}
 		done := make(chan error, 1)
-		go func() { _, err := r.ExtendHold(ctx, id, h.ID, h.ExpiresAt.Add(time.Hour), 40); done <- err }()
+		go func() {
+			_, err := r.ExtendHold(ctx, HoldExtension{UsageRequestID: id, HoldID: h.ID, OperationID: uuid.New(), LeaseSeconds: 900, AdditionalMicrocredits: 40})
+			done <- err
+		}()
 		deadline := time.Now().Add(3 * time.Second)
 		blocked := false
 		for time.Now().Before(deadline) {

@@ -34,7 +34,7 @@ func TestF05ExpiredHoldRenewalIsConflictAndUnprovenFundsStayReserved(t *testing.
 	if _, err = r.pool.Exec(ctx, `UPDATE usage_holds SET expires_at=clock_timestamp()-interval '1 minute' WHERE id=$1`, h.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = r.ExtendHold(ctx, usage, h.ID, time.Now().Add(time.Hour), 50); !errors.Is(err, ErrConflict) {
+	if _, err = r.ExtendHold(ctx, HoldExtension{UsageRequestID: usage, HoldID: h.ID, OperationID: uuid.New(), LeaseSeconds: 900, AdditionalMicrocredits: 50}); !errors.Is(err, ErrConflict) {
 		t.Fatal("expired domain renewal not conflict", err)
 	}
 	// A skewed application clock must not hide the database expiry fence.
@@ -43,7 +43,7 @@ func TestF05ExpiredHoldRenewalIsConflictAndUnprovenFundsStayReserved(t *testing.
 	r.now = func() time.Time { return time.Now().UTC().Add(-2 * time.Minute) }
 	s := NewService(r)
 	s.now = r.now
-	req := httptest.NewRequest(http.MethodPost, "/internal/v1/holds/extend", strings.NewReader(`{"usage_request_id":"`+usage.String()+`","hold_id":"`+h.ID.String()+`","lease_seconds":900,"additional_microcredits":50}`))
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/holds/extend", strings.NewReader(`{"usage_request_id":"`+usage.String()+`","hold_id":"`+h.ID.String()+`","lease_seconds":900,"additional_microcredits":50,"operation_id":"`+uuid.NewString()+`"}`))
 	req.Header.Set("Authorization", "Bearer controlled-expiry-service")
 	req.Header.Set("Content-Type", "application/json")
 	out := httptest.NewRecorder()

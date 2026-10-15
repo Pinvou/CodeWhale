@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 REQUIRED = {
+    "TestF05AdditionalReservationProjectionPublicPostgres",
     "TestF06OrganizationAdmissionBoundariesPublicPostgres",
     "TestContextEligibilityUsesCurrentScopedProductionRoutes",
     "TestReconciliationEvidenceMatchesPublicSchema",
@@ -44,7 +45,16 @@ ACCOUNT_REQUIRED = {"TestF06OrganizationStatusProjectionVersionPublicPostgres", 
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 OWNER_REQUIRED = {"TestF06OrganizationWalletRequiresLifecycleEvidence"}
-RETAINED_REQUIRED = {"TestMemberHoldIdentityMutationBoundaries", "TestPersonalUsageHoldBoundaries"}
+RETAINED_REQUIRED = {
+    "TestMemberHoldIdentityMutationBoundaries",
+    "TestPersonalUsageHoldBoundaries",
+    "TestHoldExtensionIdempotencePostgres",
+    "TestPersonalUsageHoldClockBoundaries",
+    "TestF05ExpiredHoldRenewalIsConflictAndUnprovenFundsStayReserved",
+}
+# This original regression is one named leaf test. Other retained roots must
+# still produce their original child-case evidence, not just a parent PASS.
+BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - {"TestF05ExpiredHoldRenewalIsConflictAndUnprovenFundsStayReserved"}
 
 
 def local_database_url(raw):
@@ -64,7 +74,7 @@ def local_database_url(raw):
     return raw
 
 
-def verify_results(events, required=None, *, package=None, require_children=False, exact_roots=False):
+def verify_results(events, required=None, *, package=None, require_children=False, exact_roots=False, children_required=None):
     required = REQUIRED if required is None else required
     started, passed = set(), set()
     children = set()
@@ -95,7 +105,7 @@ def verify_results(events, required=None, *, package=None, require_children=Fals
             raise RuntimeError("required financial contract or subcase skipped")
     if required - passed or required - started:
         raise RuntimeError("required financial contracts did not execute: " + ", ".join(sorted(required - passed | required - started)))
-    if require_children and required - children:
+    if require_children and (required if children_required is None else children_required) - children:
         raise RuntimeError("required financial contract has no completed child cases")
     if package is not None and not package_passed:
         raise RuntimeError("financial package did not complete successfully")
@@ -158,7 +168,8 @@ def main():
         if result.returncode:
             raise RuntimeError("Go financial phase failed: " + label)
         count = verify_results([json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")],
-                               required, package=package, require_children=scoped, exact_roots=scoped)
+                               required, package=package, require_children=scoped, exact_roots=scoped,
+                               children_required=BILLING_CHILD_REQUIRED if label == "retained-billing" else None)
         print(f"Financial phase {label}: {count} named passes; all {len(required)} required roots completed", flush=True)
 
     # Each existing owner fixture requires its own absent actors. Restoration
