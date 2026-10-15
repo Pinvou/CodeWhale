@@ -1303,8 +1303,8 @@ export class RelayStateStore {
     throw lastError;
   }
 
-  async #persist(state) {
-    const contents = serializeState(state, this.#maxBytes);
+  async #persist(state, capacityReserveBytes = 0) {
+    const contents = serializeState(state, this.#maxBytes - capacityReserveBytes);
     try {
       // Stage the recovery copy first. The primary remains authoritative until
       // its atomic replacement succeeds, so a failed commit cannot roll back a
@@ -1359,9 +1359,11 @@ export class RelayStateStore {
     });
   }
 
-  compareAndSwap(name, expectedNamespaceRevision, nextValue) {
+  compareAndSwap(name, expectedNamespaceRevision, nextValue, { capacityReserveBytes = 0 } = {}) {
     const operation = this.#mutation.then(async () => {
       this.#assertReady();
+      if (!Number.isSafeInteger(capacityReserveBytes) || capacityReserveBytes < 0
+        || capacityReserveBytes >= this.#maxBytes) fail("relay_state_capacity_reserve_invalid");
       if (!NAMESPACE.test(name)) fail("namespace_name_invalid");
       decimal(expectedNamespaceRevision, "expected_namespace_revision");
       validateJsonValue(nextValue);
@@ -1380,7 +1382,7 @@ export class RelayStateStore {
           [name]: { revision: namespaceRevision, value: cloneJson(nextValue) },
         },
       };
-      await this.#persist(nextState);
+      await this.#persist(nextState, capacityReserveBytes);
       this.#state = nextState;
       return Object.freeze({
         store_revision: nextState.revision,

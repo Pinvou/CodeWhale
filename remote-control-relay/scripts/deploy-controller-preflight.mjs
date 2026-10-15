@@ -65,7 +65,7 @@ export function parseControllerEnvironment(source) {
 export function validateControllerEnvironment(entries, { expectedFeatureFlag = "1" } = {}) {
   if (!(entries instanceof Map)) fail("controller_env_entries_invalid");
   if (!new Set(["0", "1"]).has(expectedFeatureFlag)) fail("controller_env_expected_feature_flag_invalid");
-  const allowedKeys = new Set(REQUIRED_KEYS);
+  const allowedKeys = new Set([...REQUIRED_KEYS, "PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION"]);
   if ([...entries.keys()].some((key) => !allowedKeys.has(key))) {
     fail("controller_env_unknown_key");
   }
@@ -73,6 +73,10 @@ export function validateControllerEnvironment(entries, { expectedFeatureFlag = "
     if (!entries.has(key) || entries.get(key).length === 0) {
       fail("controller_env_required_value_missing");
     }
+  }
+  const selfRegistration = entries.get("PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION");
+  if (selfRegistration !== undefined && !new Set(["0", "1", "false", "true"]).has(selfRegistration)) {
+    fail("controller_env_self_registration_invalid");
   }
   for (const name of ["PINVOU_REMOTE_ENROLLMENT_HMAC_KEY", "PINVOU_REMOTE_PAIRING_HMAC_KEY"]) {
     if (isExampleHmacKey(entries.get(name))) fail("controller_env_hmac_key_invalid");
@@ -160,7 +164,14 @@ export async function validateControllerEnvironmentFile(
     resolvedPath,
   });
   const source = await readFile(expectedPath, "utf8");
-  validateControllerEnvironment(parseControllerEnvironment(source), { expectedFeatureFlag });
+  const entries = parseControllerEnvironment(source);
+  validateControllerEnvironment(entries, { expectedFeatureFlag });
+  for (const warning of controllerDeploymentWarnings(entries)) console.warn(`[controller-preflight-warning] ${warning}`);
+}
+
+export function controllerDeploymentWarnings(entries) {
+  return ["true", "1"].includes(entries.get("PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION"))
+    ? ["self_registration_requires_public_wss_tls_termination"] : [];
 }
 
 // Check every ancestor before install -d can follow links or change ownership.

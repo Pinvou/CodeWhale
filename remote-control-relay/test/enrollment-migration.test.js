@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
-import { chmod, lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -78,9 +78,9 @@ function testStoreSecurityOptions() {
   };
 }
 
-async function fixture(t, deployment = "official") {
-  const root = await mkdtemp(join(tmpdir(), "pinvou-enrollment-migration-"));
-  const env = environment(root, deployment);
+async function fixture(t, deployment = "official", overrides = {}) {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pinvou-enrollment-migration-")));
+  const env = { ...environment(root, deployment), ...overrides };
   const config = loadEnrollmentRegistryConfig(env);
   const store = await RelayStateStore.open({
     statePath: config.controller_state_path,
@@ -525,7 +525,7 @@ test("signed role claim backfills once, replays across handlers and rejects chan
 });
 
 test("self-hosted CLI is machine-readable, private-file only, and never prints credentials", async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "pinvou-enrollment-cli-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pinvou-enrollment-cli-")));
   t.after(() => rm(root, { recursive: true, force: true }));
   const input = join(root, "batch.json");
   await writeFile(input, JSON.stringify({
@@ -588,7 +588,7 @@ async function runRollbackGate(env) {
 }
 
 test("rollback gate refuses without an inventory and never reports safe", async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "pinvou-rollback-gate-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pinvou-rollback-gate-")));
   t.after(async () => { await rm(root, { recursive: true, force: true }); });
   const result = await runRollbackGate({
     ...process.env,
@@ -604,7 +604,7 @@ test("rollback gate refuses without an inventory and never reports safe", async 
 });
 
 test("rollback gate fails closed when its coverage input is unusable", async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "pinvou-rollback-gate-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pinvou-rollback-gate-")));
   t.after(async () => { await rm(root, { recursive: true, force: true }); });
   const inventory = join(root, "inventory.json");
   await writeFile(
@@ -700,6 +700,24 @@ function nextMessageMatching(socket, predicate) {
     socket.on("message", onMessage);
   });
 }
+
+test("public policy does not authorize unknown rollback gateway identities or persist them", async (t) => {
+  const { registry } = await fixture(t, "self_hosted", {
+    NODE_ENV: "production", PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION: "true",
+  });
+  const gateway = createEnrollmentGateway({ registry, upstreamUrl: "ws://127.0.0.1:19999/pinvou3/remote/ws",
+    basePath: "/pinvou3/remote", logger: { warn() {} } });
+  const address = await gateway.listen({ host: "127.0.0.1", port: 0 });
+  t.after(() => gateway.close());
+  const before = registry.exportSnapshot();
+  const socket = await openSocket(`ws://127.0.0.1:${address.port}/pinvou3/remote/ws`);
+  t.after(() => socket.terminate());
+  const rejected = nextMessage(socket);
+  socket.send(JSON.stringify({ v: 2, type: "desktop_endpoint_register",
+    endpoint_id: "ep_abcdefghijklmnopqrstuvwx", access_token: ACCESS_A, desktop_secret: DESKTOP_SECRET }));
+  assert.equal((await rejected).code, "endpoint_not_found");
+  assert.deepEqual(registry.exportSnapshot(), before, "unknown gateway identities must not create persistent registration");
+});
 
 test("gateway does not echo controller protocol absent upstream and rejects mixed versions", async (t) => {
   const received = [];
