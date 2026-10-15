@@ -15,6 +15,8 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 REQUIRED = {
+    "TestContextEligibilityUsesCurrentScopedProductionRoutes",
+    "TestReconciliationEvidenceMatchesPublicSchema",
     "TestF05DispatchLeaseLifecycle",
     "TestF05IncompleteUpstreamErrorReplayPublicPostgres",
     "TestF05MissingReferenceDeadlineFundsPublicPostgres",

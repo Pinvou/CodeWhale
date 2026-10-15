@@ -27,6 +27,42 @@ func TestPersonalUsageHoldBoundaries(t *testing.T) {
 	pricing := func() *HoldPricingContext {
 		return &HoldPricingContext{ModelID: "controlled-model", ProtocolCode: "CHAT_COMPLETIONS", FormulaVersionID: uuid.New(), PricingSnapshot: json.RawMessage(`{"input":1,"output":2}`), RequestSnapshot: json.RawMessage(`{"provider":"controlled","maximum":100}`)}
 	}
+	t.Run("extend-distinguishes-frozen-wallet-from-insufficient-funds", func(t *testing.T) {
+		for _, frozen := range []bool{true, false} {
+			w := funded(t)
+			id := uuid.New()
+			h, err := r.Reserve(ctx, id, w.ID, 100, nil, r.now().Add(time.Hour))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if frozen {
+				if _, err := r.pool.Exec(ctx, `UPDATE wallets SET status='FROZEN' WHERE id=$1`, w.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var before string
+			facts := func() string {
+				t.Helper()
+				var value string
+				if err := r.pool.QueryRow(ctx, `SELECT jsonb_build_object('wallet',(SELECT to_jsonb(w) FROM wallets w WHERE id=$1),'hold',(SELECT to_jsonb(h) FROM usage_holds h WHERE id=$2),'allocations',(SELECT jsonb_agg(to_jsonb(a) ORDER BY a.component_id) FROM usage_hold_allocations a WHERE hold_id=$2),'leases',(SELECT jsonb_agg(to_jsonb(e) ORDER BY e.id) FROM usage_hold_lease_events e WHERE hold_id=$2))::text`, w.ID, h.ID).Scan(&value); err != nil {
+					t.Fatal(err)
+				}
+				return value
+			}
+			before = facts()
+			_, err = r.ExtendHold(ctx, id, h.ID, h.ExpiresAt.Add(time.Minute), 10001)
+			want := ErrInsufficientBalance
+			if frozen {
+				want = ErrWalletUnavailable
+			}
+			if !errors.Is(err, want) {
+				t.Fatalf("frozen=%v error=%v want=%v", frozen, err, want)
+			}
+			if before != facts() {
+				t.Fatal("rejected extension changed wallet/hold/allocation/lease facts")
+			}
+		}
+	})
 	t.Run("priced-replay-binds-all-five-facts", func(t *testing.T) {
 		w := funded(t)
 		id := uuid.New()

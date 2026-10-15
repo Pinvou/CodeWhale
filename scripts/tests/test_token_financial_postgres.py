@@ -38,6 +38,16 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_actual_required_suites(self):
         self.assertEqual(RUNNER.verify_results(self.events()), len(RUNNER.REQUIRED))
 
+    def test_context_and_reconciliation_storage_regressions_are_required(self):
+        required = {
+            "TestContextEligibilityUsesCurrentScopedProductionRoutes",
+            "TestReconciliationEvidenceMatchesPublicSchema",
+        }
+        self.assertTrue(required <= RUNNER.REQUIRED)
+        for name in required:
+            with self.subTest(name=name), self.assertRaises(RuntimeError):
+                RUNNER.verify_results([event for event in self.events() if event["Test"] != name])
+
     def test_zero_cases_is_not_success(self):
         with self.assertRaises(RuntimeError):
             RUNNER.verify_results([{"Action": "pass", "Package": "token"}])

@@ -58,6 +58,12 @@ pub(crate) struct ModelRejection {
     pub schema_version: u8,
     pub code: ModelRejectionCode,
     pub model_id: String,
+    #[serde(default, skip_serializing_if = "false_legacy_binding")]
+    pub legacy_binding: bool,
+}
+
+fn false_legacy_binding(value: &bool) -> bool {
+    !*value
 }
 
 impl ModelRejection {
@@ -70,14 +76,31 @@ impl ModelRejection {
             schema_version: 1,
             code,
             model_id: model_id.to_string(),
+            legacy_binding: false,
         })
+    }
+
+    // Produced only by local runtime preparation after a fully decoded catalog
+    // proves the saved legacy name absent. No fabricated UUID or model name is
+    // persisted, and the ordinary UUID/header constructor remains unchanged.
+    pub(crate) fn legacy_unavailable() -> Self {
+        Self {
+            schema_version: 1,
+            code: ModelRejectionCode::Unavailable,
+            model_id: String::new(),
+            legacy_binding: true,
+        }
     }
 
     fn is_valid(&self) -> bool {
         self.schema_version == 1
-            && uuid::Uuid::parse_str(&self.model_id).is_ok_and(|id| {
-                !id.is_nil() && id.to_string() == self.model_id.to_ascii_lowercase()
-            })
+            && if self.legacy_binding {
+                self.code == ModelRejectionCode::Unavailable && self.model_id.is_empty()
+            } else {
+                uuid::Uuid::parse_str(&self.model_id).is_ok_and(|id| {
+                    !id.is_nil() && id.to_string() == self.model_id.to_ascii_lowercase()
+                })
+            }
     }
 }
 
@@ -960,6 +983,49 @@ pub fn compute_stats(session_id: &str) -> std::io::Result<SessionTimelineStats> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_model_rejection_is_explicit_and_does_not_weaken_uuid_evidence() {
+        let legacy = ModelRejection::legacy_unavailable();
+        assert!(legacy.is_valid());
+        let encoded = serde_json::to_value(&legacy).unwrap();
+        assert_eq!(
+            encoded,
+            json!({"schema_version":1,"code":"MODEL_UNAVAILABLE","model_id":"","legacy_binding":true})
+        );
+        assert_eq!(
+            serde_json::from_value::<ModelRejection>(encoded).unwrap(),
+            legacy
+        );
+        for marker in [
+            json!({"schema_version":1,"code":"MODEL_DEPRECATED","model_id":"","legacy_binding":true}),
+            json!({"schema_version":1,"code":"MODEL_UNAVAILABLE","model_id":"deepseek-v4-flash","legacy_binding":true}),
+            json!({"schema_version":1,"code":"MODEL_UNAVAILABLE","model_id":"0199a100-0001-7000-8000-000000000107","legacy_binding":true}),
+            json!({"schema_version":1,"code":"MODEL_UNAVAILABLE","model_id":"","legacy_binding":false}),
+        ] {
+            assert!(
+                !serde_json::from_value::<ModelRejection>(marker)
+                    .unwrap()
+                    .is_valid()
+            );
+        }
+        assert!(
+            ModelRejection::new(ModelRejectionCode::Unavailable, "deepseek-v4-flash").is_none()
+        );
+        let uuid = ModelRejection::new(
+            ModelRejectionCode::Unavailable,
+            "0199a100-0001-7000-8000-000000000107",
+        )
+        .unwrap();
+        assert!(uuid.is_valid());
+        assert!(
+            !serde_json::to_value(uuid)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("legacy_binding")
+        );
+    }
     use crate::platform::paths::tests::ENV_LOCK;
 
     #[test]
