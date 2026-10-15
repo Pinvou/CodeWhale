@@ -1,18 +1,9 @@
 import React from 'react';
 import { formatUsagePoints } from './credit-units.js';
 import { summarizeUsageRecords, usageRecordReference } from './usage-summary.js';
+import { formatUsageTime } from './usage-time.js';
 function Empty({ children }) { return <div className="ap-empty">{children}</div>; }
 
-function formatUsageTime(value, language) {
-  const locale = { zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' }[language] || language;
-  const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? '—'
-    : new Intl.DateTimeFormat(locale, {
-        dateStyle: 'medium',
-        timeStyle: 'short',
-      }).format(date);
-}
 
 export function Usage({ copy, language, records, unavailable, page, hasPrevious, hasMore, busy, canCancel = true, onPrevious, onNext, onCancel, embedded = false }) {
   const Heading = embedded ? 'h3' : 'h2';

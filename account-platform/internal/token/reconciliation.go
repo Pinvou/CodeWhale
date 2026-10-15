@@ -165,6 +165,11 @@ func (r *PostgresRepository) StopReconciliation(ctx context.Context, usageID uui
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if pending, err := lockMissingReferenceReleaseTx(ctx, tx, usageID); err != nil {
+		return err
+	} else if pending {
+		return tx.Commit(ctx)
+	}
 	// UPDATE evaluates this ownership predicate under its usage-row lock. A
 	// previously claimed item cannot overwrite a later cancellation recovery or
 	// append RECONCILIATION_STOPPED evidence that invalidates its release proof.
@@ -408,6 +413,11 @@ func (r *UsageReconciler) Run(ctx context.Context) {
 }
 
 func (r *UsageReconciler) runOnce(ctx context.Context) {
+	if store, ok := r.store.(missingReferenceDeadlineStore); ok {
+		if err := store.RecoverStoppedMissingReferences(ctx, r.batchSize); err != nil {
+			r.logger.Error("missing-reference recovery failed", "error", err)
+		}
+	}
 	if _, err := r.store.RecoverLegacyResponseStateSplits(ctx, r.batchSize); err != nil {
 		r.logger.Error("legacy response-state recovery failed", "error", err)
 	}
@@ -417,6 +427,15 @@ func (r *UsageReconciler) runOnce(ctx context.Context) {
 		return
 	}
 	for _, item := range items {
+		if handled, err := r.reconcileMissingReferenceDeadline(ctx, item); handled {
+			if err != nil {
+				r.logger.Warn("missing-reference release pending", "usage_request_id", item.ID, "error", err)
+				if writeErr := r.store.RescheduleReconciliation(ctx, item.ID, "MISSING_UPSTREAM_REFERENCE_RELEASE_UNCONFIRMED", r.now().Add(reconciliationBackoff(item.Attempts))); writeErr != nil {
+					r.logger.Error("missing-reference retry persistence failed", "usage_request_id", item.ID, "error", writeErr)
+				}
+			}
+			continue
+		}
 		if err := r.reconcile(ctx, item); err != nil {
 			r.logger.Warn("request reconciliation deferred", "usage_request_id", item.ID, "attempt", item.Attempts, "error", err)
 			errorCode := reconciliationErrorCode(err)
@@ -477,11 +496,11 @@ func (r *UsageReconciler) reconcile(ctx context.Context, item ReconciliationItem
 		}
 		return r.commit(ctx, item, *snapshot.Usage, snapshot.ActualMicrocredits)
 	}
-	if r.evidence == nil {
-		return errors.New("usage evidence provider is unavailable")
-	}
 	if item.ProviderID == nil || item.AdapterVersion == nil || item.UpstreamRequestID == nil || strings.TrimSpace(*item.UpstreamRequestID) == "" {
 		return fmt.Errorf("%w: upstream request evidence was not captured", errManualReconciliationRequired)
+	}
+	if r.evidence == nil {
+		return errors.New("usage evidence provider is unavailable")
 	}
 	if !strings.EqualFold(*item.ProviderID, r.evidence.ProviderID()) || *item.AdapterVersion != r.evidence.AdapterVersion() {
 		return fmt.Errorf("%w: no evidence adapter matches historical provider %s/%s", errManualReconciliationRequired, *item.ProviderID, *item.AdapterVersion)
@@ -536,6 +555,13 @@ func (r *UsageReconciler) commit(ctx context.Context, item ReconciliationItem, u
 	}
 	if expectedActual != nil && actual != *expectedActual {
 		return fmt.Errorf("%w: settlement snapshot does not match historical pricing", errManualReconciliationRequired)
+	}
+	if store, ok := r.store.(missingReferenceDeadlineStore); ok {
+		if fenced, err := store.PreserveMissingReferenceLateUsage(ctx, item.ID, usage); err != nil {
+			return err
+		} else if fenced {
+			return nil
+		}
 	}
 	if err := r.billing.Commit(ctx, item.ID, *item.HoldID, actual, usage); err != nil {
 		if definitiveSettlementConflict(err) {

@@ -2,6 +2,8 @@ package token
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -128,8 +130,14 @@ func TestOrganizationModelPolicyPublicPostgres(t *testing.T) {
 		if _, err := r.SaveOrganizationModelPolicy(ctx, org, actor, 3, 1, "ALLOW_ALL", nil, "organization-policy-stale-key", "controlled stale"); !errors.Is(err, ErrModelPolicyVersionConflict) {
 			t.Fatalf("stale initial version accepted: %v", err)
 		}
-		if _, err := r.SaveOrganizationModelPolicy(ctx, org, actor, 3, 0, "ALLOW_LIST", []uuid.UUID{uuid.New()}, "organization-policy-model-key", "controlled model"); !errors.Is(err, ErrModelUnavailable) {
+		_, err := r.SaveOrganizationModelPolicy(ctx, org, actor, 3, 0, "ALLOW_LIST", []uuid.UUID{uuid.New()}, "organization-policy-model-key", "controlled model")
+		if !errors.Is(err, ErrModelUnavailable) || !errors.Is(err, errOrganizationPolicyModelUnavailable) {
 			t.Fatalf("unknown model accepted: %v", err)
+		}
+		out := httptest.NewRecorder()
+		(&Service{}).writeError(out, httptest.NewRequest(http.MethodPut, "/v1/organizations/"+org.String()+"/model-policy", nil), err)
+		if out.Code != http.StatusUnprocessableEntity || !strings.Contains(out.Body.String(), `"code":"MODEL_UNAVAILABLE"`) || out.Header().Get("X-Pinvou-Model-Rejection-v1") != "" {
+			t.Fatal("policy selection incorrectly rejected a conversation model", out.Code, out.Body.String(), out.Header())
 		}
 		readCount(org, 0)
 	})

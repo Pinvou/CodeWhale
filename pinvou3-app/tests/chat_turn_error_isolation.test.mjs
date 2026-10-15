@@ -908,7 +908,9 @@ const buffer = {
   deferredRemoteUserEvent: null,
 };
 let rejectChat = true;
+let submitFailureTimelineRefreshes = 0;
 const context = {
+  refreshAuthoritativeTurnTimeline(sid) { assert.equal(sid, "session-1"); submitFailureTimelineRefreshes += 1; return Promise.resolve(true); },
   state,
   invoke(command) {
     return rejectChat ? Promise.reject(new Error('当前模型不可用')) : Promise.resolve();
@@ -944,6 +946,11 @@ const context = {
 const chat = installChat(context);
 
 await chat.doSendFor('session-1', '第一次', '第一次', [], null, false, false);
+assert.equal(submitFailureTimelineRefreshes, 1, 'IPC submit error must read persisted send_error without chat:done');
+assert.equal(state.turnTimeline.at(-1).status, 'send_error');
+assert.equal(state.turnTimeline.at(-1).model_rejection, undefined);
+assert.equal(state.turnTimeline.at(-1).turn_id, buffer.timelineTurnAnchor.localTurnId);
+assert.ok(Number.isFinite(buffer.timelineTurnAnchor.submittedAt));
 assert.equal(
   state.chatItems.filter(item => item.turnErrorNotice).length,
   1,
@@ -1143,6 +1150,7 @@ const recoveredTimelineState = {
 };
 let timelineNotifyCount = 0;
 const chatEvents = installChatEvents({
+  sessionStates: { "session-recovered": recoveredTimelineState },
   state: recoveredTimelineState,
   listen() {},
   invoke(command, args) {
