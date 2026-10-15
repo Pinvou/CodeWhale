@@ -1250,6 +1250,7 @@ struct AcpSession {
     acp_session_id: String,
     bridge: EventBridge,
     backend: AgentBackend,
+    remote_permission_contract: bool,
     busy: AtomicBool,
     configuring: Arc<AtomicBool>,
     /// Count of senders between resolving this runtime for a prompt and
@@ -4266,12 +4267,12 @@ impl AcpPool {
         let workspace_references =
             workspace::resolve_workspace_references(&workspace, &workspace_references)?;
         let runtime = self.get_or_spawn(session_id).await?;
+        let _admission = PromptAdmissionGuard::new(&runtime.prompt_pending);
         // Hold the pre-admission window open for rebind eviction from here to
         // admission (review #463 round-8 M1): `prepare_codex_prompt` reads and
         // encodes every image attachment synchronously and is not bounded, so
         // an eviction landing in between would remove and shut down the
         // runtime this sender is about to prompt. Drop releases on every path.
-        let _admission = PromptAdmissionGuard::new(&runtime.prompt_pending);
         let prepared = prepare_codex_prompt(
             &content,
             &attachments,
@@ -5587,6 +5588,8 @@ impl AcpPool {
             AgentBackend::Deepseek => bail!("当前会话不是 ACP 会话"),
         };
         let workspace = self.execution_workspace(pinvou_session_id)?;
+        let remote_permission_contract = backend == AgentBackend::CodexAcp
+            && install::supports_remote_permission_contract(&adapter);
         if self.agents.get(pinvou_session_id).workspace_kind == CodexWorkspaceKind::Temporary {
             tokio::fs::create_dir_all(&workspace).await?;
         }
@@ -6103,6 +6106,7 @@ impl AcpPool {
         Ok(AcpSession {
             identity,
             connection,
+            remote_permission_contract,
             kimi_session_id: (backend == AgentBackend::KimiAcp).then(|| acp_session_id.clone()),
             acp_session_id,
             bridge: event_bridge,

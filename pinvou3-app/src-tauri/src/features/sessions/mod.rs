@@ -54,6 +54,8 @@ mod workspace_bindings;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::with_isolated_store_restoring_home;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

@@ -1,13 +1,69 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { dict } from './helpers/i18n-all.js';
 import {
   controlledTaskChatItems,
   isRemoteChatActive,
   mergeControlledTaskChatItems,
   remoteChatItems,
+  remotePermissionFailureText,
 } from '../src/features/remote-control/chat-transcript-projection.mjs';
 
 const connection = { status: 'connected', sessionId: 'session-1' };
+
+test('translated permission errors reconcile only the matching durable turn without discarding raw evidence', () => {
+  const code = 'task_permission_mode_changed';
+  const copy = dict.zh.remoteConversation;
+  const history = [
+    { id: 'old-user', type: 'user', text: 'same prompt', messageIndex: 0 },
+    { id: 'old-error', type: 'assistant', text: code, messageIndex: 1 },
+    { id: 'current-user', type: 'user', text: 'same prompt', messageIndex: 2 },
+    { id: 'current-error', type: 'assistant', text: code, messageIndex: 3 },
+  ];
+  const snapshot = structuredClone(history);
+  for (const errorText of ['', code]) {
+    const projected = controlledTaskChatItems([{
+      sessionId: 'session-1', taskId: 'current-task', status: 'failed',
+      text: 'same prompt', messageIndex: 2, terminalReason: code, errorText,
+    }], copy, 'session-1');
+    const merged = mergeControlledTaskChatItems(history, projected);
+    assert.equal(merged.length, 4);
+    assert.deepEqual(merged.slice(0, 2), snapshot.slice(0, 2));
+    assert.equal(merged[3].id, 'current-error');
+    assert.equal(merged[3].controlledFailureReason, code);
+    assert.ok(merged[3].text.includes(copy.permissionModeChanged));
+    assert.ok(merged[3].text.includes(code));
+    assert.deepEqual(history, snapshot);
+  }
+});
+
+test('controlled permission failures show explicit local guidance in every language while retaining the evidence code', () => {
+  const keys = {
+    task_permission_mode_required: 'permissionModeRequired',
+    task_permission_mode_changed: 'permissionModeChanged',
+    task_permission_mode_unsupported: 'permissionModeUnsupported',
+  };
+  for (const language of ['zh', 'en', 'ja']) {
+    const copy = dict[language].remoteConversation;
+    for (const [code, key] of Object.entries(keys)) {
+      assert.ok(Object.hasOwn(copy, key));
+      assert.ok(copy[key]);
+      for (const errorText of ['', code]) {
+        const items = controlledTaskChatItems([{
+          sessionId: 'session-1', taskId: 'permission-task', status: 'failed',
+          text: 'accepted task', terminalReason: code, errorText,
+        }], copy, 'session-1');
+        const failure = items.find(item => /:terminal$|:error$/.test(item.id));
+        assert.ok(failure.text.includes(copy[key]));
+        assert.ok(failure.text.includes(code));
+        if (!errorText) assert.equal(failure.controlledFailureReason, code);
+      }
+    }
+    for (const unknown of ['constructor', '__proto__', 'provider_failure', null, {}]) {
+      assert.equal(remotePermissionFailureText(unknown, copy), null);
+    }
+  }
+});
 const transcript = [
   { sessionId: 'session-1', epoch: 'e1', sequence: 1, role: 'user', text: 'hello' },
   { sessionId: 'session-1', epoch: 'e1', sequence: 2, role: 'assistant', text: 'a' },

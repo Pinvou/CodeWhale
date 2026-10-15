@@ -159,7 +159,72 @@ impl SessionConfigChange<'_> {
     }
 }
 
+pub(super) fn verify_remote_mode_ack(
+    options: &[super::SessionConfigOption],
+    desired: &str,
+) -> Result<()> {
+    if !super::config_option_supports(options, "mode", desired)
+        || super::current_config_value(options, "mode").as_deref() != Some(desired)
+    {
+        bail!("task_permission_mode_unsupported");
+    }
+    Ok(())
+}
+
+fn finish_remote_configuration_admission<T>(admission: Option<Result<T>>) -> Result<T> {
+    // None means this precise runtime retired, not a permanent mode capability
+    // failure. Preserve inner busy/configuration errors without relabeling them.
+    admission.context("remote_turn_runtime_retired")?
+}
+
+fn finish_remote_mode_configuration(
+    update: Result<()>,
+    verify_ack: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    // A failed RPC does not prove a permanent capability failure. Preserve its
+    // cause and do not accept an old configuration snapshot as a fresh ACK.
+    update?;
+    verify_ack()
+}
+
 impl AcpPool {
+    /// Remote configuration is task-local and never updates interactive defaults.
+    /// Only the pinned Codex ACP adapter's documented on-request modes qualify.
+    pub(super) async fn configure_remote_permission_mode(
+        &self,
+        session_id: &str,
+        runtime: &AcpSession,
+        mode: crate::core::mode_state::SerializableMode,
+    ) -> Result<ConfigurationGuard<Arc<AtomicBool>>> {
+        if self.backend(session_id) != super::AgentBackend::CodexAcp
+            || runtime.backend != super::AgentBackend::CodexAcp
+            || !runtime.remote_permission_contract
+        {
+            bail!("task_permission_mode_unsupported");
+        }
+        let desired = crate::features::remote_control::task_permissions::codex_mode(mode);
+        let guard = {
+            let owners = self.remote_permission_owners.lock();
+            finish_remote_configuration_admission(runtime.bridge.with_active_runtime(|| {
+                if owners.has_custody(session_id) || runtime.identity.has_live_prompt() {
+                    bail!("task_session_busy");
+                }
+                begin_configuration(
+                    &runtime.busy,
+                    runtime.configuring.clone(),
+                    "task_session_busy",
+                )
+            }))?
+        };
+        if !super::config_option_supports(&runtime.config_options.read(), "mode", desired) {
+            bail!("task_permission_mode_unsupported");
+        }
+        finish_remote_mode_configuration(runtime.set_config_option("mode", desired).await, || {
+            verify_remote_mode_ack(&runtime.config_options.read(), desired)
+        })?;
+        Ok(guard)
+    }
+
     async fn remember_config_choice(
         &self,
         runtime: &AcpSession,
@@ -290,6 +355,41 @@ impl AcpPool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn failed_remote_mode_update_preserves_cause_and_never_accepts_stale_ack() {
+        for cause in [
+            "config_transport_closed",
+            "agent_config_rejected",
+            "remote_turn_runtime_retired",
+        ] {
+            let ack_checks = std::cell::Cell::new(0);
+            let error = finish_remote_mode_configuration(
+                Err(anyhow::anyhow!(cause).context("ACP session/set_config_option 失败")),
+                || {
+                    ack_checks.set(ack_checks.get() + 1);
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+            assert_eq!(ack_checks.get(), 0);
+            assert_eq!(error.root_cause().to_string(), cause);
+            assert_eq!(error.to_string(), "ACP session/set_config_option 失败");
+            assert!(
+                !error
+                    .chain()
+                    .any(|item| item.to_string() == "task_permission_mode_unsupported")
+            );
+            assert_eq!(
+                crate::features::assistant::remote_turn::remote_engine_error_code(&error),
+                "task_engine_unavailable"
+            );
+        }
+        let ack_error =
+            finish_remote_mode_configuration(Ok(()), || verify_remote_mode_ack(&[], "agent"))
+                .unwrap_err();
+        assert_eq!(ack_error.to_string(), "task_permission_mode_unsupported");
+    }
+
     #[tokio::test]
     async fn cancelled_configuration_keeps_slot_until_blocking_persistence_finishes() {
         use super::super::store::SessionAgentStore;
@@ -352,6 +452,58 @@ mod tests {
                 .acp_config_values["model"],
             "new"
         );
+    }
+
+    #[test]
+    fn remote_configuration_retirement_is_not_a_mode_capability_failure() {
+        let runtime = super::super::lifecycle::RuntimeRetirementGate::default();
+        let busy = AtomicBool::new(false);
+        let configuring = AtomicBool::new(false);
+        let begin = || begin_configuration(&busy, &configuring, "task_session_busy");
+        let guard = finish_remote_configuration_admission(runtime.with_active(begin)).unwrap();
+        assert!(configuring.load(Ordering::Acquire));
+        drop(guard);
+        assert!(!configuring.load(Ordering::Acquire));
+
+        busy.store(true, Ordering::Release);
+        let busy_error = finish_remote_configuration_admission(runtime.with_active(begin))
+            .err()
+            .unwrap();
+        assert_eq!(busy_error.to_string(), "task_session_busy");
+        assert!(!configuring.load(Ordering::Acquire));
+        busy.store(false, Ordering::Release);
+        assert!(runtime.close_if(|| true));
+        let retired = finish_remote_configuration_admission(runtime.with_active(begin))
+            .err()
+            .unwrap();
+        assert_eq!(retired.to_string(), "remote_turn_runtime_retired");
+        assert!(!configuring.load(Ordering::Acquire));
+        for error in [busy_error, retired] {
+            assert_eq!(
+                crate::features::assistant::remote_turn::remote_engine_error_code(&error),
+                "task_engine_unavailable"
+            );
+            assert!(
+                !error
+                    .chain()
+                    .any(|cause| cause.to_string() == "task_permission_mode_unsupported")
+            );
+        }
+    }
+
+    #[test]
+    fn remote_mode_ack_cannot_keep_inherited_full_access_or_omit_capability() {
+        let options = |current| {
+            vec![serde_json::from_value::<super::super::SessionConfigOption>(json!({
+            "id":"mode", "name":"Mode", "type":"select", "currentValue":current,
+            "options":[{"value":"read-only","name":"Read-only"},{"value":"agent","name":"Agent"},{"value":"agent-full-access","name":"Full access"}]
+        })).unwrap()]
+        };
+        assert!(verify_remote_mode_ack(&options("read-only"), "read-only").is_ok());
+        assert!(verify_remote_mode_ack(&options("agent"), "agent").is_ok());
+        assert!(verify_remote_mode_ack(&options("agent-full-access"), "agent").is_err());
+        assert!(verify_remote_mode_ack(&options("agent"), "read-only").is_err());
+        assert!(verify_remote_mode_ack(&[], "agent").is_err());
     }
 
     #[test]
