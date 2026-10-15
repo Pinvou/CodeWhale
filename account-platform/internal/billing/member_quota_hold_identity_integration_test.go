@@ -1,11 +1,13 @@
 package billing
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // Uses the existing opt-in owned Billing fixture and public migration hooks.
@@ -70,7 +72,18 @@ func TestMemberHoldIdentityMutationBoundaries(t *testing.T) {
 	})
 	t.Run("extend-complete-member-budget", func(t *testing.T) {
 		h, g, _, _ := reserve(t, 100)
-		got, err := r.ExtendHold(ctx, h.UsageRequestID, h.ID, h.ExpiresAt.Add(time.Minute), 20)
+		// One command is frozen before the first repository operation.
+		command := HoldExtension{UsageRequestID: h.UsageRequestID, HoldID: h.ID, OperationID: uuid.New(), LeaseSeconds: 900, AdditionalMicrocredits: 20}
+		auditCount := func() int64 {
+			t.Helper()
+			var count int64
+			if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM member_quota_grant_audits WHERE grant_id=$1 AND action='HOLD_RESERVED'`, g.ID).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			return count
+		}
+		auditsBefore := auditCount()
+		got, err := r.ExtendHold(ctx, command)
 		if err != nil || got.MaxMicrocredits != 120 {
 			t.Fatal(got, err)
 		}
@@ -78,6 +91,51 @@ func TestMemberHoldIdentityMutationBoundaries(t *testing.T) {
 		if err := r.pool.QueryRow(ctx, `SELECT g.reserved_microcredits,m.reserved_microcredits,a.reserved_microcredits,w.reserved_microcredits FROM member_quota_grants g JOIN member_quota_hold_allocations m ON m.grant_id=g.id JOIN usage_hold_allocations a ON a.hold_id=m.hold_id AND a.component_id=m.component_id JOIN wallets w ON w.id=$3 WHERE g.id=$1 AND m.hold_id=$2`, g.ID, h.ID, h.WalletID).Scan(&quota, &allocation, &generic, &wallet); err != nil || quota != 120 || allocation != 120 || generic != 120 || wallet != 120 {
 			t.Fatal(quota, allocation, generic, wallet, err)
 		}
+		if auditCount() != auditsBefore+1 {
+			t.Fatal("first ORG extension did not create exactly one grant audit")
+		}
+		snapshot := func() string {
+			t.Helper()
+			facts := map[string]json.RawMessage{}
+			for _, table := range []string{"wallets", "ledger_accounts", "credit_lots", "entitlement_packages", "entitlement_components", "usage_holds", "usage_hold_allocations", "member_quota_grants", "member_quota_hold_allocations", "member_quota_grant_audits", "journal_entries", "ledger_postings", "receivables", "usage_hold_lease_events", "idempotency_records"} {
+				var raw []byte
+				query := `SELECT COALESCE(jsonb_agg(to_jsonb(entry) ORDER BY to_jsonb(entry)::text),'[]'::jsonb) FROM ` + pgx.Identifier{table}.Sanitize() + ` entry`
+				if err := r.pool.QueryRow(ctx, query).Scan(&raw); err != nil {
+					t.Fatalf("ORG extension snapshot %s: %v", table, err)
+				}
+				facts[table] = raw
+			}
+			raw, err := json.Marshal(facts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return string(raw)
+		}
+		beforeReplay := snapshot()
+		replay, err := r.ExtendHold(ctx, command)
+		if err != nil || replay.ID != got.ID || replay.WalletID != got.WalletID || replay.MaxMicrocredits != got.MaxMicrocredits || !replay.ExpiresAt.Equal(got.ExpiresAt) || snapshot() != beforeReplay {
+			t.Fatal("same ORG operation reapplied reservation, allocation, audit, lease or receipt", replay, err)
+		}
+		conflict := command
+		conflict.AdditionalMicrocredits++
+		if _, err := r.ExtendHold(ctx, conflict); !errors.Is(err, ErrConflict) || snapshot() != beforeReplay {
+			t.Fatal("same ORG operation accepted different facts or changed funds", err)
+		}
+		next := command
+		next.OperationID = uuid.New()
+		distinct, err := r.ExtendHold(ctx, next)
+		if err != nil || distinct.MaxMicrocredits != 140 || auditCount() != auditsBefore+2 {
+			t.Fatal("different equal-amount ORG operation did not apply once", distinct, err)
+		}
+		var componentReserved int64
+		if err := r.pool.QueryRow(ctx, `SELECT g.reserved_microcredits,m.reserved_microcredits,a.reserved_microcredits,c.reserved_microcredits,w.reserved_microcredits FROM member_quota_grants g JOIN member_quota_hold_allocations m ON m.grant_id=g.id JOIN usage_hold_allocations a ON a.hold_id=m.hold_id AND a.component_id=m.component_id JOIN entitlement_components c ON c.id=m.component_id JOIN wallets w ON w.id=$3 WHERE g.id=$1 AND m.hold_id=$2`, g.ID, h.ID, h.WalletID).Scan(&quota, &allocation, &generic, &componentReserved, &wallet); err != nil || quota != 140 || allocation != 140 || generic != 140 || componentReserved != 140 || wallet != 140 {
+			t.Fatal("distinct ORG extension did not conserve all reservation layers", quota, allocation, generic, componentReserved, wallet, err)
+		}
+		afterDistinct := snapshot()
+		if _, err := r.ExtendHold(ctx, next); err != nil || snapshot() != afterDistinct {
+			t.Fatal("distinct ORG operation replay changed effects", err)
+		}
+
 	})
 	t.Run("zero-budget-member-terminal-paths", func(t *testing.T) {
 		for _, commit := range []bool{true, false} {
@@ -136,11 +194,11 @@ func TestMemberHoldIdentityMutationBoundaries(t *testing.T) {
 			func() error { _, e := r.Commit(ctx, h.UsageRequestID, h.ID, 30, nil); return e },
 			func() error { _, e := r.Release(ctx, h.UsageRequestID, h.ID, "USER_STOPPED"); return e },
 			func() error {
-				_, e := r.ExtendHold(ctx, h.UsageRequestID, h.ID, h.ExpiresAt.Add(time.Minute), 0)
+				_, e := r.ExtendHold(ctx, HoldExtension{UsageRequestID: h.UsageRequestID, HoldID: h.ID, LeaseSeconds: 900})
 				return e
 			},
 			func() error {
-				_, e := r.ExtendHold(ctx, h.UsageRequestID, h.ID, h.ExpiresAt.Add(time.Minute), 20)
+				_, e := r.ExtendHold(ctx, HoldExtension{UsageRequestID: h.UsageRequestID, HoldID: h.ID, OperationID: uuid.New(), LeaseSeconds: 900, AdditionalMicrocredits: 20})
 				return e
 			},
 		} {

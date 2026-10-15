@@ -4,13 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"math"
 
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func (r *PostgresRepository) Commit(ctx context.Context, usageRequestID, holdID uuid.UUID, actual int64, usage map[string]any) (Hold, error) {
@@ -178,84 +176,6 @@ func (r *PostgresRepository) Commit(ctx context.Context, usageRequestID, holdID 
 	}
 	hold.Status = "COMMITTED"
 	hold.ActualMicrocredits = &actual
-	return hold, tx.Commit(ctx)
-}
-
-func (r *PostgresRepository) ExtendHold(ctx context.Context, usageRequestID, holdID uuid.UUID, expiresAt time.Time, additional int64) (Hold, error) {
-	if usageRequestID == uuid.Nil || holdID == uuid.Nil || additional < 0 || !expiresAt.After(r.now()) {
-		return Hold{}, ErrConflict
-	}
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if err != nil {
-		return Hold{}, err
-	}
-	defer tx.Rollback(ctx)
-	hold, err := getHoldByUsage(ctx, tx, usageRequestID, false)
-	if err == nil {
-		// Match Commit/Release: acquire the wallet before the mutable hold.
-		if _, err = getWallet(ctx, tx, hold.WalletID, true); err == nil {
-			hold, err = getHoldByUsage(ctx, tx, usageRequestID, true)
-		}
-	}
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && hold.ID != holdID) {
-		return Hold{}, ErrNotFound
-	}
-	if err != nil {
-		return Hold{}, err
-	}
-	if hold.Status != "ACTIVE" {
-		return Hold{}, ErrUsageAlreadyTerminal
-	}
-	now := r.now()
-	if !expiresAt.After(now) || !hold.ExpiresAt.After(now) {
-		return Hold{}, ErrConflict
-	}
-	previousExpiresAt, previousMaximum := hold.ExpiresAt, hold.MaxMicrocredits
-	if _, err := validateMemberQuotaHoldAllocations(ctx, tx, hold.ID, 0); err != nil {
-		return Hold{}, err
-	}
-	if hold.MaxMicrocredits < 0 || additional > math.MaxInt64-hold.MaxMicrocredits {
-		return Hold{}, ErrConflict
-	}
-	if additional > 0 {
-		var organizationID, memberUserID *uuid.UUID
-		var membershipVersion *int64
-		if err := tx.QueryRow(ctx, `SELECT organization_id,member_user_id,membership_version FROM usage_holds WHERE id=$1`, hold.ID).Scan(&organizationID, &memberUserID, &membershipVersion); err != nil {
-			return Hold{}, err
-		}
-		if organizationID != nil || memberUserID != nil || membershipVersion != nil {
-			if organizationID == nil || memberUserID == nil || membershipVersion == nil {
-				return Hold{}, ErrConflict
-			}
-			if err := r.extendMemberQuotaHold(ctx, tx, hold, *organizationID, *memberUserID, *membershipVersion, additional, now); err != nil {
-				return Hold{}, err
-			}
-		} else if err := extendPersonalHold(ctx, tx, hold, additional, now); err != nil {
-			return Hold{}, err
-		}
-		if _, err := validateMemberQuotaHoldAllocations(ctx, tx, hold.ID, additional); err != nil {
-			return Hold{}, err
-		}
-		hold.MaxMicrocredits += additional
-	}
-	if expiresAt.After(hold.ExpiresAt) {
-		hold.ExpiresAt = expiresAt.UTC()
-	}
-	if _, err := tx.Exec(ctx, `UPDATE usage_holds SET expires_at=$2,max_microcredits=$3,updated_at=$4 WHERE id=$1 AND status='ACTIVE'`, hold.ID, hold.ExpiresAt, hold.MaxMicrocredits, now); err != nil {
-		// The database clock can cross expiry after our locked domain check.
-		// Map only this reviewed renewal fence; other trigger failures remain
-		// errors and roll back every reservation/lease mutation.
-		var fence *pgconn.PgError
-		if errors.As(err, &fence) && fence.Code == "55000" && fence.Message == "expired hold cannot be renewed during recovery" {
-			return Hold{}, ErrConflict
-		}
-		return Hold{}, err
-	}
-	if hold.ExpiresAt.After(previousExpiresAt) || hold.MaxMicrocredits != previousMaximum {
-		if _, err := tx.Exec(ctx, `INSERT INTO usage_hold_lease_events(id,hold_id,event_type,previous_expires_at,expires_at,previous_max_microcredits,max_microcredits,additional_microcredits,created_at) VALUES($1,$2,'EXTENDED',$3,$4,$5,$6,$7,$8)`, uuid.Must(uuid.NewV7()), hold.ID, previousExpiresAt, hold.ExpiresAt, previousMaximum, hold.MaxMicrocredits, hold.MaxMicrocredits-previousMaximum, now); err != nil {
-			return Hold{}, err
-		}
-	}
 	return hold, tx.Commit(ctx)
 }
 
