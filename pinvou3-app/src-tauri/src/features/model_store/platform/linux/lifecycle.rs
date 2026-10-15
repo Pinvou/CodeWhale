@@ -841,12 +841,18 @@ impl ModelManager {
             // 脚本交回了本机 OpenAI 兼容端点，直接轻量探测 /v1/models 才是可靠判据。
             // 仍然只做“记录说在跑、实际已不在”的纠正，不凭一个端口把外部服务认领为
             // 本模型商店的运行实例。
+            // 但这个探测只对 OpenAI 风格的端点成立（路径为空或 /v1 开头）：z-image
+            // 这类文生图卡报的是 /generate，把路径改写成 /v1/models 去探必然 404，
+            // 会把正在运行的服务误判成已停止——真机上踩过：容器 healthy 而 UI
+            // 永远显示未启用。非 OpenAI 端点不做主动探测，落到下面的镜像比对。
             if let Some(endpoint) = rec.endpoint_url.as_deref() {
-                if rec.running && !openai_compatible_endpoint_alive(endpoint) {
-                    let _ = db::set_running(&rec.card_id, false);
-                    corrected.push(rec.card_name);
+                if endpoint_path_is_openai_style(endpoint) {
+                    if rec.running && !openai_compatible_endpoint_alive(endpoint) {
+                        let _ = db::set_running(&rec.card_id, false);
+                        corrected.push(rec.card_name);
+                    }
+                    continue;
                 }
-                continue;
             }
 
             // 没有容器名（这一版之前启用的老记录）：退回按镜像判断，但**只做
@@ -3429,6 +3435,15 @@ fn ollama_alive(host: &str) -> bool {
 /// 运行状态探测不能向它发一次聊天请求（那会触发真正推理），只访问轻量的
 /// `/v1/models`。无法确定的网络错误一律保留原状态，避免一时负载过高就把
 /// 正在运行的服务错标成已停止。
+fn endpoint_path_is_openai_style(endpoint_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(endpoint_url) else {
+        // 解析不了的地址不探测，保留原状态。
+        return false;
+    };
+    let path = url.path();
+    path.is_empty() || path == "/" || path.starts_with("/v1")
+}
+
 fn openai_compatible_endpoint_alive(endpoint_url: &str) -> bool {
     let Ok(mut url) = reqwest::Url::parse(endpoint_url) else {
         return true;
@@ -4739,5 +4754,27 @@ echo '权重就绪'
                 "{bad} 不指向本机，落库就等于把用户的对话导去别处"
             );
         }
+    }
+    #[test]
+    fn openai_style_detection_separates_v1_endpoints_from_generate() {
+        // 原生引擎报上来的都是这两种形态：/v1 或 /v1/chat/completions。
+        assert!(endpoint_path_is_openai_style("http://127.0.0.1:8000/v1"));
+        assert!(endpoint_path_is_openai_style(
+            "http://127.0.0.1:8000/v1/chat/completions"
+        ));
+        // 没写路径（reqwest 归一成 "/"）也算：改写成 /v1/models 是安全的。
+        assert!(endpoint_path_is_openai_style("http://127.0.0.1:8000/"));
+        assert!(endpoint_path_is_openai_style("http://127.0.0.1:8000"));
+
+        // z-image 的文生图端点：改写路径探测必 404，绝不能按 OpenAI 探测，
+        // 否则容器明明 healthy 也会被误标成已停止（真机踩过）。
+        assert!(!endpoint_path_is_openai_style(
+            "http://127.0.0.1:8000/generate"
+        ));
+        assert!(!endpoint_path_is_openai_style(
+            "http://127.0.0.1:8000/generate?size=1024"
+        ));
+        // 解析失败按「不可探测」处理，保留原状态而不是清 running。
+        assert!(!endpoint_path_is_openai_style("not a url"));
     }
 }
