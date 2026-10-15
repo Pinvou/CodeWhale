@@ -284,10 +284,15 @@ command_protocol!(
         "kb_model_download"
     ]
 );
-command_protocol!(
-    llmapi_protocol,
-    "llmapi.rs",
-    [
+#[test]
+fn retired_llmapi_commands_are_not_registered() {
+    let command_modules = include_str!("mod.rs");
+    let app_entrypoint = include_str!("../../lib.rs");
+    assert!(
+        !command_modules.contains("mod llmapi"),
+        "retired llmapi command module is still installed"
+    );
+    for removed in [
         "ensure_llmapi_binding",
         "login_llmapi_user",
         "save_llmapi_user_session",
@@ -296,9 +301,18 @@ command_protocol!(
         "set_llmapi_default_model",
         "retry_llmapi_provisioning",
         "set_llmapi_user_enabled",
-        "get_llmapi_admin_overview"
-    ]
-);
+        "get_llmapi_admin_overview",
+    ] {
+        assert!(
+            !command_modules.contains(removed),
+            "retired llmapi command remains in the installed command modules: {removed}"
+        );
+        assert!(
+            !app_entrypoint.contains(removed),
+            "retired llmapi command is still registered: {removed}"
+        );
+    }
+}
 
 #[test]
 fn preinstalled_model_startup_commands_are_not_registered() {

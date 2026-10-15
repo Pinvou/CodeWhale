@@ -75,14 +75,34 @@ function goSource(text) {
 export function authorizationRoutes(sourceName, sourceText) {
   const { code: text, masked } = goSource(sourceText);
   const routes = [];
+  const recognizedSelectors = new Set();
   for (const match of text.matchAll(routePattern)) {
     if (masked[match.index] === ' ') continue;
+    recognizedSelectors.add(match.index);
     const lineStart = text.lastIndexOf('\n', match.index) + 1;
     const lineEnd = text.indexOf('\n', match.index);
     routes.push({ source: sourceName, receiver: match[1], method: match[2].toUpperCase(), path: match[3], registration: text.slice(lineStart, lineEnd < 0 ? text.length : lineEnd) });
   }
   if ([...masked.matchAll(/\.\s*Any\b/g)].length !== routes.filter(route => route.method === 'ANY').length) {
     throw new Error(`unrecognized_wildcard_http_entrypoint:${sourceName}`);
+  }
+  // Ordinary registrations must use the same closed literal grammar as the
+  // catalog. Account for selectors on actual router receivers, not unrelated
+  // HTTP clients or the Engine/RouterGroup forwarding implementation.
+  const receivers = new Set(routes.map(route => route.receiver));
+  for (const match of masked.matchAll(/\b([A-Za-z][A-Za-z0-9_]*)\s*(?::=|=)\s*httpserver\.NewRouter\s*\(/g)) receivers.add(match[1]);
+  for (const match of masked.matchAll(/\b([A-Za-z][A-Za-z0-9_]*)\s+\*httpserver\.(?:Router|RouteGroup)\b/g)) receivers.add(match[1]);
+  let changed;
+  do {
+    changed = false;
+    for (const match of masked.matchAll(/\b([A-Za-z][A-Za-z0-9_]*)\s*(?::=|=)\s*([A-Za-z][A-Za-z0-9_]*)\s*\.\s*Group\s*\(/g)) {
+      if (receivers.has(match[2]) && !receivers.has(match[1])) { receivers.add(match[1]); changed = true; }
+    }
+  } while (changed);
+  for (const match of masked.matchAll(/\b([A-Za-z][A-Za-z0-9_]*)\s*\.\s*(?:GET|POST|PUT|PATCH|DELETE)\b/g)) {
+    if (receivers.has(match[1]) && !recognizedSelectors.has(match.index)) {
+      throw new Error(`unrecognized_http_entrypoint:${sourceName}`);
+    }
   }
   return routes;
 }
