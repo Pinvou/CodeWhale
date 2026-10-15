@@ -319,8 +319,8 @@ pub fn sanitize_for_disk(line: &str) -> String {
         }
         let bare = word.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | ';' | ':'));
         redact_next = bare.eq_ignore_ascii_case("bearer")
-            || SECRET_FLAGS.iter().any(|known| bare == *known)
-            || SECRET_ENV_KEYS.iter().any(|known| bare == *known);
+            || SECRET_FLAGS.contains(&bare)
+            || SECRET_ENV_KEYS.contains(&bare);
     }
     clamp_line(&out)
 }

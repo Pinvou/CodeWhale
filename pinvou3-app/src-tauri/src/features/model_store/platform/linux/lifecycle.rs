@@ -3612,19 +3612,19 @@ mod tests {
             sha256: script_runner::sha256_hex(content),
         };
         assert_eq!(
-            native_engine_cleanup_probe(&blob("echo LMM_ENGINE_PRESENT=0\n")).unwrap(),
+            native_engine_cleanup_probe(&blob("#!/bin/bash\necho LMM_ENGINE_PRESENT=0\n")).unwrap(),
             (false, None)
         );
         assert_eq!(
             native_engine_cleanup_probe(&blob(
-                "echo LMM_ENGINE_PRESENT=1\necho LMM_ENGINE_SIZE_BYTES=42\n"
+                "#!/bin/bash\necho LMM_ENGINE_PRESENT=1\necho LMM_ENGINE_SIZE_BYTES=42\n"
             ))
             .unwrap(),
             (true, Some(42))
         );
-        assert!(native_engine_cleanup_probe(&blob("exit 1\n")).is_err());
+        assert!(native_engine_cleanup_probe(&blob("#!/bin/bash\nexit 1\n")).is_err());
         assert!(native_engine_cleanup_probe(&blob("echo unknown\n")).is_err());
-        let mut altered = blob("echo LMM_ENGINE_PRESENT=0\n");
+        let mut altered = blob("#!/bin/bash\necho LMM_ENGINE_PRESENT=0\n");
         altered.content.push_str("echo changed\n");
         assert!(native_engine_cleanup_probe(&altered).is_err());
     }
