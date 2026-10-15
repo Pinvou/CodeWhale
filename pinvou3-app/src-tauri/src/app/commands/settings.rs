@@ -23,7 +23,6 @@ where
         .await
         .map_err(|error| format!("{label} 任务失败: {error}"))?
 }
->>>>>>> c5b66f1ac
 
 /// 从 disk 读最新 UserPrefs。
 /// 注意走 disk 而非 engine.bridge.prefs——如果用户手改 settings.json，
