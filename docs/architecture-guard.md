@@ -50,16 +50,20 @@ python scripts/architecture-guard.py
 - `#[tauri::command]` 必须位于 `app/commands/` 路径下，`generate_handler!` 条目以
   `commands::`（或 `crate::app::commands::`）前缀引用。
 - `resources/common` 不得混入 PE、ELF 等平台专属二进制。
-- 禁止 spawn 外部 `kill` 可执行文件执行进程组或进程树终止
-  （`Command::new("kill")`、`Path::new("kill")`、
-  `connector_cli_command(_, "kill")` 等形态）。Unix 组杀必须通过
-  `platform::process::kill_process_tree` / `platform::os::kill_pid_tree`
-  直接调用 `kill(2)`；该规则对所有 Rust 文件生效且没有文件级例外。
 - `pinvou-cli` crate 不得在代码中直接引用 `deepseek_tui::` 或 `tauri::`（注释文档
   除外；`use tauri as x`/glob 导入等别名形态同样被 `use` 语句规则拦截）：CLI 一律
   经由 `pinvou3_lib`（`features`/`platform` 公共面）触达 app，防止无头构建悄悄耦合
   GUI 栈或绕过 app 自身的分层（2026-09-13 随 PR #478 增补）。扫描范围是
   `pinvou-cli/crates/`（源码面；这是 tripwire 级规则，极端混淆形态不在其覆盖内）。
+- **禁止 spawn 外部 `kill` 可执行文件执行进程组/进程树终止**（`Command::new("kill")`、
+  `Path::new("kill")`、`connector_cli_command(_, "kill")` 等形态），组杀一律通过
+  `libc::kill(2)` 直调（`platform::process::kill_process_tree` /
+  `platform::os::kill_pid_tree`）。背景：procps-ng 4.0.4 会把 `kill -9 -<pgid>` 的
+  合法负 pid 错解析成 `kill(-1)`，杀光当前用户全部进程（2026-09-04 实际事故）。
+  此规则对所有 Rust 文件生效、无文件级例外：`kill_pid_tree` 的 Unix 实现收敛在
+  `platform/os/unsupported.rs`（`cfg(unix)` 分支直调 `kill(2)`，macOS 走该实现）与
+  `platform/os/linux/linux_path.rs`（Linux 独立实现），
+  不得因「合约存根」豁免整个文件。
 
 门禁只约束可以稳定、客观检测的架构边界，不以文件行数或仓库总代码量作为模块化
 合规条件。模块是否需要拆分，应依据职责、依赖、状态耦合和独立测试能力，遵循根目录
