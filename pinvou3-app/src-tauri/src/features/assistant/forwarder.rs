@@ -340,6 +340,7 @@ pub(crate) fn spawn_event_forwarder(
             match event {
                 Event::TurnStarted {
                     turn_id,
+                    created_at,
                     submission_id,
                     ..
                 } => {
@@ -385,6 +386,10 @@ pub(crate) fn spawn_event_forwarder(
                     crate::features::assistant::timing::bind_behavior_turn_id(
                         &session_id,
                         &turn_id,
+                    );
+                    crate::features::assistant::timing::record_engine_turn_started_at(
+                        &session_id,
+                        created_at.timestamp_millis(),
                     );
                     if let Some((_, mode)) = pending_cancel {
                         // Replay bound to the engine slot's turn identity
