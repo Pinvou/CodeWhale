@@ -751,14 +751,24 @@ fn move_session(
         require_yes(yes)?;
     }
     let sessions = open_session_store()?;
-    match sessions
-        .session_kind(session_id)
-        .map_err(|error| project_error("move", error))?
-    {
+    match sessions.session_kind(session_id).map_err(|error| {
+        project_error(
+            "move",
+            error.context(format!(
+                "session {session_id} does not exist or cannot be classified"
+            )),
+        )
+    })? {
         SessionKind::ScheduledRun => {
             return Err(CliError::failed(format!(
                 "projects move: session {session_id} is a scheduled run; \
                  scheduled-run sessions are managed from Scheduled"
+            )));
+        }
+        SessionKind::RemoteProxy => {
+            return Err(CliError::failed(format!(
+                "projects move: session {session_id} is a remote proxy; \
+                 remote sessions require the authenticated remote route"
             )));
         }
         SessionKind::Chat => {}

@@ -311,6 +311,7 @@ fn open_store() -> Result<SessionStore, CliError> {
 }
 
 fn require_existing(store: &SessionStore, id: &str, action: &str) -> Result<(), CliError> {
+    crate::support::reject_remote_session(store, id, "sessions", action)?;
     store
         .load(id)
         .map(|_| ())
@@ -337,6 +338,7 @@ fn kind_label(store: &SessionStore, id: &str) -> &'static str {
     match store.session_kind(id) {
         Ok(SessionKind::Chat) => "chat",
         Ok(SessionKind::ScheduledRun) => "scheduled-run",
+        Ok(SessionKind::RemoteProxy) => "remote-proxy",
         // A transient profiles-file error must not mislabel a chat session
         // as a scheduled run; surface it as unknown instead.
         Err(_) => "unknown",
@@ -523,6 +525,7 @@ fn show(
     output: OutputMode,
 ) -> Result<CliOutcome, CliError> {
     let store = open_store()?;
+    crate::support::reject_remote_session(&store, id, "sessions", "show")?;
     let mut session = store
         .load(id)
         .map_err(|error| crate::support::store_error("sessions", "show", id, error))?;
@@ -633,6 +636,7 @@ fn rename(id: &str, title: &str, output: OutputMode) -> Result<CliOutcome, CliEr
         return Err(aux_session_error("sessions rename", id));
     }
     let store = open_store()?;
+    crate::support::reject_remote_session(&store, id, "sessions", "rename")?;
     store
         .set_title(id, title.to_owned())
         .map_err(|error| crate::support::store_error("sessions", "rename", id, error))?;
@@ -791,6 +795,7 @@ fn set_hidden(id: &str, hidden: bool, output: OutputMode) -> Result<CliOutcome, 
 fn delete(id: &str, yes: bool, output: OutputMode) -> Result<CliOutcome, CliError> {
     require_yes(yes)?;
     let store = open_store()?;
+    crate::support::reject_remote_session(&store, id, "sessions", "delete")?;
     // Unknown ids exit 1 like every other sessions command (show/export/
     // rename gate on existence): the store's own delete treats NotFound as
     // success for the GUI cascade, but a CLI caller asking to delete a
@@ -878,6 +883,7 @@ fn export(
     output: OutputMode,
 ) -> Result<CliOutcome, CliError> {
     let store = open_store()?;
+    crate::support::reject_remote_session(&store, id, "sessions", "export")?;
     let session = store
         .load(id)
         .map_err(|error| crate::support::store_error("sessions", "export", id, error))?;
@@ -1267,6 +1273,32 @@ fn folder(id: &str, output: OutputMode) -> Result<CliOutcome, CliError> {
 mod tests {
     use super::*;
     use crate::{CliCommand, parse_args};
+
+    #[test]
+    fn kind_label_distinguishes_remote_proxy_local_chat_and_missing_record() {
+        let _env_lock = crate::support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = crate::support::test_support::TempHome::new("remote-kind-label");
+        std::fs::create_dir_all(home.join("sessions")).unwrap();
+        std::fs::write(
+            home.join("sessions/_remote_proxies.json"),
+            include_bytes!("../tests/fixtures/remote_proxy.json"),
+        )
+        .unwrap();
+        let store = SessionStore::boot().unwrap();
+        assert_eq!(
+            store.session_kind("remote-cli-fixture").unwrap(),
+            SessionKind::RemoteProxy,
+            "the strict production loader must accept the proxy fixture"
+        );
+        assert_eq!(kind_label(&store, "remote-cli-fixture"), "remote-proxy");
+        let chat = store
+            .create_new("test-model".into(), None, home.to_path_buf())
+            .unwrap();
+        assert_eq!(kind_label(&store, &chat.metadata.id), "chat");
+        assert_eq!(kind_label(&store, "missing-session"), "unknown");
+    }
 
     fn parse(arguments: &[&str]) -> Result<SessionsCommand, CliError> {
         let mut owned: Vec<String> = arguments.iter().map(|value| value.to_string()).collect();
