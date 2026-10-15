@@ -122,3 +122,44 @@ test('a commented-out organization assembly gate does not satisfy the checker', 
  const source = inputs.organizationFinanceSource.replace('if !s.managementEnabled {', '/* if !s.managementEnabled { return } */ if s.managementEnabled {');
  assert.throws(() => checkCoverage({ ...inputs, organizationFinanceSource: source }), /organization management/);
 });
+
+
+test('organization quota contract rejects unsupported PLAN or missing concrete components', () => {
+ for(const values of [['BASE','BONUS','PLAN'],['BASE'],['BONUS'],[]]) {
+  const organizationFinance=structuredClone(inputs.organizationFinance);
+  organizationFinance.components.schemas.QuotaItem.properties.component_type.enum=values;
+  assert.throws(()=>checkCoverage({...inputs,organizationFinance}), /organization quota component/);
+ }
+});
+
+
+test('member unit contract cannot omit or misstate the actual Admin AuditOnly command', () => {
+  const doc = JSON.parse(fs.readFileSync(new URL('../../account-platform/contracts/openapi/organization-member-units.yaml', import.meta.url), 'utf8'));
+  const organizationAccountSource = fs.readFileSync(new URL('../../account-platform/internal/account/organization_routes.go', import.meta.url), 'utf8');
+  const ordinary = '/v1/organizations/{organization_id}/members/{user_id}/units';
+  const admin = '/admin/v1/organizations/{organization_id}/members/{user_id}/units';
+  for (const mutate of [
+    value => { delete value.paths[admin].put['x-approval-policy']; },
+    value => { value.paths[admin].put['x-approval-policy'] = { command: 'ACCOUNT_MEMBER_ADD', mode: 'AuditOnly' }; },
+    value => { value.paths[admin].put['x-approval-policy'] = { command: 'ACCOUNT_MEMBER_UNITS_REPLACE', mode: 'ApprovalRequired' }; },
+    value => { value.paths[ordinary].put['x-approval-policy'] = { command: 'ACCOUNT_MEMBER_UNITS_REPLACE', mode: 'AuditOnly' }; },
+    value => { value.paths[admin].put['x-go-handler'] = 'replaceMemberUnits'; },
+    value => { value.paths[admin].put['x-permission'] = 'org.members.manage'; },
+    value => { value.paths[ordinary].put.security = []; },
+    value => { value.paths[ordinary].post = value.paths[ordinary].put; delete value.paths[ordinary].put; },
+    value => { value.paths[admin].put.requestBody.content['application/json'].schema = { $ref: '#/components/schemas/Missing' }; },
+  ]) {
+    const memberUnits = structuredClone(doc); mutate(memberUnits);
+    assert.throws(() => checkCoverage({ ...inputs, organizationAccountSource, memberUnits }), /member unit/);
+  }
+});
+
+
+test('member unit source binding rejects drift without treating commented routes as production', () => {
+  const line = inputs.organizationAccountSource.split(/\r?\n/).find(value => value.includes('admin.PUT("/organizations/:organization_id/members/:user_id/units"'));
+  assert.ok(line);
+  for (const replacement of [line.replace('ACCOUNT_MEMBER_UNITS_REPLACE', 'ACCOUNT_MEMBER_ADD'), line.replace('approvalpolicy.AuditOnly', 'approvalpolicy.ApprovalRequired'), line.replace('PermissionPlatformOrganizationsMembersManage', 'PermissionPlatformOrganizationsRead'), line.replace('adminReplaceMemberUnits', 'adminReplaceMemberRoles')]) {
+    assert.throws(() => checkCoverage({ ...inputs, organizationAccountSource: inputs.organizationAccountSource.replace(line, replacement) }), /member unit/);
+  }
+  assert.doesNotThrow(() => checkCoverage({ ...inputs, organizationAccountSource: inputs.organizationAccountSource + '\n// ' + line.trim() + '\n' }));
+});

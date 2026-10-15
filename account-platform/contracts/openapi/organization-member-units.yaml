@@ -206,6 +206,10 @@
         "x-service": "account",
         "x-go-handler": "adminReplaceMemberUnits",
         "x-permission": "platform.organizations.members.manage",
+        "x-approval-policy": {
+          "command": "ACCOUNT_MEMBER_UNITS_REPLACE",
+          "mode": "AuditOnly"
+        },
         "security": [
           {
             "UserBearer": []

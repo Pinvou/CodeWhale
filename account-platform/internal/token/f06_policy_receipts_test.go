@@ -200,6 +200,11 @@ func (r *f06UnconfirmedCancelRepository) RequestCancellation(_ context.Context, 
 	if id != r.usage.ID || user != r.usage.UserID || key != digestString([]byte("f06-cancel-original-key")) || fingerprint != cancellationFingerprint(id) || adapter != "openai-compatible-v1" {
 		panic("cancel original identity/key changed")
 	}
+	// Match the production persisted-owner guard: a personal cancel permission
+	// does not authorize an organization request, even for the same user.
+	if r.usage.OrganizationID != nil {
+		return CancellationResult{}, false, ErrNotFound
+	}
 	r.requested++
 	return cancellationSnapshot(r.usage), true, nil
 }
@@ -244,7 +249,7 @@ func (*f06UnconfirmedCancelBilling) Release(context.Context, uuid.UUID, uuid.UUI
 	panic("possible earlier hold was blindly released")
 }
 
-func TestF06InstalledCancellationMemberConflictRemainsUnconfirmed(t *testing.T) {
+func TestF06InstalledPersonalCancellationRejectsOrganizationUsage(t *testing.T) {
 	user, org, usage := uuid.New(), uuid.New(), uuid.New()
 	version := int64(3)
 	snapshot, _ := json.Marshal(frozenUsageSnapshot{ContextType: "ORGANIZATION", OrganizationID: &org, OrganizationMembershipVersion: &version})
@@ -263,7 +268,23 @@ func TestF06InstalledCancellationMemberConflictRemainsUnconfirmed(t *testing.T) 
 	req.Header.Set("Idempotency-Key", "f06-cancel-original-key")
 	out := httptest.NewRecorder()
 	s.Handler(successfulBillingVerify).ServeHTTP(out, req)
-	if out.Code != http.StatusAccepted || out.Header().Get("Location") != "/v1/usage-requests/"+usage.String() || out.Header().Get("Cache-Control") != "no-store" || !strings.Contains(out.Body.String(), "UNCERTAINTY") || repo.requested != 1 || repo.reviewed != 1 || billing.reserved != 1 || repo.usage.HoldID != nil {
-		t.Fatalf("cancel recovery changed known pending identity/funds: HTTP=%d body=%s", out.Code, out.Body)
+	if out.Code != http.StatusNotFound || out.Header().Get("Cache-Control") != "no-store" || repo.requested != 0 || repo.reviewed != 0 || billing.reserved != 0 || repo.usage.HoldID != nil {
+		t.Fatalf("personal handler crossed persisted organization scope: HTTP=%d body=%s", out.Code, out.Body)
+	}
+}
+
+// Internal recovery operates on an already authorized cancellation. This does
+// not make the personal HTTP cancel endpoint available to organization requests.
+func TestF06SharedCancellationMemberConflictRemainsUnconfirmed(t *testing.T) {
+	user, org, usage := uuid.New(), uuid.New(), uuid.New()
+	version := int64(3)
+	snapshot, _ := json.Marshal(frozenUsageSnapshot{ContextType: "ORGANIZATION", OrganizationID: &org, OrganizationMembershipVersion: &version})
+	repo := &f06UnconfirmedCancelRepository{usage: UsageRequest{ID: usage, UserID: user, OrganizationID: &org, WalletID: uuid.New(), Model: "controlled", MaximumMicrocredits: 10, CanonicalVersion: 1, ExecutionStatus: "HOLD_RESERVING", CancelStatus: "CANCEL_REQUESTED", RequestSnapshot: snapshot}}
+	billing := &f06UnconfirmedCancelBilling{}
+	s := &Service{repository: repo, cancellationStore: repo, cancellationBilling: billing, billing: billing}
+	result, err := s.finishPreDispatchCancellation(context.Background(), usage)
+	var failure *BillingHTTPError
+	if !errors.As(err, &failure) || failure.Code != "MEMBER_LIFECYCLE_CONFLICT" || result.UsageRequestID != usage || result.CancelStatus != "UNCERTAINTY" || result.ExecutionStatus != "RECONCILIATION_PENDING" || repo.requested != 0 || repo.reviewed != 1 || billing.reserved != 1 || repo.usage.HoldID != nil || repo.usage.OrganizationID == nil || *repo.usage.OrganizationID != org || repo.usage.MaximumMicrocredits != 10 || string(repo.usage.RequestSnapshot) != string(snapshot) {
+		t.Fatalf("shared recovery changed pending identity or inferred released funds: result=%+v error=%v", result, err)
 	}
 }

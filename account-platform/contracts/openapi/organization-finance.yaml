@@ -782,8 +782,7 @@
             "type": "string",
             "enum": [
               "BASE",
-              "BONUS",
-              "PLAN"
+              "BONUS"
             ]
           },
           "amount_microcredits": {
