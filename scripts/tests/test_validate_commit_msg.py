@@ -175,10 +175,14 @@ class ValidateCommitRangeTests(unittest.TestCase):
                 validate_commit_msg.validate_range("missing-base", "head"), []
             )
 
+        # `head^!` selects head and excludes its parents: a bare `head` would
+        # walk every reachable ancestor and mis-flag old nonconforming
+        # commits the legacy cutoff would have grandfathered (the round-5
+        # review regression for the shallow-clone fallback).
         git_mock.assert_called_once_with(
             "log",
             "--format=%H%x00%P%x00%an%x00%ae%x00%B%x1e",
-            "head",
+            "head^!",
         )
 
     def test_missing_base_with_present_cutoff_still_excludes_cutoff(self) -> None:
@@ -205,7 +209,7 @@ class ValidateCommitRangeTests(unittest.TestCase):
         git_mock.assert_called_once_with(
             "log",
             "--format=%H%x00%P%x00%an%x00%ae%x00%B%x1e",
-            "head",
+            "head^!",
             "--not",
             validate_commit_msg.LEGACY_HISTORY_CUTOFF,
         )

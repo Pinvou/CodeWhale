@@ -9,8 +9,13 @@ because the inflation and the deflation cancel. Against
 
   1. every test path is registered at most once (duplicate = inflated run);
   2. every consent-critical pin in REQUIRED_PINS is present exactly once
-     (absent = a stolen attribute silenced the pin). Extend REQUIRED_PINS
-     when a new consent/rollback-critical pin lands.
+     (absent = a stolen attribute silenced the pin). Pins are FULL libtest
+     paths: matching only the function's last segment would let a same-named
+     test planted in a different module satisfy a pin whose real test lost
+     its attribute there (the substitution hole). The cost is that moving a
+     pinned test to another module turns the guard red — loud and
+     one-line-to-fix, which is the direction a pin should fail. Extend
+     REQUIRED_PINS when a new consent/rollback-critical pin lands.
 
 Platform caveat (review #455 round-30 m10): two REQUIRED_PINS are
 `#[cfg(unix)]`-gated (they need an unreadable-file fixture), so a local run
@@ -34,38 +39,44 @@ import sys
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MANIFEST = os.path.join(REPO_ROOT, "pinvou3-app", "src-tauri", "Cargo.toml")
 
-# Consent/rollback-critical regression pins. A missing entry here means the
-# pin's `#[test]` attribute was lost to an edit — the exact failure this
-# guard exists for (PR #455 rounds 26 and 28).
+# Consent/rollback-critical regression pins, as FULL libtest paths (what
+# `cargo test --lib -- --list` prints). A missing entry here means the pin's
+# `#[test]` attribute was lost to an edit — the exact failure this guard
+# exists for (PR #455 rounds 26 and 28). Full paths close the substitution
+# hole: a same-named test in another module cannot satisfy a pin. Moving a
+# pinned test to another module fails loud with the new location; update the
+# path in that (rare, deliberate) case.
 REQUIRED_PINS = [
     # commands/tests.rs: the install-path consent rollback pair (round-33
     # minor 6, review #455) — exactly the consent/rollback class this guard
     # exists to protect from attribute theft.
-    "install_validation_failure_rollback_leaves_no_consent_rows",
-    "install_consent_sync_persist_failure_is_honest_and_keeps_pack",
+    "app::commands::tests::install_validation_failure_rollback_leaves_no_consent_rows",
+    "app::commands::tests::install_consent_sync_persist_failure_is_honest_and_keeps_pack",
     # scope.rs: exact-cleanup hijack pin (round-26 MAJOR 1) and the
     # state_changed hot-refresh gate pin (round-28 MINOR 3) — the pair whose
     # attributes were swapped by the round-28 insertion.
-    "exact_cleanup_never_reowns_absent_dir_id_onto_foreign_claim",
-    "enable_packages_state_changed_tracks_persisted_delta",
-    # mod.rs: secrets resync keeps the previous registry on unreadable state,
-    # and (round-30 MAJOR) a faulting mid-rebuild keyring read discards the
-    # partial rebuild wholesale instead of leaving a half-rebuilt registry.
-    "secret_values_resync_unreadable_registry_keeps_previous",
-    "secret_values_resync_keyring_fault_keeps_previous_registry",
+    "features::marketplace::scope::tests::exact_cleanup_never_reowns_absent_dir_id_onto_foreign_claim",
+    "features::marketplace::scope::tests::enable_packages_state_changed_tracks_persisted_delta",
+    # marketplace/mod.rs: secrets resync keeps the previous registry on
+    # unreadable state, and (round-30 MAJOR) a faulting mid-rebuild keyring
+    # read discards the partial rebuild wholesale instead of leaving a
+    # half-rebuilt registry.
+    "features::marketplace::tests::secret_values_resync_unreadable_registry_keeps_previous",
+    "features::marketplace::tests::secret_values_resync_keyring_fault_keeps_previous_registry",
     # plugin_import.rs: rebaseline keeps the restore point through a supply
     # failure rollback.
-    "unified_import_keeps_backup_through_supply_failure_rollback",
+    "features::marketplace::plugin_import::tests::unified_import_keeps_backup_through_supply_failure_rollback",
     # recycle_bin.rs: consent-gate collision pin, secrets-restore pin, and
     # the supply-failure rollback pin.
-    "restore_consent_gate_never_reowns_collided_pack_id",
-    "restore_secrets_pack_into_uninitialized_scope_persists_consent",
-    "restore_mcp_supply_failure_rolls_back_to_recycle_bin",
-    # mod.rs (round-34): a legacy scope file that exists but cannot be
-    # consumed must fail closed over the DenyAll fallback, never migrate as
-    # "nothing was disabled" while the wide signal initializes plain fully-on.
-    "corrupt_legacy_file_fails_closed_not_implicitly_all_on",
-    "schema_invalid_legacy_file_fails_closed",
+    "features::marketplace::recycle_bin::tests::restore_consent_gate_never_reowns_collided_pack_id",
+    "features::marketplace::recycle_bin::tests::restore_secrets_pack_into_uninitialized_scope_persists_consent",
+    "features::marketplace::recycle_bin::tests::restore_mcp_supply_failure_rolls_back_to_recycle_bin",
+    # marketplace/mod.rs (round-34): a legacy scope file that exists but
+    # cannot be consumed must fail closed over the DenyAll fallback, never
+    # migrate as "nothing was disabled" while the wide signal initializes
+    # plain fully-on.
+    "features::marketplace::tests::corrupt_legacy_file_fails_closed_not_implicitly_all_on",
+    "features::marketplace::tests::schema_invalid_legacy_file_fails_closed",
 ]
 
 
@@ -92,7 +103,7 @@ def list_tests():
         "terse",
     ]
     env = dict(os.environ, CARGO_TERM_COLOR="never")
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if result.returncode != 0:
         sys.stderr.write(result.stderr)
         raise SystemExit("test-registry-guard: cargo test --list failed")
@@ -159,23 +170,35 @@ def main():
             + "\n".join(f"  {p} x{counts[p]}" for p in duplicates)
         )
 
-    # Pin matching (round-35 minor 10, review #455): pins match on the test
-    # path's last segment — more than one registry hit for a pin name is an
-    # immediate failure, so a collision is loud. Known limitation (documented
-    # rather than pretended away): a same-named test planted in a *different*
-    # module could satisfy a pin whose real test lost its attribute in that
-    # other module; policing that would require full-path pins, a follow-up.
-    # A source-level scan flags pins silenced by #[ignore] (stable libtest
-    # --list cannot flag ignored tests).
+    # Pin matching: FULL libtest path equality (see REQUIRED_PINS). A missing
+    # pin whose last segment still appears exactly once in the registry gets
+    # its own message — that shape is a module move, not a stolen attribute,
+    # and naming the new location makes the fix a one-liner. A pin silenced
+    # by #[ignore] (stable libtest --list cannot flag ignored tests) is
+    # caught by the source-level scan below.
     ignored_src = ignored_source_pins()
+    by_segment = collections.defaultdict(list)
+    for p in paths:
+        by_segment[p.rsplit("::", 1)[-1]].append(p)
     for pin in REQUIRED_PINS:
-        matches = [p for p in paths if p.rsplit("::", 1)[-1] == pin]
-        if not matches:
+        if pin in counts and counts[pin] == 1:
+            segment = pin.rsplit("::", 1)[-1]
+            if segment in ignored_src:
+                failures.append(f"required pin {pin} is #[ignore]d at {ignored_src[segment]}")
+            continue
+        if pin in counts:
+            failures.append(f"required pin registered more than once: {pin} x{counts[pin]}")
+            continue
+        segment = pin.rsplit("::", 1)[-1]
+        relocated = by_segment.get(segment, [])
+        if relocated:
+            failures.append(
+                f"required pin {pin} not in the registry, but the function name "
+                f"appears at {relocated} — the test moved modules; update "
+                f"REQUIRED_PINS (or restore it there)"
+            )
+        else:
             failures.append(f"required pin absent from the registry (stolen #[test] attribute?): {pin}")
-        elif len(matches) > 1:
-            failures.append(f"required pin registered more than once: {matches}")
-        elif pin in ignored_src:
-            failures.append(f"required pin {pin} is #[ignore]d at {ignored_src[pin]}")
 
     if failures:
         print("test-registry-guard: FAILED", file=sys.stderr)

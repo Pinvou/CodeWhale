@@ -17,6 +17,12 @@ Two failure classes are pinned here:
    them every Linux environment installs BOTH the glibc and the musl
    native binaries. The count is pinned so the strip turns red here
    instead of being discovered as install-bloat later.
+
+Coverage note: the CI fast-gate checks out with `submodules: false` and runs
+this guard BEFORE the CodeWhale submodule init, so it sees the repo's own
+locks only (5 today); a locally initialized tree scans the submodule's locks
+too (12). The npm ci consumers this guard protects are both repo-owned, so
+the CI coverage is the one that matters.
 """
 
 import json
@@ -66,8 +72,10 @@ def main():
         if rel == os.path.join("team-relay-hub", "package-lock.json"):
             hub_libc_count = sum(
                 1
-                for entry in lock.get("packages", {}).values()
-                if isinstance(entry, dict) and "libc" in entry
+                for pkg, entry in lock.get("packages", {}).items()
+                # lock v3 keys are "node_modules/@img/<pkg>"; match the scope
+                # anywhere so bare "@img/<pkg>" keys keep working too.
+                if isinstance(entry, dict) and "@img/" in pkg and "libc" in entry
             )
     if hub_libc_count is None:
         failures.append(
@@ -77,9 +85,11 @@ def main():
         failures.append(
             f"team-relay-hub/package-lock.json: expected "
             f"{EXPECTED_TEAM_RELAY_HUB_LIBC_ENTRIES} @img/* libc fields, found "
-            f"{hub_libc_count} — a lock rewrite on npm 10 (arborist does not "
-            f"serialize libc there) strips them; regenerate with npm 11+ or "
-            f"restore the fields"
+            f"{hub_libc_count} — fewer means a lock rewrite on npm 10 "
+            f"(arborist does not serialize libc there) stripped them: "
+            f"regenerate with npm 11+ or restore the fields; MORE means the "
+            f"@img platform package set legitimately changed: update "
+            f"EXPECTED_TEAM_RELAY_HUB_LIBC_ENTRIES"
         )
     if failures:
         print("check-lock-registry: FAILED", file=sys.stderr)
@@ -88,7 +98,7 @@ def main():
         return 1
     print(
         f"check-lock-registry: ok — {len(lock_files)} lockfiles mirror-free, "
-        f"team-relay-hub libc fields intact ({hub_libc_count})"
+        f"team-relay-hub @img/* libc fields intact ({hub_libc_count})"
     )
     return 0
 

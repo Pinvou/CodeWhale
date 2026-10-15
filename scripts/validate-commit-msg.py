@@ -192,9 +192,13 @@ def validate_range(
     require_matching_signoff: bool = True,
 ) -> list[str]:
     # Shallow clones may not have the base or the legacy cutoff object; fall
-    # back to validating `head` alone and skip the cutoff exclusion rather
-    # than letting `git log` fail on a missing revision.
-    revision = f"{base}..{head}" if git_commit_exists(base) else head
+    # back to the `head^!` revision (head with all parents excluded — exactly
+    # the one commit) and skip the cutoff exclusion rather than letting
+    # `git log` fail on a missing revision. A bare `head` would walk every
+    # reachable ancestor and mis-flag old nonconforming commits that the
+    # cutoff would have grandfathered. `^!` also works on a parentless root
+    # commit (verified: selects the root alone).
+    revision = f"{base}..{head}" if git_commit_exists(base) else f"{head}^!"
     log_args = [
         "log",
         "--format=%H%x00%P%x00%an%x00%ae%x00%B%x1e",

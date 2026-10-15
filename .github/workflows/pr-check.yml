@@ -280,8 +280,9 @@ jobs:
               # Round-1518 review: this guard script is executed by the
               # rust-test leg, so a change confined to it must run that leg —
               # without this entry the guard is never exercised on the
-              # PR/MQ/main-push paths (same class as
-              # scripts/ci-libpipewire-build.sh below).
+              # PR/MQ paths (same class as scripts/ci-libpipewire-build.sh
+              # below; the push leg is compile-only and never runs the guard
+              # regardless of path filters).
               - 'scripts/test-registry-guard.py'
               - 'pinvou3-app/src-tauri/**/*.rs'
               # diagnostics.rs 在生产校验中 include_str! v1 schema，
@@ -827,10 +828,12 @@ jobs:
         run: python3 scripts/check-doc-anchors.py
 
       - name: 锁文件 registry 卫生门禁
-        # resolved 必须指向官方 registry:npmmirror 镜像慢且是跨境单点,CI 的
-        # npm ci 逐字消费 lock 的 resolved URL(#1518 清理前两把在用锁残留 134
-        # 处)。同时钉住 team-relay-hub 锁的 16 条 @img/* libc 字段:npm 10 的
-        # arborist 不序列化 libc,node22 本地一次 npm install 会静默剥掉。
+        # resolved 禁止 npmmirror 镜像:镜像慢且是跨境单点,CI 的 npm ci 逐字
+        # 消费 lock 的 resolved URL(#1518 清理前两把在用锁残留 134 处)。同时
+        # 钉住 team-relay-hub 锁的 16 条 @img/* libc 字段:npm 10 的 arborist
+        # 不序列化 libc,node22 本地一次 npm install 会静默剥掉。
+        # 注:本 step 在 submodule 检出之前执行,只覆盖本仓自有锁(5 把);
+        # CodeWhale 子模块的锁由公开底座自身治理,本地全树运行时可全量扫描。
         run: python3 scripts/check-lock-registry.py
 
       - name: 公开底座 gitlink 可达性
@@ -1405,8 +1408,9 @@ jobs:
     # 29m03s/34m53s 两个离群也未触上限,不受影响。
     # 冷跑全流程(fmt+两遍 clippy+doc+check+shear)实测需 35-50m,60m 留出余量;
     # 缓存命中时(如 community-603 19m35s / community-602 25m36s)不受影响。
-    # 本 PR(#1518)新增的 zram(最坏 240s+15s kill)与磁盘清理(约 1-3m)step
-    # 计入预算:最坏叠加约 57m,余量约 3m;再往本 job 加重活需同步上调。
+    # 本 PR(#1518)新增的 zram(最坏 240s+15s kill)与磁盘清理(约 1-3m,
+    # draft 门控不跑)step 计入预算:最坏叠加约 57m,余量约 3m;再往本 job
+    # 加重活需同步上调。
     timeout-minutes: 60
     env:
       # Draft 跑无系统依赖的 fmt 和有界 controller 回归；Ready PR、Queue 与 main 跑 clippy。
@@ -1421,17 +1425,20 @@ jobs:
         with:
           submodules: false
 
-      - name: Set up zram and swap
-        # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
-
-      # benchmark-hooks all-targets 编译会显著放大 target 目录;与 cli-test
-      # 同款磁盘清理,避免 clippy/check 阶段 No space left on device。
+      # benchmark-hooks all-targets 编译会显著放大 target 目录;与 rust-test /
+      # cli-test 同款磁盘清理(同样先清盘再扩 swap:swap 落盘会先吃掉 8-16GiB
+      # 磁盘),避免 clippy/check 阶段 No space left on device。Draft 只跑 fmt
+      # 快检,不产生编译放大,跳过本 step 省下每次 draft push 约 1-3 分钟。
       - name: Prepare Rust disk capacity
+        if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' }}
         run: |
           sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
             python3 scripts/ci-rust-disk.py
+
+      - name: Set up zram and swap
+        # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - name: 初始化公共底座 submodule
         run: git submodule update --init --recursive -- CodeWhale
@@ -1895,8 +1902,12 @@ jobs:
       # swallows the adjacent case's attributes (happened twice on upstream PR
       # #455, rounds 26/28), and raw run totals cannot catch the pair because
       # the inflation and the deflation cancel. Reuses the previous step's
-      # build artifacts (same manifest/feature set, done in seconds): assert
-      # no duplicated registration paths + every consent-critical pin present.
+      # build artifacts (same manifest/feature set), so it skips the
+      # ~7-minute compile — but loading and listing the huge lib test binary
+      # still dominates the step at ~4 minutes on the hosted runner
+      # (observed 2026-10-14, job 115954987270); still far cheaper than any
+      # rebuild. Asserts no duplicated registration paths + every
+      # consent-critical pin present (full libtest paths).
       - name: test-registry guard (duplicates + required pins)
         if: ${{ github.event_name != 'push' }}
         run: python3 scripts/test-registry-guard.py

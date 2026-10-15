@@ -4,6 +4,14 @@
 # windows-codex-runtime-test job. Production staging validation still lives
 # in resolve-runtime.ps1's own checks; wiring this contract into that flow
 # is the upstream-parity follow-up.
+#
+# Coverage note vs the upstream suite: upstream also asserts
+# Write-Utf8Atomically (atomic write / FILE_SHARE_DELETE / litter cleanup)
+# by dot-sourcing resolve-runtime.ps1 -ImportFunctionsOnly. This fork's
+# resolve-runtime.ps1 has not been parity-ported yet (it still runs its
+# top-level lock validation when dot-sourced), so those assertions are
+# deferred to the same parity follow-up; the fork's Write-Utf8Atomically is
+# byte-identical to upstream's and currently has no local coverage.
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "runtime-manifest-contract.ps1")

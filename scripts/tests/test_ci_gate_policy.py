@@ -1552,6 +1552,46 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertNotIn("|| true", step)
         self.assertNotIn("continue-on-error", step)
 
+    def test_rust_test_registry_guard_step_is_pinned(self):
+        # PR #1518 round-5 review: the test-registry guard step runs inside
+        # the rust-test leg, but unlike its fast-gate sibling above nothing
+        # pinned its existence — deleting or neutralizing the step would keep
+        # every test here green. Pin name + command + the push exclusion (the
+        # push leg is compile-only warm-cache and must not run the guard).
+        rust_test = _extract_job_block(self.pr_workflow, "rust-test")
+        step = rust_test.split(
+            "- name: test-registry guard (duplicates + required pins)", maxsplit=1
+        )[1].split("\n      - name:", maxsplit=1)[0]
+        self.assertIn("python3 scripts/test-registry-guard.py", step)
+        self.assertNotIn("|| true", step)
+        self.assertNotIn("continue-on-error", step)
+        self.assertIn("if: ${{ github.event_name != 'push' }}", step)
+
+    def test_rust_lint_disk_step_is_draft_gated_and_precedes_zram(self):
+        # PR #1518 round-5 review: the rust-lint disk cleanup is only needed
+        # for the heavy (non-draft) compile, so it must stay draft-gated —
+        # drafts run fmt-only and would otherwise pay ~1-3 minutes per push —
+        # and must keep the sibling jobs' disk-before-zram order (swap
+        # allocation consumes 8-16 GiB disk before the cleanup runs).
+        rust_lint = _extract_job_block(self.pr_workflow, "rust-lint")
+        self.assertIn("- name: Prepare Rust disk capacity", rust_lint)
+        self.assertIn("- name: Set up zram and swap", rust_lint)
+        self.assertLess(
+            rust_lint.find("- name: Prepare Rust disk capacity"),
+            rust_lint.find("- name: Set up zram and swap"),
+            "rust-lint must clean disk before allocating swap (sibling-job order)",
+        )
+        disk_step = rust_lint.split(
+            "- name: Prepare Rust disk capacity", maxsplit=1
+        )[1].split("\n      - name:", maxsplit=1)[0]
+        self.assertIn(
+            "if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' }}",
+            disk_step,
+            "rust-lint disk cleanup must stay draft-gated (RUN_HEAVY_RUST_CHECKS)",
+        )
+        self.assertIn("python3 scripts/ci-rust-disk.py", disk_step)
+        self.assertNotIn("|| true", disk_step)
+
     def test_fast_gate_runner_line_is_pinned(self):
         # Round-47 review: this one line is the ONLY place the gate-policy
         # suite itself executes in CI. Deleting it (or narrowing the `-p`
