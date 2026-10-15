@@ -3758,6 +3758,183 @@ fn without_named_custom_route(mut config: Config) -> Config {
     config
 }
 
+fn declared_local_model_limits() -> codewhale_config::route::RouteLimits {
+    codewhale_config::route::RouteLimits {
+        context_tokens: Some(1_048_576),
+        input_tokens: None,
+        output_tokens: Some(384_000),
+    }
+}
+
+fn engine_with_declared_local_model_limits(
+    active_route_limits: Option<codewhale_config::route::RouteLimits>,
+) -> Engine {
+    let config = goal_custom_route_config();
+    let engine_config = EngineConfig {
+        model: "local-model".to_string(),
+        snapshots_enabled: false,
+        terminal_chrome_enabled: false,
+        active_route_limits,
+        ..EngineConfig::default()
+    };
+    let (engine, _handle) = Engine::new(engine_config, &config);
+    engine
+}
+
+#[test]
+fn current_runtime_route_carries_installed_host_limits() {
+    // A host that declared the route budget (e.g. an uncatalogued cloud model
+    // whose true output cap the catalog does not know) installs it alongside
+    // the model. Engine-self-started turns re-derive the route through
+    // `current_runtime_route`; the re-derivation must re-state the declared
+    // budget instead of silently falling back to catalog guesses.
+    let engine = engine_with_declared_local_model_limits(Some(declared_local_model_limits()));
+
+    // Premise: without the declaration the fresh resolution cannot know the
+    // declared facts, so the carry below is load-bearing.
+    let control = engine_with_declared_local_model_limits(None);
+    let fresh = control
+        .current_runtime_route()
+        .expect("fresh route resolves");
+    assert_ne!(
+        fresh.candidate.limits(),
+        declared_local_model_limits(),
+        "fixture must prove the catalog-only pass disagrees with the declaration"
+    );
+
+    let route = engine
+        .current_runtime_route()
+        .expect("re-derived route resolves");
+    assert_eq!(route.model, "local-model");
+    assert_eq!(
+        route.candidate.limits(),
+        declared_local_model_limits(),
+        "re-derivation must keep the host-declared budget"
+    );
+    assert!(
+        route
+            .candidate
+            .applied_limit_overrides()
+            .iter()
+            .any(|item| item.source == codewhale_config::route::OverrideSource::EmbeddingHost),
+        "the carried budget must be re-stated as host declarations, got {:?}",
+        route.candidate.applied_limit_overrides()
+    );
+}
+
+fn engine_with_deepseek_flash_limits(
+    model: &str,
+    active_route_limits: Option<codewhale_config::route::RouteLimits>,
+) -> Engine {
+    let config = Config {
+        provider: Some("deepseek".to_string()),
+        ..Config::default()
+    };
+    let engine_config = EngineConfig {
+        model: model.to_string(),
+        snapshots_enabled: false,
+        terminal_chrome_enabled: false,
+        active_route_limits,
+        ..EngineConfig::default()
+    };
+    let (engine, _handle) = Engine::new(engine_config, &config);
+    engine
+}
+
+#[test]
+fn current_runtime_route_leaves_matching_limits_unstamped() {
+    // When the fresh catalog resolution already agrees with the installed
+    // limits, re-stating them would only relabel catalog values as host
+    // overrides. The re-derivation must return the untouched candidate.
+    let catalog_limits = codewhale_config::route::RouteLimits {
+        context_tokens: Some(1_000_000),
+        input_tokens: None,
+        output_tokens: Some(384_000),
+    };
+    let engine = engine_with_deepseek_flash_limits("deepseek-v4-flash", Some(catalog_limits));
+
+    let route = engine
+        .current_runtime_route()
+        .expect("re-derived route resolves");
+    assert_eq!(route.candidate.limits(), catalog_limits);
+    assert!(
+        route
+            .candidate
+            .applied_limit_overrides()
+            .iter()
+            .all(|item| item.source != codewhale_config::route::OverrideSource::EmbeddingHost),
+        "an agreeing candidate must not be re-stamped as host-declared, got {:?}",
+        route.candidate.applied_limit_overrides()
+    );
+}
+
+#[test]
+fn current_runtime_route_does_not_carry_limits_across_wire_drift() {
+    // A case-distinct saved selector (marketing-cased ids are common in
+    // persisted sessions) resolves onto the catalog's canonical wire id, so
+    // the re-derivation lands on a different wire model than the engine's
+    // session model. A budget declared for the saved spelling must not ride
+    // that resolution onto the canonical row: it resolves its own catalog
+    // envelope instead.
+    let declared = codewhale_config::route::RouteLimits {
+        context_tokens: Some(2_000_000),
+        input_tokens: None,
+        output_tokens: Some(200_000),
+    };
+    let engine = engine_with_deepseek_flash_limits("DeepSeek-V4-Flash", Some(declared));
+
+    let route = engine
+        .current_runtime_route()
+        .expect("re-derived route resolves");
+    assert_eq!(
+        route.model, "deepseek-v4-flash",
+        "fixture must prove the resolution drifts off the saved spelling"
+    );
+    assert_ne!(
+        route.candidate.limits(),
+        declared,
+        "the drifted wire model must resolve its own catalog envelope"
+    );
+    assert!(
+        route
+            .candidate
+            .applied_limit_overrides()
+            .iter()
+            .all(|item| item.source != codewhale_config::route::OverrideSource::EmbeddingHost),
+        "the drifted re-derivation must stay catalog-only, got {:?}",
+        route.candidate.applied_limit_overrides()
+    );
+}
+
+#[test]
+fn current_runtime_route_does_not_carry_limits_across_model_drift() {
+    // `Op::SyncSession` swaps `session.model` without touching route state.
+    // A budget declared for the previous conversation's model must not ride
+    // the re-derivation onto the restored one: it resolves its own catalog
+    // envelope instead.
+    let mut engine = engine_with_declared_local_model_limits(Some(declared_local_model_limits()));
+    engine.session.model = "restored-other-model".to_string();
+
+    let route = engine
+        .current_runtime_route()
+        .expect("re-derived route resolves");
+    assert_eq!(route.model, "restored-other-model");
+    assert_ne!(
+        route.candidate.limits(),
+        declared_local_model_limits(),
+        "another model's declared budget must not be carried across the swap"
+    );
+    assert!(
+        route
+            .candidate
+            .applied_limit_overrides()
+            .iter()
+            .all(|item| item.source != codewhale_config::route::OverrideSource::EmbeddingHost),
+        "the drifted re-derivation must stay catalog-only, got {:?}",
+        route.candidate.applied_limit_overrides()
+    );
+}
+
 #[tokio::test]
 async fn exhausted_goal_reaches_route_failure_without_budget_pause() {
     let config = goal_custom_route_config();
@@ -16111,7 +16288,7 @@ async fn set_model_reloads_instruction_sources_and_updates_session_prompt() {
     fs::write(&instructions, "FLASH_INSTRUCTIONS_MARKER").expect("write instructions");
     let config = EngineConfig {
         workspace: tmp.path().to_path_buf(),
-        model: "deepseek-v4-flash".to_string(),
+        model: "DeepSeek-V4-Flash".to_string(),
         instructions: vec![instructions.clone().into()],
         ..Default::default()
     };
@@ -19703,7 +19880,7 @@ fn turn_metadata_git_snapshot_emitted_only_on_change() {
 fn turn_metadata_includes_current_local_date_without_working_set() {
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
-        model: "deepseek-v4-flash".to_string(),
+        model: "DeepSeek-V4-Flash".to_string(),
         workspace: tmp.path().to_path_buf(),
         ..Default::default()
     };
@@ -19754,7 +19931,7 @@ fn turn_metadata_includes_current_local_date_without_working_set() {
 fn turn_metadata_surfaces_goal_budget_only_while_goal_active() {
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
-        model: "deepseek-v4-flash".to_string(),
+        model: "DeepSeek-V4-Flash".to_string(),
         workspace: tmp.path().to_path_buf(),
         ..Default::default()
     };
@@ -19807,7 +19984,7 @@ fn turn_metadata_surfaces_goal_budget_only_while_goal_active() {
     // Without an active goal the budget line must vanish entirely.
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
-        model: "deepseek-v4-flash".to_string(),
+        model: "DeepSeek-V4-Flash".to_string(),
         workspace: tmp.path().to_path_buf(),
         ..Default::default()
     };
@@ -19915,7 +20092,7 @@ fn turn_metadata_is_byte_identical_across_identical_consecutive_turns() {
     // block carries only facts that are stable across ordinary turns.
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
-        model: "deepseek-v4-flash".to_string(),
+        model: "DeepSeek-V4-Flash".to_string(),
         workspace: tmp.path().to_path_buf(),
         ..Default::default()
     };
@@ -20004,7 +20181,7 @@ async fn interrupted_turn_names_surviving_background_shell_jobs() {
         ..crate::tools::spec::RuntimeToolServices::default()
     };
     let engine_config = EngineConfig {
-        model: "deepseek-v4-flash".to_string(),
+        model: "DeepSeek-V4-Flash".to_string(),
         workspace: tmp.path().to_path_buf(),
         snapshots_enabled: false,
         terminal_chrome_enabled: false,
@@ -20076,7 +20253,7 @@ const TURN_META_BYTE_CEILING: usize = 333;
 fn turn_meta_block_stays_within_measured_ceiling() {
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
-        model: "deepseek-v4-flash".to_string(),
+        model: "DeepSeek-V4-Flash".to_string(),
         workspace: tmp.path().to_path_buf(),
         ..Default::default()
     };
@@ -20125,7 +20302,7 @@ fn turn_metadata_names_the_effective_sandbox_posture() {
     // approved-then-sandbox-blocked write never reads as a mystery failure.
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
-        model: "deepseek-v4-flash".to_string(),
+        model: "DeepSeek-V4-Flash".to_string(),
         workspace: tmp.path().to_path_buf(),
         ..Default::default()
     };
