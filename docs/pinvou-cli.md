@@ -26,8 +26,8 @@ Engine/ACP, project, persona or artifact commands. The internal kind label is
 Local session commands, code inspection/checkpoints, persona equip state and
 artifact read/write refuse the reserved `remote-` namespace. Windows also refuses
 ASCII case aliases of that prefix, so changing case cannot select the same local
-directory. Other platforms retain differently cased local names; generated local
-session IDs are UUIDs.
+directory. Other platforms retain differently cased local names; ordinary local
+session IDs are generated without the reserved prefix.
 An unavailable proxy keeps its original classification error, rather than
 falling back to a local directory or being reported as an authenticated proxy.
 Ordinary non-remote history, corrupt-record deletion and artifact directories
