@@ -4,6 +4,7 @@ import { EnrollmentMigrationHandler } from "./enrollment-migration-handler.js";
 import { ENROLLMENT_NAMESPACE, loadEnrollmentRegistryConfig,
   enrollmentKeyringFingerprint, enrollmentKeyringUsesKey } from "./enrollment-registry.js";
 import { isEnrollmentEndpointIdentifier } from "./identifier-contract.js";
+import { isExampleHmacKey } from "./hmac-key-config.js";
 
 const REQUEST_SCHEMA = "pinvou-enrollment-coverage-request";
 const RESPONSE_SCHEMA = "pinvou-enrollment-coverage-response";
@@ -47,7 +48,7 @@ export function loadEnrollmentCoverageControlConfig(env = process.env, { require
   const port = Number(portText);
   if (port < 1024 || port > 65535) fail("coverage_control_port_invalid");
   const key = Buffer.from(keyText || "", "utf8");
-  if (key.length < 32 || key.length > 4096
+  if (key.length < 32 || key.length > 4096 || isExampleHmacKey(keyText)
     || keyText === env.PINVOU_REMOTE_ENROLLMENT_HMAC_KEY
     || keyText === env.PINVOU_REMOTE_PAIRING_HMAC_KEY) fail("coverage_control_key_invalid");
   if (env.PINVOU_REMOTE_ENROLLMENT_HMAC_PREVIOUS_KEYS_JSON

@@ -343,6 +343,14 @@ before code lookup, and their bounded source/socket maps fail closed when full.
 Invalid syntax, absent, expired, consumed, revoked, stale-generation and
 rate-limited claims all expose only `pairing_code_invalid`.
 
+Reservation and handshake admission retain their original signed wall-clock
+deadlines and also require unexpired
+process-local monotonic budgets (10 and 20 seconds respectively). Either fence
+expiring rejects admission: wall-clock rollback cannot extend elapsed time,
+and a wall-clock jump forward does not relax authentication expiry. Monotonic
+timing is neither transmitted nor restored across process restarts. Invalidation
+failure retains the original slot and retry evidence without renewing a budget.
+
 When a controller lease terminates, a synchronous slot-release failure does not
 skip its exact lease-revision hook and peer observers. Release and observer
 failures are retained in the bounded aggregate error returned to the caller;

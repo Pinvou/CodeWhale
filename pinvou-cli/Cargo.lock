@@ -6833,7 +6833,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pinvou-cli"
-version = "0.10.9"
+version = "0.10.10"
 dependencies = [
  "adapter-gaia",
  "adapter-smoke",
@@ -6841,13 +6841,23 @@ dependencies = [
  "anyhow",
  "async-trait",
  "benchmark-core",
+ "chrono",
+ "fd-lock",
+ "libc",
  "pinvou-product-backend",
+ "pinvou3-tauri",
+ "reqwest 0.13.4",
  "serde_json",
+ "tokio",
+ "toml 1.1.4+spec-1.1.0",
+ "url",
+ "uuid",
+ "wait-timeout",
 ]
 
 [[package]]
 name = "pinvou-knowledge"
-version = "0.10.9"
+version = "0.10.10"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6882,7 +6892,7 @@ dependencies = [
 
 [[package]]
 name = "pinvou3-tauri"
-version = "0.10.9"
+version = "0.10.10"
 dependencies = [
  "aes",
  "aes-gcm",

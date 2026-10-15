@@ -72,6 +72,10 @@ pub(crate) fn cleanup_retired_embedded_tools() -> std::io::Result<()> {
     };
     let import_lock = super::plugin_import::import_lock_for(tool_id);
     let _import_guard = import_lock.lock().unwrap_or_else(|p| p.into_inner());
+    // Match marketplace writers: landing lease → import mutex → market lock.
+    // Keep the cross-process lock across every destructive retirement step.
+    let _market_write_lock = super::plugin_import::MarketplaceWriteLock::acquire()
+        .map_err(|e| std::io::Error::other(format!("retired-tool cleanup lock: {e}")))?;
     // The pre-lock probe above may have read a no-record store
     // while an import for the same id was mid-landing (it had not
     // committed when the probe ran, and holds this very lock

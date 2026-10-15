@@ -252,9 +252,11 @@ class RustDiskTests(unittest.TestCase):
         return workflow.split("\n  rust-test:", 1)[1].split("\n  cli-test:", 1)[0]
 
     def _assert_disk_preparation_recipe(self, job):
+        pre_swap = "- name: 在 swap 与缓存前准备 Rust 磁盘空间"
         pre = "- name: 缓存恢复前准备 Rust 磁盘空间"
-        post = "- name: 为两轮 Rust 测试准备磁盘空间"
-        self.assertEqual(job.count("python3 scripts/ci-rust-disk.py"), 2)
+        post = "- name: 在缓存后确认两轮 Rust 测试磁盘空间"
+        self.assertEqual(job.count("python3 scripts/ci-rust-disk.py"), 3)
+        self.assertLess(job.index(pre_swap), job.index("Set up zram and swap"))
         self.assertLess(job.index("Set up zram and swap"), job.index(pre))
         self.assertLess(job.index(pre), job.index("- name: 恢复 Rust lint 暖缓存"))
         self.assertLess(job.index(pre), job.index("- name: Cargo test cache"))
@@ -268,12 +270,31 @@ class RustDiskTests(unittest.TestCase):
             '            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \\\n'
             '            python3 scripts/ci-rust-disk.py'
         )
-        for marker in (pre, post):
+        for marker in (pre_swap, pre, post):
             step = job.split(marker, 1)[1].split("\n      - name:", 1)[0]
             body = "\n".join(line for line in step.splitlines() if not line.lstrip().startswith("#"))
             # Exact unconditional recipe: no aggressive SDK removal, reduced
             # threshold, skipped gate or swallowed failure after tools install.
-            self.assertEqual(body.strip(), expected)
+            suffix = " --min-free-gib 24" if marker == pre_swap else ""
+            self.assertEqual(body.strip(), expected + suffix)
+        self.assertNotIn("continue-on-error", job)
+
+    def test_workflow_prepares_disk_before_swap_and_rechecks_after_caches(self):
+        workflow = (ROOT / ".github/workflows/pr-check.yml").read_text(encoding="utf-8")
+        job = workflow.split("\n  rust-test:", 1)[1].split("\n  cli-test:", 1)[0]
+        preflight = job.index("- name: 在 swap 与缓存前准备 Rust 磁盘空间")
+        swap = job.index("- name: Set up zram and swap")
+        cache = job.index("- name: Cargo test cache")
+        recheck = job.index("- name: 在缓存后确认两轮 Rust 测试磁盘空间")
+
+        self.assertEqual(job.count("python3 scripts/ci-rust-disk.py"), 3)
+        self.assertLess(preflight, swap)
+        self.assertLess(swap, cache)
+        self.assertLess(cache, recheck)
+        self.assertIn("--min-free-gib 24", job[preflight:swap])
+        self.assertLess(recheck, job.index("- name: cargo test --lib --no-run"))
+        self.assertLess(recheck, job.index("- name: cargo test --test behavior_telemetry"))
+        self.assertIn('RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT"', job)
         self.assertNotIn("continue-on-error", job)
 
     def test_workflow_prepares_disk_before_cache_restore_and_rechecks_after_it(self):
@@ -281,7 +302,7 @@ class RustDiskTests(unittest.TestCase):
 
     def test_workflow_rejects_cache_restore_after_post_restore_check(self):
         job = self._rust_test_job()
-        post = "      - name: 为两轮 Rust 测试准备磁盘空间"
+        post = "      - name: 在缓存后确认两轮 Rust 测试磁盘空间"
         for cache in ("恢复 Rust lint 暖缓存", "Cargo test cache"):
             marker = "      - name: " + cache
             start = job.index(marker)
@@ -297,7 +318,7 @@ class RustDiskTests(unittest.TestCase):
     def test_workflow_rejects_missing_or_reordered_disk_preparation(self):
         job = self._rust_test_job()
         pre = "      - name: 缓存恢复前准备 Rust 磁盘空间"
-        post = "      - name: 为两轮 Rust 测试准备磁盘空间"
+        post = "      - name: 在缓存后确认两轮 Rust 测试磁盘空间"
         pre_start = job.index(pre)
         pre_end = job.index("\n      - name:", pre_start + len(pre))
         post_start = job.index(post)

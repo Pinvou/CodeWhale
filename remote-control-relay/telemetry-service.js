@@ -1137,7 +1137,11 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
       );
     }
   }
-  const latestReceivedAt = Math.max(0, ...behaviorEvents.map(event => Number(event.received_at || event.occurred_at) || 0));
+  // Event capacity can exceed the engine's function argument limit.
+  const latestReceivedAt = behaviorEvents.reduce(
+    (latest, event) => Math.max(latest, Number(event.received_at || event.occurred_at) || 0),
+    0,
+  );
   const activeCollectionPresent = devices.some(device => isBehaviorInstallationDevice(device)
     && device.behavior_collection?.status === "active");
   const dataStatus = behaviorEvents.length === 0
@@ -1734,7 +1738,7 @@ export class TelemetryStore {
     this.globalEventRateBucket = null;
     this.environment = telemetryEnvironment(options.environment);
     this.maxDevices = boundedInteger(options.maxDevices, DEFAULT_MAX_DEVICES, 1, 1_000_000);
-    this.maxEvents = boundedInteger(options.maxEvents, DEFAULT_MAX_EVENTS, 100, 5_000_000);
+    this.maxEvents = boundedInteger(options.maxEvents, DEFAULT_MAX_EVENTS, 100, 10_000_000);
     this.eventCompactionTarget = Math.max(1, Math.floor(this.maxEvents * 0.9));
     this.eventRetentionMs = boundedInteger(
       options.eventRetentionMs,
