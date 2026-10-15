@@ -243,7 +243,10 @@ func extendPersonalHold(ctx context.Context, tx pgx.Tx, hold Hold, additional in
 	if err != nil {
 		return err
 	}
-	if wallet.Status != "ACTIVE" || wallet.AvailableMicrocredits < additional {
+	if wallet.Status != "ACTIVE" {
+		return ErrWalletUnavailable
+	}
+	if wallet.AvailableMicrocredits < additional {
 		return ErrInsufficientBalance
 	}
 	type allocation struct {

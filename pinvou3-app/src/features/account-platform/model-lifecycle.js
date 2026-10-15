@@ -3,8 +3,11 @@ const rejectionCodes = new Set(['MODEL_UNAVAILABLE', 'MODEL_DEPRECATED']);
 export function isModelLifecycleRejection(value) {
   return value?.schema_version === 1
     && rejectionCodes.has(value.code)
-    && value.model_id !== '00000000-0000-0000-0000-000000000000'
-    && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value.model_id || ''));
+    && (value.legacy_binding === true
+      ? value.code === 'MODEL_UNAVAILABLE' && value.model_id === ''
+      : (value.legacy_binding === undefined || value.legacy_binding === false)
+        && value.model_id !== '00000000-0000-0000-0000-000000000000'
+        && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value.model_id || '')));
 }
 
 // Only the current turn's authoritative terminal can trigger replacement.
