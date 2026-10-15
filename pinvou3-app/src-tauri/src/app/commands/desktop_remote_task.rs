@@ -17,6 +17,9 @@ use tauri::{AppHandle, Emitter, Manager as _};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+#[cfg(test)]
+mod frozen_permission_tests;
+
 use super::desktop_remote_model::prepare_selected_task_package_snapshot;
 use crate::features::assistant::engine_pool::EnginePool;
 use crate::features::assistant::remote_turn::{EnginePoolChatEngine, EnginePoolChatTurnPort};
@@ -176,9 +179,13 @@ impl RemoteSessionProvisioner for DesktopRemoteSessionProvisioner {
                 .set_title(&session_id, bounded)
                 .map_err(|_| "task_session_create_failed".to_owned())?;
         }
-        self.store
-            .set_mode_and_persist(&session_id, permission_mode)
-            .map_err(|_| "task_session_create_failed".to_owned())?;
+        crate::features::remote_control::task_permissions::initialize_new_session(
+            &self.store,
+            &session_id,
+            code_mode,
+            permission_mode,
+        )
+        .map_err(|_| "task_session_create_failed".to_owned())?;
         self.pending_modes
             .lock()
             .insert(session_id.clone(), Some((code_mode, permission_mode)));
@@ -252,21 +259,23 @@ fn freeze_first_remote_lane(
         .ok_or_else(|| crate::features::remote_control::task_permissions::REQUIRED.to_owned())?;
     let mut pending = pending.lock();
     if let Some(frozen @ None) = pending.get_mut(session_id) {
-        store
-            .set_mode_and_persist(session_id, mode)
-            .map_err(|_| "task_session_backend_bind_failed".to_owned())?;
+        // Consume the fresh-session permit even on persistence failure. A
+        // retry can validate evidence, never manufacture a replacement fact.
         *frozen = Some((code_mode, mode));
-        return Ok(());
+        crate::features::remote_control::task_permissions::initialize_new_session(
+            store, session_id, code_mode, mode,
+        )?;
     }
     if pending
         .get(session_id)
         .is_some_and(|frozen| *frozen != Some((code_mode, mode)))
-        || store.durable_mode_entry(session_id) != Some(mode)
-        || store.mode_state(session_id).mode != mode
     {
         return Err(crate::features::remote_control::task_permissions::CHANGED.to_owned());
     }
-    Ok(())
+    crate::features::remote_control::task_permissions::validate_session(
+        store, session_id, code_mode, mode,
+    )
+    .map(|_| ())
 }
 
 fn controlled_session_exists(store: &SessionStore, session_id: &str) -> bool {

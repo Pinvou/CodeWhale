@@ -37,8 +37,18 @@ use crate::features::remote_control::controller::task::{
     TASK_MODE_CHAT, TASK_MODEL_SOURCE_CONTROLLED, TASK_MODEL_SOURCE_TEMPORARY,
     task_input_digest_for_value,
 };
+// The policy boundary is shared by production validation and the real-store
+// regression's fresh-session setup; initialization is never called by EnginePool.
+#[cfg_attr(
+    not(test),
+    expect(
+        unused_imports,
+        reason = "fresh permission initialization is test-only"
+    )
+)]
 use crate::features::remote_control::{
-    controller::temporary_model::SharedTemporaryModelStore, task_permissions::for_session,
+    controller::temporary_model::SharedTemporaryModelStore,
+    task_permissions::{for_session, initialize_new_session},
 };
 use crate::features::sessions::SessionStore;
 
@@ -1750,7 +1760,7 @@ mod tests {
         use crate::platform::prefs::{RemoteTaskPermissionPrefs, UserPrefs};
         crate::features::sessions::with_isolated_store_restoring_home(|store| {
             let root = store.manager.sessions_dir().parent().unwrap();
-            let session = store
+            let mut session = store
                 .create_new("model".into(), None, root.join("workspace"))
                 .unwrap();
             let mut prefs = UserPrefs::default();
@@ -1769,9 +1779,10 @@ mod tests {
             for (mode, expected) in [(Plan, AppMode::Plan), (Yolo, AppMode::Agent)] {
                 prefs.remote_task_permissions.chat = Some(mode);
                 prefs.save().unwrap();
-                store
-                    .set_mode_and_persist(&session.metadata.id, mode)
+                session = store
+                    .create_new("model".into(), None, root.join("workspace"))
                     .unwrap();
+                initialize_new_session(store, &session.metadata.id, false, mode).unwrap();
                 assert_eq!(
                     remote_chat_permission_mode(store, &session.metadata.id).unwrap(),
                     expected

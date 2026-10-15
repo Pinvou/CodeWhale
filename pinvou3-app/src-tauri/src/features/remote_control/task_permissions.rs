@@ -1,4 +1,6 @@
 //! B-owned remote task policy; local lane defaults never authorize remote execution.
+mod frozen;
+
 use crate::core::mode_state::SerializableMode;
 use crate::features::sessions::SessionStore;
 use crate::platform::prefs::UserPrefs;
@@ -17,12 +19,54 @@ pub(crate) fn for_session(
     code: bool,
 ) -> Result<SerializableMode, String> {
     let selected = configured(code)?;
+    validate_session(store, id, code, selected)
+}
+
+/// Called only for a newly created session's first trusted claim. Freeze the
+/// immutable fact before the mutable mode write; failure must not erase it.
+pub(crate) fn initialize_new_session(
+    store: &SessionStore,
+    id: &str,
+    code: bool,
+    selected: SerializableMode,
+) -> Result<(), String> {
+    if store.session_kind(id).ok() != Some(crate::features::sessions::SessionKind::Chat) {
+        return Err(CHANGED.to_owned());
+    }
+    // An existing fact is validation authority, never permission to reset a
+    // user-changed mode, including a retry after a failed first mode write.
+    if frozen::register_new(store, id, code, selected)? {
+        store
+            .set_mode_and_persist(id, selected)
+            .map_err(|_| "task_session_backend_bind_failed".to_owned())?;
+    }
+    validate_session(store, id, code, selected).map(|_| ())
+}
+
+pub(crate) fn validate_session(
+    store: &SessionStore,
+    id: &str,
+    code: bool,
+    selected: SerializableMode,
+) -> Result<SerializableMode, String> {
+    if store.session_kind(id).ok() != Some(crate::features::sessions::SessionKind::Chat) {
+        return Err(CHANGED.to_owned());
+    }
+    let fact = frozen::read(store, id)?.ok_or_else(|| CHANGED.to_owned())?;
+    if fact.code != code || fact.mode != selected {
+        return Err(CHANGED.to_owned());
+    }
     validate_frozen(
         selected,
-        store.durable_mode_entry(id),
+        store
+            .strict_durable_mode_entry(id)
+            .map_err(|_| CHANGED.to_owned())?,
         store.mode_state(id).mode,
     )
 }
+
+#[cfg(test)]
+mod frozen_tests;
 
 fn validate_frozen(
     selected: SerializableMode,
