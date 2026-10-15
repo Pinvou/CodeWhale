@@ -792,7 +792,12 @@ pub(crate) fn resolve_runtime_route_for_identity(
     resolve_runtime_route_for_identity_with_limits(config, identity, model_selector, None)
 }
 
-fn resolve_runtime_route_for_identity_with_limits(
+/// Identity-keyed variant of [`resolve_runtime_route_with_limits`] for
+/// re-derivation of an already-installed route: the engine knows the exact
+/// persisted identity and the limits its current route was installed with,
+/// so it can re-state them as host declarations instead of losing them to a
+/// catalog-only pass.
+pub(crate) fn resolve_runtime_route_for_identity_with_limits(
     config: &Config,
     identity: &ProviderIdentity,
     model_selector: Option<&str>,

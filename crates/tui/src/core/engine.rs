@@ -45,6 +45,7 @@ use crate::purge::{emit_purge_completed, emit_purge_failed, emit_purge_started, 
 use crate::route_runtime::resolve_runtime_route;
 use crate::route_runtime::{
     ResolvedRuntimeRoute, ValidatedRuntimeRoute, resolve_runtime_route_for_identity,
+    resolve_runtime_route_for_identity_with_limits,
 };
 use crate::tools::goal::{
     GoalPauseReason, GoalSnapshot, GoalStatus, SharedGoalState, explicit_goal_directive,
@@ -1160,6 +1161,13 @@ pub struct Engine {
     /// custom route across snapshots and config reloads.
     api_provider_id: Option<String>,
     active_route_limits: Option<codewhale_config::route::RouteLimits>,
+    /// The wire model `active_route_limits` were resolved for. Written in
+    /// lockstep with the limits so a re-derivation can prove the declared
+    /// budget still describes the model it is about to be carried onto —
+    /// `Op::SyncSession` swaps `session.model` without touching route state,
+    /// and a budget declared for another conversation's model must not ride
+    /// a re-derivation onto the restored one.
+    active_route_limits_model: Option<String>,
     active_route_capabilities: codewhale_config::route::RouteCapabilities,
     rx_op: mpsc::Receiver<Op>,
     live_runtime_authority: Arc<StdMutex<LiveRuntimeAuthorityState>>,
@@ -1668,6 +1676,7 @@ impl Engine {
         self.api_provider_id = provider_id;
         self.api_config = api_config;
         self.active_route_limits = limits;
+        self.active_route_limits_model = Some(model.clone());
         self.active_route_capabilities = capabilities;
         self.api_key_env_only_recovery = Self::env_only_api_key_recovery_hint(&self.api_config);
         self.deepseek_client = Some(client.clone());
@@ -1710,6 +1719,7 @@ impl Engine {
         self.api_provider_id = provider_id;
         self.api_config = api_config;
         self.active_route_limits = limits;
+        self.active_route_limits_model = Some(model.clone());
         self.active_route_capabilities = capabilities;
         self.api_key_env_only_recovery = Self::env_only_api_key_recovery_hint(&self.api_config);
         match concrete_client {
@@ -1737,7 +1747,34 @@ impl Engine {
             Some(self.api_provider.as_str()),
             self.api_provider_id.as_deref(),
         )?;
-        resolve_runtime_route_for_identity(&config, &identity, Some(&self.session.model))
+        let selector = self.session.model.as_str();
+        let route = resolve_runtime_route_for_identity(&config, &identity, Some(selector))?;
+        // Engine-self-started turns (edit resend, subagent completion, idle
+        // wake, goal continuation) re-derive the route here, and a catalog-only
+        // pass would drop the limits the installed route was host-declared
+        // with — an uncatalogued model would clamp back to the compat output
+        // cap. Re-state the installed limits as host declarations so they
+        // survive the re-derivation, under three guards: the limits must
+        // have been resolved for exactly this model (a `SyncSession` swap
+        // must not carry another conversation's budget), the fresh resolution
+        // must land on the same wire model (a drifted resolution must resolve
+        // its own catalog envelope), and it must actually disagree with the
+        // installed limits (an equal candidate already carries the right
+        // facts, and re-stamping them would only relabel catalog values as
+        // host overrides).
+        if route.model == self.session.model
+            && self.active_route_limits_model.as_deref() == Some(selector)
+            && let Some(installed) = self.active_route_limits
+            && route.candidate.limits() != installed
+        {
+            return resolve_runtime_route_for_identity_with_limits(
+                &config,
+                &identity,
+                Some(selector),
+                Some(installed),
+            );
+        }
+        Ok(route)
     }
 
     /// Create a new engine with the given configuration
@@ -1989,6 +2026,7 @@ impl Engine {
         };
 
         let active_route_limits = config.active_route_limits;
+        let active_route_limits_model = active_route_limits.map(|_| config.model.clone());
         let active_turn_tool_security = config.turn_tool_security.clone();
         let control_plane_restricted = active_turn_tool_security.is_some();
         let shared_auto_review_policy = Arc::new(config.auto_review_policy.clone());
@@ -2034,6 +2072,7 @@ impl Engine {
             api_provider_identity,
             api_provider_id,
             active_route_limits,
+            active_route_limits_model,
             active_route_capabilities: codewhale_config::route::RouteCapabilities::default(),
             rx_op,
             live_runtime_authority: Arc::clone(&live_runtime_authority),
@@ -3320,6 +3359,7 @@ impl Engine {
                         self.session.model = model;
                         self.config.model.clone_from(&self.session.model);
                         self.active_route_limits = route_limits;
+                        self.active_route_limits_model = Some(self.session.model.clone());
                         // This lightweight operation carries no executable
                         // route candidate, so old provider/model capability
                         // facts must not bleed into the new model.
@@ -5610,6 +5650,7 @@ impl Engine {
         // The model, limits, and compaction policy arrive in one operation so
         // no provider request can observe a partially updated route.
         self.active_route_limits = route_limits;
+        self.active_route_limits_model = Some(model.clone());
         self.config.compaction = compaction;
         // Headless/runtime hosts supply their durable turn owner. Interactive
         // turns historically supplied none, leaving a detached child with
