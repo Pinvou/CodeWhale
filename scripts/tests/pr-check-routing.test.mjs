@@ -137,7 +137,7 @@ test("Account Platform changes cannot bypass the Go gate at any PR or queue stag
   for (const path of ["scripts/check-account-platform-authorization-coverage.mjs", "scripts/tests/account-platform-authorization-coverage.test.mjs"]) {
     assert.ok(paths.includes(path), `authorization changes must trigger the Go gate: ${path}`);
   }
-  for (const path of ["account-platform/**", "scripts/account-platform*", "scripts/check-token-management-authorization-coverage.mjs", "scripts/tests/token-management-authorization-coverage.test.mjs", ".github/workflows/pr-check.yml", "scripts/tests/pr-check-routing.test.mjs"]) {
+  for (const path of ["account-platform/**", "scripts/account-platform*", "scripts/check-token-management-authorization-coverage.mjs", "scripts/tests/token-management-authorization-coverage.test.mjs", "scripts/tests/token-management-phase-coverage.test.mjs", ".github/workflows/pr-check.yml", "scripts/tests/pr-check-routing.test.mjs"]) {
     assert.ok(paths.includes(path), `Go routing must cover ${path}`);
   }
   assert.match(workflow, /account_platform: \$\{\{ steps\.filter\.outputs\.account_platform \}\}/);
@@ -151,9 +151,20 @@ test("Account Platform changes cannot bypass the Go gate at any PR or queue stag
   assert.deepEqual(run.trim().split(/\r?\n/), [
     "node scripts/check-token-management-authorization-coverage.mjs",
     "node --test scripts/tests/token-management-authorization-coverage.test.mjs",
+    "node --test scripts/tests/token-management-phase-coverage.test.mjs",
   ]);
-  for (const [checkerStatus, formalStatus, expectedOutput, expectedStatus] of [[7, 0, "checker", 7], [0, 8, "checkerformal", 8], [0, 0, "checkerformal", 0]]) {
-    const fixture = `node() { if [[ "$1" == scripts/check-token-management-authorization-coverage.mjs ]]; then printf checker; return ${checkerStatus}; else printf formal; return ${formalStatus}; fi; };\n`;
+  for (const [checkerStatus, formalStatus, phaseStatus, expectedOutput, expectedStatus] of [
+    [7, 0, 0, "checker", 7],
+    [0, 8, 0, "checkerformal", 8],
+    [0, 0, 9, "checkerformalphase", 9],
+    [0, 0, 0, "checkerformalphase", 0],
+  ]) {
+    const fixture = `node() { case "$*" in
+      scripts/check-token-management-authorization-coverage.mjs) printf checker; return ${checkerStatus};;
+      '--test scripts/tests/token-management-authorization-coverage.test.mjs') printf formal; return ${formalStatus};;
+      '--test scripts/tests/token-management-phase-coverage.test.mjs') printf phase; return ${phaseStatus};;
+      *) printf unexpected >&2; return 99;;
+    esac; };\n`;
     const result = spawnSync(bash, ["-e", "-c", fixture + run], { encoding: "utf8", timeout: 30_000, windowsHide: true });
     assert.equal(result.status, expectedStatus, result.stderr);
     assert.equal(result.stdout, expectedOutput);

@@ -2319,6 +2319,8 @@ impl AppEngine {
                 model: self.bridge.model(),
                 workspace: self.workspace.clone(),
                 // The host sync has one execution root; do not retain SDK attachments.
+                // CodeWhale #54 多根授权基建：空集经底座 normalize 后等价
+                // 单根（workspace 置于位置 0），保持既有行为。
                 workspace_roots: Vec::new(),
                 mode: AppMode::Agent,
             })

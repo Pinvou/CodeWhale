@@ -28,6 +28,8 @@ worker 外呼前续约仍有效的同版本 claim，行锁等待后再查数据�
 
 匿名范围限于可证明属于主体的可变账号、身份、注册/密码重置/资料变更联系方式、关联短信挑战、Commerce 映射、付款联系人及可清理重放内容。金额、来源、永久赠额资格、财务回执、审计及 outbox 保留。只有手机号匹配的旧 slider 或未绑定挑战无法证明历史属主，不猜测清除；已接受/撤销邀请终态不破坏不可变证据。短信风险摘要没有手机号明文，但单向摘要不等于不可关联或不可识别，仍遵循原保留策略。既有受控 replay retention case 加密内容和法律保全不自动实体删除，永久围栏阻止清理后新复制/新重放内容。
 
+LOGIN 短信挑战的 `mobile_e164` 可能没有可证明属主的用户外键，当前不会仅凭手机号在注销时清除这类明文记录。相应发送／校验尝试保存的是单向摘要，仍有联系关联性，但不包含手机号明文。既有短信清理要求挑战已过期且最后更新超过 90 天，并保留业务引用、有效投递租约或 `delivery_uncertain_at` 未澄清的记录；90 天不构成所有记录必定销毁的承诺。此类记录、单向摘要关联性和实体销毁仍纳入 [Issue #1663](https://github.com/Pinvou/pinvou3/issues/1663)，本轮未修；对外隐私说明与发布验收必须明确此边界，不能宣称注销立即清除全部手机号。
+
 最终匿名化在原 claim、生命周期、身份删除、grant 隔离与 replay 清理证明全部有效后，清除 `accepted_by` 指向该主体的 ACCEPTED 邀请邮箱及提示；保留冻结身份、目标摘要、token 摘要、接收状态及历史角色，不按 `invited_by` 删除他人收件信息。同主体 CONSUMED/EXPIRED/LOCKED/SUPERSEDED bootstrap 历史记录的身份字段替换为匿名标识，状态、代次、验证器及回执保留；这些终态不能用于认证，不改变普通消费、PENDING/REDEEMING 激活或恢复契约。
 
 两条注销源码和 API 契约正式测试统一执行 `npm --prefix account-platform ci --ignore-scripts`、`npm --prefix account-platform run test:closure-contracts`；它们使用锁定的 YAML 解析依赖，并接入现有 `account-platform-test`，仅是源码接线和契约形状检查。专用三域 PostgreSQL 组合夹具另外需要显式的 `PINVOU_TEST_SCHEMA_DATABASE_URL`（隔离部署角色准备连接）、`F08_TEST_GO`（Go 可执行文件绝对路径）和 `F08_TEST_CHILD_LOG`（私有测试日志绝对路径）；父夹具创建并传递 `F08_ACCOUNT_URL`、`F08_BILLING_URL`、`F08_TOKEN_URL`，运行原公开迁移和子测试，再按归属清理测试资源。这些是测试启动参数，不是生产配置，实际数据库、父子测试与受控外部回执结果须分别记录。

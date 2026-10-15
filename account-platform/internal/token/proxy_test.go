@@ -32,8 +32,8 @@ type streamRepositoryFake struct {
 	savedResult     ReplayResult
 	saveResultErr   error
 	commitSnapshot  map[string]any
-	increaseCalls   int
-	increasedBy     int64
+	ensureCalls     int
+	ensuredMaximum  int64
 }
 
 func (r *streamRepositoryFake) AppendReplayEvent(_ context.Context, _ uuid.UUID, eventType string, _ []byte) (int64, error) {
@@ -90,15 +90,16 @@ func (r *streamRepositoryFake) LoadReplay(context.Context, uuid.UUID, int64) (Re
 	return r.replaySnapshot, nil
 }
 
-func (r *streamRepositoryFake) IncreaseMaximum(_ context.Context, _ uuid.UUID, additional int64) error {
-	r.increaseCalls++
-	r.increasedBy += additional
+func (r *streamRepositoryFake) EnsureMaximumAtLeast(_ context.Context, _ uuid.UUID, confirmedTarget int64) error {
+	r.ensureCalls++
+	r.ensuredMaximum = max(r.ensuredMaximum, confirmedTarget)
 	return nil
 }
 
 type streamBillingFake struct {
 	ModelExecutionBillingClient
 	extendCalls          int
+	extensionIDs         []uuid.UUID
 	extendedBy           int64
 	extendErr            error
 	commitCalls          int
@@ -150,7 +151,8 @@ func (r *liveReplayRepositoryFake) MarkDelivery(_ context.Context, _ uuid.UUID, 
 	return nil
 }
 
-func (b *streamBillingFake) Extend(_ context.Context, _ uuid.UUID, _ uuid.UUID, additional int64) error {
+func (b *streamBillingFake) Extend(_ context.Context, _ uuid.UUID, _ uuid.UUID, additional int64, operationID uuid.UUID) error {
+	b.extensionIDs = append(b.extensionIDs, operationID)
 	b.extendCalls++
 	b.extendedBy += additional
 	if b.terminalSeenAtExtend != nil {
@@ -601,7 +603,7 @@ func TestProxyStreamCommitsTrustedUsageAndWarnsWhenAdditionalAuthorizationIsInsu
 	if !strings.Contains(recorder.Body.String(), "event: billing_notice") || !strings.Contains(recorder.Body.String(), "data: [DONE]") {
 		t.Fatalf("settled stream did not deliver its notice and terminal: %q", recorder.Body.String())
 	}
-	if repository.reviewReason != "" || repository.increaseCalls != 0 {
+	if repository.reviewReason != "" || repository.ensureCalls != 0 {
 		t.Fatalf("insufficient extension entered review or changed the reservation: %#v", repository)
 	}
 	if !repository.responseSaved || !repository.resultSaved || !repository.committed || billing.commitCalls != 1 {
@@ -821,7 +823,7 @@ func TestProxyStreamAuthorizesAdditionalUsageBeforeDone(t *testing.T) {
 	if billing.extendCalls != 1 || billing.extendedBy != 9 || billing.terminalBeforeExtend {
 		t.Fatalf("additional authorization order = %#v", billing)
 	}
-	if repository.increaseCalls != 1 || repository.increasedBy != 9 {
+	if repository.ensureCalls != 1 || repository.ensuredMaximum != 10 {
 		t.Fatalf("local maximum update = %#v", repository)
 	}
 	if !strings.Contains(recorder.Body.String(), "data: [DONE]") || repository.reviewReason != "" {

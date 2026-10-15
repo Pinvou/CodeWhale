@@ -58,9 +58,9 @@ func (s *Service) WithApprovalPrechecks(source ApprovalPrecheckSource) *Service 
 	return s
 }
 
-// ApprovalPrecheckProjection is the closed owner answer: exactly the documents
-// the Portal needs to render the business page, never Provider text, prompts or
-// personal data.
+// ApprovalPrecheckProjection is the closed owner answer: the financial audit
+// metadata the Portal needs to render the business page. It may include a
+// caller-supplied reason and is not a PII-free projection.
 type ApprovalPrecheckProjection struct {
 	CommandType              string
 	PolicyVersion            int64
