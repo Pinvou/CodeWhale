@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
+<<<<<<< HEAD
 # CodeWhale v0.9.12 clean re-fork guard: 70 commits, nine maintained themes (r3 closed at pinvou-v0.9.12-r3; inside a transition window the head may lead the tag).
+=======
+# CodeWhale v0.9.12 clean re-fork guard: 71 commits, nine maintained themes (r3 closed at pinvou-v0.9.12-r3; inside a transition window the head may lead the tag).
+>>>>>>> c5b66f1ac
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CODEWHALE="$REPO/CodeWhale"
 APP="$REPO/pinvou3-app/src-tauri"
 EXPECTED_UPSTREAM="dcd4c200f72f0c1ffd60d8e7f6850313db879fc5"
+<<<<<<< HEAD
 EXPECTED_HEAD="803e672bb87f5ee4e0ab56f1e23fa408ddbeeaa0"
 EXPECTED_COMMITS=70
+=======
+EXPECTED_HEAD="13ee4dfd2349f8ece3d2b7169031d09189cc9ec7"
+EXPECTED_COMMITS=71
+>>>>>>> c5b66f1ac
 # 过渡期锚点：不可变 r1 tag 的收口 commit。层 0 断言它是当前 head 的祖先，
 # 当前固定登记头继承公开维护历史；本地检查不代替严格公开维护头门禁。
 R1_CLOSURE="1fafee7e26b60a59457a43bce50c63aa2ad9dbaf"
@@ -25,7 +34,11 @@ bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
 
 fail=0
 
+<<<<<<< HEAD
 bold "── 第 0 层：v0.9.12 clean re-fork 拓扑（r1 tag 之后 55 个登记提交，r3 收口后过渡期）──"
+=======
+bold "── 第 0 层：v0.9.12 clean re-fork 拓扑（r1 tag 之后 56 个登记提交，r3 收口后过渡期）──"
+>>>>>>> c5b66f1ac
 actual_head="$(git -C "$CODEWHALE" rev-parse HEAD 2>/dev/null || true)"
 if [[ "$actual_head" == "$EXPECTED_HEAD" ]]; then
   green "  ✓ CodeWhale gitlink 指向登记 head ${EXPECTED_HEAD}（过渡期内领先钉在 r3 收口的 tag；公开维护头身份由独立门禁验证）"
@@ -59,6 +72,7 @@ fi
 bold "── 第 1 层：登记主题与父仓适配指纹 ──"
 # 格式：主题|说明|文件（相对父仓根）|grep -F 固定串
 fingerprints=(
+<<<<<<< HEAD
   "T1|宿主单 execution-root 显式配置     |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|workspace_roots: _, // host exposes one execution root"
   "T1|宿主 SyncSession 清除旧附件集合    |pinvou3-app/src-tauri/src/features/assistant/engine.rs|workspace_roots: Vec::new(),"
   "T1|宿主配置不纳 ledger 行为回归      |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|fn forkguard_engine_config_keeps_only_execution_root()"
@@ -90,6 +104,13 @@ fingerprints=(
   "T1|HTTP1 流式发送保持调用身份回归     |CodeWhale/crates/tui/src/client/operation_tests.rs|fn forkguard_model_operation_http1_stream_keeps_id"
   "T1|子代理外层重试保持调用身份回归     |CodeWhale/crates/tui/src/tools/subagent/tests/operation_identity.rs|fn forkguard_model_operation_child_retries_keep_id"
   "T1|视觉 HTTP 重试保持调用身份回归    |CodeWhale/crates/tui/src/vision/tools.rs|fn forkguard_model_operation_vision_http_retry_keeps_id"
+=======
+  "T1|宿主限额绑定精确模型|CodeWhale/crates/tui/src/core/engine.rs|active_route_limits_model: Option<String>"
+  "T1|自起轮次保留宿主限额|CodeWhale/crates/tui/src/core/engine/tests.rs|fn current_runtime_route_carries_installed_host_limits("
+  "T1|wire 漂移不继承限额|CodeWhale/crates/tui/src/core/engine/tests.rs|fn current_runtime_route_does_not_carry_limits_across_wire_drift("
+  "T1|模型漂移不继承限额|CodeWhale/crates/tui/src/core/engine/tests.rs|fn current_runtime_route_does_not_carry_limits_across_model_drift("
+  "T1|相同限额不改来源|CodeWhale/crates/tui/src/core/engine/tests.rs|fn current_runtime_route_leaves_matching_limits_unstamped("
+>>>>>>> c5b66f1ac
   "T2|Unix shell guidance preservation test|CodeWhale/crates/tui/src/tools/shell/guidance.rs|fn shell_guidance_preserves_unix_shell_contracts"
   "T2|Windows PowerShell policy bypass flags|CodeWhale/crates/tui/src/shell_dispatcher.rs|fn powershell_build_command_includes_no_profile_and_command_flags"
   "T2|Windows PowerShell encoded fallback builder|CodeWhale/crates/tui/src/shell_dispatcher.rs|fn forkguard_powershell_encoded_fallback_avoids_the_script_file"
@@ -239,6 +260,7 @@ fingerprints=(
 
   "APP|spawn 前安装 Engine session id   |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|cfg.session_id = Some(session_id.to_string());"
   "APP|产品白名单复用原生 allowed_tools |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|allowed_tools: Some(crate::features::assistant::tool_policy::allowed_tool_names())"
+  "APP|宿主申报输出事实抵达钢丝回归        |pinvou3-app/src-tauri/src/features/assistant/route_wire_cap_tests.rs|fn host_declared_output_fact_reaches_the_wire_for_both_wire_policies"
   "APP|会话工具开关走动态禁用整形        |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|pub fn shape_disallowed_tools("
   "APP|subagent ledger root 透传       |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|cfg.subagent_state_root = Some(roots.ledger);"
   "APP|逐轮精确安全策略下发               |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|turn_tool_security: Some(Arc::new(turn_tool_security))"
@@ -317,6 +339,8 @@ fingerprints=(
   "T9|Custom Responses exact-model replay             |CodeWhale/crates/tui/src/client/responses/tests.rs|fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state"
   "T9|Chat wire never captures encrypted reasoning    |CodeWhale/crates/tui/src/client/responses/tests.rs|fn forkguard_custom_chat_stream_does_not_capture_encrypted_reasoning"
   "T9|Empty encrypted content skips without breaking the stream |CodeWhale/crates/tui/src/client/responses/tests.rs|fn forkguard_custom_responses_capture_tolerates_missing_or_empty_encrypted_content"
+  "APP|unified 2000-step budget default           |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|const HOST_STEP_BUDGET: u32 = 2_000;"
+  "APP|2000-step budget behavior regression       |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|fn engine_config_defaults_to_unified_step_budget_and_respects_override"
 )
 
 for fp in "${fingerprints[@]}"; do
