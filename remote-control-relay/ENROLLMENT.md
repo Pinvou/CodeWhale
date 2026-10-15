@@ -42,6 +42,7 @@ Set these variables before opening the registry:
 | `PINVOU_REMOTE_ENROLLMENT_HMAC_KEY` | Secret HMAC key, 32–4096 UTF-8 bytes. Supply it through the deployment secret manager, never source control or logs. |
 | `PINVOU_REMOTE_ENROLLMENT_HMAC_PREVIOUS_KEYS_JSON` | Optional secret JSON array of `{ "key_id": "...", "key": "..." }` for verification-only old keys. At most seven, unique IDs distinct from the active ID; each secret has the same 32–4096 UTF-8 byte bounds. Maximum JSON input is 65536 bytes. |
 | `PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU` | Optional `1`/`true`; accepted only with `deployment=development` and `NODE_ENV=development` or `test`. |
+| `PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION` | Optional `true`/`1`, default false. In `self_hosted`, permit a native device's first complete two-role registration without account login or administrator import. Existing and revoked identities retain their credential checks. |
 
 The example defaults for both HMAC secrets are empty and fail validation. The two
 old public `replace-with-at-least-32-...` placeholder values are also rejected,
@@ -56,10 +57,11 @@ The same public examples are rejected for the independent coverage-control
 secret; deployment preflight rejects them for enrollment and pairing before
 runtime startup. Errors report only the validation code, never the secret.
 
-`official` and `self_hosted` always reject an unknown endpoint. A production
+`official` and the default `self_hosted` policy reject an unknown endpoint. A production
 runtime refuses both development deployment mode and the development TOFU
-switch. Self-hosted production therefore uses an explicit administrator import
-or enrollment operation; the migration CLI and gateway belong to DEV-02.
+switch. Self-hosted production uses an explicit administrator import unless the
+operator enables the anonymous first-use policy below. The migration CLI and
+gateway belong to DEV-02.
 The config loader rejects lexical aliases, including Windows case-only aliases.
 `RelayStateStore.open` receives both paths and also compares resolved paths and
 file identities, rejecting junction aliases and hardlinks. The legacy path may
@@ -67,6 +69,136 @@ never be anywhere inside the dedicated controller directory or alias the
 primary, backup, lock, marker, temporary, stale-lock, or other reserved
 management path. Controller state filenames using those reserved suffixes are
 also rejected.
+
+### Anonymous native first-use registration
+
+For a public installation where a new device should open remote control without
+an account or administrator, set `PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION=true`
+in the protected Relay environment. Keep `NODE_ENV=production`,
+`PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=self_hosted`, controller enabled, and
+`PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=false`. The existing desktop request
+already carries its two independent credentials; no client wire change is needed.
+
+The public desktop-to-Relay registration hop **must use `wss://` with validated
+TLS certificates**. Its first frame carries both long-lived credentials; plain
+`ws://` on an untrusted network permits passive identity theft, reconnect,
+pairing and revocation by the observer. A private `ws://` listener is suitable
+only behind TLS termination on loopback or an independently protected transport;
+it must not be exposed publicly. Deployment preflight emits
+`self_registration_requires_public_wss_tls_termination` when this policy is on;
+this warning does not inspect or certify the reverse proxy's TLS configuration.
+
+Only the full `desktop_endpoint_register` path may create an unknown identity.
+It accepts the native `ep_` plus 24 random alphanumeric characters format and
+distinct, valid Web and desktop credentials. Both role digests are persisted in
+one guarded namespace CAS before the socket becomes ready. A partial request
+never grants the other role. Conflicting credentials cannot replace an existing
+identity; a revoked endpoint cannot re-enroll. A restart or repeat enable verifies
+the same persisted credentials without another administrator operation.
+
+The trusted proxy, WebSocket/ingress limits, per-source endpoint creation rate,
+active endpoint ceiling and shared persistent-state byte budget remain required.
+Capacity and creation-rate admission happen before anonymous enrollment writes.
+In-flight registrations reserve capacity across sockets until authorization and
+attachment finish; concurrent requests for the same identity share one slot.
+Only the live Relay dispatcher explicitly authorizes creation after this admission.
+The legacy rollback gateway continues to reject unknown identities, even when
+the protected environment enables this policy.
+Audit and wire responses contain no raw credentials. The coverage binding changes
+when this policy is enabled, and preserves its released v1 bytes when disabled.
+
+New anonymous entries are attributed to `audit.source=self_registration`, separate
+from administrator `self_hosted` imports. They share a fixed quota of 512 entries
+and 512 KiB of serialized entry data, including revoked entries; quotas are checked
+before writing. Their queued store CAS must also leave 1 MiB for other writers
+(one quarter of the total limit on stores smaller than 4 MiB). That headroom check
+uses the actual queued state, so a concurrent pairing writer cannot make a stale
+capacity measurement admit another anonymous write. Rejection leaves the store
+writable: known credentials reconnect and administrators/pairing may use the
+reserved capacity. This exemption concerns the persistent new-entry quota:
+after a Relay restart, even a known identity must pass per-IP creation admission
+while the in-memory endpoint table is empty. This bounds anonymous durable growth; it does not promise
+unlimited trusted writes or fair admission for unknown devices during a Sybil flood.
+The in-memory active-endpoint ceiling is separate from this persistent quota.
+Anonymous identities can retain their slots by reconnecting before the offline
+TTL expires; those slots do not expire merely because the persistent quota is
+full. With `MAX_ENDPOINTS` below 512, anonymous identities can occupy all active
+slots, including slots needed by previously enrolled devices after a Relay
+restart. Known registry credentials do not bypass this admission ceiling.
+The reserved persistent-state headroom does not reserve active-endpoint slots
+for trusted devices; operators must also control aggregate connection pressure.
+Operators still need connection/source limits, storage monitoring and upstream
+abuse controls. Historical entries recorded as `self_hosted` cannot be reliably
+reclassified and are never guessed or automatically removed.
+
+### Offline inventory and deliberate cleanup
+
+Stop the live store owner first. The maintenance CLI uses the existing exclusive
+writer lock and private input/output checks, not a second live writer or raw JSON
+editing. Back up the complete store and the separate legacy revocation state
+before removing entries. With the protected
+deployment environment loaded, run:
+
+```sh
+node remote-control-relay/scripts/enrollment-migrate.js --list-self-registrations --output /private/enrollment/inventory.json
+node remote-control-relay/scripts/enrollment-migrate.js --check-self-registration-cleanup --input /private/enrollment/selected.json
+node remote-control-relay/scripts/enrollment-migrate.js --apply-self-registration-cleanup --input /private/enrollment/selected.json
+```
+
+Create `selected.json` from the private inventory by retaining only explicitly
+chosen entries and the original namespace revision. Inventory contains IDs,
+revisions and status, never credentials or digests; keep its directory mode 0700
+and file mode 0600. Check mode does not write; apply rejects stale revisions,
+mixed administrator/anonymous selections, duplicates and revoked entries before
+any CAS. The CLI does not infer inactivity or silently choose a retention period.
+Cleanup removes the selected **active** registration. Its Web credentials cannot
+join until the desktop registers again; reusing the same credentials can restore
+the old sharing link. Cleanup is de-registration, not permanent revocation. A
+desktop may register again under the public policy, so cleanup alone is not an
+abuse-blocking mechanism. Revoked records remain
+intact and consume quota to prevent resurrection. Neither cleanup nor quota
+rejection deletes unrelated registrations, migration records or pairing state.
+
+#### Recovering quota after a device self-revokes
+
+There are two distinct revocation authorities. The public
+`desktop_endpoint_revoke` message writes a permanent endpoint denial to the
+separate legacy Relay state; it does **not** call `EnrollmentRegistry.revoke`
+or change the registration's `active` status. That registration still consumes
+an anonymous slot, but remains eligible for the selected cleanup above. Only
+privileged registry operations create a registry `revoked` row; those rows are
+deliberately ineligible for cleanup. A device's own desktop secret does not
+authorize that privileged operation.
+
+For a registration/self-revocation flood, pause new admission in the protected
+environment and stop the store owner. Back up both state files, export the
+private inventory and explicitly select the unwanted `active` anonymous rows,
+including self-revoked devices. Run check then apply using the commands above.
+Keep the separate Relay revocation file unchanged, restart with the same state
+paths, and verify that a removed self-revoked ID still receives `endpoint_revoked`
+while a new random ID can register when admission is restored. Cleaning these
+rows releases anonymous slots without reviving the denied IDs. Do not erase
+either authority's tombstones or restore a stale whole-store backup. Privileged
+registry revocations are not a remotely available quota-burning path and remain
+retained; this procedure does not reclaim their slots or promise unlimited
+storage for repeated attacks.
+
+The new audit origin is an extension of the v3 entry format. Existing entries are
+unchanged and still readable by this version; binaries predating this origin
+reject new-origin entries. Use a rollback build that understands `self_registration`
+and disable new admission when rolling back policy. Do not run an older binary
+directly against the updated live registry, erase revocations, or restore a stale
+whole-store backup just to remove the new origin. A stopped-owner backup retains
+both roles and audit origins for reviewed recovery.
+
+This policy authorizes possession of a new random endpoint's credentials. It does
+not establish a human account or vendor-issued device identity. Revocation binds
+the endpoint ID; resetting a device's identity creates a new enrollment candidate.
+Operators of a public service must monitor aggregate creation/capacity pressure.
+Retain the complete registry and keyring when rolling back. A compatible
+administrator-only rollback build disables new-device onboarding; already
+enrolled role digests keep their authentication meaning. The new audit origin
+must remain readable by that build as described above.
 
 ### Gateway transport keepalive
 
@@ -427,11 +559,12 @@ Audit sources describe admission: explicit development enrollment records
 `development`, even with TOFU enabled; only automatic first-registration admission
 records `development_tofu`. Rotation and revocation preserve that source.
 Endpoint IDs are identifiers, not secrets: unknown, revoked and invalid-credential
-errors can reveal enrollment status. Official/self-hosted registration and
-development registration with TOFU disabled require an existing active enrollment
-and a valid credential. Only explicitly enabled non-production development TOFU
-may admit a first registration; callers must apply the protocol layer's rate
-limits before exposure.
+errors can reveal enrollment status. Official registration, the default self-hosted
+policy, and development registration with TOFU disabled require an existing active
+enrollment and valid credentials. Explicit non-production development TOFU or the
+admitted live self-hosted first-use path may create an identity. Generic registry
+authorization and the rollback gateway do not grant production creation authority;
+callers must apply protocol admission before requesting it.
 
 Recognized lock schemas with an unsupported positive version fail closed with
 `relay_state_lock_unsupported`. A v1 lock with a complete valid owner tuple and
@@ -549,6 +682,44 @@ to configure the same exact browser origin allowlist in both gateway and legacy
 Relay processes. Public same-origin at the gateway does not make the preserved
 browser Origin same-origin with the new loopback upstream Host. Use
 `nginx-enrollment-gateway.conf` for the public route and run
+`node scripts/enrollment-nginx-config.js` from the Relay directory with the
+same protected environment as the gateway and legacy Relay. The checked-in
+nginx file is only the default deployment sample: changing the base path,
+gateway host/port or legacy port requires regenerating it. The offline
+generator emits only exact WS/health locations pointing at the loopback
+Enrollment gateway; it never proxies the legacy Relay or the coverage-control
+listener. It rejects inconsistent legacy URL/bind/PORT inputs, stale public
+entrypoint paths and an immediate proxy missing from the trusted allowlist.
+Base paths use nonempty ASCII letter/digit/underscore/hyphen segments separated
+by a single slash; repeated slashes are rejected because nginx normally merges
+them before exact-location selection. This validation does not change the
+gateway's existing runtime path parser.
+For a consistent deployment, omit `PINVOU_REMOTE_PUBLIC_BASE_PATH` to use the
+default or set the same nonempty path for every process. The generator
+requires HTTPS public entrypoints even where runtime preflight permits HTTP
+localhost probes; it is an offline production perimeter contract, not a change
+to the runtime preflight's accepted URLs.
+The generated WS location explicitly uses 75-second read and send timeouts,
+preserving the checked-in sample's idle proxy budget. The offline checker
+rejects missing or changed timeout directives as configuration drift. This
+does not add gateway heartbeat behavior or change authentication deadlines;
+transport keepalive must still be verified separately before deployment.
+The legacy `PORT` defaults to 8787; the gateway port must be explicitly set.
+Also explicitly set `PINVOU_REMOTE_GATEWAY_HOST` to literal `127.0.0.1` or
+`::1`. Set both `PINVOU_REMOTE_HOST` and
+`PINVOU_REMOTE_LEGACY_RELAY_BIND_HOST` to the literal loopback host used in
+`PINVOU_REMOTE_LEGACY_RELAY_URL`; these are independent required assertions,
+not optional aliases. The offline generator rejects missing values rather than
+assuming the legacy process is safely bound.
+Save the generated output in a separate fragment file and include its contents
+in the intended server block, then run
+`node scripts/enrollment-nginx-config.js --check <generated-fragment-file>`
+against the same environment. Pass only the generated fragment file, not the
+complete server configuration. This check is not automatically invoked by the
+deployment or rollback scripts. It accepts LF/CRLF but requires the generated content
+otherwise unchanged and exits nonzero on drift; it does not rewrite files.
+This is an offline configuration check, not proof of live listeners or nginx
+syntax/context. Run `nginx -t` before applying configuration and continue to run
 `scripts/enrollment-gateway-preflight.js` with every public entrypoint. The
 preflight fails if a route lacks the gateway marker, is unavailable, the
 anonymous active-denial probe is not rejected, the Relay URL is not literal
