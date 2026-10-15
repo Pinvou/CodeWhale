@@ -3294,9 +3294,21 @@ mod tests {
             "/admin/v1/usage-requests",
             None
         ));
+        assert!(route_allowed(
+            "token",
+            &Method::GET,
+            "/v1/organizations/11111111-1111-4111-8111-111111111111/model-policy",
+            None
+        ));
         assert!(!route_allowed(
             "token",
             &Method::GET,
+            "/v1/organizations/11111111-1111-4111-8111-111111111111/model-policy",
+            Some("extra=1")
+        ));
+        assert!(!route_allowed(
+            "token",
+            &Method::POST,
             "/v1/organizations/11111111-1111-4111-8111-111111111111/model-policy",
             None
         ));
