@@ -549,6 +549,44 @@ to configure the same exact browser origin allowlist in both gateway and legacy
 Relay processes. Public same-origin at the gateway does not make the preserved
 browser Origin same-origin with the new loopback upstream Host. Use
 `nginx-enrollment-gateway.conf` for the public route and run
+`node scripts/enrollment-nginx-config.js` from the Relay directory with the
+same protected environment as the gateway and legacy Relay. The checked-in
+nginx file is only the default deployment sample: changing the base path,
+gateway host/port or legacy port requires regenerating it. The offline
+generator emits only exact WS/health locations pointing at the loopback
+Enrollment gateway; it never proxies the legacy Relay or the coverage-control
+listener. It rejects inconsistent legacy URL/bind/PORT inputs, stale public
+entrypoint paths and an immediate proxy missing from the trusted allowlist.
+Base paths use nonempty ASCII letter/digit/underscore/hyphen segments separated
+by a single slash; repeated slashes are rejected because nginx normally merges
+them before exact-location selection. This validation does not change the
+gateway's existing runtime path parser.
+For a consistent deployment, omit `PINVOU_REMOTE_PUBLIC_BASE_PATH` to use the
+default or set the same nonempty path for every process. The generator
+requires HTTPS public entrypoints even where runtime preflight permits HTTP
+localhost probes; it is an offline production perimeter contract, not a change
+to the runtime preflight's accepted URLs.
+The generated WS location explicitly uses 75-second read and send timeouts,
+preserving the checked-in sample's idle proxy budget. The offline checker
+rejects missing or changed timeout directives as configuration drift. This
+does not add gateway heartbeat behavior or change authentication deadlines;
+transport keepalive must still be verified separately before deployment.
+The legacy `PORT` defaults to 8787; the gateway port must be explicitly set.
+Also explicitly set `PINVOU_REMOTE_GATEWAY_HOST` to literal `127.0.0.1` or
+`::1`. Set both `PINVOU_REMOTE_HOST` and
+`PINVOU_REMOTE_LEGACY_RELAY_BIND_HOST` to the literal loopback host used in
+`PINVOU_REMOTE_LEGACY_RELAY_URL`; these are independent required assertions,
+not optional aliases. The offline generator rejects missing values rather than
+assuming the legacy process is safely bound.
+Save the generated output in a separate fragment file and include its contents
+in the intended server block, then run
+`node scripts/enrollment-nginx-config.js --check <generated-fragment-file>`
+against the same environment. Pass only the generated fragment file, not the
+complete server configuration. This check is not automatically invoked by the
+deployment or rollback scripts. It accepts LF/CRLF but requires the generated content
+otherwise unchanged and exits nonzero on drift; it does not rewrite files.
+This is an offline configuration check, not proof of live listeners or nginx
+syntax/context. Run `nginx -t` before applying configuration and continue to run
 `scripts/enrollment-gateway-preflight.js` with every public entrypoint. The
 preflight fails if a route lacks the gateway marker, is unavailable, the
 anonymous active-denial probe is not rejected, the Relay URL is not literal
