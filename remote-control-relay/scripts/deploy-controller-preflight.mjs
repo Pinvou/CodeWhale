@@ -2,6 +2,7 @@ import { lstat, readFile, realpath } from "node:fs/promises";
 import { isIP } from "node:net";
 import { resolve } from "node:path";
 import { isDirectCliEntry } from "../cli-entrypoint.js";
+import { isExampleHmacKey } from "../hmac-key-config.js";
 
 const REQUIRED_KEYS = Object.freeze([
   "NODE_ENV",
@@ -76,6 +77,9 @@ export function validateControllerEnvironment(entries, { expectedFeatureFlag = "
   const selfRegistration = entries.get("PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION");
   if (selfRegistration !== undefined && !new Set(["0", "1", "false", "true"]).has(selfRegistration)) {
     fail("controller_env_self_registration_invalid");
+  }
+  for (const name of ["PINVOU_REMOTE_ENROLLMENT_HMAC_KEY", "PINVOU_REMOTE_PAIRING_HMAC_KEY"]) {
+    if (isExampleHmacKey(entries.get(name))) fail("controller_env_hmac_key_invalid");
   }
   // Match the implemented server dispatcher; official live claims are not wired.
   if (entries.get("PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT") === "official") {
@@ -160,7 +164,14 @@ export async function validateControllerEnvironmentFile(
     resolvedPath,
   });
   const source = await readFile(expectedPath, "utf8");
-  validateControllerEnvironment(parseControllerEnvironment(source), { expectedFeatureFlag });
+  const entries = parseControllerEnvironment(source);
+  validateControllerEnvironment(entries, { expectedFeatureFlag });
+  for (const warning of controllerDeploymentWarnings(entries)) console.warn(`[controller-preflight-warning] ${warning}`);
+}
+
+export function controllerDeploymentWarnings(entries) {
+  return ["true", "1"].includes(entries.get("PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION"))
+    ? ["self_registration_requires_public_wss_tls_termination"] : [];
 }
 
 // Check every ancestor before install -d can follow links or change ownership.

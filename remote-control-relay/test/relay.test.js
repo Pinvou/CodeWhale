@@ -498,6 +498,30 @@ test("public production: a closing socket holds capacity until pending authoriza
   }
 });
 
+test("public production: relay-level revocation rejects re-enrollment before anonymous registry writes", { timeout: 90_000 }, async () => {
+  const env = selfRegistrationEnvironment("relay-revoked");
+  const isolated = await spawnRelay(env);
+  const id = `ep_${crypto.randomBytes(12).toString("hex")}`;
+  const access = crypto.randomBytes(32).toString("base64url");
+  const secret = crypto.randomBytes(32).toString("base64url");
+  let desktop, denied;
+  try {
+    desktop = await registerDesktop(id, access, secret, isolated.wsUrl, 15_000, true);
+    const before = await enrollmentSnapshot(env.PINVOU_REMOTE_CONTROLLER_STATE_PATH);
+    const revoked = nextMessage(desktop.ws, "desktop_endpoint_revoked", 15_000);
+    desktop.ws.send(JSON.stringify({ v: 2, type: "desktop_endpoint_revoke", endpoint_id: id, desktop_secret: secret }));
+    await revoked;
+    denied = await openControllerSocket(isolated.wsUrl);
+    const response = nextMessage(denied, "error", 15_000);
+    denied.send(JSON.stringify({ v: 2, type: "desktop_endpoint_register", endpoint_id: id,
+      access_token: access, desktop_secret: secret }));
+    assert.equal((await response).code, "endpoint_revoked");
+    assert.deepEqual(await enrollmentSnapshot(env.PINVOU_REMOTE_CONTROLLER_STATE_PATH), before);
+  } finally {
+    closeSocket(desktop?.ws); closeSocket(denied); await stopRelay(isolated.child);
+  }
+});
+
 test("desktop authorization cannot attach one socket to two endpoints", async () => {
   const isolated = await spawnRelay(controllerEnvironment("concurrent-registration"), {
     preload: new URL("./fixtures/desktop-registration-barrier.js", import.meta.url).href, ipc: true,
@@ -1607,6 +1631,43 @@ test("official controller fails startup until trusted live claim wiring exists",
     assert.doesNotMatch(output, /pinvou remote relay listening/u);
   } finally {
     await stopRelay(child);
+  }
+});
+
+test("actual controller startup rejects both public pairing HMAC examples before listening", { timeout: 150_000 }, async () => {
+  for (const [index, key] of [
+    "replace-with-at-least-32-random-bytes",
+    "replace-with-at-least-32-independent-random-bytes",
+  ].entries()) {
+    const child = spawn(process.execPath, [join(relayDir, "server.js")], {
+      cwd: relayDir,
+      env: {
+        ...process.env, PORT: String(await getFreePort()),
+        ...controllerEnvironment(`pairing-example-${index}`, {
+          NODE_ENV: "production",
+          PINVOU_REMOTE_HOST: "127.0.0.1",
+          PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "self_hosted",
+          PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: "0",
+          PINVOU_REMOTE_ENROLLMENT_HMAC_PREVIOUS_KEYS_JSON: "[]",
+          PINVOU_REMOTE_PAIRING_HMAC_KEY: key,
+        }),
+      },
+      stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+    });
+    let output = "";
+    let errors = "";
+    child.stdout.on("data", (chunk) => { output += String(chunk); });
+    child.stderr.on("data", (chunk) => { errors += String(chunk); });
+    try {
+      await waitForExit(child, 60_000);
+      assert.equal(child.exitCode, 1);
+      assert.equal(child.signalCode, null, "failure must come from validation, not termination");
+      assert.match(errors, /pairing_digest_key_invalid/u);
+      assert.doesNotMatch(output, /pinvou remote relay listening/u);
+      assert.ok(!output.includes(key) && !errors.includes(key), "startup diagnostics must not echo key material");
+    } finally {
+      await stopRelay(child);
+    }
   }
 });
 

@@ -2354,6 +2354,9 @@ impl AppEngine {
             system_prompt_override: false,
             model: self.bridge.model(),
             workspace: self.workspace.clone(),
+            // CodeWhale #54 normalizes this empty list to the existing single
+            // workspace for both awaited sync and unpublished cold hydration.
+            workspace_roots: Vec::new(),
             mode: AppMode::Agent,
         }
     }

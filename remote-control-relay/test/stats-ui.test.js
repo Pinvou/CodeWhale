@@ -9,6 +9,269 @@ import { JSDOM } from "jsdom";
 const testDir = fileURLToPath(new URL(".", import.meta.url));
 const statsHtml = readFileSync(join(testDir, "..", "web", "stats.html"), "utf8");
 
+for (const [olderStatus, newerStatus] of [[200, 200], [500, 200], [401, 200], [200, 500]]) {
+  test(`overlapping refreshes ignore older ${olderStatus} after newer ${newerStatus}`, async () => {
+    let batch = -1;
+    let releaseOlder;
+    const olderPending = new Promise(resolve => { releaseOlder = resolve; });
+    const dom = new JSDOM(statsHtml, {
+      runScripts: "dangerously",
+      url: "https://www.pinvou.com/pinvou3/stats",
+      beforeParse(window) {
+        window.fetch = async url => {
+          const path = String(url);
+          if (path.endsWith("/session")) return { ok: true, status: 200, json: async () => ({ role: "behavior_analyst" }) };
+          if (path.includes("/behavior/overview")) batch++;
+          const requestBatch = batch;
+          if (path.includes("/behavior/models")) {
+            if (requestBatch === 1) await olderPending;
+            const status = requestBatch === 1 ? olderStatus : requestBatch === 2 ? newerStatus : 200;
+            if (status !== 200) return { ok: false, status };
+          }
+          const value = path.includes("/behavior/overview")
+            ? { range: "30", data_status: "ready", metrics: { task_success_count: requestBatch * 100 + 42 } }
+            : { range: "30", rows: [{ model_key: `model-${requestBatch}`, tool_key: `tool-${requestBatch}` }] };
+          return { ok: true, status: 200, json: async () => value };
+        };
+        window.setInterval = () => 1;
+        window.clearInterval = () => {};
+      },
+    });
+    try {
+      const wait = () => new Promise(resolve => dom.window.setTimeout(resolve, 20));
+      await wait();
+      const { document } = dom.window;
+      document.querySelector("#refreshButton").click();
+      await wait();
+      document.querySelector("#refreshButton").click();
+      await wait();
+      assert.equal(document.querySelector("#taskSuccess").textContent, "242");
+      releaseOlder();
+      await wait();
+      assert.equal(document.querySelector("#taskSuccess").textContent, "242");
+      assert.match(document.querySelector("#toolCallRows").textContent, /tool-2/);
+      assert.match(document.querySelector("#modelRows").textContent, newerStatus === 200 ? /model-2/ : /model-0/);
+      assert.equal(document.querySelector("#behaviorLoadStatus").classList.contains("hidden"), newerStatus === 200);
+      assert.equal(document.querySelector("#loginLayer").classList.contains("hidden"), true);
+      assert.match(document.querySelector("#refreshButton").textContent, newerStatus === 200 ? /已更新/ : /部分失败/);
+    } finally {
+      releaseOlder();
+      dom.window.close();
+    }
+  });
+}
+
+for (const olderStatus of [200, 401]) {
+  test(`an older delayed session ${olderStatus} cannot restart refresh or undo login`, async () => {
+    let sessionCount = 0;
+    let overviewCount = 0;
+    let releaseSession;
+    const pending = new Promise(resolve => { releaseSession = resolve; });
+    const dom = new JSDOM(statsHtml, {
+      runScripts: "dangerously",
+      url: "https://www.pinvou.com/pinvou3/stats",
+      beforeParse(window) {
+        window.fetch = async url => {
+          const path = String(url);
+          if (path.endsWith("/session")) {
+            const request = sessionCount++;
+            if (request === 1) {
+              await pending;
+              if (olderStatus !== 200) return { ok: false, status: olderStatus };
+            }
+            return { ok: true, status: 200, json: async () => ({ role: "behavior_analyst" }) };
+          }
+          if (path.includes("/behavior/overview")) overviewCount++;
+          return { ok: true, status: 200, json: async () => ({ range: "30", rows: [], metrics: { task_success_count: overviewCount } }) };
+        };
+        window.setInterval = () => 1;
+        window.clearInterval = () => {};
+      },
+    });
+    try {
+      const wait = () => new Promise(resolve => dom.window.setTimeout(resolve, 20));
+      await wait();
+      const { document } = dom.window;
+      document.querySelector("#refreshButton").click();
+      await wait();
+      document.querySelector("#refreshButton").click();
+      await wait();
+      assert.equal(overviewCount, 2);
+      releaseSession();
+      await wait();
+      assert.equal(overviewCount, 2);
+      assert.equal(document.querySelector("#taskSuccess").textContent, "2");
+      assert.equal(document.querySelector("#loginLayer").classList.contains("hidden"), true);
+    } finally {
+      releaseSession();
+      dom.window.close();
+    }
+  });
+}
+
+test("an older bulk result cannot overwrite a section that switched away and back", async () => {
+  let modelRequests = 0;
+  let releaseOlder;
+  const pending = new Promise(resolve => { releaseOlder = resolve; });
+  const dom = new JSDOM(statsHtml, {
+    runScripts: "dangerously",
+    url: "https://www.pinvou.com/pinvou3/stats",
+    beforeParse(window) {
+      window.fetch = async url => {
+        const path = String(url);
+        if (path.endsWith("/session")) return { ok: true, status: 200, json: async () => ({ role: "behavior_analyst" }) };
+        const range = new URL(path, "https://www.pinvou.com").searchParams.get("range") || "30";
+        let modelKey;
+        if (path.includes("/behavior/models")) {
+          const request = modelRequests++;
+          if (request === 1) await pending;
+          modelKey = `model-${request}`;
+        }
+        return { ok: true, status: 200, json: async () => ({ range, rows: [{ model_key: modelKey }] }) };
+      };
+      window.setInterval = () => 1;
+      window.clearInterval = () => {};
+    },
+  });
+  try {
+    const wait = () => new Promise(resolve => dom.window.setTimeout(resolve, 20));
+    await wait();
+    const { document } = dom.window;
+    document.querySelector("#refreshButton").click();
+    await wait();
+    document.querySelector('[data-behavior-section="models"] [data-range="7"]').click();
+    await wait();
+    document.querySelector('[data-behavior-section="models"] [data-range="30"]').click();
+    await wait();
+    assert.match(document.querySelector("#modelRows").textContent, /model-3/);
+    releaseOlder();
+    await wait();
+    assert.match(document.querySelector("#modelRows").textContent, /model-3/);
+    assert.equal(document.querySelector('[data-behavior-section="models"] button.active').dataset.range, "30");
+  } finally {
+    releaseOlder();
+    dom.window.close();
+  }
+});
+
+for (const section of ["models", "summary"]) {
+  test(`a full refresh preserves an in-flight ${section} range switch`, async () => {
+    let releaseSwitch;
+    const pending = new Promise(resolve => { releaseSwitch = resolve; });
+    const dom = new JSDOM(statsHtml, {
+      runScripts: "dangerously",
+      url: "https://www.pinvou.com/pinvou3/stats",
+      beforeParse(window) {
+        window.fetch = async url => {
+          const path = String(url);
+          if (path.endsWith("/session")) return { ok: true, status: 200, json: async () => ({ role: "behavior_analyst" }) };
+          const range = new URL(path, "https://www.pinvou.com").searchParams.get("range") || "30";
+          if (path.includes(section === "models" ? "/behavior/models" : "/behavior/overview") && range === "7") await pending;
+          return { ok: true, status: 200, json: async () => ({ range, metrics: { task_success_count: Number(range) }, rows: [{ model_key: `model-${range}` }] }) };
+        };
+        window.setInterval = () => 1;
+        window.clearInterval = () => {};
+      },
+    });
+    try {
+      const wait = () => new Promise(resolve => dom.window.setTimeout(resolve, 20));
+      await wait();
+      const { document } = dom.window;
+      document.querySelector(`[data-behavior-section="${section}"] [data-range="7"]`).click();
+      await wait();
+      document.querySelector("#refreshButton").click();
+      await wait();
+      releaseSwitch();
+      await wait();
+      if (section === "models") assert.match(document.querySelector("#modelRows").textContent, /model-7/);
+      else assert.equal(document.querySelector("#taskSuccess").textContent, "7");
+      assert.equal(document.querySelector(`[data-behavior-section="${section}"] button.active`).dataset.range, "7");
+      assert.equal(document.querySelector(`[data-behavior-section="${section}"]`).getAttribute("aria-busy"), "false");
+    } finally {
+      releaseSwitch();
+      dom.window.close();
+    }
+  });
+}
+
+for (const failedPath of ["/behavior/overview", "/behavior/models", "/commercial/overview"]) {
+  test(`behavior dashboard isolates ${failedPath} failures and recovers on refresh`, async () => {
+    let fail = true;
+    let successCount = 42;
+    const dom = new JSDOM(statsHtml, {
+      runScripts: "dangerously",
+      url: "https://www.pinvou.com/pinvou3/stats",
+      beforeParse(window) {
+        window.fetch = async url => {
+          const path = String(url);
+          if (fail && path.includes(failedPath)) return { ok: false, status: 400 };
+          const value = path.endsWith("/session") ? { role: "behavior_analyst" }
+            : path.includes("/behavior/overview") ? {
+              range: "30", data_status: "ready", metrics: { task_success_count: successCount },
+            } : { range: "30", rows: [{ tool_key: "working-tool", model_key: "working-model" }] };
+          return { ok: true, status: 200, json: async () => value };
+        };
+        window.setInterval = () => 1;
+        window.clearInterval = () => {};
+      },
+    });
+    try {
+      const wait = () => new Promise(resolve => dom.window.setTimeout(resolve, 20));
+      await wait();
+      const { document } = dom.window;
+      const banner = document.querySelector("#behaviorLoadStatus");
+      assert.equal(banner.classList.contains("hidden"), false);
+      assert.match(banner.textContent, /加载失败/);
+      assert.match(document.querySelector("#toolCallRows").textContent, /working-tool/);
+      if (failedPath === "/behavior/overview") {
+        assert.equal(document.querySelector("#taskSuccess").textContent, "—");
+        assert.match(document.querySelector("#activationFunnelRows").textContent, /加载失败/);
+        assert.match(document.querySelector("#modelRows").textContent, /working-model/);
+      } else {
+        assert.equal(document.querySelector("#taskSuccess").textContent, "42");
+      }
+      document.querySelector("#refreshButton").click();
+      await wait();
+      assert.match(document.querySelector("#refreshButton").textContent, /部分失败/);
+      fail = false;
+      document.querySelector("#refreshButton").click();
+      await wait();
+      assert.equal(banner.classList.contains("hidden"), true);
+      assert.equal(document.querySelector("#taskSuccess").textContent, "42");
+      assert.match(document.querySelector("#modelRows").textContent, /working-model/);
+      fail = true;
+      successCount = 99;
+      document.querySelector("#refreshButton").click();
+      await wait();
+      assert.equal(banner.classList.contains("hidden"), false);
+      assert.match(document.querySelector("#modelRows").textContent, /working-model/);
+      assert.equal(document.querySelector("#taskSuccess").textContent, failedPath === "/behavior/overview" ? "42" : "99");
+    } finally {
+      dom.window.close();
+    }
+  });
+}
+
+test("a behavior API authentication failure returns to login", async () => {
+  const dom = new JSDOM(statsHtml, {
+    runScripts: "dangerously",
+    url: "https://www.pinvou.com/pinvou3/stats",
+    beforeParse(window) {
+      window.fetch = async url => String(url).endsWith("/session")
+        ? { ok: true, status: 200, json: async () => ({ role: "behavior_analyst" }) }
+        : { ok: false, status: 401 };
+      window.setInterval = () => 1;
+      window.clearInterval = () => {};
+    },
+  });
+  try {
+    await new Promise(resolve => dom.window.setTimeout(resolve, 20));
+    assert.equal(dom.window.document.querySelector("#loginLayer").classList.contains("hidden"), false);
+  } finally {
+    dom.window.close();
+  }
+});
+
 test("device details expose sortable conversation counts without encoding damage", () => {
   assert.match(statsHtml, /<span>今日对话次数<\/span>/);
   assert.match(statsHtml, /id="todayTurns"/);

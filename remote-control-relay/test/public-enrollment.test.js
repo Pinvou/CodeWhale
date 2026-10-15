@@ -26,6 +26,7 @@ function fixture(selfRegistration = true, overrides = {}) {
     getPathPolicy: () => ({ controller_state_path: statePath, legacy_web_state_path: legacyPath }),
     readNamespaceRevision: () => ({ store_revision: revision, namespace_revision: revision }),
     readNamespace: () => ({ store_revision: revision, namespace_revision: revision, value: structuredClone(value) }),
+    readCapacity: () => ({ max_bytes: 16 * 1024 * 1024 }),
     async compareAndSwap(_name, expected, next) {
       await Promise.resolve();
       if (expected !== revision) throw Object.assign(new Error("conflict"), { code: "namespace_revision_conflict" });
@@ -48,7 +49,7 @@ test("public production first registration binds both roles atomically without a
   assert.equal(registry.getControllerReadiness(ENDPOINT).web_ready, true);
   assert.equal(registry.getControllerReadiness(ENDPOINT).desktop_ready, true);
   const exported = registry.exportSnapshot().registry;
-  assert.equal(exported.entries[0].audit.source, "self_hosted");
+  assert.equal(exported.entries[0].audit.source, "self_registration");
   assert.equal(JSON.stringify(exported).includes(ACCESS), false);
   assert.equal(JSON.stringify(exported).includes(DESKTOP), false);
 });

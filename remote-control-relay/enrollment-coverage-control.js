@@ -1,9 +1,10 @@
 import crypto from "node:crypto";
 import http from "node:http";
 import { EnrollmentMigrationHandler } from "./enrollment-migration-handler.js";
-import { ENROLLMENT_NAMESPACE, loadEnrollmentRegistryConfig,
+import { ENROLLMENT_NAMESPACE, SELF_REGISTRATION_LIMITS, loadEnrollmentRegistryConfig,
   enrollmentKeyringFingerprint, enrollmentKeyringUsesKey } from "./enrollment-registry.js";
 import { isEnrollmentEndpointIdentifier } from "./identifier-contract.js";
+import { isExampleHmacKey } from "./hmac-key-config.js";
 
 const REQUEST_SCHEMA = "pinvou-enrollment-coverage-request";
 const RESPONSE_SCHEMA = "pinvou-enrollment-coverage-response";
@@ -47,7 +48,7 @@ export function loadEnrollmentCoverageControlConfig(env = process.env, { require
   const port = Number(portText);
   if (port < 1024 || port > 65535) fail("coverage_control_port_invalid");
   const key = Buffer.from(keyText || "", "utf8");
-  if (key.length < 32 || key.length > 4096
+  if (key.length < 32 || key.length > 4096 || isExampleHmacKey(keyText)
     || keyText === env.PINVOU_REMOTE_ENROLLMENT_HMAC_KEY
     || keyText === env.PINVOU_REMOTE_PAIRING_HMAC_KEY) fail("coverage_control_key_invalid");
   if (env.PINVOU_REMOTE_ENROLLMENT_HMAC_PREVIOUS_KEYS_JSON
@@ -60,7 +61,9 @@ function storeBinding(env, key) {
   // The disabled/default policy keeps the released v1 binding byte-for-byte.
   // An enabled anonymous registration policy must change the attested binding.
   const { self_registration, ...legacyConfig } = config;
-  const boundConfig = self_registration ? { ...legacyConfig, self_registration: true } : legacyConfig;
+  const boundConfig = self_registration
+    ? { ...legacyConfig, self_registration: true, self_registration_limits: SELF_REGISTRATION_LIMITS }
+    : legacyConfig;
   // Bind the configured store, deployment policy and credential key material
   // without putting paths, keys or endpoint identities on the control wire.
   return mac(key, "store", Buffer.from(JSON.stringify({ config: boundConfig,

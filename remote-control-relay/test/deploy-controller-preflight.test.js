@@ -10,6 +10,7 @@ import {
   validateControllerEnvironment,
   validateControllerEnvironmentMetadata,
   validateControllerStateDirectories,
+  controllerDeploymentWarnings,
 } from "../scripts/deploy-controller-preflight.mjs";
 import { validateControllerRouteSmokeResponse } from "../scripts/controller-route-smoke.mjs";
 import { loadEnrollmentRegistryConfig } from "../enrollment-registry.js";
@@ -61,6 +62,20 @@ test("production controller environment matches the supported secure runtime pro
   );
 });
 
+test("production preflight rejects public HMAC examples in either role without disclosing them", () => {
+  for (const name of ["PINVOU_REMOTE_ENROLLMENT_HMAC_KEY", "PINVOU_REMOTE_PAIRING_HMAC_KEY"]) {
+    for (const example of [
+      "replace-with-at-least-32-random-bytes",
+      "replace-with-at-least-32-independent-random-bytes",
+    ]) {
+      const entries = parseControllerEnvironment(VALID_ENV);
+      entries.set(name, example);
+      assert.throws(() => validateControllerEnvironment(entries),
+        error => error.code === "controller_env_hmac_key_invalid" && error.message === error.code && !error.cause);
+    }
+  }
+});
+
 test("production controller environment rejects undeclared keys", () => {
   assert.throws(
     () => validateControllerEnvironment(parseControllerEnvironment(`${VALID_ENV}\nPINVOU_UNREVIEWED_ESCAPE_HATCH=enabled\n`)),
@@ -79,6 +94,18 @@ test("production preflight accepts explicit anonymous self-registration with TOF
       `${VALID_ENV}\nPINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION=${value}\n`,
     )), /controller_env_self_registration_invalid/u);
   }
+});
+
+test("public self-registration preflight warns that the credential hop requires WSS TLS termination", () => {
+  const defaults = parseControllerEnvironment(VALID_ENV);
+  assert.deepEqual(controllerDeploymentWarnings(defaults), []);
+  for (const enabled of ["true", "1"]) {
+    assert.deepEqual(controllerDeploymentWarnings(new Map([...defaults,
+      ["PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION", enabled]])),
+    ["self_registration_requires_public_wss_tls_termination"]);
+  }
+  assert.deepEqual(controllerDeploymentWarnings(new Map([...defaults,
+    ["PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION", "false"]])), []);
 });
 
 test("production preflight can verify the exact feature-off rollback configuration", () => {

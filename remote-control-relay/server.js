@@ -1,5 +1,6 @@
 import http from "node:http";
 import crypto from "node:crypto";
+import { isExampleHmacKey } from "./hmac-key-config.js";
 import { isIP } from "node:net";
 import { chmod, mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
 import { dirname, extname, relative, resolve } from "node:path";
@@ -213,7 +214,8 @@ async function createControllerRuntime() {
     const digestKeyId = process.env.PINVOU_REMOTE_PAIRING_HMAC_KEY_ID || "";
     const digestKey = process.env.PINVOU_REMOTE_PAIRING_HMAC_KEY || "";
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(digestKeyId)
-      || Buffer.byteLength(digestKey, "utf8") < 32 || Buffer.byteLength(digestKey, "utf8") > 4096) {
+      || Buffer.byteLength(digestKey, "utf8") < 32 || Buffer.byteLength(digestKey, "utf8") > 4096
+      || isExampleHmacKey(digestKey)) {
       throw new Error("pairing_digest_key_invalid");
     }
     const signingKeyId = process.env.PINVOU_REMOTE_RELAY_SIGNING_KEY_ID || "";

@@ -460,6 +460,10 @@ async function expand(page) {
     await wait(120);
     const initialStatusGated = window.__TAURI_INVOKES__
       .filter(call => call.cmd === 'browser_show_native_surface').length === nativeShowsBeforeInitialStatus;
+    // BrowserView is lazy: browser_prepare may resolve before the chunk mounts
+    // and starts its delayed status read. Wait for that read instead of losing
+    // an optional early resolver call and leaving the test status pending.
+    await window.__uiWait__(() => typeof window.__RESOLVE_BROWSER_STATUS__ === 'function');
     window.__RESOLVE_BROWSER_STATUS__?.();
     await window.__uiWait__(() => [...window.__TAURI_INVOKES__].some(call => call.cmd === 'browser_prepare'));
     const prepareCall = [...window.__TAURI_INVOKES__].reverse().find(call => call.cmd === 'browser_prepare');

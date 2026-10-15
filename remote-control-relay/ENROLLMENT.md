@@ -44,6 +44,19 @@ Set these variables before opening the registry:
 | `PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU` | Optional `1`/`true`; accepted only with `deployment=development` and `NODE_ENV=development` or `test`. |
 | `PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION` | Optional `true`/`1`, default false. In `self_hosted`, permit a native device's first complete two-role registration without account login or administrator import. Existing and revoked identities retain their credential checks. |
 
+The example defaults for both HMAC secrets are empty and fail validation. The two
+old public `replace-with-at-least-32-...` placeholder values are also rejected,
+including when copied into the other role. Generate each secret independently
+with a cryptographic random generator (for example, 32 random bytes encoded as
+base64), import it directly into the deployment secret manager, and inject it at
+startup. Do not reuse enrollment/pairing secrets or capture secret output in logs,
+shell history, PRs or repository files. The 32–4096 UTF-8 byte check and placeholder
+rejection do not establish entropy for arbitrary administrator-supplied values.
+
+The same public examples are rejected for the independent coverage-control
+secret; deployment preflight rejects them for enrollment and pairing before
+runtime startup. Errors report only the validation code, never the secret.
+
 `official` and the default `self_hosted` policy reject an unknown endpoint. A production
 runtime refuses both development deployment mode and the development TOFU
 switch. Self-hosted production uses an explicit administrator import unless the
@@ -66,6 +79,15 @@ in the protected Relay environment. Keep `NODE_ENV=production`,
 `PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=false`. The existing desktop request
 already carries its two independent credentials; no client wire change is needed.
 
+The public desktop-to-Relay registration hop **must use `wss://` with validated
+TLS certificates**. Its first frame carries both long-lived credentials; plain
+`ws://` on an untrusted network permits passive identity theft, reconnect,
+pairing and revocation by the observer. A private `ws://` listener is suitable
+only behind TLS termination on loopback or an independently protected transport;
+it must not be exposed publicly. Deployment preflight emits
+`self_registration_requires_public_wss_tls_termination` when this policy is on;
+this warning does not inspect or certify the reverse proxy's TLS configuration.
+
 Only the full `desktop_endpoint_register` path may create an unknown identity.
 It accepts the native `ep_` plus 24 random alphanumeric characters format and
 distinct, valid Web and desktop credentials. Both role digests are persisted in
@@ -85,13 +107,64 @@ the protected environment enables this policy.
 Audit and wire responses contain no raw credentials. The coverage binding changes
 when this policy is enabled, and preserves its released v1 bytes when disabled.
 
+New anonymous entries are attributed to `audit.source=self_registration`, separate
+from administrator `self_hosted` imports. They share a fixed quota of 512 entries
+and 512 KiB of serialized entry data, including revoked entries; quotas are checked
+before writing. Their queued store CAS must also leave 1 MiB for other writers
+(one quarter of the total limit on stores smaller than 4 MiB). That headroom check
+uses the actual queued state, so a concurrent pairing writer cannot make a stale
+capacity measurement admit another anonymous write. Rejection leaves the store
+writable: known credentials reconnect and administrators/pairing may use the
+reserved capacity. This bounds anonymous durable growth; it does not promise
+unlimited trusted writes or fair admission for unknown devices during a Sybil flood.
+Operators still need connection/source limits, storage monitoring and upstream
+abuse controls. Historical entries recorded as `self_hosted` cannot be reliably
+reclassified and are never guessed or automatically removed.
+
+### Offline inventory and deliberate cleanup
+
+Stop the live store owner first. The maintenance CLI uses the existing exclusive
+writer lock and private input/output checks, not a second live writer or raw JSON
+editing. Back up the complete store and the separate legacy revocation state
+before removing entries. With the protected
+deployment environment loaded, run:
+
+```sh
+node remote-control-relay/scripts/enrollment-migrate.js --list-self-registrations --output /private/enrollment/inventory.json
+node remote-control-relay/scripts/enrollment-migrate.js --check-self-registration-cleanup --input /private/enrollment/selected.json
+node remote-control-relay/scripts/enrollment-migrate.js --apply-self-registration-cleanup --input /private/enrollment/selected.json
+```
+
+Create `selected.json` from the private inventory by retaining only explicitly
+chosen entries and the original namespace revision. Inventory contains IDs,
+revisions and status, never credentials or digests; keep its directory mode 0700
+and file mode 0600. Check mode does not write; apply rejects stale revisions,
+mixed administrator/anonymous selections, duplicates and revoked entries before
+any CAS. The CLI does not infer inactivity or silently choose a retention period.
+Cleanup removes the selected **active** registration. Its Web credentials cannot
+join until the desktop registers again; reusing the same credentials can restore
+the old sharing link. Cleanup is de-registration, not permanent revocation. A
+desktop may register again under the public policy, so cleanup alone is not an
+abuse-blocking mechanism. Revoked records remain
+intact and consume quota to prevent resurrection. Neither cleanup nor quota
+rejection deletes unrelated registrations, migration records or pairing state.
+
+The new audit origin is an extension of the v3 entry format. Existing entries are
+unchanged and still readable by this version; binaries predating this origin
+reject new-origin entries. Use a rollback build that understands `self_registration`
+and disable new admission when rolling back policy. Do not run an older binary
+directly against the updated live registry, erase revocations, or restore a stale
+whole-store backup just to remove the new origin. A stopped-owner backup retains
+both roles and audit origins for reviewed recovery.
+
 This policy authorizes possession of a new random endpoint's credentials. It does
 not establish a human account or vendor-issued device identity. Revocation binds
 the endpoint ID; resetting a device's identity creates a new enrollment candidate.
 Operators of a public service must monitor aggregate creation/capacity pressure.
-Retain the complete registry and keyring when rolling back. A rollback to the
-previous administrator-only release disables new-device onboarding; already
-enrolled role digests keep their schema and authentication meaning.
+Retain the complete registry and keyring when rolling back. A compatible
+administrator-only rollback build disables new-device onboarding; already
+enrolled role digests keep their authentication meaning. The new audit origin
+must remain readable by that build as described above.
 
 ### Gateway transport keepalive
 
@@ -387,6 +460,13 @@ active key. Every existing digest is verified with its exact persisted `key_id`;
 unknown keys still fail closed. A new key ID must identify new independently
 generated key material; never replace bytes under an existing ID. Endpoint IDs,
 role domains, CAS revisions, revoked entries and migration history are preserved.
+
+Public example values are also rejected in retained enrollment keys. A deployment
+that used one cannot use the phased procedure below to retain that key: replacing
+it immediately invalidates digests made with it. Do not delete registry history
+or silently re-enroll endpoints to work around this refusal. Record the affected
+key IDs and coordinate a separately reviewed credential recovery before changing
+such a deployment; no automatic migration or compatibility bypass is provided.
 
 1. Before the change, back up the protected primary/backup pair and secret-manager
    key versions using the documented stopped-service procedure. Record only key
