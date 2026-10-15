@@ -290,8 +290,10 @@ impl std::fmt::Debug for ExtraTools {
 pub struct EngineConfig {
     /// Model identifier to use for responses.
     pub model: String,
-    /// Route/offering limits for the active provider+model, when the runtime
-    /// route resolver had concrete catalog facts.
+    /// Route/offering limits for the active provider+model. With no
+    /// executable candidate arriving alongside it, this value is stored as
+    /// the host's declaration for re-derivation carry: pass the budget the
+    /// host itself stands behind, not a resolver-merged receipt.
     pub active_route_limits: Option<codewhale_config::route::RouteLimits>,
     /// Workspace root for tool execution and file operations.
     pub workspace: PathBuf,
@@ -1169,11 +1171,15 @@ pub struct Engine {
     /// a re-derivation onto the restored one.
     active_route_limits_model: Option<String>,
     /// The subset of `active_route_limits` the embedding host explicitly
-    /// declared, as opposed to the catalog-merged effective value. Written in
-    /// lockstep with the effective limits so a re-derivation can re-state
-    /// exactly the host's own budget: catalog, operator-config, and roster
-    /// facts must keep refreshing from the live config on engine-self-started
-    /// turns instead of being pinned stale under host provenance.
+    /// declared, as opposed to the catalog-merged effective value. A
+    /// re-derivation re-states exactly this subset so catalog,
+    /// operator-config, and roster facts keep refreshing from the live config
+    /// on engine-self-started turns instead of being pinned stale under host
+    /// provenance. Candidate-bearing installs derive it from the candidate's
+    /// `EmbeddingHost` provenance and keep a standing declaration across
+    /// value-equal re-installs (see `declared_limits_for_install`); where no
+    /// executable candidate exists — engine construction, `Op::SetModel` —
+    /// the payload itself is stored as the declaration.
     active_route_declared_limits: Option<codewhale_config::route::RouteLimits>,
     active_route_capabilities: codewhale_config::route::RouteCapabilities,
     rx_op: mpsc::Receiver<Op>,
@@ -1665,6 +1671,31 @@ impl Engine {
         format!("{message}\n\n{hint}")
     }
 
+    /// The declaration to install alongside an incoming effective triple.
+    ///
+    /// A value-preserving re-install does not retract a standing declaration:
+    /// fresh re-derivations routinely restate the exact installed triple with
+    /// no `EmbeddingHost` provenance, and clearing the declaration there would
+    /// silently drop the host's standing budget on the first such turn — the
+    /// stale-budget window this field exists to close. A changed effective
+    /// value, a different model, or an incoming candidate that does carry a
+    /// declaration always rewrites the pair.
+    fn declared_limits_for_install(
+        &self,
+        model: &str,
+        incoming_effective: Option<codewhale_config::route::RouteLimits>,
+        incoming_declared: Option<codewhale_config::route::RouteLimits>,
+    ) -> Option<codewhale_config::route::RouteLimits> {
+        if incoming_declared.is_none()
+            && incoming_effective == self.active_route_limits
+            && self.active_route_limits_model.as_deref() == Some(model)
+        {
+            self.active_route_declared_limits
+        } else {
+            incoming_declared
+        }
+    }
+
     /// Install a route that the host already resolved and client-preflighted.
     /// No identity guessing or config re-resolution is allowed at this
     /// boundary: the descriptor is the single authority for the turn.
@@ -1679,12 +1710,13 @@ impl Engine {
         let api_config = *route.config;
         let client = route.client;
 
+        let preserved_declared = self.declared_limits_for_install(&model, limits, declared_limits);
         self.api_provider = provider;
         self.api_provider_identity = identity;
         self.api_provider_id = provider_id;
         self.api_config = api_config;
         self.active_route_limits = limits;
-        self.active_route_declared_limits = declared_limits;
+        self.active_route_declared_limits = preserved_declared;
         self.active_route_limits_model = Some(model.clone());
         self.active_route_capabilities = capabilities;
         self.api_key_env_only_recovery = Self::env_only_api_key_recovery_hint(&self.api_config);
@@ -1724,12 +1756,13 @@ impl Engine {
             .map(Ok)
             .unwrap_or_else(|| DeepSeekClient::from_candidate(&api_config, &route.candidate));
 
+        let preserved_declared = self.declared_limits_for_install(&model, limits, declared_limits);
         self.api_provider = provider;
         self.api_provider_identity = identity;
         self.api_provider_id = provider_id;
         self.api_config = api_config;
         self.active_route_limits = limits;
-        self.active_route_declared_limits = declared_limits;
+        self.active_route_declared_limits = preserved_declared;
         self.active_route_limits_model = Some(model.clone());
         self.active_route_capabilities = capabilities;
         self.api_key_env_only_recovery = Self::env_only_api_key_recovery_hint(&self.api_config);
@@ -1784,12 +1817,16 @@ impl Engine {
             let Some(mut declared) = self.active_route_declared_limits else {
                 return Ok(route);
             };
-            // Declarations are stored verbatim from embedder and op payloads;
-            // degrade out-of-range values the way every other limit read
-            // point does instead of failing the self-started turn.
-            declared.context_tokens = declared
-                .context_tokens
-                .filter(|tokens| *tokens > 0 && *tokens <= u64::from(u32::MAX));
+            // Declarations are stored verbatim from embedder and op payloads.
+            // An out-of-range context declaration would fail the re-resolution
+            // outright (`append_embedding_host_limit_overrides` rejects it)
+            // and with it the self-started turn, so degrade it to unknown the
+            // way every other context read point does. Input/output
+            // declarations cannot fail resolution and stay verbatim; the
+            // budget read points range-filter them.
+            declared.context_tokens = declared.context_tokens.filter(|tokens| {
+                *tokens > 0 && *tokens <= codewhale_config::route::RouteLimits::MAX_WIRE_TOKENS
+            });
             if !declared.has_known_limit() {
                 return Ok(route);
             }
@@ -2233,7 +2270,10 @@ impl Engine {
         };
 
         let active_route_limits = config.active_route_limits;
-        // The embedder-supplied value is a declaration, not a resolver merge.
+        // No executable candidate arrives at construction, so the
+        // embedder-supplied value is stored as the declaration itself; when
+        // the host resolved it through the resolver it may merge catalog
+        // facts, which this boundary cannot distinguish.
         let active_route_declared_limits = active_route_limits;
         let active_route_limits_model = active_route_limits.map(|_| config.model.clone());
         let active_turn_tool_security = config.turn_tool_security.clone();
@@ -5529,7 +5569,6 @@ impl Engine {
         let provider_identity = route.identity.key.clone();
         let model = route.model.clone();
         let route_limits = crate::route_budget::known_route_limits(route.candidate.limits());
-        let route_declared_limits = route.candidate.embedding_host_declared_limits();
         let route_capabilities = route.candidate.capabilities();
         let route_api_config = route.config.clone();
         // Freeze the billing receipt here, while `route` is still the single
@@ -5715,9 +5754,11 @@ impl Engine {
 
         // Apply the host-resolved route budget before building the request.
         // The model, limits, and compaction policy arrive in one operation so
-        // no provider request can observe a partially updated route.
+        // no provider request can observe a partially updated route. The
+        // declaration was already paired with these limits by the install
+        // above; restating it here would clobber a value-equal preservation
+        // (see `declared_limits_for_install`).
         self.active_route_limits = route_limits;
-        self.active_route_declared_limits = route_declared_limits;
         self.active_route_limits_model = Some(model.clone());
         self.config.compaction = compaction;
         // Headless/runtime hosts supply their durable turn owner. Interactive
