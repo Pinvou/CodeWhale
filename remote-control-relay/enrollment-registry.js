@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { isExampleHmacKey } from "./hmac-key-config.js";
 import { isControllerIdentifier, isEnrollmentEndpointIdentifier, isMigrationRequestIdentifier } from "./identifier-contract.js";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
@@ -609,7 +610,8 @@ export function loadEnrollmentRegistryConfig(env = process.env) {
   }
   if (!KEY_ID.test(env.PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID || "")) fail("enrollment_hmac_key_id_invalid");
   const hmacKey = Buffer.from(env.PINVOU_REMOTE_ENROLLMENT_HMAC_KEY || "", "utf8");
-  if (hmacKey.length < 32 || hmacKey.length > 4096) fail("enrollment_hmac_key_invalid");
+  if (hmacKey.length < 32 || hmacKey.length > 4096
+    || isExampleHmacKey(env.PINVOU_REMOTE_ENROLLMENT_HMAC_KEY)) fail("enrollment_hmac_key_invalid");
   const keys = new Map([[env.PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID, hmacKey]]);
   const previousJson = env.PINVOU_REMOTE_ENROLLMENT_HMAC_PREVIOUS_KEYS_JSON;
   if (previousJson !== undefined && previousJson !== "") {
@@ -625,7 +627,8 @@ export function loadEnrollmentRegistryConfig(env = process.env) {
         || typeof item.key_id !== "string" || !KEY_ID.test(item.key_id)
         || keys.has(item.key_id) || typeof item.key !== "string") fail("enrollment_hmac_previous_keys_invalid");
       const key = Buffer.from(item.key, "utf8");
-      if (key.length < 32 || key.length > 4096 || key.toString("utf8") !== item.key) {
+      if (key.length < 32 || key.length > 4096 || key.toString("utf8") !== item.key
+        || isExampleHmacKey(item.key)) {
         fail("enrollment_hmac_previous_keys_invalid");
       }
       keys.set(item.key_id, key);

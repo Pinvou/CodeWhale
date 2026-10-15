@@ -521,9 +521,8 @@ impl Pinvou3Bridge {
         crate::platform::startup::mark("bridge_boot:prefs_load:start");
         let prefs = UserPrefs::load();
         crate::platform::startup::mark("bridge_boot:prefs_load:done");
-        if !paths::settings_path().exists() {
-            prefs.save().ok();
-        }
+        // Same locked step as `update_transaction` — see `save_boot_defaults_if_absent`.
+        prefs::save_boot_defaults_if_absent(&prefs);
         let this = Self {
             prefs,
             bundle,
@@ -2174,6 +2173,9 @@ impl Pinvou3Bridge {
             terminal_chrome_enabled,
             advisor_config,
             subagent_state_root,
+            // CodeWhale #54 新增：父仓尚未消费多根授权，解构忽略（见下方
+            // EngineConfig 字面量的空集适配）。
+            workspace_roots: _,
         } = EngineConfig::default();
 
         // Hooks have two consumption paths: turn_loop runs ToolCallBefore
@@ -2203,6 +2205,9 @@ impl Pinvou3Bridge {
             // pinvou3 override
             model: self.model(),
             workspace: self.workspace.clone(),
+            // CodeWhale #54 多根授权基建：空集经底座 normalize 后等价单根
+            // （workspace 置于位置 0），保持既有行为。
+            workspace_roots: Vec::new(),
             session_id: None,
             allow_shell: self.allow_shell(),
             trust_mode: true,
@@ -4759,6 +4764,8 @@ mod tests {
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::Never,
                     sandbox_mode: None,
+                    // CodeWhale #54：空集保持历史单根判定。
+                    workspace_roots: Vec::new(),
                 })
                 .unwrap()
         };
@@ -4814,6 +4821,8 @@ mod tests {
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::Never,
                     sandbox_mode: None,
+                    // CodeWhale #54：空集保持历史单根判定。
+                    workspace_roots: Vec::new(),
                 })
                 .unwrap()
         };
@@ -4877,6 +4886,8 @@ mod tests {
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::Never,
                     sandbox_mode: None,
+                    // CodeWhale #54：空集保持历史单根判定。
+                    workspace_roots: Vec::new(),
                 })
                 .unwrap()
         };
@@ -5075,6 +5086,8 @@ mod tests {
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::Never,
                     sandbox_mode: None,
+                    // CodeWhale #54：空集保持历史单根判定。
+                    workspace_roots: Vec::new(),
                 })
                 .unwrap()
         };

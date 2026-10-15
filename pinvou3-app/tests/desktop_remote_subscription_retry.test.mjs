@@ -131,3 +131,63 @@ test('pending channel registration is single and its old rejection cannot erase 
     f.feature.stop();
   }
 });
+
+test('a rejected channel callback cannot publish before or after same-owner retry', async () => {
+  const f = fixture((call, off) => call.name === CHANNELS[1] && call.attempt === 1
+    ? Promise.reject(new Error('fake-registration-rejected')) : Promise.resolve(off));
+  const payload = { payload: { status: 'reconnecting', claimRequestId: 'claim-retry',
+    lease: { connectionId: 'connection-retry', controllerLeaseId: 'lease-retry',
+      leaseEpoch: '1', relayEpoch: 'relay-retry', remoteControlGeneration: 'generation-retry' },
+  } };
+  try {
+    await flush();
+    const old = f.calls.find(call => call.name === CHANNELS[1]);
+    const before = JSON.stringify(f.state.desktopRemoteControl);
+    old.callback(payload);
+    assert.equal(JSON.stringify(f.state.desktopRemoteControl), before);
+    f.feature.subscribe();
+    await flush();
+    const replacement = f.calls.find(call => call.name === CHANNELS[1] && call.attempt === 2);
+    assert.ok(replacement);
+    old.callback(payload);
+    assert.equal(JSON.stringify(f.state.desktopRemoteControl), before);
+    replacement.callback(payload);
+    assert.equal(f.state.desktopRemoteControl.controllerConnection.status, 'reconnecting');
+    assert.equal(f.state.desktopRemoteControl.controllerConnection.generation, 'generation-retry');
+  } finally {
+    f.feature.stop();
+  }
+});
+
+test('a registration without a cleanup function retires its callback and permits exact retry', async () => {
+  const f = fixture((call, off) => call.name === CHANNELS[1] && call.attempt === 1
+    ? Promise.resolve(undefined) : Promise.resolve(off));
+  try {
+    await flush();
+    const old = f.calls.find(call => call.name === CHANNELS[1]);
+    const before = JSON.stringify(f.state.desktopRemoteControl);
+    const payload = { payload: { status: 'reconnecting', claimRequestId: 'claim-retry',
+      lease: { connectionId: 'connection-retry', controllerLeaseId: 'lease-retry',
+        leaseEpoch: '1', relayEpoch: 'relay-retry', remoteControlGeneration: 'generation-retry' },
+    } };
+    old.callback(payload);
+    assert.equal(JSON.stringify(f.state.desktopRemoteControl), before);
+    f.feature.subscribe();
+    await flush();
+    assert.equal(f.calls.filter(call => call.name === CHANNELS[1]).length, 2);
+    for (const name of CHANNELS.filter(name => name !== CHANNELS[1])) {
+      assert.equal(f.calls.filter(call => call.name === name).length, 1);
+    }
+    old.callback(payload);
+    assert.equal(JSON.stringify(f.state.desktopRemoteControl), before);
+    const replacement = f.calls.find(call => call.name === CHANNELS[1] && call.attempt === 2);
+    replacement.callback(payload);
+    assert.equal(f.state.desktopRemoteControl.controllerConnection.status, 'reconnecting');
+    assert.equal(f.state.desktopRemoteControl.controllerConnection.generation, 'generation-retry');
+    f.feature.stop();
+    assert.equal(f.released.length, CHANNELS.length);
+    assert.ok(!f.released.includes(old));
+  } finally {
+    f.feature.stop();
+  }
+});
