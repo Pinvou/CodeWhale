@@ -39,7 +39,11 @@ func (r *f06PolicyRepository) SaveOrganizationModelPolicy(_ context.Context, org
 	if actor == uuid.Nil || authorizationVersion != 17 || expected != 7 || mode != "ALLOW_ALL" || len(models) != 0 || key != "f06-policy-original-key" || reason != "controlled update" {
 		panic("policy intent changed")
 	}
-	return OrganizationModelPolicy{OrganizationID: org, Version: 8, Mode: mode, ModelIDs: models}, r.err
+	err := r.err
+	if errors.Is(err, ErrModelUnavailable) {
+		err = errOrganizationPolicyModelUnavailable
+	}
+	return OrganizationModelPolicy{OrganizationID: org, Version: 8, Mode: mode, ModelIDs: models}, err
 }
 
 type f06PolicyValidator struct {
@@ -69,7 +73,7 @@ func TestF06InstalledModelPolicyReceipts(t *testing.T) {
 		deny, unsupported          bool
 	}{
 		{"invoke-denied", "POST", "/chat/completions", "MODEL_POLICY_DENIED", fmt.Errorf("wrapped: %w", ErrModelPolicyDenied), 403, false, false},
-		{"invoke-unavailable", "POST", "/chat/completions", "MODEL_UNAVAILABLE", ErrModelUnavailable, 422, false, false},
+		{"invoke-unavailable", "POST", "/chat/completions", "MODEL_UNAVAILABLE", ErrModelUnavailable, 409, false, false},
 		{"invoke-policy-seam-missing", "POST", "/chat/completions", "MODEL_POLICY_UNAVAILABLE", nil, 503, false, true},
 		{"policy-version", "PUT", "", "MODEL_POLICY_VERSION_CONFLICT", fmt.Errorf("wrapped: %w", ErrModelPolicyVersionConflict), 409, false, false},
 		{"policy-model-unavailable", "PUT", "", "MODEL_UNAVAILABLE", ErrModelUnavailable, 422, false, false},
@@ -110,6 +114,13 @@ func TestF06InstalledModelPolicyReceipts(t *testing.T) {
 			}
 			if strings.Contains(out.Body.String(), "private storage detail") {
 				t.Fatal("storage detail leaked")
+			}
+			marker := ""
+			if tc.method == "POST" && tc.code == "MODEL_UNAVAILABLE" {
+				marker = tc.code
+			}
+			if got := out.Header().Get("X-Pinvou-Model-Rejection-v1"); got != marker {
+				t.Fatalf("conversation marker=%q want=%q", got, marker)
 			}
 			if tc.method == "PUT" && repo.saves != map[bool]int{true: 0, false: 1}[tc.deny] {
 				t.Fatal("permission or installed policy dispatch changed")

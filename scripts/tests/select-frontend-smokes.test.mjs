@@ -67,9 +67,9 @@ test("feature-local changes select core and feature smokes", () => {
   );
 });
 
-test("account platform changes route all five concrete F05 browser smokes", () => {
+test("account platform changes route all six concrete F05 browser smokes", () => {
   const selected = labels(selectFrontendSmokes(["pinvou3-app/src/features/account-platform/PersonalUsageWorkspace.jsx"]));
-  for (const feature of ["model-selection", "native-code", "billing-notice", "usage", "usage-governance"]) {
+  for (const feature of ["model-selection", "model-lifecycle", "native-code", "billing-notice", "usage", "usage-governance"]) {
     assert.ok(selected.includes(`npm:test:account-platform-${feature}-ui`), `${feature} browser smoke must run for account changes`);
     assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/shared/i18n.js"])).includes(`npm:test:account-platform-${feature}-ui`), `${feature} browser smoke must run for shared changes`);
   }

@@ -232,4 +232,46 @@ func TestClosureClaimACKOrder(t *testing.T) {
 			t.Fatal("stale ACK mutated claim", e)
 		}
 	})
+	t.Run("create-original-key-replays-without-repeating-closure-effects", func(t *testing.T) {
+		user, principal := seed(t)
+		key := uuid.NewString()
+		first, err := r.CreateAccountClosure(ctx, principal, key, accountClosureConfirmation)
+		if err != nil || first.Replayed || first.UserID != user {
+			t.Fatal("original create", first, err)
+		}
+		snapshot := func() string {
+			var raw []byte
+			if err := r.pool.QueryRow(ctx, `SELECT jsonb_build_object(
+'user',(SELECT to_jsonb(u) FROM users u WHERE id=$1),
+'identities',(SELECT jsonb_agg(to_jsonb(i) ORDER BY issuer,subject) FROM identities i WHERE user_id=$1),
+'requests',(SELECT jsonb_agg(to_jsonb(q) ORDER BY id) FROM account_closure_requests q WHERE user_id=$1),
+'audit',(SELECT jsonb_agg(to_jsonb(a) ORDER BY id) FROM account_closure_audit a WHERE closure_request_id=$2),
+'retention',(SELECT to_jsonb(p) FROM account_subject_retention_records p WHERE user_id=$1),
+'outbox',(SELECT jsonb_agg(to_jsonb(o) ORDER BY event_id) FROM outbox_events o))`, user, first.ID).Scan(&raw); err != nil {
+				t.Fatal(err)
+			}
+			return string(raw)
+		}
+		committed := snapshot()
+		replayed, err := r.CreateAccountClosure(ctx, principal, key, accountClosureConfirmation)
+		if err != nil || !replayed.Replayed || replayed.ID != first.ID || replayed.UserID != user || replayed.Status != first.Status || replayed.Stage != first.Stage || replayed.Version != first.Version || snapshot() != committed {
+			t.Fatal("same original facts did not return unchanged original request", replayed, err)
+		}
+		// Confirmation has one legal value. A different confirmation is invalid
+		// input, not a second invented valid command or a reason to mutate history.
+		if _, err = r.CreateAccountClosure(ctx, principal, key, "CLOSE_OTHER_ACCOUNT"); !errors.Is(err, ErrInvalidAccountClosureRequest) || snapshot() != committed {
+			t.Fatal("different facts under original key changed closure", err)
+		}
+		if _, err = r.CreateAccountClosure(ctx, principal, uuid.NewString(), accountClosureConfirmation); !errors.Is(err, ErrConflict) || snapshot() != committed {
+			t.Fatal("replacement key changed existing closure", err)
+		}
+		var requests, audits int
+		var unprepared bool
+		if err := r.pool.QueryRow(ctx, `SELECT
+(SELECT count(*) FROM account_closure_requests WHERE user_id=$1),
+(SELECT count(*) FROM account_closure_audit WHERE closure_request_id=$2),
+(SELECT cleanup_prepared_at IS NULL AND identity_deleted_at IS NULL AND grants_isolated_at IS NULL AND token_replays_cleared_at IS NULL FROM account_closure_requests WHERE id=$2)`, user, first.ID).Scan(&requests, &audits, &unprepared); err != nil || requests != 1 || audits != 1 || !unprepared || snapshot() != committed {
+			t.Fatal("replay repeated cleanup work or changed stage/audit", requests, audits, unprepared, err)
+		}
+	})
 }

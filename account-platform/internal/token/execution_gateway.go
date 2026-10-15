@@ -61,7 +61,7 @@ func (c *HTTPUpstreamClient) CopyResponseHeaders(destination, source http.Header
 			continue
 		}
 		switch strings.ToLower(key) {
-		case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "set-cookie", "content-length":
+		case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "set-cookie", "content-length", "x-pinvou-model-rejection-v1":
 			continue
 		}
 		for _, value := range values {
