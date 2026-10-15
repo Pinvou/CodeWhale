@@ -111,7 +111,11 @@ func TestOrganizationDeliveredFinanceAuthority(t *testing.T) {
 		}
 	})
 	t.Run("disabled-organization-not-authorized", func(t *testing.T) {
-		if err := r.AdminSetOrganizationStatus(ctx, principal, org.ID, "DISABLED"); err != nil {
+		state, err := r.AdminOrganizationState(ctx, org.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := r.AdminSetOrganizationStatus(ctx, principal, org.ID, state.Version, "DISABLED"); err != nil {
 			t.Fatal(err)
 		}
 		decision, err := r.Authorize(ctx, principal, "org.entitlements.purchase", &org.ID, nil)

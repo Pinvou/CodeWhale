@@ -2,27 +2,37 @@
 
 `account-platform-test` 在 Draft、Ready 和 Merge Queue 中，先保留所有 Go
 模块的测试和 vet，再通过 `scripts/test-token-financial-postgres.py` 执行
-Token 全包和 F06 既有组织钱包、成员额度的定向 PostgreSQL 验证。PostgreSQL
+Token 全包和 F06 组织状态 CAS、既有组织钱包、成员额度的定向 PostgreSQL 验证。PostgreSQL
 使用与已有 Hub 门禁相同的固定镜像，端口仅绑定 runner 的 `127.0.0.1`。无需部署凭据
 或外部支付、供应商、issuer、NATS。
 
 执行器只接受显式端口、无密码的 loopback `/postgres` 连接，先只读确认默认三个
 数据库、唯一 bootstrap 用户、无用户对象且没有其他客户端连接，然后依次执行：
 
-1. `owner-wallet`：单独运行原 `TestF06OrganizationWalletRequiresLifecycleEvidence`。
+1. `owner-account`：运行组织状态投影版本 CAS 与原组织删除版本根。
+   正式 Account fixture 自行创建和清理八个受限角色，不复用其他阶段的角色。
+2. `owner-wallet`：单独运行原 `TestF06OrganizationWalletRequiresLifecycleEvidence`。
    该正式测试仅在 Billing 角色不存在时创建、使用并清理自己的角色，拒绝复用未知角色。
-2. 核实数据库、角色、对象及连接全部还原后，按既有合同创建三个受限 Billing 角色，
-   执行 `retained-token`：Token 全包和原 18 个必跑根。测试自行创建 UUID 数据库和
+3. 核实数据库、角色、对象及连接全部还原后，按既有合同创建三个受限 Billing 角色，
+   执行 `retained-token`：Token 全包和 19 个必跑根（原 18 根及组织准入临界根）。测试自行创建 UUID 数据库和
    Token 角色，安装原生产迁移并通过真实运行时仓储操作。
-3. 再次核实当前阶段的角色、数据库、对象和连接集合后，执行 `retained-billing`：
+4. 再次核实当前阶段的角色、数据库、对象和连接集合后，执行 `retained-billing`：
    原 `TestMemberHoldIdentityMutationBoundaries` 与 `TestPersonalUsageHoldBoundaries`。
    这两个定向契约代表本轮成员额度及个人钱包边界，不是 Billing 全包或完整支付验收。
 
-三个阶段沿同一个公开入口和现有 CI 步骤执行，保留 `-race -count=1 -mod=readonly`
+四个阶段沿同一个公开入口和现有 CI 步骤执行，保留 `-race -count=1 -mod=readonly`
 与既有 20 分钟 Go 超时。每阶段校验实际包、必跑根的 run/pass 和包成功终态；
-钱包和定向 Billing 阶段还要求每个根实际命中子用例。任何失败、零用例、缺失根、
+Account、钱包和定向 Billing 阶段还要求每个根实际命中子用例。任何失败、零用例、缺失根、
 必跑子用例跳过或截断结果都会停止后续阶段。Token 其余需要外部服务的条件跳过仍
-保留在真实输出中并单独披露。原 `f06fixture` 私有两子组诊断不代表此公开三阶段入口。
+保留在真实输出中并单独披露。原 `f06fixture` 私有两子组诊断不代表此公开协调入口。
+
+状态 CAS 只将内部读取版本传给同一事务的完成操作；仅已确认的目标状态和版本可无写重放。
+真实 HTTP 与 PostgreSQL 回归在远端 ACK 和本地完成之间执行合法重命名，验证旧确认不能覆盖
+新版本。远端依赖是受控 HTTP authority，此测试不声称跨域原子性，也不自动补偿已确认的远端状态。
+组织准入根以真实 `BeginUsage`、有限分散用户/模型/路由和原完成操作，验证每分钟 599→600
+允许/601 拒绝、并发 99→100 允许/101 拒绝，以及另一组织不受影响。用户与组织成员的并发
+上限同为 5，成员计数是用户计数的子集，因此 4→5/5→6 验证二者合并边界，不冒称独立命中
+成员谓词。拒绝及原键重放均核对无新增 usage/派发/资金变化；此路径尚未开始供应商派发。
 
 结束时仅在数据库、角色、对象和连接恢复到预期、且本次角色没有外部依赖时，
 事务性删除本次明确创建的三个 Billing 角色。未知遗留或外部依赖使门禁失败并保留现场；

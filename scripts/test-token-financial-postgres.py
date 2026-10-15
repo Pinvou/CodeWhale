@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Run existing Token and scoped organization financial contracts on disposable PG.
 
-The wallet evidence fixture first owns its absent Billing actors exclusively.
+The Account fixture first owns its eight absent actors, then the wallet
+evidence fixture owns its absent Billing actors exclusively.
 After strict restoration, retained fixtures create their own UUID databases and
 Token actors while this runner owns the three Billing deployment actors. Only
 the three Billing deployment actors are bootstrapped here, using their existing
@@ -17,6 +18,7 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 REQUIRED = {
+    "TestF06OrganizationAdmissionBoundariesPublicPostgres",
     "TestContextEligibilityUsesCurrentScopedProductionRoutes",
     "TestReconciliationEvidenceMatchesPublicSchema",
     "TestF05DispatchLeaseLifecycle",
@@ -37,6 +39,8 @@ REQUIRED = {
     "TestManagementCancellationHoldRecoveryRequiresRecordedProof",
 }
 
+ACCOUNT_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/account"
+ACCOUNT_REQUIRED = {"TestF06OrganizationStatusProjectionVersionPublicPostgres", "TestF06OrganizationDeletionVersionAndTerminalScope"}
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 OWNER_REQUIRED = {"TestF06OrganizationWalletRequiresLifecycleEvidence"}
@@ -135,7 +139,10 @@ def main():
 
     def run_phase(label, target, package, required, *, scoped=False):
         env = {key: value for key, value in os.environ.items() if not key.startswith("PINVOU_TEST_")}
-        env["PINVOU_TEST_BILLING_DATABASE_URL"] = raw
+        if target == "./internal/account":
+            env["PINVOU_TEST_ACCOUNT_DATABASE_URL"] = raw
+        else:
+            env["PINVOU_TEST_BILLING_DATABASE_URL"] = raw
         if target == "./internal/token":
             env["PINVOU_TEST_TOKEN_DATABASE_URL"] = raw
         command = [go, "test", "-p=1", "-race", "-tags=nomsgpack", "-mod=readonly", "-count=1", "-timeout=20m", "-json"]
@@ -154,7 +161,12 @@ def main():
                                required, package=package, require_children=scoped, exact_roots=scoped)
         print(f"Financial phase {label}: {count} named passes; all {len(required)} required roots completed", flush=True)
 
-    # Its existing fixture safely owns absent actors; never lend precreated roles.
+    # Each existing owner fixture requires its own absent actors. Restoration
+    # is checked between every phase, before any next fixture can write.
+    try:
+        run_phase("owner-account", "./internal/account", ACCOUNT_PACKAGE, ACCOUNT_REQUIRED, scoped=True)
+    finally:
+        assert_instance({user})
     try:
         run_phase("owner-wallet", "./internal/billing", BILLING_PACKAGE, OWNER_REQUIRED, scoped=True)
     finally:
