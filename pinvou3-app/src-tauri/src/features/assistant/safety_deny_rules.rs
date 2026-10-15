@@ -1905,8 +1905,6 @@ mod tests {
                 path: None,
                 ask_for_approval: AskForApproval::Never,
                 sandbox_mode: None,
-                // CodeWhale #54：空集保持历史单根判定。
-                workspace_roots: Vec::new(),
             })
             .unwrap()
     }
@@ -2452,8 +2450,6 @@ mod tests {
                     path: None,
                     ask_for_approval: AskForApproval::OnRequest,
                     sandbox_mode: None,
-                    // CodeWhale #54：空集保持历史单根判定。
-                    workspace_roots: Vec::new(),
                 })
                 .unwrap()
         };
