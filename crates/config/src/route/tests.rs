@@ -269,6 +269,67 @@ fn resolver_records_exact_limit_override_provenance() {
 }
 
 #[test]
+fn embedding_host_declared_limits_reconstructs_only_host_provenance() {
+    // Host entries reconstruct exactly, one per declared field; interleaved
+    // catalog/operator/roster provenance must not leak into the declared
+    // subset even when it targets the same field.
+    let mut request = req(Some(ProviderKind::Zai), Some("glm-5.2"));
+    request.limit_overrides = vec![
+        SourcedLimitOverride {
+            field: LimitField::ContextTokens,
+            value: Some(262_144),
+            source: OverrideSource::UserContextWindow,
+        },
+        SourcedLimitOverride {
+            field: LimitField::OutputTokens,
+            value: Some(65_536),
+            source: OverrideSource::EmbeddingHost,
+        },
+        SourcedLimitOverride {
+            field: LimitField::ContextTokens,
+            value: Some(1_048_576),
+            source: OverrideSource::EmbeddingHost,
+        },
+    ];
+
+    let candidate = models_dev_route_resolver()
+        .resolve(&request)
+        .expect("Models.dev-backed route with sourced overrides resolves");
+
+    // Effective keeps every override (later entries win per field).
+    assert_eq!(candidate.limits().context_tokens, Some(1_048_576));
+    assert_eq!(candidate.limits().output_tokens, Some(65_536));
+
+    let declared = candidate
+        .embedding_host_declared_limits()
+        .expect("host entries exist");
+    assert_eq!(declared.context_tokens, Some(1_048_576));
+    assert_eq!(declared.input_tokens, None);
+    assert_eq!(declared.output_tokens, Some(65_536));
+}
+
+#[test]
+fn embedding_host_declared_limits_without_host_entries_is_none() {
+    // A candidate whose overrides all come from other sources — or that
+    // carries no overrides at all — has no declared subset.
+    let mut request = req(Some(ProviderKind::Zai), Some("glm-5.2"));
+    request.limit_overrides = vec![SourcedLimitOverride {
+        field: LimitField::ContextTokens,
+        value: Some(262_144),
+        source: OverrideSource::UserContextWindow,
+    }];
+    let candidate = models_dev_route_resolver()
+        .resolve(&request)
+        .expect("operator-overridden route resolves");
+    assert_eq!(candidate.embedding_host_declared_limits(), None);
+
+    let plain = models_dev_route_resolver()
+        .resolve(&req(Some(ProviderKind::Zai), Some("glm-5.2")))
+        .expect("plain catalog route resolves");
+    assert_eq!(plain.embedding_host_declared_limits(), None);
+}
+
+#[test]
 fn resolved_auth_source_existing_variants_keep_wire_compatibility() {
     let cases = [
         (ResolvedAuthSource::Cli, "cli"),
