@@ -47,7 +47,7 @@
 | 升级前回退点 | 公开不可变 tag `pinvou-v0.9.5-r13` → `f853f8f1566c57e6be40d5439a222a932aa79ef5`；同 SHA 的本地 `backup/pre-v0.9.12-sync` 仅作便利引用 |
 | 历史组织 | 上游之上 71 个带 DCO sign-off 的提交，归属 4 个长期主题（T1–T4）+ 3 个追加减量主题（T5 会话归档导出、T6 蜂群限流治理、T8 roster 宿主 profiles 呈现，即 Pinvou/CodeWhale#65 提交主题里的 T7，按 #365 先例在父仓登记时重编号）+ 2 个已合入维护分支的主题（T7 压缩检查点角色兼容；T9 custom wire 运行时路线——底座 #79 随 2026-10-08/09 批次 squash 合入，父仓配套随 #625 落地）；r1 之后 56 个提交全部经 PR squash 合入并过必需门禁。T8 主题经 Pinvou/CodeWhale#65 落位：原以五个提交随父仓蜂群二期 PR 走保持提交合入以保全钉定 SHA，实际经 squash 合入（`c5fadb86d`）——登记随之改为钉定公开维护分支头（现 `13ee4dfd2`），不再钉定合入前的波次 SHA（详见第 13 节教训登记） |
 | drift | `445 files, +67393/-21049`，净增 46344 行（实测于 `13ee4dfd2` vs 上游 `dcd4c200f`；2026-10-15 批次 #108 为同模型宿主申报限额经引擎路由重推导保持的修复，净增较 `803e672bb` 增 223）；`445 files, +67187/-21066`，净增 46121 行（实测于 `803e672bb` vs 上游 `dcd4c200f`；2026-10-14 批次 #54 为多根 workspace_roots 授权基础设施（runtime lanes），净增较 `f27672935` 增 13,959；#107 为同模型宿主路由限制修复，净增较 `480bebf61` 增 119）；`397 files, +53709/-21547`，净增 32162 行（实测于 `f27672935` vs 上游 `dcd4c200f`）；`397 files, +53533/-21490`，净增 32043 行（实测于 `480bebf61` vs 上游 `dcd4c200f`；2026-10-13/14 批次（#92/#96/#101/#102/#103/#104）以 #102 无价值测试清理与 #104 界限简化回落净增，此前 `3118c36b8a` 为 294 files +51027/-14227 净增 36800）；`252 files, +36785/-5754`，净增 31031 行（实测于 `0bc868ff0` vs 上游 `dcd4c200f`）；`44921cf02` 为 `231 files, +29286/-5364`（净增 23922），r3 收口点 `61cb769be` 为 `229 files, +29272/-5352`（净增 23920），r2 为 `190 files, +19135/-2628`（净增 16507），旧 r13 为 `110 files, +10895/-1195` |
-| 守护 | 167 条独立 CodeWhale `forkguard_*` 行为名（guard 下限 64）+ 父仓指纹与行为测试 |
+| 守护 | 215 条独立 CodeWhale `forkguard_*` 行为名（实测于登记头 `13ee4dfd2`；guard 下限 64）+ 父仓指纹与行为测试 |
 | 父仓适配 | v0.9.12 EngineConfig、Agent/Plan 模式、逐轮 reasoning/安全、ExtraTools、owner 事件隔离、Automation v3/v4 数据兼容、rusqlite 0.40.2、Shell 任务来源对账；消费方 PR #396（execpolicy）、#408（轮次取消）、#444（蜂群）、#468（computer-use）、#472（一键导出）依赖本批底座能力 |
 
 ### 轮次绑定取消：宿主 stop 按轮身份分派（父仓适配，本 PR）
@@ -328,7 +328,7 @@
 
 ## 12. 软上限评估与后续减量
 
-当前净增 8736 行，超过 1500 行软上限；`engine.rs`、`turn_loop.rs` 和 `engine/tests.rs` 也超过单文件 200 行提示线。原因是状态机、最终分发安全、“完整专家人设仅进入被选子智能体”的 spawn 边界、bundle Skills 排除 ambient 文件源的权限边界，以及评审要求的结果式生命周期/评测回归必须和 v0.9.12 原生 Engine 同步，拆成 app 侧镜像会形成更危险的双状态源。当前 Rust/Clippy/rustdoc 兼容只包含等价重写、`Default` 补全、窄 lint 说明、文档可达性修复和无调用测试 helper 清理，不改变公开函数签名或新增运行语义。
+当前净增 17336 行（该数字测量于 2026-09-22/23 批次波次头 `4767c2816`——该波次头现已不在公开 refs 上，沿开源仓同文口径沿用；登记头 drift 现值为 `445 files, +67393/-21049`、净增 46344（`13ee4dfd2`，见 §0），`252 files, +36785/-5754`、净增 31031 为 `0bc868ff0` 时点值），超过 1500 行软上限；`engine.rs`、`turn_loop.rs` 和 `engine/tests.rs` 也超过单文件 200 行提示线。原因是状态机、最终分发安全、“完整专家人设仅进入被选子智能体”的 spawn 边界、bundle Skills 排除 ambient 文件源的权限边界，以及评审要求的结果式生命周期/评测回归必须和 v0.9.12 原生 Engine 同步，拆成 app 侧镜像会形成更危险的双状态源。当前 Rust/Clippy/rustdoc 兼容只包含等价重写、`Default` 补全、窄 lint 说明、文档可达性修复和无调用测试 helper 清理，不改变公开函数签名或新增运行语义。
 
 后续减量顺序：
 
@@ -342,6 +342,15 @@
 8. 父仓先迁移到明确 re-export API，再分批收窄当前 18 个 `pub mod` 兼容 facade。
 9. 上游提供完整 static-composer/explicit-skills-root 契约后删除 T3 patch。
 10. 每次上游 release 重新核对已吸收项，不保留兼容壳。
+
+### 有意分歧登记
+
+以下各项是父仓（闭源仓）相对开源仓的有意行为分歧：双方可共存、不构成同步缺陷，也不进入上述减量顺序；每项登记分歧内容、取舍口径与钉定位置，避免后续同步或回流时被当作漂移“修复”。
+
+1. 行为/设备遥测：开源仓经社区决议（Pinvou/pinvou-agent#616）移除 opt-in telemetry client；闭源仓按企业口径保留该客户端与设备运营统计链路（`pinvou3-app/src-tauri/src/features/behavior_telemetry.rs` 为 #616 对应的 opt-in client，`pinvou3-app/src-tauri/src/platform/telemetry.rs` 为设备登记/用量统计，设计见 `docs/设备运营统计-初版.md`），随行的 access-policy 差异一并保留。此分歧属发布面差异，不回流、不上游化。
+2. 语音 closeVoice/dismissVoice 语义分化：闭源对完成态语音通知的 dismiss 保留草稿 provenance、仅进行中录音视为显式取消，与开源的 dismissal-sweep 时序不同；该时序适配由 `pinvou3-app/tests/voice_operation_lifecycle.test.mjs` 钉定，不随开源实现回移。
+3. 开源 bridge shared-cluster 机制（上游 `pinvou3-app/src/shared/bridge-shared-helpers.js`，本仓无此文件）闭源有意不采纳：闭源把对应函数体逐 lane 内联镜像（`src/platform/web/bridge.js`、`src/platform/tauri/bridge.js` 及 `src/platform/tauri/bridge/` 分文件），保持各 lane 独立演进与可验证；同步时逐函数对照，不做文件级合并。
+4. wire DTO 闭源超集：闭源 wire DTO 字段为开源面的超集，已在 Pinvou/pinvou3#463 登记，以该登记为准，此处不重复展开。
 
 ## 13. 发布与回退
 
