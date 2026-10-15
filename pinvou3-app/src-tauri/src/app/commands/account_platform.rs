@@ -177,9 +177,7 @@ pub async fn account_platform_select_session_model(
 ) -> Result<serde_json::Value, String> {
     let session_id = input.session_id.trim();
     let model_id = input.model_id.trim();
-    if session_id.is_empty() || session_id.len() > 160 {
-        return Err("model_catalog_selection_invalid: session_id is invalid".to_string());
-    }
+    require_main_session_model_target(session_id)?;
     if model_id.is_empty() || model_id.len() > 128 {
         return Err("model_catalog_selection_invalid: model_id is invalid".to_string());
     }
@@ -224,6 +222,19 @@ pub async fn account_platform_select_session_model(
         "catalog_version": catalog.body.get("catalog_version"),
         "lifecycle_status": item.get("lifecycle_status"),
     }))
+}
+
+fn require_main_session_model_target(session_id: &str) -> Result<(), String> {
+    if session_id.is_empty() || session_id.len() > 160 {
+        return Err("model_catalog_selection_invalid: session_id is invalid".to_string());
+    }
+    if crate::features::sessions::is_aux_session_id(session_id) {
+        return Err(
+            "set_session_model: auxiliary conversations inherit the main session's model"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 async fn validate_catalog_model(
@@ -446,5 +457,64 @@ mod tests {
             }))
             .is_err()
         );
+    }
+    #[test]
+    fn session_model_target_keeps_main_binding_and_rejects_aux_aliases() {
+        use super::require_main_session_model_target;
+        for id in ["aux-child", "AUX-child", "AuX-child"] {
+            assert_eq!(
+                require_main_session_model_target(id).unwrap_err(),
+                "set_session_model: auxiliary conversations inherit the main session's model"
+            );
+        }
+        for id in ["main-session", "a", "aux", "辅助-main"] {
+            assert!(
+                require_main_session_model_target(id).is_ok(),
+                "normal target: {id}"
+            );
+        }
+        for id in [String::new(), "m".repeat(161)] {
+            assert_eq!(
+                require_main_session_model_target(&id).unwrap_err(),
+                "model_catalog_selection_invalid: session_id is invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn session_model_command_guards_before_catalog_and_binding_side_effects() {
+        // This pins the actual command wiring, not a simulated App process.
+        let source = include_str!("account_platform.rs");
+        let body = source
+            .split("pub async fn account_platform_select_session_model(")
+            .nth(1)
+            .unwrap()
+            .split("fn require_main_session_model_target(")
+            .next()
+            .unwrap();
+        let guard = body
+            .find("require_main_session_model_target(session_id)?")
+            .unwrap();
+        assert_eq!(
+            body.matches("require_main_session_model_target(session_id)?")
+                .count(),
+            1
+        );
+        for operation in [
+            ".load(session_id)",
+            ".request(ApiRequest",
+            "pool.switch_session_model_ref(",
+            "super::sessions::emit_session_event(",
+        ] {
+            assert!(
+                guard < body.find(operation).unwrap(),
+                "aux guard precedes {operation}"
+            );
+        }
+        assert!(body.contains("let session_id = input.session_id.trim();"));
+        assert!(body.contains("ensure_new_session_model_selectable(item)?"));
+        assert!(body.contains("Some(ModelSelectionRef::account_platform(model_id))"));
+        assert!(body.contains(r#""session_id": session_id"#));
+        assert!(body.contains(r#""model_id": model_id"#));
     }
 }

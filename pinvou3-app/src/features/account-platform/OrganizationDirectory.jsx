@@ -20,7 +20,7 @@ export function OrganizationDirectory({ client, me, language, onChanged }) {
    const invites = hasPermission(me, 'personal.invitations.read') ? await api.invitations(controller.signal) : [];
    if (stamp === generation.current) { setOrganizations(orgs); setInvitations(invites); }
   };
-  void load().catch(reason => { if (stamp === generation.current && reason.name !== 'AbortError') setError(copy.unavailable); }).finally(() => { if (stamp === generation.current) setBusy(false); });
+  void load().catch(reason => { if (stamp === generation.current && reason.name !== 'AbortError') setError(reason.status === 403 ? copy.permissions : copy.unavailable); }).finally(() => { if (stamp === generation.current) setBusy(false); });
   return () => { generation.current++; controller.abort(); };
  }, [api, owner]); // eslint-disable-line react-hooks/exhaustive-deps
  const perform = async (action, kind) => {

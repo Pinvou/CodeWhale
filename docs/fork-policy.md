@@ -1,13 +1,17 @@
 # Pinvou 对 CodeWhale 底座的 fork 维护策略
 
-> 最后更新：2026-10-14（集成分支同步 main；CodeWhale 固定至公开维护头 `480bebf61`，CI 与发布均严格要求 gitlink=维护分支头；不可变 r3 tag 仍钉在 `61cb769be`，不再提供登记快照放行）
-> F05 调用幂等登记：原 `8b5a86390` 补丁及其后续修复已经外部维护者通过 CodeWhale #92 合入 `pinvou3-clean`，当前固定 `480bebf61` 包含该能力。父仓普通合并保留原 F05 提交历史，底座仍使用公开维护提交，不把合入前候选 SHA 当成维护头；账户 Gateway 的宿主 opt-in 与逐调用身份见 `docs/fork-modifications.md` 的 T1 登记。当前门禁及实际宿主验证仍须分别完成，不能由源码包含性替代。
+> 最后更新：2026-10-14（集成分支同步 main；CodeWhale 固定至公开维护头 `803e672bb`，CI 与发布均严格要求 gitlink=维护分支头；不可变 r3 tag 仍钉在 `61cb769be`，不再提供登记快照放行）
+> F05 调用幂等登记：原 `8b5a86390` 补丁及其后续修复已经外部维护者通过 CodeWhale #92 合入 `pinvou3-clean`，当前固定 `803e672bb` 包含该能力。父仓普通合并保留原 F05 提交历史，底座仍使用公开维护提交，不把合入前候选 SHA 当成维护头；账户 Gateway 的宿主 opt-in 与逐调用身份见 `docs/fork-modifications.md` 的 T1 登记。当前门禁及实际宿主验证仍须分别完成，不能由源码包含性替代。
 > 配套：`docs/fork-modifications.md`、`scripts/fork-guard.sh`、`docs/底座升级验收清单.md`
+
+> 2026-10-14 后续严格对齐：公开维护分支经外部批准合入 #107；`f27672935` 保留同一 wire model/protocol 的宿主冻结限制，跨模型仍重新解析。新增两条结果式回归随公开提交消费，父仓不修改底座代码、不移动标签、不放宽公开维护头校验；新 head 的宿主适用 CI 另行核验。
+
+> 2026-10-14 后续 #54 对齐：`803e672bb` 直接继承上述 #107 维护提交，消费已外部批准合入的 workspace-roots 底座能力（T1/T2）。父仓保持单 execution-root 输入，不把 session ledger 变成附加执行根；新持久化根字段沿既有 Web 元数据路径逐项脱敏，Native 原值保留。底座同时改变单根 operand cwd、symlink 与缺失路径后 `..` 的判定，不能登记为行为不变的 gitlink 更新；实际宿主验证另行记录。
 
 ## 0. 当前基线
 
 - 上游：`Hmbown/CodeWhale` tag `v0.9.12`，commit `dcd4c200f72f0c1ffd60d8e7f6850313db879fc5`。
-- 当前 fork 基线：`Pinvou/CodeWhale:pinvou3-clean`，head `480bebf616212e790ff722c92fb165c8d4a2511d`（领先不可变 tag `pinvou-v0.9.12-r3`，tag 仍钉在其收口 `61cb769be`），上游 v0.9.12 之上共 68 个带 DCO sign-off 的提交；r1 收口仍为 `1fafee7e26b60a59457a43bce50c63aa2ad9dbaf`（15 个提交），其后 53 个提交经公开维护流程合入，最新为 2026-10-13/14 批次（#101/#92/#102/#96/#103/#104）。PR #92 已由维护者合入，登记使用维护提交而非合入前内容分支 SHA。
+- 当前 fork 基线：`Pinvou/CodeWhale:pinvou3-clean`，head `803e672bb87f5ee4e0ab56f1e23fa408ddbeeaa0`（领先不可变 tag `pinvou-v0.9.12-r3`，tag 仍钉在其收口 `61cb769be`），上游 v0.9.12 之上共 70 个公开维护提交；r1 收口仍为 `1fafee7e26b60a59457a43bce50c63aa2ad9dbaf`（15 个提交），其后 55 个提交经公开维护流程合入，最新为 2026-10-13/14 批次（#101/#92/#102/#96/#103/#104/#107/#54）。PR #92 已由维护者合入，登记使用维护提交而非合入前内容分支 SHA。
 - 升级前公开回退点是不可变 tag `pinvou-v0.9.5-r13`，head `f853f8f1566c57e6be40d5439a222a932aa79ef5`；同 SHA 的本地 branch `backup/pre-v0.9.12-sync` 只作便利引用。
 - r1 已成为可消费的受保护基线；rN 收口时父仓 gitlink、维护分支和不可变 tag 指向同一 commit。
 - 过渡期豁免（2026-09-11 起）：两次 rN 收口之间，父仓 gitlink 可沿 `pinvou3-clean` 领先不可变 tag 前进；期间 `scripts/verify-public-submodule.sh` 断言 gitlink 等于公开维护分支头、不可变 tag 仍钉在其收口 commit，rN 收口时在合并头切新不可变 tag 并恢复三方相等。

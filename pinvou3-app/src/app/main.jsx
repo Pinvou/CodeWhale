@@ -26,7 +26,6 @@ import { formatSessionDate, localDateKey, formatDateGroupLabel } from '../shared
 import { groupSessionsWithProjects, resolveSessionProjectId, needsAddFolderConfirm, unavailableProjectRootPaths, WORKSPACE_KIND_BOUND } from '../features/projects/projectGrouping.js';
 import { ProjectGroupHeader } from '../features/projects/ProjectGroupHeader.jsx';
 import { classifyRebindError, mergeRebindCarryoverIds } from '../features/projects/rebindErrors.js';
-import { runSessionBatch } from '../shared/session-management.js';
 const LazyAccountPlatformPopover = lazy(() => VIEW_LOADERS.accountPlatformPopover().then(module => ({ default: module.AccountPlatformPopover })));
 import { AccountPlatformDesktopClient } from '../features/account-platform/desktop-client.js';
 import { can, isWeb } from '../shared/platform.js';
@@ -3074,7 +3073,8 @@ const NAV_PREFETCH = {
       }
 
       // 对话管理页批量操作:按会话类型分流并等待全部结果,避免未执行完成就误报成功。
-      async function handleBatchArchiveSessions(ids) {
+      // 批量执行器由已加载的 SearchView 传入,不让低频操作进入启动模块图。
+      async function handleBatchArchiveSessions(ids, runSessionBatch) {
         if (!bridge.available || !ids || !ids.length) return;
         const result = await runSessionBatch(sessionRowsForIds(ids), 'archive', {
           archive: id => bridge.sessions.archiveSession(id),
@@ -3089,7 +3089,7 @@ const NAV_PREFETCH = {
         return result;
       }
 
-      async function handleBatchDeleteSessions(ids) {
+      async function handleBatchDeleteSessions(ids, runSessionBatch) {
         if (!bridge.available || !ids || !ids.length) return;
         const result = await runSessionBatch(sessionRowsForIds(ids), 'delete', {
           delete: id => bridge.sessions.deleteSession(id),
@@ -3102,7 +3102,7 @@ const NAV_PREFETCH = {
         return result;
       }
 
-      async function handleBatchRestoreArchived(ids) {
+      async function handleBatchRestoreArchived(ids, runSessionBatch) {
         if (!bridge.available || !ids || !ids.length) return;
         const result = await runSessionBatch(ids.map(id => ({ id })), 'restore', {
           restore: id => bridge.sessions.restoreArchivedSession(id),

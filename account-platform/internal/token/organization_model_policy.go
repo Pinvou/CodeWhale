@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
@@ -16,6 +17,10 @@ import (
 	"strings"
 	"time"
 )
+
+// A policy selection can reference an absent model without rejecting the
+// model bound to a conversation. Preserve its original validation receipt.
+var errOrganizationPolicyModelUnavailable = fmt.Errorf("organization policy model selection: %w", ErrModelUnavailable)
 
 type organizationModelPolicyRepository interface {
 	GetOrganizationModelPolicy(context.Context, uuid.UUID) (OrganizationModelPolicy, error)
@@ -122,7 +127,7 @@ func (r *PostgresRepository) SaveOrganizationModelPolicy(ctx context.Context, or
 			return OrganizationModelPolicy{}, err
 		}
 		if count != len(modelIDs) {
-			return OrganizationModelPolicy{}, ErrModelUnavailable
+			return OrganizationModelPolicy{}, errOrganizationPolicyModelUnavailable
 		}
 	}
 	now, version := r.now(), current+1
