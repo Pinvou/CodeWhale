@@ -170,3 +170,55 @@ for (const [name, mutation] of [
     assert.throws(() => authorizationConsumers(billingSourceName, main, `${registry}\nfunc init() { ${mutation} }`), /unrecognized_billing_consumer_registry/);
   });
 }
+
+
+for (const method of ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']) {
+  test(`ordinary ${method} registration rejects a nonliteral path on an actual router`, () => {
+    const input = `router := httpserver.NewRouter()\nrouter.${method}(runtimePath, handler)`;
+    assert.throws(() => authorizationRoutes('dynamic.go', input), /unrecognized_http_entrypoint:dynamic.go/);
+  });
+}
+
+test('ordinary registration accounting follows actual typed routers and nested groups', () => {
+  for (const input of [
+    'func register(router *httpserver.Router) { router.GET(runtimePath, handler) }',
+    'func register(protected *httpserver.RouteGroup) { protected.POST(runtimePath, handler) }',
+    'router := httpserver.NewRouter()\nprotected := router.Group("/v1")\nadmin := protected.Group("/admin")\nadmin.PATCH(runtimePath, handler)',
+  ]) assert.throws(() => authorizationRoutes('dynamic.go', input), /unrecognized_http_entrypoint:/);
+});
+
+test('ordinary method values and unsupported whitespace grammar cannot disappear', () => {
+  for (const input of [
+    'router := httpserver.NewRouter()\nregister := router.GET',
+    'router := httpserver.NewRouter()\nrouter.GET ("/resource", handler)',
+    'router := httpserver.NewRouter()\nrouter . POST("/resource", handler)',
+    'router := httpserver.NewRouter()\nrouter.GET(`raw-path`, handler)',
+  ]) assert.throws(() => authorizationRoutes('dynamic.go', input), /unrecognized_http_entrypoint:/);
+});
+
+test('ordinary literal route grammar remains discovered with complete registration evidence', () => {
+  const input = 'router := httpserver.NewRouter()\nrouter.GET("/resource", authorizer.Require("personal.read"), handler)';
+  assert.deepEqual(authorizationRoutes('literal.go', input), [{ source: 'literal.go', receiver: 'router', method: 'GET', path: '/resource', registration: 'router.GET("/resource", authorizer.Require("personal.read"), handler)' }]);
+});
+
+test('ordinary accounting ignores Go examples, unrelated receivers and router forwarding internals', () => {
+  const examples = [
+    '// router.GET(runtimePath, handler)',
+    '/* protected.POST(runtimePath, handler) */',
+    'var quoted = "router.GET(runtimePath, handler)"',
+    'var raw = `router.POST(runtimePath, handler)`',
+    'client.GET(runtimePath, handler)',
+    'recorder.POST(runtimePath, handler)',
+    'router.Engine.GET(relativePath, handlers...)',
+    'group.RouterGroup.GET(relativePath, handlers...)',
+  ].join('\n');
+  assert.deepEqual(authorizationRoutes('examples.go', examples), []);
+});
+
+test('a dynamic mutation of an actual ordinary production registration fails closed', async () => {
+  const name = 'account-platform/internal/token/personal_execution_routes.go';
+  const production = await readFile(new URL(`../../${name}`, import.meta.url), 'utf8');
+  const anchor = 'protected.POST("/chat/completions"';
+  assert.equal(production.split(anchor).length, 2);
+  assert.throws(() => authorizationRoutes(name, production.replace(anchor, 'protected.POST(runtimePath')), /unrecognized_http_entrypoint:/);
+});
