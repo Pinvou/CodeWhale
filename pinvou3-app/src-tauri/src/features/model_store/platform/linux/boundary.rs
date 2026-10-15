@@ -35,9 +35,23 @@ pub(crate) fn store_model_name_checked(
 
 fn weights_roots_from(settings: &config::Settings) -> Vec<std::path::PathBuf> {
     let mut roots = vec![config::data_dir()];
-    let custom = std::path::PathBuf::from(&settings.models_dir);
-    if !roots.contains(&custom) {
-        roots.push(custom);
+    // 当前 models_dir + 历史用过的 models_dir（换目录不搬权重，老根下仍是商店
+    // 在册模型，第六轮评审 P2：只看当前值的话改过目录的机器旧根裸奔）+
+    // import_scan_dirs（下载脚本会在这些目录里**就地复用**已存在的权重——
+    // 复用不搬家，商店模型的权重可能就落在里面）。空串/重复项无害但白占一行，
+    // 滤掉。
+    for dir in std::iter::once(&settings.models_dir)
+        .chain(settings.models_dir_history.iter())
+        .chain(settings.import_scan_dirs.iter())
+    {
+        let trimmed = dir.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let root = std::path::PathBuf::from(trimmed);
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
     }
     roots
 }
@@ -220,6 +234,34 @@ mod tests {
             store_weights_roots().len(),
             1,
             "custom == data root must not duplicate the root"
+        );
+    }
+
+    #[test]
+    fn weights_roots_cover_history_and_import_scan_dirs() {
+        let _ctx = TempHome::new();
+        // 换目录不搬权重：历史 models_dir 与 import_scan_dirs 下的权重同样是
+        // 商店在册/复用中的模型，必须落在保护根集合里（第六轮评审 P2）。
+        write_config(
+            r#"{
+                "models_dir": "/data/new-weights",
+                "models_dir_history": ["/data/old-weights", "  "],
+                "import_scan_dirs": ["/usb/llm", "/data/new-weights"]
+            }"#,
+        );
+        let roots = store_weights_roots();
+        assert!(roots.contains(&std::path::PathBuf::from("/data/old-weights")));
+        assert!(roots.contains(&std::path::PathBuf::from("/usb/llm")));
+        assert!(roots.contains(&std::path::PathBuf::from("/data/new-weights")));
+        // 空白项滤掉、与当前 models_dir 重复的导入目录不重复占位。
+        assert_eq!(
+            roots,
+            vec![
+                config::data_dir(),
+                std::path::PathBuf::from("/data/new-weights"),
+                std::path::PathBuf::from("/data/old-weights"),
+                std::path::PathBuf::from("/usb/llm"),
+            ]
         );
     }
 }

@@ -274,9 +274,19 @@ fn collect_sensors() -> Vec<SensorGroup> {
 fn sort_sensors(groups: &mut [SensorGroup]) {
     groups.sort_by(|a, b| a.chip.cmp(&b.chip));
     for group in groups {
-        group
-            .entries
-            .sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.name.cmp(&b.name)));
+        // value 只作决胜键：同 chip 下重复 hwmon label（键完全相同而值不同）在
+        // stable sort 里会退化回 HashMap 迭代序，把值漂移误报成列表变化
+        // （第六轮评审 P3）。
+        group.entries.sort_by(|a, b| {
+            a.kind
+                .cmp(&b.kind)
+                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| {
+                    a.value
+                        .partial_cmp(&b.value)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
     }
 }
 
@@ -538,6 +548,13 @@ fn truncate_name(raw: &str) -> String {
 /// `sample_snapshot` 的 `join!` 上冻结同样长的时间，而不是只让 GPU 区块降级。
 /// 首拍就被并发踩上时 `LAST` 为空，返回 None（与"本机无 NVIDIA"同形，探测结束
 /// 后下一拍自愈）。有界且自愈：探测内部超时会 kill 子进程。
+///
+/// 边界要说清（第六轮评审 P2）：不排队保护的是**并发调用方**（设备页 2s 轮询
+/// 与 doctor 上下文并发时，拿不到锁的一路立即取旧值返回）。若轮询自己是拿锁
+/// 的一路，本拍仍要等探测完成——前端 `pollDevice` 的 in-flight 守卫是串行的，
+/// 期间不会再发新拍。即挂死场景下设备页表现为「最长一拍 ~60s 停更、GPU 区块
+/// 沿用旧值、超时后自愈」，而不是永不冻结。彻底解耦需把探测搬到独立后台
+/// 任务，属后续架构项。
 fn gpu_ext_cached() -> Option<GpuExtSnapshot> {
     static SAMPLER: OnceLock<Mutex<GpuExtCache>> = OnceLock::new();
     static LAST: OnceLock<RwLock<Option<GpuExtSnapshot>>> = OnceLock::new();
@@ -657,7 +674,10 @@ fn parse_nvidia_smi_driver_version(text: &str) -> Option<String> {
     parse_nvidia_smi_header_value(text, "Driver Version:")
 }
 
-/// 计算进程：`--query-compute-apps=pid,process_name,used_memory`。
+/// 计算进程：`--query-compute-apps=pid,process_name,used_memory`。按 pid 排序：
+/// 传感器/磁盘/网络/进程列表都是确定性排序（见 sort_sensors 的理由），计算进程
+/// 列表沿用 nvidia-smi 输出序会在条目重排时击穿 bridge 的显示等价抑制
+/// （第六轮评审 P3）；pid 唯一，单键即全序。
 fn nvidia_compute_processes() -> Vec<GpuProcInfo> {
     let Some(out) = run_nvidia_smi(&[
         "--query-compute-apps=pid,process_name,used_memory",
@@ -665,7 +685,9 @@ fn nvidia_compute_processes() -> Vec<GpuProcInfo> {
     ]) else {
         return Vec::new();
     };
-    out.lines().filter_map(parse_compute_app_line).collect()
+    let mut list: Vec<GpuProcInfo> = out.lines().filter_map(parse_compute_app_line).collect();
+    list.sort_by(|a, b| a.pid.cmp(&b.pid));
+    list
 }
 
 fn parse_compute_app_line(line: &str) -> Option<GpuProcInfo> {
@@ -673,15 +695,18 @@ fn parse_compute_app_line(line: &str) -> Option<GpuProcInfo> {
     if parts.len() < 3 {
         return None;
     }
-    // CSV 无引号转义：进程名含逗号时不能按固定下标取（名字会被截断、内存落 0），
-    // 首段是 pid、末段是内存、中间整段归名字（第三轮评审 P3）。
+    // CSV 对含逗号字段按惯例加双引号包裹（`1234, "my,proc", 4096`）：不能按
+    // 固定下标取（名字会被截断、内存落 0），首段是 pid、末段是内存、中间整段
+    // 归名字（第三轮评审 P3），再剥掉 CSV 引号包裹（第六轮评审 P3：原先名字
+    // 带字面 `"` 展示）。
     let used_mib = parts[parts.len() - 1].parse().unwrap_or(0);
-    let name = parts[1..parts.len() - 1].join(",");
+    let joined = parts[1..parts.len() - 1].join(",");
+    let name = joined.trim_matches('"');
     Some(GpuProcInfo {
         pid: parts[0].parse().ok()?,
         // unified-memory 设备 used_memory 可能是 [N/A]：按 0 处理，不丢整行。
         used_mib,
-        name: truncate_name(&name),
+        name: truncate_name(name),
     })
 }
 
@@ -821,10 +846,12 @@ pub(crate) async fn ollama_base() -> String {
 }
 
 /// 短超时探测客户端（OnceLock 共享；构建失败降级为每次现建，仍失败返回 None）。
-/// 显式禁用代理：客户端只访问 127.0.0.1，reqwest 0.13 的 `system-proxy` feature
-/// 会吃 `http_proxy` 环境变量且对 loopback 无隐式豁免——宿主设了代理而 no_proxy
-/// 没盖住 127.0.0.1 时，三个服务探测会全部改走代理然后假报"连接被拒绝"
-/// （第三轮评审 P2）。
+/// 显式禁用代理：默认目标 127.0.0.1（ollama 还可能指向自定义 `ollama_host`，
+/// 见 `ollama_base()`），reqwest 0.13 的 `system-proxy` feature 会吃
+/// `http_proxy` 环境变量且对 loopback 无隐式豁免——宿主设了代理而 no_proxy
+/// 没盖住目标时，服务探测会改走代理然后假报"连接被拒绝"（第三轮评审 P2；
+/// 口径校准：自定义 host 在代理后可达与否不在本客户端的保证范围内，第六轮
+/// 评审 P3）。
 pub(crate) fn probe_client() -> Option<&'static reqwest::Client> {
     static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
     CLIENT

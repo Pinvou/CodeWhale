@@ -142,6 +142,18 @@ pub struct Settings {
     #[serde(default)]
     pub import_scan_dirs: Vec<String>,
 
+    /// 历史上用过的权重目录（`set_storage_settings` 换目录时把旧值记进来）。
+    ///
+    /// 为什么必须留痕：改权重目录**不搬运已下载的权重**（见
+    /// `set_storage_settings` 的注释），老目录下的模型在商店库里仍然记着——
+    /// 它们依旧是商店管理的权重，只是换目录那一刻起不再位于当前 `models_dir`。
+    /// 设备管理的外部模型移除守卫按"商店权重根"拒绝删除（boundary.rs），不把
+    /// 历史目录算进去的话，改过目录的机器上旧根就处于无保护状态。只留最近
+    /// [`MAX_MODELS_DIR_HISTORY`] 个，足够覆盖正常使用（换盘不频繁），又不让
+    /// 手改配置的脏数据无限堆积。
+    #[serde(default)]
+    pub models_dir_history: Vec<String>,
+
     /// 测试模型商店是否开着。
     ///
     /// 入口是隐藏的：在模型商店页面连点标题 7 次（相邻两次间隔不超过 1.5 秒）弹出
@@ -172,12 +184,17 @@ impl Default for Settings {
             gateway_port: 8090,
             max_concurrent_downloads: 1,
             import_scan_dirs: Vec::new(),
+            models_dir_history: Vec::new(),
             test_mode_enabled: false,
         }
     }
 }
 
 pub const HF_ENDPOINT_PRESETS: &[&str] = &["https://huggingface.co", "https://hf-mirror.com"];
+
+/// `models_dir_history` 的保留上限。换权重目录不是高频操作，16 个足够覆盖
+/// "换盘—换回—再换"的正常弧线；超出后丢最老的。
+pub const MAX_MODELS_DIR_HISTORY: usize = 16;
 
 impl Settings {
     /// 夹到 1..=3。配置文件可能被手改成 0（那样谁都下不了）或者 99，不能信。

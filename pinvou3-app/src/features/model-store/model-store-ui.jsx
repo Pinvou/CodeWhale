@@ -217,10 +217,8 @@ function MsToast({ toast }) {
       // 评审 P2）。多行时放宽圆角与最大宽度；role/aria-live 让读屏器播报结果。
       className={`pointer-events-none fixed bottom-6 left-1/2 z-[240] -translate-x-1/2 bg-[rgba(32,33,36,.94)] px-4 py-2.5 text-[13px] font-medium text-white dark:bg-[rgba(232,234,237,.94)] dark:text-[#202124] ${
         String(toast.text || '').includes('\n')
-          // 限宽只放多行分支：单行分支是 nowrap 胶囊，套 max-width 会让长文案
-          // 溢出胶囊背景（模型商店既有长错误消息，round-5 review P3）。
           ? 'max-w-[min(90vw,560px)] whitespace-pre-line rounded-2xl text-left leading-5'
-          : 'whitespace-nowrap rounded-full'
+          : 'rounded-full'
       }`}
       style={{ boxShadow: '0 8px 24px rgba(0,0,0,.28)' }}
       role="status"

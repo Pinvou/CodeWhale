@@ -273,7 +273,10 @@ const DiskRow = ({ disk, copy }) => {
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={Math.round(Math.max(0, Math.min(100, disk.usedPct)))}
-          aria-label={`${disk.mountPoint || disk.name || ''} ${Math.round(Math.max(0, disk.usedPct))}%`}
+          // fmtDisks exposes mountPoint only (no disk name) — the old
+          // `disk.name` fallback was always undefined; unknown mounts read
+          // "—" to screen readers instead of "undefined 45%" (round-6 review).
+          aria-label={`${disk.mountPoint || '—'} ${Math.round(Math.max(0, disk.usedPct))}%`}
         >
           <div
             className="h-full rounded-full transition-all duration-500"
@@ -428,7 +431,12 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     }
     return () => {
       clearInterval(servicesTimer);
-      if (typeof dev.stopDevicePolling === 'function') dev.stopDevicePolling();
+      // Same reject-style-stub defense as startDevicePolling above (round-6
+      // review: the comment claimed "every other call has one" — this one
+      // didn't).
+      if (typeof dev.stopDevicePolling === 'function') {
+        Promise.resolve(dev.stopDevicePolling()).catch(() => {});
+      }
     };
   }, [showToast]);
 
@@ -437,8 +445,12 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   const retryPoll = useCallback(() => {
     const dev = (window.TauriBridge || bridge)?.device;
     if (!dev) return;
-    if (typeof dev.stopDevicePolling === 'function') dev.stopDevicePolling();
-    if (typeof dev.startDevicePolling === 'function') dev.startDevicePolling();
+    if (typeof dev.stopDevicePolling === 'function') {
+      Promise.resolve(dev.stopDevicePolling()).catch(() => {});
+    }
+    if (typeof dev.startDevicePolling === 'function') {
+      Promise.resolve(dev.startDevicePolling()).catch(() => {});
+    }
     if (typeof dev.pollDeviceServices === 'function') dev.pollDeviceServices().catch(() => {});
   }, []);
 
@@ -539,6 +551,10 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
       showToast(copy.linkDisabledRemote);
       return;
     }
+    // Cross-row mutex entry guard (round-6 review P2): mirror of the
+    // otherRowBusy disable — keeps a stale-closure click from overwriting
+    // the busy slot while another row's saveModel/remove is still in flight.
+    if (busyKey) return;
     setBusyKey(`link:${rowKey(row)}`);
     try {
       // findLinkedRows takes (...names): pass both the registry model and the
@@ -561,7 +577,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     } finally {
       setBusyKey(null);
     }
-  }, [bs, copy, showToast, t]);
+  }, [bs, busyKey, copy, showToast, t]);
 
   // Identity for busy/armed keys: the row NAME, not the id. Unregistered
   // Ollama rows swap their synthetic `ollama-*` id for a registry id the
@@ -591,6 +607,8 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   const confirmRemove = useCallback(async (row) => {
     const dev = (window.TauriBridge || bridge)?.device;
     if (!dev?.removeExternalModel) return;
+    // Cross-row mutex entry guard (round-6 review P2): see linkExternal.
+    if (busyKey) return;
     setBusyKey(`remove:${rowKey(row)}`);
     try {
       let id = row.id;
@@ -663,7 +681,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
       // second saveModel / removeExternalModel.
       setBusyKey((current) => (current === `remove:${rowKey(row)}` ? null : current));
     }
-  }, [armedRemoveId, bs, copy, deleteWeights, showToast]);
+  }, [armedRemoveId, bs, busyKey, copy, deleteWeights, showToast]);
 
   // ── AI doctor actions ────────────────────────────────────────────
   const [doctorBusy, setDoctorBusy] = useState(null);
@@ -918,6 +936,15 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                 </div>
               </div>
 
+              {/* Stale-baseline hint (round-6 review P2): probes failed
+                  repeatedly while an old list is still on display — the chips
+                  below may not reflect reality anymore. */}
+              {bs?.deviceServicesError && deviceServices ? (
+                <div className={`text-[11px] ${MUTED_TEXT}`} data-testid="device-manager-services-stale">
+                  {copy.servicesStale}
+                </div>
+              ) : null}
+
               {/* Model services probe: one subtle line of chips (null = the
                   first probe is still in flight). */}
               {bs?.deviceServicesError && !deviceServices ? (
@@ -1027,12 +1054,32 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                     const armed = armedRemoveId === rowIdentity;
                     const kindLabel = copy[KIND_LABEL_KEYS[row.kind] || 'kindOther'];
                     const rowBusy = busyKey === `link:${rowIdentity}` || busyKey === `remove:${rowIdentity}`;
+                    // Cross-row mutex (round-6 review P2): busyKey is a single
+                    // slot for the whole page. Without this, confirming row B
+                    // while row A's remove is in flight overwrites the slot and
+                    // revives A's buttons mid-flight (the CAS clear only guards
+                    // the finish path) — a second remove could then hit the same
+                    // id. Disabling every row's actions while any row is busy is
+                    // the honest expression of that single slot.
+                    const otherRowBusy = !!busyKey && !rowBusy;
                     // Daemon rows whose model name is store-managed only fail at
                     // confirm time today (backend boundary rejects the quiet
                     // registration); pre-disable with the same managed hint so
-                    // the user learns before arming (round-4 review P3).
-                    const managedByStore = storeRows.some((record) =>
-                      String(record.model_name || '').toLowerCase() === row.name.toLowerCase());
+                    // the user learns before arming (round-4 review P3). For
+                    // ollama rows the backend also checks the effective deletion
+                    // name (record.model, falling back to name, case-insensitive)
+                    // — mirror that arm so an alias registry row whose MODEL is
+                    // store-managed pre-disables too instead of arming into a
+                    // guaranteed rejection (round-6 review).
+                    const managedByStore = storeRows.some((record) => {
+                      const storeName = String(record.model_name || '').toLowerCase();
+                      if (storeName === row.name.toLowerCase()) return true;
+                      return (
+                        row.kind === 'ollama' &&
+                        !!row.model &&
+                        storeName === String(row.model).toLowerCase()
+                      );
+                    });
                     return (
                       <div
                         key={row.id || row.name}
@@ -1089,7 +1136,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                               // makes it the default model, and an unreachable
                               // default breaks every new chat (same reasoning
                               // as pinvou-model-link.checkLinkable).
-                              disabled={rowBusy || row.status === 'unreachable'}
+                              disabled={rowBusy || otherRowBusy || row.status === 'unreachable'}
                               title={row.status === 'unreachable' ? copy.linkDisabledUnreachable : undefined}
                               onClick={() => linkExternal(row)}
                               data-testid="device-manager-link"
@@ -1130,7 +1177,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                               <MsButton
                                 tone="danger"
                                 busy={busyKey === `remove:${rowIdentity}`}
-                                disabled={rowBusy || !confirmGateReady}
+                                disabled={rowBusy || otherRowBusy || !confirmGateReady}
                                 onClick={() => confirmRemove(row)}
                                 data-testid="device-manager-remove-confirm"
                               >
@@ -1148,7 +1195,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                           ) : (
                             <MsButton
                               tone="danger"
-                              disabled={rowBusy || managedByStore}
+                              disabled={rowBusy || otherRowBusy || managedByStore}
                               title={managedByStore ? copy.storeManaged : undefined}
                               onClick={() => armRemove(row)}
                               data-testid="device-manager-remove"

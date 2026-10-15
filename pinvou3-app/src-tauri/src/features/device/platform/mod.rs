@@ -33,8 +33,10 @@ pub(crate) use unsupported::{
     cuda_toolkit_version, dmi_product_name, extra_sensors, iface_has_wireless, iface_operstate_up,
     nvidia_driver_version, os_pretty_name,
 };
-// 权限收敛按 unix/not(unix) 二分，而不是按目标 OS——macOS 同样享受 0700/0600。
+// 权限收敛按 unix/not(unix) 二分，而不是按目标 OS——macOS 同样享受 0700。
+// 文件级 0600 与落盘 fsync 由 platform::atomic_write_private 在底座完成
+// （第六轮评审 P2 起登记写入复用共享原子写），这里只剩目录级收敛。
 #[cfg(unix)]
-pub(crate) use owner_only::{harden_dir_owner_only, set_file_owner_only, sync_directory};
+pub(crate) use owner_only::harden_dir_owner_only;
 #[cfg(not(unix))]
-pub(crate) use unsupported::{harden_dir_owner_only, set_file_owner_only, sync_directory};
+pub(crate) use unsupported::harden_dir_owner_only;

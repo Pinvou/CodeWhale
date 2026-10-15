@@ -122,9 +122,16 @@ pub async fn get_external_models() -> Result<ExternalModelsView, String> {
                 }
             }
             for name in names {
+                // 去重与 ollama_status 同一把大小写尺子（daemon 归一小写）：
+                // 记录写 `Qwen3:30B` 时大小写敏感比较会让同一 tag 既标
+                // available 又以未登记行重复出现（第六轮评审 P3）。
                 let already_listed = models.iter().any(|model| {
                     model.kind == "ollama"
-                        && (model.model.as_deref() == Some(name.as_str()) || model.name == name)
+                        && (model
+                            .model
+                            .as_deref()
+                            .is_some_and(|m| m.eq_ignore_ascii_case(&name))
+                            || model.name.eq_ignore_ascii_case(&name))
                 });
                 if !already_listed {
                     models.push(ExternalModel {
@@ -353,26 +360,15 @@ pub async fn register_external_model(
                 };
                 let json = serde_json::to_string_pretty(&record)
                     .map_err(|error| format!("注册表序列化失败：{error}"))?;
-                // temp 文件 + rename 原子落盘：进程崩溃不留半截 JSON（半截文件会在
-                // 下次扫描时被跳过并告警，用户看到的是模型凭空消失）。tmp 用
-                // create_new 独占创建（并发登记撞 id 时换一个重来，不静默覆盖先写
-                // 记录），rename 前 sync，掉电不留空文件；文件 0600 只留 owner。
+                // 原子落盘复用底座 platform::atomic_write_private（第六轮评审
+                // P2：原先手搓 temp+rename，失败路径残留 .tmp、0600 在 open 之后
+                // 才收紧——共享版 open 时即 0600、失败清理 tmp、写后与 rename 后
+                // 都有 fsync）。尾随换行与原实现逐字节一致；fresh_record_id 的
+                // 存在性检查保证不覆盖既有记录。
                 let path = dir.join(format!("{id}.json"));
-                let tmp = dir.join(format!("{id}.json.tmp"));
-                let mut file = match std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&tmp)
-                {
-                    Ok(file) => file,
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                    Err(error) => return Err(format!("注册表写入失败：{error}")),
-                };
-                write_record_file(&mut file, json.as_bytes())?;
-                std::fs::rename(&tmp, &path).map_err(|error| format!("注册表写入失败：{error}"))?;
-                // rename 的目录项还在页缓存里，掉电可能记录整个消失；失败不致命
-                // （最坏重新登记一次），忽略（五轮评审 P3）。
-                let _ = super::platform::sync_directory(&dir);
+                let bytes = format!("{json}\n");
+                crate::platform::atomic_write_private(&path, bytes.as_bytes())
+                    .map_err(|error| format!("注册表写入失败：{error}"))?;
                 return Ok(id);
             }
             Err("注册表 id 生成冲突，请重试".to_string())
@@ -453,17 +449,6 @@ fn fresh_record_id(dir: &Path) -> Result<String, String> {
         }
     }
     Err("注册表 id 生成冲突，请重试".to_string())
-}
-
-/// 写入 + 落盘前 sync + 文件 0600（记录含 base_url/weights_path，只留 owner；
-/// unix 专属实现收在 platform 适配层）。
-fn write_record_file(file: &mut std::fs::File, bytes: &[u8]) -> Result<(), String> {
-    use std::io::Write;
-    super::platform::set_file_owner_only(file);
-    file.write_all(bytes)
-        .and_then(|_| file.write_all(b"\n"))
-        .and_then(|_| file.sync_all())
-        .map_err(|error| format!("注册表写入失败：{error}"))
 }
 
 // ---------------------------------------------------------------- 移除
@@ -999,7 +984,11 @@ pub(crate) async fn fetch_ollama_model_names() -> Result<Vec<String>, String> {
         let chunk = response
             .chunk()
             .await
-            .map_err(|error| format!("Ollama 返回内容无法读取：{error}"))?;
+            // 不串化原始 error：reqwest 的 Display 会追加完整 URL（自定义
+            // ollama_host 可带 userinfo/内网主机名），而这条 Err 会进 warnings/
+            // UI——与 human_probe_error 刻意不透传原始错误同一纪律（第六轮
+            // 评审 P3）。
+            .map_err(|_| "Ollama 返回内容无法读取".to_string())?;
         let Some(chunk) = chunk else { break };
         if body.len() + chunk.len() > MAX_TAGS_BYTES {
             return Err(format!(

@@ -330,6 +330,11 @@
 
   // ── Model services (slow path) ───────────────────────────────────
   // 服务探测独立于 2s 快照：视图按 10s 慢轮询或手动刷新时调用。
+  // 有基线后的持续失败阈值：连续 SERVICES_STALE_FAILURES 拍（约 30s）仍失败才
+  // 立错误旗。瞬时抖动（守护进程重启中的一两拍）不该把面板打坏，但探测真死
+  // 也不能让过时的 running 状态无限期冒充事实（第六轮评审 P2）。
+  var SERVICES_STALE_FAILURES = 3;
+  var deviceServicesFailures = 0;
   async function pollDeviceServices() {
     // 与快照轮询同一 in-flight 纪律：10s 定时 + 手动刷新可并发，docker 探测最坏
     // 3s+，上一拍未返回时本拍直接跳过，避免响应乱序把旧探测结果倒灌回来。
@@ -338,19 +343,30 @@
     try {
       var services = await invoke("get_device_services");
       var next = Array.isArray(services) ? services : [];
-      // 内容没变不下发（与快照的显示等价抑制同一目标）；失败路径零变化也不 notify。
+      deviceServicesFailures = 0;
+      // 内容没变不下发（与快照的显示等价抑制同一目标）。
       // 首拍必须落地（state.deviceServices 还是 null）：基线用 null 短路，否则
       // "null || []" 会把首个空结果吞掉，视图的 loading 永远不退（第三轮评审 P2）。
+      // 错误旗→null 的翻清也必须发布：否则恢复拍若内容恰好没变，常驻错误行
+      // 会一直挂在页面上（第六轮评审 P2 附带修复）。
+      var hadError = state.deviceServicesError !== null;
       state.deviceServicesError = null;
+      var changed = hadError;
       if (!state.deviceServices || !structuralEqual(next, state.deviceServices)) {
         state.deviceServices = next;
-        notifyDomains(["device"]);
+        changed = true;
       }
+      if (changed) notifyDomains(["device"]);
     } catch (e) {
-      // 探测失败保留上一份结果：瞬时抖动不该被渲染成「全部停止」。但首拍就失败
-      // 必须可见——null 悬着只会让视图的"探测中"无限驻留，用户无从知道探测已坏。
+      // 探测失败保留上一份结果：瞬时抖动不该被渲染成「全部停止」。首拍就失败
+      // 必须立即可见——null 悬着只会让视图的"探测中"无限驻留；有基线后连续
+      // SERVICES_STALE_FAILURES 拍失败也要把错误旗立起来（旧 chips 保留显示，
+      // 视图同时给出"状态可能过期"提示），探测死了不再静默冒充在线。
       console.warn("[pinvou3][device] services poll failed", e);
-      if (!state.deviceServices) {
+      deviceServicesFailures += 1;
+      var surfaced =
+        !state.deviceServices || deviceServicesFailures >= SERVICES_STALE_FAILURES;
+      if (surfaced) {
         var message = e && e.message ? e.message : String(e || "services probe failed");
         if (state.deviceServicesError !== message) {
           state.deviceServicesError = message;

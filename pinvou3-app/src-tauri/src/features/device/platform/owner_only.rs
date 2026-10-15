@@ -8,22 +8,11 @@
 /// 非 unix 平台才走 unsupported 的显式桩。
 use std::path::Path;
 
-/// 注册表目录只留 owner 权限（0700）。
+/// 注册表目录只留 owner 权限（0700）。文件本身走
+/// `platform::atomic_write_private`（open 时即 0600），不再需要文件级收敛。
 pub(crate) fn harden_dir_owner_only(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
-}
-
-/// 注册表文件只留 owner 权限（0600），rename 落盘前调用。
-pub(crate) fn set_file_owner_only(file: &std::fs::File) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
-}
-
-/// rename 落盘后对目录做 fsync：文件内容已 sync，但目录项（rename 本身）还在
-/// 页缓存里——掉电可能记录文件整个消失（五轮评审 P3；失败不致命，调用方忽略）。
-pub(crate) fn sync_directory(path: &Path) -> std::io::Result<()> {
-    std::fs::File::open(path)?.sync_all()
 }
 
 #[cfg(test)]

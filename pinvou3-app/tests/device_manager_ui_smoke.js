@@ -560,7 +560,8 @@ async function clickTestId(page, testId) {
   }));
   rec('⑥-b 登记行 armed 态回显权重路径+勾选框+不可撤销提示',
     armedEndpoint.pathEcho && armedEndpoint.weightsToggle && armedEndpoint.irreversibleShown
-    && checkboxGatedAtFirstSight,
+    && checkboxGatedAtFirstSight?.toggleDisabled === true
+    && checkboxGatedAtFirstSight?.confirmDisabled === true,
     JSON.stringify({ armedEndpoint, checkboxGatedAtFirstSight }));
   rec('⑥-c 取消移除收起 armed 面板且不发起删除命令',
     cancelOutcome.armedClosed && cancelOutcome.removeCallsStillOne,
@@ -620,6 +621,10 @@ async function clickTestId(page, testId) {
       counterHidden: !document.querySelector('[data-testid="device-manager-doctor-counter"]'),
     };
   });
+  // ⑩-a 前半窗：①–⑧ 与 ⑨ 的准备段不得产生任何运行时报错。必须在注入预期
+  // 失败**之前**断言累计错误——原先"清空后同步断言空集"的写法观测窗为零，
+  // 任何实现都必过（round-6 review P1）。
+  rec('⑩-a 全程无运行时报错（①–⑧）', errors.length === 0, errors.slice(0, 3).join(' | '));
   await page.evaluate(() => { window.__DEVICE_MGR_TEST__.failChatSend = true; });
   await clickTestId(page, 'device-manager-doctor-send');
   await page.waitForFunction(() => !!document.querySelector('[data-testid="model-store-toast"]'), { timeout: 8000 });
@@ -683,10 +688,15 @@ async function clickTestId(page, testId) {
   rec('⑩-c 外部模型读取失败常驻错误行+重试恢复', externalErrorShown,
     JSON.stringify({ externalErrorShown }));
 
-  // ⑨ 故意注入了发送失败：transition 基建会把这次拒绝 console.error（预期内
-  // 噪音），清空后再断言"无意外运行时报错"。
+  // ⑩ 后半窗：⑨ 的预期注入失败（transition 基建的 console.error）与 ⑩-b/⑩-c
+  // 故意注入的读取失败都在上面收尾了——清空后走一段**真实交互**（模型区刷新 →
+  // 等可观察效果 → 再 settle 两拍），让"无报错"断言拥有真实观察窗；对空集同步
+  // 断言等于没有断言（round-6 review P1）。
   errors.length = 0;
-  rec('⑩ 全程无运行时报错（⑨ 的预期注入失败除外）', errors.length === 0, errors.slice(0, 3).join(' | '));
+  await clickTestId(page, 'device-manager-models-refresh');
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-external-row"]'), { timeout: 8000 });
+  await sleep(300);
+  rec('⑩ 后半窗无运行时报错（⑩-b/⑩-c/刷新路径，⑨ 预期噪音除外）', errors.length === 0, errors.slice(0, 3).join(' | '));
   await browser.close();
 
   const failed = results.filter(result => !result.pass).length;

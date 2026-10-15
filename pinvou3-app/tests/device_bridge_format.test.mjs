@@ -83,6 +83,10 @@ const fixtureSnapshot = () => ({
     { chip: 'INA3221', entries: [
       { kind: 'voltage', name: 'in0', value: 12.06, critical: null, max: 12.1 },
       { kind: 'voltage', name: 'in1', value: 13.2, critical: 13, max: null },
+      // 越过 max 但未到 critical 的电压（无 critical 臂）：非温度类的 max 就
+      // 是红线，必须 crit——此前 fixture 没有该形态的正例，删掉 max 臂实现
+      // 套件照绿（round-6 review P2 变异存活项）。
+      { kind: 'voltage', name: 'in2', value: 12.6, critical: null, max: 12.1 },
       { kind: 'current', name: 'curr1', value: 3.2, critical: null, max: null },
       { kind: 'power', name: 'power1', value: 28.46, critical: null, max: null },
     ] },
@@ -193,10 +197,13 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   assert.equal(power.entries[0].level, 'ok');
   assert.equal(power.entries[1].valueText, '13.2 V');
   assert.equal(power.entries[1].level, 'crit');
-  assert.equal(power.entries[2].valueText, '3.2 A');
-  assert.equal(power.entries[2].level, 'ok');
-  assert.equal(power.entries[3].valueText, '28.5 W');
+  // 非温度类越过 max（未到 critical，此臂无 critical）必须 crit（round-6 P2）。
+  assert.equal(power.entries[2].valueText, '12.6 V');
+  assert.equal(power.entries[2].level, 'crit');
+  assert.equal(power.entries[3].valueText, '3.2 A');
   assert.equal(power.entries[3].level, 'ok');
+  assert.equal(power.entries[4].valueText, '28.5 W');
+  assert.equal(power.entries[4].level, 'ok');
 
   // 网络：typeKey 白名单校验、累计与速率文本；非法/负速率按 0。
   assert.equal(fmt.network[0].typeKey, 'loopback');

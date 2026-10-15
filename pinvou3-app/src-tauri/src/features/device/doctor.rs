@@ -169,6 +169,10 @@ pub fn build_doctor_prompt(
 ) -> Result<String, String> {
     let question_line = match kind {
         DoctorKind::Custom => {
+            // 契约注记（第六轮评审 P3）：question 拼在上下文围栏**外**且不过
+            // sanitize——它必须始终来自**当次用户的真实输入**（前端输入框）。
+            // 若未来把会话历史/其他不可信文本预填进来，这里就是提示词注入
+            // 入口，届时必须先过上下文同款清洗。
             let question = question
                 .map(str::trim)
                 .filter(|text| !text.is_empty())
@@ -315,5 +319,31 @@ mod tests {
             .expect("hogs prompt");
         assert!(prompt.contains("不要删除任何东西"));
         assert!(prompt.contains("journalctl --disk-usage"));
+    }
+
+    #[test]
+    fn skill_md_safety_rules_stay_anchored_to_the_doctor_contract() {
+        // SKILL.md 与本文件的 SAFETY_RULES/装模型模板是同一套安全约束的两份
+        // 独立文本（一个进会话提示词、一个进释放的技能清单）。doctor 侧一直
+        // 有 contains 锚定，SKILL.md 是纯资源文件零锚定——单侧改动会静默漂移，
+        // 让同一禁令在一个入口失效（第六轮评审 P2）。此处把 SKILL.md 的关键
+        // 安全句钉进测试：改任一侧都必须有意识地过这里。
+        let skill =
+            include_str!("../../../resources/common/bundle/builtin-skills/device-doctor/SKILL.md");
+        // rm -rf 通配/模糊路径禁令（对齐 SAFETY_RULES 规则 3）。
+        assert!(skill.contains("禁止 `rm -rf` 带通配符或模糊路径"));
+        // ~/.pinvou3 禁触 + 注册表写入唯一豁免（对齐规则 4 与装模型第 6 步）。
+        assert!(skill.contains("唯一例外"));
+        assert!(skill.contains("external-models.d"));
+        assert!(skill.contains("model-store"));
+        assert!(skill.contains("永远不要手工增删改"));
+        // 注册表文件契约：文件名=<id>.json、weights_path 教 null、示例带
+        // chmod 600、命令白名单三步之外禁 && 拼接（对齐 install_model 模板）。
+        assert!(skill.contains("文件名必须与内容里的 `id` 字段完全一致"));
+        assert!(skill.contains("\"weights_path\": null"));
+        assert!(skill.contains("chmod 600"));
+        assert!(skill.contains("不得用 `&&`、`;`、`|` 拼接"));
+        // 技能边界声明：仅 MegaCube（与释放面按能力位过滤互为犄角）。
+        assert!(skill.contains("MegaCube"));
     }
 }

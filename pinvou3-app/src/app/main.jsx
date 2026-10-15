@@ -3024,11 +3024,15 @@ const App = () => {
           if (!sid) return false;
           const sent = await runBrowserUiTransition(async ({ isCurrent }) => {
             if (!isCurrent()) return false;
-            // 先发送再跳转：发送失败时用户还留在设备管理页，「问题已保留，请
-            // 重试」的 toast 才有着落——先跳转的话视图已卸载，失败只剩一条
-            // console 日志（第四轮评审 P3）。发送成功后进入会话，消息与回复
-            // 随会话历史照常渲染。
-            await bridge.chat.sendMessage(prompt);
+            // 先发送再跳转：发送失败时用户还留在设备管理页，「请重试」的
+            // toast 才有着落——先跳转的话视图已卸载，失败只剩一条 console
+            // 日志（第四轮评审 P3）。发送成功后进入会话，消息与回复随会话
+            // 历史照常渲染。sendMessage 除了 throw 还有非 throw 的失败路径
+            // （返回 false/"restored"，如附件/adopt 分支）：同样按没发出去
+            // 处理、不跳转（第六轮评审 P3；本场景无附件且会话已 materialize，
+            // 属防御性收口）。
+            const delivered = await bridge.chat.sendMessage(prompt);
+            if (delivered !== true && delivered !== undefined) return false;
             setCodeModeOn(false);
             closeMobileSidebar();
             setCurrentView('chat');

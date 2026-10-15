@@ -4,6 +4,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { expectedWebBridgeApi } from './bridge_domain_contract.mjs';
+import { desktopSliceFields } from './bridge_slice_fields.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const webBridgeRoot = path.join(root, 'src', 'platform', 'web');
@@ -118,12 +119,14 @@ for (const method of Object.keys(api.device)) {
     `web device.${method} stub must reject, never fake success`,
   );
 }
-// 桌面/双端 device 切片键集交叉锁定（round-5 review P3）：桌面加第 6 个字段
-// 漏改 web 时切片缺键返回 undefined，静默漂移——把 5 键集合钉死。
+// 桌面/双端 device 切片键集交叉锁定（round-5 review P3 → round-6 补严）：
+// 期望值不再手抄，直接解析桌面 bridge.js 的 STATE_SLICE_FIELDS.device——
+// 桌面加第 6 个字段而漏改 web 时切片缺键返回 undefined，此前硬编码数组是
+// 单向锁，恰好看不见这个方向的漂移（round-6 review P2）。
 assert.deepEqual(
   Object.keys(api.state.get('device')).sort(),
-  ['device', 'deviceError', 'deviceServices', 'deviceServicesError', 'externalModels'],
-  'web device slice must carry the exact 5-key contract',
+  desktopSliceFields().device.slice().sort(),
+  'web device slice keys must equal the desktop STATE_SLICE_FIELDS.device contract',
 );
 assert.equal(api.sendMessage, undefined, 'Web flat command facade must stay private');
 

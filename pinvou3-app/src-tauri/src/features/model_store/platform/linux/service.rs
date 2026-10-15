@@ -835,6 +835,21 @@ pub fn set_storage_settings(
         // 建不出来就不写进配置。否则要等到下次下载才在脚本里炸，那时的报错
         // （某个 mkdir 失败）离真正的原因——设置页填错了路径——已经很远了。
         std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建权重目录「{dir}」：{e}"))?;
+        // 换目录不搬权重，老目录里的模型在库里仍然记着——把旧目录记进
+        // models_dir_history，设备管理的移除守卫才知道旧根同样是商店地盘
+        // （boundary.rs 的"全部权重根"）。回填出的默认值（空串）不值得记。
+        if dir != settings.models_dir && !settings.models_dir.trim().is_empty() {
+            let old = settings.models_dir.clone();
+            settings
+                .models_dir_history
+                .retain(|d| d != &old && d != &dir);
+            settings.models_dir_history.push(old);
+            let keep = settings
+                .models_dir_history
+                .len()
+                .saturating_sub(config::MAX_MODELS_DIR_HISTORY);
+            settings.models_dir_history.drain(..keep);
+        }
         settings.models_dir = dir;
     }
     if let Some(dirs) = import_scan_dirs {
@@ -936,5 +951,45 @@ mod tests {
         assert!(is_prompt_line("  LMM_PROMPT_FORM={}  "));
         assert!(!is_prompt_line("LMM_PROMPTX=1"));
         assert!(!is_prompt_line("正在下载 …"));
+    }
+
+    #[test]
+    fn changing_models_dir_records_the_old_dir_in_history() {
+        let ctx = super::config::TempHome::new();
+        let a = ctx.path().join("weights-a");
+        let b = ctx.path().join("weights-b");
+        let path_of = |p: &std::path::Path| p.to_string_lossy().to_string();
+
+        // 默认（回填）→ A：旧值（数据根下的 models/）记入历史——它本就在
+        // 保护根里，重复无害；关键是 A 不出现在历史。
+        set_storage_settings(Some(path_of(&a)), None).expect("set first models_dir");
+        let settings = super::config::load_settings();
+        assert_eq!(settings.models_dir, path_of(&a));
+        assert!(
+            !settings.models_dir_history.contains(&path_of(&a)),
+            "当前目录不能留在历史里"
+        );
+
+        // A → B：A 进历史——换目录不搬权重，A 下的在册模型仍是商店地盘。
+        set_storage_settings(Some(path_of(&b)), None).expect("set second models_dir");
+        let settings = super::config::load_settings();
+        assert_eq!(settings.models_dir, path_of(&b));
+        assert!(settings.models_dir_history.contains(&path_of(&a)));
+
+        // B → 换回 A：A 从历史里清掉（它现在是当前值），B 进历史。
+        set_storage_settings(Some(path_of(&a)), None).expect("switch back");
+        let settings = super::config::load_settings();
+        assert!(settings.models_dir_history.contains(&path_of(&b)));
+        assert!(
+            !settings.models_dir_history.contains(&path_of(&a)),
+            "换回旧目录后它由当前值覆盖，历史里不该有第二份"
+        );
+
+        // 保护链路端到端：当前是 A、历史有 B 时，store_weights_roots 同时
+        // 覆盖两个目录（历史目录的守卫面见 boundary 的直打测试）。
+        set_storage_settings(Some(path_of(&b)), None).expect("set to b again");
+        let roots = crate::features::model_store::store_weights_roots();
+        assert!(roots.contains(&std::path::PathBuf::from(&path_of(&a))));
+        assert!(roots.contains(&std::path::PathBuf::from(&path_of(&b))));
     }
 }
