@@ -1558,7 +1558,7 @@ fn edit<S: CredentialStore>(
             updated.api_key = String::new();
             prefs.upsert_model(updated);
             if set_active {
-                prefs.set_default_model_ref(ModelSelectionRef::local(id))?;
+                prefs.set_default_model_ref(ModelSelectionRef::local(&id))?;
             }
             Ok(())
         },
