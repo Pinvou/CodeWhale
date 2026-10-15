@@ -2,6 +2,7 @@ import { lstat, readFile, realpath } from "node:fs/promises";
 import { isIP } from "node:net";
 import { resolve } from "node:path";
 import { isDirectCliEntry } from "../cli-entrypoint.js";
+import { isExampleHmacKey } from "../hmac-key-config.js";
 
 const REQUIRED_KEYS = Object.freeze([
   "NODE_ENV",
@@ -72,6 +73,9 @@ export function validateControllerEnvironment(entries, { expectedFeatureFlag = "
     if (!entries.has(key) || entries.get(key).length === 0) {
       fail("controller_env_required_value_missing");
     }
+  }
+  for (const name of ["PINVOU_REMOTE_ENROLLMENT_HMAC_KEY", "PINVOU_REMOTE_PAIRING_HMAC_KEY"]) {
+    if (isExampleHmacKey(entries.get(name))) fail("controller_env_hmac_key_invalid");
   }
   // Match the implemented server dispatcher; official live claims are not wired.
   if (entries.get("PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT") === "official") {

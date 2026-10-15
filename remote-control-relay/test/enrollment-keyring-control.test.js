@@ -54,6 +54,29 @@ test("coverage control secret must be independent of every retained enrollment k
   error => error.code === "coverage_control_key_invalid" && error.message === error.code && !error.cause);
 });
 
+test("coverage control rejects both public HMAC examples without exposing key material", () => {
+  const env = environment([]);
+  for (const example of [
+    "replace-with-at-least-32-random-bytes",
+    "replace-with-at-least-32-independent-random-bytes",
+  ]) {
+    for (const key of [example, ` ${example} `]) {
+      assert.throws(() => loadEnrollmentCoverageControlConfig({ ...env,
+        PINVOU_REMOTE_GATEWAY_CONTROL_KEY: key }, { required: true }),
+      error => error.code === "coverage_control_key_invalid" && error.message === error.code && !error.cause);
+    }
+  }
+  for (const key of ["é".repeat(16), "k".repeat(4096)]) {
+    assert.doesNotThrow(() => loadEnrollmentCoverageControlConfig({ ...env,
+      PINVOU_REMOTE_GATEWAY_CONTROL_KEY: key }, { required: true }));
+  }
+  for (const key of ["é".repeat(15), "k".repeat(4097)]) {
+    assert.throws(() => loadEnrollmentCoverageControlConfig({ ...env,
+      PINVOU_REMOTE_GATEWAY_CONTROL_KEY: key }, { required: true }),
+    { code: "coverage_control_key_invalid" });
+  }
+});
+
 test("coverage without retained keys preserves the legacy v1 binding", async () => {
   const env = environment([]);
   env.PINVOU_REMOTE_CONTROLLER_STATE_PATH = process.platform === "win32"

@@ -349,6 +349,42 @@ async fn remote_snapshot_bridge_and_engine_clones_hold_the_private_root() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn session_sync_paths_keep_the_existing_single_workspace_authority() {
+    let _lock = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let home = TestHome::new();
+    let (engine, mut receiver) = home.engine(home.snapshot()).await;
+    for cold in [false, true] {
+        if cold {
+            engine
+                .try_sync_new_session("remote-custody".into(), vec![])
+                .unwrap();
+        } else {
+            engine
+                .sync_session("remote-custody".into(), vec![])
+                .await
+                .unwrap();
+        }
+        let Some(Op::SyncSession {
+            session_id,
+            workspace,
+            workspace_roots,
+            ..
+        }) = receiver.recv().await
+        else {
+            panic!("both session sync paths must enqueue a SyncSession");
+        };
+        assert_eq!(session_id.as_deref(), Some("remote-custody"));
+        assert_eq!(workspace, home.directory.path());
+        assert!(
+            workspace_roots.is_empty(),
+            "sync must not grant extra roots"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn cancelled_cold_publication_queues_sync_then_reclaims_without_an_entry() {
     let _lock = crate::platform::paths::tests::ENV_LOCK
         .lock()

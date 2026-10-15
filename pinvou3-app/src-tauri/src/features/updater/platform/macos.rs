@@ -756,7 +756,7 @@ mod tests {
         }"#;
         let m: LatestManifest = serde_json::from_str(json).unwrap();
         assert_eq!(m.platforms.len(), 2);
-        let mac = m.platforms.get("macos-universal").unwrap();
+        let mac = &m.platforms["macos-universal"];
         assert_eq!(mac.url, "https://example.com/m.dmg");
         assert_eq!(mac.format, "dmg");
         assert_eq!(mac.size, 200);
