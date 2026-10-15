@@ -81,7 +81,7 @@ func (r *PostgresRepository) RecoverLegacyResponseStateSplits(ctx context.Contex
 		if command.RowsAffected() == 0 {
 			continue
 		}
-		if err := appendUsageConvergenceEvidenceTx(ctx, tx, candidate.ID, "LEGACY_RESPONSE_STATE_SPLIT", "RECONCILER", "RECOVERED", "execution:SETTLEMENT_PENDING/domain:UPSTREAM_ACTIVE", map[string]any{"automatic_reconciliation_enabled": true}, now); err != nil {
+		if err := appendUsageConvergenceEvidenceTx(ctx, tx, candidate.ID, "UNCERTAINTY", "RECONCILER", "REVIEW", "execution:SETTLEMENT_PENDING/domain:UPSTREAM_ACTIVE", map[string]any{"automatic_reconciliation_enabled": true, "legacy_evidence_type": "LEGACY_RESPONSE_STATE_SPLIT", "recovery_action": "RECOVERED", "prior_status": candidate.Status, "execution_status": candidate.ExecutionStatus}, now); err != nil {
 			return 0, err
 		}
 		recovered++
@@ -475,7 +475,7 @@ func (r *UsageReconciler) reconcile(ctx context.Context, item ReconciliationItem
 	}
 	var observation replayResponseObservation
 	if json.Unmarshal(item.UsageSnapshot, &observation) == nil && observation.ResponseDisposition == responseDispositionRejectedBeforeGeneration {
-		if err := r.store.RecordConvergenceEvidence(ctx, item.ID, "PROVIDER_REJECTION", "GATEWAY_RESPONSE", "RELEASE", fmt.Sprintf("http:%d", observation.HTTPStatus), map[string]any{"response_disposition": observation.ResponseDisposition, "http_status": observation.HTTPStatus}); err != nil {
+		if err := r.store.RecordConvergenceEvidence(ctx, item.ID, "RESULT_OBSERVED", "GATEWAY", "RECORDED", fmt.Sprintf("http:%d", observation.HTTPStatus), map[string]any{"response_disposition": observation.ResponseDisposition, "http_status": observation.HTTPStatus}); err != nil {
 			return err
 		}
 		if err := r.billing.Release(ctx, item.ID, *item.HoldID, "upstream rejected before generation"); err != nil {

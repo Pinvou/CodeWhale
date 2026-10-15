@@ -59,6 +59,16 @@ recovery, unknown lookup, and rejection of late delivery from an old generation.
 These fixtures prove the native HTTP/lifecycle boundary, not live provider
 cancellation support or production financial settlement.
 
+When a complete, valid catalog cannot resolve a retained legacy model name,
+the desktop marks that binding unavailable and offers the existing explicit
+replacement-branch action. It preserves the original binding, global default
+and other sessions; similar names are never substituted automatically.
+Malformed catalogs, empty references and malformed UUID identities do not
+produce lifecycle evidence. The content-free legacy marker is created only by
+local preparation under its existing turn owner; remote response bodies and
+headers cannot produce it. A replacement is created only after the user chooses
+an available model and confirms the existing branch action.
+
 The existing server admission budget counts `SETTLEMENT_PENDING` among in-flight
 states: each personal user has at most five such concurrent invocations, alongside
 the unchanged route, model and global limits. A pending settlement still owns an

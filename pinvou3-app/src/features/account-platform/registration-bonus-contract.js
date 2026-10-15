@@ -43,10 +43,18 @@ export function parseRegistrationBonusJSON(text) {
   return policy;
 }
 
+// Match the existing request contract: trim, then count Unicode code points.
+// Native textarea lengths count UTF-16 units and cannot enforce this range.
+export function registrationBonusReasonIsValid(value) {
+  if (typeof value !== 'string') return false;
+  const length = [...value.trim()].length;
+  return length >= 10 && length <= 500;
+}
+
 export function encodeRegistrationBonusJSON(value) {
   const revision = bonusRevision(value.expected_revision);
   if (typeof value.enabled !== 'boolean' || !Number.isSafeInteger(value.amount_points) || value.amount_points < 0 || value.amount_points > MAX_BONUS_POINTS
     || !Number.isInteger(value.validity_days) || value.validity_days < 1 || value.validity_days > 3650
-    || typeof value.reason !== 'string' || [...value.reason.trim()].length < 10 || [...value.reason.trim()].length > 500) throw new Error('INVALID_REGISTRATION_BONUS_REQUEST');
+    || !registrationBonusReasonIsValid(value.reason)) throw new Error('INVALID_REGISTRATION_BONUS_REQUEST');
   return `{"enabled":${value.enabled},"amount_points":${value.amount_points},"validity_days":${value.validity_days},"expected_revision":${revision},"reason":${JSON.stringify(value.reason.trim())}}`;
 }

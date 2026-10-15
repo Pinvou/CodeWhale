@@ -5,7 +5,15 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import puppeteer from 'puppeteer-core';
 
-const browserPath = [process.env.CHROME, 'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe', 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'].find((candidate) => candidate && existsSync(candidate));
+const browserPath = [process.env.CHROME,
+  'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
+  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+  'C:/Program Files/Google/Chrome/Application/chrome.exe',
+  'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+  '/snap/bin/chromium', '/usr/bin/chromium', '/usr/bin/chromium-browser',
+  '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+].find((candidate) => candidate && existsSync(candidate));
 assert.ok(browserPath, 'Chromium or Edge is required');
 const staticRoot = path.resolve(import.meta.dirname, '../../account-platform/internal/portal/static');
 let permissions = ['platform.registration-bonus.read', 'platform.registration-bonus.manage'];
@@ -102,7 +110,7 @@ const server = createServer(async (request, response) => {
       await new Promise((resolve) => { setTimeout(resolve, delay); });
     }
     completedAuthorizationReads++;
-    return json(response, { user_id: requestedUserID, status: "ACTIVE", personal_permissions: [], platform_permissions: requestedPermissions });
+    return json(response, { user_id: requestedUserID, status: "ACTIVE", active_context: { context_type: "PERSONAL", context_version: 1, authorization_version: 1, personal_authorization_version: 1, platform_authorization_version: 1, organization_authorization_version: 0, membership_version: 1, permissions: [] }, personal_permissions: [], platform_permissions: requestedPermissions });
   }
   if (url.pathname === '/api/admin/billing/admin/v1/registration-bonus-policy' && request.method === 'GET') {
     policyReads++;

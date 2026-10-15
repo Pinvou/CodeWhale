@@ -1333,6 +1333,54 @@
       "permissions": [
         "org.grants.reclaim_closed"
       ]
+    },
+    {
+      "source": "account-platform/internal/portal/service.go",
+      "receiver": "router",
+      "method": "ANY",
+      "path": "/api/account/*resource",
+      "scope": "public",
+      "strategy": "protocol.portal-account-public-allowlist-and-session-csrf-proxy"
+    },
+    {
+      "source": "account-platform/internal/portal/service.go",
+      "receiver": "router",
+      "method": "ANY",
+      "path": "/api/token/*resource",
+      "scope": "authenticated",
+      "strategy": "authenticated.portal-session-csrf-token-allowlist-proxy"
+    },
+    {
+      "source": "account-platform/internal/portal/service.go",
+      "receiver": "router",
+      "method": "ANY",
+      "path": "/api/admin/account/*resource",
+      "scope": "authenticated",
+      "strategy": "authenticated.portal-session-csrf-admin-account-allowlist-proxy"
+    },
+    {
+      "source": "account-platform/internal/portal/service.go",
+      "receiver": "router",
+      "method": "ANY",
+      "path": "/api/admin/billing/*resource",
+      "scope": "authenticated",
+      "strategy": "authenticated.portal-session-csrf-admin-billing-allowlist-proxy"
+    },
+    {
+      "source": "account-platform/internal/portal/service.go",
+      "receiver": "router",
+      "method": "ANY",
+      "path": "/api/admin/token/*resource",
+      "scope": "authenticated",
+      "strategy": "authenticated.portal-session-csrf-admin-token-allowlist-proxy"
+    },
+    {
+      "source": "account-platform/internal/portal/service.go",
+      "receiver": "router",
+      "method": "ANY",
+      "path": "/api/admin/approvals/requests/*resource",
+      "scope": "authenticated",
+      "strategy": "authenticated.portal-approval-actions-session-csrf-account-authorized"
     }
   ],
   "tasks": [
@@ -1534,6 +1582,24 @@
       "durable": "billing-member-lifecycle-v1",
       "subject": "account.membership.changed.v1",
       "permission": "internal.event.consume.account-membership-changed"
+    },
+    {
+      "source": "account-platform/cmd/billing-service/main.go",
+      "durable": "billing-wallet-adjustment-executor-p1-v1",
+      "subject": "account.approval-command.authorized.v1",
+      "permission": "internal.event.consume.account-approval-command-authorized"
+    },
+    {
+      "source": "account-platform/cmd/billing-service/main.go",
+      "durable": "billing-payment-provider-resume-executor-p2-v1",
+      "subject": "account.approval-command.authorized.v1",
+      "permission": "internal.event.consume.account-approval-command-authorized"
+    },
+    {
+      "source": "account-platform/cmd/billing-service/main.go",
+      "durable": "billing-payment-product-resume-executor-p1-v1",
+      "subject": "account.approval-command.authorized.v1",
+      "permission": "internal.event.consume.account-approval-command-authorized"
     }
   ],
   "cli": [
