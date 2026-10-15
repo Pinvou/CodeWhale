@@ -2400,6 +2400,7 @@ jobs:
           index=0
           for filter in \
             'platform::filesystem::tests::windows_' \
+            'platform::process::tests::' \
             'platform::paths::tests::managed_python_' \
             'cross_process_lock' \
             'artifact_read_recovers_an_occupied_1177_layout_after_release' \
@@ -2470,6 +2471,7 @@ jobs:
             'features::voice_shortcut::platform::tests::' \
             'app::commands::dependencies::platform::windows::tests::' \
             'features::codex_acp::platform::windows::tests::' \
+            'features::codex_acp::install::tests::' \
             'platform::os::windows::' \
             'windows_attachment_runtime_stays_security_gated'; do
             index=$((index+1))

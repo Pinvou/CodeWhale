@@ -2687,6 +2687,31 @@ class CiGatePolicyTests(unittest.TestCase):
         ]:
             self.assertIn(needle, windows_rust_test)
 
+    def test_windows_regression_executes_managed_process_and_install_tests(self):
+        # Linux excludes the Windows Job Object regressions; the other Windows
+        # phase only type-checks them. Pin both modules in the executable loop,
+        # including late cancellation and armed/disarmed install guard coverage.
+        job = _without_yaml_comments(
+            _extract_job_block(self.pr_workflow, "windows-rust-test")
+        )
+        step = job.split(
+            "\n      - name: Windows 原子替换状态机回归\n", 1
+        )[1].split("\n      - name:", 1)[0]
+        loop = step.split("for filter in \\\n", 1)[1].split("; do", 1)[0]
+        filters = re.findall(r"(?m)^\s*'([^']+)'(?:\s*\\)?\s*$", loop)
+        for module in (
+            "platform::process::tests::",
+            "features::codex_acp::install::tests::",
+        ):
+            with self.subTest(module=module):
+                self.assertEqual(filters.count(module), 1)
+        self.assertIn('"$test_exe" "$filter" --test-threads=1', step)
+        self.assertIn(
+            "grep -qE 'running [1-9][0-9]* tests?' /tmp/windows_regression.log || {",
+            step,
+        )
+        self.assertIn("exit 1", step.split("grep -qE", 1)[1])
+
     def test_memory_setup_disk_swap_is_mandatory(self):
         # 2026-09-19 拍板:磁盘 swap 必建,不再是 PINVOU3_CI_ENABLE_DISK_SWAP
         # opt-in(zram 池 70% 封顶后,8G /mnt swapfile 是唯一无界溢出层)。
