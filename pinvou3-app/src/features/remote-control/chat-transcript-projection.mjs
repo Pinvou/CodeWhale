@@ -188,6 +188,22 @@ export function controlledTaskChatItems(tasks = [], copy = {}, sessionId = '') {
   return items;
 }
 
+// The native producer appends exactly one JSON attachment display line to the
+// complete prompt. Do not treat arbitrary prefixes or legacy loose filename
+// lists as task identity. Kept aligned with the classic bridge state matcher.
+function controlledPromptMatches(prompt, display) {
+  if (display === prompt) return true;
+  const prefix = `${prompt}\n\n📎 `;
+  if (!display.startsWith(prefix)) return false;
+  const suffix = display.slice(prefix.length);
+  try {
+    const names = JSON.parse(suffix);
+    return Array.isArray(names) && names.length > 0
+      && names.every(name => typeof name === 'string' && name.length > 0)
+      && JSON.stringify(names) === suffix;
+  } catch (_) { return false; }
+}
+
 /**
  * Keeps the real, durable session timeline and adds only remote-control items
  * that have not already arrived through the ordinary chat event stream.
@@ -210,6 +226,7 @@ export function mergeControlledTaskChatItems(chatItems = [], taskItems = []) {
     || String(item.remoteTaskId) === taskId;
   const anchors = new Map();
   let lastAnchor = -1;
+  // applyTaskEventTo preserves admission order, including later status updates.
   for (const [taskId, items] of groups) {
     const prompt = items.find(item => item.type === 'user');
     if (!prompt) continue;
@@ -225,7 +242,7 @@ export function mergeControlledTaskChatItems(chatItems = [], taskItems = []) {
     if (anchor < 0) {
       anchor = durable.findIndex((item, index) => index > lastAnchor
         && item?.type === 'user' && !item.steeredMidTurn
-        && belongsTo(item, taskId) && String(item.text || '') === prompt.text
+        && belongsTo(item, taskId) && controlledPromptMatches(prompt.text, String(item.text || ''))
         && (!Number.isInteger(start) || !Number.isInteger(item.messageIndex)
           || item.messageIndex === start));
     }
@@ -242,7 +259,7 @@ export function mergeControlledTaskChatItems(chatItems = [], taskItems = []) {
     if (anchor < 0) {
       const firstEvent = durable.findIndex(item => String(item?.remoteTaskId || '') === taskId);
       const nextPosition = Number.isInteger(start) ? durable.findIndex(item => (
-        Number.isInteger(item?.messageIndex) && item.messageIndex >= start
+        item?.type === 'user' && Number.isInteger(item.messageIndex) && item.messageIndex >= start
       )) : -1;
       const nextTaskId = taskIds.slice(taskIds.indexOf(taskId) + 1)
         .find(id => anchors.get(id) >= 0);
@@ -321,7 +338,9 @@ export function mergeControlledTaskChatItems(chatItems = [], taskItems = []) {
       if (match !== undefined) {
         used.add(match);
         if (String(durable[match].text || '') !== item.text) {
-          durable[match] = { ...durable[match], ...item, id: durable[match].id };
+          // Only enrich the failure label; task-side metadata is not durable
+          // message metadata, and must not replace its identity or timestamps.
+          durable[match] = { ...durable[match], text: item.text };
         }
       } else {
         insert(item.controlledContentLane === 'output' ? outputBoundary : upper, item);

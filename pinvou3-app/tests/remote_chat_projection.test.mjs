@@ -535,6 +535,128 @@ test('live admission identity is absent for unrelated, terminal, or ambiguous ta
   assert.equal(logic.controlledTaskAdmissionIdentity([active, { ...active, taskId: 't2' }], 'session-b', 'prompt'), null);
 });
 
+test('live attachment admission preserves identity across tools and repeated prompt history', async () => {
+  const tasks = [{ taskId: 'attachment-task', sessionId: 'session-b', text: 'inspect',
+    messageIndex: 12, status: 'running', assistantText: 'AB' }];
+  const display = 'inspect\n\n📎 ["报告 · final.pdf","image.png"]';
+  const harness = liveAdmissionHarness(tasks, [
+    { type: 'user', text: display }, { type: 'assistant', text: 'old answer' },
+  ]);
+  await harness.admit(display);
+  assert.equal(harness.state.chatItems[2].remoteTaskId, 'attachment-task');
+  assert.equal(harness.state.chatItems[2].messageIndex, 12);
+  harness.state.chatItems.push({ type: 'assistant', text: 'A' },
+    { type: 'tool' }, { type: 'assistant', text: 'B' });
+  assert.deepEqual(mergeControlledTaskChatItems(harness.state.chatItems,
+    projectControlled(tasks)), harness.state.chatItems);
+});
+
+test('attachment fallback without positions follows task order across repeated prompts', () => {
+  const display = 'inspect\n\n📎 ["报告.pdf"]';
+  const history = [{ type: 'user', text: display }, { type: 'assistant', text: 'A' },
+    { type: 'tool' }, { type: 'assistant', text: 'B' },
+    { type: 'user', text: display }, { type: 'assistant', text: 'C' }];
+  assert.deepEqual(mergeControlledTaskChatItems(history, projectControlled([
+    { taskId: 't1', text: 'inspect', messageIndex: 12, assistantText: 'AB' },
+    { taskId: 't2', text: 'inspect', messageIndex: 20, assistantText: 'C' },
+  ])), history);
+});
+
+test('attachment-only UI prompt reconciles before and after admission identity', async () => {
+  // ChatView supplies this nonempty prompt for an otherwise blank composer.
+  const text = '请处理随任务提交的附件。';
+  const display = `${text}\n\n📎 ["报告.pdf"]`;
+  const tasks = [{ taskId: 't1', sessionId: 'session-b', text, status: 'running', assistantText: 'done' }];
+  const history = [{ type: 'user', text: display }, { type: 'assistant', text: 'done' }];
+  assert.deepEqual(mergeControlledTaskChatItems(history, projectControlled(tasks)), history);
+  const harness = liveAdmissionHarness(tasks);
+  await harness.admit(display);
+  assert.equal(harness.state.chatItems[0].remoteTaskId, 't1');
+});
+
+test('attachment matching rejects incomplete, malformed, or extended display suffixes', () => {
+  const task = { taskId: 't1', sessionId: 'session-b', text: 'inspect', status: 'running' };
+  const { logic } = liveAdmissionHarness([]);
+  for (const display of [
+    'inspect more\n\n📎 ["a.pdf"]', 'inspect\n\n📎 ["a.pdf"]\nextra',
+    'inspect\n\n📎 a.pdf', 'inspect\n\n📎 []', 'inspect\n\n📎 [""]',
+    'inspect\n\n📎 [null]', 'inspect\n\n📎 ["a.pdf"',
+    'inspect\n\n📎 ["a.pdf"] trailing', 'inspect\n\n📎 ["a.pdf"]\n',
+  ]) {
+    assert.equal(logic.controlledTaskAdmissionIdentity([task], 'session-b', display), null, display);
+    const history = [{ type: 'user', text: display }];
+    assert.equal(mergeControlledTaskChatItems(history, projectControlled([task])).length, 2, display);
+  }
+});
+
+test('attachment text never overrides foreign identity, raw position, or steer boundaries', () => {
+  const display = 'inspect\n\n📎 ["a.pdf"]';
+  for (const fields of [{ remoteTaskId: 'foreign' }, { messageIndex: 9 }, { steeredMidTurn: true }]) {
+    const history = [{ type: 'user', text: display, ...fields }];
+    const merged = mergeControlledTaskChatItems(history, projectControlled([
+      { taskId: 't1', text: 'inspect', messageIndex: 12 },
+    ]));
+    assert.equal(merged.length, 2);
+    assert.equal(merged[0], history[0]);
+  }
+});
+
+test('the full admitted prompt survives each state producer and is never a truncated identity', () => {
+  const { logic } = liveAdmissionHarness([]);
+  const prefix = 'x'.repeat(8192);
+  const text = `${prefix} complete prompt`;
+  const session = { sessionId: 'session-b', generation: 'g' };
+  const initial = () => ({ ...logic.createState(), controlledSession: session });
+  const event = { taskId: 't1', sessionId: 'session-b', generation: 'g', status: 'admitted', text };
+  const direct = logic.applyControlledTaskEvent(initial(), event);
+  const running = logic.applyControlledTaskEvent(initial(), { ...event, text: undefined, status: 'running' });
+  const late = logic.applyControlledTaskEvent(running, event);
+  const journal = logic.applyTaskContent(running, {
+    taskId: 't1', sessionId: 'session-b', role: 'user', eventId: 'user-content', text,
+  });
+  for (const state of [direct, late, journal]) {
+    assert.equal(state.controlledTasks[0].text, text);
+    assert.equal(logic.controlledTaskAdmissionIdentity(state.controlledTasks, 'session-b', prefix), null);
+    assert.equal(logic.controlledTaskAdmissionIdentity(state.controlledTasks, 'session-b', `${prefix} different`), null);
+    assert.equal(logic.controlledTaskAdmissionIdentity(state.controlledTasks, 'session-b', text).remoteTaskId, 't1');
+    const display = `${text}\n\n📎 ["file.pdf"]`;
+    assert.equal(logic.controlledTaskAdmissionIdentity(state.controlledTasks, 'session-b', display).remoteTaskId, 't1');
+    const history = [{ type: 'user', text: display }];
+    assert.deepEqual(mergeControlledTaskChatItems(history, projectControlled(state.controlledTasks)), history);
+  }
+  const maximum = logic.applyControlledTaskEvent(initial(), { ...event, text: 'x'.repeat(65536) });
+  assert.equal(maximum.controlledTasks[0].text.length, 65536);
+  const oversized = logic.applyControlledTaskEvent(initial(), { ...event, text: 'x'.repeat(65537) });
+  assert.equal(oversized.controlledTasks[0].text, null, 'do not silently truncate an invalid prompt');
+  for (const valid of ['界'.repeat(21845) + 'x', '😀'.repeat(16384)]) {
+    assert.equal(Buffer.byteLength(valid, 'utf8'), 65536);
+    assert.equal(logic.applyControlledTaskEvent(initial(), { ...event, text: valid }).controlledTasks[0].text, valid);
+  }
+  for (const invalid of ['界'.repeat(21846), '😀'.repeat(16384) + 'x', '\ud800']) {
+    assert.equal(logic.applyControlledTaskEvent(initial(), { ...event, text: invalid }).controlledTasks[0].text, null);
+  }
+});
+
+test('steer text cannot steal an attachment prompt anchor from the actual admission', () => {
+  const display = 'inspect\n\n📎 ["a.pdf"]';
+  const history = [{ type: 'user', text: display, steeredMidTurn: true },
+    { type: 'assistant', text: 'earlier answer' },
+    { type: 'user', text: display }, { type: 'assistant', text: 'correct answer' }];
+  assert.deepEqual(mergeControlledTaskChatItems(history, projectControlled([
+    { taskId: 't1', text: 'inspect', assistantText: 'correct answer' },
+  ])), history);
+});
+
+test('a middle hydration gap preserves unproven output and converges when filled', () => {
+  const task = projectControlled([{ taskId: 't1', text: 'inspect', messageIndex: 0, assistantText: 'ABC' }]);
+  const partial = [{ type: 'user', text: 'inspect', messageIndex: 0 },
+    { type: 'assistant', text: 'A' }, { type: 'tool' }, { type: 'assistant', text: 'C' }];
+  assert.deepEqual(mergeControlledTaskChatItems(partial, task).map(item => item.text),
+    ['inspect', 'A', undefined, 'C', 'ABC']);
+  const hydrated = [...partial.slice(0, 3), { type: 'assistant', text: 'B' }, partial[3]];
+  assert.deepEqual(mergeControlledTaskChatItems(hydrated, task), hydrated);
+});
+
 test('identical model output and failure text require distinct persisted lane coverage', () => {
   for (const failure of [{ errorText: 'failure_code' }, { terminalReason: 'failure_code' }]) {
     const projected = projectControlled([{ taskId: 't1', text: 'first', messageIndex: 0,
@@ -546,11 +668,15 @@ test('identical model output and failure text require distinct persisted lane co
     assert.equal(merged.length, 3, 'the still-unhydrated failure remains visible separately');
     const failureText = failure.errorText || 'Failed: failure_code';
     assert.deepEqual(merged.map(item => item.text), ['first', 'failure_code', failureText]);
-    const hydrated = [...history, { id: 'failure-output', type: 'assistant', text: 'failure_code' }];
+    const hydrated = [...history, { id: 'failure-output', type: 'assistant', text: 'failure_code',
+      createdAt: 123, remoteTaskId: 't1' }];
     const converged = mergeControlledTaskChatItems(hydrated, projected);
     assert.equal(converged.length, 3);
     assert.equal(converged[1], history[1]);
     assert.equal(converged[2].id, 'failure-output');
+    assert.equal(converged[2].createdAt, 123);
+    assert.equal(converged[2].remoteTaskId, 't1');
+    assert.equal(converged[2].controlledContentLane, undefined, 'do not leak fallback metadata into durable items');
     assert.deepEqual(converged.map(item => item.text), ['first', 'failure_code', failureText]);
   }
 });
