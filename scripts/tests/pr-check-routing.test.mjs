@@ -158,7 +158,7 @@ test("Account Platform changes cannot bypass the Go gate at any PR or queue stag
     assert.equal(result.status, expectedStatus, result.stderr);
     assert.equal(result.stdout, expectedOutput);
   }
-  assert.doesNotMatch(job, /secrets\.|services:|continue-on-error:/);
+  assert.doesNotMatch(job, /secrets\.|continue-on-error:/);
 });
 
 test("whole Account Platform authorization failures block the CI gate", () => {
@@ -217,6 +217,25 @@ test("Keycloak contract gate invokes the existing suite and propagates failure",
   assert.equal(script, "account-platform/deploy/keycloak/test/provision_mobile_auth_test.py");
   const failed = spawnSync(bash, ["-c", "python3() { return 7; }; export -f python3;\n" + run], { encoding: "utf8", timeout: 30_000, windowsHide: true });
   assert.equal(failed.status, 7, "a failing Keycloak contract must fail the gate");
+});
+
+test("Token financial PostgreSQL gate is required and cannot swallow a failed runner", () => {
+  const paths = filterPaths(workflow, "account_platform");
+  assert.ok(paths.includes("scripts/test-token-financial-postgres.py"));
+  assert.ok(paths.includes("scripts/tests/test_token_financial_postgres.py"));
+  const job = jobBlock("account-platform-test");
+  assert.match(job, /image: mirror\.gcr\.io\/library\/postgres@sha256:[a-f0-9]{64}/);
+  const services = job.match(/^    services:\r?\n([\s\S]*?)^    env:/m)?.[1];
+  assert.ok(services, "the disposable PostgreSQL service must exist");
+  assert.deepEqual([...services.matchAll(/^ {6}([a-z][a-z-]*):\r?$/gm)].map(match => match[1]), ["financial-postgres"]);
+  assert.deepEqual([...services.matchAll(/^ {10}- (.+)\r?$/gm)].map(match => match[1]), ["127.0.0.1:5433:5432"]);
+  assert.match(job, /^          PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: postgres:\/\/postgres@127\.0\.0\.1:5433\/postgres\?sslmode=disable\r?$/m);
+  const run = stepRun(job, "Token financial contracts on isolated PostgreSQL");
+  for (const failedPhase of ["guard", "postgres"]) {
+    const mock = `python3() { case "$*" in *unittest*) ${failedPhase === "guard" ? "return 7" : "return 0"};; *) ${failedPhase === "postgres" ? "return 7" : "return 0"};; esac; }; export -f python3;\n`;
+    const result = spawnSync(bash, ["-c", mock + run], { encoding: "utf8", timeout: 30_000, windowsHide: true });
+    assert.equal(result.status, 7, `${failedPhase} failure must fail the gate: ${result.stderr}`);
+  }
 });
 
 test("named step fixtures exclude later steps and fail closed on missing names", () => {

@@ -323,7 +323,7 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	usageRequest.HoldID = &hold.ID
 	usageRequest.PriceVersionID = &price.ID
-	envelope, acquired, err := s.repository.AcquireDispatch(r.Context(), usageRequest.ID, httpserver.RequestID(r.Context()), 10*time.Minute)
+	envelope, acquired, err := s.repository.AcquireDispatch(r.Context(), usageRequest.ID, httpserver.RequestID(r.Context()), dispatchLeaseDuration)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -418,12 +418,25 @@ func (s *Service) dispatchUsage(w http.ResponseWriter, r *http.Request, usageReq
 		return
 	}
 	holdID := *usageRequest.HoldID
-	if err := s.repository.MarkUpstream(context.WithoutCancel(r.Context()), usageRequest.ID); err != nil {
+	r = r.WithContext(withDispatchLeaseOwner(r.Context(), envelope.leaseOwner))
+	dispatchContext, cancelDispatch := context.WithCancel(context.WithoutCancel(r.Context()))
+	defer cancelDispatch()
+	leaseTicker := time.NewTicker(dispatchLeaseRenewalInterval)
+	defer leaseTicker.Stop()
+	_, stopLease, err := s.renewDispatchLease(context.WithoutCancel(r.Context()), cancelDispatch, usageRequest.ID, envelope.leaseOwner, leaseTicker.C)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	// The lease covers setup, the full upstream budget and replay persistence.
+	// Stop it when this dispatch actually returns, not when the upstream timer ends.
+	defer stopLease()
+	if err := s.repository.MarkUpstream(dispatchContext, usageRequest.ID); err != nil {
 		_ = s.repository.MarkReview(context.WithoutCancel(r.Context()), usageRequest.ID, "dispatch_state_persistence_failed", map[string]any{})
 		s.writeError(w, r, err)
 		return
 	}
-	upstreamContext, cancelUpstream := context.WithTimeout(context.WithoutCancel(r.Context()), 2*time.Hour)
+	upstreamContext, cancelUpstream := context.WithTimeout(dispatchContext, 2*time.Hour)
 	defer cancelUpstream()
 	defer s.registerActiveUpstream(usageRequest.ID, cancelUpstream)()
 	renewalFailed := s.renewHold(upstreamContext, cancelUpstream, usageRequest.ID, holdID)
@@ -631,7 +644,7 @@ func (s *Service) replayUsage(w http.ResponseWriter, r *http.Request, usage Usag
 		}
 	}
 	if usage.ExecutionStatus == "DISPATCH_INTENT_PERSISTED" {
-		envelope, acquired, err := s.repository.AcquireDispatch(context.WithoutCancel(r.Context()), usage.ID, httpserver.RequestID(r.Context()), 10*time.Minute)
+		envelope, acquired, err := s.repository.AcquireDispatch(context.WithoutCancel(r.Context()), usage.ID, httpserver.RequestID(r.Context()), dispatchLeaseDuration)
 		if err != nil {
 			s.writeError(w, r, err)
 			return
@@ -943,8 +956,28 @@ func billingNoticeFromUsageSnapshot(snapshot json.RawMessage) *billingNotice {
 }
 
 func (s *Service) handleUpstreamFailure(w http.ResponseWriter, r *http.Request, usageID, holdID uuid.UUID, response *http.Response) {
-	payload, _ := io.ReadAll(io.LimitReader(response.Body, 2<<20))
+	payload, readErr := readBoundedUpstreamBody(response.Body, 2<<20)
 	background := context.WithoutCancel(r.Context())
+	if readErr != nil {
+		// A status that the installed adapter already proves rejected before
+		// generation keeps its original financial meaning. Body completeness is
+		// separate: neither an overflow prefix nor interrupted bytes are replay.
+		disposition := responseDispositionUsageEvidenceRequired
+		if s.executionUpstream.RejectsBeforeGeneration(response.StatusCode) {
+			disposition = responseDispositionRejectedBeforeGeneration
+		}
+		if err := s.repository.MarkReview(background, usageID, "upstream_body_incomplete", map[string]any{"error_class": "body_read", "http_status": response.StatusCode, "response_disposition": disposition}); err != nil {
+			api.WriteError(w, http.StatusServiceUnavailable, "RESULT_PERSISTENCE_FAILED", "the upstream result could not be persisted", httpserver.RequestID(r.Context()))
+			return
+		}
+		if disposition == responseDispositionRejectedBeforeGeneration {
+			if err := s.executionBilling.Release(background, usageID, holdID, "upstream rejected before generation"); err == nil {
+				_ = s.repository.MarkReleased(background, usageID, "upstream_rejected")
+			}
+		}
+		api.WriteError(w, response.StatusCode, "UPSTREAM_ERROR", "the upstream response could not be read completely", httpserver.RequestID(r.Context()))
+		return
+	}
 	if len(payload) == 0 {
 		payload = []byte(`{"error":{"code":"UPSTREAM_ERROR","message":"the upstream rejected the model request"}}`)
 	}
@@ -1332,6 +1365,11 @@ func settlementRecord(price PriceVersion, usage Usage, notice *billingNotice) (i
 }
 
 func (s *Service) settlePrepared(ctx context.Context, usageID, holdID uuid.UUID, actual int64, usage Usage, snapshot map[string]any) string {
+	if store, ok := s.repository.(missingReferenceDeadlineStore); ok {
+		if fenced, err := store.PreserveMissingReferenceLateUsage(ctx, usageID, usage); err != nil || fenced {
+			return "SETTLEMENT_REVIEW_REQUIRED"
+		}
+	}
 	if err := s.executionBilling.Commit(ctx, usageID, holdID, actual, usage); err != nil {
 		if definitiveSettlementConflict(err) {
 			if markErr := s.repository.MarkReview(ctx, usageID, "settlement_conflict", snapshot); markErr != nil {
@@ -1350,6 +1388,13 @@ func (s *Service) settlePrepared(ctx context.Context, usageID, holdID uuid.UUID,
 }
 
 func (s *Service) authorizeAdditional(ctx context.Context, usageID, holdID uuid.UUID, price PriceVersion, usage Usage, maximum int64) (int64, string, bool) {
+	// A deadline decision freezes the original hold before any financial RPC.
+	// Late usage remains evidence; it cannot extend that customer's reservation.
+	if store, ok := s.repository.(missingReferenceDeadlineStore); ok {
+		if fenced, err := store.PreserveMissingReferenceLateUsage(ctx, usageID, usage); err != nil || fenced {
+			return maximum, "", false
+		}
+	}
 	actual, err := Cost(price, usage)
 	if err != nil {
 		_ = s.repository.MarkReview(ctx, usageID, "usage_invalid", map[string]any{"usage": usage})

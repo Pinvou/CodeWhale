@@ -542,7 +542,7 @@ impl SessionStore {
                     .ok()
                     .and_then(|value| value.as_object().cloned())
                     .is_some_and(|values| values.values().any(serde_json::Value::is_string));
-                let mut dropped_ambiguous_platform_ref = false;
+                let mut dropped_ambiguous_platform_refs = 0_usize;
                 for (session_id, selection) in &mut map {
                     if let ModelSelectionRef::AccountPlatform { model_id } = selection {
                         if model_id.trim().is_empty() {
@@ -550,7 +550,7 @@ impl SessionStore {
                                 *model_id = session.metadata.model.trim().to_string();
                             }
                             if model_id.is_empty() {
-                                dropped_ambiguous_platform_ref = true;
+                                dropped_ambiguous_platform_refs += 1;
                             }
                         }
                     }
@@ -558,8 +558,14 @@ impl SessionStore {
                 map.retain(|_, selection| {
                     !matches!(selection, ModelSelectionRef::AccountPlatform { model_id } if model_id.is_empty())
                 });
+                if dropped_ambiguous_platform_refs > 0 {
+                    log::warn!(
+                        "session model binding repair: dropped_count={} reason=empty_platform_identity_unrecoverable",
+                        dropped_ambiguous_platform_refs
+                    );
+                }
                 *self.session_models.write() = map;
-                if legacy_wire_format || dropped_ambiguous_platform_ref {
+                if legacy_wire_format || dropped_ambiguous_platform_refs > 0 {
                     self.save_session_models();
                 }
             }

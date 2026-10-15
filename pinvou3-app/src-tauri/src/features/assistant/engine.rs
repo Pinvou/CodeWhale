@@ -2318,6 +2318,8 @@ impl AppEngine {
                 system_prompt_override: false,
                 model: self.bridge.model(),
                 workspace: self.workspace.clone(),
+                // The host sync has one execution root; do not retain SDK attachments.
+                workspace_roots: Vec::new(),
                 mode: AppMode::Agent,
             })
             .await?;

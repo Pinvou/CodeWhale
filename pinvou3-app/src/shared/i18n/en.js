@@ -304,7 +304,7 @@ export const dictEn = {
         modelContextWindow: 'Context Window (tokens)',
         modelMaxOutput: 'Max Output (tokens)',
         customApiKey: 'API Key',
-        credEnvOverride: 'Env override', credUnavailable: 'Credential unavailable', credConfigured: 'Configured', credNotConfigured: 'Not configured', credEnterNewKey: 'Enter new key to replace', credKeep: 'Keep', credReplace: 'Replace', credDeleteKey: 'Delete Key', clearSearch: 'Clear search', clearInput: 'Clear input', sendMsg: 'Send', apiKeyGateTitle: 'API Key required', apiKeyGateDesc: 'The current model is a cloud model. Configure an API Key to start chatting.', apiKeyGateBtn: 'Configure',
+        credEnvOverride: 'Env override', credUnavailable: 'Credential unavailable', credConfigured: 'Configured', credNotConfigured: 'Not configured', credEnterNewKey: 'Enter new key to replace', credKeep: 'Keep', credReplace: 'Replace', credDeleteKey: 'Delete Key', clearSearch: 'Clear search', clearInput: 'Clear input', sendMsg: 'Send',
         detectLocalVllm: 'Detect local model services',
         detectingLocalVllm: 'Detecting…',
         useVllmConfig: 'Use config',
@@ -1993,10 +1993,6 @@ dictEn["uiTeamRelay"] = {
   "lifecycleSyncPending": "The operation is complete, but team data has not synced yet. Sync again to load the latest state."
 };
 dictEn["kbOutWeekdays"] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-dictEn["builtinModelSelect"] = "Backend model";
-dictEn["builtinModelRefresh"] = "Refresh";
-dictEn["builtinModelLoading"] = "Syncing…";
-dictEn["builtinModelEmpty"] = "No backend models";
 dictEn["uiRemote"]["status"]["idle"] = ["Not enabled", "Enable access to create a persistent remote control link."];
 dictEn["uiRemote"]["status"]["starting"] = ["Starting", "Creating the remote control connection."];
 dictEn["uiRemote"]["status"]["connecting_relay"] = ["Connecting", "Connecting to the relay…"];
@@ -2006,7 +2002,6 @@ dictEn["uiRemote"]["status"]["web_client_disconnected"] = ["Browser disconnected
 dictEn["uiRemote"]["status"]["revoked"] = ["Link revoked", "Enable remote control again."];
 dictEn["uiRemote"]["status"]["stopped"] = ["Stopped", "Open this panel to enable access again."];
 dictEn["uiRemote"]["status"]["error"] = ["Connection error", "Remote control is temporarily unavailable. Try again."];
-dictEn["uiSettingsDetail"]["builtinModel"] = "Built-in model";
 dictEn["uiSettingsDetail"]["settingsLoadFailedDetail"] = "Settings cannot be displayed right now. Reopen the page and try again.";
 dictEn["uiScheduled"]["weekdays"] = [["Monday", "Mon"], ["Tuesday", "Tue"], ["Wednesday", "Wed"], ["Thursday", "Thu"], ["Friday", "Fri"], ["Saturday", "Sat"], ["Sunday", "Sun"]];
 dictEn["uiAccount"] = {

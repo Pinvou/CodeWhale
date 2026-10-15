@@ -302,7 +302,7 @@ const jaBase = {
         modelContextWindow: 'コンテキスト長（tokens）',
         modelMaxOutput: '最大出力（tokens）',
         customApiKey: 'API Key',
-        credEnvOverride: '環境変数で上書き', credUnavailable: '資格情報が利用不可', credConfigured: '設定済み', credNotConfigured: '未設定', credEnterNewKey: '置き換える新しいキーを入力', credKeep: '保持', credReplace: '置換', credDeleteKey: 'キー削除', clearSearch: '検索をクリア', clearInput: '入力をクリア', sendMsg: '送信', apiKeyGateTitle: 'API Key の設定が必要です', apiKeyGateDesc: '現在のモデルはクラウドモデルです。チャットを開始するには API Key を設定してください。', apiKeyGateBtn: '設定する',
+        credEnvOverride: '環境変数で上書き', credUnavailable: '資格情報が利用不可', credConfigured: '設定済み', credNotConfigured: '未設定', credEnterNewKey: '置き換える新しいキーを入力', credKeep: '保持', credReplace: '置換', credDeleteKey: 'キー削除', clearSearch: '検索をクリア', clearInput: '入力をクリア', sendMsg: '送信',
         detectLocalVllm: 'ローカルモデルサービスを検出',
         detectingLocalVllm: '検出中…',
         useVllmConfig: 'この設定を使用',
@@ -1989,10 +1989,6 @@ dictJa["uiTeamRelay"] = {
   "lifecycleSyncPending": "操作は完了しましたが、チームデータはまだ同期されていません。再同期して最新の状態を取得してください。"
 };
 dictJa["kbOutWeekdays"] = ["日", "月", "火", "水", "木", "金", "土"];
-dictJa["builtinModelSelect"] = "バックエンドモデル";
-dictJa["builtinModelRefresh"] = "更新";
-dictJa["builtinModelLoading"] = "同期中…";
-dictJa["builtinModelEmpty"] = "利用可能なモデルなし";
 dictJa["uiRemote"]["status"]["idle"] = ["未有効", "有効にすると長期利用可能な遠隔操作リンクを作成します。"];
 dictJa["uiRemote"]["status"]["starting"] = ["開始中", "遠隔操作接続を作成しています。"];
 dictJa["uiRemote"]["status"]["connecting_relay"] = ["接続中", "リレーに接続しています…"];
@@ -2002,7 +1998,6 @@ dictJa["uiRemote"]["status"]["web_client_disconnected"] = ["ブラウザー切�
 dictJa["uiRemote"]["status"]["revoked"] = ["リンク無効", "遠隔操作をもう一度有効にしてください。"];
 dictJa["uiRemote"]["status"]["stopped"] = ["停止済み", "このパネルを開くと再度有効にできます。"];
 dictJa["uiRemote"]["status"]["error"] = ["接続エラー", "遠隔操作は一時的に利用できません。再試行してください。"];
-dictJa["uiSettingsDetail"]["builtinModel"] = "内蔵モデル";
 dictJa["uiSettingsDetail"]["settingsLoadFailedDetail"] = "設定ページを現在表示できません。ページを開き直して、もう一度お試しください。";
 dictJa["uiScheduled"]["weekdays"] = [["月曜日", "月"], ["火曜日", "火"], ["水曜日", "水"], ["木曜日", "木"], ["金曜日", "金"], ["土曜日", "土"], ["日曜日", "日"]];
 dictJa["uiAccount"] = {

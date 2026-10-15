@@ -264,7 +264,7 @@ class CiGatePolicyTests(unittest.TestCase):
         package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
         selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
         for feature, filenames in (
-            ("organization", ("account_platform_organization_ui_smoke.mjs", "account_platform_organization_boundaries_ui_smoke.mjs")),
+            ("organization", ("account_platform_organization_ui_smoke.mjs", "account_platform_member_units_ui_smoke.mjs", "account_platform_organization_boundaries_ui_smoke.mjs")),
             ("member-units", ("account_platform_member_units_ui_smoke.mjs",)),
         ):
             command = f"test:account-platform-{feature}-ui"
@@ -294,7 +294,7 @@ class CiGatePolicyTests(unittest.TestCase):
     def test_closure_smokes_include_production_recovery_and_original_contract(self):
         package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
         command = "test:account-platform-closure-ui"
-        files = ("account_platform_closure_ui_smoke.mjs", "account_platform_closure_production_smoke.mjs")
+        files = ("account_platform_closure_ui_smoke.mjs", "account_platform_installed_hosts_ui_smoke.mjs", "account_platform_closure_production_smoke.mjs")
         self.assertEqual(package["scripts"][command], " && ".join(f"node tests/{name}" for name in files))
         for name in files:
             self.assertTrue((ROOT / "pinvou3-app/tests" / name).is_file())

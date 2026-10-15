@@ -159,7 +159,7 @@ function LedgerRepairDraftForm({ client, copy, owner, onCreated }) {
       <button type="submit" disabled={locked}>{busy === 'facts' ? copy.reading : copy.readFacts}</button>
     </form>
     {(failure || operation.error) && <p role="alert">{failure || operation.error}</p>}{operation.unknown && <p role="status">{copy.recoveryPending}</p>}
-    {needsAuthentication && <><p>{copy.recentAuthenticationRequired}</p><button disabled={operation.busy} onClick={() => client.reauthenticate('/admin.html')}>{copy.reauthenticate}</button></>}
+    {needsAuthentication && <><p>{copy.recentAuthenticationRequired}</p><button disabled={operation.busy} onClick={() => client.reauthenticate('/admin.html?section=finance&finance_tab=ledger')}>{copy.reauthenticate}</button></>}
     {created && <p role="status">{copy.createdHint} <code>{created}</code></p>}
     {visibleFacts && <div className="adm-financial-repair-facts">
       <h4>{copy.frozenFacts}</h4>
