@@ -1168,6 +1168,13 @@ pub struct Engine {
     /// and a budget declared for another conversation's model must not ride
     /// a re-derivation onto the restored one.
     active_route_limits_model: Option<String>,
+    /// The subset of `active_route_limits` the embedding host explicitly
+    /// declared, as opposed to the catalog-merged effective value. Written in
+    /// lockstep with the effective limits so a re-derivation can re-state
+    /// exactly the host's own budget: catalog, operator-config, and roster
+    /// facts must keep refreshing from the live config on engine-self-started
+    /// turns instead of being pinned stale under host provenance.
+    active_route_declared_limits: Option<codewhale_config::route::RouteLimits>,
     active_route_capabilities: codewhale_config::route::RouteCapabilities,
     rx_op: mpsc::Receiver<Op>,
     live_runtime_authority: Arc<StdMutex<LiveRuntimeAuthorityState>>,
@@ -1667,6 +1674,7 @@ impl Engine {
         let provider_id = route.identity.exact_id;
         let model = route.model;
         let limits = crate::route_budget::known_route_limits(route.candidate.limits());
+        let declared_limits = route.candidate.embedding_host_declared_limits();
         let capabilities = route.candidate.capabilities();
         let api_config = *route.config;
         let client = route.client;
@@ -1676,6 +1684,7 @@ impl Engine {
         self.api_provider_id = provider_id;
         self.api_config = api_config;
         self.active_route_limits = limits;
+        self.active_route_declared_limits = declared_limits;
         self.active_route_limits_model = Some(model.clone());
         self.active_route_capabilities = capabilities;
         self.api_key_env_only_recovery = Self::env_only_api_key_recovery_hint(&self.api_config);
@@ -1708,6 +1717,7 @@ impl Engine {
         let provider_id = route.identity.exact_id;
         let model = route.model;
         let limits = crate::route_budget::known_route_limits(route.candidate.limits());
+        let declared_limits = route.candidate.embedding_host_declared_limits();
         let capabilities = route.candidate.capabilities();
         let api_config = *route.config;
         let concrete_client = preflighted_client
@@ -1719,6 +1729,7 @@ impl Engine {
         self.api_provider_id = provider_id;
         self.api_config = api_config;
         self.active_route_limits = limits;
+        self.active_route_declared_limits = declared_limits;
         self.active_route_limits_model = Some(model.clone());
         self.active_route_capabilities = capabilities;
         self.api_key_env_only_recovery = Self::env_only_api_key_recovery_hint(&self.api_config);
@@ -1753,28 +1764,224 @@ impl Engine {
         // wake, goal continuation) re-derive the route here, and a catalog-only
         // pass would drop the limits the installed route was host-declared
         // with — an uncatalogued model would clamp back to the compat output
-        // cap. Re-state the installed limits as host declarations so they
-        // survive the re-derivation, under three guards: the limits must
-        // have been resolved for exactly this model (a `SyncSession` swap
-        // must not carry another conversation's budget), the fresh resolution
-        // must land on the same wire model (a drifted resolution must resolve
-        // its own catalog envelope), and it must actually disagree with the
+        // cap. Re-state the host-declared subset so it survives the
+        // re-derivation, under three guards: the limits must have been
+        // resolved for exactly this model (a `SyncSession` swap must not
+        // carry another conversation's budget), the fresh resolution must
+        // land on the same wire model (a drifted resolution must resolve its
+        // own catalog envelope), and it must actually disagree with the
         // installed limits (an equal candidate already carries the right
         // facts, and re-stamping them would only relabel catalog values as
-        // host overrides).
+        // host overrides). Only the declared subset rides — the effective
+        // triple also contains catalog, operator-config, and roster facts
+        // that must keep refreshing from the live config instead of being
+        // pinned stale under host provenance.
         if route.model == self.session.model
             && self.active_route_limits_model.as_deref() == Some(selector)
             && let Some(installed) = self.active_route_limits
             && route.candidate.limits() != installed
         {
+            let Some(mut declared) = self.active_route_declared_limits else {
+                return Ok(route);
+            };
+            // Declarations are stored verbatim from embedder and op payloads;
+            // degrade out-of-range values the way every other limit read
+            // point does instead of failing the self-started turn.
+            declared.context_tokens = declared
+                .context_tokens
+                .filter(|tokens| *tokens > 0 && *tokens <= u64::from(u32::MAX));
+            if !declared.has_known_limit() {
+                return Ok(route);
+            }
             return resolve_runtime_route_for_identity_with_limits(
                 &config,
                 &identity,
                 Some(selector),
-                Some(installed),
+                Some(declared),
             );
         }
         Ok(route)
+    }
+
+    /// Install a synced conversation: identity, history, prompts, workspace,
+    /// and mode. The route state (`active_route_limits`,
+    /// `active_route_limits_model`, `active_route_declared_limits`) is
+    /// deliberately untouched — the op carries no executable route, and a
+    /// budget declared for the previous conversation's model must not adopt
+    /// the restored one (see the guards in `current_runtime_route`).
+    async fn apply_synced_session(
+        &mut self,
+        session_id: Option<String>,
+        messages: Vec<Message>,
+        system_prompt: Option<SystemPrompt>,
+        system_prompt_override: bool,
+        model: String,
+        workspace: PathBuf,
+        workspace_roots: Vec<PathBuf>,
+        mode: AppMode,
+    ) {
+        self.drop_all_steers().await;
+        // Deferred tool activations belong to one
+        // conversation. SyncSession installs a conversation's
+        // identity, history, and workspace (including the
+        // generated-ID new-session path), so never carry the
+        // previous conversation's toolbox across this edge —
+        // including a parked eviction note whose batch never
+        // recorded a result.
+        self.session.tool_activation_cache.clear();
+        self.session.pending_toolbox_eviction_notes.clear();
+        let plugin_workspace_changed = self.plugin_registry.workspace() != workspace.as_path();
+        let previous_session_id = self.session.id.clone();
+        let next_session_id = if let Some(session_id) = session_id {
+            session_id
+        } else if messages.is_empty() && system_prompt.is_none() {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            previous_session_id.clone()
+        };
+        let closed_session_id = self.install_synced_session_id(next_session_id);
+        // SyncSession installs a conversation's identity; an id
+        // change IS a conversation boundary in this runtime —
+        // callers must pass their own conversation id for
+        // same-conversation re-syncs. A boundary in the same
+        // process does not rebuild the sub-agent manager, so the
+        // previous conversation's live children and write claims
+        // must be finalized here or they keep gating writers in
+        // the new conversation (#5372). Same-session reloads
+        // keep their id and are deliberately left untouched.
+        if let Some(closed_session_id) = closed_session_id {
+            let finalized = self
+                .subagent_manager
+                .write()
+                .await
+                .finalize_session_close_for_session(&closed_session_id);
+            if finalized > 0 {
+                tracing::info!(
+                    target: "subagent",
+                    finalized,
+                    "finalized sub-agent fleet for closed session"
+                );
+            }
+        }
+        let compaction_checkpoint = extract_compaction_summary_prompt(system_prompt.clone());
+        let restored_messages = crate::runtime_handoff::project_messages_for_restore(&messages);
+        // The persisted carrier is authoritative for the one
+        // history checkpoint, at its saved location. Later
+        // turns must remain after it for Chat wire ordering.
+        let restored_messages = crate::compaction::restore_compaction_checkpoint(
+            restored_messages,
+            compaction_checkpoint.as_ref(),
+        );
+        self.session.messages = restored_messages.into();
+        // Direct field assignment bypasses `add_message` /
+        // `replace_messages`, which own the messages-revision
+        // bump the token-estimate cache keys on (#perf-r5).
+        // Without this bump the first estimate after a
+        // session restore is computed against whatever
+        // history revision was current before the sync — a
+        // stale number can flow into capacity checkpoints.
+        self.session.bump_messages_revision();
+        self.session.latest_parent_input_tokens = None;
+        self.session.compaction_summary_prompt = compaction_checkpoint;
+        self.session.system_prompt =
+            crate::compaction::strip_compaction_summaries(system_prompt.as_ref());
+        self.session.last_system_prompt_hash =
+            Some(system_prompt_hash(self.session.system_prompt.as_ref()));
+        // Prompt pins and drift baselines describe the
+        // conversation that was active before this sync. The
+        // next submitted turn must establish the installed
+        // conversation's own full prefix instead of comparing
+        // it with that stale baseline and emitting a
+        // `<context_update>` from an empty/restored prompt.
+        // Host-owned overrides remain byte-stable because the
+        // refresh path exits early while the override is set.
+        self.session.pinned_prompt_context = None;
+        self.session.context_update_baseline = None;
+        // A session sync installs a new (or restored) prefix.
+        // Declare it so the next request re-pins the KV-cache
+        // prefix under a logged `resume` reason instead of
+        // reporting undeclared drift.
+        self.session.pending_prefix_change_reason = Some("resume".to_string());
+        // Host-supplied prompts are persisted prefixes. Keep them
+        // byte-stable; mode/runtime state is projected per request.
+        self.session.system_prompt_override =
+            system_prompt_override && self.session.system_prompt.is_some();
+        self.session.auto_model = model.trim().eq_ignore_ascii_case("auto");
+        self.session.model = model;
+        self.session.workspace = workspace.clone();
+        self.session.workspace_roots =
+            codewhale_core::normalize_workspace_roots(&workspace, &workspace_roots);
+        self.current_mode = mode;
+        self.config.model.clone_from(&self.session.model);
+        self.config.workspace = workspace.clone();
+        self.config.workspace_roots = self.session.workspace_roots.clone();
+        if plugin_workspace_changed {
+            self.plugin_registry = self.plugin_registry.rediscover_for_workspace(&workspace);
+            self.config.plugin_registry = Some(Arc::clone(&self.plugin_registry));
+            // A pool may contain plugin servers and authority
+            // receipts from the previous workspace snapshot.
+            // Drop the receipts with it, or the briefing
+            // reconcile would re-announce the previous
+            // workspace's failures into the new conversation.
+            self.mcp_pool = None;
+            self.mcp_connection_errors.clear();
+            // The previous workspace's in-flight connect pass
+            // must not finish into the freshly synced
+            // conversation (see the method).
+            self.invalidate_mcp_boot_for_workspace_change();
+        }
+        // Base reloads the project context on every session
+        // sync; keep that unconditional so mid-session
+        // instruction edits are picked up on same-workspace
+        // re-syncs. The loader reads the primary root only.
+        let ctx = crate::project_context::load_project_context_with_parents(&workspace);
+        self.session.project_context = if ctx.has_instructions() {
+            Some(ctx)
+        } else {
+            None
+        };
+        self.session.rebuild_working_set();
+        self.reconcile_restored_work_bindings().await;
+        // The MCP briefing bookkeeping belongs to one
+        // conversation; rebuild it for the one just installed
+        // (see the reconcile method for why this must happen
+        // after the restored history lands, not before).
+        self.reconcile_mcp_boot_briefing_after_session_sync().await;
+        self.emit_session_updated().await;
+        let _ = self
+            .tx_event
+            .send(Event::status("Session context synced".to_string()))
+            .await;
+    }
+
+    /// Apply an `Op::SetModel` payload: swap the model and reinstall the
+    /// route state the host resolved for it. The op payload is both the
+    /// effective and the declared value because no executable route
+    /// candidate arrives with the op.
+    async fn apply_set_model(
+        &mut self,
+        model: String,
+        route_limits: Option<codewhale_config::route::RouteLimits>,
+    ) {
+        self.session.auto_model = model.trim().eq_ignore_ascii_case("auto");
+        self.session.model = model;
+        self.config.model.clone_from(&self.session.model);
+        self.active_route_limits = route_limits;
+        self.active_route_declared_limits = route_limits;
+        self.active_route_limits_model = Some(self.session.model.clone());
+        // This lightweight operation carries no executable
+        // route candidate, so old provider/model capability
+        // facts must not bleed into the new model.
+        self.active_route_capabilities = codewhale_config::route::RouteCapabilities::default();
+        self.refresh_system_prompt_with_reason("model");
+        self.emit_session_updated().await;
+        let _ = self
+            .tx_event
+            .send(Event::status(format!(
+                "Model set to: {}",
+                self.session.model
+            )))
+            .await;
     }
 
     /// Create a new engine with the given configuration
@@ -2026,6 +2233,8 @@ impl Engine {
         };
 
         let active_route_limits = config.active_route_limits;
+        // The embedder-supplied value is a declaration, not a resolver merge.
+        let active_route_declared_limits = active_route_limits;
         let active_route_limits_model = active_route_limits.map(|_| config.model.clone());
         let active_turn_tool_security = config.turn_tool_security.clone();
         let control_plane_restricted = active_turn_tool_security.is_some();
@@ -2073,6 +2282,7 @@ impl Engine {
             api_provider_id,
             active_route_limits,
             active_route_limits_model,
+            active_route_declared_limits,
             active_route_capabilities: codewhale_config::route::RouteCapabilities::default(),
             rx_op,
             live_runtime_authority: Arc::clone(&live_runtime_authority),
@@ -3355,25 +3565,7 @@ impl Engine {
                         mode: _,
                         route_limits,
                     } => {
-                        self.session.auto_model = model.trim().eq_ignore_ascii_case("auto");
-                        self.session.model = model;
-                        self.config.model.clone_from(&self.session.model);
-                        self.active_route_limits = route_limits;
-                        self.active_route_limits_model = Some(self.session.model.clone());
-                        // This lightweight operation carries no executable
-                        // route candidate, so old provider/model capability
-                        // facts must not bleed into the new model.
-                        self.active_route_capabilities =
-                            codewhale_config::route::RouteCapabilities::default();
-                        self.refresh_system_prompt_with_reason("model");
-                        self.emit_session_updated().await;
-                        let _ = self
-                            .tx_event
-                            .send(Event::status(format!(
-                                "Model set to: {}",
-                                self.session.model
-                            )))
-                            .await;
+                        self.apply_set_model(model, route_limits).await;
                     }
                     Op::SetCompaction { config } => {
                         let enabled = config.enabled;
@@ -3455,143 +3647,17 @@ impl Engine {
                         workspace_roots,
                         mode,
                     } => {
-                        self.drop_all_steers().await;
-                        // Deferred tool activations belong to one
-                        // conversation. SyncSession installs a conversation's
-                        // identity, history, and workspace (including the
-                        // generated-ID new-session path), so never carry the
-                        // previous conversation's toolbox across this edge —
-                        // including a parked eviction note whose batch never
-                        // recorded a result.
-                        self.session.tool_activation_cache.clear();
-                        self.session.pending_toolbox_eviction_notes.clear();
-                        let plugin_workspace_changed =
-                            self.plugin_registry.workspace() != workspace.as_path();
-                        let previous_session_id = self.session.id.clone();
-                        let next_session_id = if let Some(session_id) = session_id {
-                            session_id
-                        } else if messages.is_empty() && system_prompt.is_none() {
-                            uuid::Uuid::new_v4().to_string()
-                        } else {
-                            previous_session_id.clone()
-                        };
-                        let closed_session_id = self.install_synced_session_id(next_session_id);
-                        // SyncSession installs a conversation's identity; an id
-                        // change IS a conversation boundary in this runtime —
-                        // callers must pass their own conversation id for
-                        // same-conversation re-syncs. A boundary in the same
-                        // process does not rebuild the sub-agent manager, so the
-                        // previous conversation's live children and write claims
-                        // must be finalized here or they keep gating writers in
-                        // the new conversation (#5372). Same-session reloads
-                        // keep their id and are deliberately left untouched.
-                        if let Some(closed_session_id) = closed_session_id {
-                            let finalized = self
-                                .subagent_manager
-                                .write()
-                                .await
-                                .finalize_session_close_for_session(&closed_session_id);
-                            if finalized > 0 {
-                                tracing::info!(
-                                    target: "subagent",
-                                    finalized,
-                                    "finalized sub-agent fleet for closed session"
-                                );
-                            }
-                        }
-                        let compaction_checkpoint =
-                            extract_compaction_summary_prompt(system_prompt.clone());
-                        let restored_messages =
-                            crate::runtime_handoff::project_messages_for_restore(&messages);
-                        // The persisted carrier is authoritative for the one
-                        // history checkpoint, at its saved location. Later
-                        // turns must remain after it for Chat wire ordering.
-                        let restored_messages = crate::compaction::restore_compaction_checkpoint(
-                            restored_messages,
-                            compaction_checkpoint.as_ref(),
-                        );
-                        self.session.messages = restored_messages.into();
-                        // Direct field assignment bypasses `add_message` /
-                        // `replace_messages`, which own the messages-revision
-                        // bump the token-estimate cache keys on (#perf-r5).
-                        // Without this bump the first estimate after a
-                        // session restore is computed against whatever
-                        // history revision was current before the sync — a
-                        // stale number can flow into capacity checkpoints.
-                        self.session.bump_messages_revision();
-                        self.session.latest_parent_input_tokens = None;
-                        self.session.compaction_summary_prompt = compaction_checkpoint;
-                        self.session.system_prompt =
-                            crate::compaction::strip_compaction_summaries(system_prompt.as_ref());
-                        self.session.last_system_prompt_hash =
-                            Some(system_prompt_hash(self.session.system_prompt.as_ref()));
-                        // Prompt pins and drift baselines describe the
-                        // conversation that was active before this sync. The
-                        // next submitted turn must establish the installed
-                        // conversation's own full prefix instead of comparing
-                        // it with that stale baseline and emitting a
-                        // `<context_update>` from an empty/restored prompt.
-                        // Host-owned overrides remain byte-stable because the
-                        // refresh path exits early while the override is set.
-                        self.session.pinned_prompt_context = None;
-                        self.session.context_update_baseline = None;
-                        // A session sync installs a new (or restored) prefix.
-                        // Declare it so the next request re-pins the KV-cache
-                        // prefix under a logged `resume` reason instead of
-                        // reporting undeclared drift.
-                        self.session.pending_prefix_change_reason = Some("resume".to_string());
-                        // Host-supplied prompts are persisted prefixes. Keep them
-                        // byte-stable; mode/runtime state is projected per request.
-                        self.session.system_prompt_override =
-                            system_prompt_override && self.session.system_prompt.is_some();
-                        self.session.auto_model = model.trim().eq_ignore_ascii_case("auto");
-                        self.session.model = model;
-                        self.session.workspace = workspace.clone();
-                        self.session.workspace_roots =
-                            codewhale_core::normalize_workspace_roots(&workspace, &workspace_roots);
-                        self.current_mode = mode;
-                        self.config.model.clone_from(&self.session.model);
-                        self.config.workspace = workspace.clone();
-                        self.config.workspace_roots = self.session.workspace_roots.clone();
-                        if plugin_workspace_changed {
-                            self.plugin_registry =
-                                self.plugin_registry.rediscover_for_workspace(&workspace);
-                            self.config.plugin_registry = Some(Arc::clone(&self.plugin_registry));
-                            // A pool may contain plugin servers and authority
-                            // receipts from the previous workspace snapshot.
-                            // Drop the receipts with it, or the briefing
-                            // reconcile would re-announce the previous
-                            // workspace's failures into the new conversation.
-                            self.mcp_pool = None;
-                            self.mcp_connection_errors.clear();
-                            // The previous workspace's in-flight connect pass
-                            // must not finish into the freshly synced
-                            // conversation (see the method).
-                            self.invalidate_mcp_boot_for_workspace_change();
-                        }
-                        // Base reloads the project context on every session
-                        // sync; keep that unconditional so mid-session
-                        // instruction edits are picked up on same-workspace
-                        // re-syncs. The loader reads the primary root only.
-                        let ctx =
-                            crate::project_context::load_project_context_with_parents(&workspace);
-                        self.session.project_context = if ctx.has_instructions() {
-                            Some(ctx)
-                        } else {
-                            None
-                        };
-                        self.session.rebuild_working_set();
-                        self.reconcile_restored_work_bindings().await;
-                        // The MCP briefing bookkeeping belongs to one
-                        // conversation; rebuild it for the one just installed
-                        // (see the reconcile method for why this must happen
-                        // after the restored history lands, not before).
-                        self.reconcile_mcp_boot_briefing_after_session_sync().await;
-                        self.emit_session_updated().await;
-                        let _ = self
-                            .tx_event
-                            .send(Event::status("Session context synced".to_string()))
-                            .await;
+                        self.apply_synced_session(
+                            session_id,
+                            messages,
+                            system_prompt,
+                            system_prompt_override,
+                            model,
+                            workspace,
+                            workspace_roots,
+                            mode,
+                        )
+                        .await;
                     }
                     Op::CompactContext {
                         id,
@@ -5463,6 +5529,7 @@ impl Engine {
         let provider_identity = route.identity.key.clone();
         let model = route.model.clone();
         let route_limits = crate::route_budget::known_route_limits(route.candidate.limits());
+        let route_declared_limits = route.candidate.embedding_host_declared_limits();
         let route_capabilities = route.candidate.capabilities();
         let route_api_config = route.config.clone();
         // Freeze the billing receipt here, while `route` is still the single
@@ -5650,6 +5717,7 @@ impl Engine {
         // The model, limits, and compaction policy arrive in one operation so
         // no provider request can observe a partially updated route.
         self.active_route_limits = route_limits;
+        self.active_route_declared_limits = route_declared_limits;
         self.active_route_limits_model = Some(model.clone());
         self.config.compaction = compaction;
         // Headless/runtime hosts supply their durable turn owner. Interactive
