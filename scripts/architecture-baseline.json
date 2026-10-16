@@ -16,7 +16,7 @@
       "assistant->connectors": 11,
       "assistant->knowledge": 1,
       "assistant->marketplace": 64,
-      "assistant->remote_control": 33,
+      "assistant->remote_control": 32,
       "assistant->runtime_bundle": 2,
       "connectors->marketplace": 8,
       "connectors->runtime_bundle": 7,

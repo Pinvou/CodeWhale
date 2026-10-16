@@ -536,6 +536,7 @@ try {
   assert.ok(!chatView.includes('sessionAgentBackend'), 'DeepSeek ChatView must not branch on Codex state');
 
   const main = readFileSync(path.join(root, 'src', 'app', 'main.jsx'), 'utf8');
+  const sessionListPipeline = readFileSync(path.join(root, 'src', 'shared', 'session-list-pipeline.js'), 'utf8');
   const detachedShell = readFileSync(path.join(root, 'src', 'app', 'DetachedShell.jsx'), 'utf8');
   const lazyCodexView = readFileSync(
     path.join(root, 'src', 'features', 'codex', 'LazyCodexAcpView.jsx'),
@@ -588,7 +589,8 @@ try {
     'an accepted ACP turn must refresh the shared recent-session list while it is still running',
   );
   assert.ok(main.includes("{ id: 'code', label: t.sidebarTaskFilterCodeSessions }")
-    && main.includes("if (taskListFilter === 'code') return chat.taskKind === 'codex';")
+    && sessionListPipeline.includes("if (tabId === 'code') return sessions.filter((chat) => chat.taskKind === 'codex');")
+    && main.includes('filterSessionsByTab(allSidebarTasks, taskListFilter)')
     && i18n.includes("sidebarTaskFilterCodeSessions: '代码会话'")
     && i18n.includes("sidebarTaskFilterCodeSessions: 'Code sessions'")
     && i18n.includes("sidebarTaskFilterCodeSessions: 'コードセッション'")
@@ -965,6 +967,21 @@ try {
     && codexView.includes('onMeasured: () => {')
     && codexView.includes('lastScrollHeightRef.current = scrollElement.scrollHeight'),
   'Codex streaming must retain bottom following across content shrink and asynchronous layout changes');
+  // 虚拟化门控（#607 精修 ③④）：虚拟化下原生锚定与虚拟izer补偿双重作用会打架、
+  // 平滑回底会拖着估高抖动，两视图都必须按同一 shouldVirtualizeConversationTurns
+  // 决策切 overflowAnchor 与回底 behavior。
+  const timelineSource = readFileSync(path.join(root, 'src', 'features', 'conversation', 'ConversationTimeline.jsx'), 'utf8');
+  assert.ok(chatView.includes("behavior: virtualized ? 'auto' : 'smooth'")
+    && chatView.includes("overflowAnchor: shouldVirtualizeConversationTurns(conversationProjection.turns.length, scrollRef) ? 'none' : undefined"),
+  'ChatView 回底平滑度与原生锚定必须按虚拟化门控');
+  assert.ok(codexView.includes("behavior: virtualized ? 'auto' : 'smooth'")
+    && codexView.includes("overflowAnchor: shouldVirtualizeConversationTurns(visibleTurns.length, scroller) ? 'none' : undefined"),
+  'CodexAcpView 回底平滑度与原生锚定必须按虚拟化门控');
+  // 虚拟化精修 ①②：跨阈值重挂保滚动位置 + 切会话清 size cache。
+  assert.ok(timelineSource.includes('initialOffset: () => getScrollElement()?.scrollTop ?? 0')
+    && timelineSource.includes('virtualizer.measure()')
+    && timelineSource.includes('[conversationKey, virtualizer]'),
+  'ConversationTimeline 必须保留 initialOffset 惰性读取与切会话 measure() 清 cache');
   assert.ok(!codexView.includes('<JsonBlock'), 'raw ACP JSON must not leak into normal command UI');
   assert.ok(codexView.includes('await submitAcpPrompt({')
     && codexView.includes('attachments: readyAttachments.map(attachment => attachment.result)')
@@ -1255,6 +1272,25 @@ try {
     assert.equal(content['__proto__'], 'X');
     assert.equal(JSON.stringify(content), '{"constructor":"A","toString":"B","__proto__":"X"}', 'JSON 序列化不得静默丢失保留键');
     assert.equal(Array.isArray(Object.getPrototypeOf(content)), false, 'content 保持无原型对象，不得被 __proto__ 赋值改原型');
+  }
+
+  // ── buildElicitationContent：无 otherAnswerKey 的自定义答案回落主 answerKey ──
+  // 自定义回复框已在 normalizeElicitationQuestions 钉死（枚举题即使没有 agent 生成的
+  // other 伴随字段也展示），该回落分支成为可达路径：自定义文本必须仍被提交，不能静默丢弃。
+  {
+    const content = buildElicitationContent([
+      { questionId: 'q1', answerKey: 'q1', otherAnswerKey: null, multiSelect: false, answers: [{ label: '其他', value: '我自己写的内容', other: true }] },
+      { questionId: 'q2', answerKey: 'q2', otherAnswerKey: null, multiSelect: true, answers: [{ label: 'A', value: 'a', other: false }, { label: '其他', value: '补充', other: true }] },
+    ]);
+    assert.equal(content.q1, '我自己写的内容', '单选无伴随字段时自定义文本回落主 answerKey');
+    assert.deepEqual(content.q2, ['a', '补充'], '多选混入自定义文本时数组保留全部答案');
+
+    // 特殊 answerKey + 无伴随字段的自定义答案：文本作为 own property 落在保留键上，不得丢。
+    const special = buildElicitationContent([
+      { questionId: 'q', answerKey: '__proto__', otherAnswerKey: null, multiSelect: false, answers: [{ label: '其他', value: 'x', other: true }] },
+    ]);
+    assert.equal(Object.prototype.hasOwnProperty.call(special, '__proto__'), true, '自定义答案回落保留键不得被 __proto__ setter 吞掉');
+    assert.equal(special['__proto__'], 'x');
   }
 
   // ── M-E journal probe semantics lock: transport-level (endpoint active),

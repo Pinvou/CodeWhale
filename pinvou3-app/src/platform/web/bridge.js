@@ -469,7 +469,6 @@
       deviceUploadIntegrityMismatch: "the attachment content was corrupted in transit. Upload it again.",
       turnAlreadyInProgress: "⚠️ This chat is already processing a turn. The duplicate send was not executed.",
       compactStart: "⏳ Compacting context", compactDone: "✓ Context compacted", compactFail: "⚠️ Compaction failed", compactCancel: "Context compaction canceled", compactAuto: " (auto)",
-      toolGateDecision: "Permission gate", toolGateAllowed: "allowed", toolGateDenied: "denied", toolGateUnavailable: "could not review and denied", toolGateAgent: "agent", toolGateRisk: "risk",
       compactPruneMerged: "Auto-compaction: tool-result cleanup, messages unchanged",
       compactInactive: "The session engine is not running yet. Send a message before compacting the context",
       gpuUnavailable: "GPU info unavailable",
@@ -602,7 +601,6 @@
       deviceUploadIntegrityMismatch: "添付ファイルの内容が転送中に破損しました。再度アップロードしてください。",
       turnAlreadyInProgress: "⚠️ このチャットでは別のターンを処理中です。重複した送信は実行されませんでした。",
       compactStart: "⏳ コンテキストを圧縮中", compactDone: "✓ コンテキスト圧縮完了", compactFail: "⚠️ 圧縮に失敗", compactCancel: "コンテキストの圧縮をキャンセルしました", compactAuto: "（自動）",
-      toolGateDecision: "権限ゲート", toolGateAllowed: "許可", toolGateDenied: "拒否", toolGateUnavailable: "レビュー不能のため拒否", toolGateAgent: "エージェント", toolGateRisk: "リスク",
       compactPruneMerged: "自動圧縮: ツール結果を整理、メッセージ数は不変",
       compactInactive: "セッション Engine はまだ起動していません。メッセージを送信してからコンテキストを圧縮してください",
       gpuUnavailable: "GPU 情報を取得できません",
@@ -735,7 +733,6 @@
       deviceUploadIntegrityMismatch: "附件内容在传输中损坏，请重新上传",
       turnAlreadyInProgress: "⚠️ 当前会话已有一轮正在处理，本次重复发送未执行。",
       compactStart: "⏳ 正在压缩上下文", compactDone: "✓ 上下文压缩完成", compactFail: "⚠️ 压缩失败", compactCancel: "已取消上下文压缩", compactAuto: "（自动）",
-      toolGateDecision: "权限闸门", toolGateAllowed: "允许", toolGateDenied: "拒绝", toolGateUnavailable: "无法审查并拒绝", toolGateAgent: "子智能体", toolGateRisk: "风险",
       compactPruneMerged: "自动压缩：已整理工具结果，消息数不变",
       compactInactive: "会话引擎尚未运行。请先发送一条消息，再压缩上下文",
       gpuUnavailable: "GPU 信息不可用",
@@ -3177,7 +3174,20 @@
   // 永远不会堆积没用过的空「新对话」(ChatGPT/Claude 式 lazy session)。
   function enterDraft() {
     state.chatItems.forEach(function (item) {
-      if (item && item.clientMessageId) delete firstTurnSubmissions[item.clientMessageId];
+      if (item && item.clientMessageId) {
+        const submission = firstTurnSubmissions[item.clientMessageId];
+        // A submission still in flight settles its own operation from the RPC
+        // outcome; closing it here would mark a message that is about to be
+        // delivered as cancelled. Finished submissions (rejected or parked on
+        // an unknown outcome) are closed: the record is discarded, so a
+        // parked operation could never reconcile and would stay unadoptable
+        // and unsweepable until the page closes.
+        if (submission && submission.voiceOperationId && !submission.inFlight) {
+          completeVoiceSubmission(submission.voiceOperationId, null, false);
+          abandonVoiceResult(submission.voiceOperationId);
+        }
+        delete firstTurnSubmissions[item.clientMessageId];
+      }
     });
     sessionSwitchRequestToken += 1; // 新建/返回草稿会话使任何仍在等待的 load_session 结果失效
     state.scheduledRunContext = null;
@@ -5994,14 +6004,27 @@
     notify();
     return false;
   }
-  var pendingTaskDraftRecovery = null;
+  // Retained recovery for a task draft whose send was abandoned mid-await:
+  // when the user moved on to another session (or the session creation
+  // failed), the text cannot go into the unrelated active composer, so it is
+  // kept in this single in-memory slot. Returning to the draft consumes it
+  // once (append-only); the slot is not keyed by draft identity — the next
+  // draft return is the one chance to hand the text back before it is lost.
+  const pendingTaskDraftRecovery = { buffer: null };
   function getComposerDraft() {
-    if (pendingTaskDraftRecovery && pendingTaskDraftRecovery.epoch !== Number(state.draftEpoch || 0)) {
-      pendingTaskDraftRecovery = null;
-    }
-    if (pendingTaskDraftRecovery && !state.activeSessionId) {
-      state.composerDraft = [state.composerDraft, pendingTaskDraftRecovery.text].filter(Boolean).join("\n");
-      pendingTaskDraftRecovery = null;
+    // Consumed once on returning to the draft, never while an unrelated
+    // session is open. No epoch gate: re-entering the draft always allocates
+    // a new epoch (enterDraft increments unconditionally), so an epoch match
+    // could never fire and the retained text would be silently dropped.
+    if (pendingTaskDraftRecovery.buffer && !state.activeSessionId) {
+      state.composerDraft = [state.composerDraft, pendingTaskDraftRecovery.buffer.text].filter(Boolean).join("\n");
+      // The text is visibly back in the live draft: the voice association
+      // follows it, or a manual retry would be orphaned in the dead
+      // recording-time epoch.
+      if (pendingTaskDraftRecovery.buffer.operationId) {
+        rebindVoiceOperationToDraft(pendingTaskDraftRecovery.buffer.operationId, state.draftEpoch);
+      }
+      pendingTaskDraftRecovery.buffer = null;
     }
     return String(state.composerDraft || "");
   }
@@ -6026,17 +6049,36 @@
   function restoreTaskDraft(text, owner) {
     if (!owner || owner.restored) return false;
     const sid = owner.sessionId || owner.createdSessionId || voiceOperationSessionId(owner.operationId);
+    // Every restore branch settles the submission (un-park + consume a
+    // queued dismiss); without it a rejected send would leave the operation
+    // parked forever and never adoptable by a retry.
     if (sid) {
       if (owner.operationId) completeVoiceSubmission(owner.operationId, sid, false);
       restoreComposerText(sid, text);
-    } else if (!state.activeSessionId && Number(state.draftEpoch || 0) === owner.draftEpoch) {
-      prefillComposer(text, true);
-    } else if (Number(state.draftEpoch || 0) === owner.draftEpoch) {
-      var retained = pendingTaskDraftRecovery && pendingTaskDraftRecovery.epoch === owner.draftEpoch
-        ? pendingTaskDraftRecovery.text : "";
-      pendingTaskDraftRecovery = { epoch: owner.draftEpoch, text: [retained, text].filter(Boolean).join("\n") };
+    } else if (state.activeSessionId) {
+      // Retain one departed draft in memory, never in the unrelated active session.
+      if (owner.operationId) completeVoiceSubmission(owner.operationId, null, false);
+      const retained = pendingTaskDraftRecovery.buffer ? pendingTaskDraftRecovery.buffer.text : "";
+      const retainedOperationId = pendingTaskDraftRecovery.buffer ? pendingTaskDraftRecovery.buffer.operationId : null;
+      pendingTaskDraftRecovery.buffer = {
+        text: [retained, text].filter(Boolean).join("\n"),
+        // The newest operation wins: the rebind on draft return adopts the
+        // most recent stranded send (one operation per manual send).
+        operationId: owner.operationId || retainedOperationId || null,
+      };
     } else {
-      return false;
+      // Back in the draft — any epoch, because re-entering the draft
+      // allocates a new one (enterDraft increments unconditionally).
+      if (owner.operationId) {
+        completeVoiceSubmission(owner.operationId, null, false);
+        // The text is visibly back in the live draft: rebind the operation to
+        // the new epoch so a manual retry adopts it instead of orphaning the
+        // association in the dead recording-time epoch (the complete above
+        // may already have terminalized it via a queued cancel; the rebind
+        // refuses terminal operations).
+        rebindVoiceOperationToDraft(owner.operationId, state.draftEpoch);
+      }
+      prefillComposer(text, true);
     }
     owner.restored = true;
     return true;
@@ -6616,11 +6658,23 @@
       cancelPendingStreamNotify(sid);
       var didRun = false;
       var wasBackground = sid !== state.activeSessionId;
-      runSyncOnSession(sid, function () {
-        didRun = true;
-        immediateNotify();
-      });
-      if (didRun && wasBackground) immediateNotify();
+      // A throwing subscriber must not escape as an unhandled rAF/timer
+      // error (the synchronous first-delta path keeps the dispatch-loop
+      // throw semantics). runSyncOnSession's finally restores the working
+      // set before the error lands here.
+      try {
+        runSyncOnSession(sid, function () {
+          didRun = true;
+          immediateNotify();
+        });
+      } catch (error) {
+        console.error("[chat] coalesced stream notify failed", error);
+      }
+      // runSyncOnSession suppresses callbacks while a background working set
+      // is installed. Refresh the visible session list after it restores.
+      if (didRun && wasBackground) {
+        try { immediateNotify(); } catch (error) { console.error("[chat] coalesced stream notify failed", error); }
+      }
     }
     if (typeof window.requestAnimationFrame === "function") {
       pending.frame = window.requestAnimationFrame(publish);
@@ -6660,11 +6714,17 @@
     streamRenderTimers[sid] = setTimeout(function () {
       delete streamRenderTimers[sid];
       var rendered = false;
-      runSyncOnSession(sid, function () {
-        if (!currentStreamId || !currentStreamText) return;
-        rendered = renderStreamItemHtml();
-      });
-      if (rendered) notify();
+      // A throwing subscriber must not escape as an unhandled timer error
+      // (mirrors the tauri lane's scheduled-render guard).
+      try {
+        runSyncOnSession(sid, function () {
+          if (!currentStreamId || !currentStreamText) return;
+          rendered = renderStreamItemHtml();
+        });
+        if (rendered) notify();
+      } catch (error) {
+        console.error("[chat] scheduled stream render failed", error);
+      }
     }, STREAM_RENDER_THROTTLE_MS);
   }
   function cancelStreamTimers(sid) {
@@ -7292,30 +7352,10 @@
     else if (phase === "cancel") addSystemItem(bt("compactCancel") + auto + (msg ? ": " + msg : ""), { compactId, compactPhase: "cancel" });
   }); });
 
-  // Foundation sub-agent tool-gate decisions have no approval card. Keep the
-  // final allow/deny outcome visible in the web timeline for auditability.
-  listen("chat:tool_gate_decision", function (e) { onSessionEvent(e, function () {
-    const p = e.payload || {};
-    const decision = String(p.decision || "unavailable");
-    const decisionLabel = decision === "allowed"
-      ? bt("toolGateAllowed")
-      : decision === "denied"
-        ? bt("toolGateDenied")
-        : bt("toolGateUnavailable");
-    let text = bt("toolGateDecision") + ": " + (p.tool_name ? String(p.tool_name) + " — " : "") + decisionLabel;
-    if (p.agent_id) text += " · " + bt("toolGateAgent") + " " + String(p.agent_id);
-    if (p.risk) text += " · " + bt("toolGateRisk") + " " + String(p.risk);
-    if (p.reason) text += " · " + String(p.reason);
-    addSystemItem(text, {
-      toolGateDecision: true,
-      toolId: String(p.tool_id || ""),
-      toolName: String(p.tool_name || ""),
-      agentId: String(p.agent_id || ""),
-      decision,
-      reason: String(p.reason || ""),
-      risk: String(p.risk || ""),
-    });
-  }); });
+  // chat:tool_gate_decision 是 Web lane 的 never-emitted 事件（不在
+  // access-policy allowed_events / RUST_FORWARDED_EVENTS），其监听器已随
+  // dead-code sweep 移除；桌面 timeline 的 tool-gate 审计投影仍由 Tauri lane
+  // 承担。
 
   // ── request_user_input：渲染选择卡片（不进 messages.json）─────────
   // payload: { id: tool_call_id, questions: [{header, id, question, options:[{label, description}]}] }
@@ -10029,7 +10069,13 @@
       session.draftEpoch = Number(state.draftEpoch || 0);
     }
     for (var entry of voiceOperations) {
-      if (entry[1].telemetryTerminal) voiceOperations.delete(entry[0]);
+      var item = entry[1];
+      // Terminal entries are done; a dismissed entry stays adoptable for a
+      // manual retry until the next recording starts, then it is swept —
+      // a never-sent dismissal must not leak its audio chunks forever.
+      if (item.telemetryTerminal || (item.dismissed && !item.pendingSubmission)) {
+        voiceOperations.delete(entry[0]);
+      }
     }
     voiceOperations.set(session.operationId, session);
   }
@@ -10098,12 +10144,33 @@
     }
   }
 
+  // Re-entering a departed draft hands its retained text back under a new
+  // draft epoch (enterDraft increments unconditionally). Once the text is
+  // visibly back in the composer the operation follows it: a manual retry
+  // keeps the voice association instead of being orphaned in the dead
+  // recording-time epoch. Restricted to unsubmitted draft operations (no
+  // session binding, chat kind), mirroring the desktop lane's rollback and
+  // draft-return rebinds; terminal operations never rebind.
+  function rebindVoiceOperationToDraft(operationId, toEpoch) {
+    var operation = voiceOperations.get(operationId);
+    if (!operation || operation.telemetryTerminal || operation.pendingSubmission
+      || operation.sessionId || operation.ownerKind !== "chat") return false;
+    operation.draftEpoch = Number(toEpoch);
+    return true;
+  }
+
   function dismissVoiceInput() {
     // Applying an edit or dismissing a finished notice retains the draft's provenance.
     // An in-flight recording is still an explicit cancellation.
     if (activeVoiceInput && !activeVoiceInput.voiceResultReady) {
       clearVoiceInput();
       return;
+    }
+    // Mark the dismissal so the next recording start can sweep a never-sent
+    // dismissal; until then the operation stays adoptable by a manual send.
+    var operation = voiceOperations.get((state.voiceInput || {}).operationId);
+    if (operation && !operation.telemetryTerminal && !operation.pendingSubmission) {
+      operation.dismissed = true;
     }
     setVoiceInputStatus("idle", { message: "", operationId: null });
   }

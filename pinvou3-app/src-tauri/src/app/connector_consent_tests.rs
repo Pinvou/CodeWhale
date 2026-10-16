@@ -140,7 +140,7 @@ mod skill_gate_tests {
     }
 
     /// Round-33 MAJOR 2 (review #455): the connect-path consent-persist
-    /// failure copy carries the ONE shared frontend marker
+    /// failure copy emitted by the production helper carries the ONE shared frontend marker
     /// (`scope::CONSENT_SYNC_FAILURE_MARKER`) — the localized template on the
     /// store cards keys on exactly this string, so a rewording here must move
     /// the frontend matcher in the same commit. The literal is asserted (not
@@ -150,11 +150,25 @@ mod skill_gate_tests {
     /// frontend pin `consent_marker_frontend.test.mjs` leans on this test.)
     #[test]
     fn skill_gate_consent_failure_message_keeps_the_frontend_marker() {
-        assert_eq!(
-            crate::features::marketplace::scope::CONSENT_SYNC_FAILURE_MARKER,
-            "persisting their default-off consent state failed",
-            "the shipped marker is the string the frontend consentFailure matcher keys on"
-        );
+        use crate::features::marketplace::scope::CONSENT_SYNC_FAILURE_MARKER;
+
+        crate::platform::test_support::with_temp_home("pinvou3-skillgate-consent-marker", || {
+            let _ = crate::features::marketplace::load_disabled_bundles_for(
+                crate::features::marketplace::ConnectorScope::Plain,
+            );
+            let _failpoint =
+                crate::features::marketplace::scope::fail_next_disabled_bundles_write_for_test();
+            let error = crate::features::connectors::skill_gate::apply_skills_consent_sync("wecom")
+                .expect_err("fixture: the injected persist error must surface");
+            assert!(
+                error.contains(CONSENT_SYNC_FAILURE_MARKER),
+                "the shipped message must carry the frontend-matched marker: {error}"
+            );
+            assert_eq!(
+                CONSENT_SYNC_FAILURE_MARKER, "persisting their default-off consent state failed",
+                "the marker value is the frontend contract (ToolStoreView consentFailure) — update both sides together"
+            );
+        });
     }
 
     /// Round-37 C1 (review #455): a consent persist failure between connect
