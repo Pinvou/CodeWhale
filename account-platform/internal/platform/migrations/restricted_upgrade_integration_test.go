@@ -215,6 +215,84 @@ func TestRestrictedMigrationLedgerPostgresIntegration(t *testing.T) {
 		}
 		Unlock(ctx, writer)
 	})
+	t.Run("down_hooks_pin_roles_and_rollback_atomically", func(t *testing.T) {
+		hooked := Migration{Version: 5, Name: "down_hook_identity", UpSQL: `SET ROLE ` + quotedSwitched + `; CREATE TABLE down_hook_probe(id INTEGER PRIMARY KEY); INSERT INTO down_hook_probe VALUES(1); GRANT SELECT ON down_hook_probe TO ` + quotedRole, DownSQL: `SELECT 1/0`}
+		hooked.Checksum = normalizedChecksum(hooked.UpSQL)
+		withHook := []Migration{first, second, hooked}
+		if err := Up(ctx, writer, withHook); err != nil {
+			t.Fatal(err)
+		}
+		Unlock(ctx, writer)
+		assertPresent := func() {
+			t.Helper()
+			var count, ledger int
+			var current string
+			if err := writer.QueryRow(ctx, `SELECT (SELECT count(*) FROM down_hook_probe),(SELECT count(*) FROM schema_migrations WHERE version=5),current_user`).Scan(&count, &ledger, &current); err != nil || count != 1 || ledger != 1 || current != role {
+				t.Fatal("failed Down hook leaked SQL, ledger or role", err)
+			}
+		}
+		failure := errors.New("controlled Down hook failure")
+		for _, phase := range []string{"guard", "apply", "success"} {
+			called := false
+			err := DownOneWithHooks(ctx, writer, withHook, DownHooks{
+				Guard: func(ctx context.Context, tx pgx.Tx, m Migration) error {
+					var current string
+					if e := tx.QueryRow(ctx, `SELECT current_user`).Scan(&current); e != nil {
+						return e
+					}
+					if current != role {
+						return errors.New("guard starts outside migration identity")
+					}
+					if _, e := tx.Exec(ctx, `SET ROLE `+quotedSwitched); e != nil {
+						return e
+					}
+					if phase == "guard" {
+						if _, e := tx.Exec(ctx, `DELETE FROM down_hook_probe`); e != nil {
+							return e
+						}
+						return failure
+					}
+					return nil
+				},
+				ApplySQL: func(ctx context.Context, tx pgx.Tx, m Migration) error {
+					called = true
+					var current string
+					if e := tx.QueryRow(ctx, `SELECT current_user`).Scan(&current); e != nil {
+						return e
+					}
+					if current != role || m != hooked {
+						return errors.New("ApplySQL role or immutable migration changed")
+					}
+					if _, e := tx.Exec(ctx, `SET ROLE `+quotedSwitched+`; DROP TABLE down_hook_probe`); e != nil {
+						return e
+					}
+					if phase == "apply" {
+						return failure
+					}
+					return nil
+				},
+			})
+			Unlock(ctx, writer)
+			if phase != "success" {
+				if !errors.Is(err, failure) || called != (phase == "apply") {
+					t.Fatal("Down hook failure or ordering changed", err)
+				}
+				assertPresent()
+				continue
+			}
+			if err != nil || !called {
+				t.Fatal("compatible Down failed", err)
+			}
+			if _, err := VerifyApplied(ctx, writer, loaded); err != nil {
+				t.Fatal(err)
+			}
+			var exists bool
+			var current string
+			if err := writer.QueryRow(ctx, `SELECT to_regclass('down_hook_probe') IS NOT NULL,current_user`).Scan(&exists, &current); err != nil || exists || current != role {
+				t.Fatal("compatible Down did not restore ledger authority", err)
+			}
+		}
+	})
 	t.Run("empty_schema_without_create", func(t *testing.T) {
 		empty := connect(role, emptySchema)
 		assertMigrationPermissionDenied(t, Up(ctx, empty, []Migration{first}))

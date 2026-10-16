@@ -6,6 +6,8 @@ import (
 	"errors"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"time"
 )
 
 type AccountClosureGrantIsolation struct {
@@ -17,6 +19,24 @@ type AccountClosureGrantIsolation struct {
 }
 
 func (r *PostgresRepository) IsolateAccountClosedGrants(ctx context.Context, closureID, userID uuid.UUID, lifecycleVersion int64) (AccountClosureGrantIsolation, error) {
+	var result AccountClosureGrantIsolation
+	err := retryAccountClosureSerialization(ctx, func() error {
+		var err error
+		result, err = r.isolateAccountClosedGrantsOnce(ctx, closureID, userID, lifecycleVersion)
+		return err
+	})
+	if err != nil {
+		return result, err
+	}
+	// The isolation receipt has committed. A contact-scrub failure keeps the
+	// existing receipt/replay recovery path and must not restart money work.
+	if _, err := r.pool.Exec(ctx, `UPDATE payment_orders SET mobile_e164=NULL WHERE payer_user_id=$1 AND mobile_e164 IS NOT NULL`, result.MemberUserID); err != nil {
+		return AccountClosureGrantIsolation{}, err
+	}
+	return result, nil
+}
+
+func (r *PostgresRepository) isolateAccountClosedGrantsOnce(ctx context.Context, closureID, userID uuid.UUID, lifecycleVersion int64) (AccountClosureGrantIsolation, error) {
 	if closureID == uuid.Nil || userID == uuid.Nil || lifecycleVersion < 2 {
 		return AccountClosureGrantIsolation{}, ErrConflict
 	}
@@ -103,12 +123,23 @@ func (r *PostgresRepository) IsolateAccountClosedGrants(ctx context.Context, clo
 				return AccountClosureGrantIsolation{}, err
 			}
 		}
+		priorStatus, priorReason := grant.Status, grant.SuspensionReason
 		reason := "ACCOUNT_CLOSED"
 		if _, err := tx.Exec(ctx, `UPDATE member_quota_grants SET status='SUSPENDED',suspension_reason=$2,allocation_version=allocation_version+1,updated_at=$3 WHERE id=$1`, grant.ID, reason, now); err != nil {
 			return AccountClosureGrantIsolation{}, err
 		}
 		grant.Status, grant.SuspensionReason, grant.AllocationVersion, grant.UpdatedAt = "SUSPENDED", &reason, grant.AllocationVersion+1, now
-		if err := appendMemberQuotaAudit(ctx, tx, grant, "ACCOUNT_CLOSED_ISOLATED", nil, grant.AvailableMicrocredits, now); err != nil {
+		// Keep the established after snapshot and closed-grant identity, while
+		// retaining the original suspension facts in this immutable audit only.
+		snapshot, err := json.Marshal(struct {
+			MemberQuotaGrant
+			PriorStatus           string  `json:"prior_status"`
+			PriorSuspensionReason *string `json:"prior_suspension_reason"`
+		}{grant, priorStatus, priorReason})
+		if err != nil {
+			return AccountClosureGrantIsolation{}, err
+		}
+		if err := appendMemberQuotaAuditSnapshot(ctx, tx, grant, "ACCOUNT_CLOSED_ISOLATED", nil, grant.AvailableMicrocredits, now, snapshot); err != nil {
 			return AccountClosureGrantIsolation{}, err
 		}
 		if err := appendMemberQuotaOutbox(ctx, tx, grant, "billing.member-quota.account-closed.v1", now); err != nil {
@@ -127,11 +158,29 @@ func (r *PostgresRepository) commitAccountClosureIsolation(ctx context.Context, 
 	if err := tx.Commit(ctx); err != nil {
 		return AccountClosureGrantIsolation{}, err
 	}
-	// Scrub contact metadata outside the financial wallet/row-lock transaction:
-	// payer orders can belong to other wallets. The immutable isolation receipt
-	// is durable first; a missing scrub ACK retries it without re-isolating money.
-	if _, err := r.pool.Exec(ctx, `UPDATE payment_orders SET mobile_e164=NULL WHERE payer_user_id=$1 AND mobile_e164 IS NOT NULL`, result.MemberUserID); err != nil {
-		return AccountClosureGrantIsolation{}, err
-	}
 	return result, nil
+}
+
+// Retry only PostgreSQL's definite serialization abort after the complete
+// attempt has rolled back. Unknown commit outcomes, constraint failures and
+// deadlocks retain their original error/recovery contract.
+func retryAccountClosureSerialization(ctx context.Context, action func() error) error {
+	for attempt := 0; attempt < 4; attempt++ {
+		err := action()
+		if err == nil {
+			return nil
+		}
+		var pgerr *pgconn.PgError
+		if !errors.As(err, &pgerr) || pgerr.Code != "40001" || attempt == 3 {
+			return err
+		}
+		timer := time.NewTimer(time.Duration(attempt+1) * 10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return ErrConflict
 }

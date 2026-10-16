@@ -190,7 +190,7 @@ function UsageDetail({ id, client, copy, routeVersion, onBack, onQueryChange, hi
   </section>;
 }
 
-export function AdminModelOperationsWorkspace({ client, copy, permissions, routeVersion, onRouteChange, onNavigate, owner, authorizationVersion, pageOverviewEnabled = false, operationsOverviewEnabled = false }) {
+export function AdminModelOperationsWorkspace({ client, copy, language, permissions, routeVersion, onRouteChange, onNavigate, owner, authorizationVersion, pageOverviewEnabled = false, operationsOverviewEnabled = false }) {
   const histories = useRef({});
   const canRead = permissions.includes('platform.usage.read');
   const canReconcile = permissions.includes('platform.usage.reconcile.retry');
@@ -220,8 +220,8 @@ export function AdminModelOperationsWorkspace({ client, copy, permissions, route
   };
   const aggregateAllowed = operationsOverviewEnabled && ['platform.models.read', 'platform.tokens.read', 'platform.usage.read'].every(permission => permissions.includes(permission));
   return <>
-    {pageOverviewEnabled && <AdminUsagePageOverview section="modelOperations" client={client} copy={copy} permissions={permissions} userID={owner} authorizationVersion={authorizationVersion} routeVersion={routeVersion} enabled onRouteChange={onRouteChange} onDrilldown={navigateOverview} />}
-    {!pageOverviewEnabled && aggregateAllowed && <AdminModelOperationsOverview key={`${owner}:${authorizationVersion}:${overviewWindow}`} client={client} copy={copy} routeVersion={routeVersion} onRouteChange={onRouteChange} onNavigate={aggregateNavigate} />}
+    {pageOverviewEnabled && <AdminUsagePageOverview section="modelOperations" client={client} copy={copy} language={language} permissions={permissions} userID={owner} authorizationVersion={authorizationVersion} routeVersion={routeVersion} enabled onRouteChange={onRouteChange} onDrilldown={navigateOverview} />}
+    {!pageOverviewEnabled && aggregateAllowed && <AdminModelOperationsOverview key={`${owner}:${authorizationVersion}:${overviewWindow}`} client={client} copy={copy} language={language} routeVersion={routeVersion} onRouteChange={onRouteChange} onNavigate={aggregateNavigate} />}
     <nav aria-label={copy.operationsViews}>{tabs.map(value => <button key={value} type="button" aria-pressed={tab === value} onClick={() => onRouteChange({ operations_tab: value })}>{value === 'usage' ? copy.usageRequests : value === 'provisionings' ? copy.provisionings : copy.reconciliationQueue}</button>)}</nav>
     {tab === 'provisionings' ? <ProvisioningList load={provisioningLoad} copy={copy} routeVersion={routeVersion} onQueryChange={onQueryChange} histories={histories} canOpen={false} /> : tab === 'usage' ? <UsageList load={usageLoad} copy={copy} routeVersion={routeVersion} onQueryChange={onQueryChange} onOpen={open} histories={histories} canOpen />
       : <ReconciliationList load={reconciliationLoad} copy={copy} routeVersion={routeVersion} onQueryChange={onQueryChange} onOpen={open} histories={histories} canOpen />}

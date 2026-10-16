@@ -203,6 +203,40 @@ COALESCE(sum(delta_microcredits) FILTER (WHERE ledger_account_id=$2),0) FROM led
 	if err != nil || !reflect.DeepEqual(replayed, applied) {
 		t.Fatalf("idempotent replay %+v err=%v want %+v", replayed, err, applied)
 	}
+	// A result-first replay must bind the whole original command. These checks
+	// do not reread changed live balances or require a fresh activation snapshot.
+	for _, test := range []struct {
+		name   string
+		change func(*UsageSettlementRepairCommandInput)
+	}{
+		{"receipt-changed-hold", func(c *UsageSettlementRepairCommandInput) { c.HoldID = uuid.New() }},
+		{"receipt-changed-review", func(c *UsageSettlementRepairCommandInput) { c.LossReviewID = uuid.New() }},
+		{"receipt-changed-evidence", func(c *UsageSettlementRepairCommandInput) { c.EvidenceKind = "OTHER" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			before := usageRepairEffectSnapshot(t, ctx, repository)
+			changed := command
+			test.change(&changed)
+			if result, err := execute(requestID, eventID, changed, frozen); !errors.Is(err, ErrConflict) || result != (UsageSettlementRepairResult{}) {
+				t.Errorf("changed same-key command replay accepted: result=%+v err=%v", result, err)
+			}
+			if usageRepairEffectSnapshot(t, ctx, repository) != before {
+				t.Fatal("changed same-key replay mutated original financial or repair facts")
+			}
+		})
+	}
+	t.Run("receipt-canonical-evidence-whitespace", func(t *testing.T) {
+		before := usageRepairEffectSnapshot(t, ctx, repository)
+		canonical := command
+		canonical.EvidenceKind = " \t" + command.EvidenceKind + "\n"
+		result, err := execute(requestID, eventID, canonical, frozen)
+		if err != nil || !reflect.DeepEqual(result, applied) {
+			t.Fatalf("canonical same-key replay changed full result: result=%+v err=%v", result, err)
+		}
+		if usageRepairEffectSnapshot(t, ctx, repository) != before {
+			t.Fatal("canonical same-key replay changed original financial or repair facts")
+		}
+	})
 	var cases, journals int64
 	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM usage_settlement_repair_cases WHERE usage_request_id=$1),
 		(SELECT count(*) FROM journal_entries WHERE business_reference='usage-settlement-repair:'||$1)`,

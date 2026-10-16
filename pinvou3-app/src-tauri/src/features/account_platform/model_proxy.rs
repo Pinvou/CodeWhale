@@ -28,6 +28,30 @@ const LOGICAL_TURN_HEADER: &str = "X-Pinvou-Logical-Turn-ID";
 const CLIENT_CAPABILITIES_HEADER: &str = "X-Pinvou-Client-Capabilities";
 const BILLING_NOTICE_CAPABILITY: &str = "billing-notice-v1";
 const BILLING_NOTICE_EVENT: &str = "chat:billing_notice";
+const MODEL_REJECTION_HEADER: &str = "x-pinvou-model-rejection-v1";
+
+fn model_rejection_from_headers(
+    status: StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    model_id: &str,
+) -> Option<crate::features::assistant::timing::ModelRejection> {
+    use crate::features::assistant::timing::{ModelRejection, ModelRejectionCode};
+    if status != StatusCode::CONFLICT {
+        return None;
+    }
+    let values = headers.get_all(MODEL_REJECTION_HEADER);
+    let mut values = values.iter();
+    let value = values.next()?.to_str().ok()?;
+    if values.next().is_some() {
+        return None;
+    }
+    let code = match value {
+        "MODEL_UNAVAILABLE" => ModelRejectionCode::Unavailable,
+        "MODEL_DEPRECATED" => ModelRejectionCode::Deprecated,
+        _ => return None,
+    };
+    ModelRejection::new(code, model_id)
+}
 
 #[derive(Clone, Default)]
 pub(super) struct ModelGatewayProxy {
@@ -164,6 +188,33 @@ impl ModelGatewayProxy {
         }
     }
 
+    pub(super) fn capture_timing_owner(&self, session_id: &str) -> Option<(u64, String)> {
+        let authority = self.turn_authority.get()?;
+        let generation = authority.current_generation(session_id)?;
+        let mut timing_id = None;
+        authority.with_generation(session_id, generation, &mut || {
+            timing_id = crate::features::assistant::timing::current_turn_id(session_id);
+        });
+        timing_id.map(|id| (generation, id))
+    }
+
+    pub(super) fn record_prepare_rejection(
+        &self,
+        session_id: &str,
+        owner: &(u64, String),
+        rejection: crate::features::assistant::timing::ModelRejection,
+    ) {
+        if let Some(authority) = self.turn_authority.get() {
+            authority.with_generation(session_id, owner.0, &mut || {
+                crate::features::assistant::timing::record_model_rejection_for_turn(
+                    session_id,
+                    &owner.1,
+                    rejection.clone(),
+                );
+            });
+        }
+    }
+
     pub(super) async fn register_session(
         &self,
         session_id: &str,
@@ -190,7 +241,11 @@ impl ModelGatewayProxy {
             .get_or_try_init(|| start_proxy_server(self.app.clone(), authority))
             .await?;
         let route = {
-            let mut registry = server.state.registry.lock().unwrap();
+            let mut registry = server
+                .state
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let route = registry
                 .session_routes
                 .entry(session_id.to_string())
@@ -240,7 +295,11 @@ impl ModelGatewayProxy {
 
     pub(super) fn forget_session(&self, session_id: &str) {
         if let Some(server) = self.server.get() {
-            let mut registry = server.state.registry.lock().unwrap();
+            let mut registry = server
+                .state
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(route) = registry.session_routes.remove(session_id) {
                 registry.targets.remove(&route);
             }
@@ -313,7 +372,14 @@ async fn forward_chat(
         Ok(body) => body,
         Err(_) => return proxy_error(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large"),
     };
-    let Some(mut target) = state.registry.lock().unwrap().targets.get(&route).cloned() else {
+    let Some(mut target) = state
+        .registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .targets
+        .get(&route)
+        .cloned()
+    else {
         return proxy_error(StatusCode::NOT_FOUND, "unknown model proxy route");
     };
     let Some(generation) = state
@@ -360,7 +426,13 @@ async fn forward_models(
     request: Request<Body>,
 ) -> Response<Body> {
     let (parts, _) = request.into_parts();
-    let target = state.registry.lock().unwrap().targets.get(&route).cloned();
+    let target = state
+        .registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .targets
+        .get(&route)
+        .cloned();
     let Some(target) = target else {
         return proxy_error(StatusCode::NOT_FOUND, "unknown model proxy route");
     };
@@ -431,6 +503,8 @@ async fn forward(
         Ok(target) => target,
         Err(_) => return proxy_error(StatusCode::BAD_GATEWAY, "invalid upstream route"),
     };
+    // Freeze the admitted timing owner before the first network await.
+    let timing_turn_id = crate::features::assistant::timing::current_turn_id(&target.session_id);
     let mut last_error = None;
     let mut upstream_response = None;
     // A transport error can happen after the gateway accepted the request but
@@ -441,7 +515,11 @@ async fn forward(
         if delivery.as_ref().is_some_and(|delivery| delivery.stopped()) {
             return proxy_error(StatusCode::CONFLICT, "model delivery cancelled");
         }
-        let mut builder = state.client.request(method.clone(), target_url.clone());
+        let mut builder = model_request_budget(
+            state.client.request(method.clone(), target_url.clone()),
+            resource,
+            &method,
+        );
         for name in [
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
@@ -510,6 +588,31 @@ async fn forward(
         }
     }
 
+    if let (Some(turn_id), Some(rejection)) = (
+        timing_turn_id,
+        model_rejection_from_headers(status, &upstream_headers, &target.gateway_model_id),
+    ) {
+        let stopped = || {
+            target.incarnation.is_retired()
+                || delivery.as_ref().is_some_and(|delivery| delivery.stopped())
+        };
+        if !stopped() {
+            state.turn_authority.with_generation(
+                &target.session_id,
+                target.turn_generation,
+                &mut || {
+                    if !stopped() {
+                        crate::features::assistant::timing::record_model_rejection_for_turn(
+                            &target.session_id,
+                            &turn_id,
+                            rejection.clone(),
+                        );
+                    }
+                },
+            );
+        }
+    }
+
     let notice_emitter = state.app.clone().map(|app| BillingNoticeEmitter {
         app,
         session_id: target.session_id.clone(),
@@ -568,10 +671,10 @@ async fn forward(
                 _ = delivery.cancelled() => {
                     return proxy_error(StatusCode::CONFLICT, "model delivery cancelled");
                 }
-                result = upstream_response.bytes() => result,
+                result = super::bounded_response_bytes(upstream_response) => result,
             }
         } else {
-            upstream_response.bytes().await
+            super::bounded_response_bytes(upstream_response).await
         };
         let payload = match payload {
             Ok(payload) => payload,
@@ -608,6 +711,21 @@ async fn forward(
     response
         .body(body)
         .unwrap_or_else(|_| proxy_error(StatusCode::BAD_GATEWAY, "invalid gateway response"))
+}
+
+// AccountPlatformState already applies this read budget to token GET /v1/models.
+// The same catalog through the engine proxy must not wait without a budget.
+// Chat has its existing cancellation/operation contract; no new total deadline.
+fn model_request_budget(
+    builder: reqwest::RequestBuilder,
+    resource: &str,
+    method: &reqwest::Method,
+) -> reqwest::RequestBuilder {
+    if resource == "models" && *method == reqwest::Method::GET {
+        builder.timeout(super::ACCOUNT_API_REQUEST_TIMEOUT)
+    } else {
+        builder
+    }
 }
 
 fn chat_request_expects_sse(body: &[u8]) -> bool {
@@ -876,9 +994,9 @@ mod tests {
     use std::sync::Arc;
 
     use axum::Router;
-    use axum::body::Bytes;
+    use axum::body::{Body, Bytes};
     use axum::extract::State;
-    use axum::http::{HeaderMap, StatusCode, header};
+    use axum::http::{HeaderMap, Response, StatusCode, header};
     use axum::routing::post;
     use futures_util::{StreamExt, stream};
     use tokio::sync::Mutex;
@@ -907,6 +1025,242 @@ mod tests {
         assert!(super::upstream_is_allowed(
             &reqwest::Url::parse("http://127.0.0.1:3000/").unwrap()
         ));
+    }
+
+    #[tokio::test]
+    async fn gateway_lifecycle_response_is_durable_for_its_current_owner_only() {
+        use crate::features::assistant::timing;
+        let _guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou-model-proxy-evidence-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let previous_home = std::env::var_os("PINVOU3_HOME");
+        // SAFETY: ENV_LOCK serializes process environment writes in tests.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+        let id = "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c";
+        for (index, (status, marker, expected, boundary)) in [
+            (
+                StatusCode::CONFLICT,
+                Some("MODEL_UNAVAILABLE"),
+                true,
+                "current",
+            ),
+            (
+                StatusCode::CONFLICT,
+                Some("MODEL_DEPRECATED"),
+                true,
+                "current",
+            ),
+            (
+                StatusCode::FORBIDDEN,
+                Some("MODEL_UNAVAILABLE"),
+                false,
+                "current",
+            ),
+            (StatusCode::CONFLICT, None, false, "current"),
+            (
+                StatusCode::CONFLICT,
+                Some("MODEL_REMOVED"),
+                false,
+                "current",
+            ),
+            (
+                StatusCode::CONFLICT,
+                Some("MODEL_UNAVAILABLE"),
+                false,
+                "retired",
+            ),
+            (
+                StatusCode::CONFLICT,
+                Some("MODEL_UNAVAILABLE"),
+                false,
+                "cancelled",
+            ),
+            (
+                StatusCode::CONFLICT,
+                Some("MODEL_UNAVAILABLE"),
+                false,
+                "generation",
+            ),
+            (
+                StatusCode::CONFLICT,
+                Some("MODEL_UNAVAILABLE"),
+                false,
+                "timing-owner",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let server_entered = entered.clone();
+            let server_release = release.clone();
+            let upstream = Router::new().route("/v1/chat/completions", post(move || {
+                let entered = server_entered.clone();
+                let release = server_release.clone();
+                async move {
+                entered.notify_one();
+                release.notified().await;
+                let mut response = Response::builder().status(status).header(header::CONTENT_TYPE, "application/json");
+                if let Some(value) = marker { response = response.header(super::MODEL_REJECTION_HEADER, value); }
+                response.body(Body::from(r#"{"error":{"code":"MODEL_UNAVAILABLE","model_id":"body-imposter"}}"#)).unwrap()
+            }}));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, upstream).await.unwrap();
+            });
+            let sid = format!("model-proxy-evidence-{index}");
+            let proxy = ModelGatewayProxy::default();
+            let authority = Arc::new(TestTurnAuthority::default());
+            authority.set(Some(1));
+            proxy.bind_turn_authority(authority.clone()).unwrap();
+            let base = proxy
+                .register_session(&sid, &format!("http://{address}/v1"), id, 4096)
+                .await
+                .unwrap();
+            let mut owner = timing::start_turn(&sid);
+            let request = reqwest::Client::new()
+                .post(format!("{base}/chat/completions"))
+                .bearer_auth("test-only-opaque-authorization")
+                .header(
+                    "Idempotency-Key",
+                    format!("model-evidence-operation-{index}"),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(
+                    r#"{"model":"m","stream":false,"messages":[{"role":"user","content":"test"}]}"#,
+                );
+            let pending = tokio::spawn(async move { request.send().await.unwrap() });
+            entered.notified().await;
+            match boundary {
+                "retired" => proxy.forget_session(&sid),
+                "cancelled" => {
+                    let scope = proxy.cancellation_scope(&sid);
+                    proxy.cancel_turn_bound(&sid, 1, scope.as_deref());
+                }
+                "generation" => authority.set(Some(2)),
+                "timing-owner" => {
+                    timing::clear_session(&sid);
+                    owner = timing::start_turn(&sid);
+                }
+                _ => {}
+            }
+            release.notify_one();
+            let response = pending.await.unwrap();
+            assert_eq!(
+                response.status(),
+                if matches!(boundary, "retired" | "cancelled") {
+                    StatusCode::CONFLICT
+                } else {
+                    status
+                }
+            );
+            timing::finish_turn(&sid, "Failed", Some("generic model request rejected"));
+            let terminal = timing::read_timeline(&sid)
+                .unwrap()
+                .into_iter()
+                .find(|event| event.event == "assistant_done")
+                .unwrap();
+            assert_eq!(terminal.turn_id, owner);
+            assert_eq!(terminal.model_rejection.is_some(), expected);
+            if let Some(value) = terminal.model_rejection {
+                assert_eq!(value.model_id, id);
+            }
+
+            // Prepared-model observation shares the production lifecycle authority.
+            authority.set(Some(1));
+            let first = timing::start_turn(&sid);
+            let captured = proxy.capture_timing_owner(&sid).unwrap();
+            assert_eq!(captured.1, first);
+            timing::clear_session(&sid);
+            let next = timing::start_turn(&sid);
+            let rejection =
+                timing::ModelRejection::new(timing::ModelRejectionCode::Unavailable, id).unwrap();
+            proxy.record_prepare_rejection(&sid, &captured, rejection.clone());
+            timing::finish_turn(&sid, "send_error", None);
+            let terminal = timing::read_timeline(&sid)
+                .unwrap()
+                .into_iter()
+                .find(|event| event.turn_id == next && event.event == "assistant_done")
+                .unwrap();
+            assert!(
+                terminal.model_rejection.is_none(),
+                "same SID and generation cannot reuse an old timing owner"
+            );
+            let next = timing::start_turn(&sid);
+            let captured = proxy.capture_timing_owner(&sid).unwrap();
+            authority.set(None);
+            proxy.record_prepare_rejection(&sid, &captured, rejection);
+            timing::finish_turn(&sid, "send_error", None);
+            let terminal = timing::read_timeline(&sid)
+                .unwrap()
+                .into_iter()
+                .find(|event| event.turn_id == next && event.event == "assistant_done")
+                .unwrap();
+            assert!(
+                terminal.model_rejection.is_none(),
+                "cancelled generation cannot record prepare rejection"
+            );
+            timing::clear_session(&sid);
+            proxy.forget_session(&sid);
+            server.abort();
+        }
+        unsafe {
+            match previous_home {
+                Some(value) => std::env::set_var("PINVOU3_HOME", value),
+                None => std::env::remove_var("PINVOU3_HOME"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[test]
+    fn lifecycle_marker_requires_exact_status_header_and_frozen_route_identity() {
+        let id = "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c";
+        let mut headers = reqwest::header::HeaderMap::new();
+        for code in ["MODEL_UNAVAILABLE", "MODEL_DEPRECATED"] {
+            headers.insert(super::MODEL_REJECTION_HEADER, code.parse().unwrap());
+            let marker =
+                super::model_rejection_from_headers(StatusCode::CONFLICT, &headers, id).unwrap();
+            assert_eq!(marker.model_id, id);
+            for status in [
+                StatusCode::OK,
+                StatusCode::UNAUTHORIZED,
+                StatusCode::FORBIDDEN,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ] {
+                assert!(super::model_rejection_from_headers(status, &headers, id).is_none());
+            }
+        }
+        for code in [
+            "MODEL_REMOVED",
+            " MODEL_UNAVAILABLE",
+            "MODEL_UNAVAILABLE bogus",
+            "model_unavailable",
+        ] {
+            headers.insert(super::MODEL_REJECTION_HEADER, code.parse().unwrap());
+            assert!(
+                super::model_rejection_from_headers(StatusCode::CONFLICT, &headers, id).is_none()
+            );
+        }
+        headers.insert(
+            super::MODEL_REJECTION_HEADER,
+            "MODEL_UNAVAILABLE".parse().unwrap(),
+        );
+        assert!(
+            super::model_rejection_from_headers(StatusCode::CONFLICT, &headers, "invalid")
+                .is_none()
+        );
+        headers.remove(super::MODEL_REJECTION_HEADER);
+        assert!(
+            super::model_rejection_from_headers(StatusCode::CONFLICT, &headers, id).is_none(),
+            "body error text cannot produce evidence"
+        );
     }
 
     #[derive(Default)]
@@ -957,6 +1311,130 @@ mod tests {
         let explicit_error = require_sse_done(explicit_error).collect::<Vec<_>>().await;
         assert_eq!(explicit_error.len(), 1);
         assert!(explicit_error[0].is_ok());
+    }
+
+    #[test]
+    fn catalog_proxy_uses_existing_account_read_budget_without_shortening_chat() {
+        let client = reqwest::Client::new();
+        for (resource, method, expected) in [
+            (
+                "models",
+                reqwest::Method::GET,
+                Some(super::super::ACCOUNT_API_REQUEST_TIMEOUT),
+            ),
+            ("chat/completions", reqwest::Method::POST, None),
+        ] {
+            let request = super::model_request_budget(
+                client.request(method.clone(), "http://127.0.0.1/v1/models"),
+                resource,
+                &method,
+            )
+            .build()
+            .unwrap();
+            assert_eq!(request.timeout().copied(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn real_proxy_payment_body_enforces_existing_bound_and_completeness() {
+        let notice = br#"{"code":"WALLET_INSUFFICIENT","billing_notice":{"schema_version":1,"code":"WALLET_INSUFFICIENT","stage":"INITIAL_RESERVATION","turn_outcome":"REJECTED","settlement_status":"NOT_STARTED","action":"OPEN_RECHARGE","context_type":"PERSONAL","usage_request_id":"0199a100-0001-7000-8000-000000000106"}}"#;
+        let bound = super::super::MAX_RESPONSE_BYTES;
+        for (size, chunked, broken, expected) in [
+            (notice.len(), false, false, StatusCode::PAYMENT_REQUIRED),
+            (bound, false, false, StatusCode::PAYMENT_REQUIRED),
+            (bound + 1, false, false, StatusCode::BAD_GATEWAY),
+            (bound + 1, true, false, StatusCode::BAD_GATEWAY),
+            (notice.len(), true, true, StatusCode::BAD_GATEWAY),
+        ] {
+            let mut payload = notice.to_vec();
+            payload.resize(size, b' ');
+            let expected_payload = payload.clone();
+            let upstream = Router::new().route(
+                "/v1/chat/completions",
+                post(move || {
+                    let payload = payload.clone();
+                    async move {
+                        let body = if broken {
+                            Body::from_stream(stream::unfold(0, move |phase| {
+                                let payload = payload.clone();
+                                async move {
+                                    match phase {
+                                        0 => Some((Ok::<_, io::Error>(Bytes::from(payload)), 1)),
+                                        1 => {
+                                            tokio::time::sleep(std::time::Duration::from_millis(
+                                                20,
+                                            ))
+                                            .await;
+                                            Some((
+                                                Err(io::Error::new(
+                                                    io::ErrorKind::UnexpectedEof,
+                                                    "controlled incomplete body",
+                                                )),
+                                                2,
+                                            ))
+                                        }
+                                        _ => None,
+                                    }
+                                }
+                            }))
+                        } else if chunked {
+                            let chunks = payload
+                                .chunks(8192)
+                                .map(Bytes::copy_from_slice)
+                                .collect::<Vec<_>>();
+                            Body::from_stream(stream::iter(
+                                chunks.into_iter().map(Ok::<_, io::Error>),
+                            ))
+                        } else {
+                            Body::from(payload)
+                        };
+                        Response::builder()
+                            .status(StatusCode::PAYMENT_REQUIRED)
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .body(body)
+                            .unwrap()
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let task = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+            let proxy = ModelGatewayProxy::default();
+            let authority = Arc::new(TestTurnAuthority::default());
+            authority.set(Some(1));
+            proxy.bind_turn_authority(authority).unwrap();
+            let base = proxy
+                .register_session(
+                    "bounded-payment-session",
+                    &format!("http://{address}/v1"),
+                    "11111111-1111-4111-8111-111111111111",
+                    128,
+                )
+                .await
+                .unwrap();
+            let response = reqwest::Client::new()
+                .post(format!("{base}/chat/completions"))
+                .bearer_auth("controlled-user")
+                .header("Idempotency-Key", "bounded-payment-invocation-key")
+                .json(&serde_json::json!({"model":"model","messages":[],"stream":false}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                expected,
+                "size={size} chunked={chunked} broken={broken}"
+            );
+            let delivered = response.bytes().await.unwrap();
+            if expected == StatusCode::PAYMENT_REQUIRED {
+                assert_eq!(delivered.as_ref(), expected_payload.as_slice());
+                assert!(billing_notice_from_body(&delivered).is_some());
+            } else {
+                assert_ne!(delivered.as_ref(), expected_payload.as_slice());
+                assert!(billing_notice_from_body(&delivered).is_none());
+            }
+            task.abort();
+        }
     }
 
     #[test]
@@ -1502,7 +1980,10 @@ mod cancellation_integration_tests {
                 .route("/v1/usage-requests/{id}/cancel", post(cancel))
                 // Active organization / cancel-only identities cannot use the
                 // personal detail endpoint, but can confirm their own key.
-                .route("/v1/usage-requests/{id}", get(|| async { StatusCode::FORBIDDEN }))
+                .route(
+                    "/v1/usage-requests/{id}",
+                    get(|| async { StatusCode::FORBIDDEN }),
+                )
                 .route("/v1/usage-requests/by-idempotency-key", get(read))
                 .with_state(f.clone());
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

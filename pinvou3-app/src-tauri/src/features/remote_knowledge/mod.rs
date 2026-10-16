@@ -733,7 +733,7 @@ impl RemoteKnowledgeService {
                 device_id: None,
                 created_at: pending.created_at,
                 expires_at: pending.expires_at,
-                resolved_at: Some(chrono::Utc::now().timestamp()),
+                resolved_at: None,
             }),
         }
     }
@@ -817,7 +817,7 @@ impl RemoteKnowledgeService {
                     version: String::new(),
                     protocol_version: 2,
                     tls_ca: pending.tls_ca.clone(),
-                    initialized: true,
+                    initialized: false,
                     ready: false,
                     model_present: false,
                     model: String::new(),

@@ -13,7 +13,7 @@ export function requireOrganization(value, expected = '') {
 }
 export function requireMembership(value, user = '') {
  organizationID(value?.user_id); organizationID(value.membership_id); organizationVersion(value.version);
- if (user && value.user_id !== user || !['ACTIVE', 'DISABLED', 'REVOKED'].includes(value.status) || !Array.isArray(value.roles) || !value.roles.every(role => typeof role === 'string') || !Array.isArray(value.unit_ids)) invalid();
+ if (user && value.user_id !== user || !['ACTIVE', 'SUSPENDED', 'REVOKED'].includes(value.status) || !Array.isArray(value.roles) || !value.roles.every(role => typeof role === 'string') || !Array.isArray(value.unit_ids)) invalid();
  return value;
 }
 function membershipAck(value, org, user) { owned(value, org); requireMembership(value.member, user); return value; }
@@ -25,7 +25,7 @@ function memberUnitsAck(value, org, user, body) {
  return value;
 }
 function unitAck(value, org, unit = '') { owned(value?.unit, org, 'unit_id'); organizationVersion(value.structure_version); if (unit && value.unit.unit_id !== unit) invalid(); return value; }
-function bindingAck(value, org, binding = '') { owned(value, org, 'binding_id'); organizationID(value.user_id); if (binding && value.binding_id !== binding || !['ACTIVE', 'REVOKED', 'EXPIRED'].includes(value.status)) invalid(); return value; }
+function bindingAck(value, org, binding = '') { owned(value, org, 'binding_id'); organizationID(value.user_id); if (binding && value.binding_id !== binding || !['ACTIVE', 'SCHEDULED', 'REVOKED', 'EXPIRED'].includes(value.status)) invalid(); return value; }
 function invitationAck(value, org = '', invitation = '') { organizationID(value?.invitation_id); organizationID(value.organization_id); if (org && value.organization_id !== org || invitation && value.invitation_id !== invitation || !['PENDING', 'ACCEPTED', 'REVOKED', 'EXPIRED'].includes(value.status)) invalid(); return value; }
 function adminOrganization(value) { organizationID(value?.organization_id); if (typeof value.name !== 'string' || !['ACTIVE', 'DISABLED', 'DELETED'].includes(value.status)) invalid(); return value; }
 export function requireOrganizationModelPolicy(value, org) {

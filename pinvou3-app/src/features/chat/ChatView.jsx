@@ -1,3 +1,4 @@
+import { latestModelLifecycleRejection } from '../account-platform/model-lifecycle.js';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -18,18 +19,26 @@ import { ComposerModelSelector, ComposerToolMenu } from '../settings/composer-sh
 import { ComposerPopover, POPOVER_SURFACE, useOutsidePointerClose } from '../../components/ComposerPopover.jsx';
 import { PinvouLogo } from '../../components/PinvouLogo.jsx';
 import { ViewErrorBoundary } from '../../shared/ViewErrorBoundary.jsx';
-import { ArtifactCard, localizeTool, tsToolsData, tsToolWelcomeData } from '../tools/tool-common.jsx';
+import { ArtifactCard } from '../tools/tool-common.jsx';
 import { RightDockPanel, useRightDockOcclusion } from '../../components/layout/RightDock.jsx';
-import { CarefulBlockedCard, PlanCard, PlanStuckCard, ToolCard, UserInputCard, cardBtnCls } from '../tools/tool-renderers.jsx';
+import { CarefulBlockedCard, PlanCard, PlanStuckCard, ToolCard, UserInputCard } from '../tools/tool-renderers.jsx';
+import { cardBtnCls } from '../../shared/card-buttons.mjs';
 import { annotateAgentSpawnGroups } from '../multiagent/spawn-aggregation.mjs';
 import { RunningAgentsOverlay } from '../multiagent/RunningAgentsOverlay.jsx';
 import { ComputerUseBanner, ComputerUseDialogs } from '../computer-use/ComputerUseConsent.jsx';
 import {
   ConversationActivityIndicator,
   ConversationTimeline,
-  useConversationSecondClock,
 } from '../conversation/ConversationTimeline.jsx';
+import { useConversationSecondClock } from '../../hooks/useConversationSecondClock.js';
 import { AuxQuoteSelection } from '../aux-chat/AuxQuoteSelection.jsx';
+import {
+  codeBlockCopyLabels,
+  copyCodeBlockFromButton,
+  ensureCodeCopyButtons,
+  findCodeCopyButton,
+  observeCodeCopyButtons,
+} from '../conversation/code-block-copy.js';
 import { HomeModeSwitcher } from '../conversation/HomeModeSwitcher.jsx';
 import {
   conversationItemsForMode,
@@ -58,7 +67,7 @@ import { formatAttachmentLimitError } from '../attachments/attachment-limit-erro
 import { ComposerAttachmentDropOverlay } from '../attachments/ComposerAttachmentDropOverlay.jsx';
 import { ConversationAttachmentBubble } from '../attachments/ConversationAttachmentBubble.jsx';
 import { splitAttachmentLine } from '../attachments/attachment-message.js';
-import { CHAT_INPUT_MAX_LENGTH, constrainChatInput } from './chat-input-limit.js';
+import { CHAT_INPUT_MAX_LENGTH, constrainChatInput } from '../../shared/chat-input-limit.js';
 import { deriveRunningShellTasks, formatElapsedMs, tailOutputLines } from './background-tasks.js';
 import { useShellTaskCancel } from './shell-task-cancel.js';
 import {
@@ -77,6 +86,8 @@ import { AssistantMessageActions, AssistantMessageFooter } from '../conversation
 // Suspense(面板形状 fallback)与局部 ErrorBoundary,把挂起/失败限制在面板槽位,
 // 不冒泡到应用级边界闪断整视图(口径同 LazyCodexAcpView/WebAccessModal)。
 // 动态 import 收口在本表(口径同 app/view-loaders.js 的 VIEW_LOADERS)。
+const LazyToolWelcomeCard = React.lazy(() => import('../tools/ToolWelcomeCard.jsx'));
+
 const CHAT_PANEL_LOADERS = Object.freeze({
   artifacts: () => import('../artifacts/ArtifactsPanel.jsx'),
   subagent: () => import('../multiagent/SubagentTranscriptPanel.jsx'),
@@ -125,20 +136,20 @@ import { createVisualPosterMessageMeta, shouldUseVisualPosterScene } from './vis
 import {
   createDataVisualizationMessageMeta,
   createDocumentWritingMessageMeta,
-  createPersonalWorkbenchMessageMeta,
   createPptDesignMessageMeta,
-  PERSONAL_WORKBENCH_SCENE_KEY,
   shouldUseDataVisualizationScene,
   shouldUseDocumentWritingScene,
-  shouldUsePersonalWorkbenchScene,
   shouldUsePptDesignScene,
 } from './work-scene-routes.js';
 import {
+  createPersonalWorkbenchMessageMeta,
+  PERSONAL_WORKBENCH_SCENE_KEY,
   PERSONAL_WORKBENCH_TEMPLATES,
   findPersonalWorkbenchTemplateDraft,
   getPersonalWorkbenchTemplate,
   getPersonalWorkbenchTemplateById,
   isPersonalWorkbenchTemplateDraftForTemplate,
+  shouldUsePersonalWorkbenchScene,
 } from './personal-workbench-scene.js';
 import { canPrepareSceneCapabilities, prepareSceneCapabilities, requiredCapabilitiesForMeta } from './scene-capabilities.js';
 import { consumeWelcomeOptIn, resolveSendCapabilityStatus, runSharedWelcomeOptIn } from './welcome-optin.js';
@@ -333,77 +344,6 @@ const openChatExternalUrl = (url) => {
   }
   invokeTauri('open_user_external_url', { url }).catch(() => {});
 };
-
-const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
-      const [hovered, setHovered] = useState(null);
-      // 组合包化的本地能力(pptx)已无商店连接器卡,欢迎卡数据回退 tsToolWelcomeData
-      const tool = localizeTool(tsToolsData.find(item => item.backendId === toolId) || tsToolWelcomeData.find(item => item.backendId === toolId), t);
-      if (!tool || !tool.welcomeQueries) return null;
-      const ToolIcon = tool.icon || Sparkles;
-      return (
-        <div className="flex justify-start">
-          <div className={`max-w-[800px] w-full rounded-[2rem] overflow-hidden border transition-all ${
-            'bg-white border-slate-100 shadow-lg shadow-slate-200/30 dark:bg-[#1E1F20] dark:border-[#3A3A3C]/60'
-          }`}>
-            <div className={`relative p-5 border-b flex items-center gap-3.5 ${
-              'bg-gradient-to-b from-blue-50/80 to-white border-slate-100 dark:bg-[#1E1F20] dark:border-[#3A3A3C]/60'
-            }`}>
-              <div className="bg-gradient-to-tr from-blue-600 to-indigo-500 p-2.5 rounded-xl shadow-lg shadow-blue-500/30">
-                <ToolIcon size={22} className="text-white" />
-              </div>
-              <div>
-                <div className={`text-[1.05rem] font-bold tracking-tight ${'text-slate-800 dark:text-slate-100'}`}>{tool.title}</div>
-                <div className={`flex items-center text-xs mt-0.5 ${'text-slate-500 dark:text-slate-400'}`}>
-                  <span className="relative flex h-2 w-2 mr-2">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                  </span>
-                  {/* The install path deliberately keeps the switch off (DenyAll
-                      convergence), so "Ready" would be a lie; describe it truthfully
-                      and complete the opt-in on the first question (review #455 R7-M4). */}
-                  {t.uiChat.installedReady}
-                </div>
-              </div>
-            </div>
-            <div className="p-5">
-              <p className={`leading-relaxed text-[15px] ${'text-slate-600 dark:text-slate-300'}`}>
-                {tool.desc.split('。')[0]}。{t.uiChat.naturalQuestion}
-              </p>
-              <div className="flex items-center my-5">
-                <div className={`flex-grow h-px ${'bg-gradient-to-r from-transparent via-slate-200 to-transparent dark:bg-gradient-to-r dark:from-transparent dark:via-[#3A3A3C] dark:to-transparent'}`}></div>
-                <span className={`px-4 text-[11px] uppercase tracking-wider font-semibold flex items-center gap-1.5 ${'text-slate-400 dark:text-slate-500'}`}>
-                  <Sparkles size={13} />
-                  <span>{t.uiChat.askMe}</span>
-                </span>
-                <div className={`flex-grow h-px ${'bg-gradient-to-r from-transparent via-slate-200 to-transparent dark:bg-gradient-to-r dark:from-transparent dark:via-[#3A3A3C] dark:to-transparent'}`}></div>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                {tool.welcomeQueries.map((q, i) => (
-                  <button
-                    key={i}
-                    onMouseEnter={() => setHovered(i)}
-                    onMouseLeave={() => setHovered(null)}
-                    onClick={() => onSend && onSend(q)}
-                    className={`group relative flex items-center justify-between p-3 rounded-2xl border text-left transition-all duration-200 ${
-                      hovered === i
-                        ? 'border-blue-200/80 bg-blue-50/50 shadow-sm dark:border-blue-500/30 dark:bg-blue-500/10'
-                        : 'border-slate-200/60 bg-slate-50/30 hover:border-blue-200 dark:border-[#3A3A3C]/50 dark:bg-[#2A2B2D]/30 dark:hover:border-[#555]'
-                    }`}
-                  >
-                    <span className={`text-sm font-medium transition-colors ${
-                      hovered === i ? 'text-blue-700 dark:text-blue-300' : 'text-slate-700 dark:text-slate-300'
-                    }`}>{q}</span>
-                    <ChevronRight size={15} className={`transition-all duration-200 ${
-                      hovered === i ? 'text-blue-500 opacity-100 dark:text-blue-400' : 'opacity-0 -translate-x-2'
-                    }`} />
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
-      );
-    };
 
     // 输入框底栏:知识库挂载选择器(与 ComposerModelSelector/ComposerToolMenu 同款 pill,
     // class 暗色策略)。给当前对话挂一个知识集(会话级粘连),挂上后每条消息发送前后端自动
@@ -848,7 +788,19 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       // state operation), so during the async refresh window the old session's consent
       // dialogs are no longer clickable.
       useEffect(() => {
-        if (!COMPUTER_USE_ENABLED || !bridge.available || !bridge.computerUse || !activeSessionId) return;
+        if (!COMPUTER_USE_ENABLED || !bridge.available || !bridge.computerUse) return;
+        // Leaving to the draft screen must run the session-less refresh:
+        // createNewSession/leaveSessionView/applyDeletedSession all null
+        // activeSessionId without touching the computer-use slice, so a
+        // granted session's control banner (and any unanswered consent
+        // dialog) used to stay rendered on the welcome composer — the
+        // r2/r3 session-less branch fixed the state but had no production
+        // caller on this transition. Switching back re-serves the real
+        // state from the server truth via the mount refresh below.
+        if (!activeSessionId) {
+          bridge.computerUse.refreshStatus(null).catch(() => {});
+          return;
+        }
         bridge.computerUse.refreshStatus(activeSessionId).catch(() => {});
         // Missed-event fallback: if grant/stop events were missed by the frontend (e.g. a
         // refresh or a backgrounded window), the banner would drift from the real
@@ -1778,10 +1730,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const canSend = !isMultiAgentReadOnly
         && !firstTurnPending
         && (hasDraftText || hasReadyAttachment);
-      const modelContinuationBlocked = Boolean(activeSessionId && chatItems.slice(-6).some(item => (
-        item?.type === 'system'
-        && /MODEL_(?:DEPRECATED|UNAVAILABLE|REMOVED)|CONTINUATION_CUTOFF|model_catalog_selection_unavailable/i.test(String(item.text || ''))
-      )));
+      const modelContinuationBlocked = Boolean(activeSessionId && latestModelLifecycleRejection(turnTimeline));
       const [replacementModels, setReplacementModels] = useState([]);
       const [replacementModelId, setReplacementModelId] = useState('');
       const [replacementBusy, setReplacementBusy] = useState(false);
@@ -3009,21 +2958,25 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
 
             {!hasMessages && welcomeToolId && (
               <div className="max-w-[800px] w-full mx-auto mt-8">
-                <ToolWelcomeCard
-                  toolId={welcomeToolId}
-                  theme={theme}
-                  t={t}
-                  onSend={(q) => {
-                    // opt-in is unified inside sendChatMessage (R8-2: chip and
-                    // free input share one path); this handler only sends. Note
-                    // (round-25 minor 7): unlike handleSend, the chip path does
-                    // NOT restore the blocked-abort draft — that gap is the
-                    // registered chip-prefill item, not an intended match.
-                    Promise.resolve(sendChatMessage(q)).catch((err) => {
-                      console.warn("[pinvou3][chat-ui] welcome-card send failed", err);
-                    });
-                  }}
-                />
+                <ViewErrorBoundary t={t}>
+                  <React.Suspense fallback={null}>
+                    <LazyToolWelcomeCard
+                      toolId={welcomeToolId}
+                      theme={theme}
+                      t={t}
+                      onSend={(q) => {
+                        // opt-in is unified inside sendChatMessage (R8-2: chip and
+                        // free input share one path); this handler only sends. Note
+                        // (round-25 minor 7): unlike handleSend, the chip path does
+                        // NOT restore the blocked-abort draft — that gap is the
+                        // registered chip-prefill item, not an intended match.
+                        Promise.resolve(sendChatMessage(q)).catch((err) => {
+                          console.warn("[pinvou3][chat-ui] welcome-card send failed", err);
+                        });
+                      }}
+                    />
+                  </React.Suspense>
+                </ViewErrorBoundary>
               </div>
             )}
 
@@ -4151,6 +4104,21 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       // markdown(见下),订阅版本号让注册后本组件重渲染,历史消息恢复高亮。
       const syntaxVersion = useSyncExternalStore(subscribeSyntaxHighlight, getSyntaxHighlightVersion);
       void syntaxVersion;
+      // 代码块一键复制:assistant 气泡经 dangerouslySetInnerHTML 注入,按钮只能在
+      // 提交后补挂。目标 div 在流式首帧(item.streaming && !item.html)时不渲染,
+      // ref 可能为 null,因此不设 deps:每次渲染后重跑,目标挂载后的下一次渲染即
+      // 接上;ensureCodeCopyButtons 幂等(流式/重渲染会整体替换内部 DOM,新块自动
+      // 补装)。观察器与 ensure 同 effect:innerHTML 可能在 effect 不再触发时被整体
+      // 替换(冷启动懒注册重提交等),MutationObserver 自愈补装;重渲染时清理函数先
+      // 断开旧观察器再重挂,卸载时断开。
+      useEffect(() => {
+        if (item.type !== 'assistant') return;
+        const target = assistantSelectionTargetRef.current;
+        if (!target) return;
+        const labels = codeBlockCopyLabels(t.uiConversation);
+        ensureCodeCopyButtons(target, labels);
+        return observeCodeCopyButtons(target, labels);
+      });
 
       if (item.type === 'artifact_card') return <ArtifactCard item={item} theme={theme} t={t} isLatest={isLatestArtifact} />;
       if (item.type === 'plan_card') return <PlanCard item={item} t={t} onPrefill={onPrefill} />;
@@ -4198,6 +4166,12 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                 ref={assistantSelectionTargetRef}
                 className={`msg-md text-[15px] leading-relaxed ${item.streaming ? 'streaming-cursor' : ''} ${'text-[#1F1F1F] dark:text-[#E3E3E3]'}`}
                 onClick={(e) => {
+                  const copyButton = findCodeCopyButton(e.target);
+                  if (copyButton) {
+                    e.preventDefault();
+                    copyCodeBlockFromButton(copyButton, { labels: codeBlockCopyLabels(t.uiConversation) });
+                    return;
+                  }
                   // 聊天里的链接(如飞书授权 URL)点击 → 走系统浏览器,别导航主窗口/不可点。
                   const a = e.target && e.target.closest && e.target.closest('a[href]');
                   if (!a) return;

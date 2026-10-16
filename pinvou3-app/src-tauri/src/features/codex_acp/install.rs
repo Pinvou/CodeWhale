@@ -293,6 +293,31 @@ pub(super) fn probe_cli(backend: AgentBackend, path: Option<PathBuf>) -> Option<
         install_source,
     })
 }
+/// 统一的「探测命令退出码」语义：spawn 失败、超时或非零退出都视为 false，
+/// 超时进程 kill 后回收。命令由调用方构造（brew 用裸 `std::process::Command`、
+/// npm/CLI 用 `external_command` 的差异保留在入参层），stdio 一律接 null。
+pub(super) fn probe_exit_status(
+    mut command: std::process::Command,
+    args: &[&str],
+    timeout: Duration,
+) -> bool {
+    command.args(args);
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let Ok(mut child) = command.spawn() else {
+        return false;
+    };
+    match child.wait_timeout(timeout) {
+        Ok(Some(status)) => status.success(),
+        Ok(None) | Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            false
+        }
+    }
+}
 /// 探测 brew 是否已安装该 Agent 的 CLI（macOS 版本过旧时走 brew upgrade）。
 /// codex/claude-code 是 cask，kimi-code 是 formula（无 --cask）；
 /// 非 macOS 平台 brew_available 恒 false。
@@ -306,23 +331,11 @@ pub(super) fn brew_package_installed(backend: AgentBackend) -> bool {
         AgentBackend::KimiAcp => &["list", "kimi-code"],
         AgentBackend::Deepseek => return false,
     };
-    let mut command = std::process::Command::new(platform::brew_bin());
-    command
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    let Ok(mut child) = command.spawn() else {
-        return false;
-    };
-    match child.wait_timeout(Duration::from_secs(10)) {
-        Ok(Some(status)) => status.success(),
-        Ok(None) | Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            false
-        }
-    }
+    probe_exit_status(
+        std::process::Command::new(platform::brew_bin()),
+        args,
+        Duration::from_secs(10),
+    )
 }
 /// 各 Agent CLI 对应的 npm 全局包名。
 pub(super) fn npm_package(backend: AgentBackend) -> Option<&'static str> {
@@ -346,23 +359,11 @@ pub(super) fn npm_global_installed(package: &str) -> bool {
     let Some(npm) = npm_executable() else {
         return false;
     };
-    let mut command = crate::platform::process::external_command(&npm);
-    command
-        .args(["ls", "-g", package, "--depth=0"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    let Ok(mut child) = command.spawn() else {
-        return false;
-    };
-    match child.wait_timeout(Duration::from_secs(10)) {
-        Ok(Some(status)) => status.success(),
-        Ok(None) | Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            false
-        }
-    }
+    probe_exit_status(
+        crate::platform::process::external_command(&npm),
+        &["ls", "-g", package, "--depth=0"],
+        Duration::from_secs(10),
+    )
 }
 /// 判定已解析 CLI 的安装来源。多份并存（如同机同时有 brew cask 与官方脚本版）
 /// 时必须按「实际被解析使用的那一份」判定，否则升级会打到包管理器管理的另一份，
@@ -411,25 +412,15 @@ pub(super) fn finalize_install_source(
 pub(super) fn npm_global_root() -> Option<PathBuf> {
     let npm = npm_executable()?;
     let mut command = crate::platform::process::external_command(&npm);
-    command
-        .args(["prefix", "-g"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
-    let mut child = command.spawn().ok()?;
-    match child.wait_timeout(Duration::from_secs(10)) {
-        Ok(Some(status)) if status.success() => {
-            let mut stdout = String::new();
-            child.stdout.take()?.read_to_string(&mut stdout).ok()?;
-            let root = stdout.trim();
-            (!root.is_empty()).then_some(PathBuf::from(root))
-        }
-        _ => {
-            let _ = child.kill();
-            let _ = child.wait();
-            None
-        }
+    command.args(["prefix", "-g"]);
+    let output =
+        crate::platform::process::output_with_timeout(command, Duration::from_secs(10)).ok()?;
+    if !output.status.success() {
+        return None;
     }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let root = stdout.trim();
+    (!root.is_empty()).then_some(PathBuf::from(root))
 }
 /// 路径是否位于 npm 全局根下：unix 可执行文件链接在 <root>/bin，Windows 直接在根目录。
 pub(super) fn path_in_npm_global(path: &Path, root: &Path, windows: bool) -> bool {
@@ -629,7 +620,7 @@ impl Drop for InstallOutputReaders {
 }
 
 /// Differences injected by `run_official_install_script`, `run_npm_global_upgrade` and
-/// `run_brew_install` into [`run_managed_install`]; the rest of the skeleton (register pid → post-spawn
+/// `run_brew_install` into [`run_managed_install`]; the rest of the skeleton (register tree → post-spawn
 /// cancel recheck → progress → streaming output → 600s timeout → diagnostics to disk → idempotent
 /// early success → cancel rewrite → failure bail) is owned by `run_managed_install`.
 struct ManagedInstallStage {
@@ -637,8 +628,6 @@ struct ManagedInstallStage {
     diag_stage: &'static str,
     /// Command line shown in progress events.
     command_line: String,
-    /// Whether to make the child a process-group leader (npm and brew need it; the script process does not).
-    process_group: bool,
     spawn_context: String,
     stdout_context: &'static str,
     stderr_context: &'static str,
@@ -688,28 +677,26 @@ async fn run_managed_install(
     app: &AppHandle,
     backend: AgentBackend,
     operation_id: &str,
-    install_children: &Arc<parking_lot::Mutex<HashMap<AgentBackend, u32>>>,
-    install_cancelled: &Arc<parking_lot::Mutex<HashSet<AgentBackend>>>,
+    install_children: &Arc<
+        parking_lot::Mutex<HashMap<AgentBackend, crate::platform::process::ManagedProcessTree>>,
+    >,
+    install_operations: &InstallOperationStore,
     mut command: tokio::process::Command,
     stage: ManagedInstallStage,
 ) -> Result<()> {
-    if stage.process_group {
-        // Separate process group: killed as a group on cancel so npm-spawned postinstall
-        // scripts are not orphaned. (Platform details live in process.rs; this layer has no target-platform cfg.)
-        crate::platform::process::tokio_process_group_leader(&mut command);
-    }
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
+    let (mut child, process_tree) = crate::platform::process::spawn_managed_tokio(command)
+        .await
         .with_context(|| stage.spawn_context.clone())?;
-    // spawn 后登记 pid 供取消命令杀进程树；guard 在本函数任意出口注销。
-    let _child_guard = InstallChildGuard::register(install_children, backend, child.id());
+    // spawn 后登记进程树供取消命令终止；guard 在任意出口注销，异常出口回收整树。
+    let mut child_guard =
+        InstallChildGuard::register(install_children, backend, process_tree.clone());
     // 取消可能发生在 spawn 与登记之间：登记后立即补检一次。
-    if install_cancelled.lock().contains(&backend) {
-        let _ = child.kill().await;
+    if install_operations.lock().is_cancelled(backend) {
+        let _ = process_tree.terminate();
     }
     emit_install_progress(app, backend, "command", &stage.command_line);
     let stdout = child.stdout.take().context(stage.stdout_context)?;
@@ -724,7 +711,7 @@ async fn run_managed_install(
                 &format!("{}:timeout", stage.diag_stage),
                 format!("timeout_seconds={}", TIMEOUT.as_secs()),
             );
-            let _ = child.kill().await;
+            let _ = process_tree.terminate();
             let _ = child.wait().await;
             bail!("{}", stage.timeout_message);
         }
@@ -744,10 +731,11 @@ async fn run_managed_install(
             .idempotent_ok
             .is_some_and(|is_done| is_done(&stdout, &stderr))
     {
+        child_guard.disarm();
         return Ok(());
     }
-    // The process was cancelled by the user (taskkill/kill) and reaches here with a failure status: rewrite to cancelled semantics.
-    if install_cancelled.lock().remove(&backend) {
+    // Managed-tree cancellation reaches here with a failure status: rewrite to cancelled semantics.
+    if install_operations.lock().take_cancelled(backend) {
         bail!(
             "{INSTALL_CANCELLED_MARKER}{} 安装已取消",
             backend.display_name()
@@ -782,8 +770,10 @@ pub(super) async fn run_official_install_script(
     app: &AppHandle,
     backend: AgentBackend,
     operation_id: &str,
-    install_children: &Arc<parking_lot::Mutex<HashMap<AgentBackend, u32>>>,
-    install_cancelled: &Arc<parking_lot::Mutex<HashSet<AgentBackend>>>,
+    install_children: &Arc<
+        parking_lot::Mutex<HashMap<AgentBackend, crate::platform::process::ManagedProcessTree>>,
+    >,
+    install_operations: &InstallOperationStore,
 ) -> Result<()> {
     let (unix_url, windows_url) = official_script_urls(backend);
     if unix_url.is_empty() {
@@ -804,12 +794,11 @@ pub(super) async fn run_official_install_script(
         backend,
         operation_id,
         install_children,
-        install_cancelled,
+        install_operations,
         command,
         ManagedInstallStage {
             diag_stage: "script",
             command_line,
-            process_group: false,
             spawn_context: format!("failed to spawn {} install script", backend.display_name()),
             stdout_context: "failed to read install script stdout",
             stderr_context: "failed to read install script stderr",
@@ -853,7 +842,6 @@ fn npm_upgrade_stage(backend: AgentBackend, mirror: bool) -> ManagedInstallStage
                 npm_package(backend).unwrap_or("")
             )
         },
-        process_group: true,
         spawn_context: format!("failed to spawn {upgrade_kind}"),
         stdout_context: if mirror {
             "failed to read npm mirror stdout"
@@ -894,8 +882,10 @@ pub(super) async fn run_npm_global_upgrade(
     app: &AppHandle,
     backend: AgentBackend,
     operation_id: &str,
-    install_children: &Arc<parking_lot::Mutex<HashMap<AgentBackend, u32>>>,
-    install_cancelled: &Arc<parking_lot::Mutex<HashSet<AgentBackend>>>,
+    install_children: &Arc<
+        parking_lot::Mutex<HashMap<AgentBackend, crate::platform::process::ManagedProcessTree>>,
+    >,
+    install_operations: &InstallOperationStore,
 ) -> Result<()> {
     let args = npm_upgrade_args(backend)
         .with_context(|| format!("{} 不支持 npm 全局升级", backend.display_name()))?;
@@ -907,7 +897,7 @@ pub(super) async fn run_npm_global_upgrade(
         backend,
         operation_id,
         install_children,
-        install_cancelled,
+        install_operations,
         command,
         npm_upgrade_stage(backend, false),
     )
@@ -934,7 +924,7 @@ pub(super) async fn run_npm_global_upgrade(
         backend,
         operation_id,
         install_children,
-        install_cancelled,
+        install_operations,
         mirror_command,
         npm_upgrade_stage(backend, true),
     )
@@ -973,8 +963,10 @@ pub(super) async fn run_brew_install(
     app: &AppHandle,
     backend: AgentBackend,
     operation_id: &str,
-    install_children: &Arc<parking_lot::Mutex<HashMap<AgentBackend, u32>>>,
-    install_cancelled: &Arc<parking_lot::Mutex<HashSet<AgentBackend>>>,
+    install_children: &Arc<
+        parking_lot::Mutex<HashMap<AgentBackend, crate::platform::process::ManagedProcessTree>>,
+    >,
+    install_operations: &InstallOperationStore,
     args: &[&str],
     command_description: &str,
 ) -> Result<()> {
@@ -985,13 +977,12 @@ pub(super) async fn run_brew_install(
         backend,
         operation_id,
         install_children,
-        install_cancelled,
+        install_operations,
         command,
         ManagedInstallStage {
             diag_stage: "homebrew",
             command_line: command_description.to_string(),
             // Separate process group: killed as a group on cancel so brew-spawned processes are not orphaned.
-            process_group: true,
             spawn_context: "failed to spawn Homebrew".to_string(),
             stdout_context: "failed to read Homebrew stdout",
             stderr_context: "failed to read Homebrew stderr",
@@ -1259,27 +1250,276 @@ mod tests {
 
     #[test]
     pub(super) fn installing_state_is_isolated_per_agent() {
-        let installing_agents = Arc::new(parking_lot::RwLock::new(HashSet::new()));
-        let claude = AgentInstallGuard::try_start(&installing_agents, AgentBackend::ClaudeAcp)
+        let operations = Arc::new(parking_lot::Mutex::new(InstallOperationState::default()));
+        let claude = AgentInstallGuard::try_start(&operations, AgentBackend::ClaudeAcp)
             .expect("Claude install should start");
 
-        assert!(installing_agents.read().contains(&AgentBackend::ClaudeAcp));
-        assert!(!installing_agents.read().contains(&AgentBackend::CodexAcp));
-        assert!(!installing_agents.read().contains(&AgentBackend::KimiAcp));
+        assert!(operations.lock().is_active(AgentBackend::ClaudeAcp));
+        assert!(!operations.lock().is_active(AgentBackend::CodexAcp));
+        assert!(!operations.lock().is_active(AgentBackend::KimiAcp));
         assert!(
-            AgentInstallGuard::try_start(&installing_agents, AgentBackend::ClaudeAcp).is_none(),
+            AgentInstallGuard::try_start(&operations, AgentBackend::ClaudeAcp).is_none(),
             "the same Agent must remain mutually exclusive"
         );
 
-        let codex = AgentInstallGuard::try_start(&installing_agents, AgentBackend::CodexAcp)
+        let codex = AgentInstallGuard::try_start(&operations, AgentBackend::CodexAcp)
             .expect("a different Agent should not share Claude's install lock");
-        assert!(installing_agents.read().contains(&AgentBackend::CodexAcp));
+        assert!(operations.lock().is_active(AgentBackend::CodexAcp));
 
         drop(claude);
-        assert!(!installing_agents.read().contains(&AgentBackend::ClaudeAcp));
-        assert!(installing_agents.read().contains(&AgentBackend::CodexAcp));
+        assert!(!operations.lock().is_active(AgentBackend::ClaudeAcp));
+        assert!(operations.lock().is_active(AgentBackend::CodexAcp));
         drop(codex);
-        assert!(installing_agents.read().is_empty());
+        assert!(!operations.lock().is_active(AgentBackend::CodexAcp));
+    }
+
+    #[test]
+    pub(super) fn cancellation_between_start_and_tree_registration_is_not_lost() {
+        let operations = Arc::new(parking_lot::Mutex::new(InstallOperationState::default()));
+        let backend = AgentBackend::ClaudeAcp;
+        // Model a marker left by an already-finished operation. Starting the
+        // next operation must clear it as part of the same state transition
+        // that makes the operation visible to cancellation.
+        operations.lock().cancelled.insert(backend);
+
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let (continue_tx, continue_rx) = std::sync::mpsc::sync_channel(0);
+        let worker_operations = operations.clone();
+        let worker = std::thread::spawn(move || {
+            let guard = AgentInstallGuard::try_start(&worker_operations, backend)
+                .expect("operation should start");
+            assert!(worker_operations.lock().is_active(backend));
+            assert!(
+                !worker_operations.lock().is_cancelled(backend),
+                "a stale marker must not contaminate the new operation"
+            );
+            started_tx.send(()).expect("publish start checkpoint");
+
+            // This checkpoint represents the gap before spawn/register. The
+            // cancelling thread must be able to mark this active operation
+            // even though there is not yet a managed process tree to kill.
+            continue_rx.recv().expect("resume installer");
+            assert!(
+                worker_operations.lock().is_cancelled(backend),
+                "a cancellation observed after start must never be cleared"
+            );
+            drop(guard);
+        });
+
+        started_rx
+            .recv()
+            .expect("installer reached start checkpoint");
+        assert!(operations.lock().request_cancel(backend));
+        continue_tx
+            .send(())
+            .expect("resume installer after cancellation");
+        worker.join().expect("installer thread should finish");
+
+        assert!(!operations.lock().is_active(backend));
+        assert!(!operations.lock().is_cancelled(backend));
+    }
+
+    #[test]
+    fn managed_install_cancel_fixture() {
+        if std::env::var_os("PINVOU_INSTALL_CANCEL_FIXTURE").is_some() {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        }
+    }
+
+    fn owned_install_fixture() -> tokio::process::Command {
+        let mut command =
+            crate::platform::process::HiddenTokioCommand::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "features::codex_acp::install::tests::managed_install_cancel_fixture",
+                "--nocapture",
+            ])
+            .env("PINVOU_INSTALL_CANCEL_FIXTURE", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        command
+    }
+
+    #[test]
+    fn late_cancel_terminates_only_captured_old_install_tree() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let operations = Arc::new(parking_lot::Mutex::new(InstallOperationState::default()));
+            let children = Arc::new(parking_lot::Mutex::new(HashMap::new()));
+            let backend = AgentBackend::ClaudeAcp;
+            let old_operation = AgentInstallGuard::try_start(&operations, backend).unwrap();
+            let (mut old_child, old_tree) =
+                crate::platform::process::spawn_managed_tokio(owned_install_fixture())
+                    .await
+                    .unwrap();
+            let old_registration = InstallChildGuard::register(&children, backend, old_tree);
+            let captured = capture_cancelled_install_tree(&operations, &children, backend)
+                .unwrap()
+                .unwrap();
+            drop(old_registration);
+            drop(old_operation);
+            let new_operation = AgentInstallGuard::try_start(&operations, backend).unwrap();
+            let (mut new_child, new_tree) =
+                crate::platform::process::spawn_managed_tokio(owned_install_fixture())
+                    .await
+                    .unwrap();
+            let new_registration =
+                InstallChildGuard::register(&children, backend, new_tree.clone());
+            captured.terminate().unwrap();
+            let old_status =
+                tokio::time::timeout(std::time::Duration::from_secs(5), old_child.wait())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(!old_status.success());
+            assert!(
+                new_child.try_wait().unwrap().is_none(),
+                "late old cancellation killed the successor"
+            );
+            assert!(!operations.lock().is_cancelled(backend));
+            new_tree.terminate().unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), new_child.wait())
+                .await
+                .unwrap()
+                .unwrap();
+            drop(new_registration);
+            drop(new_operation);
+        });
+    }
+
+    #[test]
+    fn aborted_install_future_reclaims_orphans_but_success_disarm_preserves_them() {
+        use crate::platform::process::tests::{BoundFixtureProcess, consumer_orphan_fixture};
+        if !BoundFixtureProcess::supported() {
+            eprintln!("Windows native identity regression unsupported on this host");
+            return;
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for normal_success in [false, true] {
+            runtime.block_on(async {
+                let directory = tempfile::tempdir().unwrap();
+                let marker = directory.path().join("consumer-orphan");
+                let operations =
+                    Arc::new(parking_lot::Mutex::new(InstallOperationState::default()));
+                let children = Arc::new(parking_lot::Mutex::new(HashMap::new()));
+                let worker_ops = operations.clone();
+                let worker_children = children.clone();
+                let worker_marker = marker.clone();
+                let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+                let worker = tokio::spawn(async move {
+                    let _operation =
+                        AgentInstallGuard::try_start(&worker_ops, AgentBackend::ClaudeAcp).unwrap();
+                    let mode = if normal_success {
+                        "consumer_success_root"
+                    } else {
+                        "descendant_wait"
+                    };
+                    let (mut child, tree) = crate::platform::process::spawn_managed_tokio(
+                        consumer_orphan_fixture(mode, &worker_marker),
+                    )
+                    .await
+                    .unwrap();
+                    let mut guard = InstallChildGuard::register(
+                        &worker_children,
+                        AgentBackend::ClaudeAcp,
+                        tree,
+                    );
+                    if normal_success {
+                        assert!(child.wait().await.unwrap().success());
+                        guard.disarm();
+                    }
+                    ready_tx.send(()).unwrap();
+                    if normal_success {
+                        return;
+                    }
+                    // Real waiting consumer future: abort drops its armed
+                    // production guard, not an explicit terminate in the test.
+                    let _ = child.wait().await;
+                });
+                ready_rx.await.unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+                // running is written after the complete PID file, so identity
+                // binding never races file creation with its first write.
+                while !marker.with_extension("running").exists() {
+                    assert!(std::time::Instant::now() < deadline);
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                let pid = std::fs::read_to_string(marker.with_extension("pid"))
+                    .unwrap()
+                    .trim()
+                    .parse()
+                    .unwrap();
+                let identity = BoundFixtureProcess::bind(pid).unwrap().unwrap();
+                std::fs::write(marker.with_extension("identity-bound"), b"bound").unwrap();
+                if normal_success {
+                    worker.await.unwrap();
+                    assert!(
+                        !identity.exited(std::time::Duration::ZERO),
+                        "normal disarm killed a successful descendant"
+                    );
+                    // The pinned handle prevents PID reuse during isolated fixture cleanup.
+                    identity
+                        .terminate()
+                        .expect("terminate the successful install fixture");
+                    assert!(identity.exited(std::time::Duration::from_secs(5)));
+                } else {
+                    while !marker.with_extension("intermediary-exited").exists() {
+                        assert!(std::time::Instant::now() < deadline);
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    worker.abort();
+                    assert!(worker.await.unwrap_err().is_cancelled());
+                    assert!(
+                        identity.exited(std::time::Duration::from_secs(5)),
+                        "aborted consumer leaked an orphaned descendant"
+                    );
+                }
+                assert!(!operations.lock().is_active(AgentBackend::ClaudeAcp));
+                assert!(children.lock().is_empty());
+            });
+        }
+    }
+
+    #[test]
+    fn cancel_holds_operation_ownership_until_tree_capture() {
+        let operations = Arc::new(parking_lot::Mutex::new(InstallOperationState::default()));
+        let children = Arc::new(parking_lot::Mutex::new(HashMap::new()));
+        let backend = AgentBackend::ClaudeAcp;
+        let operation = AgentInstallGuard::try_start(&operations, backend).unwrap();
+        let children_lock = children.lock();
+        let worker_operations = operations.clone();
+        let worker_children = children.clone();
+        let (boundary_tx, boundary_rx) = std::sync::mpsc::sync_channel(0);
+        let (continue_tx, continue_rx) = std::sync::mpsc::sync_channel(0);
+        let worker = std::thread::spawn(move || {
+            capture_cancelled_install_tree_at_boundary(
+                &worker_operations,
+                &worker_children,
+                backend,
+                || {
+                    boundary_tx.send(()).unwrap();
+                    continue_rx.recv().unwrap();
+                },
+            )
+        });
+        boundary_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        // Finishing old work or starting its successor requires this same lock.
+        assert!(operations.try_lock().is_none());
+        drop(children_lock);
+        continue_tx.send(()).unwrap();
+        assert!(worker.join().unwrap().unwrap().is_none());
+        assert!(operations.lock().is_cancelled(backend));
+        drop(operation);
+        assert!(capture_cancelled_install_tree(&operations, &children, backend).is_err());
     }
 
     #[test]
@@ -1513,12 +1753,6 @@ pub(super) fn fill_install_progress(
             status.install_command = (!info.command.is_empty()).then(|| info.command.clone());
             status.install_latest_line = info.latest_line.clone();
         }
-    }
-}
-
-pub(super) fn kill_install_process_tree(pid: u32) {
-    if let Err(error) = crate::platform::process::kill_process_tree(pid) {
-        eprintln!("[pinvou3-app] failed to kill install process tree {pid}: {error:#}");
     }
 }
 

@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { percentile } from '../src/features/browser/browser-performance.mjs';
+
 const KINDS = ['cold', 'rebuilt', 'reused'];
 const STAGES = [
   'runtime_lock_ms',
@@ -17,13 +19,6 @@ const STAGES = [
   'load_session_ms',
   'sync_session_ms',
 ];
-
-function percentile(values, quantile) {
-  if (!values.length) return null;
-  const sorted = [...values].sort((left, right) => left - right);
-  const index = Math.max(0, Math.ceil(sorted.length * quantile) - 1);
-  return sorted[index];
-}
 
 function distribution(values) {
   const finite = values.filter(Number.isFinite);
@@ -77,6 +72,7 @@ function ingestFile(text, source, turns) {
     if (event.event === 'user_start') turn.userStart = Number(event.timestamp);
     if (event.event === 'assistant_done' && event.engine_startup?.engine_acquire) {
       turn.engineReady = optionalNumber(event.engine_startup.engine_ready_timestamp);
+      turn.engineTurnStarted = optionalNumber(event.engine_startup.engine_turn_started_timestamp);
       turn.firstOutput = optionalNumber(event.engine_startup.first_output_timestamp);
       turn.acquire = event.engine_startup.engine_acquire;
     }
@@ -103,6 +99,12 @@ export async function collectEngineStartupSamples(input) {
       ready_to_first_output_ms: Number.isFinite(turn.engineReady) && Number.isFinite(turn.firstOutput)
         ? Math.max(0, turn.firstOutput - turn.engineReady)
         : null,
+      ready_to_turn_started_ms: Number.isFinite(turn.engineReady) && Number.isFinite(turn.engineTurnStarted)
+        ? Math.max(0, turn.engineTurnStarted - turn.engineReady)
+        : null,
+      turn_started_to_first_output_ms: Number.isFinite(turn.engineTurnStarted) && Number.isFinite(turn.firstOutput)
+        ? Math.max(0, turn.firstOutput - turn.engineTurnStarted)
+        : null,
       send_to_first_output_ms: Number.isFinite(turn.userStart) && Number.isFinite(turn.firstOutput)
         ? Math.max(0, turn.firstOutput - turn.userStart)
         : null,
@@ -124,6 +126,8 @@ export function summarizeEngineStartup(samples, {
       acquisition: distribution(selected.map(sample => sample.total_ms)),
       send_to_ready: distribution(selected.map(sample => sample.send_to_ready_ms)),
       ready_to_first_output: distribution(selected.map(sample => sample.ready_to_first_output_ms)),
+      ready_to_turn_started: distribution(selected.map(sample => sample.ready_to_turn_started_ms)),
+      turn_started_to_first_output: distribution(selected.map(sample => sample.turn_started_to_first_output_ms)),
       send_to_first_output: distribution(selected.map(sample => sample.send_to_first_output_ms)),
       stages: Object.fromEntries(STAGES.map(stage => [stage, distribution(selected.map(sample => sample.stages[stage]))])),
     };
@@ -160,7 +164,7 @@ function cell(value) {
 export function formatEngineStartupReport(report) {
   const lines = [
     'Engine 启动观测（毫秒）',
-    '类型\t样本\t获取 P50\t获取 P95\t发送→就绪 P95\t发送→首输出 P95',
+    '类型\t样本\t获取 P50\t获取 P95\t发送→就绪 P95\t就绪→启动 P95\t启动→首输出 P95\t发送→首输出 P95',
   ];
   for (const kind of KINDS) {
     const group = report.groups[kind];
@@ -170,6 +174,8 @@ export function formatEngineStartupReport(report) {
       cell(group.acquisition.p50_ms),
       cell(group.acquisition.p95_ms),
       cell(group.send_to_ready.p95_ms),
+      cell(group.ready_to_turn_started.p95_ms),
+      cell(group.turn_started_to_first_output.p95_ms),
       cell(group.send_to_first_output.p95_ms),
     ].join('\t'));
   }

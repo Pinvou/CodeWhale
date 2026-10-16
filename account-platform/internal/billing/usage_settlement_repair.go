@@ -656,7 +656,7 @@ FROM usage_settlement_repair_cases WHERE approval_request_id=$1`, approvalReques
 }
 
 // usageSettlementRepairCaseMatches is the idempotent-hit check: the stored case
-// must belong to the same usage request, approval request and execution key.
+// must bind the original command as well as its approval and execution key.
 func usageSettlementRepairCaseMatches(ctx context.Context, source usageRepairReader,
 	input UsageSettlementRepairExecutionInput, executionKey string) (UsageSettlementRepairResult, bool, error) {
 	var storedID, storedRequestID, storedEventID uuid.UUID
@@ -682,7 +682,13 @@ FROM usage_settlement_repair_cases WHERE usage_request_id=$1`, input.Command.Usa
 		}
 		return UsageSettlementRepairResult{}, false, err
 	}
-	return stored, stored.CaseID == storedID, nil
+	if stored.CaseID != storedID || stored.UsageRequestID != input.Command.UsageRequestID ||
+		stored.HoldID != input.Command.HoldID || stored.LossReviewID == nil ||
+		*stored.LossReviewID != input.Command.LossReviewID ||
+		stored.EvidenceKind != strings.TrimSpace(input.Command.EvidenceKind) {
+		return UsageSettlementRepairResult{}, false, ErrConflict
+	}
+	return stored, true, nil
 }
 
 // usageSettlementRepairFrozenMismatch compares the frozen wire projection with

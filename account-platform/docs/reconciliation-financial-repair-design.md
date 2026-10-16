@@ -8,7 +8,7 @@
 
 # 对账财务修复（`RECONCILIATION_FINANCIAL_REPAIR`）领域设计
 
-历史设计阶段状态：`DESIGN_FROZEN / SELF_REVIEW_PASS / INDEPENDENT_REVIEW_PENDING / 历史设计阶段：NOT_IMPLEMENTED / NOT_DEPLOYED`。首版范围由用户在 2026-09-19 确认为**仅 `PROVIDER_PAID_INTERNAL_MISSING` 差异**，权限与命令版本复用现有 `platform.billing.repairs.*` 与 `policy_version=1 / snapshot_schema_version=1`（守卫见 §9）。本文冻结 GSA-34 的 closed command/snapshot/proof、归因与结案规则、零账务效果的守恒证明、幂等与恢复、失败分类、迁移与回滚及验收映射；不新增可执行路径，activation 行保持 `INACTIVE`。命令基线见 [十四命令事实与兼容基线](admin-governance-security-command-baseline.md)，治理与激活约束见 [治理与安全重设计](admin-governance-security-redesign.md) §11 与 §14。
+历史设计阶段状态：`DESIGN_FROZEN / SELF_REVIEW_PASS / INDEPENDENT_REVIEW_PENDING / 历史设计阶段：NOT_IMPLEMENTED / NOT_DEPLOYED`。首版范围由用户在 2026-09-19 确认为**仅 `PROVIDER_PAID_INTERNAL_MISSING` 差异**，权限与命令版本复用现有 `platform.billing.repairs.*` 与 `policy_version=1 / snapshot_schema_version=1`（守卫见 §9）。本文冻结 GSA-34 的 closed command/snapshot/proof、归因与结案规则、零账务效果的守恒证明、幂等与恢复、失败分类、迁移与回滚及验收映射；不新增可执行路径，activation 行保持 `INACTIVE`。历史设计引用的“十四命令事实与兼容基线”和“治理与安全重设计”未随仓库发布；当前命令与激活边界见 [审批策略注册表](../internal/platform/approvalpolicy/registry.go)、[审批命令编码](../internal/platform/approvalencoding/proof.go) 及 [对账修复运行手册](../deploy/runbooks/reconciliation-financial-repair-activation.md)。
 
 ## 1. 设计冻结阶段命令现状（历史）
 

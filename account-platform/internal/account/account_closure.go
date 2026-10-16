@@ -531,6 +531,7 @@ func (w *AccountClosureWorker) runOnce(ctx context.Context) {
 			identityFailed := false
 			for _, subject := range preparation.IdentitySubjects {
 				if err := w.repository.RenewAccountClosureClaim(ctx, item); err != nil {
+					observe(err)
 					identityFailed = true
 					break
 				}
@@ -548,6 +549,7 @@ func (w *AccountClosureWorker) runOnce(ctx context.Context) {
 				continue
 			}
 			if err := w.repository.RenewAccountClosureClaim(ctx, item); err != nil {
+				observe(err)
 				continue
 			}
 			if err := w.grants.IsolateGrants(ctx, item.UserID, item.ID, preparation.SubjectLifecycleVersion); err != nil {
@@ -559,6 +561,7 @@ func (w *AccountClosureWorker) runOnce(ctx context.Context) {
 				continue
 			}
 			if err := w.repository.RenewAccountClosureClaim(ctx, item); err != nil {
+				observe(err)
 				continue
 			}
 			if err := w.replay.ClearReplay(ctx, item.UserID); err != nil {
@@ -583,6 +586,7 @@ func (w *AccountClosureWorker) runOnce(ctx context.Context) {
 		failed := false
 		for _, client := range w.clients {
 			if err := w.repository.RenewAccountClosureClaim(ctx, item); err != nil {
+				observe(err)
 				failed = true
 				break
 			}

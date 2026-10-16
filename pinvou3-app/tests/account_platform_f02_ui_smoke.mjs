@@ -87,9 +87,15 @@ try {
     await fresh('admin'); await click('details'); await page.waitForSelector('article textarea'); await page.type('article textarea', 'Controlled original epoch reason');
     await page.evaluate(() => { window.f02.refundResponses = [503, 201]; }); await click('refunds'); await page.waitForSelector('[role=alert]'); await settled();
     await page.evaluate(() => { window.f02.setAdminEpoch(1); }); await settled();
+    assert.equal(await page.$('article textarea'), null, 'retired epoch detail is unmounted');
+    assert.equal(await page.evaluate(() => [...document.querySelectorAll('button')].some(button => button.textContent.trim() === window.f02.languageCopy().retry)), false, 'new epoch cannot replay the original invocation');
+    await click('details'); await page.waitForSelector('article textarea'); await settled();
     assert.equal(await page.$eval('article textarea', element => element.disabled), false);
+    assert.equal(await page.$eval('article textarea', element => element.value), '', 'new epoch does not inherit the old refund facts');
     assert.equal(await page.evaluate(() => window.f02.calls.filter(call => call.url.endsWith('/refunds')).length), 1, 'session change does not dispatch recovery');
-    await page.evaluate(() => { window.f02.setAdminEpoch(0); }); await settled(); await click('retry');
+    await page.evaluate(() => { window.f02.setAdminEpoch(0); }); await settled();
+    await page.waitForFunction(() => [...document.querySelectorAll('button')].some(button => button.textContent.trim() === window.f02.languageCopy().retry && !button.disabled));
+    await click('retry');
     await page.waitForFunction(() => window.f02.calls.filter(call => call.url.endsWith('/refunds')).length === 2); await settled();
     assert.ok(await page.evaluate(() => { const calls = window.f02.calls.filter(call => call.url.endsWith('/refunds')); return calls[0].key === calls[1].key && calls[0].body === calls[1].body && window.f02.refundEffects === 1; }));
   });

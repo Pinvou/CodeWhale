@@ -610,7 +610,7 @@ WHERE id=$1 AND status='FROZEN' AND points_remaining=0 AND points_used=0 AND poi
 			return RefundExceptionRepairResult{}, refundExceptionConflict("package_cas", err)
 		}
 	}
-	if _, err := tx.Exec(ctx, `UPDATE refunds SET status='SUCCEEDED',intent_version=intent_version+1,updated_at=$2 WHERE id=$1`, plan.RefundID, now); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE refunds SET status='SUCCEEDED',dispatch_state='COMPLETED',dispatch_lease_until=NULL,intent_version=intent_version+1,updated_at=$2 WHERE id=$1`, plan.RefundID, now); err != nil {
 		return RefundExceptionRepairResult{}, err
 	}
 	if err := events.AppendOutbox(ctx, tx, "billing.refund.succeeded.v1", plan.RefundID, 2, map[string]any{

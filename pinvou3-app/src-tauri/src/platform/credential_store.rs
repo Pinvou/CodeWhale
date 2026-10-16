@@ -1,4 +1,6 @@
-use codewhale_secrets::{DefaultKeyringStore, Secrets, SecretsError};
+use codewhale_secrets::{
+    DefaultKeyringStore, LEGACY_SECRET_BACKEND_ENV, SECRET_BACKEND_ENV, Secrets, SecretsError,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 #[cfg(test)]
@@ -256,7 +258,40 @@ pub struct CredentialMigrationResult {
     pub failed_model_ids: Vec<String>,
     pub failed_search_providers: Vec<String>,
     pub settings_sanitized: bool,
+    /// Search-provider credentials the migration marked removed without
+    /// deleting their keyring secret. The migration runs inside
+    /// `UserPrefs::update_transaction` closures (and transaction-free on
+    /// load, where callers drop the deferral), so deleting there would
+    /// destroy the secret before the save committed — a later failure in the
+    /// same transaction aborts with disk prefs untouched and the provider
+    /// left configured-but-secretless. Callers must delete these references
+    /// only after their save committed, via
+    /// `UserPrefs::update_transaction_with_post_commit` so the delete stays
+    /// inside the prefs-lock critical section (a delete that ran after the
+    /// lock was released could destroy a secret a concurrent replacement of
+    /// the same deterministic reference had just committed), where a failed
+    /// delete merely orphans the credential (the benign direction).
+    #[serde(default)]
+    pub deferred_search_deletes: Vec<CredentialReference>,
 }
+
+impl CredentialMigrationResult {
+    /// Whether any plaintext→keychain migration failed (a model or a search
+    /// provider). The gate every persisting caller refuses at: a failed
+    /// migration leaves the plaintext key in memory only, and the sanitize
+    /// on a subsequent save would erase it from its only durable location.
+    pub fn has_failures(&self) -> bool {
+        !self.failed_model_ids.is_empty() || !self.failed_search_providers.is_empty()
+    }
+}
+
+/// The refusal text every persisting caller returns when
+/// [`CredentialMigrationResult::has_failures`] is true: the plaintext key
+/// exists in memory only, and a save would sanitize it out of settings.json.
+/// Defined once so the prefs transaction gate and the GUI settings command
+/// return (and tests assert) one identical string.
+pub(crate) const CREDENTIAL_STORE_UNAVAILABLE_ERROR: &str =
+    "credential store unavailable; please reconfigure API Key";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialError {
@@ -327,6 +362,31 @@ pub struct SystemCredentialStore {
     fallback_services: Arc<Mutex<HashMap<String, ()>>>,
 }
 
+/// Whether the ambient environment explicitly selects the file-backed secret
+/// store: `CODEWHALE_SECRET_BACKEND` (or, when the primary variable is unset
+/// or blank, its legacy alias) set to one of the facade's file values
+/// (`file`/`local`/`json`). Mirrors the facade's `auto_detect` selection
+/// precedence and value matching; unset, blank, system aliases and unknown
+/// values all read `false`, leaving the keyring-first policy in `secrets_for`
+/// untouched.
+fn secret_backend_selection_is_file() -> bool {
+    let configured = std::env::var(SECRET_BACKEND_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| std::env::var(LEGACY_SECRET_BACKEND_ENV).ok());
+    let Some(value) = configured
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "file" | "local" | "json"
+    )
+}
+
 impl SystemCredentialStore {
     pub fn new() -> Self {
         Self::default()
@@ -368,6 +428,39 @@ impl SystemCredentialStore {
             "[credential_store] secrets_for cache miss service={}",
             service
         );
+        // An explicit file-backend selection (`CODEWHALE_SECRET_BACKEND=file`,
+        // the CodeWhale facade's documented knob — also the knob the CLI
+        // contract suites set to sandbox credential reads) must not be
+        // silently ignored by the keyring-first policy below. Any other value
+        // (unset / system aliases / unknown) keeps that policy unchanged.
+        if secret_backend_selection_is_file() {
+            log::info!(
+                "[credential_store] explicit file backend selected service={} elapsed_ms={}",
+                service,
+                started_at.elapsed().as_millis()
+            );
+            let arc = Arc::new(Secrets::file_backed());
+            cache.insert(service.to_string(), arc.clone());
+            return arc;
+        }
+        // Test hermeticity valve (marketplace reconcile hang, 2026-10-03):
+        // placed AFTER the per-store cache consult above so the fake-backend
+        // tests (inject_fake_secrets) are unaffected, and BEFORE the OS
+        // keyring is probed. Harnesses that redirect PINVOU3_HOME cannot make
+        // the OS keyring hermetic — on macOS a real-keyring read from an
+        // ad-hoc-signed test binary can block indefinitely inside
+        // SecKeychainFindGenericPassword on the ACL consent dialog
+        // (rebuild_local_mcp_entry's placeholder resolution hung the whole
+        // suite locally; Linux CI never sees it because its keyring probe
+        // fails fast into the file fallback). Production builds never read
+        // the flag.
+        #[cfg(test)]
+        if std::env::var_os("PINVOU3_TEST_KEYRING_FILE_FALLBACK").is_some() {
+            log::info!(
+                "[credential_store] test file-fallback flag set; using file keyring without probing the OS keyring"
+            );
+            return Arc::new(Secrets::file_backed());
+        }
         let store = DefaultKeyringStore::new(service);
         log::info!("[credential_store] keyring probe start service={}", service);
         let secrets = match store.probe() {
@@ -409,6 +502,23 @@ impl SystemCredentialStore {
             started_at.elapsed().as_millis()
         );
         arc
+    }
+
+    /// Services whose OS-keyring probe failed in this store instance, so
+    /// their credentials are served by (and would be written to) the
+    /// plaintext file fallback. The GUI routes through
+    /// [`CredentialStore::os_keyring_unreachable`] per reference; the CLI
+    /// (round-47 review) calls this once per command instead — its binary
+    /// installs no `log` implementation, so the fallback's own
+    /// `log::warn!` never reached a terminal and a user could store an API
+    /// key into the file fallback with no notice at all.
+    pub fn os_keyring_fallback_services(&self) -> Vec<String> {
+        self.fallback_services
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .keys()
+            .cloned()
+            .collect()
     }
 }
 
@@ -674,6 +784,31 @@ pub fn redact_secret(input: &str) -> String {
     output
 }
 
+/// AWS key shapes (`AKIA`/`ASIA` + 16 uppercase alphanumerics, 20 chars):
+/// the prefix matches case-insensitively, the 16-byte body is uppercase or
+/// digits, and any remainder is non-alphanumeric. The tail clause is what an
+/// exact-length gate could not say: a key at the end of a clause
+/// (`…credentials: AKIA…EXAMPLE.`) keeps its trailing punctuation and must
+/// still match, while a longer alphanumeric word (`akia-notes.txt` minus the
+/// dash, a brand) must not.
+fn aws_key_shape(trimmed: &str, prefix: &str) -> bool {
+    if trimmed.len() < 20 {
+        return false;
+    }
+    let Some(body) = trimmed.get(4..20) else {
+        return false;
+    };
+    trimmed
+        .get(..4)
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+        && body
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        && trimmed
+            .get(20..)
+            .is_some_and(|tail| tail.chars().all(|c| !c.is_ascii_alphanumeric()))
+}
+
 pub fn is_secret_like(value: &str) -> bool {
     let trimmed = value.trim_matches(|c: char| c == '"' || c == '\'' || c == ',' || c == ';');
     if trimmed.len() < 8 {
@@ -685,6 +820,37 @@ pub fn is_secret_like(value: &str) -> bool {
         || lower.starts_with("bce-v3/")
         || lower.starts_with("tvly-")
         || lower.starts_with("mgp")
+        // Token shapes with fixed, low-false-positive prefixes (GitHub
+        // PATs/app tokens, GitLab PATs, AWS access keys, Slack tokens). A
+        // glued `?api_key=sk-...` in a URL is still missed — the tokenizer
+        // only splits on whitespace transitions — but a bare leaked token
+        // in an error chain is now caught regardless of length.
+        || lower.starts_with("ghp_")
+        || lower.starts_with("gho_")
+        || lower.starts_with("ghs_")
+        || lower.starts_with("ghu_")
+        || lower.starts_with("github_pat_")
+        || lower.starts_with("glpat-")
+        // AWS access keys are AKIA + 16 uppercase alphanumerics (20 chars):
+        // the shape gate keeps the family without redacting every
+        // whitespace-delimited word that merely begins with "akia"
+        // (`akia-notes.txt`, the bird, a brand). The shape is checked on the
+        // FIRST 20 bytes with any remainder confined to non-alphanumerics:
+        // an exact-20 gate is defeated by trailing punctuation, and a key at
+        // the end of a clause (`…credentials: AKIA…EXAMPLE.`) is the most
+        // common leak rendering. `ASIA` (STS temporary credentials) shares
+        // the shape.
+        || ["akia", "asia"].iter().any(|prefix| aws_key_shape(trimmed, prefix))
+        || lower.starts_with("ghr_")
+        || lower.starts_with("xoxb-")
+        || lower.starts_with("xoxp-")
+        || lower.starts_with("xoxa-")
+        || lower.starts_with("xoxs-")
+        || lower.starts_with("xoxe-")
+        // Slack refresh tokens rotate through this prefix too (round-38
+        // review: the family claimed Slack shapes but skipped it).
+        || lower.starts_with("xoxr-")
+        || lower.starts_with("xapp-")
         || (trimmed.len() >= 24
             && trimmed.chars().any(|c| c.is_ascii_digit())
             && trimmed.chars().any(|c| c.is_ascii_alphabetic()))
@@ -1061,11 +1227,141 @@ mod tests {
     }
 
     #[test]
+    fn fixed_prefix_token_shapes_are_redacted() {
+        // The fixed low-false-positive prefixes (GitHub/GitLab/AWS/Slack
+        // token shapes): a bare leaked token in an error chain is caught
+        // regardless of its length, unlike the length-plus-alnum heuristic.
+        // Bare tokens: the redactor tokenizes on whitespace, so a glued
+        // `token=…` prefix would take the length heuristic instead of the
+        // fixed-prefix rule this test owns. Tails are short on purpose —
+        // the rule is prefix-only (the <8-char floor is the only length
+        // gate) — and realistic full-length shapes would trip the secret
+        // scanner on synthetic values.
+        for token in [
+            "ghp_shortexample",
+            "gho_shortexample",
+            "ghs_shortexample",
+            "ghu_shortexample",
+            "ghr_shortexample",
+            "github_pat_shortexample",
+            "glpat-shortexample",
+            // The canonical AWS docs example key: the akia family is
+            // shape-gated (AKIA + 16 uppercase alphanumerics), so the
+            // fixture must carry the real 20-char shape.
+            "AKIAIOSFODNN7EXAMPLE",
+            // STS temporary credentials share the 20-char shape.
+            "ASIAIOSFODNN7EXAMPLE",
+            "xoxb-shortexample",
+            "xoxp-shortexample",
+            "xoxa-shortexample",
+            "xoxs-shortexample",
+            "xoxe-shortexample",
+            "xoxr-shortexample",
+            "xapp-shortexample",
+        ] {
+            let redacted = super::redact_secret(token);
+            assert_ne!(
+                redacted, token,
+                "fixed-prefix token must be redacted: {redacted}"
+            );
+            assert!(redacted.contains("[REDACTED]"), "{redacted}");
+        }
+        // Ordinary words must not trip the fixed prefixes.
+        assert_eq!(
+            super::redact_secret("ghp is an abbreviation"),
+            "ghp is an abbreviation"
+        );
+        // The akia shape gate: a word that merely begins with "akia" (a
+        // filename, a brand, the bird) stays visible — over-redacting every
+        // akia-prefixed word made GUI error strings unusable.
+        for benign in ["akia-notes.txt", "akiapolaau", "AkiaCorp-v2"] {
+            assert_eq!(
+                super::redact_secret(benign),
+                benign,
+                "an akia-shaped non-key must stay visible: {benign}"
+            );
+        }
+        // The shape gate checks the first 20 bytes and lets trailing
+        // punctuation through: keys at the end of a clause are the most
+        // common leak rendering, and an exact-length gate missed them.
+        for leaked in [
+            "AKIAIOSFODNN7EXAMPLE.",
+            "AKIAIOSFODNN7EXAMPLE:",
+            "invalid credentials: AKIAIOSFODNN7EXAMPLE: signature mismatch",
+            "ASIAIOSFODNN7EXAMPLE.",
+        ] {
+            let redacted = super::redact_secret(leaked);
+            assert_ne!(
+                redacted, leaked,
+                "a punctuation-trailed AWS key must be redacted: {redacted}"
+            );
+        }
+        // A longer alphanumeric word is not a key even with the prefix
+        // (22 chars, so the >=24 generic heuristic cannot catch it either —
+        // the shape gate itself must reject the alphanumeric tail).
+        assert_eq!(
+            super::redact_secret("akiaIOSFODNN7EXAMPLExy"),
+            "akiaIOSFODNN7EXAMPLExy",
+            "an alphanumeric tail past the 20-char shape is not a key"
+        );
+    }
+
+    #[test]
     fn mcp_reference_uses_separate_service() {
         let reference = CredentialReference::for_mcp_secret("iwencai", "env", "IWENCAI_API_KEY");
         assert_eq!(reference.service, "pinvou3-mcp-secret");
         assert_eq!(reference.account, "mcp:iwencai:env:IWENCAI_API_KEY");
         assert_eq!(reference.version, 1);
+    }
+
+    /// Round-39 review (M3): `secrets_for` must honor an explicit
+    /// `CODEWHALE_SECRET_BACKEND=file` selection instead of silently probing
+    /// the OS keyring — the knob the facade documents and the CLI contract
+    /// suites set to sandbox credential reads. Discriminated via the backend
+    /// label, so the test never touches the real keychain.
+    #[test]
+    fn secrets_for_honors_explicit_file_backend_selection() {
+        let (_lock, _env) = crate::platform::test_support::locked_env(&[
+            "CODEWHALE_SECRET_BACKEND",
+            "DEEPSEEK_SECRET_BACKEND",
+            "CODEWHALE_HOME",
+        ]);
+        let home = std::env::temp_dir().join(format!(
+            "pinvou3-secret-selection-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: locked_env holds platform::paths::tests::ENV_LOCK; env
+        // writes are serialized in-process.
+        unsafe {
+            std::env::set_var("CODEWHALE_SECRET_BACKEND", "file");
+            std::env::set_var("CODEWHALE_HOME", &home);
+        }
+
+        let store = SystemCredentialStore::new();
+        let secrets = store.secrets_for("pinvou3-file-selection-probe");
+        assert!(
+            secrets.store.backend_name().contains("file-based"),
+            "an explicit file selection must select the file backend, got: {}",
+            secrets.store.backend_name()
+        );
+
+        // The legacy alias selects the file backend too.
+        // SAFETY: locked_env holds platform::paths::tests::ENV_LOCK.
+        unsafe {
+            std::env::remove_var("CODEWHALE_SECRET_BACKEND");
+            std::env::set_var("DEEPSEEK_SECRET_BACKEND", "local");
+        }
+        let store = SystemCredentialStore::new();
+        let secrets = store.secrets_for("pinvou3-file-selection-probe-legacy");
+        assert!(
+            secrets.store.backend_name().contains("file-based"),
+            "the legacy alias must select the file backend too, got: {}",
+            secrets.store.backend_name()
+        );
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
@@ -1136,6 +1432,7 @@ mod tests {
 #[cfg(test)]
 pub struct RecordingCredentialStore {
     ops: std::sync::Mutex<Vec<String>>,
+    fail_set: std::sync::Mutex<bool>,
     fail_delete: std::sync::Mutex<bool>,
 }
 
@@ -1144,12 +1441,20 @@ impl RecordingCredentialStore {
     pub fn new() -> Self {
         Self {
             ops: std::sync::Mutex::new(Vec::new()),
+            fail_set: std::sync::Mutex::new(false),
             fail_delete: std::sync::Mutex::new(false),
         }
     }
 
     pub fn ops(&self) -> Vec<String> {
         self.ops.lock().expect("recording ops lock").clone()
+    }
+
+    /// Makes every `set` fail, so tests can force a mid-transaction failure
+    /// after a delete has been deferred (a sibling provider whose keyring
+    /// write fails the whole prefs save).
+    pub fn fail_set(&self) {
+        *self.fail_set.lock().expect("recording fail lock") = true;
     }
 
     pub fn fail_delete(&self) {
@@ -1177,6 +1482,9 @@ impl CredentialStore for RecordingCredentialStore {
             Self::label(reference),
             value
         ));
+        if *self.fail_set.lock().expect("recording fail lock") {
+            return Err(CredentialError::new("injected set failure"));
+        }
         Ok(())
     }
 

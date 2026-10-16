@@ -46,18 +46,102 @@ fn engine_model_name(item: &RuntimeCatalogItem) -> String {
     }
 }
 
+#[derive(Debug)]
+struct BoundModelAbsent;
+
+impl std::fmt::Display for BoundModelAbsent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("account platform bound model is absent from the catalog")
+    }
+}
+impl std::error::Error for BoundModelAbsent {}
+
+#[derive(Debug)]
+struct BoundLegacyModelAbsent;
+
+impl std::fmt::Display for BoundLegacyModelAbsent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("account platform bound legacy model name is absent from the catalog")
+    }
+}
+impl std::error::Error for BoundLegacyModelAbsent {}
+
+fn is_legacy_model_name(reference: &str) -> bool {
+    // Old metadata contains provider model names rather than catalog UUIDs.
+    // Do not reinterpret malformed UUID-shaped identities, empty/control text,
+    // or unbounded data as trusted local recovery evidence.
+    if reference.is_empty()
+        || reference.len() > 256
+        || !reference
+            .bytes()
+            .all(|value| value.is_ascii_alphanumeric() || b"-_.:/".contains(&value))
+        || !reference.bytes().any(|value| value.is_ascii_alphabetic())
+    {
+        return false;
+    }
+    let groups: Vec<_> = reference.split('-').collect();
+    let uuid_shape = groups.iter().map(|group| group.len()).eq([8, 4, 4, 4, 12])
+        || reference.to_ascii_lowercase().starts_with("urn:uuid:")
+        || ((3..=4).contains(&groups.len())
+            && groups[0].len() == 8
+            && groups[0].bytes().all(|value| value.is_ascii_hexdigit())
+            && groups[1..].iter().all(|group| {
+                group.len() == 4 && group.bytes().all(|value| value.is_ascii_hexdigit())
+            }));
+    uuid::Uuid::parse_str(reference).is_err() && !uuid_shape
+}
+
 fn runtime_model_limits(body: serde_json::Value, model_id: &str) -> Result<RuntimeModelLimits> {
-    let catalog: RuntimeCatalog =
+    let mut catalog: RuntimeCatalog =
         serde_json::from_value(body).context("decode account platform model catalog")?;
+    if catalog.catalog_version == 0 {
+        anyhow::bail!("account platform model catalog is not published");
+    }
+    // Decode alone does not establish a valid directory. Every item must
+    // satisfy the published UUID identity contract before absence is typed.
+    for item in &mut catalog.items {
+        // Published catalog rows share the existing capability invariants.
+        // Zero output remains legal in an unrelated row; selected-model
+        // execution requirements are checked below after identity lookup.
+        if item.context_length == 0 || item.maximum_output_tokens > item.context_length {
+            anyhow::bail!("account platform catalog model limits are invalid");
+        }
+        let model_id = uuid::Uuid::parse_str(&item.model_id)
+            .ok()
+            .filter(|id| !id.is_nil())
+            .context("account platform catalog model identity is invalid")?;
+        let capability_id = uuid::Uuid::parse_str(&item.model_capability_version_id)
+            .ok()
+            .filter(|id| !id.is_nil())
+            .context("account platform catalog capability identity is invalid")?;
+        item.model_id = model_id.to_string();
+        item.model_capability_version_id = capability_id.to_string();
+    }
     let reference = model_id.trim();
+    let canonical_reference = uuid::Uuid::parse_str(reference)
+        .ok()
+        .map(|id| id.to_string());
     let item = catalog
         .items
         .into_iter()
         .find(|item| {
-            item.model_id.eq_ignore_ascii_case(reference)
-                || item.display_name.trim().eq_ignore_ascii_case(reference)
+            item.model_id
+                .eq_ignore_ascii_case(canonical_reference.as_deref().unwrap_or(reference))
+                || (canonical_reference.is_none()
+                    && item.display_name.trim().eq_ignore_ascii_case(reference))
         })
-        .with_context(|| format!("account platform model {model_id} is absent from the catalog"))?;
+        .ok_or_else(|| {
+            // A legacy name never changes to a different model automatically.
+            // Only absence from a fully validated directory offers explicit,
+            // session-local replacement; malformed directory/identity errors do not.
+            if uuid::Uuid::parse_str(reference).is_ok_and(|id| !id.is_nil()) {
+                anyhow!(BoundModelAbsent)
+            } else if is_legacy_model_name(reference) {
+                anyhow!(BoundLegacyModelAbsent)
+            } else {
+                anyhow!("account platform model {model_id} is absent from the catalog")
+            }
+        })?;
     let context_tokens = u32::try_from(item.context_length)
         .context("account platform model context limit is unsupported")?;
     let output_tokens = u32::try_from(item.maximum_output_tokens)
@@ -119,6 +203,7 @@ impl RuntimeModelProvider for AccountPlatformRuntimeModelProvider {
             return Ok(PreparedRuntimeModel::unchanged(request.model));
         }
 
+        let timing_owner = self.model_proxy.capture_timing_owner(&request.session_id);
         super::client_migration::runtime_ready().map_err(|error| anyhow!(error))?;
         // The wire model is a property of the conversation, not of the current
         // global default.  Reading the immutable session snapshot here prevents
@@ -167,7 +252,29 @@ impl RuntimeModelProvider for AccountPlatformRuntimeModelProvider {
                 catalog_response.status
             );
         }
-        let limits = runtime_model_limits(catalog_response.body, session_model_ref)?;
+        let limits = match runtime_model_limits(catalog_response.body, session_model_ref) {
+            Ok(limits) => limits,
+            Err(error) => {
+                if error.downcast_ref::<BoundModelAbsent>().is_some()
+                    || error.downcast_ref::<BoundLegacyModelAbsent>().is_some()
+                {
+                    use crate::features::assistant::timing::{ModelRejection, ModelRejectionCode};
+                    let rejection = if error.downcast_ref::<BoundLegacyModelAbsent>().is_some() {
+                        Some(ModelRejection::legacy_unavailable())
+                    } else {
+                        ModelRejection::new(ModelRejectionCode::Unavailable, session_model_ref)
+                    };
+                    if let (Some(owner), Some(rejection)) = (timing_owner.as_ref(), rejection) {
+                        self.model_proxy.record_prepare_rejection(
+                            &request.session_id,
+                            owner,
+                            rejection,
+                        );
+                    }
+                }
+                return Err(error);
+            }
+        };
         let mut model = request.model;
         model.model = limits.engine_model.clone();
         model.context_window_tokens = Some(limits.context_tokens);
@@ -231,6 +338,83 @@ mod tests {
     use crate::platform::credential_store::{CredentialEditAction, CredentialState};
     use crate::platform::prefs::{ModelPreset, SavedModel};
 
+    #[test]
+    fn missing_legacy_binding_offers_only_explicit_reselection() {
+        let catalog = json!({ "catalog_version": 1, "items": [{
+            "model_id": "0199a100-0001-7000-8000-000000000107",
+            "display_name": "deepseek-flash",
+            "model_capability_version_id": "0199a100-0001-7000-8000-000000000201",
+            "context_length": 8192, "maximum_output_tokens": 1024
+        }] });
+        let legacy = "deepseek-v4-flash";
+        let error = runtime_model_limits(catalog.clone(), legacy).unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<super::BoundLegacyModelAbsent>()
+                .is_some()
+        );
+        assert!(error.downcast_ref::<super::BoundModelAbsent>().is_none());
+        // The existing exact current-name lookup still works; absence never
+        // changes a saved old name into the newer similar directory name.
+        let current = runtime_model_limits(catalog, "deepseek-flash").unwrap();
+        assert_eq!(
+            current.gateway_model_id,
+            "0199a100-0001-7000-8000-000000000107"
+        );
+        assert_eq!(legacy, "deepseek-v4-flash");
+        for name in ["deepseek-chat", "abcdefghijklmnopqrstuvwxyzabcdef"] {
+            let error =
+                runtime_model_limits(json!({"catalog_version":1,"items":[]}), name).unwrap_err();
+            assert!(
+                error
+                    .downcast_ref::<super::BoundLegacyModelAbsent>()
+                    .is_some(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_identity_or_catalog_cannot_prove_legacy_absence() {
+        for reference in [
+            "",
+            " ",
+            "old model",
+            "bad\nmodel",
+            "00000000-0000-0000-0000-000000000000",
+            "0199a100-0001-7000-8000-00000000010z",
+            "0199a100-0001-7000-8000",
+            "xxxxxxxx-0001-7000-8000-000000000107",
+            &"a".repeat(257),
+        ] {
+            let error =
+                runtime_model_limits(json!({ "catalog_version": 1, "items": [] }), reference)
+                    .unwrap_err();
+            assert!(
+                error
+                    .downcast_ref::<super::BoundLegacyModelAbsent>()
+                    .is_none(),
+                "{reference:?}"
+            );
+        }
+        for catalog in [
+            json!({ "catalog_version": 0, "items": [] }),
+            json!({ "catalog_version": 1, "items": [{ "model_id": "bad" }] }),
+            json!({ "catalog_version": 1, "items": [{ "model_id": "0199a100-0001-7000-8000-000000000107", "display_name": "other", "model_capability_version_id": "bad", "context_length": 8192, "maximum_output_tokens": 1024 }] }),
+        ] {
+            let error = runtime_model_limits(catalog, "deepseek-v4-flash").unwrap_err();
+            assert!(
+                error
+                    .downcast_ref::<super::BoundLegacyModelAbsent>()
+                    .is_none()
+            );
+        }
+        assert!(
+            super::is_legacy_model_name("not-a-uuid"),
+            "a normal finite name differs from a malformed UUID-shaped identity"
+        );
+    }
+
     fn ordinary_model() -> SavedModel {
         SavedModel {
             id: "ordinary".to_string(),
@@ -266,28 +450,129 @@ mod tests {
     }
 
     #[test]
+    fn invalid_catalog_identity_is_never_a_bound_model_absence() {
+        let selected = "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c";
+        let valid_model = "0199a100-0001-7000-8000-000000000106";
+        let valid_capability = "0199a100-0001-7000-8000-000000000201";
+        for (model_id, capability_id) in [
+            ("not-a-uuid", valid_capability),
+            ("00000000-0000-0000-0000-000000000000", valid_capability),
+            (valid_model, "not-a-uuid"),
+            (valid_model, "00000000-0000-0000-0000-000000000000"),
+        ] {
+            let body = json!({ "catalog_version": 1, "items": [{
+                "model_id": model_id, "display_name": "complete decoded item",
+                "model_capability_version_id": capability_id,
+                "context_length": 8192, "maximum_output_tokens": 4096
+            }] });
+            let error = runtime_model_limits(body, selected).unwrap_err();
+            assert!(
+                error.downcast_ref::<super::BoundModelAbsent>().is_none(),
+                "invalid directory identity remains generic"
+            );
+        }
+        // One valid matching model does not hide an invalid unrelated item.
+        let error = runtime_model_limits(json!({ "catalog_version": 1, "items": [
+            { "model_id": selected, "display_name": "selected", "model_capability_version_id": valid_capability, "context_length": 8192, "maximum_output_tokens": 4096 },
+            { "model_id": "not-a-uuid", "display_name": "unrelated", "model_capability_version_id": valid_capability, "context_length": 8192, "maximum_output_tokens": 4096 }
+        ] }), selected).unwrap_err();
+        assert!(error.downcast_ref::<super::BoundModelAbsent>().is_none());
+        assert!(runtime_model_limits(json!({ "catalog_version": 1, "items": [{
+            "model_id": valid_model, "display_name": "valid unrelated", "model_capability_version_id": valid_capability, "context_length": 8192, "maximum_output_tokens": 4096
+        }] }), selected).unwrap_err().downcast_ref::<super::BoundModelAbsent>().is_some());
+    }
+
+    #[test]
+    fn bound_missing_model_is_distinct_from_bad_catalog_or_capability() {
+        let id = "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c";
+        let absent =
+            runtime_model_limits(json!({ "catalog_version": 1, "items": [] }), id).unwrap_err();
+        assert!(absent.downcast_ref::<super::BoundModelAbsent>().is_some());
+        for body in [
+            json!(null),
+            json!({ "catalog_version": 0, "items": [] }),
+            json!({ "items": [] }),
+            json!({ "catalog_version": 1, "items": [{}] }),
+            json!({ "catalog_version": 1, "items": [{ "model_id": id, "display_name": "bound", "model_capability_version_id": "0199a100-0001-7000-8000-000000000201", "context_length": 1, "maximum_output_tokens": 2 }] }),
+        ] {
+            assert!(
+                runtime_model_limits(body, id)
+                    .unwrap_err()
+                    .downcast_ref::<super::BoundModelAbsent>()
+                    .is_none()
+            );
+        }
+        let alias = runtime_model_limits(json!({ "catalog_version": 1, "items": [{ "model_id": "0199a100-0001-7000-8000-000000000107", "display_name": id, "model_capability_version_id": "0199a100-0001-7000-8000-000000000201", "context_length": 2, "maximum_output_tokens": 1 }] }), id).unwrap_err();
+        assert!(
+            alias.downcast_ref::<super::BoundModelAbsent>().is_some(),
+            "display name must not impersonate a stable binding"
+        );
+        assert!(
+            runtime_model_limits(json!({ "catalog_version": 1, "items": [] }), "legacy-name")
+                .unwrap_err()
+                .downcast_ref::<super::BoundModelAbsent>()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn invalid_unrelated_catalog_limits_cannot_prove_bound_model_absence() {
+        let selected = "0199a100-0001-7000-8000-000000000106";
+        for (context_length, maximum_output_tokens) in [(0, 0), (8, 9)] {
+            let error = runtime_model_limits(
+                json!({ "catalog_version": 1, "items": [{
+                "model_id": "0199a100-0001-7000-8000-000000000107",
+                "display_name": "unrelated",
+                "model_capability_version_id": "0199a100-0001-7000-8000-000000000201",
+                "context_length": context_length, "maximum_output_tokens": maximum_output_tokens
+            }] }),
+                selected,
+            )
+            .unwrap_err();
+            assert!(error.downcast_ref::<super::BoundModelAbsent>().is_none());
+        }
+        let error = runtime_model_limits(
+            json!({ "catalog_version": 1, "items": [{
+            "model_id": "0199a100-0001-7000-8000-000000000107",
+            "display_name": "unrelated output-zero row",
+            "model_capability_version_id": "0199a100-0001-7000-8000-000000000201",
+            "context_length": 8, "maximum_output_tokens": 0
+        }] }),
+            selected,
+        )
+        .unwrap_err();
+        assert!(error.downcast_ref::<super::BoundModelAbsent>().is_some());
+    }
+
+    #[test]
     fn runtime_limits_use_the_selected_published_catalog_capability() {
         let limits = runtime_model_limits(
             json!({
                 "catalog_version": 7,
                 "items": [
                     {
-                        "model_id": "model-a",
+                        "model_id": "0199a100-0001-7000-8000-000000000106",
                         "display_name": "DeepSeek Flash",
-                        "model_capability_version_id": "capability-a-v2",
+                        "model_capability_version_id": "0199a100-0001-7000-8000-000000000202",
                         "context_length": 128000,
                         "maximum_output_tokens": 4096
                     }
                 ]
             }),
-            "model-a",
+            "0199a100-0001-7000-8000-000000000106",
         )
         .expect("published model limits");
 
         assert_eq!(limits.catalog_version, 7);
-        assert_eq!(limits.gateway_model_id, "model-a");
-        assert_eq!(limits.engine_model, "model-a");
-        assert_eq!(limits.capability_version_id, "capability-a-v2");
+        assert_eq!(
+            limits.gateway_model_id,
+            "0199a100-0001-7000-8000-000000000106"
+        );
+        assert_eq!(limits.engine_model, "0199a100-0001-7000-8000-000000000106");
+        assert_eq!(
+            limits.capability_version_id,
+            "0199a100-0001-7000-8000-000000000202"
+        );
         assert_eq!(limits.context_tokens, 128_000);
         assert_eq!(limits.output_tokens, 4_096);
     }
@@ -300,7 +585,7 @@ mod tests {
                 "items": [{
                     "model_id": "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c",
                     "display_name": "deepseek-flash",
-                    "model_capability_version_id": "capability-deepseek-flash",
+                    "model_capability_version_id": "0199a100-0001-7000-8000-000000000203",
                     "context_length": 128000,
                     "maximum_output_tokens": 8192
                 }]
@@ -314,7 +599,10 @@ mod tests {
             "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c"
         );
         assert_eq!(limits.engine_model, "deepseek-v4-flash");
-        assert_eq!(limits.capability_version_id, "capability-deepseek-flash");
+        assert_eq!(
+            limits.capability_version_id,
+            "0199a100-0001-7000-8000-000000000203"
+        );
     }
 
     #[test]
@@ -325,7 +613,7 @@ mod tests {
                 "items": [{
                     "model_id": "00000000-0000-7000-8000-000000000099",
                     "display_name": "future-model",
-                    "model_capability_version_id": "capability-future",
+                    "model_capability_version_id": "0199a100-0001-7000-8000-000000000204",
                     "context_length": 128000,
                     "maximum_output_tokens": 8192
                 }]
@@ -347,9 +635,9 @@ mod tests {
                 json!({
                     "catalog_version": 1,
                     "items": [{
-                        "model_id": "bad",
+                        "model_id": "0199a100-0001-7000-8000-000000000108",
                         "display_name": "bad",
-                        "model_capability_version_id": "capability-bad",
+                        "model_capability_version_id": "0199a100-0001-7000-8000-000000000205",
                         "context_length": 4096,
                         "maximum_output_tokens": 8192
                     }]

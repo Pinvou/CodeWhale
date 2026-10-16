@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -337,6 +338,29 @@ func (r *PostgresRepository) AcceptInvitation(ctx context.Context, principal ide
 		}
 		if _, err := tx.Exec(ctx, `UPDATE memberships SET status='ACTIVE',version=$2,updated_at=$3 WHERE id=$1`, membershipID, membershipVersion, now); err != nil {
 			return MembershipMutationResult{}, err
+		}
+	} else {
+		// A pending invitation cannot silently replace an active member's
+		// grants, or acknowledge intent that was never fulfilled. Accepted
+		// receipts have already returned above and remain replayable.
+		member, err := getMember(ctx, tx, membershipID)
+		if err != nil {
+			return MembershipMutationResult{}, err
+		}
+		if !slices.Equal(managedMembershipRoles(member.Roles), sortedInvitationRoles(invitation.Roles)) {
+			return MembershipMutationResult{}, ErrConflict
+		}
+		// Nil leaves ordinary unit attachments unspecified; an explicit empty
+		// list requires an unscoped member. Independent UNIT_ADMIN grants are
+		// not invitation intent and must not be revoked or compared as empty.
+		if invitation.UnitIDs != nil {
+			currentUnits, err := readMemberUnits(ctx, tx, membershipID)
+			if err != nil {
+				return MembershipMutationResult{}, err
+			}
+			if !slices.Equal(currentUnits, invitation.UnitIDs) {
+				return MembershipMutationResult{}, ErrConflict
+			}
 		}
 	}
 

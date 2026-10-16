@@ -28,6 +28,8 @@ worker 外呼前续约仍有效的同版本 claim，行锁等待后再查数据�
 
 匿名范围限于可证明属于主体的可变账号、身份、注册/密码重置/资料变更联系方式、关联短信挑战、Commerce 映射、付款联系人及可清理重放内容。金额、来源、永久赠额资格、财务回执、审计及 outbox 保留。只有手机号匹配的旧 slider 或未绑定挑战无法证明历史属主，不猜测清除；已接受/撤销邀请终态不破坏不可变证据。短信风险摘要没有手机号明文，但单向摘要不等于不可关联或不可识别，仍遵循原保留策略。既有受控 replay retention case 加密内容和法律保全不自动实体删除，永久围栏阻止清理后新复制/新重放内容。
 
+LOGIN 短信挑战的 `mobile_e164` 可能没有可证明属主的用户外键，当前不会仅凭手机号在注销时清除这类明文记录。相应发送／校验尝试保存的是单向摘要，仍有联系关联性，但不包含手机号明文。既有短信清理要求挑战已过期且最后更新超过 90 天，并保留业务引用、有效投递租约或 `delivery_uncertain_at` 未澄清的记录；90 天不构成所有记录必定销毁的承诺。此类记录、单向摘要关联性和实体销毁仍纳入 [Issue #1663](https://github.com/Pinvou/pinvou3/issues/1663)，本轮未修；对外隐私说明与发布验收必须明确此边界，不能宣称注销立即清除全部手机号。
+
 最终匿名化在原 claim、生命周期、身份删除、grant 隔离与 replay 清理证明全部有效后，清除 `accepted_by` 指向该主体的 ACCEPTED 邀请邮箱及提示；保留冻结身份、目标摘要、token 摘要、接收状态及历史角色，不按 `invited_by` 删除他人收件信息。同主体 CONSUMED/EXPIRED/LOCKED/SUPERSEDED bootstrap 历史记录的身份字段替换为匿名标识，状态、代次、验证器及回执保留；这些终态不能用于认证，不改变普通消费、PENDING/REDEEMING 激活或恢复契约。
 
 两条注销源码和 API 契约正式测试统一执行 `npm --prefix account-platform ci --ignore-scripts`、`npm --prefix account-platform run test:closure-contracts`；它们使用锁定的 YAML 解析依赖，并接入现有 `account-platform-test`，仅是源码接线和契约形状检查。专用三域 PostgreSQL 组合夹具另外需要显式的 `PINVOU_TEST_SCHEMA_DATABASE_URL`（隔离部署角色准备连接）、`F08_TEST_GO`（Go 可执行文件绝对路径）和 `F08_TEST_CHILD_LOG`（私有测试日志绝对路径）；父夹具创建并传递 `F08_ACCOUNT_URL`、`F08_BILLING_URL`、`F08_TOKEN_URL`，运行原公开迁移和子测试，再按归属清理测试资源。这些是测试启动参数，不是生产配置，实际数据库、父子测试与受控外部回执结果须分别记录。
@@ -35,6 +37,8 @@ worker 外呼前续约仍有效的同版本 claim，行锁等待后再查数据�
 `account_subject_retention_records` 到期 `PURGED` 仅是元数据标记，不代表所有财务或加密实体已销毁。实体销毁、法律保全及不能证明属主的数据治理见 [Issue #1663](https://github.com/Pinvou/pinvou3/issues/1663)。不得直接修改账本、资格或匿名标记来完成注销。
 
 Commerce 的 USER enqueue、claim、complete、retry 与本地清理按用户→mapping→job 锁序串行化；已关闭主体或旧生命周期的晚回执不回写本地联系人、外部引用或证据。金融任务未权威完成仍阻止清理。非金融任务的 claim 事务提交后，供应商 EnsureCustomer 可能已在途；当前通用 adapter 没有供应商删除或取消回执，本地 noop 不证明外部客户已删除或供应商未留存联系方式。这一外部保留边界需按 Issue #1663 的治理方案核实，不伪造外部 ACK。
+
+隔离仍将额度标记为 `SUSPENDED/ACCOUNT_CLOSED`，保留原回收识别和资金冻结门禁；该次不可变审计在原有变更后快照字段之外，附加隔离前的 `prior_status` 与 `prior_suspension_reason`（原值为空时显式为 null）。同一隔离回执重试不重新计算或改写首次事实，不修改历史审计、迁移身份、资金金额或 HTTP 回执。
 
 组织回收保原 `/v1/organizations/{org}/account-closed-grants/{grant}/reclaim` 及 `account-closed-grants:reclaim-batch`。`org.grants.reclaim_closed` 人类委托绑定组织、grant、原用户；Billing 另核 Account ANONYMIZED/COMPLETED 生命周期。过期、冻结、预占拒绝。原 200 及 207 `SUCCEEDED/FAILED` 保持；未知 transport/错误目标回执 `COMMAND_RESULT_UNKNOWN` 保原键/事实。FAILED 不证明没有财务效果；批量逐项稳定派生键，不变成跨项原子操作。
 
@@ -45,3 +49,5 @@ Commerce 的 USER enqueue、claim、complete、retry 与本地清理按用户→
 相邻传播后，Commerce 保留前序当前 mapping/provider/adapter/subject/version 筛选、锁内重核及锁后数据库租约时钟。入队记录允许 ACTIVE、DISABLED、REPAIR_REQUIRED、PROVISIONING 的合法 producer，派发仍仅允许 ACTIVE。真实注册与已确认 MOBILE 四态共五子例通过；三域赠礼注销组合通过 65.29 秒。旧代际禁止重新派发，原有效在途回调及历史证据保留。
 
 会话撤销 ACK 按 USER→profile→sessions 锁序记录；迟到完成不覆盖 CANCELLED_ACCOUNT_CLOSURE 的状态或原因，原 COMPLETED 保持只读回放。正式无 overlay 九子例及映射锁租约专项通过 37.052 秒，其中并发 Prepare 实际遇到一次 40001：首事务回滚后核实原 claim/version/live lease 仍有效，以同 claim 恢复成功，未接受 40P01。测试中的 Account 主体快照未变，不冒称该组实测 Billing 余额。此前两次新增测试分支/观察分类失败及组合中的旧映射查询观察失败均留档。最终独立审核、生产外部系统验收和前述保留治理边界仍分别记录。
+
+持续集成的注销数据库入口为 `python3 scripts/test-account-closure-postgres.py`，在既有隔离 PostgreSQL 服务上接续 Token 财务门禁，使用公共迁移、原有非超级用户业务角色和真实父／子用例。必须显式配置 `PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL` 为无密码、带端口的本机临时 postgres 数据库；入口拒绝已有业务数据库、部署角色或 public 用户对象，不初始化或清空数据目录。每组由原 Go 夹具按归属创建、清理 UUID 数据库和角色；未清理残留只报错保留，不强制删除。必需父／子顶层用例缺失，或执行中出现失败、跳过均不能通过，原键重放及隔离前审计事实包含在门禁中。日志保留在独立临时目录并输出到 CI 日志；这不等于真实身份供应商、支付服务、外部删除回执或发布验收。

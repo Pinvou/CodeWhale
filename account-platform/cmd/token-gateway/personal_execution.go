@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/clientcompat"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/manualreview"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/Pinvou/pinvou3/account-platform/internal/token"
@@ -35,7 +36,7 @@ func installPersonalExecution(ctx context.Context, service *token.Service, repos
 	if err != nil {
 		return err
 	}
-	production := strings.EqualFold(environment, "production") || strings.EqualFold(environment, "production-new")
+	production := config.IsProduction(environment)
 	if production && len(key) == 0 {
 		return errors.New("client readiness signing key is required")
 	}
