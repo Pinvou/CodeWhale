@@ -3,6 +3,7 @@
 use super::controlled::{ControlledDeviceManager, ControlledOperation};
 use super::protocol::{LeaseContext, SenderRole};
 use super::relay_runtime::ControlledRelayPort;
+use crate::features::remote_control::relay_client::CONTROLLER_SEND_BACKPRESSURE;
 
 #[derive(Default)]
 pub(crate) struct ControlledHeartbeat {
@@ -21,10 +22,14 @@ pub(crate) mod test_support {
     pub(crate) struct CapturePort {
         pub(crate) frames: parking_lot::Mutex<Vec<Value>>,
         pub(crate) reject: std::sync::atomic::AtomicBool,
+        pub(crate) send_error: parking_lot::Mutex<Option<String>>,
     }
     #[async_trait::async_trait]
     impl ControlledRelayPort for CapturePort {
         fn try_send(&self, frame: Value) -> Result<(), String> {
+            if let Some(error) = self.send_error.lock().as_ref() {
+                return Err(error.clone());
+            }
             if self.reject.load(std::sync::atomic::Ordering::Relaxed) {
                 return Err("send_failed".into());
             }
@@ -136,6 +141,75 @@ mod tests {
     }
 
     #[test]
+    fn transient_backpressure_retries_only_the_uncommitted_heartbeat_sequence() {
+        for error in [
+            crate::features::remote_control::relay_client::RelayTrySendError::ChannelFull,
+            crate::features::remote_control::relay_client::RelayTrySendError::ByteBudgetExhausted,
+        ] {
+            let (manager, operation, lease) = connected();
+            let port = CapturePort::default();
+            let mut heartbeat = ControlledHeartbeat::default();
+            heartbeat.install(lease, "live-b-1").unwrap();
+            *port.send_error.lock() = Some(error.controller_send_code().into());
+            for _ in 0..3 {
+                heartbeat.pump(&manager, &operation, false, &port).unwrap();
+                assert_eq!(heartbeat.sequence, 0);
+                assert!(port.frames.lock().is_empty());
+                assert_eq!(
+                    manager.status().kind(),
+                    super::super::controlled::ControlledStatusKind::Connected
+                );
+            }
+            *port.send_error.lock() = None;
+            heartbeat.pump(&manager, &operation, false, &port).unwrap();
+            assert_eq!(port.frames.lock()[0]["heartbeat_sequence"], "1");
+            assert_eq!(heartbeat.sequence, 1);
+        }
+    }
+
+    #[test]
+    fn persistent_backpressure_never_extends_watchdog_or_suppresses_fatal_errors() {
+        let (manager, operation, lease) = connected();
+        let port = CapturePort::default();
+        let mut heartbeat = ControlledHeartbeat::default();
+        heartbeat.install(lease, "live-b-1").unwrap();
+        *port.send_error.lock() = Some(CONTROLLER_SEND_BACKPRESSURE.into());
+        for now in [0, 15_000, 29_999] {
+            manager.poll_watchdog_for(&operation, now).unwrap();
+            heartbeat.pump(&manager, &operation, false, &port).unwrap();
+            assert_eq!(heartbeat.sequence, 0);
+        }
+        assert_eq!(
+            manager
+                .poll_watchdog_for(&operation, 30_000)
+                .unwrap()
+                .kind(),
+            super::super::controlled::ControlledStatusKind::Error
+        );
+        assert!(heartbeat.pump(&manager, &operation, false, &port).is_err());
+        assert!(port.frames.lock().is_empty());
+
+        let (manager, operation, lease) = connected();
+        heartbeat.install(lease, "live-b-2").unwrap();
+        for fatal in [
+            "desktop relay task has stopped",
+            "desktop_controller_relay_unavailable",
+        ] {
+            *port.send_error.lock() = Some(fatal.into());
+            assert_eq!(
+                heartbeat.pump(&manager, &operation, false, &port),
+                Err(fatal.into())
+            );
+            assert_eq!(heartbeat.sequence, 0);
+        }
+        *port.send_error.lock() = Some(CONTROLLER_SEND_BACKPRESSURE.into());
+        manager.stop();
+        manager.start(None, Vec::new()).unwrap();
+        assert!(heartbeat.pump(&manager, &operation, false, &port).is_err());
+        assert!(port.frames.lock().is_empty());
+    }
+
+    #[test]
     fn transport_loss_and_retired_worker_cannot_publish_role_evidence() {
         let (manager, operation, lease) = connected();
         let port = CapturePort::default();
@@ -199,6 +273,19 @@ mod tests {
         assert!(poll.contains("if joined && !resume.is_active()"));
         assert!(poll.contains("heartbeat.pump("));
         assert!(poll.contains("&self.operation, resume.is_active(), &self.channel"));
+        let manager = include_str!("../manager/mod.rs");
+        let send = manager
+            .split("fn send_controller_message(")
+            .nth(1)
+            .unwrap()
+            .split("/// Enable WebUI access")
+            .next()
+            .unwrap();
+        assert!(send.contains(".try_send_controller_owned(generation, binding, message)"));
+        assert!(
+            send.contains(".map_err(|error| error.controller_send_code().to_owned())"),
+            "the actual manager port must preserve queue pressure, not fold it into stopped"
+        );
         assert_eq!(
             serve.matches("heartbeat.install(lease, epoch)").count(),
             2,
@@ -260,7 +347,18 @@ impl ControlledHeartbeat {
                     sequence,
                 )
                 .map_err(|error| error.code.to_owned())?;
-                port.try_send(frame)?;
+                if let Err(error) = port.try_send(frame) {
+                    if error == CONTROLLER_SEND_BACKPRESSURE {
+                        // No frame was queued and no sequence/evidence was
+                        // committed. Retry only this heartbeat next tick; the
+                        // original peer watchdog deadline remains unchanged.
+                        log::warn!(
+                            "remote control B heartbeat deferred: outbound queue backpressure"
+                        );
+                        return Ok(());
+                    }
+                    return Err(error);
+                }
                 self.sequence = sequence;
                 Ok(())
             })

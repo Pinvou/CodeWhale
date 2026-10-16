@@ -1409,12 +1409,7 @@ impl RemoteControlManager {
         };
         sender
             .try_send_controller_owned(generation, binding, message)
-            .map_err(|error| match error {
-                relay_client::RelayTrySendError::ControllerProtocolUnavailable => {
-                    "desktop_controller_relay_unavailable".to_owned()
-                }
-                _ => "desktop relay task has stopped".to_owned(),
-            })
+            .map_err(|error| error.controller_send_code().to_owned())
     }
 
     /// Enable WebUI access. Repeated calls return the same persistent endpoint

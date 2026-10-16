@@ -194,6 +194,20 @@ impl fmt::Display for RelayTrySendError {
 
 impl std::error::Error for RelayTrySendError {}
 
+pub(crate) const CONTROLLER_SEND_BACKPRESSURE: &str = "desktop_controller_send_backpressure";
+
+impl RelayTrySendError {
+    /// Preserve transient queue pressure at the controller's string port.
+    /// Authority, transport and serialization failures remain terminal there.
+    pub(crate) fn controller_send_code(&self) -> &'static str {
+        match self {
+            Self::ChannelFull | Self::ByteBudgetExhausted => CONTROLLER_SEND_BACKPRESSURE,
+            Self::ControllerProtocolUnavailable => "desktop_controller_relay_unavailable",
+            _ => "desktop relay task has stopped",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct RelaySender {
     tx: mpsc::Sender<OutboundFrame>,
@@ -1421,6 +1435,52 @@ mod tests {
             Err(mpsc::error::TryRecvError::Empty)
         ));
         assert_eq!(sender.byte_budget.available_permits(), 1024);
+    }
+
+    #[test]
+    fn controller_send_codes_distinguish_actual_queue_pressure_from_fatal_errors() {
+        let message = json!({ "payload": "controller-heartbeat" });
+        let (sender, receiver) = outbound_channel(1, 4096, 4096);
+        sender
+            .try_send(RelayOutbound::Message(message.clone()))
+            .unwrap();
+        let full = sender
+            .try_send(RelayOutbound::Message(message.clone()))
+            .unwrap_err();
+        assert_eq!(full, RelayTrySendError::ChannelFull);
+        assert_eq!(full.controller_send_code(), CONTROLLER_SEND_BACKPRESSURE);
+        drop(receiver);
+        let closed = sender
+            .try_send(RelayOutbound::Message(message.clone()))
+            .unwrap_err();
+        assert_eq!(closed, RelayTrySendError::ChannelClosed);
+        assert_ne!(closed.controller_send_code(), CONTROLLER_SEND_BACKPRESSURE);
+
+        let bytes = serde_json::to_string(&message).unwrap().len();
+        let (sender, mut receiver) = outbound_channel(4, bytes * 2 - 1, 4096);
+        sender
+            .try_send(RelayOutbound::Message(message.clone()))
+            .unwrap();
+        let budget = sender
+            .try_send(RelayOutbound::Message(message.clone()))
+            .unwrap_err();
+        assert_eq!(budget, RelayTrySendError::ByteBudgetExhausted);
+        assert_eq!(budget.controller_send_code(), CONTROLLER_SEND_BACKPRESSURE);
+        drop(receiver.try_recv().unwrap());
+        sender.try_send(RelayOutbound::Message(message)).unwrap();
+
+        for fatal in [
+            RelayTrySendError::ControllerAuthorityUnavailable,
+            RelayTrySendError::ControllerProtocolUnavailable,
+            RelayTrySendError::Serialization("fixture".into()),
+            RelayTrySendError::FrameTooLarge { bytes: 2, limit: 1 },
+        ] {
+            assert_ne!(fatal.controller_send_code(), CONTROLLER_SEND_BACKPRESSURE);
+        }
+        assert_eq!(
+            RelayTrySendError::ControllerProtocolUnavailable.controller_send_code(),
+            "desktop_controller_relay_unavailable"
+        );
     }
 
     #[test]
