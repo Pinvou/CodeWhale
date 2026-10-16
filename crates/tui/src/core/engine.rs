@@ -1686,14 +1686,27 @@ impl Engine {
         incoming_effective: Option<codewhale_config::route::RouteLimits>,
         incoming_declared: Option<codewhale_config::route::RouteLimits>,
     ) -> Option<codewhale_config::route::RouteLimits> {
-        if incoming_declared.is_none()
+        let preserve = incoming_declared.is_none()
             && incoming_effective == self.active_route_limits
-            && self.active_route_limits_model.as_deref() == Some(model)
-        {
+            && self.active_route_limits_model.as_deref() == Some(model);
+        let next = if preserve {
             self.active_route_declared_limits
         } else {
             incoming_declared
+        };
+        // Steady-state installs — preserves and declaration-less engines —
+        // stay silent; a standing declaration only actually changes here,
+        // and nothing else on the wire records that fact.
+        if self.active_route_declared_limits.is_some() && next != self.active_route_declared_limits
+        {
+            tracing::debug!(
+                model,
+                from = ?self.active_route_declared_limits,
+                to = ?next,
+                "install replaced the standing route declaration"
+            );
         }
+        next
     }
 
     /// Install a route that the host already resolved and client-preflighted.
