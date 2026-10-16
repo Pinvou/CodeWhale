@@ -3,12 +3,16 @@
 
 Two failure classes are pinned here:
 
-1. `resolved` URLs pointing at registry.npmmirror.com — the mirror is slow
-   and a cross-border single point; `npm ci` consumes lock URLs verbatim,
-   so every mirror URL is a latency/flake dependency on every build. The
+1. `resolved` URLs pointing at a registry mirror — mirrors are slow and
+   cross-border single points; `npm ci` consumes lock URLs verbatim, so
+   every mirror URL is a latency/flake dependency on every build. The
    two repo locks that are consumed by CI (team-relay-hub,
-   codex-bridge-runtime) carried 134 such URLs in total before the #1518
-   cleanup; this keeps them from creeping back in.
+   codex-bridge-runtime) carried 134 npmmirror URLs in total before the
+   #1518 cleanup; the blocklist covers npmmirror plus the other common
+   CN mirrors (round-11 review: matching only registry.npmmirror.com let
+   the same lock-regen creep back in via a taobao/tencent/huawei/cnpm
+   mirror in a contributor's npmrc). Matching is case-insensitive —
+   hosts serialize lowercase in practice, but nothing forces it.
 
 2. Missing or wrong `libc` fields on the @img/* platform packages in
    team-relay-hub/package-lock.json — npm 10's arborist does not serialize
@@ -62,6 +66,19 @@ EXPECTED_TEAM_RELAY_HUB_LIBC = {
 }
 
 
+# Registry mirror hosts banned from `resolved` URLs. npm copies the
+# registry a lock was generated against verbatim, so any of these means a
+# contributor-side mirror config crept back into the committed lock.
+MIRROR_HOST_MARKERS = (
+    "registry.npmmirror.com",
+    "npm.taobao.org",  # legacy taobao mirror (redirects to npmmirror)
+    "mirrors.cloud.tencent.com",
+    "mirrors.tencent.com",
+    "mirrors.huaweicloud.com",
+    "registry.cnpmjs.org",
+)
+
+
 def iter_lock_files():
     for root, dirs, files in os.walk(REPO_ROOT):
         dirs[:] = [
@@ -98,12 +115,15 @@ def main():
             f"{pkg}: {entry.get('resolved')}"
             for pkg, entry in lock.get("packages", {}).items()
             if isinstance(entry, dict)
-            and "registry.npmmirror.com" in (entry.get("resolved") or "")
+            and any(
+                marker in (entry.get("resolved") or "").lower()
+                for marker in MIRROR_HOST_MARKERS
+            )
         )
         if mirror_urls:
             failures.append(
-                f"{rel}: {len(mirror_urls)} resolved URLs point at "
-                f"registry.npmmirror.com (must be registry.npmjs.org):\n  "
+                f"{rel}: {len(mirror_urls)} resolved URLs point at a "
+                f"registry mirror (must be registry.npmjs.org):\n  "
                 + "\n  ".join(mirror_urls)
             )
         if rel == os.path.join("team-relay-hub", "package-lock.json"):
