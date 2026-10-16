@@ -28,7 +28,9 @@ use tokio_util::sync::CancellationToken;
 use crate::approval_log::ApprovalReceiptStore;
 use crate::client::DeepSeekClient;
 use crate::compaction::{CompactionConfig, PreparedCompactionEnvelope, compact_messages_safe};
-use crate::config::{ApiProvider, Config, DEFAULT_MAX_SUBAGENTS, DEFAULT_TEXT_MODEL};
+use crate::config::{
+    ApiProvider, Config, DEFAULT_MAX_SUBAGENTS, DEFAULT_TEXT_MODEL, ProviderIdentity,
+};
 use crate::core::model_client::SharedModelClient;
 use crate::error_taxonomy::{ErrorCategory, ErrorEnvelope, ErrorSeverity, StreamError};
 use crate::features::{Feature, Features};
@@ -1678,17 +1680,26 @@ impl Engine {
     /// no `EmbeddingHost` provenance, and clearing the declaration there would
     /// silently drop the host's standing budget on the first such turn — the
     /// stale-budget window this field exists to close. A changed effective
-    /// value, a different model, or an incoming candidate that does carry a
-    /// declaration always rewrites the pair.
+    /// value, a different model, a different configured route, or an incoming
+    /// candidate that does carry a declaration always rewrites the pair.
     fn declared_limits_for_install(
         &self,
+        incoming_identity: &ProviderIdentity,
         model: &str,
         incoming_effective: Option<codewhale_config::route::RouteLimits>,
         incoming_declared: Option<codewhale_config::route::RouteLimits>,
     ) -> Option<codewhale_config::route::RouteLimits> {
+        // The declaration describes one configured route. Two named custom
+        // endpoints can resolve the same wire model onto the same effective
+        // triple, so value and model equality alone would attribute route A's
+        // budget to route B — and B's later drift would be overlaid by A's
+        // legacy declaration instead of resolving fresh.
         let preserve = incoming_declared.is_none()
             && incoming_effective == self.active_route_limits
-            && self.active_route_limits_model.as_deref() == Some(model);
+            && self.active_route_limits_model.as_deref() == Some(model)
+            && self.api_provider == incoming_identity.provider
+            && self.api_provider_identity == incoming_identity.key
+            && self.api_provider_id == incoming_identity.exact_id;
         let next = if preserve {
             self.active_route_declared_limits
         } else {
@@ -1714,16 +1725,17 @@ impl Engine {
     /// boundary: the descriptor is the single authority for the turn.
     fn install_validated_runtime_route(&mut self, route: ValidatedRuntimeRoute) {
         let provider = route.identity.provider;
-        let identity = route.identity.key;
-        let provider_id = route.identity.exact_id;
         let model = route.model;
         let limits = crate::route_budget::known_route_limits(route.candidate.limits());
         let declared_limits = route.candidate.embedding_host_declared_limits();
         let capabilities = route.candidate.capabilities();
         let api_config = *route.config;
         let client = route.client;
+        let preserved_declared =
+            self.declared_limits_for_install(&route.identity, &model, limits, declared_limits);
+        let identity = route.identity.key;
+        let provider_id = route.identity.exact_id;
 
-        let preserved_declared = self.declared_limits_for_install(&model, limits, declared_limits);
         self.api_provider = provider;
         self.api_provider_identity = identity;
         self.api_provider_id = provider_id;
@@ -1758,8 +1770,6 @@ impl Engine {
 
         let preflighted_client = route.take_preflighted_client();
         let provider = route.identity.provider;
-        let identity = route.identity.key;
-        let provider_id = route.identity.exact_id;
         let model = route.model;
         let limits = crate::route_budget::known_route_limits(route.candidate.limits());
         let declared_limits = route.candidate.embedding_host_declared_limits();
@@ -1769,7 +1779,11 @@ impl Engine {
             .map(Ok)
             .unwrap_or_else(|| DeepSeekClient::from_candidate(&api_config, &route.candidate));
 
-        let preserved_declared = self.declared_limits_for_install(&model, limits, declared_limits);
+        let preserved_declared =
+            self.declared_limits_for_install(&route.identity, &model, limits, declared_limits);
+        let identity = route.identity.key;
+        let provider_id = route.identity.exact_id;
+
         self.api_provider = provider;
         self.api_provider_identity = identity;
         self.api_provider_id = provider_id;
