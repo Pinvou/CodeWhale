@@ -151,7 +151,7 @@ test('expired sessions use existing login while authenticated users use the exis
   await assert.rejects(requireAuditExportActor({ session: async () => ({ authenticated: false }) }, actor), { status: 401, code: 'AUTH_REQUIRED' });
 });
 
-test('fresh actor and existing export permissions are rechecked; PII is required only for create or replay', async () => {
+test('fresh actor and PII permissions are rechecked for protected actions; known-job metadata recovery stays base-only', async () => {
   await assert.rejects(requireAuditExportActor(authClient(account(otherActor)), actor), { code: 'AUDIT_EXPORT_RECOVERY_UNAVAILABLE' });
   await assert.rejects(requireAuditExportActor(authClient(account(actor, [])), actor), { code: 'AUDIT_EXPORT_RECOVERY_UNAVAILABLE' });
   const baseOnly = authClient(account(actor, ['platform.audit.export']));
@@ -161,7 +161,10 @@ test('fresh actor and existing export permissions are rechecked; PII is required
   await assert.rejects(reauthenticateAuditExport({ ...baseOnly, reauthenticate: () => moved++ }, unknownRecord(), { storage: memoryStorage() }));
   const knownJob = newAuditExportRecovery({ actor, nonce, attempt: original(), exportID, ticketIssueUnknown: true });
   await reauthenticateAuditExport({ ...baseOnly, reauthenticate: () => moved++ }, knownJob, { storage: memoryStorage() });
-  assert.equal(moved, 1); // Existing job GET/ticket/download never add a new PII policy.
+  assert.equal(moved, 1); // Reauthentication restores metadata; it never issues a ticket or downloads.
+  await assert.rejects(requireAuditExportActor(baseOnly, actor, true), { code: 'PERMISSION_DENIED', status: 403 });
+  assert.equal((await requireAuditExportActor(baseOnly, actor, false)).user_id, actor);
+  assert.equal((await requireAuditExportActor(authClient(), actor, true)).user_id, actor);
 });
 
 test('recovery clearing fails closed without losing a different actor or an undeletable request', () => {

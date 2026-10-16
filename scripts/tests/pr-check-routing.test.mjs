@@ -599,3 +599,62 @@ test("title gate enforces the convention on the live PR title (squash subject)",
     "title gate must retry-fetch the live title and validate exactly that file in subject-only mode",
   );
 });
+
+
+const frontendProbeDependencyPaths = [
+  "account-platform/package.json",
+  "account-platform/package-lock.json",
+  "account-platform/contracts/deployment/model-token-release-plan.schema.json",
+  "account-platform/contracts/deployment/model-token-release-evidence.schema.json",
+  "account-platform/deploy/nginx/credential-edge.example.json",
+  "account-platform/internal/portal/credential-handoff.v1.js",
+  "account-platform/internal/portal/credential_handoff_hash_generated.go",
+  "scripts/account-platform-credential-browser-scope.mjs",
+  "scripts/account-platform-credential-origin-probe.mjs",
+  "scripts/account-platform-credential-edge.mjs",
+  "scripts/account-platform-model-token-release-plan.mjs",
+];
+const frontendProbeInstallStep = "Install Account Platform probe dependencies";
+const frontendLogicStep = "前端逻辑测试 (pet 全套 + diff parser + markdown)";
+
+function assertFrontendProbeDependencies(text) {
+  const job = jobBlock("frontend-test", text).replaceAll("\r\n", "\n");
+  assert.match(job, /^ {8}working-directory: pinvou3-app$/m);
+  const install = namedStep(job, frontendProbeInstallStep);
+  assert.match(install, /^ {8}run: npm --prefix \.\.\/account-platform ci --ignore-scripts --prefer-offline --no-audit$/m);
+  assert.doesNotMatch(install, /^ {8}(?:if|continue-on-error|working-directory):/m,
+    "The logic test loads AP dependencies on Draft too, in the inherited app cwd");
+  assert.ok(job.indexOf(install) < job.indexOf(namedStep(job, frontendLogicStep)),
+    "AP tools must be installed before npm test module discovery");
+  const setup = job.match(/^ {6}- uses: actions\/setup-node@\S+\n[\s\S]*?(?=^ {6}- |$(?![\s\S]))/m);
+  assert.ok(setup, "frontend setup-node block not found");
+  assert.match(setup[0], /^ {12}account-platform\/package-lock\.json$/m);
+  const paths = filterPaths(text, "frontend");
+  for (const path of frontendProbeDependencyPaths) {
+    assert.ok(paths.includes(path), `${path} must route the frontend module-loading gate`);
+  }
+}
+
+test("frontend probe tool dependencies are installed before logic tests on Draft and Ready", () => {
+  assertFrontendProbeDependencies(workflow);
+});
+
+test("frontend probe dependency guard rejects incomplete or conditional installation and missing imports", () => {
+  const job = jobBlock("frontend-test");
+  const install = namedStep(job, frontendProbeInstallStep);
+  const variants = [
+    job.replace(install, ""),
+    job.replace(install, install.replace("        run:", "        if: ${{ github.event.pull_request.draft == false }}\n        run:")),
+    job.replace(install, install.replace("        run:", "        continue-on-error: true\n        run:")),
+    job.replace(install, install.replace("../account-platform", "../../account-platform")),
+    job.replace(install, "") + install,
+    job.replace(/^ {12}account-platform\/package-lock\.json\r?\n/m, ""),
+  ];
+  for (const variant of variants) {
+    assert.throws(() => assertFrontendProbeDependencies(workflow.replace(job, variant)));
+  }
+  for (const path of frontendProbeDependencyPaths) {
+    assert.throws(() => assertFrontendProbeDependencies(
+      workflow.replace(`              - '${path}'`, "")), `missing route ${path}`);
+  }
+});

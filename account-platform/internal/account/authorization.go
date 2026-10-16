@@ -71,6 +71,16 @@ type compositeAuthorizationRepository interface {
 }
 
 func (r *PostgresRepository) Authorize(ctx context.Context, principal identity.Principal, permission string, organizationID, unitID *uuid.UUID) (AuthorizationDecision, error) {
+	return authorizePermission(ctx, r.pool, principal, permission, organizationID, unitID, false)
+}
+
+// authorizationQueryer lets a locked operation reuse its transaction instead of
+// acquiring a second pool connection while retaining the existing permission SQL.
+type authorizationQueryer interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func authorizePermission(ctx context.Context, queryer authorizationQueryer, principal identity.Principal, permission string, organizationID, unitID *uuid.UUID, currentClock bool) (AuthorizationDecision, error) {
 	permission = canonicalPermissionCode(permission)
 	if !f01PermissionAllowed(permission) || (unitID != nil && organizationID == nil) {
 		return AuthorizationDecision{}, ErrForbidden
@@ -79,7 +89,7 @@ func (r *PostgresRepository) Authorize(ctx context.Context, principal identity.P
 	var roleGranted bool
 	decision.Permission = permission
 	decision.OrganizationID = organizationID
-	err := r.pool.QueryRow(ctx, `
+	err := queryer.QueryRow(ctx, `
 WITH permission_definition AS (
     SELECT scope FROM permissions WHERE code=$3
 )
@@ -95,7 +105,9 @@ SELECT u.id,u.status,COALESCE(active.context_version,1),COALESCE(pd.scope,''),
          LEFT JOIN memberships m ON m.user_id=ra.user_id AND m.organization_id=$4
          LEFT JOIN organizations o ON o.id=$4
          WHERE ra.user_id=u.id
-	       AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())
+	       AND ra.revoked_at IS NULL
+           AND ra.starts_at <= CASE WHEN $6::boolean THEN clock_timestamp() ELSE now() END
+           AND (ra.expires_at IS NULL OR ra.expires_at > CASE WHEN $6::boolean THEN clock_timestamp() ELSE now() END)
            AND (
              (pd.scope='PERSONAL' AND $4::uuid IS NULL AND $5::uuid IS NULL AND ro.scope='PERSONAL' AND ra.organization_id IS NULL AND ra.unit_id IS NULL)
              OR (pd.scope='PLATFORM' AND $4::uuid IS NULL AND $5::uuid IS NULL AND ro.scope='PLATFORM' AND ra.organization_id IS NULL AND ra.unit_id IS NULL)
@@ -112,7 +124,7 @@ FROM identities i
 JOIN users u ON u.id=i.user_id
 LEFT JOIN user_active_contexts active ON active.user_id=u.id
 LEFT JOIN permission_definition pd ON true
-WHERE i.issuer=$1 AND i.subject=$2`, principal.Issuer, principal.Subject, permission, organizationID, unitID).Scan(
+WHERE i.issuer=$1 AND i.subject=$2`, principal.Issuer, principal.Subject, permission, organizationID, unitID, currentClock).Scan(
 		&decision.UserID, &decision.UserStatus, &decision.ContextVersion, &decision.PermissionScope,
 		&decision.PersonalAuthorizationVersion, &decision.PlatformAuthorizationVersion,
 		&decision.OrganizationAuthorizationVersion, &roleGranted,

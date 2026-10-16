@@ -77,12 +77,16 @@ export async function requireAuditExportActor(client, actor, includePII = false)
   const session = await client.session();
   if (!session.authenticated) throw Object.assign(unavailable(), { code: 'AUTH_REQUIRED', status: 401 });
   const me = requirePersonalAccount(await client.authorization());
-  if (me.user_id !== actor || !me.platform_permissions.includes('platform.audit.export') || includePII && !me.platform_permissions.includes('platform.audit.pii.export')) throw unavailable();
+  if (me.user_id !== actor || !me.platform_permissions.includes('platform.audit.export')) throw unavailable();
+  // A missing current PII grant denies this operation, not metadata recovery.
+  if (includePII && !me.platform_permissions.includes('platform.audit.pii.export')) throw Object.assign(new Error('audit PII export permission is required'), { code: 'PERMISSION_DENIED', status: 403 });
   return me;
 }
 export async function reauthenticateAuditExport(client, value, { storage = globalThis.sessionStorage, navigate = url => globalThis.location.assign(url) } = {}) {
   const record = checked(value);
   const session = await client.session();
+  // A known job can still be restored by GET without PII permission. Its
+  // ticket and download actions each recheck the authoritative job below.
   if (session.authenticated) await requireAuditExportActor(client, record.actor, Boolean(record.attempt && !record.exportID && record.attempt.includePII));
   writeAuditExportRecovery(record, storage); // Verify before abandoning the in-memory state.
   const returnTo = `/admin.html?section=audit&${AUDIT_EXPORT_STEPUP_QUERY}=${encodeURIComponent(record.nonce)}`;

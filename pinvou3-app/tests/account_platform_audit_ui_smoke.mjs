@@ -24,6 +24,33 @@ const fill=async(page,reason='Controlled audit investigation')=>{
 };
 const button=async(page,key)=>page.evaluate(key=>[...document.querySelectorAll('button')].find(b=>b.textContent.trim()===window.f17.copy.audit[key]).click(),key);
 try{
+ await run('PII revoked after create denies ticket but preserves job and permits explicit retry',async page=>{
+  await open(page,'pii=1');await fill(page);await page.click('input[type=checkbox]');await button(page,'export');await page.waitForFunction(()=>document.body.textContent.includes('controlled-page-only-key'));
+  await page.evaluate(()=>{window.f17.piiAllowed=false;});await button(page,'download');await page.waitForSelector('[role=alert]');
+  assert.equal(await page.evaluate(()=>window.f17.calls.filter(c=>c.url.endsWith('/download-tickets')).length),0);
+  assert.equal(await page.evaluate(()=>window.f17.calls.filter(c=>c.url.endsWith('/download')).length),0);
+  await page.evaluate(()=>[...document.querySelectorAll('button')].find(b=>b.textContent.trim()===window.f17.copy.refresh).click());
+  await page.waitForFunction(()=>window.f17.calls.some(c=>c.url.endsWith('/audit-exports/'+window.f17.id)));
+  await page.evaluate(()=>{window.f17.piiAllowed=true;});await button(page,'download');await page.waitForFunction(()=>window.f17.downloaded);
+  assert.equal(await page.evaluate(()=>window.f17.createCount),1);
+ });
+ await run('PII is rechecked between ticket and download; retained ticket retries without issuing again',async page=>{
+  await open(page,'pii=1');await fill(page);await page.click('input[type=checkbox]');await button(page,'export');await page.waitForFunction(()=>document.body.textContent.includes('controlled-page-only-key'));
+  await page.evaluate(()=>{window.f17.revokeAfterTicket=true;});await button(page,'download');await page.waitForSelector('[role=alert]');
+  assert.equal(await page.evaluate(()=>window.f17.calls.filter(c=>c.url.endsWith('/download-tickets')).length),1);
+  assert.equal(await page.evaluate(()=>window.f17.calls.filter(c=>c.url.endsWith('/download')).length),0);
+  await page.evaluate(()=>{window.f17.piiAllowed=true;});await button(page,'download');await page.waitForFunction(()=>window.f17.downloaded);
+  assert.equal(await page.evaluate(()=>window.f17.calls.filter(c=>c.url.endsWith('/download-tickets')).length),1);
+  assert.equal(await page.evaluate(()=>window.f17.createCount),1);
+ });
+ await run('server download denial preserves the original in-memory ticket for explicit retry',async page=>{
+  await open(page,'pii=1');await fill(page);await page.click('input[type=checkbox]');await button(page,'export');await page.waitForFunction(()=>document.body.textContent.includes('controlled-page-only-key'));
+  await page.evaluate(()=>{window.f17.forbidDownload=true;});await button(page,'download');await page.waitForSelector('[role=alert]');
+  await page.evaluate(()=>{window.f17.forbidDownload=false;});await button(page,'download');await page.waitForFunction(()=>window.f17.downloaded);
+  const calls=await page.evaluate(()=>window.f17.calls.filter(c=>c.url.endsWith('/download')));
+  assert.equal(calls.length,2);assert.equal(calls[0].headers['X-Pinvou-Download-Token'],calls[1].headers['X-Pinvou-Download-Token']);
+  assert.equal(await page.evaluate(()=>window.f17.calls.filter(c=>c.url.endsWith('/download-tickets')).length),1);
+ });
  for(const language of ['zh','en','ja'])await run('real AdminPlatformView audit / create / encrypted download '+language,async page=>{
   await open(page,'language='+language+(language==='en'?'&lost=1':''));
   assert.equal(await page.evaluate(()=>document.querySelector('input[type=checkbox]').disabled),true);

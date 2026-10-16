@@ -281,6 +281,173 @@ func TestAuditExportPersistedBoundaries(t *testing.T) {
 		}
 	})
 
+	t.Run("pii_authority_is_live_after_job_lock", func(t *testing.T) {
+		for _, phase := range []string{"ticket", "download"} {
+			for _, loss := range []string{"expired", "revoked"} {
+				t.Run(phase+"_"+loss, func(t *testing.T) {
+					// A separate real account keeps the existing daily job quota intact.
+					actor := identity.Principal{Issuer: principal.Issuer, Subject: uuid.NewString(), SessionID: uuid.NewString(), AuthenticatedAt: time.Now().UTC()}
+					actorMe, _, err := repo.Bootstrap(ctx, actor)
+					if err != nil {
+						t.Fatal("PII_FIXTURE_BOOTSTRAP")
+					}
+					if err = NewWalletProvisioningWorker(repo, auditExportBoundaryWallet{}, time.Second).RunOnce(ctx); err != nil {
+						t.Fatal("PII_FIXTURE_WALLET")
+					}
+					grant := func(role string, expires time.Time, starts *time.Time) RoleBinding {
+						t.Helper()
+						binding, err := repo.AdminGrantRoleBinding(ctx, principal, RoleBindingGrant{UserID: actorMe.UserID, RoleCode: role, StartsAt: starts, ExpiresAt: &expires, IdempotencyKey: uuid.NewString(), Reason: "live PII authority boundary"})
+						if err != nil {
+							t.Fatalf("PII_FIXTURE_GRANT_%s", auditExportBoundaryErrorClass(err))
+						}
+						return binding
+					}
+					revoke := func(binding RoleBinding) {
+						t.Helper()
+						got, err := repo.AdminRevokeRoleBinding(ctx, principal, binding.ID)
+						if err != nil || got.Status != "REVOKED" {
+							t.Fatal("PII_FIXTURE_REVOKE")
+						}
+					}
+					grant("PLATFORM_AUDITOR", time.Now().UTC().Add(time.Hour), nil)
+					pii := grant("PLATFORM_AUDIT_PII_EXPORT", time.Now().UTC().Add(time.Hour), nil)
+					readyForActor := func(includePII bool) AuditExportJob {
+						t.Helper()
+						now := time.Now().UTC()
+						j, err := exports.Create(ctx, actor, AuditExportRequest{IncludePII: includePII, Reason: "live PII export boundary", IdempotencyKey: uuid.NewString(), Filter: AuditExportFilter{From: now.Add(-time.Minute), To: now}})
+						if err != nil {
+							t.Fatalf("PII_FIXTURE_CREATE_%s", auditExportBoundaryErrorClass(err))
+						}
+						claim, ok, err := exports.claim(ctx)
+						if err != nil || !ok || claim.ID != j.ID {
+							t.Fatal("PII_FIXTURE_CLAIM")
+						}
+						if err := exports.generate(ctx, claim); err != nil {
+							t.Fatalf("PII_FIXTURE_GENERATE_%s", auditExportBoundaryErrorClass(err))
+						}
+						return j
+					}
+					job := readyForActor(true)
+					var ticket AuditExportDownloadTicket
+					if phase == "download" {
+						ticket, err = exports.IssueDownloadTicket(ctx, actor, job.ID)
+						if err != nil {
+							t.Fatal("PII_FIXTURE_ORIGINAL_TICKET")
+						}
+					}
+					handler := NewService(repo, nil).WithAuditExports(exports).Handler(func(context.Context, string) (identity.Principal, error) { return actor, nil })
+					call := func(id uuid.UUID, phase, token string) *httptest.ResponseRecorder {
+						method, suffix := http.MethodGet, "/download"
+						if phase == "ticket" {
+							method, suffix = http.MethodPost, "/download-tickets"
+						}
+						r := httptest.NewRequest(method, "/admin/v1/audit-exports/"+id.String()+suffix, nil)
+						r.Header.Set("Authorization", "Bearer owned-pii-boundary")
+						r.Header.Set("X-Pinvou-Download-Token", token)
+						w := httptest.NewRecorder()
+						handler.ServeHTTP(w, r)
+						return w
+					}
+					type jobState struct {
+						row           string
+						events, audit int
+					}
+					snapshot := func() jobState {
+						t.Helper()
+						var v jobState
+						if err := repo.pool.QueryRow(ctx, `SELECT to_jsonb(job)::text,(SELECT count(*) FROM audit_export_events WHERE export_id=job.id),(SELECT count(*) FROM audit_logs WHERE resource_type='audit_export' AND resource_id=job.id::text) FROM audit_export_jobs job WHERE job.id=$1`, job.ID).Scan(&v.row, &v.events, &v.audit); err != nil {
+							t.Fatal("PII_FIXTURE_SNAPSHOT")
+						}
+						return v
+					}
+					before := snapshot()
+					lock, err := repo.pool.Begin(ctx)
+					if err != nil {
+						t.Fatal("PII_FIXTURE_LOCK")
+					}
+					defer lock.Rollback(ctx)
+					var lockedID uuid.UUID
+					if err = lock.QueryRow(ctx, `SELECT id FROM audit_export_jobs WHERE id=$1 FOR UPDATE`, job.ID).Scan(&lockedID); err != nil {
+						t.Fatal("PII_FIXTURE_LOCK_ROW")
+					}
+					response := make(chan *httptest.ResponseRecorder, 1)
+					go func() { response <- call(job.ID, phase, ticket.Token) }()
+					blocked := false
+					deadline := time.Now().Add(3 * time.Second)
+					for time.Now().Before(deadline) {
+						var n int
+						if err = f.admin.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname=$1 AND wait_event_type='Lock' AND query LIKE '%audit_export_jobs%FOR UPDATE%'`, c.Config().Database).Scan(&n); err != nil {
+							t.Fatal("PII_FIXTURE_LOCK_OBSERVATION")
+						}
+						if n > 0 {
+							blocked = true
+							break
+						}
+						time.Sleep(10 * time.Millisecond)
+					}
+					if !blocked {
+						t.Fatal("PII_FIXTURE_NO_REAL_JOB_LOCK_WAIT")
+					}
+					revoke(pii)
+					if loss == "expired" {
+						// Real role management supplies a short replacement, with the original
+						// start preceding the waiting transaction. A transaction-start now()
+						// would incorrectly retain this grant after its real expiry.
+						expires := time.Now().UTC().Add(time.Second)
+						grant("PLATFORM_AUDIT_PII_EXPORT", expires, &pii.StartsAt)
+						time.Sleep(time.Until(expires) + 50*time.Millisecond)
+					}
+					decision, err := repo.Authorize(ctx, actor, PermissionPlatformAuditPIIExport, nil, nil)
+					if err != nil || decision.Allowed {
+						t.Fatal("PII_FIXTURE_LOST_AUTHORITY_NOT_VISIBLE")
+					}
+					if err = lock.Commit(ctx); err != nil {
+						t.Fatal("PII_FIXTURE_UNLOCK")
+					}
+					var denied *httptest.ResponseRecorder
+					select {
+					case denied = <-response:
+					case <-ctx.Done():
+						t.Fatal("PII_OPERATION_DID_NOT_RETURN")
+					}
+					if denied.Code != http.StatusForbidden {
+						t.Fatalf("PII_%s_%s_STATUS_%d_WANT_403", phase, loss, denied.Code)
+					}
+					if snapshot() != before {
+						t.Fatal("PII_DENIAL_CHANGED_JOB_PAYLOAD_TOKEN_OR_AUDIT")
+					}
+					// Losing only PII authority does not make the existing job unreadable.
+					if got, err := exports.Get(ctx, actor, job.ID); err != nil || got.Status != "READY" {
+						t.Fatal("PII_DENIAL_CHANGED_GET")
+					}
+					if phase == "ticket" && loss == "revoked" {
+						redacted := readyForActor(false)
+						r := call(redacted.ID, "ticket", "")
+						if r.Code != http.StatusCreated || json.Unmarshal(r.Body.Bytes(), &ticket) != nil {
+							t.Fatal("NON_PII_TICKET_REGRESSED")
+						}
+						if call(redacted.ID, "download", ticket.Token).Code != http.StatusOK {
+							t.Fatal("NON_PII_DOWNLOAD_REGRESSED")
+						}
+					}
+					grant("PLATFORM_AUDIT_PII_EXPORT", time.Now().UTC().Add(time.Hour), nil)
+					if phase == "ticket" {
+						r := call(job.ID, "ticket", "")
+						if r.Code != http.StatusCreated || json.Unmarshal(r.Body.Bytes(), &ticket) != nil {
+							t.Fatal("PII_REGRANT_DID_NOT_ALLOW_TICKET")
+						}
+					}
+					if call(job.ID, "download", ticket.Token).Code != http.StatusOK {
+						t.Fatal("PII_REGRANT_DID_NOT_ALLOW_ORIGINAL_TICKET")
+					}
+					if call(job.ID, "download", ticket.Token).Code != http.StatusNotFound {
+						t.Fatal("PII_ORIGINAL_TICKET_WAS_NOT_SINGLE_USE")
+					}
+				})
+			}
+		}
+	})
+
 	t.Run("actual_http_base_and_pii_grant_revoke", func(t *testing.T) {
 		// The actual role-management repository validates and persists temporary
 		// bindings. This boundary test controls its trusted actor; it does not

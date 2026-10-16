@@ -314,11 +314,16 @@ func (s *AuditExportService) IssueDownloadTicket(ctx context.Context, principal 
 		return AuditExportDownloadTicket{}, err
 	}
 	var status string
+	var includePII bool
 	var fileExpiresAt *time.Time
 	var issuedAt *time.Time
-	if err := tx.QueryRow(ctx, `SELECT status,file_expires_at,download_ticket_issued_at FROM audit_export_jobs WHERE id=$1 AND actor_user_id=$2 FOR UPDATE`, exportID, actorID).Scan(&status, &fileExpiresAt, &issuedAt); errors.Is(err, pgx.ErrNoRows) {
+	if err := tx.QueryRow(ctx, `SELECT status,include_pii,file_expires_at,download_ticket_issued_at FROM audit_export_jobs WHERE id=$1 AND actor_user_id=$2 FOR UPDATE`, exportID, actorID).Scan(&status, &includePII, &fileExpiresAt, &issuedAt); errors.Is(err, pgx.ErrNoRows) {
 		return AuditExportDownloadTicket{}, ErrNotFound
 	} else if err != nil {
+		return AuditExportDownloadTicket{}, err
+	}
+	// PII permission is live, including after a wait for this job's row lock.
+	if err := requireAuditExportPIIAuthorization(ctx, tx, principal, includePII); err != nil {
 		return AuditExportDownloadTicket{}, err
 	}
 	// The row lock may wait across the file or recent-authentication deadline.
@@ -368,12 +373,17 @@ func (s *AuditExportService) Download(ctx context.Context, principal identity.Pr
 		return AuditExportDownload{}, err
 	}
 	var status, digest string
+	var includePII bool
 	var filename *string
 	var expiresAt *time.Time
 	var payload []byte
-	if err := tx.QueryRow(ctx, `SELECT status,COALESCE(download_token_digest,''),download_expires_at,filename,file_payload FROM audit_export_jobs WHERE id=$1 AND actor_user_id=$2 FOR UPDATE`, exportID, actorID).Scan(&status, &digest, &expiresAt, &filename, &payload); errors.Is(err, pgx.ErrNoRows) {
+	if err := tx.QueryRow(ctx, `SELECT status,include_pii,COALESCE(download_token_digest,''),download_expires_at,filename,file_payload FROM audit_export_jobs WHERE id=$1 AND actor_user_id=$2 FOR UPDATE`, exportID, actorID).Scan(&status, &includePII, &digest, &expiresAt, &filename, &payload); errors.Is(err, pgx.ErrNoRows) {
 		return AuditExportDownload{}, ErrNotFound
 	} else if err != nil {
+		return AuditExportDownload{}, err
+	}
+	// Reject lost PII authority before recording failure or consuming any ticket.
+	if err := requireAuditExportPIIAuthorization(ctx, tx, principal, includePII); err != nil {
 		return AuditExportDownload{}, err
 	}
 	var now time.Time
@@ -402,6 +412,25 @@ func (s *AuditExportService) Download(ctx context.Context, principal identity.Pr
 		return AuditExportDownload{}, err
 	}
 	return AuditExportDownload{Filename: *filename, Payload: payload}, tx.Commit(ctx)
+}
+
+func requireAuditExportPIIAuthorization(ctx context.Context, queryer authorizationQueryer, principal identity.Principal, includePII bool) error {
+	if !includePII {
+		return nil
+	}
+	// Use this locked operation's connection with the live database clock. The
+	// transaction start time can precede a lock wait and an expiring role grant.
+	decision, err := authorizePermission(ctx, queryer, principal, PermissionPlatformAuditPIIExport, nil, nil, true)
+	if err != nil {
+		if errors.Is(err, ErrForbidden) {
+			return ErrForbidden
+		}
+		return fmt.Errorf("%w: %w", ErrAuditExportAuthorizationUnavailable, err)
+	}
+	if !decision.Allowed {
+		return ErrForbidden
+	}
+	return nil
 }
 
 func (s *AuditExportService) actorID(ctx context.Context, principal identity.Principal) (uuid.UUID, error) {

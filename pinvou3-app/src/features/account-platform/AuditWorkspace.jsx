@@ -316,16 +316,21 @@ function Audit({ copy, data, client, setData, permissions, currentUserID }) {
     setBusy(true);
     setError('');
     try {
-      await requireAuditExportActor(client, currentUserID);
+      await requireAuditExportActor(client, currentUserID, Boolean(exportJob.include_pii));
       if (!liveRef.current) return;
       if (!exportTicketRef.current) {
         try {
           exportTicketRef.current = await acquireAuditExportTicket(client, exportJob.export_id, null);
         } catch (error) {
-          setTicketIssueUnknown(true);
+          // Explicit authorization rejection has not issued a ticket. Network,
+          // timeout, conflict and server failures still require an authoritative GET.
+          if (error?.status !== 401 && error?.status !== 403) setTicketIssueUnknown(true);
           throw error;
         }
       }
+      if (!liveRef.current) return;
+      // Permission may expire while the one-time ticket is being issued.
+      await requireAuditExportActor(client, currentUserID, Boolean(exportJob.include_pii));
       if (!liveRef.current) return;
       const blob = await client.downloadAuditExport(exportJob.export_id, exportTicketRef.current.download_token);
       if (!liveRef.current) return;
@@ -343,7 +348,7 @@ function Audit({ copy, data, client, setData, permissions, currentUserID }) {
       setExportJob((current) => ({ ...current, status: 'DOWNLOADED' }));
       finishRecovery();
     } catch (cause) {
-      if (liveRef.current) { observeRecoveryError(cause); setError(cause?.code === 'AUDIT_EXPORT_RECOVERY_UNAVAILABLE' ? copy.audit.recoveryUnavailable : copy.audit.exportFailed); }
+      if (liveRef.current) { observeRecoveryError(cause); setError(cause?.code === 'AUDIT_EXPORT_RECOVERY_UNAVAILABLE' ? copy.audit.recoveryUnavailable : cause?.status === 403 ? copy.permissionDenied : copy.audit.exportFailed); }
     } finally {
       if (liveRef.current) setBusy(false);
     }
