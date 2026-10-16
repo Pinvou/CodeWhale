@@ -1356,10 +1356,12 @@ mod tests {
                 crate::platform::process::spawn_managed_tokio(owned_install_fixture())
                     .await
                     .unwrap();
-            let old_registration = InstallChildGuard::register(&children, backend, old_tree);
+            let mut old_registration = InstallChildGuard::register(&children, backend, old_tree);
             let captured = capture_cancelled_install_tree(&operations, &children, backend)
                 .unwrap()
                 .unwrap();
+            // Keep the captured handle as the first terminator, after registry turnover.
+            old_registration.disarm();
             drop(old_registration);
             drop(old_operation);
             let new_operation = AgentInstallGuard::try_start(&operations, backend).unwrap();
