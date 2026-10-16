@@ -4172,6 +4172,24 @@ fn current_runtime_route_sanitizes_out_of_range_declared_context() {
             route.candidate.applied_limit_overrides()
         );
     }
+
+    // The inclusive upper bound: exactly `u32::MAX` is wire-representable
+    // and must ride verbatim, not be degraded by an off-by-one bound.
+    let engine =
+        engine_with_declared_local_model_limits(Some(codewhale_config::route::RouteLimits {
+            context_tokens: Some(u64::from(u32::MAX)),
+            input_tokens: None,
+            output_tokens: None,
+        }));
+    let route = engine
+        .current_runtime_route()
+        .expect("max representable declared context must resolve");
+    assert_eq!(
+        route.candidate.limits().context_tokens,
+        Some(u64::from(u32::MAX)),
+        "exactly u32::MAX is in range and must be carried, got {:?}",
+        route.candidate.limits()
+    );
 }
 
 #[tokio::test]
@@ -4247,6 +4265,163 @@ async fn equal_install_keeps_standing_declaration() {
             .any(|item| item.source == codewhale_config::route::OverrideSource::EmbeddingHost),
         "the preserved declaration must still drive the carry, got {:?}",
         route.candidate.applied_limit_overrides()
+    );
+}
+
+/// Two named custom endpoints resolving the same wire model: the A→B
+/// value-equal install boundary for route declarations. Both tables carry the
+/// same operator context window, so the plain resolution has a known shared
+/// triple.
+fn shared_model_named_endpoint_config(provider: &str) -> Config {
+    let mut custom = HashMap::new();
+    for (name, port) in [("custom-a", 18181u16), ("custom-b", 18182)] {
+        custom.insert(
+            name.to_string(),
+            crate::config::ProviderConfig {
+                kind: Some("openai-compatible".to_string()),
+                base_url: Some(format!("http://127.0.0.1:{port}/v1")),
+                model: Some("shared-model".to_string()),
+                api_key: Some("local-test-key".to_string()),
+                context_window: Some(100_000),
+                ..crate::config::ProviderConfig::default()
+            },
+        );
+    }
+    Config {
+        provider: Some(provider.to_string()),
+        providers: Some(crate::config::ProvidersConfig {
+            custom,
+            ..crate::config::ProvidersConfig::default()
+        }),
+        ..Config::default()
+    }
+}
+
+fn shared_model_endpoint_effective_limits() -> codewhale_config::route::RouteLimits {
+    let fresh = crate::route_runtime::resolve_runtime_route(
+        &shared_model_named_endpoint_config("custom-b"),
+        ApiProvider::Custom,
+        Some("shared-model"),
+    )
+    .expect("resolve the shared-model endpoint");
+    crate::route_budget::known_route_limits(fresh.candidate.limits())
+        .expect("the shared model resolves known limits")
+}
+
+#[test]
+fn equal_value_install_on_new_named_endpoint_does_not_inherit_declaration() {
+    // Two named custom endpoints can resolve the same wire model onto the
+    // same effective triple. A standing declaration describes endpoint A's
+    // route; endpoint B's value-equal declaration-less install must not
+    // adopt it, or B's later budget drop would be overlaid by A's legacy
+    // declaration instead of resolving fresh.
+    let shared = shared_model_endpoint_effective_limits();
+    assert_eq!(
+        shared.context_tokens,
+        Some(100_000),
+        "premise: the operator window supplies the shared known triple"
+    );
+
+    let engine_config = EngineConfig {
+        model: "shared-model".to_string(),
+        snapshots_enabled: false,
+        terminal_chrome_enabled: false,
+        active_route_limits: Some(shared),
+        ..EngineConfig::default()
+    };
+    let (mut engine, _handle) = Engine::new(
+        engine_config,
+        &shared_model_named_endpoint_config("custom-a"),
+    );
+    assert_eq!(engine.api_provider_identity, "custom-a");
+    assert_eq!(
+        engine.active_route_declared_limits,
+        Some(shared),
+        "premise: construction installed A's declaration"
+    );
+
+    let b_route = crate::route_runtime::resolve_runtime_route(
+        &shared_model_named_endpoint_config("custom-b"),
+        ApiProvider::Custom,
+        Some("shared-model"),
+    )
+    .expect("resolve endpoint B")
+    .validate()
+    .expect("preflight endpoint B");
+    engine.install_validated_runtime_route(b_route);
+    assert_eq!(engine.api_provider_identity, "custom-b");
+    assert_eq!(
+        engine.active_route_declared_limits, None,
+        "a value-equal install on another named endpoint must clear the declaration, got {:?}",
+        engine.active_route_declared_limits
+    );
+
+    // Endpoint B's operator config drops the context window; the next
+    // self-started re-derivation must follow the fresh resolution instead of
+    // overlaying A's legacy declaration.
+    engine
+        .api_config
+        .provider_config_for_mut(ApiProvider::Custom)
+        .context_window = Some(10_000);
+    let route = engine
+        .current_runtime_route()
+        .expect("re-derived route resolves");
+    assert_eq!(
+        route.candidate.limits().context_tokens,
+        Some(10_000),
+        "the fresh operator window must win, got {:?}",
+        route.candidate.limits()
+    );
+    assert!(
+        route
+            .candidate
+            .applied_limit_overrides()
+            .iter()
+            .all(|item| item.source != codewhale_config::route::OverrideSource::EmbeddingHost),
+        "no declaration may cross the endpoint boundary, got {:?}",
+        route.candidate.applied_limit_overrides()
+    );
+}
+
+#[test]
+fn injected_install_on_new_named_endpoint_also_clears_declaration() {
+    // The injected-client branch of `install_resolved_runtime_route` enforces
+    // the same identity boundary as the validated branch: a value-equal
+    // install onto another named endpoint must not adopt the standing
+    // declaration.
+    let shared = shared_model_endpoint_effective_limits();
+    let engine_config = EngineConfig {
+        model: "shared-model".to_string(),
+        snapshots_enabled: false,
+        terminal_chrome_enabled: false,
+        active_route_limits: Some(shared),
+        ..EngineConfig::default()
+    };
+    let (mut engine, _handle) = Engine::new(
+        engine_config,
+        &shared_model_named_endpoint_config("custom-a"),
+    );
+    engine.model_client_injected = true;
+    assert_eq!(
+        engine.active_route_declared_limits,
+        Some(shared),
+        "premise: construction installed A's declaration"
+    );
+
+    let b_route = crate::route_runtime::resolve_runtime_route(
+        &shared_model_named_endpoint_config("custom-b"),
+        ApiProvider::Custom,
+        Some("shared-model"),
+    )
+    .expect("resolve endpoint B");
+    engine
+        .install_resolved_runtime_route(b_route)
+        .expect("install endpoint B route");
+    assert_eq!(engine.api_provider_identity, "custom-b");
+    assert_eq!(
+        engine.active_route_declared_limits, None,
+        "the injected branch must clear the declaration across the endpoint boundary, got {:?}",
+        engine.active_route_declared_limits
     );
 }
 
