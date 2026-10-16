@@ -101,6 +101,30 @@ fn path_under_any(path: &Path, roots: &[PathBuf]) -> bool {
     roots.iter().any(|root| path_is_under(path, root))
 }
 
+/// 本机 Ollama 守护进程的模型权重根（纯函数，测试直打）：`OLLAMA_MODELS` 迁移
+/// 目录优先（Ollama 官方环境变量），默认 `~/.ollama/models`。注册表是 AI/手写
+/// 共用的文件，weights_path 指进这里意味着"删除权重"会连根清掉 daemon 的全部
+/// blob——商店 ollama 卡片经 `ollama create` 导入的权重也住在里面（第八轮评审
+/// P1：第七轮的守卫键在 kind 字符串上，`kind:"other"` 的同路径记录仍可绕过）。
+fn ollama_models_root_from(env_value: Option<&str>, home: &Path) -> PathBuf {
+    match env_value.map(str::trim) {
+        Some(trimmed) if !trimmed.is_empty() => PathBuf::from(trimmed),
+        _ => home.join(".ollama").join("models"),
+    }
+}
+
+/// 登记端路径臂：weights_path（**任何 kind**）落在 daemon 模型目录内即拒绝。
+/// kind 只是自我声明的元数据，照抄它布防会让 "other"/"llamacpp" 记录带着同样
+/// 的 weights_path 绕过全链（`~/.ollama/models/blobs` 恰好家目录三层，深度臂
+/// 放行）。与 `weights_in_store` 同池执行（canonicalize 是文件系统调用）。
+fn weights_under_ollama_root(weights: &str) -> bool {
+    let root = ollama_models_root_from(
+        std::env::var("OLLAMA_MODELS").ok().as_deref(),
+        &crate::platform::paths::user_home_dir(),
+    );
+    path_is_under(Path::new(weights), &root)
+}
+
 // ---------------------------------------------------------------- 视图
 
 /// 本机全部外部模型：注册表 + Ollama 在线列表（去重已注册者）。
@@ -236,8 +260,11 @@ pub async fn register_external_model(
     }
     let kind = kind.trim().to_string();
     if !MODEL_KINDS.contains(&kind.as_str()) {
+        // kind 是前端/AI 原样传来的任意字符串：回显限长（与 doctor.rs 同一纪律），
+        // 构造请求不该把超长输入逐字搬进错误与日志（第八轮评审 P3）。
         return Err(format!(
-            "不支持的模型类别“{kind}”，支持：{}",
+            "不支持的模型类别“{}”，支持：{}",
+            truncate_echo(&kind),
             MODEL_KINDS.join(" / ")
         ));
     }
@@ -293,9 +320,10 @@ pub async fn register_external_model(
         (kind == "ollama").then(|| model.clone().unwrap_or_else(|| name.clone()));
 
     // 商店边界（纵深防御第二层）：商店管理的名字/有效删除名绝不能登记成外部模型。
-    // 商店名单查询（sqlite connect）与权重根收集（读 settings）是阻塞 IO，先在
-    // blocking 池里把三个边界事实一次查全，再走纯校验，不占 async worker。
-    let (name_hit, model_hit, weights_hit) = tokio::task::spawn_blocking({
+    // 商店名单查询（sqlite connect）与权重根收集（读 settings）、daemon 模型目录
+    // 判定（canonicalize）都是阻塞 IO，先在 blocking 池里把四个边界事实一次查全，
+    // 再走纯校验，不占 async worker。
+    let (name_hit, model_hit, weights_hit, ollama_root_hit) = tokio::task::spawn_blocking({
         let name = name.clone();
         let effective_ollama_name = effective_ollama_name.clone();
         let weights_path = weights_path.clone();
@@ -313,7 +341,11 @@ pub async fn register_external_model(
                 .as_deref()
                 .map(weights_in_store)
                 .unwrap_or(false);
-            (name_hit, model_hit, weights_hit)
+            let ollama_root_hit = weights_path
+                .as_deref()
+                .map(weights_under_ollama_root)
+                .unwrap_or(false);
+            (name_hit, model_hit, weights_hit, ollama_root_hit)
         }
     })
     .await
@@ -334,6 +366,16 @@ pub async fn register_external_model(
     if weights_hit {
         return Err(format!(
             "“{}”位于模型商店目录之下，由模型商店管理，不能登记为外部模型；请前往模型商店操作",
+            weights_path.unwrap_or_default()
+        ));
+    }
+    // daemon 模型目录对**任何 kind** 都是登记禁区（第八轮评审 P1）：`~/.ollama`
+    // 不在商店权重根/应用数据根之内，上面的 kind=="ollama" 硬校验只覆盖一种
+    // 自我声明的类别——"other" 记录带同路径 weights_path 时，登记放行、移除端
+    // 深度臂放行，整目录删除会连根清掉全部 blob（含商店 ollama 卡片的权重）。
+    if ollama_root_hit {
+        return Err(format!(
+            "“{}”位于本机 Ollama 守护进程的模型目录之内，权重由守护进程统一管理，不能登记为权重路径",
             weights_path.unwrap_or_default()
         ));
     }
@@ -452,12 +494,20 @@ fn endpoint_url_is_loopback(url: &str) -> bool {
         })
 }
 
-/// URL 可解析且是 http(s)。
+/// URL 可解析且是 http(s)。错误回显限长：解析失败分支发生在 4096 长度上限
+/// 之前，构造的超长输入不该逐字进错误与日志（第八轮评审 P3）。
 fn validate_http_url(raw: &str) -> Result<(), String> {
     match reqwest::Url::parse(raw) {
         Ok(url) if matches!(url.scheme(), "http" | "https") => Ok(()),
-        Ok(url) => Err(format!("服务地址必须是 http(s) 地址：{url}")),
-        Err(error) => Err(format!("服务地址无法解析（{raw}）：{error}")),
+        Ok(url) => Err(format!(
+            "服务地址必须是 http(s) 地址：{}",
+            truncate_echo(url.as_ref())
+        )),
+        Err(error) => Err(format!(
+            "服务地址无法解析（{}）：{}",
+            truncate_echo(raw),
+            truncate_echo(&error.to_string())
+        )),
     }
 }
 
@@ -484,8 +534,11 @@ pub async fn remove_external_model(
     let mut warnings = Vec::new();
     if !is_safe_id(&id) {
         // 非注册表形状的 id（含 Ollama 在线条目的展示 id）：不是本机登记的模型。
+        // is_safe_id 恰在 id 超长/含杂字符时失败——回显必须限长，否则构造请求
+        // 的超长输入被逐字搬进错误与日志（第八轮评审 P3，与 doctor.rs 同一纪律）。
         return Err(format!(
-            "“{id}”不是本机登记的外部模型；未注册模型请通过 AI 助手会话移除"
+            "“{}”不是本机登记的外部模型；未注册模型请通过 AI 助手会话移除",
+            truncate_echo(&id)
         ));
     }
     // 读注册记录：先按 `<id>.json` 直取；文件名与 id 不一致的存量记录（早期
@@ -593,9 +646,14 @@ pub async fn remove_external_model(
                             // 守卫（含 canonicalize）与整目录删除同一池执行：
                             // canonicalize 在陈旧 NFS/FUSE 挂载上可能阻塞数秒，
                             // 不能占住 async worker（第四轮评审 P3）。
+                            let ollama_root = ollama_models_root_from(
+                                std::env::var("OLLAMA_MODELS").ok().as_deref(),
+                                &home,
+                            );
                             let target = weights_deletion_guard(
                                 &home,
                                 Some(&protected),
+                                Some(&ollama_root),
                                 Path::new(&weights_for_task),
                             )?;
                             // canonicalize（守卫）与 remove_dir_all（删除）之间存在窗口：
@@ -715,9 +773,14 @@ fn removal_boundary_error(
 /// `protected_root`（应用自身数据根 `~/.pinvou3`）整体拒绝：注册表目录恰好 3 层、
 /// bundle/skills、runtimes 等更深目录都在放行深度内，不显式排除就存在"删除权重"
 /// 按钮抹掉应用配置/知识库的通道（第三轮评审 P2）。
+/// `ollama_root`（daemon 模型目录，默认 `~/.ollama/models`）同理整体拒绝：目录
+/// 恰好家目录三层被深度臂放行，而 blob 全删等于抹掉 daemon 托管的一切权重——
+/// 商店 ollama 卡片的也在内。守卫按**路径**布防、与记录自述的 kind 无关
+/// （第八轮评审 P1：第七轮按 kind 字符串布防的版本可被 `kind:"other"` 绕过）。
 pub(crate) fn weights_deletion_guard(
     home: &Path,
     protected_root: Option<&Path>,
+    ollama_root: Option<&Path>,
     weights_path: &Path,
 ) -> Result<PathBuf, String> {
     if !weights_path.is_absolute() {
@@ -750,6 +813,18 @@ pub(crate) fn weights_deletion_guard(
                 "拒绝删除：目标位于应用数据目录（{}）之内，请到设置或模型商店操作",
                 protected_canonical.display()
             ));
+        }
+    }
+    if let Some(root) = ollama_root {
+        // 根不存在（未装 Ollama）时 canonicalize 失败：目标目录存在而根不存在，
+        // "目标在根之下"不可能成立，跳过是安全的；根可解析时与保护根同口径。
+        if let Ok(root_canonical) = root.canonicalize() {
+            if target == root_canonical || target.starts_with(&root_canonical) {
+                return Err(format!(
+                    "拒绝删除：目标位于 Ollama 守护进程的模型目录（{}）之内，权重由守护进程统一管理",
+                    root_canonical.display()
+                ));
+            }
         }
     }
     let home_canonical = home
@@ -849,6 +924,12 @@ fn is_safe_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+/// 错误回显限长（32 字符，与 doctor.rs 的 kind 回显同一纪律）：错误串会进
+/// toast/日志，构造请求的超长输入不该逐字搬运。
+fn truncate_echo(value: &str) -> String {
+    value.chars().take(32).collect()
 }
 
 // ---------------------------------------------------------------- 注册表 IO
@@ -1224,12 +1305,56 @@ mod tests {
     #[test]
     fn weights_deletion_guard_accepts_deep_absolute_dir_under_home() {
         let home = TempDir::new("guard-home");
-        let weights = home.path().join(".ollama").join("models").join("qwen3");
+        let weights = home.path().join("ai").join("weights").join("qwen3");
         std::fs::create_dir_all(&weights).expect("create weights dir");
-        let target = weights_deletion_guard(home.path(), None, &weights).expect("guard must pass");
+        let target =
+            weights_deletion_guard(home.path(), None, None, &weights).expect("guard must pass");
         assert_eq!(
             target,
             weights.canonicalize().expect("weights canonicalize")
+        );
+    }
+
+    #[test]
+    fn weights_deletion_guard_rejects_the_ollama_models_tree() {
+        // daemon 模型目录整体拒绝（第八轮评审 P1）：blob 全删等于抹掉 daemon
+        // 托管的一切权重（商店 ollama 卡片经 ollama create 导入的也在内），
+        // 与记录自述的 kind 无关——`~/.ollama/models/blobs` 恰好家目录三层，
+        // 深度臂本会放行。
+        let home = TempDir::new("guard-ollama");
+        let root = home.path().join(".ollama").join("models");
+        let blobs = root.join("blobs");
+        std::fs::create_dir_all(&blobs).expect("create blobs dir");
+        assert!(weights_deletion_guard(home.path(), None, Some(&root), &blobs).is_err());
+        // 根本身同样拒绝。
+        assert!(weights_deletion_guard(home.path(), None, Some(&root), &root).is_err());
+        // 守卫之外的家目录深目录不受牵连。
+        let weights = home.path().join("ai").join("weights").join("qwen3");
+        std::fs::create_dir_all(&weights).expect("create weights");
+        assert!(weights_deletion_guard(home.path(), None, Some(&root), &weights).is_ok());
+        // 根不存在（未装 Ollama）时跳过该臂：目标存在而根不存在，"目标在根
+        // 之下"不可能成立。
+        let missing = home.path().join("no-ollama").join("models");
+        assert!(weights_deletion_guard(home.path(), None, Some(&missing), &weights).is_ok());
+    }
+
+    #[test]
+    fn ollama_models_root_respects_env_migration_and_default() {
+        let home = Path::new("/home/u");
+        // 默认：~/.ollama/models。
+        assert_eq!(
+            ollama_models_root_from(None, home),
+            home.join(".ollama").join("models")
+        );
+        // OLLAMA_MODELS 迁移目录优先（trim 容忍 env 文件里的空白）。
+        assert_eq!(
+            ollama_models_root_from(Some(" /mnt/ollama-models "), home),
+            PathBuf::from("/mnt/ollama-models")
+        );
+        // 空白值视同未设。
+        assert_eq!(
+            ollama_models_root_from(Some("   "), home),
+            home.join(".ollama").join("models")
         );
     }
 
@@ -1243,14 +1368,14 @@ mod tests {
         std::fs::create_dir_all(&registry).expect("create registry dir");
         let deep_app = app_root.join("bundle").join("skills").join("device-doctor");
         std::fs::create_dir_all(&deep_app).expect("create deep app dir");
-        assert!(weights_deletion_guard(home.path(), Some(&app_root), &registry).is_err());
-        assert!(weights_deletion_guard(home.path(), Some(&app_root), &deep_app).is_err());
+        assert!(weights_deletion_guard(home.path(), Some(&app_root), None, &registry).is_err());
+        assert!(weights_deletion_guard(home.path(), Some(&app_root), None, &deep_app).is_err());
         // 保护根本身同样拒绝。
-        assert!(weights_deletion_guard(home.path(), Some(&app_root), &app_root).is_err());
+        assert!(weights_deletion_guard(home.path(), Some(&app_root), None, &app_root).is_err());
         // 同深度、保护根之外的家目录仍放行。
         let weights = home.path().join("ai").join("weights").join("qwen3");
         std::fs::create_dir_all(&weights).expect("create weights");
-        assert!(weights_deletion_guard(home.path(), Some(&app_root), &weights).is_ok());
+        assert!(weights_deletion_guard(home.path(), Some(&app_root), None, &weights).is_ok());
     }
 
     #[test]
@@ -1261,22 +1386,23 @@ mod tests {
 
         // 相对路径。
         let relative = Path::new("relative/weights/dir");
-        assert!(weights_deletion_guard(home.path(), None, relative).is_err());
+        assert!(weights_deletion_guard(home.path(), None, None, relative).is_err());
         // 不存在的目录。
         assert!(
-            weights_deletion_guard(home.path(), None, &home.path().join("no/such/dir")).is_err()
+            weights_deletion_guard(home.path(), None, None, &home.path().join("no/such/dir"))
+                .is_err()
         );
         // 普通文件（不是目录）。
         let file = home.path().join("file.txt");
         std::fs::write(&file, b"x").expect("write file");
-        assert!(weights_deletion_guard(home.path(), None, &file).is_err());
+        assert!(weights_deletion_guard(home.path(), None, None, &file).is_err());
         // 家目录本身。
-        assert!(weights_deletion_guard(home.path(), None, home.path()).is_err());
+        assert!(weights_deletion_guard(home.path(), None, None, home.path()).is_err());
         // 家目录之外。
         let outside = TempDir::new("guard-outside");
         let outside_weights = outside.path().join("x").join("y").join("z");
         std::fs::create_dir_all(&outside_weights).expect("create outside dir");
-        assert!(weights_deletion_guard(home.path(), None, &outside_weights).is_err());
+        assert!(weights_deletion_guard(home.path(), None, None, &outside_weights).is_err());
     }
 
     #[test]
@@ -1285,14 +1411,14 @@ mod tests {
         let home = TempDir::new("guard-depth");
         let child = home.path().join("weights-dir");
         std::fs::create_dir_all(&child).expect("create child");
-        assert!(weights_deletion_guard(home.path(), None, &child).is_err());
+        assert!(weights_deletion_guard(home.path(), None, None, &child).is_err());
         let grandchild = child.join("sub");
         std::fs::create_dir_all(&grandchild).expect("create grandchild");
-        assert!(weights_deletion_guard(home.path(), None, &grandchild).is_err());
+        assert!(weights_deletion_guard(home.path(), None, None, &grandchild).is_err());
         // 孙目录（深度 3）放行。
         let great = grandchild.join("blobs");
         std::fs::create_dir_all(&great).expect("create great");
-        assert!(weights_deletion_guard(home.path(), None, &great).is_ok());
+        assert!(weights_deletion_guard(home.path(), None, None, &great).is_ok());
     }
 
     #[test]

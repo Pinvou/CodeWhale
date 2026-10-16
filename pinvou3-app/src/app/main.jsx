@@ -3043,6 +3043,11 @@ const App = () => {
               const outcome = await result.completion;
               if (!outcome?.ok) return false;
             }
+            // 发送 round-trip 期间用户可能已点侧栏离开设备页：与
+            // handleSwitchSession 同款落定后复查，不把用户从别的页面拽进聊天
+            // （serialize 通道上后入队的 switch 转换会紧接着把视图切走，先跳转
+            // 只剩一次闪跳）（第八轮评审 P3）。
+            if (!isCurrent()) return false;
             setCodeModeOn(false);
             closeMobileSidebar();
             setCurrentView('chat');

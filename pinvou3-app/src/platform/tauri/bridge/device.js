@@ -335,6 +335,12 @@
 
   function startDevicePolling() {
     if (deviceIntervalId) return;
+    // A backend panic can leave devicePollInFlight stuck: the invoke promise
+    // never settles, pollDevice's finally never runs, and every later tick
+    // would no-op — the page freezes on stale data with no error banner.
+    // Restart paths (mount/retry) are the recovery point, so clear the flag
+    // here (round-8 review P3).
+    devicePollInFlight = false;
     pollDevice();
     deviceIntervalId = setInterval(pollDevice, 2000);
   }

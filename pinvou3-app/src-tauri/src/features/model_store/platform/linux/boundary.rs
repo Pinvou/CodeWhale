@@ -22,13 +22,30 @@ pub(crate) fn store_model_name(model_name: &str) -> Option<String> {
 ///
 /// `case_insensitive` 供 Ollama 有效删除名臂：daemon 标签按小写归一，sqlite
 /// BINARY 精确匹配会漏掉 `Qwen3:30B` → `qwen3:30b` 的别名绕道（第四轮 P3）。
+///
+/// 两臂直接比对都未命中时，再对**去掉 `:tag` 后缀**的名字按同一 case 口径重查
+/// 一次：商店的 `model_name` 由 `suggest_model_name` 生成，冒号一律清洗成 `-`
+/// （lifecycle.rs），而 daemon 侧的名字恒带 `:tag`——商店 ollama 卡片以
+/// `name:latest` 形态出现在 /api/tags 与手写注册表记录里时，直接比对全部落空
+/// （第八轮评审）。误伤方向是"把用户自己的 `x:v2` 当商店模型拒掉"（fail-safe，
+/// 报错给出商店出口）；漏放方向是别名记录真删商店部署的 daemon 模型。
 pub(crate) fn store_model_name_checked(
     model_name: &str,
     case_insensitive: bool,
 ) -> Result<Option<String>, String> {
     match db::get_store_model_by_name(model_name, case_insensitive) {
         Ok(Some(record)) => Ok(Some(record.model_name)),
-        Ok(None) => Ok(None),
+        Ok(None) => {
+            let stripped = model_name.split(':').next().unwrap_or(model_name).trim();
+            if stripped.is_empty() || stripped == model_name {
+                return Ok(None);
+            }
+            match db::get_store_model_by_name(stripped, case_insensitive) {
+                Ok(Some(record)) => Ok(Some(record.model_name)),
+                Ok(None) => Ok(None),
+                Err(error) => Err(format!("商店库查询失败：{error}")),
+            }
+        }
         Err(error) => Err(format!("商店库查询失败：{error}")),
     }
 }
@@ -38,11 +55,13 @@ fn weights_roots_from(settings: &config::Settings) -> Vec<std::path::PathBuf> {
     // 当前 models_dir + 历史用过的 models_dir（换目录不搬权重，老根下仍是商店
     // 在册模型，第六轮评审 P2：只看当前值的话改过目录的机器旧根裸奔）+
     // import_scan_dirs（下载脚本会在这些目录里**就地复用**已存在的权重——
-    // 复用不搬家，商店模型的权重可能就落在里面）。空串/重复项无害但白占一行，
-    // 滤掉。
+    // 复用不搬家，商店模型的权重可能就落在里面）+ staging_dir（下载暂存目录
+    // 可在设置里挪走，中断的下载会留下半成品权重；默认值在数据根之下，挪走后
+    // 只有这里能兜住，第八轮评审 P3）。空串/重复项无害但白占一行，滤掉。
     for dir in std::iter::once(&settings.models_dir)
         .chain(settings.models_dir_history.iter())
         .chain(settings.import_scan_dirs.iter())
+        .chain(std::iter::once(&settings.staging_dir))
     {
         let trimmed = dir.trim();
         if trimmed.is_empty() {
@@ -209,12 +228,17 @@ mod tests {
     #[test]
     fn weights_roots_cover_default_plus_custom_models_dir() {
         let _ctx = TempHome::new();
-        // 未配置：数据根 + 回填的默认 models_dir（load_settings 把空 models_dir
-        // 回填为数据根下的 models/）——两个根都算商店管理的权重。
+        // 未配置：数据根 + 回填的默认 models_dir + 回填的默认 staging_dir
+        // （load_settings 把空值分别回填为数据根下的 models/ 与 staging/）——
+        // 三个根都算商店管理的权重。
         let default_roots = store_weights_roots();
         assert_eq!(
             default_roots,
-            vec![config::data_dir(), config::data_dir().join("models")]
+            vec![
+                config::data_dir(),
+                config::data_dir().join("models"),
+                config::data_dir().join("staging"),
+            ]
         );
         // 自定义 models_dir：替换默认回填值、追加为第二个根（与数据根相同则不重复）。
         write_config(r#"{"models_dir": "/data/llm-weights"}"#);
@@ -223,17 +247,19 @@ mod tests {
             roots,
             vec![
                 config::data_dir(),
-                std::path::PathBuf::from("/data/llm-weights")
+                std::path::PathBuf::from("/data/llm-weights"),
+                config::data_dir().join("staging"),
             ]
         );
         write_config(&format!(
             r#"{{"models_dir": "{}"}}"#,
             config::data_dir().display()
         ));
+        // staging 根独立存在，custom == data root 只是不重复数据根本身。
         assert_eq!(
             store_weights_roots().len(),
-            1,
-            "custom == data root must not duplicate the root"
+            2,
+            "custom == data root must not duplicate the data root"
         );
     }
 
@@ -253,7 +279,8 @@ mod tests {
         assert!(roots.contains(&std::path::PathBuf::from("/data/old-weights")));
         assert!(roots.contains(&std::path::PathBuf::from("/usb/llm")));
         assert!(roots.contains(&std::path::PathBuf::from("/data/new-weights")));
-        // 空白项滤掉、与当前 models_dir 重复的导入目录不重复占位。
+        // 空白项滤掉、与当前 models_dir 重复的导入目录不重复占位；回填的默认
+        // staging 根排在最后。
         assert_eq!(
             roots,
             vec![
@@ -261,7 +288,42 @@ mod tests {
                 std::path::PathBuf::from("/data/new-weights"),
                 std::path::PathBuf::from("/data/old-weights"),
                 std::path::PathBuf::from("/usb/llm"),
+                config::data_dir().join("staging"),
             ]
         );
+    }
+
+    #[test]
+    fn weights_roots_cover_custom_staging_dir() {
+        let _ctx = TempHome::new();
+        // 用户把暂存目录挪到别处：中断下载留下的半成品权重同样受保护
+        // （第八轮评审 P3——原先只靠默认值落在数据根之下才被兜住）。
+        write_config(r#"{"staging_dir": "/data/llm-staging"}"#);
+        let roots = store_weights_roots();
+        assert!(roots.contains(&std::path::PathBuf::from("/data/llm-staging")));
+        // 自定义 staging 与数据根/models_dir 都不重复占位。
+        assert_eq!(roots.len(), 3, "data + backfilled models + custom staging");
+    }
+
+    #[test]
+    fn tag_suffix_store_names_are_caught_by_tagless_fallback() {
+        let _ctx = TempHome::new();
+        db::init_db().unwrap();
+        // 商店 model_name 由 suggest_model_name 生成，冒号清洗成 '-'——永无
+        // 冒号；daemon 侧恒带 `:tag`。商店 ollama 卡片以 `name:latest` 形态
+        // 出现在 /api/tags 与手写注册表记录里时，直接比对全部落空（第八轮
+        // 评审）：去掉 tag 后缀必须命中。
+        insert_store_model("card-ollama", "yuguang14b");
+        // 两种 case 口径下去 tag 都命中，大小写变体同抓。
+        assert_eq!(
+            store_model_name_checked("yuguang14b:latest", false).unwrap(),
+            Some("yuguang14b".to_string())
+        );
+        assert_eq!(
+            store_model_name_checked("Yuguang14B:latest", true).unwrap(),
+            Some("yuguang14b".to_string())
+        );
+        // 用户自己的带 tag 模型在商店无同名卡片时不受影响。
+        assert_eq!(store_model_name_checked("mymodel:v2", false).unwrap(), None);
     }
 }

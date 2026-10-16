@@ -204,7 +204,7 @@ const SectionShell = ({ id, icon: Icon, title, children }) => (
 const SensorGroupCard = ({ group, copy }) => (
   <div data-testid="device-manager-sensor-chip" className={`${CARD_CLASS} space-y-3 p-5`}>
     <div className="text-[13px] font-bold text-black/80 dark:text-white/80">{friendlyChipName(group, copy)}</div>
-    {(group.entries || []).map((entry) => {
+    {(group.entries || []).map((entry, index) => {
       // The crit label only consumes `critical`: on the temperature side the
       // bridge's `max` is sysinfo's `tempN_highest` (a since-boot historical
       // peak), not a threshold — falling back to it rendered a one-off spike
@@ -220,7 +220,13 @@ const SensorGroupCard = ({ group, copy }) => (
         : null;
       return (
         <div
-          key={`${entry.kind}-${entry.name}-${entry.valueText}`}
+          // Index is the final tiebreak: the backend sorts entries
+          // deterministically (chip/kind/name/value), so kind+name+index is
+          // stable across ticks. The formatted reading must NOT be part of the
+          // key — it jitters every 2s tick and would remount the row (and
+          // duplicate when two same-label entries round to the same text)
+          // (round-8 review P2).
+          key={`${entry.kind}-${entry.name}-${index}`}
           className="flex items-start justify-between gap-3"
         >
           <div className="min-w-0">
@@ -381,11 +387,21 @@ const ServiceChip = ({ label, running, detail, stateText }) => (
 // Effective link identity of an external-model row. Registry rows carry their
 // own base_url/model; Ollama rows listed straight from the service have
 // neither, so fall back to the fixed loopback daemon address and the listing
-// name (which is exactly the model id the daemon serves).
+// name (which is exactly the model id the daemon serves). Keyed on `kind`, not
+// `source`: the backend flips source to "registry" on registration (round-8
+// review P2) while ollama is the only kind whose registrations may legally omit
+// base_url — keying on source stranded those rows with no link control.
 const linkTargetOf = (row) => ({
-  model: row.model || (row.source === 'ollama' ? row.name : null),
-  baseUrl: row.base_url || (row.source === 'ollama' ? OLLAMA_LINK_BASE_URL : null),
+  model: row.model || (row.kind === 'ollama' ? row.name : null),
+  baseUrl: row.base_url || (row.kind === 'ollama' ? OLLAMA_LINK_BASE_URL : null),
 });
+
+// Store model_name never contains ':' (the store's name generator folds it to
+// '-') while daemon-side names always carry a ':tag'. Strip the tag before
+// store comparisons so the store's own ollama cards, listed as `name:latest`,
+// are recognized as store-managed instead of removable external rows
+// (round-8 review).
+const stripModelTag = (value) => String(value || '').toLowerCase().split(':')[0].trim();
 
 const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   const copy = t.uiDeviceMgr;
@@ -722,7 +738,13 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   const [question, setQuestion] = useState('');
   const runDoctor = useCallback(async (kind, questionText = null, onDone = null) => {
     const dev = (window.TauriBridge || bridge)?.device;
-    if (!dev?.buildDoctorPrompt || typeof onOpenChat !== 'function') return;
+    // Same surface discipline as confirmRemove/linkExternal: a bridge-missing
+    // entry is toasted, not a silent no-op the user watches do nothing
+    // (round-8 review P3).
+    if (!dev?.buildDoctorPrompt || typeof onOpenChat !== 'function') {
+      showToast(t.uiModelStore.linkBridgeMissing);
+      return;
+    }
     // Entry guard mirroring busyKey/linkExternal: the disabled buttons are the
     // first line of defense, this keeps a stale-closure double click from
     // building two doctor prompts / two sessions (round-7 review P3).
@@ -747,7 +769,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     } finally {
       setDoctorBusy(null);
     }
-  }, [copy, doctorBusy, onOpenChat, showToast]);
+  }, [copy, doctorBusy, onOpenChat, showToast, t]);
   const questionInvalid = question.trim().length === 0 || question.length > QUESTION_MAX;
   const sendCustom = useCallback(() => {
     const text = question.trim();
@@ -1115,11 +1137,11 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                     // guaranteed rejection (round-6 review).
                     const managedByStore = storeRows.some((record) => {
                       const storeName = String(record.model_name || '').toLowerCase();
-                      if (storeName === row.name.toLowerCase()) return true;
+                      if (storeName === stripModelTag(row.name)) return true;
                       return (
                         row.kind === 'ollama' &&
                         !!row.model &&
-                        storeName === String(row.model).toLowerCase()
+                        storeName === stripModelTag(row.model)
                       );
                     });
                     return (

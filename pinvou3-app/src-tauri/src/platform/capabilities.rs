@@ -233,11 +233,23 @@ pub(crate) fn global_shortcut_session_is_ambiguous(
 pub(crate) fn is_megacube_device() -> bool {
     static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
-        if let Some(forced) = forced_megacube_device_override() {
-            return forced;
-        }
-        std::env::consts::OS == "linux" && super::dmi::any_field_contains("megacube")
+        megacube_device_decision(
+            std::env::consts::OS,
+            super::dmi::any_field_contains("megacube"),
+            std::env::var("PINVOU3_MEGACUBE_DEVICE").ok().as_deref(),
+        )
     })
+}
+
+/// 判定核心（纯函数，测试直打）：环境覆盖优先（`1`/`0` 字面量），未覆盖时
+/// 仅 Linux 且 DMI 命中才开启。拆出来是因为 OnceLock 的进程级缓存让运行时
+/// 入口无法在测试里安全地变换输入（第八轮评审 P3：`=1` 是文档化的开发覆盖，
+/// 旧测试直接断言 `!is_megacube_device()` 会在带覆盖跑测试的机器上误红）。
+fn megacube_device_decision(os: &str, dmi_matches: bool, env_override: Option<&str>) -> bool {
+    if let Some(forced) = parse_megacube_env_override(env_override) {
+        return forced;
+    }
+    os == "linux" && dmi_matches
 }
 
 fn forced_megacube_device_override() -> Option<bool> {
@@ -329,10 +341,26 @@ mod tests {
     #[test]
     fn megacube_device_detection_never_reports_non_linux_hosts() {
         // 探测逻辑只在 Linux 主机上读取 DMI 字段;其余平台无论文件系统如何都返回 false。
-        if std::env::consts::OS == "linux" {
+        // `=1` 是文档化的开发覆盖（优先于 OS 判断），带覆盖跑测试的机器上
+        // 运行时入口合法地返回 true——fail-closed 语义改在纯函数上断言。
+        if forced_megacube_device_override().is_some() || std::env::consts::OS == "linux" {
             return;
         }
         assert!(!is_megacube_device());
+    }
+
+    #[test]
+    fn megacube_device_decision_matrix() {
+        // 未覆盖：仅 Linux 且 DMI 命中才开启（fail-closed）。
+        assert!(megacube_device_decision("linux", true, None));
+        assert!(!megacube_device_decision("linux", false, None));
+        assert!(!megacube_device_decision("macos", true, None));
+        assert!(!megacube_device_decision("windows", true, None));
+        // `=1` 任何 OS 强制开启；`=0` 压过 DMI（误报硬件的逃生口）。
+        assert!(megacube_device_decision("macos", false, Some("1")));
+        assert!(!megacube_device_decision("linux", true, Some("0")));
+        // 其他取值不覆盖，走 OS+DMI。
+        assert!(!megacube_device_decision("macos", true, Some("true")));
     }
 
     #[test]
