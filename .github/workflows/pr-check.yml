@@ -1350,6 +1350,9 @@ jobs:
       - name: Cargo.lock drift guard
         run: git diff --exit-code -- '**/Cargo.lock'
 
+      # 版本已固定(round-11 review):install-action 默认装最新,而 deny.toml 的
+      # advisories.ignore PackageSpec 例外路由(@→Exact 匹配、unused-ignored-advisory
+      # 语义)随版本可能漂移;cargo-shear 同理按 1.13.4 钉住。
       - name: cargo-deny
         if: ${{ needs.changes.outputs.knowledge_dependencies == 'true' }}
         uses: taiki-e/install-action@v2
@@ -1585,6 +1588,7 @@ jobs:
         run: git diff --exit-code -- '**/Cargo.lock'
 
       # cargo-deny only cares about dependency/policy paths (Cargo/lock/deny/gitlink).
+      # 版本固定 0.20.2,理由见 knowledge-rust 同名安装步(round-11 review)。
       - name: cargo-deny (advisories/licenses/bans/sources)
         if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' && needs.changes.outputs.rust_dependencies == 'true' }}
         uses: taiki-e/install-action@v2
