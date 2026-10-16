@@ -154,6 +154,7 @@ export function controlledTaskChatItems(tasks = [], copy = {}, sessionId = '') {
         id: `controlled-${taskId}:assistant`,
         type: 'assistant',
         text: assistantText,
+        controlledContentLane: 'output',
         controlledTaskId: taskId,
         remote: true,
         controlled: true,
@@ -170,6 +171,7 @@ export function controlledTaskChatItems(tasks = [], copy = {}, sessionId = '') {
         type: 'assistant',
         text: permissionCopy ? `${permissionCopy} (${errorText})` : errorText,
         ...(permissionCopy ? { controlledFailureReason: errorText } : {}),
+        controlledContentLane: 'error',
         controlledTaskId: taskId,
         remote: true,
         controlled: true,
@@ -190,6 +192,7 @@ export function controlledTaskChatItems(tasks = [], copy = {}, sessionId = '') {
         ? `${label}: ${permissionCopy ? `${permissionCopy} (${reason})` : reason}` : label,
       controlledTaskId: taskId,
       controlledFailureReason: reason || status,
+      controlledContentLane: 'terminal',
       remote: true,
       controlled: true,
       streaming: false,
@@ -199,82 +202,184 @@ export function controlledTaskChatItems(tasks = [], copy = {}, sessionId = '') {
   return items;
 }
 
+// The native producer appends exactly one JSON attachment display line to the
+// complete prompt. Do not treat arbitrary prefixes or legacy loose filename
+// lists as task identity. Kept aligned with the classic bridge state matcher.
+function controlledPromptMatches(prompt, display) {
+  if (display === prompt) return true;
+  const prefix = `${prompt}\n\n📎 `;
+  if (!display.startsWith(prefix)) return false;
+  const suffix = display.slice(prefix.length);
+  try {
+    const names = JSON.parse(suffix);
+    return Array.isArray(names) && names.length > 0
+      && names.every(name => typeof name === 'string' && name.length > 0)
+      && JSON.stringify(names) === suffix;
+  } catch (_) { return false; }
+}
+
 /**
  * Keeps the real, durable session timeline and adds only remote-control items
  * that have not already arrived through the ordinary chat event stream.
  */
 export function mergeControlledTaskChatItems(chatItems = [], taskItems = []) {
-  const merged = Array.isArray(chatItems) ? chatItems.slice() : [];
-  const available = new Map();
-  for (let index = 0; index < merged.length; index += 1) {
-    const item = merged[index];
-    if (!item || (item.type !== 'user' && item.type !== 'assistant')) continue;
-    const key = `${item.type}:${String(item.text || '')}`;
-    if (!available.has(key)) available.set(key, []);
-    available.get(key).push(index);
-  }
-  const taskAnchors = new Map();
-  let lastTaskUserIndex = -1;
+  const durable = Array.isArray(chatItems) ? chatItems.slice() : [];
+  const groups = new Map();
   for (const item of Array.isArray(taskItems) ? taskItems : []) {
-    const key = `${item.type}:${String(item.text || '')}`;
-    const taskId = String(item.controlledTaskId || '');
-    const anchor = taskAnchors.get(taskId) ?? lastTaskUserIndex;
-    const nextUserIndex = merged.findIndex((candidate, index) => (
-      index > anchor && candidate?.type === 'user'
+    if (!item?.controlledTaskId) continue;
+    const taskId = String(item.controlledTaskId);
+    if (!groups.has(taskId)) groups.set(taskId, []);
+    groups.get(taskId).push(item);
+  }
+  const insertions = new Map();
+  const insert = (index, item) => {
+    if (!insertions.has(index)) insertions.set(index, []);
+    insertions.get(index).push(item);
+  };
+  const belongsTo = (item, taskId) => !item?.remoteTaskId
+    || String(item.remoteTaskId) === taskId;
+  const anchors = new Map();
+  let lastAnchor = -1;
+  // applyTaskEventTo preserves admission order, including later status updates.
+  for (const [taskId, items] of groups) {
+    const prompt = items.find(item => item.type === 'user');
+    if (!prompt) continue;
+    const start = prompt.controlledMessageStart;
+    // Prefer identity/position over prompt text: repeated prompts and hidden
+    // transcript messages make display-array offsets unsuitable identities.
+    let anchor = durable.findIndex(item => item?.type === 'user'
+      && String(item.remoteTaskId || '') === taskId);
+    if (anchor < 0 && Number.isInteger(start)) {
+      anchor = durable.findIndex(item => item?.type === 'user'
+        && belongsTo(item, taskId) && item.messageIndex === start);
+    }
+    if (anchor < 0) {
+      anchor = durable.findIndex((item, index) => index > lastAnchor
+        && item?.type === 'user' && !item.steeredMidTurn
+        && belongsTo(item, taskId) && controlledPromptMatches(prompt.text, String(item.text || ''))
+        && (!Number.isInteger(start) || !Number.isInteger(item.messageIndex)
+          || item.messageIndex === start));
+    }
+    anchors.set(taskId, anchor);
+    if (anchor >= 0) lastAnchor = anchor;
+  }
+  const taskIds = [...groups.keys()];
+  for (const [taskId, items] of groups) {
+    const prompt = items.find(item => item.type === 'user');
+    if (!prompt) continue;
+    const start = prompt.controlledMessageStart;
+    const anchor = anchors.get(taskId) ?? -1;
+    let lower = anchor + 1;
+    if (anchor < 0) {
+      const firstEvent = durable.findIndex(item => String(item?.remoteTaskId || '') === taskId);
+      const nextPosition = Number.isInteger(start) ? durable.findIndex(item => (
+        item?.type === 'user' && Number.isInteger(item.messageIndex) && item.messageIndex >= start
+      )) : -1;
+      const nextTaskId = taskIds.slice(taskIds.indexOf(taskId) + 1)
+        .find(id => anchors.get(id) >= 0);
+      lower = firstEvent >= 0 ? firstEvent : (nextPosition >= 0
+        ? nextPosition : (nextTaskId ? anchors.get(nextTaskId) : durable.length));
+      insert(lower, prompt);
+    }
+    const nextTurn = durable.findIndex((item, index) => index >= lower && (
+      (item?.remoteTaskId && String(item.remoteTaskId) !== taskId)
+      || (item?.type === 'user' && !item.steeredMidTurn
+        && String(item.remoteTaskId || '') !== taskId)
     ));
-    const upperBound = item.type === 'user' || nextUserIndex < 0
-      ? Number.POSITIVE_INFINITY
-      : nextUserIndex;
-    const persistedFailureKey = item.controlledFailureReason
-      ? `assistant:${String(item.controlledFailureReason)}`
-      : '';
-    const eligibleIndex = (candidateKey) => {
-      const indices = available.get(candidateKey) || [];
-      let position = -1;
-      if (taskId) {
-        position = indices.findIndex(index => (
-          String(merged[index]?.remoteTaskId || '') === taskId
-        ));
+    const upper = nextTurn < 0 ? durable.length : nextTurn;
+    const candidates = [];
+    for (let index = lower; index < upper; index += 1) {
+      if (durable[index]?.type === 'assistant' && belongsTo(durable[index], taskId)) {
+        candidates.push(index);
       }
-      if (item.type === 'user' && Number.isInteger(item.controlledMessageStart)) {
-        if (position < 0) {
-          position = indices.findIndex(index => (
-            index >= item.controlledMessageStart
-            && Number(merged[index]?.messageIndex) === item.controlledMessageStart
-          ));
+    }
+    // Reserve persisted failures before joining the output lane. A terminal
+    // error following a partially hydrated answer is not model text.
+    const failureIndices = new Set();
+    const failureMatches = new Map();
+    const output = items.find(item => item.controlledContentLane === 'output');
+    const modelIndices = new Set();
+    let modelPrefix = '';
+    if (output) {
+      for (const index of candidates) {
+        const next = modelPrefix + String(durable[index].text || '');
+        if (!output.text.startsWith(next) && !next.startsWith(output.text)) break;
+        modelPrefix = next;
+        modelIndices.add(index);
+        // A prefix can end in the middle of a newer durable message. Protect
+        // the whole message, but leave later messages available for failures.
+        if (modelPrefix.length >= output.text.length) break;
+      }
+    }
+    for (const item of items.filter(candidate => candidate.controlledContentLane !== 'output'
+      && candidate.type === 'assistant')) {
+      for (let position = candidates.length - 1; position >= 0; position -= 1) {
+        const index = candidates[position];
+        if (modelIndices.has(index) || failureIndices.has(index)) continue;
+        if (String(durable[index].text || '') === item.text
+          || (item.controlledFailureReason
+            && String(durable[index].text || '') === item.controlledFailureReason)) {
+          failureIndices.add(index);
+          failureMatches.set(item, index);
+          break;
         }
       }
-      if (position < 0) {
-        position = indices.findIndex((index) => {
-          if (index <= anchor || index >= upperBound) return false;
-          if (item.type !== 'user' || !Number.isInteger(item.controlledMessageStart)) return true;
-          const candidateMessageIndex = Number(merged[index]?.messageIndex);
-          return Number.isInteger(candidateMessageIndex)
-            ? candidateMessageIndex >= item.controlledMessageStart
-            : index >= item.controlledMessageStart;
-        });
+    }
+    const outputBoundary = failureIndices.size ? Math.min(...failureIndices) : upper;
+    const used = new Set();
+    for (const item of items) {
+      if (item.type === 'user') continue;
+      if (item.controlledContentLane === 'output') {
+        // The task lane accumulates every text delta, whereas the ordinary
+        // timeline splits text at tools/reasoning. Compare the ordered lane
+        // inside this turn only; never search substrings across other turns.
+        const outputIndices = candidates.filter(index => !failureIndices.has(index));
+        const text = outputIndices.map(index => String(durable[index].text || '')).join('');
+        if (text.startsWith(item.text)) {
+          outputIndices.forEach(index => used.add(index));
+          continue; // durable lane is equal or ahead
+        }
+        if (item.text.startsWith(text)) {
+          outputIndices.forEach(index => used.add(index));
+          const suffix = item.text.slice(text.length);
+          if (suffix) insert(outputBoundary, { ...item, text: suffix });
+          continue;
+        }
       }
-      if (position < 0) return -1;
-      return indices.splice(position, 1)[0];
-    };
-    let matchingKey = key;
-    let index = eligibleIndex(key);
-    if (index < 0 && persistedFailureKey) {
-      matchingKey = persistedFailureKey;
-      index = eligibleIndex(persistedFailureKey);
-    }
-    if (index >= 0) {
-      if (matchingKey !== key) {
-        merged[index] = { ...merged[index], ...item, id: merged[index].id };
+      // Consume this failure's reservation, not the first equal model text.
+      // A lagging task snapshot may have no output lane to mark that text used.
+      const match = item.controlledContentLane !== 'output' ? failureMatches.get(item)
+        : candidates.find(index => !used.has(index) && !failureIndices.has(index) && (
+        String(durable[index].text || '') === item.text
+        || (item.controlledFailureReason
+          && String(durable[index].text || '') === item.controlledFailureReason)
+      ));
+      if (match !== undefined) {
+        used.add(match);
+        if (String(durable[match].text || '') !== item.text) {
+          // Enrich the label and a missing raw diagnostic only. Never copy
+          // task-side identity, positions or timestamps over durable metadata,
+          // or replace raw evidence already attached to the durable message.
+          const reason = item.controlledFailureReason;
+          const missingReason = durable[match].controlledFailureReason == null
+            && typeof reason === 'string' && reason.length > 0;
+          durable[match] = {
+            ...durable[match],
+            ...(missingReason ? { controlledFailureReason: reason } : {}),
+            text: item.text,
+          };
+        }
+      } else {
+        insert(item.controlledContentLane === 'output' ? outputBoundary : upper, item);
       }
-    } else {
-      merged.push(item);
-      index = merged.length - 1;
     }
-    if (item.type === 'user' && taskId) {
-      taskAnchors.set(taskId, index);
-      lastTaskUserIndex = index;
-    }
+  }
+  // Keep original indices stable while reconciling multiple tasks. Missing
+  // output belongs before the next admission, not at the conversation bottom.
+  const merged = [];
+  for (let index = 0; index <= durable.length; index += 1) {
+    merged.push(...(insertions.get(index) || []));
+    if (index < durable.length) merged.push(durable[index]);
   }
   return merged;
 }

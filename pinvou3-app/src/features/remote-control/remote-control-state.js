@@ -959,7 +959,7 @@
     // event on a multi-thread runtime. Keep the newer lifecycle state while
     // still accepting prompt text that only the admitted projection carries.
     if (index >= 0 && status === "admitted" && tasks[index].status !== "admitted") {
-      var lateText = payload.text ? String(payload.text).slice(0, 8192) : null;
+      var lateText = controlledPromptText(payload.text);
       if (!lateText || tasks[index].text) return state;
       tasks[index] = Object.assign({}, tasks[index], {
         text: lateText,
@@ -972,6 +972,7 @@
     }
     if (index >= 0 && tasks[index].status === "cancel_requested" &&
         status !== "cancel_requested" && !TASK_TERMINAL[status]) return state;
+    var promptText = controlledPromptText(payload.text);
     var entry = {
       taskId: taskId,
       sessionId: (payload.sessionId || payload.session_id)
@@ -979,8 +980,8 @@
         : (index >= 0 ? tasks[index].sessionId : null),
       status: status,
       modelSource: modelSource || (index >= 0 ? tasks[index].modelSource || null : null),
-      text: payload.text
-        ? String(payload.text).slice(0, 8192)
+      text: promptText
+        ? promptText
         : (index >= 0 ? tasks[index].text || null : null),
       messageIndex: Number.isInteger(payload.messageIndex)
         ? payload.messageIndex
@@ -1041,7 +1042,8 @@
     var payload = event || {};
     var taskId = payload.taskId ? String(payload.taskId) : "";
     var role = payload.role ? String(payload.role) : "";
-    var text = payload.text ? String(payload.text).slice(0, 8192) : "";
+    var text = role === "user" ? controlledPromptText(payload.text)
+      : (payload.text ? String(payload.text).slice(0, 8192) : "");
     var eventId = payload.eventId ? String(payload.eventId) : "";
     if (!taskId || !eventId || !text || (role !== "user" && role !== "assistant" && role !== "error")) {
       return state;
@@ -1075,6 +1077,53 @@
     next.controlledTasks = tasks;
     next.revision = state.revision + 1;
     return next;
+  }
+
+  function controlledPromptText(value) {
+    var text = value ? String(value) : "";
+    // The protocol admits up to 64 KiB. Never use a truncated prompt as an
+    // identity: two legitimate prompts can differ after the old 8192 limit.
+    if (!text || text.length > 65536) return null;
+    var bytes = 0;
+    for (var index = 0; index < text.length; index += 1) {
+      var code = text.codePointAt(index);
+      if (code >= 0xd800 && code <= 0xdfff) return null;
+      bytes += code <= 0x7f ? 1 : (code <= 0x7ff ? 2 : (code <= 0xffff ? 3 : 4));
+      if (bytes > 65536) return null;
+      if (code > 0xffff) index += 1;
+    }
+    return text;
+  }
+
+  // Keep this exact display comparison aligned with the ESM projection's
+  // controlledPromptMatches. Classic bridge state cannot import an ESM helper.
+  function controlledPromptMatches(prompt, display) {
+    if (display === prompt) return true;
+    var prefix = prompt + "\n\n📎 ";
+    if (!display.startsWith(prefix)) return false;
+    var suffix = display.slice(prefix.length);
+    try {
+      var names = JSON.parse(suffix);
+      return Array.isArray(names) && names.length > 0
+        && names.every(function (name) { return typeof name === "string" && name.length > 0; })
+        && JSON.stringify(names) === suffix;
+    } catch (_) { return false; }
+  }
+
+  // Admission is published before dispatch, and each controlled session has
+  // at most one active task. Copy its identity onto the live user bubble;
+  // display-array positions cannot stand in for raw transcript positions.
+  function controlledTaskAdmissionIdentity(tasks, sessionId, content) {
+    var active = (Array.isArray(tasks) ? tasks : []).filter(function (task) {
+      return task && task.taskId && String(task.sessionId || "") === String(sessionId || "")
+        && !TASK_TERMINAL[task.status];
+    });
+    if (active.length !== 1) return null;
+    var task = active[0];
+    if (!task.text || !controlledPromptMatches(String(task.text), String(content || ""))) return null;
+    var identity = { remoteTaskId: String(task.taskId) };
+    if (Number.isInteger(task.messageIndex)) identity.messageIndex = task.messageIndex;
+    return identity;
   }
 
   /** True when the envelope still belongs to the live connection context. */
@@ -1117,6 +1166,7 @@
     hideRemoteProxyHistory: hideRemoteProxyHistory,
     applyControlledTaskEvent: applyControlledTaskEvent,
     applyTaskContent: applyTaskContent,
+    controlledTaskAdmissionIdentity: controlledTaskAdmissionIdentity,
     matchesLiveContext: matchesLiveContext,
     isTaskTerminal: function (status) {
       return !!TASK_TERMINAL[status];
