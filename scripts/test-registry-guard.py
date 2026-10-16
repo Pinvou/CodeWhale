@@ -25,6 +25,19 @@ configuration resolves. The registry scope is the pinvou3-app/src-tauri
 crate; covering the other test manifests (e.g. pinvou-cli) is a registered
 follow-up.
 
+Static-scan boundary (review #1518 round-11): a pin's ignore status is
+read from lexically-written attributes in lib-graph source files. An
+`#[ignore]` arriving through code generation — `macro_rules!`,
+`include!`, a proc-macro — is invisible to the source side, and so is a
+pin moved outside the graph (integration `tests/`, bin targets). The
+list-presence half still demands the registered path, so relocation
+fails loud; but a *generated* `#[ignore]` on a pin that stays listed
+would stay green — relocating a pin into generated code is tampering,
+not an edit. The same boundary covers `#[path]` attributes on `mod`
+declarations nested inside inline modules (only file-top-level wirings
+are followed) and raw-identifier `mod r#type;` declarations (not
+followed).
+
 Run it from anywhere (paths are anchored to this script's repo location);
 it reuses cargo's artifacts, and CI wires it into the linux rust-test leg
 right after `cargo test --lib --no-run`.
@@ -264,6 +277,10 @@ def _string_value_after(lines, li, col):
                         close = line.find('"' + "#" * hashes, j + 1)
                         return line[j + 1 : close] if close != -1 else None
             k += 1
+        # the value may sit on a line below the attribute head, or behind
+        # comments that consumed the rest of this one — without the advance
+        # the outer loop would re-scan the same line forever
+        li += 1
     return None
 
 
@@ -352,7 +369,10 @@ def _strip_code(line, state):
                     j += 1
                 hashes = j - hashes
                 if j < n and line[j] == '"':
-                    out[k:j] = " " * (j - k)
+                    # blank the opening quote as well: a surviving `"` in
+                    # the stripped text lexes as a plain-string opener and
+                    # the attribute parser swallows everything behind it
+                    out[k : j + 1] = " " * (j - k + 1)
                     raw_hashes = hashes
                     k = j + 1
                     continue

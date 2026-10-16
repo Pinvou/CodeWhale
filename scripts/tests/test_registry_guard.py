@@ -24,7 +24,16 @@ tree, not in one-off manual runs:
     `#[path]` value is read only from a string token the lexer vouches
     for — a quoted path inside the attribute's comment cannot derail the
     wiring, and an unparseable value raises instead of silently skipping
-    the wired module.
+    the wired module;
+  - the value reader advances across lines (round-11: a value wrapped to
+    the next line, or behind a comment, re-scanned one line forever) and
+    the stripper erases a raw string's opening quote together with its
+    prefix (round-11: the surviving quote lexed as a plain-string opener
+    and swallowed the attribute run — an `#[ignore]` behind a raw-string
+    doc attribute passed the gate, and raw-string `#[path]` values never
+    wired end-to-end);
+  - main()'s duplicate-#[test] detection — the guard's original purpose —
+    is pinned against a mocked `cargo test --list` registry.
 
 `main()` shells out to cargo, so these tests exercise the pure filesystem
 half: the source scanner (`ignored_source_pins`) and the pin attribution
@@ -673,23 +682,157 @@ class ScannerParsingTests(GuardFixture):
         # Same round-9 root cause on the graph-walk side: a commented-out
         # `#[path]` wiring must not pull a file into the scan, and a comment
         # between a live `#[path]` attribute and its `mod` declaration must
-        # not break the wiring (rustc keeps them attached).
+        # not break the wiring (rustc keeps them attached). The live target
+        # deliberately does not match its mod name, so the `#[path]` wiring
+        # is the only route in and the test cannot pass via conventional
+        # resolution.
         by_path, unattributable = self._ignored_sources(
             {
                 "lib.rs": (
                     "// #[path = \"ghost.rs\"]\n"
                     "// mod ghost;\n"
                     "\n"
-                    "#[path = \"wired.rs\"]\n"
+                    "#[path = \"wired_target.rs\"]\n"
                     "// wired through a comment\n"
                     "mod wired;\n"
                 ),
                 "ghost.rs": _IGNORED_PIN,
-                "wired.rs": _IGNORED_PIN,
+                "wired_target.rs": _IGNORED_PIN,
             }
         )
         self.assertEqual(sorted(by_path), ["wired::tests::critical_pin"])
         self.assertEqual(unattributable, {})
+
+
+class Round11LexerBoundaryTests(GuardFixture):
+    """Review #1518 round-11: the value reader must always terminate (a
+    multi-line `#[path]` value used to spin the scan forever), and the
+    stripper must erase a raw string's opening quote together with its
+    prefix (its survival lexed as a plain-string opener and swallowed
+    everything behind it)."""
+
+    def test_path_value_on_following_line_is_wired(self):
+        # `#[path =` with the value on the next line behind a comment: the
+        # first line yields no string, so the scan must advance — the
+        # pre-round-11 reader re-scanned the same line forever and hung the
+        # guard process.
+        by_path, unattributable = self._ignored_sources(
+            {
+                "lib.rs": (
+                    "#[path =\n"
+                    "// value wrapped to the next line\n"
+                    "\"wrapped_target.rs\"]\n"
+                    "mod wrapped;\n"
+                ),
+                "wrapped_target.rs": _IGNORED_PIN,
+            }
+        )
+        self.assertEqual(sorted(by_path), ["wrapped::tests::critical_pin"])
+        self.assertEqual(unattributable, {})
+
+    def test_path_value_behind_multiline_block_comment_is_wired(self):
+        # Same termination property through the block-comment branch: the
+        # comment consumes the rest of the attribute line(s) and the value
+        # follows once it closes.
+        by_path, unattributable = self._ignored_sources(
+            {
+                "lib.rs": (
+                    "#[path = /* block comment\n"
+                    "   spanning lines */ \"block_target.rs\"]\n"
+                    "mod blocked;\n"
+                ),
+                "block_target.rs": _IGNORED_PIN,
+            }
+        )
+        self.assertEqual(sorted(by_path), ["blocked::tests::critical_pin"])
+        self.assertEqual(unattributable, {})
+
+    def test_raw_string_attribute_does_not_hide_following_ignore(self):
+        # The raw-string branch used to blank the body but leave the
+        # opening quote in the stripped text; the attribute parser read it
+        # as a plain-string opener and swallowed the rest of the run — a
+        # pin silenced behind a `#[doc = r#"..."#]` passed the gate. The
+        # reported location is the ignore-bearing line itself.
+        root = self._crate_root(
+            {
+                "lib.rs": (
+                    "#[doc = r#\"raw doc with [brackets] and \" quotes\"#]\n"
+                    "#[test]\n"
+                    "#[ignore]\n"
+                    "fn critical_pin() {\n"
+                    "}\n"
+                ),
+            }
+        )
+        by_path, unattributable = self._scan(root)
+        self.assertEqual(
+            by_path,
+            {"critical_pin": [self._src_path(root, "lib.rs") + ":3"]},
+        )
+        self.assertEqual(unattributable, {})
+
+    def test_raw_string_path_value_is_wired(self):
+        # The documented raw-string form must wire end-to-end: the value
+        # reader reads the raw payload, and the erased opening quote lets
+        # the attribute parser find the declaration, so the file joins the
+        # lib graph under its mod name.
+        by_path, unattributable = self._ignored_sources(
+            {
+                "lib.rs": (
+                    "#[path = r#\"raw_target.rs\"#]\n"
+                    "mod rawwired;\n"
+                ),
+                "raw_target.rs": _IGNORED_PIN,
+            }
+        )
+        self.assertEqual(sorted(by_path), ["rawwired::tests::critical_pin"])
+        self.assertEqual(unattributable, {})
+
+
+class DuplicateRegistrationTests(unittest.TestCase):
+    """main()'s duplicate-#[test] detection — the guard's original purpose
+    (review #455 rounds 26/28) — previously had no committed regression:
+    these run the real main() against a mocked `cargo test --list`
+    registry, so the duplicate half is covered without cargo too."""
+
+    def _run_main(self, paths):
+        import contextlib
+        import io
+        import sys
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write(root / "pinvou3-app" / "src-tauri" / "Cargo.toml", "")
+            _write(root / "pinvou3-app" / "src-tauri" / "src" / "lib.rs", "")
+            stderr = io.StringIO()
+            with patch.object(
+                guard, "MANIFEST", str(root / "pinvou3-app/src-tauri/Cargo.toml")
+            ), patch.object(
+                guard, "list_tests", return_value=list(paths)
+            ), patch.object(
+                sys, "argv", ["test-registry-guard"]
+            ), contextlib.redirect_stderr(stderr):
+                code = guard.main()
+        return code, stderr.getvalue()
+
+    def test_same_path_registered_twice_fails(self):
+        # The failure the guard exists for: one path registered twice means
+        # a duplicated attribute silenced a neighbouring test while
+        # inflating the run count.
+        code, err = self._run_main(["a::tests::dup", "a::tests::dup"])
+        self.assertEqual(code, 1)
+        self.assertIn("duplicate test registrations", err)
+        self.assertIn("a::tests::dup x2", err)
+
+    def test_same_name_in_distinct_modules_is_not_a_duplicate(self):
+        # Full-path keying: two modules may each carry a same-named test —
+        # libtest registers both separately. With every pin present the
+        # guard must pass (the bare-name era would have red here).
+        code, err = self._run_main(
+            list(guard.REQUIRED_PINS) + ["a::tests::dup", "b::tests::dup"]
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn("duplicate", err)
 
 
 if __name__ == "__main__":
