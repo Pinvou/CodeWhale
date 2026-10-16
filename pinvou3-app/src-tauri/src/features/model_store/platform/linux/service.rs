@@ -853,6 +853,15 @@ pub fn set_storage_settings(
         settings.models_dir = dir;
     }
     if let Some(dirs) = import_scan_dirs {
+        // 与 models_dir 同一把绝对路径尺子：相对扫描目录的解析随调用方工作
+        // 目录漂移，设备侧移除守卫拿它做权重根前缀匹配时必然失配——"这个
+        // 目录里的权重属于商店"的保护会悄悄变 no-op（第七轮评审 P3）。设置
+        // 入口直接拒绝，读取侧的 trim/滤空口径保持不变。
+        for d in dirs.iter().map(|d| d.trim()).filter(|d| !d.is_empty()) {
+            if !std::path::Path::new(d).is_absolute() {
+                return Err(format!("导入扫描目录要填绝对路径，收到的是「{d}」"));
+            }
+        }
         // 滤掉空白项：界面上多敲一次回车就会留一行空的，而空字符串进了搜索
         // 根列表只会白占一行。
         settings.import_scan_dirs = dirs
@@ -991,5 +1000,26 @@ mod tests {
         let roots = crate::features::model_store::store_weights_roots();
         assert!(roots.contains(&std::path::PathBuf::from(&path_of(&a))));
         assert!(roots.contains(&std::path::PathBuf::from(&path_of(&b))));
+    }
+
+    #[test]
+    fn import_scan_dirs_must_be_absolute() {
+        let ctx = super::config::TempHome::new();
+        // 相对扫描目录的解析随调用方工作目录漂移，设备侧移除守卫的前缀匹配
+        // 必然失配（第七轮评审 P3）——与 models_dir 同一把尺子在入口拒绝。
+        let error = set_storage_settings(
+            None,
+            Some(vec![
+                ctx.path().join("scan-ok").to_string_lossy().to_string(),
+                "relative/dir".to_string(),
+            ]),
+        )
+        .expect_err("relative import_scan_dir must be rejected");
+        assert!(error.contains("绝对路径"), "unexpected error: {error}");
+        // 合法路径照常保存，空白项照常滤掉。
+        let ok = ctx.path().join("scan-ok").to_string_lossy().to_string();
+        let settings = set_storage_settings(None, Some(vec![format!("  {ok}  "), String::new()]))
+            .expect("absolute dirs accepted");
+        assert_eq!(settings["import_scan_dirs"], serde_json::json!([ok]));
     }
 }

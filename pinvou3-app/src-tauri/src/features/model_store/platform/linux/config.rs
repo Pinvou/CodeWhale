@@ -151,6 +151,11 @@ pub struct Settings {
     /// 历史目录算进去的话，改过目录的机器上旧根就处于无保护状态。只留最近
     /// [`MAX_MODELS_DIR_HISTORY`] 个，足够覆盖正常使用（换盘不频繁），又不让
     /// 手改配置的脏数据无限堆积。
+    ///
+    /// 已知边界（第七轮评审 P3 披露）：留痕只发生在 `set_storage_settings`。
+    /// 绕过设置页、直接手改本配置文件的 `models_dir` 不会触发留痕，旧根在
+    /// 下次经设置页保存前不进保护集合——此时在册模型仍受名字臂保护，只是
+    /// 路径臂不覆盖旧根。
     #[serde(default)]
     pub models_dir_history: Vec<String>,
 

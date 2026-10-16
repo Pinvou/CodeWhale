@@ -205,12 +205,24 @@ const SensorGroupCard = ({ group, copy }) => (
   <div data-testid="device-manager-sensor-chip" className={`${CARD_CLASS} space-y-3 p-5`}>
     <div className="text-[13px] font-bold text-black/80 dark:text-white/80">{friendlyChipName(group, copy)}</div>
     {(group.entries || []).map((entry) => {
-      const limitValue = entry.critical != null ? entry.critical : entry.max;
+      // The crit label only consumes `critical`: on the temperature side the
+      // bridge's `max` is sysinfo's `tempN_highest` (a since-boot historical
+      // peak), not a threshold — falling back to it rendered a one-off spike
+      // as if it were the critical line (round-7 review P2). Peaks get their
+      // own honest label; non-temperature maxes (hwmon thresholds for
+      // fans/voltages) keep the original semantics.
+      const limitValue = entry.critical != null ? entry.critical : (entry.kind !== 'temperature' ? entry.max : null);
       const limitText = limitValue != null
         ? copy.critLimit(`${Math.round(limitValue)}${limitUnitOfKind(entry.kind)}`)
         : null;
+      const peakText = entry.kind === 'temperature' && entry.max != null
+        ? copy.peakLabel(`${Math.round(entry.max)}${limitUnitOfKind(entry.kind)}`)
+        : null;
       return (
-        <div key={`${entry.kind}-${entry.name}`} className="flex items-start justify-between gap-3">
+        <div
+          key={`${entry.kind}-${entry.name}-${entry.valueText}`}
+          className="flex items-start justify-between gap-3"
+        >
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${LEVEL_DOT[entry.level] || LEVEL_DOT.ok}`} />
@@ -229,6 +241,7 @@ const SensorGroupCard = ({ group, copy }) => (
           <div className="shrink-0 text-right">
             <div className="font-mono text-[13px] font-semibold text-black/80 dark:text-white/80">{entry.valueText}</div>
             {limitText && <div className={`text-[11px] ${MUTED_TEXT}`}>{limitText}</div>}
+            {!limitText && peakText && <div className={`text-[11px] ${MUTED_TEXT}`}>{peakText}</div>}
           </div>
         </div>
       );
@@ -347,13 +360,20 @@ const ProcList = ({ title, rows, metricKey, testId, placeholder = null }) => (
 
 // One muted chip per model service in the models section header: green dot
 // while the probe answers, gray otherwise, detail as the title tooltip.
-const ServiceChip = ({ label, running, detail }) => (
+const ServiceChip = ({ label, running, detail, stateText }) => (
   <span
     data-testid="device-manager-service-chip"
     title={detail || undefined}
     className="inline-flex items-center gap-1.5 rounded-full bg-black/[0.04] px-2.5 py-1 text-[11px] font-semibold dark:bg-white/[0.06]"
   >
-    <span className={`h-1.5 w-1.5 rounded-full ${running ? LEVEL_DOT.ok : 'bg-black/25 dark:bg-white/30'}`} />
+    {/* Running state used to be conveyed by the dot color alone (round-7
+        review P3): the dot carries an aria-label so screen-reader and
+        color-blind users can tell running from stopped. */}
+    <span
+      aria-label={stateText || undefined}
+      role="img"
+      className={`h-1.5 w-1.5 rounded-full ${running ? LEVEL_DOT.ok : 'bg-black/25 dark:bg-white/30'}`}
+    />
     <span className={MUTED_TEXT}>{label}</span>
   </span>
 );
@@ -575,7 +595,11 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
       // backend string alone reads as a foreign system error (round-4 review P3).
       showToast(copy.linkFailed(String(error?.message || error)));
     } finally {
-      setBusyKey(null);
+      // Compare-and-set clear, same contract as confirmRemove (round-5 review
+      // P2): linkExternal's own finally cleared unconditionally, which would
+      // revive the other row's buttons if the two guards ever raced
+      // (round-7 review P3 alignment).
+      setBusyKey((current) => (current === `link:${rowKey(row)}` ? null : current));
     }
   }, [bs, busyKey, copy, showToast, t]);
 
@@ -606,7 +630,13 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   // applies to them too.
   const confirmRemove = useCallback(async (row) => {
     const dev = (window.TauriBridge || bridge)?.device;
-    if (!dev?.removeExternalModel) return;
+    // Bridge missing is a silent no-op otherwise: the armed panel already
+    // collapsed on click, so the user would watch the row stay with no
+    // feedback at all (round-7 review P3).
+    if (!dev?.removeExternalModel) {
+      showToast(t.uiModelStore.linkBridgeMissing);
+      return;
+    }
     // Cross-row mutex entry guard (round-6 review P2): see linkExternal.
     if (busyKey) return;
     setBusyKey(`remove:${rowKey(row)}`);
@@ -618,7 +648,9 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
           kind: 'ollama',
           model: row.model || row.name,
         });
-        if (!record?.id) throw new Error('missing id');
+        // Backend contract break (register ok but no id): a localized message
+        // instead of the raw 'missing id' token (round-7 review P3).
+        if (!record?.id) throw new Error(copy.registerNoId);
         id = record.id;
       }
       const outcome = await dev.removeExternalModel({
@@ -640,7 +672,9 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
         const liveBridge = window.TauriBridge || bridge;
         // Assign the OUTER variable (an inner `let` here used to shadow it and
         // every cleanup failure surfaced as "unknown" — round-3 review P2).
-        cleanupErrorText = liveBridge?.models?.deleteModel ? null : 'bridge unavailable';
+        // Reasons are localized (round-7 review P3): the raw tokens used to
+        // leak into the zh/ja toast on this failure path.
+        cleanupErrorText = liveBridge?.models?.deleteModel ? null : copy.linkReasonBridge;
         for (const linked of cleanupErrorText ? [] : linkedRows) {
           try {
             await liveBridge.models.deleteModel(linked.id);
@@ -651,7 +685,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
         }
         if (cleanupErrorText) cleanupOk = false;
       } else {
-        cleanupErrorText = 'bridge unavailable';
+        cleanupErrorText = copy.linkReasonBridge;
         cleanupOk = false;
       }
       const completedKey = rowKey(row);
@@ -668,7 +702,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
         notices.push(copy.removeDone(row.name));
       } else {
         // Cleanup failure must be surfaced, not drowned by a plain success toast.
-        notices.push(copy.linkRowStale(row.name, cleanupErrorText || 'unknown'));
+        notices.push(copy.linkRowStale(row.name, cleanupErrorText || copy.linkReasonUnknown));
       }
       showToast(notices.join('\n'));
     } catch (error) {
@@ -681,7 +715,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
       // second saveModel / removeExternalModel.
       setBusyKey((current) => (current === `remove:${rowKey(row)}` ? null : current));
     }
-  }, [armedRemoveId, bs, busyKey, copy, deleteWeights, showToast]);
+  }, [armedRemoveId, bs, busyKey, copy, deleteWeights, showToast, t]);
 
   // ── AI doctor actions ────────────────────────────────────────────
   const [doctorBusy, setDoctorBusy] = useState(null);
@@ -689,6 +723,10 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   const runDoctor = useCallback(async (kind, questionText = null, onDone = null) => {
     const dev = (window.TauriBridge || bridge)?.device;
     if (!dev?.buildDoctorPrompt || typeof onOpenChat !== 'function') return;
+    // Entry guard mirroring busyKey/linkExternal: the disabled buttons are the
+    // first line of defense, this keeps a stale-closure double click from
+    // building two doctor prompts / two sessions (round-7 review P3).
+    if (doctorBusy) return;
     setDoctorBusy(kind);
     try {
       const prompt = await dev.buildDoctorPrompt(kind, questionText);
@@ -709,7 +747,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     } finally {
       setDoctorBusy(null);
     }
-  }, [copy, onOpenChat, showToast]);
+  }, [copy, doctorBusy, onOpenChat, showToast]);
   const questionInvalid = question.trim().length === 0 || question.length > QUESTION_MAX;
   const sendCustom = useCallback(() => {
     const text = question.trim();
@@ -850,8 +888,11 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
               <div className={`${CARD_CLASS} p-6 text-center text-[13px] ${MUTED_TEXT}`}>{copy.storageEmpty}</div>
             ) : (
               <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                {deviceFmt.disks.map((disk) => (
-                  <DiskRow key={disk.mountPoint} disk={disk} copy={copy} />
+                {deviceFmt.disks.map((disk, index) => (
+                  // A bind-mounted path can be listed twice, colliding
+                  // mountPoint keys (round-7 review P3): the index is only a
+                  // tiebreak — single-disk lists still key off the mount point.
+                  <DiskRow key={`${disk.mountPoint || '—'}-${index}`} disk={disk} copy={copy} />
                 ))}
               </div>
             )}
@@ -963,6 +1004,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                       label={copy[SERVICE_LABEL_KEYS[service.key]] || service.key}
                       running={!!service.running}
                       detail={service.detail}
+                      stateText={service.running ? copy.statusRunning : copy.statusUnreachable}
                     />
                   ))}
                 </div>

@@ -80,7 +80,12 @@ pub(crate) fn cuda_toolkit_version() -> Option<String> {
         .collect();
     dirs.sort_by_key(|dir| cuda_dir_sort_key(dir));
     dirs.into_iter().rev().find_map(|dir| {
-        let text = std::fs::read_to_string(dir.join("version.json")).ok()?;
+        use std::io::Read;
+        let file = std::fs::File::open(dir.join("version.json")).ok()?;
+        let mut text = String::new();
+        // version.json 是 root 所有的小文件；有界读取防异常环境下的巨文件占内存
+        // （第七轮评审 P3），64KB 对真实 version.json 已放宽三个数量级。
+        file.take(64 * 1024).read_to_string(&mut text).ok()?;
         crate::features::device::parse_cuda_toolkit_version(&text)
     })
 }
@@ -444,6 +449,62 @@ mod tests {
                 view.models.iter().any(|model| model.id == id),
                 "registry record must survive the rejected removal"
             );
+        });
+    }
+
+    /// 移除端对 ollama 记录**跳过权重删除**的端到端接线（第七轮评审 P2）：
+    /// 登记端已硬校验拒绝 ollama+weights_path（external_models 直打测试），这里
+    /// 钉存量兜底——早期模板/AI 手写的 ollama 记录可能登记了权重路径，而
+    /// `~/.ollama/models/blobs`（家目录下恰 3 层）能过守卫链的深度臂，不能让
+    /// "删除外部模型"把守护进程的全部 blob 连商店部署模型的权重一起删光。
+    /// 住在 linux 门控区：TempHome/db 初始化随 linux 模块编译。
+    #[test]
+    fn ollama_removal_skips_weight_deletion_even_with_registered_path() {
+        use crate::features::device::external_models::registry_dir;
+        use crate::features::device::remove_external_model;
+        use crate::features::model_store::platform::linux::{config, db};
+        let _ctx = config::TempHome::new();
+        db::init_db().expect("init store db");
+        // 权重目录放在家目录下第 3 层（守卫链深度臂本会放行的形状）。
+        let weights = crate::platform::paths::user_home_dir()
+            .join("ollama-weights")
+            .join("deep")
+            .join("blobs");
+        std::fs::create_dir_all(&weights).expect("create weights dir");
+        std::fs::write(weights.join("sha256-x"), b"blob bytes").expect("write blob");
+        let dir = registry_dir();
+        std::fs::create_dir_all(&dir).expect("registry dir");
+        std::fs::write(
+            dir.join("m-ollama01.json"),
+            format!(
+                r#"{{"schema":1,"id":"m-ollama01","name":"cleanup","kind":"ollama","model":"cleanup:latest","weights_path":{}}}"#,
+                serde_json::to_string(&weights.to_string_lossy()).expect("json string")
+            ),
+        )
+        .expect("write legacy ollama record");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async move {
+            let outcome =
+                remove_external_model("m-ollama01".to_string(), true, "cleanup".to_string())
+                    .await
+                    .expect("removal must succeed");
+            assert!(
+                !outcome.removed_weights,
+                "ollama weights must not be touched"
+            );
+            assert!(
+                outcome
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("不执行权重目录删除")),
+                "skip must be disclosed, got: {:?}",
+                outcome.warnings
+            );
+            assert!(outcome.removed_registry, "registry file should be removed");
+            assert!(weights.exists(), "weight dir must survive");
         });
     }
 

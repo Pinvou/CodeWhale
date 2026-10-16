@@ -41,3 +41,6 @@ pub(crate) fn nvidia_driver_version() -> Option<String> {
 /// 否则成为 dead_code）。
 #[cfg(not(unix))]
 pub(crate) fn harden_dir_owner_only(_path: &std::path::Path) {}
+
+#[cfg(not(unix))]
+pub(crate) fn harden_file_owner_only(_path: &std::path::Path) {}

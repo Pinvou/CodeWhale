@@ -191,6 +191,11 @@ fn sanitize_context_strings(value: &mut Value, home: &str, username: &str) {
 /// 路径脱敏（纯函数）：家目录前缀（要求分量边界：恰好相等或后随 `/`，避免
 /// `/home/u2` 吃到 `/home/u` 的前缀）→ `~`；`/media/<用户名>/`（Ubuntu 等对
 /// 可移动介质的自动挂载点，卷标还是插盘人可控的自由文本）→ `/media/~/`。
+///
+/// 前缀全部按 `/` 分隔符书写：目标平台是 Linux（MegaCube）；macOS 走
+/// `PINVOU3_MEGACUBE_DEVICE=1` 强开能力位的开发路径时，Windows 风格反斜杠
+/// 路径不会被脱敏——那是仅在开发机上有意义的组合，不追求覆盖（第七轮评审
+/// P3 记录该假设）。
 fn mask_path_text(text: &str, home: &str, username: &str) -> String {
     if text == home {
         return "~".to_string();

@@ -3019,6 +3019,7 @@ const App = () => {
         // 不可用 / 中途离开设备页 / 发送失败）。视图据此保留用户输入并提示重试，
         // 不再静默吞掉失败（评审 P3：失败仅 console、输入被无声清空）。
         if (!bridge.available || !prompt) return false;
+        if (!bridge.chat?.sendMessageToSession) return false;
         try {
           const sid = await bridge.sessions.materializeSession();
           if (!sid) return false;
@@ -3027,12 +3028,21 @@ const App = () => {
             // 先发送再跳转：发送失败时用户还留在设备管理页，「请重试」的
             // toast 才有着落——先跳转的话视图已卸载，失败只剩一条 console
             // 日志（第四轮评审 P3）。发送成功后进入会话，消息与回复随会话
-            // 历史照常渲染。sendMessage 除了 throw 还有非 throw 的失败路径
-            // （返回 false/"restored"，如附件/adopt 分支）：同样按没发出去
-            // 处理、不跳转（第六轮评审 P3；本场景无附件且会话已 materialize，
-            // 属防御性收口）。
-            const delivered = await bridge.chat.sendMessage(prompt);
-            if (delivered !== true && delivered !== undefined) return false;
+            // 历史照常渲染。
+            // 用**会话钉定**的 sendMessageToSession 而不是 sendMessage（第七轮
+            // 评审 P3）：transition 走 serialize 通道排队，同一通道上先入队的
+            // switchToSession 会先把桥的活动会话切走——sendMessage 按"当前活动
+            // 会话"投递，会把排查提示词发进别人的会话，而 UI 却打开这个空的
+            // 新会话。钉定 sid 后投递目标不再随活动会话漂移。
+            const result = await bridge.chat.sendMessageToSession(sid, prompt);
+            if (!result?.accepted) return false;
+            // 排队路径（accepted+queued）已入会话队列照常冲刷；直发路径等
+            // completion 落定——doSendFor 的失败（非 throw 路径）按没发出去
+            // 处理、不跳转（沿用 sendMessage 时代的失败口径）。
+            if (result.completion) {
+              const outcome = await result.completion;
+              if (!outcome?.ok) return false;
+            }
             setCodeModeOn(false);
             closeMobileSidebar();
             setCurrentView('chat');

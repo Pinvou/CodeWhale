@@ -34,9 +34,11 @@ pub(crate) use unsupported::{
     nvidia_driver_version, os_pretty_name,
 };
 // 权限收敛按 unix/not(unix) 二分，而不是按目标 OS——macOS 同样享受 0700。
-// 文件级 0600 与落盘 fsync 由 platform::atomic_write_private 在底座完成
-// （第六轮评审 P2 起登记写入复用共享原子写），这里只剩目录级收敛。
+// 写入侧的文件级 0600 与落盘 fsync 由 platform::atomic_write_private 在底座
+// 完成（第六轮评审 P2 起登记写入复用共享原子写）；这里提供目录级收敛，以及
+// 读取路径对存量文件的重收敛（doctor 模板教 AI 自写注册表文件，chmod 可能被
+// 跳过——第七轮评审 P3）。
 #[cfg(unix)]
-pub(crate) use owner_only::harden_dir_owner_only;
+pub(crate) use owner_only::{harden_dir_owner_only, harden_file_owner_only};
 #[cfg(not(unix))]
-pub(crate) use unsupported::harden_dir_owner_only;
+pub(crate) use unsupported::{harden_dir_owner_only, harden_file_owner_only};

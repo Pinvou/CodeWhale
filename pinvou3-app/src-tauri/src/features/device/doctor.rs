@@ -28,9 +28,15 @@ impl DoctorKind {
             "hogs" => Ok(Self::Hogs),
             "install_model" => Ok(Self::InstallModel),
             "custom" => Ok(Self::Custom),
-            other => Err(format!(
-                "未知的排查类型“{other}”，支持：packages / dependencies / cuda / services / hogs / install_model / custom"
-            )),
+            other => {
+                // kind 是前端原样传来的任意字符串：未知值回显在错误里要限长，
+                // 超长输入（粘贴事故/构造请求）不该被逐字搬进错误与日志
+                // （第七轮评审 P3）。
+                let echoed: String = other.chars().take(32).collect();
+                Err(format!(
+                    "未知的排查类型“{echoed}”，支持：packages / dependencies / cuda / services / hogs / install_model / custom"
+                ))
+            }
         }
     }
 
@@ -218,6 +224,11 @@ mod tests {
         assert!(DoctorKind::parse("diagnose").is_err());
         assert!(DoctorKind::parse("").is_err());
         assert!(DoctorKind::parse("PACKAGES").is_err());
+        // 未知值回显限长（第七轮评审 P3）：超长输入不被逐字搬进错误。
+        let huge = "x".repeat(500);
+        let error = DoctorKind::parse(&huge).expect_err("huge kind must be rejected");
+        assert!(error.contains(&"x".repeat(32)));
+        assert!(!error.contains(&"x".repeat(33)), "echo must be truncated");
     }
 
     #[test]
@@ -253,6 +264,11 @@ mod tests {
                 "征得用户明确同意",
                 "rm -rf",
                 "~/.pinvou3/",
+                // ~/.pinvou3 唯一豁免的范围限定词：豁免被放宽成整目录/多文件
+                // 而保持 "~/.pinvou3/" 在场时，这两句让测试仍然变红（第七轮
+                // 评审 P3：豁免条款此前只在 SKILL.md 侧锚定）。
+                "唯一例外",
+                "只许这一个文件",
                 "apt upgrade",
                 "sudo",
                 "磁盘剩余空间",

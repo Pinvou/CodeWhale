@@ -46,13 +46,17 @@
   // 传感器 chip 名规约成视图侧本地化映射键（zh/en/ja 文案在视图的 i18n，
   // bridge 只给稳定 key + 原始 label）：nvme→固态硬盘、mt79*/wifi→无线网卡（键名
   // 用通用的 "wifi"，不借具体型号——第二个 wifi 芯片接入时不会再误导，五轮评审 P3）、
-  // *fan*/fan 通道→风扇、acpitz/thermal→主板温度；未知 chip 保留小写原文，
-  // 视图兜底直接展示原文。
+  // *fan*→风扇、acpitz/thermal→主板温度；未知 chip 保留小写原文，
+  // 视图兜底直接展示原文。kind 参数仅在**整组都是风扇通道**时传 "fan"：
+  // 后端组内按 kind 字母序排（fan 恒在最前），拿首条 kind 判断会让混装
+  // 芯片（nct6798 的风扇+电压、acpitz 的风扇+温度）整卡被标成"风扇"
+  // （第七轮评审 P3）。
   function sensorChipKey(chip, kind) {
     var c = String(chip || "").toLowerCase();
     if (c.indexOf("nvme") !== -1) return "nvme";
     if (c.indexOf("mt79") !== -1 || c.indexOf("wifi") !== -1 || c.indexOf("wireless") !== -1) return "wifi";
-    if (c.indexOf("fan") !== -1 || kind === "fan") return "acpi_fan";
+    if (c.indexOf("fan") !== -1) return "acpi_fan";
+    if (kind === "fan") return "acpi_fan";
     if (c.indexOf("acpitz") !== -1 || c.indexOf("thermal") !== -1 || c.indexOf("acpi") !== -1) return "acpitz";
     return c || "other";
   }
@@ -107,9 +111,15 @@
           level: sensorLevel(e.kind, e.value, e.critical, e.max),
         };
       });
+      // chipKey 的风扇臂只在整组都是风扇通道时生效（见 sensorChipKey 注释）。
+      var fanOnly =
+        entries.length > 0 &&
+        entries.every(function (entry) {
+          return entry.kind === "fan";
+        });
       return {
         chip: g.chip ? String(g.chip) : "—",
-        chipKey: sensorChipKey(g.chip, g.entries && g.entries[0] && g.entries[0].kind),
+        chipKey: sensorChipKey(g.chip, fanOnly ? "fan" : null),
         entries: entries,
       };
     });
@@ -308,9 +318,16 @@
         notifyDomains(["device"]);
       }
     } catch (e) {
-      state.deviceError = e && e.message ? e.message : String(e || "device poll failed");
-      console.warn("[pinvou3][device] poll failed", e);
-      notifyDomains(["device"]);
+      // 同文案的失败拍不重复发布：后台 2s 轮询在故障期间每拍都会走到这里，
+      // 无条件 notify 会让设备页每 2s 全量重渲染一块不变的横幅（第七轮评审
+      // P3；services 通道同款守卫见下）。恢复拍由 success 分支的 hadDeviceError
+      // 强制发布，横幅照常清除。
+      var message = e && e.message ? e.message : String(e || "device poll failed");
+      if (state.deviceError !== message) {
+        state.deviceError = message;
+        console.warn("[pinvou3][device] poll failed", e);
+        notifyDomains(["device"]);
+      }
     } finally {
       devicePollInFlight = false;
     }

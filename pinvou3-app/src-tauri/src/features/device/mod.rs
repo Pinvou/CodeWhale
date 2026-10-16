@@ -132,6 +132,10 @@ pub struct ProcInfo {
 #[derive(Debug, Clone, Serialize)]
 pub struct GpuExtSnapshot {
     pub driver_version: Option<String>,
+    /// 安装态 CUDA toolkit（version.json）优先于驱动表头的 `CUDA Version:`
+    /// （驱动支持的上限）——卸载 toolkit 会让本字段的语义静默切换口径，两者
+    /// 并列展示时按这个优先级解读（doctor 模板已指示模型对比两者，第七轮评审
+    /// P3 补记字段口径）。取值限长 64 字符（与 docker 版本臂同一口径）。
     pub cuda_version: Option<String>,
     pub compute_processes: Vec<GpuProcInfo>,
 }
@@ -236,6 +240,16 @@ fn sample_without_gpu(state: &DeviceStateInner) -> DeviceSnapshot {
     }
 }
 
+/// sysinfo 0.36 的 `Component::max()` 语义：hwmon `tempN_highest`（开机以来的
+/// **历史峰值**），且芯片没有 highest 文件时**回退为当前读数**（上游
+/// fill_component 的 "input" 臂：`max.is_none() => max = temperature`）；真实
+/// 阈值 `tempN_max` 上游未采用（源码注释掉）。把回退值当阈值用会让下游 ±10°
+/// 告警带在无 highest 的芯片上恒 warn——只保留严格高于当前读数的历史峰值
+/// （第七轮评审 P2）；纯函数便于测试直打。
+fn component_peak_above_current(celsius: f64, max: Option<f64>) -> Option<f64> {
+    max.filter(|max| *max > celsius)
+}
+
 /// 温度走 sysinfo Components（Linux 上即 hwmon 温度通道），风扇/电压/电流/功率
 /// 走 platform::extra_sensors()，按 chip 合并分组。
 fn collect_sensors() -> Vec<SensorGroup> {
@@ -255,7 +269,7 @@ fn collect_sensors() -> Vec<SensorGroup> {
             name,
             f64::from(celsius),
             component.critical().map(f64::from),
-            component.max().map(f64::from),
+            component_peak_above_current(celsius.into(), component.max().map(f64::from)),
         );
     }
     for (chip, kind, name, value, critical, max) in platform::extra_sensors() {
@@ -614,14 +628,25 @@ fn gpu_ext_snapshot() -> Option<GpuExtSnapshot> {
         .and_then(parse_nvidia_smi_driver_version)
         .or_else(platform::nvidia_driver_version)?;
     Some(GpuExtSnapshot {
-        driver_version: Some(driver_version),
-        cuda_version: platform::cuda_toolkit_version().or_else(|| {
-            smi_output
-                .as_deref()
-                .and_then(parse_nvidia_smi_cuda_version)
-        }),
+        // 版本字符串限长 64（与 docker 版本臂同一口径）：来源是 root 所有权
+        // 文件/子进程 stdout 的不可信环境文本，超长值会原样进每拍快照 JSON
+        // 与 doctor 上下文（第七轮评审 P3）。
+        driver_version: Some(capped_version_text(driver_version)),
+        cuda_version: platform::cuda_toolkit_version()
+            .or_else(|| {
+                smi_output
+                    .as_deref()
+                    .and_then(parse_nvidia_smi_cuda_version)
+            })
+            .map(capped_version_text),
         compute_processes: nvidia_compute_processes(),
     })
+}
+
+/// 不可信来源的版本文本限长 64 字符：足够装任何真实版本号，超长只可能是
+/// 环境异常，不值得原样透传。
+fn capped_version_text(version: String) -> String {
+    version.chars().take(64).collect()
 }
 
 /// 跑一次 nvidia-smi，返回 stdout（成功时）。候选路径与超时预算复用 monitor。
@@ -920,6 +945,18 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn component_peak_above_current_drops_sysinfo_fallback_and_stale_peaks() {
+        // sysinfo 0.36 在芯片没有 tempN_highest 时把 max 回退为**当前读数**：
+        // 该值当阈值用会让 ±10° 告警带恒 warn（第七轮评审 P2）——必须丢弃。
+        assert_eq!(component_peak_above_current(45.0, Some(45.0)), None);
+        assert_eq!(component_peak_above_current(45.0, Some(44.5)), None);
+        // None（无 highest 也读不到当前值之外的分支）原样透传。
+        assert_eq!(component_peak_above_current(45.0, None), None);
+        // 严格高于当前读数的历史峰值保留（±10° 带的有效输入）。
+        assert_eq!(component_peak_above_current(45.0, Some(72.0)), Some(72.0));
+    }
 
     #[test]
     fn split_component_label_splits_first_token_as_chip() {

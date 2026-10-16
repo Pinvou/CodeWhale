@@ -3625,7 +3625,14 @@
     const content = String(text || "").trim();
     if (!sid) throw new Error(bt("targetSessionMissing"));
     if (!content) throw new Error(bt("replyContentEmpty"));
-    const exists = state.sessions.some(function (session) { return String(session.id) === sid; });
+    // 存在性校验双尺子（第七轮评审 P3）：常规路径的目标会话来自后端列表（pet
+    // 回复等），列表命中即可；但**本端刚物化**的会话由 switchActiveTo 直接建
+    // buffer，state.sessions 只在 list_sessions 刷新时更新——物化完立刻发送
+    // （设备管理排查直达）会撞上"列表里还没有它"的窗口而误报目标不存在。
+    // 本地 buffer 即物化事实，放行；下游 getBuffer/排队机制本就按
+    // sessionStates 工作，后端拒绝仍由 doSendFor 的 completion 上报。
+    const exists = state.sessions.some(function (session) { return String(session.id) === sid; })
+      || Object.prototype.hasOwnProperty.call(sessionStates.value, sid);
     if (!exists) throw new Error(bt("targetSessionMissing"));
 
     await ensureSessionBufferLoaded(sid);

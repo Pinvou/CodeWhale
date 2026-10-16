@@ -276,6 +276,15 @@ pub async fn register_external_model(
             return Err(format!("{label}过长（最多 4096 字符）"));
         }
     }
+    // Ollama 的权重字节全部由本机守护进程管理（默认 ~/.ollama，受 OLLAMA_MODELS
+    // 迁移），不在任何商店权重根/应用数据根之内——登记 weights_path 的 ollama
+    // 记录能让守卫链的名字臂/路径臂全部落空后，对着 `~/.ollama/models/blobs`
+    // （家目录下恰好 3 层，深度臂放行）执行整目录删除，把已下载的全部 blob（含
+    // 商店部署模型的权重）连根删掉（第七轮评审 P2）。UI 与 doctor 安装模板本
+    // 来就不产这个字段，这里把契约落成硬校验；移除端对存量记录同步跳过权重删除。
+    if kind == "ollama" && weights_path.is_some() {
+        return Err("Ollama 模型的权重由本机守护进程统一管理，weights_path 必须留空".to_string());
+    }
 
     // Ollama 记录实际删除的目标名：登记端点类别名时 model ≠ name（移除同一口径），
     // 商店边界必须对**有效删除名**检查——只查 name 会漏掉"别名指向商店管理的
@@ -345,33 +354,46 @@ pub async fn register_external_model(
             // 注册表记录含 base_url/weights_path，目录只留 owner 权限（对齐
             // model_store 的私密纪律；unix 专属实现收在 platform 适配层）。
             super::platform::harden_dir_owner_only(&dir);
-            for _ in 0..16 {
-                let id = fresh_record_id(&dir)?;
-                let record = RegistryRecord {
-                    schema: 1,
-                    id: id.clone(),
-                    name: name.clone(),
-                    kind: kind.clone(),
-                    base_url: base_url.clone(),
-                    model: model.clone(),
-                    weights_path: weights_path.clone(),
-                    installed_at: Some(chrono::Utc::now().to_rfc3339()),
-                    note: None,
-                };
-                let json = serde_json::to_string_pretty(&record)
-                    .map_err(|error| format!("注册表序列化失败：{error}"))?;
-                // 原子落盘复用底座 platform::atomic_write_private（第六轮评审
-                // P2：原先手搓 temp+rename，失败路径残留 .tmp、0600 在 open 之后
-                // 才收紧——共享版 open 时即 0600、失败清理 tmp、写后与 rename 后
-                // 都有 fsync）。尾随换行与原实现逐字节一致；fresh_record_id 的
-                // 存在性检查保证不覆盖既有记录。
-                let path = dir.join(format!("{id}.json"));
-                let bytes = format!("{json}\n");
-                crate::platform::atomic_write_private(&path, bytes.as_bytes())
-                    .map_err(|error| format!("注册表写入失败：{error}"))?;
-                return Ok(id);
+            // 数量上限在写入处也生效：此前只在读取侧截断，目录塞满后新登记仍会
+            // 成功、并把排序靠后的既有记录挤出可见范围（第七轮评审 P3）。
+            let existing = std::fs::read_dir(&dir)
+                .map_err(|error| format!("注册表目录读取失败：{error}"))?
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| {
+                    entry.path().extension().and_then(|ext| ext.to_str()) == Some("json")
+                })
+                .count();
+            if existing >= MAX_REGISTRY_FILES {
+                return Err(format!(
+                    "注册表已满（上限 {MAX_REGISTRY_FILES} 条），请先移除不需要的模型"
+                ));
             }
-            Err("注册表 id 生成冲突，请重试".to_string())
+            // fresh_record_id 内部已自带 16 次重试；写入失败经 `?` 直接中止，
+            // 不存在值得外层循环的重试路径（第七轮评审 P3：拆掉假循环结构）。
+            let id = fresh_record_id(&dir)?;
+            let record = RegistryRecord {
+                schema: 1,
+                id: id.clone(),
+                name: name.clone(),
+                kind: kind.clone(),
+                base_url: base_url.clone(),
+                model: model.clone(),
+                weights_path: weights_path.clone(),
+                installed_at: Some(chrono::Utc::now().to_rfc3339()),
+                note: None,
+            };
+            let json = serde_json::to_string_pretty(&record)
+                .map_err(|error| format!("注册表序列化失败：{error}"))?;
+            // 原子落盘复用底座 platform::atomic_write_private（第六轮评审
+            // P2：原先手搓 temp+rename，失败路径残留 .tmp、0600 在 open 之后
+            // 才收紧——共享版 open 时即 0600、失败清理 tmp、写后与 rename 后
+            // 都有 fsync）。尾随换行与原实现逐字节一致；fresh_record_id 的
+            // 存在性检查保证不覆盖既有记录。
+            let path = dir.join(format!("{id}.json"));
+            let bytes = format!("{json}\n");
+            crate::platform::atomic_write_private(&path, bytes.as_bytes())
+                .map_err(|error| format!("注册表写入失败：{error}"))?;
+            Ok(id)
         }
     })
     .await
@@ -540,53 +562,76 @@ pub async fn remove_external_model(
     // worker。JoinError 与删除失败映射进同一句人话报错。
     let mut removed_weights = false;
     if delete_weights {
-        match record.weights_path.as_deref() {
-            None => warnings.push("该记录未登记权重路径，已跳过权重删除".to_string()),
-            // 权重目录已不存在（上次删除成功但记录文件没删掉等）：按已删除处理，
-            // 不让重试整单报错卡死收尾。
-            Some(weights) if !Path::new(weights).exists() => warnings.push(format!(
-                "登记的权重目录不存在（可能已删除过），已跳过：{weights}"
-            )),
-            Some(weights) => {
-                let home = crate::platform::paths::user_home_dir();
-                let protected = crate::platform::paths::pinvou3_home();
-                let weights = weights.to_string();
-                let weights_for_task = weights.clone();
-                tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
-                    // 守卫（含 canonicalize）与整目录删除同一池执行：canonicalize
-                    // 在陈旧 NFS/FUSE 挂载上可能阻塞数秒，不能占住 async worker
-                    // （第四轮评审 P3；其余 IO 此前已全部入池）。
-                    let target = weights_deletion_guard(
-                        &home,
-                        Some(&protected),
-                        Path::new(&weights_for_task),
-                    )?;
-                    // canonicalize（守卫）与 remove_dir_all（删除）之间存在窗口：
-                    // 本地进程可把路径的中间分量换成符号链接让删除落到别处。
-                    // 删除前重新解析并比对，收窄最后一跳。剩余的亚毫秒级精确
-                    // 竞速不在承诺内——能写 HOME 的本地进程本就可以直接 rm -rf，
-                    // 守卫防的是"守卫时刻判断正确、删除时刻路径已被换走"的
-                    // 构造场景（五轮评审对抗实测）。
-                    let recheck = target.canonicalize().map_err(|error| {
-                        format!(
-                            "拒绝删除：目标目录在删除前变得不可解析（{}）：{error}",
-                            target.display()
-                        )
-                    })?;
-                    if recheck != target {
-                        return Err(format!(
-                            "拒绝删除：目标目录在守卫后被改动（{}），请刷新后重试",
-                            target.display()
-                        ));
+        if record.kind == "ollama" {
+            // 契约收紧的存量兜底（与登记端"weights_path 必须留空"校验同一条
+            // 约束）：早期模板/AI 手写的 ollama 记录可能登记了权重路径，移除
+            // 一律不执行目录删除，只如实警告（第七轮评审 P2）。模型本身仍从
+            // 守护进程删除（守卫 4），权重随 daemon 的模型删除一并回收。
+            if record.weights_path.is_some() {
+                warnings.push(
+                    "Ollama 记录不执行权重目录删除：权重由 Ollama 守护进程统一管理，随模型删除一并回收"
+                        .to_string(),
+                );
+            }
+        } else {
+            match record.weights_path.as_deref() {
+                None => warnings.push("该记录未登记权重路径，已跳过权重删除".to_string()),
+                Some(weights) => {
+                    let home = crate::platform::paths::user_home_dir();
+                    let protected = crate::platform::paths::pinvou3_home();
+                    let weights = weights.to_string();
+                    let weights_for_task = weights.clone();
+                    let removed =
+                        tokio::task::spawn_blocking(move || -> Result<Option<PathBuf>, String> {
+                            // 存在性预检与守卫/删除同一池：stat 与 canonicalize
+                            // 同类，陈旧 NFS/FUSE 挂载上可能阻塞数秒，不能占住
+                            // async worker（第七轮评审 P2；原先 exists() 留在
+                            // async 侧，与本文件"文件 IO 全入池"的纪律相悖）。
+                            if !Path::new(&weights_for_task).exists() {
+                                return Ok(None);
+                            }
+                            // 守卫（含 canonicalize）与整目录删除同一池执行：
+                            // canonicalize 在陈旧 NFS/FUSE 挂载上可能阻塞数秒，
+                            // 不能占住 async worker（第四轮评审 P3）。
+                            let target = weights_deletion_guard(
+                                &home,
+                                Some(&protected),
+                                Path::new(&weights_for_task),
+                            )?;
+                            // canonicalize（守卫）与 remove_dir_all（删除）之间存在窗口：
+                            // 本地进程可把路径的中间分量换成符号链接让删除落到别处。
+                            // 删除前重新解析并比对，收窄最后一跳。剩余的亚毫秒级精确
+                            // 竞速不在承诺内——能写 HOME 的本地进程本就可以直接 rm -rf，
+                            // 守卫防的是"守卫时刻判断正确、删除时刻路径已被换走"的
+                            // 构造场景（五轮评审对抗实测）。
+                            let recheck = target.canonicalize().map_err(|error| {
+                                format!(
+                                    "拒绝删除：目标目录在删除前变得不可解析（{}）：{error}",
+                                    target.display()
+                                )
+                            })?;
+                            if recheck != target {
+                                return Err(format!(
+                                    "拒绝删除：目标目录在守卫后被改动（{}），请刷新后重试",
+                                    target.display()
+                                ));
+                            }
+                            std::fs::remove_dir_all(&recheck).map_err(|error| {
+                                format!("权重目录删除失败（{}）：{error}", recheck.display())
+                            })?;
+                            Ok(Some(recheck))
+                        })
+                        .await
+                        .map_err(|error| format!("权重目录删除失败（{weights}）：{error}"))??;
+                    match removed {
+                        // 权重目录已不存在（上次删除成功但记录文件没删掉等）：按已删除
+                        // 处理，不让重试整单报错卡死收尾。
+                        None => warnings.push(format!(
+                            "登记的权重目录不存在（可能已删除过），已跳过：{weights}"
+                        )),
+                        Some(_) => removed_weights = true,
                     }
-                    std::fs::remove_dir_all(&recheck).map_err(|error| {
-                        format!("权重目录删除失败（{}）：{error}", recheck.display())
-                    })?;
-                    Ok(recheck)
-                })
-                .await
-                .map_err(|error| format!("权重目录删除失败（{weights}）：{error}"))??;
-                removed_weights = true;
+                }
             }
         }
     }
@@ -742,7 +787,16 @@ fn load_record_for_removal(
     id: &str,
 ) -> Result<Option<(RegistryRecord, PathBuf)>, String> {
     let direct = dir.join(format!("{id}.json"));
-    if let Some(record) = read_record(&direct)? {
+    // 直取命中损坏文件时把原样 Err 往上抛会让用户面对一句 JSON 报错而不知所措
+    // ——fail-closed 是对的（无法核对确认名/权重路径就绝不能删），但报错要给出
+    // 可执行的出路（第七轮评审 P3）。
+    let direct_record = read_record(&direct).map_err(|error| {
+        format!(
+            "注册表记录损坏，为防误删已拒绝移除（{}）：{error}；请确认后手工删除该文件",
+            direct.display()
+        )
+    })?;
+    if let Some(record) = direct_record {
         // 直取也要求内容 id 对得上（容忍存量空 id）：`a.json` 内容 id 是 `m-2`
         // 而 `m-1` 命中直取时，破坏性动作会用错那份记录的权重路径/模型名。
         let content_id = record.id.trim();
@@ -853,6 +907,15 @@ fn read_registry(dir: &Path) -> (Vec<ExternalModel>, Vec<String>) {
             dir.display()
         ));
         paths.truncate(MAX_REGISTRY_FILES);
+    }
+    // 扫描顺带重收敛权限（第七轮评审 P3）：doctor 安装模板教 AI 用 mkdir+cat
+    // 自写注册表文件，chmod 被跳过时目录/记录（含 base_url/weights_path）会按
+    // 进程 umask 留下组/其他可读位。写入端 atomic_write_private 的 open 时 0600
+    // 仍是主防线，这里对既有文件做尽力补偿；本函数整个跑在 blocking 池里，
+    // 权限调用失败也不影响读取本身。
+    super::platform::harden_dir_owner_only(dir);
+    for path in &paths {
+        super::platform::harden_file_owner_only(path);
     }
     let mut loaded: Vec<(String, ExternalModel)> = Vec::new();
     for path in paths {
@@ -1001,7 +1064,17 @@ pub(crate) async fn fetch_ollama_model_names() -> Result<Vec<String>, String> {
         String::from_utf8(body).map_err(|_| "Ollama 返回内容无法解析（非 UTF-8）".to_string())?;
     let value: Value =
         serde_json::from_str(&text).map_err(|error| format!("Ollama 返回内容无法解析：{error}"))?;
-    Ok(value
+    Ok(parse_ollama_tag_names(&value))
+}
+
+/// 从已解析的 /api/tags JSON 里取模型名。字节数有 1MB 上界但**条目数**没有——
+/// 假扮 Ollama 的本地进程用最小 JSON 对象可以塞进 ~8 万个名字，而每个名字都会
+/// 在 async 侧经过一次 O(列表) 的去重扫描并变成 UI 一行（第七轮评审 P3）。上限
+/// 给到 1024：真实机器上的 tag 数远用不到，超限部分直接截断（该响应本来就不可
+/// 信，不值得为它保留完整列表）。
+fn parse_ollama_tag_names(value: &Value) -> Vec<String> {
+    const MAX_TAG_ENTRIES: usize = 1024;
+    value
         .get("models")
         .and_then(Value::as_array)
         .map(|models| {
@@ -1013,9 +1086,10 @@ pub(crate) async fn fetch_ollama_model_names() -> Result<Vec<String>, String> {
                         .and_then(Value::as_str)
                         .map(str::to_string)
                 })
+                .take(MAX_TAG_ENTRIES)
                 .collect()
         })
-        .unwrap_or_default())
+        .unwrap_or_default()
 }
 
 /// Ollama 删除的独立预算：删几十 GB blob 的守护进程侧耗时不可控，沿用探测的
@@ -1059,10 +1133,21 @@ async fn probe_status_for(
         },
         "ollama" => "unreachable".to_string(),
         _ => match weights_path {
-            Some(weights) if Path::new(weights).is_dir() => "available".to_string(),
+            Some(weights) if weights_dir_present(weights).await => "available".to_string(),
             _ => "unreachable".to_string(),
         },
     }
+}
+
+/// 权重目录存在性探测：stat 与 canonicalize 同类，陈旧 NFS/FUSE 挂载上可能
+/// 阻塞数秒——本函数由 `get_external_models` 的 join_all 与登记回显直接 await，
+/// 必须与本文件其余文件 IO 同口径入 blocking 池，不能占住 async worker
+/// （第七轮评审 P2）。JoinError 按"不可达"降级，不放大成整次刷新失败。
+async fn weights_dir_present(path: &str) -> bool {
+    let path = path.to_string();
+    tokio::task::spawn_blocking(move || Path::new(&path).is_dir())
+        .await
+        .unwrap_or(false)
 }
 
 /// `http://host:port/v1` → `http://host:port/v1/models`（已带 /models 则原样）。
@@ -1566,5 +1651,43 @@ mod tests {
         .await
         .expect_err("oversized base_url must be rejected");
         assert!(error.contains("过长"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    async fn register_rejects_ollama_records_with_weights_path() {
+        // Ollama 权重由守护进程统一管理（~/.ollama 不在任何保护根内，blobs 目录
+        // 深度恰过守卫链）：登记带 weights_path 的 ollama 记录会造出能删光全部
+        // 已下载 blob 的记录（第七轮评审 P2）。校验发生在商店边界查询之前，
+        // 本测试不需要临时 HOME。
+        let error = register_external_model(
+            "cleanup".to_string(),
+            "ollama".to_string(),
+            None,
+            None,
+            Some("/home/u/.ollama/models/blobs".to_string()),
+        )
+        .await
+        .expect_err("ollama record with weights_path must be rejected");
+        assert!(
+            error.contains("weights_path 必须留空"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn parse_ollama_tag_names_caps_entries_and_skips_nameless() {
+        let many: Vec<String> = (0..1300).map(|index| format!("m{index}")).collect();
+        let payload = serde_json::json!({ "models": many.iter().map(|n| serde_json::json!({"name": n})).collect::<Vec<_>>() });
+        let names = parse_ollama_tag_names(&payload);
+        assert_eq!(names.len(), 1024, "entry cap must truncate the parsed list");
+        assert_eq!(names[0], "m0");
+        // 缺 name 的条目跳过；models 缺失/非数组 → 空列表。
+        let mixed =
+            serde_json::json!({ "models": [{"name": "a"}, {}, {"other": 1}, {"name": "b"}] });
+        assert_eq!(
+            parse_ollama_tag_names(&mixed),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        assert!(parse_ollama_tag_names(&serde_json::json!({})).is_empty());
     }
 }
