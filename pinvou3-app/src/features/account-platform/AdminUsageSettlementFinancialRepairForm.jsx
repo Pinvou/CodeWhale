@@ -22,6 +22,7 @@ export function AdminUsageSettlementFinancialRepairForm({ client, copy, onCreate
   const [busy, setBusy] = useState('');
   const [failure, setFailure] = useState('');
   const [created, setCreated] = useState('');
+  const [needsAuthentication, setNeedsAuthentication] = useState(false);
   const factsRevision = useRef(0);
   const mounted = useRef(false);
   const currentClient = useRef(client);
@@ -35,6 +36,7 @@ export function AdminUsageSettlementFinancialRepairForm({ client, copy, onCreate
 
   useEffect(() => {
     mounted.current = true;
+    setNeedsAuthentication(false);
     setFacts(null);
     setProjection(null);
     setBusy((current) => current === 'facts' ? '' : current);
@@ -78,6 +80,7 @@ export function AdminUsageSettlementFinancialRepairForm({ client, copy, onCreate
     const revision = ++factsRevision.current;
     const live = () => mounted.current && factsRevision.current === revision && currentClient.current === client;
     setBusy('facts');
+    setNeedsAuthentication(false);
     setFailure('');
     setCreated('');
     try {
@@ -97,6 +100,7 @@ export function AdminUsageSettlementFinancialRepairForm({ client, copy, onCreate
       if (!live()) return;
       setProjection(null);
       setFacts(null);
+      if (error?.code === 'RECENT_AUTHENTICATION_REQUIRED' || error?.status === 401) setNeedsAuthentication(true);
       setFailure(error?.code === 'APPROVAL_PRECHECK_UNAVAILABLE' ? copy.factsUnavailable : copy.factsFailed);
     } finally {
       if (live()) setBusy('');
@@ -109,9 +113,15 @@ export function AdminUsageSettlementFinancialRepairForm({ client, copy, onCreate
       const prepared = pending || { ...financialRepairDraftFromProjection(projection, reason, requestKey), projection };
       if (!prepared.draft) { setFailure(copy.invalidDraft); return; }
       const recovering = operation.unknown;
+      const revision = factsRevision.current;
+      const live = () => mounted.current && factsRevision.current === revision && currentClient.current === client;
+      setNeedsAuthentication(false);
       const result = await operation.mutate(prepared, async current => {
         try { return await createAndSubmitFreshGovernedApproval(client, current.draft); }
         catch (error) {
+          // Inspect the original denial before preserving a previous unknown
+          // write with COMMAND_RESULT_UNKNOWN; the facts/key stay unchanged.
+          if (live() && (error?.code === 'RECENT_AUTHENTICATION_REQUIRED' || error?.status === 401)) setNeedsAuthentication(true);
           // A denied replay cannot prove that an earlier unknown write did not
           // commit. Keep the original facts/key until authority confirms it.
           if (recovering && !error.finalResult) throw Object.assign(error, { code: 'COMMAND_RESULT_UNKNOWN' });
@@ -131,6 +141,7 @@ export function AdminUsageSettlementFinancialRepairForm({ client, copy, onCreate
     <h3>{copy.title}</h3>
     <p>{copy.lead}</p>
     {governed && operation.error && <p role="alert">{operation.error}</p>}
+    {needsAuthentication && <div className="adm-usage-settlement-repair-reauthentication"><p>{copy.writeOffRecentAuthenticationRequired}</p><button type="button" disabled={busy !== '' || operation.busy} onClick={() => client.reauthenticate('/admin.html')}>{copy.reauthenticate}</button></div>}
     <form className="adm-financial-repair-target" onSubmit={readFacts}>
       <label>{copy.command}
         <select disabled={governed && locked} value={commandType} onChange={(event) => changeCommand(event.target.value)}>

@@ -24,7 +24,7 @@ oidc:
 
 public:
   portalUrl: https://tokens.staging.example.com
-  paymentCallbackUrl: https://billing.staging.example.com/internal/payment/notifications
+  paymentCallbackUrl: https://tokens.staging.example.com/api/v1/payment-callbacks
 
 observability:
   otlpEndpoint: https://otel.staging.example.com

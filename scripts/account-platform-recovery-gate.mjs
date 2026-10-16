@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { readFile } from 'node:fs/promises';
+import { evidenceTimestamp } from './account-platform-evidence-time.mjs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -16,9 +17,7 @@ function requireValue(condition, message) {
 }
 
 function timestamp(value, name) {
-  const parsed = Date.parse(value);
-  requireValue(Number.isFinite(parsed), `${name} must be an RFC3339 timestamp`);
-  return parsed;
+  return evidenceTimestamp(value, name);
 }
 
 function nonnegative(value) {

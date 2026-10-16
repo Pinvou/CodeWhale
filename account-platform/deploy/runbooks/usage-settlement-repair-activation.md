@@ -26,7 +26,8 @@
 2. 用户/授权人已就该命令的生产激活给出明确授权（书面存档，含时间与范围），且确认首版只补记 `LOSS_REVIEW` 存量。
 3. 专属 durable `billing-usage-settlement-repair-executor-p1-v1` 的受信 cutover 资源绑定已就绪。当前 `cmd/billing-service` 通过 `approvalconsumer.BillingCommands()` 的有限已安装集合注册消费者；不存在本命令专属 `BILLING_USAGE_SETTLEMENT_REPAIR_CONSUMER_ENABLED` 开关。既有六个 `BILLING_APPROVAL_CONSUMER_*` 受信工件输入缺失、摘要不符或读取失败均失败关闭，不能以未校验资源启动消费者。
 4. 已确认 Account 五入口在 `INACTIVE` 时全部失败关闭（`ErrBillingGovernanceInactive`）。
-5. 一致性备份完成（含 Billing 库），记录备份 ID、时间与 SHA-256；激活窗口内停止写入新审批。
+5. 本命令加入全局策略集合后，先按[退款异常激活手册 §1 第5项](refund-exception-repair-activation.md)的既有流程，用当前 `PolicySetDigest` 重新签发并核验治理快照，旧 ACTIVE 摘要和收据不能沿用；此项不改变 Token handler 集合，也不能由启动或 readiness 自动代替。
+6. 一致性备份完成（含 Billing 库），记录备份 ID、时间与 SHA-256；激活窗口内停止写入新审批。
 
 ## 2. 只读核验（记录输出作为证据）
 

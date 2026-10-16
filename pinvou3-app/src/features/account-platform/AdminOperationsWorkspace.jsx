@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { secureRequestID } from './request-id.js';
 import { integerMoney } from './finance-contract.js';
-import { bonusRevision, MAX_BONUS_POINTS } from './registration-bonus-contract.js';
+import { bonusRevision, MAX_BONUS_POINTS, registrationBonusReasonIsValid } from './registration-bonus-contract.js';
 import { readBonusPending, persistBonusPending, clearBonusPending, bonusAttemptProvesNoWrite } from './registration-bonus-recovery.js';
 
 const MICROCREDITS_PER_POINT = 10_000n;
@@ -48,7 +48,7 @@ function storedReauthenticationDraft() {
       || !expectedRevision
       || typeof value?.enabled !== 'boolean' || !Number.isSafeInteger(amount) || amount < 0 || amount > MAX_BONUS_POINTS
       || !Number.isInteger(validity) || validity < 1 || validity > 3650
-      || reason.trim().length < 10 || reason.length > 500) {
+      || !registrationBonusReasonIsValid(reason)) {
       globalThis.sessionStorage.removeItem(REGISTRATION_BONUS_DRAFT_KEY);
       return null;
     }
@@ -94,10 +94,12 @@ function clearReauthenticationDraft() {
   return storageCleared;
 }
 
-export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PERMISSIONS, currentUserID = '', authorizationRefreshing = false, authorizationRefreshGuard = null }) {
+export function AdminOperationsWorkspace({ client, copy, language = 'en', permissions = EMPTY_PERMISSIONS, currentUserID = '', authorizationRefreshing = false, authorizationRefreshGuard = null }) {
   const labels = copy.operations;
   const permissionSet = new Set(permissions);
   const canManage = permissionSet.has('platform.registration-bonus.manage');
+  const canRead = permissionSet.has('platform.registration-bonus.read');
+  const locale = { zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' }[language] || 'en-US';
   const returnAttemptID = useRef(reauthenticationAttemptID());
   const initialStoredDraft = useRef(storedReauthenticationDraft());
   const workspaceUserID = useRef(currentUserID);
@@ -150,7 +152,7 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
       });
       return true;
     } catch (error) {
-      if (error?.name !== 'AbortError' && !signal?.aborted && mountedRef.current && request === loadGeneration.current) setState({ loading: false, saving: false, error: labels.loadFailed, errorCode: error?.code || '', notice: '' });
+      if (mountedRef.current && request === loadGeneration.current && currentUserID === currentUserIDRef.current) setState({ loading: false, saving: false, error: labels.loadFailed, errorCode: error?.code || '', notice: '' });
       return false;
     }
   }, [client, currentUserID, labels.loadFailed, labels.reauthenticationDraftCleanupFailed, labels.reauthenticationDraftConflict, labels.reauthenticationDraftExpired]);
@@ -190,6 +192,8 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
   const save = async (event) => {
     event?.preventDefault();
     if (saveInFlight.current || state.saving || recoveryBlocked) return;
+    // An unknown receipt replays its original command, independently of the form.
+    if (!pendingWrite.current && !registrationBonusReasonIsValid(form.reason)) return;
     const refreshGeneration = Number(authorizationRefreshGuard?.current?.generation || 0);
     const refreshInterrupted = () => Boolean(authorizationRefreshGuard?.current?.active) || Number(authorizationRefreshGuard?.current?.generation || 0) !== refreshGeneration;
     const stopForAuthorizationRefresh = () => setState((value) => ({ ...value, saving: false }));
@@ -293,7 +297,7 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
 
   const valid = Number.isSafeInteger(Number(form.amount_points)) && Number(form.amount_points) >= 0 && Number(form.amount_points) <= MAX_BONUS_POINTS
     && Number.isInteger(Number(form.validity_days)) && Number(form.validity_days) >= 1 && Number(form.validity_days) <= 3650
-    && form.reason.trim().length >= 10 && form.reason.trim().length <= 500;
+    && registrationBonusReasonIsValid(form.reason);
   const eligibilityReady = policy?.eligibility_status === 'READY';
   const reauthenticate = () => {
     if (pendingWrite.current?.actor === currentUserID && canManage) {
@@ -390,7 +394,7 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
       ? { label: labels.retryDraftCleanup, run: retryDraftCleanup }
     : state.errorCode === 'RECENT_AUTHENTICATION_REQUIRED' || state.errorCode === 'REGISTRATION_BONUS_DRAFT_STORAGE_UNAVAILABLE'
       ? { label: state.errorCode === 'RECENT_AUTHENTICATION_REQUIRED' ? labels.reauthenticate : labels.retryReauthentication, run: reauthenticate }
-      : { label: copy.retry, run: () => void load() };
+      : { label: copy.retry, read: true, run: () => void load() };
 
   return (
     <section className="adm-panel adm-settings-panel adm-registration-bonus" data-testid="registration-bonus-policy">
@@ -398,14 +402,14 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
       <div className="adm-inline-message warn" role="note">{labels.lifetimeWarning}</div>
       {pendingDraft && <div className="adm-inline-message warn adm-registration-bonus-draft-prompt" role="status"><span>{labels.unfinishedReauthenticationDraft}</span><div><button type="button" onClick={recoverPendingDraft} disabled={state.loading || !policy}>{labels.recoverDraft}</button><button type="button" onClick={discardPendingDraft}>{labels.discardDraft}</button></div></div>}
       {(unknownWrite || recoveryBlocked) && !state.error && <div className="adm-inline-message error" role="alert"><span>{recoveryBlocked ? labels.pendingStorageFailed : labels.outcomeUnknown}</span>{unknownWrite && <button type="button" disabled={state.saving || authorizationRefreshing || !canManage || recoveryBlocked} onClick={() => void save()}>{labels.retryUnknown}</button>}</div>}
-      {state.error && <div className="adm-inline-message error" role="alert"><span>{state.error}</span><button type="button" onClick={errorAction.run} disabled={state.loading || state.saving || authorizationRefreshing || !canManage || recoveryBlocked}>{errorAction.label}</button></div>}
+      {state.error && <div className="adm-inline-message error" role="alert"><span>{state.error}</span><button type="button" onClick={errorAction.run} disabled={state.loading || state.saving || authorizationRefreshing || (errorAction.read ? !canRead : !canManage) || recoveryBlocked}>{errorAction.label}</button></div>}
       {state.notice && <div className="adm-inline-message ok" role="status">{state.notice}</div>}
       {state.loading && <p className="adm-muted">{copy.loading}</p>}
       {!state.loading && policy && (
         <form className="adm-sms-form" onSubmit={save}>
           <dl className="adm-registration-bonus-summary">
             <div><dt>{labels.revision}</dt><dd>{policy.revision}</dd></div>
-            <div><dt>{labels.updatedAt}</dt><dd>{new Date(policy.updated_at).toLocaleString()}</dd></div>
+            <div><dt>{labels.updatedAt}</dt><dd>{new Date(policy.updated_at).toLocaleString(locale)}</dd></div>
           </dl>
           <div className={`adm-inline-message ${eligibilityReady ? 'ok' : 'warn'}`} role="status" data-testid="registration-bonus-readiness">{eligibilityReady ? labels.eligibilityReady : labels.eligibilityBlocked.replace('{count}', String(policy.unrecoverable_registration_count || 0))}</div>
           <div className="adm-registration-bonus-editor">
@@ -414,7 +418,7 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
               <label><span>{labels.amount}</span><input required type="number" min="0" step="1" value={form.amount_points} disabled={!canManage || unknownWrite || recoveryBlocked || state.saving} onChange={(event) => setForm((value) => ({ ...value, amount_points: event.target.value }))} /></label>
               <label><span>{labels.validityDays}</span><input required type="number" min="1" max="3650" step="1" value={form.validity_days} disabled={!canManage || unknownWrite || recoveryBlocked || state.saving} onChange={(event) => setForm((value) => ({ ...value, validity_days: event.target.value }))} /></label>
             </div>
-            {canManage && <label className="adm-sms-reason"><span>{labels.reason}</span><textarea required minLength="10" maxLength="500" rows="4" value={form.reason} disabled={unknownWrite || recoveryBlocked || state.saving} onChange={(event) => setForm((value) => ({ ...value, reason: event.target.value }))} placeholder={labels.reasonPlaceholder} /></label>}
+            {canManage && <label className="adm-sms-reason"><span>{labels.reason}</span><textarea required rows="4" value={form.reason} disabled={unknownWrite || recoveryBlocked || state.saving} onChange={(event) => setForm((value) => ({ ...value, reason: event.target.value }))} placeholder={labels.reasonPlaceholder} /></label>}
             {!canManage && <div className="adm-inline-message info" role="status">{labels.readOnly}</div>}
             {canManage && <div className="adm-registration-bonus-actions"><button type="submit" className="adm-primary-button" disabled={unknownWrite || recoveryBlocked || state.saving || authorizationRefreshing || !valid || state.errorCode === 'REGISTRATION_BONUS_DRAFT_CONFLICT' || state.errorCode === 'REGISTRATION_BONUS_DRAFT_CLEANUP_FAILED' || state.errorCode === 'REGISTRATION_BONUS_DRAFT_IDENTITY_CHANGED' || (form.enabled && !eligibilityReady)}>{state.saving ? labels.saving : labels.save}</button></div>}
           </div>

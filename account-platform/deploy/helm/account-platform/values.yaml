@@ -102,7 +102,7 @@ oidc:
 
 public:
   portalUrl: https://tokens.example.invalid
-  paymentCallbackUrl: https://billing.example.invalid/internal/payment/notifications
+  paymentCallbackUrl: https://tokens.example.invalid/api/v1/payment-callbacks
 
 observability:
   otlpEndpoint: ""

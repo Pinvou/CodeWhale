@@ -337,6 +337,8 @@ adminPlatformCopy.zh.system = {
   "healthyServices": "健康服务",
   "pendingReconciliation": "待自动核对",
   "stoppedReconciliation": "已停止自动核对",
+  "reconciliationUnavailable": "暂时无法读取自动核对状态",
+  "reconciliationErrorsUnavailable": "暂时无法读取自动核对错误",
   "names": {
     "account": "Account Service",
     "billing": "Billing Service",
@@ -384,6 +386,8 @@ adminPlatformCopy.en.system = {
   "healthyServices": "Healthy services",
   "pendingReconciliation": "Pending reconciliation",
   "stoppedReconciliation": "Stopped reconciliation",
+  "reconciliationUnavailable": "Reconciliation status is unavailable",
+  "reconciliationErrorsUnavailable": "Reconciliation errors are unavailable",
   "names": {
     "account": "Account Service",
     "billing": "Billing Service",
@@ -431,6 +435,8 @@ adminPlatformCopy.ja.system = {
   "healthyServices": "正常サービス",
   "pendingReconciliation": "照合待ち",
   "stoppedReconciliation": "自動照合停止",
+  "reconciliationUnavailable": "自動照合の状態を取得できません",
+  "reconciliationErrorsUnavailable": "自動照合のエラーを取得できません",
   "names": {
     "account": "Account Service",
     "billing": "Billing Service",

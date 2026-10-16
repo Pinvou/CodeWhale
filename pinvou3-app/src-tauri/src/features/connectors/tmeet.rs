@@ -16,7 +16,9 @@ use crate::features::connectors::skill_gate::ConnectorSkillGate;
 
 const ID: &str = "tmeet";
 const TMEET_NPM_SPEC: &str = "@tencentcloud/tmeet@1.0.18";
-const TMEET_MIN_VERSION: (u64, u64, u64) = (1, 0, 18);
+/// `pub` + the facade re-export: single-sourced with the CLI's connectors
+/// family (round-51 review, same rationale as `LARK_MIN_VERSION`).
+pub const TMEET_MIN_VERSION: (u64, u64, u64) = (1, 0, 18);
 
 const TMEET_CTX: CliCtx = CliCtx {
     cli_bin: "tmeet",
@@ -71,10 +73,10 @@ fn status_is_logged_in(s: &str) -> bool {
     s.contains("Logged in")
 }
 
-fn is_logged_in() -> bool {
-    if !tmeet_cli_present() {
-        return false;
-    }
+/// Logged-in check via `tmeet auth status`. Spawns tmeet; when not installed
+/// the spawn failure folds to false (single probe, same as wecom/feishu —
+/// no wasted `--version` boot first).
+pub(crate) fn is_logged_in() -> bool {
     if let Ok((_, so, se)) = cc::run(tmeet(&["auth", "status"])) {
         return status_is_logged_in(&so) || status_is_logged_in(&se);
     }
@@ -105,10 +107,6 @@ fn auth_lines_say_already_logged_in(auth_lines: &std::collections::VecDeque<Stri
     auth_lines
         .iter()
         .any(|line| auth_output_says_already_logged_in(line))
-}
-
-fn safe_auth_log_line(line: &str) -> Option<String> {
-    cc::safe_auth_log_line(line, true)
 }
 
 fn install_tmeet_cli() -> Result<bool, String> {
@@ -267,7 +265,7 @@ fn drain_for_auth_url<R: std::io::Read + Send + 'static>(
                     break;
                 }
             };
-            let safe = safe_auth_log_line(&line);
+            let safe = cc::safe_auth_log_line(&line, true);
             let url = TMEET_CTX.extract_url(&line);
             let _ = tx.send((url, safe));
         }
@@ -509,6 +507,13 @@ pub fn tmeet_skills_should_show() -> bool {
 pub async fn tmeet_apply_skills() -> Result<Value, String> {
     let show = tokio::task::spawn_blocking(|| -> Result<bool, String> {
         let show = tmeet_skills_should_show();
+        // Deny-first transaction boundary (#517): register the connector
+        // in the initialized DenyAll scopes BEFORE materializing skill
+        // files, so a refused registration aborts before anything lands
+        // (the sync write can block on the cross-process flock, hence
+        // inside this spawn_blocking closure; the post-apply consent sync
+        // below stays as the fail-visible belt-and-braces leg).
+        crate::features::marketplace::deny_first_register_connector("tmeet", show)?;
         if let Err(e) = GATE.apply_skills(show) {
             // The connected-catch on the card replaces this string with the
             // skills_enable_failed code, so log the raw cause here (stdout in
@@ -541,6 +546,10 @@ pub async fn tmeet_apply_skills() -> Result<Value, String> {
 /// 用户显式开启不会被开机刷新回退）。
 pub(crate) fn tmeet_gate_step() -> Result<bool, String> {
     let show = tmeet_skills_should_show();
+    // Same deny-first boundary as the apply command (#517): the auth-gate
+    // refresh also materializes skill files, so a connector flipping
+    // visible here registers first; a refusal fails before exposure.
+    crate::features::marketplace::deny_first_register_connector("tmeet", show)?;
     GATE.apply_skills(show)
         .map_err(|e| format!("更新腾讯会议技能失败: {e}"))?;
     if show {
@@ -570,6 +579,12 @@ mod tests {
     #[test]
     fn status_detects_logged_in() {
         assert!(status_is_logged_in("Logged in as user@example.com"));
+        // Deliberately a case-sensitive substring over the CLI's own report:
+        // the readiness probe accepts an installed-but-older CLI (the
+        // >=1.0.18 gate lives in the version gate, not here), so pin the
+        // exact match semantics as the contract.
+        assert!(!status_is_logged_in("logged in"));
+        assert!(status_is_logged_in("warning: Logged in on another device"));
         assert!(!status_is_logged_in(
             "Not logged in. Please use 'tmeet auth login' to authenticate."
         ));
@@ -602,14 +617,17 @@ mod tests {
     #[test]
     fn safe_auth_log_line_redacts_tokens() {
         assert_eq!(
-            safe_auth_log_line("access_token=secret").as_deref(),
+            cc::safe_auth_log_line("access_token=secret", true).as_deref(),
             Some("[redacted credential line]")
         );
         assert_eq!(
-            safe_auth_log_line("Authorization: Bearer secret").as_deref(),
+            cc::safe_auth_log_line("Authorization: Bearer secret", true).as_deref(),
             Some("[redacted credential line]")
         );
-        assert_eq!(safe_auth_log_line("  hello  ").as_deref(), Some("hello"));
-        assert_eq!(safe_auth_log_line("   "), None);
+        assert_eq!(
+            cc::safe_auth_log_line("  hello  ", true).as_deref(),
+            Some("hello")
+        );
+        assert_eq!(cc::safe_auth_log_line("   ", true), None);
     }
 }

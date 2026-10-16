@@ -11,12 +11,13 @@ window.fetch = async (url, options = {}) => {
   if (!String(url).startsWith('/api/')) return original(url, options);
   state.calls.push({ url: String(url), method: options.method || 'GET' });
   if (url === '/api/session') return new Response('{"authenticated":true}');
-  if (url === '/api/account/v1/account/bootstrap') return new Response(JSON.stringify({ user_id: '00000000-0000-4000-8000-000000000018', status: 'ACTIVE', personal_permissions: [], platform_permissions: state.mode === 'deny' ? [] : ['platform.system.status.read'] }));
+  if (url === '/api/account/v1/account/bootstrap') return new Response(JSON.stringify({ user_id: '00000000-0000-4000-8000-000000000018', status: 'ACTIVE', active_context: { context_type: 'PERSONAL', organization_id: null, membership_version: 1, context_version: 1, authorization_version: 1, personal_authorization_version: 1, platform_authorization_version: 1, organization_authorization_version: 1, permissions: [] }, personal_permissions: [], platform_permissions: state.mode === 'deny' ? [] : ['platform.system.status.read'] }));
   if (url === '/api/admin/system/status') {
     const mode = state.mode;
     if (mode === 'delay') await new Promise(resolve => { state.resolve = resolve; });
     if (mode === 'error') return new Response('{"code":"ADMIN_AUTH_UNAVAILABLE"}', { status: 503 });
     if (mode === 'missing') return new Response('{}');
+    if (mode === 'reconciliation-unavailable') return new Response('{"services":[],"relays":[],"reconciliation":{"pending":null,"stopped":null},"recent_errors":[{"source":"token-reconciliation","code":"RECONCILIATION_STATUS_UNAVAILABLE","message":"reconciliation status unavailable"},{"source":"token-reconciliation","code":"RECONCILIATION_ERRORS_UNAVAILABLE","message":"reconciliation errors unavailable"}]}');
     const unhealthy = mode === 'unhealthy';
     return new Response(`{"services":[{"key":"portal","status":"${unhealthy ? 'UNHEALTHY' : 'HEALTHY'}","latency_ms":12,"message":"${unhealthy ? 'connection failed' : ''}"}],"relays":[{"key":"token-event-relay","status":"${unhealthy ? 'DEGRADED' : 'HEALTHY'}","pending_events":9007199254740993,"dead_lettered_events":${unhealthy ? 2 : 0},"oldest_pending_seconds":1.25}],"reconciliation":{"pending":9223372036854775807,"stopped":${unhealthy ? 3 : 0}},"recent_errors":${unhealthy ? '[{"source":"token-reconciliation","resource":"controlled-resource","message":"controlled pending error","updated_at":"2026-10-09T00:00:00Z"}]' : '[]'}}`);
   }

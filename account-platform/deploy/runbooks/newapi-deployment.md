@@ -59,7 +59,7 @@ New API 使用 AGPLv3，并带上游声明的附加归属要求。发布或修�
 2. 执行 `node scripts/account-platform.mjs dev up`。该命令显式启用 `real-newapi` profile；普通 Integration/Fault 测试仍只使用 Mock New API。
 3. 首次使用新的 PostgreSQL 卷时，初始化脚本自动创建 `new_api` 角色和 `account_platform_newapi` 数据库。已有卷可在更新 Postgres 容器环境后执行 `docker compose --env-file account-platform/deploy/compose/.env -f account-platform/deploy/compose/compose.yaml exec postgres sh /docker-entrypoint-initdb.d/10-init-databases.sh`，脚本可重复执行。
 4. 仅从本机打开 `http://127.0.0.1:18106` 完成管理员初始化、配置真实上游 Channel，并创建供 Token Gateway 使用的最小权限 API Token。
-5. 将 `TOKEN_GATEWAY_ADAPTER` 固定为 `NEW_API`。创建一个仅允许平台代理模型的最小权限 New API Token，将其通过部署 Secret 注入 `TOKEN_DEFAULT_PROVIDER_API_KEY`；Provider Base URL 使用 `http://newapi:3000`。Token Gateway 启动后通过 Adapter 的 `/v1/models` 自动同步独立目录，并在用户第一次对话时创建平台托管的默认 Token Account 和显式 `CHAT` 协议路由；凭据二次加密后写入 Token 数据库。目录连续两次未发现某模型才会自动弃用，禁止把单次抖动解释为下架。
+5. 将 `TOKEN_GATEWAY_ADAPTER` 固定为 `NEW_API`。创建一个仅允许平台代理模型的最小权限 New API Token，将其通过部署 Secret 注入 `TOKEN_DEFAULT_PROVIDER_API_KEY`；隔离 standalone fixture 的 Provider Base URL 使用 `http://newapi:3000`；此输入只适用于该测试网络，正式 Gateway 使用下述受控 HTTPS 数据面。Token Gateway 启动后通过 Adapter 的 `/v1/models` 自动同步独立目录，并在用户第一次对话时创建平台托管的默认 Token Account 和显式 `CHAT` 协议路由；凭据二次加密后写入 Token 数据库。目录连续两次未发现某模型才会自动弃用，禁止把单次抖动解释为下架。
 6. 为自动用量核对创建独立的 New API 管理访问 Token，分别把 Token 和对应管理员用户数字 ID 注入 `TOKEN_RECONCILIATION_NEWAPI_ADMIN_TOKEN`、`TOKEN_RECONCILIATION_NEWAPI_ADMIN_USER_ID`。Token Gateway 会保存 New API 响应的 `X-Oneapi-Request-Id`，该凭据只用于按此 ID 精确读取 New API 日志，不用于模型调用。不得把任何实际 Token 写入 Compose、源码、日志、命令行参数或工单。
 
 Mock New API 继续用于限流、断流和缺失 usage 故障注入；真实 New API 不用于制造这些异常。
@@ -75,15 +75,15 @@ Mock New API 继续用于限流、断流和缺失 usage 故障注入；真实 Ne
 - `token-reconciliation-newapi-admin-token`：供 Token Gateway 按请求 ID 查询 New API 用量日志的独立管理访问 Token；
 - `token-reconciliation-newapi-admin-user-id`：上述管理 Token 所属的 New API 数字用户 ID。
 
-Helm 不创建内联 Secret。生产 New API 没有公网 Ingress，Service 名为 `newapi`，只有带 Token Gateway 组件标签的 Pod 可以访问其 8080 数据面。New API 只能访问 DNS、内部 Redis、批准的 PostgreSQL CIDR 和模型供应商 CIDR。
+Helm 不创建内联 Secret。按 [现有受控 TLS 装配](../production/README.newapi.md) 配置 TLS Secret、客户端受信 CA 与精确供应商 DNS/SAN；New API 与 TLS 代理处于同一 Pod。Service `newapi` 只暴露 8443 provider TLS 与 8444 status TLS，不提供 8080 Service、公共 Ingress、NodePort 或 hostPort。数据面沿原 NetworkPolicy 仅允许声明的 Token Gateway/credential Portal 客户端；8444 只用于状态检查，不证明供应商、证书或业务依赖健康。New API 的 DNS、Redis、数据库和模型供应商出口继续由现有策略限制。
 
 首次初始化使用受审计的管理员终端：
 
 ```sh
-kubectl -n <namespace> port-forward service/newapi 13000:8080
+kubectl -n <namespace> port-forward deployment/<approved-new-api-deployment> 13000:8080
 ```
 
-随后访问 `http://127.0.0.1:13000` 创建强管理员账号，配置真实上游 Channel，并创建最小权限 API Token。不要在命令行参数、工单或聊天记录中传递管理员密码和 API Token。
+该命令仅由已有 operator RBAC 在管理员终端临时转发同 Pod 的 loopback 管理后端；默认只绑定本机 loopback，不创建 8080 Service/Ingress，也不授予应用此权限。随后按现有初始化合同访问 `http://127.0.0.1:13000` 完成 setup，配置真实 Channel 与最小权限 Token，结束后立即关闭转发。8443 provider 代理明确拒绝 setup/用户管理/Cookie/重定向，不能扩展它的路由来初始化。管理员密码和 Token 不进入命令行参数、工单或日志。
 
 正式公网入口使用 `https://llmapi.pinvou.com`。New API 进程继续只绑定生产服务器
 loopback；源站安装 `deploy/nginx-pinvou-llmapi-origin.conf`，通过既有账号平台反向隧道按
@@ -98,7 +98,7 @@ IP/CIDR，不能继续使用 `none`，也不能填写公网客户端网段。边
 至少发起一次受控请求，并从 New API 日志确认客户端地址不再是 Docker 网关；否则所有用户
 会共用同一个应用限流桶，公网探测流量可导致正常登录返回 429。
 
-Token Gateway 中的 Provider Base URL 使用 `http://newapi:8080`。完成 `/v1/models`、JSON、SSE、usage 结算和客户端断开验证前，不得执行 DNS/API Gateway 切换。
+此 Helm 装配的 Provider Base URL 使用 `https://newapi:8443`，配合当前精确 allowed host `newapi` 与受信 CA 文件验证完整 CA/SAN/有效期；凭据 Portal 沿同一受控入口读取。不关闭证书或主机名验证，不将上述一次性 loopback 管理通道当作 Gateway 数据面。完成真实 `/v1/models`、JSON、SSE、usage 和断开核验前，保留既有切换门禁；TLS listener probe 或源码模板检查不能代替这些验证。
 
 ## 验收与回滚
 

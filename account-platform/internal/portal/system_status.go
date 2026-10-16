@@ -48,12 +48,13 @@ type relayStatus struct {
 }
 
 type reconciliationStatus struct {
-	Pending      int64         `json:"pending"`
-	Stopped      int64         `json:"stopped"`
+	Pending      *int64        `json:"pending"`
+	Stopped      *int64        `json:"stopped"`
 	RecentErrors []recentError `json:"recent_errors"`
 }
 
 type recentError struct {
+	Code      string    `json:"code,omitempty"`
 	Source    string    `json:"source"`
 	Resource  string    `json:"resource,omitempty"`
 	Message   string    `json:"message"`
@@ -293,11 +294,13 @@ func parseRelayMetrics(reader io.Reader) (map[string]float64, error) {
 func (s *Service) reconciliationStatus(ctx context.Context, accessToken string) reconciliationStatus {
 	result := reconciliationStatus{RecentErrors: make([]recentError, 0)}
 	var overview struct {
-		Pending int64 `json:"reconciliation_pending"`
-		Stopped int64 `json:"reconciliation_stopped"`
+		Pending *int64 `json:"reconciliation_pending"`
+		Stopped *int64 `json:"reconciliation_stopped"`
 	}
-	if err := s.getJSON(ctx, endpoint(s.config.TokenGatewayURL, "/admin/v1/overview"), accessToken, &overview); err == nil {
+	if err := s.getJSON(ctx, endpoint(s.config.TokenGatewayURL, "/admin/v1/overview"), accessToken, &overview); err == nil && overview.Pending != nil && overview.Stopped != nil && *overview.Pending >= 0 && *overview.Stopped >= 0 {
 		result.Pending, result.Stopped = overview.Pending, overview.Stopped
+	} else {
+		result.RecentErrors = append(result.RecentErrors, recentError{Source: "token-reconciliation", Code: "RECONCILIATION_STATUS_UNAVAILABLE", Message: "reconciliation status unavailable", UpdatedAt: s.now()})
 	}
 	var usage struct {
 		Items []struct {
@@ -310,12 +313,14 @@ func (s *Service) reconciliationStatus(ctx context.Context, accessToken string) 
 	if target != nil {
 		target.RawQuery = "limit=20"
 	}
-	if err := s.getJSON(ctx, target, accessToken, &usage); err == nil {
+	if err := s.getJSON(ctx, target, accessToken, &usage); err == nil && usage.Items != nil {
 		for _, item := range usage.Items {
 			if strings.TrimSpace(item.LastError) != "" {
 				result.RecentErrors = append(result.RecentErrors, recentError{Source: "token-reconciliation", Resource: item.ID, Message: item.LastError, UpdatedAt: item.UpdatedAt})
 			}
 		}
+	} else {
+		result.RecentErrors = append(result.RecentErrors, recentError{Source: "token-reconciliation", Code: "RECONCILIATION_ERRORS_UNAVAILABLE", Message: "reconciliation errors unavailable", UpdatedAt: s.now()})
 	}
 	return result
 }

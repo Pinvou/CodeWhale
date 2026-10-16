@@ -5,7 +5,15 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import puppeteer from 'puppeteer-core';
 
-const browserPath = [process.env.CHROME, 'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe', 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'].find((candidate) => candidate && existsSync(candidate));
+const browserPath = [process.env.CHROME,
+  'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
+  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+  'C:/Program Files/Google/Chrome/Application/chrome.exe',
+  'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+  '/snap/bin/chromium', '/usr/bin/chromium', '/usr/bin/chromium-browser',
+  '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+].find((candidate) => candidate && existsSync(candidate));
 assert.ok(browserPath, 'Chromium or Edge is required');
 const staticRoot = path.resolve(import.meta.dirname, '../../account-platform/internal/portal/static');
 let dropNextAck = false;
@@ -97,7 +105,7 @@ const server = createServer(async (request, response) => {
       nextAuthorizationReadDelayMs = 0;
       await new Promise((resolve) => { setTimeout(resolve, delay); });
     }
-    return json(response, { user_id: requestedUserID, status: "ACTIVE", personal_permissions: [], platform_permissions: requestedPermissions });
+    return json(response, { user_id: requestedUserID, status: "ACTIVE", active_context: { context_type: "PERSONAL", context_version: 1, authorization_version: 1, personal_authorization_version: 1, platform_authorization_version: 1, organization_authorization_version: 0, membership_version: 1, permissions: [] }, personal_permissions: [], platform_permissions: requestedPermissions });
   }
   if (url.pathname === '/api/admin/billing/admin/v1/registration-bonus-policy' && request.method === 'GET') {
     const responsePolicy = { ...policy };
@@ -157,13 +165,18 @@ try {
     ['transport-lost-ack-browser-retry-stable-key', '10000', '1', '9007199254740993', 'transport'],
     ['unknown-stepup-keeps-original-key-and-shows-current-policy', '10000', '1', '9007199254740993', 'http-reauth'],
     ['unknown-originating-actor-is-not-replayed-by-another-administrator', '10000', '1', '9007199254740993', 'http-actor'],
+    ['unknown-manage-revoked-preserves-evidence-and-never-replays', '10000', '1', '9007199254740993', 'http-revoked'],
+    ['unicode-ten-codepoint-reason', '10000', '1', '2', false, '😀'.repeat(10)],
+    ['unicode-five-hundred-codepoint-reason', '10000', '1', '2', false, '😀'.repeat(500)],
+    ['unicode-unknown-retry-preserves-original-command', '10000', '1', '2', 'http', '😀'.repeat(10)],
   ];
   let failures = 0;
-  for (const [name, microcredits, expectedPoints, revision = '2', lostAck = false] of cases) {
+  for (const [name, microcredits, expectedPoints, revision = '2', lostAck = false, reason = 'Keep amount while changing only policy enablement'] of cases) {
     const page = await browser.newPage();
     try {
       policy = { ...policy, revision, enabled: false, amount_microcredits: microcredits, eligibility_status: 'READY' };
       currentUserID = '0199a100-0001-7000-8000-000000000101'; csrfToken = 'csrf-user-a';
+      permissions = ['platform.registration-bonus.read', 'platform.registration-bonus.manage'];
       writes.length = 0; receipts.clear(); mutations = 0; dropNextAck = lostAck;
       await page.setViewport({ width: 1280, height: 900 });
       await page.evaluateOnNewDocument(() => localStorage.setItem('pinvou.admin.language', 'en'));
@@ -171,7 +184,7 @@ try {
       await page.waitForSelector('[data-testid="registration-bonus-policy"] form');
       const shown = await page.$eval('[data-testid="registration-bonus-policy"] input[type="number"]', n => n.value);
       // Exercise a real enabled/reason-only save even when the before rendering is wrong.
-      await page.type('[data-testid="registration-bonus-policy"] textarea', 'Keep amount while changing only policy enablement');
+      await page.type('[data-testid="registration-bonus-policy"] textarea', reason);
       await page.click('[data-testid="registration-bonus-policy"] input[type="checkbox"]');
       await page.click('[data-testid="registration-bonus-policy"] button[type="submit"]');
       if (typeof lostAck === 'string' && lostAck.startsWith('http')) {
@@ -187,6 +200,18 @@ try {
           assert.equal(await page.evaluate(() => Boolean(document.defaultView.sessionStorage.getItem('pinvou.admin.registration-bonus.pending.0199a100-0001-7000-8000-000000000101'))), true, 'original actor recovery evidence remains preserved');
           console.log(JSON.stringify({ action: 'pass', test: name }));
           continue;
+        }
+        if (lostAck === 'http-revoked') {
+          const recoveryKey = `pinvou.admin.registration-bonus.pending.${currentUserID}`;
+          const originalPending = await page.evaluate(key => document.defaultView.sessionStorage.getItem(key), recoveryKey);
+          permissions = ['platform.registration-bonus.read'];
+          await page.reload({ waitUntil: 'networkidle0' });
+          await page.waitForSelector('[data-testid="registration-bonus-policy"] [role="alert"] button');
+          assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] [role="alert"] button', node => node.disabled), true);
+          await page.$eval('[data-testid="registration-bonus-policy"] [role="alert"] button', node => node.click());
+          assert.equal(writes.length, 1); assert.equal(mutations, 1);
+          assert.equal(await page.evaluate(key => document.defaultView.sessionStorage.getItem(key), recoveryKey), originalPending, 'revoked manage cannot discard unresolved evidence');
+          console.log(JSON.stringify({ action: 'pass', test: name })); continue;
         }
         await page.reload({ waitUntil: 'networkidle0' });
         await page.waitForSelector('[data-testid="registration-bonus-policy"] [role="alert"] button');
@@ -208,6 +233,7 @@ try {
       assert.equal(String(writes[0].body.amount_points), expectedPoints, `${name}: reason/enable save keeps point count`);
       assert.equal(policy.amount_microcredits, lostAck === 'http-reauth' ? 400000 : (BigInt(expectedPoints) * 10000n).toString());
       assert.equal(writes[0].body.enabled, true);
+      assert.equal(writes[0].body.reason, reason.trim(), 'the complete codepoint-valid reason reaches the existing contract');
       assert.match(writes[0].raw, new RegExp('\"expected_revision\":' + revision + ','));
       assert.equal(writes[0].csrf, 'csrf-user-a');
       assert.match(writes[0].idempotencyKey, /^registration-bonus-/);
@@ -215,6 +241,69 @@ try {
     } catch (error) {
       failures += 1;
       console.log(JSON.stringify({ action: 'fail', test: name, message: error.message, writes: writes.map(w => ({amount_points:w.body.amount_points})) }));
+    } finally { await page.close(); }
+  }
+  for (const [name, reason] of [
+    ['unicode-five-is-not-ten-codepoints', '😀'.repeat(5)],
+    ['unicode-five-hundred-one-is-too-long', '😀'.repeat(501)],
+  ]) {
+    const page = await browser.newPage();
+    try {
+      policy = { ...policy, revision: '2', enabled: false, amount_microcredits: '10000', eligibility_status: 'READY' };
+      permissions = ['platform.registration-bonus.read', 'platform.registration-bonus.manage'];
+      currentUserID = '0199a100-0001-7000-8000-000000000101'; csrfToken = 'csrf-user-a';
+      writes.length = 0; receipts.clear(); mutations = 0; dropNextAck = false;
+      await page.evaluateOnNewDocument(() => localStorage.setItem('pinvou.admin.language', 'en'));
+      await page.goto(`http://127.0.0.1:${port}/admin.html?section=operations`, { waitUntil: 'networkidle0' });
+      await page.waitForSelector('[data-testid="registration-bonus-policy"] form');
+      await page.type('[data-testid="registration-bonus-policy"] textarea', reason);
+      assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', node => node.value), reason, 'native UTF16 limits must not truncate the controlled input');
+      assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] button[type="submit"]', node => node.disabled), true);
+      // Programmatic form submission must also reject an invalid NEW intent
+      // before attempting pending storage or an authenticated mutation.
+      await page.$eval('[data-testid="registration-bonus-policy"] form', form => form.requestSubmit());
+      await page.waitForNetworkIdle({ idleTime: 100 });
+      assert.equal(writes.length, 0); assert.equal(mutations, 0);
+      assert.equal(await page.evaluate(() => document.defaultView.sessionStorage.getItem('pinvou.admin.registration-bonus.pending.0199a100-0001-7000-8000-000000000101')), null);
+      assert.equal(await page.$('[data-testid="registration-bonus-policy"] [role="alert"]'), null, 'invalid input is not a storage failure');
+      console.log(JSON.stringify({ action: 'pass', test: name }));
+    } catch (error) {
+      failures++;
+      console.log(JSON.stringify({ action: 'fail', test: name, message: error.message }));
+    } finally { await page.close(); }
+  }
+  {
+    const name = 'unicode-long-reauthentication-draft-survives-without-auto-write';
+    const page = await browser.newPage();
+    try {
+      const reason = '😀'.repeat(500);
+      policy = { ...policy, revision: '2', enabled: false, amount_microcredits: '10000', eligibility_status: 'READY' };
+      permissions = ['platform.registration-bonus.read', 'platform.registration-bonus.manage'];
+      currentUserID = '0199a100-0001-7000-8000-000000000101'; csrfToken = 'csrf-user-a';
+      writes.length = 0; receipts.clear(); mutations = 0; dropNextAck = false;
+      recentAuthenticationRequired = true; authenticationBehavior = 'success';
+      await page.evaluateOnNewDocument(() => localStorage.setItem('pinvou.admin.language', 'en'));
+      await page.goto(`http://127.0.0.1:${port}/admin.html?section=operations`, { waitUntil: 'networkidle0' });
+      await page.waitForSelector('[data-testid="registration-bonus-policy"] form');
+      await page.type('[data-testid="registration-bonus-policy"] textarea', reason);
+      await page.click('[data-testid="registration-bonus-policy"] button[type="submit"]');
+      await page.waitForSelector('[data-testid="registration-bonus-policy"] [role="alert"] button');
+      assert.equal(writes.length, 0, 'recent-auth refusal has not changed policy');
+      await Promise.all([page.waitForNavigation({ waitUntil: 'networkidle0' }), page.click('[data-testid="registration-bonus-policy"] [role="alert"] button')]);
+      await page.waitForSelector('[data-testid="registration-bonus-policy"] form');
+      assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', node => node.value), reason);
+      assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] button[type="submit"]', node => node.disabled), false);
+      assert.equal(writes.length, 0); assert.equal(mutations, 0);
+      assert.equal(await page.evaluate(() => document.defaultView.sessionStorage.getItem('pinvou.admin.registration-bonus.reauthentication-draft')), null);
+      await page.click('[data-testid="registration-bonus-policy"] button[type="submit"]');
+      await page.waitForFunction(() => document.querySelector('[data-testid="registration-bonus-policy"] .adm-registration-bonus-summary dd')?.textContent.trim() === '3');
+      assert.equal(writes.length, 1); assert.equal(mutations, 1);
+      assert.equal(writes[0].body.reason, reason);
+      assert.equal(writes[0].csrf, 'csrf-user-a');
+      console.log(JSON.stringify({ action: 'pass', test: name }));
+    } catch (error) {
+      failures++;
+      console.log(JSON.stringify({ action: 'fail', test: name, message: error.message }));
     } finally { await page.close(); }
   }
   if (failures) process.exitCode = 1;

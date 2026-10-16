@@ -53,3 +53,11 @@ test('HA rejects invalid numeric outage and replica evidence', () => {
   const pdb = evidence(now); pdb.workloads[0].max_unavailable = -1;
   assert.throws(() => validateEvidence(policy, pdb, now), /disruption/);
 });
+
+test('HA rejects impossible or non-RFC3339 generation timestamps', () => {
+  const now = Date.parse('2026-03-02T00:00:00Z');
+  for (const invalid of ['2026-02-30T00:00:00Z', 'March 2, 2026', '2026-03-02']) {
+    const candidate = evidence(now); candidate.generated_at = invalid;
+    assert.throws(() => validateEvidence(policy, candidate, now), /RFC3339/);
+  }
+});

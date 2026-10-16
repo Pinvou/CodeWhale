@@ -8,10 +8,17 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// retainedRollbackGuard retains the frozen package checks for append-only
-// policy history. Legacy databases may still have a low-numbered latest
-// version; DownOne composes this guard with the audit-export rollback guard.
-func retainedRollbackGuard(_ context.Context, _ pgx.Tx, migration migrations.Migration) error {
+// retainedRollbackGuard composes frozen closure, governance and append-only policy checks.
+func retainedRollbackGuard(ctx context.Context, tx pgx.Tx, migration migrations.Migration) error {
+	if migration.Version == 28 {
+		// Keep the original SQL identity. Even a legacy database whose latest
+		// applied version is 028 must retain cleanup proofs, lifecycle fences
+		// and retention records; a later forward-only migration is not enough.
+		return errors.New("retained account closure cleanup rollback is unsupported: preserve lifecycle, cleanup and retention evidence")
+	}
+	if migration.Version == governancePermissionsVersion {
+		return guardGovernancePermissionsRollback(ctx, tx, migration)
+	}
 	if migration.Version == 33 {
 		// Original 018 protects policies with a statement-level immutable
 		// trigger, including DELETE statements that match no policy rows.

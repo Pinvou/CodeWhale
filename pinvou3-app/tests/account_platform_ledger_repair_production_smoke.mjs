@@ -9,7 +9,13 @@ import { financeCopy } from '../src/shared/finance-i18n.js';
 import { encodeFinanceJSON } from '../src/features/account-platform/finance-contract.js';
 
 const staticRoot = path.resolve(import.meta.dirname, '../../account-platform/internal/portal/static');
-const browserPath = [process.env.CHROME, 'C:/Program Files/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'].find(value => value && existsSync(value));
+const browserPath = [process.env.CHROME, process.env.EDGE_PATH, process.env.CHROMIUM,
+  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+  'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
+  'C:/Program Files/Google/Chrome/Application/chrome.exe',
+  '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+].filter(Boolean).find(value => existsSync(value));
 assert.ok(browserPath, 'Chromium is required');
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const actorA = id(101), actorB = id(102), draftID = id(9);
@@ -18,14 +24,20 @@ const projection = { command_type: 'LEDGER_REPAIR', policy_version: 1, snapshot_
   normalized_command: { target_posting_id: id(1), target_journal_entry_id: id(2), wrong_ledger_account_id: id(3), correct_ledger_account_id: id(4), amount_microcredits: '9223372036854775807', reason_code: 'ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT' },
   critical_resource_versions: { policy_version: 1, posting_set_digest: 'a'.repeat(64) },
   financial_snapshot: { amount_microcredits: '9223372036854775807', wallet_id: null } };
-let actor, csrf, mode, writes, effects, submits, created, waiting, release;
-function reset(next = 'normal') { actor = actorA; csrf = 'csrf-initial'; mode = next; writes = []; effects = 0; submits = 0; created = false; waiting = false; release = null; }
+let actor, csrf, mode, writes, effects, submits, created, waiting, release, reauthentications;
+function reset(next = 'normal') { actor = actorA; csrf = 'csrf-initial'; mode = next; writes = []; effects = 0; submits = 0; created = false; waiting = false; release = null; reauthentications = []; }
 const json = (response, body, status = 200) => { response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); response.end(encodeFinanceJSON(body)); };
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, 'http://127.0.0.1');
-  if (url.pathname === '/auth/login') { csrf = 'csrf-after-reauth'; response.writeHead(302, { Location: '/admin.html?section=finance&finance_tab=ledger' }); return response.end(); }
+  if (url.pathname === '/auth/login') {
+    const returnTo = url.searchParams.get('return_to');
+    assert.equal(url.searchParams.get('reauthenticate'), '1');
+    assert.equal(returnTo, '/admin.html?section=finance&finance_tab=ledger');
+    reauthentications.push(returnTo); csrf = 'csrf-after-reauth';
+    response.writeHead(302, { Location: returnTo }); return response.end();
+  }
   if (url.pathname === '/api/session') return json(response, { authenticated: true, csrf_token: csrf });
-  if (url.pathname === '/api/account/v1/account/bootstrap') return json(response, { user_id: actor, status: 'ACTIVE', personal_permissions: [], platform_permissions: ['platform.billing.repairs.request'], platform_authorization_version: 1 });
+  if (url.pathname === '/api/account/v1/account/bootstrap') return json(response, { user_id: actor, status: 'ACTIVE', active_context: { context_type: 'PERSONAL', organization_id: null, membership_version: 1, context_version: 1, authorization_version: 1, personal_authorization_version: 1, platform_authorization_version: 1, organization_authorization_version: 1, permissions: [] }, personal_permissions: [], platform_permissions: ['platform.users.read', 'platform.billing.wallets.read', ...(mode === 'read-only-view' ? [] : ['platform.billing.repairs.request'])], platform_authorization_version: 1 });
   if (url.pathname === '/api/admin/approvals/capability') return json(response, { session_approval_wire_version: 2, control: { version: 1, epoch: 1, authorization_relay_epoch: 1 } });
   if (url.pathname === '/api/admin/account/admin/v2/approval-command-prechecks') return json(response, projection);
   if (url.pathname === '/api/admin/approvals/requests' && request.method === 'GET') return json(response, { items: [], has_more: false });
@@ -60,9 +72,9 @@ async function open(page, language = 'en') {
   await enterLedger(page, language);
 }
 async function enterLedger(page, language = 'en') {
-  await page.waitForFunction(text => [...document.querySelectorAll('nav button')].some(button => button.textContent === text), {}, financeCopy[language].finance);
-  await page.evaluate(text => [...document.querySelectorAll('nav button')].find(button => button.textContent === text).click(), financeCopy[language].finance);
   await page.waitForSelector('.adm-financial-repair-target');
+  assert.deepEqual(await page.$$eval('nav button[aria-pressed="true"]', buttons => buttons.map(button => button.textContent)),
+    [financeCopy[language].finance, ledgerRepairCopy[language].title]);
 }
 async function prepare(page) {
   const inputs = await page.$$('.adm-financial-repair-target input');
@@ -119,8 +131,12 @@ try {
     await page.waitForSelector('.adm-financial-repair [role=alert]');
     await retry(page);
     await page.waitForFunction(text => [...document.querySelectorAll('.adm-financial-repair button')].some(button => button.textContent === text), {}, ledgerRepairCopy.en.reauthenticate);
+    const frozenIntent = await page.evaluate(() => document.defaultView.sessionStorage.getItem('pinvou.ledger-repair.intent.v1:00000000-0000-4000-8000-000000000101'));
     await Promise.all([page.waitForNavigation(), page.evaluate(text => [...document.querySelectorAll('.adm-financial-repair button')].find(button => button.textContent === text).click(), ledgerRepairCopy.en.reauthenticate)]);
     await enterLedger(page);
+    assert.deepEqual(reauthentications, ['/admin.html?section=finance&finance_tab=ledger']);
+    assert.equal(writes.length, 2);
+    assert.equal(await page.evaluate(() => document.defaultView.sessionStorage.getItem('pinvou.ledger-repair.intent.v1:00000000-0000-4000-8000-000000000101')), frozenIntent);
     await page.waitForSelector('.adm-financial-repair-draft');
     assert.equal(await page.$eval('.adm-financial-repair-draft input', element => element.value), 'k'.repeat(111));
     for (let attempt = 3; attempt <= 4; attempt++) { await retry(page); await page.waitForFunction(() => !document.querySelector('.adm-financial-repair-draft button').disabled); assert.equal(writes.length, attempt); await page.reload(); await enterLedger(page); await page.waitForSelector('.adm-financial-repair-draft'); }
@@ -128,6 +144,17 @@ try {
     assert.equal(effects, 1); assert.equal(submits, 0); assert.equal(writes.length, 5);
     for (const item of writes) { assert.equal(item.raw, writes[0].raw); assert.equal(item.actor, actorA); }
     assert.equal(writes[2].csrf, 'csrf-after-reauth');
+  });
+  await run('Ledger return query cannot grant repair permission to a read-only finance user', async page => {
+    reset('read-only-view');
+    await page.evaluateOnNewDocument(() => localStorage.setItem('pinvou.admin.language', 'en'));
+    await page.goto(`${origin}/admin.html?section=finance&finance_tab=ledger`);
+    await page.waitForFunction((finance, orders) => {
+      const selected = [...document.querySelectorAll('nav button[aria-pressed="true"]')].map(button => button.textContent);
+      return selected.length === 2 && selected[0] === finance && selected[1] === orders;
+    }, {}, financeCopy.en.finance, financeCopy.en.orders);
+    assert.equal(await page.$('.adm-financial-repair'), null);
+    assert.equal(writes.length, 0); assert.equal(effects, 0); assert.equal(submits, 0);
   });
   await run('foreign actor cannot replay unknown intent', async page => {
     reset('unknown'); await open(page); await prepare(page); await retry(page); await page.waitForSelector('.adm-financial-repair [role=alert]');

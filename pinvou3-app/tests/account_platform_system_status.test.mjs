@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
-import { formatSystemCount, parseSystemStatusJSON, requireSystemStatus } from '../src/features/account-platform/admin-system-status.js';
+import { formatSystemCount, parseSystemStatusJSON, requireSystemStatus, systemDiagnosticMessage } from '../src/features/account-platform/admin-system-status.js';
 import { adminPlatformCopy } from '../src/shared/i18n.js';
 
 test('actual client uses same-origin readonly status route, preserves raw int64 and float age', async () => {
@@ -59,4 +59,18 @@ for (const language of ['zh', 'en', 'ja']) test(`existing system/runbook labels 
   for (const key of ['services', 'relays', 'recentErrors', 'service', 'latency', 'message', 'pending', 'deadLetters', 'oldest', 'source', 'resource', 'updated', 'healthyServices', 'pendingReconciliation', 'stoppedReconciliation']) assert.ok(copy.system[key], `missing system label: ${language}.${key}`);
   for (const key of ['title', 'lead', 'bootstrap', 'bootstrapHelp', 'idp', 'idpHelp', 'noExecution']) assert.ok(copy.runbooks[key]);
   assert.ok(copy.nav.system);
+});
+
+test('unavailable reconciliation counts and diagnostic codes retain their read-only three-language presentation', () => {
+  const payload = requireSystemStatus(parseSystemStatusJSON('{"services":[],"relays":[],"reconciliation":{"pending":null,"stopped":null},"recent_errors":[{"source":"token-reconciliation","code":"RECONCILIATION_STATUS_UNAVAILABLE","message":"reconciliation status unavailable"}]}'));
+  for (const language of ['zh', 'en', 'ja']) {
+    const labels = adminPlatformCopy[language].system;
+    assert.equal(formatSystemCount(payload.reconciliation.pending, language), '—');
+    assert.equal(formatSystemCount(payload.reconciliation.stopped, language), '—');
+    assert.equal(systemDiagnosticMessage(payload.recent_errors[0], labels), labels.reconciliationUnavailable);
+    assert.ok(labels.reconciliationUnavailable); assert.ok(labels.reconciliationErrorsUnavailable);
+    assert.equal(systemDiagnosticMessage({code: 'RECONCILIATION_ERRORS_UNAVAILABLE'}, labels), labels.reconciliationErrorsUnavailable);
+    assert.equal(systemDiagnosticMessage({message: 'existing controlled diagnostic'}, labels), 'existing controlled diagnostic');
+  }
+  assert.throws(() => requireSystemStatus({...payload, recent_errors: [{source:'token-reconciliation', message:'controlled', code:{}}]}), /INVALID_SYSTEM_STATUS/);
 });

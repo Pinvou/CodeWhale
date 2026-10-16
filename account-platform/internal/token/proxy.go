@@ -158,6 +158,9 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, err)
 			return
 		}
+	} else if resolved.ContextType == "ORGANIZATION" {
+		api.WriteError(w, http.StatusServiceUnavailable, "MODEL_POLICY_UNAVAILABLE", "organization model policy is unavailable", httpserver.RequestID(r.Context()))
+		return
 	}
 	maximumOutput := request.MaxCompletionTokens
 	if maximumOutput == 0 {
@@ -295,7 +298,7 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	hold, err := s.ensureUsageHold(r.Context(), usageRequest, envelope)
 	if err != nil {
-		if definitiveBillingFailure(err) {
+		if definitiveInitialBillingFailure(err) {
 			s.writeInitialReservationFailure(w, r, usageRequest.ID, envelope, err)
 		} else {
 			w.Header().Set("Location", "/v1/usage-requests/"+usageRequest.ID.String())
@@ -320,7 +323,7 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	usageRequest.HoldID = &hold.ID
 	usageRequest.PriceVersionID = &price.ID
-	envelope, acquired, err := s.repository.AcquireDispatch(r.Context(), usageRequest.ID, httpserver.RequestID(r.Context()), 10*time.Minute)
+	envelope, acquired, err := s.repository.AcquireDispatch(r.Context(), usageRequest.ID, httpserver.RequestID(r.Context()), dispatchLeaseDuration)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -415,12 +418,25 @@ func (s *Service) dispatchUsage(w http.ResponseWriter, r *http.Request, usageReq
 		return
 	}
 	holdID := *usageRequest.HoldID
-	if err := s.repository.MarkUpstream(context.WithoutCancel(r.Context()), usageRequest.ID); err != nil {
+	r = r.WithContext(withDispatchLeaseOwner(r.Context(), envelope.leaseOwner))
+	dispatchContext, cancelDispatch := context.WithCancel(context.WithoutCancel(r.Context()))
+	defer cancelDispatch()
+	leaseTicker := time.NewTicker(dispatchLeaseRenewalInterval)
+	defer leaseTicker.Stop()
+	_, stopLease, err := s.renewDispatchLease(context.WithoutCancel(r.Context()), cancelDispatch, usageRequest.ID, envelope.leaseOwner, leaseTicker.C)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	// The lease covers setup, the full upstream budget and replay persistence.
+	// Stop it when this dispatch actually returns, not when the upstream timer ends.
+	defer stopLease()
+	if err := s.repository.MarkUpstream(dispatchContext, usageRequest.ID); err != nil {
 		_ = s.repository.MarkReview(context.WithoutCancel(r.Context()), usageRequest.ID, "dispatch_state_persistence_failed", map[string]any{})
 		s.writeError(w, r, err)
 		return
 	}
-	upstreamContext, cancelUpstream := context.WithTimeout(context.WithoutCancel(r.Context()), 2*time.Hour)
+	upstreamContext, cancelUpstream := context.WithTimeout(dispatchContext, 2*time.Hour)
 	defer cancelUpstream()
 	defer s.registerActiveUpstream(usageRequest.ID, cancelUpstream)()
 	renewalFailed := s.renewHold(upstreamContext, cancelUpstream, usageRequest.ID, holdID)
@@ -487,13 +503,20 @@ func (s *Service) dispatchUsage(w http.ResponseWriter, r *http.Request, usageReq
 	if terminal, err := s.recordTerminalFinalUsage(background, usageRequest.ID, usage); err != nil || terminal {
 		if err != nil {
 			api.WriteError(w, http.StatusServiceUnavailable, "RESULT_PERSISTENCE_FAILED", "the provider usage evidence could not be retained", httpserver.RequestID(r.Context()))
+		} else {
+			s.replayTerminalUsage(w, r, usageRequest.ID)
 		}
 		return
 	}
 	_, insufficientCode, ok := s.authorizeAdditional(background, usageRequest.ID, holdID, envelope.Price, usage, envelope.MaximumCost)
 	if !ok {
 		// A concurrent deadline may have completed while extension was attempted.
-		if terminal, _ := s.recordTerminalFinalUsage(background, usageRequest.ID, usage); terminal {
+		if terminal, err := s.recordTerminalFinalUsage(background, usageRequest.ID, usage); terminal || err != nil {
+			if err != nil {
+				api.WriteError(w, http.StatusServiceUnavailable, "RESULT_PERSISTENCE_FAILED", "the provider usage evidence could not be retained", httpserver.RequestID(r.Context()))
+			} else {
+				s.replayTerminalUsage(w, r, usageRequest.ID)
+			}
 			return
 		}
 		api.WriteError(w, http.StatusServiceUnavailable, "SETTLEMENT_PENDING", "the final response is awaiting usage settlement", httpserver.RequestID(r.Context()))
@@ -600,7 +623,7 @@ func (s *Service) replayUsage(w http.ResponseWriter, r *http.Request, usage Usag
 		}
 		hold, err := s.ensureUsageHold(context.WithoutCancel(r.Context()), usage, envelope)
 		if err != nil {
-			if definitiveBillingFailure(err) {
+			if definitiveInitialBillingFailure(err) {
 				s.writeInitialReservationFailure(w, r, usage.ID, envelope, err)
 			} else {
 				w.Header().Set("Location", "/v1/usage-requests/"+usage.ID.String())
@@ -628,7 +651,7 @@ func (s *Service) replayUsage(w http.ResponseWriter, r *http.Request, usage Usag
 		}
 	}
 	if usage.ExecutionStatus == "DISPATCH_INTENT_PERSISTED" {
-		envelope, acquired, err := s.repository.AcquireDispatch(context.WithoutCancel(r.Context()), usage.ID, httpserver.RequestID(r.Context()), 10*time.Minute)
+		envelope, acquired, err := s.repository.AcquireDispatch(context.WithoutCancel(r.Context()), usage.ID, httpserver.RequestID(r.Context()), dispatchLeaseDuration)
 		if err != nil {
 			s.writeError(w, r, err)
 			return
@@ -658,6 +681,24 @@ func (s *Service) replayUsage(w http.ResponseWriter, r *http.Request, usage Usag
 		s.replayLiveStream(w, r, usage.ID, after)
 		return
 	}
+	s.replayStoredUsage(w, r, usage, after)
+}
+
+// A financial terminal race can leave an older execution phase visible. Read
+// only the existing replay/status projection; never resume dispatch or persist
+// the new late response body through the general recovery entry point.
+func (s *Service) replayTerminalUsage(w http.ResponseWriter, r *http.Request, usageID uuid.UUID) {
+	usage, err := s.repository.GetUsage(r.Context(), usageID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	s.replayStoredUsage(w, r, usage, 0)
+}
+
+func (s *Service) replayStoredUsage(w http.ResponseWriter, r *http.Request, usage UsageRequest, after int64) {
+	w.Header().Set("X-Pinvou-Usage-Request-ID", usage.ID.String())
+	w.Header().Set("Cache-Control", "no-store")
 	snapshot, err := s.repository.LoadReplay(r.Context(), usage.ID, after)
 	if err != nil {
 		s.writeError(w, r, err)
@@ -940,8 +981,28 @@ func billingNoticeFromUsageSnapshot(snapshot json.RawMessage) *billingNotice {
 }
 
 func (s *Service) handleUpstreamFailure(w http.ResponseWriter, r *http.Request, usageID, holdID uuid.UUID, response *http.Response) {
-	payload, _ := io.ReadAll(io.LimitReader(response.Body, 2<<20))
+	payload, readErr := readBoundedUpstreamBody(response.Body, 2<<20)
 	background := context.WithoutCancel(r.Context())
+	if readErr != nil {
+		// A status that the installed adapter already proves rejected before
+		// generation keeps its original financial meaning. Body completeness is
+		// separate: neither an overflow prefix nor interrupted bytes are replay.
+		disposition := responseDispositionUsageEvidenceRequired
+		if s.executionUpstream.RejectsBeforeGeneration(response.StatusCode) {
+			disposition = responseDispositionRejectedBeforeGeneration
+		}
+		if err := s.repository.MarkReview(background, usageID, "upstream_body_incomplete", map[string]any{"error_class": "body_read", "http_status": response.StatusCode, "response_disposition": disposition}); err != nil {
+			api.WriteError(w, http.StatusServiceUnavailable, "RESULT_PERSISTENCE_FAILED", "the upstream result could not be persisted", httpserver.RequestID(r.Context()))
+			return
+		}
+		if disposition == responseDispositionRejectedBeforeGeneration {
+			if err := s.executionBilling.Release(background, usageID, holdID, "upstream rejected before generation"); err == nil {
+				_ = s.repository.MarkReleased(background, usageID, "upstream_rejected")
+			}
+		}
+		api.WriteError(w, response.StatusCode, "UPSTREAM_ERROR", "the upstream response could not be read completely", httpserver.RequestID(r.Context()))
+		return
+	}
 	if len(payload) == 0 {
 		payload = []byte(`{"error":{"code":"UPSTREAM_ERROR","message":"the upstream rejected the model request"}}`)
 	}
@@ -968,6 +1029,79 @@ func (s *Service) handleUpstreamFailure(w http.ResponseWriter, r *http.Request, 
 	_, _ = w.Write(payload)
 }
 
+const streamAggregateLimit = 32 << 20
+
+// Bound only the retained replay aggregate; ordinary SSE delivery and persisted
+// event forwarding keep their existing per-line and execution-time contracts.
+type streamReplayAggregate struct {
+	data     []byte
+	events   int
+	exceeded bool
+}
+
+func streamAggregateBytesFit(retained, additional int) bool {
+	return retained >= 0 && additional >= 0 && retained <= streamAggregateLimit && additional <= streamAggregateLimit-retained
+}
+
+func (a *streamReplayAggregate) discard() {
+	a.data = nil
+	a.events = 0
+	a.exceeded = true
+}
+
+func (a *streamReplayAggregate) append(payload []byte) {
+	if a.exceeded {
+		return
+	}
+	// RawMessage marshaling preserves the old compacting and HTML escaping.
+	// The existing scanner bounds this temporary event encoding to one line.
+	encoded, err := json.Marshal(json.RawMessage(payload))
+	if err != nil {
+		a.discard()
+		return
+	}
+	if a.data == nil {
+		a.data = []byte(`{"events":[`)
+	}
+	if a.events != 0 {
+		if !streamAggregateBytesFit(len(a.data), 1) {
+			a.discard()
+			return
+		}
+		a.data = append(a.data, ',')
+	}
+	if !streamAggregateBytesFit(len(a.data), len(encoded)) {
+		a.discard()
+		return
+	}
+	a.data = append(a.data, encoded...)
+	a.events++
+}
+
+func streamAggregateSuffix(usage Usage, lastSequence int64) ([]byte, error) {
+	fields, err := json.Marshal(map[string]any{"usage": usage, "last_sequence": lastSequence})
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte("],"), fields[1:]...), nil
+}
+
+func (a *streamReplayAggregate) fits(usage Usage, lastSequence int64) bool {
+	suffix, err := streamAggregateSuffix(usage, lastSequence)
+	return !a.exceeded && a.data != nil && err == nil && streamAggregateBytesFit(len(a.data), len(suffix))
+}
+
+func (a *streamReplayAggregate) result(usage Usage, lastSequence int64) ([]byte, error) {
+	suffix, err := streamAggregateSuffix(usage, lastSequence)
+	if err != nil {
+		return nil, err
+	}
+	if a.exceeded || a.data == nil || !streamAggregateBytesFit(len(a.data), len(suffix)) {
+		return nil, errors.New("stream aggregate limit exceeded")
+	}
+	return append(a.data, suffix...), nil
+}
+
 func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, holdID uuid.UUID, price PriceVersion, body io.Reader, renewalFailed <-chan struct{}, authorizedMaximum int64, contexts ...billingNoticeContext) {
 	flusher, _ := w.(http.Flusher)
 	controller := http.NewResponseController(w)
@@ -976,7 +1110,7 @@ func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, h
 	var usage Usage
 	usageFound := false
 	var lastSequence int64
-	aggregate := make([]json.RawMessage, 0)
+	aggregate := streamReplayAggregate{}
 	deliveryConnected := true
 	doneFound := false
 	streamFailed := false
@@ -1023,7 +1157,7 @@ func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, h
 				streamFailed = true
 			}
 			if json.Valid(payload) {
-				aggregate = append(aggregate, append(json.RawMessage(nil), payload...))
+				aggregate.append(payload)
 			}
 			if parsed, ok := s.executionUpstream.ParseUsage(payload); ok {
 				usage, usageFound = parsed, true
@@ -1088,6 +1222,22 @@ func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, h
 		_ = s.repository.MarkReview(background, usageID, reason, map[string]any{"stream_error": streamErr != nil, "usage_found": usageFound, "done_found": doneFound})
 		return
 	}
+	// Account for the complete JSON wrapper and the real final usage before
+	// any additional Billing authorization. A supported insufficient-balance
+	// notice may add one sequence, so reserve its possible sequence width.
+	receiptEvents := int64(1)
+	if supportsBillingNotice(r) {
+		if actual, costErr := Cost(price, usage); costErr == nil && actual > authorizedMaximum {
+			if _, supported := s.executionBilling.(SnapshotRenewalBillingClient); supported {
+				receiptEvents++
+			}
+		}
+	}
+	if lastSequence > (1<<63-1)-receiptEvents || !aggregate.fits(usage, lastSequence+receiptEvents) {
+		aggregate.discard()
+		_ = s.repository.MarkReview(background, usageID, "stream_aggregate_limit_exceeded", map[string]any{"usage": usage, "usage_found": usageFound, "done_found": doneFound, "last_sequence": lastSequence, "aggregate_limit_bytes": streamAggregateLimit})
+		return
+	}
 	_, insufficientCode, authorized := s.authorizeAdditional(background, usageID, holdID, price, usage, authorizedMaximum)
 	if !authorized {
 		if terminal() {
@@ -1126,7 +1276,7 @@ func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, h
 		_ = s.repository.MarkReview(background, usageID, "usage_invalid", map[string]any{"usage": usage})
 		return
 	}
-	aggregatePayload, err := json.Marshal(map[string]any{"events": aggregate, "usage": usage, "last_sequence": lastSequence})
+	aggregatePayload, err := aggregate.result(usage, lastSequence)
 	if err != nil || s.repository.SaveReplayResult(background, usageID, ReplayResult{Kind: "STREAM_AGGREGATE", HTTPStatus: http.StatusOK, ContentType: "application/json", Payload: aggregatePayload, ResponseReceived: true, ResponseDisposition: responseDispositionTrustedUsage, FinalUsage: &usage, ActualMicrocredits: &actual, SettlementSnapshot: settlementSnapshot, LastSequence: lastSequence}) != nil {
 		_ = s.repository.MarkReview(background, usageID, "result_persistence_failed", map[string]any{"last_sequence": lastSequence})
 		return
@@ -1176,7 +1326,7 @@ func (s *Service) renewHold(ctx context.Context, cancel context.CancelFunc, usag
 				return
 			case <-ticker.C:
 				renewalContext, stop := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-				err := client.Extend(renewalContext, usageID, holdID, 0)
+				err := client.Extend(renewalContext, usageID, holdID, 0, uuid.Nil)
 				stop()
 				if err != nil {
 					close(failed)
@@ -1240,6 +1390,11 @@ func settlementRecord(price PriceVersion, usage Usage, notice *billingNotice) (i
 }
 
 func (s *Service) settlePrepared(ctx context.Context, usageID, holdID uuid.UUID, actual int64, usage Usage, snapshot map[string]any) string {
+	if store, ok := s.repository.(missingReferenceDeadlineStore); ok {
+		if fenced, err := store.PreserveMissingReferenceLateUsage(ctx, usageID, usage); err != nil || fenced {
+			return "SETTLEMENT_REVIEW_REQUIRED"
+		}
+	}
 	if err := s.executionBilling.Commit(ctx, usageID, holdID, actual, usage); err != nil {
 		if definitiveSettlementConflict(err) {
 			if markErr := s.repository.MarkReview(ctx, usageID, "settlement_conflict", snapshot); markErr != nil {
@@ -1257,7 +1412,21 @@ func (s *Service) settlePrepared(ctx context.Context, usageID, holdID uuid.UUID,
 	return ""
 }
 
+// Final usage has one reservation-extension slot per persisted usage/hold pair.
+// Neither mutable maximum, amount nor wall-clock time is part of its identity:
+// a repeated slot with different facts must conflict at Billing, not charge twice.
+func finalUsageReservationOperationID(usageID, holdID uuid.UUID) uuid.UUID {
+	return uuid.NewSHA1(usageID, []byte("final-usage-reservation-v1\n"+holdID.String()))
+}
+
 func (s *Service) authorizeAdditional(ctx context.Context, usageID, holdID uuid.UUID, price PriceVersion, usage Usage, maximum int64) (int64, string, bool) {
+	// A deadline decision freezes the original hold before any financial RPC.
+	// Late usage remains evidence; it cannot extend that customer's reservation.
+	if store, ok := s.repository.(missingReferenceDeadlineStore); ok {
+		if fenced, err := store.PreserveMissingReferenceLateUsage(ctx, usageID, usage); err != nil || fenced {
+			return maximum, "", false
+		}
+	}
 	actual, err := Cost(price, usage)
 	if err != nil {
 		_ = s.repository.MarkReview(ctx, usageID, "usage_invalid", map[string]any{"usage": usage})
@@ -1271,7 +1440,8 @@ func (s *Service) authorizeAdditional(ctx context.Context, usageID, holdID uuid.
 	if !ok {
 		return actual, "", true
 	}
-	if err := client.Extend(ctx, usageID, holdID, additional); err != nil {
+	operationID := finalUsageReservationOperationID(usageID, holdID)
+	if err := client.Extend(ctx, usageID, holdID, additional, operationID); err != nil {
 		// Trusted final usage still converges through the idempotent Commit.
 		// Only a definite wallet-insufficient response becomes a user notice;
 		// uncertain failures become SETTLEMENT_PENDING only if Commit also fails.
@@ -1284,9 +1454,9 @@ func (s *Service) authorizeAdditional(ctx context.Context, usageID, holdID uuid.
 		return actual, "", true
 	}
 	if repository, ok := s.repository.(interface {
-		IncreaseMaximum(context.Context, uuid.UUID, int64) error
+		EnsureMaximumAtLeast(context.Context, uuid.UUID, int64) error
 	}); ok {
-		if err := repository.IncreaseMaximum(ctx, usageID, additional); err != nil {
+		if err := repository.EnsureMaximumAtLeast(ctx, usageID, actual); err != nil {
 			return actual, "", true
 		}
 	}

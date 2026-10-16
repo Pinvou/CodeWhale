@@ -49,8 +49,8 @@ func (r *PostgresRepository) EntitlementCorrectionProofInput(ctx context.Context
 
 // entitlementCorrectionProofProjection is the single closed owner projection
 // shared by the request assembly path and the authoritative proof recomputation.
-// A target component does not exist before the first execution, so both target
-// identifiers stay explicitly null instead of becoming zero UUIDs.
+// Target identifiers freeze the existing target-kind before-state, or remain
+// explicitly null when absent. Execution creates a separate component and lot.
 func entitlementCorrectionProofProjection(plan entitlementCorrectionReadPlan) (json.RawMessage, json.RawMessage) {
 	nullableID := func(value uuid.UUID) any {
 		if value == uuid.Nil {
@@ -82,7 +82,6 @@ type entitlementCorrectionReadPlan struct {
 	PaymentTransactionID uuid.UUID
 	SourceComponentID    uuid.UUID
 	SourceLotID          uuid.UUID
-	ExistingTargetID     uuid.UUID
 	TargetComponentID    uuid.UUID
 	TargetLotID          uuid.UUID
 	WalletVersion        int64
@@ -189,6 +188,20 @@ func entitlementCorrectionPlanFrom(ctx context.Context, source entitlementCorrec
 		return entitlementCorrectionReadPlan{}, err
 	}
 	if hasRelated {
+		return entitlementCorrectionReadPlan{}, ErrConflict
+	}
+	hasRefundRepair, err := entitlementCorrectionHasRefundRepairHistory(ctx, source, packageID)
+	if err != nil {
+		return entitlementCorrectionReadPlan{}, err
+	}
+	if hasRefundRepair {
+		return entitlementCorrectionReadPlan{}, ErrConflict
+	}
+	hasChargebackRepair, err := entitlementCorrectionHasChargebackRepairHistory(ctx, source, packageID)
+	if err != nil {
+		return entitlementCorrectionReadPlan{}, err
+	}
+	if hasChargebackRepair {
 		return entitlementCorrectionReadPlan{}, ErrConflict
 	}
 	var journalID uuid.UUID
@@ -316,8 +329,8 @@ func entitlementCorrectionPlanFrom(ctx context.Context, source entitlementCorrec
 	return entitlementCorrectionReadPlan{
 		PackageID: packageID, WalletID: walletID, PaymentOrderID: orderID, PaymentTransactionID: transactionID,
 		SourceComponentID: componentIDs[amounts.SourceType], SourceLotID: lotIDs[amounts.SourceType],
-		ExistingTargetID: componentIDs[amounts.TargetType], TargetComponentID: componentIDs[amounts.TargetType],
-		TargetLotID: lotIDs[amounts.TargetType], WalletVersion: walletVersion, PackageTotal: packageTotal,
+		TargetComponentID: componentIDs[amounts.TargetType],
+		TargetLotID:       lotIDs[amounts.TargetType], WalletVersion: walletVersion, PackageTotal: packageTotal,
 		SourceOriginal: sourceOriginal, TargetOriginal: targetOriginal,
 		SourceCreditedAt: creditedAtByKind[amounts.SourceType], SourceExpiresAt: expiresAtByKind[amounts.SourceType],
 		SourceEvidenceRef:    sourceReference,
@@ -389,4 +402,20 @@ func entitlementCorrectionDigests(input entitlementCorrectionDigestInput) (strin
 func digestHex(value []byte) string {
 	sum := sha256.Sum256(value)
 	return hex.EncodeToString(sum[:])
+}
+
+// entitlementCorrectionHasRefundRepairHistory registers this wave's immutable
+// financial history by its own package identity. Older correction installations
+// without the refund repair facility retain their existing eligibility contract.
+func entitlementCorrectionHasRefundRepairHistory(ctx context.Context, source entitlementCorrectionQuerier, packageID uuid.UUID) (bool, error) {
+	var installed bool
+	if err := source.QueryRow(ctx, `SELECT to_regclass('public.refund_exception_repair_cases') IS NOT NULL`).Scan(&installed); err != nil {
+		return false, err
+	}
+	if !installed {
+		return false, nil
+	}
+	var hasRelated bool
+	err := source.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM public.refund_exception_repair_cases WHERE package_id=$1)`, packageID).Scan(&hasRelated)
+	return hasRelated, err
 }

@@ -56,6 +56,26 @@ try {
     for (const value of ['UNHEALTHY', 'DEGRADED', 'connection failed', 'controlled-resource', 'controlled pending error']) assert.ok(text.includes(value));
     assert.equal(await page.evaluate(() => document.querySelector('.adm-metrics article strong').textContent), '0');
   });
+  for (const language of ['zh', 'en', 'ja']) await run(`unavailable reconciliation is not zero and diagnostics are translated ${language}`, async page => {
+    await open(page, `language=${language}&mode=reconciliation-unavailable`);
+    await page.waitForSelector('.adm-metrics');
+    assert.deepEqual(await page.evaluate(() => [...document.querySelectorAll('.adm-metrics article strong')].slice(1).map(node => node.textContent)), ['—', '—']);
+    assert.equal(await page.evaluate(() => {
+      const text = document.querySelector('.adm-system-workspace').textContent;
+      return text.includes(window.statusFixture.copy.system.reconciliationUnavailable) && text.includes(window.statusFixture.copy.system.reconciliationErrorsUnavailable);
+    }), true);
+  });
+  await run('existing status metrics stack on narrow screens and out-of-band guidance keeps neutral styling', async page => {
+    await page.setViewport({width:390,height:844});
+    await open(page); await page.waitForSelector('.adm-metrics');
+    assert.deepEqual(await page.evaluate(() => {
+      const metrics = getComputedStyle(document.querySelector('.adm-metrics'));
+      const neutral = document.querySelector('.adm-runbook-panel .adm-status.neutral');
+      const reference = document.createElement('span'); reference.style.color = 'var(--adm-muted)'; neutral.parentNode.append(reference);
+      const sameNeutral = getComputedStyle(neutral).color === getComputedStyle(reference).color; reference.remove();
+      return {grid: metrics.display, columns: metrics.gridTemplateColumns.split(' ').length, sameNeutral};
+    }), {grid:'grid',columns:1,sameNeutral:true});
+  });
   await run('missing response displays error with no fabricated health', async page => {
     await open(page, 'mode=missing'); await page.waitForSelector('.adm-system-workspace [role=alert]');
     assert.equal(await page.$('.adm-metrics'), null);

@@ -11,7 +11,7 @@ const version = '2026-10-08T00:00:00.123456Z';
 const type = 'TOKEN_USAGE_RECONCILIATION_RETRY';
 const root = createRoot(document.querySelector('#root'));
 const client = new AdminPlatformClient(); client.csrfToken = 'CONTROLLED_SYNTHETIC_CSRF';
-const control = { id, other, language: 'en', calls: [], canRead: true, canRetry: true, ready: true, blocker: false, foreignPrecheck: false, unknown: false, receipt: null, listFailure: 0, owner: id };
+const control = { id, other, language: 'en', calls: [], canRead: true, canRetry: true, ready: true, blocker: false, foreignPrecheck: false, unknown: false, receipt: null, listFailure: 0, owner: id, canTokens: false, delivery: 'COMPLETED' };
 const detail = { usage_request_id: id, updated_at: version, started_at: version, status: 'REVIEW', execution_status: 'REVIEW', settlement_status: 'REVIEW', delivery_status: 'COMPLETED', model: 'CONTROLLED_MODEL', maximum_microcredits: '9007199254740993', actual_microcredits: '9007199254740993', last_persisted_sequence: '9007199254740993', input_tokens: '9007199254740993', cached_input_tokens: '0', output_tokens: '1', reconciliation_attempts: 1, token_account_id: other, reconciliation_last_error: 'MANUAL_RECONCILIATION_REQUIRED' };
 const json = (value, status = 200) => new Response(encodeUsageJSON(value), { status, headers: { 'Content-Type': 'application/json' } });
 const collection = items => ({ items, next_cursor: null, has_more: false, limit: 50, as_of: version });
@@ -21,11 +21,12 @@ globalThis.fetch = async (target, options = {}) => {
   control.calls.push({ path, query: url.search, method, body: options.body, key: options.headers?.['Idempotency-Key'], csrf: options.headers?.['X-CSRF-Token'] });
   const base = '/api/admin/token/admin/v1';
   if (method === 'GET') {
+    if (path === `${base}/provisionings`) return json(collection([]));
     if (path === `${base}/usage-requests`) {
       if (control.listFailure) return json({ code: 'SNAPSHOT_EXPIRED', request_id: 'CONTROLLED_REQUEST' }, control.listFailure);
       return json(collection([detail]));
     }
-    if (path === `${base}/usage-requests/${id}`) return json(detail);
+    if (path === `${base}/usage-requests/${id}`) return json({ ...detail, delivery_status: control.delivery });
     if (path === `${base}/usage-requests/${id}/evidence`) return json(collection([{ source_kind: 'PROVIDER_USAGE', source_id: id, observed_at: version, evidence_type: 'TRUSTED_USAGE', evidence: { actual_microcredits: '9007199254740993' } }]));
     if (path === `${base}/reconciliation-cases`) return json(collection([{ case_id: other, resource_id: id, case_type: 'USAGE_RECONCILIATION_REVIEW', severity: 'P1', status: 'OPEN', resolution_due_at: version }]));
     if (path === `${base}/commands/${type}/readiness`) return json({ schema_version: 1, command_type: type, governance_state: control.ready ? 'ACTIVE' : 'PRE_ACTIVATION', governance_epoch: control.ready ? 1 : 0, commands_enabled: control.ready, ...(control.ready ? {} : { unavailable_reason: 'GOVERNANCE_INACTIVE' }) });
@@ -51,6 +52,6 @@ globalThis.fetch = async (target, options = {}) => {
   throw new Error('UNEXPECTED_CONTROLLED_POST');
 };
 control.labels = () => tokenManagementCopy[control.language].modelToken;
-control.render = () => root.render(<AdminManagementWorkspace key={control.owner} client={client} copy={adminPlatformCopy[control.language]} language={control.language} permissions={[...(control.canRead ? ['platform.usage.read'] : []), ...(control.canRetry ? ['platform.usage.reconcile.retry'] : [])]} owner={control.owner} credentialOrigin="https://controlled.invalid" />);
+control.render = () => root.render(<AdminManagementWorkspace key={control.owner} client={client} copy={adminPlatformCopy[control.language]} language={control.language} permissions={[...(control.canTokens ? ['platform.tokens.read'] : []), ...(control.canRead ? ['platform.usage.read'] : []), ...(control.canRetry ? ['platform.usage.reconcile.retry'] : [])]} owner={control.owner} credentialOrigin="https://controlled.invalid" />);
 globalThis.f05Usage = control;
 control.render();

@@ -43,7 +43,9 @@ const WECOM_CTX: CliCtx = CliCtx {
 /// 1.2.1 and every platform lock pins 1.2.1, so the minimum is 1.2.1 —
 /// installs below it must be replaced, while a minimum above a platform's
 /// lowest pinned version would cause a replace/upgrade loop on that platform.
-const WECOM_MIN_VERSION: (u64, u64, u64) = (1, 2, 1);
+/// `pub` + the facade re-export: single-sourced with the CLI's connectors
+/// family (round-51 review, same rationale as `LARK_MIN_VERSION`).
+pub const WECOM_MIN_VERSION: (u64, u64, u64) = (1, 2, 1);
 
 fn wecom(args: &[&str]) -> std::process::Command {
     WECOM_CTX.cli(args)
@@ -422,6 +424,13 @@ pub fn wecom_skills_should_show() -> bool {
 pub async fn wecom_apply_skills() -> Result<Value, String> {
     let show = tokio::task::spawn_blocking(|| -> Result<bool, String> {
         let show = wecom_skills_should_show();
+        // Deny-first transaction boundary (#517): register the connector
+        // in the initialized DenyAll scopes BEFORE materializing skill
+        // files, so a refused registration aborts before anything lands
+        // (the sync write can block on the cross-process flock, hence
+        // inside this spawn_blocking closure; the post-apply consent sync
+        // below stays as the fail-visible belt-and-braces leg).
+        crate::features::marketplace::deny_first_register_connector("wecom", show)?;
         if let Err(e) = GATE.apply_skills(show) {
             // The connected-catch on the card replaces this string with the
             // skills_enable_failed code, so log the raw cause here (stdout in
@@ -455,6 +464,10 @@ pub async fn wecom_apply_skills() -> Result<Value, String> {
 /// 用户显式开启不会被开机刷新回退）。
 pub(crate) fn wecom_gate_step() -> Result<bool, String> {
     let show = wecom_skills_should_show();
+    // Same deny-first boundary as the apply command (#517): the auth-gate
+    // refresh also materializes skill files, so a connector flipping
+    // visible here registers first; a refusal fails before exposure.
+    crate::features::marketplace::deny_first_register_connector("wecom", show)?;
     GATE.apply_skills(show)
         .map_err(|e| format!("更新企业微信技能失败: {e}"))?;
     if show {

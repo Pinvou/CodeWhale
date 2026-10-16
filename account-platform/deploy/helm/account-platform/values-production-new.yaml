@@ -63,7 +63,7 @@ oidc:
 
 public:
   portalUrl: https://tokens.example.com
-  paymentCallbackUrl: https://billing.example.com/internal/payment/notifications
+  paymentCallbackUrl: https://tokens.example.com/api/v1/payment-callbacks
 
 observability:
   otlpEndpoint: https://otel.example.com

@@ -23,7 +23,11 @@ try {
   vite = await createServer({ root, configFile: false, appType: 'mpa', logLevel: 'error', plugins: [react()], server: { host: '127.0.0.1', port: 0, watch: null } });
   await vite.listen();
   browser = await puppeteer.launch({ executablePath: chrome, headless: 'new', userDataDir: profile, args: ['--no-sandbox', '--disable-gpu', '--no-first-run'] });
-  page = await browser.newPage(); const errors = []; page.on('pageerror', error => errors.push(error.message)); page.on('dialog', dialog => dialog.accept());
+  page = await browser.newPage(); const errors = []; const duplicateKeys = [];
+  page.on('pageerror', error => errors.push(error.message)); page.on('dialog', dialog => dialog.accept());
+  page.on('console', message => {
+    if (/Encountered two children with the same key/.test(message.text())) duplicateKeys.push(message.text());
+  });
   const url = `http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-f01-ui.html`;
   const fresh = async kind => { errors.length = 0; await page.goto(url); await page.waitForFunction(() => window.f01 && document.body.textContent.includes('account-a')); if (kind === 'admin') { await page.evaluate(() => window.f01.render('admin')); await page.waitForSelector('tbody tr'); } };
   const clickText = async text => { const clicked = await page.evaluate(value => { const button = [...document.querySelectorAll('button')].find(item => item.textContent.trim() === value); if (!button || button.disabled) return false; button.click(); return true; }, text); assert(clicked, `button unavailable: ${text}`); };
@@ -32,8 +36,29 @@ try {
   await caseRun('personal exact int64 balance through production BFF', async () => { await fresh(); await waitText('922,337,203,685,477.5807'); await waitText('-1.0001'); });
   await caseRun('missing balance permission does not query token', async () => { await fresh(); await page.evaluate(() => { globalThis.f01.balanceAllowed = false; globalThis.f01.calls.length = 0; globalThis.f01.switchIdentity(); }); await waitText('account-b'); assert(await page.evaluate(() => !globalThis.f01.calls.some(call => call.url.includes('/me/balance'))), 'unauthorized balance queried'); });
   await caseRun('balance unavailability is visible and never substituted with zero', async () => { await fresh(); await page.evaluate(() => { globalThis.f01.balanceFail = true; globalThis.f01.switchIdentity(); }); await page.waitForSelector('[role=alert]'); assert(await page.evaluate(() => document.querySelector('[role=alert]').textContent.length > 0), 'empty error'); assert(await page.evaluate(() => !document.body.textContent.includes('922,337,203')), 'old balance retained'); });
+  for (const language of ['zh', 'en', 'ja']) for (const malformed of ['missing', 'null']) await caseRun(`${language}: ${malformed} bootstrap context shows recoverable error before child workspaces`, async () => {
+    await fresh(); await page.select('header select', language);
+    await page.evaluate(malformed => { globalThis.f01.badBootstrapContext = malformed; globalThis.f01.calls.length = 0; }, malformed);
+    await clickText(await page.evaluate(() => globalThis.f01.copy().account.refresh));
+    await page.waitForFunction(() => document.querySelector('.ap-login [role=alert]')?.textContent === globalThis.f01.copy().account.requestFailed);
+    assert(await page.evaluate(() => !document.querySelector('.ap-app') && !globalThis.f01.calls.some(call => call.url.includes('/me/balance') || call.url.includes('/me/organizations'))), 'invalid context mounted child or queried financial data');
+    assert(await page.evaluate(() => document.querySelector('.ap-login a')?.textContent === globalThis.f01.copy().account.login), 'existing login recovery missing');
+    await page.evaluate(() => { globalThis.f01.badBootstrapContext = ''; });
+    await clickText(await page.evaluate(() => globalThis.f01.copy().account.retry));
+    await waitText('account-a'); await waitText('922,337,203,685,477.5807');
+    assert(await page.evaluate(() => !globalThis.f01.calls.some(call => /models|catalog/.test(call.url))), 'personal balance unexpectedly required model facilities');
+  });
   await caseRun('retired profile creation cannot complete against a new identity', async () => { await fresh(); await page.evaluate(() => { globalThis.f01.delayedProfile = true; }); const input = await page.$('input[autocomplete=username]'); await input.click({ clickCount: 3 }); await input.type('renamed-a'); const text = await page.evaluate(() => globalThis.f01.copy().account.confirmChange); await clickText(text); await page.waitForFunction(() => typeof globalThis.f01.releaseProfile === 'function'); await page.evaluate(() => globalThis.f01.switchIdentity()); await waitText('account-b'); await page.evaluate(() => globalThis.f01.releaseProfile()); assert(await page.evaluate(() => !globalThis.f01.calls.some(call => call.url.endsWith('/actions/complete'))), 'old workflow continued'); });
   await caseRun('profile completion with failed logout remains recoverable without navigation', async () => { await fresh(); await page.evaluate(() => { globalThis.f01.completedProfile = true; globalThis.f01.logoutFail = true; }); const input = await page.$('input[autocomplete=username]'); await input.click({ clickCount: 3 }); await input.type('renamed-a'); await clickText(await page.evaluate(() => globalThis.f01.copy().account.confirmChange)); await page.waitForSelector('[role=alert]'); assert(page.url() === url, 'navigated despite failed logout'); });
+  for (const language of ['zh', 'en', 'ja']) await caseRun(`${language}: admin bootstrap context failure preserves existing error retry`, async () => {
+    await fresh(); await page.select('header select', language);
+    await page.evaluate(() => { globalThis.f01.badBootstrapContext = 'missing'; globalThis.f01.calls.length = 0; globalThis.f01.render('admin'); });
+    await page.waitForFunction(() => document.querySelector('.adm-shell [role=alert]')?.firstChild?.textContent === globalThis.f01.copy().admin.requestFailed);
+    assert(await page.evaluate(() => !document.querySelector('tbody') && !document.querySelector('.adm-shell nav') && !globalThis.f01.calls.some(call => call.url.includes('/admin/v1/users'))), 'invalid admin bootstrap mounted management workspace');
+    await page.evaluate(() => { globalThis.f01.badBootstrapContext = ''; });
+    await clickText(await page.evaluate(() => globalThis.f01.copy().admin.retry));
+    await page.waitForSelector('tbody tr'); await waitText('account-a');
+  });
   await caseRun('admin users keep enable and disable with no direct delete', async () => { await fresh('admin'); assert(await page.evaluate(() => ![...document.querySelectorAll('button')].some(button => /delete/i.test(button.textContent))), 'delete exposed'); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.accounts.disable)); await waitText('DISABLED'); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.accounts.enable)); await waitText('ACTIVE'); assert(await page.evaluate(() => globalThis.f01.calls.filter(call => call.url.endsWith('/status')).every(call => call.method === 'PATCH')), 'wrong status method'); });
   await caseRun('registration retry and compensation are actual wired actions', async () => { await fresh('admin'); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.userManagement.registrationRepair)); await page.waitForFunction(() => document.body.textContent.includes('REPAIR_REQUIRED')); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.userManagement.retry)); await page.waitForFunction(() => globalThis.f01.calls.some(call => call.url.endsWith('/actions/retry'))); await page.waitForFunction(() => ![...document.querySelectorAll('button')].find(button => button.textContent.trim() === globalThis.f01.copy().admin.userManagement.compensate)?.disabled); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.userManagement.compensate)); await page.waitForFunction(() => globalThis.f01.calls.some(call => call.url.endsWith('/actions/compensate'))); });
   await caseRun('profile queue loads on first navigation and rejects wrong retry ACK', async () => { await fresh('admin'); await page.evaluate(() => { globalThis.f01.badRetry = true; }); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.userManagement.profileRepair)); await waitText('REPAIR_REQUIRED'); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.userManagement.retry)); await page.waitForSelector('[role=alert]'); assert(await page.evaluate(() => document.querySelector('[role=alert]').textContent.length > 0), 'wrong ACK silently accepted'); });
@@ -89,6 +114,21 @@ try {
   await caseRun('registration unknown ACK reads durable recovery and prevents a second new registration', async () => { await desktopGuest(); await fillRegistration(); await page.evaluate(() => { globalThis.f01.registerUnknown = true; }); await page.click('form button:not([type=button])'); await waitText('REPAIR_REQUIRED'); assert(await page.evaluate(() => [...document.querySelectorAll('nav button')].every(button => button.disabled)), 'unknown registration allowed restart'); assert(await page.evaluate(() => globalThis.f01.nativeCalls.filter(call => call[0] === 'register').length === 1), 'duplicate registration sent'); });
   await caseRun('persisted registration repair is recovered before opening a fresh registration', async () => { await fresh(); await page.evaluate(() => { globalThis.f01.authenticated = false; globalThis.f01.registration = { registration_operation_id: globalThis.f01.id, status: 'REPAIR_REQUIRED' }; globalThis.f01.render('desktop'); }); await waitText('REPAIR_REQUIRED'); assert(await page.evaluate(() => globalThis.f01.nativeCalls.filter(call => call[0] === 'register').length === 0), 'new registration used for recovery'); });
   await caseRun('desktop forgot password remains Native prepare/reset rather than plaintext Account API', async () => { await desktopGuest(); await clickText(await page.evaluate(() => globalThis.f01.copy().account.authModes.forgot)); await page.type('input[autocomplete=tel-national]', '13800000000'); const inputs = await page.$$('input[type=password]'); await inputs[0].type('ControlPassword9'); await inputs[1].type('ControlPassword9'); await clickText(await page.evaluate(() => globalThis.f01.copy().account.sendCode)); await page.waitForSelector('[role=dialog]'); await clickText(await page.evaluate(() => globalThis.f01.copy().account.captchaConfirm)); await page.waitForFunction(() => globalThis.f01.nativeCalls.some(call => call[0] === 'sms')); await page.type('input[autocomplete=one-time-code]', '000000'); await page.click('form button:not([type=button])'); await waitText(await page.evaluate(() => globalThis.f01.copy().account.passwordResetComplete)); assert(await page.evaluate(() => globalThis.f01.nativeCalls.some(call => call[0] === 'reset') && !globalThis.f01.calls.some(call => call.url.endsWith('/password-changes') || call.url.endsWith('/password-resets'))), 'plaintext public API used'); });
+  await caseRun('personal workspaces preserve drafts on refresh and isolate new account state without duplicate React keys', async () => {
+    assert(duplicateKeys.length === 0, `duplicate workspace React keys: ${duplicateKeys.length}`);
+    await fresh();
+    const input = await page.$('input[autocomplete=username]');
+    await input.click(); await input.evaluate(node => node.select()); await input.type('draft-for-a');
+    assert(await input.evaluate(node => node.value === 'draft-for-a'), 'profile draft was not entered');
+    await clickText(await page.evaluate(() => globalThis.f01.copy().account.refresh));
+    await page.waitForFunction(() => {
+      const refresh = [...document.querySelectorAll('header button')].find(button => button.textContent.trim() === globalThis.f01.copy().account.refresh);
+      return refresh && !refresh.disabled && document.querySelector('input[autocomplete=username]')?.value === 'draft-for-a';
+    });
+    await page.evaluate(() => globalThis.f01.switchIdentity()); await waitText('account-b');
+    await page.waitForFunction(() => document.querySelector('input[autocomplete=username]')?.value === 'account-b');
+    assert(duplicateKeys.length === 0, `duplicate workspace React keys: ${duplicateKeys.length}`);
+  });
   console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
  } catch (error) {
   console.error(`FAIL after ${passed} PASS: ${error.message}`);

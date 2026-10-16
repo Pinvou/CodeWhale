@@ -32,6 +32,10 @@ pub use self::types::{
     RecentWorkItem, RecentWorkPatch, RuntimeMemorySnapshot, TimedMemoryItem, TopicMutation,
     TopicRead, TurnMemoryCapture, WorkContextFile,
 };
+// Round-40 review: the CLI's `memory profile set` refuses a label the
+// profile normalization would silently empty, by value — a replicated rule
+// copy would drift from the store's own normalizer.
+pub use self::types::profile_label_would_be_wiped;
 
 // ---- 路径访问器（io）----
 pub use self::io::{
@@ -53,6 +57,11 @@ pub use self::io::{
     upsert_recent_work,
 };
 
+// ---- cross-process organize busy marker (io) ----
+// The CLI maps this marker BY VALUE to `memory_organize_busy`; a local copy
+// would let the two surfaces' busy codes drift apart.
+pub use self::io::ORGANIZE_LOCK_BUSY;
+
 // ---- Stored text length cap (io) ----
 // The CLI's `memory add` validation must use the same cap constant as the
 // write side; a local copy would reintroduce a spurious
@@ -65,6 +74,27 @@ pub use self::io::WORK_CONTEXT_TEXT_MAX_CHARS;
 // with this function, so a local copy would drift into false
 // "not materialized" failures.
 pub use self::util::clean_candidate_sentence;
+// The CLI `memory add` predicts the enqueue normalization (and `update`
+// predicts the per-store writer caps) from the original input — the store-
+// authoritative contract tests read the store back as the authority, and
+// these re-exports keep the CLI from hand-mirroring the values (round-41
+// review).
+pub use self::io::{PREFERENCE_TEXT_MAX_CHARS, TIMED_TEXT_MAX_CHARS};
+pub use self::util::clean_text;
+// Round-45 review: the CLI's content-entry lanes that can render into the
+// model-visible block (`memory add`, `update`) refuse text carrying a
+// memory-block marker — the same boundary the organize validator and review
+// sanitizer enforce — instead of storing it into the block verbatim.
+// Deliberately NOT gated: `pending never --reason` — a "never store" reason
+// never renders into the block (render.rs reads only the six rendered
+// sources). Round-46 review fixed this comment, which used to name the
+// never lane and invited "fixing" the CLI to match.
+pub use self::util::contains_memory_block_marker;
+// The CLI `memory add` rejects profile-shaped preference text before
+// enqueueing (the confirm path marks it confirmed but writes nothing), and
+// `memory pending confirm` reports that no-op instead of printing success.
+pub use self::io::confirmed_pending_memory_is_materialized;
+pub use self::types::looks_like_profile_preference_text;
 
 // ---- LLM 后台复盘（llm_review）----
 pub use self::llm_review::review_turn_candidates_with_llm;

@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -113,20 +113,44 @@ function stepRun(job, name) {
   return body.join("\n");
 }
 
+
+
 const goStepName = "Test and vet all Account Platform Go modules";
 const auditPGStepName = "Audit export finite PostgreSQL rollback and persisted boundaries";
 
 function assertFiniteAuditPGSetup(job) {
   const text = job.replaceAll("\r\n", "\n");
-  // This is a single approved ephemeral service, not permission for arbitrary
+  // These are exactly two approved ephemeral services, not permission for arbitrary
   // services, production credentials, public ports or persistent volumes.
   const service = text.match(/^ {4}services:\n[\s\S]*?(?=^ {4}\S|$(?![\s\S]))/m);
   assert.ok(service, "isolated audit PostgreSQL service not found");
   assert.equal(service[0].trimEnd(), [
-    "    services:", "      audit-export-postgres:", "        image: postgres:16-alpine",
-    "        env:", "          POSTGRES_HOST_AUTH_METHOD: trust", "        ports:",
-    "          - 127.0.0.1:5432:5432", "        options: >-", "          --health-cmd pg_isready",
-    "          --health-interval 10s", "          --health-timeout 5s", "          --health-retries 5",
+    "    services:",
+    "      audit-export-postgres:",
+    "        image: postgres:16-alpine",
+    "        env:",
+    "          POSTGRES_HOST_AUTH_METHOD: trust",
+    "        ports:",
+    "          - 127.0.0.1:5432:5432",
+    "        options: >-",
+    "          --health-cmd pg_isready",
+    "          --health-interval 10s",
+    "          --health-timeout 5s",
+    "          --health-retries 5",
+    "      financial-postgres:",
+    "        # Same immutable PostgreSQL image already used by team-relay-hub-test.",
+    "        # Disposable runner only; trust is never a deployment configuration.",
+    "        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea",
+    "        env:",
+    "          POSTGRES_HOST_AUTH_METHOD: trust",
+    "          POSTGRES_DB: postgres",
+    "        ports:",
+    "          - 127.0.0.1:5433:5432",
+    "        options: >-",
+    "          --health-cmd \"pg_isready -U postgres -d postgres\"",
+    "          --health-interval 5s",
+    "          --health-timeout 5s",
+    "          --health-retries 12",
   ].join("\n"));
   assert.doesNotMatch(job, /secrets\.|continue-on-error:/);
   const pg = namedStep(job, auditPGStepName);
@@ -137,7 +161,28 @@ function assertFiniteAuditPGSetup(job) {
     "        env:", "          F17_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable",
     "          F17_TEST_DATABASE_PROFILE: github-actions-service",
   ].join("\n"));
-  assert.doesNotMatch(job.replace(pg, ""), /DATABASE_URL|DATABASE_PROFILE|F17_TEST_/);
+  // F16's two separately bounded suites use only the other ephemeral service.
+  // Validate each whole step before removing it from the audit-only env ban;
+  // arbitrary env, commands, conditions and extra steps remain rejected.
+  let outsidePGSteps = text.replace(pg, "");
+  for (const [name, environment, commands] of [
+    ["Token financial contracts on isolated PostgreSQL", [
+      "PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable",
+    ], ["set -euo pipefail", "python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py", "python3 scripts/test-token-financial-postgres.py"]],
+    ["Account closure contracts on isolated PostgreSQL", [
+      "PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable",
+      "PINVOU_ACCOUNT_CLOSURE_TEST_ARTIFACT_DIR: ${{ runner.temp }}/account-closure-postgres",
+    ], ["set -euo pipefail", "python3 -m unittest discover -s scripts/tests -p test_account_closure_postgres.py", "python3 scripts/test-account-closure-postgres.py"]],
+  ]) {
+    const step = namedStep(text, name);
+    assert.equal(step.trimEnd(), [
+      `      - name: ${name}`, "        shell: bash", "        env:",
+      ...environment.map(value => `          ${value}`), "        run: |",
+      ...commands.map(value => `          ${value}`),
+    ].join("\n"));
+    outsidePGSteps = outsidePGSteps.replace(step, "");
+  }
+  assert.doesNotMatch(outsidePGSteps, /DATABASE_URL|DATABASE_PROFILE|F17_TEST_/);
   const defaultStep = namedStep(job, goStepName);
   const jobEnv = text.match(/^ {4}env:\n[\s\S]*?(?=^ {4}\S|$(?![\s\S]))/m);
   assert.ok(jobEnv);
@@ -153,9 +198,45 @@ function assertFiniteAuditPGSetup(job) {
 const bash = process.platform === "win32" && existsSync("C:/Program Files/Git/bin/bash.exe")
   ? "C:/Program Files/Git/bin/bash.exe" : "bash";
 
+test("container CI uses immutable official cache images without losing either build or runtime gates", () => {
+  const relay = jobBlock("team-relay-hub-test");
+  assert.match(relay, /image: mirror\.gcr\.io\/library\/postgres@sha256:[a-f0-9]{64}/);
+  assert.match(relay, /--health-cmd "pg_isready/);
+  const consoleJob = jobBlock("update-release-console-test");
+  const selected = consoleJob.match(/PINVOU_UPDATE_NODE_IMAGE: (mirror\.gcr\.io\/library\/node@sha256:[a-f0-9]{64})/)[1];
+  const step = namedStep(consoleJob, "发布台容器与 Compose 配置校验");
+  assert.match(step, /if: \$\{\{ matrix\.node-version == '20' \}\}/);
+  const run = stepRun(consoleJob, "发布台容器与 Compose 配置校验");
+  const directory = mkdtempSync(join(tmpdir(), "pinvou-container-routing-"));
+  try {
+    const log = join(directory, "calls");
+    const prefix = 'docker() { printf "%s|%s\\n" "$PINVOU_UPDATE_NODE_IMAGE" "$*" >> "$LOG"; }; sudo() { return 0; }; curl() { return 0; };\n';
+    const result = spawnSync(bash, ["-e", "-c", prefix + run], { cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true, env: { ...process.env, LOG: log, PINVOU_UPDATE_NODE_IMAGE: selected } });
+    assert.equal(result.status, 0, result.stderr);
+    const calls = readFileSync(log, "utf8").trim().split("\n");
+    assert.ok(calls.some(line => line.includes(`build --build-arg NODE_IMAGE=${selected} --file`)), "direct build must receive the selected base");
+    assert.ok(calls.some(line => line.startsWith(selected + "|compose ") && line.includes("up --detach --build")), "Compose rebuild must inherit the same selection");
+    assert.ok(calls.some(line => /mirror\.gcr\.io\/library\/nginx@sha256:[a-f0-9]{64} nginx -t/.test(line)));
+    assert.match(run, /for attempt in \{1\.\.30\}/);
+    assert.match(run, /exit 1/);
+    assert.match(run, /release-console\/healthz/);
+    assert.match(run, /Authorization: Bearer \$PINVOU_UPDATE_ADMIN_TOKEN/);
+    assert.match(consoleJob, /always\(\)[\s\S]*down --volumes --remove-orphans/);
+    assert.doesNotMatch(step, /continue-on-error|\|\| true/);
+    const rejected = spawnSync(bash, ["-e", "-c", 'docker() { return 7; }; sudo() { return 0; }; curl() { return 0; };\n' + run], { cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true, env: { ...process.env, PINVOU_UPDATE_NODE_IMAGE: selected } });
+    assert.equal(rejected.status, 7, "image build failure must fail the gate before later checks");
+  } finally {
+    assert.ok(directory.startsWith(join(tmpdir(), "pinvou-container-routing-")));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("Account Platform changes cannot bypass the Go gate at any PR or queue stage", () => {
   const paths = filterPaths(workflow, "account_platform");
-  for (const path of ["account-platform/**", "scripts/account-platform*", "scripts/check-account-platform*", "scripts/check-token-management-authorization-coverage.mjs", "scripts/tests/token-management-authorization-coverage.test.mjs", ".github/workflows/pr-check.yml", "scripts/tests/pr-check-routing.test.mjs"]) {
+  for (const path of ["scripts/check-account-platform-authorization-coverage.mjs", "scripts/tests/account-platform-authorization-coverage.test.mjs"]) {
+    assert.ok(paths.includes(path), `authorization changes must trigger the Go gate: ${path}`);
+  }
+  for (const path of ["account-platform/**", "scripts/account-platform*", "scripts/check-account-platform*", "scripts/check-token-management-authorization-coverage.mjs", "scripts/tests/token-management-authorization-coverage.test.mjs", "scripts/tests/token-management-phase-coverage.test.mjs", ".github/workflows/pr-check.yml", "scripts/tests/pr-check-routing.test.mjs"]) {
     assert.ok(paths.includes(path), `Go routing must cover ${path}`);
   }
   assert.match(workflow, /account_platform: \$\{\{ steps\.filter\.outputs\.account_platform \}\}/);
@@ -169,9 +250,36 @@ test("Account Platform changes cannot bypass the Go gate at any PR or queue stag
   assert.deepEqual(run.trim().split(/\r?\n/), [
     "node scripts/check-token-management-authorization-coverage.mjs",
     "node --test scripts/tests/token-management-authorization-coverage.test.mjs",
+    "node --test scripts/tests/token-management-phase-coverage.test.mjs",
+  ]);
+  for (const [checkerStatus, formalStatus, phaseStatus, expectedOutput, expectedStatus] of [
+    [7, 0, 0, "checker", 7],
+    [0, 8, 0, "checkerformal", 8],
+    [0, 0, 9, "checkerformalphase", 9],
+    [0, 0, 0, "checkerformalphase", 0],
+  ]) {
+    const fixture = `node() { case "$*" in
+      scripts/check-token-management-authorization-coverage.mjs) printf checker; return ${checkerStatus};;
+      '--test scripts/tests/token-management-authorization-coverage.test.mjs') printf formal; return ${formalStatus};;
+      '--test scripts/tests/token-management-phase-coverage.test.mjs') printf phase; return ${phaseStatus};;
+      *) printf unexpected >&2; return 99;;
+    esac; };\n`;
+    const result = spawnSync(bash, ["-e", "-c", fixture + run], { encoding: "utf8", timeout: 30_000, windowsHide: true });
+    assert.equal(result.status, expectedStatus, result.stderr);
+    assert.equal(result.stdout, expectedOutput);
+  }
+  assert.doesNotMatch(job, /secrets\.|continue-on-error:/);
+});
+
+test("whole Account Platform authorization failures block the CI gate", () => {
+  const job = jobBlock("account-platform-test");
+  const run = stepRun(job, "Verify Account Platform authorization contracts");
+  assert.deepEqual(run.trim().split(/\r?\n/), [
+    "node scripts/check-account-platform-authorization-coverage.mjs",
+    "node --test scripts/tests/account-platform-authorization-coverage.test.mjs",
   ]);
   for (const [checkerStatus, formalStatus, expectedOutput, expectedStatus] of [[7, 0, "checker", 7], [0, 8, "checkerformal", 8], [0, 0, "checkerformal", 0]]) {
-    const fixture = `node() { if [[ "$1" == scripts/check-token-management-authorization-coverage.mjs ]]; then printf checker; return ${checkerStatus}; else printf formal; return ${formalStatus}; fi; };\n`;
+    const fixture = `node() { if [[ "$1" == scripts/check-account-platform-authorization-coverage.mjs ]]; then printf checker; return ${checkerStatus}; else printf formal; return ${formalStatus}; fi; };\n`;
     const result = spawnSync(bash, ["-e", "-c", fixture + run], { encoding: "utf8", timeout: 30_000, windowsHide: true });
     assert.equal(result.status, expectedStatus, result.stderr);
     assert.equal(result.stdout, expectedOutput);
@@ -256,6 +364,10 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
     ["        ports:", "        volumes:\n          - shared-data:/var/lib/postgresql/data\n        ports:"],
     ["F17_TEST_DATABASE_PROFILE: github-actions-service", "F17_TEST_DATABASE_PROFILE: local-owned"],
     ["postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable", "postgres://postgres@remote.invalid:5432/postgres?sslmode=disable"],
+    ["PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable", "PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: postgres://postgres@remote.invalid:5433/postgres?sslmode=disable"],
+    ["PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable", "PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable"],
+    ["python3 scripts/test-token-financial-postgres.py", "python3 scripts/test-token-financial-postgres.py || true"],
+    ["python3 scripts/test-account-closure-postgres.py", "python3 scripts/test-account-closure-postgres.py || true"],
     ["      GOTOOLCHAIN: local", "      F17_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres\n      GOTOOLCHAIN: local"],
     ["        shell: bash", "        env:\n          F17_TEST_DATABASE_PROFILE: github-actions-service\n        shell: bash"],
     ["          POSTGRES_HOST_AUTH_METHOD: trust", "          POSTGRES_PASSWORD: ${{ secrets.DB_PASSWORD }}"],
@@ -285,6 +397,25 @@ test("Keycloak contract gate invokes the existing suite and propagates failure",
   assert.equal(script, "account-platform/deploy/keycloak/test/provision_mobile_auth_test.py");
   const failed = spawnSync(bash, ["-c", "python3() { return 7; }; export -f python3;\n" + run], { encoding: "utf8", timeout: 30_000, windowsHide: true });
   assert.equal(failed.status, 7, "a failing Keycloak contract must fail the gate");
+});
+
+test("Token financial PostgreSQL gate is required and cannot swallow a failed runner", () => {
+  const paths = filterPaths(workflow, "account_platform");
+  assert.ok(paths.includes("scripts/test-token-financial-postgres.py"));
+  assert.ok(paths.includes("scripts/tests/test_token_financial_postgres.py"));
+  const job = jobBlock("account-platform-test");
+  assert.match(job, /image: mirror\.gcr\.io\/library\/postgres@sha256:[a-f0-9]{64}/);
+  const services = job.match(/^    services:\r?\n([\s\S]*?)^    env:/m)?.[1];
+  assert.ok(services, "the disposable PostgreSQL service must exist");
+  assert.deepEqual([...services.matchAll(/^ {6}([a-z][a-z-]*):\r?$/gm)].map(match => match[1]), ["audit-export-postgres", "financial-postgres"]);
+  assert.deepEqual([...services.matchAll(/^ {10}- (.+)\r?$/gm)].map(match => match[1]), ["127.0.0.1:5432:5432", "127.0.0.1:5433:5432"]);
+  assert.match(job, /^          PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: postgres:\/\/postgres@127\.0\.0\.1:5433\/postgres\?sslmode=disable\r?$/m);
+  const run = stepRun(job, "Token financial contracts on isolated PostgreSQL");
+  for (const failedPhase of ["guard", "postgres"]) {
+    const mock = `python3() { case "$*" in *unittest*) ${failedPhase === "guard" ? "return 7" : "return 0"};; *) ${failedPhase === "postgres" ? "return 7" : "return 0"};; esac; }; export -f python3;\n`;
+    const result = spawnSync(bash, ["-c", mock + run], { encoding: "utf8", timeout: 30_000, windowsHide: true });
+    assert.equal(result.status, 7, `${failedPhase} failure must fail the gate: ${result.stderr}`);
+  }
 });
 
 test("named step fixtures exclude later steps and fail closed on missing names", () => {

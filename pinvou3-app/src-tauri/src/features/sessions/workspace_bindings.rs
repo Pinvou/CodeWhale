@@ -177,7 +177,8 @@ fn read_workspace_sidecar(path: &Path) -> Option<SessionWorkspaceSidecar> {
 
 /// Cache backfill for [`SessionStore::session_workspace_binding`]
 /// (insert-conditional, review #463 F4): the sidecar was read OUTSIDE the
-/// cache lock, so a concurrent `rebind_workspace_binding` may have moved the
+/// cache lock, so a concurrent rebind batch — production's mover is
+/// `apply_rebind_workspace_bindings`'s phase-3 write — may have moved the
 /// binding (sidecar first, then cache) while the read was in flight. Blindly
 /// inserting the read result afterwards would resurrect the OLD path in the
 /// cache — and the cache wins resolution until restart, silently undoing the
@@ -332,9 +333,15 @@ impl SessionStore {
     /// The in-memory cache is scanned as well: entries whose sidecar write has
     /// not succeeded yet (legacy migration leftovers) live only there and are
     /// still what resolution reads. Session ids without a durable record are
-    /// skipped — their binding is inert (see
-    /// [`Self::workspace_binding_owner_exists`]).
-    pub(crate) fn workspace_bindings_under(&self, from: &Path) -> Vec<(String, PathBuf)> {
+    /// skipped — their binding is inert (see the private
+    /// `workspace_binding_owner_exists` helper).
+    ///
+    /// `pub` (crate-internal by origin) because the headless `projects rebind`
+    /// lane runs the same to-prefix retry pass the GUI command does: a binding
+    /// already under the destination whose SavedSession metadata still names
+    /// the source is an earlier run's unfinished half, and the CLI has no
+    /// pre-rewrite snapshot to fold it into.
+    pub fn workspace_bindings_under(&self, from: &Path) -> Vec<(String, PathBuf)> {
         // Lossy form (review #463 round-21 SF-1): a sessions-root read
         // failure degrades to the cache-only matches, disclosed via the log.
         // The SNAPSHOT and PLAN callers use `try_workspace_bindings_under`
@@ -431,8 +438,11 @@ impl SessionStore {
     /// round-10 minor 4). Session deletion clears the cache and removes the
     /// session directory (sidecar included), so `false` means the session
     /// died mid-rebind — the report and the event stream must not count a
-    /// dead id as rebound.
-    pub(crate) fn workspace_binding_artifacts_exist(&self, id: &str) -> bool {
+    /// dead id as rebound. `pub`: the headless CLI's rebind consumes the
+    /// same ghost classifier (`classify_absent_record_session` shape) for
+    /// its own report, the same crate-boundary shape as the other widened
+    /// rebind halves.
+    pub fn workspace_binding_artifacts_exist(&self, id: &str) -> bool {
         self.session_workspaces.read().contains_key(id)
             || match std::fs::metadata(self.session_workspace_sidecar_path(id)) {
                 Ok(meta) => meta.is_file(),
@@ -462,6 +472,14 @@ impl SessionStore {
     /// while the in-memory cache is what resolution reads for the rest of this
     /// run — a stale cache entry would keep the old directory in use even
     /// after the sidecar moved. `bound_at` is metadata only and is preserved.
+    ///
+    /// Test-only (round-9 review minor 8): production's mover is
+    /// [`Self::apply_rebind_workspace_bindings`]'s phase-3 write, and keeping this singular variant
+    /// compiled into production under `dead_code = allow` would let it drift
+    /// from the batch's phase-3 write closure unnoticed. The remaining test
+    /// callers use it as a single-entry convenience — it duplicates the
+    /// batch's phase-3 write rather than delegating to it, so a phase-3
+    /// change must be mirrored here by hand.
     ///
     /// Returns whether the durable sidecar is fresh. `false` means the old
     /// path is still on disk, so a restart would resurrect it; the cache is
@@ -761,9 +779,12 @@ impl SessionStore {
         outcome
     }
 
-    /// The two halves back to back (see the doc above
-    /// [`Self::plan_rebind_workspace_bindings`]): the form for callers with no
-    /// other lane to interleave between the sync and the sidecar pass.
+    /// Test-only plural convenience wrapper: production callers drive
+    /// [`Self::plan_rebind_workspace_bindings`] and
+    /// [`Self::apply_rebind_workspace_bindings`] back to back themselves (see
+    /// the doc above [`Self::plan_rebind_workspace_bindings`]); the remaining
+    /// callers are test code pinning the two-phase contract.
+    #[cfg(test)]
     pub fn rebind_workspace_bindings(
         &self,
         from: &Path,
@@ -971,13 +992,31 @@ impl SessionStore {
             // sync aborts the whole run (review #463 round-12 B1 / round-13
             // M1), so a surviving table always matches unmoved sidecars.
             if let Err(error) = self.bind_session_workspace(&id, path.clone()) {
-                // Log hygiene (round-8 should-fix): the unmigrated id reaches
-                // the in-memory table, not the log; the failure list of a
-                // subsequent rebind is the disclosure channel.
-                eprintln!(
-                    "[sessions] migrate workspace binding failed: {}",
-                    error.root_cause()
-                );
+                // Log hygiene (round-8 should-fix + round-9 minor 4): the
+                // unmigrated id reaches the in-memory table, not the log. The
+                // invalid-id arm must not log `error.root_cause()` —
+                // validate_session_id's bail echoes the rejected id, and
+                // session ids are treated as sensitive in logs — so it gets a
+                // stable, non-embedding message; every other failure logs the
+                // root cause, which never carries paths or ids — except the
+                // record-missing bail (`cannot bind workspace: session record
+                // {id} does not exist`), whose root cause embeds the id; the
+                // ghost check at the loop top makes that arm near-unreachable
+                // (it needs the record deleted between the check and the bind).
+                // Ordering constraint (round-13, on record):
+                // `bind_session_workspace` validates the id BEFORE the
+                // record-exists check; hoisting the record check above the
+                // validate would route the record-missing bail (which
+                // embeds the id) into this root_cause log and silently
+                // reintroduce the id leak this arm exists to suppress.
+                if validate_session_id(&id).is_err() {
+                    eprintln!("[sessions] migrate workspace binding skipped an invalid session id");
+                } else {
+                    eprintln!(
+                        "[sessions] migrate workspace binding failed: {}",
+                        error.root_cause()
+                    );
+                }
                 unmigrated.insert(id, path);
             }
         }

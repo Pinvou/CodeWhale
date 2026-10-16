@@ -21,4 +21,4 @@ const fixture = await readFile(new URL('../observability/event-relay-missing.tes
 await mkdir(outputDirectory);
 await writeFile(path.join(outputDirectory, 'event-relay-rules.yaml'), YAML.stringify({ groups }), { flag: 'wx' });
 await writeFile(path.join(outputDirectory, 'event-relay-missing.test.yaml'), fixture, { flag: 'wx' });
-console.log('prepared actual rendered alert rules and five isolated promtool cases');
+console.log('prepared actual rendered alert rules and eight isolated promtool cases (five alerting cases and three non-alert controls)');

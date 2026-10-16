@@ -205,14 +205,18 @@ prepare 程序只从 `TOKEN_RELEASE_DBA_DATABASE_URL` 连接 DBA；`--operation 
 5. **正式环境交接而非提前关闭**：实际目标保持 PRODUCTION/production-new 正式配对。进入实际部署前，由负责人取得并核验 DNS/覆盖新域证书、可信代理链、独立 OIDC/workload 短期签发/轮换与最小权限、同集群 NATS ACL/历史、旧 local 密文的 KMS 兼容或已批准迁移、DBA/备份恢复/HBA 和外部证据公钥来源。旧密文覆盖供应商凭据以及事件流/结果回放、dispatch 等全部使用同一 Secret Provider 的持久数据，逐类验证原 key_id、格式和 AAD 仍可解密/恢复，不能只证明新写入可用或删除历史回放来通过迁移。没有现成 KMS/身份签发条件时报告部署阻断，不临时制造服务或回退 development，但不据此阻塞已验证代码的本地提交。代码按依赖独立功能组由根签署；当前未推送或部署，后续只在适用批准范围及现场前置齐备后执行，真实环境写入仍按第6节受控顺序，首次缺31前置停写/fence/迁移、显式 cap、CAS、关闭短期运维身份后启用本代 writer/Relay、readiness和分级 gates，保留 SAFE 与只读恢复。每一阶段取得真实原始报告、独立复核与受信签名后才使用第五批门禁判断，不以本地 fixtures 填补生产证据。实际执行前重新确认旧写入实例和独占窗口，仍不允许任意 N/N-1 混写。
 6. **完成标准**：逐文件范围自检、B 最终代码/文档独立审核、适用测试/安全/架构/授权/迁移/三语门禁和真实环境缺项表同时闭合。可以单独记录代码实现已交付而环境仍 ENV_PENDING/NOT_DEPLOYED，但整个 APT-137/UI-58 不在必需环境证据缺失时标 DONE。最终报告列明每个不可变候选与相同生产 blob 的继承范围，不把不同运行或编排错误说成一次全量 exit 0。任何超出既有部署方案的领域问题返回其所有者，不为收尾放宽安全边界。
 
-### 9.1 已实现的持续验证入口
+### 9.1 既有隔离验证入口与当前交付边界
 
-- `account-platform-test` 保留原 Go/PG/容量/浏览器/镜像/依赖审计，追加专属角色步骤，默认不向其他包注入 release 测试环境。该步骤命名/标记本次 PostgreSQL 容器，使用 loopback 5433 和独立空集群，三 CLI 从候选源码外部构建后分别运行两个具名测试并拒绝任何 SKIP；EXIT 与 always 清理只操作记录的精确容器 id/label。真实 Secret/HBA 验收不由该 trust fixture 代替。
+本波恢复下述原 G6 nginx 与浏览器驱动及其 helper，保留原 guard 和代码字节。当前 head 尚未执行这些机制验收，不能把 §9.2 的历史固定输入数据计作本波重跑。当前工作流并无专属 G6 nginx/browser job；驱动可按受控隔离命令运行，专属 CI 接线及完整 E2E 保持未完成，发布前仍须实际命中用例、记录失败/跳过并完成适用门禁。
+
+- 原 G6 `account-platform-test` 方案在原 Go/PG/容量/浏览器/镜像/依赖审计之外追加专属角色步骤，默认不向其他包注入 release 测试环境；当前 head 未接入该专属步骤，以下是原隔离验收要求，不是当前工作流已运行的声明。该步骤命名/标记本次 PostgreSQL 容器，使用 loopback 5433 和独立空集群，三 CLI 从候选源码外部构建后分别运行两个具名测试并拒绝任何 SKIP；EXIT 与 always 清理只操作记录的精确容器 id/label。真实 Secret/HBA 验收不由该 trust fixture 代替。
 - `node scripts/account-platform-render-nginx-fixtures.mjs --output <新建空绝对目录> --runtime-root <nginx内可见的绝对POSIX目录>` 只读取公开 edge example，渲染两环境×三 upstream 模式六份配置及固定 fixture marker；目录非空拒绝，绝不覆盖站点配置。测试使用生成的自签证书，不加载现场证书私钥。所有 nginx 临时文件路径均落入本次目录，使非 root、只读容器可运行。
 - `python3 account-platform/test/deployment/nginx-loopback-test.py --root <同一fixture目录> --profile cloud_uat-loopback|cloud_uat-encrypted_tunnel [--nginx <受信nginx二进制>]` 只接受已标记的 fixture，替换为本机独占高端口并启动实际 nginx/mock。`--exercise-cleanup failure|cancel` 在 nginx 确实 ready 后触发已知失败/取消；预期非零退出、JSON `FAIL`，但两个 `owned_*_stopped` 必须 true，并精确匹配 `exercise_mode` 与 ready 后的 `exercise_reached=true`；cancel 由 `os.kill` 发送实际 SIGTERM，已注册 handler 才能设置 `sigterm_received=true`，前置失败或忽略信号不能冒充取消清理通过。正常矩阵需要 JSON PASS、零隧道伪造、两个 owned stopped true。测试控制选项不是任何生产工具的放宽入口。
-- CI 用 `test/deployment/nginx.Dockerfile` 构建专属旧版 nginx 1.18+Python 测试镜像；只在依赖构建时取公开软件包，运行时 `--network none`、只读根、非 root 用户、drop ALL capabilities，只有本次 fixture 可写和 loopback mock；不把该历史版本镜像部署到站点。六份 `-t`、两个正常响应矩阵、两个失败/取消清理矩阵分别留证。尚未执行远端 GitHub Actions 时只记录接线实现与根的隔离实测，不能声称 CI 已绿。
+- 原 G6 CI 方案使用已恢复的 `test/deployment/nginx.Dockerfile` 构建专属旧版 nginx 1.18+Python 测试镜像；当前 head 的专属 job 尚未接入，以下为已有隔离驱动要求；只在依赖构建时取公开软件包，运行时 `--network none`、只读根、非 root 用户、drop ALL capabilities，只有本次 fixture 可写和 loopback mock；不把该历史版本镜像部署到站点。六份 `-t`、两个正常响应矩阵、两个失败/取消清理矩阵分别留证。尚未执行远端 GitHub Actions 时只记录接线实现与根的隔离实测，不能声称 CI 已绿。
 
-### 9.2 精确输入验证、测试依赖变体与未完成环境
+### 9.2 历史固定输入验证、测试依赖变体与未完成环境
+
+以下数字仅属于所列原候选 SHA、依赖变体和隔离环境；本波恢复源文件不继承“已在当前 head 实际运行”的结论。
 
 G6 精确五代码候选 `e3bf4dc40b7b4995614d02b4ac40c3e7bebcd2bc` 与 `e371d69e58fe9e5831bf0e19a478f88bf80235e7` 对应输入无差异；十五文件冻结候选 `bcb25dcb9a31b824d1210009c7d78f15437e8560` 全账户 Node 434/434 PASS、0 SKIP（47.714 秒、exit 0）；任务覆盖 138 tasks/3 remediations/31 incomplete/352 completed、授权 339 HTTP/27 tasks/6 events/18 CLI 和 architecture 均 PASS。代码及隔离门禁已验证，B 已静态 PASS，最终证据文档复核后签署；不是远端 CI 或现场部署通过。相同源码与预构建三个原 CLI 的两项专属 PG 实测 16.86/64.31 秒，合计 82.777 秒、0 SKIP、exit 0，固定角色/fixture 库残留 0/0；真实 Helm 4.2.3 四 profile lint/render checker、Compose config/checker 和三个新增服务镜像构建通过。
 

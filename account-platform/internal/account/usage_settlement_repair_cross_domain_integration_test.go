@@ -163,8 +163,8 @@ func TestUsageSettlementRepairCrossDomainActivationPostgresIntegration(t *testin
 	if err := repository.requireApprovalAdvancement(ctx, policy); !errors.Is(err, ErrBillingGovernanceInactive) {
 		t.Fatalf("inactive cross-domain advancement: %v", err)
 	}
-	requester := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "usage-repair-activation-requester")
-	approver := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "usage-repair-activation-approver")
+	requester := seedLedgerApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "usage-repair-activation-requester")
+	approver := seedLedgerApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "usage-repair-activation-approver")
 	requesterPrincipal, approverPrincipal := approvalIntegrationPrincipal(requester), approvalIntegrationPrincipal(approver)
 	createDraft := ApprovalDraft{
 		CommandType: policy.CommandType, IdempotencyKey: "usage-repair-activation-create",
@@ -242,8 +242,8 @@ WHERE command_type='USAGE_SETTLEMENT_REPAIR' AND policy_version=1 AND snapshot_s
 	if controlErr != nil || control.Mode != "PROOF_REQUIRED" {
 		t.Fatal("official owned Account control must be PROOF_REQUIRED")
 	}
-	requester = seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "usage-repair-chain-requester")
-	approver = seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "usage-repair-chain-approver")
+	requester = seedLedgerApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "usage-repair-chain-requester")
+	approver = seedLedgerApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "usage-repair-chain-approver")
 	requesterPrincipal, approverPrincipal = approvalIntegrationPrincipal(requester), approvalIntegrationPrincipal(approver)
 	draft := ApprovalDraft{
 		CommandType: policy.CommandType, IdempotencyKey: "usage-repair-cross-domain-chain",

@@ -70,3 +70,11 @@ test('performance rejects negative durations, utilization and timing segments', 
   const segment = evidence(now); segment.timing_segments.platform_ms = -1;
   assert.throws(() => validateEvidence(policy, segment, now, provenance), /timing segment/);
 });
+
+test('performance rejects impossible or non-RFC3339 generation timestamps', () => {
+  const now = Date.parse('2026-03-02T00:00:00Z');
+  for (const invalid of ['2026-02-30T00:00:00Z', 'March 2, 2026', '2026-03-02']) {
+    const candidate = evidence(now); candidate.generated_at = invalid;
+    assert.throws(() => validateEvidence(policy, candidate, now, {expectedReleaseSHA256:'a'.repeat(64), pageTraceSHA256:'d'.repeat(64), mutationTraceSHA256:'e'.repeat(64)}), /RFC3339/);
+  }
+});

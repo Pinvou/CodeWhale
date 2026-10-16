@@ -22,7 +22,7 @@ test('audit export is server-generated, recently authenticated, redacted by defa
   assert.match(service, /PermissionPlatformAuditPIIExport/);
   assert.match(service, /subject_[\s\S]*hmacHex/);
   assert.match(roles, /PLATFORM_AUDIT_PII_EXPORT[\s\S]*ExpiresAt[\s\S]*24\*time\.Hour/);
-  assert.match(contract, /"\/account\/admin\/v1\/audit-exports"\s*:/);
+  assert.match(contract, /"\/admin\/v1\/audit-exports"\s*:/);
   assert.doesNotMatch(ui, /function exportAuditCSV/);
 });
 
@@ -58,4 +58,17 @@ test('audit export download tickets expire in fifteen minutes and are consumed w
   assert.match(portal, /audit-exports/);
   assert.match(deploy, /AUDIT_EXPORT_MASTER_KEY_BASE64/);
   assert.match(runner, /AUDIT_EXPORT_MASTER_KEY_BASE64/);
+});
+
+test('audit export overlay preserves the existing migrator service and private configuration inheritance', async () => {
+ const [base, overlay] = await Promise.all([read('deploy/production/compose.personal.yaml'),read('deploy/production/compose.audit-export.yaml')]);
+ assert.match(overlay,/^name: pinvou-personal$/m);
+ assert.match(base,/^  account-migrate:\n[\s\S]*?^    env_file:\n[\s\S]*?ACCOUNT_MIGRATION_PRIVATE_ENV_FILE/m);
+ assert.match(overlay,/^  account-migrate:\n    image: \$\{MIGRATE_IMAGE:/m);
+ assert.doesNotMatch(overlay,/^  migrate-account:/m);
+ assert.match(overlay,/^  account-service:\n    image: \$\{ACCOUNT_SERVICE_IMAGE:/m);
+ assert.match(overlay,/^  token-portal:\n    image: \$\{TOKEN_PORTAL_IMAGE:/m);
+ // The overlay changes images only: it cannot replace the base's private
+ // DSN/pgpass, network or authority configuration with an empty new service.
+ assert.doesNotMatch(overlay,/^    (?:env_file|networks|volumes|command):/m);
 });

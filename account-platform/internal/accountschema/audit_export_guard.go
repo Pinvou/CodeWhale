@@ -33,7 +33,7 @@ func DownOne(ctx context.Context, conn *pgx.Conn, input []migrations.Migration) 
 	if err != nil {
 		return err
 	}
-	return migrations.DownOneWithGuard(ctx, conn, ordered, rollbackDownGuard)
+	return migrations.DownOneWithHooks(ctx, conn, ordered, migrations.DownHooks{Guard: rollbackDownGuard, ApplySQL: applyAccountRollbackSQL})
 }
 
 func rollbackDownGuard(ctx context.Context, tx pgx.Tx, m migrations.Migration) error {

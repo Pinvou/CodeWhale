@@ -23,12 +23,15 @@ func TestPrivateF13OwnerIntegration(t *testing.T) {
 	if e != nil {
 		t.Fatal("isolated connect")
 	}
-	var dd, user string
-	var port, actors int
-	e = admin.QueryRow(ctx, `SELECT current_setting('data_directory'),session_user,current_setting('port')::int,(SELECT count(*) FROM pg_roles WHERE rolname !~ '^pg_' AND rolname<>'pinvou_wave_test')`).Scan(&dd, &user, &port, &actors)
-	admin.Close(ctx)
-	if e != nil || port != 55504 || user != "pinvou_wave_test" || actors != 0 || strings.ReplaceAll(dd, "\\", "/") != "D:/Projects/pinvou3-account-functional/.cache/parallel-runtimes/f04/data" {
-		t.Fatal("owner/port/datadir/absence guard")
+	// The URL must explicitly select an isolated superuser session with no
+	// existing deployment actors; original UUID/cleanup guards remain below.
+	var actors int
+	var isolatedOwner bool
+	e = admin.QueryRow(ctx, `SELECT current_user=session_user AND (SELECT rolsuper FROM pg_roles WHERE rolname=session_user),
+ (SELECT count(*) FROM pg_roles WHERE rolname !~ '^pg_' AND rolname<>session_user)`).Scan(&isolatedOwner, &actors)
+	_ = admin.Close(ctx)
+	if e != nil || !isolatedOwner || actors != 0 {
+		t.Fatal("explicit isolated owner and exclusive actor guard")
 	}
 	f := newStageFixture(t, ctx, raw)
 	_ = f

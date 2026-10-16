@@ -26,16 +26,12 @@ import { formatSessionDate, localDateKey, formatDateGroupLabel } from '../shared
 import { groupSessionsWithProjects, resolveSessionProjectId, needsAddFolderConfirm, unavailableProjectRootPaths, WORKSPACE_KIND_BOUND } from '../features/projects/projectGrouping.js';
 import { ProjectGroupHeader } from '../features/projects/ProjectGroupHeader.jsx';
 import { classifyRebindError, mergeRebindCarryoverIds } from '../features/projects/rebindErrors.js';
-import { runSessionBatch } from '../shared/session-management.js';
 const LazyAccountPlatformPopover = lazy(() => VIEW_LOADERS.accountPlatformPopover().then(module => ({ default: module.AccountPlatformPopover })));
 import { AccountPlatformDesktopClient } from '../features/account-platform/desktop-client.js';
 import { can, isWeb } from '../shared/platform.js';
 import { errorCode, localizedErrorMessage } from '../shared/user-facing-error.js';
 import { installGlobalMarkdownRenderer } from '../shared/markdown-renderer.js';
-import {
-  acquireNativeSurfaceTransitionHide,
-  BrowserView,
-} from '../features/browser/BrowserView.jsx';
+import { acquireNativeSurfaceTransitionHide } from '../features/browser/native-surface-coordinator.js';
 import {
   createNativeSurfaceTransitionGate,
   settleBrowserUiPublicationAfterCommit,
@@ -76,6 +72,7 @@ import {
 } from '../platform/tauri/client.js';
 import { listAcpSessions } from '../features/codex/acpClient.js';
 import { revealStartupWindow } from '../platform/tauri/startup-window.js';
+import { commitPendingUpdateReady } from '../platform/tauri/update-readiness.js';
 
 // 定时任务创建与运行链路已恢复，展示入口并允许自动跳转。
 const SCHEDULED_TASKS_ENTRY_ENABLED = true;
@@ -108,6 +105,7 @@ const LazySettingsView = lazy(() => VIEW_LOADERS.settings().then(m => ({ default
 const LazyToolStoreView = lazy(() => VIEW_LOADERS.toolStore().then(m => ({ default: m.ToolStoreView })));
 const LazyCardPoolView = lazy(() => VIEW_LOADERS.cardpool().then(m => ({ default: m.CardPoolView })));
 const LazyScheduledTasksView = lazy(() => VIEW_LOADERS.scheduled().then(m => ({ default: m.ScheduledTasksView })));
+const LazyBrowserView = lazy(() => VIEW_LOADERS.browser().then(m => ({ default: m.BrowserView })));
 const LazyKnowledgeView = lazy(() => VIEW_LOADERS.knowledge().then(m => ({ default: m.KnowledgeView })));
 const LazyModelStoreView = lazy(() => VIEW_LOADERS.modelStore().then(m => ({ default: m.ModelStoreView })));
 const LazyMonitorView = lazy(() => VIEW_LOADERS.monitor().then(m => ({ default: m.MonitorView })));
@@ -264,6 +262,10 @@ const NAV_PREFETCH = {
           window.__PINVOU_STARTUP__.mark('react:startup_window_revealed');
           window.__PINVOU_STARTUP__.flush();
         });
+        // File replacement alone does not prove the new application can render.
+        // Queue this best-effort commit after the existing window-reveal command
+        // so update bookkeeping cannot delay Linux's first visible frame.
+        void commitPendingUpdateReady();
       }, []);
       useEffect(() => {
         window.__PINVOU_STARTUP__.mark('react:first_effect');
@@ -471,7 +473,7 @@ const NAV_PREFETCH = {
         const sessionCommandToken = tracksCommandEcho
           ? browserSessionCommandEchoGuard.begin(
             options.sessionTarget,
-            bridge.activeSessionId || null,
+            bsRef.current?.activeSessionId || null,
           )
           : null;
         if (tracksSession) browserSessionTransitionPendingRef.current += 1;
@@ -624,6 +626,10 @@ const NAV_PREFETCH = {
         if (!browserNativeDisplayAvailable || !requestedSessionId || !browserPaneAllowed) return;
         setBrowserPaneStates((current) => activateBrowserPane(current, requestedSessionId));
         if (browserActive) return;
+        // Hide the lazy chunk fetch inside the Rust workspace preparation. A
+        // failed prefetch remains non-blocking; React.lazy owns the visible
+        // retry/error boundary when the view actually mounts.
+        prefetchView('browser');
         const attempt = browserOpenAttemptSequenceRef.current + 1;
         browserOpenAttemptSequenceRef.current = attempt;
         browserOpenAttemptsRef.current[requestedSessionId] = attempt;
@@ -1747,7 +1753,7 @@ const NAV_PREFETCH = {
       // 日期组展开状态:未点过的组按默认值走(今天展开、以往折叠),点过后记住用户选择
       const [dateGroupOpen, setDateGroupOpen] = useState({});
       // Code-style sidebar: enabled by default in code mode (folder grouping +
-      // collapsed primary nav); the 全部/代码 pill switches style explicitly.
+      // collapsed primary nav); the 全部/项目 pill switches style explicitly.
       // null means the user never picked: standard list outside code mode, code
       // style inside code mode (the long-standing default). Once picked, the
       // choice is persisted and applies in every mode.
@@ -1759,7 +1765,7 @@ const NAV_PREFETCH = {
           return null;
         }
       });
-      // The 全部/代码 pill drives both state and the persisted choice in one place.
+      // The 全部/项目 pill drives both state and the persisted choice in one place.
       const setSidebarCodeStylePersisted = useCallback((next) => {
         setSidebarCodeStyle(next);
         try {
@@ -1772,7 +1778,7 @@ const NAV_PREFETCH = {
       const [folderGroupOpen, setFolderGroupOpen] = useState({});
       // Primary-nav collapse is a global manual toggle, shared by every mode: nothing
       // auto-collapses it and no mode switch resets it; the choice persists per window
-      // like the 全部/代码 style pill above.
+      // like the 全部/项目 style pill above.
       const [sidebarNavCollapsed, setSidebarNavCollapsed] = useState(() => {
         try {
           return localStorage.getItem('pinvou_sidebar_nav_collapsed') === '1';
@@ -1793,7 +1799,7 @@ const NAV_PREFETCH = {
       // code sessions; only explicitly switching back to work, or opening a normal
       // chat session, exits it.
       const [codeModeOn, setCodeModeOn] = useState(false);
-      // 任务列表的展示形态由 全部/代码 胶囊决定;未显式选择(null)时普通模式
+      // 任务列表的展示形态由 全部/项目 胶囊决定;未显式选择(null)时普通模式
       // 默认「全部」标准列表、code 模式默认 code 样式(沿用既有默认)。
       const sidebarCodeListActive = sidebarCodeStyle === null ? codeModeOn : sidebarCodeStyle === 'code';
       // code 形态下「代码会话」筛选等同「全部」、「定时任务」恒为空(菜单已隐藏这两项);
@@ -1882,6 +1888,15 @@ const NAV_PREFETCH = {
         setSidebarWidth(w);
       };
       const beginSidebarResize = useCallback((event) => {
+        // Primary button only, mirroring ResizableSidePanel's splitter: a middle
+        // press falls through to the browser's middle-click autoscroll instead
+        // of starting a resize session.
+        if (event.button != null && event.button !== 0) return;
+        // Cancel the compatibility mousedown: left uncanceled it moves focus to
+        // the strip, blurring the composer mid-IME and letting later arrow keys
+        // run keyboardSidebarResize instead of moving the caret — as
+        // ResizableSidePanel does. Canceling pointerdown does not affect
+        // click/dblclick synthesis, so double-click reset is unaffected.
         event.preventDefault();
         const handle = event.currentTarget;
         const startX = event.clientX;
@@ -2152,7 +2167,11 @@ const NAV_PREFETCH = {
           if (beforeNavigate) beforeNavigate();
           if (nextView === 'chat') setCodeModeOn(false);
           setCurrentView(nextView);
-          if (bs && bs.scheduledRunContext) setActiveChat(bridge.activeSessionId || null);
+          // exitScheduledRunChat may have moved activeSessionId (return
+          // session or draft); read the latest ref after the await rather
+          // than the pre-await snapshot.
+          const bsAfterExit = bsRef.current;
+          if (bsAfterExit && bsAfterExit.scheduledRunContext) setActiveChat(bsAfterExit.activeSessionId || null);
           closeMobileSidebar();
           return true;
         }, {
@@ -2351,16 +2370,16 @@ const NAV_PREFETCH = {
           // user's chosen Plan — surfacing as "switch back from code to work
           // and the approval mode reverts to Yolo". Keep the original
           // session; ChatView shows its measured mode after mounting.
-          const scopeKey = bridge.activeSessionId
-            ? createPinvouModeScopeKey(bridge.activeSessionId)
+          const scopeKey = bs?.activeSessionId
+            ? createPinvouModeScopeKey(bs.activeSessionId)
             : undefined;
           savePinvouModeState({ mode: 'work' }, undefined, scopeKey);
-          if (bridge.available && !bridge.activeSessionId) bridge.sessions.createNewSession();
+          if (bridge.available && !bs?.activeSessionId) bridge.sessions.createNewSession();
           // While on the code page the original work session's mode may have
           // changed (the code page has its own chain), so pull a fresh value
           // before switching back — ChatView must not mount with a stale
           // modeState.
-          if (bridge.available && bridge.activeSessionId) {
+          if (bridge.available && bs?.activeSessionId) {
             bridge.interaction.syncModeState().catch(() => {});
           }
           setCurrentView('chat');
@@ -3056,7 +3075,8 @@ const NAV_PREFETCH = {
       }
 
       // 对话管理页批量操作:按会话类型分流并等待全部结果,避免未执行完成就误报成功。
-      async function handleBatchArchiveSessions(ids) {
+      // 批量执行器由已加载的 SearchView 传入,不让低频操作进入启动模块图。
+      async function handleBatchArchiveSessions(ids, runSessionBatch) {
         if (!bridge.available || !ids || !ids.length) return;
         const result = await runSessionBatch(sessionRowsForIds(ids), 'archive', {
           archive: id => bridge.sessions.archiveSession(id),
@@ -3071,7 +3091,7 @@ const NAV_PREFETCH = {
         return result;
       }
 
-      async function handleBatchDeleteSessions(ids) {
+      async function handleBatchDeleteSessions(ids, runSessionBatch) {
         if (!bridge.available || !ids || !ids.length) return;
         const result = await runSessionBatch(sessionRowsForIds(ids), 'delete', {
           delete: id => bridge.sessions.deleteSession(id),
@@ -3084,7 +3104,7 @@ const NAV_PREFETCH = {
         return result;
       }
 
-      async function handleBatchRestoreArchived(ids) {
+      async function handleBatchRestoreArchived(ids, runSessionBatch) {
         if (!bridge.available || !ids || !ids.length) return;
         const result = await runSessionBatch(ids.map(id => ({ id })), 'restore', {
           restore: id => bridge.sessions.restoreArchivedSession(id),
@@ -3933,7 +3953,7 @@ const NAV_PREFETCH = {
                 <div data-testid="sidebar-recents" className="pt-5 pb-2 max-sm:pt-2">
                   <div ref={taskFilterRef} className="relative mb-2">
                     {/* 第一行:「任务列表」标题 + 查看全部/筛选按钮;
-                        第二行:全部/代码 胶囊 + 一键折叠(分组)按钮。
+                        第二行:全部/项目 胶囊 + 一键折叠(分组)按钮。
                         胶囊选择任务列表展示形态(标准列表 / code 样式按文件夹分组),
                         与是否处于 code 模式无关;折叠按钮切换下方任务分组
                         (日期组 / 文件夹组)的整体展开状态。 */}
@@ -3968,7 +3988,7 @@ const NAV_PREFETCH = {
                         </button>
                         </span>
                       </div>
-                      {/* 全部/代码 胶囊 + 一键折叠(分组)按钮:位于「任务列表」标题下方。
+                      {/* 全部/项目 胶囊 + 一键折叠(分组)按钮:位于「任务列表」标题下方。
                           flex-wrap 兜底:ja 等语言在 220px 最小宽度下此行已无富余
                           (实测正好占满),字体渲染偏宽的环境让折叠按钮换行而非溢出。 */}
                       <div className="flex flex-wrap items-center justify-between gap-2 px-1">
@@ -4091,8 +4111,8 @@ const NAV_PREFETCH = {
                                   // bridge.projects 仅桌面存在:web 上目录组不渲染
                                   // 死入口(点击无反馈违反显式不支持约定)。
                                   onConvert={bridge.projects && group.kind === 'folder' ? (name) => handleConvertFolderToProject(group.path, name) : undefined}
-                                  onRename={group.kind === 'project' ? (name) => handleRenameProject(group.projectId, name) : undefined}
-                                  onDelete={group.kind === 'project' ? () => handleDeleteProject(group.projectId) : undefined}
+                                  onRename={bridge.projects && group.kind === 'project' ? (name) => handleRenameProject(group.projectId, name) : undefined}
+                                  onDelete={bridge.projects && group.kind === 'project' ? () => handleDeleteProject(group.projectId) : undefined}
                                   onDropSession={bridge.projects && group.kind === 'project' ? (sessionId) => handleDropSessionOnProject(sessionId, group.projectId) : undefined}
                                   unavailableRoots={group.kind === 'project' ? unavailableProjectRootPaths(group.roots) : []}
                                   onRebind={bridge.projects && group.kind === 'project' ? (rootPath, headerEl) => startRebindWorkspace(rootPath, headerEl) : undefined}
@@ -4253,7 +4273,11 @@ const NAV_PREFETCH = {
                 onPointerDown={beginSidebarResize}
                 onDoubleClick={resetSidebarWidth}
                 onKeyDown={keyboardSidebarResize}
-                className={`absolute top-0 bottom-0 right-0 w-[6px] border-0 cursor-col-resize z-50 touch-none transition-colors focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[#0B57D0] ${
+                // h-full must stay: Tailwind preflight pins every <hr> to
+                // height:0, which would turn the 6px strip into a zero-area
+                // element that pointer hit-testing can never reach (the
+                // top-0/bottom-0 stretch only applies when height is auto).
+                className={`absolute top-0 bottom-0 right-0 h-full w-[6px] border-0 cursor-col-resize z-50 touch-none transition-colors focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[#0B57D0] ${
                   sidebarResizing
                     ? 'bg-[#0B57D0]/40'
                     : (activeTheme === 'dark' ? 'hover:bg-[#A8C7FA]/30' : 'hover:bg-[#0B57D0]/25')
@@ -4327,7 +4351,7 @@ const NAV_PREFETCH = {
             )}
             {teamRelayAvailable && currentView === 'teamRelay' && <LazyTeamRelayView theme={activeTheme} t={t} onThemeChange={handleSetTheme} onUseAgent={handleTeamRelayUseAgent} onLoadCodeAgents={loadTeamRelayCodeAgents} />}
             {isCompactShell && browserActive && currentView === 'browser' && (
-              <BrowserView
+              <LazyBrowserView
                 key={browserViewSessionId}
                 theme={activeTheme}
                 t={t}
@@ -4547,14 +4571,18 @@ const NAV_PREFETCH = {
                 </div>
                 <div className="min-h-0 flex-1">
                   {browserActive ? (
-                    <BrowserView
-                      key={browserViewSessionId}
-                      theme={activeTheme}
-                      t={t}
-                      sessionId={browserViewSessionId}
-                      nativeSurfaceSuspended={browserSurfaceSuspended}
-                      ownershipSlot={browserOwnershipSlot}
-                    />
+                    <ViewErrorBoundary t={t}>
+                      <Suspense fallback={null}>
+                        <LazyBrowserView
+                          key={browserViewSessionId}
+                          theme={activeTheme}
+                          t={t}
+                          sessionId={browserViewSessionId}
+                          nativeSurfaceSuspended={browserSurfaceSuspended}
+                          ownershipSlot={browserOwnershipSlot}
+                        />
+                      </Suspense>
+                    </ViewErrorBoundary>
                   ) : (
                     <div
                       className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center text-[13px]"

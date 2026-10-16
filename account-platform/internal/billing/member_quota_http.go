@@ -120,6 +120,8 @@ func (s *Service) revokeMemberQuotaGrant(w http.ResponseWriter, r *http.Request)
 
 func memberQuotaErrorCode(err error) string {
 	switch {
+	case errors.Is(err, ErrWalletUnavailable):
+		return "WALLET_UNAVAILABLE"
 	case errors.Is(err, ErrInsufficientComponentCapacity):
 		return "INSUFFICIENT_COMPONENT_CAPACITY"
 	case errors.Is(err, ErrIdempotencyConflict):

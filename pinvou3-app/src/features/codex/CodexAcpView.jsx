@@ -58,6 +58,7 @@ import {
   appendNativeSystemItem,
   createNativeLane,
   hydrateNativeLane,
+  refreshNativeTurnTimeline,
   nativeModelServiceContext,
   projectNativeLane,
   removeLocalUserMessage,
@@ -90,14 +91,14 @@ import {
   RewindUndoChip,
   RewindUndoConfirmDialog,
 } from './RewindChip.jsx';
-import { ModalDialogShell } from './ModalDialogShell.jsx';
+import { ModalShell } from '../../components/ModalShell.jsx';
 import {
   ConversationActivityIndicator,
   ConversationMarkdown,
   ConversationStatusBadge,
   ConversationTimeline,
-  useConversationSecondClock,
 } from '../conversation/ConversationTimeline.jsx';
+import { useConversationSecondClock } from '../../hooks/useConversationSecondClock.js';
 import {
   measureConversationScrollGeometry,
   startConversationBottomFollower,
@@ -133,7 +134,8 @@ import {
 } from '../conversation/conversation-model.js';
 import { QuestionChoiceCard } from '../conversation/QuestionChoiceCard.jsx';
 import { buildUserInputAnswers, normalizeUserInputQuestions } from '../../shared/user-input-shared.js';
-import { PlanLayer, ToolCard, cardBoxCls, cardBtnCls } from '../tools/tool-renderers.jsx';
+import { PlanLayer, ToolCard, cardBoxCls } from '../tools/tool-renderers.jsx';
+import { cardBtnCls } from '../../shared/card-buttons.mjs';
 import { YoloConfirmCard } from '../../shared/yolo-confirm-card.jsx';
 import { notifyChatRoundCommitted } from '../tools/tool-events.js';
 import { AttachmentChips } from '../attachments/AttachmentChips.jsx';
@@ -261,19 +263,19 @@ function BranchSelector({ copy, branches, disabled, busy, menuOpen, onToggle, on
 // open (conditional rendering at the call site).
 function BranchDialogShell({ copy, busy, testid, labelledBy, initialFocusRef, onCancel, children }) {
   return (
-    <ModalDialogShell
+    <ModalShell
       testid={testid}
       zIndexClass="z-[120]"
       backdropLabel={copy.branchSwitchCancel}
       backdropClass="absolute inset-0 cursor-default bg-black/45 backdrop-blur-[14px] animate-in fade-in duration-200"
-      panelClass="relative w-[min(400px,calc(100vw-24px))] rounded-[24px] p-6 bg-white text-[#1F1F1F] outline-none dark:bg-[#1E1F20] dark:text-[#E8EAED]"
+      panelClass="w-[min(400px,calc(100vw-24px))] rounded-[24px] p-6 bg-white text-[#1F1F1F] outline-none dark:bg-[#1E1F20] dark:text-[#E8EAED]"
       busy={busy}
       initialFocusRef={initialFocusRef}
       labelledBy={labelledBy}
       onCancel={onCancel}
     >
       {children}
-    </ModalDialogShell>
+    </ModalShell>
   );
 }
 
@@ -690,7 +692,7 @@ export function CodexAcpView({
   const [error, setError] = useState('');
   const showError = (nextError) => {
     console.error('Codex operation failed:', nextError);
-    setError(acpErrorMessage(nextError, codexCopy, { allowRaw: !isWeb }));
+    setError(acpErrorMessage(nextError, codexCopy, { allowRaw: isWeb ? false : undefined }));
   };
   const [respondingSessionId, setRespondingSessionId] = useState(null);
   const responding = Boolean(activeId && respondingSessionId === activeId);
@@ -978,6 +980,28 @@ export function CodexAcpView({
   // session 缓存在 lane Map 里（后台会话的 turn 也能继续推进，切回不丢流式内容）。
   const isNativeAgent = activeAgentId === 'pinvou';
   const nativeLanesRef = useRef(new Map());
+  const nativeTimelineMountedRef = useRef(true);
+  useEffect(() => {
+    nativeTimelineMountedRef.current = true;
+    const unsubscribe = bridge.sessions?.onSessionDeleted?.(id => {
+      nativeSessionIdsRef.current.delete(id);
+      nativeLanesRef.current.delete(id);
+    });
+    return () => {
+      nativeTimelineMountedRef.current = false;
+      unsubscribe?.();
+      nativeLanesRef.current.clear();
+    };
+  }, []);
+
+  async function refreshNativeAuthoritativeTimeline(sessionId, lane) {
+    const changed = await refreshNativeTurnTimeline(lane,
+      () => invoke('get_session_timeline', { sessionId }),
+      () => nativeTimelineMountedRef.current && nativeSessionIdsRef.current.has(sessionId)
+        && nativeLanesRef.current.get(sessionId) === lane,
+    );
+    if (changed && sessionId === activeIdRef.current) setNativeLaneTick(tick => tick + 1);
+  }
   const [nativeLaneTick, setNativeLaneTick] = useState(0);
   const nativeSessionIdsRef = useRef(new Set());
   useEffect(() => {
@@ -1795,13 +1819,18 @@ export function CodexAcpView({
       // 原生（品悟）会话：历史与 turn timeline 来自 SavedSession / timing_events，
       // 不走 ACP 的 timeline / pending / session_info 命令。
       if (nativeSessionIdsRef.current.has(id)) {
+        const lane = getNativeLane(id);
+        const laneEpoch = lane.timelineReadEpoch || 0;
         const [saved, sessionTimeline] = await Promise.all([
           invoke('load_session', { id, setActive: false }),
           invoke('get_session_timeline', { sessionId: id }).catch(() => []),
         ]);
         if (sessionLoadRequestRef.current !== requestId) return null;
-        const lane = getNativeLane(id);
-        hydrateNativeLane(lane, saved, sessionTimeline || []);
+        if (!nativeTimelineMountedRef.current || !nativeSessionIdsRef.current.has(id)
+            || nativeLanesRef.current.get(id) !== lane) return null;
+        // A newer live turn/read keeps its timeline while the original SavedSession hydrate proceeds.
+        hydrateNativeLane(lane, saved, (lane.timelineReadEpoch || 0) === laneEpoch
+          ? sessionTimeline || [] : lane.timeline);
         // lane 随组件卸载销毁，chat:user_input_required 不重发：经后端 pending
         // 登记还原挂起的确认卡（applyNativeChatEvent 按 toolCallId 幂等去重），
         // 并顺带恢复 turn 进行中的 busy 展示。
@@ -1861,6 +1890,16 @@ export function CodexAcpView({
     acpEventSeqTrackerRef.current.rebase(sessionId, maxSeq);
   }
 
+  // reload 前置归属检查（评审 M4）：回退/撤销在途时用户切到其它会话，
+  // loadSession(原会话) 会把 activeIdRef 改回原会话、作废新会话的在途
+  // 加载并冻结其流式输出。已切走则跳过重载——磁盘已是目标状态，切回时
+  // loadSession 自然重注水；notice 补发走 pendingNotice 暂存。
+  function guardedReload(sessionId) {
+    return activeIdRef.current === sessionId
+      ? loadSession(sessionId)
+      : Promise.resolve(null);
+  }
+
   // 打开回退确认弹窗；有快照的目标懒加载 diff 预览（「将撤销的变更」摘要）。
   function openRewindDialog(entry) {
     setRewindError('');
@@ -1899,13 +1938,7 @@ export function CodexAcpView({
           conversationOnly: target.conversationOnly,
         });
       const { error: reloadError } = await reloadSessionAfterRewind({
-        // reload 前置归属检查（评审 M4）：回退/撤销在途时用户切到其它会话，
-        // loadSession(原会话) 会把 activeIdRef 改回原会话、作废新会话的在途
-        // 加载并冻结其流式输出。已切走则跳过重载——磁盘已是目标状态，切回时
-        // loadSession 自然重注水；notice 补发走 pendingNotice 暂存。
-        reload: () => (activeIdRef.current === sessionId
-          ? loadSession(sessionId)
-          : Promise.resolve(null)),
+        reload: () => guardedReload(sessionId),
         bumpTick: () => setNativeLaneTick(tick => tick + 1),
       });
       // 跨会话竞态：await 期间会话被程序化切换（remote control）时，UI 收口
@@ -1978,13 +2011,7 @@ export function CodexAcpView({
         await invoke('undo_last_rewind', { sessionId });
       }
       const { error: reloadError } = await reloadSessionAfterRewind({
-        // reload 前置归属检查（评审 M4）：回退/撤销在途时用户切到其它会话，
-        // loadSession(原会话) 会把 activeIdRef 改回原会话、作废新会话的在途
-        // 加载并冻结其流式输出。已切走则跳过重载——磁盘已是目标状态，切回时
-        // loadSession 自然重注水；notice 补发走 pendingNotice 暂存。
-        reload: () => (activeIdRef.current === sessionId
-          ? loadSession(sessionId)
-          : Promise.resolve(null)),
+        reload: () => guardedReload(sessionId),
         bumpTick: () => setNativeLaneTick(tick => tick + 1),
       });
       // 跨会话竞态：await 期间会话被程序化切换时不再写原会话的 UI 状态。
@@ -2572,6 +2599,7 @@ export function CodexAcpView({
         language: eventContext.language,
         modelServiceState: sessionId === activeIdRef.current ? eventContext.modelServiceState : null,
       });
+      if (name === 'chat:done') void refreshNativeAuthoritativeTimeline(sessionId, lane);
       if (name === 'chat:turn_started' || name === 'chat:done') {
         refreshSessions().catch(() => {});
       }
@@ -3048,8 +3076,9 @@ export function CodexAcpView({
         notifyChatRoundCommitted('code');
         if (voiceOperationId) bridge.voice.completeVoiceSubmission(voiceOperationId, targetId, true);
       } catch (sendError) {
-        removeLocalUserMessage(lane, optimisticId);
+        removeLocalUserMessage(lane, optimisticId, { preserveFailedTurn: true });
         setNativeLaneTick(tick => tick + 1);
+        void refreshNativeAuthoritativeTimeline(targetId, lane);
         throw sendError;
       }
       updateAttachments(targetId, current => current.filter(
@@ -3142,7 +3171,7 @@ export function CodexAcpView({
     setNativeLaneTick(tick => tick + 1);
   }
 
-  // 原生车道手动压缩：语义镜像 bridge interaction.compactNow——调 compact_now 后，
+  // 原生车道手动压缩：直接调 compact_now 命令（与 work 侧共享同一条命令）——调完后，
   // 进行中/结果由 chat:compaction 系统项呈现（compactStart/compactDone/compactFail）；
   // invoke 本身失败按 work 侧同款补一条 compactFail 系统提示项。
   async function compactNativeSession() {
@@ -3259,6 +3288,7 @@ export function CodexAcpView({
         <ConversationMarkdown
           text={item.legacyItem.text}
           streaming={item.status === 'in_progress'}
+          copy={t.uiConversation}
           onOpenExternal={(url) => openAcpExternalUrl(url).catch(showError)}
           onOpenResource={isWeb ? undefined : openWorkspaceResource}
         />
@@ -4488,6 +4518,8 @@ export function CodexAcpView({
             selectionRequestId={subagentPanel.selectionRequestId}
             t={t}
             theme={theme}
+            language={nativeModelServiceLanguage}
+            modelServiceState={nativeModelServiceState}
             onClose={closeSubagentPanel}
           />
         )}

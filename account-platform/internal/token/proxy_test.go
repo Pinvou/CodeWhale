@@ -32,8 +32,8 @@ type streamRepositoryFake struct {
 	savedResult     ReplayResult
 	saveResultErr   error
 	commitSnapshot  map[string]any
-	increaseCalls   int
-	increasedBy     int64
+	ensureCalls     int
+	ensuredMaximum  int64
 }
 
 func (r *streamRepositoryFake) AppendReplayEvent(_ context.Context, _ uuid.UUID, eventType string, _ []byte) (int64, error) {
@@ -56,6 +56,9 @@ func (r *streamRepositoryFake) MarkReview(_ context.Context, _ uuid.UUID, reason
 }
 
 func (r *streamRepositoryFake) MarkUpstream(context.Context, uuid.UUID) error { return nil }
+func (r *streamRepositoryFake) RenewDispatchLease(context.Context, uuid.UUID, string) (bool, error) {
+	return true, nil
+}
 
 func (r *streamRepositoryFake) SaveReplayResult(_ context.Context, _ uuid.UUID, result ReplayResult) error {
 	if r.saveResultErr != nil {
@@ -87,15 +90,16 @@ func (r *streamRepositoryFake) LoadReplay(context.Context, uuid.UUID, int64) (Re
 	return r.replaySnapshot, nil
 }
 
-func (r *streamRepositoryFake) IncreaseMaximum(_ context.Context, _ uuid.UUID, additional int64) error {
-	r.increaseCalls++
-	r.increasedBy += additional
+func (r *streamRepositoryFake) EnsureMaximumAtLeast(_ context.Context, _ uuid.UUID, confirmedTarget int64) error {
+	r.ensureCalls++
+	r.ensuredMaximum = max(r.ensuredMaximum, confirmedTarget)
 	return nil
 }
 
 type streamBillingFake struct {
 	ModelExecutionBillingClient
 	extendCalls          int
+	extensionIDs         []uuid.UUID
 	extendedBy           int64
 	extendErr            error
 	commitCalls          int
@@ -147,7 +151,8 @@ func (r *liveReplayRepositoryFake) MarkDelivery(_ context.Context, _ uuid.UUID, 
 	return nil
 }
 
-func (b *streamBillingFake) Extend(_ context.Context, _ uuid.UUID, _ uuid.UUID, additional int64) error {
+func (b *streamBillingFake) Extend(_ context.Context, _ uuid.UUID, _ uuid.UUID, additional int64, operationID uuid.UUID) error {
+	b.extensionIDs = append(b.extensionIDs, operationID)
 	b.extendCalls++
 	b.extendedBy += additional
 	if b.terminalSeenAtExtend != nil {
@@ -598,7 +603,7 @@ func TestProxyStreamCommitsTrustedUsageAndWarnsWhenAdditionalAuthorizationIsInsu
 	if !strings.Contains(recorder.Body.String(), "event: billing_notice") || !strings.Contains(recorder.Body.String(), "data: [DONE]") {
 		t.Fatalf("settled stream did not deliver its notice and terminal: %q", recorder.Body.String())
 	}
-	if repository.reviewReason != "" || repository.increaseCalls != 0 {
+	if repository.reviewReason != "" || repository.ensureCalls != 0 {
 		t.Fatalf("insufficient extension entered review or changed the reservation: %#v", repository)
 	}
 	if !repository.responseSaved || !repository.resultSaved || !repository.committed || billing.commitCalls != 1 {
@@ -662,7 +667,7 @@ func TestNonStreamingResultPersistsReconcilerSnapshotBeforeCommit(t *testing.T) 
 	usageID := uuid.New()
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	recorder := httptest.NewRecorder()
-	service.dispatchUsage(recorder, request, UsageRequest{ID: usageID, HoldID: &holdID, RequestSnapshot: json.RawMessage(`{"provider_id":"test","adapter_version":"openai-compatible-v1"}`)}, DispatchEnvelope{BaseURL: server.URL, Provider: "test", AdapterVersion: "openai-compatible-v1", Credential: []byte("credential"), RequestBody: []byte(`{"model":"test"}`), Price: PriceVersion{OutputPerMillion: 1_000_000}, MaximumCost: 10, ContextType: "PERSONAL"})
+	service.dispatchUsage(recorder, request, UsageRequest{ID: usageID, HoldID: &holdID, RequestSnapshot: json.RawMessage(`{"provider_id":"test","adapter_version":"openai-compatible-v1"}`)}, DispatchEnvelope{leaseOwner: "controlled-worker", BaseURL: server.URL, Provider: "test", AdapterVersion: "openai-compatible-v1", Credential: []byte("credential"), RequestBody: []byte(`{"model":"test"}`), Price: PriceVersion{OutputPerMillion: 1_000_000}, MaximumCost: 10, ContextType: "PERSONAL"})
 
 	if recorder.Code != http.StatusServiceUnavailable || !repository.resultSaved || repository.savedResult.Kind != "JSON" || repository.savedResult.FinalUsage == nil || repository.savedResult.ActualMicrocredits == nil || repository.savedResult.SettlementSnapshot == nil {
 		t.Fatalf("non-stream settlement evidence was not durable before commit: code=%d result=%#v", recorder.Code, repository.savedResult)
@@ -683,7 +688,7 @@ func TestNonStreamingReplayFailureLeavesNoSplitResponseState(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	recorder := httptest.NewRecorder()
 
-	service.dispatchUsage(recorder, request, UsageRequest{ID: uuid.New(), HoldID: &holdID, RequestSnapshot: json.RawMessage(`{"provider_id":"test","adapter_version":"openai-compatible-v1"}`)}, DispatchEnvelope{BaseURL: server.URL, Provider: "test", AdapterVersion: "openai-compatible-v1", Credential: []byte("credential"), RequestBody: []byte(`{"model":"test"}`), Price: PriceVersion{OutputPerMillion: 1_000_000}, MaximumCost: 10, ContextType: "PERSONAL"})
+	service.dispatchUsage(recorder, request, UsageRequest{ID: uuid.New(), HoldID: &holdID, RequestSnapshot: json.RawMessage(`{"provider_id":"test","adapter_version":"openai-compatible-v1"}`)}, DispatchEnvelope{leaseOwner: "controlled-worker", BaseURL: server.URL, Provider: "test", AdapterVersion: "openai-compatible-v1", Credential: []byte("credential"), RequestBody: []byte(`{"model":"test"}`), Price: PriceVersion{OutputPerMillion: 1_000_000}, MaximumCost: 10, ContextType: "PERSONAL"})
 
 	if recorder.Code != http.StatusServiceUnavailable || repository.responseSaved || repository.resultSaved || repository.committed || billing.commitCalls != 0 {
 		t.Fatalf("non-stream response escaped the failed atomic replay transaction: code=%d repository=%#v billing=%#v", recorder.Code, repository, billing)
@@ -706,7 +711,7 @@ func TestNonStreamingMissingUsagePersistsProviderEvidenceRecoveryState(t *testin
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	recorder := httptest.NewRecorder()
 
-	service.dispatchUsage(recorder, request, UsageRequest{ID: usageID, HoldID: &holdID, RequestSnapshot: json.RawMessage(`{"provider_id":"test","adapter_version":"openai-compatible-v1"}`)}, DispatchEnvelope{BaseURL: server.URL, Provider: "test", AdapterVersion: "openai-compatible-v1", Credential: []byte("credential"), RequestBody: []byte(`{"model":"test"}`), Price: PriceVersion{OutputPerMillion: 1_000_000}, MaximumCost: 10})
+	service.dispatchUsage(recorder, request, UsageRequest{ID: usageID, HoldID: &holdID, RequestSnapshot: json.RawMessage(`{"provider_id":"test","adapter_version":"openai-compatible-v1"}`)}, DispatchEnvelope{leaseOwner: "controlled-worker", BaseURL: server.URL, Provider: "test", AdapterVersion: "openai-compatible-v1", Credential: []byte("credential"), RequestBody: []byte(`{"model":"test"}`), Price: PriceVersion{OutputPerMillion: 1_000_000}, MaximumCost: 10})
 
 	if recorder.Code != http.StatusOK || !repository.resultSaved || repository.savedResult.ResponseDisposition != responseDispositionUsageEvidenceRequired || repository.reviewReason != "" || billing.commitCalls != 0 {
 		t.Fatalf("missing usage was not frozen for provider evidence recovery: code=%d repository=%#v billing=%#v", recorder.Code, repository, billing)
@@ -728,7 +733,7 @@ func TestPreGenerationRejectionSurvivesReleaseFailureForReconciliation(t *testin
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	recorder := httptest.NewRecorder()
 
-	service.dispatchUsage(recorder, request, UsageRequest{ID: usageID, HoldID: &holdID, RequestSnapshot: json.RawMessage(`{"provider_id":"test","adapter_version":"openai-compatible-v1"}`)}, DispatchEnvelope{BaseURL: server.URL, Provider: "test", AdapterVersion: "openai-compatible-v1", Credential: []byte("credential"), RequestBody: []byte(`{"model":"test"}`)})
+	service.dispatchUsage(recorder, request, UsageRequest{ID: usageID, HoldID: &holdID, RequestSnapshot: json.RawMessage(`{"provider_id":"test","adapter_version":"openai-compatible-v1"}`)}, DispatchEnvelope{leaseOwner: "controlled-worker", BaseURL: server.URL, Provider: "test", AdapterVersion: "openai-compatible-v1", Credential: []byte("credential"), RequestBody: []byte(`{"model":"test"}`)})
 
 	if recorder.Code != http.StatusBadRequest || repository.savedResult.ResponseDisposition != responseDispositionRejectedBeforeGeneration || repository.released || billing.releaseCalls != 1 {
 		t.Fatalf("pre-generation rejection lost its retryable release state: code=%d repository=%#v billing=%#v", recorder.Code, repository, billing)
@@ -818,7 +823,7 @@ func TestProxyStreamAuthorizesAdditionalUsageBeforeDone(t *testing.T) {
 	if billing.extendCalls != 1 || billing.extendedBy != 9 || billing.terminalBeforeExtend {
 		t.Fatalf("additional authorization order = %#v", billing)
 	}
-	if repository.increaseCalls != 1 || repository.increasedBy != 9 {
+	if repository.ensureCalls != 1 || repository.ensuredMaximum != 10 {
 		t.Fatalf("local maximum update = %#v", repository)
 	}
 	if !strings.Contains(recorder.Body.String(), "data: [DONE]") || repository.reviewReason != "" {

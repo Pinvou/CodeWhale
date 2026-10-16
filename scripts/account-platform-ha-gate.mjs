@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { readFile } from 'node:fs/promises';
+import { evidenceTimestamp } from './account-platform-evidence-time.mjs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -23,9 +24,7 @@ function count(value) {
 }
 
 function parseTime(value, name) {
-  const parsed = Date.parse(value);
-  required(Number.isFinite(parsed), `${name} must be RFC3339`);
-  return parsed;
+  return evidenceTimestamp(value, name);
 }
 
 export function validatePolicy(policy) {

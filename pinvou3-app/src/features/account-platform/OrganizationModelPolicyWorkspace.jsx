@@ -12,13 +12,19 @@ export function OrganizationModelPolicyWorkspace({ client, me, language }) {
  const operation = useFinanceOperation(owner, copy, client, 'organization-model-policy');
  const [policy, setPolicy] = useState(null), [mode, setMode] = useState('ALLOW_ALL'), [ids, setIDs] = useState([]), [reason, setReason] = useState('');
  const [models, setModels] = useState([]), [unavailable, setUnavailable] = useState(false), [loading, setLoading] = useState(false);
+ const [readDenied, setReadDenied] = useState(false);
  const generation = useRef(0);
  const canRead = hasPermission(me, 'org.models.read'), canManage = hasPermission(me, 'org.models.manage');
  const load = async (stamp, signal) => {
-  const [value, catalog] = await Promise.all([api.modelPolicy(org, signal), client.models(signal)]);
-  const modelItems = requireOrganizationModelPolicyCatalog(catalog);
-  if (generation.current !== stamp) return;
-  setPolicy(value); setMode(value.mode); setIDs(value.model_ids); setModels(modelItems); setUnavailable(false);
+  try {
+   const [value, catalog] = await Promise.all([api.modelPolicy(org, signal), client.models(signal)]);
+   const modelItems = requireOrganizationModelPolicyCatalog(catalog);
+   if (generation.current !== stamp) return;
+   setPolicy(value); setMode(value.mode); setIDs(value.model_ids); setModels(modelItems); setUnavailable(false); setReadDenied(false);
+  } catch(error) {
+   if (generation.current === stamp && error.name !== 'AbortError') setReadDenied(error.status === 403);
+   throw error;
+  }
  };
  const refresh = async () => {
   const stamp = ++generation.current; setLoading(true);
@@ -27,7 +33,7 @@ export function OrganizationModelPolicyWorkspace({ client, me, language }) {
  };
  useEffect(() => {
   const stamp = ++generation.current, controller = new AbortController();
-  setPolicy(null); setModels([]); setReason(''); setUnavailable(false); setLoading(canRead);
+  setPolicy(null); setModels([]); setReason(''); setUnavailable(false); setReadDenied(false); setLoading(canRead);
    if (canRead) void load(stamp, controller.signal).catch(error => { if (generation.current === stamp && error.name !== 'AbortError') { setPolicy(null); setModels([]); setUnavailable(true); } }).finally(() => { if (generation.current === stamp) setLoading(false); });
   return () => { generation.current++; controller.abort(); };
   // Context changes invalidate both the policy read and catalog selection.
@@ -42,7 +48,7 @@ export function OrganizationModelPolicyWorkspace({ client, me, language }) {
  };
  if (!canRead) return null;
  return <section className="ap-org-model-policy"><h3>{copy.modelPolicy}</h3><button disabled={loading || operation.busy || operation.unknown} onClick={() => void refresh()}>{copy.refresh}</button>
-  {loading && <p role="status">{copy.loading}</p>}{unavailable && <p role="alert">{copy.unavailable}</p>}
+  {loading && <p role="status">{copy.loading}</p>}{unavailable && <p role="alert">{readDenied ? copy.permissions : copy.unavailable}</p>}
   {policy && <form onSubmit={event => void save(event)}><p>{copy.version}: {policy.version}</p><fieldset disabled={!canManage || loading || operation.busy || operation.unknown}>
    <label>{copy.modelPolicyMode}<select value={mode} onChange={event => setMode(event.target.value)}>{['ALLOW_ALL', 'ALLOW_LIST', 'DENY_LIST'].map(value => <option key={value} value={value}>{copy[value]}</option>)}</select></label>
    {mode !== 'ALLOW_ALL' && <fieldset><legend>{copy.models}</legend>{models.map(model => <label key={model.model_id}><input type="checkbox" checked={ids.includes(model.model_id)} onChange={event => setIDs(current => event.target.checked ? [...current, model.model_id] : current.filter(id => id !== model.model_id))} />{model.display_name || model.upstream_model_ref || model.model_id}</label>)}

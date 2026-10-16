@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { localizedAccountPlatformError } from "./error-localization.js";
-import { formatSystemCount, requireSystemStatus } from "./admin-system-status.js";
+import { formatSystemCount, requireSystemStatus, systemDiagnosticMessage } from "./admin-system-status.js";
 const NO_PERMISSIONS = [];
 
 function ReadTable({ title, columns, items, copy }) {
@@ -158,7 +158,7 @@ export function AdminSystemStatusWorkspace({
               columns={[
                 ["source", labels.source, name],
                 ["resource", labels.resource, (value) => <code>{value || "—"}</code>],
-                ["message", labels.message],
+                ["message", labels.message, (_value, item) => systemDiagnosticMessage(item, labels)],
                 ["updated_at", labels.updated, date],
               ]}
             />

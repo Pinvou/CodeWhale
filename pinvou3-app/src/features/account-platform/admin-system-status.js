@@ -71,8 +71,15 @@ export function requireSystemStatus(value) {
   for (const item of value.recent_errors) {
     if (!item || typeof item.source !== "string" || typeof item.message !== "string" ||
       (item.resource !== undefined && typeof item.resource !== "string") ||
-      (item.updated_at !== undefined && typeof item.updated_at !== "string"))
+      (item.updated_at !== undefined && typeof item.updated_at !== "string") ||
+      (item.code !== undefined && typeof item.code !== "string"))
       throw new Error("INVALID_SYSTEM_STATUS");
   }
   return value;
+}
+
+export function systemDiagnosticMessage(item, labels) {
+  if (item.code === "RECONCILIATION_STATUS_UNAVAILABLE") return labels.reconciliationUnavailable;
+  if (item.code === "RECONCILIATION_ERRORS_UNAVAILABLE") return labels.reconciliationErrorsUnavailable;
+  return item.message;
 }

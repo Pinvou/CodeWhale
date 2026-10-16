@@ -225,6 +225,14 @@ func (s *Service) activeWallet(ctx context.Context, resolved AuthorizationContex
 func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code, message := http.StatusInternalServerError, "INTERNAL_ERROR", "the token request could not be completed"
 	switch {
+	case errors.Is(err, errOrganizationPolicyModelUnavailable):
+		status, code, message = http.StatusUnprocessableEntity, "MODEL_UNAVAILABLE", "the model is unavailable"
+	case errors.Is(err, ErrModelUnavailable):
+		status, code, message = http.StatusConflict, "MODEL_UNAVAILABLE", "the selected model is not available for this conversation"
+		w.Header().Set("X-Pinvou-Model-Rejection-v1", code)
+	case errors.Is(err, ErrModelDeprecated):
+		status, code, message = http.StatusConflict, "MODEL_DEPRECATED", "the selected model can no longer serve this conversation"
+		w.Header().Set("X-Pinvou-Model-Rejection-v1", code)
 	case errors.Is(err, ErrRateLimited):
 		retryAfter := 1
 		var limited *RateLimitError
@@ -238,6 +246,10 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusNotFound, "TOKEN_NOT_FOUND", "the token resource was not found"
 	case errors.Is(err, ErrNoEligibleRoute):
 		status, code, message = http.StatusUnprocessableEntity, "TOKEN_ROUTE_UNAVAILABLE", "no eligible token route is available"
+	case errors.Is(err, ErrModelPolicyDenied):
+		status, code, message = http.StatusForbidden, "MODEL_POLICY_DENIED", "the organization model policy does not permit this model"
+	case errors.Is(err, ErrModelPolicyVersionConflict):
+		status, code, message = http.StatusConflict, "MODEL_POLICY_VERSION_CONFLICT", "the organization model policy version changed"
 	case errors.Is(err, ErrOrganizationLifecycleConflict):
 		status, code, message = http.StatusConflict, "ORGANIZATION_LIFECYCLE_CONFLICT", "the organization lifecycle facts conflict"
 	case errors.Is(err, ErrIdempotencyConflict):

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"math"
 	"math/big"
 	"strings"
 	"time"
@@ -230,7 +231,7 @@ func (r *PostgresRepository) ApplyReviewedForcedRefund(ctx context.Context, case
 		original, available, active, suspended int64
 		target, toRevoke                       int64
 	}
-	rows, err := tx.Query(ctx, `SELECT id,credit_lot_id,component_type,original_microcredits,available_microcredits,active_grant_microcredits,suspended_grant_microcredits FROM entitlement_components WHERE package_id=$1 ORDER BY component_type,id FOR UPDATE`, item.EntitlementPackageID)
+	rows, err := tx.Query(ctx, `SELECT id,credit_lot_id,component_type,original_microcredits-reclassified_out_microcredits,available_microcredits,active_grant_microcredits,suspended_grant_microcredits FROM entitlement_components WHERE package_id=$1 ORDER BY component_type,id FOR UPDATE`, item.EntitlementPackageID)
 	if err != nil {
 		return ForcedRefundCase{}, err
 	}
@@ -264,9 +265,15 @@ func (r *PostgresRepository) ApplyReviewedForcedRefund(ctx context.Context, case
 		}
 		component.target -= previousTarget
 		if component.kind == "BASE" {
-			previousBaseTarget = previousTarget
+			if previousBaseTarget > math.MaxInt64-previousTarget {
+				return ForcedRefundCase{}, ErrConflict
+			}
+			previousBaseTarget += previousTarget
 		} else {
-			previousBonusTarget = previousTarget
+			if previousBonusTarget > math.MaxInt64-previousTarget {
+				return ForcedRefundCase{}, ErrConflict
+			}
+			previousBonusTarget += previousTarget
 		}
 		component.toRevoke = component.target
 		if revocable := component.available + component.active + component.suspended; component.toRevoke > revocable {
@@ -398,7 +405,7 @@ func (r *PostgresRepository) ApplyReviewedForcedRefund(ctx context.Context, case
 	}
 	item.RevokedBase, item.RevokedBonus = revokedBase, revokedBonus
 	item.Version++
-	if _, err := tx.Exec(ctx, `UPDATE entitlement_components SET status=CASE WHEN status='EXPIRED' THEN 'EXPIRED' WHEN revoked_microcredits=original_microcredits THEN 'REVOKED' ELSE 'FROZEN' END,updated_at=$2 WHERE package_id=$1`, item.EntitlementPackageID, now); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE entitlement_components SET status=CASE WHEN status='EXPIRED' THEN 'EXPIRED' WHEN revoked_microcredits+reclassified_out_microcredits=original_microcredits THEN 'REVOKED' ELSE 'FROZEN' END,updated_at=$2 WHERE package_id=$1`, item.EntitlementPackageID, now); err != nil {
 		return ForcedRefundCase{}, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE entitlement_packages package SET status=CASE WHEN package.status='EXPIRED' THEN 'EXPIRED' WHEN NOT EXISTS(SELECT 1 FROM entitlement_components component WHERE component.package_id=package.id AND component.status<>'REVOKED') THEN 'REVOKED' ELSE 'FROZEN' END,updated_at=$2 WHERE id=$1`, item.EntitlementPackageID, now); err != nil {

@@ -22,6 +22,7 @@ export function AdminReconciliationFinancialRepairForm({ client, copy, onCreated
   const [busy, setBusy] = useState('');
   const [failure, setFailure] = useState('');
   const [created, setCreated] = useState('');
+  const [needsAuthentication, setNeedsAuthentication] = useState(false);
   const factsRevision = useRef(0);
   const mounted = useRef(false);
   const currentClient = useRef(client);
@@ -35,6 +36,7 @@ export function AdminReconciliationFinancialRepairForm({ client, copy, onCreated
 
   useEffect(() => {
     mounted.current = true;
+    setNeedsAuthentication(false);
     setFacts(null);
     setProjection(null);
     setBusy((current) => current === 'facts' ? '' : current);
@@ -78,6 +80,7 @@ export function AdminReconciliationFinancialRepairForm({ client, copy, onCreated
     const revision = ++factsRevision.current;
     const live = () => mounted.current && factsRevision.current === revision && currentClient.current === client;
     setBusy('facts');
+    setNeedsAuthentication(false);
     setFailure('');
     setCreated('');
     try {
@@ -97,6 +100,7 @@ export function AdminReconciliationFinancialRepairForm({ client, copy, onCreated
       if (!live()) return;
       setProjection(null);
       setFacts(null);
+      if (error?.code === 'RECENT_AUTHENTICATION_REQUIRED' || error?.status === 401) setNeedsAuthentication(true);
       setFailure(error?.code === 'APPROVAL_PRECHECK_UNAVAILABLE' ? copy.factsUnavailable : copy.factsFailed);
     } finally {
       if (live()) setBusy('');
@@ -109,9 +113,15 @@ export function AdminReconciliationFinancialRepairForm({ client, copy, onCreated
       const prepared = pending || { ...financialRepairDraftFromProjection(projection, reason, requestKey), projection };
       if (!prepared.draft) { setFailure(copy.invalidDraft); return; }
       const recovering = operation.unknown;
+      const revision = factsRevision.current;
+      const live = () => mounted.current && factsRevision.current === revision && currentClient.current === client;
+      setNeedsAuthentication(false);
       const result = await operation.mutate(prepared, async current => {
         try { return await createAndSubmitFreshGovernedApproval(client, current.draft); }
         catch (error) {
+          // Inspect the original denial before preserving a previous unknown
+          // write with COMMAND_RESULT_UNKNOWN; the facts/key stay unchanged.
+          if (live() && (error?.code === 'RECENT_AUTHENTICATION_REQUIRED' || error?.status === 401)) setNeedsAuthentication(true);
           // A denied replay cannot prove that an earlier unknown write did not
           // commit. Keep the original facts/key until authority confirms it.
           if (recovering && !error.finalResult) throw Object.assign(error, { code: 'COMMAND_RESULT_UNKNOWN' });
@@ -132,6 +142,7 @@ export function AdminReconciliationFinancialRepairForm({ client, copy, onCreated
     <p>{copy.lead}</p>
     <p>{copy.ledgerEffectNone}</p>
     {governed && operation.error && <p role="alert">{operation.error}</p>}
+    {needsAuthentication && <div className="adm-reconciliation-repair-reauthentication"><p>{copy.writeOffRecentAuthenticationRequired}</p><button type="button" disabled={busy !== '' || operation.busy} onClick={() => client.reauthenticate('/admin.html')}>{copy.reauthenticate}</button></div>}
     <form className="adm-financial-repair-target" onSubmit={readFacts}>
       <label>{copy.command}
         <select disabled={governed && locked} value={commandType} onChange={(event) => changeCommand(event.target.value)}>
@@ -139,7 +150,7 @@ export function AdminReconciliationFinancialRepairForm({ client, copy, onCreated
         </select>
       </label>
       {fields.map((field) => <label key={field.key}>{label(field)}
-        <input disabled={governed && locked} required value={pending ? String(field.key === 'target_resource_id' ? pending.draft.target_resource_id : field.key === 'expected_version' ? pending.draft.normalized_command.expected_receivable_version : pending.draft.normalized_command[field.key]) : values[field.key] || ''} inputMode={field.kind === 'integer' ? 'numeric' : 'text'}
+        <input disabled={governed && locked} required value={pending ? String(field.key === 'target_resource_id' ? pending.draft.target_resource_id : pending.draft.normalized_command[field.key]) : values[field.key] || ''} inputMode={field.kind === 'integer' ? 'numeric' : 'text'}
           onChange={(event) => setValue(field.key, event.target.value)} />
       </label>)}
       <button type="submit" disabled={locked}>{busy === 'facts' ? copy.reading : copy.readFacts}</button>

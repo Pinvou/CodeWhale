@@ -18,7 +18,8 @@
 2. 用户/授权人已就该命令的生产激活给出明确授权（书面记录存档，含时间与范围）。首版范围只含 **BASE 短缺补偿**；任何放宽（BONUS 缺口、部分撤销、借用退款规则）都必须另开 policy/schema 版本与独立设计。
 3. 专属 durable `billing-chargeback-financial-repair-executor-p1-v1` 的受信 cutover 资源绑定已就绪。当前 `cmd/billing-service` 通过 `approvalconsumer.BillingCommands()` 的有限已安装集合注册消费者；不存在本命令专属 `BILLING_CHARGEBACK_FINANCIAL_REPAIR_CONSUMER_ENABLED` 开关。既有六个 `BILLING_APPROVAL_CONSUMER_*` 受信工件输入缺失、摘要不符或读取失败均失败关闭，不能以未校验资源启动消费者。
 4. 已验证 Account 侧五入口读取实时 Billing activation：行仍为 `INACTIVE` 时 create/update/submit/APPROVE/Begin 全部失败关闭（`ErrBillingGovernanceInactive`）。
-5. 已完成一致性备份（含 Billing 库）并记录备份 ID、完成时间与 SHA-256；激活窗口内停止写入新审批。
+5. 本命令加入全局策略集合后，须先按已有 Token governance 的 SAFE、quiescence、冻结资源 readback 与签名发行流程，以当前 `PolicySetDigest` 重签并核验治理快照；旧策略集合的 ACTIVE 摘要及收据不能沿用。参照 [退款修复激活手册前置条件第5项](refund-exception-repair-activation.md#1-前置条件全部满足才可开始)。这不扩展 Token handler 集合，也不由启动或 readiness 自动完成。
+6. 已完成一致性备份（含 Billing 库）并记录备份 ID、完成时间与 SHA-256；激活窗口内停止写入新审批。
 
 ## 2. 只读核验（记录输出作为证据）
 

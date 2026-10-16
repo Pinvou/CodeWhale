@@ -109,6 +109,7 @@ function childEnvironment(request, operation, environment) {
   }
   if (request.operation === 'migrate-up') {
     const key = operation.environment[0]; result.DATABASE_URL = result[key]; delete result[key];
+    if (request.options.domain === 'account') result.MIGRATION_ROLE = 'account_service';
     if (request.options.domain === 'token') result.MIGRATION_ROLE = 'token_gateway';
     if (request.options.domain === 'billing') result.MIGRATION_ROLE = 'billing_service';
     // Enforce the existing production backup validator even for a UAT rehearsal.

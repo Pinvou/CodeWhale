@@ -6,6 +6,7 @@
 
 /* eslint-disable sonarjs/no-nested-template-literals, sonarjs/no-unenclosed-multiline-block -- compact i18n dictionary: nested templates mirror the copy structure one-to-one; credential field names are false-positive secrets */
 import { browserEn } from './browser.js';
+import { CHAT_RECOVERY_COPY } from './chat-recovery.js';
 
 const conversationEn = {
   completed:'Completed', failed:'Failed', interrupted:'Interrupted', cancelled:'Cancelled', limitReached:'Limit reached', processing:'Processing', processingActive:'Processing',
@@ -183,6 +184,7 @@ const acpProvidersEn = {
 };
 
 export const dictEn = {
+  steerFailedLost: CHAT_RECOVERY_COPY.en.steerFailedLost,
   ...browserEn,
         langTag: 'en',
         acpAgent: 'ACP Agent',
@@ -287,6 +289,7 @@ export const dictEn = {
         modelPresetDeepseek: 'DeepSeek',
         modelPresetKimi: 'Kimi',
         modelPresetOpenaiCompatible: 'OpenAI Compatible',
+        modelPresetOpenaiResponses: 'OpenAI Responses Compatible',
         modelPresetOpenai: 'OpenAI',
         modelPresetAnthropic: 'Anthropic Claude',
         modelPresetGemini: 'Google Gemini',
@@ -301,7 +304,7 @@ export const dictEn = {
         modelContextWindow: 'Context Window (tokens)',
         modelMaxOutput: 'Max Output (tokens)',
         customApiKey: 'API Key',
-        credEnvOverride: 'Env override', credUnavailable: 'Credential unavailable', credConfigured: 'Configured', credNotConfigured: 'Not configured', credEnterNewKey: 'Enter new key to replace', credKeep: 'Keep', credReplace: 'Replace', credDeleteKey: 'Delete Key', clearSearch: 'Clear search', clearInput: 'Clear input', sendMsg: 'Send', apiKeyGateTitle: 'API Key required', apiKeyGateDesc: 'The current model is a cloud model. Configure an API Key to start chatting.', apiKeyGateBtn: 'Configure',
+        credEnvOverride: 'Env override', credUnavailable: 'Credential unavailable', credConfigured: 'Configured', credNotConfigured: 'Not configured', credEnterNewKey: 'Enter new key to replace', credKeep: 'Keep', credReplace: 'Replace', credDeleteKey: 'Delete Key', clearSearch: 'Clear search', clearInput: 'Clear input', sendMsg: 'Send',
         detectLocalVllm: 'Detect local model services',
         detectingLocalVllm: 'Detecting…',
         useVllmConfig: 'Use config',
@@ -335,7 +338,7 @@ export const dictEn = {
         uiMonitor: { bridgeNotReady:'Bridge not ready', readFailed:'Read failed', reading:'Loading', configError:'Configuration error', unverified:'Unverified', authFailed:'Authentication failed', bridgeError:'Monitor bridge is not ready. Open this page in the Tauri app window.', readError:e=>`Monitor read failed: ${e}`, activity:'Activity' },
 
         uiSettings: { common:'Common', system:'System', general:'General', model:'Models', search:'Search', memory:'Memory', community:'User Community', permissions:'Permissions & Environment', data:'Data Management', update:'Updates', help:'Help & Feedback', appearance:'Appearance', language:'Interface Language', languageDesc:'Change the app display language', theme:'Theme', themeDesc:'Follow the system, or choose light / dark', notifications:'Notifications', taskNotice:'Task Completion Alerts', taskNoticeDesc:'Show a system notification when a task finishes', voiceShortcuts:'Voice Shortcuts', voiceShortcutEnable:'Enable Alt voice shortcut', voiceShortcutEnableDesc:'Alt starts voice input. When the input box already has text, Alt edits the current text. Off by default.', voiceShortcutHelp:'View Alt voice shortcut guide', voiceShortcutUnsupportedDesc:'The global Alt shortcut is only supported on Windows. On this platform, Alt voice input works while the app window is focused.', voicePostprocess:'Smart organize', voicePostprocessDesc:'Sends the recognized text — together with any existing input-box draft — to your configured model service to fix errors and organize it into structured input. When off, only on-device rule-based fixes are applied.', voiceShortcutWebDesc:'In the browser, Alt voice input works inside the app window. The global shortcut is unavailable, and only plain transcription is provided — no smart organize or voice editing.', desktopAssistant:'Desktop Assistant', pet:'Desktop Companion', petDesc:'Show a persistent companion on the desktop', version:'Version', currentVersion:'Current Version', beta:'Beta', releaseNotes:'Release Notes', noReleaseNotes:'No release notes', downloading:p=>`Downloading update ${p}%`, installingUpdate:'Installing update…', installerStarted:'Installer Started', cancelDownload:'Cancel Download', providers:'ACP' },
-        uiSettingsDetail: { modelSection:'Models', settingsLoadFailed:'Failed to load settings', addModel:'Add model', envManaged:'Model settings managed by environment variables remain visible here, but must be changed in the environment.', localModel:'Local model', defaultTag:'Default', edit:'Edit', delete:'Delete', noModels:'No models', localDefaultName:'Local Qwen3.6', searchList:'Search sources', setDefault:'Set as default', addSearch:'Add search source', searchDescriptions:{ bing:'Built-in search', metaso:'Chinese search service', bocha:'Search service', baidu:'Qianfan AI Search', tavily:'International search service' }, searchSourceHint:'Built-in search works without a key; if the selected service fails, searches fall back to it automatically. Adding a Chinese search service improves long Chinese-language queries.', memoryTypes:{ preference:'Long-term preference', work_context:'Work context', current_focus:'Current focus', recent_activity:'Recent activity' }, memoryDetail:'Memory details', content:'Content', editTitle:label=>`Edit ${label}`, userCallName:'Your name', assistantNickname:'Assistant nickname', callNameDesc:'How the assistant addresses you', assistantNameDesc:'How you address the assistant', unnamedMemory:'Untitled memory', view:'View', enableMemory:'Enable memory', enableMemoryDesc:'PINVOU remembers names, preferences, work context, and recent activity', profile:'Profile', notSet:'Not set', longMemory:'Long-term memory', shortMemory:'Short-term memory', noLongMemory:'No long-term memories', noShortMemory:'No short-term memories', hiddenTasks:'Hidden tasks', archivedAt:date=>`Archived ${date}`, restore:'Restore', noHiddenTasks:'No hidden tasks', noHiddenTasksDesc:'Archived tasks appear here', system:'System', advancedPermission:'Advanced execution permission', advancedPermissionDesc:'Allow the assistant to run advanced commands such as environment configuration', missing:'Missing', installMissing:'Install missing dependencies', feedbackTitle:'Submit an issue or suggestion', feedbackDesc:'Attach images or videos; a privacy notice is shown before submission', submitFeedback:'Submit feedback', editSearch:'Edit search source', apiKeyPlaceholder:'Enter API Key', hide:'Hide', show:'Show', cancel:'Cancel', save:'Save', restartSearchTitle:'Restart to apply search settings?', restartLanguageTitle:'Restart to apply language settings?', restartSearchDesc:'Restart the app before the assistant can use the updated search source or credentials.', restartLanguageDesc:'The interface language changed. Restart to also update the assistant response language.', later:'Later', restartNow:'Restart now', deleteModelTitle:'Delete model?', deleteModelDesc:'This removes the model configuration and its saved credentials.', deleteModel:'Delete model', deleteSearchTitle:'Delete search source?', deleteSearchDesc:name=>`This removes ${name} and its saved credentials.`, deleteSearch:'Delete search source', addSearchDesc:'Choose a search source, then enter the required credentials', closeSettings:'Close settings', chooseModelDesc:'Choose a model, then enter the required credentials', collapse:'Collapse', change:'Change', customModel:'Custom model', localModelName:name=>name ? `Local ${name}` : 'Local model', apiKeyReadFailed:'Failed to read API Key', localModelId:'Local model ID', modelId:'Model ID', modelIdPlaceholder:'Enter model ID', customModelTitle:provider=>`Custom ${provider} model`, customModelDesc:'Enter a model ID manually', customLocalDesc:'Enter the model ID exposed by the local service', customCompatibleDesc:'Enter the model ID and service URL manually', modelDescriptions:{ '本地服务默认模型':'Default local service model', '高能力模型':'High-capability model', '快速响应':'Fast responses', '最新通用模型':'Latest general-purpose model', '代码场景':'Coding tasks', '高速代码场景':'High-speed coding tasks', '稳定可用':'Stable release', '高性价比':'Cost-effective', '通用能力':'General-purpose', '兼容保留':'Compatibility option', '高速响应':'High-speed responses', '轻量模型':'Lightweight model' } },
+        uiSettingsDetail: { modelSection:'Models', settingsLoadFailed:'Failed to load settings', addModel:'Add model', envManaged:'Model settings managed by environment variables remain visible here, but must be changed in the environment.', localModel:'Local model', defaultTag:'Default', edit:'Edit', delete:'Delete', noModels:'No models', localDefaultName:'Local Qwen3.6', searchList:'Search sources', setDefault:'Set as default', addSearch:'Add search source', searchDescriptions:{ bing:'Built-in search', metaso:'Chinese search service', bocha:'Search service', baidu:'Qianfan AI Search', tavily:'International search service' }, searchSourceHint:'Built-in search works without a key; if the selected service fails, searches fall back to it automatically. Adding a Chinese search service improves long Chinese-language queries.', memoryTypes:{ preference:'Long-term preference', work_context:'Work context', current_focus:'Current focus', recent_activity:'Recent activity' }, memoryDetail:'Memory details', content:'Content', editTitle:label=>`Edit ${label}`, userCallName:'Your name', assistantNickname:'Assistant nickname', callNameDesc:'How the assistant addresses you', assistantNameDesc:'How you address the assistant', unnamedMemory:'Untitled memory', view:'View', enableMemory:'Enable memory', enableMemoryDesc:'PINVOU remembers names, preferences, work context, and recent activity', profile:'Profile', notSet:'Not set', longMemory:'Long-term memory', shortMemory:'Short-term memory', noLongMemory:'No long-term memories', noShortMemory:'No short-term memories', hiddenTasks:'Hidden tasks', archivedAt:date=>`Archived ${date}`, restore:'Restore', noHiddenTasks:'No hidden tasks', noHiddenTasksDesc:'Archived tasks appear here', system:'System', advancedPermission:'Advanced execution permission', advancedPermissionDesc:'Allow the assistant to run advanced commands such as environment configuration', missing:'Missing', installMissing:'Install missing dependencies', feedbackTitle:'Submit an issue or suggestion', feedbackDesc:'Attach images or videos; a privacy notice is shown before submission', submitFeedback:'Submit feedback', editSearch:'Edit search source', apiKeyPlaceholder:'Enter API Key', hide:'Hide', show:'Show', cancel:'Cancel', save:'Save', restartSearchTitle:'Restart to apply search settings?', restartLanguageTitle:'Restart to apply language settings?', restartSearchDesc:'Restart the app before the assistant can use the updated search source or credentials.', restartLanguageDesc:'The interface language changed. Restart to also update the assistant response language.', later:'Later', restartNow:'Restart now', deleteModelTitle:'Delete model?', deleteModelDesc:'This removes the model configuration and its saved credentials.', deleteModel:'Delete model', deleteSearchTitle:'Delete search source?', deleteSearchDesc:name=>`This removes ${name} and its saved credentials.`, deleteSearch:'Delete search source', addSearchDesc:'Choose a search source, then enter the required credentials', closeSettings:'Close settings', chooseModelDesc:'Choose a model, then enter the required credentials', collapse:'Collapse', change:'Change', customModel:'Custom model', localModelName:name=>name ? `Local ${name}` : 'Local model', apiKeyReadFailed:'Failed to read API Key', localModelId:'Local model ID', modelId:'Model ID', modelIdPlaceholder:'Enter model ID', customModelTitle:provider=>`Custom ${provider} model`, customModelDesc:'Enter a model ID manually', customLocalDesc:'Enter the model ID exposed by the local service', customCompatibleDesc:'Enter the model ID and service URL manually', modelDescriptions:{ '本地服务默认模型':'Default local service model', '高能力模型':'High-capability model', '快速响应':'Fast responses', '最新通用模型':'Latest general-purpose model', '代码场景':'Coding tasks', '高速代码场景':'High-speed coding tasks', '稳定可用':'Stable release', '高性价比':'Cost-effective', '通用能力':'General-purpose', '兼容保留':'Compatibility option', '轻量模型':'Lightweight model' } },
 
         uiPetSettings: { choose:'Choose a companion', placeholder:'Coming soon', preparing:'Preparing animation', animationFailed:'Animation failed to load', coverFailed:'Cover failed to load', retry:'Retry', pets:{ lingling:{name:'Lingling',description:'Star-patterned tail, always lively'}, langlang:{name:'Langlang',description:'Black outfit and glasses, calmly by your side'}, 'ace-taffy':{name:'Ace Taffy',description:'Pink hair and crown, cheering you on'} } },
         uiScheduled: { title:'Scheduled Tasks', subtitle:'Let PINVOU automatically handle recurring work', newTask:'New Task', templates:'Recommended Templates', myTasks:'My Tasks', loading:'Loading scheduled tasks…', empty:'No matching scheduled tasks', view:n=>`View scheduled task: ${n}`, useTemplate:n=>`Use ${n} template`, running:'Task is running', unread:'Unviewed run conversation', navUnreadAria:'Scheduled tasks have unviewed run conversations', closeError:'Dismiss error', deleteTitle:'Delete scheduled task?', deleteDescription:n=>`“${n}” will stop running and be removed from the task list. Previous run history will be kept.`, cancel:'Cancel', delete:'Delete', save:'Save', filterAll:'All', filterActive:'Enabled', filterPaused:'Paused', active:'Active', paused:'Paused', enabled:'Enabled', unknown:'Unknown', notScheduled:'Not scheduled', noSchedule:'No schedule', waitingDispatch:'Waiting to run', soon:'Starting soon', nextRun:(time,remaining)=>`Next: ${time} (${remaining})`, date:(month,day)=>`${month}/${day} `, daysAfter:(days,hours)=>`in ${days}d${hours ? ` ${hours}h` : ''}`, hoursAfter:(hours,minutes)=>`in ${hours}h${minutes ? ` ${minutes}m` : ''}`, minutesAfter:(minutes,seconds)=>`in ${minutes}m ${seconds}s`, secondsAfter:seconds=>`in ${seconds}s`, runStatus:{ queued:'Queued', running:'Running', completed:'Completed', failed:'Failed', canceled:'Canceled' }, weekdays:[['Monday','Mon'],['Tuesday','Tue'],['Wednesday','Wed'],['Thursday','Thu'],['Friday','Fri'],['Saturday','Sat'],['Sunday','Sun']], hourCount:n=>`${n} hour${n === 1 ? '' : 's'}`, choose:'Choose', autoModel:'Auto select', currentModel:'Current model', reselectModel:n=>`Choose another model · ${n}`, repeatOptions:{ workdays:'Weekdays', daily:'Daily', weekly:'Weekly', hourly:'Hourly', once:'Once', custom:'Custom' }, everyHours:n=>`Every ${n} hours`, startsAt:time=>`from ${time}`, repeat:'Repeat', interval:'Interval', dateLabel:'Days', startTime:'Start time', time:'Time', chooseRepeat:'Choose repeat frequency', chooseInterval:'Choose hourly interval', chooseDate:'Choose run days', chooseStartTime:'Choose start time', chooseRunTime:'Choose run time', setStart:'Set start', createFromTemplate:'Create from template', closeCreate:'Close new task', taskName:'Task name', taskNamePlaceholder:'For example: Daily data backup', taskPrompt:'Instructions', taskPromptPlaceholder:'Describe what should be done on each run…', saveTask:'Save task', editTask:'Edit task', closeDetail:'Close task details', taskNameAria:'Scheduled task name', taskPromptAria:'Scheduled task instructions', aiModel:'AI model', chooseModel:'Choose scheduled task model', runningStatus:'Status', nextExecution:'Next run', enableTask:'Enable task', runNow:'Run now', openFolder:'Open folder', runHistory:'Run history', records:n=>`${n} record${n === 1 ? '' : 's'}`, noRecords:'No records', openRun:'Open run conversation', noOpenRun:'This run has no conversation to open', openRunLabel:s=>`Open run: ${s}`, runInProgress:'Run in progress', viewRunResult:'Open the conversation to view results', noRunSession:'No conversation available', noRunHistory:'No run history yet', saveState:{ saving:'Saving…', saved:'Saved', invalid:'Name and instructions are required', error:'Save failed' }, pause:n=>`Pause ${n}`, resume:n=>`Resume ${n}`, templateMap:{ 'daily-brief':{name:'Daily Briefing',schedule:'Daily at 8:00',description:'Summarize important news, industry updates, and connected workplace announcements',prompt:'Summarize important news and industry updates from the past 24 hours with sources and links; when Lark or WeCom is connected, include company announcements. Do not scan user directories; save results to the task workspace.'}, 'follow-up-monitor':{name:'Follow-up Monitor',schedule:'Weekdays at 9:00',description:'Review overdue and upcoming items, highlighting risks and next steps',prompt:'Summarize overdue, due-today, and upcoming (next 3 workdays) items from connected Lark or WeCom, with risks and next steps by priority. Query and organize only — do not send, approve, or modify; do not scan user directories.'}, 'weekly-review':{name:'Weekly Review',schedule:'Friday at 16:00',description:'Create a structured weekly report from this week’s workplace activity',prompt:'Create a weekly report from this week’s calendar, to-dos, and workplace messages in connected Lark or WeCom, covering progress, carry-over items, risks, and next week’s plan. Do not scan user directories or send automatically.'}, 'memory-organize':{name:'Memory Organizer',schedule:'Weekdays at 9:30',description:'Keep long-term memory tidy on a schedule: merge duplicates, prune stale items, fix wording',prompt:'Periodically organize my long-term memory: merge duplicate entries, remove outdated or invalid items, and fix vague wording so memory stays concise and accurate. This task runs automatically without opening a conversation; it only organizes memory and does not send messages or make other changes.'} } },
@@ -496,7 +499,7 @@ export const dictEn = {
           sourceTest: 'Test store',
         },
         uiToolStore: { title:'Plugin Center', search:'Search connectors, skills, and plugins', myTools:'My Plugins', installedOnly:'Installed only', results:'Search Results', back:'Back to Plugin Center', internal:'Internal · Employees only', internalTitle:'H3C Workplace\nOne-click Access', internalDesc:'Connect to internal systems with your SSO identity—no key required', internalTools:'H3C Internal Plugins', internalCount:n=>`${n} plugins · Intranet required`, view:'View', modePlain:'Plain', modeCode:'Code', modeVisibilityHint:'Configure plugin visibility per session mode', manageVisibility:'Manage Visibility', doneManagingVisibility:'Done', guide:{ title:'Plugin Guide', close:'Close', dragTitle:'Drag to install', dragDesc:'Drag a standard skill, a single .md, an MCP server, or a Pinvou plugin .zip directly into this window to import it, or click "Upload" in the top-right to choose a file.', typesTitle:'Supported forms', types:['Standard skill (SKILL.md folder)','Single .md skill file','MCP server','Pinvou plugin package (recommended)'], formatsNote:'Standard skills, .md, MCP, and Pinvou plugin packages are all importable; the Pinvou plugin package is just the recommended standard form, and the rest are auto-normalized.', dragHintShort:'Drag in a package to add a custom plugin', introTitle:'What is a Pinvou plugin package', introDesc:'One package = one card = one switch. Pack skills, MCP servers (or their combinations) into a zip; on import the type is auto-detected from content, validated, and registered, then toggled and uninstalled uniformly in the store and at runtime.', specTitle:'Plugin package spec', specDesc:'See the "Plugin Package Spec" for the full rules: zip layout, plugin.json (schema v1), mcp manifest.json, SKILL.md, icons, and naming safety.', downloadSpec:'Download spec (Markdown)', downloadHint:'Download and share with third-party package authors; the desktop app opens a save dialog.' } },
-        artifactPreview: { download:'↓ Download', openExternal:'↗ Open externally', loading:'Loading…', fileMissing:'File does not exist or has been deleted', readFailed:e=>`Read failed: ${e}`, imageReadFailed:e=>`Image read failed: ${e}`, previewUnsupported:'Preview is not supported for this type', downloadArtifact:'↓ Download artifact', openExternalArtifact:'↗ Open externally' },
+        artifactPreview: { download:'↓ Download', openExternal:'↗ Open externally', loading:'Loading…', fileMissing:'File does not exist or has been deleted', readFailed:e=>`Read failed: ${e}`, imageReadFailed:e=>`Image read failed: ${e}`, previewUnsupported:'Preview is not supported for this type', visualWarningTruncatedPages:'Long document: only the first 30 pages are rendered', visualWarningConvertFailed:'This file cannot be previewed visually (conversion failed or a renderer component is missing)', downloadArtifact:'↓ Download artifact', openExternalArtifact:'↗ Open externally' },
         uiToolDetails: { tools:{
           ima:{ title:'Tencent ima', subtitle:'Manage ima notes and knowledge bases through OpenAPI', latency:'Cloud', desc:'Connect the Tencent ima OpenAPI Skill to search, read, create, and append notes, or search and browse knowledge bases and import web pages or content. Credentials stay on this device.', configTitle:'Connect Tencent ima', configDescription:'Credentials stay on this device and are used only to enable the IMA OpenAPI Skill.', configDocLabel:'Get Client ID / API Key', welcomeQueries:['Search my ima knowledge bases','List my ima notes','Create an ima note from this content','Find the product plan in my ima knowledge base'] },
           tmeet:{ title:'Tencent Meeting', subtitle:'Manage meetings, recordings, minutes, and attendance reports as yourself', type:'CLI + Official Skill', latency:'Cloud', desc:'Connect the official Tencent Meeting CLI and skill to create, query, update, and cancel meetings, and access attendance reports, recordings, transcripts, and AI minutes. Connecting opens the authorization page for QR-code sign-in.', welcomeQueries:['Create a Tencent Meeting for me','Show my Tencent Meeting recordings','Show the latest AI meeting minutes','List the attendees of this Tencent Meeting'] },
@@ -510,6 +513,13 @@ export const dictEn = {
           settingsHint:'When enabled, the agent can take screenshots and control your mouse and keyboard, which carries a risk of unintended actions. The agent asks for your consent again before the first control of each session, and consequential actions need per-action confirmation.',
           platformUnsupportedHint:'Computer use is not available on this platform: there is no computer-use backend for this operating system.',
           settingsStoppedHint:'Computer use is stopped. Turn it off and back on to resume agent control.',
+          permTitle:'macOS system permissions',
+          permScreenRecording:'Screen Recording (screenshots)',
+          permAccessibility:'Accessibility (mouse & keyboard control)',
+          permGranted:'granted',
+          permNotGranted:'not granted',
+          permRequest:'Open system permission dialogs',
+          permRestartHint:'The system applies a grant only to a newly launched process: after granting, fully quit and reopen the app.',
           bannerTitle:'Agent is controlling your computer',
           bannerNote:'The agent can see your screen and move the mouse and keyboard. You can stop it at any time.',
           bannerStop:'Stop control',
@@ -519,6 +529,7 @@ export const dictEn = {
           grantDeny:'Deny',
           confirmTitle:'Confirm this action',
           confirmActionLabel:'Action',
+          unreadableTarget:'(no readable target)',
           confirmElementLabel:'Target element',
           confirmOnce:'Allow this once',
           confirmDeny:'Deny',
@@ -534,7 +545,6 @@ export const dictEn = {
           confirmKeyChordMasked:(chord, count)=>chord?(count===1?`Press ${chord} + ${count} masked character`:`Press ${chord} + ${count} masked characters`):(count===1?`Press ${count} masked character`:`Press ${count} masked characters`),
           confirmHoldKeyMasked:(chord, count, ms)=>chord?(count===1?`Hold ${chord} + ${count} masked character for ${ms} ms`:`Hold ${chord} + ${count} masked characters for ${ms} ms`):(count===1?`Hold ${count} masked character for ${ms} ms`:`Hold ${count} masked characters for ${ms} ms`),
           confirmDrag:(from, to)=>`Drag from ${from} to ${to}`,
-          confirmMouseMove:point=>`Move mouse to ${point}`,
           confirmMouseDown:button=>`Press and hold the ${button} mouse button`,
           confirmMouseUp:button=>`Release the ${button} mouse button`,
           screenshotCaption:'Screenshot',
@@ -776,7 +786,7 @@ export const dictEn = {
         apBtnOpen: 'Open', apBtnLocate: 'Show in folder', apLocLabel: 'Location', apMtimeLabel: 'Modified', apLastMod: 'Modified',
         apConverting: 'Generating preview…', apConvertFail: 'Preview failed', apUnsupported: 'Inline preview not available for this type; use Open below',
         apKinds: { md:'Markdown', html:'HTML document', image:'Image', pdf:'PDF document', docx:'Office document', xlsx:'Spreadsheet', legacy_office:'Office document', text:'Text file', binary:'File' },
-        apMdSaved: 'Saved', apMdSaving: 'Saving...', apMdDirty: 'Unsaved', apMdSaveFailed: 'Save failed',
+        apMdSaving: 'Saving...', apMdDirty: 'Unsaved', apMdSaveFailed: 'Save failed',
         apMdExternalUpdateBlocked: 'The file changed externally. Your unsaved edits were kept and not overwritten.',
         apMdExternalRemovalBlocked: 'The file was deleted externally. Your unsaved edits remain in this editor; copy them or restore the original file before leaving.',
         apMdAiEdit: 'AI edit', apMdAiInstructionPlaceholder: 'How should AI edit this?',
@@ -937,6 +947,7 @@ Object.assign(dictEn.uiConversation, {
   feedbackNegative: 'Not helpful',
   retryReply: 'Regenerate',
   callingTool: name => `Calling ${name}`,
+  copyCode: 'Copy code',
   inputPlaceholder: 'Enter a value',
   otherAnswer: 'Other',
   otherPlaceholder: 'Other',
@@ -1272,6 +1283,7 @@ Object.assign(dictEn.uiSettingsDetail, {
     siliconflow:{title:'SiliconFlow China',configTitle:'SiliconFlow',desc:'Official SiliconFlow China API'},
     siliconflow_global:{title:'SiliconFlow Global',configTitle:'SiliconFlow Global',desc:'SiliconFlow international API (keys are region-locked)'},
     openai_compatible:{title:'OpenAI Compatible',desc:'Custom OpenAI-compatible endpoint'},
+    openai_responses:{title:'OpenAI Responses Compatible',desc:'Custom OpenAI Responses-compatible endpoint'},
   },
   imageCapability:'Image input', imageCapabilityEnabled:'Supports images', imageCapabilityDisabled:'No image support', imageCapabilityPinvou:'Handled automatically',
   visionModel:'Vision model', visionModelNone:'None', visionModelDesc:'Used to analyze images when the current model cannot see them',
@@ -1303,24 +1315,28 @@ Object.assign(dictEn.uiSettingsDetail.modelDescriptions, {
   'K3 长上下文模型':'K3 long-context model', '高速编码模型':'High-speed coding model',
   'K3 256K 上下文，价格更低':'K3 with 256K context at a lower price',
   '官方已转 Legacy，兼容保留':'Officially legacy; kept for compatibility',
-  '官方已转 Legacy，兼容高速':'Officially legacy; high-speed compatibility',
+  '官方将于 2026-11-18 下线':'Will be retired on 2026-11-18',
+  '高速款，官方将于 2026-11-18 下线':'High-speed tier, retires on 2026-11-18',
+  '官方已转 Legacy，2026-11-18 下线':'Officially legacy; retires on 2026-11-18',
+  '官方已转 Legacy，高速款 2026-11-18 下线':'Officially legacy; high-speed tier retires on 2026-11-18',
   '最新旗舰':'Latest flagship', '上代旗舰推理':'Previous-generation flagship reasoning',
   '均衡性价比':'Balanced and cost-effective', '快速高性价比':'Fast and cost-effective',
   '快速高性价比，夜间同样四折':'Fast and cost-effective, also 40% credit cost at night',
   '旗舰推理与编码':'Flagship reasoning and coding', '均衡智能与成本':'Balanced intelligence and cost',
   '低成本高并发':'Low cost, high volume', '上代旗舰':'Previous-generation flagship',
   '快速经济':'Fast and economical',
-  '速度与智能均衡':'Balanced speed and intelligence',
   '最新 Flash，均衡高性价比':'Latest Flash, balanced and cost-effective',
-  '旗舰推理（预览）':'Flagship reasoning (preview)',
+  '上代旗舰推理（预览）':'Previous-generation flagship reasoning (preview)',
+  '最新旗舰，复杂编码与推理':'Latest flagship, complex coding and reasoning',
   // Model catalog entries (src/features/settings/model-catalog.js items[].desc)
   '旗舰编码模型，全套餐支持':'Flagship coding model, all plans', '原生多模态编码模型，额度三倍':'Native multimodal coding model, 3x quota',
   '极速多模态，200 tokens/s':'Fast multimodal, 200 tokens/s',
   '历史模型，请求自动切换至 GLM-5.3':'Legacy model, requests auto-switch to GLM-5.3', '历史模型，自动切换至 GLM-5.3-Flash':'Legacy model, auto-switch to GLM-5.3-Flash',
   '历史模型，请求自动路由至 GLM-5.3':'Legacy model, requests auto-route to GLM-5.3', '历史模型，自动路由至 GLM-5.3-Flash':'Legacy model, auto-routes to GLM-5.3-Flash',
-  '旗舰编码模型，官方将于 2026-10-09 下线':'Flagship coding model, will be retired on 2026-10-09', '官方将于 2026-10-09 下线':'Will be retired on 2026-10-09',
-  '通用推理，官方将于 2026-10-09 下线':'General-purpose reasoning, will be retired on 2026-10-09',
-  '官方将于 2026-10-21 下线':'Will be retired on 2026-10-21',
+  'V4.1-Flash 原厂直供':'V4.1-Flash, first-party direct supply', '官方更多模型档':'Official "more models" tier',
+  'MiMo 全模态轻量款':'MiMo omni-modal lightweight tier',
+  '10-14 起自动路由至 v2.6-pro，10-21 失效':'Auto-routes to v2.6-pro from 2026-10-14; ids invalid from 2026-10-21',
+  '10-14 起自动路由至 v2.6-flash，10-21 失效':'Auto-routes to v2.6-flash from 2026-10-14; ids invalid from 2026-10-21',
   '多模态高性价比':'Multimodal and cost-effective', '最新多模态高性价比':'Latest multimodal, cost-effective',
   '新预览旗舰，仅订阅渠道':'New preview flagship, subscription channels only',
   'Kimi 最新旗舰':'Latest Kimi flagship', 'Kimi 编码模型':'Kimi coding model', 'MiniMax 最新旗舰':'Latest MiniMax flagship',
@@ -1332,15 +1348,22 @@ Object.assign(dictEn.uiSettingsDetail.modelDescriptions, {
   '正式旗舰，夜间 22:00-08:00 四折（个人版）':'GA flagship, 40% credit cost 22:00-08:00 (personal plan)',
   '轻量兼容款，支持图像输入':'Lightweight compatibility option, image input',
   '最新推荐，统一模型 ID 自动升级':'Latest recommended, auto-updating under one Model ID', '低成本低时延，效果比肩 2-1-pro':'Low cost, low latency, near 2-1-pro quality',
-  '编程特化（预览），官方即将下线':'Coding-specialized (preview); retiring soon per official docs', '稳定通用，官方即将下线':'Stable general-purpose model; retiring soon per official docs', '最强旗舰；仅 Responses 协议支持函数调用':'Strongest flagship; function calling only via Responses API',
-  '编码与 Agent 新旗舰；Chat 协议仅 effort=none 支持函数调用':'New coding/agent flagship; Chat wire function calling only at effort=none',
-  '低价高效；Chat 协议仅 effort=none 支持函数调用':'Low-cost and efficient; Chat wire function calling only at effort=none',
+  '编程特化（预览），官方即将下线':'Coding-specialized (preview); retiring soon per official docs', '稳定通用，官方即将下线':'Stable general-purpose model; retiring soon per official docs', '最强旗舰':'Strongest flagship',
+  '近 Astra 旗舰，编码与 Agent（默认）':'Near-Astra flagship for coding and agents (default)',
+  '上代均衡旗舰':'Previous balanced flagship',
+  '低价高效':'Low-cost and efficient',
   'GPT-5.6 家族旗舰，推理与编码':'GPT-5.6 family flagship, reasoning and coding',
   '最强旗舰，高难推理与长程 Agent':'Strongest flagship, hard reasoning and long-running agents',
   '官方默认推荐，复杂 Agent 编码':'Official default recommendation, complex agentic coding',
+  '新均衡款，较 Sonnet 5 快 30%+，至多省 30%':'New balanced tier: 30%+ faster than Sonnet 5, up to 30% cheaper',
   '上代旗舰，兼容保留':'Previous-generation flagship, kept for compatibility',
-  '最快，200K 上下文':'Fastest, 200K context', '上一代 Flash':'Previous-generation Flash',
-  '基线速度，兼容保留':'Baseline speed, kept for compatibility',
+  '上代均衡款，兼容保留':'Previous balanced tier, kept for compatibility',
+  '最新小旗舰，100K 以下请求较 4.5 降价 90%':'Latest small flagship: 90% below Haiku 4.5 for requests up to 100K tokens',
+  '最快，200K 上下文，Azure 端 2026-11-15 下线':'Fastest, 200K context; retires on Azure on 2026-11-15',
+  '上代稳定 Flash，仍在服务':'Previous-generation stable Flash, still served',
+  '已弃用，请求自动路由至 3.8-flash':'Deprecated; requests auto-route to 3.8-flash',
+  '已弃用，请求自动路由至 3.6-flash':'Deprecated; requests auto-route to 3.6-flash',
+  '编码模型，官方将于 2026-10-28 下线':'Coding model, will be retired on 2026-10-28',
   '旗舰，编码与 Agent 默认推荐':'Flagship, default pick for coding and agents', '上代旗舰，编码与 Agent':'Previous-generation flagship, coding and agents',
   '4.20 推理，1M 上下文':'4.20 reasoning, 1M context', '4.20 非推理，1M 上下文':'4.20 non-reasoning, 1M context',
   '快速可靠，强工具调用':'Fast and reliable, strong tool calling', '代码 Agent，256K 上下文':'Coding agent, 256K context',
@@ -1354,7 +1377,7 @@ dictEn.uiSettingsDetail.modelAliasPlaceholder = 'Optional, e.g. Daily assistant'
 
 dictEn.uiSettingsDetail.customModelTitles = {
   glm:'Custom GLM model', qwen:'Custom Qwen model',
-  openai_compatible:'Custom compatible model', glm_coding_plan:'Custom GLM Coding Plan model',
+  openai_compatible:'Custom compatible model', openai_responses:'Custom Responses model', glm_coding_plan:'Custom GLM Coding Plan model',
   tencent_coding_plan:'Custom Tencent Cloud Coding Plan model', tencent_token_plan:'Custom Tencent Cloud Token Plan model', kimi_coding_plan:'Custom Kimi Coding Plan model',
   volcengine_coding_plan:'Custom Volcengine Ark Coding Plan model', qwen_coding_plan:'Custom Qwen Coding Plan model',
   openrouter:'Custom OpenRouter model', siliconflow:'Custom SiliconFlow model', siliconflow_global:'Custom SiliconFlow model',
@@ -1981,10 +2004,6 @@ dictEn["uiTeamRelay"] = {
   "lifecycleSyncPending": "The operation is complete, but team data has not synced yet. Sync again to load the latest state."
 };
 dictEn["kbOutWeekdays"] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-dictEn["builtinModelSelect"] = "Backend model";
-dictEn["builtinModelRefresh"] = "Refresh";
-dictEn["builtinModelLoading"] = "Syncing…";
-dictEn["builtinModelEmpty"] = "No backend models";
 dictEn["uiRemote"]["status"]["idle"] = ["Not enabled", "Enable access to create a persistent remote control link."];
 dictEn["uiRemote"]["status"]["starting"] = ["Starting", "Creating the remote control connection."];
 dictEn["uiRemote"]["status"]["connecting_relay"] = ["Connecting", "Connecting to the relay…"];
@@ -1994,7 +2013,6 @@ dictEn["uiRemote"]["status"]["web_client_disconnected"] = ["Browser disconnected
 dictEn["uiRemote"]["status"]["revoked"] = ["Link revoked", "Enable remote control again."];
 dictEn["uiRemote"]["status"]["stopped"] = ["Stopped", "Open this panel to enable access again."];
 dictEn["uiRemote"]["status"]["error"] = ["Connection error", "Remote control is temporarily unavailable. Try again."];
-dictEn["uiSettingsDetail"]["builtinModel"] = "Built-in model";
 dictEn["uiSettingsDetail"]["settingsLoadFailedDetail"] = "Settings cannot be displayed right now. Reopen the page and try again.";
 dictEn["uiScheduled"]["weekdays"] = [["Monday", "Mon"], ["Tuesday", "Tue"], ["Wednesday", "Wed"], ["Thursday", "Thu"], ["Friday", "Fri"], ["Saturday", "Sat"], ["Sunday", "Sun"]];
 dictEn["uiAccount"] = {
@@ -2254,7 +2272,7 @@ Object.assign(dictEn.uiChat, {
   bgTasksRunning: n => `${n} background task${n === 1 ? '' : 's'} running`,
 });
 // restored: baseline catalog descriptions (referenced by the model catalog data)
-Object.assign(dictEn.uiSettingsDetail.modelDescriptions, { '本地服务默认模型': 'Default model for the local service', '高能力模型': 'High-capability model', '快速响应': 'Fast responses', '最新通用模型': 'Latest general-purpose model', '代码场景': 'Coding tasks', '高速代码场景': 'High-speed coding tasks', '稳定可用': 'Stable release', '高性价比': 'Cost-effective', '通用能力': 'General-purpose', '兼容保留': 'Compatibility option', '高速响应': 'High-speed responses', '轻量模型': 'Lightweight model'
+Object.assign(dictEn.uiSettingsDetail.modelDescriptions, { '本地服务默认模型': 'Default model for the local service', '高能力模型': 'High-capability model', '快速响应': 'Fast responses', '最新通用模型': 'Latest general-purpose model', '代码场景': 'Coding tasks', '高速代码场景': 'High-speed coding tasks', '稳定可用': 'Stable release', '高性价比': 'Cost-effective', '通用能力': 'General-purpose', '兼容保留': 'Compatibility option', '轻量模型': 'Lightweight model'
 });
 
 // F05 complete platform-model selection copy, supplied by shared i18n.
@@ -2273,4 +2291,4 @@ Object.assign(dictEn.uiSettingsDetail, {
   modelUnavailable:'Unavailable',
   modelSwitchFailed:'Could not switch models. Try again.',
 });
-dictEn.uiModelReplacement = { title:'This model cannot continue the conversation', lead:'The original conversation and messages remain unchanged. Select a current model and continue in a traceable new branch.', create:'Create replacement branch', creating:'Creating…' };
+dictEn.uiModelReplacement = { title:'This model cannot continue the conversation', lead:'The original conversation and messages remain unchanged. Select a current model and continue in a traceable new branch.', create:'Create replacement branch', creating:'Creating…' , branchTitleSuffix:'Replacement model branch' };

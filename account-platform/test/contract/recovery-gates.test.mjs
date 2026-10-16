@@ -107,3 +107,11 @@ test('recovery rejects invalid measurements, future completed evidence and negat
   const negativeDelay = evidence(now); negativeDelay.retention_deletion_scans[0].maximum_deletion_delay_days = -1;
   assert.throws(() => validateEvidence(policy, negativeDelay, now), /deletion/);
 });
+
+test('recovery rejects impossible calendar days and non-RFC3339 dates', () => {
+  const now = Date.parse('2026-03-02T00:00:00Z');
+  for (const invalid of ['2026-02-30T00:00:00Z', 'March 2, 2026', '2026-03-02']) {
+    const candidate = evidence(now); candidate.generated_at = invalid;
+    assert.throws(() => validateEvidence(policy, candidate, now), /RFC3339|timestamp/);
+  }
+});

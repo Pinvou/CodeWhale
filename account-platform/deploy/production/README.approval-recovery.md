@@ -6,7 +6,7 @@
 
 1. 停止恢复进程，保持 `account_approval_recovery NOLOGIN`。按现有 Account 迁移工具安装全部当前迁移并完成 `verify`，保留输出的实际校验凭据。000068 的原 SQL 和校验值不变；它要求这个角色初始禁用。
 2. 在正确的 Account 数据库，由受控操作员执行 `deploy/postgres/account-approval-recovery-role.sql`，显式传入 `-v ACCOUNT_MIGRATIONS_VERIFIED=true`。这个参数是操作员对上一步真实结果的确认，脚本不能替代完整迁移校验。脚本只启用已存在且属性、成员关系及表权限符合隔离要求的专属角色，并允许连接当前数据库；不会创建角色、密码或继承业务角色。
-3. 由既有私密凭据流程供应 SCRAM 密码或受控证书身份及数据库连接配置。禁止把密码、连接凭据、投射令牌或查询租约写入仓库、命令行记录和运行日志。生产数据库认证和网络访问须只允许此进程连接相应 Account 数据库；对外连接使用已验证的数据库 TLS 配置。
+3. 由既有私密凭据流程供应 SCRAM 密码或受控证书身份及数据库连接配置。禁止把密码、连接凭据、投射令牌或查询租约写入仓库、命令行记录和运行日志。随附 `pg_hba.conf` 仅在 Account 数据库的 TLS/SCRAM 白名单列出此专属身份；该网络认证规则不会启用角色，迁移后的 `NOLOGIN` 和本节显式激活要求保持不变。生产数据库认证和网络访问须只允许此进程连接相应 Account 数据库；对外连接使用已验证的数据库 TLS 配置。
 4. 私密环境文件配置 `APPROVAL_RECOVERY_DATABASE_URL`，认证用户必须是真正的 `account_approval_recovery`。进程验证实际 `session_user/current_user`、安全属性和两项租约函数权限；不执行 SET ROLE/SET SESSION AUTHORIZATION，也不回退到普通 Account 连接。
 
 后续升级前先停进程并由操作员恢复 `NOLOGIN`，再迁移、完整校验和显式激活。不要在恢复进程内提升角色权限；禁用 LOGIN 不会终止已经建立的会话，因此必须先停止进程并确认连接已退出。

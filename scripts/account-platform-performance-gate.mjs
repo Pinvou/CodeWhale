@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { readFile } from 'node:fs/promises';
+import { evidenceTimestamp } from './account-platform-evidence-time.mjs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -27,7 +28,7 @@ function atLeast(actual, limit, name) { required(Number.isFinite(actual) && actu
 // FORMAT_ONLY: field validation does not authenticate evidence or prove an exercise.
 export function validateEvidence(policy, evidence, now = Date.now(), provenance = {}) {
   required(evidence.schema_version === 1 && evidence.environment === 'production-equivalent', 'production-equivalent evidence is required');
-  const generated = Date.parse(evidence.generated_at);
+  const generated = evidenceTimestamp(evidence.generated_at, 'generated_at');
   required(Number.isFinite(generated) && Math.abs(now - generated) <= 24 * 3600 * 1000, 'performance evidence must be generated within 24 hours');
   required(hash.test(evidence.release_sha256) && hash.test(evidence.dataset_sha256) && hash.test(evidence.report_sha256), 'release, dataset, and report digests are required');
   required(hash.test(provenance.expectedReleaseSHA256) && evidence.release_sha256 === provenance.expectedReleaseSHA256, 'performance evidence release digest does not match the candidate release');

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { financeCopy } from '../../shared/i18n.js';
 import { hasPermission } from './authorization-ui.js';
 import { formatBalance } from './balance-view.js';
@@ -6,6 +6,8 @@ import { formatFen, requireFinanceCollection, requireFinanceID, requirePaymentOr
 import { paymentOrderHistory, effectivePaymentChannel, isPayablePaymentOrder, orderSummaryStatus, orderHistoryTimestamp, paymentOrderRemainingSeconds, paymentScanPrompt, orderDurationDays } from './order-view.js';
 import { localizedProductDisplayName } from './localized-product-display-name.js';
 import { secureRequestID } from './request-id.js';
+import { personalRechargeOwner, registerPersonalRechargeReauthentication, recoverPersonalRechargeReauthentication, settlePersonalRechargeReauthentication } from './personal-recharge-reauthentication.js';
+import { PersonalOrderCloseConfirmation } from './PersonalOrderCloseConfirmation.jsx';
 
 export function PersonalFinanceWorkspace({ client, me, language }) {
   const copy = financeCopy[language];
@@ -18,11 +20,35 @@ export function PersonalFinanceWorkspace({ client, me, language }) {
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
   const [unknown, setUnknown] = useState(false);
+  const [recoveryBlocked, setRecoveryBlocked] = useState(false);
   const [now, setNow] = useState(Date.now());
+  const [closeConfirmation, setCloseConfirmation] = useState(null);
+  const closeIntent = useRef(null);
+  const mounted = useRef(false);
+  const operationBusy = useRef(false);
+  const currentView = useRef(null);
   const generation = useRef(0);
   const intent = useRef(null);
   const canCreate = hasPermission(me, 'personal.recharge.create');
-  const owner = `${me.user_id}:${me.active_context?.context_version || 0}:${me.active_context?.personal_authorization_version || 0}`;
+  const canRead = hasPermission(me, 'personal.billing.read');
+  const canManage = hasPermission(me, 'personal.recharge.manage');
+  const owner = personalRechargeOwner(me);
+  // Render-time facts fence an old dialog even before identity cleanup effects.
+  currentView.current = { client, owner, order, canRead, canManage, busy, unknown };
+  const cancelClose = useCallback(expected => {
+    if (expected && expected !== closeIntent.current) return;
+    closeIntent.current = null; setCloseConfirmation(null);
+  }, []);
+  const closeIsCurrent = useCallback(pending => {
+    const current = currentView.current;
+    return pending && mounted.current && !operationBusy.current && !current.busy && !current.unknown &&
+      current.canRead && current.canManage && pending.client === current.client && pending.owner === current.owner &&
+      pending.generation === generation.current && pending.order === current.order &&
+      pending.orderID === current.order?.order_id && isPayablePaymentOrder(current.order, Date.now());
+  }, []);
+  useEffect(() => {
+    if (closeIntent.current && !closeIsCurrent(closeIntent.current)) cancelClose();
+  }, [client, owner, order, canRead, canManage, busy, unknown, now, closeIsCurrent, cancelClose]);
   const load = async (stamp = generation.current, signal) => {
     const [products, capabilities, orders, packages] = await Promise.all([
       client.products(signal), client.paymentCapabilities(signal), client.rechargeOrders(signal), client.entitlementPackages(signal),
@@ -37,18 +63,23 @@ export function PersonalFinanceWorkspace({ client, me, language }) {
   useEffect(() => {
     const controller = new AbortController();
     const stamp = ++generation.current;
-    intent.current = null; setData(null); setOrder(null); setStatement(''); setUnknown(false); setError(''); setNotice(''); setBusy(true);
-    if (!hasPermission(me, 'personal.billing.read')) { setBusy(false); return () => { generation.current++; controller.abort(); }; }
-    void load(stamp, controller.signal).catch(reason => { if (stamp === generation.current && reason.name !== 'AbortError') setError('unavailable'); }).finally(() => { if (stamp === generation.current) setBusy(false); });
-    return () => { generation.current++; controller.abort(); };
+    mounted.current = true; operationBusy.current = true; closeIntent.current = null; setCloseConfirmation(null);
+    const recovered = recoverPersonalRechargeReauthentication(client, owner);
+    intent.current = recovered.intent; setRecoveryBlocked(recovered.blocked);
+    setData(null); setOrder(null); setStatement(''); setUnknown(Boolean(recovered.intent)); setError(recovered.blocked ? 'reauthenticationRecoveryUnavailable' : recovered.intent ? 'unknown' : ''); setNotice(''); setBusy(true);
+    if (!canRead) { operationBusy.current = false; setBusy(false); return () => { mounted.current = false; generation.current++; closeIntent.current = null; controller.abort(); }; }
+    void load(stamp, controller.signal).catch(reason => { if (stamp === generation.current && reason.name !== 'AbortError') setError('unavailable'); }).finally(() => { if (stamp === generation.current) { operationBusy.current = false; setBusy(false); } });
+    return () => { mounted.current = false; generation.current++; closeIntent.current = null; controller.abort(); };
     // Identity/version changes invalidate all financial state and pending intent.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, owner]);
+  useEffect(() => registerPersonalRechargeReauthentication(client, { owner, epoch: client.financeSessionEpoch || 0, getIntent: () => intent.current }), [client, owner, client.financeSessionEpoch]);
   useEffect(() => { const timer = globalThis.setInterval(() => setNow(Date.now()), 1000); return () => globalThis.clearInterval(timer); }, []);
   const selected = data?.products.find(item => item.product_id === productID) || data?.products[0];
   const selectedChannel = effectivePaymentChannel(selected?.channels, channel);
   const run = async action => {
-    if (busy) return;
+    if (busy || operationBusy.current || !mounted.current) return;
+    operationBusy.current = true; cancelClose();
     const stamp = generation.current;
     setBusy(true); setError(''); setNotice('');
     try {
@@ -56,28 +87,53 @@ export function PersonalFinanceWorkspace({ client, me, language }) {
       if (stamp === generation.current) await load(stamp);
     } catch (reason) {
       if (stamp === generation.current) setError(reason.message?.startsWith('INVALID_FINANCE') ? 'invalid' : 'unavailable');
-    } finally { if (stamp === generation.current) setBusy(false); }
+    } finally { if (stamp === generation.current) { operationBusy.current = false; setBusy(false); } }
+  };
+  const refreshRecovery = () => {
+    const recovered = recoverPersonalRechargeReauthentication(client, owner);
+    if (recovered.blocked || recovered.intent && intent.current &&
+        (recovered.intent.key !== intent.current.key || recovered.intent.productID !== intent.current.productID || recovered.intent.channel !== intent.current.channel)) {
+      setRecoveryBlocked(true); setError('reauthenticationRecoveryUnavailable');
+      return;
+    }
+    setRecoveryBlocked(false);
+    if (recovered.intent) { intent.current = recovered.intent; setUnknown(true); setError('unknown'); }
+    else if (intent.current) setError('unknown');
+    // No retained record can mean that an authoritative old-view receipt
+    // settled it. Do not clear an independent current invocation on this read.
   };
   const create = () => run(async stamp => {
-    if (!canCreate || (!intent.current && (!selected || !selectedChannel))) return;
+    if (!canCreate || recoveryBlocked || (!intent.current && (!selected || !selectedChannel))) return;
+    const hadUnresolved = Boolean(intent.current);
     const current = intent.current || { productID: selected.product_id, channel: selectedChannel, key: `recharge-${secureRequestID()}` };
     intent.current = current;
     try {
       const result = await client.createRecharge(current.productID, current.channel, current.key);
+      settlePersonalRechargeReauthentication(client, owner, current);
       if (stamp !== generation.current) return;
       intent.current = null; setUnknown(false); setOrder(result); setNotice('saved');
     } catch (reason) {
       if (stamp !== generation.current) return;
       // A successful status with invalid/missing ACK is also an unknown outcome.
-      if (!Number.isInteger(reason.status) || reason.status >= 500) { setUnknown(true); setError('unknown'); }
+      if (hadUnresolved || !Number.isInteger(reason.status) || reason.status >= 500) { setUnknown(true); setError('unknown'); }
       else { intent.current = null; setUnknown(false); throw reason; }
     }
   });
   const selectOrder = orderID => run(async stamp => { const result = await client.rechargeOrder(orderID); if (stamp === generation.current) setOrder(result); });
   const query = () => order && selectOrder(order.order_id);
   const close = () => {
-    if (!order || !globalThis.confirm(copy.confirmClose)) return;
-    return run(async stamp => { const result = await client.closeRechargeOrder(order.order_id); if (stamp === generation.current) { setOrder(result); setNotice('saved'); } });
+    if (closeIsCurrent(closeIntent.current)) return;
+    const current = currentView.current;
+    const pending = { client: current.client, owner: current.owner, order: current.order, orderID: current.order?.order_id, generation: generation.current };
+    if (!closeIsCurrent(pending)) { cancelClose(); return; }
+    closeIntent.current = pending; setCloseConfirmation(pending);
+  };
+  const confirmClose = pending => {
+    if (pending !== closeIntent.current) return;
+    if (!closeIsCurrent(pending)) { cancelClose(); return; }
+    // Consume synchronously: duplicate clicks cannot reuse this confirmation.
+    cancelClose();
+    return run(async stamp => { const result = await pending.client.closeRechargeOrder(pending.orderID); if (stamp === generation.current) { setOrder(result); setNotice('saved'); } });
   };
   const claim = () => run(async stamp => {
     if (!order || !statement.trim()) return;
@@ -89,22 +145,23 @@ export function PersonalFinanceWorkspace({ client, me, language }) {
   const paymentQR = payable ? safePaymentQR(order?.qr_data) : '';
   const remainingSeconds = paymentOrderRemainingSeconds(order, now);
   const duration = orderDurationDays(order);
-  if (!hasPermission(me, 'personal.billing.read')) return null;
+  if (!canRead) return null;
   return <section className="ap-finance" aria-label={copy.title}>
-    <header><h2>{copy.title}</h2><button disabled={busy} onClick={() => void run(async () => {})}>{copy.refresh}</button></header>
+    {closeConfirmation && closeIsCurrent(closeConfirmation) && <PersonalOrderCloseConfirmation copy={copy} orderID={closeConfirmation.orderID} amount={formatFen(closeConfirmation.order.amount_fen, language)} canRestoreFocus={() => closeIsCurrent(closeConfirmation)} onCancel={() => cancelClose(closeConfirmation)} onConfirm={() => void confirmClose(closeConfirmation)} />}
+    <header><h2>{copy.title}</h2><button disabled={busy} onClick={() => void run(async () => { refreshRecovery(); })}>{copy.refresh}</button></header>
     {busy && <p role="status">{copy.loading}</p>}
     {error && <p role="alert">{copy[error]}</p>}
     {notice && <p role="status">{copy[notice]}</p>}
-    {unknown && <button disabled={busy || !canCreate} onClick={() => void create()}>{copy.retry}</button>}
+    {unknown && <button disabled={busy || recoveryBlocked || !canCreate} onClick={() => void create()}>{copy.retry}</button>}
     {data && <>
       <h3>{copy.products}</h3>
       {data.products.length === 0 ? <p>{copy.empty}</p> : <form onSubmit={event => { event.preventDefault(); void create(); }}>
-        <label>{copy.product}<select disabled={busy || unknown} value={selected?.product_id || ''} onChange={event => { setProductID(event.target.value); setChannel(''); }}>
+        <label>{copy.product}<select disabled={busy || unknown || recoveryBlocked} value={selected?.product_id || ''} onChange={event => { setProductID(event.target.value); setChannel(''); }}>
           {data.products.map(item => <option key={item.product_id} value={item.product_id}>{localizedProductDisplayName(item, language, 'product_id')} — {formatFen(item.amount_fen, language)}</option>)}
         </select></label>
-        <label>{copy.channel}<select disabled={busy || unknown} value={selectedChannel} onChange={event => setChannel(event.target.value)}>{(selected?.channels || []).map(value => <option key={value} value={value}>{value}</option>)}</select></label>
+        <label>{copy.channel}<select disabled={busy || unknown || recoveryBlocked} value={selectedChannel} onChange={event => setChannel(event.target.value)}>{(selected?.channels || []).map(value => <option key={value} value={value}>{value}</option>)}</select></label>
         {!selectedChannel && <p>{copy.noChannel}</p>}
-        <button disabled={busy || unknown || !canCreate || !selectedChannel}>{copy.create}</button>
+        <button disabled={busy || unknown || recoveryBlocked || !canCreate || !selectedChannel}>{copy.create}</button>
       </form>}
       <h3>{copy.orders}</h3>
       {data.orders.length === 0 && <p>{copy.empty}</p>}
@@ -116,7 +173,7 @@ export function PersonalFinanceWorkspace({ client, me, language }) {
         {paymentURL && <a href={paymentURL} target="_blank" rel="noopener noreferrer">{copy.pay}</a>}
         {paymentQR && <><img src={paymentQR} alt={copy.providerQR} width="240" height="240" /><p>{paymentScanPrompt(copy, order.qr_scan_apps)}</p></>}
         <button disabled={busy} onClick={() => void query()}>{copy.query}</button>
-        {payable && <button disabled={busy} onClick={() => void close()}>{copy.close}</button>}
+        {payable && canManage && <button disabled={busy || unknown || recoveryBlocked} onClick={close}>{copy.close}</button>}
         {['MANUAL_REVIEW', 'CLOSED', 'FAILED'].includes(order.status) && <form onSubmit={event => { event.preventDefault(); void claim(); }}><label>{copy.statement}<textarea value={statement} maxLength={2000} onChange={event => setStatement(event.target.value)} /></label><button disabled={busy || !statement.trim()}>{copy.claim}</button></form>}
       </article>}
       <h3>{copy.packages}</h3>

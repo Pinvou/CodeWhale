@@ -62,6 +62,8 @@ pub use crate::core::mode_state::{ModeLane, SerializableMode};
 use crate::platform::paths;
 use crate::platform::prefs::{CodePermissionPrefs, ModeDefaultPrefs, ModelSelectionRef};
 use parking_lot::{Mutex, RwLock};
+#[cfg(feature = "benchmark-hooks")]
+pub(crate) use retention::RetentionEvictionRecord;
 
 /// Re-export the session-domain mode-state types so they are owned by the
 /// sessions feature. These were historically re-exported through a `core`
@@ -103,17 +105,23 @@ pub(crate) use self::store::MAX_SESSIONS_PER_KIND;
 /// the command layer must compare against the same value GUI-created and kept
 /// headless sessions carry, or a renamed constant silently breaks auto-rename.
 pub(crate) use self::store::NEW_CHAT_TITLE;
+/// Re-export the not-found predicate: the scheduled compact's liveness oracle
+/// must classify a missing automation definition exactly as the store does —
+/// a genuine disk miss, with every other failure kind kept "unknown".
+pub(crate) use self::store::is_not_found_error;
 /// Re-export transcript helpers (consumed across engine / remote-control).
 pub use self::transcript::transcript_revision;
+pub use self::validators::is_aux_session_id;
 /// Re-export the crate-visible sched-id predicate: the send gates
 /// (alias-defeating, round-34 minor 4) and the tests that pin the
 /// predicate itself.
 pub(crate) use self::validators::is_sched_session_id;
-/// Re-export the crate-visible session-id validator (used by commands). It is
-/// `pub(crate)` so it stays out of the crate's public API surface.
+/// Re-export the crate-visible session-id validator (used by commands); the
+/// session-id half is `pub` (the underlying fn is too) for the pinvou-cli
+/// `projects` family's orphan probe, the rest stays out of the public API.
+pub use self::validators::validate_session_id;
 pub(crate) use self::validators::{
-    aux_side_effect_exclusion, is_aux_session_id, validate_scheduled_task_id, validate_session_id,
-    validate_user_workspace_path,
+    aux_side_effect_exclusion, validate_scheduled_task_id, validate_user_workspace_path,
 };
 /// Re-export the rebind outcome (public rebind docs link into it; the module
 /// itself stays private).
@@ -300,7 +308,14 @@ pub struct SessionStore {
     /// deletions (see `product_runtime::agentic_task`). `None` everywhere
     /// else — the GUI never installs one and the sweep pays nothing.
     #[cfg(feature = "benchmark-hooks")]
-    retention_eviction_observer: Arc<Mutex<Option<Arc<Mutex<Vec<String>>>>>>,
+    retention_eviction_observer: Arc<Mutex<Option<Arc<Mutex<RetentionEvictionRecord>>>>>,
+    /// Evictions recorded before any observer was installed (the headless
+    /// host boots — and sweeps — before the runner arms). Flushed into the
+    /// observer when one is installed; the record windows its ids, since a
+    /// process that never arms must not grow it without bound. Gated like
+    /// the observer.
+    #[cfg(feature = "benchmark-hooks")]
+    pending_retention_evictions: Arc<Mutex<RetentionEvictionRecord>>,
 }
 
 /// Execution-root resolver for native code sessions (Pinvou Engine): a native

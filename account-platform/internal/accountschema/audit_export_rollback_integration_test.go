@@ -31,6 +31,7 @@ func TestAuditExportRollbackRoleStorageGuard(t *testing.T) {
 		t.Fatal("SETUP_UP")
 	}
 	migrations.Unlock(ctx, c)
+	verifyAuditExportPublicUpImmutability(t, ctx, c, loaded)
 	t.Run("unbound_actual_assignment_table", func(t *testing.T) {
 		tx, e := c.Begin(ctx)
 		if e != nil {

@@ -10,7 +10,9 @@ import (
 )
 
 // RecordFinalUsage retains only numeric financial evidence after a terminal call.
-// It shares the cleanup fence but does not recreate an anonymized body or key.
+// The usage-row lock serializes writes; the shared per-user replay namespace
+// does not serialize writers or imply an installed exclusive cleanup actor.
+// This method does not recreate a response body or an idempotency key.
 func (r *PostgresRepository) RecordFinalUsage(ctx context.Context, usageID uuid.UUID, provider, adapter string, usage Usage) error {
 	if usageID == uuid.Nil || usage.InputTokens < 0 || usage.OutputTokens < 0 || usage.CachedInputTokens < 0 {
 		return ErrForbidden

@@ -125,3 +125,61 @@ func TestF17AuditDownloadStreamsBeyondOrdinaryAPILimit(t *testing.T) {
 		}
 	})
 }
+
+// The actual installed BFF forwards the wildcard suffix unchanged. This tests
+// six concrete routes and session authority, independently of the OpenAPI text
+// and the client-controlled response contract; no external issuer is simulated.
+func TestF17AuditPortalSixConcreteTransportPaths(t *testing.T) {
+	store := newMemoryStore()
+	service := testService(t, store)
+	session := validSession(uuid.NewString())
+	if err := store.SaveSession(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	type captured struct{ method, path, authorization, cookie, csrf, download string }
+	requests := make(chan captured, 6)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- captured{r.Method, r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("Cookie"), r.Header.Get("X-CSRF-Token"), r.Header.Get("X-Pinvou-Download-Token")}
+		if auditExportDownloadPath(r.Method, r.URL.Path) {
+			w.Header().Set("Content-Type", "application/vnd.pinvou.audit-envelope+json")
+			_, _ = io.WriteString(w, `{"controlled":"envelope"}`)
+		} else {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{}`)
+		}
+	}))
+	defer upstream.Close()
+	service.config.AccountURL = parseTestURL(t, upstream.URL)
+	id := uuid.NewString()
+	for _, tc := range []struct{ method, path string }{
+		{"GET", "/admin/v1/audit-logs"}, {"GET", "/admin/v1/audit-logs/" + id},
+		{"POST", "/admin/v1/audit-exports"}, {"GET", "/admin/v1/audit-exports/" + id},
+		{"POST", "/admin/v1/audit-exports/" + id + "/download-tickets"}, {"GET", "/admin/v1/audit-exports/" + id + "/download"},
+	} {
+		t.Run(tc.method+tc.path, func(t *testing.T) {
+			request := financeBrowserRequest(service, session, tc.method, "/api/admin/account"+tc.path, `{}`)
+			request.Header.Set("Authorization", "Bearer browser-untrusted")
+			request.Header.Set("X-Pinvou-Download-Token", "controlled-one-use-proof")
+			response := httptest.NewRecorder()
+			service.Handler(nil).ServeHTTP(response, request)
+			if response.Code != 200 {
+				t.Fatal("actual BFF route rejected", response.Code)
+			}
+			select {
+			case actual := <-requests:
+				if actual.method != tc.method || actual.path != tc.path || actual.authorization != "Bearer "+session.AccessToken || actual.cookie != "" || actual.csrf != "" {
+					t.Fatal("actual URI or session-only authority changed")
+				}
+				expected := ""
+				if auditExportDownloadPath(tc.method, tc.path) {
+					expected = "controlled-one-use-proof"
+				}
+				if actual.download != expected {
+					t.Fatal("download token missing or crossed another route")
+				}
+			default:
+				t.Fatal("BFF did not forward exact Account path")
+			}
+		})
+	}
+}

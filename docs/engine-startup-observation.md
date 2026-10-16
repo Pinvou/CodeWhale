@@ -31,6 +31,14 @@ npm run perf:engine-startup
 
 300 ms 是本轮实验采用的内部 Engine-ready 决策预算，不是历史基线或用户可感知延迟结论。第三项用 reused 近似预热能够达到的理论上限：如果 reused 同样慢，预热不能解决主要瓶颈，应优先处理报告中占比最高的模型准备、Skills 物化、Engine 创建或历史同步阶段。
 
-报告中的“发送到首输出”只统计首个非空 `MessageDelta`，不把 `ThinkingDelta` 算作可见正文。Engine 获取失败没有完整阶段数据，不进入冷、热分布；失败本身仍由既有 turn 终态记录。
+报告把端到端首输出时间拆成三个可由真实事件界定的区间：
+
+1. “发送到就绪”：应用准备或复用 Engine；
+2. “就绪到启动”：应用提交命令，以及 CodeWhale 在 `TurnStarted` 前完成的路由解析和准入；
+3. “启动到首输出”：CodeWhale 在 `TurnStarted` 后的请求组装、模型请求和首段正文返回。
+
+第三段当前不能继续拆分，因为 Pinvou 消费的底座事件没有暴露请求组装完成和 provider 首字节时间。报告不从调用顺序推测不存在的时间点。前端点击到后端 `start_turn` 之间也不在本报告范围内。
+
+“首输出”只统计首个非空 `MessageDelta`，不把 `ThinkingDelta` 算作可见正文。Engine 获取失败没有完整阶段数据，不进入冷、热分布；失败本身仍由既有 turn 终态记录。旧 sidecar 没有 `engine_turn_started_timestamp` 时，新增的两个分段显示为空，原有指标仍可用。
 
 收集生产数据后，先保留同一设备和应用版本的优化前报告。实际优化完成后使用相同平台、样本量和命令重新采样，比较 cold/reused P50、P95、发送到 Engine 就绪和发送到首输出，不使用单次最好值作为结论。

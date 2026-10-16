@@ -62,8 +62,13 @@ use crate::features::assistant::engine::{
 };
 #[cfg(any(feature = "benchmark-hooks", test))]
 use crate::features::assistant::eval::{EvalModelSelection, EvalSuiteModelSnapshot, ModelIdentity};
+// Every note_stderr use site in this file (the two delete-gate skips and
+// the adoption-aware failed-delete sweep) is headless-gated, so the import
+// shares their gate instead of warning as unused on GUI builds.
 use crate::features::assistant::expert_roster::ExpertRosterSnapshot;
 use crate::features::assistant::platform::bridge::{Pinvou3Bridge, base_url_uses_local_or_private};
+#[cfg(any(feature = "benchmark-hooks", test))]
+use crate::features::assistant::product_runtime::note_stderr;
 use crate::features::assistant::runtime_model::{
     ModelCredentialMode, PassthroughRuntimeModelProvider, PreparedRuntimeModel,
     RuntimeModelProvider, RuntimeModelRequest,
@@ -116,7 +121,7 @@ fn elapsed_ms(started: Instant) -> u64 {
 /// spuriously trip the conservative `cleanup_failed` preset; that is
 /// accepted (the flag is diagnostics-only and the detached run still
 /// records the true outcome).
-const TURN_GATE_AWAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+pub(crate) const TURN_GATE_AWAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Total wait per op for the detached retry that re-delivers the reclaim
 /// shutdown ops after the gate-held send gave up (issue #255). The retry
@@ -492,9 +497,7 @@ pub(crate) fn forward_edit_resend_with_reminder<F>(
     send: impl FnOnce(String) -> F,
 ) -> F {
     send(match merge_aux_zero_tool_reminder(session_id, None) {
-        Some(reminder) => {
-            format!("<system-reminder>\n{reminder}\n</system-reminder>\n\n{new_message}")
-        }
+        Some(reminder) => super::engine_support::wrap_system_reminder(&reminder, &new_message),
         None => new_message,
     })
 }
@@ -554,17 +557,74 @@ fn record_is_message_free(_store: &SessionStore, _session_id: &str) -> bool {
     true
 }
 
-/// `only_if_still_empty` guards the headless stub cleanup: the disposition
-/// sampled `has_messages` OUTSIDE the turn gate, so a turn admitted between
-/// that sample and this gate would make the record a started transcript —
-/// the only copy. Under the gate the emptiness is re-checked, and such a
-/// record is kept (`Ok(false)`, engine reclaimed, nothing deleted) instead
-/// of being destroyed as a stub.
+/// Adoption probe for the one-shot delete gate. Same headless-surface split
+/// as [`record_is_message_free`]: the store method only exists for the
+/// headless builds, and GUI builds stub it to "titled", so the guarded
+/// branch can never fire there (a GUI user deleting a renamed chat through
+/// `delete_chat_session` takes the unconditional arm anyway).
+#[cfg(any(feature = "benchmark-hooks", test))]
+fn record_is_factory_titled(store: &SessionStore, session_id: &str) -> bool {
+    store
+        .chat_session_factory_titled(session_id)
+        .unwrap_or(false)
+}
+
+#[cfg(not(any(feature = "benchmark-hooks", test)))]
+fn record_is_factory_titled(_store: &SessionStore, _session_id: &str) -> bool {
+    true
+}
+
+/// What the delete gate re-verifies before the durable delete fires. Every
+/// disposition that reaches this gate sampled its fact OUTSIDE the turn
+/// lock, and a live turn can hold that lock for the turn's whole wall
+/// clock — so each sampled fact must be re-verified under the gate before
+/// it may destroy the record.
+enum DeleteGateRecheck {
+    /// An explicit deletion (GUI chat delete, eval temp session): whatever
+    /// the caller asked to delete may be deleted.
+    Unconditional,
+    /// Headless stub cleanup: keep unless the record is still a message-free
+    /// stub wearing the factory title — a turn admitted under the gate made
+    /// it a started transcript, and a rename under the gate made it an
+    /// adopted (GUI-owned) session.
+    StillAStub,
+    /// One-shot falsy cleanup: keep unless the record still wears the
+    /// factory title. A read error keeps too: deleting on unknown state is
+    /// the unsafe direction.
+    StillFactoryTitled,
+}
+
+/// How long the headless one-shot delete lanes wait for a session's turn
+/// gate before giving up and keeping the session. Same bounding philosophy
+/// as `evict_bounded`'s teardown reclaim — a headless run whose report is
+/// already built must not sit inside its own lifecycle: the delete gate's
+/// facts were sampled OUTSIDE the turn lock, and a submit admitting in that
+/// sample→gate window holds the lock for the turn's whole wall clock, so an
+/// unbounded wait would pin the one-shot process for minutes past its
+/// report. A gate still held after this bound belongs to a live transcript
+/// — the delete is skipped, nothing is touched (no reclaim, no forget, no
+/// delete) and the session stays inspectable, the safe direction. Same
+/// value as [`REBIND_EVICT_GATE_TIMEOUT`] for the same reason: comfortably
+/// longer than any ordinary send's gate hold, so a turn that is just
+/// finishing is still observed rather than skipped.
+const DELETE_GATE_WAIT: Duration = Duration::from_secs(2);
+
+/// Turn-gated durable delete. Under the gate the sampled fact is re-checked
+/// (per [`DeleteGateRecheck`]), and a record that no longer matches is kept
+/// (`Ok(false)`, engine reclaimed, nothing deleted) instead of destroyed.
+///
+/// `gate_wait` bounds the turn-gate acquisition for the headless one-shot
+/// lanes (round-49): `Some(DELETE_GATE_WAIT)` gives up on a gate still held
+/// past the budget — keep the session, touch nothing, report `Ok(false)` —
+/// instead of waiting out a live turn. `None` (the GUI chat delete and the
+/// aux reset) keeps the historical unbounded wait: an interactive caller
+/// chose to wait for the session to become deletable.
 async fn delete_chat_session_with_gate<F, Fut, G>(
     turn_locks: &SessionTurnLocks,
     store: &SessionStore,
     session_id: &str,
-    only_if_still_empty: bool,
+    gate_wait: Option<Duration>,
+    recheck: DeleteGateRecheck,
     evict_locked: F,
     forget: G,
 ) -> Result<bool>
@@ -574,16 +634,45 @@ where
     G: FnOnce(),
 {
     let turn_lock = turn_locks.for_session(session_id).await;
-    let _turn = turn_lock.lock().await;
-    if only_if_still_empty && !record_is_message_free(store, session_id) {
-        // A read error also keeps: deleting on unknown state is the unsafe
-        // direction. The engine teardown below is everything the keep path
-        // would have done, so the skip reports success — the caller's
-        // cleanup-failure lane stays reserved for genuine delete faults.
-        eprintln!(
-            "[agent-task] stub cleanup skipped: the record carries messages \
-             under the delete gate; keeping the session"
-        );
+    let _turn = match gate_wait {
+        None => turn_lock.lock().await,
+        Some(wait) => {
+            let Ok(_turn) = tokio::time::timeout(wait, turn_lock.lock()).await else {
+                // Gate-timeout skip: nothing was touched (the recheck below
+                // never ran), so keeping the session is the whole outcome.
+                // The bounded waits only arrive from the headless builds'
+                // delete lanes; on GUI builds this arm is unreachable (every
+                // caller passes `None`), which is why the notice carries the
+                // same headless gate as the disposition-mismatch skip below.
+                #[cfg(any(feature = "benchmark-hooks", test))]
+                note_stderr(&format!(
+                    "[agent-task] cleanup skipped: the session's turn gate did not free up \
+                     within {wait:?}; the session stays inspectable"
+                ));
+                return Ok(false);
+            };
+            _turn
+        }
+    };
+    let holds = match recheck {
+        DeleteGateRecheck::Unconditional => true,
+        DeleteGateRecheck::StillAStub => {
+            record_is_message_free(store, session_id) && record_is_factory_titled(store, session_id)
+        }
+        DeleteGateRecheck::StillFactoryTitled => record_is_factory_titled(store, session_id),
+    };
+    if !holds {
+        // The engine teardown below is everything the keep path would have
+        // done, so the skip reports success — the caller's cleanup-failure
+        // lane stays reserved for genuine delete faults. The skip can only
+        // fire on the headless builds (the GUI stubs both probes to "holds"),
+        // so the notice is gated with them; note_stderr keeps a closed
+        // stderr from panicking the await chain under the report.
+        #[cfg(any(feature = "benchmark-hooks", test))]
+        note_stderr(&format!(
+            "[agent-task] cleanup skipped under the delete gate: the record no \
+             longer matches the sampled disposition; keeping the session"
+        ));
         evict_locked().await;
         return Ok(false);
     }
@@ -659,7 +748,12 @@ where
         turn_locks,
         store,
         &aux_id,
-        false,
+        // GUI-path lane (web relay / command layer): unbounded gate wait.
+        None,
+        // An explicit aux reset is an explicit deletion (the aux id is
+        // task-derived and cannot be user-renamed), so the gate recheck
+        // stays unconditional under the round-26 enum.
+        DeleteGateRecheck::Unconditional,
         || evict_locked(evict_id),
         || forget(aux_id.as_str()),
     )
@@ -991,6 +1085,47 @@ where
                 break;
             }
         }
+    }
+}
+
+/// Tears down a just-spawned engine whose session hydration failed.
+/// `get_or_spawn` sits on the submit path under the session turn gate
+/// (issue #525), so the `Shutdown` send is bounded by
+/// [`TURN_GATE_AWAIT_TIMEOUT`] — the same bound as the submit send and the
+/// reclaim shutdown sends, keeping a wedged engine from extending the gate
+/// hold even when it wedged between spawn and teardown. An undelivered
+/// `Shutdown` moves to the detached [`retry_shutdown_sends`]: the engine
+/// owns a `tx_op` clone that keeps its ops channel open, so without
+/// re-delivery its run loop could only exit at process exit.
+async fn teardown_failed_spawn_engine(
+    engine: &AppEngine,
+    forwarder: tauri::async_runtime::JoinHandle<()>,
+) {
+    let handle = engine.handle.clone();
+    bounded_teardown_shutdown(move |op| {
+        let handle = handle.clone();
+        async move { handle.send(op).await }
+    })
+    .await;
+    forwarder.abort();
+}
+
+/// The testable core of [`teardown_failed_spawn_engine`]: one gate-held
+/// bounded `Shutdown` send, and the detached retry for the shortfall. The
+/// sender closure is `Clone` so the retry task can hold its own copy
+/// without touching the turn gate, the pool, or the session maps.
+async fn bounded_teardown_shutdown<S, Fut>(send: S)
+where
+    S: FnMut(Op) -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = Result<()>> + Send + 'static,
+{
+    let delivered = bounded_shutdown_sends(send.clone(), [Op::Shutdown]).await;
+    if delivered < 1 {
+        let _ = tokio::spawn(retry_shutdown_sends(
+            send,
+            vec![Op::Shutdown],
+            RECLAIM_SHUTDOWN_RETRY_PATIENCE,
+        ));
     }
 }
 
@@ -1372,6 +1507,58 @@ fn entry_is_fresh(
     !requires_model_rebuild && entry_mcp_config_revision == current_mcp_config_revision
 }
 
+/// A reused engine's pending native-window re-check (see
+/// `EngineEntry::native_window_pending`): which server kind to ask and for
+/// which model name. No URL or credential — the re-probe runs against the
+/// freshly prepared bridge's base_url/key, which for a fresh entry is the
+/// same model config the engine was spawned from.
+#[derive(Clone, Debug, PartialEq)]
+struct PendingNativeWindow {
+    model_name: String,
+    kind: crate::core::model_endpoint::LocalServerKind,
+}
+
+impl PendingNativeWindow {
+    /// Captured from the finalized spawn bridge: only routes that are
+    /// native-probeable (Ollama / LM Studio), ended the spawn without a
+    /// served-window fact, and had the adoption path arm the re-check
+    /// (`bridge.native_window_recheck` — true exactly when that route's own
+    /// native fetch ran and served no fact). Arming is part of the
+    /// construction so a fact the route can never adopt (a borrowed roster
+    /// name, a non-operator-owned endpoint) or a declared route (whose own
+    /// fetch is skipped, so it never produces a fact to re-check) can never
+    /// mark the entry: an
+    /// armed re-probe that keeps serving a fact the rebuild path refuses to
+    /// adopt would drop and respawn the engine on every send, forever. A
+    /// fact present at spawn means the normal frozen-until-rebuild
+    /// discipline applies (no re-checking).
+    fn from_finalized(bridge: &Pinvou3Bridge) -> Option<Self> {
+        use crate::core::model_endpoint::LocalServerKind;
+        if !bridge.native_window_recheck || bridge.probed_context_tokens.is_some() {
+            return None;
+        }
+        let kind = bridge.probed_local_kind?;
+        if !matches!(kind, LocalServerKind::Ollama | LocalServerKind::LmStudio) {
+            return None;
+        }
+        let model_name = bridge.effective_model_owned()?.model;
+        Some(Self { model_name, kind })
+    }
+}
+
+/// The reuse-vs-self-heal outcome for a fresh cached entry (see
+/// `EngineEntry::native_window_pending`). Standalone so the decision is
+/// unit-testable without an AppHandle-backed pool (same idiom as
+/// `require_live_engine_for_steer` / `delegate_steer_withdrawal`).
+#[derive(Debug, PartialEq, Eq)]
+enum CachedEntryReuse {
+    /// Keep the cached engine for this turn.
+    Keep,
+    /// The pending window fact materialized since spawn: reclaim the entry
+    /// and fall through to the rebuild path so the fact is adopted.
+    RebuildForWindowFact,
+}
+
 /// A session's resident entry in the pool: the engine + its own event
 /// forwarder task.
 struct EngineEntry {
@@ -1387,6 +1574,18 @@ struct EngineEntry {
     /// instance and lazily rebuilds, so new dependencies/startup parameters
     /// take effect without an app restart.
     mcp_config_revision: u64,
+    /// Set at spawn when the route is native-probeable (kind Ollama / LM
+    /// Studio, local) but no served-window fact could be adopted — the
+    /// common shape of a model that was never JIT-loaded yet. While this is
+    /// Some, engine reuse re-checks the native API once per turn
+    /// (`reprobe_missing_native_window`): the first post-load check finds
+    /// `/api/ps` / `/api/v0/models` serving the real window and the entry is
+    /// dropped for a rebuild that adopts it — instead of the collapsed
+    /// 8192-fallback budget surviving the whole first engine lifetime
+    /// (2026-09-30 user report). Holds only the model name and server kind
+    /// (no credentials — the re-probe resolves the key from the freshly
+    /// prepared bridge, which for a fresh entry is the same model config).
+    native_window_pending: Option<PendingNativeWindow>,
     /// Engine epoch (UNIX ms): on the worker ledger, a "still running" record
     /// counts as truly alive only if it had activity within this epoch. The
     /// foundation's restart-load only flips in-memory state and does not
@@ -2003,10 +2202,20 @@ impl EnginePool {
     ) -> Pinvou3Bridge {
         bridge.session_model = Some(prepared.model.clone());
         bridge.runtime_model_credential = prepared.credential.clone();
-        // Local endpoints (OpenAI-compatible presets pointing at local/intranet
-        // services): probe the service type (Ollama / vLLM / LM Studio /
-        // generic) so thinking control follows the corresponding foundation
-        // wire protocol.
+        // Local endpoints (OpenAI-compatible presets and LocalVllm presets
+        // pointing at local/intranet services): probe the service type
+        // (Ollama / vLLM / LM Studio / generic). An OpenaiCompatible route's
+        // thinking control follows the detected foundation wire protocol; a
+        // LocalVllm preset resolves provider from the preset arm instead, so
+        // for those routes the kind feeds only the native served-window
+        // follow-up below. LocalVllm presets must probe too: discovery saves
+        // Ollama/LM Studio endpoints under that preset, and `/v1/models`
+        // there never carries a window fact — without the kind probe the
+        // native fetch below can never fire and the route keeps the 128K
+        // fallback while the monitor shows the real window. The probe result
+        // cannot flip the wire route for these presets (`provider()` resolves
+        // LocalVllm to "vllm" from the preset arm before ever consulting the
+        // probed kind), so a real vLLM classified `Vllm` is inert here.
         // A probe failure (service not started/timeout/auth failure) is
         // classified as generic, keeping the existing openai wire route. The
         // probe request carries a credential from the same origin as real
@@ -2015,7 +2224,9 @@ impl EnginePool {
         // generic endpoint loses the local default thinking tier and the
         // vLLM tiers (inference itself still succeeds with the configured
         // key).
-        if bridge.provider() == "openai" && base_url_uses_local_or_private(&bridge.base_url()) {
+        if (bridge.provider() == "openai" || bridge.provider() == "vllm")
+            && base_url_uses_local_or_private(&bridge.base_url())
+        {
             let api_key = bridge.api_key();
             bridge.probed_local_kind = Some(
                 crate::core::model_endpoint::probe_local_server_kind(
@@ -2039,11 +2250,12 @@ impl EnginePool {
         // engine loads B" chain break; only follow the served name on a
         // single-model server that does not expose the configured name.
         // Non-vLLM operator-owned routes do no name correction and adopt
-        // facts only when the configured name exactly hits the list
-        // (`adopts_probed_facts`) — a single-entry "borrowed name" returns
-        // facts belonging to another model and must not be misattributed.
-        // Cloud presets and coding_plan are not operator-owned and are not
-        // probed.
+        // facts only when the sent name is the served one
+        // (`adopts_probed_facts`): a kept multi-entry name trivially is
+        // (served == configured), while a single-entry "borrowed name"
+        // returns facts belonging to another model and must not be
+        // misattributed. Cloud presets and coding_plan are not
+        // operator-owned and are not probed.
         let is_vllm_route = bridge.provider() == "vllm";
         if let Some(model) = bridge.effective_model_owned() {
             Self::adopt_probed_endpoint_facts(
@@ -2067,15 +2279,51 @@ impl EnginePool {
     /// and `probed_output_tokens` are written. On probe failure (endpoint
     /// unreachable / name not matched) both facts are None and the route
     /// falls back to configured values / window tiers.
+    ///
+    /// Ollama / LM Studio exception: their OpenAI-compatible `/v1/models`
+    /// never carries a window fact, so an endpoint probed as one of them
+    /// gets a native follow-up for the name actually sent — Ollama's
+    /// `/api/ps` effective context → `/api/show` Modelfile `num_ctx`
+    /// declaration, LM Studio's `/api/v0/models` served window
+    /// (`loaded_context_length` on a loaded entry). Only provable runtime
+    /// facts are adopted: a model that was never loaded and declares no
+    /// `num_ctx` stays without a window (the GGUF trained cap is a
+    /// capability ceiling — the server actually serves its 4096-class
+    /// default, which no API exposes — and adopting it would loosen budgets
+    /// into silent upstream truncation). Without any fact the route declares
+    /// no window and the foundation derives its budget from the 8192
+    /// unknown-Ollama fallback — compaction floors at 4096 and the
+    /// post-compaction input budget collapses to 1024 (2026-09-30 user
+    /// report: Ollama actually serving 131072); engine reuse re-checks the
+    /// missing fact (`native_window_pending`), so the first JIT load is
+    /// picked up on the next send instead of at the idle reap.
+    ///
+    /// Arms the reuse re-check (`bridge.native_window_recheck`) exactly when
+    /// this route's own native fetch ran and served no fact. A route whose
+    /// fact can never be adopted (`adopts` false on a borrowed roster name,
+    /// or not operator-owned) never runs the fetch and never arms — the
+    /// re-probe would keep serving a fact the rebuild refuses to adopt and
+    /// respawn the engine on every send; a declared route skips the fetch
+    /// entirely — its budget is the declaration by construction, and the
+    /// per-turn re-check plus an adopting rebuild must not second-guess an
+    /// explicit declaration (the monitor display still shows the smaller
+    /// native fact where one exists; a stale declaration is the user's to
+    /// fix).
     async fn adopt_probed_endpoint_facts(
         bridge: &mut Pinvou3Bridge,
         mut model: SavedModel,
         is_vllm_route: bool,
         pins_scheduled_model: bool,
     ) {
+        // Only the route's own missed native fetch sets this below; every
+        // other path (adopt-less, adopted, declared) leaves it cleared, so
+        // reusing a bridge never inherits a stale arming.
+        bridge.native_window_recheck = false;
         if !(is_vllm_route || model.is_operator_owned_endpoint()) {
             return;
         }
+        // Read before `renamed` below moves `model` into `session_model`.
+        let declared_window = model.context_window_tokens;
         // The probe carries the same credential as real inference
         // (authenticated endpoints 401 on `/v1/models` without credentials;
         // on probe failure the configured values are kept).
@@ -2088,13 +2336,143 @@ impl EnginePool {
         .await;
         let adopts =
             crate::features::monitor::adopts_probed_facts(is_vllm_route, &model.model, &served);
-        if is_vllm_route && served != model.model && !pins_scheduled_model {
+        let renamed = is_vllm_route && served != model.model && !pins_scheduled_model;
+        let sent_name = if renamed {
+            served.clone()
+        } else {
+            model.model.clone()
+        };
+        if renamed {
             model.model = served;
             bridge.session_model = Some(model);
         }
         if adopts {
             bridge.probed_context_tokens = max_len;
             bridge.probed_output_tokens = max_output;
+            // Native window fact for probed-Ollama / probed-LM Studio
+            // endpoints, only when the list probe had none and the facts are
+            // adoptable (the queried name is the one actually sent, so the
+            // fact belongs to this route by construction). Ollama's
+            // `/api/ps`→`/api/show` cascade and LM Studio's
+            // `/api/v0/models` served window are the only native facts these
+            // servers expose; every other kind keeps the listing (vLLM and
+            // friends list `max_model_len`) or no fact (generic). A model
+            // that was never loaded and declares no `num_ctx` stays without
+            // an Ollama window (the GGUF trained cap is a capability
+            // ceiling — the server actually serves its 4096-class default,
+            // which no API exposes — and adopting it would loosen budgets
+            // into silent upstream truncation); engine reuse re-checks the
+            // missing fact once per turn (`native_window_pending`), so the
+            // first load is picked up by the next send without waiting for
+            // the idle reap. For non-vLLM routes the `adopts` gate is an
+            // exact-name match on the sent name; a tagless configured name
+            // still resolves its own `/api/ps` entry via Ollama's
+            // `name:latest` canonicalization, while a genuinely different
+            // name (case- or tag-different) on a multi-entry list fires the
+            // native fetch and safely misses the keyed native maps
+            // (conservative, already a Mismatch display state). Adopted
+            // native values carry no sanity band — deliberately the same
+            // trust class as user declarations and vLLM `max_model_len`: a
+            // tiny honest value (a Modelfile `num_ctx 512` typo, a small
+            // global default) is adopted as-is and preflight fails per turn
+            // with the visible context-recovery error — loud-and-true
+            // instead of the 8192-pretense silently truncating upstream.
+            // There is no in-app override for local presets (the
+            // declaration field is hidden and declarations only min-clamp),
+            // so the escape is the real fix — the server-side context
+            // configuration; the adopted value stays visible on the monitor
+            // card / progress denominator.
+            if max_len.is_none() && declared_window.is_none() {
+                let native = crate::core::model_endpoint::fetch_native_served_context(
+                    bridge.probed_local_kind,
+                    &bridge.base_url(),
+                    Some(api_key.as_str()),
+                    &sent_name,
+                )
+                .await;
+                match native {
+                    Some(Some(ctx)) => bridge.probed_context_tokens = Some(ctx),
+                    Some(None) => {
+                        // The route asked its own native API and got no fact
+                        // — exactly the shape the reuse re-check exists for.
+                        bridge.native_window_recheck = true;
+                    }
+                    None => {}
+                }
+            }
+        }
+    }
+
+    /// Re-check for a reused engine whose spawn ended without a native
+    /// served-window fact (`EngineEntry::native_window_pending`):
+    /// re-classify the endpoint (cache-peeked; the battery re-runs at most
+    /// once per TTL) and ask the native API that classification selects.
+    /// Returns the window once the server can actually serve it (model
+    /// JIT-loaded since), None while it still can't (unloaded / endpoint
+    /// down / no declaration) — the caller keeps the engine in that case.
+    /// `bridge` is the freshly prepared (unfinalized) bridge of this same
+    /// model config; the fact is deliberately not written here — adoption
+    /// goes through the normal finalize so the route limits derive in one
+    /// place.
+    ///
+    /// The marker's frozen kind is deliberately not trusted for dispatch:
+    /// the stack behind the port can swap while the engine lives (dev
+    /// restart onto a different server class), and re-dialing the stale
+    /// kind's API would 404 on every send without ever arming a fact — the
+    /// 8192-fallback budget would persist past the point where the new
+    /// server could serve the real window. A re-classification to a
+    /// non-probeable kind lands on the helper's `None` arm and keeps (a
+    /// Generic result is never cached, so that shape re-runs the battery
+    /// per send — small local GETs, bounded, and the marker heals or drops
+    /// at the next rebuild).
+    ///
+    /// Native probes are local-only by construction (the marker is armed
+    /// inside the locality-gated finalize block, and a config edit that
+    /// changes the base_url reclaims the entry via whole-struct equality).
+    /// The direct guard below keeps that property local to this function —
+    /// a weakening of the provenance chain upstream cannot silently turn
+    /// the reuse path into a native prober of remote endpoints.
+    async fn reprobe_missing_native_window(
+        bridge: &Pinvou3Bridge,
+        pending: &PendingNativeWindow,
+    ) -> Option<u32> {
+        if !base_url_uses_local_or_private(&bridge.base_url()) {
+            return None;
+        }
+        let api_key = bridge.api_key();
+        let kind = crate::core::model_endpoint::probe_local_server_kind(
+            &bridge.base_url(),
+            Some(api_key.as_str()),
+        )
+        .await;
+        crate::core::model_endpoint::fetch_native_served_context(
+            Some(kind),
+            &bridge.base_url(),
+            Some(api_key.as_str()),
+            &pending.model_name,
+        )
+        .await
+        .unwrap_or(None)
+    }
+
+    /// The reuse-path self-heal decision (see `EngineEntry::
+    /// native_window_pending`): no pending marker → keep without probing;
+    /// pending but the native API still serves no fact → keep (the engine
+    /// stays, the next turn re-asks); pending and the fact materialized →
+    /// rebuild so the fact is adopted. Extracted from `get_or_spawn_with_policy`
+    /// verbatim so the decision — dropping it would let the collapsed
+    /// 8192-fallback budget survive the engine's whole lifetime — is pinned
+    /// by `pending_window_reuse_decision_rebuilds_once_fact_materializes`.
+    async fn cached_entry_reuse_decision(
+        pending: Option<&PendingNativeWindow>,
+        bridge: &Pinvou3Bridge,
+    ) -> CachedEntryReuse {
+        match pending {
+            None => CachedEntryReuse::Keep,
+            Some(pending) => match Self::reprobe_missing_native_window(bridge, pending).await {
+                Some(_) => CachedEntryReuse::RebuildForWindowFact,
+                None => CachedEntryReuse::Keep,
+            },
         }
     }
 
@@ -2134,7 +2512,7 @@ impl EnginePool {
         let prepared = PreparedRuntimeState::new(prepared, model_update_revision);
         let mcp_config_revision = self.mcp_config_revision.load(Ordering::Acquire);
 
-        let (fresh_engine, stale) = {
+        let (fresh_engine, pending_window, stale) = {
             let mut entries = self.entries.lock().await;
             if let Some(entry) = entries.get(session_id) {
                 if entry_is_fresh(
@@ -2142,34 +2520,86 @@ impl EnginePool {
                     entry.mcp_config_revision,
                     mcp_config_revision,
                 ) {
-                    (Some(entry.engine.clone()), None)
+                    (
+                        Some(entry.engine.clone()),
+                        entry.native_window_pending.clone(),
+                        None,
+                    )
                 } else {
-                    (None, entries.remove(session_id))
+                    (None, None, entries.remove(session_id))
                 }
             } else {
-                (None, None)
+                (None, None, None)
             }
         };
+        let mut self_healed = false;
         if let Some(engine) = fresh_engine {
-            crate::features::assistant::timing::record_engine_ready(
-                session_id,
-                crate::features::assistant::timing::EngineAcquireTiming {
-                    kind: "reused",
-                    total_ms: elapsed_ms(acquisition_started),
-                    runtime_lock_ms,
-                    prepare_model_ms,
-                    reclaim_ms: 0,
-                    finalize_bridge_ms: 0,
-                    tool_setup_ms: 0,
-                    materialize_skills_ms: 0,
-                    spawn_engine_ms: 0,
-                    load_session_ms: 0,
-                    sync_session_ms: 0,
-                },
-            );
-            return Ok(engine);
+            // Missing-native-window re-adoption (see
+            // `EngineEntry::native_window_pending`): while the spawn ended
+            // without a served-window fact — the shape of a model that was
+            // never JIT-loaded yet — every reuse re-classifies the endpoint
+            // (cache-peeked, so the 7-probe battery re-runs at most once per
+            // 60s TTL) and re-asks the selected native API once (the
+            // `/api/show` leg is 60s-cached in core, `/api/ps` /
+            // `/api/v0/models` are one small local GET each). Worst case
+            // while pending is ~9s inline on this send path — a cold kind
+            // cache against a hung-but-accepting server (3s battery + 3s ps
+            // timeout +, when ps answered Ollama-shaped-but-missing, an
+            // uncached 3s show; `Unreachable` is never cached); with the
+            // kind cached this is ~6s. The re-check ends
+            // once the fact materializes — and only then, not at the idle
+            // reap: an entry in active use never goes idle (every send
+            // refreshes `last_active`), so on a shape that can never prove
+            // a fact (the model unloads between turns on a keep_alive=0
+            // server, or a pre-0.6 Ollama whose `/api/ps` carries no
+            // `context_length`) the re-check rides each send for the
+            // engine's lifetime until an unrelated rebuild drops the
+            // marker (disclosed residual; healthy servers pay ~ms). The
+            // first post-load
+            // check finds the real window and the entry is dropped for the
+            // rebuild below, which re-finalizes with the fact adopted —
+            // instead of the collapsed 8192-fallback budget surviving the
+            // whole first engine lifetime (2026-09-30 user report). Runs
+            // outside the entries lock.
+            if matches!(
+                Self::cached_entry_reuse_decision(pending_window.as_ref(), &bridge).await,
+                CachedEntryReuse::Keep
+            ) {
+                crate::features::assistant::timing::record_engine_ready(
+                    session_id,
+                    crate::features::assistant::timing::EngineAcquireTiming {
+                        kind: "reused",
+                        total_ms: elapsed_ms(acquisition_started),
+                        runtime_lock_ms,
+                        prepare_model_ms,
+                        reclaim_ms: 0,
+                        finalize_bridge_ms: 0,
+                        tool_setup_ms: 0,
+                        materialize_skills_ms: 0,
+                        spawn_engine_ms: 0,
+                        load_session_ms: 0,
+                        sync_session_ms: 0,
+                    },
+                );
+                return Ok(engine);
+            }
+            // The model loaded since this engine spawned: reclaim and fall
+            // through to the rebuild path (mirrors the revision-mismatch
+            // reclaim; a mid-session rebuild is the same path a model edit
+            // takes, including history hydration).
+            self_healed = true;
+            let removed = self.entries.lock().await.remove(session_id);
+            if let Some(entry) = removed {
+                self.reclaim_engine_entry(session_id, entry).await;
+            }
         }
-        let acquire_kind = if stale.is_some() { "rebuilt" } else { "cold" };
+        // A pending-window self-heal drops the entry inline above (so
+        // `stale` is None) but is a mid-session rebuild, not a cold spawn.
+        let acquire_kind = if stale.is_some() || self_healed {
+            "rebuilt"
+        } else {
+            "cold"
+        };
         let reclaim_started = Instant::now();
         if let Some(entry) = stale {
             self.reclaim_engine_entry(session_id, entry).await;
@@ -2181,6 +2611,13 @@ impl EnginePool {
         let bridge =
             Self::finalize_runtime_bridge(bridge, &prepared.prepared, pins_scheduled_model).await;
         let finalize_bridge_ms = elapsed_ms(finalize_bridge_started);
+        // Pending re-adoption marker for engine reuse (see
+        // `EngineEntry::native_window_pending`): armed by the adoption inside
+        // finalize only when this route's native fetch actually ran and
+        // served no fact — adopt-less routes (`adopts` false / not
+        // operator-owned) and declared routes never arm, so a served fact
+        // that can never be adopted cannot trigger a rebuild on every send.
+        let native_window_pending = PendingNativeWindow::from_finalized(&bridge);
         let tool_setup_started = Instant::now();
         // The shell execution directory and the engine cwd share one source:
         // resolved uniformly via SessionStore::session_roots
@@ -2277,8 +2714,7 @@ impl EnginePool {
                     .await
                 {
                     if is_scheduled {
-                        let _ = engine.handle.send(Op::Shutdown).await;
-                        forwarder.abort();
+                        teardown_failed_spawn_engine(&engine, forwarder).await;
                         return Err(error).with_context(|| {
                             format!("sync scheduled session {session_id} before its first turn")
                         });
@@ -2295,8 +2731,7 @@ impl EnginePool {
                 }
             }
             Err(error) => {
-                let _ = engine.handle.send(Op::Shutdown).await;
-                forwarder.abort();
+                teardown_failed_spawn_engine(&engine, forwarder).await;
                 return Err(error).with_context(|| {
                     format!("load session {session_id} before spawning its engine")
                 });
@@ -2311,6 +2746,7 @@ impl EnginePool {
                 forwarder,
                 runtime_model: prepared,
                 mcp_config_revision,
+                native_window_pending,
                 spawned_at_ms,
                 steer_incarnation,
                 last_active_epoch_ms: AtomicU64::new(Self::now_epoch_ms()),
@@ -2505,7 +2941,10 @@ impl EnginePool {
                     &self.turn_locks,
                     &self.store,
                     &id,
-                    false,
+                    // GUI-path lane: the interactive caller asked for this
+                    // delete, so the unbounded gate wait is theirs to wait.
+                    None,
+                    DeleteGateRecheck::Unconditional,
                     || self.evict_locked(&id),
                     || self.forget_session(&id),
                 )
@@ -2539,39 +2978,19 @@ impl EnginePool {
     /// the durable delete is guarded — under the turn gate a record that
     /// carries messages (or whose state is unloadable) is a started
     /// transcript, not a stub, and is kept with only the engine reclaimed
-    /// (`delete_chat_session_with_gate` with `only_if_still_empty`).
+    /// ([`DeleteGateRecheck::StillAStub`]). The gate wait itself is bounded
+    /// ([`DELETE_GATE_WAIT`]): a gate still held past the budget keeps the
+    /// session untouched instead of pinning the report-holding teardown for
+    /// the turn's whole wall clock.
     #[cfg(any(feature = "benchmark-hooks", test))]
     pub(crate) async fn delete_chat_session_if_still_empty(&self, session_id: &str) -> Result<()> {
-        let deleted = delete_chat_session_with_gate(
-            &self.turn_locks,
-            &self.store,
+        self.delete_chat_session_gated(
             session_id,
-            true,
-            || self.evict_locked(session_id),
-            || self.forget_session(session_id),
+            DeleteGateRecheck::StillAStub,
+            "late sweep of deleted stub",
+            "late sweep of failed stub cleanup",
         )
-        .await;
-        let deleted = match deleted {
-            Ok(deleted) => deleted,
-            // Same failed-delete backstop as `delete_eval_session`: the
-            // in-memory entry must not linger on a failed delete, and the
-            // late sweep retries the disk cleanup.
-            Err(error) => {
-                self.forget_session(session_id);
-                Self::schedule_late_sweep(
-                    crate::platform::paths::sessions_root().join(session_id),
-                    "late sweep of failed stub cleanup",
-                );
-                return Err(error);
-            }
-        };
-        if deleted {
-            Self::schedule_late_sweep(
-                crate::platform::paths::sessions_root().join(session_id),
-                "late sweep of deleted stub",
-            );
-        }
-        Ok(())
+        .await
     }
 
     /// Atomically reset a task's auxiliary conversation (M6): delete the
@@ -2631,6 +3050,81 @@ impl EnginePool {
         Ok((deleted_aux, created))
     }
 
+    /// One-shot falsy delete for the teardown arms: like
+    /// [`Self::delete_chat_session_if_still_empty`], the durable delete is
+    /// guarded under the turn gate — the disposition sampled the adoption
+    /// marker outside the gate, and a live turn can hold that gate for the
+    /// turn's whole wall clock, so a rename landing during the wait makes
+    /// the record an adopted (GUI-owned) session that must be kept. The
+    /// gate wait itself is bounded ([`DELETE_GATE_WAIT`], the
+    /// `evict_bounded` "must produce its report" bounding): a gate still
+    /// held past the budget skips the delete and keeps the session
+    /// untouched. The late sweep only fires on the delete outcome (or the
+    /// failed-delete backstop), never on the keep outcome — the timeout
+    /// keep included.
+    #[cfg(any(feature = "benchmark-hooks", test))]
+    pub(crate) async fn delete_chat_session_unless_adopted(&self, session_id: &str) -> Result<()> {
+        self.delete_chat_session_gated(
+            session_id,
+            DeleteGateRecheck::StillFactoryTitled,
+            "late sweep of deleted one-shot session",
+            "late sweep of failed one-shot delete",
+        )
+        .await
+    }
+
+    /// Shared body of the two guarded deletes above: the bounded gate wait
+    /// ([`DELETE_GATE_WAIT`]), the failed-delete backstop, and the
+    /// deleted-outcome late sweep are structurally identical — the variants
+    /// differ only in the [`DeleteGateRecheck`] sampled under the gate and
+    /// the two sweep labels.
+    #[cfg(any(feature = "benchmark-hooks", test))]
+    async fn delete_chat_session_gated(
+        &self,
+        session_id: &str,
+        recheck: DeleteGateRecheck,
+        deleted_label: &'static str,
+        failed_label: &'static str,
+    ) -> Result<()> {
+        let deleted = delete_chat_session_with_gate(
+            &self.turn_locks,
+            &self.store,
+            session_id,
+            Some(DELETE_GATE_WAIT),
+            recheck,
+            || self.evict_locked(session_id),
+            || self.forget_session(session_id),
+        )
+        .await;
+        let deleted = match deleted {
+            Ok(deleted) => deleted,
+            // Same failed-delete backstop as `delete_eval_session`: the
+            // in-memory entry must not linger on a failed delete, and the
+            // late sweep retries the disk cleanup. The sweep is
+            // adoption-aware: the record SURVIVED the failed delete, so a
+            // GUI rename landing inside the sweep window turns the
+            // directory into a live session's workspace that must not be
+            // destroyed.
+            Err(error) => {
+                self.forget_session(session_id);
+                Self::schedule_late_sweep_unless_adopted(
+                    crate::platform::paths::sessions_root().join(session_id),
+                    failed_label,
+                    self.store.clone(),
+                    session_id.to_string(),
+                );
+                return Err(error);
+            }
+        };
+        if deleted {
+            Self::schedule_late_sweep(
+                crate::platform::paths::sessions_root().join(session_id),
+                deleted_label,
+            );
+        }
+        Ok(())
+    }
+
     /// Eval-only deletion keeps ordinary delete semantics, but also schedules the existing
     /// late sweep when the immediate disk deletion fails. The error remains observable to the
     /// Judge adapter, while the sweep prevents a transient filesystem failure from silently
@@ -2658,6 +3152,25 @@ impl EnginePool {
         );
     }
 
+    /// Adoption guard for the failed-delete backstop sweep: the record
+    /// survived the failed delete, so sweep the directory only while it is
+    /// still ours — an absent record means the delete converged (the sweep
+    /// then cleans the resurrected-orphan directory as before), a record
+    /// still reading factory-titled means the session was never adopted,
+    /// and a renamed (adopted) or unreadable record keeps the directory
+    /// (unknown keeps — the same rule the delete gate applies).
+    #[cfg(any(feature = "benchmark-hooks", test))]
+    fn sweep_may_remove_session_dir(store: &SessionStore, session_id: &str) -> bool {
+        match store.chat_session_record_present(session_id) {
+            Some(false) => true,
+            Some(true) => record_is_factory_titled(store, session_id),
+            // Unreadable record: keep the directory (the doc contract and
+            // the delete gate's unknown-keeps rule); the next sweep attempt
+            // re-probes.
+            None => false,
+        }
+    }
+
     /// Delayed sweep after deletion: after the foundation cancels sub-agents
     /// it writes the worker ledger asynchronously on a background thread
     /// (write_json_atomic recreates the parent directory), so a just-deleted
@@ -2668,13 +3181,50 @@ impl EnginePool {
         tauri::async_runtime::spawn(async move {
             for delay_ms in [2000u64, 6000] {
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                match std::fs::remove_dir_all(&dir) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => {
-                        eprintln!("[engine_pool] {label} {} failed: {error}", dir.display())
-                    }
+                Self::sweep_attempt_remove_dir(&dir, label, |message| {
+                    // Plain eprintln!: this twin is compiled in default
+                    // (non-benchmark) builds, and the closed-stderr panic
+                    // it risks is bounded to a detached best-effort sweep.
+                    eprintln!("{message}")
+                });
+            }
+        });
+    }
+
+    /// One sweep attempt's disk half, shared by both late-sweep entry
+    /// points: remove the directory, swallow a missing target as converged,
+    /// and hand every other failure to the entry point's own logging choice
+    /// (plain `eprintln!` for the default-build twin, `note_stderr` for the
+    /// cfg-gated backstop twin).
+    fn sweep_attempt_remove_dir(dir: &std::path::Path, label: &str, report: impl FnOnce(String)) {
+        match std::fs::remove_dir_all(dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => report(format!(
+                "[engine_pool] {label} {} failed: {error}",
+                dir.display()
+            )),
+        }
+    }
+
+    /// [`Self::schedule_late_sweep`] for the failed-delete backstop, gated on
+    /// the adoption state at each attempt: a GUI adoption landing inside the
+    /// sweep window must not lose the session directory under its surviving
+    /// record.
+    #[cfg(any(feature = "benchmark-hooks", test))]
+    fn schedule_late_sweep_unless_adopted(
+        dir: std::path::PathBuf,
+        label: &'static str,
+        store: SessionStore,
+        session_id: String,
+    ) {
+        tauri::async_runtime::spawn(async move {
+            for delay_ms in [2000u64, 6000] {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                if !Self::sweep_may_remove_session_dir(&store, &session_id) {
+                    continue;
                 }
+                Self::sweep_attempt_remove_dir(&dir, label, |message| note_stderr(&message));
             }
         });
     }
@@ -2780,7 +3330,18 @@ impl EnginePool {
                     }
                 }
                 forwarder.abort();
-                let _ = forwarder.await;
+                // The abort-join is bounded (issue #525): reclaim holds the
+                // turn gate, and a forwarder wedged outside an await point
+                // can only be reaped once it next reaches an await — which
+                // may never happen. Dropping the join handle on timeout
+                // detaches it (tauri's JoinHandle has no abort-on-drop); a
+                // detached straggler lingers like an undelivered Shutdown
+                // does (accepted #483 residue), and holds no gate, pool, or
+                // session-map state, so it cannot re-block evict/delete.
+                bounded_while_holding_turn_gate("forwarder drain", async move {
+                    let _ = forwarder.await;
+                })
+                .await;
             },
             || {
                 engine.finish_reclaimed_turn(
@@ -4388,12 +4949,13 @@ mod scheduled_model_tests {
     }
     const TEST_SUBMISSION: &str = "sub-test";
     use super::{
-        AUX_ZERO_TOOL_REMINDER, BoundedJoinOutcome, EvalModelSnapshots, ModelIdentity,
-        ModelUpdateRevisions, Op, Pinvou3Bridge, PreparedRuntimeState, REBIND_EVICT_GATE_TIMEOUT,
-        SESSION_MODEL_BINDING_STALE_ERROR, ScheduledUnattendedGuard, SessionShellManagers,
-        SessionTurnLifecycles, SessionTurnLocks, SessionTurnShellTasks, TURN_GATE_AWAIT_TIMEOUT,
-        TranscriptOperation, TurnIdentity, bounded_join_while_holding_turn_gate,
-        bounded_shutdown_sends, cancel_turn_with_gates, default_model_for_new_session_from,
+        AUX_ZERO_TOOL_REMINDER, BoundedJoinOutcome, DELETE_GATE_WAIT, DeleteGateRecheck,
+        EvalModelSnapshots, ModelIdentity, ModelUpdateRevisions, Op, Pinvou3Bridge,
+        PreparedRuntimeState, REBIND_EVICT_GATE_TIMEOUT, SESSION_MODEL_BINDING_STALE_ERROR,
+        ScheduledUnattendedGuard, SessionShellManagers, SessionTurnLifecycles, SessionTurnLocks,
+        SessionTurnShellTasks, TURN_GATE_AWAIT_TIMEOUT, TranscriptOperation, TurnIdentity,
+        bounded_join_while_holding_turn_gate, bounded_shutdown_sends, bounded_teardown_shutdown,
+        cancel_turn_with_gates, default_model_for_new_session_from,
         delete_chat_session_with_aux_cascade, delete_chat_session_with_gate,
         delete_scheduled_run_with_gate, delete_then_forget, dispatch_turn_bound_cancel,
         entry_is_fresh, evict_if_idle_with_gates, forward_edit_resend_with_reminder,
@@ -6276,6 +6838,53 @@ mod scheduled_model_tests {
         assert_eq!(error.to_string(), "sentinel delete failure");
     }
 
+    /// The failed-delete backstop sweep must be adoption-aware: it arms on a
+    /// delete that FAILED (the record survives), so a GUI rename landing in
+    /// the sweep window must stop the directory removal — while an absent
+    /// record (delete converged) and a still-factory-titled record (never
+    /// adopted) both stay sweepable. `NEW_CHAT_TITLE` is the factory title
+    /// the adoption probe compares against.
+    #[test]
+    fn failed_delete_sweep_skips_adopted_records_but_keeps_converged_and_fresh_ones() {
+        use super::EnginePool;
+        crate::platform::test_support::with_temp_home("pinvou3-engine-pool-sweep-guard", || {
+            let home = crate::platform::paths::pinvou3_home();
+            let store = SessionStore::boot().expect("session store");
+            let session_id = store
+                .create_new(
+                    "wire-model".to_string(),
+                    Some(crate::features::sessions::NEW_CHAT_TITLE.to_string()),
+                    home.join("workspace"),
+                )
+                .expect("chat session")
+                .metadata
+                .id;
+
+            // Factory-titled record (never adopted) → sweepable.
+            assert!(EnginePool::sweep_may_remove_session_dir(
+                &store,
+                &session_id
+            ));
+
+            // Adopted (renamed out of the factory title) inside the window → keep.
+            store
+                .set_title(&session_id, "user renamed me".to_string())
+                .expect("adopting rename");
+            assert!(!EnginePool::sweep_may_remove_session_dir(
+                &store,
+                &session_id
+            ));
+
+            // Record deleted after all (the retried store delete converged) →
+            // the sweep still cleans the resurrected-orphan directory.
+            store.delete(&session_id).expect("record delete");
+            assert!(EnginePool::sweep_may_remove_session_dir(
+                &store,
+                &session_id
+            ));
+        });
+    }
+
     #[tokio::test]
     async fn chat_delete_keeps_evict_delete_and_forget_ahead_of_waiting_send() {
         let _env_guard = crate::platform::paths::tests::ENV_LOCK
@@ -6312,7 +6921,8 @@ mod scheduled_model_tests {
                 &delete_locks,
                 &delete_store,
                 &delete_id,
-                false,
+                None,
+                DeleteGateRecheck::Unconditional,
                 || async move {
                     delete_engine.store(false, Ordering::Release);
                 },
@@ -6452,6 +7062,94 @@ mod scheduled_model_tests {
         let _ = std::fs::remove_dir_all(home);
     }
 
+    /// Round-49 review: the headless one-shot delete lanes' turn-gate wait is
+    /// bounded (DELETE_GATE_WAIT — the `evict_bounded` "must produce its
+    /// report" bounding). A submit admitting in the disposition's
+    /// sample→gate window holds the gate for the turn's whole wall clock;
+    /// the delete must give up after the budget and keep the session —
+    /// touching nothing (no reclaim, no forget, no delete) — instead of
+    /// pinning the report-holding teardown for minutes. Mutation pin:
+    /// reverting `delete_chat_session_unless_adopted`'s bounded argument to
+    /// `None` restores the unbounded wait and the elapsed/skip assertions
+    /// here go red.
+    #[tokio::test(start_paused = true)]
+    async fn one_shot_delete_gate_timeout_keeps_the_session_untouched() {
+        let _env_guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // RAII env restore: a failing assertion unwinds past the straight-line
+        // restore this replaces and would leave PINVOU3_HOME stale for every
+        // later test in the process.
+        let _env = EnvRestore::capture(&["PINVOU3_HOME"]);
+        let home = std::env::temp_dir().join(format!(
+            "pinvou3-engine-pool-delete-gate-timeout-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
+        unsafe { std::env::set_var("PINVOU3_HOME", &home) };
+
+        let store = SessionStore::boot().expect("session store");
+        let session_id = store
+            .create_new("wire-model".to_string(), None, home.join("workspace"))
+            .expect("chat session")
+            .metadata
+            .id;
+        let locks = SessionTurnLocks::default();
+        let gate = locks.for_session(&session_id).await;
+        // A live turn owns the gate — the submit admitted in the sample→gate
+        // window; the delete queues behind it until the bounded budget fires.
+        let _blocker = gate.lock().await;
+
+        let evicted = Arc::new(AtomicBool::new(false));
+        let forgotten = Arc::new(AtomicBool::new(false));
+        let evict_probe = evicted.clone();
+        let forget_probe = forgotten.clone();
+        let started = tokio::time::Instant::now();
+        let deleted = delete_chat_session_with_gate(
+            &locks,
+            &store,
+            &session_id,
+            Some(DELETE_GATE_WAIT),
+            // The one-shot lane's recheck: it must never run here — the
+            // timeout fires before the gate, so the sampled disposition is
+            // never even consulted.
+            DeleteGateRecheck::StillFactoryTitled,
+            move || {
+                let flag = evict_probe.clone();
+                async move {
+                    flag.store(true, Ordering::Release);
+                }
+            },
+            move || forget_probe.store(true, Ordering::Release),
+        )
+        .await
+        .expect("the gate timeout must not be an error");
+
+        assert!(
+            !deleted,
+            "a gate held past the budget must keep the session"
+        );
+        assert!(
+            started.elapsed() >= DELETE_GATE_WAIT,
+            "the delete waited the bounded budget rather than the whole turn"
+        );
+        assert!(
+            !evicted.load(Ordering::Acquire),
+            "no engine reclaim may run without the gate"
+        );
+        assert!(
+            !forgotten.load(Ordering::Acquire),
+            "no lifecycle forget may run without the gate"
+        );
+        assert!(
+            store.load(&session_id).is_ok(),
+            "the record must survive a timed-out delete"
+        );
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     /// M6: with no aux record the reset's delete half is an idempotent no-op
     /// (the create half then simply makes the fresh session).
     #[tokio::test]
@@ -6550,7 +7248,8 @@ mod scheduled_model_tests {
                 &locks,
                 &store,
                 &resolved_aux,
-                false,
+                None,
+                DeleteGateRecheck::Unconditional,
                 || async move {
                     engine.store(false, Ordering::Release);
                     steps.lock().unwrap().push("evict-aux");
@@ -6567,7 +7266,8 @@ mod scheduled_model_tests {
                 &locks,
                 &store,
                 &main_id,
-                false,
+                None,
+                DeleteGateRecheck::Unconditional,
                 || async move {
                     engine.store(false, Ordering::Release);
                     steps.lock().unwrap().push("evict-main");
@@ -6640,9 +7340,17 @@ mod scheduled_model_tests {
         );
 
         let locks = SessionTurnLocks::default();
-        delete_chat_session_with_gate(&locks, &store, &session_id, false, || async {}, || {})
-            .await
-            .expect("delete chat");
+        delete_chat_session_with_gate(
+            &locks,
+            &store,
+            &session_id,
+            None,
+            DeleteGateRecheck::Unconditional,
+            || async {},
+            || {},
+        )
+        .await
+        .expect("delete chat");
 
         assert!(
             !crate::features::assistant::timing::has_queued_active_turn(&session_id),
@@ -6659,7 +7367,7 @@ mod scheduled_model_tests {
         let _ = std::fs::remove_dir_all(home);
     }
 
-    /// The headless stub-cleanup guard: `only_if_still_empty` re-checks
+    /// The headless stub-cleanup guard: `StillAStub` re-checks
     /// emptiness UNDER the turn gate, so a record whose transcript landed
     /// between the disposition's outside-the-gate sample and the delete is
     /// kept (started transcript, the only copy) while a genuine zero-message
@@ -6709,10 +7417,17 @@ mod scheduled_model_tests {
         store.save_session_atomic(&started).expect("seed messages");
 
         let locks = SessionTurnLocks::default();
-        let deleted =
-            delete_chat_session_with_gate(&locks, &store, &session_id, true, || async {}, || {})
-                .await
-                .expect("guarded delete");
+        let deleted = delete_chat_session_with_gate(
+            &locks,
+            &store,
+            &session_id,
+            None,
+            DeleteGateRecheck::StillAStub,
+            || async {},
+            || {},
+        )
+        .await
+        .expect("guarded delete");
         assert!(
             !deleted,
             "a record that carries messages under the gate must be kept"
@@ -6728,12 +7443,123 @@ mod scheduled_model_tests {
             .expect("empty session")
             .metadata
             .id;
-        let deleted =
-            delete_chat_session_with_gate(&locks, &store, &empty_id, true, || async {}, || {})
-                .await
-                .expect("guarded delete");
+        let deleted = delete_chat_session_with_gate(
+            &locks,
+            &store,
+            &empty_id,
+            None,
+            DeleteGateRecheck::StillAStub,
+            || async {},
+            || {},
+        )
+        .await
+        .expect("guarded delete");
         assert!(deleted, "a zero-message stub is still deleted");
         assert!(store.load(&empty_id).is_err());
+
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// The one-shot adoption guard: `DeleteGateRecheck::StillFactoryTitled`
+    /// re-checks the `NEW_CHAT_TITLE` marker UNDER the turn gate, so a
+    /// rename landing while the delete waited on a live turn keeps the
+    /// record (a GUI user adopted it), while a record that still wears the
+    /// factory title deletes.
+    #[tokio::test]
+    async fn one_shot_delete_gate_rechecks_the_adoption_marker() {
+        let _env_guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = EnvRestore::capture(&["PINVOU3_HOME"]);
+        let home = std::env::temp_dir().join(format!(
+            "pinvou3-engine-pool-adoption-guard-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
+        unsafe { std::env::set_var("PINVOU3_HOME", &home) };
+
+        let store = SessionStore::boot().expect("session store");
+        let adopted_id = store
+            .create_new("wire-model".to_string(), None, home.join("workspace"))
+            .expect("chat session")
+            .metadata
+            .id;
+        store
+            .set_title(&adopted_id, "Adopted by the GUI user".to_owned())
+            .expect("rename the session away from the factory title");
+
+        let locks = SessionTurnLocks::default();
+        let deleted = delete_chat_session_with_gate(
+            &locks,
+            &store,
+            &adopted_id,
+            None,
+            DeleteGateRecheck::StillFactoryTitled,
+            || async {},
+            || {},
+        )
+        .await
+        .expect("guarded delete");
+        assert!(
+            !deleted,
+            "a record renamed under the gate was adopted and must be kept"
+        );
+        assert!(
+            store.load(&adopted_id).is_ok(),
+            "the adopted session survives the guarded one-shot delete"
+        );
+
+        // A record that still wears the factory title deletes normally.
+        let fresh_id = store
+            .create_new("wire-model".to_string(), None, home.join("workspace"))
+            .expect("factory-titled session")
+            .metadata
+            .id;
+        let deleted = delete_chat_session_with_gate(
+            &locks,
+            &store,
+            &fresh_id,
+            None,
+            DeleteGateRecheck::StillFactoryTitled,
+            || async {},
+            || {},
+        )
+        .await
+        .expect("guarded delete");
+        assert!(
+            deleted,
+            "a record that still wears the factory title is not adopted"
+        );
+        assert!(store.load(&fresh_id).is_err());
+
+        // The stub twin re-checks BOTH stub facts under the gate: a renamed
+        // zero-message record is an adopted session, not a stub.
+        let adopted_stub_id = store
+            .create_new("wire-model".to_string(), None, home.join("workspace"))
+            .expect("stub session")
+            .metadata
+            .id;
+        store
+            .set_title(&adopted_stub_id, "Renamed empty chat".to_owned())
+            .expect("rename the stub away from the factory title");
+        let deleted = delete_chat_session_with_gate(
+            &locks,
+            &store,
+            &adopted_stub_id,
+            None,
+            DeleteGateRecheck::StillAStub,
+            || async {},
+            || {},
+        )
+        .await
+        .expect("guarded stub delete");
+        assert!(
+            !deleted,
+            "a renamed zero-message record is adopted, not a stub"
+        );
+        assert!(store.load(&adopted_stub_id).is_ok());
 
         let _ = std::fs::remove_dir_all(home);
     }
@@ -7115,6 +7941,68 @@ mod scheduled_model_tests {
             .expect("retry task joins");
         assert!(started.elapsed() >= patience);
         assert!(started.elapsed() < TURN_GATE_AWAIT_TIMEOUT);
+    }
+
+    // issue #525: the spawn-failure teardown (`get_or_spawn` hydration arms
+    // on the submit path) must bound its `Shutdown` send by the turn-gate
+    // bound and move a shortfall to the detached retry, which re-delivers
+    // once capacity frees up. The forkguard_ prefix registers it as a
+    // fork-guard layer-3 behavior test (fork-policy §3).
+    #[tokio::test]
+    async fn forkguard_spawn_failure_teardown_shutdown_bounded_and_retried() {
+        // Capacity 1, filled and never drained: the gate-held teardown send
+        // parks exactly like on a wedged engine.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Op>(1);
+        tx.send(Op::CancelSubAgents)
+            .await
+            .expect("wedged slot filled");
+        let started = std::time::Instant::now();
+        tokio::time::timeout(
+            2 * TURN_GATE_AWAIT_TIMEOUT,
+            bounded_teardown_shutdown(move |op| {
+                let tx = tx.clone();
+                async move { tx.send(op).await.map_err(anyhow::Error::from) }
+            }),
+        )
+        .await
+        .expect(
+            "the teardown must settle within twice the gate bound; an unbounded regression would hang here",
+        );
+        assert!(
+            started.elapsed() >= TURN_GATE_AWAIT_TIMEOUT,
+            "the teardown must wait the full budget"
+        );
+        // The teardown returned while wedged (gate responsive) and spawned
+        // the detached retry: once the filler is drained, the retry must
+        // deliver the Shutdown so the engine can exit its normal path.
+        assert!(matches!(rx.try_recv(), Ok(Op::CancelSubAgents)));
+        assert!(
+            matches!(
+                tokio::time::timeout(2 * TURN_GATE_AWAIT_TIMEOUT, rx.recv())
+                    .await
+                    .expect("retry Shutdown must arrive within twice the gate bound"),
+                Some(Op::Shutdown)
+            ),
+            "the detached retry must re-deliver the undelivered Shutdown"
+        );
+    }
+
+    // Control for the teardown wedge test: a healthy engine accepts the
+    // Shutdown inline — the helper bounds the wait, it does not skip the
+    // send, and no retry task is left pending on a delivered op.
+    #[tokio::test]
+    async fn spawn_failure_teardown_shutdown_delivers_when_engine_accepts() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Op>(1);
+        tokio::time::timeout(
+            2 * TURN_GATE_AWAIT_TIMEOUT,
+            bounded_teardown_shutdown(move |op| {
+                let tx = tx.clone();
+                async move { tx.send(op).await.map_err(anyhow::Error::from) }
+            }),
+        )
+        .await
+        .expect("the teardown must settle on an accepting engine");
+        assert!(matches!(rx.recv().await, Some(Op::Shutdown)));
     }
 
     // The Detached arm must be distinguishable too: a task that outlives
@@ -8542,6 +9430,8 @@ mod scheduled_model_tests {
             "\n    pub ",
             "\n    pub(crate) ",
             "\n    pub(super) ",
+            "\n    fn ",
+            "\n    async fn ",
             "\n    ///",
         ]
         .iter()
@@ -8586,6 +9476,56 @@ mod scheduled_model_tests {
             "the evictability recheck must precede the entry removal"
         );
     }
+
+    // issue #525 wiring pins: the behavioral test on
+    // `bounded_teardown_shutdown` covers the composition, but the
+    // get_or_spawn hydration arms cannot be unit-constructed — pin that the
+    // production bodies route through the bounded teardown and keep no raw
+    // unbounded Shutdown send.
+    #[test]
+    fn spawn_failure_teardown_is_bounded_in_production() {
+        let src = include_str!("engine_pool.rs");
+        let src = &src[..src
+            .find("#[allow(clippy::await_holding_lock)]\nmod scheduled_model_tests {")
+            .expect("the test module marker must exist")];
+        let body = production_body(src, "async fn get_or_spawn_with_policy(");
+        assert_eq!(
+            body.matches("teardown_failed_spawn_engine(&engine, forwarder)")
+                .count(),
+            2,
+            "both hydration-failure arms (sync failure on a scheduled session, store load failure) must use the bounded teardown"
+        );
+        assert!(
+            !body.contains("engine.handle.send(Op::Shutdown)"),
+            "no direct unbounded Shutdown send may remain in the spawn-failure teardown"
+        );
+    }
+
+    #[test]
+    fn reclaim_forwarder_join_is_bounded_in_production() {
+        let src = include_str!("engine_pool.rs");
+        let src = &src[..src
+            .find("#[allow(clippy::await_holding_lock)]\nmod scheduled_model_tests {")
+            .expect("the test module marker must exist")];
+        let body = production_body(
+            src,
+            "async fn reclaim_engine_entry(&self, session_id: &str, entry: EngineEntry) {",
+        );
+        let abort_at = body
+            .find("forwarder.abort()")
+            .expect("reclaim must abort the forwarder");
+        let join_at = body
+            .find("bounded_while_holding_turn_gate(\"forwarder drain\", async move {")
+            .expect("the forwarder abort-join must be bounded (issue #525)");
+        assert!(
+            abort_at < join_at,
+            "the forwarder must be aborted before the bounded join"
+        );
+        assert!(
+            !body.contains("tokio::time::timeout(TURN_GATE_AWAIT_TIMEOUT, forwarder)"),
+            "no direct unbounded forwarder join may remain in reclaim"
+        );
+    }
 }
 
 /// Wiring tests for spawn-time probe adoption, in two layers:
@@ -8604,7 +9544,9 @@ mod scheduled_model_tests {
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
 mod probed_facts_wiring_tests {
-    use super::{EnginePool, Pinvou3Bridge, PreparedRuntimeModel};
+    use super::{
+        CachedEntryReuse, EnginePool, PendingNativeWindow, Pinvou3Bridge, PreparedRuntimeModel,
+    };
     use crate::core::model_endpoint::{LocalServerKind, models_mock};
     use crate::features::runtime_bundle::platform::Pinvou3Bundle;
     use crate::platform::credential_store::CredentialState;
@@ -8688,6 +9630,7 @@ mod probed_facts_wiring_tests {
             code_session_predicate: None,
             external_acp_session_predicate: None,
             image_analyze_always: false,
+            native_window_recheck: false,
         }
     }
 
@@ -8733,6 +9676,269 @@ mod probed_facts_wiring_tests {
         assert_eq!(bridge.probed_context_tokens, Some(262_144));
         assert_eq!(bridge.probed_output_tokens, Some(4_096));
         assert_eq!(bridge.session_model.as_ref().unwrap().model, "my-model");
+    }
+
+    /// Ollama's `/v1/models` never carries a window fact; an endpoint probed
+    /// as Ollama must follow up on the native API. The loaded model's
+    /// `/api/ps` effective context (the deployment ground truth, e.g. a
+    /// 131072 OLLAMA_CONTEXT_LENGTH serving) fills `probed_context_tokens`,
+    /// so route limits no longer fall to the foundation's 8192
+    /// unknown-Ollama fallback (compaction floor 4096 / input budget 1024).
+    #[tokio::test]
+    async fn ollama_probed_route_adopts_native_ps_context() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            ("/v1/models", 200, r#"{"data":[{"id":"my-model"}]}"#.into()),
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"my-model","context_length":131072}]}"#.into(),
+            ),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let mut bridge = wiring_bridge(model.clone());
+        bridge.probed_local_kind = Some(LocalServerKind::Ollama);
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, false, false).await;
+        assert_eq!(
+            bridge.probed_context_tokens,
+            Some(131_072),
+            "the native effective context must ride the probed facts"
+        );
+        assert_eq!(
+            mock.hits_for("/api/show"),
+            0,
+            "the /api/ps fact wins; /api/show stays unqueried"
+        );
+        assert_eq!(bridge.session_model.as_ref().unwrap().model, "my-model");
+    }
+
+    /// A hand-typed tagless configured name (`ollama run llama3` shape)
+    /// against a canonical roster: Ollama reports the entry as
+    /// `llama3:latest` in `/api/ps`, so the route's own native fetch must
+    /// still resolve it — otherwise the first-load self-heal never lands
+    /// and the 8192-fallback collapse (a global `OLLAMA_CONTEXT_LENGTH`,
+    /// the 2026-09-30 report's fatality) survives the engine's whole
+    /// lifetime with the marker armed forever. This is the pin whose
+    /// absence let that shape slip through round 5: dropping the
+    /// `:latest` fallback turns all three assertions red.
+    #[tokio::test]
+    async fn tagless_configured_name_adopts_canonical_ps_window() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            (
+                "/v1/models",
+                200,
+                r#"{"data":[{"id":"llama3:latest"},{"id":"deepseek-r1:14b"}]}"#.into(),
+            ),
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"llama3:latest","context_length":131072}]}"#.into(),
+            ),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "llama3", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let mut bridge = wiring_bridge(model.clone());
+        bridge.probed_local_kind = Some(LocalServerKind::Ollama);
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, false, false).await;
+        assert_eq!(
+            bridge.probed_context_tokens,
+            Some(131_072),
+            "the tagless configured name resolves its own canonical /api/ps entry"
+        );
+        assert!(
+            !bridge.native_window_recheck,
+            "a fact was adopted — the reuse re-check must not arm"
+        );
+        assert_eq!(
+            mock.hits_for("/api/show"),
+            0,
+            "the ps fact wins; /api/show stays unqueried"
+        );
+    }
+
+    /// Same tagless shape on a single-model server (a fresh install with
+    /// one downloaded model): `resolve_served_model_from_entries` follows
+    /// the single listed id, so served is the canonical `llama3:latest`
+    /// while the route stays the hand-typed `llama3` — the adoption gate
+    /// must fold the Ollama canonical form. Without the fold the whole
+    /// native block is skipped (no adoption AND no arming, since the
+    /// fetch and the re-check marker share the gate) and the
+    /// 8192-fallback collapse survives the engine's whole lifetime with
+    /// no self-heal.
+    #[tokio::test]
+    async fn tagless_single_entry_roster_adopts_canonical_ps_window() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            (
+                "/v1/models",
+                200,
+                r#"{"data":[{"id":"llama3:latest"}]}"#.into(),
+            ),
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"llama3:latest","context_length":131072}]}"#.into(),
+            ),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "llama3", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let mut bridge = wiring_bridge(model.clone());
+        bridge.probed_local_kind = Some(LocalServerKind::Ollama);
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, false, false).await;
+        assert_eq!(
+            bridge.probed_context_tokens,
+            Some(131_072),
+            "the tagless configured name adopts its canonical entry even on a single-entry roster"
+        );
+        assert!(
+            !bridge.native_window_recheck,
+            "a fact was adopted — the reuse re-check must not arm"
+        );
+        assert_eq!(
+            mock.hits_for("/api/show"),
+            0,
+            "the ps fact wins; /api/show stays unqueried"
+        );
+    }
+
+    /// Model downloaded but not loaded (no /api/ps entry) with a Modelfile
+    /// num_ctx declaration: the declared value is the window fact (it is the
+    /// effective value once the model loads).
+    #[tokio::test]
+    async fn ollama_probed_route_falls_back_to_show_context() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            ("/v1/models", 200, r#"{"data":[{"id":"my-model"}]}"#.into()),
+            ("/api/ps", 200, r#"{"models":[]}"#.into()),
+            (
+                "/api/show",
+                200,
+                r#"{"parameters":"num_ctx 32768","model_info":{"general.architecture":"qwen3","qwen3.context_length":40960}}"#.into(),
+            ),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let mut bridge = wiring_bridge(model.clone());
+        bridge.probed_local_kind = Some(LocalServerKind::Ollama);
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, false, false).await;
+        assert_eq!(bridge.probed_context_tokens, Some(32_768));
+    }
+
+    /// Never loaded and no num_ctx declaration: `/api/show` only carries the
+    /// GGUF *trained* context (a capability ceiling — an unloaded model
+    /// actually serves at the server default, e.g. 4096, which no API
+    /// exposes). The trained cap must not become the route limit: adopting
+    /// it would loosen compaction budgets beyond what the server accepts and
+    /// let upstream silently truncate, and the value is frozen for the
+    /// pooled engine's lifetime (no refresh after the first load). The route
+    /// keeps no probed window instead, i.e. the conservative foundation
+    /// fallback, until a respawn after the model has loaded (`/api/ps` then
+    /// reports the effective value).
+    #[tokio::test]
+    async fn ollama_probed_route_refuses_trained_context_without_num_ctx() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            ("/v1/models", 200, r#"{"data":[{"id":"my-model"}]}"#.into()),
+            ("/api/ps", 200, r#"{"models":[]}"#.into()),
+            (
+                "/api/show",
+                200,
+                r#"{"model_info":{"general.architecture":"qwen3","qwen3.context_length":131072}}"#
+                    .into(),
+            ),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let mut bridge = wiring_bridge(model.clone());
+        bridge.probed_local_kind = Some(LocalServerKind::Ollama);
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, false, false).await;
+        assert_eq!(
+            mock.hits_for("/api/show"),
+            1,
+            "the /api/show follow-up ran and still must refuse the trained cap"
+        );
+        assert_eq!(
+            bridge.probed_context_tokens, None,
+            "a 128K trained cap with no runtime declaration must not become the route limit"
+        );
+    }
+
+    /// The native follow-up is gated on the endpoint being probed as Ollama:
+    /// any other kind (Generic / vLLM / LM Studio / unprobed) never issues
+    /// the native requests.
+    #[tokio::test]
+    async fn non_ollama_kind_skips_native_context_fetch() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            ("/v1/models", 200, r#"{"data":[{"id":"my-model"}]}"#.into()),
+            ("/api/ps", 200, r#"{"models":[]}"#.into()),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let mut bridge = wiring_bridge(model.clone());
+        bridge.probed_local_kind = Some(LocalServerKind::Generic);
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, false, false).await;
+        assert_eq!(bridge.probed_context_tokens, None);
+        assert_eq!(
+            mock.hits_for("/api/ps"),
+            0,
+            "non-Ollama kinds must not receive Ollama native probes"
+        );
+        assert_eq!(mock.hits_for("/api/show"), 0);
+    }
+
+    /// Facts never borrow across names: the configured name missing from the
+    /// list is *kept* (served == configured → adopts holds), so the native
+    /// follow-up fires — but it queries `/api/ps` + `/api/show` **by that
+    /// name**, and another loaded model's context ("a" here) cannot be
+    /// misattributed to it.
+    #[tokio::test]
+    async fn kept_unlisted_name_fetches_only_its_own_native_fact() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            (
+                "/v1/models",
+                200,
+                r#"{"data":[{"id":"a"},{"id":"b"}]}"#.into(),
+            ),
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"a","context_length":131072}]}"#.into(),
+            ),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "gone", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let mut bridge = wiring_bridge(model.clone());
+        bridge.probed_local_kind = Some(LocalServerKind::Ollama);
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, false, false).await;
+        assert_eq!(
+            mock.hits_for("/api/ps"),
+            1,
+            "the native follow-up fires for the kept name"
+        );
+        assert_eq!(
+            bridge.probed_context_tokens, None,
+            "another model's /api/ps fact must not be lent to the unlisted name"
+        );
+        assert_eq!(
+            bridge.session_model.as_ref().unwrap().model,
+            "gone",
+            "non-vLLM routes keep the configured name"
+        );
     }
 
     #[tokio::test]
@@ -8823,9 +10029,623 @@ mod probed_facts_wiring_tests {
         );
     }
 
+    /// The real finalize_runtime_bridge injection block (Ollama side):
+    /// the kind probe completes as Ollama from the live `/api/tags`
+    /// signature (no hand-set `probed_local_kind`), and the adoption
+    /// follow-up then fetches the native window for the name actually sent
+    /// — pinning the production ordering "kind probe before adopt" that
+    /// the whole feature depends on: reordering those two blocks must turn
+    /// this red.
+    #[tokio::test]
+    async fn finalize_runtime_bridge_adopts_native_window_for_ollama_kind() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            // Ollama's OpenAI shim shape: the listing carries no window fact.
+            ("/v1/models", 200, r#"{"data":[{"id":"my-model"}]}"#.into()),
+            // The kind signature that classifies the endpoint as Ollama.
+            (
+                "/api/tags",
+                200,
+                r#"{"models":[{"name":"my-model"}]}"#.into(),
+            ),
+            // The native effective context the follow-up must adopt.
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"my-model","context_length":131072}]}"#.into(),
+            ),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let bridge = wiring_bridge(model.clone());
+        let prepared = PreparedRuntimeModel::unchanged(model);
+        let bridge = EnginePool::finalize_runtime_bridge(bridge, &prepared, false).await;
+        assert_eq!(
+            bridge.probed_local_kind,
+            Some(LocalServerKind::Ollama),
+            "the live /api/tags signature must classify the endpoint before adoption"
+        );
+        assert_eq!(
+            bridge.probed_context_tokens,
+            Some(131_072),
+            "the native effective context must ride the probed facts"
+        );
+        assert_eq!(
+            mock.hits_for("/api/show"),
+            0,
+            "the /api/ps fact wins; /api/show stays unqueried"
+        );
+        assert_eq!(
+            bridge.session_model.as_ref().unwrap().model,
+            "my-model",
+            "non-vLLM routes do no served-name correction"
+        );
+    }
+
+    /// Round-3 R1: a discovery-added Ollama endpoint is saved under the
+    /// LocalVllm preset (provider "vllm"). The kind probe must run for
+    /// vllm-provider local routes too, so the native follow-up fires and
+    /// the route carries the real window — instead of the 128K fallback
+    /// while the monitor shows the truth. Driven through the real finalize
+    /// block (no hand-set kind): the live `/api/tags` signature classifies
+    /// the endpoint, then the adoption adopts the `/api/ps` fact.
+    #[tokio::test]
+    async fn finalize_runtime_bridge_probes_local_vllm_route_for_ollama_window() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            // Ollama's OpenAI shim shape: the listing carries no window fact.
+            ("/v1/models", 200, r#"{"data":[{"id":"my-model"}]}"#.into()),
+            // The kind signature that classifies the endpoint as Ollama.
+            (
+                "/api/tags",
+                200,
+                r#"{"models":[{"name":"my-model"}]}"#.into(),
+            ),
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"my-model","context_length":131072}]}"#.into(),
+            ),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let mut model = saved_model(ModelPreset::LocalVllm, "my-model", None);
+        model.base_url = mock.base_url.clone();
+        let bridge = wiring_bridge(model.clone());
+        let prepared = PreparedRuntimeModel::unchanged(model);
+        let bridge = EnginePool::finalize_runtime_bridge(bridge, &prepared, false).await;
+        assert_eq!(
+            bridge.probed_local_kind,
+            Some(LocalServerKind::Ollama),
+            "a local vllm-provider route must be kind-probed (discovery saves Ollama under this preset)"
+        );
+        assert_eq!(
+            bridge.probed_context_tokens,
+            Some(131_072),
+            "the native effective context must reach the route instead of the 128K fallback"
+        );
+        assert_eq!(mock.hits_for("/api/show"), 0, "the /api/ps fact wins");
+    }
+
+    /// Adoption-level pin for the same path: a hand-set Ollama kind on a
+    /// vllm-provider route adopts the `/api/ps` effective context for the
+    /// name actually sent.
+    #[tokio::test]
+    async fn local_vllm_preset_ollama_kind_adopts_native_ps_context() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            ("/v1/models", 200, r#"{"data":[{"id":"my-model"}]}"#.into()),
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"my-model","context_length":131072}]}"#.into(),
+            ),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let mut model = saved_model(ModelPreset::LocalVllm, "my-model", None);
+        model.base_url = mock.base_url.clone();
+        let mut bridge = wiring_bridge(model.clone());
+        bridge.probed_local_kind = Some(LocalServerKind::Ollama);
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, true, false).await;
+        assert_eq!(
+            bridge.probed_context_tokens,
+            Some(131_072),
+            "a vllm-preset route with an Ollama kind must adopt the native window"
+        );
+        assert_eq!(mock.hits_for("/api/show"), 0);
+    }
+
+    /// Round-3 R1 (LM Studio side): a probed-LM Studio endpoint adopts the
+    /// native `/api/v0/models` served window (`loaded_context_length` of
+    /// the loaded entry — bug #726's 131072-vs-12918 divergence), never the
+    /// capability cap, and never the Ollama native APIs.
+    #[tokio::test]
+    async fn lmstudio_kind_adopts_v0_served_window() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            // The listing carries no window fact.
+            ("/v1/models", 200, r#"{"data":[{"id":"my-model"}]}"#.into()),
+            (
+                "/api/v0/models",
+                200,
+                r#"{"data":[{"id":"my-model","state":"loaded","max_context_length":131072,"loaded_context_length":12918}]}"#
+                    .into(),
+            ),
+            ("/api/ps", 200, r#"{"models":[]}"#.into()),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let mut bridge = wiring_bridge(model.clone());
+        bridge.probed_local_kind = Some(LocalServerKind::LmStudio);
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, false, false).await;
+        assert_eq!(
+            bridge.probed_context_tokens,
+            Some(12_918),
+            "the served window (12918), not the capability cap (131072)"
+        );
+        assert_eq!(
+            mock.hits_for("/api/ps"),
+            0,
+            "an LM Studio endpoint must not be asked the Ollama native API"
+        );
+        assert_eq!(mock.hits_for("/api/show"), 0);
+    }
+
+    /// Round-3 R3: the reuse-path re-adoption marker. `from_finalized`
+    /// captures only native-probeable routes that ended the spawn without a
+    /// served-window fact (a fact at spawn means the normal
+    /// frozen-until-rebuild discipline applies; non-native kinds never
+    /// re-check), and only when the adoption path armed the re-check (see
+    /// `pending_window_not_armed_when_fact_cannot_be_adopted` /
+    /// `pending_window_not_armed_for_declared_route` — a fact the route can
+    /// never adopt, or a declaration that min-clamps any fact, must never
+    /// mark the entry). `reprobe_missing_native_window` returns the window
+    /// once the server can actually serve it (model JIT-loaded since) and
+    /// None while it can't. The get_or_spawn glue applies the extracted
+    /// `cached_entry_reuse_decision` to drop the entry, reclaim, and let
+    /// the rebuild path re-finalize and adopt — the decision itself is
+    /// pinned by `pending_window_reuse_decision_rebuilds_once_fact_
+    /// materializes`; the surrounding pool plumbing (EnginePool needs an
+    /// AppHandle) stays the unit-test boundary of the rest of the spawn
+    /// wiring.
+    #[tokio::test]
+    async fn pending_native_window_marks_factless_native_routes() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        // Ollama route, model never loaded, no num_ctx → pending.
+        let mock = models_mock::spawn(&[
+            ("/v1/models", 200, r#"{"data":[{"id":"my-model"}]}"#.into()),
+            (
+                "/api/tags",
+                200,
+                r#"{"models":[{"name":"my-model"}]}"#.into(),
+            ),
+            ("/api/ps", 200, r#"{"models":[]}"#.into()),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let bridge = wiring_bridge(model.clone());
+        let prepared = PreparedRuntimeModel::unchanged(model);
+        let bridge = EnginePool::finalize_runtime_bridge(bridge, &prepared, false).await;
+        let pending = PendingNativeWindow::from_finalized(&bridge)
+            .expect("a factless Ollama route must be marked pending");
+        assert_eq!(pending.model_name, "my-model");
+        // Arming is part of the construction: without it nothing is marked,
+        // so a route that never asked its native API can never mark itself.
+        let mut unarmed = bridge.clone();
+        unarmed.native_window_recheck = false;
+        assert_eq!(
+            PendingNativeWindow::from_finalized(&unarmed),
+            None,
+            "an unarmed spawn must never mark the entry, however factless it is"
+        );
+        // The re-probe against the still-unloaded server: no fact (engine
+        // stays).
+        assert_eq!(
+            EnginePool::reprobe_missing_native_window(&bridge, &pending).await,
+            None
+        );
+        // After the model loads, the re-probe finds the effective window.
+        // The re-probe re-classifies the endpoint first, so the mock must
+        // carry the Ollama signature the battery looks for.
+        let loaded = models_mock::spawn(&[
+            (
+                "/api/tags",
+                200,
+                r#"{"models":[{"name":"my-model"}]}"#.into(),
+            ),
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"my-model","context_length":131072}]}"#.into(),
+            ),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let mut loaded_model =
+            saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        loaded_model.base_url = loaded.base_url.clone();
+        let loaded_bridge = wiring_bridge(loaded_model);
+        assert_eq!(
+            EnginePool::reprobe_missing_native_window(&loaded_bridge, &pending).await,
+            Some(131_072),
+            "the post-load fact must be found so the caller can drop the entry for a rebuild"
+        );
+        // A route that ended the spawn WITH a fact is not pending.
+        let loaded_finalize = models_mock::spawn(&[
+            ("/v1/models", 200, r#"{"data":[{"id":"my-model"}]}"#.into()),
+            (
+                "/api/tags",
+                200,
+                r#"{"models":[{"name":"my-model"}]}"#.into(),
+            ),
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"my-model","context_length":131072}]}"#.into(),
+            ),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let mut with_fact_model =
+            saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        with_fact_model.base_url = loaded_finalize.base_url.clone();
+        let with_fact_bridge = wiring_bridge(with_fact_model.clone());
+        let with_fact_bridge = EnginePool::finalize_runtime_bridge(
+            with_fact_bridge,
+            &PreparedRuntimeModel::unchanged(with_fact_model),
+            false,
+        )
+        .await;
+        assert_eq!(
+            PendingNativeWindow::from_finalized(&with_fact_bridge),
+            None,
+            "a fact adopted at spawn means the normal rebuild discipline applies"
+        );
+        // A Generic (no-signature) route is never pending.
+        let generic =
+            models_mock::spawn(&[("/v1/models", 200, r#"{"data":[{"id":"my-model"}]}"#.into())]);
+        let mut generic_model =
+            saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        generic_model.base_url = generic.base_url.clone();
+        let generic_bridge = wiring_bridge(generic_model.clone());
+        let generic_bridge = EnginePool::finalize_runtime_bridge(
+            generic_bridge,
+            &PreparedRuntimeModel::unchanged(generic_model),
+            false,
+        )
+        .await;
+        assert_eq!(
+            bridge.probed_local_kind,
+            Some(LocalServerKind::Ollama),
+            "sanity: the first fixture classified Ollama"
+        );
+        assert_eq!(
+            PendingNativeWindow::from_finalized(&generic_bridge),
+            None,
+            "non-native kinds have no native API to re-check"
+        );
+    }
+
+    /// Round-5 MAJOR pin: a route whose fact can materialize but can never
+    /// be adopted must not arm the reuse re-check. The roster lists only
+    /// `server-name` while the route is configured `my-model`, so `adopts`
+    /// is false and the spawn never runs the native fetch — but `/api/show`
+    /// resolves the loose name server-side and would serve `num_ctx` on
+    /// every re-probe. Arming here would drop and respawn the engine on
+    /// every send, forever, with the window never landing (the rebuild hits
+    /// the same `adopts=false`); the arming flag is what keeps the
+    /// reuse path on `Keep`.
+    #[tokio::test]
+    async fn pending_window_not_armed_when_fact_cannot_be_adopted() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            (
+                "/v1/models",
+                200,
+                r#"{"data":[{"id":"server-name"}]}"#.into(),
+            ),
+            (
+                "/api/tags",
+                200,
+                r#"{"models":[{"name":"server-name"}]}"#.into(),
+            ),
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"server-name","context_length":131072}]}"#.into(),
+            ),
+            ("/api/show", 200, r#"{"parameters":"num_ctx 4096"}"#.into()),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let mut bridge = wiring_bridge(model.clone());
+        // The kind probe lives in finalize (unit boundary, see the module
+        // doc); the direct adoption call hand-sets the classified kind like
+        // every sibling test.
+        bridge.probed_local_kind = Some(LocalServerKind::Ollama);
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, false, false).await;
+        assert!(
+            !bridge.native_window_recheck,
+            "a route whose native fact can never be adopted must not arm the re-check"
+        );
+        // The trap itself: the native API serves a fact for the configured
+        // name on every re-probe — which is exactly why an armed marker
+        // would have looped rebuilds (adoption refuses the borrowed roster
+        // name on the rebuild too).
+        let pending = PendingNativeWindow {
+            model_name: "my-model".into(),
+            kind: LocalServerKind::Ollama,
+        };
+        assert_eq!(
+            EnginePool::reprobe_missing_native_window(&bridge, &pending).await,
+            Some(4096),
+            "sanity: the server resolves the loose name — arming this shape is the bug"
+        );
+    }
+
+    /// A user declaration min-clamps any adopted fact, so the native leg
+    /// cannot change a declared route: it must not even run, and nothing
+    /// arms (otherwise the route would pay a per-turn native GET plus one
+    /// rebuild whose outcome the declaration clamps right back).
+    #[tokio::test]
+    async fn pending_window_not_armed_for_declared_route() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            ("/v1/models", 200, r#"{"data":[{"id":"my-model"}]}"#.into()),
+            ("/api/ps", 200, r#"{"models":[]}"#.into()),
+            ("/api/show", 200, r#"{"parameters":"num_ctx 4096"}"#.into()),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        model.context_window_tokens = Some(8192);
+        let mut bridge = wiring_bridge(model.clone());
+        bridge.probed_local_kind = Some(LocalServerKind::Ollama);
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, false, false).await;
+        assert!(
+            !bridge.native_window_recheck,
+            "a declared route never arms the reuse re-check"
+        );
+        assert_eq!(
+            mock.hits_for("/api/ps"),
+            0,
+            "the declaration min-clamps every adopted fact — the native leg must not even run"
+        );
+        assert_eq!(mock.hits_for("/api/show"), 0);
+        assert_eq!(
+            bridge.probed_context_tokens, None,
+            "no fact is adopted over the declaration's head"
+        );
+    }
+
+    /// The reuse-path self-heal decision (`cached_entry_reuse_decision`,
+    /// extracted verbatim from the `get_or_spawn_with_policy` glue —
+    /// EnginePool itself needs an AppHandle, the same unit-test boundary as
+    /// `require_live_engine_for_steer`): no pending marker → keep without
+    /// probing; pending but still no fact → keep (re-ask next turn); the
+    /// fact materialized → rebuild so it is adopted. A mutation that always
+    /// keeps the entry would let the collapsed 8192-fallback budget survive
+    /// the engine's whole lifetime — the reported fatality — and must turn
+    /// this red.
+    #[tokio::test]
+    async fn pending_window_reuse_decision_rebuilds_once_fact_materializes() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        // No pending marker: keep, without dialing anything (the bridge has
+        // no base_url to reach).
+        let no_pending_bridge = wiring_bridge(saved_model(
+            ModelPreset::OpenaiCompatible,
+            "my-model",
+            Some("custom"),
+        ));
+        assert_eq!(
+            EnginePool::cached_entry_reuse_decision(None, &no_pending_bridge).await,
+            CachedEntryReuse::Keep,
+            "a factless non-pending route must keep its engine without any re-probe"
+        );
+        let pending = PendingNativeWindow {
+            model_name: "my-model".into(),
+            kind: LocalServerKind::Ollama,
+        };
+        // Pending, model still unloaded: keep (the next turn re-asks).
+        // The re-probe re-classifies first, so the mock carries the Ollama
+        // signature.
+        let mock = models_mock::spawn(&[
+            (
+                "/api/tags",
+                200,
+                r#"{"models":[{"name":"my-model"}]}"#.into(),
+            ),
+            ("/api/ps", 200, r#"{"models":[]}"#.into()),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let unloaded_bridge = wiring_bridge(model);
+        assert_eq!(
+            EnginePool::cached_entry_reuse_decision(Some(&pending), &unloaded_bridge).await,
+            CachedEntryReuse::Keep,
+            "no post-load fact yet — the engine stays and the next turn re-asks"
+        );
+        // The model loaded since spawn: the decision must demand a rebuild
+        // so the rebuild path adopts the fact.
+        let loaded = models_mock::spawn(&[
+            (
+                "/api/tags",
+                200,
+                r#"{"models":[{"name":"my-model"}]}"#.into(),
+            ),
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"my-model","context_length":131072}]}"#.into(),
+            ),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let mut loaded_model =
+            saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        loaded_model.base_url = loaded.base_url.clone();
+        let loaded_bridge = wiring_bridge(loaded_model);
+        assert_eq!(
+            EnginePool::cached_entry_reuse_decision(Some(&pending), &loaded_bridge).await,
+            CachedEntryReuse::RebuildForWindowFact,
+            "the post-load fact must drop the entry for the adopting rebuild"
+        );
+    }
+
+    /// The marker's frozen kind must not drive the re-probe dispatch: the
+    /// stack behind the port can swap while the engine lives (dev restart
+    /// onto a different server class), and dispatching on the stale kind
+    /// would re-dial the wrong native API on every send — a 404 that never
+    /// arms a fact — so the real served window would never land until an
+    /// unrelated rebuild. The re-probe must re-classify (cache-peeked
+    /// battery) and follow the fresh kind. Deleting the re-classification
+    /// lands the frozen-Ollama dispatch on the doomed `/api/ps` (hits > 0,
+    /// window None) and turns both assertions red.
+    #[tokio::test]
+    async fn reprobe_reclassifies_swapped_server_kind() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        // The re-classification below runs the real battery and the
+        // hygiene clear at the end resets the shared probe state, both of
+        // which must run serially against the core probe tests (their
+        // in-flight registrations live in the same process-global registry;
+        // see PROBE_STATE_TEST_MUTEX's doc).
+        let _probe_state = crate::core::model_endpoint::tests::PROBE_STATE_TEST_MUTEX
+            .lock()
+            .await;
+        // The port now serves LM Studio's v0 API; the Ollama ps endpoint the
+        // stale marker would dial is a registered 404 so the miss is
+        // countable.
+        let mock = models_mock::spawn(&[
+            (
+                "/api/v0/models",
+                200,
+                r#"{"data":[{"id":"my-model","state":"loaded","max_context_length":131072,"loaded_context_length":12918}]}"#
+                    .into(),
+            ),
+            ("/api/ps", 404, "not found".into()),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let bridge = wiring_bridge(model);
+        // A marker frozen by the pre-swap spawn: kind Ollama.
+        let pending = PendingNativeWindow {
+            model_name: "my-model".into(),
+            kind: LocalServerKind::Ollama,
+        };
+        assert_eq!(
+            EnginePool::reprobe_missing_native_window(&bridge, &pending).await,
+            Some(12_918),
+            "the re-probe must follow the swapped-in LM Studio served window"
+        );
+        assert_eq!(
+            mock.hits_for("/api/ps"),
+            0,
+            "the frozen Ollama kind must not re-dial the doomed /api/ps"
+        );
+        // Cross-test hygiene: the re-classification cached this mock's live
+        // port for the TTL; clear it under ENV_LOCK so a port-reusing later
+        // test cannot inherit the stale kind.
+        crate::core::model_endpoint::clear_probe_kind_cache();
+    }
+
+    /// The reuse re-probe is locality-gated in its own right. Pinned without
+    /// touching the network via the v4-mapped loopback trick: the URL
+    /// classifies non-local while routing to the same mock, so deleting the
+    /// guard lets the fetch land on the mock (which serves a loaded fact →
+    /// `RebuildForWindowFact`) and turns both assertions red.
+    #[tokio::test]
+    async fn reprobe_refuses_non_local_base_url() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"my-model","context_length":131072}]}"#.into(),
+            ),
+            ("/api/show", 200, r#"{"parameters":"num_ctx 4096"}"#.into()),
+        ]);
+        let port = mock
+            .base_url
+            .rsplit(':')
+            .next()
+            .expect("mock base_url carries a port")
+            .to_string();
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = format!("http://[::ffff:127.0.0.1]:{port}");
+        let bridge = wiring_bridge(model);
+        let pending = PendingNativeWindow {
+            model_name: "my-model".into(),
+            kind: LocalServerKind::Ollama,
+        };
+        assert_eq!(
+            EnginePool::cached_entry_reuse_decision(Some(&pending), &bridge).await,
+            CachedEntryReuse::Keep,
+            "a non-local base_url must not be natively re-probed"
+        );
+        assert_eq!(
+            mock.hits_for("/api/ps"),
+            0,
+            "the locality guard must run before any request"
+        );
+    }
+
+    /// The finalize kind probe is locality-gated. Pinned without touching
+    /// the network via a v4-mapped loopback URL: `::ffff:127.0.0.1`
+    /// classifies as a non-local IPv6 literal (the conservative arm of
+    /// `base_url_uses_local_or_private`) while still routing to the same
+    /// loopback mock — so a hit on the mock proves the gate ran, and
+    /// deleting the gate turns both assertions red (the battery classifies
+    /// the live `/api/tags` signature and `probed_local_kind` stops being
+    /// None).
+    #[tokio::test]
+    async fn finalize_skips_kind_probe_for_public_host() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            ("/v1/models", 200, r#"{"data":[{"id":"my-model"}]}"#.into()),
+            (
+                "/api/tags",
+                200,
+                r#"{"models":[{"name":"my-model"}]}"#.into(),
+            ),
+        ]);
+        let port = mock
+            .base_url
+            .rsplit(':')
+            .next()
+            .expect("mock base_url carries a port")
+            .to_string();
+        let mut model = saved_model(ModelPreset::LocalVllm, "my-model", None);
+        model.base_url = format!("http://[::ffff:127.0.0.1]:{port}");
+        let bridge = wiring_bridge(model.clone());
+        let prepared = PreparedRuntimeModel::unchanged(model);
+        let bridge = EnginePool::finalize_runtime_bridge(bridge, &prepared, false).await;
+        assert_eq!(
+            bridge.probed_local_kind, None,
+            "a non-local base_url must not be kind-probed"
+        );
+        assert_eq!(
+            mock.hits_for("/api/tags"),
+            0,
+            "the signature battery must not reach the host the gate refuses"
+        );
+    }
+
     /// The real finalize_runtime_bridge injection block (vLLM side):
-    /// provider() derives "vllm" (skipping the kind probe) and a single
-    /// entry renames to the served name and adopts facts.
+    /// provider() derives "vllm" and a single entry renames to the served
+    /// name and adopts facts. The kind probe now also runs for vllm-provider
+    /// routes (see `finalize_runtime_bridge_probes_local_vllm_route_for_
+    /// ollama_window`); this mock carries no kind signature, so the probe
+    /// lands Generic — inert for the listing-facts path.
     #[tokio::test]
     async fn finalize_runtime_bridge_renames_and_injects_vllm_route() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());

@@ -50,6 +50,11 @@ func (p *privateF12OriginalProvider) Bill(context.Context, string, time.Time) ([
 	return nil, errors.New("repair must not call the provider")
 }
 
+// Keep this original owner-contract regression alongside the main integration.
+// The main TestPaymentFinancialRepairPostgresIntegration additionally covers
+// saturated BASE receivable budgets and rejection above BASE; this retained
+// baseline continues to exercise the original confirmation/conservation/replay
+// and boundary contract rather than replacing that newer coverage.
 // TestPrivateF12OriginalOwnerIntegration proves the GSA-28 domain
 // contract on real PostgreSQL: one confirmed-payment repair reuses the audited
 // merge writer from a persisted evidence row without any provider call, keeps

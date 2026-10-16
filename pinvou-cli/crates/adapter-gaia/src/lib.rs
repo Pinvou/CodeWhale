@@ -2,15 +2,17 @@
 mod contract_tests;
 mod dataset;
 mod fetch;
+mod fs_guard;
 mod private_inputs;
 mod scorer;
 mod submission;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_fixtures;
 
 use std::collections::HashSet;
 use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use agent_backend_api::{AttachmentHandle, PrivateInputHandle};
 use benchmark_core::{
@@ -28,7 +30,7 @@ pub use fetch::{
     SnapshotFileMetadata, SnapshotPreflightRequest,
 };
 pub use private_inputs::GaiaPrivateInputs;
-pub use scorer::{GAIA_SCORER_RUNTIME_PROFILE, question_scorer};
+pub use scorer::question_scorer;
 
 pub const GAIA_DATASET_REVISION: &str = "682dd723ee1e1697e00360edccf2366dc8418dd9";
 pub const GAIA_SCORER_REVISION: &str = "1349a17979f0aca0ee9c46cd7ec26eb2fb41102e";
@@ -36,12 +38,42 @@ pub const GAIA_ADAPTER_VERSION: &str = "pinvou-gaia-adapter/v1";
 pub const GAIA_SPLIT: &str = "validation";
 pub const GAIA_LEVEL: u8 = 1;
 pub const GAIA_PARQUET_SIZE: u64 = 39_524;
+/// Snapshot-relative path of the pinned validation parquet, declared once so
+/// the dataset verifier and the fetch layer cannot drift apart.
+pub(crate) const GAIA_PARQUET_PATH: &str = "2023/validation/metadata.level1.parquet";
 pub const GAIA_PARQUET_SHA256: &str =
     "5e574b0faeb4603b816e426cf7c7aefb1fe398d32f9c4861e1a4e3304f2b1281";
+/// Byte form of [`GAIA_PARQUET_SHA256`], parsed at compile time so the hex
+/// string stays the single source of truth for the pinned parquet digest.
+pub(crate) const GAIA_PARQUET_SHA256_BYTES: [u8; 32] = parse_sha256_hex(GAIA_PARQUET_SHA256);
+
+const fn parse_sha256_hex(digest: &str) -> [u8; 32] {
+    const fn nibble(byte: u8) -> u8 {
+        match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            _ => panic!("sha256 digest must be lowercase hex"),
+        }
+    }
+    let bytes = digest.as_bytes();
+    assert!(bytes.len() == 64, "sha256 digest must have 64 hex digits");
+    let mut parsed = [0_u8; 32];
+    let mut index = 0;
+    while index < 32 {
+        parsed[index] = (nibble(bytes[2 * index]) << 4) | nibble(bytes[2 * index + 1]);
+        index += 1;
+    }
+    parsed
+}
 
 const GAIA_TOOL_POLICY: &str = "pinvou-gaia-public-web/v1";
 const GAIA_OUTPUT_CONTRACT: &str = "gaia-final/v1";
-const GAIA_TASK_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Durable private prediction type tag shared with the GAIA scorer and
+/// submission writer. Core persists the resolved candidate answer under this
+/// concrete content type, which is the run-bound scorer tag used to reopen
+/// predictions offline.
+pub(crate) const GAIA_DURABLE_PREDICTION_TYPE: &str = "utf8-text/v1";
 
 pub struct GaiaAdapter {
     descriptor: BenchmarkDescriptor,
@@ -58,7 +90,10 @@ impl GaiaAdapter {
                 GAIA_SCORER_REVISION,
                 vec![Split::new(GAIA_SPLIT)],
                 ExecutionKind::NativeTurn,
-            ),
+            )
+            // `None` (unbounded) is also the builder default; spelled out so
+            // the adapter's machine-readable manifest mode is explicit.
+            .with_harness_deadline_secs(None),
             scoring_dataset: None,
         }
     }
@@ -102,12 +137,17 @@ impl GaiaAdapter {
                     .collect();
                 BenchmarkTask::new(
                     task_id,
-                    Some("gaia".into()),
                     Some(GAIA_LEVEL.to_string()),
+                    // No harness wall-clock deadline: the official GAIA
+                    // protocol is not known to define one, so the run is
+                    // bounded only by the engine's own limits (model steps
+                    // per turn, per-turn wall clock, cancellation). A
+                    // harness-side deadline would be an explicit adapter
+                    // change, never a hidden default.
                     ExecutionRequest::native_turn(
                         PrivateInputHandle::new(format!("gaia:{task_id}:prompt")),
                         attachments,
-                        GAIA_TASK_TIMEOUT,
+                        None,
                         ToolPolicyId::new(GAIA_TOOL_POLICY),
                         OutputContract::new(GAIA_OUTPUT_CONTRACT),
                     ),

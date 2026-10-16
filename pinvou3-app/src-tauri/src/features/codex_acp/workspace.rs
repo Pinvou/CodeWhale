@@ -1,6 +1,7 @@
+// architecture-guard: allow-target-cfg -- the cfg(unix)-gated test fixtures in this file share one non-portable shape: a real symlink. The round-12 baseline-gate convergence pin, the round-48 untracked-diff regression (refuses an escaping link, reads a local one canonically), and the round-51 fingerprint/baseline pins (a dirty symlink→regular-file must be skipped, never hashed through, and the tracked-ness oracle must answer literal paths so a glob-metacharacter filename cannot alias a tracked file) all need std::os::unix::fs::symlink or a `*`-bearing filename that Windows cannot express; the semantics under test are platform-independent, only the fixtures cannot be.
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::time::UNIX_EPOCH;
@@ -8,7 +9,6 @@ use std::time::UNIX_EPOCH;
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use walkdir::{DirEntry, WalkDir};
 
 // `SEARCH_LIMIT`, `PREVIEW_LIMIT` and `DIFF_LIMIT` are `pub` because the
@@ -289,6 +289,29 @@ pub fn resolve_workspace_resource(root: &Path, resource_path: &str) -> Result<Pa
     Ok(canonical)
 }
 
+/// Whether the session's stored baseline is already current for `root`.
+/// Wraps the private `load_baseline`, which self-invalidates when the stored
+/// `workspace_path` no longer matches `root` (a workspace moved by a rebind
+/// whose recapture failed or never ran): such a baseline reads as absent.
+/// `root` is canonicalized first, matching `capture_baseline`'s stored
+/// spelling — the rebind drain passes the LEXICAL translation
+/// (`to.join(suffix)`), and an inner symlink component (not just the macOS
+/// `/var` prefix alias, where both sides already sit canonical) would make
+/// the raw-string compare read not-current on every run, so the gate would
+/// keep resetting a healthy baseline instead of converging (round-12 P2-1).
+/// A root that cannot be canonicalized (vanished mid-run) reads as not
+/// current; the best-effort recapture then fails honestly and is logged.
+/// The rebind's baseline-recapture drain gates on this (round-11 review M1)
+/// so a healthy session with a fresh baseline is never reset — resetting it
+/// would wipe the "changes since session start" view (non-git) or flip
+/// every currently-dirty file to preexisting (git).
+pub fn baseline_is_current(session_id: &str, root: &Path) -> bool {
+    let Ok(root) = canonical_workspace(root) else {
+        return false;
+    };
+    matches!(load_baseline(session_id, &root), Ok(Some(_)))
+}
+
 pub fn capture_baseline(session_id: &str, root: &Path) -> Result<()> {
     let root = canonical_workspace(root)?;
     let git = is_git_workspace(&root);
@@ -314,20 +337,22 @@ pub fn capture_baseline(session_id: &str, root: &Path) -> Result<()> {
         entries,
     };
     let path = baseline_path(session_id);
+    // `atomic_write` stages inside the target's parent, so the directory
+    // must exist first (unchanged from the hand-rolled writer).
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("创建工作区基线目录失败: {}", parent.display()))?;
     }
     let payload = serde_json::to_vec_pretty(&baseline).context("序列化工作区基线失败")?;
-    let temporary = path.with_extension("json.tmp");
-    {
-        let mut file = fs::File::create(&temporary)
-            .with_context(|| format!("创建工作区基线失败: {}", temporary.display()))?;
-        file.write_all(&payload)
-            .with_context(|| format!("写入工作区基线失败: {}", temporary.display()))?;
-        file.sync_all().ok();
-    }
-    fs::rename(&temporary, &path)
+    // The hand-rolled pid-carrying tmp+rename (the CLI's `code` family
+    // captures baselines from a second process against the same session
+    // directories, so a fixed `.tmp` name would let two surfaces rename
+    // each other's half-written file into place) carried no fsync, and its
+    // two cleanup arms existed because a failed write (ENOSPC, EACCES)
+    // would strand `…tmp.<pid>` forever. `atomic_write` subsumes both: the
+    // unique per-writer staging name, the fsync-before-rename the sibling
+    // stores migrated for, and the same litter rule.
+    crate::platform::filesystem::atomic_write(&path, &payload)
         .with_context(|| format!("保存工作区基线失败: {}", path.display()))?;
     Ok(())
 }
@@ -665,17 +690,10 @@ fn git_path(root: &Path, name: &str) -> Option<PathBuf> {
     if dot_git.is_dir() {
         return Some(dot_git.join(name));
     }
-    let mut command = crate::platform::process::HiddenCommand::new("git");
-    crate::platform::process::strip_git_override_env(&mut command);
-    let output = command
-        .current_dir(root)
-        .args(["rev-parse", "--git-path", name])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let relative = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let relative = git_output(root, &["rev-parse", "--git-path", name])
+        .ok()?
+        .trim()
+        .to_string();
     (!relative.is_empty()).then(|| root.join(relative))
 }
 
@@ -721,9 +739,20 @@ pub fn workspace_diff(session_id: &str, root: &Path, relative_path: &str) -> Res
     }
 
     let mut text = if is_git_workspace(&root) {
+        // Round-51 review: `:(literal)` — `--` stops option parsing but not
+        // pathspec globbing, so a requested `a*x.txt` used to render the
+        // tracked `abx.txt`'s diff instead of its own. Same literal prefix
+        // the tracked-ness oracle below uses.
+        let literal = format!(":(literal){relative}");
         let unstaged = git_output(
             &root,
-            &["diff", "--no-ext-diff", "--no-color", "--", &relative],
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-color",
+                "--",
+                literal.as_str(),
+            ],
         )?;
         let staged = git_output(
             &root,
@@ -733,7 +762,7 @@ pub fn workspace_diff(session_id: &str, root: &Path, relative_path: &str) -> Res
                 "--no-ext-diff",
                 "--no-color",
                 "--",
-                &relative,
+                literal.as_str(),
             ],
         )?;
         let mut combined = String::new();
@@ -749,7 +778,19 @@ pub fn workspace_diff(session_id: &str, root: &Path, relative_path: &str) -> Res
             combined.push_str(&unstaged);
         }
         if combined.is_empty() && path.is_file() {
-            untracked_diff(&path, &relative)?
+            // Round-40 review: the synthetic new-file diff is only correct
+            // for an UNTRACKED file. A tracked, unmodified file reached this
+            // arm too (both diffs empty) and `untracked_diff` reported the
+            // whole content as added from /dev/null — asserting a change
+            // that does not exist, on the GUI's diff view and the CLI's
+            // `code workspace diff` alike. `ls-files --error-unmatch`
+            // settles tracked-ness (it exits nonzero for an untracked
+            // path); a tracked file answers with no diff at all.
+            if ls_files_tracked(&root, &relative) {
+                String::new()
+            } else {
+                untracked_diff(&root, &path, &relative)?
+            }
         } else {
             combined
         }
@@ -1167,7 +1208,17 @@ fn snapshot_entries(root: &Path) -> Result<BTreeMap<String, FileFingerprint>> {
 }
 
 fn fingerprint(path: &Path, include_hash: bool) -> Result<Option<FileFingerprint>> {
-    let metadata = match path.metadata() {
+    // Round-51 review M1: `symlink_metadata`, not `metadata` — the following
+    // variant let a dirty symlink→regular-file (an untracked dotfile link or
+    // a tracked file→link typechange, both listed by `git status
+    // --untracked-files=all`) pass the `is_file` gate and then hit
+    // `sha256_file`'s symlink refusal, failing the whole baseline capture
+    // (GUI session creation rolled back). Skipping non-regular entries here
+    // matches the file-tree arm (WalkDir runs with follow_links(false)) and
+    // snapshot_entries' own `is_file` filter, so both baseline arms treat a
+    // symlink as "no fingerprint" and classify_origin stays consistent
+    // (both sides `None`).
+    let metadata = match path.symlink_metadata() {
         Ok(metadata) if metadata.is_file() => metadata,
         Ok(_) => return Ok(None),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1176,20 +1227,10 @@ fn fingerprint(path: &Path, include_hash: bool) -> Result<Option<FileFingerprint
         }
     };
     let sha256 = if include_hash {
-        let mut file =
-            fs::File::open(path).with_context(|| format!("打开文件失败: {}", path.display()))?;
-        let mut digest = Sha256::new();
-        let mut buffer = [0_u8; 64 * 1024];
-        loop {
-            let read = file
-                .read(&mut buffer)
-                .with_context(|| format!("读取文件失败: {}", path.display()))?;
-            if read == 0 {
-                break;
-            }
-            digest.update(&buffer[..read]);
-        }
-        Some(crate::platform::encoding::hex_lower(&digest.finalize()))
+        Some(
+            crate::platform::hashing::sha256_file(path)
+                .with_context(|| format!("读取文件失败: {}", path.display()))?,
+        )
     } else {
         None
     };
@@ -1239,17 +1280,12 @@ fn filesystem_changes(
 }
 
 fn git_root(root: &Path) -> Option<PathBuf> {
-    let mut command = crate::platform::process::HiddenCommand::new("git");
-    crate::platform::process::strip_git_override_env(&mut command);
-    let output = command
-        .current_dir(root)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    fs::canonicalize(String::from_utf8_lossy(&output.stdout).trim()).ok()
+    fs::canonicalize(
+        git_output(root, &["rev-parse", "--show-toplevel"])
+            .ok()?
+            .trim(),
+    )
+    .ok()
 }
 
 fn git_branch(root: &Path) -> Option<String> {
@@ -1334,7 +1370,7 @@ fn git_status_entries(root: &Path) -> Result<Vec<WorkspaceChange>> {
         }
         let x = record[0] as char;
         let y = record[1] as char;
-        let path = String::from_utf8_lossy(&record[3..]).replace('\\', "/");
+        let path = porcelain_record_path(record);
         if matches!(x, 'R' | 'C') || matches!(y, 'R' | 'C') {
             index += 1;
         }
@@ -1346,6 +1382,26 @@ fn git_status_entries(root: &Path) -> Result<Vec<WorkspaceChange>> {
         });
     }
     Ok(changes)
+}
+
+/// One `git status --porcelain=v1 -z` record's path field: `XY ` prefix
+/// stripped, bytes lossily decoded. The `\` → `/` separator rewrite is a
+/// WINDOWS-only `status` quirk (git reports Windows paths with backslash
+/// separators there). A literal backslash is a legal Unix filename byte —
+/// rewriting on unix forged a phantom `back/slash.txt` entry for a real
+/// `back\slash.txt` (missing baseline fingerprint, wrong dirty path), so
+/// the raw path is kept as-is (round-51 review; same doctrine as the CLI
+/// twin's round-37 note).
+fn porcelain_record_path(record: &[u8]) -> String {
+    let path = String::from_utf8_lossy(&record[3..]);
+    #[cfg(windows)]
+    {
+        path.replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        path.into_owned()
+    }
 }
 
 fn git_status_label(x: char, y: char) -> &'static str {
@@ -1404,12 +1460,36 @@ fn classify_origin(
     }
 }
 
-fn untracked_diff(path: &Path, relative: &str) -> Result<String> {
-    if file_kind(path) != "text" {
+fn untracked_diff(root: &Path, path: &Path, relative: &str) -> Result<String> {
+    // Round-48 review MAJOR: resolve through symlinks and re-check
+    // containment BEFORE opening, then read the CANONICAL path — the
+    // lexical `root.join(relative)` let an untracked symlink planted in
+    // the agent-writable workspace (`notes.md -> ~/.ssh/id_ed25519`) route
+    // the target's bytes into the synthetic "new file" diff. Same
+    // canonicalize → gate → read-canonical discipline the preview lane has
+    // carried since the round-40/46 fixes. The read is also bounded at
+    // DIFF_LIMIT+1 (the loop only ever renders DIFF_LIMIT bytes): the
+    // previous whole-file `fs::read_to_string` loaded a multi-gigabyte
+    // untracked text file into memory just to cut it at render time.
+    let canonical_root = std::fs::canonicalize(root)
+        .with_context(|| format!("解析工作区根目录失败: {}", root.display()))?;
+    let canonical = std::fs::canonicalize(path)
+        .with_context(|| format!("读取未跟踪文件失败: {}", path.display()))?;
+    if !canonical.starts_with(&canonical_root) {
+        bail!("未跟踪路径通过符号链接越出了工作区: {}", relative);
+    }
+    if file_kind(&canonical) != "text" {
         return Ok("未跟踪的二进制文件不支持差异预览。".to_string());
     }
-    let preview = fs::read_to_string(path)
-        .with_context(|| format!("读取未跟踪文件失败: {}", path.display()))?;
+    let mut bytes = Vec::new();
+    std::fs::File::open(&canonical)
+        .and_then(|mut file| {
+            (&mut file)
+                .take(DIFF_LIMIT as u64 + 1)
+                .read_to_end(&mut bytes)
+        })
+        .with_context(|| format!("读取未跟踪文件失败: {}", canonical.display()))?;
+    let preview = String::from_utf8_lossy(&bytes);
     let mut output = format!(
         "diff --git a/{0} b/{0}\nnew file mode 100644\n--- /dev/null\n+++ b/{0}\n",
         relative
@@ -1423,6 +1503,45 @@ fn untracked_diff(path: &Path, relative: &str) -> Result<String> {
         }
     }
     Ok(output)
+}
+
+/// Tracked-ness oracle for the round-40 arm: `ls-files --error-unmatch`
+/// exits 0 with the path for a TRACKED file and exits 1 for an untracked
+/// one — but any other failure (index.lock contention, corrupt repo, git
+/// missing) also lands in `git_output`'s `Err`, which the previous
+/// `unwrap_or(false)` flattened into "untracked", degrading a tracked
+/// unmodified file back into the fabricated whole-file addition the
+/// round-40 fix exists to kill. Tracked-ness UNKNOWN therefore answers
+/// "tracked" — silence, never a fabricated diff; a genuinely untracked
+/// file diffed during a git outage re-syncs on the next call.
+fn ls_files_tracked(root: &Path, relative: &str) -> bool {
+    let mut command = crate::platform::process::HiddenCommand::new("git");
+    crate::platform::process::strip_git_override_env(&mut command);
+    // Round-51 review: `:(literal)` disables pathspec globbing — `--` only
+    // stops option parsing, so an untracked `a*x.txt` used to match the
+    // tracked `abx.txt`, exit 0, and get misanswered "tracked" (its diff
+    // silently disappeared). The literal magic prefix is understood by every
+    // git the workspace lane supports.
+    let Ok(output) = command
+        .current_dir(root)
+        .args([
+            "ls-files",
+            "--error-unmatch",
+            "--",
+            format!(":(literal){relative}").as_str(),
+        ])
+        .output()
+    else {
+        return true;
+    };
+    if output.status.success() {
+        !String::from_utf8_lossy(&output.stdout).trim().is_empty()
+    } else {
+        // `--error-unmatch` exits 1 exactly for the not-listed (untracked)
+        // case; anything else is a git failure, not an answer, and keeps
+        // the "tracked" (stay silent) answer.
+        output.status.code() != Some(1)
+    }
 }
 
 #[cfg(test)]
@@ -1455,6 +1574,33 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// Shared git subprocess helper for the workspace tests. Strip
+    /// process-wide GIT_* overrides the way production git call sites do:
+    /// other tests concurrently holding ENV_LOCK may point GIT_DIR /
+    /// GIT_INDEX_FILE at bogus locations, which would redirect these
+    /// subprocesses away from the temp repository.
+    fn run_git(dir: &Path, args: &[&str]) {
+        let mut command = std::process::Command::new("git");
+        crate::platform::process::strip_all_git_env(&mut command);
+        let output = command
+            .current_dir(dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .args(args)
+            .output()
+            .unwrap_or_else(|error| panic!("failed to spawn git {args:?}: {error}"));
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}\nstderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
 
     #[test]
@@ -1508,6 +1654,122 @@ mod tests {
         assert!(validate_workspace_relative_path(root.path(), "/absolute/secret.txt").is_err());
     }
 
+    /// A literal backslash is a legal Unix filename byte: the porcelain
+    /// record's path must survive verbatim. The unconditional `\` → `/`
+    /// rewrite used to forge a phantom `back/slash.txt` entry (and starve
+    /// the real file's baseline fingerprint) for it.
+    #[cfg(unix)]
+    #[test]
+    fn porcelain_record_path_keeps_a_unix_backslash_filename_raw() {
+        assert_eq!(
+            porcelain_record_path(b"?? back\\slash.txt"),
+            "back\\slash.txt"
+        );
+        // Ordinary records lose only the XY prefix, unrewritten.
+        assert_eq!(porcelain_record_path(b"M  src/main.py"), "src/main.py");
+    }
+
+    /// Round-51 review M1: a dirty symlink→regular-file used to pass the
+    /// following-`metadata` gate and then hit `sha256_file`'s symlink
+    /// refusal, failing the whole baseline capture (GUI session creation
+    /// rolled back). The fingerprint must SKIP the link — never hash through
+    /// it, never error — while the regular target still hashes.
+    #[cfg(unix)]
+    #[test]
+    fn fingerprint_skips_symlinks_instead_of_failing() {
+        let root = TestDir::new("fingerprint-symlink");
+        fs::create_dir_all(root.path().join("secrets")).unwrap();
+        fs::write(root.path().join("secrets/prod.env"), "SECRET=1\n").unwrap();
+        std::os::unix::fs::symlink(
+            root.path().join("secrets/prod.env"),
+            root.path().join(".env"),
+        )
+        .unwrap();
+
+        let link = fingerprint(&root.path().join(".env"), true).unwrap();
+        assert!(
+            link.is_none(),
+            "a symlink must fingerprint as None, got {link:?}"
+        );
+        let target = fingerprint(&root.path().join("secrets/prod.env"), true).unwrap();
+        let target = target.expect("regular file must fingerprint");
+        assert!(target.sha256.is_some());
+        // A broken symlink is the same skip, not a NotFound error.
+        std::os::unix::fs::symlink(
+            root.path().join("secrets/missing.env"),
+            root.path().join(".broken"),
+        )
+        .unwrap();
+        assert!(
+            fingerprint(&root.path().join(".broken"), true)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// Round-51 review M1 end-to-end shape: `git status
+    /// --untracked-files=all` lists an untracked symlink as a dirty path, and
+    /// the baseline/classify pair must treat it consistently (skip, never
+    /// hash through, never fail the capture). classify_origin takes the
+    /// baseline by reference, so the pair is exercised hermetically with a
+    /// hand-built baseline — no store, no env mutation.
+    #[cfg(unix)]
+    #[test]
+    fn git_arm_treats_untracked_symlink_as_a_consistent_skip() {
+        let Some(root) = init_git_repo("baseline-untracked-symlink") else {
+            return;
+        };
+        fs::create_dir_all(root.path().join("secrets")).unwrap();
+        fs::write(root.path().join("secrets/prod.env"), "SECRET=1\n").unwrap();
+        std::os::unix::fs::symlink(
+            root.path().join("secrets/prod.env"),
+            root.path().join(".env"),
+        )
+        .unwrap();
+
+        // The git arm's input shape: the link is listed as a dirty path.
+        let status = git_status_entries(root.path()).unwrap();
+        assert!(
+            status.iter().any(|change| change.relative_path == ".env"),
+            "git status must list the untracked symlink"
+        );
+        // The capture-side half of the fix: fingerprint skips the link
+        // (asserted in fingerprint_skips_symlinks_instead_of_failing), so the
+        // baseline entry map carries no ".env" row.
+        let baseline = WorkspaceBaseline {
+            workspace_path: root.path().to_string_lossy().into_owned(),
+            git: true,
+            dirty_paths: BTreeSet::from([".env".to_string()]),
+            entries: BTreeMap::new(),
+        };
+        let origin = classify_origin(root.path(), Some(&baseline), ".env").unwrap();
+        assert_eq!(
+            origin, "preexisting",
+            "a skipped symlink classifies consistently (both sides None), never errors"
+        );
+    }
+
+    /// Round-51 review: the tracked-ness oracle must match the path
+    /// LITERALLY — `--` disables option parsing but not pathspec globbing,
+    /// so an untracked `a*x.txt` used to match the tracked `abx.txt`, exit 0,
+    /// and get misanswered "tracked" (its diff silently disappeared).
+    #[cfg(unix)]
+    #[test]
+    fn ls_files_tracked_answers_literal_paths_not_globs() {
+        let Some(root) = init_git_repo("ls-files-literal") else {
+            return;
+        };
+        fs::write(root.path().join("abx.txt"), "tracked\n").unwrap();
+        git_output(root.path(), &["add", "."]).unwrap();
+        fs::write(root.path().join("a*x.txt"), "untracked glob-shaped\n").unwrap();
+
+        assert!(ls_files_tracked(root.path(), "abx.txt"));
+        assert!(
+            !ls_files_tracked(root.path(), "a*x.txt"),
+            "an untracked glob-metacharacter filename must not alias a tracked file"
+        );
+    }
+
     #[test]
     fn diff_cache_hits_within_session_and_invalidates_on_file_change() {
         // 无真实 git 仓库时 workspace_diff 走文件系统对比分支，内容随文件变化——正适合验证缓存失效。
@@ -1541,6 +1803,27 @@ mod tests {
     fn apply_times(path: &Path, times: fs::FileTimes) {
         let file = fs::OpenOptions::new().write(true).open(path).unwrap();
         file.set_times(times).unwrap();
+    }
+
+    // Rewrite a git-tracked fixture the way #590 hardened code_checkpoints'
+    // TestDir::write: a same-length in-place rewrite can land inside one
+    // timestamp tick with the inode number matching the entry cached in the
+    // index (ext4 hands the just-freed inode right back), so the following
+    // add/commit trusts the stale blob and the asserted commit silently
+    // no-ops with "nothing to commit". Writing a sibling staging file while
+    // the target still exists makes the staging inode differ from the cached
+    // one by construction, independent of timestamp granularity and inode
+    // reuse (safe as long as each path is rewritten at most once between
+    // index refreshes, which holds for every test here).
+    fn rewrite_git_tracked(path: &Path, content: &str) {
+        let mut staging = path.as_os_str().to_os_string();
+        staging.push(format!(
+            ".pinvou3-new-{}",
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        let staging = PathBuf::from(staging);
+        fs::write(&staging, content).unwrap();
+        fs::rename(&staging, &path).unwrap();
     }
 
     #[test]
@@ -1687,6 +1970,85 @@ mod tests {
         assert_ne!(baseline, diff_fingerprint(root.path(), "main.py"));
     }
 
+    /// Round-48 review MAJOR: in a GIT workspace the untracked arm must
+    /// (a) refuse an untracked symlink that escapes the workspace through
+    /// canonical containment (the round-40/46 discipline previously lived
+    /// only in the non-git preview arm), (b) still diff a workspace-LOCAL
+    /// untracked symlink by reading its canonical (inside-root) target,
+    /// and (c) keep answering no-diff for a tracked unmodified file. The
+    /// read is bounded at DIFF_LIMIT+1 (the whole-file `fs::read_to_string`
+    /// is gone). Requires the `git` binary; skips gracefully otherwise.
+    #[test]
+    fn untracked_diff_in_git_workspaces_resolves_symlinks_and_bounded_reads() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!(
+                "skipping untracked_diff_in_git_workspaces_resolves_symlinks_and_bounded_reads: git binary not available"
+            );
+            return;
+        }
+        let root = TestDir::new("untracked-git-symlink");
+        let repo = root.path();
+        run_git(repo, &["init", "-b", "main", "."]);
+        run_git(repo, &["config", "user.name", "test"]);
+        run_git(repo, &["config", "user.email", "test@example.com"]);
+        fs::write(repo.join("tracked.txt"), "hello\n").unwrap();
+        run_git(repo, &["add", "tracked.txt"]);
+        run_git(repo, &["commit", "-m", "init"]);
+
+        // (c) tracked + unmodified → no diff (exit-code-aware oracle).
+        let diff = workspace_diff("sess-untracked-symlink", repo, "tracked.txt").unwrap();
+        assert_eq!(diff.text, "", "a tracked unmodified file must show no diff");
+
+        #[cfg(unix)]
+        {
+            // (a) untracked symlink escaping the workspace must be refused —
+            // its target's bytes must never surface as a synthetic diff.
+            let outside = std::env::temp_dir().join(format!(
+                "pinvou3-untracked-escape-target-{}",
+                crate::platform::paths::tests::unique_suffix()
+            ));
+            fs::write(&outside, "outside secret bytes\n").unwrap();
+            std::os::unix::fs::symlink(&outside, repo.join("outside.md")).unwrap();
+            let error = workspace_diff("sess-untracked-symlink", repo, "outside.md")
+                .err()
+                .expect("an escaping untracked symlink must be refused");
+            let rendered = format!("{error:#}");
+            assert!(
+                rendered.contains("越出了工作区"),
+                "the refusal must name the symlink escape, got: {rendered}"
+            );
+            let _ = fs::remove_file(&outside);
+
+            // (b) a workspace-LOCAL untracked symlink still diffs through
+            // its canonical (inside-root) target.
+            fs::write(repo.join("inner.txt"), "inner bytes\n").unwrap();
+            std::os::unix::fs::symlink("inner.txt", repo.join("inner-link.md")).unwrap();
+            let diff = workspace_diff("sess-untracked-symlink", repo, "inner-link.md").unwrap();
+            assert!(
+                diff.text.contains("+inner bytes"),
+                "a local untracked symlink must diff via its canonical target, got: {}",
+                diff.text
+            );
+        }
+
+        // Bounded read: an untracked text file larger than DIFF_LIMIT is
+        // capped at the cap (the render loop stops at DIFF_LIMIT anyway,
+        // but the READ itself must not load the whole file).
+        let big = "x".repeat(DIFF_LIMIT * 4);
+        fs::write(repo.join("big.txt"), &big).unwrap();
+        let diff = workspace_diff("sess-untracked-symlink", repo, "big.txt").unwrap();
+        assert!(
+            diff.text.len() <= DIFF_LIMIT + 160,
+            "the untracked read must be capped near DIFF_LIMIT, got {}",
+            diff.text.len()
+        );
+        assert!(diff.truncated);
+    }
+
     // linked worktree 中 `.git` 是 gitfile，指纹必须经 git 自身解析
     // index/HEAD/ref 路径；朴素 `root.join(".git/...")` 启发式会全部落空、
     // 字段恒为 0，陈旧缓存差异会被当作命中返回。依赖 git 二进制，缺失时
@@ -1707,29 +2069,6 @@ mod tests {
         let repo = root.path().join("repo");
         let linked = root.path().join("linked");
         fs::create_dir_all(&repo).unwrap();
-        // 与生产 git 调用点一致剥掉进程级 GIT_* 覆盖：并行测试里持锁者可能把
-        // GIT_DIR / GIT_INDEX_FILE 指向无关位置，会把这些子进程带离临时仓库。
-        let run_git = |dir: &Path, args: &[&str]| {
-            let mut command = std::process::Command::new("git");
-            crate::platform::process::strip_all_git_env(&mut command);
-            let output = command
-                .current_dir(dir)
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_AUTHOR_NAME", "test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .args(args)
-                .output()
-                .unwrap_or_else(|error| panic!("failed to spawn git {args:?}: {error}"));
-            assert!(
-                output.status.success(),
-                "git {args:?} failed: {}\nstderr: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        };
         run_git(&repo, &["init", "-b", "main", "."]);
         run_git(&repo, &["config", "user.name", "test"]);
         run_git(&repo, &["config", "user.email", "test@example.com"]);
@@ -1753,7 +2092,7 @@ mod tests {
         assert_ne!(baseline.head_ref_size, 0);
 
         // worktree 内暂存改动会重写其 index → 指纹变化（暂存变化不得命中陈旧缓存）。
-        fs::write(linked.join("main.py"), "print(2)\n").unwrap();
+        rewrite_git_tracked(&linked.join("main.py"), "print(2)\n");
         run_git(&linked, &["add", "main.py"]);
         assert_ne!(baseline, diff_fingerprint(&linked, "main.py"));
 
@@ -1902,6 +2241,85 @@ mod tests {
         let _ = fs::remove_file(baseline_path(&session_id));
     }
 
+    #[test]
+    fn baseline_is_current_distinguishes_stale_from_current_roots() {
+        // round-12 P2-1 companion: the rebind recapture drain gates on this
+        // predicate, so the absent / corrupt / stale / current classification
+        // is pinned directly — an absent or corrupt baseline reads
+        // not-current (recapture rewrites it), a fresh one at the SAME root
+        // reads current, and a different root reads stale.
+        let _guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let session_id = format!("baseline-gate-{}-{nonce}", std::process::id());
+        let a = TestDir::new("baseline-gate-a");
+        let b = TestDir::new("baseline-gate-b");
+        fs::write(a.path().join("file.txt"), "a").unwrap();
+        fs::write(b.path().join("file.txt"), "b").unwrap();
+        assert!(
+            !baseline_is_current(&session_id, a.path()),
+            "no baseline yet: not current, recapture runs"
+        );
+        capture_baseline(&session_id, a.path()).unwrap();
+        assert!(
+            baseline_is_current(&session_id, a.path()),
+            "fresh baseline at the same root: current, drain skips"
+        );
+        assert!(
+            !baseline_is_current(&session_id, b.path()),
+            "a moved workspace (different root) reads stale"
+        );
+        fs::write(baseline_path(&session_id), b"not json").unwrap();
+        assert!(
+            !baseline_is_current(&session_id, a.path()),
+            "a corrupt baseline reads not-current (the drain's recapture then rewrites it)"
+        );
+        let _ = fs::remove_file(baseline_path(&session_id));
+        let _ = fs::remove_dir_all(a.path());
+        let _ = fs::remove_dir_all(b.path());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn baseline_is_current_converges_across_a_path_alias_symlink() {
+        // round-12 P2-1: capture stores the CANONICALIZED root while the
+        // rebind drain passes the LEXICAL to.join(suffix) translation — a
+        // symlink anywhere in that spelling (this pin uses a whole-path
+        // alias, the same shape; an inner component alias resolves the same
+        // way) must not make the gate read stale on every run (it would
+        // keep resetting a healthy baseline instead of converging after
+        // one idempotent recapture).
+        let _guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let session_id = format!("baseline-gate-link-{}-{nonce}", std::process::id());
+        let real = TestDir::new("baseline-gate-real");
+        let alias = std::env::temp_dir().join(format!(
+            "pinvou3-baseline-gate-alias-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::write(real.path().join("file.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(real.path(), &alias).expect("symlink");
+        // Bind through the alias: the stored baseline holds the canonical
+        // (real) spelling, as every capture does.
+        capture_baseline(&session_id, real.path()).unwrap();
+        assert!(
+            baseline_is_current(&session_id, &alias),
+            "the lexical alias spelling must resolve to the canonical stored root"
+        );
+        let _ = fs::remove_file(baseline_path(&session_id));
+        let _ = fs::remove_dir_all(real.path());
+        let _ = fs::remove_file(&alias);
+    }
+
     /// 初始化一个含 main + feature 两个分支的 git 仓库；git 不可用时返回 None 跳过。
     fn init_git_repo(label: &str) -> Option<TestDir> {
         let root = TestDir::new(label);
@@ -1964,7 +2382,7 @@ mod tests {
         };
         // 在 feature 上多一个提交：feature 的 committerdate 更新，应排在 main 前。
         git_output(root.path(), &["checkout", "feature"]).unwrap();
-        fs::write(root.path().join("file.txt"), "v2").unwrap();
+        rewrite_git_tracked(&root.path().join("file.txt"), "v2");
         git_output(
             root.path(),
             &[
@@ -2069,7 +2487,7 @@ mod tests {
         // feature commits file.txt = v2; restoring the uncommitted main-side
         // edit on top of it conflicts by construction.
         git_output(root.path(), &["checkout", "feature"]).unwrap();
-        fs::write(root.path().join("file.txt"), "v2").unwrap();
+        rewrite_git_tracked(&root.path().join("file.txt"), "v2");
         git_output(
             root.path(),
             &[
@@ -2107,7 +2525,7 @@ mod tests {
             return;
         };
         git_output(root.path(), &["checkout", "feature"]).unwrap();
-        fs::write(root.path().join("file.txt"), "v2").unwrap();
+        rewrite_git_tracked(&root.path().join("file.txt"), "v2");
         git_output(
             root.path(),
             &[
@@ -2258,7 +2676,7 @@ mod tests {
         // feature 分支上 file.txt 改为 v2 并提交；main 上未提交修改同一文件，
         // carry 模式切换必然被 git 拒绝且工作区保持原样。
         git_output(root.path(), &["checkout", "feature"]).unwrap();
-        fs::write(root.path().join("file.txt"), "v2").unwrap();
+        rewrite_git_tracked(&root.path().join("file.txt"), "v2");
         git_output(
             root.path(),
             &[

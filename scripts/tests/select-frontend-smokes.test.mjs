@@ -15,33 +15,44 @@ test("system status participates in full and feature-local Account Platform brow
   assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/features/account-platform/AdminSystemStatusWorkspace.jsx"])).includes(status));
 });
 
-test("shared frontend paths fail closed to the full browser suite", () => {
-  assert.deepEqual(
-    labels(selectFrontendSmokes(["pinvou3-app/src/shared/i18n.js"])),
-    fullLabels,
-  );
-});
+const fullSuiteCases = [
+  [
+    "shared frontend paths fail closed to the full browser suite",
+    ["pinvou3-app/src/shared/i18n.js"],
+  ],
+  [
+    "test infrastructure changes fail closed to the full browser suite",
+    ["pinvou3-app/tests/ui_test_server.js"],
+  ],
+  [
+    "frontend smoke runner changes fail closed to the full browser suite",
+    ["scripts/run-frontend-smokes.mjs"],
+  ],
+  [
+    "shared smoke manifest changes fail closed to the full browser suite",
+    ["scripts/select-frontend-smokes.mjs"],
+  ],
+  [
+    "Linux knowledge host package resources run the full suite",
+    [
+      "pinvou3-app/src-tauri/resources/platforms/linux/knowledge-host/pinvou-knowledge-host-helper",
+    ],
+  ],
+  [
+    "unknown frontend features fail closed to the full browser suite",
+    ["pinvou3-app/src/features/search/SearchView.jsx"],
+  ],
+  [
+    "an empty or unrelated diff fails closed",
+    ["docs/ci.md"],
+  ],
+];
 
-test("test infrastructure changes fail closed to the full browser suite", () => {
-  assert.deepEqual(
-    labels(selectFrontendSmokes(["pinvou3-app/tests/ui_test_server.js"])),
-    fullLabels,
-  );
-});
-
-test("frontend smoke runner changes fail closed to the full browser suite", () => {
-  assert.deepEqual(
-    labels(selectFrontendSmokes(["scripts/run-frontend-smokes.mjs"])),
-    fullLabels,
-  );
-});
-
-test("shared smoke manifest changes fail closed to the full browser suite", () => {
-  assert.deepEqual(
-    labels(selectFrontendSmokes(["scripts/select-frontend-smokes.mjs"])),
-    fullLabels,
-  );
-});
+for (const [name, paths] of fullSuiteCases) {
+  test(name, () => {
+    assert.deepEqual(labels(selectFrontendSmokes(paths)), fullLabels);
+  });
+}
 
 test("feature-local changes select core and feature smokes", () => {
   assert.deepEqual(
@@ -55,14 +66,16 @@ test("feature-local changes select core and feature smokes", () => {
     [
       "npm:test:ui-smoke",
       "npm:test:settings-ui",
+      "npm:test:composer-tools-smoke",
+      "npm:test:composer-pending-enable-smoke",
       "node:tests/pet_selector_ui_smoke.js",
     ],
   );
 });
 
-test("account platform changes route all five concrete F05 browser smokes", () => {
+test("account platform changes route all six concrete F05 browser smokes", () => {
   const selected = labels(selectFrontendSmokes(["pinvou3-app/src/features/account-platform/PersonalUsageWorkspace.jsx"]));
-  for (const feature of ["model-selection", "native-code", "billing-notice", "usage", "usage-governance"]) {
+  for (const feature of ["model-selection", "model-lifecycle", "native-code", "billing-notice", "usage", "usage-governance"]) {
     assert.ok(selected.includes(`npm:test:account-platform-${feature}-ui`), `${feature} browser smoke must run for account changes`);
     assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/shared/i18n.js"])).includes(`npm:test:account-platform-${feature}-ui`), `${feature} browser smoke must run for shared changes`);
   }
@@ -79,15 +92,6 @@ test("knowledge changes select the desktop knowledge smoke", () => {
       "npm:test:ui-smoke",
       "npm:test:kb-smoke",
     ],
-  );
-});
-
-test("Linux knowledge host package resources run the full suite", () => {
-  assert.deepEqual(
-    labels(selectFrontendSmokes([
-      "pinvou3-app/src-tauri/resources/platforms/linux/knowledge-host/pinvou-knowledge-host-helper",
-    ])),
-    fullLabels,
   );
 });
 
@@ -135,4 +139,13 @@ test("closure production and recovery browser command is selected in full and fe
   assert.ok(fullLabels.includes(target));
   assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/features/account-platform/AccountClosureWorkspace.jsx"])).includes(target));
   assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/shared/i18n.js"])).includes(target));
+});
+
+
+test("native same-actor reauthentication browser runs once for full and account feature changes", () => {
+  const target = "npm:test:account-platform-desktop-reauthentication";
+  for (const selected of [fullLabels, labels(selectFrontendSmokes(["pinvou3-app/src/features/account-platform/desktop-reauthentication.js"])), labels(selectFrontendSmokes(["pinvou3-app/src/features/account-platform/PersonalFinanceWorkspace.jsx"])), labels(selectFrontendSmokes(["pinvou3-app/src/shared/i18n.js"]))]) {
+    assert.equal(selected.filter(label => label === target).length, 1);
+  }
+  assert.equal(labels(selectFrontendSmokes(["pinvou3-app/src/features/settings/SettingsView.jsx"])).includes(target), false);
 });

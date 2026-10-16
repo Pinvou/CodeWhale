@@ -96,3 +96,20 @@ test('both PostgreSQL URLs reject query rebinding, startup options, duplicate an
   await executeOperation(request(), { execute: true, environment: { ...environment, TOKEN_MIGRATOR_DATABASE_URL: `${environment.TOKEN_MIGRATOR_DATABASE_URL}?sslmode=verify-full&connect_timeout=5`, ACCOUNT_POLICY_DATABASE_URL: `${environment.ACCOUNT_POLICY_DATABASE_URL}?sslmode=require` }, runner });
   assert.equal(calls, 1);
 });
+
+test('all supported migrations select their restricted schema role instead of inheriting caller authority', async () => {
+  for (const [domain, role] of Object.entries({ account: 'account_service', billing: 'billing_service', token: 'token_gateway' })) {
+    const directory = fileURLToPath(new URL(`../../migrations/${domain}`, import.meta.url));
+    const input = { ...request('migrate-up', { domain, directory, manifest_sha256: await migrationDirectoryDigest(directory), backup_reference: 'backup-test', backup_completed_at: '2026-09-06T00:00:00Z', backup_sha256: 'a'.repeat(64) }), expected_database: `${domain}_test` };
+    const key = `${domain.toUpperCase()}_MIGRATOR_DATABASE_URL`;
+    let calls = 0;
+    await executeOperation(input, { execute: true, environment: { [key]: `postgresql://${domain}_migrator:fixture-only@db.example.invalid/${domain}_test`, MIGRATION_ROLE: 'wrong_privileged_role', UNRELATED_SECRET: 'not-forwarded' }, runner: async (_exe, args, env) => {
+      calls++; assert.deepEqual(args, ['--dir', directory, '--direction', 'up']);
+      assert.equal(env.MIGRATION_ROLE, role); assert.equal(env[key], undefined);
+      assert.equal(env.DATABASE_URL, `postgresql://${domain}_migrator:fixture-only@db.example.invalid/${domain}_test`);
+      assert.equal(env.UNRELATED_SECRET, undefined);
+      return { ok: true, output_sha256: 'a'.repeat(64) };
+    } });
+    assert.equal(calls, 1);
+  }
+});

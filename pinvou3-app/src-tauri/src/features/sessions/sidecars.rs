@@ -25,10 +25,31 @@ use super::SessionStore;
 use crate::platform::prefs::ModelSelectionRef;
 use anyhow::{Context, Result};
 use chrono::Utc;
+use parking_lot::RwLock;
 
 const SESSION_MODELS_FILE: &str = "_session_models.json";
 const PINNED_SESSIONS_FILE: &str = "_pinned_sessions.json";
 const HIDDEN_SESSIONS_FILE: &str = "_hidden_sessions.json";
+
+/// Roll an in-memory sidecar cache back to the durable state after a failed
+/// persist: the file is the cross-process truth, and a refused/failed persist
+/// must not leave this process's snapshot claiming a state the file does not
+/// hold (shared contract of `set_session_model_id` / `set_pinned` / `set_hidden`).
+fn restore_cached_entry(
+    cache: &RwLock<HashMap<String, String>>,
+    id: &str,
+    previous: Option<String>,
+) {
+    let mut map = cache.write();
+    match previous {
+        Some(previous) => {
+            map.insert(id.to_string(), previous);
+        }
+        None => {
+            map.remove(id);
+        }
+    }
+}
 
 /// Durable write for the pinned / hidden sidecars: both files carry the same
 /// shape (an array of `{ id, <ts_key> }` objects sorted by id) and the same
@@ -177,8 +198,30 @@ where
     T: serde::Serialize + serde::de::DeserializeOwned,
     F: FnOnce(&mut HashMap<String, T>) -> bool,
 {
+    mutate_json_file(file_name, mutate, |entries| entries.is_empty())
+}
+
+/// Same read-modify-write contract as [`mutate_json_map_file`] for the plain
+/// id-list sidecar (`_multi_agent.json`): applies `mutate` to the durable
+/// content and persists only when it reports a change.
+pub(crate) fn mutate_json_list_file<F>(file_name: &str, mutate: F) -> Result<()>
+where
+    F: FnOnce(&mut Vec<String>) -> bool,
+{
+    mutate_json_file(file_name, mutate, |entries| entries.is_empty())
+}
+
+/// Shared core of [`mutate_json_map_file`] / [`mutate_json_list_file`]: read
+/// the durable content (quarantine-then-refuse on corruption), apply `mutate`,
+/// and persist only on a reported change (empty container deletes the file,
+/// pretty JSON via `atomic_write_private`).
+fn mutate_json_file<C, F>(file_name: &str, mutate: F, is_empty: impl Fn(&C) -> bool) -> Result<()>
+where
+    C: Default + serde::Serialize + serde::de::DeserializeOwned,
+    F: FnOnce(&mut C) -> bool,
+{
     let file = crate::platform::paths::sessions_root().join(file_name);
-    let mut entries: HashMap<String, T> = if file.exists() {
+    let mut entries: C = if file.exists() {
         let content =
             std::fs::read_to_string(&file).with_context(|| format!("read {file_name}"))?;
         serde_json::from_str(&content).map_err(|error| {
@@ -195,12 +238,12 @@ where
             anyhow::Error::new(error).context(format!("parse {file_name}{note}"))
         })?
     } else {
-        HashMap::new()
+        C::default()
     };
     if !mutate(&mut entries) {
         return Ok(());
     }
-    if entries.is_empty() {
+    if is_empty(&entries) {
         return match std::fs::remove_file(&file) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
@@ -361,6 +404,13 @@ fn quarantine_corrupt_sidecar(file: &std::path::Path, label: &str) -> anyhow::Er
 }
 
 impl SessionStore {
+    /// Fallback tail shared by both model-id readers: a session without an
+    /// explicit override falls back to its scheduled profile's model, if any.
+    fn scheduled_profile_model_id(&self, id: &str) -> Option<String> {
+        self.scheduled_profile(id)
+            .and_then(|profile| profile.model_id)
+    }
+
     pub fn session_model_id(&self, id: &str) -> Option<String> {
         self.session_model_ref(id)
             .map(|selection| selection.runtime_saved_model_id().to_string())
@@ -376,8 +426,7 @@ impl SessionStore {
     /// back to the immutable local model captured by their run profile.
     pub fn session_model_ref(&self, id: &str) -> Option<ModelSelectionRef> {
         self.session_model_ref_override(id).or_else(|| {
-            self.scheduled_profile(id)
-                .and_then(|profile| profile.model_id)
+            self.scheduled_profile_model_id(id)
                 .map(ModelSelectionRef::local)
         })
     }
@@ -410,8 +459,7 @@ impl SessionStore {
             Err(_) => self.session_models.read().get(id).cloned(),
         };
         durable.or_else(|| {
-            self.scheduled_profile(id)
-                .and_then(|profile| profile.model_id)
+            self.scheduled_profile_model_id(id)
                 .map(ModelSelectionRef::local)
         })
     }
@@ -520,7 +568,7 @@ impl SessionStore {
                     .ok()
                     .and_then(|value| value.as_object().cloned())
                     .is_some_and(|values| values.values().any(serde_json::Value::is_string));
-                let mut dropped_ambiguous_platform_ref = false;
+                let mut dropped_ambiguous_platform_refs = 0_usize;
                 for (session_id, selection) in &mut map {
                     if let ModelSelectionRef::AccountPlatform { model_id } = selection {
                         if model_id.trim().is_empty() {
@@ -528,7 +576,7 @@ impl SessionStore {
                                 *model_id = session.metadata.model.trim().to_string();
                             }
                             if model_id.is_empty() {
-                                dropped_ambiguous_platform_ref = true;
+                                dropped_ambiguous_platform_refs += 1;
                             }
                         }
                     }
@@ -536,8 +584,14 @@ impl SessionStore {
                 map.retain(|_, selection| {
                     !matches!(selection, ModelSelectionRef::AccountPlatform { model_id } if model_id.is_empty())
                 });
+                if dropped_ambiguous_platform_refs > 0 {
+                    log::warn!(
+                        "session model binding repair: dropped_count={} reason=empty_platform_identity_unrecoverable",
+                        dropped_ambiguous_platform_refs
+                    );
+                }
                 *self.session_models.write() = map;
-                if legacy_wire_format || dropped_ambiguous_platform_ref {
+                if legacy_wire_format || dropped_ambiguous_platform_refs > 0 {
                     self.save_session_models();
                 }
             }
@@ -579,37 +633,24 @@ impl SessionStore {
                 pins.remove(id);
             }
         }
-        let result = if pinned {
-            apply_timestamped_id_mutation_locked(
-                PINNED_SESSIONS_FILE,
-                "pinned_at",
-                "load_pinned_sessions",
-                &[(id, timestamp.clone())],
-                &[],
-            )
+        let (upserts, removes): (&[(&str, String)], &[&str]) = if pinned {
+            (&[(id, timestamp.clone())], &[])
         } else {
-            apply_timestamped_id_mutation_locked(
-                PINNED_SESSIONS_FILE,
-                "pinned_at",
-                "load_pinned_sessions",
-                &[],
-                &[id],
-            )
+            (&[], &[id])
         };
+        let result = apply_timestamped_id_mutation_locked(
+            PINNED_SESSIONS_FILE,
+            "pinned_at",
+            "load_pinned_sessions",
+            upserts,
+            removes,
+        );
         if let Err(error) = result {
             // Roll the in-memory cache back to the durable state: the file is
             // the cross-process truth and a refused/failed persist must not
             // leave this process's snapshot claiming a state the file does
             // not hold (same contract as `set_session_model_id`).
-            let mut pins = self.pinned_sessions.write();
-            match previous {
-                Some(previous) => {
-                    pins.insert(id.to_string(), previous);
-                }
-                None => {
-                    pins.remove(id);
-                }
-            }
+            restore_cached_entry(&self.pinned_sessions, id, previous);
             // Session ids stay out of the context: the failing sidecar
             // file, named in the error chain, identifies the write.
             return Err(error).context("persist pin state");
@@ -671,7 +712,12 @@ impl SessionStore {
     /// absence inherits the fault discipline; the cost is that a stale boot
     /// map can over-protect a session another process legitimately unpinned
     /// until this process next mutates or restarts (the safe direction).
-    pub(crate) fn durable_pinned_sessions(&self) -> Option<std::collections::HashSet<String>> {
+    /// Round-40 review: `pub` for the pinvou-cli sessions family — the CLI
+    /// archive's half-landed guard must consult the DURABLE registry (a pin
+    /// the desktop app wrote after the CLI booted is invisible to the
+    /// in-memory cache, which is also what a failed pin-clear rolls back
+    /// to), the same reader retention's sweep uses.
+    pub fn durable_pinned_sessions(&self) -> Option<std::collections::HashSet<String>> {
         let file = crate::platform::paths::sessions_root().join(PINNED_SESSIONS_FILE);
         let parsed = std::fs::read_to_string(&file).ok().and_then(|content| {
             parse_timestamped_id_map(&content, "pinned_at", "load_pinned_sessions")
@@ -721,37 +767,24 @@ impl SessionStore {
                 eprintln!("[sessions] clearing the pin while archiving failed: {error:#}");
             }
         }
-        let result = if hidden {
-            apply_timestamped_id_mutation_locked(
-                HIDDEN_SESSIONS_FILE,
-                "hidden_at",
-                "load_hidden_sessions",
-                &[(id, timestamp.clone())],
-                &[],
-            )
+        let (upserts, removes): (&[(&str, String)], &[&str]) = if hidden {
+            (&[(id, timestamp.clone())], &[])
         } else {
-            apply_timestamped_id_mutation_locked(
-                HIDDEN_SESSIONS_FILE,
-                "hidden_at",
-                "load_hidden_sessions",
-                &[],
-                &[id],
-            )
+            (&[], &[id])
         };
+        let result = apply_timestamped_id_mutation_locked(
+            HIDDEN_SESSIONS_FILE,
+            "hidden_at",
+            "load_hidden_sessions",
+            upserts,
+            removes,
+        );
         if let Err(error) = result {
             // Roll the hidden-cache entry back (same durable-truth contract
             // as `set_pinned`). The pin-clearing side effect above is
             // intentional and kept: hiding is the user's stated direction,
             // and a session that failed to hide stays unpinned either way.
-            let mut hidden_sessions = self.hidden_sessions.write();
-            match previous {
-                Some(previous) => {
-                    hidden_sessions.insert(id.to_string(), previous);
-                }
-                None => {
-                    hidden_sessions.remove(id);
-                }
-            }
+            restore_cached_entry(&self.hidden_sessions, id, previous);
             return Err(error).context("persist hidden state");
         }
         Ok(())

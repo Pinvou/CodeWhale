@@ -24,7 +24,7 @@
 .adm-status:before{width:6px;height:6px;border-radius:50%;background:currentColor;content:""}
 .adm-status.ok{color:var(--adm-success);background:var(--adm-success-soft)}
 .adm-status.warn{color:var(--adm-warning);background:var(--adm-warning-soft)}
-.adm-status.neutral{color:var(--adm-danger);background:var(--adm-danger-soft)}
+.adm-status.neutral{color:var(--adm-muted);background:var(--adm-strong)}
 .adm-empty{padding:64px 24px;color:var(--adm-muted);text-align:center}
 .adm-alert,.adm-inline-message{margin-bottom:16px;padding:13px 15px;border:1px solid #f0c8cc;border-radius:11px;color:var(--adm-danger);background:var(--adm-danger-soft)}
 .adm-inline-message:not(.ok):not(.error){color:var(--adm-info);border-color:#cce2ef;background:var(--adm-info-soft)}
@@ -241,3 +241,14 @@
 .adm-model-pricing-editor>h2,.adm-model-pricing-editor>p{margin:0}
 .adm-model-pricing-editor>.adm-pricing-workspace{padding:0;background:transparent;box-shadow:none}
 @media(max-width:760px){.adm-pricing-context-head{align-items:stretch;flex-direction:column}.adm-pricing-context-head>button{width:100%}}
+
+/* Existing read-only status workspace uses the same admin surfaces at all widths. */
+.adm-system-workspace{display:grid;gap:20px;min-width:0}
+.adm-system-workspace>h1{margin:0}
+.adm-system-workspace>button{justify-self:start}
+.adm-system-sections{display:grid;gap:20px;min-width:0}
+.adm-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.adm-metrics>article{display:grid;gap:8px;min-width:0;padding:20px;border:1px solid var(--adm-line);border-radius:var(--adm-radius);background:var(--adm-surface);box-shadow:var(--adm-shadow)}
+.adm-metrics>article>span{color:var(--adm-muted);font-size:12px}
+.adm-metrics>article>strong{font-size:24px;overflow-wrap:anywhere}
+@media(max-width:760px){.adm-system-workspace .adm-metrics{grid-template-columns:1fr}}

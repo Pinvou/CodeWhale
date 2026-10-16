@@ -132,13 +132,14 @@ func refundExceptionProviderStatusAccepted(status string) bool {
 	return trimmed != "" && !refundExceptionProviderFailureStatuses[trimmed]
 }
 
-// refundExceptionConflict keeps the stable ErrConflict identity while naming the
-// owner CAS that failed, which is what the operator reads in the audit trail.
+// refundExceptionConflict marks only a zero-row owner CAS as a definite
+// conflict. Storage and context errors retain their original identity so the
+// authorization consumer keeps an uncertain attempt UNKNOWN.
 func refundExceptionConflict(stage string, cause error) error {
 	if cause == nil {
 		return errors.Join(ErrConflict, errors.New(stage))
 	}
-	return errors.Join(ErrConflict, fmt.Errorf("%s: %w", stage, cause))
+	return fmt.Errorf("%s: %w", stage, cause)
 }
 
 // refundExceptionRepairPlanFrom derives the only permitted repair from
@@ -450,9 +451,31 @@ func (r *PostgresRepository) ApplyRefundExceptionRepair(ctx context.Context, inp
 	if err := refundExceptionRepairExecutionActivation(ctx, tx, input, r.now()); err != nil {
 		return RefundExceptionRepairResult{}, err
 	}
+	if input.Command.RefundID == uuid.Nil || input.Command.PaymentEvidenceID == uuid.Nil || input.Command.AnomalyCaseID == uuid.Nil {
+		return RefundExceptionRepairResult{}, ErrApprovalSnapshotMismatch
+	}
+	initialRefund, err := getRefundByID(ctx, tx, input.Command.RefundID, false)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return RefundExceptionRepairResult{}, ErrNotFound
+		}
+		return RefundExceptionRepairResult{}, err
+	}
+	// Use the ordinary refund wallet -> order -> refund gate. Re-read the
+	// frozen owner facts after acquiring the first two locks, before any write.
+	order, err := getPaymentOrderByID(ctx, tx, initialRefund.PaymentOrderID, true)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return RefundExceptionRepairResult{}, ErrApprovalSnapshotMismatch
+		}
+		return RefundExceptionRepairResult{}, err
+	}
 	plan, err := refundExceptionRepairPlanFrom(ctx, tx, input.Command, input.PolicyVersion, input.SchemaVersion, input.ActivationVersion)
 	if err != nil {
 		return RefundExceptionRepairResult{}, err
+	}
+	if plan.PaymentOrderID != order.ID || plan.WalletID != order.WalletID {
+		return RefundExceptionRepairResult{}, wrapSnapshotMismatch("payment_order_wallet")
 	}
 	if mismatch := refundExceptionRepairFrozenMismatch(plan, input.Frozen); mismatch != "" {
 		return RefundExceptionRepairResult{}, wrapSnapshotMismatch(mismatch)
@@ -460,12 +483,16 @@ func (r *PostgresRepository) ApplyRefundExceptionRepair(ctx context.Context, inp
 	now := r.now()
 	var lockedStatus string
 	var lockedUpdatedAt time.Time
-	if err := tx.QueryRow(ctx, `SELECT status,updated_at FROM refunds WHERE id=$1 FOR UPDATE`, plan.RefundID).
-		Scan(&lockedStatus, &lockedUpdatedAt); err != nil {
+	var lockedOrderID, lockedTransactionID, lockedPackageID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT status,updated_at,payment_order_id,payment_transaction_id,entitlement_package_id FROM refunds WHERE id=$1 FOR UPDATE`, plan.RefundID).
+		Scan(&lockedStatus, &lockedUpdatedAt, &lockedOrderID, &lockedTransactionID, &lockedPackageID); err != nil {
 		return RefundExceptionRepairResult{}, err
 	}
 	if lockedStatus != "MANUAL_REVIEW" || !lockedUpdatedAt.UTC().Equal(plan.RefundUpdatedAt.UTC()) {
 		return RefundExceptionRepairResult{}, wrapSnapshotMismatch("refund_updated_at")
+	}
+	if lockedOrderID != plan.PaymentOrderID || lockedTransactionID != plan.PaymentTransactionID || lockedPackageID != plan.PackageID {
+		return RefundExceptionRepairResult{}, wrapSnapshotMismatch("refund_payment_identity")
 	}
 	caseID, entryID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	reference := "refund-repair:" + plan.RefundID.String()
@@ -583,7 +610,7 @@ WHERE id=$1 AND status='FROZEN' AND points_remaining=0 AND points_used=0 AND poi
 			return RefundExceptionRepairResult{}, refundExceptionConflict("package_cas", err)
 		}
 	}
-	if _, err := tx.Exec(ctx, `UPDATE refunds SET status='SUCCEEDED',intent_version=intent_version+1,updated_at=$2 WHERE id=$1`, plan.RefundID, now); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE refunds SET status='SUCCEEDED',dispatch_state='COMPLETED',dispatch_lease_until=NULL,intent_version=intent_version+1,updated_at=$2 WHERE id=$1`, plan.RefundID, now); err != nil {
 		return RefundExceptionRepairResult{}, err
 	}
 	if err := events.AppendOutbox(ctx, tx, "billing.refund.succeeded.v1", plan.RefundID, 2, map[string]any{
@@ -605,6 +632,12 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'EXECUTED',$16)`,
 		caseID, input.ApprovalRequestID, input.AuthorizationEventID, input.ApprovalEpoch,
 		legacyFinancialExecutionKeyDigestV1(executionKey), plan.RefundID, plan.AnomalyCaseID, plan.WalletID, plan.PackageID,
 		plan.RevokedMicrocredits, plan.ShortfallMicrocredits, plan.EvidenceID, plan.FactsDigest, entryID, receivableID, now); err != nil {
+		return RefundExceptionRepairResult{}, err
+	}
+	// Project only after the refund, receivable and anomaly facts are complete.
+	// The shared projection preserves unrelated review/processing blockers;
+	// receipt-first replay above does not increment the order revision again.
+	if _, err := projectPaymentOrderWithinTransaction(ctx, tx, plan.PaymentOrderID, now); err != nil {
 		return RefundExceptionRepairResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
