@@ -17,11 +17,11 @@ use super::types::{
     PendingMemoryItem, PreferenceFile, RECENT_ACTIVITY_MAX_INJECTED, RECENT_WORK_MAX_INJECTED,
     RecentWorkItem, RuntimeMemorySnapshot, TimedMemoryItem, WorkContextFile,
 };
-use super::util::{push_if_present, write_text_atomic};
+use super::util::{collapse_whitespace, push_if_present, write_text_atomic};
 
 pub fn render_memory_block() -> stdio::Result<(String, Vec<InjectedMemoryItem>)> {
     let profile = io::load_profile()?;
-    let preferences = io::load_preferences()?;
+    let preferences = io::list_preferences()?;
     let work_context = io::load_work_context()?;
     let current_focus = io::load_current_focus()?;
     let recent_activity = io::load_recent_activity()?;
@@ -498,7 +498,7 @@ fn push_timed_snapshot_line(doc: &mut String, item: &TimedMemoryItem) {
 }
 
 fn snapshot_one_line(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
+    collapse_whitespace(value)
 }
 
 fn snapshot_optional(value: &str) -> String {

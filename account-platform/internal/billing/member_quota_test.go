@@ -3,6 +3,7 @@ package billing
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -68,6 +69,23 @@ func TestMemberQuotaBatchChildKeysAreStableAndIndependent(t *testing.T) {
 }
 
 func TestMemberQuotaErrorCodesRemainStable(t *testing.T) {
+	for _, test := range []struct {
+		err  error
+		code string
+	}{
+		{ErrWalletUnavailable, "WALLET_UNAVAILABLE"},
+		{ErrNotFound, "NOT_FOUND"},
+		{ErrConflict, "BILLING_CONFLICT"},
+		{ErrInsufficientComponentCapacity, "INSUFFICIENT_COMPONENT_CAPACITY"},
+		{ErrIdempotencyConflict, "IDEMPOTENCY_CONFLICT"},
+		{errors.New("controlled storage failure"), "INTERNAL_ERROR"},
+	} {
+		for _, err := range []error{test.err, fmt.Errorf("allocation: %w", test.err)} {
+			if got := memberQuotaErrorCode(err); got != test.code {
+				t.Fatalf("%v: got %q, want %q", err, got, test.code)
+			}
+		}
+	}
 	if got := memberQuotaErrorCode(ErrInsufficientComponentCapacity); got != "INSUFFICIENT_COMPONENT_CAPACITY" {
 		t.Fatalf("unexpected capacity code %q", got)
 	}

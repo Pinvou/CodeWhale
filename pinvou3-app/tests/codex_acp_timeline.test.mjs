@@ -624,8 +624,12 @@ try {
   assert.ok(codexCommands.includes('list_codex_acp_sessions'));
   assert.ok(codexCommands.includes('workspace_path: Option<String>'), 'Codex creation must accept an explicit project directory');
   assert.ok(codexCommands.includes('agent_id: Option<String>')
-    && /set_acp_workspace\(\s*&session\.metadata\.id,\s*backend,/.test(codexCommands),
-  'code-session creation must bind the selected ACP Agent for the lifetime of the session');
+    && codexCommands.includes('let bind_session_id')
+    && codexCommands.indexOf('let bind_session_id')
+      < codexCommands.search(/set_acp_workspace\(\s*&bind_session_id,\s*backend,/),
+  'code-session creation must bind the selected ACP Agent for the lifetime of the session '
+    + '(the binding now joins on a blocking worker; pin the moved id chain by ordering — '
+    + "indexOf('let bind_session_id') must precede its set_acp_workspace(&bind_session_id, backend, use)");
   assert.ok(codexCommands.includes('or(Some("pinvou"))'),
     'code-session creation without an explicit agent must default to the built-in Pinwu backend');
   assert.ok(codexCommands.includes('pub async fn login_acp_agent')
@@ -846,10 +850,10 @@ try {
     /else if \(mode === 'work'\) \{[\s\S]*?savePinvouModeState\(\{ mode: 'work' \}[^;]*;[\s\S]*?createNewSession\(\);[\s\S]*?setCurrentView\('chat'\)/,
     'selecting Work from the shared mode entry must return to ChatView work mode');
   assert.ok(
-    main.includes("if (bridge.available && !bridge.activeSessionId) bridge.sessions.createNewSession();"),
-    'switching back from code to work keeps the original work session; only the draft state creates a new one');
+    main.includes("if (bridge.available && !bs?.activeSessionId) bridge.sessions.createNewSession();"),
+    'switching back from code to work keeps the original work session; only the draft state creates a new one (null-safe against an unavailable bridge)');
   assert.ok(
-    main.includes("createPinvouModeScopeKey(bridge.activeSessionId)"),
+    main.includes("createPinvouModeScopeKey(bs.activeSessionId)"),
     'the pinvou mode is saved under the session scope when switching back to work so ChatView can read it after mounting');
   assert.ok(codexLogo.includes("brand-icons/openai.svg")
     && acpAgentLogo.includes('<CodexLogo')
@@ -1151,8 +1155,8 @@ try {
     && composerControls.includes('busyProp !== undefined')
     && composerControls.includes('isTauriAvailable() && !explicitMountState')
     && composerControls.includes("if (collection.source === 'remote') {")
-    && composerControls.includes('if (onMount) { onMount(collection.id); return; }')
-    && composerControls.includes('if (onUnmount) { onUnmount(); return; }')
+    && composerControls.includes('if (onMount) onMount(collection.id);')
+    && composerControls.includes('if (onUnmount) onUnmount();')
     && composerControls.includes('if (onSwitch) { onSwitch(target, { isPlan, busy }); return; }'),
   'extracted controls must keep explicit Code mounts local while preserving the bridge fallback');
   // 等值守卫：点击已激活模式必须早退，避免代码车道 onSwitch 路径每次点击都触发

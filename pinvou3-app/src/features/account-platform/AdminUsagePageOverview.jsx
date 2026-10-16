@@ -11,6 +11,8 @@ import {
   planAdminModelTokenPageOverview,
 } from './admin-usage-overview-state.js';
 
+import { formatUsageOverviewTimestamp } from './usage-time.js';
+
 const tracker = createModelTokenPageOverviewRequestTracker();
 
 function validate(section, raw, permissionView) {
@@ -44,7 +46,7 @@ function MetricCard({ section, metric, data, labels, onDrilldown }) {
     : <div className="adm-model-overview-metric">{content}</div>;
 }
 
-function UsageTrend({ section, data, labels, onDrilldown }) {
+function UsageTrend({ section, data, labels, language, onDrilldown }) {
   if (!data.usage) return null;
   const trend = data.usage.trend;
   const max = Math.max(1, ...trend.points.flatMap((point) => [point.usage_request_count, point.reconciliation_attention_count]));
@@ -57,11 +59,11 @@ function UsageTrend({ section, data, labels, onDrilldown }) {
         <button type="button" className="reconciliation" aria-label={labels.trendPoint(labels.reconciliationTrend, point.from, point.to, point.reconciliation_attention_count)} onClick={() => onDrilldown(modelTokenPageOverviewDrilldown(section, 'reconciliation_trend', data.usage.window, point), 'reconciliation_trend')}><i style={{ height: `${point.reconciliation_attention_count === 0 ? 0 : Math.max(2, point.reconciliation_attention_count / max * 100)}%` }} /></button>
       </div>)}
     </div> : <p className="adm-model-trend-empty" role="status">{labels.trendEmpty}</p>}
-    <small>{labels.bucket(trend.bucket_seconds)} · {labels.halfOpenWindow(new Date(data.usage.window.from).toLocaleString(), new Date(data.usage.window.to).toLocaleString(), data.usage.window.timezone)}</small>
+    <small>{labels.bucket(trend.bucket_seconds)} · {labels.halfOpenWindow(formatUsageOverviewTimestamp(data.usage.window.from, language), formatUsageOverviewTimestamp(data.usage.window.to, language), data.usage.window.timezone)}</small>
   </section>;
 }
 
-export function AdminUsagePageOverview({ section, client, copy, permissions, userID, authorizationVersion, routeVersion, enabled, onRouteChange, onDrilldown }) {
+export function AdminUsagePageOverview({ section, client, copy, language, permissions, userID, authorizationVersion, routeVersion, enabled, onRouteChange, onDrilldown }) {
   const labels = copy.pageOverviews;
   const windowValue = useMemo(() => readAdminModelOperationsWindow(), [routeVersion]);
   const plan = useMemo(() => planAdminModelTokenPageOverview(section, permissions, enabled, windowValue), [section, permissions, enabled, windowValue]);
@@ -128,8 +130,8 @@ export function AdminUsagePageOverview({ section, client, copy, permissions, use
     {state.error && <div className="adm-model-overview-state error" role="alert"><span>{state.error.status === 403 ? labels.permissionChanged : labels.unavailable[section]}{state.error.code ? ` · ${state.error.code}` : ''}{state.error.requestID ? ` · ${copy.requestID}: ${state.error.requestID}` : ''}{data ? ` · ${labels.stale}` : ''}</span><button type="button" disabled={retrySeconds > 0} onClick={() => setRefreshVersion((value) => value + 1)}>{retrySeconds > 0 ? labels.retryAfter(retrySeconds) : copy.retry}</button></div>}
     {data && <>
       <div className="adm-model-overview-groups">{overviewGroups(section, data).map((group) => <article key={group.key}><h3>{labels.groups[group.key]}</h3><div>{[...group.metrics.values()].map((metric) => <MetricCard key={metric.key} section={section} metric={metric} data={data} labels={labels} onDrilldown={onDrilldown} />)}</div></article>)}</div>
-      <UsageTrend section={section} data={data} labels={labels} onDrilldown={onDrilldown} />
-      <footer>{labels.asOf}: {new Date(data.as_of).toLocaleString()} · {copy.lastUpdated}: {new Date(state.updatedAt).toLocaleString()} · {labels.zeroKnown} · {labels.snapshotBoundary}</footer>
+      <UsageTrend section={section} data={data} labels={labels} language={language} onDrilldown={onDrilldown} />
+      <footer>{labels.asOf}: {formatUsageOverviewTimestamp(data.as_of, language)} · {copy.lastUpdated}: {formatUsageOverviewTimestamp(state.updatedAt, language)} · {labels.zeroKnown} · {labels.snapshotBoundary}</footer>
     </>}
   </section>;
 }

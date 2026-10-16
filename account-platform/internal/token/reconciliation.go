@@ -81,7 +81,7 @@ func (r *PostgresRepository) RecoverLegacyResponseStateSplits(ctx context.Contex
 		if command.RowsAffected() == 0 {
 			continue
 		}
-		if err := appendUsageConvergenceEvidenceTx(ctx, tx, candidate.ID, "LEGACY_RESPONSE_STATE_SPLIT", "RECONCILER", "RECOVERED", "execution:SETTLEMENT_PENDING/domain:UPSTREAM_ACTIVE", map[string]any{"automatic_reconciliation_enabled": true}, now); err != nil {
+		if err := appendUsageConvergenceEvidenceTx(ctx, tx, candidate.ID, "UNCERTAINTY", "RECONCILER", "REVIEW", "execution:SETTLEMENT_PENDING/domain:UPSTREAM_ACTIVE", map[string]any{"automatic_reconciliation_enabled": true, "legacy_evidence_type": "LEGACY_RESPONSE_STATE_SPLIT", "recovery_action": "RECOVERED", "prior_status": candidate.Status, "execution_status": candidate.ExecutionStatus}, now); err != nil {
 			return 0, err
 		}
 		recovered++
@@ -103,6 +103,9 @@ WITH candidates AS (
     FROM usage_requests request
     LEFT JOIN usage_attempts attempt ON attempt.usage_request_id = request.id
     WHERE request.status IN ('SETTLEMENT_PENDING','REVIEW')
+      -- Cancellation owns recovery of a possibly committed pre-dispatch hold.
+      -- It must retain the exact facts used by the existing release proof.
+      AND request.error_class IS DISTINCT FROM 'cancel_hold_recovery_unconfirmed'
       AND request.reconciliation_stopped_at IS NULL
       AND (request.reconciliation_next_at IS NULL OR request.reconciliation_next_at <= $1)
       AND (request.reconciliation_lease_until IS NULL OR request.reconciliation_lease_until <= $1)
@@ -144,7 +147,8 @@ RETURNING request.id,request.idempotency_key_digest,request.user_id,request.sess
 func (r *PostgresRepository) RescheduleReconciliation(ctx context.Context, usageID uuid.UUID, lastError string, nextAt time.Time) error {
 	command, err := r.pool.Exec(ctx, `UPDATE usage_requests
 SET reconciliation_next_at=$2,reconciliation_lease_until=NULL,reconciliation_last_error=$3,updated_at=$4
-WHERE id=$1 AND status IN ('SETTLEMENT_PENDING','REVIEW') AND reconciliation_stopped_at IS NULL`, usageID, nextAt.UTC(), truncateReconciliationError(lastError), r.now())
+WHERE id=$1 AND status IN ('SETTLEMENT_PENDING','REVIEW') AND reconciliation_stopped_at IS NULL
+  AND error_class IS DISTINCT FROM 'cancel_hold_recovery_unconfirmed'`, usageID, nextAt.UTC(), truncateReconciliationError(lastError), r.now())
 	if err != nil {
 		return err
 	}
@@ -161,9 +165,18 @@ func (r *PostgresRepository) StopReconciliation(ctx context.Context, usageID uui
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if pending, err := lockMissingReferenceReleaseTx(ctx, tx, usageID); err != nil {
+		return err
+	} else if pending {
+		return tx.Commit(ctx)
+	}
+	// UPDATE evaluates this ownership predicate under its usage-row lock. A
+	// previously claimed item cannot overwrite a later cancellation recovery or
+	// append RECONCILIATION_STOPPED evidence that invalidates its release proof.
 	command, err := tx.Exec(ctx, `UPDATE usage_requests
 SET status='REVIEW',settlement_status='REVIEW',cancel_status=CASE WHEN cancel_status IN ('CANCEL_REQUESTED','PROVIDER_SENT','PROVIDER_CONFIRMED') THEN 'RESULT_UNKNOWN' ELSE cancel_status END,error_class='automatic_reconciliation_exhausted',reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=$2,reconciliation_stopped_at=$3,updated_at=$3
-WHERE id=$1 AND status IN ('SETTLEMENT_PENDING','REVIEW')`, usageID, truncateReconciliationError(reason), now)
+WHERE id=$1 AND status IN ('SETTLEMENT_PENDING','REVIEW')
+  AND error_class IS DISTINCT FROM 'cancel_hold_recovery_unconfirmed'`, usageID, truncateReconciliationError(reason), now)
 	if err != nil {
 		return err
 	}
@@ -400,6 +413,11 @@ func (r *UsageReconciler) Run(ctx context.Context) {
 }
 
 func (r *UsageReconciler) runOnce(ctx context.Context) {
+	if store, ok := r.store.(missingReferenceDeadlineStore); ok {
+		if err := store.RecoverStoppedMissingReferences(ctx, r.batchSize); err != nil {
+			r.logger.Error("missing-reference recovery failed", "error", err)
+		}
+	}
 	if _, err := r.store.RecoverLegacyResponseStateSplits(ctx, r.batchSize); err != nil {
 		r.logger.Error("legacy response-state recovery failed", "error", err)
 	}
@@ -409,6 +427,15 @@ func (r *UsageReconciler) runOnce(ctx context.Context) {
 		return
 	}
 	for _, item := range items {
+		if handled, err := r.reconcileMissingReferenceDeadline(ctx, item); handled {
+			if err != nil {
+				r.logger.Warn("missing-reference release pending", "usage_request_id", item.ID, "error", err)
+				if writeErr := r.store.RescheduleReconciliation(ctx, item.ID, "MISSING_UPSTREAM_REFERENCE_RELEASE_UNCONFIRMED", r.now().Add(reconciliationBackoff(item.Attempts))); writeErr != nil {
+					r.logger.Error("missing-reference retry persistence failed", "usage_request_id", item.ID, "error", writeErr)
+				}
+			}
+			continue
+		}
 		if err := r.reconcile(ctx, item); err != nil {
 			r.logger.Warn("request reconciliation deferred", "usage_request_id", item.ID, "attempt", item.Attempts, "error", err)
 			errorCode := reconciliationErrorCode(err)
@@ -448,7 +475,7 @@ func (r *UsageReconciler) reconcile(ctx context.Context, item ReconciliationItem
 	}
 	var observation replayResponseObservation
 	if json.Unmarshal(item.UsageSnapshot, &observation) == nil && observation.ResponseDisposition == responseDispositionRejectedBeforeGeneration {
-		if err := r.store.RecordConvergenceEvidence(ctx, item.ID, "PROVIDER_REJECTION", "GATEWAY_RESPONSE", "RELEASE", fmt.Sprintf("http:%d", observation.HTTPStatus), map[string]any{"response_disposition": observation.ResponseDisposition, "http_status": observation.HTTPStatus}); err != nil {
+		if err := r.store.RecordConvergenceEvidence(ctx, item.ID, "RESULT_OBSERVED", "GATEWAY", "RECORDED", fmt.Sprintf("http:%d", observation.HTTPStatus), map[string]any{"response_disposition": observation.ResponseDisposition, "http_status": observation.HTTPStatus}); err != nil {
 			return err
 		}
 		if err := r.billing.Release(ctx, item.ID, *item.HoldID, "upstream rejected before generation"); err != nil {
@@ -469,11 +496,11 @@ func (r *UsageReconciler) reconcile(ctx context.Context, item ReconciliationItem
 		}
 		return r.commit(ctx, item, *snapshot.Usage, snapshot.ActualMicrocredits)
 	}
-	if r.evidence == nil {
-		return errors.New("usage evidence provider is unavailable")
-	}
 	if item.ProviderID == nil || item.AdapterVersion == nil || item.UpstreamRequestID == nil || strings.TrimSpace(*item.UpstreamRequestID) == "" {
 		return fmt.Errorf("%w: upstream request evidence was not captured", errManualReconciliationRequired)
+	}
+	if r.evidence == nil {
+		return errors.New("usage evidence provider is unavailable")
 	}
 	if !strings.EqualFold(*item.ProviderID, r.evidence.ProviderID()) || *item.AdapterVersion != r.evidence.AdapterVersion() {
 		return fmt.Errorf("%w: no evidence adapter matches historical provider %s/%s", errManualReconciliationRequired, *item.ProviderID, *item.AdapterVersion)
@@ -528,6 +555,13 @@ func (r *UsageReconciler) commit(ctx context.Context, item ReconciliationItem, u
 	}
 	if expectedActual != nil && actual != *expectedActual {
 		return fmt.Errorf("%w: settlement snapshot does not match historical pricing", errManualReconciliationRequired)
+	}
+	if store, ok := r.store.(missingReferenceDeadlineStore); ok {
+		if fenced, err := store.PreserveMissingReferenceLateUsage(ctx, item.ID, usage); err != nil {
+			return err
+		} else if fenced {
+			return nil
+		}
 	}
 	if err := r.billing.Commit(ctx, item.ID, *item.HoldID, actual, usage); err != nil {
 		if definitiveSettlementConflict(err) {

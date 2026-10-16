@@ -144,7 +144,10 @@ const expectedProtocolHashes = {
   // chord_masked_chars passthrough in buildConfirmRequest), the
   // background-session refresh guard, and the inert-branch optional chaining
   // inside the listener callback spans (no invoke/listen call-set change).
-  computerUse: '9d0bad5bab784eb784a92b8df52ff7e83adef94cc0f6cb7bdbb99f913217e5b8',
+  // Recomputed for the permission onboarding row: the new
+  // computer_use_permission_status invoke (settings permissionStatus) joins
+  // the domain's call set.
+  computerUse: 'a681a541d4352b99d8e964e5a19f9cbaf45fd9fa9d56d5395d6c9e6c88459843',
   // Recomputed for #308 follow-ups: prefillComposer(text, append) recovery
   // entry + comment translations touching `invoke(` mentions (the extractor
   // scans raw source, so comment wording is part of the digest). Recomputed
@@ -173,7 +176,11 @@ const expectedProtocolHashes = {
   // display-equality gate — listener body-internal edits only, no new invoke
   // or listen entries (capture-text refresh). Recomputed for per-frame stream
   // notification coalescing; event names and invoke shapes remain unchanged.
-  chat: '0938816c42c74d4019fb99fa1e8e8c20ec75fe815f5d64a89bb0357444275a33',
+  // Recomputed for the F05 model lifecycle receipt: the existing chat listener
+  // preserves the typed rejection only for its exact current timing owner.
+  // Commands, event names and invoke payloads retain their existing shapes;
+  // listener callback text is included in this source fingerprint.
+  chat: 'edfc4b697f186523956810c027ee790576db0d2c9e108c34998fb3c1758c9f9e',
   dependencies: '257468e4f9e2e9270de6ef75f685d5eafcd000226d44cfb81a1b04c0e7615707',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.

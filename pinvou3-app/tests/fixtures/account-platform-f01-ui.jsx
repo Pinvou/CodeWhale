@@ -18,7 +18,14 @@ globalThis.fetch = async (url, options = {}) => {
   control.calls.push({ url, method: options.method || 'GET', body: options.body, headers: options.headers });
   if (url === '/api/session') return control.authenticated ? json({ authenticated: true, csrf_token: 'control-csrf' }) : json({}, 401);
   if (url === '/api/logout') { if (control.logoutFail) return json({ code: 'UPSTREAM_UNAVAILABLE' }, 503); control.authenticated = false; return json(null, 204); }
-  if (url.endsWith('/account/bootstrap')) return json({ user_id: control.user, username: control.user === id ? 'account-a' : 'account-b', status: 'ACTIVE', personal_permissions: ['personal.profile.update', ...(control.balanceAllowed ? ['personal.billing.read'] : [])], platform_permissions: ['platform.users.read', 'platform.users.status.manage', 'platform.registrations.repair', 'platform.profile-changes.repair', 'platform.sms-config.read', 'platform.sms-config.manage'] });
+  if (url.endsWith('/account/bootstrap')) {
+    const personalPermissions = ['personal.profile.read', 'personal.profile.update', ...(control.balanceAllowed ? ['personal.billing.read'] : [])];
+    const payload = { user_id: control.user, username: control.user === id ? 'account-a' : 'account-b', status: 'ACTIVE', active_context: { context_type: 'PERSONAL', membership_version: 1, context_version: 1, authorization_version: 1, personal_authorization_version: 1, platform_authorization_version: 1, organization_authorization_version: 1, permissions: personalPermissions }, personal_permissions: personalPermissions, platform_permissions: ['platform.users.read', 'platform.users.status.manage', 'platform.registrations.repair', 'platform.profile-changes.repair', 'platform.sms-config.read', 'platform.sms-config.manage'] };
+    if (control.badBootstrapContext === 'missing') delete payload.active_context;
+    else if (control.badBootstrapContext === 'null') payload.active_context = null;
+    return json(payload);
+  }
+  if (url === '/api/account/v1/me/organizations') return json({ items: [] });
   if (url.includes('/v1/me/balance')) {
     const response = () => control.balanceFail ? json({ code: 'UPSTREAM_UNAVAILABLE' }, 503) : new Response('{"available_microcredits":9223372036854775807,"reserved_microcredits":-10001}', { status: 200 });
     if (control.delayNextBalance) { control.delayNextBalance = false; return new Promise(resolve => { control.releaseBalance = () => resolve(response()); }); }

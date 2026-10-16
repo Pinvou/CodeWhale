@@ -5,7 +5,7 @@
     "version": "0.2.0"
   },
   "paths": {
-    "/account/admin/v1/audit-logs": {
+    "/admin/v1/audit-logs": {
       "get": {
         "operationId": "listAdminAuditLogs",
         "summary": "Filter recent account audit events by actor, resource, action, time, and result",
@@ -79,7 +79,7 @@
         }
       }
     },
-    "/account/admin/v1/audit-logs/{audit_id}": {
+    "/admin/v1/audit-logs/{audit_id}": {
       "get": {
         "operationId": "getAdminAuditLog",
         "summary": "Get one audit event with its change summary",
@@ -101,7 +101,7 @@
         }
       }
     },
-    "/account/admin/v1/audit-exports": {
+    "/admin/v1/audit-exports": {
       "post": {
         "operationId": "createAdminAuditExport",
         "summary": "Create a server-side encrypted, watermarked audit export under strict quotas",
@@ -144,7 +144,7 @@
         }
       }
     },
-    "/account/admin/v1/audit-exports/{export_id}": {
+    "/admin/v1/audit-exports/{export_id}": {
       "get": {
         "operationId": "getAdminAuditExport",
         "summary": "Get the requesting operator's export task without file contents or keys",
@@ -173,7 +173,7 @@
         }
       }
     },
-    "/account/admin/v1/audit-exports/{export_id}/download-tickets": {
+    "/admin/v1/audit-exports/{export_id}/download-tickets": {
       "post": {
         "operationId": "issueAdminAuditExportDownloadTicket",
         "summary": "Issue the only 15-minute single-use download ticket after recent authentication",
@@ -208,7 +208,7 @@
         }
       }
     },
-    "/account/admin/v1/audit-exports/{export_id}/download": {
+    "/admin/v1/audit-exports/{export_id}/download": {
       "get": {
         "operationId": "downloadAdminAuditExport",
         "summary": "Atomically consume a download ticket and return the encrypted signed envelope once",
@@ -521,7 +521,9 @@
             "format": "uuid"
           },
           "download_url": {
-            "type": "string"
+            "type": "string",
+            "deprecated": true,
+            "description": "Legacy informational Account-relative path. Portal clients construct the session-bound /api/admin/account/admin/v1 download route; never follow this field as a browser URL or send a token to an arbitrary URL."
           },
           "download_token": {
             "type": "string"
@@ -533,5 +535,15 @@
         }
       }
     }
-  }
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "Direct Account service; routes require existing bearer authorization."
+    },
+    {
+      "url": "/api/admin/account",
+      "description": "Session-bound Portal BFF prefix for the same Account routes; existing CSRF and one-time token forwarding apply."
+    }
+  ]
 }

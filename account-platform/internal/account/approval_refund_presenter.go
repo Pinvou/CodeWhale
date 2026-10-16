@@ -41,7 +41,7 @@ func approvalRefundFinancialDetail(target approvalRefundExceptionRepairSummary, 
 			ShortfallMicrocredits string    `json:"shortfall_microcredits"`
 		} `json:"financial_snapshot"`
 	}
-	if json.Unmarshal(encoded, &proof) != nil || proof.Normalized.RefundID != target.RefundID || proof.Normalized.PaymentEvidenceID == uuid.Nil || proof.Normalized.AnomalyCaseID == uuid.Nil || !approvalPaginationHexDigest(proof.Critical.FactsDigest) || proof.Financial.WalletID == uuid.Nil || proof.Financial.PackageID == uuid.Nil || proof.Normalized.ReasonCode != "PROVIDER_REFUNDED_LOCAL_REVERSAL_MISSING" {
+	if json.Unmarshal(encoded, &proof) != nil || proof.Normalized.RefundID == uuid.Nil || proof.Normalized.RefundID != target.RefundID || proof.Normalized.PaymentEvidenceID == uuid.Nil || proof.Normalized.AnomalyCaseID == uuid.Nil || !approvalPaginationHexDigest(proof.Critical.FactsDigest) || proof.Financial.WalletID == uuid.Nil || proof.Financial.PackageID == uuid.Nil || proof.Normalized.ReasonCode != "PROVIDER_REFUNDED_LOCAL_REVERSAL_MISSING" {
 		return approvalRefundExceptionRepairSummary{}, ErrApprovalDetailPresentationUnavailable
 	}
 	target.PaymentEvidenceID = proof.Normalized.PaymentEvidenceID

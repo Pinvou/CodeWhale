@@ -7,9 +7,13 @@ import (
 	"strings"
 )
 
-// The deployment key is mandatory. No generated or built-in fallback may make
-// encrypted jobs unreadable after a restart; the owner takes its own key copy.
+// Missing configuration leaves audit export disabled for existing deployments.
+// An explicitly supplied key must be valid; no generated or built-in fallback
+// may make existing encrypted jobs unreadable after restart.
 func configuredAuditExports(repository *account.PostgresRepository, environment, encodedKey string) (*account.AuditExportService, error) {
+	if strings.TrimSpace(encodedKey) == "" {
+		return nil, nil
+	}
 	key, err := base64.StdEncoding.Strict().DecodeString(strings.TrimSpace(encodedKey))
 	defer clear(key)
 	if err != nil || len(key) != 32 {

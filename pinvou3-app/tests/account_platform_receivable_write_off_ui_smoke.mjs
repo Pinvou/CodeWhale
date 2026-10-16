@@ -4,9 +4,14 @@ import { createServer } from 'vite';
 import react from '@vitejs/plugin-react';
 import * as puppeteer from 'puppeteer-core';
 const root = import.meta.dirname + '/..';
+const browserPath = [process.env.CHROME, process.env.EDGE_PATH, process.env.CHROMIUM,
+  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files/Google/Chrome/Application/chrome.exe',
+  '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'].filter(Boolean).find(value => fs.existsSync(value));
+assert.ok(browserPath, 'A browser executable is required; set CHROME or EDGE_PATH');
 const server = await createServer({ root, configFile: false, plugins: [react()], cacheDir: root + '/node_modules/.vite-write-off-host', server: { host: '127.0.0.1', port: 0, fs: { allow: [root, fs.realpathSync(root + '/node_modules')], deny: ['**/.env*', '**/*.{pem,crt,key}'] } } });
 await server.listen();
-const browser = await puppeteer.launch({ executablePath: process.env.EDGE_PATH || 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', headless: true, args: ['--disable-gpu'] });
+const browser = await puppeteer.launch({ executablePath: browserPath, headless: true, args: ['--disable-gpu'] });
 const results = []; let pass = 0, fail = 0;
 async function run(name, query, action) {
   const page = await browser.newPage(); page.setDefaultTimeout(5000); const errors = []; page.on('pageerror', error => errors.push(error.message));
@@ -121,11 +126,47 @@ try {
     await page.waitForFunction(() => [...document.querySelectorAll('.adm-approval-tabs button')].every(button => !button.disabled));
     assert.equal(await page.evaluate(() => document.body.textContent.includes(window.f11.financeCopy.zh.unknown)), false);
   });
-  await run('Retired identity ignores late WriteOff precheck', 'late=1', async page => {
+  for (const language of ['zh', 'en', 'ja']) {
+    await run(`WriteOff recent authentication retains local intent ${language}`, `language=${language}&recent-auth=1`, async page => {
+      await openForm(page); await create(page); await page.waitForSelector('.adm-writeoff-reauthentication button');
+      assert.equal(await page.$eval('.adm-writeoff-reauthentication p', node => node.textContent), await page.evaluate(() => window.f11.ledgerRepairCopy[window.f11.language].writeOffRecentAuthenticationRequired));
+      const first = await page.evaluate(() => window.f11.calls.find(call => call.method === 'POST' && call.url === '/api/admin/approvals/requests').body);
+      assert.equal(await page.evaluate(() => window.f11.created), false);
+      await page.click('.adm-writeoff-reauthentication button');
+      assert.equal(await page.evaluate(() => window.f11.reauthentication), '/admin.html');
+      assert.equal(await page.$eval('.adm-financial-repair-draft input', input => input.value), 'controlled-write-off');
+      await page.evaluate(() => { window.f11.authenticatedAgain = true; });
+      // Explicit retry only: the controlled CTA does not navigate or submit.
+      assert.equal(await page.evaluate(() => window.f11.calls.filter(call => call.method === 'POST' && call.url === '/api/admin/approvals/requests').length), 1);
+      await page.click('.adm-financial-repair-draft button'); await page.waitForFunction(() => window.f11.status === 'SUBMITTED');
+      const bodies = await page.evaluate(() => window.f11.calls.filter(call => call.method === 'POST' && call.url === '/api/admin/approvals/requests').map(call => call.body));
+      assert.deepEqual(bodies, [first, first]); assert.equal(await page.evaluate(() => window.f11.prechecks), 1);
+    });
+    await run(`WriteOff precheck recent authentication fails before draft ${language}`, `language=${language}&precheck-auth=1`, async page => {
+      await openForm(page); await page.waitForSelector('.adm-writeoff-reauthentication button');
+      assert.equal(await page.$('.adm-financial-repair-draft'), null);
+      assert.equal(await page.evaluate(() => window.f11.calls.some(call => call.method === 'POST' && call.url === '/api/admin/approvals/requests')), false);
+      await page.click('.adm-writeoff-reauthentication button'); assert.equal(await page.evaluate(() => window.f11.reauthentication), '/admin.html');
+    });
+  }
+  await run('WriteOff unknown recent-auth denial retains original frozen facts and explicit replay', 'lost-recent=1', async page => {
+    await openForm(page); await create(page); await page.waitForFunction(() => document.querySelector('.adm-financial-repair-draft button')?.textContent === window.f11.financeCopy.zh.retry);
+    await page.click('.adm-financial-repair-draft button'); await page.waitForSelector('.adm-writeoff-reauthentication button');
+    assert.equal(await page.$eval('.adm-financial-repair-draft input', input => input.disabled), true);
+    assert.equal(await page.$eval('.adm-financial-repair-draft textarea', input => input.disabled), true);
+    await page.evaluate(() => { window.f11.authenticatedAgain = true; });
+    await page.click('.adm-financial-repair-draft button'); await page.waitForFunction(() => window.f11.status === 'SUBMITTED');
+    const bodies = await page.evaluate(() => window.f11.calls.filter(call => call.method === 'PUT' || call.url === '/api/admin/approvals/requests' && call.method === 'POST').map(call => JSON.parse(call.body)));
+    assert.equal(bodies.length, 3);
+    const original = bodies.map(({ expected_version, ...body }) => body);
+    assert.equal(new Set(original.map(body => JSON.stringify(body))).size, 1);
+    assert.equal(await page.evaluate(() => window.f11.prechecks), 1);
+  });
+  await run('Retired identity ignores late WriteOff precheck' , 'late=1', async page => {
     await openForm(page); await page.waitForFunction(() => window.f11.releasePrecheck); await page.evaluate(() => { const release = window.f11.releasePrecheck; window.f11.replaceIdentity(); setTimeout(release, 50); });
     await page.waitForFunction(() => window.f11.calls.filter(call => call.url === '/api/account/v1/account/bootstrap').length === 2);
     assert.equal(await page.$('.adm-financial-repair-draft'), null);
   });
 } finally { await browser.close(); await server.close(); }
 const result = { pass, fail, results, limits: ['Real AdminPlatformView/AdminFinanceWorkspace/AdminPlatformClient under controlled BFF replies; owner effects, independent issuer/NATS, PG, deployed API and full E2E are not exercised.'] };
-fs.writeFileSync(process.env.F11_REACT_RESULT || 'receivable-smoke-result.json', JSON.stringify(result, null, 2)); console.log(JSON.stringify(result)); process.exitCode = fail ? 1 : 0;
+if (process.env.F11_REACT_RESULT) fs.writeFileSync(process.env.F11_REACT_RESULT, JSON.stringify(result, null, 2)); console.log(JSON.stringify(result)); process.exitCode = fail ? 1 : 0;

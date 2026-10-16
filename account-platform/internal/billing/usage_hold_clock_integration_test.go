@@ -117,7 +117,10 @@ func TestPersonalUsageHoldClockBoundaries(t *testing.T) {
 		}
 		tx := blockPersonalWallet(t, ctx, r, w.ID)
 		done := make(chan error, 1)
-		go func() { _, err := r.ExtendHold(ctx, id, h.ID, base.Add(time.Minute), 0); done <- err }()
+		go func() {
+			_, err := r.ExtendHold(ctx, HoldExtension{UsageRequestID: id, HoldID: h.ID, LeaseSeconds: 60})
+			done <- err
+		}()
 		waitForPersonalWalletWaiters(t, ctx, r, 1)
 		clock.Store(base.Add(2 * time.Minute).UnixNano())
 		if err = tx.Commit(ctx); err != nil {
@@ -144,7 +147,7 @@ func TestPersonalUsageHoldClockBoundaries(t *testing.T) {
 			t.Fatal(err)
 		}
 		clock.Store(base.Add(2 * time.Minute).UnixNano())
-		if _, err = r.ExtendHold(ctx, id, h.ID, base.Add(time.Hour), 40); !errors.Is(err, ErrConflict) {
+		if _, err = r.ExtendHold(ctx, HoldExtension{UsageRequestID: id, HoldID: h.ID, OperationID: uuid.New(), LeaseSeconds: 900, AdditionalMicrocredits: 40}); !errors.Is(err, ErrConflict) {
 			t.Fatal("expired hold renewed", err)
 		}
 		if count, err := r.ExpireHolds(ctx, 100); count != 0 || !errors.Is(err, ErrHoldExpiryProofRequired) {

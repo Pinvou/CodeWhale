@@ -11,9 +11,10 @@ const projection = digest => ({ command_type: 'PAYMENT_FINANCIAL_REPAIR', policy
   critical_resource_versions: { payment_order_updated_at: '2026-10-01T00:00:00Z', facts_digest: digest.repeat(64), policy_version: 1 },
   financial_snapshot: { amount_fen: '9007199254740993', credit_microcredits: '9223372036854775807', applied_to_receivables: '9007199254740993', wallet_id: id(3), wallet_version: '9223372036854775806', provider_transaction_id: 'controlled-provider-tx' } });
 const state = window.f12 = { calls: [], id, language, financeCopy, ledgerRepairCopy, adminPlatformCopy, created: params.has('existing'),
-  status: 'DRAFT', version: 1, prechecks: 0, lose: params.has('lost'), loseEdit: params.has('edit-lost'), denyReplay: params.has('lost'), reason: 'Controlled payment-repair justification', key: 'approval:controlled-payment-repair', command: projection('a').normalized_command };
+  status: 'DRAFT', version: 1, prechecks: 0, lose: params.has('lost') || params.has('lost-recent'), loseEdit: params.has('edit-lost'), denyReplay: params.has('lost'), reason: 'Controlled payment-repair justification', key: 'approval:controlled-payment-repair', command: projection('a').normalized_command };
 const client = new AdminPlatformClient(); client.csrfToken = 'controlled-csrf';
 const root = createRoot(document.getElementById('root'));
+client.reauthenticate = returnTo => { state.reauthentication = returnTo; };
 state.replaceIdentity = () => { const next = new AdminPlatformClient(); next.csrfToken = 'controlled-next'; root.render(<AdminPlatformView client={next} language={language} copy={adminPlatformCopy[language]} onLanguageChange={() => {}} />); };
 const reply = (body, status = 200, headers = {}) => new Response(status === 204 ? null : encodeFinanceJSON(body), { status, headers: { 'Content-Type': 'application/json', ...headers } });
 const original = window.fetch.bind(window);
@@ -21,7 +22,7 @@ window.fetch = async (url, options = {}) => {
   if (!String(url).startsWith('/api/')) return original(url, options);
   state.calls.push({ url: String(url), method: options.method || 'GET', body: options.body, headers: options.headers, cache: options.cache, credentials: options.credentials });
   if (url === '/api/session') return reply({ authenticated: true, csrf_token: 'controlled-csrf' });
-  if (url === '/api/account/v1/account/bootstrap') return reply({ user_id: params.has('approve') ? id(7) : id(8), status: 'ACTIVE', personal_permissions: [],
+  if (url === '/api/account/v1/account/bootstrap') return reply({ user_id: params.has('approve') ? id(7) : id(8), status: 'ACTIVE', active_context: { context_type: 'PERSONAL', organization_id: null, membership_version: 1, context_version: 1, authorization_version: 1, personal_authorization_version: 1, platform_authorization_version: 1, organization_authorization_version: 1, permissions: [] }, personal_permissions: [],
     platform_permissions: params.has('deny') ? [] : params.has('approve') ? ['platform.billing.repairs.approve'] : ['platform.billing.repairs.request'], platform_authorization_version: 1 });
   if (url === '/api/admin/approvals/capability') return reply({ session_approval_wire_version: 2, control: { version: 1, epoch: 1, authorization_relay_epoch: 1 } });
   if (url === '/api/admin/approvals/directory') return reply({ schema_version: 1, platform_authorization_version: 1, items: [
@@ -33,6 +34,9 @@ window.fetch = async (url, options = {}) => {
   ] }, 200, { 'X-Platform-Authorization-Version': '1' });
   if (url === '/api/admin/account/admin/v2/approval-command-prechecks') {
     state.prechecks++;
+    if (params.has('precheck-auth')) return reply({ code: 'RECENT_AUTHENTICATION_REQUIRED' }, 401);
+    if (params.has('precheck-401')) return reply({ code: 'UNAUTHORIZED' }, 401);
+    if (params.has('late-auth')) return new Promise(resolve => { state.releasePrecheck = () => { state.lateAuthenticationReleased = true; resolve(reply({ code: 'RECENT_AUTHENTICATION_REQUIRED' }, 401)); }; });
     if (params.has('unavailable')) return reply({ code: 'APPROVAL_PRECHECK_UNAVAILABLE' }, 503);
     const facts = projection(state.prechecks > 1 ? 'b' : 'a');
     if (params.has('mismatch')) facts.target_resource_id = id(2);
@@ -42,6 +46,7 @@ window.fetch = async (url, options = {}) => {
   }
   if (url === '/api/admin/approvals/requests' && options.method === 'POST') {
     if (state.created && state.denyReplay && !state.lose) return reply({ code: 'FORBIDDEN' }, 403);
+    if (params.has('recent-auth') && !state.authenticatedAgain) return reply({ code: 'RECENT_AUTHENTICATION_REQUIRED' }, 401);
     if (params.has('initial-deny')) return reply({ code: 'FORBIDDEN' }, 403);
     state.created = true; const draft = parseFinanceJSON(options.body); state.reason = draft.reason; state.key = draft.idempotency_key; state.command = draft.normalized_command;
     if (state.lose) { state.lose = false; throw new TypeError('controlled committed POST lost ACK'); }
@@ -49,6 +54,7 @@ window.fetch = async (url, options = {}) => {
   }
   if (String(url).startsWith('/api/admin/approvals/requests?')) return reply({ items: state.created ? [{ approval_request_id: id(9), command_type: 'PAYMENT_FINANCIAL_REPAIR', requester: { user_id: id(8) }, status: state.status, version: state.version, target: { resource_type: 'PAYMENT_ORDER', resource_id: id(1) } }] : [], has_more: false });
   if (url === `/api/admin/approvals/requests/${id(9)}` && options.method === 'PUT') {
+    if (params.has('lost-recent') && !state.authenticatedAgain) return reply({ code: 'RECENT_AUTHENTICATION_REQUIRED' }, 401);
     if (state.denyReplay) return reply({ code: 'FORBIDDEN' }, 403);
     const draft = parseFinanceJSON(options.body); if (draft.expected_version === state.version) state.version++;
     state.reason = draft.reason; state.command = draft.normalized_command;

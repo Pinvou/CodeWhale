@@ -5,10 +5,14 @@
 /// all targets).
 mod helpers;
 pub(crate) use helpers::normalize_typed_newlines;
-// The screening-name helpers are consumed inside platform/; the re-export
-// exists for the tool-layer regression test that pins the wider-copy match.
-#[cfg(test)]
-pub(crate) use helpers::{sanitize_name, screening_name};
+// `sanitize_name` is also the tool layer's display bound for consent target
+// lines: the backends carry raw role/name strings so screening keeps seeing
+// them untruncated, and the bound is applied where the label is rendered.
+pub(crate) use helpers::sanitize_name;
+// `screening_hit` is also consumed by the tool layer for the role: macOS
+// carries a free-form, app-supplied AXRole, and the streaming matcher keeps
+// a hostile multi-megabyte role from costing a proportional fold allocation.
+pub(crate) use helpers::screening_hit;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -80,4 +84,23 @@ pub(crate) fn request_permissions() -> Result<(), ComputerUseError> {
         "request_permissions",
         "this operating system has no computer use permission prompt",
     ))
+}
+
+/// Snapshot of the OS permission grants computer use depends on:
+/// `(screen_recording, accessibility)`. `None` where the platform has no
+/// system permission flow (Windows/Linux) — the settings UI hides the
+/// onboarding row instead of showing permanently-false toggles. A `false`
+/// here is advisory, not authoritative for the action: the tool path
+/// re-checks per action, and macOS applies a fresh TCC grant only to
+/// processes launched after it (the settings UI must pair a miss with the
+/// restart guidance).
+#[cfg(target_os = "macos")]
+pub(crate) fn permission_status() -> Option<(bool, bool)> {
+    imp::permission_status()
+}
+
+/// This platform has no system permission flow, so there is no status to report.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn permission_status() -> Option<(bool, bool)> {
+    None
 }

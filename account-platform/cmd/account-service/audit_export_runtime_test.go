@@ -16,7 +16,6 @@ func TestAuditExportRuntimeConfigurationFailClosed(t *testing.T) {
 	}{
 		{"valid", valid, "test", &account.PostgresRepository{}, true},
 		{"trim-valid", "  " + valid + "  ", "test", &account.PostgresRepository{}, true},
-		{"missing", "", "test", &account.PostgresRepository{}, false},
 		{"malformed", "not-base64", "test", &account.PostgresRepository{}, false},
 		{"short", base64.StdEncoding.EncodeToString([]byte(strings.Repeat("k", 31))), "test", &account.PostgresRepository{}, false},
 		{"long", base64.StdEncoding.EncodeToString([]byte(strings.Repeat("k", 33))), "test", &account.PostgresRepository{}, false},
@@ -36,5 +35,18 @@ func TestAuditExportRuntimeConfigurationFailClosed(t *testing.T) {
 				t.Fatal("key leaked in error")
 			}
 		})
+	}
+}
+
+// Missing optional export configuration must not require a database owner,
+// allocate a key or construct a worker. Explicit invalid keys remain fatal.
+func TestAuditExportMissingConfigurationLeavesFeatureDisabled(t *testing.T) {
+	for _, environment := range []string{"production", "test", ""} {
+		for _, key := range []string{"", "  "} {
+			service, err := configuredAuditExports(nil, environment, key)
+			if err != nil || service != nil {
+				t.Fatal("absent audit export configuration enabled a worker or blocked existing startup")
+			}
+		}
 	}
 }

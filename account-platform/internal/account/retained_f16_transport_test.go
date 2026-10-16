@@ -3,6 +3,8 @@ package account
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
 	"github.com/google/uuid"
 	"net/http"
 	"net/http/httptest"
@@ -84,6 +86,64 @@ func TestF16UsageSettlementTypedEditAndResult(t *testing.T) {
 	json.Unmarshal(encoded, &wire)
 	if !ok || wire["usage_request_id"] != "00000000-0000-4000-8000-000000000002" || wire["loss_review_id"] != "00000000-0000-4000-8000-000000000003" || got.ExpectedMicrocredits != "9223372036854775807" || got.SettledMicrocredits != "9007199254740993" {
 		t.Fatal("typed original intent lost", got)
+	}
+	// Public presentation already rejects a nil target; the direct helper must
+	// also reject it without relying on that caller's separate guard.
+	t.Run("public-nil-target-remains-rejected", func(t *testing.T) {
+		zero := item
+		zero.TargetResourceID = uuid.Nil.String()
+		if approvalV2Command(zero) != nil {
+			t.Fatal("public nil target reported as available")
+		}
+		if _, err := approvalV2Detail(zero, 1); !errors.Is(err, ErrApprovalDetailPresentationUnavailable) {
+			t.Fatal("public nil detail guard changed", err)
+		}
+	})
+	artifacts, err := approvalencoding.ConvertLegacyProofInput(approvalencoding.LegacyProofInput{
+		CommandType: item.CommandType, PolicyVersion: item.PolicyVersion, SnapshotSchemaVersion: item.SnapshotSchemaVersion,
+		TargetResourceType: item.TargetResourceType, TargetResourceID: item.TargetResourceID,
+		NormalizedCommand: item.NormalizedCommand, CriticalResourceVersions: item.CriticalResourceVersions, FinancialSnapshot: item.FinancialSnapshot,
+	})
+	if err != nil {
+		t.Fatal("original typed proof conversion", err)
+	}
+	holdID := uuid.MustParse(item.TargetResourceID)
+	valid, err := approvalUsageSettlementDetail(approvalUsageSettlementRepairSummary{HoldID: holdID}, artifacts.ProofInputJSON)
+	if err != nil || valid != got {
+		t.Fatal("valid complete frozen detail changed", valid, err)
+	}
+	for _, test := range []struct {
+		name           string
+		target, frozen uuid.UUID
+	}{
+		{"both-nil-helper", uuid.Nil, uuid.Nil},
+		{"zero-target-helper", uuid.Nil, holdID},
+		{"zero-frozen-helper", holdID, uuid.Nil},
+		{"foreign-frozen-helper", holdID, uuid.New()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var proof map[string]json.RawMessage
+			var normalized map[string]json.RawMessage
+			if json.Unmarshal(artifacts.ProofInputJSON, &proof) != nil || json.Unmarshal(proof["normalized_command"], &normalized) != nil {
+				t.Fatal("original complete proof fixture")
+			}
+			normalized["hold_id"], err = json.Marshal(test.frozen)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proof["normalized_command"], err = json.Marshal(normalized)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := json.Marshal(proof)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := approvalUsageSettlementDetail(approvalUsageSettlementRepairSummary{HoldID: test.target}, encoded)
+			if !errors.Is(err, ErrApprovalDetailPresentationUnavailable) || result != (approvalUsageSettlementRepairSummary{}) {
+				t.Fatal("invalid direct-helper frozen identity accepted", result, err)
+			}
+		})
 	}
 	if output := os.Getenv("F16_OWNER_PROJECTION_OUT"); output != "" {
 		if e := os.WriteFile(output, []byte(f16OwnerProjection), 0600); e != nil {

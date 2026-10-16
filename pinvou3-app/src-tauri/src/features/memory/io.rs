@@ -6,7 +6,7 @@
 //! 确认物化等跨 store 检查也集中在此。
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::fs::{self, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -22,8 +22,8 @@ use super::types::{
     CURRENT_FOCUS_ACTIVE_MAX_STORED, CURRENT_FOCUS_DEFAULT_TTL_DAYS, MemoryProfile,
     MemorySuggestion, MemoryTextPatch, MemoryWriteEvent, NEVER_MEMORY_MAX_STORED, NeverMemoryItem,
     PENDING_MEMORY_ACTIVE_MAX_STORED, PENDING_MEMORY_RESOLVED_MAX_STORED, PENDING_STATUS_CONFIRMED,
-    PENDING_STATUS_IGNORED, PENDING_STATUS_OBSERVED, PENDING_STATUS_PENDING, PROFILE_VERSION,
-    PendingMemoryItem, PreferenceFile, ProfilePatch, RECENT_ACTIVITY_ACTIVE_MAX_STORED,
+    PENDING_STATUS_IGNORED, PENDING_STATUS_PENDING, PROFILE_VERSION, PendingMemoryItem,
+    PreferenceFile, ProfilePatch, RECENT_ACTIVITY_ACTIVE_MAX_STORED,
     RECENT_ACTIVITY_DEFAULT_TTL_DAYS, RECENT_WORK_ACTIVE_MAX_STORED,
     RECENT_WORK_ARCHIVED_MAX_STORED, RECENT_WORK_DEFAULT_TTL_DAYS, RecentWorkItem, RecentWorkPatch,
     RuntimeMemorySnapshot, TIMED_MEMORY_ARCHIVED_MAX_STORED, TimedMemoryItem,
@@ -53,9 +53,9 @@ pub(super) fn write_lock() -> &'static Mutex<()> {
 /// the CLI's `memory add` verification: comparing against a locally
 /// duplicated cap would re-create the false `memory_add_not_materialized`
 /// failure the shared normalization fixed if the cap ever changes.
-pub(super) const PREFERENCE_TEXT_MAX_CHARS: usize = 120;
+pub const PREFERENCE_TEXT_MAX_CHARS: usize = 120;
 pub const WORK_CONTEXT_TEXT_MAX_CHARS: usize = 160;
-pub(super) const TIMED_TEXT_MAX_CHARS: usize = 180;
+pub const TIMED_TEXT_MAX_CHARS: usize = 180;
 
 pub(super) fn turn_capture_store() -> &'static Mutex<BTreeMap<String, TurnCapture>> {
     static STORE: OnceLock<Mutex<BTreeMap<String, TurnCapture>>> = OnceLock::new();
@@ -96,6 +96,56 @@ pub fn organize_history_path() -> PathBuf {
 
 pub fn pending_memory_path() -> PathBuf {
     paths::user_memory_pending()
+}
+
+/// Cross-process single-flight lock for the organize pass. The in-process
+/// `organize::ORGANIZE_IN_FLIGHT` guard only serializes runs inside one
+/// process; the GUI (manual button / scheduled task) and a CLI
+/// `pinvou memory organize` in another process could still interleave their
+/// destructive apply phases, each acting on its own up-to-75-second-old
+/// snapshot, which the apply phase's re-check cannot repair. The lock file
+/// lives in the per-user memory directory — the same home as
+/// `organize_history.json` and the store files — so every entry point of the
+/// same user competes for one lock.
+pub(crate) fn organize_lock_path() -> PathBuf {
+    paths::user_memory_dir().join(".organize.lock")
+}
+
+/// Cross-surface busy marker: carried in the anyhow message
+/// `organize_memory_with_llm` fails with while `.organize.lock` is held, so
+/// the CLI (`pinvou memory organize`) can map the feature-layer lock
+/// contention onto its documented `memory_organize_busy` refusal by value
+/// instead of a duplicated literal. `pub` (not `pub(crate)`) exactly for
+/// that consumer; the GUI and the scheduled lane never match on the text
+/// (a scheduled organize records the busy failure as an ordinary failed
+/// run, with the message preserved in the run record).
+pub const ORGANIZE_LOCK_BUSY: &str = "another organize pass is already running";
+
+/// Try-acquire the cross-process organize pass lock
+/// ([`organize_lock_path`]). Uses the OS advisory file lock through the
+/// std-stabilized `File::try_lock` (flock on Unix, LockFileEx on Windows)
+/// — the same class of primitive the install locks use — no new
+/// dependency, no unsafe guard construction. The returned file handle IS
+/// the guard: holding it for the scope of the pass covers every exit path
+/// — early errors, cancellation, success — with no manual release. No
+/// explicit `unlock()`: the OS advisory lock is bound to the file
+/// descriptor and the kernel releases it when the handle drops (closes),
+/// the same discipline the settings transaction lock documents. The lock
+/// file itself is never deleted: only the OS lock on an open handle
+/// decides, so a file left behind by a crashed process never blocks the
+/// next pass. Try semantics: a second pass while one is in flight fails
+/// immediately with [`ORGANIZE_LOCK_BUSY`] on `WouldBlock` instead of
+/// queueing behind the running pass's up to 75-second LLM call.
+pub(crate) fn try_lock_organize_pass() -> io::Result<std::fs::File> {
+    let file = crate::platform::filesystem::open_lock_file_with_dirs(&organize_lock_path())?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            ORGANIZE_LOCK_BUSY,
+        )),
+        Err(TryLockError::Error(error)) => Err(error),
+    }
 }
 
 pub fn never_memory_path() -> PathBuf {
@@ -316,23 +366,10 @@ pub fn capture_deterministic_memory(message: &str) -> io::Result<Vec<MemoryWrite
 }
 
 pub fn load_recent_work() -> io::Result<Vec<RecentWorkItem>> {
-    let path = recent_work_path();
-    let raw = match read_text_recovering(&path, json_lines_are_valid::<RecentWorkItem>) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err),
-    };
-    let mut out = Vec::new();
-    for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        let Ok(mut item) = serde_json::from_str::<RecentWorkItem>(line) else {
-            continue;
-        };
-        normalize_recent_work(&mut item);
-        if !item.id.is_empty() && !item.title.is_empty() {
-            out.push(item);
-        }
-    }
-    Ok(out)
+    load_jsonl_recovering(&recent_work_path(), |item| {
+        normalize_recent_work(item);
+        !item.id.is_empty() && !item.title.is_empty()
+    })
 }
 
 pub fn upsert_recent_work(patch: RecentWorkPatch) -> io::Result<RecentWorkItem> {
@@ -1175,27 +1212,16 @@ pub(super) fn delete_timed_memory_unlocked(kind: &str, id: &str) -> io::Result<b
 }
 
 fn load_timed_memory_file(path: &std::path::Path, kind: &str) -> io::Result<Vec<TimedMemoryItem>> {
-    let raw = match read_text_recovering(path, json_lines_are_valid::<TimedMemoryItem>) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err),
-    };
-    let mut out = Vec::new();
-    for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        let Ok(mut item) = serde_json::from_str::<TimedMemoryItem>(line) else {
-            continue;
-        };
+    let items = load_jsonl_recovering(path, |item: &mut TimedMemoryItem| {
         item.kind = normalize_timed_memory_kind(if item.kind.is_empty() {
             kind
         } else {
             &item.kind
         });
-        normalize_timed_memory(&mut item);
-        if !item.id.is_empty() && !item.text.is_empty() {
-            out.push(item);
-        }
-    }
-    Ok(dedupe_timed_memory_items(out))
+        normalize_timed_memory(item);
+        !item.id.is_empty() && !item.text.is_empty()
+    })?;
+    Ok(dedupe_timed_memory_items(items))
 }
 
 /// Shared JSONL store writer: serialize each item as one compact JSON line
@@ -1217,6 +1243,65 @@ fn write_jsonl_store<T: Serialize>(
         lines.push('\n');
     }
     write_text_atomic(path, &lines)
+}
+
+/// Shared JSONL store loader: read with recovery, then parse/normalize/filter
+/// each line. `normalize_and_validate` normalizes one item in place and
+/// returns whether it stays valid (id and key field non-empty); invalid lines
+/// are dropped. The per-store read-recover/parse loops differed only in item
+/// type and this closure, so they all route through here.
+fn load_jsonl_recovering<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    mut normalize_and_validate: impl FnMut(&mut T) -> bool,
+) -> io::Result<Vec<T>> {
+    let raw = match read_text_recovering(path, json_lines_are_valid::<T>) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err),
+    };
+    let mut out = Vec::new();
+    for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let Ok(mut item) = serde_json::from_str::<T>(line) else {
+            continue;
+        };
+        if normalize_and_validate(&mut item) {
+            out.push(item);
+        }
+    }
+    Ok(out)
+}
+
+/// Shared two-bucket compaction skeleton behind the JSONL store writers:
+/// normalize-and-keep each item, sort most-recent-first, then keep at most
+/// `active_limit` items matching `is_active` and at most `overflow_limit` of
+/// the remainder, active bucket first. Single-bucket stores (never) pass an
+/// always-false `is_active` and an active limit of 0.
+fn compact_two_buckets<T>(
+    items: Vec<T>,
+    mut normalize_and_keep: impl FnMut(&mut T) -> bool,
+    sort: impl Fn(&T, &T) -> std::cmp::Ordering,
+    is_active: impl Fn(&T) -> bool,
+    active_limit: usize,
+    overflow_limit: usize,
+) -> Vec<T> {
+    let mut normalized: Vec<T> = items
+        .into_iter()
+        .filter_map(|mut item| normalize_and_keep(&mut item).then_some(item))
+        .collect();
+    normalized.sort_by(sort);
+    let mut active = Vec::new();
+    let mut overflow = Vec::new();
+    for item in normalized {
+        if is_active(&item) {
+            if active.len() < active_limit {
+                active.push(item);
+            }
+        } else if overflow.len() < overflow_limit {
+            overflow.push(item);
+        }
+    }
+    active.extend(overflow);
+    active
 }
 
 pub(super) fn write_timed_memory_file(
@@ -1248,31 +1333,27 @@ pub(super) fn compact_timed_memory_store_unlocked(kind: &str) -> io::Result<()> 
     write_timed_memory_file(&path, &items, &kind)
 }
 
-fn compact_timed_memory_items(mut items: Vec<TimedMemoryItem>, kind: &str) -> Vec<TimedMemoryItem> {
+fn compact_timed_memory_items(items: Vec<TimedMemoryItem>, kind: &str) -> Vec<TimedMemoryItem> {
     let kind = normalize_timed_memory_kind(kind);
-    items.sort_by(|a, b| {
-        parse_time(&b.last_hit)
-            .cmp(&parse_time(&a.last_hit))
-            .then_with(|| b.updated_at.cmp(&a.updated_at))
-    });
     let active_limit = if kind == "recent_activity" {
         RECENT_ACTIVITY_ACTIVE_MAX_STORED
     } else {
         CURRENT_FOCUS_ACTIVE_MAX_STORED
     };
-    let mut active = Vec::new();
-    let mut archived = Vec::new();
-    for item in items {
-        if item.status == "active" {
-            if active.len() < active_limit {
-                active.push(item);
-            }
-        } else if archived.len() < TIMED_MEMORY_ARCHIVED_MAX_STORED {
-            archived.push(item);
-        }
-    }
-    active.extend(archived);
-    active
+    // write_timed_memory_file already normalized + deduped in the previous
+    // step; this only does the two-bucket truncation.
+    compact_two_buckets(
+        items,
+        |_| true,
+        |a, b| {
+            parse_time(&b.last_hit)
+                .cmp(&parse_time(&a.last_hit))
+                .then_with(|| b.updated_at.cmp(&a.updated_at))
+        },
+        |item| item.status == "active",
+        active_limit,
+        TIMED_MEMORY_ARCHIVED_MAX_STORED,
+    )
 }
 
 fn dedupe_timed_memory_items(mut items: Vec<TimedMemoryItem>) -> Vec<TimedMemoryItem> {
@@ -1300,23 +1381,10 @@ fn dedupe_timed_memory_items(mut items: Vec<TimedMemoryItem>) -> Vec<TimedMemory
 }
 
 pub fn load_pending_memory() -> io::Result<Vec<PendingMemoryItem>> {
-    let path = pending_memory_path();
-    let raw = match read_text_recovering(&path, json_lines_are_valid::<PendingMemoryItem>) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err),
-    };
-    let mut out = Vec::new();
-    for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        let Ok(mut item) = serde_json::from_str::<PendingMemoryItem>(line) else {
-            continue;
-        };
-        normalize_pending_memory(&mut item);
-        if !item.id.is_empty() && !item.content.is_empty() {
-            out.push(item);
-        }
-    }
-    Ok(out)
+    load_jsonl_recovering(&pending_memory_path(), |item| {
+        normalize_pending_memory(item);
+        !item.id.is_empty() && !item.content.is_empty()
+    })
 }
 
 pub fn enqueue_memory_candidate(suggestion: MemorySuggestion) -> io::Result<PendingMemoryItem> {
@@ -1375,7 +1443,13 @@ pub fn enqueue_memory_candidate(suggestion: MemorySuggestion) -> io::Result<Pend
     Ok(item)
 }
 
-pub(super) fn confirmed_pending_memory_is_materialized(item: &PendingMemoryItem) -> bool {
+/// Whether a confirmed pending item actually landed in its target store.
+/// The confirm path marks the item confirmed even when the profile-shaped
+/// preference skip in `write_preference_unlocked` deliberately wrote
+/// nothing; surfacing the helper lets the CLI report that no-op honestly
+/// instead of printing success (the GUI review pipeline has its own
+/// post-confirm view).
+pub fn confirmed_pending_memory_is_materialized(item: &PendingMemoryItem) -> bool {
     if item.status != PENDING_STATUS_CONFIRMED {
         return false;
     }
@@ -1393,7 +1467,7 @@ pub(super) fn confirmed_pending_memory_is_materialized(item: &PendingMemoryItem)
             .unwrap_or(false),
         "preference" => {
             let topic = normalize_preference_topic(&item.topic);
-            load_preferences()
+            list_preferences()
                 .map(|prefs| {
                     prefs.iter().any(|pref| {
                         normalize_preference_topic(&pref.topic) == topic
@@ -1685,10 +1759,6 @@ pub(super) fn disabled_runtime_snapshot(session_id: &str) -> io::Result<RuntimeM
     })
 }
 
-pub fn list_preferences() -> io::Result<Vec<PreferenceFile>> {
-    load_preferences()
-}
-
 fn preference_stale_paths_unlocked(
     dir: &Path,
     new_path: &Path,
@@ -1819,7 +1889,11 @@ pub(super) fn delete_preference_unlocked(id: &str) -> io::Result<bool> {
     Ok(false)
 }
 
-pub(super) fn load_preferences() -> io::Result<Vec<PreferenceFile>> {
+/// The shared preference read for both surfaces: the same self-heal-on-read
+/// reconcile as the GUI command, without its `cleanup_warning` (the warning
+/// surfaces through [`list_preferences_with_cleanup`], which the CLI's
+/// list/doctor lanes use directly).
+pub fn list_preferences() -> io::Result<Vec<PreferenceFile>> {
     list_preferences_with_cleanup().map(|result| result.value)
 }
 
@@ -1936,25 +2010,12 @@ fn blocked_by_never_memory_unlocked(content: &str) -> io::Result<bool> {
 }
 
 fn load_never_memory_unlocked() -> io::Result<Vec<NeverMemoryItem>> {
-    let path = never_memory_path();
-    let raw = match read_text_recovering(&path, json_lines_are_valid::<NeverMemoryItem>) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err),
-    };
-    let mut out = Vec::new();
-    for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        let Ok(mut item) = serde_json::from_str::<NeverMemoryItem>(line) else {
-            continue;
-        };
+    load_jsonl_recovering(&never_memory_path(), |item: &mut NeverMemoryItem| {
         item.id = clean_id(&item.id);
         item.pattern = clean_text(&item.pattern, 120);
         item.reason = clean_text(&item.reason, 80);
-        if !item.id.is_empty() && !item.pattern.is_empty() {
-            out.push(item);
-        }
-    }
-    Ok(out)
+        !item.id.is_empty() && !item.pattern.is_empty()
+    })
 }
 
 pub(super) fn write_never_memory_unlocked(items: &[NeverMemoryItem]) -> io::Result<()> {
@@ -1977,17 +2038,26 @@ fn compact_never_memory_items(items: &[NeverMemoryItem]) -> Vec<NeverMemoryItem>
         })
         .collect();
     normalized.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    let mut out: Vec<NeverMemoryItem> = Vec::new();
+    // Single-bucket store: dedupe by first-seen pattern, then truncate to
+    // the capacity cap (equivalent to the old dedupe + break single pass);
+    // the active bucket stays empty when reusing the two-bucket skeleton.
+    let mut deduped: Vec<NeverMemoryItem> = Vec::new();
     for item in normalized {
-        if out.iter().any(|existing| existing.pattern == item.pattern) {
-            continue;
+        if !deduped
+            .iter()
+            .any(|existing| existing.pattern == item.pattern)
+        {
+            deduped.push(item);
         }
-        if out.len() >= NEVER_MEMORY_MAX_STORED {
-            break;
-        }
-        out.push(item);
     }
-    out
+    compact_two_buckets(
+        deduped,
+        |_| true,
+        |a, b| b.created_at.cmp(&a.created_at),
+        |_| false,
+        0,
+        NEVER_MEMORY_MAX_STORED,
+    )
 }
 
 pub(super) fn write_recent_work_unlocked(items: &[RecentWorkItem]) -> io::Result<()> {
@@ -1999,46 +2069,41 @@ pub(super) fn write_recent_work_unlocked(items: &[RecentWorkItem]) -> io::Result
 }
 
 fn compact_recent_work_items(items: &[RecentWorkItem]) -> Vec<RecentWorkItem> {
-    let mut normalized: Vec<RecentWorkItem> = items
-        .iter()
-        .filter_map(|item| {
-            let mut item = item.clone();
-            normalize_recent_work(&mut item);
-            (!item.id.is_empty() && !item.title.is_empty()).then_some(item)
-        })
-        .collect();
-    normalized.sort_by(|a, b| {
-        parse_time(&b.last_hit)
-            .cmp(&parse_time(&a.last_hit))
-            .then_with(|| b.updated_at.cmp(&a.updated_at))
-    });
-    let mut active = Vec::new();
-    let mut archived = Vec::new();
-    for item in normalized {
-        if item.status == "active" {
-            if active.len() < RECENT_WORK_ACTIVE_MAX_STORED {
-                active.push(item);
-            }
-        } else if archived.len() < RECENT_WORK_ARCHIVED_MAX_STORED {
-            archived.push(item);
-        }
+    compact_two_buckets(
+        items.to_vec(),
+        |item| {
+            normalize_recent_work(item);
+            !item.id.is_empty() && !item.title.is_empty()
+        },
+        |a, b| {
+            parse_time(&b.last_hit)
+                .cmp(&parse_time(&a.last_hit))
+                .then_with(|| b.updated_at.cmp(&a.updated_at))
+        },
+        |item| item.status == "active",
+        RECENT_WORK_ACTIVE_MAX_STORED,
+        RECENT_WORK_ARCHIVED_MAX_STORED,
+    )
+}
+
+/// Normalize a binary "active or archived" status: the recent_work and timed
+/// stores each had an identical match; converge here so they cannot drift.
+fn normalize_status_active_or_archived(status: &str) -> String {
+    match clean_text(status, 20).as_str() {
+        "active" => "active".to_string(),
+        _ => "archived".to_string(),
     }
-    active.extend(archived);
-    active
 }
 
 fn normalize_recent_work(item: &mut RecentWorkItem) {
     item.id = clean_id(&item.id);
     item.title = clean_text(&item.title, 50);
     item.summary = clean_text(&item.summary, 80);
-    item.status = match clean_text(&item.status, 20).as_str() {
-        "active" => "active".to_string(),
-        _ => "archived".to_string(),
-    };
+    item.status = normalize_status_active_or_archived(&item.status);
     item.source = clean_text(&item.source, 40);
 }
 
-fn normalize_work_context(item: &mut WorkContextFile) {
+pub(super) fn normalize_work_context(item: &mut WorkContextFile) {
     item.id = clean_id(&item.id);
     item.kind = "work_context".to_string();
     item.topic = normalize_work_context_topic(&item.topic);
@@ -2061,20 +2126,21 @@ fn normalize_timed_memory(item: &mut TimedMemoryItem) {
     item.id = clean_id(&item.id);
     item.kind = normalize_timed_memory_kind(&item.kind);
     item.topic = normalize_timed_memory_topic(&item.kind, &item.topic);
-    item.text = clean_text(&item.text, 180);
+    item.text = clean_text(&item.text, TIMED_TEXT_MAX_CHARS);
     item.source = clean_text(&item.source, 40);
-    item.status = match clean_text(&item.status, 20).as_str() {
-        "active" => "active".to_string(),
-        _ => "archived".to_string(),
-    };
+    item.status = normalize_status_active_or_archived(&item.status);
     item.ttl_days = item.ttl_days.clamp(1, 90);
 }
 
+/// Content-identity key for the timed store: joined with a single space,
+/// matching `pending_content_key` (the old "" join collapsed "a b" and "ab"
+/// into the same key). The most aggressive merging is still backed by the
+/// bigram similarity in `timed_memory_texts_are_related`.
 fn timed_memory_text_key(text: &str) -> String {
     clean_text(text, 120)
         .split_whitespace()
         .collect::<Vec<_>>()
-        .join("")
+        .join(" ")
         .to_lowercase()
 }
 
@@ -2237,7 +2303,6 @@ fn normalize_pending_memory(item: &mut PendingMemoryItem) {
     item.status = match clean_text(&item.status, 30).as_str() {
         PENDING_STATUS_CONFIRMED => PENDING_STATUS_CONFIRMED.to_string(),
         PENDING_STATUS_IGNORED => PENDING_STATUS_IGNORED.to_string(),
-        PENDING_STATUS_OBSERVED => PENDING_STATUS_OBSERVED.to_string(),
         _ => PENDING_STATUS_PENDING.to_string(),
     };
 }
@@ -2263,33 +2328,22 @@ pub(super) fn write_pending_memory_unlocked(items: &[PendingMemoryItem]) -> io::
 }
 
 fn compact_pending_memory_items(items: &[PendingMemoryItem]) -> Vec<PendingMemoryItem> {
-    let mut normalized: Vec<PendingMemoryItem> = items
-        .iter()
-        .filter_map(|item| {
-            let mut item = item.clone();
-            normalize_pending_memory(&mut item);
-            (!item.id.is_empty() && !item.content.is_empty()).then_some(item)
-        })
-        .collect();
-    normalized.sort_by(|a, b| {
-        b.updated_at
-            .cmp(&a.updated_at)
-            .then_with(|| b.created_at.cmp(&a.created_at))
-    });
-    let mut active = Vec::new();
-    let mut resolved = Vec::new();
-    for item in normalized {
-        if matches!(
-            item.status.as_str(),
-            PENDING_STATUS_PENDING | PENDING_STATUS_OBSERVED
-        ) {
-            if active.len() < PENDING_MEMORY_ACTIVE_MAX_STORED {
-                active.push(item);
-            }
-        } else if resolved.len() < PENDING_MEMORY_RESOLVED_MAX_STORED {
-            resolved.push(item);
-        }
-    }
-    active.extend(resolved);
-    active
+    compact_two_buckets(
+        items.to_vec(),
+        |item| {
+            normalize_pending_memory(item);
+            !item.id.is_empty() && !item.content.is_empty()
+        },
+        |a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then_with(|| b.created_at.cmp(&a.created_at))
+        },
+        // After normalize_pending_memory only pending/confirmed/ignored
+        // remain; the observed state has no producer, and unknown values
+        // land in the pending bucket as well.
+        |item| item.status == PENDING_STATUS_PENDING,
+        PENDING_MEMORY_ACTIVE_MAX_STORED,
+        PENDING_MEMORY_RESOLVED_MAX_STORED,
+    )
 }

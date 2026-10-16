@@ -97,7 +97,9 @@ func main() {
 		log.Fatal("ACCOUNT_AUDIT_EXPORT_CONFIGURATION_INVALID")
 	}
 	service.WithAuditExports(auditExports)
-	go observability.RunBackground(ctx, "audit-export", auditExports.Run)
+	if auditExports != nil {
+		go observability.RunBackground(ctx, "audit-export", auditExports.Run)
+	}
 	go observability.RunBackground(ctx, "wallet-provisioning", account.NewWalletProvisioningWorker(repository, wallets, 5*time.Second).Run)
 	go observability.RunBackground(ctx, "role-binding-expiry", account.NewRoleBindingExpiryWorker(repository, time.Minute).Run)
 	closureBilling, closureToken, err := configuredAccountClosureClients(credential)

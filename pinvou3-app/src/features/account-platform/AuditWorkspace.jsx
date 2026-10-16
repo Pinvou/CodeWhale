@@ -1,6 +1,7 @@
 import React, {useEffect,useRef,useState} from 'react';
 import {secureRequestID} from './request-id.js';
 import {acquireAuditExportTicket,newAuditExportAttempt,submitAuditExportAttempt} from './admin-audit-export.js';
+import { AUDIT_EXPORT_STEPUP_QUERY, auditExportStepupNonce, newAuditExportRecovery, readAuditExportRecovery, clearAuditExportRecovery, requireAuditExportActor, reauthenticateAuditExport } from './audit-export-recovery.js';
 function formatDate(value) {
   return value ? new Date(value).toLocaleString() : '—';
 }
@@ -128,26 +129,62 @@ function DetailDrawer({ label, onClose, children }) {
   );
 }
 
-function Audit({ copy, data, client, setData, permissions }) {
-  const [filters, setFilters] = useState(() => readAuditQueryFilters());
+function restoredFilters(filter) {
+  const local = value => {
+    if (!value) return '';
+    const date = new Date(value);
+    const pad = number => String(number).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  };
+  return { ...readAuditQueryFilters(), ...filter, from: local(filter.from), to: local(filter.to) };
+}
+function Audit({ copy, data, client, setData, permissions, currentUserID }) {
+  const [recovery] = useState(() => {
+    const nonce = auditExportStepupNonce();
+    try {
+      const record = readAuditExportRecovery(currentUserID, nonce);
+      if (record && (!(permissions || []).includes('platform.audit.export') || !record.exportID && (record.attempt || record.draft)?.includePII && !(permissions || []).includes('platform.audit.pii.export'))) throw new Error('recovery permission changed');
+      return { nonce, record, blocked: false };
+    } catch { return { nonce, record: null, blocked: true }; }
+  });
+  const recoveredInput = recovery.record?.attempt || recovery.record?.draft;
+  const [recoveryBlocked, setRecoveryBlocked] = useState(recovery.blocked);
+  const [recoveryPending, setRecoveryPending] = useState(Boolean(recovery.record));
+  const [needsAuthentication, setNeedsAuthentication] = useState(false);
+  const recoveryNonce = useRef(recovery.nonce);
+  const knownExportID = useRef(recovery.record?.exportID || '');
+  const [filters, setFilters] = useState(() => recoveredInput ? restoredFilters(recoveredInput.filter) : readAuditQueryFilters());
   const [detail, setDetail] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [includePII, setIncludePII] = useState(false);
+  const [includePII, setIncludePII] = useState(recoveredInput?.includePII || false);
   const [exportJob, setExportJob] = useState(null);
   const [exportKey, setExportKey] = useState('');
-  const [exportReason, setExportReason] = useState('');
-  const [exportAttempted, setExportAttempted] = useState(false);
-  const [ticketIssueUnknown, setTicketIssueUnknown] = useState(false);
+  const [exportReason, setExportReason] = useState(recoveredInput?.reason || '');
+  const [exportAttempted, setExportAttempted] = useState(Boolean(recovery.record?.attempt));
+  const [ticketIssueUnknown, setTicketIssueUnknown] = useState(recovery.record?.ticketIssueUnknown || false);
   const liveRef = useRef(true);
   useEffect(() => { liveRef.current = true; return () => { liveRef.current = false; }; }, []);
-  const exportAttemptRef = useRef(null);
-  const exportOutcomeUnknownRef = useRef(false);
+  const exportAttemptRef = useRef(recovery.record?.attempt || null);
+  const exportOutcomeUnknownRef = useRef(recovery.record?.outcomeUnknown || false);
   const exportTicketRef = useRef(null);
   const canRead = (permissions || []).includes('platform.audit.read');
   const canExport = (permissions || []).includes('platform.audit.export');
   const canExportPII = (permissions || []).includes('platform.audit.pii.export');
   const items = data.audits || [];
+  const observeRecoveryError = cause => {
+    if (cause?.status === 401 || cause?.code === 'RECENT_AUTHENTICATION_REQUIRED') setNeedsAuthentication(true);
+    if (cause?.code === 'AUDIT_EXPORT_RECOVERY_UNAVAILABLE') setRecoveryBlocked(true);
+  };
+  const finishRecovery = () => {
+    try {
+      clearAuditExportRecovery(currentUserID, recoveryNonce.current);
+      recoveryNonce.current = '';
+      setRecoveryPending(false);
+      return true;
+    } catch { setError(copy.audit.recoveryCleanupFailed); return false; }
+  };
+
   const queryFilters = () => ({
     ...filters,
     from: filters.from ? new Date(filters.from).toISOString() : '',
@@ -184,6 +221,7 @@ function Audit({ copy, data, client, setData, permissions }) {
     }
   };
   const createExport = async () => {
+    if (recoveryBlocked) return;
     if (!exportAttemptRef.current) {
       let filter;
       try { filter = queryFilters(); } catch { setError(copy.audit.exportRequestInvalid); return; }
@@ -197,13 +235,21 @@ function Audit({ copy, data, client, setData, permissions }) {
     setBusy(true);
     setError('');
     try {
+      await requireAuditExportActor(client, currentUserID, exportAttemptRef.current.includePII);
+      if (!liveRef.current) return;
       const job = await submitAuditExportAttempt(client, exportAttemptRef.current);
+      if (knownExportID.current && job.export_id !== knownExportID.current) throw new Error('INVALID_AUDIT_EXPORT_ACK');
       if (!liveRef.current) return;
       exportOutcomeUnknownRef.current = false;
+      knownExportID.current = job.export_id;
       setExportJob(job);
       setExportKey(job.decryption_key || '');
+      setNeedsAuthentication(false);
+      finishRecovery();
     } catch (cause) {
       if (!liveRef.current) return;
+      observeRecoveryError(cause);
+      if (cause?.code === 'AUDIT_EXPORT_RECOVERY_UNAVAILABLE') { setError(copy.audit.recoveryUnavailable); return; }
       // A first definite rejection permits correction. After any unknown
       // outcome, a later authorization/path rejection does not prove that the
       // first call created no job; retain the original facts and key until an
@@ -221,25 +267,57 @@ function Audit({ copy, data, client, setData, permissions }) {
     }
   };
   const refreshExport = async () => {
-    if (!exportJob) return;
+    const id = exportJob?.export_id || knownExportID.current;
+    if (!id || recoveryBlocked) return;
     setBusy(true);
     setError('');
     try {
-      const job = await client.auditExport(exportJob.export_id);
+      await requireAuditExportActor(client, currentUserID);
+      if (!liveRef.current) return;
+      const job = await client.auditExport(id);
       if (!liveRef.current) return;
       setExportJob(job);
       if (!job.download_ticket_issued_at) setTicketIssueUnknown(false);
-    } catch {
-      if (liveRef.current) setError(copy.audit.exportFailed);
+    } catch (cause) {
+      if (liveRef.current) { observeRecoveryError(cause); setError(cause?.code === 'AUDIT_EXPORT_RECOVERY_UNAVAILABLE' ? copy.audit.recoveryUnavailable : copy.audit.exportFailed); }
     } finally {
       if (liveRef.current) setBusy(false);
     }
   };
+  useEffect(() => {
+    if (recovery.record?.exportID && !recoveryBlocked) void refreshExport();
+    // Returned records can trigger an authorized GET, never a mutation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, currentUserID]);
+  const reauthenticate = async () => {
+    setBusy(true); setError('');
+    try {
+      if (recoveryBlocked && recoveryNonce.current && !recovery.record) {
+        client.reauthenticate(`/admin.html?section=audit&${AUDIT_EXPORT_STEPUP_QUERY}=${encodeURIComponent(recoveryNonce.current)}`);
+        return;
+      }
+      const draft = exportAttemptRef.current ? null : newAuditExportAttempt(queryFilters(), exportReason, includePII, 'audit-draft-validation');
+      const record = newAuditExportRecovery({ actor: currentUserID, nonce: secureRequestID(),
+        attempt: exportAttemptRef.current, draft: draft ? { filter: draft.filter, reason: draft.reason, includePII: draft.includePII } : null,
+        outcomeUnknown: exportOutcomeUnknownRef.current, exportID: exportJob?.export_id || knownExportID.current,
+        ticketIssueUnknown });
+      await reauthenticateAuditExport(client, record);
+    } catch (cause) {
+      if (liveRef.current) { observeRecoveryError(cause); setError(cause?.code === 'AUDIT_EXPORT_RECOVERY_UNAVAILABLE' ? copy.audit.recoveryUnavailable : copy.audit.recoveryStorageFailed); }
+    } finally { if (liveRef.current) setBusy(false); }
+  };
+  const newExport = () => {
+    if (!finishRecovery()) return;
+    exportAttemptRef.current = null; exportOutcomeUnknownRef.current = false; exportTicketRef.current = null; knownExportID.current = '';
+    setTicketIssueUnknown(false); setExportAttempted(false); setExportJob(null); setExportKey(''); setExportReason(''); setIncludePII(false); setNeedsAuthentication(false);
+  };
   const downloadExport = async () => {
-    if (!exportJob || (exportJob.download_ticket_issued_at && !exportTicketRef.current) || ticketIssueUnknown) return;
+    if (recoveryBlocked || !exportJob || (exportJob.download_ticket_issued_at && !exportTicketRef.current) || ticketIssueUnknown) return;
     setBusy(true);
     setError('');
     try {
+      await requireAuditExportActor(client, currentUserID);
+      if (!liveRef.current) return;
       if (!exportTicketRef.current) {
         try {
           exportTicketRef.current = await acquireAuditExportTicket(client, exportJob.export_id, null);
@@ -263,8 +341,9 @@ function Audit({ copy, data, client, setData, permissions }) {
         window.setTimeout(() => URL.revokeObjectURL(href), 60_000);
       }
       setExportJob((current) => ({ ...current, status: 'DOWNLOADED' }));
-    } catch {
-      if (liveRef.current) setError(copy.audit.exportFailed);
+      finishRecovery();
+    } catch (cause) {
+      if (liveRef.current) { observeRecoveryError(cause); setError(cause?.code === 'AUDIT_EXPORT_RECOVERY_UNAVAILABLE' ? copy.audit.recoveryUnavailable : copy.audit.exportFailed); }
     } finally {
       if (liveRef.current) setBusy(false);
     }
@@ -322,7 +401,7 @@ function Audit({ copy, data, client, setData, permissions }) {
     <>
     <section className="adm-panel">
       <SectionHeader title={copy.audit.title} count={items.length} copy={copy} />
-      <form className="adm-ops-form" onSubmit={search}><fieldset disabled={busy || exportAttempted || Boolean(exportJob)}>
+      <form className="adm-ops-form" onSubmit={search}><fieldset disabled={busy || recoveryBlocked || exportAttempted || Boolean(exportJob)}>
         <input aria-label={copy.audit.actorFilter} placeholder={copy.audit.actorFilter} value={filters.actor} onChange={(event) => setFilters((current) => ({ ...current, actor: event.target.value }))} />
         <input
           aria-label={copy.audit.actionFilter}
@@ -381,10 +460,13 @@ function Audit({ copy, data, client, setData, permissions }) {
         <button disabled={busy || !canRead}>{copy.searchAction}</button></fieldset>
       </form>
       <p>{copy.audit.exportLimits}</p>
+      {recoveryPending && <p role="status">{copy.audit.recoveryReady}</p>}
+      {recoveryBlocked && <p role="alert">{copy.audit.recoveryUnavailable}</p>}
+      {(needsAuthentication || recoveryBlocked) && <div><p>{copy.audit.reauthenticateHelp}</p><button type="button" disabled={busy} onClick={() => void reauthenticate()}>{copy.audit.reauthenticate}</button></div>}
       {canExport && <form className="adm-ops-form" onSubmit={(event) => { event.preventDefault(); void createExport(); }}>
-        <label>{copy.audit.exportReason}<input value={exportReason} minLength="10" disabled={exportAttempted || busy || Boolean(exportJob)} onChange={(event) => setExportReason(event.target.value)} required /></label>
-        <label><input type="checkbox" checked={includePII} disabled={!canExportPII || exportAttempted || busy || Boolean(exportJob)} title={!canExportPII ? copy.permissionDenied : undefined} onChange={(event) => setIncludePII(event.target.checked)} />{copy.audit.includePII}</label>
-        <button type="submit" disabled={busy || Boolean(exportJob)}>{exportAttempted ? copy.audit.retryExport : copy.audit.export}</button>
+        <label>{copy.audit.exportReason}<input value={exportReason} minLength="10" disabled={recoveryBlocked || exportAttempted || busy || Boolean(exportJob)} onChange={(event) => setExportReason(event.target.value)} required /></label>
+        <label><input type="checkbox" checked={includePII} disabled={recoveryBlocked || !canExportPII || exportAttempted || busy || Boolean(exportJob)} title={!canExportPII ? copy.permissionDenied : undefined} onChange={(event) => setIncludePII(event.target.checked)} />{copy.audit.includePII}</label>
+        <button type="submit" disabled={recoveryBlocked || busy || Boolean(exportJob)}>{exportAttempted ? copy.audit.retryExport : copy.audit.export}</button>
         {exportAttempted && !exportJob && <small role="status">{copy.audit.retrySameExport}</small>}
       </form>}
       {exportJob && (
@@ -401,17 +483,18 @@ function Audit({ copy, data, client, setData, permissions }) {
             </>
           )}
           <br />
-          <button disabled={busy} onClick={refreshExport}>
+          {recoveryPending && exportAttemptRef.current && ['PENDING', 'GENERATING', 'READY'].includes(exportJob.status) && <button disabled={busy || recoveryBlocked || (exportAttemptRef.current.includePII && !canExportPII)} onClick={() => void createExport()}>{copy.audit.recoverOriginal}</button>}
+          <button disabled={busy || recoveryBlocked} onClick={refreshExport}>
             {copy.refresh}
           </button>
           {exportJob.status === 'READY' && (
-            <button disabled={busy || ticketIssueUnknown || (Boolean(exportJob.download_ticket_issued_at) && !exportTicketRef.current)} onClick={downloadExport}>
+            <button disabled={busy || recoveryBlocked || ticketIssueUnknown || (Boolean(exportJob.download_ticket_issued_at) && !exportTicketRef.current)} onClick={downloadExport}>
               {copy.audit.download}
             </button>
           )}
           {ticketIssueUnknown && <small role="status">{copy.audit.ticketIssueUnknown}</small>}
           {exportJob.download_ticket_issued_at && !exportTicketRef.current && <small role="status">{copy.audit.ticketUnavailable}</small>}
-          <button type="button" disabled={busy} onClick={() => { exportAttemptRef.current = null; exportOutcomeUnknownRef.current = false; exportTicketRef.current = null; setTicketIssueUnknown(false); setExportAttempted(false); setExportJob(null); setExportKey(''); setExportReason(''); setIncludePII(false); }}>{copy.audit.newExport}</button>
+          <button type="button" disabled={busy} onClick={newExport}>{copy.audit.newExport}</button>
         </div>
       )}
       {error && <div className="adm-inline-message error" role="alert">{error}</div>}
@@ -456,7 +539,7 @@ function AuditDetail({ copy, item, onBack }) {
 }
 
 function Status({value}) {return <span className="adm-status">{String(value || '—')}</span>;}
-export function AuditWorkspace({client,copy,permissions}){
+export function AuditWorkspace({client,copy,permissions,currentUserID}){
  const [data,setData]=useState({audits:[]});
  const [loading,setLoading]=useState(true);
  const [loadError,setLoadError]=useState(false);
@@ -473,5 +556,5 @@ export function AuditWorkspace({client,copy,permissions}){
  },[client,retry,canRead]);
  if(loading)return <p role="status">{copy.loading}</p>;
  if(loadError)return <div role="alert">{copy.audit.actionFailed}<button onClick={()=>setRetry(value=>value+1)}>{copy.refresh}</button></div>;
- return <Audit copy={copy} data={data} client={client} setData={setData} permissions={permissions}/>;
+ return <Audit copy={copy} data={data} client={client} setData={setData} permissions={permissions} currentUserID={currentUserID}/>;
 }

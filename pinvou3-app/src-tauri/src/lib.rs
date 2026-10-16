@@ -25,6 +25,37 @@ pub use features::assistant::attachments::stage_file_in_workspace;
 #[cfg(feature = "benchmark-hooks")]
 pub use features::assistant::product_runtime::{agentic_task, headless_bridge};
 
+/// Facade for the automation scheduler foundation, consumed only by the
+/// `scheduled` family of pinvou-cli: definitions and run records live behind
+/// the public API of CodeWhale `codewhale-tui`'s (this crate's
+/// `deepseek-tui` alias) `automation_manager`, while the architecture guard
+/// `rust_cli_reaches_past_pinvou3_lib` requires pinvou-cli to reach the
+/// foundation through pinvou3_lib surfaces only — the same precedent as the
+/// `pub mod` opened on `features::projects` for the CLI. Only the entries
+/// the CLI `scheduled` family actually consumes are re-exported; the GUI
+/// itself keeps using `deepseek_tui::...` directly, not through this facade.
+pub mod automation_foundation {
+    pub use deepseek_tui::automation_manager::{
+        AutomationManager, AutomationRecord, AutomationRunRecord, AutomationSchedule,
+        AutomationStatus, CreateAutomationRequest, UpdateAutomationRequest,
+    };
+}
+
+/// Facade for the OpenCode gateway session-affinity helpers, consumed by the
+/// `models` family of pinvou-cli: `models test` mirrors the GUI's
+/// `probe_model_connection`, which must attach `x-opencode-session` itself
+/// when the base URL is an OpenCode gateway endpoint (the Go gateway
+/// rejects hand-rolled auxiliary clients without it since 2026-09; see
+/// `core::model_endpoint`). Same precedent as the `automation_foundation`
+/// facade: only the entries the CLI actually consumes are re-exported, and
+/// the GUI keeps calling `crate::core::model_endpoint` directly.
+pub mod model_probe {
+    pub use crate::core::model_endpoint::{
+        is_anthropic_api_url, is_opencode_gateway_base_url, models_probe_url,
+        opencode_session_id_for, strip_v1_suffix,
+    };
+}
+
 use crate::app::commands;
 use crate::features::{
     account_platform::AccountPlatformState,
@@ -430,8 +461,9 @@ async fn reconcile_orphaned_session_browser_files_until_success(
 ///
 /// There is deliberately no process-lifetime deletion replay. Store boot can
 /// prune sessions before this hook is registered, but no WebView from a prior
-/// process survives; `spawn_orphaned_session_browser_reconciliation` scans and
-/// retries removal of their durable browser artifacts immediately afterwards.
+/// process survives; `reconcile_orphaned_session_browser_files_until_success`
+/// scans and retries removal of their durable browser artifacts immediately
+/// afterwards.
 fn spawn_deleted_session_browser_cleanup(app: tauri::AppHandle, store: SessionStore) {
     let deletion_queue = std::sync::Arc::new(SessionBrowserCleanupQueue::default());
     let app_for_hook = app.clone();
@@ -491,12 +523,6 @@ fn spawn_deleted_session_browser_cleanup(app: tauri::AppHandle, store: SessionSt
             }
         }
     });
-}
-
-fn spawn_orphaned_session_browser_reconciliation(app: tauri::AppHandle, store: SessionStore) {
-    tauri::async_runtime::spawn(reconcile_orphaned_session_browser_files_until_success(
-        app, store,
-    ));
 }
 
 /// Funnel for process env writes inside the single-threaded startup window
@@ -567,13 +593,12 @@ fn decide_main_navigation(url: &tauri::Url, initial_origin: Option<&str>) -> Mai
             None => MainNavigationVerdict::Block { detail: None },
         };
     }
-    let origin = format!(
-        "{}://{}:{}",
-        url.scheme(),
-        url.host_str().unwrap_or_default(),
-        url.port_or_known_default()
-            .map_or_else(|| "-".to_string(), |port| port.to_string())
-    );
+    let scheme = url.scheme();
+    let host = url.host_str().unwrap_or_default();
+    let port = url
+        .port_or_known_default()
+        .map_or_else(|| "-".to_string(), |port| port.to_string());
+    let origin = format!("{scheme}://{host}:{port}");
     match initial_origin {
         None => MainNavigationVerdict::Allow {
             initial_origin: Some(origin),
@@ -582,23 +607,8 @@ fn decide_main_navigation(url: &tauri::Url, initial_origin: Option<&str>) -> Mai
             initial_origin: None,
         },
         Some(_) => MainNavigationVerdict::Block {
-            detail: Some(format!(
-                "scheme={} host={} port={}",
-                url.scheme(),
-                url.host_str().unwrap_or_default(),
-                url.port_or_known_default()
-                    .map_or_else(|| "-".to_string(), |port| port.to_string())
-            )),
+            detail: Some(format!("scheme={scheme} host={host} port={port}")),
         },
-    }
-}
-
-/// Non-blocking synchronous fallback for `RunEvent::Exit`. Explicit `app.restart()`
-/// bypasses this event and uses `prepare_app_restart()` to await the complete
-/// `shutdown_before_restart()` barrier.
-fn shutdown_browser_before_process_end(app: &tauri::AppHandle) {
-    if let Some(browser) = app.try_state::<features::browser::BrowserManager>() {
-        browser.shutdown_on_exit();
     }
 }
 
@@ -642,6 +652,45 @@ pub fn build_tauri_context() -> tauri::Context {
     tauri::generate_context!()
 }
 
+/// The startup-timeline signature of a failed knowledge init. The state is
+/// never managed on failure and nothing retries it in-process (whether the
+/// store was refused as too-new or the open failed transiently), so the
+/// `:error` line carrying the cause is the failure's only durable mark —
+/// stderr alone is lost on windowed Windows builds, and
+/// `knowledge_service:done` is reserved for a successful init so the
+/// timeline cannot read a dead service as "finished fine".
+fn mark_knowledge_service_failed(error: impl std::fmt::Display) {
+    let detail = format!("{error:#}");
+    crate::platform::startup::mark_with_detail("rust", "knowledge_service:error", &detail);
+    eprintln!("[pinvou3-app] knowledge service init failed: {detail}");
+}
+
+/// Best-effort removal of a purged session's entry from the codex_acp agents
+/// index (`session-agents.json`). Retention evictions and scheduled cleanups
+/// delete the saved-session record and its directory, but that index is owned
+/// by `features::codex_acp` (the sessions purge cannot touch it), so a stale
+/// entry used to outlive its owner and feed the boot-time sidecar backfill —
+/// resurrecting ghost `sessions/<id>/` directories on every startup. The
+/// user-delete path already removes the entry in the `delete_session` command;
+/// this leg covers the GUI purge paths that have no app handle at hook time
+/// (runtime retention evictions, scheduled-run cleanups) via the
+/// `SessionPurgedHook` (same dependency inversion as the other hook legs —
+/// sessions must not depend on codex_acp in reverse). The windowless host
+/// registers no purge hooks; dead code-mode entries its evictions leave
+/// behind are converged by the boot scan's prune at the next GUI start
+/// (dead ACP-mode entries are inert and intentionally left in place).
+/// Failure tolerance matches the other purge legs: a missing entry is fine,
+/// and any error is logged without aborting or rolling back the eviction
+/// itself.
+pub(crate) fn remove_agents_index_entry(
+    agents: &crate::features::codex_acp::SessionAgentStore,
+    session_id: &str,
+) {
+    if let Err(error) = agents.remove(session_id) {
+        eprintln!("[pinvou3-app] remove session-agents.json entry after purge failed: {error:#}");
+    }
+}
+
 pub fn run() {
     // WebKitGTK reads its RemoteInspector endpoint while constructing the first
     // WebContext, so the browser feature must reserve it before Tauri starts.
@@ -673,6 +722,7 @@ pub fn run() {
     tauri::async_runtime::set(async_runtime.handle().clone());
     startup::init();
     startup::mark("environment:ready");
+    features::updater::observe_pending_update_health();
     // 必须早于 Tauri Builder/WebView 创建：避免升级后 WebKit 复用旧 index.html，
     // 却在新包内找不到旧 CSS，退化成裸 HTML 页面。
     crate::platform::ui_cache::migrate_before_webview();
@@ -791,7 +841,7 @@ pub fn run() {
             // persists the frozen fresh-vs-upgrade verdict, ahead of every
             // first-startup write.
             startup::mark("disabled_bundles_migration:start");
-            let _ = crate::features::marketplace::scope::load_disabled_bundles();
+            crate::features::marketplace::scope::load_disabled_bundles_startup_mirrored();
             startup::mark("disabled_bundles_migration:done");
             if let Ok(resource_dir) = app.path().resource_dir() {
                 crate::platform::paths::set_runtime_resource_dir(resource_dir);
@@ -802,8 +852,6 @@ pub fn run() {
                     features::files::attachment_upload::sweep_stale_draft_attachments();
                 });
             features::browser::install_automation_context(app);
-            #[cfg(target_os = "macos")]
-            features::updater::cleanup_stale_backup();
             // Attach the logging backend in ALL builds, not just debug: without
             // it every log:: line — connector and updater failure causes among
             // them — is a no-op in release and the raw cause of a failure is
@@ -1033,10 +1081,10 @@ pub fn run() {
                     app.handle().clone(),
                     store_for_engine.clone(),
                 );
-                spawn_orphaned_session_browser_reconciliation(
+                tauri::async_runtime::spawn(reconcile_orphaned_session_browser_files_until_success(
                     app.handle().clone(),
                     store_for_engine.clone(),
-                );
+                ));
             }
             // 原生代码会话的执行根解析需要共享 AcpPool 持有的 SessionAgentStore
             // （多实例各自读盘，只有这份 clone 与 AcpPool 同一份 Arc）。
@@ -1185,10 +1233,13 @@ pub fn run() {
                     pool.bridge
                         .set_execution_root_resolver(execution_root_resolver.clone());
                     store_for_engine.set_execution_root_resolver(execution_root_resolver);
-                    pool.bridge.set_code_session_predicate(std::sync::Arc::new({
-                        let agents = code_session_agents.clone();
-                        move |session_id: &str| agents.is_code_session(session_id)
-                    }));
+                    let code_session_predicate: crate::features::sessions::CodeSessionPredicate =
+                        std::sync::Arc::new({
+                            let agents = code_session_agents.clone();
+                            move |session_id: &str| agents.is_code_session(session_id)
+                        });
+                    pool.bridge
+                        .set_code_session_predicate(code_session_predicate.clone());
                     pool.bridge
                         .set_external_acp_session_predicate(std::sync::Arc::new({
                             let acp_pool = acp_pool_for_capabilities.clone();
@@ -1196,10 +1247,7 @@ pub fn run() {
                         }));
                     // sessions feature 自己的 code 判定（mode 默认值解析 + 仅 code
                     // 持久化），与 bridge 共用同一份 SessionAgentStore 闭包。
-                    store_for_engine.set_code_session_predicate(std::sync::Arc::new({
-                        let agents = code_session_agents.clone();
-                        move |session_id: &str| agents.is_code_session(session_id)
-                    }));
+                    store_for_engine.set_code_session_predicate(code_session_predicate.clone());
                     // SessionStore::delete and deep deletion paths without
                     // an app handle (retention policy/scheduled cleanup)
                     // clear process-level per-session keys uniformly via
@@ -1211,13 +1259,26 @@ pub fn run() {
                     // place; if unmanaged (very early deletions) the item is
                     // skipped.
                     let app_for_purge_hook = handle.clone();
+                    let agents_index_for_purge_hook = code_session_agents.clone();
                     store_for_engine
                         .register_session_purged_hook(std::sync::Arc::new(move |session_id: &str| {
+                            // Drop the codex_acp agents-index entry as well —
+                            // see `remove_agents_index_entry`.
+                            crate::remove_agents_index_entry(
+                                &agents_index_for_purge_hook,
+                                session_id,
+                            );
                             crate::features::assistant::timing::clear_session(session_id);
                             crate::features::assistant::pending_user_input::clear_session(
                                 session_id,
                             );
                             crate::features::memory::discard_turn_capture(session_id);
+                            // The computer-use audit trail is per-session
+                            // metadata about what the agent did on the user's
+                            // screen. Nothing else ever removed it, so a
+                            // deleted session kept its behavioural record on
+                            // disk indefinitely.
+                            crate::features::computer_use::remove_session_audit(session_id);
                             // Self-metrics accumulate per session key
                             // (inflight entries are inserted on TurnStarted
                             // and only cleared on TurnComplete/abort); clear
@@ -1231,10 +1292,7 @@ pub fn run() {
                         }));
                     // 远程端正式支持代码会话之前，先过滤原生代码会话事件（与 Engine
                     // bridge 共用同一份 SessionAgentStore 判定）。
-                    remote_control_manager.set_code_session_predicate(std::sync::Arc::new({
-                        let agents = code_session_agents.clone();
-                        move |session_id: &str| agents.is_code_session(session_id)
-                    }));
+                    remote_control_manager.set_code_session_predicate(code_session_predicate);
                     let scheduled_state = tauri::async_runtime::block_on(
                         scheduled_tasks::ScheduledTaskState::boot_runtime(
                             &pool.bridge,
@@ -1284,7 +1342,15 @@ pub fn run() {
             // 组合目录的物化在 engine spawn 时按会话进行(build_engine_config 注入
             // skills_dir 指向 ~/.pinvou3/sessions/<sid>/skills/)。
             startup::mark("disabled_skills:start");
-            let _ = crate::features::assistant::skill_materialization::load_disabled_skills();
+            // Fully locked on purpose: a try-locked hot read cannot persist the
+            // freeze/recovery verdicts, so this re-read is the second chance to
+            // persist them if the hoisted read degraded under peer contention
+            // (the unbounded flock wait is the documented fail-stop boot
+            // tradeoff). A persist failure on this read is mirrored by the
+            // shared helper onto the timeline: the hoisted read's success does
+            // not cover a failure developing in between, and this mirror is
+            // the only durable channel that can name it.
+            crate::features::marketplace::scope::load_disabled_bundles_startup_mirrored();
             startup::mark("disabled_skills:done");
 
             // Monitor 按需采样：state 只持有 session_uptime，sample 由前端调
@@ -1340,10 +1406,10 @@ pub fn run() {
                 Ok(svc) => {
                     app.handle().manage(svc);
                     eprintln!("[pinvou3-app] knowledge service ready");
+                    startup::mark("knowledge_service:done");
                 }
-                Err(e) => eprintln!("[pinvou3-app] knowledge service init failed: {e:#}"),
+                Err(e) => mark_knowledge_service_failed(&e),
             }
-            startup::mark("knowledge_service:done");
 
             match RemoteKnowledgeService::load(RemoteKnowledgeService::default_path()) {
                 Ok(service) => {
@@ -1443,6 +1509,7 @@ pub fn run() {
             commands::computer_use::computer_use_confirm,
             commands::computer_use::computer_use_set_enabled,
             commands::computer_use::computer_use_request_permissions,
+            commands::computer_use::computer_use_permission_status,
             commands::connectors::refresh_connector_auth_gates,
             commands::connectors::feishu_ensure_cli,
             commands::connectors::feishu_connect_begin,
@@ -1814,6 +1881,7 @@ pub fn run() {
             commands::updater::restart_app,
             commands::updater::cancel_download,
             commands::updater::report_pending_update_result,
+            commands::updater::commit_pending_update_ready,
             commands::dependencies::check_dependencies,
             commands::dependencies::install_dependencies,
             commands::marketplace::list_marketplace_tools,
@@ -1946,7 +2014,9 @@ pub fn run() {
             // On main-process exit, refresh browser URL restore manifests, destroy
             // in-app native WebViews, and clean runtime targets/endpoints. Preserve
             // restore manifests; there is no external Chrome process.
-            shutdown_browser_before_process_end(app);
+            if let Some(browser) = app.try_state::<features::browser::BrowserManager>() {
+                browser.shutdown_on_exit();
+            }
             // Exit semantics preserve the latest restore manifest. Do not asynchronously
             // call ordinary stop() here: if shutdown_on_exit skips explicit close because
             // of lock contention, a late stop could acquire the lock and delete restore
@@ -1996,14 +2066,15 @@ mod startup_order_contract {
     #[test]
     fn disabled_bundles_migration_read_precedes_first_boot_writes() {
         // GUI host: the migration read at the top of the setup hook precedes
-        // the SessionStore boot. The needle pins the hoist call itself
-        // (fragment-concatenated to prevent a self-match — this test lives in
-        // the same lib.rs as the production call site, and include_str! scans
-        // the test module too, so a full needle appearing verbatim in the
-        // test would degenerate into a self-match, review #455 R4-S1). The
-        // old leg pinning the startup marks on both sides only preserved the
-        // mark sandwich: deleting or moving the hoist call between the two
-        // marks still passed (review #455 R5-S1). The later needle pins the
+        // the SessionStore boot. The needle pins the hoist call itself — the
+        // shared mirrored startup read — (fragment-concatenated to prevent a
+        // self-match — this test lives in the same lib.rs as the production
+        // call site, and include_str! scans the test module too, so a full
+        // needle appearing verbatim in the test would degenerate into a
+        // self-match). The old leg pinning the startup
+        // marks on both sides only preserved the mark sandwich: deleting or
+        // moving the hoist call between the two marks still passed (review
+        // #455 R5-S1). The later needle pins the
         // `SessionStore::boot_for_process_startup` call itself rather than
         // the adjacent startup-mark proxy (review #455 R8 nit). `find` takes
         // the first occurrence: the guarded regression is "hoist deleted or
@@ -2015,8 +2086,8 @@ mod startup_order_contract {
         assert_migration_read_precedes(
             include_str!("lib.rs"),
             &[
-                "crate::features::marketplace::scope::",
-                "load_disabled_bundles()",
+                "crate::features::marketplace::scope::load_disabled_bundles_startup_",
+                "mirrored()",
             ]
             .concat(),
             &["SessionStore::", "boot_for_process_startup()"].concat(),
@@ -2026,7 +2097,11 @@ mod startup_order_contract {
         // SessionStore boot.
         assert_migration_read_precedes(
             include_str!("features/assistant/product_runtime/headless_bridge.rs"),
-            "marketplace::scope::load_disabled_bundles()",
+            &[
+                "marketplace::scope::load_disabled_bundles_startup_",
+                "mirrored()",
+            ]
+            .concat(),
             "SessionStore::boot()",
             "headless_bridge.rs",
         );
@@ -2034,9 +2109,104 @@ mod startup_order_contract {
         // (ensure_dirs / default settings.json first-startup writes).
         assert_migration_read_precedes(
             include_str!("bin/dump_system_prompt.rs"),
-            "load_disabled_bundles()",
+            "load_disabled_bundles_startup()",
             "Pinvou3Bridge::boot()",
             "dump_system_prompt.rs",
+        );
+    }
+
+    /// The freeze-persist failure mirror is the only durable channel naming
+    /// the failure before the log plugin attaches (the windowless host
+    /// attaches none at all). lib.rs must keep the mirrored startup read at
+    /// BOTH startup sites (the hoisted freeze and the second-chance
+    /// re-read); headless keeps one. Needle assembled from fragments so this
+    /// test module's own source (scanned together with lib.rs) cannot
+    /// self-match.
+    #[test]
+    fn freeze_persist_failures_mirror_onto_the_startup_timeline_in_every_host() {
+        let mirrored_read = ["load_disabled_bundles_startup_", "mirrored()"].concat();
+        let gui_mirrors = include_str!("lib.rs").matches(&mirrored_read).count();
+        assert!(
+            gui_mirrors >= 2,
+            "lib.rs must keep the mirrored startup read at BOTH startup sites (the hoisted freeze and the second-chance re-read): found {gui_mirrors}"
+        );
+        let headless_mirrors =
+            include_str!("features/assistant/product_runtime/headless_bridge.rs")
+                .matches(&mirrored_read)
+                .count();
+        assert_eq!(
+            headless_mirrors, 1,
+            "headless_bridge.rs must keep its mirrored startup read (this host attaches no log plugin)"
+        );
+        // The console bin mirrors via eprintln (the
+        // startup timeline is pub(crate) and this host has no window at all);
+        // deleting that mirror passed every leg — pin it. The wording lives
+        // once in scope's FREEZE_PERSIST_FAILURE_NOTICE (every host mirror
+        // shares it), so pin both halves: the const keeps the message text,
+        // and the bin still references the const from its eprintln.
+        let mirror_needle = [
+            "CRITICAL: the fresh-vs-",
+            "upgraded verdict could not be persisted",
+        ]
+        .concat();
+        let const_carries_text = include_str!("features/marketplace/scope.rs")
+            .matches(&mirror_needle)
+            .count();
+        assert!(
+            const_carries_text >= 1,
+            "scope.rs must keep the freeze-persist failure notice wording (every host mirror shares it)"
+        );
+        let bin_mirrors = include_str!("bin/dump_system_prompt.rs")
+            .matches("FREEZE_PERSIST_FAILURE_NOTICE")
+            .count();
+        assert!(
+            bin_mirrors >= 1,
+            "dump_system_prompt.rs must keep its freeze-persist failure eprintln mirror (this host has neither window nor log plugin)"
+        );
+    }
+
+    /// Wiring pin for the ghost-session fix's root-cause leg: the purge
+    /// hook's agents-index leg must capture the store derived from
+    /// `AcpPool::new` (`pool.agents().clone()`), never a second
+    /// `SessionAgentStore` instance over the same file — a second instance
+    /// would rewrite `session-agents.json` from its own memory on every
+    /// purge, clobbering concurrent binds. Textual pin like the legs above
+    /// (needles fragment-concatenated against self-match, `find` takes the
+    /// first = production occurrence): deleting the capture, swapping it
+    /// for an independent `SessionAgentStore::load_or_empty`, or swapping
+    /// the `pool.agents()` binding itself for an independent instance all
+    /// fail here.
+    #[test]
+    fn purge_hook_captures_the_pool_agents_store() {
+        let source = include_str!("lib.rs");
+        let capture = source
+            .find(
+                &[
+                    "let agents_index_for_purge_hook = code_session_",
+                    "agents.clone();",
+                ]
+                .concat(),
+            )
+            .unwrap_or_else(|| {
+                panic!(
+                    "lib.rs is missing the purge-hook agents-index capture from code_session_agents"
+                )
+            });
+        let agents_binding = source
+            .find(&["let agents = pool.", "agents().clone();"].concat())
+            .unwrap_or_else(|| {
+                panic!("lib.rs is missing the pool agents binding for the purge hook")
+            });
+        let pool_binding = source
+            .find(&["let (code_session_", "agents, acp_pool_for_capabilities)"].concat())
+            .unwrap_or_else(|| panic!("lib.rs is missing the AcpPool agents binding"));
+        assert!(
+            agents_binding < capture,
+            "the purge hook's store must be cloned from the AcpPool's agents store, not an independent instance"
+        );
+        assert!(
+            pool_binding < capture,
+            "the purge hook must capture the store derived from AcpPool::new (pool.agents()), not an independent instance"
         );
     }
 }
@@ -2175,6 +2345,10 @@ mod tool_allowlist_contract {
             "file_search",
             "registry_sync",
             "start_registry_mcp_server",
+            // The computer-use instruction section (computer_use::
+            // instruction_block, rendered while the master switch is on)
+            // names the tool directly, so it must ship non-deferred.
+            crate::features::computer_use::TOOL_NAME,
         ] {
             assert!(
                 PINVOU3_ALWAYS_LOADED_TOOLS.contains(&load_bearing),
@@ -2692,5 +2866,124 @@ mod release_env_defaults_guard {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod knowledge_service_failure_tests {
+    /// A failed knowledge init must leave an `:error` line carrying the cause
+    /// on the real `startup.log` — the failure previously reached stderr only
+    /// (lost on windowed Windows builds) — and must not be bookkept as
+    /// `knowledge_service:done`, which is reserved for a successful init.
+    /// Swapping the stage name back to a success-looking or retry-promising
+    /// one, dropping the cause, or re-sharing `:done` across both arms turns
+    /// this red.
+    #[test]
+    fn failed_knowledge_init_marks_the_timeline_with_the_cause() {
+        use crate::platform::paths::tests::{ENV_LOCK, EnvVarGuard, unique_suffix};
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // Restores the host's PINVOU3_HOME (present or absent) on drop, panic paths included.
+        let _env = EnvVarGuard::capture(&["PINVOU3_HOME"]);
+        let root = std::env::temp_dir().join(format!(
+            "pinvou3-kb-fail-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create isolated PINVOU3_HOME");
+        // SAFETY: holding platform::paths::tests::ENV_LOCK (first line of this test); env writes serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &root) };
+        // Re-init re-points the sink at this test's own log (see `init` docs).
+        crate::platform::startup::init();
+
+        super::mark_knowledge_service_failed(&anyhow::anyhow!("store too new: schema 9 > 4"));
+
+        let log = std::fs::read_to_string(root.join("logs").join("startup.log"))
+            .expect("the failure mark must be persisted");
+        assert!(log.contains("knowledge_service:error"), "{log}");
+        assert!(log.contains("store too new: schema 9 > 4"), "{log}");
+        assert!(
+            !log.contains("knowledge_service:done"),
+            "a failed init must not be bookkept as finished: {log}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod session_purge_agents_index_tests {
+    use crate::features::codex_acp::{CodexWorkspaceKind, SessionAgentStore};
+
+    /// The composition root's purge hook must remove the purged session's
+    /// entry from the codex_acp agents index: retention evictions and
+    /// scheduled cleanups cannot reach that codex_acp-owned index, and a
+    /// stale entry outlives its owner and feeds the boot-time sidecar
+    /// backfill — resurrecting ghost `sessions/<id>/` directories on every
+    /// startup. The removal must be id-scoped (unrelated entries survive)
+    /// and must drop the authoritative sidecar with the index record.
+    #[test]
+    fn purge_removes_index_entry_and_keeps_others() {
+        crate::platform::test_support::with_temp_home("pinvou3-purge-agents-index", || {
+            // Index inside the hermetic home; the sidecar root derives as
+            // <home>/sessions, matching the production layout.
+            let home = crate::platform::paths::pinvou3_home();
+            let store = SessionAgentStore::for_test(home.join("session-agents.json"));
+            store
+                .bind_code_native_session(
+                    "sess-purged",
+                    CodexWorkspaceKind::Project,
+                    Some(home.clone()),
+                )
+                .expect("bind purged");
+            store
+                .bind_code_native_session(
+                    "sess-survivor",
+                    CodexWorkspaceKind::Project,
+                    Some(home.clone()),
+                )
+                .expect("bind survivor");
+
+            super::remove_agents_index_entry(&store, "sess-purged");
+
+            assert!(
+                !store.is_code_session("sess-purged"),
+                "the purged id's in-memory entry must be gone"
+            );
+            assert!(
+                store.is_code_session("sess-survivor"),
+                "unrelated entries must survive the purge leg"
+            );
+            let on_disk = std::fs::read_to_string(home.join("session-agents.json"))
+                .expect("the index must persist after the purge leg");
+            assert!(
+                !on_disk.contains("sess-purged"),
+                "the purged id must not survive on disk: {on_disk}"
+            );
+            assert!(
+                on_disk.contains("sess-survivor"),
+                "the survivor must remain on disk: {on_disk}"
+            );
+            assert!(
+                !home.join("sessions").join("sess-purged").exists(),
+                "the authoritative sidecar (and its directory) must be removed with the index entry",
+            );
+        });
+    }
+
+    /// The purge leg is best-effort like its siblings: an id without an index
+    /// entry (user deletes already removed it, or the session never had one)
+    /// must be a no-op, never an error that could abort an eviction.
+    #[test]
+    fn purge_tolerates_missing_index_entry() {
+        crate::platform::test_support::with_temp_home("pinvou3-purge-agents-index-missing", || {
+            let home = crate::platform::paths::pinvou3_home();
+            let store = SessionAgentStore::for_test(home.join("session-agents.json"));
+            super::remove_agents_index_entry(&store, "never-bound");
+            assert!(
+                !store.is_code_session("never-bound"),
+                "nothing to remove, nothing to resurrect"
+            );
+        });
     }
 }

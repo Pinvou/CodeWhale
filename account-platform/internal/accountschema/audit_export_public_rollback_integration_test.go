@@ -96,6 +96,76 @@ func TestAuditExportPublicDownRetainsOriginalHistory(t *testing.T) {
 			t.Fatal("BOUND_DOWN_CHANGED_HISTORY")
 		}
 	})
+	t.Run("public_governance_down_preserves_audit_history", func(t *testing.T) {
+		// Exercise the composed public entry point on original history through
+		// 039, before the later metadata bridge existed. Original 027 and 033
+		// provide 034's permission prerequisites; no synthetic seed or ledger
+		// deletion is needed to construct this retained historical boundary.
+		governance := f.database(t, ctx, "account", "account_service")
+		var through39, after39 []migrations.Migration
+		for _, migration := range loaded {
+			if migration.Version > governancePermissionsVersion {
+				continue
+			}
+			through39 = append(through39, migration)
+			if migration.Version != governancePermissionsVersion {
+				after39 = append(after39, migration)
+			}
+		}
+		// This is historical provisioning, not current public Account Up:
+		// today's full-delivery guard correctly requires the later permanent
+		// closure acknowledgement together with 028. The generic engine applies
+		// only the original 1..39 SQL in Load's ascending order and writes its
+		// ledger. The public Down below still receives the complete current
+		// package and uses its normal latest-applied-version selection.
+		if err := migrations.Up(ctx, governance, through39); err != nil {
+			t.Fatal("ORIGINAL_GOVERNANCE_HISTORY_UP", err)
+		}
+		migrations.Unlock(ctx, governance)
+		if _, err := migrations.VerifyApplied(ctx, governance, through39); err != nil {
+			t.Fatal("ORIGINAL_GOVERNANCE_HISTORY_VERIFY", err)
+		}
+		var has38, has39 bool
+		if err := governance.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=38),EXISTS(SELECT 1 FROM schema_migrations WHERE version=39)`).Scan(&has38, &has39); err != nil || !has38 || !has39 {
+			t.Fatal("ORIGINAL_GOVERNANCE_BOUNDARY_ABSENT", err)
+		}
+		auditHistory := func() string {
+			t.Helper()
+			var result string
+			if err := governance.QueryRow(ctx, `SELECT jsonb_build_object(
+'ledger_except_39',(SELECT jsonb_agg(to_jsonb(m) ORDER BY version) FROM schema_migrations m WHERE version<>39),
+'roles',(SELECT jsonb_agg(to_jsonb(r) ORDER BY code) FROM roles r),
+'audit_permissions',(SELECT jsonb_agg(to_jsonb(p) ORDER BY code) FROM permissions p WHERE code LIKE 'platform.audit.%'),
+'audit_role_permissions',(SELECT jsonb_agg(to_jsonb(r) ORDER BY role_code,permission_code) FROM role_permissions r WHERE permission_code LIKE 'platform.audit.%'),
+'assignments',(SELECT jsonb_agg(to_jsonb(r) ORDER BY id) FROM role_assignments r),
+'jobs',(SELECT jsonb_agg(to_jsonb(j) ORDER BY id) FROM audit_export_jobs j),
+'events',(SELECT jsonb_agg(to_jsonb(e) ORDER BY id) FROM audit_export_events e),
+'logs',(SELECT jsonb_agg(to_jsonb(a) ORDER BY id) FROM audit_logs a),
+'audit_triggers',(SELECT jsonb_agg(jsonb_build_array(c.relname,t.tgname,t.tgtype,t.tgenabled,pg_get_triggerdef(t.oid)) ORDER BY c.relname,t.tgname)
+ FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+ WHERE n.nspname='public' AND c.relname IN ('audit_export_events','audit_logs') AND NOT t.tgisinternal))::text`).Scan(&result); err != nil {
+				t.Fatal("GOVERNANCE_AUDIT_HISTORY_SNAPSHOT", err)
+			}
+			return result
+		}
+		before := auditHistory()
+		// Original 039 Down contains DISTINCT over a void-returning function.
+		// Only the existing identity-checked ApplySQL hook makes it executable;
+		// calling a helper directly would miss a dropped public hook on merge.
+		if err := DownOne(ctx, governance, loaded); err != nil {
+			t.Fatal("COMPOSED_PUBLIC_GOVERNANCE_DOWN", err)
+		}
+		migrations.Unlock(ctx, governance)
+		if _, err := migrations.VerifyApplied(ctx, governance, after39); err != nil {
+			t.Fatal("COMPOSED_PUBLIC_GOVERNANCE_DOWN_VERIFY", err)
+		}
+		if err := governance.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=38),EXISTS(SELECT 1 FROM schema_migrations WHERE version=39)`).Scan(&has38, &has39); err != nil || !has38 || has39 {
+			t.Fatal("COMPOSED_PUBLIC_GOVERNANCE_DOWN_LEDGER", err)
+		}
+		if after := auditHistory(); after != before {
+			t.Fatal("COMPOSED_GOVERNANCE_DOWN_CHANGED_AUDIT_HISTORY")
+		}
+	})
 }
 
 // These synthetic migration facts test the generic transaction infrastructure;

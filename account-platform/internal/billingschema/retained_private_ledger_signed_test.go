@@ -2,6 +2,7 @@ package billingschema
 
 import (
 	"context"
+	"errors"
 	billing "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/google/uuid"
@@ -24,13 +25,15 @@ func TestPrivateLedgerSignedCorrection(t *testing.T) {
 	if err != nil {
 		t.Fatal("connect isolated admin")
 	}
-	var dd, user string
-	var port int
+	// The explicit test URL selects an isolated cluster. Retain the exclusive
+	// actor guard without pinning its owner, port or data directory to one host.
 	var actors int
-	err = admin.QueryRow(ctx, `SELECT current_setting('data_directory'),session_user,current_setting('port')::int,(SELECT count(*) FROM pg_roles WHERE rolname !~ '^pg_' AND rolname<>'pinvou_wave_test')`).Scan(&dd, &user, &port, &actors)
+	var isolatedOwner bool
+	err = admin.QueryRow(ctx, `SELECT current_user=session_user AND (SELECT rolsuper FROM pg_roles WHERE rolname=session_user),
+ (SELECT count(*) FROM pg_roles WHERE rolname !~ '^pg_' AND rolname<>session_user)`).Scan(&isolatedOwner, &actors)
 	_ = admin.Close(ctx)
-	if err != nil || port != 55504 || user != "pinvou_wave_test" || actors != 0 || strings.ReplaceAll(dd, "\\", "/") != "D:/Projects/pinvou3-account-functional/.cache/parallel-runtimes/f04/data" {
-		t.Fatal("exclusive runtime owner/port/datadir/actor guard")
+	if err != nil || !isolatedOwner || actors != 0 {
+		t.Fatal("explicit isolated owner and exclusive actor guard")
 	}
 	f := newStageFixture(t, ctx, raw)
 	c := f.database(t, ctx, "billing", "billing_schema_owner")
@@ -56,6 +59,13 @@ func TestPrivateLedgerSignedCorrection(t *testing.T) {
 		t.Fatal("actual non-super runtime role")
 	}
 	repo := billing.NewPostgresRepositoryWithPool(pool)
+	var activationState string
+	var activationVersion, policyVersion, schemaVersion int64
+	if err := pool.QueryRow(ctx, `SELECT state,version,policy_version,snapshot_schema_version FROM billing_approval_command_activations WHERE command_type='LEDGER_REPAIR'`).Scan(&activationState, &activationVersion, &policyVersion, &schemaVersion); err != nil || activationState != "INACTIVE" || activationVersion != 1 || policyVersion != 1 || schemaVersion != 1 {
+		t.Fatal("original public INACTIVE v1/s1/version1 activation", err)
+	}
+	activated := false
+
 	var adjustment, revenue, clear, recv, payment, refund uuid.UUID
 	for code, id := range map[string]*uuid.UUID{"platform:adjustment": &adjustment, "platform:usage-revenue": &revenue, "platform:chargeback-clearing": &clear, "platform:receivables": &recv, "platform:payment-clearing": &payment, "platform:refund-clearing": &refund} {
 		if err := pool.QueryRow(ctx, `SELECT id FROM ledger_accounts WHERE code=$1 AND wallet_id IS NULL`, code).Scan(id); err != nil {
@@ -103,11 +113,11 @@ func TestPrivateLedgerSignedCorrection(t *testing.T) {
 				t.Fatal(err)
 			}
 			command := billing.LedgerRepairCommandInput{TargetJournalEntryID: jid, TargetPostingID: pid, WrongLedgerAccountID: tc.wrong, CorrectLedgerAccountID: tc.right, AmountMicrocredits: 30}
-			plan, err := repo.LedgerRepairPlanForCommand(ctx, command, 1, 1, 1)
+			plan, err := repo.LedgerRepairPlanForCommand(ctx, command, policyVersion, schemaVersion, activationVersion)
 			if err != nil {
 				t.Fatal("actual owner plan", err)
 			}
-			exec := billing.LedgerRepairExecutionInput{ApprovalRequestID: uuid.New(), AuthorizationEventID: uuid.New(), ApprovalEpoch: 1, ExecutionKey: "private-ledger-" + jid.String(), PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: 1, Command: command, Frozen: billing.LedgerRepairFrozenFacts{TargetJournalEntryID: jid, TargetPostingID: pid, WrongLedgerAccountID: tc.wrong, CorrectLedgerAccountID: tc.right, EntryType: tc.kind, AmountMicrocredits: 30, PostingSetDigest: plan.PostingSetDigest, FactsDigest: plan.FactsDigest}}
+			exec := billing.LedgerRepairExecutionInput{ApprovalRequestID: uuid.New(), AuthorizationEventID: uuid.New(), ApprovalEpoch: 1, ExecutionKey: "private-ledger-" + jid.String(), PolicyVersion: policyVersion, SchemaVersion: schemaVersion, ActivationVersion: activationVersion, Command: command, Frozen: billing.LedgerRepairFrozenFacts{TargetJournalEntryID: jid, TargetPostingID: pid, WrongLedgerAccountID: tc.wrong, CorrectLedgerAccountID: tc.right, EntryType: tc.kind, AmountMicrocredits: 30, PostingSetDigest: plan.PostingSetDigest, FactsDigest: plan.FactsDigest}}
 			counts := func() string {
 				return stageValue(t, ctx, c, `SELECT jsonb_build_array((SELECT count(*) FROM ledger_repair_cases),(SELECT count(*) FROM journal_entries),(SELECT count(*) FROM ledger_postings),(SELECT COALESCE(sum(posted_microcredits),0) FROM wallets),(SELECT COALESCE(sum(reserved_microcredits),0) FROM wallets))::text`)
 			}
@@ -121,6 +131,47 @@ func TestPrivateLedgerSignedCorrection(t *testing.T) {
 				return strings.Join(facts, "\n")
 			}
 			originalFinancialFacts := financialFacts()
+			if !activated {
+				t.Run("default-inactive-valid-command-no-financial-effect", func(t *testing.T) {
+					before := counts()
+					if _, err := repo.ApplyLedgerRepair(ctx, exec); !errors.Is(err, billing.ErrApprovalSnapshotMismatch) {
+						t.Fatal("fresh valid INACTIVE execution did not fail closed", err)
+					}
+					if counts() != before || financialFacts() != originalFinancialFacts {
+						t.Fatal("INACTIVE execution mutated financial facts")
+					}
+				})
+				// The isolated migrator's existing owner membership performs the
+				// controlled transition. Runtime gains no UPDATE or owner grant.
+				operator, err := c.Begin(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer operator.Rollback(context.Background())
+				if _, err := operator.Exec(ctx, `SET LOCAL ROLE billing_schema_owner`); err != nil {
+					t.Fatal(err)
+				}
+				var observedVersion int64
+				if err := operator.QueryRow(ctx, `UPDATE public.billing_approval_command_activations SET state='ACTIVE',version=version+1 WHERE command_type='LEDGER_REPAIR' AND policy_version=$1 AND snapshot_schema_version=$2 AND state='INACTIVE' AND version=$3 RETURNING version`, policyVersion, schemaVersion, activationVersion).Scan(&observedVersion); err != nil || observedVersion != activationVersion+1 {
+					t.Fatal("controlled original activation transition", err)
+				}
+				if err := operator.Commit(ctx); err != nil {
+					t.Fatal(err)
+				}
+				var restoredRole, originalSession string
+				if err := c.QueryRow(ctx, `SELECT current_user,session_user`).Scan(&restoredRole, &originalSession); err != nil || restoredRole != "billing_service" || originalSession != "billing_migrator" {
+					t.Fatal("operator transition changed deployment role", err)
+				}
+				activationVersion = observedVersion
+				activated = true
+				plan, err = repo.LedgerRepairPlanForCommand(ctx, command, policyVersion, schemaVersion, activationVersion)
+				if err != nil {
+					t.Fatal("actual activated owner plan", err)
+				}
+				exec.ActivationVersion = activationVersion
+				exec.Frozen.PostingSetDigest, exec.Frozen.FactsDigest = plan.PostingSetDigest, plan.FactsDigest
+			}
+
 			t.Run("noncanonical-platform-destination-refused", func(t *testing.T) {
 				rogue := uuid.New()
 				if _, err := c.Exec(ctx, `INSERT INTO ledger_accounts(id,code,account_type,created_at) SELECT $1,$2,account_type,now() FROM ledger_accounts WHERE id=$3`, rogue, "noncanonical:"+rogue.String(), tc.right); err != nil {
@@ -217,7 +268,7 @@ func TestPrivateLedgerSignedCorrection(t *testing.T) {
 		}
 		before := stageValue(t, ctx, c, `SELECT count(*)::text FROM ledger_repair_cases`)
 		command := billing.LedgerRepairCommandInput{TargetJournalEntryID: journal, TargetPostingID: posting, WrongLedgerAccountID: rogue, CorrectLedgerAccountID: revenue, AmountMicrocredits: 30}
-		if _, err := repo.LedgerRepairPlanForCommand(ctx, command, 1, 1, 1); err == nil {
+		if _, err := repo.LedgerRepairPlanForCommand(ctx, command, policyVersion, schemaVersion, activationVersion); err == nil {
 			t.Fatal("noncanonical platform source accepted")
 		}
 		if stageValue(t, ctx, c, `SELECT count(*)::text FROM ledger_repair_cases`) != before {

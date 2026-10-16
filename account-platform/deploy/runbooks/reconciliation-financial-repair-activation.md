@@ -22,7 +22,8 @@
 2. 用户/授权人已就该命令的生产激活给出明确授权（书面记录存档，含时间与范围）。首版范围只含 **`PROVIDER_PAID_INTERNAL_MISSING` 差异的零账务效果结案**；任何需要账务效果的解释（补记入账、新账户类型、人工指定归属）都必须新增账户类型、policy/schema 版本与独立设计。
 3. 专属 durable `billing-reconciliation-financial-repair-executor-p1-v1` 的受信 cutover 资源绑定已就绪。当前 Billing 启动从 `approvalconsumer.BillingCommands()` 的已安装目录注册本命令，按通用 `BILLING_APPROVAL_CONSUMER_RESOURCES_UNAVAILABLE` 资源守卫失败关闭；不使用历史开发开关 `BILLING_RECONCILIATION_FINANCIAL_REPAIR_CONSUMER_ENABLED`，该环境变量不能作为激活或执行依据。
 4. 已验证 Account 侧四入口读取实时 Billing activation：行仍为 `INACTIVE` 时 create/update/submit/APPROVE 全部失败关闭（`ErrBillingGovernanceInactive`）。
-5. 已完成一致性备份（含 Billing 库）并记录备份 ID、完成时间与 SHA-256；激活窗口内停止写入新审批。
+5. 新命令加入全局策略集合后，先完成前序[退款异常修复激活手册](refund-exception-repair-activation.md) §1 第5项的 Token 治理前置：按现有 SAFE、quiescence、冻结资源 readback 与签名发行流程，用当前 `PolicySetDigest` 重新签发并核验治理快照；不得沿用旧集合的 ACTIVE 摘要与收据，启动或 readiness 不能代替此流程。
+6. 已完成一致性备份（含 Billing 库）并记录备份 ID、完成时间与 SHA-256；激活窗口内停止写入新审批。
 
 ## 2. 只读核验（记录输出作为证据）
 

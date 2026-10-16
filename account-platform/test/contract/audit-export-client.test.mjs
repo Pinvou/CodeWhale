@@ -27,3 +27,35 @@ test('download ticket response must bind exact export and opaque token',async()=
 test('three original locales disclose one-time ticket recovery and no key logging',()=>{
  for(const locale of ['zh','en','ja'])for(const key of ['ticketIssueUnknown','ticketUnavailable','retrySameExport','saveKey','includePII'])assert.ok(auditWorkspaceCopy[locale].audit[key]);
 });
+
+test('OpenAPI service and BFF server bases match all six actual client transports', async () => {
+ const {readFile}=await import('node:fs/promises');
+ const contract=JSON.parse(await readFile(new URL('../../contracts/openapi/audit-export.json',import.meta.url),'utf8'));
+ const original=globalThis.fetch;const calls=[];const client=new AdminPlatformClient();client.csrfToken='controlled-csrf';
+ const token='t'.repeat(43);
+ try {
+  globalThis.fetch=async(url,options={})=>{
+   calls.push({url:String(url),options});
+   if(String(url).endsWith('/download'))return new Response('controlled-envelope',{status:200,headers:{'Content-Type':'application/vnd.pinvou.audit-envelope+json','Content-Length':'19'}});
+   if(String(url).endsWith('/download-tickets'))return new Response(JSON.stringify({export_id:id,download_token:token,expires_at:'2099-01-01T00:00:00Z',download_url:'https://untrusted.invalid/do-not-follow'}),{status:201});
+   if(String(url).includes('/audit-exports'))return new Response(JSON.stringify({export_id:id,status:'PENDING',decryption_key:'controlled-key'}),{status:options.method==='POST'?202:200});
+   return new Response(JSON.stringify({items:[],audit_id:id}),{status:200});
+  };
+  await client.audits();await client.audit(id);
+  await client.createAuditExport({},'controlled audit review',false,'controlled-key');
+  await client.auditExport(id);const ticket=await client.issueAuditExportDownloadTicket(id);
+  await client.downloadAuditExport(id,ticket.download_token);
+  const paths=['/admin/v1/audit-logs','/admin/v1/audit-logs/{audit_id}','/admin/v1/audit-exports','/admin/v1/audit-exports/{export_id}','/admin/v1/audit-exports/{export_id}/download-tickets','/admin/v1/audit-exports/{export_id}/download'];
+  assert.deepEqual(Object.keys(contract.paths),paths);
+  assert.deepEqual(contract.servers.map(server=>server.url),['/','/api/admin/account']);
+  for(let index=0;index<paths.length;index++){
+   const concrete=paths[index].replace(/\{(?:audit_id|export_id)\}/g,id);
+   assert.equal(contract.servers[0].url.replace(/\/$/,'')+concrete,concrete);
+   assert.equal(contract.servers[1].url+concrete,calls[index].url);
+   assert.equal(calls[index].options.credentials,'same-origin');assert.equal(calls[index].options.cache,'no-store');
+  }
+  assert.equal(calls.length,6);assert.equal(calls[5].options.headers['X-Pinvou-Download-Token'],token);
+  assert.equal(calls[5].options.redirect,'error');assert.equal(calls[2].options.headers['X-CSRF-Token'],'controlled-csrf');
+  assert.equal(contract.components.schemas.AuditExportDownloadTicket.properties.download_url.deprecated,true);
+ }finally{globalThis.fetch=original}
+});

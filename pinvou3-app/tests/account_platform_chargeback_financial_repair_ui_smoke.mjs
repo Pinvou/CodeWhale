@@ -4,9 +4,14 @@ import { createServer } from 'vite';
 import react from '@vitejs/plugin-react';
 import * as puppeteer from 'puppeteer-core';
 const root = import.meta.dirname + '/..';
+const browserPath = [process.env.CHROME, process.env.EDGE_PATH, process.env.CHROMIUM,
+  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files/Google/Chrome/Application/chrome.exe',
+  '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'].filter(Boolean).find(value => fs.existsSync(value));
+assert.ok(browserPath, 'A browser executable is required; set CHROME or EDGE_PATH');
 const server = await createServer({ root, configFile: false, plugins: [react()], cacheDir: root + '/node_modules/.vite-chargeback-repair-host', server: { host: '127.0.0.1', port: 0, fs: { allow: [root, fs.realpathSync(root + '/node_modules')], deny: ['**/.env*', '**/*.{pem,crt,key}'] } } });
 await server.listen();
-const browser = await puppeteer.launch({ executablePath: process.env.EDGE_PATH || 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', headless: true, args: ['--disable-gpu'] });
+const browser = await puppeteer.launch({ executablePath: browserPath, headless: true, args: ['--disable-gpu'] });
 const results = []; let pass = 0, fail = 0;
 async function run(name, query, action) {
   const page = await browser.newPage(); page.setDefaultTimeout(5000); const errors = []; page.on('pageerror', error => errors.push(error.message));
@@ -131,6 +136,49 @@ try {
   await run('Retired identity ignores late ChargebackRepair precheck', 'late=1', async page => {
     await openForm(page); await page.waitForFunction(() => window.f14.releasePrecheck); await page.evaluate(() => { const release = window.f14.releasePrecheck; window.f14.replaceIdentity(); setTimeout(release, 50); });
     await page.waitForFunction(() => window.f14.calls.filter(call => call.url === '/api/account/v1/account/bootstrap').length === 2);
+    assert.equal(await page.$('.adm-financial-repair-draft'), null);
+  });
+  for (const language of ['zh', 'en', 'ja']) {
+    await run(`ChargebackRepair recent authentication retains local intent ${language}`, `language=${language}&recent-auth=1`, async page => {
+      await openForm(page); await create(page); await page.waitForSelector('.adm-chargeback-repair-reauthentication button');
+      assert.equal(await page.$eval('.adm-chargeback-repair-reauthentication p', node => node.textContent), await page.evaluate(() => window.f14.ledgerRepairCopy[window.f14.language].writeOffRecentAuthenticationRequired));
+      const first = await page.evaluate(() => window.f14.calls.find(call => call.method === 'POST' && call.url === '/api/admin/approvals/requests').body);
+      assert.equal(await page.evaluate(() => window.f14.created), false);
+      await page.click('.adm-chargeback-repair-reauthentication button');
+      assert.equal(await page.evaluate(() => window.f14.reauthentication), '/admin.html');
+      assert.equal(await page.$eval('.adm-financial-repair-draft input', input => input.value), 'controlled-chargeback-repair');
+      await page.evaluate(() => { window.f14.authenticatedAgain = true; });
+      // Explicit retry only: the controlled CTA does not navigate or submit.
+      assert.equal(await page.evaluate(() => window.f14.calls.filter(call => call.method === 'POST' && call.url === '/api/admin/approvals/requests').length), 1);
+      await page.click('.adm-financial-repair-draft button'); await page.waitForFunction(() => window.f14.status === 'SUBMITTED');
+      const bodies = await page.evaluate(() => window.f14.calls.filter(call => call.method === 'POST' && call.url === '/api/admin/approvals/requests').map(call => call.body));
+      assert.deepEqual(bodies, [first, first]); assert.equal(await page.evaluate(() => window.f14.prechecks), 1);
+    });
+    await run(`ChargebackRepair precheck recent authentication fails before draft ${language}`, `language=${language}&${language === 'ja' ? 'precheck-401' : 'precheck-auth'}=1`, async page => {
+      await openForm(page); await page.waitForSelector('.adm-chargeback-repair-reauthentication button');
+      assert.equal(await page.$('.adm-financial-repair-draft'), null);
+      assert.equal(await page.evaluate(() => window.f14.calls.some(call => call.method === 'POST' && call.url === '/api/admin/approvals/requests')), false);
+      await page.click('.adm-chargeback-repair-reauthentication button'); assert.equal(await page.evaluate(() => window.f14.reauthentication), '/admin.html');
+    });
+  }
+  await run('ChargebackRepair unknown recent-auth denial retains original frozen facts and explicit replay', 'lost-recent=1', async page => {
+    await openForm(page); await create(page); await page.waitForFunction(() => document.querySelector('.adm-financial-repair-draft button')?.textContent === window.f14.financeCopy.zh.retry);
+    await page.click('.adm-financial-repair-draft button'); await page.waitForSelector('.adm-chargeback-repair-reauthentication button');
+    assert.equal(await page.$eval('.adm-financial-repair-draft input', input => input.disabled), true);
+    assert.equal(await page.$eval('.adm-financial-repair-draft textarea', input => input.disabled), true);
+    await page.evaluate(() => { window.f14.authenticatedAgain = true; });
+    await page.click('.adm-financial-repair-draft button'); await page.waitForFunction(() => window.f14.status === 'SUBMITTED');
+    const bodies = await page.evaluate(() => window.f14.calls.filter(call => call.method === 'PUT' || call.url === '/api/admin/approvals/requests' && call.method === 'POST').map(call => JSON.parse(call.body)));
+    assert.equal(bodies.length, 3);
+    const original = bodies.map(({ expected_version, ...body }) => body);
+    assert.equal(new Set(original.map(body => JSON.stringify(body))).size, 1);
+    assert.equal(await page.evaluate(() => window.f14.prechecks), 1);
+  });
+  await run('Retired chargeback identity ignores late authentication failure', 'late-auth=1', async page => {
+    await openForm(page); await page.waitForFunction(() => window.f14.releasePrecheck);
+    await page.evaluate(() => { const release = window.f14.releasePrecheck; window.f14.replaceIdentity(); setTimeout(release, 50); });
+    await page.waitForFunction(() => window.f14.lateAuthenticationReleased && window.f14.calls.filter(call => call.url === '/api/account/v1/account/bootstrap').length === 2);
+    assert.equal(await page.$('.adm-chargeback-repair-reauthentication'), null);
     assert.equal(await page.$('.adm-financial-repair-draft'), null);
   });
 } finally { await browser.close(); await server.close(); }

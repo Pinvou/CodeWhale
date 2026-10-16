@@ -40,3 +40,25 @@ func TestF17AuditRouterPermissionBeforeOwner(t *testing.T) {
 		})
 	}
 }
+
+// The existing nil-service route contract is retained: export is unavailable,
+// while startup can still assemble the Account router without an export key.
+func TestAuditExportDisabledRoutesDoNotReachOwner(t *testing.T) {
+	for _, path := range []string{"/admin/v1/audit-exports", "/admin/v1/audit-exports/00000000-0000-4000-8000-000000000001", "/admin/v1/audit-exports/00000000-0000-4000-8000-000000000001/download-tickets", "/admin/v1/audit-exports/00000000-0000-4000-8000-000000000001/download"} {
+		for _, method := range []string{"GET", "POST"} {
+			t.Run(method+path, func(t *testing.T) {
+				repository := &closureAssemblyRepository{}
+				handler := NewService(repository, nil).WithAuditExports(nil).Handler(func(context.Context, string) (identity.Principal, error) {
+					return identity.Principal{Issuer: "https://owned.invalid", Subject: "audit-actor", SessionID: "audit-session"}, nil
+				})
+				request := httptest.NewRequest(method, path, strings.NewReader(`{}`))
+				request.Header.Set("Authorization", "Bearer controlled")
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, request)
+				if response.Code != 404 || repository.calls != 0 {
+					t.Fatal("disabled export dispatched or changed the existing unavailable-route contract")
+				}
+			})
+		}
+	}
+}

@@ -1,4 +1,4 @@
-"""Real Git object/ancestry checks against an isolated controlled bare remote.
+"""Strict maintenance identity and fixed-tag checks using an isolated real Git remote.
 
 Only fixture constants point to a file transport. The shipped verifier retains
 its exact HTTPS URL; no global URL rewrite or pre-existing object store is used.
@@ -18,7 +18,7 @@ BASELINE = "61cb769be5b33abc64f64da4272f5b39a8b6c1fd"
 
 
 @unittest.skipUnless(BASH and GIT, "real Git and bash required")
-class PublicSnapshotHistoryTests(unittest.TestCase):
+class PublicStrictMaintenanceTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -52,7 +52,7 @@ class PublicSnapshotHistoryTests(unittest.TestCase):
         self.scratch = self.root / "scratch"
         self.scratch.mkdir()
         self.env["TMPDIR"] = self.scratch.as_posix()
-        self.configure(self.pin)
+        self.configure(self.advanced)
 
     def git(self, cwd, *args):
         result = subprocess.run([GIT, "-C", str(cwd), *args], env=self.env,
@@ -88,11 +88,22 @@ class PublicSnapshotHistoryTests(unittest.TestCase):
         self.assertEqual(list(self.scratch.iterdir()), [], "temporary bare repository is cleaned on success and failure")
         return result
 
-    def test_snapshot_passes_real_advanced_maintenance_but_default_release_rejects(self):
-        result = self.run_verifier("--registered-snapshot")
+    def test_default_requires_exact_maintenance_head(self):
+        result = self.run_verifier()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("冻结审核校验通过", result.stdout)
-        self.assertNotEqual(self.run_verifier().returncode, 0)
+        self.assertIn("基线过渡期校验通过", result.stdout)
+        self.configure(self.pin)
+        rejected = self.run_verifier()
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn(self.advanced, rejected.stderr)
+        self.assertIn(self.pin, rejected.stderr)
+
+    def test_registered_snapshot_argument_is_unsupported_before_remote_io(self):
+        # Invalid configuration must not hide removed-mode argument refusal.
+        (self.parent / ".gitmodules").write_text("invalid fixture config\n", encoding="utf-8")
+        result = self.run_verifier("--registered-snapshot")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unknown argument", result.stderr)
 
     def test_remote_children_cannot_inherit_tls_disable_or_askpass(self):
         wrapper = self.root / "transport-bin"
@@ -105,46 +116,47 @@ class PublicSnapshotHistoryTests(unittest.TestCase):
             '  [[ -z "${GIT_SSL_NO_VERIFY:-}" && -z "${GIT_ASKPASS:-}" && -z "${SSH_ASKPASS:-}" ]] || exit 128\n'
             ' fi\ndone\nexec "$PINVOU_REAL_GIT" "$@"\n', encoding="utf-8")
         script.chmod(0o755)
-        result = self.run_verifier("--registered-snapshot", ambient={
+        result = self.run_verifier( ambient={
             "PINVOU_WRAPPER_BIN": wrapper.as_posix(), "PINVOU_REAL_GIT": Path(GIT).as_posix(),
             "GIT_SSL_NO_VERIFY": "1", "GIT_ASKPASS": "invalid-helper", "SSH_ASKPASS": "invalid-helper",
         })
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_public_candidate_is_rejected_even_when_registered(self):
+    def test_public_candidate_cannot_override_exact_maintenance_identity(self):
         self.configure(self.candidate)
-        self.assertNotEqual(self.run_verifier("--registered-snapshot").returncode, 0)
+        self.assertNotEqual(self.run_verifier().returncode, 0)
 
-    def test_unregistered_index_pin_is_rejected(self):
+    def test_registered_pin_cannot_override_strict_maintenance_identity(self):
         self.configure(self.pin, registered=self.advanced)
-        self.assertNotEqual(self.run_verifier("--registered-snapshot").returncode, 0)
+        self.assertNotEqual(self.run_verifier().returncode, 0)
 
-    def test_registered_noncommit_is_rejected(self):
+    def test_noncommit_index_pin_is_rejected_by_strict_identity(self):
         tree = self.git(self.source, "rev-parse", f"{self.pin}^{{tree}}")
         self.configure(tree)
-        self.assertNotEqual(self.run_verifier("--registered-snapshot").returncode, 0)
+        self.assertNotEqual(self.run_verifier().returncode, 0)
 
     def test_moved_tag_is_rejected(self):
         self.git(self.remote, "update-ref", "refs/tags/pinvou-v0.9.12-r3", self.pin)
-        self.assertNotEqual(self.run_verifier("--registered-snapshot").returncode, 0)
+        self.assertNotEqual(self.run_verifier().returncode, 0)
 
     def test_annotated_tag_peels_to_fixed_commit(self):
         self.git(self.source, "tag", "-f", "-a", "pinvou-v0.9.12-r3", self.base, "-m", "fixed baseline")
         self.git(self.source, "push", "--quiet", "--force", str(self.remote), "refs/tags/pinvou-v0.9.12-r3")
-        result = self.run_verifier("--registered-snapshot")
+        result = self.run_verifier()
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_pin_outside_fixed_tag_history_is_rejected(self):
+    def test_unrelated_public_index_pin_is_rejected_by_maintenance_identity(self):
         self.git(self.source, "checkout", "--quiet", "--orphan", "unrelated")
         unrelated = self.commit("unrelated root")
         self.git(self.source, "push", "--quiet", str(self.remote), "HEAD:refs/heads/unrelated")
-        self.git(self.remote, "update-ref", "refs/heads/pinvou3-clean", unrelated)
+        # Keep maintenance at the real advanced commit; strict identity rejects
+        # this unrelated public object before any old ancestry allowance.
         self.configure(unrelated)
-        self.assertNotEqual(self.run_verifier("--registered-snapshot").returncode, 0)
+        self.assertNotEqual(self.run_verifier().returncode, 0)
 
-    def test_local_rewrites_and_ambient_credentials_objects_cannot_bypass_public_fetch(self):
+    def test_local_rewrites_and_ambient_credentials_objects_cannot_bypass_remote_refs(self):
         # A caller-local rewrite would make the valid remote disappear if it
-        # leaked into ls-remote. Both remote calls must use the fresh bare repo.
+        # leaked into ls-remote. The remote query must use the fresh bare repo.
         self.git(self.parent, "config", 'url.file:///absent-controlled-fixture/.insteadOf', self.remote_url)
         ambient = {
             "GIT_ASKPASS": "invalid-credential-helper", "SSH_ASKPASS": "invalid-credential-helper",
@@ -156,19 +168,28 @@ class PublicSnapshotHistoryTests(unittest.TestCase):
             "GIT_DIR": "/absent-controlled-repository",
             "GIT_INDEX_FILE": "/absent-controlled-index",
         }
-        result = self.run_verifier("--registered-snapshot", ambient=ambient)
+        result = self.run_verifier( ambient=ambient)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_missing_remote_cannot_use_local_objects(self):
         self.git(self.remote, "update-ref", "-d", "refs/heads/pinvou3-clean")
-        self.assertNotEqual(self.run_verifier("--registered-snapshot").returncode, 0)
+        self.assertNotEqual(self.run_verifier().returncode, 0)
+
+    def test_unavailable_remote_fails_closed_and_cleans_scratch(self):
+        self.remote_url = (self.root / "absent-public.git").as_uri()
+        (self.parent / ".gitmodules").write_text(
+            '[submodule "CodeWhale"]\n path = CodeWhale\n url = ' + self.remote_url + '\n', encoding="utf-8")
+        self.configure(self.advanced)
+        result = self.run_verifier()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("公开 CodeWhale refs", result.stderr)
 
     def test_closed_window_keeps_three_way_equality(self):
         self.configure(self.pin, closed=True)
         self.git(self.remote, "update-ref", "refs/tags/pinvou-v0.9.12-r3", self.pin)
-        self.assertNotEqual(self.run_verifier("--registered-snapshot").returncode, 0)
+        self.assertNotEqual(self.run_verifier().returncode, 0)
         self.git(self.remote, "update-ref", "refs/heads/pinvou3-clean", self.pin)
-        result = self.run_verifier("--registered-snapshot")
+        result = self.run_verifier()
         self.assertEqual(result.returncode, 0, result.stderr)
 
 

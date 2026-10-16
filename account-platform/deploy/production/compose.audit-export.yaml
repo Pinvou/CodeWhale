@@ -1,6 +1,7 @@
 # Apply with the existing personal and applicable phase overlays.
+name: pinvou-personal
 services:
-  migrate-account:
+  account-migrate:
     image: ${MIGRATE_IMAGE:?set same-source F17 migration image including original Account032}
   account-service:
     image: ${ACCOUNT_SERVICE_IMAGE:?set same-source F17 Account image with audit worker}

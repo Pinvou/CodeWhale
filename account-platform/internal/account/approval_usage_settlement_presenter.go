@@ -43,7 +43,7 @@ func approvalUsageSettlementDetail(target approvalUsageSettlementRepairSummary, 
 			AllocationsDigest    string    `json:"allocations_digest"`
 		} `json:"financial_snapshot"`
 	}
-	if json.Unmarshal(encoded, &proof) != nil || proof.Normalized.HoldID != target.HoldID || proof.Normalized.UsageRequestID == uuid.Nil || proof.Normalized.LossReviewID == uuid.Nil || proof.Normalized.EvidenceKind != "LOSS_REVIEW" || proof.Normalized.ReasonCode != "MISSING_USAGE_SETTLEMENT" || proof.Critical.HoldUpdatedAt == "" || proof.Critical.LossReviewUpdatedAt == "" || !approvalPaginationHexDigest(proof.Critical.FactsDigest) || !approvalPaginationHexDigest(proof.Financial.AllocationsDigest) || proof.Financial.WalletID == uuid.Nil {
+	if target.HoldID == uuid.Nil || json.Unmarshal(encoded, &proof) != nil || proof.Normalized.HoldID != target.HoldID || proof.Normalized.UsageRequestID == uuid.Nil || proof.Normalized.LossReviewID == uuid.Nil || proof.Normalized.EvidenceKind != "LOSS_REVIEW" || proof.Normalized.ReasonCode != "MISSING_USAGE_SETTLEMENT" || proof.Critical.HoldUpdatedAt == "" || proof.Critical.LossReviewUpdatedAt == "" || !approvalPaginationHexDigest(proof.Critical.FactsDigest) || !approvalPaginationHexDigest(proof.Financial.AllocationsDigest) || proof.Financial.WalletID == uuid.Nil {
 		return approvalUsageSettlementRepairSummary{}, ErrApprovalDetailPresentationUnavailable
 	}
 	target.UsageRequestID = proof.Normalized.UsageRequestID

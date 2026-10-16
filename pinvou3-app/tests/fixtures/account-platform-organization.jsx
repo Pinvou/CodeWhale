@@ -1,4 +1,7 @@
-import React from 'react';
+import React, { useLayoutEffect, useEffect } from 'react';
+import '../../src/features/account-platform/account-platform.css';
+import { OrganizationActionForm } from '../../src/features/account-platform/OrganizationActionForm.jsx';
+import { OrganizationClient } from '../../src/features/account-platform/organization-client.js';
 import { createRoot } from 'react-dom/client';
 import { OrganizationWorkspace } from '../../src/features/account-platform/OrganizationWorkspace.jsx';
 import { OrganizationAdminWorkspace } from '../../src/features/account-platform/OrganizationAdminWorkspace.jsx';
@@ -9,19 +12,41 @@ import { organizationCopy } from '../../src/shared/i18n.js';
 const root = createRoot(document.querySelector('#root'));
 const org='11111111-1111-4111-8111-111111111111',user='22222222-2222-4222-8222-222222222222',other='33333333-3333-4333-8333-333333333333',unit='44444444-4444-4444-8444-444444444444';
 const client = new AccountPlatformBffClient(); client.csrfToken='PUBLIC_SYNTHETIC_CSRF';
+const alternateClient = new AccountPlatformBffClient(); alternateClient.csrfToken='PUBLIC_SYNTHETIC_CSRF';
 const adminClient = new AdminPlatformClient(); adminClient.csrfToken='PUBLIC_SYNTHETIC_CSRF';
 const control={authorizationVersion:1,modelPolicy:false,policy:{organization_id:org,version:0,mode:'ALLOW_ALL',model_ids:[],authorization_version:1},policyReceipts:new Map(),purchase:false,capabilityChannels:['ALIPAY'],productStatus:'AVAILABLE',testOnly:false,admin:false,org,user,other,unit,language:'en',readonly:false,unknown:false,delayed:false,context:'ORGANIZATION',contextVersion:1,calls:[],created:false};
 const json=(value,status=200)=>new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json'}});
 globalThis.fetch=async(url,options={})=>{
  const path=new URL(String(url),'http://fixture.invalid').pathname;const method=options.method||'GET';control.calls.push({path,method,body:options.body,key:options.headers?.['Idempotency-Key']});
+ if(method==='GET' && control.readError && path.endsWith(control.readError.path)) return json({code:'CONTROLLED_READ_FAILURE'},control.readError.status);
+ if(control.enumMode && path===`/api/account/v1/organizations/${org}/role-bindings`) {
+  if(method==='GET')return json({items:[{binding_id:unit,organization_id:org,user_id:user,role_code:'AUDITOR',unit_id:null,status:control.roleRevoked?'REVOKED':'SCHEDULED',starts_at:'2099-01-01T00:00:00.000Z'}]});
+  if(method==='POST'){const body=JSON.parse(options.body);return json({binding_id:unit,organization_id:org,user_id:body.user_id,role_code:body.role_code,unit_id:body.unit_id,status:'SCHEDULED',starts_at:body.starts_at},control.unknown?202:201);}
+ }
+ if(control.enumMode && method==='DELETE' && path===`/api/account/v1/organizations/${org}/role-bindings/${unit}`){control.roleRevoked=true;return json({binding_id:unit,organization_id:org,user_id:user,role_code:'AUDITOR',unit_id:null,status:'REVOKED'});}
+ if(control.enumMode && path===`/api/token/v1/organizations/${org}/quota-grants`)return json({items:[{grant_id:unit,organization_id:org,member_user_id:user,package_id:unit,component_id:other,status:'SUSPENDED',membership_version:1,allocation_version:1,original_microcredits:'100',available_microcredits:'100',reserved_microcredits:'0',used_microcredits:'0',expired_microcredits:'0',revoked_microcredits:'0'}]});
+ if(control.enumMode && path===`/api/account/v1/organizations/${org}/quota-members`)return json({items:[{user_id:user,version:1}]});
+ if(control.confirmHarness && /\/members\/[^/]+\/units$/.test(path) && method === 'PUT') {
+  const body = JSON.parse(options.body), target = path.split('/').at(-2);
+  const response = () => json({ organization_id: org, member: { membership_id: unit, user_id: target, version: body.expected_version + 1, status: 'ACTIVE', roles: ['MEMBER'], unit_ids: body.unit_ids }, unit_ids: body.unit_ids, membership_version: body.expected_version + 1, replayed: false }, control.harnessUnknown ? 202 : 200);
+  if(control.harnessDelayed) return new Promise(resolve => { control.releaseHarness = () => resolve(response()); });
+  return response();
+ }
+ if(control.confirmHarness && path.includes('/role-bindings/') && method === 'DELETE') {
+  const target = path.split('/').at(-1);
+  return json({ binding_id: target, organization_id: org, user_id: user, role_code: 'AUDITOR', unit_id: null, status: 'REVOKED' }, control.harnessUnknown ? 202 : 200);
+ }
  if(path==='/api/admin/account/admin/v1/organizations'){
   if(method==='GET')return json({items:[{organization_id:org,name:'Controlled Org',status:'ACTIVE',member_count:1},{organization_id:other,name:'Other Org',status:'DISABLED',member_count:0}],next_cursor:null});
   if(method==='POST'){const body=JSON.parse(options.body);if(body.name!=='Controlled New Org'||body.owner_user_id!==user)return json({code:'INVALID_REQUEST'},400);return json({organization_id:unit,name:body.name,status:'ACTIVE',version:1},control.unknown?202:201);}
  }
  if(path===`/api/admin/account/admin/v1/organizations/${org}/units`||path===`/api/admin/account/admin/v1/organizations/${other}/units`){const id=path.includes(other)?other:org;return json({items:[{unit_id:unit,organization_id:id,parent_id:null,name:'Controlled Unit',status:'ACTIVE',version:1}],structure_version:1});}
- if(path===`/api/admin/account/admin/v1/organizations/${org}/members`||path===`/api/admin/account/admin/v1/organizations/${other}/members`)return json({items:[],next_cursor:null});
+ if(path===`/api/admin/account/admin/v1/organizations/${org}/members`||path===`/api/admin/account/admin/v1/organizations/${other}/members`)return json({items:control.enumMode?[{membership_id:unit,user_id:user,version:1,status:path.includes(other)?'SUSPENDED':'ACTIVE',roles:['MEMBER'],unit_ids:[]}]:[],next_cursor:null});
  if(path==='/api/account/v1/me/organizations')return json({items:[{organization_id:org,name:'Controlled Org',status:'ACTIVE',version:1}]});
  if(path==='/api/account/v1/me/invitations')return json({items:[]});
+ if(path==='/api/account/v1/invitations/accept'){if(control.invitationError)return json({code:control.invitationError.code},control.invitationError.status);return json({organization_id:org,member:{membership_id:unit,user_id:user,version:1,status:'ACTIVE',roles:['MEMBER'],unit_ids:[]}});}
+ if(path===`/api/account/v1/organizations/${org}/members/${user}/roles`){if(method!=='PUT'||!options.headers?.['Idempotency-Key'])return json({code:'INVALID_REQUEST'},400);return json({membership_id:unit,user_id:user,version:2,status:'ACTIVE',roles:JSON.parse(options.body).roles,unit_ids:[]});}
+ if(path===`/api/account/v1/organizations/${org}/members`)return json({items:[{membership_id:unit,user_id:user,version:1,status:'ACTIVE',roles:control.enumMode?['OWNER','MEMBER','ORG_ADMIN','BILLING_ADMIN','AUDITOR','UNIT_ADMIN']:['MEMBER'],unit_ids:[]}]});
  if(path==='/api/account/v1/sessions/current/active-context'){
   const body=JSON.parse(options.body);if(body.expected_context_version!==control.contextVersion)return json({code:'CONFLICT'},409);
   control.context=body.context_type;control.contextVersion++;return json({context_type:control.context,organization_id:body.organization_id,context_version:control.contextVersion,permissions:[]});
@@ -38,7 +63,7 @@ globalThis.fetch=async(url,options={})=>{
  if(path===`/api/token/v1/organizations/${org}/recharge/products`)return json({items:[{product_id:'controlled-org-product',plan_name:'Controlled product',amount_fen:'100',channels:['ALIPAY'],availability_status:control.productStatus}]});
  if(path===`/api/token/v1/organizations/${org}/payment-capabilities`)return json({provider_id:'CONTROLLED',version:'v1',channels:control.capabilityChannels,test_only:control.testOnly,formal_collection_admitted:!control.testOnly});
  if(path===`/api/token/v1/organizations/${org}/balance`)return new Response(`{"wallet_id":"${unit}","owner_type":"ORGANIZATION","owner_id":"${org}","posted_microcredits":9007199254740993,"reserved_microcredits":0,"available_microcredits":9007199254740993}`,{status:200});
- if(path===`/api/token/v1/organizations/${org}/entitlement-packages`)return json({items:[]});
+ if(path===`/api/token/v1/organizations/${org}/entitlement-packages`)return json({items:control.enumMode?[{package_id:unit,plan_name:'Controlled package',status:'ACTIVE',points_remaining_microcredits:'100',components:[{component_id:other,component_type:'BASE',status:'FROZEN',available_microcredits:'100'},{component_id:unit,component_type:'BONUS',status:'CONTROLLED_UNKNOWN_STATE',available_microcredits:'0'}]}]:[]});
 if(path==='/api/token/v1/models')return json({items:Object.prototype.hasOwnProperty.call(control,'catalogItems')?control.catalogItems:[{model_id:other,display_name:'Controlled model'}],catalog_version:1});
  if(path===`/api/token/v1/organizations/${org}/model-policy`){
   if(method==='GET')return json(control.policy);
@@ -54,6 +79,34 @@ if(path==='/api/token/v1/models')return json({items:Object.prototype.hasOwnPrope
  }
  return json({code:'UNEXPECTED_FIXTURE_ROUTE'},404);
 };
-const me=()=>({user_id:control.user,personal_permissions:['personal.profile.read','personal.context.switch'],platform_permissions:control.admin?['platform.organizations.read','platform.organizations.create']:[],active_context:{context_type:control.context,organization_id:control.context==='ORGANIZATION'?org:undefined,context_version:control.contextVersion,organization_authorization_version:control.authorizationVersion,permissions:['org.units.read','org.wallet.read',...(control.modelPolicy?['org.models.read',...(control.readonly?[]:['org.models.manage'])]:[]),...(control.purchase?['org.entitlements.purchase']:[]),...(control.readonly?[]:['org.units.manage'])]}});
-function render(){if(control.admin){root.render(<OrganizationAdminWorkspace client={adminClient} me={me()} language={control.language} />);return;}root.render(<><OrganizationDirectory client={client} me={me()} language={control.language} onChanged={async()=>render()} />{control.context==='ORGANIZATION'&&<OrganizationWorkspace client={client} me={me()} language={control.language} onChanged={async()=>render()} />}</>);}
-window.f06=Object.assign(control,{render,copy:()=>organizationCopy[control.language],switchIdentity:()=>{control.user=other;client.financeSessionEpoch++;render();}});render();
+const me=()=>({user_id:control.user,personal_permissions:['personal.profile.read','personal.context.switch',...(control.boundaries?['personal.invitations.read','personal.invitations.accept']:[])],platform_permissions:control.admin?['platform.organizations.read','platform.organizations.create']:[],active_context:{context_type:control.context,organization_id:control.context==='ORGANIZATION'?org:undefined,context_version:control.contextVersion,organization_authorization_version:control.authorizationVersion,permissions:['org.units.read','org.wallet.read',...(control.enumMode?['org.roles.read','org.roles.assign','org.members.read','org.quota.read.self','org.quota.allocate']:[]),...(control.roleMode?['org.members.read',control.roleMode==='roles'?'org.roles.assign':'org.members.manage']:[]),...(control.modelPolicy?['org.models.read',...(control.readonly?[]:['org.models.manage'])]:[]),...(control.purchase?['org.entitlements.purchase']:[]),...(control.readonly?[]:['org.units.manage'])]}});
+function CommitProbe() {
+ useLayoutEffect(() => {
+  if (!control.probeOnCommit) return;
+  const probe = control.probeOnCommit; control.probeOnCommit = null;
+  const before = control.calls.filter(call => call.method === 'PUT').length;
+  probe({ preventDefault() {} }); control.probeObserved = { before, after: control.calls.filter(call => call.method === 'PUT').length };
+ });
+ return null;
+}
+function PassiveProbe() {
+ useEffect(() => {
+  if (!control.submitAfterEffects) return;
+  control.submitAfterEffects = false;
+  const before = control.calls.filter(call => call.method === 'PUT').length;
+  document.querySelector('.ap-org-action').requestSubmit();
+  control.passiveObserved = { before, after: control.calls.filter(call => call.method === 'PUT').length };
+ });
+ return null;
+}
+function render(){
+ if (control.confirmHarness) {
+  const transport = control.useAlternateClient ? alternateClient : client, api = new OrganizationClient(transport);
+  const owner = `${control.user}:${org}:${control.contextVersion}:${control.authorizationVersion}`;
+  const target = control.harnessTarget || unit;
+  const fields = control.noFields ? [] : [{ name: 'memberUnits', multiple: true, options: control.noOptions ? [] : [{ value: unit, label: 'Controlled Unit' }], initial: [] }, { name: 'parent', optional: true, options: [{ value: unit, label: 'Controlled Unit' }] }];
+  root.render(<><select aria-label="fixture-language" value={control.language} onChange={event => { control.language = event.target.value; render(); }}>{['zh','en','ja'].map(language => <option key={language}>{language}</option>)}</select>{!control.hideHarness && <OrganizationActionForm client={transport} owner={owner} copy={organizationCopy[control.language]} scope={control.harnessScope || 'controlled-member-units'} title={organizationCopy[control.language].replaceMemberUnits} fields={fields} disabled={Boolean(control.harnessDisabled)} confirmationTarget={target} confirm prepare={values => { if (control.throwPrepare) throw new Error('Controlled preparation unavailable'); return control.noFields ? { id: target } : { unit_ids: values.memberUnits, parent_id: values.parent || null, expected_version: control.harnessVersion || 1 }; }} action={(facts, key) => control.noFields ? api.revokeRole(org, facts.id, key) : api.replaceUnits(org, user, facts.unit_ids, facts.expected_version, key)} />}<CommitProbe /><PassiveProbe /></>);
+  return;
+ }
+ if(control.admin){root.render(<OrganizationAdminWorkspace client={adminClient} me={me()} language={control.language} />);return;}root.render(<><OrganizationDirectory client={client} me={me()} language={control.language} onChanged={async()=>{if(control.refreshFail)throw new Error('Controlled refresh unavailable');render();}} />{control.context==='ORGANIZATION'&&<OrganizationWorkspace client={client} me={me()} language={control.language} onChanged={async()=>{if(control.refreshFail)throw new Error('Controlled refresh unavailable');render();}} />}</>);}
+window.f06=Object.assign(control,{render,copy:()=>organizationCopy[control.language],client,alternateClient,unmount:()=>root.render(null),switchIdentity:()=>{control.user=other;client.financeSessionEpoch++;render();}});render();

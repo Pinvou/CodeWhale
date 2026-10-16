@@ -102,7 +102,7 @@ pub fn record_conversation_attachments(
     std::fs::create_dir_all(parent).map_err(|error| format!("创建附件引用目录失败：{error}"))?;
     let payload = serde_json::to_vec_pretty(&records)
         .map_err(|error| format!("序列化附件引用失败：{error}"))?;
-    deepseek_tui::utils::write_atomic(&refs_path, &payload)
+    crate::platform::filesystem::atomic_write_private(&refs_path, &payload)
         .map_err(|error| format!("保存附件引用失败：{error:#}"))?;
     Ok(())
 }
@@ -285,19 +285,58 @@ pub async fn cancel_draft_upload(upload_id: &str) -> Result<(), String> {
     cancel_upload(&draft_attachment_workspace(), upload_id).await
 }
 
+/// Failure classification returned by [`canonical_completed_child`]; each
+/// lane maps the variants onto its own error texts, so the shared helper
+/// owns no wording.
+enum CompletedChildLookupError {
+    /// Root or supplied path missing (`io::ErrorKind::NotFound`).
+    Missing,
+    /// The completed root itself failed to resolve (non-NotFound).
+    Root(std::io::Error),
+    /// The supplied path failed to resolve (non-NotFound).
+    Child(std::io::Error),
+}
+
+/// Canonicalize the completed-attachments root plus one caller-supplied path
+/// beneath it — the shared path-resolution mechanics of the two lanes that
+/// consume a completed upload. The "resolved child sits directly under the
+/// resolved root" containment check is lane-specific (the discard lane
+/// resolves a file one level deeper than the draft lane's upload directory),
+/// so it stays with the callers over the returned pair.
+async fn canonical_completed_child(
+    workspace: &Path,
+    relative: &Path,
+) -> Result<(PathBuf, PathBuf), CompletedChildLookupError> {
+    let canonical_root = match tokio::fs::canonicalize(completed_root(workspace)).await {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(CompletedChildLookupError::Missing);
+        }
+        Err(error) => return Err(CompletedChildLookupError::Root(error)),
+    };
+    let canonical_child = match tokio::fs::canonicalize(relative).await {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(CompletedChildLookupError::Missing);
+        }
+        Err(error) => return Err(CompletedChildLookupError::Child(error)),
+    };
+    Ok((canonical_root, canonical_child))
+}
+
 async fn managed_completed_file(
     workspace: &Path,
     upload_id: &str,
 ) -> Result<(PathBuf, PathBuf), String> {
     let upload_id = validate_upload_id(upload_id)?;
-    let root = completed_root(workspace);
-    let canonical_root = tokio::fs::canonicalize(&root)
-        .await
-        .map_err(|_| "附件草稿不存在".to_string())?;
     let upload_dir = upload_completed_dir(workspace, upload_id);
-    let canonical_dir = tokio::fs::canonicalize(&upload_dir)
-        .await
-        .map_err(|_| "附件草稿不存在".to_string())?;
+    let (canonical_root, canonical_dir) =
+        match canonical_completed_child(workspace, &upload_dir).await {
+            Ok(paths) => paths,
+            // Both resolution failures surfaced as the same "draft absent"
+            // text before the shared helper existed; keep that mapping.
+            Err(_) => return Err("附件草稿不存在".to_string()),
+        };
     if canonical_dir.parent() != Some(canonical_root.as_path()) {
         return Err("附件草稿目录无效".into());
     }
@@ -351,22 +390,7 @@ async fn adopt_upload(
 
     if tokio::fs::try_exists(&target_dir).await.unwrap_or(false) {
         let (_, target_file) = managed_completed_file(target_workspace, upload_id).await?;
-        // 与下方首次采纳分支一致：摄入跑 LibreOffice/pandoc 子进程（分钟级），
-        // 必须离开 async worker 线程。
-        let ingest_path = target_file.clone();
-        let ingest_result =
-            tokio::task::spawn_blocking(move || ingest_managed_file(&ingest_path)).await;
-        let result = match ingest_result {
-            Ok(Ok(result)) => result,
-            Ok(Err(error)) => {
-                let _ = remove_dir_if_present(&target_dir).await;
-                return Err(error);
-            }
-            Err(error) => {
-                let _ = remove_dir_if_present(&target_dir).await;
-                return Err(format!("摄入任务失败：{error}"));
-            }
-        };
+        let result = ingest_managed_file_async(&target_file, &target_dir).await?;
         let _ = remove_dir_if_present(&upload_completed_dir(source_workspace, upload_id)).await;
         return Ok(result);
     }
@@ -387,21 +411,7 @@ async fn adopt_upload(
         let _ = remove_dir_if_present(&target_dir).await;
         return Err(format!("迁移附件草稿失败：{error}"));
     }
-    // 摄入跑 LibreOffice/pandoc 子进程（分钟级），离开 async worker 线程。
-    let ingest_path = target_file.clone();
-    let ingest_result =
-        tokio::task::spawn_blocking(move || ingest_managed_file(&ingest_path)).await;
-    let result = match ingest_result {
-        Ok(Ok(result)) => result,
-        Ok(Err(error)) => {
-            let _ = remove_dir_if_present(&target_dir).await;
-            return Err(error);
-        }
-        Err(error) => {
-            let _ = remove_dir_if_present(&target_dir).await;
-            return Err(format!("摄入任务失败：{error}"));
-        }
-    };
+    let result = ingest_managed_file_async(&target_file, &target_dir).await?;
     if let Err(error) = remove_dir_if_present(&source_dir).await {
         eprintln!("[attachment] cleanup adopted draft failed: {error}");
     }
@@ -414,6 +424,30 @@ fn ingest_managed_file(path: &Path) -> Result<IngestResult, String> {
     // using the canonical path for containment validation above.
     let compatible = crate::platform::os::platform_compat_path(&path.to_string_lossy());
     file_ingest::ingest_attachment(&compatible)
+}
+
+/// Ingestion runs LibreOffice/pandoc subprocesses (minutes-scale), so it must
+/// leave the async worker thread. On join failure or pipeline error the
+/// caller's `cleanup_dir` is removed (each caller's own adopted/committed
+/// attachment directory) before returning the error; on success the directory
+/// is kept for the caller to finish with (e.g. clearing the source draft).
+async fn ingest_managed_file_async(
+    path: &Path,
+    cleanup_dir: &Path,
+) -> Result<IngestResult, String> {
+    let ingest_path = path.to_path_buf();
+    let cleanup_dir = cleanup_dir.to_path_buf();
+    match tokio::task::spawn_blocking(move || ingest_managed_file(&ingest_path)).await {
+        Ok(Ok(result)) => Ok(result),
+        Ok(Err(error)) => {
+            let _ = remove_dir_if_present(&cleanup_dir).await;
+            Err(error)
+        }
+        Err(error) => {
+            let _ = remove_dir_if_present(&cleanup_dir).await;
+            Err(format!("摄入任务失败：{error}"))
+        }
+    }
 }
 
 /// Append one HTML5 drop chunk inside a session-owned workspace.
@@ -508,21 +542,7 @@ pub(crate) async fn append_chunk(
         .await
         .map_err(|error| format!("提交会话附件失败：{error}"))?;
     let completed_path = completed_dir.join(filename);
-    // 与 adopt_upload 一致：摄入跑 LibreOffice/pandoc 子进程（分钟级），
-    // 必须离开 async worker 线程。
-    let ingest_result =
-        tokio::task::spawn_blocking(move || ingest_managed_file(&completed_path)).await;
-    let result = match ingest_result {
-        Ok(Ok(result)) => result,
-        Ok(Err(error)) => {
-            let _ = remove_dir_if_present(&completed_dir).await;
-            return Err(error);
-        }
-        Err(error) => {
-            let _ = remove_dir_if_present(&completed_dir).await;
-            return Err(format!("摄入任务失败：{error}"));
-        }
-    };
+    let result = ingest_managed_file_async(&completed_path, &completed_dir).await?;
     Ok(Some(result))
 }
 
@@ -545,17 +565,17 @@ pub(crate) async fn cancel_upload(workspace: &Path, upload_id: &str) -> Result<(
 /// filesystem target from the frontend.
 pub async fn discard_attachment(workspace: &Path, path: &str) -> Result<(), String> {
     let supplied = Path::new(path);
-    let root = completed_root(workspace);
-    let canonical_root = match tokio::fs::canonicalize(&root).await {
-        Ok(path) => path,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(format!("解析会话附件目录失败：{error}")),
-    };
-    let canonical_file = match tokio::fs::canonicalize(supplied).await {
-        Ok(path) => path,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(format!("解析会话附件失败：{error}")),
-    };
+    let (canonical_root, canonical_file) =
+        match canonical_completed_child(workspace, supplied).await {
+            Ok(paths) => paths,
+            Err(CompletedChildLookupError::Missing) => return Ok(()),
+            Err(CompletedChildLookupError::Root(error)) => {
+                return Err(format!("解析会话附件目录失败：{error}"));
+            }
+            Err(CompletedChildLookupError::Child(error)) => {
+                return Err(format!("解析会话附件失败：{error}"));
+            }
+        };
     let upload_dir = canonical_file
         .parent()
         .ok_or_else(|| "附件路径无效".to_string())?;

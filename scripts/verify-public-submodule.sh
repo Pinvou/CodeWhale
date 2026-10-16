@@ -8,8 +8,7 @@ PINVOU_CODEWHALE_BRANCH="pinvou3-clean"
 PINVOU_CODEWHALE_TAG="pinvou-v0.9.12-r3"
 # 过渡期豁免（fork-policy.md 第 0 节）：两次 rN 收口之间，父仓 gitlink 可沿受保护
 # 维护分支领先不可变 tag 前进。TRANSITION_BASELINE 非空即启用过渡期断言：
-# 默认发布检查要求 gitlink 等于公开维护分支头；CI 显式登记快照模式允许
-# 维护分支前进，但必须证明固定 tag → 精确登记 pin → 公开维护头的祖先链。
+# 发布与 CI 均严格要求 gitlink 等于公开维护分支头；不可变 tag 保持原收口钉点。
 # rN 收口时：把 TAG 更新为新 tag、删除 TRANSITION_BASELINE，恢复三方相等断言。
 TRANSITION_BASELINE="61cb769be5b33abc64f64da4272f5b39a8b6c1fd"
 # 2026-10-02 entered the transition window: the registered head advanced with
@@ -17,7 +16,6 @@ TRANSITION_BASELINE="61cb769be5b33abc64f64da4272f5b39a8b6c1fd"
 # tag stays pinned at its closure commit, so the three-way-equality assertion
 # gives way to the transition assertions above.
 MAX_ATTEMPTS=3
-registered_snapshot=false
 
 # Never let ambient credentials, URL rewrites or repository objects stand in
 # for anonymously available public history. Remote commands use a fresh bare
@@ -32,9 +30,7 @@ clean_git() {
     git -c credential.helper= -c core.askPass= -c http.extraHeader= "$@"
 }
 
-if [[ $# -eq 1 && "$1" == "--registered-snapshot" ]]; then
-  registered_snapshot=true
-elif [[ $# -ne 0 ]]; then
+if [[ $# -ne 0 ]]; then
   echo "unknown argument: $1" >&2
   exit 2
 fi
@@ -110,7 +106,7 @@ tag_peeled="$(
 )"
 tag_target="${tag_peeled:-$tag_direct}"
 
-if [[ "$branch_target" != "$gitlink" && "$registered_snapshot" != true ]]; then
+if [[ "$branch_target" != "$gitlink" ]]; then
   echo "错误：${PINVOU_CODEWHALE_BRANCH} 为 ${branch_target:-<不存在>}，父仓 gitlink 为 $gitlink" >&2
   exit 1
 fi
@@ -123,33 +119,6 @@ if [[ -n "$TRANSITION_BASELINE" ]]; then
   if [[ "$tag_target" == "$gitlink" ]]; then
     echo "错误：gitlink 已追平 ${PINVOU_CODEWHALE_TAG} 收口，请切除新 tag 并清除 TRANSITION_BASELINE" >&2
     exit 1
-  fi
-  if [[ "$registered_snapshot" == true ]]; then
-    registered_pin="$(sed -n 's/^EXPECTED_HEAD="\([0-9a-f]\{40\}\)"$/\1/p' "$REPO/scripts/fork-guard.sh")"
-    if [[ ! "$registered_pin" =~ ^[0-9a-f]{40}$ || "$registered_pin" != "$gitlink" || ! "$branch_target" =~ ^[0-9a-f]{40}$ ]]; then
-      echo "错误：冻结审核 gitlink 必须精确匹配登记 pin，且公开维护分支必须存在" >&2
-      exit 1
-    fi
-    fetched=false
-    for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
-      if public_git fetch --quiet --filter=tree:0 --no-tags "$PINVOU_CODEWHALE_URL" \
-          "+refs/heads/${PINVOU_CODEWHALE_BRANCH}:refs/heads/maintenance" \
-          "+refs/tags/${PINVOU_CODEWHALE_TAG}:refs/tags/baseline" "$gitlink"; then
-        fetched=true
-        break
-      fi
-      sleep "$attempt"
-    done
-    if [[ "$fetched" != true ]] || \
-        [[ "$(public_git rev-parse 'refs/tags/baseline^{commit}' 2>/dev/null)" != "$TRANSITION_BASELINE" ]] || \
-        [[ "$(public_git cat-file -t "$gitlink" 2>/dev/null)" != commit ]] || \
-        ! public_git merge-base --is-ancestor "$TRANSITION_BASELINE" "$gitlink" || \
-        ! public_git merge-base --is-ancestor "$gitlink" refs/heads/maintenance; then
-      echo "错误：冻结审核 pin 无法证明公开可达、固定标签历史及维护分支包含关系" >&2
-      exit 1
-    fi
-    echo "公开 CodeWhale 冻结审核校验通过：登记 gitlink ${gitlink} 位于公开维护历史；不可变标签仍钉在 ${tag_target}"
-    exit 0
   fi
   echo "公开 CodeWhale 基线过渡期校验通过：${PINVOU_CODEWHALE_BRANCH} = gitlink = ${gitlink}；${PINVOU_CODEWHALE_TAG} 钉在收口 ${tag_target}"
   exit 0

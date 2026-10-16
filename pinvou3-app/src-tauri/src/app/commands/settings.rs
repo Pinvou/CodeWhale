@@ -1,6 +1,28 @@
 use super::prelude::*;
-use crate::platform::credential_store::CredentialReference;
-use crate::platform::prefs::ModelSelectionRef;
+use crate::platform::credential_store::{
+    CREDENTIAL_STORE_UNAVAILABLE_ERROR, CredentialReference, CredentialStore,
+};
+use crate::platform::prefs::{MODEL_API_KEY_ENV_OVERRIDE, ModelSelectionRef};
+
+/// Round-51 review: the settings transaction holds the cross-process
+/// settings.json.lock across keychain I/O (the CLI's models family writes
+/// the same transaction from a second process), and the sibling blocking
+/// calls (the ACP section-lock passes, `SessionAgentStore::remove`) poll a
+/// cross-process lock for up to its timeout — so the async command layer
+/// joins each blocking body on a `spawn_blocking` worker instead of parking
+/// a runtime worker that also drives the engine session pumps (the same
+/// rationale as round-50's codex.rs conversion). One helper for the join
+/// scaffolding shared by every converted command: run `body` on a blocking
+/// worker and map a failed join to `<label> 任务失败: {error}`.
+pub(super) async fn join_blocking<T, F>(label: &str, body: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(body)
+        .await
+        .map_err(|error| format!("{label} 任务失败: {error}"))?
+}
 
 /// 从 disk 读最新 UserPrefs。
 /// 注意走 disk 而非 engine.bridge.prefs——如果用户手改 settings.json，
@@ -10,17 +32,51 @@ pub async fn get_settings() -> Result<UserPrefs, String> {
     Ok(refresh_safe_prefs(UserPrefs::load()))
 }
 
-fn prepare_prefs_for_save(mut prefs: UserPrefs) -> Result<UserPrefs, String> {
-    let store = SystemCredentialStore::new();
+fn prepare_prefs_for_save(
+    mut prefs: UserPrefs,
+    store: &dyn CredentialStore,
+) -> Result<(UserPrefs, Vec<CredentialReference>), String> {
     prefs.ensure_builtin_account_platform_model();
     prefs.normalize_saved_model_metadata();
-    let migration = prefs.migrate_plaintext_api_keys_with_store(&store);
-    if !migration.failed_model_ids.is_empty() || !migration.failed_search_providers.is_empty() {
-        return Err("credential store unavailable; please reconfigure API Key".to_string());
+    let migration = prefs.migrate_plaintext_api_keys_with_store(store);
+    if migration.has_failures() {
+        return Err(CREDENTIAL_STORE_UNAVAILABLE_ERROR.to_string());
     }
+    // The migration DEFERS destructive keyring deletes (see the search
+    // Delete arm in `migrate_plaintext_api_keys_with_store`): surface them so
+    // the caller runs them only after its prefs save committed.
+    let deferred_deletes = migration.deferred_search_deletes;
     prefs.sanitize_plaintext_api_keys();
-    prefs.refresh_credential_states_with_store(&store);
-    Ok(prefs)
+    prefs.refresh_credential_states_with_store(store);
+    Ok((prefs, deferred_deletes))
+}
+
+/// Runs the search-provider keyring deletes the prefs migration deferred —
+/// only ever call this AFTER the prefs save committed and while the prefs
+/// lock is still held (via `update_transaction_with_post_commit`). Before the
+/// commit a delete would leave a configured-but-secretless provider when the
+/// save then aborted; outside the lock, a concurrent replacement of the same
+/// deterministic provider reference could commit a fresh secret between this
+/// save's commit and this cleanup, and the stale delete would destroy it
+/// while both saves reported success. Under the lock the two saves are
+/// totally ordered, so the delete can only remove the credential this
+/// command's own Delete edit removed from prefs. A failed delete is
+/// downgraded to a warning: the disk commit already succeeded and the orphan
+/// is overwritten on re-set.
+fn delete_deferred_search_credentials(
+    context: &str,
+    store: &dyn CredentialStore,
+    references: Vec<CredentialReference>,
+) {
+    for reference in references {
+        if let Err(error) = store.delete(&reference) {
+            log::warn!(
+                "{context}: prefs saved, but the removed search credential could not be \
+                 deleted from the keyring (the orphan is overwritten on re-set): {}",
+                error.user_message()
+            );
+        }
+    }
 }
 
 fn refresh_safe_prefs(mut prefs: UserPrefs) -> UserPrefs {
@@ -172,7 +228,7 @@ pub async fn get_effective_model_config(
     if std::env::var("DEEPSEEK_BASE_URL").is_ok() {
         env_overrides.push("base_url".to_string());
     }
-    let env_api_key = std::env::var("DEEPSEEK_API_KEY")
+    let env_api_key = std::env::var(MODEL_API_KEY_ENV_OVERRIDE)
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false);
     if env_api_key {
@@ -354,7 +410,14 @@ pub async fn save_model(model: SavedModel, pool: State<'_, EnginePool>) -> Resul
         return Err("内置模型不可编辑".to_string());
     }
     let model_id = model.id.clone();
-    save_model_inner(model, &SystemCredentialStore::new())?;
+    // Round-51 review: the settings transaction holds the cross-process
+    // settings.json.lock across keychain I/O (the CLI's models family writes
+    // the same transaction from a second process), so the blocking body
+    // joins a spawn_blocking worker — the same rationale as round-50's
+    // codex.rs conversion: these runtime workers also drive the engine
+    // session pumps.
+    let store = SystemCredentialStore::new();
+    join_blocking("save_model", move || save_model_inner(model, &store)).await?;
     pool.mark_model_updated(&model_id);
     Ok(())
 }
@@ -367,35 +430,45 @@ pub(super) fn save_model_inner(
 ) -> Result<(), String> {
     let model_id = model.id.clone();
     // Same ordering contract as `delete_model`: the destructive keyring
-    // delete returned by `apply_model_credential` runs only after the prefs
-    // save has committed; a failed delete then only leaves an orphaned
-    // credential (the benign direction).
-    let mut deferred_delete: Option<CredentialReference> = None;
-    UserPrefs::update_transaction(|prefs| {
-        let old = prefs.model_by_id(&model.id).cloned();
-        let (model, deferred) = apply_model_credential(model, old.as_ref(), store)
-            .map_err(|e| sanitize_command_error("save_model", e))?;
-        deferred_delete = deferred;
-        prefs.upsert_model(model);
-        Ok(())
-    })
+    // delete returned by `apply_model_credential` runs in the post-commit
+    // hook, still inside the prefs-lock critical section — after the prefs
+    // save has committed (a failed delete then only leaves an orphaned
+    // credential, the benign direction) and serialized against a concurrent
+    // replacement of the same model credential, whose keyring write also
+    // runs under the prefs lock.
+    let deferred_delete = std::cell::RefCell::new(None);
+    UserPrefs::update_transaction_with_post_commit(
+        |prefs| {
+            let old = prefs.model_by_id(&model.id).cloned();
+            let (model, deferred) = apply_model_credential(model, old.as_ref(), store)
+                .map_err(|e| sanitize_command_error("save_model", e))?;
+            *deferred_delete.borrow_mut() = deferred;
+            prefs.upsert_model(model);
+            Ok(())
+        },
+        || {
+            if let Some(reference) = deferred_delete.borrow_mut().take() {
+                if let Err(error) = store.delete(&reference) {
+                    log::warn!(
+                        "save_model: model {model_id} saved without its keyring secret (the \
+                         delete failed): {}",
+                        error.user_message()
+                    );
+                }
+            }
+        },
+    )
     .map_err(|e| sanitize_command_error("save_model", e))?;
-    if let Some(reference) = deferred_delete {
-        if let Err(error) = store.delete(&reference) {
-            log::warn!(
-                "save_model: model {model_id} saved without its keyring secret (the delete \
-                 failed): {}",
-                error.user_message()
-            );
-        }
-    }
     Ok(())
 }
 
 /// 删一条用户模型；内置 Account Platform 模型始终保留。
 #[tauri::command]
 pub async fn delete_model(id: String) -> Result<(), String> {
-    delete_model_inner(&id, &SystemCredentialStore::new())
+    // Round-51 review: same cross-process settings-lock rationale as
+    // [`save_model`] — join the blocking transaction on a worker.
+    let store = SystemCredentialStore::new();
+    join_blocking("delete_model", move || delete_model_inner(&id, &store)).await
 }
 
 pub(super) fn delete_model_inner(id: &str, store: &dyn CredentialStore) -> Result<(), String> {
@@ -434,20 +507,37 @@ pub(super) fn delete_model_inner(id: &str, store: &dyn CredentialStore) -> Resul
     Ok(())
 }
 
+// Local selections must name a user configuration, not the platform runtime
+// carrier. Catalog selections keep their separate, source-aware command path.
+fn require_local_model_selection<'a>(
+    model: Option<&'a SavedModel>,
+    id: &str,
+) -> Result<&'a SavedModel, String> {
+    let model = model.ok_or_else(|| format!("model not found: {id}"))?;
+    if model.is_builtin_account_platform() {
+        return Err("select a concrete Account Platform catalog model".to_string());
+    }
+    Ok(model)
+}
+
 /// 设全局默认模型(新建会话继承它)。不打断已在用的会话——它们各自保持 spawn
 /// 时的模型,想换在该会话的 chip 里切。
 #[tauri::command]
 pub async fn set_active_model(id: String, app: AppHandle) -> Result<(), String> {
-    UserPrefs::update_transaction(|prefs| {
-        let model = prefs
-            .model_by_id(&id)
-            .ok_or_else(|| format!("model not found: {id}"))?;
-        if model.is_builtin_account_platform() {
-            return Err("select a concrete Account Platform catalog model".to_string());
+    // Round-51 review: same cross-process settings-lock rationale as
+    // [`save_model`] — join the blocking transaction on a worker.
+    join_blocking("set_active_model", {
+        let id = id.clone();
+        move || {
+            UserPrefs::update_transaction(|prefs| {
+                require_local_model_selection(prefs.model_by_id(&id), &id)?;
+                prefs.set_default_model_ref(ModelSelectionRef::local(&id))
+            })
+            .map(|_| ())
+            .map_err(|e| sanitize_command_error("set_active_model", e))
         }
-        prefs.set_default_model_ref(ModelSelectionRef::local(&id))
     })
-    .map_err(|e| sanitize_command_error("set_active_model", e))?;
+    .await?;
     if let Some(model) = UserPrefs::load().model_by_id(&id) {
         crate::features::behavior_telemetry::track_model_selected(
             &app,
@@ -481,9 +571,7 @@ pub async fn set_session_model(
     }
     let prefs = UserPrefs::load();
     if let Some(mid) = &model_id {
-        if prefs.model_by_id(mid).is_none() {
-            return Err(format!("model not found: {mid}"));
-        }
+        require_local_model_selection(prefs.model_by_id(mid), mid)?;
     }
     let selected_model = model_id
         .as_deref()
@@ -916,9 +1004,7 @@ pub async fn probe_model_connection(
     };
     if !key.trim().is_empty() {
         if is_anthropic {
-            req = req
-                .header("x-api-key", key.trim())
-                .header("anthropic-version", "2023-06-01");
+            req = crate::core::model_endpoint::apply_anthropic_auth_headers(req, &key);
         } else {
             req = req.bearer_auth(key.trim());
         }
@@ -1336,14 +1422,12 @@ pub async fn run_image_capability_probe(
     };
     if is_anthropic {
         let messages_url = crate::core::model_endpoint::anthropic_messages_url(&base_url_stripped);
-        let mut req = client
-            .post(messages_url)
-            .json(&image_capability_test_payload_anthropic(&model));
-        if !key.trim().is_empty() {
-            req = req
-                .header("x-api-key", key.trim())
-                .header("anthropic-version", "2023-06-01");
-        }
+        let req = crate::core::model_endpoint::apply_anthropic_auth_headers(
+            client
+                .post(messages_url)
+                .json(&image_capability_test_payload_anthropic(&model)),
+            &key,
+        );
         return match req.send().await {
             Ok(resp) => {
                 let status = resp.status();
@@ -1437,7 +1521,10 @@ pub struct WebSettingsPatch {
 /// Phase C 会做 in-place engine restart（处理 in-flight turn）。
 #[tauri::command]
 pub async fn update_settings(patch: GeneralSettingsPatch) -> Result<UserPrefs, String> {
-    persist_general_settings(patch)
+    // Round-51 review: the settings transaction holds the cross-process
+    // settings.json.lock across keychain I/O — join the blocking body on a
+    // spawn_blocking worker like the sibling model commands.
+    join_blocking("update_settings", move || persist_general_settings(patch)).await
 }
 
 fn apply_general_settings_patch(current: &mut UserPrefs, patch: GeneralSettingsPatch) {
@@ -1471,35 +1558,104 @@ fn apply_general_settings_patch(current: &mut UserPrefs, patch: GeneralSettingsP
 }
 
 fn persist_general_settings(patch: GeneralSettingsPatch) -> Result<UserPrefs, String> {
-    UserPrefs::update_transaction(|current| {
-        apply_general_settings_patch(current, patch);
-        *current = prepare_prefs_for_save(current.clone())?;
-        Ok(())
-    })
+    let store = SystemCredentialStore::new();
+    // The deferred deletes are handed to the post-commit hook through a
+    // RefCell because both closures need access to them while the mutate
+    // closure alone cannot return them; the hook runs inside the same
+    // prefs-lock critical section as the commit, so a concurrent credential
+    // replacement cannot slip a fresh secret between the commit and the
+    // delete (an aborted transaction never reaches the hook at all).
+    let deferred_deletes = std::cell::RefCell::new(Vec::new());
+    UserPrefs::update_transaction_with_post_commit(
+        |current| {
+            apply_general_settings_patch(current, patch);
+            let (prepared, deferred) = prepare_prefs_for_save(current.clone(), &store)?;
+            *current = prepared;
+            *deferred_deletes.borrow_mut() = deferred;
+            Ok(())
+        },
+        || {
+            delete_deferred_search_credentials("update_settings", &store, deferred_deletes.take());
+        },
+    )
     .map(refresh_safe_prefs)
 }
 
 fn persist_search_settings(search: SearchPrefs) -> Result<UserPrefs, String> {
-    UserPrefs::update_transaction(|prefs| {
-        prefs.search = search;
-        *prefs = prepare_prefs_for_save(prefs.clone())?;
-        Ok(())
-    })
+    persist_search_settings_inner(search, &SystemCredentialStore::new())
+}
+
+/// Testable core of [`persist_search_settings`]: the credential store is
+/// injected so tests can pin the deferred-delete ordering, mirroring
+/// [`save_model_inner`] / [`delete_model_inner`].
+pub(super) fn persist_search_settings_inner(
+    search: SearchPrefs,
+    store: &dyn CredentialStore,
+) -> Result<UserPrefs, String> {
+    // Same ordering contract as `save_model`/`delete_model`: the keyring
+    // deletes deferred by the migration run in the post-commit hook, still
+    // inside the prefs-lock critical section — after the prefs save has
+    // committed (an aborted transaction leaves them unrun) and serialized
+    // against a concurrent replacement of the same credential, whose keyring
+    // write also runs under the prefs lock. A failed post-commit delete is
+    // downgraded to a warning.
+    let deferred_deletes = std::cell::RefCell::new(Vec::new());
+    UserPrefs::update_transaction_with_post_commit(
+        |prefs| {
+            prefs.search = search;
+            let (prepared, deferred) = prepare_prefs_for_save(prefs.clone(), store)?;
+            *prefs = prepared;
+            *deferred_deletes.borrow_mut() = deferred;
+            Ok(())
+        },
+        || {
+            delete_deferred_search_credentials(
+                "save_search_settings",
+                store,
+                deferred_deletes.take(),
+            );
+        },
+    )
     .map(refresh_safe_prefs)
     .map_err(|e| sanitize_command_error("save search settings", e))
 }
 
 pub(crate) fn persist_web_settings(patch: WebSettingsPatch) -> Result<UserPrefs, String> {
-    UserPrefs::update_transaction(|prefs| {
-        if let Some(memory_enabled) = patch.memory_enabled {
-            prefs.memory_enabled = memory_enabled;
-        }
-        if let Some(search) = patch.search {
-            prefs.search = search;
-        }
-        *prefs = prepare_prefs_for_save(prefs.clone())?;
-        Ok(())
-    })
+    persist_web_settings_inner(patch, &SystemCredentialStore::new())
+}
+
+/// Testable core of [`persist_web_settings`]: the credential store is
+/// injected so tests can pin the deferred-delete ordering, mirroring
+/// [`persist_search_settings_inner`].
+pub(super) fn persist_web_settings_inner(
+    patch: WebSettingsPatch,
+    store: &dyn CredentialStore,
+) -> Result<UserPrefs, String> {
+    // Same ordering contract as `save_model`/`delete_model`: the keyring
+    // deletes deferred by the migration run in the post-commit hook, still
+    // inside the prefs-lock critical section — after the prefs save has
+    // committed (an aborted transaction leaves them unrun) and serialized
+    // against a concurrent replacement of the same credential, whose keyring
+    // write also runs under the prefs lock. A failed post-commit delete is
+    // downgraded to a warning.
+    let deferred_deletes = std::cell::RefCell::new(Vec::new());
+    UserPrefs::update_transaction_with_post_commit(
+        |prefs| {
+            if let Some(memory_enabled) = patch.memory_enabled {
+                prefs.memory_enabled = memory_enabled;
+            }
+            if let Some(search) = patch.search {
+                prefs.search = search;
+            }
+            let (prepared, deferred) = prepare_prefs_for_save(prefs.clone(), store)?;
+            *prefs = prepared;
+            *deferred_deletes.borrow_mut() = deferred;
+            Ok(())
+        },
+        || {
+            delete_deferred_search_credentials("save_web_settings", store, deferred_deletes.take());
+        },
+    )
     .map(refresh_safe_prefs)
     .map_err(|e| sanitize_command_error("save web settings", e))
 }
@@ -1507,20 +1663,19 @@ pub(crate) fn persist_web_settings(patch: WebSettingsPatch) -> Result<UserPrefs,
 /// 仅更新搜索配置。模型等其他偏好始终以磁盘最新值为准，避免前端旧快照整份回写。
 #[tauri::command]
 pub async fn update_search_settings(search: SearchPrefs) -> Result<UserPrefs, String> {
-    persist_search_settings(search)
+    // Round-51 review: same cross-process settings-lock rationale as
+    // [`save_model`] — join the blocking transaction on a worker.
+    join_blocking("update_search_settings", move || {
+        persist_search_settings(search)
+    })
+    .await
 }
 
-/// Unified post-save restart finalization. Restart bypasses RunEvent::Exit, so persist and close
-/// the browser host and reap child processes first; `saved_label` only keeps each command's own log wording.
-async fn persist_and_restart<S>(
-    app: tauri::AppHandle,
-    saved_label: &str,
-    persister: impl FnOnce() -> Result<S, String>,
-) -> Result<(), String> {
-    persister()?;
+/// Post-save restart finalization — call only after the save has committed: a failed persist must
+/// never restart. Restart bypasses RunEvent::Exit, so close the browser host and reap child
+/// processes before exiting; `saved_label` only keeps each command's own log wording.
+async fn restart_after_save(app: tauri::AppHandle, saved_label: &str) -> Result<(), String> {
     eprintln!("[pinvou3-app] {saved_label} saved, restarting app...");
-    // Restart bypasses RunEvent::Exit, so persist and close the browser host and reap child
-    // processes first.
     crate::prepare_app_restart(&app).await;
     app.restart();
 }
@@ -1531,7 +1686,11 @@ pub async fn save_settings_and_restart(
     patch: GeneralSettingsPatch,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    persist_and_restart(app, "settings", move || persist_general_settings(patch)).await
+    // Same cross-process settings-lock discipline as the search twin below:
+    // persist joins the transaction on a blocking worker, and the restart
+    // runs only once the persist has succeeded.
+    join_blocking("save_settings", move || persist_general_settings(patch)).await?;
+    restart_after_save(app, "settings").await
 }
 
 /// 仅保存搜索配置后重启，避免搜索设置覆盖同时发生变化的模型列表。
@@ -1540,15 +1699,48 @@ pub async fn save_search_settings_and_restart(
     search: SearchPrefs,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    persist_and_restart(app, "search settings", move || {
+    // The settings transaction holds the cross-process settings.json.lock
+    // across keychain I/O — join it on a spawn_blocking worker like the
+    // sibling commands ([`update_search_settings`]); the restart below only
+    // runs once the persist has succeeded.
+    join_blocking("save_search_settings", move || {
         persist_search_settings(search)
     })
-    .await
+    .await?;
+    restart_after_save(app, "search settings").await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_model_selection_rejects_platform_carrier() {
+        let model = SavedModel::builtin_account_platform();
+        assert_eq!(
+            require_local_model_selection(Some(&model), &model.id).unwrap_err(),
+            "select a concrete Account Platform catalog model"
+        );
+    }
+
+    #[test]
+    fn local_model_selection_keeps_missing_id_error() {
+        assert_eq!(
+            require_local_model_selection(None, "missing").unwrap_err(),
+            "model not found: missing"
+        );
+    }
+
+    #[test]
+    fn local_model_selection_keeps_user_model() {
+        let mut model = SavedModel::builtin_account_platform();
+        model.id = "local-user-model".to_string();
+        assert!(std::ptr::eq(
+            require_local_model_selection(Some(&model), &model.id).unwrap(),
+            &model
+        ));
+    }
+
     use crate::platform::paths::tests::ENV_LOCK;
 
     #[test]

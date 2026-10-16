@@ -1,11 +1,10 @@
 # Native model cancellation
 
 The desktop model provider remains Account Platform. The former `llmapi_hub`
-and legacy command module are retained as source history but are no longer
-compiled: F05 already removed their consumers and invoke registrations, and
-their private provisioning API depended on settings fields removed by the
-Account Platform migration. This change adds no legacy settings aliases,
-changes no invoke registration, and deletes no files or user data. The existing
+source has been removed because it had no compiled consumer or invoke
+registration. The legacy command file remains only as a protocol text fixture;
+it is not compiled or registered. Existing legacy settings aliases and model
+identifiers are unchanged, and no user data is deleted. The independent
 `client_migration` still owns legacy data migration and credential cleanup.
 
 Each outgoing model invocation records its session, lifecycle generation,
@@ -59,3 +58,37 @@ identity, cancellation/reclaim, lost cancellation ACK, read-only lost-header
 recovery, unknown lookup, and rejection of late delivery from an old generation.
 These fixtures prove the native HTTP/lifecycle boundary, not live provider
 cancellation support or production financial settlement.
+
+When a complete, valid catalog cannot resolve a retained legacy model name,
+the desktop marks that binding unavailable and offers the existing explicit
+replacement-branch action. It preserves the original binding, global default
+and other sessions; similar names are never substituted automatically.
+Malformed catalogs, empty references and malformed UUID identities do not
+produce lifecycle evidence. The content-free legacy marker is created only by
+local preparation under its existing turn owner; remote response bodies and
+headers cannot produce it. A replacement is created only after the user chooses
+an available model and confirms the existing branch action.
+
+The existing server admission budget counts `SETTLEMENT_PENDING` among in-flight
+states: each personal user has at most five such concurrent invocations, alongside
+the unchanged route, model and global limits. A pending settlement still owns an
+unconfirmed financial effect. Cancellation, timeout or a stopped response does not
+remove it from that budget or authorize releasing its hold. Five pending requests
+can therefore keep new invocations at HTTP 429 until their authoritative settlement
+states converge; this is the existing contract, not a newly relaxed admission rule.
+Recovery observability, persistent retry/backoff and manual operating boundaries
+remain tracked in [issue #1632](https://github.com/Pinvou/pinvou3/issues/1632) and
+[issue #1644](https://github.com/Pinvou/pinvou3/issues/1644), rather than treating a
+successful local cancellation test as their release acceptance.
+
+For a retained pre-dispatch cancellation, an attached canonical hold may enter the
+existing expiry-fence recovery only when its original usage/wallet/amount match,
+the original user command has exact immutable local pre-dispatch evidence, and no
+dispatch intent exists. A pending Billing fence is preserved when the user's first
+cancellation command arrives; replay does not overwrite it with `UNSUPPORTED`.
+Legacy, unattached or unproved cancellation uncertainty remains unconfirmed and
+becomes visible to the existing manual-review case worker without requiring an
+ordinary usage reconciliation to exhaust its attempts. A manual case is evidence
+for investigation, not proof that funds were released. Ordinary Token notification
+delivery and historical retention remain the deferred contracts already recorded
+in #1632; this change neither installs a relay nor discards historical events.

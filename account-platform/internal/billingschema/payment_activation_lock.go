@@ -26,7 +26,7 @@ func validatePaymentActivationLock(input []migrations.Migration) error {
 		}
 	}
 	if paymentCases != (capability != nil) {
-		return errors.New("payment write-off cases require the owner activation lock capability")
+		return errors.New("payment_order_repairs require the owner activation lock capability")
 	}
 	if capability != nil && (capability.Name != "payment_activation_execution_lock" || capability.Checksum != paymentActivationLockChecksum || sqlChecksum(capability.UpSQL) != paymentActivationLockChecksum || sqlChecksum(capability.DownSQL) != paymentActivationLockDownChecksum) {
 		return errors.New("payment activation lock is not the registered forward-only migration")
