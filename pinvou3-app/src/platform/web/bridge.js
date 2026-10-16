@@ -1794,7 +1794,14 @@
         // 自动标题复用展示层过滤：内部信封/子智能体交接不参与命名，避免 XML 痕迹进
         // sidebar。hideInternalEnvelope=true 剥离 turn_meta/system-reminder 元数据块，
         // 否则普通消息的标题会拼入尾随 turn_meta（引擎持久化为独立 text block）。
-        var titleText = firstUser ? userMessageDisplayText(firstUser.content || [], true) : "";
+        let titleText = firstUser ? userMessageDisplayText(firstUser.content || [], true) : "";
+        // The session-mention injection block (the ## Referenced chats contract
+        // at the head of a message) is not user body text and never feeds
+        // auto-titling; the single source of the contract parsing is
+        // features/chat/session-mention.js (published via the window global —
+        // classic-script bridges do not import features back).
+        const splitMention = window.__PINVOU_SESSION_MENTION__ && window.__PINVOU_SESSION_MENTION__.splitSessionMentionBlock;
+        if (splitMention) titleText = splitMention(titleText).text.trim();
         if (titleText) {
           var newTitle = titleText.slice(0, 20);
           await invoke("rename_session", { id: sid, title: newTitle });
@@ -5172,10 +5179,42 @@
     } else if (payload.indexOf(user) === payload.lastIndexOf(user)) {
       index = payload.indexOf(user);
     }
-    if (index < 0) return payload === user ? { before: "", after: "" } : null;
+    if (index < 0) {
+      // Session-mention block-aware fallback (web lane carries the same
+      // implementation as the tauri chat bridge): a queued scene send stores
+      // the text as <block><body> while a scene payload embeds the body
+      // inside its template, so the literal substring match above fails.
+      // The rebuild swaps in the EDITED block and body
+      // (rebuiltQueuedFromEnvelope) so the payload keeps the send-time shape.
+      const blockEnvelope = blockAwarePayloadEnvelope(user, payload);
+      if (blockEnvelope) return blockEnvelope;
+      return payload === user ? { before: "", after: "" } : null;
+    }
     return {
       before: payload.slice(0, index),
       after: payload.slice(index + user.length),
+    };
+  }
+  // Block-aware part of queuedPayloadEnvelope (web lane copy of the tauri
+  // chat bridge's implementation): splits <block><body> user text against a
+  // payload that really carries the block at its head. Returns null when the
+  // shape does not apply (no parser, no refs, refs-only text, prefixed
+  // payload, ambiguous body anchor).
+  function blockAwarePayloadEnvelope(user, payload) {
+    const splitMention = window.__PINVOU_SESSION_MENTION__ && window.__PINVOU_SESSION_MENTION__.splitSessionMentionBlock;
+    if (typeof splitMention !== "function") return null;
+    const split = splitMention(user);
+    if (!split || !split.refs.length || !split.text) return null;
+    const blockText = user.slice(0, user.length - split.text.length);
+    const body = split.text.trim();
+    if (!body || !payload.startsWith(blockText)) return null;
+    const bodyIndex = payload.indexOf(body, blockText.length);
+    if (bodyIndex < blockText.length || payload.includes(body, bodyIndex + 1)) return null;
+    return {
+      blockPrefix: blockText,
+      before: payload.slice(blockText.length, bodyIndex),
+      after: payload.slice(bodyIndex + body.length),
+      blockAware: true,
     };
   }
   function makeQueuedMessage(id, userText, payloadText, displayText, attachments, meta, restrictTools) {
@@ -5193,15 +5232,30 @@
       restrictTools,
     };
   }
+  function rebuiltQueuedFromEnvelope(envelope, userText) {
+    const raw = String(userText == null ? "" : userText);
+    if (envelope.blockAware) {
+      const splitMention = window.__PINVOU_SESSION_MENTION__ && window.__PINVOU_SESSION_MENTION__.splitSessionMentionBlock;
+      const split = typeof splitMention === "function" ? splitMention(raw) : null;
+      let block = "";
+      let body = raw;
+      if (split && split.matched) {
+        block = raw.slice(0, raw.length - split.text.length);
+        body = split.text;
+      }
+      return block + envelope.before + body + envelope.after;
+    }
+    return envelope.before + raw + envelope.after;
+  }
   function rebuiltQueuedPayload(item, userText) {
     const envelope = item && item.payloadEnvelope;
     if (!envelope || typeof envelope.before !== "string" || typeof envelope.after !== "string") return null;
-    return envelope.before + userText + envelope.after;
+    return rebuiltQueuedFromEnvelope(envelope, userText);
   }
   function rebuiltQueuedMetaPayload(item, userText) {
     const envelope = item && item.metaPayloadEnvelope;
     if (!envelope || typeof envelope.before !== "string" || typeof envelope.after !== "string") return null;
-    return envelope.before + userText + envelope.after;
+    return rebuiltQueuedFromEnvelope(envelope, userText);
   }
   // 桌宠窗口靠全局事件感知回合起止。turn_start 补齐"发送 → 首 token"的空窗
   // (chat:delta 之前引擎在思考,宠物不该干站着);turn_end 只兜 invoke 直接失败
@@ -5821,6 +5875,32 @@
   // - false        nothing dispatched and the text was NOT restored
   //                (notice-only early returns / admission rejected) — the
   //                caller owns putting the draft back.
+  // Web first turn (no session yet): a first turn already in flight blocks a
+  // duplicate admission; otherwise the first turn dispatches through its own
+  // pipeline. Returns the send verdict for the caller.
+  function maybeSubmitFirstWebTurn(text, displayText, readyAttachments, attachmentsPayload, meta) {
+    const existingFirstTurn = state.chatItems.some(function (item) {
+      return item && item.type === "user" && !!item.deliveryState;
+    });
+    if (existingFirstTurn) return false;
+    submitFirstWebTurn(text, displayText, readyAttachments, attachmentsPayload, meta);
+    return true;
+  }
+
+  // Materialization-abort recovery: the scoped restore owns the stripped body
+  // (the mention injection block never re-enters any composer or buffer). A
+  // refs-only message strips to "" (nothing restorable), but the abort
+  // semantics are unchanged — the send never dispatched and the draft is
+  // still alive — so it resolves "restored" too (round-18 MAJOR-1,
+  // superseding round-8 M1's false here): the caller's failure tail clears
+  // the provisional draft→session mapping and keeps the draft's chips
+  // scoped to the draft. Mirrors the tauri lane's inline branch.
+  function restoreAbortedMaterialization(text, draftOwner) {
+    const restoredBody = stripMentionBlockForComposerRestore(text);
+    if (!restoredBody) return "restored";
+    return restoreTaskDraft(restoredBody, draftOwner) ? "restored" : false;
+  }
+
   async function sendMessage(text, meta, voiceOwner) {
     if (voiceOwner && ((state.activeSessionId || null) !== voiceOwner.sessionId
       || (!voiceOwner.sessionId && Number(state.draftEpoch || 0) !== voiceOwner.draftEpoch))) return false;
@@ -5845,12 +5925,7 @@
     var attachmentsPayload = readyAttachments.map(function (a) { return a.result; });
 
     if (!state.activeSessionId && IS_WEB && canInvoke("web_access_create_session_and_chat")) {
-      var existingFirstTurn = state.chatItems.some(function (item) {
-        return item && item.type === "user" && !!item.deliveryState;
-      });
-      if (existingFirstTurn) return false;
-      submitFirstWebTurn(text, displayText, readyAttachments, attachmentsPayload, meta);
-      return true;
+      return maybeSubmitFirstWebTurn(text, displayText, readyAttachments, attachmentsPayload, meta);
     }
 
     if (!state.activeSessionId) {
@@ -5863,15 +5938,32 @@
       var materialized = await ensureSession(draftOwner);
       // 物化中止（await 期间切走）→ 按原始归属恢复，不写入当前其它会话。
       // （与 tauri 版对齐，二审 F3；错误提示由 ensureSession 内如实给出）。
-      // append=true: failure-recovery semantics — the user may have started
-      // the next message during the await.
       if (!materialized || state.activeSessionId !== materialized) {
         if (materialized) draftOwner.createdSessionId = materialized;
-        restoreTaskDraft(text, draftOwner);
-        // Scoped recovery owns the restore; the caller must not append again
-        // even when the text is retained in a background buffer or draft epoch.
-        return "restored";
+        // Round-27 asto MAJOR 2(a), mirrors the tauri m2(a) write: the
+        // commit-then-navigate tail COMMITS the created session to a
+        // background buffer (the draft epoch is dead) even though
+        // ensureSession returned null — report it so the send closure's
+        // verdict mapping routes the chips to the created session. The web
+        // lane has no rollback tail (desktop-only), so any null-return with
+        // a createdSessionId binding is this shape.
+        if (!materialized && draftOwner.createdSessionId && meta) {
+          meta.materializedSessionId = draftOwner.createdSessionId;
+        }
+        return restoreAbortedMaterialization(text, draftOwner);
       }
+      // Round-24 MAJOR (upstream PR #586 review, mirrors the tauri lane):
+      // report the committed materialization through the caller-owned meta
+      // out-param — the composer's scope effect cannot observe a draft→session
+      // transition that lands while ChatView is unmounted, so the send
+      // closure records the ledger mapping itself. Lane boundary (round-27
+      // asto MAJOR 2(b)): this covers the legacy-ensureSession first send;
+      // the optimistic web_access_create_session_and_chat first turn returns
+      // true BEFORE the create runs, so its settle precedes any
+      // materialization and no report can exist for it (async failure
+      // recovery is the retry-chip path, not a settle verdict) — disclosed in
+      // the upstream PR's Current limitations.
+      if (meta) meta.materializedSessionId = materialized;
     }
     var sid = state.activeSessionId;
     var activeTurnBuffer = getBuffer(sid);
@@ -5907,6 +5999,14 @@
       state.scheduledTaskDraft = consumed.scheduledTaskDraft;
       state.activeSkill = consumed.activeSkill;
     }
+    // Navigation interrupted the send: the text goes back to the session it
+    // was typed in (buffer draft), never into the session now on screen —
+    // "restored" keeps the caller from prefilling it there (#406). A
+    // refs-only message restores nothing: resolve false so the caller's
+    // non-dispatch recovery keeps its chips armed (round-8 M1).
+    function abandonToOwnSession() {
+      return restoreComposerText(sid, text) ? "restored" : false;
+    }
     function queuePrepared(prepared) {
       state.queued.push(makeQueuedMessage(
         ++itemIdSeq,
@@ -5936,10 +6036,8 @@
       if (state.activeSessionId !== sid) {
         // The user navigated away during the hydrate: the text goes back to
         // the session it was typed in (buffer draft), never into the session
-        // now on screen — "restored" keeps the caller from prefilling it
-        // there (issue #406).
-        restoreComposerText(sid, text);
-        return "restored";
+        // now on screen (issue #406).
+        return abandonToOwnSession();
       }
       recordAuthoritySyncDiagnostic("remote_sync_blocked_action", Object.assign({
         operation: "send",
@@ -5950,8 +6048,7 @@
     // The authoritative hydrate above is asynchronous. Never let an input that
     // originated in Session A drift into Session B if the user navigated away.
     if (state.activeSessionId !== sid) {
-      restoreComposerText(sid, text);
-      return "restored";
+      return abandonToOwnSession();
     }
     if (isBusyFor(sid) || state.queued.length > 0) {
       var racedQueuePreparation = consumeUiTurnState();
@@ -6035,7 +6132,10 @@
     // parked forever and never adoptable by a retry.
     if (sid) {
       if (owner.operationId) completeVoiceSubmission(owner.operationId, sid, false);
-      restoreComposerText(sid, text);
+      // Honor the verdict (upstream round-23 asto minor 1, mirrors the tauri
+      // lane): false means the text landed NOWHERE — keep owner.restored
+      // unset so a caller retry is not blocked.
+      if (!restoreComposerText(sid, text)) return false;
     } else if (state.activeSessionId) {
       // Retain one departed draft in memory, never in the unrelated active session.
       if (owner.operationId) completeVoiceSubmission(owner.operationId, null, false);
@@ -6074,20 +6174,44 @@
   // Background session: write the session buffer only — setComposerDraft
   // targets the active working set and would leak background text into the
   // active draft.
+  // Composer restores strip the injection block on restore — the splitter is
+  // published on the window global by features/chat/session-mention.js
+  // (classic-script bridges do not import features back).
+  function stripMentionBlockForComposerRestore(text) {
+    const raw = String(text || "");
+    const splitMention = (typeof window !== "undefined") && window.__PINVOU_SESSION_MENTION__ &&
+      window.__PINVOU_SESSION_MENTION__.splitSessionMentionBlock;
+    if (typeof splitMention !== "function") return raw;
+    const split = splitMention(raw);
+    return split && split.matched ? split.text.trim() : raw;
+  }
+
+  // Session-scoped composer text restore for sends abandoned by a session
+  // switch mid-send (issue #406; mirrors the tauri bridge's restoreSteerText,
+  // including the boolean verdict: a refs-only message strips to "" and
+  // restores nothing, and the caller must not report "restored" then).
+  // A bare setComposerDraft is invisible (the composer is React-local state
+  // that only re-reads the store on [activeSessionId, draftEpoch]). Active
+  // session: append at the store level with a "\n" separator and bump
+  // draftEpoch so the draft-restore effect re-reads the accumulated draft.
+  // Background session: write the session buffer only — setComposerDraft
+  // targets the active working set and would leak background text into the
+  // active draft.
   function restoreComposerText(sid, text) {
-    const value = String(text || "");
-    if (!sid || !value) return;
+    const value = stripMentionBlockForComposerRestore(text);
+    if (!sid || !value) return false;
     if (sid === state.activeSessionId) {
       const current = String(state.composerDraft || "");
       setComposerDraft(current ? current + "\n" + value : value);
       state.draftEpoch = (state.draftEpoch || 0) + 1;
       notify();
-      return;
+      return true;
     }
     const buffer = sessionStates[sid];
-    if (!buffer) return;
+    if (!buffer) return false;
     const current = String(buffer.composerDraft || "");
     buffer.composerDraft = current ? current + "\n" + value : value;
+    return true;
   }
   // Undo one queued message (the ✕ on its chip). Attachment handles carried
   // by the queued item are released in lockstep, matching the discard
@@ -7096,6 +7220,14 @@
   // chat:done 特殊:同步收尾(flush/busy=false/mode 复位)走 runSyncOnSession
   // 路由到对应 session;异步收尾(discard_plan/落盘/刷新列表)按显式 sid 路由,
   // 不依赖工作集 —— 这样后台 session 跑完也能正确落盘。
+  // Builtin feature switches (docs/builtin-toolset-contract.md §3.3): the host
+  // emits remote_control:tools_changed after every toggle; re-dispatch the same
+  // DOM CustomEvent the desktop bridge (chat-events.js) produces so ChatView's
+  // registry subscription hot-refreshes on browser clients too.
+  listen("remote_control:tools_changed", function () {
+    try { window.dispatchEvent(new CustomEvent("pinvou:tools-changed")); } catch { /* DOM dispatch failure only affects the refresh timing */ }
+  });
+
   listen("chat:done", function (e) {
     var sid = (e.payload && e.payload.session_id) || state.activeSessionId;
     var knownDoneSession = !!sid && state.sessions.some(function (session) { return session.id === sid; });
@@ -7815,6 +7947,14 @@
       state.settings = { theme: "genesis", color_scheme: "system", language: "zh-Hans" };
     }
     notify();
+  }
+  // Builtin feature switches (docs/builtin-toolset-contract.md §3.3): the web
+  // client proxies to the same desktop host, so the registry read is exposed
+  // here too (access-policy allowlists list_builtin_features; the write side
+  // stays desktop-only). Without it the session-mention gate would be stuck
+  // fail-open in the browser while the host already removed read_session.
+  async function listBuiltinFeatures() {
+    return invoke("list_builtin_features");
   }
   async function loadSelectedPet() {
     try {
@@ -11072,6 +11212,7 @@
     stopMonitorPolling: stopMonitorPolling,
     clearMonitorStats: clearMonitorStats,
     setSelectedPet: setSelectedPet,
+    listBuiltinFeatures: listBuiltinFeatures,
     loadBehaviorTelemetryStatus: loadBehaviorTelemetryStatus,
     setBehaviorTelemetryEnabled: setBehaviorTelemetryEnabled,
     saveSettings: saveSettings,
