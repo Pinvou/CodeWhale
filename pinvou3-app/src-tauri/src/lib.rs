@@ -635,6 +635,7 @@ pub(crate) async fn prepare_app_restart(app: &tauri::AppHandle) {
         browser.shutdown_before_restart().await;
     }
     harvest_child_processes(app).await;
+    startup::mark_lifecycle_clean_exit("restart");
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1964,10 +1965,14 @@ pub fn run() {
         .build(context)
         .expect("error while building tauri application");
     startup::mark("tauri:build:done");
+    startup::begin_lifecycle();
     startup::mark("tauri:event_loop:run_enter");
     let mut resumed_reported = false;
     app.run(move |app, event| match event {
-        tauri::RunEvent::Ready => startup::mark("tauri:event_loop:ready"),
+        tauri::RunEvent::Ready => {
+            startup::mark("tauri:event_loop:ready");
+            startup::mark_lifecycle_ready();
+        }
         tauri::RunEvent::Exit => {
             startup::mark("tauri:event_loop:exit");
             // On main-process exit, refresh browser URL restore manifests, destroy
@@ -1982,10 +1987,11 @@ pub fn run() {
             // state with user-stop semantics. Process exit destroys remaining WebViews,
             // and shutdown_on_exit always removes coordination files.
             // 退出收割:同步执行——Exit 后进程即将结束,这是最后的清理窗口。
-            // 重启(app.restart())跳过本事件,调用点在 restart 前主动调同一辅助函数。
+            // 重启调用点先完成异步清理；若运行时随后派发 Exit，本段清理保持幂等。
             startup::mark("exit:cleanup:start");
             tauri::async_runtime::block_on(harvest_child_processes(app));
             startup::mark("exit:cleanup:done");
+            startup::mark_lifecycle_clean_exit("exit_event");
         }
         tauri::RunEvent::Resumed if !resumed_reported => {
             resumed_reported = true;
@@ -1993,6 +1999,9 @@ pub fn run() {
         }
         _ => {}
     });
+    // Defensive fallback if a future runtime/platform lets the event loop return
+    // without an observable Exit callback. Current desktop event loops do not return.
+    startup::mark_lifecycle_clean_exit("event_loop_returned");
     startup::mark("process:exit");
 }
 
