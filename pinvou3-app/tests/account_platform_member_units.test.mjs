@@ -24,7 +24,7 @@ test('authority-confirmed replay returns a later current member without inferrin
  const c=new OrganizationClient({request:async()=>({...ack(),replayed:true,member:{...ack().member,version:9,unit_ids:[]}})});
  assert.equal((await c.replaceUnits(org,user,[unit],7,'member-units-operation-key')).replayed,true);
 });
-for (const status of ['DISABLED', 'REVOKED']) test(`verified receipt replay preserves current ${status} projection`, async () => {
+for (const status of ['SUSPENDED', 'REVOKED']) test(`verified receipt replay preserves current ${status} projection`, async () => {
  const c = new OrganizationClient({request:async()=>({...ack(),replayed:true,member:{...ack().member,status,version:10,unit_ids:[]}})});
  const result = await c.replaceUnits(org,user,[unit],7,'member-units-operation-key');assert.equal(result.member.status,status);assert.equal(result.member.version,10);
 });

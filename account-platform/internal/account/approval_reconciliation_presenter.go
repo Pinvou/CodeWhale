@@ -39,7 +39,7 @@ func approvalReconciliationFinancialDetail(target approvalReconciliationFinancia
 			LedgerEffect string `json:"ledger_effect"`
 		} `json:"financial_snapshot"`
 	}
-	if json.Unmarshal(encoded, &proof) != nil || proof.Normalized.ReconciliationCaseID != target.ReconciliationCaseID || proof.Critical.CaseID != target.ReconciliationCaseID || proof.Normalized.PaymentEvidenceID == uuid.Nil || proof.Critical.RunID == uuid.Nil || !approvalPaginationHexDigest(proof.Critical.FactsDigest) || !approvalPaginationHexDigest(proof.Critical.ProviderSnapshotDigest) || proof.Normalized.ResolutionCode != "PROVIDER_REFUND_CONFIRMED" || proof.Financial.LedgerEffect != "NONE" {
+	if target.ReconciliationCaseID == uuid.Nil || json.Unmarshal(encoded, &proof) != nil || proof.Normalized.ReconciliationCaseID != target.ReconciliationCaseID || proof.Critical.CaseID != target.ReconciliationCaseID || proof.Normalized.PaymentEvidenceID == uuid.Nil || proof.Critical.RunID == uuid.Nil || !approvalPaginationHexDigest(proof.Critical.FactsDigest) || !approvalPaginationHexDigest(proof.Critical.ProviderSnapshotDigest) || proof.Normalized.ResolutionCode != "PROVIDER_REFUND_CONFIRMED" || proof.Financial.LedgerEffect != "NONE" {
 		return approvalReconciliationFinancialRepairSummary{}, ErrApprovalDetailPresentationUnavailable
 	}
 	target.PaymentEvidenceID = proof.Normalized.PaymentEvidenceID

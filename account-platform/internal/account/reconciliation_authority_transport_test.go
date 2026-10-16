@@ -159,4 +159,55 @@ func TestF15ReconciliationNilSummaryRejected(t *testing.T) {
 	if approvalV2Command(ApprovalRequest{CommandType: "RECONCILIATION_FINANCIAL_REPAIR", PolicyVersion: 1, SnapshotSchemaVersion: 1, TargetResourceType: "RECONCILIATION_CASE", TargetResourceID: uuid.Nil.String()}) != nil {
 		t.Fatal("nil target reported as available")
 	}
+	// The public path already rejects this target before entering the helper.
+	zero := ApprovalRequest{CommandType: "RECONCILIATION_FINANCIAL_REPAIR", PolicyVersion: 1, SnapshotSchemaVersion: 1, TargetResourceType: "RECONCILIATION_CASE", TargetResourceID: uuid.Nil.String()}
+	if _, err := approvalV2Detail(zero, 1); !errors.Is(err, ErrApprovalDetailPresentationUnavailable) {
+		t.Fatal("public nil detail guard changed", err)
+	}
+	caseID := uuid.MustParse("00000000-0000-4000-8000-000000000001")
+	original := reconciliationTransportArtifacts(t).ProofInputJSON
+	valid, err := approvalReconciliationFinancialDetail(approvalReconciliationFinancialRepairSummary{ReconciliationCaseID: caseID}, original)
+	expected := approvalReconciliationFinancialRepairSummary{
+		ReconciliationCaseID: caseID, PaymentEvidenceID: uuid.MustParse("00000000-0000-4000-8000-000000000002"),
+		RunID: uuid.MustParse("00000000-0000-4000-8000-000000000003"), BusinessDate: "2026-10-07", AmountFen: "9007199254740993",
+		Currency: "CNY", LedgerEffect: "NONE", FactsDigest: strings.Repeat("a", 64), ResolutionCode: "PROVIDER_REFUND_CONFIRMED",
+	}
+	if err != nil || valid != expected {
+		t.Fatal("valid original frozen detail changed", valid, err)
+	}
+	encode := func(value any) json.RawMessage {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return encoded
+	}
+	proofFor := func(frozen, criticalCase uuid.UUID) []byte {
+		var proof, normalized, critical map[string]json.RawMessage
+		if json.Unmarshal(original, &proof) != nil || json.Unmarshal(proof["normalized_command"], &normalized) != nil || json.Unmarshal(proof["critical_resource_versions"], &critical) != nil {
+			t.Fatal("original frozen projection fixture")
+		}
+		normalized["reconciliation_case_id"] = encode(frozen)
+		critical["case_id"] = encode(criticalCase)
+		proof["normalized_command"] = encode(normalized)
+		proof["critical_resource_versions"] = encode(critical)
+		return encode(proof)
+	}
+	for _, test := range []struct {
+		name                     string
+		target, frozen, critical uuid.UUID
+	}{
+		{"both-nil-helper", uuid.Nil, uuid.Nil, uuid.Nil},
+		{"zero-target-helper", uuid.Nil, caseID, caseID},
+		{"zero-frozen-helper", caseID, uuid.Nil, caseID},
+		{"critical-case-mismatch", caseID, caseID, uuid.New()},
+		{"frozen-case-mismatch", caseID, uuid.New(), uuid.New()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := approvalReconciliationFinancialDetail(approvalReconciliationFinancialRepairSummary{ReconciliationCaseID: test.target}, proofFor(test.frozen, test.critical))
+			if !errors.Is(err, ErrApprovalDetailPresentationUnavailable) || got != (approvalReconciliationFinancialRepairSummary{}) {
+				t.Fatal("invalid direct-helper frozen identity accepted", got, err)
+			}
+		})
+	}
 }

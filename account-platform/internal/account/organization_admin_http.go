@@ -571,7 +571,7 @@ func (s *Service) adminSetOrganizationResourceStatus(w http.ResponseWriter, r *h
 			return
 		}
 	}
-	err = repository.AdminSetOrganizationStatus(r.Context(), principal, resourceID, body.Status)
+	err = repository.AdminSetOrganizationStatus(r.Context(), principal, resourceID, state.Version, body.Status)
 
 	if err != nil {
 		s.writeError(w, r, err)

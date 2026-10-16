@@ -511,9 +511,8 @@ impl Pinvou3Bridge {
         crate::platform::startup::mark("bridge_boot:prefs_load:start");
         let prefs = UserPrefs::load();
         crate::platform::startup::mark("bridge_boot:prefs_load:done");
-        if !paths::settings_path().exists() {
-            prefs.save().ok();
-        }
+        // Same locked step as `update_transaction` — see `save_boot_defaults_if_absent`.
+        prefs::save_boot_defaults_if_absent(&prefs);
         let this = Self {
             prefs,
             bundle,
@@ -1791,9 +1790,13 @@ impl Pinvou3Bridge {
     /// min(window/4, 32768), with no window fact falling back to a quarter
     /// of the 128K fallback (→32768); then min-tightened by the endpoint's
     /// self-reported output limit (probe) and the window headroom. Cloud
-    /// presets and coding_plan never declare (SavedModel.max_output_tokens
-    /// defaults to None) and fall back to the base's vendor capability /
-    /// conservative guess.
+    /// presets and coding_plan declare no endpoint tier of their own
+    /// (SavedModel.max_output_tokens defaults to None) but still carry the
+    /// documented-output anchors from
+    /// `core::model_context::resolved_output_limit`: vendor-documented
+    /// fill-gap facts for models the base chain doesn't catalogue, replacing
+    /// the base's 8192 uncatalogued guess (base-catalogued models stay on
+    /// the base's Documented path — the anchor declines for them).
     fn route_limits_for_model(&self, model: &str) -> Option<codewhale_config::route::RouteLimits> {
         let saved = self.effective_model().filter(|saved| saved.model == model);
         let configured_context = saved.and_then(|saved| saved.context_window_tokens);
@@ -1859,7 +1862,14 @@ impl Pinvou3Bridge {
             // Documented-output anchors (core::model_context): cloud models the
             // base catalog has no output row for would otherwise ride the
             // engine's 8192 uncatalogued fail-close, which starves the
-            // Responses wire where reasoning meters as output.
+            // Responses wire where reasoning meters as output — and truncates
+            // CoT-first Chat models such as deepseek-flash mid-turn. The
+            // anchor declines for base-resolved models (fill-gap only), so a
+            // fresher base row is never tightened by this table. A documented
+            // capability fact, same standing as the operator-owned tier and
+            // the base catalogue: NOT clamped by the process-level
+            // max_output_tokens() (24K); users tighten explicitly via
+            // SavedModel.max_output_tokens (configured_output wins above).
             .or_else(|| crate::core::model_context::resolved_output_limit(model))
             // The endpoint's self-reported output limit (the `/v1/models`
             // probe) only min-tightens: when the API rejects over-limit
@@ -2013,6 +2023,7 @@ impl Pinvou3Bridge {
             //    in the new struct) ——
             model: _,
             workspace: _,
+            workspace_roots: _, // host exposes one execution root, not SDK attachments
             session_id: _,
             allow_shell: _,
             trust_mode: _,
@@ -2150,6 +2161,12 @@ impl Pinvou3Bridge {
             // pinvou3 override
             model: self.model(),
             workspace: self.workspace.clone(),
+            // Input is EngineConfig::default(), not a caller-supplied root set.
+            // Empty attachments preserve the single execution-root contract;
+            // SessionRoots.ledger remains delegated-agent state, not tool authority.
+            // CodeWhale #54 多根授权基建：空集经底座 normalize 后等价单根
+            // （workspace 置于位置 0），保持既有行为。
+            workspace_roots: Vec::new(),
             session_id: None,
             allow_shell: self.allow_shell(),
             trust_mode: true,
@@ -4685,6 +4702,7 @@ mod tests {
                 .check(codewhale_execpolicy::ExecPolicyContext {
                     command,
                     cwd: ".",
+                    workspace_roots: Vec::new(),
                     tool: Some("exec_shell"),
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::Never,
@@ -4740,6 +4758,7 @@ mod tests {
                 .check(codewhale_execpolicy::ExecPolicyContext {
                     command,
                     cwd: ".",
+                    workspace_roots: Vec::new(),
                     tool: Some("exec_shell"),
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::Never,
@@ -4803,6 +4822,7 @@ mod tests {
                 .check(codewhale_execpolicy::ExecPolicyContext {
                     command,
                     cwd: ".",
+                    workspace_roots: Vec::new(),
                     tool: Some("exec_shell"),
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::Never,
@@ -4999,6 +5019,7 @@ mod tests {
                 .check(codewhale_execpolicy::ExecPolicyContext {
                     command,
                     cwd: ".",
+                    workspace_roots: Vec::new(),
                     // The model-facing `bash` tool reaches the internal
                     // `exec_shell` policy identity before consulting rules.
                     tool: Some("exec_shell"),
@@ -6471,6 +6492,99 @@ mod tests {
         );
     }
 
+    /// Cloud-preset documented-output anchors (2026-10-14 deepseek-flash
+    /// truncation bug): the base output chain only knows the v4 spellings,
+    /// so the current official id deepseek-flash rides the engine's 8192
+    /// uncatalogued fail-close and reasoning-heavy turns die mid-CoT. The
+    /// anchor declares the documented 384K route fact — same standing as
+    /// the operator tier, NOT clamped by the process-level 24K budget —
+    /// while the user's explicit configuration keeps winning and
+    /// operator-owned endpoints keep their tier declaration.
+    #[test]
+    fn cloud_documented_output_anchor_replaces_uncatalogued_guess() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+            "DEEPSEEK_MAX_OUTPUT_TOKENS",
+            "PINVOU3_MAX_OUTPUT_TOKENS",
+        ]);
+        // A. Official DeepSeek preset × deepseek-flash, no explicit
+        // configuration: the documented 384K fact replaces the base's 8192
+        // uncatalogued guess (context 1M via PINVOU_OVERRIDES, so the
+        // window-headroom min keeps 384000; the 24K process budget never
+        // clamps a documented capability fact).
+        let mut cloud = fixture_bridge();
+        set_active_model(
+            &mut cloud,
+            ModelPreset::Deepseek,
+            "deepseek-flash",
+            "https://api.deepseek.com",
+            "sk-deepseek",
+        );
+        let limits = cloud
+            .route_limits_for_model("deepseek-flash")
+            .expect("deepseek-flash must resolve route limits");
+        assert_eq!(limits.context_tokens, Some(1_000_000));
+        assert_eq!(limits.output_tokens, Some(384_000));
+        // glm-5.3-flashx rides the same anchor (official 128K output; the
+        // base exact arm lists glm-5.3-flash but never the flashx wire id).
+        let flashx_limits = cloud
+            .route_limits_for_model("glm-5.3-flashx")
+            .expect("glm-5.3-flashx must resolve route limits");
+        assert_eq!(flashx_limits.output_tokens, Some(131_072));
+        // The Tencent Token Plan spelling of the same V4.1-Flash declares
+        // the same 384K through its own anchor row (no prefix tolerance
+        // carries the bare id). On the combined tree its 1M context rides
+        // the PINVOU_OVERRIDES row from the 2026-10 catalog refresh; the
+        // explicit declaration below stands in for that fact
+        // deterministically. Without the row the id resolves no output
+        // fact anywhere and a context-only declaration takes the quartile
+        // branch on the wire — the same 8192 truncation.
+        let mut tencent = fixture_bridge();
+        set_active_model(
+            &mut tencent,
+            ModelPreset::Deepseek,
+            "deepseek/deepseek-flash",
+            "https://api.deepseek.com",
+            "sk-deepseek",
+        );
+        tencent.prefs.advanced.saved_models[0].context_window_tokens = Some(1_048_576);
+        let tencent_limits = tencent
+            .route_limits_for_model("deepseek/deepseek-flash")
+            .expect("deepseek/deepseek-flash must resolve route limits");
+        assert_eq!(tencent_limits.context_tokens, Some(1_048_576));
+        assert_eq!(tencent_limits.output_tokens, Some(384_000));
+        // B. The user's explicit max_output_tokens keeps winning — and keeps
+        // the process-level 24K min-clamp semantics of explicit configs.
+        cloud.prefs.advanced.saved_models[0].max_output_tokens = Some(8_192);
+        let explicit = cloud
+            .route_limits_for_model("deepseek-flash")
+            .expect("deepseek-flash must resolve route limits");
+        assert_eq!(explicit.output_tokens, Some(8_192));
+        // C. Operator-owned endpoints declare by the window tier when the
+        // tier fires: a custom endpoint serving deepseek-flash with a
+        // declared 1M window takes the >=500K tier (131072), not 384000.
+        // (When the tier yields — declared window <16K, tier value <4096 →
+        // None — the anchor chain does run; the small declared window's
+        // headroom min then clamps the fact, so the anchor still never
+        // outranks an operator window.)
+        let mut local = fixture_bridge();
+        set_active_model(
+            &mut local,
+            ModelPreset::OpenaiCompatible,
+            "deepseek-flash",
+            "http://127.0.0.1:8000/v1",
+            "k",
+        );
+        local.prefs.advanced.saved_models[0].context_window_tokens = Some(1_048_576);
+        let tiered = local
+            .route_limits_for_model("deepseek-flash")
+            .expect("deepseek-flash must resolve route limits");
+        assert_eq!(tiered.output_tokens, Some(131_072));
+    }
+
     /// The cloud large-window models actually in use (not probed →
     /// probed=None, window via catalog/name hint).
     /// Assert that the derived T, converted to the conservative ruler, stays
@@ -7692,6 +7806,41 @@ mod tests {
         );
     }
 
+    /// SDK attachments are not exposed by the current host. The execution
+    /// directory and delegated-agent ledger are separate authority domains.
+    #[test]
+    fn forkguard_engine_config_keeps_only_execution_root() {
+        let (_lock, _env) = locked_env(&["PINVOU3_HOME"]);
+        let root = std::env::temp_dir().join(format!(
+            "pinvou3-single-execution-root-{}-{}",
+            std::process::id(),
+            crate::bridge::paths::tests::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create hermetic test home");
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &root) };
+        let bridge = fixture_bridge();
+        assert!(bridge.build_engine_config().workspace_roots.is_empty());
+
+        let execution = root.join("project");
+        let ledger = root.join("session-ledger");
+        let cfg = bridge.build_engine_config_for_session_roots(
+            "single-execution-root",
+            SessionRoots {
+                execution: execution.clone(),
+                ledger: ledger.clone(),
+                bound: true,
+            },
+        );
+        assert_eq!(cfg.workspace, execution);
+        assert_eq!(cfg.subagent_state_root.as_deref(), Some(ledger.as_path()));
+        assert!(
+            cfg.workspace_roots.is_empty(),
+            "ledger must not become a writable attachment"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// Destructure the Op returned by build_send_message_op into
     /// (allow_shell, trust_mode); panics on failure (test helper).
     fn extract_shell_trust(op: Op) -> (bool, bool) {
@@ -8367,6 +8516,7 @@ mod tests {
         // which also matches the base's Chat reasoning family — responses
         // wins) and nothing else.
         for model in [
+            "gpt-6.1-sol",
             "gpt-6-sol",
             "gpt-6-luna",
             "gpt-6-astra",
@@ -10503,6 +10653,7 @@ mod tests {
 
         let ordinary = bridge.build_engine_config_for_session_roots("sched-run", roots.clone());
         assert_eq!(ordinary.workspace, automation);
+        assert!(ordinary.workspace_roots.is_empty());
         assert_eq!(
             ordinary.subagent_state_root.as_deref(),
             Some(automation.as_path()),
@@ -10513,6 +10664,7 @@ mod tests {
         let multi_agent =
             bridge.build_engine_config_for_multi_agent("sched-run", roots, &snapshot, true);
         assert_eq!(multi_agent.workspace, automation);
+        assert!(multi_agent.workspace_roots.is_empty());
         assert_eq!(
             multi_agent.subagent_state_root.as_deref(),
             Some(automation.as_path())

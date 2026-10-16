@@ -44,6 +44,66 @@ pub struct EngineAcquireTiming {
     pub sync_session_ms: u64,
 }
 
+/// Fixed, content-free model lifecycle evidence owned by one admitted turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum ModelRejectionCode {
+    #[serde(rename = "MODEL_UNAVAILABLE")]
+    Unavailable,
+    #[serde(rename = "MODEL_DEPRECATED")]
+    Deprecated,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ModelRejection {
+    pub schema_version: u8,
+    pub code: ModelRejectionCode,
+    pub model_id: String,
+    #[serde(default, skip_serializing_if = "false_legacy_binding")]
+    pub legacy_binding: bool,
+}
+
+fn false_legacy_binding(value: &bool) -> bool {
+    !*value
+}
+
+impl ModelRejection {
+    pub(crate) fn new(code: ModelRejectionCode, model_id: &str) -> Option<Self> {
+        let model_id = uuid::Uuid::parse_str(model_id).ok()?;
+        if model_id.is_nil() {
+            return None;
+        }
+        Some(Self {
+            schema_version: 1,
+            code,
+            model_id: model_id.to_string(),
+            legacy_binding: false,
+        })
+    }
+
+    // Produced only by local runtime preparation after a fully decoded catalog
+    // proves the saved legacy name absent. No fabricated UUID or model name is
+    // persisted, and the ordinary UUID/header constructor remains unchanged.
+    pub(crate) fn legacy_unavailable() -> Self {
+        Self {
+            schema_version: 1,
+            code: ModelRejectionCode::Unavailable,
+            model_id: String::new(),
+            legacy_binding: true,
+        }
+    }
+
+    fn is_valid(&self) -> bool {
+        self.schema_version == 1
+            && if self.legacy_binding {
+                self.code == ModelRejectionCode::Unavailable && self.model_id.is_empty()
+            } else {
+                uuid::Uuid::parse_str(&self.model_id).is_ok_and(|id| {
+                    !id.is_nil() && id.to_string() == self.model_id.to_ascii_lowercase()
+                })
+            }
+    }
+}
+
 #[derive(Debug)]
 struct ActiveTurnTiming {
     turn_id: String,
@@ -52,8 +112,10 @@ struct ActiveTurnTiming {
     /// the task lifecycle on the engine-provided id.
     behavior_turn_id: Option<String>,
     billing_notice: Option<serde_json::Value>,
+    model_rejection: Option<ModelRejection>,
     engine_acquire: Option<EngineAcquireTiming>,
     engine_ready_timestamp: Option<i64>,
+    engine_turn_started_timestamp: Option<i64>,
     first_output_timestamp: Option<i64>,
     #[cfg(any(feature = "benchmark-hooks", test))]
     recorded_first_events: HashSet<&'static str>,
@@ -69,8 +131,10 @@ impl ActiveTurnTiming {
             turn_id,
             behavior_turn_id: None,
             billing_notice: None,
+            model_rejection: None,
             engine_acquire: None,
             engine_ready_timestamp: None,
+            engine_turn_started_timestamp: None,
             first_output_timestamp: None,
             #[cfg(any(feature = "benchmark-hooks", test))]
             recorded_first_events: HashSet::new(),
@@ -254,6 +318,39 @@ pub(crate) fn has_extra_queued_turns(session_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Capture the timing owner before asynchronous preparation or delivery.
+pub(crate) fn current_turn_id(session_id: &str) -> Option<String> {
+    active_turns()
+        .lock()
+        .ok()?
+        .get(session_id)?
+        .back()
+        .map(|turn| turn.turn_id.clone())
+}
+
+/// Never attach old evidence to a later turn or a recreated session with the same id.
+pub(crate) fn record_model_rejection_for_turn(
+    session_id: &str,
+    turn_id: &str,
+    rejection: ModelRejection,
+) -> bool {
+    if !rejection.is_valid() {
+        return false;
+    }
+    active_turns()
+        .lock()
+        .ok()
+        .and_then(|mut map| {
+            let turn = map.get_mut(session_id)?.back_mut()?;
+            if turn.turn_id != turn_id {
+                return None;
+            }
+            turn.model_rejection = Some(rejection);
+            Some(())
+        })
+        .is_some()
+}
+
 /// Attach the structured notice to the timing owner already active for this turn.
 pub fn record_billing_notice(session_id: &str, notice: serde_json::Value) -> bool {
     active_turns()
@@ -415,9 +512,13 @@ fn finish_turn_internal(
     if let Some(billing_notice) = active_turn.billing_notice {
         entry["billing_notice"] = billing_notice;
     }
+    if let Some(model_rejection) = active_turn.model_rejection {
+        entry["model_rejection"] = json!(model_rejection);
+    }
     if let Some(engine_acquire) = active_turn.engine_acquire {
         entry["engine_startup"] = json!({
             "engine_ready_timestamp": active_turn.engine_ready_timestamp,
+            "engine_turn_started_timestamp": active_turn.engine_turn_started_timestamp,
             "first_output_timestamp": active_turn.first_output_timestamp,
             "engine_acquire": engine_acquire,
         });
@@ -482,6 +583,19 @@ pub fn record_engine_ready(session_id: &str, timing: EngineAcquireTiming) {
     {
         active.engine_acquire = Some(timing);
         active.engine_ready_timestamp = Some(now_ms());
+    }
+}
+
+/// Record the foundation's authoritative turn-start instant. CodeWhale emits
+/// this after route resolution and admission, but before request assembly and
+/// provider dispatch, so it separates host/command preparation from model
+/// time-to-first-visible-output without guessing at internal stages.
+pub fn record_engine_turn_started_at(session_id: &str, timestamp: i64) {
+    if let Ok(mut map) = active_turns().lock()
+        && let Some(active) = map.get_mut(session_id).and_then(VecDeque::back_mut)
+        && active.engine_turn_started_timestamp.is_none()
+    {
+        active.engine_turn_started_timestamp = Some(timestamp);
     }
 }
 
@@ -573,6 +687,8 @@ pub struct TimelineEvent {
     pub error: Option<String>, // assistant_done only
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub billing_notice: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) model_rejection: Option<ModelRejection>,
     pub usage: Option<TurnUsage>, // assistant_done / context_snapshot(老事件为 None)
     #[cfg(any(feature = "benchmark-hooks", test))]
     pub tool_name: Option<String>,
@@ -727,6 +843,11 @@ fn parse_timeline_line(line: &str) -> Option<TimelineEvent> {
             .filter(|s| !s.is_empty())
             .map(str::to_string),
         billing_notice: v.get("billing_notice").cloned(),
+        model_rejection: v
+            .get("model_rejection")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<ModelRejection>(value).ok())
+            .filter(ModelRejection::is_valid),
         usage,
         #[cfg(any(feature = "benchmark-hooks", test))]
         tool_name: v
@@ -862,7 +983,113 @@ pub fn compute_stats(session_id: &str) -> std::io::Result<SessionTimelineStats> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_model_rejection_is_explicit_and_does_not_weaken_uuid_evidence() {
+        let legacy = ModelRejection::legacy_unavailable();
+        assert!(legacy.is_valid());
+        let encoded = serde_json::to_value(&legacy).unwrap();
+        assert_eq!(
+            encoded,
+            json!({"schema_version":1,"code":"MODEL_UNAVAILABLE","model_id":"","legacy_binding":true})
+        );
+        assert_eq!(
+            serde_json::from_value::<ModelRejection>(encoded).unwrap(),
+            legacy
+        );
+        for marker in [
+            json!({"schema_version":1,"code":"MODEL_DEPRECATED","model_id":"","legacy_binding":true}),
+            json!({"schema_version":1,"code":"MODEL_UNAVAILABLE","model_id":"deepseek-v4-flash","legacy_binding":true}),
+            json!({"schema_version":1,"code":"MODEL_UNAVAILABLE","model_id":"0199a100-0001-7000-8000-000000000107","legacy_binding":true}),
+            json!({"schema_version":1,"code":"MODEL_UNAVAILABLE","model_id":"","legacy_binding":false}),
+        ] {
+            assert!(
+                !serde_json::from_value::<ModelRejection>(marker)
+                    .unwrap()
+                    .is_valid()
+            );
+        }
+        assert!(
+            ModelRejection::new(ModelRejectionCode::Unavailable, "deepseek-v4-flash").is_none()
+        );
+        let uuid = ModelRejection::new(
+            ModelRejectionCode::Unavailable,
+            "0199a100-0001-7000-8000-000000000107",
+        )
+        .unwrap();
+        assert!(uuid.is_valid());
+        assert!(
+            !serde_json::to_value(uuid)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("legacy_binding")
+        );
+    }
     use crate::platform::paths::tests::ENV_LOCK;
+
+    #[test]
+    fn model_rejection_requires_exact_timing_owner_and_typed_reader() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp =
+            std::env::temp_dir().join(format!("pinvou-timing-model-{}", uuid::Uuid::new_v4()));
+        let previous_home = std::env::var_os("PINVOU3_HOME");
+        // SAFETY: ENV_LOCK serializes process environment changes in tests.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+        let sid = "typed-model-owner";
+        let old = start_turn(sid);
+        let value = ModelRejection::new(
+            ModelRejectionCode::Unavailable,
+            "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c",
+        )
+        .unwrap();
+        clear_session(sid);
+        let current = start_turn(sid);
+        assert!(!record_model_rejection_for_turn(sid, &old, value.clone()));
+        assert!(record_model_rejection_for_turn(
+            sid,
+            &current,
+            value.clone()
+        ));
+        finish_turn(sid, "send_error", Some("generic prepared model error"));
+        let terminal = read_timeline(sid)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.event == "assistant_done")
+            .unwrap();
+        assert_eq!(terminal.turn_id, current);
+        assert_eq!(terminal.model_rejection, Some(value.clone()));
+        assert!(!record_model_rejection_for_turn(sid, &current, value));
+        let mut line = json!({ "turn_id": "legacy", "event": "assistant_done", "timestamp": 1, "ts": "legacy", "status": "Failed" });
+        assert!(
+            parse_timeline_line(&line.to_string())
+                .unwrap()
+                .model_rejection
+                .is_none()
+        );
+        for marker in [
+            json!({ "schema_version": 1, "code": "MODEL_REMOVED", "model_id": "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c" }),
+            json!({ "schema_version": 2, "code": "MODEL_UNAVAILABLE", "model_id": "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c" }),
+            json!({ "schema_version": 1, "code": "MODEL_UNAVAILABLE", "model_id": "bad" }),
+            json!({ "schema_version": 1, "code": "MODEL_UNAVAILABLE", "model_id": "00000000-0000-0000-0000-000000000000" }),
+        ] {
+            line["model_rejection"] = marker;
+            assert!(
+                parse_timeline_line(&line.to_string())
+                    .unwrap()
+                    .model_rejection
+                    .is_none()
+            );
+        }
+        clear_session(sid);
+        unsafe {
+            match previous_home {
+                Some(value) => std::env::set_var("PINVOU3_HOME", value),
+                None => std::env::remove_var("PINVOU3_HOME"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(tmp);
+    }
 
     #[test]
     fn billing_notice_survives_timeline_hydration() {
@@ -1692,6 +1919,7 @@ mod tests {
                 sync_session_ms: 0,
             },
         );
+        record_engine_turn_started_at(sid, 1_700_000_000_123);
         record_first_output(sid);
         record_first_message_delta(sid);
         finish_turn(sid, "Completed", None);
@@ -1717,6 +1945,10 @@ mod tests {
             321
         );
         assert!(terminal["engine_startup"]["engine_ready_timestamp"].is_i64());
+        assert_eq!(
+            terminal["engine_startup"]["engine_turn_started_timestamp"],
+            1_700_000_000_123_i64
+        );
         assert!(terminal["engine_startup"]["first_output_timestamp"].is_i64());
         assert!(
             !raw.contains("workspace") && !raw.contains("model_name"),

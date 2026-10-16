@@ -1,11 +1,10 @@
 # Native model cancellation
 
 The desktop model provider remains Account Platform. The former `llmapi_hub`
-and legacy command module are retained as source history but are no longer
-compiled: F05 already removed their consumers and invoke registrations, and
-their private provisioning API depended on settings fields removed by the
-Account Platform migration. This change adds no legacy settings aliases,
-changes no invoke registration, and deletes no files or user data. The existing
+source has been removed because it had no compiled consumer or invoke
+registration. The legacy command file remains only as a protocol text fixture;
+it is not compiled or registered. Existing legacy settings aliases and model
+identifiers are unchanged, and no user data is deleted. The independent
 `client_migration` still owns legacy data migration and credential cleanup.
 
 Each outgoing model invocation records its session, lifecycle generation,
@@ -59,6 +58,16 @@ identity, cancellation/reclaim, lost cancellation ACK, read-only lost-header
 recovery, unknown lookup, and rejection of late delivery from an old generation.
 These fixtures prove the native HTTP/lifecycle boundary, not live provider
 cancellation support or production financial settlement.
+
+When a complete, valid catalog cannot resolve a retained legacy model name,
+the desktop marks that binding unavailable and offers the existing explicit
+replacement-branch action. It preserves the original binding, global default
+and other sessions; similar names are never substituted automatically.
+Malformed catalogs, empty references and malformed UUID identities do not
+produce lifecycle evidence. The content-free legacy marker is created only by
+local preparation under its existing turn owner; remote response bodies and
+headers cannot produce it. A replacement is created only after the user chooses
+an available model and confirms the existing branch action.
 
 The existing server admission budget counts `SETTLEMENT_PENDING` among in-flight
 states: each personal user has at most five such concurrent invocations, alongside

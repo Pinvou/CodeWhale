@@ -38,7 +38,7 @@ func approvalChargebackFinancialDetail(target approvalChargebackFinancialRepairS
 			ComponentDigest           string    `json:"component_digest"`
 		} `json:"financial_snapshot"`
 	}
-	if json.Unmarshal(encoded, &proof) != nil || proof.Normalized.ChargebackCaseID != target.ChargebackCaseID || proof.Normalized.PaymentEvidenceID == uuid.Nil || proof.Normalized.ExpectedCaseVersion == "" || proof.Normalized.ExpectedCaseVersion != proof.Critical.ChargebackCaseVersion || !approvalPaginationHexDigest(proof.Critical.FactsDigest) || !approvalPaginationHexDigest(proof.Financial.ComponentDigest) || proof.Financial.WalletID == uuid.Nil || proof.Financial.PackageID == uuid.Nil || proof.Normalized.ReasonCode != "BASE_SHORTFALL_COMPENSATION" {
+	if target.ChargebackCaseID == uuid.Nil || json.Unmarshal(encoded, &proof) != nil || proof.Normalized.ChargebackCaseID != target.ChargebackCaseID || proof.Normalized.PaymentEvidenceID == uuid.Nil || proof.Normalized.ExpectedCaseVersion == "" || proof.Normalized.ExpectedCaseVersion != proof.Critical.ChargebackCaseVersion || !approvalPaginationHexDigest(proof.Critical.FactsDigest) || !approvalPaginationHexDigest(proof.Financial.ComponentDigest) || proof.Financial.WalletID == uuid.Nil || proof.Financial.PackageID == uuid.Nil || proof.Normalized.ReasonCode != "BASE_SHORTFALL_COMPENSATION" {
 		return approvalChargebackFinancialRepairSummary{}, ErrApprovalDetailPresentationUnavailable
 	}
 	target.PaymentEvidenceID = proof.Normalized.PaymentEvidenceID

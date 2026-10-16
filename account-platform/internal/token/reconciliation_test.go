@@ -127,7 +127,10 @@ func TestUsageReconcilerRoutesDefinitiveCommitConflictToManualReview(t *testing.
 
 func TestUsageReconcilerStopsAfterDeadlineWhenHoldReleaseFails(t *testing.T) {
 	usageID, holdID, priceID := uuid.New(), uuid.New(), uuid.New()
-	item := ReconciliationItem{UsageRequest: UsageRequest{ID: usageID, HoldID: &holdID, PriceVersionID: &priceID, Status: "REVIEW", StartedAt: time.Now().Add(-25 * time.Hour)}, Attempts: 30}
+	// This retains the captured-reference/provider-unavailable deadline path.
+	// Missing reference now follows the separately checked release policy.
+	provider, adapter, reference := "NEW_API", "new-api-v1", "captured-request"
+	item := ReconciliationItem{UsageRequest: UsageRequest{ID: usageID, HoldID: &holdID, PriceVersionID: &priceID, Status: "REVIEW", StartedAt: time.Now().Add(-25 * time.Hour)}, Attempts: 30, ProviderID: &provider, AdapterVersion: &adapter, UpstreamRequestID: &reference}
 	store := &reconciliationStoreFake{claims: []ReconciliationItem{item}}
 	billing := &reconciliationBillingFake{releaseErr: errors.New("billing unavailable")}
 	reconciler := NewUsageReconciler(store, billing, nil, time.Second)

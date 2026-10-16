@@ -26,16 +26,12 @@ import { formatSessionDate, localDateKey, formatDateGroupLabel } from '../shared
 import { groupSessionsWithProjects, resolveSessionProjectId, needsAddFolderConfirm, unavailableProjectRootPaths, WORKSPACE_KIND_BOUND } from '../features/projects/projectGrouping.js';
 import { ProjectGroupHeader } from '../features/projects/ProjectGroupHeader.jsx';
 import { classifyRebindError, mergeRebindCarryoverIds } from '../features/projects/rebindErrors.js';
-import { runSessionBatch } from '../shared/session-management.js';
 const LazyAccountPlatformPopover = lazy(() => VIEW_LOADERS.accountPlatformPopover().then(module => ({ default: module.AccountPlatformPopover })));
 import { AccountPlatformDesktopClient } from '../features/account-platform/desktop-client.js';
 import { can, isWeb } from '../shared/platform.js';
 import { errorCode, localizedErrorMessage } from '../shared/user-facing-error.js';
 import { installGlobalMarkdownRenderer } from '../shared/markdown-renderer.js';
-import {
-  acquireNativeSurfaceTransitionHide,
-  BrowserView,
-} from '../features/browser/BrowserView.jsx';
+import { acquireNativeSurfaceTransitionHide } from '../features/browser/native-surface-coordinator.js';
 import {
   createNativeSurfaceTransitionGate,
   settleBrowserUiPublicationAfterCommit,
@@ -109,6 +105,7 @@ const LazySettingsView = lazy(() => VIEW_LOADERS.settings().then(m => ({ default
 const LazyToolStoreView = lazy(() => VIEW_LOADERS.toolStore().then(m => ({ default: m.ToolStoreView })));
 const LazyCardPoolView = lazy(() => VIEW_LOADERS.cardpool().then(m => ({ default: m.CardPoolView })));
 const LazyScheduledTasksView = lazy(() => VIEW_LOADERS.scheduled().then(m => ({ default: m.ScheduledTasksView })));
+const LazyBrowserView = lazy(() => VIEW_LOADERS.browser().then(m => ({ default: m.BrowserView })));
 const LazyKnowledgeView = lazy(() => VIEW_LOADERS.knowledge().then(m => ({ default: m.KnowledgeView })));
 const LazyModelStoreView = lazy(() => VIEW_LOADERS.modelStore().then(m => ({ default: m.ModelStoreView })));
 const LazyMonitorView = lazy(() => VIEW_LOADERS.monitor().then(m => ({ default: m.MonitorView })));
@@ -629,6 +626,10 @@ const NAV_PREFETCH = {
         if (!browserNativeDisplayAvailable || !requestedSessionId || !browserPaneAllowed) return;
         setBrowserPaneStates((current) => activateBrowserPane(current, requestedSessionId));
         if (browserActive) return;
+        // Hide the lazy chunk fetch inside the Rust workspace preparation. A
+        // failed prefetch remains non-blocking; React.lazy owns the visible
+        // retry/error boundary when the view actually mounts.
+        prefetchView('browser');
         const attempt = browserOpenAttemptSequenceRef.current + 1;
         browserOpenAttemptSequenceRef.current = attempt;
         browserOpenAttemptsRef.current[requestedSessionId] = attempt;
@@ -3074,7 +3075,8 @@ const NAV_PREFETCH = {
       }
 
       // 对话管理页批量操作:按会话类型分流并等待全部结果,避免未执行完成就误报成功。
-      async function handleBatchArchiveSessions(ids) {
+      // 批量执行器由已加载的 SearchView 传入,不让低频操作进入启动模块图。
+      async function handleBatchArchiveSessions(ids, runSessionBatch) {
         if (!bridge.available || !ids || !ids.length) return;
         const result = await runSessionBatch(sessionRowsForIds(ids), 'archive', {
           archive: id => bridge.sessions.archiveSession(id),
@@ -3089,7 +3091,7 @@ const NAV_PREFETCH = {
         return result;
       }
 
-      async function handleBatchDeleteSessions(ids) {
+      async function handleBatchDeleteSessions(ids, runSessionBatch) {
         if (!bridge.available || !ids || !ids.length) return;
         const result = await runSessionBatch(sessionRowsForIds(ids), 'delete', {
           delete: id => bridge.sessions.deleteSession(id),
@@ -3102,7 +3104,7 @@ const NAV_PREFETCH = {
         return result;
       }
 
-      async function handleBatchRestoreArchived(ids) {
+      async function handleBatchRestoreArchived(ids, runSessionBatch) {
         if (!bridge.available || !ids || !ids.length) return;
         const result = await runSessionBatch(ids.map(id => ({ id })), 'restore', {
           restore: id => bridge.sessions.restoreArchivedSession(id),
@@ -4349,7 +4351,7 @@ const NAV_PREFETCH = {
             )}
             {teamRelayAvailable && currentView === 'teamRelay' && <LazyTeamRelayView theme={activeTheme} t={t} onThemeChange={handleSetTheme} onUseAgent={handleTeamRelayUseAgent} onLoadCodeAgents={loadTeamRelayCodeAgents} />}
             {isCompactShell && browserActive && currentView === 'browser' && (
-              <BrowserView
+              <LazyBrowserView
                 key={browserViewSessionId}
                 theme={activeTheme}
                 t={t}
@@ -4569,14 +4571,18 @@ const NAV_PREFETCH = {
                 </div>
                 <div className="min-h-0 flex-1">
                   {browserActive ? (
-                    <BrowserView
-                      key={browserViewSessionId}
-                      theme={activeTheme}
-                      t={t}
-                      sessionId={browserViewSessionId}
-                      nativeSurfaceSuspended={browserSurfaceSuspended}
-                      ownershipSlot={browserOwnershipSlot}
-                    />
+                    <ViewErrorBoundary t={t}>
+                      <Suspense fallback={null}>
+                        <LazyBrowserView
+                          key={browserViewSessionId}
+                          theme={activeTheme}
+                          t={t}
+                          sessionId={browserViewSessionId}
+                          nativeSurfaceSuspended={browserSurfaceSuspended}
+                          ownershipSlot={browserOwnershipSlot}
+                        />
+                      </Suspense>
+                    </ViewErrorBoundary>
                   ) : (
                     <div
                       className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center text-[13px]"

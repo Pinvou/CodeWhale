@@ -37,7 +37,7 @@ test('ordinary default-locale Portal opening remains available and reports hando
 });
 
 const actor = '00000000-0000-4000-8000-000000000001';
-const profile = { user_id: actor, status: 'ACTIVE', personal_permissions: [], platform_permissions: [] };
+const profile = { user_id: actor, status: 'ACTIVE', active_context: { context_type: 'PERSONAL', organization_id: null, membership_version: 1, context_version: 1, authorization_version: 1, personal_authorization_version: 1, platform_authorization_version: 1, organization_authorization_version: 1, permissions: [] }, personal_permissions: [], platform_permissions: [] };
 for (const [language, tag] of [['zh', 'zh-Hans'], ['en', 'en'], ['ja', 'ja']]) {
   test(`ordinary desktop Portal opening preserves ${language}`, async () => {
     const { client, calls } = fixture();

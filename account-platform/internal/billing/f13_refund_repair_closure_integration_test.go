@@ -50,6 +50,15 @@ func TestF13RefundRepairProjectsOrderAndClosurePostgres(t *testing.T) {
 			r, ctx := retainedFinanceRepository(t)
 			activation := refundFixtureActivation(t, ctx, r.pool)("ACTIVE")
 			fixture := seedRefundException(t, ctx, r, test.partial)
+			// Exercise a retained uncertain-dispatch lease, without changing money.
+			leaseUntil := r.now().Add(time.Minute).Truncate(time.Microsecond)
+			if tag, err := r.pool.Exec(ctx, `UPDATE refunds SET dispatch_state='RESULT_UNKNOWN',dispatch_lease_until=$2 WHERE id=$1 AND status='MANUAL_REVIEW'`, fixture.RefundID, leaseUntil); err != nil || tag.RowsAffected() != 1 {
+				t.Fatal("uncertain refund dispatch fixture", err)
+			}
+			var intentVersion int64
+			if err := r.pool.QueryRow(ctx, `SELECT intent_version FROM refunds WHERE id=$1 AND dispatch_state='RESULT_UNKNOWN' AND dispatch_lease_until=$2`, fixture.RefundID, leaseUntil).Scan(&intentVersion); err != nil {
+				t.Fatal("original dispatch state not exercised", err)
+			}
 			plan, input := f13RefundRepairInput(t, ctx, r, fixture, activation)
 			var ownerID uuid.UUID
 			if err := r.pool.QueryRow(ctx, `SELECT owner_id FROM wallets WHERE id=$1`, plan.WalletID).Scan(&ownerID); err != nil {
@@ -87,6 +96,12 @@ func TestF13RefundRepairProjectsOrderAndClosurePostgres(t *testing.T) {
 			if err != nil || result.Status != "SUCCEEDED" || result.RevokedMicrocredits != plan.RevokedMicrocredits || result.ShortfallMicrocredits != plan.ShortfallMicrocredits {
 				t.Fatal("real repair", err)
 			}
+			var refundStatus, dispatchState string
+			var leaseCleared bool
+			var nextIntentVersion int64
+			if err := r.pool.QueryRow(ctx, `SELECT status,dispatch_state,dispatch_lease_until IS NULL,intent_version FROM refunds WHERE id=$1`, fixture.RefundID).Scan(&refundStatus, &dispatchState, &leaseCleared, &nextIntentVersion); err != nil || refundStatus != "SUCCEEDED" || dispatchState != "COMPLETED" || !leaseCleared || nextIntentVersion != intentVersion+1 {
+				t.Fatal("successful repair did not finish dispatch metadata exactly once", err)
+			}
 			var nextVersion, pendingCount, succeeded int64
 			if err := r.pool.QueryRow(ctx, `SELECT summary_version,(refund_summary->>'review_count')::bigint,(refund_summary->>'pending_count')::bigint,(refund_summary->>'succeeded_amount_fen')::bigint,attention_summary FROM payment_orders WHERE id=$1`, plan.PaymentOrderID).Scan(&nextVersion, &reviewCount, &pendingCount, &succeeded, &attention); err != nil {
 				t.Fatal(err)
@@ -113,6 +128,8 @@ func TestF13RefundRepairProjectsOrderAndClosurePostgres(t *testing.T) {
 				}
 			}
 			snapshot := f13PaymentOrderSnapshot(t, ctx, r, plan.PaymentOrderID)
+			// The full refunds rows in this snapshot also freeze dispatch/version/lease
+			// metadata across the original-key receipt replay.
 			financial := refundEffectSnapshot(t, ctx, r)
 			same, err := r.ApplyRefundExceptionRepair(ctx, input)
 			if err != nil || !reflect.DeepEqual(same, result) || f13PaymentOrderSnapshot(t, ctx, r, plan.PaymentOrderID) != snapshot || refundEffectSnapshot(t, ctx, r) != financial {
