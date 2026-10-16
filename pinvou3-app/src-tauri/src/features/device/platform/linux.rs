@@ -372,7 +372,7 @@ mod tests {
         let link = home.join("a");
         std::os::unix::fs::symlink(&outside, &link).expect("create symlink");
         let smuggled = link.join("b").join("c");
-        let result = weights_deletion_guard(&home, None, &smuggled);
+        let result = weights_deletion_guard(&home, None, None, &smuggled);
         let _ = std::fs::remove_dir_all(&home);
         let _ = std::fs::remove_dir_all(&outside);
         assert!(
@@ -397,6 +397,21 @@ mod tests {
         }
     }
 
+    /// 把 Ollama 守护进程地址指到必拒的死端口：e2e 会触发对 daemon 的真 HTTP
+    /// （移除守卫 4 的 DELETE、列表的 GET /api/tags），TempHome 只隔离 HOME，
+    /// daemon 地址不随 HOME 走——不注入的话，开着 Ollama 的开发机上跑测试会对
+    /// 127.0.0.1:11434 发真请求（同名字模型会被真删，第八轮评审 P2）。
+    /// 127.0.0.1:1 无监听，连接立即被拒，不吞超时预算。
+    fn point_ollama_at_dead_port() {
+        let dir = crate::features::model_store::platform::linux::config::config_dir();
+        std::fs::create_dir_all(&dir).expect("config dir");
+        std::fs::write(
+            dir.join("config.json"),
+            r#"{"ollama_host": "http://127.0.0.1:1"}"#,
+        )
+        .expect("write config.json");
+    }
+
     /// 移除路径 fail-closed 的**端到端接线**：商店库损坏时设备侧
     /// `remove_external_model` 必须整单拒绝、注册记录原样保留。helper 自身的
     /// Err 语义已由 model_store boundary.rs 的
@@ -411,6 +426,7 @@ mod tests {
         };
         use crate::features::model_store::platform::linux::config;
         let _ctx = config::TempHome::new();
+        point_ollama_at_dead_port();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -464,6 +480,7 @@ mod tests {
         use crate::features::device::remove_external_model;
         use crate::features::model_store::platform::linux::{config, db};
         let _ctx = config::TempHome::new();
+        point_ollama_at_dead_port();
         db::init_db().expect("init store db");
         // 权重目录放在家目录下第 3 层（守卫链深度臂本会放行的形状）。
         let weights = crate::platform::paths::user_home_dir()
@@ -521,5 +538,42 @@ mod tests {
         assert!(!operstate_text_is_up("notpresent"));
         assert!(!operstate_text_is_up("dormant"));
         assert!(!operstate_text_is_up(" down "));
+    }
+
+    /// 登记端 daemon 模型目录路径臂的**端到端接线**（第八轮评审 P1）：任何 kind
+    /// 的 weights_path 落在 `~/.ollama/models` 之内都必须拒绝——`kind:"other"`
+    /// 不受 ollama 硬校验覆盖，而 blobs 恰好家目录三层能过移除端的深度臂，堵不住
+    /// 登记就是"登记成功 → 移除连根删光全部 blob"。守卫矩阵/纯函数臂由
+    /// external_models 的 `weights_deletion_guard_rejects_the_ollama_models_tree`
+    /// 直打，这里钉的是命令全链。
+    #[test]
+    fn register_rejects_weights_path_under_ollama_models_root() {
+        use crate::features::device::register_external_model;
+        use crate::features::model_store::platform::linux::config;
+        let _ctx = config::TempHome::new();
+        let blobs = crate::platform::paths::user_home_dir()
+            .join(".ollama")
+            .join("models")
+            .join("blobs");
+        std::fs::create_dir_all(&blobs).expect("create blobs dir");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async move {
+            let error = register_external_model(
+                "blob-killer".to_string(),
+                "other".to_string(),
+                None,
+                None,
+                Some(blobs.to_string_lossy().to_string()),
+            )
+            .await
+            .expect_err("weights under the ollama root must be rejected");
+            assert!(
+                error.contains("Ollama"),
+                "rejection must name the daemon directory, got: {error}"
+            );
+        });
     }
 }

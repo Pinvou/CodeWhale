@@ -99,6 +99,37 @@ test('projects domain is fully wired (feature -> slice -> app)', () => {
   );
 });
 
+test('device domain is fully wired (feature -> slice -> app)', () => {
+  const feature = read('platform/tauri/bridge/device.js');
+  const sliceFields = parseSliceFields(read('platform/tauri/bridge.js'));
+  const appDomains = parseAppDomains(read('app/main.jsx'));
+
+  assert.ok(
+    feature.includes('state.device'),
+    'device feature must publish its snapshot on state.device',
+  );
+  // Writer-side lock (round-8 review P2): the device feature must only write
+  // the fields its domain declares. A phantom extra write is silently invisible
+  // through state.get('device') — this is the same class the projects lock
+  // exists for, generalized to the device domain.
+  const featureWrites = [...feature.matchAll(/state\.(\w+)\s*=/g)].map((entry) => entry[1]);
+  assert.deepEqual(
+    [...new Set(featureWrites)].sort((a, b) => a.localeCompare(b)),
+    ['device', 'deviceError', 'deviceServices', 'deviceServicesError', 'externalModels'],
+    'device feature must only write the fields its domain declares',
+  );
+  for (const field of ['device', 'deviceError', 'deviceServices', 'deviceServicesError', 'externalModels']) {
+    assert.ok(
+      sliceFields.device.includes(field),
+      `STATE_SLICE_FIELDS.device must declare ${field}`,
+    );
+  }
+  assert.ok(
+    appDomains.includes('device'),
+    'APP_BRIDGE_STATE_DOMAINS must subscribe the device domain',
+  );
+});
+
 // Web 端的 fields 注册表与桌面订阅列表必须同步:否则 web 启动期
 // getMany(APP_BRIDGE_STATE_DOMAINS) 抛 "Unknown Tauri bridge state slice",
 // 整个 WebUI 冒烟超时(#448 的根因,栈内所有 PR 的 frontend-test 全红)。

@@ -92,12 +92,17 @@ function deviceSnapshotFixture() {
 function externalModelsFixture() {
   return {
     models: [
-      // base_url 留 null：Ollama 在线条目真实形态（后端 base_url 恒 null），
-      // ⑤-b 的回环回退常量只有在这种行上才真正走到——fixture 原先填了与回退
-      // 常量相同的回环地址，回退实现删掉套件也照绿（第七轮评审 P3）。
-      { id: 'm-ollama-1', name: 'qwen3:30b', kind: 'ollama', base_url: null, model: 'qwen3:30b', weights_path: null, note: '', status: 'available', registered: false, source: 'ollama' },
+      // base_url/model 都留 null：Ollama 在线条目真实形态（后端两者恒 null），
+      // ⑤-b 的回环回退常量与 name 回退只有在这种行上才真正走到——fixture 原先
+      // 填了与回退常量相同的值，回退实现删掉套件也照绿（第七轮评审 P3 base_url，
+      // 第八轮评审 model）。
+      { id: 'm-ollama-1', name: 'qwen3:30b', kind: 'ollama', base_url: null, model: null, weights_path: null, note: '', status: 'available', registered: false, source: 'ollama' },
       { id: 'm-reg-1', name: 'my-endpoint', kind: 'openai_endpoint', base_url: 'http://127.0.0.1:9999/v1', model: 'my-model', weights_path: '/home/u/models/my-endpoint', note: '', status: 'unreachable', registered: true, source: 'registry' },
       { id: 'm-reg-2', name: 'lan-endpoint', kind: 'openai_endpoint', base_url: 'http://192.168.1.50:8000/v1', model: 'lan-model', weights_path: null, note: '', status: 'available', registered: true, source: 'registry' },
+      // 商店 ollama 卡片在 daemon 里的真实形态：商店 model_name 永无冒号、daemon
+      // 恒带 `:tag`——这行必须被 managedByStore 的去 tag 臂识别为商店管理并禁用
+      // 移除，否则会被当成可移除的外部模型（第八轮评审）。
+      { id: 'ollama-yuguang14b:latest', name: 'yuguang14b:latest', kind: 'ollama', base_url: null, model: null, weights_path: null, note: '', status: 'available', registered: false, source: 'ollama' },
     ],
     warnings: [],
   };
@@ -406,6 +411,13 @@ async function clickTestId(page, testId) {
         const remote = externalRows[2];
         const button = remote?.querySelector('[data-testid="device-manager-link-remote"]');
         return !!button && button.disabled;
+      })(),
+      // 商店 ollama 卡片的 daemon 形态（name:latest）被 managedByStore 的去 tag
+      // 臂识别为商店管理：移除禁用 + managed 提示（第八轮评审）。
+      storeTaggedRowManaged: (() => {
+        const tagged = externalRows[3];
+        const remove = tagged?.querySelector('[data-testid="device-manager-remove"]');
+        return !!remove && remove.disabled && (remove.title || '').includes('由模型商店管理');
       })(),
     };
   });

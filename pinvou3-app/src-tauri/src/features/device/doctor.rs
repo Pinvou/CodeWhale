@@ -270,6 +270,9 @@ mod tests {
                 "唯一例外",
                 "只许这一个文件",
                 "apt upgrade",
+                // dist-upgrade 禁令此前两侧都未锚定，锚着的 `apt upgrade` 落在
+                // 许可半句里，削弱禁令的编辑照样全绿（第八轮评审 P3）。
+                "禁止 `dist-upgrade`",
                 "sudo",
                 "磁盘剩余空间",
                 "短超时",
@@ -350,6 +353,10 @@ mod tests {
         assert!(skill.contains("禁止 `rm -rf` 带通配符或模糊路径"));
         // ~/.pinvou3 禁触 + 注册表写入唯一豁免（对齐规则 4 与装模型第 6 步）。
         assert!(skill.contains("唯一例外"));
+        // 豁免的范围限定词与 dist-upgrade 禁令此前在 SKILL 侧未锚定：豁免被放宽
+        // 成整目录、或禁令被削弱而保留许可半句时，套件照绿（第八轮评审 P3）。
+        assert!(skill.contains("只许这一个文件"));
+        assert!(skill.contains("禁止 `dist-upgrade`"));
         assert!(skill.contains("external-models.d"));
         assert!(skill.contains("model-store"));
         assert!(skill.contains("永远不要手工增删改"));
