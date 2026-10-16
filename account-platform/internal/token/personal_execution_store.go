@@ -181,26 +181,6 @@ func (r *PostgresRepository) ListUsageTurnsForContext(ctx context.Context, resol
 	return items, rows.Err()
 }
 
-func (r *PostgresRepository) MarkReserved(ctx context.Context, usageID, holdID, priceVersionID uuid.UUID) error {
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	now := r.now()
-	command, err := tx.Exec(ctx, `UPDATE usage_requests SET status='RESERVED',hold_id=$2,price_version_id=$3,updated_at=$4 WHERE id=$1 AND status='CREATED'`, usageID, holdID, priceVersionID, now)
-	if err != nil {
-		return err
-	}
-	if command.RowsAffected() == 0 {
-		return r.ensureUsageState(ctx, usageID, "RESERVED", "UPSTREAM_ACTIVE", "SETTLEMENT_PENDING", "COMMITTED")
-	}
-	if err := transitionExecutionTx(ctx, tx, usageID, []string{"HOLD_RESERVING"}, "HOLD_RESERVED", "billing hold reserved", now); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
 // EnsureMaximumAtLeast projects a confirmed reservation target without adding a
 // replayed acknowledgement twice. The existing deadline fence remains decisive.
 func (r *PostgresRepository) EnsureMaximumAtLeast(ctx context.Context, usageID uuid.UUID, confirmedTarget int64) error {

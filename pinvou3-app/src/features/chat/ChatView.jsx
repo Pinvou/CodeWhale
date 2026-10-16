@@ -1,3 +1,4 @@
+import { platformModelSelectableForNewSession } from '../account-platform/model-catalog-selection.js';
 import { latestModelLifecycleRejection } from '../account-platform/model-lifecycle.js';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
@@ -2246,7 +2247,7 @@ const openChatExternalUrl = (url) => {
         let active = true;
         bridge.accountPlatform.modelCatalog().then(result => {
           if (!active) return;
-          const items = (result?.items || []).filter(item => item.context_eligible && item.lifecycle_status === 'PUBLISHED');
+          const items = (result?.items || []).filter(item => platformModelSelectableForNewSession(item));
           setReplacementModels(items);
           setReplacementModelId(current => items.some(item => item.model_id === current) ? current : (items[0]?.model_id || ''));
         }).catch(() => { if (active) setReplacementError('modelSwitchFailed'); });

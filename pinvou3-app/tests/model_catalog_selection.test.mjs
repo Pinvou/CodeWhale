@@ -61,7 +61,8 @@ const effectBody = chatSource.slice(effectStart + '      useEffect(() => {'.leng
 const branchBody = chatSource.match(/const createReplacementBranch = useCallback\(async \(\) => \{([\s\S]*?)\n      \}, \[/)?.[1];
 const alertBody = chatSource.match(/replacementError && <div role="alert"[^>]*>\{([^}]+)\}/)?.[1];
 assert.ok(branchBody && alertBody);
-const effect = new Function('bridge', 'activeSessionId', 'modelContinuationBlocked', 'setReplacementModels', 'setReplacementModelId', 'setReplacementError', 't', effectBody);
+const effectCallback = new Function('bridge', 'activeSessionId', 'modelContinuationBlocked', 'setReplacementModels', 'setReplacementModelId', 'setReplacementError', 't', 'platformModelSelectableForNewSession', effectBody);
+const effect = (...args) => effectCallback(...args, platformModelSelectableForNewSession);
 const branch = new Function('bridge', 'activeSessionId', 'replacementModelId', 'replacementBusy', 'chatItems', 'setReplacementBusy', 'setReplacementError', 't', 'remoteTranscriptActive', `return (async () => {${branchBody}})();`);
 const renderAlert = new Function('t', 'replacementError', `return ${alertBody};`);
 for (const language of ['zh', 'en', 'ja']) {
@@ -84,6 +85,27 @@ test('ChatView replacement callback preserves remote transcript ownership withou
     sessions: { switchToSession: () => assert.fail('remote transcript must not switch a local session') } },
   'remote-session', 'catalog-id-a', false, [], () => assert.fail('remote transcript must not enter local replacement busy state'),
   () => assert.fail('remote transcript must not replace its error state'), dict.zh, true);
+});
+
+test('ChatView replacement catalog uses the existing new-session lifecycle cutoff', async () => {
+  const future = new Date(Date.now() + 3600000).toISOString();
+  const past = new Date(Date.now() - 3600000).toISOString();
+  const items = [
+    { model_id: 'published', context_eligible: true, lifecycle_status: 'PUBLISHED' },
+    { model_id: 'deprecated-before-cutoff', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: future },
+    { model_id: 'deprecated-after-cutoff', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: past },
+    { model_id: 'deprecated-no-cutoff', context_eligible: true, lifecycle_status: 'DEPRECATED' },
+    { model_id: 'deprecated-invalid-cutoff', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: 'invalid' },
+    { model_id: 'context-denied', context_eligible: false, lifecycle_status: 'PUBLISHED' },
+    { model_id: 'removed', context_eligible: true, lifecycle_status: 'REMOVED' },
+  ];
+  let models, selection;
+  effect({ available: true, accountPlatform: { modelCatalog: async () => ({ items }) } }, 'source-a', true,
+    value => { models = value; }, update => { selection = update('deprecated-before-cutoff'); },
+    () => assert.fail('valid catalog must not set an error'), dict.en);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(models.map(item => item.model_id), ['published', 'deprecated-before-cutoff']);
+  assert.equal(selection, 'deprecated-before-cutoff', 'a still-selectable existing choice remains selected');
 });
 
 test('Personal known execution/settlement labels match current management meanings without altering states', () => {

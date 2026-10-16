@@ -176,7 +176,7 @@
 ### 保留内容
 
 - 对宿主公开 `AppMode`、`ApprovalMode`、Automation、Task、route 和 worker ledger API。当前兼容 facade 还包含 18 个 `pub mod`，父仓全部 Rust 源码中有 61 个文件、340 处直接引用；这些模块作为不稳定下游兼容桥刻意不进入生成 API 文档。这是已登记的收窄债务，不在本次热修中做破坏性改名。
-- F05 账户调用幂等（原固定补丁 `8b5a86390`，已通过 CodeWhale #92 纳入当前维护提交 `803e672bb`）：模型逻辑调用幂等属于 T1 的执行期边界。宿主仅在账户 Gateway 路由的 `Config.request_idempotency_header` 显式启用 `Idempotency-Key`；字段不接受配置文件输入，普通模型保持原 HTTP 行为。`ModelClient` 与 `LlmClient` 的 operation-aware 默认方法兼容既有实现，具体 transport 按每个逻辑调用发送随机 UUID，而不是按 session、prompt 或静态 header 生成键。HTTP 重试、HTTP/1.1 后备及引擎内外层相同发送事实的流恢复复用该 ID；实际 prepared wire body、endpoint 或 provider 改变，或完整模型响应已经被接受后再继续推理、执行工具后跟进，均形成新模型调用和新 ID。新用户提交相同 prompt 也产生新 ID。Gateway 仍拒绝同键不同付款事实，不放宽其 fingerprint。此标识仅在 transport 生命周期内，不写入模型消息、session 历史、日志或 pinned prompt，KV-cache 前缀不变。回退是清除宿主 opt-in；原补丁以 `44921cf02` 为唯一父提交，父仓原 F05 提交历史继续保留；CodeWhale #92 的最终候选树与外部维护合入 `0cb1aec47` 完全相同，现以包含该能力的 `803e672bb` 为固定 gitlink。公开维护头严格校验、宿主 opt-in 回归和真实账户验收分别核验，源码包含性不替代门禁或验收。当前结果式回归名为 `forkguard_model_operation_http_retry_and_new_calls`、`forkguard_model_operation_opt_in_and_wire_identity`、`forkguard_model_operation_inner_and_outer_stream_retries`、`forkguard_model_operation_tool_followup_gets_new_id`；真实账户业务验收由父仓执行，loopback transport 与受控 Engine 回归不冒称模型或银行验收。通用接口可上游化，账户产品路由选择仍留在父仓。
+- F05 账户调用幂等（原固定补丁 `8b5a86390`，已通过 CodeWhale #92 纳入 2026-10-14 当时的维护提交 `803e672bb`）：模型逻辑调用幂等属于 T1 的执行期边界。宿主仅在账户 Gateway 路由的 `Config.request_idempotency_header` 显式启用 `Idempotency-Key`；字段不接受配置文件输入，普通模型保持原 HTTP 行为。`ModelClient` 与 `LlmClient` 的 operation-aware 默认方法兼容既有实现，具体 transport 按每个逻辑调用发送随机 UUID，而不是按 session、prompt 或静态 header 生成键。HTTP 重试、HTTP/1.1 后备及引擎内外层相同发送事实的流恢复复用该 ID；实际 prepared wire body、endpoint 或 provider 改变，或完整模型响应已经被接受后再继续推理、执行工具后跟进，均形成新模型调用和新 ID。新用户提交相同 prompt 也产生新 ID。Gateway 仍拒绝同键不同付款事实，不放宽其 fingerprint。此标识仅在 transport 生命周期内，不写入模型消息、session 历史、日志或 pinned prompt，KV-cache 前缀不变。回退是清除宿主 opt-in；原补丁以 `44921cf02` 为唯一父提交，父仓原 F05 提交历史继续保留；CodeWhale #92 的最终候选树与外部维护合入 `0cb1aec47` 完全相同，该批次曾以包含该能力的 `803e672bb` 为固定 gitlink；当前维护头以第 0 节为准。公开维护头严格校验、宿主 opt-in 回归和真实账户验收分别核验，源码包含性不替代门禁或验收。当前结果式回归名为 `forkguard_model_operation_http_retry_and_new_calls`、`forkguard_model_operation_opt_in_and_wire_identity`、`forkguard_model_operation_inner_and_outer_stream_retries`、`forkguard_model_operation_tool_followup_gets_new_id`；真实账户业务验收由父仓执行，loopback transport 与受控 Engine 回归不冒称模型或银行验收。通用接口可上游化，账户产品路由选择仍留在父仓。
 - A04 调用幂等的额外生产边界由 `forkguard_model_operation_http1_stream_keeps_id`、`forkguard_model_operation_child_retries_keep_id`、`forkguard_model_operation_vision_http_retry_keeps_id` 覆盖：子代理每个模型 round 的 timeout/transient 外层重试复用调用 ID，`image_analyze` 的独立 HTTP 重试从冻结路由 opt-in 传递同一调用 ID。不同工具调用或后继模型 round 仍分别生成新 ID；这些 loopback HTTP 回归不包含真实模型验收。
 - `forkguard_model_operation_preserved_partial_changes_call` 经真实引擎流恢复验证：交互模式已保留部分 assistant 输出并改变后续请求正文时，后续发送必须采用新的调用 ID。未产生内容且发送事实未变的恢复仍复用原 ID；不通过放宽 Gateway 指纹掩盖正文变化。
 - 显式启用调用幂等的路由绕过进程内非流式 response cache，避免同正文缓存跳过新调用或付款上下文的 Gateway 派发；普通模型保留既有确定性请求缓存。相同 HTTP 回归以 `temperature=0` 验证账户每次新调用实际发出不同 ID，同时普通路由的重复确定性请求仍命中本地缓存。
@@ -394,7 +394,7 @@
 
 ### F05 成熟调用身份的宿主承接
 
-本功能沿用当前固定维护提交 `803e672bb87f5ee4e0ab56f1e23fa408ddbeeaa0` 的逐调用身份（原 F05 补丁 `8b5a86390` 的能力已通过 CodeWhale #92 合入），不新增底座协议。账户运行时凭据向真实 `DtConfig.request_idempotency_header` 传递 `Idempotency-Key`；本地模型代理读取并原样转发底座的单次调用 ID，缺失或重复字段拒绝，不能按用户轮次和正文生成替代身份。同一用户轮次的不同模型调用各有身份，轮次统计的 `X-Pinvou-Logical-Turn-ID` 仍是独立分组字段。普通自配模型不启用该标记。该底座历史证据继承不等于新宿主或真实供应商验收通过。
+本节记录 2026-10-14 当时固定维护提交 `803e672bb87f5ee4e0ab56f1e23fa408ddbeeaa0` 的宿主承接；当前维护头以第 0 节为准。该批次沿用其逐调用身份（原 F05 补丁 `8b5a86390` 的能力已通过 CodeWhale #92 合入），不新增底座协议。账户运行时凭据向真实 `DtConfig.request_idempotency_header` 传递 `Idempotency-Key`；本地模型代理读取并原样转发底座的单次调用 ID，缺失或重复字段拒绝，不能按用户轮次和正文生成替代身份。同一用户轮次的不同模型调用各有身份，轮次统计的 `X-Pinvou-Logical-Turn-ID` 仍是独立分组字段。普通自配模型不启用该标记。该底座历史证据继承不等于新宿主或真实供应商验收通过。
 
 ### F05 公开维护头 #107 的宿主限制修复
 
@@ -403,7 +403,7 @@
 
 ### F05 公开维护头 #54 的单执行根兼容与 Web 元数据边界
 
-消费已外部批准并合入的 `803e672bb87f5ee4e0ab56f1e23fa408ddbeeaa0`，直接继承 #107 的 `f27672935`。#54 最终审核头 `be2cd01efd6fb606e19765c7e00c565191ebea56` 与维护合入提交树同为 `31a81e54a288045aca63786288601a98b94b1f8b`；外部 7 项成功 source checks 属于该原提交，不代表新父仓或本机编译已验证。新增能力沿既有 T1 宿主配置/Session 和 T2 工具权限登记，不增加主题。该底座批次实际为 100 个文件、+14904/-945；既包含 workspace-roots 生命周期，也改变单根 operand cwd、symlink 与缺失路径后 `..` 的判断，不能以“单根入口未变”声称底座行为不变。
+本节记录 2026-10-14 批次：消费当时已外部批准并合入的 `803e672bb87f5ee4e0ab56f1e23fa408ddbeeaa0`（当前维护头以第 0 节为准），直接继承 #107 的 `f27672935`。#54 最终审核头 `be2cd01efd6fb606e19765c7e00c565191ebea56` 与维护合入提交树同为 `31a81e54a288045aca63786288601a98b94b1f8b`；外部 7 项成功 source checks 属于该原提交，不代表新父仓或本机编译已验证。新增能力沿既有 T1 宿主配置/Session 和 T2 工具权限登记，不增加主题。该底座批次实际为 100 个文件、+14904/-945；既包含 workspace-roots 生命周期，也改变单根 operand cwd、symlink 与缺失路径后 `..` 的判断，不能以“单根入口未变”声称底座行为不变。
 
 父仓 `build_engine_config` 的输入仍仅为 `EngineConfig::default()`，显式传空 `workspace_roots`；普通/项目绑定/计划和多智能体配置只用既有 execution 根，`SessionRoots.ledger` 仍仅提供 `subagent_state_root`。`sync_session` 同样显式空附件，由底座替换为当前 primary 的单根集合，不继承上个 Session 的附件。六个既有 `ExecPolicyContext` 测试补齐空根字段，原 deny、wrapper 和 approval 断言保留；不新增磁盘根登记、multi-root UI 或授权入口。
 
