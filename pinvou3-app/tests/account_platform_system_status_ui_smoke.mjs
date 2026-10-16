@@ -29,6 +29,22 @@ const open = async (page, query = '') => {
   await page.waitForFunction(() => window.statusFixture);
 };
 try {
+  for (const language of ['zh', 'en', 'ja']) await run(`built-in service relay and recent-error diagnostics localize ${language}`, async page => {
+    await page.evaluateOnNewDocument(() => { Object.hasOwn = undefined; });
+    await open(page, `language=${language}&mode=built-in-diagnostics`); await page.waitForSelector('.adm-metrics');
+    const tables = await page.$$eval('.adm-system-sections table', nodes => nodes.map(node => node.textContent));
+    const labels = await page.evaluate(() => window.statusFixture.copy.system);
+    assert.ok(tables[0].includes(labels.probeConnectionFailed));
+    assert.ok(tables[1].includes(labels.relayMetricsInvalid));
+    assert.ok(tables[2].includes(labels.probeConnectionFailed)); assert.ok(tables[2].includes(labels.relayMetricsInvalid));
+    assert.ok(tables[0].includes(`${labels.probeHTTPError} (503)`));
+    assert.ok(tables[1].includes(`${labels.relayMetricsHTTPError} (504)`));
+    assert.ok(tables[2].includes(`${labels.probeHTTPError} (503)`));
+    assert.ok(tables[2].includes(`${labels.relayMetricsHTTPError} (504)`));
+    assert.ok(tables[2].includes(`${labels.relayDeadLetteredEvents} (3)`));
+    assert.ok(tables[2].includes('controlled external diagnostic'));
+    assert.deepEqual(await page.evaluate(() => window.statusFixture.calls.filter(call => call.url === '/api/admin/system/status').map(call => call.method)), ['GET']);
+  });
   for (const language of ['zh', 'en', 'ja']) await run(`actual admin permission navigation, status, int64, readonly runbooks ${language}`, async page => {
     await open(page, `language=${language}`);
     await page.waitForSelector('.adm-system-workspace .adm-metrics');

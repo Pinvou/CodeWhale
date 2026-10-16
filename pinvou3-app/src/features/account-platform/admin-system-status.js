@@ -65,7 +65,8 @@ export function requireSystemStatus(value) {
   }
   for (const item of [...value.services, ...value.relays]) {
     if (!item || typeof item.key !== "string" || typeof item.status !== "string" ||
-      (item.message !== undefined && typeof item.message !== "string"))
+      (item.message !== undefined && typeof item.message !== "string") ||
+      (item.code !== undefined && typeof item.code !== "string"))
       throw new Error("INVALID_SYSTEM_STATUS");
   }
   for (const item of value.recent_errors) {
@@ -78,7 +79,32 @@ export function requireSystemStatus(value) {
   return value;
 }
 
+const diagnosticLabelKeys = Object.freeze({
+  STATUS_ENDPOINT_NOT_CONFIGURED: "statusEndpointNotConfigured",
+  PROBE_REQUEST_TIMED_OUT: "probeRequestTimedOut",
+  PROBE_CONNECTION_FAILED: "probeConnectionFailed",
+  PROBE_HTTP_ERROR: "probeHTTPError",
+  PROBE_RESPONSE_INVALID: "probeResponseInvalid",
+  PROBE_ASSERTION_FAILED: "probeAssertionFailed",
+  RELAY_METRICS_HTTP_ERROR: "relayMetricsHTTPError",
+  RELAY_METRICS_INVALID: "relayMetricsInvalid",
+  RELAY_DEAD_LETTERED_EVENTS: "relayDeadLetteredEvents",
+});
+
 export function systemDiagnosticMessage(item, labels) {
+  if (Object.prototype.hasOwnProperty.call(diagnosticLabelKeys, item.code)) {
+    const label = labels[diagnosticLabelKeys[item.code]];
+    // Only our bounded transport formats contribute details; arbitrary external
+    // messages still follow the unchanged fallback below.
+    const detail = item.code === "PROBE_HTTP_ERROR"
+      ? /^HTTP ([1-9][0-9]{2})$/.exec(item.message || "")
+      : item.code === "RELAY_METRICS_HTTP_ERROR"
+        ? /^metrics HTTP ([1-9][0-9]{2})$/.exec(item.message || "")
+        : item.code === "RELAY_DEAD_LETTERED_EVENTS"
+          ? /^(0|[1-9][0-9]{0,18}) dead-lettered events$/.exec(item.message || "")
+          : null;
+    return detail ? `${label} (${detail[1]})` : label;
+  }
   if (item.code === "RECONCILIATION_STATUS_UNAVAILABLE") return labels.reconciliationUnavailable;
   if (item.code === "RECONCILIATION_ERRORS_UNAVAILABLE") return labels.reconciliationErrorsUnavailable;
   return item.message;

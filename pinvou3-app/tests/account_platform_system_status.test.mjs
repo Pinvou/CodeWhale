@@ -74,3 +74,40 @@ test('unavailable reconciliation counts and diagnostic codes retain their read-o
   }
   assert.throws(() => requireSystemStatus({...payload, recent_errors: [{source:'token-reconciliation', message:'controlled', code:{}}]}), /INVALID_SYSTEM_STATUS/);
 });
+
+const builtInDiagnosticLabels = {
+  STATUS_ENDPOINT_NOT_CONFIGURED: 'statusEndpointNotConfigured', PROBE_REQUEST_TIMED_OUT: 'probeRequestTimedOut',
+  PROBE_CONNECTION_FAILED: 'probeConnectionFailed', PROBE_HTTP_ERROR: 'probeHTTPError', PROBE_RESPONSE_INVALID: 'probeResponseInvalid',
+  PROBE_ASSERTION_FAILED: 'probeAssertionFailed', RELAY_METRICS_HTTP_ERROR: 'relayMetricsHTTPError',
+  RELAY_METRICS_INVALID: 'relayMetricsInvalid', RELAY_DEAD_LETTERED_EVENTS: 'relayDeadLetteredEvents',
+};
+test('built-in diagnostics have exact three-language presentation while external messages remain unchanged', () => {
+  for (const language of ['zh', 'en', 'ja']) for (const [code, key] of Object.entries(builtInDiagnosticLabels)) {
+    const labels = adminPlatformCopy[language].system; assert.equal(typeof labels[key], 'string'); assert.ok(labels[key]);
+    assert.equal(systemDiagnosticMessage({code, message:'original transport diagnostic'}, labels), labels[key]);
+    assert.equal(systemDiagnosticMessage({code:'EXTERNAL_PROVIDER_NOTE', message:'controlled external diagnostic'}, labels), 'controlled external diagnostic');
+  }
+});
+test('optional diagnostic code must be a string in service relay and recent error DTOs', () => {
+  const valid={services:[],relays:[],reconciliation:{},recent_errors:[]};
+  for (const collection of ['services','relays','recent_errors']) for (const code of [null,{},[],1]) {
+    const item=collection==='recent_errors'?{source:'controlled',message:'controlled',code}:{key:'controlled',status:'UNHEALTHY',message:'controlled',code};
+    assert.throws(()=>requireSystemStatus({...valid,[collection]:[item]}),/INVALID_SYSTEM_STATUS/);
+  }
+  for (const code of ['', 'EXTERNAL_PROVIDER_NOTE']) assert.ok(requireSystemStatus({...valid,services:[{key:'controlled',status:'UNHEALTHY',message:'original',code}]}));
+});
+
+test('bounded HTTP and dead-letter diagnostic facts survive translation without Object.hasOwn', () => {
+  const original = Object.getOwnPropertyDescriptor(Object, 'hasOwn');
+  try {
+    Object.defineProperty(Object, 'hasOwn', {...original,value:undefined});
+    for (const language of ['zh','en','ja']) {
+      const labels=adminPlatformCopy[language].system;
+      assert.equal(systemDiagnosticMessage({code:'PROBE_HTTP_ERROR',message:'HTTP 503'},labels),`${labels.probeHTTPError} (503)`);
+      assert.equal(systemDiagnosticMessage({code:'RELAY_METRICS_HTTP_ERROR',message:'metrics HTTP 504'},labels),`${labels.relayMetricsHTTPError} (504)`);
+      assert.equal(systemDiagnosticMessage({code:'RELAY_DEAD_LETTERED_EVENTS',message:'3 dead-lettered events'},labels),`${labels.relayDeadLetteredEvents} (3)`);
+      assert.equal(systemDiagnosticMessage({code:'PROBE_HTTP_ERROR',message:'HTTP 503 untrusted extra text'},labels),labels.probeHTTPError);
+      assert.equal(systemDiagnosticMessage({code:'__proto__',message:'external detail'},labels),'external detail');
+    }
+  } finally {Object.defineProperty(Object, 'hasOwn', original);}
+});

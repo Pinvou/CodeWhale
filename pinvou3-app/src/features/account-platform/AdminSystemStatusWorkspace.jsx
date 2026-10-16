@@ -135,7 +135,7 @@ export function AdminSystemStatusWorkspace({
                   labels.latency,
                   (value) => (value === undefined ? "—" : `${count(value)} ms`),
                 ],
-                ["message", labels.message],
+                ["message", labels.message, (_value, item) => systemDiagnosticMessage(item, labels)],
               ]}
             />
             <ReadTable
@@ -148,7 +148,7 @@ export function AdminSystemStatusWorkspace({
                 ["pending_events", labels.pending, count],
                 ["dead_lettered_events", labels.deadLetters, count],
                 ["oldest_pending_seconds", labels.oldest, age],
-                ["message", labels.message],
+                ["message", labels.message, (_value, item) => systemDiagnosticMessage(item, labels)],
               ]}
             />
             <ReadTable

@@ -21,6 +21,7 @@ import (
 )
 
 type serviceStatus struct {
+	Code      string `json:"code,omitempty"`
 	Key       string `json:"key"`
 	Status    string `json:"status"`
 	LatencyMS int64  `json:"latency_ms"`
@@ -38,6 +39,7 @@ type SystemProbe struct {
 }
 
 type relayStatus struct {
+	Code                string  `json:"code,omitempty"`
 	Key                 string  `json:"key"`
 	Status              string  `json:"status"`
 	PendingEvents       int64   `json:"pending_events"`
@@ -163,7 +165,7 @@ func (s *Service) collectSystemStatus(ctx context.Context, accessToken string) s
 	for status := range statuses {
 		result.Services = append(result.Services, status)
 		if status.Status != "HEALTHY" {
-			result.RecentErrors = append(result.RecentErrors, recentError{Source: status.Key, Message: status.Message, UpdatedAt: result.CheckedAt})
+			result.RecentErrors = append(result.RecentErrors, recentError{Code: status.Code, Source: status.Key, Message: status.Message, UpdatedAt: result.CheckedAt})
 		}
 	}
 	for relay := range relays {
@@ -173,7 +175,7 @@ func (s *Service) collectSystemStatus(ctx context.Context, accessToken string) s
 			if message == "" {
 				message = fmt.Sprintf("%d dead-lettered events", relay.DeadLetteredEvents)
 			}
-			result.RecentErrors = append(result.RecentErrors, recentError{Source: relay.Key, Message: message, UpdatedAt: result.CheckedAt})
+			result.RecentErrors = append(result.RecentErrors, recentError{Code: relay.Code, Source: relay.Key, Message: message, UpdatedAt: result.CheckedAt})
 		}
 	}
 	result.Reconciliation = s.reconciliationStatus(ctx, accessToken)
@@ -189,31 +191,31 @@ func (s *Service) collectSystemStatus(ctx context.Context, accessToken string) s
 
 func (s *Service) probe(ctx context.Context, configured SystemProbe) serviceStatus {
 	if configured.Target == nil {
-		return serviceStatus{Key: configured.Key, Status: "UNKNOWN", Message: "status endpoint is not configured"}
+		return serviceStatus{Key: configured.Key, Status: "UNKNOWN", Code: "STATUS_ENDPOINT_NOT_CONFIGURED", Message: "status endpoint is not configured"}
 	}
 	started := time.Now()
 	response, err := s.getProbe(ctx, configured.Target)
 	latency := time.Since(started).Milliseconds()
 	if err != nil {
-		return serviceStatus{Key: configured.Key, Status: "UNHEALTHY", LatencyMS: latency, Message: safeProbeError(err)}
+		return serviceStatus{Key: configured.Key, Status: "UNHEALTHY", LatencyMS: latency, Code: safeProbeCode(err), Message: safeProbeError(err)}
 	}
 	defer response.Body.Close()
 	body, readErr := io.ReadAll(io.LimitReader(response.Body, (64<<10)+1))
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return serviceStatus{Key: configured.Key, Status: "UNHEALTHY", LatencyMS: latency, Message: fmt.Sprintf("HTTP %d", response.StatusCode)}
+		return serviceStatus{Key: configured.Key, Status: "UNHEALTHY", LatencyMS: latency, Code: "PROBE_HTTP_ERROR", Message: fmt.Sprintf("HTTP %d", response.StatusCode)}
 	}
 	if configured.JSONBooleanField != "" {
 		if readErr != nil || len(body) > 64<<10 {
-			return serviceStatus{Key: configured.Key, Status: "UNHEALTHY", LatencyMS: latency, Message: "configured status response is invalid"}
+			return serviceStatus{Key: configured.Key, Status: "UNHEALTHY", LatencyMS: latency, Code: "PROBE_RESPONSE_INVALID", Message: "configured status response is invalid"}
 		}
 
 		var payload map[string]any
 		if json.Unmarshal(body, &payload) == nil {
 			if success, present := payload[configured.JSONBooleanField].(bool); !present || !success {
-				return serviceStatus{Key: configured.Key, Status: "UNHEALTHY", LatencyMS: latency, Message: "configured status assertion failed"}
+				return serviceStatus{Key: configured.Key, Status: "UNHEALTHY", LatencyMS: latency, Code: "PROBE_ASSERTION_FAILED", Message: "configured status assertion failed"}
 			}
 		} else {
-			return serviceStatus{Key: configured.Key, Status: "UNHEALTHY", LatencyMS: latency, Message: "configured status response is invalid"}
+			return serviceStatus{Key: configured.Key, Status: "UNHEALTHY", LatencyMS: latency, Code: "PROBE_RESPONSE_INVALID", Message: "configured status response is invalid"}
 		}
 	}
 	return serviceStatus{Key: configured.Key, Status: "HEALTHY", LatencyMS: latency}
@@ -222,32 +224,32 @@ func (s *Service) probe(ctx context.Context, configured SystemProbe) serviceStat
 func (s *Service) probeRelay(ctx context.Context, key string, base *url.URL) relayStatus {
 	started := time.Now()
 	health := s.probe(ctx, SystemProbe{Key: key, Target: endpoint(base, "/health/live")})
-	result := relayStatus{Key: key, Status: health.Status, Message: health.Message}
+	result := relayStatus{Key: key, Status: health.Status, Code: health.Code, Message: health.Message}
 	if health.Status != "HEALTHY" {
 		result.LatencyMS = time.Since(started).Milliseconds()
 		return result
 	}
 	response, err := s.getProbe(ctx, endpoint(base, "/metrics"))
 	if err != nil {
-		result.Status, result.Message = "DEGRADED", safeProbeError(err)
+		result.Status, result.Code, result.Message = "DEGRADED", safeProbeCode(err), safeProbeError(err)
 		result.LatencyMS = time.Since(started).Milliseconds()
 		return result
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		result.Status, result.Message = "DEGRADED", fmt.Sprintf("metrics HTTP %d", response.StatusCode)
+		result.Status, result.Code, result.Message = "DEGRADED", "RELAY_METRICS_HTTP_ERROR", fmt.Sprintf("metrics HTTP %d", response.StatusCode)
 		result.LatencyMS = time.Since(started).Milliseconds()
 		return result
 	}
 	metrics, err := parseRelayMetrics(io.LimitReader(response.Body, 256<<10))
 	if err != nil {
-		result.Status, result.Message = "DEGRADED", "relay metrics are invalid"
+		result.Status, result.Code, result.Message = "DEGRADED", "RELAY_METRICS_INVALID", "relay metrics are invalid"
 	} else {
 		result.PendingEvents = int64(metrics["pinvou_outbox_pending_events"])
 		result.DeadLetteredEvents = int64(metrics["pinvou_outbox_dead_lettered_events"])
 		result.OldestPendingSecond = metrics["pinvou_outbox_oldest_pending_age_seconds"]
 		if result.DeadLetteredEvents > 0 {
-			result.Status = "DEGRADED"
+			result.Status, result.Code = "DEGRADED", "RELAY_DEAD_LETTERED_EVENTS"
 		}
 	}
 	result.LatencyMS = time.Since(started).Milliseconds()
@@ -364,6 +366,18 @@ func endpoint(base *url.URL, resource string) *url.URL {
 	target.RawQuery = ""
 	target.Fragment = ""
 	return &target
+}
+
+// Built-in diagnostics carry a stable presentation code; original messages stay
+// available to existing readers and unknown external diagnostics remain verbatim.
+func safeProbeCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "PROBE_REQUEST_TIMED_OUT"
+	}
+	return "PROBE_CONNECTION_FAILED"
 }
 
 func safeProbeError(err error) string {
