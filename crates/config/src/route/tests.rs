@@ -272,14 +272,10 @@ fn resolver_records_exact_limit_override_provenance() {
 fn embedding_host_declared_limits_reconstructs_only_host_provenance() {
     // Host entries reconstruct exactly, one per declared field; interleaved
     // catalog/operator/roster provenance must not leak into the declared
-    // subset even when it targets the same field.
+    // subset even when a later operator entry for the same field would win
+    // last-wins.
     let mut request = req(Some(ProviderKind::Zai), Some("glm-5.2"));
     request.limit_overrides = vec![
-        SourcedLimitOverride {
-            field: LimitField::ContextTokens,
-            value: Some(262_144),
-            source: OverrideSource::UserContextWindow,
-        },
         SourcedLimitOverride {
             field: LimitField::OutputTokens,
             value: Some(65_536),
@@ -290,14 +286,21 @@ fn embedding_host_declared_limits_reconstructs_only_host_provenance() {
             value: Some(1_048_576),
             source: OverrideSource::EmbeddingHost,
         },
+        SourcedLimitOverride {
+            field: LimitField::ContextTokens,
+            value: Some(262_144),
+            source: OverrideSource::UserContextWindow,
+        },
     ];
 
     let candidate = models_dev_route_resolver()
         .resolve(&request)
         .expect("Models.dev-backed route with sourced overrides resolves");
 
-    // Effective keeps every override (later entries win per field).
-    assert_eq!(candidate.limits().context_tokens, Some(1_048_576));
+    // Effective applies every override last-wins, so the later operator
+    // entry owns context: the declared subset genuinely differs from the
+    // effective triple on that field.
+    assert_eq!(candidate.limits().context_tokens, Some(262_144));
     assert_eq!(candidate.limits().output_tokens, Some(65_536));
 
     let declared = candidate
