@@ -1042,8 +1042,10 @@ impl UserPrefs {
         // Mirror the model-only in-memory part of load_unlocked. These methods
         // do not touch disk or keychain; the original settings bytes remain
         // untouched even when legacy route metadata is normalized here.
+        prefs.migrate_account_platform_model_path();
         prefs.migrate_models();
-        prefs.ensure_builtin_llmapi_model();
+        prefs.ensure_builtin_account_platform_model();
+        prefs.migrate_model_selection_ref();
         prefs.normalize_saved_model_metadata();
         prefs.sanitize_plaintext_api_keys();
         Ok(prefs)
@@ -2582,7 +2584,11 @@ mod tests {
 
         let snapshot = UserPrefs::load_read_only_model_snapshot().unwrap();
         assert!(snapshot.active_model().unwrap().alias.is_none());
-        assert!(snapshot.model_by_id(BUILTIN_LLMAPI_MODEL_ID).is_some());
+        assert!(
+            snapshot
+                .model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+                .is_some()
+        );
         assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 

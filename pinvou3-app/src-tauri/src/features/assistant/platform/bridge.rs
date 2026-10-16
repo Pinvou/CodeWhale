@@ -5496,7 +5496,7 @@ mod tests {
         unsafe { std::env::set_var("DEEPSEEK_BASE_URL", "https://controlled.invalid/v1") };
 
         let mut bridge = fixture_bridge();
-        let mut model = SavedModel::builtin_llmapi();
+        let mut model = SavedModel::builtin_account_platform();
         model.id = "runtime-route".into();
         model.preset = ModelPreset::LocalVllm;
         model.model = "controller-model".into();
