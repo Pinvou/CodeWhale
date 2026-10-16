@@ -8,6 +8,15 @@
     "deepseek", "gpt_5", "gpt_4", "o3", "gemini", "qwen", "kimi", "minimax", "glm",
     "mimo", "doubao", "grok", "llama", "mistral", "custom", "unknown"
   ],
+  "remote_control": {
+    "stages": ["start", "stop", "refresh", "claim", "handshake", "connection", "disconnection", "resume", "task_submit", "task_admit", "task_terminal", "permission", "attachment", "artifact"],
+    "outcomes": ["ok", "rejected", "timeout", "busy", "expired", "unsupported", "internal_error"],
+    "reasons": ["none", "not_enrolled", "code_invalid", "slot_conflict", "handshake_failed", "receipt_mismatch", "liveness_missing", "watchdog_expired", "resume_failed", "task_conflict", "permission_denied", "permission_timeout", "transfer_budget", "artifact_missing", "rate_limited", "unknown"],
+    "latency_buckets": ["lt_50ms", "lt_250ms", "lt_1s", "lt_5s", "lt_30s", "gte_30s"],
+    "model_sources": ["controlled", "controller_temporary"],
+    "size_buckets": ["0_1mib", "1_10mib", "10_100mib", "100mib_plus"],
+    "permission_steps": ["request", "allowed", "denied", "expired"]
+  },
   "tools": [
     "shell", "read_file", "edit_file", "search_files", "search", "web_search",
     "view_image", "image_generation", "load_skill", "tool_search", "request_user_input",

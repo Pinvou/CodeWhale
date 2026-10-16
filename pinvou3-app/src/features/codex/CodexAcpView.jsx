@@ -96,6 +96,7 @@ import {
   ConversationTimeline,
 } from '../conversation/ConversationTimeline.jsx';
 import { useConversationSecondClock } from '../../hooks/useConversationSecondClock.js';
+import { shouldVirtualizeConversationTurns } from '../conversation/conversation-virtualization.js';
 import {
   measureConversationScrollGeometry,
   startConversationBottomFollower,
@@ -130,7 +131,7 @@ import {
   restoreConversationScrollPosition,
 } from '../conversation/conversation-model.js';
 import { QuestionChoiceCard } from '../conversation/QuestionChoiceCard.jsx';
-import { buildUserInputAnswers, normalizeUserInputQuestions } from '../../shared/user-input-shared.js';
+import { buildUserInputAnswers, normalizeElicitationQuestions, normalizeUserInputQuestions } from '../../shared/user-input-shared.js';
 import { PlanLayer, ToolCard, cardBoxCls } from '../tools/tool-renderers.jsx';
 import { cardBtnCls } from '../../shared/card-buttons.mjs';
 import { YoloConfirmCard } from '../../shared/yolo-confirm-card.jsx';
@@ -439,48 +440,13 @@ function LiveConversationActivityIndicator({ turn, onRequestAttention, className
 
 function ElicitationCard({ elicitation, pending, onRespond, responding, copy, conversationCopy }) {
   const request = elicitation.request || {};
-  const schema = request.requestedSchema || {};
-  const required = new Set(Array.isArray(schema.required) ? schema.required : []);
-  const fields = Object.entries(schema.properties || {});
-  const otherFields = new Map(fields
-    .filter(([, field]) => field && field._meta && field._meta.codex && field._meta.codex.isOtherAnswer)
-    .map(([id, field]) => [String(field._meta.codex.questionId || ''), { id, field }]));
-  const questions = fields.filter(([, field]) => (
-    !(field && field._meta && field._meta.codex && field._meta.codex.isOtherAnswer)
-  ));
+  // Schema → question mapping (companion other-answer folding, choice/custom-reply pin)
+  // lives in shared/user-input-shared.js next to the request_user_input normalization.
+  const questions = normalizeElicitationQuestions(
+    request.requestedSchema,
+    (conversationCopy && conversationCopy.otherPlaceholder) || '',
+  );
   const actionable = !!pending && !elicitation.resolved;
-
-  function choices(field) {
-    if (Array.isArray(field && field.oneOf)) {
-      return field.oneOf.map(option => ({
-        value: option && option.const,
-        label: option && (option.title || option.const),
-        description: option && option.description,
-      })).filter(option => option.value != null);
-    }
-    if (Array.isArray(field && field.enum)) {
-      return field.enum.map(value => ({ value, label: String(value), description: '' }));
-    }
-    return [];
-  }
-
-  const normalizedQuestions = questions.map(([id, field]) => {
-    const other = otherFields.get(id);
-    return {
-      id,
-      answerKey: id,
-      otherAnswerKey: other && other.id,
-      header: field.title || id,
-      question: field.description || '',
-      options: choices(field),
-      allowOther: Boolean(other),
-      otherPlaceholder: other && (other.field.title || (conversationCopy && conversationCopy.otherPlaceholder)),
-      required: required.has(id)
-        || Boolean(field && field._meta && field._meta.codex && field._meta.codex.isOther),
-      inputType: field.type || 'string',
-      secret: Boolean(field && field._meta && field._meta.codex && field._meta.codex.isSecret),
-    };
-  });
 
   function submit(groups) {
     // content 用无原型对象构造（见 buildElicitationContent）：answerKey 为
@@ -494,7 +460,7 @@ function ElicitationCard({ elicitation, pending, onRespond, responding, copy, co
     <QuestionChoiceCard
       title={copy.choiceTitle}
       description={request.message && request.message !== 'Input requested' ? request.message : ''}
-      questions={normalizedQuestions}
+      questions={questions}
       resolved={!actionable}
       submitting={responding}
       submitLabel={copy.submit}
@@ -515,7 +481,7 @@ function ElicitationCard({ elicitation, pending, onRespond, responding, copy, co
 }
 
 // 原生（品悟 Engine）会话的选择确认卡：chat:user_input_required → submit_user_input。
-// 选项归一化逻辑与主聊天 UserInputCard 对齐（allow_free_text / multi_select），
+// 选项归一化与自定义回复钉死与主聊天 UserInputCard 共用（shared/user-input-shared.js），
 // 但提交走显式 sessionId，不依赖 bridge 全局 activeSession。
 const NATIVE_CHAT_EVENTS = [
   'chat:user_message',
@@ -535,6 +501,10 @@ const NATIVE_CHAT_EVENTS = [
   'chat:user_input_required',
   'chat:plan_snapshot',
   'chat:plan_ready',
+  // discard_plan 后端广播（多端/远端 discard 回声）：把匹配的 active 方案卡幂等
+  // 冻结为 discarded。处理逻辑在 code-native-lane.js（applyNativeChatEvent 的
+  // chat:plan_resolved 分支，与 bridge chat-events.js plan_resolved 对齐）。
+  'chat:plan_resolved',
   'chat:transient_error',
   'chat:done',
 ];
@@ -2362,7 +2332,10 @@ export function CodexAcpView({
     nativeVoice.cancelVoice();
   }
   function handleNativeVoiceClose() {
-    nativeVoice.closeVoice();
+    // 保留未发送的操作与转写草稿（进行中的录音仍会被取消）。本仓 hook 的
+    // closeVoice 与 dismissVoice 同为 bridge.voice.dismissVoiceInput，这里
+    // 沿用上游的 dismissVoice 拼写以减少后续回流冲突。
+    nativeVoice.dismissVoice();
   }
 
   // 离开代码页（切模式/视图，组件卸载）时可靠取消进行中的语音输入：
@@ -2730,7 +2703,11 @@ export function CodexAcpView({
     if (!element) return;
     autoScrollRef.current = true;
     setShowScrollBottom(false);
-    element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' });
+    // Smooth gliding through a virtualized document mounts and unmounts
+    // rows for its whole duration while estimates go stale; jump instead
+    // (same decision as the overflowAnchor gate below).
+    const virtualized = shouldVirtualizeConversationTurns(visibleTurns.length, scroller);
+    element.scrollTo({ top: element.scrollHeight, behavior: virtualized ? 'auto' : 'smooth' });
   }
 
   function beginRuntimeOperation(agentId, operation) {
@@ -3532,7 +3509,7 @@ export function CodexAcpView({
 
         <div className="flex-1 min-h-0 flex">
         <div className="relative min-w-0 flex-1 min-h-0 flex flex-col">
-        <div ref={scroller} className="flex-1 min-h-0 overflow-y-auto custom-scrollbar" style={{ overflowAnchor: 'none' }}>
+        <div ref={scroller} className="flex-1 min-h-0 overflow-y-auto custom-scrollbar" style={{ overflowAnchor: shouldVirtualizeConversationTurns(visibleTurns.length, scroller) ? 'none' : undefined }}>
           {/* relative: the AuxQuoteSelection chip is absolutely positioned inside this column, clamped to its rect. */}
           <div ref={conversationContentRef} className="relative w-full max-w-[920px] min-h-full mx-auto px-6 py-6 flex flex-col gap-7">
             {workspaceUnavailable ? (

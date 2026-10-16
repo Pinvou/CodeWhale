@@ -1,5 +1,14 @@
 # CodeWhale Fork 修改清单
 
+## 本轮同步接线：冷启动所有权与有界拆除（2026-10-13）
+
+- 按用户最新确认，本轮为远控 v1 接入主模型 Responses（含原生图片输入），不扩视觉兜底协议。显式 openai_responses 与官方 OpenAI GPT 目录路线均导出正确 wire，B 与 Relay 独立复算；伪造 Chat/Responses 标签拒绝，不改写原 SavedModel 预设，不改 CodeWhale 源码。视觉兜底仅接受 Chat；远程 Responses 主模型不会被 Chat-only image_analyze 自动复用，原生图片路径不受影响。普通本地 Responses 行为保留。
+- 独立审核发现的协议劈叉由纯 core/model_wire.rs 收敛：既有 host/prefix 规则原样提取，传输路线的 host/vendor/preset/model 协议判定与 bridge 实际落点一致；DeepSeek host 与 vendor 优先级纳入校验。锁定任务不再读取 B 宿主的 PROVIDER/MODEL 环境钉来压制 wire，普通本地环境优先级保留。覆盖主模型接纳/运行时物化、伪造 wire/vendor、Chat 视觉兜底、原生图片、环境隔离及跨 JS/Rust 共享正负向夹具；未发布协议直接同批更新 allowlist 与固定合同摘要，不留开发协议兼容分支。
+
+- main #1808 的有界提交、终态落盘 join 和 Shutdown 拆除，与远控栈的冷启动守卫共存。会话加载仍在 spawn 前；新引擎以 `ColdEngineCustody` 托管，非阻塞 SyncSession 入队后才公开 entry。加载失败不生成引擎；同步失败、取消或公开冲突不得发布不完整引擎。
+- 不复用 main 原来的 load-after-spawn 错误分支：其 wrapper 已无调用前提，改由守卫覆盖全部未公开退出路径。Drop 同步 cancel、abort forwarder、按 CancelSubAgents→Shutdown 尝试入队；仅 Shutdown 未送达时，在不持 turn gate 的后台接入 main 的 `bounded_teardown_shutdown`（首发最多 5s，后续重试最多 60s）。含 CancelSubAgents 的剩余操作仍按原 FIFO 有界重试；闭包持有旧 AppEngine，保留其 bridge/私有 Skills，不引用 pool 或新实例。
+- 保留 main 两个 Shutdown 通道结果测试；将旧“两处 hydration wrapper 调用”静态钉迁到 preload→spawn→custody→try_sync→publish 顺序和守卫实际有界接线，并补充真实 AppEngine mailbox 满载/单剩 Shutdown、资源托管及不误伤 resident 回归。无 runtime 时继续同步 best effort、不 panic；入队不等于 provider 已 join，持续卡死仍可能留下旧引擎任务。
+
 ## 已合入维护分支：压缩检查点角色兼容性
 
 - T7：将带类型的 Agent 拓扑检查点放到最近一次真实用户输入之后、该轮 assistant/tool 链之前，包括压缩摘要位于链尾的情况。Chat Completions 发送前把结构化识别的当前格式摘要移到其保留轮次之前，并把该摘要与拓扑检查点合并进这条 user 出站消息；普通用户引用摘要标记不会触发重排。修复范围是压缩流程自身产生的尾部 `tool -> user`，客户报错原文为 `SSE stream request failed: HTTP 400 Bad Request: response_role: "user"`（SSE 载体）；存储历史及工具调用/结果 ID 不变，会话固定的系统前缀也不变。
@@ -31,7 +40,7 @@
 
 ## T9：Custom 路线的配置 wire 直达运行时（父仓 #625 × CodeWhale #79）
 
-- 状态：已随 2026-10-08/09 批次收口。底座侧 [Pinvou/CodeWhale#79](https://github.com/Pinvou/CodeWhale/pull/79) 以 squash `3035a022e`（`fix(route): honor custom table wire on runtime routes`，2026-10-08）合入 `pinvou3-clean`，并随该批次把登记头推进至 `0bc868ff0`（上游 v0.9.12 之上 57 个提交）；候选期结束——父仓 gitlink 即公开维护分支头，`scripts/fork-guard.sh` 的 `EXPECTED_HEAD`/`EXPECTED_COMMITS=68` 即登记值，候选重钉义务解除。候选评审史：round-5 收口于 `86dd8e8d2`（方言别名单点解析、身份 scope 读取、app-server ingress 关门、preflight 按表方言校验、捕获/回放边角与 fixture/helper 整理，别名表共享与方言警告收窄）；round-6 十一路从零复审再收口于 `842c4a4bb`（authority-glued query URL 指纹碰撞闭合、wire 绑定客户端内部重解析钉、方言警告表名与发射钉、/provider 行协议钉、endpoint 指纹降级方向文档）；本节登记随父仓 #625 落地。
+- 状态：已随 2026-10-08/09 批次收口。底座侧 [Pinvou/CodeWhale#79](https://github.com/Pinvou/CodeWhale/pull/79) 以 squash `3035a022e`（`fix(route): honor custom table wire on runtime routes`，2026-10-08）合入 `pinvou3-clean`，并随该批次把登记头推进至 `0bc868ff0`（上游 v0.9.12 之上 57 个提交）；候选期结束——父仓 gitlink 即公开维护分支头，`scripts/fork-guard.sh` 的 `EXPECTED_HEAD`/`EXPECTED_COMMITS` 以第 0 节当前登记值为准，候选重钉义务解除。候选评审史：round-5 收口于 `86dd8e8d2`（方言别名单点解析、身份 scope 读取、app-server ingress 关门、preflight 按表方言校验、捕获/回放边角与 fixture/helper 整理，别名表共享与方言警告收窄）；round-6 十一路从零复审再收口于 `842c4a4bb`（authority-glued query URL 指纹碰撞闭合、wire 绑定客户端内部重解析钉、方言警告表名与发射钉、/provider 行协议钉、endpoint 指纹降级方向文档）；本节登记随父仓 #625 落地。
 - 问题：命名 `[providers.<name>]` 表的 `wire = "responses"` 从不到达真正服务轮次的客户端。`RouteRequest` 没有 wire 通道，`candidate.protocol()` 恒为 Custom 的向后兼容静态策略（`Fixed(ChatCompletions)`），而 #3384 宿主解析路线架构下每个 `Op::SendMessage` 都携带宿主解析的路线、`install_resolved_runtime_route` 经 `DeepSeekClient::from_candidate`（绑定 `candidate.protocol()`）重建客户端——配置写着 Responses、实际 POST `{base}/chat/completions`。认得该覆盖的只有环境性 spawn 客户端（`DeepSeekClient::new` 经 `provider_wire_format_for_config`）与 `provider_capability_with_wire`，二者都不在逐轮传输路径上。品悟父仓 PR #625 以命名表把 GPT 目录模型改走 Responses 线，三轮评审未察觉，正因运行时路径零测试钉（评审第四轮以可执行探针实证 `candidate.protocol() == ChatCompletions`）。
 - 修复：`RouteRequest.wire_override`（仅 `ProviderKind::Custom` 认，内建保持描述符策略）；tui 路线层 `custom_wire_override_for` 读活动表方言（与 `provider_wire_format_for_config` 同一 `provider_wire_dialect` 来源，三处构造性一致），客户端内 `rebound_for_model_protocol`/逐请求路由/限额查找钉传输自身 wire，端点域客户端不因引擎内换模型被降级。加密推理捕获从 Codex 专属放宽到所有发送 `include: ["reasoning.encrypted_content"]` 的 Responses 路线（Codex + Custom 表；DeepSeek 明文 `reasoning_text` 与 Concentrate 契约不变）；回放门按捕获 provider 串匹配，并收窄到提供方身份（命名表为 `custom/<table>`，一张表的加密推理不再回放到另一张表）；捕获随之放宽到所有发送该 include 的 Responses 路线（OpenCode Zen 花名册一并纳入，include 与捕获按构造覆盖同一路线集）。round-5 评审跟进收口剩余缝隙：方言别名表在 config crate 单点解析（`wire_dialect_override`；拼错的方言保持降级到旧 Chat 策略，已钉），运行时路线从身份 scope 后的配置读覆盖（非当前 custom 身份不再借用全局选中表的 wire），app-server `/v1/chat/completions` 入口线程同一方言使其 Chat-only 守卫对 `wire = "responses"` 表关门而非把 chat body 打向 Responses-only 端点，preflight（`route_is_valid_for_model`）按表自身方言校验，捕获/回放边角（Chat wire 不捕获；缺失或空 `encrypted_content` 跳过且流不断）均为突变验证过的钉。消费者普查：环境客户端、capability 报告、运行时候选三者对同一表方言构造性一致；config-free 的 `resolve_route_candidate*` 包装保持静态策略（仅校验/展示，不建客户端）。
 - 覆盖：config 侧 `custom_wire_override_mints_a_wire_true_candidate`、`wire_override_is_ignored_for_builtin_kinds`、`custom_wire_override_edges_stay_fail_closed`；tui 侧 `forkguard_named_table_wire_responses_reaches_the_runtime_candidate`、`forkguard_named_table_wire_anthropic_reaches_the_runtime_candidate`、`forkguard_named_table_without_wire_keeps_the_chat_default`、`forkguard_named_table_unrecognized_wire_keeps_the_chat_default`、`forkguard_identity_pinned_route_reads_the_pinned_tables_wire`、`forkguard_ambient_wire_override_does_not_leak_onto_pinned_chat_tables`、`forkguard_custom_responses_route_turn_client_posts_to_the_responses_endpoint`（wiremock 断言 POST 路径 `/v1/responses` 与 `store:false`/`include`/逐字模型）、`forkguard_custom_anthropic_route_turn_client_posts_to_the_messages_endpoint`、`forkguard_custom_responses_stream_captures_encrypted_reasoning_as_opaque_state`、`forkguard_custom_responses_captured_state_replays_on_the_next_turn`、`forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state`、`forkguard_fixed_endpoint_legacy_state_without_fingerprint_keeps_replaying`、`forkguard_repointed_builtin_legacy_state_without_fingerprint_fails_closed`、`forkguard_custom_chat_stream_does_not_capture_encrypted_reasoning`、`forkguard_custom_responses_capture_tolerates_missing_or_empty_encrypted_content`。guard 指纹 14 条（T9）。
@@ -53,8 +62,8 @@
 | 维护分支 | `pinvou3-clean` = `13ee4dfd2349f8ece3d2b7169031d09189cc9ec7`（r1 基线 `1fafee7e2` 之上 56 个公开维护提交：#41/#47/#49、2026-09-10/11 遗留 PR 清理批次 #31/#37/#38/#39/#43/#48/#50/#51/#52/#53、2026-09-17 批次 #56/#58/#59/#60/#61、2026-09-18 批次 #55/#57/#62、2026-09-20 批次 #66、2026-09-21 批次 #64/#67、2026-09-22/23 批次 #63/#65/#68/#69/#70/#71/#72/#73、收口追加 #77/#76（替换原 #74）、2026-10-02 批次 #80、2026-10-08/09 批次 #79/#88/#89/#75/#78/#94/#95 、2026-10-12/13 批次 #90/#91/#97/#98/#93 、2026-10-13/14 批次（#92/#96/#101/#102/#103/#104）、2026-10-14 批次（#54/#107）与 2026-10-15 批次（#108））父仓固定公开维护 SHA，严格核对维护头，不引用合入前 PR SHA。 |
 | 发布状态 | r3 已收口（2026-09-23）：不可变 tag `pinvou-v0.9.12-r3` 切在合并头 `61cb769be`；2026-10-02 起 #80 使登记头领先 tag，进入过渡期，`scripts/verify-public-submodule.sh` 以 `TRANSITION_BASELINE` 断言 tag 仍钉在 `61cb769be` 且 gitlink = 维护分支头并领先 tag（2026-10-08/09 批次 #79/#88/#89/#75/#78/#94/#95 延续该过渡态）。r2 tag `pinvou-v0.9.12-r2` 仍钉在其收口 `6f780290f`（24 个提交）作为回退点；历史上父仓 gitlink 由 Official PR #1037 首次对齐，其后 #1141/#1209 与各批次 gitlink 对齐 PR 随批次前移，本次由 gitlink bump PR 随 CodeWhale#80 对齐。r3 tag 曾短暂钉在 `ba2a07768f`，在父仓引用前因 #77 Windows 编译修复重切至 `61cb769be`（同日完成，未被任何父仓提交引用） |
 | 升级前回退点 | 公开不可变 tag `pinvou-v0.9.5-r13` → `f853f8f1566c57e6be40d5439a222a932aa79ef5`；同 SHA 的本地 `backup/pre-v0.9.12-sync` 仅作便利引用 |
-| 历史组织 | 上游之上 71 个登记提交，归属 4 个长期主题（T1–T4）+ 3 个追加减量主题（T5 会话归档导出、T6 蜂群限流治理、T8 roster 宿主 profiles 呈现，即 Pinvou/CodeWhale#65 提交主题里的 T7，按 #365 先例在父仓登记时重编号）+ 2 个已合入维护分支的主题（T7 压缩检查点角色兼容；T9 custom wire 运行时路线——底座 #79 随 2026-10-08/09 批次 squash 合入，父仓配套随 #625 落地）；r1 之后 56 个提交经公开 PR 维护流程合入；本轮适用门禁以当前固定提交的实际结果为准。T8 主题经 Pinvou/CodeWhale#65 落位：原以五个提交随父仓蜂群二期 PR 走保持提交合入以保全钉定 SHA，实际经 squash 合入（`c5fadb86d`）——登记随之改为钉定公开维护分支头（现 `13ee4dfd2`），不再钉定合入前的波次 SHA（详见第 13 节教训登记） |
-| drift | `445 files, +67393/-21049`，净增 46344 行（实测于 `13ee4dfd2` vs 上游 `dcd4c200f`；2026-10-15 批次 #108 为同模型宿主申报限额经引擎路由重推导保持的修复，净增较 `803e672bb` 增 223）；`445 files, +67187/-21066`，净增 46121 行（实测于 `803e672bb` vs 上游 `dcd4c200f`；2026-10-14 批次 #54 为多根 workspace_roots 授权基础设施（runtime lanes），净增较 `f27672935` 增 13,959；#107 为同模型宿主路由限制修复，净增较 `480bebf61` 增 119）；`397 files, +53709/-21547`，净增 32162 行（实测于 `f27672935` vs 上游 `dcd4c200f`）；`397 files, +53533/-21490`，净增 32043 行（实测于 `480bebf61` vs 上游 `dcd4c200f`；2026-10-13/14 批次（#92/#96/#101/#102/#103/#104）以 #102 无价值测试清理与 #104 界限简化回落净增，此前 `3118c36b8a` 为 294 files +51027/-14227 净增 36800）；`252 files, +36785/-5754`，净增 31031 行（实测于 `0bc868ff0` vs 上游 `dcd4c200f`）；`44921cf02` 为 `231 files, +29286/-5364`（净增 23922），r3 收口点 `61cb769be` 为 `229 files, +29272/-5352`（净增 23920），r2 为 `190 files, +19135/-2628`（净增 16507），旧 r13 为 `110 files, +10895/-1195` |
+| 历史组织 | 上游之上 71 个登记提交（70 个带 DCO sign-off；唯一未签为 #107 squash `f27672935`——其合并提交信息未保留 sign-off 尾部，已留言知会上游维护者，见 CodeWhale#107），归属 4 个长期主题（T1–T4）+ 3 个追加减量主题（T5 会话归档导出、T6 蜂群限流治理、T8 roster 宿主 profiles 呈现，即 Pinvou/CodeWhale#65 提交主题里的 T7，按 #365 先例在父仓登记时重编号）+ 2 个已合入维护分支的主题（T7 压缩检查点角色兼容；T9 custom wire 运行时路线——底座 #79 随 2026-10-08/09 批次 squash 合入，父仓配套随 #625 落地）；r1 之后 56 个提交经公开 PR 维护流程合入；本轮适用门禁以当前固定提交的实际结果为准。T8 主题经 Pinvou/CodeWhale#65 落位：原以五个提交随父仓蜂群二期 PR 走保持提交合入以保全钉定 SHA，实际经 squash 合入（`c5fadb86d`）——登记随之改为钉定公开维护分支头（现 `13ee4dfd2`），不再钉定合入前的波次 SHA（详见第 13 节教训登记） |
+| drift | `445 files, +67393/-21049`，净增 46344 行（实测于 `13ee4dfd2` vs 上游 `dcd4c200f`；2026-10-15 批次 #108 为同模型宿主申报限额经引擎路由重推导保持的修复，净增较 `803e672bb` 增 223；父仓配套（回流 pinjou-agent#709）补引擎自起 `EditLastTurn` 重发轮保留宿主申报限额的钢丝端到端回归，并对齐 `edit_last_turn` 注释与 ADR 0006 表述）；`445 files, +67187/-21066`，净增 46121 行（实测于 `803e672bb` vs 上游 `dcd4c200f`；2026-10-14 批次 #54 为多根 workspace_roots 授权基础设施（runtime lanes），净增较 `f27672935` 增 13,959；#107 为同模型宿主路由限制修复，净增较 `480bebf61` 增 119）；`397 files, +53709/-21547`，净增 32162 行（实测于 `f27672935` vs 上游 `dcd4c200f`）；`397 files, +53533/-21490`，净增 32043 行（实测于 `480bebf61` vs 上游 `dcd4c200f`；2026-10-13/14 批次（#92/#96/#101/#102/#103/#104）以 #102 无价值测试清理与 #104 界限简化回落净增，此前 `3118c36b8a` 为 294 files +51027/-14227 净增 36800）；`252 files, +36785/-5754`，净增 31031 行（实测于 `0bc868ff0` vs 上游 `dcd4c200f`）；`44921cf02` 为 `231 files, +29286/-5364`（净增 23922），r3 收口点 `61cb769be` 为 `229 files, +29272/-5352`（净增 23920），r2 为 `190 files, +19135/-2628`（净增 16507），旧 r13 为 `110 files, +10895/-1195` |
 | 守护 | 当前 `13ee4dfd2` 源码静态实测 215 条不同的 CodeWhale `forkguard_*` 函数名（guard 下限仍为 64）+ 父仓指纹与行为测试；名字数不代表本轮已执行测试数。 |
 | 父仓适配 | v0.9.12 EngineConfig、Agent/Plan 模式、逐轮 reasoning/安全、ExtraTools、owner 事件隔离、Automation v3/v4 数据兼容、rusqlite 0.40.2、Shell 任务来源对账；消费方 PR #396（execpolicy）、#408（轮次取消）、#444（蜂群）、#468（computer-use）、#472（一键导出）依赖本批底座能力 |
 
@@ -158,8 +167,9 @@
 | `906ffa979` | T5 修复 | Windows 硬链接计数改走稳定句柄 API：`number_of_links` 仍 unstable（`windows_by_handle`），父仓 Windows 腿 E0658；以 `GetFileInformationByHandle` 读取（与 Runtime store 身份检查同机制），无法打开/查询按单链接放行、由归档写入端的流式读取大声暴露真实问题；unix/fallback 臂仅增加未用 path 参数保持单一调用点（#94） |
 | `0bc868ff0` | T4 修复 | drain-cap 测试的四个名字改为显式导入、不再经 tests mod 的 unix 门控 glob（#77 同形）解析：测试本身平台无关（tokio duplex），Windows lib test 编译此前 7 处 E0425/E0433（#95） |
 | `44921cf02` | T2 修复 | 浮动 stable 工具链（1.99.0，2026-10-01 滚出）编译与 lint 复绿：`mark_taken` 的 `Atomic::fetch_update` 已更名 `try_update` 并弃用，MSRV 1.88 无新名，唯一调用点 `#[allow(deprecated)]` 并注明缘由（对旧工具链惰性）；顺带清掉 1.99 clippy 对存量代码的三处新发现（`agent_plugin` 单元素 `for key in ["args"]` 循环展开、错误串逐字节不变；`workflow_panel` 两处非捕获 Copy 闭包的多余 `&bounded` 借用）；首证于父仓 windows-rust-test `codewhale-tui` 编译红（#80） |
+| `f27672935` | T1 修复 | 同 wire model/protocol 的 model-aware 请求及 subagent/fleet rebind 保留宿主冻结 route limits，避免无宿主 overrides 的静态重解析将声明输出额度降回未知模型 8192 默认钳制；跨模型/协议继续重建（#107，公开提交未含 DCO trailer） |
 
-所有提交都含 DCO `Signed-off-by`。`b4c02616b` 包含大部分跨主题收口，历史粒度确实不利于 bisect；分支公开进入评审后没有为历史美化 force-push，而是追加带 sign-off 的提交修复评审和发布门禁问题，并用本表、指纹和行为测试弥补审计粒度。不可变 tag 已创建，后续不得重写。
+除 #107 squash `f27672935`（其合并提交信息未保留 sign-off 尾部，已留言知会上游维护者，见 CodeWhale#107）外，所有提交都含 DCO `Signed-off-by`。`b4c02616b` 包含大部分跨主题收口，历史粒度确实不利于 bisect；分支公开进入评审后没有为历史美化 force-push，而是追加带 sign-off 的提交修复评审和发布门禁问题，并用本表、指纹和行为测试弥补审计粒度。不可变 tag 已创建，后续不得重写。
 
 ## 4. T1 — 宿主嵌入与路由边界
 
@@ -167,6 +177,7 @@
 
 - 对宿主公开 `AppMode`、`ApprovalMode`、Automation、Task、route 和 worker ledger API。当前兼容 facade 还包含 18 个 `pub mod`，父仓全部 Rust 源码中有 61 个文件、340 处直接引用；这些模块作为不稳定下游兼容桥刻意不进入生成 API 文档。这是已登记的收窄债务，不在本次热修中做破坏性改名。
 - `resolve_runtime_route_with_limits` 保留 wire model、context/output 上限与 embedding alias。
+- #107 的 `client.rs` 保留同模型请求及同 wire model/protocol rebind 的冻结宿主额度；跨模型仍重解析，协议改变仍走既有重建路径。本轮随集成分支继承已合入的底座修复，gitlink 无独有增量，不修改底座源码、配置或依赖；保留已有下列两条结果式测试和对应指纹，不新增底座测试。
 - `EngineConfig.session_id` 在 Engine spawn 前绑定，所有子智能体/工作流事件带 owner session 并由宿主按 owner 过滤。
 - `EngineHandle::steer` 返回 opaque id；`withdraw_steer` 区分已撤回与非 pending；中断、停止、压缩、换会话和 Engine drop 都使每个 id 恰好进入 committed/dropped 终态。
 - `CancelSubAgents` 对当前 session 的子智能体做幂等批量取消。
@@ -177,6 +188,8 @@
 ### 关键测试
 
 - `forkguard_embedding_route_limits_preserve_wire_alias`
+- `client::tests::model_aware_same_model_request_keeps_host_declared_route_limits`
+- `client::tests::rebinding_the_same_model_keeps_host_declared_route_limits`
 - `forkguard_steer_lifecycle_withdrawal_is_bounded_and_prevents_commit`
 - `forkguard_steer_lifecycle_late_withdraw_reconciles_committed_state`
 - `forkguard_steer_channel_commits_live_and_drops_withdrawn_input_in_turn_loop`
@@ -341,7 +354,7 @@
 
 ## 12. 软上限评估与后续减量
 
-当前净增 8736 行，超过 1500 行软上限；`engine.rs`、`turn_loop.rs` 和 `engine/tests.rs` 也超过单文件 200 行提示线。原因是状态机、最终分发安全、“完整专家人设仅进入被选子智能体”的 spawn 边界、bundle Skills 排除 ambient 文件源的权限边界，以及评审要求的结果式生命周期/评测回归必须和 v0.9.12 原生 Engine 同步，拆成 app 侧镜像会形成更危险的双状态源。当前 Rust/Clippy/rustdoc 兼容只包含等价重写、`Default` 补全、窄 lint 说明、文档可达性修复和无调用测试 helper 清理，不改变公开函数签名或新增运行语义。
+历史净增 17336 行（该数字测量于 2026-09-22/23 批次波次头 `4767c2816`——该波次头现已不在公开 refs 上，沿开源仓同文口径沿用；登记头 drift 现值为 `445 files, +67393/-21049`、净增 46344（`13ee4dfd2`，见 §0），`252 files, +36785/-5754`、净增 31031 为 `0bc868ff0` 时点值）；当前净增以第 0 节登记为准，超过 1500 行软上限；`engine.rs`、`turn_loop.rs` 和 `engine/tests.rs` 也超过单文件 200 行提示线。原因是状态机、最终分发安全、“完整专家人设仅进入被选子智能体”的 spawn 边界、bundle Skills 排除 ambient 文件源的权限边界，以及评审要求的结果式生命周期/评测回归必须和 v0.9.12 原生 Engine 同步，拆成 app 侧镜像会形成更危险的双状态源。当前 Rust/Clippy/rustdoc 兼容只包含等价重写、`Default` 补全、窄 lint 说明、文档可达性修复和无调用测试 helper 清理，不改变公开函数签名或新增运行语义。
 
 后续减量顺序：
 
@@ -356,11 +369,21 @@
 9. 上游提供完整 static-composer/explicit-skills-root 契约后删除 T3 patch。
 10. 每次上游 release 重新核对已吸收项，不保留兼容壳。
 
+### 有意分歧登记
+
+以下各项是父仓（闭源仓）相对开源仓的有意行为分歧：双方可共存、不构成同步缺陷，也不进入上述减量顺序；每项登记分歧内容、取舍口径与钉定位置，避免后续同步或回流时被当作漂移“修复”。
+
+1. 行为/设备遥测：开源仓经社区决议（Pinvou/pinvou-agent#616）移除 opt-in telemetry client；闭源仓按企业口径保留该客户端与设备运营统计链路（`pinvou3-app/src-tauri/src/features/behavior_telemetry.rs` 为 #616 对应的 opt-in client，`pinvou3-app/src-tauri/src/platform/telemetry.rs` 为设备登记/用量统计，设计见 `docs/设备运营统计-初版.md`），随行的 access-policy 差异一并保留。此分歧属发布面差异，不回流、不上游化。
+2. 语音 closeVoice/dismissVoice 语义分化：闭源对完成态语音通知的 dismiss 保留草稿 provenance、仅进行中录音视为显式取消，与开源的 dismissal-sweep 时序不同；该时序适配由 `pinvou3-app/tests/voice_operation_lifecycle.test.mjs` 钉定，不随开源实现回移。
+3. 开源 bridge shared-cluster 机制（上游 `pinvou3-app/src/shared/bridge-shared-helpers.js`，本仓无此文件）闭源有意不采纳：闭源把对应函数体逐 lane 内联镜像（`src/platform/web/bridge.js`、`src/platform/tauri/bridge.js` 及 `src/platform/tauri/bridge/` 分文件），保持各 lane 独立演进与可验证；同步时逐函数对照，不做文件级合并。
+4. wire DTO 闭源超集：闭源 wire DTO 字段为开源面的超集，已在 Pinvou/pinvou3#463 登记，以该登记为准，此处不重复展开。
+
 ## 13. 发布与回退
 
 - 公开回退点是不可变 tag `pinvou-v0.9.5-r13`；本地 `backup/pre-v0.9.12-sync` 不是发布前提。
 - r3 已收口（2026-09-23）：不可变 `pinvou-v0.9.12-r3` 切在合并头 `61cb769be5b33abc64f64da4272f5b39a8b6c1fd`，`pinvou3-clean` 分支头、tag 与父仓 gitlink 三方相等，以 `scripts/verify-public-submodule.sh` 验证公开可达性；回退点保持 `pinvou-v0.9.12-r2`（钉在其收口 `6f780290f1c35e8a3c5dff86b4f76da142744b0c`）；r3 tag 在父仓引用前因 #77 修复自 `ba2a07768f` 重切；下次过渡期自 r3 起，按 `docs/fork-policy.md` 第 0 节豁免执行。
 - r2 已收口：不可变 `pinvou-v0.9.12-r2` 切在合并头 `6f780290f1c35e8a3c5dff86b4f76da142744b0c`，`pinvou3-clean` 分支头、tag 与父仓 gitlink 三方相等，以 `scripts/verify-public-submodule.sh` 验证公开可达性；回退点保持 `pinvou-v0.9.12-r1`（钉在 r1 收口 `1fafee7e2`）；下次过渡期自 r2 起，按 `docs/fork-policy.md` 第 0 节豁免执行。
+- 教训登记（2026-10-15）：gh squash 合并自定义 body 只保留主题列表、丢失 sign-off 尾部，使 #107 squash `f27672935` 成为 71 个登记提交中唯一未签者；「全部带签」的失实由 #705 写入、经 #712 延续，跨两个登记批才在 #706 订正。squash 合并必须把 `Signed-off-by:` 尾部写进提交信息；每个登记批必须按 `git rev-list --grep=^Signed-off-by:` 实数签数，不得沿用上一批的计数叙述。
 - 发布过程中只为精确 head 的受保护分支更新临时移除无法在该维护分支触发的 required status contexts，完成快进后立即恢复原保护配置；未关闭 force-push 防护，也未重写已发布 tag。
 - 教训登记（2026-09-23）：#65 原计划随父仓蜂群二期 PR 保持提交落位合入（不 squash），实际经 squash 合入——曾钉定的波次头 `4767c2816` 自公共 refs 悬空、fast-gate 可达性校验红，蜂群二期分支当日重钉到维护分支头恢复 gitlink=公开分支头相等。后续底座合入一律在合入后立即把 gitlink 重钉到公开分支头，不得钉定合入前的波次 SHA；r3 收口已恢复三方相等，公开可达性继续以 `scripts/verify-public-submodule.sh` 验证。
 - 后续发布仍不得降低公开校验或把本地 object 当成发布成功。

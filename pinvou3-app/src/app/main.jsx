@@ -25,6 +25,7 @@ import { groupSessionsWithProjects, resolveSessionProjectId, needsAddFolderConfi
 import { ProjectGroupHeader } from '../features/projects/ProjectGroupHeader.jsx';
 import { classifyRebindError, mergeRebindCarryoverIds } from '../features/projects/rebindErrors.js';
 import { runSessionBatch } from '../shared/session-management.js';
+import { filterSessionsByTab, groupSessionsByLocalDate, sessionListComparator } from '../shared/session-list-pipeline.js';
 import { isLlmApiAccountVisible } from '../shared/model-options.js';
 const LazyAccountPlatformPopover = lazy(() => VIEW_LOADERS.accountPlatformPopover().then(module => ({ default: module.AccountPlatformPopover })));
 import { AccountPlatformDesktopClient } from '../features/account-platform/desktop-client.js';
@@ -61,6 +62,12 @@ import { MODEL_PRESET_DEFS } from '../features/settings/model-catalog.js';
 import { createPetActivationGuard } from '../features/pet/activation-guard.js';
 import { SessionAttachmentTitle } from '../features/attachments/SessionAttachmentTitle.jsx';
 import {
+  isControlledSessionChatActive,
+  openControlledDeviceChatWithRetry,
+} from '../features/remote-control/remote-control-logic.mjs';
+import { modelSourceForLease } from '../features/remote-control/remote-model-source.mjs';
+import { mergeSessionStoreHistory } from '../features/remote-control/remote-session-adapter.mjs';
+import {
   sessionTitlePlainText,
   sessionTitlePresentation,
 } from '../features/attachments/attachment-message.js';
@@ -76,6 +83,7 @@ import { commitPendingUpdateReady } from '../platform/tauri/update-readiness.js'
 
 // 定时任务创建与运行链路已恢复，展示入口并允许自动跳转。
 const SCHEDULED_TASKS_ENTRY_ENABLED = true;
+const REMOTE_DISCONNECTED_CONNECTION = Object.freeze({ status: 'disconnected' });
 
 // 后端默认会话标题哨兵集合(bridge 按当前语言生成三语兜底标题,并据此判断是否自动改名)——
 // 显示层把任意一种哨兵标题映射成当前语言的「新对话」文案。哨兵是跨语言的后端
@@ -123,6 +131,8 @@ const LazyArchiveToast = lazy(() => VIEW_LOADERS.archiveConfirmDialog().then(m =
 const LazyPersonaEditorModal = lazy(() => VIEW_LOADERS.cardpool().then(m => ({ default: m.PersonaEditorModal })));
 const LazyWebAccessModal = lazy(() => VIEW_LOADERS.settings().then(m => ({ default: m.WebAccessModal })));
 const LazyDetachedShell = lazy(() => import('./DetachedShell.jsx').then(m => ({ default: m.DetachedShell })));
+// Windows 双端远程控制：连接表单留在设置二级页，连接成功后打开独立对话层。
+const LazyRemoteConnectionShell = lazy(() => import('../features/remote-control/RemoteConnectionShell.jsx'));
 
 // 视图 chunk 加载占位:沿用 DetachedShell 的「…」惯例,不引入新视觉语言。
 function ViewFallback() {
@@ -143,7 +153,7 @@ const APP_BRIDGE_STATE_DOMAINS = [
   'platform', 'sessions', 'chat', 'voice', 'knowledge', 'scheduled', 'monitor',
   'settings', 'models', 'llmapi', 'vllm', 'interaction', 'personas',
   'memory', 'remoteControl', 'updater', 'dependencies', 'teamRelay',
-  'projects', 'computerUse',
+  'projects', 'desktopRemoteControl', 'computerUse',
 ];
 
 function emitPetEvent(ev, name, payload) {
@@ -1440,6 +1450,45 @@ const NAV_PREFETCH = {
       const [savedConfirm, setSavedConfirm] = useState(null); // 存入成功 → iOS 确认窗 {name}
       const [poolMyOnly, setPoolMyOnly] = useState(false); // 跳卡池时是否直接落「我的卡牌」筛选(从确认窗"去查看"进来=true)
       const [webAccessOpen, setWebAccessOpen] = useState(false);
+      const [remoteConversationOpen, setRemoteConversationOpen] = useState(false);
+      const [remoteModelSource, setRemoteModelSource] = useState('controller_temporary');
+      const remoteTemporaryModelAvailable = bs?.controllerConnection?.temporaryModelAvailable === true;
+      const remoteModelLeaseKey = `${bs?.controllerConnection?.connectionId || ''}:${bs?.controllerConnection?.leaseEpoch || ''}:${remoteTemporaryModelAvailable ? 'temporary' : 'controlled'}`;
+      const remoteModelLeaseKeyRef = useRef(remoteModelLeaseKey);
+      const controlledDeviceAutoOpenRef = useRef(null);
+      const controlledDeviceAutoOpenInFlightRef = useRef(null);
+      const controlledSessionAutoOpenRef = useRef(null);
+      const controlledSessionAutoOpenInFlightRef = useRef(null);
+      const controlledDeviceStatus = bs?.controlledDevice?.status || null;
+      const controlledDeviceGeneration = bs?.controlledDevice?.generation || null;
+      const controlledTaskSessionId = (() => {
+        if (bs?.controlledSession?.sessionId) return String(bs.controlledSession.sessionId);
+        const tasks = Array.isArray(bs?.controlledTasks) ? bs.controlledTasks : [];
+        for (let index = tasks.length - 1; index >= 0; index -= 1) {
+          if (tasks[index]?.sessionId) return String(tasks[index].sessionId);
+        }
+        return null;
+      })();
+      const remoteChatConnection = bs?.controllerConnection || REMOTE_DISCONNECTED_CONNECTION;
+      const remoteProxyHistoryAvailable = bs?.platformCapabilities?.loaded === true
+        && bs?.platformCapabilities?.os === 'windows'
+        && bs?.platformCapabilities?.desktopRemoteControl === true;
+      useEffect(() => {
+        if (!bridge.available || !remoteProxyHistoryAvailable) return;
+        bridge.desktopRemoteControl.listRemoteProxyHistory().catch(() => {});
+      }, [remoteProxyHistoryAvailable]);
+      useEffect(() => {
+        const nextModelSource = modelSourceForLease(
+          remoteModelSource,
+          bs?.controllerConnection,
+          remoteModelLeaseKeyRef.current,
+          remoteModelLeaseKey,
+        );
+        remoteModelLeaseKeyRef.current = remoteModelLeaseKey;
+        if (nextModelSource !== remoteModelSource) {
+          setRemoteModelSource(nextModelSource);
+        }
+      }, [bs?.controllerConnection, remoteModelLeaseKey, remoteModelSource, remoteTemporaryModelAvailable]);
       const [publishedBrowserOverlayIntent, setPublishedBrowserOverlayIntent] = useState('');
       const [settingsUpdateFocusTick, setSettingsUpdateFocusTick] = useState(0);
       const [settingsInitialSection, setSettingsInitialSection] = useState('general');
@@ -1832,10 +1881,11 @@ const NAV_PREFETCH = {
 
       // Build chat history from sessions
       const bridgeSessions = bs && bs.sessions;
+      const remoteProxyHistories = bs && bs.remoteProxyHistories;
       const bridgeSessionBusy = bs && bs.sessionBusy;
       const chatHistory = useMemo(() => {
         const sessionBusy = bridgeSessionBusy || {};
-        return bridgeSessions ? bridgeSessions.map(s => {
+        return mergeSessionStoreHistory(bridgeSessions, remoteProxyHistories).map(s => {
           const isPlaceholder = !s.title || isDefaultChatTitle(s.title);
           const titlePresentation = isPlaceholder
             ? { text: t.newChat, attachments: [] }
@@ -1853,6 +1903,7 @@ const NAV_PREFETCH = {
             updatedAt: s.updated_at || s.created_at || '',
             pinned: !!s.pinned,
             pinnedAt: s.pinned_at || '',
+            sessionKind: s.kind,
             working: !!sessionBusy[s.id], // concurrent sessions: is this session generating in the background
             // #445 binding: a bound work session carries workspacePath/Kind;
             // project grouping follows binding (the same signal as the safety
@@ -1867,8 +1918,8 @@ const NAV_PREFETCH = {
             testId: 'regular-sidebar-item',
             menuTestId: 'regular-sidebar-menu',
           };
-        }) : [];
-      }, [bridgeSessions, bridgeSessionBusy, t, language]);
+        });
+      }, [bridgeSessions, remoteProxyHistories, bridgeSessionBusy, t, language]);
       const codexHistory = useMemo(() => codexSessions.map(session => ({
         id: session.id,
         title: (!session.title || isDefaultChatTitle(session.title))
@@ -2236,25 +2287,9 @@ const NAV_PREFETCH = {
       // changing the callback identity per render just to read a value.
       const allSidebarTasksRef = useRef(allSidebarTasks);
       allSidebarTasksRef.current = allSidebarTasks;
-      const sidebarTaskHistory = useMemo(() => allSidebarTasks
-        .filter((chat) => {
-          if (taskListFilter === 'pinned') return !!chat.pinned;
-          if (taskListFilter === 'code') return chat.taskKind === 'codex';
-          if (taskListFilter === 'scheduled') return chat.taskKind === 'scheduled';
-          return true;
-        })
-        .sort((a, b) => {
-          if (taskListSort === 'pinned_first' && !!a.pinned !== !!b.pinned) {
-            return a.pinned ? -1 : 1;
-          }
-          const aTime = (taskListSort === 'pinned_first' && a.pinned)
-            ? (a.pinnedAt || a.updatedAt)
-            : (a.updatedAt || a.pinnedAt);
-          const bTime = (taskListSort === 'pinned_first' && b.pinned)
-            ? (b.pinnedAt || b.updatedAt)
-            : (b.updatedAt || b.pinnedAt);
-          return String(bTime || '').localeCompare(String(aTime || ''));
-        }), [allSidebarTasks, taskListFilter, taskListSort]);
+      const sidebarTaskHistory = useMemo(() => (
+        filterSessionsByTab(allSidebarTasks, taskListFilter).sort(sessionListComparator(taskListSort))
+      ), [allSidebarTasks, taskListFilter, taskListSort]);
 
       // 任务列表按日期堆叠:今天默认展开、以往默认折叠;组内顺序沿用上面的筛选+排序结果,
       // 组间按日期倒序,无时间戳的落 'unknown' 组沉底。
@@ -2264,23 +2299,10 @@ const NAV_PREFETCH = {
       const sidebarPinnedHoisted = useMemo(() => (taskListSort === 'pinned_first'
         ? sidebarTaskHistory.filter(chat => !!chat.pinned)
         : []), [taskListSort, sidebarTaskHistory]);
-      const sidebarTaskGroups = useMemo(() => {
-        const groups = [];
-        const byDate = new Map();
-        sidebarTaskHistory.forEach(chat => {
-          if (sidebarPinnedHoisted.length && chat.pinned) return;
-          const key = localDateKey(chat.updatedAt || chat.pinnedAt);
-          if (!byDate.has(key)) byDate.set(key, []);
-          byDate.get(key).push(chat);
-        });
-        byDate.forEach((rows, key) => { groups.push({ key, rows }); });
-        groups.sort((a, b) => {
-          if (a.key === 'unknown') return 1;
-          if (b.key === 'unknown') return -1;
-          return b.key.localeCompare(a.key);
-        });
-        return groups;
-      }, [sidebarTaskHistory, sidebarPinnedHoisted]);
+      const sidebarTaskGroups = useMemo(() => groupSessionsByLocalDate(
+        sidebarTaskHistory.filter(chat => !(sidebarPinnedHoisted.length && chat.pinned)),
+        (chat) => localDateKey(chat.updatedAt || chat.pinnedAt),
+      ), [sidebarTaskHistory, sidebarPinnedHoisted]);
 
       // Project view (formerly the "Code" form): every session bound to a
       // real directory — code/ACP sessions and #445 bound work sessions — is
@@ -2410,6 +2432,106 @@ const NAV_PREFETCH = {
             : keepsDesktopBrowserVisible ? 'none' : 'visible',
         });
       }, [closeMobileSidebar, runBrowserUiTransition, setCurrentView]);
+
+      // B 端建立连接后进入普通会话页，便于立即看到远程请求及执行过程。
+      // 以 remote-control generation 去重：liveness 更新和链路恢复不会反复抢走用户当前页面。
+      useEffect(() => {
+        if (controlledDeviceStatus !== 'connected') {
+          return;
+        }
+        if (!controlledDeviceGeneration) return;
+        const connectionKey = controlledDeviceGeneration;
+        if (
+          controlledDeviceAutoOpenRef.current === connectionKey
+          || controlledDeviceAutoOpenInFlightRef.current === connectionKey
+        ) return;
+        const originView = currentViewRef.current;
+        let cancelled = false;
+        controlledDeviceAutoOpenInFlightRef.current = connectionKey;
+        setRemoteConversationOpen(false);
+        void openControlledDeviceChatWithRetry({
+          navigate: () => navigateFromScheduledRun('chat'),
+          isCurrent: () => {
+            if (cancelled) return false;
+            const latest = bsRef.current && bsRef.current.controlledDevice;
+            const latestKey = latest && latest.generation;
+            const viewIsCurrent = currentViewRef.current === originView || currentViewRef.current === 'chat';
+            return !!(latest && latest.status === 'connected' && latestKey === connectionKey && viewIsCurrent);
+          },
+          onError: (error) => console.warn('[remote-control] B-side chat auto-open failed', error),
+        }).then((opened) => {
+          if (controlledDeviceAutoOpenInFlightRef.current === connectionKey) {
+            controlledDeviceAutoOpenInFlightRef.current = null;
+          }
+          if (opened) controlledDeviceAutoOpenRef.current = connectionKey;
+        });
+        return () => {
+          cancelled = true;
+          if (controlledDeviceAutoOpenInFlightRef.current === connectionKey) {
+            controlledDeviceAutoOpenInFlightRef.current = null;
+          }
+        };
+      }, [controlledDeviceGeneration, controlledDeviceStatus, navigateFromScheduledRun]);
+
+      // A remote session is provisioned only when B receives the first task.
+      // Connection-time navigation therefore cannot select it yet; once the
+      // admitted task publishes its authoritative session id, select that
+      // session exactly once so filtering never hides the received command.
+      useEffect(() => {
+        if (controlledDeviceStatus !== 'connected' || !controlledDeviceGeneration || !controlledTaskSessionId) return undefined;
+        const sessionKey = `${controlledDeviceGeneration}:${controlledTaskSessionId}`;
+        if (
+          controlledSessionAutoOpenRef.current === sessionKey
+          || controlledSessionAutoOpenInFlightRef.current === sessionKey
+        ) return undefined;
+        let cancelled = false;
+        controlledSessionAutoOpenInFlightRef.current = sessionKey;
+        void runBrowserUiTransition(async ({ isCurrent }) => {
+          const latest = bsRef.current;
+          if (latest?.scheduledRunContext && bridge.available && bridge.scheduled.exitScheduledRunChat) {
+            const exited = await bridge.scheduled.exitScheduledRunChat();
+            if (!exited || !isCurrent() || cancelled) return false;
+          }
+          if (!bridge.available || !bridge.sessions?.switchToSession || !isCurrent() || cancelled) {
+            return false;
+          }
+          setCodeModeOn(false);
+          setCurrentView('chat');
+          closeMobileSidebar();
+          const switched = await bridge.sessions.switchToSession(controlledTaskSessionId);
+          if (!switched || !isCurrent() || cancelled) return false;
+          setActiveChat(controlledTaskSessionId);
+          return true;
+        }, {
+          channel: 'session',
+          hideMode: 'workspace',
+          serialize: true,
+          sessionTarget: controlledTaskSessionId,
+        }).then((opened) => {
+          if (controlledSessionAutoOpenInFlightRef.current === sessionKey) {
+            controlledSessionAutoOpenInFlightRef.current = null;
+          }
+          if (opened) controlledSessionAutoOpenRef.current = sessionKey;
+        }).catch((error) => {
+          if (controlledSessionAutoOpenInFlightRef.current === sessionKey) {
+            controlledSessionAutoOpenInFlightRef.current = null;
+          }
+          console.warn('[remote-control] B-side session open failed', error);
+        });
+        return () => {
+          cancelled = true;
+          if (controlledSessionAutoOpenInFlightRef.current === sessionKey) {
+            controlledSessionAutoOpenInFlightRef.current = null;
+          }
+        };
+      }, [
+        controlledDeviceGeneration,
+        controlledDeviceStatus,
+        controlledTaskSessionId,
+        closeMobileSidebar,
+        runBrowserUiTransition,
+        setCurrentView,
+      ]);
 
       function openSettingsSection(section = 'general') {
         // 记录进入设置前的页面（代码页齿轮等深链入口），关闭设置时原路返回，
@@ -2643,6 +2765,26 @@ const NAV_PREFETCH = {
           sessionTarget: id,
         });
       }, [closeMobileSidebar, runBrowserUiTransition, setCurrentView]);
+
+      const activateRemoteProxy = useCallback(async (opened, isCurrent = () => true) => {
+        const localSessionId = opened?.localSessionId;
+        if (!localSessionId || !isCurrent() || !bridge.desktopRemoteControl) return false;
+        // The list and read are SessionStore-gated. Never navigate using only
+        // the connection command's optimistic WebView projection.
+        await bridge.desktopRemoteControl.listRemoteProxyHistory();
+        if (!isCurrent()) return false;
+        const switched = await handleSwitchSession(localSessionId);
+        if (!switched || !isCurrent()) return false;
+        setRemoteConversationOpen(false);
+        return true;
+      }, [handleSwitchSession]);
+
+      const openCurrentRemoteProxy = useCallback(async () => {
+        if (!bridge.desktopRemoteControl) return false;
+        const existing = bsRef.current?.controllerConnection?.localSessionId || null;
+        const opened = await bridge.desktopRemoteControl.openLiveRemoteProxy(existing);
+        return activateRemoteProxy(opened);
+      }, [activateRemoteProxy]);
 
       async function handleSearchSelect(id) {
         await handleSwitchSession(id);
@@ -2893,12 +3035,16 @@ const NAV_PREFETCH = {
       // their dependency arrays list exactly the state they read.
       const handleDeleteSession = useCallback(async (id) => {
         const isCodexSession = codexSessions.some(session => session.id === id);
-        if (bridge.available) await bridge.sessions.deleteSession(id);
+        if (bridge.available) await bridge.sessions.deleteSession(id, (code) => {
+          if (code === 'remote_unattempted_pending_exists') {
+            setSettingsToast(t.remoteConversation.deletePreparedBlocked);
+          }
+        });
         if (isCodexSession) {
           if (activeCodexId === id) updateActiveCodexSession(null);
           await refreshCodexSessions().catch(() => {});
         }
-      }, [codexSessions, activeCodexId, updateActiveCodexSession, refreshCodexSessions]);
+      }, [codexSessions, activeCodexId, updateActiveCodexSession, refreshCodexSessions, t]);
 
       const handleRenameSession = useCallback(async (id, title) => {
         const isCodexSession = codexSessions.some(session => session.id === id);
@@ -3639,21 +3785,21 @@ const NAV_PREFETCH = {
               : chat.scheduledRun
                 ? cachedItemCallback(sidebarScheduledSelectCallbacks, chat, (c) => () => handleOpenScheduledRunShortcut(c.scheduledRun))
                 : handleSwitchSession}
-            onRename={handleRenameSession}
+            onRename={chat.sessionKind === 'RemoteProxy' ? undefined : handleRenameSession}
             onDelete={handleDeleteSession}
-            onTogglePinned={handleToggleSessionPinned}
-            onOpenFolder={can('externalSystemOpen') ? handleRevealSessionFolder : undefined}
-            onExportArchive={chat.taskKind !== 'codex' && !exportingSessionIds.has(chat.id) && bridge.sessions.exportSessionArchive ? handleExportSessionArchive : undefined}
-            onArchive={handleArchiveSession}
-            onMoveToProject={projectMovesAvailable ? openMovePicker : undefined}
-            dndPayload={projectMovesAvailable && sidebarCodeListActive
+            onTogglePinned={chat.sessionKind === 'RemoteProxy' ? undefined : handleToggleSessionPinned}
+            onOpenFolder={chat.sessionKind !== 'RemoteProxy' && can('externalSystemOpen') ? handleRevealSessionFolder : undefined}
+            onArchive={chat.sessionKind === 'RemoteProxy' ? undefined : handleArchiveSession}
+            onExportArchive={chat.sessionKind !== 'RemoteProxy' && chat.taskKind !== 'codex' && !exportingSessionIds.has(chat.id) && bridge.sessions.exportSessionArchive ? handleExportSessionArchive : undefined}
+            onMoveToProject={chat.sessionKind !== 'RemoteProxy' && projectMovesAvailable ? openMovePicker : undefined}
+            dndPayload={chat.sessionKind !== 'RemoteProxy' && projectMovesAvailable && sidebarCodeListActive
               ? cachedItemCallback(sidebarDndPayloads, chat, (c) => ({ sessionId: c.id }))
               : undefined}
             dndDisabled={!!dragAvatar}
             onDragEnd={clearDropTarget}
             dragKind={detachKind}
             dragging={canDetachWindows && !!dragAvatar && dragAvatar.key === `${detachKind}:${chat.id}`}
-            onPickUp={canDetachWindows
+            onPickUp={chat.sessionKind !== 'RemoteProxy' && canDetachWindows
               ? cachedItemCallback(sidebarPickUpCallbacks, chat, (c) => (geom) => beginTearOff(detachKind, c.id, c.title, geom))
               : undefined}
           />
@@ -3690,13 +3836,22 @@ const NAV_PREFETCH = {
         setSearchOverlayOpen(true);
       }, []);
       const handleNavNewChat = useCallback(() => { handleNewChat(); }, [handleNewChat]);
-      const apiKeyGateOpen = shouldShowApiKeyGate(bs, currentView, bridge.available);
+      const isControlledChatActive = isControlledSessionChatActive(
+        bs?.controlledDevice, bs?.controlledSession, bs?.activeSessionId,
+      );
+      const apiKeyGateOpen = shouldShowApiKeyGate(
+        bs,
+        currentView,
+        bridge.available,
+        isControlledChatActive,
+      );
       const browserOverlayIntent = [
         archiveConfirm ? 'archive-confirm' : '',
         searchOverlayOpen ? 'search' : '',
         personaEditor ? 'persona-editor' : '',
         savedConfirm ? 'saved-confirm' : '',
         can('webAccessAdmin') && webAccessOpen ? 'web-access' : '',
+        can('desktopRemoteControl') && remoteConversationOpen ? 'remote-connection' : '',
         apiKeyGateOpen ? 'api-key' : '',
         bs && bs.pinvouModal ? 'pinvou-review' : '',
         isCompactShell && isSidebarOpen ? 'mobile-sidebar' : '',
@@ -4578,7 +4733,17 @@ const NAV_PREFETCH = {
                   onSidebarDateGroupingChange={handleSetSidebarDateGrouping}
                   updateFocusTick={settingsUpdateFocusTick}
                   initialSection={settingsInitialSection}
-                  onCloseSettings={() => navigateFromScheduledRun(settingsReturnViewRef.current || 'chat')}
+                  remoteConversationOpen={remoteConversationOpen}
+                  onRemoteConversationOpen={() => {
+                    openCurrentRemoteProxy()
+                      .then(opened => { if (!opened) setRemoteConversationOpen(true); })
+                      .catch(() => setRemoteConversationOpen(true));
+                  }}
+                  onRemoteConnected={activateRemoteProxy}
+                  onRemoteConversationClose={() => setRemoteConversationOpen(false)}
+                  onCloseSettings={() => {
+                    navigateFromScheduledRun(settingsReturnViewRef.current || 'chat');
+                  }}
                 />
               </ViewErrorBoundary>
             )}
@@ -4604,9 +4769,12 @@ const NAV_PREFETCH = {
                 onBackScheduledRun={() => navigateFromScheduledRun('scheduled')}
                 codeModeAvailable={codexAcpSupported}
                 onSwitchHomeMode={handleSwitchHomeMode}
+                onRemoteModelSourceChange={setRemoteModelSource}
                 browserDockAvailable={browserDockAvailable}
                 rightDockActivePanelId={browserDockSelectedPanelId}
                 onRightDockPanelSelectionChange={selectRightDockPanel}
+                remoteConnection={remoteChatConnection}
+                remoteModelSource={remoteModelSource}
               />
             )}
             {codexAcpSupported && currentView === 'codex' && (
@@ -4674,6 +4842,33 @@ const NAV_PREFETCH = {
               <LazyWebAccessModal theme={activeTheme} bs={bs} t={t} onClose={() => setWebAccessOpen(false)} />
             </Suspense>
             </ViewErrorBoundary>
+            )}
+
+            {/* A 端连接成功后直接进入对话层；关闭只隐藏会话，显式断开才结束连接。 */}
+            {can('desktopRemoteControl') && remoteConversationOpen && browserOverlayPublicationReady && (
+              <ViewErrorBoundary t={t}>
+                <Suspense fallback={null}>
+                  <div className="fixed inset-0 z-[120] flex items-start sm:items-center justify-center bg-black/50 p-3 sm:p-6">
+                    <div role="dialog" aria-modal="true" aria-labelledby="remote-connection-title" aria-describedby="remote-connection-background-hint" className="w-full max-w-[960px] max-h-full overflow-y-auto custom-scrollbar rounded-2xl bg-white shadow-2xl forced-colors:border forced-colors:border-[CanvasText] dark:bg-[#1F2023]">
+                      <LazyRemoteConnectionShell
+                        t={t}
+                        bs={bs}
+                        onClose={() => setRemoteConversationOpen(false)}
+                        onOpenChat={openCurrentRemoteProxy}
+                        onRequestDisconnect={async () => {
+                          if (!bridge?.available || !bridge.desktopRemoteControl) {
+                            const failure = new Error('desktop_remote_control_unsupported');
+                            failure.code = 'desktop_remote_control_unsupported';
+                            throw failure;
+                          }
+                          await bridge.desktopRemoteControl.controllerDisconnect();
+                          setRemoteConversationOpen(false);
+                        }}
+                      />
+                    </div>
+                  </div>
+                </Suspense>
+              </ViewErrorBoundary>
             )}
 
             {/* App 级自创卡编辑器: 聊天里「存入卡牌池」草稿走这条。错误边界与

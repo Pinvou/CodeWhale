@@ -11,6 +11,89 @@ use crate::platform::path_policy::validate_user_path;
 use std::path::Path;
 
 #[test]
+fn remote_pending_identifier_contract_matches_controlled_task_protocol() {
+    use crate::features::remote_control::controller::task::{
+        RemoteTaskRequest, task_input_digest_for_value,
+    };
+    use crate::features::sessions::remote_proxy::schema::valid_remote_identifier;
+
+    // The pending slot on A must accept exactly the identifiers B's frozen
+    // task request accepts, including all four permitted leading punctuations.
+    for (id, expected) in [
+        ("-leading".to_owned(), true),
+        ("_leading".to_owned(), true),
+        (".leading".to_owned(), true),
+        (":leading".to_owned(), true),
+        ("mid-dle_under.dot:colon".to_owned(), true),
+        ("a".repeat(128), true),
+        (String::new(), false),
+        ("bad space".to_owned(), false),
+        ("éclair".to_owned(), false),
+        ("a".repeat(129), false),
+        ("bad/slash".to_owned(), false),
+    ] {
+        assert_eq!(valid_remote_identifier(&id), expected, "A: {id:?}");
+        // session_id is a B wire identifier, not A's local_session_id;
+        // include it without conflating it with the local-session validator.
+        for field in ["client_request_id", "task_id", "session_id"] {
+            let mut payload = serde_json::json!({
+                "connection_id": "connection-1",
+                "controller_lease_id": "lease-1",
+                "lease_epoch": "epoch-1",
+                "relay_epoch": "relay-1",
+                "remote_control_generation": "generation-1",
+                "task_id": "task-1",
+                "client_request_id": "request-1",
+                "session_id": "session-1",
+                "capability_revision": "1",
+                "mode": "chat",
+                "model_source": "controlled_device",
+                "input": {"text": "hello", "attachment_ids": [], "skill_ids": []},
+            });
+            // Keep the request valid independently of the identifier under test;
+            // the admission boundary verifies the canonical input digest.
+            payload["input_digest"] = task_input_digest_for_value(&payload["input"])
+                .expect("valid task input")
+                .into();
+            payload[field] = id.clone().into();
+            assert_eq!(
+                RemoteTaskRequest::from_payload(&payload).is_ok(),
+                expected,
+                "B {field}: {id:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn local_chat_command_guard_rejects_remote_proxy_without_backend_dispatch() {
+    use crate::features::sessions::remote_proxy::binding::LiveRemoteContext;
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = SessionStore::boot_at_test_dir(temp.path()).unwrap();
+    let local = store
+        .create_new("model".into(), None, temp.path().join("local"))
+        .unwrap();
+    assert!(ensure_chat_session(&store, &local.metadata.id, "save_session_messages").is_ok());
+    let context = LiveRemoteContext {
+        peer_id: "peer".into(),
+        resume_boundary_id: "boundary".into(),
+        connection_id: "connection".into(),
+        controller_lease_id: "lease".into(),
+        lease_epoch: "epoch".into(),
+        relay_epoch: "relay".into(),
+        generation: "generation".into(),
+        control_connected: true,
+        encrypted_channel_connected: true,
+    };
+    let remote = store.test_commit_remote_proxy_open(None, &context).unwrap();
+    let error = ensure_chat_session(&store, &remote.local_session_id, "save_session_messages")
+        .expect_err("remote session must not use local transcript command");
+    assert!(error.contains("authenticated remote route"));
+    assert!(store.delete(&remote.local_session_id).is_err());
+}
+
+#[test]
 fn generic_file_staging_preserves_the_gui_image_wrapper_contract() {
     let source_dir = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
@@ -3439,4 +3522,87 @@ fn web_settings_deferred_delete_serializes_with_a_concurrent_replacement() {
             delete_started,
         );
     });
+}
+
+/// Round-54 audit A5 wiring pin (round-1 review m5: per-command labels and
+/// ordering, not file-level markers — the file-granular form was
+/// satisfiable by unrelated joins, e.g. interaction.rs's spawn_blocking
+/// check passed on the pre-existing set_super_permission join while
+/// accept_plan's was unwrapped, and a NEW bare command in a pinned file
+/// stayed green): the settings transaction holds the cross-process
+/// settings.json.lock across keychain I/O (a CLI `models` command parked
+/// at a keychain prompt can hold it for minutes), so these command bodies
+/// must reach it only through a blocking-worker join. Comment lines are
+/// stripped so prose cannot satisfy it. Round-2 review m1: the scan also
+/// stops at each file's test module and strips trailing comments, so a
+/// needle cannot be satisfied from #[cfg(test)] code or a comment, and
+/// the pet arm is scoped to the set_pet_enabled body.
+#[test]
+fn settings_transaction_commands_join_off_the_runtime() {
+    fn code(source: &str) -> String {
+        source
+            .lines()
+            .take_while(|line| !line.trim_start().starts_with("mod tests"))
+            // Strip trailing `//` comments too: only real code can satisfy
+            // a needle (the needles contain no `//`, so a cut can only
+            // under-match, never over-match).
+            .map(|line| line.split("//").next().unwrap_or(""))
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    // Per-command needles: each settings-transaction command names itself
+    // in its join label (the settings family's convention), and
+    // accept_plan's commit joins through spawn_blocking with the claim
+    // moved into the closure.
+    let interaction = code(include_str!("interaction.rs"));
+    for needle in [
+        "join_blocking(\"confirm_code_yolo\"",
+        "join_blocking(\"set_mode_default\"",
+    ] {
+        assert!(
+            interaction.contains(needle),
+            "interaction.rs lost its per-command join: {needle}"
+        );
+    }
+    assert!(
+        interaction.contains("spawn_blocking(move || plan_claim.commit())"),
+        "accept_plan's commit must run on a blocking worker"
+    );
+    for (source, label, name) in [
+        (
+            include_str!("voice.rs"),
+            "join_blocking(\"set_voice_shortcut_enabled\"",
+            "voice.rs",
+        ),
+        (
+            include_str!("computer_use.rs"),
+            "join_blocking(\"computer_use_set_enabled\"",
+            "computer_use.rs",
+        ),
+    ] {
+        assert!(
+            code(source).contains(label),
+            "{name} lost its per-command join: {label}"
+        );
+    }
+    // pet_window: the transaction must sit INSIDE the blocking closure —
+    // ordering scoped to the set_pet_enabled body (round-2 m1: a bare
+    // spawn_blocking anywhere before the function used to satisfy the
+    // whole-file ordering form).
+    let pet_window = code(include_str!("../../features/pet/pet_window.rs"));
+    let body_start = pet_window
+        .find("fn set_pet_enabled")
+        .expect("pet_window.rs must define set_pet_enabled");
+    let body = &pet_window[body_start..];
+    let spawn_at = body
+        .find("spawn_blocking")
+        .expect("set_pet_enabled must join its settings transaction");
+    let txn_at = body
+        .find("update_transaction")
+        .expect("set_pet_enabled must run the settings transaction");
+    assert!(
+        spawn_at < txn_at,
+        "set_pet_enabled must run the settings transaction inside its blocking worker"
+    );
 }

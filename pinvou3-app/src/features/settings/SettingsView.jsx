@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Code, Cpu, Database, Globe, MessageSquare, Plus, RefreshCw, Search, Sparkles, User, Users, Wrench, X } from '../../components/icons.jsx';
 import { ArchivedDeleteConfirmDialog } from '../../components/ArchiveConfirmDialog.jsx';
@@ -6,6 +6,7 @@ import { Toggle } from '../../components/Toggle.jsx';
 import PetSettingsSection from '../pet/PetSettingsSection.jsx';
 import { DEFAULT_PET_ID } from '../pet/pet-registry.js';
 import { TeamRelayAccessSettings } from '../team-relay/TeamRelayAccessSettings.jsx';
+import RemoteControlSettingsPage from '../remote-control/RemoteControlSettingsPage.jsx';
 import { bridge, isLocalModel, useBridgeState } from '../../hooks/useBridge.js';
 import { copyClipboardText } from '../../shared/clipboard.js';
 import { formatSessionDate } from '../../shared/date-utils.js';
@@ -1231,7 +1232,13 @@ const formatMemoryTime = (item, copy) => {
           <div data-testid="model-form-backdrop" className="fixed inset-0 z-[100] flex items-center justify-center bg-black/45 px-4 animate-in fade-in duration-150">
             <div data-testid="model-form-dialog" role="dialog" aria-modal="true"
               onClick={e => e.stopPropagation()}
-              className={`w-[440px] max-w-[90vw] max-h-[76vh] overflow-y-auto custom-scrollbar rounded-[22px] shadow-2xl bg-white text-[#1C1C1E] dark:bg-[#1C1C1E] dark:text-[#F2F2F7]`}>
+              className={`w-[440px] max-w-[90vw] max-h-[76vh] flex flex-col overflow-hidden rounded-[22px] shadow-2xl bg-white text-[#1C1C1E] dark:bg-[#1C1C1E] dark:text-[#F2F2F7]`}>
+              {/* 滚动必须收敛在内层 min-h-0 容器上，不要放回圆角弹窗本体：在
+                  fixed + backdrop-filter 祖先链下，个别 WebKit 内核（用户反馈的
+                  环境无法复现，疑为 webkit2gtk/旧 WebView）不会为「max-h +
+                  overflow-y-auto 同元素」的组合建立滚动区，模型列表下半部分
+                  无法滚动选择。内层 flex 滚动区在所有内核行为一致。 */}
+              <div data-testid="model-form-scroll" className="min-h-0 flex-1 overflow-y-auto overscroll-contain custom-scrollbar">
               <div className={`px-5 py-4 flex items-start justify-between gap-4 border-b border-black/[0.10] dark:border-white/[0.10]`}>
                 <div>
                   <h2 className="text-[20px] leading-6 font-semibold">{t.modelFormAddTitle}</h2>
@@ -1253,6 +1260,7 @@ const formatMemoryTime = (item, copy) => {
                 </div>
               </div>
               <div className="px-5 py-4">{pickerTab === 'local' ? renderLocalPicker() : renderCloudProviderPicker()}</div>
+              </div>
             </div>
           </div>
         );
@@ -1260,7 +1268,9 @@ const formatMemoryTime = (item, copy) => {
       return (
         <div data-testid="model-form-backdrop" className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 animate-in fade-in duration-150">
           <div data-testid="model-form-dialog" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}
-            className={`w-[430px] max-w-[90vw] max-h-[76vh] overflow-y-auto custom-scrollbar rounded-[22px] shadow-2xl bg-white text-[#1C1C1E] dark:bg-[#1C1C1E] dark:text-[#F2F2F7]`}>
+            className={`w-[430px] max-w-[90vw] max-h-[76vh] flex flex-col overflow-hidden rounded-[22px] shadow-2xl bg-white text-[#1C1C1E] dark:bg-[#1C1C1E] dark:text-[#F2F2F7]`}>
+            {/* 同上方 picker 弹窗：滚动收敛在内层 min-h-0 容器，不放圆角弹窗本体。 */}
+            <div data-testid="model-form-scroll" className="min-h-0 flex-1 overflow-y-auto overscroll-contain custom-scrollbar">
             <div className={`px-5 py-4 flex items-start justify-between gap-4 border-b ${formDivider}`}>
               <div>
                 <h2 className="text-[20px] leading-6 font-semibold">{modalTitle}</h2>
@@ -1440,6 +1450,7 @@ const formatMemoryTime = (item, copy) => {
                 className="h-10 px-5 rounded-full bg-[#007AFF] text-white text-[15px] font-semibold transition-colors disabled:opacity-35">
                 {savingModel ? settingsCopy.saving : t.modelSaveBtn}
               </button>
+            </div>
             </div>
           </div>
         </div>
@@ -1797,7 +1808,7 @@ const formatMemoryTime = (item, copy) => {
 
     /** @typedef {{ behaviorAnalyticsTitle: string, behaviorAnalyticsEntryTitle: string, behaviorAnalyticsEntryDesc: string, behaviorAnalyticsBack: string, behaviorAnalyticsLabel: string, behaviorAnalyticsDesc: string, behaviorAnalyticsNotConfigured: string, behaviorAnalyticsEnableConfirm: string, behaviorAnalyticsDisableConfirm: string, behaviorAnalyticsStatusEnabled: string, behaviorAnalyticsStatusDisabled: string, behaviorAnalyticsStatusWithdrawalPending: string, behaviorAnalyticsActionFailed: string }} BehaviorAnalyticsSettingsCopy */
     // eslint-disable-next-line no-unused-vars, sonarjs/cognitive-complexity -- contract slot parameters kept; the settings page aggregates many form branches, splitting needs a dedicated design
-    const SettingsView = ({ activeTheme, colorScheme, onColorSchemeChange, language, setLanguage, superPerm, setSuperPerm, taskCompletedNotif, setTaskCompletedNotif, searchProvider, setSearchProvider, enabledSearchProviders = DEFAULT_ENABLED_SEARCH_PROVIDERS, onAddSearchProvider, onDeleteSearchProvider, searchApiKey: _searchApiKey, setSearchApiKey, searchHasSavedKey: _searchHasSavedKey, savedModels, activeModelId, onSaveModel, onDeleteModel, onSetActiveModel, onSaveSearchConfig, onConfirmSearchConfig, onMemoryEnabledChange, onPetEnabledChange, teamRelayEnabled = false, onUnlockTeamRelay, onDisableTeamRelay, searchNeedsRestart: _searchNeedsRestart, languageNeedsRestart: _languageNeedsRestart, bs, t, onRestoreArchived, onDeleteArchived, sidebarDateGrouping = true, onSidebarDateGroupingChange, updateFocusTick, onCloseSettings, initialSection = 'general' }) => {
+    const SettingsView = ({ activeTheme, colorScheme, onColorSchemeChange, language, setLanguage, superPerm, setSuperPerm, taskCompletedNotif, setTaskCompletedNotif, searchProvider, setSearchProvider, enabledSearchProviders = DEFAULT_ENABLED_SEARCH_PROVIDERS, onAddSearchProvider, onDeleteSearchProvider, searchApiKey: _searchApiKey, setSearchApiKey, searchHasSavedKey: _searchHasSavedKey, savedModels, activeModelId, onSaveModel, onDeleteModel, onSetActiveModel, onSaveSearchConfig, onConfirmSearchConfig, onMemoryEnabledChange, onPetEnabledChange, teamRelayEnabled = false, onUnlockTeamRelay, onDisableTeamRelay, searchNeedsRestart: _searchNeedsRestart, languageNeedsRestart: _languageNeedsRestart, bs, t, onRestoreArchived, onDeleteArchived, sidebarDateGrouping = true, onSidebarDateGroupingChange, updateFocusTick, remoteConversationOpen, onRemoteConversationOpen, onRemoteConnected, onRemoteConversationClose, onCloseSettings, initialSection = 'general' }) => {
       const settingsCopy = /** @type {typeof t.uiSettingsDetail & BehaviorAnalyticsSettingsCopy} */ (t.uiSettingsDetail);
       const platformCapabilities = (bs && bs.platformCapabilities) || {};
       const showSuperPermissionSettings = !!platformCapabilities.showSuperPermissionSettings;
@@ -1814,6 +1825,9 @@ const formatMemoryTime = (item, copy) => {
       const canUpdateApp = can('appUpdate');
       const canInstallDependencies = can('dependencyInstall');
       const canConfigureDesktopNotifications = can('desktopNotifications');
+      // 双端远程控制（Windows 桌面互联）既需要平台能力，也在 Web 端被 allowlist 关闭：
+      // 能力为假时不注册该二级页面，避免出现点开即空的设置分区。
+      const canDesktopRemoteControl = can('desktopRemoteControl');
       const canManageModels = can('modelManagement');
       const acpProvidersTabVisible = !!platformCapabilities.codexAcpSupported;
       // The native hook for the global Alt voice shortcut only works on Windows; grey the
@@ -1842,6 +1856,7 @@ const formatMemoryTime = (item, copy) => {
       const builtinAvailableModels = llmApiModels.available_models || [];
       const builtinDefaultModel = llmApiModels.default_model || (((bs && bs.settings && bs.settings.advanced && bs.settings.advanced.builtin_llmapi_default_model) || '') || '');
       const versionUpdateRef = useRef(null);
+      const settingsContentRef = useRef(null);
       const hasUpdate = !!(bs && bs.updateInfo && bs.updateInfo.available);
       const archivedSessions = (bs && bs.archivedSessions) || [];
       const memorySettingsVisible = !!(bs && bs.settings && bs.settings.language === 'zh-Hans');
@@ -1875,6 +1890,10 @@ const formatMemoryTime = (item, copy) => {
           versionUpdateRef.current && versionUpdateRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
         });
       }, [canUpdateApp, updateFocusTick]);
+      useLayoutEffect(() => {
+        if (activeSection !== 'remote' || !settingsContentRef.current) return;
+        settingsContentRef.current.scrollTop = 0;
+      }, [activeSection]);
       useEffect(() => {
         if (initialSection === 'providers') {
           setActiveSection('model');
@@ -2452,9 +2471,48 @@ const formatMemoryTime = (item, copy) => {
               onDisable={onDisableTeamRelay}
             />
           )}
+          {/* 桌面远程控制是「通用」下的二级菜单（口径同「帮助 → 行为分析」）：
+              入口行只负责跳转，真正的业务面板在 renderRemote 的子页里。 */}
+          {canDesktopRemoteControl && (
+          <IOSSection>
+            <IOSRow
+              label={t.uiSettings.remoteControl}
+              desc={settingsCopy.desktopRemoteControlEntryDesc}
+              onClick={() => setActiveSection('remote')}
+              testId="desktop-remote-control-entry"
+            >
+              <ChevronRight size={17} className="shrink-0 text-[#C7C7CC] dark:text-[#636366]" />
+            </IOSRow>
+          </IOSSection>
+          )}
         </>
         );
       };
+
+      // Windows 双端远程控制（DEV-21）：自「通用」以二级菜单进入，业务面板独占该子页，
+      // 不再与外观/通知/语音等常规偏好混排（E2E-08 后续 UX 调整）。
+      const renderRemote = () => (
+        <>
+          <button
+            type="button"
+            data-testid="desktop-remote-control-back"
+            onClick={() => setActiveSection('general')}
+            className="mb-4 inline-flex items-center gap-1 text-[13px] text-[#6E6E73] hover:text-[#1C1C1E] dark:text-[#98989D] dark:hover:text-[#F2F2F7]"
+          >
+            <ChevronLeft size={15} />
+            {settingsCopy.desktopRemoteControlBack}
+          </button>
+          <RemoteControlSettingsPage
+            t={t}
+            bs={bs}
+            supported={canDesktopRemoteControl}
+            conversationOpen={remoteConversationOpen}
+            onConversationOpen={onRemoteConversationOpen}
+            onConnected={onRemoteConnected}
+            onConversationClose={onRemoteConversationClose}
+          />
+        </>
+      );
       const renderModels = () => (
         <>
           {acpProvidersTabVisible && (
@@ -2815,6 +2873,7 @@ const formatMemoryTime = (item, copy) => {
         if (activeSection === 'model') return renderModels();
         if (activeSection === 'search') return renderSearch();
         if (activeSection === 'memory') return renderMemory();
+        if (activeSection === 'remote') return renderRemote();
         if (activeSection === 'permissions') return renderPermissions();
         if (activeSection === 'data') return renderData();
         if (activeSection === 'update') return renderUpdate();
@@ -2829,6 +2888,7 @@ const formatMemoryTime = (item, copy) => {
             model: t.uiSettings.model,
             search: t.uiSettings.search,
             memory: t.uiSettings.memory,
+            remote: t.uiSettings.remoteControl,
             permissions: t.uiSettings.permissions,
             data: t.uiSettings.data,
             update: t.uiSettings.update,
@@ -2878,7 +2938,7 @@ const formatMemoryTime = (item, copy) => {
               </button>
             )}
             </div>
-            <main data-testid="settings-content" className="w-full flex-1 min-w-0 min-h-0 overflow-y-auto custom-scrollbar px-4 sm:px-6 md:px-8 py-4 sm:py-7">
+            <main ref={settingsContentRef} data-testid="settings-content" className="w-full flex-1 min-w-0 min-h-0 overflow-y-auto custom-scrollbar px-4 sm:px-6 md:px-8 py-4 sm:py-7">
               <div className="max-w-[680px]">
                 <div className="mb-5 sm:mb-6">
                   <h1 className="text-[22px] sm:text-[24px] leading-tight font-semibold tracking-normal">{sectionTitle}</h1>

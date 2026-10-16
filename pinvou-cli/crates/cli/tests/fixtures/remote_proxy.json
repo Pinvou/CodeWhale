@@ -1,0 +1,23 @@
+{
+  "schema_version": 3,
+  "records": [
+    {
+      "schema_version": 3,
+      "local_session_id": "remote-cli-fixture",
+      "peer_id": "cli-fixture-peer",
+      "remote_session_ref": "cli-fixture-remote-ref",
+      "controlled_session_id": null,
+      "ui": {
+        "title": "Remote CLI fixture",
+        "pinned": false,
+        "hidden": false,
+        "last_opened_at": null
+      },
+      "authenticated_cursor": null,
+      "retired_epochs": [],
+      "projection": { "schema_version": 1, "entries": [] },
+      "pending": [],
+      "retired_requests": []
+    }
+  ]
+}
