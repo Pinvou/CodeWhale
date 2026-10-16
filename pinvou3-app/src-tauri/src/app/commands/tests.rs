@@ -11,6 +11,89 @@ use crate::platform::path_policy::validate_user_path;
 use std::path::Path;
 
 #[test]
+fn remote_pending_identifier_contract_matches_controlled_task_protocol() {
+    use crate::features::remote_control::controller::task::{
+        RemoteTaskRequest, task_input_digest_for_value,
+    };
+    use crate::features::sessions::remote_proxy::schema::valid_remote_identifier;
+
+    // The pending slot on A must accept exactly the identifiers B's frozen
+    // task request accepts, including all four permitted leading punctuations.
+    for (id, expected) in [
+        ("-leading".to_owned(), true),
+        ("_leading".to_owned(), true),
+        (".leading".to_owned(), true),
+        (":leading".to_owned(), true),
+        ("mid-dle_under.dot:colon".to_owned(), true),
+        ("a".repeat(128), true),
+        (String::new(), false),
+        ("bad space".to_owned(), false),
+        ("éclair".to_owned(), false),
+        ("a".repeat(129), false),
+        ("bad/slash".to_owned(), false),
+    ] {
+        assert_eq!(valid_remote_identifier(&id), expected, "A: {id:?}");
+        // session_id is a B wire identifier, not A's local_session_id;
+        // include it without conflating it with the local-session validator.
+        for field in ["client_request_id", "task_id", "session_id"] {
+            let mut payload = serde_json::json!({
+                "connection_id": "connection-1",
+                "controller_lease_id": "lease-1",
+                "lease_epoch": "epoch-1",
+                "relay_epoch": "relay-1",
+                "remote_control_generation": "generation-1",
+                "task_id": "task-1",
+                "client_request_id": "request-1",
+                "session_id": "session-1",
+                "capability_revision": "1",
+                "mode": "chat",
+                "model_source": "controlled_device",
+                "input": {"text": "hello", "attachment_ids": [], "skill_ids": []},
+            });
+            // Keep the request valid independently of the identifier under test;
+            // the admission boundary verifies the canonical input digest.
+            payload["input_digest"] = task_input_digest_for_value(&payload["input"])
+                .expect("valid task input")
+                .into();
+            payload[field] = id.clone().into();
+            assert_eq!(
+                RemoteTaskRequest::from_payload(&payload).is_ok(),
+                expected,
+                "B {field}: {id:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn local_chat_command_guard_rejects_remote_proxy_without_backend_dispatch() {
+    use crate::features::sessions::remote_proxy::binding::LiveRemoteContext;
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = SessionStore::boot_at_test_dir(temp.path()).unwrap();
+    let local = store
+        .create_new("model".into(), None, temp.path().join("local"))
+        .unwrap();
+    assert!(ensure_chat_session(&store, &local.metadata.id, "save_session_messages").is_ok());
+    let context = LiveRemoteContext {
+        peer_id: "peer".into(),
+        resume_boundary_id: "boundary".into(),
+        connection_id: "connection".into(),
+        controller_lease_id: "lease".into(),
+        lease_epoch: "epoch".into(),
+        relay_epoch: "relay".into(),
+        generation: "generation".into(),
+        control_connected: true,
+        encrypted_channel_connected: true,
+    };
+    let remote = store.test_commit_remote_proxy_open(None, &context).unwrap();
+    let error = ensure_chat_session(&store, &remote.local_session_id, "save_session_messages")
+        .expect_err("remote session must not use local transcript command");
+    assert!(error.contains("authenticated remote route"));
+    assert!(store.delete(&remote.local_session_id).is_err());
+}
+
+#[test]
 fn generic_file_staging_preserves_the_gui_image_wrapper_contract() {
     let source_dir = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();

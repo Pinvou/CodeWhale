@@ -10,6 +10,8 @@ const DEFAULT_DESKTOP_CAPABILITIES = Object.freeze({
   localModelSetup: true,
   externalSystemOpen: true,
   webAccessAdmin: true,
+  // Fail closed until the Rust host's Windows capability has been projected.
+  desktopRemoteControl: false,
   desktopNotifications: true,
   hostFilePicker: true,
   artifactDownload: false,
@@ -46,6 +48,17 @@ export function can(capability) {
   // features must stay hidden until the Web adapter opts in explicitly.
   if (isWeb && typeof platform.can === 'function') return platform.can(capability) === true;
   if (isWeb) return capabilities[capability] === true;
+  if (capability === 'desktopRemoteControl') {
+    const bridge = typeof window !== 'undefined' && window.TauriBridge;
+    if (!bridge?.available || typeof bridge.state?.getMany !== 'function') return false;
+    try {
+      const detected = bridge.state.getMany(['platform'])?.platformCapabilities;
+      return detected?.loaded === true && detected.os === 'windows' &&
+        detected.desktopRemoteControl === true;
+    } catch {
+      return false;
+    }
+  }
   return capabilities[capability] !== false;
 }
 

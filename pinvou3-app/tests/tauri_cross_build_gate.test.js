@@ -322,7 +322,7 @@ test("闸门和两步备料的守卫必须留在 main() 里，不能退化成无
   // 行为级地测备料那两处要真的跑备料，所以这里退一步做源码结构断言，写法参照上面
   // 那条「开关全文件只读两处」。断的是「守卫跟调用在同一行」，等价重构（改名、调
   // 顺序）不误伤，退化成无条件调用则必红。
-  const mainBody = BUILD_SCRIPT_SOURCE.match(/\nasync function main\(\) \{\n([\s\S]*?)\n\}\n/u);
+  const mainBody = BUILD_SCRIPT_SOURCE.match(/\r?\nasync function main\(\) \{\r?\n([\s\S]*?)\r?\n\}\r?\n/u);
   assert.ok(mainBody, "build.js 必须有 main() 编排入口");
 
   // 闸门本身：上面那两条行为用例已经钉住它，这里再钉一遍结构，是为了让「整段删掉」

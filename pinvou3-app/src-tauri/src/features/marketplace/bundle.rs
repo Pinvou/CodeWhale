@@ -234,6 +234,29 @@ pub(crate) fn skill_gating_owner(skill_name: &str) -> String {
     skill_gating_owner_with(&MarketplaceManager::new().available_tools(), skill_name)
 }
 
+/// Materialization's deny decision over one caller-owned manifest snapshot.
+/// A preset directory can carry a skill name distinct from its marketplace id.
+/// Consult that alias whenever the resolved owner is NOT denied (even when a
+/// manifest claimed it); never change the owner used by import or UI listing.
+pub(crate) fn skill_gating_is_disabled_with(
+    tools: &[super::ToolManifest],
+    skill_name: &str,
+    disabled: &std::collections::HashSet<String>,
+) -> bool {
+    let owner = skill_gating_owner_with(tools, skill_name);
+    denied_owner_or_preset(&owner, disabled, || {
+        super::skill_marketplace::preset_id_for_skill_name(skill_name)
+    })
+}
+
+fn denied_owner_or_preset(
+    owner: &str,
+    disabled: &std::collections::HashSet<String>,
+    preset: impl FnOnce() -> Option<&'static str>,
+) -> bool {
+    disabled.contains(owner) || preset().is_some_and(|id| disabled.contains(id))
+}
+
 /// [`skill_gating_owner`] over a pre-walked tool snapshot (round-23 MINOR 3
 /// hoist; see [`skill_owner_package_with`]).
 pub(crate) fn skill_gating_owner_with(tools: &[super::ToolManifest], skill_name: &str) -> String {
@@ -865,7 +888,8 @@ fn tool_config_fields(tool: &super::ToolManifest) -> Vec<ConfigFieldSpec> {
 /// The reason copy written into a record's `degraded` field when its
 /// authorization is disconnected. Both writers (the desktop
 /// `features::connectors::connector_cli::bundle_store_on_disconnected` and the
-/// headless `pinvou-cli` mirror in connectors.rs) import THIS constant; the
+/// headless `pinvou-cli` mirror in connectors.rs) share THIS constant (the
+/// desktop writer goes through `BundleStore::mark_cli_disconnected`); the
 /// connectors → marketplace dependency direction matches the standing module
 /// boundary. Publishing the judgment and the copy in the same module shrinks
 /// the drift surface from "two literals drifting independently" to "edit this
@@ -965,6 +989,25 @@ pub fn readiness_for(bundle: &BundleInfo, credential_has: impl Fn(&str) -> bool)
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn deny_decision_keeps_lazy_alias_and_claimed_owner_fallback() {
+        let denied = ["owner".to_string(), "preset".to_string()]
+            .into_iter()
+            .collect();
+        assert!(super::denied_owner_or_preset("owner", &denied, || {
+            panic!("a denied owner must short-circuit alias lookup")
+        }));
+        assert!(super::denied_owner_or_preset(
+            "allowed-claimed-owner",
+            &denied,
+            || Some("preset")
+        ));
+        assert!(!super::denied_owner_or_preset("allowed", &denied, || Some(
+            "allowed-preset"
+        )));
+        assert!(!super::denied_owner_or_preset("allowed", &denied, || None));
+    }
+
     use std::io::Write;
 
     use super::*;

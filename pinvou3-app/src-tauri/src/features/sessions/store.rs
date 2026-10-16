@@ -285,6 +285,13 @@ impl SessionStore {
         }
         let store = Self {
             manager: Arc::new(manager),
+            remote_proxies: Arc::new(Mutex::new(
+                super::remote_proxy::RemoteProxyState::load_for_startup(
+                    sessions_dir.join("_remote_proxies.json"),
+                    &sessions_dir,
+                ),
+            )),
+            local_backend_resolver: Arc::new(RwLock::new(None)),
             scheduled_profiles: Arc::new(RwLock::new(HashMap::new())),
             scheduled_profiles_path: Arc::new(scheduled_profiles_path),
             scheduled_root: Arc::new(scheduled_root),
@@ -436,6 +443,13 @@ impl SessionStore {
         self.load_with_context(id, || format!("load_session({id})"))
     }
 
+    /// Engine replacement must observe every already-admitted writer from
+    /// the retired incarnation, including its commit notification.
+    pub(crate) fn load_for_engine_spawn(&self, id: &str) -> Result<SavedSession> {
+        let _mutation = self.scheduled_mutation.lock();
+        self.load(id)
+    }
+
     fn load_with_context(
         &self,
         id: &str,
@@ -511,6 +525,18 @@ impl SessionStore {
 
     pub fn save(&self, session: &SavedSession) -> Result<PathBuf> {
         let _mutation = self.scheduled_mutation.lock();
+        if session.metadata.id.starts_with("remote-")
+            || self
+                .remote_proxies
+                .lock()
+                .records
+                .contains_key(&session.metadata.id)
+        {
+            bail!("RemoteProxy cannot be saved as a local Engine/ACP Session");
+        }
+        if self.is_scheduled_session(&session.metadata.id)? {
+            return self.persist_then_reconcile(session, "committed save");
+        }
         self.persist_then_reconcile(session, "session save")
     }
 
@@ -548,6 +574,12 @@ impl SessionStore {
         // automation's record file, and the exact registry check alone
         // would let `delete("SCHED-<id>")` remove it without the
         // automation-owned path.
+        // A remote-proxy record is owned by the remote-control feature's own
+        // lifecycle; deleting it through the local Engine/ACP path would
+        // strand the proxy state.
+        if id.starts_with("remote-") || self.remote_proxies.lock().records.contains_key(id) {
+            bail!("RemoteProxy cannot be deleted through local Engine/ACP lifecycle");
+        }
         if super::validators::is_sched_session_id(id) || self.is_scheduled_session(id)? {
             bail!("Scheduled-run sessions are deleted through their automation");
         }
@@ -704,9 +736,25 @@ impl SessionStore {
     }
 
     pub fn session_kind(&self, id: &str) -> Result<SessionKind> {
-        if self.is_scheduled_session(id)? {
+        validate_session_id(id)?;
+        // Remote archive availability must not classify or block local records.
+        // Only the reserved remote namespace needs permanent-bank authority.
+        if self.remote_proxies.lock().records.contains_key(id)
+            || (id.starts_with("remote-") && self.is_archived_remote_proxy(id)?)
+        {
+            Ok(SessionKind::RemoteProxy)
+        } else if id.starts_with("remote-") {
+            bail!("RemoteProxy record is unavailable");
+        } else if self.is_scheduled_session(id)? {
             Ok(SessionKind::ScheduledRun)
         } else {
+            let path = self.manager.sessions_dir().join(format!("{id}.json"));
+            if !std::fs::metadata(&path)
+                .with_context(|| format!("classify local Session {id}"))?
+                .is_file()
+            {
+                bail!("local Session record is not a file");
+            }
             Ok(SessionKind::Chat)
         }
     }
@@ -1237,7 +1285,26 @@ impl SessionStore {
         id: &str,
         state: &ChatEngineState,
     ) -> Result<SavedSession> {
+        self.persist_chat_engine_state_with_commit(id, state, || true, |_| {})?
+            .context("chat engine persistence was retired")
+    }
+
+    /// The notification runs in the same blocking transaction as the write.
+    /// Aborting its async waiter cannot abandon a durable commit's marker.
+    /// `admit` is checked under the mutation gate: queued writers from a
+    /// retired engine cannot run after its replacement reads its baseline.
+    /// Neither callback may re-enter a mutating SessionStore method.
+    pub(crate) fn persist_chat_engine_state_with_commit(
+        &self,
+        id: &str,
+        state: &ChatEngineState,
+        admit: impl FnOnce() -> bool,
+        committed: impl FnOnce(&SavedSession),
+    ) -> Result<Option<SavedSession>> {
         let _mutation = self.scheduled_mutation.lock();
+        if !admit() {
+            return Ok(None);
+        }
         if self.scheduled_profiles.read().contains_key(id) {
             bail!("Session '{id}' is a scheduled-run session");
         }
@@ -1259,7 +1326,8 @@ impl SessionStore {
             || format!("persist chat engine state for {id}"),
             "committed engine state save",
         )?;
-        Ok(session)
+        committed(&session);
+        Ok(Some(session))
     }
 
     /// Whether a durable chat record already exists for `id`. The headless
