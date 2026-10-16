@@ -799,6 +799,82 @@ test('newer durable multi-message model text cannot be reused as an identical fa
   assert.equal(converged[4].id, 'failure');
 });
 
+test('unproven output fallback cannot consume a reserved identical failure', () => {
+  const code = 'task_permission_mode_changed';
+  const copy = dict.en.remoteConversation;
+  const failure = { id: 'failure', type: 'assistant', text: code, createdAt: 103 };
+  const history = [{ type: 'user', text: 'first' },
+    { id: 'model-start', type: 'assistant', text: 'task_' },
+    { id: 'model-gap', type: 'assistant', text: 'changed' }, failure];
+  const before = structuredClone(history);
+  const projected = controlledTaskChatItems([{ sessionId: 'session-b', taskId: 't1',
+    status: 'failed', text: 'first', assistantText: code, errorText: code }], copy, 'session-b');
+  const output = projected.find(item => item.controlledContentLane === 'output');
+  const error = projected.find(item => item.controlledContentLane === 'error');
+  const merged = mergeControlledTaskChatItems(history, projected);
+  assert.equal(merged.length, 5, 'unproven output and its failure remain separate');
+  assert.equal(merged[1], history[1]);
+  assert.equal(merged[2], history[2]);
+  assert.equal(merged[3], output);
+  assert.deepEqual(merged[4], { ...failure, text: error.text, controlledFailureReason: code });
+  assert.deepEqual(history, before);
+});
+
+test('lagging task output snapshots cannot turn identical model text into permission failures', () => {
+  const codes = ['task_permission_mode_required', 'task_permission_mode_changed',
+    'task_permission_mode_unsupported'];
+  for (const language of ['zh', 'en', 'ja']) {
+    const copy = dict[language].remoteConversation;
+    for (const code of codes) {
+      for (const errorText of ['', code]) {
+        const model = { id: 'model', type: 'assistant', text: code, messageIndex: 1,
+          remoteTaskId: 't1', createdAt: 101 };
+        const failure = { id: 'failure', type: 'assistant', text: code, messageIndex: 2,
+          remoteTaskId: 't1', createdAt: 102 };
+        const history = [{ id: 'user', type: 'user', text: 'first', remoteTaskId: 't1' },
+          model, failure, { id: 'next', type: 'user', text: 'next', remoteTaskId: 't2' },
+          { id: 'later-model', type: 'assistant', text: code, remoteTaskId: 't2' }];
+        const before = structuredClone(history);
+        const projected = controlledTaskChatItems([{ sessionId: 'session-b', taskId: 't1',
+          status: 'failed', text: 'first', errorText, terminalReason: code }], copy, 'session-b');
+        assert.equal(projected.some(item => item.controlledContentLane === 'output'), false);
+        const expectedFailure = projected.find(item => item.type === 'assistant');
+        const merged = mergeControlledTaskChatItems(history, projected);
+        assert.equal(merged.length, history.length);
+        assert.equal(merged[1], model, 'the earlier model message stays byte-for-byte untouched');
+        assert.deepEqual(merged[2], { ...failure, text: expectedFailure.text,
+          controlledFailureReason: code });
+        assert.equal(merged[3], history[3]);
+        assert.equal(merged[4], history[4], 'a later task cannot supply failure coverage');
+        assert.deepEqual(history, before, 'projection never mutates the durable input');
+      }
+    }
+  }
+});
+
+test('repeated failure overlays keep one-to-one durable reservations', () => {
+  const code = 'task_permission_mode_changed';
+  const copy = dict.en.remoteConversation;
+  const projected = controlledTaskChatItems([{ sessionId: 'session-b', taskId: 't1',
+    status: 'failed', text: 'first', errorText: code }], copy, 'session-b');
+  const error = projected.find(item => item.controlledContentLane === 'error');
+  const model = { id: 'model', type: 'assistant', text: code };
+  const failures = Array.from({ length: 2 }, (_, index) => ({
+    id: `failure-${index}`, type: 'assistant', text: code, createdAt: 50 + index,
+  }));
+  const history = [{ type: 'user', text: 'first' }, model, ...failures];
+  const before = structuredClone(history);
+  const merged = mergeControlledTaskChatItems(history,
+    [...projected, { ...error, id: 'second-failure' }]);
+  assert.equal(merged[1], model, 'a missing failure must not borrow identical model text');
+  assert.equal(merged.length, 4, 'each failure consumes its own reservation or stays visible');
+  failures.forEach((failure, index) => {
+    assert.deepEqual(merged[index + 2], { ...failure, text: error.text,
+      controlledFailureReason: code });
+  });
+  assert.deepEqual(history, before);
+});
+
 test('failure reconciliation runs without Array.findLast on the Safari 14 baseline', () => {
   const source = readFileSync(new URL('../src/features/remote-control/chat-transcript-projection.mjs', import.meta.url), 'utf8');
   const sandbox = vm.createContext({});

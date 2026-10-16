@@ -296,6 +296,7 @@ export function mergeControlledTaskChatItems(chatItems = [], taskItems = []) {
     // Reserve persisted failures before joining the output lane. A terminal
     // error following a partially hydrated answer is not model text.
     const failureIndices = new Set();
+    const failureMatches = new Map();
     const output = items.find(item => item.controlledContentLane === 'output');
     const modelIndices = new Set();
     let modelPrefix = '';
@@ -319,6 +320,7 @@ export function mergeControlledTaskChatItems(chatItems = [], taskItems = []) {
           || (item.controlledFailureReason
             && String(durable[index].text || '') === item.controlledFailureReason)) {
           failureIndices.add(index);
+          failureMatches.set(item, index);
           break;
         }
       }
@@ -344,7 +346,10 @@ export function mergeControlledTaskChatItems(chatItems = [], taskItems = []) {
           continue;
         }
       }
-      const match = candidates.find(index => !used.has(index) && (
+      // Consume this failure's reservation, not the first equal model text.
+      // A lagging task snapshot may have no output lane to mark that text used.
+      const match = item.controlledContentLane !== 'output' ? failureMatches.get(item)
+        : candidates.find(index => !used.has(index) && !failureIndices.has(index) && (
         String(durable[index].text || '') === item.text
         || (item.controlledFailureReason
           && String(durable[index].text || '') === item.controlledFailureReason)
