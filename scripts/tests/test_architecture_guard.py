@@ -561,11 +561,32 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
         self.assertEqual([], self.guard.compare_baseline_ratchet(
             current, unmarked_empty, merge_state, anchor_state, target_state
         ))
-        reduced_edges = Counter(target_state[2])
-        reduced_edges[("assistant", "remote_control")] -= 1
-        self.assertTrue(self.guard.compare_baseline_ratchet(
+        edge = ("assistant", "remote_control")
+        edge_key = "assistant->remote_control"
+        current_limit = current["rules"][cycle_rule][edge_key]
+        self.assertGreater(current_limit, 0)
+        # The candidate may already be tighter than the frozen target. An
+        # equal source allowance is legal; one below the candidate must fail.
+        # Subtracting from the frozen count instead can leave a legal limit.
+        boundary_edges = Counter(target_state[2])
+        boundary_edges[edge] = current_limit
+        self.assertEqual([], self.guard.compare_baseline_ratchet(
             current, unmarked_empty, merge_state, anchor_state,
-            (target_state[0], target_state[1], reduced_edges),
+            (target_state[0], target_state[1], boundary_edges),
+        ))
+        reduced_edges = Counter(boundary_edges)
+        reduced_edges[edge] -= 1
+        reduced_state = (target_state[0], target_state[1], reduced_edges)
+        reduced_limits, _ = self.guard.merged_migration_limits(
+            merge_state, anchor_state, reduced_state
+        )
+        self.assertEqual(current_limit - 1, reduced_limits[cycle_rule].get(edge_key, 0))
+        reduced_failures = self.guard.compare_baseline_ratchet(
+            current, unmarked_empty, merge_state, anchor_state,
+            reduced_state,
+        )
+        self.assertTrue(any(
+            f"{cycle_rule}: {edge_key}:" in failure for failure in reduced_failures
         ))
         self.assertTrue(
             self.guard.compare_baseline_ratchet(
