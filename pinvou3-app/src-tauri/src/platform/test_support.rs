@@ -9,6 +9,12 @@
 //! 模块声明位于 `platform/mod.rs`（`#[cfg(test)] pub(crate) mod test_support;`），
 //! 不进发布产物。
 
+#[cfg(test)]
+mod filesystem;
+
+#[cfg(all(test, unix))]
+pub(crate) use filesystem::plant_fifo;
+
 /// 把 PINVOU3_HOME 指到干净临时目录跑闭包，跑完恢复并清理。目录名前缀由
 /// 调用方给出（按特性/用例区分，避免同 pid 下不同测试互删），并叠加进程 id
 /// 与 `unique_suffix()` 保证并行轮次间不碰撞。借
@@ -268,28 +274,13 @@ pub(crate) fn dir_read_only_or_skip(dir: &std::path::Path, test: &str) -> bool {
 /// such copy drifts on its own. Callers assert `Some(0o600)` and skip on
 /// `None`.
 #[cfg(test)]
-pub(crate) fn permission_bits(path: &std::path::Path) -> Option<u32> {
-    crate::platform::filesystem::permission_bits(path)
-        .ok()
-        .flatten()
-}
+pub(crate) use filesystem::permission_bits;
 
 /// Loosens `path` to 0644 the way a pre-hardening build's umask left it, so a
 /// test can prove the next write tightens it. No-op (and reports `false`)
 /// where the platform has no mode bits.
 #[cfg(test)]
-pub(crate) fn loosen_to_world_readable_for_test(path: &std::path::Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).is_ok()
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        false
-    }
-}
+pub(crate) use filesystem::loosen_to_world_readable_for_test;
 
 /// Bounded-refusal assertion for an operation that must fail fast on a
 /// planted non-regular target (FIFO/device) instead of hanging: runs `f` on
@@ -299,20 +290,7 @@ pub(crate) fn loosen_to_world_readable_for_test(path: &std::path::Path) -> bool 
 /// result within the bound is a plain refusal-assertion failure. The repo
 /// convention for the hardened private-data primitives.
 #[cfg(test)]
-pub(crate) fn assert_refused_without_hanging(
-    label: &str,
-    f: impl FnOnce() -> bool + Send + 'static,
-) {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let worker = std::thread::spawn(move || {
-        let _ = tx.send(f());
-    });
-    let refused = rx
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .unwrap_or_else(|_| panic!("{label} must refuse without hanging (5s bound)"));
-    worker.join().unwrap();
-    assert!(refused, "{label} must be refused");
-}
+pub(crate) use filesystem::assert_refused_without_hanging;
 
 /// Bounded-run containment for a worker that may hold a cross-process lock
 /// (mcp.lock, a scope/transaction lock, the landing lease): spawns `worker`

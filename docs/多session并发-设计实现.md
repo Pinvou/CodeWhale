@@ -3,6 +3,7 @@
 > 创建：2026-05-27
 > 状态：已落地 + GUI 冒烟通过（commit e3f64a7）
 > 范围：pinvou3-app（前端 + Rust wrapper），未改 CodeWhale 底座
+> 时点注记：本文写于 2026-05，文中路径为当时布局；现行位置——`src-tauri/src/features/assistant/platform/bridge.rs`（原 `bridge/mod.rs`）、`src-tauri/src/platform/paths.rs`（原 `bridge/paths.rs`）、`src-tauri/src/features/assistant/engine_pool.rs`（原顶层 `engine_pool.rs`）、`src-tauri/src/features/assistant/engine.rs`（原顶层 `engine.rs`）、`src-tauri/src/app/commands/`（原 `commands.rs`，命令已按域拆分）、`src/platform/tauri/bridge.js`（原 `src/tauri-bridge.js`）
 
 ---
 
@@ -35,6 +36,8 @@
 
 ### 3.1 后端
 
+（现状：instructions 已改为 Inline 直嵌，见本节末补注）
+
 **引擎专属 config**（`bridge/mod.rs`、`bridge/paths.rs`）
 - 每 session 一份 `~/.pinvou3/sessions/<id>/instructions.md`（`session_instructions_path` + `write_session_instructions`），渲染时把 `{{PINVOU3_WORKSPACE}}` 占位符替换成该 session 的 workspace。
 - `build_engine_config_for_session(id)`：在 `build_engine_config()` 基础上覆盖 `workspace` + `instructions` 为 session 专属。**不再引用全局 `bundle/instructions.md`。**
@@ -59,14 +62,14 @@
 
 `SyncSession` 新角色：从「切换时替换状态」退化为「冷启动注水历史」——仅在某 session 首次需要引擎、且已有磁盘历史时调一次。
 
-> 后续更新（2026-05-28，d15820f「P-no-disk」）：instructions 改 `InstructionSource::Inline` 注入，不再写 `~/.pinvou3/sessions/<id>/instructions.md`；`write_session_instructions` / `rewrite_instructions_for_session` 已删（`session_instructions_path` 仅留作 boot 时 legacy 清理）；`refresh_all_instructions()` 已为 no-op，sudo 开关状态改每 turn `<system-reminder>` 注入（89231b4）。
+> 后续更新（2026-05-28，d15820f「P-no-disk」）：instructions 改 `InstructionSource::Inline` 注入，不再写 `~/.pinvou3/sessions/<id>/instructions.md`；`write_session_instructions` / `rewrite_instructions_for_session` 已删（`session_instructions_path` 现仅保留定义作 legacy 标注，无调用方）；`refresh_all_instructions()` 已为 no-op，sudo 开关状态改每 turn `<system-reminder>` 注入（89231b4）。
 
 ### 3.2 前端（`tauri-bridge.js`）
 
 **工作集 + per-session 缓冲**模型：
 - active session 的工作集 = 现有 `state.*` + 模块级 stream 全局（逻辑零改动）。
 - 后台 session 工作集存 `sessionStates[id]`。
-- 13 个事件监听器经 `onSessionEvent(e, fn)` 按 `payload.session_id` 路由：active 直接跑；后台用 `runSyncOnSession` 临时切工作集跑**同步**逻辑再切回（期间 `suppressNotify`，避免把后台渲染成 active）。
+- 事件监听器经 `onSessionEvent(e, fn)` 按 `payload.session_id` 路由（2026-05 时点为 13 个，随后续事件增长，以 `chat-events.js` 实际注册为准）：active 直接跑；后台用 `runSyncOnSession` 临时切工作集跑**同步**逻辑再切回（期间 `suppressNotify`，避免把后台渲染成 active）。
 - `chat:done` 特殊：同步收尾（flush / busy=false / 品悟卡 / mode 复位）走路由；**异步收尾**（discard_plan / 品悟终审 / 落盘 / 刷新列表）按显式 `sid` 路由，不依赖工作集——所以后台 session 跑完也能正确落盘。
 - `switchToSession` **不再 cancel** 旧 session（后台继续跑）；已有 buffer 直接换工作集，没有则 `load_session` + `rerenderFromMessages`。
 - `notify()` 投影 active 工作集到 `state.*`，并建 `state.sessionBusy` 供会话列表「工作中」转圈（`index.html`）。
@@ -77,9 +80,9 @@
 
 - **active-only 渲染**：后台 session 的流式输出不实时显示，切回才 `rerenderFromMessages`；会话列表用小圆点转圈表示「工作中」。后端已支持完整并发，**后台流式实时视图是后续可选项**（未做）。
 - vLLM 单端点靠 continuous batching 扛 N 并发，个位数 session 可接受；不自建调度（遵循 `AGENTS.md`）。
-- 专属气泡（plan_card / user_input / pinvou_actions）不进 messages，切换还原仍靠 `rerenderFromMessages`（见 commit 历史 / memory）。
+- 专属气泡（plan_card / user_input / pinvou_actions）不进 messages，切换还原仍靠 `rerenderFromMessages`（见 commit 历史）。
 
 ## 5. 验证
 
-- `cargo test --lib`（含 `engine_config_for_session_paths_are_isolated` 路径隔离单测）、L1 harness 编译、`./scripts/fork-guard.sh` 全绿。
+- `cargo test --lib`（含 `engine_config_for_session_paths_are_isolated` 路径隔离单测；该测试已随 instructions 改为 Inline 移除（见 3.1 节末补注））、L1 harness 编译、`./scripts/fork-guard.sh` 全绿。
 - GUI 冒烟：A 发长任务 → 切 B 发任务 → 两者并发跑、产物各进各自 workspace、切换不串台、列表两项都转圈。

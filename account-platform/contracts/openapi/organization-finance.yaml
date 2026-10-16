@@ -3,7 +3,7 @@
   "info": {
     "title": "Token organization finance and model policy",
     "version": "1.0.0",
-    "description": "Finite11 existing models-management assembly operations. Personal factory does not install these paths (404); bearer identity plus current Account organization permissions are independently verified. No new authority or runtime behavior. Read Billing projections are explicitly partial, monetary JSON int64 must be decoded losslessly; signed readiness and personal invocation remain separate."
+    "description": "Finite11 existing models-management assembly operations. Personal factory does not install these paths (404); bearer identity plus current Account organization permissions are independently verified. No new authority is introduced. Quota batches bind complete ordered parent facts before allocation and retain their original identity on unknown outcomes. Read Billing projections are explicitly partial, monetary JSON int64 must be decoded losslessly; signed readiness and personal invocation remain separate."
   },
   "paths": {
     "/v1/organizations/{organization_id}/model-policy": {
@@ -514,12 +514,12 @@
             "schema": {
               "type": "string"
             },
-            "description": "Original same-key request identity passed to the owning command/Billing operation."
+            "description": "Stable parent identity bound before allocation to the actor and complete ordered items. Retry the original complete batch; changed facts, subset or reordering conflict. Existing v1 child indexes remain distinct."
           }
         ],
         "responses": {
           "207": {
-            "description": "Current successful response; quota batch may include failed items.",
+            "description": "Per-item SUCCEEDED, FAILED (known business rejection) or UNKNOWN. Any UNKNOWN requires retaining the original parent key and complete ordered facts for manual whole-batch retry; 207 alone does not prove completion.",
             "content": {
               "application/json": {
                 "schema": {
@@ -530,6 +530,12 @@
           },
           "default": {
             "description": "Existing bearer/organization authority and handler error mapping; no new response behavior is introduced."
+          },
+          "409": {
+            "description": "The parent key was already frozen with different actor or ordered request facts; no child allocation is attempted."
+          },
+          "503": {
+            "description": "Parent persistence outcome is unknown. Retain the original key and complete ordered facts; do not create a new logical batch."
           }
         },
         "requestBody": {

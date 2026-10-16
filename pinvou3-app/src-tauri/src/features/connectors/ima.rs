@@ -334,7 +334,7 @@ fn ima_connect_sync_with_store<S: CredentialStore>(
     // The sync itself skips known bundles, so a reconnect of the
     // already-installed ima skill never re-runs the consent write and
     // never needs the lock.
-    crate::features::marketplace::scope::sync_deny_all_scopes_after_install(IMA_SKILL_ID)?;
+    super::skill_gate::register_installed_skill_consent(IMA_SKILL_ID)?;
 
     let previous_client_id = store.get(&client_id_ref()).map_err(|e| e.user_message())?;
     let previous_api_key = store.get(&api_key_ref()).map_err(|e| e.user_message())?;
@@ -450,22 +450,33 @@ fn redact_known_credentials(mut text: String, client_id: &str, api_key: &str) ->
 }
 
 #[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+    pub(crate) const IMA_SKILL_ID: &str = super::IMA_SKILL_ID;
+    pub(crate) fn client_id_ref() -> CredentialReference {
+        super::client_id_ref()
+    }
+    pub(crate) fn api_key_ref() -> CredentialReference {
+        super::api_key_ref()
+    }
+    pub(crate) fn ima_connect_sync_with_store<S: CredentialStore>(
+        client_id: String,
+        api_key: String,
+        store: &S,
+    ) -> Result<Value, String> {
+        super::ima_connect_sync_with_store(client_id, api_key, store)
+    }
+    pub(crate) fn ima_logout_sync_with_store<S: CredentialStore>(
+        store: &S,
+    ) -> Result<Value, String> {
+        super::ima_logout_sync_with_store(store)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::platform::credential_store::MemoryCredentialStore;
-
-    /// Temp-home harness for the connect regressions. Delegates to the
-    /// shared RAII helper (see its doc for the unwind-restore rationale).
-    fn with_temp_home<F: FnOnce()>(f: F) {
-        crate::platform::test_support::with_temp_home("pinvou3-ima-connect", f);
-    }
-
-    /// Initialize the code scope with the given deny ids while the scope lock
-    /// still works (the DenyAll sync then requires a real write). Routes onto
-    /// the canonical seed helper in scope.rs.
-    fn init_code_scope(ids: &[&str]) {
-        crate::features::marketplace::scope::seed_initialized_code_scope_for_test(ids);
-    }
 
     #[test]
     fn status_requires_both_credentials() {
@@ -475,98 +486,6 @@ mod tests {
         assert!(!status_with_store(&store).unwrap().credentials_present);
         store.set(&api_key_ref(), "api-key").unwrap();
         assert!(status_with_store(&store).unwrap().credentials_present);
-    }
-
-    /// Final semantics for a FRESH ima connect (#517 deny-first): the
-    /// consent-gate registration is refused when the scope lock is
-    /// unavailable, and the refusal must abort BEFORE the credentials are
-    /// touched or any skill content lands.
-    #[test]
-    fn connect_refused_sync_aborts_before_anything_lands() {
-        with_temp_home(|| {
-            let store = MemoryCredentialStore::default();
-
-            // Initialize the code scope (makes the DenyAll sync a required
-            // write), then make the lock file unopenable so the sync refuses.
-            init_code_scope(&["seed-bundle"]);
-            crate::features::marketplace::scope::break_scope_lock_for_test();
-
-            let error =
-                ima_connect_sync_with_store("client-v2".to_string(), "key-v2".to_string(), &store)
-                    .unwrap_err();
-            assert!(
-                error.contains("disabled_bundles.lock"),
-                "refusal must name the lock failure: {error}"
-            );
-            assert!(
-                store.get(&client_id_ref()).unwrap().is_none(),
-                "credentials must never be written on a refused connect"
-            );
-            assert!(
-                store.get(&api_key_ref()).unwrap().is_none(),
-                "credentials must never be written on a refused connect"
-            );
-            assert!(
-                SkillMarketplaceManager::new()
-                    .find_skill_dir(IMA_SKILL_ID)
-                    .is_none(),
-                "the skill must never land on a refused connect"
-            );
-        });
-    }
-
-    /// A RE-connect of
-    /// the already-installed ima skill is a known-bundle operation — the
-    /// consent gate skips the write entirely (even with the scope lock
-    /// unavailable), so the reconnect proceeds and the recorded consent
-    /// state stays untouched. The old unconditional re-registration would
-    /// have re-denied the enabled skill, and a post-gate failure then left
-    /// it disabled with no recovery path.
-    #[test]
-    fn ima_reconnect_of_installed_skill_preserves_consent_state() {
-        with_temp_home(|| {
-            let store = MemoryCredentialStore::default();
-            store.set(&client_id_ref(), "client-v1").unwrap();
-            store.set(&api_key_ref(), "key-v1").unwrap();
-            let skills = SkillMarketplaceManager::new();
-            skills
-                .install(IMA_SKILL_ID)
-                .expect("skill install must succeed while the lock works");
-            let skill_md = skills
-                .find_skill_dir(IMA_SKILL_ID)
-                .expect("precondition: ima skill installed")
-                .join("SKILL.md");
-
-            // Initialize the code scope (ima stays absent = enabled), then
-            // break the lock to prove the reconnect needs no scope write.
-            init_code_scope(&["seed-bundle"]);
-            crate::features::marketplace::scope::break_scope_lock_for_test();
-
-            ima_connect_sync_with_store("client-v2".to_string(), "key-v2".to_string(), &store)
-                .expect("a known bundle's reconnect must not need the consent-gate write");
-            assert_eq!(
-                store.get(&client_id_ref()).unwrap().as_deref(),
-                Some("client-v2"),
-                "the reconnect must update the credentials"
-            );
-            assert_eq!(
-                store.get(&api_key_ref()).unwrap().as_deref(),
-                Some("key-v2"),
-                "the reconnect must update the credentials"
-            );
-            assert!(
-                skill_md.is_file(),
-                "the reconnected skill must still be on disk"
-            );
-            assert!(
-                !crate::features::marketplace::load_disabled_bundles_for(
-                    crate::features::marketplace::ConnectorScope::Code
-                )
-                .iter()
-                .any(|id| id == "ima"),
-                "the reconnect must not re-deny the enabled skill"
-            );
-        });
     }
 
     #[test]
@@ -628,87 +547,5 @@ mod tests {
             redacted,
             r#"{"client_id":"[REDACTED]","api_key":"[REDACTED]","data":"available"}"#
         );
-    }
-
-    /// A logout must keep the deny entries whenever the uninstall does not
-    /// actually tear down an installed skill — both arms:
-    /// (1) a VACUOUS uninstall (the skill was never installed): keeps them
-    /// per the vacuous-`Ok(false)` contract on
-    /// `SkillMarketplaceManager::uninstall`;
-    /// (2) a FAILED uninstall (here: the bundle store is unreadable, which
-    /// `SkillMarketplaceManager::uninstall` refuses fail-closed): the
-    /// on-disk skill (if any) would otherwise be silently re-enabled in
-    /// initialized DenyAll scopes. The injected-store core makes both arms
-    /// reachable without touching the real system credential vault.
-    #[test]
-    fn ima_logout_vacuous_and_failed_uninstall_keeps_deny_entries() {
-        with_temp_home(|| {
-            // Phase 1: vacuous uninstall.
-            init_code_scope(&[IMA_SKILL_ID]);
-
-            let store = MemoryCredentialStore::default();
-            ima_logout_sync_with_store(&store).expect("a vacuous logout must succeed");
-
-            assert!(
-                crate::features::marketplace::scope::load_disabled_bundles_for(
-                    crate::features::marketplace::ConnectorScope::Code
-                )
-                .contains(&"ima".to_string()),
-                "a vacuous logout must not strip the deny-first entry"
-            );
-
-            // Phase 2: failed uninstall — make the bundle store unreadable
-            // (bundles.json becomes a directory, so the uninstall's
-            // fail-closed read refuses).
-            let bundles_json = crate::features::marketplace::store::BundleStore::new().file_path();
-            if bundles_json.is_file() {
-                std::fs::remove_file(&bundles_json).unwrap();
-            }
-            std::fs::create_dir_all(&bundles_json).unwrap();
-
-            ima_logout_sync_with_store(&store)
-                .expect("logout must still succeed when only the skill teardown fails");
-
-            assert!(
-                crate::features::marketplace::scope::load_disabled_bundles_for(
-                    crate::features::marketplace::ConnectorScope::Code
-                )
-                .contains(&"ima".to_string()),
-                "a failed uninstall must keep the deny entries (fail-closed)"
-            );
-        });
-    }
-
-    /// Happy-path end-state pin for a FRESH connect on a working lock:
-    /// the deny-first entry lands in the initialized Code scope
-    /// ("ima-skills" normalizes to its owner-package id "ima" on save) and
-    /// the credentials round-trip.
-    #[test]
-    fn fresh_connect_lands_deny_entry_and_credentials() {
-        with_temp_home(|| {
-            init_code_scope(&["seed-bundle"]);
-
-            let store = MemoryCredentialStore::default();
-            ima_connect_sync_with_store("client".to_string(), "key".to_string(), &store)
-                .expect("a fresh connect must succeed while the lock works");
-
-            assert!(
-                crate::features::marketplace::scope::load_disabled_bundles_for(
-                    crate::features::marketplace::ConnectorScope::Code,
-                )
-                .contains(&"ima".to_string()),
-                "the fresh connect must register the deny-first entry"
-            );
-            assert_eq!(
-                store.get(&client_id_ref()).unwrap().as_deref(),
-                Some("client"),
-                "the connect must write the credentials"
-            );
-            assert_eq!(
-                store.get(&api_key_ref()).unwrap().as_deref(),
-                Some("key"),
-                "the connect must write the credentials"
-            );
-        });
     }
 }

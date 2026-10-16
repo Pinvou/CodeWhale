@@ -1319,7 +1319,7 @@ test('providerCatalog overlays and preset labels for the custom Responses group 
   }
 });
 
-test('OpenAI Responses wire 谓词的前缀集跨语言一致（bridge.rs ↔ model-catalog.js）', () => {
+test('OpenAI Responses wire 谓词的前缀集跨语言一致（core/model_wire.rs ↔ model-catalog.js）', () => {
   // The frontend tier routing and the engine landing must hit the same model
   // set: each side maintains its own starts_with prefixes, and a new family
   // added on one side (a future gpt-7, say) would silently drift on the
@@ -1327,12 +1327,23 @@ test('OpenAI Responses wire 谓词的前缀集跨语言一致（bridge.rs ↔ mo
   // them mechanically (same technique as the MODEL_PRESET_DEFS cross-language
   // guard above).
   const rustSrc = fs.readFileSync(
-    path.join(__dirname, '..', 'src-tauri', 'src', 'features', 'assistant', 'platform', 'bridge.rs'),
+    path.join(__dirname, '..', 'src-tauri', 'src', 'core', 'model_wire.rs'),
     'utf8',
   );
   const jsSrc = fs.readFileSync(srcPath, 'utf8');
   const rustStart = rustSrc.indexOf('fn openai_responses_wire_model(');
-  assert.notStrictEqual(rustStart, -1, 'bridge.rs predicate moved — update this guard');
+  assert.notStrictEqual(rustStart, -1, 'core/model_wire.rs predicate moved — update this guard');
+  const bridgeSrc = fs.readFileSync(
+    path.join(__dirname, '..', 'src-tauri', 'src', 'features', 'assistant', 'platform', 'bridge.rs'),
+    'utf8',
+  );
+  const bridgeStart = bridgeSrc.indexOf('fn uses_responses_wire(');
+  assert.notStrictEqual(bridgeStart, -1, 'production bridge wire selector must exist');
+  const bridgeBody = bridgeSrc.slice(bridgeStart, bridgeSrc.indexOf('\n    }', bridgeStart));
+  assert.match(bridgeBody, /crate::core::model_wire::model_route_uses_responses\(/);
+  const routeStart = rustSrc.indexOf('fn model_route_uses_responses(');
+  const routeBody = rustSrc.slice(routeStart, rustSrc.indexOf('\n}', routeStart));
+  assert.match(routeBody, /openai_responses_wire_model\(model\)/);
   const rustBody = rustSrc.slice(rustStart, rustSrc.indexOf('\n}', rustStart));
   const rustPrefixes = [...rustBody.matchAll(/starts_with\("([^"]+)"\)/g)].map(m => m[1]).sort((a, b) => a.localeCompare(b));
 

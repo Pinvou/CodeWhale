@@ -13,6 +13,7 @@ export const FULL_FRONTEND_SMOKES = Object.freeze([
   command("npm", "test:workspace-panel-session-ui"),
   command("npm", "test:reader-ui"),
   command("npm", "test:reader-diff-ui"),
+  command("node", "tests/remote_archive_smoke.mjs"),
   command("npm", "test:team-relay-ui"),
   command("npm", "test:markdown-artifact-ui"),
   command("node", "tests/detached_boot_smoke.js"),

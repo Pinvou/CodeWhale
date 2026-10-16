@@ -47,6 +47,33 @@ TRUSTED_BOT_AUTHORS = {
 # 和合流前的历史提交永久打红 main。
 LEGACY_HISTORY_CUTOFF = "deae3ca0141390c06e14aa93610645088b8966d4"
 
+# #1932: 已合入集成分支的 GitHub squash 提交保留了原签署，但作者不同。
+# 仅接受这 19 个不可变对象；不是身份别名，也不豁免标题或签署检查。
+# 值为来源 PR，供审核追溯；新增提交不能按作者、分支或时间获得此例外。
+HISTORICAL_SQUASH_SIGNOFFS = {
+    "55d39fbe6a90f8fee4f2c4d6a5fa709e7974a6d3": 1829,
+    "1f0fe5d2e37955b8c888a9c41dfa4e27108d1cc9": 1828,
+    "089dc15342fdfa9991b54b37a55c03257823ccbb": 1825,
+    "dd9358617743c42c672282a5cdfd471e02f1cfd9": 1824,
+    "40b6bab756fd1ee734f9c8bd13f1ec5d3ced8ea0": 1826,
+    "ec03916575049792649b649ab45de8fdd8418243": 1787,
+    "5d6919fc217fca820e6007d5a6b62181346db2c9": 1785,
+    "71914ebe49bb1ee6d33081bb4d35b0a5ddbfd917": 1782,
+    "f6f589f77a967f6e9185b731f69cd761e14fe616": 1827,
+    "19dba2851a3f95875e0221fc1459f337dbe462df": 1817,
+    "554cb5eb34a342d997f72292b6772f64c9710917": 1816,
+    "c24ccab1071e8bc2fe2b3c2079a06db5b5320b5a": 1814,
+    "133fba77c7a4aa10b7c3bd61cae5f77419c6bff8": 1801,
+    "11ba329bfd3362f2020bc6b05112b2ce60419685": 1799,
+    "7385f5b6c44bba8ea32fbbc19ce1a78ec8b577d6": 1796,
+    "e9ed3c15c705fb2f333fed557d9d927412d95ef9": 1795,
+    "4340c11513aad6b9f9676981237dc8d327bab29f": 1794,
+    "a7587edfc44c25ddc06e17fe0366cd457b104438": 1792,
+    "c74061589a8428d3542184a1876189536e303110": 1791,
+}
+HISTORICAL_SQUASH_AUTHOR = ("zhuowp", "zwp-1989@qq.com")
+HISTORICAL_SQUASH_SIGNER = ("z27014", "zhuo.wenpei@h3c.com")
+
 
 def clean_commit_message(raw: str) -> list[str]:
     return [line.rstrip() for line in raw.splitlines() if not line.startswith("#")]
@@ -104,6 +131,8 @@ def validate_signoff(
     label: str,
     author_name: str | None = None,
     author_email: str | None = None,
+    *,
+    identity_label: str = "commit author",
 ) -> list[str]:
     signoffs = list(SIGNOFF_RE.finditer(raw))
     if not signoffs:
@@ -122,7 +151,7 @@ def validate_signoff(
             return []
 
     return [
-        f"{label}: Signed-off-by must match commit author "
+        f"{label}: Signed-off-by must match {identity_label} "
         f"'{author_name} <{author_email}>'"
     ]
 
@@ -172,13 +201,21 @@ def validate_range(
             continue
 
         errors.extend(validate_text(raw, label))
-        if not is_trusted_bot(author_name, author_email):
+        historical = commit in HISTORICAL_SQUASH_SIGNOFFS
+        if historical or not is_trusted_bot(author_name, author_email):
+            expected_name, expected_email = author_name, author_email
+            if historical:
+                if (author_name, author_email) != HISTORICAL_SQUASH_AUTHOR:
+                    errors.append(f"{label}: historical squash author does not match registration")
+                expected_name, expected_email = HISTORICAL_SQUASH_SIGNER
+            match_signer = require_matching_signoff or historical
             errors.extend(
                 validate_signoff(
                     raw,
                     label,
-                    author_name if require_matching_signoff else None,
-                    author_email if require_matching_signoff else None,
+                    expected_name if match_signer else None,
+                    expected_email if match_signer else None,
+                    identity_label="registered historical signer" if historical else "commit author",
                 )
             )
 

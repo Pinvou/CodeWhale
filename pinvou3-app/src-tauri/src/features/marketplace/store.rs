@@ -390,6 +390,11 @@ impl BundleStore {
         })
     }
 
+    /// Persist the marketplace-owned canonical disconnected state.
+    pub fn mark_cli_disconnected(&self, id: &str) -> Result<bool, String> {
+        self.mark_degraded(id, super::bundle::CLI_DISCONNECTED_DEGRADED_REASON)
+    }
+
     /// 设置上传包的用户自定义 UI 展示名/说明（写在记录 `extra` map 的
     /// `display_name` / `display_description` key，不动包目录与包清单）。
     ///
