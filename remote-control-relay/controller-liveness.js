@@ -326,8 +326,12 @@ export class ControllerLivenessHooks {
     return Object.freeze({ deliveries: Object.freeze([]) });
   }
 
-  async onSocketClosed({ lease } = {}) {
-    if (lease?.controller_lease_id && this.#states.get(lease.controller_lease_id)?.leaseOwner === lease) {
+  async onSocketClosed({ lease, role, socket_identity: socketIdentity } = {}) {
+    // The router resolves by lease ID, so a delayed old close may carry the
+    // replacement lease object. It must not erase that cycle's live evidence.
+    if (["A", "B"].includes(role) && typeof socketIdentity === "string"
+      && lease?.sockets?.[role] === socketIdentity && lease.controller_lease_id
+      && this.#states.get(lease.controller_lease_id)?.leaseOwner === lease) {
       this.#states.delete(lease.controller_lease_id);
     }
     return Object.freeze({ retain_lease: false });

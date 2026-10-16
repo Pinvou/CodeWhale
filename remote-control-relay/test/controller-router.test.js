@@ -39,15 +39,16 @@ function fixture({ clock = Date.now, capabilities = ["encrypted_frames_v1", "tas
     }),
   };
   let leaseAlive = true;
+  let currentLease = activeLease;
   let terminationObserver;
   const leases = {
     claimForDelivery: async () => ({ message: reserved, owns_initial_delivery: true }),
     acceptCommitment: ({ message, role }) => ({ message, target_role: role === "A" ? "B" : "A" }),
     forwardFinished: ({ message, role }) => ({ message, target_role: role === "A" ? "B" : "A" }),
     acceptReceipt: async ({ role }) => role === "A" ? joined : null,
-    lease: (leaseId) => leaseAlive && leaseId === activeLease.controller_lease_id ? activeLease : null,
+    lease: (leaseId) => leaseAlive && leaseId === currentLease.controller_lease_id ? currentLease : null,
     setTerminationObserver: (observer) => { terminationObserver = observer; },
-    terminateLease: async (input) => { leaseAlive = false; terminated.push(input); await terminationObserver({ controller_lease_id: activeLease.controller_lease_id, reason: input.reason }, activeLease); return true; },
+    terminateLease: async (input) => { leaseAlive = false; terminated.push(input); await terminationObserver({ controller_lease_id: currentLease.controller_lease_id, reason: input.reason }, currentLease); return true; },
     abortHandshakesBySocket: async () => 0,
     verifyResumeToken: () => { throw new Error("unexpected prepare in heartbeat regression"); },
     completeResume: () => { throw new Error("unexpected resume commit in heartbeat regression"); },
@@ -82,7 +83,8 @@ function fixture({ clock = Date.now, capabilities = ["encrypted_frames_v1", "tas
     endpointId: "endpoint-0001",
     authenticatedContext: Object.freeze({ endpointId: "endpoint-0001", credential: "secret" }),
   });
-  return { router, sent, aborted, terminated, audits, leases, activeLease, liveness, resume };
+  return { router, sent, aborted, terminated, audits, leases, activeLease, liveness, resume,
+    replaceLease: (lease) => { currentLease = lease; } };
 }
 
 async function connectController(router) {
@@ -153,6 +155,41 @@ test("real close hooks snapshot evidence before deleting it and freeze only the 
   assert.equal(await value.resume.expire(), 0);
   clock = 64_000;
   assert.equal(await value.resume.expire(), 1);
+});
+
+test("router late close resolves the new lease but cannot delete its liveness or disable expiry", async () => {
+  for (const role of ["A", "B"]) {
+    let clock = 1_000;
+    const value = fixture({ clock: () => clock, realLeaseHooks: true,
+      capabilities: ["encrypted_frames_v1", "task_v1", "role_liveness_v1", "resume_v1"] });
+    await joined(value);
+    const replacement = { ...value.activeLease,
+      liveness_epoch_a: "resumed-live-A", liveness_epoch_b: "resumed-live-B",
+      sockets: { A: "resumed-socket-A", B: "resumed-socket-B" } };
+    value.replaceLease(replacement);
+    // The production lease manager ignores sockets absent from the current
+    // lease. Keep that seam explicit; exercise the actual router and hooks.
+    value.leases.abortBySocket = async () => ({ handshakes: 0, leases: 0 });
+    await value.liveness.onLeaseCreated(replacement);
+    await value.resume.onLeaseCreated(replacement);
+    assert.equal(value.liveness.resumeDeadline(replacement), 31_000);
+    await value.router.removeSocket(`socket-${role}`);
+    assert.equal(value.leases.lease(replacement.controller_lease_id), replacement);
+    assert.equal(value.liveness.resumeDeadline(replacement), 31_000);
+    await value.liveness.handle({ lease: replacement, role,
+      socket_identity: replacement.sockets[role], message: {
+        v: 1, type: "controller_liveness", sender_role: role, heartbeat_sequence: "1",
+        connection_id: replacement.connection_id, controller_lease_id: replacement.controller_lease_id,
+        lease_epoch: replacement.lease_epoch, relay_epoch: replacement.relay_epoch,
+        remote_control_generation: replacement.remote_control_generation,
+        liveness_epoch: role === "A" ? replacement.liveness_epoch_a : replacement.liveness_epoch_b,
+      } });
+    clock = 31_000;
+    assert.equal(await value.liveness.expire(), 1);
+    assert.equal(value.terminated.length, 1);
+    assert.equal(value.terminated[0].expectedLease, replacement);
+    assert.equal(value.leases.lease(replacement.controller_lease_id), null);
+  }
 });
 
 test("router rejects a late heartbeat and retires only the expired connected lease before cleanup tick", async () => {

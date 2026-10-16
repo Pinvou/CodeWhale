@@ -202,8 +202,36 @@ test("B proof signs every envelope field in a distinct domain and consumes its c
     else assert.equal(crypto.verify(null, buildPeerLivenessAttestationPreimage(tampered), value.publicKey, signature), false, field);
   }
   await assert.rejects(() => value.hooks.handle({ message: {...peerRequest(), challenge_b64: "AQEBAQEBAQEBAQEBAQEBAQ=="}, socket_identity: "socket-A", role: "A", lease }), /controller_liveness_challenge_replay/u);
-  await value.hooks.onSocketClosed({ lease });
+  await value.hooks.onSocketClosed({ lease, role: "B", socket_identity: "socket-B" });
   await assert.rejects(() => value.hooks.handle({ message: peerRequest("challenge-peer-2"), socket_identity: "socket-A", role: "A", lease }), /controller_liveness_state_not_found/u);
+});
+
+test("stale, malformed and old-owner closes preserve the current liveness cycle", async () => {
+  for (const role of ["A", "B"]) {
+    const value = await started();
+    const replacement = { ...lease, sockets: { A: "new-socket-A", B: "new-socket-B" } };
+    await value.hooks.onLeaseCreated(replacement);
+    await value.hooks.handle({ message: heartbeat(role, 1), role,
+      socket_identity: replacement.sockets[role], lease: replacement });
+    const deadline = value.hooks.resumeDeadline(replacement);
+    for (const close of [
+      { lease: replacement, role, socket_identity: `socket-${role}` },
+      { lease: replacement, role: "other", socket_identity: replacement.sockets[role] },
+      { lease: replacement },
+      { lease, role, socket_identity: `socket-${role}` },
+    ]) {
+      assert.deepEqual(await value.hooks.onSocketClosed(close), { retain_lease: false });
+      assert.equal(value.hooks.resumeDeadline(replacement), deadline);
+    }
+    await assert.rejects(value.hooks.handle({ message: heartbeat(role, 1), role,
+      socket_identity: replacement.sockets[role], lease: replacement }),
+    { code: "controller_liveness_sequence_replay" });
+    await value.hooks.handle({ message: heartbeat(role, 2), role,
+      socket_identity: replacement.sockets[role], lease: replacement });
+    await value.hooks.onSocketClosed({ lease: replacement, role,
+      socket_identity: replacement.sockets[role] });
+    assert.equal(value.hooks.resumeDeadline(replacement), null);
+  }
 });
 
 test("B proof history is bounded, pruned and resets only with a new authenticated cycle", async () => {

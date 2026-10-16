@@ -219,7 +219,8 @@ test("missing or expired A evidence fails closed and B activity cannot create re
     const committed = await createLease(value);
     value.clock = 29_000;
     await heartbeat(value, committed.lease, "B", 1);
-    if (missing) await value.liveness.onSocketClosed({ lease: committed.lease });
+    if (missing) await value.liveness.onSocketClosed({ lease: committed.lease, role: "A",
+      socket_identity: committed.lease.sockets.A });
     value.clock = 31_000;
     await assert.rejects(heartbeat(value, committed.lease, "B", 2),
       { code: missing ? "controller_liveness_state_not_found" : "controller_liveness_expired" });
