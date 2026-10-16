@@ -756,16 +756,26 @@ const SUMMARY_SEARCH_LINES: usize = 60;
 /// `lifecycle::extract_marker` 是在整个 Vec 上找它的。丢掉它的后果是"已安装引擎"
 /// 的删除功能再也精确 `docker rmi` 不了——盘上留下一个几 GB 的孤儿镜像，而且没有
 /// 任何界面管得到它。
-fn cap_output_lines(output_lines: &mut Vec<String>) {
+fn cap_output_lines(output_lines: &mut Vec<String>, scanned_lines: &mut usize) {
     if output_lines.len() <= MAX_OUTPUT_LINES {
         return;
     }
     let drop_before = MAX_OUTPUT_LINES / 2;
+    let total = output_lines.len();
     let mut kept: Vec<String> = Vec::with_capacity(output_lines.len() - drop_before);
     for (index, line) in output_lines.drain(..).enumerate() {
         if index >= drop_before || is_control_line(&line) {
             kept.push(line);
         }
+    }
+    // 2026-10-16 评审阻塞项 1：cap 丢掉最老一半后 Vec 整体前移，提示扫描用的是
+    // 绝对下标游标——不回退的话 scanned_lines 永远大于 len()，之后到达的
+    // LMM_PROMPT= 行永不被识别，交互提示静默失效，脚本最终被当"无输出卡死"
+    // 杀掉（docker pull 这类轻松打出 5000+ 行的输出必踩）。按**实际**丢弃数
+    // 回退（协议行被保留的不算丢弃）。
+    let dropped = total - kept.len();
+    if dropped > 0 {
+        *scanned_lines = scanned_lines.saturating_sub(dropped);
     }
     *output_lines = kept;
 }
@@ -774,6 +784,7 @@ fn drain_lines(
     buf: String,
     output_lines: &mut Vec<String>,
     on_progress: &mut Option<&mut ProgressCallback<'_>>,
+    scanned_lines: &mut usize,
 ) -> String {
     let mut rest = buf;
     loop {
@@ -798,7 +809,7 @@ fn drain_lines(
         rest = rest[idx + skip..].to_string();
         if !line.trim().is_empty() {
             output_lines.push(line.clone());
-            cap_output_lines(output_lines);
+            cap_output_lines(output_lines, scanned_lines);
             if let Some(cb) = on_progress.as_deref_mut() {
                 cb(ScriptProgress::line(line));
             }
@@ -1085,7 +1096,12 @@ pub fn run_script(
                 Ok(n) => {
                     idle_deadline = Instant::now() + idle_timeout;
                     buf.push_str(&decode_utf8_stream(&mut pending, &chunk[..n]));
-                    buf = drain_lines(buf, &mut output_lines, &mut opts.on_progress);
+                    buf = drain_lines(
+                        buf,
+                        &mut output_lines,
+                        &mut opts.on_progress,
+                        &mut scanned_lines,
+                    );
                     // pty 是回显的：我们写回去的答案会原样再读回来一遍，所以
                     // 扫描只看新增的行，不会把自己写的东西当成新的提示。
                     while scanned_lines < output_lines.len() {
@@ -1140,7 +1156,12 @@ pub fn run_script(
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     buf.push_str(&decode_utf8_stream(&mut pending, &chunk[..n]));
-                    buf = drain_lines(buf, &mut output_lines, &mut opts.on_progress);
+                    buf = drain_lines(
+                        buf,
+                        &mut output_lines,
+                        &mut opts.on_progress,
+                        &mut scanned_lines,
+                    );
                     grace_until = (Instant::now() + EXIT_GRACE_IDLE).min(hard_deadline);
                 }
             }
@@ -1151,7 +1172,12 @@ pub fn run_script(
     // 到这里没有"下一块"了，按损坏处理吐出去，总比整段丢掉强。
     if !pending.is_empty() {
         buf.push_str(&String::from_utf8_lossy(&pending));
-        buf = drain_lines(buf, &mut output_lines, &mut opts.on_progress);
+        buf = drain_lines(
+            buf,
+            &mut output_lines,
+            &mut opts.on_progress,
+            &mut scanned_lines,
+        );
     }
 
     if !buf.trim().is_empty() {
@@ -2158,5 +2184,42 @@ printf '[1A[2K7e1f8fb7d4ba: Pulling fs layer
             "坏字节后面的内容必须照常出来：{out:?}"
         );
         assert!(pending.is_empty());
+    }
+    #[test]
+    fn cap_output_lines_keeps_prompt_scan_cursor_in_range() {
+        // 评审阻塞项 1 的回归测试：超上限丢最老一半后，绝对下标游标必须跟着
+        // 回退，否则之后到达的 LMM_PROMPT= 行永不被扫描（docker pull 这类
+        // 5000+ 行输出 + 交互提问的场景必踩）。
+        let mut lines: Vec<String> = (0..MAX_OUTPUT_LINES + 10)
+            .map(|i| format!("layer-{i}"))
+            .collect();
+        let mut scanned = MAX_OUTPUT_LINES + 5;
+        cap_output_lines(&mut lines, &mut scanned);
+        assert!(
+            scanned <= lines.len(),
+            "游标 {} 超出 cap 后长度 {}，新提示行将永不被扫描",
+            scanned,
+            lines.len()
+        );
+        // 新到的提示行必须落在未扫描区间内。
+        lines.push("LMM_PROMPT=继续吗？".to_string());
+        assert!(scanned < lines.len());
+        assert!(is_prompt_line(&lines[scanned..].last().unwrap()));
+    }
+
+    #[test]
+    fn cap_output_lines_preserves_control_lines_and_reports_them_as_kept() {
+        // 协议行不丢是既有承诺；被保留的协议行不能计入"丢弃数"把游标多退
+        // （多退最多造成重复扫描一行非提示行，无害但不必）。
+        let mut lines: Vec<String> = (0..MAX_OUTPUT_LINES)
+            .map(|i| format!("layer-{i}"))
+            .collect();
+        lines[3] = "LMM_ENGINE_IMAGE=example/img:tag".to_string();
+        let mut scanned = MAX_OUTPUT_LINES - 1;
+        cap_output_lines(&mut lines, &mut scanned);
+        assert!(
+            lines.iter().any(|l| l.starts_with("LMM_ENGINE_IMAGE=")),
+            "协议行被 cap 丢掉了"
+        );
     }
 }

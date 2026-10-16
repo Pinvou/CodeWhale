@@ -381,8 +381,17 @@ fn contains_as_word(haystack: &str, keyword: &str) -> bool {
         if before_ok && after_ok {
             return true;
         }
-        // 没命中就从这次匹配的下一个字节继续找，别漏掉重叠的情况
-        from = start + 1;
+        // 没命中就从这次匹配首字符的下一个字符继续找，别漏掉重叠的情况。
+        // 2026-10-16 评审阻塞项 2：这里原来是 start + 1——按**字节**推进，关键词
+        // 是 CJK（3 字节/字符）时会落在字符内部，下一轮 haystack[from..] 直接
+        // panic（非字符边界切片）。卡片脚本的失败文案是中英混排的人话，这条
+        // 路径在脚本非零退出时逐行必达。按匹配首字符的实际字节长度推进。
+        let advance = haystack[start..]
+            .chars()
+            .next()
+            .map_or(1, char::len_utf8)
+            .max(1);
+        from = start + advance;
         if from >= haystack.len() {
             break;
         }
@@ -777,5 +786,23 @@ mod tests {
         .collect();
         let picked = pick_failure_line(&lines).unwrap();
         assert_eq!(humanize_script_message(picked), "磁盘空间不足");
+    }
+    #[test]
+    fn contains_as_word_survives_cjk_boundaries() {
+        // 评审阻塞项 2 的回归测试：CJK 关键词 + 按字节推进曾经在这里 panic
+        // （"错"是 3 字节字符，start+1 落进字符内部，下一次切片直接崩）。
+        // 崩溃会被 catch_unwind 接住变成"内部错误"，真实失败原因彻底丢失。
+        assert!(!contains_as_word("curl错误：无法解析", "错误"));
+        // 前一个字节是 ASCII 字母（curl 的 l）→ 不算词边界命中；推进一个字符
+        // 后继续找，不得 panic，也不得误报。
+        assert!(contains_as_word("下载 错误：无法解析主机", "错误"));
+        // CJK 关键词紧贴 ASCII 字母时按词边界语义不命中（与 ASCII 关键词一致），
+        // 关键是不 panic 且不误报。
+        assert!(!contains_as_word("error错误error", "错误"));
+        // 关键词在句中多次出现且第一次不命中的重叠场景。
+        assert!(!contains_as_word("x错x错x错x", "错误"));
+        // 纯 ASCII 行为不变（既有语义回归）。
+        assert!(contains_as_word("dial timeout", "timeout"));
+        assert!(!contains_as_word("connecttimeout", "timeout"));
     }
 }

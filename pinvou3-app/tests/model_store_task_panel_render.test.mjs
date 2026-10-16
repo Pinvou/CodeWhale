@@ -191,13 +191,27 @@ test('启用失败且明确保留实例时提供停用入口；其他失败不�
   }
 });
 
-test('「导出日志（可外发）」只在失败的卡片上给', () => {
-  // 它存在的理由是脱敏分了两道：落盘那份留着路径和内网地址（不留就没法诊断），
-  // 导出那份把它们一起抹掉。没有这个入口，更严的那一道就没有任何出口。
+test('展开的任务卡提供「更多」入口，菜单默认收起（不渲染任何菜单项）', () => {
+  // SSR 不执行事件：菜单条目（导出/打开目录/复制）在 toolsOpen 打开前本就不该
+  // 出现在渲染结果里。这里断言的是**布局事实**——入口在、菜单内容不外漏。
+  // 菜单项各自的显示条件由 task-panel-tools 的纯函数测试真实覆盖（本文件下方）。
   const failed = render(task({ expanded: true, status: 'error', error: '磁盘空间不足' }));
   assert.match(failed, /model-store-task-tools/);
+  assert.doesNotMatch(failed, /role="menu"/);
   assert.doesNotMatch(failed, /model-store-task-export-log/);
-  // 正在跑的卡片不给：这会儿还没有"要反馈的失败"，多一个按钮只是噪声
-  assert.doesNotMatch(render(task({ expanded: true })), /model-store-task-export-log/);
+  assert.doesNotMatch(failed, /model-store-task-open-log-dir/);
+  // 收起的卡片没有工具入口（旧断言的另一半，语义保留）。
+  assert.doesNotMatch(render(task({ expanded: false })), /model-store-task-tools/);
+});
+
+test('「导出日志（可外发）」的显示条件：失败且有运行日志', async () => {
+  // 门控抽成了纯函数（task-panel-tools.js），这里是不依赖交互的真实断言——
+  // 旧测试断言与标题相反且在 SSR 下恒真空（toolsOpen 永远 false，改什么都不红）。
+  const { exportLogEligible } = await import('../src/features/model-store/task-panel-tools.js');
+  assert.equal(exportLogEligible({ status: 'error', runId: 'run-1' }), true, '失败且有日志 → 给');
+  assert.equal(exportLogEligible({ status: 'error', runId: null }), false, '失败但没有可导出的运行 → 不给');
+  assert.equal(exportLogEligible({ status: 'running', runId: 'run-1' }), false, '在跑 → 不给（还没有要反馈的失败）');
+  assert.equal(exportLogEligible({ status: 'completed', runId: 'run-1' }), false, '完成 → 不给');
+  assert.equal(exportLogEligible({}), false, '空对象 → 不给（不得抛错）');
 });
 

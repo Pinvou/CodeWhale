@@ -21,6 +21,7 @@ const files = [
   // refactored to symbolic labels first; disclosed rather than smuggled
   // past an allowlist.
   'src/features/chat/session-mention.js',
+  'src/features/model-store/EngineManagementDialog.jsx',  'src/features/model-store/LocalResourcesDialog.jsx',  'src/features/model-store/ModelStoreView.jsx',
 ];
 // 用 fileURLToPath 而非 new URL(...).pathname：后者在 Windows 上会得到 '/D:/...'，
 // 再经 path.resolve 会拼成 'D:\D:\...' 双盘符路径导致 ENOENT。
@@ -50,10 +51,31 @@ function countActiveZhLiterals(content) {
   let count = 0;
   // 匹配引号内含 CJK 的串（简化的 CJK 范围 \u4e00-\u9fff）。
   const re = /['"`][^'"`\n]*[\u4e00-\u9fff][^'"`\n]*['"`]/g;
+  // JSX 注释块 {/* … */} 里的中文（包括引号包裹的）不是界面文案——2026-10-16
+  // 把 ModelStoreView 纳入扫描时，卸载确认那段注释里的「确定/取消」曾误报 4 处。
+  // 逐行跟踪块状态：进入行从 {/* 之后算代码，离开行到 */ 之前算代码。
+  let inJsxComment = false;
   for (const line of lines) {
     const trimmed = line.trimStart();
     if (trimmed.startsWith('//') || trimmed.startsWith('*')) continue; // 整行注释
-    const code = stripTrailingLineComment(line);
+    let code = stripTrailingLineComment(line);
+    if (inJsxComment) {
+      const end = code.indexOf('*/');
+      if (end === -1) continue; // 仍在注释块内
+      code = code.slice(end + 2);
+      inJsxComment = false;
+    }
+    const jsxCmt = code.indexOf('{/*');
+    if (jsxCmt !== -1) {
+      const afterOpen = code.slice(jsxCmt + 3);
+      const end = afterOpen.indexOf('*/');
+      if (end === -1) {
+        inJsxComment = true;
+        code = code.slice(0, jsxCmt);
+      } else {
+        code = code.slice(0, jsxCmt) + afterOpen.slice(end + 2);
+      }
+    }
     // 豁免：console.warn/error/log/info/debug 的字符串实参属于「开发者诊断」，
     // 不属于 AGENTS.md §4 约束的「界面文案」，故这些调用位置之后的 CJK 串不计入。
     const consoleIdx = code.search(/console\.(warn|error|log|info|debug)\s*\(/);
@@ -75,5 +97,5 @@ for (const rel of files) {
   total += n;
   if (n > 0) console.error(`${rel}: ${n} active CJK literal(s) remaining`);
 }
-assert.equal(total, 0, `Expected 0 active CJK string literals in the checked feature views, found ${total}`);
+assert.equal(total, 0, `Expected 0 active CJK string literals across scanned feature views, found ${total}`);
 console.log('OK: no active CJK string literals in checked feature views');

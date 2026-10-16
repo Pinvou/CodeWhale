@@ -893,7 +893,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
                 onClick={() => setEnginesOpen(true)}
               >
                 <Package size={14} className="opacity-70" />
-                推理引擎
+                {copy.navEngines}
               </button>
               <button
                 type="button"
@@ -902,7 +902,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
                 onClick={() => setLocalResourcesOpen(true)}
               >
                 <Database size={14} className="opacity-70" />
-                本地资源
+                {copy.navLocalResources}
               </button>
               <button
                 type="button"
@@ -956,10 +956,12 @@ const ModelStoreView = ({ theme, t, bs }) => {
         onClose={() => setEnginesOpen(false)}
         onChanged={loadAll}
         theme={theme}
+        copy={copy}
       />
 
       <LocalResourcesDialog
         open={localResourcesOpen}
+        copy={copy}
         onClose={() => setLocalResourcesOpen(false)}
         onStorageSettings={() => {
           setLocalResourcesOpen(false);
