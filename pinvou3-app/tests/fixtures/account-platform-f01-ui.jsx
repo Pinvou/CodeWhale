@@ -20,7 +20,10 @@ globalThis.fetch = async (url, options = {}) => {
   if (url === '/api/logout') { if (control.logoutFail) return json({ code: 'UPSTREAM_UNAVAILABLE' }, 503); control.authenticated = false; return json(null, 204); }
   if (url.endsWith('/account/bootstrap')) {
     const personalPermissions = ['personal.profile.read', 'personal.profile.update', ...(control.balanceAllowed ? ['personal.billing.read'] : [])];
-    return json({ user_id: control.user, username: control.user === id ? 'account-a' : 'account-b', status: 'ACTIVE', active_context: { context_type: 'PERSONAL', membership_version: 1, context_version: 1, authorization_version: 1, personal_authorization_version: 1, platform_authorization_version: 1, organization_authorization_version: 1, permissions: personalPermissions }, personal_permissions: personalPermissions, platform_permissions: ['platform.users.read', 'platform.users.status.manage', 'platform.registrations.repair', 'platform.profile-changes.repair', 'platform.sms-config.read', 'platform.sms-config.manage'] });
+    const payload = { user_id: control.user, username: control.user === id ? 'account-a' : 'account-b', status: 'ACTIVE', active_context: { context_type: 'PERSONAL', membership_version: 1, context_version: 1, authorization_version: 1, personal_authorization_version: 1, platform_authorization_version: 1, organization_authorization_version: 1, permissions: personalPermissions }, personal_permissions: personalPermissions, platform_permissions: ['platform.users.read', 'platform.users.status.manage', 'platform.registrations.repair', 'platform.profile-changes.repair', 'platform.sms-config.read', 'platform.sms-config.manage'] };
+    if (control.badBootstrapContext === 'missing') delete payload.active_context;
+    else if (control.badBootstrapContext === 'null') payload.active_context = null;
+    return json(payload);
   }
   if (url === '/api/account/v1/me/organizations') return json({ items: [] });
   if (url.includes('/v1/me/balance')) {

@@ -262,7 +262,8 @@
             "pattern": "^[0-9a-f]{64}$"
           },
           "provider_chargeback_id": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1
           }
         }
       },

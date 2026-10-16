@@ -58,6 +58,12 @@ pub(crate) struct ModelRejection {
     pub schema_version: u8,
     pub code: ModelRejectionCode,
     pub model_id: String,
+    #[serde(default, skip_serializing_if = "false_legacy_binding")]
+    pub legacy_binding: bool,
+}
+
+fn false_legacy_binding(value: &bool) -> bool {
+    !*value
 }
 
 impl ModelRejection {
@@ -70,14 +76,31 @@ impl ModelRejection {
             schema_version: 1,
             code,
             model_id: model_id.to_string(),
+            legacy_binding: false,
         })
+    }
+
+    // Produced only by local runtime preparation after a fully decoded catalog
+    // proves the saved legacy name absent. No fabricated UUID or model name is
+    // persisted, and the ordinary UUID/header constructor remains unchanged.
+    pub(crate) fn legacy_unavailable() -> Self {
+        Self {
+            schema_version: 1,
+            code: ModelRejectionCode::Unavailable,
+            model_id: String::new(),
+            legacy_binding: true,
+        }
     }
 
     fn is_valid(&self) -> bool {
         self.schema_version == 1
-            && uuid::Uuid::parse_str(&self.model_id).is_ok_and(|id| {
-                !id.is_nil() && id.to_string() == self.model_id.to_ascii_lowercase()
-            })
+            && if self.legacy_binding {
+                self.code == ModelRejectionCode::Unavailable && self.model_id.is_empty()
+            } else {
+                uuid::Uuid::parse_str(&self.model_id).is_ok_and(|id| {
+                    !id.is_nil() && id.to_string() == self.model_id.to_ascii_lowercase()
+                })
+            }
     }
 }
 
@@ -92,6 +115,7 @@ struct ActiveTurnTiming {
     model_rejection: Option<ModelRejection>,
     engine_acquire: Option<EngineAcquireTiming>,
     engine_ready_timestamp: Option<i64>,
+    engine_turn_started_timestamp: Option<i64>,
     first_output_timestamp: Option<i64>,
     #[cfg(any(feature = "benchmark-hooks", test))]
     recorded_first_events: HashSet<&'static str>,
@@ -110,6 +134,7 @@ impl ActiveTurnTiming {
             model_rejection: None,
             engine_acquire: None,
             engine_ready_timestamp: None,
+            engine_turn_started_timestamp: None,
             first_output_timestamp: None,
             #[cfg(any(feature = "benchmark-hooks", test))]
             recorded_first_events: HashSet::new(),
@@ -493,6 +518,7 @@ fn finish_turn_internal(
     if let Some(engine_acquire) = active_turn.engine_acquire {
         entry["engine_startup"] = json!({
             "engine_ready_timestamp": active_turn.engine_ready_timestamp,
+            "engine_turn_started_timestamp": active_turn.engine_turn_started_timestamp,
             "first_output_timestamp": active_turn.first_output_timestamp,
             "engine_acquire": engine_acquire,
         });
@@ -557,6 +583,19 @@ pub fn record_engine_ready(session_id: &str, timing: EngineAcquireTiming) {
     {
         active.engine_acquire = Some(timing);
         active.engine_ready_timestamp = Some(now_ms());
+    }
+}
+
+/// Record the foundation's authoritative turn-start instant. CodeWhale emits
+/// this after route resolution and admission, but before request assembly and
+/// provider dispatch, so it separates host/command preparation from model
+/// time-to-first-visible-output without guessing at internal stages.
+pub fn record_engine_turn_started_at(session_id: &str, timestamp: i64) {
+    if let Ok(mut map) = active_turns().lock()
+        && let Some(active) = map.get_mut(session_id).and_then(VecDeque::back_mut)
+        && active.engine_turn_started_timestamp.is_none()
+    {
+        active.engine_turn_started_timestamp = Some(timestamp);
     }
 }
 
@@ -944,6 +983,49 @@ pub fn compute_stats(session_id: &str) -> std::io::Result<SessionTimelineStats> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_model_rejection_is_explicit_and_does_not_weaken_uuid_evidence() {
+        let legacy = ModelRejection::legacy_unavailable();
+        assert!(legacy.is_valid());
+        let encoded = serde_json::to_value(&legacy).unwrap();
+        assert_eq!(
+            encoded,
+            json!({"schema_version":1,"code":"MODEL_UNAVAILABLE","model_id":"","legacy_binding":true})
+        );
+        assert_eq!(
+            serde_json::from_value::<ModelRejection>(encoded).unwrap(),
+            legacy
+        );
+        for marker in [
+            json!({"schema_version":1,"code":"MODEL_DEPRECATED","model_id":"","legacy_binding":true}),
+            json!({"schema_version":1,"code":"MODEL_UNAVAILABLE","model_id":"deepseek-v4-flash","legacy_binding":true}),
+            json!({"schema_version":1,"code":"MODEL_UNAVAILABLE","model_id":"0199a100-0001-7000-8000-000000000107","legacy_binding":true}),
+            json!({"schema_version":1,"code":"MODEL_UNAVAILABLE","model_id":"","legacy_binding":false}),
+        ] {
+            assert!(
+                !serde_json::from_value::<ModelRejection>(marker)
+                    .unwrap()
+                    .is_valid()
+            );
+        }
+        assert!(
+            ModelRejection::new(ModelRejectionCode::Unavailable, "deepseek-v4-flash").is_none()
+        );
+        let uuid = ModelRejection::new(
+            ModelRejectionCode::Unavailable,
+            "0199a100-0001-7000-8000-000000000107",
+        )
+        .unwrap();
+        assert!(uuid.is_valid());
+        assert!(
+            !serde_json::to_value(uuid)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("legacy_binding")
+        );
+    }
     use crate::platform::paths::tests::ENV_LOCK;
 
     #[test]
@@ -1837,6 +1919,7 @@ mod tests {
                 sync_session_ms: 0,
             },
         );
+        record_engine_turn_started_at(sid, 1_700_000_000_123);
         record_first_output(sid);
         record_first_message_delta(sid);
         finish_turn(sid, "Completed", None);
@@ -1862,6 +1945,10 @@ mod tests {
             321
         );
         assert!(terminal["engine_startup"]["engine_ready_timestamp"].is_i64());
+        assert_eq!(
+            terminal["engine_startup"]["engine_turn_started_timestamp"],
+            1_700_000_000_123_i64
+        );
         assert!(terminal["engine_startup"]["first_output_timestamp"].is_i64());
         assert!(
             !raw.contains("workspace") && !raw.contains("model_name"),

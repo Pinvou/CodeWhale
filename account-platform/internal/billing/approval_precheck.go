@@ -44,8 +44,8 @@ type billingApprovalPrecheckRequest struct {
 }
 
 // billingApprovalPrecheckResponse is the closed projection the Portal renders.
-// It carries the owner-derived normalized/critical/financial documents verbatim
-// and never any Provider text, prompt or personal data.
+// It carries the closed owner-derived financial audit metadata verbatim,
+// which may include a caller-supplied reason; it is not a PII-free projection.
 type billingApprovalPrecheckResponse struct {
 	CommandType              string          `json:"command_type"`
 	PolicyVersion            int64           `json:"policy_version"`

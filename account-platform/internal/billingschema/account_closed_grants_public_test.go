@@ -14,7 +14,9 @@ func TestClosedGrantPublicOwnerHarness(t *testing.T) {
 	if os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL") == "" {
 		t.Skip("explicit isolated schema database required")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+	// Eight owner roots install full migration fixtures and Linux runs the child
+	// with -race; keep their shared budget below the outer eight-minute limit.
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 	defer cancel()
 	f := newStageFixture(t, ctx, os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL"))
 	bc := f.database(t, ctx, "billing", "billing_schema_owner")
@@ -29,7 +31,7 @@ func TestClosedGrantPublicOwnerHarness(t *testing.T) {
 		t.Fatal(e)
 	}
 	migrations.Unlock(ctx, bc)
-	args := []string{"test", "-mod=readonly", "-tags=nomsgpack", "-count=1", "-json", "./internal/billing", "-run", "^(TestClosedGrantPublishedOwnerEffects|TestAccountClosureIsolationPreservesPriorAuditFacts|TestAccountClosureIsolationScrubsContactWithoutFinancialMutation|TestAccountClosurePreservesUnknownForcedRefundEvidence|TestAccountClosureRequiresAuthoritativeChargebackTerminal)$"}
+	args := []string{"test", "-mod=readonly", "-tags=nomsgpack", "-count=1", "-json", "./internal/billing", "-run", "^(TestClosedGrantPublishedOwnerEffects|TestAccountClosureIsolationPreservesPriorAuditFacts|TestAccountClosureIsolationScrubsContactWithoutFinancialMutation|TestAccountClosurePreservesUnknownForcedRefundEvidence|TestAccountClosureRequiresAuthoritativeChargebackTerminal|TestAccountClosureAssessmentIncludesMemberReservations|TestF08MembershipClosureReasonQuotaReplayPostgres|TestF08ClosedGrantConcurrentReceiptReplayPostgres)$"}
 	if runtime.GOOS != "windows" {
 		args = append(args, "-race")
 	}

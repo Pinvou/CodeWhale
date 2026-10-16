@@ -143,8 +143,28 @@ test('all installed languages expose personal, repair, SMS and safe handoff mess
 
 test('personal authority and profile receipts reject missing facts without stripping extensions', () => {
   assert.throws(() => requireSession({})); assert.deepEqual(requireSession({ authenticated: false, extension: true }), { authenticated: false, extension: true });
-  const me = { user_id: id, status: 'ACTIVE', personal_permissions: [], platform_permissions: [], extension: true };
+  const me = { user_id: id, status: 'ACTIVE', personal_permissions: [], platform_permissions: [], active_context: { context_type: 'PERSONAL', context_version: 1, permissions: [] }, extension: true };
   assert.equal(requirePersonalAccount(me), me); assert.throws(() => requirePersonalAccount({ ...me, user_id: 'foreign' })); assert.throws(() => requirePersonalAccount({ ...me, personal_permissions: null }));
   const profile = { profile_change_request_id: id, field: 'USERNAME', status: 'PENDING', extension: true };
   assert.equal(requireProfileChange(profile, id, 'USERNAME'), profile); assert.throws(() => requireProfileChange({ ...profile, profile_change_request_id: 'foreign' }, id)); assert.throws(() => requireProfileChange({ ...profile, field: 'MOBILE' }, '', 'USERNAME')); assert.throws(() => requireProfileChange({ ...profile, status: '' }));
+});
+
+
+test('bootstrap rejects missing or malformed active context before organization UI ownership', () => {
+ const me={user_id:id,status:'ACTIVE',personal_permissions:['personal.billing.read'],platform_permissions:[]};
+ for(const active_context of [undefined,null,[],{}, {context_type:'UNKNOWN',context_version:1,permissions:[]}, {context_type:'PERSONAL',context_version:0,permissions:[]}, {context_type:'PERSONAL',context_version:1,permissions:null}, {context_type:'ORGANIZATION',context_version:1,permissions:[],organization_id:'bad'}]) {
+  assert.throws(()=>requirePersonalAccount({...me,active_context}), /INVALID_ACCOUNT_ACK/);
+ }
+});
+
+
+test('bootstrap preserves personal balance without model authority and validates organization ownership versions', () => {
+  const me = { user_id: id, status: 'ACTIVE', personal_permissions: ['personal.billing.read'], platform_permissions: [], active_context: { context_type: 'PERSONAL', context_version: 1, permissions: [] }, extension: true };
+  assert.equal(requirePersonalAccount(me), me);
+  const organization = { context_type: 'ORGANIZATION', organization_id: id, context_version: 2, membership_version: 3, organization_authorization_version: 4, permissions: ['org.wallet.read'] };
+  assert.equal(requirePersonalAccount({ ...me, active_context: organization }).active_context, organization);
+  for (const mutation of [{ organization_id: null }, { organization_id: '00000000-0000-0000-0000-000000000000' }, { membership_version: 0 }, { membership_version: undefined }, { organization_authorization_version: 0 }, { organization_authorization_version: undefined }, { context_version: Number.MAX_SAFE_INTEGER + 1 }, { permissions: [null] }]) {
+    assert.throws(() => requirePersonalAccount({ ...me, active_context: { ...organization, ...mutation } }), /INVALID_ACCOUNT_ACK/);
+  }
+  assert.throws(() => requirePersonalAccount({ ...me, active_context: { ...me.active_context, organization_id: id } }), /INVALID_ACCOUNT_ACK/);
 });

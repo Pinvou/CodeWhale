@@ -181,7 +181,7 @@ export function AdminReceivableWriteOffForm({ client, copy, onCreated, owner = '
     {(projection || writeOff && operation.unknown) && <form className="adm-financial-repair-draft" onSubmit={createDraft}>
       <label>{copy.reason}<textarea disabled={writeOff && locked} required minLength="10" maxLength="2000" value={pending?.draft.reason ?? reason} onChange={(event) => setReason(event.target.value)} /></label>
       <small>{copy.reasonHint}</small>
-      <label>{copy.requestKey}<input disabled={writeOff && locked} required maxLength="111" value={pending?.draft.idempotency_key?.slice('approval:'.length) ?? requestKey} onChange={(event) => setRequestKey(event.target.value)} /></label>
+      <label>{copy.requestKey}<input disabled={writeOff && locked} required value={pending?.draft.idempotency_key?.slice('approval:'.length) ?? requestKey} onChange={(event) => setRequestKey(event.target.value)} /></label>
       <small>{copy.requestKeyHint}</small>
       <button type="submit" disabled={busy !== '' || operation.busy}>{writeOff && operation.unknown ? operationCopy.retry : busy === 'draft' || operation.busy ? copy.creating : copy.createDraft}</button>
     </form>}

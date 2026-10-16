@@ -19,6 +19,53 @@ try{
  const form=async()=>{await page.evaluate(()=>{const form=[...document.querySelectorAll('form')].find(item=>item.querySelector('h4')?.textContent===window.f06.copy().createUnit);const input=form.querySelector('input');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'Controlled New Unit');input.dispatchEvent(new Event('input',{bubbles:true}));});};
  const click=async key=>{assert.ok(await page.evaluate(key=>{const text=window.f06.copy()[key];const button=[...document.querySelectorAll('button')].find(item=>item.textContent===text&&!item.disabled);if(!button)return false;button.click();return true;},key),`Missing action ${key}`);};
  const run=async(name,fn)=>{await fn();assert.deepEqual(errors,[]);passed++;console.log(`PASS ${name}`);};
+ await run('New quota allocations expose only backend-supported BASE and BONUS',async()=>{
+  await fresh('en');await page.evaluate(()=>{window.f06.enumMode=true;window.f06.authorizationVersion++;window.f06.render();});
+  await page.waitForFunction(()=>[...document.querySelectorAll('form')].some(f=>f.querySelector('h4')?.textContent===window.f06.copy().allocate));
+  assert.deepEqual(await page.evaluate(()=>{const f=[...document.querySelectorAll('form')].find(f=>f.querySelector('h4')?.textContent===window.f06.copy().allocate);return [...f.querySelector('select').options].map(o=>o.value).filter(Boolean);}),['BASE','BONUS']);
+ });
+ const prepareQuota = async component => {
+  await page.evaluate(component => {
+   const form = [...document.querySelectorAll('form')].find(f => f.querySelector('h4')?.textContent === window.f06.copy().allocate);
+   const inputs = form.querySelectorAll('input');
+   for (const [input, value] of [[inputs[0], window.f06.user], [inputs[1], window.f06.unit], [inputs[2], window.f06.other], [inputs[3], '100']]) {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, value); input.dispatchEvent(new Event('input', { bubbles: true }));
+   }
+   const select = form.querySelector('select');
+   if (component === 'PLAN') select.add(new Option('Controlled unsupported PLAN', 'PLAN'));
+   select.value = component; select.dispatchEvent(new Event('change', { bubbles: true }));
+  }, component);
+ };
+ await run('Unsupported PLAN preparation never dispatches a new allocation', async () => {
+  await fresh('en'); await page.evaluate(() => { window.f06.enumMode = true; window.f06.authorizationVersion++; window.f06.render(); });
+  await page.waitForFunction(() => [...document.querySelectorAll('form')].some(f => f.querySelector('h4')?.textContent === window.f06.copy().allocate));
+  await prepareQuota('PLAN'); await click('allocate');
+  await page.waitForFunction(() => [...document.querySelectorAll('form')].find(f => f.querySelector('h4')?.textContent === window.f06.copy().allocate)?.querySelector('[role=alert]')?.textContent === window.f06.copy().invalid);
+  assert.equal(await page.evaluate(() => window.f06.calls.some(c => c.method === 'POST')), false);
+ });
+ for (const component of ['BASE', 'BONUS']) await run(`${component}: allocation UNKNOWN retains original facts and key across language change`, async () => {
+  await fresh('en'); await page.evaluate(() => {
+   window.f06.enumMode = true; window.f06.authorizationVersion++; window.f06.unknown = true; window.f06.render();
+   const originalFetch = globalThis.fetch;
+   globalThis.fetch = async (url, options = {}) => {
+    const path = new URL(String(url), location.href).pathname;
+    if (options.method !== 'POST' || !path.endsWith('/quota-grants:batch')) return originalFetch(url, options);
+    window.f06.calls.push({ path, method: options.method, body: options.body, key: options.headers['Idempotency-Key'] });
+    const input = JSON.parse(options.body).items[0];
+    return new Response(JSON.stringify({ items: [{ index: 0, status: 'SUCCEEDED', grant: { grant_id: window.f06.unit, organization_id: window.f06.org, member_user_id: input.member_user_id, package_id: input.package_id, component_id: input.component_id, status: 'ACTIVE', membership_version: input.membership_version, allocation_version: 1, original_microcredits: input.amount_microcredits, available_microcredits: input.amount_microcredits, reserved_microcredits: '0', used_microcredits: '0', expired_microcredits: '0', revoked_microcredits: '0' } }] }), { status: window.f06.unknown ? 202 : 207, headers: { 'Content-Type': 'application/json' } });
+   };
+  });
+  await page.waitForFunction(() => [...document.querySelectorAll('form')].some(f => f.querySelector('h4')?.textContent === window.f06.copy().allocate));
+  await prepareQuota(component); await click('allocate');
+  await page.waitForFunction(() => [...document.querySelectorAll('form')].find(f => f.querySelector('h4')?.textContent === window.f06.copy().allocate)?.querySelector('[role=alert]')?.textContent === window.f06.copy().unknown);
+  assert.ok(await page.evaluate(() => [...document.querySelectorAll('form')].find(f => f.querySelector('h4')?.textContent === window.f06.copy().allocate).querySelector('fieldset').disabled));
+  await page.evaluate(() => { window.f06.unknown = false; window.f06.language = 'ja'; window.f06.render(); }); await click('retry');
+  await page.waitForFunction(() => [...document.querySelectorAll('form')].find(f => f.querySelector('h4')?.textContent === window.f06.copy().allocate)?.querySelector('[role=status]')?.textContent === window.f06.copy().saved);
+  assert.ok(await page.evaluate(component => {
+   const calls = window.f06.calls.filter(c => c.method === 'POST' && c.path.endsWith('/quota-grants:batch')), expected = { items: [{ member_user_id: window.f06.user, membership_version: 1, package_id: window.f06.unit, component_id: window.f06.other, component_type: component, amount_microcredits: 100 }] };
+   return calls.length === 2 && !!calls[0].key && calls[0].key === calls[1].key && calls[0].body === calls[1].body && JSON.stringify(JSON.parse(calls[1].body)) === JSON.stringify(expected);
+  }, component));
+ });
  for(const language of ['zh','en','ja'])await run(`${language}: organization read-only financial facts and permission controls`,async()=>{await fresh(language);await page.evaluate(()=>{window.f06.readonly=true;window.f06.render();});await page.waitForFunction(()=>!document.querySelector('.ap-org-action'));assert.ok(await page.evaluate(()=>document.body.textContent.includes('900,719,925,474.0993')));assert.equal(await page.evaluate(()=>[...document.querySelectorAll('button')].some(button=>button.textContent===window.f06.copy().createUnit)),false);});
  await run('Actual202 remains unknown and same immutable key/body survive language change',async()=>{await fresh('en');await form();await page.evaluate(()=>{window.f06.unknown=true;});await click('createUnit');await page.waitForFunction(()=>document.querySelector('[role=alert]')?.textContent===window.f06.copy().unknown);assert.ok(await page.evaluate(()=>[...document.querySelectorAll('form')].find(item=>item.querySelector('h4')?.textContent===window.f06.copy().createUnit).querySelector('fieldset').disabled));await page.evaluate(()=>{window.f06.unknown=false;window.f06.language='ja';window.f06.render();});await click('retry');await page.waitForFunction(()=>[...document.querySelectorAll('[role=status]')].some(item=>item.textContent===window.f06.copy().saved));assert.ok(await page.evaluate(()=>{const calls=window.f06.calls.filter(call=>call.method==='POST');return calls.length===2&&calls[0].key===calls[1].key&&calls[0].body===calls[1].body;}));});
  await run('Late write cannot settle or mutate the next identity',async()=>{await fresh('en');await form();await page.evaluate(()=>{window.f06.delayed=true;});await click('createUnit');await page.waitForFunction(()=>typeof window.f06.release==='function');await page.evaluate(()=>window.f06.switchIdentity());await page.waitForFunction(()=>!document.querySelector('.ap-org-action fieldset')?.disabled);await page.evaluate(()=>window.f06.release());assert.equal(await page.evaluate(()=>[...document.querySelectorAll('[role=status]')].some(item=>item.textContent===window.f06.copy().saved)),false);});
@@ -82,7 +129,7 @@ try{
   await fresh(language);await page.evaluate(()=>{window.f06.enumMode=true;window.f06.authorizationVersion++;window.f06.render();});
   await page.waitForFunction(()=>document.body.textContent.includes('CONTROLLED_UNKNOWN_STATE') && document.body.textContent.includes(window.f06.copy().enumStatus_SCHEDULED));
   assert.ok(await page.evaluate(()=>{const c=window.f06.copy(),text=document.body.textContent;return ['OWNER','MEMBER','ORG_ADMIN','BILLING_ADMIN','AUDITOR','UNIT_ADMIN'].every(v=>text.includes(c['enumRole_'+v])) && ['ACTIVE','SCHEDULED','SUSPENDED','FROZEN'].every(v=>text.includes(c['enumStatus_'+v])) && text.includes(c.enumComponent_BASE) && text.includes(c.enumComponent_BONUS) && text.includes('Controlled package');}));
-  assert.ok(await page.evaluate(()=>{const form=[...document.querySelectorAll('form')].find(f=>f.querySelector('h4')?.textContent===window.f06.copy().allocate),select=form.querySelector('select');return ['BASE','BONUS','PLAN'].every(v=>[...select.options].some(o=>o.value===v && o.textContent===window.f06.copy()['enumComponent_'+v]));}));
+  assert.ok(await page.evaluate(()=>{const form=[...document.querySelectorAll('form')].find(f=>f.querySelector('h4')?.textContent===window.f06.copy().allocate),select=form.querySelector('select');return JSON.stringify([...select.options].map(o=>o.value).filter(Boolean))===JSON.stringify(['BASE','BONUS']) && ['BASE','BONUS'].every(v=>[...select.options].some(o=>o.value===v && o.textContent===window.f06.copy()['enumComponent_'+v]));}));
   assert.equal(await page.evaluate(()=>window.f06.calls.some(c=>c.method!=='GET')),false);
  });
  for(const language of ['zh','en','ja']) await run(`${language}: disabled organization reads its real suspended member DTO`,async()=>{

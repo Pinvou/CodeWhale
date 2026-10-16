@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const defaultCatalogPath = path.join(repositoryRoot, 'account-platform', 'deploy', 'authorization-entrypoints.json');
-const routePattern = /\b([A-Za-z][A-Za-z0-9_]*)\.(GET|POST|PUT|PATCH|DELETE)\("([^"]+)"/g;
+const routePattern = /\b([A-Za-z][A-Za-z0-9_]*)\.(GET|POST|PUT|PATCH|DELETE|Any)\("([^"]+)"/g;
 const scopePrefixes = Object.freeze({ personal: ['personal.'], platform: ['platform.'], organization: ['org.'], active: ['personal.', 'org.'] });
 
 function routeKey(item) {
@@ -60,6 +60,122 @@ async function knownHumanPermissions() {
   return permissions;
 }
 
+// The Billing process installs consumers from the closed registry rather than
+// string literals. Parse that current declarative shape completely: a new
+// dynamic shape must fail coverage instead of silently losing a consumer.
+function goSource(text) {
+  const regions = /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`[^`]*`|\/\/[^\n]*|\/\*[\s\S]*?\*\//g;
+  const blank = part => part.replace(/[^\r\n]/g, ' ');
+  return {
+    code: text.replace(regions, part => part.startsWith('//') || part.startsWith('/*') ? blank(part) : part),
+    masked: text.replace(regions, blank),
+  };
+}
+
+export function authorizationRoutes(sourceName, sourceText) {
+  const { code: text, masked } = goSource(sourceText);
+  const routes = [];
+  const recognizedSelectors = new Set();
+  for (const match of text.matchAll(routePattern)) {
+    if (masked[match.index] === ' ') continue;
+    recognizedSelectors.add(match.index);
+    const lineStart = text.lastIndexOf('\n', match.index) + 1;
+    const lineEnd = text.indexOf('\n', match.index);
+    routes.push({ source: sourceName, receiver: match[1], method: match[2].toUpperCase(), path: match[3], registration: text.slice(lineStart, lineEnd < 0 ? text.length : lineEnd) });
+  }
+  if ([...masked.matchAll(/\.\s*Any\b/g)].length !== routes.filter(route => route.method === 'ANY').length) {
+    throw new Error(`unrecognized_wildcard_http_entrypoint:${sourceName}`);
+  }
+  // Ordinary registrations must use the same closed literal grammar as the
+  // catalog. Account for selectors on actual router receivers, not unrelated
+  // HTTP clients or the Engine/RouterGroup forwarding implementation.
+  const receivers = new Set(routes.map(route => route.receiver));
+  for (const match of masked.matchAll(/\b([A-Za-z][A-Za-z0-9_]*)\s*(?::=|=)\s*httpserver\.NewRouter\s*\(/g)) receivers.add(match[1]);
+  for (const match of masked.matchAll(/\b([A-Za-z][A-Za-z0-9_]*)\s+\*httpserver\.(?:Router|RouteGroup)\b/g)) receivers.add(match[1]);
+  let changed;
+  do {
+    changed = false;
+    for (const match of masked.matchAll(/\b([A-Za-z][A-Za-z0-9_]*)\s*(?::=|=)\s*([A-Za-z][A-Za-z0-9_]*)\s*\.\s*Group\s*\(/g)) {
+      if (receivers.has(match[2]) && !receivers.has(match[1])) { receivers.add(match[1]); changed = true; }
+    }
+  } while (changed);
+  for (const match of masked.matchAll(/\b([A-Za-z][A-Za-z0-9_]*)\s*\.\s*(?:GET|POST|PUT|PATCH|DELETE)\b/g)) {
+    if (receivers.has(match[1]) && !recognizedSelectors.has(match.index)) {
+      throw new Error(`unrecognized_http_entrypoint:${sourceName}`);
+    }
+  }
+  return routes;
+}
+
+export function authorizationConsumers(sourceName, sourceText, registryText) {
+  const { code: text, masked } = goSource(sourceText);
+  const calls = [...text.matchAll(/\bbroker\.ConsumeAuthorization\([^,\n]+,\s*([^,\n]+),/g)].filter(call => masked[call.index] !== ' ');
+  const events = [];
+  let billingDurables;
+  for (const call of calls) {
+    let durables;
+    if (/^"[^"\n]+"$/.test(call[1])) {
+      durables = [JSON.parse(call[1])];
+    } else if (call[1] === 'descriptor.Durable') {
+      const loops = [...text.matchAll(/for _, descriptor := range approvalconsumer\.BillingCommands\(\) \{([\s\S]*?)\n\t\}/g)].filter(loop => masked[loop.index] !== ' ');
+      if (loops.length !== 1 || call.index < loops[0].index || call.index >= loops[0].index + loops[0][0].length) {
+        throw new Error(`unrecognized_authorization_consumer:${sourceName}`);
+      }
+      if (!billingDurables) {
+        const { code: registry, masked: registryMasked } = goSource(registryText);
+        // Only the declaration, a defensive clone, and by-value range reads
+        // belong to this closed registry. Reject every other reference: this
+        // covers field/element writes, compound/multiple assignments, built-in
+        // mutation and writable aliases without pretending to interpret Go.
+        const registryUses = [...registryMasked.matchAll(/\bdescriptors\b/g)];
+        const closedUses = [...registryMasked.matchAll(/\bvar\s+descriptors\s*=\s*\[\]Descriptor\s*\{|\bslices\.Clone\(descriptors\)|\bfor _, descriptor := range descriptors \{/g)];
+        const declarations = [...registryMasked.matchAll(/\bvar\s+descriptors\s*=\s*\[\]Descriptor\s*\{/g)];
+        if (declarations.length !== 1 || registryUses.length !== closedUses.length) throw new Error('unrecognized_billing_consumer_registry');
+        const body = registry.match(/var descriptors = \[\]Descriptor\{([\s\S]*?)\n\}/)?.[1];
+        const filter = registry.match(/func BillingCommands\(\) \[\]Descriptor \{([\s\S]*?)\n\}/)?.[1];
+        if (!body || !filter || !/^result:=make\(\[\]Descriptor,0,\d+\)for_,descriptor:=rangedescriptors\{ifdescriptor.Workload==BillingWorkload\{result=append\(result,descriptor\)\}\}returnresult$/.test(filter.replace(/\s/g, ''))) {
+          throw new Error('unrecognized_billing_consumer_registry');
+        }
+        const constants = new Map([...registry.matchAll(/\b(\w+)\s*=\s*("[^"\n]+")/g)].map(match => [match[1], JSON.parse(match[2])]));
+        if (constants.get('AuthorizationSubject') !== 'account.approval-command.authorized.v1' ||
+            constants.get('BillingWorkload') !== 'billing-command-executor' ||
+            constants.get('TokenWorkload') !== 'token-command-executor') throw new Error('unrecognized_billing_consumer_registry');
+        billingDurables = [];
+        const allDurables = new Set();
+        for (const line of body.trim().split(/\r?\n/)) {
+          const row = line.match(/^\s*\{([^{}]+)\},\s*$/);
+          if (!row) throw new Error('unrecognized_billing_consumer_descriptor');
+          const fields = new Map();
+          for (const field of row[1].split(',')) {
+            const match = field.trim().match(/^(\w+):\s*("[^"\n]+"|\d+|[A-Za-z]\w*)$/);
+            if (!match || fields.has(match[1])) throw new Error('unrecognized_billing_consumer_descriptor');
+            const expression = match[2];
+            const value = expression.startsWith('"') ? JSON.parse(expression) : /^\d+$/.test(expression) ? Number(expression) : constants.get(expression);
+            if (value === undefined) throw new Error('unrecognized_billing_consumer_descriptor');
+            fields.set(match[1], value);
+          }
+          if ([...fields.keys()].sort().join(',') !== 'CommandType,Durable,ExecutorIdentity,PolicyVersion,StartSource,Workload' ||
+              typeof fields.get('CommandType') !== 'string' || !Number.isSafeInteger(fields.get('PolicyVersion')) ||
+              fields.get('PolicyVersion') <= 0 || typeof fields.get('Durable') !== 'string' ||
+              !['billing-command-executor', 'token-command-executor'].includes(fields.get('Workload')) ||
+              fields.get('ExecutorIdentity') !== fields.get('Workload') || typeof fields.get('StartSource') !== 'string' ||
+              allDurables.has(fields.get('Durable'))) throw new Error('unrecognized_billing_consumer_descriptor');
+          allDurables.add(fields.get('Durable'));
+          if (fields.get('Workload') === constants.get('BillingWorkload')) billingDurables.push(fields.get('Durable'));
+        }
+        if (!billingDurables.length) throw new Error('empty_billing_consumer_registry');
+      }
+      durables = billingDurables;
+    } else {
+      throw new Error(`unrecognized_authorization_consumer:${sourceName}`);
+    }
+    for (const durable of durables) events.push({ source: sourceName, durable, subject: 'account.approval-command.authorized.v1' });
+  }
+  // A selector that escaped the supported call grammar cannot pass silently.
+  if ([...masked.matchAll(/\bbroker\s*\.\s*ConsumeAuthorization\b/g)].length !== calls.length) throw new Error(`unrecognized_authorization_consumer:${sourceName}`);
+  return events;
+}
+
 async function discover(catalog) {
   const routes = [];
   const tasks = [];
@@ -79,24 +195,14 @@ async function discover(catalog) {
   for (const relative of productionGo) {
     const text = textBySource.get(relative) || (await source(relative));
     if (!textBySource.has(relative)) textBySource.set(relative, text);
-    routePattern.lastIndex = 0;
-    if (routePattern.test(text)) httpSources.push(relative);
-    routePattern.lastIndex = 0;
-  }
-  for (const relative of httpSources) {
-    const text = textBySource.get(relative);
-    for (const match of text.matchAll(routePattern)) {
-      const lineStart = text.lastIndexOf('\n', match.index) + 1;
-      const lineEnd = text.indexOf('\n', match.index);
-      routes.push({ source: relative, receiver: match[1], method: match[2], path: match[3], registration: text.slice(lineStart, lineEnd < 0 ? text.length : lineEnd) });
-    }
+    const discoveredRoutes = authorizationRoutes(relative, text);
+    if (discoveredRoutes.length > 0) httpSources.push(relative);
+    routes.push(...discoveredRoutes);
   }
   for (const [relative, text] of textBySource) {
     for (const match of text.matchAll(/RunBackground\([^,\n]+,\s*"([^"]+)"/g)) tasks.push({ source: relative, name: match[1] });
     for (const match of text.matchAll(/broker\.Consume(?:UntilResolved)?\([^,\n]+,\s*"([^"]+)",\s*"([^"]+)"/g)) events.push({ source: relative, durable: match[1], subject: match[2] });
-    for (const match of text.matchAll(/broker\.ConsumeAuthorization\([^,\n]+,\s*"([^"]+)"/g)) {
-      events.push({ source: relative, durable: match[1], subject: 'account.approval-command.authorized.v1' });
-    }
+    events.push(...authorizationConsumers(relative, text, textBySource.get('account-platform/internal/platform/approvalconsumer/registry.go')));
   }
   events.push({ source: 'account-platform/cmd/event-relay/main.go', durable: 'source-bound-outbox-relay', subject: 'account|billing|token.>' });
   events.push({ source: 'account-platform/cmd/event-relay/main.go', durable: 'account-approval-relay', subject: 'account.approval-command.authorized.v1' });

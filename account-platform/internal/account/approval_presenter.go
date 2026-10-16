@@ -261,7 +261,7 @@ func approvalV2Command(item ApprovalRequest) any {
 			return nil
 		}
 		id, err := uuid.Parse(value)
-		if err != nil || id.String() != value {
+		if err != nil || id == uuid.Nil || id.String() != value {
 			return nil
 		}
 		return approvalRefundExceptionRepairSummary{RefundID: id}
@@ -270,7 +270,7 @@ func approvalV2Command(item ApprovalRequest) any {
 			return nil
 		}
 		id, err := uuid.Parse(value)
-		if err != nil || id.String() != value {
+		if err != nil || id == uuid.Nil || id.String() != value {
 			return nil
 		}
 		return approvalChargebackFinancialRepairSummary{ChargebackCaseID: id}

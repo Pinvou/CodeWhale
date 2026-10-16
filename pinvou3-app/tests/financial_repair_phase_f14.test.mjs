@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { financialRepairCommands, financialRepairApprovalDraft, financialRepairPrecheck } from '../src/features/account-platform/admin-financial-repair-drafts.js';
 import { financialRepairInputs, financialRepairPrecheckBody } from '../src/features/account-platform/admin-financial-repair-form.js';
 const command = "CHARGEBACK_FINANCIAL_REPAIR";
@@ -53,7 +54,9 @@ const detail = () => ({ approval_request_id: '99999999-9999-4999-8999-9999999999
 
 
 test('F14 complete owner projection fails closed on changed or missing authority', () => {
- for (const change of [p=>{p.normalized_command.reason_code='OTHER';},p=>{p.critical_resource_versions.facts_digest='';},p=>{p.critical_resource_versions.policy_version=2;},p=>{p.critical_resource_versions.chargeback_case_version='9007199254740994';},p=>{p.normalized_command.expected_case_version=9007199254740992;},p=>{p.financial_snapshot.component_digest='';},p=>{p.financial_snapshot.wallet_version=9007199254740992;},p=>{p.financial_snapshot.base_shortfall_microcredits='0';},p=>{p.financial_snapshot.package_id='bad';},p=>{p.financial_snapshot.provider_chargeback_id=' padded ';},p=>{p.snapshot_schema_version=2;}]) {
+ const schema=JSON.parse(readFileSync(new URL('../../account-platform/contracts/openapi/chargeback-financial-repair.json',import.meta.url),'utf8'));
+ assert.equal(schema.components.schemas.FinancialSnapshot.properties.provider_chargeback_id.minLength,1);
+ for (const change of [p=>{p.normalized_command.reason_code='OTHER';},p=>{p.critical_resource_versions.facts_digest='';},p=>{p.critical_resource_versions.policy_version=2;},p=>{p.critical_resource_versions.chargeback_case_version='9007199254740994';},p=>{p.normalized_command.expected_case_version=9007199254740992;},p=>{p.financial_snapshot.component_digest='';},p=>{p.financial_snapshot.wallet_version=9007199254740992;},p=>{p.financial_snapshot.base_shortfall_microcredits='0';},p=>{p.financial_snapshot.package_id='bad';},p=>{p.financial_snapshot.provider_chargeback_id='';},p=>{p.financial_snapshot.provider_chargeback_id='   ';},p=>{p.financial_snapshot.provider_chargeback_id=' padded ';},p=>{p.snapshot_schema_version=2;}]) {
   const p=parseFinanceJSON(raw());change(p);assert.equal(financialRepairPrecheck(p),null);
  }
 });

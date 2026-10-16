@@ -1,5 +1,5 @@
 // 低频视图/浮层懒加载:用户典型路径是聊天,Settings/Codex/卡池/工具商店/
-// 定时/知识库/监控/搜索/团队协作视图以及项目管理弹窗仅在使用时加载。
+// 定时/知识库/监控/搜索/团队协作/浏览器视图以及项目管理弹窗仅在使用时加载。
 // VIEW_LOADERS 是唯一的动态 import 出口:main.jsx 的 React.lazy 与悬停、
 // 聚焦或打开前预取共用同一工厂,保证命中同一模块缓存。DetachedShell 的
 // 撕离窗视图也复用这里的视图工厂。本模块不得静态引入这些组件,否则它们
@@ -10,6 +10,7 @@ export const VIEW_LOADERS = {
   cardpool: () => import('../features/personas/Personas.jsx'),
   toolStore: () => import('../features/tools/ToolStoreView.jsx'),
   scheduled: () => import('../features/scheduled/ScheduledTasksView.jsx'),
+  browser: () => import('../features/browser/BrowserView.jsx'),
   knowledge: () => import('../features/knowledge/KnowledgeView.jsx'),
   modelStore: () => import('../features/model-store/ModelStoreView.jsx'),
   monitor: () => import('../features/monitor/MonitorView.jsx'),

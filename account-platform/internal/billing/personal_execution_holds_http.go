@@ -8,8 +8,6 @@ import (
 
 	"net/http"
 
-	"time"
-
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
@@ -20,11 +18,12 @@ import (
 func (s *Service) extendHold(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		UsageRequestID         uuid.UUID `json:"usage_request_id"`
+		OperationID            uuid.UUID `json:"operation_id"`
 		HoldID                 uuid.UUID `json:"hold_id"`
 		LeaseSeconds           int       `json:"lease_seconds"`
 		AdditionalMicrocredits int64     `json:"additional_microcredits"`
 	}
-	if err := api.DecodeJSON(w, r, &body); err != nil || body.UsageRequestID == uuid.Nil || body.HoldID == uuid.Nil || body.AdditionalMicrocredits < 0 {
+	if err := api.DecodeJSON(w, r, &body); err != nil || body.UsageRequestID == uuid.Nil || body.HoldID == uuid.Nil || body.AdditionalMicrocredits < 0 || (body.AdditionalMicrocredits > 0) == (body.OperationID == uuid.Nil) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid hold extension", httpserver.RequestID(r.Context()))
 		return
 	}
@@ -36,13 +35,13 @@ func (s *Service) extendHold(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	repository, ok := s.repository.(interface {
-		ExtendHold(context.Context, uuid.UUID, uuid.UUID, time.Time, int64) (Hold, error)
+		ExtendHold(context.Context, HoldExtension) (Hold, error)
 	})
 	if !ok {
 		api.WriteError(w, http.StatusServiceUnavailable, "HOLD_EXTENSION_UNAVAILABLE", "hold extension is unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
-	hold, err := repository.ExtendHold(r.Context(), body.UsageRequestID, body.HoldID, s.now().Add(time.Duration(body.LeaseSeconds)*time.Second), body.AdditionalMicrocredits)
+	hold, err := repository.ExtendHold(r.Context(), HoldExtension{UsageRequestID: body.UsageRequestID, HoldID: body.HoldID, OperationID: body.OperationID, LeaseSeconds: body.LeaseSeconds, AdditionalMicrocredits: body.AdditionalMicrocredits})
 	if err != nil {
 		s.writeError(w, r, err)
 		return

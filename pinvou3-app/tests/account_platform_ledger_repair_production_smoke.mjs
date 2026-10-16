@@ -37,7 +37,7 @@ const server = createServer(async (request, response) => {
     response.writeHead(302, { Location: returnTo }); return response.end();
   }
   if (url.pathname === '/api/session') return json(response, { authenticated: true, csrf_token: csrf });
-  if (url.pathname === '/api/account/v1/account/bootstrap') return json(response, { user_id: actor, status: 'ACTIVE', personal_permissions: [], platform_permissions: ['platform.users.read', 'platform.billing.wallets.read', ...(mode === 'read-only-view' ? [] : ['platform.billing.repairs.request'])], platform_authorization_version: 1 });
+  if (url.pathname === '/api/account/v1/account/bootstrap') return json(response, { user_id: actor, status: 'ACTIVE', active_context: { context_type: 'PERSONAL', organization_id: null, membership_version: 1, context_version: 1, authorization_version: 1, personal_authorization_version: 1, platform_authorization_version: 1, organization_authorization_version: 1, permissions: [] }, personal_permissions: [], platform_permissions: ['platform.users.read', 'platform.billing.wallets.read', ...(mode === 'read-only-view' ? [] : ['platform.billing.repairs.request'])], platform_authorization_version: 1 });
   if (url.pathname === '/api/admin/approvals/capability') return json(response, { session_approval_wire_version: 2, control: { version: 1, epoch: 1, authorization_relay_epoch: 1 } });
   if (url.pathname === '/api/admin/account/admin/v2/approval-command-prechecks') return json(response, projection);
   if (url.pathname === '/api/admin/approvals/requests' && request.method === 'GET') return json(response, { items: [], has_more: false });

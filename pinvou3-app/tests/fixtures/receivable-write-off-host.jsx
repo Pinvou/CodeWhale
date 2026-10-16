@@ -22,7 +22,7 @@ window.fetch = async (url, options = {}) => {
   if (!String(url).startsWith('/api/')) return original(url, options);
   state.calls.push({ url: String(url), method: options.method || 'GET', body: options.body, headers: options.headers, cache: options.cache, credentials: options.credentials });
   if (url === '/api/session') return reply({ authenticated: true, csrf_token: 'controlled-csrf' });
-  if (url === '/api/account/v1/account/bootstrap') return reply({ user_id: params.has('approve') ? id(7) : id(8), status: 'ACTIVE', personal_permissions: [],
+  if (url === '/api/account/v1/account/bootstrap') return reply({ user_id: params.has('approve') ? id(7) : id(8), status: 'ACTIVE', active_context: { context_type: 'PERSONAL', organization_id: null, membership_version: 1, context_version: 1, authorization_version: 1, personal_authorization_version: 1, platform_authorization_version: 1, organization_authorization_version: 1, permissions: [] }, personal_permissions: [],
     platform_permissions: params.has('deny') ? [] : params.has('approve') ? ['platform.billing.repairs.approve'] : ['platform.billing.repairs.request'], platform_authorization_version: 1 });
   if (url === '/api/admin/approvals/capability') return reply({ session_approval_wire_version: 2, control: { version: 1, epoch: 1, authorization_relay_epoch: 1 } });
   if (url === '/api/admin/approvals/directory') return reply({ schema_version: 1, platform_authorization_version: 1, items: [
