@@ -677,6 +677,11 @@ PINNED_GATE_STEP_NAMES = {
         "Prepare Rust disk capacity",
         "Set up zram and swap",
     ),
+    # PR #1518 round-11: 复活的 test:windows-runtime-manifest 契约步是全仓
+    # 唯一执行器,同样按 name 钉住防诱饵/防静默删除。
+    "windows-codex-runtime-test": (
+        "Windows runtime manifest 契约",
+    ),
     "knowledge-rust": (
         "cargo clippy (hard gate, lib/bins/tests + server)",
     ),
@@ -1577,6 +1582,16 @@ class CiGatePolicyTests(unittest.TestCase):
             step,
             "the lock-guard step must run unconditionally in fast-gate",
         )
+        # Round-11 review: also pin its POSITION before the submodule
+        # checkout — the guard's scan scope is THIS repo's own lockfiles
+        # (CI sees 5 before submodule init); run after it, the CodeWhale
+        # locks enter the tree and the scope silently changes.
+        self.assertLess(
+            fast_gate.find("- name: 锁文件 registry 卫生门禁"),
+            fast_gate.find("- name: 初始化公共底座 submodule"),
+            "the lock guard must scan before the submodule checkout brings "
+            "in the CodeWhale lockfiles",
+        )
 
     def test_rust_test_registry_guard_step_is_pinned(self):
         # PR #1518 round-5 review: the test-registry guard step runs inside
@@ -1611,6 +1626,30 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertNotIn("|| true", step)
         self.assertNotIn("continue-on-error", step)
         self.assertIn("if: ${{ github.event_name != 'push' }}", step)
+
+    def test_windows_runtime_manifest_contract_step_is_pinned(self):
+        # PR #1518 round-11 review: the revived test:windows-runtime-manifest
+        # contract has exactly one CI executor — this step. The PR's other
+        # two new steps were pinned in rounds 5/6; this one shipped without
+        # any pin, so deleting the step (or commenting out its command)
+        # kept every gate-policy test green while the contract silently
+        # stopped running (deletion verified green before this pin).
+        job = _extract_job_block(self.pr_workflow, "windows-codex-runtime-test")
+        self.assertIn("- name: Windows runtime manifest 契约", job)
+        step = job.split(
+            "- name: Windows runtime manifest 契约", maxsplit=1
+        )[1].split("\n      - name:", maxsplit=1)[0]
+        self.assertTrue(
+            any(
+                "npm --prefix pinvou3-app run test:windows-runtime-manifest"
+                in line
+                for line in step.splitlines()
+                if not line.lstrip().startswith("#")
+            ),
+            "pinned command must appear as an executable (non-comment) line",
+        )
+        self.assertNotIn("|| true", step)
+        self.assertNotIn("continue-on-error", step)
 
     def test_rust_lint_disk_step_is_draft_gated_and_precedes_zram(self):
         # PR #1518 round-5 review: the rust-lint disk cleanup is only needed
@@ -2957,10 +2996,20 @@ class CiGatePolicyTests(unittest.TestCase):
         # (lib --no-run on PR and push, --lib execution, behavior_telemetry
         # harness). Pin the count so silently dropping any single --locked
         # (e.g. while editing the surrounding command) goes red here.
+        # Round-11 review: count EXECUTABLE lines only — a bare `--locked`
+        # inside a comment otherwise offsets a real removal and the swap
+        # keeps this at 4 while a run line silently unlocks.
+        locked_run_lines = [
+            line
+            for line in rust_test.splitlines()
+            if "--locked" in line and not line.lstrip().startswith("#")
+        ]
         self.assertEqual(
-            rust_test.count("--locked"),
+            len(locked_run_lines),
             4,
-            "every src-tauri cargo test invocation in rust-test must stay --locked",
+            "every src-tauri cargo test invocation in rust-test must stay "
+            "--locked (counted on executable lines only); when a fifth "
+            "cargo test lands here, raise this pin in the same commit",
         )
         # push(main) 只编译暖 cache,不执行测试:MQ 已对同一组合树跑过全量测试;
         # push 恢复暖 cache 后跑全量测试曾连续触发 hosted runner 失联(见 workflow 注释)。
@@ -3042,14 +3091,22 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertGreaterEqual(len(linux_jobs), 10)
         for job in linux_jobs:
             job_name = job.strip().split(":", maxsplit=1)[0]
+            # Round-11 review: judge the contract on EXECUTABLE lines only —
+            # a commented-out step otherwise satisfies every assertIn below
+            # while the job actually runs on stock memory.
+            job_exec = "\n".join(
+                line
+                for line in job.splitlines()
+                if not line.lstrip().startswith("#")
+            )
             self.assertIn(
                 setup_step,
-                job,
+                job_exec,
                 f"ubuntu job '{job_name}' must run scripts/ci-memory-setup.sh",
             )
             self.assertIn(
                 '"${{ github.workspace }}/scripts/ci-memory-setup.sh"',
-                job,
+                job_exec,
                 f"ubuntu job '{job_name}' must invoke scripts/ci-memory-setup.sh"
                 " via an absolute path (some jobs set a run working-directory)",
             )
@@ -3061,7 +3118,7 @@ class CiGatePolicyTests(unittest.TestCase):
                 'run: timeout --kill-after=15 240 sudo --preserve-env='
                 'GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM'
                 ' bash "${{ github.workspace }}/scripts/ci-memory-setup.sh"',
-                job,
+                job_exec,
                 f"ubuntu job '{job_name}' must hard-cap ci-memory-setup with"
                 " 'timeout --kill-after=15 240' (userspace hang backstop) and"
                 " pass GITHUB_ACTIONS and the PINVOU3_CI_DISABLE_ZRAM emergency"
@@ -3071,7 +3128,7 @@ class CiGatePolicyTests(unittest.TestCase):
             )
             self.assertIn(
                 '|| echo "::warning::ci-memory-setup',
-                job,
+                job_exec,
                 f"ubuntu job '{job_name}' must keep ci-memory-setup non-fatal"
                 " (degrade to stock runner memory with a ::warning)",
             )
