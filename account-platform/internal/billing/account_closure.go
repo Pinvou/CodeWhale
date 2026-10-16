@@ -46,6 +46,7 @@ func (r *PostgresRepository) AccountClosureAssessment(ctx context.Context, userI
 		code, resourceType, action, query string
 	}{
 		{"UNSETTLED_HOLD", "USAGE_HOLD", "WAIT_FOR_USAGE_SETTLEMENT", `SELECT EXISTS(SELECT 1 FROM usage_holds hold JOIN wallets wallet ON wallet.id=hold.wallet_id WHERE wallet.owner_type='PERSONAL' AND wallet.owner_id=$1 AND hold.status IN ('ACTIVE','REVIEW'))`},
+		{"UNSETTLED_HOLD", "MEMBER_QUOTA_GRANT", "WAIT_FOR_USAGE_SETTLEMENT", `SELECT EXISTS(SELECT 1 FROM member_quota_grants WHERE member_user_id=$1 AND status IN ('ACTIVE','SUSPENDED') AND reserved_microcredits<>0)`},
 		{"PAYMENT_PROCESSING", "PAYMENT_ORDER", "FINISH_PAYMENT_ORDER", `SELECT EXISTS(SELECT 1 FROM payment_orders WHERE payer_user_id=$1 AND (status IN ('CREATED','PENDING','MANUAL_REVIEW') OR close_status IN ('CLOSE_REQUESTED','LOCALLY_CLOSED_EXTERNAL_PENDING') OR attention_summary IN ('PROCESSING','REVIEW_REQUIRED','RECEIVABLE_OPEN')))`},
 		{"REFUND_UNRESOLVED", "REFUND", "FINISH_REFUND", `SELECT EXISTS(SELECT 1 FROM refunds refund JOIN payment_orders payment ON payment.id=refund.payment_order_id WHERE payment.payer_user_id=$1 AND refund.status IN ('REQUESTED','MANUAL_REVIEW'))`},
 		{"CHARGEBACK_UNRESOLVED", "CHARGEBACK", "RESOLVE_CHARGEBACK", `SELECT EXISTS(SELECT 1 FROM chargeback_cases source JOIN payment_orders payment ON payment.id=source.payment_order_id WHERE payment.payer_user_id=$1 AND NOT COALESCE(

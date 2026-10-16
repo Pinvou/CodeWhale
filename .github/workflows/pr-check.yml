@@ -243,6 +243,7 @@ jobs:
               - 'scripts/tests/test_account_closure_postgres.py'
               - 'scripts/check-token-management-authorization-coverage.mjs'
               - 'scripts/tests/token-management-authorization-coverage.test.mjs'
+              - 'scripts/tests/token-management-phase-coverage.test.mjs'
               - 'scripts/check-account-platform-authorization-coverage.mjs'
               - 'scripts/tests/account-platform-authorization-coverage.test.mjs'
               - '.github/workflows/pr-check.yml'
@@ -944,6 +945,7 @@ jobs:
         run: |
           node scripts/check-token-management-authorization-coverage.mjs
           node --test scripts/tests/token-management-authorization-coverage.test.mjs
+          node --test scripts/tests/token-management-phase-coverage.test.mjs
 
       - name: Verify Account closure source and API contracts
         run: |

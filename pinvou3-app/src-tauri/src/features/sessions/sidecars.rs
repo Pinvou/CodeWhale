@@ -426,8 +426,7 @@ impl SessionStore {
     /// back to the immutable local model captured by their run profile.
     pub fn session_model_ref(&self, id: &str) -> Option<ModelSelectionRef> {
         self.session_model_ref_override(id).or_else(|| {
-            self.scheduled_profile(id)
-                .and_then(|profile| profile.model_id)
+            self.scheduled_profile_model_id(id)
                 .map(ModelSelectionRef::local)
         })
     }
@@ -460,8 +459,7 @@ impl SessionStore {
             Err(_) => self.session_models.read().get(id).cloned(),
         };
         durable.or_else(|| {
-            self.scheduled_profile(id)
-                .and_then(|profile| profile.model_id)
+            self.scheduled_profile_model_id(id)
                 .map(ModelSelectionRef::local)
         })
     }

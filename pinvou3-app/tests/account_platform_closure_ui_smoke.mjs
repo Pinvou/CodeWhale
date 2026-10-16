@@ -169,6 +169,34 @@ try {
     assert.equal(calls.length, 2); assert.equal(calls[0].body, calls[1].body); assert.equal(calls[0].headers['Idempotency-Key'], calls[1].headers['Idempotency-Key']);
     assert.equal(await page.evaluate(() => Object.keys(document.defaultView.sessionStorage).length), 0);
   });
+  await run('optional resume history failure preserves validated absence without automatic writes', async () => {
+    await fresh();
+    await page.evaluate(() => {
+      history.replaceState(null, '', `${location.pathname}?account_closure=confirm`);
+      window.closure.originalReplaceState = history.replaceState;
+      window.closure.historyFailures = 0;
+      history.replaceState = () => { window.closure.historyFailures++; throw new DOMException('Controlled optional history failure', 'SecurityError'); };
+    });
+    try {
+      await click('queryRetry');
+      await page.waitForFunction(() => window.closure.historyFailures === 1 && [...document.querySelectorAll('button')].some(button => button.textContent === window.closure.copy().start && !button.disabled));
+      assert.equal(await page.evaluate(() => document.body.textContent.includes(window.closure.copy().queryFailed)), false);
+      assert.equal(await page.evaluate(() => window.closure.calls.filter(call => call.method === 'POST').length), 0);
+      assert.equal(await page.$('.ap-closure-confirm-dialog'), null);
+    } finally {
+      await page.evaluate(() => { history.replaceState = window.closure.originalReplaceState; history.replaceState(null, '', location.pathname); });
+    }
+  });
+  await run('invalid authoritative query still fails closed before optional resume handling', async () => {
+    await fresh({ receipt: { invalid: true } });
+    // fresh configures the controlled response after mount; explicitly read it
+    // before asserting, rather than accepting the earlier 404-ready render.
+    await click('queryRetry');
+    await page.waitForFunction(() => window.closure.calls.filter(call => call.method === 'GET').length >= 2 && document.body.textContent.includes(window.closure.copy().queryFailed) && !document.body.textContent.includes(window.closure.copy().queryLoading));
+    assert.equal(await page.evaluate(() => document.body.textContent.includes(window.closure.copy().queryFailed)), true);
+    assert.equal(await page.evaluate(() => [...document.querySelectorAll('button')].some(button => button.textContent === window.closure.copy().start)), false);
+    assert.equal(await page.evaluate(() => window.closure.calls.filter(call => call.method === 'POST').length), 0);
+  });
   console.log(`RESULT ${count} PASS 0 FAIL 0 SKIP`);
 } catch (error) { console.error(`FAIL after ${count} PASS: ${error.stack}`); process.exitCode = 1; }
 finally { if (browser) await browser.close(); if (vite) await vite.close(); const absolute = path.resolve(profile); assert.equal(path.dirname(absolute), path.resolve(os.tmpdir())); assert.ok(path.basename(absolute).startsWith('pinvou-closure-')); fs.rmSync(absolute, { recursive: true, force: false }); }

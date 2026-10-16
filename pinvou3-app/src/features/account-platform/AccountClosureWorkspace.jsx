@@ -51,13 +51,17 @@ export function AccountClosureWorkspace({ client, me, language }) {
     if (stamp !== generation.current) return;
     try {
       if (result.closure) requireAccountClosure(result.closure);
-      setQuery(result);
+    } catch { setQuery({ status: 'error', closure: null }); return; }
+    setQuery(result);
+    try {
       const location = new URL(globalThis.location.href);
       const resume = accountClosureResumeAction({ requestedClosure: location.searchParams.get('account_closure'), queryStatus: result.status, closure: result.closure, resumed: false });
       if (resume.clearMarker) { location.searchParams.delete('account_closure'); globalThis.history.replaceState(null, '', location.pathname + location.search + location.hash); }
       if (resume.prompt && canRequest && !readClosureIntent(me.user_id, 'account-closure')) setResumeRequested(stamp);
     }
-    catch { setQuery({ status: 'error', closure: null }); }
+    catch {
+      // Resume navigation is optional and must not erase validated server facts.
+    }
   };
   useEffect(() => {
     const controller = new AbortController();

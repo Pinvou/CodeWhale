@@ -43,7 +43,7 @@ export const ledgerRepairCopy = {
     "reason": "申请理由",
     "reasonHint": "理由需 10 到 2000 字符，写入审批审计。",
     "requestKey": "请求键",
-    "requestKeyHint": "请求键连同 approval: 前缀最多 120 个 UTF-8 字节；同一目标请复用同一键。",
+    "requestKeyHint": "本地请求键最多 111 个 UTF-8 字节；加 approval: 后的公开审批键最多 120 个字节。",
     "createDraft": "创建审批草稿",
     "creating": "正在创建…",
     "createdHint": "已创建审批草稿：",
@@ -96,7 +96,7 @@ export const ledgerRepairCopy = {
     "reason": "Reason",
     "reasonHint": "The reason must be 10 to 2000 characters and is written to the approval audit.",
     "requestKey": "Request key",
-    "requestKeyHint": "The request key, including the approval: prefix, allows up to 120 UTF-8 bytes; reuse the same key for the same target.",
+    "requestKeyHint": "The local key allows up to 111 UTF-8 bytes; the public approval key including approval: allows up to 120 bytes.",
     "createDraft": "Create approval draft",
     "creating": "Creating…",
     "createdHint": "Approval draft created:",
@@ -149,7 +149,7 @@ export const ledgerRepairCopy = {
     "reason": "申請理由",
     "reasonHint": "理由は 10〜2000 文字で、承認監査に記録されます。",
     "requestKey": "リクエストキー",
-    "requestKeyHint": "リクエストキーは approval: 接頭辞を含めて UTF-8 で 120 バイト以内です。同じ対象では同じキーを使用してください。",
+    "requestKeyHint": "ローカルキーは UTF-8 で 111 バイト以内です。approval: を含む公開承認キーは 120 バイト以内です。",
     "createDraft": "承認ドラフトを作成",
     "creating": "作成中…",
     "createdHint": "承認ドラフトを作成しました:",
@@ -166,9 +166,6 @@ const recoveryCopy = {
   ja: { retry: '元のリクエストで再試行', unknown: 'ドラフト作成の結果は未確認です。元の事実とリクエストキーを保持してください。', permissions: '現在の権限が不足しています。未確認の元のリクエストは保持されます。', sourceChanged: 'リクエストが拒否されました。固定事実と承認条件を確認してください。', recoveryUnavailable: '復元記録を確実に読み書きできないため、新しいリクエストは送信していません。', recoveryPending: '再読み込みや再認証後も元のドラフト要求のみを再実行し、承認を自動提出しません。', saved: 'ドラフトの作成を確認しました。' },
 };
 for (const language of ['zh', 'en', 'ja']) Object.assign(ledgerRepairCopy[language], recoveryCopy[language]);
-ledgerRepairCopy.zh.requestKeyHint = '本地请求键最多 111 个 UTF-8 字节；加 approval: 后的公开审批键最多 120 个字节。';
-ledgerRepairCopy.en.requestKeyHint = 'The local key allows up to 111 UTF-8 bytes; the public approval key including approval: allows up to 120 bytes.';
-ledgerRepairCopy.ja.requestKeyHint = 'ローカルキーは UTF-8 で 111 バイト以内です。approval: を含む公開承認キーは 120 バイト以内です。';
 
 const authenticationCopy = {
   zh: { recentAuthenticationRequired: '\u9700\u8981\u91cd\u65b0\u8ba4\u8bc1\u540e\u7ee7\u7eed\u539f\u8349\u7a3f\u8bf7\u6c42\u3002', reauthenticate: '\u91cd\u65b0\u8ba4\u8bc1' },

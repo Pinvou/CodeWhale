@@ -5,7 +5,13 @@ export function requireSession(payload) {
   return payload;
 }
 export function requirePersonalAccount(payload) {
-  if (!nonzeroUUID(payload?.user_id) || typeof payload.status !== 'string' || !payload.status || !['personal_permissions', 'platform_permissions'].every(key => Array.isArray(payload[key]) && payload[key].every(value => typeof value === 'string'))) throw new Error('INVALID_ACCOUNT_ACK');
+  const context = payload?.active_context;
+  const validVersion = value => Number.isSafeInteger(value) && value > 0;
+  const validContext = context && !Array.isArray(context) && ['PERSONAL', 'ORGANIZATION'].includes(context.context_type) &&
+    validVersion(context.context_version) && Array.isArray(context.permissions) && context.permissions.every(value => typeof value === 'string') &&
+    (context.context_type === 'PERSONAL' ? context.organization_id == null :
+      nonzeroUUID(context.organization_id) && validVersion(context.membership_version) && validVersion(context.organization_authorization_version));
+  if (!validContext || !nonzeroUUID(payload?.user_id) || typeof payload.status !== 'string' || !payload.status || !['personal_permissions', 'platform_permissions'].every(key => Array.isArray(payload[key]) && payload[key].every(value => typeof value === 'string'))) throw new Error('INVALID_ACCOUNT_ACK');
   return payload;
 }
 export function requireProfileChange(payload, expectedID = '', expectedField = '') {

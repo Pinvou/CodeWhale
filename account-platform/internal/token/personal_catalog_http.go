@@ -91,9 +91,9 @@ func (s *Service) ensureCatalogRoutes(ctx context.Context, resolved Authorizatio
 }
 
 func waitForCatalogRoutes(ctx context.Context, operations provisioningOperations, resolved AuthorizationContext, items []CatalogModel, maximum time.Duration) {
-	deadline := time.NewTimer(maximum)
+	ctx, cancel := context.WithTimeout(ctx, maximum)
+	defer cancel()
 	ticker := time.NewTicker(50 * time.Millisecond)
-	defer deadline.Stop()
 	defer ticker.Stop()
 	for {
 		allReady := true
@@ -106,7 +106,7 @@ func waitForCatalogRoutes(ctx context.Context, operations provisioningOperations
 				allReady = false
 				break
 			}
-			if !eligible && (reason == "ROUTE_PROVISIONING_REQUIRED" || reason == "ROUTE_PROVISIONING_PENDING" || reason == "ROUTE_PROVISIONING_FAILED") {
+			if !eligible && (reason == "ROUTE_PROVISIONING_REQUIRED" || reason == "ROUTE_PROVISIONING_PENDING" || reason == "ROUTE_PROVISIONING_FAILED" || reason == "ROUTE_PROVISIONING_DRIFTED") {
 				allReady = false
 				break
 			}
@@ -116,8 +116,6 @@ func waitForCatalogRoutes(ctx context.Context, operations provisioningOperations
 		}
 		select {
 		case <-ctx.Done():
-			return
-		case <-deadline.C:
 			return
 		case <-ticker.C:
 		}
