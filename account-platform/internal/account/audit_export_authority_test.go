@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -112,5 +113,81 @@ func TestAuditExportPIIAuthorityOutageIsNotForbidden(t *testing.T) {
 	(&Service{}).writeError(w, httptest.NewRequest("POST", "/admin/v1/audit-exports", nil), err)
 	if w.Code != 503 {
 		t.Fatalf("authority outage status%d", w.Code)
+	}
+}
+
+// The same transaction queryer is used after a job lock; no second pool
+// acquisition is needed, and errors keep their HTTP classification.
+type auditPIIQueryer struct {
+	allowed   bool
+	err       error
+	queries   int
+	liveClock bool
+}
+
+func (q *auditPIIQueryer) QueryRow(_ context.Context, statement string, args ...any) pgx.Row {
+	q.queries++
+	q.liveClock = len(args) == 6 && args[2] == PermissionPlatformAuditPIIExport && args[5] == true && strings.Contains(statement, "CASE WHEN $6::boolean THEN clock_timestamp() ELSE now() END")
+	return auditPIIAuthorityRow{allowed: q.allowed, err: q.err}
+}
+
+type auditPIIAuthorityRow struct {
+	allowed bool
+	err     error
+}
+
+func (r auditPIIAuthorityRow) Scan(dest ...any) error {
+	if r.err != nil {
+		return r.err
+	}
+	*dest[1].(*string) = "ACTIVE"
+	*dest[3].(*string) = "PLATFORM"
+	*dest[7].(*bool) = r.allowed
+	return nil
+}
+
+func TestAuditExportLockedPIIAuthorityHTTPClassification(t *testing.T) {
+	if err := requireAuditExportPIIAuthorization(context.Background(), nil, identity.Principal{}, false); err != nil {
+		t.Fatal("redacted export required PII authority")
+	}
+	for _, tc := range []struct {
+		name    string
+		allowed bool
+		err     error
+		status  int
+	}{
+		{"allowed", true, nil, 0},
+		{"denied", false, nil, 403},
+		{"typed-forbidden", false, ErrForbidden, 403},
+		{"wrapped-forbidden", false, fmt.Errorf("wrapped: %w", ErrForbidden), 403},
+		{"infra", false, errors.New("controlled authority outage"), 503},
+		{"error-wins-over-allowed", true, errors.New("controlled authority outage"), 503},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			queryer := &auditPIIQueryer{allowed: tc.allowed, err: tc.err}
+			err := requireAuditExportPIIAuthorization(context.Background(), queryer, identity.Principal{}, true)
+			if queryer.queries != 1 || !queryer.liveClock {
+				t.Fatal("locked PII authority did not use existing SQL with current database clock")
+			}
+			if tc.status == 0 {
+				if err != nil {
+					t.Fatal("valid authority denied")
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("missing PII authority accepted")
+			}
+			if tc.status == 503 && (!errors.Is(err, ErrAuditExportAuthorizationUnavailable) || !errors.Is(err, tc.err)) {
+				t.Fatal("authority infrastructure cause was lost")
+			}
+			for _, path := range []string{"/admin/v1/audit-exports/owned/download-tickets", "/admin/v1/audit-exports/owned/download"} {
+				w := httptest.NewRecorder()
+				(&Service{}).writeError(w, httptest.NewRequest("POST", path, nil), err)
+				if w.Code != tc.status {
+					t.Fatalf("authority status=%d want%d", w.Code, tc.status)
+				}
+			}
+		})
 	}
 }
