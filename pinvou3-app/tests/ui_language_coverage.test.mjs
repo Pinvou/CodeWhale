@@ -216,9 +216,10 @@ for (const language of ['zh', 'en', 'ja']) {
     23,
     `${language}.uiAuxChat must hold exactly the 23 pinned keys`,
   );
-    // All 100 uiDeviceMgr keys are pinned (PR #1661 评审跟进：三语**同时**删掉一个
+    // All 104 uiDeviceMgr keys are pinned (PR #1661 评审跟进：三语**同时**删掉一个
     // key 时 parity 检查全绿、视图渲染 undefined——uiAuxChat round-14 事故的同款
-    // 洞；chipGpuTemp→chipMaxTemp 与评审新增键（servicesStale 随 round-6）随本
+    // 洞；chipGpuTemp→chipMaxTemp 与评审新增键（servicesStale 随 round-6；
+    // peakLabel/linkReasonBridge/linkReasonUnknown/registerNoId 随 round-7）随本
     // 清单一起钉死。任何键面变更必须同提交更新此清单与计数)。
     for (const key of [
       'loading', 'bridgeNotReady', 'errorBanner', 'retry', 'updatedAtLabel',
@@ -226,7 +227,7 @@ for (const language of ['zh', 'en', 'ja']) {
       'sectionOverview', 'sectionSensors', 'sectionStorage', 'sectionNetwork',
       'sectionProcesses', 'sectionModels', 'sectionDoctor',
       'sensorEmpty', 'chipNvme', 'chipWifi', 'chipFan', 'chipBoard', 'chipPower',
-      'sensorWarnAdvice', 'sensorCritAdvice', 'critLimit',
+      'sensorWarnAdvice', 'sensorCritAdvice', 'critLimit', 'peakLabel',
       'storageEmpty', 'diskSystemBadge', 'diskWarnAdvice', 'diskCritAdvice',
       'networkEmpty', 'netTypeEthernet', 'netTypeWifi', 'netTypeLoopback',
       'netTypeBridge', 'netTypeVirtual', 'netTypeOther',
@@ -240,6 +241,7 @@ for (const language of ['zh', 'en', 'ja']) {
       'remove', 'removeArmed', 'removeCancel', 'removeConfirmIntro', 'deleteWeights',
       'removeWeightsPath', 'removeIrreversible', 'linkDisabledUnreachable',
       'doctorSendFailed', 'doctorFailed', 'refreshFailed', 'linkRowStale', 'removeDone', 'removeFailed', 'warn',
+      'linkReasonBridge', 'linkReasonUnknown', 'registerNoId',
       'ollamaOfflineHint', 'localSourceHint',
       'doctorPackages', 'doctorPackagesDesc', 'doctorDependencies', 'doctorDependenciesDesc',
       'doctorCuda', 'doctorCudaDesc', 'doctorServices', 'doctorServicesDesc',
@@ -250,9 +252,24 @@ for (const language of ['zh', 'en', 'ja']) {
     // Count guard：清单看不到新增——加键必须同步更新计数（见 uiAuxChat round-36 同款）。
     assert.equal(
       Object.keys(dict[language].uiDeviceMgr).length,
-      100,
-      `${language}.uiDeviceMgr must hold exactly the 100 pinned keys`,
+      104,
+      `${language}.uiDeviceMgr must hold exactly the 104 pinned keys`,
     );
+    // Interpolation keys must stay functions in all three languages (round-7
+    // review P3): a fn→string flip in one language passes the existence and
+    // count loops while rendering literal text at the call site — the typed
+    // pins below close that hole (same pattern as uiMultiAgent).
+    for (const key of [
+      'updatedAtLabel', 'critLimit', 'peakLabel', 'servicesFailed', 'removeConfirmIntro',
+      'removeWeightsPath', 'linkFailed', 'doctorFailed', 'refreshFailed', 'linkRowStale',
+      'removeDone', 'removeFailed', 'warn', 'doctorCharCounter',
+    ]) {
+      assert.equal(
+        typeof dict[language].uiDeviceMgr[key],
+        'function',
+        `${language}.uiDeviceMgr.${key} must be an interpolation function`,
+      );
+    }
     // Nav key pin: uiDeviceMgr pins cannot see the sibling nav key — deleting
     // `deviceMgr` from all three dicts would render an undefined entry label.
     assert.ok(dict[language].deviceMgr, `${language}.deviceMgr must exist`);

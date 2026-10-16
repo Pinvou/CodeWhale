@@ -355,12 +355,23 @@ assert.doesNotMatch(
   // 失败轮同样精确域发布（全域 notify 会连带 21 域重投影）。
   assert.deepEqual([...env.domainCalls().at(-1)], ['device']);
 
+  // 同文案失败拍不重复发布（第七轮评审 P3）：后台 2s 轮询在故障期间每拍重入
+  // 这里，无条件 notify 会让设备页每 2s 全量重渲染一块不变的横幅。
+  await env.api.pollDevice();
+  assert.equal(env.state.deviceError, 'snapshot backend down');
+  assert.equal(env.notifyCount(), 2, 'identical error round must not re-notify');
+  // 错误文案变化仍要发布（横幅内容切换）。
+  env.setRespond(async () => { throw new Error('snapshot backend moved'); });
+  await env.api.pollDevice();
+  assert.equal(env.state.deviceError, 'snapshot backend moved');
+  assert.equal(env.notifyCount(), 3);
+
   // 恢复轮必须强制 notify 一次（横幅切回正常面板），即便显示等价。
   env.setRespond(async () => fixtureSnapshot());
   await env.api.pollDevice();
   assert.equal(env.state.deviceError, null);
   assert.ok(env.state.device._fmt);
-  assert.equal(env.notifyCount(), 3, 'recovery round must force a notify even when display-equal');
+  assert.equal(env.notifyCount(), 4, 'recovery round must force a notify even when display-equal');
 
   // in-flight 守卫：未决轮次期间的重入 pollDevice 直接丢弃。
   let release;
@@ -370,8 +381,77 @@ assert.doesNotMatch(
   release(fixtureSnapshot());
   await pending;
   const snapshotInvokes = env.invokes.filter(([command]) => command === 'get_device_snapshot');
-  // 成功轮 + 错误轮 + 恢复轮 + 本组未决轮 = 4;重入 tick 被吞掉不新增。
-  assert.equal(snapshotInvokes.length, 4, 'in-flight poll must swallow reentrant ticks');
+  // 成功轮 + 错误轮 + 同文案轮 + 换文案轮 + 恢复轮 + 本组未决轮 = 6;重入 tick 被吞掉不新增。
+  assert.equal(snapshotInvokes.length, 6, 'in-flight poll must swallow reentrant ticks');
+}
+
+// ── 服务探测持续失败：连续 3 拍立旗（第六轮 P2 修复的回归钉，第七轮补）──
+{
+  const env = loadDeviceFeature();
+  // 先落一拍成功基线：失败路径才有"旧 chips 保留"的意义。
+  env.setRespond(async command => {
+    if (command === 'get_device_services') {
+      return [{ key: 'ollama', running: true, detail: null }];
+    }
+    return null;
+  });
+  await env.api.pollDeviceServices();
+  const baselineNotifies = env.notifyCount();
+
+  env.setRespond(async command => {
+    if (command === 'get_device_services') throw new Error('probe timeout');
+    return null;
+  });
+  // 第 1、2 拍：有基线且未达阈值 → 静默，旧 chips 原样保留。
+  await env.api.pollDeviceServices();
+  assert.equal(env.state.deviceServicesError, null);
+  assert.equal(env.state.deviceServices.length, 1, 'stale chips must stay visible');
+  assert.equal(env.notifyCount(), baselineNotifies);
+  await env.api.pollDeviceServices();
+  assert.equal(env.state.deviceServicesError, null);
+  assert.equal(env.notifyCount(), baselineNotifies);
+  // 第 3 拍：立旗一次，精确域发布。
+  await env.api.pollDeviceServices();
+  assert.equal(env.state.deviceServicesError, 'probe timeout');
+  assert.equal(env.notifyCount(), baselineNotifies + 1);
+  assert.deepEqual([...env.domainCalls().at(-1)], ['device']);
+  // 旗已立：同文案的后续失败拍不重复 notify。
+  await env.api.pollDeviceServices();
+  assert.equal(env.notifyCount(), baselineNotifies + 1);
+  // 恢复拍：错误旗→null 翻清必须发布，即便内容与基线完全一致。
+  env.setRespond(async command => {
+    if (command === 'get_device_services') {
+      return [{ key: 'ollama', running: true, detail: null }];
+    }
+    return null;
+  });
+  await env.api.pollDeviceServices();
+  assert.equal(env.state.deviceServicesError, null);
+  assert.equal(env.notifyCount(), baselineNotifies + 2, 'recovery must publish even when content unchanged');
+}
+
+// ── sensorChipKey：风扇臂只在整组 fan 时生效（第七轮评审 P3）────────
+{
+  const env = loadDeviceFeature();
+  env.setRespond(async () => ({
+    ...fixtureSnapshot(),
+    sensors: [
+      // 混装芯片（风扇+温度）：后端组内按 kind 字母序 fan 恒排首位——旧口径
+      // 拿首条 kind 判断会把整张卡（含温度读数）标成"风扇"。
+      { chip: 'nct6798', entries: [
+        { kind: 'fan', name: 'fan1', value: 900, critical: null, max: null },
+        { kind: 'temperature', name: 'SYSTIN', value: 42, critical: 90, max: null },
+      ] },
+      // 纯风扇组且 chip 名无提示：kind 臂仍要能命中。
+      { chip: 'it8620', entries: [
+        { kind: 'fan', name: 'fan2', value: 1200, critical: null, max: null },
+      ] },
+    ],
+  }));
+  await env.api.pollDevice();
+  const [mixed, fanOnly] = env.state.device._fmt.sensors;
+  assert.equal(mixed.chipKey, 'nct6798', 'mixed-kind chip must keep its raw chip key');
+  assert.equal(fanOnly.chipKey, 'acpi_fan', 'fan-only chip must map to the fan key');
 }
 
 // ── 轮询生命周期 ─────────────────────────────────────────────────

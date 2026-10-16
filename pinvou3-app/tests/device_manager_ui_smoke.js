@@ -92,9 +92,12 @@ function deviceSnapshotFixture() {
 function externalModelsFixture() {
   return {
     models: [
-      { id: 'm-ollama-1', name: 'qwen3:30b', kind: 'ollama', base_url: 'http://127.0.0.1:11434/v1', model: 'qwen3:30b', weights_path: null, installed_at: '2026-10-01T00:00:00Z', note: '', status: 'available', registered: false, source: 'ollama' },
-      { id: 'm-reg-1', name: 'my-endpoint', kind: 'openai_endpoint', base_url: 'http://127.0.0.1:9999/v1', model: 'my-model', weights_path: '/home/u/models/my-endpoint', installed_at: '2026-10-02T00:00:00Z', note: '', status: 'unreachable', registered: true, source: 'registry' },
-      { id: 'm-reg-2', name: 'lan-endpoint', kind: 'openai_endpoint', base_url: 'http://192.168.1.50:8000/v1', model: 'lan-model', weights_path: null, installed_at: '2026-10-03T00:00:00Z', note: '', status: 'available', registered: true, source: 'registry' },
+      // base_url 留 null：Ollama 在线条目真实形态（后端 base_url 恒 null），
+      // ⑤-b 的回环回退常量只有在这种行上才真正走到——fixture 原先填了与回退
+      // 常量相同的回环地址，回退实现删掉套件也照绿（第七轮评审 P3）。
+      { id: 'm-ollama-1', name: 'qwen3:30b', kind: 'ollama', base_url: null, model: 'qwen3:30b', weights_path: null, note: '', status: 'available', registered: false, source: 'ollama' },
+      { id: 'm-reg-1', name: 'my-endpoint', kind: 'openai_endpoint', base_url: 'http://127.0.0.1:9999/v1', model: 'my-model', weights_path: '/home/u/models/my-endpoint', note: '', status: 'unreachable', registered: true, source: 'registry' },
+      { id: 'm-reg-2', name: 'lan-endpoint', kind: 'openai_endpoint', base_url: 'http://192.168.1.50:8000/v1', model: 'lan-model', weights_path: null, note: '', status: 'available', registered: true, source: 'registry' },
     ],
     warnings: [],
   };
@@ -594,7 +597,10 @@ async function clickTestId(page, testId) {
     `at nav=${snapshotCallsAtNav}, after 2.6s=${snapshotCallsAfterNav}`);
 
   // ⑧ 后端读取失败面：横幅 + 重试按钮 + 恢复（此前整条失败面只被断言"不存在"，
-  // 横幅回归消失全绿——第四轮评审 P2）。
+  // 横幅回归消失全绿——第四轮评审 P2）。重试按钮的接线必须真钉：2s 后台轮询在
+  // failSnapshot=false 后 ≤2s 自愈，"恢复"半边曾是死按钮也全绿的假覆盖（第七轮
+  // 评审 P2）——先在保持失败的状态下，以上一拍后台轮询为同步点，要求点击后
+  // 1s 内（间隔 2s 的后台拍做不到）出现下一次命令重发；随后才放开失败开关验证恢复。
   await clickNavByLabel(page, '设备管理');
   await page.waitForFunction(() => document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view') === 'monitor', { timeout: 8000 });
   await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-view"]'), { timeout: 8000 });
@@ -602,14 +608,28 @@ async function clickTestId(page, testId) {
   await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-error"]'), { timeout: 8000 });
   const bannerText = await page.evaluate(() => document.querySelector('[data-testid="device-manager-error"]')?.innerText || '');
   const retryVisible = await page.evaluate(() => !!document.querySelector('[data-testid="device-manager-retry"]'));
-  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.failSnapshot = false; });
-  const snapshotsBeforeRetry = await page.evaluate(() => window.__DEVICE_MGR_TEST__.callsOf('get_device_snapshot').length);
+  // 同步点：等一拍后台失败轮过去（计数 +1）——此刻下一拍后台轮询在 ~2s 之外。
+  const beforeRetryClick = await page.evaluate(() => window.__DEVICE_MGR_TEST__.callsOf('get_device_snapshot').length);
+  await page.waitForFunction(
+    (before) => window.__DEVICE_MGR_TEST__.callsOf('get_device_snapshot').length > before,
+    { timeout: 8000 },
+    beforeRetryClick,
+  );
+  // 失败仍在生效时点重试：1s 内必须出现下一次 get_device_snapshot——后台拍
+  // 刚走完、够不到这个窗口，只有重试按钮自己的 stop+start 立即轮询能满足；
+  // 按钮拆线时本断言必红。
   await clickTestId(page, 'device-manager-retry');
+  const retryFired = await page.waitForFunction(
+    (before) => window.__DEVICE_MGR_TEST__.callsOf('get_device_snapshot').length > before,
+    { timeout: 1000 },
+    beforeRetryClick + 1,
+  ).then(() => true, () => false);
+  // 放开失败开关：恢复横幅消失（重试轮或放开后的后台轮触发，恢复口径同前）。
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.failSnapshot = false; });
   await page.waitForFunction(() => !document.querySelector('[data-testid="device-manager-error"]'), { timeout: 8000 });
-  const snapshotsAfterRetry = await page.evaluate(() => window.__DEVICE_MGR_TEST__.callsOf('get_device_snapshot').length);
-  rec('⑧ 快照失败出横幅、重试恢复面板并重发快照命令',
-    bannerText.includes('设备状态读取失败') && retryVisible && snapshotsAfterRetry > snapshotsBeforeRetry,
-    JSON.stringify({ bannerText, retryVisible, snapshotsBeforeRetry, snapshotsAfterRetry }));
+  rec('⑧ 快照失败出横幅、重试按钮真实重发命令、放开后恢复面板',
+    bannerText.includes('设备状态读取失败') && retryVisible && retryFired,
+    JSON.stringify({ bannerText, retryVisible, retryFired }));
 
   // ⑨ 自定义提问：计数/禁用态、发送失败保留输入（「问题已保留」的承诺此前
   // 无覆盖）、成功直达会话并携带问题原文。
