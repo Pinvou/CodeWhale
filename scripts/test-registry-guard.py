@@ -172,12 +172,15 @@ def _parse_attribute(lines, i):
 
 def _fn_after(lines, idx):
     """If the first non-blank line at/after `idx` declares a function,
-    return (fn_name, line_idx), else (None, None). Blank lines do not break
-    attachment; a comment line does — an `#[ignore]` mentioned in a comment
-    must not smear onto the next function. `pub`/`async`/`unsafe` prefixes,
-    generics (`fn g<T: Clone>()`) and rustfmt-wrapped signatures
-    (`fn long(` with the parens on the following lines) all resolve; the
-    paren must open on the name's line.
+    return (fn_name, line_idx), else (None, None). `lines` is the lexed
+    text from `_strip_code`: comments (line/block/doc) and string contents
+    are already blanked, so they read as blanks and never break attachment
+    — real Rust binding: an attribute stays attached to the next item no
+    matter what comments sit between, and a pseudo-fn inside a comment
+    cannot be found. `pub`/`async`/`unsafe` prefixes, generics
+    (`fn g<T: Clone>()`) and rustfmt-wrapped signatures (`fn long(` with
+    the parens on the following lines) all resolve; the paren must open on
+    the name's line.
     """
     j = idx
     n = len(lines)
@@ -186,8 +189,6 @@ def _fn_after(lines, idx):
     if j >= n:
         return None, None
     stripped = lines[j].lstrip()
-    if stripped.startswith("//"):
-        return None, None
     match = _FN_RE.match(stripped)
     if match is None or "(" not in stripped:
         return None, None
@@ -197,7 +198,8 @@ def _fn_after(lines, idx):
 _MOD_TOKEN_RE = re.compile(
     r"\bmod\s+([A-Za-z_][A-Za-z0-9_]*)\s*(\{)?|\{|\}"
 )
-_PATH_ATTR_RE = re.compile(r'#\[\s*path\s*=\s*"([^"]*)"\s*\]')
+_PATH_ATTR_HEAD_RE = re.compile(r"#\[\s*path\s*=")
+_PATH_VALUE_RE = re.compile(r'"([^"]*)"')
 
 
 def _strip_code(line, state):
@@ -328,11 +330,17 @@ def _module_stacks(lines):
     inline-module stack) pairs — the stack decides the directory the child
     file resolves against.
 
-    Returns (stacks, externals, clean). `clean` is False when the file ends
-    with unbalanced braces/comments/strings: the simplified lexer cannot be
-    trusted there, and the caller must fail closed on the file's hits
-    instead of attributing them by path."""
+    Returns (stacks, externals, clean, stripped). `clean` is False when the
+    file ends with unbalanced braces/comments/strings: the simplified lexer
+    cannot be trusted there, and the caller must fail closed on the file's
+    hits instead of attributing them by path. `stripped` is the per-line
+    lexed text — same indices as the input — and the caller must run the
+    attribute scan on it (round-9 review: attachment decisions made on raw
+    lines let a comment line between `#[ignore]` and its fn drop a real
+    hit, and let a pseudo `#[ignore]`/fn inside a block comment fabricate
+    one)."""
     stacks = [()] * len(lines)
+    stripped_lines = []
     stack = []
     depth = 0
     state = [False, 0, None]
@@ -342,6 +350,7 @@ def _module_stacks(lines):
     for idx, raw in enumerate(lines):
         stacks[idx] = tuple(name for name, _ in stack)
         text = _strip_code(raw, state)
+        stripped_lines.append(text)
         start = 0
         if pending is not None:
             first = 0
@@ -381,37 +390,45 @@ def _module_stacks(lines):
     in_str, block_depth, raw_hashes = state
     if depth != 0 or block_depth != 0 or raw_hashes is not None:
         clean = False
-    return stacks, externals, clean
+    return stacks, externals, clean, stripped_lines
 
 
-def _path_wired_mods(lines, stacks):
+def _path_wired_mods(stripped, lines, stacks):
     """`#[path = "..."] mod <name>;` pairs whose attribute run attaches to
-    the declaration — blanks are transparent within the run, a comment line
-    breaks it (same attachment rule as the fn scan). Only file-top-level
-    declarations are wired (`stacks[line]` empty): a path attribute inside
-    an inline module block resolves against nested module directories,
-    which is not modelled. Returns [(mod_name, path_value)]."""
+    the declaration. Run delimitation is lexed (`stripped` from
+    `_strip_code`): blanks and comments are transparent within the run and
+    commented-out attributes/declarations are invisible — Rust attachment,
+    in both the "comment breaks the wiring" and "pseudo attribute inside a
+    block comment fabricates one" directions (round-9 review). The path
+    VALUE itself is read from the raw `lines` at the aligned position
+    (the lexer blanks string payloads). Only file-top-level declarations
+    are wired (`stacks[line]` empty): a path attribute inside an inline
+    module block resolves against nested module directories, which is not
+    modelled. Returns [(mod_name, path_value)]."""
     wired = []
     i = 0
-    n = len(lines)
+    n = len(stripped)
     while i < n:
-        if not lines[i].lstrip().startswith("#["):
+        if not stripped[i].lstrip().startswith("#["):
             i += 1
             continue
-        end, _ = _parse_attribute(lines, i)
-        match = None if stacks[i] else _PATH_ATTR_RE.search(
-            "\n".join(lines[i:end])
-        )
+        end, _ = _parse_attribute(stripped, i)
+        match = None
+        if not stacks[i]:
+            head = _PATH_ATTR_HEAD_RE.search("\n".join(stripped[i:end]))
+            if head is not None:
+                raw_block = "\n".join(lines[i:end])
+                quote = raw_block.find('"', head.end())
+                if quote != -1:
+                    value = _PATH_VALUE_RE.search(raw_block[quote:])
+                    if value is not None:
+                        match = value
         if match:
             j = end
-            while j < n and not lines[j].strip():
+            while j < n and not stripped[j].strip():
                 j += 1
-            if (
-                j < n
-                and not lines[j].lstrip().startswith("//")
-                and not stacks[j]
-            ):
-                decl = _strip_code(lines[j], [False, 0, None])
+            if j < n and not stacks[j]:
+                decl = stripped[j]
                 tok = _MOD_TOKEN_RE.search(decl)
                 if (
                     tok is not None
@@ -437,9 +454,14 @@ def ignored_source_pins():
     The scan is attribute-run based (round-6 review): starting from each
     `#[` line, whole bracket-balanced attribute entries are consumed (so
     wrapped cfg_attr forms resolve), and the run attaches to the function
-    declared on the next non-blank, non-comment line. A doc (`///`) or
-    plain comment terminates the run, so a comment that merely mentions
-    `#[ignore` cannot smear onto this one.
+    declared on the next non-blank line. The whole scan runs on the LEXED
+    text from `_strip_code` (round-9 review): comments — line, block, and
+    doc — are blanked before attachment is decided, matching real Rust
+    binding semantics in both directions. A comment cannot fabricate a hit
+    (a `#[ignore]` mentioned or commented out is invisible), and a comment
+    cannot hide one: a `#[ignore]` whose fn follows after a comment line
+    (or a `///` doc comment, itself an attribute) stays attached and is
+    still flagged, exactly as rustc keeps the attribute bound.
 
     Scoping and attribution (review #1518 round 6): the scan is rooted at
     `src/lib.rs` and follows external `mod <name>;` declarations — both
@@ -478,26 +500,28 @@ def ignored_source_pins():
             raise SystemExit(
                 f"test-registry-guard: cannot read lib source {path}: {err}"
             )
-        stacks, externals, clean = _module_stacks(lines)
+        stacks, externals, clean, stripped = _module_stacks(lines)
         i = 0
-        n = len(lines)
+        n = len(stripped)
         while i < n:
-            if not lines[i].lstrip().startswith("#["):
+            if not stripped[i].lstrip().startswith("#["):
                 i += 1
                 continue
             run = []
             j = i
             while j < n:
-                stripped = lines[j].lstrip()
-                if not stripped:
-                    j += 1  # blank lines are transparent within the run
+                lexed = stripped[j].lstrip()
+                if not lexed:
+                    # blanks and comments (blanked by the lexer) are both
+                    # transparent within the run — rustc attachment semantics
+                    j += 1
                     continue
-                if not stripped.startswith("#["):
+                if not lexed.startswith("#["):
                     break
-                j, ignore_line = _parse_attribute(lines, j)
+                j, ignore_line = _parse_attribute(stripped, j)
                 if ignore_line is not None:
                     run.append(ignore_line)
-            fn_name, fn_idx = _fn_after(lines, j)
+            fn_name, fn_idx = _fn_after(stripped, j)
             if run and fn_name is not None:
                 locations = [f"{path}:{line + 1}" for line in run]
                 if clean:
@@ -532,7 +556,7 @@ def ignored_source_pins():
         # exist for these, so both resolutions coexist without double
         # visits (the graph dedups by realpath).
         file_dir = os.path.dirname(path)
-        for name, rel in _path_wired_mods(lines, stacks):
+        for name, rel in _path_wired_mods(stripped, lines, stacks):
             candidate = os.path.normpath(os.path.join(file_dir, rel))
             if os.path.isfile(candidate):
                 queue.append((candidate, base + [name]))

@@ -14,7 +14,11 @@ tree, not in one-off manual runs:
     inline-module stack, so a same-named ignored fn in a sibling module —
     even within the same file — keys a different path (round 6);
   - files the simplified lexer cannot confidently parse fail closed on
-    their hits' bare function names (round 6 fallback, narrowed).
+    their hits' bare function names (round 6 fallback, narrowed);
+  - the whole attribute scan runs on the lexed text: comments cannot
+    fabricate a hit (block-comment pseudo `#[ignore]`/fn) and cannot hide
+    one (a comment between `#[ignore]` and its fn keeps the binding, as
+    rustc does) — both round-9 review directions are pinned below.
 
 `main()` shells out to cargo, so these tests exercise the pure filesystem
 half: the source scanner (`ignored_source_pins`) and the pin attribution
@@ -520,6 +524,82 @@ class ScannerParsingTests(GuardFixture):
         )
         self.assertNotIn("commented_neighbor", ignored)
         self.assertNotIn("commented_inside_run", ignored)
+
+    def test_comment_between_ignore_and_fn_does_not_hide_hit(self):
+        # Round-9 review reproduction, positive control (comment 4291331727):
+        # Rust comments do NOT sever an attribute from its item, so a pin
+        # silenced behind comment lines — after `#[ignore]` or mid-run —
+        # must still be flagged. The pre-round-9 scanner read raw lines and
+        # dropped the run at the first comment, so a disabled critical
+        # regression passed the gate on a mock libtest manifest.
+        root = self._crate_root(
+            {
+                "lib.rs": (
+                    "#[test]\n"
+                    "#[ignore]\n"
+                    "// temporary quarantine — restore before next release\n"
+                    "fn critical_pin() {\n"
+                    "}\n"
+                    "\n"
+                    "#[test]\n"
+                    "// mid-run note\n"
+                    "#[ignore = \"flaky, see #999\"]\n"
+                    "fn second_pin() {\n"
+                    "}\n"
+                ),
+            }
+        )
+        by_path, unattributable = self._scan(root)
+        src = self._src_path(root, "lib.rs")
+        self.assertEqual(
+            by_path,
+            {"critical_pin": [f"{src}:2"], "second_pin": [f"{src}:9"]},
+        )
+        self.assertEqual(unattributable, {})
+
+    def test_block_comment_pseudo_ignore_and_fn_do_not_frame_live_test(self):
+        # Round-9 review reproduction, negative control: a block comment
+        # containing `#[ignore]` and a same-named pseudo function must not be
+        # attributed to the real live test defined after it — the pre-round-9
+        # scanner read the commented text as an attribute run bound to the
+        # live fn and failed main() on a healthy tree.
+        by_path, unattributable = self._ignored_sources(
+            {
+                "lib.rs": (
+                    "/*\n"
+                    "#[ignore]\n"
+                    "fn critical_pin() {}\n"
+                    "*/\n"
+                    "#[test]\n"
+                    "fn critical_pin() {\n"
+                    "}\n"
+                ),
+            }
+        )
+        self.assertEqual(by_path, {})
+        self.assertEqual(unattributable, {})
+
+    def test_commented_out_attribute_and_path_wiring_are_invisible(self):
+        # Same round-9 root cause on the graph-walk side: a commented-out
+        # `#[path]` wiring must not pull a file into the scan, and a comment
+        # between a live `#[path]` attribute and its `mod` declaration must
+        # not break the wiring (rustc keeps them attached).
+        by_path, unattributable = self._ignored_sources(
+            {
+                "lib.rs": (
+                    "// #[path = \"ghost.rs\"]\n"
+                    "// mod ghost;\n"
+                    "\n"
+                    "#[path = \"wired.rs\"]\n"
+                    "// wired through a comment\n"
+                    "mod wired;\n"
+                ),
+                "ghost.rs": _IGNORED_PIN,
+                "wired.rs": _IGNORED_PIN,
+            }
+        )
+        self.assertEqual(sorted(by_path), ["wired::tests::critical_pin"])
+        self.assertEqual(unattributable, {})
 
 
 if __name__ == "__main__":
