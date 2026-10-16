@@ -113,11 +113,11 @@ func TestOrganizationMemberUnitProducerPublicPostgres(t *testing.T) {
 		if _, err = r.AdminAddMemberWithUnits(ctx, principal, org.ID, targetID, []string{"MEMBER"}, nil, []uuid.UUID{outside.Unit.ID}, "unit-producer-target-add"); !errors.Is(err, account.ErrConflict) {
 			t.Fatalf("changed attachment reused receipt: %v", err)
 		}
-		actorMember, err := r.ListMembers(ctx, principal, org.ID, nil)
+		actorMember, err := r.ListMembers(ctx, principal, org.ID, nil, account.MemberListQuery{Limit: 200})
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, item := range actorMember {
+		for _, item := range actorMember.Items {
 			if item.UserID == actorID && (len(item.UnitIDs) != 0 || len(item.UnitAdminIDs) != 1) {
 				t.Fatal("role scope silently created ordinary attachment")
 			}
@@ -141,12 +141,12 @@ func TestOrganizationMemberUnitProducerPublicPostgres(t *testing.T) {
 		if _, err = r.ReplaceMemberUnits(ctx, unitActor, org.ID, targetID, changed.Member.Version, []uuid.UUID{outside.Unit.ID}, "unit-producer-forbidden", false); !errors.Is(err, account.ErrForbidden) {
 			t.Fatal("escaped administrator subtree", err)
 		}
-		items, err := r.ListMembers(ctx, unitActor, org.ID, &root.Unit.ID)
+		items, err := r.ListMembers(ctx, unitActor, org.ID, &root.Unit.ID, account.MemberListQuery{Limit: 200})
 		if err != nil {
 			t.Fatal(err)
 		}
 		seen := false
-		for _, item := range items {
+		for _, item := range items.Items {
 			seen = seen || item.UserID == targetID
 		}
 		if !seen {
@@ -308,13 +308,68 @@ func TestOrganizationMemberUnitProducerPublicPostgres(t *testing.T) {
 		if err = c.QueryRow(ctx, `SELECT count(*) FROM membership_units`).Scan(&before); err != nil {
 			t.Fatal(err)
 		}
-		err = migrations.DownOne(ctx, c, ordered)
+		// The unused role CHECK can roll back. This full chain then stops at
+		// the newer bonus guard; it does not execute the older 900003 scope Down.
+		ledger := func(withoutRoleCheck bool) string {
+			t.Helper()
+			var facts string
+			if err := c.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(entry) ORDER BY version)::text FROM schema_migrations entry WHERE NOT $1::boolean OR version<>900006`, withoutRoleCheck).Scan(&facts); err != nil {
+				t.Fatal(err)
+			}
+			return facts
+		}
+		scopeFacts := func() string {
+			t.Helper()
+			return stageValue(t, ctx, c, `SELECT jsonb_build_object(
+'memberships',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM memberships f),
+'membership_units',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM membership_units f),
+'role_bindings',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM role_bindings f),
+'role_assignments',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM role_assignments f),
+'authorization_versions',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM authorization_versions f))::text`)
+		}
+		beforeScope, expectedRemainingLedger := scopeFacts(), ledger(true)
+		var latest int64
+		var modelRoleBindings int
+		if err = c.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&latest); err != nil || latest != 900006 {
+			t.Fatal("expected role CHECK migration before scope rollback", latest, err)
+		}
+		if err = c.QueryRow(ctx, `SELECT count(*) FROM role_bindings WHERE role='ORG_MODEL_ADMIN'`).Scan(&modelRoleBindings); err != nil || modelRoleBindings != 0 {
+			t.Fatal("role CHECK rollback requires no model administrator bindings", modelRoleBindings, err)
+		}
+		if err = migrations.DownOne(ctx, c, ordered); err != nil {
+			t.Fatal("unused role CHECK did not roll back safely", err)
+		}
+		if err = c.QueryRow(ctx, `SELECT count(*) FROM membership_units`).Scan(&after); err != nil || before != after {
+			t.Fatal("role CHECK rollback changed member attachments", err)
+		}
+		var remaining []migrations.Migration
+		for _, migration := range ordered {
+			if migration.Version != 900006 {
+				remaining = append(remaining, migration)
+			}
+		}
+		if len(remaining) != len(ordered)-1 || ledger(false) != expectedRemainingLedger || scopeFacts() != beforeScope {
+			t.Fatal("safe role CHECK rollback changed retained scope or unrelated history")
+		}
+		if _, err = migrations.VerifyApplied(ctx, c, remaining); err != nil {
+			t.Fatal("remaining installed history does not match safe rollback", err)
+		}
+		if err = c.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&latest); err != nil || latest != 900004 {
+			t.Fatal("bonus facts guard is not the next public rollback", latest, err)
+		}
+		err = migrations.DownOne(ctx, c, remaining)
 		var pg *pgconn.PgError
-		if !errors.As(err, &pg) || pg.Code != "55000" {
-			t.Fatal("public downgrade did not fail at forward-only evidence guard", err)
+		if !errors.As(err, &pg) || pg.Code != "P0001" || pg.Message != "registration bonus required facts guard is forward-only" {
+			t.Fatal("public downgrade did not fail at the actual bonus facts guard", err)
 		}
 		if err = c.QueryRow(ctx, `SELECT count(*) FROM membership_units`).Scan(&after); err != nil || before != after {
 			t.Fatal("failed public rollback changed member attachments", err)
+		}
+		if ledger(false) != expectedRemainingLedger || scopeFacts() != beforeScope {
+			t.Fatal("failed bonus guard rollback changed scope or remaining ledger")
+		}
+		if _, err = migrations.VerifyApplied(ctx, c, remaining); err != nil {
+			t.Fatal("failed public rollback changed remaining migration facts", err)
 		}
 	})
 	for _, state := range []string{"current", "revoked", "expired"} {

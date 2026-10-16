@@ -55,18 +55,27 @@ ORDER BY unit.parent_id NULLS FIRST,unit.name,unit.id`, organizationID, rootUnit
 	return UnitTree{Items: items, StructureVersion: structureVersion}, tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) ListMembers(ctx context.Context, principal identity.Principal, organizationID uuid.UUID, unitID *uuid.UUID) ([]Member, error) {
+func (r *PostgresRepository) ListMembers(ctx context.Context, principal identity.Principal, organizationID uuid.UUID, unitID *uuid.UUID, query MemberListQuery) (MemberPage, error) {
+	limit, position, err := memberListPosition(query, "members", organizationID, unitID)
+	if err != nil {
+		return MemberPage{}, err
+	}
+	var afterID *uuid.UUID
+	var afterName string
+	if position != nil {
+		afterID, afterName = &position.UserID, position.Name
+	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
-		return nil, err
+		return MemberPage{}, err
 	}
 	defer tx.Rollback(ctx)
 	actorID, err := activeUserID(ctx, tx, principal)
 	if err != nil {
-		return nil, err
+		return MemberPage{}, err
 	}
 	if err := requireOrganizationPermission(ctx, tx, actorID, organizationID, unitID, PermissionOrganizationMembersRead); err != nil {
-		return nil, err
+		return MemberPage{}, err
 	}
 	rows, err := tx.Query(ctx, `
 SELECT m.id,u.id,u.user_code,u.display_name,u.email,m.status,m.version,m.joined_at,
@@ -75,6 +84,7 @@ SELECT m.id,u.id,u.user_code,u.display_name,u.email,m.status,m.version,m.joined_
        ARRAY(SELECT rb.unit_id FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.role='UNIT_ADMIN' AND rb.revoked_at IS NULL AND rb.starts_at<=statement_timestamp() AND (rb.expires_at IS NULL OR rb.expires_at>statement_timestamp()) ORDER BY rb.unit_id)
 FROM memberships m JOIN users u ON u.id=m.user_id
 WHERE m.organization_id=$1 AND m.status='ACTIVE'
+  AND ($3::uuid IS NULL OR (COALESCE(u.display_name,u.email,u.id::text),u.id)>($4,$3))
   AND ($2::uuid IS NULL OR (
     EXISTS(
       SELECT 1 FROM membership_units scoped_membership
@@ -89,58 +99,80 @@ WHERE m.organization_id=$1 AND m.status='ACTIVE'
       )
     )
   ))
-ORDER BY COALESCE(u.display_name,u.email,u.id::text),u.id`, organizationID, unitID)
+ORDER BY COALESCE(u.display_name,u.email,u.id::text),u.id LIMIT $5`, organizationID, unitID, afterID, afterName, limit+1)
 	if err != nil {
-		return nil, err
+		return MemberPage{}, err
 	}
 	defer rows.Close()
 	items := make([]Member, 0)
 	for rows.Next() {
 		var item Member
 		if err := rows.Scan(&item.MembershipID, &item.UserID, &item.UserCode, &item.DisplayName, &item.Email, &item.Status, &item.Version, &item.JoinedAt, &item.Roles, &item.UnitIDs, &item.UnitAdminIDs); err != nil {
-			return nil, err
+			return MemberPage{}, err
 		}
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return MemberPage{}, err
 	}
-	return items, tx.Commit(ctx)
+	page := MemberPage{Items: items}
+	if len(items) > limit {
+		last := items[limit-1]
+		cursor := encodeMemberListCursor("members", organizationID, unitID, memberListSortName(last.DisplayName, last.Email, last.UserID), last.UserID)
+		page.Items, page.NextCursor = items[:limit], &cursor
+	}
+	return page, tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) ListQuotaMembers(ctx context.Context, principal identity.Principal, organizationID uuid.UUID) ([]QuotaMember, error) {
+func (r *PostgresRepository) ListQuotaMembers(ctx context.Context, principal identity.Principal, organizationID uuid.UUID, query MemberListQuery) (QuotaMemberPage, error) {
+	limit, position, err := memberListPosition(query, "quota-members", organizationID, nil)
+	if err != nil {
+		return QuotaMemberPage{}, err
+	}
+	var afterID *uuid.UUID
+	var afterName string
+	if position != nil {
+		afterID, afterName = &position.UserID, position.Name
+	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
-		return nil, err
+		return QuotaMemberPage{}, err
 	}
 	defer tx.Rollback(ctx)
 	actorID, err := activeUserID(ctx, tx, principal)
 	if err != nil {
-		return nil, err
+		return QuotaMemberPage{}, err
 	}
 	if err := requireOrganizationPermission(ctx, tx, actorID, organizationID, nil, PermissionOrganizationQuotaAllocate); err != nil {
-		return nil, err
+		return QuotaMemberPage{}, err
 	}
 	rows, err := tx.Query(ctx, `SELECT member.user_id,account_user.display_name,member.version
 FROM memberships member JOIN users account_user ON account_user.id=member.user_id
 WHERE member.organization_id=$1 AND member.status='ACTIVE' AND account_user.status='ACTIVE'
-ORDER BY COALESCE(account_user.display_name,account_user.id::text),account_user.id`, organizationID)
+  AND ($2::uuid IS NULL OR (COALESCE(account_user.display_name,account_user.id::text),account_user.id)>($3,$2))
+ORDER BY COALESCE(account_user.display_name,account_user.id::text),account_user.id LIMIT $4`, organizationID, afterID, afterName, limit+1)
 	if err != nil {
-		return nil, err
+		return QuotaMemberPage{}, err
 	}
 	defer rows.Close()
 	items := make([]QuotaMember, 0)
 	for rows.Next() {
 		var item QuotaMember
 		if err := rows.Scan(&item.UserID, &item.DisplayName, &item.Version); err != nil {
-			return nil, err
+			return QuotaMemberPage{}, err
 		}
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return QuotaMemberPage{}, err
 	}
-	return items, tx.Commit(ctx)
+	page := QuotaMemberPage{Items: items}
+	if len(items) > limit {
+		last := items[limit-1]
+		cursor := encodeMemberListCursor("quota-members", organizationID, nil, memberListSortName(last.DisplayName, nil, last.UserID), last.UserID)
+		page.Items, page.NextCursor = items[:limit], &cursor
+	}
+	return page, tx.Commit(ctx)
 }
 
 func (r *PostgresRepository) ReplaceMemberRoles(ctx context.Context, principal identity.Principal, organizationID, targetUserID uuid.UUID, roles []string) (Member, error) {
@@ -162,7 +194,7 @@ func (r *PostgresRepository) ReplaceMemberRoles(ctx context.Context, principal i
 	}
 	var membershipID uuid.UUID
 	var version int64
-	err = tx.QueryRow(ctx, `SELECT id,version FROM memberships WHERE organization_id=$1 AND user_id=$2 AND status='ACTIVE' FOR UPDATE`, organizationID, targetUserID).Scan(&membershipID, &version)
+	err = tx.QueryRow(ctx, `SELECT member.id,member.version FROM memberships member JOIN users target ON target.id=member.user_id AND target.status='ACTIVE' WHERE member.organization_id=$1 AND member.user_id=$2 AND member.status='ACTIVE' FOR UPDATE OF member,target`, organizationID, targetUserID).Scan(&membershipID, &version)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Member{}, ErrNotFound
 	}

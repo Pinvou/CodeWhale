@@ -393,7 +393,6 @@ Agent 应识别以下 5 种场景之一并触发反馈：`tool_not_found`（工�
 |---------|------|---------|
 | `user config is empty` | 未登录 | 执行 `tmeet auth login` |
 | `--start format error` | 时间格式不合法（如缺少时区） | 改用 `2026-03-12T14:00:00+08:00` 格式 |
-| `--meeting-id is required` | 缺少必填参数 | 补充对应必填参数 |
 | `user has been initialized` | 已登录，重复执行 login | 直接使用，或先 logout 再 login |
 | 错误码 `500284` / `该功能暂不可使用` | 当前用户无该功能使用权限（可能未灰度、商业化权益不足等） | **严禁重试**（重试无意义，权限问题非临时故障）；如实告知用户「该功能当前账号暂不可使用，可能因未开通灰度或商业化权益不足，具体解释所有权归腾讯会议所有」，不得自行推测具体原因或承诺开通方式 |
 | `event consume` 相关错误（ready 标记不出现 / 退出码 1 / `event stop` 返回 `refused` 等） | — | 见 [`references/tmeet-event.md`](references/tmeet-event.md) «典型故障速查» |

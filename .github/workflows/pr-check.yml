@@ -12,6 +12,7 @@ name: PR Check
 #   isolated Token financial PostgreSQL contracts are mandatory; real external
 #   issuer/provider/NATS integration remains explicit opt-in.
 # - team-relay-hub-test:Hub 或迁移变化时使用隔离 PostgreSQL 跑完整测试与依赖审计。
+# - relay-test:Relay 变更在 Draft、Ready PR 与 Merge Queue 均运行 Ubuntu 回归。
 # - release-contract-test:发布链路改动只跑配置/脚本契约,不在 PR 构建安装包。
 # - knowledge-rust:独立 pinvou-knowledge crate/部署入口改动跑 fmt/clippy/test 与 shell
 #   语法检查；依赖或策略改动时追加 cargo-deny，不依赖 Tauri workspace 间接覆盖。
@@ -27,7 +28,7 @@ name: PR Check
 #   rust-lint: clippy-driver artifacts are not reusable by the test
 #   compilers). Warn-visible until the pinvou-cli [lints] table and the
 #   measured debt cleanup land; fails closed on compile errors either way.
-# - rust-lint:Draft 只跑 fmt；Ready/Queue/main 跑 clippy；cargo-deny 仅在依赖
+# - rust-lint:Draft 跑 fmt 和有界 controller 安全回归；Ready/Queue/main 跑 clippy；cargo-deny 仅在依赖
 #   或策略路径变化时追加，三项均无 continue-on-error。
 #   与 rust-test 并行,各自独立 cache。clippy 规则见 Cargo.toml [lints] 表:
 #   只启用实测零欠账的 lint(deny),有欠账的 lint/group 显式 allow,
@@ -154,6 +155,8 @@ jobs:
           scripts/tests/select-frontend-smokes.test.mjs
           scripts/tests/run-frontend-smokes.test.mjs
           scripts/tests/pr-check-routing.test.mjs
+          scripts/tests/windows-relay-dacl-routing.test.mjs
+          scripts/tests/windows-relay-dacl-runner.test.mjs
 
       - name: 校验 VERSION 与各版本文件一致
         run: node scripts/sync-version.mjs --check
@@ -387,7 +390,78 @@ jobs:
               - 'scripts/tests/test_release_linux_floor_policy.py'
               - 'scripts/tests/test_release_manifest_probe.py'
               - 'scripts/tests/test_release_size_policy.py'
+              - 'scripts/run-windows-remote-control-e2e.ps1'
+              - 'scripts/windows-e2e-process-guard.ps1'
+              - 'scripts/windows-e2e-orchestrator-helpers.ps1'
+              - 'scripts/create-installer-spdx.mjs'
+              - 'scripts/check-enrollment-gated-v2-rollback.mjs'
+              - 'scripts/remote-control-release-path-policy.mjs'
+              - 'scripts/remote-control-*'
+              - 'scripts/remote-control-*/**'
+              - 'scripts/run-remote-control-*'
+              - 'scripts/run-remote-control-*/**'
+              - 'remote-control-relay/scripts/verify-github-workflow-run.cjs'
+              - 'remote-control-relay/test/github-workflow-run-identity.test.js'
+              - 'remote-control-relay/test/installer-spdx.test.js'
+              - 'remote-control-relay/test/release-path-policy.test.js'
+              - 'remote-control-relay/test/windows-e2e-*.test.js'
+              - 'remote-control-relay/docs/schemas/**'
+              - 'pinvou3-app/tests/nsis_resource_staging_contract.test.js'
+              - 'pinvou3-app/scripts/remote-control-*'
+              - 'pinvou3-app/scripts/remote-control-*/**'
+              - 'pinvou3-app/src/features/remote-control/**'
+              - 'pinvou3-app/src/features/chat/ChatView.jsx'
+              - 'pinvou3-app/src/components/Toggle.jsx'
+              - 'pinvou3-app/src/app/main.jsx'
+              - 'pinvou3-app/src/features/settings/SettingsView.jsx'
+              - 'pinvou3-app/src/hooks/useBridge.js'
+              - 'pinvou3-app/src/platform/tauri/bridge.js'
+              - 'pinvou3-app/src/shared/platform.js'
+              - 'pinvou3-app/src/platform/tauri/bridge/*remote-control*'
+              - 'pinvou3-app/src/platform/tauri/bridge/**/*remote-control*'
+              - 'pinvou3-app/src/platform/tauri/bridge/**/*remote-control*/**'
+              - 'pinvou3-app/src-tauri/src/features/remote_control/**'
+              - 'pinvou3-app/src-tauri/src/features/behavior_telemetry/remote_control.rs'
+              - 'pinvou3-app/src-tauri/src/features/sessions/remote_proxy/**'
+              - 'pinvou3-app/src-tauri/src/app/commands/desktop_remote_*.rs'
+              - 'pinvou3-app/src-tauri/src/app/commands/**'
+              - 'pinvou3-app/src-tauri/src/app/desktop_remote_composition.rs'
+              - 'pinvou3-app/src-tauri/src/app/remote_projection_adapter.rs'
+              - 'pinvou3-app/src-tauri/src/app/commands/remote_control.rs'
+              - 'pinvou3-app/src-tauri/src/platform/capabilities.rs'
+              - 'pinvou3-app/src-tauri/build.rs'
+              - 'pinvou3-app/src-tauri/build_support/desktop_controller.rs'
+              - 'pinvou3-app/src-tauri/capabilities/default.json'
+              - 'pinvou3-app/tests/remote_*'
+              - 'pinvou3-app/tests/remote_*/**'
+              - 'pinvou3-app/tests/desktop_remote_*'
+              - 'pinvou3-app/tests/desktop_remote_*/**'
+              - 'pinvou3-app/tests/connect_remote_device_*'
+              - 'pinvou3-app/tests/connect_remote_device_*/**'
+              - 'pinvou3-app/tests/remote_control_feature_gate_contract.test.mjs'
+              - 'pinvou3-app/tests/remote_control_real_ui_smoke_contract.test.mjs'
+              - 'remote-control-relay/docs/schemas/**'
+              - 'remote-control-relay/**'
+              - 'remote-control-relay/package.json'
+              - 'remote-control-relay/package-lock.json'
+              - 'remote-control-relay/scripts/controller-release-gate.mjs'
+              - 'remote-control-relay/scripts/validate-controller-release-evidence.mjs'
+              - 'remote-control-relay/scripts/query-controller-release-telemetry.mjs'
+              - 'remote-control-relay/scripts/deploy-controller-preflight.mjs'
+              - 'remote-control-relay/scripts/prepare-legacy-gateway-route.mjs'
+              - 'remote-control-relay/scripts/verify-provider-attestation.mjs'
+              - 'remote-control-relay/scripts/verify-installer-supply-chain.mjs'
+              - 'remote-control-relay/controller-sensitive-scan.js'
+              - 'remote-control-relay/test/controller-sensitive-scan.test.js'
+              - 'remote-control-relay/test/controller-telemetry.test.js'
+              - 'remote-control-relay/test/controller-release-*.test.js'
+              - 'remote-control-relay/test/windows-e2e-*.test.js'
+              - 'remote-control-relay/test/installer-spdx.test.js'
+              - 'docs/Windows双端远程控制发布与回滚.md'
+              - 'docs/Windows双端远程控制双机演练清单.md'
               - '.github/workflows/release-packages.yml'
+              - '.github/workflows/windows-remote-control-evidence.yml'
+              - '.github/workflows/windows-remote-control-build-evidence.yml'
               - '.github/workflows/pr-check.yml'
               - '.gitmodules'
               - 'private-runtimes/windows'
@@ -404,6 +478,7 @@ jobs:
               - 'pinvou-knowledge/Cargo.toml'
               - 'pinvou3-app/src-tauri/config/**'
               - 'pinvou3-app/src-tauri/packaging/**'
+              - 'pinvou3-app/src-tauri/packaging/windows/**'
               - 'pinvou3-app/src-tauri/resources/**'
               - 'pinvou3-app/tests/knowledge_host_packaging.test.mjs'
               - 'pinvou3-app/tests/macos_phase2_contract.test.js'
@@ -478,6 +553,7 @@ jobs:
               - 'pinvou3-app/src-tauri/src/features/marketplace/scope.rs'
               - 'pinvou3-app/src-tauri/src/app/commands/marketplace.rs'
               - 'pinvou3-app/src-tauri/src/features/connectors/skill_gate.rs'
+              - 'pinvou3-app/src-tauri/src/app/connector_consent_tests.rs'
               - 'pinvou3-app/scripts/tauri/**'
               - 'pinvou3-app/src-tauri/config/**'
               - 'pinvou3-app/src-tauri/packaging/**'
@@ -509,6 +585,13 @@ jobs:
               - 'remote-control-relay/**'
               - 'scripts/deploy-remote-relay.sh'
               - 'scripts/deploy-remote-relay-test.sh'
+              - 'scripts/run-windows-relay-dacl.mjs'
+              - 'scripts/tests/windows-relay-dacl-*.test.mjs'
+              - 'scripts/remote-control-local-selftest.ps1'
+              - 'scripts/run-remote-control-endpoint.ps1'
+              - 'scripts/run-windows-relay-tools-tests.mjs'
+              - 'scripts/windows-relay-tools-test-summary.mjs'
+              - 'scripts/windows-relay-tools-preflight.mjs'
               - '.github/workflows/pr-check.yml'
             team_relay_hub:
               - 'team-relay-hub/**'
@@ -862,7 +945,7 @@ jobs:
   relay-test:
     name: relay-test
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false)) }}
+    if: ${{ !cancelled() && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
@@ -974,6 +1057,42 @@ jobs:
           set -euo pipefail
           python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py
           python3 scripts/test-token-financial-postgres.py
+
+  windows-relay-dacl:
+    name: windows-relay-dacl
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request') }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: remote-control-relay/package-lock.json
+      - name: Install Relay dependencies
+        run: npm --prefix remote-control-relay ci --prefer-offline --no-audit
+      - name: Verify real Windows Relay state DACLs
+        run: node scripts/run-windows-relay-dacl.mjs
+
+  windows-relay-tools-test:
+    name: windows-relay-tools-test
+    needs: changes
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request') }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: remote-control-relay/package-lock.json
+      - name: 安装 relay 依赖
+        run: npm --prefix remote-control-relay ci --prefer-offline --no-audit
+      - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）
+        run: node scripts/run-windows-relay-tools-tests.mjs
 
   team-relay-hub-test:
     name: team-relay-hub-test
@@ -1095,15 +1214,19 @@ jobs:
     # Ready PR/Queue/main 仅在发布链路相关路径变化时验证版本同步、
     # Tauri overlay 与各平台打包契约，不生成 deb/dmg/nsis。
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.release_contract == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
-    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
       - name: Set up zram and swap
+        if: ${{ runner.os == 'Linux' }}
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
-
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
@@ -1115,15 +1238,32 @@ jobs:
       - name: 安装前端依赖
         run: npm --prefix pinvou3-app ci --prefer-offline --no-audit
 
+      - name: 安装 Relay 发布门禁依赖
+        if: ${{ runner.os == 'Windows' }}
+        run: npm --prefix remote-control-relay ci --prefer-offline --no-audit --ignore-scripts
+
+      - name: Rust（构建期开关的实际产物回归）
+        uses: dtolnay/rust-toolchain@stable
+
       # 版本一致性校验(--check)由 version-consistency job 无路径门全事件覆盖,
       # 此处不重复;仅跑 Tauri overlay、各平台打包与知识宿主契约。
       - name: Tauri 打包与发布配置契约
+        if: ${{ runner.os == 'Linux' }}
         run: |
           npm --prefix pinvou3-app run test:tauri-layout
           npm --prefix pinvou3-app run test:tauri-effective-config
           npm --prefix pinvou3-app run test:macos-phase2
           npm --prefix pinvou3-app run test:knowledge-host-packaging
           npm --prefix pinvou3-app run test:linux-asr-runtime
+
+      - name: Windows 远控发布与安全契约
+        if: ${{ runner.os == 'Windows' }}
+        env:
+          PINVOU_DESKTOP_CONTROLLER_ENABLED: '0'
+        run: |
+          npm --prefix remote-control-relay run release:gate
+          node --test --test-concurrency=1 remote-control-relay/test/controller-release-evidence.test.js remote-control-relay/test/controller-release-gates.test.js remote-control-relay/test/controller-release-telemetry-query.test.js remote-control-relay/test/github-workflow-run-identity.test.js remote-control-relay/test/installer-spdx.test.js remote-control-relay/test/release-path-policy.test.js remote-control-relay/test/windows-e2e-orchestrator-contract.test.js remote-control-relay/test/windows-e2e-orchestrator-helpers.test.js remote-control-relay/test/windows-e2e-path-guard.test.js
+          node --test pinvou3-app/tests/remote_control_feature_gate_contract.test.mjs pinvou3-app/tests/remote_control_real_ui_smoke_contract.test.mjs pinvou3-app/tests/nsis_resource_staging_contract.test.js
 
   # pinvou-knowledge 是可单独部署的 crate，必须直接验证自己的默认 feature 图、
   # 测试与部署入口，而不只依赖 Tauri 作为 client-only path dependency 的间接编译。
@@ -1234,7 +1374,7 @@ jobs:
     # 缓存命中时(如 community-603 19m35s / community-602 25m36s)不受影响。
     timeout-minutes: 60
     env:
-      # Draft 只跑无系统依赖的 fmt 快检；Ready PR、Queue 与 main 跑 clippy。
+      # Draft 跑无系统依赖的 fmt 和有界 controller 回归；Ready PR、Queue 与 main 跑 clippy。
       RUN_HEAVY_RUST_CHECKS: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
       # clippy 编译依赖(codewhale-tui)时同样可能触发 rustc/LLVM 栈溢出
       # (v0.9.5 升级后 O2 同源风险)。正式入口按平台注入 RUSTC_WRAPPER
@@ -1272,6 +1412,13 @@ jobs:
       - name: cargo fmt --check (硬门禁)
         working-directory: pinvou3-app/src-tauri
         run: cargo fmt -- --check
+
+      # Compile the real authentication/watchdog/local state modules on Drafts
+      # too. This small harness is not a replacement for the Ready full-product
+      # compile or native transport gates.
+      - name: Controller authentication and local safety regression
+        working-directory: pinvou3-app/src-tauri
+        run: cargo test --locked --manifest-path tests/controller-crypto-harness/Cargo.toml
 
       # clippy 需要 Tauri/WebKit 系统库；Draft 不安装，避免每次 push 消耗 ~70s。
       - name: 装 Tauri + pinvou3 Linux 系统依赖
@@ -1600,9 +1747,10 @@ jobs:
         # 因此直接用 package-lock 驱动的 npm ci，避免额外维护一份硬编码版本并保证可复现。
         run: npm --prefix pinvou3-app ci --prefer-offline --no-audit
 
-      # 先释放不用的 SDK，避免恢复大型缓存时磁盘耗尽、runner 尚未进入测试便失联。
-      # 保留缓存恢复后的第二次空间检查；不移除已配置的 Node、Chrome 或构建缓存。
-      - name: 恢复 Rust 缓存前准备磁盘空间
+      # 缓存解压本身会耗尽构建盘，不能等恢复完成后才释放未用 SDK。
+      # 仅使用基础白名单；setup-node/Chrome 已在上面准备，不启用 aggressive。
+      # 恢复后的容量检查仍保留，保证缓存落盘后有足够空间执行两轮测试。
+      - name: 缓存恢复前准备 Rust 磁盘空间
         run: |
           sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
@@ -2536,6 +2684,10 @@ jobs:
             'before_anything_lands' \
             'preserves_consent_state' \
             'command_bodies_register_deny_first' \
+            'shared_apply_preserves_order' \
+            'production_skill_gate_refusal' \
+            'deny_decision_keeps_lazy_alias' \
+            'app::connector_consent_tests::' \
             'vacuous_uninstall_keeps_fresh_consent_entries' \
             'standalone_tencent_docs_preset_deny_entry_excludes_the_materialized_dir' \
             'restore_of_package_missing_entry_registers_no_deny_entry' \
@@ -2586,6 +2738,7 @@ jobs:
             'features::monitor::platform::windows_memory::tests::' \
             'features::monitor::platform::windows_gpu::tests::' \
             'features::remote_control::platform::windows::tests::' \
+            'app::commands::remote_control::reader_resume_tests::' \
             'features::computer_use::platform::windows::tests::' \
             'failed_probe_never_deletes_an_existing_store_windows' \
             'features::voice_shortcut::platform::tests::' \
@@ -2742,6 +2895,8 @@ jobs:
     # the bundle_chain-gated universal bundle smoke, and the mac verify
     # script. PR legs are unchanged (check + computer_use only), so PR wall
     # time does not regress.
+    # The independent deployment regression below needs only Node itself
+    # and does not extend this job's applicability.
     if: >-
       ${{
         !cancelled() &&
@@ -2827,6 +2982,22 @@ jobs:
         uses: actions/checkout@v7
         with:
           submodules: false
+
+      - name: Node.js (isolated macOS deployment regression)
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: macOS temporary-root hardening and deployment regression
+        run: |
+          set -euo pipefail
+          hardening_log="$RUNNER_TEMP/remote-deployment-regression.tap"
+          node --test --test-reporter=tap remote-control-relay/test/deployment-incidents.test.js | tee "$hardening_log"
+          grep -qE '^# tests [1-9][0-9]*$' "$hardening_log"
+          grep -qx '# fail 0' "$hardening_log"
+          grep -qx '# skipped 0' "$hardening_log"
+          grep -qx '# todo 0' "$hardening_log"
+          grep -qE '^ok [1-9][0-9]* - actual Darwin system temporary roots accept hardening input and reject operator links$' "$hardening_log"
 
       - name: Init CodeWhale submodule
         run: git submodule update --init --recursive -- CodeWhale
@@ -3295,6 +3466,8 @@ jobs:
       - frontend-test
       - relay-test
       - account-platform-test
+      - windows-relay-dacl
+      - windows-relay-tools-test
       - team-relay-hub-test
       - update-release-console-test
       - release-contract-test
@@ -3333,6 +3506,9 @@ jobs:
           RELAY_RESULT: ${{ needs.relay-test.result }}
           ACCOUNT_PLATFORM_RESULT: ${{ needs.account-platform-test.result }}
           ACCOUNT_PLATFORM_REQUIRED: ${{ needs.changes.outputs.account_platform }}
+          WINDOWS_RELAY_DACL_RESULT: ${{ needs.windows-relay-dacl.result }}
+          WINDOWS_RELAY_RESULT: ${{ needs.windows-relay-tools-test.result }}
+          RELAY_REQUIRED_BY_POLICY: ${{ needs.changes.outputs.relay == 'true' }}
           TEAM_RELAY_HUB_RESULT: ${{ needs.team-relay-hub-test.result }}
           UPDATE_RELEASE_CONSOLE_RESULT: ${{ needs.update-release-console-test.result }}
           RELEASE_CONTRACT_RESULT: ${{ needs.release-contract-test.result }}
@@ -3374,12 +3550,24 @@ jobs:
             exit 1
           fi
 
+          if [[ "$RELAY_REQUIRED_BY_POLICY" == "true" && ( "$RELAY_RESULT" != success || "$WINDOWS_RELAY_RESULT" != success ) ]]; then
+            echo "Relay 变更要求 Linux 与 Windows 实际回归成功: relay=$RELAY_RESULT windows-relay=$WINDOWS_RELAY_RESULT" >&2
+            exit 1
+          fi
+
+          if [[ "$RELAY_REQUIRED_BY_POLICY" == "true" && "$WINDOWS_RELAY_DACL_RESULT" != success ]]; then
+            echo "Relay 变更要求真实 Windows DACL 验证成功: windows-relay-dacl=$WINDOWS_RELAY_DACL_RESULT" >&2
+            exit 1
+          fi
+
           failed=0
           for item in \
             "backflow-portability:$BACKFLOW_PORTABILITY_RESULT" \
             "frontend-test:$FRONTEND_RESULT" \
             "relay-test:$RELAY_RESULT" \
             "account-platform-test:$ACCOUNT_PLATFORM_RESULT" \
+            "windows-relay-dacl:$WINDOWS_RELAY_DACL_RESULT" \
+            "windows-relay-tools-test:$WINDOWS_RELAY_RESULT" \
             "team-relay-hub-test:$TEAM_RELAY_HUB_RESULT" \
             "update-release-console-test:$UPDATE_RELEASE_CONSOLE_RESULT" \
             "release-contract-test:$RELEASE_CONTRACT_RESULT" \

@@ -84,12 +84,64 @@ func TestRegistrationBonusPublicSchemaAndInputFacts(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		before := stageValue(t, ctx, ac, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`)
-		if err = migrations.DownOne(ctx, ac, ordered); err == nil {
-			t.Fatal("forward-only account public down unexpectedly succeeded")
+		var latest int64
+		var incompatibleBindings int
+		if err = ac.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&latest); err != nil || latest != 900006 {
+			t.Fatal("expected unused role CHECK as the installed highest version", latest, err)
+		}
+		if err = ac.QueryRow(ctx, `SELECT count(*) FROM role_bindings WHERE role='ORG_MODEL_ADMIN'`).Scan(&incompatibleBindings); err != nil || incompatibleBindings != 0 {
+			t.Fatal("safe role CHECK rollback requires no incompatible history", incompatibleBindings, err)
+		}
+		bonusInputFacts := func() string {
+			t.Helper()
+			return stageValue(t, ctx, ac, `SELECT jsonb_build_object(
+'registration_operations',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM registration_operations f),
+'wallet_provisioning_jobs',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM wallet_provisioning_jobs f),
+'eligibility',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM registration_bonus_mobile_eligibility f),
+'roles',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM roles f),
+'permissions',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM permissions f),
+'role_permissions',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM role_permissions f),
+'role_bindings',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM role_bindings f),
+'authorization_versions',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM authorization_versions f),
+'required_facts_check',(SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='wallet_provisioning_jobs'::regclass AND conname='wallet_provisioning_registration_bonus_required_facts_check'))::text`)
+		}
+		// Only the unused 900006 CHECK may roll back. The actual next public
+		// Down stops at 900004 and never executes the older 900003 scope Down.
+		beforeFacts := bonusInputFacts()
+		before := stageValue(t, ctx, ac, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version<>900006`)
+		if err = migrations.DownOne(ctx, ac, ordered); err != nil {
+			t.Fatal("unused role CHECK did not roll back safely", err)
+		}
+		if stageValue(t, ctx, ac, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`) != before || bonusInputFacts() != beforeFacts {
+			t.Fatal("safe role CHECK rollback changed bonus, authority or unrelated migration facts")
+		}
+		var remaining []migrations.Migration
+		for _, migration := range ordered {
+			if migration.Version != 900006 {
+				remaining = append(remaining, migration)
+			}
+		}
+		if len(remaining) != len(ordered)-1 {
+			t.Fatal("safe rollback must remove exactly the installed role CHECK version")
+		}
+		if _, err = migrations.VerifyApplied(ctx, ac, remaining); err != nil {
+			t.Fatal("remaining migration facts changed after safe rollback", err)
+		}
+		if err = ac.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&latest); err != nil || latest != 900004 {
+			t.Fatal("expected actual bonus facts guard as next public rollback", latest, err)
+		}
+		var pe *pgconn.PgError
+		if err = migrations.DownOne(ctx, ac, remaining); !errors.As(err, &pe) || pe.Code != "P0001" || pe.Message != "registration bonus required facts guard is forward-only" {
+			t.Fatal("actual forward-only account bonus guard was not reached", err)
 		}
 		if after := stageValue(t, ctx, ac, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`); after != before {
 			t.Fatal("failed account Down changed ledger")
+		}
+		if bonusInputFacts() != beforeFacts {
+			t.Fatal("failed account Down changed bonus or authority facts")
+		}
+		if _, err = migrations.VerifyApplied(ctx, ac, remaining); err != nil {
+			t.Fatal("failed account Down changed remaining migration facts", err)
 		}
 		var present bool
 		if err = ac.QueryRow(ctx, `SELECT to_regclass('registration_bonus_mobile_eligibility') IS NOT NULL`).Scan(&present); err != nil || !present {
@@ -180,6 +232,24 @@ func TestRegistrationBonusPublicSchemaAndInputFacts(t *testing.T) {
 		}
 		before := stageValue(t, ctx, bc, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`)
 		commandsBefore := stageValue(t, ctx, bc, `SELECT count(*)::text FROM registration_bonus_policy_commands`)
+		bonusFinancialFacts := func() string {
+			t.Helper()
+			return stageValue(t, ctx, bc, `SELECT jsonb_build_object(
+'policy_versions',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM registration_bonus_policy_versions f),
+'policy_state',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM registration_bonus_policy_state f),
+'policy_commands',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM registration_bonus_policy_commands f),
+'policy_audit',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM registration_bonus_policy_audit f),
+'claims',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM registration_bonus_claims f),
+'receipts',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM registration_bonus_receipts f),
+'wallets',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM wallets f),
+'packages',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM entitlement_packages f),
+'components',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM entitlement_components f),
+'journal_entries',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM journal_entries f),
+'ledger_postings',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM ledger_postings f))::text`)
+		}
+		financialBefore := bonusFinancialFacts()
+		// The inherited 900022 batch guard is now highest. This remains a
+		// full-chain refusal/no-effects check, not execution of the old bonus Down.
 		if err = migrations.DownOne(ctx, bc, ordered); err == nil {
 			t.Fatal("forward-only billing public down unexpectedly succeeded")
 		}
@@ -188,6 +258,9 @@ func TestRegistrationBonusPublicSchemaAndInputFacts(t *testing.T) {
 		}
 		if stageValue(t, ctx, bc, `SELECT count(*)::text FROM registration_bonus_policy_commands`) != commandsBefore {
 			t.Fatal("policy facts lost")
+		}
+		if bonusFinancialFacts() != financialBefore {
+			t.Fatal("failed billing Down changed full bonus or financial facts")
 		}
 	})
 }

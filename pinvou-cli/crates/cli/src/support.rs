@@ -598,6 +598,41 @@ pub(crate) fn boot_session_store() -> Result<pinvou3_lib::features::sessions::Se
         .map_err(|error| CliError::failed(format!("sessions store unavailable: {error:#}")))
 }
 
+/// Refusal filter, not a remote router. The app reserves `remote-` for proxy
+/// identities; on Windows reject ASCII case aliases too so the same directory
+/// cannot become a local route. Case-sensitive platforms retain their existing
+/// differently cased local names.
+/// Non-remote ids retain their original checks, including corrupt-record
+/// deletion and historical artifact directories without a session JSON.
+pub(crate) fn reject_remote_session(
+    store: &SessionStore,
+    id: &str,
+    family: &str,
+    action: &str,
+) -> Result<(), CliError> {
+    let Some(prefix) = id.get(.."remote-".len()) else {
+        return Ok(());
+    };
+    // This CLI support boundary owns filename alias handling, not product
+    // session identity. Do not impose Windows aliases on case-sensitive hosts.
+    #[cfg(target_os = "windows")]
+    let remote_namespace = prefix.eq_ignore_ascii_case("remote-");
+    #[cfg(not(target_os = "windows"))]
+    let remote_namespace = prefix == "remote-";
+    if !remote_namespace {
+        return Ok(());
+    }
+    // Keep unavailable/archived-bank diagnostics instead of pretending every
+    // lookup failure confirms a known proxy. A successful lookup never grants
+    // local authority in this namespace, even if a case alias reports Chat.
+    store
+        .session_kind(id)
+        .map_err(|error| store_error(family, action, id, error))?;
+    Err(CliError::failed(format!(
+        "{family} {action}({id}): remote session identifiers require the authenticated remote route"
+    )))
+}
+
 /// The `{family} {action}({id}): {error:#}` store-failure shape the sessions
 /// and code families each kept as a private `store_error` — stated once so a
 /// new family cannot hand-copy a diverging format.
@@ -1937,6 +1972,41 @@ pub(crate) mod test_support {
     }
 
     impl TempHome {
+        /// Seed the public persisted v3 format without claiming a live remote
+        /// connection or creating a local Engine transcript for its identity.
+        pub(crate) fn seed_remote_proxy(&self) -> &'static str {
+            let id = "remote-cli-fixture";
+            let file = serde_json::json!({
+                "schema_version": 3,
+                "records": [{
+                    "schema_version": 3,
+                    "local_session_id": id,
+                    "peer_id": "synthetic-peer",
+                    "remote_session_ref": "synthetic-reference",
+                    "controlled_session_id": null,
+                    "ui": {
+                        "title": "Synthetic remote session",
+                        "pinned": false,
+                        "hidden": false,
+                        "last_opened_at": null
+                    },
+                    "authenticated_cursor": null,
+                    "retired_epochs": [],
+                    "projection": {"schema_version": 1, "entries": []},
+                    "pending": [],
+                    "retired_requests": []
+                }]
+            });
+            let sessions = self.join("sessions");
+            std::fs::create_dir_all(&sessions).expect("create synthetic remote registry directory");
+            std::fs::write(
+                sessions.join("_remote_proxies.json"),
+                serde_json::to_vec(&file).unwrap(),
+            )
+            .expect("seed synthetic remote registry");
+            id
+        }
+
         /// Creates `<temp>/pinvou-cli-{label}-{pid}-{nanos}` and points
         /// `PINVOU3_HOME` at it. The pid+nanos suffix makes concurrent test
         /// binaries and retried runs unable to collide on the directory.
