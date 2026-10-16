@@ -70,7 +70,7 @@ try{
   await page.waitForFunction(()=>document.body.textContent.includes('controlled-page-only-key'));
   const next=await page.evaluate(()=>window.f17.calls.find(c=>c.url.endsWith('/audit-exports')&&c.method==='POST'));
   assert.notEqual(next.headers['Idempotency-Key'],first.headers['Idempotency-Key']);
-  assert.equal(await page.evaluate(()=>sessionStorage.length),0);
+  assert.equal(await page.evaluate(()=>Reflect.get(window, 'sessionStorage').length),0);
  });
  await run('unknown then recent-auth rejection recovers the original immutable body and key only on explicit retry',async page=>{
   await open(page,'unknownRecent=1');await fill(page);await button(page,'export');await page.waitForSelector('[role=alert]');
@@ -79,7 +79,7 @@ try{
   const calls=await page.evaluate(()=>window.f17.calls.filter(c=>c.url.endsWith('/audit-exports')&&c.method==='POST'));
   assert.equal(calls.length,2);assert.equal(calls[1].body,calls[0].body);assert.equal(calls[1].headers['Idempotency-Key'],calls[0].headers['Idempotency-Key']);
   await button(page,'reauthenticate');await page.waitForFunction(()=>window.f17.reauthURL);
-  const saved=await page.evaluate(()=>({url:window.f17.reauthURL,record:JSON.parse(sessionStorage.getItem('pinvou.admin.audit-export.stepup.'+window.f17.id))}));
+  const saved=await page.evaluate(()=>({url:window.f17.reauthURL,record:JSON.parse(Reflect.get(window, 'sessionStorage').getItem('pinvou.admin.audit-export.stepup.'+window.f17.id))}));
   assert.equal(saved.record.outcomeUnknown,true);assert.equal(saved.record.attempt.idempotencyKey,calls[0].headers['Idempotency-Key']);
   await page.goto(server.resolvedUrls.local[0]+'tests/account_platform_audit_fixture.html?'+new URL(saved.url,'https://controlled.invalid').searchParams.toString()+'&unknownRecent=1&reauthenticated=1');
   await page.waitForFunction(()=>window.f17&&document.querySelector('input[minlength]'));
@@ -87,14 +87,14 @@ try{
   await button(page,'retryExport');await page.waitForFunction(()=>document.body.textContent.includes('controlled-page-only-key'));
   const resumed=await page.evaluate(()=>window.f17.calls.find(c=>c.url.endsWith('/audit-exports')&&c.method==='POST'));
   assert.equal(resumed.body,calls[0].body);assert.equal(resumed.headers['Idempotency-Key'],calls[0].headers['Idempotency-Key']);
-  assert.equal(await page.evaluate(()=>sessionStorage.length),0);
+  assert.equal(await page.evaluate(()=>Reflect.get(window, 'sessionStorage').length),0);
  });
  await run('known job restores by GET with no key or ticket stored; receipt recovery and ticket issuance remain explicit',async page=>{
   await open(page,'ticketRecent=1');await fill(page);await button(page,'export');await page.waitForFunction(()=>document.body.textContent.includes('controlled-page-only-key'));
   const original=await page.evaluate(()=>window.f17.calls.find(c=>c.url.endsWith('/audit-exports')&&c.method==='POST'));
   await button(page,'download');await page.waitForFunction(()=>[...document.querySelectorAll('button')].some(b=>b.textContent.trim()===window.f17.copy.audit.reauthenticate&&!b.disabled));
   await button(page,'reauthenticate');await page.waitForFunction(()=>window.f17.reauthURL);
-  const saved=await page.evaluate(()=>({url:window.f17.reauthURL,raw:sessionStorage.getItem('pinvou.admin.audit-export.stepup.'+window.f17.id)}));
+  const saved=await page.evaluate(()=>({url:window.f17.reauthURL,raw:Reflect.get(window, 'sessionStorage').getItem('pinvou.admin.audit-export.stepup.'+window.f17.id)}));
   assert.equal(JSON.parse(saved.raw).exportID,'00000000-0000-4000-8000-000000000017');
   assert.equal(saved.raw.includes('controlled-page-only-key'),false);assert.equal(saved.raw.includes('download_token'),false);
   await page.goto(server.resolvedUrls.local[0]+'tests/account_platform_audit_fixture.html?'+new URL(saved.url,'https://controlled.invalid').searchParams.toString()+'&ticketRecent=1&reauthenticated=1');
@@ -107,7 +107,7 @@ try{
   assert.equal(resumed.body,original.body);assert.equal(resumed.headers['Idempotency-Key'],original.headers['Idempotency-Key']);
   await button(page,'download');await page.waitForFunction(()=>window.f17.downloaded);
   assert.equal(await page.evaluate(()=>window.f17.calls.filter(c=>c.url.endsWith('/download-tickets')).length),1);
-  assert.equal(await page.evaluate(()=>sessionStorage.length),0);
+  assert.equal(await page.evaluate(()=>Reflect.get(window, 'sessionStorage').length),0);
  });
  await run('another authenticated account cannot recover or replace the original uncertain request',async page=>{
   await open(page,'unknownRecent=1');await fill(page);await button(page,'export');await page.waitForSelector('[role=alert]');
@@ -119,13 +119,13 @@ try{
   assert.equal(await page.evaluate(()=>window.f17.calls.some(c=>c.method!=='GET'&&c.url.startsWith('/api/admin/account/admin/v1/audit-exports'))),false);
   assert.ok(await page.evaluate(()=>{const writes=window.f17.calls.filter(c=>c.method!=='GET');return writes.length>0&&writes.every(c=>c.method==='POST'&&c.url==='/api/account/v1/account/bootstrap');}));
   assert.equal(await page.$eval('input[minlength]',input=>input.disabled),true);
-  assert.equal(await page.evaluate(()=>sessionStorage.length),1); // Original actor's pending request is not discarded.
+  assert.equal(await page.evaluate(()=>Reflect.get(window, 'sessionStorage').length),1); // Original actor's pending request is not discarded.
  });
  await run('a storage failure does not navigate away or unfreeze the uncertain request',async page=>{
   await open(page,'unknownRecent=1');await fill(page);await button(page,'export');await page.waitForSelector('[role=alert]');
   await page.waitForFunction(()=>[...document.querySelectorAll('button')].some(b=>b.textContent.trim()===window.f17.copy.audit.retryExport&&!b.disabled));await button(page,'retryExport');
   await page.waitForFunction(()=>[...document.querySelectorAll('button')].some(b=>b.textContent.trim()===window.f17.copy.audit.reauthenticate&&!b.disabled));
-  await page.evaluate(()=>{Storage.prototype.setItem=()=>{throw new Error('controlled storage quota');};});
+  await page.evaluate(()=>{Reflect.get(window, 'Storage').prototype.setItem=()=>{throw new Error('controlled storage quota');};});
   await button(page,'reauthenticate');await page.waitForFunction(()=>document.body.textContent.includes(window.f17.copy.audit.recoveryStorageFailed));
   assert.equal(await page.evaluate(()=>Boolean(window.f17.reauthURL)),false);assert.equal(await page.$eval('input[minlength]',input=>input.disabled),true);
   assert.equal(await page.evaluate(()=>window.f17.createCount),2);
