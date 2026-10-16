@@ -194,6 +194,238 @@ def _fn_after(lines, idx):
     return match.group(1), j
 
 
+_MOD_TOKEN_RE = re.compile(
+    r"\bmod\s+([A-Za-z_][A-Za-z0-9_]*)\s*(\{)?|\{|\}"
+)
+_PATH_ATTR_RE = re.compile(r'#\[\s*path\s*=\s*"([^"]*)"\s*\]')
+
+
+def _strip_code(line, state):
+    """Blank (with spaces, positions preserved) everything that is not
+    structural Rust code: line comments, nested block comments, double-
+    quoted strings (backslash escapes honoured), raw strings (`r"..."`,
+    `r#"..."#`, may span lines), char literals (including `'\\u{7d}'`, whose
+    braces must not count toward nesting), and lifetime/label ticks (`'a`).
+    `state` is `[in_str, block_depth, raw_hashes]`, carried across lines by
+    the caller. Stripped text feeds brace tracking and `mod` detection, so a
+    brace inside a string/comment/char literal must not skew the module
+    stack."""
+    out = list(line)
+    in_str, block_depth, raw_hashes = state
+    k = 0
+    n = len(line)
+    while k < n:
+        if raw_hashes is not None:
+            if (
+                line[k] == '"'
+                and line[k + 1 : k + 1 + raw_hashes] == "#" * raw_hashes
+            ):
+                out[k : k + 1 + raw_hashes] = " " * (1 + raw_hashes)
+                k += 1 + raw_hashes
+                raw_hashes = None
+                continue
+            out[k] = " "
+            k += 1
+            continue
+        if in_str:
+            out[k] = " "
+            if line[k] == "\\":
+                k += 2
+                continue
+            if line[k] == '"':
+                in_str = False
+            k += 1
+            continue
+        if block_depth > 0:
+            out[k] = " "
+            if line[k] == "/" and line[k + 1 : k + 2] == "*":
+                block_depth += 1
+                k += 2
+                continue
+            if line[k] == "*" and line[k + 1 : k + 2] == "/":
+                block_depth -= 1
+                k += 2
+                continue
+            k += 1
+            continue
+        ch = line[k]
+        nxt = line[k + 1 : k + 2]
+        if ch == "/" and nxt == "/":
+            for t in range(k, n):
+                out[t] = " "
+            break
+        if ch == "/" and nxt == "*":
+            block_depth += 1
+            out[k] = out[k + 1] = " "
+            k += 2
+            continue
+        if ch == '"':
+            in_str = True
+            out[k] = " "
+            k += 1
+            continue
+        if ch in "rb" and not (
+            line[k - 1 : k].isalnum() or line[k - 1 : k] == "_"
+        ):
+            j = k + (ch == "b")
+            if j < n and line[j] == "r":
+                j += 1
+                hashes = j
+                while j < n and line[j] == "#":
+                    j += 1
+                hashes = j - hashes
+                if j < n and line[j] == '"':
+                    out[k:j] = " " * (j - k)
+                    raw_hashes = hashes
+                    k = j + 1
+                    continue
+        if ch == "'":
+            if nxt == "\\":
+                # escape char literal: consume through the closing tick so
+                # `'\u{7d}'` contributes no braces
+                out[k] = " "
+                k += 2
+                while k < n and line[k] != "'":
+                    out[k] = " "
+                    k += 1
+                if k < n:
+                    out[k] = " "
+                    k += 1
+                continue
+            if k + 2 < n and line[k + 2] == "'":
+                out[k] = out[k + 1] = out[k + 2] = " "
+                k += 3
+                continue
+            if nxt.isalnum() or nxt == "_":
+                # lifetime or loop label (`'static`, `'outer:`), not a literal
+                out[k] = " "
+                k += 1
+                while k < n and (line[k].isalnum() or line[k] == "_"):
+                    out[k] = " "
+                    k += 1
+                continue
+            out[k] = " "
+            k += 1
+            continue
+        k += 1
+    state[:] = [in_str, block_depth, raw_hashes]
+    return "".join(out)
+
+
+def _module_stacks(lines):
+    """Per-line inline-module stacks plus the file's external `mod` names.
+
+    Walks the stripped source (`_strip_code`) tracking inline
+    `mod <name> { ... }` nesting: `stacks[i]` is the tuple of module names
+    whose opening brace is on an earlier line and still open at line `i` —
+    the inline-module half of a hit's full libtest path (review #1518
+    round 6: attribution by file alone let same-named ignored fns in
+    sibling inline modules of the SAME file frame a live pin). A
+    `mod <name>` whose brace opens on the next line resolves by lookahead;
+    rustfmt puts an `fn` on its own line, which is the layout the snapshots
+    assume. External `mod <name>;` declarations (children in their own
+    files) are returned for the module-graph walk as (name, enclosing
+    inline-module stack) pairs — the stack decides the directory the child
+    file resolves against.
+
+    Returns (stacks, externals, clean). `clean` is False when the file ends
+    with unbalanced braces/comments/strings: the simplified lexer cannot be
+    trusted there, and the caller must fail closed on the file's hits
+    instead of attributing them by path."""
+    stacks = [()] * len(lines)
+    stack = []
+    depth = 0
+    state = [False, 0, None]
+    pending = None
+    externals = []
+    clean = True
+    for idx, raw in enumerate(lines):
+        stacks[idx] = tuple(name for name, _ in stack)
+        text = _strip_code(raw, state)
+        start = 0
+        if pending is not None:
+            first = 0
+            while first < len(text) and text[first].isspace():
+                first += 1
+            if first < len(text):
+                name, pending = pending, None
+                if text[first] == "{":
+                    depth += 1
+                    stack.append((name, depth))
+                    start = first + 1
+                else:
+                    start = first
+        for tok in _MOD_TOKEN_RE.finditer(text, start):
+            token = tok.group(0)
+            if token == "{":
+                depth += 1
+            elif token == "}":
+                depth -= 1
+                if depth < 0:
+                    clean = False
+                    depth = 0
+                while stack and stack[-1][1] > depth:
+                    stack.pop()
+            elif tok.group(2):
+                depth += 1
+                stack.append((tok.group(1), depth))
+            else:
+                rest = text[tok.end() :].strip()
+                if rest == "":
+                    pending = tok.group(1)
+                elif rest.startswith(";"):
+                    # external child; its inline-module stack decides the
+                    # directory it resolves against (a `mod x;` nested in
+                    # inline `mod s {}` lives under `s/`)
+                    externals.append((tok.group(1), stacks[idx]))
+    in_str, block_depth, raw_hashes = state
+    if depth != 0 or block_depth != 0 or raw_hashes is not None:
+        clean = False
+    return stacks, externals, clean
+
+
+def _path_wired_mods(lines, stacks):
+    """`#[path = "..."] mod <name>;` pairs whose attribute run attaches to
+    the declaration — blanks are transparent within the run, a comment line
+    breaks it (same attachment rule as the fn scan). Only file-top-level
+    declarations are wired (`stacks[line]` empty): a path attribute inside
+    an inline module block resolves against nested module directories,
+    which is not modelled. Returns [(mod_name, path_value)]."""
+    wired = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        if not lines[i].lstrip().startswith("#["):
+            i += 1
+            continue
+        end, _ = _parse_attribute(lines, i)
+        match = None if stacks[i] else _PATH_ATTR_RE.search(
+            "\n".join(lines[i:end])
+        )
+        if match:
+            j = end
+            while j < n and not lines[j].strip():
+                j += 1
+            if (
+                j < n
+                and not lines[j].lstrip().startswith("//")
+                and not stacks[j]
+            ):
+                decl = _strip_code(lines[j], [False, 0, None])
+                tok = _MOD_TOKEN_RE.search(decl)
+                if (
+                    tok is not None
+                    and tok.group(1) is not None
+                    and not tok.group(2)
+                    and decl[tok.end() :].strip().startswith(";")
+                ):
+                    wired.append((tok.group(1), match.group(1)))
+                    i = j + 1
+                    continue
+        i = end
+    return wired
+
+
 def ignored_source_pins():
     """Round-35 minor 10 (review #455): libtest's stable `--list` output cannot
     distinguish an #[ignore]d test from a live one, so scan the crate sources:
@@ -207,102 +439,121 @@ def ignored_source_pins():
     wrapped cfg_attr forms resolve), and the run attaches to the function
     declared on the next non-blank, non-comment line. A doc (`///`) or
     plain comment terminates the run, so a comment that merely mentions
-    `#[ignore` cannot smear onto this one. The map is keyed by bare
-    function name to ALL locations; pin attribution is module-aware (see
-    main), so a same-named ignored test in an unrelated module does not
-    shadow or frame the pin.
-    """
+    `#[ignore` cannot smear onto this one.
+
+    Scoping and attribution (review #1518 round 6): the scan is rooted at
+    `src/lib.rs` and follows external `mod <name>;` declarations — both
+    conventional (`a/b.rs` + `a/b/<name>.rs` layouts) and `#[path = "..."]`
+    wiring (relative to the declaring file's directory), so it covers
+    exactly the lib crate that `cargo test --lib --list` reports — bin-only
+    files (`main.rs`, undeclared strays) are never scanned and cannot alias
+    a pin's path. Each hit is keyed by its FULL libtest module path: the
+    declaring file's module path from the graph plus the inline-module
+    stack at the function's line. Files whose structure the lexer cannot
+    confidently parse (unbalanced braces/comments/strings) have their hits
+    keyed by bare function name under `unattributable` instead — fail
+    closed, narrowed from the old file-level filter to genuinely
+    unparseable files. Returns (by_path, unattributable)."""
     src_root = os.path.join(os.path.dirname(MANIFEST), "src")
-    hits = {}
-    for root, dirs, files in os.walk(src_root):
-        dirs.sort()
-        for name in sorted(files):
-            if not name.endswith(".rs"):
+    lib_root = os.path.join(src_root, "lib.rs")
+    if not os.path.isfile(lib_root):
+        raise SystemExit(
+            "test-registry-guard: src/lib.rs not found — the guard scopes "
+            "its scan to the lib module graph rooted there"
+        )
+    by_path = {}
+    unattributable = {}
+    visited = set()
+    queue = [(lib_root, [])]
+    while queue:
+        path, base = queue.pop(0)
+        real = os.path.realpath(path)
+        if real in visited:
+            continue
+        visited.add(real)
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                lines = fh.read().splitlines()
+        except OSError as err:
+            raise SystemExit(
+                f"test-registry-guard: cannot read lib source {path}: {err}"
+            )
+        stacks, externals, clean = _module_stacks(lines)
+        i = 0
+        n = len(lines)
+        while i < n:
+            if not lines[i].lstrip().startswith("#["):
+                i += 1
                 continue
-            path = os.path.join(root, name)
-            try:
-                with open(path, encoding="utf-8", errors="replace") as fh:
-                    lines = fh.read().splitlines()
-            except OSError:
-                continue
-            i = 0
-            n = len(lines)
-            while i < n:
-                if not lines[i].lstrip().startswith("#["):
-                    i += 1
+            run = []
+            j = i
+            while j < n:
+                stripped = lines[j].lstrip()
+                if not stripped:
+                    j += 1  # blank lines are transparent within the run
                     continue
-                run = []
-                j = i
-                while j < n:
-                    stripped = lines[j].lstrip()
-                    if not stripped:
-                        j += 1  # blank lines are transparent within the run
-                        continue
-                    if not stripped.startswith("#["):
-                        break
-                    j, ignore_line = _parse_attribute(lines, j)
-                    if ignore_line is not None:
-                        run.append(ignore_line)
-                fn_name, fn_idx = _fn_after(lines, j)
-                if run and fn_name is not None:
-                    hits.setdefault(fn_name, []).extend(
-                        f"{path}:{line + 1}" for line in run
+                if not stripped.startswith("#["):
+                    break
+                j, ignore_line = _parse_attribute(lines, j)
+                if ignore_line is not None:
+                    run.append(ignore_line)
+            fn_name, fn_idx = _fn_after(lines, j)
+            if run and fn_name is not None:
+                locations = [f"{path}:{line + 1}" for line in run]
+                if clean:
+                    full = "::".join(
+                        list(base) + list(stacks[fn_idx]) + [fn_name]
                     )
-                i = fn_idx + 1 if fn_idx is not None else max(j, i + 1)
-    return hits
+                    by_path.setdefault(full, []).extend(locations)
+                else:
+                    unattributable.setdefault(fn_name, []).extend(locations)
+            i = fn_idx + 1 if fn_idx is not None else max(j, i + 1)
+        # Child files of external `mod <name>;` declarations (Rust 2018):
+        # the crate roots keep children beside themselves (`mod app;` in
+        # lib.rs → src/app.rs), `mod.rs` keeps them in its own directory,
+        # and any other file `a/b.rs` opens the `a/b/` directory.
+        fname = os.path.basename(path)
+        if fname in ("lib.rs", "main.rs", "mod.rs"):
+            child_dir = os.path.dirname(path)
+        else:
+            child_dir = os.path.join(os.path.dirname(path), fname[:-3])
+        for name, estack in externals:
+            mod_dir = os.path.join(child_dir, *estack)
+            for candidate in (
+                os.path.join(mod_dir, name + ".rs"),
+                os.path.join(mod_dir, name, "mod.rs"),
+            ):
+                if os.path.isfile(candidate):
+                    queue.append((candidate, base + list(estack) + [name]))
+                    break
+        # `#[path = "..."]` wiring (12 real sites, e.g. file_ingest.rs):
+        # relative to the DECLARING FILE's directory per the rustc rule for
+        # non-inline modules — the conventional candidates above do not
+        # exist for these, so both resolutions coexist without double
+        # visits (the graph dedups by realpath).
+        file_dir = os.path.dirname(path)
+        for name, rel in _path_wired_mods(lines, stacks):
+            candidate = os.path.normpath(os.path.join(file_dir, rel))
+            if os.path.isfile(candidate):
+                queue.append((candidate, base + [name]))
+    return by_path, unattributable
 
 
-def _candidate_pin_files(pin):
-    """Source files that could directly contain the pinned test, derived
-    from its libtest module path under the standard layouts: the test's
-    parent module either lives in its own file (`a/b/tests.rs`,
-    `a/b/tests/mod.rs`) or is declared inline in the grandparent's module —
-    both its file form (`a/b.rs`) and its directory form (`a/b/mod.rs`).
-    (Round-7 review: the grandparent FILE form was documented but missing
-    from the list, which emptied the candidates for pins whose `tests` sits
-    inline in a file module like `marketplace/scope.rs` and silently pushed
-    them onto the bare-name fallback — reopening the cross-module
-    false-positive hole for those pins.) Returns only files that exist; an
-    empty result (unconventional layout) makes callers fall back to the
-    bare-name match — fail closed."""
-    parts = pin.split("::")
-    parent, leaf = parts[:-1], parts[-1]
-    src = os.path.join(os.path.dirname(MANIFEST), "src")
-    if not parent:
-        candidates = [
-            os.path.join(src, leaf + ".rs"),
-            os.path.join(src, leaf, "mod.rs"),
-        ]
-    else:
-        base = os.path.join(src, *parent)
-        candidates = [
-            os.path.join(base, leaf + ".rs"),
-            os.path.join(base, leaf, "mod.rs"),
-            base + ".rs",
-            os.path.join(base, "mod.rs"),
-            os.path.dirname(base) + ".rs",
-            os.path.join(os.path.dirname(base), "mod.rs"),
-        ]
-    return [c for c in candidates if os.path.isfile(c)]
-
-
-def _pin_ignored_locations(pin, ignored_src):
-    """Locations where the pin's own function is #[ignore]d, attributed
-    module-awarely (round-6 review): the pin's module path maps to the
-    standard files that could host it (`_candidate_pin_files`), and only an
-    ignored fn in one of those files flags the pin — a same-named ignored
-    test in an unrelated module stays silent. When the layout admits no
-    candidate file the bare-name match applies to every hit: fail closed.
-    Kept a pure function so the attribution is unit-testable without cargo
-    (review #1518: the cross-module same-name positive control must be
-    pinned by a committed regression, not a one-off manual run)."""
-    seg_hits = ignored_src.get(pin.rsplit("::", 1)[-1])
-    if not seg_hits:
-        return []
-    candidates = _candidate_pin_files(pin)
-    if candidates:
-        return [loc for loc in seg_hits if loc.rsplit(":", 1)[0] in candidates]
-    return seg_hits
+def _pin_ignored_locations(pin, by_path, unattributable):
+    """Locations where the pin's own test function is #[ignore]d, attributed
+    by FULL libtest module path (review #1518 round 6): the scan resolves
+    each hit's inline-module stack inside the lib module graph, so a
+    same-named ignored fn in a sibling module — even within the same file —
+    keys a different path and cannot frame a live pin. Only two inputs can
+    flag a pin: an exact full-path match, or a same-leaf hit in a file whose
+    structure the lexer could not confidently parse (fail closed — the old
+    file-level filter's fallback, narrowed to genuinely unattributable
+    hits). Kept a pure function so the attribution is unit-testable without
+    cargo (review #1518: the cross-module same-name positive controls must
+    be pinned by committed regressions, not one-off manual runs)."""
+    matched = list(by_path.get(pin, []))
+    matched.extend(unattributable.get(pin.rsplit("::", 1)[-1], []))
+    return matched
 
 
 def main():
@@ -328,14 +579,15 @@ def main():
     # and naming the new location makes the fix a one-liner. A pin silenced
     # by #[ignore] (stable libtest --list cannot flag ignored tests) is
     # caught by the source-level scan below; `_pin_ignored_locations` does
-    # the module-aware attribution.
-    ignored_src = ignored_source_pins()
+    # the full-module-path attribution (inline-module stacks inside the lib
+    # module graph), with the fail-closed leaf-net for unparseable files.
+    by_path, unattributable = ignored_source_pins()
     by_segment = collections.defaultdict(list)
     for p in paths:
         by_segment[p.rsplit("::", 1)[-1]].append(p)
     for pin in REQUIRED_PINS:
         if pin in counts and counts[pin] == 1:
-            matched = _pin_ignored_locations(pin, ignored_src)
+            matched = _pin_ignored_locations(pin, by_path, unattributable)
             if matched:
                 failures.append(
                     f"required pin {pin} is #[ignore]d at "
