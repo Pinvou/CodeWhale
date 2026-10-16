@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
+import * as sessionMention from '../src/features/chat/session-mention.js';
 import { prepareSceneCapabilities, requiredCapabilitiesForMeta } from '../src/features/chat/scene-capabilities.js';
 
 const root = path.resolve(import.meta.dirname, '..');
@@ -37,6 +38,28 @@ function harness(source) {
     return value;
   };
   return { api: context.api, events, state, operation, context };
+}
+
+// Official 适配：上游 #586 把发送裁决/引用台账收敛到 ChatView 模块级工厂
+// （settleSessionRefSend 家族），发送切片随之依赖 session-mention.js 的解析
+// 契约。沙箱按模块本体装载这两层；组件作用域的 ref 用可变对象模拟
+// （sessionMentionEnabledRef 保持上游的 fail-open 缺省，草稿键按当前
+// 会话/纪元推同形字符串）。
+function injectChatViewMentionScope(ctx, chat) {
+  const helpers = chat.slice(chat.indexOf('const refsSurvivingAcceptance'), chat.indexOf('const legacyMarkdownCache'));
+  if (!ctx.mentionDraftKeyRef || ctx.mentionDraftKeyRef.current === null) ctx.mentionDraftKeyRef = { current: (ctx.activeSessionId ? 'session:' + ctx.activeSessionId + ':' : 'draft:') + (ctx.draftEpoch || 0) };
+  if (!ctx.sessionMentionEnabledRef) ctx.sessionMentionEnabledRef = { current: true };
+  if (!ctx.setSessionRefs) ctx.setSessionRefs = () => {};
+  if (!ctx.sessionRefs) ctx.sessionRefs = [];
+  if (!ctx.sessionRefsRef) ctx.sessionRefsRef = { current: ctx.sessionRefs };
+  if (!ctx.mentionPendingDraftSendsRef) ctx.mentionPendingDraftSendsRef = { current: new Set() };
+  Object.assign(ctx, {
+    ...sessionMention,
+    useMemo: fn => fn(),
+    sessionMentionEnabled: true,
+    setSessionMentionEnabled() {},
+  });
+  vm.runInContext(helpers, ctx, { filename: 'ChatView:module-helpers' });
 }
 
 for (const [lane, source] of Object.entries(sources)) {
@@ -149,14 +172,15 @@ for (const [lane, source] of Object.entries(sources)) {
     const chat = read('src/features/chat/ChatView.jsx');
     const start = chat.indexOf('      const sendChatMessage = useCallback(');
     const end = chat.indexOf('\n      // ConversationTimeline', start);
-    Object.assign(h.context, { useCallback: fn => fn, activeSessionId: null,
+    Object.assign(h.context, { useCallback: fn => fn, useMemo: fn => fn, activeSessionId: null,
       bridge: { voice: h.api }, dispatchChatMessage: async () => 'restored' });
+    injectChatViewMentionScope(h.context, chat);
     vm.runInContext(`${chat.slice(start, end)}\nthis.sendChatMessage = sendChatMessage;`, h.context);
     assert.equal(await h.context.sendChatMessage('restored draft'), 'restored');
     assert.equal(operation.pendingSubmission, false);
     assert.equal(h.api.getVoiceOperationId(null, 'chat'), operation.operationId);
     assert.equal(h.events.length, 0);
-    assert.match(chat, /return result === 'restored' \? false : result;/);
+    assert.match(chat, /return result === 'restored' \|\| result === 'restored-materialized' \? false : result;/);
   });
 
   test(`${lane}: queued admission cannot associate the same voice with another manual message`, () => {
@@ -218,7 +242,7 @@ test('composer adapters preserve explicit metadata and authoritative native owne
   const chat = read('src/features/chat/ChatView.jsx');
   const native = read('src/features/codex/CodexAcpView.jsx');
   assert.match(hook, /deliverVoiceTask\(current, next, \{ \.\.\.preview\.context, mode: 'edit'/);
-  assert.match(chat, /sendChatMessage\(constrained\.text, \{ \.\.\.context, draftOwner: owner \}\)/);
+  assert.match(chat, /sendChatMessage\(outgoingText, \{ \.\.\.context, draftOwner: owner \}\)/);
   assert.match(native, /sendTask: async \(outgoing, context\) => send\(outgoing, \{ voiceOperationId: context\?\.operationId \}\)/);
   assert.match(native, /nativeControlsSessionRef\.current === activeId \? nativeControls\.modelId : null/);
   assert.match(native, /completeVoiceSubmission\(voiceOperationId, targetId, true\)/);
@@ -468,8 +492,15 @@ for (const lane of ['desktop', 'web']) {
           clearStaleVoiceState() {}, discardVoiceResult() {}, isActiveVoiceTarget: () => true,
           taskSendInFlightRef: { current: false },
         });
+        injectChatViewMentionScope(ctx, chat);
+        ctx.__vdbg = [];
+        // Official 适配：上游 #586 的恢复族依赖 stripMentionBlockForComposerRestore
+        // 与块感知信封（chat.js 本体内联实现），随恢复族一并提取进沙箱。
         const functions = ['getComposerDraft', 'setComposerDraft', 'prefillComposer', 'restoreTaskDraft',
+          'stripMentionBlockForComposerRestore', 'queuedPayloadEnvelope', 'makeQueuedMessage',
+          'rebuiltQueuedPayload', 'rebuiltQueuedMetaPayload',
           lane === 'desktop' ? 'restoreSteerText' : 'restoreComposerText', 'sendMessage'];
+        if (lane === 'web') functions.push('restoreAbortedMaterialization', 'maybeSubmitFirstWebTurn');
         vm.runInContext(functions.map(name => bridgeFunction(sendSource, name)).join('\n'), ctx);
         const sentTargets = [];
         ctx.doSendFor = async sid => { sentTargets.push(sid); return true; };
@@ -519,6 +550,7 @@ for (const lane of ['desktop', 'web']) {
         if (typeDuringAwait) ctx.setInput(switching ? 'other new input' : 'new input');
         unblock();
         assert.equal(await sending, 'send_failed');
+        console.error('VDBG', JSON.stringify(ctx.__vdbg || []), 'composerDraft=', JSON.stringify(h.state.composerDraft), 'buffer=', JSON.stringify(buffers));
         // Consume the actual ChatView prefill effect, not a replacement append stub.
         if (prefillPending) {
           ctx.prefill = h.state.composerPrefill.text;
