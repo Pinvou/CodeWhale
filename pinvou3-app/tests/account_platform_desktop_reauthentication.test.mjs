@@ -5,7 +5,7 @@ import { readClosureIntent, saveClosureIntent } from '../src/features/account-pl
 
 const actor = '00000000-0000-4000-8000-000000000001';
 const other = '00000000-0000-4000-8000-000000000002';
-const profile = id => ({ user_id: id, status: 'ACTIVE', personal_permissions: [], platform_permissions: [] });
+const profile = id => ({ user_id: id, status: 'ACTIVE', active_context: { context_type: 'PERSONAL', organization_id: null, membership_version: 1, context_version: 1, authorization_version: 1, personal_authorization_version: 1, platform_authorization_version: 1, organization_authorization_version: 1, permissions: [] }, personal_permissions: [], platform_permissions: [] });
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 function fixture(overrides = {}) {
   let ticket;

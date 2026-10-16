@@ -503,13 +503,20 @@ func (s *Service) dispatchUsage(w http.ResponseWriter, r *http.Request, usageReq
 	if terminal, err := s.recordTerminalFinalUsage(background, usageRequest.ID, usage); err != nil || terminal {
 		if err != nil {
 			api.WriteError(w, http.StatusServiceUnavailable, "RESULT_PERSISTENCE_FAILED", "the provider usage evidence could not be retained", httpserver.RequestID(r.Context()))
+		} else {
+			s.replayTerminalUsage(w, r, usageRequest.ID)
 		}
 		return
 	}
 	_, insufficientCode, ok := s.authorizeAdditional(background, usageRequest.ID, holdID, envelope.Price, usage, envelope.MaximumCost)
 	if !ok {
 		// A concurrent deadline may have completed while extension was attempted.
-		if terminal, _ := s.recordTerminalFinalUsage(background, usageRequest.ID, usage); terminal {
+		if terminal, err := s.recordTerminalFinalUsage(background, usageRequest.ID, usage); terminal || err != nil {
+			if err != nil {
+				api.WriteError(w, http.StatusServiceUnavailable, "RESULT_PERSISTENCE_FAILED", "the provider usage evidence could not be retained", httpserver.RequestID(r.Context()))
+			} else {
+				s.replayTerminalUsage(w, r, usageRequest.ID)
+			}
 			return
 		}
 		api.WriteError(w, http.StatusServiceUnavailable, "SETTLEMENT_PENDING", "the final response is awaiting usage settlement", httpserver.RequestID(r.Context()))
@@ -674,6 +681,24 @@ func (s *Service) replayUsage(w http.ResponseWriter, r *http.Request, usage Usag
 		s.replayLiveStream(w, r, usage.ID, after)
 		return
 	}
+	s.replayStoredUsage(w, r, usage, after)
+}
+
+// A financial terminal race can leave an older execution phase visible. Read
+// only the existing replay/status projection; never resume dispatch or persist
+// the new late response body through the general recovery entry point.
+func (s *Service) replayTerminalUsage(w http.ResponseWriter, r *http.Request, usageID uuid.UUID) {
+	usage, err := s.repository.GetUsage(r.Context(), usageID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	s.replayStoredUsage(w, r, usage, 0)
+}
+
+func (s *Service) replayStoredUsage(w http.ResponseWriter, r *http.Request, usage UsageRequest, after int64) {
+	w.Header().Set("X-Pinvou-Usage-Request-ID", usage.ID.String())
+	w.Header().Set("Cache-Control", "no-store")
 	snapshot, err := s.repository.LoadReplay(r.Context(), usage.ID, after)
 	if err != nil {
 		s.writeError(w, r, err)
@@ -1301,7 +1326,7 @@ func (s *Service) renewHold(ctx context.Context, cancel context.CancelFunc, usag
 				return
 			case <-ticker.C:
 				renewalContext, stop := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-				err := client.Extend(renewalContext, usageID, holdID, 0)
+				err := client.Extend(renewalContext, usageID, holdID, 0, uuid.Nil)
 				stop()
 				if err != nil {
 					close(failed)
@@ -1387,6 +1412,13 @@ func (s *Service) settlePrepared(ctx context.Context, usageID, holdID uuid.UUID,
 	return ""
 }
 
+// Final usage has one reservation-extension slot per persisted usage/hold pair.
+// Neither mutable maximum, amount nor wall-clock time is part of its identity:
+// a repeated slot with different facts must conflict at Billing, not charge twice.
+func finalUsageReservationOperationID(usageID, holdID uuid.UUID) uuid.UUID {
+	return uuid.NewSHA1(usageID, []byte("final-usage-reservation-v1\n"+holdID.String()))
+}
+
 func (s *Service) authorizeAdditional(ctx context.Context, usageID, holdID uuid.UUID, price PriceVersion, usage Usage, maximum int64) (int64, string, bool) {
 	// A deadline decision freezes the original hold before any financial RPC.
 	// Late usage remains evidence; it cannot extend that customer's reservation.
@@ -1408,7 +1440,8 @@ func (s *Service) authorizeAdditional(ctx context.Context, usageID, holdID uuid.
 	if !ok {
 		return actual, "", true
 	}
-	if err := client.Extend(ctx, usageID, holdID, additional); err != nil {
+	operationID := finalUsageReservationOperationID(usageID, holdID)
+	if err := client.Extend(ctx, usageID, holdID, additional, operationID); err != nil {
 		// Trusted final usage still converges through the idempotent Commit.
 		// Only a definite wallet-insufficient response becomes a user notice;
 		// uncertain failures become SETTLEMENT_PENDING only if Commit also fails.
@@ -1421,9 +1454,9 @@ func (s *Service) authorizeAdditional(ctx context.Context, usageID, holdID uuid.
 		return actual, "", true
 	}
 	if repository, ok := s.repository.(interface {
-		IncreaseMaximum(context.Context, uuid.UUID, int64) error
+		EnsureMaximumAtLeast(context.Context, uuid.UUID, int64) error
 	}); ok {
-		if err := repository.IncreaseMaximum(ctx, usageID, additional); err != nil {
+		if err := repository.EnsureMaximumAtLeast(ctx, usageID, actual); err != nil {
 			return actual, "", true
 		}
 	}

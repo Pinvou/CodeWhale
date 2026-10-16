@@ -2161,11 +2161,11 @@ impl Pinvou3Bridge {
             // pinvou3 override
             model: self.model(),
             workspace: self.workspace.clone(),
-            // CodeWhale #54 多根授权基建：空集经底座 normalize 后等价单根
-            // （workspace 置于位置 0），保持既有行为。
             // Input is EngineConfig::default(), not a caller-supplied root set.
             // Empty attachments preserve the single execution-root contract;
             // SessionRoots.ledger remains delegated-agent state, not tool authority.
+            // CodeWhale #54 多根授权基建：空集经底座 normalize 后等价单根
+            // （workspace 置于位置 0），保持既有行为。
             workspace_roots: Vec::new(),
             session_id: None,
             allow_shell: self.allow_shell(),

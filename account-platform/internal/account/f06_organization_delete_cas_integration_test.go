@@ -84,7 +84,7 @@ func TestF06OrganizationDeletionVersionAndTerminalScope(t *testing.T) {
 			t.Fatal("active organization deleted or changed", err)
 		}
 	})
-	if err = r.AdminSetOrganizationStatus(ctx, actor, org.ID, "DISABLED"); err != nil {
+	if err = r.AdminSetOrganizationStatus(ctx, actor, org.ID, state.Version, "DISABLED"); err != nil {
 		t.Fatal(err)
 	}
 	state, err = r.AdminOrganizationState(ctx, org.ID)

@@ -29,7 +29,7 @@ func TestClosedGrantPublicOwnerHarness(t *testing.T) {
 		t.Fatal(e)
 	}
 	migrations.Unlock(ctx, bc)
-	args := []string{"test", "-mod=readonly", "-tags=nomsgpack", "-count=1", "-json", "./internal/billing", "-run", "^(TestClosedGrantPublishedOwnerEffects|TestAccountClosureIsolationPreservesPriorAuditFacts|TestAccountClosureIsolationScrubsContactWithoutFinancialMutation|TestAccountClosurePreservesUnknownForcedRefundEvidence|TestAccountClosureRequiresAuthoritativeChargebackTerminal)$"}
+	args := []string{"test", "-mod=readonly", "-tags=nomsgpack", "-count=1", "-json", "./internal/billing", "-run", "^(TestClosedGrantPublishedOwnerEffects|TestAccountClosureIsolationPreservesPriorAuditFacts|TestAccountClosureIsolationScrubsContactWithoutFinancialMutation|TestAccountClosurePreservesUnknownForcedRefundEvidence|TestAccountClosureRequiresAuthoritativeChargebackTerminal|TestAccountClosureAssessmentIncludesMemberReservations|TestF08MembershipClosureReasonQuotaReplayPostgres|TestF08ClosedGrantConcurrentReceiptReplayPostgres)$"}
 	if runtime.GOOS != "windows" {
 		args = append(args, "-race")
 	}
