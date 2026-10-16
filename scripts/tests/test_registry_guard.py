@@ -18,7 +18,13 @@ tree, not in one-off manual runs:
   - the whole attribute scan runs on the lexed text: comments cannot
     fabricate a hit (block-comment pseudo `#[ignore]`/fn) and cannot hide
     one (a comment between `#[ignore]` and its fn keeps the binding, as
-    rustc does) — both round-9 review directions are pinned below.
+    rustc does) — both round-9 review directions are pinned below;
+  - string escapes are erased whole (round-10 review: a leftover escaped
+    quote read as an unclosed string and swallowed the fn), and the
+    `#[path]` value is read only from a string token the lexer vouches
+    for — a quoted path inside the attribute's comment cannot derail the
+    wiring, and an unparseable value raises instead of silently skipping
+    the wired module.
 
 `main()` shells out to cargo, so these tests exercise the pure filesystem
 half: the source scanner (`ignored_source_pins`) and the pin attribution
@@ -312,6 +318,45 @@ class ModulePathTests(GuardFixture):
             ],
         )
 
+    def test_path_value_behind_quote_bearing_comment_is_wired(self):
+        # Round-10 review reproduction (comment 4292115820), positive
+        # control: the first `"` after the attribute head sits INSIDE a
+        # block comment, and the old raw first-quote scan wired the module
+        # to the comment's decoy path — the real file silently left the lib
+        # graph. The value must be read only from a string token the lexer
+        # vouches for. The target deliberately does NOT match the mod name
+        # (no conventional src/<name>.rs candidate), so the `#[path]`
+        # wiring is the only route in — a decoy read cannot be masked by
+        # the conventional resolution.
+        root = self._crate_root(
+            {
+                "lib.rs": (
+                    "#[path = /* \"decoy.rs\" */ \"real_target.rs\"]\n"
+                    "mod wired;\n"
+                ),
+                "real_target.rs": _IGNORED_PIN,
+            }
+        )
+        by_path, unattributable = self._scan(root)
+        self.assertEqual(sorted(by_path), ["wired::tests::critical_pin"])
+        self.assertEqual(unattributable, {})
+
+    def test_unparseable_path_value_fails_closed_not_silently_skipped(self):
+        # Round-10 review, the no-silent-skip half: a `#[path]` head whose
+        # value cannot be reliably parsed must abort the guard loudly — the
+        # old behavior quietly left the module out of the scan, which is
+        # exactly the fail-open direction for a pin silenced in that file.
+        with self.assertRaises(SystemExit):
+            self._ignored_sources(
+                {
+                    "lib.rs": (
+                        "#[path = \"unterminated.rs\n"
+                        "mod wired;\n"
+                    ),
+                    "unterminated.rs": _IGNORED_PIN,
+                }
+            )
+
     def test_path_attribute_inside_inline_module_is_not_wired(self):
         # Out of scope by design: a path attribute nested in an inline
         # module resolves against nested module directories; wiring it
@@ -442,6 +487,27 @@ class LexerRobustnessTests(GuardFixture):
         self.assertEqual(unattributable, {})
         self.assertEqual(list(by_path), ["tests::critical_pin"])
 
+    def test_unterminated_string_makes_whole_file_fail_closed(self):
+        # Round-10 same-class hardening of the lexer-trust check: a string
+        # that never closes used to leave the file "clean" while every
+        # following line was swallowed as string content — a well-formed
+        # hit before it surfaced as a trusted full path. Untrusted parse
+        # must fail closed on the bare fn name instead.
+        by_path, unattributable = self._ignored_sources(
+            {
+                "lib.rs": (
+                    "#[test]\n"
+                    "#[ignore]\n"
+                    "fn critical_pin() {\n"
+                    "}\n"
+                    "\n"
+                    "let tail = \"this string never closes\n"
+                ),
+            }
+        )
+        self.assertEqual(by_path, {})
+        self.assertIn("critical_pin", unattributable)
+
 
 class ScannerParsingTests(GuardFixture):
     """Attribute-run parsing forms the round-6 rewrite claims to cover,
@@ -554,6 +620,30 @@ class ScannerParsingTests(GuardFixture):
         self.assertEqual(
             by_path,
             {"critical_pin": [f"{src}:2"], "second_pin": [f"{src}:9"]},
+        )
+        self.assertEqual(unattributable, {})
+
+    def test_escaped_quote_in_ignore_reason_is_detected(self):
+        # Round-10 review reproduction (comment 4292115811), positive
+        # control: the `\"` escape used to leave its escaped quote in the
+        # lexed text, which the attribute parser re-read as an unclosed
+        # string and swallowed the fn — a silenced pin passed the gate
+        # (exit 0 on a mock libtest manifest). The escaped character must
+        # be blanked together with the backslash.
+        root = self._crate_root(
+            {
+                "lib.rs": (
+                    "#[test]\n"
+                    "#[ignore = \"one quote: \\\"\"]\n"
+                    "fn critical_pin() {\n"
+                    "}\n"
+                ),
+            }
+        )
+        by_path, unattributable = self._scan(root)
+        self.assertEqual(
+            by_path,
+            {"critical_pin": [self._src_path(root, "lib.rs") + ":2"]},
         )
         self.assertEqual(unattributable, {})
 

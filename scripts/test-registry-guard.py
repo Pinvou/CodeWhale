@@ -199,15 +199,84 @@ _MOD_TOKEN_RE = re.compile(
     r"\bmod\s+([A-Za-z_][A-Za-z0-9_]*)\s*(\{)?|\{|\}"
 )
 _PATH_ATTR_HEAD_RE = re.compile(r"#\[\s*path\s*=")
-_PATH_VALUE_RE = re.compile(r'"([^"]*)"')
+
+
+def _string_value_after(lines, li, col):
+    """First string-literal payload in the raw source at/after (li, col),
+    or None. Lexes raw lines with the same construct awareness as
+    `_strip_code` — line and nested block comments are transparent — so
+    only a string token the lexer vouches for is read (round-10 review:
+    the old raw first-quote scan wired `#[path = /* "decoy.rs" */ ...]`
+    to the comment's quote, and the real file silently left the lib
+    graph). The scan starts at an attribute head, before its value, so no
+    string can be open on entry. Escape sequences are not decoded (repo
+    wiring paths are plain literals; an escaped form just resolves to a
+    nonexistent file, and cargo — not this guard — is the authority on
+    whether a wired file must exist, e.g. `#[cfg]`-gated platform
+    wiring)."""
+    block_depth = 0
+    while li < len(lines):
+        line = lines[li]
+        k = col
+        col = 0
+        n = len(line)
+        while k < n:
+            ch = line[k]
+            nxt = line[k + 1 : k + 2]
+            if block_depth > 0:
+                if ch == "/" and nxt == "*":
+                    block_depth += 1
+                    k += 2
+                    continue
+                if ch == "*" and nxt == "/":
+                    block_depth -= 1
+                    k += 2
+                    continue
+                k += 1
+                continue
+            if ch == "/" and nxt == "/":
+                break  # rest of the line is comment
+            if ch == "/" and nxt == "*":
+                block_depth += 1
+                k += 2
+                continue
+            if ch == '"':
+                j = k + 1
+                while j < n:
+                    if line[j] == "\\":
+                        j += 2
+                        continue
+                    if line[j] == '"':
+                        return line[k + 1 : j]
+                    j += 1
+                return None  # unterminated: refuse rather than guess
+            if ch in "rb" and not (
+                line[k - 1 : k].isalnum() or line[k - 1 : k] == "_"
+            ):
+                j = k + (ch == "b")
+                if j < n and line[j] == "r":
+                    j += 1
+                    hashes = j
+                    while j < n and line[j] == "#":
+                        j += 1
+                    hashes = j - hashes
+                    if j < n and line[j] == '"':
+                        close = line.find('"' + "#" * hashes, j + 1)
+                        return line[j + 1 : close] if close != -1 else None
+            k += 1
+    return None
 
 
 def _strip_code(line, state):
     """Blank (with spaces, positions preserved) everything that is not
     structural Rust code: line comments, nested block comments, double-
-    quoted strings (backslash escapes honoured), raw strings (`r"..."`,
-    `r#"..."#`, may span lines), char literals (including `'\\u{7d}'`, whose
-    braces must not count toward nesting), and lifetime/label ticks (`'a`).
+    quoted strings (backslash escapes honoured — the escaped character is
+    blanked together with the backslash, so no string-interior character
+    survives to masquerade as code; round-10 review: a leftover escaped
+    quote read as an unclosed string and swallowed the attributed fn),
+    raw strings (`r"..."`, `r#"..."#`, may span lines), char literals
+    (including `'\\u{7d}'`, whose braces must not count toward nesting),
+    and lifetime/label ticks (`'a`).
     `state` is `[in_str, block_depth, raw_hashes]`, carried across lines by
     the caller. Stripped text feeds brace tracking and `mod` detection, so a
     brace inside a string/comment/char literal must not skew the module
@@ -232,6 +301,12 @@ def _strip_code(line, state):
         if in_str:
             out[k] = " "
             if line[k] == "\\":
+                # blank the escaped character too: leaving it would put a
+                # string-interior `"` into the stripped text, which the
+                # attribute parser re-lexes as an unclosed string (it would
+                # swallow the fn the run attaches to and drop a real hit)
+                if k + 1 < n:
+                    out[k + 1] = " "
                 k += 2
                 continue
             if line[k] == '"':
@@ -388,23 +463,30 @@ def _module_stacks(lines):
                     # inline `mod s {}` lives under `s/`)
                     externals.append((tok.group(1), stacks[idx]))
     in_str, block_depth, raw_hashes = state
-    if depth != 0 or block_depth != 0 or raw_hashes is not None:
+    if depth != 0 or block_depth != 0 or in_str or raw_hashes is not None:
+        # an in_str left set means a string never closed on its line: every
+        # following line was swallowed as string content, so hits downstream
+        # are invisible — the file's parse cannot be trusted (same
+        # fail-closed class as unbalanced braces/comments; round-10)
         clean = False
     return stacks, externals, clean, stripped_lines
 
 
-def _path_wired_mods(stripped, lines, stacks):
+def _path_wired_mods(stripped, lines, stacks, path):
     """`#[path = "..."] mod <name>;` pairs whose attribute run attaches to
     the declaration. Run delimitation is lexed (`stripped` from
     `_strip_code`): blanks and comments are transparent within the run and
     commented-out attributes/declarations are invisible — Rust attachment,
     in both the "comment breaks the wiring" and "pseudo attribute inside a
-    block comment fabricates one" directions (round-9 review). The path
-    VALUE itself is read from the raw `lines` at the aligned position
-    (the lexer blanks string payloads). Only file-top-level declarations
-    are wired (`stacks[line]` empty): a path attribute inside an inline
-    module block resolves against nested module directories, which is not
-    modelled. Returns [(mod_name, path_value)]."""
+    block comment fabricates one" directions (round-9 review). The VALUE is
+    read only from a string token `_string_value_after` vouches for in the
+    raw block (the attribute head's position maps 1:1 because the lexer
+    blanks with positions preserved); an attribute head whose value cannot
+    be reliably parsed raises instead of silently skipping the wired module
+    (round-10 review). Only file-top-level declarations are wired
+    (`stacks[line]` empty): a path attribute inside an inline module block
+    resolves against nested module directories, which is not modelled.
+    Returns [(mod_name, path_value)]."""
     wired = []
     i = 0
     n = len(stripped)
@@ -413,17 +495,24 @@ def _path_wired_mods(stripped, lines, stacks):
             i += 1
             continue
         end, _ = _parse_attribute(stripped, i)
-        match = None
+        value = None
         if not stacks[i]:
-            head = _PATH_ATTR_HEAD_RE.search("\n".join(stripped[i:end]))
+            joined = "\n".join(stripped[i:end])
+            head = _PATH_ATTR_HEAD_RE.search(joined)
             if head is not None:
-                raw_block = "\n".join(lines[i:end])
-                quote = raw_block.find('"', head.end())
-                if quote != -1:
-                    value = _PATH_VALUE_RE.search(raw_block[quote:])
-                    if value is not None:
-                        match = value
-        if match:
+                nl = joined.rfind("\n", 0, head.end())
+                value = _string_value_after(
+                    lines[i:end],
+                    joined.count("\n", 0, head.end()),
+                    head.end() if nl == -1 else head.end() - nl - 1,
+                )
+                if value is None:
+                    raise SystemExit(
+                        "test-registry-guard: cannot read the #[path] value "
+                        f"at {path}:{i + 1} — refusing to silently skip the "
+                        "wired module"
+                    )
+        if value is not None:
             j = end
             while j < n and not stripped[j].strip():
                 j += 1
@@ -436,7 +525,7 @@ def _path_wired_mods(stripped, lines, stacks):
                     and not tok.group(2)
                     and decl[tok.end() :].strip().startswith(";")
                 ):
-                    wired.append((tok.group(1), match.group(1)))
+                    wired.append((tok.group(1), value))
                     i = j + 1
                     continue
         i = end
@@ -556,7 +645,7 @@ def ignored_source_pins():
         # exist for these, so both resolutions coexist without double
         # visits (the graph dedups by realpath).
         file_dir = os.path.dirname(path)
-        for name, rel in _path_wired_mods(stripped, lines, stacks):
+        for name, rel in _path_wired_mods(stripped, lines, stacks, path):
             candidate = os.path.normpath(os.path.join(file_dir, rel))
             if os.path.isfile(candidate):
                 queue.append((candidate, base + [name]))
