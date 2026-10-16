@@ -25,6 +25,7 @@ import { groupSessionsWithProjects, resolveSessionProjectId, needsAddFolderConfi
 import { ProjectGroupHeader } from '../features/projects/ProjectGroupHeader.jsx';
 import { classifyRebindError, mergeRebindCarryoverIds } from '../features/projects/rebindErrors.js';
 import { runSessionBatch } from '../shared/session-management.js';
+import { filterSessionsByTab, groupSessionsByLocalDate, sessionListComparator } from '../shared/session-list-pipeline.js';
 import { isLlmApiAccountVisible } from '../shared/model-options.js';
 import { can, isWeb } from '../shared/platform.js';
 import { errorCode, localizedErrorMessage } from '../shared/user-facing-error.js';
@@ -2230,25 +2231,9 @@ const NAV_PREFETCH = {
       // changing the callback identity per render just to read a value.
       const allSidebarTasksRef = useRef(allSidebarTasks);
       allSidebarTasksRef.current = allSidebarTasks;
-      const sidebarTaskHistory = useMemo(() => allSidebarTasks
-        .filter((chat) => {
-          if (taskListFilter === 'pinned') return !!chat.pinned;
-          if (taskListFilter === 'code') return chat.taskKind === 'codex';
-          if (taskListFilter === 'scheduled') return chat.taskKind === 'scheduled';
-          return true;
-        })
-        .sort((a, b) => {
-          if (taskListSort === 'pinned_first' && !!a.pinned !== !!b.pinned) {
-            return a.pinned ? -1 : 1;
-          }
-          const aTime = (taskListSort === 'pinned_first' && a.pinned)
-            ? (a.pinnedAt || a.updatedAt)
-            : (a.updatedAt || a.pinnedAt);
-          const bTime = (taskListSort === 'pinned_first' && b.pinned)
-            ? (b.pinnedAt || b.updatedAt)
-            : (b.updatedAt || b.pinnedAt);
-          return String(bTime || '').localeCompare(String(aTime || ''));
-        }), [allSidebarTasks, taskListFilter, taskListSort]);
+      const sidebarTaskHistory = useMemo(() => (
+        filterSessionsByTab(allSidebarTasks, taskListFilter).sort(sessionListComparator(taskListSort))
+      ), [allSidebarTasks, taskListFilter, taskListSort]);
 
       // 任务列表按日期堆叠:今天默认展开、以往默认折叠;组内顺序沿用上面的筛选+排序结果,
       // 组间按日期倒序,无时间戳的落 'unknown' 组沉底。
@@ -2258,23 +2243,10 @@ const NAV_PREFETCH = {
       const sidebarPinnedHoisted = useMemo(() => (taskListSort === 'pinned_first'
         ? sidebarTaskHistory.filter(chat => !!chat.pinned)
         : []), [taskListSort, sidebarTaskHistory]);
-      const sidebarTaskGroups = useMemo(() => {
-        const groups = [];
-        const byDate = new Map();
-        sidebarTaskHistory.forEach(chat => {
-          if (sidebarPinnedHoisted.length && chat.pinned) return;
-          const key = localDateKey(chat.updatedAt || chat.pinnedAt);
-          if (!byDate.has(key)) byDate.set(key, []);
-          byDate.get(key).push(chat);
-        });
-        byDate.forEach((rows, key) => { groups.push({ key, rows }); });
-        groups.sort((a, b) => {
-          if (a.key === 'unknown') return 1;
-          if (b.key === 'unknown') return -1;
-          return b.key.localeCompare(a.key);
-        });
-        return groups;
-      }, [sidebarTaskHistory, sidebarPinnedHoisted]);
+      const sidebarTaskGroups = useMemo(() => groupSessionsByLocalDate(
+        sidebarTaskHistory.filter(chat => !(sidebarPinnedHoisted.length && chat.pinned)),
+        (chat) => localDateKey(chat.updatedAt || chat.pinnedAt),
+      ), [sidebarTaskHistory, sidebarPinnedHoisted]);
 
       // Project view (formerly the "Code" form): every session bound to a
       // real directory — code/ACP sessions and #445 bound work sessions — is

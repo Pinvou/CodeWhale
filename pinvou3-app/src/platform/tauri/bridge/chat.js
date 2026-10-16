@@ -40,14 +40,27 @@
   // Composer 草稿是纯前端短期状态：写入时不 notify，避免每次按键都克隆
   // 整个 chat slice 并触发 App 重渲染。会话切换本身会 notify，ChatView 会在
   // activeSessionId 变化后主动读取目标 working set 的草稿。
-  var pendingTaskDraftRecovery = null;
+  // Retained recovery for a task draft whose send was abandoned mid-await:
+  // when the user moved on to another session (or the session creation
+  // failed), the text cannot go into the unrelated active composer, so it is
+  // kept in this single in-memory slot. Returning to the draft consumes it
+  // once (append-only); the slot is not keyed by draft identity — the next
+  // draft return is the one chance to hand the text back before it is lost.
+  const pendingTaskDraftRecovery = { buffer: null };
   function getComposerDraft() {
-    if (pendingTaskDraftRecovery && pendingTaskDraftRecovery.epoch !== Number(state.draftEpoch || 0)) {
-      pendingTaskDraftRecovery = null;
-    }
-    if (pendingTaskDraftRecovery && !state.activeSessionId) {
-      state.composerDraft = [state.composerDraft, pendingTaskDraftRecovery.text].filter(Boolean).join("\n");
-      pendingTaskDraftRecovery = null;
+    // Consumed once on returning to the draft, never while an unrelated
+    // session is open. No epoch gate: re-entering the draft always allocates
+    // a new epoch (enterDraft increments unconditionally), so an epoch match
+    // could never fire and the retained text would be silently dropped.
+    if (pendingTaskDraftRecovery.buffer && !state.activeSessionId) {
+      state.composerDraft = [state.composerDraft, pendingTaskDraftRecovery.buffer.text].filter(Boolean).join("\n");
+      // The text is visibly back in the live draft: the voice association
+      // follows it, or a manual retry would be orphaned in the dead
+      // recording-time epoch.
+      if (pendingTaskDraftRecovery.buffer.operationId) {
+        voice().rebindVoiceOperationToDraft(pendingTaskDraftRecovery.buffer.operationId, state.draftEpoch);
+      }
+      pendingTaskDraftRecovery.buffer = null;
     }
     return String(state.composerDraft || "");
   }
@@ -1025,18 +1038,36 @@
     }
     const sid = owner.sessionId || owner.createdSessionId
       || (owner.operationId && voice().voiceOperationSessionId(owner.operationId));
+    // Every restore branch settles the submission (un-park + consume a
+    // queued dismiss); without it a rejected send would leave the operation
+    // parked forever and never adoptable by a retry.
     if (sid) {
       if (owner.operationId) voice().completeVoiceSubmission(owner.operationId, sid, false);
       restoreSteerText(sid, text);
-    } else if (!state.activeSessionId && Number(state.draftEpoch || 0) === owner.draftEpoch) {
-      prefillComposer(text, true);
-    } else if (Number(state.draftEpoch || 0) === owner.draftEpoch) {
+    } else if (state.activeSessionId) {
       // Retain one departed draft in memory, never in the unrelated active session.
-      var retained = pendingTaskDraftRecovery && pendingTaskDraftRecovery.epoch === owner.draftEpoch
-        ? pendingTaskDraftRecovery.text : "";
-      pendingTaskDraftRecovery = { epoch: owner.draftEpoch, text: [retained, text].filter(Boolean).join("\n") };
+      if (owner.operationId) voice().completeVoiceSubmission(owner.operationId, null, false);
+      const retained = pendingTaskDraftRecovery.buffer ? pendingTaskDraftRecovery.buffer.text : "";
+      const retainedOperationId = pendingTaskDraftRecovery.buffer ? pendingTaskDraftRecovery.buffer.operationId : null;
+      pendingTaskDraftRecovery.buffer = {
+        text: [retained, text].filter(Boolean).join("\n"),
+        // The newest operation wins: the rebind on draft return adopts the
+        // most recent stranded send (one operation per manual send).
+        operationId: owner.operationId || retainedOperationId || null,
+      };
     } else {
-      return false;
+      // Back in the draft — any epoch, because re-entering the draft
+      // allocates a new one (enterDraft increments unconditionally).
+      if (owner.operationId) {
+        voice().completeVoiceSubmission(owner.operationId, null, false);
+        // The text is visibly back in the live draft: rebind the operation to
+        // the new epoch so a manual retry adopts it instead of orphaning the
+        // association in the dead recording-time epoch (the complete above
+        // may already have terminalized it via a queued cancel; the rebind
+        // refuses terminal operations).
+        voice().rebindVoiceOperationToDraft(owner.operationId, state.draftEpoch);
+      }
+      prefillComposer(text, true);
     }
     owner.restored = true;
     return true;

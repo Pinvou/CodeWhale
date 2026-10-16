@@ -148,6 +148,37 @@ mod consent_sync_tests {
             );
         });
     }
+
+    /// Round-33 MAJOR 2 (review #455): the connect-path consent-persist
+    /// failure copy emitted by `apply_skills_consent_sync` carries the ONE
+    /// shared frontend marker (`scope::CONSENT_SYNC_FAILURE_MARKER`) — the
+    /// localized template on the store cards keys on exactly this string, so
+    /// a rewording here must move the frontend matcher in the same commit.
+    /// Unlike ima.rs's inline-format pin, the shared emitter is drivable
+    /// directly: inject the persist failure and pin the REAL error text.
+    #[test]
+    fn skill_gate_consent_failure_message_keeps_the_frontend_marker() {
+        use crate::features::marketplace::scope::CONSENT_SYNC_FAILURE_MARKER;
+
+        with_temp_home("pinvou3-skillgate-consent-marker", || {
+            // Pre-warm: the first read persists the freeze verdict, settling
+            // that write so the failpoint below hits the consent SYNC's save.
+            let _ = load_disabled_bundles_for(ConnectorScope::Plain);
+            // The connect-path sync's persist FAILS.
+            let _failpoint =
+                crate::features::marketplace::scope::fail_next_disabled_bundles_write_for_test();
+            let error = super::apply_skills_consent_sync("wecom")
+                .expect_err("fixture: the injected persist error must surface");
+            assert!(
+                error.contains(CONSENT_SYNC_FAILURE_MARKER),
+                "the shipped message must carry the frontend-matched marker: {error}"
+            );
+            assert_eq!(
+                CONSENT_SYNC_FAILURE_MARKER, "persisting their default-off consent state failed",
+                "the marker value is the frontend contract (ToolStoreView consentFailure) — update both sides together"
+            );
+        });
+    }
 }
 
 #[cfg(test)]

@@ -39,6 +39,7 @@ import {
   observeCodeCopyButtons,
 } from '../conversation/code-block-copy.js';
 import { HomeModeSwitcher } from '../conversation/HomeModeSwitcher.jsx';
+import { shouldVirtualizeConversationTurns } from '../conversation/conversation-virtualization.js';
 import {
   conversationItemsForMode,
   projectDeepSeekConversation,
@@ -1282,7 +1283,11 @@ const openChatExternalUrl = (url) => {
         if (!el) return;
         autoScrollRef.current = true;
         setShowScrollBottom(false);
-        el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+        // Smooth gliding through a virtualized document mounts and unmounts
+        // rows for its whole duration while estimates go stale; jump instead
+        // (same decision as the overflowAnchor gate above).
+        const virtualized = shouldVirtualizeConversationTurns(conversationProjection.turns.length, scrollRef);
+        el.scrollTo({ top: el.scrollHeight, behavior: virtualized ? 'auto' : 'smooth' });
       }
 
       // Auto-scroll：只在原本贴底时滚内部容器到底（绝不动外层窗口，避免浏览历史时被拉回底部）
@@ -1798,7 +1803,6 @@ const openChatExternalUrl = (url) => {
         // later synchronous set in the same run (round-10 Major 1).
         let sceneStatus = null;
         let readyAutoClear = false;
-        console.warn('DBG post-welcome');
 
         if (!bridge.available) return false;
         const outgoing = String(text || '').trim();
@@ -1884,7 +1888,6 @@ const openChatExternalUrl = (url) => {
             }
           }
         }
-        console.warn('DBG pre-closer', JSON.stringify({ active: activeSessionIdRef.current, epoch: draftEpochRef.current }));
         setSceneStatusForSession(resolveSendCapabilityStatus({
           welcomeFailed: welcomeOptIn.failed,
           welcomeText: t.uiChat.welcomeOptInFailed,
@@ -2890,7 +2893,10 @@ const openChatExternalUrl = (url) => {
           <div ref={scrollRef} data-testid="chat-scroll"
             style={{
               ...responsiveGutterStyle,
-              overflowAnchor: 'none',
+              // Native scroll anchoring fights the virtualizer's absolute rows,
+              // but normal-flow timelines keep it so content-visibility estimate
+              // swaps stay compensated. Must match the timeline's own decision.
+              overflowAnchor: shouldVirtualizeConversationTurns(conversationProjection.turns.length, scrollRef) ? 'none' : undefined,
               ...(hasMessages ? {} : { paddingBottom: (composerH ? composerH + 48 : 160) + 'px' }),
             }}
             className={`flex-1 min-h-0 min-w-0 overflow-y-auto custom-scrollbar flex flex-col pt-20 max-sm:pt-16 ${hasMessages ? 'justify-start' : 'items-center justify-center'}`}>
