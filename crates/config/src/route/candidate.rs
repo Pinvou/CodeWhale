@@ -331,6 +331,10 @@ impl ReadyRouteCandidate {
     /// provenance. Catalog-, operator-config-, and roster-derived facts are
     /// absent, so re-stating the result on a later re-derivation cannot pin
     /// their stale values under host provenance.
+    ///
+    /// A `None`-valued host entry — an explicit clear, which no writer
+    /// produces today — is reconstructed as not declared and cannot ride
+    /// the carry.
     #[must_use]
     pub fn embedding_host_declared_limits(&self) -> Option<RouteLimits> {
         let mut declared = RouteLimits::default();
