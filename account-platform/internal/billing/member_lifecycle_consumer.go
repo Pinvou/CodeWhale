@@ -25,15 +25,25 @@ func (consumer *MemberLifecycleConsumer) Handle(ctx context.Context, event event
 		return events.ErrInvalidEvent
 	}
 	var payload struct {
-		OrganizationID    uuid.UUID `json:"organization_id"`
-		UserID            uuid.UUID `json:"user_id"`
-		MembershipStatus  string    `json:"membership_status"`
-		MembershipVersion int64     `json:"membership_version"`
+		OrganizationID    uuid.UUID       `json:"organization_id"`
+		UserID            uuid.UUID       `json:"user_id"`
+		MembershipStatus  string          `json:"membership_status"`
+		MembershipVersion int64           `json:"membership_version"`
+		Reason            json.RawMessage `json:"reason"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(event.Payload))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&payload) != nil || decoder.Decode(new(any)) != io.EOF || payload.OrganizationID == uuid.Nil || payload.UserID == uuid.Nil || payload.MembershipVersion != event.AggregateVersion || (payload.MembershipStatus != "ACTIVE" && payload.MembershipStatus != "SUSPENDED" && payload.MembershipStatus != "REVOKED") {
 		return events.ErrInvalidEvent
+	}
+	// Account closure adds explicit provenance to the same complete membership
+	// snapshot. Other reasons and reasons attached to live memberships are not
+	// part of this contract; an absent reason remains valid for ordinary events.
+	if payload.Reason != nil {
+		var reason string
+		if json.Unmarshal(payload.Reason, &reason) != nil || reason != "ACCOUNT_CLOSURE" || payload.MembershipStatus != "REVOKED" {
+			return events.ErrInvalidEvent
+		}
 	}
 	// Membership events carry complete state snapshots. This receiver can begin
 	// at a later version after stream retention, unlike incremental consumers

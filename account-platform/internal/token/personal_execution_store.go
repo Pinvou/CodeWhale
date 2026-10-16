@@ -211,8 +211,10 @@ func (r *PostgresRepository) MarkReserved(ctx context.Context, usageID, holdID, 
 	return tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) IncreaseMaximum(ctx context.Context, usageID uuid.UUID, additional int64) error {
-	if usageID == uuid.Nil || additional <= 0 {
+// EnsureMaximumAtLeast projects a confirmed reservation target without adding a
+// replayed acknowledgement twice. The existing deadline fence remains decisive.
+func (r *PostgresRepository) EnsureMaximumAtLeast(ctx context.Context, usageID uuid.UUID, confirmedTarget int64) error {
+	if usageID == uuid.Nil || confirmedTarget <= 0 {
 		return ErrForbidden
 	}
 	tx, err := r.pool.Begin(ctx)
@@ -228,7 +230,7 @@ func (r *PostgresRepository) IncreaseMaximum(ctx context.Context, usageID uuid.U
 	} else if pending {
 		return ErrForbidden
 	}
-	command, err := tx.Exec(ctx, `UPDATE usage_requests SET maximum_microcredits=maximum_microcredits+$2,updated_at=$3 WHERE id=$1 AND status IN ('RESERVED','UPSTREAM_ACTIVE','SETTLEMENT_PENDING','REVIEW')`, usageID, additional, r.now())
+	command, err := tx.Exec(ctx, `UPDATE usage_requests SET maximum_microcredits=GREATEST(maximum_microcredits,$2),updated_at=CASE WHEN maximum_microcredits<$2 THEN $3 ELSE updated_at END WHERE id=$1 AND status IN ('RESERVED','UPSTREAM_ACTIVE','SETTLEMENT_PENDING','REVIEW')`, usageID, confirmedTarget, r.now())
 	if err != nil {
 		return err
 	}

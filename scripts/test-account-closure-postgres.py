@@ -22,10 +22,15 @@ BILLING_ROOTS = {
     "TestAccountClosureIsolationScrubsContactWithoutFinancialMutation",
     "TestAccountClosurePreservesUnknownForcedRefundEvidence",
     "TestAccountClosureRequiresAuthoritativeChargebackTerminal",
+    "TestAccountClosureAssessmentIncludesMemberReservations",
+    "TestF08MembershipClosureReasonQuotaReplayPostgres",
+    "TestF08ClosedGrantConcurrentReceiptReplayPostgres",
 }
 CONTRACTS = [
     ("closure-combination", "./internal/billingschema", {"TestClosurePrivatePublicCombination"},
      {"": {"TestClosureClaimACKOrder"}}),
+    ("membership-closure-event", "./internal/billingschema",
+     {"TestF08AccountClosureMembershipEventConsumerPublicPostgres"}, {}),
     ("closed-grants", "./internal/billingschema", {"TestClosedGrantPublicOwnerHarness"},
      {"": BILLING_ROOTS}),
     ("gift-closure", "./internal/billingschema", {"TestGiftClosurePublicHarness"},

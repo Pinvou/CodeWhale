@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import re
 from pathlib import Path
 import unittest
 import tempfile
@@ -22,6 +23,26 @@ def stream(*events):
 
 
 class ClosurePostgresResults(unittest.TestCase):
+    def test_current_membership_and_assessment_roots_cannot_silently_drop(self):
+        original = {"TestClosedGrantPublishedOwnerEffects", "TestAccountClosureIsolationPreservesPriorAuditFacts",
+                    "TestAccountClosureIsolationScrubsContactWithoutFinancialMutation",
+                    "TestAccountClosurePreservesUnknownForcedRefundEvidence",
+                    "TestAccountClosureRequiresAuthoritativeChargebackTerminal"}
+        expected = original | {"TestAccountClosureAssessmentIncludesMemberReservations",
+                               "TestF08MembershipClosureReasonQuotaReplayPostgres",
+                               "TestF08ClosedGrantConcurrentReceiptReplayPostgres"}
+        self.assertEqual(runner.BILLING_ROOTS, expected)
+        harness = (runner.ROOT / "account-platform/internal/billingschema/account_closed_grants_public_test.go").read_text(encoding="utf-8")
+        selected = re.search(r'"-run", "\^\(([^"]+)\)\$"', harness)
+        self.assertIsNotNone(selected)
+        self.assertEqual(set(selected.group(1).split("|")), expected)
+        for missing in expected:
+            with self.subTest(missing=missing), self.assertRaises(RuntimeError):
+                runner.verify_results(stream(*({"Action": "pass", "Test": name} for name in sorted(expected - {missing}))), expected)
+        events = [row for row in runner.CONTRACTS if row[0] == "membership-closure-event"]
+        self.assertEqual(events, [("membership-closure-event", "./internal/billingschema",
+                                 {"TestF08AccountClosureMembershipEventConsumerPublicPostgres"}, {})])
+
     def test_failed_child_diagnostics_are_visible_without_becoming_success(self):
         raw = stream({"Action": "output", "Test": "Root", "Output": "controlled failure detail\n"},
                      {"Action": "fail", "Test": "Root"})

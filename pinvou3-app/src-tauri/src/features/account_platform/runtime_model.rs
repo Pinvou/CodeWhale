@@ -56,6 +56,41 @@ impl std::fmt::Display for BoundModelAbsent {
 }
 impl std::error::Error for BoundModelAbsent {}
 
+#[derive(Debug)]
+struct BoundLegacyModelAbsent;
+
+impl std::fmt::Display for BoundLegacyModelAbsent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("account platform bound legacy model name is absent from the catalog")
+    }
+}
+impl std::error::Error for BoundLegacyModelAbsent {}
+
+fn is_legacy_model_name(reference: &str) -> bool {
+    // Old metadata contains provider model names rather than catalog UUIDs.
+    // Do not reinterpret malformed UUID-shaped identities, empty/control text,
+    // or unbounded data as trusted local recovery evidence.
+    if reference.is_empty()
+        || reference.len() > 256
+        || !reference
+            .bytes()
+            .all(|value| value.is_ascii_alphanumeric() || b"-_.:/".contains(&value))
+        || !reference.bytes().any(|value| value.is_ascii_alphabetic())
+    {
+        return false;
+    }
+    let groups: Vec<_> = reference.split('-').collect();
+    let uuid_shape = groups.iter().map(|group| group.len()).eq([8, 4, 4, 4, 12])
+        || reference.to_ascii_lowercase().starts_with("urn:uuid:")
+        || ((3..=4).contains(&groups.len())
+            && groups[0].len() == 8
+            && groups[0].bytes().all(|value| value.is_ascii_hexdigit())
+            && groups[1..].iter().all(|group| {
+                group.len() == 4 && group.bytes().all(|value| value.is_ascii_hexdigit())
+            }));
+    uuid::Uuid::parse_str(reference).is_err() && !uuid_shape
+}
+
 fn runtime_model_limits(body: serde_json::Value, model_id: &str) -> Result<RuntimeModelLimits> {
     let mut catalog: RuntimeCatalog =
         serde_json::from_value(body).context("decode account platform model catalog")?;
@@ -96,10 +131,13 @@ fn runtime_model_limits(body: serde_json::Value, model_id: &str) -> Result<Runti
                     && item.display_name.trim().eq_ignore_ascii_case(reference))
         })
         .ok_or_else(|| {
-            // Only an already-bound UUID absent from a decoded catalog is lifecycle evidence.
-            // Malformed catalogs, capabilities and legacy names keep their original errors.
+            // A legacy name never changes to a different model automatically.
+            // Only absence from a fully validated directory offers explicit,
+            // session-local replacement; malformed directory/identity errors do not.
             if uuid::Uuid::parse_str(reference).is_ok_and(|id| !id.is_nil()) {
                 anyhow!(BoundModelAbsent)
+            } else if is_legacy_model_name(reference) {
+                anyhow!(BoundLegacyModelAbsent)
             } else {
                 anyhow!("account platform model {model_id} is absent from the catalog")
             }
@@ -217,12 +255,16 @@ impl RuntimeModelProvider for AccountPlatformRuntimeModelProvider {
         let limits = match runtime_model_limits(catalog_response.body, session_model_ref) {
             Ok(limits) => limits,
             Err(error) => {
-                if error.downcast_ref::<BoundModelAbsent>().is_some() {
+                if error.downcast_ref::<BoundModelAbsent>().is_some()
+                    || error.downcast_ref::<BoundLegacyModelAbsent>().is_some()
+                {
                     use crate::features::assistant::timing::{ModelRejection, ModelRejectionCode};
-                    if let (Some(owner), Some(rejection)) = (
-                        timing_owner.as_ref(),
-                        ModelRejection::new(ModelRejectionCode::Unavailable, session_model_ref),
-                    ) {
+                    let rejection = if error.downcast_ref::<BoundLegacyModelAbsent>().is_some() {
+                        Some(ModelRejection::legacy_unavailable())
+                    } else {
+                        ModelRejection::new(ModelRejectionCode::Unavailable, session_model_ref)
+                    };
+                    if let (Some(owner), Some(rejection)) = (timing_owner.as_ref(), rejection) {
                         self.model_proxy.record_prepare_rejection(
                             &request.session_id,
                             owner,
@@ -295,6 +337,83 @@ mod tests {
     };
     use crate::platform::credential_store::{CredentialEditAction, CredentialState};
     use crate::platform::prefs::{ModelPreset, SavedModel};
+
+    #[test]
+    fn missing_legacy_binding_offers_only_explicit_reselection() {
+        let catalog = json!({ "catalog_version": 1, "items": [{
+            "model_id": "0199a100-0001-7000-8000-000000000107",
+            "display_name": "deepseek-flash",
+            "model_capability_version_id": "0199a100-0001-7000-8000-000000000201",
+            "context_length": 8192, "maximum_output_tokens": 1024
+        }] });
+        let legacy = "deepseek-v4-flash";
+        let error = runtime_model_limits(catalog.clone(), legacy).unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<super::BoundLegacyModelAbsent>()
+                .is_some()
+        );
+        assert!(error.downcast_ref::<super::BoundModelAbsent>().is_none());
+        // The existing exact current-name lookup still works; absence never
+        // changes a saved old name into the newer similar directory name.
+        let current = runtime_model_limits(catalog, "deepseek-flash").unwrap();
+        assert_eq!(
+            current.gateway_model_id,
+            "0199a100-0001-7000-8000-000000000107"
+        );
+        assert_eq!(legacy, "deepseek-v4-flash");
+        for name in ["deepseek-chat", "abcdefghijklmnopqrstuvwxyzabcdef"] {
+            let error =
+                runtime_model_limits(json!({"catalog_version":1,"items":[]}), name).unwrap_err();
+            assert!(
+                error
+                    .downcast_ref::<super::BoundLegacyModelAbsent>()
+                    .is_some(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_identity_or_catalog_cannot_prove_legacy_absence() {
+        for reference in [
+            "",
+            " ",
+            "old model",
+            "bad\nmodel",
+            "00000000-0000-0000-0000-000000000000",
+            "0199a100-0001-7000-8000-00000000010z",
+            "0199a100-0001-7000-8000",
+            "xxxxxxxx-0001-7000-8000-000000000107",
+            &"a".repeat(257),
+        ] {
+            let error =
+                runtime_model_limits(json!({ "catalog_version": 1, "items": [] }), reference)
+                    .unwrap_err();
+            assert!(
+                error
+                    .downcast_ref::<super::BoundLegacyModelAbsent>()
+                    .is_none(),
+                "{reference:?}"
+            );
+        }
+        for catalog in [
+            json!({ "catalog_version": 0, "items": [] }),
+            json!({ "catalog_version": 1, "items": [{ "model_id": "bad" }] }),
+            json!({ "catalog_version": 1, "items": [{ "model_id": "0199a100-0001-7000-8000-000000000107", "display_name": "other", "model_capability_version_id": "bad", "context_length": 8192, "maximum_output_tokens": 1024 }] }),
+        ] {
+            let error = runtime_model_limits(catalog, "deepseek-v4-flash").unwrap_err();
+            assert!(
+                error
+                    .downcast_ref::<super::BoundLegacyModelAbsent>()
+                    .is_none()
+            );
+        }
+        assert!(
+            super::is_legacy_model_name("not-a-uuid"),
+            "a normal finite name differs from a malformed UUID-shaped identity"
+        );
+    }
 
     fn ordinary_model() -> SavedModel {
         SavedModel {

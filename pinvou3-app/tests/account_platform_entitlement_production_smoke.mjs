@@ -33,7 +33,7 @@ const server = createServer(async (request, response) => {
     response.writeHead(302, { Location: url.searchParams.get('return_to') }); return response.end();
   }
   if (url.pathname === '/api/session') return json(response, { authenticated: true, csrf_token: csrf });
-  if (url.pathname === '/api/account/v1/account/bootstrap') return json(response, { user_id: actor, status: 'ACTIVE', personal_permissions: [], platform_permissions: permission ? ['platform.billing.repairs.request', ...(mode === 'navigation' ? ['platform.users.read'] : [])] : [] });
+  if (url.pathname === '/api/account/v1/account/bootstrap') return json(response, { user_id: actor, status: 'ACTIVE', active_context: { context_type: 'PERSONAL', organization_id: null, membership_version: 1, context_version: 1, authorization_version: 1, personal_authorization_version: 1, platform_authorization_version: 1, organization_authorization_version: 1, permissions: [] }, personal_permissions: [], platform_permissions: permission ? ['platform.billing.repairs.request', ...(mode === 'navigation' ? ['platform.users.read'] : [])] : [] });
   if (url.pathname === '/api/admin/account/admin/v1/users') return json(response, { items: [], has_more: false });
   if (url.pathname === '/api/admin/account/admin/v2/approval-command-prechecks') {
     assert.equal(request.method, 'POST'); assert.equal(request.headers['x-csrf-token'], csrf);

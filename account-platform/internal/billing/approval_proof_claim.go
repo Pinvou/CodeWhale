@@ -133,8 +133,15 @@ func (r *PostgresRepository) ClaimBillingApprovalProof(ctx context.Context, bind
 func (f billingTxProofFacts) ledgerRepairPlan(ctx context.Context, input LedgerRepairCommandInput) (LedgerRepairPlan, error) {
 	var policyVersion, schemaVersion, version int64
 	var state string
-	if err := f.tx.QueryRow(ctx, `SELECT policy_version,snapshot_schema_version,state,version FROM billing_approval_command_activations WHERE command_type=$1`, ledgerRepairCommand).
-		Scan(&policyVersion, &schemaVersion, &state, &version); err != nil || state != "ACTIVE" || version < 1 {
+	err := f.tx.QueryRow(ctx, `SELECT policy_version,snapshot_schema_version,state,version FROM billing_approval_command_activations WHERE command_type=$1`, ledgerRepairCommand).
+		Scan(&policyVersion, &schemaVersion, &state, &version)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return LedgerRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	if err != nil {
+		return LedgerRepairPlan{}, err
+	}
+	if state != "ACTIVE" || version < 1 {
 		return LedgerRepairPlan{}, ErrApprovalSnapshotMismatch
 	}
 	return ledgerRepairPlanFrom(ctx, f.tx, input, policyVersion, schemaVersion, version)

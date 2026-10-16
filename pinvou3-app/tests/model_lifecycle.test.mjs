@@ -5,9 +5,12 @@ import { latestModelLifecycleRejection, isModelLifecycleRejection } from '../src
 import { createNativeLane, hydrateNativeLane, appendLocalUserMessage, removeLocalUserMessage, applyNativeChatEvent, refreshNativeTurnTimeline } from '../src/features/codex/code-native-lane.js';
 
 const rejection = { schema_version: 1, code: 'MODEL_UNAVAILABLE', model_id: '01a08b7a-654d-7e8d-8a7c-87b4506f2c7c' };
+const legacyRejection = { schema_version: 1, code: 'MODEL_UNAVAILABLE', model_id: '', legacy_binding: true };
 const start = (id, timestamp = 1) => ({ event: 'user_start', turn_id: id, timestamp });
 const done = (id, marker = rejection, status = 'Failed', timestamp = 2) => ({ event: 'assistant_done', turn_id: id, timestamp, status, model_rejection: marker });
 for (const status of ['Failed', 'send_error']) assert.deepEqual(latestModelLifecycleRejection([start('a'), done('a', rejection, status)]), rejection);
+for (const status of ['Failed', 'send_error']) assert.deepEqual(latestModelLifecycleRejection([start('a'), done('a', legacyRejection, status)]), legacyRejection);
+for (const value of [{ ...legacyRejection, model_id: 'deepseek-v4-flash' }, { ...legacyRejection, model_id: rejection.model_id }, { ...legacyRejection, code: 'MODEL_DEPRECATED' }, { ...legacyRejection, legacy_binding: false }, { ...rejection, legacy_binding: 'true' }, { ...rejection, legacy_binding: null }]) assert.equal(isModelLifecycleRejection(value), false);
 for (const status of ['Completed', 'succeeded', 'Cancelled', 'Interrupted', '', 'unknown']) assert.equal(latestModelLifecycleRejection([start('a'), done('a', rejection, status)]), null);
 for (const code of ['MODEL_UNAVAILABLE', 'MODEL_DEPRECATED']) assert.equal(isModelLifecycleRejection({ ...rejection, code }), true);
 for (const value of [{ ...rejection, schema_version: 2 }, { ...rejection, model_id: 'not-a-uuid' }, { ...rejection, model_id: '00000000-0000-0000-0000-000000000000' }, { ...rejection, code: 'MODEL_REMOVED' }]) assert.equal(isModelLifecycleRejection(value), false);
