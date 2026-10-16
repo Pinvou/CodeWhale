@@ -2,7 +2,7 @@
 // key on the exact shared marker string the Rust emitters pin
 // (scope::CONSENT_SYNC_FAILURE_MARKER — asserted on the Rust side by
 // skill_gate_consent_failure_message_keeps_the_frontend_marker in
-// skill_gate.rs). A backend or frontend rewording must move both sides in the
+// app/connector_consent_tests.rs). A backend or frontend rewording must move both sides in the
 // same commit; this source-text assertion is the frontend leg of that pin.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -133,12 +133,16 @@ assertRoutesThroughSharedHelper('marketplace', marketplaceSrc);
 
 // (c) The skill-gate channel's Rust leg.
 const skillGateSrc = readFileSync(join(rustDir, 'connectors/skill_gate.rs'), 'utf8');
+const connectorConsentTests = readFileSync(
+  join(root, 'src-tauri/src/app/connector_consent_tests.rs'),
+  'utf8',
+);
 // Pin the Rust-side VALUE test by name — a rename or
 // rewrite that left the constant referenced only from a comment would
 // otherwise hollow this leg silently.
 assert.ok(
-  skillGateSrc.includes('fn skill_gate_consent_failure_message_keeps_the_frontend_marker'),
-  'skill_gate.rs must keep the Rust-side value contract test this leg leans on (fn skill_gate_consent_failure_message_keeps_the_frontend_marker)',
+  connectorConsentTests.includes('fn skill_gate_consent_failure_message_keeps_the_frontend_marker'),
+  'app composition tests must keep the Rust-side value contract test this leg leans on (fn skill_gate_consent_failure_message_keeps_the_frontend_marker)',
 );
 assertRoutesThroughSharedHelper('skill_gate', skillGateSrc);
 

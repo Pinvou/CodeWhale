@@ -869,6 +869,31 @@ pub struct CodePermissionPrefs {
     pub yolo_confirmed: bool,
 }
 
+/// Explicit B-local remote authorization, independent of interactive lane defaults.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct RemoteTaskPermissionPrefs {
+    pub chat: Option<SerializableMode>,
+    pub code: Option<SerializableMode>,
+}
+
+impl<'de> Deserialize<'de> for RemoteTaskPermissionPrefs {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let mode = |field| match value.get(field).and_then(serde_json::Value::as_str) {
+            Some("plan") => Some(SerializableMode::Plan),
+            Some("yolo") => Some(SerializableMode::Yolo),
+            _ => None,
+        };
+        // Invalid remote policy disables only its lane, never the rest of UserPrefs.
+        Ok(Self {
+            chat: mode("chat"),
+            code: mode("code"),
+        })
+    }
+}
+
 /// The work lane's global default mode.
 /// Parallel to the code lane (`code_permission.last_mode`) — each workspace
 /// lane keeps an independent global default; written only by an explicit
@@ -915,6 +940,7 @@ pub struct UserPrefs {
     pub pet: PetPrefs,
     pub sidebar: SidebarPrefs,
     pub code_permission: CodePermissionPrefs,
+    pub remote_task_permissions: RemoteTaskPermissionPrefs,
     pub mode_defaults: ModeDefaultPrefs,
     /// Global Alt voice shortcut switch (native keyboard hook, currently
     /// effective on Windows only; other platforms keep the in-window Alt
@@ -992,6 +1018,56 @@ impl UserPrefs {
     pub fn load() -> Self {
         let _guard = lock_user_prefs();
         Self::load_unlocked_with_migration(true).0
+    }
+
+    /// One read-only settings snapshot for preparing a remote task package.
+    /// Unlike `load`, this never persists normalization or migrates a key into
+    /// the OS credential store. Legacy plaintext or pending credential edits
+    /// must be handled by the normal settings flow before task submission.
+    pub(crate) fn load_read_only_model_snapshot() -> Result<Self, &'static str> {
+        let _guard = lock_user_prefs();
+        let path = super::paths::settings_path();
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => Some(raw),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return Err("model_settings_unavailable"),
+        };
+        let mut prefs: Self = match raw {
+            Some(raw) => serde_json::from_str(&raw).map_err(|_| "model_settings_invalid")?,
+            None => Self::default(),
+        };
+        if prefs.has_unmigrated_credentials() {
+            return Err("model_credential_migration_required");
+        }
+        // Mirror the model-only in-memory part of load_unlocked. These methods
+        // do not touch disk or keychain; the original settings bytes remain
+        // untouched even when legacy route metadata is normalized here.
+        prefs.migrate_models();
+        prefs.ensure_builtin_llmapi_model();
+        prefs.normalize_saved_model_metadata();
+        prefs.sanitize_plaintext_api_keys();
+        Ok(prefs)
+    }
+
+    fn has_unmigrated_credentials(&self) -> bool {
+        let nonempty = |value: &str| !value.trim().is_empty();
+        self.advanced
+            .custom_api_key
+            .as_deref()
+            .is_some_and(nonempty)
+            || self
+                .advanced
+                .saved_models
+                .iter()
+                .any(|model| nonempty(&model.api_key) || model.credential_action.is_some())
+            || self.search.api_key.as_deref().is_some_and(nonempty)
+            || self.search.credentials.values().any(|credential| {
+                nonempty(&credential.api_key)
+                    || matches!(
+                        credential.credential_action,
+                        Some(CredentialEditAction::Replace | CredentialEditAction::Delete)
+                    )
+            })
     }
 
     fn defaults_for_system_locale(locale: Option<&str>) -> Self {
@@ -2492,6 +2568,45 @@ mod tests {
     }
 
     #[test]
+    fn read_only_model_snapshot_normalizes_in_memory_without_touching_settings() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _home = TemporaryPrefsHome::new("pinvou3-remote-model-readonly");
+        let path = super::super::paths::settings_path();
+        let mut prefs = UserPrefs::default();
+        // Alias normalization belongs to LocalVllm, not the OS default preset.
+        prefs.advanced.model_preset = Some(ModelPreset::LocalVllm);
+        prefs.migrate_models();
+        prefs.advanced.saved_models[0].alias = Some("old-local-alias".into());
+        let original = serde_json::to_vec(&prefs).unwrap();
+        std::fs::write(&path, &original).unwrap();
+
+        let snapshot = UserPrefs::load_read_only_model_snapshot().unwrap();
+        assert!(snapshot.active_model().unwrap().alias.is_none());
+        assert!(snapshot.model_by_id(BUILTIN_LLMAPI_MODEL_ID).is_some());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn read_only_model_snapshot_fails_closed_on_legacy_plaintext_without_writes() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _home = TemporaryPrefsHome::new("pinvou3-remote-model-legacy-key");
+        let path = super::super::paths::settings_path();
+        let mut prefs = UserPrefs::default();
+        prefs.migrate_models();
+        let mut settings = serde_json::to_value(&prefs).unwrap();
+        settings["advanced"]["saved_models"][0]["api_key"] =
+            serde_json::json!("legacy-example-not-real");
+        let original = serde_json::to_vec(&settings).unwrap();
+        std::fs::write(&path, &original).unwrap();
+
+        assert!(matches!(
+            UserPrefs::load_read_only_model_snapshot(),
+            Err("model_credential_migration_required")
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
     fn voice_shortcut_enabled_defaults_off_and_round_trips() {
         // Older settings.json lacks the field: the serde container-level
         // default falls back to false (off by default).
@@ -3555,6 +3670,7 @@ mod tests {
             pet: PetPrefs::default(),
             sidebar: SidebarPrefs::default(),
             code_permission: CodePermissionPrefs::default(),
+            remote_task_permissions: RemoteTaskPermissionPrefs::default(),
             mode_defaults: ModeDefaultPrefs::default(),
             voice_shortcut_enabled: false,
             computer_use: ComputerUsePrefs::default(),

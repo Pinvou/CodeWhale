@@ -9,11 +9,12 @@ const SIZE_STYLES = {
   md: { track: 'h-[26px] w-[46px]', knob: 'h-[22px] w-[22px]', on: 'translate-x-[22px]', off: 'translate-x-[2px]' },
 };
 
-export function Toggle({ checked, onChange, disabled = false, size = 'sm', 'aria-label': ariaLabel, className = '' }) {
+export function Toggle({ checked, onChange, disabled = false, size = 'sm', 'aria-label': ariaLabel, className = '', 'data-testid': testId }) {
   const s = SIZE_STYLES[size] || SIZE_STYLES.sm;
   return (
     <button
       type="button"
+      data-testid={testId}
       role="switch"
       aria-checked={!!checked}
       aria-label={ariaLabel}

@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **现状对照（2026-10 时点）**：本计划已实施完毕，撕离多窗口功能已上线；交互细节与实现载体有演进——前端已从单文件 `index.html` + 浏览器内 Babel 迁至 Vite 模块构建，撕离窗挂载 `src/app/DetachedShell.jsx`，后端命令落位 `src-tauri/src/features/pet/platform/detach.rs`（窗口 label 现为 `detached-{kind}-{:016x}`）。下文的 Babel/vendor 约束与 superpowers 流程为写作时点历史叙述，路径按 §“Global Constraints”所述旧布局理解。
+
 **Goal:** 让品悟左侧菜单的任意项可以弹出/撕离成独立的操作系统窗口（本计划覆盖 Phase 0 机制验证 + Phase 1 按钮触发的撕离窗口框架，端到端可用、可测试）。
 
 **Architecture:** 撕离窗口 = 同一个 `index.html` 以 `?detached=1&kind=&id=` 启动，只挂载该 kind 对应的已有面板组件（无侧边栏）。Rust 端一个 `open_detached_window` command 用 `WebviewWindowBuilder` 建窗（label 去重 + 聚焦已存在窗口），照搬现有 `open_artifact_window` 的成熟模式。后端 state 进程内共享、窗口间强独立、不做 live 数据同步。
@@ -14,11 +16,11 @@
 - 前端是**单文件** `pinvou3-app/src/index.html`，React 经 `<script type="text/babel">` 浏览器内编译，**无打包步骤**；所有依赖 vendor 离线，不得引 CDN。
 - Tauri window label 字符集仅允许 `a-zA-Z0-9-_`（见现有 `open_artifact_window` 注释）。非法字符必须转义/哈希。
 - 撕离窗口必须被 capability 覆盖，否则其 webview 无法 invoke——`capabilities/default.json` 的 `windows` 数组要包含 `detached-*` glob。
-- 窗口间**不做 live 数据同步**（白浪确认强独立）；真相源在 Rust 后端，每窗各自拉。
+- 窗口间**不做 live 数据同步**（贡献者确认强独立）；真相源在 Rust 后端，每窗各自拉。
 - 文案中英日三语：新增任何用户可见文案要在 `t` 字典三处（zh ~L215 / en ~L428 / ja ~L641）都补。
 - 飞书/对外文档用中文（与本项目既有约定一致）；本计划内代码注释保持与周围一致风格。
 - 提交粒度：每个 Task 末尾 commit 一次，message 用 `feat(multi-window): …` / `test(multi-window): …` / `chore(multi-window): …`。
-- 工作目录：worktree `/home/bailang/WorkSpace/Pinvou3-multiwindow`，分支 `feat/multi-window`。所有路径相对 `pinvou3-app/`。
+- 工作目录：贡献者本地 worktree（已归档，路径已匿名化），分支 `feat/multi-window`。所有路径相对 `pinvou3-app/`。
 
 ---
 
@@ -110,7 +112,7 @@ Expected：
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /home/bailang/WorkSpace/Pinvou3-multiwindow
+cd <worktree>
 git add pinvou3-app/src-tauri/examples/tearoff_spike.rs pinvou3-app/src-tauri/Cargo.toml
 git commit -m "chore(multi-window): Phase0 spike 验证 X11 全局鼠标(device_query)"
 ```
@@ -166,7 +168,7 @@ Expected：打印 `JSON OK`；`cargo check` 成功（capabilities 在编译期�
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /home/bailang/WorkSpace/Pinvou3-multiwindow
+cd <worktree>
 git add pinvou3-app/src-tauri/capabilities/default.json
 git commit -m "chore(multi-window): capabilities 放行 detached-* 建窗"
 ```
@@ -336,7 +338,7 @@ Expected：detach 下 4 个测试全 PASS；`cargo check` 成功（handler 注�
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /home/bailang/WorkSpace/Pinvou3-multiwindow
+cd <worktree>
 git add pinvou3-app/src-tauri/src/detach.rs pinvou3-app/src-tauri/src/lib.rs
 git commit -m "feat(multi-window): open_detached_window command(label 去重+聚焦)"
 ```
@@ -526,7 +528,7 @@ cd pinvou3-app && ./run-dev.sh
 - [ ] **Step 8: Commit**
 
 ```bash
-cd /home/bailang/WorkSpace/Pinvou3-multiwindow
+cd <worktree>
 git add pinvou3-app/src/index.html pinvou3-app/tests/detached_boot_smoke.js
 git commit -m "feat(multi-window): detached 启动分支 + DetachedShell/ViewRegistry"
 ```
@@ -703,7 +705,7 @@ Run `cd pinvou3-app && ./run-dev.sh`，逐项验：
 - [ ] **Step 9: Commit**
 
 ```bash
-cd /home/bailang/WorkSpace/Pinvou3-multiwindow
+cd <worktree>
 git add pinvou3-app/src/index.html pinvou3-app/tests/tearoff_buttons_smoke.js
 git commit -m "feat(multi-window): 侧边栏 ⧉ 弹出入口 + 角标 + 去重聚焦/回坞"
 ```
