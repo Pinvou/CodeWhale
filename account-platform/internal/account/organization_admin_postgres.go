@@ -448,8 +448,10 @@ func (r *PostgresRepository) AdminReplaceMemberRoles(ctx context.Context, princi
 	return member, tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) AdminSetOrganizationStatus(ctx context.Context, principal identity.Principal, organizationID uuid.UUID, status string) error {
-	if status != "ACTIVE" && status != "DISABLED" {
+// The completed remote projection is for observedVersion+1. Only that exact
+// tuple may be replayed; a concurrent local version cannot inherit its ACK.
+func (r *PostgresRepository) AdminSetOrganizationStatus(ctx context.Context, principal identity.Principal, organizationID uuid.UUID, observedVersion int64, status string) error {
+	if observedVersion < 1 || (status != "ACTIVE" && status != "DISABLED") {
 		return ErrConflict
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
@@ -471,7 +473,13 @@ func (r *PostgresRepository) AdminSetOrganizationStatus(ctx context.Context, pri
 		return err
 	}
 	if currentStatus == status {
+		if currentVersion != observedVersion+1 {
+			return ErrConflict
+		}
 		return tx.Commit(ctx)
+	}
+	if currentVersion != observedVersion {
+		return ErrConflict
 	}
 	if (status == "ACTIVE" && currentStatus != "DISABLED") || (status == "DISABLED" && currentStatus != "ACTIVE") {
 		return ErrConflict

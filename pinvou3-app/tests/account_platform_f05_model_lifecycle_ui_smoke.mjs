@@ -41,7 +41,7 @@ try {
     const now = Date.now();
     const old = [{ event: 'user_start', turn_id: 'timing-A', timestamp: now },
       { event: 'assistant_done', turn_id: 'timing-A', timestamp: now, status: 'Completed' }];
-    const control = window.f05Lifecycle = { language: 'en', ready: false, mode: 'fresh', calls: [], reads: [], timeline: old, oldSnapshot: old, branches: 0 };
+    const control = window.f05Lifecycle = { language: 'en', ready: false, mode: 'fresh', legacy: false, calls: [], reads: [], timeline: old, oldSnapshot: old, branches: 0 };
     const savedSource = { metadata: { id: 's1', title: 'Controlled source', model: id, workspace: '' },
       messages: [{ role: 'user', content: [{ type: 'text', text: 'Previous committed question' }] },
         { role: 'assistant', content: [{ type: 'text', text: 'Previous committed response' }] }], artifacts: [] };
@@ -51,7 +51,9 @@ try {
       control.calls.push({ command, args });
       if (command === 'chat') {
         const timestamp = Date.now();
-        const rejection = { schema_version: 1, code: 'MODEL_UNAVAILABLE', model_id: id };
+        const rejection = control.legacy
+          ? { schema_version: 1, code: 'MODEL_UNAVAILABLE', model_id: '', legacy_binding: true }
+          : { schema_version: 1, code: 'MODEL_UNAVAILABLE', model_id: id };
         control.timeline = [...control.oldSnapshot, { event: 'user_start', turn_id: 'timing-B', timestamp },
           { event: 'assistant_done', turn_id: 'timing-B', timestamp: timestamp + 1, status: 'send_error', model_rejection: rejection }];
         return Promise.reject(new Error('controlled preparation unavailable'));
@@ -84,14 +86,17 @@ try {
   };
   const shown = () => page.evaluate(() => document.body.textContent.includes(window.f05Lifecycle.copy().uiModelReplacement.title));
   const awaitBanner = () => page.waitForFunction(() => document.body.textContent.includes(window.f05Lifecycle.copy().uiModelReplacement.title));
-  for (const language of ['zh', 'en', 'ja']) {
+  for (const legacy of [false, true]) for (const language of ['zh', 'en', 'ja']) {
     phase = `locale ${language} setup`;
     await fresh(language); assert.equal(await shown(), false);
+    await page.evaluate(legacy => { window.f05Lifecycle.legacy = legacy; if (legacy) window.f05Lifecycle.savedSource.metadata.model = 'deepseek-v4-flash'; }, legacy);
     const before = await page.evaluate(() => ({ defaultRef: window.f05Lifecycle.defaultRef(), source: window.f05Lifecycle.savedSource }));
     assert.equal((await page.evaluate(() => window.f05Lifecycle.sendFailure())).ok, false);
     phase = `locale ${language} current B banner`;
     await awaitBanner();
     assert.equal(await page.evaluate(() => window.f05Lifecycle.currentMarker()?.code), 'MODEL_UNAVAILABLE');
+    assert.equal(await page.evaluate(() => window.f05Lifecycle.currentMarker()?.legacy_binding === true), legacy);
+    assert.equal(await page.evaluate(() => window.f05Lifecycle.branches), 0, 'an unavailable binding never selects a new branch automatically');
     assert.equal(await page.evaluate(() => document.body.textContent.includes(window.f05Lifecycle.copy().uiModelReplacement.lead)), true);
     await page.waitForFunction(() => [...document.querySelectorAll('button')].some(button => button.textContent === window.f05Lifecycle.copy().uiModelReplacement.create && !button.disabled));
     await page.evaluate(() => [...document.querySelectorAll('button')].find(button => button.textContent === window.f05Lifecycle.copy().uiModelReplacement.create).click());
@@ -100,7 +105,7 @@ try {
       defaults: window.f05Lifecycle.calls.filter(call => ['account_platform_select_catalog_model', 'set_default_model', 'set_active_model'].includes(call.command)).length }));
     assert.deepEqual(after.defaultRef, before.defaultRef); assert.deepEqual(after.source, before.source); assert.equal(after.defaults, 0);
     assert.equal(after.input.sourceConversationId, 's1'); assert.equal(after.input.replacementModelId, '0199a100-0001-7000-8000-000000000106');
-    assert.deepEqual(errors, []); passed++; console.log(`PASS compiled ChatView prepare rejection and branch ${language}`);
+    assert.deepEqual(errors, []); passed++; console.log(`PASS compiled ChatView ${legacy ? 'legacy name' : 'UUID'} prepare rejection and manual branch ${language}`);
   }
   // An old A read starts after B's failed attempt, in a background working set.
   // Opening authoritative B must show B; late A cannot replace that owner.

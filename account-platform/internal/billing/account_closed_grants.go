@@ -78,6 +78,16 @@ func (v *HTTPAccountClosureStateVerifier) RequireAnonymized(ctx context.Context,
 }
 
 func (r *PostgresRepository) ReclaimAccountClosedGrant(ctx context.Context, organizationID, grantID, actorID uuid.UUID, lifecycleVersion int64, reason, idempotencyKey string) (AccountClosedGrantReclaim, error) {
+	var result AccountClosedGrantReclaim
+	err := retryAccountClosureSerialization(ctx, func() error {
+		var err error
+		result, err = r.reclaimAccountClosedGrantOnce(ctx, organizationID, grantID, actorID, lifecycleVersion, reason, idempotencyKey)
+		return err
+	})
+	return result, err
+}
+
+func (r *PostgresRepository) reclaimAccountClosedGrantOnce(ctx context.Context, organizationID, grantID, actorID uuid.UUID, lifecycleVersion int64, reason, idempotencyKey string) (AccountClosedGrantReclaim, error) {
 	reason, idempotencyKey = strings.TrimSpace(reason), strings.TrimSpace(idempotencyKey)
 	if organizationID == uuid.Nil || grantID == uuid.Nil || actorID == uuid.Nil || lifecycleVersion < 2 || reason == "" || !utf8.ValidString(reason) || utf8.RuneCountInString(reason) > 500 || !utf8.ValidString(idempotencyKey) || utf8.RuneCountInString(idempotencyKey) < 16 || utf8.RuneCountInString(idempotencyKey) > 128 {
 		return AccountClosedGrantReclaim{}, ErrConflict

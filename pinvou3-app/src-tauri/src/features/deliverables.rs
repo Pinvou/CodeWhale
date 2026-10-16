@@ -45,7 +45,10 @@ pub struct DeliverableItem {
     size: u64,
 }
 
-const DELIVERABLE_EXTS: &[&str] = &[
+/// The deliverable extension whitelist, shared with the headless CLI's
+/// `artifacts list` (which imports this table instead of a hand copy — a
+/// copy silently dropped every extension added here later).
+pub const DELIVERABLE_EXTS: &[&str] = &[
     "pptx", "ppt", "docx", "doc", "pdf", "html", "htm", "xlsx", "xls", "md", "csv", "png", "jpg",
     "jpeg", "svg", "gif", "webp", "zip",
 ];
@@ -68,10 +71,10 @@ static DV_VIEW_CACHE: OnceLock<
     Mutex<HashMap<PathBuf, ((Option<SystemTime>, u64), DvSessionView)>>,
 > = OnceLock::new();
 
-fn deliverable_category(ext: &str) -> &'static str {
-    // Only extensions that survive the DELIVERABLE_EXTS filter (the sole
-    // caller filters first) can reach this match; broader extensions such as
-    // mhtml/odp/bmp never get here, so they are not listed.
+/// Only extensions that survive the DELIVERABLE_EXTS filter (the sole
+/// caller filters first) can reach this match; broader extensions such as
+/// mhtml/odp/bmp never get here, so they are not listed.
+pub fn deliverable_category(ext: &str) -> &'static str {
     match ext {
         "html" | "htm" => "web",
         "ppt" | "pptx" => "ppt",

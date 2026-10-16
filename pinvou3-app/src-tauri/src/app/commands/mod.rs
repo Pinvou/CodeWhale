@@ -35,7 +35,6 @@ pub(crate) mod diagnostics;
 pub(crate) mod files;
 pub(crate) mod interaction;
 pub(crate) mod knowledge;
-// Legacy source is retained for migration history; no runtime/invoke consumer remains.
 pub(crate) mod marketplace;
 pub(crate) mod memory;
 pub(crate) mod model_store;
