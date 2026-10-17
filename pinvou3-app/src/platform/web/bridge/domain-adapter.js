@@ -14,7 +14,7 @@
   const fields = {
     platform: ["appVersion", "backendOnline", "platformCapabilities"],
     sessions: ["sessions", "archivedSessions", "activeSessionId", "sessionBusy", "draftEpoch", "draftWorkspacePath"],
-    chat: ["activeSkill", "artifacts", "artifactChange", "attachments", "busy", "chatItems", "composerDraft", "composerPrefill", "messages", "modeState", "planSnapshot", "queued", "thinking", "tokens", "turnDirtyArtifacts", "turnPresentedArtifacts", "turnTimeline"],
+    chat: ["activeSkill", "artifacts", "artifactChange", "attachments", "busy", "chatItems", "composerDraft", "composerPrefill", "messages", "modeState", "planSnapshot", "queued", "remoteProxyDraftError", "thinking", "tokens", "turnDirtyArtifacts", "turnPresentedArtifacts", "turnTimeline"],
     voice: ["voiceInput", "voiceAsrSetup"],
     knowledge: ["kbModelSetup", "mountedCollection", "mountedCollections", "mountedCollectionsRevision"],
     scheduled: ["scheduledRunContext", "scheduledTaskAutoOpenId", "scheduledTaskBusyAction", "scheduledTaskCreationSessionId", "scheduledTaskDetail", "scheduledTaskDraft", "scheduledTaskError", "scheduledTaskErrorKind", "scheduledTaskLoading", "scheduledTaskPendingGuide", "scheduledTaskRecentRuns", "scheduledTaskRuns", "scheduledTasks", "scheduledTaskSelectionGeneration", "selectedScheduledTaskId"],
@@ -33,6 +33,21 @@
     // (没有 bridge.projects 方法面,列表恒空),防止启动期 getMany 抛
     // "Unknown Tauri bridge state slice: projects"(栈内 #448 的根因)。
     projects: ["projectsList"],
+    // desktopRemoteControl 整域桌面专属（Windows 双端远控）：Web 端补空桩，
+    // 字段集必须与桌面 STATE_SLICE_FIELDS 完全一致（见 bridge_state_domains）。
+    desktopRemoteControl: [
+      "controlledDevice",
+      "controlledSession",
+      "controllerConnection",
+      "remoteCapabilities",
+      "remoteModels",
+      "remoteProxyHistories",
+      "remoteProxyHistory",
+      "remoteProxyNotice",
+      "controlledTasks",
+      "controlledTranscript",
+      "remotePermissions"
+    ],
     updater: ["updateCancelling", "updateCheckError", "updateChecking", "updateDownloading", "updateError", "updateInfo", "updateProgress", "updateReady"],
     dependencies: ["deps", "depsChecking", "depsInstallError", "depsInstalling"]
     ,teamRelay: ["teamRelay"]

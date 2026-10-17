@@ -73,16 +73,29 @@
 
   async function loadPlatformCapabilities() {
     try {
+      var detected = await invoke("get_platform_capabilities");
       state.platformCapabilities = Object.assign(
         {},
         state.platformCapabilities,
-        await invoke("get_platform_capabilities"),
-        { loaded: true }
+        detected,
+        {
+          loaded: true,
+          desktopRemoteControl: !!detected && detected.os === "windows" &&
+            detected.desktopRemoteControlSupported === true,
+        }
       );
     } catch (error) {
+      state.platformCapabilities = Object.assign({}, state.platformCapabilities, {
+        loaded: false,
+        desktopRemoteControl: false,
+      });
       console.warn("[platform] capability detection failed", error);
+      state.platformCapabilities = Object.assign({}, state.platformCapabilities, { loaded: false, desktopRemoteControl: false });
     }
-    notify();
+    notify(["platform"]);
+    if (state.platformCapabilities.desktopRemoteControl === true && desktopRemoteControlFeature) {
+      desktopRemoteControlFeature.controllerStatus().catch(function () {});
+    }
     return state.platformCapabilities;
   }
 
@@ -204,6 +217,7 @@
     // 当前会话未发送的输入草稿。只存内存，随 session working set 切换；
     // 不落盘，避免把敏感的未发送内容带到下次启动。
     composerDraft: "",
+    remoteProxyDraftError: null,
     messages: [],      // Anthropic Messages schema
     chatItems: [],     // display items for React
     // DeepSeek Turn 生命周期(user_start / assistant_done)，来自 timing_events.jsonl；
@@ -233,6 +247,7 @@
     platformCapabilities: {
       loaded: false,
       os: "unknown",
+      desktopRemoteControl: false,
       showMegacubeSite: false,
       showSuperPermissionSettings: false,
       usesBundledDependencyInstaller: false,
@@ -352,6 +367,11 @@
       last_error: null,
       starting: false,
     },
+    // Windows 桌面双端远程控制（B 被控端 / A 主控端），与 Web 分享独立。
+    desktopRemoteControl: (function () {
+      var logic = window.__PINVOU_REMOTE_CONTROL_STATE__;
+      return logic ? logic.createState() : null;
+    })(),
     updateChecking: false,
     updateCheckError: null,   // 手动检查的错误/「已是最新」提示文案
     updateDownloading: false,
@@ -819,6 +839,28 @@
   // buffer 跑同步逻辑再切回(saveWorkingSetTo/loadWorkingSetFrom),期间 suppressNotify
   // 避免把后台渲染成 active。异步收尾(落盘)按显式 session_id 路由,不依赖工作集。
   var sessionStates = {};
+  // Composer-only, in-memory RemoteProxy drafts. Never placed in a local
+  // Engine/ACP working set or written to the RemoteProxy history DTO.
+  var remoteProxyDraftValues = Object.create(null);
+  var remoteProxyDraftOrder = [];
+  var remoteProxyDrafts = {
+    get: function (id) { return remoteProxyDraftValues[id] || ""; },
+    has: function (id) { return Object.prototype.hasOwnProperty.call(remoteProxyDraftValues, id); },
+    set: function (id, value) {
+      var text = String(value || "");
+      if (!id || text.length > 1000000) return false;
+      if (!this.has(id)) {
+        if (remoteProxyDraftOrder.length >= 256) return false;
+        remoteProxyDraftOrder.push(id);
+      }
+      remoteProxyDraftValues[id] = text;
+      return true;
+    },
+    delete: function (id) {
+      delete remoteProxyDraftValues[id];
+      remoteProxyDraftOrder = remoteProxyDraftOrder.filter(function (entry) { return entry !== id; });
+    },
+  };
   var authoritativeTranscriptSyncs = Object.create(null);
   var authoritySyncTraceSequence = 0;
   var scheduledRunSessionOwners = Object.create(null);
@@ -1042,7 +1084,10 @@
   var chatFeature = installBridgeFeature("chat", {
     voice: function () { return voiceFeature; },
     state: state, invoke: invoke, TAURI: TAURI,
-    sessionStates: sessionStates, turnUsageDirty: turnUsageDirty,
+    sessionStates: sessionStates, remoteProxyDrafts: remoteProxyDrafts,
+    isKnownRemoteProxy: function (id) { return sessionsFeature && sessionsFeature.isKnownRemoteProxy(id); },
+    isRemoteProxyView: function (id) { return sessionsFeature && sessionsFeature.isRemoteProxyView(id); },
+    turnUsageDirty: turnUsageDirty,
     personaPlaceholderTitles: personaPlaceholderTitles,
     renderMarkdown: renderMarkdown, safeConsoleInfo: safeConsoleInfo,
     recordAuthoritySyncDiagnostic: recordAuthoritySyncDiagnostic,
@@ -1123,10 +1168,20 @@
 
   var sessionsFeature = installBridgeFeature("sessions", {
     state: state, invoke: invoke, listen: listen, notify: notify,
+    readRemoteProxyHistory: function (id) {
+      return desktopRemoteControlFeature.readRemoteProxyHistory(id, { navigation: true });
+    },
+    selectRemoteProxyHistory: function (record) {
+      return desktopRemoteControlFeature.selectRemoteProxyHistory(record);
+    },
+    deleteRemoteProxyHistory: function (id) {
+      return desktopRemoteControlFeature.deleteRemoteProxyHistory(id);
+    },
+    sessionStates: sessionStates, remoteProxyDrafts: remoteProxyDrafts,
     // The draft workspace picker uses the system directory dialog through the
     // bridge; React never touches Tauri globals directly.
     dialogOpen: dialogOpen,
-    sessionStates: sessionStates, scheduledRunSessionOwners: scheduledRunSessionOwners,
+    scheduledRunSessionOwners: scheduledRunSessionOwners,
     personaPlaceholderTitles: personaPlaceholderTitles, turnUsageDirty: turnUsageDirty,
     // Clean host-side per-session side tables when a session buffer is
     // deleted/evicted (modeStateEpochs is defined later in this file, so
@@ -1398,11 +1453,15 @@
     try {
       try { await invoke("save_session_artifacts", { id: sid, paths: rebaseArtifactPathsForRebind(sid, arts.map(function (a) { return a.path; })) }); } catch (_) {}
       if (isDefaultChatTitle(meta.title) || personaPlaceholderTitles[sid]) {
-        var firstUser = msgs.find(function (m) { return m.role === "user"; });
         // 自动标题复用展示层过滤（与 web 侧一致）：内部信封/子智能体交接不参与
         // 命名；hideInternalEnvelope=true 同时剥离 turn_meta/system-reminder 元数据
         // 块，避免 XML 痕迹进 sidebar 标题。
-        var titleText = firstUser ? userMessageDisplayText(firstUser.content || [], true) : "";
+        var titleText = "";
+        msgs.some(function (message) {
+          if (!message || message.role !== "user") return false;
+          titleText = userMessageDisplayText(message.content || [], true);
+          return !!titleText;
+        });
         if (titleText) {
           var newTitle = titleText.slice(0, 20);
           await invoke("rename_session", { id: sid, title: newTitle });
@@ -1647,7 +1706,7 @@
   const STATE_SLICE_FIELDS = {
     platform: ["appVersion", "backendOnline", "platformCapabilities"],
     sessions: ["sessions", "archivedSessions", "activeSessionId", "sessionBusy", "draftEpoch", "draftWorkspacePath"],
-    chat: ["activeSkill", "artifacts", "artifactChange", "attachments", "busy", "chatItems", "composerDraft", "composerPrefill", "messages", "modeState", "planSnapshot", "queued", "thinking", "tokens", "turnDirtyArtifacts", "turnPresentedArtifacts", "turnTimeline"],
+    chat: ["activeSkill", "artifacts", "artifactChange", "attachments", "busy", "chatItems", "composerDraft", "composerPrefill", "messages", "modeState", "planSnapshot", "queued", "remoteProxyDraftError", "thinking", "tokens", "turnDirtyArtifacts", "turnPresentedArtifacts", "turnTimeline"],
     voice: ["voiceInput", "voiceAsrSetup"],
     knowledge: ["kbModelSetup", "mountedCollection", "mountedCollections", "mountedRemoteCollections", "mountedCollectionsRevision"],
     scheduled: ["scheduledRunContext", "scheduledTaskAutoOpenId", "scheduledTaskBusyAction", "scheduledTaskCreationSessionId", "scheduledTaskDetail", "scheduledTaskDraft", "scheduledTaskError", "scheduledTaskErrorKind", "scheduledTaskLoading", "scheduledTaskPendingGuide", "scheduledTaskRecentRuns", "scheduledTaskRuns", "scheduledTasks", "scheduledTaskSelectionGeneration", "selectedScheduledTaskId"],
@@ -1661,6 +1720,20 @@
     personas: ["activePersona", "personaEvents", "personaPool"],
     memory: ["memory"],
     remoteControl: ["webAccess"],
+    // Windows 双端远程控制（DEV-20）：与 Web 分享完全独立的状态域。
+    desktopRemoteControl: [
+      "controlledDevice",
+      "controlledSession",
+      "controllerConnection",
+      "remoteCapabilities",
+      "remoteModels",
+      "remoteProxyHistories",
+      "remoteProxyHistory",
+      "remoteProxyNotice",
+      "controlledTasks",
+      "controlledTranscript",
+      "remotePermissions",
+    ],
     updater: ["updateCancelling", "updateCheckError", "updateChecking", "updateDownloading", "updateError", "updateInfo", "updateProgress", "updateReady"],
     dependencies: ["deps", "depsChecking", "depsInstallError", "depsInstallProgress", "depsInstalling"],
     teamRelay: ["teamRelay"],
@@ -1673,7 +1746,8 @@
     var fields = STATE_SLICE_FIELDS[domain];
     if (!fields) throw new Error("Unknown Tauri bridge state slice: " + domain);
     var slice = {};
-    for (var i = 0; i < fields.length; i++) slice[fields[i]] = state[fields[i]];
+    var source = domain === "desktopRemoteControl" ? state.desktopRemoteControl : state;
+    for (var i = 0; i < fields.length; i++) slice[fields[i]] = source && source[fields[i]];
     if (typeof structuredClone === "function") {
       try { return structuredClone(slice); } catch (_) {} // safari14-ok: typeof-guarded with JSON fallback
     }
@@ -1784,8 +1858,9 @@
     var revision = subscriptionSliceRevisions[domain] || 0;
     if (cached && cached.revision === revision) return cached.snapshot;
     var current = {};
+    var source = domain === "desktopRemoteControl" ? state.desktopRemoteControl : state;
     for (var i = 0; i < fields.length; i++) {
-      current[fields[i]] = state[fields[i]];
+      current[fields[i]] = source && source[fields[i]];
     }
     var snapshot = subscriptionStateValue(current, cached && cached.snapshot);
     subscriptionSliceCache[domain] = { revision: revision, snapshot: snapshot };
@@ -2052,16 +2127,16 @@
     };
   }
 
-  function userMessageInputProvenance(blocks) {
-    return window.PinvouBridgeMessages.userMessageInputProvenance(blocks);
-  }
-
-  function isInternalUserMessageProvenance(provenance) {
-    return window.PinvouBridgeMessages.isInternalUserMessageProvenance(provenance);
+  function isInternalUserMessage(blocks) {
+    return window.PinvouBridgeMessages.isInternalUserMessage(blocks);
   }
 
   function isInternalRuntimeEnvelopeText(value) {
     return window.PinvouBridgeMessages.isInternalRuntimeUserMessage(value);
+  }
+
+  function isKnownInternalMetadataBlock(value) {
+    return window.PinvouBridgeMessages.isKnownInternalMetadataBlock(value);
   }
 
   // Engine 的运行时恢复提示为了兼容模型协议会以 role=user 持久化，但它不是用户输入。
@@ -2072,8 +2147,8 @@
     var textParts = (Array.isArray(blocks) ? blocks : [])
       .filter(function (block) { return block && block.type === "text"; })
       .map(function (block) { return String(block.text || ""); });
-    if (textParts.some(isInternalRuntimeEnvelopeText)) return "";
-    if (isInternalUserMessageProvenance(userMessageInputProvenance(blocks))) return "";
+    if (isInternalUserMessage(blocks)) return "";
+    textParts = textParts.filter(function (text) { return !isKnownInternalMetadataBlock(text); });
     if (!hideInternalEnvelope) return textParts.join("");
 
     return textParts.filter(function (text) {
@@ -2708,6 +2783,20 @@
   var startRemoteControl = remoteControlFeature.startRemoteControl;
   var stopRemoteControl = remoteControlFeature.stopRemoteControl;
   var refreshRemoteControlQr = remoteControlFeature.refreshRemoteControlQr;
+  var desktopRemoteControlFeature = installBridgeFeature("desktop-remote-control", {
+    state: state,
+    notify: notify,
+    invoke: invoke,
+    listen: listen,
+    bt: bt,
+    can: function (capability) {
+      if (capability === "desktopRemoteControl") {
+        var detected = state.platformCapabilities || {};
+        return detected.loaded === true && detected.os === "windows" && detected.desktopRemoteControl === true;
+      }
+      return !!(state.platformCapabilities && state.platformCapabilities[capability] === true);
+    },
+  });
   var dependenciesFeature = installBridgeFeature("dependencies", { state: state, notify: notify, invoke: invoke, listen: listen, bt: bt });
   var checkDependencies = dependenciesFeature.checkDependencies;
   var installDependencies = dependenciesFeature.installDependencies;
@@ -3126,6 +3215,51 @@
       getWebRelaySettings: remoteControlFeature.getWebRelaySettings,
       setWebRelayAddress: remoteControlFeature.setWebRelayAddress,
       resetWebRelayAddress: remoteControlFeature.resetWebRelayAddress,
+    },
+    desktopRemoteControl: {
+      controlledStart: desktopRemoteControlFeature.controlledStart,
+      controlledRefresh: desktopRemoteControlFeature.controlledRefresh,
+      controlledStop: desktopRemoteControlFeature.controlledStop,
+      controlledDisconnectNow: desktopRemoteControlFeature.controlledDisconnectNow,
+      controlledStatus: desktopRemoteControlFeature.controlledStatus,
+      controlledSync: desktopRemoteControlFeature.controlledSync,
+      clientEvent: desktopRemoteControlFeature.clientEvent,
+      endpointProfiles: desktopRemoteControlFeature.endpointProfiles,
+      setEndpointProfile: desktopRemoteControlFeature.setEndpointProfile,
+      controlledListWorkspaces: desktopRemoteControlFeature.controlledListWorkspaces,
+      controllerConnect: desktopRemoteControlFeature.controllerConnect,
+      controllerDisconnect: desktopRemoteControlFeature.controllerDisconnect,
+      controllerStatus: desktopRemoteControlFeature.controllerStatus,
+      controllerCapabilitySend: desktopRemoteControlFeature.controllerCapabilitySend,
+      controlledTaskSend: desktopRemoteControlFeature.controlledTaskSend,
+      controlledCapabilitiesSnapshot: desktopRemoteControlFeature.controlledCapabilitiesSnapshot,
+      controlledStopTask: desktopRemoteControlFeature.controlledStopTask,
+      capabilitiesSnapshot: desktopRemoteControlFeature.capabilitiesSnapshot,
+      listExportableModels: desktopRemoteControlFeature.listExportableModels,
+      listRemoteProxyHistory: desktopRemoteControlFeature.listRemoteProxyHistory,
+      openLiveRemoteProxy: desktopRemoteControlFeature.openLiveRemoteProxy,
+      readRemoteProxyHistory: desktopRemoteControlFeature.readRemoteProxyHistory,
+      deleteRemoteProxyHistory: desktopRemoteControlFeature.deleteRemoteProxyHistory,
+      archiveRemoteProxyHistory: desktopRemoteControlFeature.archiveRemoteProxyHistory,
+      listRemoteProxyArchives: desktopRemoteControlFeature.listRemoteProxyArchives,
+      listRemoteProxyArchiveCandidates: desktopRemoteControlFeature.listRemoteProxyArchiveCandidates,
+      reserveRemoteTask: desktopRemoteControlFeature.reserveRemoteTask,
+      commitRemoteTask: desktopRemoteControlFeature.commitRemoteTask,
+      cancelRemoteTask: desktopRemoteControlFeature.cancelRemoteTask,
+      abandonRemoteTask: desktopRemoteControlFeature.abandonRemoteTask,
+      permissionList: desktopRemoteControlFeature.permissionList,
+      controlledPermissionList: desktopRemoteControlFeature.controlledPermissionList,
+      permissionDecide: desktopRemoteControlFeature.permissionDecide,
+      permissionDenyTask: desktopRemoteControlFeature.permissionDenyTask,
+      attachmentBegin: desktopRemoteControlFeature.attachmentBegin,
+      attachmentChunk: desktopRemoteControlFeature.attachmentChunk,
+      attachmentAbort: desktopRemoteControlFeature.attachmentAbort,
+      artifactIndex: desktopRemoteControlFeature.artifactIndex,
+      artifactPreview: desktopRemoteControlFeature.artifactPreview,
+      artifactDownloadBegin: desktopRemoteControlFeature.artifactDownloadBegin,
+      artifactDownloadChunk: desktopRemoteControlFeature.artifactDownloadChunk,
+      artifactDownloadAbort: desktopRemoteControlFeature.artifactDownloadAbort,
+      isAvailable: desktopRemoteControlFeature.isAvailable,
     },
     artifacts: {
       artifactInfo: artifactInfo,

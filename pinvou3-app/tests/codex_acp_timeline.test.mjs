@@ -646,16 +646,75 @@ try {
   const loginMod = readFileSync(path.join(root, 'src-tauri', 'src', 'features', 'codex_acp', 'login.rs'), 'utf8');
   const introspectMod = readFileSync(path.join(root, 'src-tauri', 'src', 'features', 'codex_acp', 'introspect.rs'), 'utf8');
   const operationGate = readFileSync(path.join(root, 'src-tauri', 'src', 'features', 'codex_acp', 'operation_gate.rs'), 'utf8');
-  // PR #339 round 9 folds the activity persistence into `admit_prompt_turn`
-  // (operation_gate.rs) so a touch failure cannot leak a registered timing
-  // turn; the touch itself still runs inside `AcpPool::send_message`, before
-  // the timing registration and the spawned prompt task.
-  assert.ok(/self\.session_store\s+\.touch_activity\(session_id\)/.test(runtime)
-    && /admit_prompt_turn\(&runtime\.busy, &runtime\.configuring, session_id, \|\|/s.test(runtime)
-    && operationGate.includes('fn admit_prompt_turn')
-    && /if let Err\(error\) = touch_activity\(\) \{\s*busy\.store\(false, Ordering::Release\);/s.test(operationGate)
-    && /touch_activity\(\)[\s\S]*timing::start_turn\(session_id\)/.test(operationGate),
-    'an accepted ACP turn must persist the session activity timestamp before it starts');
+  const remoteOwnership = readFileSync(path.join(root, 'src-tauri', 'src', 'features', 'codex_acp', 'remote_ownership.rs'), 'utf8');
+  // Local admission now also checks remote custody and retains a PromptFlight.
+  // Pin the actual production chain, not the former all-in-one helper: activity
+  // persistence must still precede timing registration, the turn and its task.
+  const localSubmit = runtime.slice(
+    runtime.indexOf('async fn send_message_with_display_content_owner('),
+    runtime.indexOf('async fn finish_remote_retirement('),
+  );
+  const localAdmission = remoteOwnership.slice(
+    remoteOwnership.indexOf('pub(super) fn admit_local('),
+    remoteOwnership.indexOf('fn reserve('),
+  );
+  const finishAdmission = operationGate.slice(
+    operationGate.indexOf('pub(super) fn finish_prompt_admission('),
+    operationGate.indexOf('enum SessionConfigChange'),
+  );
+  const assertActivityAdmission = (submit, admission, finish) => {
+    const ownersIndex = submit.indexOf('let owners = self.remote_permission_owners.lock();');
+    const fenceIndex = submit.indexOf('.with_active_runtime(');
+    const admissionIndex = submit.indexOf('.admit_local(');
+    const finishIndex = submit.indexOf('operation_gate::finish_prompt_admission(');
+    const touchIndex = submit.indexOf('.touch_activity(session_id)');
+    const turnIndex = submit.indexOf('.begin_turn_bound(');
+    const spawnIndex = submit.indexOf('tokio::spawn(');
+    assert.ok(ownersIndex >= 0 && ownersIndex < fenceIndex && fenceIndex < admissionIndex
+      && admissionIndex < finishIndex
+      && finishIndex < touchIndex && touchIndex < turnIndex && turnIndex < spawnIndex,
+    'the actual local submit must admit, persist activity, begin its turn and only then spawn');
+    assert.ok(finish.indexOf('touch_activity()') >= 0
+      && finish.indexOf('touch_activity()') < finish.indexOf('timing::start_turn(session_id)'),
+    'activity persistence failure must never follow premature timing registration');
+    assert.match(admission,
+      /operation_gate::begin_prompt\(busy, configuring\)\?;\s*Ok\(PromptFlight::new\(identity\)\)/,
+      'local custody admission must reserve busy before retaining the real prompt flight');
+    assert.match(submit,
+      /let owners = self\.remote_permission_owners\.lock\(\);[\s\S]*?\.with_active_runtime\([\s\S]*?let flight = owners\.admit_local\([\s\S]*?\)\?;\s*operation_gate::finish_prompt_admission\(&runtime\.busy, session_id, \|\| \{\s*self\.session_store\s+\.touch_activity\(session_id\)[\s\S]*?\}\)\?;[\s\S]*?\.begin_turn_bound\([\s\S]*?drop\(owners\);[\s\S]*?tokio::spawn\(async move \{\s*let _flight = flight;/,
+      'the actual local submit must persist activity after admission and before beginning/spawning the owned turn');
+    assert.match(finish,
+      /if let Err\(error\) = touch_activity\(\) \{\s*busy\.store\(false, Ordering::Release\);\s*return Err\(error\);\s*\}\s*crate::features::assistant::timing::start_turn\(session_id\);/,
+      'activity persistence failure must release busy without registering timing');
+  };
+  assertActivityAdmission(localSubmit, localAdmission, finishAdmission);
+  // Guard the contract test itself against accidentally accepting the key
+  // regressions while updating source layout in future refactors.
+  assert.throws(() => assertActivityAdmission(
+    localSubmit.replace('.touch_activity(session_id)', '.touch_activity_skipped(session_id)'),
+    localAdmission, finishAdmission,
+  ), /actual local submit/);
+  assert.throws(() => assertActivityAdmission(
+    localSubmit, localAdmission,
+    finishAdmission.replace('busy.store(false, Ordering::Release);', ''),
+  ), /persistence failure/);
+  assert.throws(() => assertActivityAdmission(
+    localSubmit, localAdmission,
+    finishAdmission.replace('if let Err(error) = touch_activity()',
+      'crate::features::assistant::timing::start_turn(session_id); if let Err(error) = touch_activity()'),
+  ), /persistence failure/);
+  assert.throws(() => assertActivityAdmission(
+    localSubmit.replace('let flight = owners.admit_local',
+      'tokio::spawn(async {}); let flight = owners.admit_local'),
+    localAdmission, finishAdmission,
+  ), /actual local submit/);
+  assert.throws(() => assertActivityAdmission(
+    localSubmit.replace('.with_active_runtime(', '.with_active_runtime_skipped('),
+    localAdmission, finishAdmission,
+  ), /actual local submit/);
+  assert.throws(() => assertActivityAdmission(
+    localSubmit.replace('drop(owners);', ''), localAdmission, finishAdmission,
+  ), /actual local submit/);
   assert.ok(runtime.includes('interrupt_orphaned_turns("application_restarted")')
     && runtime.includes('cancel_without_active_prompt')
     && runtime.includes('runtime.busy.load(Ordering::Acquire)'),
@@ -1213,6 +1272,25 @@ try {
     assert.equal(content['__proto__'], 'X');
     assert.equal(JSON.stringify(content), '{"constructor":"A","toString":"B","__proto__":"X"}', 'JSON 序列化不得静默丢失保留键');
     assert.equal(Array.isArray(Object.getPrototypeOf(content)), false, 'content 保持无原型对象，不得被 __proto__ 赋值改原型');
+  }
+
+  // ── buildElicitationContent：无 otherAnswerKey 的自定义答案回落主 answerKey ──
+  // 自定义回复框已在 normalizeElicitationQuestions 钉死（枚举题即使没有 agent 生成的
+  // other 伴随字段也展示），该回落分支成为可达路径：自定义文本必须仍被提交，不能静默丢弃。
+  {
+    const content = buildElicitationContent([
+      { questionId: 'q1', answerKey: 'q1', otherAnswerKey: null, multiSelect: false, answers: [{ label: '其他', value: '我自己写的内容', other: true }] },
+      { questionId: 'q2', answerKey: 'q2', otherAnswerKey: null, multiSelect: true, answers: [{ label: 'A', value: 'a', other: false }, { label: '其他', value: '补充', other: true }] },
+    ]);
+    assert.equal(content.q1, '我自己写的内容', '单选无伴随字段时自定义文本回落主 answerKey');
+    assert.deepEqual(content.q2, ['a', '补充'], '多选混入自定义文本时数组保留全部答案');
+
+    // 特殊 answerKey + 无伴随字段的自定义答案：文本作为 own property 落在保留键上，不得丢。
+    const special = buildElicitationContent([
+      { questionId: 'q', answerKey: '__proto__', otherAnswerKey: null, multiSelect: false, answers: [{ label: '其他', value: 'x', other: true }] },
+    ]);
+    assert.equal(Object.prototype.hasOwnProperty.call(special, '__proto__'), true, '自定义答案回落保留键不得被 __proto__ setter 吞掉');
+    assert.equal(special['__proto__'], 'x');
   }
 
   // ── M-E journal probe semantics lock: transport-level (endpoint active),

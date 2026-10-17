@@ -454,7 +454,13 @@
           flushPendingStreamRender();
           resetPendingAssistant();
         }
-        addChatItem({ type: "user", text: content, time: timeStr() });
+        var userItem = { type: "user", text: content, time: timeStr() };
+        var remoteLogic = window.__PINVOU_REMOTE_CONTROL_STATE__;
+        var controlledIdentity = remoteLogic && remoteLogic.controlledTaskAdmissionIdentity
+          ? remoteLogic.controlledTaskAdmissionIdentity(state.controlledTasks, sid, content)
+          : null;
+        if (controlledIdentity) Object.assign(userItem, controlledIdentity);
+        addChatItem(userItem);
       }
       state.busy = true;
       if (!state.thinking.active) startThinking();

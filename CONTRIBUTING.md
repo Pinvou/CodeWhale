@@ -42,6 +42,8 @@ git commit -s
 
 Use `--signoff` when amending or rebasing existing commits. See the [Developer Certificate of Origin](https://developercertificate.org/). CI rejects unsigned human commits; trusted Dependabot and GitHub Actions bot commits and merge commits (more than one parent) are exempt.
 
+The fixed historical squash-commit registry documented in [the commit convention](docs/Git%20Commit%20信息规范文档.md#10-固定历史-squash-提交的签署登记) preserves the recorded original signers of 19 existing integration commits. It is not an identity alias or an exemption for new commits; titles and the registered signoffs remain checked.
+
 ## Where changes belong
 
 Pinvou Agent uses [CodeWhale](https://github.com/Pinvou/CodeWhale) as its agent engine. Do not reimplement engine capabilities in the desktop layer. The extension-boundary table is defined once in [AGENTS.md](AGENTS.md) §2; CodeWhale changes must follow it and [`docs/fork-policy.md`](docs/fork-policy.md), including the required same-PR documentation, fingerprints, and tests.

@@ -60,11 +60,12 @@ const context = vm.createContext({
   localStorage,
 });
 
-// 页面加载序:shared/bridge-messages.js → platform/tauri/bridge/*.js 工厂
+// 页面加载序:shared/bridge-messages.js / feature state helpers →
+// platform/tauri/bridge/*.js 工厂
 // → bridge.js(顺序断言在 classic_startup_bundle.test.mjs;这里解析
 // index.html 取 bridge 脚本序,特性文件增减时自动跟随)。
 const indexHtml = fs.readFileSync(path.join(root, 'src/index.html'), 'utf8');
-const bridgeScripts = [...indexHtml.matchAll(/<script src="%BASE_URL%(shared\/bridge-messages\.js|platform\/tauri\/bridge(?:\.js|\/[^"]+))"[^>]*><\/script>/g)]
+const bridgeScripts = [...indexHtml.matchAll(/<script src="%BASE_URL%(shared\/bridge-messages\.js|features\/remote-control\/remote-control-state\.js|platform\/tauri\/bridge(?:\.js|\/[^"]+))"[^>]*><\/script>/g)]
   .map(match => match[1]);
 assert.ok(bridgeScripts.includes('platform/tauri/bridge.js'), 'index.html must load platform/tauri/bridge.js');
 for (const relative of bridgeScripts) {
@@ -77,6 +78,11 @@ for (const relative of bridgeScripts) {
 
 const api = windowObject.TauriBridge;
 assert.ok(api.available, 'desktop bridge must expose the real surface under a stubbed __TAURI__');
+
+// Desktop remote control restores its controller status in a microtask during
+// bridge installation. Settle that startup publication before measuring the
+// identity behavior of the subscriptions created below.
+await new Promise(resolve => setTimeout(resolve, 0));
 
 const combinedSnapshots = [];
 const unsubscribeCombined = api.state.subscribeMany(['settings', 'models'], snapshot => {
