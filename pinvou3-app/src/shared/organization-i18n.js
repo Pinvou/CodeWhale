@@ -1,6 +1,8 @@
 export const organizationCopy = {
  zh: {
+  loadMoreMembers: '加载更多成员', membersPageHint: '这里只显示已加载的成员；如有后续页，请手动加载后再选择或分配。',
   "enumRole_OWNER": "所有者",
+  "enumRole_ORG_MODEL_ADMIN": "组织模型管理员",
   "enumRole_MEMBER": "成员",
   "enumRole_ORG_ADMIN": "组织管理员",
   "enumRole_BILLING_ADMIN": "财务管理员",
@@ -57,7 +59,9 @@ export const organizationCopy = {
   create: '创建组织', rename: '修改名称', disable: '停用', enable: '启用', delete: '删除组织', readiness: '检查删除条件', blockers: '阻断条件', addMember: '添加成员', renameUnit: '修改单元名称', deleteUnit: '删除单元', previous: '上一页', next: '下一页', search: '搜索名称',
  },
  en: {
+  loadMoreMembers: 'Load more members', membersPageHint: 'Only loaded members are shown. Load subsequent pages before selecting or allocating to other members.',
   "enumRole_OWNER": "Owner",
+  "enumRole_ORG_MODEL_ADMIN": "Organization model administrator",
   "enumRole_MEMBER": "Member",
   "enumRole_ORG_ADMIN": "Organization administrator",
   "enumRole_BILLING_ADMIN": "Billing administrator",
@@ -114,6 +118,8 @@ export const organizationCopy = {
   create: 'Create organization', rename: 'Rename', disable: 'Disable', enable: 'Enable', delete: 'Delete organization', readiness: 'Check deletion conditions', blockers: 'Blocking conditions', addMember: 'Add member', renameUnit: 'Rename unit', deleteUnit: 'Delete unit', previous: 'Previous page', next: 'Next page', search: 'Search names',
  },
  ja: {
+  loadMoreMembers: 'メンバーをさらに読み込む', membersPageHint: '読み込み済みのメンバーのみ表示しています。ほかのメンバーを選択・割り当てる前に続きのページを読み込んでください。',
+  "enumRole_ORG_MODEL_ADMIN": "組織モデル管理者",
   "enumRole_OWNER": "所有者",
   "enumRole_MEMBER": "メンバー",
   "enumRole_ORG_ADMIN": "組織管理者",

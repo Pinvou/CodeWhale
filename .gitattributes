@@ -41,3 +41,6 @@ account-platform/migrations/billing/900002_payment_anomaly_resolution_intents.up
 pinvou3-app/src/account.html text eol=lf
 pinvou3-app/src/admin.html text eol=lf
 pinvou3-app/src/portal-session-handoff.html text eol=lf
+# The generated evidence validator is compared byte-for-byte with Ajv output.
+# Keep its final newline LF on Windows as well as POSIX checkouts.
+remote-control-relay/docs/schemas/remote-control-release-evidence.v1.validator.mjs text eol=lf

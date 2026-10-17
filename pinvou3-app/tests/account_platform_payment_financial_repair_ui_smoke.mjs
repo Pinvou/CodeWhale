@@ -25,7 +25,7 @@ async function openForm(page) {
   await page.evaluate(() => [...document.querySelectorAll('nav button')].find(button => button.textContent === window.f12.ledgerRepairCopy[window.f12.language].paymentRepairTitle).click());
   await page.waitForSelector('.adm-financial-repair-target input');
   await page.evaluate(() => {
-    const values = [window.f12.id(1), window.f12.id(2)];
+    const values = [window.f12.id(1), window.f12.id(2)].map(value => window.f12.uppercaseInputs ? value.toUpperCase() : value);
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
     [...document.querySelectorAll('.adm-financial-repair-target input')].forEach((input, i) => { setter.call(input, values[i]); input.dispatchEvent(new Event('input', { bubbles: true })); });
   });
@@ -41,6 +41,21 @@ async function center(page, view) {
   if (view) await page.evaluate(view => [...document.querySelectorAll('.adm-approval-tabs button')].find(button => button.textContent === window.f12.adminPlatformCopy[window.f12.language].approvalCenter[view]).click(), view);
 }
 try {
+  for (const language of ['zh', 'en', 'ja']) {
+    await run(`PaymentRepair uppercase UUIDs retain exact canonical target and evidence ${language}`, `language=${language}&uppercase-input=1`, async page => {
+      await openForm(page); await page.waitForSelector('.adm-financial-repair-draft');
+      const expected = await page.evaluate(() => ({ target: window.f12.id(1), evidence: window.f12.id(2) }));
+      const precheck = await page.evaluate(() => JSON.parse(window.f12.calls.find(call => call.url.endsWith('/approval-command-prechecks')).body));
+      assert.equal(precheck.target_resource_id, expected.target); assert.equal(precheck.payment_evidence_id, expected.evidence);
+      await create(page); await page.waitForFunction(() => window.f12.status === 'SUBMITTED');
+      const draft = await page.evaluate(() => JSON.parse(window.f12.calls.find(call => call.method === 'POST' && call.url === '/api/admin/approvals/requests').body));
+      assert.equal(draft.target_resource_id, expected.target); assert.equal(draft.normalized_command.payment_order_id, expected.target); assert.equal(draft.normalized_command.payment_evidence_id, expected.evidence);
+    });
+  }
+  for (const condition of ['mismatch', 'evidence-mismatch']) await run(`PaymentRepair uppercase UUIDs still reject ${condition}`, `uppercase-input=1&${condition}=1`, async page => {
+    await openForm(page); await page.waitForSelector('.adm-financial-repair [role=alert]'); assert.equal(await page.$('.adm-financial-repair-draft'), null);
+    assert.equal(await page.evaluate(() => window.f12.calls.some(call => call.url === '/api/admin/approvals/requests' && call.method === 'POST')), false);
+  });
   for (const [label, key, valid] of [['ASCII111', 'a'.repeat(111), true], ['ASCII112', 'a'.repeat(112), false], ['UTF8-111bytes', '中'.repeat(37), true], ['UTF8-114bytes', '中'.repeat(38), false]]) {
     await run(`PaymentRepair prefixed key byte boundary ${label}`, '', async page => {
       await openForm(page); await page.waitForSelector('.adm-financial-repair-draft');

@@ -101,11 +101,9 @@ const webSection = webSource.slice(
 );
 assert.ok(webSection.includes('phase === "cancel"'));
 assert.ok(webSection.includes('bt("compactCancel")'));
-assert.ok(webSection.includes('listen("chat:tool_gate_decision"'));
-assert.ok(webSection.includes('toolGateDecision: true'));
-assert.ok(webSection.includes('toolName: String(p.tool_name || "")'));
-assert.ok(webSection.includes('reason: String(p.reason || "")'));
-assert.ok(webSection.includes('risk: String(p.risk || "")'));
+// chat:tool_gate_decision 是 Web lane 的 never-emitted 事件（不在 access-policy
+// allowed_events / RUST_FORWARDED_EVENTS），其监听器已随 dead-code sweep 移除；
+// 桌面 timeline 的 tool-gate 审计投影仍由 Tauri lane 承担。
 assert.match(
   read('src', 'features', 'codex', 'CodexAcpView.jsx'),
   /!hasStructuredAuditDetails && legacy\.text/,

@@ -46,7 +46,7 @@
 | 冻结差异 | 案件 `case_type='PROVIDER_PAID_INTERNAL_MISSING'`、`status='OPEN'`，其 run `status='COMPLETED'`；同渠道/业务日期允许有多个 run，复核不可只查当前 run |
 | Provider 侧处置 | 存在与案件 `provider_snapshot` 同一 `provider_id`/`provider_version`/`channel_transaction_id`/`merchant_order_no` 的**退款或冲正**账单事实（`payment_evidence.provider_refund_id` 或 Provider 账单行的同额退款/冲正记录），金额与币种一致且状态为成功 |
 | 内部仍无归属 | 冻结时刻与结案时刻的内部比对均无该 `merchant_order_no` 的订单/交易/入账事实（`payment_order_id IS NULL` 保持成立） |
-| 零账务证明 | 结案前后逐表复读：§3 禁止清单涉及的表逐行不变（含 `wallets.version` 与 `receivables.settled/outstanding`） |
+| 零账务证明 | 有限真实 PG 验证中，结案前后按 §3 禁止清单逐表比较完整行快照（含 `wallets.version` 与 `receivables.settled/outstanding`）；不是运行时全库扫描 |
 | 幂等 | 该案件无既有 `reconciliation_repair_cases`，`reconciliation_cases.status='OPEN'` 且 `resolved_at IS NULL` |
 
 判据全部由 Billing 从持久事实重算；proof 不接受浏览器提供的金额、Provider 文本或内部订单号，执行期不调用 Provider。
@@ -78,7 +78,7 @@
 | `financial_snapshot.provider_transaction_id` | 外部幂等引用 |
 | `financial_snapshot.ledger_effect` | 固定 `"NONE"`（零账务效果的显式声明，非 `NONE` 即 `PROOF_DENY`） |
 
-`facts_digest` 覆盖：本次案件全字段、该案件 run 全字段、所引用 Provider 处置证据行摘要（含 `payload_digest`）、关联手审单全字段、该案件商户单号/渠道交易号的内部归属查询为空、同渠道/业务日期/商户单号的未结差异复核，以及 activation/policy/schema 版本。无关订单、钱包版本、全库表计数与全库应收余额不参与跨审批冻结；本命令不获得任何资金写能力，执行前后仍按 §3 全禁止清单逐行核验零效果。关联事实变化仍拒绝，既有不可变回执继续先行读取。
+`facts_digest` 覆盖：本次案件全字段、该案件 run 全字段、所引用 Provider 处置证据行摘要（含 `payload_digest`）、关联手审单全字段、该案件商户单号/渠道交易号的内部归属查询为空、同渠道/业务日期/商户单号的未结差异复核，以及 activation/policy/schema 版本。无关订单、钱包版本、全库表计数与全库应收余额不参与跨审批冻结；本命令不获得任何资金写能力；写集合按 §3 限制，禁止清单的逐行零效果由有限真实 PG 前后快照验证，不把全库快照纳入运行时或冻结摘要。关联事实变化仍拒绝，既有不可变回执继续先行读取。
 
 ### 5.3 proof 与 presenter
 
@@ -87,7 +87,7 @@
 
 ## 6. 守恒、幂等与未知结果
 
-- **守恒（零效果证明）**：禁止清单涉及的全部表在结案前后逐行复读完全一致；`journal_entries`/`ledger_postings` 计数与最大 `created_at` 不变；钱包 `version` 与 `receivables` 三元组不变。
+- **守恒（零效果证明）**：执行器的写集合仅覆盖案件、关联手审与不可变修复记录；提交后核对既有回执中的 `ledger_effect=NONE` 与 `recheck_case_count=0`，不扫描全部财务表。有限真实 PG 用 `reconciliationEffectSnapshot` 对十四张财务表逐行比较完整 JSONB 快照，单独证明钱包 `version`、账本、分录、应收及其它禁止变更的事实均不变；该测试断言不能冒称运行时门禁。
 - **线性化点**：`reconciliation_repair_cases.case_id` 唯一 + 案件 `status='OPEN' AND resolved_at IS NULL` 的 `UPDATE ... WHERE` 条件 CAS（行锁）；并发两次执行至多一次成功，第二次读回既有结果。
 - **result-first**：先严格比对审批/授权/epoch、案件及执行 key 摘要的不可变收据；仅原身份重试命中，已有结果不再用可变当前事实重新授权。随后按 `reconciliation_case_id`/`approval_request_id`/`execution_key_digest` 只读读回 case 与案件终态；命中即返回同一结果，不重复结案、不重复核对。
 - **未知结果**：提交结果不明时只读查证 case 与案件 `RESOLVED` 是否同时成立；缺失或部分事实一律 `UNKNOWN_QUERY_ONLY`，禁止重放、禁止假定零效果。
@@ -102,7 +102,7 @@
 
 ### 7.2 状态推进
 
-- 只允许 `reconciliation_cases.status: OPEN → RESOLVED` 并推进 `version`、更新 `updated_at`；关联手审单同事务结案（`resolution='PROVIDER_REFUND_CONFIRMED'`、`resolved_at=now`）；`IGNORED`、重复结案、`resolution` 复用其它取值一律拒绝。
+- 只允许 `reconciliation_cases.status: OPEN → RESOLVED` 并推进 `version`、更新 `updated_at`；关联手审单同事务更新 `status='RESOLVED'`、`resolved_at` 与 `updated_at`；`resolution_code='PROVIDER_REFUND_CONFIRMED'` 写入 `manual_review_case_events.details` 和不可变修复记录，手审表本身没有 `resolution` 列；`IGNORED`、重复结案、`resolution` 复用其它取值一律拒绝。
 - 既有对账运行/比对链路（`RunReconciliation`）与 `reconciliation_cases` 的其它写入者保持原语义；本命令不改 run 计数、不改其它案件。
 
 ## 8. 失败分类与 DLQ 收口（GSA-16 合同）
@@ -136,7 +136,7 @@
 | 验收点 | 期望证据 |
 |---|---|
 | 正例结案 | 案件 `RESOLVED` + `resolution=PROVIDER_REFUND_CONFIRMED` + `resolved_at`；case 一行含复核 `recheck_case_count=0` |
-| 零账务效果 | 结案前后禁止清单各表逐行一致（含钱包 `version`、`journal/postings` 计数、`receivables` 三元组） |
+| 零账务效果 | 有限真实 PG 中，结案前后禁止清单各表完整快照逐行一致（含钱包 `version`、`journal/postings`、`receivables` 三元组）；运行时不执行此全库比对 |
 | 复核门禁 | 人为保留同单号 `OPEN` 差异时必须失败关闭且案件保持 `OPEN`；复核成功后结案 |
 | 证据门禁 | 缺外部处置证据、证据金额/币种不符、证据渠道交易号不符、案件类型不符、run 非完成、业务日期不符全部 `PROOF_DENY` |
 | 归属门禁 | 命令不接受内部订单/钱包/用户/金额参数（闭合 schema 校验拒绝额外字段）；内部若出现可归属事实则失败关闭 |
@@ -166,7 +166,7 @@
 
 - 每条事实可回溯到 §1/§2 的迁移与源码路径；“内部无可归属事实”由 `payment_order_id IS NULL` 与比对语义共同证明。
 - 首版范围与版本复用决策与用户 2026-09-19 确认一致；零账务效果是显式冻结的结论，并在 §12 记录被拒方案。
-- 变更范围仅本文件与任务登记；运行 `node scripts/check-account-platform-tasks.mjs`、`node scripts/account-platform-migration-manifest.mjs check`、`git diff --check`，不使用 SKIP 作为通过证据。
+- 历史设计阶段记录的 `node scripts/check-account-platform-tasks.mjs`、`node scripts/account-platform-migration-manifest.mjs check` 未随仓库发布，不能当作当前可执行验收入口或已执行证据。当前验证使用项目实际存在的统一构建、Go race、有限真实 PG 与受控 React 入口，命令和结果以当前 PR 记录为准；不使用 SKIP 或零用例作为通过证据。
 
 ## 15. 记录
 

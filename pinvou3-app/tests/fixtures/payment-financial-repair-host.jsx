@@ -4,13 +4,13 @@ import { AdminPlatformView } from '../../src/features/account-platform/AdminPlat
 import { AdminPlatformClient } from '../../src/features/account-platform/admin-client.js';
 import { encodeFinanceJSON, parseFinanceJSON } from '../../src/features/account-platform/finance-contract.js';
 import { financeCopy, ledgerRepairCopy, adminPlatformCopy } from '../../src/shared/i18n.js';
-const id = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const params = new URLSearchParams(location.search), language = params.get('language') || 'zh';
+const id = n => `${params.has('uppercase-input') ? 'abcdefab' : '00000000'}-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const projection = digest => ({ command_type: 'PAYMENT_FINANCIAL_REPAIR', policy_version: 1, snapshot_schema_version: 1,
   target_resource_type: 'PAYMENT_ORDER', target_resource_id: id(1), normalized_command: { payment_order_id: id(1), payment_evidence_id: id(2), reason_code: 'CONFIRMED_PAYMENT_NOT_CREDITED' },
   critical_resource_versions: { payment_order_updated_at: '2026-10-01T00:00:00Z', facts_digest: digest.repeat(64), policy_version: 1 },
   financial_snapshot: { amount_fen: '9007199254740993', credit_microcredits: '9223372036854775807', applied_to_receivables: '9007199254740993', wallet_id: id(3), wallet_version: '9223372036854775806', provider_transaction_id: 'controlled-provider-tx' } });
-const state = window.f12 = { calls: [], id, language, financeCopy, ledgerRepairCopy, adminPlatformCopy, created: params.has('existing'),
+const state = window.f12 = { calls: [], id, language, uppercaseInputs: params.has('uppercase-input'), financeCopy, ledgerRepairCopy, adminPlatformCopy, created: params.has('existing'),
   status: 'DRAFT', version: 1, prechecks: 0, lose: params.has('lost') || params.has('lost-recent'), loseEdit: params.has('edit-lost'), denyReplay: params.has('lost'), reason: 'Controlled payment-repair justification', key: 'approval:controlled-payment-repair', command: projection('a').normalized_command };
 const client = new AdminPlatformClient(); client.csrfToken = 'controlled-csrf';
 const root = createRoot(document.getElementById('root'));
