@@ -880,8 +880,13 @@
     }, STREAM_RENDER_THROTTLE_MS);
   }
 
-  function cancelStreamRenderTimers(purgedSid) {
+  function cancelStreamRenderTimers(purgedSid, reason) {
     cancelPendingStreamNotify(purgedSid);
+    var billingPrefix = String(purgedSid || "") + ":";
+    // Idle buffer eviction retains the session and its pending turn notice.
+    if (purgedSid && reason === "delete") Object.keys(pendingBillingNotices).forEach(function (key) {
+      if (key.startsWith(billingPrefix)) delete pendingBillingNotices[key];
+    });
     if (purgedSid && streamRenderTimers[purgedSid]) {
       clearTimeout(streamRenderTimers[purgedSid]);
       delete streamRenderTimers[purgedSid];
@@ -1572,6 +1577,10 @@
     var sid = payload.session_id;
     var notice = payload.billing_notice;
     if (!sid || !notice || notice.code !== "WALLET_INSUFFICIENT" || notice.context_type !== "PERSONAL") return;
+    // A late event must not recreate state after the session was purged.
+    if (sid !== state.activeSessionId && !sessionStates[sid] &&
+        !(state.sessions || []).some(function (session) { return session.id === sid; }) &&
+        !(typeof isScheduledRunSession === "function" && isScheduledRunSession(sid))) return;
     pendingBillingNotices[billingNoticeKey(sid, payload.turn_generation)] = notice;
   });
 

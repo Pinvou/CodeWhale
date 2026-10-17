@@ -39,6 +39,10 @@ const memberIdentityVersion int64 = 900011
 const memberIdentityChecksum = "af4a63ed0592a0e60d5f4744176e15cc5013c3633c6f0f414f7580b7132b2aa8"
 const memberIdentityDownChecksum = "051eae7b8cf15c7708fbfe88aa096c4d85a284e35465f0684a1ff25fe3af6925"
 
+const memberQuotaBatchVersion int64 = 900022
+const memberQuotaBatchChecksum = "4b4574114cf0a5faa46e9478f5bf1a657fcfd72378f81cdea5069ef1579881c1"
+const memberQuotaBatchDownChecksum = "034594db8fcf381883b49a917c2b67b48efe4dbd17d3408420acc43de39a22ae"
+
 // Ordered installs the new forward-only fence immediately after original 006.
 // The migration engine checks each applied version, so later delivery of lower
 // numeric versions remains possible after the high-numbered fence is recorded.
@@ -53,12 +57,20 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 	var expiredHoldRecovery *migrations.Migration
 	var meteringDeactivation *migrations.Migration
 	var memberIdentity *migrations.Migration
+	var memberQuotaBatch *migrations.Migration
 	seen := make(map[int64]bool, len(input))
 	for _, migration := range input {
 		if seen[migration.Version] {
 			return nil, errors.New("duplicate billing migration version")
 		}
 		seen[migration.Version] = true
+		if (migration.Name == "member_quota_batch_commands" || migration.Checksum == memberQuotaBatchChecksum) && migration.Version != memberQuotaBatchVersion {
+			return nil, errors.New("member quota batch command migration has a different frozen version")
+		}
+		if migration.Version == memberQuotaBatchVersion {
+			copy := migration
+			memberQuotaBatch = &copy
+		}
 		if migration.Version == generationVersion {
 			copy := migration
 			fence = &copy
@@ -83,6 +95,11 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 			copy := migration
 			meteringDeactivation = &copy
 		}
+	}
+	// Preserve earlier partial deliveries, while pinning every supplied batch
+	// receipt identity before either application or rollback can use its SQL.
+	if memberQuotaBatch != nil && (memberQuotaBatch.Name != "member_quota_batch_commands" || memberQuotaBatch.Checksum != memberQuotaBatchChecksum || sqlChecksum(memberQuotaBatch.UpSQL) != memberQuotaBatchChecksum || sqlChecksum(memberQuotaBatch.DownSQL) != memberQuotaBatchDownChecksum) {
+		return nil, errors.New("member quota batch command migration is not the frozen SQL")
 	}
 	if fence == nil || !seen[1] || !seen[6] {
 		return nil, errors.New("billing relay fence requires foundation and original event delivery migrations")

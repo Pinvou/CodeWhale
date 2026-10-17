@@ -180,7 +180,8 @@ const expectedProtocolHashes = {
   // preserves the typed rejection only for its exact current timing owner.
   // Commands, event names and invoke payloads retain their existing shapes;
   // listener callback text is included in this source fingerprint.
-  chat: 'edfc4b697f186523956810c027ee790576db0d2c9e108c34998fb3c1758c9f9e',
+  // Session-purge notice cleanup and rejection of late notices change callback text only; no event/command surface changes.
+  chat: '6a827ecb496a4748475ab4e8e0e8bb3c921ff372dcce545e3ac01f1c3d4e010c',
   dependencies: '257468e4f9e2e9270de6ef75f685d5eafcd000226d44cfb81a1b04c0e7615707',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.
