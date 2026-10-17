@@ -60,6 +60,10 @@
     var STREAM_NOTIFY_MAX_WAIT_MS = 32;
     var pendingStreamNotifications = Object.create(null);
     var pendingBillingNotices = Object.create(null);
+    // Keep only deleted scheduled IDs until this bridge instance restarts.
+    // A bare sched-* prefix stays valid for unloaded sessions, but cannot
+    // override a deletion already observed by this notice consumer.
+    var deletedScheduledBillingNoticeSessions = new Set();
 
     function billingNoticeKey(sessionId, generation) {
       return String(sessionId || "") + ":" + String(Number(generation || 0));
@@ -880,8 +884,17 @@
     }, STREAM_RENDER_THROTTLE_MS);
   }
 
-  function cancelStreamRenderTimers(purgedSid) {
+  function cancelStreamRenderTimers(purgedSid, reason) {
     cancelPendingStreamNotify(purgedSid);
+    if (purgedSid && reason === "delete" &&
+        typeof isScheduledRunSession === "function" && isScheduledRunSession(purgedSid)) {
+      deletedScheduledBillingNoticeSessions.add(purgedSid);
+    }
+    var billingPrefix = String(purgedSid || "") + ":";
+    // Idle buffer eviction retains the session and its pending turn notice.
+    if (purgedSid && reason === "delete") Object.keys(pendingBillingNotices).forEach(function (key) {
+      if (key.startsWith(billingPrefix)) delete pendingBillingNotices[key];
+    });
     if (purgedSid && streamRenderTimers[purgedSid]) {
       clearTimeout(streamRenderTimers[purgedSid]);
       delete streamRenderTimers[purgedSid];
@@ -1571,7 +1584,12 @@
     var payload = e && e.payload || {};
     var sid = payload.session_id;
     var notice = payload.billing_notice;
-    if (!sid || !notice || notice.code !== "WALLET_INSUFFICIENT" || notice.context_type !== "PERSONAL") return;
+    if (!sid || !notice || notice.code !== "WALLET_INSUFFICIENT" || notice.context_type !== "PERSONAL" ||
+        deletedScheduledBillingNoticeSessions.has(sid)) return;
+    // A late event must not recreate state after the session was purged.
+    if (sid !== state.activeSessionId && !sessionStates[sid] &&
+        !(state.sessions || []).some(function (session) { return session.id === sid; }) &&
+        !(typeof isScheduledRunSession === "function" && isScheduledRunSession(sid))) return;
     pendingBillingNotices[billingNoticeKey(sid, payload.turn_generation)] = notice;
   });
 

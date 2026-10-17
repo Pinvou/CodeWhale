@@ -244,7 +244,7 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
       } };
       if (command.actor !== freshUserID) throw new Error('INVALID_REGISTRATION_BONUS_RECOVERY');
       try { persistBonusPending(command); } catch {
-        setState(value => ({ ...value, saving: false, error: labels.pendingStorageFailed, errorCode: 'REGISTRATION_BONUS_PENDING_STORAGE', notice: '' })); return;
+        setState(value => ({ ...value, saving: false, error: labels.pendingStorageFailed, errorCode: 'REGISTRATION_BONUS_PENDING_STORAGE', retrySave: true, notice: '' })); return;
       }
       pendingWrite.current = command; setUnknownWrite(true);
       submittedCommand = command;
@@ -291,7 +291,11 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
         : error?.code === 'RECENT_AUTHENTICATION_REQUIRED'
           ? labels.recentAuthenticationRequired
           : labels.saveFailed;
-      setState({ loading: false, saving: false, error: message, errorCode: authorizationChanged ? 'REGISTRATION_BONUS_DRAFT_IDENTITY_CHANGED' : error?.code || '', notice: '' });
+      // Only a proved-no-write or not-yet-dispatched attempt may retry edited
+      // input. Unknown receipts continue to replay their original key/body.
+      const retrySave = !pendingWrite.current && (!submittedCommand || safeNoWrite) && !authorizationChanged
+        && !['REGISTRATION_BONUS_CONFLICT', 'REGISTRATION_BONUS_ELIGIBILITY_NOT_READY', 'RECENT_AUTHENTICATION_REQUIRED'].includes(error?.code);
+      setState({ loading: false, saving: false, error: message, errorCode: authorizationChanged ? 'REGISTRATION_BONUS_DRAFT_IDENTITY_CHANGED' : error?.code || '', retrySave, notice: '' });
     } finally { saveInFlight.current = false; }
   };
 
@@ -394,6 +398,8 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
       ? { label: labels.retryDraftCleanup, run: retryDraftCleanup }
     : state.errorCode === 'RECENT_AUTHENTICATION_REQUIRED' || state.errorCode === 'REGISTRATION_BONUS_DRAFT_STORAGE_UNAVAILABLE'
       ? { label: state.errorCode === 'RECENT_AUTHENTICATION_REQUIRED' ? labels.reauthenticate : labels.retryReauthentication, run: reauthenticate }
+    : state.retrySave
+      ? { label: copy.retry, save: true, run: () => void save() }
       : { label: copy.retry, read: true, run: () => void load() };
 
   return (
@@ -402,7 +408,7 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
       <div className="adm-inline-message warn" role="note">{labels.lifetimeWarning}</div>
       {pendingDraft && <div className="adm-inline-message warn adm-registration-bonus-draft-prompt" role="status"><span>{labels.unfinishedReauthenticationDraft}</span><div><button type="button" onClick={recoverPendingDraft} disabled={state.loading || !policy}>{labels.recoverDraft}</button><button type="button" onClick={discardPendingDraft}>{labels.discardDraft}</button></div></div>}
       {(unknownWrite || recoveryBlocked) && !state.error && <div className="adm-inline-message error" role="alert"><span>{recoveryBlocked ? labels.pendingStorageFailed : labels.outcomeUnknown}</span>{unknownWrite && <button type="button" disabled={state.saving || authorizationRefreshing || !canManage || recoveryBlocked} onClick={() => void save()}>{labels.retryUnknown}</button>}</div>}
-      {state.error && <div className="adm-inline-message error" role="alert"><span>{state.error}</span><button type="button" onClick={errorAction.run} disabled={state.loading || state.saving || authorizationRefreshing || (errorAction.read ? !canRead : !canManage) || recoveryBlocked}>{errorAction.label}</button></div>}
+      {state.error && <div className="adm-inline-message error" role="alert"><span>{state.error}</span><button type="button" onClick={errorAction.run} disabled={state.loading || state.saving || authorizationRefreshing || (errorAction.read ? !canRead : !canManage) || (errorAction.save && (!valid || (form.enabled && !eligibilityReady))) || recoveryBlocked}>{errorAction.label}</button></div>}
       {state.notice && <div className="adm-inline-message ok" role="status">{state.notice}</div>}
       {state.loading && <p className="adm-muted">{copy.loading}</p>}
       {!state.loading && policy && (
