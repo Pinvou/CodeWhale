@@ -65,9 +65,9 @@ unsound = "workspace"
 # so yanked releases are denied again. Reassess immediately if an advisory
 # affects the pinned version.
 yanked = "deny"
-# 被忽略条目不再命中任何 crate 时直接报错(默认 warn):上面的 zip@8.6.0
-# 例外是带摘除条件的临时豁免,calamine 落到 zip 9 基线、条目失效的同一
-# 提交里 CI 就会变红——摘除协议因此自强制,不依赖注释自觉。
+# 被忽略条目不再命中任何 crate 时直接报错(默认 warn):上面按 id 的 advisory
+# 例外(现为 RUSTSEC-2026-0387)都是带重评条件的临时豁免——依赖升级使条目
+# 失效的同一提交里 CI 就会变红,摘除协议因此自强制,不依赖注释自觉。
 unused-ignored-advisory = "deny"
 
 [licenses]

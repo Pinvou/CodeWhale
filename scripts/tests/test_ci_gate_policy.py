@@ -676,6 +676,8 @@ PINNED_GATE_STEP_NAMES = {
     "rust-lint": (
         "Prepare Rust disk capacity",
         "Set up zram and swap",
+        "cargo-deny (advisories/licenses/bans/sources)",
+        "cargo deny check (hard gate)",
     ),
     # PR #1518 round-11: 复活的 test:windows-runtime-manifest 契约步是全仓
     # 唯一执行器,同样按 name 钉住防诱饵/防静默删除。
@@ -684,6 +686,8 @@ PINNED_GATE_STEP_NAMES = {
     ),
     "knowledge-rust": (
         "cargo clippy (hard gate, lib/bins/tests + server)",
+        "cargo-deny",
+        "cargo deny check",
     ),
     "rust-loongarch64-check": (
         "Set up the pinned loong64 cross toolchain (sha256-pinned asset)",
@@ -1650,6 +1654,72 @@ class CiGatePolicyTests(unittest.TestCase):
         )
         self.assertNotIn("|| true", step)
         self.assertNotIn("continue-on-error", step)
+        # Round-12 review: without the `if:` ban an `if: false` self-decoy
+        # (or any conditional that evaluates false on the leg) keeps every
+        # assertion here green while the contract's only CI executor
+        # silently stops — the same decoy class the sibling pins (lock
+        # registry, test-registry guard) ban explicitly.
+        self.assertNotIn(
+            "if:",
+            step,
+            "the manifest contract step must run unconditionally on its leg",
+        )
+
+    def test_cargo_deny_gate_steps_are_pinned(self):
+        # Round-12 review: the deny gate (advisories/yanked) is the leg most
+        # exposed to ecosystem drift (zip yank + RUSTSEC-2026-0367/0368/0369
+        # landed the day after this branch's last green run), yet its four
+        # steps carried no pins — a version drift or a deleted check step
+        # would pass every gate-policy test. Pin both legs' install (fixed
+        # 0.20.2: the PackageSpec/id ignore routing and
+        # unused-ignored-advisory semantics are version-sensitive) and the
+        # check command (must keep `advisories` and target the shared
+        # deny.toml), on executable lines only.
+        for job, install_name, check_name in (
+            (
+                "knowledge-rust",
+                "cargo-deny",
+                "cargo deny check",
+            ),
+            (
+                "rust-lint",
+                "cargo-deny (advisories/licenses/bans/sources)",
+                "cargo deny check (hard gate)",
+            ),
+        ):
+            with self.subTest(job=job):
+                job_block = _extract_job_block(self.pr_workflow, job)
+                install = job_block.split(f"- name: {install_name}", maxsplit=1)[
+                    1
+                ].split("\n      - name:", maxsplit=1)[0]
+                self.assertTrue(
+                    any(
+                        "tool: cargo-deny@0.20.2" in line
+                        for line in install.splitlines()
+                        if not line.lstrip().startswith("#")
+                    ),
+                    f"{job}: cargo-deny must stay pinned to 0.20.2 (the "
+                    "advisory-ignore routing and unused-ignored-advisory "
+                    "semantics are version-sensitive)",
+                )
+                check = job_block.split(f"- name: {check_name}", maxsplit=1)[
+                    1
+                ].split("\n      - name:", maxsplit=1)[0]
+                code = "\n".join(
+                    line for line in check.splitlines()
+                    if not line.lstrip().startswith("#")
+                )
+                self.assertIn("advisories", code)
+                self.assertTrue(
+                    # knowledge-rust names the shared config explicitly;
+                    # rust-lint reaches it via its working-directory
+                    "deny.toml" in code
+                    or "working-directory: pinvou3-app/src-tauri" in code,
+                    f"{job}: the check must target the shared src-tauri "
+                    "deny.toml (explicitly or via working-directory)",
+                )
+                self.assertNotIn("|| true", check)
+                self.assertNotIn("continue-on-error", check)
 
     def test_rust_lint_disk_step_is_draft_gated_and_precedes_zram(self):
         # PR #1518 round-5 review: the rust-lint disk cleanup is only needed
@@ -2998,17 +3068,25 @@ class CiGatePolicyTests(unittest.TestCase):
         # (e.g. while editing the surrounding command) goes red here.
         # Round-11 review: count EXECUTABLE lines only — a bare `--locked`
         # inside a comment otherwise offsets a real removal and the swap
-        # keeps this at 4 while a run line silently unlocks.
+        # keeps this at 4 while a run line silently unlocks. Round-12
+        # review: an inline trailing comment (`cmd  # --locked`) defeats a
+        # full-line-only filter too, so each line is stripped at its first
+        # `#` before matching — a real relocation into a comment drops the
+        # count and goes red.
+        def _code_part(line):
+            return line.split("#", 1)[0]
+
         locked_run_lines = [
             line
             for line in rust_test.splitlines()
-            if "--locked" in line and not line.lstrip().startswith("#")
+            if "--locked" in _code_part(line)
+            and not line.lstrip().startswith("#")
         ]
         self.assertEqual(
             len(locked_run_lines),
             4,
             "every src-tauri cargo test invocation in rust-test must stay "
-            "--locked (counted on executable lines only); when a fifth "
+            "--locked (counted on comment-stripped code only); when a fifth "
             "cargo test lands here, raise this pin in the same commit",
         )
         # push(main) 只编译暖 cache,不执行测试:MQ 已对同一组合树跑过全量测试;

@@ -1351,8 +1351,9 @@ jobs:
         run: git diff --exit-code -- '**/Cargo.lock'
 
       # 版本已固定(round-11 review):install-action 默认装最新,而 deny.toml 的
-      # advisories.ignore PackageSpec 例外路由(@→Exact 匹配、unused-ignored-advisory
-      # 语义)随版本可能漂移;cargo-shear 同理按 1.13.4 钉住。
+      # advisories.ignore 例外路由(id 级条目、unused-ignored-advisory 语义,
+      # round-12 起为 RUSTSEC id ignore)随版本可能漂移;cargo-shear 同理按
+      # 1.13.4 钉住。
       - name: cargo-deny
         if: ${{ needs.changes.outputs.knowledge_dependencies == 'true' }}
         uses: taiki-e/install-action@v2
