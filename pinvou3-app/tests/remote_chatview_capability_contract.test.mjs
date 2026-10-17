@@ -270,9 +270,13 @@ test('only the Rust-verified remote projection renders the single ChatView timel
   assert.match(chat, /remoteProxyChatItems\(activeSessionId, remoteProxyHistory\)/);
   assert.match(chat, /if \(item\.remoteProxy && item\.type === 'system'\) \{[\s\S]*?data-testid="chat-remote-projection-entry"/);
   assert.match(chat, /if \(item\.remoteProxy && item\.type === 'system'\) \{[\s\S]*?return \([\s\S]*?\);[\s\S]*?if \(item\.type === 'artifact_card'\)/);
-  assert.match(chat, /if \(item\.type === 'assistant'\) \{[\s\S]*?renderLegacyMarkdownCached\(item, syntaxVersion\)/,
+  // Official 适配：stream-fade 回流把 legacy 现算与 remoteProxy 旁路解析上提到
+  // ChatBubble 顶部的 assistantHtml/assistantParsed（供 no-deps effect 复用同一
+  // html 身份），pin 随之更新；钉住的意图不变——remote 回复仍走普通 Markdown/代码
+  // 渲染管线，且不得在本地伪造 persona/question 动作。
+  assert.match(chat, /const assistantHtml = item\.type === 'assistant'\s*\?\s*\(\(!item\.streaming && item\.text\)\s*\?\s*renderLegacyMarkdownCached\(item, syntaxVersion\)/,
     'remote replies keep the ordinary ChatView Markdown and code renderer');
-  assert.match(chat, /item\.remoteProxy\s*\? \{ pd: \{ draft: null \}, cq: \{ q: null, html \} \}/,
+  assert.match(chat, /item\.remoteProxy\s*\?\s*\{ pd: \{ draft: null \}, cq: \{ q: null, html: assistantHtml \} \}/,
     'remote Markdown cannot manufacture local persona or question actions');
   assert.match(chat, /item\.remoteProxy\s*\? \{ text: item\.text, attachments: \[\] \}\s*: splitAttachmentLine\(mentionSplit\.text\)/,
     'remote user text cannot be interpreted as a local attachment action');
