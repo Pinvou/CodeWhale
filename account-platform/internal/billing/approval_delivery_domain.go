@@ -127,26 +127,7 @@ func (domain *billingAuthorizationDomain) LookupAuthorizationResult(ctx context.
 		encoded, err := json.Marshal(result)
 		return authorizationDomainResult{DomainResult: encoded, LedgerReferences: json.RawMessage(`{}`)}, true, err
 	case entitlementComponentAdjustmentCommand:
-		if domain.repository == nil {
-			return authorizationDomainResult{}, false, ErrApprovalExecutionUnavailable
-		}
-		owner, ok := domain.repository.(entitlementCorrectionExecutor)
-		if !ok {
-			return authorizationDomainResult{}, false, ErrApprovalExecutionUnavailable
-		}
-		result, err := owner.EntitlementCorrectionForRequest(ctx, binding.ApprovalRequestID)
-		if errors.Is(err, ErrNotFound) {
-			return authorizationDomainResult{}, false, nil
-		}
-		if err != nil {
-			return authorizationDomainResult{}, false, err
-		}
-		encoded, err := json.Marshal(result)
-		if err != nil {
-			return authorizationDomainResult{}, false, err
-		}
-		ledger, _ := json.Marshal(map[string]any{"journal_entry_id": result.JournalEntryID})
-		return authorizationDomainResult{DomainResult: encoded, LedgerReferences: ledger}, true, nil
+		return authorizationDomainResult{}, false, ErrApprovalExecutionUnavailable
 	case ledgerRepairCommand:
 		if domain.repository == nil {
 			return authorizationDomainResult{}, false, ErrApprovalExecutionUnavailable

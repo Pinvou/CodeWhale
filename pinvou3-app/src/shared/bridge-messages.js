@@ -118,6 +118,20 @@
     return lowerRemainder.indexOf("<turn_meta>") === 0 && lowerRemainder.endsWith("</turn_meta>");
   }
 
+  // CodeWhale may persist a prompt-cache delta as a user-role message so the
+  // model keeps the effective session context. It is runtime metadata, not a
+  // user turn. Match the complete canonical shape only: a user's mention or
+  // quotation of the tag must remain visible.
+  function isContextUpdateRuntimeMessage(value) {
+    var text = String(value || "").trim().replace(/\r\n/g, "\n");
+    var prefix = [
+      "<context_update>",
+      "Session context changed since it was pinned; the pinned system prompt is unchanged. Delta (+ added, - removed):",
+      "",
+    ].join("\n");
+    return text.indexOf(prefix) === 0 && text.endsWith("\n</context_update>");
+  }
+
   function userMessageInputProvenance(blocks) {
     var textBlocks = Array.isArray(blocks) ? blocks : [];
     for (var i = 0; i < textBlocks.length; i++) {
@@ -130,12 +144,40 @@
   }
 
   function isInternalRuntimeUserMessage(value) {
-    return containsOnlyInternalRuntimeMetadata(value) ||
+    return isContextUpdateRuntimeMessage(value) ||
+      containsOnlyInternalRuntimeMetadata(value) ||
       isInternalUserMessageProvenance(inputProvenanceFromText(value));
+  }
+
+  function isKnownInternalMetadataBlock(value) {
+    if (isInternalRuntimeUserMessage(value)) return true;
+    var text = String(value || "").trim().toLowerCase();
+    return /^<turn_meta_unchanged\s*\/>$/.test(text) ||
+      (text.indexOf("<turn_meta>") === 0 && text.endsWith("</turn_meta>"));
+  }
+
+  // A persisted user message is internal only when every non-empty text block
+  // is known runtime metadata. A canonical context update may be accompanied
+  // by other internal metadata, but any ordinary text keeps the user turn.
+  function isInternalUserMessage(blocks) {
+    var textBlocks = Array.isArray(blocks) ? blocks : [];
+    if (isInternalUserMessageProvenance(userMessageInputProvenance(textBlocks))) return true;
+    var foundInternal = false;
+    for (var i = 0; i < textBlocks.length; i++) {
+      var block = textBlocks[i];
+      if (!block || block.type !== "text") continue;
+      var text = String(block.text || "");
+      if (!text.trim()) continue;
+      if (!isKnownInternalMetadataBlock(text)) return false;
+      foundInternal = true;
+    }
+    return foundInternal;
   }
 
   window.PinvouBridgeMessages = Object.freeze({
     isInternalRuntimeUserMessage: isInternalRuntimeUserMessage,
+    isInternalUserMessage: isInternalUserMessage,
+    isKnownInternalMetadataBlock: isKnownInternalMetadataBlock,
     isInternalUserMessageProvenance: isInternalUserMessageProvenance,
     userMessageInputProvenance: userMessageInputProvenance,
     computerUseKnownErrorText,

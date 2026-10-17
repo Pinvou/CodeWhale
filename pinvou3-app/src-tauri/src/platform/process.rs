@@ -243,14 +243,14 @@ fn output_with_timeout_inner(
     let started = Instant::now();
     let status = loop {
         if capture_limit_exceeded(&stdout_file) || capture_limit_exceeded(&stderr_file) {
-            let _ = managed_tree.terminate();
+            let kill_note = kill_note_suffix(managed_tree.terminate());
             let _ = child.kill();
             let reap_note = reap_note_suffix(reap_killed_child(&mut child, REAP_GRACE));
             let stdout = read_capture(&mut stdout_file);
             let stderr = read_capture(&mut stderr_file);
             let detail = subprocess_output_detail(&stdout, &stderr);
             return Err(format!(
-                "{program} output exceeded {MAX_CAPTURE_BYTES} bytes; subprocess tree termination requested: {detail}{reap_note}"
+                "{program} output exceeded {MAX_CAPTURE_BYTES} bytes; subprocess tree termination requested: {detail}{reap_note}{kill_note}"
             ));
         }
         match child.try_wait() {
@@ -259,28 +259,32 @@ fn output_with_timeout_inner(
                 std::thread::sleep(Duration::from_millis(50));
             }
             Ok(None) => {
-                if kill_tree_on_timeout {
-                    let _ = managed_tree.terminate();
-                }
+                let kill_note = if kill_tree_on_timeout {
+                    kill_note_suffix(managed_tree.terminate())
+                } else {
+                    String::new()
+                };
                 let _ = child.kill();
                 let reap_note = reap_note_suffix(reap_killed_child(&mut child, REAP_GRACE));
                 let stdout = read_capture(&mut stdout_file);
                 let stderr = read_capture(&mut stderr_file);
                 let detail = subprocess_output_detail(&stdout, &stderr);
                 return Err(format!(
-                    "{program} timed out after {}s: {detail}{reap_note}",
+                    "{program} timed out after {}s: {detail}{reap_note}{kill_note}",
                     timeout.as_secs()
                 ));
             }
             Err(error) => {
-                if kill_tree_on_timeout {
-                    let _ = managed_tree.terminate();
-                }
+                let kill_note = if kill_tree_on_timeout {
+                    kill_note_suffix(managed_tree.terminate())
+                } else {
+                    String::new()
+                };
                 let _ = child.kill();
                 // 等待错误本身已是调用方的诊断信息,回收结果按既有惯例丢弃;
                 // 有界回收保证这条路径同样不越过自身的时间预算。
                 let _ = reap_killed_child(&mut child, REAP_GRACE);
-                return Err(format!("{program} wait error: {error}"));
+                return Err(format!("{program} wait error: {error}{kill_note}"));
             }
         }
     };
@@ -289,12 +293,12 @@ fn output_with_timeout_inner(
     // and `try_wait()`. Re-check after completion so overflow is never reported
     // as a silently truncated success.
     if capture_limit_exceeded(&stdout_file) || capture_limit_exceeded(&stderr_file) {
-        let _ = managed_tree.terminate();
+        let kill_note = kill_note_suffix(managed_tree.terminate());
         let stdout = read_capture(&mut stdout_file);
         let stderr = read_capture(&mut stderr_file);
         let detail = subprocess_output_detail(&stdout, &stderr);
         return Err(format!(
-            "{program} output exceeded {MAX_CAPTURE_BYTES} bytes; subprocess tree termination requested: {detail}"
+            "{program} output exceeded {MAX_CAPTURE_BYTES} bytes; subprocess tree termination requested: {detail}{kill_note}"
         ));
     }
 
@@ -352,6 +356,18 @@ fn reap_note_suffix(reap: Reap) -> String {
         }
         Reap::Failed(error) => format!("; reaping the child failed: {error}"),
     }
+}
+
+/// Renders a failed tree-kill request as an error-message suffix; an empty
+/// string when the request succeeded. A failed request must reach the
+/// caller's error message: the termination note would otherwise claim a
+/// tree termination that did not happen (the Windows taskkill helper can
+/// overrun its own budget and give up).
+fn kill_note_suffix(result: std::io::Result<()>) -> String {
+    result
+        .err()
+        .map(|error| format!("; kill tree request failed: {error}"))
+        .unwrap_or_default()
 }
 
 fn capture_limit_exceeded(file: &std::fs::File) -> bool {
@@ -1225,7 +1241,7 @@ pub(crate) mod tests {
             }
             #[cfg(windows)]
             Ok("root_timeout") => {
-                let _child = output_fixture_command("descendant_timeout")
+                let _child = output_fixture_command("root_timeout_descendant")
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .spawn()
@@ -1273,6 +1289,21 @@ pub(crate) mod tests {
                 if let Some(finished) = fixture_marker("finished") {
                     std::fs::write(finished, b"finished").unwrap();
                 }
+            }
+            #[cfg(windows)]
+            Ok("root_timeout_descendant") => {
+                std::fs::write(
+                    fixture_marker("pid").unwrap(),
+                    std::process::id().to_string(),
+                )
+                .unwrap();
+                std::fs::write(fixture_marker("running").unwrap(), b"running").unwrap();
+                // Only the ordinary-timeout fixture exits cooperatively. Its
+                // parent first observes this exact process alive after timeout.
+                assert!(wait_for_fixture_marker(
+                    "cooperative-exit",
+                    Duration::from_secs(60)
+                ));
             }
             Ok("descendant_timeout") => {
                 if let Some(pid) = fixture_marker("pid") {
@@ -1661,6 +1692,50 @@ pub(crate) mod tests {
     }
 
     #[cfg(windows)]
+    struct RootTimeoutFixtureCleanup {
+        identity: WindowsProcessHandle,
+        cooperative_exit: std::path::PathBuf,
+        completed: bool,
+    }
+
+    #[cfg(windows)]
+    impl RootTimeoutFixtureCleanup {
+        fn finish(&mut self) {
+            std::fs::write(&self.cooperative_exit, b"exit")
+                .expect("request cooperative timeout-fixture exit");
+            assert_windows_process_exited(&self.identity, Duration::from_secs(3));
+            self.completed = true;
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for RootTimeoutFixtureCleanup {
+        fn drop(&mut self) {
+            if self.completed {
+                return;
+            }
+            // A failed assertion must still clean up only the pinned fixture.
+            // TerminateProcess is asynchronous; this fallback retains its own
+            // bounded exit wait and never turns a cleanup failure into success.
+            let termination = terminate_windows_fixture_process(&self.identity);
+            // SAFETY: the cleanup guard still owns this bound process handle.
+            let wait = unsafe {
+                windows_sys::Win32::System::Threading::WaitForSingleObject(
+                    self.identity.handle,
+                    3_000,
+                )
+            };
+            eprintln!(
+                "timeout fixture {} fallback: terminate={termination:?}, wait={wait}",
+                self.identity.pid
+            );
+            if !std::thread::panicking() {
+                panic!("timeout fixture cleanup did not complete cooperatively");
+            }
+        }
+    }
+
+    #[cfg(windows)]
     #[test]
     fn ordinary_timeout_does_not_terminate_managed_descendants() {
         use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
@@ -1669,6 +1744,7 @@ pub(crate) mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let marker = temporary.path().join("root-only-timeout");
         let pid_file = marker.with_extension("pid");
+        let cooperative_exit = marker.with_extension("cooperative-exit");
         let mut command = output_fixture_command("root_timeout");
         command.env(OUTPUT_FIXTURE_MARKER_ENV, &marker);
         let (root_finished, root_result) = std::sync::mpsc::channel();
@@ -1680,12 +1756,18 @@ pub(crate) mod tests {
                 .parse()
                 .unwrap();
             let identity = WindowsProcessHandle::open(pid).unwrap().unwrap();
+            let mut cleanup = RootTimeoutFixtureCleanup {
+                identity,
+                cooperative_exit,
+                completed: false,
+            };
             root_result.recv_timeout(Duration::from_secs(35)).unwrap();
             // SAFETY: identity pins the exact descendant; zero wait only probes liveness.
-            let survived = unsafe { WaitForSingleObject(identity.handle, 0) } == WAIT_TIMEOUT;
-            terminate_windows_fixture_process(&identity)
-                .expect("terminate the deliberately surviving timeout fixture");
-            assert_windows_process_exited(&identity, Duration::from_secs(3));
+            let survived =
+                unsafe { WaitForSingleObject(cleanup.identity.handle, 0) } == WAIT_TIMEOUT;
+            // Observe the contract before cleanup. This test does not require
+            // asynchronous forced termination to complete within a wall-clock budget.
+            cleanup.finish();
             survived
         });
         let result = output_with_timeout(
@@ -1934,5 +2016,24 @@ pub(crate) mod tests {
             "descendant fixture did not exit naturally"
         );
         std::thread::sleep(Duration::from_millis(100));
+    }
+
+    /// kill_note_suffix is the platform-independent half of the tree-kill
+    /// error folding: empty on success, and a failure that names the request
+    /// (the capture-limit paths otherwise claim a termination that did not
+    /// happen). Pure function, so both branches run on every platform —
+    /// unlike the runtime-Windows taskkill branch it annotates.
+    #[test]
+    fn kill_note_suffix_is_empty_on_success_and_names_the_failure() {
+        assert_eq!(kill_note_suffix(Ok(())), "");
+        let note = kill_note_suffix(Err(std::io::Error::other("taskkill budget overrun")));
+        assert!(
+            note.starts_with("; kill tree request failed: "),
+            "the note must read as an appended failure clause, got: {note}"
+        );
+        assert!(
+            note.contains("taskkill budget overrun"),
+            "the note must carry the underlying error, got: {note}"
+        );
     }
 }

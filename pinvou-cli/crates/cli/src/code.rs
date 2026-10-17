@@ -1384,6 +1384,7 @@ fn provider_not_found(agent: &str, id: &str) -> CliError {
 /// is back (its not-found message is the sibling-lane contract the
 /// checkpoints gate's doc cites).
 fn require_existing(store: &SessionStore, id: &str, action: &str) -> Result<(), CliError> {
+    crate::support::reject_remote_session(store, id, "code", action)?;
     store
         .load(id)
         .map(|_| ())
@@ -3950,6 +3951,7 @@ fn code_sessions_list(output: OutputMode) -> Result<CliOutcome, CliError> {
 
 fn code_sessions_info(id: &str, output: OutputMode) -> Result<CliOutcome, CliError> {
     let store = open_store()?;
+    crate::support::reject_remote_session(&store, id, "code", "sessions info")?;
     let agents = SessionAgentStore::load_or_empty();
     // Fetch the session (and its model name) first: the gate below must
     // accept exactly the sessions `code sessions list` accepts, including
@@ -4004,6 +4006,7 @@ fn code_sessions_info(id: &str, output: OutputMode) -> Result<CliOutcome, CliErr
 /// error instead of reporting an empty journal.
 fn code_sessions_timeline(id: &str, output: OutputMode) -> Result<CliOutcome, CliError> {
     let store = open_store()?;
+    crate::support::reject_remote_session(&store, id, "code", "sessions timeline")?;
     let agents = SessionAgentStore::load_or_empty();
     // Same gate (and same error) as `code sessions info`, including the
     // model-name fallback for sessions whose sidecar record was lost.

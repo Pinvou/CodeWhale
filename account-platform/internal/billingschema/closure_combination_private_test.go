@@ -2,11 +2,13 @@ package billingschema
 
 import (
 	"context"
+	"errors"
 	"github.com/Pinvou/pinvou3/account-platform/internal/accountschema"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"os"
 	"os/exec"
 	"runtime"
@@ -156,13 +158,88 @@ func TestClosurePrivatePublicCombination(t *testing.T) {
 		if ledger != stageValue(t, ctx, tc, `SELECT jsonb_agg(jsonb_build_array(version,checksum) ORDER BY version)::text FROM schema_migrations`) {
 			t.Fatal("rejected rollback changed Token ledger")
 		}
-		ledger = stageValue(t, ctx, ac, `SELECT jsonb_agg(jsonb_build_array(version,checksum) ORDER BY version)::text FROM schema_migrations`)
-		if err = migrations.DownOne(ctx, ac, am); err == nil {
-			t.Fatal("Account durable ACK rollback allowed")
+		// Only unused 900006 can roll back; 900005 must retain cleanup ACKs.
+		var latest int64
+		var incompatibleBindings int
+		if err = ac.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&latest); err != nil || latest != 900006 {
+			t.Fatal("expected role CHECK before cleanup ACK rollback", latest, err)
 		}
-		if ledger != stageValue(t, ctx, ac, `SELECT jsonb_agg(jsonb_build_array(version,checksum) ORDER BY version)::text FROM schema_migrations`) {
-			t.Fatal("rejected rollback changed Account ledger")
+		if err = ac.QueryRow(ctx, `SELECT count(*) FROM role_bindings WHERE role='ORG_MODEL_ADMIN'`).Scan(&incompatibleBindings); err != nil || incompatibleBindings != 0 {
+			t.Fatal("safe role CHECK rollback requires no incompatible history", incompatibleBindings, err)
 		}
+		accountLedger := func(withoutRoleCheck bool) string {
+			t.Helper()
+			var facts string
+			if err := ac.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(entry) ORDER BY version)::text FROM schema_migrations entry WHERE NOT $1::boolean OR version<>900006`, withoutRoleCheck).Scan(&facts); err != nil {
+				t.Fatal(err)
+			}
+			return facts
+		}
+		accountFacts := func() string {
+			t.Helper()
+			return stageValue(t, ctx, ac, `SELECT jsonb_build_object(
+'users',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM users f),
+'identities',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM identities f),
+'user_sessions',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM user_sessions f),
+'memberships',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM memberships f),
+'membership_units',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM membership_units f),
+'invitations',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM invitations f),
+'account_closure_requests',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM account_closure_requests f),
+'account_closure_commands',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM account_closure_commands f),
+'account_closure_audit',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM account_closure_audit f),
+'account_subject_retention_records',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM account_subject_retention_records f),
+'roles',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM roles f),
+'permissions',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM permissions f),
+'role_permissions',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM role_permissions f),
+'role_bindings',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM role_bindings f),
+'role_assignments',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM role_assignments f),
+'authorization_versions',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM authorization_versions f),
+'outbox_events',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM outbox_events f))::text`)
+		}
+		beforeFacts, expectedRemainingLedger := accountFacts(), accountLedger(true)
+		beforeShape := stageShape(t, ctx, ac)
+		roleCheckIdentity := stageValue(t, ctx, ac, `SELECT (to_jsonb(entry)-'applied_at')::text FROM schema_migrations entry WHERE version=900006`)
+		if err = migrations.DownOne(ctx, ac, am); err != nil {
+			t.Fatal("unused role CHECK did not roll back safely", err)
+		}
+		var remaining []migrations.Migration
+		for _, migration := range am {
+			if migration.Version != 900006 {
+				remaining = append(remaining, migration)
+			}
+		}
+		if len(remaining) != len(am)-1 || accountLedger(false) != expectedRemainingLedger || accountFacts() != beforeFacts {
+			t.Fatal("safe role CHECK rollback changed retained facts or unrelated ledger")
+		}
+		if _, err = migrations.VerifyApplied(ctx, ac, remaining); err != nil {
+			t.Fatal("safe rollback left unexpected Account history", err)
+		}
+		if err = ac.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&latest); err != nil || latest != 900005 {
+			t.Fatal("cleanup ACK guard is not the next public rollback", latest, err)
+		}
+		err = migrations.DownOne(ctx, ac, remaining)
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "55000" || pgErr.Message != "account closure cleanup acknowledgements are forward-only" {
+			t.Fatal("actual Account cleanup ACK rollback was not rejected", err)
+		}
+		if accountLedger(false) != expectedRemainingLedger || accountFacts() != beforeFacts {
+			t.Fatal("rejected cleanup ACK rollback changed Account facts or full remaining ledger")
+		}
+		if _, err = migrations.VerifyApplied(ctx, ac, remaining); err != nil {
+			t.Fatal("rejected rollback changed remaining Account history", err)
+		}
+		// Restore through public Up before the real ACK child. Only the re-applied
+		// 900006 ledger row may receive a new applied_at; no history is rewritten.
+		if err = accountschema.Up(ctx, ac, am); err != nil {
+			t.Fatal("restore full Account schema before ACK child", err)
+		}
+		if _, err = migrations.VerifyApplied(ctx, ac, am); err != nil {
+			t.Fatal("restored Account history before ACK child", err)
+		}
+		if accountLedger(true) != expectedRemainingLedger || accountFacts() != beforeFacts || stageShape(t, ctx, ac) != beforeShape || stageValue(t, ctx, ac, `SELECT (to_jsonb(entry)-'applied_at')::text FROM schema_migrations entry WHERE version=900006`) != roleCheckIdentity {
+			t.Fatal("public restore changed retained facts, schema or migration identity")
+		}
+		migrations.Unlock(ctx, ac)
 	})
 	args := []string{"test", "-mod=readonly", "-tags=nomsgpack", "-count=1", "-json", "./internal/account", "-run", "^TestClosureClaimACKOrder$"}
 	if runtime.GOOS != "windows" {

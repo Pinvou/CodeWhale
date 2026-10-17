@@ -306,18 +306,18 @@ const WORKER_THREAD_NAME: &str = "computer-use-backend";
 fn install_worker_panic_redaction() {
     static INSTALL: std::sync::Once = std::sync::Once::new();
     INSTALL.call_once(|| {
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
+        crate::core::panic_hooks::chain(move |info| {
             if std::thread::current().name() == Some(WORKER_THREAD_NAME) {
                 let location = info
                     .location()
                     .map(|location| format!("{}:{}", location.file(), location.line()))
                     .unwrap_or_else(|| "unknown location".to_string());
                 eprintln!("[computer_use] panic at {location}: payload withheld");
+                true
             } else {
-                previous(info);
+                false
             }
-        }));
+        });
     });
 }
 

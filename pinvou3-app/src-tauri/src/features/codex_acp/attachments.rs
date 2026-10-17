@@ -251,6 +251,57 @@ mod tests {
     }
 
     #[test]
+    fn published_image_owner_survives_ingest_and_native_acp_second_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("remote_uploads").join("ctr-up-image");
+        let directory = crate::platform::filesystem::open_private_file_directory(&folder).unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD.decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6xYkAAAAASUVORK5CYII=").unwrap();
+        let publication = crate::platform::filesystem::publish_private_read_path(
+            directory,
+            std::ffi::OsStr::new("image.png"),
+            &bytes,
+        );
+        if !crate::platform::filesystem::supports_private_read_path_publication() {
+            assert_eq!(
+                publication.unwrap_err().kind(),
+                std::io::ErrorKind::Unsupported
+            );
+            return;
+        }
+        use sha2::{Digest, Sha256};
+        let owner = std::sync::Arc::new(publication.unwrap());
+        let descriptor = crate::features::files::file_ingest::PublishedAttachment {
+            handle_id: "ctr-up-image".into(),
+            path: owner.path().to_owned(),
+            display_name: "image.png".into(),
+            mime_type: "image/png".into(),
+            bytes: bytes.len() as u64,
+            sha256: Sha256::digest(&bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            read_owner: Some(owner.clone()),
+        };
+        let ingested = file_ingest::ingest_staged_attachment(dir.path(), &descriptor).unwrap();
+        assert!(std::fs::write(owner.path(), b"replacement").is_err());
+        let prepared =
+            prepare_codex_prompt("", &[ingested], &[], &PromptCapabilities::new().image(true))
+                .unwrap();
+        let ContentBlock::Image(image) = &prepared.blocks[0] else {
+            panic!("native image block required");
+        };
+        assert_eq!(
+            image.data,
+            base64::engine::general_purpose::STANDARD.encode(&bytes)
+        );
+        drop(descriptor);
+        owner.request_cleanup();
+        drop(owner);
+        assert!(!folder.exists());
+    }
+
+    #[test]
     fn small_text_uses_embedded_resource_and_large_text_uses_link() {
         let dir = TestDir::new("text");
         let small = dir.path().join("small.md");
