@@ -1,10 +1,17 @@
 //! `codewhale metrics` — reads the audit log and session/task stores and prints
 //! a human-readable usage rollup.
 //!
-//! Data sources:
-//! - `~/.deepseek/audit.log`   — one JSON line per event (approvals, credentials)
-//! - `~/.deepseek/sessions/`   — saved session JSON files (tool call history)
-//! - `~/.deepseek/tasks/runtime/events/` — runtime thread JSONL event streams
+//! Data sources (bases resolve `CODEWHALE_HOME` → `DEEPSEEK_HOME` →
+//! `~/.deepseek`):
+//! - `audit.log` under the base — one JSON line per event (approvals,
+//!   credentials). The sensitive-audit writer resolves to
+//!   `CODEWHALE_HOME` → `~/.codewhale/audit.log` and never consults
+//!   `DEEPSEEK_HOME`, so without `CODEWHALE_HOME` set its events land in a
+//!   file this rollup does not read.
+//! - `$CODEWHALE_TOOL_AUDIT_LOG` (opt-in) — engine tool receipts
+//!   (`tool.result`), written top-level with no `ts` stamp
+//! - `sessions/` under the base — saved session JSON files (tool call history)
+//! - `tasks/runtime/events/` under the base — runtime thread JSONL event streams
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -31,7 +38,15 @@ pub fn run(args: MetricsArgs) -> Result<()> {
 
     // Collect data from every source; treat missing files as empty.
     let mut rollup = Rollup::default();
-    read_audit_log(&base.join("audit.log"), args.since, &mut rollup);
+    // The engine's only in-repo `tool.result` writer is the opt-in
+    // tool-audit log; it has no default path, so it is read only when the
+    // variable is set. Precedence mirrors the writer's: CODEWHALE first,
+    // then the legacy DEEPSEEK spelling.
+    let tool_audit_log = std::env::var_os("CODEWHALE_TOOL_AUDIT_LOG")
+        .or_else(|| std::env::var_os("DEEPSEEK_TOOL_AUDIT_LOG"));
+    for path in audit_log_paths(&base, tool_audit_log.as_deref()) {
+        read_audit_log(&path, args.since, &mut rollup);
+    }
     read_session_files(&base.join("sessions"), args.since, &mut rollup);
     read_runtime_events(
         &base.join("tasks").join("runtime").join("events"),
@@ -240,6 +255,23 @@ impl Rollup {
 // Source readers
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Audit-log files the rollup reads: the default `base/audit.log` first,
+/// then the engine's opt-in tool-audit log when one is configured. That
+/// writer (`CODEWHALE_TOOL_AUDIT_LOG`, falling back to
+/// `DEEPSEEK_TOOL_AUDIT_LOG`) is the only in-repo source of `tool.result`
+/// receipts. An opt-in path equal to the default collapses to one entry —
+/// reading the same file twice would double-count every line.
+fn audit_log_paths(base: &Path, opt_in: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
+    let default = base.join("audit.log");
+    let mut paths = vec![default.clone()];
+    if let Some(opt_in) = opt_in.map(PathBuf::from)
+        && opt_in != default
+    {
+        paths.push(opt_in);
+    }
+    paths
+}
+
 /// Read one-JSON-line-per-event audit log.
 fn read_audit_log(path: &Path, since: Option<DateTime<Utc>>, rollup: &mut Rollup) {
     let content = match std::fs::read_to_string(path) {
@@ -310,6 +342,7 @@ fn read_audit_log(path: &Path, since: Option<DateTime<Utc>>, rollup: &mut Rollup
                 let tool_name = v
                     .pointer("/details/tool_name")
                     .or_else(|| v.pointer("/payload/tool_name"))
+                    .or_else(|| v.get("tool_name"))
                     .and_then(|t| t.as_str())
                     .unwrap_or("unknown");
                 let stats = rollup.tool_mut(tool_name);
@@ -330,19 +363,30 @@ fn read_audit_log(path: &Path, since: Option<DateTime<Utc>>, rollup: &mut Rollup
                 // oversize-hydration refusal) answered the call without the
                 // tool ever running, so it counts as neither — counting it
                 // as a success would inflate the tool's real execution rate.
+                // The engine's opt-in tool-audit log
+                // (`CODEWHALE_TOOL_AUDIT_LOG`) — the only in-repo
+                // `tool.result` writer — writes these fields at the top
+                // level of the line. The nested `details`/`payload`
+                // placements are tolerated for foreign or hand-written
+                // lines; no in-repo writer nests them.
                 let success = v
                     .pointer("/details/success")
                     .or_else(|| v.pointer("/payload/success"))
+                    .or_else(|| v.get("success"))
                     .and_then(|b| b.as_bool())
                     .unwrap_or(true);
                 let executed = v
                     .pointer("/details/executed")
                     .or_else(|| v.pointer("/payload/executed"))
+                    .or_else(|| v.get("executed"))
                     .and_then(|b| b.as_bool())
                     .unwrap_or(true);
                 if success && executed {
                     stats.successes += 1;
-                } else if !success {
+                } else if executed {
+                    // Only a receipt whose tool actually ran can be a
+                    // failure; an unexecuted one is neither, whatever its
+                    // success flag says.
                     stats.failures += 1;
                 }
             }
@@ -935,6 +979,45 @@ mod tests {
         assert_eq!(fmt_num(1_000_000), "1,000,000");
     }
 
+    // ── audit_log_paths ──
+
+    #[test]
+    fn audit_log_paths_unset_reads_default_only() {
+        let paths = audit_log_paths(Path::new("/home/user/.codewhale"), None);
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("/home/user/.codewhale/audit.log")]
+        );
+    }
+
+    #[test]
+    fn audit_log_paths_opt_in_appends_after_default() {
+        let paths = audit_log_paths(
+            Path::new("/home/user/.codewhale"),
+            Some(std::ffi::OsStr::new("/tmp/tool-audit.log")),
+        );
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/home/user/.codewhale/audit.log"),
+                PathBuf::from("/tmp/tool-audit.log"),
+            ]
+        );
+    }
+
+    #[test]
+    fn audit_log_paths_opt_in_equal_to_default_is_read_once() {
+        // Reading the same file twice would double-count every line.
+        let paths = audit_log_paths(
+            Path::new("/home/user/.codewhale"),
+            Some(std::ffi::OsStr::new("/home/user/.codewhale/audit.log")),
+        );
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("/home/user/.codewhale/audit.log")]
+        );
+    }
+
     // ── Rollup from audit log ──
 
     fn make_audit_line(event: &str, tool: &str, ts: &str) -> String {
@@ -1013,15 +1096,25 @@ mod tests {
         );
         writeln!(tmp, "{line_old}").unwrap();
         writeln!(tmp, "{line_new}").unwrap();
+        // The engine's opt-in tool-audit log writes `tool.result` lines with
+        // no `ts`; a line that cannot be dated is never excluded by
+        // `--since` — it counts whatever the cutoff.
+        writeln!(
+            tmp,
+            r#"{{"event":"tool.result","tool_name":"flat_undated","success":true}}"#
+        )
+        .unwrap();
 
         let cutoff: DateTime<Utc> = "2026-01-01T00:00:00Z".parse().unwrap();
         let mut rollup = Rollup::default();
         read_audit_log(tmp.path(), Some(cutoff), &mut rollup);
 
-        // Only the newer line should be counted.
-        assert_eq!(rollup.parsed_lines, 1);
+        // Only the newer dated line and the undatable flat line are counted.
+        assert_eq!(rollup.parsed_lines, 2);
         assert!(!rollup.tools.contains_key("exec_shell"));
         assert_eq!(rollup.tools["read_file"].calls, 1);
+        assert_eq!(rollup.tools["flat_undated"].calls, 1);
+        assert_eq!(rollup.tools["flat_undated"].successes, 1);
     }
 
     #[test]
@@ -1036,6 +1129,15 @@ mod tests {
             r#"{"event":"tool.result","ts":"2026-04-01T10:01:00+00:00","details":{"tool_name":"exec_shell","success":false}}"#,
             r#"{"event":"tool.result","ts":"2026-04-01T10:02:00+00:00","details":{"tool_name":"deferred_tool","success":true,"executed":false}}"#,
             r#"{"event":"tool.result","ts":"2026-04-01T10:03:00+00:00","details":{"tool_name":"other_tool","success":true,"executed":true}}"#,
+            // The engine's opt-in tool-audit log
+            // (`CODEWHALE_TOOL_AUDIT_LOG`) writes the same fields at the top
+            // level of the line instead of under `details`, and stamps no
+            // `ts` — the fixtures mirror that writer shape.
+            r#"{"event":"tool.result","tool_name":"flat_tool","success":true}"#,
+            r#"{"event":"tool.result","tool_name":"flat_refusal","success":true,"executed":false}"#,
+            // An unexecuted receipt is neither success nor failure whatever
+            // its success flag says — the tool never ran.
+            r#"{"event":"tool.result","tool_name":"flat_failed_refusal","success":false,"executed":false}"#,
         ];
         for line in lines {
             writeln!(tmp, "{line}").unwrap();
@@ -1055,6 +1157,16 @@ mod tests {
         assert_eq!(rollup.tools["deferred_tool"].failures, 0);
         assert_eq!(rollup.tools["other_tool"].calls, 1);
         assert_eq!(rollup.tools["other_tool"].successes, 1);
+        // The flat placement is read: dropping the top-level fallback
+        // defaults these to executed successes.
+        assert_eq!(rollup.tools["flat_tool"].calls, 1);
+        assert_eq!(rollup.tools["flat_tool"].successes, 1);
+        assert_eq!(rollup.tools["flat_refusal"].successes, 0);
+        assert_eq!(rollup.tools["flat_refusal"].failures, 0);
+        // Deleting the `executed` guard on the failure arm turns this pin
+        // red: an unexecuted receipt is never a failure.
+        assert_eq!(rollup.tools["flat_failed_refusal"].successes, 0);
+        assert_eq!(rollup.tools["flat_failed_refusal"].failures, 0);
     }
 
     #[test]

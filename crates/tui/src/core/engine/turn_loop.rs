@@ -1060,15 +1060,22 @@ fn registered_tool_requires_non_bypassable_approval(tool_name: &str) -> bool {
 /// marking across the refresh: adopting the pool's flag would flip deferred
 /// tools back onto the head of the wire list and bust the cached prefix.
 /// A name the conversation has never seen (the synthetic login tool a
-/// mid-turn 401 just started offering, or a server-side rename) arrives
-/// with the pool's eager flag and joins the active set: the 401 result's
-/// auth hint points straight at that tool, so deferring it would strand
-/// the recovery path behind a search. Replaced entries are spliced back
-/// into their own catalog slot, so a refresh that serves the same names
-/// reorders nothing and the caller's declaration (this return value: did
-/// the model-visible wire list change?) stays false — a same-count
-/// refresh moves no wire bytes and must not trip the C5 undeclared-drift
-/// guard as a false positive.
+/// mid-turn 401 just started offering, a server-side rename, or a server's
+/// full real tool set after a completed login) arrives with the pool's
+/// eager flag and joins the active set. The auth-hint case needs it: the
+/// 401 result's auth hint points straight at that tool, so deferring it
+/// would strand the recovery path behind a search. Bulk arrivals after a
+/// login follow the same rule deliberately: the graceful direct-call
+/// hydration path bounds what deferring would cost, but a fresh login's
+/// tools are advertised at once. Replaced entries are spliced back into
+/// their own catalog slot, so a refresh that serves the same names reorders
+/// nothing. The caller's declaration (this return value: did the
+/// model-visible wire list change?) then rests on content, not on the name
+/// count: a same-name refresh with byte-identical served definitions moves
+/// no wire bytes and stays false; one whose served definition changed under
+/// the same name splices new wire bytes and declares — the wire-JSON
+/// compare below exists so that drift is declared rather than tripping the
+/// C5 undeclared-drift guard.
 pub(super) fn replace_runtime_mcp_tools(
     tool_catalog: &mut Vec<Tool>,
     active_tool_names: &mut std::collections::HashSet<String>,
@@ -1083,8 +1090,24 @@ pub(super) fn replace_runtime_mcp_tools(
         .collect();
     // The wire list is the eager head plus the activated deferred tail;
     // that identity — not the catalog's length — is what a declared re-pin
-    // answers for.
+    // answers for. Membership alone is still not the whole story: a
+    // same-name refresh can change what a served tool *says* (description,
+    // schema), which the C5 content fingerprint sees as wire bytes without
+    // any name moving. When the visible name set ties, the wire-visible
+    // replaced entries' JSON — the exact bytes the fingerprint hashes —
+    // decides; a tool the conversation never ships is skipped so its drift
+    // cannot declare what no request will see.
     let wire_before = wire_visible_tool_names(tool_catalog, active_tool_names);
+    let previous_wire_json: std::collections::HashMap<String, Option<String>> = tool_catalog
+        .iter()
+        .filter(|tool| universe.contains(&tool.name))
+        .map(|tool| {
+            (
+                tool.name.clone(),
+                crate::prefix_cache::tool_to_api_json(tool),
+            )
+        })
+        .collect();
     let mut slot_by_name: std::collections::HashMap<String, usize> = tool_catalog
         .iter()
         .enumerate()
@@ -1115,7 +1138,30 @@ pub(super) fn replace_runtime_mcp_tools(
     }
     tool_catalog.retain(|tool| !departed.contains(&tool.name));
     tool_catalog.extend(arrivals);
-    wire_visible_tool_names(tool_catalog, active_tool_names) != wire_before
+    let wire_after = wire_visible_tool_names(tool_catalog, active_tool_names);
+    if wire_after != wire_before {
+        return true;
+    }
+    // Same visible membership: declare only when a wire-visible tool's
+    // served JSON changed under its name. Because the visible sets tie,
+    // every visible-after name was visible before and so has a snapshot
+    // entry; a name outside the visible set never ships, so its content
+    // drift moves no wire bytes and must not declare. A name without a
+    // predecessor is a new arrival — an eager arrival already moved the
+    // name set above, and a deferred one is invisible on the wire.
+    // `tool_to_api_json` is the exact serializer the fingerprint hashes
+    // for the non-strict request shape; under strict mode the fingerprint
+    // hashes sanitized copies, and raw-identical definitions stay
+    // sanitized-identical, so this compare can only over-declare there,
+    // never miss.
+    tool_catalog
+        .iter()
+        .filter(|tool| universe.contains(&tool.name) && wire_after.contains(&tool.name))
+        .any(|tool| {
+            previous_wire_json
+                .get(&tool.name)
+                .is_some_and(|before| *before != crate::prefix_cache::tool_to_api_json(tool))
+        })
 }
 
 /// Every name the next request would serialize: the eager head plus the
@@ -5144,8 +5190,10 @@ impl Engine {
     }
 
     /// Park a bounded-toolbox eviction note for the next recorded tool
-    /// result, combining with any note already parked — turn-start
+    /// result, queueing beside any note already parked — turn-start
     /// revalidation and a hydration batch can both evict in the same turn.
+    /// Names repeated across notes are netted when the notes render onto a
+    /// result.
     pub(super) fn park_toolbox_eviction_note(
         &mut self,
         trigger: crate::core::session::ToolboxEvictionTrigger,

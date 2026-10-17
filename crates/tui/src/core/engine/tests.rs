@@ -9494,6 +9494,71 @@ fn runtime_mcp_refresh_replaces_the_pool_slice() {
         !active.contains("mcp_old_name") && active.contains("mcp_new_name"),
         "the renamed surface must be reflected in the active set: {active:?}"
     );
+
+    // A same-name refresh that changes what the tool *says* (a description
+    // or schema update) moves wire bytes without moving any name: the C5
+    // content fingerprint sees drift the name-set identity cannot. When
+    // the name set ties, the declaration must fall back to the replaced
+    // entries' serialized bytes.
+    let mut stale_definition = api_tool("mcp_static_read");
+    stale_definition.description = "a stale description".to_string();
+    let mut catalog = vec![stale_definition, api_tool("exec_shell")];
+    let mut active = HashSet::new();
+    let universe: HashSet<String> = ["mcp_static_read"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let wire_changed = replace_runtime_mcp_tools(
+        &mut catalog,
+        &mut active,
+        &universe,
+        vec![api_tool("mcp_static_read")],
+        &cache,
+    );
+    assert!(
+        wire_changed,
+        "a same-name refresh that changes the served definition must be declared"
+    );
+    let names: Vec<&str> = catalog.iter().map(|tool| tool.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["mcp_static_read", "exec_shell"],
+        "the content-drift declaration still splices in place"
+    );
+
+    // The same content change on a tool the conversation never ships must
+    // NOT declare: a deferred tool that was never activated is invisible on
+    // the wire, so its description drift moves no wire bytes. The deferral
+    // flag survives the splice (the refresh restores the prior flag), and
+    // the empty activation cache keeps it out of the active set.
+    let mut deferred_stale = api_tool("mcp_static_read");
+    deferred_stale.description = "another stale description".to_string();
+    deferred_stale.defer_loading = Some(true);
+    let mut catalog = vec![deferred_stale, api_tool("exec_shell")];
+    let mut active = HashSet::new();
+    let wire_changed = replace_runtime_mcp_tools(
+        &mut catalog,
+        &mut active,
+        &universe,
+        vec![api_tool("mcp_static_read")],
+        &cache,
+    );
+    assert!(
+        !wire_changed,
+        "content drift on a wire-invisible tool moves no wire bytes and must stay silent"
+    );
+    assert!(
+        !active.contains("mcp_static_read"),
+        "the deferred entry must stay off the wire: {active:?}"
+    );
+    assert_eq!(
+        catalog
+            .iter()
+            .find(|tool| tool.name == "mcp_static_read")
+            .and_then(|tool| tool.defer_loading),
+        Some(true),
+        "the splice restores the pre-existing deferral flag"
+    );
 }
 
 #[test]
@@ -28325,6 +28390,55 @@ async fn mid_turn_refresh_honors_the_turn_policy() {
         !active.contains("mcp_probe_authenticate"),
         "a build-stripped name must not re-enter the active set on a refresh: {active:?}"
     );
+
+    // The arm's positive side, against the same pool: under a policy that
+    // does not strip the tool, the refresh must actually admit it — into
+    // the catalog with the pool's own definition and into the active set.
+    // The deny asserts above hold vacuously if the `mcp_catalog_changed`
+    // arm never runs at all; these do not.
+    let mut admitted_catalog = Vec::new();
+    let mut admitted_active = HashSet::new();
+    engine
+        .process_tool_results(
+            vec![Some(synthetic_toolbox_outcome(
+                "call-auth-allowed",
+                "unrelated",
+                Ok(ToolResult::success("payload").with_metadata(json!({
+                    "mcp_catalog_changed": true,
+                }))),
+            ))],
+            &mut admitted_catalog,
+            &mut admitted_active,
+            &HashMap::new(),
+            &permissive_turn_policy(),
+        )
+        .await;
+
+    assert!(
+        admitted_catalog
+            .iter()
+            .any(|tool| tool.name == "mcp_probe_authenticate"),
+        "an allowed pool tool must enter the catalog on a refresh: {admitted_catalog:?}"
+    );
+    let expected = {
+        let pool = engine.mcp_pool.as_ref().expect("pool").lock().await;
+        pool.to_api_tools()
+            .into_iter()
+            .find(|tool| tool.name == "mcp_probe_authenticate")
+            .expect("premise: the needs-auth pool serves the synthetic login tool")
+    };
+    let entered = admitted_catalog
+        .iter()
+        .find(|tool| tool.name == "mcp_probe_authenticate")
+        .expect("premise: the tool entered the catalog");
+    assert_eq!(
+        entered.description, expected.description,
+        "the admitted entry must carry the pool's definition, not a stale one"
+    );
+    assert!(
+        admitted_active.contains("mcp_probe_authenticate"),
+        "the eager synthetic login tool must be re-advertised onto the wire: {admitted_active:?}"
+    );
 }
 
 #[tokio::test]
@@ -28471,13 +28585,14 @@ async fn turn_start_note_does_not_name_a_tool_the_result_re_admits() {
         "the receipt must not declare a tool uncallable that the same result re-admits: {receipt}"
     );
 }
-/// The refusal's `executed: false` marker must reach the `tool.result` audit
-/// payload, not just the receipt metadata: the audit is the record that a
-/// refused, never-executed call is not a successful execution. Driven through
-/// the real refusal receipt this commit's marker reads, the audit line must
-/// carry the marker verbatim.
+/// The hydration receipt — the `DeferredHydration::Loaded` arm; the oversize
+/// `Refused` arm is unreachable in this fork because the per-tool budget is
+/// the disabled `usize::MAX / 2` sentinel — answers the call without
+/// executing the tool. Its `executed: false` marker must reach the
+/// `tool.result` audit payload verbatim, not just the receipt metadata, so
+/// the audit cannot record a never-executed call as a successful execution.
 #[tokio::test]
-async fn refusal_audit_payload_carries_the_executed_marker() {
+async fn hydration_receipt_audit_payload_carries_the_executed_marker() {
     use crate::llm_client::mock::{MockLlmClient, canned};
 
     let _guard = lock_test_env();
@@ -28502,7 +28617,7 @@ async fn refusal_audit_payload_carries_the_executed_marker() {
     let surface = test_tool_surface(&engine, registry, Some(catalog.clone()), AppMode::Agent);
     let tool_registry = Some(&surface.registry);
     let mut tool_uses = vec![super::streaming::ToolUseState {
-        id: "refuse-audit".to_string(),
+        id: "hydrate-audit".to_string(),
         name: "notify".to_string(),
         input: json!({}),
         caller: None,
@@ -28530,19 +28645,19 @@ async fn refusal_audit_payload_carries_the_executed_marker() {
     let plan = planned
         .plans
         .iter()
-        .find(|plan| plan.id == "refuse-audit")
-        .expect("the refused call must be planned");
+        .find(|plan| plan.id == "hydrate-audit")
+        .expect("the hydrated call must be planned");
     let receipt = plan
         .guard_result
         .as_ref()
-        .expect("the refusal must answer the call as a guard result")
+        .expect("the hydration receipt must answer the call as a guard result")
         .clone();
 
     // The results phase consumes the receipt exactly as production does.
     engine
         .process_tool_results(
             vec![Some(synthetic_toolbox_outcome(
-                "refuse-audit",
+                "hydrate-audit",
                 "notify",
                 Ok(receipt),
             ))],
@@ -28558,14 +28673,14 @@ async fn refusal_audit_payload_carries_the_executed_marker() {
         .lines()
         .find_map(|line| {
             let value: serde_json::Value = serde_json::from_str(line).ok()?;
-            (value.get("event")? == "tool.result" && value.get("tool_id")? == "refuse-audit")
+            (value.get("event")? == "tool.result" && value.get("tool_id")? == "hydrate-audit")
                 .then_some(value)
         })
-        .expect("the refusal's tool.result audit line must exist");
+        .expect("the hydration receipt's tool.result audit line must exist");
     assert_eq!(
         line.get("executed").and_then(serde_json::Value::as_bool),
         Some(false),
-        "the audit must record the refused call as never executed: {line}"
+        "the audit must record the hydration-answered call as never executed: {line}"
     );
     assert_eq!(
         line.get("success").and_then(serde_json::Value::as_bool),

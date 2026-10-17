@@ -1304,6 +1304,15 @@ fn sanitize_kimi_parameters_candidate(
 /// and only its values are visited. `oneOf` needs no visit: this runs after
 /// `normalize_kimi_compatibility` has converted every non-root `oneOf` to
 /// `anyOf`, and root composition was already flattened before that.
+/// Schema values under keywords MFJS rejects (`contains`, `prefixItems`,
+/// `patternProperties`, `not`, `if`/`then`/`else`, `propertyNames`,
+/// `unevaluatedProperties`, `unevaluatedItems`, nested `allOf`, tuple-form
+/// `items`) need no visit: the keyword itself fails closed —
+/// `UnsupportedKeyword`, `UnsupportedNestedAllOf` for a nested `allOf`, or
+/// `InvalidSchemaNode` for tuple-form `items` — before a stranded empty
+/// `items` node inside one could matter. `dependentSchemas` is the one
+/// exception in shape: `strip_dependent_keywords` removes it (with its
+/// subtree) rather than failing closed, so it cannot strand one either.
 ///
 /// Children are visited before the node's own `items` check so a nested
 /// repair can empty the parent (`"items": {"items": {}}` is vacuously true
@@ -2014,6 +2023,10 @@ fn mfjs_schema_can_terminate(
             Ok(true)
         }
         Some("array") => {
+            // An absent or non-integer `minItems` reads as 0. Non-integer
+            // values are unreachable here only because `validate_mfjs_bounds`
+            // rejects them (InvalidRange) on every node before the terminator
+            // runs — keep that call order if the walkers are reordered.
             if obj.get("minItems").and_then(Value::as_u64).unwrap_or(0) == 0 {
                 return Ok(true);
             }
@@ -2623,6 +2636,37 @@ mod kimi_tests {
             nested_positions["properties"]["choice"]["anyOf"][1],
             json!({"type": "array"})
         );
+
+        // The root's own object-form `additionalProperties` is a schema-value
+        // position too: an empty `items` there repairs to the keyword being
+        // absent and the tool ships.
+        let mut root_additional = json!({
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "additionalProperties": {"type": "array", "items": {}}
+        });
+        sanitize_for_kimi_parameters(&mut root_additional)
+            .expect("root additionalProperties empty items repair");
+        assert_eq!(
+            root_additional["additionalProperties"],
+            json!({"type": "array"})
+        );
+
+        // An empty `items` beside a `$ref` drops the same way, leaving the
+        // clean `$ref` node — MFJS admits no sibling beyond
+        // title/description next to a reference, so without the repair the
+        // whole tool would fail closed with InvalidReference.
+        let mut ref_with_items = json!({
+            "type": "object",
+            "properties": {"a": {"$ref": "#/$defs/a", "items": {}}},
+            "$defs": {"a": {"type": "string"}}
+        });
+        sanitize_for_kimi_parameters(&mut ref_with_items)
+            .expect("$ref with an empty items sibling repairs");
+        assert_eq!(
+            ref_with_items["properties"]["a"],
+            json!({"$ref": "#/$defs/a"})
+        );
     }
 
     #[test]
@@ -2694,6 +2738,33 @@ mod kimi_tests {
         assert!(
             matches!(error, KimiParameterSchemaError::InvalidSchemaNode),
             "the anyOf branch's variant is InvalidSchemaNode: {error:?}"
+        );
+
+        // The anyOf check is branch-order dependent: the terminator stops
+        // at the first terminating branch, so a terminating branch ahead
+        // of the offending one lets the tool ship — the repaired schema is
+        // instance-set-equivalent (the empty `items` was a no-op
+        // constraint), which is the desired outcome, but it means the
+        // fail-closed guarantee for anyOf holds only when the offending
+        // branch is reached.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "a": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {}, "minItems": 1}
+                    ]
+                }
+            },
+            "required": ["a"]
+        });
+        sanitize_for_kimi_parameters(&mut schema)
+            .expect("a terminating branch ahead of the offending one ships the tool");
+        assert_eq!(
+            schema["properties"]["a"]["anyOf"][1],
+            json!({"type": "array", "minItems": 1}),
+            "the shipped branch is the repaired, instance-set-equivalent form"
         );
 
         let mut schema = json!({

@@ -378,6 +378,14 @@ fn search_reports_catalog_stale_evictions_as_unavailable_not_evicted() {
         None,
     )
     .expect("first search should succeed");
+    assert_eq!(
+        cache.names().count(),
+        3,
+        "premise: the first search must admit all three deferred tools into the cache — the \
+         initial_active_tools empty-scan fallback already put deferred-0 into the active set \
+         before any search ran, so the active-set assert below is vacuous and only the cache \
+         proves admission"
+    );
     assert!(active.contains("deferred-0"));
 
     let catalog_v2: Vec<Tool> = catalog_v1
@@ -441,6 +449,13 @@ fn search_does_not_report_an_eager_promotion_as_unavailable() {
         None,
     )
     .expect("first search should succeed");
+    assert_eq!(
+        cache.names().count(),
+        1,
+        "premise: the first search must activate the tool into the cache — the active set \
+         already contains it via the initial_active_tools fallback, so only the cache proves \
+         admission"
+    );
     assert!(active.contains("promoted"));
 
     catalog[0].defer_loading = Some(false);
@@ -514,7 +529,7 @@ fn toolbox_note_rendering_nets_re_admitted_names_at_ride_time() {
     );
     assert_eq!(
         rendered
-            .matches("evicted tools from the bounded conversation toolbox")
+            .matches("evicted tools from the conversation toolbox")
             .count(),
         1,
         "a companion note the netting empties must contribute no prose: {rendered}"
@@ -574,6 +589,14 @@ fn toolbox_note_rendering_nets_re_admitted_names_at_ride_time() {
         1,
         "a name already rendered by an earlier note must not be repeated: {rendered}"
     );
+    assert!(
+        rendered.contains("This turn's start evicted"),
+        "first-note-wins: the surviving mention keeps the earlier note's attribution: {rendered}"
+    );
+    assert!(
+        !rendered.contains("This step evicted"),
+        "first-note-wins: the deduped later note contributes no attribution: {rendered}"
+    );
     assert!(notes.is_empty());
 
     // A name that left the catalog between its eviction and this ride can
@@ -620,5 +643,37 @@ fn toolbox_note_rendering_nets_re_admitted_names_at_ride_time() {
         rendered.contains("evicted a tool that has since left the toolbox catalog")
             && !rendered.contains("no longer callable until a later search"),
         "a fully unrecoverable note must drop the recovery promise: {rendered}"
+    );
+}
+
+/// Pinvou fork: the toolbox bounds are sentinel-disabled
+/// (`TOOL_ACTIVATION_CACHE_MAX_*` are `usize::MAX / 2`), so no activation can
+/// ever hit them and the oversize and eviction prose must claim no bound,
+/// numeric or otherwise — a bound that never fires is a false statement
+/// about the runtime.
+#[test]
+fn forkguard_toolbox_prose_claims_no_bound_under_the_disabled_sentinel() {
+    let reason = super::toolbox_oversize_reason();
+    assert_eq!(
+        reason,
+        "The serialized tool definition could not be measured for admission \
+         to the conversation toolbox."
+    );
+    assert!(
+        !reason.chars().any(|ch| ch.is_ascii_digit()),
+        "the disabled-sentinel prose must name no numeric bound: {reason}"
+    );
+
+    use crate::core::session::ToolboxEvictionTrigger;
+    let note =
+        super::bounded_toolbox_eviction_note(ToolboxEvictionTrigger::Step, &["x".to_string()]);
+    assert_eq!(
+        note,
+        "This step evicted tools from the conversation toolbox; the evicted tools are \
+         no longer callable until a later search re-activates them: x"
+    );
+    assert!(
+        !note.contains("bounded"),
+        "the disabled-sentinel note must not claim a bound the fork disabled: {note}"
     );
 }

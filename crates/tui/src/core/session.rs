@@ -33,21 +33,22 @@ use std::path::PathBuf;
 /// `usize::MAX / 2` — any slightly smaller value compiles; only the exact
 /// extreme is lint-rejected.
 pub(crate) const TOOL_ACTIVATION_CACHE_MAX_NAMES: usize = usize::MAX / 2;
-/// Maximum serialized bytes added to requests by cached deferred schemas.
+/// Maximum serialized bytes added to requests by cached deferred tool
+/// definitions.
 ///
 /// Pinvou fork: effectively unbounded; see [`TOOL_ACTIVATION_CACHE_MAX_NAMES`]
 /// for why the bound is `usize::MAX / 2` rather than `usize::MAX`.
 pub(crate) const TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES: usize = usize::MAX / 2;
 
-/// Bounded, process-local conversation cache for deferred tools activated by
+/// Process-local conversation cache for deferred tools activated by
 /// `tool_search` or loaded by a direct call (hydration, execution refresh,
-/// retrieval admission).
+/// retrieval admission). Bounded upstream; the Pinvou fork disables the size
+/// bounds (see the constants above), so in-fork the cache is unbounded and
+/// upstream's 8-name/16KiB LRU eviction never fires.
 ///
 /// Only names are retained. Every turn revalidates them against the currently
 /// filtered catalog, so a disconnected MCP server, changed allow/deny rule, or
-/// mode switch cannot resurrect a tool from an older authority posture. The
-/// Pinvou fork disables the size bounds (see the constants above); upstream's
-/// 8-name/16KiB LRU eviction no longer fires here.
+/// mode switch cannot resurrect a tool from an older authority posture.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ToolActivationCache {
     /// Least-recently used at the front, most-recently used at the back.
@@ -117,7 +118,9 @@ pub(crate) enum ToolboxEvictionTrigger {
     /// A `tool_search` result naming the evictions in its own payload.
     ToolSearch,
     /// A non-search activation step: a hydration batch, a retrieval
-    /// admission, or an executed tool's refresh.
+    /// admission, an executed tool's refresh, or — on the child surface —
+    /// a request-rebuild revalidation or a warm-start overflow, which have
+    /// no turn boundary of their own to attribute.
     Step,
     /// The turn-entry revalidation.
     TurnStart,
@@ -216,6 +219,17 @@ impl ToolActivationCache {
     /// Shared by revalidation and admission so the bounds condition and the
     /// LRU-front-first policy live in exactly one place.
     fn pop_collective_overflow(&mut self, catalog: &[crate::models::Tool]) -> Vec<String> {
+        // Under the fork's disabled bounds the loop condition can never hold
+        // for real schemas — the serde-failure sentinel is removed as stale
+        // by revalidation before this runs — so skip the full-cache
+        // re-serialization each condition evaluation would cost. Without the
+        // early return every `activate` pays it once per requested name and
+        // every `revalidate` pays it once.
+        if TOOL_ACTIVATION_CACHE_MAX_NAMES == usize::MAX / 2
+            && TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES == usize::MAX / 2
+        {
+            return Vec::new();
+        }
         let mut popped = Vec::new();
         while self.names.len() > TOOL_ACTIVATION_CACHE_MAX_NAMES
             || self.total_serialized_bytes(catalog) > TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES
@@ -232,7 +246,9 @@ impl ToolActivationCache {
     /// filtered catalog and enforce both cache bounds, classifying every
     /// removal by recoverability. A tool that became eager is forgotten
     /// from the cache without being reported: it is directly callable, and
-    /// the eager catalog entry must stay active.
+    /// the eager catalog entry must stay active. In the Pinvou fork the
+    /// bounds-enforcement half never fires (see the constants above); only
+    /// the membership/eager/oversize-sentinel classification is live.
     pub(crate) fn revalidate(&mut self, catalog: &[crate::models::Tool]) -> ToolActivationRemovals {
         let mut removals = ToolActivationRemovals::default();
         self.names.retain(|name| {
@@ -269,7 +285,10 @@ impl ToolActivationCache {
     /// rejects oversized schemas and evicts least-recently-used entries until
     /// both size bounds hold; the Pinvou fork disables those bounds (see the
     /// constants above), so those paths never fire and every request naming a
-    /// deferred catalog member is admitted.
+    /// deferred catalog member is admitted. The one admission rejection left
+    /// is the serde-failure measurement sentinel (see
+    /// `toolbox_oversize_reason`'s doc) — unreachable for the concrete
+    /// `Tool` type, whose derived serialization cannot fail.
     pub(crate) fn activate(
         &mut self,
         catalog: &[crate::models::Tool],
