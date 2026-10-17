@@ -608,6 +608,12 @@ fn resolve_session_artifact(
     if !crate::support::valid_session_id(session_id) {
         return Err(CliError::usage("invalid session id"));
     }
+    crate::support::reject_remote_session(
+        store,
+        session_id,
+        "artifacts",
+        if writable { "write" } else { "read" },
+    )?;
     let workspace = store
         .ledger_root(session_id)
         .map_err(|error| CliError::failed(format!("artifacts({session_id}): {error:#}")))?;

@@ -3,9 +3,12 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const { isControlledSessionChatActive } = require('../src/features/remote-control/remote-control-logic.mjs');
+const { remoteProxyForSession } = require('../src/features/remote-control/remote-session-adapter.mjs');
 
 const sourcePath = path.join(__dirname, '..', 'src', 'hooks', 'useBridge.js');
 const source = fs.readFileSync(sourcePath, 'utf8');
+const mainSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'app', 'main.jsx'), 'utf8');
 const bridgeSource = fs.readFileSync(
   path.join(__dirname, '..', 'src', 'platform', 'tauri', 'bridge', 'settings.js'),
   'utf8',
@@ -15,6 +18,11 @@ const end = source.indexOf('\nexport {', start);
 
 assert.notStrictEqual(start, -1, 'baseUrlIsLoopback must exist');
 assert.notStrictEqual(end, -1, 'credential helper boundary must exist');
+assert.doesNotMatch(
+  source,
+  /from ['"]\.\.\/features\//,
+  'shared hooks must not depend on a feature module',
+);
 
 const modelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'shared', 'model-options.js'), 'utf8');
 const helperStart = modelSource.indexOf('function isBuiltInAccountPlatformModel(');
@@ -42,6 +50,22 @@ const state = (credentialState, config = {}) => ({
     ...config,
   },
 });
+const gateForControlledStatus = (status, credentialState = 'missing', activeSessionId = 'b-session') => {
+  const bridgeState = {
+    ...state(credentialState),
+    controlledDevice: { status, generation: 'generation-1' },
+    controlledSession: { sessionId: 'b-session' },
+    activeSessionId,
+  };
+  return shouldShowModelAccessGate(
+    bridgeState,
+    'chat',
+    true,
+    isControlledSessionChatActive(
+      bridgeState.controlledDevice, bridgeState.controlledSession, bridgeState.activeSessionId,
+    ),
+  );
+};
 
 assert.strictEqual(baseUrlIsLoopback('http://localhost:8000/v1'), true);
 assert.strictEqual(baseUrlIsLoopback('http://localhost.:8000/v1'), true);
@@ -91,6 +115,35 @@ assert.strictEqual(
 assert.strictEqual(shouldShowModelAccessGate(state('missing'), 'settings', true), false);
 assert.strictEqual(shouldShowModelAccessGate(state('missing'), 'chat', false), false);
 assert.strictEqual(
+  gateForControlledStatus('connected'),
+  false,
+  'a connected controlled device must not show the local API Key gate after opening chat',
+);
+assert.strictEqual(
+  gateForControlledStatus('reconnecting', 'unavailable'),
+  false,
+  'a reconnecting controlled device must not flash the local API Key gate',
+);
+assert.strictEqual(
+  gateForControlledStatus('resume_provisional'),
+  false,
+  'a provisionally resumed controlled device must not flash the local API Key gate',
+);
+assert.strictEqual(
+  gateForControlledStatus('resume_activated_pending_liveness', 'unavailable'),
+  false,
+  'a resumed controlled device awaiting liveness must not flash the local API Key gate',
+);
+assert.strictEqual(
+  gateForControlledStatus('stopped'),
+  true,
+  'the local API Key gate must resume after controlled mode stops',
+);
+for (const activeSessionId of ['local-session', null, '']) {
+  assert.strictEqual(gateForControlledStatus('connected', 'missing', activeSessionId), true,
+    'another local conversation keeps its own credential gate');
+}
+assert.strictEqual(
   shouldShowModelAccessGate(state('missing', {
     preset: 'openai_compatible',
     base_url: 'http://127.0.0.1:11434/v1',
@@ -105,6 +158,38 @@ assert.strictEqual(
   true,
 );
 assert.strictEqual(shouldShowModelAccessGate(state('missing'), 'scheduled', true), false);
+
+assert.match(
+  mainSource,
+  /import\s*\{[^}]*isControlledSessionChatActive[^}]*\}\s*from ['"]\.\.\/features\/remote-control\/remote-control-logic\.mjs['"]/s,
+  'the app composition layer must import the shared controlled-chat predicate',
+);
+assert.match(
+  mainSource,
+  /const isControlledChatActive = isControlledSessionChatActive\(\s*bs\?\.controlledDevice, bs\?\.controlledSession, bs\?\.activeSessionId,\s*\);/,
+  'the app composition layer must derive controlled-chat ownership from the shared predicate',
+);
+assert.match(
+  mainSource,
+  /shouldShowModelAccessGate\(\s*bs,\s*currentView,\s*bridge\.available,\s*isControlledChatActive \|\| isRemoteChatActive,\s*\)/,
+  'the app composition layer must pass controlled-chat ownership into the API Key gate',
+);
+
+// A trusted RemoteProxy conversation uses its own device/temporary-model contract,
+// even when this controller has no local model. Other sessions keep the local gate.
+const emptyModelState = { modelsLoaded: true, savedModels: [] };
+for (const [activeSessionId, history, expected] of [
+  ['remote-session', { localSessionId: 'remote-session', entries: [] }, false],
+  ['local-session', { localSessionId: 'remote-session', entries: [] }, true],
+  ['remote-session', null, true],
+  ['remote-session', { localSessionId: 'remote-session' }, true],
+]) {
+  assert.strictEqual(shouldShowModelAccessGate(emptyModelState, 'chat', true,
+    Boolean(remoteProxyForSession(activeSessionId, history))), expected);
+}
+assert.match(mainSource,
+  /const isRemoteChatActive = Boolean\(remoteProxyForSession\(bs\?\.activeSessionId, bs\?\.remoteProxyHistory\)\);/,
+  'the app composition must scope the remote model contract to the current verified history');
 
 // 会话切换/热切模型必须把 sessionId 传给后端重新解析真正生效的模型，不能继续沿用全局默认。
 assert.match(

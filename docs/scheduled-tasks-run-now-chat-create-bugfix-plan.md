@@ -1,8 +1,13 @@
 # 定时任务开发方案与自动化测试方案
 
+> 状态注记：本文部分路径写于 2026-07 目录重组前，已按 2026-09 现行布局更新；仓库现行布局见 `pinvou3-app/src/ARCHITECTURE.md`。
+
 ## 背景
 
-当前已定位两个未完成修复的问题：
+写作时（2026-07 前）本文定位了两个问题，**二者均已修复落地**（模型绑定经
+`model-bindings.json` + `ModelIdResolver` 落地、聊天创建经
+`SCHEDULED_TASK_CHAT_PROMPT` + bridge 强制 `createScheduledTask` 落地），
+以下保留方案与测试设计作为回归依据与设计说明：
 
 1. 点击定时任务详情里的“立即运行”可能报错。
 2. 在聊天中创建的任务没有出现在定时任务列表。
@@ -56,7 +61,7 @@ Encountered two children with the same key, `deepseek-v4-flash`
 ```text
 run_scheduled_task_now
   -> ScheduledTaskState::run_task_now
-  -> AutomationManager::run_now
+  -> AutomationManager::run_now（app 侧经 run_now_shared 进入）
   -> TaskManager add_task_with_conversation_key
   -> ScheduledChatExecutor::execute
   -> ScheduledRunProfile { model, model_id: None }
@@ -66,7 +71,7 @@ run_scheduled_task_now
 `resolve_scheduled_model` 如果没有 `model_id`，只能按 `model` 反查。当同名模型超过一个时，会报：
 
 ```text
-Scheduled model '<model>' is ambiguous without a stable model id
+此任务绑定的 AI 模型配置不唯一，请重新选择 AI 模型并保存任务。模型：<model>
 ```
 
 ### 根因
@@ -109,9 +114,8 @@ Scheduled model '<model>' is ambiguous without a stable model id
 
 落点：
 
-- `pinvou3-app/src-tauri/src/scheduled_tasks.rs`
-- 新增 `ScheduledTaskModelBindingStore`
-- `ScheduledTaskState` 持有该 store
+- `pinvou3-app/src-tauri/src/features/scheduled/stores.rs`：`ScheduledTaskModelBindingStore`（现行实现为 `VersionedJsonStore<ScheduledTaskModelBindingRegistry>` 的 type alias，非独立结构体）
+- `pinvou3-app/src-tauri/src/features/scheduled/tasks.rs`：`ScheduledTaskState` 持有该 store（`model_bindings` 字段）
 
 行为：
 
@@ -233,7 +237,7 @@ Tauri 参数会自动转成 `model_id`，或 bridge 手动映射。
 会话：
 
 ```text
-C:\Users\123\.pinvou3\sessions\we06tk78syjd0.json
+~/.pinvou3/sessions/<session-id>.json
 ```
 
 实际流程是：
@@ -246,7 +250,7 @@ C:\Users\123\.pinvou3\sessions\we06tk78syjd0.json
 这个任务存在于 Windows 任务计划程序，不存在于：
 
 ```text
-C:\Users\123\.pinvou3\automations\automations\*.json
+~/.pinvou3/automations/automations/*.json
 ```
 
 所以 pinvou3 定时任务模块不会显示它。
@@ -269,7 +273,7 @@ C:\Users\123\.pinvou3\automations\automations\*.json
 文件：
 
 ```text
-pinvou3-app/src-tauri/src/scheduled_tasks.rs
+pinvou3-app/src-tauri/src/features/scheduled/tasks.rs
 ```
 
 更新 `SCHEDULED_TASK_CHAT_PROMPT`，明确要求：
@@ -284,6 +288,7 @@ pinvou3-app/src-tauri/src/scheduled_tasks.rs
   - 每 N 小时
   - 每天指定时间
   - 每周指定星期和时间
+  - 一次性定时：`FREQ=ONCE;AT=<本地时刻>`，`AT` 使用 `YYYY-MM-DDTHH:MM` 本地时刻（不带 Z 或时区偏移后缀），运行一次后任务自动结束；用户指定的时刻已过期时，必须先和用户确认改成未来的时刻，不要输出草稿
 - 遇到分钟级需求必须询问用户改成哪个支持规则。
 
 提示词中要显式包含反例：
@@ -298,7 +303,7 @@ pinvou3-app/src-tauri/src/scheduled_tasks.rs
 文件：
 
 ```text
-pinvou3-app/src/tauri-bridge.js
+pinvou3-app/src/platform/tauri/bridge/scheduled.js
 ```
 
 现有相关函数：
@@ -318,11 +323,16 @@ pinvou3-app/src/tauri-bridge.js
 
 #### 3. 工具权限约束
 
+（时点注：本小节工具名已按现行工具面更新为 `bash`/`write`/`edit`
+（`exec_shell`/`write_file`/`edit_file` 旧拼写已彻底退役，见 `docs/tool-governance.md` §3）；
+实际落地采取了更强的路线——创建会话的 prompt 直接禁止调用任何工具，
+见已落地的 `SCHEDULED_TASK_CHAT_PROMPT`。）
+
 如果当前引擎支持 per-session 工具控制，应在定时任务创建会话里禁用高风险工具：
 
-- `exec_shell`
-- `write_file`
-- `edit_file`
+- `bash`
+- `write`
+- `edit`
 - 与系统计划任务相关的系统命令
 
 如果当前没有 per-session 工具控制，先做两层防线：
@@ -428,7 +438,7 @@ pinvou3-app/src/tauri-bridge.js
    - `archiveSession` → 断言调用 `set_session_archived`，记录离开侧边栏；重新 load 后仍不回流（`archived` 由后端 DTO 携带）；`restoreArchivedSession` 后回到侧边栏。
    - `deleteSession` → 断言调用 `delete_session`、侧边栏记录缓存被移除、**没有**调用 `delete_scheduled_task`。
 
-3. 后端命令测试（`scheduled_session_metadata_dispatch_supports_rename_pin_archive`，`commands.rs`，已实现）：
+3. 后端命令测试（`scheduled_session_metadata_dispatch_supports_rename_pin_archive`，`pinvou3-app/src-tauri/src/app/commands/tests.rs`，已实现）：
    - 真实 `SessionStore` 创建 `sched-*` 会话，断言 `session_kind` 为 `ScheduledRun`。
    - `set_title` → reload 后标题落盘生效（`rename_session` 的真实路径）。
    - `set_pinned` → `is_pinned` / `pinned_at` 生效（`set_session_pinned` 的真实路径）。
@@ -500,6 +510,15 @@ pinvou3-app/src/tauri-bridge.js
    - 打开下拉/时间滚轮，确认浮层仍有边框或阴影，不因本次修改丢失层级感。
 
 ### 已定位现象
+
+> **【已废弃】** 从本节起至“### 范围边界”止，是问题 3 定稿前的“行级任务
+> 操作”（行级更多菜单/置顶分组）旧方案，已被上文问题 3 的结论取代——
+> 行级不提供更多菜单、不按置顶/普通任务分组、详情底部操作组保留。以下
+> 仅作决策留档，不要按此实施（例外：其中“后端数据设计”一节的
+> `task-ui-metadata.json` sidecar 与 `set_scheduled_task_pinned` 后端命令
+> 已落地，仍为现行实现；废弃仅指行级菜单/置顶分组的前端交互方案）。
+> 块内已带【已废弃】小节标记；问题 3 结论中
+> “侧边栏空间不足”仍是唯一未解决的开放项。
 
 当前定时任务列表主要支持：
 
@@ -769,7 +788,7 @@ pub async fn set_scheduled_task_pinned(id: String, pinned: bool) -> Result<Sched
 文件：
 
 ```text
-pinvou3-app/src/tauri-bridge.js
+pinvou3-app/src/platform/tauri/bridge/scheduled.js
 ```
 
 新增方法：
@@ -833,7 +852,9 @@ const regularTasks = filteredTasks.filter(task => !task.pinned);
 <TaskGroup title={pinnedTasks.length ? "普通任务" : null} tasks={regularTasks} />
 ```
 
-#### 3. 行级菜单组件
+#### 3. 行级菜单组件【已废弃：行级菜单方案未采纳，见问题3结论与 §五.1 标注】
+
+> 以下为原始设计叙述，仅作历史留痕。
 
 建议在 `ScheduledTasksView.jsx` 内部先实现局部组件，不急着抽全局组件：
 
@@ -936,7 +957,7 @@ requestDeleteTask(event, task)
 文件：
 
 ```text
-pinvou3-app/tests/scheduled_tasks_unit.js
+pinvou3-app/tests/scheduled_tasks_unit.test.js
 ```
 
 新增断言：
@@ -965,7 +986,7 @@ assert.ok(/不得.*schtasks/.test(scheduledTaskPromptRust));
 文件：
 
 ```text
-pinvou3-app/tests/scheduled_tasks_unit.js
+pinvou3-app/tests/scheduled_tasks_unit.test.js
 ```
 
 新增 bridge harness 测试：
@@ -1021,9 +1042,9 @@ assert.deepStrictEqual(invokeArgs.input, {
 文件：
 
 ```text
-pinvou3-app/src-tauri/src/scheduled_tasks.rs
-pinvou3-app/src-tauri/src/scheduled_executor.rs
-pinvou3-app/src-tauri/src/engine_pool.rs
+pinvou3-app/src-tauri/src/features/scheduled/tasks.rs
+pinvou3-app/src-tauri/src/features/scheduled/executor.rs
+pinvou3-app/src-tauri/src/features/assistant/engine_pool.rs
 ```
 
 新增测试：
@@ -1174,7 +1195,7 @@ Mock `list_models` 返回：
 文件：
 
 ```text
-pinvou3-app/tests/scheduled_tasks_unit.js
+pinvou3-app/tests/scheduled_tasks_unit.test.js
 ```
 
 新增断言：
@@ -1185,9 +1206,11 @@ pinvou3-app/tests/scheduled_tasks_unit.js
    - `data-testid="scheduled-task-actions"`
    - `data-testid="scheduled-task-action-menu"`
    - `data-testid="scheduled-detail-actions"`
-3. 行级操作按钮都调用 `event.stopPropagation()`，避免误打开编辑弹窗。
-4. 删除确认组件被行级菜单和详情菜单复用，而不是两套删除弹窗。
-5. `tauri-bridge.js` 暴露：
+
+   【已被问题3结论取代】行级菜单方案已废弃，现行断言为这些 testid 不存在（见上文问题3“自动化测试补充”与 `pinvou3-app/tests/scheduled_tasks_unit.test.js`）。
+3. 【已废弃】行级操作按钮都调用 `event.stopPropagation()`，避免误打开编辑弹窗。（行级菜单方案已废弃，同上。）
+4. 【已废弃】删除确认组件被行级菜单和详情菜单复用，而不是两套删除弹窗。（行级菜单方案已废弃，同上。）
+5. `pinvou3-app/src/platform/tauri/bridge/scheduled.js` 暴露：
    - `toggleScheduledTaskPinned`
    - `deleteScheduledTask`
    - `set_scheduled_task_pinned`
@@ -1200,8 +1223,12 @@ pinvou3-app/tests/scheduled_tasks_unit.js
 示例断言：
 
 ```js
-assert.ok(/data-testid="scheduled-task-pin"/.test(indexHtml));
-assert.ok(/data-testid="scheduled-task-actions"/.test(indexHtml));
+// 前四条对应问题3结论：行级菜单方案已废弃，现行断言为 testid 不存在
+// （见 tests/scheduled_tasks_unit.test.js）：
+assert.ok(!/data-testid="scheduled-task-pin"/.test(indexHtml));
+assert.ok(!/data-testid="scheduled-task-actions"/.test(indexHtml));
+assert.ok(!/data-testid="scheduled-task-action-menu"/.test(indexHtml));
+assert.ok(!/data-testid="scheduled-detail-actions"/.test(indexHtml));
 assert.ok(/function toggleScheduledTaskPinned/.test(tauriBridge));
 assert.ok(/set_scheduled_task_pinned/.test(tauriBridge));
 assert.ok(/task-ui-metadata\.json/.test(scheduledTasksRust));
@@ -1212,7 +1239,7 @@ assert.ok(/task-ui-metadata\.json/.test(scheduledTasksRust));
 文件：
 
 ```text
-pinvou3-app/tests/scheduled_tasks_unit.js
+pinvou3-app/tests/scheduled_tasks_unit.test.js
 ```
 
 新增 harness 测试：
@@ -1298,6 +1325,8 @@ pinvou3-app/tests/scheduled_tasks_smoke.js
 ```
 
 新增场景：
+
+> 【已废弃】场景 D–G 基于已废弃的行级菜单方案，已被问题3结论取代：主列表行级不显示置顶按钮和更多菜单，现行断言为相应 testid 不存在（见上文问题3“自动化测试补充”与 `pinvou3-app/tests/scheduled_tasks_unit.test.js`）。以下保留作为历史叙述。
 
 ##### 场景 D：行级置顶与排序
 
@@ -1400,7 +1429,7 @@ await page.setViewportSize({ width: 390, height: 844 });
 文件：
 
 ```text
-pinvou3-app/src-tauri/src/scheduled_tasks.rs
+pinvou3-app/src-tauri/src/features/scheduled/tasks.rs
 ```
 
 新增测试：
@@ -1484,6 +1513,9 @@ set_scheduled_task_pinned("missing", true)
 
 #### 5. 视觉与可访问性检查
 
+> 【已废弃】本小节的行级置顶/菜单检查项随行级菜单方案废弃（见问题 3 结论），
+> 现行 UI 无这些控件；可访问性要求以 `ScheduledTasksView.jsx` 现行实现为准。
+
 Smoke 或 Playwright 检查：
 
 - 行级按钮有 `aria-label`：
@@ -1500,6 +1532,8 @@ Smoke 或 Playwright 检查：
 
 ### 六、手工验证清单
 
+> 注：清单 17–19 所述任务行 `...` 行级菜单交互已随行级菜单方案废弃（见问题3结论与 §五.1 的【已被问题3结论取代】标注），现行删除入口以 `ScheduledTasksView.jsx` 现行实现为准；任务置顶为后端已落地能力（sidecar + `set_scheduled_task_pinned`），当前 UI 暂无置顶入口。
+
 修复后按顺序验证：
 
 1. 启动 app。
@@ -1515,9 +1549,10 @@ Smoke 或 Playwright 检查：
 11. 让 AI 创建“每小时推送 AI 新闻”。
 12. 任务出现在定时任务列表。
 13. Windows 任务计划程序中不应新增由该流程创建的 `schtasks` 任务。
-14. 在定时任务列表中置顶一个任务。
-15. 重启 app，确认置顶仍保留。
-16. 取消置顶，确认任务回到普通分组。
+14. （暂不可手动执行：置顶后端已落地，但当前 UI 无置顶入口，能力由
+    `scheduled_session_metadata_dispatch` 单测覆盖。）
+15. （待置顶入口落地后回归：重启 app，确认置顶仍保留。）
+16. （待置顶入口落地后回归：取消置顶，确认任务回到普通分组。）
 17. 通过任务行 `...` 删除任务，确认不需要先打开编辑弹窗。
 18. 通过详情弹窗 `...` 删除任务，确认与行级删除弹窗一致。
 19. 在 390px 宽度下检查菜单和删除确认不被裁剪、不溢出。
@@ -1527,7 +1562,7 @@ Smoke 或 Playwright 检查：
 最小本地验证：
 
 ```powershell
-cd C:\Users\123\pinvou3\pinvou3-app
+cd <repo>\pinvou3-app
 npm run test:scheduled
 npm run lint:ui
 npm run build:ui
@@ -1536,14 +1571,14 @@ npm run build:ui
 Smoke：
 
 ```powershell
-cd C:\Users\123\pinvou3\pinvou3-app
+cd <repo>\pinvou3-app
 node tests/scheduled_tasks_smoke.js
 ```
 
 Rust 编译验证：
 
 ```powershell
-cd C:\Users\123\pinvou3\pinvou3-app\src-tauri
+cd <repo>\pinvou3-app\src-tauri
 cargo test -p pinvou3-tauri scheduled_tasks --no-run
 cargo test -p pinvou3-tauri scheduled_executor --no-run
 cargo test -p pinvou3-tauri engine_pool --no-run
@@ -1552,7 +1587,9 @@ cargo test -p pinvou3-tauri engine_pool --no-run
 说明：
 
 - 当前本机 Rust 测试二进制曾出现 `STATUS_ENTRYPOINT_NOT_FOUND`，因此至少要求 `--no-run` 编译通过。
-- CI 或修复本机动态库环境后，再要求实际 Rust 单测运行通过。
+- （时点注：CI 现已实际运行 Rust 单测——`rust-test` / `windows-rust-test`
+  串行回归已固化为标准步骤；本机动态库环境修复后再要求本机全量单测通过。
+  根因与缓解见 `docs/windows-rust-ci.md` §What the job runs 第 11-13 步。）
 
 ## 实施顺序
 
@@ -1628,7 +1665,7 @@ cargo test -p pinvou3-tauri engine_pool --no-run
 
 #### 2. 定时运行对话（左侧栏“定时任务记录”）
 
-作用于某一次运行的会话，复用 `RecentItem` 与**普通 Session 命令**。后端 `SessionKind` 分发（`commands.rs`），前端不做命令分叉：
+作用于某一次运行的会话，复用 `RecentItem` 与**普通 Session 命令**。后端 `SessionKind` 分发（`pinvou3-app/src-tauri/src/app/commands/sessions.rs`），前端不做命令分叉：
 
 | 操作 | 命令 | ScheduledRun 的行为 |
 |---|---|---|
@@ -1643,7 +1680,7 @@ cargo test -p pinvou3-tauri engine_pool --no-run
 
 - 侧边栏记录的删除**只删这一次运行**，绝不调用 `delete_scheduled_task`。
 - 运行中/排队中的运行记录不允许删除（后端返回“正在运行的定时任务记录不能删除”）。
-- 定时运行的 transcript 由 Engine 独占持久化，`save_session_messages` / `save_session_artifacts` 仍拒绝 `sched-*`（`ensure_chat_session` 现在只守卫这两个覆盖类命令）。
+- 定时运行的 transcript 由 Engine 独占持久化，`save_session_messages` / `save_session_artifacts` 等会话覆盖类命令仍拒绝 `sched-*`（`ensure_chat_session` 按 `SessionKind` 分发守卫）。
 
 #### 3. 侧边栏“定时任务记录”的范围
 
@@ -1702,16 +1739,17 @@ cargo test -p pinvou3-tauri engine_pool --no-run
 前端：
 
 ```text
-pinvou3-app/src/main.jsx
+pinvou3-app/src/app/main.jsx
 pinvou3-app/src/components/layout/NavigationComponents.jsx
 pinvou3-app/src/features/scheduled/ScheduledTasksView.jsx
-pinvou3-app/src/tauri-bridge.js
+pinvou3-app/src/platform/tauri/bridge.js
+pinvou3-app/src/platform/tauri/bridge/scheduled.js
 ```
 
 测试：
 
 ```text
-pinvou3-app/tests/scheduled_tasks_unit.js
+pinvou3-app/tests/scheduled_tasks_unit.test.js
 pinvou3-app/tests/scheduled_tasks_smoke.js
 ```
 
@@ -1735,14 +1773,14 @@ cd src-tauri
 cargo check --locked
 ```
 
-说明：`cargo check --locked` 不编译 `#[cfg(test)]`，要覆盖新增的后端命令测试需 `cargo check --locked --tests`。本机实际运行 Rust 测试二进制可能撞 `STATUS_ENTRYPOINT_NOT_FOUND`，见 `docs/fork-modifications.md` §4。
+说明：`cargo check --locked` 不编译 `#[cfg(test)]`，要覆盖新增的后端命令测试需 `cargo check --locked --tests`。本机实际运行 Rust 测试二进制可能撞 `STATUS_ENTRYPOINT_NOT_FOUND`，根因与缓解步骤见 `docs/windows-rust-ci.md`（§What the job runs 第 11-13 步）。
 
 ### 六、交接风险
 
 1. 不要把作用于**运行对话**的操作（重命名/置顶/收纳/删除本次运行）搬到定时任务列表上——它们的对象是会话，不是任务定义。反过来也一样：任务定义的置顶/删除不要塞进侧边栏记录菜单。
 2. 不要把运行记录删除误实现为删除定时任务定义。删除一次运行只清 Session + Run + Task，任务定义、共享工作间、其他运行必须保留。
 3. 不要再给 `sched-*` 会话新增平行 Session 命令。会话元数据（标题/置顶/收起）就用普通 Session 命令，差异在后端 `SessionKind` 分发处收敛。
-4. 不要给侧边栏记录列表加二级索引或汇总存储。条数上限由后端既有 retention 兜底；前端只做「逐任务 `list_scheduled_task_runs` → 过滤 → 倒序」。
+4. 不要给侧边栏记录列表加二级索引或汇总存储。条数上限由后端既有 retention 兜底；前端加载走 `loadScheduledTaskRecentRuns()` 的单次 `list_scheduled_runs`（一次 reconcile + 过滤 + 倒序），见交接说明 §二.3。
 5. 不要在 `SCHEDULED_TURN_REMINDER` 上继续堆提示词。任务 prompt 原文已完整传入，那里只允许一条防目标改写的短约束。
 6. 不要新增第二份定时任务方案文档；后续修改继续写入本文档。
 7. 如果后续要释放侧边栏空间，优先优化分组展开策略或记录区高度分配，不要压缩主导航项。侧边栏空间偏小的问题尚未解决（现在记录不再截断，这个问题会更明显），需作为下一轮 UI 优化项跟进。

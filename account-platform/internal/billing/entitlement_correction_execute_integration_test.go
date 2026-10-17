@@ -7,6 +7,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"os"
 	"strconv"
@@ -171,6 +172,140 @@ func TestEntitlementCorrectionExecuteAndConsumerReadPostgresIntegration(t *testi
 		t.Fatal("deactivation race mutated financial facts")
 	}
 	setActivation("ACTIVE")
+	for _, fault := range []struct {
+		name, blockingSQL, blockedQuery string
+		args                            []any
+	}{
+		{"plan-query-cancellation-remains-unknown", "LOCK TABLE public.payment_orders IN ACCESS EXCLUSIVE MODE", "%FROM entitlement_packages p JOIN wallets w%", nil},
+		{"wallet-lock-cancellation-remains-unknown", "SELECT id FROM public.wallets WHERE id=$1 FOR UPDATE", "%FROM wallets WHERE id=$1 FOR UPDATE%", []any{walletID}},
+	} {
+		t.Run(fault.name, func(t *testing.T) {
+			before := entitlementFinancialFactsSnapshot(t, ctx, repository)
+			blocker, err := operator.Begin(ctx)
+			if err != nil {
+				t.Fatal("cancellation blocker begin", err)
+			}
+			defer blocker.Rollback(ctx)
+			if _, err := blocker.Exec(ctx, `SET LOCAL ROLE billing_schema_owner`); err != nil {
+				t.Fatal("cancellation blocker authority", err)
+			}
+			if _, err := blocker.Exec(ctx, fault.blockingSQL, fault.args...); err != nil {
+				t.Fatal("cancellation blocker lock", err)
+			}
+			var blockerPID int
+			if err := blocker.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&blockerPID); err != nil {
+				t.Fatal("cancellation blocker PID", err)
+			}
+			configuration := repository.pool.Config()
+			configuration.ConnConfig = configuration.ConnConfig.Copy()
+			if configuration.ConnConfig.RuntimeParams == nil {
+				configuration.ConnConfig.RuntimeParams = make(map[string]string)
+			}
+			// This one runtime pool gets a real server-side query cancellation.
+			// No financial fixture value or deployment role is changed.
+			configuration.ConnConfig.RuntimeParams["statement_timeout"] = "2000"
+			configuration.MaxConns, configuration.MinConns = 1, 0
+			faultPool, err := pgxpool.NewWithConfig(ctx, configuration)
+			if err != nil {
+				t.Fatal("bounded cancellation runtime pool", err)
+			}
+			defer faultPool.Close()
+			faultRepository := NewPostgresRepositoryWithPool(faultPool)
+			executed := make(chan error, 1)
+			go func() {
+				_, err := faultRepository.ExecuteEntitlementComponentCorrection(ctx, approvalRequestID, authorizationEventID, 2,
+					packageID, orderID, requesterID, approverID, executionKey, "independent approval completed", reasonCode, frozen)
+				executed <- err
+			}()
+			waitCtx, stop := context.WithTimeout(ctx, 5*time.Second)
+			defer stop()
+			ticker := time.NewTicker(10 * time.Millisecond)
+			defer ticker.Stop()
+			observed := false
+			for !observed {
+				select {
+				case <-executed:
+					t.Fatal("execution returned before the actual query lock barrier was observed")
+				case <-waitCtx.Done():
+					t.Fatal("actual cancellation lock barrier was not observed")
+				case <-ticker.C:
+					// Observe the runtime session as the same billing_service role; the
+					// migration blocker cannot see another role's query text.
+					if err := repository.pool.QueryRow(waitCtx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+WHERE datname=current_database() AND usename='billing_service' AND wait_event_type='Lock'
+  AND $1=ANY(pg_blocking_pids(pid)) AND query LIKE $2)`, blockerPID, fault.blockedQuery).Scan(&observed); err != nil {
+						t.Fatal("actual cancellation lock barrier observation", err)
+					}
+				}
+			}
+			var executionErr error
+			select {
+			case executionErr = <-executed:
+			case <-ctx.Done():
+				t.Fatal("bounded query cancellation did not return")
+			}
+			if err := blocker.Rollback(ctx); err != nil {
+				t.Fatal("release cancellation blocker", err)
+			}
+			after := entitlementFinancialFactsSnapshot(t, ctx, repository)
+			for table, rows := range before {
+				if after[table] != rows {
+					t.Fatalf("cancelled execution changed %s", table)
+				}
+			}
+			var pgErr *pgconn.PgError
+			if !errors.As(executionErr, &pgErr) || pgErr.Code != "57014" || errors.Is(executionErr, ErrApprovalSnapshotMismatch) || errors.Is(executionErr, ErrConflict) {
+				t.Fatalf("actual query cancellation was reclassified as a domain fact: %v", executionErr)
+			}
+			attempt := classifyAuthorizationDomainFailure(executionErr)
+			if attempt.FailureIsDefinite || attempt.StableFailureCode != "" || len(attempt.Result.DomainResult) != 0 {
+				t.Fatalf("query cancellation must remain UNKNOWN: %+v", attempt)
+			}
+		})
+	}
+	t.Run("controlled-empty-source-projection-remains-definite", func(t *testing.T) {
+		before := entitlementFinancialFactsSnapshot(t, ctx, repository)
+		var publicOID uint32
+		if err := repository.pool.QueryRow(ctx, `SELECT 'public.entitlement_components'::regclass::oid`).Scan(&publicOID); err != nil {
+			t.Fatal(err)
+		}
+		projection, err := repository.pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer projection.Rollback(ctx)
+		if _, err := projection.Exec(ctx, `CREATE TEMP TABLE entitlement_components (LIKE public.entitlement_components) ON COMMIT DROP`); err != nil {
+			t.Fatal("controlled empty source projection", err)
+		}
+		var privateEmptyProjection bool
+		if err := projection.QueryRow(ctx, `SELECT c.relnamespace=pg_my_temp_schema()
+ AND c.oid='pg_temp.entitlement_components'::regclass AND c.oid<>$1::oid
+ AND NOT EXISTS(SELECT 1 FROM entitlement_components)
+FROM pg_class c WHERE c.oid='entitlement_components'::regclass`, publicOID).Scan(&privateEmptyProjection); err != nil || !privateEmptyProjection {
+			t.Fatal("source NoRows must come from the session-owned empty projection", err)
+		}
+		err = lockEntitlementCorrectionComponents(ctx, projection, plan)
+		if !errors.Is(err, ErrApprovalSnapshotMismatch) {
+			t.Fatalf("actual source NoRows lost its definite mismatch: %v", err)
+		}
+		attempt := classifyAuthorizationDomainFailure(err)
+		if !attempt.FailureIsDefinite || attempt.StableFailureCode != "DOMAIN_PRECONDITION_REJECTED" {
+			t.Fatalf("actual source NoRows must remain definite: %+v", attempt)
+		}
+		if err := projection.Rollback(ctx); err != nil {
+			t.Fatal(err)
+		}
+		var restoredOID uint32
+		if err := repository.pool.QueryRow(ctx, `SELECT 'public.entitlement_components'::regclass::oid`).Scan(&restoredOID); err != nil || restoredOID != publicOID {
+			t.Fatal("controlled projection changed the public source relation", err)
+		}
+		after := entitlementFinancialFactsSnapshot(t, ctx, repository)
+		for table, rows := range before {
+			if after[table] != rows {
+				t.Fatalf("controlled NoRows changed %s", table)
+			}
+		}
+	})
 	t.Run("approved-monetary-facts-drift-has-no-effects", func(t *testing.T) {
 		changedProduct, err := json.Marshal(Product{ProductID: "CORRECTION_EXECUTE_TEST", AmountFen: 100, CreditMicrocredits: 100, BasePoints: 70, BonusPoints: 30, Currency: "CNY"})
 		if err != nil {

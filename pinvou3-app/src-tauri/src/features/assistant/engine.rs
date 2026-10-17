@@ -75,6 +75,8 @@ pub struct AppEngine {
     turn_lifecycle: Arc<TurnLifecycle>,
     turn_shell_tasks: Option<TurnShellTaskRegistry>,
     scheduled_disallowed_tools: Vec<String>,
+    /// Reclaim retires queued transcript writers before aborting the forwarder.
+    pub(crate) transcript_writer_active: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Default)]
@@ -265,6 +267,7 @@ struct TranscriptFallback {
 pub(crate) struct TurnReservation {
     lifecycle: Arc<TurnLifecycle>,
     reservation_id: u64,
+    generation: u64,
     base_transcript_revision: Option<String>,
     transcript: Option<ReservedTranscript>,
     admission_metadata: Option<TurnAdmissionMetadata>,
@@ -272,10 +275,11 @@ pub(crate) struct TurnReservation {
 }
 
 impl TurnReservation {
-    fn new(lifecycle: Arc<TurnLifecycle>, reservation_id: u64) -> Self {
+    fn new(lifecycle: Arc<TurnLifecycle>, reservation_id: u64, generation: u64) -> Self {
         Self {
             lifecycle,
             reservation_id,
+            generation,
             base_transcript_revision: None,
             transcript: None,
             admission_metadata: None,
@@ -289,6 +293,12 @@ impl TurnReservation {
 
     pub(crate) fn base_transcript_revision(&self) -> Option<&str> {
         self.base_transcript_revision.as_deref()
+    }
+
+    /// Stable identity of the reserved session turn. Unlike transcript indices,
+    /// this survives persistence compaction and is unique for the session.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub(crate) fn set_transcript(
@@ -516,6 +526,19 @@ pub(crate) fn dispatch_turn_bound_cancel<E: TurnBoundCancelOps + ?Sized>(
     }
 }
 
+/// A remote deadline is not the user's session-wide Stop action. Never latch
+/// a disposition on an unobserved/replaced slot, or cancel unrelated children.
+/// The foundation settles the exact cancelled turn's owned child mailbox.
+pub(crate) fn dispatch_remote_turn_cancel<E: TurnBoundCancelOps + ?Sized>(
+    engine: &E,
+    identity: Option<&TurnIdentity>,
+    mode: deepseek_tui::core::engine::CancelMode,
+) {
+    if let TurnBoundCancelAction::BoundTurn(turn_id) = turn_bound_cancel_action(identity) {
+        engine.cancel_bound_turn(&turn_id, mode);
+    }
+}
+
 /// Session-scoped turn state shared by the command path and the event
 /// forwarder. Every terminal path competes here, so the frontend receives
 /// exactly one `chat:done` for a submitted turn.
@@ -676,6 +699,22 @@ impl TurnLifecycle {
         true
     }
 
+    /// Run a synchronous side effect only for this still-active generation.
+    /// The callback must not re-enter this lifecycle or await. Holding the
+    /// state lock prevents a forwarder-created successor between validation
+    /// and capturing the old turn's shell scope.
+    pub(crate) fn with_active_generation<T>(
+        &self,
+        generation: u64,
+        action: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let state = self.state.lock();
+        if state.turn_epoch != generation || (!state.active && !state.terminal_closing) {
+            return None;
+        }
+        Some(action())
+    }
+
     /// 当前活动轮是否已提交（`SendMessage` 已入队 / `TurnStarted` 已抵达）。
     /// 供 cancel 阶段二在 generation mismatch（新轮已 reserve）时判断新轮是否
     /// 已经真正开始：仅 reserve 未 send 时，engine 里仍是旧轮遗留的子代理，
@@ -724,7 +763,7 @@ impl TurnLifecycle {
     }
 
     pub(crate) fn reserve(self: &Arc<Self>) -> Result<TurnReservation> {
-        let reservation_id = {
+        let (reservation_id, generation) = {
             let mut state = self.state.lock();
             if state.active || state.terminal_closing {
                 anyhow::bail!("session_turn_in_progress");
@@ -742,10 +781,14 @@ impl TurnLifecycle {
             state.active_reservation_id = Some(reservation_id);
             state.pending_cancel = None;
             state.submission_id = None;
-            reservation_id
+            (reservation_id, state.turn_epoch)
         };
         crate::features::connectors::visibility::turn_submitted();
-        Ok(TurnReservation::new(self.clone(), reservation_id))
+        Ok(TurnReservation::new(
+            self.clone(),
+            reservation_id,
+            generation,
+        ))
     }
 
     fn install_transcript_rule(
@@ -1696,7 +1739,7 @@ impl AppEngine {
     ///
     /// [`build_engine_config_for_session`]: crate::features::assistant::platform::bridge::Pinvou3Bridge::build_engine_config_for_session
     /// [`EnginePool`]: crate::features::assistant::engine_pool::EnginePool
-    pub(crate) async fn spawn_for_session(
+    pub(crate) fn spawn_for_session(
         app: AppHandle,
         store: SessionStore,
         bridge: Pinvou3Bridge,
@@ -1821,6 +1864,7 @@ impl AppEngine {
         let handle = spawn_engine(engine_config, &dt_config);
         let (turn_events, _) = broadcast::channel(32);
         let scheduled_unattended = Arc::new(AtomicBool::new(false));
+        let transcript_writer_active = Arc::new(AtomicBool::new(true));
         let forwarder = spawn_event_forwarder(
             app,
             handle.clone(),
@@ -1836,6 +1880,7 @@ impl AppEngine {
             shell_manager,
             turn_shell_tasks.clone(),
             steer_id_generation,
+            transcript_writer_active.clone(),
         );
 
         Ok((
@@ -1850,6 +1895,7 @@ impl AppEngine {
                 turn_lifecycle,
                 turn_shell_tasks: Some(turn_shell_tasks),
                 scheduled_disallowed_tools,
+                transcript_writer_active,
             },
             forwarder,
         ))
@@ -1893,7 +1939,14 @@ impl AppEngine {
             turn_lifecycle: Arc::new(TurnLifecycle::default()),
             turn_shell_tasks: None,
             scheduled_disallowed_tools,
+            transcript_writer_active: Arc::new(AtomicBool::new(true)),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bind_test_session(&mut self, session_id: &str, lifecycle: Arc<TurnLifecycle>) {
+        self.session_id = session_id.to_owned();
+        self.turn_lifecycle = lifecycle;
     }
 
     /// Turn submission for headless harnesses (L1 integration harness, live
@@ -2311,21 +2364,34 @@ impl AppEngine {
     /// 都是 disk-API-限制的副作用,现在彻底走掉。
     pub async fn sync_session(&self, session_id: String, messages: Vec<Message>) -> Result<()> {
         self.handle
-            .send(Op::SyncSession {
-                session_id: Some(session_id),
-                messages,
-                system_prompt: None,
-                system_prompt_override: false,
-                model: self.bridge.model(),
-                workspace: self.workspace.clone(),
-                // The host sync has one execution root; do not retain SDK attachments.
-                // CodeWhale #54 多根授权基建：空集经底座 normalize 后等价
-                // 单根（workspace 置于位置 0），保持既有行为。
-                workspace_roots: Vec::new(),
-                mode: AppMode::Agent,
-            })
+            .send(self.sync_session_op(session_id, messages))
             .await?;
         Ok(())
+    }
+
+    /// Queue mandatory identity/history in a fresh mailbox before publication.
+    pub(crate) fn try_sync_new_session(
+        &self,
+        session_id: String,
+        messages: Vec<Message>,
+    ) -> Result<()> {
+        self.handle
+            .try_send(self.sync_session_op(session_id, messages))
+    }
+
+    fn sync_session_op(&self, session_id: String, messages: Vec<Message>) -> Op {
+        Op::SyncSession {
+            session_id: Some(session_id),
+            messages,
+            system_prompt: None,
+            system_prompt_override: false,
+            model: self.bridge.model(),
+            workspace: self.workspace.clone(),
+            // CodeWhale #54 normalizes this empty list to the existing single
+            // workspace for both awaited sync and unpublished cold hydration.
+            workspace_roots: Vec::new(),
+            mode: AppMode::Agent,
+        }
     }
 }
 
@@ -2822,6 +2888,28 @@ mod turn_lifecycle_tests {
 
         // 防 Drop 副作用。
         reservation2.mark_submitted(None);
+    }
+
+    #[test]
+    fn generation_guard_holds_state_lock_and_rejects_a_successor() {
+        let lifecycle = Arc::new(TurnLifecycle::default());
+        let old = lifecycle.reserve().unwrap();
+        let old_generation = old.generation();
+        assert_eq!(
+            lifecycle.with_active_generation(old_generation, || {
+                assert!(lifecycle.state.try_lock().is_none());
+                "captured under lock"
+            }),
+            Some("captured under lock")
+        );
+        drop(old);
+        let successor = lifecycle.reserve().unwrap();
+        assert!(
+            lifecycle
+                .with_active_generation(old_generation, || panic!("must not cancel new scope"))
+                .is_none()
+        );
+        assert!(successor.ensure_active().is_ok());
     }
 
     #[test]

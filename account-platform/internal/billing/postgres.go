@@ -88,6 +88,11 @@ func (r *PostgresRepository) ensureWalletWithinTransaction(ctx context.Context, 
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, ownerType+":"+ownerID.String()); err != nil {
 		return Wallet{}, false, err
 	}
+	if ownerType == "ORG_UNIT" {
+		if err := rejectDeletedUnitWalletWrite(ctx, tx, ownerID); err != nil {
+			return Wallet{}, false, err
+		}
+	}
 	wallet, err := getWalletByOwner(ctx, tx, ownerType, ownerID)
 	if err == nil {
 		return wallet, false, nil

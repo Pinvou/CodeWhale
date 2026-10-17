@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -10,14 +11,23 @@ use serde_json::{Value, json};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_tungstenite::{
     connect_async_with_config,
-    tungstenite::{Message, protocol::WebSocketConfig},
+    tungstenite::{
+        Error as WebSocketError, Message,
+        client::IntoClientRequest,
+        error::{ProtocolError, SubProtocolError},
+        http::{HeaderValue, Request, header::SEC_WEBSOCKET_PROTOCOL},
+        protocol::WebSocketConfig,
+    },
 };
 use tokio_util::sync::CancellationToken;
 
+use super::controller::shared_transport::{
+    ControllerOutboundScope, ControllerReadReceipt, SharedControllerAuthority,
+};
 use super::protocol::{PROTOCOL_VERSION, WebAccessConfig};
 
-const RECONNECT_BASE_DELAY_MS: u64 = 500;
-const RECONNECT_MAX_DELAY_MS: u64 = 10_000;
+pub(crate) const RECONNECT_BASE_DELAY_MS: u64 = 500;
+pub(crate) const RECONNECT_MAX_DELAY_MS: u64 = 10_000;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(25);
 const REVOKE_ACK_TIMEOUT: Duration = Duration::from_secs(12);
 
@@ -42,7 +52,7 @@ const OUTBOUND_CHANNEL_CAPACITY: usize = 2_048;
 // bound retained wire payload to roughly 64 MiB. Only the current frame is
 // parsed at either side of the queue.
 const INBOUND_CHANNEL_CAPACITY: usize = 32;
-const MAX_INBOUND_TEXT_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_INBOUND_TEXT_BYTES: usize = 2 * 1024 * 1024;
 const OUTBOUND_BYTE_BUDGET: usize = 128 * 1024 * 1024;
 // Stream resets are tiny control messages. Keeping at most one in-flight and
 // one latest replacement outside the saturated data budget adds a hard 128 KiB
@@ -53,12 +63,12 @@ pub(crate) const MAX_CONTROL_FRAME_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_RELAY_FRAME_BYTES: usize = (4 * 1024 * 1024) - (64 * 1024);
 
 #[derive(Debug, Default)]
-struct ReconnectBackoff {
+pub(crate) struct ReconnectBackoff {
     attempt: u32,
 }
 
 impl ReconnectBackoff {
-    fn next_delay(&mut self) -> Duration {
+    pub(crate) fn next_delay(&mut self) -> Duration {
         let jitter_per_mille = rand::rng().random_range(800_u64..=1_200);
         self.next_delay_with_jitter(jitter_per_mille)
     }
@@ -72,7 +82,7 @@ impl ReconnectBackoff {
         Duration::from_millis(base_ms.saturating_mul(jitter_per_mille) / 1_000)
     }
 
-    fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.attempt = 0;
     }
 }
@@ -83,12 +93,16 @@ pub enum RelayOutbound {
     Shutdown,
 }
 
-#[derive(Debug)]
 pub enum RelayInbound {
     /// Raw, size-checked JSON text. Keeping parsing out of the bounded queue
     /// makes its memory ceiling proportional to wire bytes rather than the
     /// potentially much larger `serde_json::Value` representation.
     Message(String),
+    /// Strictly validated join/final metadata minted on the receiving socket.
+    ControllerMessage {
+        text: String,
+        receipt: ControllerReadReceipt,
+    },
     Connection {
         endpoint_id: String,
         connected: bool,
@@ -96,8 +110,33 @@ pub enum RelayInbound {
     },
 }
 
+impl fmt::Debug for RelayInbound {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Message(_) => f.debug_tuple("Message").field(&"[REDACTED]").finish(),
+            Self::ControllerMessage { receipt, .. } => f
+                .debug_struct("ControllerMessage")
+                .field("text", &"[REDACTED]")
+                .field("receipt", receipt)
+                .finish(),
+            Self::Connection {
+                endpoint_id,
+                connected,
+                error,
+            } => f
+                .debug_struct("Connection")
+                .field("endpoint_id", endpoint_id)
+                .field("connected", connected)
+                .field("error", error)
+                .finish(),
+        }
+    }
+}
+
 struct OutboundFrame {
     text: String,
+    controller_v1: bool,
+    controller_scope: Option<ControllerOutboundScope>,
     // The permit follows the serialized frame from the channel into the
     // reconnect queue and is released only after send or intentional discard.
     _byte_permit: OwnedSemaphorePermit,
@@ -106,7 +145,13 @@ struct OutboundFrame {
 struct SerializedFrame {
     text: String,
     permits: u32,
+    controller_v1: bool,
+    controller_scope: Option<ControllerOutboundScope>,
 }
+
+const SOCKET_MODE_NEGOTIATING: u8 = 0;
+const SOCKET_MODE_CONTROLLER: u8 = 1;
+const SOCKET_MODE_LEGACY_V2: u8 = 2;
 
 #[derive(Default)]
 struct CoalescedControlState {
@@ -121,6 +166,8 @@ pub enum RelayTrySendError {
     ByteBudgetExhausted,
     ChannelFull,
     ChannelClosed,
+    ControllerProtocolUnavailable,
+    ControllerAuthorityUnavailable,
 }
 
 impl fmt::Display for RelayTrySendError {
@@ -135,11 +182,31 @@ impl fmt::Display for RelayTrySendError {
             }
             Self::ChannelFull => formatter.write_str("relay outbound channel is full"),
             Self::ChannelClosed => formatter.write_str("relay outbound channel is closed"),
+            Self::ControllerProtocolUnavailable => {
+                formatter.write_str("desktop_controller_relay_unavailable")
+            }
+            Self::ControllerAuthorityUnavailable => {
+                formatter.write_str("desktop_controller_authority_unavailable")
+            }
         }
     }
 }
 
 impl std::error::Error for RelayTrySendError {}
+
+pub(crate) const CONTROLLER_SEND_BACKPRESSURE: &str = "desktop_controller_send_backpressure";
+
+impl RelayTrySendError {
+    /// Preserve transient queue pressure at the controller's string port.
+    /// Authority, transport and serialization failures remain terminal there.
+    pub(crate) fn controller_send_code(&self) -> &'static str {
+        match self {
+            Self::ChannelFull | Self::ByteBudgetExhausted => CONTROLLER_SEND_BACKPRESSURE,
+            Self::ControllerProtocolUnavailable => "desktop_controller_relay_unavailable",
+            _ => "desktop relay task has stopped",
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct RelaySender {
@@ -148,10 +215,40 @@ pub struct RelaySender {
     max_frame_bytes: usize,
     shutdown: CancellationToken,
     coalesced_control: Arc<Mutex<CoalescedControlState>>,
+    socket_mode: Arc<AtomicU8>,
+    pub(crate) controller_authority: SharedControllerAuthority,
 }
 
 impl RelaySender {
+    pub(crate) fn same_channel(&self, other: &Self) -> bool {
+        self.tx.same_channel(&other.tx)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_channel_owner() -> Self {
+        outbound_channel(1, 1024, 1024).0
+    }
+
     fn serialize_message(&self, value: Value) -> Result<SerializedFrame, RelayTrySendError> {
+        self.serialize_message_owned(value, None)
+    }
+
+    fn serialize_message_owned(
+        &self,
+        value: Value,
+        owner: Option<(&str, u64)>,
+    ) -> Result<SerializedFrame, RelayTrySendError> {
+        let controller_v1 = value.get("v").and_then(Value::as_u64) == Some(1);
+        if controller_v1 && self.socket_mode.load(Ordering::Acquire) == SOCKET_MODE_LEGACY_V2 {
+            return Err(RelayTrySendError::ControllerProtocolUnavailable);
+        }
+        let controller_scope = if controller_v1 {
+            self.controller_authority
+                .outbound_scope_owned(&value, owner)
+                .map_err(|_| RelayTrySendError::ControllerAuthorityUnavailable)?
+        } else {
+            None
+        };
         let text = serde_json::to_string(&value)
             .map_err(|error| RelayTrySendError::Serialization(error.to_string()))?;
         let bytes = text.len();
@@ -165,10 +262,16 @@ impl RelaySender {
             bytes,
             limit: self.max_frame_bytes,
         })?;
-        Ok(SerializedFrame { text, permits })
+        Ok(SerializedFrame {
+            text,
+            permits,
+            controller_v1,
+            controller_scope,
+        })
     }
 
     fn cancel(&self) {
+        self.controller_authority.shutdown();
         self.shutdown.cancel();
         self.coalesced_control.lock().latest = None;
     }
@@ -181,6 +284,8 @@ impl RelaySender {
             .map_err(|_| RelayTrySendError::ByteBudgetExhausted)?;
         let queued = OutboundFrame {
             text: frame.text,
+            controller_v1: frame.controller_v1,
+            controller_scope: frame.controller_scope,
             _byte_permit: byte_permit,
         };
         self.tx.try_send(queued).map_err(|error| match error {
@@ -199,6 +304,8 @@ impl RelaySender {
         };
         let queued = OutboundFrame {
             text: frame.text,
+            controller_v1: frame.controller_v1,
+            controller_scope: frame.controller_scope,
             _byte_permit: byte_permit,
         };
         tokio::select! {
@@ -224,6 +331,19 @@ impl RelaySender {
                 self.try_send_serialized(self.serialize_message(value)?)
             }
         }
+    }
+
+    pub(crate) fn try_send_controller_owned(
+        &self,
+        generation: &str,
+        binding: u64,
+        value: Value,
+    ) -> Result<(), RelayTrySendError> {
+        if value["v"].as_u64() != Some(1) {
+            return Err(RelayTrySendError::ControllerAuthorityUnavailable);
+        }
+        let frame = self.serialize_message_owned(value, Some((generation, binding)))?;
+        self.try_send_serialized(frame)
     }
 
     /// Queue a stream-reset barrier without spawning one waiter per failure.
@@ -276,12 +396,15 @@ impl RelaySender {
             let Some(frame) = next else {
                 return;
             };
-            if let Err(error) = self.send_serialized(frame).await {
+            if self.send_serialized(frame).await.is_err() {
                 let mut state = self.coalesced_control.lock();
                 state.latest = None;
                 state.worker_running = false;
                 if !self.shutdown.is_cancelled() {
-                    eprintln!("[web-access] coalesced stream reset enqueue failed: {error}");
+                    super::controller::relay_runtime::log_controlled_event(
+                        "relay_reset_enqueue_failed",
+                        "queue_failed",
+                    );
                 }
                 return;
             }
@@ -304,6 +427,8 @@ fn outbound_channel(
             max_frame_bytes,
             shutdown: CancellationToken::new(),
             coalesced_control: Arc::new(Mutex::new(CoalescedControlState::default())),
+            socket_mode: Arc::new(AtomicU8::new(SOCKET_MODE_NEGOTIATING)),
+            controller_authority: SharedControllerAuthority::default(),
         },
         rx,
     )
@@ -316,9 +441,19 @@ pub fn spawn(config: WebAccessConfig) -> (RelaySender, RelayReceiver) {
         MAX_RELAY_FRAME_BYTES,
     );
     let shutdown = tx_out.shutdown.clone();
+    let socket_mode = tx_out.socket_mode.clone();
+    let controller_authority = tx_out.controller_authority.clone();
     let (tx_in, rx_in) = mpsc::channel::<RelayInbound>(INBOUND_CHANNEL_CAPACITY);
     tauri::async_runtime::spawn(async move {
-        run_loop(config, tx_in, rx_out, shutdown).await;
+        run_loop(
+            config,
+            tx_in,
+            rx_out,
+            shutdown,
+            socket_mode,
+            controller_authority,
+        )
+        .await;
     });
     (tx_out, rx_in)
 }
@@ -341,11 +476,24 @@ pub fn spawn_revocation(
     rx_in
 }
 
-fn relay_websocket_config() -> WebSocketConfig {
+pub(crate) fn relay_websocket_config(max_inbound_text_bytes: usize) -> WebSocketConfig {
     let mut config = WebSocketConfig::default();
-    config.max_message_size = Some(MAX_INBOUND_TEXT_BYTES);
-    config.max_frame_size = Some(MAX_INBOUND_TEXT_BYTES);
+    config.max_message_size = Some(max_inbound_text_bytes);
+    config.max_frame_size = Some(max_inbound_text_bytes);
     config
+}
+
+/// The desktop endpoint carries both its existing v2 WebUI traffic and the
+/// controlled-device v1 lane. The controller transport uses the same upgrade.
+pub(crate) fn controller_websocket_request(
+    relay_url: &str,
+) -> Result<Request<()>, tokio_tungstenite::tungstenite::Error> {
+    let mut request = relay_url.into_client_request()?;
+    request.headers_mut().insert(
+        SEC_WEBSOCKET_PROTOCOL,
+        HeaderValue::from_static(super::controller::protocol::CONTROLLER_SUBPROTOCOL),
+    );
+    Ok(request)
 }
 
 async fn run_revocation_loop(
@@ -356,8 +504,11 @@ async fn run_revocation_loop(
 ) {
     let mut reconnect_backoff = ReconnectBackoff::default();
     loop {
-        let connection =
-            connect_async_with_config(&relay_url, Some(relay_websocket_config()), false);
+        let connection = connect_async_with_config(
+            &relay_url,
+            Some(relay_websocket_config(MAX_INBOUND_TEXT_BYTES)),
+            false,
+        );
         tokio::pin!(connection);
         let connected = tokio::select! {
             result = &mut connection => result,
@@ -425,9 +576,9 @@ async fn run_revocation_loop(
                     match message {
                         Ok(Message::Text(text)) => {
                             if inbound_text_too_large(text.len()) {
-                                eprintln!(
-                                    "[web-access] oversized relay revocation frame rejected: {} bytes",
-                                    text.len()
+                                super::controller::relay_runtime::log_controlled_event(
+                                    "relay_frame_oversized",
+                                    "rejected",
                                 );
                                 let _ = write.send(Message::Close(None)).await;
                                 break;
@@ -444,8 +595,11 @@ async fn run_revocation_loop(
                                         return;
                                     }
                                 }
-                                Err(error) => {
-                                    eprintln!("[web-access] relay revocation JSON ignored: {error}")
+                                Err(_) => {
+                                    super::controller::relay_runtime::log_controlled_event(
+                                        "revocation_frame_rejected",
+                                        "rejected",
+                                    )
                                 }
                             }
                         }
@@ -456,8 +610,11 @@ async fn run_revocation_loop(
                         }
                         Ok(Message::Close(_)) => break,
                         Ok(_) => {}
-                        Err(error) => {
-                            eprintln!("[web-access] relay revocation read failed: {error}");
+                        Err(_) => {
+                            super::controller::relay_runtime::log_controlled_event(
+                                "relay_read_failed",
+                                "failed",
+                            );
                             break;
                         }
                     }
@@ -509,6 +666,26 @@ async fn send_inbound_until_shutdown(
     }
 }
 
+async fn notify_controller_unavailable(
+    tx_in: &mpsc::Sender<RelayInbound>,
+    shutdown: &CancellationToken,
+) -> bool {
+    send_inbound_until_shutdown(
+        tx_in,
+        RelayInbound::Message(
+            json!({
+                "v": 2,
+                "type": "error",
+                "code": "desktop_controller_unavailable",
+                "message": "desktop controller is unavailable",
+            })
+            .to_string(),
+        ),
+        shutdown,
+    )
+    .await
+}
+
 async fn wait_reconnect_delay(
     shutdown: &CancellationToken,
     reconnect_backoff: &mut ReconnectBackoff,
@@ -526,13 +703,28 @@ async fn run_loop(
     tx_in: mpsc::Sender<RelayInbound>,
     mut rx_out: mpsc::Receiver<OutboundFrame>,
     shutdown: CancellationToken,
+    socket_mode: Arc<AtomicU8>,
+    controller_authority: SharedControllerAuthority,
 ) {
     let mut pending = VecDeque::<OutboundFrame>::new();
     let mut reconnect_backoff = ReconnectBackoff::default();
+    let mut request_controller_protocol = true;
 
     'reconnect: loop {
-        let connection =
-            connect_async_with_config(&config.relay_url, Some(relay_websocket_config()), false);
+        let offer_controller_protocol = request_controller_protocol;
+        let connection = async {
+            let request = if offer_controller_protocol {
+                controller_websocket_request(&config.relay_url)?
+            } else {
+                config.relay_url.as_str().into_client_request()?
+            };
+            connect_async_with_config(
+                request,
+                Some(relay_websocket_config(MAX_INBOUND_TEXT_BYTES)),
+                false,
+            )
+            .await
+        };
         tokio::pin!(connection);
 
         // Remain responsive to disable/rotate while the network connection is
@@ -556,9 +748,23 @@ async fn run_loop(
 
         let (ws, _) = match connected {
             Ok(pair) => pair,
+            Err(WebSocketError::Protocol(ProtocolError::SecWebSocketSubProtocolError(
+                SubProtocolError::NoSubProtocol,
+            ))) if request_controller_protocol => {
+                // An older Relay/proxy may not negotiate controller v1. Open a
+                // new v2-only desktop connection, preserving existing WebUI
+                // access; the Relay will reject controller frames on that socket.
+                request_controller_protocol = false;
+                socket_mode.store(SOCKET_MODE_LEGACY_V2, Ordering::Release);
+                continue 'reconnect;
+            }
             Err(error) => {
+                request_controller_protocol = true;
                 let message = format!("connect relay failed: {error}");
-                eprintln!("[web-access] {} ({})", message, config.relay_url);
+                super::controller::relay_runtime::log_controlled_event(
+                    "relay_connect_failed",
+                    "failed",
+                );
                 if !send_inbound_until_shutdown(
                     &tx_in,
                     RelayInbound::Connection {
@@ -578,6 +784,16 @@ async fn run_loop(
                 continue;
             }
         };
+        let legacy_v2_only = !offer_controller_protocol;
+        socket_mode.store(
+            if legacy_v2_only {
+                SOCKET_MODE_LEGACY_V2
+            } else {
+                SOCKET_MODE_CONTROLLER
+            },
+            Ordering::Release,
+        );
+        request_controller_protocol = true;
 
         let (mut write, mut read) = ws.split();
         let register = register_message(&config);
@@ -605,6 +821,9 @@ async fn run_loop(
             }
             continue;
         }
+        let Some(socket_authority) = controller_authority.open_socket(!legacy_v2_only) else {
+            return;
+        };
         if !send_inbound_until_shutdown(
             &tx_in,
             RelayInbound::Connection {
@@ -619,7 +838,24 @@ async fn run_loop(
             return;
         }
 
+        let mut controller_unavailable_reported = false;
         while let Some(frame) = pending.pop_front() {
+            if legacy_v2_only && frame.controller_v1 {
+                if !controller_unavailable_reported {
+                    controller_unavailable_reported = true;
+                    if !notify_controller_unavailable(&tx_in, &shutdown).await {
+                        return;
+                    }
+                }
+                continue;
+            }
+            if frame
+                .controller_scope
+                .as_ref()
+                .is_some_and(|scope| !controller_authority.frame_is_current(scope))
+            {
+                continue;
+            }
             let send_result = tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => return,
@@ -627,6 +863,7 @@ async fn run_loop(
             };
             if let Err(error) = send_result {
                 push_pending_front(&mut pending, frame);
+                drop(socket_authority);
                 if !send_inbound_until_shutdown(
                     &tx_in,
                     RelayInbound::Connection {
@@ -677,14 +914,26 @@ async fn run_loop(
                 outbound = rx_out.recv() => {
                     match outbound {
                         Some(frame) => {
+                            if legacy_v2_only && frame.controller_v1 {
+                                if !controller_unavailable_reported {
+                                    controller_unavailable_reported = true;
+                                    if !notify_controller_unavailable(&tx_in, &shutdown).await { return; }
+                                }
+                                continue;
+                            }
+                            if frame.controller_scope.as_ref().is_some_and(|scope|
+                                !controller_authority.frame_is_current(scope)) { continue; }
                             let send_result = tokio::select! {
                                 biased;
                                 _ = shutdown.cancelled() => return,
                                 result = write.send(Message::Text(frame.text.clone().into())) => result,
                             };
-                            if let Err(error) = send_result {
+                            if send_result.is_err() {
                                 push_pending_front(&mut pending, frame);
-                                eprintln!("[web-access] relay send failed: {error}");
+                                super::controller::relay_runtime::log_controlled_event(
+                                    "relay_send_failed",
+                                    "send_failed",
+                                );
                                 break;
                             }
                         }
@@ -701,9 +950,9 @@ async fn run_loop(
                     match message {
                         Ok(Message::Text(text)) => {
                             if inbound_text_too_large(text.len()) {
-                                eprintln!(
-                                    "[web-access] oversized relay frame rejected: {} bytes",
-                                    text.len()
+                                super::controller::relay_runtime::log_controlled_event(
+                                    "relay_frame_oversized",
+                                    "rejected",
                                 );
                                 let _ = write.send(Message::Close(None)).await;
                                 break;
@@ -711,13 +960,21 @@ async fn run_loop(
                             match serde_json::from_str::<Value>(&text) {
                                 Ok(value) => {
                                     let terminal = terminal_message(&value, &config.endpoint_id);
+                                    if terminal.is_some() { socket_authority.invalidate(); }
                                     if registration_acknowledges_endpoint(&value, &config.endpoint_id) {
                                         reconnect_backoff.reset();
                                     }
+                                    let receipt = socket_authority.receipt(&value);
                                     drop(value);
+                                    let inbound = match receipt {
+                                        Some(receipt) => RelayInbound::ControllerMessage {
+                                            text: text.to_string(), receipt,
+                                        },
+                                        None => RelayInbound::Message(text.to_string()),
+                                    };
                                     if !send_inbound_until_shutdown(
                                         &tx_in,
-                                        RelayInbound::Message(text.to_string()),
+                                        inbound,
                                         &shutdown,
                                     ).await {
                                         return;
@@ -727,7 +984,10 @@ async fn run_loop(
                                         return;
                                     }
                                 }
-                                Err(error) => eprintln!("[web-access] relay JSON ignored: {error}"),
+                                Err(_) => super::controller::relay_runtime::log_controlled_event(
+                                    "relay_frame_rejected",
+                                    "rejected",
+                                ),
                             }
                         }
                         Ok(Message::Ping(bytes)) => {
@@ -740,8 +1000,11 @@ async fn run_loop(
                         }
                         Ok(Message::Close(_)) => break,
                         Ok(_) => {}
-                        Err(error) => {
-                            eprintln!("[web-access] relay read failed: {error}");
+                        Err(_) => {
+                            super::controller::relay_runtime::log_controlled_event(
+                                "relay_read_failed",
+                                "failed",
+                            );
                             break;
                         }
                     }
@@ -764,6 +1027,9 @@ async fn run_loop(
             }
         }
 
+        // Revoke before queueing a disconnect or sleeping for reconnect. The
+        // queue/worker may be delayed, but cannot consume an old final proof.
+        drop(socket_authority);
         if !send_inbound_until_shutdown(
             &tx_in,
             RelayInbound::Connection {
@@ -867,8 +1133,71 @@ fn revoke_message_parts(endpoint_id: &str, desktop_secret: &str) -> Value {
 }
 
 #[cfg(test)]
+#[path = "relay_client/shared_controller_tests.rs"]
+mod shared_controller_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+    use tokio_tungstenite::accept_async;
+
+    #[test]
+    fn inbound_debug_redacts_relay_payloads_and_preserves_reader_receipt() {
+        let original = json!({ "future_payload": "fake-relay-payload-secret" }).to_string();
+        let ordinary = RelayInbound::Message(original.clone());
+        for diagnostic in [format!("{ordinary:?}"), format!("{ordinary:#?}")] {
+            assert!(!diagnostic.contains("fake-relay-payload-secret"));
+            assert!(diagnostic.contains("Message"));
+            assert!(diagnostic.contains("[REDACTED]"));
+        }
+        let RelayInbound::Message(text) = ordinary else {
+            unreachable!()
+        };
+        assert_eq!(text, original);
+
+        let fixture = super::super::controller::test_support::pairing_fixture("relay-debug-key");
+        let authority = SharedControllerAuthority::default();
+        let generation = fixture.joined["remote_control_generation"]
+            .as_str()
+            .unwrap();
+        authority.bind(generation).unwrap();
+        let socket = authority.open_socket(true).unwrap();
+        let receipt = socket.receipt(&fixture.joined).unwrap();
+        let original = fixture.joined.to_string();
+        let token = fixture.joined["resume_token_b64"].as_str().unwrap();
+        let event = RelayInbound::ControllerMessage {
+            text: original.clone(),
+            receipt,
+        };
+        for diagnostic in [format!("{event:?}"), format!("{event:#?}")] {
+            assert!(!diagnostic.contains(token));
+            assert!(diagnostic.contains("ControllerMessage"));
+            assert!(diagnostic.contains("ControllerReadReceipt([REDACTED])"));
+        }
+        let RelayInbound::ControllerMessage { text, receipt } = event else {
+            unreachable!()
+        };
+        assert_eq!(text, original);
+        // The actual reader-minted proof remains available, not replaced by a
+        // diagnostic stand-in or reconstructed from printable wire metadata.
+        assert_eq!(format!("{receipt:?}"), "ControllerReadReceipt([REDACTED])");
+    }
+
+    #[test]
+    fn inbound_debug_keeps_relay_connection_diagnostics() {
+        let event = RelayInbound::Connection {
+            endpoint_id: "endpoint-diagnostic".to_owned(),
+            connected: false,
+            error: Some("read deadline".to_owned()),
+        };
+        let diagnostic = format!("{event:?}");
+        assert!(diagnostic.contains("Connection"));
+        assert!(diagnostic.contains("endpoint-diagnostic"));
+        assert!(diagnostic.contains("false"));
+        assert!(diagnostic.contains("read deadline"));
+    }
 
     fn config() -> WebAccessConfig {
         WebAccessConfig {
@@ -904,6 +1233,88 @@ mod tests {
                 "desktop_secret": "desktop",
             })
         );
+    }
+
+    #[test]
+    fn desktop_endpoint_requests_controller_subprotocol_for_shared_lane() {
+        let request = controller_websocket_request(&config().relay_url).unwrap();
+        assert_eq!(
+            request.headers().get(SEC_WEBSOCKET_PROTOCOL).unwrap(),
+            super::super::controller::protocol::CONTROLLER_SUBPROTOCOL
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_handshake_never_sends_queued_or_new_controller_frames() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_url = format!("ws://{}", listener.local_addr().unwrap());
+        let (seen_tx, seen_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            // The first handshake deliberately omits the requested protocol.
+            let (first, _) = listener.accept().await.unwrap();
+            drop(accept_async(first).await.unwrap());
+            let (second, _) = listener.accept().await.unwrap();
+            let mut legacy = accept_async(second).await.unwrap();
+            let register = legacy.next().await.unwrap().unwrap();
+            let forwarded = legacy.next().await.unwrap().unwrap();
+            seen_tx.send((register, forwarded)).unwrap();
+            let _ = release_rx.await;
+        });
+        let (sender, rx_out) = outbound_channel(8, 8192, 4096);
+        let controller_frame = json!({ "v": 1, "type": "desktop_pairing_register" });
+        sender
+            .try_send(RelayOutbound::Message(controller_frame.clone()))
+            .unwrap();
+        sender
+            .try_send(RelayOutbound::Message(
+                json!({ "v": 2, "type": "rpc_response" }),
+            ))
+            .unwrap();
+        let (tx_in, mut rx_in) = mpsc::channel(8);
+        let mut config = config();
+        config.relay_url = relay_url;
+        let worker = tokio::spawn(run_loop(
+            config,
+            tx_in,
+            rx_out,
+            sender.shutdown.clone(),
+            sender.socket_mode.clone(),
+            sender.controller_authority.clone(),
+        ));
+        let (register, forwarded) = tokio::time::timeout(Duration::from_secs(4), seen_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let Message::Text(register) = register else {
+            panic!("expected registration");
+        };
+        let Message::Text(forwarded) = forwarded else {
+            panic!("expected v2 frame");
+        };
+        assert_eq!(serde_json::from_str::<Value>(&register).unwrap()["v"], 2);
+        assert_eq!(serde_json::from_str::<Value>(&forwarded).unwrap()["v"], 2);
+        assert_eq!(
+            sender.try_send(RelayOutbound::Message(controller_frame)),
+            Err(RelayTrySendError::ControllerProtocolUnavailable)
+        );
+        let unavailable = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(RelayInbound::Message(text)) = rx_in.recv().await {
+                    let message: Value = serde_json::from_str(&text).unwrap();
+                    if message["code"] == "desktop_controller_unavailable" {
+                        break message;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(unavailable["v"], 2);
+        sender.cancel();
+        let _ = release_tx.send(());
+        worker.await.unwrap();
+        server.await.unwrap();
     }
 
     #[test]
@@ -1024,6 +1435,52 @@ mod tests {
             Err(mpsc::error::TryRecvError::Empty)
         ));
         assert_eq!(sender.byte_budget.available_permits(), 1024);
+    }
+
+    #[test]
+    fn controller_send_codes_distinguish_actual_queue_pressure_from_fatal_errors() {
+        let message = json!({ "payload": "controller-heartbeat" });
+        let (sender, receiver) = outbound_channel(1, 4096, 4096);
+        sender
+            .try_send(RelayOutbound::Message(message.clone()))
+            .unwrap();
+        let full = sender
+            .try_send(RelayOutbound::Message(message.clone()))
+            .unwrap_err();
+        assert_eq!(full, RelayTrySendError::ChannelFull);
+        assert_eq!(full.controller_send_code(), CONTROLLER_SEND_BACKPRESSURE);
+        drop(receiver);
+        let closed = sender
+            .try_send(RelayOutbound::Message(message.clone()))
+            .unwrap_err();
+        assert_eq!(closed, RelayTrySendError::ChannelClosed);
+        assert_ne!(closed.controller_send_code(), CONTROLLER_SEND_BACKPRESSURE);
+
+        let bytes = serde_json::to_string(&message).unwrap().len();
+        let (sender, mut receiver) = outbound_channel(4, bytes * 2 - 1, 4096);
+        sender
+            .try_send(RelayOutbound::Message(message.clone()))
+            .unwrap();
+        let budget = sender
+            .try_send(RelayOutbound::Message(message.clone()))
+            .unwrap_err();
+        assert_eq!(budget, RelayTrySendError::ByteBudgetExhausted);
+        assert_eq!(budget.controller_send_code(), CONTROLLER_SEND_BACKPRESSURE);
+        drop(receiver.try_recv().unwrap());
+        sender.try_send(RelayOutbound::Message(message)).unwrap();
+
+        for fatal in [
+            RelayTrySendError::ControllerAuthorityUnavailable,
+            RelayTrySendError::ControllerProtocolUnavailable,
+            RelayTrySendError::Serialization("fixture".into()),
+            RelayTrySendError::FrameTooLarge { bytes: 2, limit: 1 },
+        ] {
+            assert_ne!(fatal.controller_send_code(), CONTROLLER_SEND_BACKPRESSURE);
+        }
+        assert_eq!(
+            RelayTrySendError::ControllerProtocolUnavailable.controller_send_code(),
+            "desktop_controller_relay_unavailable"
+        );
     }
 
     #[test]
@@ -1169,7 +1626,7 @@ mod tests {
 
     #[test]
     fn inbound_channel_and_text_frames_have_hard_bounds() {
-        let websocket = relay_websocket_config();
+        let websocket = relay_websocket_config(MAX_INBOUND_TEXT_BYTES);
         assert_eq!(websocket.max_message_size, Some(MAX_INBOUND_TEXT_BYTES));
         assert_eq!(websocket.max_frame_size, Some(MAX_INBOUND_TEXT_BYTES));
 

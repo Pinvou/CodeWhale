@@ -1,6 +1,6 @@
 {
   "name": "pinvou3-app",
-  "version": "0.10.10",
+  "version": "0.10.11",
   "description": "品悟智能助手桌面应用",
   "private": true,
   "scripts": {
@@ -148,6 +148,7 @@
     "test:markdown-artifact-ui": "node tests/markdown_artifact_edit_smoke.js",
     "test:browser-smoke": "node ../scripts/run-frontend-smokes.mjs --full",
     "test:webui": "npm run build:web && node ../remote-control-relay/test/web-ui.smoke.cjs",
+    "test:remote-control-ui": "node scripts/remote-control-ui-smoke.mjs",
     "test:user-journey": "../scripts/run-user-journey-tests.sh",
     "sync:version": "node ../scripts/sync-version.mjs",
     "test:markdown": "node tests/markdown_syntax_highlight.test.mjs && node tests/markdown_bridge_fallback_safety.test.mjs",
@@ -175,7 +176,7 @@
     "test:account-platform-entitlement-correction": "node --test tests/account_platform_entitlement_client.test.mjs tests/account_platform_entitlement_correction.test.mjs",
     "test:account-platform-entitlement-correction-ui": "node tests/account_platform_entitlement_production_smoke.mjs",
     "test:account-platform-desktop-reauthentication": "node --test tests/account_platform_desktop_reauthentication.test.mjs tests/account_platform_personal_recharge_reauthentication.test.mjs tests/account_platform_closure_host_transport.test.mjs && node tests/account_platform_desktop_reauthentication_ui_smoke.mjs",
-    "test:account-platform-closure-ui": "node tests/account_platform_closure_ui_smoke.mjs && node tests/account_platform_installed_hosts_ui_smoke.mjs && node tests/account_platform_closure_production_smoke.mjs",
+    "test:account-platform-closure-ui": "node tests/account_platform_closure_ui_smoke.mjs && node tests/account_platform_closure_production_smoke.mjs",
     "test:admin-registration-bonus-ui": "node tests/admin_registration_bonus_ui_smoke.mjs && node tests/admin_registration_bonus_precision_ui_smoke.mjs",
     "test:account-platform-installed-hosts-ui": "node tests/account_platform_installed_hosts_ui_smoke.mjs"
   },
@@ -209,7 +210,9 @@
     "puppeteer-core": "^25.8.0",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.9.3",
-    "vite": "^8.2.2"
+    "vite": "^8.2.2",
+    "ws": "^8.22.0",
+    "yaml": "^2.9.0"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.13",
