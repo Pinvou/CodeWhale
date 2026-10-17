@@ -1214,7 +1214,7 @@
       // chatEventsFeature is initialized further down this file; purge only
       // happens at runtime, so there is no TDZ concern.
       if (id && chatEventsFeature && typeof chatEventsFeature.cancelStreamRenderTimers === "function") {
-        chatEventsFeature.cancelStreamRenderTimers(id);
+        chatEventsFeature.cancelStreamRenderTimers(id, reason);
       }
     },
     runSyncOnSession: runSyncOnSession, persistMessagesFor: persistMessagesFor,
