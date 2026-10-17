@@ -30,7 +30,7 @@
 
 专用依赖初始化失败时不回退，普通循环仍可运行。当前进程在启动时建立专用客户端：修正启动配置或补齐依赖后须受控重启该实例并重新验专用就绪，不能仅凭普通探针恢复判定授权链已恢复。
 
-生产 Compose 要求 previous 的 FILE/SHA256 两变量都显式声明：无重叠期时都设为空字符串，有重叠期时都填入有效值；未设置或半配置均拒绝。模板使用 `${VAR?说明}` 而非带默认值的形式，不能依赖隐式空值启动。
+`deploy/compose/compose.model-token.yaml` 的 previous FILE/SHA256 两变量使用 `${VAR:-}`，未设置与显式空字符串都会渲染为空；两项都为空表示不配置 previous，不会仅因未声明而拒绝启动。重叠期必须成对提供有效文件和独立可信摘要，半配置由运行时拒绝。部署记录应明确保存本次是否启用 previous；不能把默认空值当成已完成旧身份撤权的证据。
 
 公开制品单独只读投递至 `/var/run/public/pinvou/nats-authorization`，不得与 `/var/run/secrets/pinvou/approval-nats` 私密身份目录混用。该目录只允许当前配置的 current-v2 及可选 previous-v1 文件；不得复制整个身份包、放入 seed/credentials、摘要附件或其他文件。撤除 previous 时也必须从该公开投影目录移走旧文件，原保管包仍保留。Compose 使用 `NATS_PUBLIC_AUTHORIZATION_DIRECTORY`；Helm 使用 `approvalRelay.natsPublicArtifactConfigMap`，通过逐文件 `subPath` 挂载提供 regular file，避免整卷 ConfigMap 的符号链接投影被校验器拒绝。Helm 的可信摘要分别来自 runtime Secret 的 `account-approval-relay-nats-current-public-keys-sha256` 与可选 `account-approval-relay-nats-previous-public-keys-sha256`；`approvalRelay.previousV1Enabled` 控制 previous 文件及配置是否成对启用。`subPath` 不自动更新，制品、摘要或 previous 配置变更后必须受控重建实例。
 

@@ -38,20 +38,21 @@ and external KMS/Vault gates pass. The chart validation rejects local secret
 providers, local issuers, disabled NetworkPolicy, and simulator callback URLs.
 It also rejects production without an enabled ExternalSecret, configured TLS
 Secret, and HTTPS public URLs. During key rotation, keep the previous key
-decryptable, update `tokenGateway.secretKeyId`, and wait until every Token
-Gateway readiness probe reports zero old-key ciphertext before disabling the
-previous key. Run `npm --prefix account-platform run
-security:production-readiness` only after the old key is disabled and archive
-its scrubbed JSON evidence with the release record.
+decryptable, update `tokenGateway.secretKeyId`, and wait until every production Token
+Gateway readiness probe succeeds before disabling the previous key. Production
+rotation readiness requires zero old-key ciphertext. After disabling the old key, recheck `/health/ready` on every
+Token Gateway instance and archive the scrubbed per-instance status, observation
+time, and release identity with the release record. These checks do not replace
+the separate external KMS/Vault, payment, and model-provider release evidence.
 Registry names, provider hosts, and CIDRs in the production values file are
 documentation examples; replace every one with the reviewed deployment values
 before rendering a release manifest.
 
 ```sh
-helm lint deploy/helm/account-platform \
-  -f deploy/helm/account-platform/values-production-new.yaml
-helm template pinvou deploy/helm/account-platform \
-  -f deploy/helm/account-platform/values-production-new.yaml > rendered.yaml
+helm lint account-platform/deploy/helm/account-platform \
+  -f account-platform/deploy/helm/account-platform/values-production-new.yaml
+helm template pinvou account-platform/deploy/helm/account-platform \
+  -f account-platform/deploy/helm/account-platform/values-production-new.yaml > rendered.yaml
 ```
 
 Migration hooks run before ordinary chart resources. Before the first install,

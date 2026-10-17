@@ -178,8 +178,11 @@ func (r *PostgresRepository) ExecuteEntitlementComponentCorrection(ctx context.C
 	}
 	now := r.now()
 	plan, err := entitlementCorrectionPlanFrom(ctx, tx, now, packageID, paymentOrderID)
-	if err != nil {
+	if errors.Is(err, ErrConflict) {
 		return EntitlementCorrectionResult{}, ErrApprovalSnapshotMismatch
+	}
+	if err != nil {
+		return EntitlementCorrectionResult{}, err
 	}
 	if !frozen.matches(plan) {
 		return EntitlementCorrectionResult{}, ErrApprovalSnapshotMismatch
@@ -187,12 +190,18 @@ func (r *PostgresRepository) ExecuteEntitlementComponentCorrection(ctx context.C
 	var walletStatus string
 	var walletVersion int64
 	if err := tx.QueryRow(ctx, `SELECT status,version FROM wallets WHERE id=$1 FOR UPDATE`, plan.WalletID).Scan(&walletStatus, &walletVersion); err != nil {
-		return EntitlementCorrectionResult{}, ErrApprovalSnapshotMismatch
+		if errors.Is(err, pgx.ErrNoRows) {
+			return EntitlementCorrectionResult{}, ErrApprovalSnapshotMismatch
+		}
+		return EntitlementCorrectionResult{}, err
 	}
 	var packageStatus string
 	var packageUntil time.Time
 	if err := tx.QueryRow(ctx, `SELECT status,valid_until FROM entitlement_packages WHERE id=$1 FOR UPDATE`, plan.PackageID).Scan(&packageStatus, &packageUntil); err != nil {
-		return EntitlementCorrectionResult{}, ErrApprovalSnapshotMismatch
+		if errors.Is(err, pgx.ErrNoRows) {
+			return EntitlementCorrectionResult{}, ErrApprovalSnapshotMismatch
+		}
+		return EntitlementCorrectionResult{}, err
 	}
 	if walletStatus != "ACTIVE" || walletVersion != plan.WalletVersion || packageStatus != "ACTIVE" || !packageUntil.After(now) {
 		return EntitlementCorrectionResult{}, ErrApprovalSnapshotMismatch
@@ -296,7 +305,10 @@ reserved_microcredits,used_microcredits,active_grant_microcredits,suspended_gran
 status,credited_at,expires_at FROM entitlement_components WHERE id=$1 FOR UPDATE`, plan.SourceComponentID).
 		Scan(&lotID, &original, &available, &reclassified, &reserved, &used, &granted, &suspended, &expired, &revoked, &status, &creditedAt, &expiresAt)
 	if err != nil {
-		return ErrApprovalSnapshotMismatch
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrApprovalSnapshotMismatch
+		}
+		return err
 	}
 	if lotID != plan.SourceLotID || original != plan.SourceOriginal || available != original || reclassified != 0 ||
 		reserved != 0 || used != 0 || granted != 0 || suspended != 0 || expired != 0 || revoked != 0 ||
@@ -305,7 +317,10 @@ status,credited_at,expires_at FROM entitlement_components WHERE id=$1 FOR UPDATE
 	}
 	var lotOriginal, lotRemaining int64
 	if err := tx.QueryRow(ctx, `SELECT original_microcredits,remaining_microcredits FROM credit_lots WHERE id=$1 FOR UPDATE`, plan.SourceLotID).Scan(&lotOriginal, &lotRemaining); err != nil {
-		return ErrApprovalSnapshotMismatch
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrApprovalSnapshotMismatch
+		}
+		return err
 	}
 	if lotOriginal != original || lotRemaining != original {
 		return ErrApprovalSnapshotMismatch
@@ -332,20 +347,38 @@ func verifyEntitlementCorrectionComponents(ctx context.Context, source entitleme
 	var sourceConserved, targetConserved bool
 	if err := source.QueryRow(ctx, `SELECT available_microcredits+reserved_microcredits+used_microcredits+active_grant_microcredits+
 suspended_grant_microcredits+expired_microcredits+revoked_microcredits+reclassified_out_microcredits=original_microcredits
-FROM entitlement_components WHERE id=$1`, sourceComponentID).Scan(&sourceConserved); err != nil || !sourceConserved {
+FROM entitlement_components WHERE id=$1`, sourceComponentID).Scan(&sourceConserved); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrConflict
+		}
+		return err
+	}
+	if !sourceConserved {
 		return ErrConflict
 	}
 	if err := source.QueryRow(ctx, `SELECT available_microcredits+reserved_microcredits+used_microcredits+active_grant_microcredits+
 suspended_grant_microcredits+expired_microcredits+revoked_microcredits+reclassified_out_microcredits=original_microcredits
-FROM entitlement_components WHERE id=$1`, targetComponentID).Scan(&targetConserved); err != nil || !targetConserved {
+FROM entitlement_components WHERE id=$1`, targetComponentID).Scan(&targetConserved); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrConflict
+		}
+		return err
+	}
+	if !targetConserved {
 		return ErrConflict
 	}
 	var effectiveTotal, pointsTotal int64
 	if err := source.QueryRow(ctx, `SELECT COALESCE(sum(original_microcredits-reclassified_out_microcredits),0) FROM entitlement_components WHERE package_id=$1`, packageID).Scan(&effectiveTotal); err != nil {
-		return ErrConflict
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrConflict
+		}
+		return err
 	}
 	if err := source.QueryRow(ctx, `SELECT points_total FROM entitlement_packages WHERE id=$1`, packageID).Scan(&pointsTotal); err != nil {
-		return ErrConflict
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrConflict
+		}
+		return err
 	}
 	if effectiveTotal != pointsTotal {
 		return ErrConflict
@@ -355,7 +388,13 @@ FROM entitlement_components WHERE id=$1`, targetComponentID).Scan(&targetConserv
  EXISTS(SELECT 1 FROM entitlement_components WHERE id=$1 AND package_id=$5 AND credit_lot_id=$2 AND component_type=$6 AND reclassified_out_microcredits=$8)
  AND EXISTS(SELECT 1 FROM entitlement_components WHERE id=$3 AND package_id=$5 AND credit_lot_id=$4 AND component_type=$7 AND reclassified_out_microcredits=0 AND original_microcredits=$8)`,
 		sourceComponentID, sourceLotID, targetComponentID, targetLotID, packageID, sourceType, targetType, amount).
-		Scan(&componentIdentity); err != nil || !componentIdentity {
+		Scan(&componentIdentity); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrConflict
+		}
+		return err
+	}
+	if !componentIdentity {
 		return ErrConflict
 	}
 	return nil
@@ -365,16 +404,34 @@ func verifyEntitlementCorrectionPostings(ctx context.Context, source entitlement
 	var postingCount int
 	var postingTotal int64
 	if err := source.QueryRow(ctx, `SELECT count(*),COALESCE(sum(delta_microcredits),0) FROM ledger_postings WHERE journal_entry_id=$1`, journalID).
-		Scan(&postingCount, &postingTotal); err != nil || postingCount != 2 || postingTotal != 0 {
+		Scan(&postingCount, &postingTotal); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrConflict
+		}
+		return err
+	}
+	if postingCount != 2 || postingTotal != 0 {
 		return ErrConflict
 	}
 	var sourceDelta, targetDelta int64
 	if err := source.QueryRow(ctx, `SELECT delta_microcredits FROM ledger_postings WHERE journal_entry_id=$1 AND credit_lot_id=$2`,
-		journalID, sourceLotID).Scan(&sourceDelta); err != nil || sourceDelta != -amount {
+		journalID, sourceLotID).Scan(&sourceDelta); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrConflict
+		}
+		return err
+	}
+	if sourceDelta != -amount {
 		return ErrConflict
 	}
 	if err := source.QueryRow(ctx, `SELECT delta_microcredits FROM ledger_postings WHERE journal_entry_id=$1 AND credit_lot_id=$2`,
-		journalID, targetLotID).Scan(&targetDelta); err != nil || targetDelta != amount {
+		journalID, targetLotID).Scan(&targetDelta); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrConflict
+		}
+		return err
+	}
+	if targetDelta != amount {
 		return ErrConflict
 	}
 	return nil

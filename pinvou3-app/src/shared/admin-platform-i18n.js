@@ -220,7 +220,6 @@ adminPlatformCopy.zh.operations = {
   "reauthenticationDraftStorageFailed": "无法在当前标签页安全保存草稿，已取消跳转。请允许站点会话存储后重试。",
   "retryReauthentication": "重试并重新登录",
   "unfinishedReauthenticationDraft": "检测到一次未完成再认证留下的策略草稿。确认恢复后再继续编辑，或放弃草稿并使用服务端最新策略。",
-  "recoverDraft": "恢复草稿",
   "discardDraft": "放弃草稿",
   "reauthenticationDraftRecovered": "已恢复未完成再认证的策略草稿。",
   "reauthenticationDraftDiscarded": "已放弃草稿，并恢复服务端最新策略。",
@@ -256,14 +255,10 @@ adminPlatformCopy.en.operations = {
   "saveFailed": "Could not save the registration bonus policy. Check the input and retry.",
   "conflict": "Another administrator updated this policy. Reload and submit again.",
   "recentAuthenticationRequired": "Recent authentication is required. Sign in again and retry.",
-  "reauthenticate": "Sign in again",
   "reauthenticationDraftConflict": "The policy changed during reauthentication. Your draft is preserved but cannot be submitted; load the latest policy and review it first.",
-  "loadLatestPolicy": "Load latest policy",
   "reauthenticationDraftStorageFailed": "The draft could not be stored safely in this tab, so reauthentication was cancelled. Allow session storage and retry.",
   "retryReauthentication": "Retry and sign in again",
   "unfinishedReauthenticationDraft": "A policy draft from an unfinished reauthentication attempt was found. Recover it to continue editing, or discard it and use the latest server policy.",
-  "recoverDraft": "Recover draft",
-  "discardDraft": "Discard draft",
   "reauthenticationDraftRecovered": "The unfinished reauthentication draft was restored.",
   "reauthenticationDraftDiscarded": "The draft was discarded and the latest server policy was restored.",
   "reauthenticationDraftCleanupFailed": "The policy draft could not be confirmed as safely cleared. Submission is blocked to prevent an old draft from becoming active again.",
@@ -318,6 +313,8 @@ adminPlatformCopy.ja.operations = {
   "eligibilityNotReady": "過去の携帯番号資格が準備できるまで特典を有効化できません。上記の阻害理由を確認してください。"
 };
 
+// Preserve the installed management host's domain-specific recovery wording;
+// shared recovery copy supplies unchanged values and the live unknown-result fallback.
 for (const language of ['zh', 'en', 'ja']) adminPlatformCopy[language].operations = { ...registrationBonusRecoveryCopy[language], ...adminPlatformCopy[language].operations };
 // Existing system status and read-only runbook copy from the complete feature.
 adminPlatformCopy.zh.nav.system = "系统与安全";

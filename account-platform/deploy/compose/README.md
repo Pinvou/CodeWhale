@@ -68,6 +68,6 @@ docker compose --env-file account-platform/deploy/compose/.env \
 
 确定性集成烟测使用独立 project：`node scripts/account-platform.mjs test integration`。命令会启动完整栈、验证五个 Readiness、请求/Trace 关联头和 Portal 安全头，然后仅删除该测试 project 的卷。
 
-数据库、Redis、NATS 和服务间网络不对公网开放。`compose.yaml` 是可重复的开发/测试基础拓扑；当前单机环境在它之上叠加 `compose.remote.yaml` 和不入库的站点专用覆盖运行，实际流程见 [`../../docs/deployment.md`](../../docs/deployment.md)。Kubernetes 生产目标仍以 Helm Chart 为准，不能把基础 Compose 文件单独当作高可用生产模板。Payment Simulator 不得承接生产流量。
+数据库、Redis、NATS 和服务间网络不对公网开放。`compose.yaml` 是可重复的开发/测试基础拓扑；单机远程访问使用 `compose.remote.yaml` 及由部署负责人提供的不入库站点专用覆盖；恢复前置、状态核对与操作顺序见 [`../runbooks/full-redeployment.md`](../runbooks/full-redeployment.md)，站点实际配置和操作记录仍须独立取得。Kubernetes 生产目标仍以 Helm Chart 为准，不能把基础 Compose 文件单独当作高可用生产模板。Payment Simulator 不得承接生产流量。
 
 G6 持续验证对以上公开配置执行真实 config/checker，并分别构建三个新增服务制品；只读结构检查不代替现场启停。专属 PG/原 CLI、Chrome、nginx 测试依赖变体与正式缺项见 [发布手册第9节](../runbooks/model-token-release.md#9-g6-持续门禁与环境交接)。

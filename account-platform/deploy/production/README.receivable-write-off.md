@@ -8,6 +8,8 @@ Billing 前向迁移 `900015_receivable_activation_execution_lock` 为 RWO v1/s1
 
 新增 `RECEIVABLE_WRITE_OFF` v1/s1 默认 INACTIVE；只读 precheck 可准备事实，create/update/submit/APPROVE/Begin、proof/执行仍要求实时 ACTIVE。消费集合为 Billing6 + Token3，Token19策略原样；按现有 operator cutover/readback 重新发行严格资源，不自动激活或创建消费者。
 
+新命令加入全局策略集合后，先按现有 Token governance 的 SAFE、quiescence、冻结资源 readback 与签名发行流程，用当前 `PolicySetDigest` 重新签发并核验治理快照；旧集合的 ACTIVE 摘要与收据不能沿用。此步骤不改变 Token handler 集合，也不能由启动或 readiness 自动代替。
+
 平台财务既有治理表单新增应收核销选择。请求人 `platform.billing.repairs.request`，独立审批人 `platform.billing.repairs.approve`；输入目标应收、正 int64 核销金额、原应收版本，固定原因 APPROVED_RECEIVABLE_WRITE_OFF。仅 USAGE_OVERAGE 的未结应收可处理，拒 CHARGEBACK/终态/超额/冻结事实漂移。前端金额与版本保持十进制原精度，typed EDIT 保留原目标、金额和 expected_receivable_version，重新只读获取当前事实。
 
 效果为一个不可变 case、一笔平衡 journal 与 APPROVED_WRITE_OFF allocation；应收及钱包 receivable 投影推进，不改变 posted/reserved/credit lots/权益。结果先行与原审批查询/同键回执恢复继续生效，未知 ACK 不证明零效果。Native 管理入口沿原 Portal 页面，不新增 Native 管理 API。
