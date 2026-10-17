@@ -15,8 +15,8 @@ type organizationRepository interface {
 	ListOrganizations(context.Context, identity.Principal) ([]Organization, error)
 	SetActiveContext(context.Context, identity.Principal, *uuid.UUID, int64) (Context, error)
 	ListUnits(context.Context, identity.Principal, uuid.UUID, *uuid.UUID) (UnitTree, error)
-	ListMembers(context.Context, identity.Principal, uuid.UUID, *uuid.UUID) ([]Member, error)
-	ListQuotaMembers(context.Context, identity.Principal, uuid.UUID) ([]QuotaMember, error)
+	ListMembers(context.Context, identity.Principal, uuid.UUID, *uuid.UUID, MemberListQuery) (MemberPage, error)
+	ListQuotaMembers(context.Context, identity.Principal, uuid.UUID, MemberListQuery) (QuotaMemberPage, error)
 	ListMyRoleBindings(context.Context, identity.Principal) ([]RoleBinding, error)
 	ListOrganizationRoleBindings(context.Context, identity.Principal, uuid.UUID) ([]RoleBinding, error)
 	GrantOrganizationRoleBinding(context.Context, identity.Principal, RoleBindingGrant) (RoleBinding, error)
@@ -79,12 +79,17 @@ func (s *Service) listMembers(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid resource identifier", httpserver.RequestID(r.Context()))
 		return
 	}
-	members, err := repository.ListMembers(r.Context(), mustPrincipal(r.Context()), organizationID, unitID)
+	query, err := memberListRequest(r, "members", organizationID, unitID)
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid member cursor", httpserver.RequestID(r.Context()))
+		return
+	}
+	members, err := repository.ListMembers(r.Context(), mustPrincipal(r.Context()), organizationID, unitID, query)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"items": members})
+	api.WriteJSON(w, http.StatusOK, members)
 }
 
 func (s *Service) listQuotaMembers(w http.ResponseWriter, r *http.Request) {
@@ -97,13 +102,18 @@ func (s *Service) listQuotaMembers(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	members, err := repository.ListQuotaMembers(r.Context(), mustPrincipal(r.Context()), organizationID)
+	query, err := memberListRequest(r, "quota-members", organizationID, nil)
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid member cursor", httpserver.RequestID(r.Context()))
+		return
+	}
+	members, err := repository.ListQuotaMembers(r.Context(), mustPrincipal(r.Context()), organizationID, query)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	api.WriteJSON(w, http.StatusOK, map[string]any{"items": members})
+	api.WriteJSON(w, http.StatusOK, members)
 }
 
 func (s *Service) listMyRoleBindings(w http.ResponseWriter, r *http.Request) {
@@ -453,7 +463,16 @@ func (s *Service) revokeMembership(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	idempotencyKey := organizationUnitIdempotencyKey(r, r.URL.Query().Get("idempotency_key"), "membership-remove:"+organizationID.String()+":"+userID.String())
+	// A new removal is a caller-owned intent. A delayed old-key retry must
+	// never become a second removal after the member was re-added.
+	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if idempotencyKey == "" {
+		idempotencyKey = strings.TrimSpace(r.URL.Query().Get("idempotency_key"))
+	}
+	if !validOrganizationUnitIdempotencyKey(idempotencyKey) {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "an explicit membership removal idempotency key is required", httpserver.RequestID(r.Context()))
+		return
+	}
 	result, err := repository.RevokeMembership(r.Context(), mustPrincipal(r.Context()), organizationID, userID, idempotencyKey)
 	if err != nil {
 		s.writeError(w, r, err)

@@ -100,15 +100,21 @@ func (r *PostgresRepository) reclaimAccountClosedGrantOnce(ctx context.Context, 
 	}
 	defer tx.Rollback(ctx)
 	var storedFingerprint string
+	var storedActorID uuid.UUID
 	var snapshot []byte
-	err = tx.QueryRow(ctx, `SELECT request_fingerprint,response_snapshot FROM account_closed_grant_reclaim_commands WHERE organization_id=$1 AND idempotency_key=$2`, organizationID, idempotencyKey).Scan(&storedFingerprint, &snapshot)
+	err = tx.QueryRow(ctx, `SELECT request_fingerprint,actor_user_id,response_snapshot FROM account_closed_grant_reclaim_commands WHERE organization_id=$1 AND idempotency_key=$2`, organizationID, idempotencyKey).Scan(&storedFingerprint, &storedActorID, &snapshot)
 	if err == nil {
-		if storedFingerprint != fingerprint {
+		// Bind the original actor separately so historical v1 fingerprints remain
+		// replayable by their author without accepting another actor's command.
+		if storedFingerprint != fingerprint || storedActorID != actorID {
 			return AccountClosedGrantReclaim{}, ErrIdempotencyConflict
 		}
 		var result AccountClosedGrantReclaim
 		if json.Unmarshal(snapshot, &result) != nil {
 			return AccountClosedGrantReclaim{}, ErrConflict
+		}
+		if result.SubjectLifecycleVersion != lifecycleVersion {
+			return AccountClosedGrantReclaim{}, ErrIdempotencyConflict
 		}
 		result.Replayed = true
 		return result, tx.Commit(ctx)

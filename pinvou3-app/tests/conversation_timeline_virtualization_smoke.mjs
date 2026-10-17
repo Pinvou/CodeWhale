@@ -71,6 +71,9 @@ try {
   assert.equal(longTimeline.tailUpdated, true, 'the mounted final turn must receive updates');
   assert.ok(longTimeline.topIndexes.includes(0), 'scrolling to the top must mount the first turn');
   assert.ok(longTimeline.middleIndexes.some(index => index > 200 && index < 800), 'middle scrolling must mount middle turns');
+  assert.equal(longTimeline.middleRowUnderViewport, true,
+    `a virtual row must sit at its owned offset under the viewport at a mid-history offset `
+    + `(in-view rows: ${longTimeline.middleRowsInViewport}; dropped positioning classes must fail here)`);
   assert.ok(longTimeline.bottomIndexes.includes(999), 'scrolling to the bottom must mount the final turn');
   assert.ok(Math.abs(longTimeline.bottomDistanceAfterMount) <= 1, `initial bottom drifted by ${longTimeline.bottomDistanceAfterMount}px`);
   assert.ok(Math.abs(longTimeline.measuredGap - 28) <= 1, `virtual row gap was ${longTimeline.measuredGap}px instead of 28px`);
@@ -82,14 +85,46 @@ try {
   assert.ok(Math.abs(longTimeline.topTransformOffset) <= 1, `first row transform missed the header offset by ${longTimeline.topTransformOffset}px`);
   assert.ok(Math.abs(longTimeline.topScrollTop) <= 1, `top scroll position drifted by ${longTimeline.topScrollTop}px`);
 
+  const busyFallbackLiveTail = await page.evaluate(
+    () => window.__PINVOU_TIMELINE_PERFORMANCE__.runBusyFallbackLiveTail(),
+  );
+  assert.equal(busyFallbackLiveTail.liveTailPresent, true,
+    'a busy tail without a terminal must render through the live-tail escape (component busy wiring)');
+  assert.equal(busyFallbackLiveTail.liveTurnOutsideRows, true,
+    'the live tail turn must never render inside a virtual row');
+  assert.equal(busyFallbackLiveTail.releasedTailGone, true,
+    'releasing busy must return the tail to the virtualized history');
+  assert.equal(busyFallbackLiveTail.releasedTurnInRows, true,
+    'the released tail turn must mount as a virtual row');
+
   const completionMigration = await page.evaluate(
     () => window.__PINVOU_TIMELINE_PERFORMANCE__.runCompletionMigration(),
   );
   assert.equal(completionMigration.sameElement, true, 'live tail DOM identity must survive completion');
   assert.equal(completionMigration.statePreserved, true, 'live tail local UI state must survive completion');
   assert.equal(completionMigration.mountPreserved, true, 'live tail React subtree must not remount');
+  // The completing row's first estimate must be seeded with the live tail's
+  // last measured height (the default 240px estimate would read far lower).
+  assert.ok(completionMigration.immediateRowSize >= completionMigration.liveTailHeight - 4,
+    `row estimate was not seeded from the live tail: size ${completionMigration.immediateRowSize}px vs live tail ${completionMigration.liveTailHeight}px`);
   assert.ok(Math.abs(completionMigration.immediateBottomDistance) <= 1, `live tail completion drifted immediately by ${completionMigration.immediateBottomDistance}px`);
   assert.ok(Math.abs(completionMigration.bottomDistance) <= 1, `completed live tail drifted by ${completionMigration.bottomDistance}px`);
+
+  const crossing = await page.evaluate(
+    () => window.__PINVOU_TIMELINE_PERFORMANCE__.runThresholdCrossing(),
+  );
+  assert.equal(crossing.beforeVirtual, false, 'the pre-crossing timeline must be in normal flow');
+  assert.equal(crossing.afterVirtual, true, 'crossing the turn threshold must flip the timeline into virtualization');
+  // The initialOffset handoff removes the deterministic teleport to the top
+  // (a reader at 5000px used to land at 0). What remains is the disclosed
+  // estimate drift from the remount onto 240px row estimates, so pin "same
+  // neighborhood" instead of an exact offset.
+  assert.ok(Math.abs(crossing.immediateScrollTop - crossing.beforeScrollTop) <= 1500,
+    `crossing the threshold teleported a mid-history reader: ${crossing.beforeScrollTop}px -> ${crossing.immediateScrollTop}px`);
+  assert.ok(crossing.settledScrollTop > 0,
+    `crossing the threshold collapsed the position after paint: settled at ${crossing.settledScrollTop}px`);
+  assert.ok(Math.abs(crossing.settledScrollTop - crossing.immediateScrollTop) <= 1500,
+    `crossing the threshold drifted between attach and paint: ${crossing.immediateScrollTop}px -> ${crossing.settledScrollTop}px`);
 
   console.log('conversation timeline virtualization smoke passed', JSON.stringify({ longTimeline, completionMigration }));
 } finally {

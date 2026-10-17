@@ -352,6 +352,7 @@ pub async fn install_update(
     })?
     .inspect_err(|e| log::warn!("[updater] install failed: {e}"))?;
     if exit_after_start {
+        crate::platform::startup::mark_lifecycle_clean_exit("restart");
         app.exit(0);
     }
     Ok(())
@@ -374,7 +375,8 @@ pub async fn commit_pending_update_ready(
     .map_err(|error| format!("更新 ready 提交任务失败: {error}"))?
 }
 
-/// 重启应用使新版本生效（exec 新 inode）。restart 跳过 RunEvent::Exit，
+/// 重启应用使新版本生效（exec 新 inode）。运行时可能随后派发 RunEvent::Exit；
+/// 生命周期回执保留这里先写入的 restart 原因。
 /// Synchronously close the browser host and reap ACP/connector child processes first so
 /// native surfaces and orphan processes do not remain resident.
 pub async fn restart_app(app: AppHandle) -> Result<(), String> {

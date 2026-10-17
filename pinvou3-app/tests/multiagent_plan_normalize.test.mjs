@@ -777,7 +777,7 @@ test('开关 UI 挂在模型列表下方，经 interaction 桥调后端', () => 
   );
   assert.match(
     chatViewSource,
-    /editable=\{!busy && !isMultiAgentReadOnly && item\.id === lastUserId\}/,
+    /editable=\{!busy && !isMultiAgentReadOnly && !item\.remote && item\.id === lastUserId\}/,
     'Web 只读会话不得经"编辑最后一条"绕过发送',
   );
   assert.match(
@@ -816,6 +816,7 @@ test('开关 UI 挂在模型列表下方，经 interaction 桥调后端', () => 
     /restoreTaskDraft\(text, draftOwner\);[\s\S]*return "restored";/,
     '物化中止必须按原草稿或已创建会话恢复，返回 restored 阻止调用方二次恢复（issue #406）',
   );
+  assert.doesNotMatch(materialization, /prefillComposer\(/, '物化中止不得绕过归属校验直接向当前输入框追加');
   const personasBridgeSource = read('src', 'platform', 'tauri', 'bridge', 'personas.js');
   assert.doesNotMatch(
     personasBridgeSource,

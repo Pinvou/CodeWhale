@@ -503,12 +503,3 @@ func requireAccountClosureClaimTx(ctx context.Context, tx pgx.Tx, item AccountCl
 	}
 	return err
 }
-
-func (r *PostgresRepository) RequireAccountClosureClaim(ctx context.Context, item AccountClosureRequest) error {
-	var live bool
-	err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM account_closure_requests WHERE id=$1 AND user_id=$2 AND version=$3 AND lease_until>clock_timestamp() AND status IN ('IN_PROGRESS','RETRY','BLOCKED'))`, item.ID, item.UserID, item.Version).Scan(&live)
-	if err == nil && !live {
-		return ErrConflict
-	}
-	return err
-}

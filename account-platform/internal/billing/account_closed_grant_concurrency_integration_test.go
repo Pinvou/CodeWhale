@@ -5,6 +5,7 @@ package billing
 // provider delivery and the HTTP authentication chain are outside this test.
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -141,6 +142,20 @@ func TestF08ClosedGrantConcurrentReceiptReplayPostgres(t *testing.T) {
 			replayed, err := invoke(r)
 			if err != nil || !replayed || facts() != beforeReplay {
 				t.Fatal("subsequent same-key replay did not preserve all durable effects", err)
+			}
+			if operation == "reclaim" {
+				otherActor := uuid.New()
+				otherContext := humandelegation.WithClaims(jobctx, humandelegation.Claims{DelegationID: uuid.New(), HumanUserID: otherActor, Permission: "org.grants.reclaim_closed", AuthorizationVersion: 1})
+				if _, err := r.ReclaimAccountClosedGrant(otherContext, wallet.OwnerID, grant.ID, otherActor, 2, reason, key); !errors.Is(err, ErrIdempotencyConflict) || facts() != beforeReplay {
+					t.Fatal("another actor reused the immutable reclaim receipt or changed financial facts", err)
+				}
+				if _, err := r.ReclaimAccountClosedGrant(jobctx, wallet.OwnerID, grant.ID, actor, 3, reason, key); !errors.Is(err, ErrIdempotencyConflict) || facts() != beforeReplay {
+					t.Fatal("changed closure lifecycle reused the immutable reclaim receipt or changed financial facts", err)
+				}
+				replayed, err := invoke(r)
+				if err != nil || !replayed || facts() != beforeReplay {
+					t.Fatal("rejected changed facts prevented original actor and lifecycle replay", err)
+				}
 			}
 			var audit, commands int
 			if operation == "isolate" {

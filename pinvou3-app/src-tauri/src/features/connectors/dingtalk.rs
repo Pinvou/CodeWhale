@@ -526,14 +526,13 @@ pub async fn dingtalk_apply_skills() -> Result<Value, String> {
         // (the sync write can block on the cross-process flock, hence
         // inside this spawn_blocking closure; the post-apply consent sync
         // below stays as the fail-visible belt-and-braces leg).
-        crate::features::marketplace::deny_first_register_connector("dingtalk", show)?;
-        if let Err(e) = GATE.apply_skills(show) {
-            // The connected-catch on the card replaces this string with the
-            // skills_enable_failed code, so log the raw cause here (stdout in
-            // dev runs, the app log in packaged builds) or it would be lost.
-            log::warn!("[dingtalk] apply skills failed: {e}");
-            return Err(e);
-        }
+        GATE.apply_with_consent(show).map_err(|e| {
+            e.map_materialization(|e| {
+                // Keep the raw materialization cause when the card replaces it.
+                log::warn!("[dingtalk] apply skills failed: {e}");
+                e
+            })
+        })?;
         Ok(show)
     })
     .await
@@ -561,9 +560,8 @@ pub(crate) fn dingtalk_gate_step() -> Result<bool, String> {
     // Same deny-first boundary as the apply command (#517): the auth-gate
     // refresh also materializes skill files, so a connector flipping
     // visible here registers first; a refusal fails before exposure.
-    crate::features::marketplace::deny_first_register_connector("dingtalk", show)?;
-    GATE.apply_skills(show)
-        .map_err(|e| format!("更新钉钉技能失败: {e}"))?;
+    GATE.apply_with_consent(show)
+        .map_err(|e| e.map_materialization(|e| format!("更新钉钉技能失败: {e}")))?;
     if show {
         crate::features::connectors::skill_gate::refresh_gate_consent_sync("dingtalk", "钉钉")?;
     }

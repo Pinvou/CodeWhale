@@ -222,3 +222,57 @@ test('a dynamic mutation of an actual ordinary production registration fails clo
   assert.equal(production.split(anchor).length, 2);
   assert.throws(() => authorizationRoutes(name, production.replace(anchor, 'protected.POST(runtimePath')), /unrecognized_http_entrypoint:/);
 });
+
+const relaySourceName = 'account-platform/cmd/event-relay/main.go';
+async function actualRelaySources() {
+  return Promise.all(['main.go', 'approval.go'].map(name => readFile(new URL(`../../account-platform/cmd/event-relay/${name}`, import.meta.url), 'utf8')));
+}
+test('actual closed relay source and authenticated actors produce the existing two descriptors', async () => {
+  const [main, approval] = await actualRelaySources();
+  assert.deepEqual(authorizationConsumers(relaySourceName, main, '', approval), [
+    { source: relaySourceName, durable: 'source-bound-outbox-relay', subject: 'account|billing|token.>' },
+    { source: relaySourceName, durable: 'account-approval-relay', subject: 'account.approval-command.authorized.v1' },
+  ]);
+});
+test('relay discovery rejects source, identity, subject, authentication and approval drift', async () => {
+  const [main, approval] = await actualRelaySources();
+  for (const [from, to] of [
+    ['source != "account" && source != "billing"', 'source != "account" && source != "billing" && source != "token"'],
+    ['return errors.New("ACCOUNT_EVENT_SOURCE_REQUIRED")', '_ = source'],
+    ['source = "account"', 'source = "token"'],
+    ['source+"-outbox-relay"', 'source+"-other-relay"'],
+    ['source+"-event-relay"', '"other-event-relay"'],
+    ['source + ".>"', '"account.>"'],
+    ['RequireExplicitAuthentication: true', 'RequireExplicitAuthentication: false'],
+    ['relay.RunOnce(jobContext)', 'relay.RunOnce(context.Background())'],
+    ['if source == "account" {\n\t\tapproval = openApprovalChannel', 'if source == "billing" {\n\t\tapproval = openApprovalChannel'],
+  ]) {
+    assert.ok(main.includes(from), from);
+    assert.throws(() => authorizationConsumers(relaySourceName, main.replace(from, to), '', approval), /unrecognized_event_relay/);
+  }
+  for (const extra of ['func drift() { source = "token" }', 'func drift() { source = "account" }', 'func drift() { broker, _ := events.NewNATSBroker(ctx, url, "other", cfg) }', 'func drift() { _, _ = serviceauth.ContextForJob(ctx, "other", "OUTBOX_RELAY", jobID) }']) {
+    assert.throws(() => authorizationConsumers(relaySourceName, main + '\n' + extra, '', approval), /unrecognized_event_relay/);
+  }
+  for (const [from, to] of [
+    ['"account-approval-relay"', '"other-approval-relay"'],
+    ['RequireExplicitAuthentication: true', 'RequireExplicitAuthentication: false'],
+    ['account.NewApprovalRelayStore', 'other.NewApprovalRelayStore'],
+    ['relay.RunOnce(jobContext)', 'relay.RunOnce(context.Background())'],
+  ]) assert.throws(() => authorizationConsumers(relaySourceName, main, '', approval.replace(from, to)), /unrecognized_event_relay/);
+});
+
+test('closed relay discovery ignores comment and string examples and accepts CRLF', async () => {
+  const [main, approval] = await actualRelaySources();
+  const examples = '\n// source = "token"; RequireExplicitAuthentication: false\n/* source = "token" */\nvar example = `source = "token"`\n';
+  assert.deepEqual(authorizationConsumers(relaySourceName, (main + examples).replace(/\r?\n/g, '\r\n'), '', approval + examples), authorizationConsumers(relaySourceName, main, '', approval));
+});
+
+test('unused relay configurations cannot replace actual broker authentication or relay subjects', async () => {
+  const [main, approval] = await actualRelaySources();
+  const auth = 'RequireExplicitAuthentication: true';
+  const unrelated = '\nvar unusedConfig = events.NATSConfig{RequireExplicitAuthentication: true}\n';
+  assert.throws(() => authorizationConsumers(relaySourceName, main.replace(auth, 'RequireExplicitAuthentication: false') + unrelated, '', approval), /unrecognized_event_relay/);
+  assert.throws(() => authorizationConsumers(relaySourceName, main, '', approval.replace(auth, 'RequireExplicitAuthentication: false') + unrelated), /unrecognized_event_relay/);
+  const changedSubject = main.replace('source + ".>"', '"billing.>"').replace('relay := events.Relay{', 'unusedRelay := events.Relay{AllowedSubjects: []string{source + ".>"}}\n _ = unusedRelay\n relay := events.Relay{');
+  assert.throws(() => authorizationConsumers(relaySourceName, changedSubject, '', approval), /unrecognized_event_relay/);
+});

@@ -63,7 +63,7 @@ export function financialRepairPrecheckBody(commandType, values = {}) {
   for (const field of fields) {
     const value = values[field.key];
     if (!closedValue(value, field.kind)) return { error: 'FINANCIAL_REPAIR_PRECHECK_INVALID', field: field.key };
-    body[field.key] = value;
+    body[field.key] = field.kind === 'uuid' ? value.toLowerCase() : value;
   }
   body.reason_code = financialRepairCommands[commandType].reasonCode;
   return { body };

@@ -2120,7 +2120,11 @@ mod tests {
         )
         .unwrap();
 
-        exec.write("ok.txt", "v2\n");
+        // Keep the ordinary-file change visible to Git on Windows as well.
+        let current_normal_file = "v2 changed\n";
+        assert_ne!(current_normal_file.len(), "v1\n".len());
+        exec.write("ok.txt", current_normal_file);
+        assert_eq!(exec.read("ok.txt").as_deref(), Some(current_normal_file));
         exec.write("my dir/.env", "SECRET=current\n");
         let diff = diff_checkpoint(ledger.path(), exec.path(), "c1-1", true).unwrap();
         assert!(
@@ -2137,6 +2141,7 @@ mod tests {
             "secret section with spaces must not enter the patch: {:?}",
             diff.patch
         );
+        assert!(diff.patch.contains("ok.txt"));
     }
 
     /// A binary file's diff section has no ---/+++ marker lines, so the
@@ -2450,7 +2455,13 @@ mod tests {
 
         // 当前状态：ok.txt 改了，.env 也改了（purge 后不在 index，快照→当前
         // 的原始 diff 会显示 D .env）。
-        exec.write("ok.txt", "v2\n");
+        // This test exercises secret filtering, not Git's stat cache. On
+        // Windows a rapid equal-size replacement can keep the old index blob;
+        // make this ordinary-file change unambiguously visible by size.
+        let current_normal_file = "v2 changed\n";
+        assert_ne!(current_normal_file.len(), "v1\n".len());
+        exec.write("ok.txt", current_normal_file);
+        assert_eq!(exec.read("ok.txt").as_deref(), Some(current_normal_file));
         exec.write(".env", "SECRET=current\n");
         let diff = diff_checkpoint(ledger.path(), exec.path(), "c1-1", true).unwrap();
         assert!(
@@ -2458,7 +2469,37 @@ mod tests {
             "敏感条目不得出现在变更清单: {:?}",
             diff.changes
         );
-        assert!(diff.changes.iter().any(|change| change.path == "ok.txt"));
+        if !diff.changes.iter().any(|change| change.path == "ok.txt") {
+            // Diagnose this ordinary fixture only; never print secret paths or
+            // contents. A disk/index mismatch distinguishes Git stat caching
+            // from a path accidentally removed by the preview filter.
+            let disk = git_ok(
+                &repo,
+                exec.path(),
+                &[
+                    "hash-object",
+                    "--no-filters",
+                    exec.path().join("ok.txt").to_str().unwrap(),
+                ],
+            );
+            let index = git_ok(&repo, exec.path(), &["rev-parse", ":ok.txt"]);
+            let raw = git_ok(
+                &repo,
+                exec.path(),
+                &[
+                    "diff",
+                    "--cached",
+                    "--raw",
+                    "refs/checkpoints/c1-1",
+                    "--",
+                    "ok.txt",
+                ],
+            );
+            let stat = git_ok(&repo, exec.path(), &["ls-files", "--debug", "--", "ok.txt"]);
+            panic!(
+                "ordinary preview fixture missing: disk={disk:?}, index={index:?}, raw={raw:?}, stat={stat:?}"
+            );
+        }
         // The patch renders straight to the CLI: the secret section (path
         // and content) must be stripped wholesale, normal files kept.
         assert!(
@@ -2543,7 +2584,12 @@ mod tests {
             },
         )
         .unwrap();
-        exec.write("ok.txt", "v2\n");
+        // Secret-prefix hardening requires a real ordinary-file diff; avoid
+        // the confirmed equal-size Windows stat-cache fixture ambiguity.
+        let current_normal_file = "v2 changed\n";
+        assert_ne!(current_normal_file.len(), "v1\n".len());
+        exec.write("ok.txt", current_normal_file);
+        assert_eq!(exec.read("ok.txt").as_deref(), Some(current_normal_file));
         exec.write(".env", "SECRET=current\n");
         let diff = diff_checkpoint(ledger.path(), exec.path(), "np-1", true).unwrap();
         assert!(

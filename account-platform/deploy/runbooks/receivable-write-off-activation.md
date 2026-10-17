@@ -8,7 +8,8 @@
 2. 用户/授权人已就该命令的生产激活给出明确授权（书面记录存档，含时间与范围）。
 3. 专属 durable `billing-receivable-write-off-executor-p1-v1` 的受信 cutover 资源绑定已就绪，Billing 使用当前 `RunBillingApprovalConsumers` 注册集合与受信资源装配启动（六个受信收据输入缺项、摘要不符或读取失败仍硬失败关闭），不得添加不存在的逐命令启动开关。
 4. 已验证 Account 侧五入口读取实时 Billing activation：行仍为 `INACTIVE` 时 create/update/submit/APPROVE/Begin 全部失败关闭（`ErrBillingGovernanceInactive`）。
-5. 已完成一致性备份（含 Billing 库）并记录备份 ID、完成时间与 SHA-256；激活窗口内停止写入新审批。
+5. 新命令加入全局策略集合后，先按现有 Token governance 的 SAFE、quiescence、冻结资源 readback 与签名发行流程，用当前 `PolicySetDigest` 重新签发并核验治理快照；旧集合的 ACTIVE 摘要与收据不能沿用。此步骤不改变 Token handler 集合，也不能由启动或 readiness 自动代替。
+6. 已完成一致性备份（含 Billing 库）并记录备份 ID、完成时间与 SHA-256；激活窗口内停止写入新审批。
 
 ## 2. 只读核验（记录输出作为证据）
 

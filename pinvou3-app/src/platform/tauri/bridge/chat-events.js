@@ -60,6 +60,10 @@
     var STREAM_NOTIFY_MAX_WAIT_MS = 32;
     var pendingStreamNotifications = Object.create(null);
     var pendingBillingNotices = Object.create(null);
+    // Keep only deleted scheduled IDs until this bridge instance restarts.
+    // A bare sched-* prefix stays valid for unloaded sessions, but cannot
+    // override a deletion already observed by this notice consumer.
+    var deletedScheduledBillingNoticeSessions = new Set();
 
     function billingNoticeKey(sessionId, generation) {
       return String(sessionId || "") + ":" + String(Number(generation || 0));
@@ -122,13 +126,23 @@
         cancelPendingStreamNotify(sid);
         var didRun = false;
         var wasBackground = sid !== state.activeSessionId;
-        runSyncOnSession(sid, function () {
-          didRun = true;
-          immediateNotify();
-        });
+        // A throwing subscriber must not escape as an unhandled rAF/timer
+        // error (the synchronous first-delta path keeps the dispatch-loop
+        // throw semantics). runSyncOnSession's finally restores the working
+        // set before the error lands here.
+        try {
+          runSyncOnSession(sid, function () {
+            didRun = true;
+            immediateNotify();
+          });
+        } catch (error) {
+          console.error("[chat] coalesced stream notify failed", error);
+        }
         // runSyncOnSession suppresses callbacks while a background working set
         // is installed. Refresh the visible session list after it restores.
-        if (didRun && wasBackground) immediateNotify();
+        if (didRun && wasBackground) {
+          try { immediateNotify(); } catch (error) { console.error("[chat] coalesced stream notify failed", error); }
+        }
       }
       if (typeof window.requestAnimationFrame === "function") {
         pending.frame = window.requestAnimationFrame(publish);
@@ -556,7 +570,13 @@
           flushPendingStreamRender();
           resetPendingAssistant();
         }
-        addChatItem({ type: "user", text: content, time: timeStr() });
+        var userItem = { type: "user", text: content, time: timeStr() };
+        var remoteLogic = window.__PINVOU_REMOTE_CONTROL_STATE__;
+        var controlledIdentity = remoteLogic && remoteLogic.controlledTaskAdmissionIdentity
+          ? remoteLogic.controlledTaskAdmissionIdentity(state.controlledTasks, sid, content)
+          : null;
+        if (controlledIdentity) Object.assign(userItem, controlledIdentity);
+        addChatItem(userItem);
       }
       state.busy = true;
       if (!state.thinking.active) startThinking();
@@ -845,21 +865,36 @@
     if (streamRenderTimers[sid]) return; // a trailing edge is already pending: this delta only accumulates text
     streamRenderTimers[sid] = setTimeout(function () {
       delete streamRenderTimers[sid];
-      let rendered = false;
-      // The timer fires at an event-loop idle point, so it must re-enter the
-      // session's working set before rendering; a terminated stream
-      // (currentStreamId reset) means a terminal path already flushed
-      // synchronously — skip.
-      runSyncOnSession(sid, function () {
-        if (!context.currentStreamId || !context.currentStreamText) return;
-        rendered = renderStreamItemHtml();
-      });
-      if (rendered) notify(); // background sessions are suppressed inside runSyncOnSession; notify once more
+      var rendered = false;
+      // A throwing subscriber must not escape as an unhandled timer error
+      // (same rationale as the coalesced publish guard above).
+      try {
+        // The timer fires at an event-loop idle point, so it must re-enter the
+        // session's working set before rendering; a terminated stream
+        // (currentStreamId reset) means a terminal path already flushed
+        // synchronously — skip.
+        runSyncOnSession(sid, function () {
+          if (!context.currentStreamId || !context.currentStreamText) return;
+          rendered = renderStreamItemHtml();
+        });
+        if (rendered) notify(); // background sessions are suppressed inside runSyncOnSession; notify once more
+      } catch (error) {
+        console.error("[chat] scheduled stream render failed", error);
+      }
     }, STREAM_RENDER_THROTTLE_MS);
   }
 
-  function cancelStreamRenderTimers(purgedSid) {
+  function cancelStreamRenderTimers(purgedSid, reason) {
     cancelPendingStreamNotify(purgedSid);
+    if (purgedSid && reason === "delete" &&
+        typeof isScheduledRunSession === "function" && isScheduledRunSession(purgedSid)) {
+      deletedScheduledBillingNoticeSessions.add(purgedSid);
+    }
+    var billingPrefix = String(purgedSid || "") + ":";
+    // Idle buffer eviction retains the session and its pending turn notice.
+    if (purgedSid && reason === "delete") Object.keys(pendingBillingNotices).forEach(function (key) {
+      if (key.startsWith(billingPrefix)) delete pendingBillingNotices[key];
+    });
     if (purgedSid && streamRenderTimers[purgedSid]) {
       clearTimeout(streamRenderTimers[purgedSid]);
       delete streamRenderTimers[purgedSid];
@@ -1549,7 +1584,12 @@
     var payload = e && e.payload || {};
     var sid = payload.session_id;
     var notice = payload.billing_notice;
-    if (!sid || !notice || notice.code !== "WALLET_INSUFFICIENT" || notice.context_type !== "PERSONAL") return;
+    if (!sid || !notice || notice.code !== "WALLET_INSUFFICIENT" || notice.context_type !== "PERSONAL" ||
+        deletedScheduledBillingNoticeSessions.has(sid)) return;
+    // A late event must not recreate state after the session was purged.
+    if (sid !== state.activeSessionId && !sessionStates[sid] &&
+        !(state.sessions || []).some(function (session) { return session.id === sid; }) &&
+        !(typeof isScheduledRunSession === "function" && isScheduledRunSession(sid))) return;
     pendingBillingNotices[billingNoticeKey(sid, payload.turn_generation)] = notice;
   });
 

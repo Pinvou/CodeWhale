@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -207,6 +211,102 @@ class ValidateCommitRangeTests(unittest.TestCase):
             )
 
             self.assertEqual(validate_commit_msg.validate_range("base", "head"), [])
+
+
+class HistoricalSquashSignoffTests(unittest.TestCase):
+    commit_record = staticmethod(ValidateCommitRangeTests.commit_record)
+    message = "fix: 修复历史提交签署校验\n\nSigned-off-by: z27014 <zhuo.wenpei@h3c.com>"
+
+    def check_record(self, sha: str, *, author=None, message=None, **kwargs):
+        author = author or validate_commit_msg.HISTORICAL_SQUASH_AUTHOR
+        record = self.commit_record(
+            sha, "parent", *author, self.message if message is None else message
+        )
+        with patch.object(validate_commit_msg, "git", return_value=record):
+            return validate_commit_msg.validate_range("base", "head", **kwargs)
+
+    def test_registry_is_bounded_to_19_full_object_ids_with_source_prs(self):
+        registry = validate_commit_msg.HISTORICAL_SQUASH_SIGNOFFS
+        self.assertEqual(len(registry), 19)
+        self.assertEqual(len(set(registry.values())), 19)
+        for sha, pr in registry.items():
+            self.assertRegex(sha, re.compile(r"^[0-9a-f]{40}$"))
+            self.assertIsInstance(pr, int)
+
+    def test_all_registered_objects_still_require_original_signer_and_title(self):
+        for sha in validate_commit_msg.HISTORICAL_SQUASH_SIGNOFFS:
+            with self.subTest(sha=sha):
+                self.assertEqual(self.check_record(sha), [])
+                for message in (
+                    "fix: 修复历史提交签署校验",
+                    self.message.replace("z27014", "wrong-signer"),
+                    self.message.replace("zhuo.wenpei@h3c.com", "other@example.com"),
+                    self.message.replace("修复历史提交签署校验", "english only"),
+                ):
+                    self.assertTrue(self.check_record(sha, message=message))
+                self.assertTrue(self.check_record(
+                    sha, message="fix: 修复历史提交签署校验",
+                    require_matching_signoff=False,
+                ))
+                self.assertTrue(self.check_record(
+                    sha, message=self.message.replace("z27014", "wrong-signer"),
+                    require_matching_signoff=False,
+                ))
+
+    def test_registered_author_anomalies_fail_even_if_self_signed_or_bot(self):
+        for sha in validate_commit_msg.HISTORICAL_SQUASH_SIGNOFFS:
+            for author in (
+                validate_commit_msg.HISTORICAL_SQUASH_SIGNER,
+                ("other", "other@example.com"),
+                ("dependabot[bot]", "49699333+dependabot[bot]@users.noreply.github.com"),
+            ):
+                with self.subTest(sha=sha, author=author):
+                    self.assertTrue(self.check_record(sha, author=author))
+                    self.assertTrue(self.check_record(
+                        sha, author=author,
+                        message=f"fix: 修复历史提交签署校验\n\nSigned-off-by: {author[0]} <{author[1]}>",
+                    ))
+
+    def test_unknown_and_abbreviated_object_ids_do_not_create_identity_alias(self):
+        for sha in validate_commit_msg.HISTORICAL_SQUASH_SIGNOFFS:
+            with self.subTest(sha=sha):
+                self.assertTrue(self.check_record(sha[:12]))
+                self.assertTrue(self.check_record(sha + "0"))
+        self.assertTrue(self.check_record("0" * 40))
+        self.assertEqual(self.check_record(
+            "0" * 40, author=validate_commit_msg.HISTORICAL_SQUASH_SIGNER
+        ), [])
+
+    def test_real_git_recreated_commit_does_not_inherit_historical_exception(self):
+        # A real object ID changes when any message/content/parent changes. No
+        # network or repository history is needed, so this also runs in CI clones.
+        with tempfile.TemporaryDirectory() as directory:
+            env = dict(os.environ, GIT_AUTHOR_NAME="zhuowp",
+                       GIT_AUTHOR_EMAIL="zwp-1989@qq.com",
+                       GIT_COMMITTER_NAME="Fixture", GIT_COMMITTER_EMAIL="fixture@example.com",
+                       GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+
+            def git(*args, input=None):
+                return subprocess.check_output(
+                    ("git", "-C", directory, *args), input=input,
+                    text=True, encoding="utf-8", env=env,
+                ).strip()
+
+            git("init", "--quiet")
+            tree = git("hash-object", "-t", "tree", "--stdin", input="")
+            base = git("commit-tree", tree, input="fixture root")
+            original = git("commit-tree", tree, "-p", base, input=self.message)
+            recreated = git("commit-tree", tree, "-p", base, input=self.message + "\n\n新提交")
+            self.assertNotEqual(original, recreated)
+            with (
+                patch.object(validate_commit_msg, "git", side_effect=git),
+                patch.object(validate_commit_msg, "LEGACY_HISTORY_CUTOFF", base),
+                patch.object(validate_commit_msg, "HISTORICAL_SQUASH_SIGNOFFS", {original: 1829}),
+            ):
+                self.assertEqual(validate_commit_msg.validate_range(base, original), [])
+                errors = validate_commit_msg.validate_range(base, recreated)
+                self.assertEqual(len(errors), 1)
+                self.assertIn("must match commit author", errors[0])
 
 
 class CommitMessageWorkflowTests(unittest.TestCase):

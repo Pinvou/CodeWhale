@@ -8,4 +8,4 @@
 - 场景选择与消息标签分别保存；Tauri、Web 和 Rust 后端使用一致的 `design:ppt` 白名单，旧场景不变。
 - 保留 Official 现有的受控场景曝光、选择与提交统计，遵循已有埋点开关，不新增对话内容采集。
 
-验证入口：`test:pinvou-mode-state`、`test:scene-capabilities`、`test:pinvou-scene-sidecar`、`test:ui-language` 与构建后的 `test:design-mode-entry-smoke`。
+验证入口：`test:pinvou-mode-state`、`test:scene-capabilities`、`test:pinvou-scene-sidecar`、`test:ui-language` 与构建后的 `test:scene-cards-smoke`。
