@@ -91,10 +91,16 @@ export function ConnectionBanner({
     };
   }, [state, probe, heartbeatMs]);
 
-  // "Back online" shows briefly, then clears itself.
+  // "Back online" shows briefly, then clears itself. The dismissal resets
+  // during render when a new restored episode begins (adjust-on-change), so
+  // the effect only owns the timer.
+  const [prevRestored, setPrevRestored] = useState(state.restored);
+  if (prevRestored !== state.restored) {
+    setPrevRestored(state.restored);
+    if (state.restored) setDismissedRestored(false);
+  }
   useEffect(() => {
     if (!state.restored) return;
-    setDismissedRestored(false);
     const id = window.setTimeout(() => dispatch({ type: "restored-seen" }), 4_000);
     return () => window.clearTimeout(id);
   }, [state.restored]);

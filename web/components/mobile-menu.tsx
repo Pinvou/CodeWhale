@@ -137,6 +137,9 @@ export function MobileMenu({
     };
     window.addEventListener("keydown", onKey);
     desktop.addEventListener("change", onDesktop);
+    // Initial sync with the media query: if the sheet mounts while the
+    // viewport is already desktop-width, close it before it locks scroll.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (desktop.matches) closeImmediately();
 
     return () => {
