@@ -9,6 +9,9 @@
     var notify = context.notify;
     var TAURI = context.TAURI;
     var sessionStates = context.sessionStates;
+    var remoteProxyDrafts = context.remoteProxyDrafts;
+    var isKnownRemoteProxy = context.isKnownRemoteProxy || function () { return false; };
+    var isRemoteProxyView = context.isRemoteProxyView || function () { return false; };
     var turnUsageDirty = context.turnUsageDirty;
     var personaPlaceholderTitles = context.personaPlaceholderTitles;
     var renderMarkdown = context.renderMarkdown;
@@ -67,6 +70,16 @@
   function setComposerDraft(value) {
     var text = value == null ? "" : String(value);
     state.composerDraft = text;
+    if (isRemoteProxyView(state.activeSessionId) && remoteProxyDrafts) {
+      if (!remoteProxyDrafts.set(state.activeSessionId, text)) {
+        state.remoteProxyDraftError = state.activeSessionId;
+        notify();
+      } else if (state.remoteProxyDraftError === state.activeSessionId) {
+        state.remoteProxyDraftError = null;
+        notify();
+      }
+      return text;
+    }
     var activeBuffer = state.activeSessionId && sessionStates[state.activeSessionId];
     if (activeBuffer) activeBuffer.composerDraft = text;
     return text;
@@ -106,11 +119,28 @@
     const value = stripMentionBlockForComposerRestore(text);
     if (!sid || !value) return false;
     if (sid === state.activeSessionId) {
+      if (isRemoteProxyView(sid) && remoteProxyDrafts) {
+        const current = remoteProxyDrafts.get(sid);
+        if (!remoteProxyDrafts.set(sid, current ? current + "\n" + value : value)) {
+          state.remoteProxyDraftError = sid;
+          notify();
+          return false;
+        }
+      }
       const current = String(state.composerDraft || "");
       setComposerDraft(current ? current + "\n" + value : value);
       state.draftEpoch = (state.draftEpoch || 0) + 1;
       notify();
       return true;
+    }
+    if (isKnownRemoteProxy(sid) && remoteProxyDrafts) {
+      const current = remoteProxyDrafts.get(sid);
+      const saved = remoteProxyDrafts.set(sid, current ? current + "\n" + value : value);
+      if (!saved) {
+        state.remoteProxyDraftError = sid;
+        notify();
+      }
+      return saved;
     }
     const buffer = sessionStates[sid];
     if (!buffer) return false;
@@ -1180,7 +1210,7 @@
     // Every restore branch settles the submission (un-park + consume a
     // queued dismiss); without it a rejected send would leave the operation
     // parked forever and never adoptable by a retry.
-    if (sid) {
+      if (sid) {
       if (owner.operationId) voice().completeVoiceSubmission(owner.operationId, sid, false);
       // Honor the verdict (upstream round-23 asto minor 1): false means the
       // text landed NOWHERE (evicted or purged buffer) — keep owner.restored

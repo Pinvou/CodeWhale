@@ -853,10 +853,9 @@ pub fn bundle_store_on_connected(id: &str) {
 /// marketplace dependency direction matches the standing boundary (see the
 /// comment in `bundle.rs`).
 pub fn bundle_store_on_disconnected(id: &str) {
-    if let Err(e) = crate::features::marketplace::store::BundleStore::new().mark_degraded(
-        id,
-        crate::features::marketplace::bundle::CLI_DISCONNECTED_DEGRADED_REASON,
-    ) {
+    if let Err(e) =
+        crate::features::marketplace::store::BundleStore::new().mark_cli_disconnected(id)
+    {
         log::warn!("[connectors] bundles.json 镜像写入失败（disconnect {id}）: {e}");
     }
 }

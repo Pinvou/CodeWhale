@@ -658,12 +658,7 @@ pub(crate) mod tests {
     /// `#[cfg(unix)]`).
     #[cfg(test)]
     #[cfg(unix)]
-    pub(crate) fn plant_fifo(path: &std::path::Path) {
-        let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
-        // SAFETY: mkfifo on a fresh temp path; no other thread touches it.
-        let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
-        assert_eq!(rc, 0, "fixture: mkfifo must succeed");
-    }
+    pub(crate) use crate::platform::test_support::plant_fifo;
 
     #[test]
     fn pinvou3_home_respects_env_override() {
@@ -701,11 +696,12 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let ambient = root.join("python.exe");
         std::fs::write(&ambient, b"ambient").unwrap();
+        let bundled = crate::platform::os::windows::bundled_python_path();
         // SAFETY: holding platform::paths::tests::ENV_LOCK; in-process env writes are serialized.
         unsafe { std::env::set_var("PINVOU3_PYTHON", &ambient) };
 
-        assert_eq!(python_command(), ambient.to_string_lossy());
-        assert!(managed_python_command().is_err());
+        let ambient_command = python_command();
+        let managed_command = managed_python_command();
 
         match previous {
             // SAFETY: holding platform::paths::tests::ENV_LOCK; in-process env writes are serialized.
@@ -714,6 +710,17 @@ pub(crate) mod tests {
             None => unsafe { std::env::remove_var("PINVOU3_PYTHON") },
         }
         std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(ambient_command, ambient.to_string_lossy());
+        // A packaged test executable may have a genuine bundled runtime. The
+        // security contract rejects the ambient override, not that runtime.
+        match bundled {
+            Some(path) => {
+                let managed = managed_command.expect("bundled runtime remains usable");
+                assert_eq!(managed, path.to_string_lossy());
+                assert_ne!(managed, ambient.to_string_lossy());
+            }
+            None => assert!(managed_command.is_err()),
+        }
     }
 
     #[test]

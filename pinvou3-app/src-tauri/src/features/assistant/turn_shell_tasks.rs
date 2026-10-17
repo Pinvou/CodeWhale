@@ -1053,6 +1053,37 @@ mod tests {
     use super::*;
     use deepseek_tui::tools::shell::{ShellJobOwner, ShellJobSnapshot, new_shared_shell_manager};
 
+    #[tokio::test]
+    async fn fixed_remote_shell_cancel_rechecks_after_a_successor_starts() {
+        use super::super::{engine::TurnLifecycle, engine_pool::request_turn_shell_cancel};
+        let lifecycle = Arc::new(TurnLifecycle::default());
+        let old = lifecycle.reserve().unwrap();
+        let target = old.generation();
+        assert_eq!(lifecycle.current_turn_generation(), Some(target));
+        // Reproduce the check -> shell request scheduling window. A forwarder
+        // can advance the lifecycle even while the pool's turn gate is held.
+        drop(old);
+        let successor = lifecycle.reserve().unwrap();
+        let tasks = SessionTurnShellTasks::default();
+        let sid = "remote-shell-successor";
+        let registry = tasks.for_session(sid, new_shared_shell_manager(std::env::temp_dir()));
+        let scope = registry
+            .bind_or_prepare_turn("new-local-turn")
+            .await
+            .unwrap();
+        assert!(request_turn_shell_cancel(&tasks, Some(&lifecycle), sid, Some(target)).is_none());
+        assert!(!registry.inner.state.lock().scopes[&scope].cancel_requested);
+        assert!(successor.ensure_active().is_ok());
+        // This generation's own cancellation still captures and marks its
+        // exact real scope; no external command or background job is started.
+        assert!(
+            request_turn_shell_cancel(&tasks, Some(&lifecycle), sid, Some(successor.generation()))
+                .is_some()
+        );
+        assert!(registry.inner.state.lock().scopes[&scope].cancel_requested);
+        registry.finalize_scope(scope, true).await.unwrap();
+    }
+
     fn sleep_command() -> &'static str {
         if std::env::consts::OS == "windows" {
             "Start-Sleep -Seconds 30"

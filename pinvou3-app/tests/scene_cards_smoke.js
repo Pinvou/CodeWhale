@@ -80,7 +80,7 @@ function injectSource() {
     }));
     function invoke(cmd,args){
       switch(cmd){
-        case 'get_settings': return Promise.resolve({theme:'liquid-light',language:'zh-Hans'});
+        case 'get_settings': return Promise.resolve({theme:'liquid-light',color_scheme:'light',language:'zh-Hans'});
         case 'get_platform_capabilities': return Promise.resolve({codexAcpSupported:true});
         case 'get_effective_model_config': return Promise.resolve({model:'qwen36_35b_256k',base_url:'http://127.0.0.1:8000/v1',api_key_set:false});
         case 'list_sessions': return Promise.resolve(SESSIONS);

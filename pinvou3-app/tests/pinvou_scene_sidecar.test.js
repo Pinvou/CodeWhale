@@ -9,6 +9,27 @@ const tauriBridgeSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'pla
 const webBridgeSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'platform', 'web', 'bridge.js'), 'utf8');
 const sessionsRustSource = fs.readFileSync(path.join(__dirname, '..', 'src-tauri', 'src', 'app', 'commands', 'sessions.rs'), 'utf8');
 
+function callbackDependencyList(sourceText, callbackName) {
+  const start = sourceText.indexOf(`const ${callbackName} = useCallback(`);
+  if (start < 0) return null;
+  const tail = sourceText.slice(start);
+  const match = tail.match(/\}, \[([^\]]*)\]\);/);
+  return match ? match[1].split(',').map(value => value.trim()).filter(Boolean) : null;
+}
+
+const dispatchChatMessageDependencies = callbackDependencyList(chatViewSource, 'dispatchChatMessage');
+const requiredDispatchChatMessageDependencies = [
+  'activeSessionId',
+  'dataVisualizationSceneActive',
+  'documentWritingSceneActive',
+  'hasReadyAttachment',
+  'personalWorkbenchSceneActive',
+  'pptDesignSceneActive',
+  'sessionMentionEnabled',
+  't',
+  'visualPosterSceneActive',
+];
+
 // 提取两个 bridge 里真实的 normalizePinvouScene 白名单正则源码，供测试复用，
 // 保证 sidecar 记录路径走的是源码里的白名单，而不是各自 mock 的宽松实现。
 function extractNormalizeSceneRegex(source) {
@@ -265,8 +286,12 @@ function rec(name, pass, detail = '') {
       // injection block is a machine contract, re-prepended onto
       // pinvouPayloadText instead of sandwiching inside scene boilerplate).
       /const scenePrompt = sceneBody \|\| t\.uiChatScenes\.attachmentPrompt;/.test(chatViewSource) &&
-      /\}, \[activeSessionId, dataVisualizationSceneActive, documentWritingSceneActive, hasReadyAttachment, personalWorkbenchSceneActive, pptDesignSceneActive, sessionMentionEnabled, t, visualPosterSceneActive\]\);/.test(chatViewSource),
-    'ChatView sendChatMessage contract');
+      requiredDispatchChatMessageDependencies.every(value => dispatchChatMessageDependencies?.includes(value)),
+    JSON.stringify({
+      contract: 'ChatView sendChatMessage dependencies',
+      actual: dispatchChatMessageDependencies,
+      required: requiredDispatchChatMessageDependencies,
+    }));
 
   rec('scene sidecar 通过 session 后端在 Tauri/Web 间共享并保留本地迁移缓存',
     /get_session_pinvou_scene_events/.test(tauriBridgeSource) &&

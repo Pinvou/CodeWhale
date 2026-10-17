@@ -3300,7 +3300,10 @@ mod tests {
         // known-busy `format!` return must be an unconditional predecessor
         // of the starting-up fallback, and the fallback's guard must test
         // the known set for emptiness.
-        let window = production_source();
+        // Source-level anchors must see the same newlines on Windows and Unix.
+        let window = production_source()
+            .replace("\r\n", "\n")
+            .replace('\r', "\n");
         let start = window
             .find("if acp_busy_unknown {")
             .expect("the unknown-ACP-state arm must exist");

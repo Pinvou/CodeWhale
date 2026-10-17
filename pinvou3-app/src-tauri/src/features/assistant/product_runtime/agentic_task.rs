@@ -1249,10 +1249,17 @@ fn ensure_existing_chat_session(store: &SessionStore, session_id: &str) -> Resul
              headless runs cannot resolve its scope"
         );
     }
-    match store.session_kind(session_id)? {
+    ensure_chat_session_kind(session_id, store.session_kind(session_id)?)
+}
+
+fn ensure_chat_session_kind(session_id: &str, kind: SessionKind) -> Result<()> {
+    match kind {
         SessionKind::Chat => Ok(()),
         SessionKind::ScheduledRun => anyhow::bail!(
             "agent_session_not_chat: session '{session_id}' is a scheduled-run session"
+        ),
+        SessionKind::RemoteProxy => anyhow::bail!(
+            "agent_session_not_chat: session '{session_id}' is a remote-proxy session"
         ),
     }
 }
@@ -2898,6 +2905,25 @@ mod tests {
             .unwrap();
         ensure_existing_chat_session(&store, &chat.metadata.id).unwrap();
 
+        // A's remote proxy must never reach this local Engine entry point.
+        let proxy = store
+            .test_commit_remote_proxy_open(
+                None,
+                &crate::features::sessions::remote_proxy::binding::LiveRemoteContext {
+                    peer_id: "peer-test".into(),
+                    resume_boundary_id: "boundary-test".into(),
+                    connection_id: "connection-test".into(),
+                    controller_lease_id: "lease-test".into(),
+                    lease_epoch: "1".into(),
+                    relay_epoch: "relay-test".into(),
+                    generation: "generation-test".into(),
+                    control_connected: true,
+                    encrypted_channel_connected: true,
+                },
+            )
+            .unwrap();
+        assert!(ensure_existing_chat_session(&store, &proxy.local_session_id).is_err());
+
         // A scheduled-run profile on the same id flips the kind: not chat.
         store.scheduled_profiles.write().insert(
             chat.metadata.id.clone(),
@@ -2941,6 +2967,16 @@ mod tests {
         let error = ensure_existing_chat_session(&store, &chat.metadata.id).unwrap_err();
         assert!(error.to_string().contains("agent_session_unreadable"));
         // `_env` restores the captured PINVOU3_HOME on return or panic.
+    }
+
+    #[test]
+    fn agentic_session_kind_gate_rejects_remote_proxy_authority() {
+        use crate::features::sessions::SessionKind;
+        assert!(super::ensure_chat_session_kind("chat", SessionKind::Chat).is_ok());
+        for kind in [SessionKind::ScheduledRun, SessionKind::RemoteProxy] {
+            let error = super::ensure_chat_session_kind("non-chat", kind).unwrap_err();
+            assert!(error.to_string().contains("agent_session_not_chat"));
+        }
     }
 
     /// A `--mode plan` run that never reaches the turn must leave a
