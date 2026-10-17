@@ -220,12 +220,15 @@ jobs:
 
       # 5) 链式 wrapper(RUSTC_WRAPPER_CHAIN):wrapper 必须先注入 RUST_MIN_STACK、
       #    再把完整原 argv(含首参 rustc)原样交给链上命令执行。链目标是本步
-      #    自编译的探针(rustc 三端都有),打印收到的 argv 与 env 后逐字段断言:
+      #    自编译的探针(rustc 三端都有),每个参数独立成行输出后逐行断言:
       #    探针未被调用 = 委托被删;argv 缺首参或缺参 = 透传被丢;stack 非
-      #    16777216 = 注入失败。`env` 一类无参即打印的命令对前两类变异均不
-      #    敏感,故不再使用。注:本仓 CI 不接 sccache 链的真实原因是仓内没有
-      #    sccache;sccache 客户端本身会把客户端 env 经 env_vars 转发给 server
-      #    派生的编译器(pinvou-agent#269 的生产接线即依赖此),并非不传 env。
+      #    16777216 = 注入失败。round-12 review:旧的 argv=[a b c] 单行 join
+      #    输出对「合并参数」变异不敏感($* 把三个参数折叠成一个也能拼出同
+      #    一行),现改为每参一行 + 参数计数断言,合并/丢参/多参都会转红。
+      #    `env` 一类无参即打印的命令对前两类变异均不敏感,故不再使用。注:
+      #    本仓 CI 不接 sccache 链的真实原因是仓内没有 sccache;sccache 客户
+      #    端本身会把客户端 env 经 env_vars 转发给 server 派生的编译器
+      #    (pinvou-agent#269 的生产接线即依赖此),并非不传 env。
       - name: 链式 wrapper —— 完整 argv 委托链上命令且仍注入 16 MiB
         shell: bash
         run: |
@@ -237,12 +240,17 @@ jobs:
           chmod +x rustc-stack-wrapper 2>/dev/null || true
           unset RUST_MIN_STACK
           # 探针:把「委托语义」变成逐字段可比对的输出——链命令被调用、
-          # 完整 argv(含首参 rustc)透传、RUST_MIN_STACK 注入,缺一即断言失败。
+          # 完整 argv(含首参 rustc)按参数逐行透传、RUST_MIN_STACK 注入,
+          # 缺一即断言失败;参数计数行额外钉住「不多不少恰好三个」。
           cat > chain-probe.rs <<'EOF'
           fn main() {
               let args: Vec<String> = std::env::args().skip(1).collect();
               let stack = std::env::var("RUST_MIN_STACK").unwrap_or_else(|_| "unset".into());
-              println!("chain_probe argv=[{}] stack=[{}]", args.join(" "), stack);
+              println!("chain_probe_stack=[{}]", stack);
+              println!("chain_probe_argc={}", args.len());
+              for arg in &args {
+                  println!("chain_probe_arg=[{}]", arg);
+              }
           }
           EOF
           rustc -O chain-probe.rs -o chain-probe.exe
@@ -254,6 +262,11 @@ jobs:
             wrapper="./rustc-stack-wrapper"
           fi
           # cargo 调用约定:wrapper 收到 [rustc, --version, --verbose],必须把
-          # 三者原样交给链上命令;命令替换收集输出,grep -Fqx 整行精确比对。
+          # 三者作为三个独立 argv 元素原样交给链上命令;命令替换收集输出,
+          # grep -Fqx 整行精确比对(合并参数只剩一行、argc=1,均转红)。
           out="$(RUSTC_WRAPPER_CHAIN="$PWD/chain-probe.exe" "$wrapper" rustc --version --verbose)"
-          printf '%s\n' "$out" | grep -Fqx 'chain_probe argv=[rustc --version --verbose] stack=[16777216]'
+          printf '%s\n' "$out" | grep -Fqx 'chain_probe_stack=[16777216]'
+          printf '%s\n' "$out" | grep -Fqx 'chain_probe_argc=3'
+          printf '%s\n' "$out" | grep -Fqx 'chain_probe_arg=[rustc]'
+          printf '%s\n' "$out" | grep -Fqx 'chain_probe_arg=[--version]'
+          printf '%s\n' "$out" | grep -Fqx 'chain_probe_arg=[--verbose]'
