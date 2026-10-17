@@ -119,6 +119,17 @@ test("team relay changes select its action smoke", () => {
   );
 });
 
+test("unknown frontend features fail closed to the full browser suite", () => {
+  assert.deepEqual(
+    labels(selectFrontendSmokes(["pinvou3-app/src/features/search/SearchView.jsx"])),
+    fullLabels,
+  );
+});
+
+test("an empty or unrelated diff fails closed", () => {
+  assert.deepEqual(labels(selectFrontendSmokes(["docs/ci.md"])), fullLabels);
+});
+
 test("organization and member unit browsers run for feature and shared changes", () => {
   for (const target of ["test:account-platform-organization-ui", "test:account-platform-member-units-ui"]) {
     assert.ok(fullLabels.includes(`npm:${target}`));
