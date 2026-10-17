@@ -15,15 +15,17 @@ Two failure classes are pinned here:
    hosts serialize lowercase in practice, but nothing forces it.
 
 2. Missing or wrong `libc` fields on the @img/* platform packages in
-   team-relay-hub/package-lock.json — npm 10's arborist does not serialize
-   `libc` (pkgMetaKeys gained the key only in npm 11), so a single local
-   `npm install` on node 22 silently strips the filtering fields; without
-   them every Linux environment installs BOTH the glibc and the musl
-   native binaries. The exact pkg→libc mapping is pinned (round-6 review:
-   a bare count survives a glibc/musl value swap, which installs the
-   wrong-ABI binary), so both the strip and the swap turn red here instead
-   of being discovered as install-bloat or odd crashes later. If the @img
-   platform set legitimately changes, update EXPECTED_TEAM_RELAY_HUB_LIBC.
+   team-relay-hub/package-lock.json — npm's arborist did not serialize
+   `libc` before npm 11.11.0 (the serializer fix landed there; every
+   npm 11.0–11.10 still strips the fields, so "npm 11+" is NOT enough —
+   round-12 review), so a single local `npm install` on node 22 with an
+   in-range npm silently strips the filtering fields; without them every
+   Linux environment installs BOTH the glibc and the musl native
+   binaries. The exact pkg→libc mapping is pinned (round-6 review: a bare
+   count survives a glibc/musl value swap, which installs the wrong-ABI
+   binary), so both the strip and the swap turn red here instead of being
+   discovered as install-bloat or odd crashes later. If the @img platform
+   set legitimately changes, update EXPECTED_TEAM_RELAY_HUB_LIBC.
 
 3. Lockfile format downgrades — the mirror scan walks the v3 `packages`
    map; a lock rewritten at lockfileVersion != 3 (an npm-old regen) would
@@ -68,14 +70,22 @@ EXPECTED_TEAM_RELAY_HUB_LIBC = {
 
 # Registry mirror hosts banned from `resolved` URLs. npm copies the
 # registry a lock was generated against verbatim, so any of these means a
-# contributor-side mirror config crept back into the committed lock.
+# contributor-side mirror config crept back into the committed lock. The
+# bare `npmmirror.com` marker (round-12 review) also covers the non-host
+# tarball form `https://npmmirror.com/mirrors/...` that some tools write;
+# the aliyun/ustc/163/tuna entries close the same class for the other
+# common CN mirrors.
 MIRROR_HOST_MARKERS = (
-    "registry.npmmirror.com",
+    "npmmirror.com",
     "npm.taobao.org",  # legacy taobao mirror (redirects to npmmirror)
     "mirrors.cloud.tencent.com",
     "mirrors.tencent.com",
     "mirrors.huaweicloud.com",
     "registry.cnpmjs.org",
+    "mirrors.aliyun.com",
+    "mirrors.ustc.edu.cn",
+    "mirrors.163.com",
+    "mirrors.tuna.tsinghua.edu.cn",
 )
 
 
@@ -123,7 +133,8 @@ def main():
         if mirror_urls:
             failures.append(
                 f"{rel}: {len(mirror_urls)} resolved URLs point at a "
-                f"registry mirror (must be registry.npmjs.org):\n  "
+                f"registry mirror (locks must resolve against the official "
+                f"registry, registry.npmjs.org):\n  "
                 + "\n  ".join(mirror_urls)
             )
         if rel == os.path.join("team-relay-hub", "package-lock.json"):
@@ -144,8 +155,9 @@ def main():
         for pkg in sorted(set(expected) - set(hub_libc)):
             failures.append(
                 f"team-relay-hub/package-lock.json: @img/* libc field stripped: "
-                f"{pkg} is missing (npm 10 arborist does not serialize libc — "
-                f"regenerate with npm 11+ or restore the fields)"
+                f"{pkg} is missing (npm arborist below 11.11.0 does not "
+                f"serialize libc — regenerate with npm >= 11.11 or restore "
+                f"the fields)"
             )
         for pkg in sorted(set(hub_libc) - set(expected)):
             failures.append(
