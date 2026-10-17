@@ -367,8 +367,11 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: remote-control-relay/package-lock.json
+          # No npm cache, same file-wide release contract as the jobs below:
+          # setup-node cannot be told not to save, so a restore-only entry
+          # still re-mints a main-scope single-lockfile entry on this rare
+          # job (see the job-level rationale below).
+
 
       - name: 安装 Relay 发布门禁依赖
         if: env.PINVOU_DESKTOP_CONTROLLER_ENABLED == '1'
