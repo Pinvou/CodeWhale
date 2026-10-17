@@ -1891,7 +1891,9 @@ impl Engine {
         // generated-ID new-session path), so never carry the
         // previous conversation's toolbox across this edge —
         // including a parked eviction note whose batch never
-        // recorded a result.
+        // recorded a result. The note clear is redundant with
+        // the turn-entry sweep and is kept so no future
+        // non-turn reader inherits cross-conversation state.
         self.session.tool_activation_cache.clear();
         self.session.pending_toolbox_eviction_notes.clear();
         let plugin_workspace_changed = self.plugin_registry.workspace() != workspace.as_path();
