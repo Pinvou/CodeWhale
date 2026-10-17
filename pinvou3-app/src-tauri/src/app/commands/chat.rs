@@ -344,7 +344,7 @@ pub(crate) async fn chat_with_reservation(
         // refs-only turn persists an EMPTY label by intent (round-16 m2): the
         // rewind UI keys off checkpoint counts, and an empty label beats
         // leaking the contract header.
-        let label = super::sessions::strip_session_mention_block(&display_content)
+        let checkpoint_label = super::sessions::strip_session_mention_block(&display_content)
             .trim()
             .to_string();
         let snapshot = tauri::async_runtime::spawn_blocking(move || {
@@ -371,7 +371,7 @@ pub(crate) async fn chat_with_reservation(
                 &checkpoint_execution,
                 turn_number,
                 crate::features::code_checkpoints::CheckpointKind::Turn,
-                &label,
+                &checkpoint_label,
             )
             .map(Some)
         })
