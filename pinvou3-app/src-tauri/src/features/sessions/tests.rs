@@ -8,7 +8,7 @@
 
 use super::*;
 use crate::platform::paths;
-use crate::platform::paths::tests::ENV_LOCK;
+use crate::platform::paths::tests::{ENV_LOCK, EnvVarGuard};
 use crate::platform::prefs::{BUILTIN_ACCOUNT_PLATFORM_MODEL_ID, ModelSelectionRef, UserPrefs};
 use anyhow::Result;
 use chrono::Utc;
@@ -30,6 +30,10 @@ use super::validators::generate_session_id;
 /// the guard; the lock is released only when the guard drops.
 fn isolated_store() -> (SessionStore, std::sync::MutexGuard<'static, ()>) {
     let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    (boot_isolated_store_locked(), guard)
+}
+
+fn boot_isolated_store_locked() -> SessionStore {
     // pid + in-process counter: paths::tests::ENV_LOCK doc warns nanos-only
     // names can collide across two concurrent cargo test processes (the
     // lock only serializes in-process) — a collision shares the dir, and
@@ -44,7 +48,59 @@ fn isolated_store() -> (SessionStore, std::sync::MutexGuard<'static, ()>) {
     let store = SessionStore::boot_with_scheduled_root(tmp.join("scheduled")).expect("boot");
     // Note: no remove_var — the lock has not dropped yet, and the assertions
     // below need PINVOU3_HOME to still be this value.
-    (store, guard)
+    store
+}
+
+/// A synchronous test scope: restore HOME after dropping the store and before
+/// releasing ENV_LOCK. The historical isolated_store contract stays unchanged.
+pub(crate) fn with_isolated_store_restoring_home<R>(action: impl FnOnce(&SessionStore) -> R) -> R {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    with_isolated_store_restoring_home_locked(&guard, action)
+}
+
+fn with_isolated_store_restoring_home_locked<R>(
+    _guard: &std::sync::MutexGuard<'static, ()>,
+    action: impl FnOnce(&SessionStore) -> R,
+) -> R {
+    let previous = std::env::var_os("PINVOU3_HOME");
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _home = EnvVarGuard::capture(&["PINVOU3_HOME"]);
+        let store = boot_isolated_store_locked();
+        action(&store)
+    }));
+    // Both normal and unwinding exits restore the exact Option<OsString>
+    // while the caller still holds the same process-level environment lock.
+    assert_eq!(std::env::var_os("PINVOU3_HOME"), previous);
+    match outcome {
+        Ok(value) => value,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+#[test]
+fn isolated_store_scope_restores_existing_and_absent_home_on_success_and_panic() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _outer = EnvVarGuard::capture(&["PINVOU3_HOME"]);
+    let owned_home = tempfile::tempdir().unwrap();
+    for initial in [None, Some(owned_home.path().as_os_str().to_owned())] {
+        // SAFETY: ENV_LOCK is held until the outer restore guard has dropped.
+        match &initial {
+            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+        }
+        for panic in [false, true] {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                with_isolated_store_restoring_home_locked(&guard, |store| {
+                    assert_eq!(store.manager.sessions_dir(), paths::sessions_root());
+                    if panic {
+                        std::panic::panic_any("owned-test-scope-unwind");
+                    }
+                });
+            }));
+            assert_eq!(result.is_err(), panic);
+            assert_eq!(std::env::var_os("PINVOU3_HOME"), initial);
+        }
+    }
 }
 
 fn record_session_deletions(store: &SessionStore) -> Arc<std::sync::Mutex<Vec<String>>> {
@@ -1171,6 +1227,71 @@ fn create_empty_with_id_carries_the_localizable_new_chat_placeholder() {
             .title,
         super::store::NEW_CHAT_TITLE,
         "the persisted record is what the GUI list renders"
+    );
+}
+
+#[test]
+fn queued_engine_snapshot_checks_retirement_under_the_mutation_gate() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _restore = paths::tests::EnvVarGuard::capture(&["PINVOU3_HOME"]);
+    let tmp = tempfile::tempdir().unwrap();
+    // SAFETY: ENV_LOCK serializes test environment changes.
+    unsafe { std::env::set_var("PINVOU3_HOME", tmp.path()) };
+    let store = SessionStore::boot_with_scheduled_root(tmp.path().join("scheduled")).unwrap();
+    let session = store
+        .create_new("/model".into(), None, tmp.path().into())
+        .unwrap();
+    let messages = vec![
+        user_text("first task"),
+        assistant_text("answer"),
+        user_text("next task"),
+    ];
+    store
+        .update_messages(&session.metadata.id, messages.clone())
+        .unwrap();
+    let active = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let mutation = store.scheduled_mutation.lock();
+    let worker_store = store.clone();
+    let worker_active = active.clone();
+    let id = session.metadata.id.clone();
+    let state = ChatEngineState {
+        messages: messages[..2].to_vec(),
+        system_prompt: None,
+        model: "/model".into(),
+        workspace: tmp.path().into(),
+    };
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (admit_tx, admit_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        worker_store.persist_chat_engine_state_with_commit(
+            &id,
+            &state,
+            || {
+                admit_tx.send(()).unwrap();
+                worker_active.load(std::sync::atomic::Ordering::Acquire)
+            },
+            |_| panic!("retired writer notified"),
+        )
+    });
+    started_rx.recv().unwrap();
+    assert!(
+        matches!(
+            admit_rx.recv_timeout(std::time::Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ),
+        "writer admission must wait for the mutation gate"
+    );
+    active.store(false, std::sync::atomic::Ordering::Release);
+    drop(mutation);
+    admit_rx.recv().unwrap();
+    assert!(worker.join().unwrap().unwrap().is_none());
+    assert_eq!(
+        store
+            .load_for_engine_spawn(&session.metadata.id)
+            .unwrap()
+            .messages,
+        messages
     );
 }
 

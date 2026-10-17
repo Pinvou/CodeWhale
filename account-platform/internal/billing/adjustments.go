@@ -37,7 +37,14 @@ func (r *PostgresRepository) requestAdjustment(ctx context.Context, walletID uui
 			return ManualAdjustment{}, err
 		}
 	}
-	wallet, err := getWallet(ctx, r.pool, walletID, false)
+	// Creation of a pending adjustment must serialize with terminal wallet
+	// transitions; a status read followed by an autocommit insert can miss deletion.
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return ManualAdjustment{}, err
+	}
+	defer tx.Rollback(ctx)
+	wallet, err := getWallet(ctx, tx, walletID, true)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ManualAdjustment{}, ErrNotFound
 	}
@@ -46,6 +53,11 @@ func (r *PostgresRepository) requestAdjustment(ctx context.Context, walletID uui
 	}
 	if wallet.Status != "ACTIVE" {
 		return ManualAdjustment{}, ErrWalletUnavailable
+	}
+	if wallet.OwnerType == "ORG_UNIT" {
+		if err := rejectDeletedUnitWalletWrite(ctx, tx, wallet.OwnerID); err != nil {
+			return ManualAdjustment{}, err
+		}
 	}
 	now := r.now()
 	adjustment := ManualAdjustment{
@@ -62,18 +74,18 @@ func (r *PostgresRepository) requestAdjustment(ctx context.Context, walletID uui
 	if idempotencyKey != "" {
 		adjustment.RequestIdempotencyKey = &idempotencyKey
 	}
-	command, err := r.pool.Exec(ctx, `INSERT INTO manual_adjustments(id,wallet_id,amount_microcredits,reason,requested_by,status,request_idempotency_key,created_at,updated_at) VALUES($1,$2,$3,$4,$5,'PENDING_APPROVAL',NULLIF($6,''),$7,$7) ON CONFLICT (requested_by,request_idempotency_key) WHERE request_idempotency_key IS NOT NULL DO NOTHING`, adjustment.ID, walletID, amount, reason, requestedBy, idempotencyKey, now)
+	command, err := tx.Exec(ctx, `INSERT INTO manual_adjustments(id,wallet_id,amount_microcredits,reason,requested_by,status,request_idempotency_key,created_at,updated_at) VALUES($1,$2,$3,$4,$5,'PENDING_APPROVAL',NULLIF($6,''),$7,$7) ON CONFLICT (requested_by,request_idempotency_key) WHERE request_idempotency_key IS NOT NULL DO NOTHING`, adjustment.ID, walletID, amount, reason, requestedBy, idempotencyKey, now)
 	if err != nil {
 		return ManualAdjustment{}, err
 	}
 	if command.RowsAffected() == 1 {
-		return adjustment, nil
+		return adjustment, tx.Commit(ctx)
 	}
-	existing, err := getAdjustmentByRequestKey(ctx, r.pool, requestedBy, idempotencyKey)
+	existing, err := getAdjustmentByRequestKey(ctx, tx, requestedBy, idempotencyKey)
 	if err != nil || existing.WalletID != walletID || existing.AmountMicrocredits != amount || existing.Reason != reason {
 		return ManualAdjustment{}, ErrConflict
 	}
-	return existing, nil
+	return existing, tx.Commit(ctx)
 }
 
 func (r *PostgresRepository) ExecuteApprovedAdjustment(ctx context.Context, adjustmentID, approvalRequestID uuid.UUID, executionIdempotencyKey string, approvedBy uuid.UUID, decisionReason string) (ManualAdjustment, error) {
@@ -106,6 +118,11 @@ func (r *PostgresRepository) ExecuteApprovedAdjustment(ctx context.Context, adju
 	}
 	if wallet.Status != "ACTIVE" {
 		return ManualAdjustment{}, ErrWalletUnavailable
+	}
+	if wallet.OwnerType == "ORG_UNIT" {
+		if err := rejectDeletedUnitWalletWrite(ctx, tx, wallet.OwnerID); err != nil {
+			return ManualAdjustment{}, err
+		}
 	}
 	now := r.now()
 	entryID := uuid.Must(uuid.NewV7())

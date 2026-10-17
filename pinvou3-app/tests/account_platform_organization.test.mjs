@@ -21,8 +21,8 @@ test('installed membership states include suspended members and reject non-domai
  for(const status of ['ACTIVE','SUSPENDED','REVOKED']) {
   const admin=new OrganizationAdminClient({request:async()=>({items:[{...member,status}],next_cursor:null})});
   assert.equal((await admin.members(org)).items[0].status,status);
-  const client=new OrganizationClient({request:async()=>({items:[{...member,status}]})});
-  assert.equal((await client.members(org))[0].status,status);
+  const client=new OrganizationClient({request:async()=>({items:[{...member,status}],next_cursor:null})});
+  assert.equal((await client.members(org)).items[0].status,status);
  }
  for(const status of ['DISABLED','UNKNOWN','__proto__',null]) {
   const admin=new OrganizationAdminClient({request:async()=>({items:[{...member,status}],next_cursor:null})});
@@ -120,4 +120,38 @@ test('organization operation copy fulfills every finance hook error state in all
   assert.notEqual(copy.invitationUnknown, copy.contextUnknown);
   assert.notEqual(copy.invitationUnavailable, copy.invitationAcceptedRefreshUnknown);
  }
+});
+
+
+test('member page clients preserve opaque cursor, unit filter and cancellation signal', async()=>{
+ const requests=[],controller=new AbortController(),unit='44444444-4444-4444-8444-444444444444';
+ const member={membership_id:unit,user_id:user,version:1,status:'ACTIVE',roles:['MEMBER'],unit_ids:[]};
+ const client=new OrganizationClient({request:async(area,path,options)=>{requests.push({area,path,options});return {items:[member],next_cursor:'next+/opaque='};}});
+ const page=await client.members(org,{unit_id:unit,limit:2,cursor:'previous+/opaque='},controller.signal);
+ assert.equal(page.items[0].user_id,user);assert.equal(page.next_cursor,'next+/opaque=');
+ const query=new URL(requests[0].path,'https://fixture.invalid').searchParams;
+ assert.equal(query.get('unit_id'),unit);assert.equal(query.get('limit'),'2');assert.equal(query.get('cursor'),'previous+/opaque=');assert.equal(requests[0].options.signal,controller.signal);
+});
+test('quota member pages retain next cursor and reject missing or malformed pagination facts',async()=>{
+ const requests=[];const client=new OrganizationClient({request:async(area,path)=>{requests.push(path);return {items:[{user_id:user,version:1}],next_cursor:'quota-next'};}});
+ assert.equal((await client.quotaMembers(org,{limit:2,cursor:'quota-first'})).next_cursor,'quota-next');
+ assert.equal(new URL(requests[0],'https://fixture.invalid').searchParams.get('cursor'),'quota-first');
+ for(const next of [undefined,'',1,{}]) {client.client.request=async()=>({items:[],...(next===undefined?{}:{next_cursor:next})});await assert.rejects(client.quotaMembers(org),/INVALID_ORGANIZATION_ACK/);}
+});
+test('a valid mixed 207 UNKNOWN is not a completed batch and preserves duplicate item indices',async()=>{
+ const duplicate={items:[facts.items[0],facts.items[0]]};
+ const client=new OrganizationClient({request:async()=>({items:[{index:0,status:'SUCCEEDED',grant},{index:1,status:'UNKNOWN',code:'MEMBER_QUOTA_ALLOCATION_UNKNOWN'}]})});
+ await assert.rejects(client.allocate(org,duplicate,'same-whole-batch-key'),error=>error.code==='COMMAND_RESULT_UNKNOWN'&&error.financeRequestState==='WRITE_OBSERVED');
+});
+
+
+test('member pagination works when Object.hasOwn is unavailable without installing a shim',async()=>{
+ const saved=Object.getOwnPropertyDescriptor(Object,'hasOwn');
+ try {
+  Object.defineProperty(Object,'hasOwn',{configurable:true,writable:true,value:undefined});
+  const client=new OrganizationClient({request:async()=>({items:[],next_cursor:null})});
+  assert.deepEqual((await client.members(org)).items,[]);
+  assert.deepEqual((await client.quotaMembers(org)).items,[]);
+  assert.equal(Object.hasOwn,undefined,'production must not install a replacement global API');
+ } finally {Object.defineProperty(Object,'hasOwn',saved);}
 });

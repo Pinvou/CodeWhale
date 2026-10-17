@@ -16,7 +16,10 @@
 
   // 抹平裸 <script>/<style>/<iframe> 等危险标签：在 marked.parse 【之后】做替换而非之前，
   // 只命中正文裸写的 HTML，不会双重转义代码块里已被转义的 `<script>` 字面量。
-  var DANGEROUS_TAGS_RE = /<(\/?(?:script|style|iframe|object|embed|link|meta)\b[^>]*)>/gi;
+  // /u 与 shared/markdown-renderer.js 的单一来源对齐（ſ U+017F 等字符仅在
+  // unicode 模式下参与大小写折叠）；本文件无法 import ESM（plain script），
+  // 只保留行为对齐，改动此正则须与渲染器单一来源同步。
+  var DANGEROUS_TAGS_RE = /<(\/?(?:script|style|iframe|object|embed|link|meta)\b[^>]*)>/giu;
 
   function neutralizeRawDangerousTags(html) {
     return html.replace(DANGEROUS_TAGS_RE, function (_, inner) { return "&lt;" + inner + "&gt;"; });

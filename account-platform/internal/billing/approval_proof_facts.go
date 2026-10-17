@@ -247,10 +247,6 @@ func currentBillingProofInput(ctx context.Context, repository billingProofFacts,
 	return current, "", ownerState, nil
 }
 
-func (r *PostgresRepository) entitlementCorrectionPlan(ctx context.Context, packageID, orderID uuid.UUID) (entitlementCorrectionReadPlan, error) {
-	return r.planEntitlementComponentCorrection(ctx, packageID, orderID)
-}
-
 func (r *PostgresRepository) ledgerRepairPlan(ctx context.Context, input LedgerRepairCommandInput) (LedgerRepairPlan, error) {
 	snapshot, err := r.ApprovalCommandActivations(ctx)
 	if err != nil {

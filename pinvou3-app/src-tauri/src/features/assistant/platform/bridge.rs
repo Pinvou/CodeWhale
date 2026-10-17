@@ -123,19 +123,13 @@ fn configure_provider(
 }
 
 fn is_official_deepseek_base_url(base_url: &str) -> bool {
-    let normalized = base_url
-        .trim()
-        .trim_end_matches('/')
-        .trim_end_matches("/beta")
-        .trim_end_matches("/v1")
-        .to_ascii_lowercase();
     // api.deepseeki.com used to be in this list; removed on 2026-09-11: the
     // official documentation never listed the domain, and the community
     // reported it as a non-resolvable unofficial domain
     // (deepseek-ai/awesome-deepseek-agent#311),
     // so it must not trigger the official DeepSeek provider/model-name
     // rewriting.
-    matches!(normalized.as_str(), "https://api.deepseek.com")
+    crate::core::model_wire::is_official_deepseek_base_url(base_url)
 }
 
 /// Official-OpenAI endpoint check for the Responses remap. The remap must not
@@ -143,18 +137,13 @@ fn is_official_deepseek_base_url(base_url: &str) -> bool {
 /// record pointed at an aggregator or private host: those keep the Chat wire
 /// today, and a strictly-Responses-only feature set is exactly what the
 /// `openai_responses` preset group is the explicit opt-in for.
+#[cfg(test)]
 fn is_official_openai_base_url(base_url: &str) -> bool {
     // Lowercase before stripping the `/v1` suffix: the strip is
     // case-sensitive, so `https://api.openai.com/V1` (an odd-but-legitimate
     // spelling of the official host) must normalize to the official form
     // rather than silently keep the Chat wire for a GPT id.
-    let normalized = base_url
-        .trim()
-        .trim_end_matches('/')
-        .to_ascii_lowercase()
-        .trim_end_matches("/v1")
-        .to_string();
-    matches!(normalized.as_str(), "https://api.openai.com")
+    crate::core::model_wire::is_official_openai_base_url(base_url)
 }
 
 /// Conversation key for engine configs that carry no session identity
@@ -195,12 +184,9 @@ fn is_siliconflow_cn_base_url(base_url: &str) -> bool {
 /// should use the dedicated `openai_responses` preset.
 /// Frontend mirror: model-catalog.js `isOpenaiResponsesWireModel` (the tier
 /// UI depends on it).
+#[cfg(test)]
 fn openai_responses_wire_model(model: &str) -> bool {
-    let lower = model.trim().to_ascii_lowercase();
-    lower.starts_with("gpt-6")
-        || lower.starts_with("gpt-5.6")
-        || lower.starts_with("gpt-5.5")
-        || lower.starts_with("gpt-5.4-mini")
+    crate::core::model_wire::openai_responses_wire_model(model)
 }
 
 pub(crate) fn base_url_uses_loopback(base_url: &str) -> bool {
@@ -299,6 +285,20 @@ pub struct Pinvou3Bridge {
     /// bridge clone, falls back to a shared default conversation key in
     /// `build_dt_config`.
     pub session_affinity_key: Option<String>,
+    /// The remote-send boundary captured the final credential result. This
+    /// also records an intentional absence, preventing engine construction
+    /// from consulting mutable process or credential-store state again.
+    pub(crate) runtime_model_credential_frozen: bool,
+    /// A remote turn owns an isolated discovery root. Every bridge/engine clone
+    /// retains it; local materialization must never widen this root.
+    pub(crate) remote_turn_skills:
+        Option<Arc<super::super::skill_materialization::RemoteTurnSkills>>,
+    /// The app has supplied a complete task-scoped route. Process-wide model
+    /// environment variables and discovery probes must not rewrite it.
+    pub runtime_route_locked: bool,
+    /// Optional task-scoped visual fallback and its isolated credential.
+    pub runtime_vision_model: Option<SavedModel>,
+    pub runtime_vision_credential: Option<RuntimeModelCredential>,
     /// `max_model_len` (context window) probed from the local vLLM
     /// `/v1/models` endpoint. Injected at
     /// EnginePool spawn by `resolve_served_model` (the matched entry's own
@@ -369,6 +369,16 @@ impl std::fmt::Debug for Pinvou3Bridge {
             .field("session_model", &self.session_model)
             .field("runtime_model_credential", &self.runtime_model_credential)
             .field("session_affinity_key", &self.session_affinity_key)
+            .field(
+                "runtime_model_credential_frozen",
+                &self.runtime_model_credential_frozen,
+            )
+            .field("runtime_route_locked", &self.runtime_route_locked)
+            .field(
+                "runtime_vision_model",
+                &self.runtime_vision_model.as_ref().map(|model| &model.id),
+            )
+            .field("runtime_vision_credential", &self.runtime_vision_credential)
             .field("probed_context_tokens", &self.probed_context_tokens)
             .field("probed_output_tokens", &self.probed_output_tokens)
             .field("probed_local_kind", &self.probed_local_kind)
@@ -520,6 +530,11 @@ impl Pinvou3Bridge {
             session_model: None,
             runtime_model_credential: None,
             session_affinity_key: None,
+            runtime_model_credential_frozen: false,
+            remote_turn_skills: None,
+            runtime_route_locked: false,
+            runtime_vision_model: None,
+            runtime_vision_credential: None,
             probed_context_tokens: None,
             probed_output_tokens: None,
             probed_local_kind: None,
@@ -1054,6 +1069,12 @@ impl Pinvou3Bridge {
             .or_else(|| self.prefs.active_model())
     }
 
+    /// A host-supplied task route is authoritative. Process-wide model
+    /// overrides belong to normal local startup and must not rewrite it.
+    pub(crate) fn runtime_route_is_locked(&self) -> bool {
+        self.runtime_route_locked
+    }
+
     /// A copy of the currently effective model (session > active). After
     /// EnginePool probes the vLLM served name it clones this, renames the
     /// model, and puts it back into session_model, achieving "requests use
@@ -1084,8 +1105,10 @@ impl Pinvou3Bridge {
         if is_official_deepseek_base_url(&self.base_url()) {
             return "deepseek".to_string();
         }
-        if let Ok(v) = std::env::var("DEEPSEEK_PROVIDER") {
-            return v;
+        if !self.runtime_route_is_locked() {
+            if let Ok(v) = std::env::var("DEEPSEEK_PROVIDER") {
+                return v;
+            }
         }
         // `OpenAI compatible` is only a wire protocol; it does not mean the
         // real provider is OpenAI. reasoning_content parsing, replay, and the
@@ -1203,17 +1226,19 @@ impl Pinvou3Bridge {
         }
     }
 
-    /// Operator-owned overrides that suppress the Responses remap: explicit
+    /// Local-only operator overrides that suppress the Responses remap: explicit
     /// `DEEPSEEK_PROVIDER` / `DEEPSEEK_MODEL` env pins and the
-    /// official-DeepSeek endpoint guard. Shared by
+    /// official-DeepSeek endpoint guard. Locked task routes ignore the env
+    /// pins, but retain their own endpoint guard. Shared by
     /// [`Self::uses_responses_wire`] and the `ModelPreset::OpenaiResponses`
     /// arm of [`Self::provider`], so the wire gate and the engine landing
     /// can never disagree (round-5 review: a bare `DEEPSEEK_MODEL` used to
     /// suppress the gate while the preset arm still minted the Responses
     /// table).
     fn responses_wire_suppressed(&self) -> bool {
-        std::env::var("DEEPSEEK_PROVIDER").is_ok()
-            || std::env::var("DEEPSEEK_MODEL").is_ok()
+        (!self.runtime_route_is_locked()
+            && (std::env::var("DEEPSEEK_PROVIDER").is_ok()
+                || std::env::var("DEEPSEEK_MODEL").is_ok()))
             || is_official_deepseek_base_url(&self.base_url())
     }
 
@@ -1245,16 +1270,12 @@ impl Pinvou3Bridge {
         let preset = model
             .map(|m| m.preset)
             .unwrap_or_else(|| self.prefs.advanced.model_preset.unwrap_or_default());
-        if preset == ModelPreset::OpenaiResponses {
-            return true;
-        }
-        let is_openai_route = preset == ModelPreset::Openai
-            || model
-                .and_then(|m| m.vendor.as_deref())
-                .is_some_and(|vendor| vendor.trim().eq_ignore_ascii_case("openai"));
-        is_openai_route
-            && openai_responses_wire_model(&self.model())
-            && is_official_openai_base_url(&self.base_url())
+        crate::core::model_wire::model_route_uses_responses(
+            preset.as_str(),
+            model.and_then(|m| m.vendor.as_deref()),
+            &self.model(),
+            &self.base_url(),
+        )
     }
 
     /// Engine route identity: [`Self::provider`] carries vendor semantics
@@ -1447,11 +1468,13 @@ impl Pinvou3Bridge {
                 .unwrap_or_default();
         }
         let is_official_deepseek = is_official_deepseek_base_url(&self.base_url());
-        if let Ok(v) = std::env::var("DEEPSEEK_MODEL") {
-            if is_official_deepseek {
-                return official_deepseek_model_name(&v);
+        if !self.runtime_route_is_locked() {
+            if let Ok(v) = std::env::var("DEEPSEEK_MODEL") {
+                if is_official_deepseek {
+                    return official_deepseek_model_name(&v);
+                }
+                return v;
             }
-            return v;
         }
         if let Some(m) = self.effective_model() {
             if is_official_deepseek {
@@ -1489,8 +1512,10 @@ impl Pinvou3Bridge {
                 .map(|model| model.base_url.clone())
                 .unwrap_or_default();
         }
-        if let Ok(v) = std::env::var("DEEPSEEK_BASE_URL") {
-            return v;
+        if !self.runtime_route_is_locked() {
+            if let Ok(v) = std::env::var("DEEPSEEK_BASE_URL") {
+                return v;
+            }
         }
         if let Some(m) = self.effective_model() {
             return m.base_url.clone();
@@ -1523,8 +1548,15 @@ impl Pinvou3Bridge {
     /// Current active api_key (passed to the foundation's
     /// `DtConfig.api_key`).
     pub fn api_key(&self) -> String {
+        self.api_key_with_store(shared_credential_store())
+    }
+
+    pub(crate) fn api_key_with_store(&self, store: &dyn CredentialStore) -> String {
         if let Some(credential) = &self.runtime_model_credential {
             return credential.expose_api_key().to_string();
+        }
+        if self.runtime_model_credential_frozen {
+            return String::new();
         }
         if let Ok(v) = std::env::var("DEEPSEEK_API_KEY") {
             if !v.trim().is_empty() {
@@ -1532,10 +1564,25 @@ impl Pinvou3Bridge {
             }
         }
         if let Some(m) = self.effective_model() {
+            if let Some(reference) = &m.credential_ref {
+                match store.get(reference) {
+                    Ok(Some(key)) if !key.trim().is_empty() => return key,
+                    Ok(_) => {}
+                    Err(err) => {
+                        eprintln!(
+                            "[pinvou3-app] credential read failed for model {}: {}",
+                            m.id,
+                            err.user_message()
+                        );
+                    }
+                }
+            }
             // Local vLLM needs no auth: when the user leaves the key empty,
             // fall back to local-no-auth (the base requires a non-empty value).
-            let local_endpoint = m.preset == ModelPreset::LocalVllm && self.provider() == "vllm";
-            return Self::credential_for_model(m, local_endpoint, "model");
+            if m.preset == ModelPreset::LocalVllm && self.provider() == "vllm" {
+                return LOCAL_VLLM_API_KEY.to_string();
+            }
+            return m.api_key.clone();
         }
         match (
             self.prefs.advanced.model_preset.unwrap_or_default(),
@@ -1613,22 +1660,39 @@ impl Pinvou3Bridge {
     fn resolve_vision_model_config(&self) -> Option<deepseek_tui::config::VisionModelConfig> {
         let effective = self.effective_model();
         if let Some(vision_id) = effective.and_then(|model| model.vision_model_id.as_deref()) {
-            let Some(vision) = self.prefs.model_by_id(vision_id) else {
+            let runtime_vision = self
+                .runtime_vision_model
+                .as_ref()
+                .filter(|model| model.id == vision_id);
+            let Some(vision) = runtime_vision.or_else(|| self.prefs.model_by_id(vision_id)) else {
                 eprintln!(
                     "[pinvou3-app] vision_model_id {vision_id} not found in saved_models; \
                      image_analyze disabled"
                 );
                 return None;
             };
+            // The existing image_analyze tool is Chat-only. A transported
+            // route must not silently send Responses/Messages models to Chat.
+            if self.runtime_route_is_locked()
+                && crate::core::model_wire::model_route_wire_api(
+                    vision.preset.as_str(),
+                    vision.vendor.as_deref(),
+                    &vision.model,
+                    &vision.base_url,
+                ) != "openai_chat_completions"
+            {
+                return None;
+            }
             // The vision model's own capability is not rejected here: the
             // selector already verified it with the image-recognition probe
             // (only supported models can be selected). The override mark
             // (disabled) may be a leftover from a historical probe
-            // misjudgment (e.g. kimi-for-coding was once backfilled after the
-            // probe pipeline returned 400); at runtime it is used per the fact
-            // that it was actually selected; a text model configured as a
-            // vision model is blocked by the frontend probe gate.
-            let api_key = Self::api_key_for_saved_model(vision);
+            // misjudgment; at runtime it is used per the fact that it was
+            // actually selected.
+            let api_key = runtime_vision
+                .and_then(|_| self.runtime_vision_credential.as_ref())
+                .map(|credential| credential.expose_api_key().to_owned())
+                .unwrap_or_else(|| Self::api_key_for_saved_model(vision));
             if api_key.trim().is_empty() {
                 eprintln!(
                     "[pinvou3-app] vision model {} has no usable credential; \
@@ -1642,6 +1706,20 @@ impl Pinvou3Bridge {
                 api_key: Some(api_key),
                 base_url: Some(vision.base_url.clone()),
             });
+        }
+        // Native image input still follows the main protocol's client; only
+        // automatic reuse by the separate Chat-only image tool is disabled.
+        if self.runtime_route_is_locked()
+            && effective.is_none_or(|model| {
+                crate::core::model_wire::model_route_wire_api(
+                    model.preset.as_str(),
+                    model.vendor.as_deref(),
+                    &self.model(),
+                    &self.base_url(),
+                ) != "openai_chat_completions"
+            })
+        {
+            return None;
         }
         if effective.map(effective_image_capability) == Some(EffectiveImageCapability::Supported) {
             return Some(deepseek_tui::config::VisionModelConfig {
@@ -2179,7 +2257,10 @@ impl Pinvou3Bridge {
             mcp_config_path: self.bundle.work_mode_mcp_config_path(),
             mcp_oauth_callback_port,
             mcp_oauth_callback_url,
-            skills_dir: self.bundle.skills_dir.clone(),
+            skills_dir: self.remote_turn_skills.as_ref().map_or_else(
+                || self.bundle.skills_dir.clone(),
+                |skills| skills.path().to_path_buf(),
+            ),
             explicit_skills_root_only: true,
             plugin_registry: None,
             instructions: self.instructions(),
@@ -2480,14 +2561,16 @@ impl Pinvou3Bridge {
         };
         // The skill discovery root points at the composed directory per
         // session (skill dual-scope governance: directory content = the
-        // enabled skill set of that session's scope). Pre-spawn
-        // materialization is EnginePool's job; only the path is injected
-        // here. When the directory does not exist the foundation's
-        // `insert_configured_skills_dir` skips it (empty discovery set → the
-        // `## Skills` block is not rendered), and the send path's self-heal
-        // (`ensure_session_skills`) guarantees the directory is rebuilt
-        // before the next materialization opportunity.
-        cfg.skills_dir = crate::platform::paths::session_skills_dir(session_id);
+        // enabled skill set of that session's scope). Local engines discover
+        // the session's composed enabled set and may self-heal it. Remote
+        // engines discover only the owned selection copied before spawn;
+        // neither local writers nor remote self-heal may replace it with the
+        // shared enabled set. explicit_skills_root_only keeps foundation
+        // workspace discovery from widening either configured root.
+        cfg.skills_dir = self.remote_turn_skills.as_ref().map_or_else(
+            || crate::platform::paths::session_skills_dir(session_id),
+            |skills| skills.path().to_path_buf(),
+        );
         // CLI hard-deny (the execpolicy channel of the scope gate): spawn-time
         // injection initial value; the hot refresh after a toggle goes through
         // EnginePool::refresh_permission_rulesets — both share this one
@@ -3164,7 +3247,7 @@ impl Pinvou3Bridge {
         persona_reminder: Option<String>,
         restrict_tools: bool,
     ) -> Result<Op> {
-        self.ensure_session_skills_for_send(session_id);
+        self.ensure_session_skills_for_send(session_id)?;
         self.build_send_message_op_with_hooks(
             session_id,
             content,
@@ -3184,7 +3267,7 @@ impl Pinvou3Bridge {
         content: String,
         policy: &crate::features::assistant::product_runtime::eval_tool_policy::EvalTurnPolicy,
     ) -> Result<Op> {
-        self.ensure_session_skills_for_send(session_id);
+        self.ensure_session_skills_for_send(session_id)?;
         let content = format!("{}\n\n{content}", policy.id.model_reminder());
         let allowed_tools = policy
             .allowed_tools
@@ -3251,7 +3334,7 @@ impl Pinvou3Bridge {
         snapshot: &ExpertRosterSnapshot,
         expert_candidates: &[String],
     ) -> Result<Op> {
-        self.ensure_session_skills_for_send(session_id);
+        self.ensure_session_skills_for_send(session_id)?;
         self.build_send_message_op_with_hooks(
             session_id,
             content,
@@ -3274,14 +3357,20 @@ impl Pinvou3Bridge {
         format!("sub-{}", uuid::Uuid::new_v4())
     }
 
-    fn ensure_session_skills_for_send(&self, session_id: &str) {
+    fn ensure_session_skills_for_send(&self, session_id: &str) -> Result<()> {
+        if let Some(skills) = &self.remote_turn_skills {
+            // Missing private snapshots fail closed, never self-heal from B's
+            // shared (potentially broader) enabled set.
+            anyhow::ensure!(skills.path().is_dir(), "task_skill_unavailable");
+            return Ok(());
+        }
         // Aux sessions have no skill surface: their engine is isolated (empty
         // tool catalog, minimal instructions), so materializing the composed
         // directory would only feed a `## Skills` block the zero-tool turn
         // cannot act on. Spawn-time materialization and the toggle hot
         // refresh skip aux for the same reason (engine_pool).
         if crate::features::sessions::is_aux_session_id(session_id) {
-            return;
+            return Ok(());
         }
         // Send-path self-healing (skill dual-scope governance §2.3.3): rebuild the
         // composed directory from the current mode scope when missing (a microsecond
@@ -3297,6 +3386,7 @@ impl Pinvou3Bridge {
             self.session_policy(session_id).mode(),
             bound_workspace.as_deref(),
         );
+        Ok(())
     }
 
     fn build_send_message_op_with_hooks(
@@ -3661,6 +3751,11 @@ impl Pinvou3Bridge {
             workspace: std::env::temp_dir(),
             session_model,
             runtime_model_credential: None,
+            runtime_model_credential_frozen: false,
+            runtime_route_locked: false,
+            remote_turn_skills: None,
+            runtime_vision_model: None,
+            runtime_vision_credential: None,
             session_affinity_key: None,
             probed_context_tokens: None,
             probed_output_tokens: None,
@@ -3746,6 +3841,11 @@ mod tests {
             session_model: None,
             runtime_model_credential: None,
             session_affinity_key: None,
+            runtime_model_credential_frozen: false,
+            runtime_route_locked: false,
+            runtime_vision_model: None,
+            remote_turn_skills: None,
+            runtime_vision_credential: None,
             probed_context_tokens: None,
             probed_output_tokens: None,
             probed_local_kind: None,
@@ -5179,6 +5279,229 @@ mod tests {
                 .features
                 .enabled(deepseek_tui::features::Feature::VisionModel)
         );
+    }
+
+    #[test]
+    fn task_scoped_vision_route_uses_runtime_model_credential() {
+        let mut bridge = fixture_bridge();
+        set_active_model(
+            &mut bridge,
+            ModelPreset::Deepseek,
+            "deepseek-chat",
+            "https://api.deepseek.com/v1",
+            "",
+        );
+        let mut primary = bridge.prefs.advanced.saved_models[0].clone();
+        primary.id = "remote-task-primary".into();
+        primary.vision_model_id = Some("remote-task-vision".into());
+        bridge.session_model = Some(primary);
+        let mut vision = bridge.prefs.advanced.saved_models[0].clone();
+        vision.id = "remote-task-vision".into();
+        vision.model = "gpt-4o".into();
+        vision.base_url = "https://vision.example.invalid/v1".into();
+        vision.api_key.clear();
+        bridge.runtime_vision_model = Some(vision);
+        bridge.runtime_vision_credential =
+            Some(RuntimeModelCredential::api_key("sk-runtime-vision").unwrap());
+
+        let config = bridge.resolve_vision_model_config().unwrap();
+        assert_eq!(config.model, "gpt-4o");
+        assert_eq!(config.api_key.as_deref(), Some("sk-runtime-vision"));
+        assert_eq!(
+            config.base_url.as_deref(),
+            Some("https://vision.example.invalid/v1")
+        );
+    }
+
+    #[test]
+    fn locked_messages_primary_never_reuses_the_chat_only_vision_tool() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ]);
+        for (preset, vendor) in [
+            (ModelPreset::Anthropic, None),
+            (ModelPreset::OpenaiCompatible, Some("anthropic")),
+        ] {
+            for override_value in [
+                prefs::ImageCapabilityOverride::Enabled,
+                prefs::ImageCapabilityOverride::Pinvou,
+            ] {
+                let mut bridge = fixture_bridge();
+                set_active_model(
+                    &mut bridge,
+                    preset,
+                    "fixture-unknown-vision-model",
+                    "https://api.anthropic.com",
+                    "fixture-primary-key",
+                );
+                let mut primary = bridge.prefs.advanced.saved_models[0].clone();
+                primary.vendor = vendor.map(str::to_owned);
+                primary.image_capability_override = override_value;
+                bridge.session_model = Some(primary);
+                bridge.runtime_route_locked = true;
+                bridge.image_analyze_always = true;
+                if override_value == prefs::ImageCapabilityOverride::Enabled {
+                    assert_eq!(
+                        bridge.effective_image_capability(),
+                        EffectiveImageCapability::Supported
+                    );
+                } else {
+                    assert_eq!(
+                        bridge.effective_image_capability(),
+                        EffectiveImageCapability::Unknown
+                    );
+                }
+                assert!(bridge.resolve_vision_model_config().is_none());
+                assert!(bridge.build_engine_config().vision_config.is_none());
+                bridge.runtime_route_locked = false;
+                assert!(
+                    bridge.resolve_vision_model_config().is_some(),
+                    "ordinary local behavior is unchanged"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn locked_responses_primary_keeps_native_images_but_does_not_reuse_chat_vision_tool() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ]);
+        let mut bridge = fixture_bridge();
+        set_active_model(
+            &mut bridge,
+            ModelPreset::OpenaiResponses,
+            "gpt-6-sol",
+            "https://responses.example.test/v1",
+            "fixture-primary-key",
+        );
+        let mut primary = bridge.prefs.advanced.saved_models[0].clone();
+        primary.image_capability_override = prefs::ImageCapabilityOverride::Enabled;
+        bridge.session_model = Some(primary);
+        bridge.runtime_route_locked = true;
+        bridge.image_analyze_always = true;
+        assert_eq!(
+            bridge.effective_image_capability(),
+            EffectiveImageCapability::Supported
+        );
+        assert!(bridge.resolve_vision_model_config().is_none());
+        assert!(bridge.build_engine_config().vision_config.is_none());
+
+        let mut vision = bridge.session_model.clone().unwrap();
+        vision.id = "runtime-vision".into();
+        vision.preset = ModelPreset::Openai;
+        vision.vendor = None;
+        vision.model = "gpt-4o".into();
+        vision.base_url = "https://api.openai.com/v1".into();
+        bridge.session_model.as_mut().unwrap().vision_model_id = Some(vision.id.clone());
+        bridge.runtime_vision_model = Some(vision);
+        bridge.runtime_vision_credential =
+            Some(RuntimeModelCredential::api_key("fixture-vision-key").unwrap());
+        let config = bridge.resolve_vision_model_config().unwrap();
+        assert_eq!(config.model, "gpt-4o");
+        assert_eq!(config.api_key.as_deref(), Some("fixture-vision-key"));
+        bridge.runtime_vision_model.as_mut().unwrap().preset = ModelPreset::OpenaiResponses;
+        assert!(bridge.resolve_vision_model_config().is_none());
+        bridge.runtime_vision_model.as_mut().unwrap().preset = ModelPreset::Anthropic;
+        assert!(bridge.resolve_vision_model_config().is_none());
+    }
+
+    #[test]
+    fn locked_runtime_responses_wire_ignores_environment_suppression() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ]);
+        // SAFETY: platform::paths::tests::ENV_LOCK held by locked_env.
+        unsafe {
+            std::env::set_var("DEEPSEEK_PROVIDER", "anthropic");
+            std::env::set_var("DEEPSEEK_MODEL", "deepseek-chat");
+            std::env::set_var("DEEPSEEK_BASE_URL", "https://controlled.invalid/v1");
+        }
+        for (preset, vendor, base) in [
+            (ModelPreset::Openai, None, "https://api.openai.com/v1"),
+            (
+                ModelPreset::OpenaiCompatible,
+                Some("openai"),
+                "https://api.openai.com/v1",
+            ),
+            (
+                ModelPreset::OpenaiResponses,
+                None,
+                "https://relay.example.test/v1",
+            ),
+        ] {
+            let mut bridge = fixture_bridge();
+            set_active_model(&mut bridge, preset, "gpt-6-sol", base, "fixture-key");
+            let mut model = bridge.prefs.advanced.saved_models[0].clone();
+            model.vendor = vendor.map(str::to_owned);
+            bridge.session_model = Some(model);
+            bridge.runtime_route_locked = true;
+            assert!(!bridge.responses_wire_suppressed());
+            assert!(bridge.uses_responses_wire());
+            assert_eq!(bridge.model(), "gpt-6-sol");
+            assert_eq!(bridge.base_url(), base);
+            assert_eq!(bridge.engine_route_provider(), RESPONSES_ROUTE_PROVIDER);
+            let config = bridge.build_dt_config();
+            assert_eq!(config.provider.as_deref(), Some(RESPONSES_ROUTE_PROVIDER));
+            let table = &config
+                .providers
+                .as_ref()
+                .expect("Responses provider table must be materialized")
+                .custom[RESPONSES_ROUTE_PROVIDER];
+            assert_eq!(table.wire.as_deref(), Some("responses"));
+
+            // Ordinary local startup still yields to operator-owned env pins.
+            bridge.runtime_route_locked = false;
+            assert!(bridge.responses_wire_suppressed());
+            assert!(!bridge.uses_responses_wire());
+            assert_eq!(bridge.engine_route_provider(), "anthropic");
+        }
+        let mut deepseek = fixture_bridge();
+        set_active_model(
+            &mut deepseek,
+            ModelPreset::OpenaiResponses,
+            "gpt-6-sol",
+            "https://api.deepseek.com/v1",
+            "fixture-key",
+        );
+        deepseek.runtime_route_locked = true;
+        assert!(!deepseek.uses_responses_wire());
+        assert_eq!(deepseek.engine_route_provider(), "deepseek");
+    }
+
+    #[test]
+    fn locked_runtime_route_ignores_process_model_overrides() {
+        let (_lock, _env) =
+            locked_env(&["DEEPSEEK_PROVIDER", "DEEPSEEK_MODEL", "DEEPSEEK_BASE_URL"]);
+        // SAFETY: platform::paths::tests::ENV_LOCK held by locked_env.
+        unsafe { std::env::set_var("DEEPSEEK_PROVIDER", "anthropic") };
+        // SAFETY: platform::paths::tests::ENV_LOCK held by locked_env.
+        unsafe { std::env::set_var("DEEPSEEK_MODEL", "controlled-device-model") };
+        // SAFETY: platform::paths::tests::ENV_LOCK held by locked_env.
+        unsafe { std::env::set_var("DEEPSEEK_BASE_URL", "https://controlled.invalid/v1") };
+
+        let mut bridge = fixture_bridge();
+        let mut model = SavedModel::builtin_account_platform();
+        model.id = "runtime-route".into();
+        model.preset = ModelPreset::LocalVllm;
+        model.model = "controller-model".into();
+        model.base_url = "https://controller.example.invalid/v1".into();
+        bridge.session_model = Some(model);
+        bridge.runtime_route_locked = true;
+
+        assert!(bridge.runtime_route_is_locked());
+        assert_eq!(bridge.provider(), "vllm");
+        assert_eq!(bridge.model(), "controller-model");
+        assert_eq!(bridge.base_url(), "https://controller.example.invalid/v1");
     }
 
     #[test]

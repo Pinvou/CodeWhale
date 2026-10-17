@@ -11,7 +11,7 @@
 
 1. 先搜索现有 Issue 和 PR，避免重复建设。
 2. 大型功能、架构调整和破坏性变更应先通过 Issue 讨论。
-3. 按 [README.zh-CN.md](README.zh-CN.md) 准备开发环境。
+3. 按 [README.md](README.md) 准备开发环境。
 4. 从官方仓库最新 `main` 开始开发。
 
 维护者可从 `origin/main` 创建分支。外部贡献者应先配置一次官方仓库，并从 `upstream/main` 创建分支：

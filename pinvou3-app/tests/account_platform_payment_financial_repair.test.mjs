@@ -43,3 +43,10 @@ test('Real Payment mixed legacy and governed readers preserve old Wallet type an
  globalThis.fetch=async url=>new Response(String(url).includes('/capability')?JSON.stringify({session_approval_wire_version:2,control:{version:1,epoch:1,authorization_relay_epoch:1}}):payload,{status:200});
  try{const c=new AdminPlatformClient('https://portal.example');for(const read of [()=>c.approvalRequests(),()=>c.governedApprovalRequests()]){const p=await read();assert.equal(p.items[0].financial_snapshot.wallet_version,7);assert.equal(p.items[1].financial_snapshot.wallet_version,'9007199254740993');assert.equal(p.items[1].financial_snapshot.applied_to_receivables,'9223372036854775807');assert.equal(p.items[1].command.payment_evidence_id,id(2));}}finally{globalThis.fetch=old;}
 });
+
+test('valid mixed-case UUID inputs canonicalize before frozen target and evidence binding',()=>{
+ const order='ABCDEFAB-CDEF-4ABC-8ABC-ABCDEFABCDEF', evidence='FEDCBAFE-DCBA-4FED-9FED-FEDCBAFEDCBA';
+ const prepared=financialRepairPrecheckBody('PAYMENT_FINANCIAL_REPAIR',{target_resource_id:order,payment_evidence_id:evidence});
+ assert.deepEqual(prepared.body,{command_type:'PAYMENT_FINANCIAL_REPAIR',target_resource_id:order.toLowerCase(),payment_evidence_id:evidence.toLowerCase(),reason_code:'CONFIRMED_PAYMENT_NOT_CREDITED'});
+ for(const key of ['target_resource_id','payment_evidence_id'])for(const bad of [` ${order}`,`${order} `,order.slice(1),order.replace('ABCDEFAB','GBCDEFAB')])assert.equal(financialRepairPrecheckBody('PAYMENT_FINANCIAL_REPAIR',{target_resource_id:order,payment_evidence_id:evidence,[key]:bad}).error,'FINANCIAL_REPAIR_PRECHECK_INVALID');
+});

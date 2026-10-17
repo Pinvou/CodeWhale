@@ -130,10 +130,14 @@ func (r *PostgresRepository) AdminAddMemberWithUnits(ctx context.Context, princi
 		return MembershipMutationResult{}, err
 	}
 	var organizationStatus, userStatus string
-	if err := tx.QueryRow(ctx, `SELECT status FROM organizations WHERE id=$1 FOR UPDATE`, organizationID).Scan(&organizationStatus); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT status FROM organizations WHERE id=$1 FOR UPDATE`, organizationID).Scan(&organizationStatus); errors.Is(err, pgx.ErrNoRows) {
+		return MembershipMutationResult{}, ErrNotFound
+	} else if err != nil {
 		return MembershipMutationResult{}, err
 	}
-	if err := tx.QueryRow(ctx, `SELECT status FROM users WHERE id=$1 FOR UPDATE`, userID).Scan(&userStatus); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT status FROM users WHERE id=$1 FOR UPDATE`, userID).Scan(&userStatus); errors.Is(err, pgx.ErrNoRows) {
+		return MembershipMutationResult{}, ErrNotFound
+	} else if err != nil {
 		return MembershipMutationResult{}, err
 	}
 	if organizationStatus != "ACTIVE" || userStatus != "ACTIVE" {
@@ -270,6 +274,17 @@ func (r *PostgresRepository) removeMembership(ctx context.Context, principal ide
 		}
 		markMembershipResultReplayed(&replay.MembershipMutationResult)
 		return replay.MembershipMutationResult, tx.Commit(ctx)
+	}
+	if !platformAdmin {
+		// Preserve receipt-scope replay above. Only a new mutation needs this
+		// existence-blind precheck before the original lock/fenced decision.
+		err := requireOrganizationPermission(ctx, tx, actorID, organizationID, nil, PermissionOrganizationMembersManage)
+		if errors.Is(err, ErrForbidden) {
+			err = requireOrganizationMemberPermission(ctx, tx, actorID, organizationID, targetUserID, PermissionOrganizationMembersManage)
+		}
+		if err != nil {
+			return MembershipMutationResult{}, err
+		}
 	}
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "membership:"+organizationID.String()+":"+targetUserID.String()); err != nil {
 		return MembershipMutationResult{}, err
@@ -410,7 +425,9 @@ func (r *PostgresRepository) transferOwnership(ctx context.Context, principal id
 		return OwnershipTransferResult{}, err
 	}
 	var organizationStatus string
-	if err := tx.QueryRow(ctx, `SELECT status FROM organizations WHERE id=$1 FOR UPDATE`, organizationID).Scan(&organizationStatus); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT status FROM organizations WHERE id=$1 FOR UPDATE`, organizationID).Scan(&organizationStatus); errors.Is(err, pgx.ErrNoRows) {
+		return OwnershipTransferResult{}, ErrNotFound
+	} else if err != nil {
 		return OwnershipTransferResult{}, err
 	}
 	if organizationStatus != "ACTIVE" {
