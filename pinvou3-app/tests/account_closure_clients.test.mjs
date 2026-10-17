@@ -133,3 +133,49 @@ test('all closure states, stages and recovery labels are explicit in every langu
     }
   }
 });
+
+
+test('closed-grant mixed 207 preserves every validated result and the complete original UNKNOWN invocation', async () => {
+  const ids = [grant, actor, other];
+  const projection = { organization_id: other, grant_id: grant, member_user_id: actor, package_id: actor, component_id: actor, status: 'RECLAIMED_ACCOUNT_CLOSED', membership_version: 2, allocation_version: 2, original_microcredits: '10', available_microcredits: '0', reserved_microcredits: '0', used_microcredits: '0', expired_microcredits: '0', revoked_microcredits: '10' };
+  const result = { items: [
+    { grant_id: grant, status: 'SUCCEEDED', result: { grant: projection, amount_microcredits: '10', subject_lifecycle_version: '2', replayed: true } },
+    { grant_id: actor, status: 'FAILED', code: 'ACCOUNT_CLOSED_GRANT_RECLAIM_REJECTED' },
+    { grant_id: other, status: 'FAILED', code: 'COMMAND_RESULT_UNKNOWN' },
+  ] };
+  const calls = [];
+  const client = new OrganizationClient({ request: async (area, path, options) => { calls.push({ area, path, options }); return result; } });
+  for (let attempt = 0; attempt < 2; attempt++) await assert.rejects(client.reclaimClosedGrants(other, ids, 'Original complete batch reason', key), error => {
+    assert.equal(error.code, 'COMMAND_RESULT_UNKNOWN');
+    assert.equal(error.financeRequestState, 'WRITE_OBSERVED');
+    assert.deepEqual(error.batchResult, result);
+    return true;
+  });
+  assert.deepEqual(calls[0], calls[1]);
+  assert.deepEqual(calls[0].options.body.grant_ids, ids);
+  assert.equal(calls[0].options.idempotencyKey, key);
+});
+
+test('closed-grant UNKNOWN report never bypasses remaining target/status/code validation', async () => {
+  const ids = [grant, actor];
+  let reply;
+  const client = new OrganizationClient({ request: async () => reply });
+  const unknown = { grant_id: grant, status: 'FAILED', code: 'COMMAND_RESULT_UNKNOWN' };
+  for (const later of [
+    { grant_id: other, status: 'FAILED', code: 'ACCOUNT_CLOSED_GRANT_RECLAIM_REJECTED' },
+    { grant_id: actor, status: 'FAILED', code: 'UNRECOGNIZED_ERROR' },
+    { grant_id: actor, status: 'UNKNOWN', code: 'COMMAND_RESULT_UNKNOWN' },
+    { grant_id: actor, status: 'SUCCEEDED', result: {} },
+  ]) {
+    reply = { items: [unknown, later] };
+    await assert.rejects(client.reclaimClosedGrants(other, ids, 'Original batch reason', key), error => {
+      assert.equal(error.message, 'INVALID_ORGANIZATION_ACK');
+      assert.equal(error.batchResult, undefined);
+      return true;
+    });
+  }
+});
+
+test('closed-grant unconfirmed result is localized explicitly in all three languages', () => {
+  for (const language of ['zh', 'en', 'ja']) assert.ok(accountClosedGrantCopy[language].batchUnconfirmed);
+});

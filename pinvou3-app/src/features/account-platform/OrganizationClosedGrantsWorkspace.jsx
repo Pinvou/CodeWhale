@@ -68,6 +68,16 @@ export function OrganizationClosedGrantsWorkspace({ client, me, language }) {
    throw reason;
   }
  };
+ const reclaimBatch = async (facts, key) => {
+  const stamp = identityGeneration.current;
+  try { return await api.reclaimClosedGrants(org, facts.grants, facts.reason, key); }
+  catch (reason) {
+   // Only the client's fully validated 207 projection may be displayed. The
+   // original operation still owns UNKNOWN facts/key and explicit whole retry.
+   if (stamp === identityGeneration.current && reason.code === 'COMMAND_RESULT_UNKNOWN' && reason.batchResult) setBatchResult({ owner, api, items: reason.batchResult.items });
+   throw reason;
+  }
+ };
  return <section><h3>{copy.title}</h3><p>{copy.lead}</p>
   <button disabled={busy} onClick={() => void refresh()}>{copy.refresh}</button>
   {busy && <p role="status">{copy.loading}</p>}{error && <p role="alert">{copy.unavailable}</p>}
@@ -75,7 +85,7 @@ export function OrganizationClosedGrantsWorkspace({ client, me, language }) {
    <p>{grant.recovery_only ? copy.recoveryPending : `${grant.member_user_id} · ${formatBalance(grant.available_microcredits, language)}`} · {grant.grant_id}</p>
    <OrganizationActionForm useOperation={useClosedGrantOperation} client={client} owner={owner} copy={copy} scope={`closed-grant-reclaim:${grant.grant_id}`} title={copy.single} fields={[]} prepare={() => ({ grant: grant.grant_id, reason: 'ACCOUNT_CLOSED_FULL_RECLAIM' })} action={(facts, key) => reclaim(grant, facts, key)} onConfirmed={() => void refresh()} disabled={busy || error || !eligible.some(item => item.grant_id === grant.grant_id)} confirm />
   </article>)}
-  <OrganizationActionForm useOperation={useClosedGrantOperation} key={`${owner}:closed-grant-batch`} client={client} owner={owner} copy={copy} scope="closed-grant-reclaim-batch" title={copy.batch} fields={[{ name: 'grants', label: 'grant', multiple: true, options: eligible.map(grant => ({ value: grant.grant_id, label: `${grant.member_user_id} · ${grant.grant_id}` })) }]} prepare={values => { if (!values.grants.length || values.grants.length > 200) throw new Error('INVALID_ORGANIZATION_INPUT'); return { grants: [...values.grants], reason: 'ACCOUNT_CLOSED_FULL_RECLAIM' }; }} action={(facts, key) => api.reclaimClosedGrants(org, facts.grants, facts.reason, key)} onConfirmed={result => { setBatchResult(result); void refresh(); }} disabled={busy || error || !eligible.length} confirm />
-  {batchResult && <ul>{batchResult.items.map(item => <li key={item.grant_id}>{item.grant_id} · {item.status === 'SUCCEEDED' ? copy.reclaimed : copy.rejected}</li>)}</ul>}
+  <OrganizationActionForm useOperation={useClosedGrantOperation} key={`${owner}:closed-grant-batch`} client={client} owner={owner} copy={copy} scope="closed-grant-reclaim-batch" title={copy.batch} fields={[{ name: 'grants', label: 'grant', multiple: true, options: eligible.map(grant => ({ value: grant.grant_id, label: `${grant.member_user_id} · ${grant.grant_id}` })) }]} prepare={values => { if (!values.grants.length || values.grants.length > 200) throw new Error('INVALID_ORGANIZATION_INPUT'); return { grants: [...values.grants], reason: 'ACCOUNT_CLOSED_FULL_RECLAIM' }; }} action={reclaimBatch} onConfirmed={result => { setBatchResult({ owner, api, items: result.items }); void refresh(); }} disabled={busy || error || !eligible.length} confirm />
+  {batchResult?.owner === owner && batchResult.api === api && <ul>{batchResult.items.map(item => <li key={item.grant_id}>{item.grant_id} · {item.status === 'SUCCEEDED' ? copy.reclaimed : item.code === 'COMMAND_RESULT_UNKNOWN' ? copy.batchUnconfirmed : copy.rejected}</li>)}</ul>}
  </section>;
 }

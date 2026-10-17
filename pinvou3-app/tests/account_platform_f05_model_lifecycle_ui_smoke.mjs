@@ -66,13 +66,19 @@ try {
       if (command === 'load_session' && args.id === 's1') return Promise.resolve(structuredClone(savedSource));
       if (command === 'account_platform_model_catalog') return Promise.resolve({ catalog_version: 1, items: [
         { model_id: replacementId, display_name: 'Current replacement', context_eligible: true, lifecycle_status: 'PUBLISHED' },
+        { model_id: 'deprecated-future', display_name: 'Deprecated before cutoff', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: new Date(now + 3600000).toISOString() },
+        { model_id: 'deprecated-expired', display_name: 'Expired', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: new Date(now - 3600000).toISOString() },
+        { model_id: 'deprecated-invalid', display_name: 'Invalid cutoff', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: 'invalid' },
+        { model_id: 'deprecated-missing', display_name: 'Missing cutoff', context_eligible: true, lifecycle_status: 'DEPRECATED' },
+        { model_id: 'context-denied', display_name: 'Denied', context_eligible: false, lifecycle_status: 'PUBLISHED' },
+        { model_id: 'removed', display_name: 'Removed', context_eligible: true, lifecycle_status: 'REMOVED' },
       ] });
       if (command === 'account_platform_branch_replacement_session') {
         control.branches++; control.branchInput = structuredClone(args.input);
         return Promise.resolve({ session: { id: 'replacement-s1', title: 'Controlled replacement' } });
       }
       if (command === 'load_session' && args.id === 'replacement-s1') return Promise.resolve({
-        metadata: { ...savedSource.metadata, id: 'replacement-s1', model: replacementId },
+        metadata: { ...savedSource.metadata, id: 'replacement-s1', model: control.branchInput?.replacementModelId || replacementId },
         messages: structuredClone(savedSource.messages), artifacts: [],
       });
       return baseline(command, args);
@@ -106,6 +112,28 @@ try {
     assert.deepEqual(after.defaultRef, before.defaultRef); assert.deepEqual(after.source, before.source); assert.equal(after.defaults, 0);
     assert.equal(after.input.sourceConversationId, 's1'); assert.equal(after.input.replacementModelId, '0199a100-0001-7000-8000-000000000106');
     assert.deepEqual(errors, []); passed++; console.log(`PASS compiled ChatView ${legacy ? 'legacy name' : 'UUID'} prepare rejection and manual branch ${language}`);
+  }
+  for (const language of ['zh', 'en', 'ja']) {
+    phase = `locale ${language} deprecated replacement before cutoff`;
+    await fresh(language);
+    const before = await page.evaluate(() => ({ defaultRef: window.f05Lifecycle.defaultRef(), source: window.f05Lifecycle.savedSource }));
+    assert.equal((await page.evaluate(() => window.f05Lifecycle.sendFailure())).ok, false);
+    await awaitBanner();
+    await page.waitForFunction(() => [...document.querySelectorAll('select option')].some(option => option.value === 'deprecated-future'));
+    const options = await page.evaluate(() => [...document.querySelectorAll('select')].find(select => [...select.options].some(option => option.value === 'deprecated-future')) && [...[...document.querySelectorAll('select')].find(select => [...select.options].some(option => option.value === 'deprecated-future')).options].map(option => option.value));
+    assert.deepEqual(options, ['0199a100-0001-7000-8000-000000000106', 'deprecated-future']);
+    await page.evaluate(() => {
+      const select = [...document.querySelectorAll('select')].find(item => [...item.options].some(option => option.value === 'deprecated-future'));
+      select.value = 'deprecated-future'; select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await page.waitForFunction(() => [...document.querySelectorAll('select')].some(select => select.value === 'deprecated-future'));
+    await page.evaluate(() => [...document.querySelectorAll('button')].find(button => button.textContent === window.f05Lifecycle.copy().uiModelReplacement.create).click());
+    await page.waitForFunction(() => window.f05Lifecycle.activeId() === 'replacement-s1');
+    const after = await page.evaluate(() => ({ defaultRef: window.f05Lifecycle.defaultRef(), source: window.f05Lifecycle.savedSource, input: window.f05Lifecycle.branchInput,
+      defaults: window.f05Lifecycle.calls.filter(call => ['account_platform_select_catalog_model', 'set_default_model', 'set_active_model'].includes(call.command)).length }));
+    assert.deepEqual(after.defaultRef, before.defaultRef); assert.deepEqual(after.source, before.source); assert.equal(after.defaults, 0);
+    assert.equal(after.input.sourceConversationId, 's1'); assert.equal(after.input.replacementModelId, 'deprecated-future');
+    assert.deepEqual(errors, []); passed++; console.log(`PASS compiled ChatView selectable deprecated replacement ${language}`);
   }
   // An old A read starts after B's failed attempt, in a background working set.
   // Opening authoritative B must show B; late A cannot replace that owner.

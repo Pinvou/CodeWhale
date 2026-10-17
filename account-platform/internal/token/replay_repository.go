@@ -659,19 +659,20 @@ func (r *PostgresRepository) ReleaseReplayRetentionCase(ctx context.Context, cas
 	return nil
 }
 
+type uncertainDispatchCandidate struct {
+	id    uuid.UUID
+	owner string
+	until time.Time
+}
+
 func (r *PostgresRepository) RecoverUncertainDispatches(ctx context.Context) error {
 	rows, err := r.pool.Query(ctx, `SELECT request.id,COALESCE(intent.worker_lease_owner,''),intent.worker_lease_until FROM usage_requests request JOIN usage_dispatch_intents intent ON intent.usage_request_id=request.id WHERE request.execution_status IN ('UPSTREAM_DISPATCHING','STREAMING') AND intent.worker_lease_until<=$1 AND intent.adapter_supports_idempotency=false`, r.now())
 	if err != nil {
 		return err
 	}
-	type candidate struct {
-		id    uuid.UUID
-		owner string
-		until time.Time
-	}
-	var candidates []candidate
+	var candidates []uncertainDispatchCandidate
 	for rows.Next() {
-		var item candidate
+		var item uncertainDispatchCandidate
 		if err := rows.Scan(&item.id, &item.owner, &item.until); err != nil {
 			rows.Close()
 			return err
@@ -683,12 +684,33 @@ func (r *PostgresRepository) RecoverUncertainDispatches(ctx context.Context) err
 	if err != nil {
 		return err
 	}
+	return recoverDispatchCandidates(ctx, candidates, r.recoverExpiredDispatch)
+}
+
+// Each candidate owns its transaction and rechecks the observed lease. One
+// rolled-back candidate must not prevent independent candidates from recovering.
+// Retain only the first cause and a count, not an unbounded list of row errors.
+func recoverDispatchCandidates(ctx context.Context, candidates []uncertainDispatchCandidate, recoverOne func(context.Context, uuid.UUID, string, time.Time) error) error {
+	var first error
+	failed := 0
+	result := func() error {
+		if first == nil {
+			return nil
+		}
+		return fmt.Errorf("%d uncertain dispatch recoveries failed: %w", failed, first)
+	}
 	for _, item := range candidates {
-		if err := r.recoverExpiredDispatch(ctx, item.id, item.owner, item.until); err != nil {
-			return err
+		if err := ctx.Err(); err != nil {
+			return errors.Join(result(), err)
+		}
+		if err := recoverOne(ctx, item.id, item.owner, item.until); err != nil {
+			if first == nil {
+				first = err
+			}
+			failed++
 		}
 	}
-	return nil
+	return result()
 }
 
 // The scan is only a candidate list. SaveReplayResult and this recovery share
