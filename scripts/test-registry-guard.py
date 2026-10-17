@@ -25,18 +25,24 @@ configuration resolves. The registry scope is the pinvou3-app/src-tauri
 crate; covering the other test manifests (e.g. pinvou-cli) is a registered
 follow-up.
 
-Static-scan boundary (review #1518 round-11): a pin's ignore status is
-read from lexically-written attributes in lib-graph source files. An
-`#[ignore]` arriving through code generation — `macro_rules!`,
+Static-scan boundary (review #1518 round-11, narrowed round-12): a pin's
+ignore status is read from lexically-written attributes in lib-graph source
+files. An `#[ignore]` arriving through code generation — `macro_rules!`,
 `include!`, a proc-macro — is invisible to the source side, and so is a
 pin moved outside the graph (integration `tests/`, bin targets). The
 list-presence half still demands the registered path, so relocation
 fails loud; but a *generated* `#[ignore]` on a pin that stays listed
 would stay green — relocating a pin into generated code is tampering,
-not an edit. The same boundary covers `#[path]` attributes on `mod`
-declarations nested inside inline modules (only file-top-level wirings
-are followed) and raw-identifier `mod r#type;` declarations (not
-followed).
+not an edit. The scanner follows `#[path]` wiring both at file top level
+and inside inline modules (round-12: resolved per the rustc rule — the
+declaring file's directory at top level, the externals' child directory
+plus the inline-module components inside one), so both legal wirings are
+scanned, and `main` fails CLOSED on a registered pin whose source it
+cannot attribute (unmodelled wiring, macro-generated test, or
+raw-identifier `mod r#type;`) instead of trusting the registry entry.
+Still unmodelled (a REQUIRED_PIN there hits the fail-closed net, not a
+silent skip): `#[path = "dir"]` on the inline module itself, and
+`#[ignore]` written on the same line as its inline-module opener.
 
 Run it from anywhere (paths are anchored to this script's repo location);
 it reuses cargo's artifacts, and CI wires it into the linux rust-test leg
@@ -133,6 +139,12 @@ _FN_RE = re.compile(
     r"^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?"
     r"fn\s+([A-Za-z_][A-Za-z0-9_]*)"
 )
+# How far past the name line a rustfmt-wrapped signature may put its
+# parameter `(` (`fn g<\n    T: LoooongBound,\n    U: Other,\n>(") —
+# generous, since generic lists only wrap one parameter per line; the scan
+# still stops at the first `{` or `;`, so the lookahead cannot jump into a
+# foreign item.
+_FN_PAREN_LOOKAHEAD = 64
 _IGNORE_RE = re.compile(r"\bignore\b")
 
 
@@ -190,10 +202,13 @@ def _fn_after(lines, idx):
     are already blanked, so they read as blanks and never break attachment
     — real Rust binding: an attribute stays attached to the next item no
     matter what comments sit between, and a pseudo-fn inside a comment
-    cannot be found. `pub`/`async`/`unsafe` prefixes, generics
-    (`fn g<T: Clone>()`) and rustfmt-wrapped signatures (`fn long(` with
-    the parens on the following lines) all resolve; the paren must open on
-    the name's line.
+    cannot be found. `pub`/`async`/`unsafe` prefixes and generics
+    (`fn g<T: Clone>()`) resolve; rustfmt-wrapped signatures resolve too —
+    when a long generic parameter list pushes the parameter paren onto a
+    later line (`fn g<\\n    T: Bound,\\n>(`), the scan accepts the `(` at
+    the first stop before a `{` or `;` (round-12 review: requiring the
+    paren on the name's line silently dropped the hit on exactly the shape
+    rustfmt emits for long bound lists, with no fail-closed fallback).
     """
     j = idx
     n = len(lines)
@@ -203,7 +218,19 @@ def _fn_after(lines, idx):
         return None, None
     stripped = lines[j].lstrip()
     match = _FN_RE.match(stripped)
-    if match is None or "(" not in stripped:
+    if match is None:
+        return None, None
+    if "(" not in stripped:
+        k = j + 1
+        while k < n and k - j <= _FN_PAREN_LOOKAHEAD:
+            text = lines[k]
+            stops = [c for c in (text.find("("), text.find("{"), text.find(";")) if c != -1]
+            if not stops:
+                k += 1
+                continue
+            if min(stops) == text.find("("):
+                return match.group(1), j
+            return None, None
         return None, None
     return match.group(1), j
 
@@ -480,8 +507,16 @@ def _module_stacks(lines):
                 elif rest.startswith(";"):
                     # external child; its inline-module stack decides the
                     # directory it resolves against (a `mod x;` nested in
-                    # inline `mod s {}` lives under `s/`)
-                    externals.append((tok.group(1), stacks[idx]))
+                    # inline `mod s {}` lives under `s/`). Snap the stack
+                    # NOW, not the line-start snapshot: braces opened
+                    # earlier on this same line (`mod s { mod x; }`, legal
+                    # but never emitted by rustfmt) already sit in `stack`,
+                    # and the line-start tuple would resolve `x` one
+                    # directory too high (round-12 review: stray files
+                    # there could alias hits into wrong paths)
+                    externals.append(
+                        (tok.group(1), tuple(name for name, _ in stack))
+                    )
     in_str, block_depth, raw_hashes = state
     if depth != 0 or block_depth != 0 or in_str or raw_hashes is not None:
         # an in_str left set means a string never closed on its line: every
@@ -503,62 +538,107 @@ def _path_wired_mods(stripped, lines, stacks, path):
     raw block (the attribute head's position maps 1:1 because the lexer
     blanks with positions preserved); an attribute head whose value cannot
     be reliably parsed raises instead of silently skipping the wired module
-    (round-10 review). Only file-top-level declarations are wired
-    (`stacks[line]` empty): a path attribute inside an inline module block
-    resolves against nested module directories, which is not modelled.
-    Returns [(mod_name, path_value)]."""
+    (round-10 review). Attributes BETWEEN the path entry and the `mod`
+    declaration — the idiomatic `#[path = "..."]` + `#[cfg(unix)]`
+    platform-wiring shape — no longer break the pairing: the run is
+    consumed entry by entry and a seen path value stays pending until the
+    declaration (or a non-attribute item) ends the run (round-12 review:
+    the old single-entry pairing silently dropped exactly that wiring,
+    while the `#[cfg]`-first order worked). Wirings are modelled wherever
+    they appear: the returned inline-module stack (empty at file top
+    level) tells the caller which resolution base rustc uses — round-12
+    review closed the silent skip of `mod outer { #[path = "real.rs"]
+    mod routed; }` (rustc loads `src/outer/real.rs`; the file previously
+    never entered the scan and an `#[ignore]` there was invisible). A
+    `#[path]` on the inline module itself (`#[path = "dir"] mod inner {
+    ... }`) is still not followed (children resolve under the attribute
+    directory — unmodelled; a REQUIRED_PIN there fails closed via the
+    source-attribution net in `main`).
+    Returns [(mod_name, path_value, inline_module_stack)]."""
     wired = []
+    pending_value = None
     i = 0
     n = len(stripped)
     while i < n:
         if not stripped[i].lstrip().startswith("#["):
+            if pending_value is not None:
+                # the run ended on a non-attribute item without a `mod`
+                # declaration: rustc would attach the path attribute to
+                # that item instead — not a wiring this guard models
+                pending_value = None
             i += 1
             continue
         end, _ = _parse_attribute(stripped, i)
-        value = None
-        if not stacks[i]:
-            joined = "\n".join(stripped[i:end])
-            head = _PATH_ATTR_HEAD_RE.search(joined)
-            if head is not None:
-                nl = joined.rfind("\n", 0, head.end())
-                value = _string_value_after(
-                    lines[i:end],
-                    joined.count("\n", 0, head.end()),
-                    head.end() if nl == -1 else head.end() - nl - 1,
+        joined = "\n".join(stripped[i:end])
+        head = _PATH_ATTR_HEAD_RE.search(joined)
+        if head is not None:
+            nl = joined.rfind("\n", 0, head.end())
+            value = _string_value_after(
+                lines[i:end],
+                joined.count("\n", 0, head.end()),
+                head.end() if nl == -1 else head.end() - nl - 1,
+            )
+            if value is None:
+                raise SystemExit(
+                    "test-registry-guard: cannot read the #[path] value "
+                    f"at {path}:{i + 1} — refusing to silently skip the "
+                    "wired module"
                 )
-                if value is None:
-                    raise SystemExit(
-                        "test-registry-guard: cannot read the #[path] value "
-                        f"at {path}:{i + 1} — refusing to silently skip the "
-                        "wired module"
-                    )
-        if value is not None:
-            j = end
-            while j < n and not stripped[j].strip():
-                j += 1
-            if j < n and not stacks[j]:
-                decl = stripped[j]
-                tok = _MOD_TOKEN_RE.search(decl)
-                if (
-                    tok is not None
-                    and tok.group(1) is not None
-                    and not tok.group(2)
-                    and decl[tok.end() :].strip().startswith(";")
-                ):
-                    wired.append((tok.group(1), value))
-                    i = j + 1
-                    continue
+            pending_value = value
+        j = end
+        while j < n and not stripped[j].strip():
+            j += 1
+        if j >= n:
+            break
+        if stripped[j].lstrip().startswith("#["):
+            # another attribute entry in the same run: keep any pending
+            # path value and pair it with the declaration after it
+            i = j
+            continue
+        decl = stripped[j]
+        tok = _MOD_TOKEN_RE.search(decl)
+        if (
+            pending_value is not None
+            and tok is not None
+            and tok.group(1) is not None
+            and not tok.group(2)
+            and decl[tok.end() :].strip().startswith(";")
+        ):
+            wired.append((tok.group(1), pending_value, tuple(stacks[j])))
+            pending_value = None
+            i = j + 1
+            continue
+        pending_value = None
         i = end
     return wired
 
 
-def ignored_source_pins():
-    """Round-35 minor 10 (review #455): libtest's stable `--list` output cannot
-    distinguish an #[ignore]d test from a live one, so scan the crate sources:
-    any `fn <name>` whose directly attached attribute run contains an
-    `ignore` token (covers `#[ignore]`, `#[ignore = "..."]`,
-    `#[cfg_attr(..., ignore)]` in single- and multi-line form) is a
-    silenced test.
+def _scan_graph():
+    """Walk the lib module graph from `src/lib.rs` and return
+    (by_path, unattributable, attributable):
+
+    - `by_path`: full libtest path -> `file:line` locations of every fn
+      whose attached attribute run contains an `ignore` token;
+    - `unattributable`: bare fn name -> locations for hits in files the
+      lexer could not confidently parse (fail closed);
+    - `attributable`: full libtest paths of every fn carrying ANY attached
+      attribute entry — the proof set `main`'s source-attribution net uses
+      (round-12 review): every normally-declared test fn carries at least
+      its `#[test]`/`#[tokio::test]` attribute, so a registered pin absent
+      from this set has its source outside the scanned graph and an
+      `#[ignore]` there would be invisible.
+
+    Scoping: the walk is rooted at `src/lib.rs` and follows external
+    `mod <name>;` declarations — both conventional (`a/b.rs` +
+    `a/b/<name>.rs` layouts) and `#[path = "..."]` wiring (at file top
+    level relative to the declaring file's directory; inside inline
+    modules relative to the externals' child directory plus the
+    inline-module components, per the rustc rule — round-12), so it covers
+    exactly the lib crate that `cargo test --lib --list` reports — bin-only
+    files (`main.rs`, undeclared strays) are never scanned and cannot alias
+    a pin's path. Hits are keyed by their FULL libtest module path: the
+    declaring file's module path from the graph plus the inline-module
+    stack at the function's line.
 
     The scan is attribute-run based (round-6 review): starting from each
     `#[` line, whole bracket-balanced attribute entries are consumed (so
@@ -570,21 +650,7 @@ def ignored_source_pins():
     (a `#[ignore]` mentioned or commented out is invisible), and a comment
     cannot hide one: a `#[ignore]` whose fn follows after a comment line
     (or a `///` doc comment, itself an attribute) stays attached and is
-    still flagged, exactly as rustc keeps the attribute bound.
-
-    Scoping and attribution (review #1518 round 6): the scan is rooted at
-    `src/lib.rs` and follows external `mod <name>;` declarations — both
-    conventional (`a/b.rs` + `a/b/<name>.rs` layouts) and `#[path = "..."]`
-    wiring (relative to the declaring file's directory), so it covers
-    exactly the lib crate that `cargo test --lib --list` reports — bin-only
-    files (`main.rs`, undeclared strays) are never scanned and cannot alias
-    a pin's path. Each hit is keyed by its FULL libtest module path: the
-    declaring file's module path from the graph plus the inline-module
-    stack at the function's line. Files whose structure the lexer cannot
-    confidently parse (unbalanced braces/comments/strings) have their hits
-    keyed by bare function name under `unattributable` instead — fail
-    closed, narrowed from the old file-level filter to genuinely
-    unparseable files. Returns (by_path, unattributable)."""
+    still flagged, exactly as rustc keeps the attribute bound."""
     src_root = os.path.join(os.path.dirname(MANIFEST), "src")
     lib_root = os.path.join(src_root, "lib.rs")
     if not os.path.isfile(lib_root):
@@ -594,6 +660,7 @@ def ignored_source_pins():
         )
     by_path = {}
     unattributable = {}
+    attributable = set()
     visited = set()
     queue = [(lib_root, [])]
     while queue:
@@ -617,6 +684,7 @@ def ignored_source_pins():
                 i += 1
                 continue
             run = []
+            entries = 0
             j = i
             while j < n:
                 lexed = stripped[j].lstrip()
@@ -628,17 +696,21 @@ def ignored_source_pins():
                 if not lexed.startswith("#["):
                     break
                 j, ignore_line = _parse_attribute(stripped, j)
+                entries += 1
                 if ignore_line is not None:
                     run.append(ignore_line)
             fn_name, fn_idx = _fn_after(stripped, j)
-            if run and fn_name is not None:
-                locations = [f"{path}:{line + 1}" for line in run]
+            if entries and fn_name is not None:
                 if clean:
                     full = "::".join(
                         list(base) + list(stacks[fn_idx]) + [fn_name]
                     )
-                    by_path.setdefault(full, []).extend(locations)
+                    if run:
+                        locations = [f"{path}:{line + 1}" for line in run]
+                        by_path.setdefault(full, []).extend(locations)
+                    attributable.add(full)
                 else:
+                    locations = [f"{path}:{line + 1}" for line in run]
                     unattributable.setdefault(fn_name, []).extend(locations)
             i = fn_idx + 1 if fn_idx is not None else max(j, i + 1)
         # Child files of external `mod <name>;` declarations (Rust 2018):
@@ -659,16 +731,42 @@ def ignored_source_pins():
                 if os.path.isfile(candidate):
                     queue.append((candidate, base + list(estack) + [name]))
                     break
-        # `#[path = "..."]` wiring (12 real sites, e.g. file_ingest.rs):
-        # relative to the DECLARING FILE's directory per the rustc rule for
-        # non-inline modules — the conventional candidates above do not
-        # exist for these, so both resolutions coexist without double
-        # visits (the graph dedups by realpath).
+        # `#[path = "..."]` wiring (12 real sites, e.g. file_ingest.rs).
+        # rustc resolution, round-12 (verified against the Rust Reference
+        # and rustc itself): a wiring OUTSIDE any inline module resolves
+        # against the declaring file's own directory; inside inline
+        # modules it resolves against the same base the conventional
+        # externals use (dirname for mod-rs roots, dirname/<file-stem>
+        # for other files) with the inline-module components appended as
+        # directories — exactly `child_dir + estack`. The conventional
+        # candidates above do not exist for these, so both resolutions
+        # coexist without double visits (the graph dedups by realpath).
         file_dir = os.path.dirname(path)
-        for name, rel in _path_wired_mods(stripped, lines, stacks, path):
-            candidate = os.path.normpath(os.path.join(file_dir, rel))
+        for name, rel, estack in _path_wired_mods(stripped, lines, stacks, path):
+            if estack:
+                candidate = os.path.normpath(
+                    os.path.join(child_dir, *estack, rel)
+                )
+                mod_path = base + list(estack)
+            else:
+                candidate = os.path.normpath(os.path.join(file_dir, rel))
+                mod_path = base
             if os.path.isfile(candidate):
-                queue.append((candidate, base + [name]))
+                queue.append((candidate, mod_path + [name]))
+    return by_path, unattributable, attributable
+
+
+def ignored_source_pins():
+    """`#[ignore]` source hits, as (by_path, unattributable) — round-35
+    minor 10 (review #455): libtest's stable `--list` output cannot
+    distinguish an #[ignore]d test from a live one, so scan the crate
+    sources: any `fn <name>` whose directly attached attribute run contains
+    an `ignore` token (covers `#[ignore]`, `#[ignore = "..."]`,
+    `#[cfg_attr(..., ignore)]` in single- and multi-line form) is a
+    silenced test. Thin wrapper over `_scan_graph` (which additionally
+    returns the all-attributable-paths proof set main's net uses), keeping
+    the two-value shape the behavior suite unpacks."""
+    by_path, unattributable, _ = _scan_graph()
     return by_path, unattributable
 
 
@@ -714,7 +812,7 @@ def main():
     # caught by the source-level scan below; `_pin_ignored_locations` does
     # the full-module-path attribution (inline-module stacks inside the lib
     # module graph), with the fail-closed leaf-net for unparseable files.
-    by_path, unattributable = ignored_source_pins()
+    by_path, unattributable, attributable = _scan_graph()
     by_segment = collections.defaultdict(list)
     for p in paths:
         by_segment[p.rsplit("::", 1)[-1]].append(p)
@@ -725,6 +823,25 @@ def main():
                 failures.append(
                     f"required pin {pin} is #[ignore]d at "
                     + ", ".join(matched)
+                )
+                continue
+            if (
+                pin not in attributable
+                and pin.rsplit("::", 1)[-1] not in unattributable
+            ):
+                # Fail closed (round-12 review): a listed pin whose fn the
+                # source scan cannot attribute is a pin whose #[ignore]
+                # would be invisible too — exactly the false-green shape
+                # (every normally-declared test fn carries at least its
+                # `#[test]` attribute, so it is attributable). Refuse to
+                # trust the registry entry until the scanner models
+                # whatever wiring hides the source.
+                failures.append(
+                    f"required pin {pin} is registered but its source "
+                    "location is outside the scanned lib module graph "
+                    "(unmodelled #[path] wiring, macro-generated test, or "
+                    "raw-identifier mod) — an #[ignore] there would go "
+                    "undetected; extend the scanner before trusting it"
                 )
             continue
         if pin in counts:

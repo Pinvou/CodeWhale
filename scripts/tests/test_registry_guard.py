@@ -366,21 +366,87 @@ class ModulePathTests(GuardFixture):
                 }
             )
 
-    def test_path_attribute_inside_inline_module_is_not_wired(self):
-        # Out of scope by design: a path attribute nested in an inline
-        # module resolves against nested module directories; wiring it
-        # against the file's directory would attribute wrong paths. The
-        # declaration is left unwired (its hits would only matter if a pin
-        # lived there, which none does).
+    def test_path_attribute_inside_inline_module_is_wired(self):
+        # Round-12 review (Jensen P2, comment 4297148007), positive control:
+        # `mod outer { #[path = "real.rs"] mod routed; }` is legal Rust and
+        # rustc loads `src/outer/real.rs` as `outer::routed` (resolution
+        # verified against rustc: the declaring mod-rs root's directory plus
+        # the inline-module components). The pre-round-12 scanner silently
+        # left the file out of the graph, so an #[ignore] on a REQUIRED_PIN
+        # there passed the gate — the guard now follows the wiring. The
+        # target deliberately does NOT match the mod name, so the wiring is
+        # the only route in.
         by_path, unattributable = self._ignored_sources(
             {
                 "lib.rs": (
                     "mod outer {\n"
-                    "    #[path = \"inner.rs\"]\n"
-                    "    mod inner;\n"
+                    "    #[path = \"real.rs\"]\n"
+                    "    mod routed;\n"
                     "}\n"
                 ),
-                "inner.rs": _IGNORED_PIN,
+                "outer/real.rs": _IGNORED_PIN,
+            }
+        )
+        self.assertEqual(sorted(by_path), ["outer::routed::tests::critical_pin"])
+        self.assertEqual(unattributable, {})
+
+    def test_inline_module_path_wiring_in_non_mod_rs_file_is_wired(self):
+        # Round-12, the non-mod-rs half of the rustc rule: in `src/a/b.rs`
+        # (module a::b), an inline module's #[path] child resolves against
+        # `src/a/b/` plus the inline-module components — rustc verified:
+        # `mod s { #[path = "x.rs"] mod m; }` loads `src/a/b/s/x.rs`.
+        by_path, unattributable = self._ignored_sources(
+            {
+                "lib.rs": "mod a;\n",
+                "a.rs": "pub mod b;\n",
+                "a/b.rs": (
+                    "pub mod s {\n"
+                    "    #[path = \"real.rs\"]\n"
+                    "    pub mod m;\n"
+                    "}\n"
+                ),
+                "a/b/s/real.rs": _IGNORED_PIN,
+            }
+        )
+        self.assertEqual(
+            sorted(by_path), ["a::b::s::m::tests::critical_pin"]
+        )
+        self.assertEqual(unattributable, {})
+
+    def test_attribute_between_path_and_declaration_does_not_break_wiring(self):
+        # Round-12 review: the idiomatic platform-wiring shape puts a cfg
+        # attribute between the path attribute and the `mod` declaration
+        # (`#[path = "..."]` + `#[cfg(unix)]`). The old single-entry pairing
+        # silently dropped exactly this wiring while the `#[cfg]`-first
+        # order worked; a path value stays pending across the run's
+        # attribute entries until the declaration (or a non-attribute item)
+        # ends it.
+        by_path, unattributable = self._ignored_sources(
+            {
+                "lib.rs": (
+                    "#[path = \"wired/real_target.rs\"]\n"
+                    "#[cfg(unix)]\n"
+                    "mod pinned_mod;\n"
+                ),
+                "wired/real_target.rs": _IGNORED_PIN,
+            }
+        )
+        self.assertEqual(sorted(by_path), ["pinned_mod::tests::critical_pin"])
+        self.assertEqual(unattributable, {})
+
+    def test_path_run_ended_by_non_attribute_item_drops_pending_value(self):
+        # The pending value must not leak past the run: rustc attaches the
+        # path attribute to the next item, and a `fn` there means the
+        # "wiring" never was one — no module may enter the graph through it
+        # (the stray file stays unscanned; a pin living there is caught by
+        # main()'s source-attribution net, not by phantom scanning).
+        by_path, unattributable = self._ignored_sources(
+            {
+                "lib.rs": (
+                    "#[path = \"stray_target.rs\"]\n"
+                    "fn not_a_mod() {}\n"
+                ),
+                "stray_target.rs": _IGNORED_PIN,
             }
         )
         self.assertEqual(by_path, {})
@@ -568,6 +634,40 @@ class ScannerParsingTests(GuardFixture):
             "}\n"
         )
         self.assertIn("skipped_wrapped", ignored)
+
+    def test_rustfmt_wrapped_generic_signature_is_detected(self):
+        # Round-12 review: rustfmt wraps a long generic parameter list so
+        # the parameter `(` opens on a later line (`fn g<\n    T: ...,\n>(
+        # `). Requiring the paren on the name's line silently dropped the
+        # hit with no fail-closed fallback; the scan must follow the
+        # signature to its paren.
+        ignored = self._ignored(
+            "#[test]\n"
+            "#[ignore = \"wrapped generics\"]\n"
+            "fn long_name_with_generics<\n"
+            "    T: Clone + Send + Sync + Static,\n"
+            ">(\n"
+            "    value: T,\n"
+            ") {\n"
+            "}\n"
+        )
+        self.assertIn("long_name_with_generics", ignored)
+
+    def test_wrapped_signature_stops_at_body_brace(self):
+        # The lookahead must not jump across a body: a `fn`-looking line
+        # whose `{` (or `;`) comes before any `(` is not a function this
+        # run attaches to — no hit may be fabricated for it (rustc rejects
+        # the shape outright, so a missed hit cannot go live either).
+        ignored = self._ignored(
+            "#[test]\n"
+            "#[ignore]\n"
+            "fn not_a_signature<\n"
+            "    T: Clone,\n"
+            "> where T: Static {\n"
+            "    let x = 1;\n"
+            "}\n"
+        )
+        self.assertEqual(ignored, {})
 
     def test_ignore_inside_string_literal_is_not_a_hit(self):
         # `ignore` is judged by tokens outside strings: a cfg_attr whose
@@ -793,9 +893,12 @@ class DuplicateRegistrationTests(unittest.TestCase):
     """main()'s duplicate-#[test] detection — the guard's original purpose
     (review #455 rounds 26/28) — previously had no committed regression:
     these run the real main() against a mocked `cargo test --list`
-    registry, so the duplicate half is covered without cargo too."""
+    registry, so the duplicate half is covered without cargo too. Round-12
+    adds the composition layer: main()'s headline "pin is #[ignore]d"
+    failure path, the relocated/absent message branches, the argv guard,
+    the cargo invocation contract, and the source-attribution net."""
 
-    def _run_main(self, paths):
+    def _run_main(self, paths, source="", required=None):
         import contextlib
         import io
         import sys
@@ -803,12 +906,17 @@ class DuplicateRegistrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             _write(root / "pinvou3-app" / "src-tauri" / "Cargo.toml", "")
-            _write(root / "pinvou3-app" / "src-tauri" / "src" / "lib.rs", "")
+            _write(root / "pinvou3-app" / "src-tauri" / "src" / "lib.rs", source)
             stderr = io.StringIO()
+            pins = (
+                list(guard.REQUIRED_PINS) if required is None else list(required)
+            )
             with patch.object(
                 guard, "MANIFEST", str(root / "pinvou3-app/src-tauri/Cargo.toml")
             ), patch.object(
                 guard, "list_tests", return_value=list(paths)
+            ), patch.object(
+                guard, "REQUIRED_PINS", pins
             ), patch.object(
                 sys, "argv", ["test-registry-guard"]
             ), contextlib.redirect_stderr(stderr):
@@ -826,13 +934,169 @@ class DuplicateRegistrationTests(unittest.TestCase):
 
     def test_same_name_in_distinct_modules_is_not_a_duplicate(self):
         # Full-path keying: two modules may each carry a same-named test —
-        # libtest registers both separately. With every pin present the
+        # libtest registers both separately. With the required pin present
+        # AND its source attributable (round-12: the registry half alone no
+        # longer satisfies main() — the fixture declares the real fns) the
         # guard must pass (the bare-name era would have red here).
+        source = (
+            "mod a {\n"
+            "    mod tests {\n"
+            "        #[test]\n"
+            "        fn dup() {}\n"
+            "    }\n"
+            "}\n"
+            "mod b {\n"
+            "    mod tests {\n"
+            "        #[test]\n"
+            "        fn dup() {}\n"
+            "    }\n"
+            "}\n"
+        )
         code, err = self._run_main(
-            list(guard.REQUIRED_PINS) + ["a::tests::dup", "b::tests::dup"]
+            ["a::tests::dup", "b::tests::dup"],
+            source=source,
+            required=["a::tests::dup"],
         )
         self.assertEqual(code, 0)
         self.assertNotIn("duplicate", err)
+
+    def test_main_reports_ignored_pin_end_to_end(self):
+        # Round-12 composition net (fresh review L3): the scan half
+        # (ignored_source_pins) and the attribution half
+        # (_pin_ignored_locations) were each covered in isolation, but
+        # main()'s headline failure path — the reason the guard exists —
+        # was never exercised end to end. A wiring regression inside
+        # main() must not pass silently.
+        source = (
+            "mod a {\n"
+            "    mod tests {\n"
+            "        #[test]\n"
+            '        #[ignore = "quarantined"]\n'
+            "        fn critical_pin() {}\n"
+            "    }\n"
+            "}\n"
+        )
+        code, err = self._run_main(
+            ["a::tests::critical_pin"],
+            source=source,
+            required=["a::tests::critical_pin"],
+        )
+        self.assertEqual(code, 1)
+        self.assertIn(
+            "required pin a::tests::critical_pin is #[ignore]d at", err
+        )
+        self.assertIn("lib.rs:4", err)
+
+    def test_main_reports_relocated_pin_with_new_location(self):
+        # A pin missing from the registry whose leaf still appears exactly
+        # once must name the new location (module move, not theft).
+        source = (
+            "mod moved {\n"
+            "    mod tests {\n"
+            "        #[test]\n"
+            "        fn critical_pin() {}\n"
+            "    }\n"
+            "}\n"
+        )
+        code, err = self._run_main(
+            ["moved::tests::critical_pin"],
+            source=source,
+            required=["old::tests::critical_pin"],
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("moved modules", err)
+        self.assertIn("moved::tests::critical_pin", err)
+
+    def test_main_reports_absent_pin_as_stolen_attribute(self):
+        code, err = self._run_main([], required=["old::tests::critical_pin"])
+        self.assertEqual(code, 1)
+        self.assertIn("absent from the registry", err)
+        self.assertIn("old::tests::critical_pin", err)
+
+    def test_main_fails_closed_on_registered_pin_with_unscannable_source(self):
+        # Round-12 source-attribution net: a listed pin whose declaring
+        # file the lib module graph never reaches (here the wired target
+        # does not exist on disk) would hide any #[ignore] — the guard
+        # refuses to trust the registry entry instead of passing.
+        source = "#[path = \"nowhere/real.rs\"]\nmod wired;\n"
+        code, err = self._run_main(
+            ["wired::tests::critical_pin"],
+            source=source,
+            required=["wired::tests::critical_pin"],
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("outside the scanned lib module graph", err)
+        self.assertIn("wired::tests::critical_pin", err)
+
+    def test_main_rejects_arguments(self):
+        import sys
+
+        with patch.object(sys, "argv", ["test-registry-guard", "--flag"]):
+            with self.assertRaises(SystemExit) as ctx:
+                guard.main()
+        self.assertIn("takes no arguments", str(ctx.exception))
+
+    def test_list_tests_invokes_locked_no_default_features_cargo(self):
+        # Round-12: the cargo invocation is a contract — same manifest,
+        # --no-default-features and --locked as the build step right before
+        # it (artifact reuse), terse listing, color pinned off.
+        captured = {}
+
+        class FakeResult:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def fake_run(cmd, capture_output, text, env):
+            captured["cmd"] = cmd
+            captured["env"] = env
+            return FakeResult()
+
+        with tempfile.TemporaryDirectory() as td:
+            manifest = str(
+                Path(td) / "pinvou3-app" / "src-tauri" / "Cargo.toml"
+            )
+            with patch.object(guard, "MANIFEST", manifest), patch.object(
+                guard.subprocess, "run", side_effect=fake_run
+            ):
+                with self.assertRaises(SystemExit):
+                    # zero parsed tests -> fail closed AFTER the call
+                    guard.list_tests()
+        self.assertEqual(captured["cmd"][:2], ["cargo", "test"])
+        self.assertIn("--locked", captured["cmd"])
+        self.assertIn("--no-default-features", captured["cmd"])
+        self.assertEqual(captured["env"]["CARGO_TERM_COLOR"], "never")
+
+
+class SameLineInlineModuleTests(GuardFixture):
+    """Round-12: an external `mod x;` sharing its line with the inline
+    module that opens there (`mod s { mod x; }`) must resolve against the
+    stack WITH `s` — the line-start snapshot resolved it one directory too
+    high, where a stray file could alias hits into wrong paths."""
+
+    def test_same_line_inline_external_resolves_inside_module(self):
+        by_path, unattributable = self._ignored_sources(
+            {
+                "lib.rs": "mod a;\n",
+                "a.rs": "mod s { mod child; }\n",
+                "a/s/child.rs": _IGNORED_PIN,
+            }
+        )
+        self.assertEqual(sorted(by_path), ["a::s::child::tests::critical_pin"])
+        self.assertEqual(unattributable, {})
+
+    def test_stray_file_at_wrong_level_is_not_scanned(self):
+        # The stray file the old stack snapshot WOULD have resolved (`a/child.rs`)
+        # is never compiled by rustc and must stay invisible to the graph.
+        by_path, unattributable = self._ignored_sources(
+            {
+                "lib.rs": "mod a;\n",
+                "a.rs": "mod s { mod child; }\n",
+                "a/child.rs": _IGNORED_PIN,
+            }
+        )
+        self.assertEqual(by_path, {})
+        self.assertEqual(unattributable, {})
 
 
 if __name__ == "__main__":
