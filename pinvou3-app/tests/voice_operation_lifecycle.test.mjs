@@ -759,7 +759,14 @@ test('desktop: actual session restore refuses missing buffers and failed remote 
     sandbox.remoteProxyDrafts = { get: () => '', set: () => writable };
     sandbox.setComposerDraft = value => { state.composerDraft = value; };
     sandbox.notify = () => {};
-    vm.runInContext(bridgeFunction(chatSource, 'restoreSteerText'), sandbox);
+    vm.runInContext(
+      // Official 适配：合并后的 restoreSteerText 依赖 #586 的
+      // stripMentionBlockForComposerRestore（chat.js 本体内联实现），
+      // 随恢复族一并提取进沙箱（window 全局缺省时原样返回）。
+      bridgeFunction(chatSource, 'stripMentionBlockForComposerRestore') + '\n'
+        + bridgeFunction(chatSource, 'restoreSteerText'),
+      sandbox,
+    );
     const owner = { sessionId: remote ? 'remote-session' : 'missing-session',
       draftEpoch: 4, operationId: 'voiceop-refused', restored: false };
     assert.equal(sandbox.restoreTaskDraft('recoverable text', owner), false);

@@ -91,7 +91,21 @@ const sendWithSessionRefsSrc = (() => {
   return source.slice(start, tail + tailMarker.length);
 })();
 
-const settlePrefix = `${refsSurvivingAcceptanceFn}\n${makeSettleSessionRefSendFn}\nconst settleSessionRefSend = makeSettleSessionRefSend({ mentionDraftKeyRef, sessionMentionEnabledRef, setSessionRefs });\n`;
+const settlePrefix = `${refsSurvivingAcceptanceFn}\n${makeSettleSessionRefSendFn}\nconst settleSessionRefSend = makeSettleSessionRefSend({ mentionDraftKeyRef, sessionMentionEnabledRef, setSessionRefs });\n`
+  // Remote-control scope the merged send lane now references (main's
+  // desktop-remote integration): the mention behavioral sandboxes run the
+  // plain local composer, so the remote lanes are inert — no transcript
+  // active, no identity drift, mayRestore() always true.
+  + 'const remoteChatActive = false;\n'
+  + 'const remoteTranscriptActive = false;\n'
+  + 'const remoteComposerIdentity = null;\n'
+  + 'const remoteComposerIdentityRef = { current: null };\n'
+  + 'const sameRemoteComposerOwner = () => true;\n'
+  + 'const activeSessionIdRef = { current: null };\n'
+  + 'const activeSessionId = null;\n'
+  + 'const controlledChatActive = false;\n'
+  + 'const remoteNewDispatchReady = true;\n'
+  + 'const controlledLinkReady = true;\n';
 
 
 test('injection block carries metadata + contract only, no contents; round-trip strips it losslessly', () => {
@@ -3448,7 +3462,7 @@ test('canSend keeps a refs-only composer sendable (behavioral, round-25 asto min
   assert.notEqual(start, -1, 'canSend expression not found');
   const expr = source.slice(start, source.indexOf(';', start) + 1);
   const evalWith = (members) => {
-    const sandbox = { isMultiAgentReadOnly: false, firstTurnPending: false, hasDraftText: false, hasReadyAttachment: false, ...members };
+    const sandbox = { isMultiAgentReadOnly: false, firstTurnPending: false, hasDraftText: false, hasReadyAttachment: false, remoteChatActive: false, controlledChatActive: false, hasRemoteFile: false, ...members };
     vm.runInNewContext(`${expr}\nthis.canSend = canSend;`, sandbox);
     return sandbox.canSend;
   };
