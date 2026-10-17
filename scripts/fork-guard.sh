@@ -108,6 +108,9 @@ fingerprints=(
   "T2|Windows PowerShell temp-script form end-to-end|CodeWhale/crates/tui/src/tools/shell/tests.rs|fn forkguard_powershell_temp_script_form_runs_a_non_ascii_payload"
   "T1|宿主 facade 公开 Automation        |CodeWhale/crates/tui/src/lib.rs|pub mod automation_manager;"
   "T1|宿主显式 route limits              |CodeWhale/crates/tui/src/route_runtime.rs|pub fn resolve_runtime_route_with_limits("
+  "T1|同模型请求保留冻结宿主额度           |CodeWhale/crates/tui/src/client.rs|if request.model.trim() == self.default_model {"
+  "T1|同模型 model-aware 请求额度回归     |CodeWhale/crates/tui/src/client.rs|fn model_aware_same_model_request_keeps_host_declared_route_limits"
+  "T1|同模型子客户端 rebind 额度回归      |CodeWhale/crates/tui/src/client.rs|fn rebinding_the_same_model_keeps_host_declared_route_limits"
   "T1|只读 worker ledger                |CodeWhale/crates/tui/src/tools/subagent/mod.rs|pub fn read_persisted_agent_worker_records("
   "T1|可靠 steer 返回关联 id             |CodeWhale/crates/tui/src/core/engine/handle.rs|pub async fn steer(&self, content: impl Into<String>) -> Result<String>"
   "T1|steer 撤回有界回归                 |CodeWhale/crates/tui/src/core/engine/tests.rs|forkguard_steer_lifecycle_withdrawal_is_bounded_and_prevents_commit"
@@ -273,6 +276,14 @@ fingerprints=(
   "APP|turn gate 持锁副作用 await 上界   |pinvou3-app/src-tauri/src/features/assistant/engine.rs|fn forkguard_reclaimed_persistence_join_detaches_task_that_outlives_budget"
   "APP|turn gate 持锁副作用 await 上界   |pinvou3-app/src-tauri/src/features/assistant/engine_pool.rs|async fn bounded_teardown_shutdown<S, Fut>"
   "APP|turn gate 持锁副作用 await 上界   |pinvou3-app/src-tauri/src/features/assistant/engine_pool.rs|fn forkguard_spawn_failure_teardown_shutdown_bounded_and_retried"
+  "APP|未公开引擎拆除实际有界接线       |pinvou3-app/src-tauri/src/features/assistant/engine_pool.rs|fn spawn_failure_teardown_is_bounded_in_production"
+  "APP|未公开引擎拆除托管旧资源回归     |pinvou3-app/src-tauri/src/features/assistant/engine_pool_remote_tests.rs|fn cold_custody_shutdown_only_retry_retains_old_resources_and_never_blocks_drop"
+  "APP|未公开引擎拆除保持 FIFO 回归    |pinvou3-app/src-tauri/src/features/assistant/engine_pool_remote_tests.rs|fn cold_custody_full_mailbox_keeps_cancel_shutdown_fifo_and_spares_resident"
+  "APP|临时模型真实 wire 统一闭集       |pinvou3-app/src-tauri/src/core/model_wire.rs|pub(crate) fn model_route_uses_responses("
+  "APP|临时主模型 Responses 真实接纳    |pinvou3-app/src-tauri/src/features/remote_control/controller/temporary_model.rs|fn implicit_responses_primary_is_wire_true_and_forged_chat_is_rejected"
+  "APP|Responses 主模型隔离 Chat 图片工具 |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|fn locked_responses_primary_keeps_native_images_but_does_not_reuse_chat_vision_tool"
+  "APP|临时模型旧 Chat 正控              |pinvou3-app/src-tauri/src/features/remote_control/controller/temporary_model.rs|fn legacy_and_aggregator_chat_routes_remain_exportable_and_materializable"
+  "APP|冻结路线协议隔离宿主环境         |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|fn locked_runtime_responses_wire_ignores_environment_suppression"
   "APP|resolved route 由宿主统一解析     |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|pub fn resolve_runtime_route_for_model("
   "APP|GLM 小写存量配置解析到规范模型    |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|fn forkguard_zai_direct_route_survives_model_casing_mismatch"
   "APP|128K/256K compaction 合约        |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|fn forkguard_compaction_128k_scenarios"
@@ -329,6 +340,8 @@ fi
 echo
 bold "── 第 2 层：CodeWhale forkguard 回归 ──"
 ( cd "$CODEWHALE" && cargo test -p codewhale-tui --lib --locked forkguard_ -- --test-threads=1 ) || fail=1
+( cd "$CODEWHALE" && cargo test -p codewhale-tui --lib --locked client::tests::model_aware_same_model_request_keeps_host_declared_route_limits -- --exact --test-threads=1 ) || fail=1
+( cd "$CODEWHALE" && cargo test -p codewhale-tui --lib --locked client::tests::rebinding_the_same_model_keeps_host_declared_route_limits -- --exact --test-threads=1 ) || fail=1
 ( cd "$CODEWHALE" && cargo test -p codewhale-tui --lib --locked --features benchmark-eval-controls forkguard_benchmark_ -- --test-threads=1 ) || fail=1
 
 echo

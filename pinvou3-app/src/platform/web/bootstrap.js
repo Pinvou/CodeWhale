@@ -14,6 +14,9 @@
     interruptSend: false,
     deviceFileUpload: true,
     acpCodeMode: true,
+    // Windows-only desktop dual-end remote control: the browser lane owns the
+    // WebUI v2 wire and must never expose the desktop controller surface.
+    desktopRemoteControl: false,
     // Mouse/keyboard control is desktop-only by design; the web bridge only
     // exposes rejecting stubs (review finding: state the polarity explicitly).
     computerUse: false,

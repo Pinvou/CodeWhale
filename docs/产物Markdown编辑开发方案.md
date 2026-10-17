@@ -674,7 +674,7 @@ if (!force && latestDraftRef.current !== lastSavedRef.current) return false;
 用户在宽屏模式下打开右侧“产物与代码”面板，并拖动中间分割线调整左右区域宽度后，左侧对话区变窄。此时蓝色用户消息气泡里的 AI 编辑 prompt 可能显示不完整，尤其是包含很长 Windows 文件路径时，例如：
 
 ```text
-C:\Users\123\.pinvou3\sessions\...\workspace\hello-world.md
+C:\Users\<user>\.pinvou3\sessions\...\workspace\hello-world.md
 ```
 
 表现为：

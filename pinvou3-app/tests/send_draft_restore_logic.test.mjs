@@ -431,8 +431,14 @@ assert.match(
 // handleSend 的恢复必须保留 empty-vs-typed 区分（空输入框整体还原，非空降级为 append prefill）。
 assert.match(
   chatViewSource,
-  /if \(!accepted\) \{\s*\n\s*if \(inputTextRef\.current === ''\) setInputText\(text\);\s*\n\s*else if \(text\) bridge\.chat\.prefillComposer\(text, true\);/,
+  /if \(!accepted && mayRestore\(\)\) \{\s*\n\s*if \(inputTextRef\.current === ''\) setInputText\(text\);\s*\n\s*else if \(text\) bridge\.chat\.prefillComposer\(text, true\);/,
   'handleSend 的 !accepted 恢复分支必须保留 empty-vs-typed 区分',
+);
+
+assert.match(
+  chatViewSource,
+  /else if \(!accepted && remoteTranscriptActive && sentSessionId\) \{\s*\n\s*bridge\.chat\.restoreTaskDraft\(text, \{ sessionId: sentSessionId, restored: false \}\);/,
+  'cross-binding rejection must restore the draft to the original sentSessionId',
 );
 
 console.log('send_draft_restore_logic: all assertions passed');

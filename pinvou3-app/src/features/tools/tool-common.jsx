@@ -567,7 +567,8 @@ const AcFmtIcon = FileTypeIcon;
         ? 'bg-red-100 text-red-600 dark:bg-red-900/40 dark:text-red-400'
         : 'bg-green-100 text-green-600 dark:bg-green-900/40 dark:text-green-400';
       const TrendIcon = isPositive ? TrendingUp : TrendingDown;
-      const fmt = (v) => isNaN(v) ? '--' : v.toFixed(2);
+      // v can be undefined (missing field): Number.isNaN(undefined) is false, so it would pass through to toFixed and throw a TypeError; both null/undefined must be blocked.
+      const fmt = (v) => v == null || Number.isNaN(v) ? '--' : v.toFixed(2);
       return (
         <div className={`w-full max-w-md rounded-[24px] shadow-xl overflow-hidden border transition-all bg-white border-slate-100 shadow-slate-200/50 dark:bg-[#1C1C1E] dark:border-white/10 dark:shadow-none`}>
           <div className={`p-6 pb-5 ${bgGradient}`}>
@@ -581,7 +582,7 @@ const AcFmtIcon = FileTypeIcon;
               <div className="flex items-baseline space-x-4">
                 <span className={`text-[3.5rem] leading-none font-black tracking-tighter font-mono ${mainColor}`} style={{ fontVariantNumeric: 'tabular-nums' }}>{fmt(price)}</span>
                 <div className="flex flex-col justify-end pb-1 space-y-0.5">
-                  <span className={`text-sm font-bold font-mono px-1.5 py-0.5 rounded ${badgeColor}`}>{isPositive ? '+' : ''}{isNaN(changePercent) ? '--' : changePercent.toFixed(2)}%</span>
+                  <span className={`text-sm font-bold font-mono px-1.5 py-0.5 rounded ${badgeColor}`}>{isPositive ? '+' : ''}{changePercent == null || Number.isNaN(changePercent) ? '--' : changePercent.toFixed(2)}%</span>
                 </div>
               </div>
               <TrendIcon className={`w-12 h-12 mb-2 opacity-15 ${mainColor}`} />
