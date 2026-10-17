@@ -11,10 +11,6 @@ unmaintained = "all"
 unsound = "all"
 # Ignore specific advisories (known issues in dependencies)
 ignore = [
-    "RUSTSEC-2024-0436",  # paste unmaintained - no safe upgrade
-    "RUSTSEC-2026-0192",  # ttf-parser unmaintained - no safe upgrade
-    "RUSTSEC-2024-0388",  # derivative unmaintained - transitive via starlark
-    "RUSTSEC-2025-0057",  # fxhash unmaintained - transitive via starlark
     "RUSTSEC-2025-0141",  # bincode unmaintained - transitive via syntect, no safe upgrade (syntect 5.3.0 is latest)
     "RUSTSEC-2024-0320",  # yaml-rust unmaintained - transitive via syntect, no safe upgrade (syntect 5.3.0 is latest)
 ]
@@ -28,11 +24,9 @@ ignore = [
 # warning, so the ratchet is warm but not yet blocking CI.
 # Surviving duplicates after the 708 -> 679 shrink (see PR body):
 # - reqwest 0.12 vs 0.13 — blocked on oauth2 5.0.0 which still depends on reqwest 0.12
-# - sha2 0.10 vs 0.11 — blocked on oauth2 (0.10) vs schemaui 0.12 (0.11)
+# - sha2 0.10 vs 0.11 — blocked on oauth2 (0.10) vs the workspace (0.11)
 # - thiserror 1 vs 2 — blocked on portable-pty 0.9 via filedescriptor 0.8 (v1) vs workspace v2
 # - toml 0.8 vs 1.1 + toml_edit 0.22 vs 0.25 + winnow 0.7 vs 1.0 — blocked on rust-i18n 4.2 (0.8 stack) vs workspace 1.1
-# - strum 0.27 vs 0.28 — ratatui-widgets 0.3.0 (via ratatui 0.30.0) pins 0.27
-#   while ratatui-core 0.1.2 uses 0.28; unifies once widgets moves forward
 multiple-versions = "warn"
 wildcards = "deny"
 # Explicitly allow the surviving duplicates so `cargo deny` does not warn
@@ -51,8 +45,6 @@ skip = [
     { name = "fancy-regex", version = "0.16.2" },
     { name = "itertools", version = "0.13.0" },
     { name = "security-framework", version = "2.11.1" },
-    { name = "strum", version = "0.28.0" },
-    { name = "strum_macros", version = "0.28.0" },
     { name = "windows-sys" },
     { name = "windows-targets" },
     { name = "windows_aarch64_gnullvm" },

@@ -21,6 +21,8 @@ export function LocaleSwitcher({ current }: { current: string }) {
 
   const switchLocale = (code: string) => {
     if (code === current) return;
+    // Event handler, not render: writing the locale cookie is the point.
+    // eslint-disable-next-line react-hooks/immutability
     document.cookie = `NEXT_LOCALE=${code};path=/;max-age=${60 * 60 * 24 * 365}`;
     router.push(replacePathLocale(pathname, code));
   };

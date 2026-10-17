@@ -64,7 +64,15 @@ pub fn parse_mcp_command(input: &str) -> Result<ParsedMcpServer> {
         });
     }
 
-    let parts: Vec<String> = shell_words::split(input).unwrap_or_default();
+    // `shlex::split` returns None for unparseable input (unmatched quote,
+    // trailing backslash) — distinct from an empty token stream, so keep
+    // the two failure messages apart.
+    let parts: Vec<String> = shlex::split(input).ok_or_else(|| {
+        anyhow::anyhow!(
+            "MCP command cannot be parsed as shell words (unmatched quote or \
+             trailing backslash): {input:?}"
+        )
+    })?;
     if parts.is_empty() {
         anyhow::bail!("MCP command cannot be empty");
     }
@@ -528,58 +536,58 @@ mod tests {
         );
     }
 
-    // === shell_words split tests ===
+    // === shlex split tests ===
 
     #[test]
-    fn shell_words_simple() {
+    fn shlex_split_simple() {
         assert_eq!(
-            shell_words::split("npx server /tmp").unwrap(),
+            shlex::split("npx server /tmp").unwrap(),
             vec!["npx", "server", "/tmp"]
         );
     }
 
     #[test]
-    fn shell_words_double_quotes() {
+    fn shlex_split_double_quotes() {
         assert_eq!(
-            shell_words::split(r#"npx server --env="MY KEY""#).unwrap(),
+            shlex::split(r#"npx server --env="MY KEY""#).unwrap(),
             vec!["npx", "server", "--env=MY KEY"]
         );
     }
 
     #[test]
-    fn shell_words_single_quotes() {
+    fn shlex_split_single_quotes() {
         assert_eq!(
-            shell_words::split("npx server --env='MY KEY'").unwrap(),
+            shlex::split("npx server --env='MY KEY'").unwrap(),
             vec!["npx", "server", "--env=MY KEY"]
         );
     }
 
     #[test]
-    fn shell_words_mixed_quotes() {
+    fn shlex_split_mixed_quotes() {
         assert_eq!(
-            shell_words::split(r#"cmd --opt="hello world" --flag 'single'"#).unwrap(),
+            shlex::split(r#"cmd --opt="hello world" --flag 'single'"#).unwrap(),
             vec!["cmd", "--opt=hello world", "--flag", "single"]
         );
     }
 
     #[test]
-    fn shell_words_escaped_quote() {
+    fn shlex_split_escaped_quote() {
         assert_eq!(
-            shell_words::split(r#"cmd arg\"with\"quotes"#).unwrap(),
+            shlex::split(r#"cmd arg\"with\"quotes"#).unwrap(),
             vec!["cmd", r#"arg"with"quotes"#]
         );
     }
 
     #[test]
-    fn shell_words_empty() {
-        assert!(shell_words::split("").unwrap().is_empty());
-        assert!(shell_words::split("   ").unwrap().is_empty());
+    fn shlex_split_empty() {
+        assert!(shlex::split("").unwrap().is_empty());
+        assert!(shlex::split("   ").unwrap().is_empty());
     }
 
     #[test]
-    fn shell_words_postgres_url() {
+    fn shlex_split_postgres_url() {
         assert_eq!(
-            shell_words::split(
+            shlex::split(
                 r#"npx -y @modelcontextprotocol/server-postgres "postgresql://user:pass@host/db""#
             )
             .unwrap(),
@@ -605,6 +613,53 @@ mod tests {
                 "/tmp",
                 "--env=MY KEY"
             ]
+        );
+    }
+
+    // === shell_words → shlex migration: unparseable input edges ===
+
+    #[test]
+    fn shlex_unmatched_double_quote_fails_to_parse() {
+        // An unterminated quote must fail the parse (None) — never yield
+        // silently truncated tokens.
+        assert!(shlex::split(r#"npx server --config "unclosed"#).is_none());
+    }
+
+    #[test]
+    fn parse_command_unmatched_double_quote_is_rejected_as_unparseable() {
+        let err = parse_mcp_command(r#"npx server --config "unclosed"#).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cannot be parsed as shell words"),
+            "an unmatched quote must be reported as a parse failure: {msg}"
+        );
+        assert!(
+            !msg.contains("cannot be empty"),
+            "a non-empty command must not be reported as empty: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_command_trailing_backslash_is_rejected_as_unparseable() {
+        // `foo\` is non-empty input whose shell-word parse fails under
+        // shlex 2. shell-words 1.1 accepted it (as a program named
+        // `foo\`), and real shells accept it too — bash/sh/dash hand the
+        // literal-backslash name to exec, so it only fails when no such
+        // file exists. Surfacing the parse failure as a distinct error
+        // (instead of guessing at the intent) must stay.
+        let err = parse_mcp_command(r"foo\").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cannot be parsed as shell words"),
+            "a trailing backslash must be reported as a parse failure: {msg}"
+        );
+        assert!(
+            msg.contains(r"foo\\"),
+            "the message must echo the offending input: {msg}"
+        );
+        assert!(
+            !msg.contains("cannot be empty"),
+            "a trailing backslash is not an empty command: {msg}"
         );
     }
 

@@ -422,17 +422,38 @@ fn cache_is_fresh(cache: &McpRegistryIndex, now: DateTime<Utc>) -> bool {
 /// (`ServerResponse._meta["io.modelcontextprotocol.registry/official"]
 /// .status`, enum `active | deprecated | deleted`).
 /// <https://github.com/modelcontextprotocol/registry/blob/main/docs/reference/api/openapi.yaml>
-fn viable_entries(entries: Vec<RegistryServerEntry>) -> Vec<McpRegistryServerEntry> {
-    entries
-        .into_iter()
-        .filter(|entry| {
-            !matches!(
-                entry.lifecycle_status(),
-                Some("deleted") | Some("deprecated")
-            )
+fn viable_entries(
+    entries: Vec<RegistryServerEntry>,
+) -> Result<Vec<McpRegistryServerEntry>, ToolError> {
+    let mut viable = Vec::new();
+    for entry in entries {
+        if matches!(
+            entry.lifecycle_status(),
+            Some("deleted") | Some("deprecated")
+        ) {
+            continue;
+        }
+        if let Some(server) = server_to_entry(entry.server)? {
+            viable.push(server);
+        }
+    }
+    Ok(viable)
+}
+
+/// Quote one token of the rendered launch command. `shlex::try_quote`
+/// only fails on NUL bytes — which can never be part of a process
+/// argument — and the registry payload it quotes is externally
+/// controlled, so failure must surface as a sync error instead of a
+/// panic or a silent strip that would change the launch semantics.
+fn quote_launch_token(value: &str, identifier: &str, field: &str) -> Result<String, ToolError> {
+    shlex::try_quote(value)
+        .map(|quoted| quoted.into_owned())
+        .map_err(|_| {
+            ToolError::execution_failed(format!(
+                "Registry package {identifier} contains a NUL byte in its \
+                 {field}; refusing to render a launch command"
+            ))
         })
-        .filter_map(|entry| server_to_entry(entry.server))
-        .collect()
 }
 
 /// Render the run command template. Positional `packageArguments` with a
@@ -448,7 +469,7 @@ fn build_run_command(
     version: &str,
     runtime_arguments: &[String],
     package_arguments: &[RegistryArg],
-) -> String {
+) -> Result<String, ToolError> {
     let runtime = runtime_hint;
     let mut normalized_runtime_arguments = runtime_arguments.to_vec();
     if runtime_hint == "npx"
@@ -460,8 +481,8 @@ fn build_run_command(
     }
     let mid = normalized_runtime_arguments
         .iter()
-        .map(|argument| shell_words::quote(argument))
-        .collect::<Vec<_>>()
+        .map(|argument| quote_launch_token(argument, identifier, "runtime arguments"))
+        .collect::<Result<Vec<_>, _>>()?
         .join(" ");
     let mid_with_space = if mid.is_empty() {
         String::new()
@@ -471,7 +492,7 @@ fn build_run_command(
     let (sep, tail) = match runtime_hint {
         "npx" => ("@", version.to_string()),
         "uvx" => ("==", version.to_string()),
-        _ => return String::new(),
+        _ => return Ok(String::new()),
     };
     // Upstream positional packageArguments ship without a `name`; named
     // args always carry one. A nameless arg with a literal `value` (or a
@@ -483,16 +504,18 @@ fn build_run_command(
         .filter(|a| !a.is_required)
         .filter(|a| a.name.is_none())
         .filter_map(|a| a.value.as_deref().or(a.default.as_deref()))
-        .map(|value| shell_words::quote(value).into_owned())
-        .collect();
+        .map(|value| quote_launch_token(value, identifier, "package arguments"))
+        .collect::<Result<Vec<_>, _>>()?;
     let fixed_str = if fixed.is_empty() {
         String::new()
     } else {
         format!(" {}", fixed.join(" "))
     };
     let package_spec = format!("{identifier}{sep}{tail}");
-    let package = shell_words::quote(&package_spec);
-    format!("{runtime} {mid_with_space}{package}{fixed_str} <ARGS>")
+    let package = quote_launch_token(&package_spec, identifier, "package spec")?;
+    Ok(format!(
+        "{runtime} {mid_with_space}{package}{fixed_str} <ARGS>"
+    ))
 }
 
 fn build_launch_spec(
@@ -500,15 +523,15 @@ fn build_launch_spec(
     identifier: &str,
     version: &str,
     pkg: &RegistryPackage,
-) -> McpLaunchSpec {
-    McpLaunchSpec {
+) -> Result<McpLaunchSpec, ToolError> {
+    Ok(McpLaunchSpec {
         run_command: build_run_command(
             runtime_hint,
             identifier,
             version,
             &pkg.runtime_arguments,
             &pkg.package_arguments,
-        ),
+        )?,
         required_args: pkg
             .package_arguments
             .iter()
@@ -528,10 +551,10 @@ fn build_launch_spec(
                 default: a.default.clone(),
             })
             .collect(),
-    }
+    })
 }
 
-fn server_to_entry(server: RegistryServer) -> Option<McpRegistryServerEntry> {
+fn server_to_entry(server: RegistryServer) -> Result<Option<McpRegistryServerEntry>, ToolError> {
     // We only need the FIRST viable stdio package per server for
     // launch metadata; everything beyond it would just duplicate
     // info. Filter to stdio, resolve runtime_hint + version, and stop
@@ -558,13 +581,15 @@ fn server_to_entry(server: RegistryServer) -> Option<McpRegistryServerEntry> {
             Some((p, hint, version))
         });
 
-    let (pkg, hint, version) = first_pkg?;
+    let Some((pkg, hint, version)) = first_pkg else {
+        return Ok(None);
+    };
 
-    Some(McpRegistryServerEntry {
+    Ok(Some(McpRegistryServerEntry {
         name: server.name,
         description: server.description,
-        launch: build_launch_spec(&hint, &pkg.identifier, &version, &pkg),
-    })
+        launch: build_launch_spec(&hint, &pkg.identifier, &version, &pkg)?,
+    }))
 }
 
 /// Prompt attached to every `registry_sync` result (Registry-first policy).
@@ -800,7 +825,7 @@ fn sync_strategy(cache: Option<&McpRegistryIndex>, now: DateTime<Utc>) -> SyncSt
 fn merge_incremental_entries(
     base: &[McpRegistryServerEntry],
     entries: Vec<RegistryServerEntry>,
-) -> Vec<McpRegistryServerEntry> {
+) -> Result<Vec<McpRegistryServerEntry>, ToolError> {
     let mut merged: HashMap<String, McpRegistryServerEntry> = base
         .iter()
         .map(|entry| (entry.name.clone(), entry.clone()))
@@ -814,7 +839,7 @@ fn merge_incremental_entries(
             merged.remove(&name);
             continue;
         }
-        match server_to_entry(entry.server) {
+        match server_to_entry(entry.server)? {
             Some(updated) => {
                 merged.insert(name, updated);
             }
@@ -823,7 +848,7 @@ fn merge_incremental_entries(
             }
         }
     }
-    merged.into_values().collect()
+    Ok(merged.into_values().collect())
 }
 
 /// Fetch the index (full or incremental), assemble the next snapshot in
@@ -852,11 +877,11 @@ async fn sync_once(path: &Path) -> Result<(), ToolError> {
         match fetch_registry_entries(&client, updated_since).await {
             Ok(entries) => {
                 servers = Some(match strategy {
-                    SyncStrategy::Full => viable_entries(entries),
+                    SyncStrategy::Full => viable_entries(entries)?,
                     SyncStrategy::Incremental { .. } => merge_incremental_entries(
                         &cached.expect("incremental needs a cache").servers,
                         entries,
-                    ),
+                    )?,
                 });
                 break;
             }
@@ -949,6 +974,26 @@ impl ToolSpec for McpSyncRegistry {
             .map_err(|e| ToolError::execution_failed(format!("Serialize: {e}")))?;
         Ok(ToolResult::success(json))
     }
+}
+
+/// Quote one model- or cache-supplied value spliced into a Registry launch
+/// command. `shlex::try_quote` only fails on NUL bytes — which can never be
+/// part of a process argument — and the value crosses the cache-file or
+/// tool-input boundary, so failure must surface as invalid input instead
+/// of a panic or a silent strip.
+fn quote_registry_argument(
+    value: &str,
+    registry_name: &str,
+    field: &str,
+) -> Result<String, ToolError> {
+    shlex::try_quote(value)
+        .map(|quoted| quoted.into_owned())
+        .map_err(|_| {
+            ToolError::invalid_input(format!(
+                "argument {field} for registry server '{registry_name}' contains \
+                 a NUL byte, which cannot be passed as a process argument"
+            ))
+        })
 }
 
 /// Start one zero-environment stdio server selected from the Registry cache.
@@ -1064,9 +1109,13 @@ impl ToolSpec for StartRegistryMcpServer {
                     ))
                 })?;
             if matches!(argument.kind.as_deref(), Some("named")) && !argument.name.is_empty() {
-                rendered_args.push(shell_words::quote(&argument.name).into_owned());
+                rendered_args.push(quote_registry_argument(
+                    &argument.name,
+                    registry_name,
+                    "name",
+                )?);
             }
-            rendered_args.push(shell_words::quote(&value).into_owned());
+            rendered_args.push(quote_registry_argument(&value, registry_name, "value")?);
         }
 
         let command = entry
@@ -1099,7 +1148,7 @@ mod tests {
             description: "desc".into(),
             packages: None,
         };
-        assert!(server_to_entry(server).is_none());
+        assert!(server_to_entry(server).unwrap().is_none());
     }
 
     #[test]
@@ -1118,7 +1167,7 @@ mod tests {
                 environment_variables: Value::Null,
             }]),
         };
-        assert!(server_to_entry(server).is_none());
+        assert!(server_to_entry(server).unwrap().is_none());
     }
 
     #[test]
@@ -1137,7 +1186,7 @@ mod tests {
                 environment_variables: Value::Null,
             }]),
         };
-        let entry = server_to_entry(server).unwrap();
+        let entry = server_to_entry(server).unwrap().unwrap();
         assert_eq!(entry.launch.run_command, "npx -y @test/pkg@1.0.0 <ARGS>");
     }
 
@@ -1157,7 +1206,7 @@ mod tests {
                 environment_variables: json!([{ "name": "API_KEY", "isRequired": true }]),
             }]),
         };
-        assert!(server_to_entry(server).is_none());
+        assert!(server_to_entry(server).unwrap().is_none());
     }
 
     #[test]
@@ -1188,7 +1237,7 @@ mod tests {
                 environment_variables: Value::Null,
             }]),
         };
-        let entry = server_to_entry(server).unwrap();
+        let entry = server_to_entry(server).unwrap().unwrap();
         assert_eq!(
             entry.launch.run_command,
             "npx -y agentic-mermaid@0.1.2 mcp <ARGS>"
@@ -1222,7 +1271,7 @@ mod tests {
                 environment_variables: Value::Null,
             }]),
         };
-        let entry = server_to_entry(server).unwrap();
+        let entry = server_to_entry(server).unwrap().unwrap();
         assert_eq!(entry.launch.run_command, "npx -y @test/fs@1.0.0 <ARGS>");
         assert_eq!(entry.launch.required_args.len(), 1);
     }
@@ -1242,9 +1291,73 @@ mod tests {
                 value: Some("/tmp/a folder".into()),
                 default: None,
             }],
-        );
-        let parsed = shell_words::split(command.replace("<ARGS>", "").trim()).unwrap();
+        )
+        .unwrap();
+        let parsed = shlex::split(command.replace("<ARGS>", "").trim()).unwrap();
         assert_eq!(parsed.last().map(String::as_str), Some("/tmp/a folder"));
+    }
+
+    // === shell_words → shlex migration: NUL bytes must error, not panic ===
+
+    #[test]
+    fn run_command_rejects_nul_byte_in_runtime_arguments() {
+        // Registry launch data is externally controlled; `shlex::try_quote`
+        // fails on NUL bytes and the failure must propagate as an error
+        // (shell-words 1.1's quote() silently embedded the NUL into the
+        // launch string; the migration rejects it instead).
+        let err = build_run_command("npx", "@test/pkg", "1.0.0", &["--flag\u{0}".into()], &[])
+            .unwrap_err();
+        assert!(matches!(err, ToolError::ExecutionFailed { .. }));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("NUL byte"),
+            "error must name the NUL byte: {msg}"
+        );
+        assert!(
+            msg.contains("@test/pkg"),
+            "error must name the offending package: {msg}"
+        );
+    }
+
+    #[test]
+    fn run_command_rejects_nul_byte_in_fixed_package_argument() {
+        let err = build_run_command(
+            "npx",
+            "@test/pkg",
+            "1.0.0",
+            &["-y".into()],
+            &[RegistryArg {
+                name: None,
+                description: None,
+                is_required: false,
+                kind: Some("positional".into()),
+                value: Some("mc\u{0}p".into()),
+                default: None,
+            }],
+        )
+        .unwrap_err();
+        assert!(matches!(err, ToolError::ExecutionFailed { .. }));
+        assert!(
+            err.to_string().contains("NUL byte"),
+            "error must name the NUL byte: {err}"
+        );
+    }
+
+    #[test]
+    fn registry_argument_with_nul_byte_is_invalid_input_not_a_panic() {
+        // The start path quotes model- or cache-supplied argument values;
+        // a NUL byte is rejected as invalid input instead of panicking.
+        let err = quote_registry_argument("va\u{0}lue", "test/server", "value").unwrap_err();
+        assert!(matches!(err, ToolError::InvalidInput { .. }));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("NUL byte"),
+            "error must name the NUL byte: {msg}"
+        );
+        assert!(
+            msg.contains("test/server"),
+            "error must name the registry server: {msg}"
+        );
     }
 
     #[test]
@@ -1263,7 +1376,7 @@ mod tests {
                 environment_variables: Value::Null,
             }]),
         };
-        assert!(server_to_entry(server).is_none());
+        assert!(server_to_entry(server).unwrap().is_none());
     }
 
     #[test]
@@ -1282,7 +1395,7 @@ mod tests {
                 environment_variables: Value::Null,
             }]),
         };
-        assert!(server_to_entry(server).is_none());
+        assert!(server_to_entry(server).unwrap().is_none());
     }
 
     #[test]
@@ -1301,7 +1414,7 @@ mod tests {
                 environment_variables: Value::Null,
             }]),
         };
-        assert!(server_to_entry(server).is_none());
+        assert!(server_to_entry(server).unwrap().is_none());
     }
 
     /// End-to-end smoke test: cold-start `McpSyncRegistry::execute()`
@@ -1493,10 +1606,49 @@ mod tests {
             parse_server_entry(json!({ "name": "e/no-pkg", "description": "d" }), None),
         ];
 
-        let viable = viable_entries(entries);
+        let viable = viable_entries(entries).unwrap();
 
         let names: Vec<&str> = viable.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["a/active", "d/no-meta"]);
+    }
+
+    #[test]
+    fn viable_entries_fails_closed_on_nul_byte_in_registry_data() {
+        // A NUL byte arriving in registry launch data must fail the sync
+        // conversion loudly — never panic, and never drop the entry
+        // silently (the snapshot would then advertise a server whose
+        // command cannot be rendered).
+        let entry = parse_server_entry(
+            json!({
+                "name": "nul/server",
+                "description": "d",
+                "packages": [{
+                    "registryType": "npm",
+                    "identifier": "@test/pkg",
+                    "version": "1.0.0",
+                    "runtimeHint": "npx",
+                    "transport": "stdio",
+                    "packageArguments": [],
+                    "runtimeArguments": ["-y\u{0}"],
+                    "environmentVariables": null
+                }]
+            }),
+            None,
+        );
+        // `McpRegistryServerEntry` is not `Debug`, so unwrap_err() is
+        // unavailable; match out the error directly.
+        let Err(err) = viable_entries(vec![entry]) else {
+            panic!("NUL byte in registry launch data must fail the conversion");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("NUL byte"),
+            "error must name the NUL byte: {msg}"
+        );
+        assert!(
+            msg.contains("@test/pkg"),
+            "error must name the offending package: {msg}"
+        );
     }
 
     /// Minimal cache entry — only `name`/`description`/launch matter to the
@@ -1683,7 +1835,7 @@ mod tests {
             ),
         ];
 
-        let merged = merge_incremental_entries(&base, entries);
+        let merged = merge_incremental_entries(&base, entries).unwrap();
         let by_name: HashMap<&str, &McpRegistryServerEntry> = merged
             .iter()
             .map(|entry| (entry.name.as_str(), entry))

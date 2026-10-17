@@ -23,7 +23,7 @@ const repoRoot = path.resolve(webRoot, "..");
 const configPath = path.join(webRoot, "gt.config.json");
 const catalogDir = path.join(webRoot, "gt-catalog");
 const dictDir = path.join(webRoot, "lib", "i18n", "dictionaries");
-const pinnedCli = "2.17.2";
+const pinnedCli = "2.26.3";
 const tuiLocaleDir = path.join(repoRoot, "crates", "tui", "locales");
 const promptPath = path.join(repoRoot, "crates", "tui", "src", "prompts", "text.rs");
 

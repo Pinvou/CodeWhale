@@ -1,0 +1,35 @@
+name: VS Code Extension
+
+on:
+  push:
+    branches: [master, main, pinvou3-clean]
+  pull_request:
+    branches: [master, main, pinvou3-clean]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  typecheck:
+    name: Type Check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extensions/vscode
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: extensions/vscode/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      # The extension rides on major TypeScript bumps (7.x at the time of
+      # this workflow) that no other CI job compiles; `vsce package` only
+      # runs at release time. `tsc -p ./` (the compile script) is the same
+      # emit used for packaging, without the --noEmit blind spot of a
+      # checker-only invocation.
+      - name: Compile (type check)
+        run: npm run compile
