@@ -1,6 +1,11 @@
 const MAX_FILE_BYTES = 32 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 const MAX_FILES = 8;
+// Downloads get the same single-file bound as uploads (B enforces the same
+// limit per transfer server-side). Without it a misbehaving or compromised B
+// could keep a `completed:false` chunk stream going and grow this WebView's
+// memory without bound.
+const MAX_DOWNLOAD_BYTES = 32 * 1024 * 1024;
 
 // Operation identity is revision-bound; finishing an old operation may never
 // clear a newer upload. Tokens are local UI ownership, not remote authority.
@@ -101,7 +106,12 @@ export async function downloadRemoteArtifact(api, binding, artifact) {
   );
   const chunks = [];
   let nextChunk = 0;
+  let receivedBytes = 0;
   try {
+    if (!Number.isSafeInteger(begin.totalBytes) || begin.totalBytes < 0
+      || begin.totalBytes > MAX_DOWNLOAD_BYTES) {
+      throw new Error('remote_artifact_size_limit');
+    }
     for (;;) {
       const receipt = await api.artifactDownloadChunk(
         binding.localSessionId, binding.remoteRef, artifact.taskId, artifact.artifactId,
@@ -109,6 +119,10 @@ export async function downloadRemoteArtifact(api, binding, artifact) {
       );
       const bytes = base64ToBytes(receipt.chunkB64);
       if (bytes.length !== receipt.chunkBytes) throw new Error('remote_artifact_chunk_invalid');
+      receivedBytes += bytes.length;
+      if (receivedBytes > begin.totalBytes || receivedBytes > MAX_DOWNLOAD_BYTES) {
+        throw new Error('remote_artifact_size_limit');
+      }
       chunks.push(bytes);
       if (receipt.completed) break;
       if (!Number.isSafeInteger(receipt.nextChunk) || receipt.nextChunk <= nextChunk) {

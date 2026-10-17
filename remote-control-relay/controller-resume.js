@@ -27,6 +27,18 @@ function fail(code) {
   throw new ControllerResumeHookError(code);
 }
 
+// Soft failures are rejected per frame without teardown: the sender has not
+// yet proven lease membership (token verification has not passed), so the
+// frame must never make an irreversible decision about the live lease —
+// neither for a stray frame from a non-member nor for a retry racing a
+// just-reconnected socket. Only failures after token verification own
+// cleanup authority.
+function failSoft(code) {
+  const error = new ControllerResumeHookError(code);
+  error.soft = true;
+  throw error;
+}
+
 function now(clock) {
   const value = clock();
   if (!Number.isSafeInteger(value) || value < 0) fail("controller_resume_clock_invalid");
@@ -197,7 +209,13 @@ export class ControllerResumeHooks {
       state.accepted.set(key, Object.freeze({ socketIdentity, digest, requestId: message.request_id }));
       return result;
     } catch (error) {
-      await this.#terminate(state, lease, "controller_resume_failed");
+      // Pre-authentication failures (unknown sender, bad schema/token, wrong
+      // phase) must not hand cleanup authority to an unverified frame: a
+      // replaced controller still holding the plaintext lease context could
+      // otherwise kill the successor's live session with one garbage frame.
+      if (!error || error.soft !== true) {
+        await this.#terminate(state, lease, "controller_resume_failed");
+      }
       throw error;
     }
   }
@@ -205,19 +223,32 @@ export class ControllerResumeHooks {
   #prepare({ message, socketIdentity, role, lease, state }) {
     const senderRole = message.sender_role;
     if (!ROLES.includes(senderRole) || (ROLES.includes(role) && role !== senderRole)) {
-      fail("controller_resume_role_invalid");
-    }
-    if (state.phase !== "awaiting_prepare" && state.phase !== "prepared") {
-      fail("controller_resume_phase_invalid");
+      failSoft("controller_resume_role_invalid");
     }
     let validated;
     try {
       validated = validateControllerMessage(message, senderRole, lease);
     } catch (error) {
-      fail("controller_resume_message_invalid");
+      failSoft("controller_resume_message_invalid");
     }
     if (validated.original_deadline_ms !== lease.resume_deadline_ms) {
-      fail("controller_resume_deadline_mismatch");
+      failSoft("controller_resume_deadline_mismatch");
+    }
+    if (!this.#leaseManager) failSoft("controller_resume_manager_unavailable");
+    try {
+      this.#leaseManager.verifyResumeToken({
+        controllerLeaseId: lease.controller_lease_id,
+        role: senderRole,
+        resumeTokenB64: validated.resume_token_b64,
+      });
+    } catch (error) {
+      failSoft(error?.code ?? "controller_resume_token_invalid");
+    }
+    if (state.phase !== "awaiting_prepare" && state.phase !== "prepared") {
+      // Authenticated sender, but recovery is not open (already connected,
+      // terminated, or a later phase): reject the frame without tearing down
+      // the live lease; the sender's recovery worker retries within budget.
+      failSoft("controller_resume_phase_invalid");
     }
     const existing = state.prepared[senderRole];
     if (existing) {
@@ -228,12 +259,6 @@ export class ControllerResumeHooks {
       }
       return Object.freeze({ deliveries: Object.freeze([]) });
     }
-    if (!this.#leaseManager) fail("controller_resume_manager_unavailable");
-    this.#leaseManager.verifyResumeToken({
-      controllerLeaseId: lease.controller_lease_id,
-      role: senderRole,
-      resumeTokenB64: validated.resume_token_b64,
-    });
     if (Object.values(state.prepared).some((item) => item.socketIdentity === socketIdentity)) {
       fail("controller_resume_socket_conflict");
     }

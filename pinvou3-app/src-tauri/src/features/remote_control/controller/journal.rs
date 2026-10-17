@@ -261,6 +261,7 @@ struct JournalState {
     epoch: String,
     generation: Option<String>,
     retired_generations: HashSet<String>,
+    retired_order: VecDeque<String>,
     sessions: HashMap<String, JournalInner>,
 }
 
@@ -277,6 +278,7 @@ impl RemoteJournal {
                 epoch,
                 generation: None,
                 retired_generations: HashSet::new(),
+                retired_order: VecDeque::new(),
                 sessions: HashMap::new(),
             }),
         }
@@ -301,6 +303,7 @@ impl RemoteJournal {
         inner.epoch_seed = inner.epoch.clone();
         inner.generation = None;
         inner.retired_generations.clear();
+        inner.retired_order.clear();
         inner.sessions.clear();
     }
 
@@ -311,14 +314,22 @@ impl RemoteJournal {
         validate_id(generation, MAX_SESSION_ID_CHARS)?;
         let mut state = self.inner.lock();
         if state.generation.as_deref() != Some(generation) {
-            if state.retired_generations.contains(generation)
-                || (state.generation.is_some()
-                    && state.retired_generations.len() >= MAX_RETIRED_GENERATIONS)
-            {
+            if state.retired_generations.contains(generation) {
                 return Err(error("journal_generation_retired"));
             }
             if let Some(previous) = state.generation.take() {
-                state.retired_generations.insert(previous);
+                // Bounded FIFO retirement: without eviction a long-lived
+                // process hard-fails every new generation once the cap is
+                // hit, silently dropping all journal recording. A replay of
+                // an evicted generation stays fenced by its derived epoch and
+                // the per-frame lease context binding.
+                state.retired_generations.insert(previous.clone());
+                state.retired_order.push_back(previous);
+                if state.retired_order.len() > MAX_RETIRED_GENERATIONS {
+                    if let Some(evicted) = state.retired_order.pop_front() {
+                        state.retired_generations.remove(&evicted);
+                    }
+                }
             }
             let mut hasher = Sha256::new();
             hasher.update(b"pinvou-journal-generation-v1\0");
@@ -981,6 +992,34 @@ mod dev19_contract_tests {
         );
         assert_eq!(
             journal.bind_generation("generation-1").unwrap_err().code,
+            "journal_generation_retired"
+        );
+    }
+
+    #[test]
+    fn retired_generation_cap_evicts_fifo_and_never_hard_fails_new_generations() {
+        let journal = RemoteJournal::new("boot-1");
+        for index in 0..=super::MAX_RETIRED_GENERATIONS {
+            journal
+                .bind_generation(&format!("generation-{index:04}"))
+                .unwrap();
+        }
+        // The next bind previously hit the hard cap (state where every new
+        // generation was failed forever); it now evicts the oldest retirement.
+        journal.bind_generation("generation-0065").unwrap();
+        // The evicted generation is no longer fenced and can bind again...
+        journal.bind_generation("generation-0000").unwrap();
+        // ...while retirements still inside the window stay fenced.
+        assert_eq!(
+            journal
+                .bind_generation(&format!("generation-{:04}", super::MAX_RETIRED_GENERATIONS - 1))
+                .unwrap_err()
+                .code,
+            "journal_generation_retired"
+        );
+        // And the newest retirement (made by the re-bind above) is fenced too.
+        assert_eq!(
+            journal.bind_generation("generation-0065").unwrap_err().code,
             "journal_generation_retired"
         );
     }

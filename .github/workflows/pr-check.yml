@@ -258,6 +258,11 @@ jobs:
               - 'CodeWhale'
               - 'pinvou3-app/src-tauri/rust-toolchain.toml'
               - 'pinvou3-app/src-tauri/**/*.rs'
+              # behavior_telemetry_tests.rs include_str! 根目录遥测 schema 做
+              # 跨语言契约断言;不列出则 schema-only 改动会静默跳过 rust-test
+              # (test_ci_gate_policy 锁定此路由)。
+              - 'docs/schemas/behavior-telemetry-v1.schema.json'
+              - 'docs/schemas/behavior-telemetry-registries.json'
               - '!pinvou3-app/src-tauri/src/features/feedback/**'
               - '!pinvou3-app/src-tauri/src/features/personas/**'
               - '!pinvou3-app/src-tauri/src/features/pet/**'
@@ -540,6 +545,11 @@ jobs:
               - 'pinvou3-app/src-tauri/src/app/commands/marketplace.rs'
               - 'pinvou3-app/src-tauri/src/features/connectors/skill_gate.rs'
               - 'pinvou3-app/src-tauri/src/app/connector_consent_tests.rs'
+              # behavior_telemetry_model_contract.test.mjs 读取根目录遥测
+              # schema 做跨语言契约断言;不列出则 schema-only 改动会静默跳过
+              # 该 node 门禁(test_ci_gate_policy 锁定此路由)。
+              - 'docs/schemas/behavior-telemetry-v1.schema.json'
+              - 'docs/schemas/behavior-telemetry-registries.json'
               - 'pinvou3-app/scripts/tauri/**'
               - 'pinvou3-app/src-tauri/config/**'
               - 'pinvou3-app/src-tauri/packaging/**'
@@ -2593,7 +2603,9 @@ jobs:
           }
           cd pinvou3-app/src-tauri
           # 逐过滤器断言至少命中 1 个测试,避免测试改名后过滤器 0 匹配却 exit 0
-          # 导致的静默空跑。
+          # 导致的静默空跑。staging::tests 是 cfg(all(test, windows)) 的传输
+          # 删除安全测试(reaper 清理身份/容量归还),此前只被编译、无任何 leg
+          # 执行,与本步骤修补的 pinjou-cli cfg(windows) 空跑属同一缺陷类。
           index=0
           for filter in \
             'platform::filesystem::tests::windows_' \
@@ -2668,6 +2680,7 @@ jobs:
             'features::monitor::platform::windows_gpu::tests::' \
             'features::remote_control::platform::windows::tests::' \
             'app::commands::remote_control::reader_resume_tests::' \
+            'features::remote_control::controller::transfer::staging::tests::' \
             'features::computer_use::platform::windows::tests::' \
             'failed_probe_never_deletes_an_existing_store_windows' \
             'features::voice_shortcut::platform::tests::' \

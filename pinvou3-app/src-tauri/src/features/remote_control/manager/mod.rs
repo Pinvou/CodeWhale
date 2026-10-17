@@ -40,8 +40,8 @@ use persistence::{
     fresh_config, load_config, load_or_initialize_rpc_ledger, load_pending_revocations,
     load_relay_settings, new_stream_epoch, normalize_relay_address, pairing_info,
     pending_revocation_key, persist_config, persist_rpc_ledger, process_lock_path, public_url,
-    queue_pending_revocation, relay_settings_path, remote_public_base_url, remote_relay_ws_url,
-    remove_config, remove_private_file, remove_rpc_ledger, validate_config,
+    queue_pending_revocation_for_removal, relay_settings_path, remote_public_base_url,
+    remote_relay_ws_url, remove_config, remove_private_file, remove_rpc_ledger, validate_config,
     validate_relay_settings,
 };
 
@@ -1482,7 +1482,7 @@ impl RemoteControlManager {
             .map(|endpoint| endpoint.config.clone())
             .or_else(|| persisted_previous.clone());
         if let Some(previous) = previous_config.as_ref() {
-            queue_pending_revocation(previous)?;
+            queue_pending_revocation_for_removal(previous)?;
         }
         let allow_host_workspace = previous_config
             .as_ref()
@@ -1627,7 +1627,7 @@ impl RemoteControlManager {
             .map(|endpoint| endpoint.config.clone())
             .or_else(|| persisted.clone());
         if let Some(config) = current_config.as_ref() {
-            queue_pending_revocation(config)?;
+            queue_pending_revocation_for_removal(config)?;
         }
         // A failed removal leaves the old config authoritative. Its queued
         // entry therefore remains dormant instead of revoking a live link.
@@ -3616,7 +3616,7 @@ impl RemoteControlManager {
 mod tests {
     use super::persistence::{
         acknowledge_pending_revocation_at, load_config_from, load_pending_revocations_from,
-        queue_pending_revocation_at,
+        queue_pending_revocation_at, queue_pending_revocation_for_removal_at,
     };
     use super::rpc::{WebSessionScope, web_scope_admits_absent_session, web_session_scope};
     use super::*;
@@ -5153,6 +5153,34 @@ mod tests {
         );
         acknowledge_pending_revocation_at(&path, &second).unwrap();
         assert!(!path.exists(), "an empty revocation ledger is removed");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn removal_queueing_evicts_the_oldest_entry_instead_of_blocking_the_lifecycle() {
+        let directory = std::env::temp_dir().join(format!(
+            "pinvou-web-revocation-evict-{}-{}",
+            std::process::id(),
+            crate::features::remote_control::short_token(12)
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("pending.json");
+        let mut queued = VecDeque::new();
+        for index in 0..MAX_PENDING_REVOCATIONS {
+            let pending = test_pending_revocation(&format!("ep_retired_{index:02}"));
+            queue_pending_revocation_at(&path, pending.clone()).unwrap();
+            queued.push_back(pending);
+        }
+        // The strict queue is full now; a plain queue would fail the
+        // stop/refresh lifecycle right here.
+        let newest = test_pending_revocation("ep_retired_newest");
+        queue_pending_revocation_for_removal_at(&path, newest.clone())
+            .expect("removal queueing must never be blocked by a full queue");
+        let restored = load_pending_revocations_from(&path).unwrap();
+        let mut expected = queued.clone();
+        expected.pop_front();
+        expected.push_back(newest);
+        assert_eq!(restored.entries, expected);
         std::fs::remove_dir_all(directory).unwrap();
     }
 

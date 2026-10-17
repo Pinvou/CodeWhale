@@ -443,7 +443,7 @@ test("resume epoch grammar follows wire identifiers and rejects invalid finals b
   assert.equal(updated.resume_deadline_ms, String(value.clock + 30_000));
 });
 
-test("cross-role, invalid or stale tokens terminate the original lease", async () => {
+test("cross-role, invalid or stale tokens are rejected per frame without teardown", async () => {
   const value = fixture();
   const committed = await createLease(value);
   await detached(value, committed);
@@ -451,8 +451,40 @@ test("cross-role, invalid or stale tokens terminate the original lease", async (
     message: prepare("A", committed.lease, committed.messages.B.resume_token_b64, "request-prepare-A"),
     socket_identity: "new-socket-A", role: "A", lease: committed.lease,
   }), /resume_token_invalid/u);
+  // A wrong token is a per-frame rejection: an unverified sender must never
+  // gain cleanup authority over the recoverable lease, so the lease survives
+  // and stays open for the legitimate member's retry.
+  assert.notEqual(value.manager.lease(committed.lease.controller_lease_id), null);
+  await value.hooks.handle({
+    message: prepare("A", committed.lease, committed.messages.A.resume_token_b64, "request-prepare-A2"),
+    socket_identity: "recovery-socket-A", role: "A", lease: committed.lease,
+  });
+  assert.equal(value.hooks.phase(committed.lease.controller_lease_id), "prepared");
+  // Recovery still ends at the frozen deadline even when prodded by frames.
+  value.clock = Number(committed.lease.resume_deadline_ms);
+  assert.equal(await value.hooks.expire(), 1);
   assert.equal(value.manager.lease(committed.lease.controller_lease_id), null);
-  assert.equal(value.hooks.isBusinessAllowed(committed.lease.controller_lease_id), false);
+});
+
+test("a stray prepare never tears down a live connected lease", async () => {
+  const value = fixture();
+  const committed = await createLease(value);
+  // Connected phase, wrong token from a socket that never joined the lease:
+  // per-frame rejection only, the live session keeps running.
+  await assert.rejects(value.hooks.handle({
+    message: prepare("A", committed.lease, committed.messages.B.resume_token_b64, "request-stray-A"),
+    socket_identity: "stranger-socket", role: "A", lease: committed.lease,
+  }), /resume_token_invalid/u);
+  assert.notEqual(value.manager.lease(committed.lease.controller_lease_id), null);
+  assert.equal(value.hooks.isBusinessAllowed(committed.lease.controller_lease_id), true);
+  // Connected phase, even a valid member's stale recovery frame (fast
+  // reconnect racing the close event) must not abort the live session.
+  await assert.rejects(value.hooks.handle({
+    message: prepare("A", committed.lease, committed.messages.A.resume_token_b64, "request-stray-A2"),
+    socket_identity: "old-socket-A", role: "A", lease: committed.lease,
+  }), /controller_resume_phase_invalid/u);
+  assert.notEqual(value.manager.lease(committed.lease.controller_lease_id), null);
+  assert.equal(value.hooks.isBusinessAllowed(committed.lease.controller_lease_id), true);
 });
 
 test("activation ACK cannot skip either E2E confirmation and wrong liveness terminates", async () => {

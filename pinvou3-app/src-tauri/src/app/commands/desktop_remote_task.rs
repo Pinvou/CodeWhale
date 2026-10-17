@@ -335,9 +335,19 @@ impl ControllerTaskEventSink for TaskEventBridge {
         // forwarding to A remains gated by the connected transport below.
         let Ok(lease) = self.app.state::<
             crate::features::remote_control::controller::controlled::ControlledDeviceManager,
-        >().with_local_cancel_lease(Clone::clone) else { return; };
+        >().with_local_cancel_lease(Clone::clone) else {
+            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "journal_event_ignored",
+                "lease_unavailable",
+            );
+            return;
+        };
         let runtime = self.app.state::<Arc<DesktopRemoteTaskRuntime>>();
         let Some(remote_ref) = runtime.service().remote_ref_for(session_id) else {
+            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "journal_event_ignored",
+                "session_mapping_missing",
+            );
             return;
         };
         if runtime
@@ -346,15 +356,27 @@ impl ControllerTaskEventSink for TaskEventBridge {
             .as_deref()
             != Some(session_id)
         {
+            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "journal_event_ignored",
+                "generation_or_binding_stale",
+            );
             return;
         }
         if let Some(task_id) = task_id {
             let Ok(record) = runtime.service().status(task_id) else {
+                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                    "journal_event_ignored",
+                    "task_binding_stale",
+                );
                 return;
             };
             if record.session_id != session_id
                 || record.lease.remote_control_generation != lease.remote_control_generation
             {
+                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                    "journal_event_ignored",
+                    "task_binding_stale",
+                );
                 return;
             }
         }
@@ -363,6 +385,10 @@ impl ControllerTaskEventSink for TaskEventBridge {
             .bind_generation(&lease.remote_control_generation)
             .is_err()
         {
+            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "journal_event_ignored",
+                "generation_or_binding_stale",
+            );
             return;
         }
         let event_id = format!("journal-{}", uuid::Uuid::new_v4().simple());

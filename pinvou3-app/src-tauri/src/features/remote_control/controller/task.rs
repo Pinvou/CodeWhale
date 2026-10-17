@@ -62,6 +62,10 @@ const LEDGER_FILE_VERSION: u8 = 1;
 const MAX_TRACKED_TASKS: usize = 256;
 const MAX_LEDGER_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_LIVE_TASKS: usize = 64;
+/// Upper bound for remote_ref→session bindings per generation. Without it an
+/// authenticated controller could grow the map (and the persisted B sessions
+/// it creates) without bound until the generation ends.
+const MAX_REMOTE_SESSIONS: usize = 256;
 const MAX_ID_CHARS: usize = 128;
 const MAX_REASON_CHARS: usize = 64;
 const MAX_RESULT_DIGEST_CHARS: usize = 64;
@@ -1384,6 +1388,9 @@ impl RemoteSessionMap {
             }
         }
         let binding = (session_id.to_owned(), generation.to_owned(), lane);
+        if !forward.contains_key(remote_ref) && forward.len() >= MAX_REMOTE_SESSIONS {
+            return Err(error("task_session_limit_exceeded"));
+        }
         if let Some(previous) = forward.insert(remote_ref.to_owned(), binding) {
             if previous.0 != session_id {
                 reverse.remove(&previous.0);
@@ -2122,12 +2129,16 @@ impl RemoteTaskService {
         let session_id = provisioner
             .create_authoritative_session(title, code_mode)
             .map_err(|code| provisioner_error(code, "task_session_create_failed"))?;
-        self.sessions.bind(
+        let bound = self.sessions.bind(
             remote_ref,
             &session_id,
             generation,
             RemoteSessionLane::from_code_mode(code_mode),
-        )
+        );
+        if bound.is_err() {
+            provisioner.forget_unclaimed_session(&session_id);
+        }
+        bound
     }
 
     /// Return the B-authoritative session already bound to `remote_ref`, or
@@ -2371,6 +2382,15 @@ impl RemoteTaskService {
             Err(_) => return Err(error("task_session_lookup_failed")),
         }
         let previous = self.sessions.session_for(remote_ref, generation);
+        // Same busy guard as close_remote_session: switching away from a
+        // session with a live task would rebind remote_ref to the new session
+        // and leave the running task without a reachable cancel path until
+        // its turn budget expires.
+        if let Some(previous) = &previous {
+            if previous != session_id && self.ledger.active_for_session(previous).is_some() {
+                return Err(error("task_session_busy"));
+            }
+        }
         let bound = self.sessions.bind(
             remote_ref,
             session_id,
@@ -3802,6 +3822,7 @@ mod tests {
         existing: Mutex<Vec<String>>,
         claims: Mutex<Vec<(String, bool, Option<String>)>>,
         fail_claim: AtomicBool,
+        forgotten: Mutex<Vec<String>>,
     }
 
     impl FakeSessions {
@@ -3826,6 +3847,10 @@ mod tests {
             _code_mode: bool,
         ) -> std::result::Result<String, String> {
             self.create_neutral_session()
+        }
+
+        fn forget_unclaimed_session(&self, session_id: &str) {
+            self.forgotten.lock().push(session_id.to_owned());
         }
 
         fn session_exists(&self, session_id: &str) -> std::result::Result<bool, String> {
@@ -6571,6 +6596,74 @@ mod tests {
     }
 
     #[test]
+    fn switch_remote_session_rejects_switching_away_from_a_session_with_a_live_task() {
+        let ledger = RemoteTaskLedger::in_memory();
+        ledger
+            .admit(
+                &context("generation-0001"),
+                &request(&payload(
+                    "session-0001",
+                    "task-0001",
+                    "client-0001",
+                    &digest(1),
+                )),
+                1_000,
+            )
+            .unwrap();
+        let service = RemoteTaskService::new(Arc::new(ledger));
+        let sessions = Arc::new(FakeSessions::default());
+        sessions.existing.lock().push("session-0001".into());
+        sessions.existing.lock().push("session-existing".into());
+        service.set_session_provisioner(sessions);
+        service
+            .ensure_remote_session("ref-chat", "Remote", false, "generation-0001")
+            .unwrap();
+        // A live task on the previously bound session blocks switching away:
+        // rebinding remote_ref would leave the running task without a
+        // reachable cancel path until its turn budget expires.
+        assert_eq!(
+            service
+                .switch_remote_session("ref-chat", "session-existing", "generation-0001")
+                .unwrap_err()
+                .code,
+            "task_session_busy"
+        );
+        // Re-binding the same still-busy session is not a switch-away.
+        service
+            .switch_remote_session("ref-chat", "session-0001", "generation-0001")
+            .unwrap();
+    }
+
+    #[test]
+    fn session_map_binds_are_bounded_and_capped_binds_do_not_leak_sessions() {
+        let service = RemoteTaskService::new(Arc::new(RemoteTaskLedger::in_memory()));
+        let sessions = Arc::new(FakeSessions::default());
+        service.set_session_provisioner(sessions.clone());
+        for index in 0..super::MAX_REMOTE_SESSIONS {
+            service
+                .ensure_remote_session(&format!("ref-{index:04}"), "Remote", false, "generation-0001")
+                .unwrap();
+        }
+        assert_eq!(
+            service
+                .ensure_remote_session("ref-overflow", "Remote", false, "generation-0001")
+                .unwrap_err()
+                .code,
+            "task_session_limit_exceeded"
+        );
+        assert_eq!(
+            sessions.created.lock().len(),
+            super::MAX_REMOTE_SESSIONS + 1,
+            "the overflow attempt still created a session record"
+        );
+        assert_eq!(
+            sessions.forgotten.lock().len(),
+            1,
+            "a capped bind must forget the session it just created"
+        );
+    }
+
+    #[test]
     fn code_mode_open_and_unknown_code_claim_are_never_chat() {
         let service = RemoteTaskService::new(Arc::new(RemoteTaskLedger::in_memory()));
         let sessions = Arc::new(FakeSessions::default());
@@ -7192,14 +7285,30 @@ mod tests {
         });
         entered_rx.recv().unwrap();
         let switch_service = service.clone();
+        let (go_tx, go_rx) = std::sync::mpsc::channel();
         let switch = std::thread::spawn(move || {
+            go_rx.recv().unwrap();
             switch_service.switch_remote_session("ref-chat", "session-0002", "generation-0001")
         });
         release_tx.send(()).unwrap();
-        assert!(matches!(
-            submit.join().unwrap(),
-            Ok(AdmissionOutcome::Admitted(_))
-        ));
+        let outcome = submit.join().unwrap();
+        let ticket = match outcome {
+            Ok(AdmissionOutcome::Admitted(ticket)) => ticket,
+            other => panic!("expected admission, got {other:?}"),
+        };
+        // An admitted-but-undispatched task keeps its session busy (the blind
+        // spot the switch busy guard closes), so settle it to terminal before
+        // letting the switch proceed — the switch thread stays gated until the
+        // record is terminal.
+        service
+            .fail_admitted(
+                &ticket.record.task_id,
+                ticket.record.sequence,
+                "test_settled",
+                1_002,
+            )
+            .unwrap();
+        go_tx.send(()).unwrap();
         switch.join().unwrap().unwrap();
         assert_eq!(
             service.lane_for_session("session-0001", "generation-0001"),

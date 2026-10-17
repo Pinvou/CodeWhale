@@ -385,8 +385,51 @@ pub(super) fn persist_pending_revocations_to(
     }
 }
 
-pub(super) fn queue_pending_revocation(config: &WebAccessConfig) -> Result<(), String> {
-    queue_pending_revocation_at(&pending_revocations_path(), PendingRevocation::from(config))
+pub(super) fn queue_pending_revocation_for_removal(
+    config: &WebAccessConfig,
+) -> Result<(), String> {
+    queue_pending_revocation_for_removal_at(
+        &pending_revocations_path(),
+        PendingRevocation::from(config),
+    )
+}
+
+/// Record the revocation intent for a config that is being removed right now
+/// (stop/rotate). A full queue must never block that lifecycle — once 32
+/// permanently unreachable relays accumulated, the user could otherwise never
+/// stop or rotate Web access again. When the queue is full the oldest entry is
+/// dropped for the newest revocation: the dropped relay keeps serving its (no
+/// longer referenced) token until it is reachable and the replayed queue
+/// reaches it again, while the removal the user asked for always succeeds.
+pub(super) fn queue_pending_revocation_for_removal_at(
+    path: &Path,
+    pending: PendingRevocation,
+) -> Result<(), String> {
+    validate_pending_revocation(&pending)?;
+    let mut ledger = load_pending_revocations_from(path)?;
+    let key = pending_revocation_key(&pending);
+    if let Some(existing) = ledger
+        .entries
+        .iter()
+        .find(|entry| pending_revocation_key(entry) == key)
+    {
+        return if existing == &pending {
+            Ok(())
+        } else {
+            Err(format!(
+                "conflicting pending Web revocation credentials for {}",
+                pending.endpoint_id
+            ))
+        };
+    }
+    if ledger.entries.len() >= super::MAX_PENDING_REVOCATIONS {
+        ledger.entries.pop_front();
+        eprintln!(
+            "[remote-control] pending Web revocation queue is full; dropping the oldest entry to record the newest revocation"
+        );
+    }
+    ledger.entries.push_back(pending);
+    persist_pending_revocations_to(path, &ledger)
 }
 
 pub(super) fn queue_pending_revocation_at(
