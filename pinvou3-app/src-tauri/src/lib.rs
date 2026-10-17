@@ -57,6 +57,10 @@ pub mod model_probe {
 }
 
 use crate::app::commands;
+use crate::app::desktop_remote_composition::{
+    DesktopControlledExecutionPort, DesktopLocalExecutionPort, DesktopRemoteApplicationEvents,
+    DesktopRemoteProjectionPort,
+};
 use crate::features::{
     account_platform::AccountPlatformState,
     assistant::{engine_pool::EnginePool, platform::bridge},
@@ -66,6 +70,12 @@ use crate::features::{
     monitor::MonitorState,
     pet::{pet_window, selected_pet},
     remote_control::RemoteControlManager,
+    remote_control::controller::{
+        capabilities::CapabilitySnapshotManager, controlled::ControlledDeviceManager,
+        controlling::ControllingDeviceManager, controlling_session::ControllingSessionManager,
+        encrypted_lane::ControlledLaneState, encrypted_lane::ControllingLaneState,
+        permission::PermissionAuthority,
+    },
     remote_knowledge::RemoteKnowledgeService,
     scheduled::tasks as scheduled_tasks,
     sessions::SessionStore,
@@ -636,6 +646,7 @@ pub(crate) async fn prepare_app_restart(app: &tauri::AppHandle) {
         browser.shutdown_before_restart().await;
     }
     harvest_child_processes(app).await;
+    startup::mark_lifecycle_clean_exit("restart");
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1245,6 +1256,20 @@ pub fn run() {
                             let acp_pool = acp_pool_for_capabilities.clone();
                             move |session_id: &str| acp_pool.is_acp(session_id)
                         }));
+                    // Route ordinary Sessions using the same trusted ACP
+                    // binding (including its durable metadata fallback).
+                    // RemoteProxy is classified by SessionStore first and
+                    // never invokes this local-backend resolver.
+                    store_for_engine.set_local_backend_resolver(std::sync::Arc::new({
+                        let acp_pool = acp_pool_for_capabilities.clone();
+                        move |session_id: &str| {
+                            Ok(if acp_pool.is_acp(session_id) {
+                                crate::features::sessions::remote_proxy::routing::LocalBackendBinding::Acp
+                            } else {
+                                crate::features::sessions::remote_proxy::routing::LocalBackendBinding::Engine
+                            })
+                        }
+                    }));
                     // sessions feature 自己的 code 判定（mode 默认值解析 + 仅 code
                     // 持久化），与 bridge 共用同一份 SessionAgentStore 闭包。
                     store_for_engine.set_code_session_predicate(code_session_predicate.clone());
@@ -1314,6 +1339,179 @@ pub fn run() {
                     // （回到 lazy spawn 语义，下次发消息重建 + 注水历史）。
                     pool.start_idle_reaper();
                     eprintln!("[pinvou3-app] engine pool ready (lazy spawn per session)");
+                    // ── Windows 桌面双端远程控制（DEV-20 单一注册点） ──
+                    let desktop_boot = (|| -> Result<(), String> {
+                        if !crate::platform::capabilities::current().desktop_remote_control_supported {
+                            return Ok(());
+                        }
+                        // A corrupt/unwritable remote ledger disables this domain;
+                        // it must not prevent the released Legacy Web from resuming.
+                        let ledger = std::sync::Arc::new(
+                            crate::features::remote_control::controller::task::RemoteTaskLedger::open_recovered(
+                                crate::platform::paths::sessions_root().join("_remote_control_tasks.json"),
+                                crate::features::remote_control::controller::clock::monotonic_millis(),
+                            ).map_err(|error| error.code.to_owned())?,
+                        );
+                        // E2E-06：B 端清理端口必须在任何终态（stop/refresh/远端断开/
+                        // 恢复失败）都能中断本代远端任务并回收其凭证。
+                        let controlled_device_manager = ControlledDeviceManager::default();
+                        controlled_device_manager.register_cleanup_sink(std::sync::Arc::new(
+                            commands::desktop_remote_controller_business::DesktopControlledCleanup::new(
+                                handle.clone(),
+                            ),
+                        ));
+                        handle.manage(controlled_device_manager);
+                        commands::desktop_remote_controlled::spawn_watchdog_reaper(handle.clone());
+                        handle.manage(ControllingDeviceManager::default());
+                        handle.manage(ControllingSessionManager::default());
+                        handle.manage(ControllingLaneState::default());
+                        handle.manage(ControlledLaneState::default());
+                        handle.manage(
+                            features::remote_control::controller::relay_runtime::ControlledOutboundState::default(),
+                        );
+                        handle.manage(CapabilitySnapshotManager::default());
+                        let temporary_models = commands::desktop_remote_model::shared_model_store();
+                        handle.manage(temporary_models.clone());
+                        let permission_authority = std::sync::Arc::new(PermissionAuthority::default());
+                        permission_authority.register_controlled_cleanup(
+                            &handle.state::<ControlledDeviceManager>(),
+                        );
+                        let permission_telemetry_app = handle.clone();
+                        permission_authority.set_telemetry_sink(std::sync::Arc::new(move |metric| {
+                            use features::behavior_telemetry::{
+                                RemoteControlEvent, RemoteOutcome, RemotePermissionStep, RemoteReason,
+                                RemoteStage, track_remote_control,
+                            };
+                            use features::remote_control::controller::permission::PermissionTelemetryTransition;
+                            let (outcome, reason, step) = match metric.transition {
+                                PermissionTelemetryTransition::Requested =>
+                                    (RemoteOutcome::Ok, RemoteReason::None, RemotePermissionStep::Request),
+                                PermissionTelemetryTransition::Allowed =>
+                                    (RemoteOutcome::Ok, RemoteReason::None, RemotePermissionStep::Allowed),
+                                PermissionTelemetryTransition::Denied =>
+                                    (RemoteOutcome::Rejected, RemoteReason::PermissionDenied, RemotePermissionStep::Denied),
+                                PermissionTelemetryTransition::Expired =>
+                                    (RemoteOutcome::Expired, RemoteReason::PermissionTimeout, RemotePermissionStep::Expired),
+                            };
+                            track_remote_control(&permission_telemetry_app,
+                                RemoteControlEvent::new(RemoteStage::Permission, outcome)
+                                    .reason(reason)
+                                    .permission_step(step)
+                                    .latency_ms(metric.latency_ms));
+                        }));
+                        handle.manage(permission_authority.clone());
+                        let desktop_task_runtime = commands::desktop_remote_task::DesktopRemoteTaskRuntime::new(
+                            handle.clone(),
+                            store_for_engine.clone(),
+                            pool.clone(),
+                            acp_pool_for_capabilities.clone(),
+                            temporary_models.clone(),
+                            ledger,
+                        );
+                        handle.manage(desktop_task_runtime.ledger());
+                        let desktop_transfer_registry = std::sync::Arc::new(
+                            crate::features::remote_control::controller::transfer::TransferRegistry::default()
+                        );
+                        let desktop_attachments =
+                            commands::desktop_remote_attachment::DesktopRemoteAttachmentRuntime::from_session_store(
+                                store_for_engine.clone(),
+                                desktop_task_runtime.service(),
+                                desktop_transfer_registry.clone(),
+                            );
+                        let desktop_artifacts =
+                            commands::desktop_remote_artifact::DesktopRemoteArtifactRuntime::with_registry(
+                                desktop_task_runtime.service(),
+                                desktop_transfer_registry,
+                            );
+                        desktop_task_runtime.set_code_artifact_port(desktop_artifacts.clone());
+                        desktop_task_runtime
+                            .hooks()
+                            .set_artifact_scope(desktop_artifacts.clone());
+                        handle.state::<ControlledDeviceManager>().register_cleanup_sink(desktop_attachments.cleanup_sink());
+                        let desktop_history =
+                            commands::desktop_remote_journal::DesktopRemoteJournalRuntime::journal_only(
+                                format!("boot-{}", std::process::id()),
+                            );
+                        desktop_task_runtime
+                            .hooks()
+                            .set_model_scope(temporary_models);
+                        desktop_task_runtime
+                            .hooks()
+                            .set_permission_scope(permission_authority);
+                        desktop_task_runtime.hooks().set_transfer_scope(std::sync::Arc::new(
+                            commands::desktop_remote_attachment::DesktopRemoteTransferScope::new(
+                                desktop_attachments.clone(),
+                                desktop_artifacts.clone(),
+                            ),
+                        ));
+                        desktop_task_runtime.hooks().set_journal(std::sync::Arc::new(
+                            commands::desktop_remote_journal::DesktopTaskEventSink::new(
+                                handle.clone(),
+                                desktop_history.journal().clone(),
+                            ),
+                        ));
+                        let recovered = desktop_task_runtime.recover_after_restart();
+                        if recovered > 0 {
+                            eprintln!(
+                                "[pinvou3-app] remote control: {recovered} in-flight task(s) closed after restart"
+                            );
+                        }
+                        handle.manage(desktop_task_runtime);
+                        commands::desktop_remote_attachment::DesktopRemoteAttachmentRuntime::start_reaper(&desktop_attachments);
+                        handle.manage(desktop_attachments);
+                        handle.manage(desktop_artifacts);
+                        handle.manage(desktop_history);
+                        // DEV-20 composition: one B execution port for both
+                        // authenticated network ingress and B-local ChatView.
+                        let controlled_owner = std::sync::Arc::new(
+                            commands::desktop_remote_controller_business::DesktopControlledExecutionAdapter::new(
+                                handle.clone(),
+                            ),
+                        );
+                        let controlled_execution: DesktopControlledExecutionPort = controlled_owner.clone();
+                        let local_execution: DesktopLocalExecutionPort = controlled_owner;
+                        handle.manage(controlled_execution);
+                        handle.manage(local_execution);
+                        // The typed A projection port and the host event adapter
+                        // share the existing SessionStore and live role owners.
+                        // Verified encrypted ingress feeds the single typed
+                        // RemoteProxy projection path.
+                        let host_events: std::sync::Arc<
+                            dyn features::sessions::application::ports::ApplicationEventPort,
+                        > = std::sync::Arc::new(DesktopRemoteApplicationEvents(handle.clone()));
+                        let projector = std::sync::Arc::new(
+                            features::sessions::application::project_remote::RemoteProjectionService::new(
+                                store_for_engine.clone(),
+                                host_events,
+                            ),
+                        );
+                        let projection = std::sync::Arc::new(
+                            app::remote_projection_adapter::RemoteProjectionAdapter::new(projector),
+                        );
+                        let projection_port: DesktopRemoteProjectionPort = projection.clone();
+                        handle.manage(projection);
+                        handle.manage(projection_port);
+                        handle.manage(std::sync::Arc::new(
+                            commands::desktop_remote_action::DesktopRemoteActionState::default(),
+                        ));
+                        handle.manage(
+                            features::sessions::application::dispatch_remote::RemoteDispatchService::new(
+                                store_for_engine.clone(),
+                                std::sync::Arc::new(
+                                    commands::desktop_remote_task::DesktopRemoteTaskDispatchPort::new(
+                                        handle.clone(),
+                                    ),
+                                ),
+                            ),
+                        );
+                        // Publish readiness after all domain states and host ports exist.
+                        handle.manage(commands::desktop_remote_state::DesktopRemoteReady);
+                        eprintln!("[pinvou3-app] Windows desktop remote control ready");
+                        Ok(())
+                    })();
+                    if let Err(error) = desktop_boot {
+                        eprintln!("[pinvou3-app] desktop remote control disabled: {error}");
+                    }
                     match remote_control_manager.resume() {
                         Ok(true) => eprintln!("[pinvou3-app] persistent Web access resumed"),
                         Ok(false) => {}
@@ -1722,11 +1920,45 @@ pub fn run() {
             commands::runtime::cancel_generation,
             commands::runtime::list_shell_tasks,
             commands::runtime::cancel_shell_task,
+            commands::desktop_remote_controlled::desktop_remote_controlled_start,
+            commands::desktop_remote_controlled::desktop_remote_controlled_refresh,
+            commands::desktop_remote_controlled::desktop_remote_controlled_stop,
+            commands::desktop_remote_controlled::desktop_remote_controlled_disconnect_now,
+            commands::desktop_remote_controlled::desktop_remote_controlled_status,
+            commands::desktop_remote_controlled::desktop_remote_client_event,
+            commands::desktop_remote_controlled::desktop_remote_controlled_poll_watchdog,
+            commands::desktop_remote_controlled::desktop_remote_controlled_list_workspaces,
+            commands::desktop_remote_controller::desktop_remote_controller_connect,
+            commands::desktop_remote_controller::desktop_remote_controller_disconnect,
+            commands::desktop_remote_controller::desktop_remote_controller_status,
+            commands::desktop_remote_capability::desktop_remote_controller_capability_snapshot,
+            commands::desktop_remote_capability::desktop_remote_controller_capability_send,
+            commands::desktop_remote_capabilities::desktop_remote_capabilities_snapshot,
+            commands::desktop_remote_capabilities::desktop_remote_controlled_capabilities_snapshot,
+            commands::desktop_remote_task::desktop_remote_controlled_task_send,
+            commands::desktop_remote_task::desktop_remote_controlled_task_stop,
+            commands::desktop_remote_task::desktop_remote_task_reserve_a,
+            commands::desktop_remote_action::desktop_remote_action_a,
+            commands::desktop_remote_task::desktop_remote_task_commit_a,
+            commands::desktop_remote_task::desktop_remote_task_cancel_a,
+            commands::desktop_remote_task::desktop_remote_task_abandon_prepared_a,
+            commands::desktop_remote_proxy::desktop_remote_proxy_history_list,
+            commands::desktop_remote_proxy::desktop_remote_proxy_history_read,
+            commands::desktop_remote_proxy::desktop_remote_proxy_history_delete,
+            commands::desktop_remote_proxy::desktop_remote_proxy_archive,
+            commands::desktop_remote_proxy::desktop_remote_proxy_archive_list,
+            commands::desktop_remote_proxy::desktop_remote_proxy_archive_candidates,
+            commands::desktop_remote_proxy::desktop_remote_proxy_open_live,
+            commands::desktop_remote_model::desktop_remote_model_list_exportable,
+            commands::desktop_remote_permission::desktop_remote_permission_deny_task,
+            commands::desktop_remote_permission::desktop_remote_permission_list_b,
             commands::remote_control::web_access_enable,
             commands::remote_control::web_access_disable,
             commands::remote_control::web_access_status,
             commands::remote_control::web_access_rotate,
             commands::remote_control::web_access_relay_settings,
+            commands::remote_control::desktop_remote_endpoint_profiles,
+            commands::remote_control::desktop_remote_set_endpoint_profile,
             commands::remote_control::web_access_set_relay,
             commands::remote_control::web_access_reset_relay,
             commands::remote_control::web_access_bridge_ready,
@@ -2005,10 +2237,14 @@ pub fn run() {
         .build(context)
         .expect("error while building tauri application");
     startup::mark("tauri:build:done");
+    startup::begin_lifecycle();
     startup::mark("tauri:event_loop:run_enter");
     let mut resumed_reported = false;
     app.run(move |app, event| match event {
-        tauri::RunEvent::Ready => startup::mark("tauri:event_loop:ready"),
+        tauri::RunEvent::Ready => {
+            startup::mark("tauri:event_loop:ready");
+            startup::mark_lifecycle_ready();
+        }
         tauri::RunEvent::Exit => {
             startup::mark("tauri:event_loop:exit");
             // On main-process exit, refresh browser URL restore manifests, destroy
@@ -2023,10 +2259,11 @@ pub fn run() {
             // state with user-stop semantics. Process exit destroys remaining WebViews,
             // and shutdown_on_exit always removes coordination files.
             // 退出收割:同步执行——Exit 后进程即将结束,这是最后的清理窗口。
-            // 重启(app.restart())跳过本事件,调用点在 restart 前主动调同一辅助函数。
+            // 重启调用点先完成异步清理；若运行时随后派发 Exit，本段清理保持幂等。
             startup::mark("exit:cleanup:start");
             tauri::async_runtime::block_on(harvest_child_processes(app));
             startup::mark("exit:cleanup:done");
+            startup::mark_lifecycle_clean_exit("exit_event");
         }
         tauri::RunEvent::Resumed if !resumed_reported => {
             resumed_reported = true;
@@ -2034,6 +2271,9 @@ pub fn run() {
         }
         _ => {}
     });
+    // Defensive fallback if a future runtime/platform lets the event loop return
+    // without an observable Exit callback. Current desktop event loops do not return.
+    startup::mark_lifecycle_clean_exit("event_loop_returned");
     startup::mark("process:exit");
 }
 

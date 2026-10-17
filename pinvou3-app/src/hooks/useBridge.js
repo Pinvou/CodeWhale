@@ -24,8 +24,11 @@ function useBridgeState(domains) {
 function usePlatformCapability(capability) {
   const [supported, setSupported] = useState(() => can(capability));
   useEffect(() => {
-    if (!isWeb) return undefined;
     const refresh = () => setSupported(can(capability));
+    if (!isWeb) {
+      if (capability !== 'desktopRemoteControl' || !bridge.available || !bridge.state) return undefined;
+      return bridge.state.subscribe('platform', refresh);
+    }
     window.addEventListener('pinvou:web-capabilities', refresh);
     window.addEventListener('pinvou:web-connection', refresh);
     refresh();
@@ -73,9 +76,12 @@ function activeModelIsLocal(bs) {
 // “使用本地/第三方模型”会把用户送到仍被 gate 盖住的设置页，形成死锁。
 // 除了真正没有任何可用模型的状态，旧版本的“云模型缺少用户凭据”也统一
 // 进入这里，让用户在登录平台模型和配置自己的模型之间作出明确选择。
-function shouldShowModelAccessGate(bs, currentView, bridgeAvailable) {
+function shouldShowModelAccessGate(bs, currentView, bridgeAvailable, isRemoteTranscriptActive = false) {
   const inChat = currentView === 'chat'
     || (currentView === 'scheduled' && !!(bs && bs.scheduledRunContext));
+  // 被控端连接后，聊天页承载的是远端任务和稍后创建的权威 Session，不能再用
+  // 当前本机普通会话的模型配置弹出 API Key 门控。重连期间也保持这一语义，避免
+  // 链路短暂抖动时弹窗盖住仍在恢复的被控对话；连接终止后则自然恢复本机门控。
   const config = bs && bs.effectiveModelConfig;
   const modelsLoaded = !!(bs && bs.modelsLoaded === true && Array.isArray(bs.savedModels));
   // The managed carrier is not a concrete callable selection. It remains in
@@ -89,7 +95,7 @@ function shouldShowModelAccessGate(bs, currentView, bridgeAvailable) {
   const requiresUserApiKey = config && config.requires_user_api_key !== false;
   const noUsableModel = modelsLoaded && !hasSavedModel && !hasEffectiveModel;
   const userCredentialRequired = missingCredential && requiresUserApiKey && !isLocalModel(config);
-  return !!(bridgeAvailable && inChat && (noUsableModel || userCredentialRequired));
+  return !!(bridgeAvailable && inChat && !isRemoteTranscriptActive && (noUsableModel || userCredentialRequired));
 }
 
 export {

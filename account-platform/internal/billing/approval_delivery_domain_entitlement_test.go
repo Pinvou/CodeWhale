@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"strings"
 	"testing"
 
@@ -204,4 +205,66 @@ type entitlementAuthorizationQueryStub struct{ t *testing.T }
 func (s *entitlementAuthorizationQueryStub) QueryRow(context.Context, string, ...any) pgx.Row {
 	s.t.Fatal("entitlement result lookup must use its installed domain result repository")
 	return nil
+}
+
+func TestBillingAuthorizationEntitlementUnknownKeepsSingleClaimAndResultOnlyRecovery(t *testing.T) {
+	binding, event, command, frozen := entitlementCorrectionCommandFixture()
+	artifacts, err := approvalencoding.ConvertLegacyProofInput(approvalencoding.LegacyProofInput{
+		CommandType: event.CommandType, PolicyVersion: 2, SnapshotSchemaVersion: 2,
+		TargetResourceType: event.TargetResourceType, TargetResourceID: event.TargetResourceID,
+		NormalizedCommand: event.NormalizedCommand, CriticalResourceVersions: event.CriticalResourceVersions,
+		FinancialSnapshot: event.FinancialSnapshot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event.ProofSchemaVersion = "1"
+	event.CommandDigest, event.SnapshotDigest = artifacts.CommandDigest, artifacts.SnapshotDigest
+	event.DomainRevision = "1:" + strings.Repeat("c", 64)
+	event.ApprovalControlEpoch = binding.ApprovalEpoch
+	binding.SerializationVersion = approvalencoding.ApprovalSerializationVersion
+	repository := &entitlementAuthorizationRepositoryStub{
+		entitlementRunErr:        &pgconn.PgError{Code: "57014", Message: "controlled query cancellation"},
+		entitlementCorrectionErr: ErrNotFound,
+	}
+	claimed, proofCalls, claims := false, 0, 0
+	domain := &billingAuthorizationDomain{
+		repository: repository,
+		priorClaim: func(context.Context, ApprovalAuthorizationBinding) (bool, error) { return claimed, nil },
+		proof: func(_ context.Context, request approvalencoding.ProofRequest) (approvalencoding.ProofResponse, error) {
+			proofCalls++
+			if request.Artifacts.CommandDigest != event.CommandDigest || request.Artifacts.SnapshotDigest != event.SnapshotDigest {
+				t.Fatal("UNKNOWN recovery changed the frozen proof input")
+			}
+			return approvalencoding.ProofResponse{Verdict: "ALLOW", DomainRevision: event.DomainRevision,
+				CommandDigest: event.CommandDigest, SnapshotDigest: event.SnapshotDigest}, nil
+		},
+		claim: func(_ context.Context, got ApprovalAuthorizationBinding, actual approvalencoding.AuthorizationEvent) error {
+			if got != binding || actual.CommandDigest != event.CommandDigest || actual.SnapshotDigest != event.SnapshotDigest {
+				t.Fatal("UNKNOWN claim changed the approval identity or frozen facts")
+			}
+			claimed = true
+			claims++
+			return nil
+		},
+	}
+	first := domain.ExecuteAuthorizationAttempt(context.Background(), binding, event, command)
+	if first.FailureIsDefinite || first.StableFailureCode != "" || len(first.Result.DomainResult) != 0 || claims != 1 || proofCalls != 1 || repository.entitlementRuns != 1 || repository.entitlementKey != command.ExecutionIdempotencyKey || repository.entitlementFrozen != frozen {
+		t.Fatal("cancelled effect must remain UNKNOWN under its original single claim")
+	}
+	if _, found, err := domain.LookupAuthorizationResult(context.Background(), binding, event); err != nil || found {
+		t.Fatal("missing result after UNKNOWN is not proof of no effect", err)
+	}
+	second := domain.ExecuteAuthorizationAttempt(context.Background(), binding, event, command)
+	if second.FailureIsDefinite || len(second.Result.DomainResult) != 0 || claims != 1 || proofCalls != 1 || repository.entitlementRuns != 1 {
+		t.Fatal("an existing UNKNOWN claim allowed another proof or financial effect")
+	}
+	// This is a dispatch-boundary stub control, not evidence of a second effect.
+	// A later discovered committed receipt is read through the existing result path.
+	repository.entitlementCorrectionErr = nil
+	repository.entitlementCorrection = EntitlementCorrectionResult{CorrectionID: uuid.New(), JournalEntryID: uuid.New(), Status: "SUCCEEDED"}
+	result, found, err := domain.LookupAuthorizationResult(context.Background(), binding, event)
+	if err != nil || !found || len(result.DomainResult) == 0 || claims != 1 || proofCalls != 1 || repository.entitlementRuns != 1 || repository.entitlementKey != command.ExecutionIdempotencyKey || repository.entitlementFrozen != frozen {
+		t.Fatal("UNKNOWN recovery did not remain result-only under original facts", err)
+	}
 }

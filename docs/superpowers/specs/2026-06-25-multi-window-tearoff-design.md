@@ -1,8 +1,8 @@
 # 品悟 多窗口（拖拽撕离 / Tear-off）设计
 
 - 日期：2026-06-25
-- 分支 / worktree：`feat/multi-window` @ `/home/bailang/WorkSpace/Pinvou3-multiwindow`（基于 main `e6246e2`）
-- 状态：设计已与白浪确认，待写实施计划
+- 分支 / worktree：`feat/multi-window` @ 贡献者本地 worktree（已归档，路径已匿名化）（写作时基线为当时的 main `e6246e2`；该 hash 因公开 main 历史重整在当前 main 上可能不可解析）
+- 状态：设计已与贡献者确认，待写实施计划（后续：实施计划见 ../plans/2026-06-25-multi-window-tearoff.md，功能已上线，交互细节有演进，见 plan 文首现状对照）
 
 ## 1. 目标与非目标
 
@@ -11,15 +11,15 @@
 
 ### 非目标
 - 不做窗口内分屏 / 多 Tab（那是另一种"多窗口"，本次不做）。
-- 不做撕离窗口之间的实时数据双向同步——**窗口之间独立性很强**（白浪确认）。真相源在 Rust 后端、进程内共享；每个窗口各自拉数据即可，无需窗口间 live sync。
+- 不做撕离窗口之间的实时数据双向同步——**窗口之间独立性很强**（设计时与贡献者确认）。真相源在 Rust 后端、进程内共享；每个窗口各自拉数据即可，无需窗口间 live sync。
 - 不改造现有各面板的业务逻辑，只复用。
 
 ## 2. 关键事实（第一性，已核实）
 
-- Tauri **v2**（`tauri = 2.11.1`，`tauri-build = 2.6.1`）。前端是单个 `pinvou3-app/src/index.html`，React 经浏览器内 Babel（`type="text/babel"`，无打包步骤），全部 vendor 离线。
-- 后端 `src-tauri/src/engine_pool.rs` **已是多 session 并发**：每个 `session_id` 一个独立 keep-alive engine，`commands.rs` 按 `session_id` 路由。→ 撕离会话窗口的后端路由**零改动**。
+- Tauri **v2**（`tauri = 2.11.1`，`tauri-build = 2.6.1`）。前端是单个 `pinvou3-app/src/index.html`，React 经浏览器内 Babel（`type="text/babel"`，无打包步骤），全部 vendor 离线。（时点注：2026-06 时如此；现行前端为 Vite 模块构建，入口 `src/app/main.jsx`。）
+- 后端 `src-tauri/src/engine_pool.rs` **已是多 session 并发**：每个 `session_id` 一个独立 keep-alive engine，`commands.rs` 按 `session_id` 路由。→ 撕离会话窗口的后端路由**零改动**。（时点注：现行路径为 `src-tauri/src/features/assistant/engine_pool.rs`；`commands.rs` 已按域拆分为 `src-tauri/src/app/commands/<域>.rs`。）
 - 现有 `tauri.conf.json` 只声明一个 `label:"main"` 窗口。`capabilities/default.json` 当前给了 `core:default` + window 的 minimize/toggle-maximize/close/start-dragging，**没有运行时建窗权限**——需补。
-- 运行环境（本机）：**X11**，3 台 1920×1080 显示器横向拼接（HDMI-0 @0,0 / USB-C-1 @1920,0 / USB-C-0 @3840,0）。X11 下全局鼠标坐标+按键状态可读 → "原生跟随鬼影"方案可行。
+- 运行环境（本机）：多台 1080p 显示器横向拼接的 X11 环境。X11 下全局鼠标坐标+按键状态可读 → "原生跟随鬼影"方案可行。
 
 ## 3. 核心抽象：菜单项 = 视图描述符（ViewDescriptor）
 
@@ -35,6 +35,8 @@
 | `cardpool` | — | 专家卡牌池面板 |
 | `localenv` | — | 本地环境面板 |
 
+> 注：最终上线的可撕离 kind 集合相对此表有增删，以 `pinvou3-app/src/app/DetachedShell.jsx` 现行注册表为准。
+
 设计原则：**新增 kind = 在一张映射表里加一行 + 指定它复用哪个已有面板组件**，不写新业务 UI。
 
 ## 4. 架构
@@ -49,7 +51,7 @@
 - `DetachedShell` 内部维护一张 `kind → 面板组件 + props(id)` 映射表（ViewRegistry），是 §3 表格的代码落地。
 
 ### 4.2 窗口身份 / 去重 / 回坞
-- 撕离窗口 `label = detached:{kind}:{id}`，全局唯一。
+- 撕离窗口 `label = detached:{kind}:{id}`，全局唯一。（时点注：设计稿拼写；Tauri label 字符集不含 `:`，现行实现为 `detached-{kind}-{16位hex}`，见 `src-tauri/src/features/pet/platform/detach.rs`。）
 - 撕离同一项时若该 label 已存在 → 不新建，`set_focus` 聚焦已有窗口。
 - 主窗口侧边栏：被撕离的项**保留在列表**但显示"已弹出 ⧉"角标；点它 = 聚焦其撕离窗口，而非内联打开。
 - 关闭撕离窗口 → emit 回坞信号给主窗口，去角标、恢复内联可点。
@@ -113,7 +115,7 @@
 ## 8. 验证方式（无 GUI 自测难点）
 - Rust 逻辑（落点判定、label 规则、去重）走单元测试。
 - DragTracker X11 实现走本机手动 spike + 一个可独立运行的小 bin 验证（参考 repo 既有 `src-tauri/src/bin` 习惯）。
-- 端到端撕离手势需在白浪的 X11 三屏机器上肉眼验收（Phase 0 与每 Phase 末）。
+- 端到端撕离手势需在贡献者的 X11 多屏机器上肉眼验收（Phase 0 与每 Phase 末）。
 
 ## 9. 待实现时再定的小问题
 - 鬼影卡片的具体视觉（图标来源 / 文案）——实现时按现有侧边栏项样式取。

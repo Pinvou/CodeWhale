@@ -17,13 +17,50 @@ import (
 type quotaBatchErrorRepository struct {
 	Repository
 	memberQuotaRepository
-	errors   []error
-	requests []MemberQuotaAllocation
+	errors      []error
+	requests    []MemberQuotaAllocation
+	freezeErr   error
+	freezeCalls int
+}
+
+func (r *quotaBatchErrorRepository) FreezeMemberQuotaBatch(context.Context, uuid.UUID, uuid.UUID, string, []memberQuotaBatchItem) error {
+	r.freezeCalls++
+	return r.freezeErr
 }
 
 func (r *quotaBatchErrorRepository) AllocateMemberQuota(_ context.Context, request MemberQuotaAllocation) (MemberQuotaGrant, bool, error) {
 	r.requests = append(r.requests, request)
 	return MemberQuotaGrant{}, false, r.errors[len(r.requests)-1]
+}
+
+func TestMemberQuotaBatchFreezesBeforeAnyChildAllocation(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{"changed-parent-facts", ErrIdempotencyConflict, http.StatusConflict, "IDEMPOTENCY_CONFLICT"},
+		{"lost-parent-commit-acknowledgement", errors.New("controlled lost commit acknowledgement"), http.StatusServiceUnavailable, "MEMBER_QUOTA_BATCH_OUTCOME_UNKNOWN"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repo := &quotaBatchErrorRepository{freezeErr: test.err}
+			item := memberQuotaBatchItem{MemberUserID: uuid.New(), PackageID: uuid.New(), ComponentID: uuid.New(), ComponentType: "BASE", AmountMicrocredits: 40, MembershipVersion: 1}
+			body, err := json.Marshal(map[string]any{"items": []memberQuotaBatchItem{item}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/controlled", strings.NewReader(string(body)))
+			req.SetPathValue("organization_id", uuid.NewString())
+			req.Header.Set("Idempotency-Key", "original-batch-key-0001")
+			req = req.WithContext(humandelegation.WithClaims(req.Context(), humandelegation.Claims{HumanUserID: uuid.New()}))
+			response := httptest.NewRecorder()
+			NewService(repo).allocateMemberQuotaBatch(response, req)
+			if response.Code != test.status || !strings.Contains(response.Body.String(), test.code) || response.Header().Get("Cache-Control") != "no-store" || repo.freezeCalls != 1 || len(repo.requests) != 0 {
+				t.Fatalf("unfrozen batch dispatched: status=%d body=%s freeze=%d requests=%d", response.Code, response.Body.String(), repo.freezeCalls, len(repo.requests))
+			}
+		})
+	}
 }
 
 func TestMemberQuotaBatchPreservesTypedFailures(t *testing.T) {
@@ -49,9 +86,13 @@ func TestMemberQuotaBatchPreservesTypedFailures(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil || response.Code != http.StatusMultiStatus || len(result.Items) != 3 || response.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("batch failed: %d %s (%v)", response.Code, response.Body.String(), err)
 	}
-	for i, code := range []string{"WALLET_UNAVAILABLE", "WALLET_UNAVAILABLE", "INTERNAL_ERROR"} {
+	for i, code := range []string{"WALLET_UNAVAILABLE", "WALLET_UNAVAILABLE", "MEMBER_QUOTA_ALLOCATION_UNKNOWN"} {
 		item := result.Items[i]
-		if item.Index != i || item.Status != "FAILED" || item.Code != code || item.Created || item.Grant != nil {
+		expectedStatus := "FAILED"
+		if i == 2 {
+			expectedStatus = "UNKNOWN"
+		}
+		if item.Index != i || item.Status != expectedStatus || item.Code != code || item.Created || item.Grant != nil {
 			t.Fatalf("item %d: %#v", i, item)
 		}
 		request := repo.requests[i]

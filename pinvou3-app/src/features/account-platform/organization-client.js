@@ -6,6 +6,18 @@ const invalid = () => { throw new Error('INVALID_ORGANIZATION_ACK'); };
 const orgPath = id => `/v1/organizations/${organizationID(id)}`;
 function owned(value, org, field) { try { organizationID(org); organizationID(value?.organization_id); } catch { invalid(); } if (value.organization_id !== org) invalid(); if (field) organizationID(value[field]); return value; }
 function collection(value, check) { return requireFinanceCollection(value).map(item => check(item)); }
+function memberPageQuery({ unit_id, limit = 50, cursor = '' } = {}) {
+ if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200 || cursor != null && typeof cursor !== 'string') throw new Error('INVALID_ORGANIZATION_INPUT');
+ const query = new URLSearchParams({ limit: String(limit) });
+ if (unit_id) query.set('unit_id', organizationID(unit_id));
+ if (cursor) query.set('cursor', cursor);
+ return query;
+}
+function memberPage(value, check, cursor) {
+ const items = collection(value, check);
+ if (!Object.prototype.hasOwnProperty.call(value, 'next_cursor') || value.next_cursor !== null && (typeof value.next_cursor !== 'string' || !value.next_cursor || value.next_cursor === cursor)) invalid();
+ return { ...value, items };
+}
 export function requireOrganization(value, expected = '') {
  organizationID(value?.organization_id); organizationVersion(value.version);
  if (expected && value.organization_id !== expected || !['ACTIVE', 'DISABLED', 'DELETED'].includes(value.status) || typeof value.name !== 'string') invalid();
@@ -61,8 +73,8 @@ export class OrganizationClient {
  async acceptInvitation(id) { const value = await this.request('account', '/v1/invitations/accept', 'POST', { invitation_id: organizationID(id) }); owned(value, value?.organization_id); return membershipAck(value, value.organization_id); }
  async acceptLink(token) { if (typeof token !== 'string' || !token.trim()) throw new Error('INVALID_ORGANIZATION_INPUT'); const value = await this.request('account', '/v1/invitations/accept', 'POST', { token: token.trim() }); return membershipAck(value, value?.organization_id); }
  async units(org, signal) { const value = await this.request('account', `${orgPath(org)}/units`, 'GET', undefined, '', [200], signal); organizationVersion(value.structure_version); collection(value, item => owned(item, org, 'unit_id')); return value; }
- async members(org, signal) { return collection(await this.request('account', `${orgPath(org)}/members`, 'GET', undefined, '', [200], signal), requireMembership); }
- async quotaMembers(org, signal) { return collection(await this.request('account', `${orgPath(org)}/quota-members`, 'GET', undefined, '', [200], signal), item => { organizationID(item.user_id); organizationVersion(item.version); return item; }); }
+ async members(org, query = {}, signal) { return memberPage(await this.request('account', `${orgPath(org)}/members?${memberPageQuery(query)}`, 'GET', undefined, '', [200], signal), requireMembership, query.cursor); }
+ async quotaMembers(org, query = {}, signal) { return memberPage(await this.request('account', `${orgPath(org)}/quota-members?${memberPageQuery(query)}`, 'GET', undefined, '', [200], signal), item => { organizationID(item.user_id); organizationVersion(item.version); return item; }, query.cursor); }
  async bindings(org, signal) { return collection(await this.request('account', `${orgPath(org)}/role-bindings`, 'GET', undefined, '', [200], signal), item => bindingAck(item, org)); }
  async createUnit(org, body, key) { return unitAck(await this.request('account', `${orgPath(org)}/units`, 'POST', body, key, [200, 201]), org); }
  async moveUnit(org, unit, body, key) { return unitAck(await this.request('account', `${orgPath(org)}/units/${organizationID(unit)}/parent`, 'PATCH', body, key), org, unit); }
@@ -98,7 +110,8 @@ export class OrganizationClient {
  async allocate(org, body, key) {
   const items = collection(await this.request('token', `${orgPath(org)}/quota-grants:batch`, 'POST', body, key, [207]), item => item);
   if (items.length !== body.items.length) invalid();
-  items.forEach((item, index) => { if (item.index !== index || !['SUCCEEDED', 'FAILED'].includes(item.status)) invalid(); if (item.status === 'SUCCEEDED') { const grant = requireQuotaGrant(item.grant, org, body.items[index]); if (integerMoney(grant.original_microcredits) !== integerMoney(body.items[index].amount_microcredits) || grant.membership_version !== body.items[index].membership_version) invalid(); } else if (typeof item.code !== 'string' || !item.code) invalid(); });
+  items.forEach((item, index) => { if (item.index !== index || !['SUCCEEDED', 'FAILED', 'UNKNOWN'].includes(item.status)) invalid(); if (item.status === 'SUCCEEDED') { const grant = requireQuotaGrant(item.grant, org, body.items[index]); if (integerMoney(grant.original_microcredits) !== integerMoney(body.items[index].amount_microcredits) || grant.membership_version !== body.items[index].membership_version) invalid(); } else if (typeof item.code !== 'string' || !item.code) invalid(); });
+  if (items.some(item => item.status === 'UNKNOWN')) throw Object.assign(new Error('COMMAND_RESULT_UNKNOWN'), { code: 'COMMAND_RESULT_UNKNOWN', financeRequestState: 'WRITE_OBSERVED' });
   return { items };
  }
  async revokeGrant(org, id, reason, key) { return requireQuotaGrant(await this.request('token', `${orgPath(org)}/quota-grants/${organizationID(id)}/revoke`, 'POST', { reason }, key), org, { grant_id: id }); }
@@ -115,10 +128,13 @@ export class OrganizationClient {
   if (!Array.isArray(result?.items) || result.items.length !== ids.length) invalid();
   for (const [index, item] of result.items.entries()) {
    if (item?.grant_id !== ids[index] || !['SUCCEEDED', 'FAILED'].includes(item.status)) invalid();
-   if (item.status === 'FAILED') { if (item.code !== 'ACCOUNT_CLOSED_GRANT_RECLAIM_REJECTED') invalid(); continue; }
+   if (item.status === 'FAILED') { if (!['ACCOUNT_CLOSED_GRANT_RECLAIM_REJECTED', 'COMMAND_RESULT_UNKNOWN'].includes(item.code)) invalid(); continue; }
    const receipt = item.result;
    requireQuotaGrant(receipt?.grant, org, { grant_id: ids[index] });
    if (receipt.grant.status !== 'RECLAIMED_ACCOUNT_CLOSED' || integerMoney(receipt.amount_microcredits) <= 0n || integerMoney(receipt.subject_lifecycle_version) < 2n || typeof receipt.replayed !== 'boolean') invalid();
+  }
+  if (result.items.some(item => item.status === 'FAILED' && item.code === 'COMMAND_RESULT_UNKNOWN')) {
+   throw Object.assign(new Error('COMMAND_RESULT_UNKNOWN'), { code: 'COMMAND_RESULT_UNKNOWN', financeRequestState: 'WRITE_OBSERVED', batchResult: result });
   }
   return result;
  }

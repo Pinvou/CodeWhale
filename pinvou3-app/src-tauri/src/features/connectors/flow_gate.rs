@@ -660,19 +660,45 @@ mod tests {
     #[test]
     fn aborted_throttle_wait_rolls_back_the_reservation() {
         let last = Mutex::new(Vec::new());
+        let interval = Duration::from_millis(120);
         assert!(throttle_ok(&last, 120));
+        let first_slot = last.lock().unwrap()[0];
+        let mut cancelled_slot = None;
         // 第二家预约成功但立刻被中止。
         assert!(
-            throttle_at(&last, Duration::from_millis(120), &mut |_| {}, &mut || true).is_none()
+            throttle_at(&last, interval, &mut |_| {}, &mut || {
+                cancelled_slot = last.lock().unwrap().last().copied();
+                true
+            })
+            .is_none()
         );
-        // 回滚后剩下的窗口应约等于第一家的 120ms，而不是再叠加一个。
-        let t0 = Instant::now();
-        assert!(throttle_ok(&last, 120));
-        let waited = t0.elapsed();
+        let cancelled_slot = cancelled_slot.expect("the cancelled call must reserve a slot");
+        let remaining_slots = last.lock().unwrap().clone();
         assert!(
-            waited < Duration::from_millis(180),
-            "aborted reservation must not stack another full window, waited {waited:?}"
+            !remaining_slots.contains(&cancelled_slot),
+            "the cancelled reservation must be removed"
         );
+        // 第一家可能已过期并被清理；中止后不能留下任何新增预约。
+        assert!(remaining_slots.len() <= 1);
+        assert!(remaining_slots.iter().all(|slot| *slot == first_slot));
+
+        // 检查预约时刻，而不是线程何时被重新调度：sleep 允许超时唤醒，
+        // 繁忙 runner 的墙钟上限不能证明是否多叠加了一个节流窗口。
+        let mut requested_wait = None;
+        let permit = throttle_at(
+            &last,
+            interval,
+            &mut |remaining| requested_wait = Some(remaining),
+            &mut || false,
+        )
+        .expect("the next login must be admitted");
+        if let Some(remaining) = requested_wait {
+            assert!(remaining <= interval);
+            assert_eq!(permit.slot, first_slot + interval);
+        } else {
+            assert!(permit.slot >= first_slot + interval);
+        }
+        permit.confirm();
     }
 
     /// 非 LIFO 中止不留幽灵槽位（issue #1097）：先占槽的 A 中止时，后来者 B 的

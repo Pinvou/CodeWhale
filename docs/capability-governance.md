@@ -1,9 +1,12 @@
 # 能力治理（Capability Governance）
 
 本文档描述 pinvou3 当前的能力治理架构：哪些能力存在、谁决定它们在某个会话
-中可用、运行时如何生效。它取代 v0.9.0 blocklist 时代的能力档案说明与已删除的
-`skill-scope-governance-改动说明.md`（PR 验收记录，内容已沉淀于此）；
-canonical 工具族、白名单和执行安全细节继续以 `tool-governance.md` 为准。
+中可用、运行时如何生效。取代 `tool-governance.md` 的 v0.9.0 blocklist 时代
+版本（该文件名现由按 v0.9.12 工具面重写的继任版本沿用，见其文首沿革注；
+两文按职责分工：工具白名单与隐藏兼容名细节以 `tool-governance.md` 为准，
+能力包与 scope 治理以本文为准）与
+`skill-scope-governance-改动说明.md`（PR 验收记录，文件已随 #287 删除，
+内容已沉淀于此）。
 
 > **落地状态**（2026-09-18）：§1、§2 为现状（能力档案已退役，模式能力差量
 > 已收敛为静态表 `MODE_TABLE`）；§3 的存储已收敛为**单一 `disabled_bundles.json`**

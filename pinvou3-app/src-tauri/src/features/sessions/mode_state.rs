@@ -193,6 +193,32 @@ fn folded_collections(state: &SessionModeState) -> Vec<MountedCollection> {
 // ── SessionStore 行为 impl ──
 
 impl SessionStore {
+    /// Strict evidence for remote authorization. Keep the local restore API's
+    /// cache fallback unchanged, but never treat it as proof of a durable mode.
+    pub(crate) fn strict_durable_mode_entry(&self, id: &str) -> Result<Option<SerializableMode>> {
+        use std::io::Read as _;
+        let _io = self.session_mode_states_io.lock();
+        let Some(directory) = crate::platform::filesystem::open_existing_private_file_directory(
+            self.manager.sessions_dir(),
+        )?
+        else {
+            return Ok(None);
+        };
+        let Some(file) =
+            directory.open_plain_file(std::ffi::OsStr::new("_session_mode_states.json"))?
+        else {
+            return Ok(None);
+        };
+        const MAX_BYTES: u64 = 16 * 1024 * 1024;
+        let mut bytes = Vec::new();
+        file.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_BYTES {
+            bail!("session mode evidence too large");
+        }
+        let mut entries: HashMap<String, SerializableMode> = serde_json::from_slice(&bytes)?;
+        Ok(entries.remove(id))
+    }
+
     /// The session's entry in the durable `_session_mode_states.json`, if any.
     ///
     /// This — not [`Self::mode_state`]'s resolved fallback — is what a failed
