@@ -44,6 +44,10 @@ pub(super) fn host_file_roots() -> Vec<(String, PathBuf)> {
     imp::host_file_roots()
 }
 
+pub(super) fn desktop_control_supported() -> bool {
+    imp::desktop_control_supported()
+}
+
 pub(super) fn workspace_identity(path: &Path) -> std::io::Result<WorkspaceIdentity> {
     imp::workspace_identity(path)
 }

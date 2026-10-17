@@ -39,6 +39,16 @@ func (r *PostgresRepository) ApplyOrganizationUnitLifecycle(ctx context.Context,
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "organization-unit:"+organizationID.String()+":"+unitID.String()); err != nil {
 		return OrganizationUnitDeletionAssessment{}, err
 	}
+	// Serialize wallet creation and financial writers before assessing funds.
+	// Financial writers hold the wallet row; this projection never takes a
+	// financial command row lock in the reverse direction.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "ORG_UNIT:"+unitID.String()); err != nil {
+		return OrganizationUnitDeletionAssessment{}, err
+	}
+	var walletID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM wallets WHERE owner_type='ORG_UNIT' AND owner_id=$1 FOR UPDATE`, unitID).Scan(&walletID); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return OrganizationUnitDeletionAssessment{}, err
+	}
 	var currentStatus string
 	var currentVersion int64
 	err = tx.QueryRow(ctx, `SELECT status,structure_version FROM organization_unit_lifecycle_states WHERE organization_id=$1 AND unit_id=$2 FOR UPDATE`, organizationID, unitID).Scan(&currentStatus, &currentVersion)
@@ -75,6 +85,11 @@ func (r *PostgresRepository) ApplyOrganizationUnitLifecycle(ctx context.Context,
 	if _, err := tx.Exec(ctx, `INSERT INTO organization_unit_lifecycle_states(organization_id,unit_id,status,structure_version,updated_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(organization_id,unit_id) DO UPDATE SET status=EXCLUDED.status,structure_version=EXCLUDED.structure_version,updated_at=EXCLUDED.updated_at`, organizationID, unitID, status, structureVersion, time.Now().UTC()); err != nil {
 		return OrganizationUnitDeletionAssessment{}, err
 	}
+	if status == "DELETED" {
+		if _, err := tx.Exec(ctx, `UPDATE wallets SET status='CLOSED',version=version+1,updated_at=$2 WHERE owner_type='ORG_UNIT' AND owner_id=$1 AND status<>'CLOSED'`, unitID, r.now()); err != nil {
+			return OrganizationUnitDeletionAssessment{}, err
+		}
+	}
 	return assessment, tx.Commit(ctx)
 }
 
@@ -99,6 +114,13 @@ func organizationUnitDeletionBlockers(ctx context.Context, queryer organizationU
 	if err := rows.Err(); err != nil {
 		return OrganizationUnitDeletionAssessment{}, err
 	}
+	// Close this cursor before further queries: tx may own a single connection.
+	rows.Close()
+	financial, err := organizationUnitFinancialBlockers(ctx, queryer, unitID)
+	if err != nil {
+		return OrganizationUnitDeletionAssessment{}, err
+	}
+	assessment.Blockers = append(assessment.Blockers, financial...)
 	assessment.Ready = len(assessment.Blockers) == 0
 	return assessment, nil
 }

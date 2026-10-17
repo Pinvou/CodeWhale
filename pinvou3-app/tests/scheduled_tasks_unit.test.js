@@ -35,6 +35,10 @@ const bridgeMessages = fs.readFileSync(
   path.join(__dirname, '..', 'src', 'shared', 'bridge-messages.js'),
   'utf8'
 );
+const remoteControlState = fs.readFileSync(
+  path.join(__dirname, '..', 'src', 'features', 'remote-control', 'remote-control-state.js'),
+  'utf8'
+);
 const tauriBridge = [bridgeMessages]
   .concat(tauriBridgeFeatureNames.map(name => fs.readFileSync(path.join(__dirname, '..', 'src', 'platform', 'tauri', 'bridge', `${name}.js`), 'utf8')))
   .concat(fs.readFileSync(path.join(__dirname, '..', 'src', 'platform', 'tauri', 'bridge.js'), 'utf8'))
@@ -437,7 +441,7 @@ assert.ok(
     /scheduledRunHistory\.map/.test(indexHtml) &&
     /<RecentItem[\s\S]{0,900}chat=\{chat\}[\s\S]{0,900}handleOpenScheduledRunShortcut\(c\.scheduledRun\)/.test(indexHtml) &&
     /onContextMenu=\{openContextMenu\}/.test(indexHtml) &&
-    /onTogglePinned && onTogglePinned\(chat\.id, !chat\.pinned\)/.test(indexHtml) &&
+    /onTogglePinned && <button[\s\S]{0,200}onTogglePinned\(chat\.id, !chat\.pinned\)/.test(indexHtml) &&
     /setConfirming\(true\)/.test(indexHtml) &&
     /renameSession\(id, title\)/.test(indexHtml),
   'scheduled run record operations belong to the sidebar RecentItem, not the scheduled task definition list'
@@ -466,7 +470,7 @@ assert.ok(
   'an older autosave completion must not flash an error over newer pending edits'
 );
 assert.ok(
-  /editable=\{!busy && !isMultiAgentReadOnly && item\.id === lastUserId\}/.test(indexHtml) &&
+  /editable=\{!busy && !isMultiAgentReadOnly && !item\.remote && item\.id === lastUserId\}/.test(indexHtml) &&
     !/async function editLastTurn\(newText\)[\s\S]{0,420}isScheduledRunSession\(state\.activeSessionId\)\) return false/.test(tauriBridge) &&
     !indexHtml.includes('定时运行使用创建时锁定的模型'),
   'a scheduled run opened from history should use the ordinary chat editor and composer controls'
@@ -864,6 +868,9 @@ function createBridgeHarness(sharedStorage, runtimeOptions) {
     TextDecoder: TextDecoder,
     Uint8Array: Uint8Array,
   };
+  // Match index.html: the shared state reducer is installed before either
+  // platform bridge consumes the desktopRemoteControl domain.
+  vm.runInNewContext(remoteControlState, context, { filename: "remote-control-state.js" });
   vm.runInNewContext(
     bridgeKind === "web" ? webBridge : tauriBridge,
     context,
@@ -1106,6 +1113,10 @@ async function lostFirstWebSessionChunkStillHasCancellableLease() {
 async function subscriptionSnapshotsAvoidTranscriptDeepClone() {
   var harness = createBridgeHarness();
   var bridge = harness.bridge;
+  // The desktop remote-control feature restores its authoritative controller
+  // status in a microtask when the bridge is installed. Let that startup
+  // publication settle so this assertion measures only createNewSession.
+  await tick();
   var chatUpdates = [];
   var combinedUpdates = [];
   var unsubscribeChat = bridge.state.subscribe("chat", function (snapshot) {
@@ -1225,6 +1236,7 @@ async function reentrantSubscriptionNotificationsStayOrdered() {
 async function persistentSubscriptionSnapshotsPreserveJsonEdges() {
   var harness = createBridgeHarness();
   var bridge = harness.bridge;
+  await tick(); // settle the bridge's initial desktop controller-status publication
   var snapshots = [];
   var negativeZero = true;
   function settingsResult() {
@@ -2004,6 +2016,13 @@ async function currentInternalProvenanceAndEnvelopeStayOutOfPresentation() {
     'Switch to an alternate tool or source.',
     runtimeTurnMeta,
   ].join('\n');
+  var contextUpdateText = [
+    '<context_update>',
+    'Session context changed since it was pinned; the pinned system prompt is unchanged. Delta (+ added, - removed):',
+    '- ## Skills',
+    '- visual-design context from runtime',
+    '</context_update>',
+  ].join('\n');
 
   for (var bridgeIndex = 0; bridgeIndex < 2; bridgeIndex++) {
     var bridgeKind = bridgeIndex === 0 ? "tauri" : "web";
@@ -2040,6 +2059,13 @@ async function currentInternalProvenanceAndEnvelopeStayOutOfPresentation() {
           // Some transports flatten the runtime payload and its metadata into one text block.
           { role: "user", content: [{ type: "text", text: serializedEnvelopeAndMeta }] },
           { role: "user", content: [{ type: "text", text: serializedRuntimePromptAndMeta }] },
+          { role: "user", content: [{ type: "text", text: contextUpdateText }] },
+          { role: "user", content: [
+            { type: "text", text: contextUpdateText },
+            { type: "text", text: "<turn_meta_unchanged />" },
+            { type: "text", text: "multi-block real user note" },
+          ] },
+          { role: "user", content: [{ type: "text", text: "Please explain the ordinary <context_update> tag." }] },
           { role: "assistant", content: [{ type: "text", text: "parent final answer" }] },
         ],
         artifacts: [],
@@ -2060,10 +2086,15 @@ async function currentInternalProvenanceAndEnvelopeStayOutOfPresentation() {
       "codewhale:runtime_event",
       "Current workspace:",
       "Input provenance: shell_completion",
+      "visual-design context from runtime",
     ].forEach(function (hiddenText) {
       assert.ok(!visible.includes(hiddenText),
         bridgeKind + " must hide internal payload: " + hiddenText);
     });
+    assert.ok(visible.includes("multi-block real user note"),
+      bridgeKind + " must retain ordinary text beside a canonical context update block");
+    assert.ok(visible.includes("Please explain the ordinary <context_update> tag."),
+      bridgeKind + " must retain an ordinary mention of the context-update tag");
     assert.ok(raw.includes("current child-only completion summary"),
       bridgeKind + " must preserve the child handoff in model context");
     assert.ok(raw.includes("current runtime recovery hint"),
@@ -2076,6 +2107,8 @@ async function currentInternalProvenanceAndEnvelopeStayOutOfPresentation() {
       bridgeKind + " must preserve shell_completion provenance metadata");
     assert.ok(raw.includes("Tool calls have failed for 2 consecutive steps"),
       bridgeKind + " must preserve serialized runtime guidance in model context");
+    assert.ok(raw.includes("visual-design context from runtime"),
+      bridgeKind + " must preserve the context update in model context");
 
     await harness.emit("chat:user_message", {
       session_id: sessionId,
@@ -2087,11 +2120,18 @@ async function currentInternalProvenanceAndEnvelopeStayOutOfPresentation() {
       content: serializedRuntimePromptAndMeta,
       operation: "append",
     });
+    await harness.emit("chat:user_message", {
+      session_id: sessionId,
+      content: contextUpdateText,
+      operation: "append",
+    });
     var afterLiveInternal = JSON.stringify(harness.bridge.state.get("chat").chatItems);
     assert.ok(!afterLiveInternal.includes("Tool calls have failed for 2 consecutive steps"),
       bridgeKind + " must hide a live runtime prompt with trailing provenance metadata");
     assert.ok(!afterLiveInternal.includes("current child-only completion summary"),
       bridgeKind + " must hide a live envelope with trailing metadata");
+    assert.ok(!afterLiveInternal.includes("visual-design context from runtime"),
+      bridgeKind + " must hide a live canonical context update");
 
     var quotedEnvelope = completionText + "\nPlease explain this literal runtime envelope.";
     await harness.emit("chat:user_message", {
@@ -2102,6 +2142,16 @@ async function currentInternalProvenanceAndEnvelopeStayOutOfPresentation() {
     var afterQuotedEnvelope = JSON.stringify(harness.bridge.state.get("chat").chatItems);
     assert.ok(afterQuotedEnvelope.includes("Please explain this literal runtime envelope."),
       bridgeKind + " must retain user text following an internal-looking quoted envelope");
+
+    var quotedContextUpdate = contextUpdateText + "\nPlease explain this literal context update.";
+    await harness.emit("chat:user_message", {
+      session_id: sessionId,
+      content: quotedContextUpdate,
+      operation: "append",
+    });
+    var afterQuotedContextUpdate = JSON.stringify(harness.bridge.state.get("chat").chatItems);
+    assert.ok(afterQuotedContextUpdate.includes("Please explain this literal context update."),
+      bridgeKind + " must retain user text following a quoted context update");
   }
 }
 
@@ -2113,6 +2163,12 @@ async function autoTitleSkipsInternalAndStripsTurnMeta() {
       'This is an internal runtime event, not user input.',
       'auto-title child completion summary',
       '</codewhale:runtime_event>',
+    ].join('\n');
+    var contextUpdateText = [
+      '<context_update>',
+      'Session context changed since it was pinned; the pinned system prompt is unchanged. Delta (+ added, - removed):',
+      '- auto-title runtime context',
+      '</context_update>',
     ].join('\n');
 
     // 场景 1：首条 user 消息为内部信封 → 不得 rename（XML 不得进 sidebar 标题）。
@@ -2129,6 +2185,7 @@ async function autoTitleSkipsInternalAndStripsTurnMeta() {
             { type: "text", text: envelopeText },
             { type: "text", text: "<turn_meta>\nInput provenance: subagent_handoff (non-authoritative)\n</turn_meta>" },
           ] },
+          { role: "user", content: [{ type: "text", text: contextUpdateText }] },
           { role: "assistant", content: [{ type: "text", text: "父汇总" }] },
         ],
         artifacts: [],
@@ -2143,7 +2200,38 @@ async function autoTitleSkipsInternalAndStripsTurnMeta() {
       bridgeKind + " persistMessagesFor 应执行（前置条件成立，防止假绿）");
     var rename1 = h1.calls.filter(function (c) { return c.cmd === "rename_session"; });
     assert.strictEqual(rename1.length, 0,
-      bridgeKind + " 首条内部信封不得触发自动命名（信封 XML 不得进 sidebar）：" + JSON.stringify(rename1));
+      bridgeKind + " 内部运行时消息不得触发自动命名（内部 XML 不得进 sidebar）：" + JSON.stringify(rename1));
+
+    // 场景 1b：context update 是首条且唯一内部 user 消息，后随真实 user。
+    // The context update is the first and only internal user
+    // turn, followed by a real user turn. Auto-title must skip the delta and
+    // select the first displayable user text.
+    var hContext = createBridgeHarness(null, { bridgeKind: bridgeKind });
+    var sidContext = "chat-title-context-update-" + bridgeKind;
+    hContext.handlers.list_sessions = function () {
+      return [{ id: sidContext, title: "New chat" }];
+    };
+    hContext.handlers.load_session = function () {
+      return {
+        metadata: { id: sidContext, title: "New chat" },
+        messages: [
+          { role: "user", content: [{ type: "text", text: contextUpdateText }] },
+          { role: "assistant", content: [{ type: "text", text: "context acknowledged" }] },
+          { role: "user", content: [{ type: "text", text: "Real user title request" }] },
+        ],
+        artifacts: [],
+      };
+    };
+    assert.strictEqual(await hContext.bridge.sessions.switchToSession(sidContext), true);
+    await hContext.emit("session:list_changed", {});
+    await new Promise(function (r) { setTimeout(r, 50); });
+    await hContext.emit("chat:done", { session_id: sidContext, status: "Completed" });
+    await new Promise(function (r) { setTimeout(r, 150); });
+    var contextRenames = hContext.calls.filter(function (c) { return c.cmd === "rename_session"; });
+    assert.strictEqual(contextRenames.length, 1,
+      bridgeKind + " must auto-title from the real user turn after an internal context update");
+    assert.strictEqual(contextRenames[0].args.title, "Real user title requ",
+      bridgeKind + " must skip the internal context delta when choosing the title");
 
     // 场景 2：首条 user 消息为普通消息（引擎标准布局：正文 + 尾随 turn_meta block）
     // → 标题应为正文，不得拼入 turn_meta/workspace XML。

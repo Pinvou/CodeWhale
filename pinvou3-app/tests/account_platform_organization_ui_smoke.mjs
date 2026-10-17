@@ -66,6 +66,105 @@ try{
    return calls.length === 2 && !!calls[0].key && calls[0].key === calls[1].key && calls[0].body === calls[1].body && JSON.stringify(JSON.parse(calls[1].body)) === JSON.stringify(expected);
   }, component));
  });
+ for (const language of ['zh','en','ja']) await run(`${language}: manual member and quota pages preserve selector scope`,async()=>{
+  await fresh(language);await page.evaluate(()=>{window.f06.enumMode=true;window.f06.pagination=true;window.f06.authorizationVersion++;window.f06.render();});
+  await page.waitForFunction(()=>document.body.textContent.includes('First page member')&&document.body.textContent.includes('First page quota member'));
+  assert.equal(await page.evaluate(()=>window.f06.memberReads.length),2,'no automatic all-page traversal');
+  assert.equal(await page.evaluate(()=>document.body.textContent.includes('Second page member')),false);
+  await page.evaluate(()=>[...document.querySelectorAll('button')].filter(b=>b.textContent===window.f06.copy().loadMoreMembers&&!b.disabled).forEach(b=>b.click()));
+  await page.waitForFunction(()=>document.body.textContent.includes('Second page member')&&document.body.textContent.includes('Second page quota member'));
+  assert.deepEqual(await page.evaluate(()=>window.f06.memberReads.filter(x=>x.cursor).map(x=>x.cursor).sort()),['members-page-2','quota-page-2']);
+  assert.equal(await page.evaluate(()=>[...document.querySelectorAll('form')].find(f=>f.querySelector('h4')?.textContent===window.f06.copy().replaceRoles).querySelector('select').querySelector(`option[value="${window.f06.other}"]`)?.textContent),'Second page member');
+  assert.equal(await page.evaluate(()=>[...document.querySelectorAll('button')].filter(b=>b.textContent===window.f06.copy().loadMoreMembers).every(b=>b.disabled)),true);
+ });
+ await run('member pagination rejects a denied continuation without exposing stale selector targets',async()=>{
+  await fresh('en');await page.evaluate(()=>{window.f06.enumMode=true;window.f06.pagination=true;window.f06.authorizationVersion++;window.f06.render();});
+  await page.waitForFunction(()=>document.body.textContent.includes('First page member'));
+  await page.evaluate(()=>{window.f06.pageDenied=true;[...document.querySelectorAll('button')].find(b=>b.textContent===window.f06.copy().loadMoreMembers&&!b.disabled).click();});
+  await page.waitForFunction(()=>[...document.querySelectorAll('[role=alert]')].some(el=>el.textContent===window.f06.copy().permissions));
+  assert.equal(await page.evaluate(()=>document.body.textContent.includes('Second page member')),false);
+  assert.equal(await page.evaluate(()=>[...document.querySelectorAll('form')].find(f=>f.querySelector('h4')?.textContent===window.f06.copy().replaceRoles).querySelector('select').options.length),1);
+ });
+ await run('late member continuation cannot cross owner authorization generation',async()=>{
+  await fresh('en');await page.evaluate(()=>{window.f06.enumMode=true;window.f06.pagination=true;window.f06.authorizationVersion++;window.f06.render();});
+  await page.waitForFunction(()=>document.body.textContent.includes('First page member'));
+  await page.evaluate(()=>{window.f06.delayPage=true;[...document.querySelectorAll('button')].find(b=>b.textContent===window.f06.copy().loadMoreMembers&&!b.disabled).click();});
+  await page.waitForFunction(()=>window.f06.releasePage);
+  await page.evaluate(()=>{window.f06.user=window.f06.other;window.f06.authorizationVersion++;window.f06.render();});
+  await page.waitForFunction(()=>window.f06.memberReads.filter(x=>!x.cursor).length>=4);
+  await page.evaluate(async()=>{window.f06.releasePage();await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));});
+  assert.equal(await page.evaluate(()=>document.body.textContent.includes('Second page member')),false);
+ });
+ await run('fresh transport epoch without owner render rejects old pagination dispatch and settlement',async()=>{
+  await fresh('en');await page.evaluate(()=>{window.f06.enumMode=true;window.f06.pagination=true;window.f06.authorizationVersion++;window.f06.render();});
+  await page.waitForFunction(()=>document.body.textContent.includes('First page member')&&document.body.textContent.includes('First page quota member'));
+  const callbackReads=await page.evaluate(()=>{
+   const button=[...document.querySelectorAll('button')].find(b=>b.textContent===window.f06.copy().loadMoreMembers&&!b.disabled);
+   const props=button[Object.keys(button).find(key=>key.startsWith('__reactProps$'))],before=window.f06.memberReads.length;
+   window.f06.client.financeSessionEpoch=(window.f06.client.financeSessionEpoch||0)+1;
+   // Deliberately do not render the owner after the transport changes.
+   props.onClick();return window.f06.memberReads.length-before;
+  });
+  await fresh('en');await page.evaluate(()=>{window.f06.enumMode=true;window.f06.pagination=true;window.f06.authorizationVersion++;window.f06.render();});
+  await page.waitForFunction(()=>document.body.textContent.includes('First page member')&&document.body.textContent.includes('First page quota member'));
+  await page.evaluate(()=>{window.f06.delayPage=true;[...document.querySelectorAll('button')].find(b=>b.textContent===window.f06.copy().loadMoreMembers&&!b.disabled).click();});
+  await page.waitForFunction(()=>window.f06.releasePage);
+  const lateReads=await page.evaluate(async()=>{
+   const before=window.f06.memberReads.length;
+   window.f06.client.financeSessionEpoch=(window.f06.client.financeSessionEpoch||0)+1;
+   // Release the old request without a parent or owner render.
+   window.f06.releasePage();await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+   return window.f06.memberReads.length-before;
+  });
+  assert.deepEqual({callbackReads,lateReads},{callbackReads:0,lateReads:0},'old reads cannot use the new transport epoch before bootstrap rerenders its owner');
+ });
+ await run('same-owner client replacement hides old member pages and rejects old callbacks before effects',async()=>{
+  await fresh('en');await page.evaluate(()=>{window.f06.enumMode=true;window.f06.pagination=true;window.f06.authorizationVersion++;window.f06.render();});
+  await page.waitForFunction(()=>document.body.textContent.includes('First page member'));
+  await page.evaluate(()=>{const button=[...document.querySelectorAll('button')].find(b=>b.textContent===window.f06.copy().loadMoreMembers&&!b.disabled);const props=button[Object.keys(button).find(key=>key.startsWith('__reactProps$'))];window.f06.oldPageClick=props.onClick;button.click();});
+  await page.waitForFunction(()=>document.body.textContent.includes('Second page member'));
+  await page.evaluate(()=>{window.f06.inspectMemberClientCommit=true;window.f06.useAlternateWorkspaceClient=true;window.f06.render();});
+  await page.waitForFunction(()=>window.f06.memberClientCommit);
+  const result=await page.evaluate(()=>window.f06.memberClientCommit);
+  assert.equal(result.sawOldPage,false,'new client render cannot expose old client loaded pages');
+  assert.equal(result.readsAfter,result.readsBefore,'retired callback cannot dispatch an old-client continuation before effects');
+ });
+ for(const language of ['zh','en','ja']) await run(`${language}: registered model administrator is grant-only and sends the existing role command`,async()=>{
+  await fresh(language);await page.evaluate(()=>{window.f06.enumMode=true;window.f06.roleMode='members';window.f06.authorizationVersion++;window.f06.render();});
+  await page.waitForFunction(()=>[...document.querySelectorAll('form')].find(f=>f.querySelector('h4')?.textContent===window.f06.copy().grantRole)?.querySelector(`option[value="${window.f06.user}"]`));
+  const choices=await page.evaluate(()=>{
+   const form=key=>[...document.querySelectorAll('form')].find(f=>f.querySelector('h4')?.textContent===window.f06.copy()[key]);
+   const option=form('grantRole').querySelector('option[value="ORG_MODEL_ADMIN"]');
+   return {label:option?.textContent,expected:window.f06.copy().enumRole_ORG_MODEL_ADMIN,invite:Boolean(form('invite').querySelector('option[value="ORG_MODEL_ADMIN"]')),replace:Boolean(form('replaceRoles').querySelector('option[value="ORG_MODEL_ADMIN"]'))};
+  });
+  assert.equal(choices.label,choices.expected);assert.notEqual(choices.label,'ORG_MODEL_ADMIN');assert.equal(choices.invite,false);assert.equal(choices.replace,false);
+  await page.evaluate(()=>{const form=[...document.querySelectorAll('form')].find(f=>f.querySelector('h4')?.textContent===window.f06.copy().grantRole);const selects=form.querySelectorAll('select');for(const [element,value] of [[selects[0],window.f06.user],[selects[1],'ORG_MODEL_ADMIN']]){element.value=value;element.dispatchEvent(new Event('change',{bubbles:true}));}const reason=form.querySelector('input[type=text]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(reason,'Controlled existing model administrator role');reason.dispatchEvent(new Event('input',{bubbles:true}));});
+  await page.evaluate(()=>[...document.querySelectorAll('form')].find(f=>f.querySelector('h4')?.textContent===window.f06.copy().grantRole).requestSubmit());
+  await page.waitForFunction(()=>[...document.querySelectorAll('form')].find(f=>f.querySelector('h4')?.textContent===window.f06.copy().grantRole)?.querySelector('[role=status]')?.textContent===window.f06.copy().saved);
+  assert.equal(await page.evaluate(()=>{const calls=window.f06.calls.filter(c=>c.method==='POST'&&c.path.endsWith('/role-bindings'));return calls.length===1&&JSON.parse(calls[0].body).role_code==='ORG_MODEL_ADMIN'&&JSON.parse(calls[0].body).unit_id===null&&Boolean(calls[0].key);}),true);
+ });
+ for(const unknownMode of ['207','503']) await run(`${unknownMode}: a whole quota batch retains ordered facts and key until known`,async()=>{
+  await fresh('en');await page.evaluate(mode=>{
+   window.f06.enumMode=true;window.f06.pagination=true;window.f06.authorizationVersion++;window.f06.batchUncertain=true;window.f06.render();
+   const originalFetch=globalThis.fetch;
+   globalThis.fetch=async(url,options={})=>{
+    const path=new URL(String(url),location.href).pathname;if(options.method!=='POST'||!path.endsWith('/quota-grants:batch'))return originalFetch(url,options);
+    window.f06.calls.push({path,method:options.method,body:options.body,key:options.headers['Idempotency-Key']});
+    if(window.f06.batchUncertain&&mode==='503')return new Response(JSON.stringify({code:'MEMBER_QUOTA_BATCH_OUTCOME_UNKNOWN'}),{status:503,headers:{'Content-Type':'application/json'}});
+    const items=JSON.parse(options.body).items.map((input,index)=>window.f06.batchUncertain&&index===1?{index,status:'UNKNOWN',code:'MEMBER_QUOTA_ALLOCATION_UNKNOWN'}:{index,status:'SUCCEEDED',grant:{grant_id:index?window.f06.other:window.f06.unit,organization_id:window.f06.org,member_user_id:input.member_user_id,package_id:input.package_id,component_id:input.component_id,status:'ACTIVE',membership_version:input.membership_version,allocation_version:1,original_microcredits:input.amount_microcredits,available_microcredits:input.amount_microcredits,reserved_microcredits:'0',used_microcredits:'0',expired_microcredits:'0',revoked_microcredits:'0'}});
+    return new Response(JSON.stringify({items}),{status:207,headers:{'Content-Type':'application/json'}});
+   };
+  },unknownMode);
+  await page.waitForFunction(()=>document.body.textContent.includes('First page quota member'));
+  await page.evaluate(()=>{const buttons=[...document.querySelectorAll('button')].filter(b=>b.textContent===window.f06.copy().loadMoreMembers&&!b.disabled);buttons.forEach(b=>b.click());});
+  await page.waitForFunction(()=>document.body.textContent.includes('Second page quota member'));await prepareQuota('BASE');
+  await page.evaluate(()=>{const form=[...document.querySelectorAll('form')].find(f=>f.querySelector('h4')?.textContent===window.f06.copy().allocate),input=form.querySelector('input');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,`${window.f06.user},${window.f06.other}`);input.dispatchEvent(new Event('input',{bubbles:true}));});
+  await click('allocate');await page.waitForFunction(()=>[...document.querySelectorAll('form')].find(f=>f.querySelector('h4')?.textContent===window.f06.copy().allocate)?.querySelector('[role=alert]')?.textContent===window.f06.copy().unknown);
+  assert.equal(await page.evaluate(()=>window.f06.calls.filter(c=>c.path.endsWith('/quota-grants:batch')).length),1,'unknown cannot automatically issue another POST');
+  await page.evaluate(()=>{window.f06.batchUncertain=false;window.f06.language='ja';window.f06.render();});await click('retry');
+  await page.waitForFunction(()=>[...document.querySelectorAll('form')].find(f=>f.querySelector('h4')?.textContent===window.f06.copy().allocate)?.querySelector('[role=status]')?.textContent===window.f06.copy().saved);
+  assert.equal(await page.evaluate(()=>{const calls=window.f06.calls.filter(c=>c.path.endsWith('/quota-grants:batch'));const items=JSON.parse(calls[0].body).items;return calls.length===2&&calls[0].body===calls[1].body&&calls[0].key===calls[1].key&&items.length===2&&items[0].member_user_id===window.f06.user&&items[1].member_user_id===window.f06.other&&items[1].membership_version===2;}),true);
+ });
  for(const language of ['zh','en','ja'])await run(`${language}: organization read-only financial facts and permission controls`,async()=>{await fresh(language);await page.evaluate(()=>{window.f06.readonly=true;window.f06.render();});await page.waitForFunction(()=>!document.querySelector('.ap-org-action'));assert.ok(await page.evaluate(()=>document.body.textContent.includes('900,719,925,474.0993')));assert.equal(await page.evaluate(()=>[...document.querySelectorAll('button')].some(button=>button.textContent===window.f06.copy().createUnit)),false);});
  await run('Actual202 remains unknown and same immutable key/body survive language change',async()=>{await fresh('en');await form();await page.evaluate(()=>{window.f06.unknown=true;});await click('createUnit');await page.waitForFunction(()=>document.querySelector('[role=alert]')?.textContent===window.f06.copy().unknown);assert.ok(await page.evaluate(()=>[...document.querySelectorAll('form')].find(item=>item.querySelector('h4')?.textContent===window.f06.copy().createUnit).querySelector('fieldset').disabled));await page.evaluate(()=>{window.f06.unknown=false;window.f06.language='ja';window.f06.render();});await click('retry');await page.waitForFunction(()=>[...document.querySelectorAll('[role=status]')].some(item=>item.textContent===window.f06.copy().saved));assert.ok(await page.evaluate(()=>{const calls=window.f06.calls.filter(call=>call.method==='POST');return calls.length===2&&calls[0].key===calls[1].key&&calls[0].body===calls[1].body;}));});
  await run('Late write cannot settle or mutate the next identity',async()=>{await fresh('en');await form();await page.evaluate(()=>{window.f06.delayed=true;});await click('createUnit');await page.waitForFunction(()=>typeof window.f06.release==='function');await page.evaluate(()=>window.f06.switchIdentity());await page.waitForFunction(()=>!document.querySelector('.ap-org-action fieldset')?.disabled);await page.evaluate(()=>window.f06.release());assert.equal(await page.evaluate(()=>[...document.querySelectorAll('[role=status]')].some(item=>item.textContent===window.f06.copy().saved)),false);});

@@ -32,6 +32,8 @@ let delayedPolicyWriteStarted = false;
 const reauthenticationRequests = [];
 const writes = [];
 let failingPolicyReads = 0;
+let invalidNextPolicyWrite = false;
+const rejectedPolicyWrites = [];
 let policyReads = 0;
 let pauseNextPolicyRead = false;
 let releasePolicyRead = null;
@@ -140,6 +142,11 @@ const server = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    if (invalidNextPolicyWrite) {
+      invalidNextPolicyWrite = false;
+      rejectedPolicyWrites.push({ body, idempotencyKey: request.headers['idempotency-key'] });
+      return json(response, { code: 'REGISTRATION_BONUS_INVALID' }, 400);
+    }
     writes.push({ body, idempotencyKey: request.headers['idempotency-key'], csrf: request.headers['x-csrf-token'] });
     policy = { ...policy, revision: policy.revision + 1, enabled: body.enabled, amount_microcredits: body.amount_points * 10_000, validity_days: body.validity_days, updated_at: new Date().toISOString() };
     return json(response, policy);
@@ -493,6 +500,45 @@ try {
       console.log(JSON.stringify({ action: 'pass', test: `${language}: selected locale uses same-browser native timestamp formatter` }));
     } catch (error) { newFailures++; console.log(JSON.stringify({ action: 'fail', test: `${language}: selected timestamp locale`, message: error.message })); }
     finally { await datePage.close(); }
+  }
+  for (const language of ['zh', 'en', 'ja']) {
+    const saveRetryPage = await browser.newPage();
+    try {
+      permissions = ['platform.registration-bonus.read', 'platform.registration-bonus.manage'];
+      currentUserID = '0199a100-0001-7000-8000-000000000101'; csrfToken = 'csrf-user-a';
+      writes.length = 0; rejectedPolicyWrites.length = 0; policyReads = 0;
+      policy = { ...policy, revision: 700, enabled: false, amount_microcredits: 0, validity_days: 30, eligibility_status: 'READY' };
+      await saveRetryPage.evaluateOnNewDocument(language => localStorage.setItem('pinvou.admin.language', language), language);
+      await saveRetryPage.goto(`http://127.0.0.1:${port}/admin.html?section=operations`, { waitUntil: 'networkidle0' });
+      const root = '[data-testid="registration-bonus-policy"]';
+      await saveRetryPage.waitForSelector(`${root} form`);
+      const numbers = await saveRetryPage.$$(`${root} input[type=number]`);
+      await numbers[0].evaluate(node => { node.focus(); node.select(); }); await numbers[0].type('25');
+      await numbers[1].evaluate(node => { node.focus(); node.select(); }); await numbers[1].type('90');
+      await saveRetryPage.type(`${root} textarea`, 'Keep this unsaved policy reason');
+      await saveRetryPage.click(`${root} input[type=checkbox]`);
+      invalidNextPolicyWrite = true;
+      await saveRetryPage.click(`${root} button[type=submit]`);
+      await saveRetryPage.waitForSelector(`${root} [role=alert] button`);
+      assert.equal(rejectedPolicyWrites.length, 1); assert.equal(writes.length, 0); assert.equal(policy.revision, 700);
+      assert.equal(await saveRetryPage.$eval(`${root} [role=alert] span`, node => node.textContent), adminPlatformCopy[language].operations.saveFailed);
+      const values = await saveRetryPage.$eval(root, node => ({ numbers: [...node.querySelectorAll('input[type=number]')].map(input => input.value), enabled: node.querySelector('input[type=checkbox]').checked, reason: node.querySelector('textarea').value }));
+      assert.deepEqual(values, { numbers: ['25', '90'], enabled: true, reason: 'Keep this unsaved policy reason' });
+      const readsBeforeRetry = policyReads;
+      await numbers[0].evaluate(node => { node.focus(); node.select(); }); await numbers[0].type('-1');
+      assert.equal(await saveRetryPage.$eval(`${root} [role=alert] button`, node => node.disabled), true, 'save retry must not bypass numeric form validation');
+      await numbers[0].evaluate(node => { node.focus(); node.select(); }); await numbers[0].type('26');
+      await saveRetryPage.type(`${root} textarea`, ' after correcting input');
+      await saveRetryPage.click(`${root} [role=alert] button`);
+      await saveRetryPage.waitForFunction(() => document.querySelector('[data-testid="registration-bonus-policy"] .adm-registration-bonus-summary dd')?.textContent.trim() === '701', { timeout: 3000 });
+      assert.equal(policyReads, readsBeforeRetry, 'explicit save retry must not reload and discard the edited form');
+      assert.equal(writes.length, 1); assert.equal(writes[0].body.expected_revision, 700);
+      assert.equal(writes[0].body.amount_points, 26); assert.equal(writes[0].body.validity_days, 90); assert.equal(writes[0].body.enabled, true);
+      assert.equal(writes[0].body.reason, 'Keep this unsaved policy reason after correcting input');
+      assert.notEqual(writes[0].idempotencyKey, rejectedPolicyWrites[0].idempotencyKey, 'proved-no-write rejection permits a new edited command');
+      console.log(JSON.stringify({ action: 'pass', test: `${language}: known-no-write save retry preserves draft and validates edited form` }));
+    } catch (error) { newFailures++; console.log(JSON.stringify({ action: 'fail', test: `${language}: known-no-write save retry`, message: error.message })); }
+    finally { invalidNextPolicyWrite = false; await saveRetryPage.close(); }
   }
   for (const kind of ['manual-same-actor', 'effect-owned-new-actor', 'retired-reader-newer-request']) {
     const retryPage = await browser.newPage();

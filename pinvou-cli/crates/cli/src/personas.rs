@@ -1440,6 +1440,7 @@ fn open_equipped_session(
     // PINVOU3_HOME would silently resolve against the cwd.
     sandbox_home()?;
     let store = crate::support::boot_session_store()?;
+    crate::support::reject_remote_session(&store, session_id, "personas", verb)?;
     store.load(session_id).map_err(|error| {
         CliError::failed(format!(
             "personas {verb}: session {session_id} does not exist ({error})"

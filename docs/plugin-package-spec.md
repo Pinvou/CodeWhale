@@ -180,9 +180,11 @@ MCP server 的启动真相源。本地 stdio server 的必填与常用字段：
 ```
 
 可选字段全量：`env`、`secret_env`、`secret_headers`、`validate_on_install`、
-`config_fields`、`routing_rules`、`tool_table_entries`、`pip_dependencies`、
+`config_fields`、`pip_dependencies`、
 `windows_python_dependencies`（仅受信任内置包消费）、
 `servers`、`companion_skills`。
+（路由知识字段 `routing_rules` / `tool_table_entries` 已删除：一律进 SKILL.md，
+serde 会忽略旧 manifest 中的残留字段。）
 
 ---
 

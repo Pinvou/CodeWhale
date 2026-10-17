@@ -30,10 +30,6 @@ pub struct ToolManifest {
     #[serde(default)]
     pub config_fields: Vec<ConfigField>,
     #[serde(default)]
-    pub routing_rules: Vec<String>,
-    #[serde(default)]
-    pub tool_table_entries: Vec<String>,
-    #[serde(default)]
     pub pip_dependencies: Vec<String>,
     /// Platform-specific, hash-locked Python wheels. A matching target is installed into an
     /// isolated user environment; only non-Windows targets may use the legacy pip fallback.
