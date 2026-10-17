@@ -30,3 +30,7 @@ Object.assign(accountClosedGrantCopy.ja, { reclaimed: '回収済み', rejected: 
 Object.assign(accountClosedGrantCopy.zh, { recoveryUnavailable: '无法安全保存或读取原回收凭据，已停止发送请求。请恢复会话存储后再试。', recoveryPending: '原回收结果尚未确认；只能凭原请求重试。' });
 Object.assign(accountClosedGrantCopy.en, { recoveryUnavailable: 'The original reclaim proof cannot be read or saved safely. Requests are blocked until session storage is restored.', recoveryPending: 'The original reclaim result is unconfirmed. Retry only the original request.' });
 Object.assign(accountClosedGrantCopy.ja, { recoveryUnavailable: '元の回収証跡を安全に保存・読み取りできないため送信を停止しました。セッション保存を復旧してから再試行してください。', recoveryPending: '元の回収結果は未確認です。元の要求でのみ再試行できます。' });
+
+Object.assign(accountClosedGrantCopy.zh, { batchUnconfirmed: '结果未确认：仅重试原完整批次以恢复回执。' });
+Object.assign(accountClosedGrantCopy.en, { batchUnconfirmed: 'Result unconfirmed: retry only the original complete batch to recover its receipt.' });
+Object.assign(accountClosedGrantCopy.ja, { batchUnconfirmed: '結果は未確認です。元の一括要求全体でのみ再試行して受領結果を確認してください。' });

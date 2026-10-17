@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import fs from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { checkCoverage, loadInputs } from '../check-token-management-authorization-coverage.mjs';
 
 const inputs = loadInputs();
@@ -83,6 +84,99 @@ test('real CRLF route sources preserve declaration offsets and complete inventor
     routeSource: inputs.routeSource.replace(/\r?\n/g, '\r\n'),
     credentialSource: inputs.credentialSource.replace(/\r?\n/g, '\r\n'),
   }), checkCoverage(inputs));
+});
+
+const invocationDocument = JSON.parse(readFileSync(new URL('../../account-platform/contracts/openapi/token-invocation.yaml', import.meta.url), 'utf8'));
+for (const [name, mutate] of Object.entries({
+  missingRoute: document => { delete document.paths['/v1/models']; },
+  extraRoute: document => { document.paths['/v1/uninstalled'] = document.paths['/v1/models']; },
+  wrongHandler: document => { document.paths['/v1/models'].get['x-go-handler'] = 'uninstalled'; },
+  wrongPermission: document => { document.paths['/v1/models'].get['x-permission'] = 'platform.models.manage'; },
+  missingAuthentication: document => { document.paths['/v1/models'].get.security = []; },
+  missingIdempotency: document => { document.paths['/v1/chat/completions'].post.parameters[0].required = false; },
+  missingPathIdentity: document => { document.paths['/v1/usage-requests/{usage_request_id}'].get.parameters = []; },
+  missingModel: document => { document.paths['/v1/chat/completions'].post.requestBody.content['application/json'].schema.required = []; },
+  missingPositiveOperation: document => { document.paths['/internal/v1/holds/extend'].post.requestBody.content['application/json'].schema.oneOf[0].required = ['additional_microcredits']; },
+  unrestrictedRenewalOperation: document => { delete document.paths['/internal/v1/holds/extend'].post.requestBody.content['application/json'].schema.oneOf[1].properties.operation_id.enum; },
+})) {
+  test(`finite invocation contract rejects ${name} without changing installed routes`, () => {
+    const invocation = structuredClone(invocationDocument); mutate(invocation);
+    assert.throws(() => checkCoverage({ ...inputs, invocation }), /invocation/);
+  });
+}
+
+test('finite invocation checks actual route, authentication and handler authority sources', () => {
+  for (const [file, from, to] of [
+    ['token/personal_execution_routes.go', 'protected.GET("/models",', 'protected.GET("/uninstalled-models",'],
+    ['token/personal_execution_routes.go', 'protected.POST("/chat/completions",', 'protected.POST(runtimePath,'],
+    ['token/personal_execution_routes.go', 'internal.token.client-readiness.read', 'internal.token.unclassified'],
+    ['token/service.go', 'protected.Use(identity.GinMiddleware(verify))', 'protected.Use(otherMiddleware)'],
+    ['token/personal_catalog_http.go', '"personal.models.read"', '"platform.models.manage"'],
+    ['billing/service.go', 'serviceauth.GinMiddleware(serviceToken)', 'otherMiddleware'],
+    ['billing/personal_execution_holds_http.go', '(body.AdditionalMicrocredits > 0) == (body.OperationID == uuid.Nil)', 'false'],
+  ]) {
+    assert.ok(inputs.invocationSources[file].includes(from), from);
+    assert.throws(() => checkCoverage({ ...inputs, invocationSources: { ...inputs.invocationSources, [file]: inputs.invocationSources[file].replace(from, to) } }), /invocation|unrecognized_http_entrypoint/);
+  }
+});
+test('invocation handler comments and strings cannot substitute for real authority', () => {
+  const name = 'token/personal_catalog_http.go';
+  const removed = inputs.invocationSources[name].replace('s.resolveModelUsagePermission(w, r, "personal.models.read", "org.models.read")', 'unclassified()');
+  const source = removed.replace('func (s *Service) listCatalogModels(w http.ResponseWriter, r *http.Request) {', `func (s *Service) listCatalogModels(w http.ResponseWriter, r *http.Request) {
+ // s.resolveModelUsagePermission(w, r, "personal.models.read", "org.models.read")
+ _ = \`s.resolveModelUsagePermission(w, r, "personal.models.read", "org.models.read")\``);
+  assert.throws(() => checkCoverage({ ...inputs, invocationSources: { ...inputs.invocationSources, [name]: source } }), /invocation/);
+});
+test('actual invocation inputs support comment examples and CRLF without new operations', () => {
+  const invocationSources = Object.fromEntries(Object.entries(inputs.invocationSources).map(([name, value]) => [name, ('// protected.GET(runtimePath, handler)\n' + value).replace(/\r?\n/g, '\r\n')]));
+  assert.deepEqual(checkCoverage({ ...inputs, invocationSources }), checkCoverage(inputs));
+});
+
+test('invocation authentication, group and hold checks reject string or comment substitutes', () => {
+  for (const [file, actual] of [
+    ['token/service.go', 'protected := router.Group("/v1")'],
+    ['token/service.go', 'protected.Use(identity.GinMiddleware(verify))'],
+    ['token/personal_execution_routes.go', 'internal.Use(serviceauth.GinMiddleware(s.managementServiceToken))'],
+    ['billing/service.go', 'protected.Use(serviceauth.GinMiddleware(serviceToken))'],
+    ['account/service.go', 'internal.Use(serviceauth.GinMiddleware(s.serviceToken))'],
+    ['billing/personal_execution_holds_http.go', '(body.AdditionalMicrocredits > 0) == (body.OperationID == uuid.Nil)'],
+  ]) {
+    const original = inputs.invocationSources[file];
+    assert.ok(original.includes(actual));
+    for (const example of ['var example = ' + JSON.stringify(actual), 'var example = `'+ actual +'`', '// ' + actual, '/* ' + actual + ' */']) {
+      const source = original.replace(actual, 'unclassified()') + '\n' + example + '\n';
+      assert.throws(() => checkCoverage({ ...inputs, invocationSources: { ...inputs.invocationSources, [file]: source } }), /invocation/, file + ': ' + example);
+    }
+  }
+});
+
+test('a raw-string function declaration cannot replace actual invocation handler authority', () => {
+  const file = 'token/personal_catalog_http.go';
+  const actual = inputs.invocationSources[file].replace('"personal.models.read"', '"platform.models.manage"');
+  const fake = 'var example = `func (s *Service) listCatalogModels(w http.ResponseWriter, r *http.Request) {\n s.resolveModelUsagePermission(w, r, "personal.models.read", "org.models.read")\n}\n`\n';
+  assert.throws(() => checkCoverage({ ...inputs, invocationSources: { ...inputs.invocationSources, [file]: actual.replace('func (s *Service) listCatalogModels(', fake + 'func (s *Service) listCatalogModels(') } }), /invocation/);
+});
+
+test('unused Go functions cannot replace installed invocation authentication or hold validation', () => {
+  for (const [file, actual, declaration, statement] of [
+    ['token/service.go', 'protected := router.Group("/v1")', 'func unused(router *httpserver.Router)', 'protected := router.Group("/v1"); _ = protected'],
+    ['token/service.go', 'protected.Use(identity.GinMiddleware(verify))', 'func unused(protected *httpserver.RouteGroup, verify identity.VerifyFunc)', 'protected.Use(identity.GinMiddleware(verify))'],
+    ['token/personal_execution_routes.go', 'internal.Use(serviceauth.GinMiddleware(s.managementServiceToken))', 'func unused(s *Service, internal *httpserver.RouteGroup)', 'internal.Use(serviceauth.GinMiddleware(s.managementServiceToken))'],
+    ['billing/service.go', 'protected.Use(serviceauth.GinMiddleware(serviceToken))', 'func unused(protected *httpserver.RouteGroup, serviceToken string)', 'protected.Use(serviceauth.GinMiddleware(serviceToken))'],
+    ['account/service.go', 'internal.Use(serviceauth.GinMiddleware(s.serviceToken))', 'func unused(s *Service, internal *httpserver.RouteGroup)', 'internal.Use(serviceauth.GinMiddleware(s.serviceToken))'],
+    ['billing/personal_execution_holds_http.go', '(body.AdditionalMicrocredits > 0) == (body.OperationID == uuid.Nil)', 'func unused(body struct { AdditionalMicrocredits int64; OperationID uuid.UUID })', '_ = (body.AdditionalMicrocredits > 0) == (body.OperationID == uuid.Nil)'],
+  ]) {
+    const source = inputs.invocationSources[file].replace(actual, 'unclassified()') + '\n' + declaration + ' {\n' + statement + '\n}\n';
+    assert.throws(() => checkCoverage({ ...inputs, invocationSources: { ...inputs.invocationSources, [file]: source } }), /invocation/, file);
+  }
+});
+test('the installed Token Handler must still register the invocation routes', () => {
+  const file = 'token/service.go'; const actual = 's.registerPersonalExecutionRoutes(router, protected)';
+  assert.ok(inputs.invocationSources[file].includes(actual));
+  for (const example of ['var example = `'+actual+'`', 'func unused(s *Service, router *httpserver.Router, protected *httpserver.RouteGroup) { '+actual+' }']) {
+    const source = inputs.invocationSources[file].replace(actual, '') + '\n' + example + '\n';
+    assert.throws(() => checkCoverage({ ...inputs, invocationSources: { ...inputs.invocationSources, [file]: source } }), /invocation/);
+  }
 });
 
 test('organization finance registration cannot disappear outside the management inventory', () => {
