@@ -23,9 +23,18 @@ test('organization notices retain exact scope and never authorize personal recha
 
 function liveBillingNotices() {
   const maps = [];
+  const sets = [];
   const listeners = new Map();
   const state = { activeSessionId: 'other', sessions: [{ id: 'deleted' }, { id: 'other' }], tokens: { max: 0 } };
   const sessionStates = { deleted: {}, other: {} };
+  const scheduledRunSessionOwners = {};
+  const bridge = readFileSync(new URL('../src/platform/tauri/bridge.js', import.meta.url), 'utf8');
+  const predicateStart = bridge.indexOf('function isScheduledRunSession(sid)');
+  const predicateEnd = bridge.indexOf('\n  }', predicateStart) + '\n  }'.length;
+  assert.ok(predicateStart >= 0 && predicateEnd > predicateStart);
+  const isScheduledRunSession = vm.runInNewContext(`(${bridge.slice(predicateStart, predicateEnd)})`, {
+    state, sessionStates, scheduledRunSessionOwners,
+  });
   const window = { __PINVOU_TAURI_BRIDGE_FEATURES__: {} };
   const observedObject = new Proxy(Object, {
     get(target, key) {
@@ -39,12 +48,18 @@ function liveBillingNotices() {
   });
   vm.runInNewContext(readFileSync(new URL('../src/platform/tauri/bridge/chat-events.js', import.meta.url), 'utf8'), {
     window, Object: observedObject, console,
+    Set: new Proxy(Set, {
+      construct(target, args) {
+        const result = Reflect.construct(target, args);
+        sets.push(result);
+        return result;
+      },
+    }),
   });
   const feature = window.__PINVOU_TAURI_BRIDGE_FEATURES__['chat-events']({
     state, sessionStates, listen(name, handler) { listeners.set(name, handler); },
-    isScheduledRunSession() { return false; },
+    isScheduledRunSession,
   });
-  const bridge = readFileSync(new URL('../src/platform/tauri/bridge.js', import.meta.url), 'utf8');
   const hookStart = bridge.indexOf('function (id, reason)', bridge.indexOf('onSessionBufferPurged:'));
   const hookEnd = bridge.indexOf('\n    },', hookStart) + '\n    }'.length;
   assert.ok(hookStart >= 0 && hookEnd > hookStart);
@@ -58,11 +73,16 @@ function liveBillingNotices() {
   });
   sessionWindow.__PINVOU_TAURI_BRIDGE_FEATURES__.sessions({
     state, sessionStates, onSessionBufferPurged: purge,
-    turnUsageDirty: {}, personaPlaceholderTitles: {}, scheduledRunSessionOwners: {},
+    turnUsageDirty: {}, personaPlaceholderTitles: {}, scheduledRunSessionOwners,
     invalidateScheduledRecentRunsForSession() {}, notify() {},
     listen(name, handler) { sessionListeners.set(name, handler); return Promise.resolve(); },
   });
   return {
+    addSession(id, { loaded = true, scheduled = false, listed = true } = {}) {
+      if (listed) state.sessions.push({ id });
+      if (loaded) sessionStates[id] = { scheduledRunSession: scheduled };
+      if (scheduled) scheduledRunSessionOwners[id] = { phase: 'active' };
+    },
     emit(id, generation, value) {
       listeners.get('chat:billing_notice')({ payload: { session_id: id, turn_generation: generation, billing_notice: value } });
     },
@@ -78,6 +98,7 @@ function liveBillingNotices() {
     },
     activeSessionId() { return state.activeSessionId; },
     contains(value) { return maps.some(map => Object.values(map).includes(value)); },
+    retainedDeletionIDs() { return sets.flatMap(set => [...set]); },
   };
 }
 
@@ -137,4 +158,65 @@ test('a late billing notice cannot repopulate a deleted or unknown session', () 
   const active = { ...notice };
   live.emit('other', 3, active);
   assert.equal(live.contains(active), true);
+});
+
+test('real scheduled predicate cannot revive a deleted scheduled billing notice', () => {
+  const live = liveBillingNotices();
+  const id = 'sched-00000000-0000-4000-8000-000000000001';
+  live.addSession(id, { scheduled: true });
+  const pending = { ...notice };
+  live.emit(id, 1, pending);
+  assert.equal(live.contains(pending), true);
+  live.deleteSession(id);
+  assert.equal(live.contains(pending), false);
+  const late = { ...notice };
+  live.emit(id, 2, late);
+  assert.equal(live.contains(late), false);
+});
+
+test('valid unloaded and evicted scheduled sessions retain their billing notices', () => {
+  const live = liveBillingNotices();
+  const id = 'sched-00000000-0000-4000-8000-000000000002';
+  live.addSession(id, { loaded: false, scheduled: true, listed: false });
+  const unloaded = { ...notice };
+  live.emit(id, 1, unloaded);
+  assert.equal(live.contains(unloaded), true);
+  live.evictSession(id);
+  assert.equal(live.contains(unloaded), true);
+  const afterEviction = { ...notice };
+  live.emit(id, 2, afterEviction);
+  assert.equal(live.contains(afterEviction), true);
+});
+
+test('bare scheduled prefixes remain valid while real deletion takes precedence', () => {
+  const live = liveBillingNotices();
+  const id = 'sched-00000000-0000-4000-8000-000000000003';
+  const pending = { ...notice };
+  live.emit(id, 1, pending);
+  assert.equal(live.contains(pending), true, 'unloaded prefix requires no buffer or owner');
+  live.evictSession(id);
+  live.cancelTimers(id);
+  assert.equal(live.contains(pending), true);
+  assert.deepEqual(live.retainedDeletionIDs(), []);
+  live.deleteSession(id);
+  assert.equal(live.contains(pending), false);
+  // Stale view facts must not override an observed scheduled-session deletion.
+  live.addSession(id, { scheduled: true });
+  const late = { ...notice };
+  live.emit(id, 2, late);
+  assert.equal(live.contains(late), false);
+  const other = { ...notice };
+  live.emit('sched-other-valid', 1, other);
+  assert.equal(live.contains(other), true);
+});
+
+test('only true scheduled deletion retains a process-local id and repeat deletion is idempotent', () => {
+  const live = liveBillingNotices();
+  live.deleteSession('deleted');
+  live.evictSession('sched-idle');
+  live.cancelTimers('sched-timer-only');
+  assert.deepEqual(live.retainedDeletionIDs(), []);
+  live.deleteSession('sched-gone');
+  live.deleteSession('sched-gone');
+  assert.deepEqual(live.retainedDeletionIDs(), ['sched-gone']);
 });
