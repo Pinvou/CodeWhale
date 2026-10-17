@@ -972,6 +972,16 @@
         "file": "900005_account_closure_replay_ack.up.sql",
         "version": 900005,
         "sha256": "2d0a1bb1f24fd37fa10b69f9ca4da3835f8d2619666afba0a692088361937adb"
+      },
+      {
+        "file": "900006_organization_model_admin_binding.down.sql",
+        "version": 900006,
+        "sha256": "2fcf1d623c99631a6953ee6d9d6d6e6f8e52266879605a23c21d06a1d9b5dfee"
+      },
+      {
+        "file": "900006_organization_model_admin_binding.up.sql",
+        "version": 900006,
+        "sha256": "dfc80c505b064390fdc64160110b9ca6b7465a1a99ef09f574113d0e9ab87c37"
       }
     ],
     "billing": [
@@ -1944,6 +1954,16 @@
         "file": "900021_usage_activation_execution_lock.up.sql",
         "version": 900021,
         "sha256": "6499e5dc5fd073b1742e4399e9feb4bb596ebeef2a40701611794f6dbac2212f"
+      },
+      {
+        "file": "900022_member_quota_batch_commands.down.sql",
+        "version": 900022,
+        "sha256": "034594db8fcf381883b49a917c2b67b48efe4dbd17d3408420acc43de39a22ae"
+      },
+      {
+        "file": "900022_member_quota_batch_commands.up.sql",
+        "version": 900022,
+        "sha256": "4b4574114cf0a5faa46e9478f5bf1a657fcfd72378f81cdea5069ef1579881c1"
       }
     ],
     "payment-simulator": [
