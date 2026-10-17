@@ -274,8 +274,11 @@ test('only the Rust-verified remote projection renders the single ChatView timel
     'remote replies keep the ordinary ChatView Markdown and code renderer');
   assert.match(chat, /item\.remoteProxy\s*\? \{ pd: \{ draft: null \}, cq: \{ q: null, html \} \}/,
     'remote Markdown cannot manufacture local persona or question actions');
-  assert.match(chat, /item\.remoteProxy\s*\? \{ text: item\.text, attachments: \[\] \}\s*: splitAttachmentLine\(item\.text\)/,
+  assert.match(chat, /item\.remoteProxy\s*\? \{ text: item\.text, attachments: \[\] \}\s*: splitAttachmentLine\(mentionSplit\.text\)/,
     'remote user text cannot be interpreted as a local attachment action');
+  // #586 回流适配：本地消息才做提及解析；remote 文本不得伪造本地会话引用卡片。
+  assert.match(chat, /const mentionSplit = item\.remoteProxy\s*\?[\s\S]*?splitSessionMentionBlock\(item\.text\)/,
+    'remote user text cannot manufacture local mention cards');
   assert.match(chat, /<ToolCard\s+item=\{item\.legacyItem\}\s+sessionId=\{activeSessionId\}\s+t=\{t\}\s+variant="timeline"\s*\/>/,
     'remote tool items must reuse the ordinary B-side timeline tool renderer');
   assert.match(chat, /const conversationBusy = remoteChatActive\s*\? !!currentRemoteTaskId/,

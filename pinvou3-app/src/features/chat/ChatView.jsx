@@ -5836,7 +5836,12 @@ const openChatExternalUrl = (url) => {
     // users cannot accidentally edit the JSON contract line. Parsed refs pass
     // the shared choke point — dirty history (e.g. thousands of refs) must not
     // blow up the cards UI or the edit-resend rebuild.
-    const mentionSplit = splitSessionMentionBlock(item.text);
+    // A RemoteProxy message is B-authored unverified text: it must not
+    // manufacture local mention cards (the Rust-verified projection
+    // contract), so only local messages go through mention parsing.
+    const mentionSplit = item.remoteProxy
+      ? { text: item.text, refs: [] }
+      : splitSessionMentionBlock(item.text);
     const mentionRefs = dedupeSessionRefs(mentionSplit.refs);
       const unified = conversationVariant === 'unified';
       const deliveryState = item.deliveryState || '';
