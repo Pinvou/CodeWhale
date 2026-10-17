@@ -17,6 +17,7 @@ import (
 )
 
 type memberQuotaRepository interface {
+	FreezeMemberQuotaBatch(context.Context, uuid.UUID, uuid.UUID, string, []memberQuotaBatchItem) error
 	AllocateMemberQuota(context.Context, MemberQuotaAllocation) (MemberQuotaGrant, bool, error)
 	ListMemberQuotaGrants(context.Context, uuid.UUID, *uuid.UUID, int) ([]MemberQuotaGrant, error)
 	RevokeMemberQuota(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, string) (MemberQuotaGrant, error)
@@ -77,6 +78,17 @@ func (s *Service) allocateMemberQuotaBatch(w http.ResponseWriter, r *http.Reques
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid member quota allocation batch", httpserver.RequestID(r.Context()))
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
+	if err := repository.FreezeMemberQuotaBatch(r.Context(), organizationID, delegation.HumanUserID, batchKey, body.Items); err != nil {
+		if errors.Is(err, ErrIdempotencyConflict) || errors.Is(err, ErrConflict) {
+			s.writeError(w, r, err)
+		} else {
+			// A failed commit acknowledgement does not prove the parent was not
+			// stored. The caller must retain this key and the complete original facts.
+			api.WriteError(w, http.StatusServiceUnavailable, "MEMBER_QUOTA_BATCH_OUTCOME_UNKNOWN", "retry the complete original batch with its original key", httpserver.RequestID(r.Context()))
+		}
+		return
+	}
 	results := make([]memberQuotaBatchResult, 0, len(body.Items))
 	for index, item := range body.Items {
 		grant, created, itemErr := repository.AllocateMemberQuota(r.Context(), MemberQuotaAllocation{OrganizationID: organizationID, MemberUserID: item.MemberUserID, PackageID: item.PackageID, ComponentID: item.ComponentID, ComponentType: item.ComponentType, AmountMicrocredits: item.AmountMicrocredits, MembershipVersion: item.MembershipVersion, CreatedBy: delegation.HumanUserID, IdempotencyKey: deriveMemberQuotaChildKey(batchKey, index, item)})
@@ -85,6 +97,11 @@ func (s *Service) allocateMemberQuotaBatch(w http.ResponseWriter, r *http.Reques
 			result.Status, result.Created, result.Grant = "SUCCEEDED", created, &grant
 		} else {
 			result.Status, result.Code = "FAILED", memberQuotaErrorCode(itemErr)
+			if result.Code == "INTERNAL_ERROR" {
+				// In particular, tx.Commit may have succeeded before its reply was
+				// lost. Never turn an unclassified storage error into a safe new key.
+				result.Status, result.Code = "UNKNOWN", "MEMBER_QUOTA_ALLOCATION_UNKNOWN"
+			}
 		}
 		results = append(results, result)
 	}

@@ -39,6 +39,11 @@ const memberIdentityVersion int64 = 900011
 const memberIdentityChecksum = "af4a63ed0592a0e60d5f4744176e15cc5013c3633c6f0f414f7580b7132b2aa8"
 const memberIdentityDownChecksum = "051eae7b8cf15c7708fbfe88aa096c4d85a284e35465f0684a1ff25fe3af6925"
 
+// Pin the original F07 delivery before either application or rollback.
+const registrationBonusVersion int64 = 79
+const registrationBonusChecksum = "27802b2d3e76e6a42c809d620d3d9833cfaa529d7d5517982318236a56719deb"
+const registrationBonusDownChecksum = "56c6319eb573db51e60cb8e8a1a91173b882b4a025c7d6a941f0b01833f027c6"
+
 // Ordered installs the new forward-only fence immediately after original 006.
 // The migration engine checks each applied version, so later delivery of lower
 // numeric versions remains possible after the high-numbered fence is recorded.
@@ -80,12 +85,16 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 	var expiredHoldRecovery *migrations.Migration
 	var meteringDeactivation *migrations.Migration
 	var memberIdentity *migrations.Migration
+	var registrationBonus *migrations.Migration
 	seen := make(map[int64]bool, len(input))
 	for _, migration := range input {
 		if seen[migration.Version] {
 			return nil, errors.New("duplicate billing migration version")
 		}
 		seen[migration.Version] = true
+		if (migration.Name == "registration_bonus" || migration.Checksum == registrationBonusChecksum) && migration.Version != registrationBonusVersion {
+			return nil, errors.New("billing registration bonus migration has a different frozen version")
+		}
 		if migration.Version == generationVersion {
 			copy := migration
 			fence = &copy
@@ -109,6 +118,10 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 		if migration.Version == meteringDeactivationVersion {
 			copy := migration
 			meteringDeactivation = &copy
+		}
+		if migration.Version == registrationBonusVersion {
+			copy := migration
+			registrationBonus = &copy
 		}
 	}
 	if fence == nil || !seen[1] || !seen[6] {
@@ -152,6 +165,9 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 		if pin.migration != nil && (pin.migration.Name != pin.name || pin.migration.Checksum != pin.up || sqlChecksum(pin.migration.UpSQL) != pin.up || sqlChecksum(pin.migration.DownSQL) != pin.down) {
 			return nil, errors.New("billing recovery and deactivation migrations are not the frozen forward-only identities")
 		}
+	}
+	if registrationBonus != nil && (registrationBonus.Name != "registration_bonus" || registrationBonus.Checksum != registrationBonusChecksum || sqlChecksum(registrationBonus.UpSQL) != registrationBonusChecksum || sqlChecksum(registrationBonus.DownSQL) != registrationBonusDownChecksum) {
+		return nil, errors.New("billing registration bonus migration is not the frozen identity")
 	}
 	ordered := slices.Clone(input)
 	slices.SortFunc(ordered, func(a, b migrations.Migration) int {

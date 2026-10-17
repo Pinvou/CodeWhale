@@ -63,7 +63,7 @@ async function knownHumanPermissions() {
 // The Billing process installs consumers from the closed registry rather than
 // string literals. Parse that current declarative shape completely: a new
 // dynamic shape must fail coverage instead of silently losing a consumer.
-function goSource(text) {
+export function goSource(text) {
   const regions = /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`[^`]*`|\/\/[^\n]*|\/\*[\s\S]*?\*\//g;
   const blank = part => part.replace(/[^\r\n]/g, ' ');
   return {
@@ -107,7 +107,68 @@ export function authorizationRoutes(sourceName, sourceText) {
   return routes;
 }
 
-export function authorizationConsumers(sourceName, sourceText, registryText) {
+
+// The two dynamic relay catalog rows describe this installed closed shape.
+// They are not evidence that a Token relay or an arbitrary new actor exists.
+function eventRelayConsumers(sourceName, main, approval) {
+  function view(sourceText) {
+    const { code, masked } = goSource(sourceText);
+    let text = ''; let mask = '';
+    for (let index = 0; index < code.length; index += 1) {
+      if (!/\s/.test(code[index])) { text += code[index]; mask += masked[index]; }
+    }
+    return { text, mask };
+  }
+  function actualFunction(sourceText, name) {
+    const source = goSource(sourceText);
+    const declarations = [...source.code.matchAll(new RegExp('func ' + name + '\\([^\\n]+\\{([\\s\\S]*?)\\n\\}', 'g'))].filter(match => source.masked[match.index] !== ' ');
+    if (declarations.length !== 1) throw new Error(`unrecognized_event_relay:${sourceName}:function`);
+    return declarations[0][1];
+  }
+  const mainView = view(main); const approvalView = view(approval);
+  const runView = view(actualFunction(main, 'run'));
+  const openApprovalView = view(actualFunction(approval, 'openApprovalChannel'));
+  const approvalRunView = view(actualFunction(approval, 'runApprovalRelay'));
+  const matches = ({ text, mask }, pattern) => [...text.matchAll(pattern)].filter(match => mask[match.index] !== ' ');
+  const exactly = (input, pattern, count = 1) => {
+    if (matches(input, pattern).length !== count) throw new Error(`unrecognized_event_relay:${sourceName}:${pattern.source}`);
+  };
+  exactly(mainView, /source:=strings\.TrimSpace\(environment\("EVENT_SOURCE"\)\)/g);
+  exactly(mainView, /ifsource==""\{source="account"\}/g);
+  exactly(mainView, /source="account"/g);
+  exactly(mainView, /ifsource!="account"&&source!="billing"\{returnerrors\.New\("ACCOUNT_EVENT_SOURCE_REQUIRED"\)\}/g);
+  const references = [...goSource(main).masked.matchAll(/\bsource\b/g)];
+  const closed = matches(mainView, /source(?::=strings\.TrimSpace\(environment\("EVENT_SOURCE"\)\)|==""|="account"|!="account"|!="billing"|=="account"|=="billing"|\+"-outbox-relay:"|\+"-outbox-relay"|\+"-event-relay"|\+"\.>")|newRelayMetrics\(source\)/g);
+  if (references.length !== closed.length) throw new Error(`unrecognized_event_relay:${sourceName}:source-references`);
+  const brokerConfigs = matches(runView, /events\.NewNATSBroker\(setup,environment\("NATS_URL"\),source\+"-outbox-relay",events\.NATSConfig\{([^{}]*)\}\)/g);
+  if (brokerConfigs.length !== 1) throw new Error(`unrecognized_event_relay:${sourceName}:broker-config`);
+  exactly(view(brokerConfigs[0][1]), /RequireExplicitAuthentication:true/g);
+  exactly(mainView, /RequireExplicitAuthentication:true/g);
+  exactly({ text: mainView.mask, mask: mainView.mask }, /events\.NewNATSBroker\(/g);
+  exactly({ text: mainView.mask, mask: mainView.mask }, /serviceauth\.ContextForJob\(/g);
+  exactly(runView, /relay:=events\.Relay\{Store:store,Broker:broker,WorkerID:source\+"-outbox-relay:"\+uuid\.NewString\(\),BatchSize:\d+,Lease:\d+\*time\.Second,MaxAttempts:\d+,AllowedSubjects:\[\]string\{source\+"\.>"\}\}/g);
+  exactly({ text: mainView.mask, mask: mainView.mask }, /events\.Relay\{/g);
+  exactly(runView, /relay\.RunOnce\(jobContext\)/g);
+  exactly(mainView, /serviceauth\.ContextForJob\(ctx,source\+"-event-relay","OUTBOX_RELAY",jobID\)/g);
+  exactly(mainView, /ifsource=="account"\{approval=openApprovalChannel\(setup,environment,logger\)\}/g);
+  exactly(mainView, /openApprovalChannel\(/g);
+  exactly(approvalView, /account\.NewApprovalRelayStore\(ctx,environment\("APPROVAL_RELAY_DATABASE_URL"\)\)/g);
+  const approvalConfigs = matches(openApprovalView, /events\.NewNATSPublishOnlyBroker\(ctx,environment\("NATS_URL"\),"account-approval-relay",events\.NATSConfig\{([^{}]*)\}\)/g);
+  if (approvalConfigs.length !== 1) throw new Error(`unrecognized_event_relay:${sourceName}:approval-config`);
+  exactly(view(approvalConfigs[0][1]), /RequireExplicitAuthentication:true/g);
+  exactly(approvalRunView, /relay\.RunOnce\(jobContext\)/g);
+  exactly(approvalView, /RequireExplicitAuthentication:true/g);
+  exactly({ text: approvalView.mask, mask: approvalView.mask }, /events\.NewNATSPublishOnlyBroker\(/g);
+  exactly({ text: approvalView.mask, mask: approvalView.mask }, /serviceauth\.ContextForJob\(/g);
+  exactly(approvalView, /serviceauth\.ContextForJob\(ctx,"account-approval-relay","OUTBOX_RELAY",jobRunID\)/g);
+  return [
+    { source: sourceName, durable: 'source-bound-outbox-relay', subject: 'account|billing|token.>' },
+    { source: sourceName, durable: 'account-approval-relay', subject: 'account.approval-command.authorized.v1' },
+  ];
+}
+
+export function authorizationConsumers(sourceName, sourceText, registryText, relayApprovalText = '') {
+  if (sourceName === 'account-platform/cmd/event-relay/main.go') return eventRelayConsumers(sourceName, sourceText, relayApprovalText);
   const { code: text, masked } = goSource(sourceText);
   const calls = [...text.matchAll(/\bbroker\.ConsumeAuthorization\([^,\n]+,\s*([^,\n]+),/g)].filter(call => masked[call.index] !== ' ');
   const events = [];
@@ -202,10 +263,8 @@ async function discover(catalog) {
   for (const [relative, text] of textBySource) {
     for (const match of text.matchAll(/RunBackground\([^,\n]+,\s*"([^"]+)"/g)) tasks.push({ source: relative, name: match[1] });
     for (const match of text.matchAll(/broker\.Consume(?:UntilResolved)?\([^,\n]+,\s*"([^"]+)",\s*"([^"]+)"/g)) events.push({ source: relative, durable: match[1], subject: match[2] });
-    events.push(...authorizationConsumers(relative, text, textBySource.get('account-platform/internal/platform/approvalconsumer/registry.go')));
+    events.push(...authorizationConsumers(relative, text, textBySource.get('account-platform/internal/platform/approvalconsumer/registry.go'), textBySource.get('account-platform/cmd/event-relay/approval.go')));
   }
-  events.push({ source: 'account-platform/cmd/event-relay/main.go', durable: 'source-bound-outbox-relay', subject: 'account|billing|token.>' });
-  events.push({ source: 'account-platform/cmd/event-relay/main.go', durable: 'account-approval-relay', subject: 'account.approval-command.authorized.v1' });
   const cliRoot = path.join(repositoryRoot, 'account-platform', 'cmd');
   const cli = (await readdir(cliRoot, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map((entry) => ({ name: entry.name, source: `account-platform/cmd/${entry.name}/main.go` }));
   return { routes, tasks, events, cli, httpSources, textBySource };
