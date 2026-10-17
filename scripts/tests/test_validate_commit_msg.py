@@ -234,6 +234,69 @@ class ValidateCommitRangeTests(unittest.TestCase):
         self.assertTrue(errors)
         self.assertIn("description must use Chinese", errors[0])
 
+    def test_shallow_boundary_merge_keeps_exemption(self) -> None:
+        # Round-12 review: at a shallow boundary git grafts the boundary
+        # commit's parents away — `git log --format=%P` reports NO parents
+        # even for a merge (verified on a depth-1 clone of a merge head,
+        # while `git cat-file` shows both), so without the raw-object check
+        # a merge head loses its merge exemption and a GitHub auto-merge
+        # commit's subject/DCO gets validated. The raw parent check only
+        # arms in a shallow clone (.git/shallow), so full clones never pay
+        # the extra plumbing calls.
+        with (
+            patch.object(
+                validate_commit_msg, "git_commit_exists", side_effect=[False, False]
+            ),
+            patch.object(
+                validate_commit_msg, "_in_shallow_clone", return_value=True
+            ),
+            patch.object(
+                validate_commit_msg, "_raw_parents", return_value=["p1", "p2"]
+            ) as raw_parents,
+            patch.object(validate_commit_msg, "git") as git_mock,
+        ):
+            git_mock.return_value = self.commit_record(
+                "0123456789abcdef",
+                "",  # grafted away at the shallow boundary
+                "GitHub",
+                "noreply@github.com",
+                "Merge pull request #1 from branch",
+            )
+
+            self.assertEqual(
+                validate_commit_msg.validate_range("missing-base", "head"), []
+            )
+        raw_parents.assert_called_once_with("0123456789abcdef")
+
+    def test_shallow_boundary_non_merge_still_validated(self) -> None:
+        # The raw-object check must not become a blanket exemption: a
+        # shallow-boundary single-parent commit (raw object agrees with %P)
+        # is still validated, and the raw check runs exactly once.
+        with (
+            patch.object(
+                validate_commit_msg, "git_commit_exists", side_effect=[False, False]
+            ),
+            patch.object(
+                validate_commit_msg, "_in_shallow_clone", return_value=True
+            ),
+            patch.object(
+                validate_commit_msg, "_raw_parents", return_value=["p1"]
+            ),
+            patch.object(validate_commit_msg, "git") as git_mock,
+        ):
+            git_mock.return_value = self.commit_record(
+                "fedcba9876543210",
+                "parent",
+                "Test User",
+                "test@example.com",
+                "fix: 修复提交门禁范围",
+            )
+
+            errors = validate_commit_msg.validate_range("missing-base", "head")
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("missing Signed-off-by", errors[0])
+
     def test_range_rejects_missing_signoff(self) -> None:
         with (
             patch.object(

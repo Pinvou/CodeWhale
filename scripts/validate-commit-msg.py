@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -177,6 +178,37 @@ def git_commit_exists(revision: str) -> bool:
     )
 
 
+def _in_shallow_clone() -> bool:
+    """True when this checkout is a shallow clone. At a shallow boundary git
+    grafts the boundary commit's parent links away: `git log --format=%P`
+    reports NO parents even for a merge (verified on a depth-1 clone of a
+    merge head, while `git cat-file` shows both), which would strip a merge
+    head of its merge exemption and validate a GitHub auto-merge commit's
+    subject/DCO. Uses subprocess directly (not the mockable `git` helper)
+    so the merge-detection fast path stays testable without git mocking;
+    round-12 review."""
+    probe = subprocess.run(
+        ("git", "rev-parse", "--git-dir"),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode != 0:
+        return False
+    return os.path.isfile(os.path.join(probe.stdout.strip(), "shallow"))
+
+
+def _raw_parents(commit: str) -> list[str]:
+    """Parent hashes read from the RAW commit object via cat-file — the
+    only graft-free source at a shallow boundary (see _in_shallow_clone).
+    Only called when a shallow clone was detected, so full clones pay
+    nothing."""
+    out = subprocess.check_output(
+        ("git", "cat-file", "commit", commit), text=True, encoding="utf-8"
+    )
+    return [line.split()[1] for line in out.splitlines() if line.startswith("parent ")]
+
+
 def validate_file(path: Path, *, require_signoff: bool = True) -> list[str]:
     raw = path.read_text(encoding="utf-8")
     errors = validate_text(raw, str(path))
@@ -209,6 +241,7 @@ def validate_range(
         log_args.extend(("--not", LEGACY_HISTORY_CUTOFF))
     commit_log = git(*log_args)
     errors: list[str] = []
+    shallow = _in_shallow_clone()
 
     for record in commit_log.split("\x1e"):
         record = record.strip("\r\n")
@@ -220,6 +253,10 @@ def validate_range(
         commit, parents, author_name, author_email, raw = fields
         label = f"{commit[:12]} {first_subject(raw)}"
         if len(parents.split()) > 1:
+            continue
+        if shallow and len(_raw_parents(commit)) > 1:
+            # Shallow boundary: %P was grafted to empty even though the raw
+            # object is a merge — keep the merge exemption (round-12 review).
             continue
 
         errors.extend(validate_text(raw, label))
