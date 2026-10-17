@@ -1488,11 +1488,17 @@
           // auto-titling; the single source of the contract parsing is
           // features/chat/session-mention.js (published via the window global —
           // classic-script bridges do not import features back).
-          var body = userMessageDisplayText(message.content || [], true);
+          // The received cross-session message block (features/messaging
+          // delivery of send_message_to_session) is stripped OUTERMOST first —
+          // the sender block wraps the body and the body may itself start with
+          // a mention block; the order matches chat.rs's
+          // first_send_title_source and UserBubble's parse order.
+          titleText = userMessageDisplayText(message.content || [], true);
+          var splitMessage = window.__PINVOU_SESSION_MESSAGE__ && window.__PINVOU_SESSION_MESSAGE__.splitSessionMessageBlock;
+          if (splitMessage) titleText = splitMessage(titleText).text.trim();
           var splitMention = window.__PINVOU_SESSION_MENTION__ && window.__PINVOU_SESSION_MENTION__.splitSessionMentionBlock;
-          if (splitMention) body = splitMention(body).text.trim();
-          titleText = body;
-          return !!body;
+          if (splitMention) titleText = splitMention(titleText).text.trim();
+          return !!titleText;
         });
         if (titleText) {
           var newTitle = titleText.slice(0, 20);

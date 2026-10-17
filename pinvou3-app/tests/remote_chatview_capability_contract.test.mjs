@@ -278,11 +278,15 @@ test('only the Rust-verified remote projection renders the single ChatView timel
     'remote replies keep the ordinary ChatView Markdown and code renderer');
   assert.match(chat, /item\.remoteProxy\s*\?\s*\{ pd: \{ draft: null \}, cq: \{ q: null, html: assistantHtml \} \}/,
     'remote Markdown cannot manufacture local persona or question actions');
-  assert.match(chat, /item\.remoteProxy\s*\? \{ text: item\.text, attachments: \[\] \}\s*: splitAttachmentLine\(mentionSplit\.text\)/,
-    'remote user text cannot be interpreted as a local attachment action');
+  // #627 回流适配：remote 分支与 session-message 的 delivered 分支合成同一条
+  // 旁路链——remote 文本与已投递跨会话正文都不得进入本地附件解析。
+  assert.match(chat, /item\.remoteProxy \|\| delivered\s*\?\s*\{ text: mentionSplit\.text, attachments: \[\] \}\s*:\s*splitAttachmentLine\(mentionSplit\.text\)/,
+    'remote user text and delivered bodies cannot be interpreted as local attachment actions');
   // #586 回流适配：本地消息才做提及解析；remote 文本不得伪造本地会话引用卡片。
-  assert.match(chat, /const mentionSplit = item\.remoteProxy\s*\?[\s\S]*?splitSessionMentionBlock\(item\.text\)/,
-    'remote user text cannot manufacture local mention cards');
+  // #627 合成：同一条链同时钉住 remote 与 delivered 两个旁路（后者为
+  // features::messaging 投递正文——发送方可控，同样不得进入本地解析器）。
+  assert.match(chat, /const mentionSplit = item\.remoteProxy \|\| delivered\s*\?\s*\{ refs: \[\], text: messageSplit\.text \}\s*:\s*splitSessionMentionBlock\(messageSplit\.text\)/,
+    'remote user text and delivered bodies cannot manufacture local mention cards');
   assert.match(chat, /<ToolCard\s+item=\{item\.legacyItem\}\s+sessionId=\{activeSessionId\}\s+t=\{t\}\s+variant="timeline"\s*\/>/,
     'remote tool items must reuse the ordinary B-side timeline tool renderer');
   assert.match(chat, /const conversationBusy = remoteChatActive\s*\? !!currentRemoteTaskId/,
