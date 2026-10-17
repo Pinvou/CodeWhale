@@ -49,6 +49,7 @@ pub mod knowledge;
 pub mod llmapi_hub;
 pub mod marketplace;
 pub mod memory;
+pub mod messaging;
 pub(crate) mod model_store;
 pub mod monitor;
 pub mod multiagent;
