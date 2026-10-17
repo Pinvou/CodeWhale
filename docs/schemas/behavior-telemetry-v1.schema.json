@@ -36,7 +36,7 @@
       "attachment_added", "attachment_processing_completed", "knowledge_import_started",
       "knowledge_import_completed", "artifact_created", "artifact_exported", "code_mode_opened",
       "scheduled_task_created", "scheduled_task_run_finished", "team_mode_opened",
-      "response_feedback_changed", "response_copied"
+      "response_feedback_changed", "response_copied", "remote_control_event"
     ] },
     "event_source": { "const": "client" },
     "occurred_at": { "type": "integer", "minimum": 1 },
@@ -112,6 +112,13 @@
     "rating": { "enum": ["positive", "negative"] },
     "reason_code": { "enum": ["accurate", "helpful", "fast", "incorrect", "incomplete", "unsafe", "too_slow", "other"] },
     "content_type": { "enum": ["text", "code", "table", "other"] },
+    "remote_stage": { "enum": ["start", "stop", "refresh", "claim", "handshake", "connection", "disconnection", "resume", "task_submit", "task_admit", "task_terminal", "permission", "attachment", "artifact"] },
+    "remote_outcome": { "enum": ["ok", "rejected", "timeout", "busy", "expired", "unsupported", "internal_error"] },
+    "remote_reason": { "enum": ["none", "not_enrolled", "code_invalid", "slot_conflict", "handshake_failed", "receipt_mismatch", "liveness_missing", "watchdog_expired", "resume_failed", "task_conflict", "permission_denied", "permission_timeout", "transfer_budget", "artifact_missing", "rate_limited", "unknown"] },
+    "remote_latency_bucket": { "enum": ["lt_50ms", "lt_250ms", "lt_1s", "lt_5s", "lt_30s", "gte_30s"] },
+    "remote_model_source": { "enum": ["controlled", "controller_temporary"] },
+    "remote_size_bucket": { "enum": ["0_1mib", "1_10mib", "10_100mib", "100mib_plus"] },
+    "remote_permission_step": { "enum": ["request", "allowed", "denied", "expired"] },
     "clock_skew_bucket": { "enum": ["normal", "past_1h_plus", "future_5m_plus", "unknown"] }
   },
   "$defs": {
@@ -135,7 +142,9 @@
     "selection_scope", "selection_source", "attachment_id", "file_type_bucket", "size_bucket",
     "source_type", "item_count_bucket", "artifact_id", "artifact_type", "export_format",
     "scheduled_task_id", "schedule_type", "task_type", "member_count_bucket", "feedback_id",
-    "feedback_action", "rating", "reason_code", "content_type"
+    "feedback_action", "rating", "reason_code", "content_type", "remote_stage",
+    "remote_outcome", "remote_reason", "remote_latency_bucket", "remote_model_source",
+    "remote_size_bucket", "remote_permission_step"
   ],
   "x-server-injected-fields": ["received_at", "device_id", "account_subject_id", "environment", "clock_skew_bucket"],
   "x-event-contracts": {
@@ -187,6 +196,10 @@
     "scheduled_task_run_finished": { "required": ["scheduled_task_id", "operation_id", "attempt_index", "status", "duration_ms"] },
     "team_mode_opened": { "required": ["view_id", "session_id", "member_count_bucket", "entry_point"] },
     "response_feedback_changed": { "required": ["feedback_id", "session_id", "turn_id", "feedback_action"] },
-    "response_copied": { "required": ["session_id", "turn_id", "content_type"] }
+    "response_copied": { "required": ["session_id", "turn_id", "content_type"] },
+    "remote_control_event": {
+      "required": ["remote_stage", "remote_outcome", "remote_reason", "remote_latency_bucket"],
+      "allowed": ["remote_stage", "remote_outcome", "remote_reason", "remote_latency_bucket", "remote_model_source", "remote_size_bucket", "remote_permission_step"]
+    }
   }
 }

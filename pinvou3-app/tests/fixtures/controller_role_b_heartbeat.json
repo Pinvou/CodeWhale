@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "type": "controller_liveness",
+  "connection_id": "connection-0001",
+  "controller_lease_id": "lease-0001",
+  "lease_epoch": "1",
+  "relay_epoch": "epoch-test-1",
+  "remote_control_generation": "generation-0001",
+  "sender_role": "B",
+  "liveness_epoch": "live-b-1",
+  "heartbeat_sequence": "1"
+}

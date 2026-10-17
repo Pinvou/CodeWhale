@@ -144,4 +144,10 @@ revert: 回滚本次订单状态修改提交
 
 - 便于代码复盘、问题追溯、代码评审（CR）
 
+## 10\. 固定历史 squash 提交的签署登记
+
+PR #1932 汇总历史时，19 个已经由 GitHub squash 合入 `integration/remote-control` 的提交，其 Git 作者为 `zhuowp <zwp-1989@qq.com>`，保留的原签署为 `z27014 <zhuo.wenpei@h3c.com>`。为保全原提交历史，`scripts/validate-commit-msg.py` 的 `HISTORICAL_SQUASH_SIGNOFFS` 逐条登记完整 SHA 和来源 PR，仅对这些不可变对象校验上述原签署者，而不要求其与 Git 作者相同。
+
+这是一份封闭的历史兼容登记，不是身份等价声明、代为补签或对 DCO 权利的重新认证。标题规范、必须存在且匹配登记的原签署仍受校验；登记对象的作者异常也会拒绝。未登记对象（含重新创建、cherry-pick 后产生的新 SHA）仍按普通规则要求作者自身签署。不得按作者、分支、PR 编号或时间自动扩大例外，也不调整既有历史截止点或 PR 工作流的严格校验参数。
+
 > （注：部分内容可能由 AI 生成）

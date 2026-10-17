@@ -35,6 +35,7 @@ pub mod mcp_catalog;
 pub mod package_export;
 pub mod plugin_import;
 pub mod recycle_bin;
+pub(crate) mod retirement;
 pub mod scope;
 pub mod skill_marketplace;
 pub mod skill_scope;
@@ -73,7 +74,7 @@ use crate::platform::paths;
 /// cleanup), while `restore_plugin` holds import_lock across `install_upload`
 /// → TRANSACTION (round-21 minor 4: `import_plugin_package` in plugin_import.rs
 /// is a second import_lock → TRANSACTION crossing of the same shape; round-32
-/// minor 4 adds a third, same-direction crossing in this PR — extraction.rs's
+/// minor 4 adds a third, same-direction crossing — retirement.rs's
 /// retired-tool cleanup holds import_lock(id) across its residue
 /// `uninstall(id)`, so the family is no longer exclusively pre-existing). A
 /// theoretical same-instance inversion exists at their cross (review R14
@@ -3336,6 +3337,12 @@ pub(crate) mod tests {
         mcp_path
     }
 
+    fn missing_absolute_fixture_path(name: &str) -> String {
+        let path = paths::pinvou3_home().join("missing-old-targets").join(name);
+        assert!(path.is_absolute() && !path.exists());
+        path.to_string_lossy().into_owned()
+    }
+
     /// Shared tail of the reconcile tests: a converged reconcile reports no
     /// actions and leaves mcp.json byte-identical.
     fn assert_reconcile_idempotent<S: CredentialStore>(
@@ -3357,6 +3364,7 @@ pub(crate) mod tests {
     #[test]
     fn reconcile_rebuilds_dead_local_entry_and_keeps_unknown_entries() {
         with_temp_home(|| {
+            let missing_script = missing_absolute_fixture_path("w.py");
             write_local_tool_fixture("weather-x", true);
             write_installed_ids(&["weather-x".to_string()]);
             let manager = MarketplaceManager::with_store(MemoryCredentialStore::default());
@@ -3369,13 +3377,13 @@ pub(crate) mod tests {
                 .unwrap();
             let unknown = serde_json::json!({"command": "node", "args": ["/opt/user-tool/run.js"]});
             let mcp_path = seed_mcp_json(serde_json::json!({
-                "weather-x": {"command": "python3", "args": ["/x/w.py"]},
+                "weather-x": {"command": "python3", "args": [missing_script.clone()]},
                 "user-own-tool": unknown,
             }));
 
             let actions = manager.reconcile_installed_mcp_entries().unwrap();
             assert_eq!(actions.len(), 1, "{actions:?}");
-            assert!(actions[0].contains("weather-x") && actions[0].contains("/x/w.py"));
+            assert!(actions[0].contains("weather-x") && actions[0].contains(&missing_script));
 
             let mcp = read_mcp_json();
             let entry = &mcp["servers"]["weather-x"];
@@ -3885,13 +3893,14 @@ pub(crate) mod tests {
     #[test]
     fn reconcile_rebuild_preserves_user_configured_fields() {
         with_temp_home(|| {
+            let missing_script = missing_absolute_fixture_path("w.py");
             write_local_tool_fixture("toggle-x", false);
             write_installed_ids(&["toggle-x".to_string()]);
             let manager = MarketplaceManager::with_store(MemoryCredentialStore::default());
             let mcp_path = seed_mcp_json(serde_json::json!({
                 "toggle-x": {
                     "command": "python3",
-                    "args": ["/x/w.py"],
+                    "args": [missing_script],
                     "enabled": false,
                     "timeout_ms": 4200,
                     "custom_hint": "keep"
@@ -3934,14 +3943,18 @@ pub(crate) mod tests {
     #[test]
     fn reconcile_refuses_rebuild_when_manifest_command_is_dead() {
         with_temp_home(|| {
+            let missing_command = missing_absolute_fixture_path("binary");
             write_tool_manifest_fixture(
                 "deadbin",
                 "deadbin",
-                r#""mcp_tools":[],"command":"/opt/dead/binary","args":[]"#,
+                &format!(
+                    r#""mcp_tools":[],"command":{},"args":[]"#,
+                    serde_json::to_string(&missing_command).unwrap()
+                ),
             );
             write_installed_ids(&["deadbin".to_string()]);
             let mcp_path = seed_mcp_json(serde_json::json!({
-                "deadbin": {"command": "/opt/dead/binary"}
+                "deadbin": {"command": missing_command.clone()}
             }));
             let manager = MarketplaceManager::with_store(MemoryCredentialStore::default());
 
@@ -3949,7 +3962,7 @@ pub(crate) mod tests {
             let actions = manager.reconcile_installed_mcp_entries().unwrap();
             assert_eq!(actions.len(), 1, "{actions:?}");
             assert!(
-                actions[0].contains("not rebuilt") && actions[0].contains("/opt/dead/binary"),
+                actions[0].contains("not rebuilt") && actions[0].contains(&missing_command),
                 "{actions:?}"
             );
             assert_eq!(
@@ -4015,12 +4028,13 @@ pub(crate) mod tests {
     #[test]
     fn reconcile_rebuilds_local_tool_with_unresolvable_secret() {
         with_temp_home(|| {
+            let missing_script = missing_absolute_fixture_path("w.py");
             write_local_tool_fixture("lostkey-x", true);
             write_installed_ids(&["lostkey-x".to_string()]);
             let manager = MarketplaceManager::with_store(MemoryCredentialStore::default());
             // No credential-store entry for AMAP_KEY.
             let mcp_path = seed_mcp_json(serde_json::json!({
-                "lostkey-x": {"command": "python3", "args": ["/x/w.py"]}
+                "lostkey-x": {"command": "python3", "args": [missing_script]}
             }));
 
             let actions = manager.reconcile_installed_mcp_entries().unwrap();
@@ -8084,7 +8098,7 @@ pub(crate) mod tests {
                 .and_then(|a| a.last())
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
-                .to_string();
+                .replace('\\', "/");
             assert!(
                 command.contains("bundles/session-reader/mcp")
                     && !command.contains("Session-Reader"),
@@ -8880,6 +8894,36 @@ pub(crate) mod tests {
                 "跳过 pip 后供给应照常写入 mcp.json"
             );
             assert!(mgr.installed_ids().contains(&"up-pip".to_string()));
+        });
+    }
+
+    /// Windows 内置解释器使用隔离环境，普通安装不能把磁盘上来源未验证 manifest
+    /// 的任意 `pip_dependencies` 当作可信下载指令，避免产生“安装成功但 import 必然
+    /// 失败”，也避免绕过上传入口的依赖锁校验。
+    #[test]
+    fn ordinary_install_with_unlocked_pip_dependencies_is_rejected() {
+        if std::env::consts::OS != "windows" {
+            return;
+        }
+        with_temp_home(|| {
+            write_tool_manifest(
+                "up-pip-reinstall",
+                r#"{
+                    "id":"up-pip-reinstall","name":"Up","description":"d","version":"1","icon":"x","category":"c",
+                    "mcp_tools":[],"command":"python","args":["server.py"],
+                    "pip_dependencies":["pinvou3-nonexistent-pkg-xyz"]
+                }"#,
+            );
+            let mgr = MarketplaceManager::new();
+            let error = mgr
+                .install("up-pip-reinstall", &std::collections::HashMap::new())
+                .unwrap_err();
+
+            assert!(error.contains("未经过 Windows 可验证依赖锁"), "{error}");
+            assert!(
+                !mgr.installed_ids()
+                    .contains(&"up-pip-reinstall".to_string())
+            );
         });
     }
 
