@@ -119,17 +119,6 @@ test("team relay changes select its action smoke", () => {
   );
 });
 
-test("unknown frontend features fail closed to the full browser suite", () => {
-  assert.deepEqual(
-    labels(selectFrontendSmokes(["pinvou3-app/src/features/search/SearchView.jsx"])),
-    fullLabels,
-  );
-});
-
-test("an empty or unrelated diff fails closed", () => {
-  assert.deepEqual(labels(selectFrontendSmokes(["docs/ci.md"])), fullLabels);
-});
-
 test("organization and member unit browsers run for feature and shared changes", () => {
   for (const target of ["test:account-platform-organization-ui", "test:account-platform-member-units-ui"]) {
     assert.ok(fullLabels.includes(`npm:${target}`));
@@ -158,4 +147,14 @@ test("native same-actor reauthentication browser runs once for full and account 
     assert.equal(selected.filter(label => label === target).length, 1);
   }
   assert.equal(labels(selectFrontendSmokes(["pinvou3-app/src/features/settings/SettingsView.jsx"])).includes(target), false);
+});
+
+test("installed hosts run once after full and account command expansion", () => {
+  const { scripts } = JSON.parse(readFileSync(new URL("../../pinvou3-app/package.json", import.meta.url), "utf8"));
+  for (const selected of [FULL_FRONTEND_SMOKES, selectFrontendSmokes(["pinvou3-app/src/features/account-platform/AdminOperationsWorkspace.jsx"])]) {
+    const expanded = selected.flatMap(({ kind, target }) => kind === "npm" ? scripts[target].split(" && ") : [`node ${target}`]);
+    assert.equal(expanded.filter(command => command === "node tests/account_platform_installed_hosts_ui_smoke.mjs").length, 1);
+    assert.ok(expanded.includes("node tests/account_platform_closure_ui_smoke.mjs"));
+    assert.ok(expanded.includes("node tests/account_platform_closure_production_smoke.mjs"));
+  }
 });

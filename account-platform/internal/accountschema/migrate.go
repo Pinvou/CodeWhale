@@ -20,6 +20,10 @@ const metadataVersion int64 = 900001
 const metadataChecksum = "b14cb9c2e538d20ec869458940d60867090549c027f439ed199d703ef3e7f45d"
 const metadataDownChecksum = "fb0c59fb6749b7c82dc824a64a248a152b5a86672c2b7c44fdd06c52ab2cef04"
 
+const modelAdminBindingVersion int64 = 900006
+const modelAdminBindingChecksum = "dfc80c505b064390fdc64160110b9ca6b7465a1a99ef09f574113d0e9ab87c37"
+const modelAdminBindingDownChecksum = "2fcf1d623c99631a6953ee6d9d6d6e6f8e52266879605a23c21d06a1d9b5dfee"
+
 type permissionFact struct{ code, description string }
 type roleEdge struct{ role, permission string }
 
@@ -48,13 +52,33 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 		return nil, err
 	}
 	var seed *migrations.Migration
+	var modelAdminBinding *migrations.Migration
 	for _, migration := range input {
+		if (migration.Name == "organization_model_admin_binding" || migration.Checksum == modelAdminBindingChecksum) && migration.Version != modelAdminBindingVersion {
+			return nil, errors.New("organization model administrator binding migration has a different frozen version")
+		}
+		if migration.Version == modelAdminBindingVersion {
+			if modelAdminBinding != nil {
+				return nil, errors.New("duplicate organization model administrator binding migration")
+			}
+			copy := migration
+			modelAdminBinding = &copy
+		}
 		if migration.Version == metadataVersion {
 			if seed != nil {
 				return nil, errors.New("duplicate first-delivery metadata migration")
 			}
 			copy := migration
 			seed = &copy
+		}
+	}
+	// Earlier partial deliveries do not acquire a new migration dependency.
+	// Whenever present, the same identity is checked before both Up and DownOne.
+	if modelAdminBinding != nil {
+		up := sha256.Sum256([]byte(strings.ReplaceAll(strings.ReplaceAll(modelAdminBinding.UpSQL, "\r\n", "\n"), "\r", "\n")))
+		down := sha256.Sum256([]byte(strings.ReplaceAll(strings.ReplaceAll(modelAdminBinding.DownSQL, "\r\n", "\n"), "\r", "\n")))
+		if modelAdminBinding.Name != "organization_model_admin_binding" || modelAdminBinding.Checksum != modelAdminBindingChecksum || hex.EncodeToString(up[:]) != modelAdminBindingChecksum || hex.EncodeToString(down[:]) != modelAdminBindingDownChecksum {
+			return nil, errors.New("organization model administrator binding migration is not the frozen SQL")
 		}
 	}
 	if seed == nil {

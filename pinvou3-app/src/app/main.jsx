@@ -26,7 +26,6 @@ import { formatSessionDate, localDateKey, formatDateGroupLabel } from '../shared
 import { groupSessionsWithProjects, resolveSessionProjectId, needsAddFolderConfirm, unavailableProjectRootPaths, WORKSPACE_KIND_BOUND } from '../features/projects/projectGrouping.js';
 import { ProjectGroupHeader } from '../features/projects/ProjectGroupHeader.jsx';
 import { classifyRebindError, mergeRebindCarryoverIds } from '../features/projects/rebindErrors.js';
-import { runSessionBatch } from '../shared/session-management.js';
 import { filterSessionsByTab, groupSessionsByLocalDate, sessionListComparator } from '../shared/session-list-pipeline.js';
 const LazyAccountPlatformPopover = lazy(() => VIEW_LOADERS.accountPlatformPopover().then(module => ({ default: module.AccountPlatformPopover })));
 import { AccountPlatformDesktopClient } from '../features/account-platform/desktop-client.js';

@@ -29,7 +29,7 @@ WHERE command_type = 'REFUND_EXCEPTION_REPAIR' AND policy_version = 1 AND snapsh
 
 -- Billing：确认没有该命令的审批联动事实
 SELECT (SELECT count(*) FROM refund_exception_repair_cases WHERE approval_request_id IS NOT NULL) AS approval_cases,
-       (SELECT count(*) FROM billing_approval_proof_claims) AS proof_claims;
+       (SELECT count(*) FROM billing_approval_proof_claims WHERE command_type = 'REFUND_EXCEPTION_REPAIR') AS proof_claims;
 
 -- Billing：存量清单——“Provider 已退款、本地冲销缺失”的退款
 -- in_scope 只表示候选证据匹配；不代表已通过全部 owner 判据。

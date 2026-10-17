@@ -743,12 +743,20 @@ class CiGatePolicyTests(unittest.TestCase):
     def test_closure_smokes_include_production_recovery_and_original_contract(self):
         package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
         command = "test:account-platform-closure-ui"
-        files = ("account_platform_closure_ui_smoke.mjs", "account_platform_installed_hosts_ui_smoke.mjs", "account_platform_closure_production_smoke.mjs")
+        files = ("account_platform_closure_ui_smoke.mjs", "account_platform_closure_production_smoke.mjs")
         self.assertEqual(package["scripts"][command], " && ".join(f"node tests/{name}" for name in files))
         for name in files:
             self.assertTrue((ROOT / "pinvou3-app/tests" / name).is_file())
         selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
         self.assertGreaterEqual(selector.count(f'command("npm", "{command}")'), 2)
+
+        # Installed-host coverage has its own full/account selector lane; it must
+        # remain present without running twice through the closure composite.
+        installed_command = "test:account-platform-installed-hosts-ui"
+        installed_file = "account_platform_installed_hosts_ui_smoke.mjs"
+        self.assertEqual(package["scripts"][installed_command], f"node tests/{installed_file}")
+        self.assertTrue((ROOT / "pinvou3-app/tests" / installed_file).is_file())
+        self.assertGreaterEqual(selector.count(f'command("npm", "{installed_command}")'), 2)
 
     def test_embedded_account_portal_assets_are_rebuilt_and_checked(self):
         changes = _without_yaml_comments(

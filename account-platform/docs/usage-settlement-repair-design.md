@@ -104,7 +104,7 @@
 
 ### 7.1 新增不可变审计行（GSA-36 前向迁移）
 
-`usage_settlement_repair_cases`（`billing_schema_owner` 持有，不可变触发器拒绝 UPDATE/DELETE；900003 最终 runtime 对该后加表实际有 UPDATE/DELETE privilege，有限 PG 已验证两项权限及写入拒绝，不能声称 ACL 双重拒绝。保留原迁移身份，不扩大权限）：`id`、`approval_request_id`（唯一）、`authorization_event_id`（唯一）、`approval_epoch`、`execution_key_digest`（唯一、`^[0-9a-f]{64}$`）、`usage_request_id`（唯一）、`hold_id`、`loss_review_id`（可空、唯一）、`wallet_id`、`evidence_kind`、`expected_microcredits`、`settled_microcredits`、`overage_microcredits`（`>=0`）、`allocations_digest`、`facts_digest`、`journal_entry_id`（唯一）、`receivable_id`（可空、唯一）、`state`、`created_at`。
+`usage_settlement_repair_cases`（`billing_schema_owner` 持有，runtime 仅保留 SELECT/INSERT；官方 Billing 迁移收尾 `finishBillingMigration` 显式撤销该后加表的 UPDATE/DELETE，不可变触发器继续拒绝改写。以完整公开迁移收尾后的权限为准，不能把中间 900003 的宽授权当作最终状态；保留原迁移身份，不扩大权限）：`id`、`approval_request_id`（唯一）、`authorization_event_id`（唯一）、`approval_epoch`、`execution_key_digest`（唯一、`^[0-9a-f]{64}$`）、`usage_request_id`（唯一）、`hold_id`、`loss_review_id`（可空、唯一）、`wallet_id`、`evidence_kind`、`expected_microcredits`、`settled_microcredits`、`overage_microcredits`（`>=0`）、`allocations_digest`、`facts_digest`、`journal_entry_id`（唯一）、`receivable_id`（可空、唯一）、`state`、`created_at`。
 
 ### 7.2 损失复核状态推进（本命令引入的唯一新状态边）
 
@@ -139,7 +139,7 @@
 
 ## 10. 迁移、N/N-1 与回滚
 
-- 迁移只前向追加：新增 `usage_settlement_repair_cases` 与 `usage_loss_reviews.status` 的 `RESOLVED_SETTLED` 取值（本波 Billing `000074/000075`；proof-claim allowlist 为 `000076`，Account durable 路由为 `000077`），guard 校验迁移身份与 schema owner 分离；不改 `000002/000012/000016/000054/000060` 既有列、CHECK 语义与历史行。
+- 迁移只前向追加：新增 `usage_settlement_repair_cases` 与 `usage_loss_reviews.status` 的 `RESOLVED_SETTLED` 取值（本波 Billing `000074/000075`；proof-claim allowlist 为 `000076`，Account durable 路由为 `000077`），guard 校验迁移身份与 schema owner 分离；不改 `000002/000012/000016/000054/000060` 既有列、CHECK 语义与历史行。 Billing `900021_usage_activation_execution_lock` 为本命令 v1/s1 安装固定 owner 锁能力：新执行与停用在 activation 行锁上串行化，runtime 只获固定函数 EXECUTE/私有 schema USAGE，不能直接改激活表或继承 owner；Down 显式拒绝，回退仍按下述 INACTIVE 流程。
 - N/N-1：先部署可读新表/新取值的 Billing，再部署 proof 端与执行器/消费者，最后业务页；既有 `Commit` 与损失复核写入者行为不变（不认识新取值时仍按既有两值读取，失败关闭而非误判）。
 - 回滚：只允许停止消费者、把 activation 行翻回 `INACTIVE`；已产生的 case/journal/应收/回填与损失复核状态一律保留可读，禁止破坏性 down。
 - 未通过 GSA-38～40 且未取得独立生产授权前，不部署、不激活。
