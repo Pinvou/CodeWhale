@@ -20,6 +20,8 @@ readiness 签发、release manifest 和发布 CLI 的版本格式与排序统一
 
 Gateway 启动真实 usage reconciliation、replay retention、usage history projection 和 Token review SLA worker；Billing 同进程启动现有 hold expiry 处理。JSON/SSE 的可信用量先持久化，再提交 Billing 一次性 hold/ledger 回执；缺失或不可证用量保留资金未知和对账，不以响应已送达认定已结算。
 
+不确定派发恢复逐项使用原有独立事务，重新核对候选的租约所有者、到期时间、执行状态及上游幂等能力；单项失败回滚后继续处理同批其他候选，取消上下文则停止，不自动重新派发或释放余额。批次有失败时，worker 记录固定 `UNCERTAIN_DISPATCH_RECOVERY_RETRY_PENDING` 错误码，沿原周期重试，不把原始数据库错误、请求身份或加密内容写入日志。该记录不代表失败项已恢复，也不改变留存清理及资金对账规则。
+
 尚未结算的加密响应和流式内容从各内容首次持久化起保留30天（30×24小时），重复持久化不延长期限；超过期限不能继续回放这些内容。已结算调用沿用原流式内容24小时、结果30天的终结保留规则。清理只处理回放内容，未决调用身份、幂等键、财务事实及审计证据仍保留，不能据此释放资金、将 REVIEW 当作已结算或触发新调用；用量状态仍可查询。正式留存案件使用原受控、有限期的私有留存副本，不将其重新公开为普通回放。
 
 个人新调用并发上限沿用5，按 `execution_status` 统计 `RECEIVED`、`HOLD_RESERVING`、`HOLD_RESERVED`、`DISPATCH_INTENT_PERSISTED`、`UPSTREAM_DISPATCHING`、`STREAMING` 和 `SETTLEMENT_PENDING`。因此结算仍不确定、执行状态仍为 `SETTLEMENT_PENDING` 的人工复核项也可能占用额度；普通已转为执行 `REVIEW` 的项不计入这组状态。原幂等键恢复查询先于新调用准入，恢复与取消沿用既有路径；不新增自动释放资金、准入排除或超时策略。

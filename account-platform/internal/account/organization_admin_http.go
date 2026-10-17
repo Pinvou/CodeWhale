@@ -263,7 +263,16 @@ func (s *Service) adminRemoveMember(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	idempotencyKey := organizationUnitIdempotencyKey(r, r.URL.Query().Get("idempotency_key"), "admin-member-remove:"+organizationID.String()+":"+userID.String())
+	// Delayed retries keep their original intent; re-removal after re-add
+	// requires a new caller-owned key even in the same administrator session.
+	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if idempotencyKey == "" {
+		idempotencyKey = strings.TrimSpace(r.URL.Query().Get("idempotency_key"))
+	}
+	if !validOrganizationUnitIdempotencyKey(idempotencyKey) {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "an explicit membership removal idempotency key is required", httpserver.RequestID(r.Context()))
+		return
+	}
 	result, err := repository.AdminRemoveMember(r.Context(), mustPrincipal(r.Context()), organizationID, userID, idempotencyKey)
 	if err != nil {
 		s.writeError(w, r, err)

@@ -4,7 +4,9 @@
 
 新增唯一 PAYMENT_FINANCIAL_REPAIR v1/s1，默认 INACTIVE。注册集合为 Billing7 + Token3；当前 Token19 原样。使用现有 operator cutover/readback 与 RunBillingApprovalConsumers 装配，不添加独立命令环境开关，不自动激活、发行资源或创建消费者。
 
-请求人 platform.billing.repairs.request，独立审批人 platform.billing.repairs.approve。输入付款订单和不可变付款证据 ID；固定原因 CONFIRMED_PAYMENT_NOT_CREDITED。仅 MANUAL_REVIEW 且匹配唯一 REVIEW_REQUIRED 交易、证据为成功、内部尚未入账、无退款拒付的当前订单；证据的真实 customer/SKU 必须匹配，不能从订单反填。完整数字由既有财务 codec 保真，typed EDIT 使用原 normalized payment_evidence_id 重新只读预检。
+新命令加入全局策略集合后，先按现有 Token governance 的 SAFE、quiescence、冻结资源 readback 与签名发行流程，用当前 `PolicySetDigest` 重新签发并核验治理快照；旧集合的 ACTIVE 摘要与收据不能沿用。此步骤不改变 Token handler 集合，也不能由启动或 readiness 自动代替。
+
+请求人 platform.billing.repairs.request，独立审批人 platform.billing.repairs.approve。输入付款订单和不可变付款证据 ID；固定原因 CONFIRMED_PAYMENT_NOT_CREDITED。仅 MANUAL_REVIEW 且匹配唯一 REVIEW_REQUIRED 交易、证据为成功、内部尚未入账、无退款拒付的当前订单；证据的真实 `external_customer_key` 必须等于订单 `requester_id`，SKU 必须匹配订单；不能从订单反填缺失证据，也不能由审批人指定其他受益人。个人订单（`beneficiary_organization_id` 为空）的钱包必须为 `PERSONAL`，且 `owner_id` 等于订单 `requester_id`；组织订单仍以原订单不可变的 `beneficiary_organization_id` 为受益关系，并核对 `ORGANIZATION` 钱包归属，不由本纠偏重新指定受益组织。完整数字由既有财务 codec 保真，typed EDIT 使用原 normalized payment_evidence_id 重新只读预检。
 
 执行复用已审付款合并写入者，追加单次 case/平衡 journal/package/权益及双身份审计；BASE 按既有顺序清偿应收。结果先行查询与未知 ACK 同键恢复沿原审批工作流；不新增 PAYMENT_REPAIR_CREDIT，不放宽自审、窗口、权限或 TestOnly 收款守卫。Native 沿原管理页面进入，无新 Native API。
 

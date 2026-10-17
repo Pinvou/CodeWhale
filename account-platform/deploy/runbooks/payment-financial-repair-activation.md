@@ -8,7 +8,8 @@
 2. 用户/授权人已就该命令的生产激活给出明确授权（书面记录存档，含时间与范围）。
 3. 专属 durable `billing-payment-financial-repair-executor-p1-v1` 的受信 cutover 资源绑定已就绪，Billing 通过当前 `cmd/billing-service` 中的 `approvalconsumer.BillingCommands()` 有限注册集合和受信资源装配启动，不添加不存在的逐命令启动开关（六个受信收据输入缺项、摘要不符或读取失败都会硬失败关闭）。
 4. 已验证 Account 侧五入口读取实时 Billing activation：行仍为 `INACTIVE` 时 create/update/submit/APPROVE/Begin 全部失败关闭（`ErrBillingGovernanceInactive`）。
-5. 已完成一致性备份（含 Billing 库）并记录备份 ID、完成时间与 SHA-256；激活窗口内停止写入新审批。
+5. 新命令加入全局策略集合后，先按现有 Token governance 的 SAFE、quiescence、冻结资源 readback 与签名发行流程，用当前 `PolicySetDigest` 重新签发并核验治理快照；旧集合的 ACTIVE 摘要与收据不能沿用。此步骤不改变 Token handler 集合，也不能由启动或 readiness 自动代替。
+6. 已完成一致性备份（含 Billing 库）并记录备份 ID、完成时间与 SHA-256；激活窗口内停止写入新审批。
 
 ## 2. 只读核验（记录输出作为证据）
 
@@ -51,6 +52,8 @@ WHERE payment_order.status='MANUAL_REVIEW' AND payment_order.fulfillment_status=
   AND NOT EXISTS(SELECT 1 FROM refunds r WHERE r.payment_order_id=payment_order.id)
   AND NOT EXISTS(SELECT 1 FROM chargeback_cases c WHERE c.payment_order_id=payment_order.id);
 ```
+
+只读候选清单不代替钱包资格核验。个人订单（`beneficiary_organization_id` 为空）的钱包必须为 `PERSONAL`，且 `owner_id` 等于订单 `requester_id`；组织订单仍以原订单不可变的 `beneficiary_organization_id` 为受益关系，并核对 `ORGANIZATION` 钱包归属，不由本纠偏重新指定受益组织。钱包状态仍必须为 ACTIVE。
 
 Account 侧核验：`approval_requests` 中该命令不得存在 `APPROVED`/`EXECUTING`/`EXECUTION_FAILED` 的遗留行；`outbox_events` 中不得存在未消费的该命令授权事件。任一不满足即阻断激活，并按设计 §8 失败分类只读查证。
 

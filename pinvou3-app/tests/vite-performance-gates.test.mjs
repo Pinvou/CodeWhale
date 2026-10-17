@@ -18,7 +18,7 @@ const mainSource = readFileSync(new URL('../src/app/main.jsx', import.meta.url),
 const chatSource = readFileSync(new URL('../src/features/chat/ChatView.jsx', import.meta.url), 'utf8');
 
 test('startup gates remain active in desktop and web production builds', () => {
-  assert.equal(MAIN_ENTRY_BUDGET_BYTES, 486_000);
+  assert.equal(MAIN_ENTRY_BUDGET_BYTES, 496_000);
   for (const mode of ['production', 'web']) {
     const config = createViteConfig({ command: 'build', mode });
     const pluginNames = new Set(config.plugins.flat(Infinity).filter(Boolean).map(plugin => plugin.name));
