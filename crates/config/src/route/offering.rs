@@ -36,6 +36,11 @@ pub struct RouteLimits {
 }
 
 impl RouteLimits {
+    /// Highest token count representable on the provider wire. Wire budget
+    /// fields are u32, so a stored limit beyond this — or at zero — is
+    /// treated as unknown by the engine's range filters.
+    pub const MAX_WIRE_TOKENS: u64 = u32::MAX as u64;
+
     /// Whether at least one limit fact is known.
     #[must_use]
     pub const fn has_known_limit(self) -> bool {

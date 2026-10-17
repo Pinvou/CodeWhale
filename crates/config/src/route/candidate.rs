@@ -325,4 +325,29 @@ impl ReadyRouteCandidate {
     pub fn applied_limit_overrides(&self) -> &[SourcedLimitOverride] {
         &self.applied_limit_overrides
     }
+
+    /// The subset of these limits an embedding host explicitly declared,
+    /// reconstructed from the recorded [`OverrideSource::EmbeddingHost`]
+    /// provenance. Catalog-, operator-config-, and roster-derived facts are
+    /// absent, so re-stating the result on a later re-derivation cannot pin
+    /// their stale values under host provenance.
+    ///
+    /// A `None`-valued host entry — an explicit clear, which no writer
+    /// produces today — is reconstructed as not declared and cannot ride
+    /// the carry.
+    #[must_use]
+    pub fn embedding_host_declared_limits(&self) -> Option<RouteLimits> {
+        let mut declared = RouteLimits::default();
+        for item in &self.applied_limit_overrides {
+            if item.source != OverrideSource::EmbeddingHost {
+                continue;
+            }
+            match item.field {
+                LimitField::ContextTokens => declared.context_tokens = item.value,
+                LimitField::InputTokens => declared.input_tokens = item.value,
+                LimitField::OutputTokens => declared.output_tokens = item.value,
+            }
+        }
+        declared.has_known_limit().then_some(declared)
+    }
 }
