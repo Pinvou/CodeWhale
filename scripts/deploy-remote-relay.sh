@@ -198,7 +198,7 @@ node --check "$code_stage/scripts/controller-route-smoke.mjs"
 node "$code_stage/scripts/deploy-controller-preflight.mjs" "$controller_env"
 # The state store deliberately refuses to create missing ancestors. Provision
 # its dedicated root explicitly so a first deployment on a clean host can
-# start without weakening the store's symlink/ownership checks.
+# start without weakening the symlink/ownership checks of the store.
 install -d -o root -g root -m 700 "$controller_state_root"
 install -d -o root -g root -m 700 "$controller_state_dir"
 test -f "$code_stage/docs/schemas/behavior-telemetry-v1.schema.json"

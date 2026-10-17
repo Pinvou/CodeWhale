@@ -812,7 +812,9 @@ test("gateway does not echo controller protocol absent upstream and rejects mixe
   assert.equal(oldWss.clients.size, 0);
 });
 
-test("real legacy v2 Relay is safe only behind the enrollment gateway", async (t) => {
+test("real legacy v2 Relay is safe only behind the enrollment gateway", {
+  skip: process.platform !== "win32" ? "requires the Windows netstat listener inspection" : false,
+}, async (t) => {
   const { root, registry } = await fixture(t);
   const relayPort = await freePort();
   const legacyHttp = `http://127.0.0.1:${relayPort}/pinvou3/remote`;

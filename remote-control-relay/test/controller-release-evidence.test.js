@@ -29,9 +29,13 @@ const testPublicKeySha256 = crypto.createHash("sha256")
   .update(testKeys.publicKey.export({ type: "spki", format: "der" })).digest("hex");
 const certificateRoot = await mkdtemp(join(tmpdir(), "pinvou-provider-chain-"));
 const openssl = process.platform === "win32" ? "C:\\Program Files\\Git\\usr\\bin\\openssl.exe" : "openssl";
-execFileSync(openssl, ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", join(certificateRoot, "root.key"), "-out", join(certificateRoot, "root.pem"), "-subj", "/CN=Pinvou Test Provider Root", "-days", "2"], { stdio: "ignore" });
+// Explicit extensions: LibreSSL emits no Basic Constraints by default and its
+// x509 subcommand lacks -addext, so the leaf profile comes from an extfile.
+const leafExtensions = join(certificateRoot, "leaf-extensions.cnf");
+await writeFile(leafExtensions, "basicConstraints=critical,CA:FALSE\n", "utf8");
+execFileSync(openssl, ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", join(certificateRoot, "root.key"), "-out", join(certificateRoot, "root.pem"), "-subj", "/CN=Pinvou Test Provider Root", "-days", "2", "-addext", "basicConstraints=critical,CA:TRUE"], { stdio: "ignore" });
 execFileSync(openssl, ["req", "-newkey", "rsa:2048", "-nodes", "-keyout", join(certificateRoot, "leaf.key"), "-out", join(certificateRoot, "leaf.csr"), "-subj", "/CN=Pinvou Test Provider Verifier"], { stdio: "ignore" });
-execFileSync(openssl, ["x509", "-req", "-in", join(certificateRoot, "leaf.csr"), "-CA", join(certificateRoot, "root.pem"), "-CAkey", join(certificateRoot, "root.key"), "-CAcreateserial", "-out", join(certificateRoot, "leaf.pem"), "-days", "2"], { stdio: "ignore" });
+execFileSync(openssl, ["x509", "-req", "-in", join(certificateRoot, "leaf.csr"), "-CA", join(certificateRoot, "root.pem"), "-CAkey", join(certificateRoot, "root.key"), "-CAcreateserial", "-out", join(certificateRoot, "leaf.pem"), "-days", "2", "-extfile", leafExtensions], { stdio: "ignore" });
 const providerRootPem = await readFile(join(certificateRoot, "root.pem"), "utf8");
 const providerLeafPem = await readFile(join(certificateRoot, "leaf.pem"), "utf8");
 const providerLeafKey = crypto.createPrivateKey(await readFile(join(certificateRoot, "leaf.key"), "utf8"));

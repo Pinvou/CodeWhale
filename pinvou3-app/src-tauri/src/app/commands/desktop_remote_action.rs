@@ -241,7 +241,8 @@ impl DesktopRemoteActionState {
                     && Some(upload.task_id.as_str()) == pending.task_id.as_deref()
             });
             if !bound {
-                inner.uploads.remove(transfer_id);
+                // 与 !ok 路径对称：绑定不匹配只拒绝本次回执，不得驱逐另一个
+                // task 名下的存证。
                 let _ = pending
                     .reply
                     .send(Err("remote_attachment_binding_mismatch".into()));
@@ -959,6 +960,36 @@ mod tests {
         assert_eq!(
             chunk.try_recv().unwrap(),
             Err("remote_attachment_binding_mismatch".into())
+        );
+        // 绑定不匹配的 ok 回执不得驱逐另一个 task 的存证（与 !ok 路径对称）：
+        // task-1 仍可用同一 transfer 完成上传。
+        assert!(state.inner.lock().uploads.contains_key("transfer-1"));
+        let mut retry = register(
+            &state,
+            "request-3",
+            "attachment_chunk",
+            Some("task-1"),
+            Some("transfer-1"),
+        );
+        settle(
+            &state,
+            json!({
+                "request_id":"request-3","session_id":"remote-0001",
+                "operation":"attachment_chunk","ok":true,
+                "body":{"state":"completed"}
+            }),
+        );
+        assert!(retry.try_recv().unwrap().is_ok());
+        assert!(
+            state
+                .validate_completed_uploads(
+                    "local-0001",
+                    "remote-0001",
+                    &live(),
+                    "task-1",
+                    &["transfer-1".into()],
+                )
+                .is_ok()
         );
     }
 
