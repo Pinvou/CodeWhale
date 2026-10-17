@@ -95,6 +95,7 @@ for (const language of ['zh', 'en', 'ja']) {
     'uiTeamRelayAccess',
     'uiBuiltinPlugins',
     'uiAuxChat',
+    'uiSessionMention',
   ]) {
     assert.ok(dict[language][section], `${language}.${section} must exist`);
   }
@@ -217,6 +218,27 @@ for (const language of ['zh', 'en', 'ja']) {
   // the ledger's lowercase cancelled token (case-insensitive match); the key
   // must exist in all three locales.
   assert.ok(dict[language].uiConversation.cancelled, `${language}.uiConversation.cancelled must exist`);
+  // Session mention (PR #586): every key consumed by SessionMentionControls /
+  // ChatView must exist in all three locales (function keys typed as such).
+  for (const key of ['menuTitle', 'menuEmpty', 'dropHint', 'cardUnavailable', 'cardDisabled', 'disabledNotice']) {
+    assert.ok(dict[language].uiSessionMention[key], `${language}.uiSessionMention.${key} must exist`);
+  }
+  for (const fnKey of ['chipRemove', 'cardJump']) {
+    assert.equal(typeof dict[language].uiSessionMention[fnKey], 'function', `${language}.uiSessionMention.${fnKey} must be a function`);
+  }
+  // Count guard (round-15 m4): ja replaces the whole section object, so a
+  // ja-missing key renders undefined rather than falling back — pin the
+  // exact parity surface (8 keys, same set in all three locales).
+  assert.equal(
+    Object.keys(dict[language].uiSessionMention).length,
+    8,
+    `${language}.uiSessionMention must hold exactly the 8 pinned keys`,
+  );
+  assert.deepEqual(
+    [...Object.keys(dict[language].uiSessionMention)].sort((a, b) => a.localeCompare(b)),
+    ['cardDisabled', 'cardJump', 'cardUnavailable', 'chipRemove', 'disabledNotice', 'dropHint', 'menuEmpty', 'menuTitle'],
+    `${language}.uiSessionMention must be the same key set in every locale`,
+  );
   for (const deadKey of ['confirmTitle', 'impactLabels', 'startDenied', 'stages', 'terminal', 'workerCount', 'advancedEdit', 'planCompileError']) {
     assert.equal(multiAgent[deadKey], undefined, `${language}.uiMultiAgent.${deadKey} is retired and must stay deleted`);
   }
@@ -381,7 +403,9 @@ assert.match(chat, /chatViewCopy\.placeholderSceneAdjust/);
 assert.match(chat, /chatViewCopy\.placeholderSceneDataViz/);
 assert.match(chat, /chatViewCopy\.placeholderScenePoster/);
 assert.match(chat, /chatViewCopy\.placeholderScenePpt/);
-assert.match(chat, /outgoing \|\| t\.uiChatScenes\.attachmentPrompt/);
+// Official 适配：上游 #586 让场景 meta 嵌入剥离注入块后的正文（sceneBody），
+// 块本身按发送时形状重新拼接回 payload 头 —— 断言随语义更新。
+assert.match(chat, /sceneBody \|\| t\.uiChatScenes\.attachmentPrompt/);
 assert.doesNotMatch(chatRaw, /outgoing \|\| '请根据附件内容继续处理。'/);
 assert.doesNotMatch(chatRaw, /designGeneralPlaceholder/);
 assert.doesNotMatch(chatRaw, /label:\s*'个人工作台'/);

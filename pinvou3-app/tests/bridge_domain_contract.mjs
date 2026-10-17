@@ -74,14 +74,15 @@ export const desktopOnlyBridgeApi = {
   // In a web relay session that is the remote desktop, not the browser user's
   // machine — pasting must stay on the browser's own clipboardData there.
   attachments: ['addPasteImageFromClipboard'],
-  // Builtin feature toggles (list_builtin_features / set_builtin_feature_enabled)
-  // are desktop Rust command channels with no web backend. list_builtin_features
-  // is consumed by ChatView (the session-mention feature gate); the enable
-  // switch is the contract hook for the builtin plugin page.
+  // Builtin feature toggles: the registry read (list_builtin_features) is
+  // lane-agnostic and web-allowed (the session-mention gate in ChatView must
+  // see the host's switch state from a browser too, upstream PR #586);
+  // set_builtin_feature_enabled stays a desktop-only write channel — the
+  // contract hook for the builtin plugin page's future switch UI.
   // saveSearchSettingsAndRestart stays web-expected: Official's dual web host
   // exposes the method (its stub warns and returns false on IS_WEB), so the
   // web surface keeps requiring it.
-  settings: ['listBuiltinFeatures', 'setBuiltinFeatureEnabled'],
+  settings: ['setBuiltinFeatureEnabled'],
 };
 
 // 整域桌面专属：Web 端连域都不存在（区别于 platform 这类"空域仍在"）。
