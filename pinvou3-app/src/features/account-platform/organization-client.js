@@ -138,7 +138,7 @@ export class OrganizationClient {
    if (receipt.grant.status !== 'RECLAIMED_ACCOUNT_CLOSED' || integerMoney(receipt.amount_microcredits) <= 0n || integerMoney(receipt.subject_lifecycle_version) < 2n || typeof receipt.replayed !== 'boolean') invalid();
   }
   if (result.items.some(item => item.status === 'FAILED' && item.code === 'COMMAND_RESULT_UNKNOWN')) {
-   throw Object.assign(new Error('COMMAND_RESULT_UNKNOWN'), { code: 'COMMAND_RESULT_UNKNOWN', financeRequestState: 'WRITE_OBSERVED', batchResult: result });
+   throw Object.assign(new Error('COMMAND_RESULT_UNKNOWN'), { code: 'COMMAND_RESULT_UNKNOWN', status: 503, financeRequestState: 'WRITE_OBSERVED', batchResult: result });
   }
   return result;
  }
