@@ -214,6 +214,11 @@ class PinAttributionTests(GuardFixture):
             ),
             [],
         )
+        # Round-13: pin the fail-closed HALF explicitly — the hit must be
+        # visible ONLY through the leaf net, never through a trusted full
+        # path (otherwise a path-shape accident could satisfy a pin without
+        # the unparseable-file suspicion).
+        self.assertEqual(by_path, {})
 
     def test_bin_root_and_unreached_files_are_never_scanned(self):
         # The scan is scoped to the lib module graph from lib.rs: the bin
@@ -355,7 +360,10 @@ class ModulePathTests(GuardFixture):
         # value cannot be reliably parsed must abort the guard loudly — the
         # old behavior quietly left the module out of the scan, which is
         # exactly the fail-open direction for a pin silenced in that file.
-        with self.assertRaises(SystemExit):
+        # Round-13: pin the MESSAGE too — any SystemExit from any source
+        # satisfied the bare assertRaises, so a regression that aborted for
+        # the wrong reason (or a refactored raise site) passed unnoticed.
+        with self.assertRaises(SystemExit) as ctx:
             self._ignored_sources(
                 {
                     "lib.rs": (
@@ -365,6 +373,7 @@ class ModulePathTests(GuardFixture):
                     "unterminated.rs": _IGNORED_PIN,
                 }
             )
+        self.assertIn("cannot read the #[path] value", str(ctx.exception))
 
     def test_path_attribute_inside_inline_module_is_wired(self):
         # Round-12 review (Jensen P2, comment 4297148007), positive control:
@@ -932,6 +941,28 @@ class DuplicateRegistrationTests(unittest.TestCase):
         self.assertIn("duplicate test registrations", err)
         self.assertIn("a::tests::dup x2", err)
 
+    def test_required_pin_registered_more_than_once_has_dedicated_message(self):
+        # Round-13: main()'s pin-specific "registered more than once"
+        # branch was the only main() branch with no committed regression —
+        # deleting it degraded the message to the generic duplicates line
+        # while every test stayed green. Pin the dedicated message so the
+        # branch is load-bearing.
+        code, err = self._run_main(
+            ["a::tests::dup", "a::tests::dup"],
+            source=(
+                "#[cfg(test)]\n"
+                "mod tests {\n"
+                "    #[test]\n"
+                "    fn dup() {}\n"
+                "}\n"
+            ),
+            required=["a::tests::dup"],
+        )
+        self.assertEqual(code, 1)
+        self.assertIn(
+            "required pin registered more than once: a::tests::dup x2", err
+        )
+
     def test_same_name_in_distinct_modules_is_not_a_duplicate(self):
         # Full-path keying: two modules may each carry a same-named test —
         # libtest registers both separately. With the required pin present
@@ -1066,6 +1097,14 @@ class DuplicateRegistrationTests(unittest.TestCase):
         self.assertIn("--locked", captured["cmd"])
         self.assertIn("--no-default-features", captured["cmd"])
         self.assertEqual(captured["env"]["CARGO_TERM_COLOR"], "never")
+        # Round-13: the registry scope and the artifact-reuse contract ride
+        # on two more argv details the old assertions did not pin — `--lib`
+        # (dropping it silently mixes integration-test targets into the
+        # registry) and the manifest path matching the MANIFEST the guard
+        # was pointed at (a swapped manifest would list a different crate's
+        # tests while every other assertion here stays green).
+        self.assertIn("--lib", captured["cmd"])
+        self.assertIn(str(Path(manifest)), captured["cmd"])
 
 
 class SameLineInlineModuleTests(GuardFixture):
@@ -1097,6 +1136,171 @@ class SameLineInlineModuleTests(GuardFixture):
         )
         self.assertEqual(by_path, {})
         self.assertEqual(unattributable, {})
+
+
+class Round13HardeningTests(GuardFixture):
+    """Round-13 review: branch-level anchors the earlier rounds left
+    unpinned — the EOF-unclean lexer states other than an unterminated
+    plain string, the `;`-stop of the rustfmt-signature lookahead, the
+    hashless raw-string `#[path]` value form, qualifier prefixes beyond
+    `pub/async/unsafe`, wired `main.rs` child resolution, and the loud
+    abort when `src/lib.rs` is missing."""
+
+    def test_hit_before_unterminated_block_comment_fails_closed(self):
+        # The hit is recorded BEFORE the opener, so the leaf-net route is
+        # exercised: an unclean-at-EOF file (block_depth stuck > 0) must
+        # keep its hits untrusted — attributed to the bare name only, never
+        # to a full libtest path (the in_str variant was pinned in round
+        # 10; this is the block-comment sibling of that branch).
+        by_path, unattributable = self._ignored_sources(
+            {
+                "lib.rs": "#[cfg(test)]\nmod broken;\n",
+                "broken.rs": (
+                    "#[test]\n"
+                    "#[ignore]\n"
+                    "fn critical_pin() {}\n"
+                    "/* never closed\n"
+                ),
+            }
+        )
+        self.assertEqual(by_path, {})
+        self.assertNotEqual(unattributable.get("critical_pin"), [])
+
+    def test_hit_before_unterminated_raw_string_fails_closed(self):
+        # Same contract for the third EOF-unclean state (raw_hashes stuck
+        # non-None): the recorded hit must land in the leaf net, not the
+        # trusted path map.
+        by_path, unattributable = self._ignored_sources(
+            {
+                "lib.rs": "#[cfg(test)]\nmod broken;\n",
+                "broken.rs": (
+                    "#[test]\n"
+                    "#[ignore]\n"
+                    "fn critical_pin() {}\n"
+                    'const S: &str = r#"never closed\n'
+                ),
+            }
+        )
+        self.assertEqual(by_path, {})
+        self.assertNotEqual(unattributable.get("critical_pin"), [])
+
+    def test_signature_stopped_by_semicolon_is_not_attached(self):
+        # A wrapped signature whose first structural stop is `;` (trait
+        # method shape) must not capture the hit into a foreign fn — the
+        # run stays unattached, and main()'s source-attribution net fails
+        # closed on a pin in that position.
+        by_path, unattributable = self._ignored_sources(
+            {
+                "lib.rs": (
+                    "#[test]\n"
+                    "#[ignore]\n"
+                    "fn trait_shaped<T>\n"
+                    "where\n"
+                    "    T: LoooongBound;\n"
+                    "#[test]\n"
+                    "fn later() {}\n"
+                )
+            }
+        )
+        self.assertEqual(by_path, {})
+        self.assertEqual(unattributable, {})
+
+    def test_hashless_raw_string_path_value_is_wired(self):
+        # Round-11 pinned the `r#"..."#` form end-to-end; the hashless
+        # `r"..."` form takes the same value-reader branch with zero
+        # hashes and must wire identically (round-13: the branch had no
+        # committed anchor).
+        root = self._crate_root(
+            {
+                "lib.rs": '#[path = r"real_target.rs"]\nmod rawwired;\n',
+                "real_target.rs": _IGNORED_PIN,
+            }
+        )
+        by_path, unattributable = self._scan(root)
+        self.assertEqual(sorted(by_path), ["rawwired::tests::critical_pin"])
+        self.assertEqual(unattributable, {})
+
+    def test_const_fn_qualifier_is_attributable(self):
+        # Round-13 widened the fn-line regex to the full qualifier set
+        # (rustc's canonical order is pub/default/const/async/unsafe/
+        # extern — `#[test] pub const fn` is legal and compiles, verified
+        # against rustc). The old prefix chain silently dropped `const fn`
+        # on the floor, making such a pin fail closed instead of scanned.
+        by_path, unattributable = self._ignored_sources(
+            {
+                "lib.rs": (
+                    "#[cfg(test)]\n"
+                    "mod tests {\n"
+                    "    #[test]\n"
+                    "    #[ignore = \"slow in CI\"]\n"
+                    "    pub const fn critical_pin() {}\n"
+                    "}\n"
+                )
+            }
+        )
+        self.assertEqual(
+            sorted(by_path), ["tests::critical_pin"]
+        )
+        self.assertEqual(unattributable, {})
+
+    def test_escaped_char_literal_does_not_offset_attribution(self):
+        # `'\u{7d}'` is the docstring's named char-literal case: its braces
+        # must not count toward the inline-module stack, or the pin's path
+        # gains a phantom component and the attribution misses.
+        by_path, unattributable = self._ignored_sources(
+            {
+                "lib.rs": (
+                    "const BRACE: char = '\\u{7d}';\n"
+                    "#[cfg(test)]\n"
+                    "mod tests {\n"
+                    "    #[test]\n"
+                    "    #[ignore = \"slow in CI\"]\n"
+                    "    fn critical_pin() {}\n"
+                    "}\n"
+                )
+            }
+        )
+        self.assertEqual(sorted(by_path), ["tests::critical_pin"])
+        self.assertEqual(unattributable, {})
+
+    def test_wired_main_rs_child_modules_open_stem_directory(self):
+        # Round-13: the conventional child directory was chosen by basename
+        # alone, so a file reached via `#[path = "main.rs"] mod entry;`
+        # resolved `mod inner;` beside itself instead of into `main/` —
+        # rustc (and now the scanner) opens the stem directory because the
+        # wired file is an ordinary file module, not a crate root.
+        by_path, unattributable = self._ignored_sources(
+            {
+                "lib.rs": '#[path = "main.rs"]\nmod entry;\n',
+                "main.rs": "mod inner;\n",
+                "main/inner.rs": _IGNORED_PIN,
+            }
+        )
+        self.assertEqual(sorted(by_path), ["entry::inner::tests::critical_pin"])
+        self.assertEqual(unattributable, {})
+
+    def test_wired_main_rs_does_not_pull_siblings_as_children(self):
+        # Negative control for the rule above: the sibling file the OLD
+        # basename rule would have consumed (`inner.rs` beside the wired
+        # main.rs) is never compiled by rustc and must stay invisible.
+        by_path, unattributable = self._ignored_sources(
+            {
+                "lib.rs": '#[path = "main.rs"]\nmod entry;\n',
+                "main.rs": "mod inner;\n",
+                "inner.rs": _IGNORED_PIN,
+            }
+        )
+        self.assertEqual(by_path, {})
+        self.assertEqual(unattributable, {})
+
+    def test_missing_lib_rs_aborts_loudly(self):
+        # The scan scopes itself to src/lib.rs; when the manifest points at
+        # a crate without one the guard must abort instead of silently
+        # scanning nothing (every pin would fail the attribution net with a
+        # misleading message).
+        with self.assertRaises(SystemExit) as ctx:
+            self._ignored_sources({"main.rs": _IGNORED_PIN})
+        self.assertIn("src/lib.rs not found", str(ctx.exception))
 
 
 if __name__ == "__main__":

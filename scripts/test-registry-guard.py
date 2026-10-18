@@ -136,7 +136,8 @@ def list_tests():
 
 
 _FN_RE = re.compile(
-    r"^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?"
+    r"^(?:(?:pub(?:\([^)]*\))?\s+)|(?:const\s+)|(?:async\s+)|(?:unsafe\s+)|"
+    r"(?:extern(?:\s+\"[^\"]*\")?\s+))*"
     r"fn\s+([A-Za-z_][A-Za-z0-9_]*)"
 )
 # How far past the name line a rustfmt-wrapped signature may put its
@@ -662,9 +663,14 @@ def _scan_graph():
     unattributable = {}
     attributable = set()
     visited = set()
-    queue = [(lib_root, [])]
+    # The third tuple element marks crate roots: only a root (or a `mod.rs`)
+    # keeps conventional `mod x;` children beside itself — a file reached
+    # through `#[path = "main.rs"] mod m;` wiring is an ordinary file module
+    # whose children open `<stem>/`, even though its basename is `main.rs`
+    # (round-13 review: the basename heuristic alone misresolved those).
+    queue = [(lib_root, [], True)]
     while queue:
-        path, base = queue.pop(0)
+        path, base, is_crate_root = queue.pop(0)
         real = os.path.realpath(path)
         if real in visited:
             continue
@@ -718,7 +724,7 @@ def _scan_graph():
         # lib.rs → src/app.rs), `mod.rs` keeps them in its own directory,
         # and any other file `a/b.rs` opens the `a/b/` directory.
         fname = os.path.basename(path)
-        if fname in ("lib.rs", "main.rs", "mod.rs"):
+        if is_crate_root or fname == "mod.rs":
             child_dir = os.path.dirname(path)
         else:
             child_dir = os.path.join(os.path.dirname(path), fname[:-3])
@@ -729,7 +735,7 @@ def _scan_graph():
                 os.path.join(mod_dir, name, "mod.rs"),
             ):
                 if os.path.isfile(candidate):
-                    queue.append((candidate, base + list(estack) + [name]))
+                    queue.append((candidate, base + list(estack) + [name], False))
                     break
         # `#[path = "..."]` wiring (12 real sites, e.g. file_ingest.rs).
         # rustc resolution, round-12 (verified against the Rust Reference
@@ -752,7 +758,7 @@ def _scan_graph():
                 candidate = os.path.normpath(os.path.join(file_dir, rel))
                 mod_path = base
             if os.path.isfile(candidate):
-                queue.append((candidate, mod_path + [name]))
+                queue.append((candidate, mod_path + [name], False))
     return by_path, unattributable, attributable
 
 
@@ -839,9 +845,12 @@ def main():
                 failures.append(
                     f"required pin {pin} is registered but its source "
                     "location is outside the scanned lib module graph "
-                    "(unmodelled #[path] wiring, macro-generated test, or "
-                    "raw-identifier mod) — an #[ignore] there would go "
-                    "undetected; extend the scanner before trusting it"
+                    "(unmodelled #[path] wiring, macro-generated test, "
+                    "raw-identifier mod, or an attribute run the scanner "
+                    "could not bind to the fn line — e.g. `#[test] "
+                    "#[ignore] fn` and the inline `mod` opener sharing one "
+                    "line) — an #[ignore] there would go undetected; "
+                    "extend the scanner before trusting it"
                 )
             continue
         if pin in counts:
@@ -852,8 +861,10 @@ def main():
         if relocated:
             failures.append(
                 f"required pin {pin} not in the registry, but the function name "
-                f"appears at {relocated} — the test moved modules; update "
-                f"REQUIRED_PINS (or restore it there)"
+                f"appears at {relocated} — the test moved modules (update "
+                f"REQUIRED_PINS, or restore it there), or its #[test] "
+                f"attribute was stolen and an unrelated same-name test "
+                f"satisfies the registry"
             )
         else:
             failures.append(f"required pin absent from the registry (stolen #[test] attribute?): {pin}")
