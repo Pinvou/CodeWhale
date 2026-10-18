@@ -362,7 +362,7 @@ async fn run_rlm_turn_impl(
                                    from the preview alone. Emit a ```repl block now that uses \
                                    `llm_query`, `sub_query_sequence`, or an explicitly independent \
                                    `llm_query_batched(..., dependency_mode=\"independent\")` against \
-                                   `context` to actually compute the answer."
+                                   `_context` to actually compute the answer."
                                 .to_string(),
                             cache_control: None,
                         }],
@@ -422,7 +422,7 @@ async fn run_rlm_turn_impl(
                             text: "Reminder: emit Python inside a ```repl … ``` fence. \
                                    Use `llm_query`, `sub_query_sequence`, or \
                                    `llm_query_batched(..., dependency_mode=\"independent\")` to \
-                                   process `context` and call `FINAL(value)` when done."
+                                   process `_context` and call `finalize(value)` when done."
                                 .to_string(),
                             cache_control: None,
                         }],
@@ -702,14 +702,19 @@ fn build_metadata_message(
         parts.push(format!("> {}", truncate_text(rp.trim(), 600)));
         parts.push(String::new());
     }
-    parts.push("**`context`** — the long input lives in the REPL only".to_string());
+    parts.push(
+        "**Input** — the long input lives in the REPL only, as `_context` (alias `content`)"
+            .to_string(),
+    );
     parts.push(format!("- Length: {prompt_len} chars"));
     parts.push(format!("- Preview: \"{prompt_preview}\""));
     parts.push(String::new());
 
     parts.push("**REPL helpers** (use inside ```repl blocks)".to_string());
-    parts.push("- `context` / `ctx`                       — the full input string".to_string());
-    parts.push("- `len(context)` / `context[a:b]` / `context.splitlines()` — slice it".to_string());
+    parts.push("- `_context` / `content`                 — the full input string".to_string());
+    parts.push(
+        "- `len(_context)` / `_context[a:b]` / `_context.splitlines()` — slice it".to_string(),
+    );
     parts.push(
         "- `chunk_context(max_chars=20000, overlap=0)` — full-coverage chunks with index/start/end/text"
             .to_string(),
@@ -745,10 +750,10 @@ fn build_metadata_message(
     parts.push("- `SHOW_VARS()`                          — list user variables".to_string());
     parts.push("- `repl_set(name, value)` / `repl_get(name)` — explicit store".to_string());
     parts.push(
-        "- `FINAL(value)`                         — end the loop with this answer".to_string(),
+        "- `finalize(value, confidence=None)`     — end the loop with this answer".to_string(),
     );
     parts.push(
-        "- `FINAL_VAR(name)`                      — end the loop with a variable's value"
+        "- `evaluate_progress()`                  — inspect whether a final answer exists"
             .to_string(),
     );
     parts.push(String::new());
@@ -1041,12 +1046,14 @@ mod tests {
     fn build_metadata_contains_key_information() {
         let msg = build_metadata_message("Hello, world!", None, 0, None, None);
         let text = extract_text_blocks(&msg.content);
-        assert!(text.contains("context"));
+        assert!(text.contains("_context"));
+        assert!(!text.contains("`context` / `ctx`"));
         assert!(text.contains("Hello, world!"));
         assert!(text.contains("round 0"));
         assert!(text.contains("llm_query"));
         assert!(text.contains("rlm_query"));
-        assert!(text.contains("FINAL"));
+        assert!(text.contains("finalize(value, confidence=None)"));
+        assert!(!text.contains("FINAL_VAR"));
     }
 
     #[test]
