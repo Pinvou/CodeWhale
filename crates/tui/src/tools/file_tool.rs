@@ -160,7 +160,7 @@ impl ToolSpec for EditTool {
     }
 
     fn description(&self) -> &'static str {
-        "Edit one file with targeted text replacements. Every edits[].oldText must identify a unique, non-overlapping region of the original file. Merge nearby or overlapping changes into one edit."
+        "Edit one file with targeted text replacements. Every edits[].oldText must identify a unique, non-overlapping region of the original file. When no exact match is found, the tool retries automatically with leading-whitespace-tolerant fuzzy matching plus punctuation/line-ending normalization, so a replacement can succeed even when oldText differs cosmetically from the file. Merge nearby or overlapping changes into one edit."
     }
 
     fn input_schema(&self) -> Value {

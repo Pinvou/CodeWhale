@@ -317,7 +317,7 @@ impl ToolSpec for ApplyPatchTool {
     }
 
     fn description(&self) -> &'static str {
-        "Apply a unified-diff patch (multi-hunk, multi-file) or full-file replacements via `replace`. Use this instead of `git apply` or `patch` in `bash`, or repeated `edit` calls — single transactional change with fuzzy matching and a rendered diff."
+        "Apply a unified-diff patch (multi-hunk, multi-file) or full-file replacements via `replace`. Use this instead of `git apply` or `patch` in `bash`, or repeated `edit` calls — single transactional change with fuzzy matching; the compact JSON result reports counts and touched files (the UI renders the diff)."
     }
 
     fn input_schema(&self) -> Value {
@@ -366,7 +366,7 @@ impl ToolSpec for ApplyPatchTool {
                 },
                 "expected_hash": {
                     "type": "string",
-                    "description": "Optional sha256:<hex> of the complete target file bytes; a mismatch refuses the patch without writing. Compute it with `bash`; `read` does not return a hash. Verifies the `path` argument when given, otherwise the first file the patch touches; other files in a multi-file patch are not hash-checked."
+                    "description": "Optional sha256:<hex> of the complete target file bytes; a mismatch refuses the patch without writing. Compute it with `bash`; `read` does not return a hash. For unified-diff `patch` input this verifies the `path` argument when given, otherwise the first file the patch touches; with `replace` the `path` argument is ignored and the first file in `files` is checked. Other files in a multi-file patch are not hash-checked."
                 }
             },
             "oneOf": [

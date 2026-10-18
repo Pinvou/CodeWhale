@@ -105,7 +105,9 @@ Actions: \"schedule\" (create a pending trigger; requires approval), \
 \"cancel\" (cancel a pending trigger before it fires; requires approval). \
 Use delay_minutes or fire_at (ISO 8601 UTC) — not both. \
 message is required for action=schedule; fire_at must be strictly in the future. \
-Returns trigger_id and resolved fire_at."
+Returns trigger_id and resolved fire_at. \
+Triggers are private to the scheduling session: other or later sessions cannot \
+list, read, or cancel them."
         }
     }
 

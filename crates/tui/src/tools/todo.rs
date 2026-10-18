@@ -261,7 +261,7 @@ impl ToolSpec for TodoWriteTool {
     }
 
     fn description(&self) -> &'static str {
-        "Replace the To-do list shown to the user. Optional: use it when a visible plan helps; at most one item may be in_progress at a time."
+        "Replace the To-do list shown to the user. Optional: use it when a visible plan helps; at most one item may be in_progress at a time — if a call contains several, the last one wins and earlier in_progress items are demoted to pending."
     }
 
     fn input_schema(&self) -> serde_json::Value {

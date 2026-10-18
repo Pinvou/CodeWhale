@@ -74,7 +74,7 @@ impl ToolSpec for GitTool {
                 },
                 "path": {
                     "type": "string",
-                    "description": "Optional subdirectory or file path to scope the git command"
+                    "description": "Optional subdirectory or file path to scope the git command. Required for action=blame, where it must point to a single tracked file"
                 },
                 "cached": {
                     "type": "boolean",
