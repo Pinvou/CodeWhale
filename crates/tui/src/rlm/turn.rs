@@ -33,7 +33,7 @@ const MAX_CONSECUTIVE_NO_CODE: u32 = 3;
 /// Max output tokens for the root LLM — it just needs to generate code.
 /// Max chars of stdout shown as metadata to the root LLM in next iteration.
 const STDOUT_METADATA_PREVIEW_LEN: usize = 800;
-/// Max chars of `context` shown as a preview in the metadata.
+/// Max chars of `_context` shown as a preview in the metadata.
 const PROMPT_PREVIEW_LEN: usize = 500;
 /// Temperature for root LLM calls.
 /// Bound on conversation history we keep across iterations.
@@ -83,12 +83,12 @@ pub struct RlmTurnResult {
     /// Per-round trace. Empty when the loop never reached the REPL.
     pub trace: Vec<RlmRoundTrace>,
     /// Total sub-LLM RPCs made by the sub-agent (sum of `rpc_count` across
-    /// rounds). Useful for verifying that the model engaged with `context`
+    /// rounds). Useful for verifying that the model engaged with `_context`
     /// rather than answering directly.
     pub total_rpcs: u32,
 }
 
-/// Run a full RLM turn. `prompt` is loaded into the REPL as `context`; it
+/// Run a full RLM turn. `prompt` is loaded into the REPL as `_context`; it
 /// never enters the root LLM's window.
 pub async fn run_rlm_turn(
     client: &DeepSeekClient,
@@ -679,7 +679,7 @@ fn build_root_request(
 
 /// Build `Metadata(state)` from the paper. Surfaces:
 /// - the small `root_prompt` (if any) — repeated each iteration
-/// - `context` length + preview
+/// - `_context` length + preview
 /// - the REPL helpers
 /// - the previous round's code summary + stdout preview
 fn build_metadata_message(

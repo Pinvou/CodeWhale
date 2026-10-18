@@ -118,7 +118,7 @@ impl RlmTool {
             Some("eval") => format!(
                 "Run one Python REPL block against a named RLM context. Returns a \
                  bounded projection of stdout/stderr plus metadata. If the code calls \
-                 FINAL/finalize, the final value is stored as a var_handle retrievable \
+                 finalize(...) is called, the final value is stored as a var_handle retrievable \
                  with handle_read instead of copied unbounded into the parent context. \
                  Large stdout/stderr payloads (>1k chars) are also stored as \
                  var_handles (returned in stdout_handle / stderr_handle) to keep the \
@@ -141,7 +141,7 @@ impl RlmTool {
                  \"open\" (load file_path/content/url/session_object into a named Python \
                  kernel; returns only metadata so the parent transcript holds a handle, \
                  not the body), \"eval\" (run one bounded Python REPL block against a \
-                 named context; approval required; FINAL/finalize values and large \
+                 named context; approval required; finalize(...) values and large \
                  stdout/stderr become var_handles retrievable with handle_read; \
                  {HANDLE_READ_ACTIVATION_HINT}), \
                  \"configure\" (output feedback, child timeout, sub-RLM depth, session \
@@ -273,7 +273,7 @@ impl ToolSpec for RlmTool {
                 },
                 "code": {
                     "type": "string",
-                    "description": "Raw Python executed against the context (no markdown fences). The loaded source is in scope as `content`; call FINAL(value)/finalize(...) to return a result handle. Example: print(len(content)). (action=eval)"
+                    "description": "Raw Python executed against the context (no markdown fences). The loaded source is in scope as `content`; call finalize(...) to return a result handle. Example: print(len(content)). (action=eval)"
                 },
                 "output_feedback": {
                     "type": "string",
@@ -476,7 +476,7 @@ impl RlmTool {
         let code = required_non_empty_str(input, "code").map_err(|_| {
             ToolError::invalid_input(
                 "rlm_eval: `code` is required and runs raw Python against the RLM context (no markdown fences). \
-                 Example: {\"name\": \"<ctx>\", \"code\": \"print(len(content))\"}; call FINAL(value) to return a result handle.",
+                 Example: {\"name\": \"<ctx>\", \"code\": \"print(len(content))\"}; call finalize(...) to return a result handle.",
             )
         })?;
         let session = get_session(context, name).await?;
@@ -750,7 +750,7 @@ fn legacy_action_schema(action: &str) -> Value {
             "required": ["name", "code"],
             "properties": {
                 "name": { "type": "string", "description": "RLM context name returned by rlm_open." },
-                "code": { "type": "string", "description": "Raw Python executed against the context (no markdown fences). The loaded source is in scope as `content`; call FINAL(value)/finalize(...) to return a result handle. Example: print(len(content))." }
+                "code": { "type": "string", "description": "Raw Python executed against the context (no markdown fences). The loaded source is in scope as `content`; call finalize(...) to return a result handle. Example: print(len(content))." }
             }
         }),
         "configure" => json!({

@@ -366,7 +366,7 @@ impl ToolSpec for ApplyPatchTool {
                 },
                 "expected_hash": {
                     "type": "string",
-                    "description": "Optional sha256:<hex> of the complete target file bytes; a mismatch refuses the patch without writing. Compute it with `bash`; `read` does not return a hash. For unified-diff `patch` input this verifies the `path` argument when given, otherwise the first file the patch touches; with `replace` the `path` argument is ignored and the first file in `files` is checked. Other files in a multi-file patch are not hash-checked."
+                    "description": "Optional sha256:<hex> of the complete target file bytes; a mismatch refuses the patch without writing. Pass the `content_hash` that `read` reported for the file. For unified-diff `patch` input this verifies the `path` argument when given, otherwise the first file the patch touches; with `replace` the `path` argument is ignored and the first file in the `replace` array is checked. Other files in a multi-file patch are not hash-checked."
                 }
             },
             "oneOf": [
@@ -1624,6 +1624,22 @@ mod tests {
 
     fn parse_patch_result(result: ToolResult) -> PatchResult {
         serde_json::from_str(&result.content).expect("patch result json")
+    }
+
+    #[test]
+    fn expected_hash_schema_names_read_content_hash_and_replace_array() {
+        // Round-1 review pin: `read` reports `content_hash` on every text read
+        // and the multi-file array input is `replace` (alias `changes`) — the
+        // schema must not send the model hunting for a hash via `bash` or
+        // naming a nonexistent `files` input.
+        let schema = ApplyPatchTool.input_schema();
+        let description = schema["properties"]["expected_hash"]["description"]
+            .as_str()
+            .expect("expected_hash description");
+        assert!(description.contains("content_hash"));
+        assert!(description.contains("the `replace` array"));
+        assert!(!description.contains("Compute it with `bash`"));
+        assert!(!description.contains("in `files`"));
     }
 
     #[test]

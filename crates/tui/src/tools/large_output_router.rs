@@ -244,8 +244,9 @@ impl LargeOutputRouter {
         (routing, estimated_tokens, threshold)
     }
 
-    /// Wrap a synthesis result with a workshop provenance header and a hint
-    /// about the stored raw output.
+    /// Wrap a synthesis result with a provenance header. The raw output is
+    /// retained internally for diagnostics; no model-facing text claims it can
+    /// be read back (nothing can — see `WorkshopVariables::take_raw`).
     #[must_use]
     pub fn wrap_synthesis(
         tool_name: &str,
@@ -255,7 +256,7 @@ impl LargeOutputRouter {
     ) -> String {
         format!(
             "[workshop-synthesis: tool={tool_name}, raw_tokens≈{estimated_tokens}, \
-             threshold={threshold}, raw_stored_in={WORKSHOP_LAST_TOOL_RESULT_VAR}]\n\n{synthesis}"
+             threshold={threshold}]\n\n{synthesis}"
         )
     }
 }
@@ -555,5 +556,10 @@ mod tests {
         assert!(wrapped.contains("web_search"));
         assert!(wrapped.contains("5000"));
         assert!(wrapped.contains("key facts here"));
+        // The header must not cite the workshop variable: nothing can read it
+        // back (promote_to_context never shipped), so pointing the model at it
+        // is a retrieval dead end.
+        assert!(!wrapped.contains("raw_stored_in"));
+        assert!(!wrapped.contains("last_tool_result"));
     }
 }

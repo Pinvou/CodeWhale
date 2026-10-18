@@ -776,8 +776,18 @@ pub(crate) fn effective_authority_recap() -> &'static str {
 /// config-directory constitution replaced the bundled base prompt, the
 /// `### Whose word wins` section the recap points at may no longer exist, so
 /// appending the recap would leave a dangling cross-reference.
-fn authority_recap_trailer_appended(composer_installed: bool) -> bool {
-    !composer_installed && base_prompt_origin() == BasePromptOrigin::Bundled
+pub(crate) fn authority_recap_trailer_appended(composer_installed: bool) -> bool {
+    authority_recap_trailer_appended_for(composer_installed, base_prompt_origin())
+}
+
+/// Pure core of [`authority_recap_trailer_appended`], split out so the
+/// config-override arm is unit-testable without installing the process-global
+/// override cell.
+fn authority_recap_trailer_appended_for(
+    composer_installed: bool,
+    origin: BasePromptOrigin,
+) -> bool {
+    !composer_installed && origin == BasePromptOrigin::Bundled
 }
 
 /// Optional locale-native reinforcement preamble prepended to the system
@@ -1499,13 +1509,24 @@ mod tests {
     /// embedder composer that owns the static prefix retires that section,
     /// so the trailer must be skipped instead of dangling in the blocks. The
     /// same guard covers an opted-in config-directory constitution override
-    /// (the override need not contain the section either); that arm is
-    /// exercised by the startup install path, not here — the override
-    /// OnceLock is process-global.
+    /// (the override replaces the bundled base and need not contain the
+    /// section either).
     #[test]
     fn authority_recap_trailer_skipped_when_static_composer_owns_prefix() {
         assert!(authority_recap_trailer_appended(false));
         assert!(!authority_recap_trailer_appended(true));
+        assert!(authority_recap_trailer_appended_for(
+            false,
+            BasePromptOrigin::Bundled
+        ));
+        assert!(!authority_recap_trailer_appended_for(
+            false,
+            BasePromptOrigin::ConfigOverride
+        ));
+        assert!(!authority_recap_trailer_appended_for(
+            true,
+            BasePromptOrigin::ConfigOverride
+        ));
     }
 
     // Config-directory prompt override resolution (#3638). These exercise the

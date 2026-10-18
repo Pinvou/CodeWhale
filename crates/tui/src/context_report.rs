@@ -597,15 +597,27 @@ fn base_source_entries(
         CountingConfidence::High,
         Some(3),
     ));
-    builder.push(SourceEntry::text(
-        SourceKind::AuthorityRecap,
-        "Authority recap",
-        None,
-        ActivationReason::AlwaysOn,
-        crate::prompts::effective_authority_recap(),
-        CountingConfidence::High,
-        Some(1),
-    ));
+    if crate::prompts::authority_recap_trailer_appended(
+        crate::prompts::static_prompt_composer_installed(),
+    ) {
+        builder.push(SourceEntry::text(
+            SourceKind::AuthorityRecap,
+            "Authority recap",
+            None,
+            ActivationReason::AlwaysOn,
+            crate::prompts::effective_authority_recap(),
+            CountingConfidence::High,
+            Some(1),
+        ));
+    } else {
+        builder.push(SourceEntry::omitted(
+            SourceKind::AuthorityRecap,
+            "Authority recap",
+            None,
+            Some(1),
+            "not appended: a static composer or config-directory constitution owns the prompt prefix, so the bundled section the recap cross-references is absent",
+        ));
+    }
     builder.push(SourceEntry::text(
         SourceKind::EnvironmentBlock,
         "Runtime environment",

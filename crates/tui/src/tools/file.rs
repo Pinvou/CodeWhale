@@ -1679,11 +1679,11 @@ fn text_matches(haystack: &str, needle: &str) -> Vec<(usize, usize)> {
 fn contract_edit_not_found(path: &str, index: usize, total: usize) -> ToolError {
     if total == 1 {
         ToolError::execution_failed(format!(
-            "Could not find the exact text in {path}. The old text must match exactly including all whitespace and newlines."
+            "Could not find the text in {path}. The old text must match the file exactly; only punctuation, line endings, and per-line trailing whitespace are normalized automatically."
         ))
     } else {
         ToolError::execution_failed(format!(
-            "Could not find edits[{index}] in {path}. The oldText must match exactly including all whitespace and newlines."
+            "Could not find edits[{index}] in {path}. The oldText must match the file exactly; only punctuation, line endings, and per-line trailing whitespace are normalized automatically."
         ))
     }
 }

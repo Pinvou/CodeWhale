@@ -97,7 +97,7 @@ impl ToolSpec for SendLaterTool {
 
     fn description(&self) -> &'static str {
         if self.read_only {
-            "Inspect pending one-shot delayed continuations. Actions: \"list\" (newest triggers), \"read\" (one trigger by trigger_id)."
+            "Inspect pending one-shot delayed continuations. Actions: \"list\" (newest triggers), \"read\" (one trigger by trigger_id). Triggers are private to the scheduling session: other or later sessions cannot list or read them."
         } else {
             "Schedule a one-shot delayed message into the current workspace. \
 Actions: \"schedule\" (create a pending trigger; requires approval), \
