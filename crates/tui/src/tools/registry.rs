@@ -186,7 +186,7 @@ impl ToolRegistry {
                     let preview_chars = 1_200usize;
                     let preview: String = result.content.chars().take(preview_chars).collect();
                     let ellipsis = if result.content.chars().count() > preview_chars {
-                        "\n… [output truncated — full text in workshop variable `last_tool_result`]"
+                        "\n… [output truncated — rerun the tool with narrower arguments for the remaining detail]"
                     } else {
                         ""
                     };
