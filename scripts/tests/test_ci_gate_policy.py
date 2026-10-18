@@ -1629,7 +1629,20 @@ class CiGatePolicyTests(unittest.TestCase):
         )
         self.assertNotIn("|| true", step)
         self.assertNotIn("continue-on-error", step)
-        self.assertIn("if: ${{ github.event_name != 'push' }}", step)
+        # Round-13: match the push exclusion on executable lines only — a
+        # commented copy of the `if:` satisfied the raw-text assertIn while
+        # the (deleted) real condition silently widened the guard's run
+        # set. Direction is over-run, not bypass, but the same fix as the
+        # disk step keeps the file's convention uniform.
+        self.assertIn(
+            "if: ${{ github.event_name != 'push' }}",
+            "\n".join(
+                line
+                for line in step.splitlines()
+                if not line.lstrip().startswith("#")
+            ),
+            "test-registry guard must stay push-excluded (executable line)",
+        )
 
     def test_windows_runtime_manifest_contract_step_is_pinned(self):
         # PR #1518 round-11 review: the revived test:windows-runtime-manifest
@@ -1675,16 +1688,25 @@ class CiGatePolicyTests(unittest.TestCase):
         # unused-ignored-advisory semantics are version-sensitive) and the
         # check command (must keep `advisories` and target the shared
         # deny.toml), on executable lines only.
-        for job, install_name, check_name in (
+        # Round-13 review: the check step's `if:` itself was unpinned —
+        # flipping it to `false` (or dropping one conjunct) silently
+        # disarms the hard gate while every assertion here stays green.
+        # These steps carry legitimate routing conditions, so instead of
+        # the sibling steps' no-`if:` ban, pin the exact condition per
+        # leg on non-comment lines.
+        for job, install_name, check_name, route_condition in (
             (
                 "knowledge-rust",
                 "cargo-deny",
                 "cargo deny check",
+                "needs.changes.outputs.knowledge_dependencies == 'true'",
             ),
             (
                 "rust-lint",
                 "cargo-deny (advisories/licenses/bans/sources)",
                 "cargo deny check (hard gate)",
+                "env.RUN_HEAVY_RUST_CHECKS == 'true' && "
+                "needs.changes.outputs.rust_dependencies == 'true'",
             ),
         ):
             with self.subTest(job=job):
@@ -1692,15 +1714,26 @@ class CiGatePolicyTests(unittest.TestCase):
                 install = job_block.split(f"- name: {install_name}", maxsplit=1)[
                     1
                 ].split("\n      - name:", maxsplit=1)[0]
+                install_code = "\n".join(
+                    line
+                    for line in install.splitlines()
+                    if not line.lstrip().startswith("#")
+                )
                 self.assertTrue(
                     any(
                         "tool: cargo-deny@0.20.2" in line
-                        for line in install.splitlines()
-                        if not line.lstrip().startswith("#")
+                        for line in install_code.splitlines()
                     ),
                     f"{job}: cargo-deny must stay pinned to 0.20.2 (the "
                     "advisory-ignore routing and unused-ignored-advisory "
                     "semantics are version-sensitive)",
+                )
+                self.assertIn(
+                    f"if: ${{{{ {route_condition} }}}}",
+                    install_code,
+                    f"{job}: the deny install step's routing condition "
+                    "drifted — the gate must run exactly when the shared "
+                    "deny.toml's inputs change",
                 )
                 check = job_block.split(f"- name: {check_name}", maxsplit=1)[
                     1
@@ -1718,8 +1751,46 @@ class CiGatePolicyTests(unittest.TestCase):
                     f"{job}: the check must target the shared src-tauri "
                     "deny.toml (explicitly or via working-directory)",
                 )
+                self.assertIn(
+                    f"if: ${{{{ {route_condition} }}}}",
+                    code,
+                    f"{job}: the deny check step's `if:` drifted — flipping "
+                    "it (to `false` or a weaker condition) would silently "
+                    "disarm the advisories/yanked hard gate",
+                )
                 self.assertNotIn("|| true", check)
                 self.assertNotIn("continue-on-error", check)
+
+    def test_deny_toml_keeps_strict_yanked_deny(self):
+        # Round-13 review: the whole zip yank episode (rounds 8-12) made
+        # `yanked = "deny"` load-bearing — the round-9 PackageSpec exception
+        # is gone, so ANY future yank of the pinned 8.6.0 (or anything else)
+        # must fail CI. Nothing machine-checked the value: downgrading to
+        # "warn" passed every gate-policy test, the guard suites, and
+        # cargo-deny itself. Pin it as a non-comment line of the shared
+        # config.
+        deny_toml = (
+            ROOT / "pinvou3-app/src-tauri/deny.toml"
+        ).read_text(encoding="utf-8")
+        deny_code = "\n".join(
+            line
+            for line in deny_toml.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        self.assertIn(
+            'yanked = "deny"',
+            deny_code,
+            "deny.toml must keep yanked = \"deny\" on an executable line — "
+            "the zip 8.6.0 story only works with the strict value, and a "
+            "silent downgrade to warn reopens the ecosystem-drift hole",
+        )
+        self.assertNotIn(
+            'yanked =',
+            deny_code.replace('yanked = "deny"', ""),
+            "the yanked setting must appear exactly once and as \"deny\" — "
+            "a second executable yanked line (e.g. a warn fallback) would "
+            "silently override the strict value",
+        )
 
     def test_rust_lint_disk_step_is_draft_gated_and_precedes_zram(self):
         # PR #1518 round-5 review: the rust-lint disk cleanup is only needed
@@ -1738,9 +1809,15 @@ class CiGatePolicyTests(unittest.TestCase):
         disk_step = rust_lint.split(
             "- name: Prepare Rust disk capacity", maxsplit=1
         )[1].split("\n      - name:", maxsplit=1)[0]
+        # Round-13: executable-lines-only (a commented copy of the `if:`
+        # satisfied the raw assertIn while the real gate was dropped).
         self.assertIn(
             "if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' }}",
-            disk_step,
+            "\n".join(
+                line
+                for line in disk_step.splitlines()
+                if not line.lstrip().startswith("#")
+            ),
             "rust-lint disk cleanup must stay draft-gated (RUN_HEAVY_RUST_CHECKS)",
         )
         self.assertTrue(
@@ -4898,6 +4975,44 @@ class CiGatePolicyTests(unittest.TestCase):
         )
         self.assertIn("timeout-minutes: 10", changes)
         self.assertIn("timeout-minutes: 20", smoke)
+
+    def test_wrapper_smoke_chain_probe_step_is_pinned(self):
+        # Round-13 review: the chain-contract probe (step 5) had no
+        # anti-deletion pin — deleting the whole step left the remaining
+        # smoke steps green and every gate-policy test here untouched,
+        # exactly the gap this PR fixed for the windows runtime-manifest
+        # step in round 11. Pin the step name and the two load-bearing
+        # probe assertions on executable lines, so the smoke can silently
+        # lose its delegation contract no more.
+        workflow = (
+            ROOT / ".github/workflows/rustc-wrapper-smoke.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "- name: 链式 wrapper —— 完整 argv 委托链上命令且仍注入 16 MiB",
+            workflow,
+        )
+        step = workflow.split(
+            "- name: 链式 wrapper —— 完整 argv 委托链上命令且仍注入 16 MiB",
+            maxsplit=1,
+        )[1].split("\n      - name:", maxsplit=1)[0]
+        step_code = "\n".join(
+            line
+            for line in step.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        for probe in (
+            "grep -Fqx 'chain_probe_stack=[16777216]'",
+            "grep -Fqx 'chain_probe_argc=3'",
+        ):
+            self.assertIn(
+                probe,
+                step_code,
+                f"the chain probe must keep its {probe.split('[')[0]}… "
+                "assertion as an executable line — deleting it reopens the "
+                "merge-args/drop-injection escape the round-12 probe rewrite "
+                "closed",
+            )
+        self.assertIn("rustc-stack-wrapper", step_code)
 
 
 
