@@ -188,25 +188,34 @@ def _in_shallow_clone() -> bool:
     so the merge-detection fast path stays testable without git mocking;
     round-12 review."""
     probe = subprocess.run(
-        ("git", "rev-parse", "--git-dir"),
+        # --git-path (not --git-dir + join): in a linked worktree the
+        # per-worktree .git dir is where `shallow` lives only when git says
+        # so — joining the worktree git-dir missed a shallow file recorded
+        # in the common dir (round-13 review: false-red direction, shallow
+        # worktrees lost the merge exemption).
+        ("git", "rev-parse", "--git-path", "shallow"),
         capture_output=True,
         text=True,
         check=False,
     )
     if probe.returncode != 0:
         return False
-    return os.path.isfile(os.path.join(probe.stdout.strip(), "shallow"))
+    return os.path.isfile(probe.stdout.strip())
 
 
 def _raw_parents(commit: str) -> list[str]:
     """Parent hashes read from the RAW commit object via cat-file — the
     only graft-free source at a shallow boundary (see _in_shallow_clone).
     Only called when a shallow clone was detected, so full clones pay
-    nothing."""
+    nothing. Only the commit HEADER (before the first blank line) is
+    scanned: a body line starting with `parent ` is prose, and counting it
+    made a forged body line exempt a non-merge commit from the subject and
+    DCO checks entirely (round-13 review, false-pass direction)."""
     out = subprocess.check_output(
         ("git", "cat-file", "commit", commit), text=True, encoding="utf-8"
     )
-    return [line.split()[1] for line in out.splitlines() if line.startswith("parent ")]
+    header = out.split("\n\n", 1)[0]
+    return [line.split()[1] for line in header.splitlines() if line.startswith("parent ")]
 
 
 def validate_file(path: Path, *, require_signoff: bool = True) -> list[str]:
