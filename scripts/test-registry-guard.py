@@ -544,26 +544,45 @@ def _record_inline_decl(decls, path, estack, name, directory, idx):
     `#[cfg(unix)] #[path = "unix_dir"] mod outer { ... }` shadowed by a
     later `#[cfg(windows)]` twin). Same-directory repeats are harmless
     (identical twins resolve identically); only a genuine conflict aborts,
-    with both locations and the rename guidance."""
+    with both locations and the rename guidance.
+    Round-16 review: the directory TEXT is not the physical location —
+    in a non-mod-rs file a plain first component consumes the pending
+    stem while a `#[path]` twin clears it, so `#[cfg(unix)] mod outer`
+    and `#[cfg(windows)] #[path = "outer"] mod outer` carry the same
+    text but resolve to `src/a/b/outer/` vs `src/a/outer/` (rustc 1.99
+    probes). Each declaration therefore records its PHYSICAL base along
+    with the text; differing bases abort even when the texts match.
+    Twins deeper than the first component share one base, and mod-rs
+    files have child_dir == file_dir, so neither shape regresses into a
+    false clash."""
     prev = decls.get((estack, name))
     if prev is None:
         decls[(estack, name)] = (directory, idx)
         return
-    prev_dir, prev_idx = prev
-    if prev_dir == directory:
+    prev_key, prev_idx = prev
+    if prev_key == directory:
         return
+    prev_base, prev_text = prev_key
+    base, text = directory
+    if prev_base == base:
+        # one shared resolution base: the text difference alone pins the
+        # physical clash (the round-15 message form)
+        prev_phys, phys = prev_text, text
+    else:
+        prev_phys = os.path.join(prev_base, prev_text)
+        phys = os.path.join(base, text)
     raise SystemExit(
         "test-registry-guard: ambiguous inline module at "
         f"{path}:{prev_idx + 1} and {path}:{idx + 1} — module '{name}' is "
         f"declared twice with different physical directories "
-        f"('{prev_dir}' vs '{directory}'), typically under mutually "
+        f"('{prev_phys}' vs '{phys}'), typically under mutually "
         "exclusive cfg; which declaration survives depends on the host "
         "platform, so the guard cannot attribute pins through this node — "
         "give the modules distinct names"
     )
 
 
-def _path_wired_mods(stripped, lines, stacks, path):
+def _path_wired_mods(stripped, lines, stacks, path, plain_file, child_dir, file_dir):
     """`#[path = "..."] mod <name>;` pairs whose attribute run attaches to
     the declaration. Run delimitation is lexed (`stripped` from
     `_strip_code`): blanks and comments are transparent within the run and
@@ -605,7 +624,11 @@ def _path_wired_mods(stripped, lines, stacks, path):
     directory (attribute value, or the bare name when no path attribute
     attaches) and a conflicting repeat fails closed via
     `_record_inline_decl` instead of guessing; same-directory repeats
-    stay legal.
+    stay legal — but the directory TEXT is not the physical location
+    (round-16 review): in a non-mod-rs file a plain first component
+    consumes the pending stem while a same-named `#[path]` twin clears
+    it, so the recorded value is the (physical base, directory) pair
+    `_record_inline_decl` compares.
     Returns ([(mod_name, path_value, inline_module_stack)],
     {(enclosing_stack, mod_name): directory})."""
     wired = []
@@ -627,13 +650,22 @@ def _path_wired_mods(stripped, lines, stacks, path):
                 # its effective directory is the module NAME — record it
                 # so a cfg-mutex twin carrying a #[path] to a different
                 # directory fails closed instead of the name silently
-                # shadowing the redirect (round-15 review)
+                # shadowing the redirect (round-15 review). The base rides
+                # along: at the first level of a non-mod-rs file a plain
+                # component consumes the pending stem while a #[path]
+                # twin clears it, so equal TEXTS still resolve to
+                # different files (`src/a/b/outer/` vs `src/a/outer/`,
+                # rustc 1.99 probes — round-16 review); deeper twins and
+                # mod-rs files share one base, so only the genuine
+                # mismatch aborts
+                estack_i = tuple(stacks[i])
+                base = child_dir if plain_file and not estack_i else file_dir
                 _record_inline_decl(
                     inline_decls,
                     path,
-                    tuple(stacks[i]),
+                    estack_i,
                     tok.group(1),
-                    tok.group(1),
+                    (base, tok.group(1)),
                     i,
                 )
             i += 1
@@ -682,13 +714,16 @@ def _path_wired_mods(stripped, lines, stacks, path):
                 # the directory nested declarations resolve against while
                 # the module keeps its NAME for the libtest path (rustc
                 # thread_files rule) — record the override per enclosing
-                # stack instead of dropping it
+                # stack instead of dropping it. The comparison base is the
+                # file's own directory: an own-#[path] first component
+                # clears the non-mod-rs stem (round-15), and deeper twins
+                # share the enclosing base (round-16)
                 _record_inline_decl(
                     inline_decls,
                     path,
                     tuple(stacks[j]),
                     tok.group(1),
-                    pending_value,
+                    (file_dir, pending_value),
                     j,
                 )
                 inline_dirs[(tuple(stacks[j]), tok.group(1))] = pending_value
@@ -714,8 +749,11 @@ def _dir_components(estack, overrides):
 
 def _inline_base(child_dir, file_dir, plain_file, estack, overrides):
     """Resolution base for declarations nested under the inline-module
-    stack `estack`. A mod-rs file (crate root, `mod.rs`) resolves against
-    its own directory — `child_dir` already is it. Any other file keeps
+    stack `estack`. A mod-rs file (crate root, `mod.rs`) — and a file
+    loaded through `#[path]` wiring, which rustc's mod_file_path makes
+    mod.rs-like too (round-16 review) — resolves against its own
+    directory: `plain_file` is False for it, and `child_dir` already is
+    that directory. Any other file keeps
     its pending file-stem directory (`child_dir` = dirname + stem), the
     stem a plain inline module consumes — EXCEPT when the FIRST stack
     component carries its own `#[path]` override: rustc resolves an
@@ -760,7 +798,10 @@ def _scan_graph():
     thread_files rule — round-14; in a non-mod-rs file that first
     override replaces the pending file-stem directory instead of
     appending after it, because rustc clears the stem when an inline
-    module carries its own path — round-15), so it covers
+    module carries its own path — round-15; a file reached through
+    `#[path]` wiring is itself mod.rs-like, its conventional children
+    resolving beside it rather than under `<stem>/` — round-16), so it
+    covers
     exactly the lib crate that `cargo test --lib --list` reports — bin-only
     files (`main.rs`, undeclared strays) are never scanned and cannot alias
     a pin's path. Hits are keyed by their FULL libtest module path: the
@@ -792,14 +833,20 @@ def _scan_graph():
     unattributable = {}
     attributable = set()
     visited = set()
-    # The third tuple element marks crate roots: only a root (or a `mod.rs`)
-    # keeps conventional `mod x;` children beside itself — a file reached
-    # through `#[path = "main.rs"] mod m;` wiring is an ordinary file module
-    # whose children open `<stem>/`, even though its basename is `main.rs`
-    # (round-13 review: the basename heuristic alone misresolved those).
-    queue = [(lib_root, [], True)]
+    # The fourth queue element marks files rustc loaded through an
+    # explicit `#[path]`: mod_file_path returns DirOwnership
+    # Owned{relative: None} for those — every #[path] file is mod.rs-like,
+    # so its conventional `mod x;` children resolve BESIDE the file. Only
+    # the crate root (or a `mod.rs`) does the same; an ordinary
+    # conventional child (`a/b.rs`) opens the `a/b/` directory instead
+    # (round-13 review: the basename heuristic alone misresolved crate
+    # roots; round-16 review: the round-13 wave had generalized the
+    # `<stem>/` rule to wired files too, reading a file rustc never loads
+    # while the real sibling source stayed unscanned — rustc 1.99 probes,
+    # both directions).
+    queue = [(lib_root, [], True, False)]
     while queue:
-        path, base, is_crate_root = queue.pop(0)
+        path, base, is_crate_root, path_loaded = queue.pop(0)
         real = os.path.realpath(path)
         if real in visited:
             continue
@@ -851,9 +898,11 @@ def _scan_graph():
         # Child files of external `mod <name>;` declarations (Rust 2018):
         # the crate roots keep children beside themselves (`mod app;` in
         # lib.rs → src/app.rs), `mod.rs` keeps them in its own directory,
-        # and any other file `a/b.rs` opens the `a/b/` directory.
+        # any other file `a/b.rs` opens the `a/b/` directory — and a file
+        # loaded through `#[path]` wiring is mod.rs-like (children beside
+        # it, the ownership comment above; round-16 review).
         fname = os.path.basename(path)
-        plain_file = not (is_crate_root or fname == "mod.rs")
+        plain_file = not (is_crate_root or path_loaded or fname == "mod.rs")
         if plain_file:
             child_dir = os.path.join(os.path.dirname(path), fname[:-3])
         else:
@@ -864,7 +913,9 @@ def _scan_graph():
         # and the wired wirings (round-14 review); `_inline_base` decides
         # the base those components hang off — an own-#[path] FIRST
         # component drops the non-mod-rs stem (round-15 review).
-        wired, inline_dirs = _path_wired_mods(stripped, lines, stacks, path)
+        wired, inline_dirs = _path_wired_mods(
+            stripped, lines, stacks, path, plain_file, child_dir, file_dir
+        )
         for name, estack in externals:
             mod_dir = os.path.join(
                 _inline_base(
@@ -877,7 +928,9 @@ def _scan_graph():
                 os.path.join(mod_dir, name, "mod.rs"),
             ):
                 if os.path.isfile(candidate):
-                    queue.append((candidate, base + list(estack) + [name], False))
+                    queue.append(
+                        (candidate, base + list(estack) + [name], False, False)
+                    )
                     break
         # `#[path = "..."]` wiring (12 real sites, e.g. file_ingest.rs).
         # rustc resolution, round-12 (verified against the Rust Reference
@@ -917,7 +970,10 @@ def _scan_graph():
                 candidate = os.path.normpath(os.path.join(file_dir, rel))
                 mod_path = base
             if os.path.isfile(candidate):
-                queue.append((candidate, mod_path + [name], False))
+                # the wired file itself is mod.rs-like: path_loaded tags
+                # the queue entry so ITS children resolve beside it
+                # (round-16 review)
+                queue.append((candidate, mod_path + [name], False, True))
     return by_path, unattributable, attributable
 
 
