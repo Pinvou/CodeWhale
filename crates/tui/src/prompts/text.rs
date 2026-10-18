@@ -274,7 +274,9 @@ remain independent.
 Calling a gated write tool is the proposal, not the execution — the change runs
 only after approval is granted. If a write call is rejected because approval
 has not been granted yet, do not retry it: present the change in your plan and
-wait for approval before calling the write tool again.
+wait for approval before calling the write tool again. If approval prompts are
+disabled for this turn, waiting cannot succeed — report the blocked change and
+move on instead of retrying.
 
 This system context is pinned for the session. When workspace files,
 instructions, skills, memory, or the goal change after that, the delta arrives

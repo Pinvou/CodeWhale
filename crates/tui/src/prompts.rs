@@ -772,11 +772,12 @@ pub(crate) fn effective_authority_recap() -> &'static str {
 }
 
 /// Whether the authority-recap trailer is appended after WorldState. When an
-/// embedder composer owns the static prompt prefix, the bundled
-/// `### Whose word wins` section the recap points at no longer exists, so
+/// embedder composer owns the static prompt prefix, or an opted-in
+/// config-directory constitution replaced the bundled base prompt, the
+/// `### Whose word wins` section the recap points at may no longer exist, so
 /// appending the recap would leave a dangling cross-reference.
 fn authority_recap_trailer_appended(composer_installed: bool) -> bool {
-    !composer_installed
+    !composer_installed && base_prompt_origin() == BasePromptOrigin::Bundled
 }
 
 /// Optional locale-native reinforcement preamble prepended to the system
@@ -1496,7 +1497,11 @@ mod tests {
 
     /// The recap points at the bundled `### Whose word wins` section; an
     /// embedder composer that owns the static prefix retires that section,
-    /// so the trailer must be skipped instead of dangling in the blocks.
+    /// so the trailer must be skipped instead of dangling in the blocks. The
+    /// same guard covers an opted-in config-directory constitution override
+    /// (the override need not contain the section either); that arm is
+    /// exercised by the startup install path, not here — the override
+    /// OnceLock is process-global.
     #[test]
     fn authority_recap_trailer_skipped_when_static_composer_owns_prefix() {
         assert!(authority_recap_trailer_appended(false));
