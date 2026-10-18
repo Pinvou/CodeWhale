@@ -8498,8 +8498,7 @@ impl ToolSpec for AgentTool {
             "action=claim widens your own enforced write scope: pass write_roots before mutating anything a fail-closed write refusal named. It records a durable claim receipt and fails on contention with a peer claim; it never touches another agent's scope. ",
             "Action contract: start requires prompt; message/followup require a target and message; peek/interrupt/cancel require a target; claim requires at least one scope entry; roster, status, and wait are unscoped. ",
             "This is the whole model-facing sub-agent surface; there is no second transport. ",
-            "In Operate, use detached=true only for independent or long work that must outlive the active turn; a write-capable root start defaults write scope to the parent workspace unless narrowed with write_roots; arbitrary shell remains gated. ",
-            "Legacy action=status|peek|cancel remain for compatibility."
+            "In Operate, use detached=true only for independent or long work that must outlive the active turn; a write-capable root start defaults write scope to the parent workspace unless narrowed with write_roots; arbitrary shell remains gated. "
         )
     }
 
@@ -8550,7 +8549,7 @@ impl ToolSpec for AgentTool {
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "The focused task to give the worker. A read-only role needs no write scope; a write-capable role defaults to the parent workspace unless narrowed with write_roots."
+                    "description": "The focused task to give the worker. The child sees only this prompt, not your conversation — include every fact and path it needs. A read-only role needs no write scope; a write-capable role defaults to the parent workspace unless narrowed with write_roots."
                 },
                 "detached": {
                     "type": "boolean",
