@@ -32,6 +32,15 @@ tree, not in one-off manual runs:
     and swallowed the attribute run — an `#[ignore]` behind a raw-string
     doc attribute passed the gate, and raw-string `#[path]` values never
     wired end-to-end);
+  - round-15 review: cfg-mutex inline twins of one module name with
+    different `#[path]` directories no longer collapse onto a single
+    (enclosing stack, name) slot — a conflicting repeat fails closed
+    naming both declarations, instead of the later twin silently
+    shadowing the platform-relevant real source; and a non-mod-rs file's
+    own-`#[path]` inline module resolves against the FILE's directory
+    with the pending file-stem cleared (the earlier fixture here pinned
+    the stem-relative location rustc never loads — corrected in
+    Round14InlineRedirectTests);
   - main()'s duplicate-#[test] detection — the guard's original purpose —
     is pinned against a mocked `cargo test --list` registry.
 
@@ -1418,11 +1427,16 @@ class Round14InlineRedirectTests(GuardFixture):
         self.assertEqual(unattributable, {})
 
     def test_non_mod_rs_redirect_resolves_against_the_file_directory(self):
-        # Round-12's non-mod-rs rule with the redirect added: in src/a/b.rs
-        # the children of `#[path = "redir"] mod s { ... }` resolve against
-        # src/a/b/redir/ (same base as round-12, the s/ component replaced
-        # by the attribute's directory).
-        by_path, unattributable = self._ignored_sources(
+        # Round-15 review P2 (comment 4306952266), correcting this test's
+        # own round-14 expectation: rustc resolves an inline module's OWN
+        # #[path] against the declaring module's directory and CLEARS the
+        # pending file-stem (rustc 1.99 probes: `#[path = "redir"] mod s
+        # { #[path = "real.rs"] mod m; }` in src/a/b.rs loads
+        # src/a/redir/real.rs — the old body pinned the stem-relative
+        # src/a/b/redir/real.rs, a file rustc never loads). Both wrong
+        # locations are planted as LIVE decoys so the model — not the
+        # fail-closed net — decides.
+        root = self._crate_root(
             {
                 "lib.rs": "mod a;\n",
                 "a.rs": "pub mod b;\n",
@@ -1433,12 +1447,17 @@ class Round14InlineRedirectTests(GuardFixture):
                     "    pub mod m;\n"
                     "}\n"
                 ),
-                "a/b/redir/real.rs": _IGNORED_PIN,
+                "a/redir/real.rs": _IGNORED_PIN,
+                "a/b/redir/real.rs": _LIVE_PIN,
                 "a/b/s/real.rs": _LIVE_PIN,
             }
         )
+        by_path, unattributable = self._scan(root)
+        pin = "a::b::s::m::tests::critical_pin"
+        self.assertEqual(sorted(by_path), [pin])
         self.assertEqual(
-            sorted(by_path), ["a::b::s::m::tests::critical_pin"]
+            [loc.rsplit(":", 1)[0] for loc in by_path[pin]],
+            [self._src_path(root, "a/redir/real.rs")],
         )
         self.assertEqual(unattributable, {})
 
@@ -1477,6 +1496,287 @@ class Round14InlineRedirectTests(GuardFixture):
         )
         self.assertEqual(code, 0)
         self.assertNotIn("is #[ignore]d", err)
+
+
+class Round15CfgAmbiguityTests(GuardFixture):
+    """Round-15 review P2 (comment 4306952265): two cfg-mutex inline
+    declarations of one module name with different `#[path]` redirects
+    shared the single (enclosing_stack, name) slot and the LATER one
+    silently replaced the earlier — a Linux-relevant ignored pin resolved
+    against the Windows twin's directory and main() returned 0 (the
+    review's four-fixture matrix, fixture 1: unix-first order). rustc
+    strips cfg-mismatched items before module resolution, so which twin
+    survives depends on the host platform, which the guard cannot
+    evaluate: a conflicting repeat now fails closed (`_record_inline_decl`),
+    in both declaration orders, for a plain-vs-redirected twin too, and
+    even when both twins agree on the ignore status — the ambiguity itself
+    is the failure. Same-directory twins stay legal."""
+
+    _LIB_UNIX_FIRST = (
+        "#[cfg(unix)]\n"
+        '#[path = "unix_dir"]\n'
+        "mod outer {\n"
+        "    mod routed;\n"
+        "}\n"
+        "#[cfg(windows)]\n"
+        '#[path = "windows_dir"]\n'
+        "mod outer {\n"
+        "    mod routed;\n"
+        "}\n"
+    )
+    _PIN = "outer::routed::tests::critical_pin"
+    # Reuse DuplicateRegistrationTests' main() runner without inheriting
+    # its test methods (same pattern as Round14InlineRedirectTests).
+    _run_main = DuplicateRegistrationTests._run_main
+
+    def test_conflicting_redirect_twins_fail_closed(self):
+        # The review reproduction, verbatim order (unix first): the real
+        # unix_dir source carries the #[ignore], the windows twin is live.
+        # Pre-fix the windows entry replaced the unix one, the scanner
+        # read only windows_dir, and the silenced pin passed (the review's
+        # 0). The file is refused now; the refusal names both directories.
+        with self.assertRaises(SystemExit) as ctx:
+            self._ignored_sources(
+                {
+                    "lib.rs": self._LIB_UNIX_FIRST,
+                    "unix_dir/routed.rs": _IGNORED_PIN,
+                    "windows_dir/routed.rs": _LIVE_PIN,
+                }
+            )
+        msg = str(ctx.exception)
+        self.assertIn("ambiguous inline module", msg)
+        self.assertIn("'unix_dir' vs 'windows_dir'", msg)
+        self.assertIn("distinct names", msg)
+
+    def test_conflict_fails_closed_in_reverse_declaration_order(self):
+        # The map may not keep whichever twin is declared last: the
+        # windows-first order (the review's fixture 2 — pre-fix it
+        # "passed" only because the shadowing happened to point at the
+        # ignored file) must abort too.
+        with self.assertRaises(SystemExit) as ctx:
+            self._ignored_sources(
+                {
+                    "lib.rs": (
+                        "#[cfg(windows)]\n"
+                        '#[path = "windows_dir"]\n'
+                        "mod outer {\n"
+                        "    mod routed;\n"
+                        "}\n"
+                        "#[cfg(unix)]\n"
+                        '#[path = "unix_dir"]\n'
+                        "mod outer {\n"
+                        "    mod routed;\n"
+                        "}\n"
+                    ),
+                    "unix_dir/routed.rs": _IGNORED_PIN,
+                    "windows_dir/routed.rs": _LIVE_PIN,
+                }
+            )
+        self.assertIn("'windows_dir' vs 'unix_dir'", str(ctx.exception))
+
+    def test_ambiguous_node_fails_closed_even_when_both_twins_agree(self):
+        # Both-live and both-ignored change the verdict, not the
+        # attribution problem: the guard cannot know which file holds the
+        # pin's source, so the conflict stays a refusal instead of a
+        # platform-dependent guess — fail closed in every direction.
+        for unix_file, windows_file in (
+            (_LIVE_PIN, _LIVE_PIN),
+            (_IGNORED_PIN, _IGNORED_PIN),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                self._ignored_sources(
+                    {
+                        "lib.rs": self._LIB_UNIX_FIRST,
+                        "unix_dir/routed.rs": unix_file,
+                        "windows_dir/routed.rs": windows_file,
+                    }
+                )
+            self.assertIn("ambiguous inline module", str(ctx.exception))
+
+    def test_redirected_twin_conflicts_with_plain_name_module(self):
+        # A #[path] twin vs a plain cfg-mutex twin of the same name: the
+        # plain declaration's effective directory is the module NAME (the
+        # fallback _dir_components applies), so 'unix_dir' vs 'outer' is a
+        # genuine conflict — the plain side is recorded too, not only
+        # path-carrying declarations.
+        with self.assertRaises(SystemExit) as ctx:
+            self._ignored_sources(
+                {
+                    "lib.rs": (
+                        "#[cfg(unix)]\n"
+                        '#[path = "unix_dir"]\n'
+                        "mod outer {\n"
+                        "    mod routed;\n"
+                        "}\n"
+                        "#[cfg(windows)]\n"
+                        "mod outer {\n"
+                        "    mod routed;\n"
+                        "}\n"
+                    ),
+                    "unix_dir/routed.rs": _IGNORED_PIN,
+                    "outer/routed.rs": _LIVE_PIN,
+                }
+            )
+        self.assertIn("'unix_dir' vs 'outer'", str(ctx.exception))
+
+    def test_identical_redirect_twins_are_not_ambiguous(self):
+        # The same directory twice resolves identically — legal Rust, the
+        # scan proceeds and the pin is attributed at the shared file.
+        by_path, unattributable = self._ignored_sources(
+            {
+                "lib.rs": (
+                    "#[cfg(unix)]\n"
+                    '#[path = "shared_dir"]\n'
+                    "mod outer {\n"
+                    "    mod routed;\n"
+                    "}\n"
+                    "#[cfg(windows)]\n"
+                    '#[path = "shared_dir"]\n'
+                    "mod outer {\n"
+                    "    mod routed;\n"
+                    "}\n"
+                ),
+                "shared_dir/routed.rs": _IGNORED_PIN,
+            }
+        )
+        self.assertEqual(sorted(by_path), [self._PIN])
+        self.assertEqual(unattributable, {})
+
+    def test_main_fails_closed_on_ambiguous_redirect(self):
+        # End to end: the ambiguity aborts the guard run itself — main()
+        # exits with the refusal, it never reaches a verdict derived from
+        # whichever twin the old map happened to keep.
+        with self.assertRaises(SystemExit) as ctx:
+            self._run_main(
+                [self._PIN],
+                source=self._LIB_UNIX_FIRST,
+                required=[self._PIN],
+                files={
+                    "unix_dir/routed.rs": _IGNORED_PIN,
+                    "windows_dir/routed.rs": _LIVE_PIN,
+                },
+            )
+        self.assertIn("ambiguous inline module", str(ctx.exception))
+
+
+class Round15NonModRsOwnershipTests(GuardFixture):
+    """Round-15 review P2 (comment 4306952266): in a non-mod-rs file the
+    pending file-stem directory stayed the base the own-#[path] inline
+    module's directory was appended after, while rustc resolves an inline
+    module's own path against the declaring module's directory and CLEARS
+    the pending stem — `#[path = "redir"] mod s { #[path = "real.rs"]
+    mod m; }` in src/a/b.rs loads src/a/redir/real.rs; the scanner read
+    src/a/b/redir/real.rs, a file rustc never loads (rustc 1.99 probes,
+    both directions). The corrected round-14 fixture lives in
+    Round14InlineRedirectTests; these pin the remaining shapes: the
+    reverse decoy direction, external children under the redirected
+    module, composition after a plain inline has consumed the stem, and
+    the end-to-end red."""
+
+    _LIB = (
+        '#[path = "redir"]\n'
+        "pub mod s {\n"
+        '    #[path = "real.rs"]\n'
+        "    pub mod m;\n"
+        "}\n"
+    )
+    _PIN = "a::b::s::m::tests::critical_pin"
+    _run_main = DuplicateRegistrationTests._run_main
+
+    def _tree(self, real, stem_relative):
+        return {
+            "lib.rs": "mod a;\n",
+            "a.rs": "pub mod b;\n",
+            "a/b.rs": self._LIB,
+            "a/redir/real.rs": real,
+            "a/b/redir/real.rs": stem_relative,
+        }
+
+    def test_stem_relative_decoy_cannot_frame_live_pin(self):
+        # Reverse half: with the real (file-dir-relative) source live, an
+        # #[ignore] at the old stem-relative location is NOT a lib source
+        # — it must not frame the pin. Pre-fix the scanner read exactly
+        # that decoy and keyed its hit under the pin's path.
+        by_path, unattributable = self._ignored_sources(
+            self._tree(real=_LIVE_PIN, stem_relative=_IGNORED_PIN)
+        )
+        self.assertEqual(by_path, {})
+        self.assertEqual(unattributable, {})
+
+    def test_external_child_of_own_path_inline_uses_file_dir(self):
+        # Conventional children under the redirected inline module move
+        # with it: `#[path = "redir"] mod s { mod m; }` in a/b.rs loads
+        # src/a/redir/m.rs — the stem is cleared for the whole subtree,
+        # and neither the stem-relative nor the name-relative twin counts.
+        by_path, unattributable = self._ignored_sources(
+            {
+                "lib.rs": "mod a;\n",
+                "a.rs": "pub mod b;\n",
+                "a/b.rs": (
+                    '#[path = "redir"]\n'
+                    "pub mod s {\n"
+                    "    pub mod m;\n"
+                    "}\n"
+                ),
+                "a/redir/m.rs": _IGNORED_PIN,
+                "a/b/redir/m.rs": _LIVE_PIN,
+                "a/b/s/m.rs": _LIVE_PIN,
+            }
+        )
+        self.assertEqual(sorted(by_path), [self._PIN])
+        self.assertEqual(unattributable, {})
+
+    def test_own_path_after_plain_inline_composes_after_consumed_stem(self):
+        # A plain first inline component consumes the stem
+        # (src/b/outer/…); an own-#[path] module BELOW it composes after
+        # that consumed base — the base must only drop to the file
+        # directory when the FIRST component itself carries the override
+        # (rustc probe: `mod outer { #[path = "redir"] mod s { ... } }` in
+        # src/b.rs loads src/b/outer/redir/real.rs, not src/outer/…).
+        by_path, unattributable = self._ignored_sources(
+            {
+                "lib.rs": "mod a;\n",
+                "a.rs": "pub mod b;\n",
+                "a/b.rs": (
+                    "pub mod outer {\n"
+                    '    #[path = "redir"]\n'
+                    "    pub mod s {\n"
+                    '        #[path = "real.rs"]\n'
+                    "        pub mod m;\n"
+                    "    }\n"
+                    "}\n"
+                ),
+                "a/b/outer/redir/real.rs": _IGNORED_PIN,
+                "a/outer/redir/real.rs": _LIVE_PIN,
+                "a/b/outer/s/real.rs": _LIVE_PIN,
+            }
+        )
+        self.assertEqual(
+            sorted(by_path),
+            ["a::b::outer::s::m::tests::critical_pin"],
+        )
+        self.assertEqual(unattributable, {})
+
+    def test_main_red_on_non_mod_rs_redirected_ignored_pin(self):
+        # End to end over the review's false-green fixture: the real
+        # (file-dir-relative) source carries the #[ignore], the
+        # stem-relative twin the pre-fix scanner actually read is live —
+        # main() must fail with the ignore verdict AT THE REAL FILE.
+        code, err = self._run_main(
+            [self._PIN],
+            source="mod a;\n",
+            required=[self._PIN],
+            files={
+                "a.rs": "pub mod b;\n",
+                "a/b.rs": self._LIB,
+                "a/redir/real.rs": _IGNORED_PIN,
+                "a/b/redir/real.rs": _LIVE_PIN,
+            },
+        )
+        self.assertEqual(code, 1)
+        self.assertIn(f"required pin {self._PIN} is #[ignore]d at", err)
+        self.assertIn(str(Path("a") / "redir" / "real.rs") + ":4", err)
+        self.assertNotIn("outside the scanned lib module graph", err)
 
 
 if __name__ == "__main__":
