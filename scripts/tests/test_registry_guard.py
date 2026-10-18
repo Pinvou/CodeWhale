@@ -907,7 +907,7 @@ class DuplicateRegistrationTests(unittest.TestCase):
     failure path, the relocated/absent message branches, the argv guard,
     the cargo invocation contract, and the source-attribution net."""
 
-    def _run_main(self, paths, source="", required=None):
+    def _run_main(self, paths, source="", required=None, files=None):
         import contextlib
         import io
         import sys
@@ -916,6 +916,8 @@ class DuplicateRegistrationTests(unittest.TestCase):
             root = Path(td)
             _write(root / "pinvou3-app" / "src-tauri" / "Cargo.toml", "")
             _write(root / "pinvou3-app" / "src-tauri" / "src" / "lib.rs", source)
+            for rel, text in (files or {}).items():
+                _write(root / "pinvou3-app" / "src-tauri" / "src" / rel, text)
             stderr = io.StringIO()
             pins = (
                 list(guard.REQUIRED_PINS) if required is None else list(required)
@@ -1301,6 +1303,180 @@ class Round13HardeningTests(GuardFixture):
         with self.assertRaises(SystemExit) as ctx:
             self._ignored_sources({"main.rs": _IGNORED_PIN})
         self.assertIn("src/lib.rs not found", str(ctx.exception))
+
+
+class Round14InlineRedirectTests(GuardFixture):
+    """Round-14 review P2 (comment 4303787402): a `#[path]` on the inline
+    module itself redirects the directory everything nested inside resolves
+    against (the Rust Reference's thread_files form). The scanner dropped
+    that attribute, resolved nested wirings against the module NAME's
+    directory, and — when an unwired leftover file existed at that
+    unredirected location with the same full module path — attributed the
+    pin to the WRONG physical file: a silenced real source passed as
+    attributable and main() returned 0 (the review's four-fixture matrix,
+    fixture 3). The fix models the redirect per rustc; every test here
+    plants a decoy at the unredirected location so the model — not the
+    fail-closed net — is what decides the outcome."""
+
+    _LIB = (
+        '#[path = "real_dir"]\n'
+        "mod outer {\n"
+        '    #[path = "real.rs"]\n'
+        "    mod routed;\n"
+        "}\n"
+    )
+    _PIN = "outer::routed::tests::critical_pin"
+    # Reuse DuplicateRegistrationTests' main() runner (its crate-tree
+    # writer takes extra files now) without inheriting its test methods.
+    _run_main = DuplicateRegistrationTests._run_main
+
+    def test_redirected_real_source_is_scanned_not_the_decoy(self):
+        # The review reproduction, verbatim: the real source lives in
+        # src/real_dir/ (the redirected directory) and carries the
+        # #[ignore]; the leftover src/outer/real.rs holds a live fn of the
+        # same full path. The pin must be flagged AT THE REAL FILE — the
+        # decoy must neither silence the hit nor satisfy attribution.
+        root = self._crate_root(
+            {
+                "lib.rs": self._LIB,
+                "real_dir/real.rs": _IGNORED_PIN,
+                "outer/real.rs": _LIVE_PIN,
+            }
+        )
+        by_path, unattributable = self._scan(root)
+        self.assertEqual(sorted(by_path), [self._PIN])
+        self.assertEqual(
+            [
+                loc.rsplit(":", 1)[0]
+                for loc in by_path[self._PIN]
+            ],
+            [self._src_path(root, "real_dir/real.rs")],
+        )
+        self.assertEqual(
+            guard._pin_ignored_locations(self._PIN, by_path, unattributable),
+            [self._src_path(root, "real_dir/real.rs") + ":4"],
+        )
+        self.assertEqual(unattributable, {})
+
+    def test_decoy_location_is_outside_the_graph_entirely(self):
+        # The reverse half: with the real (redirected) source live, the
+        # unwired leftover is NOT a lib source — an #[ignore] planted
+        # there must not frame the pin. Pre-fix the scanner scanned the
+        # leftover INSTEAD of the real file and keyed its hits under the
+        # pin's path.
+        by_path, unattributable = self._ignored_sources(
+            {
+                "lib.rs": self._LIB,
+                "real_dir/real.rs": _LIVE_PIN,
+                "outer/real.rs": _IGNORED_PIN,
+            }
+        )
+        self.assertEqual(by_path, {})
+        self.assertEqual(unattributable, {})
+
+    def test_conventional_children_of_redirected_inline_module_resolve(self):
+        # The redirect applies to conventional children too: rustc loads
+        # src/real_dir/routed.rs for `#[path = "real_dir"] mod outer {
+        # mod routed; }` — not src/outer/routed.rs.
+        by_path, unattributable = self._ignored_sources(
+            {
+                "lib.rs": (
+                    '#[path = "real_dir"]\n'
+                    "mod outer {\n"
+                    "    mod routed;\n"
+                    "}\n"
+                ),
+                "real_dir/routed.rs": _IGNORED_PIN,
+                "outer/routed.rs": _LIVE_PIN,
+            }
+        )
+        self.assertEqual(sorted(by_path), [self._PIN])
+        self.assertEqual(unattributable, {})
+
+    def test_nested_redirects_compose(self):
+        # Each level's attribute replaces its own component: rustc loads
+        # src/d1/d2/real.rs for `#[path = "d1"] mod a { #[path = "d2"]
+        # mod b { #[path = "real.rs"] mod c; } }`, and the libtest path
+        # keeps the module names (a::b::c::…).
+        by_path, unattributable = self._ignored_sources(
+            {
+                "lib.rs": (
+                    '#[path = "d1"]\n'
+                    "mod a {\n"
+                    '    #[path = "d2"]\n'
+                    "    mod b {\n"
+                    '        #[path = "real.rs"]\n'
+                    "        mod c;\n"
+                    "    }\n"
+                    "}\n"
+                ),
+                "d1/d2/real.rs": _IGNORED_PIN,
+                "a/b/real.rs": _LIVE_PIN,
+            }
+        )
+        self.assertEqual(sorted(by_path), ["a::b::c::tests::critical_pin"])
+        self.assertEqual(unattributable, {})
+
+    def test_non_mod_rs_redirect_resolves_against_the_file_directory(self):
+        # Round-12's non-mod-rs rule with the redirect added: in src/a/b.rs
+        # the children of `#[path = "redir"] mod s { ... }` resolve against
+        # src/a/b/redir/ (same base as round-12, the s/ component replaced
+        # by the attribute's directory).
+        by_path, unattributable = self._ignored_sources(
+            {
+                "lib.rs": "mod a;\n",
+                "a.rs": "pub mod b;\n",
+                "a/b.rs": (
+                    '#[path = "redir"]\n'
+                    "pub mod s {\n"
+                    '    #[path = "real.rs"]\n'
+                    "    pub mod m;\n"
+                    "}\n"
+                ),
+                "a/b/redir/real.rs": _IGNORED_PIN,
+                "a/b/s/real.rs": _LIVE_PIN,
+            }
+        )
+        self.assertEqual(
+            sorted(by_path), ["a::b::s::m::tests::critical_pin"]
+        )
+        self.assertEqual(unattributable, {})
+
+    def test_main_red_on_redirected_ignored_pin_despite_decoy(self):
+        # End-to-end over the review's false-green fixture: main() must
+        # fail on the #[ignore]-at-the-real-file message — not pass, and
+        # not the fail-closed "outside the scanned lib module graph"
+        # message (the redirect is modelled now, the real source IS
+        # reached).
+        code, err = self._run_main(
+            [self._PIN],
+            source=self._LIB,
+            required=[self._PIN],
+            files={
+                "real_dir/real.rs": _IGNORED_PIN,
+                "outer/real.rs": _LIVE_PIN,
+            },
+        )
+        self.assertEqual(code, 1)
+        self.assertIn(f"required pin {self._PIN} is #[ignore]d at", err)
+        self.assertIn(str(Path("real_dir") / "real.rs") + ":4", err)
+        self.assertNotIn("outside the scanned lib module graph", err)
+
+    def test_main_green_when_redirected_real_source_is_live(self):
+        # The corrected direction of the review's fixture 3: a live real
+        # source is properly attributed through the redirect, and the
+        # decoy's #[ignore] — outside the graph — cannot frame it.
+        code, err = self._run_main(
+            [self._PIN],
+            source=self._LIB,
+            required=[self._PIN],
+            files={
+                "real_dir/real.rs": _LIVE_PIN,
+                "outer/real.rs": _IGNORED_PIN,
+            },
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn("is #[ignore]d", err)
 
 
 if __name__ == "__main__":

@@ -41,8 +41,8 @@ scanned, and `main` fails CLOSED on a registered pin whose source it
 cannot attribute (unmodelled wiring, macro-generated test, or
 raw-identifier `mod r#type;`) instead of trusting the registry entry.
 Still unmodelled (a REQUIRED_PIN there hits the fail-closed net, not a
-silent skip): `#[path = "dir"]` on the inline module itself, and
-`#[ignore]` written on the same line as its inline-module opener.
+silent skip): `#[ignore]` written on the same line as its inline-module
+opener.
 
 Run it from anywhere (paths are anchored to this script's repo location);
 it reuses cargo's artifacts, and CI wires it into the linux rust-test leg
@@ -550,13 +550,21 @@ def _path_wired_mods(stripped, lines, stacks, path):
     level) tells the caller which resolution base rustc uses — round-12
     review closed the silent skip of `mod outer { #[path = "real.rs"]
     mod routed; }` (rustc loads `src/outer/real.rs`; the file previously
-    never entered the scan and an `#[ignore]` there was invisible). A
-    `#[path]` on the inline module itself (`#[path = "dir"] mod inner {
-    ... }`) is still not followed (children resolve under the attribute
-    directory — unmodelled; a REQUIRED_PIN there fails closed via the
-    source-attribution net in `main`).
-    Returns [(mod_name, path_value, inline_module_stack)]."""
+    never entered the scan and an `#[ignore]` there was invisible).
+    Round-14 review closed the remaining half: a `#[path]` on the inline
+    module ITSELF (`#[path = "dir"] mod inner { ... }`) redirects the
+    directory every declaration nested inside resolves against (the Rust
+    Reference's thread_files form), returned separately as
+    {(enclosing_stack, module_name): directory} so the caller resolves
+    both conventional children and wired wirings PHYSICALLY — without it
+    the scanner read the unredirected `<name>/` location, where an
+    unwired leftover file with the same full module path fabricated
+    attribution for a pin whose real source (carrying the `#[ignore]`)
+    sat in the redirected file.
+    Returns ([(mod_name, path_value, inline_module_stack)],
+    {(enclosing_stack, mod_name): directory})."""
     wired = []
+    inline_dirs = {}
     pending_value = None
     i = 0
     n = len(stripped)
@@ -602,16 +610,37 @@ def _path_wired_mods(stripped, lines, stacks, path):
             pending_value is not None
             and tok is not None
             and tok.group(1) is not None
-            and not tok.group(2)
-            and decl[tok.end() :].strip().startswith(";")
         ):
-            wired.append((tok.group(1), pending_value, tuple(stacks[j])))
-            pending_value = None
-            i = j + 1
-            continue
+            if not tok.group(2) and decl[tok.end() :].strip().startswith(";"):
+                wired.append((tok.group(1), pending_value, tuple(stacks[j])))
+                pending_value = None
+                i = j + 1
+                continue
+            if tok.group(2):
+                # `#[path = "dir"] mod <name> {`: the attribute redirects
+                # the directory nested declarations resolve against while
+                # the module keeps its NAME for the libtest path (rustc
+                # thread_files rule) — record the override per enclosing
+                # stack instead of dropping it
+                inline_dirs[(tuple(stacks[j]), tok.group(1))] = pending_value
+                pending_value = None
+                i = j + 1
+                continue
         pending_value = None
         i = end
-    return wired
+    return wired, inline_dirs
+
+
+def _dir_components(estack, overrides):
+    """Directory components for an inline-module stack: a module opened by
+    `#[path = "dir"] mod <name> {` contributes the attribute's directory
+    INSTEAD of its name (rustc's thread_files rule, round-14 review); any
+    other inline module contributes its name. The libtest path is
+    unaffected either way — the module is still named `<name>`."""
+    return tuple(
+        overrides.get((estack[:depth], name), name)
+        for depth, name in enumerate(estack)
+    )
 
 
 def _scan_graph():
@@ -634,7 +663,10 @@ def _scan_graph():
     `a/b/<name>.rs` layouts) and `#[path = "..."]` wiring (at file top
     level relative to the declaring file's directory; inside inline
     modules relative to the externals' child directory plus the
-    inline-module components, per the rustc rule — round-12), so it covers
+    inline-module components, per the rustc rule — round-12; a component
+    opened by its own `#[path = "dir"] mod <name> {` contributes the
+    attribute's directory instead of `<name>`, the Rust Reference's
+    thread_files rule — round-14), so it covers
     exactly the lib crate that `cargo test --lib --list` reports — bin-only
     files (`main.rs`, undeclared strays) are never scanned and cannot alias
     a pin's path. Hits are keyed by their FULL libtest module path: the
@@ -728,8 +760,14 @@ def _scan_graph():
             child_dir = os.path.dirname(path)
         else:
             child_dir = os.path.join(os.path.dirname(path), fname[:-3])
+        # Collected before the child resolution below: its inline_dirs
+        # override the resolution base of BOTH the conventional externals
+        # and the wired wirings (round-14 review).
+        wired, inline_dirs = _path_wired_mods(stripped, lines, stacks, path)
         for name, estack in externals:
-            mod_dir = os.path.join(child_dir, *estack)
+            mod_dir = os.path.join(
+                child_dir, *_dir_components(estack, inline_dirs)
+            )
             for candidate in (
                 os.path.join(mod_dir, name + ".rs"),
                 os.path.join(mod_dir, name, "mod.rs"),
@@ -744,14 +782,22 @@ def _scan_graph():
         # modules it resolves against the same base the conventional
         # externals use (dirname for mod-rs roots, dirname/<file-stem>
         # for other files) with the inline-module components appended as
-        # directories — exactly `child_dir + estack`. The conventional
-        # candidates above do not exist for these, so both resolutions
-        # coexist without double visits (the graph dedups by realpath).
+        # directories — exactly `child_dir + estack`. Round-14 review: a
+        # component opened by `#[path = "dir"] mod <name> {` contributes
+        # the attribute's directory instead of `<name>` (thread_files
+        # rule), for BOTH conventional children and wired wirings — the
+        # unredirected `<name>/` location is not a lib path at all, and
+        # reading it let an unwired leftover file fabricate attribution.
+        # The conventional candidates do not exist for wirings, so both
+        # resolutions coexist without double visits (the graph dedups by
+        # realpath).
         file_dir = os.path.dirname(path)
-        for name, rel, estack in _path_wired_mods(stripped, lines, stacks, path):
+        for name, rel, estack in wired:
             if estack:
                 candidate = os.path.normpath(
-                    os.path.join(child_dir, *estack, rel)
+                    os.path.join(
+                        child_dir, *_dir_components(estack, inline_dirs), rel
+                    )
                 )
                 mod_path = base + list(estack)
             else:
