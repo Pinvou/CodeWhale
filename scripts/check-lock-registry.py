@@ -105,8 +105,11 @@ def main():
     if not lock_files:
         failures.append("no package-lock.json found — guard ran against the wrong tree?")
     hub_libc = None
+    hub_seen = False
     for path in lock_files:
         rel = os.path.relpath(path, REPO_ROOT)
+        if rel == os.path.join("team-relay-hub", "package-lock.json"):
+            hub_seen = True
         try:
             with open(path, encoding="utf-8") as handle:
                 lock = json.load(handle)
@@ -120,6 +123,17 @@ def main():
                 "the mirror scan walks the v3 `packages` map, so a "
                 "format-downgraded lock would skip every check silently; "
                 "regenerate the lock with a current npm"
+            )
+        # Round-13 review: a v3 lock whose `packages` map is missing or
+        # empty made the mirror scan pass silently (no real npm produces
+        # that shape — even a dependency-free lock carries the "" root
+        # entry), so treat it as corruption rather than a clean scan.
+        if version == 3 and not lock.get("packages"):
+            failures.append(
+                f"{rel}: lockfileVersion 3 but the `packages` map is "
+                "missing or empty — the mirror scan would pass silently "
+                "over nothing; regenerate the lock with npm (the root "
+                '"" entry must exist)'
             )
         mirror_urls = sorted(
             f"{pkg}: {entry.get('resolved')}"
@@ -147,9 +161,20 @@ def main():
                     continue
                 hub_libc[pkg[marker:]] = entry["libc"]
     if hub_libc is None:
-        failures.append(
-            "team-relay-hub/package-lock.json not found — guard ran against the wrong tree?"
-        )
+        # Round-13 review: distinguish "absent" from "present but
+        # unreadable" — the unreadable path above already reported the
+        # real error, and the stale not-found message on top of it sent
+        # the reader hunting for a file that exists.
+        if not hub_seen:
+            failures.append(
+                "team-relay-hub/package-lock.json not found — guard ran against the wrong tree?"
+            )
+        else:
+            failures.append(
+                "team-relay-hub/package-lock.json could not be parsed — "
+                "@img/* libc mapping unchecked (see the unreadable-lockfile "
+                "error above)"
+            )
     else:
         expected = EXPECTED_TEAM_RELAY_HUB_LIBC
         for pkg in sorted(set(expected) - set(hub_libc)):

@@ -174,6 +174,42 @@ class LockRegistryGuardTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("team-relay-hub/package-lock.json not found", err)
 
+    def test_unreadable_hub_lock_reports_parse_failure_not_not_found(self):
+        # Round-13 review: an unreadable hub lock already reports the real
+        # error, but the hub-not-parsed state then ALSO appended the
+        # misleading "not found" message, sending the reader hunting for a
+        # file that exists.
+        code, err = self._run(
+            {"team-relay-hub/package-lock.json": "{ not json"}
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("unreadable lockfile", err)
+        self.assertNotIn("not found", err)
+        self.assertIn("could not be parsed", err)
+
+    def test_v3_lock_with_empty_packages_map_fails(self):
+        # Round-13 review: a v3 lock whose `packages` map is missing or
+        # empty made the mirror scan pass silently over nothing (no real
+        # npm produces that — even a dependency-free lock carries the ""
+        # root entry). Both the hub leg and a plain side lock must fail.
+        empty = {"name": "x", "lockfileVersion": 3, "packages": {}}
+        code, err = self._run(
+            {
+                "team-relay-hub/package-lock.json": json.dumps(_lock()),
+                "other/package-lock.json": json.dumps(empty),
+            }
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("packages` map is missing or empty", err)
+
+        code, err = self._run(
+            {
+                "team-relay-hub/package-lock.json": json.dumps(empty),
+            }
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("packages` map is missing or empty", err)
+
 
 if __name__ == "__main__":
     unittest.main()
