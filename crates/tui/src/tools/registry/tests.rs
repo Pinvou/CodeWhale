@@ -1698,4 +1698,10 @@ fn rlm_family_removes_legacy_aliases() {
 fn classic_truncation_footer_teaches_a_followable_retry() {
     assert!(CLASSIC_TRUNCATION_FOOTER.contains("narrower arguments"));
     assert!(!CLASSIC_TRUNCATION_FOOTER.contains("last_tool_result"));
+    // The dead-end footer must not return at the truncation site either —
+    // whether as the const's text or re-inlined at the call site. (Source
+    // pin: blind to the phrase appearing in a comment, which is acceptable
+    // for this exact sentence.)
+    const REGISTRY_SOURCE: &str = include_str!("../registry.rs");
+    assert!(!REGISTRY_SOURCE.contains("full text in workshop variable"));
 }

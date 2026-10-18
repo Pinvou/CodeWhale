@@ -2883,7 +2883,7 @@ fn agent_description_explains_background_child_and_transcript_handle() {
     let estimated = estimate_tool_description_tokens_conservative(description);
     assert!(
         estimated <= 1024,
-        "agent description exceeds the conservative 1024-token budget          ({estimated} estimated tokens, {} chars)",
+        "agent description exceeds the conservative 1024-token budget ({estimated} estimated tokens, {} chars)",
         description.chars().count()
     );
 }

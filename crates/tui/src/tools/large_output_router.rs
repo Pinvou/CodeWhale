@@ -287,11 +287,12 @@ impl WorkshopVariables {
     }
 
     /// Retrieve and clear the stored raw output (consume semantics so the
-    /// variable is not accidentally promoted twice).
+    /// variable is not accidentally read twice).
     ///
-    /// Called by the `promote_to_context` tool (not yet wired in this PR).
+    /// No production caller: `promote_to_context` never shipped, so the raw
+    /// output stays diagnostics-only (unit tests exercise this accessor).
     #[must_use]
-    #[allow(dead_code)] // consumed by promote_to_context tool in follow-up
+    #[allow(dead_code)] // promote_to_context never shipped; no production caller
     pub fn take_raw(&mut self) -> Option<(String, String)> {
         if self.last_tool_result.is_empty() {
             return None;
