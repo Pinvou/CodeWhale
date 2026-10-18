@@ -264,8 +264,9 @@ impl LargeOutputRouter {
 // ── Workshop variable store ───────────────────────────────────────────────────
 
 /// In-process store for workshop variables that persist across tool calls
-/// within a session. The only variable exposed today is `last_tool_result`
-/// which holds the most recent raw large-tool output for `promote_to_context`.
+/// within a session. The only variable today is `last_tool_result`, holding
+/// the most recent raw large-tool output for diagnostics; nothing reads it
+/// back (`promote_to_context` never shipped).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkshopVariables {
     /// Raw content of the most recent large tool output that was routed

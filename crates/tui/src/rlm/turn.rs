@@ -46,14 +46,15 @@ const MAX_HISTORY_MESSAGES: usize = 20;
 /// How an RLM turn ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RlmTermination {
-    /// `FINAL(value)` was called inside the REPL or `FINAL(...)` appeared
-    /// at the top of the model's response on its own line.
+    /// `finalize(value)` — or a legacy `FINAL`/`FINAL_VAR` alias — was
+    /// called inside the REPL, or a top-level `FINAL(...)` appeared on its
+    /// own line.
     Final,
     /// The model failed to emit a `repl` block for too many rounds in a
     /// row. The accumulated last response text is surfaced as the answer
     /// rather than being thrown away.
     NoCode,
-    /// Iteration cap reached without `FINAL`.
+    /// Iteration cap reached without `finalize()`.
     Exhausted,
     /// Hard error — LLM call failed, REPL crashed, timeout.
     Error,
@@ -188,7 +189,7 @@ async fn run_rlm_turn_impl(
     let mut trace: Vec<RlmRoundTrace> = Vec::new();
     let mut total_rpcs: u32 = 0;
 
-    // 1. Stage `context` to a temp file. The REPL reads it on bootstrap so
+    // 1. Stage `_context` to a temp file. The REPL reads it on bootstrap so
     //    the big string never enters the process command line and doesn't
     //    show up in `ps`.
     let ctx_path = match write_context_file(&prompt) {
@@ -313,7 +314,7 @@ async fn run_rlm_turn_impl(
                     iterations: iteration + 1,
                     duration: start.elapsed(),
                     error: Some(format!(
-                        "RLM root model response incomplete: provider stop reason `{reason}`; partial FINAL/REPL output was not accepted."
+                        "RLM root model response incomplete: provider stop reason `{reason}`; partial finalize/REPL output was not accepted."
                     )),
                     usage: total_usage,
                     termination: RlmTermination::Error,
@@ -616,7 +617,7 @@ async fn run_rlm_turn_impl(
             iterations: MAX_RLM_ITERATIONS,
             duration: start.elapsed(),
             error: Some(format!(
-                "RLM loop exhausted after {MAX_RLM_ITERATIONS} iterations without FINAL"
+                "RLM loop exhausted after {MAX_RLM_ITERATIONS} iterations without finalize()"
             )),
             usage: total_usage,
             termination: RlmTermination::Exhausted,
@@ -1053,7 +1054,10 @@ mod tests {
         assert!(text.contains("llm_query"));
         assert!(text.contains("rlm_query"));
         assert!(text.contains("finalize(value, confidence=None)"));
-        assert!(!text.contains("FINAL_VAR"));
+        assert!(text.contains("evaluate_progress()"));
+        // The metadata teaches the canonical surface only; no legacy alias
+        // name may return (round-2 review pin).
+        assert!(!text.contains("FINAL"));
     }
 
     #[test]

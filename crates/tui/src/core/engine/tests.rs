@@ -635,6 +635,10 @@ fn registry_first_instruction_only_names_published_tools() {
     }
     assert!(MCP_REGISTRY_FIRST_INSTRUCTION.contains("`bash`"));
     assert!(MCP_REGISTRY_FIRST_INSTRUCTION.contains("`Web`"));
+    // Round-2 review pin: the fresh-install caveat must stay disclosed, and
+    // the false "clearly irrelevant" verdict it replaced must not return.
+    assert!(MCP_REGISTRY_FIRST_INSTRUCTION.contains("may still be downloading"));
+    assert!(!MCP_REGISTRY_FIRST_INSTRUCTION.contains("clearly irrelevant"));
 }
 
 /// The registry-first instruction commands tools that the host must keep

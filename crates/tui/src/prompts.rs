@@ -3297,6 +3297,10 @@ mod tests {
             CORE_EXECUTION_PROFILE_PROMPT.contains("present the change in your plan"),
             "Execution profile must name the correct behavior on rejection"
         );
+        assert!(
+            CORE_EXECUTION_PROFILE_PROMPT.contains("waiting cannot succeed"),
+            "Execution profile must disclose that waiting is hopeless when              approval prompts are disabled"
+        );
     }
 
     #[test]

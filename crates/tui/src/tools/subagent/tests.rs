@@ -2876,12 +2876,15 @@ fn agent_description_explains_background_child_and_transcript_handle() {
              {description}"
         );
     }
-    // Headroom note: the description sits 13 tokens (40 chars) under this
-    // cap (3032 chars = 1011 estimated tokens). Budget any reword against
-    // this limit instead of loosening the cap.
+    // Headroom note: the estimate below is the live measurement — budget any
+    // reword against it instead of loosening the cap. (Static headroom
+    // comments went stale when the round-2 text shrank the description, so
+    // the failure message now prints the current tokens/chars.)
+    let estimated = estimate_tool_description_tokens_conservative(description);
     assert!(
-        estimate_tool_description_tokens_conservative(description) <= 1024,
-        "agent description exceeds the conservative 1024-token budget"
+        estimated <= 1024,
+        "agent description exceeds the conservative 1024-token budget          ({estimated} estimated tokens, {} chars)",
+        description.chars().count()
     );
 }
 
@@ -5804,6 +5807,13 @@ fn agent_tool_prompt_schema_keeps_ordinary_starts_message_first() {
     assert!(prompt.contains("focused task"));
     assert!(prompt.contains("read-only role needs no write scope"));
     assert!(prompt.contains("write-capable role defaults to the parent workspace"));
+    // Round-2 review pin: the fresh-context disclosure is load-bearing
+    // delegation guidance and must not silently disappear again.
+    assert!(prompt.contains("The child sees only this prompt, not your conversation"));
+    assert!(
+        !prompt.contains("Legacy action"),
+        "the retired legacy-action sentence must not return: {prompt}"
+    );
     for ceremony in [
         "Subagent Brief",
         "QUESTION",

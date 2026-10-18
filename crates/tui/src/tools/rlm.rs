@@ -118,7 +118,7 @@ impl RlmTool {
             Some("eval") => format!(
                 "Run one Python REPL block against a named RLM context. Returns a \
                  bounded projection of stdout/stderr plus metadata. If the code calls \
-                 finalize(...) is called, the final value is stored as a var_handle retrievable \
+                 finalize(...), the final value is stored as a var_handle retrievable \
                  with handle_read instead of copied unbounded into the parent context. \
                  Large stdout/stderr payloads (>1k chars) are also stored as \
                  var_handles (returned in stdout_handle / stderr_handle) to keep the \
@@ -1311,7 +1311,7 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("raw Python"), "explains it runs Python: {msg}");
         assert!(
-            msg.contains("print(len(content))") || msg.contains("FINAL"),
+            msg.contains("print(len(content))") || msg.contains("finalize(...)"),
             "includes an example: {msg}"
         );
     }

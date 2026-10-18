@@ -1233,8 +1233,8 @@ pub struct Engine {
     /// always returns `None` from `diagnostics_for`.
     lsp_manager: Arc<crate::lsp::LspManager>,
     /// Session-scoped workshop variable store (#548). Shared across all tool
-    /// calls so `last_tool_result` persists within the session and can be
-    /// promoted to the parent context via `promote_to_context`.
+    /// calls; `last_tool_result` persists within the session for diagnostics
+    /// only — no tool can read it back (`promote_to_context` never shipped).
     workshop_vars: Option<
         std::sync::Arc<tokio::sync::Mutex<crate::tools::large_output_router::WorkshopVariables>>,
     >,

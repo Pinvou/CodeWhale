@@ -13,7 +13,7 @@ use crate::tools::spec::{
 };
 
 use super::{
-    MCP_IMAGE_TEXT_PLACEHOLDER, ToolRegistry, enforce_tool_authority,
+    CLASSIC_TRUNCATION_FOOTER, MCP_IMAGE_TEXT_PLACEHOLDER, ToolRegistry, enforce_tool_authority,
     mcp_result_to_bounded_rich_tool_result, mcp_tool_adapter_for_test,
 };
 
@@ -1689,4 +1689,13 @@ fn rlm_family_removes_legacy_aliases() {
             "{retired} must not be advertised"
         );
     }
+}
+
+// Round-2 review pin: the classic-routing truncation footer must not cite
+// the unreadable `last_tool_result` workshop variable; the only followable
+// advice it can give is narrowing the rerun.
+#[test]
+fn classic_truncation_footer_teaches_a_followable_retry() {
+    assert!(CLASSIC_TRUNCATION_FOOTER.contains("narrower arguments"));
+    assert!(!CLASSIC_TRUNCATION_FOOTER.contains("last_tool_result"));
 }

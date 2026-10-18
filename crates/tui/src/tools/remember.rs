@@ -216,7 +216,7 @@ impl ToolSpec for RememberTool {
         }
 
         Err(ToolError::execution_failed(format!(
-            "native memory store not found at {} — expected the              `memory/global/MEMORY.md` layout; the legacy single-file memory              path was removed in v0.9.4",
+            "native memory store not found at {} — expected the `memory/global/MEMORY.md` layout; the legacy single-file memory path was removed in v0.9.4",
             path.display()
         )))
     }

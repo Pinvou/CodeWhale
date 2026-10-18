@@ -615,7 +615,7 @@ fn base_source_entries(
             "Authority recap",
             None,
             Some(1),
-            "not appended: a static composer or config-directory constitution owns the prompt prefix, so the bundled section the recap cross-references is absent",
+            "not appended: a static composer or config-directory constitution owns the prompt prefix, so the bundled section the recap cross-references is not guaranteed to be present",
         ));
     }
     builder.push(SourceEntry::text(

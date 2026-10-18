@@ -52,7 +52,11 @@ fn bundled_integration_skills_use_current_codewhale_commands_and_paths() {
     // retired and cannot dispatch; `File` is a hidden compatibility alias
     // that never appears in a catalog or in `tool_search`, so `read` is the
     // citable name.
-    assert!(PDF_BODY.contains("built-in `read` tool"));
+    // The visible `read` has no PDF branch (PDF bytes decode as lossy
+    // binary), so the pdf skill must route extraction through installed
+    // CLIs instead of teaching `read` for it.
+    assert!(!PDF_BODY.contains("the built-in `read` tool"));
+    assert!(PDF_BODY.contains("`pdftotext`"));
     for (name, body) in [
         ("pdf", PDF_BODY),
         ("help", HELP_BODY),

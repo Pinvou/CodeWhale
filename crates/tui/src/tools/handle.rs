@@ -256,8 +256,8 @@ impl ToolSpec for HandleReadTool {
          one-based line ranges, `count` for metadata counts, `jsonpath` \
          for a small JSON-path projection, or `introspect` for the \
          handle's supported projections, size hints, and examples. This retrieves from the in-memory \
-         handle store (a bounded cache — under memory pressure the oldest handles are evicted and \
-         read as missing) instead of asking the parent transcript to hold \
+         handle store (a bounded cache — once the store exceeds its byte budget the oldest \
+         handles are evicted and read as missing) instead of asking the parent transcript to hold \
          the full payload."
     }
 

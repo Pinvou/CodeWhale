@@ -2343,6 +2343,9 @@ mod tests {
         let text = &blocks[0].text;
         assert!(text.contains(FIXED_SUMMARY));
         assert!(text.contains("Another language model"));
+        // Round-2 review pin: the header must keep disclosing that older
+        // tool results do not survive compaction.
+        assert!(text.contains("older tool results were pruned"));
 
         // Replacement history keeps older user turns, then the open round
         // verbatim (user + assistant + tools), then one checkpoint.
