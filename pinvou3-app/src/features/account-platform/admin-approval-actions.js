@@ -1,4 +1,4 @@
-export const approvalCommands = Object.freeze(['WALLET_ADJUSTMENT', 'PAYMENT_PROVIDER_RESUME', 'PAYMENT_PRODUCT_RESUME']);
+export const approvalCommands = Object.freeze(['WALLET_ADJUSTMENT', 'PAYMENT_PROVIDER_RESUME', 'PAYMENT_PRODUCT_RESUME', 'ENTITLEMENT_COMPONENT_ADJUSTMENT']);
 export const approvalViews = Object.freeze(['mine', 'pending', 'execution', 'directory']);
 export const executionStatuses = Object.freeze(['EXECUTION_FAILED', 'EXECUTING', 'APPROVED', 'EXECUTED']);
 export const approvalStatuses = Object.freeze(['DRAFT', 'SUBMITTED', 'APPROVED', 'EXECUTING', 'EXECUTION_FAILED', 'EXECUTED', 'REJECTED', 'WITHDRAWN', 'EXPIRED', 'INVALIDATED']);

@@ -7,6 +7,7 @@ import puppeteer from 'puppeteer-core';
 import { entitlementCorrectionCopy } from '../src/shared/entitlement-correction-i18n.js';
 import { financeCopy } from '../src/shared/finance-i18n.js';
 import { encodeEntitlementCorrectionJSON } from '../src/features/account-platform/admin-entitlement-correction.js';
+import { adminPlatformCopy } from '../src/shared/i18n.js';
 
 const browserPath = [process.env.CHROME, 'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe', 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'].find(value => value && existsSync(value));
 assert.ok(browserPath, 'Chromium is required');
@@ -22,8 +23,9 @@ const proof = { command_type: 'ENTITLEMENT_COMPONENT_ADJUSTMENT', policy_version
   financial_snapshot: { package_total_microcredits: '9223372036854775807', source_original_microcredits: '9223372036854775807', target_original_microcredits: '0', effective_total_microcredits: '9223372036854775807' } };
 let actor = actorA, csrf = 'csrf-initial', permission = true, writes = [], effects = 0, status = '', mode = 'normal', auths = 0, version = 1, updates = [];
 let prechecks = [], expectedReason = 'CORRECTION';
+let center = null;
 const caseGroup = process.env.F09_ENTITLEMENT_CASE || 'all';
-assert.ok(['all', 'original', 'navigation', 'reason', 'invalid', 'read-errors'].includes(caseGroup));
+assert.ok(['all', 'original', 'navigation', 'reason', 'invalid', 'read-errors', 'approvals'].includes(caseGroup));
 let releaseCreate, createWaiting, submitCalls;
 const json = (response, payload, code = 200) => { response.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); response.end(encodeEntitlementCorrectionJSON(payload)); };
 const server = createServer(async (request, response) => {
@@ -33,21 +35,30 @@ const server = createServer(async (request, response) => {
     response.writeHead(302, { Location: url.searchParams.get('return_to') }); return response.end();
   }
   if (url.pathname === '/api/session') return json(response, { authenticated: true, csrf_token: csrf });
-  if (url.pathname === '/api/account/v1/account/bootstrap') return json(response, { user_id: actor, status: 'ACTIVE', active_context: { context_type: 'PERSONAL', organization_id: null, membership_version: 1, context_version: 1, authorization_version: 1, personal_authorization_version: 1, platform_authorization_version: 1, organization_authorization_version: 1, permissions: [] }, personal_permissions: [], platform_permissions: permission ? ['platform.billing.repairs.request', ...(mode === 'navigation' ? ['platform.users.read'] : [])] : [] });
+  if (url.pathname === '/api/account/v1/account/bootstrap') return json(response, { user_id: actor, status: 'ACTIVE', active_context: { context_type: 'PERSONAL', organization_id: null, membership_version: 1, context_version: 1, authorization_version: 1, personal_authorization_version: 1, platform_authorization_version: 1, organization_authorization_version: 1, permissions: [] }, personal_permissions: [], platform_permissions: center?.permissions ?? (permission ? ['platform.billing.repairs.request', ...(mode === 'navigation' ? ['platform.users.read'] : [])] : []) });
   if (url.pathname === '/api/admin/account/admin/v1/users') return json(response, { items: [], has_more: false });
   if (url.pathname === '/api/admin/account/admin/v2/approval-command-prechecks') {
     assert.equal(request.method, 'POST'); assert.equal(request.headers['x-csrf-token'], csrf);
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
     const payload = JSON.parse(Buffer.concat(chunks).toString()); prechecks.push(payload);
     assert.deepEqual(payload, { command_type: proof.command_type, target_resource_id: packageID, payment_order_id: orderID, reason_code: expectedReason });
-    assert.equal(effects, 0, 'precheck is not a write');
+    if (!center) assert.equal(effects, 0, 'precheck is not a write');
     if (mode === 'invalid-owner-input') return json(response, { code: 'INVALID_APPROVAL_PRECHECK_REQUEST' }, 400);
     if (mode === 'owner-unavailable') return json(response, { code: 'APPROVAL_PRECHECK_UNAVAILABLE' }, 503);
     const answer = { ...proof, normalized_command: { ...proof.normalized_command, reason_code: expectedReason } };
     return json(response, mode === 'foreign-proof' ? { ...answer, target_resource_id: id(99) } : answer);
   }
   if (url.pathname === '/api/admin/approvals/capability') return json(response, { session_approval_wire_version: 2, control: { version: 1, epoch: 1, authorization_relay_epoch: 1 } });
-  if (url.pathname === '/api/admin/approvals/requests' && request.method === 'GET') return json(response, { items: status ? [{ approval_request_id: requestID, command_type: proof.command_type, target: { resource_type: proof.target_resource_type, resource_id: packageID }, status, version }] : [], has_more: false });
+  if (url.pathname === '/api/admin/approvals/directory') {
+    response.setHeader('X-Platform-Authorization-Version', '1');
+    return json(response, { schema_version: 1, platform_authorization_version: 1, items: [{ command_type: proof.command_type, policy_version: 2, risk_class: 'FINANCIAL_CORRECTION', requestable: true }, { command_type: 'UNINSTALLED_TEST_APPROVAL', policy_version: 2, risk_class: 'UNKNOWN', requestable: true }] });
+  }
+  if (url.pathname === '/api/admin/approvals/requests' && request.method === 'GET') {
+    center?.reads.push(url.searchParams.toString());
+    const matches = !center || (!url.searchParams.has('requester_user_id') || url.searchParams.get('requester_user_id') === actorA)
+      && (!url.searchParams.has('status') || url.searchParams.get('status') === status);
+    return json(response, { items: status && matches ? [{ approval_request_id: requestID, command_type: proof.command_type, target: { resource_type: proof.target_resource_type, resource_id: packageID }, requester: { user_id: actorA }, status, version }] : [], has_more: false });
+  }
   if (url.pathname === '/api/admin/approvals/requests' && request.method === 'POST') {
     assert.equal(request.headers['x-csrf-token'], csrf);
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
@@ -71,12 +82,35 @@ const server = createServer(async (request, response) => {
   if (url.pathname === `/api/admin/approvals/requests/${requestID}` && request.method === 'PUT') {
     assert.equal(request.headers['x-csrf-token'], csrf);
     const chunks = []; for await (const chunk of request) chunks.push(chunk); const raw = Buffer.concat(chunks).toString();
-    const body = JSON.parse(raw); assert.equal(body.expected_version, 7); updates.push(raw);
+    const body = JSON.parse(raw);
+    if (center) {
+      assert.equal(body.expected_version, center.editVersion);
+      assert.deepEqual(body.normalized_command, proof.normalized_command);
+      assert.match(raw, /"wallet_version":9223372036854775807[,}]/);
+      assert.match(raw, /"amount_microcredits":9007199254740993[,}]/);
+      updates.push(raw);
+      if (updates.length === 1) { version++; return json(response, { code: 'COMMAND_RESULT_UNKNOWN' }, 503); }
+      assert.equal(raw, updates[0], 'center EDIT retries the original CAS, exact proof and invocation key');
+      response.writeHead(204); return response.end();
+    }
+    assert.equal(body.expected_version, 7); updates.push(raw);
     if (updates.length === 1) { effects++; version = 8; if (mode !== 'edit-submit-denied') return json(response, { code: 'COMMAND_RESULT_UNKNOWN' }, 503); }
     else assert.equal(raw, updates[0], 'edit retry must preserve the original CAS and full exact input');
     response.writeHead(204); return response.end();
   }
-  if (url.pathname === `/api/admin/approvals/requests/${requestID}` && request.method === 'GET') return json(response, { ...proof, approval_request_id: requestID, version, action_control_version: 1, detail_availability: 'AVAILABLE', target: { resource_type: proof.target_resource_type, resource_id: packageID }, status, allowed_actions: status === 'DRAFT' ? ['EDIT', 'SUBMIT'] : [] });
+  if (url.pathname === `/api/admin/approvals/requests/${requestID}` && request.method === 'GET') return json(response, { ...proof, command: proof.normalized_command, approval_request_id: requestID, version, action_control_version: 1, detail_availability: 'AVAILABLE', target: { resource_type: proof.target_resource_type, resource_id: packageID }, requester: { user_id: actorA }, status, allowed_actions: status === 'DRAFT' ? ['EDIT', 'SUBMIT'] : center && status === 'SUBMITTED' ? ['APPROVE', 'REJECT'] : [] });
+  if (url.pathname === `/api/admin/approvals/requests/${requestID}/actions/decide` && center) {
+    assert.equal(request.method, 'POST'); assert.equal(request.headers['x-csrf-token'], csrf);
+    assert.equal(request.headers['x-pinvou-approval-action-control-version'], '1');
+    const chunks = []; for await (const chunk of request) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+    assert.notEqual(actor, actorA, 'the requester cannot decide their own correction');
+    assert.ok(center.permissions.includes('platform.billing.repairs.approve'));
+    assert.equal(body.expected_version, version); assert.equal(body.action_control_version, 1);
+    assert.ok(['APPROVE', 'REJECT'].includes(body.decision)); assert.ok(body.reason.trim().length >= 10);
+    center.decisions.push({ requestID, body, csrf }); status = body.decision === 'APPROVE' ? 'APPROVED' : 'REJECTED'; version++;
+    response.writeHead(204); return response.end();
+  }
   if (url.pathname === `/api/admin/approvals/requests/${requestID}/actions/submit`) { assert.equal(request.method, 'POST'); assert.equal(request.headers['x-csrf-token'], csrf); submitCalls++; if (['submit-denied', 'edit-submit-denied'].includes(mode) && submitCalls === 1) return json(response, { code: 'PERMISSION_DENIED' }, 403); status = 'SUBMITTED'; version++; response.writeHead(204); return response.end(); }
   if (url.pathname.startsWith('/api/')) return json(response, { code: 'UNEXPECTED_TEST_ROUTE' }, 404);
   const file = path.resolve(staticRoot, `.${url.pathname}`);
@@ -88,7 +122,7 @@ await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const origin = `http://127.0.0.1:${server.address().port}`;
 const browser = await puppeteer.launch({ executablePath: browserPath, headless: true, args: ['--no-sandbox'] });
 let passed = 0;
-const reset = () => { actor = actorA; csrf = 'csrf-initial'; permission = true; writes = []; effects = 0; status = ''; mode = 'normal'; auths = 0; version = 1; updates = []; submitCalls = 0; prechecks = []; expectedReason = 'CORRECTION'; };
+const reset = () => { actor = actorA; csrf = 'csrf-initial'; permission = true; writes = []; effects = 0; status = ''; mode = 'normal'; auths = 0; version = 1; updates = []; submitCalls = 0; prechecks = []; expectedReason = 'CORRECTION'; center = null; };
 const click = async (page, text) => {
   await page.waitForFunction(label => [...document.querySelectorAll('button')].some(button => button.textContent === label && !button.disabled), { timeout: 5000 }, text);
   await page.evaluate(label => [...document.querySelectorAll('button')].find(button => button.textContent === label).click(), text);
@@ -223,6 +257,63 @@ try {
     await page.waitForFunction(text => document.querySelector('[role="alert"]')?.textContent === text, { timeout: 5000 }, behavior === 'invalid-owner-input' ? financeCopy[language].inputInvalid : entitlementCorrectionCopy[language].unavailable);
     assert.equal(prechecks.length, 1); assert.equal(writes.length, 0); assert.equal(effects, 0); assert.equal(await page.$('section textarea'), null);
     passed++; console.log(`PASS compiled ${language} ${behavior} preserves distinct input versus owner-fact error`); await page.close();
+  }
+  if (['all', 'approvals'].includes(caseGroup)) {
+    const openCenterDetail = async (page, language) => {
+      await click(page, adminPlatformCopy[language].nav.approvals);
+      await page.waitForFunction(command => document.querySelector('tbody')?.textContent.includes(command), {}, proof.command_type);
+      await click(page, financeCopy[language].details); await page.waitForSelector('article textarea');
+      assert.ok(await page.$eval('article', (node, id) => node.textContent.includes(id), requestID));
+    };
+    for (const language of ['zh', 'en', 'ja']) for (const decision of ['APPROVE', 'REJECT']) {
+      reset(); center = { permissions: ['platform.billing.repairs.request'], decisions: [], reads: [] };
+      const page = await open(language);
+      try {
+        await prepare(page, language); await click(page, entitlementCorrectionCopy[language].submit);
+        await page.waitForSelector('section article'); assert.equal(status, 'SUBMITTED'); assert.equal(writes.length, 1);
+        await openCenterDetail(page, language);
+        assert.ok(center.reads.some(query => new URLSearchParams(query).get('requester_user_id') === actorA));
+        assert.equal(await page.$$eval('article button', (buttons, labels) => buttons.some(button => labels.includes(button.textContent)), [financeCopy[language].approve, financeCopy[language].reject]), false, 'request permission alone cannot decide even if the controlled detail advertises actions');
+        await click(page, adminPlatformCopy[language].approvalCenter.directory);
+        await page.waitForFunction(command => document.querySelector('tbody')?.textContent.includes(command), {}, proof.command_type);
+        assert.equal(await page.$eval('tbody', node => node.textContent.includes('UNINSTALLED_TEST_APPROVAL')), false, 'unknown commands must not become installed through directory data');
+        actor = actorB; csrf = 'csrf-independent-approver'; center.permissions = ['platform.billing.repairs.approve'];
+        await page.goto(`${origin}/admin.html?section=approvals&approval_view=pending`, { waitUntil: 'networkidle0' });
+        await page.waitForFunction(command => document.querySelector('tbody')?.textContent.includes(command), {}, proof.command_type);
+        assert.equal(await page.$$eval('main > nav button', (buttons, label) => buttons.some(button => button.textContent === label), entitlementCorrectionCopy[language].title), false, 'approver-only access cannot create a new correction');
+        await click(page, financeCopy[language].details); await page.waitForSelector('article textarea');
+        const label = decision === 'APPROVE' ? financeCopy[language].approve : financeCopy[language].reject;
+        assert.equal(await page.$$eval('article button', (buttons, text) => buttons.find(button => button.textContent === text)?.disabled, label), true, 'a decision needs the existing minimum reason');
+        await page.type('article textarea', 'Independent verified original product split');
+        await click(page, label);
+        await page.waitForFunction(expected => document.querySelector('article')?.textContent.includes(expected), {}, decision === 'APPROVE' ? 'APPROVED' : 'REJECTED');
+        assert.equal(center.decisions.length, 1); assert.equal(center.decisions[0].requestID, requestID);
+        assert.equal(center.decisions[0].body.decision, decision); assert.equal(center.decisions[0].csrf, csrf);
+        assert.equal(writes.length, 1); assert.equal(effects, 1, 'a browser approval decision is not financial execution');
+        await page.waitForNetworkIdle({ idleTime: 100 });
+        center.permissions = [];
+        const readsBeforeDenied = center.reads.length;
+        await page.reload({ waitUntil: 'networkidle0' });
+        assert.equal(await page.$('.adm-approval-workspace'), null); assert.equal(center.reads.length, readsBeforeDenied);
+        passed++; console.log(`PASS compiled ${language} real correction creation -> mine/directory -> independent ${decision} with exact request/control/version and permission denials`);
+      } finally { await page.close(); }
+    }
+    reset(); mode = 'submit-denied'; center = { permissions: ['platform.billing.repairs.request'], decisions: [], reads: [], editVersion: 1 };
+    const page = await open();
+    try {
+      await prepare(page); await click(page, entitlementCorrectionCopy.en.submit);
+      await page.waitForFunction(text => document.body.textContent.includes(text), {}, entitlementCorrectionCopy.en.recoveryPending);
+      assert.equal(status, 'DRAFT'); assert.equal(writes.length, 1); assert.equal(version, 1);
+      await openCenterDetail(page, 'en'); await page.type('article textarea', 'Recheck the exact original product split');
+      await click(page, financeCopy.en.editSubmit);
+      await page.waitForFunction(label => [...document.querySelectorAll('button')].some(button => button.textContent === label && !button.disabled), {}, financeCopy.en.retry);
+      assert.equal(updates.length, 1); assert.equal(version, 2); assert.equal(prechecks.length, 2);
+      await click(page, financeCopy.en.retry);
+      await page.waitForFunction(() => document.querySelector('article')?.textContent.includes('SUBMITTED'));
+      assert.equal(updates.length, 2); assert.equal(updates[1], updates[0]); assert.equal(prechecks.length, 2, 'unknown EDIT retries frozen proof without reading a newer intent');
+      assert.equal(JSON.parse(updates[0]).expected_version, 1); assert.equal(writes.length, 1); assert.equal(effects, 1);
+      passed++; console.log('PASS compiled actual created draft -> center EDIT -> lost ACK -> same original request/key/CAS/exact proof replay -> SUBMITTED');
+    } finally { await page.close(); }
   }
   console.log(`ENTITLEMENT_COMPILED_PASS ${passed} FAIL 0 SKIP 0`);
 } catch (error) {

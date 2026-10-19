@@ -162,6 +162,10 @@ func TestAccountClosureAnonymizesOwnedHistoricalContacts(t *testing.T) {
 		return item
 	}
 	item := claim()
+	if err = r.EnterAccountClosureQuiescing(ctx, *item); err != nil {
+		t.Fatal(err)
+	}
+	item = claim()
 	if err = r.AdvanceAccountClosureToIdentityCleanup(ctx, *item); err != nil {
 		t.Fatal(err)
 	}
