@@ -81,10 +81,10 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         )
 
     def run_main_fixture(self, *, existing_roles=False, user_objects=False, leftover=False,
-                         owner_leftover=False, account_leftover=False, active_client=False, external_dependency=False,
+                         owner_leftover=False, account_leftover=False, schema_leftover=False, active_client=False, external_dependency=False,
                          go_fail_phase=None, empty_phase=None, skipped_phase=None):
         writes, commands, phases, trace = [], [], [], []
-        state = {"bootstrapped": False, "account_done": False, "owner_done": False, "retained_done": False}
+        state = {"bootstrapped": False, "account_done": False, "owner_done": False, "schema_done": False, "retained_done": False}
 
         def run(argv, **kwargs):
             if argv[0] == "go":
@@ -101,20 +101,30 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                     phase, required, package = "retained-token", RUNNER.REQUIRED, RUNNER.TOKEN_PACKAGE
                     self.assertTrue(state["bootstrapped"])
                     state["retained_done"] = True
+                elif argv[-1] == "./internal/billingschema":
+                    phase, required, package = "owner-schema", RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE
+                    self.assertFalse(state["bootstrapped"])
+                    state["schema_done"] = True
                 else:
                     phase, required, package = "retained-billing", RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE
                     self.assertTrue(state["bootstrapped"])
                     state["retained_done"] = True
                 phases.append(phase)
                 trace.append(phase)
-                self.assertNotIn("PINVOU_TEST_SCHEMA_DATABASE_URL", kwargs["env"])
+                if phase == "owner-schema":
+                    self.assertEqual(kwargs["env"]["PINVOU_TEST_SCHEMA_DATABASE_URL"], "postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable")
+                    self.assertNotIn("PINVOU_TEST_BILLING_DATABASE_URL", kwargs["env"])
+                else:
+                    self.assertNotIn("PINVOU_TEST_SCHEMA_DATABASE_URL", kwargs["env"])
                 self.assertIn("-race", argv)
                 if phase == "owner-account":
                     self.assertEqual(kwargs["env"]["PINVOU_TEST_ACCOUNT_DATABASE_URL"], "postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable")
                     self.assertNotIn("PINVOU_TEST_BILLING_DATABASE_URL", kwargs["env"])
-                else:
+                elif phase != "owner-schema":
                     self.assertNotIn("PINVOU_TEST_ACCOUNT_DATABASE_URL", kwargs["env"])
                     self.assertEqual(kwargs["env"]["PINVOU_TEST_BILLING_DATABASE_URL"], "postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable")
+                if phase == "owner-schema":
+                    self.assertNotIn("PINVOU_TEST_ACCOUNT_DATABASE_URL", kwargs["env"])
                 if phase == "retained-token":
                     self.assertIn("PINVOU_TEST_TOKEN_DATABASE_URL", kwargs["env"])
                 else:
@@ -149,6 +159,8 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                     value += "\nexisting_runtime"
                 elif account_leftover and state["account_done"]:
                     value += "\naccount_service"
+                elif schema_leftover and state["schema_done"]:
+                    value += "\nbilling_schema_owner"
                 elif state["bootstrapped"] or owner_leftover and state["owner_done"]:
                     value = "\n".join(sorted(RUNNER.ACTORS | {"postgres"}))
             elif "FROM pg_class" in sql:
@@ -188,15 +200,39 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.run_main_fixture(leftover=True)
         self.assertEqual(self.fixture_writes, ["create"])
-        self.assertEqual(self.fixture_phases, ["owner-account", "owner-wallet", "retained-token"])
+        self.assertEqual(self.fixture_phases, ["owner-account", "owner-wallet", "owner-schema", "retained-token"])
 
     def test_public_entry_executes_account_then_owner_token_and_retained(self):
         self.run_main_fixture()
-        self.assertEqual(len(self.fixture_commands), 4)
+        self.assertEqual(len(self.fixture_commands), 5)
         self.assertIn("^TestF06OrganizationWalletRequiresLifecycleEvidence$", self.fixture_commands[1])
         self.assertEqual(self.fixture_commands[0][-1], "./internal/account")
-        self.assertEqual(self.fixture_commands[2][-1], "./internal/token")
-        self.assertEqual(self.fixture_commands[3][-1], "./internal/billing")
+        self.assertEqual(self.fixture_commands[2][-1], "./internal/billingschema")
+        self.assertEqual(self.fixture_commands[3][-1], "./internal/token")
+        self.assertEqual(self.fixture_commands[4][-1], "./internal/billing")
+
+    def test_schema_restoration_is_required_before_retained_bootstrap(self):
+        with self.assertRaises(RuntimeError):
+            self.run_main_fixture(schema_leftover=True)
+        self.assertEqual(self.fixture_writes, [])
+        self.assertEqual(self.fixture_phases, ["owner-account", "owner-wallet", "owner-schema"])
+
+    def test_package_index_schema_contract_is_selected_and_cannot_skip(self):
+        self.run_main_fixture()
+        roots, package = RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE
+        self.assertEqual(roots, {"TestF09EntitlementPackageIndexPublicMigration"})
+        command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
+        self.assertIn("^TestF09EntitlementPackageIndexPublicMigration$", command)
+        valid = self.events(roots, package, children=True)
+        self.assertGreater(RUNNER.verify_results(valid, roots, package=package, require_children=True, exact_roots=True), 0)
+        for invalid in (
+            [event for event in valid if "/" not in event.get("Test", "")],
+            [event for event in valid if event.get("Test")],
+            [{**event, "Package": RUNNER.BILLING_PACKAGE} for event in valid],
+            valid + [{"Action": "skip", "Package": package, "Test": next(iter(roots)) + "/actual"}],
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, roots, package=package, require_children=True, exact_roots=True)
 
     def test_owner_stage_restoration_is_required_before_retained_bootstrap(self):
         with self.assertRaises(RuntimeError):
@@ -210,14 +246,53 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         self.assertEqual(self.fixture_writes, [])
         self.assertEqual(self.fixture_phases, ["owner-account"])
 
-    def test_account_phase_requires_both_real_cas_and_lifecycle_roots(self):
+    def test_account_phase_requires_real_cas_lifecycle_and_review_governance_roots(self):
         self.assertEqual(RUNNER.ACCOUNT_REQUIRED, {
             "TestF06OrganizationStatusProjectionVersionPublicPostgres",
             "TestF06OrganizationDeletionVersionAndTerminalScope",
+            "TestF06Review5566377593PublicPostgres",
+            "TestOrdinaryDeadLetterReplayRuntimePostgres",
         })
         for name in RUNNER.ACCOUNT_REQUIRED:
             with self.subTest(name=name), self.assertRaises(RuntimeError):
                 RUNNER.verify_results([e for e in self.events(RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE, True) if e.get("Test", "").split("/")[0] != name], RUNNER.ACCOUNT_REQUIRED, package=RUNNER.ACCOUNT_PACKAGE, require_children=True, exact_roots=True)
+
+    def test_review_governance_and_batch_are_selected_with_mandatory_child_evidence(self):
+        required = {
+            "owner-account": ("TestF06Review5566377593PublicPostgres", RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE),
+            "retained-billing": ("TestMemberQuotaBatchPersistedFactsAndFinancialReplay", RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE),
+        }
+        self.run_main_fixture()
+        for phase, (name, roots, package) in required.items():
+            with self.subTest(phase=phase):
+                command = self.fixture_commands[self.fixture_phases.index(phase)]
+                self.assertIn(name, command[command.index("-run") + 1])
+                self.assertIn(name, roots)
+                valid = self.events(roots, package, children=True)
+                self.assertGreater(RUNNER.verify_results(valid, roots, package=package, require_children=True, exact_roots=True), 0)
+                for missing in (
+                    [event for event in valid if event.get("Test", "").split("/")[0] != name],
+                    [event for event in valid if not event.get("Test", "").startswith(name + "/")],
+                    valid + [{"Action": "skip", "Package": package, "Test": name + "/actual"}],
+                ):
+                    with self.assertRaises(RuntimeError):
+                        RUNNER.verify_results(missing, roots, package=package, require_children=True, exact_roots=True)
+
+    def test_expiry_restore_root_is_selected_and_requires_completed_children(self):
+        name = "TestF06MemberQuotaRestoreUsesOrdinaryPackageExpiry"
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIn(name, command[command.index("-run") + 1])
+        self.assertIn(name, RUNNER.BILLING_CHILD_REQUIRED)
+        roots, package = RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE
+        valid = self.events(roots, package, children=True)
+        for missing in (
+            [event for event in valid if event.get("Test", "").split("/")[0] != name],
+            [event for event in valid if not event.get("Test", "").startswith(name + "/")],
+            valid + [{"Action": "skip", "Package": package, "Test": name + "/actual"}],
+        ):
+            with self.assertRaises(RuntimeError):
+                RUNNER.verify_results(missing, roots, package=package, require_children=True, exact_roots=True)
 
     def test_active_client_prevents_any_fixture_execution(self):
         with self.assertRaises(RuntimeError):
@@ -233,15 +308,16 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_any_failed_phase_stops_later_phases(self):
         for phase, expected in [("owner-account", ["owner-account"]),
                                 ("owner-wallet", ["owner-account", "owner-wallet"]),
-                                ("retained-token", ["owner-account", "owner-wallet", "retained-token"]),
-                                ("retained-billing", ["owner-account", "owner-wallet", "retained-token", "retained-billing"])]:
+                                ("owner-schema", ["owner-account", "owner-wallet", "owner-schema"]),
+                                ("retained-token", ["owner-account", "owner-wallet", "owner-schema", "retained-token"]),
+                                ("retained-billing", ["owner-account", "owner-wallet", "owner-schema", "retained-token", "retained-billing"])]:
             with self.subTest(phase=phase), self.assertRaises(RuntimeError):
                 self.run_main_fixture(go_fail_phase=phase)
             self.assertEqual(self.fixture_phases, expected)
-            self.assertEqual(self.fixture_writes, [] if phase in {"owner-account", "owner-wallet"} else ["create", "drop"])
+            self.assertEqual(self.fixture_writes, [] if phase in {"owner-account", "owner-wallet", "owner-schema"} else ["create", "drop"])
 
     def test_each_phase_rejects_zero_or_skipped_required_tests(self):
-        for phase in ["owner-account", "owner-wallet", "retained-token", "retained-billing"]:
+        for phase in ["owner-account", "owner-wallet", "owner-schema", "retained-token", "retained-billing"]:
             for option in ["empty_phase", "skipped_phase"]:
                 with self.subTest(phase=phase, option=option), self.assertRaises(RuntimeError):
                     self.run_main_fixture(**{option: phase})
@@ -264,7 +340,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_owned_fixture_restores_only_its_actors(self):
         self.run_main_fixture()
         self.assertEqual(self.fixture_writes, ["create", "drop"])
-        self.assertEqual(self.fixture_trace, ["owner-account", "owner-wallet", "create", "retained-token", "retained-billing", "drop"])
+        self.assertEqual(self.fixture_trace, ["owner-account", "owner-wallet", "owner-schema", "create", "retained-token", "retained-billing", "drop"])
 
     def test_ledger_activation_read_failure_regression_is_mandatory(self):
         root = "TestLedgerRepairClaimActivationReadErrorsPostgres"

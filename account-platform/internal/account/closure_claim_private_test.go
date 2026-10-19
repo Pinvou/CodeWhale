@@ -162,6 +162,13 @@ func TestClosureClaimACKOrder(t *testing.T) {
 		if e != nil || item == nil {
 			t.Fatal("real claim", e)
 		}
+		if e = r.EnterAccountClosureQuiescing(ctx, *item); e != nil {
+			t.Fatal(e)
+		}
+		item, e = r.ClaimAccountClosure(ctx)
+		if e != nil || item == nil {
+			t.Fatal("post-quiet claim", e)
+		}
 		if e = r.AdvanceAccountClosureToIdentityCleanup(ctx, *item); e != nil {
 			t.Fatal(e)
 		}
@@ -206,6 +213,13 @@ func TestClosureClaimACKOrder(t *testing.T) {
 		item, e := r.ClaimAccountClosure(ctx)
 		if e != nil || item == nil {
 			t.Fatal("real claim", e)
+		}
+		if e = r.EnterAccountClosureQuiescing(ctx, *item); e != nil {
+			t.Fatal(e)
+		}
+		item, e = r.ClaimAccountClosure(ctx)
+		if e != nil || item == nil {
+			t.Fatal("post-quiet claim", e)
 		}
 		if e = r.AdvanceAccountClosureToIdentityCleanup(ctx, *item); e != nil {
 			t.Fatal(e)

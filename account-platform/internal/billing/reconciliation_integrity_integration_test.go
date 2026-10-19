@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"strings"
 	"testing"
+	"time"
 )
 
 func reconciliationAuditPayment(t *testing.T, r *PostgresRepository, ctx context.Context, order PaymentOrder, transaction uuid.UUID) ReconciliationInternalFact {
@@ -158,7 +159,7 @@ func TestF03FourWayRefundAndChargebackSources(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			start, end := reconciliationBusinessDateRange(normalizedReconciliationBusinessDate(r.now()))
+			start, end := reconciliationBusinessDateRange(normalizedReconciliationBusinessDate(r.now().In(time.FixedZone("Asia/Shanghai", 8*60*60))))
 			facts, err := c.listFourWayReconciliationFacts(ctx, r.pool, order.Channel, start, end)
 			if err != nil {
 				t.Fatal(err)
@@ -220,7 +221,7 @@ func TestF03FourWayRefundCashCannotRevokeWrongFraction(t *testing.T) {
 			}
 			check := func(wantValid bool) {
 				t.Helper()
-				start, end := reconciliationBusinessDateRange(normalizedReconciliationBusinessDate(r.now()))
+				start, end := reconciliationBusinessDateRange(normalizedReconciliationBusinessDate(r.now().In(time.FixedZone("Asia/Shanghai", 8*60*60))))
 				facts, err := c.listFourWayReconciliationFacts(ctx, r.pool, order.Channel, start, end)
 				if err != nil {
 					t.Fatal(err)
@@ -322,7 +323,7 @@ func TestF03FourWayPartialForcedRefundKeepsConsumedBonusOutOfDebt(t *testing.T) 
 	if err != nil || wallet.ReceivableMicrocredits != 225000 || wallet.PostedMicrocredits != 0 {
 		t.Fatal("BASE target debt or BONUS no-debt contract changed", err)
 	}
-	start, end := reconciliationBusinessDateRange(normalizedReconciliationBusinessDate(r.now()))
+	start, end := reconciliationBusinessDateRange(normalizedReconciliationBusinessDate(r.now().In(time.FixedZone("Asia/Shanghai", 8*60*60))))
 	facts, err := c.listFourWayReconciliationFacts(ctx, r.pool, order.Channel, start, end)
 	if err != nil {
 		t.Fatal(err)

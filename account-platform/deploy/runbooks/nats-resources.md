@@ -20,6 +20,8 @@ F01 基线操作员只获固定 stream INFO/CREATE 和自己的回复收件箱�
 
 每次发布由真实 JetStream ACK 后才标记 SQL published，message ID 是 `event UUID:publication_generation`。租约失效或未知 SQL 提交不能绕过重投栅栏；相同代次再次发布由 broker 去重，人工改变代次不是本阶段提供的操作。普通发布持续失败按原 12 次策略进入对应领域死信，仍须保留数据库事实。本阶段不提供死信人工重放能力。
 
+上述范围描述的是 F02 交付时点；后续 F18 在 Account 完整升级至 094 后提供[普通 Account 死信受控重放](ordinary-dead-letter-replay.md)。它通过现有 CLI、真实 `account_service` 与受限数据库入口处理保留的普通死信，不改变 F02 的 broker 资源/身份发行范围或普通 relay 构造，不开放审批授权事件重放，也不扩展 Billing、Token 的原有能力。不得手工修改发布代际或扩大数据库授权代替该入口。
+
 ## 验证与限制
 
 ### 审批首次初始化

@@ -1,9 +1,27 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { OrganizationClient, OrganizationAdminClient, organizationUnitIDs } from '../src/features/account-platform/organization-client.js';
 import { AccountPlatformBffClient } from '../src/features/account-platform/bff-client.js';
 const org='11111111-1111-4111-8111-111111111111',user='22222222-2222-4222-8222-222222222222',unit='33333333-3333-4333-8333-333333333333',other='44444444-4444-4444-8444-444444444444';
 const ack=()=>({organization_id:org,member:{user_id:user,membership_id:other,status:'ACTIVE',version:8,roles:['MEMBER'],unit_ids:[unit]},replayed:false});
+
+test('member-unit response schemas use the persisted membership vocabulary', () => {
+ const migration = readFileSync(new URL('../../account-platform/migrations/account/000002_account_domain.up.sql', import.meta.url), 'utf8');
+ const membership = migration.match(/CREATE TABLE memberships \([\s\S]*?status TEXT NOT NULL CHECK \(status IN \(([^)]+)\)\)/);
+ assert.ok(membership, 'the real membership CHECK must be present');
+ const states = [...membership[1].matchAll(/'([^']+)'/g)].map(match => match[1]);
+ const contract = JSON.parse(readFileSync(new URL('../../account-platform/contracts/openapi/organization-member-units.yaml', import.meta.url), 'utf8'));
+ const memberSchemas = [];
+ function visit(value) {
+  if (!value || typeof value !== 'object') return;
+  if (value.properties?.membership_id && value.properties?.user_id && value.properties?.status) memberSchemas.push(value);
+  for (const child of Object.values(value)) visit(child);
+ }
+ visit(contract);
+ assert.equal(memberSchemas.length, 2, 'both organization and admin PUT responses must be checked');
+ for (const schema of memberSchemas) assert.deepEqual(schema.properties.status.enum, states);
+});
 test('ordinary unit IDs are explicit, canonical and separate from role scope',()=>{
  assert.deepEqual(organizationUnitIDs([other,unit,unit]),[unit,other]);assert.deepEqual(organizationUnitIDs([]),[]);
  for(const value of [null,undefined,'unit',[null],['not-a-uuid']])assert.throws(()=>organizationUnitIDs(value));

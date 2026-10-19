@@ -133,10 +133,17 @@ test("organization and member unit browsers run for feature and shared changes",
   }
 });
 
-test("registration bonus compiled browsers are kept in full and feature suites", () => {
+test("registration bonus compiled browsers run exactly once after full and feature expansion", () => {
   const target = "npm:test:account-platform-registration-bonus-ui";
-  assert.ok(fullLabels.includes(target));
-  assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/features/account-platform/AdminOperationsWorkspace.jsx"])).includes(target));
+  const { scripts } = JSON.parse(readFileSync(new URL("../../pinvou3-app/package.json", import.meta.url), "utf8"));
+  assert.equal(scripts["test:admin-registration-bonus-ui"], undefined);
+  for (const selected of [FULL_FRONTEND_SMOKES, selectFrontendSmokes(["pinvou3-app/src/features/account-platform/AdminOperationsWorkspace.jsx"]), selectFrontendSmokes(["pinvou3-app/src/shared/i18n.js"])]) {
+    assert.equal(labels(selected).filter(label => label === target).length, 1);
+    const expanded = selected.flatMap(({ kind, target }) => kind === "npm" ? scripts[target].split(" && ") : [`node ${target}`]);
+    for (const file of ["admin_registration_bonus_ui_smoke.mjs", "admin_registration_bonus_precision_ui_smoke.mjs"]) {
+      assert.equal(expanded.filter(command => command === `node tests/${file}`).length, 1);
+    }
+  }
 });
 
 test("closure production and recovery browser command is selected in full and feature suites", () => {

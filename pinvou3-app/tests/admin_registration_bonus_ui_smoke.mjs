@@ -186,6 +186,8 @@ try {
       submitRightGap: Math.abs(actions.right - submit.right),
     };
   });
+  assert.equal(await page.$eval('.adm-registration-bonus-summary dt', node => getComputedStyle(node).color),
+    'rgb(100, 116, 139)', 'the summary label must retain the existing muted-color fallback');
   assert.ok(desktopLayout.reasonWidth >= desktopLayout.editorWidth - 40, 'change reason must use the editor width');
   assert.ok(desktopLayout.textareaHeight >= 110, 'change reason must provide a usable writing area');
   assert.ok(desktopLayout.submitRightGap <= 1, 'the primary action must align to the editor edge');
@@ -525,6 +527,19 @@ try {
       const values = await saveRetryPage.$eval(root, node => ({ numbers: [...node.querySelectorAll('input[type=number]')].map(input => input.value), enabled: node.querySelector('input[type=checkbox]').checked, reason: node.querySelector('textarea').value }));
       assert.deepEqual(values, { numbers: ['25', '90'], enabled: true, reason: 'Keep this unsaved policy reason' });
       const readsBeforeRetry = policyReads;
+      const authorizationReadsBeforeInvalidSave = completedAuthorizationReads;
+      for (const [index, value] of [[0, ''], [0, '0.5'], [0, '922337203685478'], [1, ''], [1, '0'], [1, '3651']]) {
+        await numbers[index].evaluate(node => { node.focus(); node.select(); }); await saveRetryPage.keyboard.press('Backspace');
+        if (value) await numbers[index].type(value);
+        assert.equal(await saveRetryPage.$eval(`${root} [role=alert] button`, node => node.disabled), true, `invalid field ${index}=${JSON.stringify(value)} must disable retry`);
+        // Dispatch the actual React save handler without native required validation.
+        await saveRetryPage.$eval(`${root} form`, form => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+        await saveRetryPage.waitForNetworkIdle({ idleTime: 100 });
+        assert.equal(completedAuthorizationReads, authorizationReadsBeforeInvalidSave, 'invalid new intent stops before authentication and command creation');
+        assert.equal(writes.length, 0); assert.equal(rejectedPolicyWrites.length, 1); assert.equal(policy.revision, 700);
+        assert.equal(await saveRetryPage.$eval(`${root} form`, form => form.ownerDocument.defaultView.sessionStorage.getItem('pinvou.admin.registration-bonus.pending.0199a100-0001-7000-8000-000000000101')), null);
+        await numbers[index].evaluate(node => { node.focus(); node.select(); }); await numbers[index].type(index === 0 ? '25' : '90');
+      }
       await numbers[0].evaluate(node => { node.focus(); node.select(); }); await numbers[0].type('-1');
       assert.equal(await saveRetryPage.$eval(`${root} [role=alert] button`, node => node.disabled), true, 'save retry must not bypass numeric form validation');
       await numbers[0].evaluate(node => { node.focus(); node.select(); }); await numbers[0].type('26');

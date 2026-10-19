@@ -82,7 +82,21 @@
         "x-permission": "platform.registration-bonus.read",
         "responses": {
           "200": {
-            "description": "Current policy with authoritative Account eligibility readiness; no mutation."
+            "description": "Current policy with authoritative Account eligibility readiness; no mutation.",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/RegistrationBonusPolicy"}
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required."
+          },
+          "403": {
+            "description": "Read permission denied."
+          },
+          "503": {
+            "description": "Policy or eligibility authority unavailable."
           }
         }
       },
@@ -156,7 +170,12 @@
         },
         "responses": {
           "200": {
-            "description": "Committed/replayed policy; exact integer points convert to microcredits at 10000 per point."
+            "description": "Committed/replayed policy; exact integer points convert to microcredits at 10000 per point. Readiness enrichment may report UNAVAILABLE after a successful commit or replay.",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/RegistrationBonusPolicy"}
+              }
+            }
           },
           "400": {
             "description": "Invalid JSON/input."
@@ -254,6 +273,9 @@
           },
           "200": {
             "description": "Same operation/facts immutable receipt replay."
+          },
+          "400": {
+            "description": "Invalid JSON or provisioning facts."
           },
           "409": {
             "description": "Changed operation facts or eligibility not READY."
@@ -545,6 +567,35 @@
     }
   },
   "components": {
+    "schemas": {
+      "RegistrationBonusPolicy": {
+        "type": "object",
+        "required": [
+          "revision", "enabled", "amount_microcredits", "validity_days",
+          "updated_at", "eligibility_status", "recoverable_registration_count",
+          "unrecoverable_registration_count"
+        ],
+        "properties": {
+          "revision": {
+            "type": "integer", "format": "int64", "minimum": 1,
+            "description": "Exact numeric int64 token; browser consumers must use the existing lossless policy codec."
+          },
+          "enabled": {"type": "boolean"},
+          "amount_microcredits": {
+            "type": "integer", "format": "int64", "minimum": 0,
+            "description": "Exact numeric token, not rounded through JavaScript Number."
+          },
+          "validity_days": {"type": "integer", "minimum": 1, "maximum": 3650},
+          "updated_at": {"type": "string", "format": "date-time"},
+          "eligibility_status": {
+            "type": "string",
+            "description": "Authoritative Account readiness on GET; PUT may return UNAVAILABLE if readiness enrichment fails after a committed/replayed update."
+          },
+          "recoverable_registration_count": {"type": "integer", "format": "int64", "minimum": 0},
+          "unrecoverable_registration_count": {"type": "integer", "format": "int64", "minimum": 0}
+        }
+      }
+    },
     "securitySchemes": {
       "userBearer": {
         "type": "http",

@@ -27,7 +27,7 @@ func main() {
 		log.Fatal("--event-id must be a UUID")
 	}
 	ctx := context.Background()
-	store, err := events.NewPostgresStore(ctx, os.Getenv("DATABASE_URL"))
+	store, err := configuredReplayStore(ctx, os.Getenv("DATABASE_URL"))
 	if err != nil {
 		log.Fatal("EVENT_REPLAY_STORE_UNAVAILABLE")
 	}

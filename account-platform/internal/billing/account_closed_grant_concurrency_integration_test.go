@@ -68,7 +68,7 @@ func TestF08ClosedGrantConcurrentReceiptReplayPostgres(t *testing.T) {
 			if operation == "isolate" {
 				_, err = blocker.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "account-closed-grants:"+member.String())
 			} else {
-				_, err = blocker.Exec(ctx, `SELECT id FROM member_quota_grants WHERE id=$1 FOR UPDATE`, grant.ID)
+				_, err = blocker.Exec(ctx, `SELECT id FROM wallets WHERE id=$1 FOR UPDATE`, wallet.ID)
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -97,7 +97,9 @@ func TestF08ClosedGrantConcurrentReceiptReplayPostgres(t *testing.T) {
 			defer ticker.Stop()
 			queryFragment := "%pg_advisory_xact_lock%"
 			if operation == "reclaim" {
-				queryFragment = "%member_quota_grants%FOR UPDATE%"
+				// Both calls read the original command receipt before waiting on
+				// the wallet-first lock, rather than acquiring a grant in advance.
+				queryFragment = "%wallets%FOR UPDATE%"
 			}
 			for {
 				var waiting int

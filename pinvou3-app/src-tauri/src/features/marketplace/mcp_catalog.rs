@@ -194,6 +194,86 @@ pub fn package_mcp_dir(id: &str) -> PathBuf {
     paths::bundles_root().join(id).join("mcp")
 }
 
+/// Resolve a local manifest's launch args against a released package dir:
+/// the `server.py` placeholder becomes the released script's absolute path,
+/// every other argument passes through verbatim. Shared by the install
+/// writer (`add_to_mcp_json` local branch), the startup rebuild validator,
+/// and the per-aux scoped session-reader config writer (ADR-0024) so every
+/// mcp.json producer judges the same launch target.
+pub fn local_server_args(manifest: &ToolManifest, server_dir: &Path) -> Vec<String> {
+    manifest
+        .args
+        .iter()
+        .map(|a| {
+            if a == "server.py" || a.ends_with("/server.py") {
+                server_dir.join("server.py").to_string_lossy().to_string()
+            } else {
+                a.clone()
+            }
+        })
+        .collect()
+}
+
+/// The command a local mcp.json entry launches: the bare python family resolves to
+/// the current runtime, anything else is the manifest value verbatim. Shared by
+/// the same three producers as [`local_server_args`].
+pub fn local_server_command(manifest: &ToolManifest) -> String {
+    if manifest.command == "python" || manifest.command == "python3" {
+        paths::python_command()
+    } else {
+        manifest.command.clone()
+    }
+}
+
+/// The aux-scoped session-reader mcp.json entry for one parent task
+/// (ADR-0024): reuses this module's launch resolution — the same
+/// resolved python command and released
+/// `~/.pinvou3/bundles/session-reader/mcp/server.py` path an install
+/// writes — and appends the scope pin `--only-session=<parent_id>` so
+/// the server enforces the scope process-side. The `=` form is
+/// deliberate: the session-id charset admits leading `-`, and a
+/// two-token `--only-session -x` would make argparse read the pin as an
+/// option and kill the server at boot (a dead tool declaration); the
+/// `=` form assigns any charset-valid value verbatim (review round-3).
+/// `None` when the embedded manifest is unavailable (a build/catalog
+/// invariant break) or when the released `server.py` is missing — the
+/// boot seed is skipped when the secret migration fails, seed-install
+/// failures are non-blocking, and a mid-session deletion has no in-app
+/// heal, so the entry builder judges the launch target itself rather
+/// than trusting the seed, matching `rebuild_local_mcp_entry`'s
+/// no-dead-entry discipline; the caller (the per-aux config writer in
+/// `runtime_bundle`) fails closed to the zero-tool aux branch. The
+/// `is_file` check is existence, not version: a stale 1.0.0 release
+/// passes the guard and pins to the old argparse for one boot cycle
+/// before the startup byte-compare heals it (round-9 minor 13, same
+/// discipline as `rebuild_local_mcp_entry`).
+pub fn aux_session_reader_entry(parent_id: &str) -> Option<serde_json::Value> {
+    let manifest = embedded_manifest("session-reader").ok().flatten()?;
+    let server_dir = package_mcp_dir("session-reader");
+    let mut args = local_server_args(&manifest, &server_dir);
+    if args
+        .first()
+        .map(|script| !std::path::Path::new(script).is_file())
+        .unwrap_or(true)
+    {
+        return None;
+    }
+    // Round-9 minor 15: pin the sessions dir explicitly — without it the
+    // server resolves its default store, which under a relocated home
+    // (PINVOU3_HOME) lands elsewhere and permanently denies the pinned
+    // read (fail-closed, but surprising in dev). App-anchored like the
+    // scope pin itself.
+    args.push(format!(
+        "--sessions-dir={}",
+        crate::platform::paths::sessions_root().display()
+    ));
+    args.push(format!("--only-session={parent_id}"));
+    Some(serde_json::json!({
+        "command": local_server_command(&manifest),
+        "args": args,
+    }))
+}
+
 /// 释放包内容到 `bundles/<id>/mcp/`（staged + 原子 rename，与技能 install 同范式）。
 /// 返回包内容指纹（写 BundleStore 记录用）；不在内嵌目录 → Ok(None)（调用方回退
 /// 旧布局）。内容指纹跳过旧布局残留标记，与技能指纹同一口径。
@@ -334,5 +414,170 @@ mod tests {
         }
         // 12 known embedded packages
         assert_eq!(MCP_PACKAGES.len(), 12);
+    }
+
+    /// ADR-0024 E6: the byte-compare upgrade leg — an existing 1.0.0 install
+    /// (content mismatch vs the embedded 1.1.0 package) is re-released and
+    /// reports `true`; an up-to-date install reports `false` and is left
+    /// byte-identical. This is the "mismatch-rewrite" behavior the aux
+    /// config tests seed through.
+    #[test]
+    fn ensure_package_released_upgrades_a_stale_install_byte_compare() {
+        let _g = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou3-mcp-release-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+
+        // Fresh release: created, reports true.
+        assert!(ensure_package_released("session-reader").expect("first release"));
+        let server_py = package_mcp_dir("session-reader").join("server.py");
+        let current = std::fs::read_to_string(&server_py).expect("released server.py");
+
+        // Idempotent re-release: byte-compare equal, reports false, untouched.
+        let before = std::fs::metadata(&server_py).unwrap();
+        assert!(!ensure_package_released("session-reader").expect("idempotent"));
+        let after = std::fs::metadata(&server_py).unwrap();
+        assert_eq!(
+            before.modified().ok(),
+            after.modified().ok(),
+            "an up-to-date install must not be rewritten"
+        );
+
+        // Stale install (1.0.0 shape: any byte drift): re-released, true.
+        std::fs::write(&server_py, "# stale 1.0.0 content\n").unwrap();
+        assert!(ensure_package_released("session-reader").expect("upgrade"));
+        assert_eq!(
+            std::fs::read_to_string(&server_py).unwrap(),
+            current,
+            "the stale install must be byte-restored to the embedded package"
+        );
+
+        // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
+        unsafe { std::env::remove_var("PINVOU3_HOME") };
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// ADR-0024 B2 content pin: the scoped entry reuses this module's launch
+    /// resolution — resolved python command, the released package script as
+    /// the first arg, the app-anchored `--sessions-dir=` pin, and the parent
+    /// pin in the `=` form (dash-immune) — with launch fields only. This is
+    /// the content half of the per-aux config contract; the writer-side
+    /// hygiene (token filename, private modes, idempotence) is pinned in
+    /// `runtime_bundle`'s extraction tests against a fixture entry.
+    #[test]
+    fn aux_session_reader_entry_pins_marketplace_launch_resolution() {
+        let _g = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou3-aux-entry-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+        // The builder judges the launch target itself (round-3 MAJOR-2), so
+        // the isolated home needs the released package the way the boot seed
+        // would have produced it.
+        ensure_package_released("session-reader")
+            .expect("seed the released session-reader package");
+
+        let parent_id = "l5cz0m8xq2k1b";
+        let entry = aux_session_reader_entry(parent_id).expect("the scoped entry");
+
+        let mut keys: Vec<&str> = entry
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["args", "command"],
+            "launch fields only (no env, no timeout drift)"
+        );
+        let command = entry["command"].as_str().unwrap();
+        assert_eq!(
+            command,
+            paths::python_command(),
+            "the bare python family resolves to the current runtime"
+        );
+        let args: Vec<String> = entry["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap().to_string())
+            .collect();
+        let script = args[0].replace('\\', "/");
+        assert!(
+            script.ends_with("session-reader/mcp/server.py"),
+            "the first arg is the released package script, got {script:?}"
+        );
+        assert_eq!(
+            args.iter()
+                .filter(|a| a.starts_with("--sessions-dir="))
+                .count(),
+            1,
+            "the sessions dir is pinned explicitly (relocated-home dev surprise)"
+        );
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some(format!("--only-session={parent_id}").as_str()),
+            "args end with the parent pin in the = form (dash-immune)"
+        );
+
+        // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
+        unsafe { std::env::remove_var("PINVOU3_HOME") };
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Review round-3 MAJOR-2: the builder judges the launch target itself.
+    /// When the released `server.py` is absent (boot seed skipped on a
+    /// keyring-less machine, a log-only seed-install failure, or a
+    /// mid-session deletion), the entry builder must return `None` so the
+    /// caller demotes the aux spawn to the zero-tool branch instead of
+    /// writing a config that declares a dead tool. Deleting the
+    /// `is_file()` guard from `aux_session_reader_entry` turns this test red.
+    #[test]
+    fn aux_session_reader_entry_demotes_when_released_server_script_is_missing() {
+        let _g = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou3-aux-entry-missing-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+        // The isolated home contains no released session-reader package, so
+        // the launch target cannot exist.
+        assert!(
+            !package_mcp_dir("session-reader")
+                .join("server.py")
+                .is_file()
+        );
+
+        assert!(
+            aux_session_reader_entry("l5cz0m8xq2k1b").is_none(),
+            "a missing released script must yield no entry, never a dead tool declaration"
+        );
+
+        // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
+        unsafe { std::env::remove_var("PINVOU3_HOME") };
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

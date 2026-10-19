@@ -37,7 +37,7 @@ FROM billing_approval_command_activations
 WHERE command_type = 'USAGE_SETTLEMENT_REPAIR' AND policy_version = 1 AND snapshot_schema_version = 1;
 
 SELECT (SELECT count(*) FROM usage_settlement_repair_cases WHERE approval_request_id IS NOT NULL) AS approval_cases,
-       (SELECT count(*) FROM billing_approval_proof_claims) AS proof_claims;
+       (SELECT count(*) FROM billing_approval_proof_claims WHERE command_type = 'USAGE_SETTLEMENT_REPAIR') AS proof_claims;
 
 -- 存量：只读候选列表，不是in_scope或授权结论；必须通过实际owner冻结定价/用量/钱包和完整摘要检查
 SELECT review.id,

@@ -36,7 +36,14 @@ trap 'sudo rm -rf "$work"' EXIT
 sudo apt-get update -qq
 sudo apt-get install -y --no-install-recommends meson ninja-build ca-certificates curl
 
+# --retry/--retry-all-errors: the curl retry convention this repo's CI
+# downloads follow (cf. fetch-connectors.sh; the fast-gate actionlint
+# download retries too) — a gitlab.freedesktop.org transient otherwise
+# hard-fails every Rust leg that needs this prefix.
+# The retry-start window does not stop an in-flight transfer; keep its
+# separately reviewed per-transfer limit together with both retry conventions.
 curl --proto '=https' --tlsv1.2 --location --silent --show-error --fail \
+  --retry 3 --retry-delay 2 --retry-max-time 180 --retry-all-errors --max-time 300 \
   "https://gitlab.freedesktop.org/pipewire/pipewire/-/archive/${PW_VERSION}/pipewire-${PW_VERSION}.tar.gz" \
   -o "$work/pipewire.tar.gz"
 echo "$PW_SHA256  $work/pipewire.tar.gz" | sha256sum --check --status

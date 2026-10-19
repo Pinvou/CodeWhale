@@ -156,7 +156,9 @@ async fn remote_send_joint_preparation_and_reserved_dispatch_freeze_credentials_
                 );
             }
             assert!(content.contains("fixture persona reminder"));
-            assert_eq!(content.contains(AUX_ZERO_TOOL_REMINDER), aux);
+            // ADR-0024 renamed the aux boundary constant; the merge still keys
+            // on the aux- prefix only, so the reminder rides exactly the aux leg.
+            assert_eq!(content.contains(AUX_SCOPED_TOOL_REMINDER), aux);
             assert_eq!(route.model(), wire_model);
             assert!(
                 lifecycle.reserve().is_err(),

@@ -109,16 +109,18 @@ pub(crate) async fn chat_with_reservation(
     });
     // 默认标题会话用首条消息自动命名（原生代码会话与 ACP 同一语义）。
     // 命名失败不阻断发送——标题是展示层信息，正文投递才是关键路径。
-    let title_source = if message.trim().is_empty() {
+    // A leading session-mention injection block is stripped before the
+    // fallback branch (first_send_title_source): a refs-only + attachment
+    // first send still titles after the attachment basename.
+    let title_source = super::sessions::first_send_title_source(
+        message.trim(),
         attachments
             .as_deref()
             .unwrap_or_default()
             .first()
-            .map(|attachment| attachment.basename.clone())
-            .unwrap_or_default()
-    } else {
-        message.trim().to_string()
-    };
+            .map(|attachment| attachment.basename.as_str()),
+    )
+    .to_string();
     if let Err(error) = super::sessions::apply_default_session_title(store, &sid, &title_source) {
         log::warn!("[pinvou3][chat] auto title failed for {sid}: {error}");
     }
@@ -305,13 +307,19 @@ pub(crate) async fn chat_with_reservation(
     // 多智能体模式（ADR-0006）：所有产生模型 turn 的入口共用同一装配——快照
     // 与候选行同源捕获；蜂群契约本体在 spawn 级 instructions，用户内容逐字透传。
     // 候选匹配只看用户原文（raw_message），不看 full 里已拼接的 persona 正文 /
-    // KB 引导 / 附件引用，避免注入文本的领域词虚假抬升无关专家卡。
+    // KB 引导 / 附件引用，避免注入文本的领域词虚假抬升无关专家卡。The
+    // session-mention injection block in the raw text is a machine contract,
+    // not user vocabulary (its fixed English words like "read_session" would
+    // spuriously hit expert n-grams), so it is stripped under the same rule
+    // as titles and checkpoint labels (round-27 asto m6: the added lines are
+    // English — CONTRIBUTING's comment-language rule).
+    let match_source = super::sessions::strip_session_mention_block(&raw_message);
     let prepared_delegation = super::multiagent::prepare_delegation_turn(
         pool,
         &sid,
         mode_state.multi_agent,
         full,
-        super::multiagent::MatchSource(&raw_message),
+        super::multiagent::MatchSource(match_source),
     );
     full = prepared_delegation.content;
     let mode = mode_state.mode;
@@ -329,7 +337,16 @@ pub(crate) async fn chat_with_reservation(
         let sid_count = sid.clone();
         let checkpoint_ledger = roots.ledger.clone();
         let checkpoint_execution = roots.execution.clone();
-        let label = display_content.clone();
+        // The turn-checkpoint label is user-facing on the rewind surface: strip
+        // the session-mention injection block the way titles/bubbles do, so a
+        // refs-carrying first turn labels the checkpoint with the user's text
+        // instead of the machine contract (upstream review round-10 M1). A
+        // refs-only turn persists an EMPTY label by intent (round-16 m2): the
+        // rewind UI keys off checkpoint counts, and an empty label beats
+        // leaking the contract header.
+        let checkpoint_label = super::sessions::strip_session_mention_block(&display_content)
+            .trim()
+            .to_string();
         let snapshot = tauri::async_runtime::spawn_blocking(move || {
             // 执行根体积门（对齐底座 snapshot 机制）：超过 2GB 的目录不做快照——
             // 全量 add -A 的 IO 与影子仓库存储都不划算，该轮如实没有回退入口
@@ -354,7 +371,7 @@ pub(crate) async fn chat_with_reservation(
                 &checkpoint_execution,
                 turn_number,
                 crate::features::code_checkpoints::CheckpointKind::Turn,
-                &label,
+                &checkpoint_label,
             )
             .map(Some)
         })
@@ -429,7 +446,14 @@ pub(crate) async fn chat_with_reservation(
                 }
             }
             if memory_enabled {
-                crate::features::memory::record_turn_user(&sid, &raw_message);
+                // Long-memory records user prose, not the machine contract:
+                // strip the injection block like every other user-text
+                // surface (round-15 m6 — the fixed English contract words
+                // must not enter the memory index as domain terms).
+                crate::features::memory::record_turn_user(
+                    &sid,
+                    super::sessions::strip_session_mention_block(&raw_message),
+                );
             }
             log::info!(
                 "[pinvou3][chat] engine send ok sid={} send_elapsed_ms={} total_elapsed_ms={}",

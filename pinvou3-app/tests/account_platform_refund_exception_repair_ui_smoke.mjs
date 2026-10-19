@@ -176,4 +176,4 @@ try {
   });
 } finally { await browser.close(); await server.close(); }
 const result = { pass, fail, results, limits: ['Real AdminPlatformView/AdminFinanceWorkspace/AdminPlatformClient under controlled BFF replies; owner effects, independent issuer/NATS, PG, deployed API and full E2E are not exercised.'] };
-fs.writeFileSync(process.env.F13_REACT_RESULT || 'refund-repair-smoke-result.json', JSON.stringify(result, null, 2)); console.log(JSON.stringify(result)); process.exitCode = fail ? 1 : 0;
+if (process.env.F13_REACT_RESULT) fs.writeFileSync(process.env.F13_REACT_RESULT, JSON.stringify(result, null, 2)); console.log(JSON.stringify(result)); process.exitCode = fail ? 1 : 0;

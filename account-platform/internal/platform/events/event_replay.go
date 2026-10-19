@@ -44,7 +44,7 @@ func (store *PostgresStore) InspectDeadLetter(ctx context.Context, eventID uuid.
 	if eventID == uuid.Nil {
 		return DeadLetterCandidate{}, errors.New("event ID is required")
 	}
-	event, candidate, err := scanDeadLetter(store.pool.QueryRow(ctx, `SELECT event_id,event_type,aggregate_id,aggregate_version,payload,trace_id,occurred_at,attempts,COALESCE(last_error,''),dead_lettered_at FROM outbox_events WHERE event_id=$1 AND published_at IS NULL AND dead_lettered_at IS NOT NULL`, eventID))
+	event, candidate, err := scanDeadLetter(store.pool.QueryRow(ctx, `SELECT event_id,event_type,aggregate_id,aggregate_version,payload,trace_id,occurred_at,attempts,COALESCE(last_error,''),dead_lettered_at,publication_generation FROM outbox_events WHERE event_id=$1 AND published_at IS NULL AND dead_lettered_at IS NOT NULL`, eventID))
 	if err != nil {
 		return DeadLetterCandidate{}, err
 	}
@@ -95,7 +95,7 @@ func (store *PostgresStore) ReplayDeadLetter(ctx context.Context, request Replay
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return ReplayResult{}, err
 	}
-	event, _, err := scanDeadLetter(tx.QueryRow(ctx, `SELECT event_id,event_type,aggregate_id,aggregate_version,payload,trace_id,occurred_at,attempts,COALESCE(last_error,''),dead_lettered_at FROM outbox_events WHERE event_id=$1 AND published_at IS NULL AND dead_lettered_at IS NOT NULL FOR UPDATE`, request.EventID))
+	event, _, err := scanDeadLetter(tx.QueryRow(ctx, `SELECT event_id,event_type,aggregate_id,aggregate_version,payload,trace_id,occurred_at,attempts,COALESCE(last_error,''),dead_lettered_at,publication_generation FROM outbox_events WHERE event_id=$1 AND published_at IS NULL AND dead_lettered_at IS NOT NULL FOR UPDATE`, request.EventID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ReplayResult{}, errors.New("event is not currently dead-lettered")
 	}
@@ -107,6 +107,24 @@ func (store *PostgresStore) ReplayDeadLetter(ctx context.Context, request Replay
 		return ReplayResult{}, errors.New("dead-letter event digest does not match inspected immutable envelope")
 	}
 	replayID := uuid.Must(uuid.NewV7())
+	if store.accountReplay {
+		envelope, err := event.Marshal()
+		if err != nil {
+			return ReplayResult{}, err
+		}
+		var result ReplayResult
+		// The restricted function creates the receipt, consumes its generation
+		// mapping and enqueues in this transaction. Missing capability is an
+		// error; Account must never fall back to broad runtime UPDATE rights.
+		err = tx.QueryRow(ctx, `SELECT replay_id,event_id,replayed FROM public.enqueue_ordinary_dead_letter_replay($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, replayID, request.EventID, event.PublicationGeneration, digest, request.IdempotencyKey, requestHash, identity.Service, identity.JobType, identity.JobRunID, request.Reason, envelope).Scan(&result.ReplayID, &result.EventID, &result.Replayed)
+		if err != nil {
+			return ReplayResult{}, err
+		}
+		if result.EventID != request.EventID || result.ReplayID == uuid.Nil {
+			return ReplayResult{}, errors.New("ordinary replay result does not match the request")
+		}
+		return result, tx.Commit(ctx)
+	}
 	_, err = tx.Exec(ctx, `INSERT INTO event_replay_requests(replay_id,event_id,event_digest,idempotency_key,request_hash,actor_type,service_name,job_type,job_run_id,reason,replayed_at) VALUES($1,$2,$3,$4,$5,'SERVICE',$6,$7,$8,$9,now())`, replayID, request.EventID, digest, request.IdempotencyKey, requestHash, identity.Service, identity.JobType, identity.JobRunID, request.Reason)
 	if err != nil {
 		return ReplayResult{}, err
@@ -129,7 +147,7 @@ type rowScanner interface{ Scan(...any) error }
 func scanDeadLetter(row rowScanner) (Event, DeadLetterCandidate, error) {
 	var event Event
 	var candidate DeadLetterCandidate
-	err := row.Scan(&event.ID, &event.Type, &event.AggregateID, &event.AggregateVersion, &event.Payload, &event.TraceID, &event.OccurredAt, &event.Attempts, &candidate.LastError, &candidate.DeadLetteredAt)
+	err := row.Scan(&event.ID, &event.Type, &event.AggregateID, &event.AggregateVersion, &event.Payload, &event.TraceID, &event.OccurredAt, &event.Attempts, &candidate.LastError, &candidate.DeadLetteredAt, &event.PublicationGeneration)
 	if err != nil {
 		return Event{}, DeadLetterCandidate{}, err
 	}

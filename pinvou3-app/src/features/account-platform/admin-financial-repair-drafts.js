@@ -161,7 +161,8 @@ export function financialRepairPrecheck(value) {
         !/^[0-9a-f]{64}$/.test(financial.component_digest || '') ||
         !uuidPattern.test(financial.wallet_id || '') || !uuidPattern.test(financial.package_id || '') ||
         typeof financial.provider_chargeback_id !== 'string' || !financial.provider_chargeback_id.trim() ||
-        financial.provider_chargeback_id.trim() !== financial.provider_chargeback_id) return null;
+        financial.provider_chargeback_id.trim() !== financial.provider_chargeback_id ||
+        new TextEncoder().encode(financial.provider_chargeback_id).length > 200) return null;
     } catch { return null; }
   }
   if (value.command_type === 'REFUND_EXCEPTION_REPAIR') {

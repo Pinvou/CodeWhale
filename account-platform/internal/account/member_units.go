@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"slices"
 	"sort"
 	"time"
 
@@ -22,12 +21,14 @@ func normalizedMemberUnits(input []uuid.UUID) ([]uuid.UUID, error) {
 		return nil, nil
 	}
 	result := make([]uuid.UUID, 0, len(input))
+	seen := make(map[uuid.UUID]struct{}, len(input))
 	for _, id := range input {
 		if id == uuid.Nil {
 			return nil, ErrConflict
 		}
-		if !slices.Contains(result, id) {
+		if _, exists := seen[id]; !exists {
 			result = append(result, id)
+			seen[id] = struct{}{}
 		}
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].String() < result[j].String() })
@@ -55,12 +56,13 @@ func writeMemberUnits(ctx context.Context, tx pgx.Tx, membershipID uuid.UUID, id
 	if _, err := tx.Exec(ctx, `DELETE FROM membership_units WHERE membership_id=$1`, membershipID); err != nil {
 		return err
 	}
-	for _, id := range ids {
-		if _, err := tx.Exec(ctx, `INSERT INTO membership_units(membership_id,unit_id,created_at) VALUES($1,$2,$3)`, membershipID, id, now); err != nil {
-			return err
-		}
+	if len(ids) == 0 {
+		return nil
 	}
-	return nil
+	_, err := tx.Exec(ctx, `INSERT INTO membership_units(membership_id,unit_id,created_at)
+SELECT $1,requested.unit_id,$3 FROM unnest($2::uuid[]) WITH ORDINALITY AS requested(unit_id,position)
+ORDER BY requested.position`, membershipID, ids, now)
+	return err
 }
 
 type memberUnitsReceipt struct {
@@ -144,7 +146,7 @@ func (r *PostgresRepository) ReplaceMemberUnits(ctx context.Context, principal i
 	}
 	var membershipID uuid.UUID
 	var version int64
-	if err = tx.QueryRow(ctx, `SELECT m.id,m.version FROM memberships m JOIN users u ON u.id=m.user_id AND u.status='ACTIVE' WHERE m.organization_id=$1 AND m.user_id=$2 AND m.status='ACTIVE' FOR UPDATE OF m`, organizationID, targetID).Scan(&membershipID, &version); errors.Is(err, pgx.ErrNoRows) {
+	if err = tx.QueryRow(ctx, `SELECT m.id,m.version FROM memberships m JOIN users u ON u.id=m.user_id AND u.status='ACTIVE' WHERE m.organization_id=$1 AND m.user_id=$2 AND m.status='ACTIVE' FOR UPDATE OF m,u`, organizationID, targetID).Scan(&membershipID, &version); errors.Is(err, pgx.ErrNoRows) {
 		return MembershipMutationResult{}, ErrNotFound
 	} else if err != nil {
 		return MembershipMutationResult{}, err
