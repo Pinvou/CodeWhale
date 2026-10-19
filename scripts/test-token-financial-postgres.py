@@ -48,6 +48,8 @@ ACCOUNT_REQUIRED = {
 }
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
+SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
+SCHEMA_REQUIRED = {"TestF09EntitlementPackageIndexPublicMigration"}
 OWNER_REQUIRED = {"TestF06OrganizationWalletRequiresLifecycleEvidence"}
 RETAINED_REQUIRED = {
     "TestF06MemberQuotaRestoreUsesOrdinaryPackageExpiry",
@@ -157,6 +159,8 @@ def main():
         env = {key: value for key, value in os.environ.items() if not key.startswith("PINVOU_TEST_")}
         if target == "./internal/account":
             env["PINVOU_TEST_ACCOUNT_DATABASE_URL"] = raw
+        elif target == "./internal/billingschema":
+            env["PINVOU_TEST_SCHEMA_DATABASE_URL"] = raw
         else:
             env["PINVOU_TEST_BILLING_DATABASE_URL"] = raw
         if target == "./internal/token":
@@ -186,6 +190,10 @@ def main():
         assert_instance({user})
     try:
         run_phase("owner-wallet", "./internal/billing", BILLING_PACKAGE, OWNER_REQUIRED, scoped=True)
+    finally:
+        assert_instance({user})
+    try:
+        run_phase("owner-schema", "./internal/billingschema", SCHEMA_PACKAGE, SCHEMA_REQUIRED, scoped=True)
     finally:
         assert_instance({user})
 
