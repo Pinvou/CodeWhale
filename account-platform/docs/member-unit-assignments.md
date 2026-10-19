@@ -28,7 +28,7 @@ The same actor, organization, key, target, expected version and normalized units
 can replay without another audit or event. Replays require current authority
 over the original affected units; changed input conflicts. Later member
 changes may appear in a successfully replayed current projection, including a
-subsequent DISABLED or REVOKED state. The handler propagates that current status
+subsequent SUSPENDED or REVOKED state. The handler propagates that current status
 and version to downstream lifecycle projections; it does not reactivate the
 member on replay. A fresh mutation ACK must still be ACTIVE with exact advanced
 version and units.

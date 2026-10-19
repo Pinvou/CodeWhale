@@ -53,7 +53,7 @@ func TestClosedGrantPublicOwnerHarness(t *testing.T) {
 		t.Fatal(e)
 	}
 	migrations.Unlock(ctx, bc)
-	// Setup keeps its existing limit; the eight complete owner roots use the
+	// Setup keeps its existing limit; the ten complete owner roots use the
 	// remaining enclosing test budget rather than sharing setup's 150 seconds.
 	cancel()
 	parentDeadline, hasDeadline := t.Deadline()
@@ -63,7 +63,7 @@ func TestClosedGrantPublicOwnerHarness(t *testing.T) {
 	}
 	childCtx, cancelChild := context.WithDeadline(context.Background(), commandDeadline)
 	defer cancelChild()
-	args := []string{"test", "-mod=readonly", "-tags=nomsgpack", "-count=1", "-json", "./internal/billing", "-run", "^(TestClosedGrantPublishedOwnerEffects|TestAccountClosureIsolationPreservesPriorAuditFacts|TestAccountClosureIsolationScrubsContactWithoutFinancialMutation|TestAccountClosurePreservesUnknownForcedRefundEvidence|TestAccountClosureRequiresAuthoritativeChargebackTerminal|TestAccountClosureAssessmentIncludesMemberReservations|TestF08MembershipClosureReasonQuotaReplayPostgres|TestF08ClosedGrantConcurrentReceiptReplayPostgres)$"}
+	args := []string{"test", "-mod=readonly", "-tags=nomsgpack", "-count=1", "-json", "./internal/billing", "-run", "^(TestClosedGrantPublishedOwnerEffects|TestAccountClosureIsolationPreservesPriorAuditFacts|TestAccountClosureIsolationScrubsContactWithoutFinancialMutation|TestAccountClosurePreservesUnknownForcedRefundEvidence|TestAccountClosureRequiresAuthoritativeChargebackTerminal|TestAccountClosureAssessmentIncludesMemberReservations|TestF08MembershipClosureReasonQuotaReplayPostgres|TestF08ClosedGrantConcurrentReceiptReplayPostgres|TestF08ClosureBlocksPendingFinancialAnomalyPostgres|TestF08ReclaimBlocksPendingFinancialAnomalyPostgres)$"}
 	args = append(args, "-timeout="+childTimeout.String())
 	if runtime.GOOS != "windows" {
 		args = append(args, "-race")

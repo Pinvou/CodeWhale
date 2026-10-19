@@ -13,7 +13,7 @@ pub(super) use crate::platform::credential_store::{
     CredentialEditAction, CredentialState, CredentialStore, SystemCredentialStore,
 };
 pub(super) use crate::platform::prefs::{
-    AdvancedPrefs, ColorScheme, Language, NotificationPrefs, SavedModel, SearchPrefs,
+    AdvancedPrefs, ChatPrefs, ColorScheme, Language, NotificationPrefs, SavedModel, SearchPrefs,
     SearchProvider, SidebarPrefs, Theme, UserPrefs,
 };
 

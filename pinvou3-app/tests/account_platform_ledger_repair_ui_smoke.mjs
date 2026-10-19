@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import fs from 'node:fs';
 import {createServer} from 'vite';
 import react from '@vitejs/plugin-react';
@@ -10,6 +12,43 @@ const browser=await puppeteer.launch({executablePath:browserPath,headless:true,a
 let pass=0,fail=0;const results=[];
 const run=async(name,fn)=>{const page=await browser.newPage();page.setDefaultTimeout(5000);const errors=[];page.on('pageerror',e=>errors.push(e.message));try{await fn(page);assert.deepEqual(errors,[]);pass++;results.push({name,pass:true});}catch(e){fail++;results.push({name,pass:false,error:e.message,diagnostic:await page.evaluate(()=>({text:document.body.innerText,calls:window.f10?.calls})).catch(()=>null)});}finally{await page.close();}};
 try{
+ // SSR renders the actual component without running effects: the first frame
+ // must select the same authorized tab as a subsequent permission update.
+ const { AdminFinanceWorkspace } = await server.ssrLoadModule('/src/features/account-platform/AdminFinanceWorkspace.jsx');
+ const { financeCopy, ledgerRepairCopy, entitlementCorrectionCopy } = await server.ssrLoadModule('/src/shared/i18n.js');
+ for (const [name, permissions, initialTab, expected] of [
+  ['finance-only ledger', ['platform.billing.wallets.read'], 'ledger', financeCopy.en.orders],
+  ['finance-only correction', ['platform.billing.wallets.read'], 'correction', financeCopy.en.orders],
+  ['finance-only denied writeoff', ['platform.billing.wallets.read'], 'writeoff', financeCopy.en.orders],
+  ['finance-only denied paymentrepair', ['platform.billing.wallets.read'], 'paymentrepair', financeCopy.en.orders],
+  ['finance-only unknown', ['platform.billing.wallets.read'], 'unknown', financeCopy.en.orders],
+  ['finance-only wallets', ['platform.billing.wallets.read'], 'wallets', financeCopy.en.wallet],
+  ['finance-only controls', ['platform.billing.wallets.read'], 'controls', financeCopy.en.providerControls],
+  ['repair-only default', ['platform.billing.repairs.request'], 'orders', ledgerRepairCopy.en.title],
+  ['repair-only correction', ['platform.billing.repairs.request'], 'correction', entitlementCorrectionCopy.en.title],
+  ['repair-only writeoff', ['platform.billing.repairs.request'], 'writeoff', ledgerRepairCopy.en.writeOffTitle],
+  ['repair-only paymentrepair', ['platform.billing.repairs.request'], 'paymentrepair', ledgerRepairCopy.en.paymentRepairTitle],
+  ['approve-only default', ['platform.billing.repairs.approve'], 'ledger', financeCopy.en.approvals],
+  ['approve-only denied writeoff', ['platform.billing.repairs.approve'], 'writeoff', financeCopy.en.approvals],
+  ['approve-only denied paymentrepair', ['platform.billing.repairs.approve'], 'paymentrepair', financeCopy.en.approvals],
+ ]) {
+  const html = renderToStaticMarkup(React.createElement(AdminFinanceWorkspace, { client: {}, me: { user_id: 'controlled-first-frame', platform_permissions: permissions }, language: 'en', initialTab }));
+  const selected = [...html.matchAll(/<button[^>]*aria-pressed="true"[^>]*>(.*?)<\/button>/g)].map(match => match[1]);
+  assert.deepEqual(selected, [expected], name);
+  pass++; results.push({ name: 'actual JSX first render before effects: ' + name, pass: true });
+ }
+ await run('actual finance component reselects on permission changes', async page => {
+  await page.goto(server.resolvedUrls.local[0] + 'tests/account_platform_ledger_repair_fixture.html?language=en&finance-tabs=1');
+  await page.waitForSelector('.adm-financial-repair-target');
+  await page.evaluate(() => window.f10.renderFinance(['platform.billing.wallets.read'], 'ledger'));
+  await page.waitForFunction(() => document.querySelector('nav button[aria-pressed="true"]')?.textContent === window.f10.financeCopy.en.orders);
+  assert.equal(await page.$('.adm-financial-repair-target'), null);
+  await page.evaluate(() => window.f10.renderFinance(['platform.billing.repairs.approve'], 'ledger'));
+  await page.waitForFunction(() => document.querySelector('nav button[aria-pressed="true"]')?.textContent === window.f10.financeCopy.en.approvals);
+  await page.evaluate(() => window.f10.renderFinance(['platform.billing.repairs.request'], 'correction'));
+  await page.waitForFunction(() => document.querySelector('nav button[aria-pressed="true"]')?.textContent === window.f10.entitlementCorrectionCopy.en.title);
+  assert.equal(await page.$('.adm-financial-repair-target'), null);
+ });
  for(const language of ['zh','en','ja'])await run('production finance tab / lossless precheck / draft / submit '+language,async page=>{
   await page.goto(server.resolvedUrls.local[0]+`tests/account_platform_ledger_repair_fixture.html?language=${language}${language==='en'?'&lost=1':''}`);
   await page.waitForFunction(()=>window.f10 && [...document.querySelectorAll('nav button')].some(b=>b.textContent===window.f10.financeCopy[window.f10.language].finance));
