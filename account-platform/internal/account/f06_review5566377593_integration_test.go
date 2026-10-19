@@ -143,14 +143,22 @@ ORDER BY role.code LIMIT 1`, uuid.New(), ownerID, canonicalPermissionCode(Permis
 			t.Fatal("active admin role replacement stopped working", err)
 		}
 	})
-	for _, entrypoint := range []string{"grant", "admin-replace"} {
+	for _, entrypoint := range []string{"grant", "admin-replace", "units-org", "units-platform"} {
 		t.Run("concurrent-disable-fences-"+entrypoint, func(t *testing.T) {
 			before := snapshot()
+			var targetVersion int64
+			if err := r.pool.QueryRow(ctx, `SELECT version FROM memberships WHERE id=$1`, member.Member.MembershipID).Scan(&targetVersion); err != nil {
+				t.Fatal(err)
+			}
 			blocker, err := r.pool.Begin(ctx)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer blocker.Rollback(ctx)
+			var blockerPID uint32
+			if err := blocker.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&blockerPID); err != nil {
+				t.Fatal(err)
+			}
 			if _, err := blocker.Exec(ctx, `UPDATE users SET status='DISABLED' WHERE id=$1`, target); err != nil {
 				t.Fatal(err)
 			}
@@ -161,25 +169,33 @@ ORDER BY role.code LIMIT 1`, uuid.New(), ownerID, canonicalPermissionCode(Permis
 				if entrypoint == "grant" {
 					_, err := r.GrantOrganizationRoleBinding(workerCtx, owner, RoleBindingGrant{UserID: target, RoleCode: "ORG_ADMIN", OrganizationID: &org.ID, IdempotencyKey: uuid.NewString()})
 					done <- err
-				} else {
+				} else if entrypoint == "admin-replace" {
 					_, err := r.AdminReplaceMemberRoles(workerCtx, owner, org.ID, target, []string{"ORG_ADMIN"}, nil)
+					done <- err
+				} else {
+					_, err := r.ReplaceMemberUnits(workerCtx, owner, org.ID, target, targetVersion, []uuid.UUID{unit.Unit.ID}, uuid.NewString(), entrypoint == "units-platform")
 					done <- err
 				}
 			}()
-			// Observe the actual target-admission query waiting on the user row,
-			// rather than inferring a fence from a sleep or a later cache write.
+			// Observe the real wait on this exact target-row holder. The old
+			// implementation reaches UPDATE users; the fixed one waits at target
+			// admission. Both must be released before checking the durable result,
+			// so a RED cannot be manufactured by matching only the new SQL text.
 			locked := false
+			var waitingSQL string
 			waitUntil := time.Now().Add(3 * time.Second)
 			for !locked && time.Now().Before(waitUntil) {
-				if err := f.admin.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name=$1 AND wait_event_type='Lock' AND query LIKE '%target.status=''ACTIVE''%' AND query LIKE '%FOR UPDATE OF member,target%')`, r.pool.Config().ConnConfig.RuntimeParams["application_name"]).Scan(&locked); err != nil {
+				if err := f.admin.QueryRow(ctx, `SELECT COALESCE((SELECT query FROM pg_stat_activity WHERE application_name=$1 AND wait_event_type='Lock' AND $2::integer=ANY(pg_blocking_pids(pid)) LIMIT 1),'')`, r.pool.Config().ConnConfig.RuntimeParams["application_name"], blockerPID).Scan(&waitingSQL); err != nil {
 					blocker.Rollback(ctx)
 					stop()
 					t.Fatal(err)
 				}
+				locked = waitingSQL != ""
 				if !locked {
 					time.Sleep(5 * time.Millisecond)
 				}
 			}
+			t.Logf("observed target-row waiter: %s", waitingSQL)
 			if err := blocker.Commit(ctx); err != nil {
 				t.Fatal(err)
 			}
@@ -191,8 +207,139 @@ ORDER BY role.code LIMIT 1`, uuid.New(), ownerID, canonicalPermissionCode(Permis
 			if _, resetErr := r.pool.Exec(ctx, `UPDATE users SET status='ACTIVE' WHERE id=$1`, target); resetErr != nil {
 				t.Fatal(resetErr)
 			}
-			if !locked || err == nil || snapshot() != before {
-				t.Fatal("target admission did not serialize with disable or mutated grants", locked, err)
+			changed := snapshot() != before
+			if !locked || err == nil || changed {
+				t.Fatalf("target admission did not serialize with disable or mutated grants: observed=%t err=%v durableChanged=%t", locked, err, changed)
+			}
+			if strings.HasPrefix(entrypoint, "units-") && !errors.Is(err, ErrNotFound) {
+				t.Fatal("disabled attachment target lost its existing not-found contract", err)
+			}
+		})
+	}
+	for _, platform := range []bool{false, true} {
+		name := "organization"
+		if platform {
+			name = "platform"
+		}
+		t.Run("member-units-first-fences-disable-"+name, func(t *testing.T) {
+			var targetVersion int64
+			var auditBefore, outboxBefore, commandsBefore int
+			if err := r.pool.QueryRow(ctx, `SELECT version,(SELECT count(*) FROM audit_logs),(SELECT count(*) FROM outbox_events),(SELECT count(*) FROM membership_commands) FROM memberships WHERE id=$1`, member.Member.MembershipID).Scan(&targetVersion, &auditBefore, &outboxBefore, &commandsBefore); err != nil {
+				t.Fatal(err)
+			}
+			// The setup actor normally connects to postgres. Lock only the
+			// database created by this exact fixture, not the bootstrap database.
+			barrierConfig := f.admin.Config().Copy()
+			barrierConfig.Database = r.pool.Config().ConnConfig.Database
+			var owned bool
+			if err := f.admin.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=$1 AND pg_get_userbyid(datdba)='account_service')`, barrierConfig.Database).Scan(&owned); err != nil || !owned || !strings.HasPrefix(barrierConfig.Database, "f01_wallet_fence_") {
+				t.Fatal("audit barrier is not the original owned fixture database", err)
+			}
+			barrier, err := pgx.ConnectConfig(ctx, barrierConfig)
+			if err != nil {
+				t.Fatal("open owned fixture audit barrier", err)
+			}
+			defer func() {
+				clean, stop := context.WithTimeout(context.Background(), 5*time.Second)
+				defer stop()
+				if err := barrier.Close(clean); err != nil {
+					t.Error("close owned fixture audit barrier", err)
+				}
+			}()
+			var database, actor string
+			if err := barrier.QueryRow(ctx, `SELECT current_database(),current_user`).Scan(&database, &actor); err != nil || database != barrierConfig.Database || actor != barrierConfig.User {
+				t.Fatal("owned audit barrier connection identity mismatch", err)
+			}
+			blocker, err := barrier.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer blocker.Rollback(ctx)
+			var blockerPID uint32
+			if err := blocker.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&blockerPID); err != nil {
+				t.Fatal(err)
+			}
+			// Pause the real replacement only after its user/admission locks and
+			// writes, without adding production hooks or changing isolation.
+			if _, err := blocker.Exec(ctx, `LOCK TABLE audit_logs IN SHARE MODE`); err != nil {
+				t.Fatal(err)
+			}
+			workerCtx, stop := context.WithTimeout(ctx, 10*time.Second)
+			defer stop()
+			type outcome struct {
+				result MembershipMutationResult
+				err    error
+			}
+			replaced := make(chan outcome, 1)
+			key := uuid.NewString()
+			go func() {
+				result, err := r.ReplaceMemberUnits(workerCtx, owner, org.ID, target, targetVersion, []uuid.UUID{unit.Unit.ID}, key, platform)
+				replaced <- outcome{result, err}
+			}()
+			var replacementPID uint32
+			waitUntil := time.Now().Add(3 * time.Second)
+			for replacementPID == 0 && time.Now().Before(waitUntil) {
+				if err := f.admin.QueryRow(ctx, `SELECT COALESCE((SELECT pid FROM pg_stat_activity WHERE application_name=$1 AND wait_event_type='Lock' AND query LIKE '%INSERT INTO audit_logs%' AND $2::integer=ANY(pg_blocking_pids(pid)) LIMIT 1),0)`, r.pool.Config().ConnConfig.RuntimeParams["application_name"], blockerPID).Scan(&replacementPID); err != nil {
+					t.Fatal(err)
+				}
+				if replacementPID == 0 {
+					time.Sleep(5 * time.Millisecond)
+				}
+			}
+			if replacementPID == 0 {
+				t.Fatal("replacement did not reach its actual audit write while holding target admission")
+			}
+			disabled := make(chan error, 1)
+			go func() { disabled <- r.AdminSetUserStatus(workerCtx, owner, target, "DISABLED") }()
+			locked := false
+			waitUntil = time.Now().Add(3 * time.Second)
+			for !locked && time.Now().Before(waitUntil) {
+				if err := f.admin.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name=$1 AND wait_event_type='Lock' AND query LIKE '%SELECT status FROM users WHERE id=$1 FOR UPDATE%' AND $2::integer=ANY(pg_blocking_pids(pid)))`, r.pool.Config().ConnConfig.RuntimeParams["application_name"], replacementPID).Scan(&locked); err != nil {
+					t.Fatal(err)
+				}
+				if !locked {
+					time.Sleep(5 * time.Millisecond)
+				}
+			}
+			if !locked {
+				t.Fatal("actual disable did not wait for the admitted replacement's target lock")
+			}
+			if err := blocker.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+			var changed outcome
+			select {
+			case changed = <-replaced:
+			case <-workerCtx.Done():
+				t.Fatal("replacement failed to finish after owned audit barrier released")
+			}
+			if changed.err != nil || changed.result.Replayed || changed.result.Member.Version != targetVersion+1 || !slices.Equal(changed.result.Member.UnitIDs, []uuid.UUID{unit.Unit.ID}) {
+				t.Fatal("valid earlier replacement failed or lost its exact effect", changed.err)
+			}
+			select {
+			case err = <-disabled:
+			case <-workerCtx.Done():
+				t.Fatal("disable failed to finish after admitted replacement committed")
+			}
+			if err != nil {
+				var conflict *pgconn.PgError
+				if !errors.As(err, &conflict) || conflict.Code != "40001" {
+					t.Fatal("disable lost its existing serializable retry classification", err)
+				}
+				if err := r.AdminSetUserStatus(ctx, owner, target, "DISABLED"); err != nil {
+					t.Fatal("fresh disable retry failed after valid earlier replacement", err)
+				}
+			}
+			var status string
+			var auditAfter, outboxAfter, commandsAfter int
+			if err := r.pool.QueryRow(ctx, `SELECT status,(SELECT count(*) FROM audit_logs),(SELECT count(*) FROM outbox_events),(SELECT count(*) FROM membership_commands) FROM users WHERE id=$1`, target).Scan(&status, &auditAfter, &outboxAfter, &commandsAfter); err != nil || status != "DISABLED" || auditAfter != auditBefore+2 || outboxAfter != outboxBefore+1 || commandsAfter != commandsBefore+1 {
+				t.Fatal("serial order changed replacement/disable audit, event or receipt counts", err)
+			}
+			member = changed.result
+			// Restore only the controlled status for subsequent independent cases;
+			// retain all real version/audit/receipt facts from both operations.
+			if _, err := r.pool.Exec(ctx, `UPDATE users SET status='ACTIVE' WHERE id=$1`, target); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}
