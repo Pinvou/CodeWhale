@@ -122,6 +122,12 @@ func (r *PostgresRepository) reclaimAccountClosedGrantOnce(ctx context.Context, 
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return AccountClosedGrantReclaim{}, err
 	}
+	// Only new effects take the shared wallet-first financial lock order;
+	// committed command receipts above remain independently replayable.
+	wallet, err := lockMemberQuotaWallet(ctx, tx, organizationID)
+	if err != nil {
+		return AccountClosedGrantReclaim{}, err
+	}
 	grant, _, err := loadMemberQuotaGrant(ctx, tx, grantID, true)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && grant.OrganizationID != organizationID) {
 		return AccountClosedGrantReclaim{}, ErrNotFound
@@ -145,7 +151,12 @@ UNION ALL SELECT 1 FROM payment_anomaly_cases anomaly JOIN entitlement_packages 
 	if frozen {
 		return AccountClosedGrantReclaim{}, ErrConflict
 	}
-	if _, err := tx.Exec(ctx, `SELECT id FROM entitlement_components WHERE id=$1 FOR UPDATE`, grant.ComponentID); err != nil {
+	var componentPackageID, packageWalletID uuid.UUID
+	err = tx.QueryRow(ctx, `SELECT component.package_id,package.wallet_id FROM entitlement_components component JOIN entitlement_packages package ON package.id=component.package_id WHERE component.id=$1 FOR UPDATE OF component`, grant.ComponentID).Scan(&componentPackageID, &packageWalletID)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && (componentPackageID != grant.PackageID || packageWalletID != wallet.ID)) {
+		return AccountClosedGrantReclaim{}, ErrConflict
+	}
+	if err != nil {
 		return AccountClosedGrantReclaim{}, err
 	}
 	now, amount := r.now(), grant.AvailableMicrocredits
@@ -214,7 +225,7 @@ func (s *Service) reclaimAccountClosedGrantInternal(w http.ResponseWriter, r *ht
 		ReclaimAccountClosedGrant(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int64, string, string) (AccountClosedGrantReclaim, error)
 	})
 	if !ok {
-		s.writeError(w, r, ErrConflict)
+		api.WriteError(w, http.StatusServiceUnavailable, "ACCOUNT_CLOSURE_UNAVAILABLE", "account closure reclaim is unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
 	grant, lifecycleVersion, err := repository.AccountClosedGrantCandidate(r.Context(), organizationID, grantID)
