@@ -509,7 +509,7 @@ function RemoteKnowledgeView({ t, embedded = false }) {
         includeDeleted: includeTrash,
       });
       if (requestId !== collectionsRequestRef.current || serverId !== selectedServerRef.current) return;
-      setCollections(next);
+      setCollections(next || []);
       const current = selectedCollectionRef.current;
       const nextCollectionId = current && next.some(item => item.id === current)
         ? current
@@ -882,7 +882,7 @@ function RemoteKnowledgeView({ t, embedded = false }) {
     });
     if (!created) return;
     setShareLink(created.share);
-    setOwnerShares(await invokeTauri('remote_kb_shares', { serverId: selectedServerId }));
+    setOwnerShares((await invokeTauri('remote_kb_shares', { serverId: selectedServerId })) || []);
   }
 
   async function resolveJoinRequest(requestId, scope) {
@@ -894,13 +894,13 @@ function RemoteKnowledgeView({ t, embedded = false }) {
       ...(scope ? { scope } : {}),
     }));
     if (!resolved) return;
-    setOwnerJoinRequests(await invokeTauri('remote_kb_join_requests', { serverId: selectedServerId }));
-    setOwnerDevices(await invokeTauri('remote_kb_devices', { serverId: selectedServerId }));
+    setOwnerJoinRequests((await invokeTauri('remote_kb_join_requests', { serverId: selectedServerId })) || []);
+    setOwnerDevices((await invokeTauri('remote_kb_devices', { serverId: selectedServerId })) || []);
   }
 
   async function stopShare(shareId) {
     const stopped = await run(`stop-share-${shareId}`, () => invokeTauri('remote_kb_stop_share', { serverId: selectedServerId, shareId }));
-    if (stopped) setOwnerShares(await invokeTauri('remote_kb_shares', { serverId: selectedServerId }));
+    if (stopped) setOwnerShares((await invokeTauri('remote_kb_shares', { serverId: selectedServerId })) || []);
   }
 
   async function updateMember(device, patch) {
