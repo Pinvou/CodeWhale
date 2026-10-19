@@ -28,7 +28,7 @@ func TestAccountClosureAnonymizesOwnedHistoricalContacts(t *testing.T) {
 		if id != user {
 			name = "other_" + strings.ReplaceAll(id.String(), "-", "")[:12]
 		}
-		_, err := r.pool.Exec(ctx, `WITH capability AS (SELECT set_config('pinvou.registration_bonus_capable','1',true)) INSERT INTO users(id,status,user_code,username,mobile_e164,email,created_at,updated_at) SELECT $1,'ACTIVE',generate_unique_user_code(),$2,$3,$5,$4,$4 FROM capability`, id, name, fmt.Sprintf("+861380000%04d", index), now, name+"@Example.Invalid")
+		_, err := r.pool.Exec(ctx, `WITH capability AS (SELECT set_config('pinvou.registration_bonus_capable','1',true)) INSERT INTO users(id,status,user_code,username,mobile_e164,mobile_verified_at,email,display_name,created_at,updated_at) SELECT $1,'ACTIVE',generate_unique_user_code(),$2,$3,$4,$5,$6,$4,$4 FROM capability`, id, name, fmt.Sprintf("+861380000%04d", index), now, name+"@Example.Invalid", name+" display")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -124,10 +124,45 @@ func TestAccountClosureAnonymizesOwnedHistoricalContacts(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Historical rows are controlled fixture inputs, not provider operations.
+	// Use completed business records so their linked SMS belongs to the subject
+	// without adding new in-flight work or changing the LOGIN retention policy.
+	type contactHistory struct {
+		username, mobile, userCode                    string
+		sms                                           [3]uuid.UUID
+		profile, password, registration, mapping, job uuid.UUID
+	}
+	histories := map[uuid.UUID]contactHistory{}
+	for _, subject := range []uuid.UUID{user, other} {
+		history := contactHistory{sms: [3]uuid.UUID{uuid.New(), uuid.New(), uuid.New()}, profile: uuid.New(), password: uuid.New(), registration: uuid.New(), mapping: uuid.New(), job: uuid.New()}
+		if err := r.pool.QueryRow(ctx, `SELECT username,mobile_e164,user_code FROM users WHERE id=$1`, subject).Scan(&history.username, &history.mobile, &history.userCode); err != nil {
+			t.Fatal(err)
+		}
+		for index, purpose := range []string{"PROFILE_MOBILE", "PASSWORD_RESET", "REGISTER"} {
+			if _, err := r.pool.Exec(ctx, `INSERT INTO sms_challenges(id,mobile_e164,purpose,code_hash,status,provider_message_id,expires_at,consumed_at,created_at,updated_at,provider_id,adapter_version) VALUES($1,$2,$3,$4,'CONSUMED','controlled-provider-message',$5,$6,$6,$6,'controlled-privacy','v1')`, history.sms[index], history.mobile, purpose, []byte{1}, now.Add(time.Hour), now); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, statement := range []struct {
+			sql  string
+			args []any
+		}{
+			{`INSERT INTO profile_change_requests(id,user_id,identity_issuer,identity_subject,field,old_value,new_value,expected_profile_version,sms_challenge_id,status,next_attempt_at,sla_expires_at,created_at,updated_at) VALUES($1,$2,'closure-owned-history',$3,'MOBILE',$4,$5,1,$6,'COMPLETED',$7,$8,$7,$7)`, []any{history.profile, subject, subject.String(), history.mobile, history.mobile + "1", history.sms[0], now, now.Add(time.Hour)}},
+			{`INSERT INTO password_reset_operations(id,user_id,identity_issuer,identity_subject,sms_challenge_id,status,method,mobile_e164,password_handle,password_policy_version,next_attempt_at,sla_expires_at,created_at,updated_at,completed_at,password_updated_at,sessions_revoked_at) VALUES($1,$2,'closure-owned-history',$3,$4,'COMPLETED','SMS',$5,'controlled-password-reference','controlled-v1',$6,$7,$6,$6,$6,$6,$6)`, []any{history.password, subject, subject.String(), history.sms[1], history.mobile, now, now.Add(time.Hour)}},
+			{`INSERT INTO registration_operations(id,candidate_user_id,query_token_hash,request_fingerprint,username_normalized,mobile_e164,sms_challenge_id,password_policy_version,identity_subject,committed_user_id,status,next_retry_at,created_at,updated_at) VALUES($1,$2,$3,$3,$4,$5,$6,'controlled-v1',$7,$2,'ACTIVE',$8,$8,$8)`, []any{history.registration, subject, make([]byte, 32), strings.ToLower(history.username), history.mobile, history.sms[2], subject.String(), now}},
+			{`INSERT INTO commerce_customer_mappings(id,subject_type,subject_id,provider_id,adapter_version,status,external_reference_redacted,last_error_code,provisioned_at,created_at,updated_at) VALUES($1,'USER',$2,'controlled-privacy','v1','READY','controlled-redacted-reference','CONTROLLED_OLD_FAILURE',$3,$3,$3)`, []any{history.mapping, subject, now}},
+			{`INSERT INTO commerce_customer_sync_jobs(id,mapping_id,mapping_version,subject_type,subject_id,provider_id,adapter_version,task_category,contact_mobile_e164,status,next_attempt_at,created_at,updated_at,completed_at) VALUES($1,$2,1,'USER',$3,'controlled-privacy','v1','PROFILE_SYNC',$4,'COMPLETED',$5,$5,$5,$5)`, []any{history.job, history.mapping, subject, history.mobile, now}},
+		} {
+			if _, err := r.pool.Exec(ctx, statement.sql, statement.args...); err != nil {
+				t.Fatal(err)
+			}
+		}
+		histories[subject] = history
+	}
 	snapshot := func() string {
 		t.Helper()
 		facts := []string{}
-		for _, table := range []string{"invitations", "super_admin_bootstrap_credentials", "users", "identities", "memberships", "account_closure_requests", "account_closure_commands", "account_closure_audit", "account_subject_retention_records", "audit_logs", "outbox_events", "registration_operations", "role_bindings", "role_assignments"} {
+		for _, table := range []string{"invitations", "super_admin_bootstrap_credentials", "users", "identities", "memberships", "account_closure_requests", "account_closure_commands", "account_closure_audit", "account_subject_retention_records", "audit_logs", "outbox_events", "registration_operations", "role_bindings", "role_assignments", "sms_challenges", "profile_change_requests", "password_reset_operations", "commerce_customer_sync_jobs", "commerce_customer_mappings"} {
 			var rows string
 			if err := r.pool.QueryRow(ctx, `SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb)::text FROM `+pgx.Identifier{table}.Sanitize()+` t`).Scan(&rows); err != nil {
 				t.Fatal(err)
@@ -157,6 +192,21 @@ func TestAccountClosureAnonymizesOwnedHistoricalContacts(t *testing.T) {
 		foreignTerminalBefore[id] = row("invitations", id, []string{})
 	}
 	foreignCredentialBefore := row("super_admin_bootstrap_credentials", foreignCredential, []string{})
+	foreignHistory := histories[other]
+	foreignContacts := map[string]map[uuid.UUID]string{}
+	for table, ids := range map[string][]uuid.UUID{
+		"sms_challenges":              foreignHistory.sms[:],
+		"profile_change_requests":     {foreignHistory.profile},
+		"password_reset_operations":   {foreignHistory.password},
+		"registration_operations":     {foreignHistory.registration},
+		"commerce_customer_mappings":  {foreignHistory.mapping},
+		"commerce_customer_sync_jobs": {foreignHistory.job},
+	} {
+		foreignContacts[table] = map[uuid.UUID]string{}
+		for _, id := range ids {
+			foreignContacts[table][id] = row(table, id, []string{})
+		}
+	}
 	principal := identity.Principal{Issuer: "closure-owned-history", Subject: user.String(), AuthenticatedAt: now}
 	for name, authenticatedAt := range map[string]time.Time{"missing-recent-auth": {}, "expired-recent-auth": now.Add(-accountClosureRecentAuth - time.Minute), "future-recent-auth": now.Add(3 * time.Minute)} {
 		t.Run(name, func(t *testing.T) {
@@ -253,8 +303,65 @@ func TestAccountClosureAnonymizesOwnedHistoricalContacts(t *testing.T) {
 		}
 	})
 	t.Run("owned-contacts-only", func(t *testing.T) {
+		history := histories[user]
+		foreignUserBefore := row("users", other, []string{})
+		userEvidence := row("users", user, []string{"status", "username", "mobile_e164", "mobile_verified_at", "display_name", "email", "anonymized_at", "profile_version", "membership_version", "version", "updated_at"})
+		retainedContacts := map[string]string{
+			"profile_change_requests":     row("profile_change_requests", history.profile, []string{"old_value", "new_value", "identity_issuer", "identity_subject", "updated_at"}),
+			"password_reset_operations":   row("password_reset_operations", history.password, []string{"mobile_e164", "identity_issuer", "identity_subject"}),
+			"registration_operations":     row("registration_operations", history.registration, []string{"username_normalized", "mobile_e164", "identity_subject", "updated_at"}),
+			"commerce_customer_sync_jobs": row("commerce_customer_sync_jobs", history.job, []string{"contact_mobile_e164", "updated_at"}),
+			"commerce_customer_mappings":  row("commerce_customer_mappings", history.mapping, []string{"status", "external_reference_redacted", "last_error_code", "detached_at", "version", "updated_at"}),
+		}
+		smsEvidence := map[uuid.UUID]string{}
+		for _, id := range history.sms {
+			smsEvidence[id] = row("sms_challenges", id, []string{"mobile_e164", "provider_message_id", "updated_at"})
+		}
 		if err := r.AnonymizeAccountClosure(ctx, item, lifecycle); err != nil {
 			t.Fatal(err)
+		}
+		var cleanUser bool
+		if err := r.pool.QueryRow(ctx, `SELECT status='DELETED' AND user_code=$2 AND left(username,7)='closed_' AND username<>$3 AND mobile_e164 LIKE 'closed:%' AND mobile_e164<>$4 AND email IS NULL AND display_name IS NULL AND mobile_verified_at IS NULL AND anonymized_at IS NOT NULL FROM users WHERE id=$1`, user, history.userCode, history.username, history.mobile).Scan(&cleanUser); err != nil || !cleanUser {
+			t.Fatal("subject users PII was not anonymized while preserving user code", err)
+		}
+		if row("users", user, []string{"status", "username", "mobile_e164", "mobile_verified_at", "display_name", "email", "anonymized_at", "profile_version", "membership_version", "version", "updated_at"}) != userEvidence || row("users", other, []string{}) != foreignUserBefore {
+			t.Fatal("anonymization changed frozen user evidence or another user's row")
+		}
+		for _, id := range history.sms {
+			var clear bool
+			if err := r.pool.QueryRow(ctx, `SELECT mobile_e164 LIKE 'closed:%' AND mobile_e164<>$2 AND provider_message_id IS NULL FROM sms_challenges WHERE id=$1`, id, history.mobile).Scan(&clear); err != nil || !clear {
+				t.Fatal("subject-linked SMS retained identifying contact", err)
+			}
+			if row("sms_challenges", id, []string{"mobile_e164", "provider_message_id", "updated_at"}) != smsEvidence[id] {
+				t.Fatal("subject-linked SMS frozen evidence changed")
+			}
+		}
+		for _, check := range []struct {
+			table   string
+			id      uuid.UUID
+			cleared string
+			omitted []string
+		}{
+			{"profile_change_requests", history.profile, `old_value LIKE 'closed:%' AND new_value LIKE 'closed:%' AND identity_issuer='closed' AND identity_subject LIKE 'closed:%'`, []string{"old_value", "new_value", "identity_issuer", "identity_subject", "updated_at"}},
+			{"password_reset_operations", history.password, `mobile_e164 LIKE 'closed:%' AND identity_issuer='closed' AND identity_subject LIKE 'closed:%'`, []string{"mobile_e164", "identity_issuer", "identity_subject"}},
+			{"registration_operations", history.registration, `left(username_normalized,7)='closed_' AND mobile_e164 LIKE 'closed:%' AND identity_subject IS NULL`, []string{"username_normalized", "mobile_e164", "identity_subject", "updated_at"}},
+			{"commerce_customer_sync_jobs", history.job, `contact_mobile_e164 IS NULL`, []string{"contact_mobile_e164", "updated_at"}},
+			{"commerce_customer_mappings", history.mapping, `status='DETACHED' AND external_reference_redacted IS NULL AND last_error_code IS NULL AND detached_at IS NOT NULL AND version=2`, []string{"status", "external_reference_redacted", "last_error_code", "detached_at", "version", "updated_at"}},
+		} {
+			var clear bool
+			if err := r.pool.QueryRow(ctx, `SELECT `+check.cleared+` FROM `+pgx.Identifier{check.table}.Sanitize()+` WHERE id=$1`, check.id).Scan(&clear); err != nil || !clear {
+				t.Fatal("subject operational contact was not anonymized", check.table, err)
+			}
+			if row(check.table, check.id, check.omitted) != retainedContacts[check.table] {
+				t.Fatal("subject operational frozen evidence changed", check.table)
+			}
+		}
+		for table, records := range foreignContacts {
+			for id, before := range records {
+				if row(table, id, []string{}) != before {
+					t.Fatal("another subject's operational contact changed", table)
+				}
+			}
 		}
 		for _, id := range ownedInvitations {
 			var clear bool
