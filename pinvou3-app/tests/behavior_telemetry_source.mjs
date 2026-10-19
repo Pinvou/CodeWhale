@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 const behaviorTelemetryModules = [
   '../src-tauri/src/features/behavior_telemetry.rs',
   '../src-tauri/src/features/behavior_telemetry/runtime.rs',
+  '../src-tauri/src/features/behavior_telemetry/heartbeat.rs',
   '../src-tauri/src/features/behavior_telemetry/events.rs',
   '../src-tauri/src/features/behavior_telemetry_tests.rs',
 ];

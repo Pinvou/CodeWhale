@@ -131,14 +131,27 @@ fn test_telemetry(runtime: RuntimeConfig, state: PersistedState) -> BehaviorTele
         tool_install_terminals: ToolInstallTerminalCoordinator::default(),
         event_tx: None,
         control_tx: None,
+        heartbeat_tx: None,
     }
 }
 
 async fn mock_http(
     responses: Vec<(u16, &'static str)>,
 ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+    let (base, server, _) = mock_http_observed(responses).await;
+    (base, server)
+}
+
+async fn mock_http_observed(
+    responses: Vec<(u16, &'static str)>,
+) -> (
+    String,
+    tokio::task::JoinHandle<Vec<String>>,
+    mpsc::Receiver<()>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let (observed_tx, observed_rx) = mpsc::channel(responses.len().max(1));
     let handle = tokio::spawn(async move {
         let mut requests = Vec::new();
         for (status, body) in responses {
@@ -176,10 +189,335 @@ async fn mock_http(
             );
             socket.write_all(response.as_bytes()).await.unwrap();
             socket.shutdown().await.unwrap();
+            let _ = observed_tx.try_send(());
         }
         requests
     });
-    (format!("http://{address}"), handle)
+    (format!("http://{address}"), handle, observed_rx)
+}
+
+fn heartbeat_state(runtime: &RuntimeConfig) -> PersistedState {
+    let mut state = PersistedState::fresh(runtime);
+    state.device_id = Some("installation_device".to_string());
+    state.device_token = Some("installation_token".to_string());
+    state.control.enabled = true;
+    state.control.collection_period_id = Some("installation_period".to_string());
+    state
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn installation_heartbeat_does_not_wait_for_behavior_event_upload() {
+    let _home = TestHome::new();
+    let (base, heartbeat_server) = mock_http(vec![(200, "{}")]).await;
+    let (events_base, seen, release, events_server) = controlled_http(503, "{}").await;
+    let mut runtime = test_runtime(&base);
+    runtime.behavior_events_url = format!("{events_base}/events");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    telemetry.track(BehaviorEvent::new("app_opened").string("launch_type", "cold"));
+    let pending = telemetry.outbox.lock().unwrap().batch();
+    assert_eq!(pending.len(), 1);
+    let uploader = telemetry.worker_clone();
+    let upload = tokio::spawn(async move { uploader.send_events(&pending).await });
+    tokio::time::timeout(Duration::from_secs(3), seen)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), telemetry.send_heartbeat())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!upload.is_finished());
+    assert_eq!(telemetry.outbox.lock().unwrap().records.len(), 1);
+    release.send(()).unwrap();
+    assert!(upload.await.unwrap().is_err());
+    assert!(events_server.await.unwrap().starts_with("POST /events "));
+    assert!(heartbeat_server.await.unwrap()[0].starts_with("POST /v1/heartbeat "));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn installation_heartbeat_progresses_for_six_idle_minutes_and_stops_with_owner() {
+    let _home = TestHome::new();
+    // The second heartbeat fails; subsequent ticks must still run without events.
+    let (base, server, mut observed) =
+        mock_http_observed(vec![(200, "{}"), (503, "{}"), (200, "{}"), (200, "{}")]).await;
+    let runtime = test_runtime(&base);
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    let (tx, rx) = mpsc::channel(1);
+    let worker = tokio::spawn(BehaviorTelemetry::run_heartbeat_worker(
+        rx,
+        telemetry.worker_clone(),
+    ));
+    for tick in 0..4 {
+        if tick > 0 {
+            // Pause only the idle timer; HTTP runs against a real loopback socket.
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(119)).await;
+            tokio::time::resume();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), observed.recv())
+                    .await
+                    .is_err()
+            );
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::time::resume();
+        }
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), observed.recv())
+                .await
+                .unwrap(),
+            Some(())
+        );
+        // Wait until the worker has consumed the response, before advancing time.
+        drop(telemetry.control_gate.lock().await);
+        assert!(telemetry.outbox.lock().unwrap().records.is_empty());
+    }
+    drop(tx);
+    tokio::time::timeout(Duration::from_secs(3), worker)
+        .await
+        .unwrap()
+        .unwrap();
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 4);
+    for request in requests {
+        assert!(request.starts_with("POST /v1/heartbeat "));
+        assert!(request.contains("Bearer installation_token"));
+        let body: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(
+            body,
+            json!({
+                "device_id": "installation_device", "app_version": "0.0.0-test",
+                "platform": "test", "arch": "test", "state": "online",
+            })
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn installation_heartbeat_enable_wakes_without_waiting_for_interval() {
+    let _home = TestHome::new();
+    let (base, server, mut observed) = mock_http_observed(vec![
+        (200, r#"{"collection_period_id":"installation_period"}"#),
+        (200, "{}"),
+    ])
+    .await;
+    let runtime = test_runtime(&base);
+    let mut state = heartbeat_state(&runtime);
+    state.control.enabled = false;
+    state.control.collection_period_id = None;
+    state.control.cohort_started = true;
+    let mut telemetry = test_telemetry(runtime, state);
+    let (tx, rx) = mpsc::channel(1);
+    telemetry.heartbeat_tx = Some(tx);
+    let worker = tokio::spawn(BehaviorTelemetry::run_heartbeat_worker(
+        rx,
+        telemetry.worker_clone(),
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), observed.recv())
+            .await
+            .is_err()
+    );
+    assert!(
+        telemetry
+            .set_user_collection_enabled(true)
+            .await
+            .unwrap()
+            .enabled
+    );
+    // The first response is collection/start; the next is the immediate heartbeat.
+    assert_eq!(observed.recv().await, Some(()));
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), observed.recv())
+            .await
+            .unwrap(),
+        Some(())
+    );
+    drop(telemetry);
+    tokio::time::timeout(Duration::from_secs(3), worker)
+        .await
+        .unwrap()
+        .unwrap();
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].starts_with("POST /collection/start "));
+    assert!(requests[1].starts_with("POST /v1/heartbeat "));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn installation_heartbeat_skips_disabled_pending_mismatched_or_unhealthy_state() {
+    let _home = TestHome::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let runtime = test_runtime(&format!("http://{}", listener.local_addr().unwrap()));
+    for case in 0..11 {
+        let mut config = runtime.clone();
+        let mut state = heartbeat_state(&config);
+        match case {
+            0 => config.enabled = false,
+            1 => state.control.enabled = false,
+            2 => state.control.user_enabled = Some(false),
+            3 => state.control.collection_blocked = true,
+            4 => state.control.collection_period_id = None,
+            5 => state.device_token = None,
+            6 => state.telemetry_base_url.push_str("/old"),
+            7 => {
+                state.control.pending_request = Some(PendingControlRequest {
+                    kind: PendingControlKind::End,
+                    request_id: "pending_end".into(),
+                    collection_period_id: state.control.collection_period_id.clone(),
+                    behavior_events_url: config.behavior_events_url.clone(),
+                })
+            }
+            8 => state
+                .control
+                .pending_deletions
+                .push(PendingEndpointDeletion {
+                    request_id: "pending_delete".into(),
+                    behavior_events_url: config.behavior_events_url.clone(),
+                    device_id: "retired_device".into(),
+                    device_token: "retired_token".into(),
+                }),
+            _ => {}
+        }
+        let telemetry = test_telemetry(config, state);
+        if case == 9 {
+            telemetry.state_healthy.store(false, Ordering::Release);
+        }
+        if case == 10 {
+            telemetry
+                .authorization_generation
+                .store(1, Ordering::Release);
+        }
+        tokio::time::timeout(Duration::from_secs(1), telemetry.send_heartbeat())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), listener.accept())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn installation_heartbeat_remote_deletion_stops_collection_without_registering() {
+    let _home = TestHome::new();
+    let (base, server) = mock_http(vec![(410, r#"{"error":"device_data_deleted"}"#)]).await;
+    let runtime = test_runtime(&base);
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    telemetry.send_heartbeat().await.unwrap();
+    assert!(!telemetry.status().await.enabled);
+    assert!(
+        telemetry
+            .state
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .control
+            .collection_blocked
+    );
+    telemetry.send_heartbeat().await.unwrap();
+    assert_eq!(server.await.unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn installation_heartbeat_expired_credentials_renew_same_installation() {
+    let _home = TestHome::new();
+    let (base, server) = mock_http(vec![
+        (410, r#"{"error":"device_credentials_expired"}"#),
+        (
+            200,
+            r#"{"device_id":"renewed_device","device_token":"renewed_token"}"#,
+        ),
+        (200, r#"{"collection_period_id":"renewed_period"}"#),
+        (200, "{}"),
+    ])
+    .await;
+    let runtime = test_runtime(&base);
+    let state = heartbeat_state(&runtime);
+    let installation_id = state.installation_id.clone();
+    let telemetry = test_telemetry(runtime, state);
+    telemetry.send_heartbeat().await.unwrap();
+    telemetry.send_heartbeat().await.unwrap();
+    let current = telemetry.state.lock().await.clone().unwrap();
+    assert_eq!(current.installation_id, installation_id);
+    assert_eq!(current.device_id.as_deref(), Some("renewed_device"));
+    assert!(telemetry.status().await.enabled);
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 4);
+    assert!(requests[1].starts_with("POST /v1/register "));
+    assert!(requests[1].contains(&format!("pinvou3-installation:{installation_id}")));
+    assert!(requests[2].starts_with("POST /collection/start "));
+    assert!(requests[3].starts_with("POST /v1/heartbeat "));
+    assert!(requests[3].contains("Bearer renewed_token"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn installation_heartbeat_unknown_errors_preserve_identity_and_allow_retry() {
+    let _home = TestHome::new();
+    let (base, server) = mock_http(vec![
+        (401, "{}"),
+        (410, r#"{"error":"future_reason"}"#),
+        (410, "not-json"),
+        (503, "{}"),
+        (200, "{}"),
+    ])
+    .await;
+    let runtime = test_runtime(&base);
+    let state = heartbeat_state(&runtime);
+    let installation_id = state.installation_id.clone();
+    let telemetry = test_telemetry(runtime, state);
+    for _ in 0..4 {
+        assert!(telemetry.send_heartbeat().await.is_err());
+    }
+    telemetry.send_heartbeat().await.unwrap();
+    let current = telemetry.state.lock().await.clone().unwrap();
+    assert_eq!(current.installation_id, installation_id);
+    assert_eq!(current.device_id.as_deref(), Some("installation_device"));
+    assert!(telemetry.status().await.enabled);
+    assert!(
+        server
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.starts_with("POST /v1/heartbeat "))
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn installation_heartbeat_queued_behind_stop_rechecks_consent() {
+    let _home = TestHome::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let runtime = test_runtime(&format!("http://{}", listener.local_addr().unwrap()));
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    let gate = telemetry.control_gate.lock().await;
+    let mut stop = Box::pin(telemetry.set_user_collection_enabled(false));
+    let mut heartbeat = Box::pin(telemetry.send_heartbeat());
+    // Queue both futures while collection is still enabled, with stop first in
+    // the FIFO control gate. Eligibility must be checked after acquiring it.
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(stop.as_mut(), cx).is_pending());
+        assert!(std::future::Future::poll(heartbeat.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    drop(gate);
+    let (stopped, heartbeat) = tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::join!(stop, heartbeat)
+    })
+    .await
+    .unwrap();
+    let stopped = stopped.unwrap();
+    assert!(!stopped.enabled);
+    assert!(stopped.withdrawal_pending);
+    heartbeat.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), listener.accept())
+            .await
+            .is_err()
+    );
 }
 
 async fn controlled_http(
