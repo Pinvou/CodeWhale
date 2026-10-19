@@ -889,14 +889,16 @@ class CiGatePolicyTests(unittest.TestCase):
             )
 
     def test_behavior_telemetry_schema_contract_fully_routed(self):
-        # 根目录 `docs/schemas/behavior-telemetry-*.json` 被两个消费方跨语言
-        # 读取:behavior_telemetry_tests.rs include_str!(rust-test leg)与
-        # behavior_telemetry_model_contract.test.mjs readFileSync(frontend
-        # leg)。这两个文件都不匹配任何按目录前缀的通配条目,漏登记时
-        # schema-only PR 的 rust-test 与 node 门禁会全部 skipped,而
-        # required-gate 的 success|skipped 循环照常放行(fail-open)。显式
-        # 登记两条精确路径并用本测试钉住;新增 schema 文件时这里会失败,
-        # 提醒同步登记。
+        # 根目录 `docs/schemas/behavior-telemetry-*.json` 被跨语言消费方读取:
+        # behavior_telemetry_model_contract.test.mjs 与
+        # behavior_telemetry_activation_contract.test.mjs readFileSync 两个
+        # 文件(frontend leg),behavior_telemetry_tests.rs include_str! 只读
+        # registries(rust-test leg)。这些路径都不匹配任何按目录前缀的通配
+        # 条目,漏登记时 schema-only PR 的对应门禁会静默 skipped,而
+        # required-gate 的 success|skipped 循环照常放行(fail-open)。按真实
+        # 消费面显式登记:两个 schema 都进 frontend,仅 registries 进
+        # rust_full(v1 schema 无 Rust 消费方,过度登记只是无谓放大
+        # rust-test 触发面);新增 schema 文件时这里会失败,提醒同步登记。
         workflow = self.pr_workflow
         frontend_paths = _frontend_filter_entries(workflow)
         rust_full_paths = _rust_full_filter_entries(workflow)
@@ -909,11 +911,19 @@ class CiGatePolicyTests(unittest.TestCase):
                 f"遥测 schema {schema} 未被 frontend filter 覆盖,"
                 "schema-only 改动会静默跳过 behavior_telemetry node 门禁",
             )
-            self.assertTrue(
-                _is_covered_by_trigger(schema, rust_full_paths),
-                f"遥测 schema {schema} 未被 rust_full filter 覆盖,"
-                "schema-only 改动会静默跳过 behavior_telemetry include_str! 契约",
-            )
+        self.assertTrue(
+            _is_covered_by_trigger(
+                "docs/schemas/behavior-telemetry-registries.json", rust_full_paths
+            ),
+            "遥测 registries 未被 rust_full filter 覆盖,"
+            "registries-only 改动会静默跳过 behavior_telemetry include_str! 契约",
+        )
+        self.assertFalse(
+            _is_covered_by_trigger(
+                "docs/schemas/behavior-telemetry-v1.schema.json", rust_full_paths
+            ),
+            "v1 schema 无 Rust 消费方,不应登记进 rust_full(过度触发面)",
+        )
 
     def test_path_extractor_sees_trailing_comment_entries(self):
         # Round-41 review M8 回归锁:行尾同列注释曾让整条条目对提取器
