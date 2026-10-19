@@ -943,6 +943,51 @@ test("device inventory contains installation registrations only", () => {
   }
 });
 
+test("installation heartbeats keep an idle client online without counting behavior activity", (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const dataDir = mkdtempSync(join(tmpdir(), "pinvou-installation-presence-"));
+  let store;
+  try {
+    store = new TelemetryStore(dataDir, "test-device-pepper-at-least-24-chars");
+    const register = (source) => {
+      const credential = store.register({
+        hardware_claim: `heartbeat-test-claim-${source}`,
+        registration_secret: `heartbeat-test-registration-secret-${source}`,
+        hardware_source: source,
+        app_version: "0.10.12",
+        platform: "windows",
+        arch: "x86_64",
+      }, null);
+      return store.authenticate(credential.device_id, credential.device_token);
+    };
+    const installation = register("installation_id");
+    const hardware = ["system_uuid", "ioplatformuuid", "persisted_random"].map(register);
+    for (let minute = 0; minute <= 6; minute += 2) {
+      if (minute) now += 120_000;
+      hardware.forEach(device => store.heartbeat(device, { state: "online" }, null));
+      store.heartbeat(installation, { state: "online" }, null);
+      const devices = [...store.devices.values()];
+      const overview = buildStatsOverview(devices, store.events, store.behaviorEvents, now);
+      assert.deepEqual(overview.counts, { online: 1, active_today: 0, active_7d: 0 });
+      assert(overview.usage_trend.every((day) => day.turns === 0));
+      const list = buildDeviceList(devices, store.events, store.behaviorEvents, now);
+      assert.equal(list.length, 1);
+      assert.equal(list[0].device_id, installation.device_id);
+      assert.equal(list[0].online, true);
+    }
+    assert.equal(store.events.length, 0);
+    assert.equal(store.behaviorEvents.length, 0);
+    // The legacy heartbeat cannot keep a stopped installation online or double count it.
+    now += 300_001;
+    hardware.forEach(device => store.heartbeat(device, { state: "online" }, null));
+    assert.equal(buildStatsOverview([...store.devices.values()], [], [], now).counts.online, 0);
+  } finally {
+    if (store?.saveTimer) clearTimeout(store.saveTimer);
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("legacy hardware usage does not enter the new dashboard", () => {
   const now = at("2026-09-04T12:00:00");
   const devices = [{
