@@ -51,6 +51,15 @@ export function registrationBonusReasonIsValid(value) {
   return length >= 10 && length <= 500;
 }
 
+export function registrationBonusFormIsValid(form) {
+  return typeof form?.enabled === 'boolean'
+    && typeof form.amount_points === 'string' && form.amount_points.trim() !== ''
+    && Number.isSafeInteger(Number(form.amount_points)) && Number(form.amount_points) >= 0 && Number(form.amount_points) <= MAX_BONUS_POINTS
+    && typeof form.validity_days === 'string' && form.validity_days.trim() !== ''
+    && Number.isInteger(Number(form.validity_days)) && Number(form.validity_days) >= 1 && Number(form.validity_days) <= 3650
+    && registrationBonusReasonIsValid(form.reason);
+}
+
 export function encodeRegistrationBonusJSON(value) {
   const revision = bonusRevision(value.expected_revision);
   if (typeof value.enabled !== 'boolean' || !Number.isSafeInteger(value.amount_points) || value.amount_points < 0 || value.amount_points > MAX_BONUS_POINTS

@@ -3330,6 +3330,74 @@ mod tests {
     }
 
     #[test]
+    fn organization_member_pages_cross_the_desktop_request_allowlist() {
+        use base64::Engine;
+        let org = "11111111-1111-4111-8111-111111111111";
+        let unit = "22222222-2222-4222-8222-222222222222";
+        for (collection, unit_id) in [
+            ("members", None),
+            ("members", Some(unit)),
+            ("quota-members", None),
+        ] {
+            let path = format!("/v1/organizations/{org}/{collection}");
+            let cursor = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+                serde_json::to_vec(&serde_json::json!({
+                    "resource": collection, "organization_id": org, "unit_id": unit_id,
+                    "name": "Member 测试", "user_id": unit
+                }))
+                .unwrap(),
+            );
+            let filter = unit_id.map_or(String::new(), |id| format!("unit_id={id}&"));
+            for query in [
+                "limit=50".to_string(),
+                format!("limit=200&{filter}cursor={cursor}"),
+                format!("%6cimit=%35%30&{filter}cursor={cursor}"),
+            ] {
+                assert!(route_allowed("account", &Method::GET, &path, Some(&query)));
+                let request = || ApiRequest {
+                    area: "account".into(),
+                    resource: format!("{path}?{query}"),
+                    method: "GET".into(),
+                    body: None,
+                    idempotency_key: None,
+                };
+                let prepared = prepare_request(&config(), request()).unwrap();
+                assert_eq!(prepared.method, Method::GET);
+                assert_eq!(prepared.url.path(), path);
+                assert_eq!(prepared.url.query(), Some(query.as_str()));
+                let mut with_body = request();
+                with_body.body = Some(serde_json::json!({}));
+                assert!(prepare_request(&config(), with_body).is_err());
+                let mut with_key = request();
+                with_key.idempotency_key = Some("unexpected-list-key".into());
+                assert!(prepare_request(&config(), with_key).is_err());
+            }
+            for (method, resource) in [
+                ("GET", format!("{path}?limit=50&%6cimit=1")),
+                ("GET", format!("{path}?cursor=%2530")),
+                ("GET", format!("{path}?limit=%GG")),
+                ("GET", format!("{path}?limit=50#fragment")),
+                ("POST", format!("{path}?limit=50")),
+                ("PUT", format!("{path}/{unit}/units?limit=50")),
+            ] {
+                assert!(
+                    prepare_request(
+                        &config(),
+                        ApiRequest {
+                            area: "account".into(),
+                            resource,
+                            method: method.into(),
+                            body: None,
+                            idempotency_key: None,
+                        }
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn model_and_usage_allowlist_keeps_requests_finite() {
         for query in [
             None,
