@@ -35,7 +35,9 @@ impl BehaviorTelemetry {
     pub(super) async fn send_heartbeat(&self) -> Result<()> {
         // Serialize with consent, deletion and endpoint/credential changes. A
         // completed stop cannot be followed by a heartbeat from an old snapshot.
-        // The HTTP client bounds the time an in-flight request holds this gate.
+        // Each HTTP request is bounded to 12 seconds. Expired credentials can
+        // add register + collection/start under this gate (up to 36 seconds of
+        // network waits in total, in addition to local persistence work).
         let _control_guard = self.control_gate.lock().await;
         if !self.runtime.enabled || !self.state_healthy.load(Ordering::Acquire) {
             return Ok(());

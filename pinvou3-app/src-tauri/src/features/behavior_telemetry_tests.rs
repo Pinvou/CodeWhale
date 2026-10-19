@@ -206,6 +206,77 @@ fn heartbeat_state(runtime: &RuntimeConfig) -> PersistedState {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn installation_heartbeat_constructor_starts_persisted_installation_immediately() {
+    let home = TestHome::new();
+    let (base, heartbeat_server) = mock_http(vec![(200, "{}")]).await;
+    let (events_base, events_seen, release_events, events_server) =
+        controlled_http(503, "{}").await;
+    let events_url = format!("{events_base}/events");
+    let _env = EnvRestore::set(
+        &home,
+        &[
+            ("PINVOU_BEHAVIOR_TELEMETRY_ENABLED", "true"),
+            ("PINVOU_TELEMETRY_BASE_URL", &base),
+            ("PINVOU_BEHAVIOR_EVENTS_URL", &events_url),
+            (
+                "PINVOU_TELEMETRY_ENROLLMENT_TOKEN",
+                "test-enrollment-token-1234567890",
+            ),
+        ],
+    );
+    let runtime = RuntimeConfig::from_env();
+    let mut state = heartbeat_state(&runtime);
+    state.control.user_enabled = Some(true);
+    state.control.cohort_started = true;
+    persist_state(&state).unwrap();
+
+    // Exercise the production constructor's channels, gating and spawn; never
+    // inject a heartbeat sender or manually spawn the heartbeat worker here.
+    let telemetry = BehaviorTelemetry::new();
+    let channel_created = telemetry.heartbeat_tx.is_some();
+    let worker_state = Arc::downgrade(&telemetry.state);
+    let heartbeat = tokio::time::timeout(Duration::from_secs(3), heartbeat_server).await;
+    let event_upload = tokio::time::timeout(Duration::from_secs(3), events_seen).await;
+
+    // Drain all constructor workers before TestHome restores the process-wide
+    // environment, even when the heartbeat observation failed in a mutation run.
+    telemetry.collecting.store(false, Ordering::Release);
+    drop(telemetry);
+    let _ = release_events.send(());
+    events_server.abort();
+    let _ = events_server.await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while worker_state.upgrade().is_some() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("constructor workers should stop before restoring the test environment");
+
+    assert!(
+        channel_created,
+        "constructor must retain the heartbeat wake channel"
+    );
+    event_upload
+        .expect("startup event upload should begin")
+        .unwrap();
+    let requests = heartbeat
+        .expect("constructor must send its first heartbeat without waiting 120 seconds")
+        .unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].starts_with("POST /v1/heartbeat "));
+    assert!(requests[0].contains("Bearer installation_token"));
+    let body: Value = serde_json::from_str(requests[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(
+        body,
+        json!({
+            "device_id": "installation_device", "app_version": runtime.app_version,
+            "platform": runtime.platform, "arch": runtime.arch, "state": "online",
+        })
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn installation_heartbeat_does_not_wait_for_behavior_event_upload() {
     let _home = TestHome::new();
     let (base, heartbeat_server) = mock_http(vec![(200, "{}")]).await;
@@ -326,7 +397,12 @@ async fn installation_heartbeat_enable_wakes_without_waiting_for_interval() {
             .enabled
     );
     // The first response is collection/start; the next is the immediate heartbeat.
-    assert_eq!(observed.recv().await, Some(()));
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), observed.recv())
+            .await
+            .expect("collection/start response should be observed"),
+        Some(())
+    );
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(3), observed.recv())
             .await
@@ -349,7 +425,7 @@ async fn installation_heartbeat_skips_disabled_pending_mismatched_or_unhealthy_s
     let _home = TestHome::new();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let runtime = test_runtime(&format!("http://{}", listener.local_addr().unwrap()));
-    for case in 0..11 {
+    for case in 0..12 {
         let mut config = runtime.clone();
         let mut state = heartbeat_state(&config);
         match case {
@@ -360,6 +436,7 @@ async fn installation_heartbeat_skips_disabled_pending_mismatched_or_unhealthy_s
             4 => state.control.collection_period_id = None,
             5 => state.device_token = None,
             6 => state.telemetry_base_url.push_str("/old"),
+            11 => state.behavior_events_url.push_str("/old"),
             7 => {
                 state.control.pending_request = Some(PendingControlRequest {
                     kind: PendingControlKind::End,

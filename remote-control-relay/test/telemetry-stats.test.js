@@ -962,10 +962,10 @@ test("installation heartbeats keep an idle client online without counting behavi
       return store.authenticate(credential.device_id, credential.device_token);
     };
     const installation = register("installation_id");
-    const hardware = register("windows_cim_uuid");
+    const hardware = ["system_uuid", "ioplatformuuid", "persisted_random"].map(register);
     for (let minute = 0; minute <= 6; minute += 2) {
       if (minute) now += 120_000;
-      store.heartbeat(hardware, { state: "online" }, null);
+      hardware.forEach(device => store.heartbeat(device, { state: "online" }, null));
       store.heartbeat(installation, { state: "online" }, null);
       const devices = [...store.devices.values()];
       const overview = buildStatsOverview(devices, store.events, store.behaviorEvents, now);
@@ -980,7 +980,7 @@ test("installation heartbeats keep an idle client online without counting behavi
     assert.equal(store.behaviorEvents.length, 0);
     // The legacy heartbeat cannot keep a stopped installation online or double count it.
     now += 300_001;
-    store.heartbeat(hardware, { state: "online" }, null);
+    hardware.forEach(device => store.heartbeat(device, { state: "online" }, null));
     assert.equal(buildStatsOverview([...store.devices.values()], [], [], now).counts.online, 0);
   } finally {
     if (store?.saveTimer) clearTimeout(store.saveTimer);
