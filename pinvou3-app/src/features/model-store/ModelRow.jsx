@@ -143,7 +143,7 @@ function PrimaryAction({ model, copy, busyKind, onDownload, onDeploy, onEnable, 
  * @param {object} params - 参数。
  * @returns {React.ReactElement} 行卡。
  */
-function ModelRow({ model, copy, busyKind, onOpen, onDownload, onDeploy, onEnable, onStop, onUninstall }) {
+function ModelRow({ model, copy, busyKind, scriptUpdate, onOpen, onDownload, onDeploy, onEnable, onStop, onUninstall }) {
   const badge = STATE_BADGE[model.state] || STATE_BADGE.available;
   const busy = !!busyKind;
   const isDual = model.deploy_topology === 'dual';
@@ -231,6 +231,15 @@ function ModelRow({ model, copy, busyKind, onOpen, onDownload, onDeploy, onEnabl
           >
             {busyKind === 'deploy' ? copy.deploying : copy.redeploy}
           </button>
+        ) : null}
+        {/* 服务器有新版脚本 → 列表页直接标注，用户不需要到详情页手动检查 */}
+        {scriptUpdate && !model.record?.needs_redeploy ? (
+          <span
+            className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700 dark:bg-blue-500/10 dark:text-blue-300"
+            data-testid="model-store-script-update-badge"
+          >
+            {copy.scriptUpdateBadge}
+          </span>
         ) : null}
         <PrimaryAction
           model={model}

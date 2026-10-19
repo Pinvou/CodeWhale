@@ -486,6 +486,7 @@ export const dictEn = {
           enginesDelete:'Delete',
           enginesConfirm:(name)=>`Delete “${name}”? This frees the engine's disk space; model weights are not removed.`,
           enginesConfirmDelete:'Delete now',
+          scriptUpdateBadge:'Update available',
           enginesConfirmOllama:(name)=>`Delete "${name}"? This removes the ollama engine and ALL its model data (including weights, often tens of GB). You will need to re-download all models to use them again.`,
           enginesDeleted:(freed,purged)=>`Deleted, freed ${freed}.${purged?' Note: model data was also removed.':''}`,
           enginesDeleteFailed:(m)=>`Delete failed: ${m}`,

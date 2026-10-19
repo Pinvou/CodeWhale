@@ -484,6 +484,7 @@ const jaBase = {
           enginesDelete:'削除',
           enginesConfirm:(name)=>`「${name}」を削除しますか？エンジンの容量を解放します。モデルの重みは削除されません。`,
           enginesConfirmDelete:'削除を実行',
+          scriptUpdateBadge:'更新あり',
           enginesConfirmOllama:(name)=>`「${name}」を削除しますか？ollama エンジンとその全モデルデータ（重みを含む、数十GB）が削除されます。再利用には全モデルの再ダウンロードが必要です。`,
           enginesDeleted:(freed,purged)=>`削除しました。${freed} 解放されました。${purged?'注意：モデルデータも削除されました。':''}`,
           enginesDeleteFailed:(m)=>`削除に失敗しました：${m}`,

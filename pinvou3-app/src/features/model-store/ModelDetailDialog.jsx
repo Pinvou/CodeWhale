@@ -66,7 +66,7 @@ function CopyRow({ label, value, hint, copyLabel, onCopy, testId }) {
  * 按 `none` 处理——宁可多出一条黄条,不能少出一条。
  * @returns {React.ReactElement} 弹窗。
  */
-function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onToast, savedModels, onCardScripts, cardBusy }) {
+function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onToast, savedModels, onCardScripts, cardBusy, scriptUpdates }) {
   const [detail, setDetail] = useState(null);
   const [keys, setKeys] = useState([]);
   const [error, setError] = useState(null);
@@ -264,7 +264,8 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
           {/* 紧跟在「这个模型是什么」那几行后面:权重完整性跟引擎、体积是同一类
               事实,不是一条飘在页尾的免责声明。达标的卡这里什么都不长。 */}
           <WeightVerifyNotice card={card} copy={copy} />
-          {onCardScripts ? <CardScriptsActions key={record.card_id} record={record} copy={copy} busy={cardBusy} onAction={onCardScripts} /> : null}
+          {/* 只在服务器确实有新版脚本时才渲染更新入口——自动检测替代手动检查 */}
+          {onCardScripts && scriptUpdates?.[record.card_id] ? <CardScriptsActions key={record.card_id} record={record} copy={copy} busy={cardBusy} onAction={onCardScripts} /> : null}
 
           <div className="mt-5">
             <h3 className={`mb-2 text-[13px] font-medium ${TEXT_PRIMARY}`}>{copy.runtimeTitle}</h3>

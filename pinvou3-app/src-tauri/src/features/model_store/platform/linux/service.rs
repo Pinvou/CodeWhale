@@ -410,12 +410,26 @@ fn strip_bulky_fields<T: serde::Serialize>(models: T) -> Value {
 /// 永远是 false，界面上「重新部署」就永远不出现——比常驻还糟，因为脚本真的更新了
 /// 也没人提示。
 fn library_payload(models: Vec<db::StoreModelRecord>) -> Value {
+    // 先算两个派生判定再瘦身：它们要读 scripts_content，而 strip 会摘掉它。
     let flags: Vec<bool> = models.iter().map(needs_redeploy).collect();
+    // 本地脚本哈希摘要（script_type -> sha256）。前端拿它跟卡片列表的
+    // script_sha256 比对，自动检测「服务器有更新」——用户不需要手动检查。
+    let local_hashes: Vec<Value> = models
+        .iter()
+        .map(|m| {
+            let mut map = serde_json::Map::new();
+            for (kind, blob) in &m.scripts_content {
+                map.insert(kind.clone(), Value::String(blob.sha256.clone()));
+            }
+            Value::Object(map)
+        })
+        .collect();
     let mut value = strip_bulky_fields(models);
     if let Some(items) = value.as_array_mut() {
-        for (item, needs) in items.iter_mut().zip(flags) {
+        for (i, item) in items.iter_mut().enumerate() {
             if let Some(obj) = item.as_object_mut() {
-                obj.insert("needs_redeploy".to_string(), Value::Bool(needs));
+                obj.insert("needs_redeploy".to_string(), Value::Bool(flags[i]));
+                obj.insert("local_script_hashes".to_string(), local_hashes[i].clone());
             }
         }
     }

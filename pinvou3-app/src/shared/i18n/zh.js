@@ -519,6 +519,7 @@ export const dictZh = {
           enginesDelete:'删除',
           enginesConfirm:(name)=>`删除“${name}”？此操作会释放引擎空间；模型权重不会被删除。`,
           enginesConfirmDelete:'确认删除',
+          scriptUpdateBadge:'有可用更新',
           enginesConfirmOllama:(name)=>`删除「${name}」？此操作会删除 ollama 引擎及其全部模型数据（含权重，通常几十 GB）。如需再用，须重新下载所有模型。`,
           enginesDeleted:(freed,purged)=>`已删除，释放 ${freed}。${purged?'注意：模型数据已一并删除。':''}`,
           enginesDeleteFailed:(m)=>`删除失败：${m}`,

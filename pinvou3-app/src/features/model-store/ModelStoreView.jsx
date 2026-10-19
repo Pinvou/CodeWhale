@@ -226,6 +226,28 @@ const ModelStoreView = ({ theme, t, bs }) => {
    * 一边挂了不能把另一边的功能一起拖下水。
    * @returns {Promise<void>} 两边都落地后 resolve(各自已经吞掉自己的错误)。
    */
+  // 自动检测脚本更新：卡片列表的 script_sha256（服务器当前版）vs 本地
+  // local_script_hashes（上次缓存的版本）。有差异 → 该卡有可用更新。
+  // 前端做比对而不是后端：两个数据源（远程卡片列表 + 本地库）本来就分开加载。
+  const scriptUpdates = useMemo(() => {
+    const map = {};
+    if (!Array.isArray(cards) || !library?.models) return map;
+    for (const model of library.models) {
+      const card = cards.find((c) => c.id === model.card_id);
+      if (!card?.script_sha256) continue;
+      const local = model.local_script_hashes || {};
+      const server = card.script_sha256;
+      const types = new Set([...Object.keys(local), ...Object.keys(server)]);
+      for (const t of types) {
+        if ((local[t] || '') !== (server[t] || '')) {
+          map[model.card_id] = true;
+          break;
+        }
+      }
+    }
+    return map;
+  }, [cards, library]);
+
   const loadAll = useCallback(async () => {
     await Promise.all([loadCards(), loadLibrary()]);
   }, [loadCards, loadLibrary]);
@@ -716,6 +738,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
               key={model.id}
               model={model}
               copy={copy}
+              scriptUpdate={!!scriptUpdates[model.record?.card_id || model.card_id]}
               busyKind={
                 model.state === 'available' || model.state === 'incomplete'
                   ? (runningTask(downloadTaskKey(model.id))?.kind || null)
@@ -990,6 +1013,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
 
       <ModelDetailDialog
         cardId={detailCardId}
+        scriptUpdates={scriptUpdates}
         cardBusy={!!runningTask(lifecycleTaskKey(detailCardId)) || !!runningTask(downloadTaskKey(detailCardId))}
         onCardScripts={(record, rollback) => {
           setDetailCardId(null);
