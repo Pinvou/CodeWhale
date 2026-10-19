@@ -813,7 +813,7 @@ test("gateway does not echo controller protocol absent upstream and rejects mixe
 });
 
 test("real legacy v2 Relay is safe only behind the enrollment gateway", {
-  skip: process.platform !== "win32" ? "requires the Windows netstat listener inspection" : false,
+  skip: process.platform === "darwin" ? "listener inspection needs ss(8), which macOS does not ship" : false,
 }, async (t) => {
   const { root, registry } = await fixture(t);
   const relayPort = await freePort();

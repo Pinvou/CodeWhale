@@ -192,7 +192,7 @@ async function gatewayFixture(t, { beforeSpawn = () => {} } = {}) {
 
 test("rollback fixture retries a real occupied port and still runs the full coverage CLI", {
   timeout: 90_000,
-  skip: process.platform !== "win32" ? "requires the Windows netstat listener inspection" : false,
+  skip: process.platform === "darwin" ? "listener inspection needs ss(8), which macOS does not ship" : false,
 }, async (t) => {
   const blocker = net.createServer();
   t.after(() => new Promise((resolve) => blocker.close(resolve)));
@@ -257,7 +257,7 @@ test("rollback fixture bounds unknown stderr and never echoes it or retries", { 
 });
 
 test("rollback live gate: a real registry revocation during the preflight barrier cannot reuse initial coverage",
-  { timeout: 90_000, skip: process.platform !== "win32" ? "requires the Windows netstat listener inspection" : false }, async (t) => {
+  { timeout: 90_000, skip: process.platform === "darwin" ? "listener inspection needs ss(8), which macOS does not ship" : false }, async (t) => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "pinvou-rollback-revoke-")));
     let store;
     let upstream;
@@ -312,7 +312,7 @@ test("rollback live gate: a real registry revocation during the preflight barrie
   });
 
 test("rollback live gate: real gateway owner, coverage and preflight CLI succeed without acquiring a second lock",
-  { timeout: 90_000, skip: process.platform !== "win32" ? "requires the Windows netstat listener inspection" : false }, async (t) => {
+  { timeout: 90_000, skip: process.platform === "darwin" ? "listener inspection needs ss(8), which macOS does not ship" : false }, async (t) => {
     const { env, child } = await gatewayFixture(t);
     const paths = [env.PINVOU_REMOTE_CONTROLLER_STATE_PATH, `${env.PINVOU_REMOTE_CONTROLLER_STATE_PATH}.bak`,
       `${env.PINVOU_REMOTE_CONTROLLER_STATE_PATH}.lock`];
@@ -374,7 +374,7 @@ test("rollback live gate: protected control rejects unsigned, wrong-key, wrong-s
   });
 
 test("rollback live gate: authentic coverage cannot qualify a different public gateway instance",
-  { timeout: 90_000, skip: process.platform !== "win32" ? "requires the Windows netstat listener inspection" : false }, async (t) => {
+  { timeout: 90_000, skip: process.platform === "darwin" ? "listener inspection needs ss(8), which macOS does not ship" : false }, async (t) => {
     const { env } = await gatewayFixture(t);
     const snapshot = await requestEnrollmentCoverage({ endpointIds: ["legacy-rollback-endpoint"], env });
     const other = createEnrollmentGateway({
