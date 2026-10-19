@@ -376,9 +376,11 @@ function coreTaskActivityByDay(devices, behaviorEvents, startDay, endDay) {
 }
 
 function buildHourlyUsageTrend(devices, taskEvents, now) {
-  // 24 Beijing clock-hour buckets, including the current partial hour.
-  const endHour = Math.floor(now / HOUR_MS);
-  const startHour = endHour - 23;
+  // Beijing calendar days, sharing preprocessing with the legacy rolling window.
+  const currentHour = Math.floor(now / HOUR_MS);
+  const todayHour = (statsDay(now) * DAY_MS - STATS_TIMEZONE_OFFSET_MS) / HOUR_MS;
+  const startHour = todayHour - 24;
+  const endHour = todayHour + 23;
   const rows = new Map();
   for (let hour = startHour; hour <= endHour; hour += 1) {
     rows.set(hour, { hour: hour * HOUR_MS, device_ids: new Set(), new_devices: 0, turns: 0 });
@@ -400,7 +402,14 @@ function buildHourlyUsageTrend(devices, taskEvents, now) {
     const row = rowAt(device.first_seen_at);
     if (row) row.new_devices += 1;
   }
-  return [...rows.values()].map(({ device_ids, ...row }) => ({ ...row, active_devices: device_ids.size }));
+  const hourly = [...rows.values()].map(({ device_ids, ...row }) => ({ ...row, active_devices: device_ids.size }));
+  return {
+    current: hourly.filter(row => row.hour >= (currentHour - 23) * HOUR_MS && row.hour <= currentHour * HOUR_MS),
+    today: hourly.slice(24).map(row => row.hour > now
+      ? { hour: row.hour, active_devices: null, new_devices: null, turns: null }
+      : row),
+    previous: hourly.slice(0, 24),
+  };
 }
 
 function installationConversationsByDay(finishedEvents, startDay, endDay) {
@@ -487,6 +496,7 @@ export function buildStatsOverview(devices, events, behaviorEventsOrNow = [], fa
   const versionRows = (versions) => [...versions.entries()]
     .map(([version, count]) => ({ version, count }))
     .sort((a, b) => b.count - a.count || a.version.localeCompare(b.version));
+  const hourlyTrend = buildHourlyUsageTrend(operationalDevices, taskEvents, now);
 
   return {
     generated_at: now,
@@ -501,7 +511,9 @@ export function buildStatsOverview(devices, events, behaviorEventsOrNow = [], fa
       active_devices: row.device_ids.size,
       turns: row.turns,
     })),
-    usage_trend_hourly: buildHourlyUsageTrend(operationalDevices, taskEvents, now),
+    usage_trend_hourly: hourlyTrend.current,
+    usage_trend_hourly_today: hourlyTrend.today,
+    usage_trend_hourly_previous: hourlyTrend.previous,
     active_versions: versionRows(versionMap),
     active_versions_by_platform: Object.fromEntries(Object.entries(platformVersionMaps)
       .map(([platform, versions]) => [platform, versionRows(versions)])),

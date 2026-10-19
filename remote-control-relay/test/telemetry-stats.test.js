@@ -170,6 +170,41 @@ test("hourly usage includes 24 clock hours with exact boundaries and isolated co
   assert(empty.every(row => row.active_devices === 0 && row.new_devices === 0 && row.turns === 0));
 });
 
+test("hourly calendar comparison aligns Beijing days, keeps yesterday complete and leaves future hours null", () => {
+  const now = at("2026-10-19T00:30:00");
+  const today = at("2026-10-19T00:00:00");
+  const yesterday = today - 86_400_000;
+  const devices = [
+    { device_id: "a", first_seen_at: yesterday },
+    { device_id: "b", first_seen_at: yesterday + 3_599_999 },
+    { device_id: "c", first_seen_at: today },
+    { device_id: "future", first_seen_at: now + 1 },
+  ].map(row => ({ ...row, hardware_source: "installation_id" }));
+  const event = (device_id, attempt_id, occurred_at) => ({
+    device_id, attempt_id, event_name: "task_finished", occurred_at, mode: "assistant", initiator_type: "user",
+  });
+  const events = [
+    event("a", "before", yesterday - 1), event("a", "first", yesterday),
+    event("b", "late", yesterday + 3_599_999), event("a", "last", today - 1),
+    event("c", "today", now), event("future", "future", now + 1),
+  ];
+  const report = buildStatsOverview(devices, [], events, now);
+  const previous = report.usage_trend_hourly_previous;
+  const current = report.usage_trend_hourly_today;
+  assert.equal(previous.length, 24);
+  assert.equal(current.length, 24);
+  assert.deepEqual(previous[0], { hour: yesterday, active_devices: 2, new_devices: 2, turns: 2 });
+  assert.deepEqual(previous[23], { hour: today - 3_600_000, active_devices: 1, new_devices: 0, turns: 1 });
+  assert.deepEqual(current[0], { hour: today, active_devices: 1, new_devices: 1, turns: 1 });
+  assert(current.slice(1).every(row => row.active_devices === null && row.new_devices === null && row.turns === null));
+  assert(current.every((row, index) => row.hour === today + index * 3_600_000 && row.hour - previous[index].hour === 86_400_000));
+  assert.equal(report.usage_trend_hourly.length, 24);
+  assert.equal(report.usage_trend_hourly[0].hour, yesterday + 3_600_000);
+  const boundary = buildStatsOverview([], [], [], today + 3_600_000).usage_trend_hourly_today;
+  assert.deepEqual(boundary[1], { hour: today + 3_600_000, active_devices: 0, new_devices: 0, turns: 0 });
+  assert.equal(boundary[2].turns, null);
+});
+
 test("hourly conversations preserve daily clipping and deduplication before slicing the hourly window", () => {
   const now = at("2026-10-19T12:30:00");
   const devices = [{ device_id: "a", hardware_source: "installation_id" }];
@@ -184,6 +219,8 @@ test("hourly conversations preserve daily clipping and deduplication before slic
   const report = buildStatsOverview(devices, [], events, now);
   assert.equal(report.usage_trend_hourly.reduce((sum, row) => sum + row.turns, 0), 1);
   assert.equal(report.usage_trend_hourly.at(-1).turns, report.usage_trend.at(-1).turns);
+  assert.equal(report.usage_trend_hourly_previous.reduce((sum, row) => sum + row.turns, 0), 100);
+  assert.equal(report.usage_trend_hourly_today.reduce((sum, row) => sum + row.turns, 0), 1);
 });
 
 test("shared chart preprocessing excludes future submissions and completions only from hourly totals", () => {

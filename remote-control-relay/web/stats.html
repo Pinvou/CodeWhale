@@ -22,6 +22,10 @@
     @media(max-width:1000px){.panels{grid-template-columns:1fr}.metrics{grid-template-columns:1fr 1fr}.table-wrap{max-height:none}.table-card{overflow:auto}}
     @media(max-width:680px){.version-grid{grid-template-columns:1fr}.usage-panels .card-title{flex-wrap:wrap}.version-panel .version-list{min-height:0}}
     @media(max-width:680px){.topbar{height:62px;padding:0 16px}.top-brand small,.live{display:none}.content{padding:21px 16px 36px}.headline{align-items:flex-start}.headline h1{font-size:23px}.refresh{display:none}.metrics{grid-template-columns:1fr}.panels{grid-template-columns:1fr}.donut-wrap{justify-content:center}.table-head{align-items:flex-start;gap:10px;flex-wrap:wrap}.tools .search{display:none}.behavior-meta-row{align-items:stretch;flex-direction:column}.behavior-period{justify-content:space-between}}
+      #hourlyTrendSvg .line2{stroke-dasharray:none}
+    #hourlyTrendSvg .previous-day{stroke-dasharray:5 5;opacity:.5}
+    .period-legend{font-size:11px;gap:16px;margin-top:6px}.period-legend i{width:22px;height:0;border-top:2px solid #778399;border-radius:0}.period-legend .previous-key{border-top-style:dashed;opacity:.5}
+    .chart-tooltip .comparison-label{margin-top:8px;font-size:11px;color:#778399}
   </style>
   <style>
     .rank-card-full-width { grid-column: 1 / -1; }
@@ -71,7 +75,7 @@
       </section>
       <section class="panels usage-panels">
         <article class="card"><div class="card-title"><div><h2>使用趋势</h2><p>设备活跃、新增与对话次数的相对变化</p></div><div class="seg"><button data-days="7">7 天</button><button class="active" data-days="30">30 天</button></div></div><div class="legend trend-legend"><span><i style="background:#3267e3"></i>活跃设备</span><span><i style="background:#8b5fd3"></i>新增设备</span><span><i style="background:#ed9153"></i>对话次数</span></div><div class="chart"><svg id="trendSvg" viewBox="0 0 780 220" preserveAspectRatio="none"></svg><div id="trendTooltip" class="chart-tooltip" role="status" aria-live="polite" hidden></div></div></article>
-        <article class="card"><div class="card-title"><div><h2>最近 24 小时使用趋势</h2><p>按小时统计 · 北京时间 · 含当前未结束小时</p></div></div><div class="legend trend-legend"><span><i style="background:#3267e3"></i>活跃设备</span><span><i style="background:#8b5fd3"></i>新增设备</span><span><i style="background:#ed9153"></i>对话次数</span></div><div class="chart"><svg id="hourlyTrendSvg" viewBox="0 0 780 220" preserveAspectRatio="none"></svg><div id="hourlyTrendTooltip" class="chart-tooltip" role="status" aria-live="polite" hidden></div></div></article>
+        <article class="card"><div class="card-title"><div><h2>今日 / 昨日 24 小时趋势</h2><p>北京时间 0–23 点 · 今日当前小时尚未结束</p></div></div><div class="legend trend-legend"><span><i style="background:#3267e3"></i>活跃设备</span><span><i style="background:#8b5fd3"></i>新增设备</span><span><i style="background:#ed9153"></i>对话次数</span></div><div class="legend period-legend"><span><i></i>今日</span><span><i class="previous-key"></i>昨日（完整小时）</span></div><div class="chart"><svg id="hourlyTrendSvg" viewBox="0 0 780 220" preserveAspectRatio="none"></svg><div id="hourlyTrendTooltip" class="chart-tooltip" role="status" aria-live="polite" hidden></div></div></article>
       </section>
       <section class="card version-coverage" aria-labelledby="versionCoverageTitle">
         <div class="card-title"><div><h2 id="versionCoverageTitle">版本覆盖</h2><p>近 7 日活跃设备 · 各平台分别展示前 5 个版本，其余合并</p></div></div>
@@ -157,35 +161,71 @@
   const statsDayLabel=day=>new Date(day*DAY_MS).toISOString().slice(0,10);
   async function api(path,options={}){const response=await fetch(`/pinvou3/stats/api/${path}`,{...options,headers:{'content-type':'application/json',...(options.headers||{})}});if(response.status===401)throw new Error('unauthorized');if(response.status===403)throw new Error('forbidden');if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.json()}
   function showLogin(message=''){if(state.timer)clearInterval(state.timer);state.timer=null;$('loginLayer').classList.remove('hidden');$('loginError').textContent=message;setTimeout(()=>$('password').focus(),60)}
-  function linePath(values,max,left=35,right=770,top=22,bottom=184){if(!values.length)return'';return values.map((value,index)=>{const x=left+(right-left)*(values.length===1?0:index/(values.length-1));const y=bottom-(Math.max(0,value)/(max||1))*(bottom-top);return`${index?'L':'M'}${x.toFixed(1)} ${y.toFixed(1)}`}).join(' ')}
+  function linePath(values,max,left=35,right=770,top=22,bottom=184){
+    let connected=false;
+    return values.map((value,index)=>{
+      if(value===null){connected=false;return''}
+      const x=left+(right-left)*(values.length===1?0:index/(values.length-1)),y=bottom-Math.max(0,value)/(max||1)*(bottom-top);
+      const command=connected?'L':'M';connected=true;
+      return`${command}${x.toFixed(1)} ${y.toFixed(1)}`;
+    }).filter(Boolean).join(' ');
+  }
   function renderTrend(){
     const source=state.overview?.usage_trend||[],days=source.slice(-state.range),newByDay=new Map(days.map(row=>[row.day,0]));
     state.devices.forEach(device=>{const day=statsDayLabel(statsDay(device.first_seen_at));if(newByDay.has(day))newByDay.set(day,newByDay.get(day)+1)});
     renderUsageTrend('trend', days.map(row=>({...row,label:row.day,axis:row.day.slice(5),new_devices:newByDay.get(row.day)||0})), false);
   }
+  function hourlyLabel(hour){
+    const label=new Date(Number(hour)+STATS_TIMEZONE_OFFSET_MS).toISOString().slice(0,16).replace('T',' ');
+    return`${label}–${String((Number(label.slice(-5,-3))+1)%24).padStart(2,'0')}:00（北京时间）`;
+  }
   function renderHourlyTrend(){
-    const rows=(state.overview?.usage_trend_hourly||[]).map(row=>{
-      const label=new Date(Number(row.hour)+STATS_TIMEZONE_OFFSET_MS).toISOString().slice(0,16).replace('T',' ');
-      return {...row,label:`${label}–${String((Number(label.slice(-5,-3))+1)%24).padStart(2,'0')}:00（北京时间）`,axis:label.slice(11)};
-    });
+    const previous=new Map((state.overview?.usage_trend_hourly_previous||[]).map(row=>[Number(row.hour),row]));
+    const rows=(state.overview?.usage_trend_hourly_today||[]).map(row=>({
+      ...row,label:hourlyLabel(row.hour),axis:new Date(Number(row.hour)+STATS_TIMEZONE_OFFSET_MS).toISOString().slice(11,16),
+      previous:previous.get(Number(row.hour)-DAY_MS),
+    }));
     renderUsageTrend('hourlyTrend', rows, true);
   }
   function renderUsageTrend(prefix,days,hourly){
-    const active=days.map(row=>Number(row.active_devices)||0),newDevices=days.map(row=>Number(row.new_devices)||0),turns=days.map(row=>Number(row.turns)||0),activeMax=Math.max(1,...active),newMax=Math.max(1,...newDevices),turnMax=Math.max(1,...turns),activePath=linePath(active,activeMax),newPath=linePath(newDevices,newMax),turnPath=linePath(turns,turnMax),lastX=days.length>1?770:35;
+    const number=value=>value==null?null:Number(value)||0;
+    const series=[
+      {key:'active_devices',label:'活跃设备',unit:'台',color:'#3267e3',className:'line',dot:'Active'},
+      {key:'new_devices',label:'新增设备',unit:'台',color:'#8b5fd3',className:'line3',dot:'New'},
+      {key:'turns',label:'对话次数',unit:'次',color:'#ed9153',className:'line2',dot:'Turns'},
+    ].map(item=>{
+      const values=days.map(row=>number(row[item.key])),previous=days.map(row=>number(row.previous?.[item.key]));
+      return {...item,values,previous,max:Math.max(1,...values,...previous)};
+    });
     const labels=[0,Math.floor((days.length-1)/4),Math.floor((days.length-1)/2),Math.floor((days.length-1)*3/4),days.length-1].filter((value,index,array)=>value>=0&&array.indexOf(value)===index),svg=$(`${prefix}Svg`),tooltip=$(`${prefix}Tooltip`);
+    const pointX=index=>35+735*(days.length===1?0:index/(days.length-1)),pointY=(value,max)=>184-Math.max(0,value)/max*162;
     tooltip.hidden=true;
     let axis=svg.parentElement.querySelector('.chart-axis');
     if(!axis){axis=document.createElement('div');axis.className='chart-axis';axis.setAttribute('aria-hidden','true');svg.parentElement.append(axis)}
     axis.innerHTML=labels.map(index=>`<span style="left:${days.length>1?index/(days.length-1)*100:0}%;transform:translateX(${index===0?'0':index===days.length-1?'-100%':'-50%'})">${escapeHtml(days[index]?.axis||'')}</span>`).join('');
-    svg.innerHTML=`<defs><linearGradient id="${prefix}Area" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3267e3" stop-opacity=".18"/><stop offset="1" stop-color="#3267e3" stop-opacity="0"/></linearGradient></defs>${[22,76,130,184].map(y=>`<line class="gridline" x1="35" y1="${y}" x2="770" y2="${y}"/>`).join('')}${activePath?`<path class="area" style="fill:url(#${prefix}Area)" d="${activePath} L${lastX} 184 L35 184 Z"/><path class="line" d="${activePath}"/><path class="line3" d="${newPath}"/><path class="line2" d="${turnPath}"/>`:''}${days.length?`<g id="${prefix}Hover" visibility="hidden" aria-hidden="true"><line id="${prefix}Crosshair" class="trend-crosshair" y1="22" y2="184"/><circle id="${prefix}DotActive" class="trend-dot trend-dot-active" r="5"/><circle id="${prefix}DotNew" class="trend-dot trend-dot-new" r="5"/><circle id="${prefix}DotTurns" class="trend-dot trend-dot-turns" r="5"/></g><rect id="${prefix}HitArea" class="trend-hit" x="35" y="18" width="735" height="170" tabindex="0" role="slider" aria-orientation="horizontal" aria-valuemin="0" aria-valuemax="${days.length-1}" aria-valuenow="${days.length-1}" aria-label="使用趋势图，使用左右方向键查看${hourly?'每小时':'每日'}数据"/>`:''}`;
-    if(!days.length){
-      svg.innerHTML += '<text class="axis" x="390" y="105" text-anchor="middle">暂无趋势数据</text>';
-      return;
-    }
-    const hit=$(`${prefix}HitArea`),hover=$(`${prefix}Hover`),crosshair=$(`${prefix}Crosshair`),dots=[$(`${prefix}DotActive`),$(`${prefix}DotNew`),$(`${prefix}DotTurns`)],pointX=index=>35+735*(days.length===1?0:index/(days.length-1)),pointY=(value,max)=>184-Math.max(0,value)/max*162,hide=()=>{hover.setAttribute('visibility','hidden');tooltip.hidden=true};
-    const show=index=>{const selected=Math.max(0,Math.min(days.length-1,index)),row=days[selected],x=pointX(selected),values=[active[selected],newDevices[selected],turns[selected]],ys=[pointY(values[0],activeMax),pointY(values[1],newMax),pointY(values[2],turnMax)],summary=`${row.label}，活跃设备 ${values[0]} 台，新增设备 ${values[1]} 台，对话次数 ${values[2]} 次`;hit.dataset.index=String(selected);hit.setAttribute('aria-valuemin','0');hit.setAttribute('aria-valuemax',String(days.length-1));hit.setAttribute('aria-valuenow',String(selected));hit.setAttribute('aria-valuetext',summary);crosshair.setAttribute('x1',x.toFixed(1));crosshair.setAttribute('x2',x.toFixed(1));dots.forEach((dot,dotIndex)=>{dot.setAttribute('cx',x.toFixed(1));dot.setAttribute('cy',ys[dotIndex].toFixed(1))});hover.setAttribute('visibility','visible');tooltip.innerHTML=`<strong>${escapeHtml(row.label)}</strong><span><i style="background:#3267e3"></i>活跃设备<b>${nf.format(values[0])} 台</b></span><span><i style="background:#8b5fd3"></i>新增设备<b>${nf.format(values[1])} 台</b></span><span><i style="background:#ed9153"></i>对话次数<b>${nf.format(values[2])} 次</b></span>`;tooltip.hidden=false;const bounds=svg.getBoundingClientRect(),chartWidth=svg.parentElement.clientWidth||bounds.width||780,xPx=x/780*chartWidth,half=Math.min((tooltip.offsetWidth||184)/2,Math.max(0,chartWidth/2-4));tooltip.style.left=`${Math.max(half+4,Math.min(chartWidth-half-4,xPx))}px`};
+    const activePath=linePath(series[0].values,series[0].max),lastActive=series[0].values.findLastIndex(value=>value!==null);
+    const paths=series.map(item=>{
+      const current=linePath(item.values,item.max),previous=linePath(item.previous,item.max),last=item.values.findLastIndex(value=>value!==null);
+      return`${hourly&&previous?`<path class="${item.className} previous-day" d="${previous}"/>`:''}${current?`<path class="${item.className}" d="${current}"/>`:''}${hourly&&last>=0?`<circle class="current-point" fill="${item.color}" cx="${pointX(last).toFixed(1)}" cy="${pointY(item.values[last],item.max).toFixed(1)}" r="3"/>`:''}`;
+    }).join('');
+    svg.innerHTML=`<defs><linearGradient id="${prefix}Area" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3267e3" stop-opacity=".18"/><stop offset="1" stop-color="#3267e3" stop-opacity="0"/></linearGradient></defs>${[22,76,130,184].map(y=>`<line class="gridline" x1="35" y1="${y}" x2="770" y2="${y}"/>`).join('')}${activePath?`<path class="area" style="fill:url(#${prefix}Area)" d="${activePath} L${pointX(lastActive)} 184 L35 184 Z"/>`:''}${paths}${days.length?`<g id="${prefix}Hover" visibility="hidden" aria-hidden="true"><line id="${prefix}Crosshair" class="trend-crosshair" y1="22" y2="184"/>${series.map(item=>`<circle id="${prefix}Dot${item.dot}" class="trend-dot" fill="${item.color}" r="5"/>`).join('')}</g><rect id="${prefix}HitArea" class="trend-hit" x="35" y="18" width="735" height="170" tabindex="0" role="slider" aria-orientation="horizontal" aria-valuemin="0" aria-valuemax="${days.length-1}" aria-valuenow="${Math.max(0,lastActive)}" aria-label="使用趋势图，使用左右方向键查看${hourly?'每小时今日与昨日对照':'每日'}数据"/>`:''}`;
+    if(!days.length){svg.innerHTML+='<text class="axis" x="390" y="105" text-anchor="middle">暂无趋势数据</text>';return}
+    const hit=$(`${prefix}HitArea`),hover=$(`${prefix}Hover`),crosshair=$(`${prefix}Crosshair`),hide=()=>{hover.setAttribute('visibility','hidden');tooltip.hidden=true};
+    const show=index=>{
+      const selected=Math.max(0,Math.min(days.length-1,index)),row=days[selected],x=pointX(selected),future=hourly&&row.active_devices===null;
+      const currentSummary=series.map(item=>`${item.label} ${item.values[selected]??'—'} ${item.unit}`).join('，');
+      const previousSummary=series.map(item=>`${item.label} ${item.previous[selected]??'—'} ${item.unit}`).join('，');
+      const summary=`${row.label}，${hourly?'今日，':''}${future?'尚未到达':currentSummary}${hourly?`；昨日 ${hourlyLabel(Number(row.hour)-DAY_MS)}，${row.previous?previousSummary:'暂无数据'}`:''}`;
+      hit.dataset.index=String(selected);hit.setAttribute('aria-valuenow',String(selected));hit.setAttribute('aria-valuetext',summary);
+      crosshair.setAttribute('x1',x.toFixed(1));crosshair.setAttribute('x2',x.toFixed(1));
+      series.forEach(item=>{const dot=$(`${prefix}Dot${item.dot}`),value=item.values[selected];dot.style.display=value===null?'none':'';dot.setAttribute('cx',x.toFixed(1));dot.setAttribute('cy',pointY(value,item.max).toFixed(1))});
+      hover.setAttribute('visibility','visible');
+      const detail=previous=>series.map(item=>`<span><i style="background:${item.color}${previous?';opacity:.5':''}"></i>${item.label}<b>${(previous?item.previous:item.values)[selected]===null?'—':nf.format((previous?item.previous:item.values)[selected])} ${item.unit}</b></span>`).join('');
+      tooltip.innerHTML=`<strong>${escapeHtml(row.label)}</strong>${hourly?'<strong class="comparison-label">今日</strong>':''}${future?'尚未到达':detail(false)}${hourly?`<strong class="comparison-label">昨日 ${escapeHtml(hourlyLabel(Number(row.hour)-DAY_MS))}</strong>${row.previous?detail(true):'暂无数据'}`:''}`;
+      tooltip.hidden=false;const bounds=svg.getBoundingClientRect(),chartWidth=svg.parentElement.clientWidth||bounds.width||780,xPx=x/780*chartWidth,half=Math.min((tooltip.offsetWidth||184)/2,Math.max(0,chartWidth/2-4));tooltip.style.left=`${Math.max(half+4,Math.min(chartWidth-half-4,xPx))}px`;
+    };
     const indexAt=clientX=>{const bounds=svg.getBoundingClientRect(),viewX=(clientX-bounds.left)/(bounds.width||1)*780,ratio=(Math.max(35,Math.min(770,viewX))-35)/735;return Math.round(ratio*(days.length-1))};
-    hit.addEventListener('pointermove',event=>show(indexAt(event.clientX)));hit.addEventListener('pointerdown',event=>show(indexAt(event.clientX)));hit.addEventListener('pointerleave',hide);hit.addEventListener('focus',()=>show(Number(hit.dataset.index??days.length-1)));hit.addEventListener('blur',hide);hit.addEventListener('keydown',event=>{if(event.key!=='ArrowLeft'&&event.key!=='ArrowRight'&&event.key!=='Home'&&event.key!=='End')return;event.preventDefault();const current=Number(hit.dataset.index??days.length-1),next=event.key==='Home'?0:event.key==='End'?days.length-1:current+(event.key==='ArrowLeft'?-1:1);show(next)});
+    hit.addEventListener('pointermove',event=>show(indexAt(event.clientX)));hit.addEventListener('pointerdown',event=>show(indexAt(event.clientX)));hit.addEventListener('pointerleave',hide);hit.addEventListener('focus',()=>show(Number(hit.dataset.index??Math.max(0,lastActive))));hit.addEventListener('blur',hide);hit.addEventListener('keydown',event=>{if(event.key!=='ArrowLeft'&&event.key!=='ArrowRight'&&event.key!=='Home'&&event.key!=='End')return;event.preventDefault();const current=Number(hit.dataset.index??Math.max(0,lastActive)),next=event.key==='Home'?0:event.key==='End'?days.length-1:current+(event.key==='ArrowLeft'?-1:1);show(next)});
   }
   function renderVersionChart(prefix, versions){
     const total=versions.reduce((sum,row)=>sum+row.count,0),colors=['#3267e3','#8b5fd3','#ed9153','#1d9b70','#7da5dc','#e7ecf5'];

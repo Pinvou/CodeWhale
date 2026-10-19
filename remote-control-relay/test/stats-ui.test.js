@@ -392,10 +392,10 @@ test("version coverage shows four independent charts with five versions and rema
 });
 
 test("hourly and daily charts coexist with independent pointers, keyboard navigation and refresh", async () => {
-  const start = Date.parse("2026-10-18T01:00:00+08:00");
+  const start = Date.parse("2026-10-19T00:00:00+08:00");
   let report = {
     ...overview,
-    usage_trend_hourly: Array.from({ length: 24 }, (_, index) => ({
+    usage_trend_hourly_today: Array.from({ length: 24 }, (_, index) => ({
       hour: start + index * 3_600_000, active_devices: index === 23 ? 2 : 0,
       new_devices: index === 23 ? 1 : 0, turns: index === 23 ? 9 : 0,
     })),
@@ -419,31 +419,87 @@ test("hourly and daily charts coexist with independent pointers, keyboard naviga
     const tooltip = doc.querySelector("#hourlyTrendTooltip");
     hit.dispatchEvent(new dom.window.MouseEvent("pointermove", { clientX: 770, bubbles: true }));
     assert.equal(tooltip.hidden, false);
-    assert.match(tooltip.textContent, /2026-10-19 00:00–01:00（北京时间）/);
+    assert.match(tooltip.textContent, /2026-10-19 23:00–00:00（北京时间）/);
     assert.match(tooltip.textContent, /活跃设备2 台/);
     assert.match(tooltip.textContent, /新增设备1 台/);
     assert.match(tooltip.textContent, /对话次数9 次/);
     assert.equal(doc.querySelector("#trendTooltip").hidden, true);
     hit.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Home", bubbles: true }));
-    assert.match(hit.getAttribute("aria-valuetext"), /2026-10-18 01:00–02:00/);
+    assert.match(hit.getAttribute("aria-valuetext"), /2026-10-19 00:00–01:00/);
     assert.match(tooltip.textContent, /对话次数0 次/);
     assert.equal(hit.getAttribute("aria-valuemax"), "23");
     const before = hourlySvg.innerHTML;
     doc.querySelector('[data-days="7"]').click();
     assert.equal(hourlySvg.innerHTML, before);
     assert.equal(new Set([...doc.querySelectorAll("[id]")].map(el => el.id)).size, doc.querySelectorAll("[id]").length);
-    report = { ...report, usage_trend_hourly: report.usage_trend_hourly.map(row => ({ ...row, turns: 4 })) };
+    report = { ...report, usage_trend_hourly_today: report.usage_trend_hourly_today.map(row => ({ ...row, turns: 4 })) };
     doc.querySelector("#refreshButton").click();
     await wait();
     hit = doc.querySelector("#hourlyTrendHitArea");
     hit.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "End", bubbles: true }));
     assert.match(tooltip.textContent, /对话次数4 次/);
-    report = { ...report, usage_trend_hourly: [] };
+    report = { ...report, usage_trend_hourly_today: [] };
     doc.querySelector("#refreshButton").click();
     await wait();
     assert.equal(tooltip.hidden, true);
     assert.equal(doc.querySelector("#hourlyTrendHitArea"), null);
     assert.match(hourlySvg.textContent, /暂无趋势数据/);
+  } finally { dom.window.close(); }
+});
+
+test("hourly comparison shares scales, styles yesterday separately and does not draw future zeros", async () => {
+  const today = Date.parse("2026-10-19T00:00:00+08:00");
+  let report = {
+    ...overview,
+    usage_trend_hourly_today: Array.from({ length: 24 }, (_, index) => ({
+      hour: today + index * 3_600_000, active_devices: index === 0 ? 1 : null,
+      new_devices: index === 0 ? 0 : null, turns: index === 0 ? 10 : null,
+    })),
+    usage_trend_hourly_previous: Array.from({ length: 24 }, (_, index) => ({
+      hour: today - 86_400_000 + index * 3_600_000, active_devices: 2, new_devices: 1, turns: 20,
+    })).reverse(), // Match timestamps, never rely on transport ordering.
+  };
+  const dom = new JSDOM(statsHtml, {
+    runScripts: "dangerously", url: "https://www.pinvou.com/pinvou3/stats",
+    beforeParse(window) {
+      window.fetch = async url => ({ ok: true, status: 200, json: async () => String(url).endsWith("/overview") ? report : { devices } });
+      window.setInterval = () => 1;
+    },
+  });
+  try {
+    const wait = () => new Promise(resolve => dom.window.setTimeout(resolve, 20));
+    await wait();
+    const doc = dom.window.document;
+    const svg = doc.querySelector("#hourlyTrendSvg");
+    assert.equal(svg.querySelectorAll("path.previous-day").length, 3);
+    const turns = svg.querySelector("path.line2:not(.previous-day)");
+    const previous = svg.querySelector("path.line2.previous-day");
+    assert.equal(turns.getAttribute("d"), "M35.0 103.0"); // 10 on the shared 20 scale.
+    assert.match(previous.getAttribute("d"), /^M35\.0 22\.0 L/);
+    assert.equal(dom.window.getComputedStyle(turns).strokeDasharray, "none");
+    assert.equal(dom.window.getComputedStyle(previous).strokeDasharray, "5 5");
+    assert.equal(dom.window.getComputedStyle(previous).opacity, "0.5");
+    assert.equal(svg.querySelectorAll("circle.current-point").length, 3);
+    assert.match(svg.parentElement.querySelector(".chart-axis").textContent, /^00:00.*23:00$/);
+    let hit = doc.querySelector("#hourlyTrendHitArea");
+    const tooltip = doc.querySelector("#hourlyTrendTooltip");
+    hit.dispatchEvent(new dom.window.Event("focus"));
+    assert.equal(hit.getAttribute("aria-valuenow"), "0");
+    assert.match(tooltip.textContent, /今日.*对话次数10 次.*昨日 2026-10-18 00:00.*对话次数20 次/);
+    hit.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "End", bubbles: true }));
+    assert.match(tooltip.textContent, /今日尚未到达.*昨日 2026-10-18 23:00.*对话次数20 次/);
+    assert.match(hit.getAttribute("aria-valuetext"), /尚未到达.*昨日.*对话次数 20 次/);
+    assert.equal(doc.querySelector("#hourlyTrendDotTurns").style.display, "none");
+    hit.dispatchEvent(new dom.window.MouseEvent("pointerleave"));
+    assert.equal(tooltip.hidden, true);
+    assert.equal(doc.querySelector("#hourlyTrendHover").getAttribute("visibility"), "hidden");
+    report = { ...report, usage_trend_hourly_previous: [] };
+    doc.querySelector("#refreshButton").click();
+    await wait();
+    assert.equal(svg.querySelectorAll("path.previous-day").length, 0);
+    hit = doc.querySelector("#hourlyTrendHitArea");
+    hit.dispatchEvent(new dom.window.Event("focus"));
+    assert.match(tooltip.textContent, /昨日.*暂无数据/);
   } finally { dom.window.close(); }
 });
 
