@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { scheduleStartupUpdateCheck, STARTUP_UPDATE_DELAY_MS, updatesForLibrary, initialStartupUpdateState, reduceStartupUpdates, hasUnreadStartupUpdates } from '../src/features/model-store/startup-update-check.js';
+import { VIEWED_UPDATES_STORAGE_KEY, loadViewedUpdateRevisions, saveViewedUpdateRevisions } from '../src/features/model-store/startup-update-read-state.js';
+
+function memoryStorage(raw) {
+  const values = new Map(raw === undefined ? [] : [[VIEWED_UPDATES_STORAGE_KEY, raw]]);
+  return {
+    writes: 0,
+    getItem: (key) => values.get(key) ?? null,
+    setItem(key, value) { values.set(key, value); this.writes += 1; },
+  };
+}
 
 function fixture(available = true, check = async () => ({ updates: [] })) {
   let counter = 0;
@@ -91,4 +101,77 @@ test('acknowledgement is scoped to the card and remote revision', () => {
   state = reduceStartupUpdates(state, { type: 'viewed' });
   state = reduceStartupUpdates(state, { type: 'report', updates: [{ card_id: 'b', revision: 'v2' }], models: null });
   assert.equal(hasUnreadStartupUpdates(state), true);
+});
+
+test('app restart keeps viewed sidebar updates read without hiding model badges or skipping detection', async () => {
+  const storage = memoryStorage();
+  const updates = [{ card_id: 'a', local_revision: 'installed', revision: 'new' }];
+  let checks = 0;
+  async function startApp(viewingStore) {
+    let state = initialStartupUpdateState(loadViewedUpdateRevisions(storage));
+    const startup = fixture(true, async () => { checks += 1; return { updates }; });
+    startup.paint(); startup.paint(); startup.fire(); await new Promise(setImmediate);
+    state = reduceStartupUpdates(state, { type: 'report', updates: startup.reports[0].updates, models: null, viewingStore });
+    return state;
+  }
+  const viewed = await startApp(true);
+  assert.equal(saveViewedUpdateRevisions(viewed.viewedRevisions, storage), true);
+  const restarted = await startApp(false);
+  assert.equal(checks, 2, 'each app launch still performs its own startup check');
+  assert.equal(hasUnreadStartupUpdates(restarted), false);
+  assert.deepEqual(restarted.updates, updates, 'installed cards keep their available update badges');
+});
+
+test('persisted acknowledgement does not suppress a new revision or a different card', () => {
+  const storage = memoryStorage();
+  const viewed = reduceStartupUpdates(initialStartupUpdateState(), { type: 'report', updates: [{ card_id: 'a', revision: 'v1' }], viewingStore: true });
+  saveViewedUpdateRevisions(viewed.viewedRevisions, storage);
+  for (const updates of [[{ card_id: 'a', revision: 'v2' }], [{ card_id: 'b', revision: 'v1' }]]) {
+    const restarted = reduceStartupUpdates(initialStartupUpdateState(loadViewedUpdateRevisions(storage)), { type: 'report', updates });
+    assert.equal(hasUnreadStartupUpdates(restarted), true);
+  }
+});
+
+test('saving a window merges acknowledgements saved by another window', () => {
+  const storage = memoryStorage();
+  const first = reduceStartupUpdates(initialStartupUpdateState(), { type: 'report', updates: [{ card_id: 'a', revision: 'v1' }], viewingStore: true });
+  const second = reduceStartupUpdates(initialStartupUpdateState(), { type: 'report', updates: [{ card_id: 'b', revision: 'v2' }], viewingStore: true });
+  saveViewedUpdateRevisions(first.viewedRevisions, storage);
+  saveViewedUpdateRevisions(second.viewedRevisions, storage);
+  const restarted = reduceStartupUpdates(initialStartupUpdateState(loadViewedUpdateRevisions(storage)), {
+    type: 'report', updates: [...first.updates, ...second.updates],
+  });
+  assert.equal(hasUnreadStartupUpdates(restarted), false);
+  assert.equal(restarted.updates.length, 2);
+});
+
+test('malformed persisted values are ignored and valid revision pairs are retained', () => {
+  for (const raw of ['{', 'null', '{}', '42', '"invalid"']) {
+    assert.equal(loadViewedUpdateRevisions(memoryStorage(raw)).size, 0);
+  }
+  const key = JSON.stringify(['a', 'v1']);
+  const storage = memoryStorage(JSON.stringify([key, key, 'not json', null, 4, '{}', '[]', '["a",null]', '["", "v1"]', '["a","v1","extra"]']));
+  assert.deepEqual([...loadViewedUpdateRevisions(storage)], [key]);
+});
+
+test('unavailable or full persistence keeps acknowledgement usable in memory', () => {
+  const blocked = { getItem() { throw Error('blocked'); }, setItem() { throw Error('blocked'); } };
+  const full = { getItem: () => null, setItem() { throw Error('quota'); } };
+  const viewed = reduceStartupUpdates(initialStartupUpdateState(), { type: 'report', updates: [{ card_id: 'a', revision: 'v1' }], viewingStore: true });
+  for (const storage of [null, blocked, full]) {
+    assert.equal(loadViewedUpdateRevisions(storage).size, 0);
+    assert.equal(saveViewedUpdateRevisions(viewed.viewedRevisions, storage), false);
+    assert.equal(hasUnreadStartupUpdates(viewed), false);
+    assert.equal(viewed.updates.length, 1);
+  }
+});
+
+test('initialization and repeated saves do not rewrite storage unnecessarily', () => {
+  const storage = memoryStorage();
+  saveViewedUpdateRevisions(new Set(), storage);
+  assert.equal(storage.writes, 0);
+  const keys = new Set([JSON.stringify(['a', 'v1'])]);
+  saveViewedUpdateRevisions(keys, storage);
+  saveViewedUpdateRevisions(keys, storage);
+  assert.equal(storage.writes, 1);
 });
