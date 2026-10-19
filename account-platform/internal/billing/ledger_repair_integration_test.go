@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -157,6 +158,74 @@ VALUES($1,'PERSONAL',$2,'ACTIVE',100,0,3,$3,$3)`, walletID, ownerID, now); err !
 	if err != nil || stored != result {
 		t.Fatalf("result-first read stored=%+v err=%v", stored, err)
 	}
+	t.Run("real-unique-violation-rejects-and-rolls-back-all-new-facts", func(t *testing.T) {
+		// An additional unique index is a controlled fault in this owned UUID
+		// database only. It forces a real 23505 after a new repair's postings;
+		// this does not claim reproduction of a production concurrency race.
+		freshJournal, freshPosting := uuid.New(), uuid.New()
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
+		if _, err := tx.Exec(ctx, `INSERT INTO journal_entries(id,entry_type,business_reference,description,created_at) VALUES($1,'USAGE',$2,'controlled unique collision',now())`, freshJournal, "usage:"+freshJournal.String()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO ledger_postings(id,journal_entry_id,ledger_account_id,delta_microcredits,created_at) VALUES($1,$2,$3,30,now()),($4,$2,$5,-30,now())`, freshPosting, freshJournal, adjustmentAccount, uuid.New(), walletAccountID); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		freshCommand := command
+		freshCommand.TargetJournalEntryID, freshCommand.TargetPostingID = freshJournal, freshPosting
+		freshPlan, err := repository.LedgerRepairPlanForCommand(ctx, freshCommand, 1, 1, activationVersion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fresh := execution
+		fresh.ApprovalRequestID, fresh.AuthorizationEventID = uuid.New(), uuid.New()
+		fresh.ExecutionKey, fresh.Command = "ledger-repair-"+freshJournal.String(), freshCommand
+		fresh.Frozen.TargetJournalEntryID, fresh.Frozen.TargetPostingID = freshJournal, freshPosting
+		fresh.Frozen.PostingSetDigest, fresh.Frozen.FactsDigest = freshPlan.PostingSetDigest, freshPlan.FactsDigest
+		ddl := func(query string) {
+			t.Helper()
+			tx, err := operator.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(ctx)
+			if _, err := tx.Exec(ctx, `SET LOCAL ROLE billing_schema_owner`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tx.Exec(ctx, query); err != nil {
+				t.Fatal(err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+		}
+		facts := func() string {
+			var rows []string
+			for _, table := range []string{"wallets", "credit_lots", "usage_holds", "usage_hold_allocations", "entitlement_packages", "entitlement_components", "receivables", "receivable_allocations", "refunds", "payment_orders", "chargeback_cases", "forced_refund_cases", "journal_entries", "ledger_postings", "ledger_repair_cases"} {
+				var value string
+				if err := pool.QueryRow(ctx, `SELECT COALESCE(jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text),'[]'::jsonb)::text FROM `+table+` f`).Scan(&value); err != nil {
+					t.Fatal(err)
+				}
+				rows = append(rows, value)
+			}
+			return strings.Join(rows, "\n")
+		}
+		ddl(`CREATE UNIQUE INDEX f10_ledger_unique_fault ON public.ledger_repair_cases ((true))`)
+		before := facts()
+		if _, err := repository.ApplyLedgerRepair(ctx, fresh); !errors.Is(err, ErrConflict) || facts() != before {
+			t.Fatal("23505 did not return conflict with complete transaction rollback", err)
+		}
+		ddl(`DROP INDEX public.f10_ledger_unique_fault`)
+		if _, err := repository.ApplyLedgerRepair(ctx, fresh); err != nil {
+			t.Fatal("same valid frozen request failed after removing owned fault", err)
+		}
+	})
 }
 
 // TestLedgerRepairPlatformOnlyShapePostgresIntegration proves the frozen §5
