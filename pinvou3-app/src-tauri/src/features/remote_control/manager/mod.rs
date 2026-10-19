@@ -4353,6 +4353,7 @@ mod tests {
             "chat",
             "ingest_file",
             "delete_model",
+            "delete_model_if_store_link",
             "save_model",
             "set_active_model",
             "test_model_connection",

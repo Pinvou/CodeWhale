@@ -66,6 +66,22 @@ fn stopped_old_route_is_bound_before_enable_overwrites_wire_identity() {
 }
 
 #[test]
+fn manually_detached_historical_routes_stay_untouched_after_reload() {
+    let mut detached = saved("manual", "old-wire-id", "http://127.0.0.1:8000/v1");
+    detached.model_store_link_detached = true;
+    let serialized = serde_json::to_string(&detached).unwrap();
+    let reloaded: SavedModel = serde_json::from_str(&serialized).unwrap();
+    let mut rows = vec![reloaded.clone()];
+    assert!(reconcile(&mut rows, &[route()]).is_empty());
+    assert_eq!(rows, [reloaded]);
+    assert!(rows[0].model_store_card_id.is_none());
+    // Explicitly choosing a card again opts in and restores normal migration.
+    rows[0].model_store_link_detached = false;
+    assert_eq!(reconcile(&mut rows, &[route()]), ["manual"]);
+    assert_eq!(rows[0].model, "new-wire-id");
+}
+
+#[test]
 fn remote_other_port_unrelated_and_ambiguous_legacy_routes_are_not_rewritten() {
     let rows = vec![
         saved("remote", "old-wire-id", "https://example.com/v1"),
@@ -179,6 +195,26 @@ fn sync_commits_existing_rows_and_selection_and_reloads_after_restart() {
     )
     .unwrap();
     db::set_running("qwen-card", true).unwrap();
+    assert!(matches_current_model_route(
+        "qwen-card",
+        "http://127.0.0.1:8001/v1/chat/completions",
+        "new-wire-id"
+    ));
+    assert!(!matches_current_model_route(
+        "qwen-card",
+        "http://127.0.0.1:9999/v1",
+        "new-wire-id"
+    ));
+    assert!(!matches_current_model_route(
+        "qwen-card",
+        "http://127.0.0.1:8001/v1",
+        "other-wire-id"
+    ));
+    assert!(!matches_current_model_route(
+        "missing-card",
+        "http://127.0.0.1:8001/v1",
+        "new-wire-id"
+    ));
     assert_eq!(sync().unwrap(), ["stable-id"]);
     let reloaded = UserPrefs::load();
     assert_eq!(

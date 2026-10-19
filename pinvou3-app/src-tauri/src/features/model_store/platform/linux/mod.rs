@@ -37,6 +37,7 @@ pub mod errors;
 pub mod import_scan;
 pub mod lifecycle;
 mod linked_models;
+pub(crate) use linked_models::matches_current_model_route;
 pub mod native_card_compat;
 mod native_runtime;
 pub mod orphans;

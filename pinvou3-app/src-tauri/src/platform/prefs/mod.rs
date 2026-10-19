@@ -399,6 +399,10 @@ impl<'de> Deserialize<'de> for ImageCapabilityOverride {
     }
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// 一条用户保存的模型配置:GUI「模型列表」的一项,也是热切换的最小单位。
 /// `id` 稳定(前端生成),被 `active_model_id` / session `model_id` 引用。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -429,6 +433,12 @@ pub struct SavedModel {
     /// Stable link to a locally installed store card; wire model IDs may change on upgrade.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_store_card_id: Option<String>,
+    /// A manual route edit opts out of legacy migration until explicit re-linking.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub model_store_link_detached: bool,
+    /// Incoming editor intent only: untouched route fields use the latest store route.
+    #[serde(default, skip_serializing)]
+    pub preserve_model_store_route: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -518,6 +528,8 @@ impl SavedModel {
             model: BUILTIN_LLMAPI_DEFAULT_MODEL.to_string(),
             base_url: BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL.to_string(),
             model_store_card_id: None,
+            model_store_link_detached: false,
+            preserve_model_store_route: false,
             provider_kind: Some(MODEL_PROVIDER_KIND_CUSTOM.to_string()),
             vendor: None,
             endpoint_mode: None,
@@ -1495,6 +1507,8 @@ impl UserPrefs {
             reasoning_effort: None,
             model,
             model_store_card_id: None,
+            model_store_link_detached: false,
+            preserve_model_store_route: false,
             base_url,
             provider_kind: None,
             vendor: None,
@@ -1971,6 +1985,8 @@ mod tests {
             reasoning_effort: None,
             model: "qwen36_35b_256k".into(),
             model_store_card_id: None,
+            model_store_link_detached: false,
+            preserve_model_store_route: false,
             base_url: "http://127.0.0.1:8000/v1".into(),
             provider_kind: None,
             vendor: None,
@@ -2027,6 +2043,8 @@ mod tests {
             reasoning_effort: None,
             model: "qwen36_35b_256k".into(),
             model_store_card_id: None,
+            model_store_link_detached: false,
+            preserve_model_store_route: false,
             base_url: "http://127.0.0.1:8000/v1".into(),
             provider_kind: None,
             vendor: None,
@@ -2379,6 +2397,8 @@ mod tests {
             reasoning_effort: None,
             model: "qwen36_35b_256k".into(),
             model_store_card_id: None,
+            model_store_link_detached: false,
+            preserve_model_store_route: false,
             base_url: "http://127.0.0.1:8000/v1".into(),
             provider_kind: None,
             vendor: None,
@@ -2479,6 +2499,8 @@ mod tests {
             reasoning_effort: None,
             model: "m1".into(),
             model_store_card_id: None,
+            model_store_link_detached: false,
+            preserve_model_store_route: false,
             base_url: "https://example.invalid/v1".into(),
             provider_kind: None,
             vendor: None,
@@ -2845,6 +2867,8 @@ mod tests {
             reasoning_effort: None,
             model: "glm-5-turbo".into(),
             model_store_card_id: None,
+            model_store_link_detached: false,
+            preserve_model_store_route: false,
             base_url: "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions/".into(),
             provider_kind: None,
             vendor: None,
@@ -2885,6 +2909,8 @@ mod tests {
             reasoning_effort: None,
             model: "glm-5.2".into(),
             model_store_card_id: None,
+            model_store_link_detached: false,
+            preserve_model_store_route: false,
             base_url: "https://open.bigmodel.cn/api/paas/v4".into(),
             provider_kind: None,
             vendor: None,
@@ -2930,6 +2956,8 @@ mod tests {
             reasoning_effort: None,
             model: "MiniMax-M3".into(),
             model_store_card_id: None,
+            model_store_link_detached: false,
+            preserve_model_store_route: false,
             base_url: "https://api.minimax.chat/v1".into(),
             provider_kind: None,
             vendor: None,
@@ -2963,6 +2991,8 @@ mod tests {
             reasoning_effort: None,
             model: "MiniMax-M3".into(),
             model_store_card_id: None,
+            model_store_link_detached: false,
+            preserve_model_store_route: false,
             base_url: "https://api.minimax.chat".into(),
             provider_kind: Some(MODEL_PROVIDER_KIND_OFFICIAL_API.into()),
             vendor: None,
@@ -3014,6 +3044,8 @@ mod tests {
                 reasoning_effort: None,
                 model: "qwen36_35b_256k".into(),
                 model_store_card_id: None,
+                model_store_link_detached: false,
+                preserve_model_store_route: false,
                 base_url: "http://127.0.0.1:8000/v1".into(),
                 provider_kind: None,
                 vendor: None,
@@ -3038,6 +3070,8 @@ mod tests {
                 reasoning_effort: None,
                 model: "custom-model".into(),
                 model_store_card_id: None,
+                model_store_link_detached: false,
+                preserve_model_store_route: false,
                 base_url: "https://gateway.example.com/v1".into(),
                 provider_kind: Some(MODEL_PROVIDER_KIND_CUSTOM.into()),
                 vendor: None,
@@ -3118,6 +3152,8 @@ mod tests {
             reasoning_effort: None,
             model: "qwen36_35b_256k".into(),
             model_store_card_id: None,
+            model_store_link_detached: false,
+            preserve_model_store_route: false,
             base_url: "http://127.0.0.1:8000/v1".into(),
             provider_kind: None,
             vendor: None,
@@ -3153,6 +3189,8 @@ mod tests {
             reasoning_effort: reasoning_effort.map(str::to_string),
             model: "qwen3-32b".into(),
             model_store_card_id: None,
+            model_store_link_detached: false,
+            preserve_model_store_route: false,
             base_url: base_url.into(),
             provider_kind: Some(
                 match preset {
@@ -3435,6 +3473,8 @@ mod tests {
             reasoning_effort: None,
             model: "kimi-k2.6".into(),
             model_store_card_id: None,
+            model_store_link_detached: false,
+            preserve_model_store_route: false,
             base_url: "https://api.moonshot.cn/v1".into(),
             provider_kind: None,
             vendor: None,
@@ -4276,6 +4316,8 @@ mod tests {
             reasoning_effort: None,
             model: "deepseek-chat".to_string(),
             model_store_card_id: None,
+            model_store_link_detached: false,
+            preserve_model_store_route: false,
             base_url: "https://api.deepseek.com".to_string(),
             provider_kind: None,
             vendor: None,

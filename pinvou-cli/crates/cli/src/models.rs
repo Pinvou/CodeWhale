@@ -1249,6 +1249,8 @@ fn add<S: CredentialStore>(
         model: model.to_owned(),
         base_url: base_url.to_owned(),
         model_store_card_id: None,
+        model_store_link_detached: true,
+        preserve_model_store_route: false,
         provider_kind: metadata.provider_kind,
         vendor: metadata.vendor,
         endpoint_mode: metadata.endpoint_mode,
@@ -1328,6 +1330,7 @@ fn apply_model_edit(model: &mut SavedModel, changes: &ModelEdit) {
             .is_some_and(|value| value != &model.base_url)
     {
         model.model_store_card_id = None;
+        model.model_store_link_detached = true;
     }
     if let Some(preset) = changes.preset {
         model.preset = preset;
@@ -3869,6 +3872,10 @@ mod tests {
             },
         );
         assert!(model.model_store_card_id.is_none());
+        assert!(model.model_store_link_detached);
+        let reloaded: SavedModel =
+            serde_json::from_value(serde_json::to_value(&model).unwrap()).unwrap();
+        assert!(reloaded.model_store_link_detached);
     }
     use pinvou3_lib::platform::credential_store::CredentialError;
 

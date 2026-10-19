@@ -329,6 +329,10 @@ const formatMemoryTime = (item, copy) => {
       const [endpointMode, setEndpointMode] = useState((initialProvider && initialProvider.endpointMode) || '');
       const [model, setModel] = useState(initial.model || '');
       const [baseUrl, setBaseUrl] = useState(initial.base_url || '');
+      const [storeRouteAtOpen] = useState(() => ({
+        existing: !!initial.id && !initial.__new,
+        model: (initial.model || '').trim(), baseUrl: (initial.base_url || '').trim(),
+      }));
       const [contextWindow, setContextWindow] = useState(initial.context_window_tokens ? String(initial.context_window_tokens) : '');
       const [maxOutput, setMaxOutput] = useState(initial.max_output_tokens ? String(initial.max_output_tokens) : '');
       // Thinking effort: initialize from the stored value (normalize first —
@@ -655,6 +659,8 @@ const formatMemoryTime = (item, copy) => {
             // 仅当前表单模型支持档位时保存；手输 model 变为无档位模型时置 null(#209)。
             reasoning_effort: reasoningEffortTiers.length > 0 ? (reasoningEffort || null) : null,
             model: model.trim(), base_url: baseUrl.trim(),
+            preserve_model_store_route: storeRouteAtOpen.existing
+              && model.trim() === storeRouteAtOpen.model && baseUrl.trim() === storeRouteAtOpen.baseUrl,
             api_key: nextApiKey, credential_action: nextKeyAction,
             provider_kind: providerKind || null,
             vendor: vendor || null,

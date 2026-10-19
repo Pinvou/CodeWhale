@@ -443,14 +443,47 @@ pub(super) fn save_model_inner(
     UserPrefs::update_transaction_with_post_commit(
         |prefs| {
             let old = prefs.model_by_id(&model.id).cloned();
+            if model.preserve_model_store_route && model.is_operator_owned_endpoint() {
+                if let Some(latest) = old.as_ref().filter(|row| {
+                    row.model_store_card_id.is_some() && !row.model_store_link_detached
+                }) {
+                    model.base_url.clone_from(&latest.base_url);
+                    model.model.clone_from(&latest.model);
+                }
+            }
+            model.preserve_model_store_route = false;
             // Settings editors predating store provenance omit this optional field.
             // Keep it for non-route edits; a user-entered route change unlinks it.
-            if model.model_store_card_id.is_none() {
-                model.model_store_card_id = old
-                    .as_ref()
-                    .filter(|old| old.base_url == model.base_url && old.model == model.model)
-                    .and_then(|old| old.model_store_card_id.clone());
-            }
+            let same_route = old
+                .as_ref()
+                .is_some_and(|old| old.base_url == model.base_url && old.model == model.model);
+            let previous = old
+                .as_ref()
+                .filter(|old| !old.model_store_link_detached)
+                .and_then(|old| old.model_store_card_id.as_deref());
+            let requested = model
+                .model_store_card_id
+                .as_deref()
+                .or_else(|| same_route.then_some(previous).flatten());
+            model.model_store_card_id = requested
+                .filter(|card| {
+                    !model.model_store_link_detached
+                        && !model.is_builtin_llmapi()
+                        && model.is_operator_owned_endpoint()
+                        && ((same_route && previous == Some(*card))
+                            || crate::features::model_store::matches_current_model_route(
+                                card,
+                                &model.base_url,
+                                &model.model,
+                            ))
+                })
+                .map(str::to_owned);
+            model.model_store_link_detached = model.model_store_card_id.is_none()
+                && (model.model_store_link_detached
+                    || old.as_ref().is_none_or(|old| {
+                        old.model_store_link_detached || old.model_store_card_id.is_some()
+                    })
+                    || !same_route);
             let (model, deferred) = apply_model_credential(model, old.as_ref(), store)
                 .map_err(|e| sanitize_command_error("save_model", e))?;
             *deferred_delete.borrow_mut() = deferred;
@@ -516,6 +549,92 @@ pub(super) fn delete_model_inner(id: &str, store: &dyn CredentialStore) -> Resul
         }
     }
     Ok(())
+}
+
+/// Remove a stale store-managed route only if its current persisted ownership still matches.
+/// A settings form may detach or repurpose the same row while an uninstall is running.
+#[tauri::command]
+pub async fn delete_model_if_store_link(id: String, card_id: String) -> Result<bool, String> {
+    let store = SystemCredentialStore::new();
+    join_blocking("delete_model_if_store_link", move || {
+        delete_model_if_store_link_inner(&id, &card_id, &store)
+    })
+    .await
+}
+
+fn is_store_link_cleanup_target(model: &SavedModel, card_id: &str) -> bool {
+    if card_id.is_empty()
+        || model.model_store_card_id.as_deref() != Some(card_id)
+        || model.model_store_link_detached
+        || model.is_builtin_llmapi()
+        || !model.is_operator_owned_endpoint()
+    {
+        return false;
+    }
+    let Ok(url) = reqwest::Url::parse(&model.base_url) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !matches!(
+            url.path().trim_end_matches('/'),
+            "/v1" | "/v1/chat/completions"
+        )
+    {
+        return false;
+    }
+    url.host_str().is_some_and(|host| {
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        let host = host.strip_suffix('.').unwrap_or(host);
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    })
+}
+
+pub(super) fn delete_model_if_store_link_inner(
+    id: &str,
+    card_id: &str,
+    store: &dyn CredentialStore,
+) -> Result<bool, String> {
+    let removed = std::cell::Cell::new(false);
+    let reference = std::cell::RefCell::new(None);
+    UserPrefs::update_transaction_with_post_commit(
+        |prefs| {
+            let Some(model) = prefs.model_by_id(id) else {
+                return Ok(());
+            };
+            if !is_store_link_cleanup_target(model, card_id) {
+                return Ok(());
+            }
+            if prefs.advanced.saved_models.len() <= 1 {
+                return Err("至少保留一个模型".to_string());
+            }
+            *reference.borrow_mut() = model.credential_ref.clone();
+            prefs.remove_model(id);
+            removed.set(true);
+            Ok(())
+        },
+        || {
+            // Keep the settings lock until the credential is removed: another save of
+            // the same id must not replace its secret between this commit and cleanup.
+            if let Some(reference) = reference.borrow_mut().take() {
+                if let Err(error) = store.delete(&reference) {
+                    log::warn!(
+                        "delete_model_if_store_link: model {id} removed, but its keyring secret \
+                         could not be deleted: {}",
+                        error.user_message()
+                    );
+                }
+            }
+        },
+    )
+    .map_err(|e| sanitize_command_error("delete_model_if_store_link", e))?;
+    Ok(removed.get())
 }
 
 /// 设全局默认模型(新建会话继承它)。不打断已在用的会话——它们各自保持 spawn
@@ -2039,6 +2158,8 @@ mod tests {
             reasoning_effort: None,
             model: "active-model".to_string(),
             model_store_card_id: None,
+            model_store_link_detached: false,
+            preserve_model_store_route: false,
             base_url: "https://active.example/v1".to_string(),
             provider_kind: None,
             vendor: None,

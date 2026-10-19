@@ -138,6 +138,7 @@ for (const command of [
   'transcribe_voice_audio',
   'save_model',
   'delete_model',
+  'delete_model_if_store_link',
   'set_active_model',
   'test_model_connection',
   'set_disabled_connectors',

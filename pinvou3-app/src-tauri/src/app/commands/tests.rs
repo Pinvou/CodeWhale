@@ -3032,6 +3032,125 @@ fn delete_model_rejects_the_last_model_without_touching_the_keyring() {
 }
 
 #[test]
+fn delete_model_if_store_link_rechecks_current_ownership_and_preserves_detached_rows() {
+    use serde_json::json;
+    for (label, patch) in [
+        ("detached", json!({ "model_store_link_detached": true })),
+        ("unlinked", json!({ "model_store_card_id": null })),
+        ("other-card", json!({ "model_store_card_id": "other-card" })),
+        (
+            "remote",
+            json!({ "base_url": "https://api.example.com/v1" }),
+        ),
+        (
+            "managed-provider",
+            // Provider metadata is normalized from the endpoint on load.
+            json!({
+                "provider_kind": "coding_plan",
+                "base_url": "https://open.bigmodel.cn/api/coding/paas/v4"
+            }),
+        ),
+        (
+            "non-operator",
+            json!({ "preset": "deepseek", "provider_kind": null }),
+        ),
+        (
+            "not-chat",
+            json!({ "base_url": "http://127.0.0.1:30001/api" }),
+        ),
+        (
+            "credentials-in-url",
+            json!({ "base_url": "http://user:pw@localhost:30001/v1" }),
+        ),
+        (
+            "bad-localhost",
+            json!({ "base_url": "http://localhost..:30001/v1" }),
+        ),
+    ] {
+        crate::platform::test_support::with_temp_home(
+            &format!("conditional-delete-{label}"),
+            || {
+                let mut linked = model_deletion_test_model("m-linked", true);
+                linked.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+                linked.provider_kind = Some("custom".to_string());
+                linked.base_url = "http://127.0.0.1:30001/v1".to_string();
+                linked.model_store_card_id = Some("store-card".to_string());
+                seed_model_deletion_prefs(&[model_deletion_test_model("m-keep", false), linked]);
+                // The uninstall UI has already selected this row from its old snapshot.
+                assert_eq!(
+                    UserPrefs::load()
+                        .model_by_id("m-linked")
+                        .unwrap()
+                        .model_store_card_id
+                        .as_deref(),
+                    Some("store-card")
+                );
+                UserPrefs::update_transaction(|prefs| {
+                    let mut current =
+                        serde_json::to_value(prefs.model_by_id("m-linked").unwrap()).unwrap();
+                    for (key, value) in patch.as_object().unwrap() {
+                        current[key] = value.clone();
+                    }
+                    prefs.upsert_model(serde_json::from_value(current).unwrap());
+                    Ok(())
+                })
+                .unwrap();
+                let before = UserPrefs::load().model_by_id("m-linked").cloned().unwrap();
+                let store = crate::platform::credential_store::RecordingCredentialStore::new();
+                assert!(
+                    !super::settings::delete_model_if_store_link_inner(
+                        "m-linked",
+                        "store-card",
+                        &store
+                    )
+                    .unwrap(),
+                    "{label}"
+                );
+                let after = UserPrefs::load().model_by_id("m-linked").cloned().unwrap();
+                assert_eq!(
+                    serde_json::to_value(after).unwrap(),
+                    serde_json::to_value(before).unwrap(),
+                    "{label}"
+                );
+                assert!(store.ops().is_empty(), "{label}: must preserve credentials");
+            },
+        );
+    }
+}
+
+#[test]
+fn delete_model_if_store_link_removes_only_the_matching_route_and_secret() {
+    crate::platform::test_support::with_temp_home("conditional-delete-linked", || {
+        let mut linked = model_deletion_test_model("m-linked", true);
+        linked.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+        linked.provider_kind = Some("custom".to_string());
+        linked.base_url = "http://[::1]:30001/v1/chat/completions".to_string();
+        linked.model_store_card_id = Some("store-card".to_string());
+        seed_model_deletion_prefs(&[model_deletion_test_model("m-keep", false), linked]);
+        let store = crate::platform::credential_store::RecordingCredentialStore::new();
+        assert!(
+            super::settings::delete_model_if_store_link_inner("m-linked", "store-card", &store)
+                .unwrap()
+        );
+        assert!(UserPrefs::load().model_by_id("m-linked").is_none());
+        assert!(UserPrefs::load().model_by_id("m-keep").is_some());
+        assert_eq!(
+            store.ops(),
+            vec!["delete:pinvou3-model-api-key:model:m-linked".to_string()]
+        );
+        assert!(
+            !super::settings::delete_model_if_store_link_inner("m-linked", "store-card", &store)
+                .unwrap()
+        );
+        assert_eq!(
+            store.ops().len(),
+            1,
+            "idempotent cleanup must not touch credentials twice"
+        );
+    });
+}
+
+#[test]
 fn save_model_delete_action_defers_the_keyring_delete() {
     crate::platform::test_support::with_temp_home("save-model-defer", || {
         let mut model = model_deletion_test_model("m-edit", true);
@@ -3119,6 +3238,18 @@ fn save_model_preserves_store_provenance_for_options_but_clears_it_for_route_edi
             persisted.model_store_card_id.as_deref(),
             Some("stable-card")
         );
+        // A full-object client may retain the old optional field while editing
+        // its local port. That must not silently opt back into route rewrites.
+        let mut full_route_edit = persisted.clone();
+        full_route_edit.base_url = "http://127.0.0.1:9998/v1".into();
+        super::settings::save_model_inner(full_route_edit, &store).unwrap();
+        assert!(
+            UserPrefs::load()
+                .model_by_id("local-store")
+                .unwrap()
+                .model_store_card_id
+                .is_none()
+        );
         let mut route_edit = persisted;
         route_edit.model_store_card_id = None;
         route_edit.base_url = "http://127.0.0.1:9999/v1".into();
@@ -3130,6 +3261,62 @@ fn save_model_preserves_store_provenance_for_options_but_clears_it_for_route_edi
                 .model_store_card_id
                 .is_none()
         );
+    });
+}
+
+#[test]
+fn stale_store_model_form_keeps_the_latest_route_and_explicit_detach_is_durable() {
+    crate::platform::test_support::with_temp_home("store-model-stale-form", || {
+        let mut original = model_deletion_test_model("store-form", false);
+        original.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+        original.model = "old-wire".into();
+        original.base_url = "http://127.0.0.1:8000/v1".into();
+        // The form opens before legacy provenance migration has run.
+        original.model_store_card_id = None;
+        seed_model_deletion_prefs(&[original.clone()]);
+        let mut stale_form = original.clone();
+        stale_form.name = "My edited label".into();
+        stale_form.context_window_tokens = Some(131072);
+        stale_form.preserve_model_store_route = true;
+        UserPrefs::update_transaction(|prefs| {
+            let mut latest = original.clone();
+            latest.model_store_card_id = Some("stable-card".into());
+            latest.model = "new-wire".into();
+            latest.base_url = "http://127.0.0.1:8001/v1".into();
+            prefs.upsert_model(latest);
+            Ok(())
+        })
+        .unwrap();
+        let store = crate::platform::credential_store::RecordingCredentialStore::new();
+        super::settings::save_model_inner(stale_form, &store).unwrap();
+        let latest = UserPrefs::load().model_by_id("store-form").unwrap().clone();
+        assert_eq!(latest.model, "new-wire");
+        assert_eq!(latest.base_url, "http://127.0.0.1:8001/v1");
+        assert_eq!(latest.name, "My edited label");
+        assert_eq!(latest.context_window_tokens, Some(131072));
+        assert_eq!(latest.model_store_card_id.as_deref(), Some("stable-card"));
+        assert!(!latest.model_store_link_detached);
+        assert!(!latest.preserve_model_store_route);
+        assert!(
+            serde_json::to_value(&latest)
+                .unwrap()
+                .get("preserve_model_store_route")
+                .is_none()
+        );
+        let mut manual = latest;
+        manual.model = original.model;
+        manual.base_url = original.base_url;
+        super::settings::save_model_inner(manual, &store).unwrap();
+        let mut detached = UserPrefs::load().model_by_id("store-form").unwrap().clone();
+        assert!(detached.model_store_card_id.is_none());
+        assert!(detached.model_store_link_detached);
+        // An older editor omits the additive detached field on an options edit.
+        detached.model_store_link_detached = false;
+        detached.name = "Another label".into();
+        super::settings::save_model_inner(detached, &store).unwrap();
+        let reloaded = UserPrefs::load().model_by_id("store-form").unwrap().clone();
+        assert!(reloaded.model_store_link_detached);
+        assert_eq!(reloaded.model, "old-wire");
     });
 }
 

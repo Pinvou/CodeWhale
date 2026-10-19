@@ -155,7 +155,7 @@
     )),
     llmapi: {},
     vllm: domain(["discoverLocalVllm"]),
-    models: domain(["loadModels", "saveModel", "revealModelApiKey", "deleteModel", "setActiveModel", "loadSessionModel", "switchModel", "testModelConnection", "getImageInputCapability", "testImageInputCapability", "probeLocalServerKind"]),
+    models: domain(["loadModels", "saveModel", "revealModelApiKey", "deleteModel", "deleteModelIfStoreLink", "setActiveModel", "loadSessionModel", "switchModel", "testModelConnection", "getImageInputCapability", "testImageInputCapability", "probeLocalServerKind"]),
     interaction: domain(["toggleSuperPerm", "acceptPlan", "discardPlan", "exitPlanToYolo", "setPlanModeNext", "setDraftMode", "setModeLane", "refreshModeDefaults", "getCodePermissionPrefs", "confirmCodeYolo", "syncModeState", "planStuckReplan", "planStuckGo", "submitUserInput", "cancelUserInput", "summonPinvou", "inspectPinvou", "resolvePinvouReview", "dismissPinvouReview", "editLastTurn"]),
     rendering: domain(["renderMarkdown"]),
     remoteControl: domain(["getWebRelaySettings", "setWebRelayAddress"], {
