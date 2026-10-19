@@ -23,7 +23,7 @@ WHERE command_type = 'PAYMENT_FINANCIAL_REPAIR' AND policy_version = 1 AND snaps
 
 -- Billing：确认没有该命令的审批联动补记
 SELECT (SELECT count(*) FROM payment_order_repairs WHERE approval_request_id IS NOT NULL) AS approval_repairs,
-       (SELECT count(*) FROM billing_approval_proof_claims) AS proof_claims;
+       (SELECT count(*) FROM billing_approval_proof_claims WHERE command_type = 'PAYMENT_FINANCIAL_REPAIR') AS proof_claims;
 
 -- Billing：只读候选清单，不替代 owner 的完整商品/钱包/应收 proof。
 -- in_scope 要求恰好一条 REVIEW_REQUIRED 交易且交易号匹配；实际放行前仍须重新预检。
