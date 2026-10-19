@@ -3453,11 +3453,13 @@ function hasStoredCredential(record) {
         const isReadonly = isReadonlyModel(m);
         const codingPlan = isCodingPlanModel(m);
         const providerLabel = providerLabelForModel(m, t);
-        // Alias gating is preset-only, matching the form, selector labels, and
-        // Rust `normalize_alias`; `isLocal`'s extra loopback check applies to
-        // icon/tag/scope only, so a loopback custom endpoint keeps its alias here.
-        const alias = m.preset !== 'local_vllm' ? String(m.alias || '').trim() : '';
-        const title = alias || m.model || m.name;
+        // 标题与聊天页选择器用同一把尺（selectorMainLabel：别名 → 商店接入行
+        // 显示名 → 预设/自定义回退），不再 m.model 优先——否则引擎自报的容器内
+        // 路径（真机实测 mtp 卡 /models/target）会顶掉用户看得懂的显示名，设置页
+        // 和聊天页同一个模型两个名字（用户实测 2026-10-15）。alias 的 preset 门槛
+        // 在 selectorMainLabel 里与表单/Rust normalize_alias 一致；wire 用的 model
+        // 字段不动，副标题仍展示它。
+        const title = selectorMainLabel(m, t) || m.model || m.name;
         return (
           <div key={m.id} className={`min-h-[60px] grid grid-cols-[24px_32px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 border-b last:border-b-0 border-black/[0.12] dark:border-white/[0.10]`}>
             <button type="button" onClick={() => !isActive && onSetActiveModel(m.id)} className="shrink-0" title={t.setActiveModel}>

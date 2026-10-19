@@ -5748,6 +5748,7 @@ async function revealModelApiKey(id) { return pinvouSharedweb().revealModelApiKe
    return deleted;
   }
   async function setActiveModel(id) {
+    if (typeof window.CustomEvent === 'function') window.dispatchEvent(new window.CustomEvent('pinvou:manual-model-selection', { detail: { sessionId: null } }));
     await invoke("set_active_model", { id: id });
     await loadModels();
     await loadSettings();
@@ -5794,6 +5795,7 @@ async function revealModelApiKey(id) { return pinvouSharedweb().revealModelApiKe
   // 切当前会话模型；草稿态只寄存到首条消息物化，不改全局默认。
   async function switchModelRef(sessionId, modelRef) {
     if (!modelRef || !modelRef.source) throw new Error("model selection is required");
+    if (typeof window.CustomEvent === 'function') window.dispatchEvent(new window.CustomEvent('pinvou:manual-model-selection', { detail: { sessionId: sessionId || null } }));
     if (!sessionId) {
       state.pendingDraftModelRef = modelRef;
       notify();
@@ -5810,8 +5812,19 @@ async function revealModelApiKey(id) { return pinvouSharedweb().revealModelApiKe
     }
     await loadSessionModel(sessionId);
   }
-  async function switchModel(sessionId, modelId) {
-    return switchModelRef(sessionId, { source: "LOCAL_CONFIG", saved_model_id: modelId });
+  async function switchModel(sessionId, modelId, options) {
+    if (!options?.ifIdle) {
+      await switchModelRef(sessionId, { source: "LOCAL_CONFIG", saved_model_id: modelId });
+    } else {
+      if (!sessionId) throw new Error("idle handoff requires a session");
+      await invoke("set_session_model", { sessionId: sessionId, modelId: modelId,
+        ifIdle: true, expectedModelId: options.expectedModelId || null,
+        expectedDefaultModelId: options.expectedDefaultModelId || null });
+      await loadSessionModel(sessionId);
+    }
+  }
+  async function testModelConnection(baseUrl, apiKey, modelId) {
+    return await invoke("test_model_connection", { baseUrl: baseUrl, apiKey: apiKey, modelId: modelId || null });
   }
 async function testModelConnection(baseUrl, apiKey, modelId, noAuth) { return pinvouSharedweb().testModelConnection(baseUrl, apiKey, modelId, noAuth); }
   // 测试图片输入能力(设计 §7.3):用当前表单的 model/base_url/key 发一张内置纯色图,

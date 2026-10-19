@@ -331,14 +331,14 @@ const expectedProtocolHashes = {
   // the set_global_shortcut_config invoke (the dedicated command owns both
   // the plugin registration and the prefs persistence; update_settings
   // stays untouched).
+  // Preserve typed selection/draft semantics and cmsd idle CAS; keep throttled cross-platform update events.
   // Retain PR #1995 model refresh ordering and Account builtin toggles and typed voice references; updater also
   // inherits main's Windows progress event and installation lifecycle.
   // Guarded store deletion, endpoint-conditional deletion and models:changed are retained; list_models
   // uses the shared loader so cross-cluster reads share one ordering boundary.
-  // Recomputed for the keyless-aware model and tier probes: the form's noAuth
-  // posture is forwarded so saved credentials cannot ride a keyless request.
-  settings: 'fd75c39aadcb8eedba062d1e1cf84a36c7e61cc851701894a9c953df8b394cc6',
-  updater: 'cfe92470008c2dade64f891c36a5fa70930478f803d4d2a6d100e68d9c29392b',
+  // Combined parent conditional device deletion and PR CMS idle CAS.
+  settings: '476c7473aa5aa551dceab26e388e4d20fa9585323e4ed1f2e5e531b5dfac443d',
+  updater: '30a3762ee45f378d476efec934dc4be50522a02a5b9a97111191496510d4d7d4',
   // Voice draft preparation now carries its typed source/model reference;
   // session bindings remain authoritative and the command set is unchanged.
   voice: '79c031f1039f8b8cb46d47c37ec9946706d1ec5378cf06c1f7f4654cdf21bd37',
