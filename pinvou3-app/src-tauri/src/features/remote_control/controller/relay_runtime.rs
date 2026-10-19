@@ -3057,7 +3057,10 @@ mod tests {
         }
         assert_eq!(log_stage("controlled_status"), "controlled_status");
         assert_eq!(log_detail("pairing_code_invalid"), "pairing_code_invalid");
-        assert_eq!(log_stage("task_session_discard_failed"), "task_session_discard_failed");
+        assert_eq!(
+            log_stage("task_session_discard_failed"),
+            "task_session_discard_failed"
+        );
         assert_eq!(log_detail("delete_failed"), "delete_failed");
         assert_eq!(
             log_stage("pending_revocation_queue_full"),
