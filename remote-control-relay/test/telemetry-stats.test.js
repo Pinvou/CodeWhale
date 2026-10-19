@@ -98,6 +98,150 @@ const installationDevicesFor = (events) => [...new Set(events
   .filter(Boolean))]
   .map((device_id) => ({ device_id, hardware_source: "installation_id" }));
 
+test("version coverage groups the same active installations by platform and current version", () => {
+  const now = at("2026-10-19T12:30:00");
+  const devices = [
+    { device_id: "win", platform: "WINDOWS", app_version: "1.0" },
+    { device_id: "linux", platform: "linux", app_version: "2.0" },
+    { device_id: "mac", platform: "macos", app_version: "2.0" },
+    { device_id: "unknown", platform: "unknown" },
+    { device_id: "inactive", platform: "windows", app_version: "old" },
+  ].map(device => ({ ...device, hardware_source: "installation_id" }));
+  devices.push({ device_id: "legacy", hardware_source: "windows_cim_uuid", platform: "windows", app_version: "old" });
+  const events = ["win", "linux", "mac", "unknown", "legacy", "deleted"].map(device_id => ({
+    device_id, event_name: "task_submitted", attempt_id: device_id, mode: "assistant", initiator_type: "user", occurred_at: now,
+  }));
+  events.push({ ...events[0], app_version: "3.0", received_at: now });
+  events.push({ ...events[0], app_version: "1.5", received_at: now - 1 });
+  const report = buildStatsOverview(devices, [], events, now);
+  assert.deepEqual(report.active_versions_by_platform, {
+    windows: [{ version: "3.0", count: 1 }],
+    linux: [{ version: "2.0", count: 1 }],
+    macos: [{ version: "2.0", count: 1 }],
+  });
+  assert.equal(report.active_versions.reduce((sum, row) => sum + row.count, 0), 4);
+  assert.deepEqual(report.active_versions.find(row => row.version === "未知"), { version: "未知", count: 1 });
+  assert.deepEqual(buildStatsOverview(devices, [], [], now).active_versions_by_platform, { windows: [], linux: [], macos: [] });
+});
+
+test("hourly usage includes 24 clock hours with exact boundaries and isolated core-task counts", () => {
+  const now = at("2026-10-19T00:30:00");
+  const start = at("2026-10-18T01:00:00");
+  const hour = 3_600_000;
+  const devices = [
+    { device_id: "a", first_seen_at: start },
+    { device_id: "b", first_seen_at: (start + hour) / 1000 },
+    { device_id: "cross", first_seen_at: start - 1 },
+    { device_id: "future", first_seen_at: now + 1 },
+  ].map(device => ({ ...device, hardware_source: "installation_id" }));
+  devices.push({ device_id: "legacy", hardware_source: "windows_cim_uuid", first_seen_at: start });
+  const event = (device_id, attempt_id, event_name, occurred_at, extra = {}) => ({
+    device_id, attempt_id, event_id: `${device_id}_${attempt_id}_${event_name}_${occurred_at}`,
+    event_name, occurred_at, mode: "assistant", initiator_type: "user", ...extra,
+  });
+  const events = [
+    event("a", "one", "task_submitted", start),
+    event("a", "two", "task_submitted", start + 1),
+    event("a", "one", "task_finished", start + hour - 1, { status: "failed" }),
+    event("a", "one", "task_finished", start + hour), // same attempt, not a second conversation
+    event("b", "one", "task_finished", (start + hour) / 1000), // orphan terminal + seconds
+    event("cross", "cross", "task_submitted", start - 1),
+    event("cross", "cross", "task_finished", now), // completion does not create new activity
+    event("a", "today", "task_submitted", now),
+    event("a", "today", "task_finished", now),
+    event("a", "future", "task_finished", now + 1),
+    event("a", "background", "task_finished", start, { initiator_type: "scheduled" }),
+    event("a", "system", "task_submitted", start, { initiator_type: "system" }),
+    event("legacy", "one", "task_finished", start),
+    event("deleted", "one", "task_finished", start),
+    event("future", "open", "app_opened", start),
+    event("a", "badtime", "task_finished", "invalid"),
+  ];
+  const rows = buildStatsOverview(devices, [{ device_id: "a", occurred_at: start }], events, now).usage_trend_hourly;
+  assert.equal(rows.length, 24);
+  assert.deepEqual(rows[0], { hour: start, active_devices: 1, new_devices: 1, turns: 1 });
+  assert.deepEqual(rows[1], { hour: start + hour, active_devices: 1, new_devices: 1, turns: 1 });
+  assert.deepEqual(rows[2], { hour: start + 2 * hour, active_devices: 0, new_devices: 0, turns: 0 });
+  assert.deepEqual(rows.at(-1), { hour: at("2026-10-19T00:00:00"), active_devices: 1, new_devices: 0, turns: 2 });
+  assert.equal(rows.reduce((sum, row) => sum + row.turns, 0), 4);
+  assert(rows.every((row, index) => row.hour === start + index * hour));
+  const empty = buildStatsOverview([], [], [], now).usage_trend_hourly;
+  assert.equal(empty.length, 24);
+  assert(empty.every(row => row.active_devices === 0 && row.new_devices === 0 && row.turns === 0));
+});
+
+test("hourly conversations preserve daily clipping and deduplication before slicing the hourly window", () => {
+  const now = at("2026-10-19T12:30:00");
+  const devices = [{ device_id: "a", hardware_source: "installation_id" }];
+  const event = (attempt_id, occurred_at) => ({ device_id: "a", attempt_id, event_name: "task_finished", mode: "assistant", initiator_type: "user", occurred_at });
+  const events = [
+    ...Array.from({ length: 100 }, (_, index) => event(`cap_${index}`, at("2026-10-18T01:00:00") + index)),
+    event("clipped", at("2026-10-18T14:00:00")),
+    event("old_duplicate", at("2026-10-17T12:00:00")),
+    event("old_duplicate", at("2026-10-19T12:00:00")),
+    event("current", now),
+  ];
+  const report = buildStatsOverview(devices, [], events, now);
+  assert.equal(report.usage_trend_hourly.reduce((sum, row) => sum + row.turns, 0), 1);
+  assert.equal(report.usage_trend_hourly.at(-1).turns, report.usage_trend.at(-1).turns);
+});
+
+test("shared chart preprocessing excludes future submissions and completions only from hourly totals", () => {
+  const now = at("2026-10-19T12:30:00");
+  const event = (device_id, attempt_id, event_name, occurred_at) => ({
+    device_id, attempt_id, event_name, occurred_at, mode: "assistant", initiator_type: "user",
+  });
+  const events = [
+    event("submission", "one", "task_submitted", now + 1),
+    event("submission", "one", "task_finished", now),
+    event("duplicate", "one", "task_finished", now + 1),
+    event("duplicate", "one", "task_finished", now),
+    ...Array.from({ length: 100 }, (_, index) => event("capped", `future_${index}`, "task_finished", now + 1)),
+    event("capped", "observed", "task_finished", now),
+    // An observed submission outside the 24-hour window still suppresses fallback
+    // activity even when a duplicate future submission precedes it in storage.
+    event("cross", "one", "task_submitted", now + 1),
+    event("cross", "one", "task_submitted", now - 2 * 86_400_000),
+    event("cross", "one", "task_finished", now),
+  ];
+  const report = buildStatsOverview(installationDevicesFor(events), [], events, now);
+  assert.equal(report.usage_trend.at(-1).turns, 103);
+  assert.equal(report.usage_trend.at(-1).active_devices, 4);
+  assert.deepEqual(report.usage_trend_hourly.at(-1), {
+    hour: at("2026-10-19T12:00:00"), active_devices: 3, new_devices: 0, turns: 4,
+  });
+});
+
+test("one future completion does not rescan historical timestamps for the hourly chart", () => {
+  const now = at("2026-10-19T12:30:00");
+  let timestampReads = 0;
+  const events = Array.from({ length: 50_000 }, (_, index) => ({
+    device_id: `installation_${index % 1000}`,
+    attempt_id: `attempt_${index}`,
+    event_name: "task_finished",
+    mode: "assistant",
+    initiator_type: "user",
+    get occurred_at() {
+      timestampReads += 1;
+      return now - 1;
+    },
+  }));
+  const devices = installationDevicesFor(events);
+  const baseline = buildStatsOverview(devices, [], events, now);
+  const baselineReads = timestampReads;
+  timestampReads = 0;
+  const future = {
+    device_id: "installation_0", attempt_id: "future", event_name: "task_finished",
+    mode: "assistant", initiator_type: "user", occurred_at: now + 1,
+  };
+  const withFuture = buildStatsOverview(devices, [], [future, ...events], now);
+  // Measure work, not wall-clock time: one skewed event must not add another
+  // whole-history pass through contribution clipping and attempt deduplication.
+  assert(timestampReads <= baselineReads, `${timestampReads} historical reads exceeded ${baselineReads}`);
+  assert.deepEqual(withFuture.usage_trend_hourly, baseline.usage_trend_hourly);
+  assert.equal(withFuture.usage_trend.at(-1).turns, baseline.usage_trend.at(-1).turns + 1);
+});
+
 function behaviorEvent(collectionPeriodId, overrides = {}) {
   return {
     schema_version: 1,

@@ -54,6 +54,7 @@ const RANGE_DAYS = new Map([
 const ONLINE_WINDOW_MS = 5 * 60_000;
 const ADMIN_SESSION_MS = 12 * 60 * 60_000;
 const DAY_MS = 24 * 60 * 60_000;
+const HOUR_MS = 60 * 60_000;
 const REGION_REFRESH_MS = DAY_MS;
 const STATS_TIMEZONE_OFFSET_MS = 8 * 60 * 60_000;
 const DEFAULT_EVENT_RETENTION_MS = 35 * DAY_MS;
@@ -282,19 +283,80 @@ function coreTaskFinishedEvents(devices, behaviorEvents, startDay, endDay) {
   return uniqueAttempts(clipDailySubjectContributions(eligible).events, "task_finished");
 }
 
-function coreTaskActivityByDay(devices, behaviorEvents, startDay, endDay) {
-  const rows = new Map();
-  for (let day = startDay; day <= endDay; day += 1) rows.set(day, new Set());
+function prepareStatsTaskEvents(devices, behaviorEvents, startDay, endDay, now) {
   const installationEvents = installationBehaviorEvents(devices, behaviorEvents);
-  const submittedAttempts = new Set(installationEvents
-    .filter((event) => isCoreUserTask(event, "task_submitted"))
-    .map(attemptIdentityKey)
-    .filter(Boolean));
+  // Keep submissions outside either chart window when identifying orphaned terminals.
+  // The earliest timestamp also distinguishes future-only submissions for the hour chart.
+  const submittedAttempts = new Map();
+  for (const event of installationEvents) {
+    if (!isCoreUserTask(event, "task_submitted")) continue;
+    const key = attemptIdentityKey(event);
+    if (!key) continue;
+    const occurredAt = normalizeUsageOccurredAt(event.occurred_at);
+    const observedAt = Number.isFinite(occurredAt) ? occurredAt : Infinity;
+    submittedAttempts.set(key, Math.min(submittedAttempts.get(key) ?? Infinity, observedAt));
+  }
+  const activity = [];
+  const observedActivity = [];
+  const eligibleFinished = [];
   for (const event of installationEvents) {
     const submitted = isCoreUserTask(event, "task_submitted");
-    const orphanedTerminal = isCoreUserTask(event, "task_finished")
-      && !submittedAttempts.has(attemptIdentityKey(event));
-    if (!submitted && !orphanedTerminal) continue;
+    const finished = isCoreUserTask(event, "task_finished");
+    if (!submitted && !finished) continue;
+    const occurredAt = normalizeUsageOccurredAt(event.occurred_at);
+    const key = attemptIdentityKey(event);
+    if (submitted || !submittedAttempts.has(key)) activity.push(event);
+    if (occurredAt <= now && (submitted || !(submittedAttempts.get(key) <= now))) {
+      observedActivity.push(event);
+    }
+    const day = statsDay(event.occurred_at);
+    if (finished && day >= startDay && day <= endDay) {
+      eligibleFinished.push(event);
+    }
+  }
+  const { finished, observedFinished } = statsTaskFinishedEvents(eligibleFinished, now);
+  return { activity, observedActivity, finished, observedFinished };
+}
+
+function statsTaskFinishedEvents(events, now) {
+  const contributions = new Map();
+  const attempts = new Map();
+  const finished = [];
+  const observedFinished = [];
+  const limit = contributionLimit("task_finished");
+  // Evaluate both views in one pass, including when client clock skew produces
+  // future events. Each view consumes its daily cap before attempt deduplication.
+  for (const event of events) {
+    const identity = eventIdentity(event);
+    const observed = normalizeUsageOccurredAt(event.occurred_at) <= now;
+    const contributionKey = `${identity}:${statsDay(event.occurred_at)}:${event.event_name}`;
+    const counts = contributions.get(contributionKey) || { daily: 0, hourly: 0 };
+    const retainDaily = !identity || counts.daily < limit;
+    const retainHourly = observed && (!identity || counts.hourly < limit);
+    if (retainDaily) counts.daily += 1;
+    if (retainHourly) counts.hourly += 1;
+    contributions.set(contributionKey, counts);
+    if (!retainDaily && !retainHourly) continue;
+    const key = attemptIdentityKey(event);
+    if (!key) continue;
+    const seen = attempts.get(key) || { daily: false, hourly: false };
+    if (retainDaily && !seen.daily) {
+      finished.push(event);
+      seen.daily = true;
+    }
+    if (retainHourly && !seen.hourly) {
+      observedFinished.push(event);
+      seen.hourly = true;
+    }
+    attempts.set(key, seen);
+  }
+  return { finished, observedFinished };
+}
+
+function taskActivityByDay(activityEvents, startDay, endDay) {
+  const rows = new Map();
+  for (let day = startDay; day <= endDay; day += 1) rows.set(day, new Set());
+  for (const event of activityEvents) {
     const day = statsDay(event.occurred_at);
     const identity = eventIdentity(event);
     if (rows.has(day) && identity) rows.get(day).add(identity);
@@ -302,11 +364,50 @@ function coreTaskActivityByDay(devices, behaviorEvents, startDay, endDay) {
   return rows;
 }
 
-function installationConversationsByDay(devices, behaviorEvents, startDay, endDay) {
+function coreTaskActivityByDay(devices, behaviorEvents, startDay, endDay) {
+  const installationEvents = installationBehaviorEvents(devices, behaviorEvents);
+  const submittedAttempts = new Set(installationEvents
+    .filter((event) => isCoreUserTask(event, "task_submitted"))
+    .map(attemptIdentityKey)
+    .filter(Boolean));
+  const activity = installationEvents.filter((event) => isCoreUserTask(event, "task_submitted")
+    || (isCoreUserTask(event, "task_finished") && !submittedAttempts.has(attemptIdentityKey(event))));
+  return taskActivityByDay(activity, startDay, endDay);
+}
+
+function buildHourlyUsageTrend(devices, taskEvents, now) {
+  // 24 Beijing clock-hour buckets, including the current partial hour.
+  const endHour = Math.floor(now / HOUR_MS);
+  const startHour = endHour - 23;
+  const rows = new Map();
+  for (let hour = startHour; hour <= endHour; hour += 1) {
+    rows.set(hour, { hour: hour * HOUR_MS, device_ids: new Set(), new_devices: 0, turns: 0 });
+  }
+  const rowAt = (timestamp) => {
+    const time = normalizeUsageOccurredAt(timestamp);
+    return time <= now ? rows.get(Math.floor(time / HOUR_MS)) : undefined;
+  };
+  for (const event of taskEvents.observedActivity) {
+    rowAt(event.occurred_at)?.device_ids.add(eventIdentity(event));
+  }
+  // Apply the same daily contribution cap and attempt deduplication as the day chart
+  // before selecting hours, so the cap is not reset at the start of this window.
+  for (const event of taskEvents.observedFinished) {
+    const row = rowAt(event.occurred_at);
+    if (row) row.turns += 1;
+  }
+  for (const device of devices) {
+    const row = rowAt(device.first_seen_at);
+    if (row) row.new_devices += 1;
+  }
+  return [...rows.values()].map(({ device_ids, ...row }) => ({ ...row, active_devices: device_ids.size }));
+}
+
+function installationConversationsByDay(finishedEvents, startDay, endDay) {
   const rows = new Map();
   for (let day = startDay; day <= endDay; day += 1) rows.set(day, new Map());
 
-  for (const event of coreTaskFinishedEvents(devices, behaviorEvents, startDay, endDay)) {
+  for (const event of finishedEvents) {
     const day = statsDay(event.occurred_at);
     const counts = rows.get(day);
     if (!counts) continue;
@@ -353,18 +454,9 @@ export function buildStatsOverview(devices, events, behaviorEventsOrNow = [], fa
   const online = operationalDevices.filter(
     (device) => now - Number(device.last_seen_at || 0) <= ONLINE_WINDOW_MS,
   );
-  const conversations = installationConversationsByDay(
-    operationalDevices,
-    behaviorEvents,
-    trendStart,
-    today,
-  );
-  const activity = coreTaskActivityByDay(
-    operationalDevices,
-    behaviorEvents,
-    trendStart,
-    today,
-  );
+  const taskEvents = prepareStatsTaskEvents(operationalDevices, behaviorEvents, trendStart, today, now);
+  const conversations = installationConversationsByDay(taskEvents.finished, trendStart, today);
+  const activity = taskActivityByDay(taskEvents.activity, trendStart, today);
   const trend = new Map();
   for (let day = trendStart; day <= today; day += 1) {
     const usage = conversations.get(day) || new Map();
@@ -382,12 +474,19 @@ export function buildStatsOverview(devices, events, behaviorEventsOrNow = [], fa
   }
   const behaviorMetadataByDevice = latestBehaviorMetadataByIdentity(behaviorEvents);
   const versionMap = new Map();
+  const platformVersionMaps = { windows: new Map(), linux: new Map(), macos: new Map() };
   for (const deviceId of activeWeek) {
     const version = behaviorMetadataByDevice.get(deviceId)?.app_version
       || deviceById.get(deviceId)?.app_version
       || "未知";
     versionMap.set(version, (versionMap.get(version) || 0) + 1);
+    const platform = String(deviceById.get(deviceId)?.platform || "").toLowerCase();
+    const platformVersions = Object.hasOwn(platformVersionMaps, platform) ? platformVersionMaps[platform] : null;
+    if (platformVersions) platformVersions.set(version, (platformVersions.get(version) || 0) + 1);
   }
+  const versionRows = (versions) => [...versions.entries()]
+    .map(([version, count]) => ({ version, count }))
+    .sort((a, b) => b.count - a.count || a.version.localeCompare(b.version));
 
   return {
     generated_at: now,
@@ -402,9 +501,10 @@ export function buildStatsOverview(devices, events, behaviorEventsOrNow = [], fa
       active_devices: row.device_ids.size,
       turns: row.turns,
     })),
-    active_versions: [...versionMap.entries()]
-      .map(([version, count]) => ({ version, count }))
-      .sort((a, b) => b.count - a.count || a.version.localeCompare(b.version)),
+    usage_trend_hourly: buildHourlyUsageTrend(operationalDevices, taskEvents, now),
+    active_versions: versionRows(versionMap),
+    active_versions_by_platform: Object.fromEntries(Object.entries(platformVersionMaps)
+      .map(([platform, versions]) => [platform, versionRows(versions)])),
   };
 }
 
@@ -412,7 +512,9 @@ export function buildDeviceList(devices, events, behaviorEventsOrNow = [], fallb
   const { behaviorEvents, now } = statsArguments(behaviorEventsOrNow, fallbackNow);
   const weekStart = statsDay(now) - 6;
   const today = statsDay(now);
-  const usage = installationConversationsByDay(devices, behaviorEvents, weekStart, today);
+  const usage = installationConversationsByDay(
+    coreTaskFinishedEvents(devices, behaviorEvents, weekStart, today), weekStart, today,
+  );
   const todayUsage = usage.get(today) || new Map();
   const activity = new Map();
   const behaviorMetadataByDevice = latestBehaviorMetadataByIdentity(behaviorEvents);

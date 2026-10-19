@@ -355,6 +355,98 @@ test("usage trend exposes exact values on hover and after a range rerender", asy
   }
 });
 
+test("version coverage shows four independent charts with five versions and remaining share", async () => {
+  const versions = Array.from({ length: 7 }, (_, index) => ({ version: `1.${index}`, count: 7 - index }));
+  const report = {
+    ...overview, active_versions: versions,
+    active_versions_by_platform: {
+      windows: versions.slice(0, 6), linux: [{ version: '<img src=x onerror="alert(1)">', count: 2 }], macos: [],
+    },
+  };
+  const dom = new JSDOM(statsHtml, {
+    runScripts: "dangerously", url: "https://www.pinvou.com/pinvou3/stats",
+    beforeParse(window) {
+      window.fetch = async url => ({ ok: true, status: 200, json: async () => String(url).endsWith("/overview") ? report : { devices } });
+      window.setInterval = () => 1;
+    },
+  });
+  try {
+    await new Promise(resolve => dom.window.setTimeout(resolve, 20));
+    const doc = dom.window.document;
+    assert.equal(doc.querySelectorAll(".version-coverage .version-panel").length, 4);
+    assert.equal(doc.querySelector(".usage-panels .version-coverage"), null);
+    for (const prefix of ["version", "windowsVersion"]) {
+      const labels = [...doc.querySelectorAll(`#${prefix}List .version-row b`)].map(el => el.textContent);
+      assert.deepEqual(labels, ["1.0", "1.1", "1.2", "1.3", "1.4", "其他版本"]);
+    }
+    assert.equal(doc.querySelector("#versionTotal").textContent, "28");
+    assert.equal(doc.querySelector("#windowsVersionTotal").textContent, "27");
+    assert.match(doc.querySelector("#versionList .version-row:last-child").textContent, /3 台 · 11%/);
+    assert.match(doc.querySelector("#windowsVersionList .version-row:last-child").textContent, /2 台 · 7%/);
+    assert.match(doc.querySelector("#linuxVersionList").textContent, /2 台 · 100%/);
+    assert.equal(doc.querySelector("#linuxVersionList img"), null);
+    assert.equal(doc.querySelector("#macosVersionTotal").textContent, "0");
+    assert.match(doc.querySelector("#macosVersionList").textContent, /暂无活跃版本数据/);
+    assert.equal(doc.querySelector("#versionCount").textContent, "版本 7 个");
+  } finally { dom.window.close(); }
+});
+
+test("hourly and daily charts coexist with independent pointers, keyboard navigation and refresh", async () => {
+  const start = Date.parse("2026-10-18T01:00:00+08:00");
+  let report = {
+    ...overview,
+    usage_trend_hourly: Array.from({ length: 24 }, (_, index) => ({
+      hour: start + index * 3_600_000, active_devices: index === 23 ? 2 : 0,
+      new_devices: index === 23 ? 1 : 0, turns: index === 23 ? 9 : 0,
+    })),
+  };
+  const dom = new JSDOM(statsHtml, {
+    runScripts: "dangerously", url: "https://www.pinvou.com/pinvou3/stats",
+    beforeParse(window) {
+      window.fetch = async url => ({ ok: true, status: 200, json: async () => String(url).endsWith("/overview") ? report : { devices } });
+      window.setInterval = () => 1;
+    },
+  });
+  try {
+    const wait = () => new Promise(resolve => dom.window.setTimeout(resolve, 20));
+    await wait();
+    const doc = dom.window.document;
+    assert.equal(doc.querySelectorAll(".usage-panels .chart").length, 2);
+    assert.equal(doc.querySelectorAll("#hourlyTrendSvg path.line,#hourlyTrendSvg path.line2,#hourlyTrendSvg path.line3").length, 3);
+    const hourlySvg = doc.querySelector("#hourlyTrendSvg");
+    hourlySvg.getBoundingClientRect = () => ({ left: 0, width: 780 });
+    let hit = doc.querySelector("#hourlyTrendHitArea");
+    const tooltip = doc.querySelector("#hourlyTrendTooltip");
+    hit.dispatchEvent(new dom.window.MouseEvent("pointermove", { clientX: 770, bubbles: true }));
+    assert.equal(tooltip.hidden, false);
+    assert.match(tooltip.textContent, /2026-10-19 00:00–01:00（北京时间）/);
+    assert.match(tooltip.textContent, /活跃设备2 台/);
+    assert.match(tooltip.textContent, /新增设备1 台/);
+    assert.match(tooltip.textContent, /对话次数9 次/);
+    assert.equal(doc.querySelector("#trendTooltip").hidden, true);
+    hit.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Home", bubbles: true }));
+    assert.match(hit.getAttribute("aria-valuetext"), /2026-10-18 01:00–02:00/);
+    assert.match(tooltip.textContent, /对话次数0 次/);
+    assert.equal(hit.getAttribute("aria-valuemax"), "23");
+    const before = hourlySvg.innerHTML;
+    doc.querySelector('[data-days="7"]').click();
+    assert.equal(hourlySvg.innerHTML, before);
+    assert.equal(new Set([...doc.querySelectorAll("[id]")].map(el => el.id)).size, doc.querySelectorAll("[id]").length);
+    report = { ...report, usage_trend_hourly: report.usage_trend_hourly.map(row => ({ ...row, turns: 4 })) };
+    doc.querySelector("#refreshButton").click();
+    await wait();
+    hit = doc.querySelector("#hourlyTrendHitArea");
+    hit.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "End", bubbles: true }));
+    assert.match(tooltip.textContent, /对话次数4 次/);
+    report = { ...report, usage_trend_hourly: [] };
+    doc.querySelector("#refreshButton").click();
+    await wait();
+    assert.equal(tooltip.hidden, true);
+    assert.equal(doc.querySelector("#hourlyTrendHitArea"), null);
+    assert.match(hourlySvg.textContent, /暂无趋势数据/);
+  } finally { dom.window.close(); }
+});
+
 test("behavior analytics views render alongside the device dashboard", async () => {
   const dom = new JSDOM(statsHtml, {
     runScripts: "dangerously",
