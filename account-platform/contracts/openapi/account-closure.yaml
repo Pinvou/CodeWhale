@@ -2,6 +2,12 @@ openapi: 3.1.0
 info:
   title: Pinvou Account Closure API
   version: 0.1.0
+  description: >-
+    Requests retain their original identity and advance through forward-only stages.
+    Before identity cleanup, guarded financial self-service recovery may temporarily
+    restore account access without cancelling the request. After the blockers clear,
+    the original request re-enters the quiet period and rechecks all domains before
+    cleanup. Access cannot be restored after identity cleanup starts.
 security:
   - oidc: []
 paths:
