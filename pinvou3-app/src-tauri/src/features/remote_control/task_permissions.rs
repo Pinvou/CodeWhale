@@ -45,7 +45,10 @@ fn validate_existing_settings() -> Result<(), String> {
 }
 
 pub(crate) fn save(policy: RemoteTaskPermissionPrefs) -> Result<RemoteTaskPermissionPrefs, String> {
-    if policy.chat.is_none() || policy.code.is_none() {
+    // The settings UI saves one lane at a time, including before first enable.
+    // Persist an unconfigured sibling without authorizing it; configured()
+    // still rejects that lane until selected or initialized by explicit enable.
+    if policy.chat.is_none() && policy.code.is_none() {
         return Err(REQUIRED.to_owned());
     }
     UserPrefs::update_transaction(|prefs| {

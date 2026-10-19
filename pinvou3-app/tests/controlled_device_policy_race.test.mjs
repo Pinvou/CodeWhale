@@ -94,14 +94,30 @@ test('enable waits for saved policy and ignores a late initial read before editi
 });
 
 test('editing an inactive unconfigured lane never grants YOLO to the other lane', async () => {
-  const writes = [];
-  const h = harness({ controlledPermissions: async policy => {
-    if (policy) writes.push(plain(policy));
-    return policy || { chat: null, code: null };
-  } });
-  await h.initialRead;
-  await h.change('chat', 'plan');
-  assert.deepEqual(writes, [{ chat: 'plan', code: null }]);
+  // Bridge seam only: the production Rust save and durable reload are covered
+  // by saving_one_lane_before_enabling_persists_plan_without_authorizing_the_other.
+  for (const first of ['chat', 'code']) {
+    const second = first === 'chat' ? 'code' : 'chat';
+    const writes = [];
+    let stored = { chat: null, code: null };
+    const h = harness({ controlledPermissions: async policy => {
+      if (policy) {
+        if (!policy.chat && !policy.code) throw new Error('task_permission_mode_required');
+        stored = plain(policy);
+        writes.push(stored);
+      }
+      return { ...stored };
+    } });
+    await h.initialRead;
+    await h.change(first, 'plan');
+    assert.deepEqual(writes, [{ chat: null, code: null, [first]: 'plan' }]);
+    assert.equal(h.state.taskPolicy[second], null);
+    await h.retry();
+    assert.equal(h.state.taskPolicy[first], 'plan');
+    await h.change(second, 'plan');
+    assert.deepEqual(plain(h.state.taskPolicy), { chat: 'plan', code: 'plan' });
+    assert.deepEqual(writes[1], { chat: 'plan', code: 'plan' });
+  }
 });
 
 test('post-enable read failure blocks editing and refresh retries without writing defaults', async () => {

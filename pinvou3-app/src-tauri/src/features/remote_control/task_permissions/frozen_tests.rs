@@ -3,6 +3,54 @@ use crate::features::sessions::with_isolated_store_restoring_home;
 use std::path::Path;
 
 #[test]
+fn saving_one_lane_before_enabling_persists_plan_without_authorizing_the_other() {
+    use SerializableMode::{Plan, Yolo};
+    for first_is_code in [false, true] {
+        with_isolated_store_restoring_home(|store| {
+            let settings = store
+                .manager
+                .sessions_dir()
+                .parent()
+                .unwrap()
+                .join("settings.json");
+            std::fs::write(&settings, br#"{"mode_defaults":{"work":"plan"}}"#).unwrap();
+            let first = RemoteTaskPermissionPrefs {
+                chat: (!first_is_code).then_some(Plan),
+                code: first_is_code.then_some(Plan),
+            };
+            let saved = save(first).unwrap();
+            assert_eq!(saved.chat, first.chat);
+            assert_eq!(saved.code, first.code);
+            // Read the file independently of the returned value or live prefs.
+            let durable: UserPrefs =
+                serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+            assert_eq!(durable.remote_task_permissions.chat, first.chat);
+            assert_eq!(durable.remote_task_permissions.code, first.code);
+            assert_eq!(durable.mode_defaults.work, Some(Plan));
+            assert_eq!(configured(first_is_code).unwrap(), Plan);
+            assert_eq!(configured(!first_is_code).unwrap_err(), REQUIRED);
+
+            let both = save(RemoteTaskPermissionPrefs {
+                chat: Some(Plan),
+                code: Some(Plan),
+            })
+            .unwrap();
+            assert_eq!(both.chat, Some(Plan));
+            assert_eq!(both.code, Some(Plan));
+            enable_defaults().unwrap();
+            assert_eq!(configured(false).unwrap(), Plan);
+            assert_eq!(configured(true).unwrap(), Plan);
+
+            // Only explicit enable initializes the still-unconfigured lane.
+            save(first).unwrap();
+            enable_defaults().unwrap();
+            assert_eq!(configured(first_is_code).unwrap(), Plan);
+            assert_eq!(configured(!first_is_code).unwrap(), Yolo);
+        });
+    }
+}
+
+#[test]
 fn enabling_persists_defaults_without_changing_local_permissions_and_preserves_selection() {
     with_isolated_store_restoring_home(|store| {
         let settings = store
@@ -40,16 +88,27 @@ fn enabling_persists_defaults_without_changing_local_permissions_and_preserves_s
         enable_defaults().unwrap();
         assert_eq!(configured(false).unwrap(), SerializableMode::Plan);
         assert_eq!(configured(true).unwrap(), SerializableMode::Yolo);
+        let before_empty_save = std::fs::read(&settings).unwrap();
         assert_eq!(
             save(crate::platform::prefs::RemoteTaskPermissionPrefs::default()).unwrap_err(),
             REQUIRED
         );
+        assert_eq!(std::fs::read(&settings).unwrap(), before_empty_save);
         let backup = settings.with_extension("fixture-backup");
         let valid = std::fs::read(&settings).unwrap();
         for damaged in ["{not-json", "[]", "{\"advanced\":42}"] {
             std::fs::write(&settings, damaged).unwrap();
             assert_eq!(
                 enable_defaults().unwrap_err(),
+                "remote_task_permissions_save_failed"
+            );
+            assert_eq!(std::fs::read_to_string(&settings).unwrap(), damaged);
+            assert_eq!(
+                save(RemoteTaskPermissionPrefs {
+                    chat: Some(SerializableMode::Plan),
+                    code: None
+                })
+                .unwrap_err(),
                 "remote_task_permissions_save_failed"
             );
             assert_eq!(std::fs::read_to_string(&settings).unwrap(), damaged);
@@ -64,6 +123,18 @@ fn enabling_persists_defaults_without_changing_local_permissions_and_preserves_s
         assert!(
             settings.is_dir(),
             "failed enable must not destroy the existing path"
+        );
+        assert_eq!(
+            save(RemoteTaskPermissionPrefs {
+                chat: Some(SerializableMode::Plan),
+                code: None
+            })
+            .unwrap_err(),
+            "remote_task_permissions_save_failed"
+        );
+        assert!(
+            settings.is_dir(),
+            "failed save must preserve the blocked path"
         );
     });
 }
