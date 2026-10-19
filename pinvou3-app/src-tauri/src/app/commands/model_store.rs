@@ -49,6 +49,41 @@ pub async fn model_store_model_detail(card_id: String) -> Result<Value, String> 
     model_store::model_detail(card_id).await
 }
 
+#[tauri::command]
+pub async fn model_store_check_card_update(card_id: String) -> Result<Value, String> {
+    model_store::check_card_update(card_id).await
+}
+
+#[tauri::command]
+pub async fn model_store_startup_update_check(
+    service: State<'_, Arc<ModelStoreService>>,
+) -> Result<Value, String> {
+    model_store::startup_update_check(Arc::clone(service.inner())).await
+}
+
+#[tauri::command]
+pub async fn model_store_versions(card_id: String) -> Result<Value, String> {
+    model_store::versions(card_id).await
+}
+#[tauri::command]
+pub fn model_store_start_version_action(
+    service: State<'_, Arc<ModelStoreService>>,
+    card_id: String,
+    action: String,
+    version_id: String,
+) -> Result<Value, String> {
+    model_store::start_version_action(&service, card_id, action, version_id)
+}
+
+#[tauri::command]
+pub fn model_store_start_card_update(
+    service: State<'_, Arc<ModelStoreService>>,
+    card_id: String,
+    revision: String,
+) -> Result<Value, String> {
+    model_store::start_card_update(&service, card_id, revision)
+}
+
 // ---------------------------------------------------------------- 长操作
 
 #[tauri::command]

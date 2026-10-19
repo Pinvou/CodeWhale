@@ -10,7 +10,7 @@ import { PROJECT_SESSION_DRAG_TYPE } from '../../features/projects/projectGroupi
 // notify (including background streaming tokens); when the props are
 // reference stable (see NAV_ICON_*/NAV_PREFETCH/navNavigateHandlers in
 // main.jsx) the whole nav item can skip the re-render.
-const NavItem = memo(function NavItem({ icon, label, active, unread = false, unreadLabel, unreadTestId = 'scheduled-nav-unread', unreadTone = 'default', theme, isSidebarOpen = true, onClick, dragKind, dragging, onPickUp, nativeButton = false, t, onPointerEnter, onFocus }) {
+const NavItem = memo(function NavItem({ icon, label, active, unread = false, unreadLabel, unreadTestId = 'scheduled-nav-unread', unreadTone = 'default', unreadText, unreadTextTestId, theme, isSidebarOpen = true, onClick, dragKind, dragging, onPickUp, nativeButton = false, t, onPointerEnter, onFocus }) {
       const drag = useLongPressDrag(dragKind, onPickUp);
       const dragProps = dragKind ? drag.handlers : {};
       const clickH = dragKind ? drag.guardClick(onClick) : onClick;
@@ -33,12 +33,13 @@ const NavItem = memo(function NavItem({ icon, label, active, unread = false, unr
         >
           <div className={`relative ${isSidebarOpen ? 'mr-3' : ''} shrink-0 ${active ? 'text-[#0B57D0] dark:text-[#041E49]' : ''}`}>
             {icon}
-            {unread && (
+            {unread && (!isSidebarOpen || !unreadText) && (
               <span data-testid={unreadTestId} aria-label={unreadLabel || t?.uiScheduled?.navUnreadAria}
                 className={"absolute -right-1.5 -top-1 w-2.5 h-2.5 rounded-full border-2 " + (unreadTone === 'danger' ? 'bg-[#DF3F4F] ' : 'bg-[#0B57D0] ') + (active ? 'border-[#D3E3FD] dark:border-[#A8C7FA]' : 'border-[#F0F4F9] dark:border-[#1E1F20]')} />
             )}
           </div>
           {isSidebarOpen && <span className="whitespace-nowrap">{label}</span>}
+          {isSidebarOpen && unread && unreadText ? <span data-testid={unreadTextTestId || `${unreadTestId}-text`} className={`ml-auto whitespace-nowrap pl-3 text-[12px] font-semibold ${unreadTone === 'danger' ? 'text-[#C5221F] dark:text-[#FF8A80]' : 'text-[#0B57D0] dark:text-[#A8C7FA]'}`}>{unreadText}</span> : null}
         </Root>
       );
     });

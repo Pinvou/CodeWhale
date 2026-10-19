@@ -19,6 +19,22 @@ const LOG_WAIT_SECONDS = 25;
 
 const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'];
 
+/** Preserve a valid saved choice; otherwise use the backend's deployment default. */
+function selectedDeployProfile(record) {
+  const profiles = record?.profiles || [];
+  return [record?.active_profile_id, record?.default_profile_id]
+    .find((id) => profiles.some((profile) => profile.id === id)) || profiles[0]?.id || null;
+}
+
+/** Legacy catalogue names still label the benchmark as default. */
+function deployProfileLabel(record, profile, copy) {
+  if (record?.card_id === 'qwen38-27b-nvfp4-mtp') {
+    if (profile.id === 'benchmark') return copy.profileMtpBenchmark;
+    if (profile.id === 'production-sampling') return copy.profileMtpProduction;
+  }
+  return profile.name;
+}
+
 /**
  * 人类可读的字节数。单位是国际通用符号,不需要进 i18n 词典。
  * @param {number} bytes - 字节数。
@@ -544,6 +560,8 @@ function uninstallDoneText(copy, name, outcome) {
 }
 
 export {
+  selectedDeployProfile,
+  deployProfileLabel,
   MAX_LOG_LINES,
   SPEED_WINDOW_MS,
   LOG_WAIT_SECONDS,

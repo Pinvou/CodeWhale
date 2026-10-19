@@ -1,0 +1,28 @@
+--- a/native_engine_process.py
++++ b/native_engine_process.py
+@@ -225,12 +225,19 @@
+                                      stdout=log, stderr=log, close_fds=True, start_new_session=True)
+         finally:
+             os.close(log)
+-        # Popen waits for exec. Keep our child unreaped while recording its identity;
+-        # this PID cannot be reused by a different process in this interval.
+-        process = identity(child.pid, self.target)
+-        if process is None:
+-            child.poll()
+-            raise UnsafeState("引擎在建立运行记录前已退出；请查看诊断日志")
++        # Popen's exec handshake can finish before /proc exposes the new argv.
++        # Only wait for this direct, unreaped child: discovery never authorizes
++        # adoption, and this PID cannot be reused until poll observes its exit.
++        deadline = time.monotonic() + 2
++        while True:
++            process = identity(child.pid, self.target)
++            if process is not None:
++                break
++            if child.poll() is not None:
++                raise UnsafeState("引擎在建立运行记录前已退出；请查看诊断日志")
++            if time.monotonic() >= deadline:
++                raise UnsafeState(f"引擎进程 {child.pid} 的身份尚未确认；已保留进程和日志，请联系管理员核对")
++            time.sleep(0.01)
+         try:
+             self.record(process)
+         except Exception as error:

@@ -1,6 +1,7 @@
 import { lazy, startTransition as scheduleViewTransition, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
+import { useModelStoreStartupUpdates } from '../features/model-store/useModelStoreStartupUpdates.js';
 import '../styles/base.css';
 import '../styles/tailwind.css';
 import { I, Plus, Edit2, Trash2, ClipboardList, BarChart2, Settings, Monitor, Smartphone, Brain, BrainCircuit, Clock, Sun, Moon, Zap, Package, RefreshCw, RotateCcw, Search, Upload, Lightbulb, Paperclip, Mic, Send, Store, StoreFront, Terminal, ChevronDown, IconGrid, ChevronRight, Copy, CheckCircle2, AlertTriangle, Menu, MoreHorizontal, Check, Filter, Database, Download, FolderPlus, Award, Feather, AppWindow, Radio, Palette, Briefcase, Sparkles, StopCircle, XCircle, Wrench, User, Layers, MessageSquare, X, ArrowLeft, ExternalLink, BookOpen, Code, FileText, Hexagon, Layout, Presentation, Mail, MessageCircle, Navigation, Video, Puzzle, LineChart, Building2, Cpu, Server, Globe, ChevronLeft, XIcon, CloudSun, TrendingUp, TrendingDown, GridIcon, TableIcon, PresentationIcon, ImageIcon, Archive, PetPawIcon, Users } from '../components/icons.jsx';
@@ -1325,6 +1326,7 @@ const App = () => {
       // `model_store_availability`,而这一处漏改——调用抛「命令不存在」、被吞掉、
       // 入口永远不渲染。界面上没有任何异常,只是那个功能凭空消失了,查了一轮才找到。
       const [modelStoreAvailable, setModelStoreAvailable] = useState(false);
+      const { updates: modelStoreUpdates, hasUnread: modelStoreHasUnread, reconcile: reconcileModelStoreUpdates } = useModelStoreStartupUpdates(modelStoreAvailable, currentView === 'modelStore');
       useEffect(() => {
         let alive = true;
         invokeTauri('model_store_availability')
@@ -4885,6 +4887,8 @@ const App = () => {
                 <div data-testid="nav-model-store" style={NAV_TESTID_WRAPPER_STYLE}>
                   <NavItem
                     icon={NAV_ICON_MODEL_STORE} label={t.modelStore}
+                    unread={modelStoreHasUnread} unreadLabel={t.uiModelStore.startupUpdatesFound(modelStoreUpdates.length)} unreadTestId="model-store-update-dot"
+                    unreadTone="danger" unreadText={t.uiModelStore.startupUpdateBadge} unreadTextTestId="model-store-update-label"
                     active={currentView === 'modelStore'}
                     theme={activeTheme}
                     isSidebarOpen={isSidebarOpen}
@@ -5448,7 +5452,7 @@ const App = () => {
             )}
             {currentView === 'outputs' && <LazyKnowledgeView theme={activeTheme} t={t} mode="outputs" />}
             {currentView === 'knowledge' && <LazyKnowledgeView theme={activeTheme} t={t} />}
-            {currentView === 'modelStore' && <LazyModelStoreView theme={activeTheme} t={t} bs={bs} />}
+            {currentView === 'modelStore' && modelStoreAvailable && <LazyModelStoreView theme={activeTheme} t={t} bs={bs} startupUpdates={modelStoreUpdates} onLibrarySnapshot={reconcileModelStoreUpdates} />}
               </Suspense>
             </ViewErrorBoundary>
 
@@ -5674,7 +5678,7 @@ const App = () => {
               { key: 'toolStore', label: t.toolStore, icon: <Puzzle size={18} />,
                 active: currentView === 'toolStore', onClick: () => mobileNavigate('toolStore') },
               ...(modelStoreAvailable ? [{ key: 'modelStore', label: t.modelStore, icon: NAV_ICON_MODEL_STORE,
-                active: currentView === 'modelStore', onClick: () => mobileNavigate('modelStore') }] : []),
+                active: currentView === 'modelStore', dot: modelStoreHasUnread, onClick: () => mobileNavigate('modelStore') }] : []),
               { key: 'settings', label: t.settings, icon: <Settings size={18} />,
                 active: currentView === 'settings', dot: hasUpdate, onClick: () => mobileNavigate('settings') },
             ]} /></Suspense>

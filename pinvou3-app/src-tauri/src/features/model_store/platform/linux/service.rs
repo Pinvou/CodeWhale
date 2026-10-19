@@ -130,6 +130,7 @@ pub struct ModelStoreService {
     queue: Arc<DownloadQueue>,
     runs: Mutex<HashMap<String, Arc<RunLog>>>,
     startup_cleanup: StartupCleanup,
+    startup_updates: super::startup_updates::StartupUpdates,
 }
 
 impl Default for ModelStoreService {
@@ -146,6 +147,7 @@ impl ModelStoreService {
             queue: Arc::new(DownloadQueue::default()),
             runs: Mutex::new(HashMap::new()),
             startup_cleanup: StartupCleanup::default(),
+            startup_updates: Default::default(),
         }
     }
 
@@ -218,6 +220,9 @@ fn needs_redeploy(record: &db::StoreModelRecord) -> bool {
     if record.status != "deployed" {
         return false;
     }
+    if record.card_update_pending {
+        return true;
+    }
     if let (Some(deployed), Some(current)) = (
         record.deployed_script_sha256.as_deref(),
         record
@@ -275,11 +280,25 @@ fn strip_bulky_fields<T: serde::Serialize>(models: T) -> Value {
 /// 也没人提示。
 fn library_payload(models: Vec<db::StoreModelRecord>) -> Value {
     let flags: Vec<bool> = models.iter().map(needs_redeploy).collect();
+    let defaults: Vec<_> = models
+        .iter()
+        .map(|record| {
+            super::deploy_profiles::default_id(&record.card_id, &record.profiles).map(str::to_owned)
+        })
+        .collect();
+    let revisions: Vec<_> = models
+        .iter()
+        .map(|record| super::card_update::revision(&super::card_update::notice_manifest(record)))
+        .collect();
     let mut value = strip_bulky_fields(models);
     if let Some(items) = value.as_array_mut() {
-        for (item, needs) in items.iter_mut().zip(flags) {
+        for (((item, needs), default), revision) in
+            items.iter_mut().zip(flags).zip(defaults).zip(revisions)
+        {
             if let Some(obj) = item.as_object_mut() {
                 obj.insert("needs_redeploy".to_string(), Value::Bool(needs));
+                obj.insert("default_profile_id".to_string(), json!(default));
+                obj.insert("card_revision".to_string(), json!(revision));
             }
         }
     }
@@ -302,6 +321,7 @@ struct OpCleanup {
     /// 正常跑完时由工作线程填上；还是 `None` 就说明 panic 逃出了 catch_unwind，
     /// 那也得给 RunLog 一个结局，不能让调用方一直等下去。
     outcome: Option<Result<Value, String>>,
+    operation_lock: Option<std::fs::File>,
 }
 
 impl Drop for OpCleanup {
@@ -310,14 +330,36 @@ impl Drop for OpCleanup {
         self.registry_owner.active.finish(&self.card);
         // 下载之外的操作没进过队列，release 对它们是空操作
         self.registry_owner.queue.release(&self.run_id);
+        self.operation_lock.take();
         // finish 必须是最后一步：它一置位，长轮询就会立刻带着结局返回，调用方
         // 可能下一毫秒就来重试同一张卡——那时互斥必须已经放开了。
         let outcome = self
             .outcome
             .take()
             .unwrap_or_else(|| Err("内部错误：任务线程异常终止，没有留下结果".to_string()));
-        self.log.finish(outcome, self.control.cancelled());
+        let cancelled = self.control.cancelled() && outcome.is_err();
+        self.log.finish(outcome, cancelled);
     }
+}
+
+/// Cross-process serialization for all mutations of one public card.
+fn card_operation_lock(card_id: &str) -> Result<std::fs::File, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let safe_id = config::safe_path_component(card_id)?;
+    let lock_dir = config::data_dir().join("operation-locks");
+    std::fs::create_dir_all(&lock_dir).map_err(|e| e.to_string())?;
+    let operation_lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(lock_dir.join(format!("{safe_id}.lock")))
+        .map_err(|e| e.to_string())?;
+    operation_lock
+        .try_lock()
+        .map_err(|_| "该模型正在其他窗口操作，请稍后重试".to_string())?;
+    Ok(operation_lock)
 }
 
 /// 把一个阻塞的生命周期操作跑起来，立刻返回 run_id。
@@ -341,6 +383,9 @@ where
     // 但登记表之外的东西一律等占坑成功再建——占不到坑就直接返回，不能留下一条
     // 没人会去读、也没人会去收的运行记录。
     let run_id = new_run_id();
+    // All lifecycle actions share the lock with package replacement, including
+    // another app process. Closing the fd releases it after panic/cancellation.
+    let operation_lock = card_operation_lock(card_id)?;
     // 卡片级互斥：同一张卡不许被两处同时操作。
     service.active.try_begin(card_id, op, Some(&run_id))?;
 
@@ -362,6 +407,7 @@ where
             log: Arc::clone(&log_for_thread),
             control: control_probe,
             outcome: None,
+            operation_lock: Some(operation_lock),
         };
         // catch_unwind 只负责把 panic 变成一句人话，"一定会收尾"是守卫保证的。
         // AssertUnwindSafe：job 只被调用一次，panic 之后我们不再碰它捕获的任何
@@ -423,10 +469,120 @@ pub async fn model_detail(card_id: String) -> Result<Value, String> {
         ModelManager::new(None, None)
             .get_model_detail(&card_id)
             .map_err(|e| e.to_string())
-            .and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string()))
+            .and_then(|d| {
+                let default =
+                    super::deploy_profiles::default_id(&d.record.card_id, &d.record.profiles);
+                let mut value = serde_json::to_value(&d).map_err(|e| e.to_string())?;
+                value["record"]["default_profile_id"] = json!(default);
+                Ok(value)
+            })
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+pub async fn check_card_update(card_id: String) -> Result<Value, String> {
+    tokio::task::spawn_blocking(move || {
+        ModelManager::new(None, None)
+            .check_card_update(&card_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+pub async fn startup_update_check(service: Arc<ModelStoreService>) -> Result<Value, String> {
+    let report = service
+        .startup_updates
+        .once(super::available(), super::startup_updates::check)
+        .await;
+    serde_json::to_value(report).map_err(|e| e.to_string())
+}
+
+pub async fn versions(card_id: String) -> Result<Value, String> {
+    tokio::task::spawn_blocking(move || {
+        ModelManager::new(None, None)
+            .versions(&card_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+pub fn start_version_action(
+    service: &Arc<ModelStoreService>,
+    card_id: String,
+    action: String,
+    version_id: String,
+) -> Result<Value, String> {
+    let op = match action.as_str() {
+        "stage" => CardOp {
+            kind: "version_stage",
+            label: "下载新版",
+        },
+        "switch" => CardOp {
+            kind: "version_switch",
+            label: "切换版本",
+        },
+        "delete" => CardOp {
+            kind: "version_delete",
+            label: "清理旧版",
+        },
+        _ => return Err("不支持的版本操作".into()),
+    };
+    let card = card_id.clone();
+    let queue = Arc::clone(&service.queue);
+    spawn_op(service, &card_id, op, move |log, control, run_id| {
+        if action == "stage" {
+            let ticket = queue.enqueue(run_id);
+            while !queue.try_start(ticket, config::load_settings().max_concurrent_downloads()) {
+                if control.cancelled() {
+                    return Err("已取消".into());
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        }
+        use std::os::unix::fs::OpenOptionsExt;
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(config::data_dir().join("version-operations.lock"))
+            .map_err(|e| e.to_string())?;
+        lock.try_lock()
+            .map_err(|_| "另一个版本操作正在进行，请稍后重试".to_string())?;
+        let mgr = ModelManager::new(None, None);
+        let mut progress = |line: &str| log.push(line);
+        match action.as_str() {
+            "stage" => mgr.stage_version(&card, &version_id, &mut progress, control),
+            "switch" => mgr.switch_version(&card, &version_id, &mut progress, control),
+            _ => mgr.delete_version(&card, &version_id, &mut progress, control),
+        }
+        .map_err(|e| e.to_string())
+    })
+}
+
+pub fn start_card_update(
+    service: &Arc<ModelStoreService>,
+    card_id: String,
+    revision: String,
+) -> Result<Value, String> {
+    let card = card_id.clone();
+    spawn_op(
+        service,
+        &card_id,
+        CardOp {
+            kind: "update",
+            label: "更新卡片",
+        },
+        move |log, control, _| {
+            ModelManager::new(None, None)
+                .update_card(&card, &revision, &mut |line| log.push(line), control)
+                .map_err(|e| e.to_string())
+        },
+    )
 }
 
 // ---------------------------------------------------------------- 长操作
@@ -872,6 +1028,7 @@ pub fn force_remove(
     }
     // 还是要过卡片互斥：真有一个卸载正在删文件时把记录抽走，脚本删到一半就会
     // 对着一个不存在的记录继续跑。
+    let _operation_lock = card_operation_lock(&card_id)?;
     service.active.try_begin(&card_id, OP_FORCE_REMOVE, None)?;
     let result = ModelManager::new(None, None)
         .force_remove_record(&card_id)
@@ -884,6 +1041,28 @@ pub fn force_remove(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancellation_after_a_successful_commit_is_reported_as_success() {
+        let _home = config::TempHome::new();
+        let service = Arc::new(ModelStoreService::new());
+        let started = spawn_op(&service, "committed-card", OP_DEPLOY, |_, control, _| {
+            control
+                .cancel
+                .as_ref()
+                .unwrap()
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(json!({"committed":true}))
+        })
+        .unwrap();
+        let log = service.run(started["run_id"].as_str().unwrap()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while log.outcome.lock().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(log.outcome.lock().as_ref().is_some_and(Result::is_ok));
+        assert!(!*log.cancelled.lock());
+    }
 
     /// 「现在还有没有提示在等人答」只有后端知道，而这件事必须由后端说了算。
     ///
@@ -936,5 +1115,31 @@ mod tests {
         assert!(is_prompt_line("  LMM_PROMPT_FORM={}  "));
         assert!(!is_prompt_line("LMM_PROMPTX=1"));
         assert!(!is_prompt_line("正在下载 …"));
+    }
+    #[test]
+    fn card_operation_lock_is_shared_by_independent_service_instances() {
+        let _home = config::TempHome::new();
+        let first = Arc::new(ModelStoreService::new());
+        let second = Arc::new(ModelStoreService::new());
+        let (release, wait) = std::sync::mpsc::channel();
+        let started = spawn_op(&first, "shared-card", OP_DEPLOY, move |_, _, _| {
+            wait.recv().unwrap();
+            Ok(Value::Null)
+        })
+        .unwrap();
+        assert!(spawn_op(&second, "shared-card", OP_ENABLE, |_, _, _| Ok(Value::Null)).is_err());
+        assert!(
+            force_remove(&second, "shared-card".into(), true)
+                .unwrap_err()
+                .contains("其他窗口")
+        );
+        release.send(()).unwrap();
+        let log = first.run(started["run_id"].as_str().unwrap()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while log.outcome.lock().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(log.outcome.lock().as_ref().is_some_and(Result::is_ok));
+        assert!(spawn_op(&second, "shared-card", OP_ENABLE, |_, _, _| Ok(Value::Null)).is_ok());
     }
 }

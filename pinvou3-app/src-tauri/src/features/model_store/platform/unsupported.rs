@@ -42,6 +42,34 @@ pub async fn model_detail(_card_id: String) -> Result<Value, String> {
     nope()
 }
 
+pub async fn check_card_update(_card_id: String) -> Result<Value, String> {
+    nope()
+}
+
+pub async fn startup_update_check(_service: Arc<ModelStoreService>) -> Result<Value, String> {
+    Ok(serde_json::json!({"checked":0,"skipped":0,"updates":[]}))
+}
+
+pub async fn versions(_card_id: String) -> Result<Value, String> {
+    nope()
+}
+pub fn start_version_action(
+    _service: &Arc<ModelStoreService>,
+    _card_id: String,
+    _action: String,
+    _version_id: String,
+) -> Result<Value, String> {
+    nope()
+}
+
+pub fn start_card_update(
+    _service: &Arc<ModelStoreService>,
+    _card_id: String,
+    _revision: String,
+) -> Result<Value, String> {
+    nope()
+}
+
 pub fn start_download(
     _service: &Arc<ModelStoreService>,
     _card_id: String,
