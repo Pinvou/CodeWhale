@@ -305,6 +305,8 @@ test("usage trend exposes exact values on hover and after a range rerender", asy
       active_devices: index === 7 ? 3 : index + 1,
       turns: index === 7 ? 12 : index + 2,
     })),
+    usage_trend_hourly_today: [{ hour: seenAt, active_devices: 3, new_devices: 1, turns: 4 }],
+    usage_trend_hourly_previous: [{ hour: seenAt - 86_400_000, active_devices: 2, new_devices: 1, turns: 3 }],
   };
   const dom = new JSDOM(statsHtml, {
     runScripts: "dangerously",
@@ -333,6 +335,57 @@ test("usage trend exposes exact values on hover and after a range rerender", asy
     assert.match(tooltip.textContent, /活跃设备3 台/);
     assert.match(tooltip.textContent, /新增设备3 台/);
     assert.match(tooltip.textContent, /对话次数12 次/);
+    const controls = [...document.querySelectorAll('[data-daily-metric]')];
+    assert.equal(controls.length, 3);
+    assert(controls.every(input => input.checked && input.labels.length === 1));
+    const hourlyBefore = document.querySelector('#hourlyTrendSvg').innerHTML;
+    const classes = ['line', 'line3', 'line2'];
+    const labels = ['活跃设备', '新增设备', '对话次数'];
+    for (let mask = 0; mask < 8; mask++) {
+      controls.forEach((input, index) => {
+        if (input.checked !== Boolean(mask & (1 << index))) input.click();
+      });
+      for (const range of ['30', '7']) {
+        document.querySelector(`[data-days="${range}"]`).click();
+        controls.forEach((input, index) => {
+          assert.equal(svg.querySelectorAll(`path.${classes[index]}`).length, input.checked ? 1 : 0);
+          assert.equal(svg.querySelectorAll('.trend-dot').length, controls.filter(control => control.checked).length);
+        });
+        assert.equal(Boolean(svg.querySelector('.area')), controls[0].checked);
+        if (mask) {
+          hitArea = document.querySelector('#trendHitArea');
+          assert.equal(hitArea.getAttribute('aria-valuemax'), range === '7' ? '6' : '7');
+          hitArea.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+          labels.forEach((label, index) => {
+            assert.equal(tooltip.textContent.includes(label), controls[index].checked);
+            assert.equal(hitArea.getAttribute('aria-valuetext').includes(label), controls[index].checked);
+          });
+        } else {
+          assert.equal(document.querySelector('#trendHitArea'), null);
+          assert.equal(tooltip.hidden, true);
+          assert.match(svg.textContent, /请选择至少一项指标/);
+        }
+        assert.equal(document.querySelector('#hourlyTrendSvg').innerHTML, hourlyBefore);
+      }
+    }
+    controls[0].click();
+    controls[1].click();
+    document.querySelector('#refreshButton').click();
+    await new Promise(resolve => dom.window.setTimeout(resolve, 20));
+    assert.deepEqual(controls.map(input => input.checked), [false, false, true]);
+    assert.equal(svg.querySelectorAll('path.line2').length, 1);
+    assert.equal(svg.querySelector('.area'), null);
+    const dailyBefore = svg.innerHTML;
+    document.querySelector('[data-hourly-metric="turns"]').click();
+    assert.equal(svg.innerHTML, dailyBefore);
+    controls[2].click();
+    document.querySelector('#refreshButton').click();
+    await new Promise(resolve => dom.window.setTimeout(resolve, 20));
+    assert(controls.every(input => !input.checked));
+    assert.match(svg.textContent, /请选择至少一项指标/);
+    controls.forEach(input => input.click());
+    hitArea = document.querySelector('#trendHitArea');
+    hitArea.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'End', bubbles: true }));
     assert.equal(document.querySelector("#trendHover").getAttribute("visibility"), "visible");
     assert.match(hitArea.getAttribute("aria-valuetext"), /活跃设备 3 台/);
 
