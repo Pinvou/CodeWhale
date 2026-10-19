@@ -173,6 +173,13 @@ impl DesktopControlledExecutionAdapter {
 
 fn submit_error(code: &str) -> UseCaseError {
     match code {
+        "task_permission_mode_required" => {
+            UseCaseError::new("task_permission_mode_required", false)
+        }
+        "task_permission_mode_changed" => UseCaseError::new("task_permission_mode_changed", false),
+        "task_permission_mode_unsupported" => {
+            UseCaseError::new("task_permission_mode_unsupported", false)
+        }
         "task_session_busy" => UseCaseError::new("task_session_busy", true),
         "task_turn_timeout" => UseCaseError::new("task_turn_timeout", false),
         "task_turn_timeout_config_invalid" => {
@@ -1246,7 +1253,54 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         }
         result
             .map(|outcome| outcome.status)
-            .map_err(|error| error.code().to_owned())
+            .map_err(|error| {
+                let code = error.code();
+                if crate::features::remote_control::controller::task_rejection::is_definite(code) {
+                    // A retry can fail a now-changed policy after an earlier
+                    // attempt was already admitted. Never call that rejection.
+                    let ledger = self.app.state::<Arc<RemoteTaskLedger>>();
+                    if !matches!(ledger.record(&field("task_id")), Err(ref lookup) if lookup.code == "task_not_found") {
+                        return "task_request_conflict".to_owned();
+                    }
+                }
+                code.to_owned()
+            })
+    }
+
+    async fn task_status(
+        &self,
+        lease: &LeaseContext,
+        session_ref: &str,
+        task_id: &str,
+        client_request_id: &str,
+    ) -> Result<Value, String> {
+        let controlled = self.app.state::<ControlledDeviceManager>();
+        controlled
+            .with_current_business_lease(lease, || {
+                let runtime = self
+                    .app
+                    .state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>();
+                let session_id = runtime
+                    .service()
+                    .session_for(session_ref, &lease.remote_control_generation)
+                    .ok_or_else(|| "task_session_binding_mismatch".to_owned())?;
+                let record = self
+                    .app
+                    .state::<Arc<RemoteTaskLedger>>()
+                    .record(task_id)
+                    .map_err(|error| error.code.to_owned())?;
+                if record.session_id != session_id
+                    || record.client_request_id != client_request_id
+                    || record.lease != TaskLeaseBinding::from_context(lease)
+                {
+                    return Err("task_request_conflict".into());
+                }
+                runtime
+                    .service()
+                    .status_payload(task_id)
+                    .map_err(|error| error.code.to_owned())
+            })
+            .map_err(|error| error.code.to_owned())?
     }
 
     async fn cancel_task(
@@ -2192,6 +2246,9 @@ mod submit_boundary_tests {
             ("task_ledger_persist_failed", true),
             ("task_session_backend_bind_failed", true),
             ("task_status_binding_invalid", false),
+            ("task_permission_mode_required", false),
+            ("task_permission_mode_changed", false),
+            ("task_permission_mode_unsupported", false),
             ("task_workspace_unexpected", false),
             ("task_workspace_not_authorized", false),
             ("task_session_binding_mismatch", false),

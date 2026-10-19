@@ -68,7 +68,8 @@ function StatusBanner({ copy, state, errorCode }) {
   let detail = copy[detailKey];
   if (errorCode === 'desktop_controller_relay_unavailable') detail = copy.errorRelayUnavailable;
   if (errorCode === 'desktop_remote_control_unsupported') detail = copy.unsupported;
-  if (errorCode && !['desktop_controller_relay_unavailable', 'desktop_remote_control_unsupported'].includes(errorCode)) {
+  if (errorCode === 'remote_task_permissions_save_failed') detail = copy.taskPermissionSaveFailed;
+  if (errorCode && !['desktop_controller_relay_unavailable', 'desktop_remote_control_unsupported', 'remote_task_permissions_save_failed'].includes(errorCode)) {
     detail = copy.errorGeneric;
   }
   return (
@@ -96,6 +97,8 @@ export default function ControlledDevicePanel({
   const status = device.status || 'disabled';
   const [busy, setBusy] = useState(null);
   const [localError, setLocalError] = useState(null);
+  const [taskPolicy, setTaskPolicy] = useState(null);
+  const policyIntent = useRef(0);
   const previousAuthority = useRef(controlledAuthorityKey(device));
   const authority = useRef(previousAuthority.current);
   const operationGuard = useRef(createAsyncOperationGuard());
@@ -132,6 +135,19 @@ export default function ControlledDevicePanel({
 
   const authorityKey = controlledAuthorityKey(device);
   authority.current = authorityKey;
+
+  useEffect(() => {
+    const remote = bridge?.available && bridge.desktopRemoteControl;
+    if (!supported || !remote?.controlledPermissions) return undefined;
+    let cancelled = false;
+    const intent = policyIntent.current;
+    remote.controlledPermissions().then(policy => {
+      if (!cancelled && policyIntent.current === intent) setTaskPolicy(policy);
+    }).catch(() => {
+      if (!cancelled && policyIntent.current === intent) setLocalError('remote_task_permissions_save_failed');
+    });
+    return () => { cancelled = true; };
+  }, [supported]);
 
   useEffect(() => {
     const guard = createAsyncOperationGuard();
@@ -305,7 +321,9 @@ export default function ControlledDevicePanel({
             className="focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#007AFF] forced-colors:border forced-colors:border-[ButtonText] motion-reduce:transition-none"
             onChange={() => run('toggle', async remote => {
               if (active) return remote.controlledStop();
+              policyIntent.current += 1;
               const result = await remote.controlledStart(null, stagedWorkspaces);
+              setTaskPolicy(previous => ({ chat: previous?.chat || 'yolo', code: previous?.code || 'yolo' }));
               setStagedWorkspaces([]);
               return result;
             })}
@@ -314,6 +332,30 @@ export default function ControlledDevicePanel({
       </div>
 
       <div className="rounded-2xl border border-black/[0.08] bg-white p-4 shadow-[0_1px_2px_rgba(0,0,0,0.03)] dark:border-white/[0.1] dark:bg-white/[0.035]">
+        <fieldset className="mb-4 space-y-2" disabled={!!busy || !taskPolicy}>
+          <legend className="text-[13px] font-semibold">{copy.taskPermissionTitle}</legend>
+          <p className="text-[12px] leading-5 opacity-80">{copy.taskPermissionDescription}</p>
+          {['chat', 'code'].map(lane => (
+            <label key={lane} className="flex items-center justify-between gap-3 text-[13px]">
+              <span>{lane === 'chat' ? copy.taskPermissionChat : copy.taskPermissionCode}</span>
+              <select aria-label={lane === 'chat' ? copy.taskPermissionChat : copy.taskPermissionCode}
+                value={taskPolicy?.[lane] || ''}
+                className="rounded border border-black/15 bg-transparent px-2 py-1 dark:border-white/20"
+                onChange={event => {
+                  const next = { chat: taskPolicy?.chat || 'yolo', code: taskPolicy?.code || 'yolo', [lane]: event.target.value };
+                  run('task-permissions', async remote => {
+                    const intent = ++policyIntent.current;
+                    const saved = await remote.controlledPermissions(next);
+                    if (policyIntent.current === intent) setTaskPolicy(saved);
+                  });
+                }}>
+                {!taskPolicy?.[lane] && <option value="" disabled>{copy.taskPermissionUnconfigured}</option>}
+                <option value="yolo">{copy.taskPermissionYolo}</option>
+                <option value="plan">{copy.taskPermissionPlan}</option>
+              </select>
+            </label>
+          ))}
+        </fieldset>
         <StatusBanner copy={copy} state={uiState} errorCode={visibleError} />
         {localError && <div className="mt-3"><StatusBanner copy={copy} state="error" errorCode={localError} /></div>}
 

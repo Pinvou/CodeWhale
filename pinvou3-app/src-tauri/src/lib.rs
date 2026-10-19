@@ -1893,6 +1893,7 @@ pub fn run() {
             commands::runtime::list_shell_tasks,
             commands::runtime::cancel_shell_task,
             commands::desktop_remote_controlled::desktop_remote_controlled_start,
+            commands::desktop_remote_controlled::desktop_remote_controlled_permissions,
             commands::desktop_remote_controlled::desktop_remote_controlled_refresh,
             commands::desktop_remote_controlled::desktop_remote_controlled_stop,
             commands::desktop_remote_controlled::desktop_remote_controlled_disconnect_now,

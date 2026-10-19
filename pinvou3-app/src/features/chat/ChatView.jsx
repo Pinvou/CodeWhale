@@ -6234,7 +6234,10 @@ const openChatExternalUrl = (url) => {
       if (item.remoteProxy && item.type === 'system') {
         const copy = t.remoteConversation;
         const label = copy[remoteProjectionLabelKey(item.remoteKind)] || copy.projectionEvent;
-        const systemBody = remoteProxySystemBody(item);
+        const rawBody = remoteProxySystemBody(item);
+        const failureHelp = remotePermissionFailureText(rawBody, copy)
+          || (item.remoteRejected ? copy.taskRejectedGeneric : null);
+        const systemBody = failureHelp ? `${failureHelp}\n(${rawBody})` : rawBody;
         return (
           <div className="flex justify-center">
             <div data-testid="chat-remote-projection-entry" data-kind={item.remoteKind}

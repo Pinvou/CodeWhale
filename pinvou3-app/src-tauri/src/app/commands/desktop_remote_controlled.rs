@@ -224,6 +224,20 @@ pub fn desktop_remote_client_event(
 }
 
 #[tauri::command]
+pub async fn desktop_remote_controlled_permissions(
+    manager: State<'_, ControlledDeviceManager>,
+    policy: Option<crate::platform::prefs::RemoteTaskPermissionPrefs>,
+) -> Result<crate::platform::prefs::RemoteTaskPermissionPrefs, String> {
+    ensure_supported(&manager)?;
+    tokio::task::spawn_blocking(move || match policy {
+        Some(policy) => crate::features::remote_control::task_permissions::save(policy),
+        None => Ok(crate::platform::prefs::UserPrefs::load().remote_task_permissions),
+    })
+    .await
+    .map_err(|_| "remote_task_permissions_save_failed".to_owned())?
+}
+
+#[tauri::command]
 pub async fn desktop_remote_controlled_start(
     app: AppHandle,
     manager: State<'_, ControlledDeviceManager>,
@@ -239,6 +253,11 @@ pub async fn desktop_remote_controlled_start(
     let result = async {
         ensure_supported(&manager)?;
         let workspaces = workspace_requests(workspaces)?;
+        tokio::task::spawn_blocking(
+            crate::features::remote_control::task_permissions::enable_defaults,
+        )
+        .await
+        .map_err(|_| "remote_task_permissions_save_failed".to_owned())??;
         // Retain the exact operation returned under the start lock. Looking up
         // "current" again can substitute a concurrent stop/restart's new owner.
         let operation = match manager.start(device_name.as_deref(), workspaces) {

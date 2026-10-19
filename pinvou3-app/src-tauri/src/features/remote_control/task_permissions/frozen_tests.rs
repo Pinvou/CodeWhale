@@ -2,6 +2,72 @@ use super::*;
 use crate::features::sessions::with_isolated_store_restoring_home;
 use std::path::Path;
 
+#[test]
+fn enabling_persists_defaults_without_changing_local_permissions_and_preserves_selection() {
+    with_isolated_store_restoring_home(|store| {
+        let settings = store
+            .manager
+            .sessions_dir()
+            .parent()
+            .unwrap()
+            .join("settings.json");
+        std::fs::write(
+            &settings,
+            br#"{"code_permission":{"last_mode":"plan"},"mode_defaults":{"work":"plan"}}"#,
+        )
+        .unwrap();
+        assert_eq!(configured(false).unwrap_err(), REQUIRED);
+        enable_defaults().unwrap();
+        let prefs = UserPrefs::load();
+        assert_eq!(
+            prefs.remote_task_permissions.chat,
+            Some(SerializableMode::Yolo)
+        );
+        assert_eq!(
+            prefs.remote_task_permissions.code,
+            Some(SerializableMode::Yolo)
+        );
+        assert_eq!(
+            prefs.code_permission.last_mode,
+            Some(SerializableMode::Plan)
+        );
+        assert_eq!(prefs.mode_defaults.work, Some(SerializableMode::Plan));
+        save(crate::platform::prefs::RemoteTaskPermissionPrefs {
+            chat: Some(SerializableMode::Plan),
+            code: Some(SerializableMode::Yolo),
+        })
+        .unwrap();
+        enable_defaults().unwrap();
+        assert_eq!(configured(false).unwrap(), SerializableMode::Plan);
+        assert_eq!(configured(true).unwrap(), SerializableMode::Yolo);
+        assert_eq!(
+            save(crate::platform::prefs::RemoteTaskPermissionPrefs::default()).unwrap_err(),
+            REQUIRED
+        );
+        let backup = settings.with_extension("fixture-backup");
+        let valid = std::fs::read(&settings).unwrap();
+        for damaged in ["{not-json", "[]", "{\"advanced\":42}"] {
+            std::fs::write(&settings, damaged).unwrap();
+            assert_eq!(
+                enable_defaults().unwrap_err(),
+                "remote_task_permissions_save_failed"
+            );
+            assert_eq!(std::fs::read_to_string(&settings).unwrap(), damaged);
+        }
+        std::fs::write(&settings, &valid).unwrap();
+        std::fs::rename(&settings, &backup).unwrap();
+        std::fs::create_dir(&settings).unwrap();
+        assert_eq!(
+            enable_defaults().unwrap_err(),
+            "remote_task_permissions_save_failed"
+        );
+        assert!(
+            settings.is_dir(),
+            "failed enable must not destroy the existing path"
+        );
+    });
+}
+
 fn with_session(action: impl FnOnce(&SessionStore, &str, &Path)) {
     with_isolated_store_restoring_home(|store| {
         let root = store.manager.sessions_dir();

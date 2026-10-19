@@ -1341,6 +1341,10 @@
       subscribe: subscribe,
       stop: stop,
       controlledStart: controlledStart,
+      controlledPermissions: function (policy) {
+        if (!isAvailable()) return Promise.reject(new Error("desktop_remote_control_unsupported"));
+        return invoke("desktop_remote_controlled_permissions", { policy: policy || null });
+      },
       controlledRefresh: controlledRefresh,
       controlledStop: controlledStop,
       controlledDisconnectNow: controlledDisconnectNow,
