@@ -115,15 +115,23 @@ fn denied_tool_error(tool_name: &str) -> ToolError {
     }
 }
 
-/// Next-step guidance for a `denied by user` refusal (#5146). Under the Never
-/// posture prompts are disabled for the whole turn, so waiting for an
-/// approval that cannot arrive deadlocks the model — tell it to report the
-/// blocked change and move on instead.
+/// Next-step guidance for a `denied by user` refusal (#5146). The text must
+/// match how the posture actually resolves an approval request: under Never
+/// prompts are disabled for the whole turn, and under Auto (auto-review)
+/// approval-required calls are auto-denied without a modal
+/// (`ApprovalRequestDisposition::AutoDenyAutoReview`) — in both, waiting for
+/// an approval that cannot arrive deadlocks the model.
 fn denied_call_next_step(approval_mode: crate::tui::approval::ApprovalMode) -> &'static str {
-    if approval_mode == crate::tui::approval::ApprovalMode::Never {
-        "Approval prompts are disabled for this turn, so waiting cannot succeed — do not retry the same call; report the blocked change and move on."
-    } else {
-        "Do not retry the same call; present what you intended and wait for the user's approval or new instructions."
+    match approval_mode {
+        crate::tui::approval::ApprovalMode::Never => {
+            "Approval prompts are disabled for this turn, so waiting cannot succeed — do not retry the same call; report the blocked change and move on."
+        }
+        crate::tui::approval::ApprovalMode::Auto => {
+            "Auto-review denies approval-required calls without a prompt, so waiting cannot succeed — do not retry the same call; re-plan without the blocked change or report it."
+        }
+        _ => {
+            "Do not retry the same call; present what you intended and wait for the user's approval or new instructions."
+        }
     }
 }
 
@@ -7461,7 +7469,6 @@ mod tests {
         assert!(never.contains("waiting cannot succeed"), "{never}");
         assert!(!never.contains("wait for the user's approval"), "{never}");
         for mode in [
-            crate::tui::approval::ApprovalMode::Auto,
             crate::tui::approval::ApprovalMode::Bypass,
             crate::tui::approval::ApprovalMode::Suggest,
         ] {
@@ -7471,6 +7478,19 @@ mod tests {
                 "{mode:?}: {step}"
             );
         }
+    }
+
+    #[test]
+    fn denied_call_next_step_names_the_auto_review_deadlock() {
+        // Round-6 review pin: auto-review auto-denies approval-required calls
+        // without a modal (AutoDenyAutoReview), so the wait phrasing is the
+        // same dead-end there that Never had. The Auto arm must say waiting
+        // cannot succeed and point at re-planning.
+        let auto = denied_call_next_step(crate::tui::approval::ApprovalMode::Auto);
+        assert!(auto.contains("waiting cannot succeed"), "{auto}");
+        assert!(auto.contains("Auto-review"), "{auto}");
+        assert!(auto.contains("re-plan"), "{auto}");
+        assert!(!auto.contains("wait for the user's approval"), "{auto}");
     }
 
     #[test]
