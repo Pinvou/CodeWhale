@@ -493,6 +493,49 @@ test("hourly comparison shares scales, styles yesterday separately and does not 
     hit.dispatchEvent(new dom.window.MouseEvent("pointerleave"));
     assert.equal(tooltip.hidden, true);
     assert.equal(doc.querySelector("#hourlyTrendHover").getAttribute("visibility"), "hidden");
+    const controls = [...doc.querySelectorAll('[data-hourly-metric]')];
+    assert.equal(controls.length, 3);
+    assert(controls.every(input => input.checked && input.labels.length === 1));
+    const dailyBefore = doc.querySelector('#trendSvg').innerHTML;
+    for (const [key, className, label] of [
+      ['active_devices', 'line', '活跃设备'],
+      ['new_devices', 'line3', '新增设备'],
+      ['turns', 'line2', '对话次数'],
+    ]) {
+      const input = doc.querySelector(`[data-hourly-metric="${key}"]`);
+      input.click();
+      assert.equal(svg.querySelectorAll(`path.${className}`).length, 0);
+      assert.equal(svg.querySelectorAll('path.previous-day').length, 2);
+      assert.equal(svg.querySelectorAll('circle.current-point').length, 2);
+      if (key === 'active_devices') assert.equal(svg.querySelector('.area'), null);
+      hit = doc.querySelector('#hourlyTrendHitArea');
+      hit.dispatchEvent(new dom.window.Event('focus'));
+      assert(!tooltip.textContent.includes(label));
+      assert(!hit.getAttribute('aria-valuetext').includes(label));
+      assert.equal(doc.querySelector('#trendSvg').innerHTML, dailyBefore);
+      input.click();
+      assert.equal(svg.querySelectorAll(`path.${className}`).length, 2);
+      assert.equal(tooltip.hidden, true);
+    }
+    controls[0].click();
+    controls[1].click();
+    doc.querySelector('#refreshButton').click();
+    await wait();
+    assert.deepEqual(controls.map(input => input.checked), [false, false, true]);
+    assert.equal(svg.querySelectorAll('path.previous-day').length, 1);
+    assert.equal(svg.querySelectorAll('path.line2').length, 2);
+    assert.equal(svg.querySelectorAll('.area').length, 0);
+    controls[2].click();
+    assert.equal(svg.querySelectorAll('path,circle,rect.trend-hit').length, 0);
+    assert.match(svg.textContent, /请选择至少一项指标/);
+    assert.equal(tooltip.hidden, true);
+    doc.querySelector('#refreshButton').click();
+    await wait();
+    assert(controls.every(input => !input.checked));
+    assert.match(svg.textContent, /请选择至少一项指标/);
+    controls.forEach(input => input.click());
+    assert.equal(svg.querySelectorAll('path.previous-day').length, 3);
+    assert.equal(svg.querySelectorAll('circle.current-point').length, 3);
     report = { ...report, usage_trend_hourly_previous: [] };
     doc.querySelector("#refreshButton").click();
     await wait();
