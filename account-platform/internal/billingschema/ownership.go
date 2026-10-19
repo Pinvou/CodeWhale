@@ -62,6 +62,14 @@ func prepareBillingMigration(ctx context.Context, tx pgx.Tx, migration migration
 			return protectBillingMigrationAndLendBonusDDL(ctx, tx, migration)
 		}
 	}
+	if migration.Version == 80 {
+		if err := validatePackageIndexDDL(migration); err != nil {
+			return err
+		}
+		if !hardened {
+			return lendPackageIndexDDL(ctx, tx, migration)
+		}
+	}
 	if hardened {
 		// This authority exists only in this uncommitted migration transaction.
 		// The runtime is never granted membership in the independent owner role.
@@ -87,6 +95,9 @@ SET ROLE billing_service;`); err != nil {
 }
 
 func finishBillingMigration(ctx context.Context, tx pgx.Tx, migration migrations.Migration) error {
+	if err := revokePackageIndexDDL(ctx, tx, migration); err != nil {
+		return err
+	}
 	if err := revokeBonusDDL(ctx, tx, migration); err != nil {
 		return err
 	}

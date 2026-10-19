@@ -40,6 +40,105 @@ func TestChargebackFrozenExecutionPostgres(t *testing.T) {
 		}
 		return p
 	}
+	t.Run("actual-payment-origin-two-leg-reconciliation", func(t *testing.T) {
+		// Use a separate owned DB so the real list query must select exactly this
+		// payment and chargeback. Funding and consumption use original writers.
+		r, ctx := retainedFinanceRepository(t)
+		c, order, transaction, pack := retainedFinanceOrder(t, r, ctx, 1000000, true)
+		usageID := uuid.New()
+		hold, err := r.Reserve(ctx, usageID, order.WalletID, 1000000, nil, r.now().Add(time.Hour))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.Commit(ctx, usageID, hold.ID, 1000000, map[string]any{"controlled": true}); err != nil {
+			t.Fatal(err)
+		}
+		providerReference := "audit-chargeback-repair-" + uuid.NewString()
+		source, err := r.RecordConfirmedChargebackForReview(ctx, transaction, providerReference, []byte(`{"controlled":true}`))
+		if err != nil || source.EntitlementPackageID != pack || source.ManualReviewCaseID == nil {
+			t.Fatalf("original chargeback evidence %+v %v", source, err)
+		}
+		actor, key := uuid.New(), uuid.NewString()
+		retainedClaimAnomaly(t, r, ctx, *source.ManualReviewCaseID, actor)
+		if _, err := retainedResolveClaimedAnomaly(t, r, ctx, *source.ManualReviewCaseID, actor, key, "ESCALATE_FINANCIAL_REPAIR", "controlled original chargeback escalation", "PENDING"); err != nil {
+			t.Fatal(err)
+		}
+		activation := chargebackFixtureActivation(t, ctx, r.pool)("ACTIVE")
+		p, err := chargebackFinancialRepairPlanFrom(ctx, r.pool, ChargebackFinancialRepairCommandInput{ChargebackCaseID: source.ID, PaymentEvidenceID: source.PaymentEvidenceID}, 1, 1, activation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := r.ApplyChargebackFinancialRepair(ctx, chargebackFrozenInput(p, activation))
+		if err != nil || result.BaseShortfallMicrocredits != 1000000 {
+			t.Fatalf("actual two-leg repair %+v %v", result, err)
+		}
+		var paymentReference string
+		if err := r.pool.QueryRow(ctx, `SELECT provider_transaction_id FROM payment_transactions WHERE id=$1`, transaction).Scan(&paymentReference); err != nil {
+			t.Fatal(err)
+		}
+		financialSnapshot := func() string {
+			var raw string
+			if err := r.pool.QueryRow(ctx, `SELECT jsonb_build_array(
+ (SELECT jsonb_agg(to_jsonb(w) ORDER BY id) FROM wallets w),
+ (SELECT jsonb_agg(to_jsonb(p) ORDER BY id) FROM entitlement_packages p),
+ (SELECT jsonb_agg(to_jsonb(c) ORDER BY id) FROM entitlement_components c),
+ (SELECT jsonb_agg(to_jsonb(l) ORDER BY id) FROM credit_lots l),
+ (SELECT jsonb_agg(to_jsonb(j) ORDER BY id) FROM journal_entries j),
+ (SELECT jsonb_agg(to_jsonb(p) ORDER BY id) FROM ledger_postings p),
+ (SELECT jsonb_agg(to_jsonb(r) ORDER BY id) FROM receivables r),
+ (SELECT jsonb_agg(to_jsonb(a) ORDER BY id) FROM receivable_allocations a),
+ (SELECT jsonb_agg(to_jsonb(c) ORDER BY id) FROM chargeback_cases c),
+ (SELECT jsonb_agg(to_jsonb(c) ORDER BY id) FROM chargeback_financial_repair_cases c))::text`).Scan(&raw); err != nil {
+				t.Fatal(err)
+			}
+			return raw
+		}
+		beforeReconciliation := financialSnapshot()
+		observedAt := r.now()
+		controlledBill := []ProviderBillEntry{
+			{EntryType: "PAYMENT", ProviderReferenceID: paymentReference, ChannelTransactionID: paymentReference, MerchantOrderNo: order.MerchantOrderNo, Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, Status: "SUCCESS", PaidAt: observedAt},
+			{EntryType: "CHARGEBACK", ProviderReferenceID: providerReference, ChannelTransactionID: providerReference, MerchantOrderNo: order.MerchantOrderNo, Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, Status: "SUCCESS", PaidAt: observedAt},
+		}
+		provider := &reconciliationFixtureProvider{retainedFinancialProvider: *c.provider.(*retainedFinancialProvider), rows: controlledBill}
+		api, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		local := observedAt.In(time.FixedZone("Asia/Shanghai", 8*60*60))
+		run, err := api.RunAdminReconciliation(ctx, uuid.New(), order.Channel, normalizedReconciliationBusinessDate(local))
+		if err != nil || run.Status != "COMPLETED" || run.CaseCount != 0 {
+			t.Fatalf("actual API reconciliation failed: %+v %v", run, err)
+		}
+		start, end := reconciliationBusinessDateRange(normalizedReconciliationBusinessDate(local))
+		facts, err := c.listFourWayReconciliationFacts(ctx, r.pool, order.Channel, start, end)
+		if err != nil || len(facts) != 2 {
+			t.Fatalf("expected original payment and repaired chargeback, got %d: %v", len(facts), err)
+		}
+		if err := auditFourWayReconciliationFacts(ctx, r.pool, facts); err != nil {
+			t.Fatal(err)
+		}
+		seen := false
+		for _, fact := range facts {
+			if !fact.LedgerPresent || !fact.LedgerValid || fact.IntegrityCaseType != "" {
+				t.Fatalf("real compensation failed audit: %+v", fact)
+			}
+			if fact.EntryType == "CHARGEBACK" {
+				if !fact.EventDateVerified || fact.EventDateConflict {
+					t.Fatalf("trusted chargeback occurrence date missing: %+v", fact)
+				}
+				seen = fact.ProviderReferenceID == providerReference
+			}
+		}
+		if !seen {
+			t.Fatal("query did not select the actual repaired chargeback")
+		}
+		if differences := CompareFourWayReconciliation(controlledBill, facts); len(differences) != 0 {
+			t.Fatalf("actual chargeback repair generated differences: %+v", differences)
+		}
+		if financialSnapshot() != beforeReconciliation {
+			t.Fatal("API bill reconciliation repeated or changed a financial effect")
+		}
+	})
 	reject := func(t *testing.T, i ChargebackFinancialRepairExecutionInput) {
 		t.Helper()
 		before := chargebackEffectSnapshot(t, ctx, r)

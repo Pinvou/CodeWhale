@@ -15,10 +15,15 @@ func TestF03ReversalOccurrenceDayDoesNotBecomeSettlementDay(t *testing.T) {
 		t.Fatal(err)
 	}
 	reference := "controlled-cross-day-refund"
-	if _, _, err := original.finishRefund(ctx, refund, ProviderRefund{MerchantRefundNo: refund.MerchantRefundNo, AmountFen: refund.AmountFen, Status: "SUCCESS", ChannelRefundID: reference}, false); err != nil {
+	wireReference := " \u3000" + reference + "\u0085 "
+	if _, _, err := original.finishRefund(ctx, refund, ProviderRefund{MerchantRefundNo: refund.MerchantRefundNo, AmountFen: refund.AmountFen, Status: "SUCCESS", ChannelRefundID: wireReference}, false); err != nil {
 		t.Fatal(err)
 	}
-	now := r.now()
+	var storedReference string
+	if err := r.pool.QueryRow(ctx, `SELECT channel_refund_id FROM refunds WHERE id=$1`, refund.ID).Scan(&storedReference); err != nil || storedReference != wireReference {
+		t.Fatal("original supplier reference was rewritten", err)
+	}
+	now := r.now().In(time.FixedZone("Asia/Shanghai", 8*60*60))
 	previous := normalizedReconciliationBusinessDate(now).AddDate(0, 0, -1)
 	supplierOccurrence := previous.Add(4 * time.Hour)
 	terminal := original.provider.(*retainedFinancialProvider).result

@@ -20,6 +20,7 @@ type reconciliationAuditRequest struct {
 	Source      string   `json:"source_id"`
 	References  []string `json:"journal_refs"`
 	IsForced    bool     `json:"is_forced"`
+	EntryType   string   `json:"entry_type"`
 }
 type reconciliationAuditRecord map[string]json.RawMessage
 
@@ -48,7 +49,7 @@ func auditFourWayReconciliationFacts(ctx context.Context, q reconciliationQuerie
 		if err := json.Unmarshal(f.InternalSnapshot, &internal); err != nil {
 			return fmt.Errorf("decode reconciliation internal facts: %w", err)
 		}
-		request := reconciliationAuditRequest{Index: i, Order: f.PaymentOrderID.String()}
+		request := reconciliationAuditRequest{Index: i, Order: f.PaymentOrderID.String(), EntryType: f.EntryType}
 		if f.EntryType == "PAYMENT" {
 			var transaction reconciliationAuditRecord
 			if err := json.Unmarshal(internal["payment_transaction"], &transaction); err != nil {
@@ -65,12 +66,12 @@ func auditFourWayReconciliationFacts(ctx context.Context, q reconciliationQuerie
 			request.Source = auditString(source, "id")
 			switch {
 			case f.EntryType == "CHARGEBACK":
-				request.References = []string{"payment-transaction:" + request.Transaction + ":chargeback:" + auditString(source, "provider_chargeback_id")}
+				request.References = []string{"payment-transaction:" + request.Transaction + ":chargeback:" + auditString(source, "provider_chargeback_id"), chargebackRepairReferencePrefix + request.Source}
 			case auditString(source, "provider_refund_id") != "":
 				request.IsForced = true
 				request.References = []string{"forced-refund:" + request.Source}
 			default:
-				request.References = []string{"refund:" + request.Source}
+				request.References = []string{"refund:" + request.Source, "refund-repair:" + request.Source}
 			}
 		}
 		requests = append(requests, request)
@@ -94,6 +95,8 @@ func auditFourWayReconciliationFacts(ctx context.Context, q reconciliationQuerie
  'postings',COALESCE((SELECT jsonb_agg(to_jsonb(post)||jsonb_build_object('account',to_jsonb(a))) FROM ledger_postings post JOIN journal_entries j ON j.id=post.journal_entry_id LEFT JOIN ledger_accounts a ON a.id=post.ledger_account_id WHERE j.business_reference=ANY(input.journal_refs)),'[]'),
  'allocations',COALESCE((SELECT jsonb_agg(to_jsonb(a)||jsonb_build_object('receivable_wallet_id',r.wallet_id)) FROM receivable_allocations a JOIN receivables r ON r.id=a.receivable_id JOIN journal_entries j ON j.id=a.journal_entry_id WHERE j.business_reference=ANY(input.journal_refs)),'[]'),
  'receivables',COALESCE((SELECT jsonb_agg(to_jsonb(r)) FROM receivables r WHERE r.source_reference=ANY(input.journal_refs)),'[]'),
+ 'refund_repairs',COALESCE((SELECT jsonb_agg(to_jsonb(r)) FROM refund_exception_repair_cases r WHERE input.entry_type='REFUND' AND NOT input.is_forced AND r.refund_id=NULLIF(input.source_id,'')::uuid),'[]'),
+ 'chargeback_repairs',COALESCE((SELECT jsonb_agg(to_jsonb(c)) FROM chargeback_financial_repair_cases c WHERE c.chargeback_case_id=NULLIF(input.source_id,'')::uuid AND ('chargeback-repair:'||c.chargeback_case_id::text)=ANY(input.journal_refs)),'[]'),
  'reservations',COALESCE((SELECT jsonb_agg(to_jsonb(r)) FROM refund_component_reservations r WHERE r.refund_id=NULLIF(input.source_id,'')::uuid),'[]'),
  'forced_history',COALESCE((SELECT jsonb_agg(jsonb_build_object(
   'source',to_jsonb(s),
@@ -104,7 +107,7 @@ func auditFourWayReconciliationFacts(ctx context.Context, q reconciliationQuerie
  FROM forced_refund_cases s WHERE input.is_forced AND s.payment_transaction_id=input.transaction_id::uuid),'[]'),
  'forced_mixed',input.is_forced AND (EXISTS(SELECT 1 FROM refunds r WHERE r.payment_transaction_id=input.transaction_id::uuid AND (r.status='SUCCEEDED' OR EXISTS(SELECT 1 FROM journal_entries j WHERE j.entry_type='REFUND' AND j.business_reference='refund:'||r.id::text)))
  OR EXISTS(SELECT 1 FROM chargeback_cases c WHERE c.payment_transaction_id=input.transaction_id::uuid AND (c.status='CONFIRMED' OR EXISTS(SELECT 1 FROM journal_entries j WHERE j.entry_type='CHARGEBACK' AND j.business_reference='payment-transaction:'||input.transaction_id||':chargeback:'||c.provider_chargeback_id)))))
- FROM jsonb_to_recordset($1::jsonb) AS input(index int,order_id text,transaction_id text,source_id text,journal_refs text[],is_forced bool)`, raw)
+ FROM jsonb_to_recordset($1::jsonb) AS input(index int,order_id text,transaction_id text,source_id text,journal_refs text[],is_forced bool,entry_type text)`, raw)
 	if err != nil {
 		return fmt.Errorf("query reconciliation integrity: %w", err)
 	}
@@ -295,7 +298,22 @@ func auditReconciliationFactWithForcedGroup(f *ReconciliationInternalFact, reque
 		if auditString(source, "payment_order_id") != request.Order || auditString(source, "payment_transaction_id") != request.Transaction || auditString(source, "entitlement_package_id") != auditString(packages[0], "id") {
 			return
 		}
-		if strings.HasPrefix(request.References[0], "refund:") {
+		if f.EntryType == "REFUND" && !request.IsForced {
+			reference := auditString(journals[0], "business_reference")
+			if reference != "refund:"+request.Source && reference != "refund-repair:"+request.Source {
+				return
+			}
+		}
+		if f.EntryType == "REFUND" && auditString(journals[0], "business_reference") == "refund-repair:"+request.Source {
+			amounts, valid := auditRefundRepairAmounts(request, payload, source, transaction, wallet, auditString(packages[0], "id"), credit, lotAmounts, kindAmounts)
+			if !valid {
+				return
+			}
+			total.Set(credit)
+			walletExpected.Set(amounts.revoked)
+			receivableExpected.Set(amounts.shortfall)
+			lotAmounts = amounts.lots
+		} else if strings.HasPrefix(request.References[0], "refund:") {
 			total = auditInteger(source, "credit_microcredits")
 			if total == nil || total.Cmp(credit) != 0 || !bytesEqualJSONInteger(source["amount_fen"], transaction["amount_fen"]) {
 				return
@@ -340,15 +358,22 @@ func auditReconciliationFactWithForcedGroup(f *ReconciliationInternalFact, reque
 				journalType = "CHARGEBACK"
 				clearing = chargebackClearingAccount.String()
 				clearingType = "CHARGEBACK_CLEARING"
+				if !auditChargebackJournalReference(request, payload, source, journals[0], wallet, auditString(packages[0], "id")) {
+					return
+				}
 			}
 			base, bonus := auditInteger(source, "revoked_base_microcredits"), auditInteger(source, "revoked_bonus_microcredits")
 			if base == nil || bonus == nil {
 				return
 			}
 			walletExpected.Add(base, bonus)
+			receivableReference := request.References[0]
+			if f.EntryType == "CHARGEBACK" {
+				receivableReference = auditString(journals[0], "business_reference")
+			}
 			for _, r := range auditRecords(payload["receivables"]) {
 				n := auditInteger(r, "original_microcredits")
-				if n == nil || n.Sign() <= 0 || auditString(r, "id") != auditString(source, "receivable_id") || auditString(r, "source_type") != journalType || auditString(r, "source_reference") != request.References[0] || auditString(r, "wallet_id") != wallet || auditString(r, "payment_order_id") != request.Order || auditString(r, "payment_transaction_id") != request.Transaction || auditString(r, "entitlement_package_id") != auditString(packages[0], "id") {
+				if n == nil || n.Sign() <= 0 || auditString(r, "id") != auditString(source, "receivable_id") || auditString(r, "source_type") != journalType || auditString(r, "source_reference") != receivableReference || auditString(r, "wallet_id") != wallet || auditString(r, "payment_order_id") != request.Order || auditString(r, "payment_transaction_id") != request.Transaction || auditString(r, "entitlement_package_id") != auditString(packages[0], "id") {
 					return
 				}
 				receivableExpected.Add(receivableExpected, n)
@@ -643,8 +668,10 @@ func reconciliationIntegrityDigest(payload reconciliationAuditRecord) string {
 		"components":          {"id", "package_id", "component_type", "credit_lot_id", "original_microcredits"},
 		"allocations":         {"receivable_id", "wallet_id", "source_type", "source_reference", "amount_microcredits", "journal_entry_id", "receivable_wallet_id"},
 		"receivables":         {"id", "wallet_id", "source_type", "source_reference", "original_microcredits", "payment_order_id", "payment_transaction_id", "entitlement_package_id"},
+		"refund_repairs":      {"id", "approval_request_id", "authorization_event_id", "approval_epoch", "execution_key_digest", "refund_id", "anomaly_case_id", "wallet_id", "package_id", "revoked_microcredits", "shortfall_microcredits", "payment_evidence_id", "facts_digest", "journal_entry_id", "receivable_id", "state"},
 		"reservations":        {"refund_id", "component_id", "package_id", "component_type", "credit_lot_id", "available_microcredits", "active_grant_microcredits", "suspended_grant_microcredits"},
 		"corrections":         {"id", "approval_request_id", "authorization_event_id", "approval_epoch", "execution_key_digest", "package_id", "wallet_id", "payment_order_id", "payment_transaction_id", "source_component_id", "source_lot_id", "target_component_id", "target_lot_id", "source_type", "target_type", "amount_microcredits", "reason_code", "source_evidence_digest", "facts_digest", "journal_entry_id"},
+		"chargeback_repairs":  {"id", "approval_request_id", "authorization_event_id", "approval_epoch", "execution_key_digest", "chargeback_case_id", "anomaly_case_id", "wallet_id", "package_id", "payment_evidence_id", "base_shortfall_microcredits", "component_digest", "facts_digest", "journal_entry_id", "receivable_id", "state"},
 		"correction_journals": {"id", "entry_type", "business_reference"},
 		"correction_postings": {"journal_entry_id", "ledger_account_id", "delta_microcredits", "credit_lot_id"},
 	}
