@@ -536,7 +536,8 @@ impl crate::features::assistant::runtime_model::RuntimeTurnAuthority
 /// Whether this turn is forced off the full tool table: pure-conversation
 /// meta card / caller per-turn request / an `aux-` auxiliary conversation —
 /// any one forces it (aux turns then receive their scoped surface, not the
-/// full catalog — see [`aux_tool_surface`], ADR-0024)./// `aux-` is server-side enforced (same idea as the `sched-` prefix guard):
+/// full catalog — see [`aux_tool_surface`], ADR-0024).
+/// `aux-` is server-side enforced (same idea as the `sched-` prefix guard):
 /// the bridge layer always passes `restrictTools: true`, but `restrict_tools`
 /// is only an optional call parameter of `chat` / `web_access_chat` — a
 /// browser passing false, or any caller bypassing the first-party bridge,
