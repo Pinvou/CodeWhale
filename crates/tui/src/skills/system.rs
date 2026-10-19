@@ -1,6 +1,7 @@
 //! System-skill installer: bundles first-party skills and auto-installs them
 //! on first launch.
 
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -14,7 +15,75 @@ use std::path::Path;
 /// continuous operate-mode operations).
 /// Generation 10 adds the bundled `mcp-discovery` skill (Registry-first
 /// tool selection).
-const BUNDLED_SKILL_VERSION: &str = "10";
+/// Generation 11 corrects bundled skill bodies from the model-facing text
+/// audit (#112: real `mcp` CLI forms, alias-stub direction, pdf extraction
+/// route, xlsx recalc caveat) and refreshes superseded shipped copies via
+/// [`SUPERSEDED_SHIPPED_BODY_DIGESTS`].
+const BUNDLED_SKILL_VERSION: &str = "11";
+
+/// SHA-256 digests of bundled bodies shipped by the previous generation that
+/// this generation replaces. The non-destructive upgrade table (#4691) must
+/// treat an installed copy matching a known shipped body — current or
+/// superseded — as unmodified so the generation bump can refresh it; only
+/// bodies that match no shipped generation are user edits and stay
+/// untouched. Digests are lowercase hex over the exact shipped SKILL.md
+/// bytes. Add an entry whenever a bundled body changes; retire old entries
+/// only when installs older than the dropped generation are no longer
+/// supported.
+const SUPERSEDED_SHIPPED_BODY_DIGESTS: &[(&str, &str)] = &[
+    (
+        "documents",
+        "27ba3161ab9448245d6658efadccf955ee8f4ef2cda4f7b825a99c45b8bd66aa",
+    ),
+    (
+        "docx",
+        "fb2edb80df2119e42c1febcb5eae74c15092ba1e5dfbedf91ee45118ed9c7556",
+    ),
+    (
+        "mcp-builder",
+        "3caa3ca14b9fc9560726642c4b73c62b5261da580e882e144d36842904f02bb6",
+    ),
+    (
+        "mcp-discovery",
+        "f973e01ca9a17058871e0f7bc0eae4dff7fa497feb0f55fde94836ebe3d3db3a",
+    ),
+    (
+        "pdf",
+        "d41ae8935b60a7df17617fa7969b5d95f72fd667e511164d6e83aa1d4d82fdc3",
+    ),
+    (
+        "pptx",
+        "e9663d929e47533efff3b9388f6da62aad7f48b75f01e30ae310dd59b53f169a",
+    ),
+    (
+        "presentations",
+        "ecddd5663a93bc1afca20ef2a5bdac26258a98557aa1a743797c0a5fa720a247",
+    ),
+    (
+        "skill-installer",
+        "cd4ac950534bceba6265e326cbc09998c296db97e094fe81698c22030bfc8bba",
+    ),
+    (
+        "spreadsheets",
+        "6d1c6c8730f325e3ec9e16ac5b2fe2e3d3cb42c4555343c36799ee693ab26844",
+    ),
+    (
+        "xlsx",
+        "9f39afcb40351ffae49827440f25b820847da73d2a383136c81a47f192e997f5",
+    ),
+];
+
+/// True when `body` is a known shipped copy of `name` that the current
+/// generation supersedes (see [`SUPERSEDED_SHIPPED_BODY_DIGESTS`]).
+fn is_superseded_shipped_body(name: &str, body: &str) -> bool {
+    let digest: String = Sha256::digest(body.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    SUPERSEDED_SHIPPED_BODY_DIGESTS
+        .iter()
+        .any(|(skill, superseded)| *skill == name && *superseded == digest)
+}
 
 // ── system & extension (meta) ───────────────────────────────────────────────
 const SKILL_CREATOR_BODY: &str = include_str!("../../assets/skills/skill-creator/SKILL.md");
@@ -372,11 +441,16 @@ fn install_one(
     };
 
     if should_install {
-        // Never overwrite a user-modified copy that no longer matches a known
-        // shipped body (#4691 non-destructive upgrade table).
+        // Never overwrite a user-modified copy that matches no known shipped
+        // body (#4691 non-destructive upgrade table). A copy of a body this
+        // generation supersedes is an unmodified install, not a user edit,
+        // so the bump refreshes it instead of fossilizing the old text.
         if target_file.exists() {
             let existing = fs::read_to_string(&target_file).unwrap_or_default();
-            if !existing.is_empty() && existing != skill.body {
+            if !existing.is_empty()
+                && existing != skill.body
+                && !is_superseded_shipped_body(skill.name, &existing)
+            {
                 // Preserve user/compatible-root content; skip replace-by-name.
                 return Ok(false);
             }
