@@ -115,6 +115,18 @@ fn denied_tool_error(tool_name: &str) -> ToolError {
     }
 }
 
+/// Next-step guidance for a `denied by user` refusal (#5146). Under the Never
+/// posture prompts are disabled for the whole turn, so waiting for an
+/// approval that cannot arrive deadlocks the model — tell it to report the
+/// blocked change and move on instead.
+fn denied_call_next_step(approval_mode: crate::tui::approval::ApprovalMode) -> &'static str {
+    if approval_mode == crate::tui::approval::ApprovalMode::Never {
+        "Approval prompts are disabled for this turn, so waiting cannot succeed — do not retry the same call; report the blocked change and move on."
+    } else {
+        "Do not retry the same call; present what you intended and wait for the user's approval or new instructions."
+    }
+}
+
 /// Repair only benchmark read calls whose intent can be recovered without
 /// changing the requested resource. The caller is feature- and host-gated;
 /// normal engine calls retain strict schema validation.
@@ -4998,13 +5010,13 @@ impl Engine {
                                         // #5146: name the correct next
                                         // behavior, not a bare denial, so
                                         // a model that emitted the call as
-                                        // its proposal knows to present
-                                        // the change and wait instead of
-                                        // retrying. Keep the `denied by
-                                        // user` marker — error taxonomy
-                                        // and retry classification match
-                                        // on it.
-                                        "Tool '{tool_name}' denied by user — the call was not approved. Do not retry the same call; present what you intended and wait for the user's approval or new instructions."
+                                        // its proposal knows the way forward
+                                        // instead of retrying. Keep the
+                                        // `denied by user` marker — error
+                                        // taxonomy and retry classification
+                                        // match on it.
+                                        "Tool '{tool_name}' denied by user — the call was not approved. {}",
+                                        denied_call_next_step(self.session.approval_mode)
                                     )))),
                                     None,
                                     None,
@@ -7438,6 +7450,28 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
     use tempfile::tempdir;
+
+    #[test]
+    fn denied_call_next_step_names_the_never_posture_deadlock() {
+        // Round-4 review pin: under the Never posture the old "wait for the
+        // user's approval" guidance deadlocked the model — prompts are
+        // disabled for the whole turn. The Never arm must say waiting cannot
+        // succeed and never fall back to the wait phrasing.
+        let never = denied_call_next_step(crate::tui::approval::ApprovalMode::Never);
+        assert!(never.contains("waiting cannot succeed"), "{never}");
+        assert!(!never.contains("wait for the user's approval"), "{never}");
+        for mode in [
+            crate::tui::approval::ApprovalMode::Auto,
+            crate::tui::approval::ApprovalMode::Bypass,
+            crate::tui::approval::ApprovalMode::Suggest,
+        ] {
+            let step = denied_call_next_step(mode);
+            assert!(
+                step.contains("wait for the user's approval"),
+                "{mode:?}: {step}"
+            );
+        }
+    }
 
     #[test]
     fn flush_keeps_signature_only_blocks_but_not_empty_signature_mints() {

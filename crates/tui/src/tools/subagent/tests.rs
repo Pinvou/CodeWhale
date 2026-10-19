@@ -2876,6 +2876,14 @@ fn agent_description_explains_background_child_and_transcript_handle() {
              {description}"
         );
     }
+    // The "Legacy action=status|peek|cancel" sentence was removed from the
+    // description because status/peek/cancel are first-class advertised
+    // actions. The negative pin lives on the description (not the prompt
+    // field) because that is the surface the sentence lived on.
+    assert!(
+        !description.contains("Legacy action"),
+        "the retired legacy-action sentence must not return: {description}"
+    );
     // Headroom note: the estimate below is the live measurement — budget any
     // reword against it instead of loosening the cap. (Static headroom
     // comments went stale when the round-2 text shrank the description, so
@@ -5810,10 +5818,6 @@ fn agent_tool_prompt_schema_keeps_ordinary_starts_message_first() {
     // Round-2 review pin: the fresh-context disclosure is load-bearing
     // delegation guidance and must not silently disappear again.
     assert!(prompt.contains("The child sees only this prompt, not your conversation"));
-    assert!(
-        !prompt.contains("Legacy action"),
-        "the retired legacy-action sentence must not return: {prompt}"
-    );
     for ceremony in [
         "Subagent Brief",
         "QUESTION",

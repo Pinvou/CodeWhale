@@ -31,9 +31,6 @@ pub const DEFAULT_LARGE_OUTPUT_THRESHOLD_TOKENS: usize = 32_768;
 /// on the side of routing rather than dumping raw data into the parent.
 const CHARS_PER_TOKEN_ESTIMATE: usize = 3;
 
-/// Workshop variable name where the raw tool output is stored.
-pub const WORKSHOP_LAST_TOOL_RESULT_VAR: &str = "last_tool_result";
-
 static ACTIVE_WORKSHOP: OnceLock<Mutex<WorkshopConfig>> = OnceLock::new();
 
 #[cfg(test)]

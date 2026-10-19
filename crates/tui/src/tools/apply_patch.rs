@@ -546,7 +546,7 @@ fn verify_patch_expected_hash(
         "`apply_patch` refused: {target} changed since it was read. \
          expected_hash was {expected} but the file is now {actual}, so nothing was written. \
          Recovery: call `read` path=\"{target}\" to get the current contents \
-         then rebuild the patch. If retaining expected_hash, recompute the SHA-256 of the complete file bytes with `bash` and use the sha256: prefix; `read` does not return a hash."
+         then rebuild the patch. If retaining expected_hash, recompute the SHA-256 of the complete file bytes with `bash` and use the sha256: prefix; `read` does not report a hash."
     )))
 }
 
@@ -2945,7 +2945,7 @@ diff --git a/b.txt b/b.txt
         assert!(message.contains("nothing was written"), "{message}");
         assert!(message.contains("call `read`"), "{message}");
         assert!(
-            message.contains("`read` does not return a hash"),
+            message.contains("`read` does not report a hash"),
             "{message}"
         );
         assert!(!message.contains("File"), "{message}");
@@ -3013,6 +3013,40 @@ diff --git a/two.txt b/two.txt
         assert_eq!(
             fs::read_to_string(tmp.path().join("two.txt")).unwrap(),
             "two\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn replace_expected_hash_checks_the_first_replace_entry_not_path() {
+        // Round-4 review pin: with `replace` input the top-level `path` is
+        // ignored and the first `replace` entry is hash-checked, exactly as
+        // the schema discloses. A decoy `path` whose live bytes do not match
+        // expected_hash must therefore not block the patch.
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        fs::write(tmp.path().join("target.txt"), "alpha\n").expect("write");
+        fs::write(tmp.path().join("decoy.txt"), "beta\n").expect("write");
+
+        ApplyPatchTool
+            .execute(
+                json!({
+                    "path": "decoy.txt",
+                    "replace": [{ "path": "target.txt", "content": "alpha edited\n" }],
+                    "expected_hash": content_hash(b"alpha\n"),
+                }),
+                &ctx,
+            )
+            .await
+            .expect("the first replace entry's hash must gate, not `path`");
+
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("target.txt")).expect("read"),
+            "alpha edited\n"
+        );
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("decoy.txt")).expect("read"),
+            "beta\n",
+            "the ignored `path` file must stay untouched"
         );
     }
 

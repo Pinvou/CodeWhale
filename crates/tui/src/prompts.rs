@@ -1397,9 +1397,12 @@ pub(crate) fn system_prompt_for_mode_with_context_skills_session_and_approval_fo
     .to_system_blocks();
 
     // Trailers keep recency bias after WorldState: authority, then locale.
-    // When an embedder composer owns the static prefix, the bundled
-    // `### Whose word wins` section the recap points at no longer exists,
-    // so appending the recap would leave a dangling cross-reference.
+    // When an embedder composer owns the static prefix, or an opted-in
+    // config-directory constitution replaced the bundled base prompt, the
+    // `### Whose word wins` section the recap points at is not guaranteed to
+    // exist, so appending the recap would leave a dangling cross-reference.
+    // The bundled headless host ships a compact constitution without the
+    // section and skips the recap as well.
     if !bundled_headless && authority_recap_trailer_appended(static_composer_installed) {
         blocks.push(SystemBlock {
             block_type: "text".to_string(),

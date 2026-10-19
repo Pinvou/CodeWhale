@@ -1660,6 +1660,10 @@ fn normalize_contract_fuzzy(text: &str) -> String {
             '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => '"',
             '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
             | '\u{2212}' => '-',
+            // NFKC already folds each listed space to ASCII space (a run for
+            // the em-space family); the arm stays so the disclosed
+            // "Unicode-space mapping" category does not depend on NFKC table
+            // details.
             '\u{00A0}' | '\u{2002}'..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}' => ' ',
             other => other,
         })

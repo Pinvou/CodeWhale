@@ -323,9 +323,13 @@ fn contract_edit_fuzzy_normalization_preserves_untouched_lines() {
 
 #[test]
 fn contract_edit_fuzzy_maps_unicode_spaces() {
-    // Round-2 review pin: the fallback folds NFKC-compatible forms and maps
-    // Unicode spaces (NBSP → ASCII space) anywhere in oldText, exactly as
-    // the `edit` description discloses.
+    // Round-2 review pin: the fallback folds NFKC-compatible forms anywhere
+    // in oldText, exactly as the `edit` description discloses. The Unicode
+    // spaces the description names are delivered by the NFKC pass (NBSP and
+    // EN SPACE each fold to a single ASCII space; the em-space family folds
+    // to a run), so the pin exercises the observable fold for both
+    // representative members rather than the belt-and-braces mapping arm
+    // behind NFKC.
     let updated = apply_contract_edits(
         "alpha beta\n",
         &[ContractEdit {
@@ -335,7 +339,18 @@ fn contract_edit_fuzzy_maps_unicode_spaces() {
         }],
         "doc.txt",
     )
-    .expect("unicode-space fold matches");
+    .expect("NBSP fold matches");
+    assert_eq!(updated, "alpha gamma\n");
+    let updated = apply_contract_edits(
+        "alpha beta\n",
+        &[ContractEdit {
+            index: 0,
+            old_text: "alpha\u{2002}beta".to_string(),
+            new_text: "alpha gamma".to_string(),
+        }],
+        "doc.txt",
+    )
+    .expect("en-space fold matches");
     assert_eq!(updated, "alpha gamma\n");
 }
 
