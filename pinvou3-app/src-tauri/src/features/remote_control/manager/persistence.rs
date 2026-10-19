@@ -396,9 +396,10 @@ pub(super) fn queue_pending_revocation_for_removal(config: &WebAccessConfig) -> 
 /// (stop/rotate). A full queue must never block that lifecycle — once 32
 /// permanently unreachable relays accumulated, the user could otherwise never
 /// stop or rotate Web access again. When the queue is full the oldest entry is
-/// dropped for the newest revocation: the dropped relay keeps serving its (no
-/// longer referenced) token until it is reachable and the replayed queue
-/// reaches it again, while the removal the user asked for always succeeds.
+/// dropped for the newest revocation, and the drop is permanent: the ledger no
+/// longer holds that intent, so it can never be replayed. The dropped relay
+/// keeps serving its (no longer referenced) token until external expiry or a
+/// manual cleanup, while the removal the user asked for always succeeds.
 pub(super) fn queue_pending_revocation_for_removal_at(
     path: &Path,
     pending: PendingRevocation,
@@ -422,8 +423,9 @@ pub(super) fn queue_pending_revocation_for_removal_at(
     }
     if ledger.entries.len() >= super::MAX_PENDING_REVOCATIONS {
         ledger.entries.pop_front();
-        eprintln!(
-            "[remote-control] pending Web revocation queue is full; dropping the oldest entry to record the newest revocation"
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "pending_revocation_queue_full",
+            "evicted_oldest",
         );
     }
     ledger.entries.push_back(pending);
