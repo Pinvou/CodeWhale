@@ -9,7 +9,8 @@ name: PR Check
 # - frontend-test:Draft 跑 lint/build/逻辑测试；Ready PR 与 Merge Queue 按实际
 #   base/head diff 选择浏览器 smoke；未知或共享路径保守执行全部 smoke。
 # - account-platform-test: path-aware tests/vet for all Go modules at every stage;
-#   real external-service integration remains explicit opt-in.
+#   isolated Token financial PostgreSQL contracts are mandatory; real external
+#   issuer/provider/NATS integration remains explicit opt-in.
 # - team-relay-hub-test:Hub 或迁移变化时使用隔离 PostgreSQL 跑完整测试与依赖审计。
 # - relay-test:Relay 变更在 Draft、Ready PR 与 Merge Queue 均运行 Ubuntu 回归。
 # - release-contract-test:发布链路改动只跑配置/脚本契约,不在 PR 构建安装包。
@@ -232,8 +233,13 @@ jobs:
             account_platform:
               - 'account-platform/**'
               - 'scripts/account-platform*'
+              - 'scripts/test-token-financial-postgres.py'
+              - 'scripts/tests/test_token_financial_postgres.py'
               - 'scripts/check-token-management-authorization-coverage.mjs'
               - 'scripts/tests/token-management-authorization-coverage.test.mjs'
+              - 'scripts/tests/token-management-phase-coverage.test.mjs'
+              - 'scripts/check-account-platform-authorization-coverage.mjs'
+              - 'scripts/tests/account-platform-authorization-coverage.test.mjs'
               - '.github/workflows/pr-check.yml'
               - 'scripts/tests/pr-check-routing.test.mjs'
             rust_code:
@@ -973,6 +979,21 @@ jobs:
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 45
+    services:
+      financial-postgres:
+        # Same immutable PostgreSQL image already used by team-relay-hub-test.
+        # Disposable runner only; trust is never a deployment configuration.
+        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - 127.0.0.1:5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     env:
       GOTOOLCHAIN: local
       CGO_ENABLED: "1"
@@ -998,6 +1019,12 @@ jobs:
         run: |
           node scripts/check-token-management-authorization-coverage.mjs
           node --test scripts/tests/token-management-authorization-coverage.test.mjs
+          node --test scripts/tests/token-management-phase-coverage.test.mjs
+
+      - name: Verify Account Platform authorization contracts
+        run: |
+          node scripts/check-account-platform-authorization-coverage.mjs
+          node --test scripts/tests/account-platform-authorization-coverage.test.mjs
 
       - name: Keycloak provisioning and theme contracts
         shell: bash
@@ -1021,6 +1048,15 @@ jobs:
               go vet -tags=nomsgpack -mod=readonly ./...
             )
           done < <(find account-platform -name vendor -prune -o -name go.mod -print0 | sort -z)
+
+      - name: Token financial contracts on isolated PostgreSQL
+        shell: bash
+        env:
+          PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py
+          python3 scripts/test-token-financial-postgres.py
 
   windows-relay-dacl:
     name: windows-relay-dacl

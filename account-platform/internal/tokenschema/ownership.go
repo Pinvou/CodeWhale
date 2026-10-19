@@ -26,6 +26,9 @@ func prepareTokenMigration(ctx context.Context, tx pgx.Tx, m migrations.Migratio
 	if err := tx.QueryRow(ctx, `SELECT to_regclass('public.token_runtime_hardening') IS NOT NULL`).Scan(&hardened); err != nil {
 		return err
 	}
+	if err := bridgeHistoryDefiners(ctx, tx, false); err != nil {
+		return err
+	}
 	if !hardened {
 		return lendOverviewIndexDDL(ctx, tx, m)
 	}
@@ -41,7 +44,7 @@ func prepareTokenMigration(ctx context.Context, tx pgx.Tx, m migrations.Migratio
  END LOOP;
  FOR object IN SELECT p.oid::regprocedure::text AS signature FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
  WHERE n.nspname='public' AND pg_get_userbyid(p.proowner)='token_schema_owner'
- AND p.proname NOT IN ('harden_token_runtime_objects','reject_token_truncate','reject_token_audit_mutation') LOOP
+ AND p.proname NOT IN ('harden_token_runtime_objects','reject_token_truncate','reject_token_audit_mutation','project_usage_history_request','maintain_usage_history_projection','backfill_usage_history_projection') LOOP
  EXECUTE format('ALTER FUNCTION %s OWNER TO token_gateway',object.signature);
  END LOOP;
  END $$; SET ROLE token_gateway;`)
@@ -55,6 +58,9 @@ func finishTokenMigration(ctx context.Context, tx pgx.Tx, m migrations.Migration
 	if !hardened {
 		return revokeOverviewIndexDDL(ctx, tx, m)
 	}
+	if err := bridgeHistoryDefiners(ctx, tx, false); err != nil {
+		return err
+	}
 	_, err := tx.Exec(ctx, `SET ROLE token_schema_owner; SELECT public.harden_token_runtime_objects();
  SET ROLE token_cap_policy_deployer;
  DO $$ DECLARE object RECORD; BEGIN
@@ -64,5 +70,8 @@ func finishTokenMigration(ctx context.Context, tx pgx.Tx, m migrations.Migration
  EXECUTE format('CREATE TRIGGER token_no_truncate BEFORE TRUNCATE ON public.%I FOR EACH STATEMENT EXECUTE FUNCTION public.reject_token_truncate()',object.relname);
  END LOOP;
  END $$; SET ROLE token_gateway;`)
-	return err
+	if err != nil {
+		return err
+	}
+	return bridgeHistoryDefiners(ctx, tx, true)
 }

@@ -1092,7 +1092,16 @@ impl Pinvou3Bridge {
         b
     }
 
+    fn account_gateway_runtime(&self) -> bool {
+        self.runtime_model_credential
+            .as_ref()
+            .is_some_and(|credential| credential.request_idempotency_header().is_some())
+    }
+
     pub fn provider(&self) -> String {
+        if self.account_gateway_runtime() {
+            return "openai".into();
+        }
         if is_official_deepseek_base_url(&self.base_url()) {
             return "deepseek".to_string();
         }
@@ -1449,6 +1458,15 @@ impl Pinvou3Bridge {
     /// `DtConfig.default_text_model` / `EngineConfig.model`).
     /// env var > settings.custom_model_name > vendor default.
     pub fn model(&self) -> String {
+        if self.account_gateway_runtime() {
+            // finalize_runtime_bridge always installs the prepared model with
+            // this credential. Its account route cannot inherit a cloud override.
+            return self
+                .session_model
+                .as_ref()
+                .map(|model| model.model.clone())
+                .unwrap_or_default();
+        }
         let is_official_deepseek = is_official_deepseek_base_url(&self.base_url());
         if !self.runtime_route_is_locked() {
             if let Ok(v) = std::env::var("DEEPSEEK_MODEL") {
@@ -1487,6 +1505,13 @@ impl Pinvou3Bridge {
     /// `DtConfig.providers.*.base_url`).
     /// env var > settings.custom_base_url > vendor default.
     pub fn base_url(&self) -> String {
+        if self.account_gateway_runtime() {
+            return self
+                .session_model
+                .as_ref()
+                .map(|model| model.base_url.clone())
+                .unwrap_or_default();
+        }
         if !self.runtime_route_is_locked() {
             if let Ok(v) = std::env::var("DEEPSEEK_BASE_URL") {
                 return v;
@@ -2076,6 +2101,7 @@ impl Pinvou3Bridge {
             //    in the new struct) ——
             model: _,
             workspace: _,
+            workspace_roots: _, // host exposes one execution root, not SDK attachments
             session_id: _,
             allow_shell: _,
             trust_mode: _,
@@ -2186,7 +2212,6 @@ impl Pinvou3Bridge {
             subagent_state_root,
             // CodeWhale #54 新增：父仓尚未消费多根授权，解构忽略（见下方
             // EngineConfig 字面量的空集适配）。
-            workspace_roots: _,
         } = EngineConfig::default();
 
         // Hooks have two consumption paths: turn_loop runs ToolCallBefore
@@ -2216,6 +2241,9 @@ impl Pinvou3Bridge {
             // pinvou3 override
             model: self.model(),
             workspace: self.workspace.clone(),
+            // Input is EngineConfig::default(), not a caller-supplied root set.
+            // Empty attachments preserve the single execution-root contract;
+            // SessionRoots.ledger remains delegated-agent state, not tool authority.
             // CodeWhale #54 多根授权基建：空集经底座 normalize 后等价单根
             // （workspace 置于位置 0），保持既有行为。
             workspace_roots: Vec::new(),
@@ -2850,6 +2878,11 @@ impl Pinvou3Bridge {
     /// `DEEPSEEK_*` settings in run-dev.sh).
     pub fn build_dt_config(&self) -> DtConfig {
         let mut cfg = DtConfig::default();
+        cfg.request_idempotency_header = self
+            .runtime_model_credential
+            .as_ref()
+            .and_then(|credential| credential.request_idempotency_header())
+            .map(str::to_owned);
         // The engine landing (the RESPONSES_ROUTE_PROVIDER named-custom route
         // on a GPT×Responses hit) may diverge from the vendor-semantics
         // provider(); see `engine_route_provider`.
@@ -4771,12 +4804,12 @@ mod tests {
                 .check(codewhale_execpolicy::ExecPolicyContext {
                     command,
                     cwd: ".",
+                    workspace_roots: Vec::new(),
                     tool: Some("exec_shell"),
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::Never,
                     sandbox_mode: None,
                     // CodeWhale #54：空集保持历史单根判定。
-                    workspace_roots: Vec::new(),
                 })
                 .unwrap()
         };
@@ -4828,12 +4861,12 @@ mod tests {
                 .check(codewhale_execpolicy::ExecPolicyContext {
                     command,
                     cwd: ".",
+                    workspace_roots: Vec::new(),
                     tool: Some("exec_shell"),
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::Never,
                     sandbox_mode: None,
                     // CodeWhale #54：空集保持历史单根判定。
-                    workspace_roots: Vec::new(),
                 })
                 .unwrap()
         };
@@ -4893,12 +4926,12 @@ mod tests {
                 .check(codewhale_execpolicy::ExecPolicyContext {
                     command,
                     cwd: ".",
+                    workspace_roots: Vec::new(),
                     tool: Some("exec_shell"),
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::Never,
                     sandbox_mode: None,
                     // CodeWhale #54：空集保持历史单根判定。
-                    workspace_roots: Vec::new(),
                 })
                 .unwrap()
         };
@@ -5091,6 +5124,7 @@ mod tests {
                 .check(codewhale_execpolicy::ExecPolicyContext {
                     command,
                     cwd: ".",
+                    workspace_roots: Vec::new(),
                     // The model-facing `bash` tool reaches the internal
                     // `exec_shell` policy identity before consulting rules.
                     tool: Some("exec_shell"),
@@ -5098,7 +5132,6 @@ mod tests {
                     ask_for_approval: codewhale_execpolicy::AskForApproval::Never,
                     sandbox_mode: None,
                     // CodeWhale #54：空集保持历史单根判定。
-                    workspace_roots: Vec::new(),
                 })
                 .unwrap()
         };
@@ -5463,7 +5496,7 @@ mod tests {
         unsafe { std::env::set_var("DEEPSEEK_BASE_URL", "https://controlled.invalid/v1") };
 
         let mut bridge = fixture_bridge();
-        let mut model = SavedModel::builtin_llmapi();
+        let mut model = SavedModel::builtin_account_platform();
         model.id = "runtime-route".into();
         model.preset = ModelPreset::LocalVllm;
         model.model = "controller-model".into();
@@ -8102,6 +8135,41 @@ mod tests {
         );
     }
 
+    /// SDK attachments are not exposed by the current host. The execution
+    /// directory and delegated-agent ledger are separate authority domains.
+    #[test]
+    fn forkguard_engine_config_keeps_only_execution_root() {
+        let (_lock, _env) = locked_env(&["PINVOU3_HOME"]);
+        let root = std::env::temp_dir().join(format!(
+            "pinvou3-single-execution-root-{}-{}",
+            std::process::id(),
+            crate::bridge::paths::tests::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create hermetic test home");
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &root) };
+        let bridge = fixture_bridge();
+        assert!(bridge.build_engine_config().workspace_roots.is_empty());
+
+        let execution = root.join("project");
+        let ledger = root.join("session-ledger");
+        let cfg = bridge.build_engine_config_for_session_roots(
+            "single-execution-root",
+            SessionRoots {
+                execution: execution.clone(),
+                ledger: ledger.clone(),
+                bound: true,
+            },
+        );
+        assert_eq!(cfg.workspace, execution);
+        assert_eq!(cfg.subagent_state_root.as_deref(), Some(ledger.as_path()));
+        assert!(
+            cfg.workspace_roots.is_empty(),
+            "ledger must not become a writable attachment"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// Destructure the Op returned by build_send_message_op into
     /// (allow_shell, trust_mode); panics on failure (test helper).
     fn extract_shell_trust(op: Op) -> (bool, bool) {
@@ -9678,6 +9746,63 @@ mod tests {
     }
 
     #[test]
+    fn account_gateway_credentials_and_operation_header_stay_on_prepared_route() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ]);
+        let mut bridge = fixture_bridge();
+        let mut account_model = SavedModel::builtin_account_platform();
+        account_model.base_url = "https://gateway.example.test/v1".into();
+        account_model.model = "prepared-account-model".into();
+        bridge.session_model = Some(account_model);
+        bridge.runtime_model_credential = Some(
+            RuntimeModelCredential::account_platform_access_token("isolated-account-access".into())
+                .unwrap(),
+        );
+        // SAFETY: shared test ENV_LOCK serializes mutation and restores all values.
+        unsafe {
+            std::env::set_var("DEEPSEEK_MODEL", "other-model");
+            std::env::set_var("DEEPSEEK_PROVIDER", "anthropic");
+            std::env::set_var(
+                "DEEPSEEK_BASE_URL",
+                "https://other-provider.example.test/v1",
+            );
+            std::env::set_var("DEEPSEEK_API_KEY", "other-key");
+        }
+        let config = bridge.build_dt_config();
+        assert_eq!(bridge.base_url(), "https://gateway.example.test/v1");
+        assert_eq!(bridge.model(), "prepared-account-model");
+        assert_eq!(bridge.provider(), "openai");
+        assert_eq!(
+            config.request_idempotency_header.as_deref(),
+            Some("Idempotency-Key")
+        );
+        assert_eq!(
+            config
+                .providers
+                .as_ref()
+                .unwrap()
+                .openai
+                .base_url
+                .as_deref(),
+            Some("https://gateway.example.test/v1")
+        );
+        assert!(
+            config.providers.as_ref().unwrap().openai.api_key.as_deref()
+                == Some("isolated-account-access")
+        );
+        bridge.runtime_model_credential = None;
+        let ordinary = bridge.build_dt_config();
+        assert!(ordinary.request_idempotency_header.is_none());
+        assert_eq!(bridge.base_url(), "https://other-provider.example.test/v1");
+        assert_eq!(bridge.provider(), "anthropic");
+        assert_eq!(bridge.model(), "other-model");
+    }
+
+    #[test]
     fn empty_api_key_env_does_not_hide_saved_credential() {
         let (_lock, _env) = locked_env(&["DEEPSEEK_API_KEY"]);
         let mut bridge = fixture_bridge();
@@ -10857,6 +10982,7 @@ mod tests {
 
         let ordinary = bridge.build_engine_config_for_session_roots("sched-run", roots.clone());
         assert_eq!(ordinary.workspace, automation);
+        assert!(ordinary.workspace_roots.is_empty());
         assert_eq!(
             ordinary.subagent_state_root.as_deref(),
             Some(automation.as_path()),
@@ -10867,6 +10993,7 @@ mod tests {
         let multi_agent =
             bridge.build_engine_config_for_multi_agent("sched-run", roots, &snapshot, true);
         assert_eq!(multi_agent.workspace, automation);
+        assert!(multi_agent.workspace_roots.is_empty());
         assert_eq!(
             multi_agent.subagent_state_root.as_deref(),
             Some(automation.as_path())

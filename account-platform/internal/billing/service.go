@@ -100,6 +100,8 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected.GET("/internal/v1/wallets/:wallet_id/balance", serviceauth.Require("internal.billing.wallet.read"), httpserver.AdaptFunc(s.getBalance))
 	if _, supported := s.repository.(managementHoldRepository); supported {
 		protected.POST("/internal/v1/holds/reserve", serviceauth.Require("internal.billing.hold.reserve"), httpserver.AdaptFunc(s.reserve))
+		protected.POST("/internal/v1/holds/extend", serviceauth.Require("internal.billing.hold.extend"), httpserver.AdaptFunc(s.extendHold))
+		protected.POST("/internal/v1/holds/commit", serviceauth.Require("internal.billing.hold.commit"), httpserver.AdaptFunc(s.commit))
 		protected.POST("/internal/v1/holds/release", serviceauth.Require("internal.billing.hold.release"), httpserver.AdaptFunc(s.release))
 	}
 	protected.GET("/internal/v1/pricing/current", serviceauth.Require("internal.billing.pricing.read"), httpserver.AdaptFunc(s.currentPrice))

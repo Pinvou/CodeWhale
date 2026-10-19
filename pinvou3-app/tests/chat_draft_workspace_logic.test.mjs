@@ -316,3 +316,54 @@ test('pickDraftWorkspace：对话框不可用或非草稿态返回 null', async 
   assert.equal(await rt2.api.pickDraftWorkspace(), null);
   assert.equal(rt2.state.draftWorkspacePath, null);
 });
+
+// A model selection failure rolls back materialization, not the user's draft.
+test('ensureSession: rejected platform model preserves text, workspace, mode and retry owner', async () => {
+  const calls = [];
+  const rt = loadSessionsFeature({
+    async invoke(name) {
+      calls.push(name);
+      if (name === 'create_session') return { id: 'public-draft-owned' };
+      if (name === 'account_platform_select_session_model') throw new Error('controlled catalog unavailable');
+      if (name === 'list_sessions' || name === 'list_archived_sessions') return [];
+      return {};
+    },
+  });
+  rt.state.composerDraft = 'public unsent draft';
+  rt.state.draftWorkspacePath = '/public/workspace';
+  rt.state.pendingDraftMode = 'plan';
+  rt.state.modeState = { mode: 'plan', multiAgent: true };
+  rt.state.pendingDraftMultiAgent = true;
+  rt.state.pendingDraftModelRef = { source: 'ACCOUNT_PLATFORM', model_id: 'public-catalog-model' };
+  const owner = { draftEpoch: rt.state.draftEpoch };
+  assert.equal(await rt.api.ensureSession(owner), null);
+  assert.ok(calls.includes('account_platform_select_session_model'));
+  assert.ok(calls.includes('delete_session'));
+  assert.equal(rt.state.activeSessionId, null);
+  assert.equal(rt.state.composerDraft, 'public unsent draft');
+  assert.equal(rt.state.draftWorkspacePath, '/public/workspace');
+  assert.equal(rt.state.pendingDraftMode, 'plan');
+  assert.equal(rt.state.modeState.mode, 'plan');
+  assert.equal(rt.state.pendingDraftMultiAgent, true);
+  assert.equal(rt.state.pendingDraftModelRef.model_id, 'public-catalog-model');
+  assert.equal(owner.createdSessionId, null);
+  assert.equal(owner.draftEpoch, rt.state.draftEpoch);
+  assert.equal(owner.rollbackFromDraftEpoch, 0);
+});
+
+test('ensureSession: model rejection after navigation does not restore the old draft', async () => {
+  const rt = loadSessionsFeature();
+  const selection = rt.defer('account_platform_select_session_model');
+  rt.state.composerDraft = 'old public draft';
+  rt.state.pendingDraftModelRef = { source: 'ACCOUNT_PLATFORM', model_id: 'public-catalog-model' };
+  const pending = rt.api.ensureSession();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.ok(rt.calls.invoke.some(([name]) => name === 'account_platform_select_session_model'));
+  await rt.api.createNewSession();
+  rt.state.composerDraft = 'new public draft';
+  selection.reject(new Error('controlled catalog unavailable'));
+  assert.equal(await pending, null);
+  assert.equal(rt.state.activeSessionId, null);
+  assert.equal(rt.state.composerDraft, 'new public draft');
+  assert.equal(rt.state.pendingDraftModelRef, null);
+});

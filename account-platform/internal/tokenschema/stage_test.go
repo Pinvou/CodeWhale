@@ -18,7 +18,7 @@ func TestInstalledManagementMigrationPackage(t *testing.T) {
 		change func([]migrations.Migration) []migrations.Migration
 	}{
 		{"missing", func(ms []migrations.Migration) []migrations.Migration { return ms[1:] }},
-		{"future-version", func(ms []migrations.Migration) []migrations.Migration { ms[0].Version = 34; return ms }},
+		{"future-version", func(ms []migrations.Migration) []migrations.Migration { ms[0].Version = 35; return ms }},
 		{"duplicate", func(ms []migrations.Migration) []migrations.Migration { ms[1] = ms[0]; return ms }},
 		{"modified-up", func(ms []migrations.Migration) []migrations.Migration { ms[0].UpSQL += "\nSELECT 1;"; return ms }},
 		{"modified-down", func(ms []migrations.Migration) []migrations.Migration { ms[0].DownSQL += "\nSELECT 1;"; return ms }},

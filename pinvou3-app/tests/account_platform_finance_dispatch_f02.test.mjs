@@ -45,6 +45,39 @@ test('transport failure and invalid success ACK are not declared undispatched', 
   }
 });
 
+test('optional usage codec rejects an invalid body before dispatch', async () => {
+  let calls = 0;
+  await withFetch(() => { calls++; throw new Error('Unexpected fetch'); }, async () => {
+    const codec = { encode: () => { throw new Error('INVALID_USAGE_INTEGER'); } };
+    const error = await rejection(() => new AdminPlatformClient('').mutate('token', '/v1/admin/usage', 'POST', {}, 'controlled-key', undefined, 200, codec));
+    assert.equal(calls, 0);
+    assert.equal(error.financeRequestState, 'NOT_DISPATCHED');
+  });
+});
+
+test('optional usage codec keeps exact bytes and decodes the successful response', async () => {
+  const encoded = '{"evidence_high_watermark":9007199254740993}';
+  const decoded = { evidence_high_watermark: '9007199254740993' };
+  const body = { evidence_high_watermark: '9007199254740993' };
+  const codec = { encode: (value) => { assert.equal(value, body); return encoded; }, decode: (value) => { assert.equal(value, encoded); return decoded; } };
+  await withFetch(async (_url, options) => {
+    assert.equal(options.body, encoded);
+    return new Response(encoded, { status: 200 });
+  }, async () => {
+    assert.equal(await new AdminPlatformClient('').mutate('token', '/v1/admin/usage', 'POST', body, 'controlled-key', undefined, 200, codec), decoded);
+  });
+});
+
+test('optional usage codec response rejection is not declared undispatched', async () => {
+  let calls = 0;
+  const codec = { encode: () => '{}', decode: () => { throw new Error('INVALID_USAGE_ACK'); } };
+  await withFetch(async () => { calls++; return json({}); }, async () => {
+    const error = await rejection(() => new AdminPlatformClient('').mutate('token', '/v1/admin/usage', 'POST', {}, 'controlled-key', undefined, 200, codec));
+    assert.equal(calls, 1);
+    assert.notEqual(error.financeRequestState, 'NOT_DISPATCHED');
+  });
+});
+
 test('decision control rejection before POST is distinct from post-POST ACK rejection', async () => {
   const client = new AdminPlatformClient(''); const calls = [];
   await withFetch(async (url) => { calls.push(url); return url.endsWith('/capability') ? json(capability()) : json({}, 200); }, async () => {

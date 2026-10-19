@@ -134,7 +134,10 @@ test("container CI uses immutable official cache images without losing either bu
 
 test("Account Platform changes cannot bypass the Go gate at any PR or queue stage", () => {
   const paths = filterPaths(workflow, "account_platform");
-  for (const path of ["account-platform/**", "scripts/account-platform*", "scripts/check-token-management-authorization-coverage.mjs", "scripts/tests/token-management-authorization-coverage.test.mjs", ".github/workflows/pr-check.yml", "scripts/tests/pr-check-routing.test.mjs"]) {
+  for (const path of ["scripts/check-account-platform-authorization-coverage.mjs", "scripts/tests/account-platform-authorization-coverage.test.mjs"]) {
+    assert.ok(paths.includes(path), `authorization changes must trigger the Go gate: ${path}`);
+  }
+  for (const path of ["account-platform/**", "scripts/account-platform*", "scripts/check-token-management-authorization-coverage.mjs", "scripts/tests/token-management-authorization-coverage.test.mjs", "scripts/tests/token-management-phase-coverage.test.mjs", ".github/workflows/pr-check.yml", "scripts/tests/pr-check-routing.test.mjs"]) {
     assert.ok(paths.includes(path), `Go routing must cover ${path}`);
   }
   assert.match(workflow, /account_platform: \$\{\{ steps\.filter\.outputs\.account_platform \}\}/);
@@ -148,14 +151,40 @@ test("Account Platform changes cannot bypass the Go gate at any PR or queue stag
   assert.deepEqual(run.trim().split(/\r?\n/), [
     "node scripts/check-token-management-authorization-coverage.mjs",
     "node --test scripts/tests/token-management-authorization-coverage.test.mjs",
+    "node --test scripts/tests/token-management-phase-coverage.test.mjs",
   ]);
-  for (const [checkerStatus, formalStatus, expectedOutput, expectedStatus] of [[7, 0, "checker", 7], [0, 8, "checkerformal", 8], [0, 0, "checkerformal", 0]]) {
-    const fixture = `node() { if [[ "$1" == scripts/check-token-management-authorization-coverage.mjs ]]; then printf checker; return ${checkerStatus}; else printf formal; return ${formalStatus}; fi; };\n`;
+  for (const [checkerStatus, formalStatus, phaseStatus, expectedOutput, expectedStatus] of [
+    [7, 0, 0, "checker", 7],
+    [0, 8, 0, "checkerformal", 8],
+    [0, 0, 9, "checkerformalphase", 9],
+    [0, 0, 0, "checkerformalphase", 0],
+  ]) {
+    const fixture = `node() { case "$*" in
+      scripts/check-token-management-authorization-coverage.mjs) printf checker; return ${checkerStatus};;
+      '--test scripts/tests/token-management-authorization-coverage.test.mjs') printf formal; return ${formalStatus};;
+      '--test scripts/tests/token-management-phase-coverage.test.mjs') printf phase; return ${phaseStatus};;
+      *) printf unexpected >&2; return 99;;
+    esac; };\n`;
     const result = spawnSync(bash, ["-e", "-c", fixture + run], { encoding: "utf8", timeout: 30_000, windowsHide: true });
     assert.equal(result.status, expectedStatus, result.stderr);
     assert.equal(result.stdout, expectedOutput);
   }
-  assert.doesNotMatch(job, /secrets\.|services:|continue-on-error:/);
+  assert.doesNotMatch(job, /secrets\.|continue-on-error:/);
+});
+
+test("whole Account Platform authorization failures block the CI gate", () => {
+  const job = jobBlock("account-platform-test");
+  const run = stepRun(job, "Verify Account Platform authorization contracts");
+  assert.deepEqual(run.trim().split(/\r?\n/), [
+    "node scripts/check-account-platform-authorization-coverage.mjs",
+    "node --test scripts/tests/account-platform-authorization-coverage.test.mjs",
+  ]);
+  for (const [checkerStatus, formalStatus, expectedOutput, expectedStatus] of [[7, 0, "checker", 7], [0, 8, "checkerformal", 8], [0, 0, "checkerformal", 0]]) {
+    const fixture = `node() { if [[ "$1" == scripts/check-account-platform-authorization-coverage.mjs ]]; then printf checker; return ${checkerStatus}; else printf formal; return ${formalStatus}; fi; };\n`;
+    const result = spawnSync(bash, ["-e", "-c", fixture + run], { encoding: "utf8", timeout: 30_000, windowsHide: true });
+    assert.equal(result.status, expectedStatus, result.stderr);
+    assert.equal(result.stdout, expectedOutput);
+  }
 });
 
 test("Go gate executes test and vet for root and future nested modules, and fails on errors", () => {
@@ -199,6 +228,25 @@ test("Keycloak contract gate invokes the existing suite and propagates failure",
   assert.equal(script, "account-platform/deploy/keycloak/test/provision_mobile_auth_test.py");
   const failed = spawnSync(bash, ["-c", "python3() { return 7; }; export -f python3;\n" + run], { encoding: "utf8", timeout: 30_000, windowsHide: true });
   assert.equal(failed.status, 7, "a failing Keycloak contract must fail the gate");
+});
+
+test("Token financial PostgreSQL gate is required and cannot swallow a failed runner", () => {
+  const paths = filterPaths(workflow, "account_platform");
+  assert.ok(paths.includes("scripts/test-token-financial-postgres.py"));
+  assert.ok(paths.includes("scripts/tests/test_token_financial_postgres.py"));
+  const job = jobBlock("account-platform-test");
+  assert.match(job, /image: mirror\.gcr\.io\/library\/postgres@sha256:[a-f0-9]{64}/);
+  const services = job.match(/^    services:\r?\n([\s\S]*?)^    env:/m)?.[1];
+  assert.ok(services, "the disposable PostgreSQL service must exist");
+  assert.deepEqual([...services.matchAll(/^ {6}([a-z][a-z-]*):\r?$/gm)].map(match => match[1]), ["financial-postgres"]);
+  assert.deepEqual([...services.matchAll(/^ {10}- (.+)\r?$/gm)].map(match => match[1]), ["127.0.0.1:5433:5432"]);
+  assert.match(job, /^          PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: postgres:\/\/postgres@127\.0\.0\.1:5433\/postgres\?sslmode=disable\r?$/m);
+  const run = stepRun(job, "Token financial contracts on isolated PostgreSQL");
+  for (const failedPhase of ["guard", "postgres"]) {
+    const mock = `python3() { case "$*" in *unittest*) ${failedPhase === "guard" ? "return 7" : "return 0"};; *) ${failedPhase === "postgres" ? "return 7" : "return 0"};; esac; }; export -f python3;\n`;
+    const result = spawnSync(bash, ["-c", mock + run], { encoding: "utf8", timeout: 30_000, windowsHide: true });
+    assert.equal(result.status, 7, `${failedPhase} failure must fail the gate: ${result.stderr}`);
+  }
 });
 
 test("named step fixtures exclude later steps and fail closed on missing names", () => {

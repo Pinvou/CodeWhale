@@ -1,5 +1,5 @@
-// Package tokenschema pins the installed management storage and excludes all
-// later client admission, organization lifecycle and public usage projections.
+// Package tokenschema pins the installed personal execution and management storage.
+// Organization lifecycle, event replay and privacy stages remain excluded.
 package tokenschema
 
 import (
@@ -46,6 +46,10 @@ var installed = map[int64]identity{
 	33:     {name: "model_token_page_overview_indexes", checksum: "a17e2fb2855c376b3a0b41961aa3ad0bc45f4193ebd445d6f4db31c430d3e0d6", downChecksum: "e064ed383496dad953f2d555bfafa501232ad3f50b35648d1bdbe9ec9dc47fd9"},
 	900001: {name: "runtime_storage_hardening", checksum: "4590d925d2575b0b1076c864f9cfe3b9a8115a9eee864a8a19fba48003f85bac", downChecksum: "3d4e34c2499153f8d63292ccdae47c3cf4bb5a2ba93ad5093cc0cfdbcd4ada92"},
 	900002: {name: "hold_expiry_dispatch_fence", checksum: "70e1ab2e4df09da798f8960aef356fb91ed6cef675dcb0613b5e7f303839af55", downChecksum: "718410daef7dece72847123a0db47c6636ce7a7c008c4fd4d15470ddd058581d"},
+	16:     {name: "client_readiness", checksum: "c87acabfbc2f0048d50c8d58af1b5a9ecf2ce0cbe9789df90c92192e60a692c5", downChecksum: "d9aeecb29706b1e11db1962815e738de870c1356fb153abe1ee7577a0f85bbe1"},
+	17:     {name: "usage_admission_indexes", checksum: "fcd9960bf027d6daa6be4c02b109a520398a9515b142f73abd6b9ef5007d09dd", downChecksum: "b61e971e2c5fcff420de457c3da870331ec721abd321f11ae6971de6790108ce"},
+	34:     {name: "usage_history_groups", checksum: "8f25256da33ce045b00f5f96471dee1169f92047a82fefa42d5485add44a4948", downChecksum: "7ffd599821fb4aa220ca06ef305af84527cbd5b3f27a9fbc9dbadf803f6099c0"},
+	900003: {name: "usage_history_storage_compatibility", checksum: "4bb49b9651b476a0eb6496e775c89e4a3f9da9c53d683064317d5364841bc840", downChecksum: "96991acf88092a3cbbd9eaf7c8d90743d919cca342c364aac59498db78506194"},
 }
 
 func Ordered(loaded []migrations.Migration) ([]migrations.Migration, error) {
@@ -120,8 +124,17 @@ func Up(ctx context.Context, c *pgx.Conn, loaded []migrations.Migration) error {
 // The immutable original SQL and the runtime's steady-state authority stay
 // unchanged. A failed statement or hook rolls back the grant with the DDL.
 func lendOverviewIndexDDL(ctx context.Context, tx pgx.Tx, m migrations.Migration) error {
-	if m.Version != 33 {
+	if m.Version != 33 && m.Version != 16 && m.Version != 17 {
 		return nil
+	}
+	if m.Version != 33 {
+		var granted bool
+		if err := tx.QueryRow(ctx, `SELECT has_schema_privilege('token_gateway','public','CREATE')`).Scan(&granted); err != nil {
+			return err
+		}
+		if granted {
+			return nil
+		}
 	}
 	var permitted bool
 	if err := tx.QueryRow(ctx, `SELECT session_user='token_migrator' AND current_user='token_gateway'
@@ -138,8 +151,17 @@ func lendOverviewIndexDDL(ctx context.Context, tx pgx.Tx, m migrations.Migration
 }
 
 func revokeOverviewIndexDDL(ctx context.Context, tx pgx.Tx, m migrations.Migration) error {
-	if m.Version != 33 {
+	if m.Version != 33 && m.Version != 16 && m.Version != 17 {
 		return nil
+	}
+	if m.Version == 16 || m.Version == 17 {
+		var previouslyRestricted bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=29)`).Scan(&previouslyRestricted); err != nil {
+			return err
+		}
+		if !previouslyRestricted {
+			return nil
+		}
 	}
 	_, err := tx.Exec(ctx, `SET ROLE token_schema_owner; REVOKE CREATE ON SCHEMA public FROM token_gateway`)
 	return err

@@ -35,3 +35,11 @@ F01 原 cc4827faa 的精确提交 CI 与 required-gate 已成功、外部审核�
 非作者独立适用检查：routing 14、CI policy 37、F04 overview Node 9、部署合同 5 均通过且 Node 无跳过；Token 管理授权 checker、actionlint、架构和 diffcheck 退出 0。另一非作者确认 Account 默认测试 2.796 秒、BillingSchema 默认测试 3.637 秒和 vet 退出 0。本轮没有新增真实 PG、完整浏览器或 Native 执行，不将前波 PG 或历史验收冒称当前组合实测。
 
 验证计划曾误选当前 F04 不存在的 `token-management-phase-coverage.test.mjs`，调用实际退出 1，未执行测试且不计通过；记录保留，不引入后波文件或放宽门禁。F03 夹具未知耗时仍由 #1681 跟踪；新签名 head 的远端 CI 待验，CodeWhale 公开维护链仍按用户指示暂缓。
+
+## F05：保全个人调用与回执合同的相邻承接
+
+从原 F05 `524d809e4e44b578660de90bf4c55e53f21cdf7f` 普通相邻合并签名 F04 `291cd79f467d300a5dfbbccef28d757607596ff3`，十五个 incoming 文件逐字节保全。F05 原 Token 合同、审批 registry、共享未知写入恢复、phase 测试和 CodeWhale gitlink 不变，既有个人调用/取消与 overview 功能没有被前序覆盖。
+
+独立适用 CI 检查：routing 14、CI policy 37、Token phase 6、usage overview Node 4、部署合同 5 全部通过，Node 无跳过；Token 授权 checker、actionlint、架构和 diffcheck 退出 0。另一非作者 Account 默认测试 4.770 秒、BillingSchema 默认测试 3.669 秒、Token 默认测试 5.109 秒及 vet 实际退出 0；未配置 PG 环境，没有本轮真实 PG，默认非 verbose 输出不提供跳过数量，不宣称零跳过。
+
+UI、Native 和资产源码无增量，不重复完整浏览器/Native 或将历史结果冒称本轮执行。F03 当前精确提交 CI 与 required-gate 已成功，但不能沿用给 F05 新 head；其远端 CI 待验，严格公开 CodeWhale 维护祖先门禁的已知阻断继续保留，按用户指示暂缓，不能宣称整个 F05 通过。#1681 的原夹具未知耗时原因仍未确认。

@@ -1900,12 +1900,12 @@ mod tests {
             .check(ExecPolicyContext {
                 command,
                 cwd: ".",
+                workspace_roots: Vec::new(),
                 tool: Some("exec_shell"),
                 path: None,
                 ask_for_approval: AskForApproval::Never,
                 sandbox_mode: None,
                 // CodeWhale #54：空集保持历史单根判定。
-                workspace_roots: Vec::new(),
             })
             .unwrap()
     }
@@ -2446,12 +2446,12 @@ mod tests {
                 .check(ExecPolicyContext {
                     command: &command,
                     cwd: ".",
+                    workspace_roots: Vec::new(),
                     tool: Some("exec_shell"),
                     path: None,
                     ask_for_approval: AskForApproval::OnRequest,
                     sandbox_mode: None,
                     // CodeWhale #54：空集保持历史单根判定。
-                    workspace_roots: Vec::new(),
                 })
                 .unwrap()
         };

@@ -27,15 +27,7 @@
     return;
   }
 
-  var invokeErrorObserver = function () {};
-  var modelAvailabilityError = function () { return null; };
-  const rawInvoke = TAURI.core.invoke;
-  const invoke = function (command, args) {
-    return rawInvoke(command, args).catch(function (error) {
-      invokeErrorObserver(error, command);
-      throw error;
-    });
-  };
+  const invoke = TAURI.core.invoke;
   const { listen } = TAURI.event;
   const dialogOpen = TAURI.dialog?.open;
   const dialogSave = TAURI.dialog?.save;
@@ -274,12 +266,14 @@
       runtime: null,
       snapshot_path: "",
     },
-    llmApiStatus: null,
-    llmApiModels: null,
     // 「添加模型」方案:已保存模型列表 + 全局默认 id + 当前会话绑定的模型 id
     savedModels: [],
+    modelsLoaded: false,
     activeModelId: null,
+    defaultModelRef: null,
     currentSessionModelId: null, // 当前 active session 显式绑定的模型;null=跟随全局默认
+    currentSessionModelRef: null,
+    pendingDraftModelRef: null,
     superPermEnabled: false,
     // Computer use (screenshot + keyboard/mouse control) authorization state. enabled is
     // the global switch (off by default);
@@ -1082,6 +1076,9 @@
   var presentArtifactAbsPath = artifactTrackerFeature.presentArtifactAbsPath;
 
   var chatFeature = installBridgeFeature("chat", {
+    refreshAuthoritativeTurnTimeline: function (sid) {
+      return chatEventsFeature.refreshAuthoritativeTurnTimeline(sid);
+    },
     voice: function () { return voiceFeature; },
     state: state, invoke: invoke, TAURI: TAURI,
     sessionStates: sessionStates, remoteProxyDrafts: remoteProxyDrafts,
@@ -1113,7 +1110,6 @@
     fileMutationAction: fileMutationAction,
     parseScheduledTaskDraftFromText: function () { return parseScheduledTaskDraftFromText.apply(null, arguments); },
     autoCreateScheduledTaskDraft: function () { return autoCreateScheduledTaskDraft.apply(null, arguments); },
-    modelAvailabilityError: function () { return modelAvailabilityError.apply(null, arguments); },
     get currentStreamText() { return currentStreamText; },
     set currentStreamText(value) { currentStreamText = value; },
     get currentStreamId() { return currentStreamId; },
@@ -1218,7 +1214,7 @@
       // chatEventsFeature is initialized further down this file; purge only
       // happens at runtime, so there is no TDZ concern.
       if (id && chatEventsFeature && typeof chatEventsFeature.cancelStreamRenderTimers === "function") {
-        chatEventsFeature.cancelStreamRenderTimers(id);
+        chatEventsFeature.cancelStreamRenderTimers(id, reason);
       }
     },
     runSyncOnSession: runSyncOnSession, persistMessagesFor: persistMessagesFor,
@@ -1712,8 +1708,7 @@
     scheduled: ["scheduledRunContext", "scheduledTaskAutoOpenId", "scheduledTaskBusyAction", "scheduledTaskCreationSessionId", "scheduledTaskDetail", "scheduledTaskDraft", "scheduledTaskError", "scheduledTaskErrorKind", "scheduledTaskLoading", "scheduledTaskPendingGuide", "scheduledTaskRecentRuns", "scheduledTaskRuns", "scheduledTasks", "scheduledTaskSelectionGeneration", "selectedScheduledTaskId"],
     monitor: ["monitor", "monitorError"],
     settings: ["settings", "selectedPet", "behaviorTelemetry"],
-    models: ["activeModelId", "currentSessionModelId", "effectiveModelConfig", "savedModels"],
-    llmapi: ["llmApiModels", "llmApiStatus"],
+    models: ["activeModelId", "currentSessionModelId", "currentSessionModelRef", "pendingDraftModelRef", "defaultModelRef", "effectiveModelConfig", "savedModels", "modelsLoaded"],
     vllm: [],
     interaction: ["pinvouModal", "pinvouReviews", "pinvouSummoning", "superPermEnabled"],
     computerUse: ["computerUse"],
@@ -2514,6 +2509,7 @@
   }
 
   const chatEventsFeature = installBridgeFeature("chat-events", {
+    onSessionDeleted: onSessionDeleted,
     state: state, listen: listen, invoke: invoke, turnUsageDirty: turnUsageDirty,
     sessionStates: sessionStates, renderMarkdown: renderMarkdown, bt: bt,
     notify: notify, onSessionEvent: onSessionEvent, runSyncOnSession: runSyncOnSession,
@@ -2601,8 +2597,6 @@
   var clearMonitorStats = monitorFeature.clearMonitorStats;
   var pollBackendStatus = monitorFeature.pollBackendStatus;
   var settingsFeature = installBridgeFeature("settings", { state: state, notify: notify, invoke: invoke, listen: listen });
-  invokeErrorObserver = settingsFeature.observeInvokeError;
-  modelAvailabilityError = settingsFeature.modelAvailabilityError;
   var loadSettings = settingsFeature.loadSettings;
   var loadBehaviorTelemetryStatus = settingsFeature.loadBehaviorTelemetryStatus;
   var setBehaviorTelemetryEnabled = settingsFeature.setBehaviorTelemetryEnabled;
@@ -2611,17 +2605,6 @@
   var loadEffectiveModelConfig = settingsFeature.loadEffectiveModelConfig;
   var saveSettings = settingsFeature.saveSettings;
   var saveSettingsAndRestart = settingsFeature.saveSettingsAndRestart;
-  var refreshLlmApiOnStartup = settingsFeature.refreshLlmApiOnStartup;
-  var refreshLlmApi = settingsFeature.refreshLlmApi;
-  var getLlmApiStatus = settingsFeature.getLlmApiStatus;
-  var getLlmApiModels = settingsFeature.getLlmApiModels;
-  var setLlmApiDefaultModel = settingsFeature.setLlmApiDefaultModel;
-  var ensureLlmApiBinding = settingsFeature.ensureLlmApiBinding;
-  var loginLlmApiUser = settingsFeature.loginLlmApiUser;
-  var saveLlmApiUserSession = settingsFeature.saveLlmApiUserSession;
-  var retryLlmApiProvisioning = settingsFeature.retryLlmApiProvisioning;
-  var setLlmApiUserEnabled = settingsFeature.setLlmApiUserEnabled;
-  var getLlmApiAdminOverview = settingsFeature.getLlmApiAdminOverview;
   var saveSearchSettings = settingsFeature.saveSearchSettings;
   var saveSearchSettingsAndRestart = settingsFeature.saveSearchSettingsAndRestart;
   var submitFeedback = settingsFeature.submitFeedback;
@@ -2954,9 +2937,6 @@
       parallelLoads.push(startupAwait("bridge:refresh_super_permission", refreshSuperPerm));
     }
     await Promise.all(parallelLoads);
-    refreshLlmApiOnStartup()
-      .catch(function (e) { console.warn("load llmapi account/models failed", e); });
-    startupMark("bridge:llmapi_refresh_started");
     // 分离会话必须在同一初始化链内绑定目标 id。此前 DetachedShell 的独立 effect
     // 会与这里的 enterDraft() 并发，慢初始化时已加载的原会话会被重置成空白草稿。
     if (isDetachedWindow && detachedWindowKind === "session" && detachedWindowSessionId) {
@@ -3151,23 +3131,12 @@
       setBuiltinFeatureEnabled: setBuiltinFeatureEnabled,
     },
     feedback: { submitFeedback: submitFeedback },
-    llmapi: {
-      refreshLlmApi: refreshLlmApi,
-      getLlmApiStatus: getLlmApiStatus,
-      getLlmApiModels: getLlmApiModels,
-      setLlmApiDefaultModel: setLlmApiDefaultModel,
-      ensureLlmApiBinding: ensureLlmApiBinding,
-      loginLlmApiUser: loginLlmApiUser,
-      saveLlmApiUserSession: saveLlmApiUserSession,
-      retryLlmApiProvisioning: retryLlmApiProvisioning,
-      setLlmApiUserEnabled: setLlmApiUserEnabled,
-      getLlmApiAdminOverview: getLlmApiAdminOverview,
-    },
     vllm: {
       discoverLocalVllm: discoverLocalVllm,
     },
     models: {
       getEffectiveModelConfig: getEffectiveModelConfig,
+      loadEffectiveModelConfig: loadEffectiveModelConfig,
       loadModels: loadModels,
       saveModel: saveModel,
       revealModelApiKey: revealModelApiKey,
@@ -3175,6 +3144,7 @@
       setActiveModel: setActiveModel,
       loadSessionModel: loadSessionModel,
       switchModel: switchModel,
+      switchModelRef: settingsFeature.switchModelRef,
       testModelConnection: testModelConnection,
       getImageInputCapability: getImageInputCapability,
       testImageInputCapability: testImageInputCapability,

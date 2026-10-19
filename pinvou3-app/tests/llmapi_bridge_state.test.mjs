@@ -26,230 +26,62 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function baseState() {
-  return {
-    activeSessionId: 'session-1',
-    activeModelId: 'builtin_llmapi',
-    currentSessionModelId: 'builtin_llmapi',
-    effectiveModelConfig: { model: 'deepseek-v4-flash' },
-    savedModels: [
-      { id: 'builtin_llmapi', kind: 'builtin_llmapi' },
-      { id: 'custom-model', kind: null },
-    ],
-    llmApiStatus: {
-      backend_user_exists: true,
-      backend_user_state: 'exists',
-      stale: false,
-      enabled: true,
-      provisioning_status: 'ready',
-    },
-    llmApiModels: { available_models: ['deepseek-v4-flash'] },
-  };
-}
 
-const { factories, windowObject } = loadFactories();
-
+// The retired LLM API account no longer owns model authority. Exercise the
+// replacement settings transport, preserving failure and stale-response coverage.
+function baseState() { return { activeSessionId: 'session-1', savedModels: [], currentSessionModelRef: {source:'LOCAL_CONFIG',saved_model_id:'local'}, effectiveModelConfig:{model:'local'} }; }
+const { factories } = loadFactories();
+function settings(state, invoke) { return factories.settings({state, invoke, notify(){}, listen(){}}); }
 {
-  const state = baseState();
-  const settings = factories.settings({
-    state,
-    notify() {},
-    listen() {},
-    invoke: async () => null,
-  });
-  assert.equal(
-    settings.observeInvokeError(new Error('send_user_message failed: service_disabled: user has been banned'), 'chat'),
-    true,
-  );
-  assert.equal(state.llmApiStatus.backend_user_state, 'not_exists');
-  assert.equal(state.llmApiModels, null);
-  assert.equal(state.effectiveModelConfig, null);
-  assert.match(settings.modelAvailabilityError('session-1'), /选择其他模型/);
-  windowObject.PinvouTauriBridgeStrings = { builtinModelUnavailable: 'Select another model first.' };
-  assert.equal(settings.modelAvailabilityError('session-1'), 'Select another model first.');
-  delete windowObject.PinvouTauriBridgeStrings;
+ const state=baseState(), calls=[];
+ const domain=settings(state, async (command,args)=>{calls.push([command,args]); if(command==='get_session_model_ref')return {source:'ACCOUNT_PLATFORM',model_id:'public'}; if(command==='get_effective_model_config')return {model:'public',requires_user_api_key:false}; return null;});
+ await domain.switchModelRef('session-1',{source:'ACCOUNT_PLATFORM',model_id:'public'});
+ assert.equal(calls[0][0],'account_platform_select_session_model');
+ assert.equal(calls[0][1].input.sessionId,'session-1');
+ assert.equal(state.currentSessionModelRef.model_id,'public');
+ assert.equal(state.effectiveModelConfig.model,'public');
+ assert.equal(calls.some(([command])=>command.startsWith('get_llmapi')),false);
 }
-
 {
-  const state = baseState();
-  state.activeModelId = 'custom-model';
-  state.currentSessionModelId = null;
-  const settings = factories.settings({
-    state,
-    notify() {},
-    listen() {},
-    invoke: async () => null,
-  });
-  assert.equal(
-    settings.observeInvokeError(new Error('service_disabled: unrelated domain'), 'submit_feedback'),
-    false,
-    'an unrelated command must not mutate LLM API account state when the effective model is custom',
-  );
-  assert.equal(state.llmApiStatus.backend_user_state, 'exists');
+ const state=baseState(), previous=state.currentSessionModelRef;
+ const domain=settings(state, async ()=>{throw new Error('PERMISSION_DENIED');});
+ await assert.rejects(domain.switchModelRef('session-1',{source:'ACCOUNT_PLATFORM',model_id:'public'}),/PERMISSION_DENIED/);
+ assert.equal(state.currentSessionModelRef,previous);
+ assert.equal(state.effectiveModelConfig.model,'local');
 }
-
 {
-  const statusRequest = deferred();
-  const state = baseState();
-  const settings = factories.settings({
-    state,
-    notify() {},
-    listen() {},
-    invoke(command) {
-      if (command === 'get_llmapi_status') return statusRequest.promise;
-      return Promise.resolve(null);
-    },
-  });
-  const refresh = settings.getLlmApiStatus();
-  settings.observeInvokeError(new Error('service_disabled: account disabled'), 'chat');
-  statusRequest.resolve({
-    backend_user_exists: true,
-    backend_user_state: 'exists',
-    stale: false,
-    enabled: true,
-    provisioning_status: 'ready',
-  });
-  const returned = await refresh;
-  assert.equal(returned.backend_user_state, 'not_exists');
-  assert.equal(state.llmApiStatus.backend_user_state, 'not_exists');
+ const state=baseState(), request=deferred();
+ const domain=settings(state, command=>command==='get_effective_model_config'?request.promise:Promise.resolve(null));
+ const pending=domain.loadSessionModel('session-1'); state.activeSessionId='session-2';
+ request.resolve({model:'stale'}); assert.equal(await pending,false);
+ assert.equal(state.effectiveModelConfig.model,'local');
 }
-
 {
-  const state = baseState();
-  const settings = factories.settings({
-    state,
-    notify() {},
-    listen() {},
-    invoke: async command => command === 'get_llmapi_status' ? {
-      backend_user_exists: true,
-      backend_user_state: 'exists',
-      stale: true,
-      auto_login_failed: true,
-      enabled: true,
-      provisioning_status: 'ready',
-      quota: null,
-    } : null,
-  });
-  const status = await settings.getLlmApiStatus();
-  assert.equal(status.stale, true);
-  assert.equal(status.auto_login_failed, true);
-  assert.equal(state.llmApiStatus.backend_user_state, 'exists');
+ const state=baseState(), request=deferred(); let n=0;
+ const domain=settings(state, command=>command==='get_effective_model_config'?(++n===1?request.promise:Promise.resolve({model:'new'})):Promise.resolve(null));
+ const old=domain.loadSessionModel('session-1'); await domain.loadSessionModel('session-1');
+ request.resolve({model:'old'}); await old; assert.equal(state.effectiveModelConfig.model,'new');
 }
-
 {
-  const modelsRequest = deferred();
-  const state = baseState();
-  const settings = factories.settings({
-    state,
-    notify() {},
-    listen() {},
-    invoke(command) {
-      if (command === 'get_llmapi_models') return modelsRequest.promise;
-      return Promise.resolve(null);
-    },
-  });
-  const refresh = settings.getLlmApiModels();
-  settings.observeInvokeError(new Error('service_disabled: account disabled'), 'chat');
-  modelsRequest.resolve({ available_models: ['stale-model'] });
-  await refresh;
-  assert.equal(state.llmApiModels, null, 'a model response started before the authoritative error must be ignored');
+ const state=baseState();
+ const domain=settings(state, async command=>{if(command==='get_effective_model_config')throw new Error('temporary'); return null;});
+ assert.equal(await domain.loadSessionModel('session-1'),false);
+ assert.equal(state.effectiveModelConfig.model,'local','transient refresh does not invent a missing model');
 }
-
 {
-  const state = baseState();
-  const invokedCommands = [];
-  const settings = factories.settings({
-    state,
-    notify() {},
-    listen() {},
-    invoke: async command => {
-      invokedCommands.push(command);
-      if (command === 'get_llmapi_status') {
-        return {
-          backend_user_exists: true,
-          backend_user_state: 'exists',
-          stale: false,
-          enabled: false,
-          provisioning_status: 'disabled',
-        };
-      }
-      return { available_models: ['must-not-be-used'] };
-    },
-  });
-  const result = await settings.refreshLlmApi();
-  assert.equal(result.status.enabled, false);
-  assert.equal(invokedCommands.includes('get_llmapi_models'), false);
-  assert.equal(state.llmApiModels, null);
-  assert.equal(state.effectiveModelConfig, null);
+ const state=baseState(), calls=[];
+ const domain=settings(state, async (command,args)=>{calls.push([command,args]);return null;});
+ await domain.switchModelRef(null,{source:'ACCOUNT_PLATFORM',model_id:'public'});
+ assert.equal(calls.length,0,'draft selection is deferred until the real session is materialized');
+ assert.equal(state.pendingDraftModelRef.model_id,'public');
+ await assert.rejects(domain.switchModelRef('session-1',{source:'UNKNOWN'}),/unsupported/);
+ assert.equal(calls.length,0);
 }
-
 {
-  const state = baseState();
-  state.llmApiStatus = {
-    backend_user_exists: false,
-    backend_user_state: 'not_exists',
-    stale: false,
-    enabled: false,
-    provisioning_status: 'disabled',
-  };
-  const invokes = [];
-  let notifications = 0;
-  const settings = factories.settings({
-    state,
-    notify() {},
-    listen() {},
-    invoke: async () => null,
-  });
-  Object.assign(state, {
-    chatItems: [],
-    messages: [],
-    attachments: [],
-    busy: false,
-  });
-  const chat = factories.chat({
-    state,
-    invoke(command) { invokes.push(command); return Promise.resolve(null); },
-    notify() { notifications += 1; },
-    TAURI: null,
-    sessionStates: {},
-    turnUsageDirty: {},
-    personaPlaceholderTitles: {},
-    renderMarkdown: String,
-    safeConsoleInfo() {},
-    bt(key) { return key; },
-    runSyncOnSession(_sessionId, action) { action(); },
-    startThinking() {},
-    stopThinking() {},
-    ensureSessionBufferLoaded: async () => {},
-    ensureSession: async () => {},
-    getBuffer() { return null; },
-    reconcileRemoteTurn: async () => true,
-    markRemoteTurn() {},
-    clearAttachments() {},
-    isScheduledRunSession() { return false; },
-    basename(value) { return String(value || ''); },
-    extractArtifactPath() { return null; },
-    parseScheduledTaskDraftFromText() { return null; },
-    autoCreateScheduledTaskDraft() {},
-    modelAvailabilityError: settings.modelAvailabilityError,
-    itemIdSeq: 0,
-    pendingAssistantText: '',
-    pendingAssistantBlocks: [],
-    currentStreamText: '',
-    currentStreamId: 0,
-  });
-  assert.equal(
-    await chat.doSendFor('session-1', 'interactive', 'interactive', [], null, false, false),
-    false,
-    'an interactive send should surface the visible error without rejecting its UI event handler',
-  );
-  await assert.rejects(
-    chat.doSendFor('session-1', 'hello', 'hello', [], null, false, true),
-    /选择其他模型/,
-  );
-  assert.equal(invokes.includes('chat'), false, 'the disabled hidden model must be blocked before invoking chat');
-  assert.equal(state.chatItems.some(item => item.turnErrorNotice && /选择其他模型/.test(item.text)), true);
-  assert.ok(notifications > 0);
+ const state=baseState(), requests=[deferred(),deferred()]; let n=0;
+ const domain=settings(state, command=>command==='list_models'?requests[n++].promise:Promise.resolve(null));
+ const old=domain.loadModels(), current=domain.loadModels();
+ requests[1].resolve({models:[{id:'new'}]});await current;requests[0].resolve({models:[{id:'old'}]});await old;
+ assert.equal(state.savedModels[0].id,'new','a late list cannot overwrite the current catalog');
 }
-
-console.log('LLM API bridge state and send guards passed');
+console.log('account platform model bridge: 7 scenarios passed');

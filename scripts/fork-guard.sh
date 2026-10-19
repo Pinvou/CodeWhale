@@ -12,6 +12,7 @@ EXPECTED_COMMITS=74
 # 即维护分支自 r1 收口线性前进而非另起分叉（2026-10-02 起处于过渡期：gitlink =
 # 维护分支头，领先钉在 r3 收口 commit 的不可变 tag；tag 钉点与领先关系由
 # scripts/verify-public-submodule.sh 在过渡期断言）。
+# 当前固定登记头继承公开维护历史；本地检查不代替严格公开维护头门禁。
 R1_CLOSURE="1fafee7e26b60a59457a43bce50c63aa2ad9dbaf"
 FAST_ONLY=0
 
@@ -44,7 +45,7 @@ else
 fi
 
 if git -C "$CODEWHALE" merge-base --is-ancestor "$R1_CLOSURE" HEAD 2>/dev/null; then
-  green "  ✓ 线性前进成立：r1 收口是当前 head 的祖先（过渡期内 gitlink=分支头，领先钉在 r3 收口的 tag）"
+  green "  ✓ 线性前进成立：r1 收口是当前 head 的祖先（当前固定头继承公开维护历史；不代替严格公开维护头门禁）"
 else
   red "  ✗ r1 收口 $R1_CLOSURE 不是当前 head 的祖先，线性前进关系断裂"
   fail=1
@@ -61,6 +62,37 @@ fi
 bold "── 第 1 层：登记主题与父仓适配指纹 ──"
 # 格式：主题|说明|文件（相对父仓根）|grep -F 固定串
 fingerprints=(
+  "T1|宿主单 execution-root 显式配置     |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|workspace_roots: _, // host exposes one execution root"
+  "T1|宿主 SyncSession 清除旧附件集合    |pinvou3-app/src-tauri/src/features/assistant/engine.rs|workspace_roots: Vec::new(),"
+  "T1|宿主配置不纳 ledger 行为回归      |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|fn forkguard_engine_config_keeps_only_execution_root()"
+  "T1|空根/多根 SyncSession 线协议回归   |CodeWhale/crates/protocol/src/op.rs|fn sync_session_workspace_roots_ride_the_wire_only_when_present()"
+  "T1|真实 Session 同步替换根集合回归    |CodeWhale/crates/tui/src/core/engine/tests.rs|async fn sync_session_replaces_workspace_roots_for_the_next_turn()"
+  "T2|单 primary 根退化与去重回归       |CodeWhale/crates/core/src/lib.rs|fn normalize_workspace_roots_puts_cwd_first_and_dedups()"
+  "T2|空/相对根与无效 cwd fail-closed    |CodeWhale/crates/core/src/lib.rs|fn normalize_workspace_roots_drops_empty_and_relative_entries()"
+  "T2|真实工具权限物化兼容单根回归       |CodeWhale/crates/tui/src/core/engine/tests.rs|fn tool_context_for_turn_materializes_session_workspace_roots()"
+  "T2|文件系统 super-root 不授可写权限   |CodeWhale/crates/tui/src/sandbox/policy.rs|fn workspace_write_drops_a_root_that_canonicalizes_to_the_filesystem_root()"
+  "T2|单根缺失路径与 symlink cwd 判定    |CodeWhale/crates/tui/src/core/engine/tests.rs|fn exec_judged_cwd_resolves_absent_interior_behind_symlink()"
+  "T1|Web 逐附加根复用既有路径脱敏       |pinvou3-app/src-tauri/src/app/commands/codex.rs|*root = PathBuf::from(redact_workspace_path_for_web(&root.to_string_lossy()));"
+  "T1|Unix/Windows 实际 Web JSON 脱敏回归|pinvou3-app/src-tauri/src/app/commands/codex.rs|fn forkguard_web_session_projection_redacts_attached_roots_and_keeps_native_metadata()"
+  "T1|同模型请求保留宿主冻结限制回归     |CodeWhale/crates/tui/src/client.rs|fn model_aware_same_model_request_keeps_host_declared_route_limits()"
+  "T1|同模型重绑定保留宿主冻结限制回归   |CodeWhale/crates/tui/src/client.rs|fn rebinding_the_same_model_keeps_host_declared_route_limits()"
+  "T1|同模型真实生产请求使用冻结路由限制 |CodeWhale/crates/tui/src/client.rs|if request.model.trim() == self.default_model {"
+  "T2|历史 r6 容器修复现行生产实现       |CodeWhale/crates/tui/src/core/engine/dispatch.rs|pub(super) fn normalize_schema_json_containers("
+  "T2|历史 r6 容器修复现行工具执行接线   |CodeWhale/crates/tui/src/core/engine/turn_loop.rs|normalize_schema_json_containers("
+  "T2|现行嵌套容器真实工具校验回归       |CodeWhale/crates/tui/src/core/engine/dispatch.rs|fn decodes_nested_containers_and_passes_tool_validation()"
+  "T2|现行原语错误类型及超限保护回归     |CodeWhale/crates/tui/src/core/engine/dispatch.rs|fn leaves_primitives_wrong_types_and_unbounded_strings_unchanged()"
+  "T1|宿主模型调用幂等仅显式路由启用    |CodeWhale/crates/tui/src/config.rs|pub request_idempotency_header: Option<String>"
+  "T1|模型调用身份跨传输重试边界         |CodeWhale/crates/tui/src/core/runtime_contract/model.rs|async fn create_message_stream_for_operation("
+  "T1|模型调用身份按实际 wire 事实区分   |CodeWhale/crates/tui/src/client.rs|fn stream_operation_identity("
+  "T1|HTTP 重试与独立相同调用结果回归    |CodeWhale/crates/tui/src/client/operation_tests.rs|fn forkguard_model_operation_http_retry_and_new_calls"
+  "T1|普通路由及 header 安全边界回归     |CodeWhale/crates/tui/src/client/operation_tests.rs|fn forkguard_model_operation_opt_in_and_wire_identity"
+  "T1|引擎内外两层流重试身份结果回归     |CodeWhale/crates/tui/src/core/engine/operation_tests.rs|fn forkguard_model_operation_inner_and_outer_stream_retries"
+  "T1|工具后继模型调用新身份结果回归     |CodeWhale/crates/tui/src/core/engine/operation_tests.rs|fn forkguard_model_operation_tool_followup_gets_new_id"
+  "T1|保留部分输出改变调用身份结果回归   |CodeWhale/crates/tui/src/core/engine/operation_tests.rs|fn forkguard_model_operation_preserved_partial_changes_call"
+  "T1|幂等账户调用不走进程内正文缓存     |CodeWhale/crates/tui/src/client.rs|let cacheable = self.request_idempotency_header.is_none()"
+  "T1|HTTP1 流式发送保持调用身份回归     |CodeWhale/crates/tui/src/client/operation_tests.rs|fn forkguard_model_operation_http1_stream_keeps_id"
+  "T1|子代理外层重试保持调用身份回归     |CodeWhale/crates/tui/src/tools/subagent/tests/operation_identity.rs|fn forkguard_model_operation_child_retries_keep_id"
+  "T1|视觉 HTTP 重试保持调用身份回归    |CodeWhale/crates/tui/src/vision/tools.rs|fn forkguard_model_operation_vision_http_retry_keeps_id"
   "T1|宿主限额绑定精确模型|CodeWhale/crates/tui/src/core/engine.rs|active_route_limits_model: Option<String>"
   "T1|自起轮次保留宿主限额|CodeWhale/crates/tui/src/core/engine/tests.rs|fn current_runtime_route_carries_installed_host_limits("
   "T1|wire 漂移不继承限额|CodeWhale/crates/tui/src/core/engine/tests.rs|fn current_runtime_route_does_not_carry_limits_across_wire_drift("

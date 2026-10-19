@@ -15,8 +15,8 @@ pub type StoreError = AppError;
 
 const API_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// 单独的连接阶段时限，取值与 `llmapi_hub/adapter.rs` 的 `HTTP_CONNECT_TIMEOUT_SECS`
-/// 一致。见 `get_json` 里的说明：没有它，握不上手的链路会把整个 API_TIMEOUT 吃光。
+/// 连接阶段最多等待 5 秒，避免无法握手的链路耗尽 15 秒的 API 总预算。
+/// `get_json` 同时设置连接时限和总时限。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 同一个引擎+模型组合下，不同的部署参数方案（比如"基准测试配置" vs
@@ -214,8 +214,8 @@ impl StoreClient {
         let url = format!("{}{}", self.base_url, path);
         let client = reqwest::blocking::Client::builder()
             // 只设总超时的话，一条连不上的慢链路能把 15 秒预算全耗在 TCP/TLS
-            // 握手上，界面要等满 15 秒才看到"连不上"。对照 llmapi_hub/adapter.rs
-            // 的 blocking_client()，两个超时都设。
+            // 握手上，界面要等满 15 秒才看到"连不上"。本客户端用 5 秒连接时限
+            // 提前结束握手失败，同时保留 15 秒的 API 总时限。
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(API_TIMEOUT)
             .redirect(reqwest::redirect::Policy::custom(|attempt| {

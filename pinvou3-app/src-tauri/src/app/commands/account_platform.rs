@@ -1,4 +1,7 @@
-use tauri::State;
+use crate::features::assistant::engine_pool::EnginePool;
+use crate::features::sessions::SessionStore;
+use crate::platform::prefs::{BUILTIN_ACCOUNT_PLATFORM_MODEL_ID, ModelSelectionRef, UserPrefs};
+use tauri::{AppHandle, State};
 
 use crate::features::account_platform::{
     AccountPlatformState, ApiRequest, ApiResponse, LoginCredentials, MobileRegistration,
@@ -33,8 +36,10 @@ pub async fn account_platform_reset_password(
 pub async fn account_platform_login(
     credentials: LoginCredentials,
     state: State<'_, AccountPlatformState>,
+    pool: State<'_, EnginePool>,
 ) -> Result<SessionStatus, String> {
     let status = state.login(credentials).await?;
+    pool.mark_model_updated(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID);
     Ok(status)
 }
 
@@ -81,16 +86,20 @@ pub async fn account_platform_registration_status(
 pub async fn account_platform_login_sms(
     input: SMSLoginCredentials,
     state: State<'_, AccountPlatformState>,
+    pool: State<'_, EnginePool>,
 ) -> Result<SessionStatus, String> {
     let status = state.login_sms(input).await?;
+    pool.mark_model_updated(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID);
     Ok(status)
 }
 
 #[tauri::command]
 pub async fn account_platform_logout(
     state: State<'_, AccountPlatformState>,
+    pool: State<'_, EnginePool>,
 ) -> Result<SessionStatus, String> {
     let status = state.logout().await?;
+    pool.mark_model_updated(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID);
     Ok(status)
 }
 
@@ -100,4 +109,412 @@ pub async fn account_platform_request(
     state: State<'_, AccountPlatformState>,
 ) -> Result<ApiResponse, String> {
     state.request(request).await
+}
+
+#[tauri::command]
+pub async fn account_platform_model_catalog(
+    state: State<'_, AccountPlatformState>,
+) -> Result<serde_json::Value, String> {
+    let response = state
+        .request(ApiRequest {
+            area: "token".to_string(),
+            resource: "/v1/models".to_string(),
+            method: "GET".to_string(),
+            body: None,
+            idempotency_key: None,
+        })
+        .await?;
+    if !(200..300).contains(&response.status) {
+        return Err("model_catalog_unavailable: current catalog cannot be loaded".to_string());
+    }
+    let mut body = response.body;
+    if let Some(object) = body.as_object_mut() {
+        object.insert(
+            "selected_model_id".to_string(),
+            UserPrefs::load()
+                .advanced
+                .default_model_ref
+                .and_then(|selection| match selection {
+                    ModelSelectionRef::AccountPlatform { model_id } => Some(model_id),
+                    ModelSelectionRef::LocalConfig { .. } => None,
+                })
+                .map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null),
+        );
+    }
+    Ok(body)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogModelSelection {
+    model_id: String,
+}
+
+#[tauri::command]
+pub async fn account_platform_select_catalog_model(
+    input: CatalogModelSelection,
+    state: State<'_, AccountPlatformState>,
+    pool: State<'_, EnginePool>,
+) -> Result<serde_json::Value, String> {
+    select_catalog_model(&input.model_id, &state, &pool).await
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionCatalogModelSelection {
+    session_id: String,
+    model_id: String,
+}
+
+#[tauri::command]
+pub async fn account_platform_select_session_model(
+    input: SessionCatalogModelSelection,
+    app: AppHandle,
+    state: State<'_, AccountPlatformState>,
+    pool: State<'_, EnginePool>,
+    store: State<'_, SessionStore>,
+) -> Result<serde_json::Value, String> {
+    let session_id = input.session_id.trim();
+    let model_id = input.model_id.trim();
+    require_main_session_model_target(session_id)?;
+    if model_id.is_empty() || model_id.len() > 128 {
+        return Err("model_catalog_selection_invalid: model_id is invalid".to_string());
+    }
+    store
+        .load(session_id)
+        .map_err(|_| "model_catalog_selection_invalid: session does not exist".to_string())?;
+    let catalog = state
+        .request(ApiRequest {
+            area: "token".to_string(),
+            resource: "/v1/models".to_string(),
+            method: "GET".to_string(),
+            body: None,
+            idempotency_key: None,
+        })
+        .await?;
+    if !(200..300).contains(&catalog.status) {
+        return Err("model_catalog_unavailable: current catalog cannot be loaded".to_string());
+    }
+    let item = catalog
+        .body
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| {
+            items.iter().find(|item| {
+                item.get("model_id").and_then(serde_json::Value::as_str) == Some(model_id)
+            })
+        })
+        .ok_or_else(|| {
+            "model_catalog_selection_invalid: model is not catalog visible".to_string()
+        })?;
+    ensure_new_session_model_selectable(item)?;
+    pool.switch_session_model_ref(
+        session_id,
+        Some(ModelSelectionRef::account_platform(model_id)),
+    )
+    .await
+    .map_err(|error| format!("set_session_model({session_id}): {error:#}"))?;
+    super::sessions::emit_session_event(&app, "session:model_changed", session_id, "model");
+    Ok(serde_json::json!({
+        "session_id": session_id,
+        "model_id": model_id,
+        "catalog_version": catalog.body.get("catalog_version"),
+        "lifecycle_status": item.get("lifecycle_status"),
+    }))
+}
+
+fn require_main_session_model_target(session_id: &str) -> Result<(), String> {
+    if session_id.is_empty() || session_id.len() > 160 {
+        return Err("model_catalog_selection_invalid: session_id is invalid".to_string());
+    }
+    if crate::features::sessions::is_aux_session_id(session_id) {
+        return Err(
+            "set_session_model: auxiliary conversations inherit the main session's model"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+async fn validate_catalog_model(
+    requested_model_id: &str,
+    state: &AccountPlatformState,
+) -> Result<serde_json::Value, String> {
+    let model_id = requested_model_id.trim();
+    if model_id.is_empty() || model_id.len() > 128 {
+        return Err("model_catalog_selection_invalid: model_id is invalid".to_string());
+    }
+    let catalog = state
+        .request(ApiRequest {
+            area: "token".to_string(),
+            resource: "/v1/models".to_string(),
+            method: "GET".to_string(),
+            body: None,
+            idempotency_key: None,
+        })
+        .await?;
+    if !(200..300).contains(&catalog.status) {
+        return Err("model_catalog_unavailable: current catalog cannot be loaded".to_string());
+    }
+    let item = catalog
+        .body
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| {
+            items.iter().find(|item| {
+                item.get("model_id").and_then(serde_json::Value::as_str) == Some(model_id)
+            })
+        })
+        .ok_or_else(|| {
+            "model_catalog_selection_invalid: model is not catalog visible".to_string()
+        })?;
+    ensure_new_session_model_selectable(item)?;
+    Ok(serde_json::json!({
+        "model_id": model_id,
+        "catalog_version": catalog.body.get("catalog_version"),
+        "lifecycle_status": item.get("lifecycle_status"),
+    }))
+}
+
+// Explicitly changing the default is separate from validating a model for a
+// replacement branch. A branch must never modify another session's default.
+async fn select_catalog_model(
+    requested_model_id: &str,
+    state: &AccountPlatformState,
+    pool: &EnginePool,
+) -> Result<serde_json::Value, String> {
+    let selection = validate_catalog_model(requested_model_id, state).await?;
+    let model_id = requested_model_id.trim();
+    UserPrefs::update_transaction(|prefs| {
+        prefs.set_default_model_ref(ModelSelectionRef::account_platform(model_id))
+    })?;
+    pool.mark_model_updated(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID);
+    Ok(selection)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplacementSessionBranch {
+    source_conversation_id: String,
+    source_turn_id: String,
+    source_message_count: usize,
+    replacement_model_id: String,
+    replacement_title_suffix: String,
+    default_chat_title: String,
+}
+
+#[tauri::command]
+pub async fn account_platform_branch_replacement_session(
+    input: ReplacementSessionBranch,
+    app: AppHandle,
+    state: State<'_, AccountPlatformState>,
+    _pool: State<'_, EnginePool>,
+    store: State<'_, SessionStore>,
+) -> Result<serde_json::Value, String> {
+    if input.source_turn_id.trim().is_empty() || input.source_turn_id.len() > 160 {
+        return Err("replacement_branch_invalid: source turn is required".to_string());
+    }
+    if [&input.replacement_title_suffix, &input.default_chat_title]
+        .iter()
+        .any(|value| value.trim().is_empty() || value.chars().any(char::is_control))
+    {
+        return Err(
+            "replacement_branch_invalid: title copy is required without control characters"
+                .to_string(),
+        );
+    }
+    validate_catalog_model(&input.replacement_model_id, &state).await?;
+    let (session, lineage) = store
+        .create_replacement_branch(
+            input.source_conversation_id.trim(),
+            input.source_message_count,
+            input.source_turn_id.trim().to_string(),
+            input.replacement_model_id.trim().to_string(),
+            input.replacement_title_suffix,
+            input.default_chat_title,
+        )
+        .map_err(|error| format!("replacement_branch_failed: {error:#}"))?;
+    store.set_active(Some(session.metadata.id.clone()));
+    super::sessions::emit_session_event(
+        &app,
+        "session:list_changed",
+        &session.metadata.id,
+        "replacement_branch",
+    );
+    Ok(serde_json::json!({ "session": session.metadata, "lineage": lineage }))
+}
+
+fn ensure_new_session_model_selectable(item: &serde_json::Value) -> Result<(), String> {
+    if item
+        .get("context_eligible")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        let reason = item
+            .get("eligibility_reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("MODEL_CONTEXT_INELIGIBLE");
+        return Err(format!("model_catalog_selection_unavailable: {reason}"));
+    }
+    match item
+        .get("lifecycle_status")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("PUBLISHED") => Ok(()),
+        Some("DEPRECATED") => {
+            let cutoff = item
+                .get("new_session_cutoff_at")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+            if cutoff.is_some_and(|value| value > chrono::Utc::now()) {
+                Ok(())
+            } else {
+                Err("model_catalog_selection_unavailable: NEW_SESSION_CUTOFF_REACHED".to_string())
+            }
+        }
+        _ => Err("model_catalog_selection_unavailable: MODEL_REMOVED".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_new_session_model_selectable;
+
+    #[test]
+    fn replacement_branch_never_invokes_global_model_selection() {
+        let source = include_str!("account_platform.rs");
+        let branch = source
+            .split("pub async fn account_platform_branch_replacement_session(")
+            .nth(1)
+            .unwrap()
+            .split("fn ensure_new_session_model_selectable(")
+            .next()
+            .unwrap();
+        assert!(
+            branch.contains("validate_catalog_model(&input.replacement_model_id, &state).await?")
+        );
+        assert!(!branch.contains("select_catalog_model("));
+        assert!(!branch.contains("UserPrefs::update_transaction"));
+        assert!(!branch.contains("mark_model_updated"));
+        assert!(branch.contains(".create_replacement_branch("));
+    }
+
+    #[test]
+    fn catalog_validation_and_explicit_default_selection_keep_distinct_mutation_boundaries() {
+        let source = include_str!("account_platform.rs");
+        let validation = source
+            .split("async fn validate_catalog_model(")
+            .nth(1)
+            .expect("read-only catalog validation")
+            .split("async fn select_catalog_model(")
+            .next()
+            .unwrap();
+        assert!(!validation.contains("UserPrefs::update_transaction"));
+        assert!(!validation.contains("mark_model_updated"));
+        assert!(validation.contains("ensure_new_session_model_selectable(item)?"));
+        let selection = source
+            .split("async fn select_catalog_model(")
+            .nth(1)
+            .unwrap()
+            .split("pub struct ReplacementSessionBranch")
+            .next()
+            .unwrap();
+        assert!(selection.contains("validate_catalog_model(requested_model_id, state).await?"));
+        assert!(selection.contains("UserPrefs::update_transaction"));
+        assert!(selection.contains("pool.mark_model_updated(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)"));
+    }
+
+    #[test]
+    fn catalog_selection_obeys_new_session_cutoff_and_context_eligibility() {
+        assert!(
+            ensure_new_session_model_selectable(&serde_json::json!({
+                "lifecycle_status":"PUBLISHED", "context_eligible":true
+            }))
+            .is_ok()
+        );
+        assert!(
+            ensure_new_session_model_selectable(&serde_json::json!({
+                "lifecycle_status":"PUBLISHED", "context_eligible":false,
+                "eligibility_reason":"ORGANIZATION_MODEL_DENIED"
+            }))
+            .is_err()
+        );
+        assert!(ensure_new_session_model_selectable(&serde_json::json!({
+            "lifecycle_status":"DEPRECATED", "context_eligible":true,
+            "new_session_cutoff_at":(chrono::Utc::now()+chrono::Duration::minutes(5)).to_rfc3339()
+        }))
+        .is_ok());
+        assert!(
+            ensure_new_session_model_selectable(&serde_json::json!({
+                "lifecycle_status":"DEPRECATED", "context_eligible":true
+            }))
+            .is_err()
+        );
+        assert!(
+            ensure_new_session_model_selectable(&serde_json::json!({
+                "lifecycle_status":"REMOVED", "context_eligible":true
+            }))
+            .is_err()
+        );
+    }
+    #[test]
+    fn session_model_target_keeps_main_binding_and_rejects_aux_aliases() {
+        use super::require_main_session_model_target;
+        for id in ["aux-child", "AUX-child", "AuX-child"] {
+            assert_eq!(
+                require_main_session_model_target(id).unwrap_err(),
+                "set_session_model: auxiliary conversations inherit the main session's model"
+            );
+        }
+        for id in ["main-session", "a", "aux", "辅助-main"] {
+            assert!(
+                require_main_session_model_target(id).is_ok(),
+                "normal target: {id}"
+            );
+        }
+        for id in [String::new(), "m".repeat(161)] {
+            assert_eq!(
+                require_main_session_model_target(&id).unwrap_err(),
+                "model_catalog_selection_invalid: session_id is invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn session_model_command_guards_before_catalog_and_binding_side_effects() {
+        // This pins the actual command wiring, not a simulated App process.
+        let source = include_str!("account_platform.rs");
+        let body = source
+            .split("pub async fn account_platform_select_session_model(")
+            .nth(1)
+            .unwrap()
+            .split("fn require_main_session_model_target(")
+            .next()
+            .unwrap();
+        let guard = body
+            .find("require_main_session_model_target(session_id)?")
+            .unwrap();
+        assert_eq!(
+            body.matches("require_main_session_model_target(session_id)?")
+                .count(),
+            1
+        );
+        for operation in [
+            ".load(session_id)",
+            ".request(ApiRequest",
+            "pool.switch_session_model_ref(",
+            "super::sessions::emit_session_event(",
+        ] {
+            assert!(
+                guard < body.find(operation).unwrap(),
+                "aux guard precedes {operation}"
+            );
+        }
+        assert!(body.contains("let session_id = input.session_id.trim();"));
+        assert!(body.contains("ensure_new_session_model_selectable(item)?"));
+        assert!(body.contains("Some(ModelSelectionRef::account_platform(model_id))"));
+        assert!(body.contains(r#""session_id": session_id"#));
+        assert!(body.contains(r#""model_id": model_id"#));
+    }
 }

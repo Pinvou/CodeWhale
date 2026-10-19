@@ -65,6 +65,11 @@ func TestInstalledBillingConsumptionAndRecoveryFences(t *testing.T) {
 			t.Fatalf("undelivered executor installed: %s", durable)
 		}
 	}
+	for _, d := range All() {
+		if d.CommandType == "TOKEN_USAGE_RECONCILIATION_RETRY" {
+			t.Fatal("AuditOnly usage retry must not gain an approval consumer")
+		}
+	}
 	first := all[0]
 	all[0].Durable = "tampered"
 	if All()[0] != first {

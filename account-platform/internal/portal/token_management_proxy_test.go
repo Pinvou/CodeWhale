@@ -88,7 +88,7 @@ func TestF04ManagementProxyRejectsFutureAndMalformedOperations(t *testing.T) {
 	id := uuid.NewString()
 	for _, target := range []struct{ method, path string }{
 		{"POST", "/api/admin/token/admin/v1/token-accounts"}, {"DELETE", "/api/admin/token/admin/v1/token-accounts/" + id},
-		{"GET", "/api/admin/token/admin/v1/usage-requests"}, {"GET", "/api/admin/token/admin/v1/model-operations"},
+		{"POST", "/api/admin/token/admin/v1/usage-requests"}, {"GET", "/api/admin/token/admin/v1/model-operations"},
 		{"POST", "/api/admin/token/v1/chat/completions"}, {"POST", "/api/admin/token/v1/recharge/orders"},
 		{"GET", "/api/admin/token/admin/v1/models/not-a-uuid"}, {"GET", "/api/admin/token/admin/v1/models/00000000-0000-0000-0000-000000000000"},
 		{"POST", "/api/admin/billing/admin/v1/pricing/" + id + "/delete"}, {"PUT", "/api/admin/billing/admin/v1/metering-units/" + id},

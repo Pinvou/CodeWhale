@@ -19,6 +19,15 @@ func (r *PostgresRepository) fenceExpiredHold(ctx context.Context, identity hold
 	if !identity.Valid() || identity.ExpiresAt.After(r.now()) {
 		return holdexpiry.Proof{}, ErrForbidden
 	}
+	// Authentication/decryption may use a remote key service. Do it before
+	// acquiring the usage lock, then compare the exact sealed row under that lock.
+	unused, err := r.loadUnusedExpiryDispatch(ctx, identity.UsageRequestID)
+	if err != nil {
+		return holdexpiry.Proof{}, err
+	}
+	if unused != nil {
+		defer unused.clear()
+	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return holdexpiry.Proof{}, err
@@ -31,12 +40,8 @@ func (r *PostgresRepository) fenceExpiredHold(ctx context.Context, identity hold
 	if usage.CanonicalVersion <= 0 || usage.HoldID == nil || *usage.HoldID != identity.HoldID || usage.WalletID != identity.WalletID || usage.MaximumMicrocredits != identity.MaxMicrocredits {
 		return holdexpiry.Proof{}, ErrForbidden
 	}
-	var intent bool
-	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM usage_dispatch_intents WHERE usage_request_id=$1)`, usage.ID).Scan(&intent); err != nil {
+	if err = validateUnusedExpiryDispatchTx(ctx, tx, usage, unused); err != nil {
 		return holdexpiry.Proof{}, err
-	}
-	if intent {
-		return holdexpiry.Proof{}, ErrForbidden
 	}
 	var saved []byte
 	var proofID uuid.UUID
@@ -62,10 +67,58 @@ func (r *PostgresRepository) fenceExpiredHold(ctx context.Context, identity hold
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return holdexpiry.Proof{}, err
 		}
+		if usage.ExecutionStatus == "REVIEW" && usage.ErrorClass != nil && *usage.ErrorClass == "cancel_hold_recovery_unconfirmed" {
+			// User cancellation may have lost a release ACK before an expiry
+			// proof exists. Only the original, locally fenced command and its
+			// exact immutable evidence authorize the existing recovery path.
+			// A REVIEW label, absent hold ACK, or persisted dispatch is not proof.
+			if unused != nil {
+				return holdexpiry.Proof{}, ErrForbidden
+			}
+			var locallyFenced bool
+			err = tx.QueryRow(ctx, `SELECT cancel_status='CANCEL_REQUESTED'
+ AND delivery_status='USER_STOPPED' AND cancellation_origin='USER'
+ AND cancel_requested_at=user_stopped_at
+ AND NOT EXISTS(SELECT 1 FROM usage_dispatch_intents intent WHERE intent.usage_request_id=usage_requests.id)
+ AND EXISTS(SELECT 1 FROM usage_cancel_commands command
+ JOIN usage_cancellation_evidence evidence ON evidence.usage_request_id=command.usage_request_id
+ WHERE command.usage_request_id=usage_requests.id AND command.user_id=usage_requests.user_id
+ AND command.cancellation_version=1 AND command.request_fingerprint=$2
+ AND command.created_at=usage_requests.cancel_requested_at AND evidence.occurred_at=command.created_at
+ AND evidence.evidence_type='CANCEL_REQUESTED' AND btrim(evidence.adapter_version)<>''
+ AND evidence.provider_id IS NULL AND evidence.upstream_reference_digest IS NULL
+ AND evidence.sanitized_evidence=jsonb_build_object('capability','LOCAL_PRE_DISPATCH','pre_dispatch',true))
+ FROM usage_requests WHERE id=$1`, usage.ID, cancellationFingerprint(usage.ID)).Scan(&locallyFenced)
+			if err != nil {
+				return holdexpiry.Proof{}, err
+			}
+			if !locallyFenced {
+				return holdexpiry.Proof{}, ErrForbidden
+			}
+			if err = transitionExecutionTx(ctx, tx, usage.ID, []string{"REVIEW"}, "HOLD_RESERVED", "retry locally fenced expiry release", r.now()); err != nil {
+				return holdexpiry.Proof{}, err
+			}
+			if _, err = tx.Exec(ctx, `UPDATE usage_requests SET status='RESERVED',settlement_status='HOLD_ACTIVE',updated_at=$2 WHERE id=$1`, usage.ID, r.now()); err != nil {
+				return holdexpiry.Proof{}, err
+			}
+			usage.ExecutionStatus = "HOLD_RESERVED"
+		}
+		if unused != nil && usage.ExecutionStatus != "DISPATCH_INTENT_PERSISTED" {
+			return holdexpiry.Proof{}, ErrForbidden
+		}
+		if unused != nil && usage.ExecutionStatus == "DISPATCH_INTENT_PERSISTED" {
+			// AcquireDispatch cannot commit/return an envelope until it has
+			// transitioned this same locked usage row. Do not lock the intent
+			// here: Acquire takes intent then usage, so that would invert order.
+			if err = transitionExecutionTx(ctx, tx, usage.ID, []string{"DISPATCH_INTENT_PERSISTED"}, "HOLD_RESERVED", "unused expired dispatch fenced", r.now()); err != nil {
+				return holdexpiry.Proof{}, err
+			}
+			usage.ExecutionStatus = "HOLD_RESERVED"
+		}
 		if usage.ExecutionStatus != "HOLD_RESERVING" && usage.ExecutionStatus != "HOLD_RESERVED" {
 			return holdexpiry.Proof{}, ErrForbidden
 		}
-		if usage.CancelStatus != "NOT_REQUESTED" && usage.CancelStatus != "CANCEL_REQUESTED" {
+		if usage.CancelStatus != "NOT_REQUESTED" && usage.CancelStatus != "CANCEL_REQUESTED" && !(unused != nil && usage.DeliveryStatus == "USER_STOPPED" && usage.CancelStatus == "UNSUPPORTED") {
 			return holdexpiry.Proof{}, ErrForbidden
 		}
 		proofID = uuid.Must(uuid.NewV7())

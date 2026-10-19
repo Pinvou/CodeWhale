@@ -70,10 +70,10 @@ func (r *PostgresRepository) LoadDispatchPreparation(ctx context.Context, usageI
 	} else if err != nil {
 		return DispatchEnvelope{}, err
 	}
-	if keyID != r.secrets.KeyID() || replayDigest(ciphertext) != integrity {
+	if replayDigest(ciphertext) != integrity {
 		return DispatchEnvelope{}, ErrInvalidSecret
 	}
-	plaintext, err := r.secrets.Decrypt(ciphertext, replayAAD(usageID, "dispatch", 0))
+	plaintext, err := r.secrets.DecryptWithKeyID(keyID, ciphertext, replayAAD(usageID, "dispatch", 0))
 	if err != nil {
 		return DispatchEnvelope{}, err
 	}

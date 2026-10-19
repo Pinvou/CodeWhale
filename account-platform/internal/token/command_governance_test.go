@@ -58,12 +58,12 @@ func (reader testTokenGovernanceActivationReader) CurrentTokenCommandGovernanceA
 	return reader.activation, reader.err
 }
 
-func TestEighteenManagementTokenCommandSpecsMatchRegistry(t *testing.T) {
-	if len(tokenCommandSpecs) != 18 {
-		t.Fatalf("expected 18 governed management commands, got %d", len(tokenCommandSpecs))
+func TestNineteenTokenCommandSpecsMatchInstalledRegistry(t *testing.T) {
+	if len(tokenCommandSpecs) != 19 {
+		t.Fatalf("expected 19 governed commands, got %d", len(tokenCommandSpecs))
 	}
-	if _, installed := tokenCommandSpecs["TOKEN_USAGE_RECONCILIATION_RETRY"]; installed {
-		t.Fatal("usage reconciliation execution is not installed with management")
+	if spec, installed := tokenCommandSpecs["TOKEN_USAGE_RECONCILIATION_RETRY"]; !installed || spec.Approval {
+		t.Fatal("actual usage retry must be installed as AuditOnly")
 	}
 	for commandType, spec := range tokenCommandSpecs {
 		policy, err := approvalpolicy.Lookup(commandType)

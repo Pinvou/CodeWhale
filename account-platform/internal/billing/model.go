@@ -10,6 +10,7 @@ import (
 )
 
 var (
+	ErrHoldExpiryProofRequired       = errors.New("expired hold requires trusted pre-dispatch cancellation proof")
 	ErrNotFound                      = errors.New("billing resource not found")
 	ErrConflict                      = errors.New("billing resource conflict")
 	ErrInsufficientBalance           = errors.New("wallet has insufficient available credits")

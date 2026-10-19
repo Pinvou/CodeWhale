@@ -1,3 +1,4 @@
+import { parseUsageJSON, encodeUsageJSON } from './admin-usage-governance.js';
 import { parseFinanceJSON, encodeFinanceJSON, requireFinanceID, requirePaymentOrder, integerMoney } from './finance-contract.js';
 import { requireSession } from './personal-contract.js';
 import { mergeObservedVersions } from './authorization-ui.js';
@@ -113,7 +114,7 @@ export class AdminPlatformClient {
     globalThis.location.assign(`${this.baseURL}/auth/login?reauthenticate=1&return_to=${encodeURIComponent(returnTo)}`);
   }
 
-  async request(area, resource, signal) {
+  async request(area, resource, signal, decode = null) {
     if (signal?.aborted) throw abortRequestError();
     const url = `${this.baseURL}/api/admin/${area}${resource}`;
     let entry = this.inflightReads.get(url);
@@ -130,7 +131,7 @@ export class AdminPlatformClient {
           signal: entry.controller.signal,
         });
         this.observeAuthorizationVersions(response.headers);
-        const payload = area === 'billing' && response.ok ? parseFinanceJSON(await response.text()) : await response.json().catch(() => ({}));
+        const payload = response.ok && decode ? decode(await response.text()) : area === 'billing' && response.ok ? parseFinanceJSON(await response.text()) : await response.json().catch(() => ({}));
         if (!response.ok) throw errorFromResponse(response, payload);
         return payload;
       })();
@@ -152,7 +153,7 @@ export class AdminPlatformClient {
     entry.controller.abort();
   }
 
-  async mutate(area, resource, method, body, idempotencyKey = '', signal, expectedStatus = 0) {
+  async mutate(area, resource, method, body, idempotencyKey = '', signal, expectedStatus = 0, codec = null) {
     const headers = {
       Accept: 'application/json',
       'Content-Type': 'application/json',
@@ -160,7 +161,7 @@ export class AdminPlatformClient {
     };
     if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey;
     let encodedBody;
-    try { encodedBody = body === undefined ? undefined : area === 'billing' ? encodeFinanceJSON(body) : JSON.stringify(body); }
+    try { encodedBody = body === undefined ? undefined : codec ? codec.encode(body) : area === 'billing' ? encodeFinanceJSON(body) : JSON.stringify(body); }
     catch (error) { throw financeNotDispatched(error, true); }
     const options = {
       method,
@@ -172,7 +173,7 @@ export class AdminPlatformClient {
     };
     const response = await fetch(`${this.baseURL}/api/admin/${area}${resource}`, options);
     this.observeAuthorizationVersions(response.headers);
-    const payload = response.status === 204 ? null : area === 'billing' && response.ok ? parseFinanceJSON(await response.text()) : await response.json().catch(() => ({}));
+    const payload = response.status === 204 ? null : response.ok && codec ? codec.decode(await response.text()) : area === 'billing' && response.ok ? parseFinanceJSON(await response.text()) : await response.json().catch(() => ({}));
     if (!response.ok) throw errorFromResponse(response, payload);
     if (expectedStatus && response.status !== expectedStatus) throw new Error('INVALID_MUTATION_ACK');
     return payload;
@@ -823,7 +824,56 @@ catalogRollbackImpact(sourceCatalogVersion, signal) {
     return this.request('token', `/admin/v1/model-catalog/impact/rollback?${query}`, signal);
   }
 
-governedTokenCommandPrecheck(input, signal) {
+tokenOperationsOverview(window = '24h', signal) {
+  if (!['24h', '7d', '30d'].includes(window)) throw new Error('INVALID_OVERVIEW_WINDOW');
+  return this.request('token', `/admin/v1/operations-overview?${new URLSearchParams({ window })}`, signal);
+}
+tokenModelOperationsPageOverview(window = '', signal) {
+  if (window && !['24h', '7d', '30d'].includes(window)) throw new Error('INVALID_OVERVIEW_WINDOW');
+  return this.request('token', `/admin/v1/overviews/model-operations${window ? `?${new URLSearchParams({ window })}` : ''}`, signal);
+}
+usageRequests(filters = {}, signal) {
+    // F05 advertises personal execution, not an organization producer/filter.
+    const personalFilters = { ...filters };
+    delete personalFilters.organization_id;
+    return this.request('token', `/admin/v1/usage-requests?${tokenAdminCollectionQuery('usage', personalFilters)}`, signal, parseUsageJSON);
+  }
+
+  usageRequest(id, signal) {
+    return this.request('token', `/admin/v1/usage-requests/${requireFinanceID(id)}`, signal, parseUsageJSON);
+  }
+
+  usageEvidence(id, filters = {}, signal) {
+    return this.request('token', `/admin/v1/usage-requests/${requireFinanceID(id)}/evidence?${tokenAdminCollectionQuery('usageEvidence', filters)}`, signal, parseUsageJSON);
+  }
+
+  usageReconciliationCases(filters = {}, signal) {
+    return this.request('token', `/admin/v1/reconciliation-cases?${tokenAdminCollectionQuery('reconciliation', filters)}`, signal, parseUsageJSON);
+  }
+
+  usageReconciliationCommandReadiness(signal) {
+    return this.request('token', '/admin/v1/commands/TOKEN_USAGE_RECONCILIATION_RETRY/readiness', signal);
+  }
+
+  usageReconciliationPrecheck(input, signal) {
+    if (input.command_type !== 'TOKEN_USAGE_RECONCILIATION_RETRY') throw new Error('INVALID_USAGE_RESPONSE');
+    return this.mutate('token', '/admin/v1/commands:precheck', 'POST', input, '', signal, 200, { encode: encodeUsageJSON, decode: parseUsageJSON });
+  }
+
+  usageReconciliationResult(reference, signal) {
+    return this.request('token', `/admin/v1/commands/${requireFinanceID(reference)}`, signal, parseUsageJSON);
+  }
+
+  usageReconciliationByIdempotencyKey(key, signal) {
+    return this.mutate('token', '/admin/v1/commands/by-idempotency-key?command_type=TOKEN_USAGE_RECONCILIATION_RETRY', 'GET', undefined, key, signal, 0, { encode: encodeUsageJSON, decode: parseUsageJSON });
+  }
+
+  createUsageReconciliationCommand(input, key, signal) {
+    if (input.command_type !== 'TOKEN_USAGE_RECONCILIATION_RETRY') throw new Error('INVALID_USAGE_RESPONSE');
+    return this.mutate('token', '/admin/v1/commands', 'POST', input, key, signal, 0, { encode: encodeUsageJSON, decode: parseUsageJSON });
+  }
+
+  governedTokenCommandPrecheck(input, signal) {
     return this.mutate('token', '/admin/v1/commands:precheck', 'POST', input, '', signal);
   }
 

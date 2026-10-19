@@ -628,9 +628,10 @@ test('开关 UI 挂在模型列表下方，经 interaction 桥调后端', () => 
     '开关本身不允许创建会话（注释提及不算，禁止的是调用）',
   );
   const sessionsBridgeSource = read('src', 'platform', 'tauri', 'bridge', 'sessions.js');
+  assert.match(sessionsBridgeSource, /var pendingMultiAgent = state\.pendingDraftMultiAgent === true;/);
   assert.match(
     sessionsBridgeSource,
-    /pendingMultiAgent = state\.pendingDraftMultiAgent === true;[\s\S]{0,900}set_multi_agent_mode/,
+    /if \(pendingMultiAgent\) \{\s*try \{\s*await invoke\("set_multi_agent_mode", \{ sessionId: meta\.id, enabled: true \}\)/,
     '寄存的开关意图在首条消息物化会话时落后端',
   );
   assert.match(

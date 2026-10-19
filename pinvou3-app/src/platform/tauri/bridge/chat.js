@@ -36,9 +36,6 @@
     var userMessageDisplayText = context.userMessageDisplayText;
     var parseScheduledTaskDraftFromText = context.parseScheduledTaskDraftFromText;
     var autoCreateScheduledTaskDraft = context.autoCreateScheduledTaskDraft;
-    var modelAvailabilityError = typeof context.modelAvailabilityError === "function"
-      ? context.modelAvailabilityError
-      : function () { return null; };
 
   // Composer 草稿是纯前端短期状态：写入时不 notify，避免每次按键都克隆
   // 整个 chat slice 并触发 App 重渲染。会话切换本身会 notify，ChatView 会在
@@ -447,16 +444,6 @@
   // 真正发送:在 sid 的工作集上加 user 气泡 + 流式占位 + busy,然后 invoke chat。
   // active/后台通用(后台走 runSyncOnSession 临时切工作集)。
   function doSendFor(sid, text, displayText, attachmentsPayload, meta, restrictTools, surfaceFailure) {
-    var unavailableModelMessage = modelAvailabilityError(sid);
-    if (unavailableModelMessage) {
-      var unavailableModelError = new Error(unavailableModelMessage);
-      runSyncOnSession(sid, function () {
-        state.chatItems = state.chatItems.filter(function (item) { return !item.turnErrorNotice; });
-        addSystemItem("⚠️ " + unavailableModelMessage, { turnErrorNotice: true });
-      });
-      notify();
-      return surfaceFailure ? Promise.reject(unavailableModelError) : Promise.resolve(false);
-    }
     safeConsoleInfo("[pinvou3][chat-ui] send start", {
       sid: sid,
       textLen: (text || "").length,
@@ -468,11 +455,13 @@
     var submittedMessagePos = -1;
     var submittedUserItemId = 0;
     var submittedStreamId = 0;
+    var submittedTimelineAnchor = null;
     if (turnOwnerBuffer && turnOwnerBuffer.remoteTurnActive) {
       recordAuthoritySyncDiagnostic("local_send_blocked_by_remote_sync", authoritySyncBufferSnapshot(sid, turnOwnerBuffer));
       return Promise.reject(new Error(bt("sessionSyncingTurn")));
     }
     if (turnOwnerBuffer) {
+      turnOwnerBuffer.timelineReadEpoch = (turnOwnerBuffer.timelineReadEpoch || 0) + 1;
       turnOwnerBuffer.localTurnOwned = true;
       turnOwnerBuffer.remoteTurnActive = false;
       turnOwnerBuffer.remoteTerminalSeen = false;
@@ -498,6 +487,25 @@
       submittedMessage = { role: "user", content: [{ type: "text", text: displayText }] };
       submittedMessagePos = state.messages.length;
       state.messages.push(submittedMessage);
+      if (turnOwnerBuffer) {
+        var timeline = state.turnTimeline || [];
+        var submittedAt = Date.now();
+        turnOwnerBuffer.timelineTurnSeq = (turnOwnerBuffer.timelineTurnSeq || 0) + 1;
+        var localTurnId = "ui_" + sid + "_" + submittedAt + "_" + turnOwnerBuffer.timelineTurnSeq;
+        submittedTimelineAnchor = {
+          knownStartIds: timeline.filter(function (event) { return event && event.event === "user_start"; })
+            .map(function (event) { return event.turn_id; }),
+          submittedAt: submittedAt,
+          localTurnId: localTurnId,
+        };
+        turnOwnerBuffer.timelineTurnAnchor = submittedTimelineAnchor;
+        state.turnTimeline = timeline.concat([{
+          event: "user_start", turn_id: localTurnId, timestamp: submittedAt,
+          ts: new Date(submittedAt).toISOString(),
+          ui_turn_index: Math.max(0, state.chatItems.filter(function (item) { return item && item.type === "user"; }).length - 1),
+        }]);
+        state.activeTurnTimelineId = localTurnId;
+      }
       state.busy = true;
       startThinking();
       context.currentStreamText = "";
@@ -548,6 +556,18 @@
           state.chatItems = state.chatItems.filter(function (item) {
             return item.id !== submittedUserItemId && item.id !== submittedStreamId;
           });
+          if (sessionStates[sid] === turnOwnerBuffer && turnOwnerBuffer && turnOwnerBuffer.timelineTurnAnchor === submittedTimelineAnchor && submittedTimelineAnchor) {
+            var localId = submittedTimelineAnchor.localTurnId;
+            if ((state.turnTimeline || []).some(function (event) { return event && event.event === "user_start" && event.turn_id === localId; })
+                && !(state.turnTimeline || []).some(function (event) { return event && event.event === "assistant_done" && event.turn_id === localId; })) {
+              var timestamp = Date.now();
+              state.turnTimeline = (state.turnTimeline || []).concat([{
+                event: "assistant_done", turn_id: localId, timestamp: timestamp,
+                ts: new Date(timestamp).toISOString(), status: "send_error", error: null,
+              }]);
+            }
+            if (state.activeTurnTimelineId === localId) state.activeTurnTimelineId = null;
+          }
           resetPendingAssistant();
           state.busy = false;
           stopThinking();
@@ -585,6 +605,11 @@
           });
         });
         notify();
+        // Preparation failures finish timing with send_error before IPC rejects;
+        // they never produce chat:done. Read the same authority after rollback.
+        if (sessionStates[sid] === turnOwnerBuffer && typeof context.refreshAuthoritativeTurnTimeline === "function") {
+          context.refreshAuthoritativeTurnTimeline(sid);
+        }
         if (surfaceFailure) throw err;
         return false;
       });

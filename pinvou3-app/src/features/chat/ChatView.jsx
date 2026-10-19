@@ -1,3 +1,5 @@
+import { platformModelSelectableForNewSession } from '../account-platform/model-catalog-selection.js';
+import { latestModelLifecycleRejection } from '../account-platform/model-lifecycle.js';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -716,7 +718,7 @@ const openChatExternalUrl = (url) => {
     };
 
     // eslint-disable-next-line sonarjs/cognitive-complexity -- legacy main view: session/mode/artifact/browser state is highly cohesive; split refactor tracked separately
-    const ChatView = ({ theme, t, bs, prefill, prefillAppend = false, focusComposerTick = 0, onPrefillConsumed, onOpenEditor, justInstalledTool, setJustInstalledTool, onGotoSettings, onGotoModelSettings, onGotoTools, onBackScheduledRun, codeModeAvailable = false, onSwitchHomeMode, onRemoteModelSourceChange, browserDockAvailable = false, browserDockOpen = false, rightDockActivePanelId = null, onRightDockPanelSelectionChange, onOpenBrowserDock, remoteConnection = null, remoteModelSource = 'controller_temporary' }) => {
+    const ChatView = ({ theme, t, bs, prefill, prefillAppend = false, focusComposerTick = 0, onPrefillConsumed, onOpenEditor, justInstalledTool, setJustInstalledTool, onGotoSettings, onGotoModelSettings, onGotoTools, onBackScheduledRun, codeModeAvailable = false, onSwitchHomeMode, onRemoteModelSourceChange, browserDockAvailable = false, browserDockOpen = false, rightDockActivePanelId = null, onRightDockPanelSelectionChange, onOpenBrowserDock, remoteConnection = null, remoteModelSource = 'controller_temporary', accountPlatformClient, onOpenAccountRecharge }) => {
       const chatCopy = t.uiChat;
       const chatViewCopy = t.uiChatView;
       const sceneCopy = chatCopy.sceneModes;
@@ -2235,6 +2237,41 @@ const openChatExternalUrl = (url) => {
         && (remoteChatActive ? (hasDraftText || hasRemoteFile)
           : (controlledChatActive ? (hasDraftText || hasReadyAttachment)
             : (hasDraftText || hasReadyAttachment)));
+      const modelContinuationBlocked = Boolean(!remoteTranscriptActive && activeSessionId && latestModelLifecycleRejection(turnTimeline));
+      const [replacementModels, setReplacementModels] = useState([]);
+      const [replacementModelId, setReplacementModelId] = useState('');
+      const [replacementBusy, setReplacementBusy] = useState(false);
+      const [replacementError, setReplacementError] = useState('');
+      useEffect(() => {
+        if (!modelContinuationBlocked || !bridge.available || !bridge.accountPlatform?.modelCatalog) return;
+        let active = true;
+        bridge.accountPlatform.modelCatalog().then(result => {
+          if (!active) return;
+          const items = (result?.items || []).filter(item => platformModelSelectableForNewSession(item));
+          setReplacementModels(items);
+          setReplacementModelId(current => items.some(item => item.model_id === current) ? current : (items[0]?.model_id || ''));
+        }).catch(() => { if (active) setReplacementError('modelSwitchFailed'); });
+        return () => { active = false; };
+      }, [modelContinuationBlocked, activeSessionId]);
+      const createReplacementBranch = useCallback(async () => {
+        if (remoteTranscriptActive || !activeSessionId || !replacementModelId || replacementBusy) return;
+        setReplacementBusy(true); setReplacementError('');
+        try {
+          const result = await bridge.accountPlatform.branchReplacementSession({
+            sourceConversationId: activeSessionId,
+            sourceTurnId: `message:${Math.max(0, chatItems.length - 1)}`,
+            sourceMessageCount: 0,
+            replacementModelId,
+            replacementTitleSuffix: t.uiModelReplacement.branchTitleSuffix,
+            defaultChatTitle: t.newChat,
+          });
+          await bridge.sessions.switchToSession(result.session.id);
+        } catch {
+          setReplacementError('modelSwitchFailed');
+        } finally {
+          setReplacementBusy(false);
+        }
+      }, [activeSessionId, chatItems.length, remoteTranscriptActive, replacementBusy, replacementModelId, t.uiModelReplacement.branchTitleSuffix, t.newChat]);
       const sceneCapabilityPreparing = sceneCapabilityStatus && sceneCapabilityStatus.kind === 'preparing';
       const canClearInput = hasDraftText && !voiceActive;
       function handleClearInput() {
@@ -4187,6 +4224,7 @@ const openChatExternalUrl = (url) => {
                     renderItem={handleTimelineRenderItem}
                     renderToolItem={handleTimelineRenderToolItem}
                     onOpenExternal={openChatExternalUrl}
+                    onUserErrorAction={onOpenAccountRecharge}
                   />
                 {/* Selection quotes: select text in the main conversation
                     timeline → stage it as a quote of this task's aux chat and
@@ -4263,6 +4301,19 @@ const openChatExternalUrl = (url) => {
             style={responsiveGutterStyle}
           >
             <div className="max-w-[800px] w-full mx-auto">
+              {modelContinuationBlocked && (
+                <div className="mb-3 rounded-2xl border border-amber-300/70 bg-amber-50/95 p-3 text-[12px] text-amber-950 shadow-lg backdrop-blur dark:border-amber-700/60 dark:bg-amber-950/90 dark:text-amber-100">
+                  <div className="font-semibold">{t.uiModelReplacement.title}</div>
+                  <div className="mt-1 leading-relaxed opacity-80">{t.uiModelReplacement.lead}</div>
+                  <div className="mt-2 flex gap-2">
+                    <select value={replacementModelId} onChange={event => setReplacementModelId(event.target.value)} disabled={replacementBusy || !replacementModels.length} className="h-9 min-w-0 flex-1 rounded-xl border border-amber-300 bg-white px-3 dark:border-amber-700 dark:bg-black/20">
+                      {replacementModels.map(item => <option key={item.model_id} value={item.model_id}>{item.display_name}</option>)}
+                    </select>
+                    <button type="button" onClick={() => void createReplacementBranch()} disabled={replacementBusy || !replacementModelId} className="h-9 rounded-xl bg-amber-600 px-3 font-semibold text-white disabled:opacity-50">{replacementBusy ? t.uiModelReplacement.creating : t.uiModelReplacement.create}</button>
+                  </div>
+                  {replacementError && <div role="alert" className="mt-2 break-words text-red-600 dark:text-red-300">{t.uiSettingsDetail.modelSwitchFailed}</div>}
+                </div>
+              )}
               {!remoteTranscriptActive && COMPUTER_USE_ENABLED && (
                 <ComputerUseBanner slice={computerUseSlice} copy={computerUseCopy} />
               )}
@@ -4624,7 +4675,7 @@ const openChatExternalUrl = (url) => {
                       the backend's swarm_mode_available excludes them (the
                       engine always assembles plain config there), so the
                       entry hides up front instead of erroring on click. */}
-                  <ComposerModelSelector t={t} bs={bs} onGotoSettings={onGotoModelSettings || onGotoSettings} compact={composerCompact} multiAgentAvailable={!scheduledRunContext} />
+                  <ComposerModelSelector t={t} bs={bs} accountPlatformClient={accountPlatformClient} onGotoSettings={onGotoModelSettings || onGotoSettings} compact={composerCompact} multiAgentAvailable={!scheduledRunContext} />
                   <ComposerToolMenu t={t} onGotoTools={onGotoTools} sessionId={bs && bs.activeSessionId} compact={composerCompact} activeSkill={bs && bs.activeSkill} />
                     <ComposerKbSelector t={t} bs={bs} compact={composerCompact} />
                   </>}

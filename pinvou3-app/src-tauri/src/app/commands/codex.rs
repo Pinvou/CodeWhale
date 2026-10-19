@@ -727,6 +727,9 @@ fn redact_session_metadata_for_web_in_place(metadata: &mut SessionMetadata) {
     metadata.workspace = std::path::PathBuf::from(redact_workspace_path_for_web(
         &metadata.workspace.to_string_lossy(),
     ));
+    for root in &mut metadata.workspace_roots {
+        *root = PathBuf::from(redact_workspace_path_for_web(&root.to_string_lossy()));
+    }
 }
 
 fn redact_codex_session_list_item_for_web(item: &mut CodexAcpSessionListItem) {
@@ -1095,6 +1098,81 @@ mod tests {
         assert_eq!(item_json["workspace"], "secret-project");
         assert_eq!(item_json["workspace_path"], "secret-project");
         assert!(!item_json.to_string().contains(PRIVATE_WORKSPACE));
+    }
+
+    #[test]
+    fn forkguard_web_session_projection_redacts_attached_roots_and_keeps_native_metadata() {
+        for (workspace, roots) in [
+            (
+                "/fixture/private/main-project",
+                [
+                    "/fixture/private/shared-library",
+                    "/fixture/private/reference-docs",
+                ],
+            ),
+            (
+                r"C:\fixture\private\main-project",
+                [
+                    r"C:\fixture\private\shared-library",
+                    r"D:\fixture\private\reference-docs",
+                ],
+            ),
+        ] {
+            let mut native = metadata_with_workspace(workspace);
+            native.workspace_roots = roots.iter().map(|root| PathBuf::from(*root)).collect();
+            let native_before = serde_json::to_value(&native).expect("serialize native metadata");
+            assert_eq!(native_before["workspace"], workspace);
+            assert_eq!(native_before["workspace_roots"], serde_json::json!(roots));
+
+            // Ordinary Web/Relay sessions project the SDK metadata through this helper.
+            let projected = redact_session_metadata_for_web(native.clone());
+            let projected_json = serde_json::to_value(&projected).expect("serialize Web metadata");
+            assert_eq!(projected_json["workspace"], "main-project");
+            assert_eq!(
+                projected_json["workspace_roots"],
+                serde_json::json!(["shared-library", "reference-docs"])
+            );
+            assert_eq!(serde_json::to_value(&native).unwrap(), native_before);
+
+            // The existing native-code Web list consumer must use the same projection.
+            let mut item = CodexAcpSessionListItem {
+                metadata: native.clone(),
+                pinned: false,
+                pinned_at: None,
+                workspace: CodexAcpWorkspaceInfo {
+                    workspace_kind: CodexWorkspaceKind::Project,
+                    workspace_path: workspace.to_string(),
+                    workspace_available: true,
+                },
+                agent_id: "codex".to_string(),
+                agent_name: "Codex".to_string(),
+            };
+            redact_codex_session_list_item_for_web(&mut item);
+            let item_json = serde_json::to_value(&item).expect("serialize Web list item");
+            assert_eq!(item_json["workspace"], "main-project");
+            assert_eq!(item_json["workspace_path"], "main-project");
+            assert_eq!(
+                item_json["workspace_roots"],
+                projected_json["workspace_roots"]
+            );
+            for absolute in [workspace, roots[0], roots[1]] {
+                // Compare parsed strings as well as serialized JSON: Windows separators
+                // are escaped on the wire, so a raw substring check alone is insufficient.
+                let wire = serde_json::to_string(absolute).unwrap();
+                assert!(!projected_json.to_string().contains(&wire));
+                assert!(!item_json.to_string().contains(&wire));
+            }
+            assert_eq!(serde_json::to_value(&native).unwrap(), native_before);
+        }
+
+        let legacy = redact_session_metadata_for_web(metadata_with_workspace("/fixture/main"));
+        assert!(legacy.workspace_roots.is_empty());
+        assert!(
+            serde_json::to_value(legacy)
+                .unwrap()
+                .get("workspace_roots")
+                .is_none()
+        );
     }
 
     #[test]

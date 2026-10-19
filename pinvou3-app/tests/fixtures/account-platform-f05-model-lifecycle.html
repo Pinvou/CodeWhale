@@ -1,0 +1,58 @@
+<!doctype html><html><head><meta charset="UTF-8"><title>F05 model lifecycle controlled host</title></head><body><div id="root" style="height:900px"></div>
+<script src="/src/shared/legacy-polyfills.js"></script>
+<script src="/src/platform/web/bootstrap.js"></script>
+<script src="/src/shared/authority-sync-diagnostics.js"></script>
+<script src="/src/platform/web/host-file-picker.js"></script>
+<script src="/src/features/attachments/attachment-drop-controller.js"></script>
+<script src="/src/shared/model-service-errors.js"></script>
+<script src="/src/shared/bridge-messages.js"></script>
+<script src="/src/shared/chunked-file-upload.js"></script>
+<script src="/src/shared/markdown-bridge-fallback.js"></script>
+<script src="/src/shared/format-utils.js"></script>
+<script src="/src/platform/web/bridge/turn-terminal.js"></script>
+<script src="/src/platform/web/bridge.js"></script>
+<script src="/src/platform/web/bridge/domain-adapter.js"></script>
+<script src="/src/platform/tauri/bridge/artifact-tracker.js"></script>
+<script src="/src/platform/tauri/bridge/chat.js"></script>
+<script src="/src/platform/tauri/bridge/chat-events.js"></script>
+<script src="/src/platform/tauri/bridge/sessions.js"></script>
+<script src="/src/platform/tauri/bridge/terminal.js"></script>
+<script src="/src/platform/tauri/bridge/scheduled.js"></script>
+<script src="/src/platform/tauri/bridge/monitor.js"></script>
+<script src="/src/platform/tauri/bridge/settings.js"></script>
+<script src="/src/platform/tauri/bridge/memory.js"></script>
+<script src="/src/platform/tauri/bridge/artifacts.js"></script>
+<script src="/src/platform/tauri/bridge/personas.js"></script>
+<script src="/src/platform/tauri/bridge/updater.js"></script>
+<script src="/src/platform/tauri/bridge/remote-control.js"></script>
+<script src="/src/features/remote-control/remote-control-state.js"></script>
+<script src="/src/platform/tauri/bridge/desktop-remote-control.js"></script>
+<script src="/src/platform/tauri/bridge/dependencies.js"></script>
+<script src="/src/platform/tauri/bridge/voice.js"></script>
+<script src="/src/platform/tauri/bridge/knowledge-model.js"></script>
+<script src="/src/platform/tauri/bridge/interaction.js"></script>
+<script src="/src/platform/tauri/bridge/multiagent.js"></script>
+<script src="/src/platform/tauri/bridge/team-relay.js"></script>
+<script src="/src/platform/tauri/bridge/aux-chat.js"></script>
+<script src="/src/platform/tauri/bridge/projects.js"></script>
+<script src="/src/platform/tauri/bridge/computer_use.js"></script>
+<script src="/src/platform/tauri/bridge/account-platform.js"></script>
+<script>
+// Observe the installed feature instance without replacing its reader, invoke,
+// ownership guard or event consumers. Warm switchToSession restores a cached
+// buffer; the test must explicitly drive the real authority-refresh operation.
+(function () {
+  var registry = window.__PINVOU_TAURI_BRIDGE_FEATURES__;
+  var install = registry["chat-events"];
+  if (typeof install !== "function") throw new Error("chat-events fixture producer unavailable");
+  registry["chat-events"] = function (context) {
+    var feature = install(context);
+    window.f05Lifecycle.refreshAuthoritativeTimeline = function (sessionId) {
+      return feature.refreshAuthoritativeTurnTimeline(sessionId);
+    };
+    return feature;
+  };
+})();
+</script>
+<script src="/src/platform/tauri/bridge.js"></script>
+<script type="module" src="/tests/fixtures/account-platform-f05-model-lifecycle.jsx"></script></body></html>

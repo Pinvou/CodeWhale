@@ -44,6 +44,66 @@ pub struct EngineAcquireTiming {
     pub sync_session_ms: u64,
 }
 
+/// Fixed, content-free model lifecycle evidence owned by one admitted turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum ModelRejectionCode {
+    #[serde(rename = "MODEL_UNAVAILABLE")]
+    Unavailable,
+    #[serde(rename = "MODEL_DEPRECATED")]
+    Deprecated,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ModelRejection {
+    pub schema_version: u8,
+    pub code: ModelRejectionCode,
+    pub model_id: String,
+    #[serde(default, skip_serializing_if = "false_legacy_binding")]
+    pub legacy_binding: bool,
+}
+
+fn false_legacy_binding(value: &bool) -> bool {
+    !*value
+}
+
+impl ModelRejection {
+    pub(crate) fn new(code: ModelRejectionCode, model_id: &str) -> Option<Self> {
+        let model_id = uuid::Uuid::parse_str(model_id).ok()?;
+        if model_id.is_nil() {
+            return None;
+        }
+        Some(Self {
+            schema_version: 1,
+            code,
+            model_id: model_id.to_string(),
+            legacy_binding: false,
+        })
+    }
+
+    // Produced only by local runtime preparation after a fully decoded catalog
+    // proves the saved legacy name absent. No fabricated UUID or model name is
+    // persisted, and the ordinary UUID/header constructor remains unchanged.
+    pub(crate) fn legacy_unavailable() -> Self {
+        Self {
+            schema_version: 1,
+            code: ModelRejectionCode::Unavailable,
+            model_id: String::new(),
+            legacy_binding: true,
+        }
+    }
+
+    fn is_valid(&self) -> bool {
+        self.schema_version == 1
+            && if self.legacy_binding {
+                self.code == ModelRejectionCode::Unavailable && self.model_id.is_empty()
+            } else {
+                uuid::Uuid::parse_str(&self.model_id).is_ok_and(|id| {
+                    !id.is_nil() && id.to_string() == self.model_id.to_ascii_lowercase()
+                })
+            }
+    }
+}
+
 #[derive(Debug)]
 struct ActiveTurnTiming {
     turn_id: String,
@@ -51,6 +111,8 @@ struct ActiveTurnTiming {
     /// remains stable for the local timeline, while value signals must join
     /// the task lifecycle on the engine-provided id.
     behavior_turn_id: Option<String>,
+    billing_notice: Option<serde_json::Value>,
+    model_rejection: Option<ModelRejection>,
     engine_acquire: Option<EngineAcquireTiming>,
     engine_ready_timestamp: Option<i64>,
     engine_turn_started_timestamp: Option<i64>,
@@ -68,6 +130,8 @@ impl ActiveTurnTiming {
         Self {
             turn_id,
             behavior_turn_id: None,
+            billing_notice: None,
+            model_rejection: None,
             engine_acquire: None,
             engine_ready_timestamp: None,
             engine_turn_started_timestamp: None,
@@ -254,6 +318,52 @@ pub(crate) fn has_extra_queued_turns(session_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Capture the timing owner before asynchronous preparation or delivery.
+pub(crate) fn current_turn_id(session_id: &str) -> Option<String> {
+    active_turns()
+        .lock()
+        .ok()?
+        .get(session_id)?
+        .back()
+        .map(|turn| turn.turn_id.clone())
+}
+
+/// Never attach old evidence to a later turn or a recreated session with the same id.
+pub(crate) fn record_model_rejection_for_turn(
+    session_id: &str,
+    turn_id: &str,
+    rejection: ModelRejection,
+) -> bool {
+    if !rejection.is_valid() {
+        return false;
+    }
+    active_turns()
+        .lock()
+        .ok()
+        .and_then(|mut map| {
+            let turn = map.get_mut(session_id)?.back_mut()?;
+            if turn.turn_id != turn_id {
+                return None;
+            }
+            turn.model_rejection = Some(rejection);
+            Some(())
+        })
+        .is_some()
+}
+
+/// Attach the structured notice to the timing owner already active for this turn.
+pub fn record_billing_notice(session_id: &str, notice: serde_json::Value) -> bool {
+    active_turns()
+        .lock()
+        .ok()
+        .and_then(|mut map| {
+            let active = map.get_mut(session_id)?.back_mut()?;
+            active.billing_notice = Some(notice);
+            Some(())
+        })
+        .is_some()
+}
+
 /// 旧调用点(无 usage):落盘不带 usage 字段,reader API 反序列化为 None。
 /// 保留是为了不强迫所有调用点同步升级(commands.rs:200 的 send_error 兜底等)。
 pub fn finish_turn(session_id: &str, status: &str, error: Option<&str>) {
@@ -398,6 +508,12 @@ fn finish_turn_internal(
     });
     if let Some(behavior_turn_id) = active_turn.behavior_turn_id {
         entry["behavior_turn_id"] = json!(behavior_turn_id);
+    }
+    if let Some(billing_notice) = active_turn.billing_notice {
+        entry["billing_notice"] = billing_notice;
+    }
+    if let Some(model_rejection) = active_turn.model_rejection {
+        entry["model_rejection"] = json!(model_rejection);
     }
     if let Some(engine_acquire) = active_turn.engine_acquire {
         entry["engine_startup"] = json!({
@@ -569,6 +685,10 @@ pub struct TimelineEvent {
     pub ts: String,     // RFC3339
     pub status: Option<String>, // assistant_done only
     pub error: Option<String>, // assistant_done only
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing_notice: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) model_rejection: Option<ModelRejection>,
     pub usage: Option<TurnUsage>, // assistant_done / context_snapshot(老事件为 None)
     #[cfg(any(feature = "benchmark-hooks", test))]
     pub tool_name: Option<String>,
@@ -722,6 +842,12 @@ fn parse_timeline_line(line: &str) -> Option<TimelineEvent> {
             .and_then(|x| x.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string),
+        billing_notice: v.get("billing_notice").cloned(),
+        model_rejection: v
+            .get("model_rejection")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<ModelRejection>(value).ok())
+            .filter(ModelRejection::is_valid),
         usage,
         #[cfg(any(feature = "benchmark-hooks", test))]
         tool_name: v
@@ -857,7 +983,156 @@ pub fn compute_stats(session_id: &str) -> std::io::Result<SessionTimelineStats> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_model_rejection_is_explicit_and_does_not_weaken_uuid_evidence() {
+        let legacy = ModelRejection::legacy_unavailable();
+        assert!(legacy.is_valid());
+        let encoded = serde_json::to_value(&legacy).unwrap();
+        assert_eq!(
+            encoded,
+            json!({"schema_version":1,"code":"MODEL_UNAVAILABLE","model_id":"","legacy_binding":true})
+        );
+        assert_eq!(
+            serde_json::from_value::<ModelRejection>(encoded).unwrap(),
+            legacy
+        );
+        for marker in [
+            json!({"schema_version":1,"code":"MODEL_DEPRECATED","model_id":"","legacy_binding":true}),
+            json!({"schema_version":1,"code":"MODEL_UNAVAILABLE","model_id":"deepseek-v4-flash","legacy_binding":true}),
+            json!({"schema_version":1,"code":"MODEL_UNAVAILABLE","model_id":"0199a100-0001-7000-8000-000000000107","legacy_binding":true}),
+            json!({"schema_version":1,"code":"MODEL_UNAVAILABLE","model_id":"","legacy_binding":false}),
+        ] {
+            assert!(
+                !serde_json::from_value::<ModelRejection>(marker)
+                    .unwrap()
+                    .is_valid()
+            );
+        }
+        assert!(
+            ModelRejection::new(ModelRejectionCode::Unavailable, "deepseek-v4-flash").is_none()
+        );
+        let uuid = ModelRejection::new(
+            ModelRejectionCode::Unavailable,
+            "0199a100-0001-7000-8000-000000000107",
+        )
+        .unwrap();
+        assert!(uuid.is_valid());
+        assert!(
+            !serde_json::to_value(uuid)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("legacy_binding")
+        );
+    }
     use crate::platform::paths::tests::ENV_LOCK;
+
+    #[test]
+    fn model_rejection_requires_exact_timing_owner_and_typed_reader() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp =
+            std::env::temp_dir().join(format!("pinvou-timing-model-{}", uuid::Uuid::new_v4()));
+        let previous_home = std::env::var_os("PINVOU3_HOME");
+        // SAFETY: ENV_LOCK serializes process environment changes in tests.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+        let sid = "typed-model-owner";
+        let old = start_turn(sid);
+        let value = ModelRejection::new(
+            ModelRejectionCode::Unavailable,
+            "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c",
+        )
+        .unwrap();
+        clear_session(sid);
+        let current = start_turn(sid);
+        assert!(!record_model_rejection_for_turn(sid, &old, value.clone()));
+        assert!(record_model_rejection_for_turn(
+            sid,
+            &current,
+            value.clone()
+        ));
+        finish_turn(sid, "send_error", Some("generic prepared model error"));
+        let terminal = read_timeline(sid)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.event == "assistant_done")
+            .unwrap();
+        assert_eq!(terminal.turn_id, current);
+        assert_eq!(terminal.model_rejection, Some(value.clone()));
+        assert!(!record_model_rejection_for_turn(sid, &current, value));
+        let mut line = json!({ "turn_id": "legacy", "event": "assistant_done", "timestamp": 1, "ts": "legacy", "status": "Failed" });
+        assert!(
+            parse_timeline_line(&line.to_string())
+                .unwrap()
+                .model_rejection
+                .is_none()
+        );
+        for marker in [
+            json!({ "schema_version": 1, "code": "MODEL_REMOVED", "model_id": "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c" }),
+            json!({ "schema_version": 2, "code": "MODEL_UNAVAILABLE", "model_id": "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c" }),
+            json!({ "schema_version": 1, "code": "MODEL_UNAVAILABLE", "model_id": "bad" }),
+            json!({ "schema_version": 1, "code": "MODEL_UNAVAILABLE", "model_id": "00000000-0000-0000-0000-000000000000" }),
+        ] {
+            line["model_rejection"] = marker;
+            assert!(
+                parse_timeline_line(&line.to_string())
+                    .unwrap()
+                    .model_rejection
+                    .is_none()
+            );
+        }
+        clear_session(sid);
+        unsafe {
+            match previous_home {
+                Some(value) => std::env::set_var("PINVOU3_HOME", value),
+                None => std::env::remove_var("PINVOU3_HOME"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[test]
+    fn billing_notice_survives_timeline_hydration() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou3-timing-billing-notice-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+
+        let sid = "session-billing-notice";
+        start_turn(sid);
+        assert!(record_billing_notice(
+            sid,
+            json!({
+                "schema_version": 1,
+                "code": "WALLET_INSUFFICIENT",
+                "stage": "INITIAL_RESERVATION",
+                "turn_outcome": "REJECTED",
+                "settlement_status": "NOT_STARTED",
+                "action": "CONTACT_ORG_ADMIN",
+                "context_type": "ORGANIZATION",
+                "usage_request_id": "0199a100-0001-7000-8000-000000000106"
+            })
+        ));
+        finish_turn(sid, "Failed", Some("wallet reservation rejected"));
+
+        let done = read_timeline(sid)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.event == "assistant_done")
+            .expect("assistant terminal");
+        let notice = done.billing_notice.expect("persisted billing notice");
+        assert_eq!(notice["code"], "WALLET_INSUFFICIENT");
+        assert_eq!(notice["context_type"], "ORGANIZATION");
+        assert_eq!(notice["action"], "CONTACT_ORG_ADMIN");
+
+        let _ = std::fs::remove_dir_all(tmp);
+    }
 
     #[test]
     fn timing_events_append_and_pair_turn_id() {

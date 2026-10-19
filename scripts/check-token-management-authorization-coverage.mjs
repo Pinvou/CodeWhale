@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { authorizationRoutes, goSource } from './check-account-platform-authorization-coverage.mjs';
 
 // These contracts use JSON syntax, which is also valid YAML. This check needs
 // no installed frontend packages and never executes Go or contacts a service.
@@ -9,6 +10,20 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const quoted = (text) => [...text.matchAll(/"([^"\n]+)"/g)].map((m) => m[1]);
 const sorted = (values) => [...values].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
 const fail = (message) => { throw new Error(message); };
+// F05 delivers complete personal execution and its retry governance together.
+// This phase boundary is explicit; runtime database intersections cannot enable
+// a later wave or conceal a missing management command.
+const expectedTokenCommands = [
+  'TOKEN_PROTOCOL_DRAFT_CREATE', 'TOKEN_PROTOCOL_PUBLISH',
+  'TOKEN_FORMULA_DRAFT_CREATE', 'TOKEN_FORMULA_PUBLISH',
+  'TOKEN_MODEL_DRAFT_SAVE', 'TOKEN_MODEL_PUBLISH', 'TOKEN_MODEL_LIFECYCLE_CHANGE',
+  'TOKEN_MODEL_CATALOG_SYNC', 'TOKEN_MODEL_CATALOG_ROLLBACK',
+  'TOKEN_ACCOUNT_CREATE', 'TOKEN_ACCOUNT_STATUS_CHANGE',
+  'TOKEN_ROUTE_UPSERT', 'TOKEN_ROUTE_DELETE',
+  'TOKEN_CREDENTIAL_ENROLL', 'TOKEN_CREDENTIAL_ROTATE', 'TOKEN_CREDENTIAL_REVOKE',
+  'TOKEN_CREDENTIAL_VALIDATE', 'TOKEN_ROUTE_PROVISIONING_REPAIR',
+  'TOKEN_USAGE_RECONCILIATION_RETRY',
+];
 
 // Keep the declarative route grammar strict, but find every real method
 // selector before parsing it. Mask Go comments/literals with equal-length
@@ -99,7 +114,7 @@ export function commandSpecs(source, handlers) {
     if (!handler) fail('command missing actual handler');
     return { command: m[1], permissions: quoted(m[2]), recentAuth: m[3] === 'true', approvalRequired: m[4] === 'true', requiredFacts: quoted(m[5]), family: handler[1], transport: handler[2] };
   });
-  if (commands.length !== 18 || commands.some((c) => c.command === 'TOKEN_USAGE_RECONCILIATION_RETRY')) fail('F04 requires exactly the management 18 command set');
+  assert.deepEqual(commands.map((c) => c.command).sort(), [...expectedTokenCommands].sort(), 'F05 requires the complete management and usage retry command set');
   return sorted(commands);
 }
 
@@ -151,7 +166,125 @@ const requiredParameters = {
   adminTokenCredentialImpact: ['query:action'],
 };
 
-export function checkCoverage({ routeSource, specSource, handlerSource, credentialSource, dtoSources, manifest, management, credential }) {
+
+// This is the finite installed invocation contract, not a general Go/OpenAPI
+// interpreter. Its success responses remain intentionally partial projections.
+export function checkInvocationCoverage({ invocation, invocationSources }) {
+  const read = name => {
+    const text = invocationSources[name];
+    assert.equal(typeof text, 'string', `invocation source missing: ${name}`);
+    return text;
+  };
+  const actualFunction = (sourceText, name) => {
+    const source = goSource(sourceText);
+    const declarations = [...source.code.matchAll(new RegExp('func \\(s \\*Service\\) ' + name + '\\([^\\n]+\\{([\\s\\S]*?)\\n\\}', 'g'))].filter(match => source.masked[match.index] !== ' ');
+    assert.equal(declarations.length, 1, 'invocation actual handler declaration missing or duplicated');
+    return declarations[0][1];
+  };
+  // Keep each compact character tied to its original lexical region. A code
+  // sample inside a Go comment or string cannot stand in for an installed call.
+  const containsCode = (sourceText, expected) => {
+    const { code, masked } = goSource(sourceText);
+    let text = ''; let mask = '';
+    for (let index = 0; index < code.length; index += 1) {
+      if (!/\s/.test(code[index])) { text += code[index]; mask += masked[index]; }
+    }
+    for (let index = text.indexOf(expected); index >= 0; index = text.indexOf(expected, index + 1)) {
+      if (mask[index] !== ' ') return true;
+    }
+    return false;
+  };
+  const personalSource = actualFunction(read('token/personal_execution_routes.go'), 'registerPersonalExecutionRoutes');
+  const tokenService = actualFunction(read('token/service.go'), 'Handler');
+  assert.ok(containsCode(tokenService, 's.registerPersonalExecutionRoutes(router,protected)'), 'invocation route installation drift');
+  assert.ok(containsCode(tokenService, 'protected:=router.Group("/v1")') && containsCode(tokenService, 'protected.Use(identity.GinMiddleware(verify))'), 'invocation user authentication drift');
+  assert.ok(containsCode(personalSource, 'internal.Use(serviceauth.GinMiddleware(s.managementServiceToken))'), 'invocation internal authentication drift');
+  assert.ok(containsCode(actualFunction(read('billing/service.go'), 'Handler'), 'protected.Use(serviceauth.GinMiddleware(serviceToken))'), 'invocation Billing authentication drift');
+  assert.ok(containsCode(actualFunction(read('account/service.go'), 'Handler'), 'internal.Use(serviceauth.GinMiddleware(s.serviceToken))'), 'invocation Account authentication drift');
+  const human = {
+    listCatalogModels: ['personal.models.read', 'token/personal_catalog_http.go', 'resolveModelUsagePermission'],
+    modelProtocols: ['personal.models.read', 'token/personal_execution_http.go', 'resolveModelUsagePermission'],
+    chatCompletions: ['personal.model.invoke', 'token/proxy.go', 'resolveModelUsagePermission'],
+    getPersonalUsageByIdempotencyKey: ['personal.usage.cancel', 'token/personal_execution_http.go', 'authorizePersonalUsageUser'],
+    getUsageRequest: ['personal.usage.read', 'token/personal_execution_http.go', 'resolveModelUsagePermission'],
+    cancelUsageRequest: ['personal.usage.cancel', 'token/personal_execution_http.go', 'authorizePersonalUsageUser'],
+    listMyUsageRequests: ['personal.usage.read', 'token/personal_execution_http.go', 'resolveModelUsagePermission'],
+    listMyUsageTurns: ['personal.usage.read', 'token/personal_execution_http.go', 'resolveModelUsagePermission'],
+  };
+  const routes = [];
+  for (const [service, name, prefixes] of [
+    ['token', 'token/personal_execution_routes.go', { protected: '/v1', internal: '/internal/v1', router: '' }],
+    ['billing', 'billing/service.go', { protected: '' }],
+    ['account', 'account/service.go', { internal: '/internal/v1' }],
+  ]) {
+    for (const route of authorizationRoutes(name, read(name))) {
+      const handler = route.registration.match(/httpserver\.AdaptFunc\(s\.(\w+)\)/)?.[1];
+      if (service === 'billing' && !['extendHold', 'commit'].includes(handler)) continue;
+      if (service === 'account' && handler !== 'internalClientCompatibility') continue;
+      assert.ok(Object.hasOwn(prefixes, route.receiver) && handler, 'invocation route shape drift');
+      const url = (prefixes[route.receiver] + route.path).replace(/:([a-z_]+)/g, '{$1}');
+      let permission = route.registration.match(/serviceauth\.Require\("([^"]+)"\)/)?.[1];
+      if (human[handler]) {
+        const [expected, file, resolver] = human[handler];
+        const functionBody = actualFunction(read(file), handler);
+        const { code, masked } = goSource(functionBody);
+        const calls = [...code.matchAll(/\bs\.(resolveModelUsagePermission|authorizePersonalUsageUser)\(\s*w,\s*r,\s*"([^"]+)"/g)].filter(match => masked[match.index] !== ' ');
+        assert.equal(calls.length, 1, 'invocation handler authority shape drift');
+        assert.equal(calls[0][1], resolver, 'invocation handler authority resolver drift');
+        assert.equal(calls[0][2], expected, 'invocation handler authority drift');
+        permission = expected;
+      }
+      if (handler === 'clientCompatibility') permission = 'PUBLIC';
+      assert.ok(permission, 'invocation authority missing');
+      routes.push({ service, method: route.method.toLowerCase(), path: url, handler, permission });
+    }
+  }
+  assert.equal(routes.length, 14, 'invocation installed operation count drift');
+  for (const item of Object.values(invocation.paths)) {
+    assert.ok(Object.keys(item).every(method => ['get', 'post', 'put', 'patch', 'delete'].includes(method)), 'invocation operation grammar drift');
+  }
+  const ops = operations(invocation);
+  assert.deepEqual(sorted(ops.map(({ method, path, op }) => ({ service: op['x-service'], method, path }))), sorted(routes.map(({ service, method, path }) => ({ service, method, path }))), 'invocation path/service drift');
+  const keyed = new Set(['chatCompletions', 'getPersonalUsageByIdempotencyKey', 'cancelUsageRequest']);
+  for (const { method, path: url, op } of ops) {
+    const route = routes.find(item => item.service === op['x-service'] && item.method === method && item.path === url);
+    assert.equal(op['x-go-handler'], route.handler, 'invocation handler drift');
+    assert.equal(op['x-permission'], route.permission, 'invocation permission drift');
+    const security = route.permission === 'PUBLIC' ? [] : [{ [route.permission.startsWith('internal.') ? 'WorkloadBearer' : 'UserBearer']: [] }];
+    assert.deepEqual(op.security, security, 'invocation authentication drift');
+    const paths = [...url.matchAll(/\{(\w+)\}/g)].map(match => match[1]).sort();
+    assert.deepEqual((op.parameters ?? []).filter(item => item.in === 'path' && item.required).map(item => item.name).sort(), paths, 'invocation path identity drift');
+    if (keyed.has(route.handler)) {
+      const key = op.parameters?.find(item => item.in === 'header' && item.name === 'Idempotency-Key');
+      assert.ok(key?.required && key.schema.type === 'string' && key.schema.minLength === 16 && key.schema.maxLength === 128, 'invocation idempotency key drift');
+    }
+  }
+  const body = url => {
+    const request = invocation.paths[url].post.requestBody;
+    assert.equal(request?.required, true, 'invocation body required drift');
+    return request.content['application/json'].schema;
+  };
+  const chat = body('/v1/chat/completions');
+  assert.deepEqual(chat.required, ['model'], 'invocation model input drift');
+  assert.deepEqual(chat.properties.model, { type: 'string', minLength: 1 }, 'invocation model type drift');
+  const extension = body('/internal/v1/holds/extend');
+  assert.deepEqual(extension.required, ['usage_request_id', 'hold_id'], 'invocation extension identity drift');
+  assert.equal(extension.additionalProperties, false, 'invocation extension unknown field drift');
+  assert.deepEqual(Object.keys(extension.properties).sort(), ['additional_microcredits', 'hold_id', 'lease_seconds', 'operation_id', 'usage_request_id'], 'invocation extension field drift');
+  const nil = '00000000-0000-0000-0000-000000000000';
+  assert.deepEqual(extension.oneOf, [
+    { required: ['additional_microcredits', 'operation_id'], properties: { additional_microcredits: { type: 'integer', format: 'int64', minimum: 1 }, operation_id: { type: 'string', format: 'uuid', not: { enum: [nil] } } } },
+    { properties: { additional_microcredits: { type: 'integer', format: 'int64', enum: [0] }, operation_id: { type: ['string', 'null'], format: 'uuid', enum: [null, nil] } } },
+  ], 'invocation extension operation identity drift');
+  assert.ok(containsCode(actualFunction(read('billing/personal_execution_holds_http.go'), 'extendHold'), '(body.AdditionalMicrocredits>0)==(body.OperationID==uuid.Nil)'), 'invocation extension handler operation validation drift');
+  assert.deepEqual(body('/internal/v1/holds/commit').required, ['usage_request_id', 'hold_id', 'usage_snapshot'], 'invocation settlement input drift');
+  assert.deepEqual(body('/internal/v1/client-readiness/attestations').required, ['artifact_sha256', 'client_version', 'environment'], 'invocation attestation input drift');
+  validateRefs(invocation);
+  return routes.length;
+}
+
+export function checkCoverage({ routeSource, specSource, handlerSource, credentialSource, dtoSources, manifest, management, credential, invocation, invocationSources }) {
+  checkInvocationCoverage({ invocation, invocationSources });
   const routes = managementRoutes(routeSource);
   const commands = commandSpecs(specSource, handlerSource);
   const isolated = credentialRoutes(credentialSource);
@@ -221,6 +354,8 @@ export function loadInputs(base = root) {
     manifest: json('account-platform/deploy/authorization-token-management-entrypoints.json'),
     management: json('account-platform/contracts/openapi/token-management.yaml'),
     credential: json('account-platform/contracts/openapi/token-credential-origin.yaml'),
+    invocation: json('account-platform/contracts/openapi/token-invocation.yaml'),
+    invocationSources: Object.fromEntries(['token/personal_execution_routes.go', 'token/service.go', 'token/personal_catalog_http.go', 'token/personal_execution_http.go', 'token/proxy.go', 'token/client_readiness.go', 'billing/service.go', 'billing/personal_execution_holds_http.go', 'account/service.go'].map(name => [name, read('account-platform/internal/' + name)])),
   };
 }
 

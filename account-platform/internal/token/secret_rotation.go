@@ -23,9 +23,9 @@ type SecretRotationResult struct {
 const secretRotationRemainingSQL = `SELECT
   (SELECT count(*) FROM provider_credentials WHERE key_id<>$1) +
   (SELECT count(*) FROM usage_dispatch_preparations WHERE key_id<>$1) +
-  (SELECT count(*) FROM usage_dispatch_intents WHERE key_id IS NOT NULL AND key_id<>$1) +
-  (SELECT count(*) FROM usage_stream_events WHERE key_id<>$1) +
-  (SELECT count(*) FROM usage_replay_results WHERE key_id<>$1)`
+  (SELECT count(*) FROM usage_dispatch_intents WHERE encrypted_envelope IS NOT NULL AND key_id IS NOT NULL AND key_id<>$1) +
+  (SELECT count(*) FROM usage_stream_events WHERE octet_length(encrypted_payload)>0 AND key_id<>$1) +
+  (SELECT count(*) FROM usage_replay_results WHERE octet_length(encrypted_payload)>0 AND key_id<>$1)`
 
 type secretRotationRepository interface {
 	RotateSecretKey(context.Context, int) (SecretRotationResult, error)
@@ -254,6 +254,11 @@ func (r *PostgresRepository) secretRotationUpper(ctx context.Context, table int,
 	if table == 1 || table == 2 {
 		predicate += " AND encrypted_envelope IS NOT NULL"
 	}
+	if table == 3 || table == 4 {
+		// F05 retention keeps first-content/key/integrity metadata after erasing
+		// the public body. These empty stubs are not ciphertext to re-encrypt.
+		predicate += " AND octet_length(encrypted_payload)>0"
+	}
 	if table == 3 {
 		columns += ",sequence"
 		order += ",sequence DESC"
@@ -288,10 +293,10 @@ func (r *PostgresRepository) secretRotationItems(ctx context.Context, table int,
 	case 1, 2:
 		query = `SELECT usage_request_id,encrypted_envelope,key_id,COALESCE(envelope_integrity,'') FROM ` + secretRotationTables[table] + ` WHERE encrypted_envelope IS NOT NULL AND key_id<>$1 AND ($2::uuid IS NULL OR usage_request_id>$2) AND usage_request_id<=$3 ORDER BY usage_request_id LIMIT $4`
 	case 3:
-		query = `SELECT usage_request_id,sequence,event_type,encrypted_payload,key_id,payload_integrity FROM usage_stream_events WHERE key_id<>$1 AND ($2::uuid IS NULL OR (usage_request_id,sequence)>($2,$5)) AND (usage_request_id,sequence)<=($3,$6) ORDER BY usage_request_id,sequence LIMIT $4`
+		query = `SELECT usage_request_id,sequence,event_type,encrypted_payload,key_id,payload_integrity FROM usage_stream_events WHERE octet_length(encrypted_payload)>0 AND key_id<>$1 AND ($2::uuid IS NULL OR (usage_request_id,sequence)>($2,$5)) AND (usage_request_id,sequence)<=($3,$6) ORDER BY usage_request_id,sequence LIMIT $4`
 		args = append(args, cursor.sequence, upper.sequence)
 	case 4:
-		query = `SELECT usage_request_id,response_kind,last_sequence,encrypted_payload,key_id,payload_integrity FROM usage_replay_results WHERE key_id<>$1 AND ($2::uuid IS NULL OR usage_request_id>$2) AND usage_request_id<=$3 ORDER BY usage_request_id LIMIT $4`
+		query = `SELECT usage_request_id,response_kind,last_sequence,encrypted_payload,key_id,payload_integrity FROM usage_replay_results WHERE octet_length(encrypted_payload)>0 AND key_id<>$1 AND ($2::uuid IS NULL OR usage_request_id>$2) AND usage_request_id<=$3 ORDER BY usage_request_id LIMIT $4`
 	default:
 		return nil, ErrForbidden
 	}

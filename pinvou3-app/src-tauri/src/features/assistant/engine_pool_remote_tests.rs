@@ -35,7 +35,7 @@ async fn remote_send_joint_preparation_and_reserved_dispatch_freeze_credentials_
             ("remote-caller", false, true),
             ("aux-remote-joint", false, false),
         ] {
-            let mut model = SavedModel::builtin_llmapi();
+            let mut model = SavedModel::builtin_account_platform();
             model.preset = crate::platform::prefs::ModelPreset::Deepseek;
             model.id = "fixture-task-model".into();
             model.model = "fixture-task-wire".into();
@@ -85,7 +85,7 @@ async fn remote_send_joint_preparation_and_reserved_dispatch_freeze_credentials_
                         store_ref,
                         &JointRuntimeProvider,
                         &credentials,
-                        Pinvou3Bridge::test_fixture(Some(SavedModel::builtin_llmapi())),
+                        Pinvou3Bridge::test_fixture(Some(SavedModel::builtin_account_platform())),
                         session_id,
                         false,
                         RuntimeModelOverrides {
@@ -260,7 +260,7 @@ impl TestHome {
         &self,
         snapshot: Arc<RemoteTurnSkills>,
     ) -> (AppEngine, tokio::sync::mpsc::Receiver<Op>) {
-        let mut bridge = Pinvou3Bridge::test_fixture(Some(SavedModel::builtin_llmapi()));
+        let mut bridge = Pinvou3Bridge::test_fixture(Some(SavedModel::builtin_account_platform()));
         bridge.workspace = self.directory.path().to_path_buf();
         bridge.runtime_model_credential_frozen = true;
         bridge.remote_turn_skills = Some(snapshot);
@@ -308,7 +308,7 @@ fn entry(engine: AppEngine, forwarder: JoinHandle<()>, owner: Arc<RemoteTurnOwne
         engine,
         forwarder,
         runtime_model: PreparedRuntimeState::new(
-            PreparedRuntimeModel::unchanged(SavedModel::builtin_llmapi()),
+            PreparedRuntimeModel::unchanged(SavedModel::builtin_account_platform()),
             true,
             0,
         ),

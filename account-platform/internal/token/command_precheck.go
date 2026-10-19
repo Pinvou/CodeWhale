@@ -92,19 +92,20 @@ func parseModelPublishCommand(raw json.RawMessage) (modelPublishCommand, error) 
 }
 
 var directCommandPrecheckTypes = map[string]string{
-	"TOKEN_PROTOCOL_DRAFT_CREATE":     "PROTOCOL",
-	"TOKEN_PROTOCOL_PUBLISH":          "PROTOCOL",
-	"TOKEN_FORMULA_DRAFT_CREATE":      "FORMULA",
-	"TOKEN_FORMULA_PUBLISH":           "FORMULA",
-	"TOKEN_MODEL_DRAFT_SAVE":          "MODEL",
-	"TOKEN_MODEL_PUBLISH":             "MODEL",
-	"TOKEN_MODEL_CATALOG_SYNC":        "MODEL_CATALOG",
-	"TOKEN_ACCOUNT_CREATE":            "TOKEN_ACCOUNT",
-	"TOKEN_ACCOUNT_STATUS_CHANGE":     "TOKEN_ACCOUNT",
-	"TOKEN_ROUTE_UPSERT":              "TOKEN_ROUTE",
-	"TOKEN_ROUTE_DELETE":              "TOKEN_ROUTE",
-	"TOKEN_ROUTE_PROVISIONING_REPAIR": "PROVISIONING",
-	"TOKEN_CREDENTIAL_VALIDATE":       "PROVIDER_CREDENTIAL",
+	"TOKEN_PROTOCOL_DRAFT_CREATE":      "PROTOCOL",
+	"TOKEN_PROTOCOL_PUBLISH":           "PROTOCOL",
+	"TOKEN_FORMULA_DRAFT_CREATE":       "FORMULA",
+	"TOKEN_FORMULA_PUBLISH":            "FORMULA",
+	"TOKEN_MODEL_DRAFT_SAVE":           "MODEL",
+	"TOKEN_MODEL_PUBLISH":              "MODEL",
+	"TOKEN_MODEL_CATALOG_SYNC":         "MODEL_CATALOG",
+	"TOKEN_ACCOUNT_CREATE":             "TOKEN_ACCOUNT",
+	"TOKEN_ACCOUNT_STATUS_CHANGE":      "TOKEN_ACCOUNT",
+	"TOKEN_ROUTE_UPSERT":               "TOKEN_ROUTE",
+	"TOKEN_ROUTE_DELETE":               "TOKEN_ROUTE",
+	"TOKEN_ROUTE_PROVISIONING_REPAIR":  "PROVISIONING",
+	"TOKEN_USAGE_RECONCILIATION_RETRY": "USAGE_REQUEST",
+	"TOKEN_CREDENTIAL_VALIDATE":        "PROVIDER_CREDENTIAL",
 }
 
 func (s *Service) adminTokenCommandPrecheck(w http.ResponseWriter, r *http.Request) {
@@ -368,7 +369,7 @@ func validateOwnedCommandPrecheck(commandType string, raw json.RawMessage) error
 		if decodeCommand(raw, &command) != nil {
 			return ErrTokenCommandInvalid
 		}
-	case "TOKEN_ROUTE_PROVISIONING_REPAIR":
+	case "TOKEN_ROUTE_PROVISIONING_REPAIR", "TOKEN_USAGE_RECONCILIATION_RETRY":
 		_, err := parseRuntimeGovernedCommand(commandType, "", raw)
 		return err
 	case "TOKEN_CREDENTIAL_VALIDATE":
@@ -394,7 +395,7 @@ func validateOwnedCommandPrecheckTarget(commandType, targetID string, raw json.R
 		return err
 	}
 	commandType = strings.ToUpper(strings.TrimSpace(commandType))
-	if commandType == "TOKEN_ROUTE_PROVISIONING_REPAIR" {
+	if commandType == "TOKEN_ROUTE_PROVISIONING_REPAIR" || commandType == "TOKEN_USAGE_RECONCILIATION_RETRY" {
 		_, err := parseRuntimeGovernedCommand(commandType, targetID, raw)
 		return err
 	}
@@ -455,6 +456,22 @@ func parseRuntimeGovernedCommand(commandType, targetID string, raw json.RawMessa
 			return runtimeGovernedCommand{}, ErrTokenCommandInvalid
 		}
 		result = runtimeGovernedCommand{ResourceID: id, ExpectedVersion: version.UTC(), TargetGeneration: command.TargetGeneration}
+	case "TOKEN_USAGE_RECONCILIATION_RETRY":
+		var command struct {
+			UsageRequestID        string `json:"usage_request_id"`
+			ExpectedUsageVersion  string `json:"expected_usage_version"`
+			EvidenceHighWatermark int64  `json:"evidence_high_watermark"`
+			ReplayModelRequest    *bool  `json:"replay_model_request"`
+		}
+		if decodeCommand(raw, &command) != nil || command.ReplayModelRequest == nil || *command.ReplayModelRequest || command.EvidenceHighWatermark < 0 {
+			return runtimeGovernedCommand{}, ErrTokenCommandInvalid
+		}
+		id, err := uuid.Parse(command.UsageRequestID)
+		version, versionErr := time.Parse(time.RFC3339Nano, command.ExpectedUsageVersion)
+		if err != nil || id == uuid.Nil || command.UsageRequestID != id.String() || versionErr != nil || command.ExpectedUsageVersion != version.UTC().Format(time.RFC3339Nano) || canonicalTarget != "" && canonicalTarget != id.String() {
+			return runtimeGovernedCommand{}, ErrTokenCommandInvalid
+		}
+		result = runtimeGovernedCommand{ResourceID: id, ExpectedVersion: version.UTC(), EvidenceHighWatermark: command.EvidenceHighWatermark}
 	default:
 		return runtimeGovernedCommand{}, ErrTokenCommandInvalid
 	}
@@ -944,6 +961,34 @@ func loadCommandPrecheckSnapshot(ctx context.Context, tx pgx.Tx, commandType, ta
 		}
 		version := updatedAt.UTC().Format(time.RFC3339Nano)
 		return commandPrecheckSnapshot{Status: status, ExpectedVersions: map[string]any{"provisioning_id": command.ResourceID, "expected_provisioning_version": version, "target_generation": desiredGeneration}, EvidenceValues: []string{status, version, strconv.FormatInt(desiredGeneration, 10), strconv.Itoa(repairRound)}, Blockers: blockers}, nil
+	case "TOKEN_USAGE_RECONCILIATION_RETRY":
+		command, err := parseRuntimeGovernedCommand(commandType, targetID, raw)
+		if err != nil {
+			return commandPrecheckSnapshot{}, err
+		}
+		var status string
+		var highWater int64
+		var updatedAt time.Time
+		var debitProhibited bool
+		err = tx.QueryRow(ctx, `SELECT u.status,u.last_persisted_sequence,u.updated_at,EXISTS(SELECT 1 FROM usage_platform_loss_reviews loss WHERE loss.usage_request_id=u.id AND loss.customer_debit_prohibited) FROM usage_requests u WHERE u.id=$1`, command.ResourceID).Scan(&status, &highWater, &updatedAt, &debitProhibited)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return commandPrecheckSnapshot{}, ErrNotFound
+		}
+		if err != nil {
+			return commandPrecheckSnapshot{}, err
+		}
+		if !updatedAt.Equal(command.ExpectedVersion) || highWater != command.EvidenceHighWatermark {
+			return commandPrecheckSnapshot{}, ErrCatalogVersionConflict
+		}
+		blockers := []string{}
+		if status != "SETTLEMENT_PENDING" && status != "REVIEW" {
+			blockers = append(blockers, "USAGE_NOT_RECONCILABLE")
+		}
+		if debitProhibited {
+			blockers = append(blockers, "CUSTOMER_DEBIT_PROHIBITED")
+		}
+		version := updatedAt.UTC().Format(time.RFC3339Nano)
+		return commandPrecheckSnapshot{Status: status, ExpectedVersions: map[string]any{"usage_request_id": command.ResourceID, "expected_usage_version": version, "evidence_high_watermark": highWater}, EvidenceValues: []string{status, version, strconv.FormatInt(highWater, 10), strconv.FormatBool(debitProhibited)}, Blockers: blockers}, nil
 	default:
 		return commandPrecheckSnapshot{}, ErrTokenCommandInvalid
 	}
