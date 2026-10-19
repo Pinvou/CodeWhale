@@ -36,7 +36,8 @@ func (r *PostgresRepository) ApplyOrganizationMemberLifecycle(ctx context.Contex
 
 // HTTP projection and durable membership snapshots share quota/version facts.
 func (r *PostgresRepository) applyOrganizationMemberLifecycle(ctx context.Context, tx pgx.Tx, organizationID, userID uuid.UUID, status string, membershipVersion int64, ignoreStale bool) (OrganizationMemberLifecycleState, error) {
-	if _, err := lockMemberQuotaWallet(ctx, tx, organizationID); err != nil && !errors.Is(err, ErrNotFound) {
+	wallet, err := lockMemberQuotaWallet(ctx, tx, organizationID)
+	if err != nil && !errors.Is(err, ErrNotFound) {
 		return OrganizationMemberLifecycleState{}, err
 	}
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "organization-member:"+organizationID.String()+":"+userID.String()); err != nil {
@@ -44,7 +45,7 @@ func (r *PostgresRepository) applyOrganizationMemberLifecycle(ctx context.Contex
 	}
 	var currentStatus string
 	var currentVersion int64
-	err := tx.QueryRow(ctx, `SELECT status,membership_version FROM organization_member_lifecycle_states WHERE organization_id=$1 AND user_id=$2 FOR UPDATE`, organizationID, userID).Scan(&currentStatus, &currentVersion)
+	err = tx.QueryRow(ctx, `SELECT status,membership_version FROM organization_member_lifecycle_states WHERE organization_id=$1 AND user_id=$2 FOR UPDATE`, organizationID, userID).Scan(&currentStatus, &currentVersion)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return OrganizationMemberLifecycleState{}, err
 	}
@@ -62,14 +63,14 @@ func (r *PostgresRepository) applyOrganizationMemberLifecycle(ctx context.Contex
 	// repairs grants written by older versions that recorded the user's global
 	// membership version, while the grant predicate keeps an already-aligned
 	// replay free of duplicate audit/outbox rows.
-	if err := r.applyMemberQuotaLifecycle(ctx, tx, organizationID, userID, status, membershipVersion, now); err != nil {
+	if err := r.applyMemberQuotaLifecycle(ctx, tx, wallet.ID, organizationID, userID, status, membershipVersion, now); err != nil {
 		return OrganizationMemberLifecycleState{}, err
 	}
 	state := OrganizationMemberLifecycleState{OrganizationID: organizationID, UserID: userID, Status: status, MembershipVersion: membershipVersion}
 	return state, nil
 }
 
-func (r *PostgresRepository) applyMemberQuotaLifecycle(ctx context.Context, tx pgx.Tx, organizationID, userID uuid.UUID, lifecycleStatus string, membershipVersion int64, now time.Time) error {
+func (r *PostgresRepository) applyMemberQuotaLifecycle(ctx context.Context, tx pgx.Tx, walletID, organizationID, userID uuid.UUID, lifecycleStatus string, membershipVersion int64, now time.Time) error {
 	wantedStatus := "ACTIVE"
 	if lifecycleStatus != "ACTIVE" {
 		wantedStatus = "SUSPENDED"
@@ -101,6 +102,10 @@ ORDER BY component_id,id FOR UPDATE`, organizationID, userID, wantedStatus, memb
 		grant, _, err := loadMemberQuotaGrant(ctx, tx, grantID, false)
 		if err != nil {
 			return err
+		}
+		// Expiring a whole package can finish another grant in this locked list.
+		if grant.Status == "EXPIRED" {
+			continue
 		}
 		// Grant row locks may have waited across the entitlement deadline.
 		// Use the current clock for the locked facts and their audit records.
@@ -146,19 +151,28 @@ ORDER BY component_id,id FOR UPDATE`, organizationID, userID, wantedStatus, memb
 			reason := "MEMBER_REMOVED"
 			grant.SuspensionReason = &reason
 		} else if !grant.ExpiresAt.After(now) {
-			if amount > 0 {
-				command, err := tx.Exec(ctx, `UPDATE entitlement_components SET suspended_grant_microcredits=suspended_grant_microcredits-$2,expired_microcredits=expired_microcredits+$2,updated_at=$3 WHERE id=$1 AND suspended_grant_microcredits>=$2`, grant.ComponentID, amount, now)
-				if err != nil || command.RowsAffected() != 1 {
-					if err == nil {
-						err = ErrConflict
-					}
+			if amount == 0 && grant.ReservedMicrocredits == 0 {
+				// A fully used grant may belong to an already CONSUMED package.
+				// Keep its original zero-value terminal transition, without money writes.
+				_, err = tx.Exec(ctx, `UPDATE member_quota_grants SET status='EXPIRED',suspension_reason=NULL,membership_version=$2,allocation_version=allocation_version+1,updated_at=$3 WHERE id=$1`, grant.ID, membershipVersion, now)
+				grant.Status, grant.SuspensionReason, grant.MembershipVersion = "EXPIRED", nil, membershipVersion
+				action, eventType = "EXPIRED", "billing.member-quota.expired.v1"
+			} else {
+				// Preserve this projection's version in the ordinary expiry snapshot.
+				// All updates, hold release and ledger writes roll back together.
+				if _, err := tx.Exec(ctx, `UPDATE member_quota_grants SET membership_version=$4 WHERE organization_id=$1 AND member_user_id=$2 AND package_id=$3 AND status='SUSPENDED' AND suspension_reason='MEMBER_REMOVED'`, organizationID, userID, grant.PackageID, membershipVersion); err != nil {
 					return err
 				}
+				expired, err := r.expireDuePackageTx(ctx, tx, grant.PackageID, walletID)
+				if err != nil {
+					return err
+				}
+				if !expired {
+					// A grant deadline alone cannot authorize burning a not-due package.
+					return ErrConflict
+				}
+				continue
 			}
-			_, err = tx.Exec(ctx, `UPDATE member_quota_grants SET available_microcredits=0,expired_microcredits=expired_microcredits+available_microcredits,status='EXPIRED',suspension_reason=NULL,membership_version=$2,allocation_version=allocation_version+1,updated_at=$3 WHERE id=$1`, grant.ID, membershipVersion, now)
-			grant.AvailableMicrocredits, grant.ExpiredMicrocredits = 0, grant.ExpiredMicrocredits+amount
-			grant.Status, grant.SuspensionReason, grant.MembershipVersion = "EXPIRED", nil, membershipVersion
-			action, eventType = "EXPIRED", "billing.member-quota.expired.v1"
 		} else {
 			if amount > 0 {
 				command, err := tx.Exec(ctx, `UPDATE entitlement_components SET suspended_grant_microcredits=suspended_grant_microcredits-$2,active_grant_microcredits=active_grant_microcredits+$2,updated_at=$3 WHERE id=$1 AND suspended_grant_microcredits>=$2`, grant.ComponentID, amount, now)

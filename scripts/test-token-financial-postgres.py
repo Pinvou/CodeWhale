@@ -41,11 +41,17 @@ REQUIRED = {
 }
 
 ACCOUNT_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/account"
-ACCOUNT_REQUIRED = {"TestF06OrganizationStatusProjectionVersionPublicPostgres", "TestF06OrganizationDeletionVersionAndTerminalScope"}
+ACCOUNT_REQUIRED = {
+    "TestF06OrganizationStatusProjectionVersionPublicPostgres",
+    "TestF06OrganizationDeletionVersionAndTerminalScope",
+    "TestF06Review5566377593PublicPostgres",
+}
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 OWNER_REQUIRED = {"TestF06OrganizationWalletRequiresLifecycleEvidence"}
 RETAINED_REQUIRED = {
+    "TestF06MemberQuotaRestoreUsesOrdinaryPackageExpiry",
+    "TestMemberQuotaBatchPersistedFactsAndFinancialReplay",
     "TestMemberHoldIdentityMutationBoundaries",
     "TestPersonalUsageHoldBoundaries",
     "TestHoldExtensionIdempotencePostgres",

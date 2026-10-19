@@ -118,25 +118,45 @@ func (r *PostgresRepository) expireOnePackage(ctx context.Context) (bool, error)
 	defer tx.Rollback(ctx)
 	now := r.now()
 	var packageID, walletID uuid.UUID
-	err = tx.QueryRow(ctx, `SELECT id,wallet_id FROM entitlement_packages WHERE status='ACTIVE' AND valid_until<=$1 ORDER BY valid_until,credited_at,id LIMIT 1`, now).Scan(&packageID, &walletID)
+	err = tx.QueryRow(ctx, `SELECT package.id,package.wallet_id FROM entitlement_packages package
+WHERE package.status='ACTIVE' AND package.valid_until<=$1
+  AND NOT EXISTS(SELECT 1 FROM usage_holds hold
+      JOIN usage_hold_allocations allocation ON allocation.hold_id=hold.id
+      JOIN entitlement_components component ON component.id=allocation.component_id
+      WHERE hold.status='REVIEW' AND component.package_id=package.id
+        AND allocation.reserved_microcredits>allocation.settled_microcredits+allocation.released_microcredits)
+ORDER BY package.valid_until,package.credited_at,package.id LIMIT 1`, now).Scan(&packageID, &walletID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, tx.Commit(ctx)
 	}
 	if err != nil {
 		return false, err
 	}
-	if err := lockTransactionKey(ctx, tx, "entitlement.expire", packageID.String()); err != nil {
-		return false, err
-	}
+	// All financial mutators acquire the wallet before the package advisory key.
 	if _, err := getWallet(ctx, tx, walletID, true); err != nil {
 		return false, err
 	}
+	if _, err := r.expireDuePackageTx(ctx, tx, packageID, walletID); err != nil {
+		return false, err
+	}
+	// A selected candidate may have been processed while the wallet lock waited.
+	return true, tx.Commit(ctx)
+}
+
+// expireDuePackageTx applies ordinary whole-package expiry while the caller owns
+// the wallet row lock. Lifecycle restoration uses this same ledger/lot path;
+// cumulative expired component counters are never burned a second time.
+func (r *PostgresRepository) expireDuePackageTx(ctx context.Context, tx pgx.Tx, packageID, walletID uuid.UUID) (bool, error) {
+	if err := lockTransactionKey(ctx, tx, "entitlement.expire", packageID.String()); err != nil {
+		return false, err
+	}
+	now := r.now()
 	var stillDue bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM entitlement_packages WHERE id=$1 AND status='ACTIVE' AND valid_until<=$2)`, packageID, now).Scan(&stillDue); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM entitlement_packages WHERE id=$1 AND wallet_id=$3 AND status='ACTIVE' AND valid_until<=$2)`, packageID, now, walletID).Scan(&stillDue); err != nil {
 		return false, err
 	}
 	if !stillDue {
-		return true, tx.Commit(ctx)
+		return false, nil
 	}
 	holdRows, err := tx.Query(ctx, `SELECT hold.id,hold.wallet_id,hold.max_microcredits FROM usage_holds hold WHERE hold.status='ACTIVE' AND EXISTS(SELECT 1 FROM usage_hold_allocations allocation JOIN entitlement_components component ON component.id=allocation.component_id WHERE allocation.hold_id=hold.id AND component.package_id=$1) FOR UPDATE OF hold`, packageID)
 	if err != nil {
@@ -155,6 +175,10 @@ func (r *PostgresRepository) expireOnePackage(ctx context.Context) (bool, error)
 		}
 		holds = append(holds, hold)
 	}
+	if err := holdRows.Err(); err != nil {
+		holdRows.Close()
+		return false, err
+	}
 	holdRows.Close()
 	for _, hold := range holds {
 		if err := releasePackageAllocations(ctx, tx, hold.id, now); err != nil {
@@ -170,10 +194,10 @@ func (r *PostgresRepository) expireOnePackage(ctx context.Context) (bool, error)
 		}
 	}
 	type expiringComponent struct {
-		id, lotID                    uuid.UUID
-		available, active, suspended int64
+		id, lotID                              uuid.UUID
+		available, active, suspended, reserved int64
 	}
-	componentRows, err := tx.Query(ctx, `SELECT id,credit_lot_id,available_microcredits,active_grant_microcredits,suspended_grant_microcredits FROM entitlement_components WHERE package_id=$1 ORDER BY expires_at,CASE component_type WHEN 'BONUS' THEN 0 ELSE 1 END,credited_at,id FOR UPDATE`, packageID)
+	componentRows, err := tx.Query(ctx, `SELECT id,credit_lot_id,available_microcredits,active_grant_microcredits,suspended_grant_microcredits,reserved_microcredits FROM entitlement_components WHERE package_id=$1 ORDER BY expires_at,CASE component_type WHEN 'BONUS' THEN 0 ELSE 1 END,credited_at,id FOR UPDATE`, packageID)
 	if err != nil {
 		return false, err
 	}
@@ -181,14 +205,29 @@ func (r *PostgresRepository) expireOnePackage(ctx context.Context) (bool, error)
 	var remaining int64
 	for componentRows.Next() {
 		var component expiringComponent
-		if err := componentRows.Scan(&component.id, &component.lotID, &component.available, &component.active, &component.suspended); err != nil {
+		if err := componentRows.Scan(&component.id, &component.lotID, &component.available, &component.active, &component.suspended, &component.reserved); err != nil {
 			componentRows.Close()
 			return false, err
+		}
+		// REVIEW holds remain reserved; never finalize even an all-reserved package.
+		if component.reserved != 0 {
+			componentRows.Close()
+			return false, ErrConflict
 		}
 		components = append(components, component)
 		remaining += component.available + component.active + component.suspended
 	}
+	if err := componentRows.Err(); err != nil {
+		componentRows.Close()
+		return false, err
+	}
 	componentRows.Close()
+	// Zero-value grants must also reach their terminal state, without zero postings.
+	for _, component := range components {
+		if err := expireMemberQuotaGrantsForComponent(ctx, tx, component.id, now); err != nil {
+			return false, err
+		}
+	}
 	if remaining > 0 {
 		entryID := uuid.Must(uuid.NewV7())
 		if err := insertJournal(ctx, tx, entryID, "EXPIRY", "expire:"+packageID.String(), "expire entitlement package", now); err != nil {
@@ -212,9 +251,6 @@ func (r *PostgresRepository) expireOnePackage(ctx context.Context) (bool, error)
 			}
 			if command.RowsAffected() != 1 {
 				return false, ErrConflict
-			}
-			if err := expireMemberQuotaGrantsForComponent(ctx, tx, component.id, now); err != nil {
-				return false, err
 			}
 			command, err = tx.Exec(ctx, `UPDATE entitlement_components SET available_microcredits=0,active_grant_microcredits=0,suspended_grant_microcredits=0,expired_microcredits=expired_microcredits+$2,status='EXPIRED',updated_at=$6 WHERE id=$1 AND available_microcredits=$3 AND active_grant_microcredits=$4 AND suspended_grant_microcredits=$5 AND reserved_microcredits=0`, component.id, expiring, component.available, component.active, component.suspended, now)
 			if err != nil {
@@ -242,7 +278,7 @@ func (r *PostgresRepository) expireOnePackage(ctx context.Context) (bool, error)
 	if _, err := tx.Exec(ctx, `UPDATE entitlement_packages SET status=$2,updated_at=$3 WHERE id=$1`, packageID, status, now); err != nil {
 		return false, err
 	}
-	return true, tx.Commit(ctx)
+	return true, nil
 }
 
 type PackageExpiryWorker struct {
