@@ -28,11 +28,12 @@ function fail(code) {
 }
 
 // Soft failures are rejected per frame without teardown: the sender has not
-// yet proven lease membership (token verification has not passed), so the
-// frame must never make an irreversible decision about the live lease —
-// neither for a stray frame from a non-member nor for a retry racing a
-// just-reconnected socket. Only failures after token verification own
-// cleanup authority.
+// yet proven lease membership, so the frame must never make an irreversible
+// decision about the live lease — neither for a stray frame from a non-member
+// nor for a retry racing a just-reconnected socket. Membership is proven per
+// type: prepare by its resume token, the other four types by the
+// prepared-socket identity bound during an authenticated prepare. Only
+// failures after that proof own cleanup authority.
 function failSoft(code) {
   const error = new ControllerResumeHookError(code);
   error.soft = true;
@@ -158,7 +159,9 @@ export class ControllerResumeHooks {
     const retired = state.retired?.accepted.get(key);
     if (state.retired && (message.activation_id === state.retired.activationId
       || (message.type === "controller_resume_prepare" && message.request_id === retired?.requestId))) {
-      // Retired traffic has no cleanup authority over the new revision.
+      // Retired traffic has no cleanup authority over the new revision. This
+      // branch sits before the try below, so even its hard failures reach the
+      // caller without touching the lease.
       const validated = this.#validate(message, senderRole, lease);
       if (role !== senderRole || !retired || retired.socketIdentity !== socketIdentity
         || retired.digest !== messageDigest(validated) || lease.sockets[role] !== socketIdentity) {
@@ -170,10 +173,18 @@ export class ControllerResumeHooks {
     try {
       const accepted = state.accepted.get(key);
       if (accepted) {
-        const validated = this.#validate(message, senderRole, lease);
+        let validated;
+        try {
+          validated = this.#validate(message, senderRole, lease);
+        } catch (error) {
+          // A retry has not authenticated yet (prepare: token; the other
+          // types: prepared-socket identity inside the handlers), so a schema
+          // mismatch must not gain cleanup authority over the window.
+          failSoft("controller_resume_message_invalid");
+        }
         if ((role !== senderRole && !(message.type === "controller_resume_prepare" && role === "unknown"))
           || accepted.socketIdentity !== socketIdentity || accepted.digest !== messageDigest(validated)) {
-          fail("controller_resume_retry_conflict");
+          failSoft("controller_resume_retry_conflict");
         }
         // A successfully accepted old phase cannot roll back a later phase or
         // acquire cleanup authority just because its exact retry arrived late.
@@ -190,8 +201,7 @@ export class ControllerResumeHooks {
       }
       let result;
       if (message.type === "controller_resume_prepare") {
-        state.resumeStartedAt ??= timestamp;
-        result = this.#prepare({ message, socketIdentity, role, lease, state });
+        result = this.#prepare({ message, socketIdentity, role, lease, state, timestamp });
       } else if (message.type === "encrypted_resume_confirm") {
         result = this.#confirm({ message, socketIdentity, role, lease, state });
       } else if (message.type === "controller_resume_activation_ack") {
@@ -213,6 +223,8 @@ export class ControllerResumeHooks {
       // phase) must not hand cleanup authority to an unverified frame: a
       // replaced controller still holding the plaintext lease context could
       // otherwise kill the successor's live session with one garbage frame.
+      // This holds for all five resume frame types — prepare authenticates by
+      // token, the others by the prepared-socket identity.
       if (!error || error.soft !== true) {
         await this.#terminate(state, lease, "controller_resume_failed");
       }
@@ -220,7 +232,7 @@ export class ControllerResumeHooks {
     }
   }
 
-  #prepare({ message, socketIdentity, role, lease, state }) {
+  #prepare({ message, socketIdentity, role, lease, state, timestamp }) {
     const senderRole = message.sender_role;
     if (!ROLES.includes(senderRole) || (ROLES.includes(role) && role !== senderRole)) {
       failSoft("controller_resume_role_invalid");
@@ -244,6 +256,9 @@ export class ControllerResumeHooks {
     } catch (error) {
       failSoft(error?.code ?? "controller_resume_token_invalid");
     }
+    // The recovery-latency metric starts at the first authenticated prepare,
+    // not at the first frame: unauthenticated probes must not pollute it.
+    state.resumeStartedAt ??= timestamp;
     if (state.phase !== "awaiting_prepare" && state.phase !== "prepared") {
       // Authenticated sender, but recovery is not open (already connected,
       // terminated, or a later phase): reject the frame without tearing down
@@ -309,7 +324,7 @@ export class ControllerResumeHooks {
     const senderRole = this.#sender(message, role);
     const prepared = state.prepared[senderRole];
     if (!prepared || prepared.socketIdentity !== socketIdentity) {
-      fail("controller_resume_socket_invalid");
+      failSoft("controller_resume_socket_invalid");
     }
     const validated = this.#validate(message, senderRole, lease);
     if (validated.activation_id !== state.activationId) fail("controller_resume_activation_invalid");
@@ -340,11 +355,11 @@ export class ControllerResumeHooks {
 
   #activate({ message, socketIdentity, role, lease, state }) {
     if (role !== "B" || message.sender_role !== undefined) {
-      fail("controller_resume_role_invalid");
+      failSoft("controller_resume_role_invalid");
     }
     const prepared = state.prepared.B;
     if (!prepared || prepared.socketIdentity !== socketIdentity) {
-      fail("controller_resume_socket_invalid");
+      failSoft("controller_resume_socket_invalid");
     }
     const validated = this.#validate(message, "B", lease);
     if (validated.activation_id !== state.activationId
@@ -383,9 +398,11 @@ export class ControllerResumeHooks {
   }
 
   #postActivationLiveness({ message, socketIdentity, role, lease, state }) {
-    if (role !== "B") fail("controller_resume_role_invalid");
+    if (role !== "B") failSoft("controller_resume_role_invalid");
     const prepared = state.prepared.B;
-    if (!prepared || prepared.socketIdentity !== socketIdentity) fail("controller_resume_socket_invalid");
+    if (!prepared || prepared.socketIdentity !== socketIdentity) {
+      failSoft("controller_resume_socket_invalid");
+    }
     const validated = this.#validate(message, "B", lease);
     if (state.postActivationLiveness && state.phase === "liveness_confirmed") {
       if (state.postActivationLiveness.socketIdentity !== socketIdentity
@@ -438,10 +455,15 @@ export class ControllerResumeHooks {
   }
 
   #ready({ message, socketIdentity, role, lease, state }) {
-    this.#requirePhase(state, "liveness_confirmed", "controller_resume_phase_invalid");
+    // Authenticate before any phase decision: a stray ready ack must not gain
+    // cleanup authority over the live lease (the phase check below stays hard
+    // for an authenticated member skipping the sequence).
     const senderRole = this.#sender(message, role);
     const prepared = state.prepared[senderRole];
-    if (!prepared || prepared.socketIdentity !== socketIdentity) fail("controller_resume_socket_invalid");
+    if (!prepared || prepared.socketIdentity !== socketIdentity) {
+      failSoft("controller_resume_socket_invalid");
+    }
+    this.#requirePhase(state, "liveness_confirmed", "controller_resume_phase_invalid");
     const validated = this.#validate(message, senderRole, lease);
     if (validated.activation_id !== state.activationId
       || validated.liveness_epoch_b !== state.candidate.livenessEpochB
@@ -654,7 +676,9 @@ export class ControllerResumeHooks {
 
   #sender(message, role) {
     const senderRole = message?.sender_role;
-    if (!ROLES.includes(senderRole) || role !== senderRole) fail("controller_resume_role_invalid");
+    if (!ROLES.includes(senderRole) || role !== senderRole) {
+      failSoft("controller_resume_role_invalid");
+    }
     return senderRole;
   }
 

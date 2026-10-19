@@ -487,6 +487,79 @@ test("a stray prepare never tears down a live connected lease", async () => {
   assert.equal(value.hooks.isBusinessAllowed(committed.lease.controller_lease_id), true);
 });
 
+test("stray recovery frames of every type never tear down a live connected lease", async () => {
+  const value = fixture();
+  const committed = await createLease(value);
+  const lease = committed.lease;
+  // Connected phase, prepared map empty: the four non-prepare frame types
+  // authenticate via the prepared-socket identity, so a stranger's frame with
+  // an unknown activation id must be a soft per-frame rejection — exactly like
+  // the token-gated prepare — and must never terminate the live session.
+  const strayCases = [
+    ["encrypted_resume_confirm", "A", { activation_id: "activation-unknown-1", ciphertext_b64: "AQID", ciphertext_bytes: "3" }],
+    ["controller_resume_activation_ack", null, { activation_id: "activation-unknown-1", original_deadline_ms: lease.resume_deadline_ms }],
+    ["controller_post_activation_liveness", null, { activation_id: "activation-unknown-1", liveness_epoch_b: "live-b-stray-1", heartbeat_sequence_b: "1" }],
+    ["controller_resume_ready_ack", "A", { activation_id: "activation-unknown-1", liveness_epoch_b: "live-b-stray-1", heartbeat_sequence_b: "1" }],
+  ];
+  for (const [type, senderRole, extra] of strayCases) {
+    await assert.rejects(value.hooks.handle({
+      message: activationMessage(type, senderRole, lease, `request-stray-${type}`, extra),
+      socket_identity: "stranger-socket", role: senderRole ?? "B", lease,
+    }), (error) => {
+      assert.equal(error.soft, true, `${type} must be a soft per-frame rejection`);
+      return true;
+    });
+    assert.notEqual(value.manager.lease(lease.controller_lease_id), null, `${type} must not terminate the lease`);
+    assert.equal(
+      value.hooks.isBusinessAllowed(lease.controller_lease_id),
+      true,
+      `${type} must not interrupt the live session`,
+    );
+  }
+  // The recovery window stays fully usable for the legitimate members.
+  const provisionalResult = await provisional(value, committed);
+  assert.equal(provisionalResult.deliveries.length, 2);
+});
+
+test("a conflicting retry during the recovery window is rejected per frame without teardown", async () => {
+  const value = fixture();
+  const committed = await createLease(value);
+  await detached(value, committed);
+  await value.hooks.handle({
+    message: prepare("A", committed.lease, committed.messages.A.resume_token_b64, "request-prepare-A"),
+    socket_identity: "new-socket-A", role: "A", lease: committed.lease,
+  });
+  assert.equal(value.hooks.phase(committed.lease.controller_lease_id), "prepared");
+  // Schema-garbage retry for an already-accepted role: the retry branch runs
+  // before any authentication of the incoming frame, so it must be soft.
+  await assert.rejects(value.hooks.handle({
+    message: { ...prepare("A", committed.lease, committed.messages.A.resume_token_b64, "request-prepare-A"), transport_challenge_b64: 123 },
+    socket_identity: "stranger-socket", role: "A", lease: committed.lease,
+  }), (error) => {
+    assert.equal(error.soft, true, "garbage retries must be soft per-frame rejections");
+    return true;
+  });
+  assert.notEqual(value.manager.lease(committed.lease.controller_lease_id), null);
+  assert.equal(value.hooks.phase(committed.lease.controller_lease_id), "prepared");
+  // A schema-valid but conflicting retry is equally powerless.
+  await assert.rejects(value.hooks.handle({
+    message: prepare("A", committed.lease, committed.messages.A.resume_token_b64, "request-conflicting"),
+    socket_identity: "stranger-socket", role: "A", lease: committed.lease,
+  }), (error) => {
+    assert.equal(error.code, "controller_resume_retry_conflict");
+    assert.equal(error.soft, true);
+    return true;
+  });
+  assert.notEqual(value.manager.lease(committed.lease.controller_lease_id), null);
+  // The legitimate member still completes recovery over the intact window.
+  const provisionalResult = await value.hooks.handle({
+    message: prepare("B", committed.lease, committed.messages.B.resume_token_b64, "request-prepare-B", "AQEBAQEBAQEBAQEBAQEBAQ=="),
+    socket_identity: "new-socket-B", role: "B", lease: committed.lease,
+  });
+  assert.equal(provisionalResult.deliveries.length, 2);
+  assert.equal(value.hooks.phase(committed.lease.controller_lease_id), "provisional");
+});
+
 test("activation ACK cannot skip either E2E confirmation and wrong liveness terminates", async () => {
   const first = fixture();
   const firstCommitted = await createLease(first);
