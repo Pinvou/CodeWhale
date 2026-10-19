@@ -418,6 +418,7 @@ mod tests {
             path: None,
             ask_for_approval: AskForApproval::Never,
             sandbox_mode: Some("workspace-write"),
+            workspace_roots: Vec::new(),
         }
     }
 
