@@ -6,7 +6,7 @@
 
 1. 目标 Commit 已完成 GSA-38（切换/回滚工具、资源清单与只读 readiness）、GSA-39（生产等价集成、性能、N/N-1 与故障演练）与 GSA-40（逐命令额度与生产证据归档）中适用于本命令的项，并有独立审核记录。
 2. 用户/授权人已就该命令的生产激活给出明确授权（书面记录存档，含时间与范围）。
-3. 专属 durable `billing-receivable-write-off-executor-p1-v1` 的受信 cutover 资源绑定已就绪，Billing 使用当前 `RunBillingApprovalConsumers` 注册集合与受信资源装配启动（六个受信收据输入缺项、摘要不符或读取失败仍硬失败关闭），不得添加不存在的逐命令启动开关。
+3. 专属 durable `billing-receivable-write-off-executor-p1-v1` 的受信 cutover 资源绑定已就绪，Billing 通过 `cmd/billing-service/main.go` 中 `approvalconsumer.BillingCommands()` 的注册循环和受信资源装配启动（六个受信收据输入缺项、摘要不符或读取失败仍硬失败关闭），不得添加不存在的逐命令启动开关。
 4. 已验证 Account 侧五入口读取实时 Billing activation：行仍为 `INACTIVE` 时 create/update/submit/APPROVE/Begin 全部失败关闭（`ErrBillingGovernanceInactive`）。
 5. 新命令加入全局策略集合后，先按现有 Token governance 的 SAFE、quiescence、冻结资源 readback 与签名发行流程，用当前 `PolicySetDigest` 重新签发并核验治理快照；旧集合的 ACTIVE 摘要与收据不能沿用。此步骤不改变 Token handler 集合，也不能由启动或 readiness 自动代替。
 6. 已完成一致性备份（含 Billing 库）并记录备份 ID、完成时间与 SHA-256；激活窗口内停止写入新审批。
@@ -25,7 +25,7 @@ WHERE command_type = 'RECEIVABLE_WRITE_OFF' AND policy_version = 1 AND snapshot_
 SELECT (SELECT count(*) FROM receivable_write_off_cases) AS cases,
        (SELECT count(*) FROM receivable_allocations WHERE source_type = 'APPROVED_WRITE_OFF') AS write_off_allocations,
        (SELECT count(*) FROM journal_entries WHERE business_reference LIKE 'write-off:%') AS write_off_journals,
-       (SELECT count(*) FROM billing_approval_proof_claims) AS proof_claims;
+       (SELECT count(*) FROM billing_approval_proof_claims WHERE command_type = 'RECEIVABLE_WRITE_OFF') AS proof_claims;
 ```
 
 Account 侧核验：`approval_requests` 中该命令不得存在 `APPROVED`/`EXECUTING`/`EXECUTION_FAILED` 的遗留行；`outbox_events` 中不得存在未消费的该命令授权事件。任一不满足即阻断激活，并按设计 §8 失败分类只读查证。

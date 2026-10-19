@@ -33,7 +33,7 @@ WHERE command_type = 'CHARGEBACK_FINANCIAL_REPAIR' AND policy_version = 1 AND sn
 
 -- Billing：确认没有该命令的审批联动事实
 SELECT (SELECT count(*) FROM chargeback_financial_repair_cases WHERE approval_request_id IS NOT NULL) AS approval_cases,
-       (SELECT count(*) FROM billing_approval_proof_claims) AS proof_claims;
+       (SELECT count(*) FROM billing_approval_proof_claims WHERE command_type = 'CHARGEBACK_FINANCIAL_REPAIR') AS proof_claims;
 
 -- Billing：存量清单——“已确认拒付、但仍留有可撤销额度”的候选会走既有 CONFIRM_CHARGEBACK 路径，
 -- 以下只读 SQL 仅生成候选排查清单，不是权威 owner precheck 或激活准入证明。

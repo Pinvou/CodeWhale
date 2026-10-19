@@ -35,7 +35,7 @@ WHERE command_type = 'RECONCILIATION_FINANCIAL_REPAIR' AND policy_version = 1 AN
 
 -- Billing：确认没有该命令的审批联动事实
 SELECT (SELECT count(*) FROM reconciliation_repair_cases WHERE approval_request_id IS NOT NULL) AS approval_cases,
-       (SELECT count(*) FROM billing_approval_proof_claims) AS proof_claims;
+       (SELECT count(*) FROM billing_approval_proof_claims WHERE command_type = 'RECONCILIATION_FINANCIAL_REPAIR') AS proof_claims;
 
 -- Billing：存量清单——“Provider 已收款、内部无归属”且已有 Provider 侧退款/冲正证据的差异
 -- （in_scope=true 的差异才在首版范围内；复核门禁要求同一商户单号在同渠道/业务日期的全部 run 不再有其它 OPEN/IN_REVIEW 差异。）
