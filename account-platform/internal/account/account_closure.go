@@ -633,7 +633,9 @@ func (w *AccountClosureWorker) runOnce(ctx context.Context) {
 			}
 			continue
 		}
-		observe(w.repository.AdvanceAccountClosureToIdentityCleanup(ctx, *item))
+		if err := w.repository.AdvanceAccountClosureToIdentityCleanup(ctx, *item); err != nil {
+			observe(w.repository.ScheduleAccountClosureError(ctx, *item, "IDENTITY_CLEANUP_ADVANCE_FAILED"))
+		}
 	}
 }
 
