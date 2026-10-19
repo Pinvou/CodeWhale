@@ -33,8 +33,8 @@ export function updatesForLibrary(updates, models) {
 
 const updateKey = (update) => JSON.stringify([update.card_id, update.revision]);
 
-export function initialStartupUpdateState() {
-  return { updates: [], viewedRevisions: new Set() };
+export function initialStartupUpdateState(viewedRevisions = []) {
+  return { updates: [], viewedRevisions: new Set(viewedRevisions) };
 }
 
 /** Sidebar acknowledgement and available model versions have separate lifetimes. */
