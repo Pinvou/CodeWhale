@@ -30,7 +30,9 @@ class ClosurePostgresResults(unittest.TestCase):
                     "TestAccountClosureRequiresAuthoritativeChargebackTerminal"}
         expected = original | {"TestAccountClosureAssessmentIncludesMemberReservations",
                                "TestF08MembershipClosureReasonQuotaReplayPostgres",
-                               "TestF08ClosedGrantConcurrentReceiptReplayPostgres"}
+                               "TestF08ClosedGrantConcurrentReceiptReplayPostgres",
+                               "TestF08ClosureBlocksPendingFinancialAnomalyPostgres",
+                               "TestF08ReclaimBlocksPendingFinancialAnomalyPostgres"}
         self.assertEqual(runner.BILLING_ROOTS, expected)
         harness = (runner.ROOT / "account-platform/internal/billingschema/account_closed_grants_public_test.go").read_text(encoding="utf-8")
         selected = re.search(r'"-run", "\^\(([^"]+)\)\$"', harness)
@@ -42,6 +44,18 @@ class ClosurePostgresResults(unittest.TestCase):
         events = [row for row in runner.CONTRACTS if row[0] == "membership-closure-event"]
         self.assertEqual(events, [("membership-closure-event", "./internal/billingschema",
                                  {"TestF08AccountClosureMembershipEventConsumerPublicPostgres"}, {})])
+
+    def test_anonymization_advance_failure_root_cannot_silently_drop(self):
+        expected = {"TestAccountClosureAnonymizesOwnedHistoricalContacts",
+                    "TestAccountClosureRollbackPreservesEvidence",
+                    "TestAccountClosureSelfServiceRecoveryPostgres",
+                    "TestF08ClosureAdvanceFailureIsScheduledPostgres"}
+        contracts = [row for row in runner.CONTRACTS if row[0] == "account-anonymization"]
+        self.assertEqual(contracts, [("account-anonymization", "./internal/account", expected, {})])
+        for missing in expected:
+            with self.subTest(missing=missing), self.assertRaises(RuntimeError):
+                runner.verify_results(stream(*({"Action": "pass", "Test": name}
+                                              for name in sorted(expected - {missing}))), expected)
 
     def test_failed_child_diagnostics_are_visible_without_becoming_success(self):
         raw = stream({"Action": "output", "Test": "Root", "Output": "controlled failure detail\n"},

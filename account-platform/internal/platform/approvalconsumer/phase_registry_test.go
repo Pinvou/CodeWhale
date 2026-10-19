@@ -22,6 +22,7 @@ func TestInstalledBillingConsumptionAndRecoveryFences(t *testing.T) {
 		t.Fatal("installed consumer set differs")
 	}
 	seen := make(map[string]bool)
+	legacyPolicies := map[string]int64{"WALLET_ADJUSTMENT": 1, "PAYMENT_PROVIDER_RESUME": 2, "PAYMENT_PRODUCT_RESUME": 1}
 	for _, d := range all {
 		if expected, ok := want[d.CommandType]; !ok || expected != d || seen[d.CommandType] {
 			t.Fatalf("delivery contract differs: %s", d.CommandType)
@@ -32,7 +33,7 @@ func TestInstalledBillingConsumptionAndRecoveryFences(t *testing.T) {
 		}
 		otherWorkload := TokenWorkload
 		if d.Workload == BillingWorkload {
-			if MatchRoute(LegacyBilling(), d.CommandType, d.PolicyVersion, d.ExecutorIdentity) != (d.CommandType != "ENTITLEMENT_COMPONENT_ADJUSTMENT") {
+			if MatchRoute(LegacyBilling(), d.CommandType, d.PolicyVersion, d.ExecutorIdentity) != (legacyPolicies[d.CommandType] == d.PolicyVersion) {
 				t.Fatal("legacy Billing routing lost")
 			}
 		} else {
@@ -65,6 +66,18 @@ func TestInstalledBillingConsumptionAndRecoveryFences(t *testing.T) {
 	}
 	if Match(LegacyBilling(), "WALLET_ADJUSTMENT", 1, BillingWorkload) {
 		t.Fatal("shared routing descriptor granted execution")
+	}
+	for command, version := range legacyPolicies {
+		if MatchRoute(LegacyBilling(), command, version+1, BillingWorkload) || MatchRoute(LegacyBilling(), command, version, TokenWorkload) {
+			t.Fatal("shared routing accepted a different frozen policy or executor")
+		}
+	}
+	for _, command := range []string{"ENTITLEMENT_COMPONENT_ADJUSTMENT", "LEDGER_REPAIR", "RECEIVABLE_WRITE_OFF", "PAYMENT_FINANCIAL_REPAIR", "REFUND_EXCEPTION_REPAIR", "CHARGEBACK_FINANCIAL_REPAIR", "FUTURE_BILLING_COMMAND", ""} {
+		for _, version := range []int64{1, 2} {
+			if MatchRoute(LegacyBilling(), command, version, BillingWorkload) {
+				t.Fatal("shared routing expanded beyond its three historical commands", command)
+			}
+		}
 	}
 	for _, durable := range []string{"token-command-executor-v1", "token-usage-reconciliation-executor-v1", "token-organization-executor-v1"} {
 		if _, ok := LookupDurable(durable); ok {

@@ -574,11 +574,8 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'EXECUTED',$15)`,
 		plan.TargetJournalEntryID, plan.TargetPostingID, plan.WrongLedgerAccountID, plan.CorrectLedgerAccountID,
 		plan.EntryType, amount, plan.PostingSetDigest, plan.FactsDigest, journalID, now); err != nil {
 		if ledgerRepairUniqueViolation(err) {
-			// A different approval already corrected this posting: never create a
-			// second domain effect, only report the conflict.
-			if stored, readErr := readLedgerRepairCaseByPosting(ctx, tx, plan.TargetPostingID); readErr == nil && stored.matchesFrozen(input, executionKey) {
-				return stored.LedgerRepairResult, tx.Commit(ctx)
-			}
+			// A uniqueness error aborts this transaction. Reject the conflict and
+			// let the deferred rollback discard its new journal and postings.
 			return LedgerRepairResult{}, ErrConflict
 		}
 		return LedgerRepairResult{}, err
@@ -654,24 +651,6 @@ func readLedgerRepairCase(ctx context.Context, source ledgerRepairReader, approv
 	err := source.QueryRow(ctx, `SELECT id,approval_request_id,authorization_event_id,approval_epoch,execution_key_digest,
 target_journal_entry_id,target_posting_id,wrong_ledger_account_id,correct_ledger_account_id,entry_type,amount_microcredits,
 posting_set_digest,journal_entry_id FROM ledger_repair_cases WHERE approval_request_id=$1`, approvalRequestID).Scan(
-		&record.CaseID, &record.ApprovalRequestID, &record.AuthorizationEventID, &record.ApprovalEpoch, &record.ExecutionKeyDigest,
-		&record.TargetJournalEntryID, &record.TargetPostingID, &record.WrongLedgerAccountID, &record.CorrectLedgerAccountID,
-		&record.EntryType, &record.AmountMicrocredits, &record.PostingSetDigest, &record.JournalEntryID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ledgerRepairCaseRecord{}, ErrNotFound
-	}
-	if err != nil {
-		return ledgerRepairCaseRecord{}, err
-	}
-	record.Status = "SUCCEEDED"
-	return record, nil
-}
-
-func readLedgerRepairCaseByPosting(ctx context.Context, source ledgerRepairReader, targetPostingID uuid.UUID) (ledgerRepairCaseRecord, error) {
-	var record ledgerRepairCaseRecord
-	err := source.QueryRow(ctx, `SELECT id,approval_request_id,authorization_event_id,approval_epoch,execution_key_digest,
-target_journal_entry_id,target_posting_id,wrong_ledger_account_id,correct_ledger_account_id,entry_type,amount_microcredits,
-posting_set_digest,journal_entry_id FROM ledger_repair_cases WHERE target_posting_id=$1`, targetPostingID).Scan(
 		&record.CaseID, &record.ApprovalRequestID, &record.AuthorizationEventID, &record.ApprovalEpoch, &record.ExecutionKeyDigest,
 		&record.TargetJournalEntryID, &record.TargetPostingID, &record.WrongLedgerAccountID, &record.CorrectLedgerAccountID,
 		&record.EntryType, &record.AmountMicrocredits, &record.PostingSetDigest, &record.JournalEntryID)
