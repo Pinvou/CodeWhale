@@ -30,16 +30,21 @@ function EngineManagementDialog({ open, onClose, onChanged, theme, copy }) {
   };
 
   useEffect(() => {
-    if (open) load();
-  }, [open]);
+    if (open) {
+      setDeleted(null);
+      load();
+    }
+  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const [deleted, setDeleted] = useState(null);
   const remove = async () => {
     if (!confirm) return;
     setBusy(true);
     setError(null);
     try {
-      await deleteInstalledEngine(confirm.engine_name, confirm.engine_version || null);
+      const result = await deleteInstalledEngine(confirm.engine_name, confirm.engine_version || null);
       setConfirm(null);
+      setDeleted(result || {});
       await load();
       onChanged?.();
     } catch (cause) {
@@ -88,10 +93,23 @@ function EngineManagementDialog({ open, onClose, onChanged, theme, copy }) {
         </div>
       ) : null}
 
+      {deleted && !confirm ? (
+        <div className="mt-4 rounded-[14px] bg-emerald-50 p-3 dark:bg-emerald-500/10" data-testid="model-store-engines-deleted">
+          <p className={`text-[13px] leading-6 ${TEXT_PRIMARY}`}>
+            {copy.enginesDeleted(
+              deleted.freed_bytes ? formatBytes(deleted.freed_bytes) : '—',
+              deleted.purged_model_data,
+            )}
+          </p>
+        </div>
+      ) : null}
+
       {confirm ? (
         <div className="mt-4 rounded-[14px] bg-amber-50 p-3 dark:bg-amber-500/10">
           <p className={`text-[13px] leading-6 ${TEXT_PRIMARY}`}>
-            {copy.enginesConfirm(`${confirm.engine_name}${confirm.engine_version ? ` · ${confirm.engine_version}` : ''}`)}
+            {confirm.engine_name === 'ollama'
+              ? copy.enginesConfirmOllama(confirm.engine_name)
+              : copy.enginesConfirm(`${confirm.engine_name}${confirm.engine_version ? ` · ${confirm.engine_version}` : ''}`)}
           </p>
           <div className="mt-3 flex justify-end gap-2">
             <MsButton tone="ghost" disabled={busy} onClick={() => setConfirm(null)}>{copy.dialogCancel}</MsButton>
