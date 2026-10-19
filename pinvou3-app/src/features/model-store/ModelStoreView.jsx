@@ -66,6 +66,7 @@ import { StoreCardDialog } from './StoreCardDialog.jsx';
 import { StorageSettingsDialog } from './StorageSettingsDialog.jsx';
 import { EngineManagementDialog } from './EngineManagementDialog.jsx';
 import { LocalResourcesDialog } from './LocalResourcesDialog.jsx';
+import { ResourceManagerDialog } from './ResourceManagerDialog.jsx';
 import { MemoryAdmissionDialog } from './MemoryAdmissionDialog.jsx';
 import {
   BTN_NEUTRAL,
@@ -141,6 +142,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
   // 已有的引擎和外部权重。它们各自按打开时刷新，避免首页加载被慢扫描拖住。
   const [enginesOpen, setEnginesOpen] = useState(false);
   const [localResourcesOpen, setLocalResourcesOpen] = useState(false);
+  const [resourceManagerOpen, setResourceManagerOpen] = useState(false);
   // 二次内存确认只在“已有模型运行且风险/预算未知”时出现。首个模型不拦截。
   const [memoryConfirm, setMemoryConfirm] = useState(null);
   const [retainedStop, setRetainedStop] = useState(null);
@@ -902,30 +904,12 @@ const ModelStoreView = ({ theme, t, bs }) => {
               />
               <button
                 type="button"
-                data-testid="model-store-storage"
+                data-testid="model-store-resources"
                 className={BTN_NEUTRAL}
-                onClick={() => setStorageOpen(true)}
-              >
-                <Database size={14} className="opacity-70" />
-                {copy.storageButton}
-              </button>
-              <button
-                type="button"
-                data-testid="model-store-engines"
-                className={BTN_NEUTRAL}
-                onClick={() => setEnginesOpen(true)}
+                onClick={() => setResourceManagerOpen(true)}
               >
                 <Package size={14} className="opacity-70" />
-                {copy.navEngines}
-              </button>
-              <button
-                type="button"
-                data-testid="model-store-local-resources"
-                className={BTN_NEUTRAL}
-                onClick={() => setLocalResourcesOpen(true)}
-              >
-                <Database size={14} className="opacity-70" />
-                {copy.navLocalResources}
+                {copy.resourceManager}
               </button>
               <button
                 type="button"
@@ -974,6 +958,16 @@ const ModelStoreView = ({ theme, t, bs }) => {
         onSaved={showToast}
       />
 
+      <ResourceManagerDialog
+        open={resourceManagerOpen}
+        onClose={() => setResourceManagerOpen(false)}
+        copy={copy}
+        theme={theme}
+        onOpenEngines={() => setEnginesOpen(true)}
+        onOpenLocalResources={() => setLocalResourcesOpen(true)}
+        onOpenStorage={() => setStorageOpen(true)}
+      />
+
       <EngineManagementDialog
         open={enginesOpen}
         onClose={() => setEnginesOpen(false)}
@@ -1014,6 +1008,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
       <ModelDetailDialog
         cardId={detailCardId}
         scriptUpdates={scriptUpdates}
+        onUninstall={requestUninstall}
         cardBusy={!!runningTask(lifecycleTaskKey(detailCardId)) || !!runningTask(downloadTaskKey(detailCardId))}
         onCardScripts={(record, rollback) => {
           setDetailCardId(null);

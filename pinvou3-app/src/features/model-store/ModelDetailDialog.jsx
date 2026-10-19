@@ -66,7 +66,7 @@ function CopyRow({ label, value, hint, copyLabel, onCopy, testId }) {
  * 按 `none` 处理——宁可多出一条黄条,不能少出一条。
  * @returns {React.ReactElement} 弹窗。
  */
-function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onToast, savedModels, onCardScripts, cardBusy, scriptUpdates }) {
+function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onToast, savedModels, onCardScripts, cardBusy, scriptUpdates, onUninstall }) {
   const [detail, setDetail] = useState(null);
   const [keys, setKeys] = useState([]);
   const [error, setError] = useState(null);
@@ -386,6 +386,16 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
             >
               {copy.redeploy}
             </MsButton>
+            {onUninstall ? (
+              <MsButton
+                tone="danger"
+                disabled={record.running || cardBusy}
+                onClick={() => { onClose(); onUninstall(record); }}
+                data-testid="model-store-detail-uninstall"
+              >
+                {copy.uninstall}
+              </MsButton>
+            ) : null}
             <MsButton tone="ghost" onClick={onClose}>{copy.detailClose}</MsButton>
           </div>
         </>

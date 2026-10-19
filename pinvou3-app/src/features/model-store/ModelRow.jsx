@@ -13,7 +13,7 @@
 // 2. **动作按钮按状态只出一个主动作。** 一个模型在任意时刻只有一件"下一步该做的
 //    事"：没下就下载、下完就部署、部署好就启用、跑着就停用。把四个按钮同时摆出来
 //    再灰掉三个，是把状态机的复杂度甩给用户。
-import { Download, Play, StopCircle, Trash2 } from '../../components/icons.jsx';
+import { ChevronRight, Download, Play, StopCircle } from '../../components/icons.jsx';
 import { ProviderIcon } from '../../components/ProviderIcon.jsx';
 import { formatBytes } from './model-store-logic.js';
 import { resolveBrandIcon } from './model-brand-icon.js';
@@ -257,14 +257,14 @@ function ModelRow({ model, copy, busyKind, scriptUpdate, onOpen, onDownload, onD
         {model.record ? (
           <button
             type="button"
-            title={copy.uninstall}
-            aria-label={copy.uninstall}
+            title={copy.detail}
+            aria-label={copy.detail}
             disabled={busy}
-            data-testid="model-store-uninstall"
-            className={`${TRAILING_SLOT} inline-flex items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-600 disabled:opacity-40 dark:text-slate-500 dark:hover:bg-rose-500/10 dark:hover:text-rose-400`}
-            onClick={() => onUninstall(model.record)}
+            data-testid="model-store-open-detail"
+            className={`${TRAILING_SLOT} inline-flex items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700 disabled:opacity-40 dark:text-slate-500 dark:hover:bg-slate-500/10 dark:hover:text-slate-300`}
+            onClick={() => onOpen(model)}
           >
-            <Trash2 size={15} />
+            <ChevronRight size={16} />
           </button>
         ) : (
           <span className={TRAILING_SLOT} aria-hidden="true" data-testid="model-store-trailing-spacer" />
