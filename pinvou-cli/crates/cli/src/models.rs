@@ -1248,6 +1248,7 @@ fn add<S: CredentialStore>(
         reasoning_effort,
         model: model.to_owned(),
         base_url: base_url.to_owned(),
+        model_store_card_id: None,
         provider_kind: metadata.provider_kind,
         vendor: metadata.vendor,
         endpoint_mode: metadata.endpoint_mode,
@@ -1317,6 +1318,17 @@ fn require_known_vision_model(
 /// per-session model binding and scheduled-task model pin that referenced the
 /// old one).
 fn apply_model_edit(model: &mut SavedModel, changes: &ModelEdit) {
+    if changes
+        .model
+        .as_ref()
+        .is_some_and(|value| value != &model.model)
+        || changes
+            .base_url
+            .as_ref()
+            .is_some_and(|value| value != &model.base_url)
+    {
+        model.model_store_card_id = None;
+    }
     if let Some(preset) = changes.preset {
         model.preset = preset;
     }
@@ -3823,6 +3835,41 @@ fn resolve_search_key<S: CredentialStore>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn store_card_link_survives_option_edits_and_clears_when_route_changes() {
+        let mut model: SavedModel = serde_json::from_value(serde_json::json!({
+            "id":"local", "name":"Local", "preset":"openai_compatible",
+            "model":"wire-model", "base_url":"http://127.0.0.1:8000/v1",
+            "model_store_card_id":"stable-card"
+        }))
+        .expect("model fixture");
+        apply_model_edit(
+            &mut model,
+            &ModelEdit {
+                name: Some("My name".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(model.model_store_card_id.as_deref(), Some("stable-card"));
+        let same_base = model.base_url.clone();
+        apply_model_edit(
+            &mut model,
+            &ModelEdit {
+                base_url: Some(same_base),
+                ..Default::default()
+            },
+        );
+        assert_eq!(model.model_store_card_id.as_deref(), Some("stable-card"));
+        apply_model_edit(
+            &mut model,
+            &ModelEdit {
+                model: Some("other-model".into()),
+                ..Default::default()
+            },
+        );
+        assert!(model.model_store_card_id.is_none());
+    }
     use pinvou3_lib::platform::credential_store::CredentialError;
 
     // The credential-lane tests all steer the product through the

@@ -24,6 +24,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
 
 let invokeResponse = async () => null;
+const listeners = new Map();
 const localStorage = {
   getItem: () => null,
   setItem() {},
@@ -32,7 +33,7 @@ const localStorage = {
 const windowObject = {
   __TAURI__: {
     core: { invoke: (...args) => invokeResponse(...args) },
-    event: { listen: async () => () => {} },
+    event: { listen: async (name, fn) => { listeners.set(name, fn); return () => listeners.delete(name); } },
     dialog: { open: async () => null },
   },
   performance: { now: () => 0 },
@@ -255,3 +256,39 @@ assert.deepEqual(replayRows(), expectedReplayRows);
 assert.deepEqual(replayLoads, ['replay-A', 'replay-B']);
 assert.equal(firstReplaySnapshot.chatItems[1].output, 'complete', 'later navigation must not mutate an old published tool');
 unsubscribeReplay();
+
+// Background store completion must refresh model options AND the current session
+// config without selecting the updated card or replacing session bindings.
+assert.ok(listeners.has('models:changed'));
+const refreshCommands = [];
+let modelLoads = 0;
+let releaseFirstLoad;
+const firstLoadBlocked = new Promise(resolve => { releaseFirstLoad = resolve; });
+invokeResponse = async (command) => {
+  refreshCommands.push(command);
+  if (command === 'list_models') {
+    modelLoads += 1;
+    if (modelLoads === 1) await firstLoadBlocked;
+    return { active_model_id: 'keep-selected', models: [
+      { id: 'keep-selected', model: 'other-model' },
+      { id: 'stable-store-id', model: 'new-wire-id', base_url: 'http://127.0.0.1:8001/v1' },
+    ] };
+  }
+  if (command === 'get_settings') return { advanced: {} };
+  if (command === 'get_effective_model_config') return { model: 'new-wire-id' };
+  if (command === 'get_llmapi_status') return { backend_user_state: 'not_exists', stale: false };
+  return null;
+};
+const firstRefresh = listeners.get('models:changed')({ payload: { model_ids: ['stable-store-id'] } });
+const secondRefresh = listeners.get('models:changed')({ payload: { model_ids: ['another-id'] } });
+releaseFirstLoad();
+await Promise.all([firstRefresh, secondRefresh]);
+const updatedModels = api.state.get('models');
+assert.equal(updatedModels.activeModelId, 'keep-selected');
+assert.equal(updatedModels.savedModels.find(row => row.id === 'stable-store-id').model, 'new-wire-id');
+assert.equal(updatedModels.effectiveModelConfig.model, 'new-wire-id');
+assert.equal(modelLoads, 2, 'an event during refresh must trigger a final fresh snapshot');
+assert.ok(refreshCommands.includes('get_settings'));
+assert.ok(refreshCommands.includes('get_effective_model_config'));
+assert.ok(!refreshCommands.some(command => /set_active_model|set_session_model|save_model/.test(command)),
+  'refresh must never select or recreate models');

@@ -40,8 +40,10 @@ pub async fn model_store_cards(test_mode: Option<bool>) -> Result<Value, String>
 }
 
 #[tauri::command]
-pub async fn model_store_library() -> Result<Value, String> {
-    model_store::library().await
+pub async fn model_store_library(
+    service: State<'_, Arc<ModelStoreService>>,
+) -> Result<Value, String> {
+    model_store::library(Arc::clone(&service)).await
 }
 
 #[tauri::command]

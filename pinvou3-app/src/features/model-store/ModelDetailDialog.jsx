@@ -8,7 +8,7 @@ import { EmptyState } from '../../components/EmptyState.jsx';
 import { Spinner } from '../../components/Spinner.jsx';
 import { createApiKey, fetchApiKeys, fetchModelDetail } from './model-store-api.js';
 import { tryGetTauriBridge } from '../../platform/tauri/client.js';
-import { buildSavedModel, checkLinkable, findLinkedRows, pickApiKey } from './pinvou-model-link.js';
+import { buildSavedModel, checkLinkable, findCardLinkedRows, pickApiKey } from './pinvou-model-link.js';
 import { formatBytes, libraryStatusOf } from './model-store-logic.js';
 import {
   HOVER_SURFACE,
@@ -178,6 +178,7 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
         modelName,
         displayName: copy.linkModelName(record.card_name || record.model_name),
         baseUrl: record.endpoint_url,
+        cardId,
         contextWindow: null,
         // 已经接入过就**沿用那一行的 id**，让这次保存变成更新而不是新增。
         //
@@ -185,7 +186,7 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
         // 再点一次，品悟的模型列表里就多一行指向同一个本地服务的重复项，而且
         // 每次都会被设为当前模型。判据跟移除侧的 findLinkedRows 完全一致
         // （model + 回环 base_url），两边用同一把尺子才不会出现"接得进、清不掉"。
-        existingId: findLinkedRows(savedModels, modelName)[0]?.id,
+        existingId: findCardLinkedRows(savedModels, cardId, modelName)[0]?.id,
       });
       await bridge.models.saveModel(saved);
       // 选为当前模型。注意这只影响**新建的会话**，不会打断正在生成的那些。

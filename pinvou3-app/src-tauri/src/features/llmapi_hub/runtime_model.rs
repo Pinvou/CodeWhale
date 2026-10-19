@@ -104,6 +104,7 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "ordinary".to_string(),
+            model_store_card_id: None,
             base_url: "https://example.invalid/v1".to_string(),
             provider_kind: None,
             vendor: None,

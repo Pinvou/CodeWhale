@@ -170,6 +170,7 @@ async fn boot_wire_cap_engine(
         max_output_tokens: None,
         reasoning_effort: None,
         model: model.to_string(),
+        model_store_card_id: None,
         base_url: base_url.to_string(),
         provider_kind: None,
         vendor: None,

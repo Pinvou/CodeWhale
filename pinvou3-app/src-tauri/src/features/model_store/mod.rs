@@ -45,6 +45,10 @@
 
 mod platform;
 
+/// Called after linked model routes commit. The app invalidates engine caches and
+/// publishes a model-list refresh; the store does not depend on assistant internals.
+pub type ModelsChangedHandler = std::sync::Arc<dyn Fn(&[String]) + Send + Sync>;
+
 /// 非 Linux 平台上给用户看的原因。放在这里而不是桩文件里，是为了让
 /// 「为什么没有这个功能」只有一处定义。
 pub(crate) const UNSUPPORTED_REASON: &str = "模型商店只在 Linux 设备上可用：它需要 docker 起推理引擎、需要 pty 跑卡片脚本、\

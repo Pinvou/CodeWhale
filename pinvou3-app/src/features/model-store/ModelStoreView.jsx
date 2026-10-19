@@ -50,7 +50,7 @@ import {
   uninstallOptionsFor,
 } from './model-store-logic.js';
 import { tryGetTauriBridge } from '../../platform/tauri/client.js';
-import { findLinkedRows } from './pinvou-model-link.js';
+import { findCardLinkedRows } from './pinvou-model-link.js';
 // 发起/取消/应答/关闭都是模块级函数,身份恒定。直接引用而不是从 hook 的返回值上
 // 取,这样下面那些 useCallback 的依赖数组才是稳的——挂在 hook 返回对象上的话,
 // 每来一批日志行都会让它们全部重建。
@@ -226,6 +226,7 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
       // 已经不在了,不说一声他会以为模型还在服务。
       const corrected = libraryList?.corrected ?? [];
       if (corrected.length > 0) showToast(copy.corrected(corrected[0]));
+      if (libraryList?.link_sync_error) showToast(copy.linkSyncFailed(libraryList.link_sync_error));
     } catch (error) {
       if (!stale()) setLibraryError(String(error?.message || error));
     } finally {
@@ -440,7 +441,7 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
   const cleanLinkedRows = useCallback(
     // names 要把这个模型的**全部标识**都带上（model_name 和 endpoint_model）。
     // 接入时存的是 endpoint_model，只按 model_name 找必然落空——见 findLinkedRows。
-    async (names, displayName, { quiet = false } = {}) => {
+    async (names, displayName, { quiet = false, cardId } = {}) => {
       const bridge = tryGetTauriBridge();
       // **先分清「查过了没有」和「根本没查成」**。
       //
@@ -456,7 +457,7 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
         showToast(copy.linkBridgeMissing);
         return false;
       }
-      const rows = findLinkedRows(bs.savedModels, ...names);
+      const rows = findCardLinkedRows(bs.savedModels, cardId, ...names);
       // 真的没有死行要清:这是最常见的情况(用户从没接入过这个模型),不必出声。
       if (rows.length === 0) return true;
       // 有死行、但拿不到 deleteModel。这两个条件**不能**合并成一句 return:合并之后
@@ -504,12 +505,14 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
     async ({ record, kind, title, start, doneText }) => {
       const result = await runTask({ title, kind, key: lifecycleTaskKey(record.card_id), start });
       if (result.duplicate || result.aborted) return result;
-      if (result.ok) showToast(typeof doneText === 'function' ? doneText(result.result) : doneText);
+      if (result.ok) showToast(result.result?.link_sync_error
+        ? copy.linkSyncFailed(result.result.link_sync_error)
+        : (typeof doneText === 'function' ? doneText(result.result) : doneText));
       loadAll();
       // 把结果交回调用方：卸载成功后还要顺带清理品悟模型列表里的死行。
       return result;
     },
-    [loadAll, showToast]
+    [copy, loadAll, showToast]
   );
 
   const deployWithProfile = useCallback(
@@ -626,6 +629,7 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
     const linksCleaned = await cleanLinkedRows(
       [record.endpoint_model, record.model_name],
       record.card_name,
+      { cardId: record.card_id },
     );
     if (!linksCleaned) showToast(copy.uninstallLinksLeft(record.card_name));
   }, [cleanLinkedRows, confirmUninstall, copy, runLifecycle, showToast]);
@@ -698,7 +702,7 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
       const linksCleaned = await cleanLinkedRows(
         [result?.endpoint_model, result?.model_name],
         target.cardName,
-        { quiet: true },
+        { quiet: true, cardId: target.cardId },
       );
       const residual = Array.isArray(result?.residual_paths) ? result.residual_paths : [];
       // toast 只有一个槽位,后一条会把前一条顶掉。cleanLinkedRows 清不掉时已经弹了
