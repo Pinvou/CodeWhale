@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight, MoreHorizontal } from '../../components/icons.jsx';
 import { Spinner } from '../../components/Spinner.jsx';
 import { copyClipboardText } from '../../shared/clipboard.js';
+import { exportLogEligible } from './task-panel-tools.js';
 import { exportRunLog, revealRunLogsDir } from './model-store-api.js';
 import {
   canForceRemove,
@@ -408,7 +409,7 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
                 role="menu"
                 aria-label={copy.taskMore}
               >
-                {isError && task.runId ? (
+                {exportLogEligible(task) ? (
                   <button
                     type="button"
                     role="menuitem"

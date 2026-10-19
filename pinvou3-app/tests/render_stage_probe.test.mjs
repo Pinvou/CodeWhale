@@ -14,7 +14,7 @@ function harness({ stallRecorded = true } = {}) {
   const window = {
     requestAnimationFrame: fn => { rafQueue.push(fn); return rafQueue.length; },
     // 探针模块以 window 为 root（浏览器侧），诊断桩必须挂在同一对象上
-    AuthoritySyncDiagnostics: stallRecorded ? { record: (event, details) => recorded.push({ event, details }) } : undefined,
+    PinvouAuthoritySyncDiagnostics: stallRecorded ? { record: (event, details) => recorded.push({ event, details }) } : undefined,
   };
   const sandbox = { window };
   vm.createContext(sandbox);

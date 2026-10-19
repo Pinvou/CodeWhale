@@ -38,7 +38,7 @@
       (recvToDispatch != null && recvToDispatch > STALL_RECV_TO_DISPATCH_MS) ||
       (dispatchToFrame != null && dispatchToFrame > STALL_DISPATCH_TO_FRAME_MS);
     if (!stalled) return;
-    var diagnostics = root.AuthoritySyncDiagnostics;
+    var diagnostics = root.PinvouAuthoritySyncDiagnostics;
     if (!diagnostics || typeof diagnostics.record !== "function") return;
     var details = { stage_seq: entry.seq };
     if (entry.sid) details.session_id = entry.sid;
