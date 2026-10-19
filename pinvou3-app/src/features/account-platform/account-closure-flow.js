@@ -39,6 +39,14 @@ export function accountClosurePresentation({ queryStatus = accountClosureQuerySt
   };
 }
 
+export function accountClosureBlockerLabel(blocker, copy) {
+  const code = Object.prototype.hasOwnProperty.call(copy.blockerCodes, blocker.code)
+    ? copy.blockerCodes[blocker.code] : null;
+  const action = Object.prototype.hasOwnProperty.call(copy.actionCodes, blocker.user_action)
+    ? copy.actionCodes[blocker.user_action] : null;
+  return `${code || blocker.code} — ${action || blocker.user_action || blocker.domain}`;
+}
+
 export async function submitAccountClosure({ client, confirmation, key, returnTo, language }) {
   if (confirmation !== 'CLOSE_MY_ACCOUNT') {
     return { status: confirmation === null ? 'cancelled' : 'confirmation-mismatch' };
