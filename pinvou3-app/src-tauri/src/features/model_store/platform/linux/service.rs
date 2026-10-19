@@ -131,6 +131,7 @@ pub struct ModelStoreService {
     runs: Mutex<HashMap<String, Arc<RunLog>>>,
     startup_cleanup: StartupCleanup,
     startup_updates: super::startup_updates::StartupUpdates,
+    models_changed: Mutex<Option<super::super::super::ModelsChangedHandler>>,
 }
 
 impl Default for ModelStoreService {
@@ -148,7 +149,23 @@ impl ModelStoreService {
             runs: Mutex::new(HashMap::new()),
             startup_cleanup: StartupCleanup::default(),
             startup_updates: Default::default(),
+            models_changed: Mutex::new(None),
         }
+    }
+
+    pub fn set_models_changed_handler(&self, handler: super::super::super::ModelsChangedHandler) {
+        *self.models_changed.lock() = Some(handler);
+    }
+
+    fn sync_linked_models(&self, card_id: Option<&str>) -> Result<(), String> {
+        let changed = super::linked_models::sync(card_id)?;
+        if !changed.is_empty() {
+            let handler = self.models_changed.lock().clone();
+            if let Some(handler) = handler {
+                handler(&changed);
+            }
+        }
+        Ok(())
     }
 
     fn new_run(&self, run_id: &str) -> Arc<RunLog> {
@@ -448,16 +465,18 @@ pub async fn list_cards(test_mode: bool) -> Result<Value, String> {
     .map_err(|e| e.to_string())?
 }
 
-pub async fn library() -> Result<Value, String> {
-    tokio::task::spawn_blocking(|| {
+pub async fn library(service: Arc<ModelStoreService>) -> Result<Value, String> {
+    tokio::task::spawn_blocking(move || {
         let mgr = ModelManager::new(None, None);
         // 先按实际容器状态纠正一次 running：设备可能是重启之后才起的应用，
         // 库里的 running 标记这时候是过期的。
         let corrected = mgr.reconcile_running_status();
+        let link_sync_error = service.sync_linked_models(None).err();
         let models = db::list_store_models().map_err(|e| e.to_string())?;
         Ok(json!({
             "models": library_payload(models),
             "corrected": corrected,
+            "link_sync_error": link_sync_error,
         }))
     })
     .await
@@ -703,15 +722,21 @@ pub fn start_lifecycle(
     }
 
     let card = card_id.clone();
+    let service_for_job = Arc::clone(service);
     spawn_op(service, &card_id, op, move |log, control, _run_id| {
         let log_cb = Arc::clone(log);
         let mut cb = move |line: &str| log_cb.push(line);
         let mgr = ModelManager::new(None, None);
         match action.as_str() {
-            "enable" => mgr
-                .enable(&card, &mut cb, control)
-                .map(|_| Value::Null)
-                .map_err(|e| e.to_string()),
+            "enable" => {
+                // Bind legacy rows while the old endpoint still exists. The second
+                // pass commits the actual new route even if the view was unmounted.
+                service_for_job.sync_linked_models(Some(&card))?;
+                mgr.enable(&card, &mut cb, control)
+                    .map_err(|e| e.to_string())?;
+                let link_sync_error = service_for_job.sync_linked_models(Some(&card)).err();
+                Ok(json!({"link_sync_error": link_sync_error}))
+            }
             "stop" => mgr
                 .stop(&card, &mut cb, control)
                 .map(|_| Value::Null)
@@ -913,7 +938,7 @@ pub fn run_startup_cleanup(service: &Arc<ModelStoreService>) {
 /// 手动点一次「检查卡片更新」。
 ///
 /// 失败不影响启动：它只碰 `card_source = 'builtin'` 的记录，刷不动就维持原样。
-pub fn run_startup_refresh() {
+pub fn run_startup_refresh(service: &Arc<ModelStoreService>) {
     let refreshed = ModelManager::refresh_builtin_cards();
     if !refreshed.is_empty() {
         eprintln!(
@@ -922,6 +947,12 @@ pub fn run_startup_refresh() {
             refreshed.join("、")
         );
     }
+    let service = Arc::clone(service);
+    std::thread::spawn(move || {
+        if let Err(error) = service.sync_linked_models(None) {
+            log::warn!("model-store linked model refresh failed: {error}");
+        }
+    });
 }
 
 /// 取走启动清理的报告。**取一次就没了**——否则用户每切一次视图就被同一条提示弹一遍。
@@ -1041,6 +1072,91 @@ pub fn force_remove(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enable_synchronizes_linked_route_and_notifies_after_commit_without_a_view() {
+        use crate::platform::prefs::{SavedModel, UserPrefs};
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "sync-card",
+            model_name: "store-model",
+            card_name: "Local",
+            org: None,
+            description: None,
+            engine_name: "native",
+            engine_version: None,
+            size_bytes: 1,
+            quantization: None,
+            source_repo_id: None,
+            source_filename: None,
+            scripts: &Default::default(),
+            status: "deployed",
+            profiles: &[],
+            deploy_topology: super::super::store_client::DeployTopology::Single,
+            card_source: "store",
+        })
+        .unwrap();
+        db::set_endpoint_info(
+            "sync-card",
+            Some("http://127.0.0.1:8000/v1"),
+            Some("old-model"),
+        )
+        .unwrap();
+        let script = "#!/bin/sh\necho LMM_ENDPOINT_URL=http://127.0.0.1:8001/v1/chat/completions\necho LMM_ENDPOINT_MODEL=new-model\n";
+        let scripts = std::collections::BTreeMap::from([(
+            "enable".into(),
+            db::ScriptBlob {
+                content: script.into(),
+                sha256: script_runner::sha256_hex(script),
+            },
+        )]);
+        db::set_scripts_content("sync-card", &scripts, &Default::default()).unwrap();
+        let row: SavedModel =
+            serde_json::from_value(json!({"id":"stable-id", "name":"Custom label",
+            "preset":"openai_compatible", "provider_kind":"custom", "model":"old-model",
+            "base_url":"http://127.0.0.1:8000/v1", "context_window_tokens":131072}))
+            .unwrap();
+        UserPrefs::update_transaction(|prefs| {
+            prefs.advanced.saved_models.push(row);
+            prefs.advanced.active_model_id = Some("stable-id".into());
+            Ok(())
+        })
+        .unwrap();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observation = Arc::clone(&observed);
+        let service = Arc::new(ModelStoreService::new());
+        service.set_models_changed_handler(Arc::new(move |ids| {
+            let prefs = UserPrefs::load();
+            observation.lock().push((
+                ids.to_vec(),
+                prefs.model_by_id("stable-id").unwrap().model.clone(),
+            ));
+        }));
+        let started =
+            start_lifecycle(&service, "sync-card".into(), "enable".into(), false).unwrap();
+        let log = service.run(started["run_id"].as_str().unwrap()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while log.outcome.lock().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(log.outcome.lock().as_ref().is_some_and(Result::is_ok));
+        let observations = observed.lock();
+        assert!(
+            observations
+                .iter()
+                .any(|(ids, model)| ids == &["stable-id"] && model == "new-model")
+        );
+        let reloaded = UserPrefs::load();
+        let row = reloaded.model_by_id("stable-id").unwrap();
+        assert_eq!(row.base_url, "http://127.0.0.1:8001/v1");
+        assert_eq!(row.name, "Custom label");
+        assert_eq!(row.context_window_tokens, Some(131072));
+        assert_eq!(
+            reloaded.advanced.active_model_id.as_deref(),
+            Some("stable-id")
+        );
+    }
 
     #[test]
     fn cancellation_after_a_successful_commit_is_reported_as_success() {

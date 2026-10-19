@@ -293,6 +293,7 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "deepseek-chat".into(),
+            model_store_card_id: None,
             base_url: "https://api.deepseek.com/v1".into(),
             provider_kind: Some("official_api".into()),
             vendor: Some("deepseek".into()),

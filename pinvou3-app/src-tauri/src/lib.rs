@@ -1194,6 +1194,16 @@ pub fn run() {
             // 「同一张卡不许被两处同时操作」的唯一依据，各持一份等于没有约束。
             let model_store =
                 std::sync::Arc::new(features::model_store::ModelStoreService::default());
+            let model_store_app = app.handle().clone();
+            model_store.set_models_changed_handler(std::sync::Arc::new(move |ids| {
+                if let Some(pool) = model_store_app.try_state::<features::assistant::engine_pool::EnginePool>() {
+                    for id in ids { pool.mark_model_updated(id); }
+                }
+                use tauri::Emitter;
+                let payload = serde_json::json!({"model_ids": ids});
+                let _ = model_store_app.emit("models:changed", &payload);
+                platform::app_events::forward_app_event(&model_store_app, "models:changed", payload);
+            }));
             // 收掉上次没收干净的脚本进程。**这一步必须在这里真的被调用**：应用被强杀
             // 或崩溃之后，hf download 之类的子进程还活着、占着权重目录的文件锁，用户
             // 下一次下载会一直卡住且没有任何提示——真机上这么僵持过 16 小时。
@@ -1202,7 +1212,7 @@ pub fn run() {
             // 内置卡片的脚本编译在二进制里：应用升级就等于脚本升级，这里把已下载的
             // 内置卡刷到当前版本。不刷的话，卡片会一直跑下载那天固化的旧脚本——
             // 真机上因此白查过一轮：推了新应用、脚本改动一个都没生效。
-            features::model_store::run_startup_refresh();
+            features::model_store::run_startup_refresh(&model_store);
             app.handle().manage(model_store);
             let remote_control_manager = RemoteControlManager::new(app.handle().clone());
             let remote_event_transport = remote_control_manager.clone();

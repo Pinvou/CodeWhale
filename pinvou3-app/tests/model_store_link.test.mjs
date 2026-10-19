@@ -6,6 +6,7 @@ import {
   buildSavedModel,
   checkLinkable,
   findLinkedRows,
+  findCardLinkedRows,
   isLocalGatewayUrl,
   isOpenAiChatEndpoint,
   makeModelId,
@@ -49,6 +50,13 @@ test('model 填推理服务自己认的 id', () => {
   // 直连时必须填 endpoint_model。经网关才是填 model_name（网关按它查表再替换），
   // 两者混用就是 404 —— 而调用方那边只会看到一句"模型不存在"。
   assert.equal(buildSavedModel(OK).model, 'deepseek-v4-flash-vision-exp');
+});
+
+test('接入时记录稳定卡片关联，升级后仍沿用保存模型 id', () => {
+  const row = buildSavedModel({ ...OK, cardId: 'stable-card', existingId: 'saved-id' });
+  assert.equal(row.model_store_card_id, 'stable-card');
+  assert.equal(row.id, 'saved-id');
+  assert.equal(buildSavedModel(OK).model_store_card_id, null);
 });
 
 test('缺任何一个必要取值都要当场报错，不能拼出半截配置', () => {
@@ -167,6 +175,18 @@ test('findLinkedRows：入参脏了就返回空，不许抛', () => {
   assert.deepEqual(findLinkedRows([], 'x'), []);
   assert.deepEqual(findLinkedRows([{ model: 'x' }], ''), [], '没有 model_name 时一行都不能删');
   assert.deepEqual(findLinkedRows([null, undefined, { model: 'x' }], 'x'), [], '缺 base_url 的不算');
+});
+
+test('卡片关联优先且不复用或删除另一张卡的同名接口', () => {
+  const rows = [
+    { id: 'legacy', model: 'shared-model', base_url: 'http://127.0.0.1:8000/v1' },
+    { id: 'other-card', model_store_card_id: 'sglang', model: 'shared-model', base_url: 'http://127.0.0.1:8000/v1' },
+    { id: 'same-card', model_store_card_id: 'tachyon', model: 'old-model', base_url: 'http://127.0.0.1:8001/v1' },
+    { id: 'remote', model_store_card_id: 'tachyon', model: 'shared-model', base_url: 'https://example.com/v1' },
+  ];
+  assert.deepEqual(findCardLinkedRows(rows, 'tachyon', 'shared-model').map(row => row.id), ['same-card', 'legacy']);
+  assert.deepEqual(findCardLinkedRows(rows, 'sglang', 'old-model').map(row => row.id), ['other-card']);
+  assert.deepEqual(findCardLinkedRows(rows, null, 'shared-model'), []);
 });
 
 test('isLocalGatewayUrl：认回环地址，不认局域网地址', () => {

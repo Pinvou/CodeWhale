@@ -343,11 +343,23 @@ impl ScriptsSource {
         // card_id 来自商店响应，直接 join 的话 `../` 或绝对路径会整体逃出 cards 目录。
         let safe_id = config::safe_path_component(card_id)
             .map_err(|e| ModelManagerError::new(format!("卡片 id 不合法：{e}")))?;
-        let dir = config::data_dir().join("cards").join(safe_id);
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| ModelManagerError::new(format!("创建卡片目录失败：{e}")))?;
-
+        let cards_dir = config::data_dir().join("cards");
+        let dir = cards_dir.join(safe_id);
         let assets = self.asset_contents(policy)?;
+        if assets.contains_key("native_engine_process.py") {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::create_dir_all(&cards_dir)
+                .map_err(|e| ModelManagerError::new(e.to_string()))?;
+            match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(ModelManagerError::new(error.to_string())),
+            }
+            super::native_runtime::prepare(&dir).map_err(ModelManagerError::new)?;
+        } else {
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| ModelManagerError::new(format!("创建卡片目录失败：{e}")))?;
+        }
         script_runner::materialize_assets(&dir, &assets)?;
 
         // 入口脚本也按固定文件名写进包里，这样包内其它脚本也能互相引用
@@ -1877,7 +1889,8 @@ impl ModelManager {
             ));
             endpoint_model = Some(rec.model_name.clone());
         }
-        let _ = db::set_endpoint_info(card_id, endpoint_url.as_deref(), endpoint_model.as_deref());
+        db::set_endpoint_info(card_id, endpoint_url.as_deref(), endpoint_model.as_deref())
+            .map_err(|e| ModelManagerError::new(format!("记录模型接口失败：{e}")))?;
         Ok(())
     }
 
@@ -2529,7 +2542,7 @@ fn extract_marker(output_lines: &[String], prefix: &str) -> Option<String> {
 /// `127.0.0.0/8` 都是（真机上 sglang/vllm 确实有绑到 `127.0.0.2` 的用法，只认
 /// 那一个字面量会把合法卡片一起拒掉）。反过来也别放宽到 RFC1918 私网段——
 /// 那已经是「另一台机器」，对话内容就出本机了。
-fn endpoint_url_is_loopback(url: &str) -> bool {
+pub(super) fn endpoint_url_is_loopback(url: &str) -> bool {
     reqwest::Url::parse(url)
         .ok()
         .and_then(|parsed| parsed.host_str().map(str::to_string))
@@ -3482,6 +3495,38 @@ echo '权重就绪'
             .unwrap_err();
         assert!(error.to_string().contains("旧权重未被覆盖"), "{error}");
         assert!(!tmp.path().join("models/download-ran").exists());
+    }
+
+    #[test]
+    fn offline_native_scripts_receive_a_private_runtime_before_they_execute() {
+        let _tmp = setup_temp_db();
+        add_stuck_record("private-native", "Org/Native", 11);
+        let mut record = db::get_store_model("private-native").unwrap().unwrap();
+        let blob = |content: &str| db::ScriptBlob {
+            content: content.into(),
+            sha256: script_runner::sha256_hex(content),
+        };
+        record.scripts_content.insert(
+            "enable".into(),
+            blob("#!/bin/sh\ntest \"$(stat -c %a .runtime)\" = 700\n"),
+        );
+        record.assets_content.insert(
+            "native_engine_process.py".into(),
+            blob("# test controller\n"),
+        );
+        let mgr = ModelManager::new(None, None);
+        let prepared = mgr
+            .local_scripts_source(&record)
+            .unwrap()
+            .prepare(&record.card_id, "enable")
+            .unwrap();
+        assert!(
+            std::process::Command::new(&prepared.entry)
+                .current_dir(prepared.cwd.unwrap())
+                .status()
+                .unwrap()
+                .success()
+        );
     }
 
     #[test]

@@ -3097,6 +3097,42 @@ fn save_model_inner_commits_prefs_before_the_deferred_delete() {
     });
 }
 
+#[test]
+fn save_model_preserves_store_provenance_for_options_but_clears_it_for_route_edits() {
+    crate::platform::test_support::with_temp_home("store-model-link-edit", || {
+        let mut original = model_deletion_test_model("local-store", false);
+        original.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+        original.base_url = "http://127.0.0.1:8000/v1".into();
+        original.model_store_card_id = Some("stable-card".into());
+        seed_model_deletion_prefs(&[original.clone()]);
+        let store = crate::platform::credential_store::RecordingCredentialStore::new();
+        let mut options_edit = original.clone();
+        options_edit.model_store_card_id = None;
+        options_edit.name = "My custom label".into();
+        options_edit.context_window_tokens = Some(131072);
+        super::settings::save_model_inner(options_edit, &store).unwrap();
+        let persisted = UserPrefs::load()
+            .model_by_id("local-store")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            persisted.model_store_card_id.as_deref(),
+            Some("stable-card")
+        );
+        let mut route_edit = persisted;
+        route_edit.model_store_card_id = None;
+        route_edit.base_url = "http://127.0.0.1:9999/v1".into();
+        super::settings::save_model_inner(route_edit, &store).unwrap();
+        assert!(
+            UserPrefs::load()
+                .model_by_id("local-store")
+                .unwrap()
+                .model_store_card_id
+                .is_none()
+        );
+    });
+}
+
 // ---- search credential deletion ordering (search settings save commits before the keyring) ----
 
 use crate::platform::prefs::{SearchCredential, SearchProvider};

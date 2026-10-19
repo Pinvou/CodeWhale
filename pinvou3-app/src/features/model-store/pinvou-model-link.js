@@ -35,7 +35,7 @@ function makeModelId() {
  *   generic 类型。错得很隐蔽。
  * @param {{modelName: string, displayName: string, baseUrl: string,
  *          apiKey?: string|null, contextWindow?: number|null,
- *          existingId?: string|null}} input 入参。
+ *          existingId?: string|null, cardId?: string|null}} input 入参。
  * @returns {object} 可直接交给 bridge.models.saveModel 的一行配置。
  */
 function buildSavedModel({
@@ -45,6 +45,7 @@ function buildSavedModel({
   apiKey = null,
   contextWindow = null,
   existingId = null,
+  cardId = null,
 }) {
   if (!modelName) throw new Error('missing modelName');
   if (!baseUrl) throw new Error('missing baseUrl');
@@ -60,6 +61,7 @@ function buildSavedModel({
     provider_kind: 'custom',
     model: modelName,
     base_url: baseUrl,
+    model_store_card_id: cardId,
     context_window_tokens: contextWindow || null,
     max_output_tokens: null,
     reasoning_effort: null,
@@ -246,10 +248,20 @@ function findLinkedRows(savedModels, ...names) {
   return savedModels.filter((row) => wanted.has(row?.model) && isLocalGatewayUrl(row?.base_url));
 }
 
+/** Prefer explicit provenance; a same-name row owned by another card is unrelated. */
+function findCardLinkedRows(savedModels, cardId, ...names) {
+  if (!Array.isArray(savedModels) || !cardId) return [];
+  const bound = savedModels.filter((row) => row?.model_store_card_id === cardId
+    && isLocalGatewayUrl(row.base_url));
+  const legacy = findLinkedRows(savedModels, ...names).filter((row) => !row.model_store_card_id);
+  return [...bound, ...legacy];
+}
+
 export {
   buildSavedModel,
   checkLinkable,
   findLinkedRows,
+  findCardLinkedRows,
   isLocalGatewayUrl,
   isOpenAiChatEndpoint,
   makeModelId,

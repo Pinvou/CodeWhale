@@ -18,6 +18,10 @@ use super::super::UNSUPPORTED_REASON;
 #[derive(Default)]
 pub struct ModelStoreService;
 
+impl ModelStoreService {
+    pub fn set_models_changed_handler(&self, _handler: super::super::ModelsChangedHandler) {}
+}
+
 pub(crate) fn available() -> bool {
     false
 }
@@ -34,7 +38,7 @@ pub async fn list_cards(_test_mode: bool) -> Result<Value, String> {
     nope()
 }
 
-pub async fn library() -> Result<Value, String> {
+pub async fn library(_service: Arc<ModelStoreService>) -> Result<Value, String> {
     nope()
 }
 
@@ -167,7 +171,7 @@ pub fn set_storage_settings(
 pub fn run_startup_cleanup(_service: &Arc<ModelStoreService>) {}
 
 /// 非 Linux 上没有内置卡片库可刷，直接返回。同样不报错——这是启动路径。
-pub fn run_startup_refresh() {}
+pub fn run_startup_refresh(_service: &Arc<ModelStoreService>) {}
 
 pub fn take_startup_cleanup(_service: &Arc<ModelStoreService>) -> Result<Value, String> {
     nope()

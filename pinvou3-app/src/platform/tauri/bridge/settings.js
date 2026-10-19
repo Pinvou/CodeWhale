@@ -139,6 +139,30 @@ function pinvouSharedtauriSettings() {
   });
 
   async function loadSettings() { return pinvouSharedtauriSettings().loadSettings(); }
+
+  // Store tasks finish independently of the visible page. Reload all model
+  // consumers after a route commit without changing global/session selection.
+  var modelsRefreshPromise = null;
+  var modelsRefreshPending = false;
+  function refreshChangedModels() {
+    modelsRefreshPending = true;
+    if (modelsRefreshPromise) return modelsRefreshPromise;
+    modelsRefreshPromise = (async function () {
+      do {
+        modelsRefreshPending = false;
+        await loadModels();
+        await loadSettings();
+        await loadEffectiveModelConfig();
+      } while (modelsRefreshPending);
+    })().finally(function () { modelsRefreshPromise = null; });
+    return modelsRefreshPromise;
+  }
+  listen("models:changed", function () {
+    return refreshChangedModels().catch(function () {
+      console.warn("[models] linked model refresh failed");
+    });
+  });
+
   async function loadBehaviorTelemetryStatus() {
     try {
       state.behaviorTelemetry = await invoke("get_behavior_telemetry_status");

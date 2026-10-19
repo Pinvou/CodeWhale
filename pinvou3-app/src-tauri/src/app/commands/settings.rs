@@ -428,7 +428,7 @@ pub async fn save_model(model: SavedModel, pool: State<'_, EnginePool>) -> Resul
 /// Testable core of [`save_model`]: the engine-pool notification stays with
 /// the command, mirroring [`delete_model_inner`].
 pub(super) fn save_model_inner(
-    model: SavedModel,
+    mut model: SavedModel,
     store: &dyn CredentialStore,
 ) -> Result<(), String> {
     let model_id = model.id.clone();
@@ -443,6 +443,14 @@ pub(super) fn save_model_inner(
     UserPrefs::update_transaction_with_post_commit(
         |prefs| {
             let old = prefs.model_by_id(&model.id).cloned();
+            // Settings editors predating store provenance omit this optional field.
+            // Keep it for non-route edits; a user-entered route change unlinks it.
+            if model.model_store_card_id.is_none() {
+                model.model_store_card_id = old
+                    .as_ref()
+                    .filter(|old| old.base_url == model.base_url && old.model == model.model)
+                    .and_then(|old| old.model_store_card_id.clone());
+            }
             let (model, deferred) = apply_model_credential(model, old.as_ref(), store)
                 .map_err(|e| sanitize_command_error("save_model", e))?;
             *deferred_delete.borrow_mut() = deferred;
@@ -2030,6 +2038,7 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "active-model".to_string(),
+            model_store_card_id: None,
             base_url: "https://active.example/v1".to_string(),
             provider_kind: None,
             vendor: None,

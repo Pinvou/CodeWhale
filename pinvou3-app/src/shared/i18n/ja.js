@@ -481,6 +481,7 @@ const jaBase = {
           linkNoModelName: 'このモデルにはモデル名がなく、接続できません。',
           linkNoKey: 'API キーを取得できませんでした',
           linkBridgeMissing: 'この環境ではモデル設定を書き込めません',
+          linkSyncFailed: (error) => `モデル設定を同期できませんでした：${error}。モデルストアを更新して再試行してください。`,
           linkKeyLabel: 'PINVOU',
           linkModelName: (name) => `ローカル · ${name}`,
           // —— 起動時の残留プロセス回収 ——

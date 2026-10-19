@@ -81,7 +81,10 @@ fn single_weight(rec: &db::StoreModelRecord) -> Result<(String, String), ModelMa
     if files.len() != 1 {
         return Err(fail("此版本暂不支持多文件权重的隔离升级；当前部署已保留。"));
     }
-    Ok(files.into_iter().next().unwrap())
+    files
+        .into_iter()
+        .next()
+        .ok_or_else(|| fail("此卡片缺少可确认的单文件权重。"))
 }
 
 fn find_weight(root: &Path, name: &str) -> Result<PathBuf, ModelManagerError> {
@@ -113,7 +116,9 @@ fn find_weight(root: &Path, name: &str) -> Result<PathBuf, ModelManagerError> {
     if found.len() != 1 {
         return Err(fail("无法唯一确认隔离目录中的权重文件，未切换部署。"));
     }
-    Ok(found.pop().unwrap())
+    found
+        .pop()
+        .ok_or_else(|| fail("无法唯一确认隔离目录中的权重文件，未切换部署。"))
 }
 
 fn legacy_resource_dir(rec: &db::StoreModelRecord, configured_root: &Path) -> Option<PathBuf> {

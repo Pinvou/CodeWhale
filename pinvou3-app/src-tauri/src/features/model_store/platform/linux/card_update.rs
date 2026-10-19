@@ -199,7 +199,12 @@ pub fn compatibility(
             .source_filename
             .as_deref()
             .and_then(|name| weights::normalize_path(name).ok());
-        if !selected.is_some_and(|name| result.next_weights.as_ref().unwrap().contains_key(&name)) {
+        if !selected.is_some_and(|name| {
+            result
+                .next_weights
+                .as_ref()
+                .is_some_and(|files| files.contains_key(&name))
+        }) {
             result.can_stage = false;
             result.reason = "filename_not_in_manifest".into();
         }
