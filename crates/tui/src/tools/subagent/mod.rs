@@ -8485,17 +8485,17 @@ impl ToolSpec for AgentTool {
 
     fn description(&self) -> &'static str {
         concat!(
-            "Start with action=start and prompt; returns a turn-owned agent_id immediately. Read-only roles need no extra fields. Set detached=true only for work that must remain independently observable after the turn. ",
+            "Start with action=start and prompt; returns a turn-owned agent_id immediately. A prompt-only start (no type/profile) launches read-only; pass a write-capable type (e.g. implement) or declare write_roots before write work. Read-only roles need no extra fields. Set detached=true only for work that must remain independently observable after the turn. ",
             "Use multiple starts for independent parallel tasks. ",
             "type selects the Fleet role: general (full tool access), explore (fast read-only exploration), planner (grounded strategy, read-only probes), reviewer (reads and grades code), implement (lands focused code changes), test (runs tests and reports evidence), advisor (read-only design counsel), or custom (allowed_tools on the parent's posture); legacy aliases are still accepted. ",
             "profile runs the child as a named Fleet role or an exact prompt-only profile explicitly presented by the embedding host — pass it only when the task needs that identity. The child follows the operator's per-role model configuration, else the parent's model; model or thinking overrides are not advertised (parse-accepted for compatibility). ",
-            "Use action=roster to inspect the Fleet roles and the host-presented prompt-only profiles (if any), with their descriptions, before choosing a type or profile. The host-profile listing is capped and unpaged — search a large pool with profile_query. ",
-            "Child run budgets (model turns, wall time) come from Fleet role defaults and operator [subagents] config; budget fields are not advertised (parse-accepted for compatibility). ",
+            "Use action=roster to inspect Fleet roles and host-presented prompt-only profiles before choosing a type or profile. The host-profile listing is capped and unpaged — search a large pool with profile_query. ",
+            "Child run budgets come from Fleet role defaults and operator [subagents] config; budget fields are not advertised (parse-accepted for compatibility). ",
             "worktree=true gives the child an isolated git worktree — use it whenever parallel writers must not collide with the parent checkout. ",
             "A write-capable child defaults write scope to the parent workspace; narrow it with write_roots (repo-relative paths) so parallel children claim disjoint scope. ",
             "Prefer type=implement for write work and type=test (or the Run tool with action=\"verifiers\") after writes settle — dispatch is not completion. ",
             "Coordinate through this same tool: action=message queues a note without waking the child; action=followup delivers queued notes and wakes a running child for its next user-provenance turn; action=interrupt stops the current child turn while preserving its checkpoint; action=wait blocks without changing child state, and until=\"all\" joins a whole fan-out in one call. ",
-            "action=claim widens your own enforced write scope: pass write_roots before mutating anything a fail-closed write refusal named. It records a durable claim receipt and fails on contention with a peer claim; it never touches another agent's scope. ",
+            "action=claim widens your own enforced write scope: pass write_roots before mutating anything a fail-closed write refusal named. Records a durable claim receipt; fails on peer-claim contention; never touches another agent's scope. ",
             "Action contract: start requires prompt; message/followup require a target and message; peek/interrupt/cancel require a target; claim requires at least one scope entry; roster, status, and wait are unscoped. ",
             "This is the whole model-facing sub-agent surface; there is no second transport. ",
             "In Operate, use detached=true only for independent or long work that must outlive the active turn; a write-capable root start defaults write scope to the parent workspace unless narrowed with write_roots; arbitrary shell remains gated. "
@@ -8549,7 +8549,7 @@ impl ToolSpec for AgentTool {
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "The focused task to give the worker. The child sees only this prompt, not your conversation — include every fact and path it needs. A read-only role needs no write scope; a write-capable role defaults to the parent workspace unless narrowed with write_roots."
+                    "description": "The focused task to give the worker. By default the child sees only this prompt, not your conversation — include every fact and path it needs. A read-only role needs no write scope; a write-capable role defaults to the parent workspace unless narrowed with write_roots."
                 },
                 "detached": {
                     "type": "boolean",

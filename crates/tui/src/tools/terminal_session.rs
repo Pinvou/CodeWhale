@@ -761,10 +761,10 @@ pub struct TerminalSendTool;
 impl ToolSpec for TerminalSendTool {
     terminal_tool_common!(
         "terminal/send",
-        "Send raw input to a live persistent terminal session. Use a literal ETX control byte to interrupt an interactive process. A prior-process shell is reported as stale/lost rather than reattached. (Unix only)"
+        "Send raw input to a live persistent terminal session. To interrupt the running foreground command use terminal/cancel — raw ETX typed here can flush the queued completion sentinel and leave the session reporting a command that never finishes. A prior-process shell is reported as stale/lost rather than reattached. (Unix only)"
     );
     fn input_schema(&self) -> serde_json::Value {
-        json!({"type":"object","properties":{"session":{"type":"string"},"text":{"type":"string"},"wait_ms":{"type":"integer","default":250}},"required":["session","text"]})
+        json!({"type":"object","properties":{"session":{"type":"string"},"text":{"type":"string"},"wait_ms":{"type":"integer","default":250,"minimum":1,"maximum":60000}},"required":["session","text"]})
     }
     async fn execute(
         &self,
@@ -803,10 +803,10 @@ pub struct TerminalWaitTool;
 impl ToolSpec for TerminalWaitTool {
     terminal_tool_common!(
         "terminal/wait",
-        "Wait for the current foreground command in a live persistent terminal session and return buffered output. A prior-process shell is reported as stale/lost rather than reattached. Output buffer holds at most 512KiB; older bytes are dropped silently. (Unix only)"
+        "Wait for the current foreground command in a live persistent terminal session and return the output produced since the previous call — at most 12KiB per call; if more was produced the middle is omitted in-band and cannot be re-fetched, so poll promptly for chatty commands. A prior-process shell is reported as stale/lost rather than reattached. The session buffer holds at most 512KiB; older bytes are dropped silently. (Unix only)"
     );
     fn input_schema(&self) -> serde_json::Value {
-        json!({"type":"object","properties":{"session":{"type":"string"},"timeout_secs":{"type":"integer","default":120}},"required":["session"]})
+        json!({"type":"object","properties":{"session":{"type":"string"},"timeout_secs":{"type":"integer","default":120,"minimum":1,"maximum":600}},"required":["session"]})
     }
     async fn execute(
         &self,
@@ -842,7 +842,7 @@ pub struct TerminalCancelTool;
 impl ToolSpec for TerminalCancelTool {
     terminal_tool_common!(
         "terminal/cancel",
-        "Interrupt the running foreground command with ETX. The live terminal session survives and can be reused; its non-secret summary persists. (Unix only)"
+        "Interrupt the running foreground command with ETX, resubmitting the completion sentinel until the shell acknowledges. The live terminal session survives and can be reused; its non-secret summary persists. (Unix only)"
     );
     fn input_schema(&self) -> serde_json::Value {
         json!({"type":"object","properties":{"session":{"type":"string"}},"required":["session"]})

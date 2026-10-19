@@ -60,7 +60,7 @@ impl ToolSpec for GitTool {
     }
 
     fn description(&self) -> &'static str {
-        "Inspect repository state and history with status, diff, log, show, or blame. All actions are read-only and parallel-safe."
+        "Inspect repository state and history with status, diff, log, show, or blame. No action mutates the repository, but actions run `git`, which may execute repository-configured helpers (textconv/diff drivers); read-only shell sessions therefore refuse this tool."
     }
 
     fn input_schema(&self) -> Value {

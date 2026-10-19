@@ -21,6 +21,13 @@ fn grep_description_matches_default_exclusion_behavior() {
         description
             .contains("Files over 10MB and files containing invalid UTF-8 are skipped silently")
     );
+    assert!(
+        description
+            .contains("as are entries that cannot be read and (by default) symlinked entries")
+    );
+    assert!(description.contains(
+        "Include globs support only `*`, `**`, and `?` — brace expansion like `*.{rs,ts}` matches nothing"
+    ));
     assert!(description.contains("after 30s"));
     assert!(description.contains("replaces that default list entirely"));
 }
@@ -78,6 +85,15 @@ fn test_matches_glob_star() {
 fn test_matches_glob_question() {
     assert!(matches_glob("test.rs", "test.??"));
     assert!(!matches_glob("test.rs", "test.?"));
+}
+
+/// The description promises brace expansion matches nothing: `{`/`}` are
+/// matched as literal characters, not alternation.
+#[test]
+fn test_matches_glob_brace_expansion_matches_nothing() {
+    assert!(!matches_glob("main.rs", "*.{rs,ts}"));
+    assert!(!matches_glob("main.ts", "*.{rs,ts}"));
+    assert!(matches_glob("main.{rs,ts}", "*.{rs,ts}"));
 }
 
 #[test]

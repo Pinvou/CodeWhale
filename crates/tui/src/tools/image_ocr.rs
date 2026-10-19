@@ -29,7 +29,7 @@ impl ToolSpec for ImageOcrTool {
     }
 
     fn description(&self) -> &'static str {
-        "Extract text from an image (PNG, JPEG, or TIFF) via local OCR. On macOS this uses the built-in Vision framework; otherwise it uses local tesseract when available. Use this for screenshots, scanned receipts/whiteboards, or any visual that contains text the model needs to read. Returns the extracted text inline; no file is written."
+        "Extract text from an image (PNG, JPEG, or TIFF) via local OCR. On macOS this uses the built-in Vision framework; otherwise it uses local tesseract when available. There is no language parameter: recognition uses the platform default language set (typically the system locale / English), so non-Latin text may come back garbled or empty with no error — treat empty or mojibake output on likely non-English images as a recognition failure and say so. Use this for screenshots, scanned receipts/whiteboards, or any visual that contains text the model needs to read. Returns the extracted text inline; no file is written."
     }
 
     fn input_schema(&self) -> Value {

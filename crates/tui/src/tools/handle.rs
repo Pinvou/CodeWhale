@@ -271,7 +271,7 @@ impl ToolSpec for HandleReadTool {
                     "oneOf": [
                         {
                             "type": "object",
-                            "required": ["kind", "session_id", "name"],
+                            "required": ["kind", "session_id", "name", "type", "length", "repr_preview", "sha256"],
                             "properties": {
                                 "kind": { "type": "string", "const": "var_handle" },
                                 "session_id": { "type": "string" },
@@ -532,7 +532,7 @@ fn parse_projection(input: &Value) -> Result<Projection, ToolError> {
 
 fn projection_usage_hint() -> String {
     "handle_read: provide exactly one projection: `slice`, `range`, `count: true`, `jsonpath`, or `introspect: true`. \
-     Examples: {\"handle\":{\"kind\":\"var_handle\",\"session_id\":\"rlm:abc\",\"name\":\"final_1\"},\"slice\":{\"start\":0,\"end\":500}}; \
+     Prefer the string handle form. Examples: {\"handle\":\"rlm:abc/final_1\",\"slice\":{\"start\":0,\"end\":500}}; \
      {\"handle\":\"rlm:abc/final_1\",\"count\":true}; \
      {\"handle\":\"rlm:abc/final_1\",\"introspect\":true}."
         .to_string()
@@ -862,6 +862,35 @@ mod tests {
 
     fn ctx() -> ToolContext {
         ToolContext::new(".")
+    }
+
+    #[test]
+    fn handle_schema_requires_every_var_handle_field() {
+        // VarHandle's Deserialize derive has no field defaults, so an object
+        // missing any of the seven fields fails `parse_handle` at runtime; the
+        // schema's object branch must demand the same set, not a subset.
+        let schema = HandleReadTool.input_schema();
+        let object_branch = schema["properties"]["handle"]["oneOf"]
+            .as_array()
+            .expect("handle oneOf")
+            .iter()
+            .find(|branch| branch["type"] == "object")
+            .expect("object branch");
+        let required = object_branch["required"].as_array().expect("required");
+        for field in [
+            "kind",
+            "session_id",
+            "name",
+            "type",
+            "length",
+            "repr_preview",
+            "sha256",
+        ] {
+            assert!(
+                required.iter().any(|r| r == field),
+                "required must list `{field}`: {required:?}"
+            );
+        }
     }
 
     #[tokio::test]

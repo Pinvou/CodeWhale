@@ -5816,8 +5816,10 @@ fn agent_tool_prompt_schema_keeps_ordinary_starts_message_first() {
     assert!(prompt.contains("read-only role needs no write scope"));
     assert!(prompt.contains("write-capable role defaults to the parent workspace"));
     // Round-2 review pin: the fresh-context disclosure is load-bearing
-    // delegation guidance and must not silently disappear again.
-    assert!(prompt.contains("The child sees only this prompt, not your conversation"));
+    // delegation guidance and must not silently disappear again. Hedged to
+    // "By default" because a parse-accepted fork_context start can seed the
+    // child with the parent prefix.
+    assert!(prompt.contains("By default the child sees only this prompt, not your conversation"));
     for ceremony in [
         "Subagent Brief",
         "QUESTION",
@@ -19941,7 +19943,10 @@ fn the_launched_authority_is_the_one_the_spawn_boundary_accepts() {
 /// Measured 80,856B on 2026-08-02 (commit body has the receipt); +10%.
 const READ_ONLY_CHILD_ENVELOPE_BYTE_CEILING: usize = 89_000;
 /// Measured 72,679B on 2026-08-02 (commit body has the receipt); +10%.
-const PARENT_SURFACE_BYTE_CEILING: usize = 80_000;
+/// Re-measured ~82.0kB on 2026-10-19 (round-4 disclosure wave: read-only
+/// prompt-only start, review/tasks/verify/web/search/github/goal/terminal/
+/// git/ocr/extract truthful-limit disclosures); +10%.
+const PARENT_SURFACE_BYTE_CEILING: usize = 90_000;
 
 #[tokio::test]
 async fn read_only_child_envelope_stays_within_measured_ceiling() {

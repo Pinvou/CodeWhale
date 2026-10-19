@@ -122,7 +122,8 @@ impl RlmTool {
                  with handle_read instead of copied unbounded into the parent context. \
                  Large stdout/stderr payloads (>1k chars) are also stored as \
                  var_handles (returned in stdout_handle / stderr_handle) to keep the \
-                 parent transcript lean. Batch child helpers require \
+                 parent transcript lean, unless output_feedback is \"metadata\", which \
+                 stores neither. Batch child helpers require \
                  dependency_mode='independent'; use sub_query_sequence or a \
                  sequential loop for dependent work; \
                  {HANDLE_READ_ACTIVATION_HINT}."
@@ -141,8 +142,9 @@ impl RlmTool {
                  \"open\" (load file_path/content/url/session_object into a named Python \
                  kernel; returns only metadata so the parent transcript holds a handle, \
                  not the body), \"eval\" (run one bounded Python REPL block against a \
-                 named context; approval required; finalize(...) values and large \
-                 stdout/stderr become var_handles retrievable with handle_read; \
+                 named context; approval required; finalize(...) values always become \
+                 var_handles retrievable with handle_read, and large stdout/stderr do \
+                 too unless output_feedback is \"metadata\", which stores neither; \
                  {HANDLE_READ_ACTIVATION_HINT}), \
                  \"configure\" (output feedback, child timeout, sub-RLM depth, session \
                  sharing), \"close\" (tear down the kernel and return usage metadata)."

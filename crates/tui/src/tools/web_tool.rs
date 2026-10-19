@@ -116,11 +116,11 @@ impl ToolSpec for WebTool {
                 },
                 "max_results": {
                     "type": "integer",
-                    "description": "Maximum search results (action=search)"
+                    "description": "Maximum search results (action=search; 1-10, default 5)"
                 },
                 "timeout_ms": {
                     "type": "integer",
-                    "description": "Timeout in milliseconds (action=search, fetch, or wait)"
+                    "description": "Timeout in milliseconds (action=search, fetch, or wait; default 15000 for search and fetch, 30000 for wait; hard-caps at 60000 for search, 300000 for fetch, and 120000 for wait)"
                 },
                 "recency": {
                     "oneOf": [
@@ -140,7 +140,7 @@ impl ToolSpec for WebTool {
                 },
                 "url": {
                     "type": "string",
-                    "description": "URL to fetch (action=fetch) or healthcheck URL (action=wait)"
+                    "description": "URL to fetch (action=fetch) or healthcheck URL (action=wait). Loopback and private-address targets are refused for fetch; only action=wait may reach loopback."
                 },
                 "format": {
                     "type": "string",

@@ -358,7 +358,7 @@ impl ToolSpec for ApplyPatchTool {
                 },
                 "fuzz": {
                     "type": "integer",
-                    "description": "Maximum fuzz factor for fuzzy matching (default: 3)"
+                    "description": "Maximum fuzz factor (default: 3; hard cap 50)"
                 },
                 "create_if_missing": {
                     "type": "boolean",
@@ -1423,7 +1423,7 @@ fn format_hunk_no_match_error(
             let expected_preview = preview_expected_lines(hunk, HUNK_PREVIEW_LINES).join("\n");
             let file_preview = snippet_around(lines, *adjusted_line, SNIPPET_RADIUS).join("\n");
             format!(
-                "could not find matching context near line {expected_line} (searched around line {adjusted_line} with offset {offset:+} and fuzz up to {max_fuzz}). Expected context preview:\n{expected_preview}\nFile snippet near line {adjusted_line}:\n{file_preview}\nHints: the line numbers may be stale after earlier edits — call `read` to re-check the current contents, ensure the patch matches the file, increase `fuzz`, or regenerate the patch."
+                "could not find matching context near line {expected_line} (searched around line {adjusted_line} with offset {offset:+} and fuzz up to {max_fuzz}). Expected context preview:\n{expected_preview}\nFile snippet near line {adjusted_line}:\n{file_preview}\nHints: the line numbers may be stale after earlier edits — call `read` to re-check the current contents, ensure the patch matches the file, increase `fuzz` (up to 50), or regenerate the patch."
             )
         }
         ApplyHunkError::ContextAmbiguous {
@@ -1643,6 +1643,35 @@ mod tests {
         assert!(description.contains("the `replace` array"));
         assert!(!description.contains("content_hash"));
         assert!(!description.contains("in `files`"));
+    }
+
+    #[test]
+    fn fuzz_schema_and_no_match_hint_disclose_the_hard_cap() {
+        // The schema must state the silent `.min(MAX_FUZZ)` clamp, and the
+        // NoMatch hint must tell the model the ceiling it may raise `fuzz` to,
+        // so the model-facing text keeps matching actual behavior.
+        let schema = ApplyPatchTool.input_schema();
+        let description = schema["properties"]["fuzz"]["description"]
+            .as_str()
+            .expect("fuzz description");
+        assert!(description.contains("default: 3"), "{description}");
+        assert!(description.contains("hard cap 50"), "{description}");
+
+        let lines = vec!["line1".to_string(), "line2".to_string()];
+        let hunk = Hunk {
+            old_start: 5,
+            old_count: 1,
+            new_start: 5,
+            new_count: 1,
+            lines: vec![HunkLine::Context("missing".to_string())],
+        };
+        let err = ApplyHunkError::NoMatch {
+            expected_line: 5,
+            adjusted_line: 0,
+            offset: 0,
+        };
+        let message = format_hunk_no_match_error(&lines, &hunk, &err, MAX_FUZZ);
+        assert!(message.contains("increase `fuzz` (up to 50)"), "{message}");
     }
 
     #[test]

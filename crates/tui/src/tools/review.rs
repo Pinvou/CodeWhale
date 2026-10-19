@@ -62,6 +62,7 @@ Rules for \"suggestions\":\n\
 - \"suggestion\" is prose explaining the change.\n\
 - \"replacement\" is NOT a description. It is the literal replacement source code, verbatim, with the exact indentation it must have in the file, and with no diff markers, no line numbers, and no fences. It replaces lines start_line..end_line (inclusive) of the NEW version of the file; when the change is a single line, set start_line == end_line == line.\n\
 - Supply \"replacement\" ONLY for a mechanical, high-confidence fix you are certain compiles and is correct as written (a typo, a wrong comparison operator, a missing await/unwrap guard, a renamed symbol, a wrong constant). Anything requiring judgement, new imports, or edits elsewhere in the file must omit \"replacement\" and stay prose-only.\n\
+- A replacement may span at most 25 lines (start_line..end_line inclusive); a larger mechanical fix must ship as prose instructions instead.\n\
 - Anchor a suggestion only to lines that appear in the diff you were given, and never to a deleted line. If you are not sure of the exact line numbers, omit \"replacement\".\n\
 - A wrong replacement is worse than no replacement: it is one click from being merged. When in doubt, omit it.";
 
@@ -644,7 +645,7 @@ impl ToolSpec for ReviewTool {
                 },
                 "max_chars": {
                     "type": "integer",
-                    "description": "Maximum characters to include from the source (default: 200000)."
+                    "description": "Maximum characters to include from the source (default: 200000; hard cap 1000000)."
                 }
             },
             "required": ["target"]
@@ -1090,6 +1091,21 @@ fn parse_pr_url(url: &str) -> Option<PullRequestRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_prompt_and_schema_state_committable_and_max_chars_limits() {
+        // The prompt must teach the committable budget the anchor pipeline
+        // enforces, and the schema must disclose the max_chars clamp, so the
+        // model-facing text keeps matching actual behavior.
+        assert!(REVIEW_SYSTEM_PROMPT.contains("at most 25 lines"));
+        assert!(REVIEW_SYSTEM_PROMPT.contains("prose instructions"));
+        let schema = ReviewTool::new(None, "unused".to_string()).input_schema();
+        let max_chars = schema["properties"]["max_chars"]["description"]
+            .as_str()
+            .expect("max_chars description");
+        assert!(max_chars.contains("default: 200000"), "{max_chars}");
+        assert!(max_chars.contains("hard cap 1000000"), "{max_chars}");
+    }
 
     #[tokio::test]
     async fn missing_review_client_uses_codewhale_provider_neutral_language() {
