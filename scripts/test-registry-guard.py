@@ -800,8 +800,12 @@ def _scan_graph():
     appending after it, because rustc clears the stem when an inline
     module carries its own path — round-15; a file reached through
     `#[path]` wiring is itself mod.rs-like, its conventional children
-    resolving beside it rather than under `<stem>/` — round-16), so it
-    covers
+    resolving beside it rather than under `<stem>/` — round-16; an
+    explicit-path declaration resolves ONLY through its attribute target,
+    never the conventional candidates, and the scan context is the
+    (physical file, module path) pair so one file wired under two module
+    names is scanned under each libtest path it produces, with module
+    cycles failing closed like rustc's loader — round-17), so it covers
     exactly the lib crate that `cargo test --lib --list` reports — bin-only
     files (`main.rs`, undeclared strays) are never scanned and cannot alias
     a pin's path. Hits are keyed by their FULL libtest module path: the
@@ -832,6 +836,10 @@ def _scan_graph():
     by_path = {}
     unattributable = {}
     attributable = set()
+    # Visited holds (realpath, module path) scan contexts, not bare
+    # physical files (round-17 review): a #[path] wiring reaching one file
+    # under two module names must be scanned under each libtest path it
+    # produces.
     visited = set()
     # The fourth queue element marks files rustc loaded through an
     # explicit `#[path]`: mod_file_path returns DirOwnership
@@ -844,13 +852,45 @@ def _scan_graph():
     # `<stem>/` rule to wired files too, reading a file rustc never loads
     # while the real sibling source stayed unscanned — rustc 1.99 probes,
     # both directions).
-    queue = [(lib_root, [], True, False)]
+    # Round-17 review: a `#[path]` declaration whose module name matches
+    # its target's basename ALSO matched the externals' conventional
+    # candidates — `#[path = "shared.rs"] mod shared;` found src/shared.rs
+    # through both loops, the externals enqueue won the FIFO race with
+    # path_loaded=False, and the realpath-only visited set then dropped
+    # the correct wired entry, so the scan read the stem-directory decoy
+    # (four-control 0/1/0/1 instead of 1/0/0/1). Two fixes: an
+    # explicit-path declaration is resolved ONLY through its attribute
+    # target (the wired loop owns it; rustc never loads the conventional
+    # spot for it), and the visited key is the (realpath, module path)
+    # scan CONTEXT — one physical file wired under two module names is
+    # two libtest paths (rustc 1.99 probe: `#[path = "shared.rs"]
+    # mod alpha;` + `mod beta;` lists alpha::inner::t AND beta::inner::t),
+    # while the ancestor chain carried alongside rejects circular module
+    # graphs exactly where rustc's own loader stops (circular modules).
+    queue = [(lib_root, [], True, False, frozenset())]
     while queue:
-        path, base, is_crate_root, path_loaded = queue.pop(0)
+        path, base, is_crate_root, path_loaded, ancestors = queue.pop(0)
         real = os.path.realpath(path)
-        if real in visited:
+        context = (real, tuple(base))
+        if context in visited:
             continue
-        visited.add(real)
+        visited.add(context)
+        chain = ancestors | {real}
+
+        def _enqueue(candidate, child_base, crate_root, loaded, chain=chain):
+            # A candidate already on the chain of ancestors that produced
+            # it is a module cycle: rustc refuses to build such a crate
+            # ("circular modules"), so a scan that kept walking would only
+            # model a graph no libtest list can come from — fail closed
+            # with rustc's own wording instead (round-17 review).
+            if os.path.realpath(candidate) in chain:
+                raise SystemExit(
+                    "test-registry-guard: circular modules: "
+                    f"{path} -> {candidate} — rustc rejects the module "
+                    "graph, refusing to scan it"
+                )
+            queue.append((candidate, child_base, crate_root, loaded, chain))
+
         try:
             with open(path, encoding="utf-8", errors="replace") as fh:
                 lines = fh.read().splitlines()
@@ -916,7 +956,17 @@ def _scan_graph():
         wired, inline_dirs = _path_wired_mods(
             stripped, lines, stacks, path, plain_file, child_dir, file_dir
         )
+        # An explicit `#[path]` declaration never falls back to the
+        # conventional candidates probed below: rustc resolves it ONLY to
+        # the attribute target, which the wired loop enqueues — with the
+        # mod.rs-like ownership tag the conventional spot must not carry
+        # (round-17 review: `#[path = "shared.rs"] mod shared;` has
+        # src/shared.rs sitting at BOTH spots, and the conventional
+        # enqueue won the FIFO race with the wrong ownership).
+        wired_names = {(estack, name) for name, _rel, estack in wired}
         for name, estack in externals:
+            if (estack, name) in wired_names:
+                continue
             mod_dir = os.path.join(
                 _inline_base(
                     child_dir, file_dir, plain_file, estack, inline_dirs
@@ -928,8 +978,8 @@ def _scan_graph():
                 os.path.join(mod_dir, name, "mod.rs"),
             ):
                 if os.path.isfile(candidate):
-                    queue.append(
-                        (candidate, base + list(estack) + [name], False, False)
+                    _enqueue(
+                        candidate, base + list(estack) + [name], False, False
                     )
                     break
         # `#[path = "..."]` wiring (12 real sites, e.g. file_ingest.rs).
@@ -947,9 +997,12 @@ def _scan_graph():
         # reading it let an unwired leftover file fabricate attribution.
         # Round-15 review: that first override REPLACES the non-mod-rs
         # pending stem instead of appending after it (`_inline_base`).
-        # The conventional candidates do not exist for wirings, so both
-        # resolutions coexist without double visits (the graph dedups by
-        # realpath).
+        # The conventional candidates do not exist for wirings — an
+        # explicit-path declaration is excluded from that probing above
+        # (round-17 review) — so both resolutions coexist without double
+        # visits (the graph dedups by the (realpath, module path) scan
+        # context, so one physical file wired under two module names is
+        # scanned under each libtest path it produces).
         for name, rel, estack in wired:
             if estack:
                 candidate = os.path.normpath(
@@ -973,7 +1026,7 @@ def _scan_graph():
                 # the wired file itself is mod.rs-like: path_loaded tags
                 # the queue entry so ITS children resolve beside it
                 # (round-16 review)
-                queue.append((candidate, mod_path + [name], False, True))
+                _enqueue(candidate, mod_path + [name], False, True)
     return by_path, unattributable, attributable
 
 
@@ -1005,7 +1058,10 @@ def _pin_ignored_locations(pin, by_path, unattributable):
     be pinned by committed regressions, not one-off manual runs)."""
     matched = list(by_path.get(pin, []))
     matched.extend(unattributable.get(pin.rsplit("::", 1)[-1], []))
-    return matched
+    # One physical file wired under two module paths is scanned once per
+    # context (round-17 review); its unparseable-fn leaf hits then repeat
+    # the same locations — dedupe, order preserved.
+    return list(dict.fromkeys(matched))
 
 
 def main():

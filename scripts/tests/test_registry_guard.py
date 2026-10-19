@@ -1284,20 +1284,24 @@ class Round13HardeningTests(GuardFixture):
         # `#[path = "main.rs"] mod entry;` + `mod inner;` loads the
         # SIBLING src/inner.rs — the stem-directory file `main/inner.rs`
         # is not a lib source at all, and the live twin sitting there
-        # must not satisfy the scan.
-        by_path, unattributable = self._ignored_sources(
-            {
-                "lib.rs": '#[path = "main.rs"]\nmod entry;\n',
-                "main.rs": "mod inner;\n",
-                "inner.rs": _IGNORED_PIN,
-                "main/inner.rs": _LIVE_PIN,
-            }
-        )
+        # must not satisfy the scan. The location is compared EXACTLY
+        # against `_src_path` (round-17 review): a hardcoded-slash
+        # `endswith` rejected the scanner's legitimate backslash output
+        # on Windows and the `"/main/"` decoy exclusion went blind to it.
+        files = {
+            "lib.rs": '#[path = "main.rs"]\nmod entry;\n',
+            "main.rs": "mod inner;\n",
+            "inner.rs": _IGNORED_PIN,
+            "main/inner.rs": _LIVE_PIN,
+        }
+        root = self._crate_root(files)
+        by_path, unattributable = self._scan(root)
         self.assertEqual(sorted(by_path), ["entry::inner::tests::critical_pin"])
         self.assertEqual(unattributable, {})
-        for loc in by_path["entry::inner::tests::critical_pin"]:
-            self.assertTrue(loc.endswith("/inner.rs:4"), loc)
-            self.assertNotIn("/main/", loc)
+        self.assertEqual(
+            by_path["entry::inner::tests::critical_pin"],
+            [self._src_path(root, "inner.rs") + ":4"],
+        )
 
     def test_wired_file_stem_directory_is_not_a_lib_source(self):
         # Reverse control for the corrected rule: an #[ignore] at the
@@ -1972,20 +1976,24 @@ class Round16PathFileOwnershipTests(GuardFixture):
         # The review's fixture 1: the real sibling source carries the
         # #[ignore], the stem-directory twin is live — the scan must
         # attribute the pin AT src/inner.rs (pre-fix it read exactly the
-        # unwired shim/inner.rs and passed).
-        by_path, unattributable = self._ignored_sources(
-            {
-                "lib.rs": self._LIB,
-                "shim.rs": self._SHIM,
-                "inner.rs": _IGNORED_PIN,
-                "shim/inner.rs": _LIVE_PIN,
-            }
-        )
+        # unwired shim/inner.rs and passed). Exact `_src_path` equality
+        # instead of a slash-suffixed endswith (round-17 review: the
+        # hardcoded separator rejected the scanner's backslash output on
+        # Windows, and the `"/shim/"` exclusion missed that form too).
+        files = {
+            "lib.rs": self._LIB,
+            "shim.rs": self._SHIM,
+            "inner.rs": _IGNORED_PIN,
+            "shim/inner.rs": _LIVE_PIN,
+        }
+        root = self._crate_root(files)
+        by_path, unattributable = self._scan(root)
         self.assertEqual(sorted(by_path), [self._PIN])
         self.assertEqual(unattributable, {})
-        for loc in by_path[self._PIN]:
-            self.assertTrue(loc.endswith("/inner.rs:4"), loc)
-            self.assertNotIn("/shim/", loc)
+        self.assertEqual(
+            by_path[self._PIN],
+            [self._src_path(root, "inner.rs") + ":4"],
+        )
 
     def test_stem_twin_decoy_cannot_frame_live_pin(self):
         # Reverse half: with the real sibling source live, the #[ignore]
@@ -2006,50 +2014,58 @@ class Round16PathFileOwnershipTests(GuardFixture):
         # Ownership covers every child shape: a plain inline module in
         # the wired file consumes no stem — `mod outer { mod routed; }`
         # in shim.rs loads src/outer/routed.rs (rustc probe), so the
-        # shim/outer/ twin is a decoy, not the pin's source.
-        by_path, unattributable = self._ignored_sources(
-            {
-                "lib.rs": self._LIB,
-                "shim.rs": "mod outer {\n    mod routed;\n}\n",
-                "outer/routed.rs": _IGNORED_PIN,
-                "shim/outer/routed.rs": _LIVE_PIN,
-            }
-        )
+        # shim/outer/ twin is a decoy, not the pin's source. Exact
+        # `_src_path` equality (round-17 review) — the slash-substring
+        # decoy exclusion was vacuous against Windows backslash output.
+        files = {
+            "lib.rs": self._LIB,
+            "shim.rs": "mod outer {\n    mod routed;\n}\n",
+            "outer/routed.rs": _IGNORED_PIN,
+            "shim/outer/routed.rs": _LIVE_PIN,
+        }
+        root = self._crate_root(files)
+        by_path, unattributable = self._scan(root)
         self.assertEqual(
             sorted(by_path),
             ["entry::outer::routed::tests::critical_pin"],
         )
         self.assertEqual(unattributable, {})
-        for loc in by_path["entry::outer::routed::tests::critical_pin"]:
-            self.assertNotIn("/shim/", loc)
+        self.assertEqual(
+            by_path["entry::outer::routed::tests::critical_pin"],
+            [self._src_path(root, "outer/routed.rs") + ":4"],
+        )
 
     def test_own_path_inline_in_path_owned_file_uses_file_dir(self):
         # An own-#[path] inline module inside the wired file composes
         # against the file's directory too (rustc probe:
         # `#[path = "redir"] mod s { … }` in shim.rs loads
         # src/redir/real.rs): neither the stem-relative nor the
-        # module-name-relative twin is a lib source.
-        by_path, unattributable = self._ignored_sources(
-            {
-                "lib.rs": self._LIB,
-                "shim.rs": (
-                    '#[path = "redir"]\n'
-                    "mod s {\n"
-                    '    #[path = "real.rs"]\n'
-                    "    mod m;\n"
-                    "}\n"
-                ),
-                "redir/real.rs": _IGNORED_PIN,
-                "shim/redir/real.rs": _LIVE_PIN,
-                "shim/s/real.rs": _LIVE_PIN,
-            }
-        )
+        # module-name-relative twin is a lib source. Exact `_src_path`
+        # equality (round-17 review) — same Windows-separator blindness
+        # as the sibling tests.
+        files = {
+            "lib.rs": self._LIB,
+            "shim.rs": (
+                '#[path = "redir"]\n'
+                "mod s {\n"
+                '    #[path = "real.rs"]\n'
+                "    mod m;\n"
+                "}\n"
+            ),
+            "redir/real.rs": _IGNORED_PIN,
+            "shim/redir/real.rs": _LIVE_PIN,
+            "shim/s/real.rs": _LIVE_PIN,
+        }
+        root = self._crate_root(files)
+        by_path, unattributable = self._scan(root)
         self.assertEqual(
             sorted(by_path), ["entry::s::m::tests::critical_pin"]
         )
         self.assertEqual(unattributable, {})
-        for loc in by_path["entry::s::m::tests::critical_pin"]:
-            self.assertNotIn("/shim/", loc)
+        self.assertEqual(
+            by_path["entry::s::m::tests::critical_pin"],
+            [self._src_path(root, "redir/real.rs") + ":4"],
+        )
 
     def test_main_red_locates_real_sibling_source(self):
         # End to end over the review's false-green fixture: main() fails
@@ -2070,6 +2086,135 @@ class Round16PathFileOwnershipTests(GuardFixture):
         self.assertIn(str(Path("inner.rs")) + ":4", err)
         self.assertNotIn(str(Path("shim") / "inner.rs"), err)
         self.assertNotIn("outside the scanned lib module graph", err)
+
+
+class Round17ExplicitPathOwnershipTests(GuardFixture):
+    """Round-17 review P2 (comment 4308210510): a `#[path]` declaration
+    whose module name matches its target's basename also matched the
+    externals' conventional candidates — `lib.rs:
+    #[path = "shared.rs"] mod shared;` found src/shared.rs through both
+    loops, the externals enqueue won the FIFO race with path_loaded=False,
+    and the realpath-only visited set dropped the correct wired entry, so
+    the scan read the stem-directory decoy (the review's four-control ran
+    0/1/0/1 instead of 1/0/0/1, no cfg needed). One physical file wired
+    under two module names additionally lost every context after the
+    first (rustc 1.99 probe: alpha::inner::t AND beta::inner::t are both
+    libtest paths), and module cycles now fail closed the way rustc's
+    loader does ("circular modules"). Round-17 review P2 (comment
+    4308210515) reworked the round-16 location assertions onto exact
+    `_src_path` equality: the hardcoded-slash `endswith` rejected the
+    scanner's legitimate backslash output on Windows (2 of the reviewer's
+    93 items failed) and the `"/main/"`/`"/shim/"` decoy exclusions went
+    vacuous against it — exact platform-native equality on both sides
+    keeps the assertions honest under BOTH separators."""
+
+    _LIB = '#[path = "shared.rs"]\nmod shared;\n'
+    _SHIM = "mod inner;\n"
+    _PIN = "shared::inner::tests::critical_pin"
+    _run_main = DuplicateRegistrationTests._run_main
+
+    def test_explicit_path_declaration_wins_over_conventional_twin(self):
+        # The review's fixture: real src/inner.rs carries the #[ignore],
+        # the stem-directory decoy src/shared/inner.rs is live — main
+        # must fail AT THE REAL source (pre-fix the decoy satisfied the
+        # scan and the guard returned 0).
+        code, err = self._run_main(
+            [self._PIN],
+            source=self._LIB,
+            required=[self._PIN],
+            files={
+                "shared.rs": self._SHIM,
+                "inner.rs": _IGNORED_PIN,
+                "shared/inner.rs": _LIVE_PIN,
+            },
+        )
+        self.assertEqual(code, 1)
+        self.assertIn(f"required pin {self._PIN} is #[ignore]d at", err)
+        self.assertIn(str(Path("inner.rs")) + ":4", err)
+        self.assertNotIn(str(Path("shared") / "inner.rs"), err)
+        self.assertNotIn("outside the scanned lib module graph", err)
+
+    def test_explicit_path_reverse_control_decoy_cannot_frame(self):
+        # Reverse half of the four-control: the real sibling source is
+        # live, the decoy carries the #[ignore] — the guard must pass
+        # (pre-fix it returned 1 off the wrongly-scanned decoy).
+        code, err = self._run_main(
+            [self._PIN],
+            source=self._LIB,
+            required=[self._PIN],
+            files={
+                "shared.rs": self._SHIM,
+                "inner.rs": _LIVE_PIN,
+                "shared/inner.rs": _IGNORED_PIN,
+            },
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn(str(Path("shared") / "inner.rs"), err)
+
+    def test_one_file_two_module_paths_both_contexts_scanned(self):
+        # The same physical file wired under two module names is two
+        # libtest paths (rustc 1.99 probe): the scan must attribute BOTH
+        # contexts — the realpath-only visited set silently dropped the
+        # second, pushing its pin into the fail-closed outside-graph
+        # branch.
+        lib = (
+            '#[path = "shared.rs"]\nmod alpha;\n'
+            '#[path = "shared.rs"]\nmod beta;\n'
+        )
+        files = {
+            "lib.rs": lib,
+            "shared.rs": self._SHIM,
+            "inner.rs": _IGNORED_PIN,
+        }
+        root = self._crate_root(files)
+        with patch.object(
+            guard, "MANIFEST", str(root / "pinvou3-app/src-tauri/Cargo.toml")
+        ):
+            by_path, unattributable, attributable = guard._scan_graph()
+        self.assertEqual(unattributable, {})
+        self.assertEqual(
+            sorted(attributable),
+            [
+                "alpha::inner::tests::critical_pin",
+                "beta::inner::tests::critical_pin",
+            ],
+        )
+        expected_loc = [self._src_path(root, "inner.rs") + ":4"]
+        self.assertEqual(by_path["alpha::inner::tests::critical_pin"], expected_loc)
+        self.assertEqual(by_path["beta::inner::tests::critical_pin"], expected_loc)
+        # End to end: the second context's pin is judged on the REAL
+        # source, not reported outside the graph.
+        code, err = self._run_main(
+            ["beta::inner::tests::critical_pin"],
+            source=lib,
+            required=["beta::inner::tests::critical_pin"],
+            files={
+                "shared.rs": self._SHIM,
+                "inner.rs": _IGNORED_PIN,
+            },
+        )
+        self.assertEqual(code, 1)
+        self.assertIn(
+            "required pin beta::inner::tests::critical_pin is #[ignore]d at",
+            err,
+        )
+        self.assertNotIn("outside the scanned lib module graph", err)
+
+    def test_circular_module_graph_fails_closed(self):
+        # rustc refuses a #[path] module cycle ("circular modules:
+        # src/a.rs -> src/a.rs", rustc 1.99 probe); the scan mirrors that
+        # refusal instead of walking an unbounded context tree.
+        files = {
+            "lib.rs": '#[path = "a.rs"]\nmod a;\n',
+            "a.rs": '#[path = "a.rs"]\nmod b;\n',
+        }
+        root = self._crate_root(files)
+        with patch.object(
+            guard, "MANIFEST", str(root / "pinvou3-app/src-tauri/Cargo.toml")
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                guard.ignored_source_pins()
+        self.assertIn("circular modules", str(ctx.exception))
 
 
 if __name__ == "__main__":
