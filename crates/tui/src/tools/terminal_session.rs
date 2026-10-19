@@ -717,7 +717,7 @@ impl ToolSpec for TerminalRunTool {
         "Run a command in a persistent PTY shell session. cd, exports, shell functions, and activated environments persist across calls in this process. Identity and a non-secret last-known summary persist across restarts; prior shells are surfaced as stale/lost and are never reattached. On timeout the wait is abandoned but the command keeps running in the session (use terminal/wait or cancel). (Unix only)"
     );
     fn input_schema(&self) -> serde_json::Value {
-        json!({"type":"object","properties":{"command":{"type":"string"},"session":{"type":"string","default":"term-1"},"timeout_secs":{"type":"integer","default":120}},"required":["command"]})
+        json!({"type":"object","properties":{"command":{"type":"string"},"session":{"type":"string","default":"term-1"},"timeout_secs":{"type":"integer","default":120,"minimum":1,"maximum":600}},"required":["command"]})
     }
     async fn execute(
         &self,
@@ -777,7 +777,8 @@ impl ToolSpec for TerminalSendTool {
             let name = session_name(&input, true)?.to_string();
             let text = required_str(&input, "text")?.as_bytes().to_vec();
             let session = find(&name, &context.workspace).map_err(ToolError::execution_failed)?;
-            let wait = Duration::from_millis(optional_u64(&input, "wait_ms", 250)?.min(60_000));
+            let wait =
+                Duration::from_millis(optional_u64(&input, "wait_ms", 250)?.clamp(1, 60_000));
             return tokio::task::spawn_blocking(move || {
                 let mut session = session
                     .lock()
