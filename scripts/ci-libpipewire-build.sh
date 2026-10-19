@@ -37,6 +37,7 @@ sudo apt-get update -qq
 sudo apt-get install -y --no-install-recommends meson ninja-build ca-certificates curl
 
 curl --proto '=https' --tlsv1.2 --location --silent --show-error --fail \
+  --retry 3 --retry-delay 2 --retry-max-time 180 \
   "https://gitlab.freedesktop.org/pipewire/pipewire/-/archive/${PW_VERSION}/pipewire-${PW_VERSION}.tar.gz" \
   -o "$work/pipewire.tar.gz"
 echo "$PW_SHA256  $work/pipewire.tar.gz" | sha256sum --check --status
