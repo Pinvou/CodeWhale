@@ -162,6 +162,13 @@ func TestProfileClosureWritersRespectSubjectFence(t *testing.T) {
 				if err != nil || item == nil {
 					t.Fatal(err)
 				}
+				if err = r.EnterAccountClosureQuiescing(ctx, *item); err != nil {
+					t.Fatal(err)
+				}
+				item, err = r.ClaimAccountClosure(ctx)
+				if err != nil || item == nil {
+					t.Fatal("actual post-quiet claim", err)
+				}
 				if err = r.AdvanceAccountClosureToIdentityCleanup(ctx, *item); err != nil {
 					t.Fatal(err)
 				}
@@ -245,6 +252,13 @@ func TestProfileClosureWritersRespectSubjectFence(t *testing.T) {
 				item, err := r.ClaimAccountClosure(ctx)
 				if err != nil || item == nil {
 					t.Fatal(err)
+				}
+				if err = r.EnterAccountClosureQuiescing(ctx, *item); err != nil {
+					t.Fatal(err)
+				}
+				item, err = r.ClaimAccountClosure(ctx)
+				if err != nil || item == nil {
+					t.Fatal("actual post-quiet claim", err)
 				}
 				if err = r.AdvanceAccountClosureToIdentityCleanup(ctx, *item); err != nil {
 					t.Fatal(err)

@@ -132,6 +132,25 @@ test('member page clients preserve opaque cursor, unit filter and cancellation s
  const query=new URL(requests[0].path,'https://fixture.invalid').searchParams;
  assert.equal(query.get('unit_id'),unit);assert.equal(query.get('limit'),'2');assert.equal(query.get('cursor'),'previous+/opaque=');assert.equal(requests[0].options.signal,controller.signal);
 });
+
+test('Desktop member and quota member lists transport first and subsequent Go-format pages', async()=>{
+ const requests=[];
+ const client=new OrganizationClient(new AccountPlatformDesktopClient({request:async input=>{
+  requests.push(input);return {status:200,body:{items:[],next_cursor:null}};
+ }}));
+ for(const [method,resource,unitID] of [['members','members',null],['members','members',grantID],['quotaMembers','quota-members',null]]) {
+  await client[method](org);
+  assert.deepEqual(requests.at(-1),{area:'account',resource:`/v1/organizations/${org}/${resource}?limit=50`,method:'GET',body:undefined,idempotencyKey:undefined});
+  const cursor=Buffer.from(JSON.stringify({resource,organization_id:org,unit_id:unitID,name:'Member 测试',user_id:user})).toString('base64url');
+  await client[method](org,{limit:200,...(unitID?{unit_id:unitID}:{}),cursor});
+  const request=requests.at(-1),query=new URL(request.resource,'https://fixture.invalid').searchParams;
+  assert.equal(request.area,'account');assert.equal(request.method,'GET');
+  assert.equal(query.get('limit'),'200');assert.equal(query.get('unit_id'),unitID);assert.equal(query.get('cursor'),cursor);
+  assert.deepEqual([...query.keys()],unitID?['limit','unit_id','cursor']:['limit','cursor']);
+  assert.equal(request.body,undefined);assert.equal(request.idempotencyKey,undefined);
+ }
+ assert.equal(requests.length,6);
+});
 test('quota member pages retain next cursor and reject missing or malformed pagination facts',async()=>{
  const requests=[];const client=new OrganizationClient({request:async(area,path)=>{requests.push(path);return {items:[{user_id:user,version:1}],next_cursor:'quota-next'};}});
  assert.equal((await client.quotaMembers(org,{limit:2,cursor:'quota-first'})).next_cursor,'quota-next');

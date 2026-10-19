@@ -76,6 +76,13 @@ func TestCommerceClosureCallbacksRespectSubjectFence(t *testing.T) {
 				}
 				return string(b)
 			}
+			if _, e = r.CreateAccountClosure(ctx, p, uuid.NewString(), "CLOSE_MY_ACCOUNT"); e != nil {
+				t.Fatal(e)
+			}
+			item, e := r.ClaimAccountClosure(ctx)
+			if e != nil || item == nil {
+				t.Fatal("actual pre-quiet claim", e)
+			}
 			if name == "complete-user-wait" || name == "retry-user-wait" {
 				blocker, e := pgx.Connect(ctx, f.serviceURL(t, c, "account_service"))
 				if e != nil {
@@ -91,7 +98,9 @@ func TestCommerceClosureCallbacksRespectSubjectFence(t *testing.T) {
 					t.Fatal(e)
 				}
 				closing := make(chan error, 1)
-				go func() { _, e := r.CreateAccountClosure(ctx, p, uuid.NewString(), "CLOSE_MY_ACCOUNT"); closing <- e }()
+				// Request creation remains ACTIVE now. Race the actual quiet-period
+				// transition against the callback, preserving the original fence.
+				go func() { closing <- r.EnterAccountClosureQuiescing(ctx, *item) }()
 				wait := func(pattern string) {
 					deadline := time.Now().Add(5 * time.Second)
 					for time.Now().Before(deadline) {
@@ -111,7 +120,7 @@ func TestCommerceClosureCallbacksRespectSubjectFence(t *testing.T) {
 					}
 					t.Fatal("real callback/closure did not wait on subject row", pattern)
 				}
-				wait("%identities identity JOIN users u%FOR UPDATE OF u%")
+				wait("%SELECT u.status,u.version FROM users u JOIN account_closure_requests%FOR UPDATE OF u%")
 				done := make(chan error, 1)
 				go func() { done <- callback() }()
 				wait("%SELECT status,subject_lifecycle_version FROM users%FOR SHARE%")
@@ -129,10 +138,10 @@ func TestCommerceClosureCallbacksRespectSubjectFence(t *testing.T) {
 					t.Fatal("late callback overwrote closure state", status, user, e)
 				}
 			} else {
-				if _, e = r.CreateAccountClosure(ctx, p, uuid.NewString(), "CLOSE_MY_ACCOUNT"); e != nil {
+				if e = r.EnterAccountClosureQuiescing(ctx, *item); e != nil {
 					t.Fatal(e)
 				}
-				item, e := r.ClaimAccountClosure(ctx)
+				item, e = r.ClaimAccountClosure(ctx)
 				if e != nil || item == nil {
 					t.Fatal(e)
 				}

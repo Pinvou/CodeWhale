@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseRegistrationBonusJSON, encodeRegistrationBonusJSON, bonusRevision, MAX_BONUS_POINTS, registrationBonusReasonIsValid } from '../src/features/account-platform/registration-bonus-contract.js';
+import { parseRegistrationBonusJSON, encodeRegistrationBonusJSON, bonusRevision, MAX_BONUS_POINTS, registrationBonusReasonIsValid, registrationBonusFormIsValid } from '../src/features/account-platform/registration-bonus-contract.js';
 import { readBonusPending, persistBonusPending, clearBonusPending, bonusAttemptProvesNoWrite } from '../src/features/account-platform/registration-bonus-recovery.js';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
 import { adminPlatformCopy } from '../src/shared/i18n.js';
@@ -51,6 +51,25 @@ test('reason bounds use trimmed Unicode code points, matching the existing wire 
     if (valid) assert.equal(JSON.parse(encodeRegistrationBonusJSON({ ...body, reason })).reason, reason.trim());
     else assert.throws(() => encodeRegistrationBonusJSON({ ...body, reason }), /INVALID_REGISTRATION_BONUS_REQUEST/);
   }
+});
+
+test('new policy form requires explicit bounded numbers and a complete reason while preserving zero', () => {
+  const form = { enabled: true, amount_points: '0', validity_days: '30', reason: body.reason };
+  assert.equal(registrationBonusFormIsValid(form), true);
+  assert.equal(registrationBonusFormIsValid({ ...form, amount_points: String(MAX_BONUS_POINTS), validity_days: '3650' }), true);
+  assert.equal(registrationBonusFormIsValid({ ...form, amount_points: ' 0 ', validity_days: ' 1 ' }), true);
+  for (const amount_points of ['', ' ', '\t\n', '-1', '0.5', String(MAX_BONUS_POINTS + 1), '9007199254740992', 'Infinity', 'NaN', null, 0]) {
+    assert.equal(registrationBonusFormIsValid({ ...form, amount_points }), false, `amount ${JSON.stringify(amount_points)}`);
+  }
+  for (const validity_days of ['', ' ', '0', '-1', '1.5', '3651', 'Infinity', null, 30]) {
+    assert.equal(registrationBonusFormIsValid({ ...form, validity_days }), false, `validity ${JSON.stringify(validity_days)}`);
+  }
+  for (const reason of ['', ' '.repeat(10), 'a'.repeat(9), '😀'.repeat(501)]) {
+    assert.equal(registrationBonusFormIsValid({ ...form, reason }), false);
+  }
+  assert.equal(registrationBonusFormIsValid({ ...form, reason: '😀'.repeat(10) }), true);
+  assert.equal(registrationBonusFormIsValid({ ...form, enabled: 'true' }), false);
+  assert.equal(registrationBonusFormIsValid(null), false);
 });
 
 test('legal non-BMP recovery preserves the original actor, request key and complete reason', () => {

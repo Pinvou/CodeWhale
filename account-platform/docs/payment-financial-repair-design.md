@@ -4,7 +4,7 @@
 
 ## 1. 设计冻结时的命令现状（历史）
 
-当前 F12 装配使用 Account 原 `000073` consumer route、Billing 原 `000065/000066` 及 `000077` requester 审计迁移，并保留 `900016_payment_activation_execution_lock` 与 `900017_payment_repair_order_lookup` 的原 Up/Down 身份；专属 durable 为 `billing-payment-financial-repair-executor-p1-v1`，沿既有 `RunBillingApprovalConsumers` 与资源注册，无新增消费开关。只有默认 INACTIVE 已保留，以下“仅元数据/无 handler”等描述是设计冻结时的记录。
+当前 F12 装配使用 Account 原 `000073` consumer route、Billing 原 `000065/000066` 及 `000077` requester 审计迁移，并保留 `900016_payment_activation_execution_lock` 与 `900017_payment_repair_order_lookup` 的原 Up/Down 身份；专属 durable 为 `billing-payment-financial-repair-executor-p1-v1`，沿既有 `cmd/billing-service/main.go` 中 `approvalconsumer.BillingCommands()` 的注册循环与资源注册，无新增消费开关。只有默认 INACTIVE 已保留，以下“仅元数据/无 handler”等描述是设计冻结时的记录。
 
 - **只有策略元数据**：Account `approval_command_policies`/`approvalpolicy` 登记 `policy_version=1 / snapshot_schema_version=1 / APPROVAL_REQUIRED`，请求/审批权限 `platform.billing.repairs.request|approve`、`FINANCIAL_FACT_CHANGE`、一名非申请人审批、24 小时有效期、5 分钟执行窗口、执行身份 `billing-command-executor`（`migrations/account/000018_approval_commands.up.sql`、`internal/platform/approvalpolicy/registry.go`）。
 - **静态不可执行**：不在 `executableApprovalCommands` 内，create/update/submit/APPROVE/Begin 全部失败关闭。
