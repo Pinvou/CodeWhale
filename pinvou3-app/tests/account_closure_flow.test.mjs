@@ -2,12 +2,14 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  accountClosureBlockerLabel,
   accountClosurePresentation,
   accountClosureQueryStatus,
   accountClosureResumeAction,
   queryAccountClosure,
   submitAccountClosure,
 } from '../src/features/account-platform/account-closure-flow.js';
+import { accountClosureCopy } from '../src/shared/account-closure-i18n.js';
 
 function domainError(status, code = '') {
   return Object.assign(new Error(code || `HTTP ${status}`), { status, code });
@@ -138,4 +140,44 @@ test('account closure presentation permits a request only after an authoritative
     accountClosurePresentation({ queryStatus: accountClosureQueryStatus.error, closure: { closure_request_id: 'closure-1' } }),
     { state: 'existing', canRequest: false, canRetry: true },
   );
+});
+
+test('account closure blocker labels preserve known translations and unknown code/action fallbacks', () => {
+  for (const copy of Object.values(accountClosureCopy)) {
+    assert.equal(accountClosureBlockerLabel({ code: 'PERSONAL_BALANCE_NONZERO', user_action: 'CLEAR_PERSONAL_BALANCE', domain: 'BILLING' }, copy),
+      `${copy.blockerCodes.PERSONAL_BALANCE_NONZERO} — ${copy.actionCodes.CLEAR_PERSONAL_BALANCE}`);
+    assert.equal(accountClosureBlockerLabel({ code: 'UNKNOWN_CODE', user_action: 'UNKNOWN_ACTION', domain: 'TOKEN' }, copy),
+      'UNKNOWN_CODE — UNKNOWN_ACTION');
+    for (const action of ['', null, undefined]) {
+      assert.equal(accountClosureBlockerLabel({ code: 'UNKNOWN_CODE', user_action: action, domain: 'TOKEN' }, copy),
+        'UNKNOWN_CODE — TOKEN');
+    }
+  }
+});
+
+test('account closure blocker labels never render inherited prototype members', () => {
+  for (const copy of Object.values(accountClosureCopy)) {
+    for (const code of ['constructor', 'toString', '__proto__']) {
+      assert.equal(accountClosureBlockerLabel({ code, user_action: 'CLEAR_PERSONAL_BALANCE', domain: 'BILLING' }, copy),
+        `${code} — ${copy.actionCodes.CLEAR_PERSONAL_BALANCE}`);
+      assert.equal(accountClosureBlockerLabel({ code: 'PERSONAL_BALANCE_NONZERO', user_action: code, domain: 'BILLING' }, copy),
+        `${copy.blockerCodes.PERSONAL_BALANCE_NONZERO} — ${code}`);
+      assert.equal(accountClosureBlockerLabel({ code, user_action: code, domain: 'BILLING' }, copy), `${code} — ${code}`);
+      assert.equal(accountClosureBlockerLabel({ code, user_action: '', domain: 'BILLING' }, copy), `${code} — BILLING`);
+    }
+  }
+});
+
+test('account closure blocker labels work without Object.hasOwn', () => {
+  const descriptor = Object.getOwnPropertyDescriptor(Object, 'hasOwn');
+  try {
+    Object.defineProperty(Object, 'hasOwn', { configurable: true, writable: true, value: undefined });
+    assert.equal(accountClosureBlockerLabel({ code: '__proto__', user_action: 'constructor', domain: 'ACCOUNT' }, accountClosureCopy.en),
+      '__proto__ — constructor');
+    assert.equal(accountClosureBlockerLabel({ code: 'PERSONAL_BALANCE_NONZERO', user_action: '', domain: 'BILLING' }, accountClosureCopy.en),
+      `${accountClosureCopy.en.blockerCodes.PERSONAL_BALANCE_NONZERO} — BILLING`);
+  } finally {
+    if (descriptor) Object.defineProperty(Object, 'hasOwn', descriptor);
+    else delete Object.hasOwn;
+  }
 });

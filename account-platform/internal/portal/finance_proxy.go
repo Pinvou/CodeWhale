@@ -29,7 +29,7 @@ func (s *Service) proxyAdminBilling(w http.ResponseWriter, r *http.Request) {
 // Usage repair and later governance paths remain outside this stage.
 func billingAdminPathAllowed(method, resource string) bool {
 	if resource == "/admin/v1/registration-bonus-policy" {
-		return method == http.MethodGet || method == http.MethodPut
+		return method == http.MethodGet || method == http.MethodHead || method == http.MethodPut
 	}
 	if pricingAdminPathAllowed(method, resource) {
 		return true

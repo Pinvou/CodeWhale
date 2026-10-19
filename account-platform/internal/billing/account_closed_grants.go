@@ -144,7 +144,7 @@ SELECT 1 FROM member_quota_hold_allocations a JOIN usage_holds h ON h.id=a.hold_
 UNION ALL SELECT 1 FROM refunds WHERE entitlement_package_id=$2 AND status IN ('REQUESTED','MANUAL_REVIEW')
 UNION ALL SELECT 1 FROM chargeback_cases WHERE entitlement_package_id=$2 AND status='REVIEW_REQUIRED'
 UNION ALL SELECT 1 FROM reconciliation_cases c JOIN entitlement_packages p ON p.payment_order_id=c.payment_order_id WHERE p.id=$2 AND c.status IN ('OPEN','IN_REVIEW')
-UNION ALL SELECT 1 FROM payment_anomaly_cases anomaly JOIN entitlement_packages payment ON payment.payment_order_id=anomaly.payment_order_id WHERE payment.id=$2 AND anomaly.status='OPEN'
+UNION ALL SELECT 1 FROM payment_anomaly_cases anomaly JOIN entitlement_packages payment ON payment.payment_order_id=anomaly.payment_order_id WHERE payment.id=$2 AND (anomaly.status='OPEN' OR (anomaly.status='RESOLVED' AND anomaly.financial_action_status='PENDING'))
 )`, grant.ID, grant.PackageID).Scan(&frozen); err != nil {
 		return AccountClosedGrantReclaim{}, err
 	}

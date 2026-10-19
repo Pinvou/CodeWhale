@@ -326,9 +326,10 @@ func (r *PostgresRepository) AnonymizeAccountClosure(ctx context.Context, item *
 	}
 	closureID, userID := item.ID, item.UserID
 	var userCode, stage string
+	var email *string
 	var identityDeletedAt, grantsIsolatedAt, replayClearedAt *time.Time
 	var currentLifecycle int64
-	err = tx.QueryRow(ctx, `SELECT users.user_code,users.subject_lifecycle_version,request.stage,request.identity_deleted_at,request.grants_isolated_at,request.token_replays_cleared_at FROM account_closure_requests request JOIN users ON users.id=request.user_id WHERE request.id=$1 AND request.user_id=$2 FOR UPDATE OF request,users`, closureID, userID).Scan(&userCode, &currentLifecycle, &stage, &identityDeletedAt, &grantsIsolatedAt, &replayClearedAt)
+	err = tx.QueryRow(ctx, `SELECT users.user_code,users.subject_lifecycle_version,request.stage,request.identity_deleted_at,request.grants_isolated_at,request.token_replays_cleared_at,users.email FROM account_closure_requests request JOIN users ON users.id=request.user_id WHERE request.id=$1 AND request.user_id=$2 FOR UPDATE OF request,users`, closureID, userID).Scan(&userCode, &currentLifecycle, &stage, &identityDeletedAt, &grantsIsolatedAt, &replayClearedAt, &email)
 	if err != nil {
 		return err
 	}
@@ -361,10 +362,16 @@ EXISTS(SELECT 1 FROM commerce_customer_sync_jobs WHERE subject_type='USER' AND s
 	if _, err := tx.Exec(ctx, `UPDATE registration_operations SET username_normalized='closed_'||replace(gen_random_uuid()::text,'-',''),mobile_e164='closed:'||gen_random_uuid()::text,identity_subject=NULL,updated_at=$2 WHERE candidate_user_id=$1 OR committed_user_id=$1`, userID, now); err != nil {
 		return err
 	}
-	// The accepting recipient owns these mutable contact projections. Preserve
-	// invitation status and frozen identity/digest/token facts, including other
+	// The recipient owns accepted contact projections and terminal EMAIL
+	// contacts matching their locked current email. Keep this at final cleanup,
+	// including requests already prepared before this cleanup was installed.
+	// Preserve status and frozen identity/digest/token facts, including other
 	// recipients' invitations issued by the closing user.
-	if _, err := tx.Exec(ctx, `UPDATE invitations SET email_normalized=NULL,target_hint=NULL,version=version+1,updated_at=$2 WHERE accepted_by=$1 AND status='ACCEPTED' AND (email_normalized IS NOT NULL OR target_hint IS NOT NULL)`, userID, now); err != nil {
+	var emailDigest []byte
+	if email != nil && normalizeEmail(*email) != "" {
+		emailDigest = invitationTargetDigest(normalizeEmail(*email))
+	}
+	if _, err := tx.Exec(ctx, `UPDATE invitations SET email_normalized=NULL,target_hint=NULL,version=version+1,updated_at=$2 WHERE ((accepted_by=$1 AND status='ACCEPTED') OR (target_type='EMAIL' AND status IN ('EXPIRED','REVOKED') AND (target_digest=$3 OR accepted_by=$1))) AND (email_normalized IS NOT NULL OR target_hint IS NOT NULL)`, userID, now, emailDigest); err != nil {
 		return err
 	}
 	// Terminal bootstrap credentials no longer authenticate. Their retained

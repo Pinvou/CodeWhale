@@ -97,6 +97,17 @@ func TestF07PolicyInstalledRoutes(t *testing.T) {
 			t.Fatalf("PUT status=%d writes=%d policy=%s", w.Code, repo.writes, w.Header().Get("X-Command-Type"))
 		}
 	})
+	t.Run("head-reuses-read-permission-without-mutation", func(t *testing.T) {
+		n := repo.writes
+		if w := call("HEAD", ""); w.Code != 200 || seen != "platform.registration-bonus.read" || repo.writes != n {
+			t.Fatalf("HEAD status=%d permission=%s writes=%d", w.Code, seen, repo.writes)
+		}
+		allowed = false
+		defer func() { allowed = true }()
+		if w := call("HEAD", ""); w.Code != 403 || repo.writes != n {
+			t.Fatalf("denied HEAD status=%d writes=%d", w.Code, repo.writes)
+		}
+	})
 	t.Run("permission-denied-before-mutation", func(t *testing.T) {
 		allowed = false
 		defer func() { allowed = true }()
