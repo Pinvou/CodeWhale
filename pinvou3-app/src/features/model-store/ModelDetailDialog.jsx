@@ -379,24 +379,54 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
                   确实需要能重来一次。详情页是主动打开、带着上下文的那一面，
                   放一个随时可用的修复动作是合适的。
                 运行中禁用：重新部署会撞上还占着端口的旧容器，必须先停用。 */}
-            <MsButton
-              tone="ghost"
-              disabled={record.status !== 'deployed' || record.running}
-              onClick={() => onRedeploy(record)}
-            >
-              {copy.redeploy}
-            </MsButton>
-            {onUninstall ? (
-              <MsButton
-                tone="danger"
-                disabled={record.running || cardBusy}
-                onClick={() => { onClose(); onUninstall(record); }}
-                data-testid="model-store-detail-uninstall"
-              >
-                {copy.uninstall}
-              </MsButton>
-            ) : null}
-            <MsButton tone="ghost" onClick={onClose}>{copy.detailClose}</MsButton>
+            {/* 智能操作按钮：一个按钮按状态切换（更新脚本 > 卸载部署 > 部署模型）。
+                设计目标：用户在详情页只需要关注一个主操作，不需要在多个按钮间
+                猜测哪个是自己想要的。关闭弹窗走右上角 × 或点击遮罩。 */}
+            {(() => {
+              const hasUpdate = scriptUpdates?.[record.card_id];
+              const isDeployed = record.status === 'deployed';
+              const isRunning = record.running;
+
+              if (hasUpdate) {
+                return (
+                  <MsButton
+                    tone="primary"
+                    disabled={cardBusy}
+                    onClick={() => {
+                      if (window.confirm(isRunning ? copy.updateConfirmRunning : copy.updateConfirmStopped)) {
+                        onClose();
+                        onCardScripts?.(record, false);
+                      }
+                    }}
+                    data-testid="model-store-detail-action-update"
+                  >
+                    {copy.actionUpdate}
+                  </MsButton>
+                );
+              }
+              if (isDeployed) {
+                return (
+                  <MsButton
+                    tone="danger"
+                    disabled={isRunning || cardBusy}
+                    onClick={() => { onClose(); onUninstall?.(record); }}
+                    data-testid="model-store-detail-action-uninstall"
+                  >
+                    {copy.actionUninstall}
+                  </MsButton>
+                );
+              }
+              return (
+                <MsButton
+                  tone="ghost"
+                  disabled={cardBusy}
+                  onClick={() => { onClose(); onRedeploy?.(record); }}
+                  data-testid="model-store-detail-action-deploy"
+                >
+                  {copy.actionDeploy}
+                </MsButton>
+              );
+            })()}
           </div>
         </>
       ) : null}

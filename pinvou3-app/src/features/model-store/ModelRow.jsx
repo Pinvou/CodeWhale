@@ -13,7 +13,7 @@
 // 2. **动作按钮按状态只出一个主动作。** 一个模型在任意时刻只有一件"下一步该做的
 //    事"：没下就下载、下完就部署、部署好就启用、跑着就停用。把四个按钮同时摆出来
 //    再灰掉三个，是把状态机的复杂度甩给用户。
-import { ChevronRight, Download, Play, StopCircle } from '../../components/icons.jsx';
+import { Download, Play, StopCircle } from '../../components/icons.jsx';
 import { ProviderIcon } from '../../components/ProviderIcon.jsx';
 import { formatBytes } from './model-store-logic.js';
 import { resolveBrandIcon } from './model-brand-icon.js';
@@ -261,10 +261,10 @@ function ModelRow({ model, copy, busyKind, scriptUpdate, onOpen, onDownload, onD
             aria-label={copy.detail}
             disabled={busy}
             data-testid="model-store-open-detail"
-            className={`${TRAILING_SLOT} inline-flex items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700 disabled:opacity-40 dark:text-slate-500 dark:hover:bg-slate-500/10 dark:hover:text-slate-300`}
+            className={`${TRAILING_SLOT} inline-flex items-center justify-center rounded-full text-[12px] font-medium text-blue-600 transition-colors hover:bg-blue-50 hover:text-blue-700 disabled:opacity-40 dark:text-blue-400 dark:hover:bg-blue-500/10 dark:hover:text-blue-300`}
             onClick={() => onOpen(model)}
           >
-            <ChevronRight size={16} />
+            {copy.detail}
           </button>
         ) : (
           <span className={TRAILING_SLOT} aria-hidden="true" data-testid="model-store-trailing-spacer" />
