@@ -364,6 +364,68 @@ VALUES($1,$2,'USAGE_OVERAGE',$3,40,40,'OPEN',$4,$4)`, uuid.New(), walletTwo, "us
 		}
 		return value
 	}
+	// An already-bound approval is not a fresh repair opportunity. Match every
+	// persisted approval/evidence/actor identity before returning its receipt.
+	baseReplay := PaymentFinancialRepairExecutionInput{
+		ApprovalRequestID: requestID, AuthorizationEventID: eventID, ApprovalEpoch: 2,
+		ApproverUserID: approvingUserID, RequesterUserID: requestingUserID,
+		ExecutionKey: "payment-repair:" + requestID.String(), PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: activationVersion,
+		Command: command, Frozen: frozenFacts(plan),
+	}
+	for _, scenario := range []struct {
+		name   string
+		change func(*PaymentFinancialRepairExecutionInput)
+	}{
+		{"authorization-event", func(input *PaymentFinancialRepairExecutionInput) { input.AuthorizationEventID = uuid.New() }},
+		{"approval-epoch", func(input *PaymentFinancialRepairExecutionInput) { input.ApprovalEpoch++ }},
+		{"execution-key", func(input *PaymentFinancialRepairExecutionInput) { input.ExecutionKey += ":changed" }},
+		{"order", func(input *PaymentFinancialRepairExecutionInput) { input.Command.PaymentOrderID = uuid.New() }},
+		{"evidence", func(input *PaymentFinancialRepairExecutionInput) { input.Command.PaymentEvidenceID = uuid.New() }},
+		{"requester", func(input *PaymentFinancialRepairExecutionInput) { input.RequesterUserID = uuid.New() }},
+		{"approver", func(input *PaymentFinancialRepairExecutionInput) { input.ApproverUserID = uuid.New() }},
+	} {
+		t.Run("BoundApprovalIdentity/"+scenario.name, func(t *testing.T) {
+			input := baseReplay
+			scenario.change(&input)
+			before := fullFinancialSnapshot()
+			result, err := coordinator.ApplyPaymentFinancialRepair(ctx, input)
+			if !errors.Is(err, ErrConflict) || result != (PaymentFinancialRepairResult{}) {
+				t.Fatal("changed bound identity did not return definite conflict", result, err)
+			}
+			attempt := classifyAuthorizationDomainFailure(err)
+			if !attempt.FailureIsDefinite || attempt.StableFailureCode != "DOMAIN_PRECONDITION_REJECTED" || fullFinancialSnapshot() != before {
+				t.Fatal("bound approval conflict changed financial facts or became UNKNOWN", attempt)
+			}
+		})
+	}
+	t.Run("BoundApprovalIdentity/another-eligible-order", func(t *testing.T) {
+		otherOrder, _, otherEvidence := seed(100, 100, 80, 20, "RECORDED", "PAY_SUCCESS")
+		otherCommand := PaymentFinancialRepairCommandInput{PaymentOrderID: otherOrder, PaymentEvidenceID: otherEvidence}
+		otherPlan, err := paymentFinancialRepairPlanFrom(ctx, pool, otherCommand, 1, 1, activationVersion)
+		if err != nil {
+			t.Fatal("second target must independently be a valid fresh repair", err)
+		}
+		input := baseReplay
+		input.Command, input.Frozen = otherCommand, frozenFacts(otherPlan)
+		before := fullFinancialSnapshot()
+		result, err := coordinator.ApplyPaymentFinancialRepair(ctx, input)
+		if !errors.Is(err, ErrConflict) || result != (PaymentFinancialRepairResult{}) {
+			t.Fatal("existing approval reused for a valid second order", result, err)
+		}
+		attempt := classifyAuthorizationDomainFailure(err)
+		if !attempt.FailureIsDefinite || attempt.StableFailureCode != "DOMAIN_PRECONDITION_REJECTED" || fullFinancialSnapshot() != before {
+			t.Fatal("second-order conflict became UNKNOWN or changed original/new financial facts", attempt)
+		}
+	})
+	t.Run("BoundApprovalIdentity/exact-receipt-after-deactivation", func(t *testing.T) {
+		setActivation("INACTIVE")
+		defer func() { activationVersion = setActivation("ACTIVE") }()
+		before := fullFinancialSnapshot()
+		result, err := coordinator.ApplyPaymentFinancialRepair(ctx, baseReplay)
+		if err != nil || result != applied || fullFinancialSnapshot() != before {
+			t.Fatal("exact immutable receipt became dependent on fresh-effect activation", result, err)
+		}
+	})
 	for _, scenario := range []struct {
 		name                   string
 		credits, bonus, posted int64
