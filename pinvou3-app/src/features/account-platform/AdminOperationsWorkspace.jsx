@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { secureRequestID } from './request-id.js';
 import { integerMoney } from './finance-contract.js';
-import { bonusRevision, MAX_BONUS_POINTS, registrationBonusReasonIsValid } from './registration-bonus-contract.js';
+import { bonusRevision, MAX_BONUS_POINTS, registrationBonusReasonIsValid, registrationBonusFormIsValid } from './registration-bonus-contract.js';
 import { readBonusPending, persistBonusPending, clearBonusPending, bonusAttemptProvesNoWrite } from './registration-bonus-recovery.js';
 
 const MICROCREDITS_PER_POINT = 10_000n;
@@ -193,7 +193,7 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
     event?.preventDefault();
     if (saveInFlight.current || state.saving || recoveryBlocked) return;
     // An unknown receipt replays its original command, independently of the form.
-    if (!pendingWrite.current && !registrationBonusReasonIsValid(form.reason)) return;
+    if (!pendingWrite.current && !registrationBonusFormIsValid(form)) return;
     const refreshGeneration = Number(authorizationRefreshGuard?.current?.generation || 0);
     const refreshInterrupted = () => Boolean(authorizationRefreshGuard?.current?.active) || Number(authorizationRefreshGuard?.current?.generation || 0) !== refreshGeneration;
     const stopForAuthorizationRefresh = () => setState((value) => ({ ...value, saving: false }));
@@ -299,9 +299,7 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
     } finally { saveInFlight.current = false; }
   };
 
-  const valid = Number.isSafeInteger(Number(form.amount_points)) && Number(form.amount_points) >= 0 && Number(form.amount_points) <= MAX_BONUS_POINTS
-    && Number.isInteger(Number(form.validity_days)) && Number(form.validity_days) >= 1 && Number(form.validity_days) <= 3650
-    && registrationBonusReasonIsValid(form.reason);
+  const valid = registrationBonusFormIsValid(form);
   const eligibilityReady = policy?.eligibility_status === 'READY';
   const reauthenticate = () => {
     if (pendingWrite.current?.actor === currentUserID && canManage) {
