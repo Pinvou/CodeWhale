@@ -1704,4 +1704,13 @@ fn classic_truncation_footer_teaches_a_followable_retry() {
     // for this exact sentence.)
     const REGISTRY_SOURCE: &str = include_str!("../registry.rs");
     assert!(!REGISTRY_SOURCE.contains("full text in workshop variable"));
+    // Round-6 review pin: the same dead-end class for the classic per-call
+    // truncation footer in truncate.rs. Positive pins there stay green if the
+    // dead-end sentence is merely appended, so the source must be scanned —
+    // this test lives outside truncate.rs so its own literal does not count.
+    const TRUNCATE_SOURCE: &str = include_str!("../truncate.rs");
+    assert!(
+        !TRUNCATE_SOURCE.contains("No tool call reaches this copy"),
+        "the classic truncation footer must keep naming the followable retrieval route"
+    );
 }

@@ -396,6 +396,29 @@ pub fn build_headless_context_report(config: &Config, workspace: &Path) -> Promp
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Why the source map reports the authority recap as omitted, keyed on the
+/// same two conjuncts the append site evaluates — the caller flag mirroring
+/// `!bundled_headless` and the recap trailer gate — so each omission names
+/// the cause that actually produced it instead of attributing every one to
+/// the headless composition.
+fn authority_recap_omission_reason(
+    include_in_report: bool,
+    trailer_appended: bool,
+) -> &'static str {
+    match (include_in_report, trailer_appended) {
+        (true, false) => {
+            "not appended: a static composer or config-directory constitution owns the prompt prefix, so the bundled section the recap cross-references is not guaranteed to be present"
+        }
+        (false, true) => {
+            "not appended: bundled-headless sessions compose a minimal base prompt without the bundled section the recap cross-references"
+        }
+        (false, false) => {
+            "not appended: this headless report path omits the bundled section the recap cross-references, and a static composer or config-directory constitution owning the prompt prefix would omit it independently"
+        }
+        (true, true) => unreachable!("the AlwaysOn arm handles the appended case"),
+    }
+}
+
 fn base_source_entries(
     model: &str,
     workspace: &Path,
@@ -600,11 +623,10 @@ fn base_source_entries(
         CountingConfidence::High,
         Some(3),
     ));
-    if include_authority_recap
-        && crate::prompts::authority_recap_trailer_appended(
-            crate::prompts::static_prompt_composer_installed(),
-        )
-    {
+    let recap_trailer_appended = crate::prompts::authority_recap_trailer_appended(
+        crate::prompts::static_prompt_composer_installed(),
+    );
+    if include_authority_recap && recap_trailer_appended {
         builder.push(SourceEntry::text(
             SourceKind::AuthorityRecap,
             "Authority recap",
@@ -615,11 +637,8 @@ fn base_source_entries(
             Some(1),
         ));
     } else {
-        let reason = if !include_authority_recap {
-            "not appended: bundled-headless sessions compose a minimal base prompt without the bundled section the recap cross-references"
-        } else {
-            "not appended: a static composer or config-directory constitution owns the prompt prefix, so the bundled section the recap cross-references is not guaranteed to be present"
-        };
+        let reason =
+            authority_recap_omission_reason(include_authority_recap, recap_trailer_appended);
         builder.push(SourceEntry::omitted(
             SourceKind::AuthorityRecap,
             "Authority recap",
@@ -985,6 +1004,59 @@ mod tests {
     use codewhale_config::route::RouteLimits;
     use std::fs;
     use tempfile::tempdir;
+
+    // Round-6 review pin: the omission arm must emit an actual Omitted
+    // AuthorityRecap entry whose reason is the one the pure selector picks
+    // for the live gate values — previously the branch had no coverage.
+    #[test]
+    fn headless_report_omits_the_authority_recap_entry_with_a_reason() {
+        let tmp = tempdir().expect("tempdir");
+        let builder = base_source_entries(
+            "test-model",
+            tmp.path(),
+            None,
+            false,
+            false,
+            "en",
+            crate::tui::app::AppMode::Agent,
+            None,
+            None,
+            false,
+        );
+        let recaps: Vec<_> = builder
+            .entries
+            .iter()
+            .filter(|e| e.source_kind == SourceKind::AuthorityRecap)
+            .collect();
+        assert_eq!(recaps.len(), 1, "exactly one authority recap entry");
+        assert_eq!(recaps[0].activation_reason, ActivationReason::Omitted);
+        let expected = authority_recap_omission_reason(
+            false,
+            crate::prompts::authority_recap_trailer_appended(
+                crate::prompts::static_prompt_composer_installed(),
+            ),
+        );
+        assert_eq!(recaps[0].truncation_reason.as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn authority_recap_omission_reason_names_each_cause() {
+        assert!(
+            authority_recap_omission_reason(true, false)
+                .contains("static composer or config-directory constitution"),
+            "composer-owned prefix must name the composer cause"
+        );
+        assert!(
+            authority_recap_omission_reason(false, true).contains("bundled-headless sessions"),
+            "a passing trailer gate with a headless report path must name headless"
+        );
+        let both = authority_recap_omission_reason(false, false);
+        assert!(
+            both.contains("headless report path")
+                && both.contains("static composer or config-directory constitution"),
+            "when both conjuncts fail each must be named: {both}"
+        );
+    }
 
     #[test]
     fn context_report_json_contains_sources_and_tool_results() {
