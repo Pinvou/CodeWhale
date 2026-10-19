@@ -197,7 +197,7 @@ const SECRET_ENV_KEYS: [&str; 1] = ["LMM_HF_TOKEN"];
 ///
 /// 拒绝绝对路径、`..`、以及 Windows 风格的盘符——卡片内容来自网络，路径直接
 /// 拿来拼接就等于把「往任意位置写文件」的能力交给了卡片作者（或中间人）。
-fn sanitize_relative_path(rel: &str) -> Result<PathBuf, ScriptError> {
+pub(super) fn sanitize_relative_path(rel: &str) -> Result<PathBuf, ScriptError> {
     let rel = rel.trim().replace('\\', "/");
     if rel.is_empty() {
         return Err(ScriptError::new("卡片里有一个空的文件路径"));

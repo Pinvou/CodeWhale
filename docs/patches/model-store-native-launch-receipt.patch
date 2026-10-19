@@ -1,6 +1,29 @@
 --- a/native_engine_process.py
 +++ b/native_engine_process.py
-@@ -225,12 +225,19 @@
+@@ -58,6 +58,22 @@
+         if not raw:
+             return None
+         if len(raw) > 65536 or not raw.endswith(b"\0"):
++            # An unrelated process can legitimately have a huge argv (rustc,
++            # browsers, etc.). Exclude only identities proven different; a
++            # truncated candidate engine must still block process operations.
++            executable = root / "exe"
++            if os.readlink(executable) != target["executable"]:
++                return None
++            metadata = executable.stat()
++            if [metadata.st_dev, metadata.st_ino] != target["inode"]:
++                return None
++            prefix = raw.split(b"\0")[:-1]
++            if len(prefix) >= 2:
++                weights = Path(os.fsdecode(prefix[1]))
++                if not weights.is_absolute():
++                    weights = root / "cwd" / weights
++                if str(weights.resolve()) != target["weights"]:
++                    return None
+             raise UnsafeState("无法完整读取引擎身份")
+         args = [os.fsdecode(arg) for arg in raw[:-1].split(b"\0")]
+         if len(args) < 2:
+@@ -225,12 +241,19 @@
                                       stdout=log, stderr=log, close_fds=True, start_new_session=True)
          finally:
              os.close(log)

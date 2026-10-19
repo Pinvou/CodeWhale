@@ -27,6 +27,7 @@
 //! 品悟有自己的更新机制）、`gateway.rs` / `worker.rs` / `system_probe.rs`（分别是
 //! 局域网暴露、双机从机控制、硬件探测，排在后面的阶段）。
 
+mod card_assets;
 pub mod card_update;
 pub mod config;
 pub mod db;

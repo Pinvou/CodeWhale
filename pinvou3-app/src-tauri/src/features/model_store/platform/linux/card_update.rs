@@ -349,7 +349,12 @@ fn normalized_hashes(hashes: Option<&BTreeMap<String, String>>) -> BTreeMap<Stri
     hashes
         .into_iter()
         .flat_map(|map| map.iter())
-        .map(|(path, hash)| (path.clone(), hash.to_ascii_lowercase()))
+        .map(|(path, hash)| {
+            (
+                path.clone(),
+                super::native_card_compat::upstream_digest(path, hash),
+            )
+        })
         .collect()
 }
 
@@ -372,6 +377,19 @@ pub fn preview(rec: &db::StoreModelRecord, card: &StoreCardDetail) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn audited_controller_repairs_are_the_same_catalogue_revision() {
+        use super::super::native_card_compat::{BROKEN, FIXED, LAUNCH_FIXED};
+        for hash in [BROKEN, LAUNCH_FIXED, FIXED] {
+            let hashes = BTreeMap::from([("native_engine_process.py".into(), hash.into())]);
+            assert_eq!(
+                normalized_hashes(Some(&hashes))["native_engine_process.py"],
+                BROKEN
+            );
+        }
+        let hashes = BTreeMap::from([("other.py".into(), FIXED.into())]);
+        assert_eq!(normalized_hashes(Some(&hashes))["other.py"], FIXED);
+    }
     fn package() -> (BTreeMap<String, String>, BTreeMap<String, String>) {
         let scripts = ENTRIES[..6]
             .iter()
