@@ -104,12 +104,19 @@ func TestF08AccountClosureMembershipEventConsumerPublicPostgres(t *testing.T) {
 	}
 	beforeMoney := stageWalletFacts(t, ctx, bc)
 	request, err := ar.CreateAccountClosure(ctx, identity.Principal{Issuer: "closure-membership-contract", Subject: user.String(), AuthenticatedAt: now}, uuid.NewString(), "CLOSE_MY_ACCOUNT")
-	if err != nil || request.Stage != "QUIESCING" {
+	if err != nil || request.Stage != "CLOSURE_REQUESTED" {
 		t.Fatalf("actual closure request: %+v %v", request, err)
 	}
 	claimed, err := ar.ClaimAccountClosure(ctx)
 	if err != nil || claimed == nil || claimed.ID != request.ID {
 		t.Fatal("actual closure claim", err)
+	}
+	if err = ar.EnterAccountClosureQuiescing(ctx, *claimed); err != nil {
+		t.Fatal("actual quiet-period entry", err)
+	}
+	claimed, err = ar.ClaimAccountClosure(ctx)
+	if err != nil || claimed == nil || claimed.ID != request.ID {
+		t.Fatal("actual post-quiet claim", err)
 	}
 	if err = ar.AdvanceAccountClosureToIdentityCleanup(ctx, *claimed); err != nil {
 		t.Fatal(err)

@@ -86,3 +86,33 @@ func TestUserVisibleClosureRemovesInternalIdentifiers(t *testing.T) {
 		t.Fatalf("unexpected public closure: %#v", visible)
 	}
 }
+
+func TestAccountClosureSelfServiceRequiresKnownFinancialAction(t *testing.T) {
+	for _, test := range []struct{ code, action string }{
+		{"PERSONAL_BALANCE_NONZERO", "CLEAR_PERSONAL_BALANCE"},
+		{"RECEIVABLE_OUTSTANDING", "SETTLE_RECEIVABLE"},
+		{"PAYMENT_PROCESSING", "FINISH_PAYMENT_ORDER"},
+	} {
+		if !accountClosureNeedsSelfService([]AccountClosureBlocker{{Domain: "BILLING", Code: test.code, UserAction: test.action}}) {
+			t.Fatal("existing user financial action omitted", test)
+		}
+		for _, invalid := range []AccountClosureBlocker{
+			{Domain: "TOKEN", Code: test.code, UserAction: test.action},
+			{Domain: "BILLING", Code: "UNKNOWN", UserAction: test.action},
+			{Domain: "BILLING", Code: test.code, UserAction: "CONTACT_SUPPORT"},
+		} {
+			if accountClosureNeedsSelfService([]AccountClosureBlocker{invalid}) {
+				t.Fatal("unproven action restored access", invalid)
+			}
+		}
+	}
+	for _, blocker := range []AccountClosureBlocker{
+		{Domain: "BILLING", Code: "UNSETTLED_HOLD", UserAction: "WAIT_FOR_USAGE_SETTLEMENT"},
+		{Domain: "BILLING", Code: "REFUND_UNRESOLVED", UserAction: "FINISH_REFUND"},
+		{Domain: "ACCOUNT", Code: "ORGANIZATION_OWNERSHIP_REQUIRED", UserAction: "TRANSFER_OWNERSHIP"},
+	} {
+		if accountClosureNeedsSelfService([]AccountClosureBlocker{blocker}) {
+			t.Fatal("non-user financial blocker restored access", blocker)
+		}
+	}
+}

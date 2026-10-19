@@ -1,9 +1,9 @@
 export const accountClosureCopy = {
   "zh": {
     "title": "注销账号",
-    "lead": "注销是持久化流程。系统会先检查组织所有权与最后有效超级管理员，再进入静默期并等待账务和用量结清；运营修复只能重试，不能跳过阻断。",
+    "lead": "系统会先检查角色、账务和用量，再进入静默期。身份清理前如需你清零余额、结清应收或完成支付，系统会受控恢复账号操作；处理后原注销申请自动继续，无需重新申请。身份清理开始后不能恢复账号，运营重试也不能跳过阻断。",
     "beforeTitle": "开始前请确认",
-    "before": "请先转让仍持有的组织所有权，并确保已有另一名有效超级管理员。开始后将停止创建新的支付、权益和模型用量。操作需要最近五分钟内完成身份认证。",
+    "before": "请先转让组织所有权、交接最后有效超级管理员，并处理已有资金事项。进入静默期后停止新的支付、权益和模型用量；仅在身份清理前遇需你处理的资金阻断时受控恢复操作，原申请不会取消。操作需要最近五分钟内完成身份认证。",
     "start": "申请注销账号",
     "confirmPrompt": "此操作会进入账号注销流程。请输入 CLOSE_MY_ACCOUNT 继续：",
     "confirmInput": "确认文本",
@@ -53,9 +53,9 @@ export const accountClosureCopy = {
   },
   "en": {
     "title": "Close account",
-    "lead": "Closure is a durable workflow. Ownership and the final active super-admin are checked before the quiet period; billing and usage must then settle. Operations can retry a stage but cannot bypass blockers.",
+    "lead": "Roles, billing, and usage are checked before the quiet period. Before identity cleanup, account access can be restored under safeguards so you can clear a balance, settle a receivable, or finish a payment. The original closure request then continues automatically; do not submit another request. Access cannot be restored after identity cleanup starts, and operations cannot bypass blockers.",
     "beforeTitle": "Before you begin",
-    "before": "Transfer any organization ownership and ensure another active super-admin exists. New payments, benefits, and model usage stop after the quiet period begins. Authentication within the last five minutes is required.",
+    "before": "Transfer organization ownership, hand off the final active super-admin role, and resolve existing financial matters. The quiet period stops new payments, benefits, and model usage. Access may be restored under safeguards for financial actions before identity cleanup; this does not cancel the original request. Authentication within the last five minutes is required.",
     "start": "Request account closure",
     "confirmPrompt": "This starts account closure. Enter CLOSE_MY_ACCOUNT to continue:",
     "confirmInput": "Confirmation text",
@@ -105,9 +105,9 @@ export const accountClosureCopy = {
   },
   "ja": {
     "title": "アカウント削除",
-    "lead": "削除は永続化されたワークフローです。所有権と最後の有効なスーパー管理者を確認してから静止期間に入り、請求と利用量の精算を待ちます。運用担当者は段階を再試行できますが、ブロックを回避できません。",
+    "lead": "役割、請求、利用量を確認してから静止期間に入ります。本人情報の削除開始前に残高、未収金、支払いの処理が必要な場合、安全条件を確認してアカウント操作を再開します。処理後は元の申請が自動的に続くため、再申請は不要です。本人情報の削除開始後は復帰できず、運用担当者もブロックを回避できません。",
     "beforeTitle": "開始前の確認",
-    "before": "組織の所有権を移管し、別の有効なスーパー管理者を確保してください。静止期間に入ると、新しい支払い、特典、モデル利用は停止します。直近5分以内の再認証が必要です。",
+    "before": "組織の所有権と最後の有効なスーパー管理者を引き継ぎ、既存の資金処理を済ませてください。静止期間中は新しい支払い、特典、モデル利用を停止します。本人情報の削除開始前に必要な資金操作を再開しても、元の申請は取り消されません。直近5分以内の再認証が必要です。",
     "start": "アカウント削除を申請",
     "confirmPrompt": "アカウント削除を開始します。続行するには CLOSE_MY_ACCOUNT と入力してください：",
     "confirmInput": "確認文字列",

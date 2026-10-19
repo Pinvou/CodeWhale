@@ -215,6 +215,8 @@ try {
         }
         await page.reload({ waitUntil: 'networkidle0' });
         await page.waitForSelector('[data-testid="registration-bonus-policy"] [role="alert"] button');
+        assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', node => node.value), '', 'unknown recovery does not need a newly valid editable form');
+        assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] [role="alert"] button', node => node.disabled), false, 'original unknown command remains retryable despite the blank edited reason');
         if (lostAck === 'http-reauth') {
           recentAuthenticationRequired = true;
           await page.click('[data-testid="registration-bonus-policy"] [role="alert"] button');

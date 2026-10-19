@@ -1,5 +1,13 @@
 # 自助注销与隐私清理（F08）
 
+## 身份清理前的自助资金恢复
+
+创建申请仅持久化原申请 ID、幂等摘要、确认事实及审计，保持 `CLOSURE_REQUESTED`，不立即将用户关闭。worker 先复核角色以及 Billing、Token 全域阻断；有阻断保持账号可操作，全部清除才进入静默期。静默后的复核仍然保留，前检查不构成跨服务资金原子围栏。
+
+在 `QUIESCING` / `FINANCIAL_CLEARANCE` 发现 `PERSONAL_BALANCE_NONZERO/CLEAR_PERSONAL_BALANCE`、`RECEIVABLE_OUTSTANDING/SETTLE_RECEIVABLE` 或 `PAYMENT_PROCESSING/FINISH_PAYMENT_ORDER` 时，仅在原 claim、请求版本、用户状态与版本仍有效，且身份清理准备、删除、权益隔离、重放清理及生命周期里程碑均为空的事务中，将 `CLOSING` 受控恢复为 `ACTIVE` 并追加审计。请求保持 `FINANCIAL_CLEARANCE/BLOCKED`、原 ID 和原 key，按原机制重试，不撤销申请、不退款、不清除应收。纯等待或平台处理阻断不会单独触发恢复，未知动作字符串不能触发恢复。
+
+恢复期间仍有阻断则保持账号可操作；全部清除后，再次验证角色和用户快照，重新设置 `CLOSING` 并释放 claim。下一次领取必须在 `CLOSING` 下重新执行全域财务检查，才能推进 `IDENTITY_CLEANUP`。恢复期间新增所有权、用户被停用、并发版本变化或过期 worker 均不能绕过守卫。已处于财务阻断的旧请求适用同一防护；身份清理阶段及任何清理里程碑写入后绝不恢复。027 阶段仍单向，既有迁移身份及字节保持不变；这不是管理员启用、注销撤销或跨服务冻结协议。
+
 ## 数据库回滚边界
 
 Account 027 为 forward-only：Down 明确返回 SQLSTATE 55000，空库与已有注销记录均不允许撤销。旧 Down 原本也被 018 的 statement-level 只追加策略触发器拒绝；本次只将拒绝原因明确化，不改 027 Up 或已安装 Up 校验和，不删除策略、注销请求、命令、审计或触发器，也不将 CLOSING 改为 DISABLED。应用回退须保留数据库及证据，停止相关消费者后按兼容版本恢复；本说明不授权生产数据库操作。
