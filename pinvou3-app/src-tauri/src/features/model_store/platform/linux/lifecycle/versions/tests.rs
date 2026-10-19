@@ -534,6 +534,46 @@ fn interrupted_stage_is_recoverable_and_cancelled_cleanup_does_not_remove_files(
 }
 
 #[test]
+fn changed_storage_settings_before_switch_cannot_archive_an_unresolved_old_version() {
+    let (temp, mgr, current, card, pkg, id) = fixture();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    let mut settings = mgr.settings.clone();
+    settings.models_dir = temp
+        .path()
+        .join("other-models")
+        .to_string_lossy()
+        .into_owned();
+    fs::create_dir_all(&settings.models_dir).unwrap();
+    let relocated = ModelManager::new(Some(settings), None);
+    let error = relocated
+        .switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap_err();
+    assert!(error.to_string().contains("不能保证回退"));
+    assert_eq!(
+        serde_json::to_value(db::get_store_model(&current.card_id).unwrap().unwrap()).unwrap(),
+        serde_json::to_value(&current).unwrap()
+    );
+    assert_eq!(
+        version_store::get(&current.card_id, &id)
+            .unwrap()
+            .unwrap()
+            .state,
+        "ready"
+    );
+    assert_eq!(
+        version_store::list(Some(&current.card_id)).unwrap().len(),
+        1
+    );
+    assert!(
+        mgr.settings
+            .models_path()
+            .join("legacy/old.tachyon")
+            .exists()
+    );
+}
+
+#[test]
 fn rollback_uses_pinned_storage_after_settings_change_and_rejects_corrupt_recipe() {
     let (temp, mgr, current, card, pkg, id) = fixture();
     mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
