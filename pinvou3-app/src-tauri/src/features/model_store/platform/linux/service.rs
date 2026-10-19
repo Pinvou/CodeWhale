@@ -561,17 +561,6 @@ pub fn start_version_action(
                 std::thread::sleep(Duration::from_millis(250));
             }
         }
-        use std::os::unix::fs::OpenOptionsExt;
-        let lock = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .mode(0o600)
-            .open(config::data_dir().join("version-operations.lock"))
-            .map_err(|e| e.to_string())?;
-        lock.try_lock()
-            .map_err(|_| "另一个版本操作正在进行，请稍后重试".to_string())?;
         let mgr = ModelManager::new(None, None);
         let mut progress = |line: &str| log.push(line);
         match action.as_str() {

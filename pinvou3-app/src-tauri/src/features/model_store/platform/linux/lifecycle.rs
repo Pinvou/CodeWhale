@@ -262,6 +262,18 @@ struct PreparedScript {
     cwd: Option<std::path::PathBuf>,
 }
 
+fn validate_remote_assets(assets: &BTreeMap<String, String>) -> Result<(), ModelManagerError> {
+    if let Some(path) = assets
+        .keys()
+        .find(|path| super::card_assets::is_runtime_cache(path))
+    {
+        return Err(ModelManagerError::new(format!(
+            "卡片附属文件 {path} 是运行缓存，不能作为部署配方下载；请修复卡片文件清单。"
+        )));
+    }
+    Ok(())
+}
+
 impl ScriptsSource {
     /// `local_paths` 来自 `ModelManager::builtin_store`：只有内置测试商店的
     /// scripts/assets 值是本地文件路径，真实商店必须是 https 链接。
@@ -432,18 +444,27 @@ impl ScriptsSource {
                 asset_sha256,
                 ..
             } => {
+                validate_remote_assets(assets)?;
                 let mut out = BTreeMap::new();
                 for (path, url) in assets {
                     let expected = asset_sha256
                         .as_ref()
                         .and_then(|h| h.get(path))
                         .map(|s| s.as_str());
+                    let content = script_runner::fetch_script_content(url, expected, policy)?;
                     out.insert(
                         path.clone(),
-                        script_runner::fetch_script_content(url, expected, policy)?,
+                        db::ScriptBlob {
+                            sha256: script_runner::sha256_hex(&content),
+                            content,
+                        },
                     );
                 }
-                Ok(out)
+                super::native_card_compat::apply(&mut out).map_err(ModelManagerError::new)?;
+                Ok(out
+                    .into_iter()
+                    .map(|(path, blob)| (path, blob.content))
+                    .collect())
             }
         }
     }
@@ -939,7 +960,10 @@ impl ModelManager {
         control: script_runner::RunControl,
         mut wait_for_slot: Option<&mut dyn FnMut() -> Result<(), ModelManagerError>>,
     ) -> Result<DownloadResult, ModelManagerError> {
+        let _resources =
+            super::version_store::resource_operation_lock(false).map_err(ModelManagerError::new)?;
         let card = self.store.get_card(card_id)?;
+        validate_remote_assets(&card.assets)?;
         if let Some(existing) =
             db::get_store_model(card_id).map_err(|e| ModelManagerError::new(e.to_string()))?
         {
@@ -1608,15 +1632,7 @@ impl ModelManager {
         card: &StoreCardDetail,
         control: Option<&script_runner::RunControl>,
     ) -> Result<CardPackage, ModelManagerError> {
-        if let Some(path) = card
-            .assets
-            .keys()
-            .find(|path| super::card_assets::is_runtime_cache(path))
-        {
-            return Err(ModelManagerError::new(format!(
-                "卡片附属文件 {path} 是运行缓存，不能作为部署配方下载；请修复卡片文件清单。"
-            )));
-        }
+        validate_remote_assets(&card.assets)?;
         // 来源校验必须在**抓取的这一刻**做：抓完就固化成 Local 副本，之后
         // install_engine 直接跑副本、不再有任何 fetch 可校验。副本里的 sha256
         // 是按内容自算的，证明不了"内容是对的"，只能证明"内容没再变过"。
@@ -1698,7 +1714,10 @@ impl ModelManager {
         on_progress: &mut ProgressFn<'_>,
         control: script_runner::RunControl,
     ) -> Result<serde_json::Value, ModelManagerError> {
+        let _resources =
+            super::version_store::resource_operation_lock(false).map_err(ModelManagerError::new)?;
         let rec = self.get_record(card_id)?;
+        versions::ensure_not_deleting(&rec)?;
         if rec.running {
             return Err(ModelManagerError::new("请先停用模型，再更新卡片。"));
         }
@@ -1757,7 +1776,10 @@ impl ModelManager {
         on_progress: &mut ProgressFn<'_>,
         control: script_runner::RunControl,
     ) -> Result<(), ModelManagerError> {
+        let _resources =
+            super::version_store::resource_operation_lock(false).map_err(ModelManagerError::new)?;
         let rec = self.get_record(card_id)?;
+        versions::ensure_not_deleting(&rec)?;
         let source = self.local_scripts_source(&rec)?;
         let profiles = source.profiles();
         let resolved_profile_id = profile_id.map(|s| s.to_string()).or_else(|| {
@@ -1815,7 +1837,10 @@ impl ModelManager {
         on_progress: &mut ProgressFn<'_>,
         control: script_runner::RunControl,
     ) -> Result<(), ModelManagerError> {
+        let _resources =
+            super::version_store::resource_operation_lock(false).map_err(ModelManagerError::new)?;
         let rec = self.get_record(card_id)?;
+        versions::ensure_not_deleting(&rec)?;
         if rec.card_update_pending {
             return Err(ModelManagerError::new(
                 "卡片已更新，请先重新部署，再启用模型。",
@@ -1944,6 +1969,8 @@ impl ModelManager {
         on_progress: &mut ProgressFn<'_>,
         control: script_runner::RunControl,
     ) -> Result<UninstallOutcome, ModelManagerError> {
+        let _resources = super::version_store::resource_operation_lock(purge_weights)
+            .map_err(ModelManagerError::new)?;
         if super::version_store::has_history(card_id).map_err(ModelManagerError::new)? {
             return Err(ModelManagerError::new(
                 "请先在历史版本中清理保留版本，再卸载或删除当前模型。",
@@ -1951,9 +1978,19 @@ impl ModelManager {
         }
         let rec = self.get_record(card_id)?;
         let mut env = self.env_for_record(&rec);
+        // Isolated weights belong to the host's version manager. The card only
+        // removes its service; shared-reference/ownership/process checks must
+        // succeed before the host, rather than the script, deletes any weights.
+        let script_purge = purge_weights && !versions::managed_storage(&rec)?;
+        if purge_weights {
+            versions::current_purge_preflight(&rec, &self.settings.models_path())?;
+        }
+        if !purge_weights {
+            versions::ensure_not_deleting(&rec)?;
+        }
         env.insert(
             "LMM_PURGE_WEIGHTS".into(),
-            if purge_weights { "1" } else { "0" }.into(),
+            if script_purge { "1" } else { "0" }.into(),
         );
         let source = self.local_scripts_source(&rec)?;
 
@@ -2146,8 +2183,15 @@ impl ModelManager {
             }
         }
 
-        let models_dir = self.settings.models_path();
+        let models_dir = rec
+            .models_root
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.settings.models_path());
         let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Some(actual) = versions::legacy_resource_dir(rec, &models_dir) {
+            candidates.push(actual);
+        }
         // 权重目录：卡片脚本统一放在 ${LMM_MODELS_DIR}/<HF 仓库名> 下。
         //
         // 末段同样要过 safe_path_component——本函数另外两个分支都过了，这一支漏了。
@@ -2186,7 +2230,8 @@ impl ModelManager {
 
         let mut out: Vec<PathBuf> = Vec::new();
         for p in candidates {
-            if !out.contains(&p) {
+            if !out.iter().any(|parent| p.starts_with(parent)) {
+                out.retain(|child| !child.starts_with(&p));
                 out.push(p);
             }
         }
@@ -3613,9 +3658,26 @@ echo '权重就绪'
             "vendor/.cache/jit.log".into(),
             "https://example.test/must-not-fetch".into(),
         );
-        let mgr = ModelManager::new(Some(download_settings(&tmp.path().join("models"))), None);
+        let mut mgr = ModelManager::new(Some(download_settings(&tmp.path().join("models"))), None);
         let result = mgr.fetch_and_store_scripts(&card, None);
         assert!(result.err().unwrap().to_string().contains("运行缓存"));
+        // Exercise both the public lifecycle and its on-demand fallback, without
+        // fetching the deliberately unreachable asset or changing runtime cache.
+        mgr.store = Box::new(OneCardStore { card: card.clone() });
+        let error = mgr
+            .download_from_store(&card.summary.id, &mut |_| {}, Default::default(), None)
+            .unwrap_err();
+        assert!(error.to_string().contains("运行缓存"));
+        let runtime = config::data_dir().join("cards").join(&card.summary.id);
+        std::fs::create_dir_all(runtime.join("vendor/.cache")).unwrap();
+        let cache = runtime.join("vendor/.cache/jit.log");
+        std::fs::write(&cache, b"live runtime cache").unwrap();
+        let error = ScriptsSource::from_card(&card, false)
+            .prepare(&card.summary.id, "enable")
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("运行缓存"));
+        assert_eq!(std::fs::read(cache).unwrap(), b"live runtime cache");
     }
 
     #[test]

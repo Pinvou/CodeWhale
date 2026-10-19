@@ -17,7 +17,7 @@ export function ModelVersionsDialog({ record, copy, theme, busy, onClose, onActi
       if (!cancelled) { setVersions(rows); setError(null); }
     }).catch((failure) => { if (!cancelled) setError(String(failure?.message || failure)); });
     return () => { cancelled = true; };
-  }, [record.card_id, attempt]);
+  }, [record.card_id, attempt, busy]);
 
   const act = (action, version) => {
     onAction(record, action, version.version_id);

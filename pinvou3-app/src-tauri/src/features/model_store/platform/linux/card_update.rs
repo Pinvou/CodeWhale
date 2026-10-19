@@ -153,6 +153,13 @@ pub fn compatibility(
                     result.reason = "artifact_selection_changed".into();
                     return result;
                 }
+            } else if old.len() != 1
+                && rec.source_filename.as_deref().is_some_and(|name| {
+                    weights::normalize_path(name).is_ok_and(|name| old.contains_key(&name))
+                })
+            {
+                result.reason = "artifact_selection_changed".into();
+                return result;
             }
             result.kind = "compatible".into();
             result.reason = "verified_weights".into();
@@ -282,7 +289,9 @@ pub fn validate_inventory(
     }
     for (path, url) in assets {
         checked_hash(path, url, asset_hashes)?;
-        if path.contains(['\\', ':'])
+        if path.trim() != path
+            || path.chars().any(char::is_control)
+            || path.contains(['\\', ':'])
             || path
                 .split('/')
                 .any(|part| part.is_empty() || part.starts_with('.'))
@@ -427,6 +436,11 @@ mod tests {
             "/tmp/x",
             ".runtime/serve.pid",
             ".deploy-env",
+            " .deploy-env",
+            " .runtime/serve.identity.json",
+            "enable.sh ",
+            "helper.py\n",
+            "a/\tb",
             "enable.sh",
             "a\\b",
             "a//b",

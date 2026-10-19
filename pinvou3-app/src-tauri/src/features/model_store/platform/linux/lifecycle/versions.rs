@@ -121,7 +121,10 @@ fn find_weight(root: &Path, name: &str) -> Result<PathBuf, ModelManagerError> {
         .ok_or_else(|| fail("无法唯一确认隔离目录中的权重文件，未切换部署。"))
 }
 
-fn legacy_resource_dir(rec: &db::StoreModelRecord, configured_root: &Path) -> Option<PathBuf> {
+pub(super) fn legacy_resource_dir(
+    rec: &db::StoreModelRecord,
+    configured_root: &Path,
+) -> Option<PathBuf> {
     let allowed = rec
         .models_root
         .as_deref()
@@ -149,7 +152,7 @@ fn legacy_resource_dir(rec: &db::StoreModelRecord, configured_root: &Path) -> Op
         .and_then(|root| PathBuf::from(root).canonicalize().ok())
 }
 
-fn managed_storage(rec: &db::StoreModelRecord) -> Result<bool, ModelManagerError> {
+pub(super) fn managed_storage(rec: &db::StoreModelRecord) -> Result<bool, ModelManagerError> {
     Ok(
         version_store::get(&rec.card_id, &version_store::active_id(rec))
             .map_err(fail)?
@@ -157,29 +160,100 @@ fn managed_storage(rec: &db::StoreModelRecord) -> Result<bool, ModelManagerError
     )
 }
 
-/// Called only after a successful explicit purge, before deleting the public
-/// record. Global engines and unrelated model directories are never removed.
-pub(super) fn purge_current_storage(
+pub(super) fn ensure_not_deleting(rec: &db::StoreModelRecord) -> Result<(), ModelManagerError> {
+    if version_store::get(&rec.card_id, &version_store::active_id(rec))
+        .map_err(fail)?
+        .is_some_and(|v| v.state == "deleting")
+    {
+        return Err(fail("当前版本的彻底删除尚未完成，请重试删除模型。"));
+    }
+    Ok(())
+}
+
+fn valid_resource_marker(
+    root: &Path,
+    expected: &str,
+    deleting: bool,
+) -> Result<bool, ModelManagerError> {
+    let marker = root.join(".pinvou-version.json");
+    Ok(match marker.symlink_metadata() {
+        Ok(meta) => {
+            meta.is_file()
+                && meta.nlink() == 1
+                && fs::read_to_string(marker).ok().as_deref() == Some(expected)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && deleting => fs::read_dir(root)
+            .map_err(|e| fail(e.to_string()))?
+            .next()
+            .is_none(),
+        _ => false,
+    })
+}
+
+/// Downloaded legacy cards have no deploy-env yet. Their missing runtime path
+/// does not prove that an otherwise matching shared weight is unreferenced.
+fn unresolved_weight_reference(other: &db::StoreModelRecord, owner: &db::StoreModelRecord) -> bool {
+    if owner
+        .source_repo_id
+        .as_deref()
+        .is_some_and(|repo| !repo.is_empty())
+        && other.source_repo_id == owner.source_repo_id
+        && (other.source_filename == owner.source_filename
+            || other.source_filename.as_deref().is_none_or(str::is_empty)
+            || owner.source_filename.as_deref().is_none_or(str::is_empty))
+    {
+        return true;
+    }
+    let inventory = |rec: &db::StoreModelRecord| {
+        let blob = rec.assets_content.get(weight_identity::MANIFEST)?;
+        weight_identity::verified(blob, &blob.sha256).ok()
+    };
+    match (inventory(other), inventory(owner)) {
+        (Some(other), Some(owner)) => owner
+            .iter()
+            .any(|(name, hash)| other.get(name) == Some(hash)),
+        _ => false,
+    }
+}
+
+/// Check references before scripts can remove deployment state, then repeat
+/// after the service stops before deleting any host-managed files.
+pub(super) fn current_purge_preflight(
     rec: &db::StoreModelRecord,
     configured_root: &Path,
-) -> Result<(), ModelManagerError> {
-    if !managed_storage(rec)? {
-        return Ok(());
-    }
-    let root = PathBuf::from(
-        rec.models_root
-            .as_ref()
-            .ok_or_else(|| fail("缺少版本存储目录"))?,
-    );
-    let runtime = runtime_path(rec)?;
-    ensure_unused(&runtime, Some(&root))?;
+) -> Result<Option<(Version, PathBuf, PathBuf)>, ModelManagerError> {
     let id = version_store::active_id(rec);
+    let version = version_store::get(&rec.card_id, &id).map_err(fail)?;
+    let managed = version.as_ref().is_some_and(|v| v.managed);
+    let root = if managed {
+        Some(PathBuf::from(
+            rec.models_root
+                .as_ref()
+                .ok_or_else(|| fail("缺少版本存储目录"))?,
+        ))
+    } else {
+        legacy_resource_dir(rec, configured_root)
+    };
+    let runtime = runtime_path(rec)?;
+    let possible_legacy_reference = |other: &db::StoreModelRecord| {
+        rec.source_repo_id
+            .as_deref()
+            .is_some_and(|repo| !repo.is_empty())
+            && rec.source_repo_id == other.source_repo_id
+            || unresolved_weight_reference(rec, other)
+    };
+    let overlaps = |other: Option<&Path>, other_record: Option<&db::StoreModelRecord>| match (
+        root.as_deref(),
+        other,
+    ) {
+        (Some(root), Some(other)) => root.starts_with(other) || other.starts_with(root),
+        _ => !managed && other_record.is_some_and(possible_legacy_reference),
+    };
     let other_versions = version_store::list(None).map_err(fail)?;
     if other_versions.iter().any(|v| {
         !(v.card_id == rec.card_id && v.version_id == id)
-            && v.resource_dir
-                .as_ref()
-                .is_some_and(|p| root.starts_with(p) || Path::new(p).starts_with(&root))
+            && (config::data_dir().join("cards").join(&v.runtime_card_id) == runtime
+                || overlaps(v.resource_dir.as_deref().map(Path::new), v.record.as_ref()))
     }) {
         return Err(fail("此版本的存储仍被引用，已保留资源和记录。"));
     }
@@ -188,26 +262,47 @@ pub(super) fn purge_current_storage(
         .iter()
         .filter(|r| r.card_id != rec.card_id)
     {
-        if legacy_resource_dir(other, configured_root)
-            .is_some_and(|p| root.starts_with(&p) || p.starts_with(&root))
+        if runtime_path(other).ok().as_ref() == Some(&runtime)
+            || overlaps(
+                legacy_resource_dir(other, configured_root).as_deref(),
+                Some(other),
+            )
         {
             return Err(fail("此版本的存储仍被其他模型引用，已保留资源和记录。"));
         }
     }
+    if !managed {
+        return Ok(None);
+    }
+    let version = version.unwrap();
+    let root = root.unwrap();
     if root.exists() {
         let expected = serde_json::json!({"card_id":rec.card_id,"version_id":id}).to_string();
         if !root
             .symlink_metadata()
             .map_err(|e| fail(e.to_string()))?
             .is_dir()
-            || fs::read_to_string(root.join(".pinvou-version.json"))
-                .ok()
-                .as_deref()
-                != Some(&expected)
+            || !valid_resource_marker(&root, &expected, version.state == "deleting")?
         {
             return Err(fail("版本目录归属不符，已保留资源和记录。"));
         }
-        fs::remove_dir_all(root).map_err(|e| fail(e.to_string()))?;
+    }
+    Ok(Some((version, root, runtime)))
+}
+
+/// Called after the card has removed its service with weight deletion disabled.
+pub(super) fn purge_current_storage(
+    rec: &db::StoreModelRecord,
+    configured_root: &Path,
+) -> Result<(), ModelManagerError> {
+    let Some((mut version, root, runtime)) = current_purge_preflight(rec, configured_root)? else {
+        return Ok(());
+    };
+    ensure_unused(&runtime, Some(&root))?;
+    version.state = "deleting".into();
+    version_store::put(&version).map_err(fail)?;
+    if root.exists() {
+        remove_managed_resource(&root)?;
     }
     if runtime.exists() {
         fs::remove_dir_all(runtime).map_err(|e| fail(e.to_string()))?;
@@ -299,13 +394,16 @@ impl ModelManager {
         version_store::recover_interrupted(card_id).map_err(fail)?;
         let mut versions = version_store::list(Some(card_id)).map_err(fail)?;
         let id = version_store::active_id(&current);
+        let deleting = versions
+            .iter()
+            .any(|v| v.version_id == id && v.state == "deleting");
         versions.retain(|v| v.version_id != id);
         versions.insert(
             0,
             Version {
                 card_id: card_id.into(),
-                version_id: id,
-                state: "current".into(),
+                version_id: id.clone(),
+                state: if deleting { "deleting" } else { "current" }.into(),
                 models_root: current.models_root.clone(),
                 runtime_card_id: current
                     .runtime_card_id
@@ -325,7 +423,7 @@ impl ModelManager {
             "filename":v.record.as_ref().and_then(|r|r.source_filename.clone()),
             "size_bytes":v.models_root.as_ref().filter(|_|v.managed).or(v.resource_dir.as_ref()).map(|p|super::super::disk::dir_size_bytes(Path::new(p))).unwrap_or_else(||v.record.as_ref().map(|r|r.size_bytes.max(0) as u64).unwrap_or(0)),
             "can_switch":(["ready","history"].contains(&v.state.as_str())),
-            "can_delete":v.state!="current" && v.state!="downloading",
+            "can_delete":v.version_id != id && v.state!="current" && v.state!="downloading",
             "can_retry":v.state=="failed",
         })).collect::<Vec<_>>()))
     }
@@ -337,7 +435,9 @@ impl ModelManager {
         on_progress: &mut ProgressFn<'_>,
         control: script_runner::RunControl,
     ) -> Result<serde_json::Value, ModelManagerError> {
+        let _resources = version_store::resource_operation_lock(false).map_err(fail)?;
         let current = self.get_record(card_id)?;
+        ensure_not_deleting(&current)?;
         let card = self.store.get_card(card_id)?;
         card_update::validate_inventory(
             &card.scripts,
@@ -545,7 +645,9 @@ impl ModelManager {
         on_progress: &mut ProgressFn<'_>,
         control: script_runner::RunControl,
     ) -> Result<serde_json::Value, ModelManagerError> {
+        let _resources = version_store::resource_operation_lock(true).map_err(fail)?;
         let current = self.get_record(card_id)?;
+        ensure_not_deleting(&current)?;
         if current.running {
             return Err(fail("请先停用当前模型，再切换版本。"));
         }
@@ -566,6 +668,20 @@ impl ModelManager {
             .ok_or_else(|| fail("目标版本不存在"))?;
         if !["ready", "history"].contains(&target.state.as_str()) {
             return Err(fail("目标版本尚未验证完成"));
+        }
+        if target.state == "ready" {
+            // A new upgrade promises a usable rollback. A history target is
+            // also a recovery route and remains usable if the current file broke.
+            on_progress("校验当前版本权重，确认升级后仍可回退。");
+            let (name, hash) = single_weight(&current)?;
+            let old_file = find_weight(resource.as_deref().unwrap(), &name).map_err(|_| {
+                fail("当前权重缺失，不能保证升级后回退；请先修复当前部署，未切换版本。")
+            })?;
+            if file_digest(&old_file, &control)? != hash {
+                return Err(fail(
+                    "当前权重校验失败，不能保证升级后回退；请先修复当前部署，未切换版本。",
+                ));
+            }
         }
         let rec = target
             .record
@@ -589,7 +705,16 @@ impl ModelManager {
             return Err(fail("目标权重校验失败，未切换版本。"));
         }
         let source = self.local_scripts_source(rec)?;
-        let env = self.env_for_record(rec);
+        let selected_profile = super::super::deploy_profiles::selected_id(
+            card_id,
+            source.profiles(),
+            rec.active_profile_id.as_deref(),
+        )
+        .map(str::to_owned);
+        let mut env = self.env_for_record(rec);
+        if let Some(profile) = &selected_profile {
+            env.insert("LMM_DEPLOY_PROFILE".into(), profile.clone());
+        }
         let probe = self.engine_probe(&source, card_id, &env);
         if !probe.installed {
             self.install_engine(&source, &env, on_progress, control.clone(), probe.need_root)?;
@@ -603,6 +728,7 @@ impl ModelManager {
         rec.card_update_pending = false;
         rec.running = false;
         rec.deployed_script_sha256 = source.script_hash("deploy");
+        rec.active_profile_id = selected_profile;
         let mut old = Version {
             card_id: card_id.into(),
             version_id: version_store::active_id(&current),
@@ -639,6 +765,7 @@ impl ModelManager {
         on_progress: &mut ProgressFn<'_>,
         control: script_runner::RunControl,
     ) -> Result<serde_json::Value, ModelManagerError> {
+        let _resources = version_store::resource_operation_lock(true).map_err(fail)?;
         let current = self.get_record(card_id)?;
         if version_store::active_id(&current) == id {
             return Err(fail("当前版本不能从历史版本中删除。"));
@@ -669,16 +796,22 @@ impl ModelManager {
                 !(v.card_id == card_id && v.version_id == id)
                     && v.runtime_card_id == version.runtime_card_id
             });
-        let shared_resource = active
+        let shared_resource = active.iter().any(|other| {
+            if let Some(path) = legacy_resource_dir(other, &self.settings.models_path()) {
+                resource.starts_with(&path) || path.starts_with(&resource)
+            } else {
+                !version.managed
+                    && version
+                        .record
+                        .as_ref()
+                        .is_some_and(|owner| unresolved_weight_reference(other, owner))
+            }
+        }) || others
             .iter()
-            .filter_map(|r| legacy_resource_dir(r, &self.settings.models_path()))
-            .any(|other| resource.starts_with(&other) || other.starts_with(&resource))
-            || others
-                .iter()
-                .filter(|v| !(v.card_id == card_id && v.version_id == id))
-                .filter_map(|v| v.resource_dir.as_ref())
-                .map(PathBuf::from)
-                .any(|other| resource.starts_with(&other) || other.starts_with(&resource));
+            .filter(|v| !(v.card_id == card_id && v.version_id == id))
+            .filter_map(|v| v.resource_dir.as_ref())
+            .map(PathBuf::from)
+            .any(|other| resource.starts_with(&other) || other.starts_with(&resource));
         if shared_resource || shared_runtime {
             return Err(fail(
                 "此版本的权重或运行目录仍被其他版本引用，未删除任何资源。",
@@ -705,12 +838,9 @@ impl ModelManager {
             }
             if version.managed {
                 let expected = serde_json::json!({"card_id":card_id,"version_id":id}).to_string();
-                let marker = resource.join(".pinvou-version.json");
-                let meta = marker.symlink_metadata().map_err(|e| fail(e.to_string()))?;
-                if !meta.is_file()
-                    || meta.nlink() != 1
-                    || fs::read_to_string(&marker).ok().as_deref() != Some(&expected)
-                {
+                // A crash between removing the last marker and the empty root
+                // may leave only that directory. Never accept unknown contents.
+                if !valid_resource_marker(&resource, &expected, version.state == "deleting")? {
                     return Err(fail("版本目录归属校验失败，未删除资源。"));
                 }
                 freed = allocated_exclusive(&resource)?;
@@ -754,7 +884,7 @@ impl ModelManager {
         version.state = "deleting".into();
         version_store::put(&version).map_err(fail)?;
         if version.managed && resource.exists() {
-            fs::remove_dir_all(&resource).map_err(|e| fail(e.to_string()))?;
+            remove_managed_resource(&resource)?;
         }
         if let Some(file) = legacy_file {
             fs::remove_file(file).map_err(|e| fail(e.to_string()))?;
@@ -766,6 +896,29 @@ impl ModelManager {
         on_progress("选中的历史版本已清理，共享引擎保留。统计只计入实际删除的独占文件块。");
         Ok(serde_json::json!({"freed_bytes":freed,"remaining_paths":remaining}))
     }
+}
+
+/// Preserve the ownership marker through any partial recursive deletion. Only
+/// remove it once the tree is empty so permission/IO failures remain retryable.
+fn remove_managed_resource(root: &Path) -> Result<(), ModelManagerError> {
+    let marker = root.join(".pinvou-version.json");
+    for entry in fs::read_dir(root).map_err(|e| fail(e.to_string()))? {
+        let entry = entry.map_err(|e| fail(e.to_string()))?;
+        if entry.path() == marker {
+            continue;
+        }
+        if entry.file_type().map_err(|e| fail(e.to_string()))?.is_dir() {
+            fs::remove_dir_all(entry.path()).map_err(|e| fail(e.to_string()))?;
+        } else {
+            fs::remove_file(entry.path()).map_err(|e| fail(e.to_string()))?;
+        }
+    }
+    match fs::remove_file(marker) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(fail(e.to_string())),
+    }
+    fs::remove_dir(root).map_err(|e| fail(e.to_string()))
 }
 
 fn allocated_exclusive(path: &Path) -> Result<u64, ModelManagerError> {
