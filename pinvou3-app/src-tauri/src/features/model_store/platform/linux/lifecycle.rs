@@ -1526,7 +1526,15 @@ impl ModelManager {
         rec: &db::StoreModelRecord,
     ) -> Result<ScriptsSource, ModelManagerError> {
         if !rec.scripts_content.is_empty() {
-            let mut assets = rec.assets_content.clone();
+            // Some legacy local imports captured generated Docker/JIT caches.
+            // Replaying them overwrites live state and can hit root-owned files.
+            // Keep existing caches and the archived recipe untouched on disk.
+            let mut assets = rec
+                .assets_content
+                .iter()
+                .filter(|(path, _)| !super::card_assets::is_runtime_cache(path))
+                .map(|(path, blob)| (path.clone(), blob.clone()))
+                .collect();
             // Offline rollback must retain the same narrowly audited repair as
             // newly fetched cards. Keep the archived package itself unchanged.
             super::native_card_compat::apply(&mut assets).map_err(ModelManagerError::new)?;
@@ -1588,6 +1596,15 @@ impl ModelManager {
         card: &StoreCardDetail,
         control: Option<&script_runner::RunControl>,
     ) -> Result<CardPackage, ModelManagerError> {
+        if let Some(path) = card
+            .assets
+            .keys()
+            .find(|path| super::card_assets::is_runtime_cache(path))
+        {
+            return Err(ModelManagerError::new(format!(
+                "卡片附属文件 {path} 是运行缓存，不能作为部署配方下载；请修复卡片文件清单。"
+            )));
+        }
         // 来源校验必须在**抓取的这一刻**做：抓完就固化成 Local 副本，之后
         // install_engine 直接跑副本、不再有任何 fetch 可校验。副本里的 sha256
         // 是按内容自算的，证明不了"内容是对的"，只能证明"内容没再变过"。
@@ -3465,6 +3482,95 @@ echo '权重就绪'
             .unwrap_err();
         assert!(error.to_string().contains("旧权重未被覆盖"), "{error}");
         assert!(!tmp.path().join("models/download-ran").exists());
+    }
+
+    #[test]
+    fn legacy_cached_runtime_files_are_preserved_while_source_assets_are_prepared() {
+        let _tmp = setup_temp_db();
+        add_stuck_record("legacy-cache", "Org/Old", 11);
+        let mut record = db::get_store_model("legacy-cache").unwrap().unwrap();
+        record.card_source = "local".into();
+        let blob = |content: &str| db::ScriptBlob {
+            content: content.into(),
+            sha256: script_runner::sha256_hex(content),
+        };
+        record
+            .scripts_content
+            .insert("enable".into(), blob("#!/bin/sh\nexit 0\n"));
+        record.assets_content = BTreeMap::from([
+            (
+                "vendor/.cache/flashinfer/jit.log".into(),
+                blob("stale snapshot"),
+            ),
+            (
+                "vendor/__pycache__/generated.pyc".into(),
+                blob("stale bytecode"),
+            ),
+            ("vendor/start.sh".into(), blob("#!/bin/sh\nexit 0\n")),
+            ("vendor/.cache-tools/helper.py".into(), blob("source code")),
+            (".venv/lib/module.py".into(), blob("bundled source")),
+        ]);
+        let runtime = config::data_dir().join("cards/legacy-cache");
+        let cache = runtime.join("vendor/.cache/flashinfer/jit.log");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(&cache, "current runtime cache").unwrap();
+        let mut permissions = std::fs::metadata(&cache).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&cache, permissions.clone()).unwrap();
+        let mgr = ModelManager::new(None, None);
+        let source = mgr.local_scripts_source(&record).unwrap();
+        let prepared = source.prepare(&record.card_id, "enable").unwrap();
+        assert!(
+            std::process::Command::new(&prepared.entry)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&cache).unwrap(),
+            "current runtime cache"
+        );
+        assert_eq!(
+            std::fs::metadata(&cache).unwrap().permissions(),
+            permissions
+        );
+        assert!(!runtime.join("vendor/__pycache__/generated.pyc").exists());
+        assert_eq!(
+            std::fs::read_to_string(runtime.join("vendor/.cache-tools/helper.py")).unwrap(),
+            "source code"
+        );
+        assert_eq!(
+            std::fs::read_to_string(runtime.join(".venv/lib/module.py")).unwrap(),
+            "bundled source"
+        );
+        assert_eq!(
+            record.assets_content["vendor/.cache/flashinfer/jit.log"].content,
+            "stale snapshot"
+        );
+        // Cache filtering must not hide an unsafe package path.
+        record
+            .assets_content
+            .insert("../.cache/escape".into(), blob("unsafe"));
+        assert!(
+            mgr.local_scripts_source(&record)
+                .unwrap()
+                .prepare(&record.card_id, "enable")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn newly_fetched_cards_reject_generated_cache_assets_before_downloading() {
+        let tmp = setup_temp_db();
+        let mut card = make_card("Bad snapshot", None);
+        card.scripts.clear();
+        card.assets.insert(
+            "vendor/.cache/jit.log".into(),
+            "https://example.test/must-not-fetch".into(),
+        );
+        let mgr = ModelManager::new(Some(download_settings(&tmp.path().join("models"))), None);
+        let result = mgr.fetch_and_store_scripts(&card, None);
+        assert!(result.err().unwrap().to_string().contains("运行缓存"));
     }
 
     #[test]

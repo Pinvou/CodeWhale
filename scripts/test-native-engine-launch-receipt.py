@@ -12,6 +12,7 @@ import os
 import re
 from pathlib import Path
 import signal
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -32,10 +33,17 @@ class NativeLaunchReceiptTests(unittest.TestCase):
         fixed_hash = re.search(r'pub const FIXED: &str = "([a-f0-9]{64})";', rust).group(1)
         fixed = CONTROLLER_PATH.read_text(encoding="utf-8")
         self.assertEqual(fixed.count(new), 1)
-        published = fixed.replace(new, old, 1)
+        identity_old = re.search(r'const IDENTITY_OLD: &str = r#"(.*?)"#;', rust, re.S).group(1)
+        identity_new = re.search(r'const IDENTITY_NEW: &str = r#"(.*?)"#;', rust, re.S).group(1)
+        launch_fixed_hash = re.search(r'pub const LAUNCH_FIXED: &str = "([a-f0-9]{64})";', rust).group(1)
+        self.assertEqual(fixed.count(identity_new), 1)
+        launch_fixed = fixed.replace(identity_new, identity_old, 1)
+        self.assertEqual(hashlib.sha256(launch_fixed.encode()).hexdigest(), launch_fixed_hash)
+        published = launch_fixed.replace(new, old, 1)
         self.assertEqual(hashlib.sha256(published.encode()).hexdigest(), broken_hash)
         self.assertEqual(published.count(old), 1)
-        self.assertEqual(hashlib.sha256(published.replace(old, new, 1).encode()).hexdigest(), fixed_hash)
+        repaired = published.replace(old, new, 1).replace(identity_old, identity_new, 1)
+        self.assertEqual(hashlib.sha256(repaired.encode()).hexdigest(), fixed_hash)
 
     def setUp(self):
         spec = importlib.util.spec_from_file_location("card_controller", CONTROLLER_PATH)
@@ -108,6 +116,40 @@ class NativeLaunchReceiptTests(unittest.TestCase):
             send.assert_not_called()
         self.assertFalse((self.runtime / "serve.identity.json").exists())
 
+    def test_oversized_argv_of_an_unrelated_executable_does_not_block_discovery(self):
+        child = subprocess.Popen(["unrelated-test-" + "x" * 70000, "30"], executable="/usr/bin/sleep")
+        try:
+            self.wait_for_large_argv(child)
+            self.assertIsNone(self.controller.identity(child.pid, self.target))
+            self.assertNotIn(child.pid, [match["pid"] for match in self.controller.discover(self.target)])
+        finally:
+            child.terminate()
+            child.wait(timeout=3)
+
+    def test_oversized_argv_of_the_same_executable_requires_proven_different_weights(self):
+        other_weights = self.weights.with_name("other-model.py")
+        other_weights.write_text("import time; time.sleep(30)\n")
+        for weights, same in [(other_weights, False), (self.weights, True)]:
+            child = subprocess.Popen([self.target["executable"], str(weights), "x" * 70000])
+            try:
+                self.wait_for_large_argv(child)
+                if same:
+                    with self.assertRaisesRegex(self.controller.UnsafeState, "无法完整读取引擎身份"):
+                        self.controller.identity(child.pid, self.target)
+                else:
+                    self.assertIsNone(self.controller.identity(child.pid, self.target))
+            finally:
+                child.terminate()
+                child.wait(timeout=3)
+
+    def wait_for_large_argv(self, child):
+        import time
+        for _ in range(100):
+            if len(Path(f"/proc/{child.pid}/cmdline").read_bytes()) > 65536:
+                return
+            time.sleep(0.01)
+        self.fail("test child did not expose its oversized argv")
+
     def test_200_real_child_launch_receipt_and_stop_cycles(self):
         original_spawn = self.controller.subprocess.Popen
         children = []
@@ -117,15 +159,8 @@ class NativeLaunchReceiptTests(unittest.TestCase):
             children.append(child)
             return child
 
-        def discover_test_children(target):
-            # Keep the inventory inside this test. Unrelated host processes can
-            # have deliberately unreadable /proc state or very long argv during
-            # compilation; identity/receipts/pidfd signalling remain real.
-            return [process for child in children
-                    if (process := self.controller.identity(child.pid, target)) is not None]
-
-        with mock.patch.object(self.controller.subprocess, "Popen", side_effect=spawn), \
-                mock.patch.object(self.controller, "discover", side_effect=discover_test_children):
+        # Exercise the full host inventory, including unrelated processes.
+        with mock.patch.object(self.controller.subprocess, "Popen", side_effect=spawn):
             for _ in range(200):
                 try:
                     process = self.instance.launch(self.command, "", "")
