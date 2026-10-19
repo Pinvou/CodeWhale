@@ -350,6 +350,7 @@ const CONTROLLED_PORT_LOG_ERROR_CODES: &[&str] = &[
     "task_session_lane_conflict",
     "task_session_lane_mismatch",
     "task_session_lane_unknown",
+    "task_session_limit_exceeded",
     "task_session_lookup_failed",
     "task_session_map_conflict",
     "task_session_not_found",
@@ -531,6 +532,7 @@ fn log_stage(value: &str) -> &'static str {
         "task_terminal_persist_failed",
         "task_rejected_persist_failed",
         "task_dispatch_rejected",
+        "task_session_discard_failed",
         "artifact_capture_failed",
         "workspace_auth_restore_failed",
         "attachment_release_failed",
@@ -596,6 +598,7 @@ fn log_detail(value: &str) -> &'static str {
         "seal_failed",
         "queue_failed",
         "generation_or_binding_stale",
+        "delete_failed",
         "permission_expired",
         "permission_denied",
         "task_conflict",
@@ -3052,6 +3055,8 @@ mod tests {
         }
         assert_eq!(log_stage("controlled_status"), "controlled_status");
         assert_eq!(log_detail("pairing_code_invalid"), "pairing_code_invalid");
+        assert_eq!(log_stage("task_session_discard_failed"), "task_session_discard_failed");
+        assert_eq!(log_detail("delete_failed"), "delete_failed");
         for stage in [
             "task_submit_endpoint_received",
             "task_submit_socket_written",

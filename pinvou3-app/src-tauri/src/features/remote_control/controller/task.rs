@@ -1553,6 +1553,16 @@ pub(crate) trait RemoteSessionProvisioner: Send + Sync {
 
     fn forget_unclaimed_session(&self, _session_id: &str) {}
 
+    /// Roll back a session this service created moments ago but could not
+    /// bind (e.g. the per-generation bind cap): implementations must drop the
+    /// pending lane mode AND the just-persisted record, so a capped peer
+    /// cannot accumulate orphan B-side sessions. Distinct from
+    /// [`Self::forget_unclaimed_session`], which only clears lane bookkeeping
+    /// for a session that stays in the store (switch-away).
+    fn discard_created_session(&self, session_id: &str) {
+        self.forget_unclaimed_session(session_id);
+    }
+
     /// Resolve B-owned workspace authority before taking the session lock.
     /// Implementations may consult the controlled-device owner here, but must
     /// never re-enter that owner from `claim_execution_lane` below.
@@ -2121,6 +2131,15 @@ impl RemoteTaskService {
         code_mode: bool,
         generation: &str,
     ) -> Result<String> {
+        let _guard = self.session_open_lock.lock();
+        // Same busy guard as switch/close: opening a fresh session for a
+        // remote_ref whose current session still runs a task would strand that
+        // task without a reachable cancel path.
+        if let Some(previous) = self.sessions.session_for(remote_ref, generation) {
+            if self.ledger.active_for_session(&previous).is_some() {
+                return Err(error("task_session_busy"));
+            }
+        }
         let provisioner = self
             .provisioner
             .lock()
@@ -2136,7 +2155,7 @@ impl RemoteTaskService {
             RemoteSessionLane::from_code_mode(code_mode),
         );
         if bound.is_err() {
-            provisioner.forget_unclaimed_session(&session_id);
+            provisioner.discard_created_session(&session_id);
         }
         bound
     }
@@ -2183,7 +2202,7 @@ impl RemoteTaskService {
             RemoteSessionLane::Unknown,
         );
         if result.is_err() {
-            provisioner.forget_unclaimed_session(&session_id);
+            provisioner.discard_created_session(&session_id);
         }
         result
     }
@@ -2347,14 +2366,14 @@ impl RemoteTaskService {
         let session_id = provisioner
             .create_authoritative_session(title, code_mode)
             .map_err(|code| provisioner_error(code, "task_session_create_failed"))?;
-        if let Err(error) = self.sessions.bind(
+        if let Err(bind_error) = self.sessions.bind(
             remote_ref,
             &session_id,
             generation,
             RemoteSessionLane::Unknown,
         ) {
-            provisioner.forget_unclaimed_session(&session_id);
-            return Err(error);
+            provisioner.discard_created_session(&session_id);
+            return Err(bind_error);
         }
         provisioner
             .claim_execution_lane(&session_id, code_mode, workspace)
@@ -3823,6 +3842,7 @@ mod tests {
         claims: Mutex<Vec<(String, bool, Option<String>)>>,
         fail_claim: AtomicBool,
         forgotten: Mutex<Vec<String>>,
+        discarded: Mutex<Vec<String>>,
     }
 
     impl FakeSessions {
@@ -3851,6 +3871,11 @@ mod tests {
 
         fn forget_unclaimed_session(&self, session_id: &str) {
             self.forgotten.lock().push(session_id.to_owned());
+        }
+
+        fn discard_created_session(&self, session_id: &str) {
+            self.forgotten.lock().push(session_id.to_owned());
+            self.discarded.lock().push(session_id.to_owned());
         }
 
         fn session_exists(&self, session_id: &str) -> std::result::Result<bool, String> {
@@ -6635,6 +6660,59 @@ mod tests {
     }
 
     #[test]
+    fn open_remote_session_rejects_rebinding_a_remote_ref_with_a_live_task() {
+        // Same blind spot as the switch guard: opening a fresh session over a
+        // remote_ref whose current session still runs a task would strand that
+        // task without a reachable cancel path.
+        let ledger = RemoteTaskLedger::in_memory();
+        let ticket = match ledger
+            .admit(
+                &context("generation-0001"),
+                &request(&payload(
+                    "session-0001",
+                    "task-0001",
+                    "client-0001",
+                    &digest(1),
+                )),
+                1_000,
+            )
+            .unwrap()
+        {
+            AdmissionOutcome::Admitted(ticket) => ticket,
+            other => panic!("expected admission, got {other:?}"),
+        };
+        let service = RemoteTaskService::new(Arc::new(ledger));
+        let sessions = Arc::new(FakeSessions::default());
+        sessions.existing.lock().push("session-0001".into());
+        service.set_session_provisioner(sessions.clone());
+        service
+            .ensure_remote_session("ref-chat", "Chat", false, "generation-0001")
+            .unwrap();
+        let created_before = sessions.created.lock().len();
+        assert_eq!(
+            service
+                .open_remote_session("ref-chat", "Chat", false, "generation-0001")
+                .unwrap_err()
+                .code,
+            "task_session_busy"
+        );
+        // The busy check precedes provisioning: nothing was created to discard.
+        assert_eq!(sessions.created.lock().len(), created_before);
+        // Once the task is terminal, opening proceeds.
+        service
+            .fail_admitted(
+                &ticket.record.task_id,
+                ticket.record.sequence,
+                "test_settled",
+                1_002,
+            )
+            .unwrap();
+        service
+            .open_remote_session("ref-chat", "Chat", false, "generation-0001")
+            .unwrap();
+    }
+
+    #[test]
     fn session_map_binds_are_bounded_and_capped_binds_do_not_leak_sessions() {
         let service = RemoteTaskService::new(Arc::new(RemoteTaskLedger::in_memory()));
         let sessions = Arc::new(FakeSessions::default());
@@ -6665,6 +6743,11 @@ mod tests {
             sessions.forgotten.lock().len(),
             1,
             "a capped bind must forget the session it just created"
+        );
+        assert_eq!(
+            sessions.discarded.lock().len(),
+            1,
+            "the capped bind must also discard (roll back) the just-created record"
         );
     }
 
@@ -7289,10 +7372,10 @@ mod tests {
             )
         });
         entered_rx.recv().unwrap();
+        // The switch genuinely contends on session_open_lock while admission
+        // holds it inside the install callback.
         let switch_service = service.clone();
-        let (go_tx, go_rx) = std::sync::mpsc::channel();
         let switch = std::thread::spawn(move || {
-            go_rx.recv().unwrap();
             switch_service.switch_remote_session("ref-chat", "session-0002", "generation-0001")
         });
         release_tx.send(()).unwrap();
@@ -7301,10 +7384,15 @@ mod tests {
             Ok(AdmissionOutcome::Admitted(ticket)) => ticket,
             other => panic!("expected admission, got {other:?}"),
         };
-        // An admitted-but-undispatched task keeps its session busy (the blind
-        // spot the switch busy guard closes), so settle it to terminal before
-        // letting the switch proceed — the switch thread stays gated until the
-        // record is terminal.
+        // The switch could only proceed after admission released the lock, and
+        // the admitted-but-undispatched task keeps its session busy — the blind
+        // spot the switch busy guard closes. The guard must reject the switch
+        // instead of stranding the running task without a cancel path.
+        assert_eq!(
+            switch.join().unwrap().unwrap_err().code,
+            "task_session_busy"
+        );
+        // Once the task is terminal the same switch succeeds.
         service
             .fail_admitted(
                 &ticket.record.task_id,
@@ -7313,8 +7401,9 @@ mod tests {
                 1_002,
             )
             .unwrap();
-        go_tx.send(()).unwrap();
-        switch.join().unwrap().unwrap();
+        service
+            .switch_remote_session("ref-chat", "session-0002", "generation-0001")
+            .unwrap();
         assert_eq!(
             service.lane_for_session("session-0001", "generation-0001"),
             None

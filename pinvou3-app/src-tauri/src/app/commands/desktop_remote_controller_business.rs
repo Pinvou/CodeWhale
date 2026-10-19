@@ -198,6 +198,9 @@ fn submit_error(code: &str) -> UseCaseError {
             UseCaseError::new("task_session_binding_mismatch", false)
         }
         "task_lease_mismatch" => UseCaseError::new("task_lease_mismatch", true),
+        "task_session_limit_exceeded" => {
+            UseCaseError::new("task_session_limit_exceeded", false)
+        }
         "task_session_provisioner_unavailable" => {
             UseCaseError::new("task_session_provisioner_unavailable", true)
         }

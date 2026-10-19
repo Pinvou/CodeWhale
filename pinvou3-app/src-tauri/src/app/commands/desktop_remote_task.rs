@@ -200,6 +200,20 @@ impl RemoteSessionProvisioner for DesktopRemoteSessionProvisioner {
         self.pending_modes.lock().remove(session_id);
     }
 
+    fn discard_created_session(&self, session_id: &str) {
+        self.pending_modes.lock().remove(session_id);
+        // The record was persisted by this same path moments ago and was never
+        // bound to a remote_ref; roll it back so a capped bind attempt cannot
+        // accumulate orphan B-side sessions. A failed rollback must not mask
+        // the caller's bind error, so it is logged and swallowed.
+        if self.store.delete(session_id).is_err() {
+            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "task_session_discard_failed",
+                "delete_failed",
+            );
+        }
+    }
+
     fn claim_execution_lane(
         &self,
         session_id: &str,
