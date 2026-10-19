@@ -81,8 +81,8 @@ func TestInstalledPersonalAccountSchemaPostgres(t *testing.T) {
 		}
 	})
 	t.Run("forward-only-rollback-is-atomic", func(t *testing.T) {
-		// The new role CHECK can shrink only without any historical use of
-		// its added role. Scope history below it remains forward-only.
+		// The unused role CHECK can shrink. The complete F07 chain then stops
+		// at 900004; it does not pass that guard to execute the older scope Down.
 		var latest int64
 		var incompatibleBindings int
 		if err := connection.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&latest); err != nil || latest != 900006 {
@@ -131,12 +131,12 @@ func TestInstalledPersonalAccountSchemaPostgres(t *testing.T) {
 		if _, err := migrations.VerifyApplied(ctx, connection, remaining); err != nil {
 			t.Fatalf("safe rollback changed remaining migration history: %v", err)
 		}
-		if err := connection.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&latest); err != nil || latest != 900003 {
-			t.Fatal("expected original scope history as the next installed rollback", latest, err)
+		if err := connection.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&latest); err != nil || latest != 900004 {
+			t.Fatal("expected bonus facts guard as the next installed rollback", latest, err)
 		}
 		var pgErr *pgconn.PgError
-		if err := migrations.DownOne(ctx, connection, remaining); !errors.As(err, &pgErr) || pgErr.Code != "55000" {
-			t.Fatal("original forward-only scope history rollback was not rejected", err)
+		if err := migrations.DownOne(ctx, connection, remaining); !errors.As(err, &pgErr) || pgErr.Code != "P0001" || pgErr.Message != "registration bonus required facts guard is forward-only" {
+			t.Fatal("actual forward-only bonus facts guard rollback was not rejected", err)
 		}
 		if ledger(false) != expectedRemainingLedger || authorityFacts() != beforeAuthority {
 			t.Fatal("failed public rollback changed retained ledger or authority")

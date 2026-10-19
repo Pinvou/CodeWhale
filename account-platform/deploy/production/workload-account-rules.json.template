@@ -23,6 +23,7 @@
     "subject": "__BILLING_WORKLOAD_SUBJECT__",
     "service": "billing-service",
     "permissions": [
+      "internal.registration-bonus-eligibility.read",
       "internal.authorization.check",
       "internal.authorization.delegate",
       "internal.approval-execution.begin",

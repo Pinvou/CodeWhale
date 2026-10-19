@@ -20,21 +20,23 @@ import (
 )
 
 type PostgresRepository struct {
-	pool                        *pgxpool.Pool
-	approvalWriterPool          *pgxpool.Pool
-	approvalWriterCommit        func(context.Context, pgx.Tx) error
-	commerceProviderID          string
-	commerceAdapterVersion      string
-	approvalProofSource         ApprovalProofSource
-	approvalSnapshots           ApprovalSnapshotSource
-	billingGovernanceActivation billinggovernance.Reader
-	tokenGovernanceActivation   tokengovernance.Reader
-	approvalPresenterReady      func(approvalpolicy.Policy) bool
-	approvalPagination          approvalPaginationRuntime
-	approvalPaginationMetrics   *ApprovalPaginationMetrics
-	now                         func() time.Time
-	walletPolicyVersion         string
-	walletProvisioningSLA       time.Duration
+	pool                              *pgxpool.Pool
+	approvalWriterPool                *pgxpool.Pool
+	approvalWriterCommit              func(context.Context, pgx.Tx) error
+	commerceProviderID                string
+	commerceAdapterVersion            string
+	approvalProofSource               ApprovalProofSource
+	approvalSnapshots                 ApprovalSnapshotSource
+	billingGovernanceActivation       billinggovernance.Reader
+	tokenGovernanceActivation         tokengovernance.Reader
+	approvalPresenterReady            func(approvalpolicy.Policy) bool
+	approvalPagination                approvalPaginationRuntime
+	approvalPaginationMetrics         *ApprovalPaginationMetrics
+	now                               func() time.Time
+	walletPolicyVersion               string
+	walletProvisioningSLA             time.Duration
+	registrationBonusFingerprintKeyID string
+	registrationBonusFingerprintKey   []byte
 }
 
 func NewPostgresRepository(ctx context.Context, databaseURL string) (*PostgresRepository, error) {
@@ -74,6 +76,18 @@ func (r *PostgresRepository) ConfigureWalletProvisioning(policyVersion string, s
 
 func (r *PostgresRepository) Ping(ctx context.Context) error { return r.pool.Ping(ctx) }
 
+// Configure before starting registration workers or accepting mobile requests.
+func (r *PostgresRepository) ConfigureRegistrationBonusFingerprint(keyID string, key []byte) error {
+	keyID = strings.TrimSpace(keyID)
+	if !registrationBonusKeyIDValid(keyID) || len(key) != 32 {
+		return errors.New("registration bonus fingerprint requires a valid key id and exactly 32 random bytes")
+	}
+	clear(r.registrationBonusFingerprintKey)
+	r.registrationBonusFingerprintKeyID = keyID
+	r.registrationBonusFingerprintKey = append([]byte(nil), key...)
+	return nil
+}
+
 func (r *PostgresRepository) userIDByPrincipal(ctx context.Context, principal identity.Principal) (uuid.UUID, error) {
 	var userID uuid.UUID
 	err := r.pool.QueryRow(ctx, `SELECT u.id FROM identities i JOIN users u ON u.id=i.user_id AND u.status='ACTIVE' WHERE i.issuer=$1 AND i.subject=$2`, principal.Issuer, principal.Subject).Scan(&userID)
@@ -83,6 +97,7 @@ func (r *PostgresRepository) userIDByPrincipal(ctx context.Context, principal id
 	return userID, err
 }
 func (r *PostgresRepository) Close() {
+	clear(r.registrationBonusFingerprintKey)
 	if r.approvalWriterPool != nil && r.approvalWriterPool != r.pool {
 		r.approvalWriterPool.Close()
 	}

@@ -157,6 +157,7 @@ func buildPolicies() map[string]Policy {
 		"ACCOUNT_REGISTRATION_COMPENSATE":               "platform.registrations.repair",
 		"ACCOUNT_PROFILE_CHANGE_RETRY":                  "platform.profile-changes.repair",
 		"ACCOUNT_SMS_CONFIGURATION_UPDATE":              "platform.sms-config.manage",
+		"BILLING_REGISTRATION_BONUS_POLICY_UPDATE":      "platform.registration-bonus.manage",
 	} {
 		result[commandType] = Policy{CommandType: commandType, PolicyVersion: Version, Mode: AuditOnly,
 			RequesterPermission: permission, RiskClass: "GOVERNANCE_OR_NORMAL_STATE_MACHINE",

@@ -96,6 +96,10 @@ func retainedWalletFenceActors(t *testing.T) *retainedWalletFenceFixture {
 }
 
 func (f *retainedWalletFenceFixture) repository(t *testing.T) *PostgresRepository {
+	return f.repositoryWithInitialStage(t, nil)
+}
+
+func (f *retainedWalletFenceFixture) repositoryWithInitialStage(t *testing.T, initial func(context.Context, *pgx.Conn, []migrations.Migration) error) *PostgresRepository {
 	t.Helper()
 	ctx := f.ctx
 	name := "f01_wallet_fence_" + strings.ReplaceAll(uuid.NewString(), "-", "")
@@ -157,6 +161,11 @@ func (f *retainedWalletFenceFixture) repository(t *testing.T) *PostgresRepositor
 	installed, err := migrations.Load("../../migrations/account")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if initial != nil {
+		if err = initial(ctx, connection, installed); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err = accountschema.Up(ctx, connection, installed); err != nil {
 		t.Fatal(err)

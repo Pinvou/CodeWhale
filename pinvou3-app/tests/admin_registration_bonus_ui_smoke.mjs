@@ -1,0 +1,629 @@
+import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+import puppeteer from 'puppeteer-core';
+
+const browserPath = [process.env.CHROME,
+  'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
+  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+  'C:/Program Files/Google/Chrome/Application/chrome.exe',
+  'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+  '/snap/bin/chromium', '/usr/bin/chromium', '/usr/bin/chromium-browser',
+  '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+].find((candidate) => candidate && existsSync(candidate));
+assert.ok(browserPath, 'Chromium or Edge is required');
+const staticRoot = path.resolve(import.meta.dirname, '../../account-platform/internal/portal/static');
+let permissions = ['platform.registration-bonus.read', 'platform.registration-bonus.manage'];
+let currentUserID = '0199a100-0001-7000-8000-000000000101';
+let csrfToken = 'csrf-user-a';
+let policy = { revision: 2, enabled: false, amount_microcredits: 0, validity_days: 30, updated_at: new Date().toISOString(), eligibility_status: 'READY', recoverable_registration_count: 4, unrecoverable_registration_count: 0 };
+let recentAuthenticationRequired = false;
+let authenticationBehavior = 'concurrent-update';
+let nextPolicyReadDelayMs = 0;
+let delayedPolicyReadStarted = false;
+let nextAuthorizationReadDelayMs = 0;
+let delayNextSaveAuthorizationRead = false;
+let delayedSaveAuthorizationStarted = false;
+let delayNextPolicyWrite = false;
+let delayedPolicyWriteStarted = false;
+const reauthenticationRequests = [];
+const writes = [];
+let failingPolicyReads = 0;
+let invalidNextPolicyWrite = false;
+const rejectedPolicyWrites = [];
+let policyReads = 0;
+let pauseNextPolicyRead = false;
+let releasePolicyRead = null;
+let completedAuthorizationReads = 0;
+let completedPolicyReads = 0;
+
+function json(response, payload, status = 200) {
+  response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+  response.end(JSON.stringify(payload));
+}
+const server = createServer(async (request, response) => {
+  const url = new URL(request.url, 'http://127.0.0.1');
+  if (url.pathname === '/__test__/readonly') { permissions = ['platform.registration-bonus.read']; return json(response, {}); }
+  if (url.pathname === '/__test__/blocked') { policy = { ...policy, eligibility_status: 'BLOCKED', unrecoverable_registration_count: 2 }; return json(response, {}); }
+  if (url.pathname === '/__test__/recent-auth') { recentAuthenticationRequired = true; return json(response, {}); }
+  if (url.pathname === '/__test__/auth-cancel') { authenticationBehavior = 'cancel'; nextPolicyReadDelayMs = 300; return json(response, {}); }
+  if (url.pathname === '/__test__/auth-switch-user') { authenticationBehavior = 'switch-user'; return json(response, {}); }
+  if (url.pathname === '/__test__/auth-expire-return') { authenticationBehavior = 'expire-return'; return json(response, {}); }
+  if (url.pathname === '/__test__/delay-next-save-authorization') {
+    delayNextSaveAuthorizationRead = true;
+    delayedSaveAuthorizationStarted = false;
+    return json(response, {});
+  }
+  if (url.pathname === '/__test__/delay-next-policy-write') {
+    delayNextPolicyWrite = true;
+    delayedPolicyWriteStarted = false;
+    return json(response, {});
+  }
+  if (url.pathname === '/__test__/switch-current-user') {
+    currentUserID = currentUserID.endsWith('0101') ? '0199a100-0001-7000-8000-000000000202' : '0199a100-0001-7000-8000-000000000101';
+    csrfToken = currentUserID.endsWith('0101') ? 'csrf-user-a' : 'csrf-user-b';
+    nextAuthorizationReadDelayMs = 500;
+    return json(response, {});
+  }
+  if (url.pathname === '/__test__/switch-current-user-with-stale-policy-read') {
+    currentUserID = currentUserID.endsWith('0101') ? '0199a100-0001-7000-8000-000000000202' : '0199a100-0001-7000-8000-000000000101';
+    csrfToken = currentUserID.endsWith('0101') ? 'csrf-user-a' : 'csrf-user-b';
+    nextAuthorizationReadDelayMs = 100;
+    nextPolicyReadDelayMs = 800;
+    delayedPolicyReadStarted = false;
+    return json(response, {});
+  }
+  if (url.pathname === '/__test__/writes') return json(response, writes);
+  if (url.pathname === '/auth/login') {
+    reauthenticationRequests.push(url);
+    let returnTo = url.searchParams.get('return_to') || '/admin.html?section=operations';
+    if (authenticationBehavior === 'concurrent-update') policy = { ...policy, revision: policy.revision + 1, amount_microcredits: 400_000, validity_days: 45, updated_at: new Date().toISOString() };
+    if (authenticationBehavior === 'cancel') returnTo = '/admin.html?section=operations';
+    if (authenticationBehavior === 'switch-user') {
+      currentUserID = currentUserID.endsWith('0101') ? '0199a100-0001-7000-8000-000000000202' : '0199a100-0001-7000-8000-000000000101';
+      csrfToken = currentUserID.endsWith('0101') ? 'csrf-user-a' : 'csrf-user-b';
+    }
+    if (authenticationBehavior === 'expire-return') {
+      authenticationBehavior = 'success';
+      nextPolicyReadDelayMs = 1500;
+      response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      return response.end(`<script>const key='pinvou.admin.registration-bonus.reauthentication-draft';const draft=JSON.parse(sessionStorage.getItem(key));draft.expires_at=Date.now()+1000;sessionStorage.setItem(key,JSON.stringify(draft));location.replace(${JSON.stringify(returnTo)});</script>`);
+    }
+    authenticationBehavior = 'success';
+    response.writeHead(302, { Location: returnTo });
+    return response.end();
+  }
+  if (url.pathname === '/api/admin/account/admin/v1/users' && request.method === 'GET') return json(response, { items: [], next_cursor: null });
+  if (url.pathname === '/api/session') return json(response, { authenticated: true, csrf_token: csrfToken });
+  if (url.pathname === '/api/account/v1/account/bootstrap') {
+    if (request.headers['x-csrf-token'] !== csrfToken) return json(response, { code: 'CSRF_REJECTED' }, 403);
+    const requestedUserID = currentUserID;
+    const requestedPermissions = [...permissions];
+    if (delayNextSaveAuthorizationRead) {
+      delayNextSaveAuthorizationRead = false;
+      delayedSaveAuthorizationStarted = true;
+      await new Promise((resolve) => { setTimeout(resolve, 250); });
+    } else if (nextAuthorizationReadDelayMs > 0) {
+      const delay = nextAuthorizationReadDelayMs;
+      nextAuthorizationReadDelayMs = 0;
+      await new Promise((resolve) => { setTimeout(resolve, delay); });
+    }
+    completedAuthorizationReads++;
+    return json(response, { user_id: requestedUserID, status: "ACTIVE", active_context: { context_type: "PERSONAL", context_version: 1, authorization_version: 1, personal_authorization_version: 1, platform_authorization_version: 1, organization_authorization_version: 0, membership_version: 1, permissions: [] }, personal_permissions: [], platform_permissions: requestedPermissions });
+  }
+  if (url.pathname === '/api/admin/billing/admin/v1/registration-bonus-policy' && request.method === 'GET') {
+    policyReads++;
+    if (failingPolicyReads > 0) { failingPolicyReads--; return json(response, { code: 'REGISTRATION_BONUS_UNAVAILABLE' }, 503); }
+    const responsePolicy = { ...policy };
+    if (pauseNextPolicyRead) { pauseNextPolicyRead = false; await new Promise(resolve => { releasePolicyRead = resolve; }); }
+    if (nextPolicyReadDelayMs > 0) {
+      const delay = nextPolicyReadDelayMs;
+      nextPolicyReadDelayMs = 0;
+      delayedPolicyReadStarted = true;
+      await new Promise((resolve) => { setTimeout(resolve, delay); });
+    }
+    completedPolicyReads++;
+    return json(response, responsePolicy);
+  }
+  if (url.pathname === '/api/admin/billing/admin/v1/registration-bonus-policy' && request.method === 'PUT') {
+    if (request.headers['x-csrf-token'] !== csrfToken) return json(response, { code: 'CSRF_REJECTED' }, 403);
+    if (delayNextPolicyWrite) {
+      delayNextPolicyWrite = false;
+      delayedPolicyWriteStarted = true;
+      await new Promise((resolve) => { setTimeout(resolve, 500); });
+    }
+    if (recentAuthenticationRequired) {
+      recentAuthenticationRequired = false;
+      return json(response, { code: 'RECENT_AUTHENTICATION_REQUIRED', message: 'recent authentication required' }, 401);
+    }
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    if (invalidNextPolicyWrite) {
+      invalidNextPolicyWrite = false;
+      rejectedPolicyWrites.push({ body, idempotencyKey: request.headers['idempotency-key'] });
+      return json(response, { code: 'REGISTRATION_BONUS_INVALID' }, 400);
+    }
+    writes.push({ body, idempotencyKey: request.headers['idempotency-key'], csrf: request.headers['x-csrf-token'] });
+    policy = { ...policy, revision: policy.revision + 1, enabled: body.enabled, amount_microcredits: body.amount_points * 10_000, validity_days: body.validity_days, updated_at: new Date().toISOString() };
+    return json(response, policy);
+  }
+  const relative = url.pathname === '/admin.html' ? 'admin.html' : url.pathname.replace(/^\//, '');
+  const target = path.resolve(staticRoot, relative);
+  if (!target.startsWith(staticRoot) || !existsSync(target)) { response.writeHead(404); return response.end('not found'); }
+  const type = path.extname(target) === '.html' ? 'text/html' : path.extname(target) === '.css' ? 'text/css' : 'text/javascript';
+  response.writeHead(200, { 'Content-Type': `${type}; charset=utf-8` });
+  response.end(await readFile(target));
+});
+
+await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+const { port } = server.address();
+const browser = await puppeteer.launch({ executablePath: browserPath, headless: 'new', args: ['--no-sandbox', '--disable-gpu', '--no-first-run', `--explicitly-allowed-ports=${port}`] });
+try {
+  const page = await browser.newPage();
+  page.on('pageerror', error => console.error('Controlled policy page exception:', error.message));
+  page.on('response', response => { if (response.url().includes('/api/') && response.status() >= 400) console.error('Controlled policy HTTP status:', new URL(response.url()).pathname, response.status()); });
+  await page.setViewport({ width: 1280, height: 900, deviceScaleFactor: 1 });
+  await page.evaluateOnNewDocument(() => localStorage.setItem('pinvou.admin.language', 'en'));
+  await page.goto(`http://127.0.0.1:${port}/admin.html?section=operations`, { waitUntil: 'networkidle0' });
+  await page.waitForSelector('[data-testid="registration-bonus-policy"] form');
+  const text = await page.$eval('[data-testid="registration-bonus-policy"]', (node) => node.textContent);
+  assert.match(text, /permanently consumes eligibility/i);
+  assert.match(await page.$eval('[data-testid="registration-bonus-readiness"]', (node) => node.textContent), /backfill is complete/i);
+  const desktopLayout = await page.$eval('[data-testid="registration-bonus-policy"]', (node) => {
+    const editor = node.querySelector('.adm-registration-bonus-editor').getBoundingClientRect();
+    const reason = node.querySelector('.adm-sms-reason').getBoundingClientRect();
+    const textarea = node.querySelector('textarea').getBoundingClientRect();
+    const actions = node.querySelector('.adm-registration-bonus-actions').getBoundingClientRect();
+    const submit = node.querySelector('button[type="submit"]').getBoundingClientRect();
+    return {
+      reasonWidth: reason.width,
+      editorWidth: editor.width,
+      textareaHeight: textarea.height,
+      submitRightGap: Math.abs(actions.right - submit.right),
+    };
+  });
+  assert.ok(desktopLayout.reasonWidth >= desktopLayout.editorWidth - 40, 'change reason must use the editor width');
+  assert.ok(desktopLayout.textareaHeight >= 110, 'change reason must provide a usable writing area');
+  assert.ok(desktopLayout.submitRightGap <= 1, 'the primary action must align to the editor edge');
+  const inputs = await page.$$('[data-testid="registration-bonus-policy"] input[type="number"]');
+  await inputs[0].evaluate((node) => { node.focus(); node.select(); }); await inputs[0].type('25');
+  await inputs[1].evaluate((node) => { node.focus(); node.select(); }); await inputs[1].type('90');
+  const textareas = await page.$$('[data-testid="registration-bonus-policy"] textarea');
+  await textareas[0].type('Enable the controlled launch bonus');
+  await page.click('[data-testid="registration-bonus-policy"] input[type="checkbox"]');
+  await page.click('[data-testid="registration-bonus-policy"] button[type="submit"]');
+  await page.waitForFunction(() => document.querySelector('[data-testid="registration-bonus-policy"] .adm-registration-bonus-summary dd')?.textContent.trim() === '3');
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].body.expected_revision, 2);
+  assert.equal(writes[0].body.amount_points, 25);
+  assert.equal(writes[0].csrf, 'csrf-user-a');
+  assert.match(writes[0].idempotencyKey, /^registration-bonus-/);
+
+  await fetch(`http://127.0.0.1:${port}/__test__/recent-auth`);
+  await page.type('[data-testid="registration-bonus-policy"] textarea', 'Confirm recent authentication flow');
+  await page.click('[data-testid="registration-bonus-policy"] button[type="submit"]');
+  await page.waitForSelector('[data-testid="registration-bonus-policy"] [role="alert"]');
+  assert.match(await page.$eval('[data-testid="registration-bonus-policy"] [role="alert"]', (node) => node.textContent), /sign in again/i);
+  assert.match(await page.$eval('[data-testid="registration-bonus-policy"] [role="alert"] button', (node) => node.textContent), /sign in again/i);
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: 'networkidle0' }),
+    page.click('[data-testid="registration-bonus-policy"] [role="alert"] button'),
+  ]);
+  await page.waitForSelector('[data-testid="registration-bonus-policy"] form');
+  assert.equal(reauthenticationRequests.length, 1);
+  assert.equal(reauthenticationRequests[0].searchParams.get('reauthenticate'), '1');
+  const firstReturnTo = new URL(reauthenticationRequests[0].searchParams.get('return_to'), `http://127.0.0.1:${port}`);
+  assert.equal(firstReturnTo.pathname, '/admin.html');
+  assert.equal(firstReturnTo.searchParams.get('section'), 'operations');
+  assert.match(firstReturnTo.searchParams.get('registration_bonus_stepup'), /^[0-9a-f-]{36}$/);
+  assert.deepEqual(await page.$$eval('[data-testid="registration-bonus-policy"] input[type="number"]', (nodes) => nodes.map((node) => node.value)), ['25', '90']);
+  assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] input[type="checkbox"]', (node) => node.checked), true);
+  assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', (node) => node.value), 'Confirm recent authentication flow');
+  assert.equal(await page.$eval('html', (node) => node.ownerDocument.defaultView.sessionStorage.getItem('pinvou.admin.registration-bonus.reauthentication-draft')), null);
+  assert.equal(new URL(page.url()).searchParams.has('registration_bonus_stepup'), false);
+  assert.match(await page.$eval('[data-testid="registration-bonus-policy"] [role="alert"]', (node) => node.textContent), /policy changed during reauthentication/i);
+  assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] button[type="submit"]', (node) => node.disabled), true, 'a stale restored draft must not be submitted against the latest revision');
+  assert.equal(writes.length, 1, 'restoring a stale draft must not create a write');
+  await page.click('[data-testid="registration-bonus-policy"] [role="alert"] button');
+  await page.waitForFunction(() => document.querySelector('[data-testid="registration-bonus-policy"] input[type="number"]')?.value === '40');
+  assert.deepEqual(await page.$$eval('[data-testid="registration-bonus-policy"] input[type="number"]', (nodes) => nodes.map((node) => node.value)), ['40', '45']);
+  assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', (node) => node.value), '');
+
+  await page.type('[data-testid="registration-bonus-policy"] textarea', 'Verify unavailable session storage');
+  await fetch(`http://127.0.0.1:${port}/__test__/recent-auth`);
+  await page.click('[data-testid="registration-bonus-policy"] button[type="submit"]');
+  await page.waitForSelector('[data-testid="registration-bonus-policy"] [role="alert"]');
+  await page.$eval('html', (node) => {
+    const view = node.ownerDocument.defaultView;
+    view.__pinvouOriginalSessionStorageSetItem = view.Storage.prototype.setItem;
+    view.Storage.prototype.setItem = () => { throw new Error('session storage unavailable'); };
+  });
+  const urlBeforeStorageFailure = page.url();
+  await page.click('[data-testid="registration-bonus-policy"] [role="alert"] button');
+  await page.waitForFunction(() => /draft could not be stored safely/i.test(document.querySelector('[data-testid="registration-bonus-policy"] [role="alert"]')?.textContent || ''));
+  assert.equal(page.url(), urlBeforeStorageFailure, 'storage failure must cancel the reauthentication navigation');
+  assert.equal(reauthenticationRequests.length, 1, 'storage failure must not reach the authentication endpoint');
+  assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', (node) => node.value), 'Verify unavailable session storage');
+  await page.$eval('html', (node) => {
+    const view = node.ownerDocument.defaultView;
+    view.Storage.prototype.setItem = view.__pinvouOriginalSessionStorageSetItem;
+    delete view.__pinvouOriginalSessionStorageSetItem;
+  });
+
+  await fetch(`http://127.0.0.1:${port}/__test__/auth-cancel`);
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: 'domcontentloaded' }),
+    page.click('[data-testid="registration-bonus-policy"] [role="alert"] button'),
+  ]);
+  await page.waitForSelector('.adm-registration-bonus-draft-prompt');
+  assert.equal(await page.$eval('.adm-registration-bonus-draft-prompt button:first-child', (node) => node.disabled), true, 'draft recovery must wait for the authoritative policy');
+  await page.waitForSelector('[data-testid="registration-bonus-policy"] form');
+  assert.equal(await page.$eval('.adm-registration-bonus-draft-prompt button:first-child', (node) => node.disabled), false);
+  assert.deepEqual(await page.$$eval('[data-testid="registration-bonus-policy"] input[type="number"]', (nodes) => nodes.map((node) => node.value)), ['40', '45'], 'unfinished reauthentication must keep the server policy authoritative until recovery is chosen');
+  assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', (node) => node.value), '');
+  await page.$eval('html', (node) => {
+    const view = node.ownerDocument.defaultView;
+    view.__pinvouOriginalSessionStorageRemoveItem = view.Storage.prototype.removeItem;
+    view.Storage.prototype.removeItem = () => { throw new Error('session storage delete unavailable'); };
+  });
+  await page.click('.adm-registration-bonus-draft-prompt button:first-child');
+  assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', (node) => node.value), 'Verify unavailable session storage');
+  assert.equal(await page.$eval('html', (node) => node.ownerDocument.defaultView.sessionStorage.getItem('pinvou.admin.registration-bonus.reauthentication-draft')), '{"version":0}', 'a verified invalid tombstone must replace a draft when deletion fails');
+  await page.$eval('html', (node) => {
+    const view = node.ownerDocument.defaultView;
+    view.Storage.prototype.removeItem = view.__pinvouOriginalSessionStorageRemoveItem;
+    delete view.__pinvouOriginalSessionStorageRemoveItem;
+  });
+
+  const writesBeforeIdentityRefresh = writes.length;
+  await fetch(`http://127.0.0.1:${port}/__test__/switch-current-user`);
+  await page.evaluate(() => globalThis.dispatchEvent(new Event('focus')));
+  await page.waitForFunction(() => document.querySelector('[data-testid="registration-bonus-policy"] button[type="submit"]')?.disabled === true);
+  await page.$eval('[data-testid="registration-bonus-policy"] form', (form) => form.requestSubmit());
+  await new Promise((resolve) => { setTimeout(resolve, 75); });
+  assert.equal(writes.length, writesBeforeIdentityRefresh, 'a mutation must be blocked while a rotated session identity is being refreshed');
+  await page.waitForFunction(() => document.querySelector('[data-testid="registration-bonus-policy"] textarea')?.value === '');
+  assert.deepEqual(await page.$$eval('[data-testid="registration-bonus-policy"] input[type="number"]', (nodes) => nodes.map((node) => node.value)), ['40', '45'], 'a live identity change must reset the previous administrator draft');
+
+  await page.type('[data-testid="registration-bonus-policy"] textarea', 'Cancel a save interrupted by identity refresh');
+  await fetch(`http://127.0.0.1:${port}/__test__/delay-next-save-authorization`);
+  await page.click('[data-testid="registration-bonus-policy"] button[type="submit"]');
+  for (let attempt = 0; attempt < 50 && !delayedSaveAuthorizationStarted; attempt += 1) {
+    await new Promise((resolve) => { setTimeout(resolve, 10); });
+  }
+  assert.equal(delayedSaveAuthorizationStarted, true, 'the save authorization preflight must be in flight before the identity refresh starts');
+  const writesBeforeInterruptedSave = writes.length;
+  await fetch(`http://127.0.0.1:${port}/__test__/switch-current-user`);
+  await page.evaluate(() => globalThis.dispatchEvent(new Event('focus')));
+  await page.waitForFunction(() => document.querySelector('[data-testid="registration-bonus-policy"] textarea')?.value === '');
+  assert.equal(writes.length, writesBeforeInterruptedSave, 'a save preflight started by the old identity must be cancelled when a newer authorization refresh begins');
+  assert.equal(currentUserID, '0199a100-0001-7000-8000-000000000101');
+
+  await page.type('[data-testid="registration-bonus-policy"] textarea', 'Reconcile a save completed during identity refresh');
+  await fetch(`http://127.0.0.1:${port}/__test__/delay-next-policy-write`);
+  const writesBeforeReconciliation = writes.length;
+  const revisionBeforeReconciliation = policy.revision;
+  await page.click('[data-testid="registration-bonus-policy"] button[type="submit"]');
+  for (let attempt = 0; attempt < 50 && !delayedPolicyWriteStarted; attempt += 1) {
+    await new Promise((resolve) => { setTimeout(resolve, 10); });
+  }
+  assert.equal(delayedPolicyWriteStarted, true, 'the policy write must be in flight before the same-identity refresh starts');
+  await page.evaluate(() => globalThis.dispatchEvent(new Event('focus')));
+  await page.waitForFunction((revision) => document.querySelector('[data-testid="registration-bonus-policy"] .adm-registration-bonus-summary dd')?.textContent.trim() === String(revision), {}, revisionBeforeReconciliation + 1);
+  assert.equal(writes.length, writesBeforeReconciliation + 1, 'a successful in-flight write must remain committed');
+  assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', (node) => node.value), '', 'the authoritative policy reload must replace the submitted form');
+  assert.match(await page.$eval('[data-testid="registration-bonus-policy"] [role="status"]', (node) => node.textContent), /save completed.*latest server policy/i);
+
+  await page.type('[data-testid="registration-bonus-policy"] textarea', 'Bypass a stale read after cross identity refresh');
+  await fetch(`http://127.0.0.1:${port}/__test__/delay-next-policy-write`);
+  const writesBeforeCrossIdentityReconciliation = writes.length;
+  const revisionBeforeCrossIdentityReconciliation = policy.revision;
+  await page.click('[data-testid="registration-bonus-policy"] button[type="submit"]');
+  for (let attempt = 0; attempt < 50 && !delayedPolicyWriteStarted; attempt += 1) {
+    await new Promise((resolve) => { setTimeout(resolve, 10); });
+  }
+  assert.equal(delayedPolicyWriteStarted, true, 'the cross-identity scenario must begin with an in-flight policy write');
+  await fetch(`http://127.0.0.1:${port}/__test__/switch-current-user-with-stale-policy-read`);
+  await page.evaluate(() => globalThis.dispatchEvent(new Event('focus')));
+  for (let attempt = 0; attempt < 100 && !delayedPolicyReadStarted; attempt += 1) {
+    await new Promise((resolve) => { setTimeout(resolve, 10); });
+  }
+  assert.equal(delayedPolicyReadStarted, true, 'the new identity must start a policy read that snapshots the pre-write revision');
+  await page.waitForFunction((revision) => document.querySelector('[data-testid="registration-bonus-policy"] .adm-registration-bonus-summary dd')?.textContent.trim() === String(revision), {}, revisionBeforeCrossIdentityReconciliation + 1);
+  assert.equal(writes.length, writesBeforeCrossIdentityReconciliation + 1);
+  assert.equal(currentUserID, '0199a100-0001-7000-8000-000000000202');
+  assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', (node) => node.value), '', 'reconciliation must bypass the stale shared read and show the committed policy');
+  assert.match(await page.$eval('[data-testid="registration-bonus-policy"] [role="status"]', (node) => node.textContent), /save completed.*latest server policy/i);
+
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.waitForSelector('[data-testid="registration-bonus-policy"] form');
+  assert.equal(await page.$('.adm-registration-bonus-draft-prompt'), null);
+  assert.equal(await page.$eval('html', (node) => node.ownerDocument.defaultView.sessionStorage.getItem('pinvou.admin.registration-bonus.reauthentication-draft')), null);
+
+  await page.type('[data-testid="registration-bonus-policy"] textarea', 'Ensure drafts cannot cross administrators');
+  await fetch(`http://127.0.0.1:${port}/__test__/recent-auth`);
+  await page.click('[data-testid="registration-bonus-policy"] button[type="submit"]');
+  await page.waitForSelector('[data-testid="registration-bonus-policy"] [role="alert"]');
+  await fetch(`http://127.0.0.1:${port}/__test__/auth-switch-user`);
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: 'networkidle0' }),
+    page.click('[data-testid="registration-bonus-policy"] [role="alert"] button'),
+  ]);
+  await page.waitForSelector('[data-testid="registration-bonus-policy"] form');
+  assert.equal(currentUserID, '0199a100-0001-7000-8000-000000000101');
+  assert.equal(await page.$('.adm-registration-bonus-draft-prompt'), null);
+  assert.deepEqual(await page.$$eval('[data-testid="registration-bonus-policy"] input[type="number"]', (nodes) => nodes.map((node) => node.value)), ['40', '45']);
+  assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', (node) => node.value), '', 'a different administrator must never receive the originating administrator draft');
+  assert.equal(await page.$eval('html', (node) => node.ownerDocument.defaultView.sessionStorage.getItem('pinvou.admin.registration-bonus.reauthentication-draft')), null);
+
+  await page.type('[data-testid="registration-bonus-policy"] textarea', 'Discard an expired automatic return draft');
+  await fetch(`http://127.0.0.1:${port}/__test__/recent-auth`);
+  await page.click('[data-testid="registration-bonus-policy"] button[type="submit"]');
+  await page.waitForSelector('[data-testid="registration-bonus-policy"] [role="alert"]');
+  await fetch(`http://127.0.0.1:${port}/__test__/auth-expire-return`);
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: 'networkidle0' }),
+    page.click('[data-testid="registration-bonus-policy"] [role="alert"] button'),
+  ]);
+  await page.waitForSelector('[data-testid="registration-bonus-policy"] form');
+  assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', (node) => node.value), '', 'an automatic return must not restore a draft that expired while policy data loaded');
+  assert.match(await page.$eval('[data-testid="registration-bonus-policy"] [role="status"]', (node) => node.textContent), /draft expired/i);
+  assert.equal(await page.$eval('html', (node) => node.ownerDocument.defaultView.sessionStorage.getItem('pinvou.admin.registration-bonus.reauthentication-draft')), null);
+
+  await page.$eval('html', (node, { userID, revision }) => {
+    const view = node.ownerDocument.defaultView;
+    const now = view.Date.now();
+    view.sessionStorage.setItem('pinvou.admin.registration-bonus.reauthentication-draft', JSON.stringify({
+      version: 1,
+      attempt_id: '11111111-1111-4111-8111-111111111111',
+      user_id: userID,
+      created_at: now,
+      expires_at: now + 10 * 60 * 1000,
+      expected_revision: revision,
+      enabled: false,
+      amount_points: 40,
+      validity_days: 45,
+      reason: 'Discard an expired pending draft',
+    }));
+  }, { userID: currentUserID, revision: policy.revision });
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.waitForSelector('.adm-registration-bonus-draft-prompt');
+  await page.evaluate(() => {
+    globalThis.__pinvouOriginalDateNow = Date.now;
+    const expiredNow = Date.now() + 11 * 60 * 1000;
+    Date.now = () => expiredNow;
+  });
+  await page.click('.adm-registration-bonus-draft-prompt button:first-child');
+  await page.evaluate(() => {
+    Date.now = globalThis.__pinvouOriginalDateNow;
+    delete globalThis.__pinvouOriginalDateNow;
+  });
+  assert.equal(await page.$('.adm-registration-bonus-draft-prompt'), null);
+  assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', (node) => node.value), '', 'a pending draft must be checked for expiry when recovery is requested');
+  assert.match(await page.$eval('[data-testid="registration-bonus-policy"] [role="status"]', (node) => node.textContent), /draft expired/i);
+  assert.equal(await page.$eval('html', (node) => node.ownerDocument.defaultView.sessionStorage.getItem('pinvou.admin.registration-bonus.reauthentication-draft')), null);
+
+  await fetch(`http://127.0.0.1:${port}/__test__/blocked`);
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.waitForSelector('[data-testid="registration-bonus-policy"] form');
+  assert.match(await page.$eval('[data-testid="registration-bonus-readiness"]', (node) => node.textContent), /2 anonymized registrations/i);
+  const enabledCheckbox = await page.$('[data-testid="registration-bonus-policy"] input[type="checkbox"]');
+  assert.equal(await enabledCheckbox.evaluate((node) => node.disabled), false, 'an enabled policy must retain its kill switch while readiness is blocked');
+  await enabledCheckbox.click();
+  const blockedTextarea = await page.$('[data-testid="registration-bonus-policy"] textarea');
+  await blockedTextarea.type('Disable while eligibility is blocked');
+  assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] button[type="submit"]', (node) => node.disabled), false, 'disabling must remain available while blocked');
+  const expectedBlockedRevision = policy.revision + 1;
+  await page.click('[data-testid="registration-bonus-policy"] button[type="submit"]');
+  await page.waitForFunction((revision) => document.querySelector('[data-testid="registration-bonus-policy"] .adm-registration-bonus-summary dd')?.textContent.trim() === String(revision), {}, expectedBlockedRevision);
+  assert.equal(writes.at(-1).body.enabled, false);
+  assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] input[type="checkbox"]', (node) => node.disabled), true, 'blocked readiness must prevent re-enabling');
+
+  await fetch(`http://127.0.0.1:${port}/__test__/readonly`);
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.waitForSelector('[data-testid="registration-bonus-policy"] form');
+  assert.equal(await page.$('[data-testid="registration-bonus-policy"] button[type="submit"]'), null);
+  assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] input[type="number"]', (node) => node.disabled), true);
+
+  permissions = ['platform.registration-bonus.read', 'platform.registration-bonus.manage'];
+  policy = { ...policy, eligibility_status: 'READY', unrecoverable_registration_count: 0 };
+  await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 1 });
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.waitForSelector('[data-testid="registration-bonus-policy"] form');
+  const mobileLayout = await page.$eval('[data-testid="registration-bonus-policy"]', (node) => {
+    const fields = [...node.querySelectorAll('input[type="number"]')].map((input) => input.getBoundingClientRect());
+    const editor = node.querySelector('.adm-registration-bonus-editor').getBoundingClientRect();
+    const submit = node.querySelector('button[type="submit"]').getBoundingClientRect();
+    return {
+      fieldsStacked: fields[1].top > fields[0].bottom,
+      submitWidth: submit.width,
+      editorInnerWidth: editor.width - 30,
+    };
+  });
+  assert.equal(mobileLayout.fieldsStacked, true, 'numeric fields must stack on narrow screens');
+  assert.ok(Math.abs(mobileLayout.submitWidth - mobileLayout.editorInnerWidth) <= 2, 'primary action must fill the narrow editor');
+  const { adminPlatformCopy } = await import('../src/shared/i18n.js');
+  for (const language of ['zh', 'en', 'ja']) {
+    await page.select('.adm-shell > header select', language);
+    await page.waitForFunction(title => document.querySelector('[data-testid="registration-bonus-policy"] h2')?.textContent === title, {}, adminPlatformCopy[language].operations.title);
+    const content = await page.$eval('[data-testid="registration-bonus-policy"]', node => node.textContent);
+    assert.ok(content.includes(adminPlatformCopy[language].operations.lifetimeWarning));
+    assert.equal(content.includes('undefined'), false);
+    console.log(`PASS ${language}: actual policy navigation and complete local-language form`);
+  }
+  console.log('PASS original registration bonus workflow: reauthentication, storage, authorization, readonly and mobile assertions');
+  let newFailures = 0;
+  const fixedTimestamp = '2030-02-03T04:05:06Z';
+  for (const language of ['zh', 'en', 'ja']) {
+    const readPage = await browser.newPage();
+    try {
+      permissions = ['platform.registration-bonus.read']; writes.length = 0; policyReads = 0; failingPolicyReads = 1;
+      policy = { ...policy, revision: 200, updated_at: fixedTimestamp };
+      await readPage.evaluateOnNewDocument(language => localStorage.setItem('pinvou.admin.language', language), language);
+      await readPage.goto(`http://127.0.0.1:${port}/admin.html?section=operations`, { waitUntil: 'networkidle0' });
+      await readPage.waitForSelector('[data-testid="registration-bonus-policy"] [role=alert] button');
+      const button = '[data-testid="registration-bonus-policy"] [role=alert] button';
+      assert.equal(await readPage.$eval(button, node => node.disabled), false, 'read-only GET retry must remain available');
+      const retryButton = await readPage.$(button);
+      pauseNextPolicyRead = true; await retryButton.click();
+      await readPage.waitForFunction(() => !document.querySelector('[data-testid="registration-bonus-policy"] [role=alert] button'));
+      assert.equal(typeof releasePolicyRead, 'function'); assert.equal(policyReads, 2);
+      assert.equal(await readPage.$('[data-testid="registration-bonus-policy"] button:not(:disabled)'), null, 'loading removes the retry and exposes no new operation');
+      await retryButton.evaluate(node => node.click()); assert.equal(policyReads, 2, 'removed retry cannot dispatch another GET');
+      releasePolicyRead(); releasePolicyRead = null;
+      await readPage.waitForFunction(() => document.querySelector('[data-testid="registration-bonus-policy"] .adm-registration-bonus-summary dd')?.textContent.trim() === '200');
+      assert.equal(writes.length, 0); assert.equal(policyReads, 2);
+      assert.equal(await readPage.$('[data-testid="registration-bonus-policy"] button[type=submit]'), null);
+      assert.equal(await readPage.$('[data-testid="registration-bonus-policy"] textarea'), null);
+      assert.ok(await readPage.$$eval('[data-testid="registration-bonus-policy"] input', nodes => nodes.every(node => node.disabled)));
+      console.log(JSON.stringify({ action: 'pass', test: `${language}: readonly GET503 retry200 stays locked and never PUTs` }));
+    } catch (error) { newFailures++; console.log(JSON.stringify({ action: 'fail', test: `${language}: readonly GET retry`, message: error.message })); }
+    finally { if (releasePolicyRead) { releasePolicyRead(); releasePolicyRead = null; } pauseNextPolicyRead = false; failingPolicyReads = 0; await readPage.close(); }
+    const datePage = await browser.newPage();
+    try {
+      permissions = ['platform.registration-bonus.read']; writes.length = 0;
+      policy = { ...policy, revision: 300, updated_at: fixedTimestamp };
+      const protocol = await datePage.target().createCDPSession(); await protocol.send('Emulation.setLocaleOverride', { locale: 'en-US' });
+      await datePage.evaluateOnNewDocument(language => localStorage.setItem('pinvou.admin.language', language), language);
+      await datePage.goto(`http://127.0.0.1:${port}/admin.html?section=operations`, { waitUntil: 'networkidle0' });
+      await datePage.waitForSelector('[data-testid="registration-bonus-policy"] .adm-registration-bonus-summary');
+      const result = await datePage.evaluate(({ language, timestamp }) => {
+        const locale = { zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' }[language];
+        return { expected: new Date(timestamp).toLocaleString(locale), shown: document.querySelectorAll('.adm-registration-bonus-summary dd')[1].textContent, browserLocale: Intl.DateTimeFormat().resolvedOptions().locale };
+      }, { language, timestamp: fixedTimestamp });
+      assert.equal(result.browserLocale, 'en-US'); assert.equal(result.shown, result.expected, 'timestamp must use selected application locale');
+      assert.equal(writes.length, 0); assert.equal(policy.updated_at, fixedTimestamp);
+      console.log(JSON.stringify({ action: 'pass', test: `${language}: selected locale uses same-browser native timestamp formatter` }));
+    } catch (error) { newFailures++; console.log(JSON.stringify({ action: 'fail', test: `${language}: selected timestamp locale`, message: error.message })); }
+    finally { await datePage.close(); }
+  }
+  for (const language of ['zh', 'en', 'ja']) {
+    const saveRetryPage = await browser.newPage();
+    try {
+      permissions = ['platform.registration-bonus.read', 'platform.registration-bonus.manage'];
+      currentUserID = '0199a100-0001-7000-8000-000000000101'; csrfToken = 'csrf-user-a';
+      writes.length = 0; rejectedPolicyWrites.length = 0; policyReads = 0;
+      policy = { ...policy, revision: 700, enabled: false, amount_microcredits: 0, validity_days: 30, eligibility_status: 'READY' };
+      await saveRetryPage.evaluateOnNewDocument(language => localStorage.setItem('pinvou.admin.language', language), language);
+      await saveRetryPage.goto(`http://127.0.0.1:${port}/admin.html?section=operations`, { waitUntil: 'networkidle0' });
+      const root = '[data-testid="registration-bonus-policy"]';
+      await saveRetryPage.waitForSelector(`${root} form`);
+      const numbers = await saveRetryPage.$$(`${root} input[type=number]`);
+      await numbers[0].evaluate(node => { node.focus(); node.select(); }); await numbers[0].type('25');
+      await numbers[1].evaluate(node => { node.focus(); node.select(); }); await numbers[1].type('90');
+      await saveRetryPage.type(`${root} textarea`, 'Keep this unsaved policy reason');
+      await saveRetryPage.click(`${root} input[type=checkbox]`);
+      invalidNextPolicyWrite = true;
+      await saveRetryPage.click(`${root} button[type=submit]`);
+      await saveRetryPage.waitForSelector(`${root} [role=alert] button`);
+      assert.equal(rejectedPolicyWrites.length, 1); assert.equal(writes.length, 0); assert.equal(policy.revision, 700);
+      assert.equal(await saveRetryPage.$eval(`${root} [role=alert] span`, node => node.textContent), adminPlatformCopy[language].operations.saveFailed);
+      const values = await saveRetryPage.$eval(root, node => ({ numbers: [...node.querySelectorAll('input[type=number]')].map(input => input.value), enabled: node.querySelector('input[type=checkbox]').checked, reason: node.querySelector('textarea').value }));
+      assert.deepEqual(values, { numbers: ['25', '90'], enabled: true, reason: 'Keep this unsaved policy reason' });
+      const readsBeforeRetry = policyReads;
+      const authorizationReadsBeforeInvalidSave = completedAuthorizationReads;
+      for (const [index, value] of [[0, ''], [0, '0.5'], [0, '922337203685478'], [1, ''], [1, '0'], [1, '3651']]) {
+        await numbers[index].evaluate(node => { node.focus(); node.select(); }); await saveRetryPage.keyboard.press('Backspace');
+        if (value) await numbers[index].type(value);
+        assert.equal(await saveRetryPage.$eval(`${root} [role=alert] button`, node => node.disabled), true, `invalid field ${index}=${JSON.stringify(value)} must disable retry`);
+        // Dispatch the actual React save handler without native required validation.
+        await saveRetryPage.$eval(`${root} form`, form => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+        await saveRetryPage.waitForNetworkIdle({ idleTime: 100 });
+        assert.equal(completedAuthorizationReads, authorizationReadsBeforeInvalidSave, 'invalid new intent stops before authentication and command creation');
+        assert.equal(writes.length, 0); assert.equal(rejectedPolicyWrites.length, 1); assert.equal(policy.revision, 700);
+        assert.equal(await saveRetryPage.$eval(`${root} form`, form => form.ownerDocument.defaultView.sessionStorage.getItem('pinvou.admin.registration-bonus.pending.0199a100-0001-7000-8000-000000000101')), null);
+        await numbers[index].evaluate(node => { node.focus(); node.select(); }); await numbers[index].type(index === 0 ? '25' : '90');
+      }
+      await numbers[0].evaluate(node => { node.focus(); node.select(); }); await numbers[0].type('-1');
+      assert.equal(await saveRetryPage.$eval(`${root} [role=alert] button`, node => node.disabled), true, 'save retry must not bypass numeric form validation');
+      await numbers[0].evaluate(node => { node.focus(); node.select(); }); await numbers[0].type('26');
+      await saveRetryPage.type(`${root} textarea`, ' after correcting input');
+      await saveRetryPage.click(`${root} [role=alert] button`);
+      await saveRetryPage.waitForFunction(() => document.querySelector('[data-testid="registration-bonus-policy"] .adm-registration-bonus-summary dd')?.textContent.trim() === '701', { timeout: 3000 });
+      assert.equal(policyReads, readsBeforeRetry, 'explicit save retry must not reload and discard the edited form');
+      assert.equal(writes.length, 1); assert.equal(writes[0].body.expected_revision, 700);
+      assert.equal(writes[0].body.amount_points, 26); assert.equal(writes[0].body.validity_days, 90); assert.equal(writes[0].body.enabled, true);
+      assert.equal(writes[0].body.reason, 'Keep this unsaved policy reason after correcting input');
+      assert.notEqual(writes[0].idempotencyKey, rejectedPolicyWrites[0].idempotencyKey, 'proved-no-write rejection permits a new edited command');
+      console.log(JSON.stringify({ action: 'pass', test: `${language}: known-no-write save retry preserves draft and validates edited form` }));
+    } catch (error) { newFailures++; console.log(JSON.stringify({ action: 'fail', test: `${language}: known-no-write save retry`, message: error.message })); }
+    finally { invalidNextPolicyWrite = false; await saveRetryPage.close(); }
+  }
+  for (const kind of ['manual-same-actor', 'effect-owned-new-actor', 'retired-reader-newer-request']) {
+    const retryPage = await browser.newPage();
+    try {
+      permissions = ['platform.registration-bonus.read', 'platform.registration-bonus.manage', ...(kind === 'retired-reader-newer-request' ? ['platform.users.read'] : [])]; currentUserID = '0199a100-0001-7000-8000-000000000101'; csrfToken = 'csrf-user-a'; writes.length = 0;
+      policy = { ...policy, revision: 900, enabled: false, amount_microcredits: 0, validity_days: 30, eligibility_status: 'READY' };
+      recentAuthenticationRequired = false; nextPolicyReadDelayMs = 0; nextAuthorizationReadDelayMs = 0;
+      await retryPage.evaluateOnNewDocument(() => localStorage.setItem('pinvou.admin.language', 'en'));
+      await retryPage.goto(`http://127.0.0.1:${port}/admin.html?section=operations`, { waitUntil: 'networkidle0' });
+      await retryPage.waitForSelector('[data-testid="registration-bonus-policy"] form');
+      const pendingKeyA = `pinvou.admin.registration-bonus.pending.${currentUserID}`;
+      const pendingA = await retryPage.evaluate(key => document.defaultView.sessionStorage.getItem(key), pendingKeyA);
+      let expectedRevision;
+      if (kind !== 'effect-owned-new-actor') {
+        recentAuthenticationRequired = true; authenticationBehavior = 'concurrent-update';
+        await retryPage.type('[data-testid="registration-bonus-policy"] textarea', 'Prepare original reauthentication draft without a policy write');
+        await retryPage.click('[data-testid="registration-bonus-policy"] input[type=checkbox]');
+        await retryPage.click('[data-testid="registration-bonus-policy"] button[type=submit]');
+        await retryPage.waitForSelector('[data-testid="registration-bonus-policy"] [role=alert] button');
+        await Promise.all([retryPage.waitForNavigation({ waitUntil: 'networkidle0' }), retryPage.click('[data-testid="registration-bonus-policy"] [role=alert] button')]);
+        await retryPage.waitForSelector('[data-testid="registration-bonus-policy"] form');
+        assert.match(await retryPage.$eval('[data-testid="registration-bonus-policy"] [role=alert]', node => node.textContent), /policy changed during reauthentication/i);
+        expectedRevision = policy.revision; nextPolicyReadDelayMs = 800; delayedPolicyReadStarted = false;
+        await retryPage.click('[data-testid="registration-bonus-policy"] [role=alert] button');
+      } else {
+        policy = { ...policy, revision: 901 }; expectedRevision = 901;
+        await fetch(`http://127.0.0.1:${port}/__test__/switch-current-user-with-stale-policy-read`);
+        await retryPage.evaluate(() => globalThis.dispatchEvent(new Event('focus')));
+      }
+      for (let attempt = 0; attempt < 100 && !delayedPolicyReadStarted; attempt++) await new Promise(resolve => { setTimeout(resolve, 10); });
+      assert.equal(delayedPolicyReadStarted, true, 'real shared SDK policy GET must be in flight before focus invalidation');
+      const authBeforeAbort = completedAuthorizationReads, readsBeforeAbort = policyReads;
+      if (kind === 'retired-reader-newer-request') {
+        const completedBeforeRetirement = completedPolicyReads;
+        await retryPage.evaluate(label => [...document.querySelectorAll('.adm-shell > nav button')].find(button => button.textContent === label).click(), adminPlatformCopy.en.nav.users);
+        await retryPage.waitForFunction(() => !document.querySelector('[data-testid="registration-bonus-policy"]'));
+        await retryPage.evaluate(() => globalThis.dispatchEvent(new Event('focus')));
+        policy = { ...policy, revision: 902 };
+        await retryPage.evaluate(label => [...document.querySelectorAll('.adm-shell > nav button')].find(button => button.textContent === label).click(), adminPlatformCopy.en.operations.nav);
+        await retryPage.waitForFunction(() => document.querySelector('[data-testid="registration-bonus-policy"] .adm-registration-bonus-summary dd')?.textContent.trim() === '902');
+        for (let attempt = 0; attempt < 200 && completedPolicyReads < completedBeforeRetirement + 2; attempt++) await new Promise(resolve => { setTimeout(resolve, 10); });
+        assert.ok(completedPolicyReads >= completedBeforeRetirement + 2, 'retired server response and newer read must both finish');
+        assert.equal(await retryPage.$eval('.adm-registration-bonus-summary dd', node => node.textContent.trim()), '902');
+        assert.equal(await retryPage.$('[data-testid="registration-bonus-policy"] [role=alert]'), null);
+        assert.equal(await retryPage.$('[data-testid="registration-bonus-policy"] .adm-muted'), null);
+        assert.equal(writes.length, 0); assert.equal(await retryPage.evaluate(key => document.defaultView.sessionStorage.getItem(key), pendingKeyA), pendingA);
+        console.log(JSON.stringify({ action: 'pass', test: `${kind}: retired abort cannot clobber a remounted newer read` }));
+        continue;
+      }
+      nextAuthorizationReadDelayMs = 100;
+      await retryPage.evaluate(() => globalThis.dispatchEvent(new Event('focus')));
+      for (let attempt = 0; attempt < 100 && completedAuthorizationReads <= authBeforeAbort; attempt++) await new Promise(resolve => { setTimeout(resolve, 10); });
+      assert.ok(completedAuthorizationReads > authBeforeAbort, 'real authorization refresh must complete');
+      try {
+        await retryPage.waitForFunction(() => { const workspace = document.querySelector('[data-testid="registration-bonus-policy"]'); return workspace?.querySelector('[role=alert] button')?.disabled === false && !workspace.querySelector('.adm-muted'); }, { timeout: 3000 });
+      } catch (error) {
+        const state = await retryPage.$eval('[data-testid="registration-bonus-policy"]', node => ({ loading: Boolean(node.querySelector('.adm-muted')), error: node.querySelector('[role=alert]')?.textContent || '', revision: node.querySelector('.adm-registration-bonus-summary dd')?.textContent || '' }));
+        throw new Error(`${error.message}; actual state ${JSON.stringify({ ...state, policyReads, authCompleted: completedAuthorizationReads > authBeforeAbort, writes: writes.length })}`, { cause: error });
+      }
+      assert.equal(policyReads, readsBeforeAbort, 'aborted read settles as error and does not silently auto-load'); assert.equal(writes.length, 0);
+      assert.equal(await retryPage.evaluate(key => document.defaultView.sessionStorage.getItem(key), pendingKeyA), pendingA);
+      await retryPage.click('[data-testid="registration-bonus-policy"] [role=alert] button');
+      await retryPage.waitForFunction(revision => document.querySelector('[data-testid="registration-bonus-policy"] .adm-registration-bonus-summary dd')?.textContent.trim() === String(revision), {}, expectedRevision);
+      assert.equal(policyReads, readsBeforeAbort + 1); assert.equal(writes.length, 0);
+      assert.equal(await retryPage.evaluate(key => document.defaultView.sessionStorage.getItem(key), pendingKeyA), pendingA);
+      console.log(JSON.stringify({ action: 'pass', test: `${kind}: actual shared SDK abort restores existing explicit GET retry` }));
+    } catch (error) { newFailures++; console.log(JSON.stringify({ action: 'fail', test: `${kind}: actual shared SDK abort`, message: error.message })); }
+    finally { recentAuthenticationRequired = false; nextAuthorizationReadDelayMs = 0; nextPolicyReadDelayMs = 0; await retryPage.close(); }
+  }
+  if (newFailures) process.exitCode = 1;
+  console.log('Admin registration bonus UI smoke passed');
+} finally {
+  await browser.close();
+  await new Promise((resolve) => server.close(resolve));
+}
