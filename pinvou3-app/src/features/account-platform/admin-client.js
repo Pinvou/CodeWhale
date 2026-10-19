@@ -175,7 +175,7 @@ export class AdminPlatformClient {
     this.observeAuthorizationVersions(response.headers);
     const payload = response.status === 204 ? null : response.ok && codec ? codec.decode(await response.text()) : area === 'billing' && response.ok ? parseFinanceJSON(await response.text()) : await response.json().catch(() => ({}));
     if (!response.ok) throw errorFromResponse(response, payload);
-    if (expectedStatus && response.status !== expectedStatus) throw new Error('INVALID_MUTATION_ACK');
+    if (expectedStatus && !(Array.isArray(expectedStatus) ? expectedStatus.includes(response.status) : response.status === expectedStatus)) throw new Error('INVALID_MUTATION_ACK');
     return payload;
   }
 

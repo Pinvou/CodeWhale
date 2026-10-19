@@ -65,7 +65,7 @@ type compositeAuthorizationRepository interface {
 
 func (r *PostgresRepository) Authorize(ctx context.Context, principal identity.Principal, permission string, organizationID, unitID *uuid.UUID) (AuthorizationDecision, error) {
 	permission = canonicalPermissionCode(permission)
-	if !f01PermissionAllowed(permission) || organizationID != nil || unitID != nil {
+	if !f01PermissionAllowed(permission) || (unitID != nil && organizationID == nil) {
 		return AuthorizationDecision{}, ErrForbidden
 	}
 	var decision AuthorizationDecision
@@ -85,12 +85,20 @@ SELECT u.id,u.status,COALESCE(active.context_version,1),COALESCE(pd.scope,''),
          FROM role_assignments ra
          JOIN roles ro ON ro.code=ra.role_code
          JOIN role_permissions rp ON rp.role_code=ra.role_code AND rp.permission_code=$3
+         LEFT JOIN memberships m ON m.user_id=ra.user_id AND m.organization_id=$4
+         LEFT JOIN organizations o ON o.id=$4
          WHERE ra.user_id=u.id
 	       AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())
            AND (
              (pd.scope='PERSONAL' AND $4::uuid IS NULL AND $5::uuid IS NULL AND ro.scope='PERSONAL' AND ra.organization_id IS NULL AND ra.unit_id IS NULL)
              OR (pd.scope='PLATFORM' AND $4::uuid IS NULL AND $5::uuid IS NULL AND ro.scope='PLATFORM' AND ra.organization_id IS NULL AND ra.unit_id IS NULL)
-
+             OR (pd.scope='ORGANIZATION' AND $4::uuid IS NOT NULL AND ra.organization_id=$4 AND m.status='ACTIVE' AND o.status='ACTIVE' AND (
+               (ro.scope='ORGANIZATION' AND ra.unit_id IS NULL)
+               OR (ro.scope='UNIT' AND $5::uuid IS NOT NULL AND EXISTS(
+                 SELECT 1 FROM organization_unit_closure c
+                 WHERE c.organization_id=$4 AND c.ancestor_id=ra.unit_id AND c.descendant_id=$5
+               ))
+             ))
            )
        )
 FROM identities i

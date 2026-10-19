@@ -8,7 +8,8 @@ import (
 )
 
 // ManageNATSResources is a bounded operator entry, never a runtime fallback.
-// F01 has no consumer, approval executor, or future-domain resource operations.
+// Only this delivery's fixed ordinary consumers may be installed. Approval
+// consumers still require their independent control/receipt initialization.
 func ManageNATSResources(ctx context.Context, rawURL string, cfg NATSConfig, createOnly bool) error {
 	if cfg.ResourceMode != "" && cfg.ResourceMode != "provisioned" {
 		return ErrNATSResources
@@ -30,5 +31,5 @@ func ManageNATSResources(ctx context.Context, rawURL string, cfg NATSConfig, cre
 	if err != nil || !validStreamConfig(stream.CachedInfo().Config) {
 		return ErrNATSResources
 	}
-	return nil
+	return ProvisionNATSResources(ctx, js, createOnly)
 }

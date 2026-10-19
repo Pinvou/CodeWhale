@@ -34,6 +34,16 @@ func (s *Service) resolveModelUsagePermission(w http.ResponseWriter, r *http.Req
 			return AuthorizationContext{}, false
 		}
 		authorizedUserID, err = s.authorizer.AuthorizedUserID(r.Context(), principal, personalPermission)
+	case "ORGANIZATION":
+		if resolved.OrganizationID == nil || *resolved.OrganizationID == uuid.Nil || organizationPermission == "" || resolved.OrganizationMembershipVersion == nil || *resolved.OrganizationMembershipVersion < 1 {
+			s.writeError(w, r, ErrForbidden)
+			return AuthorizationContext{}, false
+		}
+		var version int64
+		authorizedUserID, version, err = s.authorizer.AuthorizedOrganizationUserID(r.Context(), principal, organizationPermission, *resolved.OrganizationID)
+		if err == nil {
+			resolved.AuthorizationVersion = version
+		}
 	default:
 		s.writeError(w, r, ErrForbidden)
 		return AuthorizationContext{}, false

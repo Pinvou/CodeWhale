@@ -94,6 +94,9 @@ func provisionedConsumers() []jetstream.ConsumerConfig {
 		// A provider outage must keep the durable command for an explicit retry;
 		// production uses ConsumeUntilResolved, so its provisioned config agrees.
 		eventConsumerConfig("billing-refund-executor-v1", "billing.refund.requested.v1", true),
+		// Full membership snapshots repair durable quota authority after every
+		// member role, ownership or lease change. An outage must retain them.
+		eventConsumerConfig("billing-member-lifecycle-v1", "account.membership.changed.v1", true),
 	}
 }
 

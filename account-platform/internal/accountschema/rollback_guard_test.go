@@ -27,6 +27,12 @@ func TestRetainedPolicyRollbackGuard(t *testing.T) {
 	}
 }
 
+func TestRetainedOrganizationGovernanceRollbackGuard(t *testing.T) {
+	if err := retainedRollbackGuard(context.Background(), nil, migrations.Migration{Version: 39}); err == nil || !strings.Contains(err.Error(), "original scope-version SQL cannot compare void results") {
+		t.Fatalf("unsupported retained organization rollback was allowed: %v", err)
+	}
+}
+
 type executionGuardTx struct {
 	pgx.Tx
 	sql []string

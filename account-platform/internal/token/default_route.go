@@ -100,6 +100,13 @@ func (p *PostgresDefaultRouteProvisioner) provisionResourcesForAttempt(ctx conte
 	if err := lockTokenAccountOwner(ctx, tx, ownerType, ownerID); err != nil {
 		return err
 	}
+	// Provisioning can also create an organization account, credential or route.
+	// Keep the owner-before-lifecycle advisory ordering of governed creation.
+	if ownerOrganization != nil {
+		if err := lockActiveOrganization(ctx, tx, *ownerOrganization); err != nil {
+			return err
+		}
+	}
 	now := p.repository.now()
 	var accountID uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT id FROM token_accounts WHERE owner_type=$1 AND owner_id=$2 AND management_mode='PLATFORM' ORDER BY created_at,id LIMIT 1 FOR UPDATE`, ownerType, ownerID).Scan(&accountID); errors.Is(err, pgx.ErrNoRows) {

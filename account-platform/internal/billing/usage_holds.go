@@ -61,6 +61,9 @@ func (r *PostgresRepository) Commit(ctx context.Context, usageRequestID, holdID 
 	if hold.Status != "ACTIVE" {
 		return Hold{}, ErrUsageAlreadyTerminal
 	}
+	if _, err := validateMemberQuotaHoldAllocations(ctx, tx, hold.ID, 0); err != nil {
+		return Hold{}, err
+	}
 	now := r.now()
 	backedActual := min(actual, hold.MaxMicrocredits)
 	overage := actual - backedActual
@@ -95,6 +98,10 @@ func (r *PostgresRepository) Commit(ctx context.Context, usageRequestID, holdID 
 		}
 		allocations = append(allocations, item)
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return Hold{}, err
+	}
 	rows.Close()
 	remaining := backedActual
 	for _, item := range allocations {
@@ -117,9 +124,9 @@ func (r *PostgresRepository) Commit(ctx context.Context, usageRequestID, holdID 
 			return Hold{}, memberErr
 		}
 		if memberBacked {
-			// F06 first delivers member-quota settlement. Preserve existing
-			// member-backed facts without mutating them as personal credit.
-			return Hold{}, ErrConflict
+			if err := settleMemberQuotaComponent(ctx, tx, hold.ID, item.componentID, settled, now); err != nil {
+				return Hold{}, err
+			}
 		} else {
 			command, err := tx.Exec(ctx, `UPDATE entitlement_components SET reserved_microcredits=reserved_microcredits-$2,used_microcredits=used_microcredits+$3,available_microcredits=available_microcredits+$4,status=CASE WHEN status IN ('FROZEN','REVOKED','EXPIRED') THEN status WHEN reserved_microcredits-$2=0 AND available_microcredits+$4+active_grant_microcredits+suspended_grant_microcredits=0 THEN 'CONSUMED' ELSE 'ACTIVE' END,updated_at=$5 WHERE id=$1 AND reserved_microcredits>=$2`, item.componentID, item.reserved, settled, released, now)
 			if err != nil {

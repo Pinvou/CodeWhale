@@ -118,3 +118,11 @@ test("team relay changes select its action smoke", () => {
     ["npm:test:ui-smoke", "npm:test:team-relay-ui"],
   );
 });
+
+test("organization and member unit browsers run for feature and shared changes", () => {
+  for (const target of ["test:account-platform-organization-ui", "test:account-platform-member-units-ui"]) {
+    assert.ok(fullLabels.includes(`npm:${target}`));
+    assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/features/account-platform/ModelPolicyWorkspace.jsx"])).includes(`npm:${target}`));
+    assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/shared/i18n.js"])).includes(`npm:${target}`));
+  }
+});

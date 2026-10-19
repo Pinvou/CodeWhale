@@ -35,18 +35,21 @@ func TestLegacyPendingRefundBlocksTargetedMigration(t *testing.T) {
 	}
 	var before27, through27 []migrations.Migration
 	for _, m := range all {
-		if m.Version <= 25 || m.Version == 900001 {
+		if m.Version <= 25 || m.Version == generationVersion || m.Version == memberIdentityVersion {
 			before27 = append(before27, m)
 			through27 = append(through27, m)
 		}
-		if m.Version == 27 {
+		if m.Version == 27 || m.Version == memberFinancialReasonVersion {
 			through27 = append(through27, m)
 		}
 	}
 	for _, status := range []string{"REQUESTED", "MANUAL_REVIEW", "SUCCEEDED", "FAILED", "EMPTY", "CONCURRENT_REQUESTED"} {
 		t.Run(status, func(t *testing.T) {
+			// Each separately owned database receives the original bounded budget.
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
 			name := "f02_legacy_refund_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-			if _, err := admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
+			if _, err := admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()+" OWNER billing_schema_owner"); err != nil {
 				t.Fatal("create exclusively owned upgrade DB")
 			}
 			defer func() {
@@ -54,9 +57,22 @@ func TestLegacyPendingRefundBlocksTargetedMigration(t *testing.T) {
 				defer stop()
 				var owner string
 				var active int
-				if err := admin.QueryRow(clean, `SELECT pg_get_userbyid(datdba),(SELECT count(*) FROM pg_stat_activity WHERE datname=$1) FROM pg_database WHERE datname=$1`, name).Scan(&owner, &active); err != nil || owner != config.User || active != 0 {
-					t.Error("owned upgrade DB cleanup guard failed")
-					return
+				// Connection Close can return before the backend disappears from
+				// pg_stat_activity. Wait boundedly; never force disconnect or drop.
+				deadline := time.Now().Add(5 * time.Second)
+				for {
+					if err := admin.QueryRow(clean, `SELECT pg_get_userbyid(datdba),(SELECT count(*) FROM pg_stat_activity WHERE datname=$1) FROM pg_database WHERE datname=$1`, name).Scan(&owner, &active); err != nil || owner != "billing_schema_owner" {
+						t.Error("owned upgrade DB cleanup identity guard failed", err)
+						return
+					}
+					if active == 0 {
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Error("owned upgrade DB remains active; cleanup refused", active)
+						return
+					}
+					time.Sleep(10 * time.Millisecond)
 				}
 				if _, err := admin.Exec(clean, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
 					t.Error("nonforce owned upgrade DB cleanup failed")
@@ -64,14 +80,22 @@ func TestLegacyPendingRefundBlocksTargetedMigration(t *testing.T) {
 			}()
 			own := config.Copy()
 			own.Database = name
+			own.User = "billing_migrator"
+			own.Password = ""
 			c, err := pgx.ConnectConfig(ctx, own)
 			if err != nil {
 				t.Fatal("connect owned upgrade DB")
 			}
 			defer c.Close(context.Background())
+			if _, err = c.Exec(ctx, `SET ROLE billing_schema_owner; ALTER SCHEMA public OWNER TO billing_schema_owner; REVOKE CREATE ON SCHEMA public FROM PUBLIC; GRANT USAGE,CREATE ON SCHEMA public TO billing_service; SET ROLE billing_service`); err != nil {
+				t.Fatal(err)
+			}
 			if err := Up(ctx, c, before27); err != nil {
 				t.Fatal(err)
 			}
+			// Release the completed installer session lease before the independent
+			// migration actor tests the actual pending-refund row lock.
+			migrations.Unlock(ctx, c)
 			if _, err := c.Exec(ctx, legacyUpgradeSeed); err != nil {
 				t.Fatal(err)
 			}
@@ -108,6 +132,9 @@ func TestLegacyPendingRefundBlocksTargetedMigration(t *testing.T) {
 					t.Fatal("connect concurrent migration fixture")
 				}
 				defer migrator.Close(context.Background())
+				if _, err = migrator.Exec(ctx, `SET ROLE billing_service`); err != nil {
+					t.Fatal(err)
+				}
 				pid := migrator.PgConn().PID()
 				migrationCtx, stop := context.WithTimeout(ctx, 10*time.Second)
 				done := make(chan error, 1)

@@ -116,7 +116,7 @@ func (r *HTTPWalletResolver) Ensure(ctx context.Context, ownerType string, owner
 		return uuid.Nil, fmt.Errorf("Billing wallet provisioning returned HTTP %d", response.StatusCode)
 	}
 	var body walletFacts
-	if err := decodeAccountAuthority(response.Body, 1<<20, &body); err != nil || ownerType != "PERSONAL" || ownerID == uuid.Nil || !body.validIdentity() || body.OwnerID != ownerID {
+	if err := decodeAccountAuthority(response.Body, 1<<20, &body); err != nil || ownerID == uuid.Nil || !body.validIdentity() || body.OwnerType != ownerType || body.OwnerID != ownerID {
 		return uuid.Nil, errors.New("Billing returned an invalid wallet")
 	}
 	return body.WalletID, nil
@@ -203,21 +203,30 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	protected.POST("/recharge/orders/:order_id/close", httpserver.AdaptFunc(s.closeRechargeOrder))
 	protected.POST("/recharge/orders/:order_id/payment-claims", httpserver.AdaptFunc(s.addLatePaymentClaim))
 	protected.GET("/me/entitlement-packages", httpserver.AdaptFunc(s.getEntitlementPackages))
+	s.registerOrganizationFinanceRoutes(protected)
 	s.registerPersonalExecutionRoutes(router, protected)
 	s.registerManagementRoutes(router, protected)
 	return TokenCredentialDeadlineMiddleware(router)
 }
 
 func (s *Service) activeWallet(ctx context.Context, resolved AuthorizationContext) (uuid.UUID, error) {
-	if resolved.ContextType != "PERSONAL" || resolved.OrganizationID != nil || resolved.UserID == uuid.Nil {
+	if resolved.UserID == uuid.Nil {
 		return uuid.Nil, ErrForbidden
 	}
-	return s.wallets.Ensure(ctx, "PERSONAL", resolved.UserID)
+	if resolved.ContextType == "PERSONAL" && resolved.OrganizationID == nil {
+		return s.wallets.Ensure(ctx, "PERSONAL", resolved.UserID)
+	}
+	if resolved.ContextType == "ORGANIZATION" && resolved.OrganizationID != nil && *resolved.OrganizationID != uuid.Nil {
+		return s.wallets.Ensure(ctx, "ORGANIZATION", *resolved.OrganizationID)
+	}
+	return uuid.Nil, ErrForbidden
 }
 
 func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code, message := http.StatusInternalServerError, "INTERNAL_ERROR", "the token request could not be completed"
 	switch {
+	case errors.Is(err, errOrganizationPolicyModelUnavailable):
+		status, code, message = http.StatusUnprocessableEntity, "MODEL_UNAVAILABLE", "the model is unavailable"
 	case errors.Is(err, ErrModelUnavailable):
 		status, code, message = http.StatusConflict, "MODEL_UNAVAILABLE", "the selected model is not available for this conversation"
 		w.Header().Set("X-Pinvou-Model-Rejection-v1", code)
@@ -237,6 +246,12 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusNotFound, "TOKEN_NOT_FOUND", "the token resource was not found"
 	case errors.Is(err, ErrNoEligibleRoute):
 		status, code, message = http.StatusUnprocessableEntity, "TOKEN_ROUTE_UNAVAILABLE", "no eligible token route is available"
+	case errors.Is(err, ErrModelPolicyDenied):
+		status, code, message = http.StatusForbidden, "MODEL_POLICY_DENIED", "the organization model policy does not permit this model"
+	case errors.Is(err, ErrModelPolicyVersionConflict):
+		status, code, message = http.StatusConflict, "MODEL_POLICY_VERSION_CONFLICT", "the organization model policy version changed"
+	case errors.Is(err, ErrOrganizationLifecycleConflict):
+		status, code, message = http.StatusConflict, "ORGANIZATION_LIFECYCLE_CONFLICT", "the organization lifecycle facts conflict"
 	case errors.Is(err, ErrIdempotencyConflict):
 		status, code, message = http.StatusConflict, "IDEMPOTENCY_CONFLICT", "the idempotency key was already used with different input"
 	case errors.Is(err, ErrForbidden):

@@ -17,7 +17,7 @@ import (
 )
 
 func (r *PostgresRepository) BeginUsage(ctx context.Context, request UsageRequest, snapshot map[string]any) (UsageRequest, bool, error) {
-	if request.OrganizationID != nil || request.ID == uuid.Nil || len(request.IdempotencyKeyDigest) != 64 || request.IdempotencyNamespace != "model-inference" || request.CanonicalVersion <= 0 || len(request.RequestFingerprint) != 64 || request.UserID == uuid.Nil || request.SessionID == "" || request.TokenAccountID == uuid.Nil || request.CredentialID == uuid.Nil || request.WalletID == uuid.Nil || request.Model == "" || request.MaximumMicrocredits < 0 {
+	if (request.OrganizationID != nil && *request.OrganizationID == uuid.Nil) || request.ID == uuid.Nil || len(request.IdempotencyKeyDigest) != 64 || request.IdempotencyNamespace != "model-inference" || request.CanonicalVersion <= 0 || len(request.RequestFingerprint) != 64 || request.UserID == uuid.Nil || request.SessionID == "" || request.TokenAccountID == uuid.Nil || request.CredentialID == uuid.Nil || request.WalletID == uuid.Nil || request.Model == "" || request.MaximumMicrocredits < 0 {
 		return UsageRequest{}, false, ErrForbidden
 	}
 	encoded, err := json.Marshal(snapshot)
@@ -45,6 +45,13 @@ func (r *PostgresRepository) BeginUsage(ctx context.Context, request UsageReques
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return UsageRequest{}, false, err
+	}
+	// Accepted immutable receipts above stay replayable after lifecycle changes.
+	// Only new invocations participate in the organization lifecycle gate.
+	if request.OrganizationID != nil {
+		if err := lockActiveOrganization(ctx, tx, *request.OrganizationID); err != nil {
+			return UsageRequest{}, false, err
+		}
 	}
 	now := r.now()
 	if err := admitUsage(ctx, tx, request, now); err != nil {

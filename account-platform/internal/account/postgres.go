@@ -301,21 +301,56 @@ WHERE i.issuer = $1 AND i.subject = $2`, principal.Issuer, principal.Subject, pr
 
 func (r *PostgresRepository) ResolveAuthorizationContext(ctx context.Context, principal identity.Principal) (AuthorizationContext, error) {
 	var resolved AuthorizationContext
-	err := r.pool.QueryRow(ctx, `SELECT u.id,s.session_id,active.context_type,u.membership_version,active.context_version,
- COALESCE((SELECT array_agg(DISTINCT ra.role_code ORDER BY ra.role_code) FROM role_assignments ra JOIN roles ro ON ro.code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id IS NULL AND ra.unit_id IS NULL AND ro.scope='PERSONAL' AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())),'{}'),
- COALESCE((SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code) FROM role_assignments ra JOIN roles ro ON ro.code=ra.role_code JOIN role_permissions rp ON rp.role_code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id IS NULL AND ra.unit_id IS NULL AND ro.scope='PERSONAL' AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())),'{}'),
- COALESCE((SELECT array_agg(DISTINCT ra.role_code ORDER BY ra.role_code) FROM role_assignments ra JOIN roles ro ON ro.code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id IS NULL AND ra.unit_id IS NULL AND ro.scope='PLATFORM' AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())),'{}'),
- COALESCE((SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code) FROM role_assignments ra JOIN roles ro ON ro.code=ra.role_code JOIN role_permissions rp ON rp.role_code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id IS NULL AND ra.unit_id IS NULL AND ro.scope='PLATFORM' AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())),'{}'),
- COALESCE((SELECT version FROM authorization_versions WHERE user_id=u.id AND scope='PERSONAL' AND scope_id='00000000-0000-0000-0000-000000000000'::uuid),1),
- COALESCE((SELECT version FROM authorization_versions WHERE user_id=u.id AND scope='PLATFORM' AND scope_id='00000000-0000-0000-0000-000000000000'::uuid),1),u.mobile_e164,u.mobile_verified_at IS NOT NULL
-FROM identities i JOIN users u ON u.id=i.user_id AND u.status='ACTIVE'
+	err := r.pool.QueryRow(ctx, `
+SELECT u.id,s.session_id,active.context_type,active.organization_id,u.membership_version,
+       CASE WHEN active.organization_id IS NULL THEN NULL ELSE max(m.version) END,active.context_version,
+       COALESCE(array_agg(DISTINCT mu.unit_id) FILTER (WHERE mu.unit_id IS NOT NULL),'{}'),
+       COALESCE(array_agg(DISTINCT c.ancestor_id) FILTER (WHERE c.ancestor_id IS NOT NULL),'{}'),
+       COALESCE((SELECT array_agg(DISTINCT ra.role_code ORDER BY ra.role_code) FROM role_assignments ra JOIN roles ro ON ro.code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id=active.organization_id AND ro.scope='ORGANIZATION' AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())),'{}'),
+       COALESCE((SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code) FROM role_assignments ra JOIN roles ro ON ro.code=ra.role_code JOIN role_permissions rp ON rp.role_code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id=active.organization_id AND ro.scope='ORGANIZATION' AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())),'{}'),
+       COALESCE((
+         SELECT jsonb_agg(jsonb_build_object(
+           'unit_id', scoped.unit_id,
+           'role', scoped.role_code,
+           'permissions', scoped.permissions
+         ) ORDER BY scoped.unit_id,scoped.role_code)
+         FROM (
+           SELECT ra.unit_id,ra.role_code,array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code) AS permissions
+           FROM role_assignments ra
+           JOIN roles ro ON ro.code=ra.role_code AND ro.scope='UNIT'
+           JOIN role_permissions rp ON rp.role_code=ra.role_code
+           WHERE ra.user_id=u.id AND ra.organization_id=active.organization_id AND ra.unit_id IS NOT NULL
+             AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())
+           GROUP BY ra.unit_id,ra.role_code
+         ) scoped
+       ),'[]'::jsonb),
+       COALESCE((SELECT array_agg(DISTINCT ra.role_code ORDER BY ra.role_code) FROM role_assignments ra JOIN roles ro ON ro.code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id IS NULL AND ra.unit_id IS NULL AND ro.scope='PERSONAL' AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())),'{}'),
+       COALESCE((SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code) FROM role_assignments ra JOIN roles ro ON ro.code=ra.role_code JOIN role_permissions rp ON rp.role_code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id IS NULL AND ra.unit_id IS NULL AND ro.scope='PERSONAL' AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())),'{}'),
+       COALESCE((SELECT array_agg(DISTINCT ra.role_code ORDER BY ra.role_code) FROM role_assignments ra JOIN roles ro ON ro.code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id IS NULL AND ra.unit_id IS NULL AND ro.scope='PLATFORM' AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())),'{}'),
+       COALESCE((SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code) FROM role_assignments ra JOIN roles ro ON ro.code=ra.role_code JOIN role_permissions rp ON rp.role_code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id IS NULL AND ra.unit_id IS NULL AND ro.scope='PLATFORM' AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())),'{}'),
+       COALESCE((SELECT av.version FROM authorization_versions av WHERE av.user_id=u.id AND av.scope=CASE WHEN active.organization_id IS NULL THEN 'PERSONAL' ELSE 'ORGANIZATION' END AND av.scope_id=COALESCE(active.organization_id,'00000000-0000-0000-0000-000000000000'::uuid)),1),
+       COALESCE((SELECT version FROM authorization_versions WHERE user_id=u.id AND scope='PERSONAL' AND scope_id='00000000-0000-0000-0000-000000000000'::uuid),1),
+       COALESCE((SELECT version FROM authorization_versions WHERE user_id=u.id AND scope='PLATFORM' AND scope_id='00000000-0000-0000-0000-000000000000'::uuid),1),
+       COALESCE((SELECT version FROM authorization_versions WHERE user_id=u.id AND scope='ORGANIZATION' AND scope_id=active.organization_id),1),
+       u.mobile_e164,u.mobile_verified_at IS NOT NULL
+FROM identities i
+JOIN users u ON u.id=i.user_id AND u.status='ACTIVE'
 JOIN user_sessions s ON s.user_id=u.id AND s.issuer=i.issuer AND s.session_id=$3
-JOIN user_active_contexts active ON active.user_id=u.id AND active.context_type='PERSONAL' AND active.organization_id IS NULL
-WHERE i.issuer=$1 AND i.subject=$2`, principal.Issuer, principal.Subject, principal.SessionID).Scan(
-		&resolved.UserID, &resolved.SessionID, &resolved.ContextType, &resolved.MembershipVersion, &resolved.ContextVersion,
-		&resolved.PersonalRoles, &resolved.PersonalPermissions, &resolved.PlatformRoles, &resolved.PlatformPermissions,
-		&resolved.PersonalAuthorizationVersion, &resolved.PlatformAuthorizationVersion, &resolved.Mobile, &resolved.MobileVerified)
-	resolved.AuthorizationVersion = resolved.PersonalAuthorizationVersion
+JOIN user_active_contexts active ON active.user_id=u.id
+LEFT JOIN organizations o ON o.id=active.organization_id
+LEFT JOIN memberships m ON m.user_id=u.id AND m.organization_id=active.organization_id AND m.status='ACTIVE'
+LEFT JOIN membership_units mu ON mu.membership_id=m.id
+LEFT JOIN organization_unit_closure c ON c.organization_id=m.organization_id AND c.descendant_id=mu.unit_id
+WHERE i.issuer=$1 AND i.subject=$2 AND (active.organization_id IS NULL OR o.status='ACTIVE')
+GROUP BY u.id,s.session_id,active.context_type,active.organization_id,active.context_version`, principal.Issuer, principal.Subject, principal.SessionID).Scan(
+		&resolved.UserID, &resolved.SessionID, &resolved.ContextType, &resolved.OrganizationID,
+		&resolved.MembershipVersion, &resolved.OrganizationMembershipVersion, &resolved.ContextVersion, &resolved.UnitIDs, &resolved.AncestorUnitIDs,
+		&resolved.Roles, &resolved.Permissions, &resolved.UnitAuthorizationBindings,
+		&resolved.PersonalRoles, &resolved.PersonalPermissions,
+		&resolved.PlatformRoles, &resolved.PlatformPermissions, &resolved.AuthorizationVersion,
+		&resolved.PersonalAuthorizationVersion, &resolved.PlatformAuthorizationVersion,
+		&resolved.OrganizationAuthorizationVersion, &resolved.Mobile, &resolved.MobileVerified,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var status string
 		statusErr := r.pool.QueryRow(ctx, `SELECT u.status FROM identities i JOIN users u ON u.id=i.user_id WHERE i.issuer=$1 AND i.subject=$2`, principal.Issuer, principal.Subject).Scan(&status)
@@ -333,10 +368,14 @@ WHERE i.issuer=$1 AND i.subject=$2`, principal.Issuer, principal.Subject, princi
 	if err != nil {
 		return AuthorizationContext{}, err
 	}
+	resolved.Permissions = filterF01Permissions(resolved.Permissions)
 	resolved.PersonalPermissions = filterF01Permissions(resolved.PersonalPermissions)
 	resolved.PlatformPermissions = filterF01Permissions(resolved.PlatformPermissions)
+	for i := range resolved.UnitAuthorizationBindings {
+		resolved.UnitAuthorizationBindings[i].Permissions = filterF01Permissions(resolved.UnitAuthorizationBindings[i].Permissions)
+	}
 	normalizeActiveScopeAuthorization(&resolved)
-	if resolved.ContextType == "ORGANIZATION" && resolved.OrganizationID != nil && len(resolved.Roles) == 0 {
+	if resolved.ContextType == "ORGANIZATION" && resolved.OrganizationID != nil && (resolved.OrganizationMembershipVersion == nil || len(resolved.Roles) == 0) {
 		return AuthorizationContext{}, ErrForbidden
 	}
 	if resolved.UnitIDs == nil {

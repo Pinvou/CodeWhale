@@ -24,6 +24,7 @@ try {
   copyFileSync(path.join(here, '..', 'src', 'shared', 'finance-i18n.js'), path.join(dir, 'shared', 'finance-i18n.js'));
   copyFileSync(path.join(here, '..', 'src', 'shared', 'reconciliation-i18n.js'), path.join(dir, 'shared', 'reconciliation-i18n.js'));
   copyFileSync(path.join(here, '..', 'src', 'shared', 'token-management-i18n.js'), path.join(dir, 'shared', 'token-management-i18n.js'));
+  copyFileSync(path.join(here, '..', 'src', 'shared', 'organization-i18n.js'), path.join(dir, 'shared', 'organization-i18n.js'));
   copyFileSync(path.join(here, '..', 'src', 'shared', 'model-usage-i18n.js'), path.join(dir, 'shared', 'model-usage-i18n.js'));
   // i18n.js is split by locale with zh imported directly, so the temporary copy must include
   // zh and its shared browser dictionary.

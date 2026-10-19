@@ -718,6 +718,9 @@ func publicAccountPathAllowed(method, resource string) bool {
 	return method == http.MethodGet && strings.HasPrefix(resource, prefix) && pathUUID(strings.TrimPrefix(resource, prefix))
 }
 func accountPathAllowed(method, resource string) bool {
+	if organizationAccountPathAllowed(method, resource) {
+		return true
+	}
 	if method == http.MethodHead {
 		method = http.MethodGet
 	}
@@ -737,6 +740,9 @@ func accountPathAllowed(method, resource string) bool {
 	return (len(parts) == 4 && method == http.MethodGet) || (len(parts) == 5 && parts[4] == "mobile-challenges" && method == http.MethodPost) || (len(parts) == 6 && parts[4] == "actions" && parts[5] == "complete" && method == http.MethodPost)
 }
 func tokenPathAllowed(method, resource string) bool {
+	if organizationTokenPathAllowed(method, resource) {
+		return true
+	}
 	if method == http.MethodHead {
 		method = http.MethodGet
 	}
@@ -759,6 +765,9 @@ func tokenPathAllowed(method, resource string) bool {
 	return method == http.MethodGet && len(parts) == 4 || method == http.MethodPost && len(parts) == 5 && (parts[4] == "close" || parts[4] == "payment-claims")
 }
 func accountAdminPathAllowed(method, resource string) bool {
+	if organizationAdminPathAllowed(method, resource) {
+		return true
+	}
 	if method == http.MethodHead {
 		method = http.MethodGet
 	}

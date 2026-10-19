@@ -8,6 +8,7 @@
 pub(crate) mod client_migration;
 mod model_cancellation;
 mod model_proxy;
+mod organization_routes;
 mod platform;
 pub(crate) mod runtime_model;
 
@@ -1650,7 +1651,7 @@ fn bootstrap_user_id(body: &Value) -> Result<String, String> {
 
 fn prepare_request(
     config: &AccountPlatformConfig,
-    input: ApiRequest,
+    mut input: ApiRequest,
 ) -> Result<PreparedRequest, String> {
     let method = Method::from_bytes(input.method.as_bytes())
         .map_err(|_| "account_platform_request_invalid: invalid method".to_string())?;
@@ -1674,6 +1675,8 @@ fn prepare_request(
     if method == Method::GET && input.body.is_some() {
         return Err("account_platform_request_invalid: GET body is not allowed".to_string());
     }
+    organization_routes::exact_body(&input.area, parsed.path(), &mut input.body)?;
+    let organization_key = organization_routes::keyed(&input.area, &method, parsed.path());
     let requires_key = input.area == "token"
         && ((method == Method::POST
             && (parsed.path() == "/v1/recharge/orders"
@@ -1685,7 +1688,8 @@ fn prepare_request(
             if requires_key
                 && (16..=128).contains(&key.len())
                 && key.bytes().all(|c| c.is_ascii_graphic()) => {}
-        None if !requires_key => {}
+        Some(key) if organization_key && organization_routes::valid_key(&input.area, key) => {}
+        None if !requires_key && !organization_key => {}
         _ => {
             return Err(
                 "account_platform_request_denied: invalid idempotency key for route".to_string(),
@@ -1713,6 +1717,9 @@ fn prepare_request(
 }
 
 fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -> bool {
+    if organization_routes::allowed(area, method, path, query) {
+        return true;
+    }
     if area == "token" {
         if path == "/v1/me/balance" {
             return *method == Method::GET && matches!(query, None | Some("consistency=strong"));
@@ -1881,6 +1888,7 @@ fn parse_retry_after_seconds(value: &str, now: chrono::DateTime<chrono::Utc>) ->
 
 async fn response_to_api(response: reqwest::Response) -> Result<ApiResponse, String> {
     let balance_response = response.url().path().ends_with("/v1/me/balance")
+        || response.url().path().starts_with("/v1/organizations/")
         || response.url().path().contains("/v1/recharge/")
         || response
             .url()
@@ -2445,7 +2453,6 @@ mod tests {
             );
         }
         for path in [
-            "/v1/me/organizations",
             "/v1/sessions/current/active-context",
             "/admin/v1/users",
             "/v1/me/account-closure",
@@ -3207,6 +3214,74 @@ mod tests {
     }
 
     #[test]
+    fn organization_member_pages_cross_the_desktop_request_allowlist() {
+        use base64::Engine;
+        let org = "11111111-1111-4111-8111-111111111111";
+        let unit = "22222222-2222-4222-8222-222222222222";
+        for (collection, unit_id) in [
+            ("members", None),
+            ("members", Some(unit)),
+            ("quota-members", None),
+        ] {
+            let path = format!("/v1/organizations/{org}/{collection}");
+            let cursor = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+                serde_json::to_vec(&serde_json::json!({
+                    "resource": collection, "organization_id": org, "unit_id": unit_id,
+                    "name": "Member 测试", "user_id": unit
+                }))
+                .unwrap(),
+            );
+            let filter = unit_id.map_or(String::new(), |id| format!("unit_id={id}&"));
+            for query in [
+                "limit=50".to_string(),
+                format!("limit=200&{filter}cursor={cursor}"),
+                format!("%6cimit=%35%30&{filter}cursor={cursor}"),
+            ] {
+                assert!(route_allowed("account", &Method::GET, &path, Some(&query)));
+                let request = || ApiRequest {
+                    area: "account".into(),
+                    resource: format!("{path}?{query}"),
+                    method: "GET".into(),
+                    body: None,
+                    idempotency_key: None,
+                };
+                let prepared = prepare_request(&config(), request()).unwrap();
+                assert_eq!(prepared.method, Method::GET);
+                assert_eq!(prepared.url.path(), path);
+                assert_eq!(prepared.url.query(), Some(query.as_str()));
+                let mut with_body = request();
+                with_body.body = Some(serde_json::json!({}));
+                assert!(prepare_request(&config(), with_body).is_err());
+                let mut with_key = request();
+                with_key.idempotency_key = Some("unexpected-list-key".into());
+                assert!(prepare_request(&config(), with_key).is_err());
+            }
+            for (method, resource) in [
+                ("GET", format!("{path}?limit=50&%6cimit=1")),
+                ("GET", format!("{path}?cursor=%2530")),
+                ("GET", format!("{path}?limit=%GG")),
+                ("GET", format!("{path}?limit=50#fragment")),
+                ("POST", format!("{path}?limit=50")),
+                ("PUT", format!("{path}/{unit}/units?limit=50")),
+            ] {
+                assert!(
+                    prepare_request(
+                        &config(),
+                        ApiRequest {
+                            area: "account".into(),
+                            resource,
+                            method: method.into(),
+                            body: None,
+                            idempotency_key: None,
+                        }
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn model_and_usage_allowlist_keeps_requests_finite() {
         for query in [
             None,
@@ -3287,9 +3362,21 @@ mod tests {
             "/admin/v1/usage-requests",
             None
         ));
+        assert!(route_allowed(
+            "token",
+            &Method::GET,
+            "/v1/organizations/11111111-1111-4111-8111-111111111111/model-policy",
+            None
+        ));
         assert!(!route_allowed(
             "token",
             &Method::GET,
+            "/v1/organizations/11111111-1111-4111-8111-111111111111/model-policy",
+            Some("extra=1")
+        ));
+        assert!(!route_allowed(
+            "token",
+            &Method::POST,
             "/v1/organizations/11111111-1111-4111-8111-111111111111/model-policy",
             None
         ));

@@ -44,6 +44,47 @@ try {
     assert.ok(await page.evaluate(() => document.querySelector('.ap-usage-row').textContent.includes('CONTROLLED_UNKNOWN_EXECUTION') && document.querySelector('.ap-usage-row').textContent.includes('CONTROLLED_UNKNOWN_SETTLEMENT'))); }
     assert.ok(await page.evaluate(() => window.f05.calls.every(call => call.method === 'GET')));
   });
+  await run('organization usage remains readable but personal cancellation permission cannot authorize it', async () => {
+    await fresh();
+    await page.evaluate(() => { window.f05.organizational = true; window.f05.active = true; window.f05.cancel = true; window.f05.version++; window.f05.render(); });
+    await page.waitForFunction(() => document.querySelector('.ap-usage-row')?.textContent.includes('public-user-a') && [...document.querySelectorAll('button')].some(button => button.textContent === window.f05.copy().stopDelivery && button.disabled));
+    await settled();
+    assert.ok(await page.evaluate(() => { const stop = [...document.querySelectorAll('button')].find(button => button.textContent === window.f05.copy().stopDelivery); stop.click(); return stop.disabled && !window.f05.calls.some(call => call.method === 'POST'); }));
+  });
+  await run('personal read permission does not grant organization usage read access', async () => {
+    await fresh(); const count = await page.evaluate(() => window.f05.calls.length);
+    await page.evaluate(() => { window.f05.organizational = true; window.f05.orgRead = false; window.f05.version++; window.f05.render(); });
+    await page.waitForFunction(() => !document.querySelector('.ap-personal-usage'));
+    assert.equal(await page.evaluate(() => window.f05.calls.length), count);
+  });
+  for (const language of ['zh','en','ja']) await run(`${language}: history 403 has a read-permission message while 503 remains unavailable`, async () => {
+    await fresh();
+    for(const status of [403,503]) {
+      await page.evaluate(({language,status})=>{window.f05.language=language;window.f05.readStatus=status;window.f05.version++;window.f05.render();},{language,status});
+      await page.waitForFunction(status=>[...document.querySelectorAll('[role=alert]')].some(item=>item.textContent===window.f05.copy()[status===403?'permissionDenied':'usageUnavailable']),{},status);
+      await settled();
+    }
+    assert.ok(await page.evaluate(()=>window.f05.calls.every(call=>call.method==='GET')));
+  });
+  await run('refresh and pagination retain data on a denied read and clear the read label after success', async () => {
+    await fresh();await page.evaluate(()=>{window.f05.readStatus=403;});
+    assert.ok(await page.evaluate(()=>{const button=[...document.querySelectorAll('button')].find(b=>b.textContent===window.f05.copy().refresh);button.click();return true;}));
+    await page.waitForFunction(()=>document.querySelector('[role=alert]')?.textContent===window.f05.copy().permissionDenied);
+    assert.ok(await page.evaluate(()=>document.body.textContent.includes('public-user-a')));await settled();
+    await click('nextPage');await settled();assert.ok(await page.evaluate(()=>document.querySelector('[role=alert]')?.textContent===window.f05.copy().permissionDenied));
+    await page.evaluate(()=>{window.f05.readStatus=0;});await page.evaluate(()=>[...document.querySelectorAll('button')].find(b=>b.textContent===window.f05.copy().refresh).click());await settled();
+    await page.waitForFunction(()=>!document.querySelector('[role=alert]'));
+  });
+  await run('a late previous identity read denial cannot label the new identity', async () => {
+    await fresh();await page.evaluate(()=>{window.f05.delayed=true;window.f05.readStatus=403;window.f05.version++;window.f05.render();});await page.waitForFunction(()=>window.f05.pending.length===1);
+    await page.evaluate(()=>{window.f05.user='public-user-b';window.f05.readStatus=0;window.f05.version++;window.f05.render();});await page.waitForFunction(()=>document.body.textContent.includes('public-user-b'));
+    await page.evaluate(()=>window.f05.resolve());await settled();assert.ok(await page.evaluate(()=>!document.querySelector('[role=alert]') && !document.body.textContent.includes('public-user-a')));
+  });
+  await run('cancellation 403 keeps its original mutation error and definite-rejection key behavior', async () => {
+    await fresh();await page.evaluate(()=>{window.f05.active=true;window.f05.version++;window.f05.render();});await settled();await page.waitForFunction(()=>[...document.querySelectorAll('button')].some(b=>b.textContent===window.f05.copy().stopDelivery));
+    await page.evaluate(()=>{window.f05.cancelStatus=403;});await click('stopDelivery');await settled();await page.waitForFunction(()=>document.querySelector('[role=alert]')?.textContent===window.f05.copy().usageUnavailable);
+    await click('stopDelivery');await settled();assert.ok(await page.evaluate(()=>{const posts=window.f05.calls.filter(c=>c.method==='POST');return posts.length===2 && posts[0].key!==posts[1].key;}));
+  });
   console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
 } catch (error) { console.error(`FAIL after ${passed} PASS: ${error.name}`); process.exitCode = 1; }
 finally { if (browser) await browser.close(); if (vite) await vite.close(); if (fs.existsSync(profile)) fs.rmSync(profile, { recursive: true, force: true }); }

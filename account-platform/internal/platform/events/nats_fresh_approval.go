@@ -67,7 +67,7 @@ func InitializeFreshApprovalConsumers(ctx context.Context, rawURL string, cfg NA
 	if err != nil || deadLetters.State.Subjects["account-platform.dead-letter."+approvalconsumer.AuthorizationSubject] != 0 {
 		return nil, ErrNATSResources
 	}
-	allowed := map[string]bool{"billing-refund-executor-v1": true}
+	allowed := ordinaryConsumerNames()
 	for _, d := range approvalconsumer.BillingCommands() {
 		allowed[d.Durable] = true
 	}
@@ -75,7 +75,7 @@ func InitializeFreshApprovalConsumers(ctx context.Context, rawURL string, cfg NA
 	count := 0
 	for name := range names.Name() {
 		count++
-		if count > 4 || !allowed[name] {
+		if count > len(allowed) || !allowed[name] {
 			return nil, ErrNATSResources
 		}
 	}
@@ -156,7 +156,7 @@ func checkFreshApprovalConsumers(ctx context.Context, rawURL string, cfg NATSCon
 		}
 	}
 	names := stream.ConsumerNames(ctx)
-	allowed := map[string]bool{"billing-refund-executor-v1": true}
+	allowed := ordinaryConsumerNames()
 	for _, d := range approvalconsumer.BillingCommands() {
 		allowed[d.Durable] = true
 	}
@@ -190,4 +190,14 @@ func checkFreshApprovalConsumers(ctx context.Context, rawURL string, cfg NATSCon
 		}
 	}
 	return FreshApprovalControl{Version: version, ApprovalEpoch: epoch, RelayEpoch: relayEpoch}, nil
+}
+
+// Ordinary resources are independently fixed by this delivery's event
+// registry, rather than inferred from foreign or future consumers.
+func ordinaryConsumerNames() map[string]bool {
+	allowed := make(map[string]bool)
+	for _, descriptor := range provisionedConsumers() {
+		allowed[descriptor.Name] = true
+	}
+	return allowed
 }

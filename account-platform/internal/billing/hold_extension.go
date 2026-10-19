@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/google/uuid"
@@ -203,6 +204,12 @@ func (r *PostgresRepository) extendHoldWithinTransaction(ctx context.Context, tx
 		return Hold{}, ErrConflict
 	}
 	previousExpiresAt, previousMaximum := hold.ExpiresAt, hold.MaxMicrocredits
+	if _, err := validateMemberQuotaHoldAllocations(ctx, tx, hold.ID, 0); err != nil {
+		return Hold{}, err
+	}
+	if hold.MaxMicrocredits < 0 || additional > math.MaxInt64-hold.MaxMicrocredits {
+		return Hold{}, ErrConflict
+	}
 	if additional > 0 {
 		var organizationID, memberUserID *uuid.UUID
 		var membershipVersion *int64
@@ -210,9 +217,16 @@ func (r *PostgresRepository) extendHoldWithinTransaction(ctx context.Context, tx
 			return Hold{}, err
 		}
 		if organizationID != nil || memberUserID != nil || membershipVersion != nil {
-			// Organization producer and quota extension first belong to F06.
-			return Hold{}, ErrConflict
+			if organizationID == nil || memberUserID == nil || membershipVersion == nil {
+				return Hold{}, ErrConflict
+			}
+			if err := r.extendMemberQuotaHold(ctx, tx, hold, *organizationID, *memberUserID, *membershipVersion, additional, now); err != nil {
+				return Hold{}, err
+			}
 		} else if err := extendPersonalHold(ctx, tx, hold, additional, now); err != nil {
+			return Hold{}, err
+		}
+		if _, err := validateMemberQuotaHoldAllocations(ctx, tx, hold.ID, additional); err != nil {
 			return Hold{}, err
 		}
 		hold.MaxMicrocredits += additional

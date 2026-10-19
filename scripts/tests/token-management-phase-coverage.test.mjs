@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { commandSpecs } from '../check-token-management-authorization-coverage.mjs';
+import { checkCoverage, loadInputs, commandSpecs } from '../check-token-management-authorization-coverage.mjs';
 
 // These are boundary tests of the actual command parser. Host, SQL and OpenAPI
 // verification still uses the assembled repository, not these synthetic texts.
@@ -53,4 +53,27 @@ test('the real assembled Go dispatch table contains exactly the current phase', 
   const specs = fs.readFileSync(new URL('../../account-platform/internal/token/command_governance.go', import.meta.url), 'utf8');
   const handlers = fs.readFileSync(new URL('../../account-platform/internal/token/governance_handlers.go', import.meta.url), 'utf8');
   assert.deepEqual(commandSpecs(specs, handlers).map(item => item.command).sort(), [...commands].sort());
+});
+
+
+test('installed organization lifecycle contracts keep exact workload authority and real DTOs', () => {
+  const inputs = loadInputs();
+  checkCoverage(inputs);
+  for (const [suffix, permission, command, response] of [
+    ['', 'internal.token.organization.lifecycle', 'TOKEN_ORGANIZATION_LIFECYCLE_APPLY', 'OrganizationLifecycleAssessment'],
+    ['/units/{unit_id}', 'internal.token.organization-unit.lifecycle', 'TOKEN_ORGANIZATION_UNIT_LIFECYCLE_APPLY', 'OrganizationUnitDeletionAssessment'],
+  ]) {
+    const op = inputs.management.paths[`/internal/v1/organizations/{organization_id}${suffix}/lifecycle`].put;
+    assert.deepEqual(op['x-authority'], { kind: 'workload', all: [permission] });
+    assert.deepEqual(op['x-command-policy'], { command, mode: 'AuditOnly' });
+    assert.equal(op.responses['200'].content['application/json'].schema.$ref, `#/components/schemas/${response}`);
+    assert.ok(inputs.management.components.schemas[response].properties.ready);
+    assert.ok(inputs.management.components.schemas[response].properties.blockers);
+  }
+});
+
+test('lifecycle contracts cannot hide a missing serialized response field', () => {
+  const inputs = loadInputs();
+  delete inputs.management.components.schemas.OrganizationLifecycleAssessment.properties.account_version;
+  assert.throws(() => checkCoverage(inputs), /selected DTO field coverage drift/);
 });
