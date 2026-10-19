@@ -550,6 +550,11 @@ impl ModelManager {
         } else {
             legacy_resource_dir(&current, &self.settings.models_path())
         };
+        if resource.is_none() {
+            return Err(fail(
+                "无法确认当前版本的权重目录，不能保证回退；请先修复当前部署，未切换版本。",
+            ));
+        }
         ensure_unused(&runtime_path(&current)?, resource.as_deref())?;
         let mut target = version_store::get(card_id, id)
             .map_err(fail)?
