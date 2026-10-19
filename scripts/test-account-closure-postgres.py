@@ -36,7 +36,8 @@ CONTRACTS = [
     ("gift-closure", "./internal/billingschema", {"TestGiftClosurePublicHarness"},
      {"": {"TestGiftClosureProducerBoundaries"}, ".billing": {"TestClosedGrantPublishedOwnerEffects"}}),
     ("account-anonymization", "./internal/account",
-     {"TestAccountClosureAnonymizesOwnedHistoricalContacts", "TestAccountClosureRollbackPreservesEvidence"}, {}),
+     {"TestAccountClosureAnonymizesOwnedHistoricalContacts", "TestAccountClosureRollbackPreservesEvidence",
+      "TestAccountClosureSelfServiceRecoveryPostgres"}, {}),
 ]
 
 
