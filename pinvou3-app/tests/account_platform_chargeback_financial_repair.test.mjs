@@ -1,6 +1,6 @@
 import test from 'node:test'; import assert from 'node:assert/strict';
 import {financialRepairPrecheckBody,financialRepairCommandTypes} from '../src/features/account-platform/admin-financial-repair-form.js';
-import {financialRepairApprovalDraft} from '../src/features/account-platform/admin-financial-repair-drafts.js';
+import {financialRepairApprovalDraft,financialRepairPrecheck} from '../src/features/account-platform/admin-financial-repair-drafts.js';
 import {currentApprovalEditDraft} from '../src/features/account-platform/admin-finance.js';
 import {AdminPlatformClient} from '../src/features/account-platform/admin-client.js';
 import {parseFinanceJSON,encodeFinanceJSON} from '../src/features/account-platform/finance-contract.js';
@@ -8,6 +8,22 @@ import {ledgerRepairCopy} from '../src/shared/ledger-repair-i18n.js';
 const raw=()=>"{\"command_type\":\"CHARGEBACK_FINANCIAL_REPAIR\",\"policy_version\":1,\"snapshot_schema_version\":1,\"target_resource_type\":\"CHARGEBACK_CASE\",\"target_resource_id\":\"00000000-0000-4000-8000-000000000001\",\"normalized_command\":{\"chargeback_case_id\":\"00000000-0000-4000-8000-000000000001\",\"payment_evidence_id\":\"00000000-0000-4000-8000-000000000002\",\"expected_case_version\":9007199254740993,\"reason_code\":\"BASE_SHORTFALL_COMPENSATION\"},\"critical_resource_versions\":{\"chargeback_case_version\":9007199254740993,\"facts_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"policy_version\":1},\"financial_snapshot\":{\"base_shortfall_microcredits\":9223372036854775807,\"wallet_id\":\"00000000-0000-4000-8000-000000000003\",\"wallet_version\":9007199254740993,\"package_id\":\"00000000-0000-4000-8000-000000000004\",\"component_digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"provider_chargeback_id\":\"controlled-provider-chargeback\"}}";
 const id=n=>`00000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
 const values={target_resource_id:id(1),payment_evidence_id:id(2)};
+
+for (const [label, providerID, valid] of [
+ ['ASCII200', 'x'.repeat(200), true], ['ASCII201', 'x'.repeat(201), false],
+ ['CJK200', '\u4e2d'.repeat(66) + 'aa', true], ['CJK201', '\u4e2d'.repeat(67), false],
+ ['emoji200', '\u{1f600}'.repeat(50), true], ['emoji204', '\u{1f600}'.repeat(51), false],
+]) test(`provider chargeback reference uses existing 200 UTF8 byte proof bound: ${label}`, () => {
+ const projection=parseFinanceJSON(raw()); projection.financial_snapshot.provider_chargeback_id=providerID;
+ assert.equal(new TextEncoder().encode(providerID).length<=200,valid);
+ assert.equal(financialRepairPrecheck(projection)!==null,valid);
+ if (valid) {
+  const draft=financialRepairApprovalDraft(projection,'Controlled chargeback correction reason','controlled-f14-key');
+  assert.equal(draft.financial_snapshot.provider_chargeback_id,providerID);
+ } else {
+  assert.throws(()=>financialRepairApprovalDraft(projection,'Controlled chargeback correction reason','controlled-f14-key'));
+ }
+});
 test('only installed chargeback descriptor and current strict precheck fields',()=>{assert.deepEqual(financialRepairCommandTypes,['LEDGER_REPAIR','RECEIVABLE_WRITE_OFF','PAYMENT_FINANCIAL_REPAIR','REFUND_EXCEPTION_REPAIR','CHARGEBACK_FINANCIAL_REPAIR', 'RECONCILIATION_FINANCIAL_REPAIR']);assert.deepEqual(financialRepairPrecheckBody('CHARGEBACK_FINANCIAL_REPAIR',values).body,{command_type:'CHARGEBACK_FINANCIAL_REPAIR',...values,reason_code:'BASE_SHORTFALL_COMPENSATION'});for(const v of ['',null,true,'00000000-0000-0000-0000-000000000000',' padded '])assert.ok(financialRepairPrecheckBody('CHARGEBACK_FINANCIAL_REPAIR',{...values,payment_evidence_id:v}).error)});
 test('real client raw numeric owner response preserves exact case versions and amount',async()=>{const old=globalThis.fetch;let call;const controller=new AbortController();globalThis.fetch=async(url,options)=>{call={url,options};return new Response(raw(),{status:200})};try{const c=new AdminPlatformClient('https://portal.example');c.csrfToken='controlled-f14';const p=await c.approvalCommandPrecheck(financialRepairPrecheckBody('CHARGEBACK_FINANCIAL_REPAIR',values).body,controller.signal);assert.equal(call.options.headers['X-CSRF-Token'],'controlled-f14');assert.equal(call.options.cache,'no-store');assert.equal(call.options.signal,controller.signal);assert.equal(p.normalized_command.expected_case_version,'9007199254740993');assert.equal(p.critical_resource_versions.chargeback_case_version,'9007199254740993');assert.equal(p.financial_snapshot.base_shortfall_microcredits,'9223372036854775807');const d=financialRepairApprovalDraft(p,'Controlled chargeback correction reason','controlled-f14-key');const out=encodeFinanceJSON(d);assert.ok(out.includes('"expected_case_version":9007199254740993'));assert.ok(out.includes('"chargeback_case_version":9007199254740993'));}finally{globalThis.fetch=old}});
 test('typed EDIT uses original evidence and current owner facts without live-row ID inference',async()=>{let request;const d=await currentApprovalEditDraft({approvalCommandPrecheck:async b=>{request=b;return parseFinanceJSON(raw())}},{approval_request_id:id(9),command_type:'CHARGEBACK_FINANCIAL_REPAIR',status:'DRAFT',allowed_actions:['EDIT'],target:{resource_type:'CHARGEBACK_CASE',resource_id:id(1)},command:{chargeback_case_id:id(1),payment_evidence_id:id(2),expected_case_version:'9007199254740993',reason_code:'BASE_SHORTFALL_COMPENSATION'}},'Edited chargeback correction reason');assert.equal(request.payment_evidence_id,id(2));assert.equal(request.target_resource_id,id(1));assert.equal(d.normalized_command.payment_evidence_id,id(2));assert.equal(d.normalized_command.expected_case_version,'9007199254740993')});

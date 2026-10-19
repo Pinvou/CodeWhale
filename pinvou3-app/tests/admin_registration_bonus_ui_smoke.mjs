@@ -186,6 +186,8 @@ try {
       submitRightGap: Math.abs(actions.right - submit.right),
     };
   });
+  assert.equal(await page.$eval('.adm-registration-bonus-summary dt', node => getComputedStyle(node).color),
+    'rgb(100, 116, 139)', 'the summary label must retain the existing muted-color fallback');
   assert.ok(desktopLayout.reasonWidth >= desktopLayout.editorWidth - 40, 'change reason must use the editor width');
   assert.ok(desktopLayout.textareaHeight >= 110, 'change reason must provide a usable writing area');
   assert.ok(desktopLayout.submitRightGap <= 1, 'the primary action must align to the editor edge');

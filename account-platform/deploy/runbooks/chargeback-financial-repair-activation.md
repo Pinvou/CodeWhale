@@ -1,5 +1,7 @@
 # 拒付财务修复（`CHARGEBACK_FINANCIAL_REPAIR`）受控激活手册
 
+部署镜像、统一 Compose、完整迁移和当前资源集合的入口见 [拒付财务修复交付索引](../production/README.chargeback-financial-repair.md)；本手册的 BASE 首版范围、GSA-38～40、默认 INACTIVE 与明确激活授权保持不变。
+
 ## 本轮实现与验证边界
 
 独立复验曾在 Account relay 就绪阶段失败，尚未进入 Billing 装配、proof、consumer 或财务执行，具体原因没有被原固定错误消息保留下来。后续带安全诊断的隔离运行通过，仅说明该次未重现，不能证明偶发根因已修。F14 专属测试现在可输出闭合阶段、SQLSTATE 和固定错误分类；共享默认装配及公开错误仍脱敏，原 5 秒就绪预算与全部权限判据不变。此未定位风险由 Issue #1719 保留，即使随后正式独立测试通过也不自动视为根因收尾。

@@ -132,7 +132,7 @@
                           "type": "string",
                           "enum": [
                             "ACTIVE",
-                            "DISABLED",
+                            "SUSPENDED",
                             "REVOKED"
                           ]
                         },
@@ -330,7 +330,7 @@
                           "type": "string",
                           "enum": [
                             "ACTIVE",
-                            "DISABLED",
+                            "SUSPENDED",
                             "REVOKED"
                           ]
                         },

@@ -158,6 +158,16 @@ func (r *PostgresRepository) GrantOrganizationRoleBinding(ctx context.Context, p
 	if !assignable || scope == "PLATFORM" || scope == "PERSONAL" || request.RoleCode == "OWNER" || (scope == "UNIT") != (request.UnitID != nil) {
 		return RoleBinding{}, ErrConflict
 	}
+	// Organization-wide managers retain the existing missing-unit response.
+	// Scoped callers must prove authority before learning target existence.
+	if err := requireOrganizationPermission(ctx, tx, actorID, *request.OrganizationID, nil, PermissionOrganizationRolesAssign); err != nil {
+		if !errors.Is(err, ErrForbidden) {
+			return RoleBinding{}, err
+		}
+		if err := requireOrganizationPermission(ctx, tx, actorID, *request.OrganizationID, request.UnitID, PermissionOrganizationRolesAssign); err != nil {
+			return RoleBinding{}, err
+		}
+	}
 	if request.UnitID != nil {
 		var exists bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM organization_units WHERE id=$1 AND organization_id=$2 AND status='ACTIVE')`, *request.UnitID, *request.OrganizationID).Scan(&exists); err != nil {
@@ -171,7 +181,7 @@ func (r *PostgresRepository) GrantOrganizationRoleBinding(ctx context.Context, p
 		return RoleBinding{}, err
 	}
 	var membershipID uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT id FROM memberships WHERE organization_id=$1 AND user_id=$2 AND status='ACTIVE' FOR UPDATE`, *request.OrganizationID, request.UserID).Scan(&membershipID); errors.Is(err, pgx.ErrNoRows) {
+	if err := tx.QueryRow(ctx, `SELECT member.id FROM memberships member JOIN users target ON target.id=member.user_id AND target.status='ACTIVE' WHERE member.organization_id=$1 AND member.user_id=$2 AND member.status='ACTIVE' FOR UPDATE OF member,target`, *request.OrganizationID, request.UserID).Scan(&membershipID); errors.Is(err, pgx.ErrNoRows) {
 		return RoleBinding{}, ErrNotFound
 	} else if err != nil {
 		return RoleBinding{}, err

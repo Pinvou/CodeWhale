@@ -32,11 +32,15 @@ missing projected identity or omitted permission fails closed in production.
 Account configures the fingerprint and prepares permanent historical eligibility
 before accepting registration traffic. BLOCKED historical readiness remains visible
 and prevents bonus policy enablement; unavailable preparation fails startup.
-Upgrade in this order: stop registration writers and wallet workers; install the
+Upgrade in this order: block registration traffic and stop Account (which owns
+the wallet-provisioning worker); install the
 complete Account/Billing F07 migrations using their existing migration identities;
-provide the permanent fingerprint key and exact incoming workload rules; start
-Account to finish its eligibility backfill; then start Billing and the existing
-wallet workers before restoring registration traffic. Original Account 087 retains
+provide the permanent fingerprint key and exact incoming workload rules; make
+Billing and the existing Identity dependencies available; then start Account with
+registration traffic still blocked. Account finishes eligibility preparation
+before starting its embedded wallet-provisioning worker. Verify readiness and
+wallet provisioning before restoring registration traffic; the worker is not a
+separately started service. Original Account 087 retains
 its registered checksum; 900004 is delivered with it and validates required job
 facts. No applied migration or historical eligibility row is rewritten.
 Missing or invalid key material prevents a mobile-enabled Account from starting.

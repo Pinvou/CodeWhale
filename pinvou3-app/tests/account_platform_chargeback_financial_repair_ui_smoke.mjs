@@ -41,6 +41,23 @@ async function center(page, view) {
   if (view) await page.evaluate(view => [...document.querySelectorAll('.adm-approval-tabs button')].find(button => button.textContent === window.f14.adminPlatformCopy[window.f14.language].approvalCenter[view]).click(), view);
 }
 try {
+  for (const [label, value, valid] of [
+    ['ASCII200', 'x'.repeat(200), true], ['ASCII201', 'x'.repeat(201), false],
+    ['CJK200', '\u4e2d'.repeat(66) + 'aa', true], ['CJK201', '\u4e2d'.repeat(67), false],
+    ['emoji200', '\u{1f600}'.repeat(50), true], ['emoji204', '\u{1f600}'.repeat(51), false],
+  ]) await run(`ChargebackRepair provider UTF8 byte boundary ${label}`, `language=en&provider-id=${encodeURIComponent(value)}`, async page => {
+    await openForm(page);
+    if (valid) {
+      await create(page); await page.waitForFunction(() => window.f14.status === 'SUBMITTED');
+      const draft = await page.evaluate(() => JSON.parse(window.f14.calls.find(call => call.url === '/api/admin/approvals/requests' && call.method === 'POST').body));
+      assert.equal(draft.financial_snapshot.provider_chargeback_id, value);
+    } else {
+      await page.waitForSelector('.adm-financial-repair [role=alert]');
+      assert.equal(await page.$('.adm-financial-repair-draft'), null);
+      assert.equal(await page.$eval('.adm-financial-repair [role=alert]', node => node.textContent), await page.evaluate(() => window.f14.ledgerRepairCopy.en.factsFailed));
+      assert.equal(await page.evaluate(() => window.f14.calls.some(call => call.url === '/api/admin/approvals/requests' && call.method === 'POST')), false);
+    }
+  });
   for (const [label, key, valid] of [['ASCII111', 'a'.repeat(111), true], ['ASCII112', 'a'.repeat(112), false], ['UTF8-111bytes', '中'.repeat(37), true], ['UTF8-114bytes', '中'.repeat(38), false]]) {
     await run(`ChargebackRepair prefixed key byte boundary ${label}`, '', async page => {
       await openForm(page); await page.waitForSelector('.adm-financial-repair-draft');
@@ -183,4 +200,4 @@ try {
   });
 } finally { await browser.close(); await server.close(); }
 const result = { pass, fail, results, limits: ['Real AdminPlatformView/AdminFinanceWorkspace/AdminPlatformClient under controlled BFF replies; owner effects, independent issuer/NATS, PG, deployed API and full E2E are not exercised.'] };
-fs.writeFileSync(process.env.F14_REACT_RESULT || 'chargeback-repair-smoke-result.json', JSON.stringify(result, null, 2)); console.log(JSON.stringify(result)); process.exitCode = fail ? 1 : 0;
+if (process.env.F14_REACT_RESULT) fs.writeFileSync(process.env.F14_REACT_RESULT, JSON.stringify(result, null, 2)); console.log(JSON.stringify(result)); process.exitCode = fail ? 1 : 0;

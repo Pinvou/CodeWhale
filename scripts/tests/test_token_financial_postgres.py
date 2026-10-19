@@ -210,14 +210,52 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         self.assertEqual(self.fixture_writes, [])
         self.assertEqual(self.fixture_phases, ["owner-account"])
 
-    def test_account_phase_requires_both_real_cas_and_lifecycle_roots(self):
+    def test_account_phase_requires_real_cas_lifecycle_and_review_governance_roots(self):
         self.assertEqual(RUNNER.ACCOUNT_REQUIRED, {
             "TestF06OrganizationStatusProjectionVersionPublicPostgres",
             "TestF06OrganizationDeletionVersionAndTerminalScope",
+            "TestF06Review5566377593PublicPostgres",
         })
         for name in RUNNER.ACCOUNT_REQUIRED:
             with self.subTest(name=name), self.assertRaises(RuntimeError):
                 RUNNER.verify_results([e for e in self.events(RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE, True) if e.get("Test", "").split("/")[0] != name], RUNNER.ACCOUNT_REQUIRED, package=RUNNER.ACCOUNT_PACKAGE, require_children=True, exact_roots=True)
+
+    def test_review_governance_and_batch_are_selected_with_mandatory_child_evidence(self):
+        required = {
+            "owner-account": ("TestF06Review5566377593PublicPostgres", RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE),
+            "retained-billing": ("TestMemberQuotaBatchPersistedFactsAndFinancialReplay", RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE),
+        }
+        self.run_main_fixture()
+        for phase, (name, roots, package) in required.items():
+            with self.subTest(phase=phase):
+                command = self.fixture_commands[self.fixture_phases.index(phase)]
+                self.assertIn(name, command[command.index("-run") + 1])
+                self.assertIn(name, roots)
+                valid = self.events(roots, package, children=True)
+                self.assertGreater(RUNNER.verify_results(valid, roots, package=package, require_children=True, exact_roots=True), 0)
+                for missing in (
+                    [event for event in valid if event.get("Test", "").split("/")[0] != name],
+                    [event for event in valid if not event.get("Test", "").startswith(name + "/")],
+                    valid + [{"Action": "skip", "Package": package, "Test": name + "/actual"}],
+                ):
+                    with self.assertRaises(RuntimeError):
+                        RUNNER.verify_results(missing, roots, package=package, require_children=True, exact_roots=True)
+
+    def test_expiry_restore_root_is_selected_and_requires_completed_children(self):
+        name = "TestF06MemberQuotaRestoreUsesOrdinaryPackageExpiry"
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIn(name, command[command.index("-run") + 1])
+        self.assertIn(name, RUNNER.BILLING_CHILD_REQUIRED)
+        roots, package = RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE
+        valid = self.events(roots, package, children=True)
+        for missing in (
+            [event for event in valid if event.get("Test", "").split("/")[0] != name],
+            [event for event in valid if not event.get("Test", "").startswith(name + "/")],
+            valid + [{"Action": "skip", "Package": package, "Test": name + "/actual"}],
+        ):
+            with self.assertRaises(RuntimeError):
+                RUNNER.verify_results(missing, roots, package=package, require_children=True, exact_roots=True)
 
     def test_active_client_prevents_any_fixture_execution(self):
         with self.assertRaises(RuntimeError):

@@ -264,6 +264,7 @@
           },
           "provider_chargeback_id": {
             "type": "string",
+            "description": "Non-empty provider reference, at most 200 UTF-8 bytes. This is a byte bound, not a JSON Schema code-point maxLength; the original reference is never truncated.",
             "minLength": 1
           }
         }

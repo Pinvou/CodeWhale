@@ -1,5 +1,7 @@
 # 退款异常修复（`REFUND_EXCEPTION_REPAIR`）受控激活手册
 
+部署镜像、统一 Compose、完整迁移及当前资源集合的交付入口见 [退款异常财务修复交付索引](../production/README.refund-exception-repair.md)；本手册中的 GSA-38～40、明确激活授权与默认 INACTIVE 边界保持不变。
+
 本轮前向迁移 `900018_refund_activation_execution_lock` 提供固定 Refund v1/s1 的私有 owner 锁能力；先按正式 Billing Up/Verify 安装，再由已授权 operator 明确激活。默认仍为 INACTIVE。新写在同一财务事务内锁定 activation 并核对冻结版本与更新时间，停用必须等待该事务结束；已有不可变成功回执先只读回放，不因后续停用失效。不得给 runtime 表 UPDATE 或 owner 身份来绕过该接口。
 
 900018 Down 显式拒绝，保留能力、迁移账本和财务事实。运维回退通过停止 consumer 并受控设置 activation 为 INACTIVE；不删除已执行 case、journal 或回执。原 067 Up 与不可变触发器保持原字节，runtime 仅保 SELECT/INSERT，收尾及未来安装不得重新授予 UPDATE/DELETE。执行键摘要采用历史兼容域（见 `docs/financial-execution-key-compatibility.md`），没有更换历史 hash，也不声称增强 hash 隔离。
