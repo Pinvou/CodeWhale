@@ -28,7 +28,7 @@ func TestAccountClosureAnonymizesOwnedHistoricalContacts(t *testing.T) {
 		if id != user {
 			name = "other_" + strings.ReplaceAll(id.String(), "-", "")[:12]
 		}
-		_, err := r.pool.Exec(ctx, `WITH capability AS (SELECT set_config('pinvou.registration_bonus_capable','1',true)) INSERT INTO users(id,status,user_code,username,mobile_e164,created_at,updated_at) SELECT $1,'ACTIVE',generate_unique_user_code(),$2,$3,$4,$4 FROM capability`, id, name, fmt.Sprintf("+861380000%04d", index), now)
+		_, err := r.pool.Exec(ctx, `WITH capability AS (SELECT set_config('pinvou.registration_bonus_capable','1',true)) INSERT INTO users(id,status,user_code,username,mobile_e164,email,created_at,updated_at) SELECT $1,'ACTIVE',generate_unique_user_code(),$2,$3,$5,$4,$4 FROM capability`, id, name, fmt.Sprintf("+861380000%04d", index), now, name+"@Example.Invalid")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -77,6 +77,36 @@ func TestAccountClosureAnonymizesOwnedHistoricalContacts(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Exercise real terminal transitions without accepting either EMAIL invite.
+	// The mixed-case stored user email must use the creator's normalization.
+	inviter := identity.Principal{Issuer: "closure-owned-history", Subject: other.String()}
+	recipient := identity.Principal{Issuer: "closure-owned-history", Subject: user.String()}
+	originalNow := r.now
+	r.now = func() time.Time { return now.Add(-2 * time.Hour) }
+	expired, err := r.CreateInvitation(ctx, inviter, org, InvitationCreateRequest{TargetType: "EMAIL", Target: username + "@Example.Invalid", Roles: []string{"MEMBER"}, ExpiresInHours: 1, IdempotencyKey: uuid.NewString()})
+	r.now = originalNow
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = r.AcceptInvitation(ctx, recipient, expired.Token, nil); !errors.Is(err, ErrInvitationExpired) {
+		t.Fatal("original invitation expiration did not run", err)
+	}
+	revoked, err := r.CreateInvitation(ctx, inviter, org, InvitationCreateRequest{TargetType: "EMAIL", Target: username + "@Example.Invalid", Roles: []string{"MEMBER"}, ExpiresInHours: 1, IdempotencyKey: uuid.NewString()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = r.RevokeInvitation(ctx, inviter, org, revoked.ID); err != nil {
+		t.Fatal(err)
+	}
+	ownedInvitations = append(ownedInvitations, expired.ID, revoked.ID)
+	foreignTerminal := []uuid.UUID{uuid.New(), uuid.New()}
+	for index, id := range foreignTerminal {
+		status := []string{"EXPIRED", "REVOKED"}[index]
+		email := "foreign-terminal-" + id.String() + "@example.invalid"
+		if _, err = r.pool.Exec(ctx, `INSERT INTO invitations(id,organization_id,email_normalized,token_hash,status,roles,invited_by,expires_at,created_at,updated_at,target_type,target_digest,target_hint,idempotency_key,request_hash,revoked_at) VALUES($1,$2,$3,gen_random_bytes(32),$4,'["MEMBER"]'::jsonb,$5,$6,$7,$7,'EMAIL',$8,'foreign recipient',$9,repeat('a',64),CASE WHEN $4='REVOKED' THEN $7::timestamptz END)`, id, org, email, status, user, now.Add(-time.Hour), now.Add(-2*time.Hour), invitationTargetDigest(email), "foreign-terminal-"+id.String()); err != nil {
+			t.Fatal(err)
+		}
+	}
 	ownedCredentials := []uuid.UUID{}
 	foreignCredential := uuid.New()
 	for index, status := range []string{"CONSUMED", "EXPIRED", "LOCKED", "SUPERSEDED", "CONSUMED"} {
@@ -122,6 +152,10 @@ func TestAccountClosureAnonymizesOwnedHistoricalContacts(t *testing.T) {
 		retained[id] = row("super_admin_bootstrap_credentials", id, []string{"identity_subject", "updated_at"})
 	}
 	foreignInvitationBefore := row("invitations", foreignInvitation, []string{})
+	foreignTerminalBefore := map[uuid.UUID]string{}
+	for _, id := range foreignTerminal {
+		foreignTerminalBefore[id] = row("invitations", id, []string{})
+	}
 	foreignCredentialBefore := row("super_admin_bootstrap_credentials", foreignCredential, []string{})
 	principal := identity.Principal{Issuer: "closure-owned-history", Subject: user.String(), AuthenticatedAt: now}
 	for name, authenticatedAt := range map[string]time.Time{"missing-recent-auth": {}, "expired-recent-auth": now.Add(-accountClosureRecentAuth - time.Minute), "future-recent-auth": now.Add(3 * time.Minute)} {
@@ -225,10 +259,10 @@ func TestAccountClosureAnonymizesOwnedHistoricalContacts(t *testing.T) {
 		for _, id := range ownedInvitations {
 			var clear bool
 			if err := r.pool.QueryRow(ctx, `SELECT email_normalized IS NULL AND target_hint IS NULL FROM invitations WHERE id=$1`, id).Scan(&clear); err != nil || !clear {
-				t.Fatal("accepted recipient contacts retained", err)
+				t.Fatal("owned accepted or terminal recipient contacts retained", err)
 			}
 			if row("invitations", id, []string{"email_normalized", "target_hint", "version", "updated_at"}) != retained[id] {
-				t.Fatal("accepted invitation frozen evidence changed")
+				t.Fatal("owned invitation frozen evidence changed")
 			}
 		}
 		for _, id := range ownedCredentials {
@@ -242,6 +276,11 @@ func TestAccountClosureAnonymizesOwnedHistoricalContacts(t *testing.T) {
 		}
 		if row("invitations", foreignInvitation, []string{}) != foreignInvitationBefore || row("super_admin_bootstrap_credentials", foreignCredential, []string{}) != foreignCredentialBefore {
 			t.Fatal("another recipient or bootstrap owner's data changed")
+		}
+		for _, id := range foreignTerminal {
+			if row("invitations", id, []string{}) != foreignTerminalBefore[id] {
+				t.Fatal("terminal invitation for another recipient changed")
+			}
 		}
 		var complete bool
 		if err := r.pool.QueryRow(ctx, `SELECT u.status='DELETED' AND q.stage='ANONYMIZED' AND q.identity_deleted_at IS NOT NULL AND q.grants_isolated_at IS NOT NULL AND q.token_replays_cleared_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM identities WHERE user_id=u.id) AND EXISTS(SELECT 1 FROM account_subject_retention_records WHERE user_id=u.id) AND EXISTS(SELECT 1 FROM outbox_events WHERE aggregate_id=q.id AND event_type='account.user.anonymized.v1') FROM users u JOIN account_closure_requests q ON q.user_id=u.id WHERE u.id=$1`, user).Scan(&complete); err != nil || !complete {
