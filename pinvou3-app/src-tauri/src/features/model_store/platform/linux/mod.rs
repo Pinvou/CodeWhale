@@ -16,6 +16,7 @@
 //! | `script_runner` | **最核心**：pty 执行卡片脚本，解析进度/交互提示，静默超时，取消 |
 //! | `lifecycle` | 六个入口脚本的编排（下载/装引擎/部署/启用/停用/卸载） |
 //! | `run_state` | 运行中任务注册表、日志缓冲、卡片级并发互斥、下载队列 |
+//! | `local_service` | 本地下载服务（service.sock）：cmsd 等本机入口经它委托商店执行下载 |
 //! | `orphans` | 启动时回收上次没收干净的**脚本进程**（权重一个字节都不动） |
 //! | `errors` | 把技术错误翻译成用户看得懂的话 |
 //! | `disk` | 字节格式化与目录体积统计 |
@@ -27,11 +28,15 @@
 //! 品悟有自己的更新机制）、`gateway.rs` / `worker.rs` / `system_probe.rs`（分别是
 //! 局域网暴露、双机从机控制、硬件探测，排在后面的阶段）。
 
+pub mod background;
 pub mod boundary;
 mod card_assets;
 pub mod card_update;
+pub mod cmsd_inventory;
 pub mod config;
+mod control_file;
 pub mod db;
+mod delegated_run;
 pub mod deploy_profiles;
 
 // 商店边界在 platform/mod.rs 经 `use linux as backend` 转发，必须先在本模块根
@@ -42,9 +47,15 @@ pub(crate) use boundary::{
 };
 pub mod disk;
 pub mod errors;
+pub mod execution_fence;
+mod host_control;
 pub mod import_scan;
+mod incomplete;
 pub mod lifecycle;
 mod linked_models;
+pub mod local_service;
+mod log_page;
+pub mod maintenance;
 pub(crate) use linked_models::matches_current_model_route;
 pub mod native_card_compat;
 mod native_runtime;
@@ -64,10 +75,10 @@ pub mod weight_identity;
 pub use service::{
     ModelStoreService, active_runs, answer_run, api_keys, cancel_run, check_card_update,
     create_api_key, disable_test_store, follow_deployment_context, force_remove, library,
-    list_cards, model_detail, run_log, run_startup_cleanup, run_startup_refresh,
-    set_storage_settings, start_card_update, start_deploy, start_download, start_lifecycle,
-    start_version_action, startup_update_check, storage_settings, take_startup_cleanup,
-    test_store_state, unlock_test_store, versions,
+    list_cards, model_detail, preview_incomplete, retry_incomplete, run_log, run_startup_cleanup,
+    run_startup_refresh, set_storage_settings, start_card_update, start_deploy, start_download,
+    start_lifecycle, start_version_action, startup_update_check, storage_settings,
+    take_startup_cleanup, test_store_state, unlock_test_store, versions,
 };
 
 // 可见性契约：`installed_weight_paths_checked` 与 `installed_weight_candidate_names_checked`

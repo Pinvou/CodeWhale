@@ -21,6 +21,17 @@ use tauri::State;
 
 use crate::features::model_store::{self, ModelStoreService, StoreAvailability};
 
+/// Store operations can wait for a background host and its IPC response. Keep
+/// every invocation off the WebView/runtime thread and dispatch it only once.
+async fn dispatch_store<F>(job: F) -> Result<Value, String>
+where
+    F: FnOnce() -> Result<Value, String> + Send + 'static,
+{
+    tokio::task::spawn_blocking(job)
+        .await
+        .map_err(|error| error.to_string())?
+}
+
 /// 这台机器上有没有模型商店。前端拿它决定侧栏入口渲不渲染。
 ///
 /// 形状刻意跟其余命令保持一致（`async` + `Result`），尽管这个查询既不会失败也不
@@ -44,6 +55,25 @@ pub async fn model_store_library(
     service: State<'_, Arc<ModelStoreService>>,
 ) -> Result<Value, String> {
     model_store::library(Arc::clone(&service)).await
+}
+
+#[tauri::command]
+pub async fn model_store_preview_incomplete(
+    service: State<'_, Arc<ModelStoreService>>,
+    run_id: String,
+) -> Result<Value, String> {
+    let service = Arc::clone(&service);
+    model_store::preview_incomplete(&service, run_id).await
+}
+
+#[tauri::command]
+pub async fn model_store_retry_incomplete(
+    service: State<'_, Arc<ModelStoreService>>,
+    run_id: String,
+    expected_sha256: String,
+) -> Result<Value, String> {
+    let service = Arc::clone(&service);
+    dispatch_store(move || model_store::retry_incomplete(&service, run_id, expected_sha256)).await
 }
 
 #[tauri::command]
@@ -79,42 +109,50 @@ pub async fn model_store_versions(card_id: String, measure: Option<bool>) -> Res
     model_store::versions(card_id, measure).await
 }
 #[tauri::command]
-pub fn model_store_start_version_action(
+pub async fn model_store_start_version_action(
     service: State<'_, Arc<ModelStoreService>>,
     card_id: String,
     action: String,
     version_id: String,
 ) -> Result<Value, String> {
-    model_store::start_version_action(&service, card_id, action, version_id)
+    let service = Arc::clone(&service);
+    dispatch_store(move || model_store::start_version_action(&service, card_id, action, version_id))
+        .await
 }
 
 #[tauri::command]
-pub fn model_store_start_card_update(
+pub async fn model_store_start_card_update(
     service: State<'_, Arc<ModelStoreService>>,
     card_id: String,
     revision: String,
 ) -> Result<Value, String> {
-    model_store::start_card_update(&service, card_id, revision)
+    let service = Arc::clone(&service);
+    dispatch_store(move || model_store::start_card_update(&service, card_id, revision)).await
 }
 
 // ---------------------------------------------------------------- 长操作
 
 #[tauri::command]
-pub fn model_store_start_download(
+pub async fn model_store_start_download(
     service: State<'_, Arc<ModelStoreService>>,
     card_id: String,
     test_mode: Option<bool>,
 ) -> Result<Value, String> {
-    model_store::start_download(&service, card_id, test_mode.unwrap_or(false))
+    let service = Arc::clone(&service);
+    dispatch_store(move || {
+        model_store::start_download(&service, card_id, test_mode.unwrap_or(false))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn model_store_start_deploy(
+pub async fn model_store_start_deploy(
     service: State<'_, Arc<ModelStoreService>>,
     card_id: String,
     profile_id: Option<String>,
 ) -> Result<Value, String> {
-    model_store::start_deploy(&service, card_id, profile_id)
+    let service = Arc::clone(&service);
+    dispatch_store(move || model_store::start_deploy(&service, card_id, profile_id)).await
 }
 
 /// 启用 / 停用 / 卸载。
@@ -123,22 +161,28 @@ pub fn model_store_start_deploy(
 /// 参数缺席命中。「卸载」保留权重并把卡片退回「已下载」，「删除」才连权重一起清掉
 /// 并把卡片移出模型库。
 #[tauri::command]
-pub fn model_store_start_lifecycle(
+pub async fn model_store_start_lifecycle(
     service: State<'_, Arc<ModelStoreService>>,
     card_id: String,
     action: String,
     purge_weights: Option<bool>,
 ) -> Result<Value, String> {
-    model_store::start_lifecycle(&service, card_id, action, purge_weights.unwrap_or(false))
+    let service = Arc::clone(&service);
+    dispatch_store(move || {
+        model_store::start_lifecycle(&service, card_id, action, purge_weights.unwrap_or(false))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn model_store_force_remove(
+pub async fn model_store_force_remove(
     service: State<'_, Arc<ModelStoreService>>,
     card_id: String,
     confirm: Option<bool>,
 ) -> Result<Value, String> {
-    model_store::force_remove(&service, card_id, confirm.unwrap_or(false))
+    let service = Arc::clone(&service);
+    dispatch_store(move || model_store::force_remove(&service, card_id, confirm.unwrap_or(false)))
+        .await
 }
 
 // ---------------------------------------------------------------- 运行日志
@@ -149,27 +193,30 @@ pub async fn model_store_run_log(
     run_id: String,
     from: usize,
     wait: Option<u64>,
+    from_byte: Option<usize>,
 ) -> Result<Value, String> {
     // 克隆 Arc 再进 await：State 的借用不能跨过 await 点。
     let service = Arc::clone(&service);
-    model_store::run_log(service, run_id, from, wait).await
+    model_store::run_log(service, run_id, from, wait, from_byte).await
 }
 
 #[tauri::command]
-pub fn model_store_cancel_run(
+pub async fn model_store_cancel_run(
     service: State<'_, Arc<ModelStoreService>>,
     run_id: String,
 ) -> Result<Value, String> {
-    model_store::cancel_run(&service, run_id)
+    let service = Arc::clone(&service);
+    dispatch_store(move || model_store::cancel_run(&service, run_id)).await
 }
 
 #[tauri::command]
-pub fn model_store_answer_run(
+pub async fn model_store_answer_run(
     service: State<'_, Arc<ModelStoreService>>,
     run_id: String,
     answer: Option<String>,
 ) -> Result<Value, String> {
-    model_store::answer_run(&service, run_id, answer)
+    let service = Arc::clone(&service);
+    dispatch_store(move || model_store::answer_run(&service, run_id, answer)).await
 }
 
 /// 还在跑的长操作。给了 `card_id` 就只看那一张卡。
@@ -183,11 +230,12 @@ pub fn model_store_answer_run(
 /// 回的只是登记表快照；日志照常走 `model_store_run_log`，游标在调用方手里，
 /// 接回来时前半段一行都不会丢。
 #[tauri::command]
-pub fn model_store_active_runs(
+pub async fn model_store_active_runs(
     service: State<'_, Arc<ModelStoreService>>,
     card_id: Option<String>,
 ) -> Result<Value, String> {
-    model_store::active_runs(&service, card_id)
+    let service = Arc::clone(&service);
+    dispatch_store(move || model_store::active_runs(&service, card_id)).await
 }
 
 // ---------------------------------------------------------------- API Key
@@ -229,10 +277,11 @@ pub fn model_store_disable_test_store() -> Result<Value, String> {
 /// 服务里等界面起来取。**取一次就没了**——否则用户每切一次视图就被同一条提示
 /// 弹一遍。没有残留时回的是两个空数组，不是错误。
 #[tauri::command]
-pub fn model_store_take_startup_cleanup(
+pub async fn model_store_take_startup_cleanup(
     service: State<'_, Arc<ModelStoreService>>,
 ) -> Result<Value, String> {
-    model_store::take_startup_cleanup(&service)
+    let service = Arc::clone(&service);
+    dispatch_store(move || model_store::take_startup_cleanup(&service)).await
 }
 
 // ------------------------------------------------------ 权重目录与导入扫描
@@ -254,4 +303,85 @@ pub fn model_store_set_storage_settings(
     startup_update_check_enabled: Option<bool>,
 ) -> Result<Value, String> {
     model_store::set_storage_settings(models_dir, import_scan_dirs, startup_update_check_enabled)
+}
+
+#[cfg(test)]
+mod blocking_dispatch_tests {
+    use super::dispatch_store;
+    use serde_json::json;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn concurrent_dispatches_leave_the_invoke_thread_free() {
+        let caller = std::thread::current().id();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut pending = Vec::new();
+        let mut started = Vec::new();
+        let mut release = Vec::new();
+        for id in 0..2 {
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let calls = Arc::clone(&calls);
+            pending.push(tokio::spawn(dispatch_store(move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let _ = started_tx.send(std::thread::current().id());
+                release_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .map_err(|error| error.to_string())?;
+                Ok(json!({"run_id": id}))
+            })));
+            started.push(started_rx);
+            release.push(release_tx);
+        }
+        // Both blocking jobs must start before either is released. If dispatch
+        // runs inline, its bounded wait finishes the job before this can run.
+        for worker in started {
+            let worker = tokio::time::timeout(Duration::from_secs(2), worker)
+                .await
+                .expect("worker did not start")
+                .expect("worker dropped its start signal");
+            assert_ne!(worker, caller);
+        }
+        assert!(pending.iter().all(|job| !job.is_finished()));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        for release in release {
+            release.send(()).unwrap();
+        }
+        for (id, job) in pending.into_iter().enumerate() {
+            assert_eq!(job.await.unwrap().unwrap(), json!({"run_id": id}));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn backend_error_is_returned_without_replaying_the_operation() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let probe = Arc::clone(&calls);
+        let result = dispatch_store(move || {
+            probe.fetch_add(1, Ordering::SeqCst);
+            Err("store_offline: fixture".into())
+        })
+        .await;
+        assert_eq!(result.unwrap_err(), "store_offline: fixture");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn join_error_is_returned_without_replaying_the_operation() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let probe = Arc::clone(&calls);
+        let result = dispatch_store(move || {
+            probe.fetch_add(1, Ordering::SeqCst);
+            panic!("model store dispatch fixture panic");
+        })
+        .await;
+        assert!(
+            result
+                .unwrap_err()
+                .contains("model store dispatch fixture panic")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
 }
