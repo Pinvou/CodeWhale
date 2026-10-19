@@ -194,6 +194,7 @@ async fn boot_wire_cap_engine(
         credential_state: crate::platform::credential_store::CredentialState::Missing,
         has_secret: false,
         credential_action: None,
+        store_card_id: None,
     };
     customize_model(&mut saved_model);
     bridge.prefs.advanced.saved_models = vec![saved_model];

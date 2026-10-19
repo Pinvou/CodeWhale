@@ -1423,9 +1423,10 @@ fn add<S: CredentialStore>(
         model: model.to_owned(),
         base_url: base_url.to_owned(),
         model_store_card_id: None,
+        store_card_id: None,
+        model_store_link_only: false,
         model_store_link_detached: true,
         model_store_link_requested: false,
-        model_store_link_only: false,
         preserve_model_store_route: false,
         preserve_context_window_tokens: false,
         context_window_edit_requested: false,
@@ -1506,6 +1507,20 @@ fn require_known_vision_model(
 /// old one).
 fn apply_model_edit(model: &mut SavedModel, changes: &ModelEdit) {
     let previous_route = model.clone();
+    if changes
+        .model
+        .as_ref()
+        .is_some_and(|value| value != &model.model)
+        || changes
+            .base_url
+            .as_ref()
+            .is_some_and(|value| value != &model.base_url)
+    {
+        model.model_store_card_id = None;
+        model.store_card_id = None;
+        model.model_store_link_detached = true;
+    }
+
     if let Some(preset) = changes.preset {
         model.preset = preset;
     }

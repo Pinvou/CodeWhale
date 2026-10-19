@@ -23,6 +23,7 @@ fn route() -> Route {
         base_url: "http://127.0.0.1:8001/v1".into(),
         model: "new-wire-id".into(),
         ready: true,
+        aliases: vec![],
         context_repair_stamp: None,
         previous: vec![("http://127.0.0.1:8000/v1".into(), "old-wire-id".into())],
     }
@@ -41,6 +42,7 @@ fn upgrade_migrates_exact_old_route_and_preserves_credentials_and_options() {
     expected.model = "new-wire-id".into();
     expected.base_url = "http://127.0.0.1:8001/v1".into();
     expected.model_store_card_id = Some("qwen-card".into());
+    expected.store_card_id = Some("qwen-card".into());
     assert_eq!(rows, [expected]);
     assert!(reconcile(&mut rows, &[route()]).is_empty());
 }
@@ -245,6 +247,7 @@ fn explicit_follow_changes_only_target_context_and_survives_reload() {
     running_card();
     let mut target = saved("target", "wire", "http://127.0.0.1:8000/v1");
     target.model_store_card_id = Some("qwen-card".into());
+    target.store_card_id = Some("qwen-card".into());
     target.context_window_tokens = Some(32768);
     let mut other = target.clone();
     other.id = "manual-limit".into();
@@ -297,6 +300,36 @@ fn explicit_follow_changes_only_target_context_and_survives_reload() {
             .unwrap()
             .context_window_tokens
             .is_none()
+    );
+    // A subsequent deployment may change both wire identity and capacity.
+    // Synchronization follows its endpoint while automatic context stays None;
+    // the other row keeps its explicit manual ceiling.
+    db::set_endpoint_info(
+        "qwen-card",
+        Some("http://127.0.0.1:8001/v1"),
+        Some("upgraded-wire"),
+    )
+    .unwrap();
+    assert_eq!(sync().unwrap(), ["manual-limit", "target"]);
+    let migrated = UserPrefs::load();
+    let target = migrated.model_by_id("target").unwrap();
+    assert_eq!(target.base_url, "http://127.0.0.1:8001/v1");
+    assert_eq!(target.model, "upgraded-wire");
+    assert_eq!(target.context_window_tokens, None);
+    assert_eq!(
+        migrated
+            .model_by_id("manual-limit")
+            .unwrap()
+            .context_window_tokens,
+        Some(32768)
+    );
+    assert!(sync().unwrap().is_empty());
+    assert_eq!(
+        UserPrefs::load()
+            .model_by_id("target")
+            .unwrap()
+            .context_window_tokens,
+        None
     );
 }
 
@@ -515,4 +548,63 @@ fn store_routes_only_accept_http_chat_endpoints() {
     assert!(chat_base("https://localhost:8000/v1/chat/completions").is_some());
     assert!(chat_base("ftp://127.0.0.1:8000/v1").is_none());
     assert!(chat_base("ws://127.0.0.1:8000/v1").is_none());
+}
+
+#[test]
+fn exact_legacy_physical_tags_follow_current_binding_without_overwriting_context_mode() {
+    let mut legacy = saved("legacy", "old-wire-id", "http://127.0.0.1:8000/v1");
+    legacy.context_window_tokens = None;
+    legacy.store_card_id = Some("qwen-card--old".into());
+    let mut current = route();
+    current.aliases.push("qwen-card--old".into());
+    let mut rows = vec![legacy];
+    reconcile(&mut rows, &[current]);
+    assert_eq!(rows[0].model_store_card_id.as_deref(), Some("qwen-card"));
+    assert_eq!(rows[0].store_card_id.as_deref(), Some("qwen-card"));
+    assert_eq!(rows[0].context_window_tokens, None);
+    rows[0].context_window_tokens = Some(32768);
+    let current = route();
+    reconcile(&mut rows, &[current]);
+    assert_eq!(rows[0].context_window_tokens, Some(32768));
+    let mut experiment = saved("experiment", "other", "http://127.0.0.1:8001/v1");
+    experiment.store_card_id = Some("explicit-experiment".into());
+    let mut prefs = UserPrefs::default();
+    prefs.advanced.saved_models = vec![experiment];
+    prefs.normalize_saved_model_metadata();
+    assert_eq!(prefs.advanced.saved_models[0].model_store_card_id, None);
+    assert_eq!(
+        prefs.advanced.saved_models[0].store_card_id.as_deref(),
+        Some("explicit-experiment")
+    );
+}
+
+/// r3 评审 P2-4：换胎后 cmsd 绑定随行。显式链接到旧卡的行在卡片换成新卡时，
+/// model_store_card_id 与 store_card_id 必须一起指向新卡——否则
+/// normalize_store_link 会在下次加载时按失配把整条链接静默双清。
+#[test]
+fn explicit_link_swap_carries_the_cmsd_binding_to_the_new_card() {
+    let mut row = saved("linked", "old-wire-id", "http://127.0.0.1:8000/v1");
+    row.model_store_card_id = Some("old-card".into());
+    row.store_card_id = Some("old-card".into());
+    let mut rows = vec![row];
+    let swapped = || Route {
+        card_id: "new-card".into(),
+        base_url: "http://127.0.0.1:8001/v1".into(),
+        model: "new-wire-id".into(),
+        ready: true,
+        aliases: vec!["old-card".into()],
+        context_repair_stamp: None,
+        previous: vec![],
+    };
+    assert_eq!(reconcile(&mut rows, &[swapped()]), ["linked"]);
+    let row = &rows[0];
+    assert_eq!(row.model_store_card_id.as_deref(), Some("new-card"));
+    assert_eq!(
+        row.store_card_id.as_deref(),
+        Some("new-card"),
+        "cmsd binding must follow the swap, or the next prefs load detaches the row"
+    );
+    assert!(!row.model_store_link_detached);
+    // 收敛后再次同步不再报变更。
+    assert!(reconcile(&mut rows, &[swapped()]).is_empty());
 }

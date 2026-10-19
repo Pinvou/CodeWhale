@@ -35,7 +35,9 @@ function makeModelId() {
  *   generic 类型。错得很隐蔽。
  * @param {{modelName: string, displayName: string, baseUrl: string,
  *          apiKey?: string|null, contextWindow?: number|null,
- *          existingId?: string|null, cardId?: string|null}} input 入参。
+ *          existingId?: string|null, storeCardId?: string|null, cardId?: string|null,
+ *          registrationId?: string|null}} input 入参。registrationId 为首次登记
+ *          预定的稳定 id：新行不携带 link_only 语义（后端窄事务只服务既有行）。
  * @returns {object} 可直接交给 bridge.models.saveModel 的一行配置。
  */
 function buildSavedModel({
@@ -45,7 +47,9 @@ function buildSavedModel({
   apiKey = null,
   contextWindow = null,
   existingId = null,
+  storeCardId = null,
   cardId = null,
+  registrationId = null,
 }) {
   if (!modelName) throw new Error('missing modelName');
   if (!baseUrl) throw new Error('missing baseUrl');
@@ -55,7 +59,7 @@ function buildSavedModel({
     // 不给这个出口的话，每次接入都是一个新 id：同一个本地模型被接入两次，
     // 品悟的模型列表里就有两行指向同一个服务，用户分不出哪个是哪个，而且
     // 每次接入都会把新的那行设为当前模型。
-    id: existingId || makeModelId(),
+    id: registrationId || existingId || makeModelId(),
     name: displayName,
     preset: 'openai_compatible',
     provider_kind: 'custom',
@@ -66,7 +70,7 @@ function buildSavedModel({
     model_store_link_requested: !!cardId,
     // Repeated import changes only the validated store route. The backend
     // preserves the latest user options and credential under its settings lock.
-    model_store_link_only: !!(existingId && cardId),
+    model_store_link_only: !!(existingId && !registrationId && cardId),
     context_window_tokens: contextWindow || null,
     max_output_tokens: null,
     reasoning_effort: null,
@@ -74,6 +78,8 @@ function buildSavedModel({
     // credential_state: missing 那条岔路。
     api_key: apiKey || 'local',
     credential_action: 'replace',
+    // 卡片身份标记：换胎后自动切换按它精确匹配（同名多卡防撞），存量行没有。
+    store_card_id: cardId || storeCardId || undefined,
     image_capability_override: 'pinvou',
     vision_model_id: null,
   };

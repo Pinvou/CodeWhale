@@ -261,6 +261,7 @@ mod tests {
             vendor: None,
             endpoint_mode: None,
             image_capability_override: Default::default(),
+            store_card_id: None,
             vision_model_id: None,
             api_key: String::new(),
             credential_ref: None,
