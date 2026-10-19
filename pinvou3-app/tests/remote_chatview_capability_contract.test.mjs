@@ -270,12 +270,23 @@ test('only the Rust-verified remote projection renders the single ChatView timel
   assert.match(chat, /remoteProxyChatItems\(activeSessionId, remoteProxyHistory\)/);
   assert.match(chat, /if \(item\.remoteProxy && item\.type === 'system'\) \{[\s\S]*?data-testid="chat-remote-projection-entry"/);
   assert.match(chat, /if \(item\.remoteProxy && item\.type === 'system'\) \{[\s\S]*?return \([\s\S]*?\);[\s\S]*?if \(item\.type === 'artifact_card'\)/);
-  assert.match(chat, /if \(item\.type === 'assistant'\) \{[\s\S]*?renderLegacyMarkdownCached\(item, syntaxVersion\)/,
+  // Official 适配：stream-fade 回流把 legacy 现算与 remoteProxy 旁路解析上提到
+  // ChatBubble 顶部的 assistantHtml/assistantParsed（供 no-deps effect 复用同一
+  // html 身份），pin 随之更新；钉住的意图不变——remote 回复仍走普通 Markdown/代码
+  // 渲染管线，且不得在本地伪造 persona/question 动作。
+  assert.match(chat, /const assistantHtml = item\.type === 'assistant'\s*\?\s*\(\(!item\.streaming && item\.text\)\s*\?\s*renderLegacyMarkdownCached\(item, syntaxVersion\)/,
     'remote replies keep the ordinary ChatView Markdown and code renderer');
-  assert.match(chat, /item\.remoteProxy\s*\? \{ pd: \{ draft: null \}, cq: \{ q: null, html \} \}/,
+  assert.match(chat, /item\.remoteProxy\s*\?\s*\{ pd: \{ draft: null \}, cq: \{ q: null, html: assistantHtml \} \}/,
     'remote Markdown cannot manufacture local persona or question actions');
-  assert.match(chat, /item\.remoteProxy\s*\? \{ text: item\.text, attachments: \[\] \}\s*: splitAttachmentLine\(item\.text\)/,
-    'remote user text cannot be interpreted as a local attachment action');
+  // #627 回流适配：remote 分支与 session-message 的 delivered 分支合成同一条
+  // 旁路链——remote 文本与已投递跨会话正文都不得进入本地附件解析。
+  assert.match(chat, /item\.remoteProxy \|\| delivered\s*\?\s*\{ text: mentionSplit\.text, attachments: \[\] \}\s*:\s*splitAttachmentLine\(mentionSplit\.text\)/,
+    'remote user text and delivered bodies cannot be interpreted as local attachment actions');
+  // #586 回流适配：本地消息才做提及解析；remote 文本不得伪造本地会话引用卡片。
+  // #627 合成：同一条链同时钉住 remote 与 delivered 两个旁路（后者为
+  // features::messaging 投递正文——发送方可控，同样不得进入本地解析器）。
+  assert.match(chat, /const mentionSplit = item\.remoteProxy \|\| delivered\s*\?\s*\{ refs: \[\], text: messageSplit\.text \}\s*:\s*splitSessionMentionBlock\(messageSplit\.text\)/,
+    'remote user text and delivered bodies cannot manufacture local mention cards');
   assert.match(chat, /<ToolCard\s+item=\{item\.legacyItem\}\s+sessionId=\{activeSessionId\}\s+t=\{t\}\s+variant="timeline"\s*\/>/,
     'remote tool items must reuse the ordinary B-side timeline tool renderer');
   assert.match(chat, /const conversationBusy = remoteChatActive\s*\? !!currentRemoteTaskId/,
