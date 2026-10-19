@@ -2283,12 +2283,14 @@ Object.assign(dictEn.uiChat, {
 // Windows desktop remote control: controlled-device panel (DEV-21).
 dictEn["controlledDevice"] = {
   taskPermissionTitle: "Remote task permissions",
-  taskPermissionDescription: "Enabling remote control defaults both channels to YOLO: tasks may modify files and run commands within existing workspace and adapter limits. Plan is read-only. Changes apply to new remote sessions; create a new session after changing permissions.",
+  taskPermissionDescription: "Enabling remote control defaults unconfigured channels to YOLO and preserves existing permissions. YOLO may modify files and run commands within existing workspace and adapter limits. Plan is read-only. Changes apply to new remote sessions; create a new session after changing permissions.",
   taskPermissionChat: "Chat tasks",
   taskPermissionCode: "Code tasks",
   taskPermissionYolo: "YOLO — allow execution",
   taskPermissionPlan: "Plan — read-only",
   taskPermissionUnconfigured: "Not configured (YOLO on enable)",
+  taskPermissionLoading: "Loading permissions…",
+  taskPermissionUnavailable: "Permissions unavailable",
   taskPermissionSaveFailed: "Could not read or save remote task permissions. Check the format and access permissions of settings.json and try again.",
   connectionTitle: "Connection status",
   section: "Desktop remote control",

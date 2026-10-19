@@ -2255,12 +2255,14 @@ Object.assign(dictZh.uiChat, {
 // Windows 双端远程控制：B 被控端面板（DEV-21）。
 dictZh["controlledDevice"] = {
   taskPermissionTitle: "远程任务权限",
-  taskPermissionDescription: "开启远程控制时，聊天和代码通道默认使用 YOLO：允许在现有工作区和适配器限制内修改文件、执行命令。Plan 为只读。权限修改仅对新远程会话生效，修改后请新建会话。",
+  taskPermissionDescription: "开启远程控制时，未配置的通道默认使用 YOLO，保留已设置的权限。YOLO 允许在现有工作区和适配器限制内修改文件、执行命令，Plan 为只读。权限修改仅对新远程会话生效，修改后请新建会话。",
   taskPermissionChat: "聊天任务",
   taskPermissionCode: "代码任务",
   taskPermissionYolo: "YOLO — 允许执行",
   taskPermissionPlan: "Plan — 只读",
   taskPermissionUnconfigured: "未配置（开启时默认 YOLO）",
+  taskPermissionLoading: "正在读取权限…",
+  taskPermissionUnavailable: "权限尚未就绪",
   taskPermissionSaveFailed: "无法读取或保存远程任务权限，请检查 settings.json 的格式和读写权限后重试。",
   section: "桌面远程控制",
   title: "允许他人连接本机",

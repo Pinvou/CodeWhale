@@ -2280,12 +2280,14 @@ Object.assign(dictJa.uiChat, {
 // Windows デスクトップ遠隔操作：被制御側パネル（DEV-21）。
 dictJa["controlledDevice"] = {
   taskPermissionTitle: "リモートタスクの権限",
-  taskPermissionDescription: "リモート操作を有効にすると、チャットとコードは既定で YOLO になります。既存のワークスペースとアダプターの制限内でファイル変更とコマンド実行を許可します。Plan は読み取り専用です。変更後は新しいリモートセッションを作成してください。",
+  taskPermissionDescription: "リモート操作を有効にすると、未設定のチャネルのみ YOLO になり、既存の権限は保持されます。YOLO は既存のワークスペースとアダプターの制限内でファイル変更とコマンド実行を許可します。Plan は読み取り専用です。変更後は新しいリモートセッションを作成してください。",
   taskPermissionChat: "チャットタスク",
   taskPermissionCode: "コードタスク",
   taskPermissionYolo: "YOLO — 実行を許可",
   taskPermissionPlan: "Plan — 読み取り専用",
   taskPermissionUnconfigured: "未設定（有効化時は YOLO）",
+  taskPermissionLoading: "権限を読み込み中…",
+  taskPermissionUnavailable: "権限を確認できません",
   taskPermissionSaveFailed: "リモートタスクの権限を読み取りまたは保存できませんでした。settings.json の形式とアクセス権を確認して再試行してください。",
   connectionTitle: "接続状態",
   section: "デスクトップ遠隔操作",
