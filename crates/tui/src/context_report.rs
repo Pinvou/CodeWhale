@@ -257,6 +257,7 @@ pub fn build_context_report(app: &App) -> PromptSourceMap {
         app.mode,
         Some(app.plugin_registry.as_ref()),
         Some(context_window.tokens),
+        true,
     );
     add_app_runtime_entries(&mut builder, app);
     let active_context_estimated_tokens =
@@ -339,6 +340,7 @@ pub fn build_headless_context_report(config: &Config, workspace: &Path) -> Promp
         crate::tui::app::AppMode::Agent,
         None,
         Some(context_window.tokens),
+        false,
     );
     let memory_path = config.memory_path();
     let memory_enabled = config.memory_enabled();
@@ -404,6 +406,7 @@ fn base_source_entries(
     mode: crate::tui::app::AppMode,
     plugin_registry: Option<&crate::plugins::PluginRegistry>,
     context_window_tokens: Option<u32>,
+    include_authority_recap: bool,
 ) -> ReportBuilder {
     let mut builder = ReportBuilder::new();
 
@@ -597,9 +600,11 @@ fn base_source_entries(
         CountingConfidence::High,
         Some(3),
     ));
-    if crate::prompts::authority_recap_trailer_appended(
-        crate::prompts::static_prompt_composer_installed(),
-    ) {
+    if include_authority_recap
+        && crate::prompts::authority_recap_trailer_appended(
+            crate::prompts::static_prompt_composer_installed(),
+        )
+    {
         builder.push(SourceEntry::text(
             SourceKind::AuthorityRecap,
             "Authority recap",
@@ -610,12 +615,17 @@ fn base_source_entries(
             Some(1),
         ));
     } else {
+        let reason = if !include_authority_recap {
+            "not appended: bundled-headless sessions compose a minimal base prompt without the bundled section the recap cross-references"
+        } else {
+            "not appended: a static composer or config-directory constitution owns the prompt prefix, so the bundled section the recap cross-references is not guaranteed to be present"
+        };
         builder.push(SourceEntry::omitted(
             SourceKind::AuthorityRecap,
             "Authority recap",
             None,
             Some(1),
-            "not appended: a static composer or config-directory constitution owns the prompt prefix, so the bundled section the recap cross-references is not guaranteed to be present",
+            reason,
         ));
     }
     builder.push(SourceEntry::text(

@@ -31,7 +31,9 @@ pub struct PromptSessionContext<'a> {
     pub locale_tag: &'a str,
     /// When true, a ## Language Output Requirement block is appended
     /// to the system prompt instructing the model to respond in
-    /// the resolved session locale.
+    /// the resolved session locale. Skipped for the bundled headless
+    /// composition, which carries no `## Language` rule for the
+    /// block's override line to modify.
     pub translation_enabled: bool,
     /// Active model identifier. The bundled constitution is model-agnostic,
     /// but embedders may still provide a prompt override containing
@@ -998,15 +1000,15 @@ fn apply_model_template(
 
 /// Authority recap block — appended at the end of the system prompt,
 /// just before the user's first message. Uses recency bias constructively
-/// without restating ranks: precedence is stated only in `BASE_PROMPT`
-/// § Whose word wins (#4777).
+/// without restating ranks: `BASE_PROMPT` § Whose word wins states the
+/// default ranking (#4777).
 const AUTHORITY_RECAP: &str = "\
 ## Authority Recap
 
 Codewhale's constitution governs your behavior. Ground truth underlies the
 whole list: the user may override a fact, but no one may invent one. When
-guidance conflicts, consult ### Whose word wins — that is the only place
-precedence is stated.";
+guidance conflicts, consult ### Whose word wins — it states the default
+ranking; explicit override blocks may carve out exceptions.";
 
 pub(crate) fn compose_prompt_with_approval_model_and_shell(
     personality: Personality,
@@ -1247,7 +1249,13 @@ pub(crate) fn system_prompt_for_mode_with_context_skills_session_and_approval_fo
     // above the volatile-content boundary because it's a per-session
     // flag, not a per-turn one: enabling `/translate` is a session
     // toggle, so the prompt-prefix bytes don't drift turn-over-turn.
-    if session_context.translation_enabled {
+    // Gated on `!bundled_headless` for the same reason the recap
+    // trailer is: the bundled headless composition delivers
+    // HEADLESS_BASE_PROMPT only, and this block's closing line
+    // overrides the `## Language` rule that composition never
+    // delivers — a dangling override would teach a rule the host
+    // never received.
+    if !bundled_headless && session_context.translation_enabled {
         full_prompt = format!(
             "{full_prompt}\n\n{}",
             translation_output_instruction(session_context.locale_tag)
@@ -2134,6 +2142,60 @@ mod tests {
     }
 
     #[test]
+    fn translation_block_never_arrives_without_the_language_rule() {
+        // The translation block closes by overriding the `## Language` rule.
+        // The bundled headless composition delivers HEADLESS_BASE_PROMPT
+        // only, so the block is gated on `!bundled_headless` exactly like
+        // the recap trailer — a host must never receive an override for a
+        // rule its composition does not carry.
+        let _env_lock = crate::test_support::lock_test_env();
+        let tmp = tempdir().expect("tempdir");
+        for host in [PromptHost::Interactive, PromptHost::Headless] {
+            let text = system_prompt_flat_text(
+                &system_prompt_for_mode_with_context_skills_session_and_approval_for_host(
+                    tmp.path(),
+                    None,
+                    None,
+                    None,
+                    PromptSessionContext {
+                        translation_enabled: true,
+                        locale_tag: "zh-Hans",
+                        ..PromptSessionContext::default()
+                    },
+                    host,
+                ),
+            );
+            if host == PromptHost::Headless {
+                assert!(
+                    !text.contains("## Language Output Requirement"),
+                    "bundled headless host must not receive the translation block: {text}"
+                );
+                assert!(
+                    !text.contains("overrides the ## Language rule"),
+                    "no override line may dangle without the ## Language rule: {text}"
+                );
+                assert!(
+                    !text.contains("## Language\n"),
+                    "bundled headless composition carries no ## Language rule: {text}"
+                );
+            } else {
+                assert!(
+                    text.contains("## Language Output Requirement"),
+                    "interactive host with translation enabled receives the block"
+                );
+                assert!(
+                    text.contains("This overrides the ## Language rule"),
+                    "the block keeps its explicit override line"
+                );
+                assert!(
+                    text.contains("## Language\n"),
+                    "the overridden ## Language rule must ship alongside the block: {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn system_prompt_merges_workspace_and_configured_skills_dir() {
         let _env_guard = crate::test_support::lock_test_env();
         let tmp = tempdir().expect("tempdir");
@@ -2918,9 +2980,10 @@ mod tests {
 
     #[test]
     fn memory_guidance_does_not_state_precedence() {
-        // #4777: only BASE_PROMPT § Whose word wins states ranks. Memory
-        // hygiene keeps the imperative→preference rule and drops the
-        // inverted Tier list that used to put Constitution above the user.
+        // #4777: BASE_PROMPT § Whose word wins states the default ranking;
+        // overlays must not add their own. Memory hygiene keeps the
+        // imperative→preference rule and drops the inverted Tier list that
+        // used to put Constitution above the user.
         let guidance = MEMORY_GUIDANCE.to_ascii_lowercase();
         for forbidden in [
             "tier 1",
@@ -2984,8 +3047,12 @@ mod tests {
             "canonical precedence section must remain in BASE_PROMPT"
         );
         assert!(
-            BASE_PROMPT.contains("This ordering is stated here and nowhere else"),
-            "BASE_PROMPT must assert single-source precedence"
+            BASE_PROMPT.contains("This ordering is the default ranking"),
+            "BASE_PROMPT must state the default ranking"
+        );
+        assert!(
+            BASE_PROMPT.contains("explicit override blocks"),
+            "BASE_PROMPT must allow scoped override blocks to state their own precedence"
         );
     }
 

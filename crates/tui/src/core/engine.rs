@@ -4383,7 +4383,7 @@ impl Engine {
             } else {
                 String::new()
             };
-            lines.push(format!("Accessible folders: {listed}{suffix}"));
+            lines.push(format!("Accessible folders: {listed}{suffix}; relative paths resolve against Current workspace — use these absolute spellings to reach these folders"));
         }
         lines.extend([
             format!(

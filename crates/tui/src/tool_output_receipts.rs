@@ -225,6 +225,17 @@ fn render_tool_output_receipt(
     };
     let exit_status = infer_exit_status(original_content).unwrap_or_else(|| "unknown".to_string());
     let preview = preview_for_receipt(handle, original_content);
+    let truncation = match handle {
+        DetailHandle::Artifact(record) => format!(
+            "truncation: raw output omitted; full output retained as artifact {} — read it \
+             back with retrieve_tool_result using that ref\n\
+             ",
+            record.id
+        ),
+        DetailHandle::Unavailable => {
+            "truncation: raw output omitted — full output in the tool details view\n".to_string()
+        }
+    };
 
     format!(
         "[TOOL_OUTPUT_RECEIPT]\n\
@@ -234,7 +245,7 @@ fn render_tool_output_receipt(
          exit_status: {exit_status}\n\
          elapsed: unknown\n\
          output: {bytes} ({chars} chars, ~{tokens} tokens)\n\
-         truncation: raw output omitted — full output in the tool details view\n\
+         {truncation}\
          command_or_query: {command_or_query}\n\
          preview: {preview}\n\
          [/TOOL_OUTPUT_RECEIPT]",
@@ -379,8 +390,9 @@ mod tests {
         assert!(content.contains("[TOOL_OUTPUT_RECEIPT]"));
         assert!(content.contains("tool: exec_shell"));
         assert!(!content.contains("detail_handle"));
-        assert!(!content.contains("retrieve_tool_result"));
-        assert!(content.contains("full output in the tool details view"));
+        assert!(content.contains("read it back with retrieve_tool_result"));
+        assert!(content.contains("artifact art_call-big"));
+        assert!(!content.contains("tool details view"));
         assert!(
             content.contains("command_or_query: {\"command\":\"cargo test -p codewhale-tui\"}")
         );
@@ -404,8 +416,8 @@ mod tests {
         assert!(!content.contains("NO_ARTIFACT_RAW"));
         assert!(!content.contains("detail_handle"));
         assert!(!content.contains("storage:"));
-        assert!(!content.contains("retrieve_tool_result"));
         assert!(content.contains("full output in the tool details view"));
+        assert!(!content.contains("retrieve_tool_result"));
     }
 
     #[test]

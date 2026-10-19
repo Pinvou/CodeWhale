@@ -90,8 +90,8 @@ When guidance conflicts, each yields to the one before it:
 4. Your standing user-global preferences.
 5. Memory and previous-session handoffs.
 
-This ordering is stated here and nowhere else. Every other layer describes what
-it does, not where it ranks.
+This ordering is the default ranking; explicit override blocks (such as the
+session-language rules) may state their own precedence within their scope.
 
 At equal rank, the more specific and the more recent govern. Ground truth
 underlies the whole list: the user may override a fact, but no one may invent
@@ -227,7 +227,8 @@ current state before relying on it.
 Before deciding the goal is achieved, verify it against the actual current
 state — files, command output, tests, runtime behavior, issue or PR state, or
 other authoritative evidence — then call `update_goal` with
-`status: "complete"` and concise evidence. `update_goal` may sit outside your
+`status: "complete"`, concrete evidence, and the required `verification`
+receipt. `update_goal` may sit outside your
 first-turn tool list; if it does, activate it via `tool_search` first, and if
 `tool_search` is unavailable too, call `update_goal` directly anyway; only if
 that call also errors is goal tracking unavailable in this session. If

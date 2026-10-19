@@ -800,7 +800,7 @@ pub fn context_update_message(known: &str, current: &str) -> Option<String> {
     }
     if truncated > 0 {
         out.push_str(&format!(
-            "(+{truncated} more changed lines; re-read the files you need)\n"
+            "({truncated} more changed lines, additions and removals; re-read the files you need)\n"
         ));
     }
     out.push_str("</context_update>");
@@ -980,7 +980,12 @@ mod tests {
             "{}",
             bounded.len()
         );
-        assert!(bounded.contains("more changed lines"));
+        assert!(bounded.contains(
+            " more changed lines, additions and removals; re-read the files you need)\n"
+        ));
+        // The old footer wore the payload's additions marker even though the
+        // count covers removals too; that wording must not come back.
+        assert!(!bounded.contains("more changed lines;"));
     }
 
     #[test]
