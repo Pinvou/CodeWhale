@@ -79,7 +79,7 @@ static DINGTALK_SKILLS_DIR: Dir<'_> =
 static TMEET_SKILLS_DIR: Dir<'_> =
     include_dir!("$CARGO_MANIFEST_DIR/resources/common/bundle/tmeet-skills");
 
-// 连接器技能目录表（飞书 lark 9 + 企微 14 新名 + 0.1.9 legacy 名 + 钉钉/腾讯会议
+// 连接器技能目录表（飞书 lark 9 + 企微 15 新名 + 0.1.9 legacy 名 + 钉钉/腾讯会议
 // mono skill）已下沉到 `crate::platform::connector_skills` 作为单一真相源：
 // marketplace 注册表（wecom 卡 skills 列表）、扁平布局迁移、`cli_bundle_of_skill`
 // 反查与 `legacy_cli_records` 首启登记与本模块的门控写/删共用（五轮评审必修 3：
@@ -188,8 +188,17 @@ pub(crate) use crate::platform::connector_skills::{
 ///       data-URL 政策、personas 卡牌文案与四平台权限提醒语、feishu 最低
 ///       lark-cli 1.0.95 门禁。Official 已占用 0.34，extracted-VERSION 门禁
 ///       只做不等比较，使用新值。
+/// 0.36: 回流 Community #725 的连接器 CLI 与第三方技能树组件更新
+///       （dws 1.0.64、lark-cli 1.0.98、wecom-cli 1.3.4——技能表新增
+///       wecomcli-pptx 共 15 名并接入 platform 单一真相源断言、tmeet 等
+///       的文档审计与安全提示段落，均登记于对应 NOTICE）；codex-bridge
+///       备料脚本组件钉更新（node 24.22.0、CODEX_ACP 2.2.2 等，含与
+///       在途 #715 移植的 loongarch64 接线并集）。wecom 卡测试的 14 名
+///       断言由 `wecom_skill_dirs_track_platform_truth`（15 名）取代。
+///       技能树不参与内容哈希，必须 bump 语义版本让已连接用户启动时
+///       刷新；extracted-VERSION 门禁只做不等比较。
 pub const BUNDLE_VERSION: &str = concat!(
-    "0.35-",
+    "0.36-",
     env!("BUNDLE_INSTRUCTIONS_HASH"),
     "-",
     env!("BUNDLE_H3C_CLI_HASH"),
@@ -2821,7 +2830,7 @@ mod tests {
             assert!(!bundle.skills_dir.join(d).exists(), "{d} 应被清理");
         }
 
-        // 显示门控:同样先清 legacy(开头无条件清理),再解包 14 个当前技能
+        // 显示门控:同样先清 legacy(开头无条件清理),再解包 15 个当前技能
         for d in WECOM_LEGACY_SKILL_DIRS {
             std::fs::create_dir_all(bundle.skills_dir.join(d)).unwrap();
         }
