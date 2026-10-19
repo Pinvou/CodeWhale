@@ -51,6 +51,10 @@ func (r *PostgresRepository) PrepareAccountClosureCleanup(ctx context.Context, i
 		}
 		return AccountClosureCleanupPreparation{IdentitySubjects: subjects, SubjectLifecycleVersion: lifecycleVersion}, tx.Commit(ctx)
 	}
+	// Current producers enqueue only CUSTOMER_PROVISIONING and PROFILE_SYNC.
+	// A future FINANCIAL producer must define draining before CLOSING, because
+	// Commerce dispatch requires an ACTIVE subject of the same lifecycle. Unknown
+	// financial jobs remain blockers; do not dispatch or cancel them on assumption.
 	var financialJobs bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM commerce_customer_sync_jobs WHERE subject_type='USER' AND subject_id=$1 AND task_category='FINANCIAL' AND status NOT IN ('COMPLETED','CANCELLED_ACCOUNT_CLOSURE'))`, userID).Scan(&financialJobs); err != nil {
 		return AccountClosureCleanupPreparation{}, err
