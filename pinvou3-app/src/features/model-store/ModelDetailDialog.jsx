@@ -184,9 +184,9 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
         //
         // 不查重的话，`makeModelId()` 每次都生成新 id：用户连点两次、或者隔天
         // 再点一次，品悟的模型列表里就多一行指向同一个本地服务的重复项，而且
-        // 每次都会被设为当前模型。判据跟移除侧的 findLinkedRows 完全一致
-        // （model + 回环 base_url），两边用同一把尺子才不会出现"接得进、清不掉"。
-        existingId: findCardLinkedRows(savedModels, cardId, modelName)[0]?.id,
+        // 每次都会被设为当前模型。接入与移除都只认后端确认的卡片关联，
+        // 不复用用户自行配置或已经解除关联的同名本地接口。
+        existingId: findCardLinkedRows(savedModels, cardId)[0]?.id,
       });
       await bridge.models.saveModel(saved);
       // 选为当前模型。注意这只影响**新建的会话**，不会打断正在生成的那些。

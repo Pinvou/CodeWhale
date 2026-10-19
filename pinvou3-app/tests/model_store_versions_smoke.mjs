@@ -21,6 +21,13 @@ try {
     root: path.join(appRoot, 'src'), configFile: false, appType: 'mpa', logLevel: 'error',
     plugins: [{
       name: 'model-versions-regression',
+      enforce: 'pre',
+      transform(source, id) {
+        // Expose the real form only inside this isolated browser fixture.
+        if (id.split('?')[0] === path.join(appRoot, 'src/features/settings/SettingsView.jsx')) {
+          return `${source}\nexport { ModelFormModal as __TestModelForm };\n`;
+        }
+      },
       configureServer(server) {
         server.middlewares.use('/versions.html', (_request, response) => {
           response.setHeader('content-type', 'text/html; charset=utf-8');
@@ -104,8 +111,78 @@ try {
     version_id: 'test-version', state: 'downloading', can_switch: false, can_delete: false,
   }]));
   await expectActions(2);
+  await page.reload();
+  await page.evaluate(async () => {
+    // The real settings form stays mounted while its model props refresh, just
+    // like a background models:changed event in the application.
+    /* eslint-disable import-x/no-unresolved, n/no-missing-import */
+    const reactModule = await import('/@id/react');
+    const { createElement } = reactModule.default || reactModule;
+    const client = await import('/@id/react-dom/client');
+    const { __TestModelForm } = await import('/features/settings/SettingsView.jsx');
+    const { dictZh } = await import('/shared/i18n/zh.js');
+    /* eslint-enable import-x/no-unresolved, n/no-missing-import */
+    const createRoot = client.createRoot || client.default?.createRoot;
+    const root = createRoot(document.getElementById('root'));
+    window.savedFormPayloads = [];
+    window.legacyModel = {
+      id: 'isolated-legacy', name: 'Legacy model', preset: 'openai_compatible',
+      model: 'old-wire-model', base_url: 'http://127.0.0.1:8911/v1',
+      has_secret: true, credential_state: 'configured', context_window_tokens: 32000,
+    };
+    window.renderModelForm = (initial, key = 'existing') => root.render(createElement(__TestModelForm, {
+      key, initial, isDark: false, t: dictZh,
+      bs: { platformCapabilities: { localVllmSupported: true } },
+      models: [initial], onCancel() {},
+      onSave: async (payload) => { window.savedFormPayloads.push(payload); },
+    }));
+    window.renderModelForm(window.legacyModel);
+  });
+  await page.waitForSelector('[data-testid="model-form-alias"]');
+  // A legacy form opened before migration has no provenance yet. Updating its
+  // props must retain the original route snapshot and the user's form state.
+  await page.evaluate(() => window.renderModelForm({
+    ...window.legacyModel, model_store_card_id: 'isolated-card',
+    model: 'new-wire-model', base_url: 'http://127.0.0.1:8912/v1',
+  }));
+  await page.type('[data-testid="model-form-alias"]', 'My local alias');
+  await page.click('[data-testid="model-form-context-window"]');
+  await page.keyboard.down('Control');
+  await page.keyboard.press('A');
+  await page.keyboard.up('Control');
+  await page.type('[data-testid="model-form-context-window"]', '64000');
+  await page.click('[data-testid="model-form-save"]');
+  await page.waitForFunction(() => window.savedFormPayloads.length === 1);
+  const unchangedRoute = await page.evaluate(() => window.savedFormPayloads[0]);
+  assert.equal(unchangedRoute.preserve_model_store_route, true);
+  assert.equal(unchangedRoute.model, 'old-wire-model');
+  assert.equal(unchangedRoute.base_url, 'http://127.0.0.1:8911/v1');
+  assert.equal(unchangedRoute.alias, 'My local alias');
+  assert.equal(unchangedRoute.context_window_tokens, 64000);
+  const routeInput = await page.$('input[value="http://127.0.0.1:8911/v1"]');
+  assert.ok(routeInput, 'the existing form still displays its original route');
+  await routeInput.click();
+  await page.keyboard.down('Control');
+  await page.keyboard.press('A');
+  await page.keyboard.up('Control');
+  await routeInput.type('http://127.0.0.1:8999/v1');
+  await page.click('[data-testid="model-form-save"]');
+  await page.waitForFunction(() => window.savedFormPayloads.length === 2);
+  const editedRoute = await page.evaluate(() => window.savedFormPayloads[1]);
+  assert.equal(editedRoute.preserve_model_store_route, false);
+  assert.equal(editedRoute.base_url, 'http://127.0.0.1:8999/v1');
+  // New drafts must never opt into retaining some existing persisted route,
+  // even when the draft has an id and its route inputs remain unchanged.
+  await page.evaluate(() => window.renderModelForm({
+    ...window.legacyModel, __new: true, preset: 'local_vllm',
+  }, 'new'));
+  await page.waitForFunction(() => !document.querySelector('[data-testid="model-form-alias"]'));
+  await page.click('[data-testid="model-form-save"]');
+  await page.waitForFunction(() => window.savedFormPayloads.length === 3);
+  assert.equal(await page.evaluate(() => window.savedFormPayloads[2].preserve_model_store_route), false);
   assert.deepEqual(errors, []);
   console.log('PASS: versions refresh after success/failure/cancellation and ignore stale responses');
+  console.log('PASS: existing settings forms preserve untouched routes after migration; edited routes and new drafts opt out');
 } finally {
   await browser?.close();
   await vite?.close();

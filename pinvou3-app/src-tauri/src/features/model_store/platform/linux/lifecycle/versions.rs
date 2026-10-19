@@ -274,8 +274,8 @@ pub(super) fn current_purge_preflight(
     if !managed {
         return Ok(None);
     }
-    let version = version.unwrap();
-    let root = root.unwrap();
+    let version = version.ok_or_else(|| fail("当前托管版本缺少归属记录，已保留资源。"))?;
+    let root = root.ok_or_else(|| fail("无法确认当前托管版本的权重目录，已保留资源。"))?;
     if root.exists() {
         let expected = serde_json::json!({"card_id":rec.card_id,"version_id":id}).to_string();
         if !root
@@ -657,12 +657,10 @@ impl ModelManager {
         } else {
             legacy_resource_dir(&current, &self.settings.models_path())
         };
-        if resource.is_none() {
-            return Err(fail(
-                "无法确认当前版本的权重目录，不能保证回退；请先修复当前部署，未切换版本。",
-            ));
-        }
-        ensure_unused(&runtime_path(&current)?, resource.as_deref())?;
+        let resource = resource.ok_or_else(|| {
+            fail("无法确认当前版本的权重目录，不能保证回退；请先修复当前部署，未切换版本。")
+        })?;
+        ensure_unused(&runtime_path(&current)?, Some(&resource))?;
         let mut target = version_store::get(card_id, id)
             .map_err(fail)?
             .ok_or_else(|| fail("目标版本不存在"))?;
@@ -674,7 +672,7 @@ impl ModelManager {
             // also a recovery route and remains usable if the current file broke.
             on_progress("校验当前版本权重，确认升级后仍可回退。");
             let (name, hash) = single_weight(&current)?;
-            let old_file = find_weight(resource.as_deref().unwrap(), &name).map_err(|_| {
+            let old_file = find_weight(&resource, &name).map_err(|_| {
                 fail("当前权重缺失，不能保证升级后回退；请先修复当前部署，未切换版本。")
             })?;
             if file_digest(&old_file, &control)? != hash {
@@ -738,7 +736,7 @@ impl ModelManager {
                 .runtime_card_id
                 .clone()
                 .unwrap_or_else(|| card_id.into()),
-            resource_dir: resource.map(|p| p.to_string_lossy().into_owned()),
+            resource_dir: Some(resource.to_string_lossy().into_owned()),
             managed,
             created_at: current.downloaded_at.clone(),
             record: Some(current.clone()),

@@ -18,6 +18,10 @@ use super::super::UNSUPPORTED_REASON;
 #[derive(Default)]
 pub struct ModelStoreService;
 
+pub(crate) fn matches_current_model_route(_card_id: &str, _base_url: &str, _model: &str) -> bool {
+    false
+}
+
 impl ModelStoreService {
     pub fn set_models_changed_handler(&self, _handler: super::super::ModelsChangedHandler) {}
 }

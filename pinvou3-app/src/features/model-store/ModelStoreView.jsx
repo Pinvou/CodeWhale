@@ -433,19 +433,18 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
    * `quiet` 给强制移除用：那条路径的结果页已经在说"磁盘上还有残留"，再叠一句
    * "顺带清了几行配置"只会稀释更要紧的提醒。但**清不掉时无论如何都要说**——
    * 品悟不允许删掉最后一个模型，那种情况下用户会留着一个静默失效的默认模型。
-   * @param {string|undefined} modelName - LMM 的 model_name。
+   * @param {string} cardId - 后端确认的卡片关联。
    * @param {string} displayName - 用于提示的模型名。
    * @param {{quiet?: boolean}} [options] - 成功时要不要出声。
    * @returns {Promise<boolean>} 清干净了(或本来就没什么要清)为 true;清不掉为 false。
    */
   const cleanLinkedRows = useCallback(
-    // names 要把这个模型的**全部标识**都带上（model_name 和 endpoint_model）。
-    // 接入时存的是 endpoint_model，只按 model_name 找必然落空——见 findLinkedRows。
-    async (names, displayName, { quiet = false, cardId } = {}) => {
+    // 名字和回环地址不足以授权删除用户配置，关联迁移由后端精确判断。
+    async (cardId, displayName, { quiet = false } = {}) => {
       const bridge = tryGetTauriBridge();
       // **先分清「查过了没有」和「根本没查成」**。
       //
-      // `findLinkedRows` 对 `undefined` 和空数组返回的都是 `[]`，下面那句
+      // `findCardLinkedRows` 对 `undefined` 和空数组返回的都是 `[]`，下面那句
       // `rows.length === 0 → return true` 于是会在**我们压根没能力查看**的情况下
       // 宣告清理成功。品悟模型列表那一行照样留着，而调用方拿到 true、提示语说
       // 「已卸载」，用户毫不知情——2026-09-22 真机上驭光卡删除后留下的那行死数据
@@ -457,26 +456,29 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
         showToast(copy.linkBridgeMissing);
         return false;
       }
-      const rows = findCardLinkedRows(bs.savedModels, cardId, ...names);
+      const rows = findCardLinkedRows(bs.savedModels, cardId);
       // 真的没有死行要清:这是最常见的情况(用户从没接入过这个模型),不必出声。
       if (rows.length === 0) return true;
-      // 有死行、但拿不到 deleteModel。这两个条件**不能**合并成一句 return:合并之后
+      // 有死行、但拿不到条件删除能力。这两个条件**不能**合并成一句 return:合并之后
       // 「该清但清不掉」会被当成「没什么要清的」静默放过,留下一行静默失效的默认模型。
       // linkBridgeMissing 是一条**定值文案**(不是模板函数),别当函数调用。
-      if (!bridge?.models?.deleteModel) {
+      if (!bridge?.models?.deleteModelIfStoreLink) {
         showToast(copy.linkBridgeMissing);
         return false;
       }
+      // The snapshot only selects candidates; the backend rechecks current ownership
+      // under the settings lock so a concurrent manual edit cannot be deleted.
+      let removed = 0;
       for (const row of rows) {
         try {
-          await bridge.models.deleteModel(row.id);
+          if (await bridge.models.deleteModelIfStoreLink(row.id, cardId)) removed += 1;
         } catch (error) {
           showToast(copy.linkRowStale(row.name || displayName, String(error?.message || error)));
           // 清不掉是**失败**,要让调用方知道,否则它会紧接着弹一句成功提示把这条盖掉。
           return false;
         }
       }
-      if (!quiet) showToast(copy.linkRowRemoved(displayName, rows.length));
+      if (!quiet && removed > 0) showToast(copy.linkRowRemoved(displayName, removed));
       return true;
     },
     [bs, copy, showToast]
@@ -627,9 +629,8 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
     // 强制移除那条路径一直是接住的（`const linksCleaned = ...`），两条路不该有
     // 差别：判据是「这个模型还能不能被调用」，跟用户点的是哪个按钮无关。
     const linksCleaned = await cleanLinkedRows(
-      [record.endpoint_model, record.model_name],
+      record.card_id,
       record.card_name,
-      { cardId: record.card_id },
     );
     if (!linksCleaned) showToast(copy.uninstallLinksLeft(record.card_name));
   }, [cleanLinkedRows, confirmUninstall, copy, runLifecycle, showToast]);
@@ -700,9 +701,9 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
       // 这里刻意不弹第二条 toast:强制移除的结果页已经在说"磁盘上还有残留"了,
       // 再叠一句"顺带清了几行配置"只会稀释那个更要紧的提醒。清不掉时才说话。
       const linksCleaned = await cleanLinkedRows(
-        [result?.endpoint_model, result?.model_name],
+        target.cardId,
         target.cardName,
-        { quiet: true, cardId: target.cardId },
+        { quiet: true },
       );
       const residual = Array.isArray(result?.residual_paths) ? result.residual_paths : [];
       // toast 只有一个槽位,后一条会把前一条顶掉。cleanLinkedRows 清不掉时已经弹了

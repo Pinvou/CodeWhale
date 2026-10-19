@@ -5276,6 +5276,12 @@ async function revealModelApiKey(id) { return pinvouSharedweb().revealModelApiKe
    await loadModels();
    await loadEffectiveModelConfig();
   }
+ async function deleteModelIfStoreLink(id, cardId) {
+   var removed = await invoke("delete_model_if_store_link", { id: id, cardId: cardId });
+   await loadModels();
+   await loadEffectiveModelConfig();
+   return removed === true;
+ }
   async function setActiveModel(id) {
     await invoke("set_active_model", { id: id });
     await loadModels();
@@ -7454,6 +7460,7 @@ function appendVoiceText(base, text) { return pinvouSharedweb().appendVoiceText(
    saveModel: saveModel,
    revealModelApiKey: revealModelApiKey,
    deleteModel: deleteModel,
+   deleteModelIfStoreLink: deleteModelIfStoreLink,
     getImageInputCapability: getImageInputCapability,
     testImageInputCapability: testImageInputCapability,
     setActiveModel: setActiveModel,

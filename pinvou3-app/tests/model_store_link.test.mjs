@@ -25,6 +25,7 @@ test('credential_action 必须是 replace，api_key 不能留空', () => {
   // 错得极其隐蔽，所以钉死。本地推理服务不校验 Key，占位值即可。
   assert.equal(buildSavedModel(OK).credential_action, 'replace');
   assert.equal(buildSavedModel(OK).api_key, 'local');
+  assert.equal(buildSavedModel(OK).model_store_link_detached, false);
   assert.equal(buildSavedModel({ ...OK, apiKey: 'sk-x' }).api_key, 'sk-x');
 });
 
@@ -184,9 +185,18 @@ test('卡片关联优先且不复用或删除另一张卡的同名接口', () =>
     { id: 'same-card', model_store_card_id: 'tachyon', model: 'old-model', base_url: 'http://127.0.0.1:8001/v1' },
     { id: 'remote', model_store_card_id: 'tachyon', model: 'shared-model', base_url: 'https://example.com/v1' },
   ];
-  assert.deepEqual(findCardLinkedRows(rows, 'tachyon', 'shared-model').map(row => row.id), ['same-card', 'legacy']);
+  assert.deepEqual(findCardLinkedRows(rows, 'tachyon', 'shared-model').map(row => row.id), ['same-card']);
   assert.deepEqual(findCardLinkedRows(rows, 'sglang', 'old-model').map(row => row.id), ['other-card']);
   assert.deepEqual(findCardLinkedRows(rows, null, 'shared-model'), []);
+});
+
+test('解除关联后的同名本机接口不会被再次接入覆盖或在卸载时清理', () => {
+  const detached = { id: 'user-edited', model: 'same-wire', base_url: 'http://127.0.0.1:9999/v1', model_store_card_id: null };
+  const managed = { ...detached, id: 'managed', provider_kind: 'coding_plan', model_store_card_id: 'original-card' };
+  const optedOut = { ...detached, model_store_card_id: 'original-card', model_store_link_detached: true };
+  assert.deepEqual(findCardLinkedRows([detached, managed, optedOut], 'original-card', 'same-wire'), []);
+  const bound = { ...detached, id: 'bound', model_store_card_id: 'original-card' };
+  assert.deepEqual(findCardLinkedRows([detached, bound], 'original-card', 'same-wire'), [bound]);
 });
 
 test('isLocalGatewayUrl：认回环地址，不认局域网地址', () => {

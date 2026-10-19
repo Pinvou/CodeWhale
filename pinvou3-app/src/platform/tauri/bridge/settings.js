@@ -549,6 +549,13 @@ function pinvouSharedtauriSettings() {
    await loadSettings();
    await loadEffectiveModelConfig();
   }
+ async function deleteModelIfStoreLink(id, cardId) {
+   var removed = await invoke("delete_model_if_store_link", { id: id, cardId: cardId });
+   await loadModels();
+   await loadSettings();
+   await loadEffectiveModelConfig();
+   return removed === true;
+ }
   async function setActiveModel(id) {
     await invoke("set_active_model", { id: id });
     await loadModels();
@@ -691,6 +698,7 @@ function pinvouSharedtauriSettings() {
       saveModel: saveModel,
       revealModelApiKey: revealModelApiKey,
       deleteModel: deleteModel,
+      deleteModelIfStoreLink: deleteModelIfStoreLink,
       setActiveModel: setActiveModel,
       loadSessionModel: loadSessionModel,
       switchModel: switchModel,

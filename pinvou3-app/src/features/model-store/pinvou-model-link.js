@@ -62,6 +62,7 @@ function buildSavedModel({
     model: modelName,
     base_url: baseUrl,
     model_store_card_id: cardId,
+    model_store_link_detached: false,
     context_window_tokens: contextWindow || null,
     max_output_tokens: null,
     reasoning_effort: null,
@@ -248,13 +249,11 @@ function findLinkedRows(savedModels, ...names) {
   return savedModels.filter((row) => wanted.has(row?.model) && isLocalGatewayUrl(row?.base_url));
 }
 
-/** Prefer explicit provenance; a same-name row owned by another card is unrelated. */
-function findCardLinkedRows(savedModels, cardId, ...names) {
+/** Legacy routes are migrated precisely by the backend; names never authorize mutation. */
+function findCardLinkedRows(savedModels, cardId) {
   if (!Array.isArray(savedModels) || !cardId) return [];
-  const bound = savedModels.filter((row) => row?.model_store_card_id === cardId
-    && isLocalGatewayUrl(row.base_url));
-  const legacy = findLinkedRows(savedModels, ...names).filter((row) => !row.model_store_card_id);
-  return [...bound, ...legacy];
+  return savedModels.filter((row) => row?.model_store_card_id === cardId
+    && !row.model_store_link_detached && row.provider_kind !== 'coding_plan' && isLocalGatewayUrl(row.base_url));
 }
 
 export {

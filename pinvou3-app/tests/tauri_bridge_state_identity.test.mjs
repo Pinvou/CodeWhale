@@ -292,3 +292,22 @@ assert.ok(refreshCommands.includes('get_settings'));
 assert.ok(refreshCommands.includes('get_effective_model_config'));
 assert.ok(!refreshCommands.some(command => /set_active_model|set_session_model|save_model/.test(command)),
   'refresh must never select or recreate models');
+
+// Store uninstall must forward the card ownership guard, preserve backend no-op
+// results, and refresh the model snapshot after the conditional transaction.
+const cleanupCalls = [];
+let cleanupRemoved = true;
+invokeResponse = async (command, args) => {
+  cleanupCalls.push({ command, args });
+  if (command === 'delete_model_if_store_link') return cleanupRemoved;
+  if (command === 'list_models') return { models: [], active_model_id: null };
+  return {};
+};
+assert.equal(await api.models.deleteModelIfStoreLink('m-stale', 'store-card'), true);
+assert.equal(cleanupCalls[0].command, 'delete_model_if_store_link');
+assert.deepEqual(JSON.parse(JSON.stringify(cleanupCalls[0].args)), { id: 'm-stale', cardId: 'store-card' });
+assert.ok(cleanupCalls.some(call => call.command === 'list_models'));
+cleanupRemoved = false;
+assert.equal(await api.models.deleteModelIfStoreLink('m-repurposed', 'store-card'), false);
+assert.ok(!cleanupCalls.some(call => call.command === 'delete_model'),
+  'uninstall cleanup must never fall back to unconditional deletion');

@@ -40,10 +40,30 @@ fn identity(record: &db::StoreModelRecord) -> Option<(String, String)> {
     (!model.is_empty()).then(|| (base, model.to_string()))
 }
 
+pub(crate) fn matches_current_model_route(card_id: &str, base_url: &str, model: &str) -> bool {
+    let Ok(Some(rec)) = db::get_store_model(card_id) else {
+        return false;
+    };
+    if !rec.running || rec.status != "deployed" || rec.card_update_pending {
+        return false;
+    }
+    let Ok(version) = version_store::get(card_id, &version_store::active_id(&rec)) else {
+        return false;
+    };
+    if version.is_some_and(|v| v.state == "deleting") {
+        return false;
+    }
+    identity(&rec)
+        .is_some_and(|(base, wire)| chat_base(base_url).as_deref() == Some(&base) && model == wire)
+}
+
 fn reconcile(models: &mut [SavedModel], routes: &[Route], card_id: Option<&str>) -> Vec<String> {
     let mut changed = Vec::new();
     for row in models {
-        if row.is_builtin_llmapi() || !row.is_operator_owned_endpoint() {
+        if row.model_store_link_detached
+            || row.is_builtin_llmapi()
+            || !row.is_operator_owned_endpoint()
+        {
             continue;
         }
         let Some(base) = chat_base(&row.base_url) else {

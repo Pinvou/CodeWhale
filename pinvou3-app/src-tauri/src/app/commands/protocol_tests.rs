@@ -561,6 +561,7 @@ command_protocol!(
         "reveal_model_api_key",
         "save_model",
         "delete_model",
+        "delete_model_if_store_link",
         "set_active_model",
         "set_session_model",
         "get_session_model_id",
