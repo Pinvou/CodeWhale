@@ -612,7 +612,13 @@ impl Pinvou3Bundle {
     /// 本目录无 SKILL.md 不会被注册表扫成常驻技能。
     pub(super) fn write_connector_cli_bins(&self) -> std::io::Result<()> {
         let eip = self.skills_dir.join("eip");
-        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+        // 平台内嵌二进制只覆盖 win-x64 / linux-x64 / linux-arm64 / macOS 双架构;
+        // linux/loongarch64 无上游构建,调用点必须一并 cfg 掉(否则 E0425),连接时
+        // 由 `eip_bin_path()` 的缺失检查显式报 unsupported,不借用其他架构产物。
+        #[cfg(all(
+            any(windows, target_os = "linux", target_os = "macos"),
+            not(all(target_os = "linux", target_arch = "loongarch64"))
+        ))]
         Self::extract_dir_if_changed(&EIP_PLATFORM_BIN_DIR, &eip.join("bin"))?;
         if let Some(bin) = EIP_SKILL_DIR.get_dir("bin") {
             Self::extract_dir_if_changed(bin, &eip)?;
@@ -620,7 +626,10 @@ impl Pinvou3Bundle {
         Self::chmod_cli_bins(&eip.join("bin"))?;
 
         let zhidao = self.skills_dir.join("zhidao");
-        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+        #[cfg(all(
+            any(windows, target_os = "linux", target_os = "macos"),
+            not(all(target_os = "linux", target_arch = "loongarch64"))
+        ))]
         Self::extract_dir_if_changed(&ZHIDAO_PLATFORM_BIN_DIR, &zhidao.join("bin"))?;
         if let Some(bin) = ZHIDAO_SKILL_DIR.get_dir("bin") {
             Self::extract_dir_if_changed(bin, &zhidao)?;

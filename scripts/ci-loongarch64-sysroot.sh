@@ -345,6 +345,17 @@ verify_sysroot() {
     echo "         scripts/check-linux-glibc-floor.sh" >&2
   fi
 
+  # Startup objects are the other half of the link contract: crt1.o/crti.o/
+  # crtn.o live in the multiarch dir (libc6-dev), and a missing one surfaces
+  # only at real link time ("ld: cannot find crt1.o") which cargo check legs
+  # never reach. Assert them here so a prune/extract regression fails with a
+  # precise message instead of a cmake try-compile wall.
+  local crt_obj
+  for crt_obj in crt1.o crti.o crtn.o; do
+    [ -f "$root/usr/lib/$MULTIARCH_DIR/$crt_obj" ] \
+      || fail "sysroot lacks the startup object $crt_obj under usr/lib/$MULTIARCH_DIR (extract/prune regression?)"
+  done
+
   # Host pkg-config reads the foreign .pc files through the sysroot env.
   pkg_config_env "$root"
   for pcmod in "${VERIFY_PC_MODULES[@]}"; do
@@ -373,6 +384,19 @@ write_cmake_toolchain_file() {
     echo "set(CMAKE_SYSTEM_NAME Linux)"
     echo "set(CMAKE_SYSTEM_PROCESSOR loongarch64)"
     echo "set(CMAKE_SYSROOT \"$root\")"
+    # The deepin tree uses the debian multiarch layout (usr/lib/loongarch64-
+    # linux-gnu), while the bootstrapped cross-gcc's default startfile/library
+    # search under --sysroot only covers <sysroot>/usr/lib. Without pointing
+    # the search there, every link dies with "cannot find crt1.o/-lc/-lm"
+    # (the cmake try-compile is the first real link and surfaced exactly
+    # that). -B feeds gcc's startfile search; -L feeds the linker's -l
+    # resolution. Only the deepin tree is searched this way — the toolchain's
+    # own bundled glibc dir must NOT shadow the sysroot under CMAKE_SYSROOT.
+    echo "set(CMAKE_C_FLAGS_INIT \"-B$root/usr/lib/$MULTIARCH_DIR\")"
+    echo "set(CMAKE_CXX_FLAGS_INIT \"-B$root/usr/lib/$MULTIARCH_DIR\")"
+    echo "set(CMAKE_EXE_LINKER_FLAGS_INIT \"-L$root/usr/lib/$MULTIARCH_DIR\")"
+    echo "set(CMAKE_SHARED_LINKER_FLAGS_INIT \"-L$root/usr/lib/$MULTIARCH_DIR\")"
+    echo "set(CMAKE_MODULE_LINKER_FLAGS_INIT \"-L$root/usr/lib/$MULTIARCH_DIR\")"
     echo "set(CMAKE_C_COMPILER \"$prefix/bin/$TRIPLE-gcc\")"
     echo "set(CMAKE_CXX_COMPILER \"$prefix/bin/$TRIPLE-g++\")"
     echo "set(CMAKE_AR \"$prefix/bin/$TRIPLE-gcc-ar\")"
