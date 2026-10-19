@@ -385,9 +385,7 @@ pub(super) fn persist_pending_revocations_to(
     }
 }
 
-pub(super) fn queue_pending_revocation_for_removal(
-    config: &WebAccessConfig,
-) -> Result<(), String> {
+pub(super) fn queue_pending_revocation_for_removal(config: &WebAccessConfig) -> Result<(), String> {
     queue_pending_revocation_for_removal_at(
         &pending_revocations_path(),
         PendingRevocation::from(config),

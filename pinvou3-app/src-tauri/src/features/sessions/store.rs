@@ -742,8 +742,7 @@ impl SessionStore {
         // Remote archive availability must not classify or block local records.
         // Only the reserved remote namespace needs permanent-bank authority.
         if self.remote_proxies.lock().records.contains_key(id)
-            || (super::validators::is_remote_session_id(id)
-                && self.is_archived_remote_proxy(id)?)
+            || (super::validators::is_remote_session_id(id) && self.is_archived_remote_proxy(id)?)
         {
             Ok(SessionKind::RemoteProxy)
         } else if super::validators::is_remote_session_id(id) {

@@ -1012,7 +1012,10 @@ mod dev19_contract_tests {
         // ...while retirements still inside the window stay fenced.
         assert_eq!(
             journal
-                .bind_generation(&format!("generation-{:04}", super::MAX_RETIRED_GENERATIONS - 1))
+                .bind_generation(&format!(
+                    "generation-{:04}",
+                    super::MAX_RETIRED_GENERATIONS - 1
+                ))
                 .unwrap_err()
                 .code,
             "journal_generation_retired"

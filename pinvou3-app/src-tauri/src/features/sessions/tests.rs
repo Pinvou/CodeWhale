@@ -5043,7 +5043,9 @@ fn remote_namespace_gates_reject_case_variant_ids() {
             .session_kind(id)
             .expect_err("a case-variant remote- id must classify as the reserved namespace");
         assert!(
-            error.to_string().contains("RemoteProxy record is unavailable"),
+            error
+                .to_string()
+                .contains("RemoteProxy record is unavailable"),
             "the classification must be the reserved-namespace error: {error:#}"
         );
     }

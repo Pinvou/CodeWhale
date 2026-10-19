@@ -6641,7 +6641,12 @@ mod tests {
         service.set_session_provisioner(sessions.clone());
         for index in 0..super::MAX_REMOTE_SESSIONS {
             service
-                .ensure_remote_session(&format!("ref-{index:04}"), "Remote", false, "generation-0001")
+                .ensure_remote_session(
+                    &format!("ref-{index:04}"),
+                    "Remote",
+                    false,
+                    "generation-0001",
+                )
                 .unwrap();
         }
         assert_eq!(
