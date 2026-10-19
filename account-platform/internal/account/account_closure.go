@@ -40,6 +40,8 @@ type AccountClosureRequest struct {
 	UpdatedAt         time.Time               `json:"updated_at"`
 	CompletedAt       *time.Time              `json:"completed_at,omitempty"`
 	LeaseUntil        *time.Time              `json:"-"`
+	UserStatus        string                  `json:"-"`
+	UserVersion       int64                   `json:"-"`
 	Replayed          bool                    `json:"replayed"`
 }
 
@@ -137,15 +139,8 @@ func (r *PostgresRepository) CreateAccountClosure(ctx context.Context, principal
 	if _, err := tx.Exec(ctx, `INSERT INTO account_closure_requests(id,user_id,idempotency_key_digest,request_fingerprint,status,stage,policy_version,blocker_snapshot,reauthenticated_at,sla_expires_at,version,created_at,updated_at,next_attempt_at) VALUES($1,$2,$3,$4,$5,'CLOSURE_REQUESTED',$6,$7,$8,$9,1,$10,$10,$10)`, request.ID, userID, keyDigest, fingerprint, request.Status, accountClosurePolicyVersion, encodedBlockers, request.ReauthenticatedAt, request.SLAExpiresAt, now); err != nil {
 		return AccountClosureRequest{}, err
 	}
-	if len(blockers) == 0 {
-		if _, err := tx.Exec(ctx, `UPDATE account_closure_requests SET stage='QUIESCING',version=2,updated_at=$2 WHERE id=$1`, request.ID, now); err != nil {
-			return AccountClosureRequest{}, err
-		}
-		if _, err := tx.Exec(ctx, `UPDATE users SET status='CLOSING',version=version+1,updated_at=$2 WHERE id=$1 AND status='ACTIVE'`, userID, now); err != nil {
-			return AccountClosureRequest{}, err
-		}
-		request.Stage, request.Version = "QUIESCING", 2
-	}
+	// The worker checks every financial domain while self-service is still
+	// available. Creating a durable request alone must not lock the user out.
 	if _, err := tx.Exec(ctx, `INSERT INTO account_closure_audit(id,closure_request_id,event_type,actor_user_id,from_stage,to_stage,redacted_details,occurred_at) VALUES($1,$2,'REQUESTED',$3,'CLOSURE_REQUESTED',$4,jsonb_build_object('policy_version',$5::integer,'recent_auth',true,'pre_quiet_blocker_codes',(SELECT COALESCE(jsonb_agg(value->>'code'),'[]'::jsonb) FROM jsonb_array_elements($6::jsonb) value)),$7)`, uuid.Must(uuid.NewV7()), request.ID, userID, request.Stage, accountClosurePolicyVersion, encodedBlockers, now); err != nil {
 		return AccountClosureRequest{}, err
 	}
@@ -192,6 +187,9 @@ func (r *PostgresRepository) ClaimAccountClosure(ctx context.Context) (*AccountC
 	item.UpdatedAt = now
 	leaseUntil := now.Add(30 * time.Second)
 	item.LeaseUntil = &leaseUntil
+	if err := tx.QueryRow(ctx, `SELECT status,version FROM users WHERE id=$1`, item.UserID).Scan(&item.UserStatus, &item.UserVersion); err != nil {
+		return nil, err
+	}
 	return &item, tx.Commit(ctx)
 }
 
@@ -244,37 +242,37 @@ func (r *PostgresRepository) EnterAccountClosureQuiescing(ctx context.Context, i
 	if err := lockAccountClosureClaim(ctx, tx, item); err != nil {
 		return err
 	}
-	var userStatus string
-	if err := tx.QueryRow(ctx, `SELECT status FROM users WHERE id=$1 FOR UPDATE`, item.UserID).Scan(&userStatus); errors.Is(err, pgx.ErrNoRows) {
-		return ErrConflict
-	} else if err != nil {
+	if err := lockAccountClosurePreCleanupUser(ctx, tx, item); err != nil {
 		return err
 	}
-	if userStatus != "ACTIVE" {
+	if item.UserStatus != "ACTIVE" {
 		return ErrConflict
 	}
-	if err := requireAccountClosureClaimTx(ctx, tx, item); err != nil {
-		return err
+	stage := "FINANCIAL_CLEARANCE"
+	if item.Stage == "CLOSURE_REQUESTED" {
+		stage = "QUIESCING"
 	}
 	now := r.now()
 	if err := checkAccountClosureRoleGateTx(ctx, tx, item.UserID); err != nil {
 		return err
 	}
-	command, err := tx.Exec(ctx, `UPDATE account_closure_requests SET status='IN_PROGRESS',stage='QUIESCING',blocker_snapshot='[]'::jsonb,next_attempt_at=$2,lease_until=NULL,last_error_code=NULL,version=version+1,updated_at=$2 WHERE id=$1 AND version=$3 AND stage='CLOSURE_REQUESTED' AND lease_until>clock_timestamp()`, item.ID, now, item.Version)
-	if err != nil {
-		return err
-	}
-	if command.RowsAffected() != 1 {
-		return ErrConflict
-	}
-	userCommand, err := tx.Exec(ctx, `UPDATE users SET status='CLOSING',version=version+1,updated_at=$2 WHERE id=$1 AND status='ACTIVE'`, item.UserID, now)
+	userCommand, err := tx.Exec(ctx, `UPDATE users SET status='CLOSING',version=version+1,updated_at=$2 WHERE id=$1 AND status='ACTIVE' AND version=$3`, item.UserID, now, item.UserVersion)
 	if err != nil {
 		return err
 	}
 	if userCommand.RowsAffected() != 1 {
 		return ErrConflict
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO account_closure_audit(id,closure_request_id,event_type,from_stage,to_stage,redacted_details,occurred_at) VALUES($1,$2,'QUIET_PERIOD_ENTERED','CLOSURE_REQUESTED','QUIESCING','{}'::jsonb,$3)`, uuid.Must(uuid.NewV7()), item.ID, now); err != nil {
+	// Release the claim even on re-entry. Only a fresh claim and another full
+	// assessment with the user CLOSING may advance into identity cleanup.
+	command, err := tx.Exec(ctx, `UPDATE account_closure_requests SET status='IN_PROGRESS',stage=$4,blocker_snapshot='[]'::jsonb,next_attempt_at=$2,lease_until=NULL,last_error_code=NULL,version=version+1,updated_at=$2 WHERE id=$1 AND version=$3 AND stage=$5 AND lease_until>clock_timestamp()`, item.ID, now, item.Version, stage, item.Stage)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrConflict
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO account_closure_audit(id,closure_request_id,event_type,from_stage,to_stage,redacted_details,occurred_at) VALUES($1,$2,'QUIET_PERIOD_ENTERED',$3,$4,'{}'::jsonb,$5)`, uuid.Must(uuid.NewV7()), item.ID, item.Stage, stage, now); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -297,7 +295,22 @@ func (r *PostgresRepository) SaveAccountClosureBlockers(ctx context.Context, ite
 	if err := lockAccountClosureClaim(ctx, tx, item); err != nil {
 		return err
 	}
+	if err := lockAccountClosurePreCleanupUser(ctx, tx, item); err != nil {
+		return err
+	}
 	now := r.now()
+	if item.UserStatus == "CLOSING" && accountClosureNeedsSelfService(blockers) {
+		command, err := tx.Exec(ctx, `UPDATE users SET status='ACTIVE',version=version+1,updated_at=$2 WHERE id=$1 AND status='CLOSING' AND version=$3`, item.UserID, now, item.UserVersion)
+		if err != nil {
+			return err
+		}
+		if command.RowsAffected() != 1 {
+			return ErrConflict
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO account_closure_audit(id,closure_request_id,event_type,from_stage,to_stage,redacted_details,occurred_at) VALUES($1,$2,'SELF_SERVICE_RESTORED',$3,'FINANCIAL_CLEARANCE','{"identity_cleanup_started":false}'::jsonb,$4)`, uuid.Must(uuid.NewV7()), item.ID, item.Stage, now); err != nil {
+			return err
+		}
+	}
 	command, err := tx.Exec(ctx, `UPDATE account_closure_requests SET status=$2,stage='FINANCIAL_CLEARANCE',blocker_snapshot=$3,next_attempt_at=$4,lease_until=NULL,last_error_code=NULL,version=version+1,updated_at=$5 WHERE id=$1 AND version=$6 AND stage IN ('QUIESCING','FINANCIAL_CLEARANCE') AND lease_until>clock_timestamp()`, item.ID, status, encoded, now.Add(time.Minute), now, item.Version)
 	if err != nil {
 		return err
@@ -312,12 +325,21 @@ func (r *PostgresRepository) SaveAccountClosureBlockers(ctx context.Context, ite
 }
 
 func (r *PostgresRepository) AdvanceAccountClosureToIdentityCleanup(ctx context.Context, item AccountClosureRequest) error {
-	tx, err := r.pool.Begin(ctx)
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
 	if err := lockAccountClosureClaim(ctx, tx, item); err != nil {
+		return err
+	}
+	if err := lockAccountClosurePreCleanupUser(ctx, tx, item); err != nil {
+		return err
+	}
+	if item.UserStatus != "CLOSING" {
+		return ErrConflict
+	}
+	if err := checkAccountClosureRoleGateTx(ctx, tx, item.UserID); err != nil {
 		return err
 	}
 	now := r.now()
@@ -508,16 +530,6 @@ func (w *AccountClosureWorker) runOnce(ctx context.Context) {
 			observe(w.repository.ScheduleAccountClosureError(ctx, *item, "ACCOUNT_GATE_UNAVAILABLE"))
 			continue
 		}
-		if item.Stage == "CLOSURE_REQUESTED" {
-			if len(blockers) != 0 {
-				observe(w.repository.SaveAccountClosureRequestedBlockers(ctx, *item, blockers))
-				continue
-			}
-			if err := w.repository.EnterAccountClosureQuiescing(ctx, *item); err != nil {
-				observe(w.repository.ScheduleAccountClosureError(ctx, *item, "QUIET_PERIOD_ENTRY_FAILED"))
-			}
-			continue
-		}
 		if item.Stage == "IDENTITY_CLEANUP" {
 			if w.identities == nil || w.grants == nil || w.replay == nil {
 				observe(w.repository.ScheduleAccountClosureCleanupError(ctx, item, "CLEANUP_DEPENDENCY_UNAVAILABLE"))
@@ -601,11 +613,29 @@ func (w *AccountClosureWorker) runOnce(ctx context.Context) {
 		if failed {
 			continue
 		}
+		if item.Stage == "CLOSURE_REQUESTED" {
+			if len(blockers) != 0 {
+				observe(w.repository.SaveAccountClosureRequestedBlockers(ctx, *item, blockers))
+				continue
+			}
+			if err := w.repository.EnterAccountClosureQuiescing(ctx, *item); err != nil {
+				observe(w.repository.ScheduleAccountClosureError(ctx, *item, "QUIET_PERIOD_ENTRY_FAILED"))
+			}
+			continue
+		}
 		if len(blockers) != 0 {
 			observe(w.repository.SaveAccountClosureBlockers(ctx, *item, blockers))
 			continue
 		}
-		observe(w.repository.AdvanceAccountClosureToIdentityCleanup(ctx, *item))
+		if item.UserStatus == "ACTIVE" {
+			if err := w.repository.EnterAccountClosureQuiescing(ctx, *item); err != nil {
+				observe(w.repository.ScheduleAccountClosureError(ctx, *item, "QUIET_PERIOD_REENTRY_FAILED"))
+			}
+			continue
+		}
+		if err := w.repository.AdvanceAccountClosureToIdentityCleanup(ctx, *item); err != nil {
+			observe(w.repository.ScheduleAccountClosureError(ctx, *item, "IDENTITY_CLEANUP_ADVANCE_FAILED"))
+		}
 	}
 }
 

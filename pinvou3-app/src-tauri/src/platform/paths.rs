@@ -243,6 +243,23 @@ pub fn browser_session_mcp_json(session_id: &str) -> PathBuf {
     browser_session_mcp_dir().join(format!("{}.json", browser_session_token(session_id)))
 }
 
+/// Per-aux scoped MCP configuration directory (ADR-0024): holds the
+/// token-named session-reader configs that pin an auxiliary engine to its
+/// parent task's session id. Sibling layout of the browser `mcp-sessions`
+/// directory, but directly under the Pinvou home — it never contains user
+/// servers, only app-written single-entry configs.
+pub fn aux_mcp_sessions_dir() -> PathBuf {
+    pinvou3_home().join("mcp-sessions")
+}
+/// Conversation-scoped aux MCP config path. Mirrors
+/// [`browser_session_mcp_json`]: the filename is the stable session token
+/// (the shared fnv1a digest behind `browser_session_token`), so the raw
+/// session id never appears in the path — no invalid path characters, no
+/// traversal, no id disclosure in directory listings.
+pub fn aux_session_mcp_json(session_id: &str) -> PathBuf {
+    aux_mcp_sessions_dir().join(format!("{}.json", browser_session_token(session_id)))
+}
+
 /// Stable FNV-1a token for a session ID. It is used only for local filenames, WebView labels,
 /// and initial-page markers, not authentication. Requests retain the complete session_id,
 /// which the main application recomputes and validates.

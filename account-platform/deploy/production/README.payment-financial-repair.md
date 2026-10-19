@@ -2,7 +2,7 @@
 
 在前序生产叠加文件后加入 compose.payment-financial-repair.yaml。Account、Billing、Portal、migrator、Token、relay 和 approval-resources 必须同一 F12 源，继承前序身份、私有网络和外部 HTTPS 合同。公开安装原 Account073 与 Billing065/066/077/900016/900017，以及全部前序迁移，不改变原迁移字节。
 
-新增唯一 PAYMENT_FINANCIAL_REPAIR v1/s1，默认 INACTIVE。注册集合为 Billing7 + Token3；当前 Token19 原样。使用现有 operator cutover/readback 与 RunBillingApprovalConsumers 装配，不添加独立命令环境开关，不自动激活、发行资源或创建消费者。
+新增唯一 PAYMENT_FINANCIAL_REPAIR v1/s1，默认 INACTIVE。注册集合为 Billing7 + Token3；当前 Token19 原样。使用现有 operator cutover/readback 与 `cmd/billing-service/main.go` 中 `approvalconsumer.BillingCommands()` 的注册循环装配，不添加独立命令环境开关，不自动激活、发行资源或创建消费者。
 
 新命令加入全局策略集合后，先按现有 Token governance 的 SAFE、quiescence、冻结资源 readback 与签名发行流程，用当前 `PolicySetDigest` 重新签发并核验治理快照；旧集合的 ACTIVE 摘要与收据不能沿用。此步骤不改变 Token handler 集合，也不能由启动或 readiness 自动代替。
 

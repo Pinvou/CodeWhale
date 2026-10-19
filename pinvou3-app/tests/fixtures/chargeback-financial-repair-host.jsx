@@ -40,6 +40,7 @@ window.fetch = async (url, options = {}) => {
     if (params.has('late-auth')) return new Promise(resolve => { state.releasePrecheck = () => { state.lateAuthenticationReleased = true; resolve(reply({ code: 'RECENT_AUTHENTICATION_REQUIRED' }, 401)); }; });
     if (params.has('unavailable')) return reply({ code: 'APPROVAL_PRECHECK_UNAVAILABLE' }, 503);
     const facts = projection(state.prechecks > 1 ? 'b' : 'a');
+    if (params.has('provider-id')) facts.financial_snapshot.provider_chargeback_id = params.get('provider-id');
     if (params.has('mismatch')) facts.target_resource_id = id(2);
     if (params.has('case-version-mismatch')) facts.critical_resource_versions.chargeback_case_version = '9007199254740994';
     if (params.has('edit-version-changed')) { facts.normalized_command.expected_case_version = '9007199254740994'; facts.critical_resource_versions.chargeback_case_version = '9007199254740994'; }

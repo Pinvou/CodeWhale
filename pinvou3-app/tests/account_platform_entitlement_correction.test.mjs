@@ -3,6 +3,8 @@ import test from 'node:test';
 import { entitlementCorrectionPrecheck, entitlementCorrectionApprovalDraft, parseEntitlementCorrectionJSON, encodeEntitlementCorrectionJSON, entitlementCorrectionInputValid } from '../src/features/account-platform/admin-entitlement-correction.js';
 import { entitlementIntentStorage, entitlementEditReferences } from '../src/features/account-platform/entitlement-correction-intent.js';
 import { createAndSubmitFreshGovernedApproval } from '../src/features/account-platform/admin-governed-approval-workflow.js';
+import { approvalCommands, readApprovalRoute, approvalQuery } from '../src/features/account-platform/admin-approval-actions.js';
+import { currentApprovalEditDraft } from '../src/features/account-platform/admin-finance.js';
 
 const packageID = '00000000-0000-4000-8000-000000000001';
 const orderID = '00000000-0000-4000-8000-000000000002';
@@ -19,6 +21,50 @@ const fixture = () => ({
   },
   financial_snapshot: { package_total_microcredits: '9223372036854775807', source_original_microcredits: '9223372036854775807',
     target_original_microcredits: '0', effective_total_microcredits: '9223372036854775807' },
+});
+
+test('installed entitlement command reaches every approval-center view while unknown commands remain closed', () => {
+  const command = 'ENTITLEMENT_COMPONENT_ADJUSTMENT';
+  assert.ok(approvalCommands.includes(command));
+  assert.equal(approvalCommands.includes('UNINSTALLED_TEST_APPROVAL'), false);
+  for (const view of ['mine', 'pending', 'execution', 'directory']) {
+    const route = readApprovalRoute(`?approval_view=${view}&approval_command_type=${command}&approval_target=${packageID}`);
+    assert.equal(route.view, view); assert.equal(route.commandType, command);
+    assert.equal(approvalQuery(route, orderID).command_type, command);
+  }
+});
+
+test('entitlement center EDIT refreshes proof for the fixed original intent and preserves exact facts', async () => {
+  const facts = fixture(); facts.critical_resource_versions.wallet_version = '9223372036854775807';
+  const original = { approval_request_id: orderID, command_type: facts.command_type, status: 'DRAFT', allowed_actions: ['EDIT'],
+    target: { resource_type: 'ENTITLEMENT_PACKAGE', resource_id: packageID }, command: facts.normalized_command,
+    critical_resource_versions: { wallet_version: 1, facts_digest: 'old' } };
+  const calls = [];
+  const draft = await currentApprovalEditDraft({ entitlementCorrectionPrecheck: async (...args) => { calls.push(args); return facts; } }, original, 'Verified original product split evidence');
+  assert.deepEqual(calls, [[packageID, orderID, 'PRODUCT_SPLIT_CORRECTION']]);
+  assert.deepEqual(draft.normalized_command, original.command);
+  assert.deepEqual(draft.critical_resource_versions, facts.critical_resource_versions);
+  assert.equal(draft.critical_resource_versions.wallet_version, '9223372036854775807');
+  assert.equal(draft.idempotency_key, `approval:edit:${orderID}`);
+  assert.deepEqual(original.critical_resource_versions, { wallet_version: 1, facts_digest: 'old' });
+});
+
+test('entitlement center EDIT rejects changed owner facts and invalid drafts before creating any command', async () => {
+  const facts = fixture();
+  const detail = { approval_request_id: orderID, command_type: facts.command_type, status: 'DRAFT', allowed_actions: ['EDIT'],
+    target: { resource_type: 'ENTITLEMENT_PACKAGE', resource_id: packageID }, command: facts.normalized_command };
+  let reads = 0;
+  const client = { entitlementCorrectionPrecheck: async () => { reads++; return facts; } };
+  for (const value of [{ ...detail, status: 'SUBMITTED' }, { ...detail, allowed_actions: [] },
+    { ...detail, target: { resource_type: 'PAYMENT_ORDER', resource_id: packageID } },
+    { ...detail, command: { ...detail.command, payment_order_id: 'bad' } }]) {
+    await assert.rejects(currentApprovalEditDraft(client, value, 'Verified original product split evidence'));
+  }
+  assert.equal(reads, 0);
+  for (const changes of [{ package_id: orderID }, { payment_order_id: packageID }, { reason_code: 'OTHER' }]) {
+    await assert.rejects(currentApprovalEditDraft({ entitlementCorrectionPrecheck: async () => ({ ...fixture(), normalized_command: { ...facts.normalized_command, ...changes } }) }, detail, 'Verified original product split evidence'));
+  }
+  await assert.rejects(currentApprovalEditDraft({ entitlementCorrectionPrecheck: async () => ({}) }, detail, 'Verified original product split evidence'));
 });
 
 for (const [name, code, valid] of [

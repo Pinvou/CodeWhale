@@ -25,6 +25,8 @@ BILLING_ROOTS = {
     "TestAccountClosureAssessmentIncludesMemberReservations",
     "TestF08MembershipClosureReasonQuotaReplayPostgres",
     "TestF08ClosedGrantConcurrentReceiptReplayPostgres",
+    "TestF08ClosureBlocksPendingFinancialAnomalyPostgres",
+    "TestF08ReclaimBlocksPendingFinancialAnomalyPostgres",
 }
 CONTRACTS = [
     ("closure-combination", "./internal/billingschema", {"TestClosurePrivatePublicCombination"},
@@ -36,7 +38,8 @@ CONTRACTS = [
     ("gift-closure", "./internal/billingschema", {"TestGiftClosurePublicHarness"},
      {"": {"TestGiftClosureProducerBoundaries"}, ".billing": {"TestClosedGrantPublishedOwnerEffects"}}),
     ("account-anonymization", "./internal/account",
-     {"TestAccountClosureAnonymizesOwnedHistoricalContacts", "TestAccountClosureRollbackPreservesEvidence"}, {}),
+     {"TestAccountClosureAnonymizesOwnedHistoricalContacts", "TestAccountClosureRollbackPreservesEvidence",
+      "TestAccountClosureSelfServiceRecoveryPostgres", "TestF08ClosureAdvanceFailureIsScheduledPostgres"}, {}),
 ]
 
 

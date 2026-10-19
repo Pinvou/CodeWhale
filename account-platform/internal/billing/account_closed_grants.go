@@ -122,6 +122,12 @@ func (r *PostgresRepository) reclaimAccountClosedGrantOnce(ctx context.Context, 
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return AccountClosedGrantReclaim{}, err
 	}
+	// Only new effects take the shared wallet-first financial lock order;
+	// committed command receipts above remain independently replayable.
+	wallet, err := lockMemberQuotaWallet(ctx, tx, organizationID)
+	if err != nil {
+		return AccountClosedGrantReclaim{}, err
+	}
 	grant, _, err := loadMemberQuotaGrant(ctx, tx, grantID, true)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && grant.OrganizationID != organizationID) {
 		return AccountClosedGrantReclaim{}, ErrNotFound
@@ -138,14 +144,19 @@ SELECT 1 FROM member_quota_hold_allocations a JOIN usage_holds h ON h.id=a.hold_
 UNION ALL SELECT 1 FROM refunds WHERE entitlement_package_id=$2 AND status IN ('REQUESTED','MANUAL_REVIEW')
 UNION ALL SELECT 1 FROM chargeback_cases WHERE entitlement_package_id=$2 AND status='REVIEW_REQUIRED'
 UNION ALL SELECT 1 FROM reconciliation_cases c JOIN entitlement_packages p ON p.payment_order_id=c.payment_order_id WHERE p.id=$2 AND c.status IN ('OPEN','IN_REVIEW')
-UNION ALL SELECT 1 FROM payment_anomaly_cases anomaly JOIN entitlement_packages payment ON payment.payment_order_id=anomaly.payment_order_id WHERE payment.id=$2 AND anomaly.status='OPEN'
+UNION ALL SELECT 1 FROM payment_anomaly_cases anomaly JOIN entitlement_packages payment ON payment.payment_order_id=anomaly.payment_order_id WHERE payment.id=$2 AND (anomaly.status='OPEN' OR (anomaly.status='RESOLVED' AND anomaly.financial_action_status='PENDING'))
 )`, grant.ID, grant.PackageID).Scan(&frozen); err != nil {
 		return AccountClosedGrantReclaim{}, err
 	}
 	if frozen {
 		return AccountClosedGrantReclaim{}, ErrConflict
 	}
-	if _, err := tx.Exec(ctx, `SELECT id FROM entitlement_components WHERE id=$1 FOR UPDATE`, grant.ComponentID); err != nil {
+	var componentPackageID, packageWalletID uuid.UUID
+	err = tx.QueryRow(ctx, `SELECT component.package_id,package.wallet_id FROM entitlement_components component JOIN entitlement_packages package ON package.id=component.package_id WHERE component.id=$1 FOR UPDATE OF component`, grant.ComponentID).Scan(&componentPackageID, &packageWalletID)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && (componentPackageID != grant.PackageID || packageWalletID != wallet.ID)) {
+		return AccountClosedGrantReclaim{}, ErrConflict
+	}
+	if err != nil {
 		return AccountClosedGrantReclaim{}, err
 	}
 	now, amount := r.now(), grant.AvailableMicrocredits
@@ -214,7 +225,7 @@ func (s *Service) reclaimAccountClosedGrantInternal(w http.ResponseWriter, r *ht
 		ReclaimAccountClosedGrant(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int64, string, string) (AccountClosedGrantReclaim, error)
 	})
 	if !ok {
-		s.writeError(w, r, ErrConflict)
+		api.WriteError(w, http.StatusServiceUnavailable, "ACCOUNT_CLOSURE_UNAVAILABLE", "account closure reclaim is unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
 	grant, lifecycleVersion, err := repository.AccountClosedGrantCandidate(r.Context(), organizationID, grantID)

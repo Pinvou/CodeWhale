@@ -594,13 +594,13 @@ WHERE repair.approval_request_id=$1`, approvalRequestID).
 // repair row must carry the same approval identity, epoch and execution key as
 // the delivery being consumed.
 func paymentFinancialRepairCaseMatches(ctx context.Context, source paymentRepairReader, input PaymentFinancialRepairExecutionInput, executionKey string) (PaymentFinancialRepairResult, bool, error) {
-	var storedOrderID uuid.UUID
+	var storedOrderID, storedEvidenceID, storedRequesterID, storedApproverID uuid.UUID
 	var authorizationEventID uuid.UUID
 	var approvalEpoch int64
 	var executionKeyDigest string
-	err := source.QueryRow(ctx, `SELECT payment_order_id,authorization_event_id,approval_epoch,execution_key_digest
+	err := source.QueryRow(ctx, `SELECT payment_order_id,payment_evidence_id,requester_user_id,actor_id,authorization_event_id,approval_epoch,execution_key_digest
 FROM payment_order_repairs WHERE approval_request_id=$1`, input.ApprovalRequestID).
-		Scan(&storedOrderID, &authorizationEventID, &approvalEpoch, &executionKeyDigest)
+		Scan(&storedOrderID, &storedEvidenceID, &storedRequesterID, &storedApproverID, &authorizationEventID, &approvalEpoch, &executionKeyDigest)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PaymentFinancialRepairResult{}, false, nil
 	}
@@ -608,9 +608,12 @@ FROM payment_order_repairs WHERE approval_request_id=$1`, input.ApprovalRequestI
 		return PaymentFinancialRepairResult{}, false, err
 	}
 	matches := authorizationEventID == input.AuthorizationEventID && approvalEpoch == input.ApprovalEpoch &&
-		executionKeyDigest == legacyFinancialExecutionKeyDigestV1(executionKey) && storedOrderID == input.Command.PaymentOrderID
+		executionKeyDigest == legacyFinancialExecutionKeyDigestV1(executionKey) && storedOrderID == input.Command.PaymentOrderID &&
+		storedEvidenceID == input.Command.PaymentEvidenceID && storedRequesterID == input.RequesterUserID && storedApproverID == input.ApproverUserID
 	if !matches {
-		return PaymentFinancialRepairResult{}, false, nil
+		// This approval already belongs to different immutable execution facts;
+		// it cannot proceed as a fresh repair and fail later on a unique index.
+		return PaymentFinancialRepairResult{}, false, ErrConflict
 	}
 	stored, err := readPaymentFinancialRepair(ctx, source, input.ApprovalRequestID)
 	if err != nil {
