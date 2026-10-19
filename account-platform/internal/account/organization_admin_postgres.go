@@ -364,14 +364,21 @@ func normalizeAdminMemberRoles(roles []string, unitAdminIDs []uuid.UUID) ([]stri
 }
 
 func validateAdminUnits(ctx context.Context, tx pgx.Tx, organizationID uuid.UUID, unitIDs []uuid.UUID) error {
+	if len(unitIDs) == 0 {
+		return nil
+	}
+	// Callers can combine ordinary attachments and UNIT_ADMIN scope. Overlap
+	// remains valid, just as repeated EXISTS checks accepted the same ID twice.
+	unique := make(map[uuid.UUID]struct{}, len(unitIDs))
 	for _, unitID := range unitIDs {
-		var exists bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM organization_units WHERE id=$1 AND organization_id=$2 AND status='ACTIVE')`, unitID, organizationID).Scan(&exists); err != nil {
-			return err
-		}
-		if !exists {
-			return ErrNotFound
-		}
+		unique[unitID] = struct{}{}
+	}
+	var count int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM organization_units WHERE id=ANY($1::uuid[]) AND organization_id=$2 AND status='ACTIVE'`, unitIDs, organizationID).Scan(&count); err != nil {
+		return err
+	}
+	if count != len(unique) {
+		return ErrNotFound
 	}
 	return nil
 }
@@ -385,8 +392,15 @@ func replaceAdminMemberRoles(ctx context.Context, tx pgx.Tx, membershipID, userI
 			return 0, mapConstraintError(err)
 		}
 	}
-	for _, unitID := range unitAdminIDs {
-		if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,unit_id,created_by,created_at,starts_at,grant_source) VALUES($1,$2,'UNIT_ADMIN',$3,$4,$5,$5,'ADMIN')`, uuid.Must(uuid.NewV7()), membershipID, unitID, actorID, now); err != nil {
+	if len(unitAdminIDs) > 0 {
+		bindingIDs := make([]uuid.UUID, len(unitAdminIDs))
+		for i := range unitAdminIDs {
+			bindingIDs[i] = uuid.Must(uuid.NewV7())
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,unit_id,created_by,created_at,starts_at,grant_source)
+SELECT requested.binding_id,$2,'UNIT_ADMIN',requested.unit_id,$4,$5,$5,'ADMIN'
+FROM unnest($1::uuid[],$3::uuid[]) WITH ORDINALITY AS requested(binding_id,unit_id,position)
+ORDER BY requested.position`, bindingIDs, membershipID, unitAdminIDs, actorID, now); err != nil {
 			return 0, mapConstraintError(err)
 		}
 	}
@@ -417,21 +431,20 @@ func (r *PostgresRepository) AdminReplaceMemberRoles(ctx context.Context, princi
 	if err != nil {
 		return Member{}, err
 	}
+	if actorID == nil {
+		return Member{}, ErrForbidden
+	}
 	if err := validateAdminUnits(ctx, tx, organizationID, unitAdminIDs); err != nil {
 		return Member{}, err
 	}
 	var membershipID uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT id FROM memberships WHERE organization_id=$1 AND user_id=$2 AND status='ACTIVE' FOR UPDATE`, organizationID, userID).Scan(&membershipID); errors.Is(err, pgx.ErrNoRows) {
+	if err := tx.QueryRow(ctx, `SELECT member.id FROM memberships member JOIN users target ON target.id=member.user_id AND target.status='ACTIVE' WHERE member.organization_id=$1 AND member.user_id=$2 AND member.status='ACTIVE' FOR UPDATE OF member,target`, organizationID, userID).Scan(&membershipID); errors.Is(err, pgx.ErrNoRows) {
 		return Member{}, ErrNotFound
 	} else if err != nil {
 		return Member{}, err
 	}
 	now := r.now()
-	createdBy := userID
-	if actorID != nil {
-		createdBy = *actorID
-	}
-	version, err := replaceAdminMemberRoles(ctx, tx, membershipID, userID, createdBy, roles, unitAdminIDs, now)
+	version, err := replaceAdminMemberRoles(ctx, tx, membershipID, userID, *actorID, roles, unitAdminIDs, now)
 	if err != nil {
 		return Member{}, err
 	}
