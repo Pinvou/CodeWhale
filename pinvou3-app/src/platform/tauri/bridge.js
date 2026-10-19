@@ -256,6 +256,11 @@
       codexAcpSupported: false,
       teamRelaySupported: true,
       browserNativeDisplay: false,
+      localEmbedSupported: false,
+      // Global wake-up shortcut (set_global_shortcut_config); false on Wayland
+      // Linux. Fail-closed so the settings toggle stays disabled until
+      // load_platform_capabilities corrects the slice.
+      globalShortcutsAvailable: false,
     },
     settings: null,
     behaviorTelemetry: null,
@@ -2677,6 +2682,9 @@
   var testImageInputCapability = settingsFeature.testImageInputCapability;
   var probeLocalServerKind = settingsFeature.probeLocalServerKind;
   var testSearchProvider = settingsFeature.testSearchProvider;
+  // Dedicated global-shortcut command (update_settings is never used);
+  // Rust exclusively owns persistence and registration.
+  const setGlobalShortcutConfig = settingsFeature.setGlobalShortcutConfig;
   var setBuiltinFeatureEnabled = settingsFeature.setBuiltinFeatureEnabled;
   var listBuiltinFeatures = settingsFeature.listBuiltinFeatures;
 
@@ -3182,7 +3190,8 @@
       testSearchProvider: testSearchProvider,
       loadBehaviorTelemetryStatus: loadBehaviorTelemetryStatus,
       setBehaviorTelemetryEnabled: setBehaviorTelemetryEnabled,
-      listBuiltinFeatures: listBuiltinFeatures,
+      setGlobalShortcutConfig,
+      listBuiltinFeatures,
       setBuiltinFeatureEnabled: setBuiltinFeatureEnabled,
     },
     feedback: { submitFeedback: submitFeedback },
