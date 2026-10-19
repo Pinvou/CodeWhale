@@ -31,9 +31,10 @@ pub struct PromptSessionContext<'a> {
     pub locale_tag: &'a str,
     /// When true, a ## Language Output Requirement block is appended
     /// to the system prompt instructing the model to respond in
-    /// the resolved session locale. Skipped for the bundled headless
-    /// composition, which carries no `## Language` rule for the
-    /// block's override line to modify.
+    /// the resolved session locale. The block's closing override
+    /// sentence ships only when the composition carries the `## Language`
+    /// rule it modifies (the interactive base prompt); compositions
+    /// without the rule still receive the instruction itself.
     pub translation_enabled: bool,
     /// Active model identifier. The bundled constitution is model-agnostic,
     /// but embedders may still provide a prompt override containing
@@ -101,9 +102,9 @@ const INSTRUCTIONS_FILE_MAX_BYTES: usize = 100 * 1024;
 /// natural-language output — explanations, summaries, conversation.
 /// Code identifiers, untranslatable technical terms, and explicitly
 /// requested English code blocks are exempt.
-fn translation_output_instruction(locale_tag: &str) -> String {
+fn translation_output_instruction(locale_tag: &str, overrides_language_rule: bool) -> String {
     let target_language = translation_target_language_for_tag(locale_tag);
-    format!(
+    let mut block = format!(
         "\
 ## Language Output Requirement\n\
 \n\
@@ -117,9 +118,17 @@ Only output English for:\n\
 This is a hard display requirement for this session: predominantly-English \
 turns are machine-translated before display for a {target_language}-reading \
 audience, so English prose that slips into your response may reach the user \
-untranslated. \
-This overrides the ## Language rule for this session."
-    )
+untranslated."
+    );
+    // The override line only makes sense when the composition actually
+    // carries the `## Language` rule it outranks (interactive base prompt).
+    // Where the rule is absent (bundled headless composition, composers that
+    // omit it) the instruction still ships — it is the whole feature for a
+    // translation_enabled host — but the dangling override sentence does not.
+    if overrides_language_rule {
+        block.push_str(" This overrides the ## Language rule for this session.");
+    }
+    block
 }
 
 fn concise_output_discipline_instruction() -> &'static str {
@@ -1249,16 +1258,17 @@ pub(crate) fn system_prompt_for_mode_with_context_skills_session_and_approval_fo
     // above the volatile-content boundary because it's a per-session
     // flag, not a per-turn one: enabling `/translate` is a session
     // toggle, so the prompt-prefix bytes don't drift turn-over-turn.
-    // Gated on `!bundled_headless` for the same reason the recap
-    // trailer is: the bundled headless composition delivers
-    // HEADLESS_BASE_PROMPT only, and this block's closing line
-    // overrides the `## Language` rule that composition never
-    // delivers — a dangling override would teach a rule the host
-    // never received.
-    if !bundled_headless && session_context.translation_enabled {
+    // Not gated on `!bundled_headless`: the instruction is the whole
+    // translation feature for an embedder (the post-hoc translation layer is
+    // TUI-only). Only the closing override line is conditional — it names the
+    // `## Language` rule, so it ships solely when the composition actually
+    // carries that rule; otherwise it would dangle exactly like the recap
+    // cross-reference the trailer gate fixes.
+    if session_context.translation_enabled {
+        let overrides_language_rule = full_prompt.contains("## Language");
         full_prompt = format!(
             "{full_prompt}\n\n{}",
-            translation_output_instruction(session_context.locale_tag)
+            translation_output_instruction(session_context.locale_tag, overrides_language_rule)
         );
     }
 
@@ -2142,12 +2152,14 @@ mod tests {
     }
 
     #[test]
-    fn translation_block_never_arrives_without_the_language_rule() {
-        // The translation block closes by overriding the `## Language` rule.
-        // The bundled headless composition delivers HEADLESS_BASE_PROMPT
-        // only, so the block is gated on `!bundled_headless` exactly like
-        // the recap trailer — a host must never receive an override for a
-        // rule its composition does not carry.
+    fn translation_block_ships_without_dangling_override() {
+        // The translation instruction is the whole feature for a
+        // translation_enabled host (the post-hoc translation layer is
+        // TUI-only), so every host receives the block. Only the closing
+        // override line is host-aware: it names the `## Language` rule, so it
+        // ships solely when the composition carries that rule — the bundled
+        // headless composition does not, and a dangling override would teach
+        // a rule the host never received.
         let _env_lock = crate::test_support::lock_test_env();
         let tmp = tempdir().expect("tempdir");
         for host in [PromptHost::Interactive, PromptHost::Headless] {
@@ -2165,33 +2177,24 @@ mod tests {
                     host,
                 ),
             );
-            if host == PromptHost::Headless {
-                assert!(
-                    !text.contains("## Language Output Requirement"),
-                    "bundled headless host must not receive the translation block: {text}"
-                );
-                assert!(
-                    !text.contains("overrides the ## Language rule"),
-                    "no override line may dangle without the ## Language rule: {text}"
-                );
-                assert!(
-                    !text.contains("## Language\n"),
-                    "bundled headless composition carries no ## Language rule: {text}"
-                );
-            } else {
-                assert!(
-                    text.contains("## Language Output Requirement"),
-                    "interactive host with translation enabled receives the block"
-                );
-                assert!(
-                    text.contains("This overrides the ## Language rule"),
-                    "the block keeps its explicit override line"
-                );
-                assert!(
-                    text.contains("## Language\n"),
-                    "the overridden ## Language rule must ship alongside the block: {text}"
-                );
-            }
+            assert!(
+                text.contains("## Language Output Requirement"),
+                "{host:?} host with translation enabled must receive the block: {text}"
+            );
+            assert!(
+                text.contains("Always respond in Simplified Chinese"),
+                "{host:?} host must receive the operative language instruction: {text}"
+            );
+            assert!(
+                text.contains("## Language\n") == (host == PromptHost::Interactive),
+                "{host:?}: the ## Language rule presence is host-determined: {text}"
+            );
+            assert!(
+                text.contains("This overrides the ## Language rule")
+                    == (host == PromptHost::Interactive),
+                "{host:?}: the override line must ship exactly when the rule it \
+                 overrides is present: {text}"
+            );
         }
     }
 
@@ -3509,15 +3512,20 @@ mod tests {
             "the language rule must keep its declared deference to locale bookends"
         );
         assert!(
-            translation_output_instruction("zh-Hans")
+            translation_output_instruction("zh-Hans", true)
                 .contains("predominantly-English turns are machine-translated"),
             "the translation block must describe the detector-gated interception layer, not a guarantee"
         );
         assert!(
-            translation_output_instruction("zh-Hans")
+            translation_output_instruction("zh-Hans", true)
                 .contains("This overrides the ## Language rule"),
             "the translation block must keep its explicit precedence over the language rule; \
              without it the locale bookends and the language rule contradict each other again"
+        );
+        assert!(
+            !translation_output_instruction("zh-Hans", false)
+                .contains("This overrides the ## Language rule"),
+            "compositions without the ## Language rule must not receive a dangling override"
         );
     }
 
