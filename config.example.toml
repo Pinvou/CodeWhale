@@ -1182,9 +1182,10 @@ exponential_base = 2.0
 # Workshop / Large-Output Routing (#548)
 # ─────────────────────────────────────────────────────────────────────────────────
 # By default, tool outputs exceeding `large_output_threshold_tokens` are
-# classified by the adaptive evidence router (#4619): the model-facing result
-# carries `evidence_routing` metadata and oversized bodies spill to evidence
-# artifacts instead of entering the parent context wholesale. The legacy
+# classified by the adaptive evidence router (#4619): host-side
+# `evidence_routing` metadata steers the spill, and oversized bodies reach the
+# model as evidence artifacts plus a bounded preview instead of entering the
+# parent context wholesale. The legacy
 # workshop-synthesis behavior (truncate to a preview, store the raw text in
 # the in-memory `last_tool_result` variable) survives only behind the
 # `CODEWHALE_CLASSIC_OUTPUT_ROUTING` rollback switch — and that variable is
@@ -1195,7 +1196,9 @@ exponential_base = 2.0
 # thresholds without changing the global default; they apply to the adaptive
 # router's threshold too. Name tools by the identifier that actually
 # executes — the shell tool is `bash` (`exec_shell` was retired), `grep_files`
-# and `web_search` are live names, so an override keyed to them matches.
+# is the live search name, and the web tool is `Web`. A key with a live name
+# matches; `web_search` runs inside `Web` and is not a registered name, so a
+# key with it (or with `exec_shell`) matches nothing.
 #
 # There is no per-call `raw = true` escape. It was documented here, but
 # `raw = true` on a tool call does NOT bypass routing: the adaptive router
@@ -1212,7 +1215,7 @@ exponential_base = 2.0
 # # tool_result_max_bytes = 102400
 # [workshop.per_tool_thresholds]
 # bash = 2048          # shell output routed aggressively
-# web_search = 8192    # search results can be large; give them more room
+# Web = 8192           # Web results can be large; give them more room
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # Profile Example (for multiple environments)
