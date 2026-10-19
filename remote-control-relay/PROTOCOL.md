@@ -232,6 +232,14 @@ connection open.
   against `WS_MAX_BUFFERED_BYTES`. A slow recipient is terminated when the
   high-water mark would be crossed; the Relay does not accumulate an unbounded
   per-client queue.
+- HTTP analytics and WebSockets currently share the Node event loop. Long
+  synchronous statistics queries can delay application heartbeats and transport
+  pongs until a desktop disconnects. Scene value joins index copy/export signals
+  by installation, session and turn, then search the completion-time window;
+  they must not rescan the full event history for each scene task. Regression
+  coverage checks join boundaries, result isolation and a deterministic work
+  budget. If heavier analytics are added, move them off the Relay event loop
+  rather than extending authenticated liveness deadlines.
 - Browser WebSocket upgrades must use either a same-host `Origin` or an origin
   listed in `PINVOU_REMOTE_ALLOWED_WEB_ORIGINS`. Native desktop clients may omit
   `Origin`. The check assumes the reverse proxy preserves the public `Host` and

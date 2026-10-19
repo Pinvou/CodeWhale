@@ -616,6 +616,72 @@ test("scene value signals require the same installation, session, and turn", () 
   assert.equal(sameSession.negative_feedback_rate, 1 / 30);
 });
 
+test("scene value joins preserve time boundaries, unordered signals, and feedback", () => {
+  const now = at("2026-09-04T12:00:00");
+  const windowMs = 30 * 60_000;
+  const cases = [
+    { name: "at_completion", signals: [["response_copied", 0]], valued: true },
+    { name: "at_window_end", signals: [["artifact_exported", windowMs]], valued: true },
+    { name: "after_window", signals: [["response_copied", windowMs + 1]], valued: false },
+    { name: "before_completion", signals: [["response_copied", -1]], valued: false },
+    { name: "unordered", signals: [["artifact_exported", windowMs + 1], ["response_copied", -1], ["response_copied", 1]], valued: true },
+    { name: "other_installation", signals: [["response_copied", 1, { identity_id: "other_installation" }]], valued: false },
+    { name: "other_session", signals: [["response_copied", 1, { session_id: "other_session" }]], valued: false },
+    { name: "other_turn", signals: [["artifact_exported", 1, { turn_id: "other_turn" }]], valued: false },
+    { name: "positive_feedback", signals: [["response_feedback_changed", 1, { feedback_action: "set", rating: "positive" }]], valued: true },
+    { name: "removed_feedback", signals: [["response_feedback_changed", 1, { feedback_action: "set", rating: "positive" }], ["response_feedback_changed", 2, { feedback_action: "remove" }]], valued: false },
+    { name: "negative_and_copy", signals: [["response_copied", 1], ["response_feedback_changed", 2, { feedback_action: "set", rating: "negative" }]], valued: true, negative: true },
+  ];
+  const events = cases.flatMap(scenario => Array.from({ length: 30 }, (_, index) => {
+    const base = now - 2 * 60 * 60_000 + index;
+    const identity = `install_${scenario.name}`;
+    const attemptId = `${scenario.name}_${index}`;
+    const context = { identity_id: identity, session_id: "session", turn_id: `turn_${index}` };
+    return [
+      { event_id: `scene_${attemptId}`, event_name: "scene_submitted", attempt_id: attemptId, scene_l1: "work", scene_l2: scenario.name, ...context, occurred_at: base - 1 },
+      { event_id: `finish_${attemptId}`, event_name: "task_finished", attempt_id: attemptId, status: "success", mode: "assistant", initiator_type: "user", ...context, occurred_at: base },
+      ...scenario.signals.map(([eventName, offset, overrides], signalIndex) => ({
+        event_id: `signal_${attemptId}_${signalIndex}`, event_name: eventName,
+        ...context, ...overrides, occurred_at: base + offset,
+      })),
+    ];
+  }).flat());
+  const report = buildBehaviorSceneRanking(
+    installationDevicesFor(events), [], events, "today", now, { minimumGroupSubjects: 0 },
+  );
+  for (const scenario of cases) {
+    const row = report.rows.find(item => item.scene_l2 === scenario.name);
+    assert.equal(row.explicit_value_sample_size, 30, scenario.name);
+    assert.equal(row.explicit_value_rate, scenario.valued ? 1 : 0, scenario.name);
+    assert.equal(row.negative_feedback_rate, scenario.negative ? 1 : 0, scenario.name);
+  }
+});
+
+test("scene value joins keep work linear when unrelated history grows", () => {
+  const now = at("2026-09-04T12:00:00");
+  let unrelatedTurnReads = 0;
+  const events = Array.from({ length: 10_000 }, (_, index) => ({
+    event_id: `unrelated_${index}`, event_name: "app_opened",
+    identity_id: `unrelated_install_${Math.floor(index / 50)}`,
+    session_id: "unrelated_session", occurred_at: now - 60_000,
+    get turn_id() { unrelatedTurnReads += 1; return "unrelated_turn"; },
+  }));
+  for (let index = 0; index < 30; index += 1) {
+    events.push(
+      { event_id: `scene_${index}`, event_name: "scene_submitted", attempt_id: `attempt_${index}`, scene_l1: "work", scene_l2: "writing", identity_id: "scene_install", occurred_at: now - 2_000 },
+      { event_id: `finish_${index}`, event_name: "task_finished", attempt_id: `attempt_${index}`, session_id: "session", turn_id: `turn_${index}`, status: "success", mode: "assistant", initiator_type: "user", identity_id: "scene_install", occurred_at: now - 1_000 },
+    );
+  }
+  const report = buildBehaviorSceneRanking(
+    installationDevicesFor(events), [], events, "today", now, { minimumGroupSubjects: 0 },
+  );
+  assert.equal(report.rows[0].explicit_value_sample_size, 30);
+  assert.equal(report.rows[0].explicit_value_rate, 0);
+  // A work budget detects repeated full-history joins without a flaky clock limit.
+  assert(unrelatedTurnReads <= events.length,
+    `scene joins revisited unrelated history ${unrelatedTurnReads} times`);
+});
+
 test("tool funnel operation identifiers are isolated by installation", () => {
   const now = at("2026-09-04T12:00:00");
   const events = ["install_a", "install_b"].flatMap((identity) => [

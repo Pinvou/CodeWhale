@@ -1425,6 +1425,33 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
   };
 }
 
+function sceneValueSignalIndex(events) {
+  const byTurn = new Map();
+  for (const event of events) {
+    if (!["response_copied", "artifact_exported"].includes(event.event_name)) continue;
+    const turnKey = sessionTurnIdentityKey(event);
+    const occurredAt = Number(event.occurred_at);
+    if (!turnKey || Number.isNaN(occurredAt)) continue;
+    const timestamps = byTurn.get(turnKey) || [];
+    timestamps.push(occurredAt);
+    byTurn.set(turnKey, timestamps);
+  }
+  for (const timestamps of byTurn.values()) timestamps.sort((left, right) => left - right);
+  return byTurn;
+}
+
+function hasSceneValueSignal(byTurn, turnKey, completedAt) {
+  const timestamps = byTurn.get(turnKey) || [];
+  let low = 0;
+  let high = timestamps.length;
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    if (timestamps[middle] < completedAt) low = middle + 1;
+    else high = middle;
+  }
+  return low < timestamps.length && timestamps[low] <= completedAt + EXPLICIT_VALUE_WINDOW_MS;
+}
+
 export function buildBehaviorSceneRanking(devices, usageEvents, behaviorEvents, range = "30", now = Date.now(), options = {}) {
   behaviorEvents = installationBehaviorEvents(devices, behaviorEvents);
   const window = rangeWindow(range, now);
@@ -1434,6 +1461,9 @@ export function buildBehaviorSceneRanking(devices, usageEvents, behaviorEvents, 
   const windowEvents = clipDailySubjectContributions(
     filteredBehaviorEvents(behaviorEvents, window),
   ).events;
+  // The HTTP statistics routes share Relay's event loop with WebSocket heartbeats.
+  // Index once instead of scanning the entire history for every scene task.
+  const valueSignalsByTurn = sceneValueSignalIndex(windowEvents);
   const finishedByAttempt = new Map(uniqueAttempts(windowEvents, "task_finished")
     .map(event => [attemptIdentityKey(event), event]));
   const latestFeedbackByTurn = new Map();
@@ -1485,12 +1515,9 @@ export function buildBehaviorSceneRanking(devices, usageEvents, behaviorEvents, 
         if (feedback?.feedback_action === "set" && feedback.rating === "negative") {
           row.negative_feedback.add(taskKey);
         }
-        const hasValue = Boolean(finishedTurnKey) && (windowEvents.some(signal => (
-          sessionTurnIdentityKey(signal) === finishedTurnKey
-            && ["response_copied", "artifact_exported"].includes(signal.event_name)
-            && Number(signal.occurred_at) >= Number(finished.occurred_at)
-            && Number(signal.occurred_at) <= Number(finished.occurred_at) + EXPLICIT_VALUE_WINDOW_MS
-        )) || (feedback?.feedback_action === "set"
+        const hasValue = Boolean(finishedTurnKey) && (hasSceneValueSignal(
+          valueSignalsByTurn, finishedTurnKey, Number(finished.occurred_at),
+        ) || (feedback?.feedback_action === "set"
           && feedback.rating === "positive"
           && Number(feedback.occurred_at) >= Number(finished.occurred_at)
           && Number(feedback.occurred_at) <= Number(finished.occurred_at) + EXPLICIT_VALUE_WINDOW_MS));
