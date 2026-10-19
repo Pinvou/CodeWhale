@@ -7,6 +7,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  selectedDeployProfile,
+  deployProfileLabel,
   MAX_LOG_LINES,
   UNLOCK_CLICKS,
   UNLOCK_CLICK_GAP_MS,
@@ -31,6 +33,23 @@ import {
 } from '../src/features/model-store/model-store-logic.js';
 
 const emptyState = () => ({ lines: [], progress: null, speed: null, prompt: null, samples: [] });
+
+test('deployment selection uses the backend default and keeps valid saved choices', () => {
+  const record = {
+    card_id: 'qwen38-27b-nvfp4-mtp',
+    profiles: [{ id: 'benchmark' }, { id: 'production-sampling' }],
+    default_profile_id: 'production-sampling',
+  };
+  assert.equal(selectedDeployProfile(record), 'production-sampling');
+  assert.equal(selectedDeployProfile({ ...record, active_profile_id: 'benchmark' }), 'benchmark');
+  assert.equal(selectedDeployProfile({ ...record, active_profile_id: 'removed' }), 'production-sampling');
+  assert.equal(selectedDeployProfile({ ...record, default_profile_id: 'removed' }), 'benchmark');
+  assert.equal(selectedDeployProfile({ profiles: [] }), null);
+  const copy = { profileMtpBenchmark: 'Benchmark 64K', profileMtpProduction: 'Production 256K' };
+  assert.equal(deployProfileLabel(record, { id: 'benchmark', name: 'Old default 8K' }, copy), 'Benchmark 64K');
+  assert.equal(deployProfileLabel(record, { id: 'production-sampling' }, copy), 'Production 256K');
+  assert.equal(deployProfileLabel({ card_id: 'other' }, { id: 'benchmark', name: 'Other profile' }, copy), 'Other profile');
+});
 
 test('formatBytes：按 1024 进位，B 取整、其余保留一位小数', () => {
   assert.equal(formatBytes(0), '0B');

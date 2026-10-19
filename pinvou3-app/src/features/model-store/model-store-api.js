@@ -80,6 +80,16 @@ function fetchModelDetail(cardId) {
   return invokeTauri('model_store_model_detail', { cardId });
 }
 
+/** Read the latest recipe and compare it with the installed card. */
+function checkCardUpdate(cardId) {
+  return invokeTauri('model_store_check_card_update', { cardId });
+}
+
+/** Apply the exact revision that the user reviewed; progress uses normal tasks. */
+function startCardUpdate(cardId, revision) {
+  return invokeTauri('model_store_start_card_update', { cardId, revision });
+}
+
 /**
  * 某个模型的 API Key 列表。
  * @param {string} cardId - 卡片 ID。
@@ -258,6 +268,8 @@ function saveStorageSettings({ modelsDir = null, importScanDirs = null } = {}) {
 }
 
 export {
+  checkCardUpdate,
+  startCardUpdate,
   storeAvailability,
   takeStartupCleanup,
   fetchStorageSettings,
@@ -281,3 +293,6 @@ export {
   answerRun,
   fetchActiveRuns,
 };
+
+export function fetchVersions(cardId) { return invokeTauri("model_store_versions", { cardId }); }
+export function startVersionAction(cardId, action, versionId) { return invokeTauri("model_store_start_version_action", { cardId, action, versionId }); }

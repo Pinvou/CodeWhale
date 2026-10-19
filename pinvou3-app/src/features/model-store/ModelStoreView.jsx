@@ -1,3 +1,4 @@
+import { ModelVersionsDialog } from "./ModelVersionsDialog.jsx";
 // 模型商店:浏览 / 下载 / 在本机部署大模型。
 //
 // 数据来自本进程的 model_store 命令(见 model-store-api.js),本文件不直接碰
@@ -17,12 +18,14 @@ import { EmptyState } from '../../components/EmptyState.jsx';
 import { Spinner } from '../../components/Spinner.jsx';
 import { IosSearchField } from '../../components/IosControls.jsx';
 import {
+  startVersionAction,
   disableTestStore,
   fetchLibrary,
   fetchStoreCards,
   fetchTestStoreState,
   forceRemoveModel,
   startDeploy,
+  startCardUpdate,
   startDownload,
   startEnable,
   startStop,
@@ -33,6 +36,8 @@ import {
 } from './model-store-api.js';
 import {
   advanceUnlockClicks,
+  selectedDeployProfile,
+  deployProfileLabel,
   cardIdFromLifecycleKey,
   downloadTaskKey,
   filterModels,
@@ -61,6 +66,7 @@ import {
 } from './useLmmTasks.js';
 import { StoreGuide } from './ModelStoreCards.jsx';
 import { ModelRow } from './ModelRow.jsx';
+import { CardUpdateDialog } from './CardUpdateDialog.jsx';
 import { ModelStoreTaskPanel } from './ModelStoreTaskPanel.jsx';
 import { ModelDetailDialog } from './ModelDetailDialog.jsx';
 import { StoreCardDialog } from './StoreCardDialog.jsx';
@@ -89,8 +95,9 @@ const PILL_BASE = 'inline-flex h-9 items-center rounded-full px-3.5 text-[13px] 
 const PILL_ON = 'bg-[#3A3A3C] text-white dark:bg-white dark:text-black';
 const PILL_OFF = 'bg-[#F2F2F7] text-black hover:bg-[#E5E5EA] dark:bg-[#2C2C2E] dark:text-white dark:hover:bg-[#3A3A3C]';
 const EMPTY_LIBRARY = { models: [], corrected: [] };
+const EMPTY_STARTUP_UPDATES = [];
 
-const ModelStoreView = ({ theme, t, bs }) => {
+const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, onLibrarySnapshot = NOOP }) => {
   const copy = t.uiModelStore;
   // 桥接快照只做「宿主是否已就绪」的标记;模型商店的数据走 LMM 自己的管理接口,
   // 不从 bs 里取。
@@ -119,6 +126,9 @@ const ModelStoreView = ({ theme, t, bs }) => {
 
   const [detailCard, setDetailCard] = useState(null);
   const [detailCardId, setDetailCardId] = useState(null);
+  const [updateRecord, setUpdateRecord] = useState(null);
+  const [versionsRecord, setVersionsRecord] = useState(null);
+  const [versionCleanupResult, setVersionCleanupResult] = useState(null);
   const [confirmUninstall, setConfirmUninstall] = useState(null);
   // 卸载失败后的逃生路径。两段:'confirm' 是二次确认,'result' 是移除之后把
   // LMM 报回来的残留路径摊开给用户看。
@@ -210,6 +220,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
       const libraryList = await fetchLibrary();
       if (stale()) return;
       setLibrary(libraryList || EMPTY_LIBRARY);
+      onLibrarySnapshot(libraryList?.models || []);
       setLibraryError(null);
       // 启动时按实际容器状态纠正过运行标记的模型:用户上次看到的「运行中」其实
       // 已经不在了,不说一声他会以为模型还在服务。
@@ -220,7 +231,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
     } finally {
       if (!stale()) setLibraryLoading(false);
     }
-  }, [copy, showToast]);
+  }, [copy, showToast, onLibrarySnapshot]);
 
   /**
    * 两份数据一起刷。**刻意不是 Promise.all**:两条路各自成败、各自记错误态,
@@ -367,6 +378,12 @@ const ModelStoreView = ({ theme, t, bs }) => {
           return { title: copy.taskDownload(name), key: downloadTaskKey(cardId) };
         case 'deploy':
           return { title: copy.taskDeploy(name), key: lifecycleTaskKey(cardId) };
+        case 'version_stage':
+        case 'version_switch':
+        case 'version_delete':
+          return { title: copy.versionTask(name), key: lifecycleTaskKey(cardId) };
+        case 'update':
+          return { title: copy.taskCardUpdate(name), key: lifecycleTaskKey(cardId) };
         case 'enable':
           return { title: copy.taskEnable(name), key: lifecycleTaskKey(cardId) };
         case 'stop':
@@ -506,12 +523,33 @@ const ModelStoreView = ({ theme, t, bs }) => {
     [copy, runLifecycle]
   );
 
+  const handleCardUpdate = useCallback(
+    (record, revision) => runLifecycle({
+      record,
+      kind: 'update',
+      title: copy.taskCardUpdate(record.card_name),
+      start: () => startCardUpdate(record.card_id, revision),
+      doneText: (outcome) => (outcome?.changed ? copy.cardUpdateDone : copy.cardUpdateCurrent),
+    }),
+    [copy, runLifecycle]
+  );
+
+  const handleVersionAction = useCallback(async (record, action, versionId) => {
+    const result = await runLifecycle({ record, kind: `version_${action}`,
+      title: copy.versionTask(record.card_name),
+      start: () => startVersionAction(record.card_id, action, versionId),
+      doneText: (outcome) => action === 'delete' ? copy.versionDeleted((outcome?.freed_bytes || 0) / 1024 ** 3) : (action === 'stage' ? copy.versionStaged : copy.versionSwitched),
+    });
+    if (result?.ok && action === 'stage') setVersionsRecord(record);
+    if (result?.ok && action === 'delete' && result.result?.remaining_paths?.length) setVersionCleanupResult(result.result);
+  }, [copy, runLifecycle]);
+
   const handleDeploy = useCallback(
     (record) => {
       // 多套部署方案的卡片先弹方案选择器;单方案/无方案卡片直接部署。
       const profiles = record.profiles || [];
       if (profiles.length > 1) {
-        setProfilePick({ record, selectedId: record.active_profile_id || profiles[0].id });
+        setProfilePick({ record, selectedId: selectedDeployProfile(record) });
         return;
       }
       deployWithProfile(record, null);
@@ -729,6 +767,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
             <ModelRow
               key={model.id}
               model={model}
+              hasUpdate={startupUpdates.some((update) => update.card_id === model.id && update.local_revision === model.record?.card_revision)}
               copy={copy}
               busyKind={
                 model.state === 'available'
@@ -741,6 +780,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
               onEnable={handleEnable}
               onStop={handleStop}
               onUninstall={requestUninstall}
+              onCheckUpdate={setUpdateRecord} onVersions={setVersionsRecord}
             />
           ))}
         </div>
@@ -997,7 +1037,27 @@ const ModelStoreView = ({ theme, t, bs }) => {
         }}
       />
 
+      {versionCleanupResult ? <MsDialog open onClose={() => setVersionCleanupResult(null)} theme={theme} labelledBy="version-cleanup-result" testId="model-version-cleanup-result">
+        <MsDialogTitle id="version-cleanup-result" onClose={() => setVersionCleanupResult(null)} closeLabel={copy.detailClose}>{copy.versionCleanupTitle}</MsDialogTitle>
+        <p>{copy.versionDeleted((versionCleanupResult.freed_bytes || 0) / 1024 ** 3)}</p>
+        <p className="mt-3 text-[13px]">{copy.versionRemaining}</p>
+        <ul className="mt-2 space-y-1 break-all text-[12px]">{versionCleanupResult.remaining_paths.map((path) => <li key={path}>{path}</li>)}</ul>
+      </MsDialog> : null}
+      {versionsRecord ? <ModelVersionsDialog record={library.models?.find((r) => r.card_id === versionsRecord.card_id) || versionsRecord} copy={copy} theme={theme} busy={!!runningTask(lifecycleTaskKey(versionsRecord.card_id))} onClose={() => setVersionsRecord(null)} onAction={handleVersionAction} /> : null}
+      {updateRecord ? (
+        <CardUpdateDialog
+          key={updateRecord.card_id}
+          record={updateRecord}
+          copy={copy}
+          theme={theme}
+          busy={!!runningTask(lifecycleTaskKey(updateRecord.card_id))}
+          onClose={() => setUpdateRecord(null)}
+          onUpdate={handleCardUpdate} onStage={(record, revision) => handleVersionAction(record, "stage", revision)} onVersions={setVersionsRecord}
+        />
+      ) : null}
+
       <ModelDetailDialog
+        onVersions={(record) => { setDetailCardId(null); setVersionsRecord(record); }}
         cardId={detailCardId}
         // 只为了权重校验档位：那是卡片元数据，库记录（弹窗自己 fetch 的那份）里
         // 没有这一列。找不到时传 null，弹窗会按最不安全那一档出提示。
@@ -1009,6 +1069,10 @@ const ModelStoreView = ({ theme, t, bs }) => {
         savedModels={bs?.savedModels}
         onToast={showToast}
         onClose={() => setDetailCardId(null)}
+        onCheckUpdate={(record) => {
+          setDetailCardId(null);
+          setUpdateRecord(record);
+        }}
         onRedeploy={(record) => {
           setDetailCardId(null);
           handleDeploy(record);
@@ -1164,7 +1228,10 @@ const ModelStoreView = ({ theme, t, bs }) => {
                     onChange={() => setProfilePick((prev) => ({ ...prev, selectedId: profile.id }))}
                   />
                   <span className="min-w-0">
-                    <span className={`block text-[13px] ${TEXT_PRIMARY}`}>{profile.name}</span>
+                    <span className={`block text-[13px] ${TEXT_PRIMARY}`}>
+                      {deployProfileLabel(profilePick.record, profile, copy)}
+                      {profile.id === profilePick.record.default_profile_id ? <span className={`ml-2 text-[11px] ${TEXT_SECONDARY}`}>{copy.profileDefault}</span> : null}
+                    </span>
                     {profile.description ? (
                       <span className={`block text-[11px] ${TEXT_SECONDARY}`}>{profile.description}</span>
                     ) : null}

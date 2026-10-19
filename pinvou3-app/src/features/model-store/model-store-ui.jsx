@@ -93,7 +93,7 @@ function MsPill({ tone = 'neutral', children, className = '', testId }) {
  * 键盘路径靠 Escape 监听和弹窗内的关闭按钮,背板只做点击关闭。
  * @returns {React.ReactElement|null} 弹窗。
  */
-function MsDialog({ open, onClose, theme, labelledBy, wide = false, testId, children }) {
+function MsDialog({ open, onClose, theme, labelledBy, wide = false, testId, footer, children }) {
   const isDark = theme === 'dark';
   useEffect(() => {
     if (!open) return () => {};
@@ -123,14 +123,19 @@ function MsDialog({ open, onClose, theme, labelledBy, wide = false, testId, chil
         aria-modal="true"
         aria-labelledby={labelledBy}
         data-testid={testId}
-        className={`max-h-[calc(100vh-96px)] ${wide ? 'w-[560px]' : 'w-[420px]'} max-w-[calc(100vw-48px)] overflow-y-auto rounded-[20px] bg-white p-6 dark:bg-[#202124] ${TEXT_PRIMARY}`}
+        className={`max-h-[calc(100vh-96px)] ${wide ? 'w-[560px]' : 'w-[420px]'} max-w-[calc(100vw-48px)] ${footer ? 'flex flex-col overflow-hidden' : 'overflow-y-auto'} rounded-[20px] bg-white p-6 dark:bg-[#202124] ${TEXT_PRIMARY}`}
         style={{
           // isDark dynamic-value: 保留 (boxShadow)
           boxShadow: isDark ? '0 24px 60px rgba(0,0,0,.55)' : '0 24px 60px rgba(0,0,0,.22)',
         }}
         onClick={(event) => event.stopPropagation()}
       >
-        {children}
+        {footer ? (
+          <>
+            <div className="min-h-0 min-w-0 overflow-x-hidden overflow-y-auto">{children}</div>
+            <div className="mt-4 shrink-0 border-t border-black/10 pt-4 dark:border-white/10">{footer}</div>
+          </>
+        ) : children}
       </div>
     </div>
   );

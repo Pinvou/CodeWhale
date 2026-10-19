@@ -79,6 +79,12 @@ CREATE TABLE IF NOT EXISTS store_models (
     assets_content_json TEXT
 );
 
+CREATE TABLE IF NOT EXISTS model_versions (
+ card_id TEXT NOT NULL, version_id TEXT NOT NULL, state TEXT NOT NULL,
+ record_json TEXT, models_root TEXT, runtime_card_id TEXT NOT NULL,
+ resource_dir TEXT, managed INTEGER NOT NULL DEFAULT 0,
+ created_at TEXT NOT NULL, error TEXT, PRIMARY KEY(card_id,version_id));
+
 CREATE TABLE IF NOT EXISTS api_keys (
     id TEXT PRIMARY KEY,
     card_id TEXT,
@@ -116,6 +122,10 @@ const MIGRATION_COLUMNS: &[(&str, &[(&str, &str)])] = &[
             // 这是判断"某个容器是不是本应用起的"唯一可靠的依据——镜像不是身份，
             // 别人用同一个镜像起的容器跟我们的长得一模一样。
             ("container_name", "TEXT"),
+            ("card_update_pending", "INTEGER NOT NULL DEFAULT 0"),
+            ("models_root", "TEXT"),
+            ("runtime_card_id", "TEXT"),
+            ("active_version_id", "TEXT"),
         ],
     ),
     ("api_keys", &[("card_id", "TEXT")]),
@@ -153,7 +163,7 @@ pub fn db_path() -> PathBuf {
 /// WAL 会在库文件旁多出 `models.db-wal` / `models.db-shm` 两个文件。已确认全仓
 /// 没有任何地方按 `models.db` 这个确切文件名去删除、备份或导出（`db_path()`
 /// 只有本文件在用），所以不存在"删掉主库、留下两个残片"的清理漏网。
-fn connect() -> rusqlite::Result<Connection> {
+pub(super) fn connect() -> rusqlite::Result<Connection> {
     // 开库之前先把库文件的权限收好，库里存着明文网关密钥（见 ensure_db_file_private）。
     ensure_db_file_private();
     let conn = Connection::open(db_path())?;
@@ -361,7 +371,7 @@ pub struct InstalledEngineRecord {
 }
 
 impl InstalledEngineRecord {
-    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+    pub(super) fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
             engine_name: row.get("engine_name")?,
             engine_version: row.get("engine_version")?,
@@ -489,7 +499,7 @@ pub fn set_container_name(card_id: &str, container_name: Option<&str>) -> rusqli
 
 // ---------------- 商店模型记录 ----------------
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StoreModelRecord {
     pub card_id: String,
     pub model_name: String,
@@ -529,6 +539,15 @@ pub struct StoreModelRecord {
     /// 一比就知道。以前界面对所有已部署模型都常驻一个「重新部署」按钮，用户
     /// 根本不知道自己为什么要点它。
     pub deployed_script_sha256: Option<String>,
+    pub card_source: String,
+    /// A whole-package update must be installed and deployed before enabling.
+    pub card_update_pending: bool,
+    #[serde(default)]
+    pub models_root: Option<String>,
+    #[serde(default)]
+    pub runtime_card_id: Option<String>,
+    #[serde(default)]
+    pub active_version_id: Option<String>,
 }
 
 /// 一份固化下来的脚本：正文 + 它的 sha256（来源哈希，用于"检查卡片更新"时
@@ -540,7 +559,7 @@ pub struct ScriptBlob {
 }
 
 impl StoreModelRecord {
-    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+    pub(super) fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
         let profiles_raw: Option<String> = row.get("profiles_json")?;
         let profiles = profiles_raw
             .and_then(|s| serde_json::from_str::<Vec<DeployProfile>>(&s).ok())
@@ -595,6 +614,13 @@ impl StoreModelRecord {
                 .and_then(|s| serde_json::from_value(serde_json::Value::String(s)).ok())
                 .unwrap_or_default(),
             deployed_script_sha256: row.get("deployed_script_sha256")?,
+            card_source: row
+                .get::<_, Option<String>>("card_source")?
+                .unwrap_or_else(|| "store".into()),
+            card_update_pending: row.get::<_, i64>("card_update_pending")? != 0,
+            models_root: row.get("models_root")?,
+            runtime_card_id: row.get("runtime_card_id")?,
+            active_version_id: row.get("active_version_id")?,
         })
     }
 }
@@ -618,6 +644,81 @@ pub fn set_scripts_content(
         params![json, assets_json, now_iso(), card_id],
     )?;
     Ok(())
+}
+
+/// Commit metadata, profiles and the verified file package together. Keep model
+/// identity, credentials, weights, endpoints and deployment history intact.
+pub fn replace_card_package(
+    expected: &StoreModelRecord,
+    card: &super::store_client::StoreCardDetail,
+    blobs: &std::collections::BTreeMap<String, ScriptBlob>,
+    assets: &std::collections::BTreeMap<String, ScriptBlob>,
+) -> Result<(), String> {
+    let replace = || -> rusqlite::Result<bool> {
+        let mut conn = connect()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current = tx.query_row(
+            "SELECT * FROM store_models WHERE card_id = ?1",
+            params![expected.card_id],
+            StoreModelRecord::from_row,
+        )?;
+        if current.running
+            || current.status != expected.status
+            || current.card_source != expected.card_source
+            || current.scripts_fetched_at != expected.scripts_fetched_at
+            || super::card_update::local_manifest(&current)
+                != super::card_update::local_manifest(expected)
+        {
+            return Ok(false);
+        }
+        let active_profile = current
+            .active_profile_id
+            .filter(|id| card.profiles.iter().any(|p| &p.id == id));
+        let size_bytes = i64::try_from(card.summary.size_bytes)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        tx.execute(
+            "UPDATE store_models SET card_name=?1, org=?2, description=?3,
+             engine_name=?4, engine_version=?5, size_bytes=?6, quantization=?7,
+             source_repo_id=?8, source_filename=?9, profiles_json=?10,
+             active_profile_id=?11, scripts_content_json=?12, assets_content_json=?13,
+             scripts_fetched_at=?14, card_update_pending=1,
+             script_install_engine=?15, script_download_model=?16, script_deploy=?17,
+             script_enable=?18, script_stop=?19, script_uninstall=?20
+             WHERE card_id=?21",
+            params![
+                card.summary.name,
+                card.summary.org,
+                card.summary.description,
+                card.summary.engine_name,
+                card.summary.engine_version,
+                size_bytes,
+                card.summary.quantization,
+                card.source_repo_id,
+                card.source_filename,
+                serde_json::to_string(&card.profiles)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+                active_profile,
+                serde_json::to_string(blobs)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+                serde_json::to_string(assets)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+                now_iso(),
+                card.scripts.get("install_engine"),
+                card.scripts.get("download_model"),
+                card.scripts.get("deploy"),
+                card.scripts.get("enable"),
+                card.scripts.get("stop"),
+                card.scripts.get("uninstall"),
+                expected.card_id
+            ],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    };
+    match replace().map_err(|e| format!("保存卡片更新失败，已保留原版本：{e}"))? {
+        true => Ok(()),
+        false => Err("模型状态在更新期间发生变化，未替换卡片；请重新检查更新。".into()),
+    }
 }
 
 pub struct AddStoreModelParams<'a> {
@@ -755,7 +856,7 @@ pub fn update_store_model_status(
     let conn = connect()?;
     if status == "deployed" {
         conn.execute(
-            "UPDATE store_models SET status = ?1, deployed_at = ?2, deployed_script_sha256 = ?3              WHERE card_id = ?4",
+            "UPDATE store_models SET status = ?1, deployed_at = ?2, deployed_script_sha256 = ?3, card_update_pending = 0 WHERE card_id = ?4",
             params![status, now_iso(), deploy_script_sha256, card_id],
         )?;
     } else {
@@ -847,6 +948,61 @@ pub fn list_store_models() -> rusqlite::Result<Vec<StoreModelRecord>> {
     Ok(rows)
 }
 
+/// Startup discovery reads catalogue metadata and stored digests only. Serde
+/// skips source contents without allocating copies; no weight files are opened.
+pub(super) fn startup_card_ids() -> rusqlite::Result<Vec<String>> {
+    let conn = connect()?;
+    let mut query = conn
+        .prepare("SELECT card_id FROM store_models WHERE card_source='store' ORDER BY card_id")?;
+    query.query_map([], |row| row.get(0))?.collect()
+}
+
+pub(super) fn startup_card_manifest(card_id: &str) -> rusqlite::Result<Option<serde_json::Value>> {
+    #[derive(serde::Deserialize)]
+    struct DigestOnly {
+        sha256: String,
+    }
+    fn json_error(e: serde_json::Error) -> rusqlite::Error {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+    }
+    fn digests(
+        row: &rusqlite::Row<'_>,
+        column: &str,
+    ) -> rusqlite::Result<std::collections::BTreeMap<String, String>> {
+        let raw = row.get_ref(column)?;
+        let text = if raw == rusqlite::types::ValueRef::Null {
+            "{}"
+        } else {
+            raw.as_str()?
+        };
+        let blobs: std::collections::BTreeMap<String, DigestOnly> =
+            serde_json::from_str(text).map_err(json_error)?;
+        Ok(blobs
+            .into_iter()
+            .map(|(key, blob)| {
+                let hash = super::native_card_compat::upstream_digest(&key, &blob.sha256);
+                (key, hash)
+            })
+            .collect())
+    }
+    connect()?.query_row(
+        "SELECT card_name,org,description,engine_name,engine_version,size_bytes,quantization,source_repo_id,source_filename,profiles_json,deploy_topology,scripts_content_json,assets_content_json FROM store_models WHERE card_id=?1 AND card_source='store'",
+        [card_id], |row| {
+            let raw = row.get_ref("profiles_json")?;
+            let profiles: Vec<DeployProfile> = serde_json::from_str(if raw == rusqlite::types::ValueRef::Null { "[]" } else { raw.as_str()? }).map_err(json_error)?;
+            Ok(serde_json::json!({
+                "name":row.get::<_,String>("card_name")?, "org":row.get::<_,Option<String>>("org")?,
+                "description":row.get::<_,Option<String>>("description")?, "engine_name":row.get::<_,String>("engine_name")?,
+                "engine_version":row.get::<_,Option<String>>("engine_version")?, "size_bytes":row.get::<_,i64>("size_bytes")?,
+                "quantization":row.get::<_,Option<String>>("quantization")?, "source_repo_id":row.get::<_,Option<String>>("source_repo_id")?,
+                "source_filename":row.get::<_,Option<String>>("source_filename")?, "profiles":profiles,
+                "deploy_topology":row.get::<_,String>("deploy_topology")?,
+                "scripts":digests(row,"scripts_content_json")?, "assets":digests(row,"assets_content_json")?,
+            }))
+        }
+    ).optional()
+}
+
 pub fn get_store_model(card_id: &str) -> rusqlite::Result<Option<StoreModelRecord>> {
     let conn = connect()?;
     conn.query_row(
@@ -876,6 +1032,15 @@ pub fn get_store_model_by_name(model_name: &str) -> rusqlite::Result<Option<Stor
 pub fn delete_store_model(card_id: &str) -> rusqlite::Result<()> {
     let mut conn = connect()?;
     let tx = conn.transaction()?;
+    let retained: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM model_versions WHERE card_id=?1 AND state!='current'",
+        [card_id],
+        |row| row.get(0),
+    )?;
+    if retained != 0 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    tx.execute("DELETE FROM model_versions WHERE card_id=?1", [card_id])?;
     tx.execute(
         "DELETE FROM store_models WHERE card_id = ?1",
         params![card_id],
@@ -909,7 +1074,7 @@ pub struct ApiKeyRecord {
 }
 
 impl ApiKeyRecord {
-    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+    pub(super) fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
             id: row.get("id")?,
             card_id: row.get("card_id")?,
@@ -1414,5 +1579,162 @@ mod tests {
         assert!(cols.contains("profiles_json"));
         assert!(cols.contains("active_profile_id"));
         assert!(cols.contains("endpoint_url"));
+    }
+    fn update_fixture() -> (
+        StoreModelRecord,
+        super::super::store_client::StoreCardDetail,
+    ) {
+        let card: super::super::store_client::StoreCardDetail = serde_json::from_value(serde_json::json!({
+            "id":"update-test", "name":"Updated card", "engine_name":"engine", "engine_version":"v2",
+            "source_repo_id":"org/model", "quantization":"NVFP4", "size_bytes":1024,
+            "profiles":[{"id":"new-profile", "name":"New profile"}],
+            "scripts":{}, "script_sha256":{}, "assets":{}, "asset_sha256":{}
+        })).unwrap();
+        add_store_model(AddStoreModelParams {
+            card_id: "update-test",
+            model_name: "stable-model-name",
+            card_name: "Old card",
+            org: None,
+            description: None,
+            engine_name: "engine",
+            engine_version: Some("v1"),
+            size_bytes: 1024,
+            quantization: Some("NVFP4"),
+            source_repo_id: Some("org/model"),
+            source_filename: None,
+            scripts: &Default::default(),
+            status: "deployed",
+            profiles: &[],
+            deploy_topology: DeployTopology::Single,
+            card_source: "store",
+        })
+        .unwrap();
+        let old = ScriptBlob {
+            content: "old".into(),
+            sha256: super::super::script_runner::sha256_hex("old"),
+        };
+        set_scripts_content(
+            "update-test",
+            &std::collections::BTreeMap::from([("deploy".into(), old)]),
+            &Default::default(),
+        )
+        .unwrap();
+        set_endpoint_info(
+            "update-test",
+            Some("http://127.0.0.1:8000/v1"),
+            Some("served-model"),
+        )
+        .unwrap();
+        (get_store_model("update-test").unwrap().unwrap(), card)
+    }
+
+    #[test]
+    fn card_update_changes_metadata_and_assets_atomically_preserving_model_identity() {
+        let _ctx = setup_temp_db();
+        let (old, card) = update_fixture();
+        let key = add_api_key(&old.card_id, Some("existing-key")).unwrap();
+        let assets = std::collections::BTreeMap::from([(
+            "common.sh".into(),
+            ScriptBlob {
+                content: "new asset".into(),
+                sha256: "new-hash".into(),
+            },
+        )]);
+        // Even unchanged entry scripts need redeployment when metadata/assets change.
+        replace_card_package(&old, &card, &old.scripts_content, &assets).unwrap();
+        let updated = get_store_model(&old.card_id).unwrap().unwrap();
+        assert_eq!(updated.engine_version.as_deref(), Some("v2"));
+        assert_eq!(updated.profiles[0].id, "new-profile");
+        assert_eq!(updated.assets_content["common.sh"].content, "new asset");
+        assert!(updated.card_update_pending);
+        assert_eq!(updated.model_name, old.model_name);
+        assert_eq!(updated.downloaded_at, old.downloaded_at);
+        assert_eq!(updated.deployed_at, old.deployed_at);
+        assert_eq!(updated.endpoint_url, old.endpoint_url);
+        assert_eq!(updated.endpoint_model, old.endpoint_model);
+        assert_eq!(
+            list_api_keys_for_card(&old.card_id).unwrap()[0].key_value,
+            key.key_value
+        );
+        let manager = super::super::lifecycle::ModelManager::new(None, None);
+        let error = manager
+            .enable(&old.card_id, &mut |_| {}, Default::default())
+            .unwrap_err();
+        assert!(error.to_string().contains("重新部署"));
+    }
+
+    #[test]
+    fn card_update_db_failure_keeps_metadata_and_files_together() {
+        let _ctx = setup_temp_db();
+        let (old, card) = update_fixture();
+        connect().unwrap().execute_batch("CREATE TRIGGER reject_card_update BEFORE UPDATE OF scripts_content_json ON store_models BEGIN SELECT RAISE(ABORT,'injected write failure'); END;").unwrap();
+        assert!(
+            replace_card_package(&old, &card, &Default::default(), &Default::default()).is_err()
+        );
+        let kept = get_store_model(&old.card_id).unwrap().unwrap();
+        assert_eq!(
+            super::super::card_update::local_manifest(&kept),
+            super::super::card_update::local_manifest(&old)
+        );
+        assert!(!kept.card_update_pending);
+    }
+
+    #[test]
+    fn card_update_rejects_a_model_that_started_after_preview() {
+        let _ctx = setup_temp_db();
+        let (old, card) = update_fixture();
+        set_running(&old.card_id, true).unwrap();
+        assert!(
+            replace_card_package(&old, &card, &Default::default(), &Default::default()).is_err()
+        );
+        let kept = get_store_model(&old.card_id).unwrap().unwrap();
+        assert_eq!(kept.engine_version, old.engine_version);
+        assert!(kept.running);
+        assert!(!kept.card_update_pending);
+    }
+
+    #[test]
+    fn card_update_preview_detects_asset_and_metadata_only_changes() {
+        let _ctx = setup_temp_db();
+        let (old, mut card) = update_fixture();
+        card.summary.name = old.card_name.clone();
+        card.summary.engine_version = old.engine_version.clone();
+        card.profiles.clear();
+        card.script_sha256 = Some(
+            old.scripts_content
+                .iter()
+                .map(|(k, v)| (k.clone(), v.sha256.clone()))
+                .collect(),
+        );
+        let manifest = super::super::card_update::remote_manifest(&card);
+        assert_eq!(super::super::card_update::local_manifest(&old), manifest);
+        for digest in card.script_sha256.as_mut().unwrap().values_mut() {
+            *digest = digest.to_ascii_uppercase();
+        }
+        assert!(
+            !super::super::card_update::preview(&old, &card)["changed"]
+                .as_bool()
+                .unwrap()
+        );
+        card.asset_sha256 = Some(std::collections::BTreeMap::from([(
+            "common.sh".into(),
+            "a".repeat(64),
+        )]));
+        assert!(
+            super::super::card_update::preview(&old, &card)["changed"]
+                .as_bool()
+                .unwrap()
+        );
+        assert_ne!(
+            super::super::card_update::revision(&manifest),
+            super::super::card_update::revision(&super::super::card_update::remote_manifest(&card))
+        );
+        card.asset_sha256 = Some(Default::default());
+        card.summary.engine_version = Some("v3".into());
+        assert!(
+            super::super::card_update::preview(&old, &card)["changed"]
+                .as_bool()
+                .unwrap()
+        );
     }
 }

@@ -281,8 +281,8 @@ pub fn test_cards() -> Vec<TestCard> {
                 org: Some("Qwen".into()),
                 description: Some(
                     "SGLang + NVFP4 + Native MTP，面向 H3C Cube/GB10（ARM64）。同一个模型/\
-                     同一个引擎镜像下有研究团队验证过的多套部署参数方案：默认「基准测试\
-                     配置」，另可切换到面向生产/Agent 场景的「生产采样配置」。"
+                     同一个引擎镜像下有研究团队验证过的多套部署参数方案：默认使用面向\
+                     生产/Agent 场景的 256K「生产采样配置」，也可选择「基准测试配置」。"
                         .into(),
                 ),
                 size_bytes: 21_945_295_265,
@@ -303,13 +303,13 @@ pub fn test_cards() -> Vec<TestCard> {
             profiles: vec![
                 profile(
                     "benchmark",
-                    "基准测试配置（默认）",
+                    "基准测试配置",
                     "研究团队 Benchmark 验证的默认参数：8192 上下文（部署时覆盖为 65536）、\
                      BF16 KV Cache，默认只监听 127.0.0.1。",
                 ),
                 profile(
                     "production-sampling",
-                    "生产采样配置",
+                    "生产采样配置（默认，256K 上下文）",
                     "面向生产环境 + Agent/工具调用调过的参数：262144 上下文、FP8 E4M3 KV \
                      Cache，默认监听 0.0.0.0，带工具调用/推理内容解析和生产默认采样参数。",
                 ),

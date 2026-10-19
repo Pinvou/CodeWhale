@@ -178,12 +178,24 @@ const STORE_API_ATTEMPTS: u32 = 3;
 
 pub struct StoreClient {
     base_url: String,
+    timeout: Duration,
+    attempts: u32,
 }
 
 impl StoreClient {
     pub fn new(base_url: &str) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
+            timeout: API_TIMEOUT,
+            attempts: STORE_API_ATTEMPTS,
+        }
+    }
+
+    pub(super) fn for_startup(base_url: &str) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            timeout: Duration::from_secs(5),
+            attempts: 1,
         }
     }
 
@@ -216,8 +228,8 @@ impl StoreClient {
             // 只设总超时的话，一条连不上的慢链路能把 15 秒预算全耗在 TCP/TLS
             // 握手上，界面要等满 15 秒才看到"连不上"。对照 llmapi_hub/adapter.rs
             // 的 blocking_client()，两个超时都设。
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(API_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT.min(self.timeout))
+            .timeout(self.timeout)
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
                 if attempt.previous().len() >= 10 || attempt.url().scheme() != "https" {
                     let redirect_url = attempt.url().clone();
@@ -237,14 +249,14 @@ impl StoreClient {
         // 只重试**快速失败**：超时本身已经等满了 API_TIMEOUT，再重试只会让页面
         // 卡得更久；4xx 是商店明确的回答，重试多少次结果都一样。
         let mut last_err = String::new();
-        for attempt in 1..=STORE_API_ATTEMPTS {
+        for attempt in 1..=self.attempts {
             match client.get(&url).send() {
                 Ok(resp) => {
                     let status = resp.status();
                     if status.as_u16() == 404 {
                         return Err(StoreError::new("未找到对应的商店内容"));
                     }
-                    if status.is_server_error() && attempt < STORE_API_ATTEMPTS {
+                    if status.is_server_error() && attempt < self.attempts {
                         last_err = format!("模型商店返回错误（{}）", status.as_u16());
                         std::thread::sleep(std::time::Duration::from_secs(attempt as u64));
                         continue;
@@ -264,7 +276,7 @@ impl StoreClient {
                         "{}（请检查设置里的模型商店地址是否正确、设备是否能访问外网）",
                         humanize_reqwest_error(&e)
                     );
-                    if e.is_timeout() || attempt == STORE_API_ATTEMPTS {
+                    if e.is_timeout() || attempt == self.attempts {
                         break;
                     }
                     std::thread::sleep(std::time::Duration::from_secs(attempt as u64));

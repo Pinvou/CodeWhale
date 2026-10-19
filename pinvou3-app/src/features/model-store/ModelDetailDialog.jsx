@@ -65,7 +65,7 @@ function CopyRow({ label, value, hint, copyLabel, onCopy, testId }) {
  * 按 `none` 处理——宁可多出一条黄条,不能少出一条。
  * @returns {React.ReactElement} 弹窗。
  */
-function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onToast, savedModels }) {
+function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onToast, savedModels, onCheckUpdate, onVersions }) {
   const [detail, setDetail] = useState(null);
   const [keys, setKeys] = useState([]);
   const [error, setError] = useState(null);
@@ -367,6 +367,14 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
                 </div>
               )}
             </div>
+            {record.card_source !== 'builtin' ? (
+          <>
+              <MsButton tone="ghost" disabled={busy} onClick={() => onCheckUpdate(record)}>
+                {copy.cardUpdateCheck}
+              </MsButton>
+              {onVersions ? <MsButton tone="ghost" onClick={() => onVersions(record)}>{copy.versionHistory}</MsButton> : null}
+          </>
+            ) : null}
             {/* 这个「重新部署」**刻意常驻**，跟列表行那个不是一回事：
                 - 列表行（ModelRow）只在 needs_redeploy 时出现——脚本更新了、跟上次
                   部署用的版本对不上。那是日常路径，不该让用户对着一个常亮的按钮
