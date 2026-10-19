@@ -1033,7 +1033,8 @@ pub fn delete_store_model(card_id: &str) -> rusqlite::Result<()> {
     let mut conn = connect()?;
     let tx = conn.transaction()?;
     let retained: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM model_versions WHERE card_id=?1 AND state!='current'",
+        "SELECT COUNT(*) FROM model_versions WHERE card_id=?1
+         AND version_id != COALESCE((SELECT active_version_id FROM store_models WHERE card_id=?1), '')",
         [card_id],
         |row| row.get(0),
     )?;

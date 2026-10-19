@@ -618,8 +618,76 @@ fn rollback_uses_pinned_storage_after_settings_change_and_rejects_corrupt_recipe
 }
 
 #[test]
+fn isolated_purge_checks_shared_references_before_deleting_weights() {
+    let (_temp, mgr, current, card, mut pkg, id) = fixture();
+    pkg.scripts.insert("uninstall".into(), blob(
+        "#!/bin/bash\nprintf '%s' \"$LMM_PURGE_WEIGHTS\" > uninstall-purge-intent\nif [ \"$LMM_PURGE_WEIGHTS\" = 1 ]; then rm -rf \"$LMM_MODELS_DIR/new\"; exit 99; fi\n"
+    ));
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    mgr.delete_version(
+        &current.card_id,
+        &version_store::active_id(&current),
+        &mut |_| {},
+        Default::default(),
+    )
+    .unwrap();
+    let active = db::get_store_model(&current.card_id).unwrap().unwrap();
+    let resource = legacy_resource_dir(&active, &mgr.settings.models_path()).unwrap();
+    db::add_store_model(db::AddStoreModelParams {
+        card_id: "shared-current",
+        model_name: "shared",
+        card_name: "Shared",
+        org: None,
+        description: None,
+        engine_name: "native",
+        engine_version: Some("new"),
+        size_bytes: 11,
+        quantization: None,
+        source_repo_id: card.source_repo_id.as_deref(),
+        source_filename: card.source_filename.as_deref(),
+        scripts: &Default::default(),
+        status: "deployed",
+        profiles: &[],
+        deploy_topology: DeployTopology::Single,
+        card_source: "store",
+    })
+    .unwrap();
+    let runtime = config::data_dir().join("cards/shared-current");
+    fs::create_dir_all(&runtime).unwrap();
+    fs::write(
+        runtime.join(".deploy-env"),
+        format!("MODEL_DIR=\"{}\"\n", resource.display()),
+    )
+    .unwrap();
+    assert!(
+        mgr.uninstall(&current.card_id, true, &mut |_| {}, Default::default())
+            .is_err()
+    );
+    assert_eq!(
+        fs::read(resource.join("new.tachyon")).unwrap(),
+        b"new-weights"
+    );
+    assert!(
+        !runtime_path(&active)
+            .unwrap()
+            .join("uninstall-purge-intent")
+            .exists()
+    );
+    assert!(db::get_store_model(&current.card_id).unwrap().is_some());
+    db::delete_store_model("shared-current").unwrap();
+    mgr.uninstall(&current.card_id, true, &mut |_| {}, Default::default())
+        .unwrap();
+    assert!(!Path::new(active.models_root.as_ref().unwrap()).exists());
+    assert!(db::get_store_model(&current.card_id).unwrap().is_none());
+}
+
+#[test]
 fn explicit_purge_after_history_cleanup_removes_the_active_isolated_storage() {
     let (_temp, mgr, current, card, pkg, id) = fixture();
+    let key = db::add_api_key(&current.card_id, Some("purge test")).unwrap();
     mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
         .unwrap();
     mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
@@ -638,10 +706,109 @@ fn explicit_purge_after_history_cleanup_removes_the_active_isolated_storage() {
     assert!(!outcome.record_kept);
     assert!(!Path::new(&root).exists());
     assert!(db::get_store_model(&current.card_id).unwrap().is_none());
+    assert!(db::find_api_key(&key.key_value).unwrap().is_none());
     assert!(
         version_store::list(Some(&current.card_id))
             .unwrap()
             .is_empty()
+    );
+}
+
+#[test]
+fn interrupted_current_purge_can_retry_without_a_marker_after_the_commit_point() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_temp, mgr, current, card, pkg, id) = fixture();
+    let key = db::add_api_key(&current.card_id, Some("retry test")).unwrap();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    mgr.delete_version(
+        &current.card_id,
+        &version_store::active_id(&current),
+        &mut |_| {},
+        Default::default(),
+    )
+    .unwrap();
+    let active = db::get_store_model(&current.card_id).unwrap().unwrap();
+    let root = PathBuf::from(active.models_root.as_ref().unwrap());
+    let parent = root.parent().unwrap();
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o500)).unwrap();
+    let result = mgr.uninstall(&current.card_id, true, &mut |_| {}, Default::default());
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(result.is_err());
+    assert!(root.exists());
+    assert!(!root.join(".pinvou-version.json").exists());
+    assert_eq!(
+        version_store::get(&current.card_id, &id)
+            .unwrap()
+            .unwrap()
+            .state,
+        "deleting"
+    );
+    assert!(!version_store::has_history(&current.card_id).unwrap());
+    assert_eq!(version_store::retained_bytes().unwrap(), 0);
+    let rows = mgr.versions(&current.card_id).unwrap();
+    assert_eq!(rows[0]["state"], "deleting");
+    assert_eq!(rows[0]["can_delete"], false);
+    assert!(
+        mgr.deploy(&current.card_id, None, &mut |_| {}, Default::default())
+            .is_err()
+    );
+    assert!(
+        mgr.enable(&current.card_id, &mut |_| {}, Default::default())
+            .is_err()
+    );
+    assert!(
+        mgr.uninstall(&current.card_id, false, &mut |_| {}, Default::default())
+            .is_err()
+    );
+    mgr.uninstall(&current.card_id, true, &mut |_| {}, Default::default())
+        .unwrap();
+    assert!(!root.exists());
+    assert!(db::get_store_model(&current.card_id).unwrap().is_none());
+    assert!(
+        version_store::list(Some(&current.card_id))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(db::find_api_key(&key.key_value).unwrap().is_none());
+}
+
+#[test]
+fn a_current_version_without_a_marker_is_not_an_authorized_empty_purge() {
+    let (_temp, mgr, current, card, pkg, id) = fixture();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    mgr.delete_version(
+        &current.card_id,
+        &version_store::active_id(&current),
+        &mut |_| {},
+        Default::default(),
+    )
+    .unwrap();
+    let active = db::get_store_model(&current.card_id).unwrap().unwrap();
+    let root = PathBuf::from(active.models_root.as_ref().unwrap());
+    fs::remove_file(root.join(".pinvou-version.json")).unwrap();
+    assert!(
+        mgr.uninstall(&current.card_id, true, &mut |_| {}, Default::default())
+            .is_err()
+    );
+    assert!(root.join("new/new.tachyon").exists());
+    fs::remove_dir_all(root.join("new")).unwrap();
+    assert!(
+        mgr.uninstall(&current.card_id, true, &mut |_| {}, Default::default())
+            .is_err()
+    );
+    assert!(root.exists());
+    assert_eq!(
+        version_store::get(&current.card_id, &id)
+            .unwrap()
+            .unwrap()
+            .state,
+        "current"
     );
 }
 
@@ -666,4 +833,390 @@ fn absent_evidence_never_turns_changed_paths_or_sizes_into_reusable_weights() {
     card.summary.size_bytes = 11;
     card.source_repo_id = Some("other/source".into());
     assert!(!card_update::compatibility(&current, &card, None).can_update);
+}
+
+#[test]
+fn clearing_a_selected_artifact_in_a_multi_file_manifest_requires_review() {
+    let (_temp, _mgr, mut current, mut card, _pkg, _id) = fixture();
+    let manifest = blob(&format!(
+        "{}  old.tachyon\n{}  other.tachyon\n",
+        "a".repeat(64),
+        "b".repeat(64)
+    ));
+    current
+        .assets_content
+        .insert(weight_identity::MANIFEST.into(), manifest.clone());
+    card.asset_sha256
+        .as_mut()
+        .unwrap()
+        .insert(weight_identity::MANIFEST.into(), manifest.sha256.clone());
+    for selection in [None, Some("".into()), Some("  ".into())] {
+        card.source_filename = selection;
+        let result = card_update::compatibility(&current, &card, Some(&manifest));
+        assert!(!result.can_update);
+        assert_eq!(result.reason, "artifact_selection_changed");
+    }
+    card.source_filename = current.source_filename.clone();
+    assert!(card_update::compatibility(&current, &card, Some(&manifest)).can_update);
+}
+
+#[test]
+fn switching_resolves_defaults_and_rollback_preserves_the_saved_profile() {
+    let (_temp, mgr, current, mut card, mut pkg, _id) = fixture();
+    let profiles = serde_json::json!([
+        {"id":"default","name":"Default"}, {"id":"custom","name":"Custom"}
+    ]);
+    card.profiles = serde_json::from_value(profiles.clone()).unwrap();
+    db::connect()
+        .unwrap()
+        .execute(
+            "UPDATE store_models SET profiles_json=?1,active_profile_id='custom' WHERE card_id=?2",
+            rusqlite::params![profiles.to_string(), current.card_id],
+        )
+        .unwrap();
+    let mut scripts = current.scripts_content.clone();
+    scripts
+        .get_mut("deploy")
+        .unwrap()
+        .content
+        .push_str("printf '%s' \"$LMM_DEPLOY_PROFILE\" > chosen-profile\n");
+    scripts.get_mut("deploy").unwrap().sha256 =
+        script_runner::sha256_hex(&scripts["deploy"].content);
+    db::set_scripts_content(&current.card_id, &scripts, &current.assets_content).unwrap();
+    let current = db::get_store_model(&current.card_id).unwrap().unwrap();
+    pkg.scripts
+        .get_mut("deploy")
+        .unwrap()
+        .content
+        .push_str("printf '%s' \"$LMM_DEPLOY_PROFILE\" > chosen-profile\n");
+    let deploy = pkg.scripts.get_mut("deploy").unwrap();
+    deploy.sha256 = script_runner::sha256_hex(&deploy.content);
+    card.script_sha256
+        .as_mut()
+        .unwrap()
+        .insert("deploy".into(), deploy.sha256.clone());
+    let id = card_update::revision(&card_update::remote_manifest(&card));
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    let active = db::get_store_model(&current.card_id).unwrap().unwrap();
+    assert_eq!(active.active_profile_id.as_deref(), Some("default"));
+    assert_eq!(
+        fs::read_to_string(runtime_path(&active).unwrap().join("chosen-profile")).unwrap(),
+        "default"
+    );
+    mgr.switch_version(
+        &current.card_id,
+        &version_store::active_id(&current),
+        &mut |_| {},
+        Default::default(),
+    )
+    .unwrap();
+    let restored = db::get_store_model(&current.card_id).unwrap().unwrap();
+    assert_eq!(restored.active_profile_id.as_deref(), Some("custom"));
+    assert_eq!(
+        fs::read_to_string(runtime_path(&restored).unwrap().join("chosen-profile")).unwrap(),
+        "custom"
+    );
+}
+
+#[test]
+fn partial_recursive_cleanup_keeps_the_marker_and_can_be_retried() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_temp, mgr, current, card, pkg, id) = fixture();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    let mut version = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    let root = PathBuf::from(version.resource_dir.as_ref().unwrap());
+    let locked = root.join("locked");
+    fs::create_dir(&locked).unwrap();
+    fs::write(locked.join("weights"), b"partial").unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
+    version.state = "deleting".into();
+    version_store::put(&version).unwrap();
+    let result = remove_managed_resource(&root);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(result.is_err());
+    assert!(root.join(".pinvou-version.json").exists());
+    mgr.delete_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    assert!(!root.exists());
+    assert!(version_store::get(&current.card_id, &id).unwrap().is_none());
+}
+
+#[test]
+fn deleting_without_a_marker_accepts_only_an_empty_resource_root() {
+    let (_temp, mgr, current, card, pkg, id) = fixture();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    let mut version = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    let root = PathBuf::from(version.resource_dir.as_ref().unwrap());
+    version.state = "deleting".into();
+    version_store::put(&version).unwrap();
+    fs::remove_file(root.join(".pinvou-version.json")).unwrap();
+    assert!(
+        mgr.delete_version(&current.card_id, &id, &mut |_| {}, Default::default())
+            .is_err()
+    );
+    assert!(root.join("new/new.tachyon").exists());
+    fs::remove_dir_all(root.join("new")).unwrap();
+    mgr.delete_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    assert!(!root.exists());
+}
+
+#[test]
+fn new_upgrades_require_intact_old_weights_but_history_remains_a_recovery_route() {
+    let (_temp, mgr, current, card, pkg, id) = fixture();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    let old_file = mgr.settings.models_path().join("legacy/old.tachyon");
+    for content in [Some(b"corrupt".as_slice()), None] {
+        if let Some(content) = content {
+            fs::write(&old_file, content).unwrap();
+        } else {
+            fs::remove_file(&old_file).unwrap();
+        }
+        assert!(
+            mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+                .is_err()
+        );
+        assert_eq!(
+            db::get_store_model(&current.card_id)
+                .unwrap()
+                .unwrap()
+                .active_version_id,
+            None
+        );
+        assert_eq!(
+            version_store::get(&current.card_id, &id)
+                .unwrap()
+                .unwrap()
+                .state,
+            "ready"
+        );
+    }
+    fs::write(&old_file, b"old-weights").unwrap();
+    mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    let active = db::get_store_model(&current.card_id).unwrap().unwrap();
+    let active_root = legacy_resource_dir(&active, &mgr.settings.models_path()).unwrap();
+    fs::remove_file(find_weight(&active_root, "new.tachyon").unwrap()).unwrap();
+    mgr.switch_version(
+        &current.card_id,
+        &version_store::active_id(&current),
+        &mut |_| {},
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        db::get_store_model(&current.card_id)
+            .unwrap()
+            .unwrap()
+            .source_filename,
+        current.source_filename
+    );
+}
+
+#[test]
+fn downloaded_undeployed_cards_still_protect_shared_legacy_weights() {
+    let (_temp, mgr, current, card, pkg, id) = fixture();
+    db::add_store_model(db::AddStoreModelParams {
+        card_id: "other-downloaded-card",
+        model_name: "other",
+        card_name: "Other",
+        org: None,
+        description: None,
+        engine_name: "native",
+        engine_version: Some("old"),
+        size_bytes: 11,
+        quantization: None,
+        source_repo_id: current.source_repo_id.as_deref(),
+        source_filename: current.source_filename.as_deref(),
+        scripts: &Default::default(),
+        status: "downloaded",
+        profiles: &[],
+        deploy_topology: DeployTopology::Single,
+        card_source: "store",
+    })
+    .unwrap();
+    let mut other_scripts = current.scripts_content.clone();
+    other_scripts.insert("uninstall".into(), blob(
+        "#!/bin/bash\nif [ \"$LMM_PURGE_WEIGHTS\" = 1 ]; then rm -rf \"$LMM_MODELS_DIR/legacy\"; fi\n"
+    ));
+    db::set_scripts_content(
+        "other-downloaded-card",
+        &other_scripts,
+        &current.assets_content,
+    )
+    .unwrap();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    let old_id = version_store::active_id(&current);
+    // Protect the reverse direction too: the ordinary legacy card must not
+    // delete bytes retained for the upgraded card's rollback.
+    assert!(
+        mgr.uninstall(
+            "other-downloaded-card",
+            true,
+            &mut |_| {},
+            Default::default()
+        )
+        .is_err()
+    );
+    assert!(
+        db::get_store_model("other-downloaded-card")
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        mgr.settings
+            .models_path()
+            .join("legacy/old.tachyon")
+            .exists()
+    );
+    assert!(
+        mgr.delete_version(&current.card_id, &old_id, &mut |_| {}, Default::default())
+            .is_err()
+    );
+    assert!(
+        mgr.settings
+            .models_path()
+            .join("legacy/old.tachyon")
+            .exists()
+    );
+    assert_eq!(
+        version_store::get(&current.card_id, &old_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        "history"
+    );
+    // Even a corrected source label cannot hide matching verified weight bytes.
+    db::connect().unwrap().execute(
+        "UPDATE store_models SET source_repo_id='corrected/alias' WHERE card_id='other-downloaded-card'", []
+    ).unwrap();
+    assert!(
+        mgr.uninstall(
+            "other-downloaded-card",
+            true,
+            &mut |_| {},
+            Default::default()
+        )
+        .is_err()
+    );
+    assert!(
+        mgr.delete_version(&current.card_id, &old_id, &mut |_| {}, Default::default())
+            .is_err()
+    );
+    assert!(
+        mgr.settings
+            .models_path()
+            .join("legacy/old.tachyon")
+            .exists()
+    );
+}
+
+#[test]
+fn shared_resource_locks_allow_readers_and_exclude_reference_deletion() {
+    let (_temp, mgr, current, card, pkg, id) = fixture();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    let first = version_store::resource_operation_lock(false).unwrap();
+    let second = version_store::resource_operation_lock(false).unwrap();
+    assert!(version_store::resource_operation_lock(true).is_err());
+    assert!(
+        mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+            .unwrap_err()
+            .to_string()
+            .contains("资源操作")
+    );
+    assert!(
+        mgr.delete_version(&current.card_id, &id, &mut |_| {}, Default::default())
+            .unwrap_err()
+            .to_string()
+            .contains("资源操作")
+    );
+    assert!(
+        mgr.uninstall(&current.card_id, true, &mut |_| {}, Default::default())
+            .unwrap_err()
+            .to_string()
+            .contains("资源操作")
+    );
+    drop(first);
+    drop(second);
+    let writer = version_store::resource_operation_lock(true).unwrap();
+    assert!(version_store::resource_operation_lock(false).is_err());
+    assert!(
+        mgr.deploy(&current.card_id, None, &mut |_| {}, Default::default())
+            .unwrap_err()
+            .to_string()
+            .contains("资源操作")
+    );
+    assert!(
+        mgr.enable(&current.card_id, &mut |_| {}, Default::default())
+            .unwrap_err()
+            .to_string()
+            .contains("资源操作")
+    );
+    drop(writer);
+    mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+}
+
+#[test]
+fn rollback_reports_pinned_residuals_after_default_storage_changes() {
+    let (temp, mgr, current, card, pkg, id) = fixture();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    let mut settings = mgr.settings.clone();
+    let unrelated = temp.path().join("other-models");
+    settings.models_dir = unrelated.to_string_lossy().into_owned();
+    fs::create_dir_all(unrelated.join("stable-name")).unwrap();
+    fs::write(unrelated.join("stable-name/unrelated"), b"keep me").unwrap();
+    let relocated = ModelManager::new(Some(settings), None);
+    relocated
+        .switch_version(
+            &current.card_id,
+            &version_store::active_id(&current),
+            &mut |_| {},
+            Default::default(),
+        )
+        .unwrap();
+    relocated
+        .delete_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    let outcome = relocated
+        .uninstall(&current.card_id, false, &mut |_| {}, Default::default())
+        .unwrap();
+    let old = mgr
+        .settings
+        .models_path()
+        .join("legacy")
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert!(outcome.remaining_paths.contains(&old));
+    assert!(
+        outcome
+            .remaining_paths
+            .iter()
+            .all(|p| !Path::new(p).starts_with(&unrelated))
+    );
+    let forced = relocated.force_remove_record(&current.card_id).unwrap();
+    assert!(forced.residual_paths.contains(&old));
+    assert!(
+        forced
+            .residual_paths
+            .iter()
+            .all(|p| !Path::new(p).starts_with(&unrelated))
+    );
+    assert!(Path::new(&old).join("old.tachyon").exists());
+    assert!(unrelated.join("stable-name/unrelated").exists());
 }

@@ -22,6 +22,29 @@ fn connection() -> Result<rusqlite::Connection, String> {
     Ok(conn)
 }
 
+/// Readers may prepare/download independent cards concurrently. A switch or
+/// deletion excludes all reference-producing operations through their commit.
+pub fn resource_operation_lock(exclusive: bool) -> Result<std::fs::File, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let root = super::config::data_dir();
+    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(root.join("version-operations.lock"))
+        .map_err(|e| e.to_string())?;
+    let result = if exclusive {
+        lock.try_lock()
+    } else {
+        lock.try_lock_shared()
+    };
+    result.map_err(|_| "另一个模型资源操作正在进行，请稍后重试".to_string())?;
+    Ok(lock)
+}
+
 fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Version> {
     let raw: Option<String> = row.get("record_json")?;
     let record = raw
@@ -177,13 +200,27 @@ fn write_active(conn: &rusqlite::Connection, r: &db::StoreModelRecord) -> Result
 }
 
 pub fn has_history(card_id: &str) -> Result<bool, String> {
-    Ok(list(Some(card_id))?.iter().any(|v| v.state != "current"))
+    let active = db::get_store_model(card_id)
+        .map_err(|e| e.to_string())?
+        .as_ref()
+        .map(active_id);
+    Ok(list(Some(card_id))?
+        .iter()
+        .any(|v| Some(&v.version_id) != active.as_ref()))
 }
 
 pub fn retained_bytes() -> Result<u64, String> {
     let mut seen = std::collections::BTreeSet::new();
     let mut total = 0u64;
     for version in list(None)?.into_iter().filter(|v| v.state != "current") {
+        if version.state == "deleting"
+            && db::get_store_model(&version.card_id)
+                .map_err(|e| e.to_string())?
+                .as_ref()
+                .is_some_and(|r| active_id(r) == version.version_id)
+        {
+            continue;
+        }
         let key = version
             .resource_dir
             .clone()
