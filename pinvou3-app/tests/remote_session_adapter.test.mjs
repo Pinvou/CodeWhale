@@ -38,6 +38,15 @@ const history = {
   ],
 };
 
+test('authenticated rejection is visible and ends task activity without a journal terminal', () => {
+  const rejected = { ...history, rejections: [{ taskId: 'task-1', code: 'task_permission_mode_required' }] };
+  const items = remoteProxyChatItems(rejected.localSessionId, rejected);
+  assert.equal(activeRemoteTaskId(rejected.localSessionId, rejected), null);
+  const receipt = items.find(item => item.id.startsWith('remote-rejection:'));
+  assert.equal(receipt.text, 'task_permission_mode_required');
+  assert.equal(receipt.remoteKind, 'error');
+});
+
 test('RemoteProxy history requires an exact verified read, not an ID prefix or stale selection', () => {
   assert.equal(remoteProxyForSession('remote-local-1', history), history);
   assert.equal(remoteProxyForSession('remote-other', history), null);

@@ -28,6 +28,134 @@ fn make_store(root: &std::path::Path) -> SessionStore {
 }
 
 #[test]
+fn authenticated_rejection_retires_only_exact_attempt_and_survives_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = make_store(temp.path());
+    let live = context();
+    let opened = store.test_commit_remote_proxy_open(None, &live).unwrap();
+    store
+        .confirm_remote_mapping(
+            &opened.local_session_id,
+            &live,
+            &AuthenticatedMapping {
+                remote_session_ref: opened.remote_session_ref.clone(),
+                controlled_session_id: "b-session".into(),
+            },
+        )
+        .unwrap();
+    let id = &opened.local_session_id;
+    let remote_ref = &opened.remote_session_ref;
+    let code = "task_permission_mode_required";
+    let fingerprint = "a".repeat(64);
+    store
+        .insert_remote_pending(
+            id,
+            remote_ref,
+            &live,
+            PendingRemoteRequest {
+                task_id: "task-rejected".into(),
+                client_request_id: "client-rejected".into(),
+                request_fingerprint: fingerprint.clone(),
+                reservation_fingerprint: None,
+                dispatch_state: PendingDispatchState::PreparedNeverAttempted,
+            },
+        )
+        .unwrap();
+    assert!(
+        store
+            .reject_authenticated_remote_request(
+                id,
+                remote_ref,
+                &live,
+                "task-rejected",
+                "client-rejected",
+                code
+            )
+            .is_err()
+    );
+    store
+        .mark_remote_dispatch_attempt(
+            id,
+            remote_ref,
+            &live,
+            "client-rejected",
+            "task-rejected",
+            &fingerprint,
+        )
+        .unwrap();
+    let mut stale = live.clone();
+    stale.lease_epoch = "old-epoch".into();
+    for (session_ref, context, task, client) in [
+        ("wrong-ref", &live, "task-rejected", "client-rejected"),
+        (
+            remote_ref.as_str(),
+            &stale,
+            "task-rejected",
+            "client-rejected",
+        ),
+        (remote_ref.as_str(), &live, "other-task", "client-rejected"),
+        (remote_ref.as_str(), &live, "task-rejected", "other-client"),
+    ] {
+        assert!(
+            store
+                .reject_authenticated_remote_request(id, session_ref, context, task, client, code)
+                .is_err()
+        );
+    }
+    assert_eq!(
+        store
+            .read_remote_proxy_history(id)
+            .unwrap()
+            .pending_unknown_count,
+        1
+    );
+    store
+        .reject_authenticated_remote_request(
+            id,
+            remote_ref,
+            &live,
+            "task-rejected",
+            "client-rejected",
+            code,
+        )
+        .unwrap();
+    store
+        .reject_authenticated_remote_request(
+            id,
+            remote_ref,
+            &live,
+            "task-rejected",
+            "client-rejected",
+            code,
+        )
+        .unwrap();
+    assert!(
+        store
+            .reject_authenticated_remote_request(
+                id,
+                remote_ref,
+                &live,
+                "task-rejected",
+                "client-rejected",
+                "task_permission_mode_changed"
+            )
+            .is_err()
+    );
+    let restored = make_store(temp.path())
+        .read_remote_proxy_history(id)
+        .unwrap();
+    assert_eq!(restored.pending_unknown_count, 0);
+    assert_eq!(
+        restored.rejections,
+        vec![("task-rejected".into(), code.into())]
+    );
+    assert!(
+        restored.authenticated_cursor.is_none(),
+        "rejections do not invent journal events or cursors"
+    );
+}
+
+#[test]
 fn duplicate_archive_cleans_exact_cross_instance_active_residue() {
     let temp = tempfile::tempdir().unwrap();
     let first = make_store(temp.path());

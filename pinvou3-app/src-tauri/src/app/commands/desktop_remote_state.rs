@@ -155,6 +155,7 @@ mod tests {
             .invoke_handler(tauri::generate_handler![
                 commands::desktop_remote_controlled::desktop_remote_controlled_status,
                 commands::desktop_remote_controlled::desktop_remote_controlled_list_workspaces,
+                commands::desktop_remote_controlled::desktop_remote_controlled_permissions,
                 commands::desktop_remote_controller::desktop_remote_controller_status,
                 commands::desktop_remote_proxy::desktop_remote_proxy_open_live,
                 commands::desktop_remote_proxy::desktop_remote_proxy_history_list,
@@ -204,6 +205,7 @@ mod tests {
             for name in [
                 "controlled_status",
                 "controlled_list_workspaces",
+                "controlled_permissions",
                 "controller_status",
                 "proxy_open_live",
                 "proxy_history_list",

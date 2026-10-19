@@ -240,6 +240,15 @@ export function remoteProxyChatItems(localSessionId, history) {
   // or failed. The native ToolCard has no neutral terminal state, so hide the
   // unrecoverable card instead of leaking its raw body or inventing an outcome.
   const hiddenLegacyTools = new Set();
+  for (const rejection of record.rejections || []) {
+    items.push({
+      id: `remote-rejection:${localSessionId}:${rejection.taskId}`,
+      type: 'system', text: rejection.code,
+      remote: true, remoteProxy: true, remoteKind: 'error',
+      remoteRejected: true,
+      remoteTaskId: rejection.taskId, remoteAttachments: [],
+    });
+  }
   for (const tool of tools.values()) {
     if (tool.state !== 'running') continue;
     const taskState = tool.remoteTaskId
@@ -260,6 +269,7 @@ export function activeRemoteTaskId(localSessionId, history) {
   let activeTaskId = null;
   let activeIndex = -1;
   for (const task of tasks.values()) {
+    if ((record.rejections || []).some(item => item.taskId === task.taskId)) continue;
     if (!TERMINAL_TASK_STATES.has(task.state) && task.lastActivity >= activeIndex) {
       activeTaskId = task.taskId;
       activeIndex = task.lastActivity;

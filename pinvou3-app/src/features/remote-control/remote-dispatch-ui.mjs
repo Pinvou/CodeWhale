@@ -20,6 +20,9 @@ export function remoteDispatchCases(localSessionId, history) {
     .filter(entry => entry?.kind === 'status' && entry.taskId
       && ['succeeded', 'failed', 'cancelled', 'interrupted'].includes(entry.body))
     .map(entry => entry.taskId));
+  if (history?.localSessionId === localSessionId) {
+    for (const rejection of history.rejections || []) terminalTasks.add(rejection.taskId);
+  }
   const cases = casesBySession.get(localSessionId);
   for (const [taskId, item] of cases || []) {
     if (terminalTasks.has(taskId)) {

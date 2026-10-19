@@ -53,6 +53,36 @@ function bindProxy(logic, state, remoteRef, sessionId) {
   });
 }
 
+test('B permission settings round-trip independently of controller task intent', async () => {
+  const policy = { chat: 'plan', code: 'yolo' };
+  const { feature, calls } = installFeature((command, args) => {
+    if (command === 'desktop_remote_controlled_permissions') return Promise.resolve(args.policy || policy);
+    return undefined;
+  });
+  assert.deepEqual(await feature.controlledPermissions(), policy);
+  assert.deepEqual(await feature.controlledPermissions(policy), policy);
+  const settingsCalls = calls.filter(call => call.command === 'desktop_remote_controlled_permissions');
+  assert.equal(settingsCalls.length, 2);
+  assert.equal(settingsCalls[0].args.policy, null);
+  assert.deepEqual(settingsCalls[1].args.policy, policy);
+});
+
+test('rejection history refresh notices require the exact live session and lease', () => {
+  const { logic } = installFeature();
+  const state = logic.createState();
+  state.controllerConnection = { status: 'connected', localSessionId: 'remote-a', sessionRef: 'ref-a',
+    connectionId: 'conn-a', controllerLeaseId: 'lease-a', leaseEpoch: '1', relayEpoch: 'relay-a', generation: 'gen-a' };
+  const notice = { ...state.controllerConnection, kind: 'rejection', remoteSessionRef: 'ref-a',
+    controlledSessionId: 'b-session', fields: { sequence: 1 } };
+  const next = logic.applyRemoteProxyNotice(state, notice);
+  assert.notEqual(next, state);
+  assert.equal(next.remoteProxyNotice.kind, 'rejection');
+  assert.equal(logic.applyRemoteProxyNotice(state, { ...notice, leaseEpoch: 'old' }), state);
+  assert.equal(logic.applyRemoteProxyNotice(state, { ...notice, localSessionId: 'remote-b' }), state);
+  assert.equal(logic.applyRemoteProxyNotice(next, notice), next);
+  assert.notEqual(logic.applyRemoteProxyNotice(next, { ...notice, fields: { sequence: 2 } }), next);
+});
+
 test('B status consumes only current Rust ControlledStatus fields', async () => {
   const { feature, state } = installFeature((command) => {
     if (command === 'desktop_remote_controlled_start') return Promise.resolve({

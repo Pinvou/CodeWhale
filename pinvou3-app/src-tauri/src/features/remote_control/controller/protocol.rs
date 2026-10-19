@@ -105,7 +105,7 @@ const MAX_ARTIFACTS: usize = 256;
 pub(crate) const MAX_ENCRYPTED_WIRE_BYTES: usize =
     MAX_ENCRYPTED_FRAME_BYTES.div_ceil(3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
 const CONTROLLER_CONTRACT_SHA256: &str =
-    "98ab9cc1835d7b617b142b7e26b8583a96245107db574465b46a836f43217a6b";
+    "63db457fd305cf8d758133fa8996b853bd3073892fa8bfe93aec7de8f873e242";
 
 pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -1311,7 +1311,7 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "session_id",
                 "task_status",
             ],
-            optional: &["result_digest"],
+            optional: &["result_digest", "rejection_code", "client_request_id"],
             roles: &[B],
         },
         "remote_action_request" => Schema {
@@ -2283,6 +2283,16 @@ fn validate_named_field(object: &Map<String, Value>, field: &str, value: &Value)
         validate_enum(value, field, MODES)?;
     } else if field == "task_status" {
         validate_enum(value, field, TASK_STATUSES)?;
+    } else if field == "rejection_code" {
+        validate_enum(value, field, super::task_rejection::CODES)?;
+        if object.get("task_status").and_then(Value::as_str) != Some("failed")
+            || object
+                .get("client_request_id")
+                .and_then(Value::as_str)
+                .is_none()
+        {
+            return Err(ControllerProtocolError::new("invalid_field", field));
+        }
     } else if field == "decision" {
         validate_enum(value, field, DECISIONS)?;
     } else if field == "risk_level" {
@@ -4389,7 +4399,7 @@ mod tests {
                 "sender_role":SENDER_ROLES, "client_role":CLIENT_ROLES,
                 "key_algorithm":KEY_ALGORITHMS, "signature_algorithm":SIGNATURE_ALGORITHMS, "direction":DIRECTIONS,
                 "model_source":MODEL_SOURCES, "mode":MODES, "task_status":TASK_STATUSES,
-                "decision":DECISIONS, "risk_level":RISK_LEVELS,
+                "rejection_code":super::super::task_rejection::CODES, "decision":DECISIONS, "risk_level":RISK_LEVELS,
                 "event_kind":EVENT_KINDS, "preset":PRESETS,
                 "wire_api":WIRE_APIS, "provider_kind":PROVIDER_KINDS, "vendor":VENDORS,
                 "endpoint_mode":ENDPOINT_MODES, "reasoning_effort":REASONING_EFFORTS,
@@ -5260,6 +5270,41 @@ mod tests {
                 .code,
             "invalid_enum"
         );
+    }
+
+    #[test]
+    fn task_rejection_requires_closed_code_failed_status_and_request_identity() {
+        let submit = fixture()["task_submit_vectors"]["controlled"].clone();
+        let mut payload = submit;
+        payload.as_object_mut().unwrap().retain(|key, _| {
+            [
+                "v",
+                "connection_id",
+                "controller_lease_id",
+                "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
+                "request_id",
+                "task_id",
+                "client_request_id",
+                "session_id",
+            ]
+            .contains(&key.as_str())
+        });
+        payload["type"] = json!("task_status");
+        payload["task_status"] = json!("failed");
+        for code in super::super::task_rejection::CODES {
+            payload["rejection_code"] = json!(code);
+            assert!(validate_controller_payload_json(&payload.to_string(), B).is_ok());
+        }
+        payload["task_status"] = json!("running");
+        assert!(validate_controller_payload_json(&payload.to_string(), B).is_err());
+        payload["task_status"] = json!("failed");
+        payload["rejection_code"] = json!("private_provider_error");
+        assert!(validate_controller_payload_json(&payload.to_string(), B).is_err());
+        payload["rejection_code"] = json!("task_permission_mode_required");
+        payload.as_object_mut().unwrap().remove("client_request_id");
+        assert!(validate_controller_payload_json(&payload.to_string(), B).is_err());
     }
 
     #[test]
