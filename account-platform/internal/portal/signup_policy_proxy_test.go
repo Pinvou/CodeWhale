@@ -42,8 +42,10 @@ func TestF07SignupPolicyProductionPortal(t *testing.T) {
 		want                   int
 	}{
 		{"read", "GET", "/admin/v1/registration-bonus-policy", true, false, 200},
+		{"head", "HEAD", "/admin/v1/registration-bonus-policy", true, false, 200},
 		{"write", "PUT", "/admin/v1/registration-bonus-policy", true, true, 200},
 		{"no-session", "GET", "/admin/v1/registration-bonus-policy", false, false, 401},
+		{"head-no-session", "HEAD", "/admin/v1/registration-bonus-policy", false, false, 401},
 		{"no-csrf", "PUT", "/admin/v1/registration-bonus-policy", true, false, 403},
 		{"post-denied", "POST", "/admin/v1/registration-bonus-policy", true, true, 404},
 		{"delete-denied", "DELETE", "/admin/v1/registration-bonus-policy", true, true, 404},
@@ -70,8 +72,15 @@ func TestF07SignupPolicyProductionPortal(t *testing.T) {
 				t.Fatalf("real Portal status=%d want=%d", w.Code, c.want)
 			}
 			if c.want == 200 {
-				if calls.Load() != before+1 || w.Header().Get("Cache-Control") != "no-store" || !strings.Contains(w.Body.String(), `"revision":2`) {
+				if calls.Load() != before+1 || w.Header().Get("Cache-Control") != "no-store" {
 					t.Fatal("policy response was not the upstream no-store receipt")
+				}
+				if c.method == http.MethodHead {
+					if w.Body.Len() != 0 {
+						t.Fatal("HEAD policy response included a body")
+					}
+				} else if !strings.Contains(w.Body.String(), `"revision":2`) {
+					t.Fatal("policy response lost upstream receipt")
 				}
 			} else if calls.Load() != before {
 				t.Fatal("denied policy request reached upstream")

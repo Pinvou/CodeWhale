@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { accountClosureCopy, financeCopy } from '../../shared/i18n.js';
 import { hasPermission } from './authorization-ui.js';
-import { accountClosureResumeAction, accountClosurePresentation, queryAccountClosure, submitAccountClosure } from './account-closure-flow.js';
+import { accountClosureBlockerLabel, accountClosureResumeAction, accountClosurePresentation, queryAccountClosure, submitAccountClosure } from './account-closure-flow.js';
 import { requireAccountClosure } from './account-closure-contract.js';
 import { useClosureOperation } from './useClosureOperation.js';
 import { readClosureIntent } from './closure-intent.js';
@@ -130,7 +130,7 @@ export function AccountClosureWorkspace({ client, me, language }) {
     {query.status === 'error' && <p role="alert">{copy.queryFailed}</p>}
     <button disabled={operation.busy} onClick={() => void load()}>{copy.queryRetry}</button>
     {item && <><p>{copy.statuses[item.status]} · {copy.stages[item.stage]}</p><p>{copy.sla}: {item.sla_expires_at}</p>
-      {item.blockers.length ? <ul>{item.blockers.map((blocker, index) => <li key={`${blocker.domain}:${blocker.code}:${index}`}>{copy.blockerCodes[blocker.code] || blocker.code} — {copy.actionCodes[blocker.user_action] || blocker.user_action || blocker.domain}</li>)}</ul> : <p>{copy.noBlockers}</p>}</>}
+      {item.blockers.length ? <ul>{item.blockers.map((blocker, index) => <li key={`${blocker.domain}:${blocker.code}:${index}`}>{accountClosureBlockerLabel(blocker, copy)}</li>)}</ul> : <p>{copy.noBlockers}</p>}</>}
     {canRequest && (presentation.canRequest || operation.unknown) && <><p>{copy.before}</p><button disabled={operation.busy || operation.blocked || !sameIdentity(ready.current)} onClick={() => void request()}>{operation.unknown ? financeCopy[language].retry : copy.start}</button></>}
   </section>;
 }
