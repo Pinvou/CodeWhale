@@ -1537,10 +1537,10 @@ default_text_model = "deepseek-ai/deepseek-v4-pro"
 # omitted entirely, the runtime uses these product defaults. Later launch,
 # approval, and activity-persistence paths all read through this one model.
 # [workflow]
-# # Allow the parent agent to auto-launch Workflow for multi-agent work.
-# # Set false to require an explicit `/workflow` opt-in.
+# # Reserved: currently not consumed by launch gating — auto-start approval
+# # is governed by auto_start_read_only / require_approval_for_writes.
 # automatic = true
-# # Auto-start read-only plans without an approval card when automatic is on.
+# # Auto-start read-only plans without an approval card.
 # auto_start_read_only = true
 # # Require an approval card before write/shell/network/high-budget launches.
 # require_approval_for_writes = true

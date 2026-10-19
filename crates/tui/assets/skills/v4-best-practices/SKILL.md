@@ -11,15 +11,15 @@ specific, observable failure class.
 ## 1. Verify references before writing
 
 Before referencing a file path, function, or type in code or plan output,
-call `grep_files` or `read_file` to confirm it exists in the workspace.
+call `grep_files` or `read` to confirm it exists in the workspace.
 
 ```
-# Bad:  edit_file path="src/config/loader.rs" (assumed from memory)
+# Bad:  edit path="src/config/loader.rs" (assumed from memory)
 # Good: grep_files pattern="pub fn load_config" → confirms src/config/mod.rs:42
 #        then reference src/config/mod.rs:42
 ```
 
-Failure avoided: `edit_file` errors on non-existent paths; LSP diagnostics
+Failure avoided: `edit` errors on non-existent paths; LSP diagnostics
 on hallucinated symbols.
 
 ## 2. Spawn a verifier sub-agent before multi-file execution

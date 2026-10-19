@@ -10,7 +10,7 @@ invocation: model+user
 Use for PowerPoint / `.pptx` slide decks.
 
 ## Compatibility
-`presentations` is a compatibility alias for this skill.
+The legacy name `presentations` resolves to a stub that redirects here; loading `pptx` directly is equivalent.
 
 ## Workflow
 1. Choose a simple layout system and stick to it.

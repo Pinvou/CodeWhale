@@ -24,11 +24,10 @@ Common commands:
 
 ```bash
 codewhale mcp init
-codewhale mcp add my-server --command node --arg server.js
-codewhale mcp add remote-server --url http://127.0.0.1:3000/mcp
+codewhale mcp add stdio my-server node server.js
+codewhale mcp add http remote-server http://127.0.0.1:3000/mcp
 codewhale mcp list
 codewhale mcp validate
-codewhale mcp tools
 ```
 
 HTTP/SSE entries can include per-server headers in `~/.codewhale/mcp.json` when
@@ -40,5 +39,5 @@ credentials or custom routing headers are required.
 2. Choose transport and credential handling.
 3. Implement the server using a maintained MCP SDK when available.
 4. Add the server with `codewhale mcp add` or edit `~/.codewhale/mcp.json`.
-5. Run `codewhale mcp validate`, then `codewhale mcp tools`. The server's tools appear in your tool catalog deferred; activate them via `tool_search`.
+5. Run `codewhale mcp validate` (there is no `mcp tools` listing verb). The server's tools appear in your tool catalog deferred; activate them via `tool_search`.
 6. Test one happy path and one failure path before calling it done.

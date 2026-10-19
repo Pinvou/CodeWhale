@@ -10,7 +10,7 @@ invocation: model+user
 Use for `.docx` / Word-style documents (memos, reports, letters, templates).
 
 ## Compatibility
-`documents` is a compatibility alias for this skill.
+The legacy name `documents` resolves to a stub that redirects here; loading `docx` directly is equivalent.
 
 ## Workflow
 1. Prefer `.docx` in the workspace.

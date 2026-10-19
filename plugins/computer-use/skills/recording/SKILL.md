@@ -6,7 +6,8 @@ description: Capture screen recordings on local and hdc computers (macOS, Window
 # Recording and screenshots
 
 1. Pick the computer (`computer_list`, or pass `computer` — it switches).
-2. `recording_start` with optional `display` (macOS/Linux), `region` (Linux/
+2. `recording_start` with optional `display` (macOS; Linux/Windows capture
+   every display), `region` (Linux/
    Windows), `fps` (Linux/Windows), `durationSec` (macOS auto-stop), and
    `intervalMs` (HarmonyOS snapshot cadence).
 3. Do the work (or let the user do it).
