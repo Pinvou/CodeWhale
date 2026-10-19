@@ -92,6 +92,12 @@ pub enum ApiProvider {
     Moonshot,
     Sglang,
     Vllm,
+    /// Pinvou fork: Tachyon (驭光) vendor engine — vLLM-wire-family local
+    /// server whose effective effort ladder is none/low/medium/xhigh (`high`
+    /// is a 400; the deepest tier is `xhigh`). Selected programmatically by
+    /// the Pinvou host after probing `owned_by == "tachyon"`; deliberately
+    /// absent from the user-facing catalog (`ProviderKind::ALL`).
+    Tachyon,
     Ollama,
     OllamaCloud,
     Huggingface,
@@ -369,7 +375,7 @@ impl ApiProvider {
 
     /// `ApiProvider` discriminant → `ProviderKind` lookup.
     /// Index 1 is `None` for the legacy `DeepseekCN` variant.
-    const KIND_LOOKUP: [Option<codewhale_config::ProviderKind>; 49] = [
+    const KIND_LOOKUP: [Option<codewhale_config::ProviderKind>; 50] = [
         Some(codewhale_config::ProviderKind::Deepseek),
         None, // DeepseekCN
         Some(codewhale_config::ProviderKind::DeepseekAnthropic),
@@ -389,6 +395,7 @@ impl ApiProvider {
         Some(codewhale_config::ProviderKind::Moonshot),
         Some(codewhale_config::ProviderKind::Sglang),
         Some(codewhale_config::ProviderKind::Vllm),
+        Some(codewhale_config::ProviderKind::Tachyon),
         Some(codewhale_config::ProviderKind::Ollama),
         Some(codewhale_config::ProviderKind::OllamaCloud),
         Some(codewhale_config::ProviderKind::Huggingface),
@@ -422,7 +429,7 @@ impl ApiProvider {
     ];
 
     /// `ProviderKind` discriminant → `ApiProvider` lookup.
-    const FROM_KIND_LOOKUP: [Self; 48] = [
+    const FROM_KIND_LOOKUP: [Self; 49] = [
         Self::Deepseek,
         Self::DeepseekAnthropic,
         Self::NvidiaNim,
@@ -441,6 +448,7 @@ impl ApiProvider {
         Self::Moonshot,
         Self::Sglang,
         Self::Vllm,
+        Self::Tachyon,
         Self::Ollama,
         Self::OllamaCloud,
         Self::Huggingface,
@@ -496,7 +504,10 @@ impl ApiProvider {
     /// is hosted on the user's own infrastructure.
     #[must_use]
     pub fn is_self_hosted(self) -> bool {
-        matches!(self, Self::Sglang | Self::Vllm | Self::Ollama)
+        matches!(
+            self,
+            Self::Sglang | Self::Vllm | Self::Tachyon | Self::Ollama
+        )
     }
 }
 
@@ -1599,6 +1610,7 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
         }
         ApiProvider::Sglang => vec![DEFAULT_SGLANG_MODEL, DEFAULT_SGLANG_FLASH_MODEL],
         ApiProvider::Vllm => vec![DEFAULT_VLLM_MODEL, DEFAULT_VLLM_FLASH_MODEL],
+        ApiProvider::Tachyon => vec![DEFAULT_TACHYON_MODEL],
         ApiProvider::Volcengine => vec![DEFAULT_VOLCENGINE_MODEL, DEFAULT_VOLCENGINE_FLASH_MODEL],
         ApiProvider::Ollama | ApiProvider::OllamaCloud => Vec::new(),
         ApiProvider::Openai => OFFICIAL_OPENAI_MODELS.to_vec(),
@@ -3934,6 +3946,10 @@ pub struct ProvidersConfig {
     pub sglang: ProviderConfig,
     #[serde(default)]
     pub vllm: ProviderConfig,
+    /// Pinvou fork: Tachyon (驭光) vendor engine table (see
+    /// `ApiProvider::Tachyon`).
+    #[serde(default)]
+    pub tachyon: ProviderConfig,
     #[serde(default)]
     pub ollama: ProviderConfig,
     #[serde(default, alias = "ollama-cloud", alias = "ollamaCloud")]
@@ -5703,6 +5719,7 @@ impl Config {
             ApiProvider::Moonshot => &providers.moonshot,
             ApiProvider::Sglang => &providers.sglang,
             ApiProvider::Vllm => &providers.vllm,
+            ApiProvider::Tachyon => &providers.tachyon,
             ApiProvider::Ollama => &providers.ollama,
             ApiProvider::OllamaCloud if self.selects_legacy_ollama_cloud_route() => {
                 &providers.ollama
@@ -5789,6 +5806,7 @@ impl Config {
             ApiProvider::Moonshot => &mut providers.moonshot,
             ApiProvider::Sglang => &mut providers.sglang,
             ApiProvider::Vllm => &mut providers.vllm,
+            ApiProvider::Tachyon => &mut providers.tachyon,
             ApiProvider::Ollama => &mut providers.ollama,
             ApiProvider::OllamaCloud if legacy_ollama_cloud => &mut providers.ollama,
             ApiProvider::OllamaCloud => &mut providers.ollama_cloud,
@@ -6169,6 +6187,7 @@ impl Config {
             ApiProvider::Moonshot => DEFAULT_MOONSHOT_MODEL,
             ApiProvider::Sglang => DEFAULT_SGLANG_MODEL,
             ApiProvider::Vllm => DEFAULT_VLLM_MODEL,
+            ApiProvider::Tachyon => DEFAULT_TACHYON_MODEL,
             ApiProvider::Ollama => DEFAULT_OLLAMA_MODEL,
             ApiProvider::OllamaCloud => DEFAULT_OLLAMA_CLOUD_MODEL,
             ApiProvider::Volcengine => DEFAULT_VOLCENGINE_MODEL,
@@ -6307,6 +6326,7 @@ impl Config {
             | ApiProvider::Moonshot
             | ApiProvider::Sglang
             | ApiProvider::Vllm
+            | ApiProvider::Tachyon
             | ApiProvider::Ollama
             | ApiProvider::OllamaCloud
             | ApiProvider::Volcengine
@@ -6415,6 +6435,7 @@ impl Config {
                         }
                         ApiProvider::Sglang => DEFAULT_SGLANG_BASE_URL,
                         ApiProvider::Vllm => DEFAULT_VLLM_BASE_URL,
+                        ApiProvider::Tachyon => DEFAULT_TACHYON_BASE_URL,
                         ApiProvider::Ollama => DEFAULT_OLLAMA_BASE_URL,
                         ApiProvider::OllamaCloud => DEFAULT_OLLAMA_CLOUD_BASE_URL,
                         ApiProvider::Volcengine => DEFAULT_VOLCENGINE_BASE_URL,
@@ -7087,7 +7108,7 @@ impl Config {
             }
             // Self-hosted deployments commonly run without auth on localhost.
             // Return an empty key and let the client omit the Authorization header.
-            ApiProvider::Sglang | ApiProvider::Vllm => Ok(String::new()),
+            ApiProvider::Sglang | ApiProvider::Vllm | ApiProvider::Tachyon => Ok(String::new()),
             ApiProvider::Ollama
                 if provider_route_is_keyless_self_hosted(provider, &self.deepseek_base_url()) =>
             {
@@ -7908,6 +7929,11 @@ fn root_deepseek_model_is_foreign_to_direct_provider(provider: ApiProvider, mode
             | ApiProvider::Together
             | ApiProvider::Sglang
             | ApiProvider::Vllm
+            // Pinvou fork: Tachyon is a vLLM-wire-family local engine whose
+            // served ids come from the deployment's model store — DeepSeek
+            // ids (the vLLM default model, among others) must pass exactly
+            // like they do on the vllm route.
+            | ApiProvider::Tachyon
             | ApiProvider::Volcengine
             | ApiProvider::Atlascloud
             | ApiProvider::OpencodeGo
@@ -8151,6 +8177,7 @@ fn provider_env_base_url_override(provider: ApiProvider) -> Option<String> {
         ApiProvider::Moonshot => &["MOONSHOT_BASE_URL", "KIMI_BASE_URL"],
         ApiProvider::Sglang => &["SGLANG_BASE_URL"],
         ApiProvider::Vllm => &["VLLM_BASE_URL"],
+        ApiProvider::Tachyon => &["TACHYON_BASE_URL"],
         ApiProvider::Ollama => &["OLLAMA_BASE_URL"],
         ApiProvider::OllamaCloud => &["OLLAMA_CLOUD_BASE_URL"],
         ApiProvider::Huggingface => &["HUGGINGFACE_BASE_URL", "HF_BASE_URL"],
@@ -8372,6 +8399,13 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
                     .providers
                     .get_or_insert_with(ProvidersConfig::default)
                     .vllm
+                    .base_url = Some(value);
+            }
+            ApiProvider::Tachyon => {
+                config
+                    .providers
+                    .get_or_insert_with(ProvidersConfig::default)
+                    .tachyon
                     .base_url = Some(value);
             }
             ApiProvider::Ollama => {
@@ -8749,6 +8783,16 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             .vllm
             .base_url = Some(value);
     }
+    if matches!(config.api_provider(), ApiProvider::Tachyon)
+        && let Ok(value) = std::env::var("TACHYON_BASE_URL")
+        && !value.trim().is_empty()
+    {
+        config
+            .providers
+            .get_or_insert_with(ProvidersConfig::default)
+            .tachyon
+            .base_url = Some(value);
+    }
     if matches!(config.api_provider(), ApiProvider::Meta)
         && let Ok(value) = std::env::var("META_MODEL_API_BASE_URL")
             .or_else(|_| std::env::var("MODEL_API_BASE_URL"))
@@ -8890,6 +8934,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
                 ApiProvider::Moonshot => &mut providers.moonshot,
                 ApiProvider::Sglang => &mut providers.sglang,
                 ApiProvider::Vllm => &mut providers.vllm,
+                ApiProvider::Tachyon => &mut providers.tachyon,
                 ApiProvider::Ollama => &mut providers.ollama,
                 ApiProvider::OllamaCloud => &mut providers.ollama_cloud,
                 ApiProvider::Volcengine => &mut providers.volcengine,
@@ -9278,6 +9323,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
                 ApiProvider::Moonshot => &mut providers.moonshot,
                 ApiProvider::Sglang => &mut providers.sglang,
                 ApiProvider::Vllm => &mut providers.vllm,
+                ApiProvider::Tachyon => &mut providers.tachyon,
                 ApiProvider::Ollama => &mut providers.ollama,
                 ApiProvider::OllamaCloud => &mut providers.ollama_cloud,
                 ApiProvider::Volcengine => &mut providers.volcengine,
@@ -10782,6 +10828,7 @@ fn merge_providers(
             moonshot: merge_provider_config(base.moonshot, override_cfg.moonshot),
             sglang: merge_provider_config(base.sglang, override_cfg.sglang),
             vllm: merge_provider_config(base.vllm, override_cfg.vllm),
+            tachyon: merge_provider_config(base.tachyon, override_cfg.tachyon),
             ollama: merge_provider_config(base.ollama, override_cfg.ollama),
             ollama_cloud: merge_provider_config(base.ollama_cloud, override_cfg.ollama_cloud),
             volcengine: merge_provider_config(base.volcengine, override_cfg.volcengine),

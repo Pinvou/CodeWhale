@@ -1245,6 +1245,9 @@ fn default_reasoning_stream_visibility(provider: ApiProvider) -> ProviderReasoni
         | ApiProvider::MinimaxAnthropic
         | ApiProvider::Sglang
         | ApiProvider::Vllm
+        // Pinvou fork: Tachyon streams reasoning as `delta.reasoning_content`
+        // (vLLM reasoning-parser family).
+        | ApiProvider::Tachyon
         | ApiProvider::Zai
         | ApiProvider::Xai
         // Model Studio surfaces reasoning as structured Thinking on both
@@ -1511,7 +1514,10 @@ fn model_cost_label_for_pricing(provider: ApiProvider, pricing: Option<&PricingS
         Some(PricingSku::AccountCredits { .. }) => "credits".to_string(),
         Some(PricingSku::LocalOrNotApplicable) => "local".to_string(),
         Some(PricingSku::UnknownOrStale) | None => match provider {
-            ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm => "local".to_string(),
+            ApiProvider::Ollama
+            | ApiProvider::Sglang
+            | ApiProvider::Vllm
+            | ApiProvider::Tachyon => "local".to_string(),
             ApiProvider::OpenaiCodex => "oauth quota".to_string(),
             ApiProvider::OpencodeZen => "pay-as-you-go".to_string(),
             _ => "price ?".to_string(),

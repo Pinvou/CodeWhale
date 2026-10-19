@@ -120,6 +120,12 @@ pub(crate) const DEFAULT_SGLANG_BASE_URL: &str = "http://localhost:30000/v1";
 pub(crate) const DEFAULT_VLLM_MODEL: &str = "deepseek-ai/DeepSeek-V4-Pro";
 pub(crate) const DEFAULT_VLLM_FLASH_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
 pub(crate) const DEFAULT_VLLM_BASE_URL: &str = "http://localhost:8000/v1";
+/// Pinvou fork: Tachyon (驭光) vendor engine defaults. Served model ids come
+/// from the deployment's model store; `qwen3.8` mirrors the current Tachyon
+/// card (engine team notice 2026-10). Host configs always carry an explicit
+/// model, so this only seeds bare selections.
+pub(crate) const DEFAULT_TACHYON_MODEL: &str = "qwen3.8";
+pub(crate) const DEFAULT_TACHYON_BASE_URL: &str = "http://localhost:8000/v1";
 /// Unresolved local-Ollama default. A live `GET /v1/models` (Ollama's
 /// OpenAI-compat catalog, same tags as `/api/tags`) must supply the real id;
 /// this marker must never be sent as a model name.

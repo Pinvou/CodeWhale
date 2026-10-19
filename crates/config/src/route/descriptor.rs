@@ -163,7 +163,13 @@ impl TransportKind {
             | ProviderKind::ModelstudioCodingPlanAnthropic => Self::AnthropicMessages,
             ProviderKind::OpenaiCodex => Self::Codex,
             ProviderKind::Antigravity => Self::Antigravity,
-            ProviderKind::Ollama | ProviderKind::Vllm | ProviderKind::Sglang => Self::LocalRuntime,
+            ProviderKind::Ollama
+            | ProviderKind::Vllm
+            | ProviderKind::Sglang
+            | ProviderKind::Tachyon => {
+                // Pinvou fork: Tachyon is a self-hosted local runtime like vLLM.
+                Self::LocalRuntime
+            }
             ProviderKind::Custom => Self::Custom,
             ProviderKind::Deepseek | ProviderKind::OpencodeZen => Self::ModelAware,
             _ => match kind.provider().wire_policy() {

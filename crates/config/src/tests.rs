@@ -5250,8 +5250,10 @@ fn meta_model_api_scopes_both_documented_key_names_to_official_endpoint() {
 #[test]
 fn provider_metadata_registry_covers_every_provider_kind_once() {
     let providers = provider::all_providers();
-    // Full registry keeps legacy dialect/plan kinds for provider_for_kind.
-    assert_eq!(providers.len(), 48);
+    // Full registry keeps legacy dialect/plan kinds for provider_for_kind,
+    // plus the Pinvou-fork Tachyon vendor engine (registered-only, like the
+    // dual-wire kinds — not a selectable catalog row).
+    assert_eq!(providers.len(), 49);
     // Catalog surface is one identity per vendor (no dual-wire / plan rows),
     // and never a retired tombstone: Antigravity stays in the full registry
     // so old config parses and can be cleared, but it left `ALL` when it
@@ -6633,6 +6635,7 @@ fn self_hosted_providers_do_not_probe_secret_store_by_default() {
     for provider in [
         ProviderKind::Sglang,
         ProviderKind::Vllm,
+        ProviderKind::Tachyon,
         ProviderKind::Ollama,
     ] {
         let config = ConfigToml {

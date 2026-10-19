@@ -307,7 +307,7 @@ fn provider_scoped_cost(
     // override stale/junk recorded surfaces: they cannot become PAYG merely
     // because an older recorder wrote a bogus endpoint classification.
     let intrinsic_surface = match provider {
-        ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm => {
+        ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm | ApiProvider::Tachyon => {
             Some(crate::pricing::LOCAL_BILLING_SURFACE)
         }
         ApiProvider::OpenaiCodex | ApiProvider::OpencodeGo => {

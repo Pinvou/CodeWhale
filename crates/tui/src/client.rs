@@ -4068,6 +4068,14 @@ pub(super) fn apply_reasoning_effort(
                     "enable_thinking": false,
                 });
             }
+            // Pinvou fork: Tachyon (驭光) shares vLLM's off switch. The wire
+            // family is identical (`chat_template_kwargs.enable_thinking`);
+            // only the tier ladder below differs.
+            ApiProvider::Tachyon => {
+                body["chat_template_kwargs"] = json!({
+                    "enable_thinking": false,
+                });
+            }
             ApiProvider::Openai
             | ApiProvider::WanjieArk
             | ApiProvider::Qianfan
@@ -4183,6 +4191,23 @@ pub(super) fn apply_reasoning_effort(
                 };
                 body["reasoning_effort"] = json!(value);
             }
+            // Pinvou fork: Tachyon (驭光) effective tiers are
+            // none/low/medium/xhigh. `high` is rejected with HTTP 400 by the
+            // product's chat template (engine team notice 2026-10), so a
+            // `high` request (legacy stored value or an unlabeled tier) is
+            // defensively clamped to `medium` — the ladder must never emit
+            // `high` on this route. The deeper `xhigh` tier is reached only
+            // through the max/xhigh family below.
+            ApiProvider::Tachyon => {
+                body["chat_template_kwargs"] = json!({
+                    "enable_thinking": true,
+                });
+                let value = match normalized.as_str() {
+                    "low" | "minimal" => "low",
+                    _ => "medium",
+                };
+                body["reasoning_effort"] = json!(value);
+            }
             ApiProvider::Openai
             | ApiProvider::WanjieArk
             | ApiProvider::Qianfan
@@ -4282,6 +4307,14 @@ pub(super) fn apply_reasoning_effort(
                 // vLLM only supports none/low/medium/high — downgrade
                 // "max" to "high" instead of sending an invalid value.
                 body["reasoning_effort"] = json!("high");
+            }
+            // Pinvou fork: Tachyon's deepest tier IS `xhigh` (unlike vLLM's
+            // max→high downgrade) — the max/xhigh family maps straight to it.
+            ApiProvider::Tachyon => {
+                body["chat_template_kwargs"] = json!({
+                    "enable_thinking": true,
+                });
+                body["reasoning_effort"] = json!("xhigh");
             }
             ApiProvider::Openai
             | ApiProvider::WanjieArk
@@ -10013,6 +10046,70 @@ mod tests {
             let mut body = json!({});
             apply_reasoning_effort(&mut body, Some("off"), ApiProvider::Ollama);
             assert_eq!(body, json!({ "think": false }));
+        }
+    }
+
+    /// Pinvou fork regression (fork-modifications T10): the Tachyon (驭光)
+    /// tier ladder never emits `reasoning_effort: "high"` — the product's
+    /// chat template rejects it with HTTP 400 (engine team notice 2026-10).
+    /// Every tier family is covered: off disables via enable_thinking=false,
+    /// low/medium pass through, an explicit `high` clamps defensively to
+    /// `medium`, and unlabeled tiers ("" / bare spellings) land on `medium`
+    /// rather than `high`.
+    #[test]
+    fn forkguard_tachyon_effort_ladder_never_emits_high() {
+        // off family: enable_thinking=false, no reasoning_effort.
+        let mut body = json!({});
+        apply_reasoning_effort(&mut body, Some("off"), ApiProvider::Tachyon);
+        assert_eq!(
+            body,
+            json!({ "chat_template_kwargs": { "enable_thinking": false } })
+        );
+
+        // low~high family: explicit tiers pass through / clamp.
+        for (effort, expected_value) in [
+            ("low", "low"),
+            ("minimal", "low"),
+            ("medium", "medium"),
+            ("mid", "medium"),
+            ("high", "medium"),
+            ("", "medium"),
+        ] {
+            let mut body = json!({});
+            apply_reasoning_effort(&mut body, Some(effort), ApiProvider::Tachyon);
+            assert_eq!(
+                body,
+                json!({
+                    "chat_template_kwargs": { "enable_thinking": true },
+                    "reasoning_effort": expected_value,
+                }),
+                "effort {effort:?} must never surface as \"high\""
+            );
+            assert_ne!(
+                body.get("reasoning_effort").and_then(Value::as_str),
+                Some("high"),
+                "the Tachyon ladder must never emit high (HTTP 400 on the wire)"
+            );
+        }
+    }
+
+    /// Pinvou fork regression (fork-modifications T10): the max/xhigh family
+    /// maps to Tachyon's real deepest tier `xhigh` — unlike the vLLM arm,
+    /// which downgrades max→high because vLLM has no xhigh. Also pins the
+    /// deep-family spellings ("highest"/"ultra"/"ultracode") to xhigh.
+    #[test]
+    fn forkguard_tachyon_max_maps_to_xhigh() {
+        for effort in ["xhigh", "max", "highest", "ultra", "ultracode"] {
+            let mut body = json!({});
+            apply_reasoning_effort(&mut body, Some(effort), ApiProvider::Tachyon);
+            assert_eq!(
+                body,
+                json!({
+                    "chat_template_kwargs": { "enable_thinking": true },
+                    "reasoning_effort": "xhigh",
+                }),
+                "effort {effort:?} must map to the Tachyon deepest tier xhigh"
+            );
         }
     }
 

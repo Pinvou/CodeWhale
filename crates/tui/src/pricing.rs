@@ -389,7 +389,7 @@ pub(crate) fn billing_surface_for_route(
     // Routes whose billing shape is a property of the provider itself, not of
     // the endpoint spelling.
     match provider {
-        ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm => {
+        ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm | ApiProvider::Tachyon => {
             return Some(LOCAL_BILLING_SURFACE);
         }
         // Ollama Cloud publishes plan/account terms, not a Codewhale-owned

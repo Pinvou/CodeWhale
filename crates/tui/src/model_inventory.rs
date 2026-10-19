@@ -156,7 +156,10 @@ impl ModelInventory {
                 }
                 if matches!(
                     provider,
-                    ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm
+                    ApiProvider::Ollama
+                        | ApiProvider::Sglang
+                        | ApiProvider::Vllm
+                        | ApiProvider::Tachyon
                 ) {
                     tags.push("local");
                 }
@@ -411,6 +414,7 @@ fn provider_default_model(config: &Config, provider: ApiProvider) -> String {
             ApiProvider::OllamaCloud => crate::config::DEFAULT_OLLAMA_CLOUD_MODEL,
             ApiProvider::Sglang => crate::config::DEFAULT_SGLANG_MODEL,
             ApiProvider::Vllm => crate::config::DEFAULT_VLLM_MODEL,
+            ApiProvider::Tachyon => crate::config::DEFAULT_TACHYON_MODEL,
             _ => crate::config::DEFAULT_TEXT_MODEL,
         })
         .to_string()

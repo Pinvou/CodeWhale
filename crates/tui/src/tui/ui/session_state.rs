@@ -1161,6 +1161,7 @@ pub(crate) fn mirror_saved_api_key_in_config(
         ApiProvider::Moonshot => &mut providers.moonshot,
         ApiProvider::Sglang => &mut providers.sglang,
         ApiProvider::Vllm => &mut providers.vllm,
+        ApiProvider::Tachyon => &mut providers.tachyon,
         ApiProvider::Ollama => &mut providers.ollama,
         ApiProvider::OllamaCloud => &mut providers.ollama_cloud,
         ApiProvider::Huggingface => &mut providers.huggingface,

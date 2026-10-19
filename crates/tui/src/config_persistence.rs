@@ -308,6 +308,7 @@ fn provider_base_url_table_key(provider: ApiProvider) -> anyhow::Result<&'static
         ApiProvider::Moonshot => Ok("moonshot"),
         ApiProvider::Sglang => Ok("sglang"),
         ApiProvider::Vllm => Ok("vllm"),
+        ApiProvider::Tachyon => Ok("tachyon"),
         ApiProvider::Ollama => Ok("ollama"),
         ApiProvider::OllamaCloud => Ok("ollama_cloud"),
         ApiProvider::Together => Ok("together"),

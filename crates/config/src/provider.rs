@@ -29,13 +29,14 @@ use super::{
     DEFAULT_QIANFAN_BASE_URL, DEFAULT_QIANFAN_MODEL, DEFAULT_SAKANA_BASE_URL, DEFAULT_SAKANA_MODEL,
     DEFAULT_SGLANG_BASE_URL, DEFAULT_SGLANG_MODEL, DEFAULT_SILICONFLOW_BASE_URL,
     DEFAULT_SILICONFLOW_CN_BASE_URL, DEFAULT_SILICONFLOW_MODEL, DEFAULT_STEPFUN_BASE_URL,
-    DEFAULT_STEPFUN_MODEL, DEFAULT_TELECOMJS_BASE_URL, DEFAULT_TELECOMJS_MODEL,
-    DEFAULT_TOGETHER_BASE_URL, DEFAULT_TOGETHER_MODEL, DEFAULT_VLLM_BASE_URL, DEFAULT_VLLM_MODEL,
-    DEFAULT_VOLCENGINE_BASE_URL, DEFAULT_VOLCENGINE_MODEL, DEFAULT_WANJIE_ARK_BASE_URL,
-    DEFAULT_WANJIE_ARK_MODEL, DEFAULT_XAI_BASE_URL, DEFAULT_XAI_MODEL,
-    DEFAULT_XIAOMI_MIMO_BASE_URL, DEFAULT_XIAOMI_MIMO_MODEL, DEFAULT_ZAI_BASE_URL,
-    DEFAULT_ZAI_MODEL, MODELSTUDIO_CODING_PLAN_ANTHROPIC_BASE_URL,
-    MODELSTUDIO_TOKEN_PLAN_ANTHROPIC_BASE_URL, ProviderKind,
+    DEFAULT_STEPFUN_MODEL, DEFAULT_TACHYON_BASE_URL, DEFAULT_TACHYON_MODEL,
+    DEFAULT_TELECOMJS_BASE_URL, DEFAULT_TELECOMJS_MODEL, DEFAULT_TOGETHER_BASE_URL,
+    DEFAULT_TOGETHER_MODEL, DEFAULT_VLLM_BASE_URL, DEFAULT_VLLM_MODEL, DEFAULT_VOLCENGINE_BASE_URL,
+    DEFAULT_VOLCENGINE_MODEL, DEFAULT_WANJIE_ARK_BASE_URL, DEFAULT_WANJIE_ARK_MODEL,
+    DEFAULT_XAI_BASE_URL, DEFAULT_XAI_MODEL, DEFAULT_XIAOMI_MIMO_BASE_URL,
+    DEFAULT_XIAOMI_MIMO_MODEL, DEFAULT_ZAI_BASE_URL, DEFAULT_ZAI_MODEL,
+    MODELSTUDIO_CODING_PLAN_ANTHROPIC_BASE_URL, MODELSTUDIO_TOKEN_PLAN_ANTHROPIC_BASE_URL,
+    ProviderKind,
 };
 
 /// Wire protocol spoken by a provider.
@@ -310,6 +311,14 @@ pub const fn credential_help(kind: ProviderKind) -> CredentialHelp {
             credential_url: None,
             docs_url: Some("https://docs.vllm.ai/en/stable/serving/openai_compatible_server/"),
             guidance: "Self-hosted vLLM is keyless by default; configure a key only if your server requires one.",
+        },
+        // Pinvou fork: Tachyon deployments are keyless by default; a key is
+        // only needed when the card is started with `--api-key`.
+        ProviderKind::Tachyon => CredentialHelp {
+            acquisition: LocalOptional,
+            credential_url: None,
+            docs_url: None,
+            guidance: "Self-hosted Tachyon is keyless by default; configure a key only if your server requires one.",
         },
         ProviderKind::Ollama => CredentialHelp {
             acquisition: LocalOptional,
@@ -981,6 +990,24 @@ provider!(
     ["VLLM_API_KEY"],
     "vllm",
     aliases: ["v-llm"]
+);
+// Pinvou fork: Tachyon (驭光) vendor engine. Wire-family identical to vLLM
+// (`chat_template_kwargs.enable_thinking` + `reasoning_effort`) except the
+// effective tier ladder is none/low/medium/xhigh — `high` is rejected 400 by
+// the product template and the deepest tier is `xhigh`. Not a selectable
+// catalog row (`ProviderKind::ALL`): the Pinvou host selects it via config
+// after probing `owned_by == "tachyon"`. Registered-only, like the legacy
+// dual-wire kinds.
+provider!(
+    Tachyon,
+    Tachyon,
+    "tachyon",
+    "Tachyon (Pinvou)",
+    DEFAULT_TACHYON_BASE_URL,
+    DEFAULT_TACHYON_MODEL,
+    ["TACHYON_API_KEY"],
+    "tachyon",
+    aliases: []
 );
 provider!(
     Ollama,
@@ -1822,6 +1849,7 @@ static ARCEE: Arcee = Arcee;
 static MOONSHOT: Moonshot = Moonshot;
 static SGLANG: Sglang = Sglang;
 static VLLM: Vllm = Vllm;
+static TACHYON: Tachyon = Tachyon;
 static OLLAMA: Ollama = Ollama;
 static OLLAMA_CLOUD: OllamaCloud = OllamaCloud;
 static HUGGINGFACE: Huggingface = Huggingface;
@@ -1854,7 +1882,7 @@ static MODELSTUDIO_CODING_PLAN_ANTHROPIC: ModelstudioCodingPlanAnthropic =
     ModelstudioCodingPlanAnthropic;
 static CUSTOM: Custom = Custom;
 
-static PROVIDER_REGISTRY: [&dyn Provider; 48] = [
+static PROVIDER_REGISTRY: [&dyn Provider; 49] = [
     &DEEPSEEK,
     &DEEPSEEK_ANTHROPIC,
     &NVIDIA_NIM,
@@ -1873,6 +1901,7 @@ static PROVIDER_REGISTRY: [&dyn Provider; 48] = [
     &MOONSHOT,
     &SGLANG,
     &VLLM,
+    &TACHYON,
     &OLLAMA,
     &OLLAMA_CLOUD,
     &HUGGINGFACE,
@@ -1938,6 +1967,10 @@ pub fn providers_sorted_for_display() -> Vec<&'static dyn Provider> {
         .iter()
         .copied()
         .filter(|provider| provider.kind() != ProviderKind::Antigravity)
+        // Pinvou fork: Tachyon is registered-only (selected programmatically
+        // by the Pinvou host after probing); standalone pickers must not
+        // offer it, matching `ProviderKind::ALL`'s catalog exclusion.
+        .filter(|provider| provider.kind() != ProviderKind::Tachyon)
         .collect();
     providers.sort_by(|a, b| {
         a.display_name()
@@ -2428,6 +2461,7 @@ mod tests {
         for kind in [
             ProviderKind::Sglang,
             ProviderKind::Vllm,
+            ProviderKind::Tachyon,
             ProviderKind::Ollama,
         ] {
             assert_eq!(
@@ -2551,11 +2585,13 @@ mod tests {
     #[test]
     fn display_order_is_complete_and_unique() {
         // Every selectable provider is retained exactly once; legacy
-        // configuration tombstones stay in the internal registry only.
+        // configuration tombstones stay in the internal registry only, and
+        // the Pinvou-fork Tachyon engine is registered-only (host-selected
+        // after probing) so pickers must not offer it either.
         let display = providers_sorted_for_display();
         assert_eq!(
             display.len(),
-            all_providers().len() - 1,
+            all_providers().len() - 2,
             "display order must include every selectable built-in provider"
         );
         assert!(

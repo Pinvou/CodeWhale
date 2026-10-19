@@ -137,6 +137,10 @@ pub const DEFAULT_SGLANG_BASE_URL: &str = "http://localhost:30000/v1";
 pub const DEFAULT_VLLM_MODEL: &str = "deepseek-ai/DeepSeek-V4-Pro";
 pub const DEFAULT_VLLM_FLASH_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
 pub const DEFAULT_VLLM_BASE_URL: &str = "http://localhost:8000/v1";
+// Pinvou fork: Tachyon (驭光) vendor engine defaults; mirrors
+// crates/config/src/provider_defaults.rs for the docs drift check.
+pub const DEFAULT_TACHYON_MODEL: &str = "qwen3.8";
+pub const DEFAULT_TACHYON_BASE_URL: &str = "http://localhost:8000/v1";
 /// Unresolved local-Ollama default. A live provider-catalog refresh must
 /// replace this with a tag `GET /v1/models` actually returned. Do not send
 /// this string as a model id.

@@ -3715,6 +3715,20 @@ fn provider_accepts_reasoning_content(provider: ApiProvider) -> bool {
             | ApiProvider::Sglang
             | ApiProvider::Zai
             | ApiProvider::Moonshot // #3016: Kimi thinking traces use reasoning_content
+            // Pinvou fork: Tachyon (驭光) streams thinking as
+            // `delta.reasoning_content` (same reasoning-parser family as
+            // vLLM). Both consumers below still gate on
+            // `model_supports_reasoning`, so for a served id the model
+            // catalogue does not know (e.g. bare `qwen3.8`) the decode is
+            // guaranteed instead by the Pinvou host writing
+            // `reasoning_stream_style = "separate_field"` into the
+            // `[providers.tachyon]` table (configured styles are consulted
+            // before this classification). Replay follows the model
+            // catalogue gate below: catalogued reasoning ids (qwen3.x
+            // included) DO replay — a deliberate difference from the vllm
+            // route, registered in fork-modifications T10 — while ids the
+            // catalogue does not know keep replay off.
+            | ApiProvider::Tachyon
     )
 }
 

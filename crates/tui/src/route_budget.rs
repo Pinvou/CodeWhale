@@ -187,7 +187,9 @@ fn route_declares_unknown_output_ceiling(provider: ApiProvider, model: &str) -> 
     match provider {
         // Operator-owned engines: the local server, not this process, owns the
         // output ceiling, and it is routinely far above any catalogue row.
-        ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm => true,
+        ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm | ApiProvider::Tachyon => {
+            true
+        }
         // Kimi Code membership ids publish their limits in the membership
         // catalog rather than the static model catalogue.
         ApiProvider::Moonshot => crate::config::is_kimi_code_membership_model(model),
