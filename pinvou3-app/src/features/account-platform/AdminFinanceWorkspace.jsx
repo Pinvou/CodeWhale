@@ -225,6 +225,12 @@ function ProviderControls({ client, copy, permissions, owner }) {
   </section>;
 }
 
+function initialFinanceTab(initialTab, canReadFinance, canRequestRepair, defaultTab) {
+  if (['ledger', 'correction', 'writeoff', 'paymentrepair', 'refundrepair'].includes(initialTab) && canRequestRepair) return initialTab;
+  if (canReadFinance && ['orders', 'wallets', 'controls'].includes(initialTab)) return initialTab;
+  return defaultTab;
+}
+
 export function AdminFinanceWorkspace({ client, me, language, initialTab = 'orders' }) {
   const copy = financeCopy[language];
   const permissions = me.platform_permissions || [];
@@ -232,11 +238,9 @@ export function AdminFinanceWorkspace({ client, me, language, initialTab = 'orde
   const canReadFinance = permissions.includes('platform.billing.wallets.read');
   const canRequestRepair = permissions.includes('platform.billing.repairs.request');
   const defaultTab = canReadFinance ? 'orders' : canRequestRepair ? 'ledger' : 'approvals';
-  const [tab, setTab] = useState(canReadFinance || (['ledger', 'correction', 'writeoff', 'paymentrepair', 'refundrepair'].includes(initialTab) && canRequestRepair) ? initialTab : defaultTab);
+  const [tab, setTab] = useState(() => initialFinanceTab(initialTab, canReadFinance, canRequestRepair, defaultTab));
   useEffect(() => {
-    if (['ledger', 'correction', 'writeoff', 'paymentrepair', 'refundrepair'].includes(initialTab) && canRequestRepair) setTab(initialTab);
-    else if (canReadFinance && ['orders', 'wallets', 'controls'].includes(initialTab)) setTab(initialTab);
-    else setTab(defaultTab);
+    setTab(initialFinanceTab(initialTab, canReadFinance, canRequestRepair, defaultTab));
   }, [initialTab, canReadFinance, canRequestRepair, defaultTab]);
   const [approvalID, setApprovalID] = useState('');
   const tabs = [...(canRequestRepair ? [['ledger', ledgerRepairCopy[language].title], ['writeoff', ledgerRepairCopy[language].writeOffTitle], ['paymentrepair', ledgerRepairCopy[language].paymentRepairTitle], ['refundrepair', ledgerRepairCopy[language].refundRepairTitle], ['correction', entitlementCorrectionCopy[language].title]] : []),
