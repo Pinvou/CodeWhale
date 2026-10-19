@@ -917,6 +917,10 @@ jobs:
       # repack xz -9 → glibc 2.38 下限守护(内部对解包树逐 ELF 跑
       # check-linux-elf-policy.sh)。工具链/sysroot 已在 job env 导出,
       # 编排脚本检测到后跳过内部安装。
+      - name: 安装前端依赖
+        working-directory: pinvou3-app
+        run: npm ci --prefer-offline --no-audit
+
       - name: Cross build + package the loong64 deb
         run: bash scripts/ci-build-linux-loongarch64.sh
 

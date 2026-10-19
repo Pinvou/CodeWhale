@@ -145,7 +145,15 @@ export CXX_loongarch64_unknown_linux_gnu="$TOOLCHAIN_BIN/$TRIPLE-g++"
 export AR_loongarch64_unknown_linux_gnu="$TOOLCHAIN_BIN/$TRIPLE-gcc-ar"
 export RANLIB_loongarch64_unknown_linux_gnu="$TOOLCHAIN_BIN/$TRIPLE-gcc-ranlib"
 export STRIP="$TOOLCHAIN_BIN/$TRIPLE-strip"
-export CARGO_TARGET_LOONGARCH64_UNKNOWN_LINUX_GNU_LINKER="$TOOLCHAIN_BIN/$TRIPLE-gcc"
+# Cargo links through the rust-lld wrapper (rustc's LLVM emits R_LARCH_CALL36
+# that the bundled bfd 2.41 cannot resolve; the wrapper keeps native cmake/cc
+# builds on bfd and the glibc 2.38 floor unchanged). The wrapper is
+# materialized by ci-loongarch64-toolchain.sh — a stale or hand-made prefix
+# without it must fail here, not at link time.
+cargo_linker="$TOOLCHAIN_BIN/$TRIPLE-gcc-rust-lld"
+[ -x "$cargo_linker" ] \
+  || fail "missing $cargo_linker — re-run scripts/ci-loongarch64-toolchain.sh to materialize the rust-lld linker wrapper"
+export CARGO_TARGET_LOONGARCH64_UNKNOWN_LINUX_GNU_LINKER="$cargo_linker"
 export PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR CMAKE_TOOLCHAIN_FILE
 # bindgen (libspa/pipewire -sys build scripts) must bind against the target
 # sysroot's headers, not the host's /usr/include (exported by the sysroot
