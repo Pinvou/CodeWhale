@@ -66,6 +66,8 @@ pub struct PlatformCapabilities {
     /// Every other target reports `false` and hides the entry points.
     pub desktop_remote_control_supported: bool,
     pub paste_image_clipboard_read: bool,
+    pub local_embed_supported: bool,
+    pub global_shortcuts_available: bool,
 }
 
 impl PlatformCapabilities {
@@ -102,6 +104,8 @@ impl PlatformCapabilities {
             voice_shortcut_native: capabilities.voice_shortcut_native,
             desktop_remote_control_supported: capabilities.desktop_remote_control_supported,
             paste_image_clipboard_read: capabilities.paste_image_clipboard_read,
+            local_embed_supported: capabilities.local_embed_supported,
+            global_shortcuts_available: capabilities.global_shortcuts_available,
         }
     }
 }
@@ -199,6 +203,14 @@ mod platform_capability_tests {
         assert_eq!(
             capabilities.paste_image_clipboard_read,
             expected.paste_image_clipboard_read
+        );
+        assert_eq!(
+            capabilities.local_embed_supported,
+            expected.local_embed_supported
+        );
+        assert_eq!(
+            capabilities.global_shortcuts_available,
+            expected.global_shortcuts_available
         );
     }
 

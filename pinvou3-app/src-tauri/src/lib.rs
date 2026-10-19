@@ -802,7 +802,7 @@ pub fn run() {
         })
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
-                crate::platform::window_startup::activate_main_window(window);
+                crate::platform::window_startup::activate_main_window(window, "single_instance");
             }
         }))
         .plugin(
@@ -830,7 +830,39 @@ pub fn run() {
                     Ok(())
                 })
                 .build(),
-        )
+        );
+    // System-wide bring-to-front shortcut (off by default, opt-in like the
+    // voice shortcut; default accelerator Ctrl/Cmd+Alt+P when enabled —
+    // configurable in settings). Registered ONLY on sessions where it can
+    // actually work: on Wayland the X11 grabs behind the plugin would be
+    // silently dead (XWayland's X server receives no system-wide keys), and
+    // with no X server to connect to at all the plugin's manager thread
+    // cannot attach (its connection failure is swallowed on that thread, so
+    // every later register would silently no-op rather than error — on Linux
+    // manager creation itself is infallible, which is exactly why a dead
+    // registration would go unnoticed). The same availability flag gates
+    // every later apply (`features::global_shortcut`), so plugin presence and
+    // the feature gate can never disagree.
+    // No plugin-level handler here: it would fire for ANY shortcut registered
+    // on this shared plugin. Scoping is bound per shortcut at registration
+    // time — `features::global_shortcut` registers through `on_shortcut`,
+    // whose handler triggers strictly on Pressed (Released stays a no-op) and
+    // only for the combo that registration created.
+    let builder = if crate::platform::capabilities::current().global_shortcuts_available {
+        builder
+            .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+            .plugin(
+                tauri::plugin::Builder::<_, ()>::new("startup-probe-global-shortcut")
+                    .setup(|_app, _api| {
+                        startup::mark("tauri:plugin_global_shortcut_ready");
+                        Ok(())
+                    })
+                    .build(),
+            )
+    } else {
+        builder
+    };
+    let builder = builder
         .on_page_load(|webview, payload| {
             startup::mark_with_detail(
                 "rust",
@@ -899,6 +931,11 @@ pub fn run() {
                 );
             }
             startup::mark("setup:plugins_ready");
+            // Log-attached; only now can a log::warn! reach the log file. The
+            // degraded-XWayland-session diagnostic is emitted here instead of
+            // inside capabilities::current(), whose first call (builder
+            // construction) runs before any logger exists.
+            crate::features::global_shortcut::warn_if_ambiguous_session();
             crate::platform::window_startup::arm_hidden_main_window_fallback(app.handle());
 
             // Linux webview(webkit2gtk)默认拒绝 getUserMedia,语音输入点麦克风会被拒。
@@ -1609,9 +1646,18 @@ pub fn run() {
             // Startup replay: settings.json's voice_shortcut_enabled is the
             // authoritative persistence of the switch (frontend localStorage is
             // only a mirror); sync it into the native-layer AtomicBool right
-            // after the hook is installed.
-            crate::features::voice_shortcut::set_enabled(
-                crate::platform::prefs::UserPrefs::load().voice_shortcut_enabled,
+            // after the hook is installed. One shared load serves both this
+            // and the global-shortcut replay below.
+            let prefs = crate::platform::prefs::UserPrefs::load();
+            crate::features::voice_shortcut::set_enabled(prefs.voice_shortcut_enabled);
+
+            // System-wide bring-to-front shortcut: same replay shape. A parse
+            // failure or register conflict (another app owns the combination)
+            // logs and continues — startup must never fail over the shortcut.
+            crate::features::global_shortcut::install(app.handle().clone());
+            crate::features::global_shortcut::apply_saved_settings(
+                prefs.global_shortcut_enabled,
+                &prefs.global_shortcut_accelerator,
             );
 
             startup::mark("setup:done");
@@ -1847,6 +1893,7 @@ pub fn run() {
             commands::voice::cancel_voice_asr,
             commands::voice::set_voice_shortcut_enabled,
             commands::voice::set_voice_shortcut_recording,
+            commands::global_shortcut::set_global_shortcut_config,
             commands::projects::list_projects,
             commands::projects::create_project,
             commands::projects::update_project,
