@@ -329,6 +329,7 @@
       ['聊天 / 代码调用',`${n(r.task_modes?.assistant)} / ${n(r.task_modes?.code)}`],
       ['被控模型 / 主控临时模型',`${n(r.task_model_sources?.controlled)} / ${n(r.task_model_sources?.controller_temporary)}`],
       ['等待终态 / 结果未知',`${n(r.pending_count)} / ${n(r.unknown_count)}`],
+      ['确定未发送',n(r.not_sent_count)],
       ['首输出 P50 / P90',`${ms(r.first_output_p50_ms)} / ${ms(r.first_output_p90_ms)}`],
       ['执行耗时 P50 / P90',`${ms(r.task_duration_p50_ms)} / ${ms(r.task_duration_p90_ms)}`],
       ['主控等待结果 P50 / P90',`${ms(r.result_wait_p50_ms)} / ${ms(r.result_wait_p90_ms)}`],
@@ -339,7 +340,7 @@
       ['执行终态 / 观测到主控接收',`${n(r.execution_terminal_count)} / ${n(r.result_received_count)}`],
       ['主控接收观测率',pct(r.result_receipt_rate)],
     ],[row=>escapeHtml(row[0]),row=>escapeHtml(row[1])]);
-    const stages={start:'启用被控',stop:'停用被控',refresh:'刷新配对',claim:'认领',handshake:'握手',connection:'连接',disconnection:'断连',resume:'重连',task_submit:'提交',task_admit:'接纳',task_running:'执行',first_output:'首输出',task_terminal:'终态',task_rejected:'拒绝',result_received:'结果接收',model_used:'模型使用',permission:'权限',attachment:'附件传输',artifact:'产物传输'};
+    const stages={start:'启用被控',stop:'停用被控',refresh:'刷新配对',claim:'认领',handshake:'握手',connection:'连接',disconnection:'断连',resume:'重连',task_submit:'提交',task_not_sent:'未发送',task_admit:'接纳',task_running:'执行',first_output:'首输出',task_terminal:'终态',task_rejected:'拒绝',result_received:'结果接收',model_used:'模型使用',permission:'权限',attachment:'附件传输',artifact:'产物传输'};
     renderSimpleRows('remoteEventRows',r.rows||[],[row=>escapeHtml(stages[row.stage]||row.stage),row=>escapeHtml(row.outcome),row=>escapeHtml(row.reason),row=>n(row.count)]);
   }
   function renderCommercial(){for(const id of ['paidPenetration','arpu','arppu','mrr'])$(id).textContent='未接入';$('paidUsers').textContent='无权威账号数据';$('newPaidUsers').textContent='无权威订单数据';$('renewalRate').textContent='未计算';$('revenueTrend').textContent='商业数据源尚未接入，不展示模拟收入';$('conversionFunnel').innerHTML='<div class="empty-tip">商业与实验指标属于 P2，本版本暂不实现</div>'}

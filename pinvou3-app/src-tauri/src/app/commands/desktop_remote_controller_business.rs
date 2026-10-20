@@ -1262,6 +1262,15 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
                     if !matches!(ledger.record(&field("task_id")), Err(ref lookup) if lookup.code == "task_not_found") {
                         return "task_request_conflict".to_owned();
                     }
+                    // B owns the admission decision even when A opted out or
+                    // disconnected before its rejection receipt arrived. This
+                    // is not a B-origin submission or an executed invocation.
+                    use crate::features::behavior_telemetry::{
+                        RemoteControlEvent, RemoteStage, track_remote_control,
+                    };
+                    track_remote_control(&self.app, RemoteControlEvent::from_result::<()>(
+                        RemoteStage::TaskRejected, &Err(code.to_owned()), 0,
+                    ).task(&field("task_id"), true, payload.get("mode").and_then(Value::as_str)));
                 }
                 code.to_owned()
             })

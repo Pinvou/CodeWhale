@@ -19,7 +19,10 @@ export function remoteTaskGroups(events) {
   }
   return [...groups.entries()].map(([key, rows]) => {
     rows = ordered(rows);
-    const submitted = rows.find(e => e.remote_stage === "task_submit");
+    const submitted = rows.find(e => e.remote_stage === "task_submit"
+      && (e.remote_outcome === "ok" || e.remote_task_status === "unknown"));
+    const notSent = rows.find(e => e.remote_stage === "task_not_sent"
+      || (e.remote_stage === "task_submit" && e.remote_outcome !== "ok" && e.remote_task_status !== "unknown"));
     const authoritative = rows.find(e => e.remote_role === "controlled" && e.remote_stage === "task_terminal");
     const received = rows.find(e => e.remote_role === "controller" && e.remote_stage === "result_received");
     // Unknown on B cannot be overwritten by an optimistic observer on A.
@@ -28,9 +31,11 @@ export function remoteTaskGroups(events) {
     const rejected = rows.find(e => e.remote_stage === "task_rejected");
     const owner = submitted || admitted || terminal || rows[0];
     const mode = rows.find(e => ["assistant", "code"].includes(e.remote_mode))?.remote_mode;
-    return { key, rows, submitted, admitted, terminal, received, rejected, owner, mode,
+    return { key, rows, submitted, admitted, terminal, received, rejected, notSent, owner, mode,
       attributed: Boolean(submitted), authoritative,
-      status: terminal?.remote_task_status || (rejected ? "rejected" : "pending") };
+      status: terminal?.remote_task_status || (rejected ? "rejected"
+        : !admitted && submitted?.remote_task_status === "unknown" ? "unknown"
+        : !submitted && !admitted && notSent ? "not_sent" : "pending") };
   });
 }
 
@@ -125,6 +130,7 @@ export function buildRemoteOverview(events, start, end, minimumSample = 30, coun
     rejected_count: tasks.filter(t => t.rejected && inWindow(t.rejected) && allowed(t, "task_rejected")).length,
     unknown_count: tasks.filter(t => t.status === "unknown").length,
     pending_count: tasks.filter(t => t.status === "pending").length,
+    not_sent_count: tasks.filter(t => t.status === "not_sent").length,
     unattributed_count: completed.filter(t => !t.attributed).length,
     controller_installations: new Set(raw.filter(e => e.remote_role === "controller").map(identity).filter(Boolean)).size,
     controlled_installations: new Set(raw.filter(e => e.remote_role === "controlled").map(identity).filter(Boolean)).size,

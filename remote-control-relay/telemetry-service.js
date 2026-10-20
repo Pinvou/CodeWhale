@@ -1150,7 +1150,7 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
   const voiceAdopters = intersectionSize(voiceUsers, successfulActiveInstallations);
   const firstValueWithin24h = new Set();
   for (const event of taskFinished) {
-    if (event.status !== "success" || event.initiator_type !== "user"
+    if (event.remote_attribution_unknown || event.status !== "success" || event.initiator_type !== "user"
       || !["assistant", "code", "team"].includes(event.mode)) continue;
     const identity = eventIdentity(event);
     const cohort = maturedCohorts.get(identity);

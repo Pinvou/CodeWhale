@@ -54,6 +54,54 @@ test("B-only execution counts once without making passive B active or retained",
   assert.equal(buildStatsOverview(devices, [], rows, now).usage_trend.at(-1).active_devices, 0);
 });
 
+test("passive B success cannot become first-day activation or technical value", () => {
+  const cohortTime = now - 30 * 3600000;
+  const rows = [
+    { event_name: "analytics_cohort_started", event_id: "cohort_B", device_id: "B", occurred_at: cohortTime },
+    ...invocation().filter(e => e.remote_role === "controlled")
+      .map(e => ({ ...e, occurred_at: now - 10 * 3600000 })),
+  ];
+  const report = buildBehaviorOverview(devices, [], rows, "7d", now);
+  assert.equal(report.metrics.cohort_matured_installations, 1);
+  assert.equal(report.metrics.task_finished_count, 1);
+  assert.equal(report.metrics.first_technical_value_24h_installations, 0);
+  assert.equal(report.metrics.wsta_installations, 0);
+  assert.equal(report.funnels.activation.task_succeeded_installations, 0);
+});
+
+test("B-only admission rejection reports its reason without an invocation or origin activity", () => {
+  const rows = [event("controlled", "task_rejected", { remote_outcome: "rejected", remote_reason: "permission_required" })];
+  const report = buildBehaviorOverview(devices, [], rows, "today", now);
+  assert.equal(report.remote_control.rejected_count, 1);
+  assert.equal(report.remote_control.rows[0].reason, "permission_required");
+  assert.equal(report.metrics.task_finished_count, 0);
+  assert.equal(report.remote_control.submitted_count, 0);
+  assert.equal(report.metrics.task_active_installations, 0);
+});
+
+test("never-sent, uncertain send, and subsequent actual dispatch remain distinct", () => {
+  const failed = event("controller", "task_not_sent", { remote_outcome: "internal_error", remote_reason: "unknown" });
+  for (const observation of [failed, { ...failed, remote_stage: "task_submit" }]) {
+    const report = buildBehaviorOverview(devices, [], [observation], "today", now);
+    assert.equal(report.remote_control.not_sent_count, 1);
+    assert.equal(report.remote_control.pending_count, 0);
+    assert.equal(report.remote_control.submitted_count, 0);
+    assert.equal(report.metrics.task_submitted_count, 0);
+    assert.equal(report.metrics.task_finished_count, 0);
+  }
+  const uncertain = event("controller", "task_submit", { remote_outcome: "internal_error", remote_task_status: "unknown" });
+  const report = buildBehaviorOverview(devices, [], [failed, uncertain], "today", now);
+  assert.equal(report.remote_control.unknown_count, 1);
+  assert.equal(report.remote_control.not_sent_count, 0);
+  assert.equal(report.remote_control.pending_count, 0);
+  assert.equal(report.remote_control.submitted_count, 1);
+  assert.equal(report.metrics.task_finished_count, 0);
+  const recovered = buildBehaviorOverview(devices, [], [failed, uncertain, ...invocation().slice(1)], "today", now);
+  assert.equal(recovered.remote_control.task_count, 1);
+  assert.equal(recovered.remote_control.unknown_count, 0);
+  assert.equal(recovered.remote_control.not_sent_count, 0);
+});
+
 test("A-only authenticated receipt counts once; submission alone remains pending", () => {
   const rows = invocation().filter(e => e.remote_role === "controller");
   assert.equal(buildBehaviorOverview(devices, [], rows, "today", now).metrics.task_finished_count, 1);

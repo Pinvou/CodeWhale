@@ -112,7 +112,7 @@
     "rating": { "enum": ["positive", "negative"] },
     "reason_code": { "enum": ["accurate", "helpful", "fast", "incorrect", "incomplete", "unsafe", "too_slow", "other"] },
     "content_type": { "enum": ["text", "code", "table", "other"] },
-    "remote_stage": {"enum": ["start", "stop", "refresh", "claim", "handshake", "connection", "disconnection", "resume", "task_submit", "task_admit", "task_terminal", "permission", "attachment", "artifact", "task_running", "first_output", "task_rejected", "result_received", "model_used"]},
+    "remote_stage": {"enum": ["start", "stop", "refresh", "claim", "handshake", "connection", "disconnection", "resume", "task_submit", "task_not_sent", "task_admit", "task_terminal", "permission", "attachment", "artifact", "task_running", "first_output", "task_rejected", "result_received", "model_used"]},
     "remote_outcome": { "enum": ["ok", "rejected", "timeout", "busy", "expired", "unsupported", "internal_error"] },
     "remote_reason": {"enum": ["none", "not_enrolled", "code_invalid", "slot_conflict", "handshake_failed", "receipt_mismatch", "liveness_missing", "watchdog_expired", "resume_failed", "task_conflict", "permission_denied", "permission_timeout", "transfer_budget", "artifact_missing", "rate_limited", "unknown", "permission_required", "permission_changed", "capability_stale", "model_unavailable", "task_timeout"]},
     "remote_latency_bucket": { "enum": ["lt_50ms", "lt_250ms", "lt_1s", "lt_5s", "lt_30s", "gte_30s"] },

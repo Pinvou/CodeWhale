@@ -2281,11 +2281,25 @@ pub async fn desktop_remote_task_commit_a<R: tauri::Runtime>(
         let result = service
             .commit_prepared(&local_session_id, &remote_ref, handle, &attachment_ids)
             .map_err(|error| error.code().to_owned());
-        if let Some(outcome) = task_submit_telemetry_outcome(&result) {
+        if let Some(observation) = task_submit_telemetry_outcome(&result) {
+            let event = match observation {
+                SubmitTelemetry::Queued => {
+                    RemoteControlEvent::new(RemoteStage::TaskSubmit, RemoteOutcome::Ok)
+                }
+                SubmitTelemetry::Unknown => {
+                    RemoteControlEvent::new(RemoteStage::TaskSubmit, RemoteOutcome::InternalError)
+                        .status("unknown")
+                }
+                SubmitTelemetry::NotSent(code) => RemoteControlEvent::from_result::<()>(
+                    RemoteStage::TaskNotSent,
+                    &Err(code.to_owned()),
+                    0,
+                ),
+            };
             crate::features::behavior_telemetry::track_remote_origin_event(
                 &app,
                 &telemetry_task_id,
-                RemoteControlEvent::new(RemoteStage::TaskSubmit, outcome)
+                event
                     .task(&telemetry_task_id, false, telemetry_mode)
                     .latency_ms(started.elapsed().as_millis() as u64),
             );
@@ -2295,19 +2309,31 @@ pub async fn desktop_remote_task_commit_a<R: tauri::Runtime>(
     .await
 }
 
+#[derive(Debug, PartialEq)]
+enum SubmitTelemetry<'a> {
+    Queued,
+    Unknown,
+    NotSent(&'a str),
+}
+
 fn task_submit_telemetry_outcome(
     result: &Result<RemoteDispatchReport, String>,
-) -> Option<RemoteOutcome> {
+) -> Option<SubmitTelemetry<'_>> {
     match result {
-        Err(_) => Some(RemoteOutcome::InternalError),
+        // Errors precede the durable attempt barrier; later send failures
+        // become OutcomeUnknown reports rather than errors.
+        Err(code) => Some(SubmitTelemetry::NotSent(code)),
         Ok(report) if report.attempt == RemoteDispatchAttempt::Reconciled => None,
+        Ok(report) if report.attempt == RemoteDispatchAttempt::NotAttempted => {
+            Some(SubmitTelemetry::NotSent("remote_dispatch_not_attempted"))
+        }
         Ok(report)
             if report.attempt == RemoteDispatchAttempt::FirstAttempt
                 && report.state == RemoteDispatchState::Queued =>
         {
-            Some(RemoteOutcome::Ok)
+            Some(SubmitTelemetry::Queued)
         }
-        Ok(_) => Some(RemoteOutcome::InternalError),
+        Ok(_) => Some(SubmitTelemetry::Unknown),
     }
 }
 
@@ -2777,21 +2803,21 @@ mod tests {
                 RemoteDispatchState::Queued,
                 RemoteDispatchAttempt::FirstAttempt,
             ))),
-            Some(RemoteOutcome::Ok)
+            Some(SubmitTelemetry::Queued)
         );
         assert_eq!(
             task_submit_telemetry_outcome(&Ok(report(
                 RemoteDispatchState::PreparedNotSent,
                 RemoteDispatchAttempt::NotAttempted,
             ))),
-            Some(RemoteOutcome::InternalError)
+            Some(SubmitTelemetry::NotSent("remote_dispatch_not_attempted"))
         );
         assert_eq!(
             task_submit_telemetry_outcome(&Ok(report(
                 RemoteDispatchState::OutcomeUnknown,
                 RemoteDispatchAttempt::FirstAttempt,
             ))),
-            Some(RemoteOutcome::InternalError)
+            Some(SubmitTelemetry::Unknown)
         );
         assert_eq!(
             task_submit_telemetry_outcome(&Ok(report(
@@ -2802,7 +2828,7 @@ mod tests {
         );
         assert_eq!(
             task_submit_telemetry_outcome(&Err("sentinel-must-not-be-classified".into())),
-            Some(RemoteOutcome::InternalError)
+            Some(SubmitTelemetry::NotSent("sentinel-must-not-be-classified"))
         );
     }
 

@@ -1069,7 +1069,7 @@ impl crate::features::remote_control::controller::controlling_service::Controlli
         if !frame.snapshot().verify_digest() {
             return Err("remote_projection_snapshot_digest_invalid".into());
         }
-        self.project_frame(
+        let result = self.project_frame(
             frame.operation(),
             frame.lease(),
             &frame.snapshot().session_id,
@@ -1078,7 +1078,22 @@ impl crate::features::remote_control::controller::controlling_service::Controlli
                 AuthenticatedProxyEvent::verify(candidate, &SnapshotFrameProof { frame, binding })
                     .map_err(|_| "remote_projection_proof_rejected".to_owned())
             },
-        )
+        );
+        // Snapshot recovery is also an authenticated result-delivery path.
+        // Only record after the exact live mapping and snapshot were applied;
+        // stable task/status IDs deduplicate this against live/replayed frames.
+        if result.is_ok() {
+            for event in &frame.snapshot().events {
+                if let (Some(task), Some(status)) =
+                    (event.task_id.as_deref(), event.terminal_status.as_deref())
+                {
+                    crate::features::behavior_telemetry::track_remote_result_received(
+                        &self.app, task, status,
+                    );
+                }
+            }
+        }
+        result
     }
 }
 

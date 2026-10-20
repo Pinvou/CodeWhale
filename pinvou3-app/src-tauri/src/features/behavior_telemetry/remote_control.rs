@@ -31,6 +31,7 @@ controlled_enum!(RemoteStage {
     Disconnection => "disconnection",
     Resume => "resume",
     TaskSubmit => "task_submit",
+    TaskNotSent => "task_not_sent",
     TaskAdmit => "task_admit",
     TaskTerminal => "task_terminal",
     TaskRunning => "task_running",
@@ -529,6 +530,39 @@ mod tests {
                 .contains("random-task-id")
         );
         assert_eq!(b.fields["remote_task_status"], "success");
+    }
+
+    #[test]
+    fn live_and_snapshot_receipts_dedupe_without_collapsing_submission_states() {
+        let receipt = || {
+            RemoteControlEvent::new(RemoteStage::ResultReceived, RemoteOutcome::Ok)
+                .task("random-task-id", false, Some("chat"))
+                .status("succeeded")
+                .into_behavior()
+        };
+        assert_eq!(receipt().event_id, receipt().event_id);
+        let not_sent = RemoteControlEvent::from_result::<()>(
+            RemoteStage::TaskNotSent,
+            &Err("task_permission_mode_required".into()),
+            0,
+        )
+        .task("random-task-id", false, Some("chat"))
+        .into_behavior();
+        let unknown =
+            RemoteControlEvent::new(RemoteStage::TaskSubmit, RemoteOutcome::InternalError)
+                .task("random-task-id", false, Some("chat"))
+                .status("unknown")
+                .into_behavior();
+        let queued = RemoteControlEvent::new(RemoteStage::TaskSubmit, RemoteOutcome::Ok)
+            .task("random-task-id", false, Some("chat"))
+            .into_behavior();
+        for event in [&not_sent, &unknown, &queued] {
+            validate_event_fields(event).unwrap();
+        }
+        assert_eq!(not_sent.fields["remote_reason"], "permission_required");
+        assert_eq!(unknown.fields["remote_task_status"], "unknown");
+        assert_ne!(not_sent.event_id, unknown.event_id);
+        assert_ne!(queued.event_id, unknown.event_id);
     }
 
     #[test]
