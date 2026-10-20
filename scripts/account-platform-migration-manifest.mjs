@@ -11,6 +11,10 @@ const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url))
 const migrationsRoot = path.join(repositoryRoot, 'account-platform', 'migrations');
 const manifestPath = path.join(migrationsRoot, 'manifest.json');
 const migrationName = /^(\d+)_([a-z0-9_]+)\.(up|down)\.sql$/;
+// The existing 900xxx supplemental identities coexist with ordinary domain
+// versions. They must not freeze the ordinary sequence below their own range.
+const supplementalVersionStart = 900000;
+const versionSequence = version => version >= supplementalVersionStart ? 'supplemental' : 'ordinary';
 
 function digest(value) {
   return createHash('sha256').update(value.replace(/\r\n?/g, '\n')).digest('hex');
@@ -67,9 +71,10 @@ export function assertExistingEntriesImmutable(manifest, current, allowNew) {
     if (!current[domain]) throw new Error(`recorded migration domain was removed: ${domain}`);
     const recorded = manifest.domains[domain];
     const actualByFile = new Map(current[domain].map((entry) => [entry.file, entry]));
-    let maxRecordedVersion = 0;
+    const maxRecordedVersions = { ordinary: 0, supplemental: 0 };
     for (const entry of recorded) {
-      maxRecordedVersion = Math.max(maxRecordedVersion, entry.version);
+      const sequence = versionSequence(entry.version);
+      maxRecordedVersions[sequence] = Math.max(maxRecordedVersions[sequence], entry.version);
       const actual = actualByFile.get(entry.file);
       if (!actual) throw new Error(`recorded migration was removed: ${domain}/${entry.file}`);
       if (actual.version !== entry.version || actual.sha256 !== entry.sha256) {
@@ -80,7 +85,9 @@ export function assertExistingEntriesImmutable(manifest, current, allowNew) {
     for (const entry of current[domain]) {
       if (recordedFiles.has(entry.file)) continue;
       if (!allowNew) throw new Error(`migration manifest is missing: ${domain}/${entry.file}`);
-      if (entry.version <= maxRecordedVersion) throw new Error(`new migration must advance ${domain} beyond version ${maxRecordedVersion}`);
+      const sequence = versionSequence(entry.version);
+      const maximum = maxRecordedVersions[sequence];
+      if (entry.version <= maximum) throw new Error(`new migration must advance ${domain} ${sequence} sequence beyond version ${maximum}`);
     }
   }
   for (const domain of currentDomains) {

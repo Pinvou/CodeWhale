@@ -924,6 +924,16 @@
         "sha256": "4d41f85e3838be938a371bbede46bb6527981d681715328976f8ccfb1d7dc6d0"
       },
       {
+        "file": "000094_ordinary_dead_letter_replay_runtime.down.sql",
+        "version": 94,
+        "sha256": "7a814d2c6acf9d7f4558284196f5093a0b483fe6275e87b6f4f735d254666764"
+      },
+      {
+        "file": "000094_ordinary_dead_letter_replay_runtime.up.sql",
+        "version": 94,
+        "sha256": "eea5cccf8417dc013b56b459da58335391228fb51d71a4a9afe5cbc178618fb1"
+      },
+      {
         "file": "900001_first_delivery_permission_metadata.down.sql",
         "version": 900001,
         "sha256": "fb0c59fb6749b7c82dc824a64a248a152b5a86672c2b7c44fdd06c52ab2cef04"
@@ -1744,6 +1754,16 @@
         "file": "000079_registration_bonus.up.sql",
         "version": 79,
         "sha256": "27802b2d3e76e6a42c809d620d3d9833cfaa529d7d5517982318236a56719deb"
+      },
+      {
+        "file": "000080_entitlement_components_package_index.down.sql",
+        "version": 80,
+        "sha256": "b132cba123ea9e393bb0750e4ae4e97966aad347a7739a98c5a1abc5c4af94b0"
+      },
+      {
+        "file": "000080_entitlement_components_package_index.up.sql",
+        "version": 80,
+        "sha256": "768099650ccd0ea81262cbdd2ef1fa8ec273304f4995a144ae829e1401fe6f4d"
       },
       {
         "file": "900001_outbox_publication_generation.down.sql",
