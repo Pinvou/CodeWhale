@@ -25,6 +25,10 @@ export const financialRepairInputs = Object.freeze({
     { key: 'write_off_microcredits', kind: 'integer' },
     { key: 'expected_version', kind: 'integer' },
   ]),
+  PAYMENT_FINANCIAL_REPAIR: Object.freeze([
+    { key: 'target_resource_id', kind: 'uuid' },
+    { key: 'payment_evidence_id', kind: 'uuid' },
+  ]),
 
 });
 
@@ -54,7 +58,7 @@ export function financialRepairPrecheckBody(commandType, values = {}) {
   for (const field of fields) {
     const value = values[field.key];
     if (!closedValue(value, field.kind)) return { error: 'FINANCIAL_REPAIR_PRECHECK_INVALID', field: field.key };
-    body[field.key] = value;
+    body[field.key] = field.kind === 'uuid' ? value.toLowerCase() : value;
   }
   body.reason_code = financialRepairCommands[commandType].reasonCode;
   return { body };

@@ -301,6 +301,30 @@ func validBillingRecoveryPayload(command string, domainResult, ledgerReferences 
 			(result.StatusAfter == "PARTIALLY_SETTLED" || result.StatusAfter == "WRITTEN_OFF") &&
 			lowerHexDigest(result.FactsDigest) && result.JournalEntryID != uuid.Nil && result.AllocationID != uuid.Nil &&
 			result.Status == "SUCCEEDED" && ledger.JournalEntryID == result.JournalEntryID
+	case "PAYMENT_FINANCIAL_REPAIR":
+		var result struct {
+			RepairID              uuid.UUID `json:"repair_id"`
+			PaymentOrderID        uuid.UUID `json:"payment_order_id"`
+			PaymentTransactionID  uuid.UUID `json:"payment_transaction_id"`
+			EntitlementPackageID  uuid.UUID `json:"entitlement_package_id"`
+			JournalEntryID        uuid.UUID `json:"journal_entry_id"`
+			ProviderTransactionID string    `json:"provider_transaction_id"`
+			CreditMicrocredits    int64     `json:"credit_microcredits"`
+			AppliedToReceivables  int64     `json:"applied_to_receivables"`
+			WalletVersionAfter    int64     `json:"wallet_version_after"`
+			FactsDigest           string    `json:"facts_digest"`
+			Status                string    `json:"status"`
+		}
+		var ledger struct {
+			JournalEntryID uuid.UUID `json:"journal_entry_id"`
+		}
+		return decode(domainResult, &result) && decode(ledgerReferences, &ledger) &&
+			result.RepairID != uuid.Nil && result.PaymentOrderID != uuid.Nil && result.PaymentTransactionID != uuid.Nil &&
+			result.EntitlementPackageID != uuid.Nil && result.JournalEntryID != uuid.Nil &&
+			strings.TrimSpace(result.ProviderTransactionID) != "" && result.CreditMicrocredits > 0 &&
+			result.AppliedToReceivables >= 0 && result.AppliedToReceivables <= result.CreditMicrocredits &&
+			result.WalletVersionAfter > 0 && lowerHexDigest(result.FactsDigest) &&
+			result.Status == "SUCCEEDED" && ledger.JournalEntryID == result.JournalEntryID
 	}
 	return false
 }

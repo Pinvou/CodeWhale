@@ -20,14 +20,17 @@ try{
   ['finance-only ledger', ['platform.billing.wallets.read'], 'ledger', financeCopy.en.orders],
   ['finance-only correction', ['platform.billing.wallets.read'], 'correction', financeCopy.en.orders],
   ['finance-only denied writeoff', ['platform.billing.wallets.read'], 'writeoff', financeCopy.en.orders],
+  ['finance-only denied paymentrepair', ['platform.billing.wallets.read'], 'paymentrepair', financeCopy.en.orders],
   ['finance-only unknown', ['platform.billing.wallets.read'], 'unknown', financeCopy.en.orders],
   ['finance-only wallets', ['platform.billing.wallets.read'], 'wallets', financeCopy.en.wallet],
   ['finance-only controls', ['platform.billing.wallets.read'], 'controls', financeCopy.en.providerControls],
   ['repair-only default', ['platform.billing.repairs.request'], 'orders', ledgerRepairCopy.en.title],
   ['repair-only correction', ['platform.billing.repairs.request'], 'correction', entitlementCorrectionCopy.en.title],
   ['repair-only writeoff', ['platform.billing.repairs.request'], 'writeoff', ledgerRepairCopy.en.writeOffTitle],
+  ['repair-only paymentrepair', ['platform.billing.repairs.request'], 'paymentrepair', ledgerRepairCopy.en.paymentRepairTitle],
   ['approve-only default', ['platform.billing.repairs.approve'], 'ledger', financeCopy.en.approvals],
   ['approve-only denied writeoff', ['platform.billing.repairs.approve'], 'writeoff', financeCopy.en.approvals],
+  ['approve-only denied paymentrepair', ['platform.billing.repairs.approve'], 'paymentrepair', financeCopy.en.approvals],
  ]) {
   const html = renderToStaticMarkup(React.createElement(AdminFinanceWorkspace, { client: {}, me: { user_id: 'controlled-first-frame', platform_permissions: permissions }, language: 'en', initialTab }));
   const selected = [...html.matchAll(/<button[^>]*aria-pressed="true"[^>]*>(.*?)<\/button>/g)].map(match => match[1]);

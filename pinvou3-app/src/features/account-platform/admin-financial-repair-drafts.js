@@ -29,6 +29,11 @@ export const financialRepairCommands = Object.freeze({
       { key: 'amount_microcredits', kind: 'integer' },
     ],
   },
+  PAYMENT_FINANCIAL_REPAIR: {
+    targetResourceType: 'PAYMENT_ORDER', reasonKey: 'reason_code',
+    reasonCode: 'CONFIRMED_PAYMENT_NOT_CREDITED', targetKey: 'payment_order_id',
+    fields: [{ key: 'payment_order_id', kind: 'uuid' }, { key: 'payment_evidence_id', kind: 'uuid' }],
+  },
   RECEIVABLE_WRITE_OFF: {
     targetResourceType: 'RECEIVABLE', reasonKey: 'reason_code',
     reasonCode: 'APPROVED_RECEIVABLE_WRITE_OFF', targetKey: 'receivable_id',
@@ -89,6 +94,18 @@ export function financialRepairPrecheck(value) {
     if (!validField(normalized[field.key], field)) {
       return null;
     }
+  }
+  if (value.command_type === 'PAYMENT_FINANCIAL_REPAIR') {
+    try {
+      if (normalized.reason_code !== command.reasonCode || critical.policy_version !== 1 ||
+        !/^[0-9a-f]{64}$/.test(critical.facts_digest || '') ||
+        typeof critical.payment_order_updated_at !== 'string' || !Number.isFinite(Date.parse(critical.payment_order_updated_at)) ||
+        integerMoney(financial.amount_fen) <= 0n || integerMoney(financial.credit_microcredits) <= 0n ||
+        integerMoney(financial.wallet_version) <= 0n || integerMoney(financial.applied_to_receivables) < 0n ||
+        integerMoney(financial.applied_to_receivables) > integerMoney(financial.credit_microcredits) ||
+        !uuidPattern.test(financial.wallet_id || '') || typeof financial.provider_transaction_id !== 'string' ||
+        !financial.provider_transaction_id.trim() || financial.provider_transaction_id.trim() !== financial.provider_transaction_id) return null;
+    } catch { return null; }
   }
   if (value.command_type === 'RECEIVABLE_WRITE_OFF') {
     try {

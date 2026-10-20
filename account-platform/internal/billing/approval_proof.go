@@ -37,7 +37,7 @@ func activeBillingProofCommand(snapshot ApprovalCommandActivationSnapshot, comma
 
 func (s *Service) billingApprovalProof(ctx context.Context, request approvalencoding.ProofRequest) (approvalencoding.ProofResponse, error) {
 	command := request.Artifacts.CommandType
-	if command != "WALLET_ADJUSTMENT" && command != "PAYMENT_PROVIDER_RESUME" && command != "PAYMENT_PRODUCT_RESUME" && command != entitlementComponentAdjustmentCommand && command != ledgerRepairCommand && command != receivableWriteOffCommand {
+	if command != "WALLET_ADJUSTMENT" && command != "PAYMENT_PROVIDER_RESUME" && command != "PAYMENT_PRODUCT_RESUME" && command != entitlementComponentAdjustmentCommand && command != ledgerRepairCommand && command != receivableWriteOffCommand && command != paymentFinancialRepairCommand {
 		return approvalencoding.ProofResponse{}, errBillingApprovalProofUnavailable
 	}
 	repository, ok := s.repository.(billingApprovalProofRepository)

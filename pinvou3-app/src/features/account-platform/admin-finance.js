@@ -85,6 +85,20 @@ export async function currentApprovalEditDraft(client, detail, reason) {
       projection.reasonCode !== command.reason_code) throw unavailable();
     return entitlementCorrectionApprovalDraft(facts, command.reason_code, reason, `edit:${detail.approval_request_id}`);
   }
+  if (detail.command_type === 'PAYMENT_FINANCIAL_REPAIR') {
+    const target = detail.target || { resource_type: detail.target_resource_type, resource_id: detail.target_resource_id };
+    if (!command || target.resource_type !== 'PAYMENT_ORDER' || !approvalIDPattern.test(target.resource_id) ||
+      command.payment_order_id !== target.resource_id || !approvalIDPattern.test(command.payment_evidence_id) ||
+      command.reason_code !== 'CONFIRMED_PAYMENT_NOT_CREDITED') throw unavailable();
+    const facts = await client.approvalCommandPrecheck({ command_type: detail.command_type,
+      target_resource_id: command.payment_order_id, payment_evidence_id: command.payment_evidence_id,
+      reason_code: command.reason_code });
+    const draft = financialRepairApprovalDraft(facts, reason, `edit:${detail.approval_request_id}`);
+    if (draft.command_type !== detail.command_type || draft.target_resource_id !== target.resource_id ||
+      draft.normalized_command.payment_order_id !== command.payment_order_id ||
+      draft.normalized_command.payment_evidence_id !== command.payment_evidence_id) throw unavailable();
+    return draft;
+  }
   if (detail.command_type === 'RECEIVABLE_WRITE_OFF') {
     const target = detail.target || { resource_type: detail.target_resource_type, resource_id: detail.target_resource_id };
     if (!command || target.resource_type !== 'RECEIVABLE' || !approvalIDPattern.test(target.resource_id) ||

@@ -3,7 +3,9 @@ package billingschema
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,6 +67,68 @@ FROM pg_class c WHERE c.oid='public.entitlement_components'::regclass`)
 	}
 	t.Run("fresh-public-up", func(t *testing.T) {
 		c := f.database(t, ctx, "billing", "billing_schema_owner")
+		ordered, err := Ordered(loaded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		injected := errors.New("owned fixture after original080 DDL injection")
+		err = migrations.UpWithHooks(ctx, c, ordered, migrations.UpHooks{
+			BeforeApply: prepareBillingMigration, ApplySQL: applyBillingMigration, LedgerRole: "billing_schema_owner",
+			AfterApply: func(ctx context.Context, tx pgx.Tx, m migrations.Migration) error {
+				if m.Version != 80 {
+					return finishBillingMigration(ctx, tx, m)
+				}
+				var loan bool
+				if err := tx.QueryRow(ctx, `SELECT current_user='billing_service'
+AND has_schema_privilege('billing_service','public','CREATE')
+AND NOT pg_has_role('billing_service','billing_schema_owner','MEMBER')
+AND COALESCE(current_setting('pinvou.package_index_ddl_loan',true),'')='true'`).Scan(&loan); err != nil || !loan {
+					t.Fatalf("fresh080 must borrow only DDL CREATE: loan=%v err=%v", loan, err)
+				}
+				if err := finishBillingMigration(ctx, tx, m); err != nil {
+					return err
+				}
+				var returned bool
+				if err := tx.QueryRow(ctx, `SELECT current_user='billing_service' AND NOT has_schema_privilege('billing_service','public','CREATE')`).Scan(&returned); err != nil || !returned {
+					t.Fatalf("fresh080 must return borrowed CREATE: returned=%v err=%v", returned, err)
+				}
+				return injected
+			},
+		})
+		if err == nil || !strings.Contains(err.Error(), injected.Error()) {
+			t.Fatal("080 rollback injection not reached", err)
+		}
+		if stageValue(t, ctx, c, `SELECT (to_regclass('public.entitlement_components_package_idx') IS NULL
+AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version=80)
+AND NOT has_schema_privilege('billing_service','public','CREATE')
+AND NOT pg_has_role('billing_service','billing_schema_owner','MEMBER'))::text`) != "true" {
+			t.Fatal("failed080 index, ledger and privilege loan must roll back together")
+		}
+		// A pre-existing privilege is not our loan. Keep this entire controlled
+		// probe in a rolled-back deployment transaction; public Up below still
+		// starts with runtime CREATE revoked and exercises the actual fresh path.
+		func() {
+			tx, err := c.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(ctx)
+			if _, err := tx.Exec(ctx, `SET ROLE billing_schema_owner; GRANT CREATE ON SCHEMA public TO billing_service; SET ROLE billing_service`); err != nil {
+				t.Fatal(err)
+			}
+			if err := lendPackageIndexDDL(ctx, tx, index); err != nil {
+				t.Fatal(err)
+			}
+			if err := revokePackageIndexDDL(ctx, tx, index); err != nil {
+				t.Fatal(err)
+			}
+			var preserved bool
+			if err := tx.QueryRow(ctx, `SELECT current_user='billing_service'
+AND has_schema_privilege('billing_service','public','CREATE')
+AND COALESCE(current_setting('pinvou.package_index_ddl_loan',true),'')<>'true'`).Scan(&preserved); err != nil || !preserved {
+				t.Fatalf("an existing CREATE privilege must not be revoked: preserved=%v err=%v", preserved, err)
+			}
+		}()
 		if err := Up(ctx, c, loaded); err != nil {
 			t.Fatal("fresh public migration", err)
 		}
