@@ -25,13 +25,16 @@ test('script changes require explicit boolean confirmation and rollback choice',
   }
 });
 
-async function fixture(t, { running = false, status = 'deployed' } = {}) {
+async function fixture(t, { running = false, status = 'deployed', activeRuns = [] } = {}) {
   const saved = new Map(['window', 'document', '__TAURI__', 'IS_REACT_ACT_ENVIRONMENT']
     .map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   const window = createWindow('<!doctype html><html><body><div id="root"></div></body></html>');
   const record = { card_id: 'card', card_name: 'Test model', running, status, local_script_hashes: { enable: 'old' } };
   const starts = [];
   const runs = new Map();
+  const recoveringRuns = [...activeRuns];
+  const cancellations = [];
+  for (const run of activeRuns) runs.set(run.run_id, Promise.withResolvers());
   const unexpected = [];
   const nativeConfirmCalls = [];
   window.confirm = (message) => {
@@ -48,7 +51,8 @@ async function fixture(t, { running = false, status = 'deployed' } = {}) {
       case 'model_store_library': return { models: [record], corrected: [] };
       case 'model_store_model_detail': return { record, runtime_lines: [] };
       case 'model_store_api_keys': return [];
-      case 'model_store_active_runs': return { runs: [] };
+      case 'model_store_active_runs': return { runs: recoveringRuns };
+      case 'model_store_cancel_run': cancellations.push(payload); return { ok: true };
       case 'model_store_take_startup_cleanup': return null;
       case 'model_store_run_log': return runs.get(payload.runId).promise;
       case 'model_store_start_lifecycle':
@@ -70,6 +74,7 @@ async function fixture(t, { running = false, status = 'deployed' } = {}) {
   };
   t.after(async () => {
     await act(async () => {
+      recoveringRuns.length = 0;
       for (const run of runs.values()) run.resolve({ lines: [], next: 0, done: true, ok: false, cancelled: true });
     });
     await act(async () => {
@@ -84,7 +89,7 @@ async function fixture(t, { running = false, status = 'deployed' } = {}) {
     assert.deepEqual(nativeConfirmCalls, []);
   });
   return {
-    record, container, starts, finish,
+    record, container, starts, finish, cancellations,
     async escape() {
       const event = new window.Event('keydown');
       event.key = 'Escape';
@@ -102,6 +107,31 @@ async function fixture(t, { running = false, status = 'deployed' } = {}) {
       await act(async () => button.click());
     },
   };
+}
+
+for (const language of ['zh', 'en', 'ja']) {
+  test(`${language}: reload recovers a script update and its real cancel control`, async (t) => {
+    const runId = `reattach-script-update-${language}`;
+    const ui = await fixture(t, {
+      status: 'downloaded', activeRuns: [{ run_id: runId, card_id: 'card', kind: 'card_scripts' }],
+    });
+    const view = () => React.createElement(ModelStoreView, { theme: 'light', t: dict[language], bs: {} });
+    await ui.render(view());
+    const task = getTasks().find((entry) => entry.runId === runId);
+    assert.ok(task, 'The running update must remain visible after reload');
+    assert.equal(task.reattached, true);
+    assert.equal(task.key, 'card:card');
+    const copy = dict[language].uiModelStore;
+    assert.ok([copy.cardScriptsTask('card'), copy.cardScriptsTask(ui.record.card_name)].includes(task.title));
+    assert.ok(ui.container.querySelector('[data-task-kind="card_scripts"]'));
+    await ui.render(null);
+    await ui.render(view());
+    assert.equal(getTasks().filter((entry) => entry.runId === runId).length, 1);
+    assert.equal(ui.starts.length, 0, 'Recovery must not start a second update');
+    await ui.click('[data-testid="model-store-task-cancel"]');
+    assert.deepEqual(ui.cancellations, [{ runId }]);
+    assert.equal(getTasks().find((entry) => entry.runId === runId).status, 'cancelling');
+  });
 }
 
 for (const language of ['zh', 'en', 'ja']) {

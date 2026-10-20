@@ -346,6 +346,8 @@ const ModelStoreView = ({ theme, t, bs }) => {
           return { title: copy.taskStop(name), key: lifecycleTaskKey(cardId) };
         case 'uninstall':
           return { title: copy.taskUninstall(name), key: lifecycleTaskKey(cardId) };
+        case 'card_scripts':
+          return { title: copy.cardScriptsTask(name), key: lifecycleTaskKey(cardId) };
         // 认不出的操作不接:宁可不显示,也不要一张说不清自己在干什么、却点得了
         // 取消的任务卡。卡片脚本和应用可以不同版本,这条兜底不能省。
         default:
