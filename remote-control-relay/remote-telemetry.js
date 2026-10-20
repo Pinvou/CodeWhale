@@ -101,7 +101,9 @@ export function buildRemoteOverview(events, start, end, minimumSample = 30, coun
   const tasks = remoteTaskGroups(events).filter(t => t.rows.some(inWindow));
   const completed = tasks.filter(t => t.terminal && inWindow(t.terminal) && TERMINAL.has(t.status)
     && (!countedTaskKeys || countedTaskKeys.has(t.key)));
-  const knownExecutions = tasks.filter(t => t.authoritative && inWindow(t.authoritative) && TERMINAL.has(t.status)
+  // Receipt coverage uses the same clipped completion cohort as call counts,
+  // while receipt evidence still comes from the full retained task history.
+  const knownExecutions = completed.filter(t => t.authoritative
     && t.submitted?.remote_role !== "controlled");
   const awaitingReceipt = knownExecutions.filter(t => !t.received);
   const count = (stage, outcome) => raw.filter(e => e.remote_stage === stage && (!outcome || e.remote_outcome === outcome)).length;

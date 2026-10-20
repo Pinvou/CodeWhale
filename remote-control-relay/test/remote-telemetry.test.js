@@ -23,6 +23,17 @@ function invocation() {
     event("controller", "result_received", { occurred_at: now - 1000, remote_task_status: "success" })];
 }
 
+function completedInvocations(count, completedAt = now - 20000) {
+  return Array.from({ length: count }, (_, index) => {
+    const taskKey = index.toString(16).padStart(64, "0");
+    return [
+      event("controller", "task_submit", { occurred_at: completedAt - 2000 + index }),
+      event("controlled", "task_admit", { occurred_at: completedAt - 1000 + index }),
+      event("controlled", "task_terminal", { occurred_at: completedAt + index, remote_task_status: "success" }),
+    ].map(row => ({ ...row, remote_task_key: taskKey, event_id: `${index}_${row.event_id}` }));
+  }).flat();
+}
+
 test("A/B reports join once across total calls, per-device calls, WSTA and model ranking", () => {
   const rows = invocation();
   for (const events of [rows, [...rows].reverse(), [...rows, ...rows]]) {
@@ -116,6 +127,10 @@ test("B-local shared-session task belongs to B and does not count A's mirror", (
   const detail = buildDeviceList(devices, [], rows, now);
   assert.equal(detail.find(d => d.device_id === "A").turns_today, 0);
   assert.equal(detail.find(d => d.device_id === "B").turns_today, 1);
+  const remote = buildBehaviorOverview(devices, [], rows, "today", now).remote_control;
+  assert.equal(remote.execution_terminal_count, 0);
+  assert.equal(remote.result_received_count, 0);
+  assert.equal(remote.awaiting_receipt_count, 0);
 });
 
 test("unknown B outcome overrides observer success; rejection is not an execution", () => {
@@ -240,7 +255,47 @@ test("remote detail uses the same daily call contribution cap as the overall das
   const report = buildBehaviorOverview(devices, [], [...local, ...invocation()], "today", now);
   assert.equal(report.metrics.task_finished_count, 100);
   assert.equal(report.remote_control.task_count, 0);
+  assert.equal(report.remote_control.execution_terminal_count, 0);
+  assert.equal(report.remote_control.result_received_count, 0);
+  assert.equal(report.remote_control.awaiting_receipt_count, 0);
+  assert.equal(report.remote_control.result_receipt_rate, null);
   assert.ok(report.data_quality.warnings.includes("subject_contribution_clipped"));
+});
+
+for (const count of [1, 100, 200]) {
+  test(`execution receipt cohort respects the daily cap for ${count} remote tasks`, () => {
+    const report = buildBehaviorOverview(devices, [], completedInvocations(count), "today", now);
+    const expected = Math.min(count, 100);
+    assert.equal(report.metrics.task_finished_count, expected);
+    assert.equal(report.remote_control.task_count, expected);
+    assert.equal(report.remote_control.execution_terminal_count, expected);
+    assert.equal(report.remote_control.awaiting_receipt_count, expected);
+    assert.equal(report.remote_control.result_received_count, 0);
+    assert.equal(report.remote_control.result_receipt_rate, expected < 30 ? null : 0);
+  });
+}
+
+test("clipped execution cohort finds cross-day receipts without including overflow tasks", () => {
+  const executions = completedInvocations(200, now - 86400000 - 20000);
+  const receipts = executions.filter(row => row.remote_stage === "task_terminal")
+    .filter((_, index) => index < 50 || index >= 100)
+    .map(row => event("controller", "result_received", {
+      remote_task_key: row.remote_task_key, event_id: `receipt_${row.remote_task_key}`,
+      occurred_at: now - 1000, remote_task_status: "success", remote_duration_ms: 9000,
+    }));
+  const rows = [...executions, ...receipts];
+  const report = buildBehaviorOverview(devices, [], rows, "7d", now);
+  assert.equal(report.metrics.task_finished_count, 100);
+  assert.equal(report.remote_control.task_count, 100);
+  assert.equal(report.remote_control.execution_terminal_count, 100);
+  assert.equal(report.remote_control.result_received_count, 50);
+  assert.equal(report.remote_control.awaiting_receipt_count, 50);
+  assert.equal(report.remote_control.result_receipt_rate, 0.5);
+  const today = buildBehaviorOverview(devices, [], rows, "today", now).remote_control;
+  assert.equal(today.execution_terminal_count, 0);
+  assert.equal(today.result_received_count, 0);
+  assert.equal(today.awaiting_receipt_count, 0);
+  assert.equal(today.result_wait_p50_ms, 9000);
 });
 
 test("remote tools are counted only on B and attributed to the consenting initiator", () => {
