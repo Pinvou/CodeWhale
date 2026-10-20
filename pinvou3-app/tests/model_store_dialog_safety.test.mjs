@@ -87,13 +87,15 @@ test('保存失败不影响 loaded —— 用户要能改完再存一次', () =>
 // ——— 21. 详情页：标题栏常驻 + 重试 ———
 
 test('详情页的标题栏在 error/loading/正常三个分支之上，只有一处', () => {
-  const titles = DETAIL_DIALOG.match(/<MsDialogTitle/g) || [];
+  // The update confirmation has its own title; this contract guards the
+  // persistent detail title across error/loading/success branches.
+  const titles = DETAIL_DIALOG.match(/<MsDialogTitle id=\{TITLE_ID\}/g) || [];
   assert.equal(
     titles.length,
     1,
     '标题栏出现了多处或一处也没有 —— 它必须常驻在分支之上，右上角的关闭按钮就在里面'
   );
-  const titleAt = DETAIL_DIALOG.indexOf('<MsDialogTitle');
+  const titleAt = DETAIL_DIALOG.indexOf('<MsDialogTitle id={TITLE_ID}');
   const errorBranchAt = DETAIL_DIALOG.indexOf('{error ? (');
   assert.ok(errorBranchAt > 0, '找不到 error 分支');
   assert.ok(

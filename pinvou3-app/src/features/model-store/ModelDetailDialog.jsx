@@ -74,6 +74,8 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
   // 借用会让重试转圈时把那两个按钮也一起禁掉(虽然此刻它们并不在屏幕上,
   // 但重试成功后 busy 若未归位就会留下一排灰按钮)。
   const [retrying, setRetrying] = useState(false);
+  const [updateConfirmation, setUpdateConfirmation] = useState(null);
+  const updateSubmitted = useRef(false);
 
   // 当前有效的那张卡。换卡时自增，让上一张卡在途的响应落地时能认出自己已经过期。
   //
@@ -113,6 +115,7 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
     setDetail(null);
     setKeys([]);
     setError(null);
+    setUpdateConfirmation(null);
     load();
   }, [load]);
 
@@ -210,6 +213,36 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
   // 直连推理服务时要填的是它自己认的那个 id。
   const modelId = record?.endpoint_model || record?.model_name || '';
   const runtimeLines = detail?.runtime_lines ?? [];
+
+  if (updateConfirmation === cardId && record?.card_id === cardId) {
+    const cancelUpdate = () => setUpdateConfirmation(null);
+    return (
+      <MsDialog open={!!cardId} onClose={cancelUpdate} theme={theme}
+        labelledBy="model-store-update-confirm-title" testId="model-store-update-confirm">
+        <MsDialogTitle id="model-store-update-confirm-title" onClose={cancelUpdate} closeLabel={copy.cardScriptsCancel}>
+          {copy.actionUpdate}
+        </MsDialogTitle>
+        <p className={`mt-3 text-[13px] leading-6 ${TEXT_SECONDARY}`}>
+          {record.running ? copy.updateConfirmRunning : copy.updateConfirmStopped}
+        </p>
+        <div className="mt-5 flex justify-end gap-2">
+          <MsButton tone="neutral" onClick={cancelUpdate} data-testid="model-store-update-cancel">
+            {copy.cardScriptsCancel}
+          </MsButton>
+          <MsButton tone="primary" disabled={cardBusy} data-testid="model-store-update-confirm-submit"
+            onClick={() => {
+              if (cardBusy || updateSubmitted.current) return;
+              updateSubmitted.current = true;
+              setUpdateConfirmation(null);
+              onClose();
+              onUpdateWithCleanup?.(record, record.running);
+            }}>
+            {copy.cardScriptsConfirm}
+          </MsButton>
+        </div>
+      </MsDialog>
+    );
+  }
 
   return (
     <MsDialog open={!!cardId} onClose={onClose} theme={theme} labelledBy={TITLE_ID} wide testId="model-store-detail-dialog">
@@ -392,10 +425,8 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
                     tone="primary"
                     disabled={cardBusy}
                     onClick={() => {
-                      if (window.confirm(isRunning ? copy.updateConfirmRunning : copy.updateConfirmStopped)) {
-                        onClose();
-                        onUpdateWithCleanup?.(record, isRunning);
-                      }
+                      updateSubmitted.current = false;
+                      setUpdateConfirmation(record.card_id);
                     }}
                     data-testid="model-store-detail-action-update"
                   >

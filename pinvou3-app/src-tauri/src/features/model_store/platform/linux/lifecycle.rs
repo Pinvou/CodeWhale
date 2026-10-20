@@ -2050,6 +2050,64 @@ impl ModelManager {
             .ok_or_else(|| ModelManagerError::new("该模型尚未下载"))
     }
 
+    /// A cached package may require a new engine after an explicit script update.
+    /// Probe that package rather than trusting the historical installed-engine row.
+    /// Reuse existing weights and never fetch a newer package during deployment.
+    fn prepare_deployment_engine(
+        &self,
+        rec: &db::StoreModelRecord,
+        source: &ScriptsSource,
+        env: &HashMap<String, String>,
+        on_progress: &mut ProgressFn<'_>,
+        control: script_runner::RunControl,
+    ) -> Result<(), ModelManagerError> {
+        if control.cancelled() {
+            return Err(ModelManagerError::new("已取消部署。"));
+        }
+        let probe = self.engine_probe(source, &rec.card_id, env);
+        if probe.installed {
+            return Ok(());
+        }
+        if rec.running {
+            return Err(ModelManagerError::new(
+                "模型仍在运行且无法确认引擎依赖，请先停用模型再重新部署。",
+            ));
+        }
+        on_progress("检查发现当前脚本所需引擎尚未就绪，先安装引擎；已有模型权重将保留。");
+        if probe.need_root {
+            on_progress("安装此引擎需要管理员权限，请在系统授权窗口中确认。");
+        }
+        let lines = self.install_engine(
+            source,
+            env,
+            &mut |line| on_progress(&script_runner::prefix_log_line("[安装引擎] ", line)),
+            control.clone(),
+            probe.need_root,
+        )?;
+        if control.cancelled() {
+            return Err(ModelManagerError::new("已取消部署，未继续执行部署脚本。"));
+        }
+        // Native cards implement an exact binary checksum probe. A zero installer
+        // exit alone must not turn a missing/corrupt engine into a successful deploy.
+        if native_tachyon_version(rec).is_some()
+            && !self.engine_probe(source, &rec.card_id, env).installed
+        {
+            return Err(ModelManagerError::new(
+                "引擎安装后仍未通过完整性检查，已停止部署；请查看安装引擎日志。",
+            ));
+        }
+        let cleanup_script = source.optional_script_blob("uninstall_engine")?;
+        db::mark_engine_installed(
+            &rec.engine_name,
+            rec.engine_version.as_deref(),
+            extract_marker(&lines, "LMM_ENGINE_IMAGE=").as_deref(),
+            source.script_hash("install_engine").as_deref(),
+            cleanup_script.as_ref(),
+        )
+        .map_err(|error| ModelManagerError::new(format!("记录引擎安装状态失败：{error}")))?;
+        Ok(())
+    }
+
     /// profile_id 不传时：已经部署过就沿用上次用的方案（重新部署/修复场景），
     /// 从没部署过就用商店给的第一个方案——没有多方案概念的卡片 profiles 是空
     /// 列表，解析出来的就是 None，行为跟没有 profile 概念时完全一样。
@@ -2081,6 +2139,8 @@ impl ModelManager {
         if let Some(pid) = &resolved_profile_id {
             env.insert("LMM_DEPLOY_PROFILE".into(), pid.clone());
         }
+
+        self.prepare_deployment_engine(&rec, &source, &env, on_progress, control.clone())?;
 
         match self.run_card_script(
             &source,
@@ -4382,6 +4442,132 @@ echo '权重就绪'
     fn manager_with_card(settings: Settings, card: StoreCardDetail) -> ModelManager {
         ModelManager::new(Some(settings), Some(Box::new(OneCardStore { card })))
             .with_local_script_paths()
+    }
+
+    fn updated_engine_deployment(
+        replacement_install: Option<&str>,
+        common: Option<&str>,
+    ) -> (config::TempHome, ModelManager, PathBuf) {
+        let home = setup_temp_db();
+        let models = home.path().join("models");
+        let manager = manager_with_card(
+            download_settings(&models),
+            local_script_card(&home.path().join("scripts"), None),
+        );
+        manager
+            .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+            .unwrap();
+        let rec = db::get_store_model("card-dl").unwrap().unwrap();
+        let mut scripts = rec.scripts_content.clone();
+        let blob = |text: &str| db::ScriptBlob {
+            content: text.into(),
+            sha256: script_runner::sha256_hex(text),
+        };
+        scripts.insert(
+            "install_engine".into(),
+            blob(&replacement_install.map(str::to_string).unwrap_or_else(|| {
+                FAKE_INSTALL_ENGINE.replace("engine-installed", "engine-updated")
+            })),
+        );
+        scripts.insert("deploy".into(), blob(
+            "#!/bin/sh\n[ -f \"$LMM_MODELS_DIR/engine-updated\" ] || { echo 'ERROR: 引擎未就绪' >&2; exit 1; }\necho ran >> \"$LMM_MODELS_DIR/deploy-ran\"\n",
+        ));
+        let mut assets = rec.assets_content.clone();
+        if let Some(common) = common {
+            assets.insert("common.sh".into(), blob(common));
+        }
+        db::replace_card_package(&rec, &scripts, &assets).unwrap();
+        (home, manager, models)
+    }
+
+    #[test]
+    fn deploy_after_script_update_installs_missing_engine_without_downloading_weights() {
+        let (_home, manager, models) = updated_engine_deployment(None, None);
+        assert!(
+            db::get_installed_engine("vllm", Some("v0.27.1"))
+                .unwrap()
+                .is_some()
+        );
+        assert!(!models.join("engine-updated").exists());
+        manager
+            .deploy("card-dl", None, &mut |_| {}, Default::default())
+            .unwrap();
+        assert_eq!(ran_times(&models.join("engine-updated")), 1);
+        assert_eq!(ran_times(&models.join("deploy-ran")), 1);
+        assert_eq!(ran_times(&models.join("download-ran")), 1);
+        assert!(
+            models.join("engine-installed").exists(),
+            "旧引擎不能被更新流程删除"
+        );
+        assert_eq!(
+            db::get_store_model("card-dl").unwrap().unwrap().status,
+            "deployed"
+        );
+        manager
+            .deploy("card-dl", None, &mut |_| {}, Default::default())
+            .unwrap();
+        assert_eq!(
+            ran_times(&models.join("engine-updated")),
+            1,
+            "已就绪的依赖应复用"
+        );
+        assert_eq!(ran_times(&models.join("deploy-ran")), 2);
+    }
+
+    #[test]
+    fn deploy_engine_install_failure_keeps_weights_and_never_executes_deploy() {
+        let failed = "#!/bin/sh\nif [ \"${LMM_PROBE_ONLY:-0}\" = 1 ]; then exit 1; fi\necho 'ERROR: 磁盘空间不足' >&2\nexit 1\n";
+        let (_home, manager, models) = updated_engine_deployment(Some(failed), None);
+        let before = db::get_installed_engine("vllm", Some("v0.27.1"))
+            .unwrap()
+            .unwrap();
+        let error = manager
+            .deploy("card-dl", None, &mut |_| {}, Default::default())
+            .unwrap_err();
+        assert!(error.to_string().contains("磁盘空间不足"), "{error}");
+        assert_eq!(ran_times(&models.join("deploy-ran")), 0);
+        assert_eq!(ran_times(&models.join("download-ran")), 1);
+        let after = db::get_installed_engine("vllm", Some("v0.27.1"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.install_script_sha256, after.install_script_sha256);
+        assert_eq!(
+            db::get_store_model("card-dl").unwrap().unwrap().status,
+            "downloaded"
+        );
+    }
+
+    #[test]
+    fn deploy_cancelled_before_engine_install_has_no_install_or_deploy_side_effects() {
+        let (_home, manager, models) = updated_engine_deployment(None, None);
+        let control = script_runner::RunControl {
+            cancel: Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                true,
+            ))),
+            ..Default::default()
+        };
+        let error = manager
+            .deploy("card-dl", None, &mut |_| {}, control)
+            .unwrap_err();
+        assert!(error.to_string().contains("已取消"));
+        assert!(!models.join("engine-updated").exists());
+        assert!(!models.join("deploy-ran").exists());
+    }
+
+    #[test]
+    fn deploy_rejects_native_installer_success_without_a_ready_engine() {
+        let install = "#!/bin/sh\nCARD_DIR=\"$(dirname \"$0\")\"\n. \"$CARD_DIR/common.sh\"\nif [ \"${LMM_PROBE_ONLY:-0}\" = 1 ]; then exit 1; fi\necho 'claimed installed'\n";
+        let common = format!(
+            "ENGINE_BIN_SHA256=\"{}\"\n# local-model-manager/engines/tachyon-serve\n",
+            "a".repeat(64)
+        );
+        let (_home, manager, models) = updated_engine_deployment(Some(install), Some(&common));
+        let error = manager
+            .deploy("card-dl", None, &mut |_| {}, Default::default())
+            .unwrap_err();
+        assert!(error.to_string().contains("完整性检查"), "{error}");
+        assert!(!models.join("deploy-ran").exists());
+        assert_eq!(ran_times(&models.join("download-ran")), 1);
     }
 
     /// 防的是「下载中途失败，库里却留下一条说它已经好了的记录」。
