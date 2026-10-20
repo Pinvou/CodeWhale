@@ -1027,10 +1027,14 @@ impl ModelManager {
         // "No such file or directory"，那句话不会告诉任何人发生了什么。不注入的话，
         // 脚本会在真正要动从机那一步以它自己的话失败。
         if rec.deploy_topology == DeployTopology::Dual {
-            env.insert(
-                "LMM_DUAL_UNSUPPORTED".into(),
-                "双机部署尚未在这个版本里实现".into(),
-            );
+            if let Some(worker_path) = ensure_worker_tool() {
+                env.insert("LMM_WORKER".into(), worker_path);
+            } else {
+                env.insert(
+                    "LMM_DUAL_UNSUPPORTED".into(),
+                    "无法创建从机控制工具，请检查磁盘权限".into(),
+                );
+            }
         }
         env
     }
@@ -4781,4 +4785,24 @@ echo '权重就绪'
         // 解析失败按「不可探测」处理，保留原状态而不是清 running。
         assert!(!endpoint_path_is_openai_style("not a url"));
     }
+}
+
+/// 确保从机控制工具存在并返回其路径。内容固定，幂等写入。
+fn ensure_worker_tool() -> Option<String> {
+    let bin_dir = config::data_dir().join("bin");
+    std::fs::create_dir_all(&bin_dir).ok()?;
+    let path = bin_dir.join("lmm-worker");
+    let content = include_str!("../../../../../resources/common/bundle/lmm-worker");
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        if existing == content {
+            return path.to_str().map(String::from);
+        }
+    }
+    std::fs::write(&path, content).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).ok()?;
+    }
+    path.to_str().map(String::from)
 }

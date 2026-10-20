@@ -262,3 +262,15 @@ pub fn model_store_set_storage_settings(
 ) -> Result<Value, String> {
     model_store::set_storage_settings(models_dir, import_scan_dirs)
 }
+
+/// 添加局域网远程模型（验证端点后落库）。
+#[tauri::command]
+pub async fn model_store_add_remote(url: String, name: Option<String>) -> Result<Value, String> {
+    crate::features::model_store::platform::linux::service::add_remote_model(url, name).await
+}
+
+/// 移除局域网远程模型。
+#[tauri::command]
+pub fn model_store_remove_remote(card_id: String) -> Result<(), String> {
+    crate::features::model_store::platform::linux::service::remove_remote_model(card_id)
+}

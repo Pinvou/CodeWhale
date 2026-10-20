@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""LMM_WORKER：双机从机控制器（最小版）。
+
+由品悟客户端写入 ~/.pinvou3/model-store/bin/lmm-worker 并注入 LMM_WORKER 环境变量。
+子命令与 LMM 时代 core/worker.rs 的 CLI 兼容：
+
+  connect          → 检查/建立 SSH 连接（首次会通过 LMM_PROMPT_FORM 询问从机信息）
+  info             → 打印 user@host
+  exec <cmd>       → SSH 到从机执行命令，透传退出码
+  copy <local> <remote> → scp 到从机
+  cleanup          → 清除保存的凭据
+
+凭据存储：~/.pinvou3/model-store/worker.json（含 host/user/key_path）
+密码不落盘——首次 connect 时安装公钥到从机，之后全程密钥登录。
+"""
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+STORE = Path.home() / ".pinvou3" / "model-store"
+CRED_FILE = STORE / "worker.json"
+KEY_FILE = STORE / "worker_key"
+KNOWN_HOSTS = STORE / "worker_known_hosts"
+
+
+def load_cred():
+    if CRED_FILE.exists():
+        return json.loads(CRED_FILE.read_text())
+    return None
+
+
+def save_cred(cred):
+    STORE.mkdir(parents=True, exist_ok=True)
+    CRED_FILE.write_text(json.dumps(cred, ensure_ascii=False))
+
+
+def ssh_base(cred):
+    """构建 SSH 基础命令（密钥登录+专用 known_hosts）。"""
+    return [
+        "ssh",
+        "-i", str(KEY_FILE),
+        "-o", f"UserKnownHostsFile={KNOWN_HOSTS}",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "ConnectTimeout=10",
+        f"{cred['user']}@{cred['host']}",
+    ]
+
+
+def ssh_run(cred, cmd):
+    return subprocess.run(ssh_base(cred) + [cmd], capture_output=True, text=True, timeout=300)
+
+
+def do_connect():
+    cred = load_cred()
+    if cred:
+        r = ssh_run(cred, "echo ok")
+        if r.returncode == 0:
+            print(f"从机连接就绪：{cred['user']}@{cred['host']}")
+            return 0
+        print(f"已保存的从机连不上（{cred['user']}@{cred['host']}），请重新填写。", file=sys.stderr)
+
+    # 通过 LMM_PROMPT_FORM 向用户要从机信息（script_runner 会暂停进程并展示表单）
+    form = json.dumps({
+        "title": "连接从机",
+        "description": "填写从机的管理网地址和登录信息。首次连接后会自动安装公钥，之后免密登录。",
+        "fields": [
+            {"key": "host", "label": "从机 IP 地址", "type": "text", "required": True, "placeholder": "192.168.10.42"},
+            {"key": "user", "label": "用户名", "type": "text", "required": True, "value": "sky"},
+            {"key": "password", "label": "密码", "type": "password", "required": True},
+        ]
+    }, ensure_ascii=False)
+    print(f"LMM_PROMPT_FORM={form}")
+    sys.stdout.flush()
+
+    # 从 stdin 读取答案（script_runner 会把用户填的内容写回来）
+    answer_line = sys.stdin.readline().strip()
+    try:
+        answers = json.loads(answer_line)
+    except (json.JSONDecodeError, ValueError):
+        print("ERROR: 未收到有效的表单回答", file=sys.stderr)
+        return 1
+
+    host = answers.get("host", "").strip()
+    user = answers.get("user", "").strip()
+    password = answers.get("password", "")
+
+    if not host or not user or not password:
+        print("ERROR: 从机地址、用户名和密码都不能为空", file=sys.stderr)
+        return 1
+
+    # 生成密钥对（如果没有）
+    if not KEY_FILE.exists():
+        KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["ssh-keygen", "-t", "ed25519", "-f", str(KEY_FILE), "-N", "", "-q"], check=True)
+        os.chmod(KEY_FILE, 0o600)
+
+    # 用密码把公钥安装到从机
+    pub_key = Path(str(KEY_FILE) + ".pub").read_text().strip()
+    install_cmd = f"mkdir -p ~/.ssh && echo '{pub_key}' >> ~/.ssh/authorized_keys && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"
+    r = subprocess.run(
+        ["sshpass", "-p", password, "ssh",
+         "-o", "StrictHostKeyChecking=accept-new",
+         "-o", f"UserKnownHostsFile={KNOWN_HOSTS}",
+         f"{user}@{host}", install_cmd],
+        capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        print(f"ERROR: 连接从机失败（{user}@{host}）：{r.stderr.strip()[:200]}", file=sys.stderr)
+        return 1
+
+    # 保存凭据（密码不存，后续用密钥）
+    save_cred({"host": host, "user": user})
+    print(f"从机连接成功并已安装公钥：{user}@{host}")
+    return 0
+
+
+def do_info():
+    cred = load_cred()
+    if not cred:
+        print("ERROR: 尚未连接从机，请先运行 connect", file=sys.stderr)
+        return 1
+    print(f"{cred['user']}@{cred['host']}")
+    return 0
+
+
+def do_exec(cmd):
+    cred = load_cred()
+    if not cred:
+        print("ERROR: 尚未连接从机", file=sys.stderr)
+        return 1
+    r = subprocess.run(ssh_base(cred) + [cmd])
+    return r.returncode
+
+
+def do_copy(local, remote):
+    cred = load_cred()
+    if not cred:
+        print("ERROR: 尚未连接从机", file=sys.stderr)
+        return 1
+    r = subprocess.run(
+        ["scp"] + ssh_base(cred)[1:-1] + [local, f"{cred['user']}@{cred['host']}:{remote}"])
+    # ssh_base[0] 是 "ssh"，去掉换成 "scp"；最后一个元素是 user@host 需要拼路径
+    return r.returncode
+
+
+def do_cleanup():
+    if CRED_FILE.exists():
+        CRED_FILE.unlink()
+    if KEY_FILE.exists():
+        KEY_FILE.unlink()
+        Path(str(KEY_FILE) + ".pub").unlink(missing_ok=True)
+    print("从机凭据已清除")
+    return 0
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        print("用法: lmm-worker <connect|info|exec|copy|cleanup> [args...]", file=sys.stderr)
+        return 2
+
+    cmd = args[0]
+    if cmd == "connect":
+        return do_connect()
+    elif cmd == "info":
+        return do_info()
+    elif cmd == "exec" and len(args) > 1:
+        return do_exec(" ".join(args[1:]))
+    elif cmd == "copy" and len(args) == 3:
+        return do_copy(args[1], args[2])
+    elif cmd == "cleanup":
+        return do_cleanup()
+    else:
+        print(f"ERROR: 未知子命令或不完整参数: {' '.join(args)}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
