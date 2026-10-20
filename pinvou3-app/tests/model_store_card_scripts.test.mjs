@@ -51,6 +51,10 @@ async function fixture(t, { running = false, status = 'deployed', activeRuns = [
       case 'model_store_library': return { models: [record], corrected: [] };
       case 'model_store_model_detail': return { record, runtime_lines: [] };
       case 'model_store_api_keys': return [];
+      case 'model_store_lan_status': return {
+        enabled: false, available: false, reason: 'lan_model_unavailable',
+        interfaces: [], port: 8090, model_id: 'pinvou:card',
+      };
       case 'model_store_active_runs': return { runs: recoveringRuns };
       case 'model_store_cancel_run': cancellations.push(payload); return { ok: true };
       case 'model_store_take_startup_cleanup': return null;
