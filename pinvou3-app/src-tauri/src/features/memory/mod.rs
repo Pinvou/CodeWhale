@@ -27,9 +27,10 @@ mod util;
 // ---- 实体类型与 trait（types）----
 pub use self::types::{
     MemoryProfile, MemoryReviewModel, MemorySuggestion, MemoryTextPatch, MemoryWriteEvent,
-    NeverMemoryItem, PendingMemoryItem, PreferenceFile, ProfileConventions, ProfileIdentity,
-    ProfilePatch, RecentWorkItem, RecentWorkPatch, RuntimeMemorySnapshot, TimedMemoryItem,
-    TopicMutation, TopicRead, TurnMemoryCapture, WorkContextFile,
+    NeverMemoryItem, PendingMemoryItem, PendingSensitiveIdentity, PreferenceFile,
+    ProfileConventions, ProfileIdentity, ProfilePatch, RecentWorkItem, RecentWorkPatch,
+    RuntimeMemorySnapshot, TimedMemoryItem, TopicMutation, TopicRead, TurnMemoryCapture,
+    WorkContextFile,
 };
 // Round-40 review: the CLI's `memory profile set` refuses a label the
 // profile normalization would silently empty, by value — a replicated rule

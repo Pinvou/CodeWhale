@@ -548,6 +548,3 @@ export function buildElicitationContent(groups) {
   }
   return content;
 }
-
-export {
-};
