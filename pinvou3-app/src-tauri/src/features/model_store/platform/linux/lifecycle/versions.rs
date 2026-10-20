@@ -87,7 +87,7 @@ fn single_weight(rec: &db::StoreModelRecord) -> Result<(String, String), ModelMa
         .ok_or_else(|| fail("此卡片缺少可确认的单文件权重。"))
 }
 
-fn find_weight(root: &Path, name: &str) -> Result<PathBuf, ModelManagerError> {
+fn locate_weight(root: &Path, name: &str) -> Result<Option<PathBuf>, ModelManagerError> {
     let canonical = root.canonicalize().map_err(|e| fail(e.to_string()))?;
     let mut stack = vec![(root.to_path_buf(), 0)];
     let mut found = Vec::new();
@@ -102,6 +102,8 @@ fn find_weight(root: &Path, name: &str) -> Result<PathBuf, ModelManagerError> {
             let kind = entry.file_type().map_err(|e| fail(e.to_string()))?;
             if kind.is_dir() {
                 stack.push((entry.path(), depth + 1));
+            } else if entry.path().ends_with(name) && kind.is_symlink() {
+                return Err(fail("拒绝使用链接权重文件。"));
             } else if kind.is_file() && entry.path().ends_with(name) {
                 let path = entry
                     .path()
@@ -113,12 +115,14 @@ fn find_weight(root: &Path, name: &str) -> Result<PathBuf, ModelManagerError> {
             }
         }
     }
-    if found.len() != 1 {
+    if found.len() > 1 {
         return Err(fail("无法唯一确认隔离目录中的权重文件，未切换部署。"));
     }
-    found
-        .pop()
-        .ok_or_else(|| fail("无法唯一确认隔离目录中的权重文件，未切换部署。"))
+    Ok(found.pop())
+}
+
+fn find_weight(root: &Path, name: &str) -> Result<PathBuf, ModelManagerError> {
+    locate_weight(root, name)?.ok_or_else(|| fail("无法唯一确认隔离目录中的权重文件，未切换部署。"))
 }
 
 pub(super) fn legacy_resource_dir(
@@ -844,13 +848,15 @@ impl ModelManager {
                 freed = allocated_exclusive(&resource)?;
             } else if let Some(rec) = version.record.as_ref() {
                 let (name, hash) = single_weight(rec)?;
-                let file = resource.join(name);
-                let metadata = match file.symlink_metadata() {
-                    Ok(metadata) => Some(metadata),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                    Err(error) => return Err(fail(error.to_string())),
-                };
-                if let Some(meta) = metadata {
+                // Match the same bounded, unique nested layout accepted during
+                // activation. Missing weights are only a successful retry after
+                // the durable deletion commit point, never a cleared history.
+                let file = locate_weight(&resource, &name)?;
+                if file.is_none() && version.state != "deleting" {
+                    return Err(fail("无法确认旧版权重位置，版本记录已保留。"));
+                }
+                if let Some(file) = file {
+                    let meta = file.symlink_metadata().map_err(|e| fail(e.to_string()))?;
                     if !meta.is_file() {
                         return Err(fail("旧版权重不是普通文件，未删除资源。"));
                     }
@@ -873,6 +879,9 @@ impl ModelManager {
             } else {
                 return Err(fail("旧版缺少文件清单，未删除资源。"));
             }
+        }
+        if !version.managed && !resource.exists() && version.state != "deleting" {
+            return Err(fail("无法确认旧版权重目录，版本记录已保留。"));
         }
         if control.cancelled() {
             return Err(fail("已取消"));

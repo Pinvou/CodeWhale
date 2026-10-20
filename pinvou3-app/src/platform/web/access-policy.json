@@ -190,6 +190,7 @@
     "chat:usage",
     "chat:user_message",
     "chat:user_input_required",
+    "models:changed",
     "multiagent:agent_progress",
     "remote_control:tools_changed",
     "scheduled_task:run_updated",
