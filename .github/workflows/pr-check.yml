@@ -273,10 +273,11 @@ jobs:
               - 'CodeWhale'
               - 'pinvou3-app/src-tauri/rust-toolchain.toml'
               - 'pinvou3-app/src-tauri/**/*.rs'
-              # behavior_telemetry_tests.rs include_str! 根目录遥测 registries
-              # 做跨语言契约断言;不列出则 registries-only 改动会静默跳过
-              # rust-test(test_ci_gate_policy 锁定此路由)。v1 schema 无 Rust
-              # 消费方,只由 frontend 的 node 门禁读取,故不在此登记。
+              # diagnostics.rs 在生产校验中 include_str! v1 schema，
+              # behavior_telemetry_tests.rs 同时嵌入 schema 与 registries。
+              # 精确登记编译输入，schema-only Ready PR/MQ 也须执行 Rust 回归
+              # (test_ci_gate_policy 从实际消费者锁定此路由)。
+              - 'docs/schemas/behavior-telemetry-v1.schema.json'
               - 'docs/schemas/behavior-telemetry-registries.json'
               - '!pinvou3-app/src-tauri/src/features/feedback/**'
               - '!pinvou3-app/src-tauri/src/features/personas/**'
