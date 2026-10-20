@@ -5,6 +5,9 @@ import { readFileSync } from 'node:fs';
 import { checkCoverage, loadInputs } from '../check-token-management-authorization-coverage.mjs';
 
 const inputs = loadInputs();
+const closedGrantAuthority = 'resolved, org, _, ok := s.resolveOrganizationBilling(w, r, "org.grants.reclaim_closed")';
+const changedClosedGrantAuthority = 'resolved, org, _, ok := s.resolveOrganizationBilling(w, r, "org.grants.allocate")';
+assert.equal(inputs.organizationHandlerSource.split(closedGrantAuthority).length - 1, 1);
 const anchors = {
   routeSource: inputs.routeSource.split(/\r?\n/).find(line => /^\s*internal\.POST\("\/holds\/expiry-proof"/.test(line)),
   credentialSource: inputs.credentialSource.split(/\r?\n/).find(line => /^\s*router\.GET\("\/assets\/credential\.css"/.test(line)),
@@ -185,7 +188,7 @@ test('closed-grant authority helper cannot disappear or change permission', () =
   for (const source of [
     inputs.organizationHandlerSource.replaceAll('s.closedGrantClient(w, r)', 's.unclassifiedClosedGrantClient(w, r)'),
     inputs.organizationHandlerSource.replace('func (s *Service) closedGrantClient(', 'func (s *Service) unclassifiedClosedGrantClient('),
-    inputs.organizationHandlerSource.replace('s.resolveOrganizationBilling(w, r, "org.grants.reclaim_closed")', 's.resolveOrganizationBilling(w, r, "org.grants.allocate")'),
+    inputs.organizationHandlerSource.replace(closedGrantAuthority, changedClosedGrantAuthority),
   ]) assert.throws(() => checkCoverage({ ...inputs, organizationHandlerSource: source }), /closed grant authority/);
 });
 
@@ -206,7 +209,7 @@ test('comments and strings cannot stand in for the closed-grant authority chain'
 test('a commented or stringified whole helper cannot hide changed real authority', () => {
   const helper = inputs.organizationHandlerSource.match(/func \(s \*Service\) closedGrantClient\([^\n]*\) [^\n]*\{[\s\S]*?\n\}/)?.[0];
   assert.ok(helper);
-  const changed = inputs.organizationHandlerSource.replace('s.resolveOrganizationBilling(w, r, "org.grants.reclaim_closed")', 's.resolveOrganizationBilling(w, r, "org.grants.allocate")');
+  const changed = inputs.organizationHandlerSource.replace(closedGrantAuthority, changedClosedGrantAuthority);
   for (const standIn of [`/*\n${helper}\n*/\n`, `var fakeClosedGrantHelper = \`\n${helper}\n\`\n`]) {
     assert.throws(() => checkCoverage({ ...inputs, organizationHandlerSource: standIn + changed }), /closed grant authority changed/);
   }

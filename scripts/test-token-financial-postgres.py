@@ -52,6 +52,7 @@ SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingsch
 SCHEMA_REQUIRED = {"TestF09EntitlementPackageIndexPublicMigration"}
 OWNER_REQUIRED = {"TestF06OrganizationWalletRequiresLifecycleEvidence"}
 RETAINED_REQUIRED = {
+    "TestLedgerRepairClaimActivationReadErrorsPostgres",
     "TestF06MemberQuotaRestoreUsesOrdinaryPackageExpiry",
     "TestMemberQuotaBatchPersistedFactsAndFinancialReplay",
     "TestMemberHoldIdentityMutationBoundaries",

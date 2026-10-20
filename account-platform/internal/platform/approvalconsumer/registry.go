@@ -29,6 +29,7 @@ type Descriptor struct {
 
 var descriptors = []Descriptor{
 	{CommandType: "ENTITLEMENT_COMPONENT_ADJUSTMENT", PolicyVersion: 2, ExecutorIdentity: BillingWorkload, Durable: "billing-entitlement-component-adjustment-executor-p2-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
+	{CommandType: "LEDGER_REPAIR", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-ledger-repair-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
 	{CommandType: "WALLET_ADJUSTMENT", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-wallet-adjustment-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
 	{CommandType: "PAYMENT_PROVIDER_RESUME", PolicyVersion: 2, ExecutorIdentity: BillingWorkload, Durable: "billing-payment-provider-resume-executor-p2-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
 	{CommandType: "PAYMENT_PRODUCT_RESUME", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-payment-product-resume-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
@@ -69,18 +70,23 @@ func Match(descriptor Descriptor, commandType string, policyVersion int64, execu
 // read-only shared-subject routing only; Match remains the execution mapping.
 func MatchRoute(descriptor Descriptor, commandType string, policyVersion int64, executorIdentity string) bool {
 	if descriptor == legacyBilling {
-		for _, candidate := range BillingCommands() {
-			if candidate.CommandType != "ENTITLEMENT_COMPONENT_ADJUSTMENT" && candidate.CommandType == commandType && candidate.PolicyVersion == policyVersion && candidate.ExecutorIdentity == executorIdentity {
-				return true
-			}
+		if executorIdentity != BillingWorkload {
+			return false
 		}
-		return false
+		switch commandType {
+		case "WALLET_ADJUSTMENT", "PAYMENT_PRODUCT_RESUME":
+			return policyVersion == 1
+		case "PAYMENT_PROVIDER_RESUME":
+			return policyVersion == 2
+		default:
+			return false
+		}
 	}
 	return Match(descriptor, commandType, policyVersion, executorIdentity)
 }
 
 func BillingCommands() []Descriptor {
-	result := make([]Descriptor, 0, 3)
+	result := make([]Descriptor, 0, 5)
 	for _, descriptor := range descriptors {
 		if descriptor.Workload == BillingWorkload {
 			result = append(result, descriptor)

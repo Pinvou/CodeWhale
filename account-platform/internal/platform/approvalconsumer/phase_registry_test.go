@@ -5,6 +5,7 @@ import "testing"
 func TestInstalledBillingConsumptionAndRecoveryFences(t *testing.T) {
 	want := map[string]Descriptor{
 		"ENTITLEMENT_COMPONENT_ADJUSTMENT": {CommandType: "ENTITLEMENT_COMPONENT_ADJUSTMENT", PolicyVersion: 2, ExecutorIdentity: BillingWorkload, Durable: "billing-entitlement-component-adjustment-executor-p2-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
+		"LEDGER_REPAIR":                    {CommandType: "LEDGER_REPAIR", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-ledger-repair-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
 		"WALLET_ADJUSTMENT":                {CommandType: "WALLET_ADJUSTMENT", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-wallet-adjustment-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
 		"PAYMENT_PROVIDER_RESUME":          {CommandType: "PAYMENT_PROVIDER_RESUME", PolicyVersion: 2, ExecutorIdentity: BillingWorkload, Durable: "billing-payment-provider-resume-executor-p2-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
 		"PAYMENT_PRODUCT_RESUME":           {CommandType: "PAYMENT_PRODUCT_RESUME", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-payment-product-resume-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
@@ -13,10 +14,11 @@ func TestInstalledBillingConsumptionAndRecoveryFences(t *testing.T) {
 		"TOKEN_CREDENTIAL_REVOKE":          {CommandType: "TOKEN_CREDENTIAL_REVOKE", PolicyVersion: 1, ExecutorIdentity: TokenWorkload, Durable: "token-credential-revoke-executor-v1", Workload: TokenWorkload, StartSource: StartExisting},
 	}
 	all := All()
-	if len(all) != len(want) || len(BillingCommands()) != 4 || len(TokenCommands()) != 3 {
+	if len(all) != len(want) || len(BillingCommands()) != 5 || len(TokenCommands()) != 3 {
 		t.Fatal("installed consumer set differs")
 	}
 	seen := make(map[string]bool)
+	legacyPolicies := map[string]int64{"WALLET_ADJUSTMENT": 1, "PAYMENT_PROVIDER_RESUME": 2, "PAYMENT_PRODUCT_RESUME": 1}
 	for _, d := range all {
 		if expected, ok := want[d.CommandType]; !ok || expected != d || seen[d.CommandType] {
 			t.Fatalf("delivery contract differs: %s", d.CommandType)
@@ -27,7 +29,7 @@ func TestInstalledBillingConsumptionAndRecoveryFences(t *testing.T) {
 		}
 		otherWorkload := TokenWorkload
 		if d.Workload == BillingWorkload {
-			if MatchRoute(LegacyBilling(), d.CommandType, d.PolicyVersion, d.ExecutorIdentity) != (d.CommandType != "ENTITLEMENT_COMPONENT_ADJUSTMENT") {
+			if MatchRoute(LegacyBilling(), d.CommandType, d.PolicyVersion, d.ExecutorIdentity) != (legacyPolicies[d.CommandType] == d.PolicyVersion) {
 				t.Fatal("legacy Billing routing lost")
 			}
 		} else {
@@ -60,6 +62,18 @@ func TestInstalledBillingConsumptionAndRecoveryFences(t *testing.T) {
 	}
 	if Match(LegacyBilling(), "WALLET_ADJUSTMENT", 1, BillingWorkload) {
 		t.Fatal("shared routing descriptor granted execution")
+	}
+	for command, version := range legacyPolicies {
+		if MatchRoute(LegacyBilling(), command, version+1, BillingWorkload) || MatchRoute(LegacyBilling(), command, version, TokenWorkload) {
+			t.Fatal("shared routing accepted a different frozen policy or executor")
+		}
+	}
+	for _, command := range []string{"ENTITLEMENT_COMPONENT_ADJUSTMENT", "LEDGER_REPAIR", "FUTURE_BILLING_COMMAND", ""} {
+		for _, version := range []int64{1, 2} {
+			if MatchRoute(LegacyBilling(), command, version, BillingWorkload) {
+				t.Fatal("shared routing expanded beyond its three historical commands", command)
+			}
+		}
 	}
 	for _, durable := range []string{"token-command-executor-v1", "token-usage-reconciliation-executor-v1", "token-organization-executor-v1"} {
 		if _, ok := LookupDurable(durable); ok {

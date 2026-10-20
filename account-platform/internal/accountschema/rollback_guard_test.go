@@ -27,9 +27,9 @@ func TestRetainedPolicyRollbackGuard(t *testing.T) {
 	}
 }
 
-func TestRetainedOrganizationGovernanceRollbackGuard(t *testing.T) {
-	if err := retainedRollbackGuard(context.Background(), nil, migrations.Migration{Version: 39}); err == nil || !strings.Contains(err.Error(), "original scope-version SQL cannot compare void results") {
-		t.Fatalf("unsupported retained organization rollback was allowed: %v", err)
+func TestRetainedOrganizationGovernanceRollbackRejectsUnpinnedSource(t *testing.T) {
+	if err := retainedRollbackGuard(context.Background(), nil, migrations.Migration{Version: 39}); err == nil || !strings.Contains(err.Error(), "exact frozen migration identity") {
+		t.Fatalf("unpinned organization rollback was allowed: %v", err)
 	}
 }
 

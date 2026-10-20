@@ -128,15 +128,22 @@ export class OrganizationClient {
   if (!Array.isArray(result?.items) || result.items.length !== ids.length) invalid();
   for (const [index, item] of result.items.entries()) {
    if (item?.grant_id !== ids[index] || !['SUCCEEDED', 'FAILED'].includes(item.status)) invalid();
-   if (item.status === 'FAILED') { if (!['ACCOUNT_CLOSED_GRANT_RECLAIM_REJECTED', 'COMMAND_RESULT_UNKNOWN'].includes(item.code)) invalid(); continue; }
+   if (item.status === 'FAILED') {
+    if (item.result !== undefined) invalid();
+    if (!['ACCOUNT_CLOSED_GRANT_RECLAIM_REJECTED', 'COMMAND_RESULT_UNKNOWN'].includes(item.code)) invalid();
+    continue;
+   }
    const receipt = item.result;
    requireQuotaGrant(receipt?.grant, org, { grant_id: ids[index] });
    if (receipt.grant.status !== 'RECLAIMED_ACCOUNT_CLOSED' || integerMoney(receipt.amount_microcredits) <= 0n || integerMoney(receipt.subject_lifecycle_version) < 2n || typeof receipt.replayed !== 'boolean') invalid();
   }
   if (result.items.some(item => item.status === 'FAILED' && item.code === 'COMMAND_RESULT_UNKNOWN')) {
-   throw Object.assign(new Error('COMMAND_RESULT_UNKNOWN'), { code: 'COMMAND_RESULT_UNKNOWN', financeRequestState: 'WRITE_OBSERVED', batchResult: result });
+   throw Object.assign(new Error('COMMAND_RESULT_UNKNOWN'), { code: 'COMMAND_RESULT_UNKNOWN', status: 503, financeRequestState: 'WRITE_OBSERVED', batchResult: result });
   }
   return result;
+ }
+ reclaimClosedGrantsBatch(org, ids, reason, key) {
+  return this.reclaimClosedGrants(org, ids, reason, key);
  }
 }
 

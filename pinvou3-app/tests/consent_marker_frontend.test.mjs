@@ -27,7 +27,7 @@ const productionOf = (src) => {
 const uiState = readFileSync(
   join(root, 'src/features/tools/connector-ui-state.js'),
   'utf8',
-);
+).replace(/\r\n/g, '\n');
 const MARKER = 'persisting their default-off consent state failed';
 assert.ok(
   uiState.replace(/\s+/g, ' ').includes(`export const CONSENT_SYNC_FAILURE_MARKER = '${MARKER}'`),

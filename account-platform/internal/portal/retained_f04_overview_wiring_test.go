@@ -82,6 +82,11 @@ func TestRetainedF04OverviewFutureAndMethodDeny(t *testing.T) {
 			t.Fatalf("future or malformed path allowed %s", path)
 		}
 	}
+	for _, path := range []string{"/admin/v1/usage-requests", "/admin/v1/reconciliation-cases"} {
+		if !tokenAdminPathAllowed(http.MethodGet, path) {
+			t.Fatalf("installed usage/reconciliation read route rejected: %s", path)
+		}
+	}
 	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
 		if tokenAdminPathAllowed(method, "/admin/v1/overviews/model-catalog") {
 			t.Fatalf("overview mutation allowed %s", method)

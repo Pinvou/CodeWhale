@@ -20,6 +20,8 @@ import (
 )
 
 type PostgresRepository struct {
+	registrationBonusFingerprintKeyID string
+	registrationBonusFingerprintKey   []byte
 	pool                              *pgxpool.Pool
 	approvalWriterPool                *pgxpool.Pool
 	approvalWriterCommit              func(context.Context, pgx.Tx) error
@@ -35,8 +37,6 @@ type PostgresRepository struct {
 	now                               func() time.Time
 	walletPolicyVersion               string
 	walletProvisioningSLA             time.Duration
-	registrationBonusFingerprintKeyID string
-	registrationBonusFingerprintKey   []byte
 }
 
 func NewPostgresRepository(ctx context.Context, databaseURL string) (*PostgresRepository, error) {

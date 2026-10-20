@@ -235,6 +235,9 @@ type stageFixture struct {
 
 func newStageFixture(t *testing.T, ctx context.Context, raw string) *stageFixture {
 	t.Helper()
+	if strings.TrimSpace(raw) == "" {
+		t.Skip("explicit isolated PostgreSQL configuration is required")
+	}
 	admin, err := pgx.Connect(ctx, raw)
 	if err != nil {
 		t.Fatal("connect schema setup identity")

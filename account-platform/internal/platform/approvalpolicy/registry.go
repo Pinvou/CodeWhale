@@ -98,8 +98,8 @@ func buildPolicies() map[string]Policy {
 		"BILLING_ORGANIZATION_UNIT_LIFECYCLE_APPLY":     "internal.billing.organization-unit.lifecycle",
 		"ACCOUNT_MEMBER_ADD":                            "platform.organizations.members.manage",
 		"ACCOUNT_MEMBER_REMOVE":                         "platform.organizations.members.manage",
-		"ACCOUNT_MEMBER_ROLES_REPLACE":                  "platform.organizations.members.manage",
 		"ACCOUNT_MEMBER_UNITS_REPLACE":                  "platform.organizations.members.manage",
+		"ACCOUNT_MEMBER_ROLES_REPLACE":                  "platform.organizations.members.manage",
 		"ACCOUNT_ORGANIZATION_CREATE":                   "platform.organizations.create",
 		"ACCOUNT_ORGANIZATION_DELETE":                   "platform.organizations.delete",
 		"ACCOUNT_ORGANIZATION_RENAME":                   "platform.organizations.profile.manage",
@@ -123,6 +123,7 @@ func buildPolicies() map[string]Policy {
 		"BILLING_LATE_PAYMENT_ARCHIVE":                  "platform.billing.orders.sync",
 		"BILLING_LATE_PAYMENT_CLAIM":                    "platform.billing.orders.sync",
 		"BILLING_LATE_PAYMENT_QUERY":                    "platform.billing.orders.sync",
+		"BILLING_REGISTRATION_BONUS_POLICY_UPDATE":      "platform.registration-bonus.manage",
 		"BILLING_LATE_PAYMENT_SCHEDULE":                 "platform.billing.orders.sync",
 		"BILLING_NORMAL_REFUND":                         "platform.billing.repairs.request",
 		"BILLING_PAYMENT_ANOMALY_CLAIM":                 "platform.billing.orders.sync",
@@ -154,11 +155,10 @@ func buildPolicies() map[string]Policy {
 		"EVENT_OUTBOX_RELAY":                            "internal.events.relay",
 		"ACCOUNT_USER_STATUS_CHANGE":                    "platform.users.status.manage",
 		"ACCOUNT_REGISTRATION_RETRY":                    "platform.registrations.repair",
+		"ACCOUNT_CLOSURE_RETRY":                         "platform.account-closures.repair",
 		"ACCOUNT_REGISTRATION_COMPENSATE":               "platform.registrations.repair",
 		"ACCOUNT_PROFILE_CHANGE_RETRY":                  "platform.profile-changes.repair",
-		"ACCOUNT_CLOSURE_RETRY":                         "platform.account-closures.repair",
 		"ACCOUNT_SMS_CONFIGURATION_UPDATE":              "platform.sms-config.manage",
-		"BILLING_REGISTRATION_BONUS_POLICY_UPDATE":      "platform.registration-bonus.manage",
 	} {
 		result[commandType] = Policy{CommandType: commandType, PolicyVersion: Version, Mode: AuditOnly,
 			RequesterPermission: permission, RiskClass: "GOVERNANCE_OR_NORMAL_STATE_MACHINE",
@@ -192,6 +192,13 @@ func buildPolicies() map[string]Policy {
 		SnapshotSchemaVersion: 1, CriticalResourceFields: []string{"provider_id", "provider_version", "product_id", "provider_control_version", "product_control_version", "catalog_item_id", "catalog_version", "admission_version", "mapping_id", "mapping_version", "probe_order_id", "policy_version", "observation_high_watermark", "evaluation_high_watermark"},
 		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "billing-command-executor",
 	}
+	result["LEDGER_REPAIR"] = Policy{
+		CommandType: "LEDGER_REPAIR", PolicyVersion: 1, Mode: ApprovalRequired,
+		RequesterPermission: "platform.billing.repairs.request", ApproverPermission: "platform.billing.repairs.approve",
+		RiskClass: "FINANCIAL_FACT_CHANGE", ApprovalCount: 1, SelfApprovalForbidden: true,
+		SnapshotSchemaVersion: 1, CriticalResourceFields: []string{"target_id", "resource_version", "financial_snapshot", "policy_version"},
+		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "billing-command-executor",
+	}
 	addTokenGovernancePolicies(result)
 	result["ENTITLEMENT_COMPONENT_ADJUSTMENT"] = Policy{
 		CommandType: "ENTITLEMENT_COMPONENT_ADJUSTMENT", PolicyVersion: 2, Mode: ApprovalRequired,
@@ -206,7 +213,7 @@ func buildPolicies() map[string]Policy {
 // Executable is the installed, closed approval command set.
 func Executable(command string) bool {
 	switch strings.ToUpper(strings.TrimSpace(command)) {
-	case "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME", "ENTITLEMENT_COMPONENT_ADJUSTMENT", "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK", "TOKEN_CREDENTIAL_REVOKE":
+	case "LEDGER_REPAIR", "ENTITLEMENT_COMPONENT_ADJUSTMENT", "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME", "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK", "TOKEN_CREDENTIAL_REVOKE":
 		return true
 	}
 	return false
@@ -260,6 +267,8 @@ func addTokenGovernancePolicies(result map[string]Policy) {
 		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "token-command-executor",
 	}
 	audit("TOKEN_CREDENTIAL_VALIDATE", 2, "platform.tokens.credentials.validate", 2, "token_account_id", "expected_account_version", "credential_id", "credential_version", "precheck_fingerprint", "request_fingerprint")
+	audit("TOKEN_ORGANIZATION_LIFECYCLE_APPLY", 1, "internal.token.organization.lifecycle", 1, "target_id", "request_fingerprint")
+	audit("TOKEN_ORGANIZATION_UNIT_LIFECYCLE_APPLY", 1, "internal.token.organization-unit.lifecycle", 1, "target_id", "request_fingerprint")
 	audit("TOKEN_ORGANIZATION_MODEL_POLICY_UPDATE", 1, "org.models.manage", 1, "target_id", "request_fingerprint")
 	audit("TOKEN_USAGE_RECONCILIATION_RETRY", 2, "platform.usage.reconcile.retry", 2, "usage_request_id", "expected_usage_version", "evidence_high_watermark", "precheck_fingerprint", "request_fingerprint")
 	audit("TOKEN_ROUTE_PROVISIONING_REPAIR", 2, "platform.tokens.manage", 2, "provisioning_id", "expected_provisioning_version", "target_generation", "precheck_fingerprint", "request_fingerprint")

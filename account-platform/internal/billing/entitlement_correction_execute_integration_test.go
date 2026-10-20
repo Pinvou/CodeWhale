@@ -428,6 +428,9 @@ JOIN entitlement_components c ON c.package_id=p.id WHERE p.id=$1 GROUP BY p.poin
 		byType["BASE"].AvailableMicrocredits != 80 || byType["BONUS"].AvailableMicrocredits != 20 {
 		t.Fatalf("effective projection base=%+v bonus=%+v", byType["BASE"], byType["BONUS"])
 	}
+	if byType["BASE"].ReclassifiedOutMicrocredits != 20 || byType["BONUS"].ReclassifiedOutMicrocredits != 0 {
+		t.Fatalf("personal projection omitted real reclassified facts: base=%+v bonus=%+v", byType["BASE"], byType["BONUS"])
+	}
 	adminOrder, err := repository.AdminPaymentOrder(ctx, orderID)
 	if err != nil || len(adminOrder.Packages) != 1 || len(adminOrder.Packages[0].Components) != 2 {
 		t.Fatal("admin correction projection missing")
@@ -436,6 +439,13 @@ JOIN entitlement_components c ON c.package_id=p.id WHERE p.id=$1 GROUP BY p.poin
 		expected := int64(20)
 		if component.ComponentType == "BASE" {
 			expected = 80
+		}
+		expectedReclassified := int64(0)
+		if component.ComponentType == "BASE" {
+			expectedReclassified = 20
+		}
+		if component.ReclassifiedOutMicrocredits != expectedReclassified || component.OriginalMicrocredits-component.ReclassifiedOutMicrocredits != component.EffectiveOriginalMicrocredits {
+			t.Fatal("admin projection omitted real reclassified facts")
 		}
 		if component.EffectiveOriginalMicrocredits != expected {
 			t.Fatal("admin correction projection retained pre-correction effective amount")
@@ -573,6 +583,11 @@ func entitlementRepositoryToVersion(t *testing.T, ctx context.Context, raw strin
 	}
 	selected := make([]migrations.Migration, 0, len(loaded))
 	for _, migration := range loaded {
+		// Partial fixtures retain the original F09 entitlement phase input.
+		// Full installation (maximum == 0) must keep every F10 Ledger migration.
+		if maximum != 0 && (migration.Version == 61 || migration.Version == 62 || migration.Version == 900014) {
+			continue
+		}
 		if migration.Version == 900013 && maximum != 0 && maximum < 59 {
 			continue
 		}

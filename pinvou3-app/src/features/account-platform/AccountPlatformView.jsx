@@ -1,10 +1,12 @@
-import { PersonalFinanceWorkspace } from './PersonalFinanceWorkspace.jsx';
 import { AccountClosureWorkspace } from './AccountClosureWorkspace.jsx';
+import { PersonalFinanceWorkspace } from './PersonalFinanceWorkspace.jsx';
 import { PersonalUsageWorkspace } from './PersonalUsageWorkspace.jsx';
 import { OrganizationDirectory } from './OrganizationDirectory.jsx';
 import { OrganizationWorkspace } from './OrganizationWorkspace.jsx';
 import { requirePersonalAccount } from './personal-contract.js';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { capturePersonalRechargeReauthentication, authorizePersonalRechargeReauthentication } from './personal-recharge-reauthentication.js';
+import { createDesktopReauthenticationCoordinator } from './desktop-reauthentication.js';
 import { supportedLocales, localeNames } from '../../shared/supported-locales.js';
 import { hasPermission } from './authorization-ui.js';
 import { formatBalance } from './balance-view.js';
@@ -22,9 +24,15 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
+  const [reauthentication, setReauthentication] = useState(null);
+  const coordinatorRef = useRef(null);
+  const identity = useRef(null);
+  const copyRef = useRef(copy);
+  copyRef.current = copy;
+  identity.current = { auth, me, profileOwner, client };
   const epoch = useRef(0);
   const ready = useRef(false);
-  ready.current = auth === 'ready' && profileOwner === client;
+  ready.current = auth === 'ready' && profileOwner === client && !reauthentication;
   const refreshRef = useRef(null);
 
   const load = async (generation, signal) => {
@@ -33,6 +41,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     if (!session.authenticated) { setAuth('guest'); return; }
     const profile = requirePersonalAccount(await client.bootstrap(signal));
     if (generation !== epoch.current) return;
+    authorizePersonalRechargeReauthentication(client, profile);
     setMe(profile); setProfileOwner(client);
     setAuth('ready');
     if (profile.active_context?.context_type === 'ORGANIZATION' || !hasPermission(profile, 'personal.billing.read')) return profile;
@@ -53,7 +62,62 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   };
   refreshRef.current = refresh;
   useEffect(() => {
-    const synchronize = () => { if (ready.current) void refreshRef.current(false); };
+    if (portal || typeof client.bindReauthentication !== 'function') return undefined;
+    const coordinator = createDesktopReauthenticationCoordinator({
+      client,
+      getActor: () => {
+        const current = identity.current;
+        return current.auth === 'ready' && current.profileOwner === client && current.client === client ? current.me?.user_id : null;
+      },
+      onPrompt: ticket => {
+        if (coordinatorRef.current !== coordinator) throw new Error('REAUTHENTICATION_EXPIRED');
+        // Native login retires its old credentials before requesting a password
+        // grant. Retire this view before that action can start, even on failure.
+        capturePersonalRechargeReauthentication(client, ticket.actor);
+        epoch.current++; ready.current = false; ticket.viewRetired = true;
+        setBalance(null); setNotice(''); setError(''); setBusy(false);
+        setReauthentication({ coordinator, ticket });
+      },
+      onVerified: (_ticket, profile) => {
+        if (coordinatorRef.current !== coordinator) throw new Error('REAUTHENTICATION_EXPIRED');
+        authorizePersonalRechargeReauthentication(client, profile);
+        const generation = ++epoch.current;
+        setMe(profile); setProfileOwner(client); setAuth('ready');
+        setReauthentication(null); setError(''); setNotice(copyRef.current.desktopReauthenticationCompleted);
+        // This restores the fresh actor's view only. The closure workspace reads
+        // its durable intent and requires an explicit retry of the original key.
+        if (profile.active_context?.context_type !== 'ORGANIZATION' && hasPermission(profile, 'personal.billing.read')) {
+          void client.balance().then(value => { if (generation === epoch.current) setBalance(value); })
+            .catch(reason => { if (generation === epoch.current) setError(localizedAccountPlatformError(copyRef.current, reason)); });
+        }
+      },
+      onRejected: (ticket, reason) => {
+        if (coordinatorRef.current !== coordinator) return;
+        if (!ticket.viewRetired) { setError(localizedAccountPlatformError(copyRef.current, reason)); return; }
+        epoch.current++; ready.current = false;
+        setReauthentication(null); setMe(null); setBalance(null); setNotice(''); setBusy(false); setAuth('error');
+        setError(localizedAccountPlatformError(copyRef.current, reason, {
+          REAUTHENTICATION_ACTOR_MISMATCH: copyRef.current.desktopReauthenticationActorMismatch,
+          REAUTHENTICATION_CANCELLED: copyRef.current.desktopReauthenticationCancelled,
+        }));
+      },
+    });
+    coordinatorRef.current = coordinator;
+    const unbind = client.bindReauthentication(language => coordinator.request(language));
+    return () => {
+      if (coordinatorRef.current === coordinator) coordinatorRef.current = null;
+      unbind(); coordinator.dispose();
+    };
+  }, [client, portal]);
+  const reauthenticationClient = useMemo(() => {
+    if (!reauthentication) return null;
+    const { coordinator, ticket } = reauthentication;
+    const value = Object.create(client);
+    value.login = (account, password) => coordinator.authenticate(ticket, () => client.login(account, password));
+    return value;
+  }, [client, reauthentication]);
+  useEffect(() => {
+    const synchronize = () => { if (ready.current && !coordinatorRef.current?.hasPending()) void refreshRef.current(false); };
     const unsubscribeContext = client.onContextVersion?.(synchronize);
     const unsubscribeAuthorization = client.onAuthorizationVersion?.(synchronize);
     globalThis.addEventListener?.('focus', synchronize);
@@ -62,7 +126,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   useEffect(() => {
     const controller = new AbortController();
     const generation = ++epoch.current;
-    setProfileOwner(client); setAuth('loading'); setMe(null); setBalance(null); setNotice(''); setError('');
+    setReauthentication(null); setProfileOwner(client); setAuth('loading'); setMe(null); setBalance(null); setNotice(''); setError('');
     void load(generation, controller.signal).catch(reason => {
       if (generation === epoch.current && reason?.name !== 'AbortError') { setAuth('error'); setError(localizedAccountPlatformError(copy, reason)); }
     });
@@ -83,6 +147,13 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     if (portal) { if (!await logout()) return; globalThis.location.assign('/auth/login?return_to=%2F'); }
     else { await logout(); }
   };
+  if (reauthentication && reauthentication.ticket.client === client) return <div className="ap-shell ap-login">
+    <AccountLogin key={reauthentication.ticket.id} client={reauthenticationClient} copy={copy} reauthentication
+      onAuthenticated={() => reauthentication.coordinator.complete(reauthentication.ticket)}
+      onAuthenticationFailure={reason => reauthentication.coordinator.fail(reauthentication.ticket, reason)} />
+    <button type="button" onClick={() => reauthentication.coordinator.cancel(reauthentication.ticket)}>{copy.desktopReauthenticationCancel}</button>
+    {onClose && <button type="button" onClick={() => { reauthentication.coordinator.cancel(reauthentication.ticket); onClose(); }}>{copy.close}</button>}
+  </div>;
   if (auth === 'loading' || profileOwner !== client) return <div className="ap-shell ap-centered" role="status">{copy.loading}</div>;
   if (auth !== 'ready') return <div className="ap-shell ap-login">
     {error && <div className="ap-alert error" role="alert">{error}</div>}
@@ -99,11 +170,11 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     <OrganizationDirectory key={`${me.user_id}:${client.financeSessionEpoch || 0}`} client={client} me={me} language={language} onChanged={() => refresh(false)} />
     {me.active_context?.context_type === 'ORGANIZATION' ? <OrganizationWorkspace key={`${me.user_id}:${me.active_context.organization_id}:${me.active_context.context_version}`} client={client} me={me} language={language} onChanged={() => refresh(false)} /> : <>
     {hasPermission(me, 'personal.billing.read') && <section className="ap-balance-hero"><span>{copy.availableCredits}</span><strong>{formatBalance(balance?.available_microcredits, language)}</strong><small>{copy.reservedCredits}: {formatBalance(balance?.reserved_microcredits, language)}</small></section>}
-    <PersonalFinanceWorkspace key={`finance:${me.user_id}`} client={client} me={me} language={language} />
-    <PersonalUsageWorkspace key={`usage:${me.user_id}`} client={client} me={me} language={language} />
-    <AccountClosureWorkspace key={`${me.user_id}:${client.financeSessionEpoch || 0}`} client={client} me={me} language={language} />
+    <PersonalFinanceWorkspace key={`personal-finance:${me.user_id}`} client={client} me={me} language={language} />
+    <PersonalUsageWorkspace key={`personal-usage:${me.user_id}`} client={client} me={me} language={language} />
+    <AccountClosureWorkspace key={`${me.user_id}:${me.personal_authorization_version || me.active_context?.personal_authorization_version || 0}:${client.financeSessionEpoch || 0}`} client={client} me={me} language={language} />
     </>}
-    {hasPermission(me, 'personal.profile.update') && (portal ? <ProfileSettings key={`profile:${me.user_id}`} copy={copy} me={me} client={client} onError={reason => { if (renderedEpoch === epoch.current) setError(localizedAccountPlatformError(copy, reason)); }} onChanged={result => changed(result, renderedEpoch)} onRecovering={() => { if (renderedEpoch === epoch.current) setNotice(copy.profileChangeRecovering); }} /> : <button onClick={() => client.openPortal(language).catch(reason => { if (renderedEpoch === epoch.current) setError(localizedAccountPlatformError(copy, reason)); })}>{copy.profileSettings}</button>)}
+    {hasPermission(me, 'personal.profile.update') && (portal ? <ProfileSettings key={me.user_id} copy={copy} me={me} client={client} onError={reason => { if (renderedEpoch === epoch.current) setError(localizedAccountPlatformError(copy, reason)); }} onChanged={result => changed(result, renderedEpoch)} onRecovering={() => { if (renderedEpoch === epoch.current) setNotice(copy.profileChangeRecovering); }} /> : <button onClick={() => client.openPortal(language).catch(reason => { if (renderedEpoch === epoch.current) setError(localizedAccountPlatformError(copy, reason)); })}>{copy.profileSettings}</button>)}
     {portal && hasPermission(me, 'personal.security.manage') && <a href="/auth/login?reauthenticate=1&return_to=%2F">{copy.reauthenticate}</a>}
     {portal && me.platform_permissions?.some(permission => permission.startsWith('platform.')) && <a href="/admin.html">{copy.adminCenter}</a>}
     {onClose && <button onClick={onClose}>{copy.close}</button>}

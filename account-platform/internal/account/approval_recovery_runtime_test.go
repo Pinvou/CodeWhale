@@ -17,14 +17,15 @@ import (
 // Controlled authority receipts test HTTP composition; they are not a claim
 // that a real financial command or provider transaction executed in this test.
 func TestApprovalRecoveryRuntimeHTTPContinuesAfterConfirmationFailure(t *testing.T) {
-	descriptor := approvalconsumer.BillingCommands()[0]
-	for _, candidate := range approvalconsumer.BillingCommands() {
-		if candidate.CommandType == "WALLET_ADJUSTMENT" {
-			descriptor = candidate
+	var descriptor approvalconsumer.Descriptor
+	for _, installed := range approvalconsumer.BillingCommands() {
+		if installed.CommandType == "WALLET_ADJUSTMENT" {
+			descriptor = installed
+			break
 		}
 	}
 	if descriptor.CommandType != "WALLET_ADJUSTMENT" {
-		t.Fatal("controlled adjustment receipt requires installed adjustment descriptor")
+		t.Fatal("wallet recovery descriptor is not installed")
 	}
 	items := make([]ApprovalRecoveryCandidate, 2)
 	for i := range items {

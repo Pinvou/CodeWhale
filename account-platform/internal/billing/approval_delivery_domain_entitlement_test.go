@@ -120,6 +120,14 @@ func TestBillingAuthorizationDomainEntitlementResultFirstRead(t *testing.T) {
 	if _, found, err = domain.LookupAuthorizationResult(context.Background(), binding, event); err == nil || found {
 		t.Fatalf("read error became absence: found=%v err=%v", found, err)
 	}
+
+	t.Run("missing repository with database remains unavailable", func(t *testing.T) {
+		domain := &billingAuthorizationDomain{database: &entitlementAuthorizationQueryStub{t: t}}
+		result, found, err := domain.LookupAuthorizationResult(context.Background(), binding, event)
+		if !errors.Is(err, ErrApprovalExecutionUnavailable) || found || len(result.DomainResult) != 0 || len(result.LedgerReferences) != 0 {
+			t.Fatalf("missing owner result=%+v found=%v err=%v", result, found, err)
+		}
+	})
 }
 
 func TestBillingAuthorizationDomainEntitlementProofUsesSchemaV2BeforeEffect(t *testing.T) {

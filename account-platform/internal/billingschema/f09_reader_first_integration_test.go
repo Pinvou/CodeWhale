@@ -30,7 +30,10 @@ func TestF09ReaderFirstBeforeAndAfterCorrectionMigration(t *testing.T) {
 	// migrations except the four correction phases and their dependent lock.
 	var predecessor []migrations.Migration
 	for _, m := range loaded {
-		if (m.Version >= 56 && m.Version <= 59) || m.Version == 900013 {
+		// Preserve the original F09 hardened predecessor. The F10 Ledger
+		// 061/062/900014 phases require the correction capability; the
+		// complete public upgrade below still includes every migration.
+		if (m.Version >= 56 && m.Version <= 59) || m.Version == 900013 || m.Version == 61 || m.Version == 62 || m.Version == 900014 {
 			continue
 		}
 		predecessor = append(predecessor, m)
@@ -106,8 +109,8 @@ EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='public.entitlement_components'
 		}
 		for _, component := range components {
 			if component.ID == lotID {
-				if component.OriginalMicrocredits != 100 || component.EffectiveOriginalMicrocredits != effective {
-					t.Fatalf("original/effective=%d/%d want=100/%d", component.OriginalMicrocredits, component.EffectiveOriginalMicrocredits, effective)
+				if component.OriginalMicrocredits != 100 || component.EffectiveOriginalMicrocredits != effective || component.ReclassifiedOutMicrocredits != 100-effective {
+					t.Fatalf("original/reclassified/effective=%d/%d/%d want=100/%d/%d", component.OriginalMicrocredits, component.ReclassifiedOutMicrocredits, component.EffectiveOriginalMicrocredits, 100-effective, effective)
 				}
 				return
 			}

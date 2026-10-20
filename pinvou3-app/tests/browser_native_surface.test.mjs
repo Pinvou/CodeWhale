@@ -45,7 +45,7 @@ const linuxAutomation = readFileSync(
     'linux_automation.rs',
   ),
   'utf8',
-);
+).replace(/\r\n/g, '\n');
 const linuxSurface = readFileSync(
   path.join(
     projectRoot,

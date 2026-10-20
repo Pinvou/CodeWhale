@@ -736,7 +736,7 @@ func accountPathAllowed(method, resource string) bool {
 			return true
 		}
 	}
-	if method == http.MethodGet && (resource == "/v1/me" || resource == "/v1/me/authorization-context") {
+	if method == http.MethodGet && (resource == "/v1/me" || resource == "/v1/me/authorization-context" || resource == "/v1/me/commerce-customer-mapping") {
 		return true
 	}
 	parts := strings.Split(strings.TrimPrefix(resource, "/"), "/")

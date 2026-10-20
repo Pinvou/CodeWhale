@@ -39,7 +39,10 @@ func TestF09EntitlementPolicyMigrationIdentityPostgres(t *testing.T) {
 			original = m
 			continue
 		}
-		if m.Version == 70 {
+		// The baseline omits the original dependent 070 and F10 Ledger 071,
+		// which requires that complete route. The qualified upgrade below still
+		// uses loaded unchanged, so it exercises their real public sequence.
+		if m.Version == 70 || m.Version == 71 {
 			continue
 		}
 		baseline = append(baseline, m)

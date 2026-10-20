@@ -66,9 +66,9 @@ func TestEntitlementFirstDeliveryActivationContract(t *testing.T) {
 	}
 	t.Run("later-command-stays-inactive", func(t *testing.T) {
 		s := entitlementFirstDeliverySnapshot()
-		s.Activations[2].State = "ACTIVE"
+		s.Activations[6].State = "ACTIVE"
 		if ValidateSnapshot(s) == nil {
-			t.Fatal("advertised undelivered ledger repair")
+			t.Fatal("advertised undelivered receivable write-off")
 		}
 	})
 }

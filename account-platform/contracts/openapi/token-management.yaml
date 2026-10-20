@@ -3932,7 +3932,7 @@
     },
     "/internal/v1/organizations/{organization_id}/lifecycle": {
       "put": {
-        "operationId": "put_internal_v1_organization_lifecycle",
+        "operationId": "applyOrganizationLifecycle",
         "summary": "applyOrganizationLifecycle",
         "description": "Account workload projection only; exact permission and AuditOnly policy are required. Same version/status is replayable; stale or conflicting version/state is rejected. A blocked assessment returns 409 with the same assessment DTO; preflight_only does not mutate lifecycle state.",
         "x-go-handler": "applyOrganizationLifecycle",
@@ -4016,7 +4016,7 @@
     },
     "/internal/v1/organizations/{organization_id}/units/{unit_id}/lifecycle": {
       "put": {
-        "operationId": "put_internal_v1_organization_unit_lifecycle",
+        "operationId": "organizationUnitDeletionBlockers",
         "summary": "organizationUnitDeletionBlockers",
         "description": "Account workload projection only; exact permission and AuditOnly policy are required. Same version/status is replayable; stale or conflicting version/state is rejected. Readiness is part of the 200 assessment and must be checked; false does not prove deletion completed.",
         "x-go-handler": "organizationUnitDeletionBlockers",

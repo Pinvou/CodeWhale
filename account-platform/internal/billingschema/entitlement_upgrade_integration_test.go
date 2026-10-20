@@ -26,6 +26,12 @@ func TestF09HardenedEntitlementUpgradeKeepsPhasePrivileges(t *testing.T) {
 	stage := func(maximum int64) []migrations.Migration {
 		var selected []migrations.Migration
 		for _, m := range loaded {
+			// Keep the original F09 migration identities for this entitlement
+			// phase fixture. F10 Ledger 061/062/900014 require their own v1
+			// activation sequence and are covered by the Ledger upgrade tests.
+			if m.Version == 61 || m.Version == 62 || m.Version == 900014 {
+				continue
+			}
 			if m.Version == 900013 && maximum < 59 {
 				continue
 			} // Original lock function is delivered after 059.
@@ -77,12 +83,62 @@ func TestF09HardenedEntitlementUpgradeKeepsPhasePrivileges(t *testing.T) {
 		if err := other.QueryRow(ctx, `SELECT has_table_privilege('billing_service','public.entitlement_component_corrections','INSERT')`).Scan(&writable); err != nil || writable {
 			t.Fatal("custom version opened original effect privileges", err)
 		}
-		// A later hardening pass also must use the identity, not just ledger 58.
-		if err := Up(ctx, other, append(input, migrations.Migration{Version: 900014, Name: "later_owned_test", UpSQL: "SELECT 1;", DownSQL: "SELECT 1;", Checksum: sqlChecksum("SELECT 1;")})); err != nil {
-			t.Fatal(err)
+		type phaseSnapshot struct {
+			owner, caller, ledger     string
+			read, insert, update, del bool
+		}
+		snapshot := func() phaseSnapshot {
+			t.Helper()
+			var state phaseSnapshot
+			if err := other.QueryRow(ctx, `SELECT pg_get_userbyid(relowner),current_user,
+ (SELECT jsonb_agg(jsonb_build_array(version,checksum) ORDER BY version)::text FROM schema_migrations),
+ has_table_privilege('billing_service',oid,'SELECT'),has_table_privilege('billing_service',oid,'INSERT'),
+ has_table_privilege('billing_service',oid,'UPDATE'),has_table_privilege('billing_service',oid,'DELETE')
+ FROM pg_class WHERE oid='public.entitlement_component_corrections'::regclass`).Scan(&state.owner, &state.caller, &state.ledger, &state.read, &state.insert, &state.update, &state.del); err != nil {
+				t.Fatal("read custom phase authority and complete history", err)
+			}
+			return state
+		}
+		beforeReserved := snapshot()
+		if beforeReserved.owner != "billing_schema_owner" || beforeReserved.caller != "billing_service" || !beforeReserved.read || beforeReserved.insert || beforeReserved.update || beforeReserved.del {
+			t.Fatal("custom58 changed the original prepare phase authority")
+		}
+		// F10 now reserves the former generic fixture number for the Ledger lock.
+		// An unrelated body must be refused without changing any original state.
+		reserved := migrations.Migration{Version: 900014, Name: "later_owned_test", UpSQL: "SELECT 1;", DownSQL: "SELECT 1;", Checksum: sqlChecksum("SELECT 1;")}
+		if err := Up(ctx, other, append(input, reserved)); err == nil || err.Error() != "ledger repair cases require the owner activation lock capability" {
+			t.Fatal("unrelated body did not reach the reserved Ledger capability guard", err)
+		}
+		if snapshot() != beforeReserved {
+			t.Fatal("reserved migration rejection changed ownership, caller, privileges or history")
+		}
+		var reservedRows int
+		if err := other.QueryRow(ctx, `SELECT count(*) FROM schema_migrations WHERE version=900014`).Scan(&reservedRows); err != nil || reservedRows != 0 {
+			t.Fatal("rejected reserved migration entered the ledger", err)
+		}
+		// A genuine generic later hardening pass still must use the exact effect
+		// identity, not MAX(version). This number belongs only to this fresh fixture.
+		const laterTestVersion int64 = 1900014
+		for _, migration := range loaded {
+			if migration.Version >= laterTestVersion {
+				t.Fatal("generic control must be beyond every installed-source identity")
+			}
+		}
+		later := reserved
+		later.Version = laterTestVersion
+		if err := Up(ctx, other, append(input, later)); err != nil {
+			t.Fatal("public generic later hardening rejected", err)
+		}
+		var laterRows int
+		if err := other.QueryRow(ctx, `SELECT count(*) FROM schema_migrations WHERE version=$1 AND checksum=$2`, laterTestVersion, later.Checksum).Scan(&laterRows); err != nil || laterRows != 1 {
+			t.Fatal("generic later hardening did not actually enter the ledger", err)
 		}
 		if err := other.QueryRow(ctx, `SELECT has_table_privilege('billing_service','public.entitlement_component_corrections','INSERT')`).Scan(&writable); err != nil || writable {
 			t.Fatal("custom ledger version opened original effect privileges", err)
+		}
+		afterLater := snapshot()
+		if afterLater.owner != beforeReserved.owner || afterLater.caller != beforeReserved.caller || afterLater.read != beforeReserved.read || afterLater.insert != beforeReserved.insert || afterLater.update != beforeReserved.update || afterLater.del != beforeReserved.del {
+			t.Fatal("generic later hardening changed original prepare authority")
 		}
 	})
 }

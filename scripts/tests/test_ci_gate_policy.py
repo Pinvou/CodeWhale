@@ -811,6 +811,14 @@ class CiGatePolicyTests(unittest.TestCase):
         selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
         self.assertGreaterEqual(selector.count(f'command("npm", "{command}")'), 2)
 
+        # Installed-host coverage has its own full/account selector lane; it must
+        # remain present without running twice through the closure composite.
+        installed_command = "test:account-platform-installed-hosts-ui"
+        installed_file = "account_platform_installed_hosts_ui_smoke.mjs"
+        self.assertEqual(package["scripts"][installed_command], f"node tests/{installed_file}")
+        self.assertTrue((ROOT / "pinvou3-app/tests" / installed_file).is_file())
+        self.assertGreaterEqual(selector.count(f'command("npm", "{installed_command}")'), 2)
+
     def test_embedded_account_portal_assets_are_rebuilt_and_checked(self):
         changes = _without_yaml_comments(
             self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(

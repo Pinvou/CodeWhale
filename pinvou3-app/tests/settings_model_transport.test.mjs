@@ -84,4 +84,4 @@ function settings(state, invoke) { return factories.settings({state, invoke, not
  requests[1].resolve({models:[{id:'new'}]});await current;requests[0].resolve({models:[{id:'old'}]});await old;
  assert.equal(state.savedModels[0].id,'new','a late list cannot overwrite the current catalog');
 }
-console.log('account platform model bridge: 7 scenarios passed');
+console.log('settings model transport regressions passed');

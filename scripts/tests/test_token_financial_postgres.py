@@ -341,6 +341,23 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         self.assertEqual(self.fixture_writes, ["create", "drop"])
         self.assertEqual(self.fixture_trace, ["owner-account", "owner-wallet", "owner-schema", "create", "retained-token", "retained-billing", "drop"])
 
+    def test_ledger_activation_read_failure_regression_is_mandatory(self):
+        root = "TestLedgerRepairClaimActivationReadErrorsPostgres"
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        events = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True}
+        self.assertGreater(RUNNER.verify_results(events, RUNNER.RETAINED_REQUIRED, **options), 0)
+        missing = [event for event in events if event.get("Test", "").split("/", 1)[0] != root]
+        no_child = [event for event in events if not event.get("Test", "").startswith(root + "/")]
+        wrong_package = [dict(event, Package="unexpected/billing")
+                         if event.get("Test", "").split("/", 1)[0] == root else event
+                         for event in events]
+        skipped = events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/actual"}]
+        for invalid in (missing, no_child, wrong_package, skipped):
+            with self.subTest(events=invalid), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, RUNNER.RETAINED_REQUIRED, **options)
+
     def test_positive_extension_suites_are_mandatory(self):
         self.assertIn("TestF05AdditionalReservationProjectionPublicPostgres", RUNNER.REQUIRED)
         billing = {"TestHoldExtensionIdempotencePostgres", "TestPersonalUsageHoldBoundaries",

@@ -60,7 +60,7 @@ type activationVersion struct {
 // entitlement correction command keeps exactly one v1 row as immutable history
 // and may append a v2 row, so this reader accepts either pair and never rewrites
 // the frozen version of an existing request. LEDGER_REPAIR keeps exactly one
-// v1/s1 pair, which remains INACTIVE in this rollout.
+// v1/s1 pair; its state is still selected explicitly by the operator.
 var activationVersions = map[string][]activationVersion{
 	"CHARGEBACK_FINANCIAL_REPAIR":      {{1, 1}},
 	"ENTITLEMENT_COMPONENT_ADJUSTMENT": {{1, 1}, {2, 2}},
@@ -104,7 +104,7 @@ func ValidateSnapshot(s Snapshot) error {
 			return ErrUnavailable
 		}
 		switch activation.CommandType {
-		case "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME":
+		case "LEDGER_REPAIR", "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME":
 		case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
 			if activation.PolicyVersion == 1 && activation.State != "INACTIVE" || activation.PolicyVersion == 2 && (!seen[activation.CommandType] || previousPolicy != 1) {
 				return ErrUnavailable
