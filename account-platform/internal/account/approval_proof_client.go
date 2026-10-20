@@ -69,7 +69,7 @@ func (source *HTTPApprovalProofSource) Proof(ctx context.Context, requestID uuid
 	}
 	base := source.billingURL
 	switch artifacts.CommandType {
-	case "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME":
+	case "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME", "ENTITLEMENT_COMPONENT_ADJUSTMENT":
 	case "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK", "TOKEN_CREDENTIAL_REVOKE":
 		base = source.tokenURL
 	default:
@@ -142,7 +142,7 @@ func (source *HTTPApprovalProofSource) Proof(ctx context.Context, requestID uuid
 
 func approvalProofReasonAllowed(command, verdict, reason string) bool {
 	switch command {
-	case "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME", "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK", "TOKEN_CREDENTIAL_REVOKE":
+	case "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME", "ENTITLEMENT_COMPONENT_ADJUSTMENT", "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK", "TOKEN_CREDENTIAL_REVOKE":
 	default:
 		return false
 	}
@@ -162,6 +162,8 @@ func approvalProofReasonAllowed(command, verdict, reason string) bool {
 		return true
 	}
 	switch command {
+	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
+		return reason == "ACTIVATION_CHANGED" || reason == "EVIDENCE_MISSING"
 	case "WALLET_ADJUSTMENT":
 		return false
 	case "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME":

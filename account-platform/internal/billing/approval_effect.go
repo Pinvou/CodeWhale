@@ -21,6 +21,8 @@ func (r *PostgresRepository) ObserveApprovalEffect(ctx context.Context, requestI
 	var observedAt time.Time
 	var err error
 	switch commandType {
+	case entitlementComponentAdjustmentCommand:
+		err = r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM entitlement_component_corrections WHERE approval_request_id=$1) OR EXISTS(SELECT 1 FROM billing_approval_proof_claims WHERE approval_request_id=$1),transaction_timestamp()`, requestID).Scan(&observed, &observedAt)
 	case "WALLET_ADJUSTMENT":
 		err = r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM manual_adjustments WHERE approval_request_id=$1),transaction_timestamp()`, requestID).Scan(&observed, &observedAt)
 	case "PAYMENT_PROVIDER_RESUME":

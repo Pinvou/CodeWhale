@@ -26,6 +26,14 @@ type commandSpec struct {
 }
 
 var commandSpecs = map[string]commandSpec{
+	"ENTITLEMENT_COMPONENT_ADJUSTMENT": {
+		policyVersion: 2, snapshotVersion: 2, targetType: "ENTITLEMENT_PACKAGE", executor: "billing-command-executor",
+		normalizedKeys: []string{"package_id", "payment_order_id", "reason_code"},
+		criticalKeys:   []string{"package_id", "wallet_id", "wallet_version", "payment_order_id", "payment_transaction_id", "source_component_id", "source_lot_id", "target_component_id", "target_lot_id", "source_type", "target_type", "amount_microcredits", "source_evidence_digest", "facts_digest", "policy_version"},
+		financialKeys:  []string{"package_total_microcredits", "source_original_microcredits", "target_original_microcredits", "effective_total_microcredits"},
+		criticalInts:   []string{"wallet_version", "amount_microcredits", "policy_version"},
+		financialInts:  []string{"package_total_microcredits", "source_original_microcredits", "target_original_microcredits", "effective_total_microcredits"},
+	},
 	"WALLET_ADJUSTMENT": {
 		policyVersion: 1, snapshotVersion: 1, targetType: "MANUAL_ADJUSTMENT", executor: "billing-command-executor",
 		normalizedKeys: []string{"adjustment_id", "wallet_id", "amount_microcredits", "requested_by"},
@@ -396,6 +404,16 @@ func validateProofValues(commandType string, spec commandSpec, targetType, targe
 		}
 	}
 	switch commandType {
+	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
+		if !validUUID(targetID) || !equalString(normalizedObject["package_id"], targetID) || !equalString(criticalObject["package_id"], targetID) ||
+			!validUUIDField(normalizedObject["payment_order_id"]) || !sameCanonical(normalizedObject["payment_order_id"], criticalObject["payment_order_id"]) || !boundedStringField(normalizedObject["reason_code"], 80) ||
+			!validUUIDField(criticalObject["wallet_id"]) || !validUUIDField(criticalObject["payment_transaction_id"]) || !validUUIDField(criticalObject["source_component_id"]) || !validUUIDField(criticalObject["source_lot_id"]) ||
+			!nullableUUID(criticalObject["target_component_id"]) || !nullableUUID(criticalObject["target_lot_id"]) || (criticalObject["target_component_id"].kind == jsonNull) != (criticalObject["target_lot_id"].kind == jsonNull) ||
+			!entitlementComponentKind(criticalObject["source_type"]) || !entitlementComponentKind(criticalObject["target_type"]) || sameCanonical(criticalObject["source_type"], criticalObject["target_type"]) ||
+			!hexLengthField(criticalObject["source_evidence_digest"], 64) || !hexLengthField(criticalObject["facts_digest"], 64) || integers["c.wallet_version"] < 1 || integers["c.amount_microcredits"] < 1 || integers["c.policy_version"] != 2 ||
+			integers["f.package_total_microcredits"] < 1 || integers["f.effective_total_microcredits"] != integers["f.package_total_microcredits"] || integers["f.source_original_microcredits"] < integers["c.amount_microcredits"] || integers["f.target_original_microcredits"] < 0 {
+			return ErrInvalidDocument
+		}
 	case "WALLET_ADJUSTMENT":
 		if !validUUID(targetID) || !equalString(normalizedObject["adjustment_id"], targetID) || !validUUIDField(normalizedObject["wallet_id"]) || !validUUIDField(financialObject["wallet_id"]) || !sameCanonical(normalizedObject["wallet_id"], financialObject["wallet_id"]) || integers["n.amount_microcredits"] == 0 || integers["n.amount_microcredits"] != integers["f.delta_microcredits"] || integers["c.adjustment_version"] < 1 {
 			return ErrInvalidDocument
@@ -414,6 +432,10 @@ func validateProofValues(commandType string, spec commandSpec, targetType, targe
 
 	}
 	return nil
+}
+
+func entitlementComponentKind(value *jsonValue) bool {
+	return equalString(value, "BASE") || equalString(value, "BONUS")
 }
 
 func providerCommon(object map[string]*jsonValue) bool {

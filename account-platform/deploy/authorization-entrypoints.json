@@ -180,6 +180,15 @@
     {
       "source": "account-platform/internal/account/service.go",
       "receiver": "adminV2",
+      "method": "POST",
+      "path": "/approval-command-prechecks",
+      "scope": "platform",
+      "strategy": "domain.entitlement-precheck-recent-auth-read-only-owner",
+      "permissions": ["platform.billing.repairs.request"]
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "adminV2",
       "method": "GET",
       "path": "/approval-capability",
       "scope": "platform",
@@ -1598,6 +1607,12 @@
     {
       "source": "account-platform/cmd/billing-service/main.go",
       "durable": "billing-payment-product-resume-executor-p1-v1",
+      "subject": "account.approval-command.authorized.v1",
+      "permission": "internal.event.consume.account-approval-command-authorized"
+    },
+    {
+      "source": "account-platform/cmd/billing-service/main.go",
+      "durable": "billing-entitlement-component-adjustment-executor-p2-v1",
       "subject": "account.approval-command.authorized.v1",
       "permission": "internal.event.consume.account-approval-command-authorized"
     }

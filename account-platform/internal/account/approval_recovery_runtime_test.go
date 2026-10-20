@@ -18,6 +18,14 @@ import (
 // that a real financial command or provider transaction executed in this test.
 func TestApprovalRecoveryRuntimeHTTPContinuesAfterConfirmationFailure(t *testing.T) {
 	descriptor := approvalconsumer.BillingCommands()[0]
+	for _, candidate := range approvalconsumer.BillingCommands() {
+		if candidate.CommandType == "WALLET_ADJUSTMENT" {
+			descriptor = candidate
+		}
+	}
+	if descriptor.CommandType != "WALLET_ADJUSTMENT" {
+		t.Fatal("controlled adjustment receipt requires installed adjustment descriptor")
+	}
 	items := make([]ApprovalRecoveryCandidate, 2)
 	for i := range items {
 		items[i] = ApprovalRecoveryCandidate{RequestID: uuid.New(), ExecutionID: uuid.New(), OriginalEventID: uuid.New(), OriginalKey: "controlled-original-key", Durable: descriptor.Durable, Workload: descriptor.Workload, CommandType: descriptor.CommandType, PolicyVersion: descriptor.PolicyVersion, CommandFingerprint: strings.Repeat("a", 64), ApprovalEpoch: 1, RequestVersion: 1, RequestStatus: "EXECUTING", ExecutionStatus: "EXECUTING", ExecutionDeadline: time.Now().Add(time.Minute), Investigation: approvalconsumer.ClassifyProofFailure(descriptor.CommandType, descriptor.PolicyVersion, "")}

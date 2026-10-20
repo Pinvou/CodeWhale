@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/google/uuid"
 )
@@ -239,7 +240,20 @@ func validApprovalBFFMutation(kind string, raw []byte, wire int, version int64, 
 	}
 	if kind == "create" || kind == "update" {
 		var commandType string
-		if json.Unmarshal(seen["command_type"], &commandType) != nil || !currentGovernedApprovalCommand(commandType) {
+		if json.Unmarshal(seen["command_type"], &commandType) != nil {
+			return false
+		}
+		if commandType == "ENTITLEMENT_COMPONENT_ADJUSTMENT" {
+			// This command was delivered only as policy2/snapshot2. Preserve the
+			// legacy six-command contract and validate the exact owner facts.
+			var targetType, targetID string
+			if wire != 2 || json.Unmarshal(seen["target_resource_type"], &targetType) != nil || json.Unmarshal(seen["target_resource_id"], &targetID) != nil {
+				return false
+			}
+			if _, err := approvalencoding.ConvertLegacyProofInput(approvalencoding.LegacyProofInput{CommandType: commandType, PolicyVersion: 2, SnapshotSchemaVersion: 2, TargetResourceType: targetType, TargetResourceID: targetID, NormalizedCommand: seen["normalized_command"], CriticalResourceVersions: seen["critical_resource_versions"], FinancialSnapshot: seen["financial_snapshot"]}); err != nil {
+				return false
+			}
+		} else if !currentGovernedApprovalCommand(commandType) {
 			return false
 		}
 	}

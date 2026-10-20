@@ -82,8 +82,8 @@ export function supersedesEligibleApproval(page, commandType, targetID) {
   throw financeNotDispatched(Object.assign(new Error('approval state is not eligible for replacement'), { code: 'APPROVAL_REPLACEMENT_UNAVAILABLE' }));
 }
 
-export async function createAndSubmitFreshGovernedApproval(client, draft, signal, expectedReference = '') {
-  const references = editReferences(client);
+export async function createAndSubmitFreshGovernedApproval(client, draft, signal, expectedReference = '', referenceStorage) {
+  const references = referenceStorage || editReferences(client);
   const identity = JSON.stringify([client.financeSessionEpoch || 0, draft?.command_type, draft?.target_resource_id, draft?.idempotency_key]);
   const frozenInput = frozenDraftKey(draft);
   const previous = references.get(identity);

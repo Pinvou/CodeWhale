@@ -771,6 +771,9 @@ func tokenPathAllowed(method, resource string) bool {
 	return method == http.MethodGet && len(parts) == 4 || method == http.MethodPost && len(parts) == 5 && (parts[4] == "close" || parts[4] == "payment-claims")
 }
 func accountAdminPathAllowed(method, resource string) bool {
+	if resource == "/admin/v2/approval-command-prechecks" {
+		return method == http.MethodPost
+	}
 	if resource == "/admin/v1/account-closure-requests" {
 		return method == http.MethodGet || method == http.MethodHead
 	}

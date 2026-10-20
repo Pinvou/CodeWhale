@@ -4,7 +4,10 @@ import { clearClosureIntent, readClosureIntent, saveClosureIntent } from './clos
 
 // This feature's proof must survive the redirect to recent authentication.
 // Current permission remains the caller's gate; storage never grants authority.
-export function useClosureOperation(owner, copy, client, scope) {
+export function useClosureOperation(owner, copy, client, scope, storageAdapter) {
+  const readIntent = storageAdapter?.read || readClosureIntent;
+  const saveIntent = storageAdapter?.save || saveClosureIntent;
+  const clearIntent = storageAdapter?.clear || clearClosureIntent;
   const actor = owner.split(':')[0];
   const generation = useRef(0), running = useRef(false), intent = useRef(null);
   const authority = useRef(null);
@@ -13,10 +16,10 @@ export function useClosureOperation(owner, copy, client, scope) {
   useEffect(() => {
     authority.current = { owner, scope, client, epoch: client.financeSessionEpoch };
     generation.current++; running.current = false; setBusy(false); setError(''); setMessage('');
-    try { intent.current = readClosureIntent(actor, scope); setUnknown(Boolean(intent.current)); setBlocked(false); }
+    try { intent.current = readIntent(actor, scope); setUnknown(Boolean(intent.current)); setBlocked(false); }
     catch { intent.current = null; setUnknown(false); setBlocked(true); setError('recoveryUnavailable'); }
     return () => { generation.current++; };
-  }, [actor, scope, owner, client, client.financeSessionEpoch]);
+  }, [actor, scope, owner, client, client.financeSessionEpoch, readIntent]);
   const mutate = async (facts, action) => {
     if (authority.current?.owner !== owner || authority.current.scope !== scope || authority.current.client !== client || authority.current.epoch !== client.financeSessionEpoch) return;
     if (running.current || blocked) return;
@@ -25,14 +28,14 @@ export function useClosureOperation(owner, copy, client, scope) {
     let current;
     try {
       current = intent.current || { actor, scope, key: `closure-${secureRequestID()}`, facts: JSON.parse(JSON.stringify(facts)) };
-      intent.current = saveClosureIntent(current);
+      intent.current = saveIntent(current);
     } catch { setBlocked(true); setError('recoveryUnavailable'); return; }
     running.current = true; setBusy(true); setError(''); setMessage('');
     try {
       const result = await action(current.facts, current.key);
       const noReceipt = ['reauthenticating', 'recent-authentication-required', 'cancelled', 'confirmation-mismatch'].includes(result?.status);
       if (!noReceipt || !hadUnresolved) {
-        try { clearClosureIntent(actor, scope, current.key); }
+        try { clearIntent(actor, scope, current.key); }
         catch {
           if (stamp === generation.current) { setBlocked(true); setUnknown(true); setError('recoveryUnavailable'); }
           return;
@@ -45,7 +48,7 @@ export function useClosureOperation(owner, copy, client, scope) {
       if (stamp !== generation.current) return;
       const uncertain = hadUnresolved || !Number.isInteger(reason.status) || reason.status >= 500 || reason.code === 'COMMAND_RESULT_UNKNOWN';
       if (!uncertain) {
-        try { clearClosureIntent(actor, scope, current.key); intent.current = null; }
+        try { clearIntent(actor, scope, current.key); intent.current = null; }
         catch { setBlocked(true); setError('recoveryUnavailable'); return; }
       }
       setUnknown(uncertain); setError(uncertain ? 'unknown' : reason.status === 403 ? 'permissions' : 'sourceChanged');

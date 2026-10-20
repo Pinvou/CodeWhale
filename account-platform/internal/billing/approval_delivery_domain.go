@@ -30,6 +30,8 @@ type billingAuthorizationExecutionRepository interface {
 	productResumeVersions(context.Context, ProductResumeVersions) (ProductResumeVersions, error)
 	executeProviderResume(context.Context, ProviderResumeVersions, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, string, PaymentOrder, ProviderOrder) (ProviderResumeResult, error)
 	executeProductResume(context.Context, ProductResumeVersions, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, string, PaymentOrder, ProviderOrder) (ProductResumeResult, error)
+	EntitlementCorrectionForRequest(context.Context, uuid.UUID) (EntitlementCorrectionResult, error)
+	ExecuteEntitlementComponentCorrection(context.Context, uuid.UUID, uuid.UUID, int64, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, string, string, string, entitlementCorrectionFrozenFacts) (EntitlementCorrectionResult, error)
 }
 
 func newBillingAuthorizationDomain(service *Service) approvalAuthorizationDomain {
@@ -57,6 +59,17 @@ func newBillingAuthorizationDomain(service *Service) approvalAuthorizationDomain
 }
 
 func (domain *billingAuthorizationDomain) LookupAuthorizationResult(ctx context.Context, binding ApprovalAuthorizationBinding, event approvalencoding.AuthorizationEvent) (authorizationDomainResult, bool, error) {
+	if domain != nil && domain.repository != nil && binding.CommandType == entitlementComponentAdjustmentCommand {
+		result, err := domain.repository.EntitlementCorrectionForRequest(ctx, binding.ApprovalRequestID)
+		if errors.Is(err, ErrNotFound) {
+			return authorizationDomainResult{}, false, nil
+		}
+		if err != nil {
+			return authorizationDomainResult{}, false, err
+		}
+		encoded, ledger, err := entitlementAuthorizationResult(result)
+		return authorizationDomainResult{DomainResult: encoded, LedgerReferences: ledger}, true, err
+	}
 	if domain == nil || domain.database == nil {
 		return authorizationDomainResult{}, false, ErrApprovalExecutionUnavailable
 	}
@@ -107,6 +120,9 @@ func (domain *billingAuthorizationDomain) ExecuteAuthorizationAttempt(ctx contex
 	if domain == nil || domain.repository == nil {
 		return authorizationDomainAttempt{}
 	}
+	if binding.CommandType == entitlementComponentAdjustmentCommand && binding.SerializationVersion != approvalencoding.ApprovalSerializationVersion {
+		return definiteAuthorizationFailure("COMMAND_MAPPING_INVALID")
+	}
 	if binding.SerializationVersion == approvalencoding.ApprovalSerializationVersion {
 		if domain.priorClaim == nil {
 			return authorizationDomainAttempt{}
@@ -131,6 +147,8 @@ func (domain *billingAuthorizationDomain) ExecuteAuthorizationAttempt(ctx contex
 	switch binding.CommandType {
 	case "WALLET_ADJUSTMENT":
 		return domain.executeAdjustment(ctx, binding, event, command)
+	case entitlementComponentAdjustmentCommand:
+		return domain.executeEntitlementCorrection(ctx, binding, event, command)
 	case "PAYMENT_PROVIDER_RESUME":
 		return domain.executeProviderResume(ctx, binding, event, command)
 	case "PAYMENT_PRODUCT_RESUME":
@@ -144,6 +162,9 @@ func (domain *billingAuthorizationDomain) ExecuteAuthorizationAttempt(ctx contex
 // command's frozen proof input: the entitlement correction command owns the
 // appended v2 schema, every other command keeps the original v1 schema.
 func approvalSnapshotSchemaVersion(commandType string) int {
+	if commandType == entitlementComponentAdjustmentCommand {
+		return 2
+	}
 	return 1
 }
 
@@ -303,6 +324,9 @@ func classifyAuthorizationDomainFailure(err error) authorizationDomainAttempt {
 
 func validAuthorizationCommandTarget(event approvalencoding.AuthorizationEvent) bool {
 	switch event.CommandType {
+	case entitlementComponentAdjustmentCommand:
+		id, err := uuid.Parse(event.TargetResourceID)
+		return err == nil && id != uuid.Nil && id.String() == event.TargetResourceID && event.PolicyVersion == 2 && event.TargetResourceType == "ENTITLEMENT_PACKAGE"
 	case "WALLET_ADJUSTMENT":
 		return event.TargetResourceType == "MANUAL_ADJUSTMENT" && strings.TrimSpace(event.TargetResourceID) == event.TargetResourceID
 	case "PAYMENT_PROVIDER_RESUME":
