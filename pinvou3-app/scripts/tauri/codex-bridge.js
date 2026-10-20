@@ -392,7 +392,7 @@ function prepareCodexBridge({
   // 透传，备料脚本回落 `uname -m` 按**宿主**架构备 Node，包里的 Bridge node 就是
   // 错架构的——全程零提示，正是本条链路要消灭的静默错包。那条子集断言同样在
   // 上面那个测试文件里。
-  const machine = { arm64: "aarch64", x64: "x86_64" }[targetArch];
+  const machine = { arm64: "aarch64", loong64: "loongarch64", x64: "x86_64" }[targetArch];
   // 永远复制一份：machine 有值时注入，没有值时把调用环境里可能残留的
   // PINVOU3_BRIDGE_TARGET_ARCH 清掉。这个变量是备料脚本的手动开关，直接调脚本
   // 时设它合法；但经由这里时 machine 为空意味着这次构建没有交叉目标——留着

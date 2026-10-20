@@ -236,6 +236,7 @@ assert.equal(
 const injectedBridgeMachines = new Set();
 for (const [targetArch, machine] of [
   ["arm64", "aarch64"],
+  ["loong64", "loongarch64"],
   ["x64", "x86_64"],
 ]) {
   for (const platform of ["linux", "darwin"]) {
@@ -266,12 +267,13 @@ assert.equal(
 // 且必须清掉调用环境里可能残留的 PINVOU3_BRIDGE_TARGET_ARCH——那是备料脚本的手动
 // 开关，shell 里残留它时若原样透传，非交叉构建会被按残留值备出另一架构的 Node，
 // 而 overlay 仍按 process.arch 挑，静默错包只是换了个入口。
-// 反例用 loongarch64 这类几乎不会进词表的机器段：riscv64 是相对主流的目标，哪天真
-// 被支持，用它会把这个反例用例本身撞红，还得回头改测试。
+// 反例现在用 riscv64（loongarch64 已进入 machine 映射，上面的循环就在注入它）；
+// riscv64 是相对主流的目标，哪天真被支持，用它会把这个反例用例本身撞红，还得
+// 回头改测试。
 const leftoverBridgeEnv = { ...bridgeEnvFixture, PINVOU3_BRIDGE_TARGET_ARCH: "x86_64" };
 const fallbackBridgeEnv = capturedBridgeSpawn({
   platform: "linux",
-  targetArch: "loongarch64",
+  targetArch: "riscv64",
   env: leftoverBridgeEnv,
 }).options.env;
 assert.deepEqual(
@@ -314,6 +316,10 @@ const acceptedBridgeTargets = new Set(
 );
 for (const machine of injectedBridgeMachines) {
   for (const osName of ["Linux", "Darwin"]) {
+    // darwin Node distributions exist only for aarch64/x86_64; loongarch64 is
+    // Linux-only and must fall into the bridge script's *) there (a darwin
+    // host cannot package it - no darwin-loong64 build exists).
+    if (osName === "Darwin" && !["aarch64", "x86_64"].includes(machine)) continue;
     assert.ok(
       acceptedBridgeTargets.has(`${osName}-${machine}`),
       `备料脚本的目标词表必须认得 ${osName}-${machine}，否则交叉构建会落到 *) 硬失败`,
@@ -339,6 +345,12 @@ assert.match(
 // 不注入 → 备料脚本回落 `uname -m` 按**宿主**架构备 Node → 包里的 Bridge node 是
 // 宿主架构，全程零报错，恰是本 PR 要消灭的静默错包。
 //
+// 上面那组用例现在把 arm64→aarch64 / loong64→loongarch64 / x64→x86_64 逐项写死，
+// 钉的是**映射值对不对**；但因为对照表是硬编码的，往 TARGET_MACHINE_ARCHITECTURES
+// 里加一个新架构而不动 machine 映射，上面照样全绿。而那正是要防的洞：machine 落成
+// undefined → 环境变量不注入 → 备料脚本回落 `uname -m` 按**宿主**架构备 Node →
+// 包里的 Bridge node 是宿主架构，全程零报错，恰是要消灭的静默错包。
+//
 // 所以这条断言两头都**从源码派生**，不硬编码任何架构名：
 //   左边 = build.js 的 TARGET_MACHINE_ARCHITECTURES 能产出的全部 node arch；
 //   右边 = 真跑一次 prepareCodexBridge、看它到底注没注入（即 machine 映射的键）；
@@ -357,6 +369,11 @@ for (const targetArch of new Set(Object.values(TARGET_MACHINE_ARCHITECTURES))) {
       + "两张表必须一起改。",
   );
   for (const osName of ["Linux", "Darwin"]) {
+    // darwin Node distributions exist only for aarch64/x86_64; a machine
+    // without one (loongarch64) is rejected by the darwin dispatch on
+    // purpose, so only its Linux acceptance is derived. The darwin aliases of
+    // the machines that do exist stay pinned by the hard-coded loop above.
+    if (osName === "Darwin" && !["aarch64", "x86_64"].includes(injected)) continue;
     assert.ok(
       acceptedBridgeTargets.has(`${osName}-${injected}`),
       `${targetArch} 注入的 ${injected} 不在备料脚本的目标词表里（${osName}），`
@@ -552,13 +569,28 @@ assert.match(
 // 原先它是逐字匹配那一行的写法（`if (process.env.PINVOU3_SKIP_LINUX_ASR !== "1")
 // prepareLinuxAsrRuntime();`）。那样任何等价重构都会把它弄红，而真正要守的顺序
 // 反倒没被检查——把开关读取上移成局部常量就是这么撞上的。改成按位置比较。
+// 交叉构建可能给备料调用传选项（目标架构、预构建引擎），所以钉的是打包路径上的
+// 这次调用本身，而不是无参形态。
 assert.ok(
-  buildSource.includes("prepareLinuxAsrRuntime()"),
+  buildSource.includes("prepareLinuxAsrRuntime("),
   "Linux packaging must still prepare the SenseVoice runtime",
 );
 assert.ok(
-  buildSource.indexOf("prepareLinuxAsrRuntime()") < buildSource.indexOf("writeEffectiveArtifacts("),
+  buildSource.indexOf("prepareLinuxAsrRuntime(") < buildSource.indexOf("writeEffectiveArtifacts("),
   "Linux packaging must prepare the architecture-specific SenseVoice runtime before manifest generation",
+);
+// 共享知识库还有一条 dev 路径的调用（`development: true`），所以裸的
+// prepareKnowledgeHost( 匹配证明不了打包路径已接线：钉打包路径的守卫，连同
+// 「清单生成之前」的顺序一起。
+assert.match(
+  buildSource,
+  /if \(!skipKnowledgeHost\) prepareKnowledgeHost\(/u,
+  "Linux packaging must still prepare the knowledge host",
+);
+assert.ok(
+  buildSource.indexOf("if (!skipKnowledgeHost) prepareKnowledgeHost(")
+    < buildSource.indexOf("writeEffectiveArtifacts("),
+  "Linux packaging must prepare the knowledge host before manifest generation",
 );
 // 交叉构建要能显式跳过 ASR（SenseVoice 只能在目标架构上原生构建）。
 assert.match(buildSource, /skipLinuxAsr/u, "the ASR step must stay skippable for cross builds");
@@ -817,6 +849,10 @@ assert.match(
 assert.match(
   platformArchitectureConfigPath("linux", "arm64").replaceAll("\\", "/"),
   /platforms\/linux\/aarch64\/tauri\.conf\.json$/u,
+);
+assert.match(
+  platformArchitectureConfigPath("linux", "loong64").replaceAll("\\", "/"),
+  /platforms\/linux\/loongarch64\/tauri\.conf\.json$/u,
 );
 
 const linuxDev = composeEffectiveConfig([linuxStartupOverlay]).effectiveConfig;
