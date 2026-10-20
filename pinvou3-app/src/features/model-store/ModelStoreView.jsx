@@ -45,6 +45,7 @@ import {
 } from './model-store-logic.js';
 import { tryGetTauriBridge } from '../../platform/tauri/client.js';
 import { findLinkedRows } from './pinvou-model-link.js';
+import { updateScriptsWithCleanup } from './update-scripts-workflow.js';
 // 发起/取消/应答/关闭都是模块级函数,身份恒定。直接引用而不是从 hook 的返回值上
 // 取,这样下面那些 useCallback 的依赖数组才是稳的——挂在 hook 返回对象上的话,
 // 每来一批日志行都会让它们全部重建。
@@ -228,6 +229,10 @@ const ModelStoreView = ({ theme, t, bs }) => {
    * 一边挂了不能把另一边的功能一起拖下水。
    * @returns {Promise<void>} 两边都落地后 resolve(各自已经吞掉自己的错误)。
    */
+  const loadAll = useCallback(async () => {
+    await Promise.all([loadCards(), loadLibrary()]);
+  }, [loadCards, loadLibrary]);
+
   // 自动检测脚本更新：卡片列表的 script_sha256（服务器当前版）vs 本地
   // local_script_hashes（上次缓存的版本）。有差异 → 该卡有可用更新。
   // 前端做比对而不是后端：两个数据源（远程卡片列表 + 本地库）本来就分开加载。
@@ -254,21 +259,13 @@ const ModelStoreView = ({ theme, t, bs }) => {
    * 更新后卡片回到「已下载」状态，按钮显示「部署模型」。 */
   const handleUpdateWithCleanup = useCallback(async (record, wasRunning) => {
     try {
-      if (wasRunning) {
-        await startStop(record.card_id);
-      }
-      await startUninstall(record.card_id, false);
-      await startCardScripts(record.card_id, false, true);
+      await updateScriptsWithCleanup({ record, wasRunning, copy });
     } catch (cause) {
       showToast(String(cause?.message || cause));
     } finally {
       loadAll();
     }
-  }, [loadAll, showToast]);
-
-  const loadAll = useCallback(async () => {
-    await Promise.all([loadCards(), loadLibrary()]);
-  }, [loadCards, loadLibrary]);
+  }, [copy, loadAll, showToast]);
 
   const guide = storeGuideState(status);
 
