@@ -6995,6 +6995,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "atspi",
+ "axum",
  "base64 0.22.1",
  "block2",
  "calamine",
