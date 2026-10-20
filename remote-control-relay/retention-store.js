@@ -5,12 +5,19 @@ import { MIN_RELIABLE_SAMPLE, isSuccessfulCoreUserTask, normalizeUsageOccurredAt
 import { atomicWriteJson, enforcePrivateFile } from './telemetry-storage.js';
 export { statsDay as retentionDay } from './telemetry-primitives.js';
 
+// The last Beijing calendar day containing a representable JavaScript Date.
+// Do not compare stored days to today's clock: offline restores and clock
+// rollback must not invalidate an otherwise representable authority.
+const MAX_RETENTION_DAY = statsDayFromMilliseconds(8_640_000_000_000_000);
+const validRetentionDay = day => Number.isSafeInteger(day) && day > 0 && day <= MAX_RETENTION_DAY;
+
 export class RetentionFacts {
   constructor(dataDir = null, now = Date.now()) {
     this.path = dataDir ? join(dataDir, 'retention-facts.json') : null;
     this.marker = dataDir ? join(dataDir, 'retention-facts.initialized') : null;
     this.rows = new Map();
     this.initializedAt = now;
+    this.metricVersionStartedAt = null;
     this.dirty = Boolean(this.marker && !existsSync(this.marker));
     this.unresolvedInstallations = 0;
     if (this.marker && existsSync(this.marker)) {
@@ -24,16 +31,23 @@ export class RetentionFacts {
     enforcePrivateFile(this.path);
     // A damaged authority must never be replaced with an empty successful metric.
     const value = JSON.parse(readFileSync(this.path, 'utf8'));
-    if (value.version !== 1 || !Number.isFinite(value.initialized_at)
+    if (!value || typeof value !== 'object' || Array.isArray(value)
+      || value.version !== 1 || !Number.isFinite(value.initialized_at)
       || value.initialized_at <= 0 || !Array.isArray(value.rows)) throw new Error('invalid retention facts');
     this.initializedAt = value.initialized_at;
+    if (value.metric_version_started_at === undefined) this.dirty = true;
+    else {
+      if (!Number.isFinite(value.metric_version_started_at) || value.metric_version_started_at <= 0) throw new Error('invalid retention facts');
+      this.metricVersionStartedAt = value.metric_version_started_at;
+    }
     for (const row of value.rows) {
-      if (typeof row.device_id !== 'string' || !row.device_id || row.device_id.length > 128
-        || this.rows.has(row.device_id) || !Number.isInteger(row.first_success_day)
-        || row.first_success_day <= 0 || typeof row.history_complete !== 'boolean'
+      if (!row || typeof row !== 'object' || Array.isArray(row)
+        || typeof row.device_id !== 'string' || !row.device_id || row.device_id.length > 128
+        || this.rows.has(row.device_id) || !validRetentionDay(row.first_success_day)
+        || typeof row.history_complete !== 'boolean'
         || !Array.isArray(row.successful_days) || row.successful_days.length > 31
         || !row.successful_days.includes(row.first_success_day)
-        || row.successful_days.some(day => !Number.isInteger(day)
+        || row.successful_days.some(day => !validRetentionDay(day)
           || day < row.first_success_day || day > row.first_success_day + 30)) throw new Error('invalid retention row');
       this.rows.set(row.device_id, { ...row, successful_days: [...new Set(row.successful_days)] });
     }
@@ -52,7 +66,7 @@ export class RetentionFacts {
         || !isSuccessfulCoreUserTask(event)) continue;
       const timestamp = normalizeUsageOccurredAt(event.occurred_at);
       const day = statsDayFromMilliseconds(timestamp);
-      if (!Number.isInteger(day) || day < 1 || timestamp > now) continue;
+      if (!validRetentionDay(day) || timestamp > now) continue;
       let row = this.rows.get(id);
       if (!row) {
         row = {
@@ -86,9 +100,14 @@ export class RetentionFacts {
 
   flush() {
     if (!this.path || !this.dirty) return;
-    atomicWriteJson(this.path, { version: 1, initialized_at: this.initializedAt, rows: [...this.rows.values()] });
+    // This instance's first successful activation of the new metric, not a
+    // guessed deployment date or the older history-completeness boundary.
+    const metricVersionStartedAt = this.metricVersionStartedAt ?? Date.now();
+    atomicWriteJson(this.path, { version: 1, initialized_at: this.initializedAt,
+      metric_version_started_at: metricVersionStartedAt, rows: [...this.rows.values()] });
     if (!existsSync(this.marker)) writeFileSync(this.marker, '1\n', { mode: 0o600, flag: 'wx' });
     enforcePrivateFile(this.marker);
+    this.metricVersionStartedAt = metricVersionStartedAt;
     this.dirty = false;
   }
 

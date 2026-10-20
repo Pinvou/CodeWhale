@@ -9,8 +9,9 @@ import { RetentionFacts } from '../retention-store.js';
 
 const relay = dirname(dirname(fileURLToPath(import.meta.url)));
 const entry = join(relay, 'scripts', 'backfill-retention.mjs');
-function run(script, args) {
+function run(script, args, cwd = relay) {
   const result = spawnSync(process.execPath, [script, ...args], {
+    cwd,
     env:Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('PINVOU_TELEMETRY_'))),
     encoding:'utf8', windowsHide:true, timeout:10_000, maxBuffer:64 * 1024,
   });
@@ -48,6 +49,7 @@ test('linked backfill CLI applies confirmed offline data and writes reloadable r
   const firstSuccess = now - 31 * 86_400_000;
   const device = {
     device_id:'dev_linked_backfill_fixture', hardware_source:'installation_id',
+    hardware_hash:'linked-backfill-hash', device_token:'linked-backfill-token',
     first_seen_at:firstSuccess, last_seen_at:now,
   };
   writeFileSync(join(dataDir, 'devices.json'), JSON.stringify({ devices:[device] }));
@@ -86,7 +88,10 @@ test('backfill help and argument failures are readable without a stack trace', (
   const help = run(entry, ['--help']);
   assert.equal(help.status, 0);
   assert.match(help.stdout, /--apply --offline/);
-  for (const args of [[], ['--data-dir'], ['--data-dir', '--apply'], ['--source'], ['--invalid-retention-option']]) {
+  const combinedHelp = run(entry, ['--data-dir', 'unused-fixture', '--help']);
+  assert.equal(combinedHelp.status, 0);
+  assert.equal(combinedHelp.stdout, help.stdout);
+  for (const args of [[], ['--data-dir'], ['--data-dir', '--apply'], ['--source'], ['--source='], ['--invalid-retention-option']]) {
     const result = run(entry, args);
     assert.equal(result.status, 1);
     assert.match(result.stderr, /usage:/i);
@@ -96,6 +101,19 @@ test('backfill help and argument failures are readable without a stack trace', (
   const unsafeApply = run(entry, ['--data-dir', 'unused-fixture', '--apply']);
   assert.equal(unsafeApply.status, 1);
   assert.match(unsafeApply.stderr, /offline/);
+});
+
+test('backfill accepts option-prefixed relative paths through explicit equals operands', t => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pinvou-retention-cli-')));
+  t.after(() => rmSync(dir, { recursive:true, force:true }));
+  mkdirSync(join(dir, '--data'));
+  writeFileSync(join(dir, '--data', 'devices.json'), '{"devices":[]}');
+  writeFileSync(join(dir, '--backup.jsonl'), '');
+  const result = run(entry, ['--data-dir=--data', '--source=--backup.jsonl'], dir);
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, '');
+  assert.equal(JSON.parse(result.stdout).scanned_events, 0);
+  assert.equal(existsSync(join(dir, '--data', 'retention-facts.json')), false);
 });
 
 test('backfill import has no CLI side effects', () => {

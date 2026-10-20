@@ -1,4 +1,4 @@
-import assert from 'node:assert/strict';
+﻿import assert from 'node:assert/strict';
 import fs, { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -11,7 +11,7 @@ import { backfillRetention } from '../scripts/backfill-retention.mjs';
 const at = s => Date.parse(s + '+08:00');
 const DAY = 86400000;
 const now = at('2026-10-20T10:00:00');
-const device = (id = 'fixture') => ({ device_id: id, hardware_source: 'installation_id', first_seen_at: at('2026-09-01T08:00:00') });
+const device = (id = 'fixture') => ({ device_id: id, hardware_hash:`fixture-hash-${id}`, device_token:`fixture-token-${id}`, hardware_source: 'installation_id', first_seen_at: at('2026-09-01T08:00:00') });
 const success = (time, id = 'fixture', extra = {}) => ({ device_id: id, event_id: `${id}_${time}`, attempt_id: `${id}_${time}`, event_name: 'task_finished', status: 'success', initiator_type: 'user', mode: 'assistant', occurred_at: at(time), received_at: at(time), ...extra });
 const fixtureStores = new Map();
 function testStore(dir, pepper, options) {
@@ -35,7 +35,9 @@ function fixture(t, action) {
       store.saveTimer = null;
     }
     fixtureStores.delete(dir);
-    rmSync(dir, { recursive: true, force: true });
+    // Windows can briefly retain a just-closed file during directory teardown.
+    // Retry only cleanup, after all store timers have been cancelled.
+    rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
   });
   return action(dir);
 }
@@ -54,6 +56,213 @@ function ingressSuccess(collectionPeriodId, eventId = 'retention_ingress_event_0
     attempt_id:eventId, turn_id:'retention_turn_001', status:'success', duration_ms:1, mode:'assistant',
     initiator_type:'user', input_type:'text', has_attachment:false };
 }
+
+for (const damage of ['json', 'shape', 'row', 'duplicate', 'missing', 'read']) {
+  test(`unknown device inventory (${damage}) cannot erase persisted retention on restart`, t => fixture(t, dir => {
+    t.mock.method(Date, 'now', () => now);
+    const { store, registered } = registeredStore(dir);
+    const collection = store.startBehaviorCollection(registered, { request_id:'start_inventory_boundary_001' });
+    assert.equal(store.appendBehaviorEvents(registered, [ingressSuccess(collection.collection_period_id)]).results[0].status, 'accepted');
+    store.saveNow();
+    clearTimeout(store.saveTimer); store.saveTimer = null;
+    const inventory = readFileSync(store.devicesPath);
+    const files = [store.retentionFacts.path, store.retentionFacts.marker, store.behaviorEventsPath];
+    const before = files.map(path => readFileSync(path));
+    if (damage === 'json') writeFileSync(store.devicesPath, '{broken');
+    if (damage === 'shape') writeFileSync(store.devicesPath, '{"devices":null}');
+    if (damage === 'row') writeFileSync(store.devicesPath, '{"devices":[null]}');
+    if (damage === 'duplicate') writeFileSync(store.devicesPath, JSON.stringify({ devices:[registered, registered] }));
+    if (damage === 'missing') rmSync(store.devicesPath);
+    const corrupt = existsSync(store.devicesPath) ? readFileSync(store.devicesPath) : null;
+    const originalRead = fs.readFileSync;
+    const fault = damage === 'read' ? t.mock.method(fs, 'readFileSync', (path, ...args) => {
+      if (path === store.devicesPath) throw Object.assign(new Error('fixture read denied'), { code:'EACCES' });
+      return originalRead(path, ...args);
+    }) : null;
+    if (fault) syncBuiltinESMExports();
+    try {
+      assert.throws(() => testStore(dir, store.pepper), error => error.status === 503 && error.message === 'telemetry_storage_unavailable');
+    } finally {
+      if (fault) { fault.mock.restore(); syncBuiltinESMExports(); }
+    }
+    files.forEach((path, index) => assert.deepEqual(readFileSync(path), before[index]));
+    if (corrupt) assert.deepEqual(readFileSync(store.devicesPath), corrupt);
+    else assert.equal(existsSync(store.devicesPath), false);
+    writeFileSync(store.devicesPath, inventory);
+    const recovered = testStore(dir, store.pepper);
+    assert.equal(recovered.retentionFacts.rows.size, 1);
+    assert.equal(recovered.behaviorOverview('30').retention.d1.eligible_installations, 0);
+    recovered.deleteBehaviorData(recovered.devices.get(registered.device_id), { request_id:'delete_inventory_boundary_001' });
+    assert.equal(new RetentionFacts(dir).rows.size, 0);
+  }));
+}
+
+test('known empty inventory still reconciles retention while a fresh startup anchors inventory first', t => fixture(t, dir => {
+  const { store, registered } = registeredStore(dir);
+  store.retentionFacts.observe([success('2026-09-01T08:00:00', registered.device_id)], [registered], now);
+  store.retentionFacts.flush();
+  writeFileSync(store.devicesPath, JSON.stringify({ devices:[] }));
+  assert.equal(testStore(dir, store.pepper).retentionFacts.rows.size, 0);
+  assert.equal(new RetentionFacts(dir).rows.size, 0);
+}));
+
+test('offline dry run and apply share strict inventory validation and preserve every authority on rejection', async t => fixture(t, async dir => {
+  const { store, registered } = registeredStore(dir);
+  store.retentionFacts.observe([success('2026-09-01T08:00:00', registered.device_id)], [registered], now);
+  store.retentionFacts.flush();
+  writeFileSync(store.behaviorEventsPath, `${JSON.stringify(success('2026-10-01T08:00:00', registered.device_id))}\n`);
+  writeFileSync(store.deletionTombstonesPath, '{"records":[]}');
+  const validInventory = readFileSync(store.devicesPath);
+  const files = [store.retentionFacts.path, store.retentionFacts.marker, store.behaviorEventsPath, store.deletionTombstonesPath];
+  const before = files.map(path => readFileSync(path));
+  const second = { ...registered, device_id:'second' };
+  for (const devices of [[{ device_id:registered.device_id }], [registered, registered], [registered, second],
+    [{ ...registered, device_token:'' }], [null]]) {
+    const corrupt = JSON.stringify({ devices });
+    writeFileSync(store.devicesPath, corrupt);
+    for (const apply of [false, true]) {
+      await assert.rejects(backfillRetention({ dataDir:dir, now, apply }), /invalid device inventory/);
+      files.forEach((path, index) => assert.deepEqual(readFileSync(path), before[index]));
+      assert.equal(readFileSync(store.devicesPath, 'utf8'), corrupt);
+    }
+  }
+  writeFileSync(store.devicesPath, validInventory);
+  writeFileSync(store.deletionTombstonesPath, '{"records":[null]}');
+  assert.throws(() => testStore(dir, store.pepper), /telemetry_storage_unavailable/);
+  for (const apply of [false, true]) await assert.rejects(backfillRetention({ dataDir:dir, now, apply }), /invalid deletion inventory/);
+  assert.deepEqual(readFileSync(store.retentionFacts.path), before[0]);
+  writeFileSync(store.deletionTombstonesPath, before[3]);
+  const applied = await backfillRetention({ dataDir:dir, now, apply:true });
+  assert.equal(applied.after.d30.retained_installations, 1);
+  assert.equal(testStore(dir, store.pepper).retentionFacts.rows.size, 1);
+}));
+
+test('query reconciliation matures deferred events and fails closed when its authority cannot persist', t => fixture(t, dir => {
+  let clock = now;
+  t.mock.method(Date, 'now', () => clock);
+  const { store, registered } = registeredStore(dir);
+  // Isolate the query's reconciliation from the periodic compactor: removing
+  // behaviorOverview's persistRetentionFacts call must make this test fail.
+  t.mock.method(store, 'compactExpiredEventsIfDue', () => false);
+  store.behaviorEvents = [success('2026-10-21T08:00:00', registered.device_id)];
+  store.persistRetentionFacts(clock);
+  assert.equal(store.retentionFacts.rows.size, 0);
+  const original = readFileSync(store.retentionFacts.path);
+  clock = at('2026-10-22T08:00:00');
+  const flush = t.mock.method(store.retentionFacts, 'flush', () => { throw new Error('fixture disk full'); });
+  assert.throws(() => store.behaviorOverview('30'), error => error.status === 503 && error.message === 'retention_storage_unavailable');
+  assert.deepEqual(readFileSync(store.retentionFacts.path), original);
+  assert.equal(store.retentionFacts.dirty, true);
+  flush.mock.restore();
+  assert.equal(store.behaviorOverview('30').retention.d1.eligible_installations, 1);
+  assert.equal(new RetentionFacts(dir).rows.get(registered.device_id).first_success_day, retentionDay(at('2026-10-21T08:00:00')));
+  store.devices.delete(registered.device_id);
+  assert.equal(store.behaviorOverview('30').retention.d1.eligible_installations, 0);
+  assert.equal(new RetentionFacts(dir).rows.size, 0);
+}));
+
+test('metric activation is recorded on successful authority persistence and survives restart', t => fixture(t, dir => {
+  let clock = now;
+  t.mock.method(Date, 'now', () => clock);
+  const { store } = registeredStore(dir);
+  const legacy = JSON.parse(readFileSync(store.retentionFacts.path, 'utf8'));
+  legacy.initialized_at = at('2026-08-01T00:00:00');
+  delete legacy.metric_version_started_at;
+  writeFileSync(store.retentionFacts.path, JSON.stringify(legacy));
+  clock += DAY;
+  const migrated = testStore(dir, store.pepper);
+  const report = migrated.behaviorOverview('30');
+  assert.equal(report.metric_version, 'behavior-v1.5');
+  assert.equal(report.metric_version_started_at, clock);
+  assert.equal(migrated.retentionFacts.initializedAt, legacy.initialized_at);
+  clock += DAY;
+  assert.equal(testStore(dir, store.pepper).behaviorOverview('30').metric_version_started_at, report.metric_version_started_at);
+  assert.equal(buildBehaviorOverview([], [], [], '30', clock).metric_version_started_at, null);
+  assert.equal(buildBehaviorOverview([], [], [], '30', clock).metric_version, 'behavior-v1.5');
+}));
+
+test('loader rejects invalid facts, rows and marker without rewriting the authority', t => fixture(t, dir => {
+  const path = join(dir, 'retention-facts.json');
+  const marker = join(dir, 'retention-facts.initialized');
+  const row = { device_id:'fixture', first_success_day:20_000, successful_days:[20_000], history_complete:true };
+  const valid = { version:1, initialized_at:now, rows:[row] };
+  const badRows = [null, [], {}, { ...row, device_id:'' }, { ...row, device_id:'x'.repeat(129) },
+    { ...row, first_success_day:0 }, { ...row, first_success_day:1.5 }, { ...row, history_complete:'true' },
+    { ...row, first_success_day:100_000_001, successful_days:[100_000_001] },
+    { ...row, first_success_day:Number.MAX_SAFE_INTEGER + 1, successful_days:[Number.MAX_SAFE_INTEGER + 1] },
+    { ...row, first_success_day:100_000_000, successful_days:[100_000_000, 100_000_001] },
+    { ...row, successful_days:null }, { ...row, successful_days:[] }, { ...row, successful_days:[20_000, 19_999] },
+    { ...row, successful_days:[20_000, 20_031] }, { ...row, successful_days:[20_000, 20_000.5] },
+    { ...row, successful_days:Array(32).fill(20_000) }];
+  for (const value of [null, [], { ...valid, version:2 }, { ...valid, initialized_at:0 },
+    { ...valid, metric_version_started_at:null }, { ...valid, rows:[row, row] },
+    ...badRows.map(row => ({ ...valid, rows:[row] }))]) {
+    const bytes = JSON.stringify(value);
+    writeFileSync(path, bytes); writeFileSync(marker, '1\n');
+    assert.throws(() => new RetentionFacts(dir), /invalid retention (facts|row)/, bytes);
+    assert.equal(readFileSync(path, 'utf8'), bytes);
+  }
+  writeFileSync(path, JSON.stringify({ ...valid, rows:[{ ...row, successful_days:Array.from({length:31}, (_, index) => 20_000 + index) }] }));
+  assert.equal(new RetentionFacts(dir).rows.get('fixture').successful_days.length, 31);
+  // The upper representable day remains valid even when it is ahead of now.
+  writeFileSync(path, JSON.stringify({ ...valid, rows:[{ ...row, first_success_day:100_000_000, successful_days:[100_000_000] }] }));
+  assert.equal(new RetentionFacts(dir).rows.get('fixture').first_success_day, 100_000_000);
+  for (const value of ['', '1', '2\n', '1\nextra']) {
+    writeFileSync(marker, value);
+    assert.throws(() => new RetentionFacts(dir), /missing or invalid retention authority/);
+    assert.equal(readFileSync(marker, 'utf8'), value);
+  }
+}));
+
+test('a later earlier-success batch preserves the exact D30 target across reload', t => fixture(t, dir => {
+  const initial = new RetentionFacts(dir, at('2026-08-01T00:00:00'));
+  initial.observe([success('2026-09-02T08:00:00'), success('2026-10-01T08:00:00')], [device()], now);
+  initial.flush();
+  const next = new RetentionFacts(dir);
+  next.observe([success('2026-09-01T08:00:00')], [device()], now);
+  next.flush();
+  assert.equal(next.metrics(now).d30.retained_installations, 1);
+  assert.equal(new RetentionFacts(dir).metrics(now).d30.retained_installations, 1);
+}));
+
+test('unresolved installation counts include missing history and legacy comparison keeps its distinct anchor', async t => fixture(t, async dir => {
+  const devices = [device('legacy'), { ...device('new'), first_seen_at:at('2026-09-03T00:00:00') },
+    { ...device('missing'), first_seen_at:null }, { ...device('hardware'), hardware_source:'hardware_serial' }];
+  const state = new RetentionFacts(dir, at('2026-09-02T00:00:00'));
+  state.observe([], devices, now);
+  assert.equal(state.metrics(now).d30.history_unresolved_installations, 2);
+  state.observe([success('2026-09-02T08:00:00', 'new')], devices, now);
+  assert.equal(state.metrics(now).d30.history_unresolved_installations, 3);
+  state.flush();
+  writeFileSync(join(dir, 'devices.json'), JSON.stringify({ devices }));
+  const events = [{ ...success('2026-09-01T08:00:00', 'legacy'), event_name:'analytics_cohort_started' },
+    success('2026-09-02T08:00:00', 'legacy'), success('2026-10-01T08:00:00', 'legacy'),
+    success('2026-10-21T08:00:00', 'legacy'), success('2026-09-01T08:00:00', 'excluded'),
+    success('2026-09-01T08:00:00', 'new', { identity_id:'legacy' })];
+  writeFileSync(join(dir, 'behavior-events.jsonl'), events.map(value => JSON.stringify(value)).join('\n'));
+  const report = await backfillRetention({ dataDir:dir, now });
+  assert.deepEqual(report.legacy_cohort_start.d30, { eligible_installations:1, retained_installations:1 });
+  assert.equal(report.after.d30.retained_installations, 0);
+  assert.deepEqual(report.excluded_events, { ineligible_identity:1, future_timestamp:1, identity_mismatch:1 });
+}));
+
+test('a failed close retains its original error and cleans its temporary file', t => fixture(t, dir => {
+  const state = new RetentionFacts(dir);
+  const close = fs.closeSync;
+  const fault = t.mock.method(fs, 'closeSync', descriptor => {
+    close(descriptor);
+    throw Object.assign(new Error('fixture primary close error'), { code:'EIO' });
+  });
+  syncBuiltinESMExports();
+  try {
+    assert.throws(() => state.flush(), error => error.code === 'EIO' && error.message === 'fixture primary close error');
+    assert.equal(state.dirty, true);
+    assert.equal(state.metricVersionStartedAt, null);
+    assert.equal(readdirSync(dir).some(name => name.endsWith('.tmp')), false);
+  } finally { fault.mock.restore(); syncBuiltinESMExports(); }
+  state.flush();
+  assert.ok(state.metricVersionStartedAt > 0);
+}));
 
 test('day zero is rejected before persistence and seconds are normalized exactly once', t => fixture(t, dir => {
   assert.equal(retentionDay(57), 0);
@@ -215,6 +424,7 @@ test('duplicates and out-of-order earlier success recalculate exact horizons wit
 });
 
 test('durable facts survive age compaction and restart', t => fixture(t, dir => {
+  t.mock.method(Date, 'now', () => now);
   const { store, registered } = registeredStore(dir);
   store.behaviorEvents = ['2026-09-01T08:00:00','2026-09-02T08:00:00','2026-09-08T08:00:00','2026-10-01T08:00:00'].map(time => success(time,registered.device_id));
   store.compactBehaviorEvents(at('2026-12-01T00:00:00'));
@@ -254,6 +464,7 @@ test('ingress retries cannot acknowledge duplicates before pending retention fac
 }));
 
 test('startup migration observes old successes before pruning the raw file', t => fixture(t, dir => {
+  t.mock.method(Date, 'now', () => now);
   const { store, registered } = registeredStore(dir);
   const old = ['2025-01-01T08:00:00','2025-01-31T08:00:00'].map(time => success(time,registered.device_id));
   writeFileSync(store.behaviorEventsPath, old.map(e=>JSON.stringify(e)).join('\n')+'\n');

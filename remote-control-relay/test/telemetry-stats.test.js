@@ -1780,11 +1780,23 @@ test("legacy behavior files are rewritten without raw tool or model aliases", ()
   const privateTool = "customer-private-tool-alias";
   const privateModel = "customer-private-model-alias";
   try {
+    const inventory = new TelemetryStore(dataDir, "test-device-pepper-at-least-24-chars");
+    let registered;
+    try {
+      registered = ["legacy", "xai", "local"].map(name => inventory.register({
+        hardware_claim: `fixture-legacy-alias-${name}`,
+        registration_secret: `fixture-registration-secret-${name}-at-least-32`,
+        hardware_source: "installation_id",
+      }));
+      inventory.saveNow();
+    } finally {
+      clearTimeout(inventory.saveTimer);
+    }
     writeFileSync(join(dataDir, "behavior-events.jsonl"), [
-      JSON.stringify({ event_id: "legacy_tool_event_0001", event_name: "tool_call_completed", device_id: "legacy_device", tool_name: privateTool, tool_type: "custom", success: true, occurred_at: Date.now(), received_at: Date.now() }),
-      JSON.stringify({ event_id: "legacy_model_event_0001", event_name: "model_used", device_id: "legacy_device", provider_name: "private-provider", model_name: privateModel, occurred_at: Date.now(), received_at: Date.now() }),
-      JSON.stringify({ event_id: "xai_model_event_0001", event_name: "model_used", device_id: "xai_device", provider_key: "xai", model_key: "grok", occurred_at: Date.now(), received_at: Date.now() }),
-      JSON.stringify({ event_id: "local_model_event_0001", event_name: "model_used", device_id: "local_device", provider_key: "local", model_key: "qwen", occurred_at: Date.now(), received_at: Date.now() }),
+      JSON.stringify({ event_id: "legacy_tool_event_0001", event_name: "tool_call_completed", device_id: registered[0].device_id, tool_name: privateTool, tool_type: "custom", success: true, occurred_at: Date.now(), received_at: Date.now() }),
+      JSON.stringify({ event_id: "legacy_model_event_0001", event_name: "model_used", device_id: registered[0].device_id, provider_name: "private-provider", model_name: privateModel, occurred_at: Date.now(), received_at: Date.now() }),
+      JSON.stringify({ event_id: "xai_model_event_0001", event_name: "model_used", device_id: registered[1].device_id, provider_key: "xai", model_key: "grok", occurred_at: Date.now(), received_at: Date.now() }),
+      JSON.stringify({ event_id: "local_model_event_0001", event_name: "model_used", device_id: registered[2].device_id, provider_key: "local", model_key: "qwen", occurred_at: Date.now(), received_at: Date.now() }),
     ].join("\n") + "\n");
     const store = new TelemetryStore(dataDir, "test-device-pepper-at-least-24-chars");
     assert.equal(store.behaviorEvents[0].tool_key, "custom");

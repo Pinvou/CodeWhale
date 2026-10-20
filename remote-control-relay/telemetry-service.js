@@ -5,7 +5,7 @@ import {
   boundedText, deletionSubjectHash, isCoreUserTask, isSuccessfulCoreUserTask,
   normalizeUsageOccurredAt, statsDay,
 } from "./telemetry-primitives.js";
-import { atomicWriteJson, atomicWriteJsonLines, enforcePrivateFile } from "./telemetry-storage.js";
+import { atomicWriteJson, atomicWriteJsonLines, enforcePrivateFile, validDeviceInventory } from "./telemetry-storage.js";
 import { isIP } from "node:net";
 import {
   appendFileSync,
@@ -1036,7 +1036,7 @@ function behaviorToolType(value) {
   return ["skill", "mcp", "cli", "builtin", "custom", "unknown"].includes(type) ? type : "unknown";
 }
 
-export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, range = "30", now = Date.now(), pipelineEvents = [], retentionFacts = null) {
+export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, range = "30", now = Date.now(), pipelineEvents = [], retentionFacts = null, metricVersionStartedAt = null) {
   behaviorEvents = installationBehaviorEvents(devices, behaviorEvents);
   const window = rangeWindow(range, now);
   const activeByDay = activeIdentityByDay(devices, usageEvents, behaviorEvents, window);
@@ -1210,8 +1210,8 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
     range: window.range,
     subject: "installation",
     timezone: "Asia/Shanghai",
-    metric_version: "behavior-v1.4",
-    metric_version_started_at: Date.parse("2026-09-11T00:00:00+08:00"),
+    metric_version: "behavior-v1.5",
+    metric_version_started_at: metricVersionStartedAt,
     data_status: dataStatus,
     latest_event_received_at: latestReceivedAt || null,
     active_installations: activeTotal,
@@ -1746,13 +1746,16 @@ async function readJson(req) {
   }
 }
 
-function loadJson(path, fallback) {
-  if (!existsSync(path)) return fallback;
+function loadJson(path, fallback, validate) {
   try {
-    return JSON.parse(readFileSync(path, "utf8"));
+    enforcePrivateFile(path);
+    const saved = JSON.parse(readFileSync(path, "utf8"));
+    if (!validate(saved)) throw new Error("invalid persisted inventory");
+    return saved;
   } catch (error) {
+    if (error.code === "ENOENT") return fallback;
     console.error("[telemetry-error] persistence_read_failed");
-    return fallback;
+    throw new TelemetryHttpError(503, "telemetry_storage_unavailable");
   }
 }
 
@@ -1811,13 +1814,24 @@ export class TelemetryStore {
       1_000_000,
     );
 
+    // Unknown inventory is never authorization to prune durable retention.
+    // Validate before tombstone migration, raw compaction or authority writes.
+    let saved = loadJson(this.devicesPath, null, validDeviceInventory);
+    if (saved === null && [this.eventsPath, this.behaviorEventsPath, this.behaviorPipelinePath,
+      this.deletionTombstonesPath, join(dataDir, "retention-facts.json"),
+      join(dataDir, "retention-facts.initialized")].some(path => existsSync(path))) {
+      throw new TelemetryHttpError(503, "telemetry_storage_unavailable");
+    }
+    if (saved === null) {
+      // Anchor a proven-fresh inventory before creating dependent authority.
+      saved = { version: 2, devices: [] };
+      atomicWriteJson(this.devicesPath, saved);
+    }
     this.loadDeletionTombstones();
-    const saved = loadJson(this.devicesPath, { devices: [] });
     let restoredDeletedDevice = false;
     let restoredTimestampDevice = false;
     const loadedAt = Date.now();
-    for (const device of Array.isArray(saved.devices) ? saved.devices : []) {
-      if (!device?.device_id || !device?.hardware_hash || !device?.device_token) continue;
+    for (const device of saved.devices) {
       if (this.removedSubjectHashes.has(this.deletionSubjectHash(device.device_id))) {
         restoredDeletedDevice = true;
         continue;
@@ -1884,9 +1898,11 @@ export class TelemetryStore {
   }
 
   loadDeletionTombstones() {
-    const saved = loadJson(this.deletionTombstonesPath, { records: [] });
-    this.deletionTombstones = (Array.isArray(saved.records) ? saved.records : [])
-      .filter((record) => record?.subject_hash)
+    const saved = loadJson(this.deletionTombstonesPath, { records: [] }, value => value
+      && typeof value === "object" && !Array.isArray(value) && Array.isArray(value.records)
+      && value.records.every(record => record && typeof record === "object" && !Array.isArray(record)
+        && typeof record.subject_hash === "string" && record.subject_hash.length > 0));
+    this.deletionTombstones = saved.records
       .map((record) => ({
         ...record,
         removal_reason: record.removal_reason
@@ -2732,6 +2748,7 @@ export class TelemetryStore {
       now,
       this.behaviorPipelineEvents,
       this.retentionFacts.metrics(now),
+      this.retentionFacts.metricVersionStartedAt,
     );
   }
 

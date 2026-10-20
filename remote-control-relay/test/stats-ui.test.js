@@ -9,6 +9,46 @@ import { JSDOM } from "jsdom";
 const testDir = fileURLToPath(new URL(".", import.meta.url));
 const statsHtml = readFileSync(join(testDir, "..", "web", "stats.html"), "utf8");
 
+test('behavior metric switch uses instance metadata in Beijing time and marks unknown dates honestly', async () => {
+  let startedAt = Date.parse('2034-02-04T23:21:00Z');
+  let revision = 0;
+  const dom = new JSDOM(statsHtml, {
+    runScripts:'dangerously', url:'https://www.pinvou.com/pinvou3/stats',
+    beforeParse(window) {
+      window.fetch = async url => ({ ok:true, status:200, json:async () => String(url).endsWith('/session')
+        ? { role:'behavior_analyst' }
+        : { range:'30', data_status:'ready', metric_version:revision ? `behavior-v1.5-${revision}` : 'behavior-v1.5', metric_version_started_at:startedAt } });
+      window.setInterval = () => 1;
+      window.clearInterval = () => {};
+    },
+  });
+  const meta = () => dom.window.document.querySelector('#behaviorMeta').textContent;
+  const until = async expected => {
+    for (let attempt = 0; attempt < 100 && !expected.test(meta()); attempt++) {
+      await new Promise(resolve => dom.window.setTimeout(resolve, 10));
+    }
+    assert.match(meta(), expected);
+  };
+  try {
+    await until(/本实例切换时间 2034\/02\/05 07:21/);
+    // Complete the startup refresh's trailing microtasks before another refresh
+    // or JSDOM teardown. Its fetch mocks resolve without external I/O.
+    await new Promise(setImmediate);
+    assert.match(meta(), /behavior-v1\.5/);
+    assert.doesNotMatch(meta(), /2026-09-10|2026-09-11/);
+    for (const value of [null, undefined, '2034-02-05', -1, 1e99]) {
+      startedAt = value;
+      revision++;
+      // Await the complete production refresh, including its DOM bookkeeping,
+      // rather than treating renderBehavior's earlier mutation as completion.
+      await dom.window.refreshData(true);
+      await until(new RegExp(`behavior-v1\\.5-${revision}`));
+      await until(/本实例切换时间未记录/);
+      assert.doesNotMatch(meta(), /2034\/02\/05|2026-09-10|2026-09-11/);
+    }
+  } finally { dom.window.close(); }
+});
+
 for (const [olderStatus, newerStatus] of [[200, 200], [500, 200], [401, 200], [200, 500]]) {
   test(`overlapping refreshes ignore older ${olderStatus} after newer ${newerStatus}`, async () => {
     let batch = -1;
