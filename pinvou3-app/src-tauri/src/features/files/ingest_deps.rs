@@ -66,7 +66,7 @@ pub struct DependencyCheckItem {
 /// 一键安装进度的实时事件载荷。平台适配器经纯 Rust 回调上报,
 /// 本域层包成此结构后 `app.emit("deps:install_progress", …)`。
 #[derive(Clone, Serialize)]
-pub struct DepInstallProgress {
+pub(super) struct DepInstallProgress {
     pub package: String,
     pub current: usize,
     pub total: usize,

@@ -9,6 +9,7 @@ import React, {
 import { createPetActivationState, loadActivePet } from './pet-active.js';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
 import { useAutoResizeTextarea } from '../../hooks/useAutoResizeTextarea.js';
+import { useFollowMainWindowLanguage } from '../../hooks/useFollowMainWindowLanguage.js';
 import { loadImage } from './load-image.js';
 import {
   buildAnimationSequence,
@@ -72,7 +73,7 @@ import {
   resolvePet,
 } from './pet-registry.js';
 import { useReducedMotion } from '../../hooks/useReducedMotion.js';
-import { dict, ensureLanguage, initialSystemLanguage, TAG_TO_LANG } from '../../shared/i18n.js';
+import { dict } from '../../shared/i18n.js';
 import './pet.css';
 
 const TICK_MS = 600;
@@ -168,7 +169,7 @@ export default function PetWindow({
     ? Math.min(MAX_SCALE, Math.max(DEFAULT_SCALE, configuredScale))
     : DEFAULT_SCALE;
   const stateRef = useRef(createPetState());
-  const [language, setLanguage] = useState(initialSystemLanguage);
+  const language = useFollowMainWindowLanguage({ enabled: isTauriAvailable() });
   const t = dict[language] || dict.zh;
   const petCopy = t.uiPet;
   // pet.html 的 <title>/<html lang> 是静态中文,按当前语言同步一次。

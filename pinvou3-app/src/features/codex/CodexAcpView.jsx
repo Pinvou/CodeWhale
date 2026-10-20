@@ -1273,7 +1273,7 @@ export function CodexAcpView({
     if (!notice) return null;
     return {
       ...notice,
-      detail: redactDisplayError(notice.detail, acpModelServiceLanguage) || '',
+      detail: timelineDisplayError(notice.detail, { language: acpModelServiceLanguage }) || '',
     };
   }, [events, acpModelServiceLanguage]);
   const visibleRuntimeNotice = runtimeNotice?.key === dismissedNoticeKey
