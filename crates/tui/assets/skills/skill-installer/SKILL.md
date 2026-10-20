@@ -27,8 +27,8 @@ Codewhale skill.
 2. Prefer Codewhale's native `/skill` commands over ad hoc copying.
 3. For GitHub/community skills, inspect the `SKILL.md` before recommending
    trust. Treat scripts and companion files as untrusted until reviewed.
-4. After installing, tell the user to restart the session if the skill does not
-   appear immediately in the available-skills list.
+4. Installed skills are picked up immediately; if one does not appear, reopen
+   the skill list rather than restarting.
 5. If a skill conflicts by name with a workspace skill, explain that workspace
    skill directories take precedence over global `~/.codewhale/skills`, with
    `~/.deepseek/skills` retained as a legacy fallback.

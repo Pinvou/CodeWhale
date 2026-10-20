@@ -48,9 +48,12 @@ entirely; check your tool list and follow step 1 either way.
    need to be exact. When such a candidate exists, you **must start it and inspect
    its tools before** using `bash`, local programs, custom code, or a manual
    implementation. The availability or familiarity of a local alternative is
-   not a reason to skip the candidate. Skip Registry use only when every entry is
-   clearly irrelevant, or when a matching server fails to start after the retry
-   described below.
+   not a reason to skip the candidate. Skip Registry use only when no
+   entry plausibly covers the task (if a refined query still returns
+   nothing, the visible snapshot has no relevant entry — on a fresh
+   install it may still be downloading, so proceed with local tools
+   rather than retrying), or when a matching server fails to start
+   after the retry described below.
 3. **Install + run transactionally.** If `start_registry_mcp_server` is not in
    your tool list after `registry_sync` succeeded, activate it via
    `tool_search` as in step 1; if that fails, registry starts are

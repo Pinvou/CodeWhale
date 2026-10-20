@@ -52,7 +52,11 @@ fn bundled_integration_skills_use_current_codewhale_commands_and_paths() {
     // retired and cannot dispatch; `File` is a hidden compatibility alias
     // that never appears in a catalog or in `tool_search`, so `read` is the
     // citable name.
-    assert!(PDF_BODY.contains("built-in `read` tool"));
+    // The visible `read` has no PDF branch (PDF bytes decode as lossy
+    // binary), so the pdf skill must route extraction through installed
+    // CLIs instead of teaching `read` for it.
+    assert!(!PDF_BODY.contains("the built-in `read` tool"));
+    assert!(PDF_BODY.contains("`pdftotext`"));
     for (name, body) in [
         ("pdf", PDF_BODY),
         ("help", HELP_BODY),
@@ -199,8 +203,10 @@ fn contributor_onboarding_ships_at_generation_8_and_keeps_its_refusals() {
         .expect("contributor-onboarding must be bundled");
     assert_eq!(skill.introduced_in, 8);
     // The pin tracks the current catalog generation: 9 added handoff,
-    // 10 added mcp-discovery (#5238).
-    assert_eq!(BUNDLED_SKILL_VERSION, "10");
+    // 10 added mcp-discovery (#5238), 11 corrected bundled skill bodies
+    // from the model-facing text audit (#112) and refreshes superseded
+    // shipped copies.
+    assert_eq!(BUNDLED_SKILL_VERSION, "11");
 
     let body = skill.body;
     assert!(body.contains("invocation: explicit-only"));
@@ -603,6 +609,84 @@ fn upgrade_preserves_user_modified_bundled_skill_body() {
         body.contains("customized"),
         "user edit must not be overwritten by name alone"
     );
+}
+
+// Round-6 review pin: a generation bump must refresh an installed copy whose
+// body is a known superseded shipped body — the old shipped text is not a
+// user edit, and without this the bump would fossilize the generation-10
+// bodies forever (#4691 non-destructive upgrade table). The generation-10
+// documents stub body is embedded here because the digest table stores only
+// hashes.
+#[test]
+fn version_bump_refreshes_superseded_shipped_body() {
+    #[rustfmt::skip]
+    const GENERATION_10_DOCUMENTS: &str = "---\nname: documents\ndescription: Compatibility alias for the docx skill. Prefer loading docx.\naliases-for: docx\n---\n\n# documents (alias)\n\nThis skill is a compatibility alias for **docx**.\n\nLoad and follow the `docx` skill body for the actual workflow.\n";
+    let tmp = TempDir::new().unwrap();
+    assert!(
+        is_superseded_shipped_body("documents", GENERATION_10_DOCUMENTS),
+        "embedded generation-10 documents body must match the superseded digest"
+    );
+    fs::create_dir_all(skill_dir(&tmp, "documents")).unwrap();
+    fs::write(skill_file(&tmp, "documents"), GENERATION_10_DOCUMENTS).unwrap();
+    fs::write(marker_file(&tmp), "10").unwrap();
+
+    install_system_skills(tmp.path()).unwrap();
+
+    let current = BUNDLED_SKILLS
+        .iter()
+        .find(|s| s.name == "documents")
+        .expect("documents must stay bundled")
+        .body;
+    assert_eq!(
+        fs::read_to_string(skill_file(&tmp, "documents")).unwrap(),
+        current,
+        "superseded shipped body must be refreshed on bump"
+    );
+    assert_eq!(fs::read_to_string(marker_file(&tmp)).unwrap().trim(), "11");
+}
+
+#[test]
+fn version_bump_still_preserves_user_modified_body() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(skill_dir(&tmp, "documents")).unwrap();
+    fs::write(
+        skill_file(&tmp, "documents"),
+        "---\nname: documents\ndescription: customized\n---\n\n# custom\n",
+    )
+    .unwrap();
+    fs::write(marker_file(&tmp), "10").unwrap();
+
+    install_system_skills(tmp.path()).unwrap();
+
+    assert!(
+        fs::read_to_string(skill_file(&tmp, "documents"))
+            .unwrap()
+            .contains("customized"),
+        "user edit must not be refreshed by the bump"
+    );
+}
+
+// The digest table must only reference bundled skills whose current body
+// differs from the recorded digest — a stale entry (skill dropped from the
+// bundle, or digest equal to the current body) would silently disable the
+// refresh or the preserve arm.
+#[test]
+fn superseded_digests_reference_bundled_skills_with_changed_bodies() {
+    use sha2::{Digest, Sha256};
+    for (name, digest) in SUPERSEDED_SHIPPED_BODY_DIGESTS {
+        let skill = BUNDLED_SKILLS
+            .iter()
+            .find(|s| s.name == *name)
+            .unwrap_or_else(|| panic!("superseded digest references non-bundled skill {name}"));
+        let current: String = Sha256::digest(skill.body.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_ne!(
+            &current, digest,
+            "{name}: superseded digest equals the current body digest; drop the entry"
+        );
+    }
 }
 
 #[test]

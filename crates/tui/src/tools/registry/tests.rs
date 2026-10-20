@@ -13,7 +13,7 @@ use crate::tools::spec::{
 };
 
 use super::{
-    MCP_IMAGE_TEXT_PLACEHOLDER, ToolRegistry, enforce_tool_authority,
+    CLASSIC_TRUNCATION_FOOTER, MCP_IMAGE_TEXT_PLACEHOLDER, ToolRegistry, enforce_tool_authority,
     mcp_result_to_bounded_rich_tool_result, mcp_tool_adapter_for_test,
 };
 
@@ -1689,4 +1689,28 @@ fn rlm_family_removes_legacy_aliases() {
             "{retired} must not be advertised"
         );
     }
+}
+
+// Round-2 review pin: the classic-routing truncation footer must not cite
+// the unreadable `last_tool_result` workshop variable; the only followable
+// advice it can give is narrowing the rerun.
+#[test]
+fn classic_truncation_footer_teaches_a_followable_retry() {
+    assert!(CLASSIC_TRUNCATION_FOOTER.contains("narrower arguments"));
+    assert!(!CLASSIC_TRUNCATION_FOOTER.contains("last_tool_result"));
+    // The dead-end footer must not return at the truncation site either —
+    // whether as the const's text or re-inlined at the call site. (Source
+    // pin: blind to the phrase appearing in a comment, which is acceptable
+    // for this exact sentence.)
+    const REGISTRY_SOURCE: &str = include_str!("../registry.rs");
+    assert!(!REGISTRY_SOURCE.contains("full text in workshop variable"));
+    // Round-6 review pin: the same dead-end class for the classic per-call
+    // truncation footer in truncate.rs. Positive pins there stay green if the
+    // dead-end sentence is merely appended, so the source must be scanned —
+    // this test lives outside truncate.rs so its own literal does not count.
+    const TRUNCATE_SOURCE: &str = include_str!("../truncate.rs");
+    assert!(
+        !TRUNCATE_SOURCE.contains("No tool call reaches this copy"),
+        "the classic truncation footer must keep naming the followable retrieval route"
+    );
 }

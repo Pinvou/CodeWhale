@@ -31,9 +31,6 @@ pub const DEFAULT_LARGE_OUTPUT_THRESHOLD_TOKENS: usize = 32_768;
 /// on the side of routing rather than dumping raw data into the parent.
 const CHARS_PER_TOKEN_ESTIMATE: usize = 3;
 
-/// Workshop variable name where the raw tool output is stored.
-pub const WORKSHOP_LAST_TOOL_RESULT_VAR: &str = "last_tool_result";
-
 static ACTIVE_WORKSHOP: OnceLock<Mutex<WorkshopConfig>> = OnceLock::new();
 
 #[cfg(test)]
@@ -244,8 +241,9 @@ impl LargeOutputRouter {
         (routing, estimated_tokens, threshold)
     }
 
-    /// Wrap a synthesis result with a workshop provenance header and a hint
-    /// about the stored raw output.
+    /// Wrap a synthesis result with a provenance header. The raw output is
+    /// retained internally for diagnostics; no model-facing text claims it can
+    /// be read back (nothing can — see `WorkshopVariables::take_raw`).
     #[must_use]
     pub fn wrap_synthesis(
         tool_name: &str,
@@ -255,7 +253,7 @@ impl LargeOutputRouter {
     ) -> String {
         format!(
             "[workshop-synthesis: tool={tool_name}, raw_tokens≈{estimated_tokens}, \
-             threshold={threshold}, raw_stored_in={WORKSHOP_LAST_TOOL_RESULT_VAR}]\n\n{synthesis}"
+             threshold={threshold}]\n\n{synthesis}"
         )
     }
 }
@@ -263,8 +261,9 @@ impl LargeOutputRouter {
 // ── Workshop variable store ───────────────────────────────────────────────────
 
 /// In-process store for workshop variables that persist across tool calls
-/// within a session. The only variable exposed today is `last_tool_result`
-/// which holds the most recent raw large-tool output for `promote_to_context`.
+/// within a session. The only variable today is `last_tool_result`, holding
+/// the most recent raw large-tool output for diagnostics; nothing reads it
+/// back (`promote_to_context` never shipped).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkshopVariables {
     /// Raw content of the most recent large tool output that was routed
@@ -285,11 +284,12 @@ impl WorkshopVariables {
     }
 
     /// Retrieve and clear the stored raw output (consume semantics so the
-    /// variable is not accidentally promoted twice).
+    /// variable is not accidentally read twice).
     ///
-    /// Called by the `promote_to_context` tool (not yet wired in this PR).
+    /// No production caller: `promote_to_context` never shipped, so the raw
+    /// output stays diagnostics-only (unit tests exercise this accessor).
     #[must_use]
-    #[allow(dead_code)] // consumed by promote_to_context tool in follow-up
+    #[allow(dead_code)] // promote_to_context never shipped; no production caller
     pub fn take_raw(&mut self) -> Option<(String, String)> {
         if self.last_tool_result.is_empty() {
             return None;
@@ -555,5 +555,10 @@ mod tests {
         assert!(wrapped.contains("web_search"));
         assert!(wrapped.contains("5000"));
         assert!(wrapped.contains("key facts here"));
+        // The header must not cite the workshop variable: nothing can read it
+        // back (promote_to_context never shipped), so pointing the model at it
+        // is a retrieval dead end.
+        assert!(!wrapped.contains("raw_stored_in"));
+        assert!(!wrapped.contains("last_tool_result"));
     }
 }

@@ -408,9 +408,10 @@ pub(crate) fn enforce_execution_envelope(
                     "[execution_envelope.executes.write_denied] Tool {name} runs a program or a child process, which mutates the workspace \
                      just as directly as a file write. This agent runs read-only under its \
                      clamped permission ceiling, so arbitrary execution is refused however it is \
-                     spelled — shell, verification gate, automation, plugin, or MCP server. The \
+                     spelled — shell, verification gate, automation, plugin, or MCP server. If your \
+                     ceiling also grants shell authority, the \
                      built-in verification gates (Run/run_tests/run_verifiers in their default \
-                     form) are still available."
+                     form) are still available; otherwise report your findings directly."
                 ));
             }
             if !envelope.shell {

@@ -67,7 +67,7 @@ impl ToolSpec for SpeechTool {
     }
 
     fn description(&self) -> &str {
-        "Generate speech/audio directly through the configured Xiaomi MiMo OpenAI-compatible API. Use this when the user asks for speech, TTS, narration, read-aloud, voice design, or voice cloning."
+        "Generate speech/audio directly through the configured Xiaomi MiMo OpenAI-compatible API. Requires the session provider to be xiaomi-mimo — calls fail with an error under any other provider. Use this when the user asks for speech, TTS, narration, read-aloud, voice design, or voice cloning."
     }
 
     fn input_schema(&self) -> Value {

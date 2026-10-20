@@ -179,7 +179,7 @@ impl ToolSpec for FimEditTool {
             prefix_end,
             suffix_start,
             message: format!(
-                "FIM edit applied to `{path}`. Generated {generated_len} chars between prefix_anchor end (byte {prefix_end}) and suffix_anchor start (byte {suffix_start}).",
+                "FIM edit applied to `{path}`. Generated {generated_len} bytes between prefix_anchor end (byte {prefix_end}) and suffix_anchor start (byte {suffix_start}).",
             ),
         };
 

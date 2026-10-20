@@ -31,6 +31,9 @@ codewhale mcp validate
 codewhale mcp tools
 ```
 
+(In a running session, `/mcp add …` is the interactive equivalent of
+`codewhale mcp add`; it is a TUI command, not a shell command.)
+
 HTTP/SSE entries can include per-server headers in `~/.codewhale/mcp.json` when
 credentials or custom routing headers are required.
 

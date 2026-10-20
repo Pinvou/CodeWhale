@@ -1,11 +1,15 @@
 ---
 name: spreadsheets
-description: Compatibility alias for the xlsx skill. Prefer loading xlsx.
+description: Compatibility stub owning the legacy name spreadsheets; the xlsx skill provides the workflow.
 aliases-for: xlsx
 ---
 
-# spreadsheets (alias)
+# spreadsheets (compatibility stub)
 
-This skill is a compatibility alias for **xlsx**.
+This stub exists so the legacy name `spreadsheets` keeps resolving. It contains no
+workflow of its own.
 
-Load and follow the `xlsx` skill body for the actual workflow.
+If the `xlsx` skill is installed and enabled, load_skill("xlsx") returns
+it directly. If loading `xlsx` returns this stub again, `xlsx` is not
+installed or is disabled — tell the user, and continue with generic guidance
+for this file type instead of retrying.

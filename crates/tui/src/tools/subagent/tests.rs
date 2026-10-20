@@ -2876,12 +2876,23 @@ fn agent_description_explains_background_child_and_transcript_handle() {
              {description}"
         );
     }
-    // Headroom note: the description sits 13 tokens (40 chars) under this
-    // cap (3032 chars = 1011 estimated tokens). Budget any reword against
-    // this limit instead of loosening the cap.
+    // The "Legacy action=status|peek|cancel" sentence was removed from the
+    // description because status/peek/cancel are first-class advertised
+    // actions. The negative pin lives on the description (not the prompt
+    // field) because that is the surface the sentence lived on.
     assert!(
-        estimate_tool_description_tokens_conservative(description) <= 1024,
-        "agent description exceeds the conservative 1024-token budget"
+        !description.contains("Legacy action"),
+        "the retired legacy-action sentence must not return: {description}"
+    );
+    // Headroom note: the estimate below is the live measurement — budget any
+    // reword against it instead of loosening the cap. (Static headroom
+    // comments went stale when the round-2 text shrank the description, so
+    // the failure message now prints the current tokens/chars.)
+    let estimated = estimate_tool_description_tokens_conservative(description);
+    assert!(
+        estimated <= 1024,
+        "agent description exceeds the conservative 1024-token budget ({estimated} estimated tokens, {} chars)",
+        description.chars().count()
     );
 }
 
@@ -5804,6 +5815,11 @@ fn agent_tool_prompt_schema_keeps_ordinary_starts_message_first() {
     assert!(prompt.contains("focused task"));
     assert!(prompt.contains("read-only role needs no write scope"));
     assert!(prompt.contains("write-capable role defaults to the parent workspace"));
+    // Round-2 review pin: the fresh-context disclosure is load-bearing
+    // delegation guidance and must not silently disappear again. Hedged to
+    // "By default" because a parse-accepted fork_context start can seed the
+    // child with the parent prefix.
+    assert!(prompt.contains("By default the child sees only this prompt, not your conversation"));
     for ceremony in [
         "Subagent Brief",
         "QUESTION",
@@ -19927,7 +19943,10 @@ fn the_launched_authority_is_the_one_the_spawn_boundary_accepts() {
 /// Measured 80,856B on 2026-08-02 (commit body has the receipt); +10%.
 const READ_ONLY_CHILD_ENVELOPE_BYTE_CEILING: usize = 89_000;
 /// Measured 72,679B on 2026-08-02 (commit body has the receipt); +10%.
-const PARENT_SURFACE_BYTE_CEILING: usize = 80_000;
+/// Re-measured ~82.0kB on 2026-10-19 (round-4 disclosure wave: read-only
+/// prompt-only start, review/tasks/verify/web/search/github/goal/terminal/
+/// git/ocr/extract truthful-limit disclosures); +10%.
+const PARENT_SURFACE_BYTE_CEILING: usize = 90_000;
 
 #[tokio::test]
 async fn read_only_child_envelope_stays_within_measured_ceiling() {

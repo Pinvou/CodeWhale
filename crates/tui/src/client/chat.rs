@@ -1199,15 +1199,17 @@ pub(crate) fn build_chat_wire_body(
                 let note = function.get_mut("parameters").and_then(|parameters| {
                     crate::tools::schema_sanitize::sanitize_for_xai_parameters(parameters)
                 });
-                if let Some(note) = note
-                    && let Some(description) = function
-                        .get_mut("description")
-                        .and_then(|d| d.as_str().map(str::to_string))
-                {
-                    function.insert(
-                        "description".to_string(),
-                        json!(format!("{description} {note}")),
-                    );
+                if let Some(note) = note {
+                    let description = function
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let description = if description.is_empty() {
+                        note
+                    } else {
+                        format!("{description} {note}")
+                    };
+                    function.insert("description".to_string(), json!(description));
                 }
             }
         }
@@ -7092,7 +7094,7 @@ mod image_block_wire_tests {
     //! `{"type":"image_url","image_url":{"url":…}}`.
     use super::{ApiProvider, build_chat_messages, build_chat_wire_body};
     use crate::models::Role;
-    use crate::models::{ContentBlock, ImageUrlContent, Message, MessageRequest};
+    use crate::models::{ContentBlock, ImageUrlContent, Message, MessageRequest, Tool};
 
     const DATA_URL: &str = "data:image/png;base64,QUJD";
 
@@ -8169,6 +8171,81 @@ mod image_block_wire_tests {
                 })
             }),
             "media from an ambiguous duplicate-ID batch must not survive: {wire:?}"
+        );
+    }
+
+    /// The xAI lane must land the schema-constraint note even when a tool
+    /// carries an empty description — mirroring the Responses and Anthropic
+    /// lanes, which substitute the note instead of dropping it.
+    #[test]
+    fn xai_chat_lands_constraint_note_when_tool_description_is_empty() {
+        let union_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "patch": {"type": "string"},
+                "replace": {"type": "array"},
+                "changes": {"type": "array"}
+            },
+            "oneOf": [
+                {"required": ["patch"]},
+                {"required": ["replace"]},
+                {"required": ["changes"]}
+            ]
+        });
+        let tool = |name: &str, description: &str| Tool {
+            tool_type: None,
+            name: name.to_string(),
+            description: description.to_string(),
+            input_schema: union_schema.clone(),
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        };
+        let request = MessageRequest {
+            model: "grok-4".to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "apply a patch".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 128,
+            system: None,
+            tools: Some(vec![
+                tool("apply_patch", ""),
+                tool("lookup", "Lookup things."),
+            ]),
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+        };
+
+        let body = build_chat_wire_body(
+            &request,
+            ApiProvider::Xai,
+            crate::config::DEFAULT_XAI_BASE_URL,
+            false,
+        )
+        .expect("xAI wire body");
+
+        const NOTE: &str = "Exactly one of these parameter groups must be provided: `changes` | `patch` | `replace`.";
+        let tools = body.body["tools"].as_array().expect("tools array");
+        assert_eq!(tools.len(), 2, "both tools must survive sanitization");
+        assert_eq!(
+            tools[0]["function"]["description"], NOTE,
+            "an empty description must be substituted with the note, not dropped or space-prefixed"
+        );
+        assert_eq!(
+            tools[1]["function"]["description"],
+            format!("Lookup things. {NOTE}"),
+            "a non-empty description keeps the appended-note form"
         );
     }
 }

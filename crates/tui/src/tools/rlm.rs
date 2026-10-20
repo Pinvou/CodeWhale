@@ -118,11 +118,12 @@ impl RlmTool {
             Some("eval") => format!(
                 "Run one Python REPL block against a named RLM context. Returns a \
                  bounded projection of stdout/stderr plus metadata. If the code calls \
-                 FINAL/finalize, the final value is stored as a var_handle retrievable \
+                 finalize(...), the final value is stored as a var_handle retrievable \
                  with handle_read instead of copied unbounded into the parent context. \
                  Large stdout/stderr payloads (>1k chars) are also stored as \
                  var_handles (returned in stdout_handle / stderr_handle) to keep the \
-                 parent transcript lean. Batch child helpers require \
+                 parent transcript lean, unless output_feedback is \"metadata\", which \
+                 stores neither. Batch child helpers require \
                  dependency_mode='independent'; use sub_query_sequence or a \
                  sequential loop for dependent work; \
                  {HANDLE_READ_ACTIVATION_HINT}."
@@ -141,8 +142,9 @@ impl RlmTool {
                  \"open\" (load file_path/content/url/session_object into a named Python \
                  kernel; returns only metadata so the parent transcript holds a handle, \
                  not the body), \"eval\" (run one bounded Python REPL block against a \
-                 named context; approval required; FINAL/finalize values and large \
-                 stdout/stderr become var_handles retrievable with handle_read; \
+                 named context; approval required; finalize(...) values always become \
+                 var_handles retrievable with handle_read, and large stdout/stderr do \
+                 too unless output_feedback is \"metadata\", which stores neither; \
                  {HANDLE_READ_ACTIVATION_HINT}), \
                  \"configure\" (output feedback, child timeout, sub-RLM depth, session \
                  sharing), \"close\" (tear down the kernel and return usage metadata)."
@@ -273,7 +275,7 @@ impl ToolSpec for RlmTool {
                 },
                 "code": {
                     "type": "string",
-                    "description": "Raw Python executed against the context (no markdown fences). The loaded source is in scope as `content`; call FINAL(value)/finalize(...) to return a result handle. Example: print(len(content)). (action=eval)"
+                    "description": "Raw Python executed against the context (no markdown fences). The loaded source is in scope as `content`; call finalize(...) to return a result handle. Example: print(len(content)). (action=eval)"
                 },
                 "output_feedback": {
                     "type": "string",
@@ -476,7 +478,7 @@ impl RlmTool {
         let code = required_non_empty_str(input, "code").map_err(|_| {
             ToolError::invalid_input(
                 "rlm_eval: `code` is required and runs raw Python against the RLM context (no markdown fences). \
-                 Example: {\"name\": \"<ctx>\", \"code\": \"print(len(content))\"}; call FINAL(value) to return a result handle.",
+                 Example: {\"name\": \"<ctx>\", \"code\": \"print(len(content))\"}; call finalize(...) to return a result handle.",
             )
         })?;
         let session = get_session(context, name).await?;
@@ -750,7 +752,7 @@ fn legacy_action_schema(action: &str) -> Value {
             "required": ["name", "code"],
             "properties": {
                 "name": { "type": "string", "description": "RLM context name returned by rlm_open." },
-                "code": { "type": "string", "description": "Raw Python executed against the context (no markdown fences). The loaded source is in scope as `content`; call FINAL(value)/finalize(...) to return a result handle. Example: print(len(content))." }
+                "code": { "type": "string", "description": "Raw Python executed against the context (no markdown fences). The loaded source is in scope as `content`; call finalize(...) to return a result handle. Example: print(len(content))." }
             }
         }),
         "configure" => json!({
@@ -1311,7 +1313,7 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("raw Python"), "explains it runs Python: {msg}");
         assert!(
-            msg.contains("print(len(content))") || msg.contains("FINAL"),
+            msg.contains("print(len(content))") || msg.contains("finalize(...)"),
             "includes an example: {msg}"
         );
     }

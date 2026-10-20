@@ -1660,6 +1660,10 @@ fn normalize_contract_fuzzy(text: &str) -> String {
             '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => '"',
             '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
             | '\u{2212}' => '-',
+            // NFKC already folds each listed space to ASCII space (a run for
+            // the em-space family); the arm stays so the disclosed
+            // "Unicode-space mapping" category does not depend on NFKC table
+            // details.
             '\u{00A0}' | '\u{2002}'..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}' => ' ',
             other => other,
         })
@@ -1679,11 +1683,11 @@ fn text_matches(haystack: &str, needle: &str) -> Vec<(usize, usize)> {
 fn contract_edit_not_found(path: &str, index: usize, total: usize) -> ToolError {
     if total == 1 {
         ToolError::execution_failed(format!(
-            "Could not find the exact text in {path}. The old text must match exactly including all whitespace and newlines."
+            "Could not find the text in {path}. The old text must match the file exactly; only NFKC Unicode folding, punctuation and Unicode-space mapping, line endings, and per-line trailing whitespace are normalized automatically."
         ))
     } else {
         ToolError::execution_failed(format!(
-            "Could not find edits[{index}] in {path}. The oldText must match exactly including all whitespace and newlines."
+            "Could not find edits[{index}] in {path}. The oldText must match the file exactly; only NFKC Unicode folding, punctuation and Unicode-space mapping, line endings, and per-line trailing whitespace are normalized automatically."
         ))
     }
 }

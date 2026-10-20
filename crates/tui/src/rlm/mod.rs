@@ -15,8 +15,8 @@
 //! ```
 //!
 //! Invariants:
-//! - `P` is held only as a REPL variable (`context` / `ctx`); never
-//!   appears in the root LLM's window.
+//! - `P` is held only as a REPL variable (`_context`, alias `content`);
+//!   never appears in the root LLM's window.
 //! - The root LLM receives small metadata messages — length, preview,
 //!   helper list, prior-round summary.
 //! - Code rounds and sub-LLM calls travel over a single stdin/stdout

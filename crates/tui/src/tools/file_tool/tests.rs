@@ -543,6 +543,22 @@ fn advertised_actions_match_the_actions_that_dispatch() {
 }
 
 #[test]
+fn edit_description_discloses_only_the_contract_fallback() {
+    // The canonical contract path normalizes Unicode (NFKC), punctuation,
+    // Unicode spaces, line endings, and per-line trailing whitespace; it
+    // does NOT tolerate indentation drift (that is the hidden `edit_file`
+    // path). Round-1 review pin: the description must not borrow
+    // edit_file's fallback claims; round-2 review pin: it must disclose
+    // the NFKC fold the matcher actually performs.
+    let d = EditTool.description();
+    assert!(d.contains("NFKC"));
+    assert!(d.contains("punctuation and Unicode-space mapping"));
+    assert!(d.contains("per-line trailing whitespace"));
+    assert!(d.contains("indentation must still match exactly"));
+    assert!(!d.contains("leading-whitespace-tolerant"));
+}
+
+#[test]
 fn primitive_schemas_are_separate_and_small_contract_shaped() {
     assert_eq!(ReadTool.name(), "read");
     assert_eq!(WriteTool.name(), "write");

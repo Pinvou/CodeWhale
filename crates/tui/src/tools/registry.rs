@@ -25,6 +25,13 @@ use super::spec::{
     ToolResultContentBlock, ToolSpec,
 };
 
+/// Footer appended by the legacy classic-routing path when a tool result is
+/// preview-truncated. It must never cite the `last_tool_result` workshop
+/// variable — nothing can read that back (`promote_to_context` never
+/// shipped) — so the only followable advice is narrowing the rerun.
+const CLASSIC_TRUNCATION_FOOTER: &str =
+    "\n… [output truncated — rerun the tool with narrower arguments for the remaining detail]";
+
 // === Types ===
 
 /// Registry that holds all available tools.
@@ -186,7 +193,7 @@ impl ToolRegistry {
                     let preview_chars = 1_200usize;
                     let preview: String = result.content.chars().take(preview_chars).collect();
                     let ellipsis = if result.content.chars().count() > preview_chars {
-                        "\n… [output truncated — full text in workshop variable `last_tool_result`]"
+                        CLASSIC_TRUNCATION_FOOTER
                     } else {
                         ""
                     };

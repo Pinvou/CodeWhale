@@ -187,7 +187,7 @@ pub(super) fn format_tool_error_with_schema(
             format!("Tool '{tool_name}' is missing required field '{field}'")
         }
         ToolError::PathEscape { path } => format!(
-            "Path escapes workspace: {}. Use a workspace-relative path or enable trust mode.",
+            "Path escapes the workspace boundary: {}. Relative paths resolve against the primary workspace; use the absolute spelling of a folder listed under Accessible folders, or enable trust mode.",
             path.display()
         ),
         ToolError::ExecutionFailed { message } => message.clone(),

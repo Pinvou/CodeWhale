@@ -2292,13 +2292,13 @@ impl NamedFleetConfigToml {
 /// See `config.example.toml` for documentation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkflowConfigToml {
-    /// Allow the parent agent to auto-launch Workflow for multi-agent work.
-    /// Product default is on; set `false` to require explicit `/workflow`.
+    /// Reserved: currently not consumed by launch gating — auto-start
+    /// approval is governed by [`Self::auto_start_read_only`] and
+    /// [`Self::require_approval_for_writes`]. Product default is on.
     #[serde(default = "default_workflow_automatic")]
     pub automatic: bool,
-    /// When automatic launch is enabled, start read-only child plans without
-    /// an approval card. Write/shell/network plans still consult
-    /// [`Self::require_approval_for_writes`].
+    /// Start read-only child plans without an approval card. Write/shell/
+    /// network plans still consult [`Self::require_approval_for_writes`].
     #[serde(default = "default_workflow_auto_start_read_only")]
     pub auto_start_read_only: bool,
     /// Require an operator approval card before launching plans that write,

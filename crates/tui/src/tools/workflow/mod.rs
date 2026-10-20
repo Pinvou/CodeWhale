@@ -976,7 +976,7 @@ impl ToolSpec for WorkflowTool {
             "For parallel fan-out, pass an array of zero-argument thunks exactly like `await parallel([() => task({...}), () => task({...})])`; do not pass task promises as variadic arguments. ",
             "Provide exactly one of script, source_path, or plan (structured planner JSON). ",
             "Use action=start for detached orchestration and action=status with run_id to inspect progress. Use action=run when the model needs the final result before continuing. ",
-            "Start a workflow on your own only for broad or staged work (the session [workflow].automatic table, default on). An explicit /workflow invocation is authorization. Do not start a workflow for one-file edits or simple questions."
+            "Start a workflow on your own only for broad or staged work; whether a start runs immediately or asks the user depends on the session's workflow approval settings (read-only plans may auto-start, writes may require an approval card). An explicit /workflow invocation is authorization. Do not start a workflow for one-file edits or simple questions."
         )
     }
 

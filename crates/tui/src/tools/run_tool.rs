@@ -84,11 +84,11 @@ impl ToolSpec for RunTool {
                 },
                 "args": {
                     "type": "string",
-                    "description": "Extra arguments for cargo test (action=tests)"
+                    "description": "Extra arguments for cargo test (action=tests; rejected by action=verifiers)"
                 },
                 "all_features": {
                     "type": "boolean",
-                    "description": "Include --all-features for cargo test (action=tests)"
+                    "description": "Include --all-features for cargo test (action=tests; rejected by action=verifiers)"
                 },
                 "profile": {
                     "type": "string",

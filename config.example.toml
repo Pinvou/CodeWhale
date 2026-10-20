@@ -1181,15 +1181,24 @@ exponential_base = 2.0
 # ─────────────────────────────────────────────────────────────────────────────────
 # Workshop / Large-Output Routing (#548)
 # ─────────────────────────────────────────────────────────────────────────────────
-# Tool outputs exceeding `large_output_threshold_tokens` are routed through a
-# V4-Flash synthesis sub-agent.  Only the synthesis reaches the parent context;
-# the raw text is stored in the workshop variable `last_tool_result` so the
-# parent can call `promote_to_context` later if it needs the full content.
+# By default, tool outputs exceeding `large_output_threshold_tokens` are
+# classified by the adaptive evidence router (#4619): host-side
+# `evidence_routing` metadata steers the spill, and oversized bodies reach the
+# model as evidence artifacts plus a bounded preview instead of entering the
+# parent context wholesale. The legacy
+# workshop-synthesis behavior (truncate to a preview, store the raw text in
+# the in-memory `last_tool_result` variable) survives only behind the
+# `CODEWHALE_CLASSIC_OUTPUT_ROUTING` rollback switch — and that variable is
+# diagnostics-only: `promote_to_context` never shipped, so no tool can read
+# it back.
 #
-# Per-tool overrides let high-volume tools (e.g. Bash) use tighter
-# thresholds without changing the global default. Name tools by the identifiers
-# the model actually sees — `exec_shell`, `grep_files`, and `web_search` were
-# retired and an override keyed to them matches nothing.
+# Per-tool overrides let high-volume tools (e.g. bash) use tighter
+# thresholds without changing the global default; they apply to the adaptive
+# router's threshold too. Name tools by the identifier that actually
+# executes — the shell tool is `bash` (`exec_shell` was retired), `grep_files`
+# is the live search name, and the web tool is `Web`. A key with a live name
+# matches; `web_search` runs inside `Web` and is not a registered name, so a
+# key with it (or with `exec_shell`) matches nothing.
 #
 # There is no per-call `raw = true` escape. It was documented here, but
 # `raw = true` on a tool call does NOT bypass routing: the adaptive router
@@ -1205,8 +1214,8 @@ exponential_base = 2.0
 # # read_result_max_bytes = 102400
 # # tool_result_max_bytes = 102400
 # [workshop.per_tool_thresholds]
-# Bash = 2048          # shell output synthesised aggressively
-# Web  = 8192          # web results can be large; give them more room
+# bash = 2048          # shell output routed aggressively
+# Web = 8192           # Web results can be large; give them more room
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # Profile Example (for multiple environments)
@@ -1528,10 +1537,10 @@ default_text_model = "deepseek-ai/deepseek-v4-pro"
 # omitted entirely, the runtime uses these product defaults. Later launch,
 # approval, and activity-persistence paths all read through this one model.
 # [workflow]
-# # Allow the parent agent to auto-launch Workflow for multi-agent work.
-# # Set false to require an explicit `/workflow` opt-in.
+# # Reserved: currently not consumed by launch gating — auto-start approval
+# # is governed by auto_start_read_only / require_approval_for_writes.
 # automatic = true
-# # Auto-start read-only plans without an approval card when automatic is on.
+# # Auto-start read-only plans without an approval card.
 # auto_start_read_only = true
 # # Require an approval card before write/shell/network/high-budget launches.
 # require_approval_for_writes = true

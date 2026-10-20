@@ -149,7 +149,7 @@ fn agent_list_event(manager: &SubAgentManager, active_session_id: &str) -> Event
 }
 
 const MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE: &str = "runtime:mcp-registry-first";
-const MCP_REGISTRY_FIRST_INSTRUCTION: &str = "## MCP Registry-first policy\n\nFor any task centered on a specialized capability, including media or document conversion, data transformation, browser automation, database or service access, or a developer utility, you must call `registry_sync` with a `query` describing that capability before `bash`, the `Web` tool, code execution, local programs, custom code, or a manual implementation. If `registry_sync` is not in your tool list, run `tool_search` first to activate it; if it cannot be surfaced or called at all, Registry access is unavailable in this session — use local tools instead. It scores the local Registry snapshot host-side and returns at most eight matches; the full catalog never enters the conversation. Treat a returned server as a match when it plausibly covers the core capability; wording need not be exact. If any plausible match exists, you must call `start_registry_mcp_server` with its exact name and inspect its tools before considering a local alternative; activate it via `tool_search` as well, since activating `registry_sync` does not activate it. If nothing matches, refine the query once; a still-empty refined result means every Registry entry is clearly irrelevant. An installed or familiar shell command is not a reason to skip Registry discovery. Use local tools directly only for ordinary repo-native work and simple file operations, or after the matching server fails to start.";
+const MCP_REGISTRY_FIRST_INSTRUCTION: &str = "## MCP Registry-first policy\n\nFor any task centered on a specialized capability, including media or document conversion, data transformation, browser automation, database or service access, or a developer utility, you must call `registry_sync` with a `query` describing that capability before `bash`, the `Web` tool, code execution, local programs, custom code, or a manual implementation. If `registry_sync` is not in your tool list, run `tool_search` first to activate it; if it cannot be surfaced or called at all, Registry access is unavailable in this session — use local tools instead. It scores the local Registry snapshot host-side and returns at most eight matches; the full catalog never enters the conversation. Treat a returned server as a match when it plausibly covers the core capability; wording need not be exact. If any plausible match exists, you must call `start_registry_mcp_server` with its exact name and inspect its tools before considering a local alternative; activate it via `tool_search` as well, since activating `registry_sync` does not activate it. If nothing matches, refine the query once; a still-empty refined result means the visible snapshot has no relevant entry — on a fresh install the snapshot may still be downloading, so conclude the Registry cannot help this task and proceed with local tools rather than retrying. An installed or familiar shell command is not a reason to skip Registry discovery. Use local tools directly only for ordinary repo-native work and simple file operations, or after the matching server fails to start.";
 const ISOLATED_CHAT_ENGINE_PROMPT: &str = "You are Codewhale Chat. Answer the user's request directly and conversationally. This isolated chat-only session has no local workspace, project, memory, skill, account, credential, path, runtime context, or tools.";
 
 fn sanitize_isolated_chat_attachments(mut text: String) -> String {
@@ -1233,8 +1233,8 @@ pub struct Engine {
     /// always returns `None` from `diagnostics_for`.
     lsp_manager: Arc<crate::lsp::LspManager>,
     /// Session-scoped workshop variable store (#548). Shared across all tool
-    /// calls so `last_tool_result` persists within the session and can be
-    /// promoted to the parent context via `promote_to_context`.
+    /// calls; `last_tool_result` persists within the session for diagnostics
+    /// only — no tool can read it back (`promote_to_context` never shipped).
     workshop_vars: Option<
         std::sync::Arc<tokio::sync::Mutex<crate::tools::large_output_router::WorkshopVariables>>,
     >,
@@ -4383,7 +4383,7 @@ impl Engine {
             } else {
                 String::new()
             };
-            lines.push(format!("Accessible folders: {listed}{suffix}"));
+            lines.push(format!("Accessible folders: {listed}{suffix}; relative paths resolve against Current workspace — use these absolute spellings to reach these folders"));
         }
         lines.extend([
             format!(

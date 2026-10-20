@@ -70,7 +70,7 @@ impl ToolSpec for ValidateDataTool {
                     "type": "string",
                     "enum": ["auto", "json", "toml"],
                     "default": "auto",
-                    "description": "Validation format. 'auto' infers from extension then falls back to trying both."
+                    "description": "Validation format. 'auto' validates strictly as the format the extension names when it is recognized (json/toml); only an absent or unrecognized extension tries both."
                 }
             },
             "additionalProperties": false

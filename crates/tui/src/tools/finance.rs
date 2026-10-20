@@ -206,7 +206,7 @@ impl ToolSpec for FinanceTool {
                 },
                 "type": {
                     "type": "string",
-                    "description": "Optional asset type hint. Currently only `crypto` affects resolution (appends -USD to a bare symbol); other values are accepted and ignored."
+                    "description": "Optional asset type hint. A bare `BTC` is always resolved to `BTC-USD`; `crypto` appends -USD to any other bare symbol; other values are accepted and ignored."
                 },
                 "market": {
                     "type": "string",

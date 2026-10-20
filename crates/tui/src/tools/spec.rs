@@ -720,9 +720,11 @@ pub struct ToolExecutionState {
     /// Exact active route capability facts. Unknown stays fail-closed.
     pub(crate) route_capabilities: codewhale_config::route::RouteCapabilities,
 
-    /// Per-session workshop variable store (#548). Holds the raw content of
-    /// the most recent large-tool routing event so the parent can call
-    /// `promote_to_context` later. `None` when the router is disabled.
+    /// Per-session workshop variable store (#548). Only the classic-output
+    /// rollback path stores anything here: the raw content of the most recent
+    /// large-tool routing event, kept for diagnostics — no tool can read it
+    /// back (`promote_to_context` never shipped). `None` when the router is
+    /// disabled.
     pub workshop_vars: Option<
         std::sync::Arc<tokio::sync::Mutex<crate::tools::large_output_router::WorkshopVariables>>,
     >,

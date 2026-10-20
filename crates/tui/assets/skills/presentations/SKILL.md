@@ -1,11 +1,15 @@
 ---
 name: presentations
-description: Compatibility alias for the pptx skill. Prefer loading pptx.
+description: Compatibility stub owning the legacy name presentations; the pptx skill provides the workflow.
 aliases-for: pptx
 ---
 
-# presentations (alias)
+# presentations (compatibility stub)
 
-This skill is a compatibility alias for **pptx**.
+This stub exists so the legacy name `presentations` keeps resolving. It contains no
+workflow of its own.
 
-Load and follow the `pptx` skill body for the actual workflow.
+If the `pptx` skill is installed and enabled, load_skill("pptx") returns
+it directly. If loading `pptx` returns this stub again, `pptx` is not
+installed or is disabled — tell the user, and continue with generic guidance
+for this file type instead of retrying.

@@ -365,7 +365,7 @@ fn markdown_title(body: &str) -> Option<String> {
 
 fn js_required_error(url: &str) -> ToolError {
     ToolError::execution_failed(format!(
-        "No readable page content was found at {url}; the page may require JavaScript. Recovery: use browser automation for this URL."
+        "No readable page content was found at {url}; the page may require JavaScript. Recovery: if your session provides browser tools (check with `tool_search`), render the page there; otherwise report that this page needs JavaScript and cannot be read here."
     ))
 }
 
@@ -899,7 +899,8 @@ mod tests {
 
         let message = error.to_string();
         assert!(message.contains("may require JavaScript"));
-        assert!(message.contains("browser automation"));
+        assert!(message.contains("browser tools"));
+        assert!(!message.contains("browser automation"));
     }
 
     #[tokio::test]

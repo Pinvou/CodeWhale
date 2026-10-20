@@ -317,7 +317,7 @@ impl ToolSpec for ApplyPatchTool {
     }
 
     fn description(&self) -> &'static str {
-        "Apply a unified-diff patch (multi-hunk, multi-file) or full-file replacements via `replace`. Use this instead of `git apply` or `patch` in `bash`, or repeated `edit` calls — single transactional change with fuzzy matching and a rendered diff."
+        "Apply a unified-diff patch (multi-hunk, multi-file) or full-file replacements via `replace`. Use this instead of `git apply` or `patch` in `bash`, or repeated `edit` calls — single transactional change with fuzzy matching; the compact JSON result reports counts and touched files (the UI renders the diff)."
     }
 
     fn input_schema(&self) -> Value {
@@ -358,7 +358,7 @@ impl ToolSpec for ApplyPatchTool {
                 },
                 "fuzz": {
                     "type": "integer",
-                    "description": "Maximum fuzz factor for fuzzy matching (default: 3)"
+                    "description": "Maximum fuzz factor (default: 3; hard cap 50)"
                 },
                 "create_if_missing": {
                     "type": "boolean",
@@ -366,7 +366,7 @@ impl ToolSpec for ApplyPatchTool {
                 },
                 "expected_hash": {
                     "type": "string",
-                    "description": "Optional sha256:<hex> of the complete target file bytes; a mismatch refuses the patch without writing. Compute it with `bash`; `read` does not return a hash. Verifies the `path` argument when given, otherwise the first file the patch touches; other files in a multi-file patch are not hash-checked."
+                    "description": "Optional sha256:<hex> of the complete target file bytes; a mismatch refuses the patch without writing. Compute it over the complete file bytes yourself, for example with `bash`: `sha256sum <path>`; `read` does not report a hash. For unified-diff `patch` input this verifies the `path` argument when given, otherwise the first file the patch touches; with `replace` the `path` argument is ignored and the first file in the `replace` array is checked. Other files in a multi-file patch are not hash-checked."
                 }
             },
             "oneOf": [
@@ -546,7 +546,7 @@ fn verify_patch_expected_hash(
         "`apply_patch` refused: {target} changed since it was read. \
          expected_hash was {expected} but the file is now {actual}, so nothing was written. \
          Recovery: call `read` path=\"{target}\" to get the current contents \
-         then rebuild the patch. If retaining expected_hash, recompute the SHA-256 of the complete file bytes with `bash` and use the sha256: prefix; `read` does not return a hash."
+         then rebuild the patch. If retaining expected_hash, recompute the SHA-256 of the complete file bytes with `bash` and use the sha256: prefix; `read` does not report a hash."
     )))
 }
 
@@ -1423,7 +1423,7 @@ fn format_hunk_no_match_error(
             let expected_preview = preview_expected_lines(hunk, HUNK_PREVIEW_LINES).join("\n");
             let file_preview = snippet_around(lines, *adjusted_line, SNIPPET_RADIUS).join("\n");
             format!(
-                "could not find matching context near line {expected_line} (searched around line {adjusted_line} with offset {offset:+} and fuzz up to {max_fuzz}). Expected context preview:\n{expected_preview}\nFile snippet near line {adjusted_line}:\n{file_preview}\nHints: the line numbers may be stale after earlier edits — call `read` to re-check the current contents, ensure the patch matches the file, increase `fuzz`, or regenerate the patch."
+                "could not find matching context near line {expected_line} (searched around line {adjusted_line} with offset {offset:+} and fuzz up to {max_fuzz}). Expected context preview:\n{expected_preview}\nFile snippet near line {adjusted_line}:\n{file_preview}\nHints: the line numbers may be stale after earlier edits — call `read` to re-check the current contents, ensure the patch matches the file, increase `fuzz` (up to 50), or regenerate the patch."
             )
         }
         ApplyHunkError::ContextAmbiguous {
@@ -1624,6 +1624,54 @@ mod tests {
 
     fn parse_patch_result(result: ToolResult) -> PatchResult {
         serde_json::from_str(&result.content).expect("patch result json")
+    }
+
+    #[test]
+    fn expected_hash_schema_teaches_bash_recompute_and_replace_array() {
+        // Round-2 review pin: the model-visible `read` reports no hash (the
+        // `content_hash` emission belongs to the hidden `read_file`/`File`
+        // readers), so the schema must send the model to recompute the
+        // SHA-256 itself — e.g. via `bash` — and must name the `replace`
+        // array input (alias `changes`), never a nonexistent `files` input
+        // or a hash `read` never prints.
+        let schema = ApplyPatchTool.input_schema();
+        let description = schema["properties"]["expected_hash"]["description"]
+            .as_str()
+            .expect("expected_hash description");
+        assert!(description.contains("sha256:<hex>"));
+        assert!(description.contains("`bash`"));
+        assert!(description.contains("the `replace` array"));
+        assert!(!description.contains("content_hash"));
+        assert!(!description.contains("in `files`"));
+    }
+
+    #[test]
+    fn fuzz_schema_and_no_match_hint_disclose_the_hard_cap() {
+        // The schema must state the silent `.min(MAX_FUZZ)` clamp, and the
+        // NoMatch hint must tell the model the ceiling it may raise `fuzz` to,
+        // so the model-facing text keeps matching actual behavior.
+        let schema = ApplyPatchTool.input_schema();
+        let description = schema["properties"]["fuzz"]["description"]
+            .as_str()
+            .expect("fuzz description");
+        assert!(description.contains("default: 3"), "{description}");
+        assert!(description.contains("hard cap 50"), "{description}");
+
+        let lines = vec!["line1".to_string(), "line2".to_string()];
+        let hunk = Hunk {
+            old_start: 5,
+            old_count: 1,
+            new_start: 5,
+            new_count: 1,
+            lines: vec![HunkLine::Context("missing".to_string())],
+        };
+        let err = ApplyHunkError::NoMatch {
+            expected_line: 5,
+            adjusted_line: 0,
+            offset: 0,
+        };
+        let message = format_hunk_no_match_error(&lines, &hunk, &err, MAX_FUZZ);
+        assert!(message.contains("increase `fuzz` (up to 50)"), "{message}");
     }
 
     #[test]
@@ -2926,7 +2974,7 @@ diff --git a/b.txt b/b.txt
         assert!(message.contains("nothing was written"), "{message}");
         assert!(message.contains("call `read`"), "{message}");
         assert!(
-            message.contains("`read` does not return a hash"),
+            message.contains("`read` does not report a hash"),
             "{message}"
         );
         assert!(!message.contains("File"), "{message}");
@@ -2994,6 +3042,40 @@ diff --git a/two.txt b/two.txt
         assert_eq!(
             fs::read_to_string(tmp.path().join("two.txt")).unwrap(),
             "two\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn replace_expected_hash_checks_the_first_replace_entry_not_path() {
+        // Round-4 review pin: with `replace` input the top-level `path` is
+        // ignored and the first `replace` entry is hash-checked, exactly as
+        // the schema discloses. A decoy `path` whose live bytes do not match
+        // expected_hash must therefore not block the patch.
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        fs::write(tmp.path().join("target.txt"), "alpha\n").expect("write");
+        fs::write(tmp.path().join("decoy.txt"), "beta\n").expect("write");
+
+        ApplyPatchTool
+            .execute(
+                json!({
+                    "path": "decoy.txt",
+                    "replace": [{ "path": "target.txt", "content": "alpha edited\n" }],
+                    "expected_hash": content_hash(b"alpha\n"),
+                }),
+                &ctx,
+            )
+            .await
+            .expect("the first replace entry's hash must gate, not `path`");
+
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("target.txt")).expect("read"),
+            "alpha edited\n"
+        );
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("decoy.txt")).expect("read"),
+            "beta\n",
+            "the ignored `path` file must stay untouched"
         );
     }
 

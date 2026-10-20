@@ -13,8 +13,8 @@ Use this skill for any task where a PDF is the primary input or output.
    watermark, redact, fill forms, encrypt/decrypt, or create.
 2. Preserve originals. Write outputs with explicit names.
 3. Use the most reliable available tool:
-   - the built-in `read` tool for basic text extraction from PDFs
-   - `pdftotext`, `pdfinfo`, `qpdf`, or `mutool` when installed
+   - `pdftotext` for text extraction, `pdfinfo` for page counts, and
+     `qpdf` or `mutool` for split/merge/rotate — via `bash` when installed
    - Python libraries such as `pypdf`, `pdfplumber`, `PyMuPDF`, or
      `reportlab` when available
    - OCR tools only for scanned pages

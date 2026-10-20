@@ -33,7 +33,7 @@ const MAX_CONSECUTIVE_NO_CODE: u32 = 3;
 /// Max output tokens for the root LLM — it just needs to generate code.
 /// Max chars of stdout shown as metadata to the root LLM in next iteration.
 const STDOUT_METADATA_PREVIEW_LEN: usize = 800;
-/// Max chars of `context` shown as a preview in the metadata.
+/// Max chars of `_context` shown as a preview in the metadata.
 const PROMPT_PREVIEW_LEN: usize = 500;
 /// Temperature for root LLM calls.
 /// Bound on conversation history we keep across iterations.
@@ -46,14 +46,15 @@ const MAX_HISTORY_MESSAGES: usize = 20;
 /// How an RLM turn ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RlmTermination {
-    /// `FINAL(value)` was called inside the REPL or `FINAL(...)` appeared
-    /// at the top of the model's response on its own line.
+    /// `finalize(value)` — or a legacy `FINAL`/`FINAL_VAR` alias — was
+    /// called inside the REPL, or a top-level `FINAL(...)` appeared on its
+    /// own line.
     Final,
     /// The model failed to emit a `repl` block for too many rounds in a
     /// row. The accumulated last response text is surfaced as the answer
     /// rather than being thrown away.
     NoCode,
-    /// Iteration cap reached without `FINAL`.
+    /// Iteration cap reached without `finalize()`.
     Exhausted,
     /// Hard error — LLM call failed, REPL crashed, timeout.
     Error,
@@ -83,12 +84,12 @@ pub struct RlmTurnResult {
     /// Per-round trace. Empty when the loop never reached the REPL.
     pub trace: Vec<RlmRoundTrace>,
     /// Total sub-LLM RPCs made by the sub-agent (sum of `rpc_count` across
-    /// rounds). Useful for verifying that the model engaged with `context`
+    /// rounds). Useful for verifying that the model engaged with `_context`
     /// rather than answering directly.
     pub total_rpcs: u32,
 }
 
-/// Run a full RLM turn. `prompt` is loaded into the REPL as `context`; it
+/// Run a full RLM turn. `prompt` is loaded into the REPL as `_context`; it
 /// never enters the root LLM's window.
 pub async fn run_rlm_turn(
     client: &DeepSeekClient,
@@ -188,7 +189,7 @@ async fn run_rlm_turn_impl(
     let mut trace: Vec<RlmRoundTrace> = Vec::new();
     let mut total_rpcs: u32 = 0;
 
-    // 1. Stage `context` to a temp file. The REPL reads it on bootstrap so
+    // 1. Stage `_context` to a temp file. The REPL reads it on bootstrap so
     //    the big string never enters the process command line and doesn't
     //    show up in `ps`.
     let ctx_path = match write_context_file(&prompt) {
@@ -313,7 +314,7 @@ async fn run_rlm_turn_impl(
                     iterations: iteration + 1,
                     duration: start.elapsed(),
                     error: Some(format!(
-                        "RLM root model response incomplete: provider stop reason `{reason}`; partial FINAL/REPL output was not accepted."
+                        "RLM root model response incomplete: provider stop reason `{reason}`; partial finalize/REPL output was not accepted."
                     )),
                     usage: total_usage,
                     termination: RlmTermination::Error,
@@ -362,7 +363,7 @@ async fn run_rlm_turn_impl(
                                    from the preview alone. Emit a ```repl block now that uses \
                                    `llm_query`, `sub_query_sequence`, or an explicitly independent \
                                    `llm_query_batched(..., dependency_mode=\"independent\")` against \
-                                   `context` to actually compute the answer."
+                                   `_context` to actually compute the answer."
                                 .to_string(),
                             cache_control: None,
                         }],
@@ -422,7 +423,7 @@ async fn run_rlm_turn_impl(
                             text: "Reminder: emit Python inside a ```repl … ``` fence. \
                                    Use `llm_query`, `sub_query_sequence`, or \
                                    `llm_query_batched(..., dependency_mode=\"independent\")` to \
-                                   process `context` and call `FINAL(value)` when done."
+                                   process `_context` and call `finalize(value)` when done."
                                 .to_string(),
                             cache_control: None,
                         }],
@@ -616,7 +617,7 @@ async fn run_rlm_turn_impl(
             iterations: MAX_RLM_ITERATIONS,
             duration: start.elapsed(),
             error: Some(format!(
-                "RLM loop exhausted after {MAX_RLM_ITERATIONS} iterations without FINAL"
+                "RLM loop exhausted after {MAX_RLM_ITERATIONS} iterations without finalize()"
             )),
             usage: total_usage,
             termination: RlmTermination::Exhausted,
@@ -679,7 +680,7 @@ fn build_root_request(
 
 /// Build `Metadata(state)` from the paper. Surfaces:
 /// - the small `root_prompt` (if any) — repeated each iteration
-/// - `context` length + preview
+/// - `_context` length + preview
 /// - the REPL helpers
 /// - the previous round's code summary + stdout preview
 fn build_metadata_message(
@@ -702,14 +703,19 @@ fn build_metadata_message(
         parts.push(format!("> {}", truncate_text(rp.trim(), 600)));
         parts.push(String::new());
     }
-    parts.push("**`context`** — the long input lives in the REPL only".to_string());
+    parts.push(
+        "**Input** — the long input lives in the REPL only, as `_context` (alias `content`)"
+            .to_string(),
+    );
     parts.push(format!("- Length: {prompt_len} chars"));
     parts.push(format!("- Preview: \"{prompt_preview}\""));
     parts.push(String::new());
 
     parts.push("**REPL helpers** (use inside ```repl blocks)".to_string());
-    parts.push("- `context` / `ctx`                       — the full input string".to_string());
-    parts.push("- `len(context)` / `context[a:b]` / `context.splitlines()` — slice it".to_string());
+    parts.push("- `_context` / `content`                 — the full input string".to_string());
+    parts.push(
+        "- `len(_context)` / `_context[a:b]` / `_context.splitlines()` — slice it".to_string(),
+    );
     parts.push(
         "- `chunk_context(max_chars=20000, overlap=0)` — full-coverage chunks with index/start/end/text"
             .to_string(),
@@ -745,10 +751,10 @@ fn build_metadata_message(
     parts.push("- `SHOW_VARS()`                          — list user variables".to_string());
     parts.push("- `repl_set(name, value)` / `repl_get(name)` — explicit store".to_string());
     parts.push(
-        "- `FINAL(value)`                         — end the loop with this answer".to_string(),
+        "- `finalize(value, confidence=None)`     — end the loop with this answer".to_string(),
     );
     parts.push(
-        "- `FINAL_VAR(name)`                      — end the loop with a variable's value"
+        "- `evaluate_progress()`                  — inspect whether a final answer exists"
             .to_string(),
     );
     parts.push(String::new());
@@ -1041,12 +1047,17 @@ mod tests {
     fn build_metadata_contains_key_information() {
         let msg = build_metadata_message("Hello, world!", None, 0, None, None);
         let text = extract_text_blocks(&msg.content);
-        assert!(text.contains("context"));
+        assert!(text.contains("_context"));
+        assert!(!text.contains("`context` / `ctx`"));
         assert!(text.contains("Hello, world!"));
         assert!(text.contains("round 0"));
         assert!(text.contains("llm_query"));
         assert!(text.contains("rlm_query"));
-        assert!(text.contains("FINAL"));
+        assert!(text.contains("finalize(value, confidence=None)"));
+        assert!(text.contains("evaluate_progress()"));
+        // The metadata teaches the canonical surface only; no legacy alias
+        // name may return (round-2 review pin).
+        assert!(!text.contains("FINAL"));
     }
 
     #[test]

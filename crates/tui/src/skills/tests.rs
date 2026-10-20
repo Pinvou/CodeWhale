@@ -256,6 +256,65 @@ fn forkguard_mcp_discovery_skill_conditions_registry_commands() {
         !SKILL.contains("`exec_shell`"),
         "exec_shell is a retired alias; cite `bash` instead:\n{SKILL}"
     );
+    assert!(
+        SKILL.contains("may still be downloading"),
+        "the fresh-install snapshot caveat must stay disclosed:\n{SKILL}"
+    );
+    assert!(
+        !SKILL.contains("clearly irrelevant"),
+        "the false fresh-install verdict must not return:\n{SKILL}"
+    );
+}
+
+// Round-2 review pin: the bundled pdf skill must not route text extraction
+// through the built-in `read` tool — the model-visible `read` has no PDF
+// branch and returns lossy binary (extraction lives in the hidden
+// `read_file`); the skill must teach the installed CLI/Python routes.
+#[test]
+fn forkguard_pdf_skill_does_not_teach_read_for_extraction() {
+    const SKILL: &str = include_str!("../../assets/skills/pdf/SKILL.md");
+    assert!(
+        !SKILL.contains("the built-in `read` tool"),
+        "pdf skill must not send extraction to the lossy visible `read`:\n{SKILL}"
+    );
+    assert!(
+        SKILL.contains("`pdftotext`"),
+        "pdf skill must name the pdftotext route:\n{SKILL}"
+    );
+}
+
+// Round-6 review pin: `codewhale mcp` is the clap CLI — `add` takes a
+// positional server name plus `--command`/`--url`/`--arg` flags, and the
+// `mcp tools` listing verb exists (the `mcp init` output itself recommends
+// it). The `/mcp add stdio|http|recommended` positional forms are the
+// in-session TUI command, which no model tool can invoke; teaching them as
+// `codewhale mcp` commands ships commands that fail with an argument error.
+#[test]
+fn forkguard_mcp_skills_teach_real_cli_forms() {
+    const MCP_BUILDER: &str = include_str!("../../assets/skills/mcp-builder/SKILL.md");
+    const FEISHU: &str = include_str!("../../assets/skills/feishu/SKILL.md");
+    for (name, skill) in [("mcp-builder", MCP_BUILDER), ("feishu", FEISHU)] {
+        assert!(
+            skill.contains("codewhale mcp add"),
+            "{name} must teach the `codewhale mcp add` CLI:\n{skill}"
+        );
+        assert!(
+            skill.contains("--command") || skill.contains("--url"),
+            "{name} must teach the flag forms the CLI actually parses:\n{skill}"
+        );
+        assert!(
+            skill.contains("codewhale mcp tools"),
+            "{name} must teach `codewhale mcp tools`, which exists:\n{skill}"
+        );
+        assert!(
+            !skill.contains("mcp add stdio") && !skill.contains("mcp add http"),
+            "{name} must not teach `/mcp` slash forms as `codewhale mcp` CLI commands:\n{skill}"
+        );
+        assert!(
+            !skill.contains("no `mcp tools` listing verb"),
+            "{name} must not claim the `mcp tools` verb is missing:\n{skill}"
+        );
+    }
 }
 
 #[test]

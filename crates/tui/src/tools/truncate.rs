@@ -367,10 +367,12 @@ pub const SPILLOVER_RECOVERY_HINT: &str = "omitted range recovery:";
 ///
 /// The distinction that matters is retrievability, not tidiness. An adaptive
 /// session artifact carries an `art_<id>` the retrieval tool resolves, so name
-/// it. A legacy global spillover is authorized by an ownership sidecar whose
-/// write is allowed to fail (see [`publish_legacy_spillover_ownership`]), so
-/// promising retrieval there would just be a fourth dead route; say plainly
-/// that there is no tool call for it and name what does work instead.
+/// it. A legacy global spillover is authorized by an ownership sidecar
+/// published at spill time (see [`publish_legacy_spillover_ownership`]);
+/// `retrieve_tool_result` resolves the bare call id, the sha, or the printed
+/// path and reads it back through that sidecar, so the classic footer names
+/// that route and keeps the narrower rerun as the fallback for the rare case
+/// the best-effort sidecar write failed.
 fn spillover_recovery_instruction(retrieval_ref: Option<&str>) -> String {
     match retrieval_ref {
         Some(reference) => format!(
@@ -379,8 +381,9 @@ fn spillover_recovery_instruction(retrieval_ref: Option<&str>) -> String {
              mode=\"query\" with query=\"…\" to search it)"
         ),
         None => format!(
-            "{SPILLOVER_RECOVERY_HINT} no tool call reaches this copy — re-run the command \
-             with narrower output (a tighter filter, or head/tail) if you need the rest"
+            "{SPILLOVER_RECOVERY_HINT} full copy kept out of context; read it back with \
+             retrieve_tool_result using this call's id or the spillover path — re-run the \
+             command with narrower output (a tighter filter, or head/tail) if you need it fresh"
         ),
     }
 }
@@ -949,18 +952,20 @@ mod tests {
         assert!(!footer.contains("sed"), "{footer}");
     }
 
-    /// The legacy global copy has no guaranteed authorization sidecar, so the
-    /// footer must not invent a fourth dead route — but it still must not name
-    /// the three it used to.
+    /// The legacy global copy is authorized by an ownership sidecar published
+    /// at spill time; `retrieve_tool_result` resolves the bare call id or the
+    /// printed path through it. The footer must teach that working route and
+    /// keep the narrower rerun as the fallback.
     #[test]
-    fn truncation_footer_without_an_artifact_promises_nothing_it_cannot_deliver() {
+    fn truncation_footer_without_an_artifact_names_the_legacy_retrieval_route() {
         let footer = spillover_preview_footer(4096, 120, "/tmp/tool_outputs/call-1.txt", None);
 
+        assert!(footer.contains("retrieve_tool_result"), "{footer}");
         assert!(
-            footer.contains("no tool call reaches this copy"),
+            footer.contains("this call's id or the spillover path"),
             "{footer}"
         );
-        assert!(!footer.contains("retrieve_tool_result"), "{footer}");
+        assert!(footer.contains("re-run the command"), "{footer}");
         assert!(!footer.contains("read_file"), "{footer}");
         assert!(!footer.contains("sed"), "{footer}");
     }
@@ -1228,9 +1233,11 @@ mod tests {
             assert!(result.content.contains(&path.display().to_string()));
             assert!(result.content.contains(SPILLOVER_RECOVERY_HINT));
             assert!(
-                !result.content.contains("retrieve_tool_result"),
-                "legacy spillover ownership can fail to publish; promising \
-                 retrieval here would be another dead route"
+                result
+                    .content
+                    .contains("read it back with retrieve_tool_result"),
+                "the classic footer must teach the working retrieval route: {}",
+                &result.content[result.content.len().saturating_sub(400)..]
             );
             assert!(!result.content.contains("read_file"));
             assert!(!result.content.contains("sed"));

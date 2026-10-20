@@ -38,7 +38,9 @@ pub(super) fn run_gh_text(context: &ToolContext, args: &[&str]) -> Result<String
         .output()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                ToolError::not_available("gh CLI not found; install it or set DEEPSEEK_GH_BIN")
+                ToolError::not_available(
+                    "gh CLI not found; install it or set CODEWHALE_GH_BIN (legacy: DEEPSEEK_GH_BIN)",
+                )
             } else {
                 ToolError::execution_failed(format!("failed to run gh: {e}"))
             }

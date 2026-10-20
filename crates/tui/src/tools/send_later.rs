@@ -97,7 +97,7 @@ impl ToolSpec for SendLaterTool {
 
     fn description(&self) -> &'static str {
         if self.read_only {
-            "Inspect pending one-shot delayed continuations. Actions: \"list\" (newest triggers), \"read\" (one trigger by trigger_id)."
+            "Inspect one-shot delayed continuations (list returns every status unless filtered with `status`). Actions: \"list\" (newest triggers), \"read\" (one trigger by trigger_id). Triggers are private to the scheduling session: other or later sessions cannot list or read them."
         } else {
             "Schedule a one-shot delayed message into the current workspace. \
 Actions: \"schedule\" (create a pending trigger; requires approval), \
@@ -105,7 +105,9 @@ Actions: \"schedule\" (create a pending trigger; requires approval), \
 \"cancel\" (cancel a pending trigger before it fires; requires approval). \
 Use delay_minutes or fire_at (ISO 8601 UTC) — not both. \
 message is required for action=schedule; fire_at must be strictly in the future. \
-Returns trigger_id and resolved fire_at."
+Returns trigger_id and resolved fire_at. \
+Triggers are private to the scheduling session: other or later sessions cannot \
+list, read, or cancel them."
         }
     }
 
@@ -326,10 +328,16 @@ async fn execute_schedule(input: &Value, context: &ToolContext) -> Result<ToolRe
     ))
 }
 
+/// The `list` schema declares `limit` in `[1, 200]`; enforce it so the
+/// declared bound cannot silently widen (round-2 review).
+fn clamp_list_limit(raw: u64) -> usize {
+    raw.clamp(1, 200) as usize
+}
+
 async fn execute_list(input: &Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
     let automations = SendLaterTool::automations_from_context(context)?;
 
-    let limit = Some(optional_u64(input, "limit", 50)? as usize);
+    let limit = Some(clamp_list_limit(optional_u64(input, "limit", 50)?));
     let status_filter = optional_str(input, "status")?
         .map(parse_trigger_status)
         .transpose()
@@ -592,6 +600,14 @@ mod tests {
             err.to_string().contains("future"),
             "expected future-time error, got: {err}"
         );
+    }
+
+    #[test]
+    fn list_limit_is_clamped_to_the_declared_schema_bounds() {
+        use super::clamp_list_limit;
+        assert_eq!(clamp_list_limit(50), 50);
+        assert_eq!(clamp_list_limit(10_000), 200);
+        assert_eq!(clamp_list_limit(0), 1);
     }
 
     #[tokio::test]

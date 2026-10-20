@@ -31,7 +31,10 @@ pub struct PromptSessionContext<'a> {
     pub locale_tag: &'a str,
     /// When true, a ## Language Output Requirement block is appended
     /// to the system prompt instructing the model to respond in
-    /// the resolved session locale.
+    /// the resolved session locale. The block's closing override
+    /// sentence ships only when the composition carries the `## Language`
+    /// rule it modifies (the interactive base prompt); compositions
+    /// without the rule still receive the instruction itself.
     pub translation_enabled: bool,
     /// Active model identifier. The bundled constitution is model-agnostic,
     /// but embedders may still provide a prompt override containing
@@ -99,9 +102,9 @@ const INSTRUCTIONS_FILE_MAX_BYTES: usize = 100 * 1024;
 /// natural-language output — explanations, summaries, conversation.
 /// Code identifiers, untranslatable technical terms, and explicitly
 /// requested English code blocks are exempt.
-fn translation_output_instruction(locale_tag: &str) -> String {
+fn translation_output_instruction(locale_tag: &str, overrides_language_rule: bool) -> String {
     let target_language = translation_target_language_for_tag(locale_tag);
-    format!(
+    let mut block = format!(
         "\
 ## Language Output Requirement\n\
 \n\
@@ -115,9 +118,17 @@ Only output English for:\n\
 This is a hard display requirement for this session: predominantly-English \
 turns are machine-translated before display for a {target_language}-reading \
 audience, so English prose that slips into your response may reach the user \
-untranslated. \
-This overrides the ## Language rule for this session."
-    )
+untranslated."
+    );
+    // The override line only makes sense when the composition actually
+    // carries the `## Language` rule it outranks (interactive base prompt).
+    // Where the rule is absent (bundled headless composition, composers that
+    // omit it) the instruction still ships — it is the whole feature for a
+    // translation_enabled host — but the dangling override sentence does not.
+    if overrides_language_rule {
+        block.push_str(" This overrides the ## Language rule for this session.");
+    }
+    block
 }
 
 fn concise_output_discipline_instruction() -> &'static str {
@@ -772,11 +783,22 @@ pub(crate) fn effective_authority_recap() -> &'static str {
 }
 
 /// Whether the authority-recap trailer is appended after WorldState. When an
-/// embedder composer owns the static prompt prefix, the bundled
-/// `### Whose word wins` section the recap points at no longer exists, so
+/// embedder composer owns the static prompt prefix, or an opted-in
+/// config-directory constitution replaced the bundled base prompt, the
+/// `### Whose word wins` section the recap points at may no longer exist, so
 /// appending the recap would leave a dangling cross-reference.
-fn authority_recap_trailer_appended(composer_installed: bool) -> bool {
-    !composer_installed
+pub(crate) fn authority_recap_trailer_appended(composer_installed: bool) -> bool {
+    authority_recap_trailer_appended_for(composer_installed, base_prompt_origin())
+}
+
+/// Pure core of [`authority_recap_trailer_appended`], split out so the
+/// config-override arm is unit-testable without installing the process-global
+/// override cell.
+fn authority_recap_trailer_appended_for(
+    composer_installed: bool,
+    origin: BasePromptOrigin,
+) -> bool {
+    !composer_installed && origin == BasePromptOrigin::Bundled
 }
 
 /// Optional locale-native reinforcement preamble prepended to the system
@@ -987,15 +1009,15 @@ fn apply_model_template(
 
 /// Authority recap block — appended at the end of the system prompt,
 /// just before the user's first message. Uses recency bias constructively
-/// without restating ranks: precedence is stated only in `BASE_PROMPT`
-/// § Whose word wins (#4777).
+/// without restating ranks: `BASE_PROMPT` § Whose word wins states the
+/// default ranking (#4777).
 const AUTHORITY_RECAP: &str = "\
 ## Authority Recap
 
 Codewhale's constitution governs your behavior. Ground truth underlies the
 whole list: the user may override a fact, but no one may invent one. When
-guidance conflicts, consult ### Whose word wins — that is the only place
-precedence is stated.";
+guidance conflicts, consult ### Whose word wins — it states the default
+ranking; explicit override blocks may carve out exceptions.";
 
 pub(crate) fn compose_prompt_with_approval_model_and_shell(
     personality: Personality,
@@ -1236,10 +1258,17 @@ pub(crate) fn system_prompt_for_mode_with_context_skills_session_and_approval_fo
     // above the volatile-content boundary because it's a per-session
     // flag, not a per-turn one: enabling `/translate` is a session
     // toggle, so the prompt-prefix bytes don't drift turn-over-turn.
+    // Not gated on `!bundled_headless`: the instruction is the whole
+    // translation feature for an embedder (the post-hoc translation layer is
+    // TUI-only). Only the closing override line is conditional — it names the
+    // `## Language` rule, so it ships solely when the composition actually
+    // carries that rule; otherwise it would dangle exactly like the recap
+    // cross-reference the trailer gate fixes.
     if session_context.translation_enabled {
+        let overrides_language_rule = full_prompt.contains("## Language");
         full_prompt = format!(
             "{full_prompt}\n\n{}",
-            translation_output_instruction(session_context.locale_tag)
+            translation_output_instruction(session_context.locale_tag, overrides_language_rule)
         );
     }
 
@@ -1386,9 +1415,12 @@ pub(crate) fn system_prompt_for_mode_with_context_skills_session_and_approval_fo
     .to_system_blocks();
 
     // Trailers keep recency bias after WorldState: authority, then locale.
-    // When an embedder composer owns the static prefix, the bundled
-    // `### Whose word wins` section the recap points at no longer exists,
-    // so appending the recap would leave a dangling cross-reference.
+    // When an embedder composer owns the static prefix, or an opted-in
+    // config-directory constitution replaced the bundled base prompt, the
+    // `### Whose word wins` section the recap points at is not guaranteed to
+    // exist, so appending the recap would leave a dangling cross-reference.
+    // The bundled headless host ships a compact constitution without the
+    // section and skips the recap as well.
     if !bundled_headless && authority_recap_trailer_appended(static_composer_installed) {
         blocks.push(SystemBlock {
             block_type: "text".to_string(),
@@ -1496,11 +1528,26 @@ mod tests {
 
     /// The recap points at the bundled `### Whose word wins` section; an
     /// embedder composer that owns the static prefix retires that section,
-    /// so the trailer must be skipped instead of dangling in the blocks.
+    /// so the trailer must be skipped instead of dangling in the blocks. The
+    /// same guard covers an opted-in config-directory constitution override
+    /// (the override replaces the bundled base and need not contain the
+    /// section either).
     #[test]
     fn authority_recap_trailer_skipped_when_static_composer_owns_prefix() {
         assert!(authority_recap_trailer_appended(false));
         assert!(!authority_recap_trailer_appended(true));
+        assert!(authority_recap_trailer_appended_for(
+            false,
+            BasePromptOrigin::Bundled
+        ));
+        assert!(!authority_recap_trailer_appended_for(
+            false,
+            BasePromptOrigin::ConfigOverride
+        ));
+        assert!(!authority_recap_trailer_appended_for(
+            true,
+            BasePromptOrigin::ConfigOverride
+        ));
     }
 
     // Config-directory prompt override resolution (#3638). These exercise the
@@ -2102,6 +2149,53 @@ mod tests {
             text.contains("consult ### Whose word wins"),
             "authority recap must point at 0.9.0's precedence section"
         );
+    }
+
+    #[test]
+    fn translation_block_ships_without_dangling_override() {
+        // The translation instruction is the whole feature for a
+        // translation_enabled host (the post-hoc translation layer is
+        // TUI-only), so every host receives the block. Only the closing
+        // override line is host-aware: it names the `## Language` rule, so it
+        // ships solely when the composition carries that rule — the bundled
+        // headless composition does not, and a dangling override would teach
+        // a rule the host never received.
+        let _env_lock = crate::test_support::lock_test_env();
+        let tmp = tempdir().expect("tempdir");
+        for host in [PromptHost::Interactive, PromptHost::Headless] {
+            let text = system_prompt_flat_text(
+                &system_prompt_for_mode_with_context_skills_session_and_approval_for_host(
+                    tmp.path(),
+                    None,
+                    None,
+                    None,
+                    PromptSessionContext {
+                        translation_enabled: true,
+                        locale_tag: "zh-Hans",
+                        ..PromptSessionContext::default()
+                    },
+                    host,
+                ),
+            );
+            assert!(
+                text.contains("## Language Output Requirement"),
+                "{host:?} host with translation enabled must receive the block: {text}"
+            );
+            assert!(
+                text.contains("Always respond in Simplified Chinese"),
+                "{host:?} host must receive the operative language instruction: {text}"
+            );
+            assert!(
+                text.contains("## Language\n") == (host == PromptHost::Interactive),
+                "{host:?}: the ## Language rule presence is host-determined: {text}"
+            );
+            assert!(
+                text.contains("This overrides the ## Language rule")
+                    == (host == PromptHost::Interactive),
+                "{host:?}: the override line must ship exactly when the rule it \
+                 overrides is present: {text}"
+            );
+        }
     }
 
     #[test]
@@ -2889,9 +2983,10 @@ mod tests {
 
     #[test]
     fn memory_guidance_does_not_state_precedence() {
-        // #4777: only BASE_PROMPT § Whose word wins states ranks. Memory
-        // hygiene keeps the imperative→preference rule and drops the
-        // inverted Tier list that used to put Constitution above the user.
+        // #4777: BASE_PROMPT § Whose word wins states the default ranking;
+        // overlays must not add their own. Memory hygiene keeps the
+        // imperative→preference rule and drops the inverted Tier list that
+        // used to put Constitution above the user.
         let guidance = MEMORY_GUIDANCE.to_ascii_lowercase();
         for forbidden in [
             "tier 1",
@@ -2955,8 +3050,12 @@ mod tests {
             "canonical precedence section must remain in BASE_PROMPT"
         );
         assert!(
-            BASE_PROMPT.contains("This ordering is stated here and nowhere else"),
-            "BASE_PROMPT must assert single-source precedence"
+            BASE_PROMPT.contains("This ordering is the default ranking"),
+            "BASE_PROMPT must state the default ranking"
+        );
+        assert!(
+            BASE_PROMPT.contains("explicit override blocks"),
+            "BASE_PROMPT must allow scoped override blocks to state their own precedence"
         );
     }
 
@@ -3271,6 +3370,10 @@ mod tests {
             CORE_EXECUTION_PROFILE_PROMPT.contains("present the change in your plan"),
             "Execution profile must name the correct behavior on rejection"
         );
+        assert!(
+            CORE_EXECUTION_PROFILE_PROMPT.contains("waiting cannot succeed"),
+            "Execution profile must disclose that waiting is hopeless when approval prompts are disabled"
+        );
     }
 
     #[test]
@@ -3409,15 +3512,20 @@ mod tests {
             "the language rule must keep its declared deference to locale bookends"
         );
         assert!(
-            translation_output_instruction("zh-Hans")
+            translation_output_instruction("zh-Hans", true)
                 .contains("predominantly-English turns are machine-translated"),
             "the translation block must describe the detector-gated interception layer, not a guarantee"
         );
         assert!(
-            translation_output_instruction("zh-Hans")
+            translation_output_instruction("zh-Hans", true)
                 .contains("This overrides the ## Language rule"),
             "the translation block must keep its explicit precedence over the language rule; \
              without it the locale bookends and the language rule contradict each other again"
+        );
+        assert!(
+            !translation_output_instruction("zh-Hans", false)
+                .contains("This overrides the ## Language rule"),
+            "compositions without the ## Language rule must not receive a dangling override"
         );
     }
 

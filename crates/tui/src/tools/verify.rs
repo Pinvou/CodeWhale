@@ -102,7 +102,11 @@ Return ONLY valid JSON (no prose, no markdown fences) matching this schema:\n\
 }\n\
 Set verdict=refuted if you found at least one critical or high finding; upheld only if you \
 genuinely could not refute the claim; uncertain if the evidence was insufficient to decide. Set \
-unresolved_risk=true whenever any unaddressed correctness risk remains.";
+unresolved_risk=true whenever any unaddressed correctness risk remains. verdict=upheld is never \
+returned as written when a blocking finding exists: any critical or high finding force-converts \
+it to refuted, any medium finding force-converts it to uncertain, and any critical, high, or \
+medium finding also forces unresolved_risk=true regardless of what you set; only low findings \
+are exempt.";
 
 /// A single adversarial finding the agent should address.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

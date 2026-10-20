@@ -321,6 +321,67 @@ fn contract_edit_fuzzy_normalization_preserves_untouched_lines() {
     assert_eq!(updated, "untouched line  \nShe said hello.\ntail  \n");
 }
 
+#[test]
+fn contract_edit_fuzzy_maps_unicode_spaces() {
+    // Round-2 review pin: the fallback folds NFKC-compatible forms anywhere
+    // in oldText, exactly as the `edit` description discloses. The Unicode
+    // spaces the description names are delivered by the NFKC pass (NBSP and
+    // EN SPACE each fold to a single ASCII space; the em-space family folds
+    // to a run), so the pin exercises the observable fold for both
+    // representative members rather than the belt-and-braces mapping arm
+    // behind NFKC.
+    let updated = apply_contract_edits(
+        "alpha beta\n",
+        &[ContractEdit {
+            index: 0,
+            old_text: "alpha\u{00A0}beta".to_string(),
+            new_text: "alpha gamma".to_string(),
+        }],
+        "doc.txt",
+    )
+    .expect("NBSP fold matches");
+    assert_eq!(updated, "alpha gamma\n");
+    let updated = apply_contract_edits(
+        "alpha beta\n",
+        &[ContractEdit {
+            index: 0,
+            old_text: "alpha\u{2002}beta".to_string(),
+            new_text: "alpha gamma".to_string(),
+        }],
+        "doc.txt",
+    )
+    .expect("en-space fold matches");
+    assert_eq!(updated, "alpha gamma\n");
+}
+
+#[test]
+fn contract_edit_fuzzy_still_requires_leading_indentation() {
+    // Round-2 review pin: the negative half of the disclosure — leading
+    // indentation is not normalized, so an oldText indented differently from
+    // the file (over-indented: a shallower oldText is a plain substring of a
+    // deeper-indented line) must miss, and the miss error must restate the
+    // normalization set.
+    let error = apply_contract_edits(
+        "fn main() {\n    ready()\n}\n",
+        &[ContractEdit {
+            index: 0,
+            old_text: "      ready()".to_string(),
+            new_text: "      ready()?;".to_string(),
+        }],
+        "doc.txt",
+    )
+    .expect_err("indentation drift must not fuzzy-match");
+    let message = error.to_string();
+    assert!(
+        message.contains("normalized automatically"),
+        "miss error must restate the normalization set: {message}"
+    );
+    assert!(
+        message.contains("NFKC"),
+        "miss error must disclose the same normalization set as the description: {message}"
+    );
+}
+
 #[tokio::test]
 async fn contract_edit_preserves_bom_and_crlf_without_prior_read() {
     let temporary = tempfile::tempdir().expect("tempdir");

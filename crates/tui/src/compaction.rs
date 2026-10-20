@@ -155,8 +155,9 @@ from earlier turns.";
 /// This intentionally follows Codex's `templates/compact/summary_prefix.md`:
 /// the checkpoint is a user-history item, never standing system-prompt prose.
 const SUMMARY_HEADER: &str = "Another language model started to solve this problem and produced \
-a summary of its thinking process. You also have access to the state of the tools that were used \
-by that language model. Use this to build on the work that has already been done and avoid \
+a summary of its thinking process. You also have access to the recent tool state from the last \
+round before compaction (older tool results were pruned — rerun a command if you need output \
+that is no longer visible). Use this to build on the work that has already been done and avoid \
 duplicating work. Here is the summary produced by the other language model, use the information \
 in this summary to assist with your own analysis:";
 
@@ -2342,6 +2343,9 @@ mod tests {
         let text = &blocks[0].text;
         assert!(text.contains(FIXED_SUMMARY));
         assert!(text.contains("Another language model"));
+        // Round-2 review pin: the header must keep disclosing that older
+        // tool results do not survive compaction.
+        assert!(text.contains("older tool results were pruned"));
 
         // Replacement history keeps older user turns, then the open round
         // verbatim (user + assistant + tools), then one checkpoint.

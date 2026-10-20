@@ -770,7 +770,7 @@ impl ToolSpec for TaskShellStartTool {
             "properties": {
                 "command": { "type": "string" },
                 "cwd": { "type": "string", "description": "Optional working directory within the workspace." },
-                "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000, "description": "Accepted for interface compatibility but not enforced: the command always starts in the background and is not bounded by this timeout. A running shell task cannot be cancelled from the model surface; it ends when the command finishes." },
+                "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000, "description": "Accepted for interface compatibility but not enforced: the command always starts in the background and is not bounded by this timeout. A running shell task keeps running until the command finishes or you cancel it through the shell session controls (discover them with `tool_search`)." },
                 "stdin": { "type": "string" },
                 "tty": { "type": "boolean" }
             },
