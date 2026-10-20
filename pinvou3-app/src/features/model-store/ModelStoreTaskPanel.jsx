@@ -248,12 +248,10 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
   const view = taskProgressView(task);
   const layers = layerSummary(task.layers);
   const ChevronIcon = task.expanded ? ChevronDown : ChevronRight;
-  // 展开区里能复制的全文 = 日志 + 错误原文。「撤简日志」的前提就是这个按钮:
-  // 简化之后用户没法再靠肉眼从面板里抄走排查信息,必须有一个一键拿全文的出口。
+  // 原始日志只用于本机展开查看，不得直接写入剪贴板对外传播。
   const logText = (errorText ? [...task.lines, '', errorText] : task.lines).join('\n');
-  const copyLog = () => {
-    copyClipboardText(logText || '').then((ok) => setCopied(ok ? 'ok' : 'fail'));
-  };
+  const copyingRef = useRef(false);
+  const [copying, setCopying] = useState(false);
   // 日志相关操作的就地反馈（成功给路径、失败给原因）。失败静静地什么都不发生的话，
   // 用户只会反复点那个按钮。
   const [logNotice, setLogNotice] = useState(null);
@@ -283,9 +281,29 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
       (e) => setLogNotice({ tone: 'error', text: copy.taskExportLogFailed(String(e?.message || e)) })
     );
   };
-  const copyDetails = () => {
+  const copyDetails = async () => {
     setToolsOpen(false);
-    copyLog();
+    if (copyingRef.current) return;
+    if (!task.runId) {
+      setCopied('fail');
+      return;
+    }
+    copyingRef.current = true;
+    setCopying(true);
+    try {
+      // Same backend-sanitized snapshot as file export. Missing/old backend
+      // response or export failure must never fall back to raw task.lines.
+      const result = await exportRunLog(task.runId);
+      const text = result?.text;
+      const ok = typeof text === 'string' && text.trim().length > 0
+        && await copyClipboardText(text);
+      setCopied(ok ? 'ok' : 'fail');
+    } catch {
+      setCopied('fail');
+    } finally {
+      copyingRef.current = false;
+      setCopying(false);
+    }
   };
 
   return (
@@ -434,6 +452,7 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
                   role="menuitem"
                   className={`w-full rounded-lg px-2.5 py-2 text-left text-[12px] font-medium ${HOVER_SURFACE} ${TEXT_PRIMARY}`}
                   onClick={copyDetails}
+                  disabled={copying}
                   data-testid="model-store-task-copy-log"
                 >
                   {copy[COPY_LABEL_KEYS[copied] ?? 'taskCopyLog']}

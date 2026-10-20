@@ -966,8 +966,7 @@ pub async fn run_log(
 
 /// 在文件管理器里打开运行日志目录。
 ///
-/// 只给"打开目录"，不给"把日志读回前端"：那几 MB 文本走 IPC 再塞进一个浮动任务卡
-/// 没有任何意义，而用户真正要做的是把文件发给别人。
+/// 原始日志只在本机查看；复制/导出另走更严格脱敏后的有界快照。
 pub fn reveal_run_logs_dir() -> Result<Value, String> {
     let dir = run_log_store::logs_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建日志目录失败：{e}"))?;
@@ -977,8 +976,8 @@ pub fn reveal_run_logs_dir() -> Result<Value, String> {
 
 /// 导出一次运行的日志（比落盘那份多过一道脱敏，见 `run_log_store`）。
 pub fn export_run_log(run_id: String) -> Result<Value, String> {
-    let path = run_log_store::export_run_log(&run_id)?;
-    Ok(json!({ "path": path.to_string_lossy() }))
+    let (path, text) = run_log_store::export_run_log(&run_id)?;
+    Ok(json!({ "path": path.to_string_lossy(), "text": text }))
 }
 
 pub fn cancel_run(service: &Arc<ModelStoreService>, run_id: String) -> Result<Value, String> {
