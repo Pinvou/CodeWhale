@@ -3725,10 +3725,10 @@ fn provider_accepts_reasoning_content(provider: ApiProvider) -> bool {
             // `delta.reasoning_content` (same reasoning-parser family as
             // vLLM). Stream decoding defaults to separate_field even for
             // unknown served IDs; explicit configuration still wins.
-            // Replay follows the model catalogue gate below: catalogued reasoning ids (qwen3.x
-            // included) DO replay — a deliberate difference from the vllm
-            // route, registered in fork-modifications T10 — while ids the
-            // catalogue does not know keep replay off.
+            // Replay retains the shared catalog-and-family recognition policy:
+            // recognized families (including uncatalogued kimi-* aliases) can
+            // replay, while unrecognized IDs such as bare qwen3.8 do not.
+            // Stream decoding does not widen that policy.
             | ApiProvider::Tachyon
     )
 }
