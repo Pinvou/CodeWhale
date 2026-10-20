@@ -139,6 +139,16 @@ fn prepare_switch_rollback_and_cleanup_preserve_credentials_and_old_weights() {
         .unwrap();
     let active = db::get_store_model(&current.card_id).unwrap().unwrap();
     assert_eq!(active.active_version_id.as_deref(), Some(id.as_str()));
+    let active_runtime = runtime_path(&active).unwrap();
+    assert_eq!(
+        fs::read_to_string(active_runtime.join(".deploy-env")).unwrap(),
+        format!(
+            "MODEL_DIR=\"{}\"\n",
+            Path::new(staged.models_root.as_deref().unwrap())
+                .join("new")
+                .display()
+        )
+    );
     assert_eq!(active.model_name, current.model_name);
     assert_eq!(
         db::list_api_keys_for_card(&current.card_id).unwrap()[0].key_value,
@@ -163,6 +173,13 @@ fn prepare_switch_rollback_and_cleanup_preserve_credentials_and_old_weights() {
     let restored = db::get_store_model(&current.card_id).unwrap().unwrap();
     assert_eq!(restored.source_filename, current.source_filename);
     assert_eq!(restored.engine_version, current.engine_version);
+    assert_eq!(
+        fs::read_to_string(runtime_path(&restored).unwrap().join(".deploy-env")).unwrap(),
+        format!(
+            "MODEL_DIR=\"{}/legacy\"\n",
+            mgr.settings.models_path().display()
+        )
+    );
     let new_root = PathBuf::from(staged.models_root.unwrap());
     let outcome = mgr
         .delete_version(&current.card_id, &id, &mut |_| {}, Default::default())

@@ -357,7 +357,10 @@ impl ScriptsSource {
             .map_err(|e| ModelManagerError::new(format!("卡片 id 不合法：{e}")))?;
         let cards_dir = config::data_dir().join("cards");
         let dir = cards_dir.join(safe_id);
-        let assets = self.asset_contents(policy)?;
+        let mut assets = self.asset_contents(policy)?;
+        if matches!(self, Self::Local { .. }) {
+            assets.retain(|name, _| !super::card_assets::is_mutable_runtime_asset(name));
+        }
         if assets.contains_key("native_engine_process.py") {
             use std::os::unix::fs::DirBuilderExt;
             std::fs::create_dir_all(&cards_dir)
@@ -3599,6 +3602,8 @@ echo '权重就绪'
             ("vendor/start.sh".into(), blob("#!/bin/sh\nexit 0\n")),
             ("vendor/.cache-tools/helper.py".into(), blob("source code")),
             (".venv/lib/module.py".into(), blob("bundled source")),
+            (".deploy-env".into(), blob("stale deployment config")),
+            (".runtime/engine.json".into(), blob("stale engine identity")),
         ]);
         let runtime = config::data_dir().join("cards/legacy-cache");
         let cache = runtime.join("vendor/.cache/flashinfer/jit.log");
@@ -3607,6 +3612,13 @@ echo '权重就绪'
         let mut permissions = std::fs::metadata(&cache).unwrap().permissions();
         permissions.set_readonly(true);
         std::fs::set_permissions(&cache, permissions.clone()).unwrap();
+        std::fs::write(runtime.join(".deploy-env"), "current deployment config").unwrap();
+        std::fs::create_dir_all(runtime.join(".runtime")).unwrap();
+        std::fs::write(
+            runtime.join(".runtime/engine.json"),
+            "current engine identity",
+        )
+        .unwrap();
         let mgr = ModelManager::new(None, None);
         let source = mgr.local_scripts_source(&record).unwrap();
         let prepared = source.prepare(&record.card_id, "enable").unwrap();
@@ -3632,6 +3644,14 @@ echo '权重就绪'
         assert_eq!(
             std::fs::read_to_string(runtime.join(".venv/lib/module.py")).unwrap(),
             "bundled source"
+        );
+        assert_eq!(
+            std::fs::read_to_string(runtime.join(".deploy-env")).unwrap(),
+            "current deployment config"
+        );
+        assert_eq!(
+            std::fs::read_to_string(runtime.join(".runtime/engine.json")).unwrap(),
+            "current engine identity"
         );
         assert_eq!(
             record.assets_content["vendor/.cache/flashinfer/jit.log"].content,
