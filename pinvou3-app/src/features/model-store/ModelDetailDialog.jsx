@@ -6,7 +6,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { KeyRound, Plus } from '../../components/icons.jsx';
 import { EmptyState } from '../../components/EmptyState.jsx';
 import { Spinner } from '../../components/Spinner.jsx';
-import { CardScriptsActions } from './CardScriptsActions.jsx';
 import { createApiKey, fetchApiKeys, fetchModelDetail } from './model-store-api.js';
 import { tryGetTauriBridge } from '../../platform/tauri/client.js';
 import { buildSavedModel, checkLinkable, findLinkedRows, pickApiKey } from './pinvou-model-link.js';
@@ -66,7 +65,7 @@ function CopyRow({ label, value, hint, copyLabel, onCopy, testId }) {
  * 按 `none` 处理——宁可多出一条黄条,不能少出一条。
  * @returns {React.ReactElement} 弹窗。
  */
-function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onToast, savedModels, onCardScripts, cardBusy, scriptUpdates, onUninstall }) {
+function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onToast, savedModels, onCardScripts, cardBusy, scriptUpdates, onUninstall, onUpdateWithCleanup }) {
   const [detail, setDetail] = useState(null);
   const [keys, setKeys] = useState([]);
   const [error, setError] = useState(null);
@@ -265,7 +264,7 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
               事实,不是一条飘在页尾的免责声明。达标的卡这里什么都不长。 */}
           <WeightVerifyNotice card={card} copy={copy} />
           {/* 只在服务器确实有新版脚本时才渲染更新入口——自动检测替代手动检查 */}
-          {onCardScripts && scriptUpdates?.[record.card_id] ? <CardScriptsActions key={record.card_id} record={record} copy={copy} busy={cardBusy} onAction={onCardScripts} /> : null}
+
 
           <div className="mt-5">
             <h3 className={`mb-2 text-[13px] font-medium ${TEXT_PRIMARY}`}>{copy.runtimeTitle}</h3>
@@ -395,7 +394,7 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
                     onClick={() => {
                       if (window.confirm(isRunning ? copy.updateConfirmRunning : copy.updateConfirmStopped)) {
                         onClose();
-                        onCardScripts?.(record, false);
+                        onUpdateWithCleanup?.(record, isRunning);
                       }
                     }}
                     data-testid="model-store-detail-action-update"

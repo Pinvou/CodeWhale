@@ -250,6 +250,22 @@ const ModelStoreView = ({ theme, t, bs }) => {
     return map;
   }, [cards, library]);
 
+  /** 智能操作按钮的「更新脚本」：停止 → 卸载部署 → 更新脚本 → 刷新。
+   * 更新后卡片回到「已下载」状态，按钮显示「部署模型」。 */
+  const handleUpdateWithCleanup = useCallback(async (record, wasRunning) => {
+    try {
+      if (wasRunning) {
+        await startStop(record.card_id);
+      }
+      await startUninstall(record.card_id, false);
+      await startCardScripts(record.card_id, false, true);
+    } catch (cause) {
+      showToast(String(cause?.message || cause));
+    } finally {
+      loadAll();
+    }
+  }, [loadAll, showToast]);
+
   const loadAll = useCallback(async () => {
     await Promise.all([loadCards(), loadLibrary()]);
   }, [loadCards, loadLibrary]);
@@ -752,6 +768,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
               onEnable={handleEnable}
               onStop={handleStop}
               onUninstall={requestUninstall}
+        onUpdateWithCleanup={handleUpdateWithCleanup}
             />
           ))}
         </div>
