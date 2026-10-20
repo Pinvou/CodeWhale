@@ -62,6 +62,7 @@ struct CachedRemoteActionResult {
 #[derive(Default)]
 struct RemoteActionResultCache {
     entries: Mutex<HashMap<String, CachedRemoteActionResult>>,
+    rejections: super::task_rejection::Cache,
 }
 
 enum RemoteActionCacheLookup {
@@ -252,6 +253,10 @@ pub(crate) fn log_remote_action_event(scope: &str, stage: &str, operation: &str,
 // `desktop_remote_controller_business::submit_error`. Unknown static codes
 // remain private and collapse to `other` at the sink.
 const CONTROLLED_PORT_LOG_ERROR_CODES: &[&str] = &[
+    "task_rejection_capacity",
+    "task_permission_mode_required",
+    "task_permission_mode_changed",
+    "task_permission_mode_unsupported",
     "capability_admission_capacity",
     "capability_descriptor_capacity",
     "capability_descriptor_duplicate",
@@ -1753,7 +1758,13 @@ async fn dispatch_controlled_business_job(
             }
         };
     if is_task_submit {
-        log_controlled_event("task_submit_dispatched", "accepted");
+        let rejected = responses
+            .iter()
+            .any(|(_, payload)| payload.get("rejection_code").is_some());
+        log_controlled_event(
+            "task_submit_dispatched",
+            if rejected { "rejected" } else { "accepted" },
+        );
     }
     // Async business may finish after stop/disconnect/re-pair. Seal/send while
     // pinned to the same current live lease; no late response may enter a new
@@ -1777,7 +1788,14 @@ async fn dispatch_controlled_business_job(
                 return;
             }
             if is_task_submit && response_kind == "task_status" {
-                log_controlled_event("task_submit_status_sent", "accepted");
+                log_controlled_event(
+                    "task_submit_status_sent",
+                    if response.get("rejection_code").is_some() {
+                        "rejected"
+                    } else {
+                        "accepted"
+                    },
+                );
             }
             if matches!(
                 response_kind,
@@ -1900,6 +1918,18 @@ pub(crate) trait ControlledBusinessPort: Send + Sync {
         session_ref: &str,
         payload: &Value,
     ) -> Result<Value, String>;
+
+    /// Reconcile a duplicate without allocating a session or dispatching again.
+    /// A missing/pruned record is outcome-unknown, never proof of non-execution.
+    async fn task_status(
+        &self,
+        _lease: &LeaseContext,
+        _session_ref: &str,
+        _task_id: &str,
+        _client_request_id: &str,
+    ) -> Result<Value, String> {
+        Err("task_not_found".into())
+    }
 
     /// 取消一条任务，返回 wire `task_status` 载荷（若服务不产出则返回 None）。
     async fn cancel_task(
@@ -2055,7 +2085,60 @@ async fn dispatch_decrypted_payload_cached<P: ControlledBusinessPort + ?Sized>(
                 .and_then(Value::as_str)
                 .ok_or_else(|| "task_request_invalid".to_owned())?
                 .to_owned();
-            let response = port.submit_task(lease, &session_ref, payload).await?;
+            let task_id = payload
+                .get("task_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let fingerprint = super::task_rejection::fingerprint(payload);
+            use super::task_rejection::Lookup;
+            match action_results.rejections.begin(task_id, fingerprint)? {
+                Lookup::Refused(mut response) => {
+                    for key in super::task_rejection::RESPONSE_CONTEXT {
+                        if let Some(value) = payload.get(*key) {
+                            response[*key] = value.clone();
+                        }
+                    }
+                    return Ok(vec![("task_status", response)]);
+                }
+                Lookup::Capacity => {
+                    return Ok(vec![(
+                        "task_status",
+                        super::task_rejection::response(payload, super::task_rejection::CAPACITY)?,
+                    )]);
+                }
+                Lookup::First => {}
+                Lookup::Retry => {
+                    let client_request_id = payload
+                        .get("client_request_id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| "task_request_invalid".to_owned())?;
+                    let response = port
+                        .task_status(lease, &session_ref, task_id, client_request_id)
+                        .await?;
+                    return Ok(vec![(
+                        "task_status",
+                        rewrite_session_id(response, &session_ref)?,
+                    )]);
+                }
+            }
+            let response = match port.submit_task(lease, &session_ref, payload).await {
+                Ok(response) => response,
+                Err(code) if super::task_rejection::is_definite(&code) => {
+                    let bounded_code = super::task_rejection::CODES
+                        .iter()
+                        .copied()
+                        .find(|known| *known == code)
+                        .unwrap_or("task_request_invalid");
+                    log_controlled_port_error(
+                        "task_submit_dispatch_failed",
+                        RemotePortError::new(bounded_code, false),
+                    );
+                    let response = super::task_rejection::response(payload, &code)?;
+                    action_results.rejections.refuse(task_id, response.clone());
+                    response
+                }
+                Err(code) => return Err(code),
+            };
             Ok(vec![(
                 "task_status",
                 rewrite_session_id(response, &session_ref)?,
@@ -3828,6 +3911,7 @@ mod tests {
         #[derive(Default)]
         struct StubPort {
             action_calls: std::sync::atomic::AtomicUsize,
+            task_calls: std::sync::atomic::AtomicUsize,
             block: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
         }
 
@@ -3873,6 +3957,23 @@ mod tests {
                 payload: &Value,
             ) -> Result<Value, String> {
                 // B 权威会话 id 与 A 的引用不同，由派发层改写回去。
+                let prior = self
+                    .task_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if payload.get("reject_after_first") == Some(&json!(true)) && prior > 0 {
+                    return Err("task_permission_mode_required".into());
+                }
+                if payload.get("unknown_then_reject") == Some(&json!(true)) {
+                    return Err(if prior == 0 {
+                        "controlled_submission_worker_failed"
+                    } else {
+                        "task_permission_mode_required"
+                    }
+                    .into());
+                }
+                if let Some(code) = payload.get("reject_with").and_then(Value::as_str) {
+                    return Err(code.to_owned());
+                }
                 Ok(json!({
                     "v": 1,
                     "type": "task_status",
@@ -4005,6 +4106,142 @@ mod tests {
         assert_eq!(response["session_id"], "session-a-ref");
         assert_eq!(response["code"], "capability_snapshot_unavailable");
 
+        let denied_cache = RemoteActionResultCache::default();
+        let accepted_port = StubPort::default();
+        let accepted_cache = RemoteActionResultCache::default();
+        let unknown_port = StubPort::default();
+        let unknown_cache = RemoteActionResultCache::default();
+        let unknown = json!({"session_id":"session-a-ref", "task_id":"unknown-task", "client_request_id":"unknown-client", "unknown_then_reject":true});
+        assert!(
+            dispatch_decrypted_payload_cached(
+                &unknown_port,
+                &unknown_cache,
+                &lease,
+                "task_submit",
+                &unknown
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            dispatch_decrypted_payload_cached(
+                &unknown_port,
+                &unknown_cache,
+                &lease,
+                "task_submit",
+                &unknown
+            )
+            .await
+            .is_err(),
+            "an ambiguous first outcome cannot become a definite refusal on retry"
+        );
+        assert_eq!(
+            unknown_port
+                .task_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        let accepted = json!({"session_id":"session-a-ref", "task_id":"previously-accepted", "client_request_id":"client-accepted", "reject_after_first":true});
+        assert!(
+            dispatch_decrypted_payload_cached(
+                &accepted_port,
+                &accepted_cache,
+                &lease,
+                "task_submit",
+                &accepted
+            )
+            .await
+            .is_ok()
+        );
+        assert!(
+            dispatch_decrypted_payload_cached(
+                &accepted_port,
+                &accepted_cache,
+                &lease,
+                "task_submit",
+                &accepted
+            )
+            .await
+            .is_err(),
+            "a retry cannot report non-execution after a prior acceptance, even if its ledger record was pruned"
+        );
+        assert_eq!(
+            accepted_port
+                .task_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        let denied = json!({"session_id":"session-a-ref", "task_id":"cached-denied", "client_request_id":"client-denied", "reject_with":"task_permission_mode_required"});
+        let before = port.task_calls.load(std::sync::atomic::Ordering::SeqCst);
+        let first =
+            dispatch_decrypted_payload_cached(&port, &denied_cache, &lease, "task_submit", &denied)
+                .await
+                .unwrap();
+        let retry =
+            dispatch_decrypted_payload_cached(&port, &denied_cache, &lease, "task_submit", &denied)
+                .await
+                .unwrap();
+        assert_eq!(first, retry);
+        let mut resumed = denied.clone();
+        resumed["connection_id"] = json!("resumed-connection");
+        resumed["lease_epoch"] = json!("resumed-epoch");
+        resumed["request_id"] = json!("resumed-request");
+        let response = dispatch_decrypted_payload_cached(
+            &port,
+            &denied_cache,
+            &lease,
+            "task_submit",
+            &resumed,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            response[0].1["rejection_code"],
+            "task_permission_mode_required"
+        );
+        assert_eq!(response[0].1["connection_id"], "resumed-connection");
+        assert_eq!(response[0].1["request_id"], "resumed-request");
+        assert_eq!(
+            port.task_calls.load(std::sync::atomic::Ordering::SeqCst),
+            before + 1
+        );
+        let mut changed = denied.clone();
+        changed.as_object_mut().unwrap().remove("reject_with");
+        assert!(
+            dispatch_decrypted_payload_cached(
+                &port,
+                &denied_cache,
+                &lease,
+                "task_submit",
+                &changed
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            port.task_calls.load(std::sync::atomic::Ordering::SeqCst),
+            before + 1,
+            "a changed retry must not execute after a refusal"
+        );
+
+        for code in super::super::task_rejection::CODES {
+            let frames = dispatch_decrypted_payload(&port, &lease, "task_submit", &json!({
+                "v":1, "type":"task_submit", "task_id":"task-denied", "client_request_id":"client-denied",
+                "request_id":"request-denied", "session_id":"session-a-ref", "reject_with":code,
+                "input":{"text":"must not be returned"}, "temporary_model_package":{"credential":"secret"},
+            })).await.unwrap();
+            assert_eq!(frames.len(), 1);
+            assert_eq!(frames[0].0, "task_status");
+            assert_eq!(frames[0].1["task_status"], "failed");
+            assert_eq!(frames[0].1["rejection_code"], *code);
+            assert_eq!(frames[0].1["client_request_id"], "client-denied");
+            assert!(frames[0].1.get("input").is_none());
+            assert!(frames[0].1.get("temporary_model_package").is_none());
+        }
+        assert!(dispatch_decrypted_payload(&port, &lease, "task_submit", &json!({
+            "session_id":"session-a-ref", "reject_with":"controlled_submission_worker_failed",
+        })).await.is_err(), "ambiguous worker outcomes are never definitive rejection receipts");
+
         let frames = dispatch_decrypted_payload(
             &port,
             &lease,
@@ -4059,6 +4296,7 @@ mod tests {
         let release = Arc::new(tokio::sync::Notify::new());
         let blocking = Arc::new(StubPort {
             action_calls: Default::default(),
+            task_calls: Default::default(),
             block: Some((started.clone(), release.clone())),
         });
         let cache = Arc::new(RemoteActionResultCache::default());

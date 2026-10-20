@@ -46,6 +46,7 @@ pub mod deliverables;
 pub mod dependencies;
 pub mod feedback;
 pub mod files;
+pub(crate) mod global_shortcut;
 pub mod knowledge;
 pub mod marketplace;
 pub mod memory;
