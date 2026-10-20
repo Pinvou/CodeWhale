@@ -4,6 +4,7 @@
 //! content block kind tracking, streamed tool-use buffers, transparent retry
 //! policy, and scrubbers for text that looks like a forged tool-call wrapper.
 
+use super::{dispatch::parse_tool_input, partial_input::PartialInputProof};
 use crate::models::ToolCaller;
 use std::time::Duration;
 
@@ -25,6 +26,28 @@ pub(super) struct ToolUseState {
     pub(super) thought_signature: Option<String>,
     pub(super) input_buffer: String,
     pub(super) input_parse_error: Option<String>,
+    pub(super) input_parse_hint: PartialInputProof,
+}
+
+impl ToolUseState {
+    /// Called after appending/logging the raw delta, preserving parsed-log order.
+    pub(super) fn refresh_partial_input(&mut self, delta: &str) -> bool {
+        if let Some(some) = self.input_parse_hint.reuse(&self.input_buffer, delta) {
+            return some;
+        }
+        let some = if let Some(value) = parse_tool_input(&self.input_buffer) {
+            self.input = value;
+            true
+        } else {
+            false
+        };
+        self.input_parse_hint.record(some);
+        some
+    }
+
+    pub(super) fn invalidate_input_parse_hint(&mut self) {
+        self.input_parse_hint.invalidate();
+    }
 }
 
 /// Maximum total bytes of text/thinking content before aborting the stream.
