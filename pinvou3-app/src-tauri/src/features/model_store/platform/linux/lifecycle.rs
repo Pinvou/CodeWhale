@@ -2371,6 +2371,22 @@ impl ModelManager {
                  本次未执行脚本、未停止模型或删除文件。请先获取经过修复的模型卡片包，再继续更新或卸载；无需重新下载现有权重。",
             ));
         }
+        // Old URL-only records have no sibling assets. Pin the checked entry
+        // in memory so a second HTTP response cannot replace it after preflight.
+        let source = match source {
+            ScriptsSource::Remote { profiles, .. } => ScriptsSource::Local {
+                blobs: BTreeMap::from([(
+                    "uninstall".into(),
+                    db::ScriptBlob {
+                        sha256: script_runner::sha256_hex(&uninstall),
+                        content: uninstall,
+                    },
+                )]),
+                assets: BTreeMap::new(),
+                profiles,
+            },
+            local => local,
+        };
         let mut env = self.env_for_record(&rec);
         env.insert(
             "LMM_PURGE_WEIGHTS".into(),
