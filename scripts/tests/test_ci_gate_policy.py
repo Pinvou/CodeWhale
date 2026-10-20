@@ -774,7 +774,7 @@ class CiGatePolicyTests(unittest.TestCase):
         package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
         selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
         for feature, filenames in (
-            ("organization", ("account_platform_organization_ui_smoke.mjs", "account_platform_organization_boundaries_ui_smoke.mjs")),
+            ("organization", ("account_platform_organization_ui_smoke.mjs", "account_platform_member_units_ui_smoke.mjs", "account_platform_organization_boundaries_ui_smoke.mjs")),
             ("member-units", ("account_platform_member_units_ui_smoke.mjs",)),
         ):
             command = f"test:account-platform-{feature}-ui"

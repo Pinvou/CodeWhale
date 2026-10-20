@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  financialRepairCommandTypes, financialRepairInputs, financialRepairPrecheckBody,
+  financialRepairInputs, financialRepairPrecheckBody,
   financialRepairProjectionRows, financialRepairDraftFromProjection,
 } from './admin-financial-repair-form.js';
 
+import { AdminReceivableWriteOffForm } from './AdminReceivableWriteOffForm.jsx';
 import { useClosureOperation } from './useClosureOperation.js';
 import { ledgerIntentStorage, readLedgerIntent } from './ledger-repair-intent.js';
 import { requireFinanceID } from './finance-contract.js';
@@ -12,8 +13,18 @@ import { requireFinanceID } from './finance-contract.js';
 // the precheck returns the frozen projection and the draft copies it verbatim.
 // The only operator inputs are the target references, the free-text reason and
 // the request key.
-export function AdminFinancialRepairDraftForm({ client, copy, owner, onCreated }) {
-  const [commandType, setCommandType] = useState(financialRepairCommandTypes[0]);
+export function AdminFinancialRepairDraftForm(props) {
+  if (props.commandTypes?.length === 1 && props.commandTypes[0] === 'RECEIVABLE_WRITE_OFF') {
+    return <AdminReceivableWriteOffForm {...props} />;
+  }
+  if (!props.commandTypes || (props.commandTypes.length === 1 && props.commandTypes[0] === 'LEDGER_REPAIR')) {
+    return <LedgerRepairDraftForm {...props} />;
+  }
+  return <section role="alert">{props.copy.invalidInput}</section>;
+}
+
+function LedgerRepairDraftForm({ client, copy, owner, onCreated }) {
+  const [commandType, setCommandType] = useState('LEDGER_REPAIR');
   const [values, setValues] = useState({});
   const [facts, setFacts] = useState(null);
   const [projection, setProjection] = useState(null);
@@ -134,7 +145,7 @@ export function AdminFinancialRepairDraftForm({ client, copy, owner, onCreated }
     <form className="adm-financial-repair-target" onSubmit={readFacts}>
       <label>{copy.command}
         <select disabled={locked} value={commandType} onChange={(event) => changeCommand(event.target.value)}>
-          {financialRepairCommandTypes.map((command) => <option key={command} value={command}>{command}</option>)}
+          {['LEDGER_REPAIR'].map((command) => <option key={command} value={command}>{command}</option>)}
         </select>
       </label>
       {fields.map((field) => <label key={field.key}>{label(field)}

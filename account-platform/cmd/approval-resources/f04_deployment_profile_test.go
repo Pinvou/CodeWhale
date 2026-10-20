@@ -86,7 +86,7 @@ func TestF04OfflineRendererPreservesArtifactSuperset(t *testing.T) {
 					Durable string `json:"durable"`
 				} `json:"consumers"`
 			}
-			if json.Unmarshal(manifest, &parsed) != nil || len(parsed.Consumers) != 8 {
+			if json.Unmarshal(manifest, &parsed) != nil || len(parsed.Consumers) != 9 {
 				t.Fatal("fixed offline expectation changed with deployment profile")
 			}
 			expectedDurables := []string{
@@ -95,6 +95,7 @@ func TestF04OfflineRendererPreservesArtifactSuperset(t *testing.T) {
 				"billing-wallet-adjustment-executor-p1-v1",
 				"billing-payment-provider-resume-executor-p2-v1",
 				"billing-payment-product-resume-executor-p1-v1",
+				"billing-receivable-write-off-executor-p1-v1",
 				"token-model-lifecycle-executor-v1",
 				"token-catalog-rollback-executor-v1",
 				"token-credential-revoke-executor-v1",

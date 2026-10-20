@@ -67,6 +67,22 @@ func TestNATSFixedAuthorizationAndOverlap(t *testing.T) {
 	if len(operator.Publish) != 3+2*len(provisionedConsumers())+2*len(approvalconsumer.BillingCommands()) || !reflect.DeepEqual(operator.Subscribe, []string{"_INBOX.event-resource-operator.>"}) {
 		t.Fatal("operator permissions")
 	}
+	// F11 adds exactly the INFO and CREATE grants for the dedicated write-off
+	// durable. The remaining fixed grants must stay unchanged and wildcard-free.
+	for _, want := range []string{
+		"$JS.API.CONSUMER.INFO.ACCOUNT_PLATFORM.billing-receivable-write-off-executor-p1-v1",
+		"$JS.API.CONSUMER.CREATE.ACCOUNT_PLATFORM.billing-receivable-write-off-executor-p1-v1.account.approval-command.authorized.v1",
+	} {
+		count := 0
+		for _, subject := range operator.Publish {
+			if subject == want {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatal("write-off durable exact grant missing or duplicated")
+		}
+	}
 	for _, subject := range operator.Publish {
 		if strings.Contains(subject, ">") || strings.Contains(subject, "*") || strings.Contains(subject, ".UPDATE.") || strings.Contains(subject, ".DELETE.") || strings.Contains(subject, ".MSG.GET.") {
 			t.Fatal("operator broadened")

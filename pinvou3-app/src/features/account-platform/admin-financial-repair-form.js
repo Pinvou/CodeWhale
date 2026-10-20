@@ -20,6 +20,11 @@ export const financialRepairInputs = Object.freeze({
     { key: 'correct_ledger_account_id', kind: 'uuid' },
     { key: 'amount_microcredits', kind: 'integer' },
   ]),
+  RECEIVABLE_WRITE_OFF: Object.freeze([
+    { key: 'target_resource_id', kind: 'uuid' },
+    { key: 'write_off_microcredits', kind: 'integer' },
+    { key: 'expected_version', kind: 'integer' },
+  ]),
 
 });
 

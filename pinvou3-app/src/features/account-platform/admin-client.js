@@ -17,6 +17,15 @@ function errorFromResponse(response, payload) {
   error.retryAfterSeconds = responseRetryAfter(payload, response.headers.get('Retry-After'));
   return error;
 }
+// Only the installed write-off legacy rows use these int64 versions. Preserve
+// the original decoding of every other legacy command, including ENT's codec.
+function parseWriteOffApprovalJSON(text, fallback = JSON.parse) {
+  const original = fallback(text);
+  if (original?.command_type === 'RECEIVABLE_WRITE_OFF') return parseFinanceJSON(text);
+  if (!original?.items?.some(item => item?.command_type === 'RECEIVABLE_WRITE_OFF')) return original;
+  const exact = parseFinanceJSON(text);
+  return { ...original, items: original.items.map((item, i) => item?.command_type === 'RECEIVABLE_WRITE_OFF' ? exact.items[i] : item) };
+}
 function abortRequestError() {
   if (typeof globalThis.DOMException === 'function') return new globalThis.DOMException('The operation was aborted.', 'AbortError');
   const error = new Error('The operation was aborted.');
@@ -320,10 +329,10 @@ export class AdminPlatformClient {
   approvalRequests(filters = {}, signal) {
     const query = new URLSearchParams({ limit: '200' });
     for (const [key, value] of Object.entries(filters)) if (value) query.set(key, value);
-    return this.request('account', `/admin/v1/approval-requests?${query}`, signal, text => parseApprovalEntitlementJSON(text, JSON.parse));
+    return this.request('account', `/admin/v1/approval-requests?${query}`, signal, text => parseApprovalEntitlementJSON(text, value => parseWriteOffApprovalJSON(value)));
   }
   approvalRequest(requestID, signal) {
-    return this.request('account', `/admin/v1/approval-requests/${encodeURIComponent(requestID)}`, signal, text => parseApprovalEntitlementJSON(text, JSON.parse));
+    return this.request('account', `/admin/v1/approval-requests/${encodeURIComponent(requestID)}`, signal, text => parseApprovalEntitlementJSON(text, value => parseWriteOffApprovalJSON(value)));
   }
   approvalLineage() {
     return { generation: this.approvalControlGeneration, sessionEpoch: this.financeSessionEpoch,

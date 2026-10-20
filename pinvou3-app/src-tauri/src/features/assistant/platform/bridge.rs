@@ -2216,8 +2216,6 @@ impl Pinvou3Bridge {
             terminal_chrome_enabled,
             advisor_config,
             subagent_state_root,
-            // CodeWhale #54 新增：父仓尚未消费多根授权，解构忽略（见下方
-            // EngineConfig 字面量的空集适配）。
         } = EngineConfig::default();
 
         // Hooks have two consumption paths: turn_loop runs ToolCallBefore
@@ -5044,7 +5042,6 @@ mod tests {
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::Never,
                     sandbox_mode: None,
-                    // CodeWhale #54：空集保持历史单根判定。
                 })
                 .unwrap()
         };
@@ -5101,7 +5098,6 @@ mod tests {
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::Never,
                     sandbox_mode: None,
-                    // CodeWhale #54：空集保持历史单根判定。
                 })
                 .unwrap()
         };
@@ -5166,7 +5162,6 @@ mod tests {
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::Never,
                     sandbox_mode: None,
-                    // CodeWhale #54：空集保持历史单根判定。
                 })
                 .unwrap()
         };
@@ -5398,7 +5393,6 @@ mod tests {
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::Never,
                     sandbox_mode: None,
-                    // CodeWhale #54：空集保持历史单根判定。
                 })
                 .unwrap()
         };
