@@ -281,32 +281,12 @@ function saveStorageSettings({ modelsDir = null, importScanDirs = null } = {}) {
   return invokeTauri('model_store_set_storage_settings', { modelsDir, importScanDirs });
 }
 
-
-/**
- * 添加局域网远程模型：验证端点可达后落库。
- * @param {string} url - 远程端点（http://IP:PORT）
- * @param {string=} name - 可选显示名
- */
-function addRemoteModel(url, name) {
-  return invokeTauri('model_store_add_remote', { url, name: name || null });
-}
-
-/**
- * 移除局域网远程模型。
- * @param {string} cardId - 以 remote- 开头的卡片 ID
- */
-function removeRemoteModel(cardId) {
-  return invokeTauri('model_store_remove_remote', { cardId });
-}
-
 export {
   storeAvailability,
   takeStartupCleanup,
   fetchStorageSettings,
   saveStorageSettings,
   fetchStoreCards,
-  addRemoteModel,
-  removeRemoteModel,
   fetchLibrary,
   fetchModelDetail,
   fetchInstalledEngines,

@@ -2000,8 +2000,6 @@ pub fn run() {
             commands::llmapi::set_llmapi_user_enabled,
             commands::llmapi::get_llmapi_admin_overview,
             commands::monitor::discover_local_vllm,
-            commands::model_store::model_store_add_remote,
-            commands::model_store::model_store_remove_remote,
             commands::model_store::model_store_availability,
             commands::model_store::model_store_cards,
             commands::model_store::model_store_library,

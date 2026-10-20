@@ -43,7 +43,7 @@
 //!
 //! 只在 Linux 上真正编译，见 `platform/mod.rs` 的说明。
 
-pub mod platform;
+mod platform;
 
 /// 非 Linux 平台上给用户看的原因。放在这里而不是桩文件里，是为了让
 /// 「为什么没有这个功能」只有一处定义。

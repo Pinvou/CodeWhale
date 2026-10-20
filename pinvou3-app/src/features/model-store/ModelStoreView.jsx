@@ -12,7 +12,7 @@
 //
 // 依赖方向 features -> components/shared/platform,不得反向引用 app/。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Database, Package, Plus, RefreshCw } from '../../components/icons.jsx';
+import { AlertTriangle, Database, Package, RefreshCw } from '../../components/icons.jsx';
 import { EmptyState } from '../../components/EmptyState.jsx';
 import { Spinner } from '../../components/Spinner.jsx';
 import { IosSearchField } from '../../components/IosControls.jsx';
@@ -20,7 +20,6 @@ import {
   fetchLibrary,
   fetchMemoryAdmission,
   fetchStoreCards,
-  addRemoteModel,
   forceRemoveModel,
   startDeploy,
   startDownload,
@@ -250,30 +249,6 @@ const ModelStoreView = ({ theme, t, bs }) => {
     }
     return map;
   }, [cards, library]);
-
-  /** 添加局域网远程模型 */
-  const [remoteUrl, setRemoteUrl] = useState('');
-  const [remoteName, setRemoteName] = useState('');
-  const [remoteBusy, setRemoteBusy] = useState(false);
-  const [remoteError, setRemoteError] = useState(null);
-  const [remoteOpen, setRemoteOpen] = useState(false);
-
-  const handleAddRemote = useCallback(async () => {
-    if (!remoteUrl.trim()) return;
-    setRemoteBusy(true);
-    setRemoteError(null);
-    try {
-      await addRemoteModel(remoteUrl.trim(), remoteName.trim() || undefined);
-      setRemoteOpen(false);
-      setRemoteUrl('');
-      setRemoteName('');
-      loadAll();
-    } catch (cause) {
-      setRemoteError(String(cause?.message || cause));
-    } finally {
-      setRemoteBusy(false);
-    }
-  }, [remoteUrl, remoteName, loadAll]);
 
   /** 智能操作按钮的「更新脚本」：停止 → 卸载部署 → 更新脚本 → 刷新。
    * 更新后卡片回到「已下载」状态，按钮显示「部署模型」。 */
@@ -955,15 +930,6 @@ const ModelStoreView = ({ theme, t, bs }) => {
               </button>
               <button
                 type="button"
-                data-testid="model-store-add-remote"
-                className={BTN_NEUTRAL}
-                onClick={() => setRemoteOpen(true)}
-              >
-                <Plus size={14} className="opacity-70" />
-                {copy.addRemote}
-              </button>
-              <button
-                type="button"
                 disabled={loading}
                 data-testid="model-store-refresh"
                 className={BTN_NEUTRAL}
@@ -1008,45 +974,6 @@ const ModelStoreView = ({ theme, t, bs }) => {
         theme={theme}
         onSaved={showToast}
       />
-
-      {remoteOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4" data-testid="model-store-remote-dialog">
-          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl dark:bg-[#1C1C1E]">
-            <h3 className="mb-1 text-[16px] font-semibold">{copy.addRemote}</h3>
-            <p className="mb-4 text-[12px] leading-5 text-slate-500 dark:text-slate-400">{copy.addRemoteDesc}</p>
-            <div className="space-y-3">
-              <div>
-                <label className="mb-1 block text-[12px] font-medium">{copy.addRemoteUrl}</label>
-                <input
-                  type="url"
-                  value={remoteUrl}
-                  onChange={(e) => setRemoteUrl(e.target.value)}
-                  placeholder="http://192.168.1.100:8000"
-                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-[14px] dark:border-slate-700 dark:bg-slate-800"
-                  data-testid="model-store-remote-url"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block text-[12px] font-medium">{copy.addRemoteName}</label>
-                <input
-                  type="text"
-                  value={remoteName}
-                  onChange={(e) => setRemoteName(e.target.value)}
-                  placeholder=""
-                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-[14px] dark:border-slate-700 dark:bg-slate-800"
-                />
-              </div>
-              {remoteError ? <p className="text-[12px] text-rose-600">{remoteError}</p> : null}
-            </div>
-            <div className="mt-5 flex justify-end gap-2">
-              <MsButton tone="ghost" onClick={() => setRemoteOpen(false)}>{copy.dialogCancel}</MsButton>
-              <MsButton tone="primary" busy={remoteBusy} disabled={!remoteUrl.trim()} onClick={handleAddRemote}>
-                {copy.addRemote}
-              </MsButton>
-            </div>
-          </div>
-        </div>
-      ) : null}
 
       <ResourceManagerDialog
         open={resourceManagerOpen}
