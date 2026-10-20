@@ -33,9 +33,11 @@ async function fixture(t, { running = false, status = 'deployed' } = {}) {
   const starts = [];
   const runs = new Map();
   const unexpected = [];
-  let confirmed = true;
-  const confirmations = [];
-  window.confirm = (message) => { confirmations.push(message); return confirmed; };
+  const nativeConfirmCalls = [];
+  window.confirm = (message) => {
+    nativeConfirmCalls.push(message);
+    throw new Error('Native confirmation must not be used');
+  };
   globalThis.window = window;
   globalThis.document = window.document;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -79,10 +81,20 @@ async function fixture(t, { running = false, status = 'deployed' } = {}) {
       else delete globalThis[key];
     }
     assert.deepEqual(unexpected, []);
+    assert.deepEqual(nativeConfirmCalls, []);
   });
   return {
-    record, container, starts, confirmations, finish,
-    confirm(value) { confirmed = value; },
+    record, container, starts, finish,
+    async escape() {
+      const event = new window.Event('keydown');
+      event.key = 'Escape';
+      await act(async () => window.dispatchEvent(event));
+    },
+    async doubleClick(selector) {
+      const button = container.querySelector(selector);
+      assert.ok(button, `Missing ${selector}`);
+      await act(async () => { button.click(); button.click(); });
+    },
     async render(element) { await act(async () => root.render(element)); },
     async click(selector) {
       const button = container.querySelector(selector);
@@ -112,8 +124,22 @@ for (const language of ['zh', 'en', 'ja']) {
       assert.equal(ui.container.querySelectorAll('[data-testid="model-store-detail-action-uninstall"]').length, 0);
       assert.equal(ui.container.querySelectorAll('[data-testid="model-store-detail-action-deploy"]').length, 0);
       await ui.click('[data-testid="model-store-detail-action-update"]');
-      assert.deepEqual(actions, busy ? [] : ['close', [ui.record, running]]);
-      assert.deepEqual(ui.confirmations, busy ? [] : [running ? copy.updateConfirmRunning : copy.updateConfirmStopped]);
+      assert.deepEqual(actions, []);
+      if (busy) {
+        assert.equal(ui.container.querySelectorAll('[data-testid="model-store-update-confirm"]').length, 0);
+      } else {
+        const confirmation = ui.container.querySelector('[data-testid="model-store-update-confirm"]');
+        assert.ok(confirmation);
+        assert.ok(confirmation.textContent.includes(running ? copy.updateConfirmRunning : copy.updateConfirmStopped));
+        assert.equal(ui.container.querySelector('[data-testid="model-store-update-cancel"]').textContent, copy.cardScriptsCancel);
+        assert.equal(ui.container.querySelector('[data-testid="model-store-update-confirm-submit"]').textContent, copy.cardScriptsConfirm);
+        await ui.click('[data-testid="model-store-update-cancel"]');
+        assert.deepEqual(actions, []);
+        assert.ok(ui.container.querySelector('[data-testid="model-store-detail-dialog"]'));
+        await ui.click('[data-testid="model-store-detail-action-update"]');
+        await ui.click('[data-testid="model-store-update-confirm-submit"]');
+        assert.deepEqual(actions, ['close', [ui.record, running]]);
+      }
     });
   }
 }
@@ -123,12 +149,14 @@ for (const running of [false, true]) {
     const ui = await fixture(t, { running });
     await ui.render(React.createElement(ModelStoreView, { theme: 'light', t: dict.zh, bs: {} }));
     await ui.click('[data-testid="model-store-open-detail"]');
-    ui.confirm(false);
     await ui.click('[data-testid="model-store-detail-action-update"]');
     assert.equal(ui.starts.length, 0);
+    await ui.click('[data-testid="model-store-update-cancel"]');
+    assert.equal(ui.starts.length, 0);
     assert.ok(ui.container.querySelector('[data-testid="model-store-detail-dialog"]'));
-    ui.confirm(true);
     await ui.click('[data-testid="model-store-detail-action-update"]');
+    assert.equal(ui.starts.length, 0);
+    await ui.click('[data-testid="model-store-update-confirm-submit"]');
     assert.equal(ui.container.querySelectorAll('[data-testid="model-store-detail-dialog"]').length, 0);
     const expected = [
       ...(running ? [{ cardId: 'card', action: 'stop' }] : []),
@@ -148,6 +176,63 @@ for (const running of [false, true]) {
     assert.equal(getTasks().length, 0);
   });
 }
+
+test('confirmation rechecks busy state and ignores a double submit', async (t) => {
+  const ui = await fixture(t);
+  const actions = [];
+  const render = (cardBusy) => ui.render(React.createElement(ModelDetailDialog, {
+    cardId: 'card', copy: dict.zh.uiModelStore, theme: 'light', cardBusy, scriptUpdates: { card: true },
+    onClose: () => actions.push('close'),
+    onUpdateWithCleanup: (record, running) => actions.push([record, running]),
+  }));
+  await render(false);
+  await ui.click('[data-testid="model-store-detail-action-update"]');
+  await render(true);
+  assert.equal(ui.container.querySelector('[data-testid="model-store-update-confirm-submit"]').disabled, true);
+  await ui.click('[data-testid="model-store-update-confirm-submit"]');
+  assert.deepEqual(actions, []);
+  // Cancellation remains available even if the card becomes busy.
+  await ui.click('[data-testid="model-store-update-cancel"]');
+  assert.ok(ui.container.querySelector('[data-testid="model-store-detail-dialog"]'));
+  await render(false);
+  await ui.click('[data-testid="model-store-detail-action-update"]');
+  await ui.doubleClick('[data-testid="model-store-update-confirm-submit"]');
+  assert.deepEqual(actions, ['close', [ui.record, false]]);
+});
+
+for (const dismiss of ['escape', 'backdrop', 'close']) {
+  test(`${dismiss} dismisses only the custom confirmation without starting work`, async (t) => {
+    const ui = await fixture(t);
+    const actions = [];
+    await ui.render(React.createElement(ModelDetailDialog, {
+      cardId: 'card', copy: dict.zh.uiModelStore, theme: 'light', scriptUpdates: { card: true },
+      onClose: () => actions.push('close'), onUpdateWithCleanup: () => actions.push('update'),
+    }));
+    await ui.click('[data-testid="model-store-detail-action-update"]');
+    if (dismiss === 'escape') await ui.escape();
+    else if (dismiss === 'backdrop') await ui.click('[role="presentation"]');
+    else await ui.click('[data-testid="model-store-update-confirm"] button[aria-label]');
+    assert.deepEqual(actions, []);
+    assert.ok(ui.container.querySelector('[data-testid="model-store-detail-dialog"]'));
+    assert.equal(ui.container.querySelectorAll('[data-testid="model-store-update-confirm"]').length, 0);
+  });
+}
+
+test('closing and reopening the detail does not reuse an old confirmation', async (t) => {
+  const ui = await fixture(t);
+  const actions = [];
+  const render = (cardId) => ui.render(React.createElement(ModelDetailDialog, {
+    cardId, copy: dict.zh.uiModelStore, theme: 'light', scriptUpdates: { card: true },
+    onClose() {}, onUpdateWithCleanup: () => actions.push('update'),
+  }));
+  await render('card');
+  await ui.click('[data-testid="model-store-detail-action-update"]');
+  await render(null);
+  await render('card');
+  assert.ok(ui.container.querySelector('[data-testid="model-store-detail-dialog"]'));
+  assert.equal(ui.container.querySelectorAll('[data-testid="model-store-update-confirm"]').length, 0);
+  assert.deepEqual(actions, []);
+});
 
 for (const [status, running, action, disabled] of [
   ['deployed', false, 'uninstall', false],
