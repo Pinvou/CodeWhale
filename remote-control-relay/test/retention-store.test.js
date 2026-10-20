@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { RetentionFacts } from '../retention-store.js';
+import { RetentionFacts, retentionDay } from '../retention-store.js';
 import { TelemetryStore, buildBehaviorOverview } from '../telemetry-service.js';
 import { backfillRetention } from '../scripts/backfill-retention.mjs';
 
@@ -12,6 +13,12 @@ const DAY = 86400000;
 const now = at('2026-10-20T10:00:00');
 const device = (id = 'fixture') => ({ device_id: id, hardware_source: 'installation_id', first_seen_at: at('2026-09-01T08:00:00') });
 const success = (time, id = 'fixture', extra = {}) => ({ device_id: id, event_id: `${id}_${time}`, attempt_id: `${id}_${time}`, event_name: 'task_finished', status: 'success', initiator_type: 'user', mode: 'assistant', occurred_at: at(time), received_at: at(time), ...extra });
+const fixtureStores = new Map();
+function testStore(dir, pepper, options) {
+  const store = new TelemetryStore(dir, pepper, options);
+  fixtureStores.get(dir).add(store);
+  return store;
+}
 const facts = (events, devices = [device()], time = now) => {
   const result = new RetentionFacts(null, at('2026-08-01T00:00:00'));
   result.observe(events, devices, time);
@@ -19,16 +26,139 @@ const facts = (events, devices = [device()], time = now) => {
 };
 function fixture(t, action) {
   const dir = mkdtempSync(join(tmpdir(), 'pinvou-retention-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  fixtureStores.set(dir, new Set());
+  t.after(() => {
+    // saveNow persists immediately but does not cancel saveSoon's pending timer.
+    // Close every store, including reopened instances, before deleting its files.
+    for (const store of fixtureStores.get(dir)) {
+      clearTimeout(store.saveTimer);
+      store.saveTimer = null;
+    }
+    fixtureStores.delete(dir);
+    rmSync(dir, { recursive: true, force: true });
+  });
   return action(dir);
 }
 function registeredStore(dir) {
-  const store = new TelemetryStore(dir, 'fixture-pepper-at-least-24-characters');
+  const store = testStore(dir, 'fixture-pepper-at-least-24-characters');
   const credential = store.register({ hardware_claim: 'fixture-installation-retention', registration_secret: 'fixture-registration-secret-at-least-32', hardware_source: 'installation_id' });
   const registered = store.authenticate(credential.device_id, credential.device_token);
   store.saveNow();
   return { store, registered };
 }
+
+function ingressSuccess(collectionPeriodId, eventId = 'retention_ingress_event_001') {
+  return { schema_version:1, event_id:eventId, event_name:'task_finished', event_source:'client', occurred_at:now,
+    collection_period_id:collectionPeriodId, producer:'pinvou_agent', producer_version:'0.10.12', app_version:'0.10.12',
+    platform:'windows', arch:'x86_64', channel:'dev', locale:'zh-CN', session_id:'retention_session_001',
+    attempt_id:eventId, turn_id:'retention_turn_001', status:'success', duration_ms:1, mode:'assistant',
+    initiator_type:'user', input_type:'text', has_attachment:false };
+}
+
+test('day zero is rejected before persistence and seconds are normalized exactly once', t => fixture(t, dir => {
+  assert.equal(retentionDay(57), 0);
+  const state = new RetentionFacts(dir);
+  state.observe([success('2026-09-01T08:00:00', 'fixture', { occurred_at:57 })], [device()], now);
+  assert.equal(state.rows.size, 0);
+  state.observe([success('2026-09-01T08:00:00', 'fixture', { occurred_at:57_600 })], [device()], now);
+  assert.equal(state.rows.get('fixture').first_success_day, 1);
+  state.flush();
+  assert.equal(new RetentionFacts(dir).rows.get('fixture').first_success_day, 1);
+}));
+
+test('backfill reports rows dropped by device reconciliation before applying them', async t => fixture(t, async dir => {
+  const state = new RetentionFacts(dir);
+  state.observe(['kept', 'missing'].map(id => success('2026-09-01T08:00:00', id)), ['kept', 'missing'].map(device), now);
+  state.flush();
+  writeFileSync(join(dir, 'devices.json'), JSON.stringify({ devices:[device('kept')] }));
+  writeFileSync(join(dir, 'behavior-events.jsonl'), '');
+  const bytes = readFileSync(state.path);
+  const dry = await backfillRetention({ dataDir:dir, now });
+  assert.equal(dry.before.d30.eligible_installations, 2);
+  assert.equal(dry.after.d30.eligible_installations, 1);
+  assert.equal(dry.rows_dropped, 1);
+  assert.deepEqual(readFileSync(state.path), bytes);
+  const applied = await backfillRetention({ dataDir:dir, now, apply:true });
+  assert.deepEqual(applied, { ...dry, applied:true });
+  assert.deepEqual([...new RetentionFacts(dir).rows.keys()], ['kept']);
+}));
+
+test('backfill skips invalid JSON values and day zero consistently in dry run and apply', async t => fixture(t, async dir => {
+  const { store, registered } = registeredStore(dir);
+  const source = join(dir, 'backup.jsonl');
+  const event = success('2026-09-01T08:00:00', registered.device_id);
+  const lines = [null, 42, 'text', [], { ...event, occurred_at:57 }, event, event];
+  writeFileSync(source, lines.map(value => JSON.stringify(value)).join('\n') + '\n{broken\n');
+  const rawExists = existsSync(store.behaviorEventsPath);
+  const before = readFileSync(store.retentionFacts.path);
+  const dry = await backfillRetention({ dataDir:dir, sources:[source, source], now });
+  assert.equal(dry.scanned_events, 7); // Parsed input lines, including duplicates; source paths are deduplicated.
+  assert.equal(dry.malformed_lines, 1);
+  assert.equal(dry.invalid_events, 4);
+  assert.equal(dry.invalid_timestamp_events, 1);
+  assert.equal(dry.after.d30.eligible_installations, 1);
+  assert.deepEqual(readFileSync(store.retentionFacts.path), before);
+  const applied = await backfillRetention({ dataDir:dir, sources:[source], now, apply:true });
+  assert.deepEqual(applied, { ...dry, applied:true });
+  assert.equal(existsSync(store.behaviorEventsPath), rawExists);
+  assert.equal(testStore(dir, store.pepper).retentionFacts.rows.size, 1);
+}));
+
+test('a fresh deployment has an empty read-only backfill but explicit missing sources fail', async t => fixture(t, async dir => {
+  writeFileSync(join(dir, 'devices.json'), JSON.stringify({ devices:[] }));
+  const files = readdirSync(dir);
+  const dry = await backfillRetention({ dataDir:dir, now });
+  assert.equal(dry.scanned_events, 0);
+  assert.equal(dry.after.d30.eligible_installations, 0);
+  assert.deepEqual(readdirSync(dir), files);
+  await assert.rejects(backfillRetention({ dataDir:dir, sources:[join(dir, 'missing-backup.jsonl')], now }), { code:'ENOENT' });
+  await assert.rejects(backfillRetention({ dataDir:dir, sources:[join(dir, 'behavior-events.jsonl')], now }), { code:'ENOENT' });
+}));
+
+for (const operation of ['writeFileSync', 'renameSync']) {
+  test(`failed retention ${operation} removes its temporary file and can retry`, t => fixture(t, dir => {
+    const state = new RetentionFacts(dir);
+    state.flush();
+    const before = readFileSync(state.path);
+    state.observe([success('2026-09-01T08:00:00')], [device()], now);
+    const original = fs[operation];
+    const failure = t.mock.method(fs, operation, (...args) => {
+      if (operation === 'writeFileSync') original(args[0], '{partial');
+      throw Object.assign(new Error('fixture disk failure'), { code:'EIO' });
+    });
+    syncBuiltinESMExports();
+    try {
+      assert.throws(() => state.flush(), /fixture disk failure/);
+      assert.deepEqual(readFileSync(state.path), before);
+      assert.equal(state.dirty, true);
+      assert.equal(readdirSync(dir).some(name => name.endsWith('.tmp')), false);
+    } finally {
+      failure.mock.restore();
+      syncBuiltinESMExports();
+    }
+    state.flush();
+    assert.equal(new RetentionFacts(dir).rows.size, 1);
+    assert.equal(state.dirty, false);
+  }));
+}
+
+test('behavior ingress observes accepted increments without rescanning retained history', t => fixture(t, dir => {
+  t.mock.method(Date, 'now', () => now);
+  const { store, registered } = registeredStore(dir);
+  const collection = store.startBehaviorCollection(registered, { request_id:'start_increment_retention_001' });
+  store.compactExpiredEventsIfDue(now);
+  store.behaviorEvents = Array.from({ length:50_000 }, (_, index) => ({ event_id:`historical_${index}`, event_name:'scene_impression' }));
+  const lengths = [];
+  const observe = store.retentionFacts.observe.bind(store.retentionFacts);
+  store.retentionFacts.observe = (events, ...args) => { lengths.push(events.length); return observe(events, ...args); };
+  const event = ingressSuccess(collection.collection_period_id);
+  assert.equal(store.appendBehaviorEvents(registered, [event]).results[0].status, 'accepted');
+  assert.deepEqual(lengths, [1]);
+  assert.equal(store.appendBehaviorEvents(registered, [event]).results[0].status, 'duplicate');
+  assert.deepEqual(lengths, [1]);
+  assert.equal(new RetentionFacts(dir).rows.size, 1);
+  store.saveNow();
+}));
 
 test('ABC real-time D30 keeps A and lets C join both denominator and numerator today', () => {
   const devices = ['A','B','C'].map(device);
@@ -90,7 +220,7 @@ test('durable facts survive age compaction and restart', t => fixture(t, dir => 
   store.compactBehaviorEvents(at('2026-12-01T00:00:00'));
   assert.equal(store.behaviorEvents.length, 0);
   for (const h of [1,7,30]) assert.equal(store.retentionFacts.metrics(now)[`d${h}`].retained_installations, 1);
-  const reopened = new TelemetryStore(dir, store.pepper);
+  const reopened = testStore(dir, store.pepper);
   for (const h of [1,7,30]) assert.equal(reopened.behaviorOverview('today').retention[`d${h}`].retained_installations, 1);
   assert.equal(reopened.behaviorOverview('today').retention.d30.history_status, 'partial');
 }));
@@ -127,7 +257,7 @@ test('startup migration observes old successes before pruning the raw file', t =
   const { store, registered } = registeredStore(dir);
   const old = ['2025-01-01T08:00:00','2025-01-31T08:00:00'].map(time => success(time,registered.device_id));
   writeFileSync(store.behaviorEventsPath, old.map(e=>JSON.stringify(e)).join('\n')+'\n');
-  const migrated = new TelemetryStore(dir, store.pepper);
+  const migrated = testStore(dir, store.pepper);
   assert.equal(migrated.behaviorEvents.length, 0);
   assert.equal(migrated.behaviorOverview('30').retention.d30.retained_installations, 1);
 }));
@@ -141,7 +271,7 @@ test('an installation returning after 36 days keeps its original identity and fi
   clock+=36*DAY;
   store.compactExpiredData(clock);
   assert.equal(store.behaviorEvents.length,0);
-  const reopened=new TelemetryStore(dir,store.pepper);
+  const reopened=testStore(dir,store.pepper);
   const returned=reopened.register({hardware_claim:'fixture-installation-retention',registration_secret:'fixture-registration-secret-at-least-32',hardware_source:'installation_id'});
   assert.equal(returned.device_id,registered.device_id);
   assert.equal(reopened.devices.size,1);
@@ -159,7 +289,7 @@ test('deletion removes retention and a restored facts backup cannot resurrect th
   store.deleteBehaviorData(registered, { request_id:'delete_retention_fixture_001' });
   assert.equal(new RetentionFacts(dir).rows.size, 0);
   writeFileSync(store.retentionFacts.path, backup);
-  const reopened = new TelemetryStore(dir, store.pepper);
+  const reopened = testStore(dir, store.pepper);
   assert.equal(reopened.behaviorOverview('30').retention.d30.eligible_installations, 0);
   assert.equal(new RetentionFacts(dir).rows.size, 0);
 }));
@@ -170,7 +300,7 @@ test('processing deletion is recovered before retention becomes visible', t => f
   store.persistRetentionFacts(now);
   store.retentionFacts.flush = () => { throw new Error('fixture disk failure'); };
   assert.throws(()=>store.deleteBehaviorData(registered,{request_id:'delete_pending_retention_001'}), /retention_storage_unavailable/);
-  const reopened = new TelemetryStore(dir, store.pepper);
+  const reopened = testStore(dir, store.pepper);
   assert.equal(reopened.retentionFacts.rows.size, 0);
   assert.equal(reopened.deletionTombstones.at(-1).status, 'completed');
 }));
@@ -182,14 +312,14 @@ test('failed retention persistence prevents raw compaction and damaged authority
   assert.throws(()=>store.compactBehaviorEvents(now), /retention_storage_unavailable/);
   assert.equal(store.behaviorEvents.length, 1);
   writeFileSync(store.retentionFacts.path, '{broken');
-  assert.throws(()=>new TelemetryStore(dir,store.pepper));
+  assert.throws(()=>testStore(dir,store.pepper));
   assert.equal(readFileSync(store.retentionFacts.path,'utf8'),'{broken');
 }));
 
 test('an initialized but missing facts file is not mistaken for first deployment', t => fixture(t, dir => {
   const { store }=registeredStore(dir);
   rmSync(store.retentionFacts.path);
-  assert.throws(()=>new TelemetryStore(dir,store.pepper),/missing or invalid retention authority/);
+  assert.throws(()=>testStore(dir,store.pepper),/missing or invalid retention authority/);
 }));
 
 test('backfill dry run is read-only; apply deduplicates snapshots and preserves the live raw log', async t => fixture(t, async dir => {
@@ -207,7 +337,7 @@ test('backfill dry run is read-only; apply deduplicates snapshots and preserves 
   const applied=await backfillRetention({dataDir:dir,sources:[source],now,apply:true});
   assert.deepEqual(applied.after,dry.after);
   assert.deepEqual(readFileSync(store.behaviorEventsPath),rawBefore);
-  const reopened=new TelemetryStore(dir,store.pepper);
+  const reopened=testStore(dir,store.pepper);
   assert.equal(reopened.retentionFacts.metrics(now).d30.retained_installations,1);
   assert.equal(reopened.retentionFacts.rows.size,1);
 }));
@@ -219,10 +349,40 @@ test('daily timestamps normalize seconds, confidence starts at 30, and state sta
   state.observe(events,devices,now);
   assert.equal(state.metrics(now).d30.retention_rate,1);
   assert.equal(state.metrics(now).d30.history_status,'complete');
+  for (const horizon of [1, 7, 30]) assert.equal(state.metrics(now)[`d${horizon}`].horizon_days, horizon);
   state.flush();
   const raw=readFileSync(state.path,'utf8');
   assert.equal(raw.includes('must-not-persist'),false);
   assert.deepEqual(new RetentionFacts(dir).metrics(now),state.metrics(now));
+}));
+
+test('clock skew cannot silently restore a cohort with uncertain history to complete', t => fixture(t, dir => {
+  const initializedAt = at('2026-09-01T08:00:00');
+  const state = new RetentionFacts(dir, initializedAt);
+  const registered = { ...device(), first_seen_at:initializedAt + 1_000 };
+  state.observe([success('2026-09-01T08:00:00')], [registered], now);
+  assert.equal(state.rows.get('fixture').history_complete, false);
+  state.observe([success('2026-10-01T08:00:00')], [registered], now);
+  state.flush();
+  const reopened = new RetentionFacts(dir);
+  reopened.observe([], [registered], now);
+  assert.equal(reopened.metrics(now).d30.retained_installations, 1);
+  assert.equal(reopened.metrics(now).d30.history_status, 'partial');
+}));
+
+test('offline deletion filtering shares online trimming of subject IDs', async t => fixture(t, async dir => {
+  const { store, registered } = registeredStore(dir);
+  const padded = `  ${registered.device_id}  `;
+  const deviceRow = { ...registered, device_id:padded };
+  store.retentionFacts.observe([success('2026-09-01T08:00:00', padded)], [deviceRow], now);
+  store.retentionFacts.flush();
+  writeFileSync(store.devicesPath, JSON.stringify({ devices:[deviceRow] }));
+  writeFileSync(store.deletionTombstonesPath, JSON.stringify({ records:[{ subject_hash:store.deletionSubjectHash(registered.device_id) }] }));
+  const result = await backfillRetention({ dataDir:dir, now, pepper:store.pepper, apply:true });
+  assert.equal(result.rows_dropped, 1);
+  assert.equal(result.after.d30.eligible_installations, 0);
+  assert.equal(new RetentionFacts(dir).rows.size, 0);
+  assert.equal(testStore(dir, store.pepper).devices.size, 0);
 }));
 
 test('backfill excludes a deleted identity while preserving a fresh registration on the same claim', async t => fixture(t, async dir => {

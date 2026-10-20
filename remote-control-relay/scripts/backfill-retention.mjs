@@ -1,10 +1,10 @@
 // Offline migration: never restore raw backup events into the live event log.
-import { createReadStream, readFileSync } from 'node:fs';
-import crypto from 'node:crypto';
+import { createReadStream, existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
-import { pathToFileURL } from 'node:url';
 import { RetentionFacts, retentionDay } from '../retention-store.js';
+import { deletionSubjectHash, isSuccessfulCoreUserTask, normalizeUsageOccurredAt, statsDayFromMilliseconds } from '../telemetry-primitives.js';
+import { isDirectCliEntry } from '../cli-entrypoint.js';
 
 export async function backfillRetention({ dataDir, sources = [], apply = false, now = Date.now(), pepper = process.env.PINVOU_TELEMETRY_DEVICE_PEPPER }) {
   const saved = JSON.parse(readFileSync(join(dataDir, 'devices.json'), 'utf8'));
@@ -15,16 +15,23 @@ export async function backfillRetention({ dataDir, sources = [], apply = false, 
   const removedSubjects = new Set((tombstones?.records || []).map(row => row.subject_hash).filter(Boolean));
   if (removedSubjects.size && !pepper) throw new Error('deletion filtering requires PINVOU_TELEMETRY_DEVICE_PEPPER');
   const devices = (saved.devices || []).filter(row => !removedSubjects.has(
-    crypto.createHmac('sha256', pepper || '').update(`deletion-subject:${String(row.device_id).slice(0,96)}`).digest('hex'),
+    deletionSubjectHash(row.device_id, pepper || ''),
   ));
   const facts = new RetentionFacts(dataDir, now);
-  facts.observe([], devices, now);
   const before = facts.metrics(now);
+  const beforeRows = facts.rows.size;
+  facts.observe([], devices, now);
+  const rowsDropped = beforeRows - facts.rows.size;
   const legacyCohorts = new Map();
   const legacyActivity = new Map();
   const eligibleIds = new Set(devices.filter(d => d.hardware_source === 'installation_id').map(d => d.device_id));
-  let malformed = 0, scanned = 0;
-  for (const path of new Set([join(dataDir, 'behavior-events.jsonl'), ...sources].map(p => resolve(p)))) {
+  let malformed = 0, scanned = 0, invalidEvents = 0, invalidTimestamps = 0;
+  const livePath = resolve(dataDir, 'behavior-events.jsonl');
+  const sourcePaths = new Set(sources.map(path => resolve(path)));
+  for (const path of new Set([livePath, ...sourcePaths])) {
+    // Like online startup, a fresh deployment need not have a live event log.
+    // Explicit backup sources must exist, even if they name that same path.
+    if (path === livePath && !sourcePaths.has(path) && !existsSync(path)) continue;
     const stream = createReadStream(path, { encoding: 'utf8' });
     const lines = createInterface({ input: stream, crlfDelay: Infinity });
     try {
@@ -34,16 +41,17 @@ export async function backfillRetention({ dataDir, sources = [], apply = false, 
         let event;
         try { event = JSON.parse(line); } catch { malformed += 1; continue; }
         scanned += 1;
+        if (!event || typeof event !== 'object' || Array.isArray(event)) { invalidEvents += 1; continue; }
         const id = event.identity_id || event.device_id;
-        const timestamp = Number(event.occurred_at) < 1e12 ? Number(event.occurred_at) * 1000 : Number(event.occurred_at);
-        const day = retentionDay(timestamp);
-        if (!eligibleIds.has(id) || !Number.isInteger(day) || timestamp > now
+        const timestamp = normalizeUsageOccurredAt(event.occurred_at);
+        const day = statsDayFromMilliseconds(timestamp);
+        if (!Number.isInteger(day) || day < 1) { invalidTimestamps += 1; continue; }
+        if (!eligibleIds.has(id) || timestamp > now
           || (event.identity_id && event.device_id && event.identity_id !== event.device_id)) continue;
         if (event.event_name === 'analytics_cohort_started') {
           legacyCohorts.set(id, Math.min(day, legacyCohorts.get(id) ?? day));
         }
-        if (event.event_name === 'task_finished' && event.status === 'success'
-          && event.initiator_type === 'user' && ['assistant', 'code', 'team'].includes(event.mode)) {
+        if (isSuccessfulCoreUserTask(event)) {
           if (!legacyActivity.has(id)) legacyActivity.set(id, new Set());
           legacyActivity.get(id).add(day);
           chunk.push(event);
@@ -59,20 +67,55 @@ export async function backfillRetention({ dataDir, sources = [], apply = false, 
     return [`d${h}`, { eligible_installations: rows.length, retained_installations: rows.filter(([id, day]) => legacyActivity.get(id)?.has(day + h)).length }];
   }));
   if (apply) facts.flush();
-  return { applied: apply, scanned_events: scanned, malformed_lines: malformed, before, after, legacy_cohort_start: legacy };
+  return {
+    applied:apply, scanned_events:scanned, malformed_lines:malformed,
+    invalid_events:invalidEvents, invalid_timestamp_events:invalidTimestamps,
+    rows_dropped:rowsDropped, before, after, legacy_cohort_start:legacy,
+  };
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  const args = process.argv.slice(2);
+const USAGE = 'usage: node backfill-retention.mjs --data-dir DIR [--source JSONL] [--apply --offline]';
+function argumentError(message) {
+  return Object.assign(new Error(message), { cliMessage:`${message}\n${USAGE}` });
+}
+
+function parseArguments(args) {
   const sources = [];
   let dataDir, apply = false, offline = false;
+  if (args.length === 1 && args[0] === '--help') return { help:true };
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--data-dir') dataDir = args[++i];
-    else if (args[i] === '--source') sources.push(args[++i]);
-    else if (args[i] === '--apply') apply = true;
+    if (args[i] === '--data-dir' || args[i] === '--source') {
+      const option = args[i];
+      const value = args[++i];
+      if (!value || value.startsWith('--')) throw argumentError(`${option} requires a path`);
+      if (option === '--source') sources.push(value);
+      else {
+        if (dataDir) throw argumentError('--data-dir may only be supplied once');
+        dataDir = value;
+      }
+    } else if (args[i] === '--apply') apply = true;
     else if (args[i] === '--offline') offline = true;
-    else throw new Error('usage: --data-dir DIR [--source JSONL] [--apply --offline]');
+    else throw argumentError('unknown argument');
   }
-  if (!dataDir || sources.some(p => !p) || (apply && !offline)) throw new Error('apply requires an offline service: --data-dir DIR [--source JSONL] [--apply --offline]');
-  console.log(JSON.stringify(await backfillRetention({ dataDir, sources, apply }), null, 2));
+  if (!dataDir) throw argumentError('--data-dir is required');
+  if (apply && !offline) throw argumentError('--apply requires --offline to confirm the service is stopped');
+  return { dataDir, sources, apply };
+}
+
+try {
+  if (isDirectCliEntry(import.meta.url)) {
+    const options = parseArguments(process.argv.slice(2));
+    if (options.help) {
+      console.log(`${USAGE}\nDefault: read-only dry run. --source may be repeated.\nDeletion filtering requires PINVOU_TELEMETRY_DEVICE_PEPPER when tombstones exist.`);
+    } else {
+      console.log(JSON.stringify(await backfillRetention(options), null, 2));
+    }
+  }
+} catch (error) {
+  // Do not echo raw JSON or filesystem contents from a failed backup parse.
+  const known = ['deletion filtering requires PINVOU_TELEMETRY_DEVICE_PEPPER', 'missing or invalid retention authority',
+    'invalid retention facts', 'invalid retention row', 'unsafe telemetry storage file'];
+  console.error(error.cliMessage || (known.includes(error.message) ? error.message
+    : `retention backfill failed (${error.code || (error instanceof SyntaxError ? 'invalid_json' : 'storage_error')})`));
+  process.exitCode = 1;
 }

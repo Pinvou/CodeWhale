@@ -1,5 +1,11 @@
 import crypto from "node:crypto";
 import { RetentionFacts, retentionFromEvents } from "./retention-store.js";
+import {
+  DAY_MS, STATS_TIMEZONE_OFFSET_MS, MIN_RELIABLE_SAMPLE,
+  boundedText, deletionSubjectHash, isCoreUserTask, isSuccessfulCoreUserTask,
+  normalizeUsageOccurredAt, statsDay,
+} from "./telemetry-primitives.js";
+import { atomicWriteJson, atomicWriteJsonLines, enforcePrivateFile } from "./telemetry-storage.js";
 import { isIP } from "node:net";
 import {
   appendFileSync,
@@ -8,8 +14,6 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
-  renameSync,
-  writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -54,10 +58,8 @@ const RANGE_DAYS = new Map([
 ]);
 const ONLINE_WINDOW_MS = 5 * 60_000;
 const ADMIN_SESSION_MS = 12 * 60 * 60_000;
-const DAY_MS = 24 * 60 * 60_000;
 const HOUR_MS = 60 * 60_000;
 const REGION_REFRESH_MS = DAY_MS;
-const STATS_TIMEZONE_OFFSET_MS = 8 * 60 * 60_000;
 const DEFAULT_EVENT_RETENTION_MS = 35 * DAY_MS;
 const DEFAULT_MAX_EVENTS = 100_000;
 const DEFAULT_MAX_DEVICES = 10_000;
@@ -98,10 +100,6 @@ function safeEqual(a, b) {
 
 function randomId(prefix, bytes = 18) {
   return `${prefix}${crypto.randomBytes(bytes).toString("base64url")}`;
-}
-
-function boundedText(value, max = 128) {
-  return String(value || "").trim().slice(0, max);
 }
 
 function boundedCount(value) {
@@ -222,18 +220,6 @@ export function createIpRegionResolver(options = {}) {
   };
 }
 
-function statsDay(timestamp) {
-  const normalizedTimestamp = normalizeUsageOccurredAt(timestamp);
-  return Math.floor((normalizedTimestamp + STATS_TIMEZONE_OFFSET_MS) / DAY_MS);
-}
-
-function normalizeUsageOccurredAt(value) {
-  const occurredAt = Number(value);
-  if (!Number.isFinite(occurredAt) || occurredAt <= 0) return Number.NaN;
-  if (occurredAt >= 1_000_000_000_000) return occurredAt;
-  return occurredAt * 1_000;
-}
-
 function statsDayLabel(day) {
   return new Date(day * DAY_MS).toISOString().slice(0, 10);
 }
@@ -248,12 +234,6 @@ function installationBehaviorEvents(devices, behaviorEvents) {
     .map((device) => boundedText(device.device_id, 128))
     .filter(Boolean));
   return behaviorEvents.filter((event) => installationIds.has(eventIdentity(event)));
-}
-
-function isCoreUserTask(event, eventName) {
-  return event?.event_name === eventName
-    && event.initiator_type === "user"
-    && ["assistant", "code", "team"].includes(event.mode);
 }
 
 function attemptIdentityKey(event) {
@@ -624,7 +604,7 @@ function rate(part, total) {
 function successfulActiveIdentities(behaviorEvents, window) {
   const windowEvents = filteredBehaviorEvents(behaviorEvents, window);
   return new Set(windowEvents
-    .filter((event) => isCoreUserTask(event, "task_finished") && event.status === "success")
+    .filter(isSuccessfulCoreUserTask)
     .map(eventIdentity)
     .filter(Boolean));
 }
@@ -636,7 +616,6 @@ function intersectionSize(values, eligible) {
 }
 
 const EXPLICIT_VALUE_WINDOW_MS = 30 * 60_000;
-const MIN_RELIABLE_SAMPLE = 30;
 const MIN_PRIVACY_GROUP_SUBJECTS = 1;
 
 function reliableRate(part, total) {
@@ -911,10 +890,7 @@ export function buildWeeklyExplicitValueMetric(behaviorEvents, now = Date.now())
       && event.rating === "positive";
   });
   const successfulTasks = uniqueAttempts(behaviorEvents.filter((event) => (
-    event.event_name === "task_finished"
-      && event.status === "success"
-      && event.initiator_type === "user"
-      && ["assistant", "code", "team"].includes(event.mode)
+    isSuccessfulCoreUserTask(event)
       && Number(event.occurred_at) >= week.start
       && Number(event.occurred_at) <= week.end
   )), "task_finished");
@@ -1780,31 +1756,6 @@ function loadJson(path, fallback) {
   }
 }
 
-function atomicWriteJson(path, value) {
-  const temporary = `${path}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-  renameSync(temporary, path);
-  enforcePrivateFile(path);
-}
-
-function atomicWriteJsonLines(path, values) {
-  const temporary = `${path}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
-  const content = values.length
-    ? `${values.map((value) => JSON.stringify(value)).join("\n")}\n`
-    : "";
-  writeFileSync(temporary, content, { mode: 0o600, flag: "wx" });
-  renameSync(temporary, path);
-  enforcePrivateFile(path);
-}
-
-function enforcePrivateFile(path) {
-  const metadata = lstatSync(path);
-  if (metadata.isSymbolicLink() || !metadata.isFile()) {
-    throw new Error("unsafe telemetry storage file");
-  }
-  chmodSync(path, 0o600);
-}
-
 export class TelemetryStore {
   constructor(dataDir, pepper, options = {}) {
     this.dataDir = dataDir;
@@ -1923,9 +1874,7 @@ export class TelemetryStore {
   }
 
   deletionSubjectHash(deviceId) {
-    return crypto.createHmac("sha256", this.pepper)
-      .update(`deletion-subject:${boundedText(deviceId, 96)}`)
-      .digest("hex");
+    return deletionSubjectHash(deviceId, this.pepper);
   }
 
   deletionTokenHash(token) {
@@ -2004,10 +1953,19 @@ export class TelemetryStore {
     return this.removedSubjectHashes.has(subjectHash);
   }
 
-  persistRetentionFacts(now = Date.now()) {
+  persistRetentionFacts(now = Date.now(), events = this.behaviorEvents) {
     const devices = [...this.devices.values()].filter(device => !this.subjectWasDeleted(device.device_id));
     try {
-      this.retentionFacts.observe(this.behaviorEvents, devices, now);
+      this.retentionFacts.observe(events, devices, now);
+    } catch {
+      console.error("[telemetry-error] retention_facts_persist_failed");
+      throw new TelemetryHttpError(503, "retention_storage_unavailable");
+    }
+    this.flushRetentionFacts();
+  }
+
+  flushRetentionFacts() {
+    try {
       this.retentionFacts.flush();
     } catch {
       console.error("[telemetry-error] retention_facts_persist_failed");
@@ -2437,7 +2395,7 @@ export class TelemetryStore {
     this.compactExpiredEventsIfDue(now);
     // A retry after raw append succeeded must persist pending facts before
     // acknowledging a duplicate, even when periodic compaction is not due.
-    this.persistRetentionFacts(now);
+    this.flushRetentionFacts();
     if (this.eventRateLimited(device.device_id, inputEvents.length, now)) {
       response.results = inputEvents.map((raw) => ({
         event_id: boundedText(raw?.event_id, 96),
@@ -2538,7 +2496,7 @@ export class TelemetryStore {
         this.behaviorEvents.push(event);
       }
       try {
-        this.persistRetentionFacts(now);
+        this.persistRetentionFacts(now, accepted);
       } catch {
         for (const index of acceptedResultIndexes) {
           response.results[index] = { ...response.results[index], status: "retryable", reason_code: "storage_unavailable" };

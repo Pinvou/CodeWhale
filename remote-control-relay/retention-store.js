@@ -1,20 +1,9 @@
 // Durable, minimal retention facts. Raw telemetry can expire independently.
-import crypto from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-
-const DAY = 86_400_000;
-export function retentionDay(timestamp) {
-  const value = Number(timestamp);
-  if (!Number.isFinite(value) || value <= 0) return NaN;
-  return Math.floor(((value < 1e12 ? value * 1000 : value) + 28_800_000) / DAY);
-}
-
-function privateFile(path) {
-  const stat = lstatSync(path);
-  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('unsafe retention storage file');
-  chmodSync(path, 0o600);
-}
+import { MIN_RELIABLE_SAMPLE, isSuccessfulCoreUserTask, normalizeUsageOccurredAt, statsDay as retentionDay, statsDayFromMilliseconds } from './telemetry-primitives.js';
+import { atomicWriteJson, enforcePrivateFile } from './telemetry-storage.js';
+export { statsDay as retentionDay } from './telemetry-primitives.js';
 
 export class RetentionFacts {
   constructor(dataDir = null, now = Date.now()) {
@@ -25,14 +14,14 @@ export class RetentionFacts {
     this.dirty = Boolean(this.marker && !existsSync(this.marker));
     this.unresolvedInstallations = 0;
     if (this.marker && existsSync(this.marker)) {
-      privateFile(this.marker);
+      enforcePrivateFile(this.marker);
       if (readFileSync(this.marker, 'utf8') !== '1\n' || !existsSync(this.path)) throw new Error('missing or invalid retention authority');
     }
     if (!this.path || !existsSync(this.path)) {
       this.dirty = true;
       return;
     }
-    privateFile(this.path);
+    enforcePrivateFile(this.path);
     // A damaged authority must never be replaced with an empty successful metric.
     const value = JSON.parse(readFileSync(this.path, 'utf8'));
     if (value.version !== 1 || !Number.isFinite(value.initialized_at)
@@ -60,12 +49,10 @@ export class RetentionFacts {
       const id = event.identity_id || event.device_id;
       const device = eligible.get(id);
       if (!device || (event.identity_id && event.device_id && event.identity_id !== event.device_id)
-        || event.event_name !== 'task_finished' || event.status !== 'success'
-        || event.initiator_type !== 'user' || !['assistant', 'code', 'team'].includes(event.mode)) continue;
-      const raw = Number(event.occurred_at);
-      const timestamp = raw < 1e12 ? raw * 1000 : raw;
-      const day = retentionDay(timestamp);
-      if (!Number.isInteger(day) || timestamp > now) continue;
+        || !isSuccessfulCoreUserTask(event)) continue;
+      const timestamp = normalizeUsageOccurredAt(event.occurred_at);
+      const day = statsDayFromMilliseconds(timestamp);
+      if (!Number.isInteger(day) || day < 1 || timestamp > now) continue;
       let row = this.rows.get(id);
       if (!row) {
         row = {
@@ -97,19 +84,11 @@ export class RetentionFacts {
     )).length;
   }
 
-  remove(id) {
-    if (this.rows.delete(id)) this.dirty = true;
-  }
-
   flush() {
     if (!this.path || !this.dirty) return;
-    if (existsSync(this.path)) privateFile(this.path);
-    const temporary = `${this.path}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-    writeFileSync(temporary, JSON.stringify({ version: 1, initialized_at: this.initializedAt, rows: [...this.rows.values()] }) + '\n', { mode: 0o600, flag: 'wx' });
-    renameSync(temporary, this.path);
-    privateFile(this.path);
+    atomicWriteJson(this.path, { version: 1, initialized_at: this.initializedAt, rows: [...this.rows.values()] });
     if (!existsSync(this.marker)) writeFileSync(this.marker, '1\n', { mode: 0o600, flag: 'wx' });
-    privateFile(this.marker);
+    enforcePrivateFile(this.marker);
     this.dirty = false;
   }
 
@@ -127,8 +106,8 @@ export class RetentionFacts {
       }
       return [`d${horizon}`, {
         horizon_days: horizon, eligible_installations: eligible, retained_installations: retained,
-        retention_rate: eligible >= 30 ? retained / eligible : null,
-        confidence: eligible >= 30 ? 'sufficient' : 'low',
+        retention_rate: eligible >= MIN_RELIABLE_SAMPLE ? retained / eligible : null,
+        confidence: eligible >= MIN_RELIABLE_SAMPLE ? 'sufficient' : 'low',
         basis: 'first_success_beijing_day', observation: 'realtime',
         provisional_installations: provisional, history_incomplete_installations: incomplete,
         history_status: this.unresolvedInstallations ? 'partial' : 'complete',
