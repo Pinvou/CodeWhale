@@ -1257,7 +1257,12 @@ mod tests {
         // Selecting the provider explicitly keeps its default model usable.
         config.provider = Some("tachyon".to_string());
         let inventory = ModelInventory::from_config(&config);
-        assert!(inventory.candidate(ApiProvider::Tachyon, model).is_some());
+        assert!(
+            inventory
+                .candidate(ApiProvider::Tachyon, model)
+                .unwrap()
+                .thinking_supported
+        );
         assert!(parse_inventory_auto_route_recommendation(&recommendation, &inventory).is_some());
         assert_eq!(
             resolve_explicit_route_with_inventory(&config, model)

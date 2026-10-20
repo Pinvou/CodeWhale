@@ -846,12 +846,16 @@ pub fn provider_capability_with_wire(
         crate::models::max_output_tokens_for_model(resolved_model)
     };
 
-    // Thinking support: V4 models support thinking on all providers, but
-    // only when the model name matches the V4 family.
+    // Tachyon declares thinking controls for unlisted local served IDs. Keep
+    // this route capability separate from global model recognition (which
+    // also authorizes history replay), and honor explicit catalog negatives.
+    let tachyon_thinking_controls = provider == ApiProvider::Tachyon
+        && crate::model_catalog::resolved_supports_reasoning(resolved_model).is_none();
     let thinking_supported = is_v4_pro
         || is_v4_flash
         || is_reasoner
-        || crate::models::model_supports_reasoning(resolved_model);
+        || crate::models::model_supports_reasoning(resolved_model)
+        || tachyon_thinking_controls;
 
     // Cache telemetry: returned only by DeepSeek-native and NVIDIA NIM endpoints.
     let cache_telemetry_supported = matches!(

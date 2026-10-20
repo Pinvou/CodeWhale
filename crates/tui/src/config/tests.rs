@@ -11311,6 +11311,22 @@ fn provider_capability_arcee_direct_models_use_api_docs_shape() {
 }
 
 #[test]
+fn forkguard_tachyon_thinking_capability_is_route_scoped() {
+    for model in [DEFAULT_TACHYON_MODEL, "local-served-model"] {
+        assert!(!crate::models::model_supports_reasoning(model));
+        assert!(provider_capability(ApiProvider::Tachyon, model).thinking_supported);
+        assert!(!provider_capability(ApiProvider::Vllm, model).thinking_supported);
+        assert!(!provider_capability(ApiProvider::Openai, model).thinking_supported);
+    }
+    let non_reasoning = "claude-haiku-4-5";
+    assert_eq!(
+        crate::model_catalog::resolved_supports_reasoning(non_reasoning),
+        Some(false)
+    );
+    assert!(!provider_capability(ApiProvider::Tachyon, non_reasoning).thinking_supported);
+}
+
+#[test]
 fn provider_capability_scenario_3() {
     // Scenario consolidation of: provider_capability_openai_custom_model_is_chat_completions_without_thinking, provider_capability_atlascloud_v4_model_resolves_model_metadata, provider_capability_moonshot_default_model_resolves_kimi_metadata, provider_capability_minimax_anthropic_uses_messages_shape, provider_capability_wanjie_ark_reasoner_has_thinking_no_cache, provider_capability_mistral_matches_reasoning_model_contract, provider_capability_ollama_deepseek_tag_uses_deepseek_heuristic, provider_capability_ollama_unknown_model_falls_back_to_8192
     // from provider_capability_openai_custom_model_is_chat_completions_without_thinking

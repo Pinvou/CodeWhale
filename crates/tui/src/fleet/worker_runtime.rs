@@ -2839,6 +2839,40 @@ mod tests {
     }
 
     #[test]
+    fn forkguard_tachyon_fleet_accepts_explicit_reasoning_for_served_ids() {
+        let config = Config {
+            provider: Some("tachyon".to_string()),
+            ..Default::default()
+        };
+        for model in [crate::config::DEFAULT_TACHYON_MODEL, "local-served-model"] {
+            for effort in ["low", "medium", "xhigh", "max"] {
+                let mut profile = agent_profile(
+                    "local-builder",
+                    "builder",
+                    None,
+                    codewhale_config::FleetLoadout::Inherit,
+                );
+                profile.profile.model = Some(model.to_string());
+                profile.profile.provider = Some("tachyon".to_string());
+                profile.profile.reasoning_effort = Some(effort.to_string());
+                let task = fleet_task(
+                    "local-build",
+                    Some(worker_profile(
+                        Some("local-builder"),
+                        None,
+                        None,
+                        None,
+                        None,
+                        vec![],
+                    )),
+                );
+                validate_fleet_task_routes(&[task], &[profile], Some(model), Some(&config))
+                    .unwrap_or_else(|error| panic!("{model}/{effort}: {error}"));
+            }
+        }
+    }
+
+    #[test]
     fn validate_fleet_task_routes_keeps_non_explicit_thinking_modes_route_agnostic() {
         for effort in ["inherit", "auto", "off"] {
             let mut profile = agent_profile(

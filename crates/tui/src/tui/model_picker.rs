@@ -3197,6 +3197,12 @@ mod tests {
 
     #[test]
     fn forkguard_tachyon_picker_preserves_normalized_effort_on_reopen() {
+        for model in [crate::config::DEFAULT_TACHYON_MODEL, "local-served-model"] {
+            assert!(
+                effective_picker_metadata(&Config::default(), Some(ApiProvider::Tachyon), model)
+                    .reasoning
+            );
+        }
         for requested in [
             ReasoningEffort::Max,
             ReasoningEffort::XHigh,
