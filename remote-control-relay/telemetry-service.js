@@ -25,7 +25,7 @@ import {
   validateBehaviorEventShape,
 } from "./behavior-telemetry-schema.js";
 import { normalizeSnapshot as normalizeControllerTelemetrySnapshot } from "./controller-telemetry.js";
-import { projectRemoteTasks, buildRemoteOverview } from "./remote-telemetry.js";
+import { projectRemoteTasks, remoteTaskGroups, buildRemoteOverview } from "./remote-telemetry.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TELEMETRY_PREFIX = "/pinvou3/telemetry";
@@ -242,12 +242,27 @@ function isBehaviorInstallationDevice(device) {
   return device?.hardware_source === "installation_id";
 }
 
+// Only arrays created here carry a prepared snapshot. Public builder inputs
+// remain ordinary mutable arrays; their callers cannot accidentally reuse a stale
+// projection. Sub-builders share the immutable report snapshot and its task join.
+const installationEventSnapshots = new WeakMap();
+const installationIdentityKey = devices => devices.filter(isBehaviorInstallationDevice)
+  .map(device => boundedText(device.device_id, 128)).filter(Boolean).sort().join("\u001f");
+
 function installationBehaviorEvents(devices, behaviorEvents) {
-  const installationIds = new Set(devices
-    .filter(isBehaviorInstallationDevice)
-    .map((device) => boundedText(device.device_id, 128))
-    .filter(Boolean));
-  return projectRemoteTasks(behaviorEvents.filter((event) => installationIds.has(eventIdentity(event))));
+  const installationKey = installationIdentityKey(devices);
+  const previous = installationEventSnapshots.get(behaviorEvents);
+  if (previous?.installationKey === installationKey) return behaviorEvents;
+  const installationIds = new Set(devices.filter(isBehaviorInstallationDevice)
+    .map(device => boundedText(device.device_id, 128)).filter(Boolean));
+  // If the installation set changes, rebuild from raw facts rather than keeping
+  // an attribution projected from an installation which has since been deleted.
+  const rawEvents = (previous?.rawEvents || behaviorEvents)
+    .filter(event => installationIds.has(eventIdentity(event)));
+  const taskGroups = remoteTaskGroups(rawEvents);
+  const events = projectRemoteTasks(rawEvents, taskGroups);
+  installationEventSnapshots.set(events, { installationKey, rawEvents, taskGroups });
+  return events;
 }
 
 function isCoreUserTask(event, eventName) {
@@ -1306,7 +1321,8 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
     error_categories: taskErrors,
     remote_control: buildRemoteOverview(behaviorEvents, window.startDay * DAY_MS - STATS_TIMEZONE_OFFSET_MS,
       Math.min(now, (window.endDay + 1) * DAY_MS - STATS_TIMEZONE_OFFSET_MS - 1), MIN_RELIABLE_SAMPLE,
-      new Set(coreTaskFinished.filter(e => e.remote_projection).map(e => e.remote_task_key)), windowEvents),
+      new Set(coreTaskFinished.filter(e => e.remote_projection).map(e => e.remote_task_key)), windowEvents,
+      installationEventSnapshots.get(behaviorEvents)?.taskGroups),
     data_quality: {
       minimum_reliable_sample: MIN_RELIABLE_SAMPLE,
       minimum_group_subjects: MIN_PRIVACY_GROUP_SUBJECTS,
@@ -1817,6 +1833,7 @@ export class TelemetryStore {
     this.events = [];
     this.eventIds = new Set();
     this.behaviorEvents = [];
+    this.behaviorProjectionSnapshot = null;
     this.behaviorEventIds = new Set();
     this.behaviorPipelineEvents = [];
     this.deletionTombstones = [];
@@ -2706,10 +2723,25 @@ export class TelemetryStore {
     };
   }
 
+  preparedBehaviorEvents(devices) {
+    const installationKey = installationIdentityKey(devices);
+    const previous = this.behaviorProjectionSnapshot;
+    // Stored events are append-only. Ingestion grows this array; retention and
+    // deletion replace it. Include the installation set for identity upgrades
+    // and deletion, and never cache date-window or active-collection metrics.
+    if (previous?.source === this.behaviorEvents && previous.length === this.behaviorEvents.length
+      && previous.installationKey === installationKey) return previous.events;
+    const events = installationBehaviorEvents(devices, this.behaviorEvents);
+    this.behaviorProjectionSnapshot = { source: this.behaviorEvents,
+      length: this.behaviorEvents.length, installationKey, events };
+    return events;
+  }
+
   overview() {
     if (this.compactExpiredEventsIfDue()) this.rebuildUsageCounters();
+    const devices = [...this.devices.values()];
     return {
-      ...buildStatsOverview([...this.devices.values()], this.events, this.behaviorEvents),
+      ...buildStatsOverview(devices, this.events, this.preparedBehaviorEvents(devices)),
       registration_capacity: {
         used: this.devices.size,
         limit: this.maxDevices,
@@ -2721,34 +2753,33 @@ export class TelemetryStore {
 
   deviceList() {
     if (this.compactExpiredEventsIfDue()) this.rebuildUsageCounters();
-    return buildDeviceList([...this.devices.values()], this.events, this.behaviorEvents);
+    const devices = [...this.devices.values()];
+    return buildDeviceList(devices, this.events, this.preparedBehaviorEvents(devices));
   }
 
   behaviorOverview(range) {
     if (this.compactExpiredEventsIfDue()) this.rebuildUsageCounters();
-    return buildBehaviorOverview(
-      [...this.devices.values()],
-      this.events,
-      this.behaviorEvents,
-      range,
-      Date.now(),
-      this.behaviorPipelineEvents,
-    );
+    const devices = [...this.devices.values()];
+    return buildBehaviorOverview(devices, this.events, this.preparedBehaviorEvents(devices),
+      range, Date.now(), this.behaviorPipelineEvents);
   }
 
   behaviorTools(range, type) {
     if (this.compactExpiredEventsIfDue()) this.rebuildUsageCounters();
-    return buildBehaviorToolRanking([...this.devices.values()], this.events, this.behaviorEvents, range, type);
+    const devices = [...this.devices.values()];
+    return buildBehaviorToolRanking(devices, this.events, this.preparedBehaviorEvents(devices), range, type);
   }
 
   behaviorScenes(range) {
     if (this.compactExpiredEventsIfDue()) this.rebuildUsageCounters();
-    return buildBehaviorSceneRanking([...this.devices.values()], this.events, this.behaviorEvents, range);
+    const devices = [...this.devices.values()];
+    return buildBehaviorSceneRanking(devices, this.events, this.preparedBehaviorEvents(devices), range);
   }
 
   behaviorModels(range) {
     if (this.compactExpiredEventsIfDue()) this.rebuildUsageCounters();
-    return buildBehaviorModelRanking([...this.devices.values()], this.events, this.behaviorEvents, range);
+    const devices = [...this.devices.values()];
+    return buildBehaviorModelRanking(devices, this.events, this.preparedBehaviorEvents(devices), range);
   }
 
   commercialOverview(range) {

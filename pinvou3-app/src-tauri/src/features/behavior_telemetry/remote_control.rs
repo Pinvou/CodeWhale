@@ -194,10 +194,16 @@ impl RemoteControlEvent {
     /// task_id is a fresh random logical invocation, never a device identity.
     pub(crate) fn task(mut self, task_id: &str, controlled: bool, mode: Option<&str>) -> Self {
         use sha2::{Digest, Sha256};
-        let mut digest = Sha256::new();
-        digest.update(b"pinvou-remote-invocation-v1\0");
-        digest.update(task_id.as_bytes());
-        self.task_key = Some(crate::platform::encoding::hex_lower(&digest.finalize()));
+        // Validation failures may not have a task ID yet. Keep their diagnostic
+        // event, but do not merge unrelated requests into the hash of an empty ID.
+        self.task_key = if task_id.trim().is_empty() {
+            None
+        } else {
+            let mut digest = Sha256::new();
+            digest.update(b"pinvou-remote-invocation-v1\0");
+            digest.update(task_id.as_bytes());
+            Some(crate::platform::encoding::hex_lower(&digest.finalize()))
+        };
         self.mode = mode.and_then(|mode| match mode {
             "chat" | "assistant" => Some("assistant"),
             "code" => Some("code"),
@@ -505,6 +511,29 @@ mod tests {
     const _: fn(&tauri::AppHandle, RemoteControlEvent) = track_remote_control;
     const _: fn(&tauri::AppHandle, RemoteControlEvent, String) = track_remote_control_with_event_id;
     const _: fn(&tauri::AppHandle, RemoteControlEvent, &str) = super::super::track_remote_transfer;
+
+    #[test]
+    fn missing_task_identity_keeps_independent_uncorrelated_diagnostics() {
+        let event = |task| {
+            RemoteControlEvent::new(RemoteStage::TaskRejected, RemoteOutcome::Rejected)
+                .task(task, true, Some("chat"))
+                .into_behavior()
+        };
+        for missing in ["", " ", "\t\r\n"] {
+            let first = event(missing);
+            let second = event(missing);
+            validate_event_fields(&first).unwrap();
+            assert!(!first.fields.contains_key("remote_task_key"));
+            assert_eq!(first.fields["remote_stage"], "task_rejected");
+            assert_eq!(first.fields["remote_role"], "controlled");
+            assert_ne!(first.event_id, second.event_id);
+        }
+        let replaced = RemoteControlEvent::new(RemoteStage::TaskRejected, RemoteOutcome::Rejected)
+            .task("previous-task", true, Some("chat"))
+            .task("", true, Some("chat"))
+            .into_behavior();
+        assert!(!replaced.fields.contains_key("remote_task_key"));
+    }
 
     #[test]
     fn logical_invocation_correlates_roles_without_sharing_event_identity() {

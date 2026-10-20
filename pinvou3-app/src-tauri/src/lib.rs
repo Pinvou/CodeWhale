@@ -1456,6 +1456,7 @@ pub fn run() {
                             commands::desktop_remote_journal::DesktopTaskEventSink::new(
                                 handle.clone(),
                                 desktop_history.journal().clone(),
+                                desktop_task_runtime.ledger(),
                             ),
                         ));
                         let recovered = desktop_task_runtime.recover_after_restart();

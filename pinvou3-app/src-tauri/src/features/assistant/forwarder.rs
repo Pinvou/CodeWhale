@@ -450,6 +450,16 @@ pub(crate) fn spawn_event_forwarder(
                     chat_persistence_error = None;
                     current_assistant.reset();
                     current_turn_id = Some(turn_id.clone());
+                    if let Some(task_id) =
+                        turn_lifecycle.take_remote_task_for_submission(submission_id.as_deref())
+                    {
+                        crate::features::behavior_telemetry::bind_remote_execution_turn(
+                            &app,
+                            &session_id,
+                            &task_id,
+                            &turn_id,
+                        );
+                    }
                     crate::features::behavior_telemetry::admit_task(&app, &session_id, &turn_id);
                     if let Some(model) = bridge.effective_model_owned() {
                         crate::features::behavior_telemetry::track_model_used_keys(

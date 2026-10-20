@@ -24,7 +24,8 @@ use super::desktop_remote_model::prepare_selected_task_package_snapshot;
 use crate::features::assistant::engine_pool::EnginePool;
 use crate::features::assistant::remote_turn::{EnginePoolChatEngine, EnginePoolChatTurnPort};
 use crate::features::behavior_telemetry::{
-    RemoteControlEvent, RemoteOutcome, RemoteStage, track_remote_control,
+    RemoteControlEvent, RemoteOutcome, RemoteStage, capture_remote_execution_lease,
+    register_remote_execution_with_lease, track_remote_control,
 };
 use crate::features::codex_acp::AcpPool;
 use crate::features::codex_acp::remote_turn::{AcpPoolCodeTurnPort, RemoteWorkspaceAuthorizations};
@@ -1148,13 +1149,13 @@ fn submit_prepared_bound_task_inner(
         Some(expected_remote_ref),
         &capabilities,
         &models,
-        service,
+        service.clone(),
         controlled_monotonic_millis(),
         local_attachments,
         local_attachment_cleanup,
         budget,
     );
-    if local_submission && result.is_err() {
+    if should_report_local_task_rejection(local_submission, &result, &service.ledger(), task_id) {
         track_remote_control(
             app,
             RemoteControlEvent::from_result(RemoteStage::TaskRejected, &result, 0)
@@ -1162,6 +1163,20 @@ fn submit_prepared_bound_task_inner(
         );
     }
     result
+}
+
+fn should_report_local_task_rejection(
+    local_submission: bool,
+    result: &Result<Value, String>,
+    ledger: &RemoteTaskLedger,
+    task_id: &str,
+) -> bool {
+    // Installation failures happen after admission and already publish a durable
+    // failed terminal. Replays can also fail a newer policy: neither is a new
+    // rejection. Only a confirmed absent task authorizes rejection telemetry.
+    local_submission
+        && result.is_err()
+        && matches!(ledger.record(task_id), Err(lookup) if lookup.code == "task_not_found")
 }
 
 #[cfg(test)]
@@ -1309,7 +1324,20 @@ fn admit_and_dispatch(
     let authorizations = app
         .state::<Arc<DesktopRemoteTaskRuntime>>()
         .authorizations();
+    let telemetry_lease = capture_remote_execution_lease(app);
     let install = |ticket: &RemoteTaskTicket| {
+        // This callback runs only after durable admission, before any fallible
+        // installation. Capture consent before admission and revalidate it here;
+        // late admitted/failed publication must not acquire a newer consent lease.
+        if let Some(telemetry_lease) = telemetry_lease.as_ref() {
+            register_remote_execution_with_lease(
+                app,
+                session_id,
+                &ticket.record.task_id,
+                &ticket.record.mode,
+                telemetry_lease,
+            );
+        }
         if local_attachments.is_none() {
             let ids = ticket
                 .input
@@ -2971,6 +2999,64 @@ mod tests {
             "input": {"text": "hello", "attachment_ids": [], "skill_ids": []}
         });
         (manager, service, context, payload)
+    }
+
+    #[test]
+    fn local_installation_failures_are_terminals_not_new_rejections() {
+        for panic_install in [false, true] {
+            let (_, service, context, payload) = task_admission_fixture();
+            let ledger = service.ledger();
+            let rejected = Err("task_workspace_capacity".to_owned());
+            assert!(should_report_local_task_rejection(
+                true,
+                &rejected,
+                &ledger,
+                "task-admission"
+            ));
+            assert!(!should_report_local_task_rejection(
+                false,
+                &rejected,
+                &ledger,
+                "task-admission"
+            ));
+            assert!(!should_report_local_task_rejection(
+                true,
+                &Ok(json!({})),
+                &ledger,
+                "task-admission"
+            ));
+            let prepared = service
+                .prepare_bound_admission(&context, &payload, 3_500, Some("a-ref-admission"), |_| {
+                    if panic_install {
+                        panic!("test model installation panic");
+                    }
+                    Err("task_workspace_capacity")
+                })
+                .unwrap();
+            let result = service
+                .finish_bound_admission(prepared)
+                .map(|_| json!({}))
+                .map_err(|error| error.code.to_owned());
+            assert!(result.is_err());
+            assert_eq!(
+                ledger.record("task-admission").unwrap().wire_status(),
+                "failed"
+            );
+            assert!(!should_report_local_task_rejection(
+                true,
+                &result,
+                &ledger,
+                "task-admission"
+            ));
+            // A retry's policy failure cannot turn an already failed task into
+            // an additional rejected invocation either.
+            assert!(!should_report_local_task_rejection(
+                true,
+                &rejected,
+                &ledger,
+                "task-admission"
+            ));
+        }
     }
 
     #[test]

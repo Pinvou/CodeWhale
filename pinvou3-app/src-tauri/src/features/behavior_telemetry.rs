@@ -1704,7 +1704,8 @@ mod remote_control;
 #[path = "behavior_telemetry/remote_execution.rs"]
 mod remote_execution;
 pub(crate) use remote_execution::{
-    register_remote_execution, register_remote_origin, track_remote_execution_event,
+    bind_remote_execution_turn, capture_remote_execution_lease,
+    register_remote_execution_with_lease, register_remote_origin, track_remote_execution_event,
     track_remote_origin_event, track_remote_result_received, track_remote_task_output,
     unregister_remote_execution,
 };

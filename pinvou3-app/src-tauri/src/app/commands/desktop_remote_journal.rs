@@ -7,8 +7,7 @@ use parking_lot::Mutex;
 
 use crate::features::behavior_telemetry::{
     RemoteControlEvent, RemoteModelSource, RemoteOutcome, RemoteReason, RemoteStage,
-    register_remote_execution, track_remote_execution_event, track_remote_origin_event,
-    unregister_remote_execution,
+    track_remote_execution_event, track_remote_origin_event, unregister_remote_execution,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -29,7 +28,9 @@ use crate::features::remote_control::controller::journal::ReplayOutcome;
 use crate::features::remote_control::controller::journal::{JournalEvent, RemoteJournal};
 use crate::features::remote_control::controller::ports::RemotePortError;
 use crate::features::remote_control::controller::protocol::LeaseContext;
-use crate::features::remote_control::controller::task::{RemoteTaskEvent, RemoteTaskEventSink};
+use crate::features::remote_control::controller::task::{
+    RemoteTaskEvent, RemoteTaskEventSink, RemoteTaskLedger, RemoteTaskRecord,
+};
 use crate::features::sessions::SessionStore;
 use crate::features::sessions::remote_proxy::binding::LiveRemoteContext;
 use crate::features::sessions::remote_proxy::projection::TerminalPendingCorrelation;
@@ -46,6 +47,7 @@ pub(crate) struct DesktopRemoteJournalRuntime {
 pub(crate) struct DesktopTaskEventSink {
     app: tauri::AppHandle,
     journal: Arc<RemoteJournal>,
+    ledger: Arc<RemoteTaskLedger>,
     telemetry_seen: Mutex<TaskTelemetryDedupe>,
 }
 
@@ -127,10 +129,15 @@ fn stable_task_telemetry_event_id(task_id: &str, lifecycle: TaskTelemetryLifecyc
 }
 
 impl DesktopTaskEventSink {
-    pub(crate) fn new(app: tauri::AppHandle, journal: Arc<RemoteJournal>) -> Self {
+    pub(crate) fn new(
+        app: tauri::AppHandle,
+        journal: Arc<RemoteJournal>,
+        ledger: Arc<RemoteTaskLedger>,
+    ) -> Self {
         Self {
             app,
             journal,
+            ledger,
             telemetry_seen: Mutex::new(TaskTelemetryDedupe::default()),
         }
     }
@@ -172,9 +179,6 @@ impl DesktopTaskEventSink {
             crate::features::remote_control::controller::task::RemoteTaskModelSource::ControllerTemporary =>
                 RemoteModelSource::ControllerTemporary,
         };
-        if stage == RemoteStage::TaskAdmit {
-            register_remote_execution(&self.app, &event.session_id, &event.task_id, &record.mode);
-        }
         let mut metric = RemoteControlEvent::new(stage, outcome)
             .reason(reason)
             .model_source(source)
@@ -208,6 +212,16 @@ impl DesktopTaskEventSink {
 
 const TASK_STATUS_EVENT: &str = "desktop-remote-task-event";
 pub(crate) const REMOTE_PROXY_CAPABILITY_EVENT: &str = "desktop-remote-proxy-capability";
+
+fn task_telemetry_record(
+    ledger: &RemoteTaskLedger,
+    event: &RemoteTaskEvent,
+) -> Option<RemoteTaskRecord> {
+    ledger.record(&event.task_id).ok().filter(|record| {
+        record.session_id == event.session_id
+            && record.lease.remote_control_generation == event.generation
+    })
+}
 
 /// Send every B-side lifecycle transition to A, including tasks submitted
 /// locally from B. The initial A-originated admitted response may duplicate
@@ -303,14 +317,11 @@ impl RemoteTaskEventSink for DesktopTaskEventSink {
         use tauri::Emitter as _;
         use tauri::Manager as _;
         // Execution telemetry follows B's durable ledger even after transport
-        // loss. UI/journal publication below still requires a current lease.
-        let runtime = self.app.state::<Arc<DesktopRemoteTaskRuntime>>();
-        if let Ok(record) = runtime.service().status(&event.task_id) {
-            if record.session_id == event.session_id
-                && record.lease.remote_control_generation == event.generation
-            {
-                self.track_task_once(event, &record);
-            }
+        // loss, including recovery before DesktopRemoteTaskRuntime is managed.
+        // The ledger is an explicit dependency; missing live transport must not
+        // prevent recovery's interrupted/unknown terminal from being recorded.
+        if let Some(record) = task_telemetry_record(&self.ledger, event) {
+            self.track_task_once(event, &record);
         }
         let Some(lease) = self
             .app
@@ -1166,6 +1177,55 @@ mod tests {
             outcome_unknown: false,
             terminal_reason: None,
             result_digest: None,
+        }
+    }
+
+    #[test]
+    fn recovered_terminal_telemetry_reads_its_owned_ledger_without_a_runtime() {
+        use crate::features::remote_control::controller::task::RemoteTaskRequest;
+
+        for dispatched in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("task-ledger.json");
+            let lease = LeaseContext {
+                connection_id: "connection-1".into(),
+                controller_lease_id: "lease-1".into(),
+                lease_epoch: "1".into(),
+                relay_epoch: "relay-1".into(),
+                remote_control_generation: "generation-1".into(),
+            };
+            let request = RemoteTaskRequest::from_payload(&json!({
+                "connection_id": lease.connection_id,
+                "controller_lease_id": lease.controller_lease_id,
+                "lease_epoch": lease.lease_epoch,
+                "relay_epoch": lease.relay_epoch,
+                "remote_control_generation": lease.remote_control_generation,
+                "task_id": "task-1", "client_request_id": "client-1",
+                "session_id": "session-1", "capability_revision": "1",
+                "mode": "chat", "model_source": "controlled_device",
+                "input_digest": crate::features::sessions::remote_proxy::outbox::remote_task_input_digest("hello", &[], &[]),
+                "input": {"text": "hello", "attachment_ids": [], "skill_ids": []},
+            })).unwrap();
+            {
+                let ledger = RemoteTaskLedger::open_recovered(path.clone(), 0).unwrap();
+                ledger.admit(&lease, &request, 100).unwrap();
+                if dispatched {
+                    ledger.begin_dispatch("task-1", 101).unwrap();
+                }
+            }
+            let restored = RemoteTaskLedger::open_recovered(path, 0).unwrap();
+            let recovered = restored.recover_after_restart(0);
+            assert_eq!(recovered.len(), 1);
+            let mut event = task_event("task-1", recovered[0].wire_status());
+            event.outcome_unknown = recovered[0].outcome_unknown;
+            let record = task_telemetry_record(&restored, &event).unwrap();
+            assert_eq!(record.terminal_reason.as_deref(), Some("process_restart"));
+            assert_eq!(record.outcome_unknown, dispatched);
+            let mut seen = TaskTelemetryDedupe::default();
+            assert!(seen.decide(&event).is_some(), "recovery emits one terminal");
+            assert!(seen.decide(&event).is_none());
+            event.generation = "another-generation".into();
+            assert!(task_telemetry_record(&restored, &event).is_none());
         }
     }
 

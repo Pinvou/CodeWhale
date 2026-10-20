@@ -210,8 +210,10 @@ test("connection and permission events never add a call", () => {
 test("collector persists remote extensions, dedupes after restart and forgets deleted origin attribution", () => {
   const directory = mkdtempSync(join(tmpdir(), "pinvou-remote-stats-"));
   const pepper = "remote-stats-test-pepper-at-least-24-chars";
+  const stores = [];
   try {
     const store = new TelemetryStore(directory, pepper);
+    stores.push(store);
     const endpoints = new Map(["controller", "controlled"].map(role => {
       const credentials = store.register({ hardware_claim: `install-remote-stats-${role}`, hardware_source: "installation_id",
         registration_secret: `remote-stats-registration-secret-${role}`, identity_quality: "installation_only",
@@ -232,6 +234,7 @@ test("collector persists remote extensions, dedupes after restart and forgets de
     }
     store.saveNow();
     const restored = new TelemetryStore(directory, pepper);
+    stores.push(restored);
     for (const [role, payload] of accepted) {
       const { credentials } = endpoints.get(role);
       assert.equal(restored.appendBehaviorEvents(restored.authenticate(credentials.device_id, credentials.device_token), [payload]).results[0].status, "duplicate");
@@ -245,7 +248,10 @@ test("collector persists remote extensions, dedupes after restart and forgets de
     assert.equal(report.remote_control.unattributed_count, 1);
     assert.equal(report.metrics.wsta_installations, 0);
     assert.equal(report.metrics.task_active_installations, 0);
-  } finally { rmSync(directory, { recursive: true, force: true }); }
+  } finally {
+    for (const store of stores) if (store.saveTimer) clearTimeout(store.saveTimer);
+    rmSync(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+  }
 });
 
 test("remote detail uses the same daily call contribution cap as the overall dashboard", () => {
@@ -312,4 +318,103 @@ test("remote tools are counted only on B and attributed to the consenting initia
   const ranking = buildBehaviorToolRanking(devices, [], rows, "today", "call", now);
   assert.equal(ranking.rows[0].call_count, 1);
   assert.equal(ranking.rows[0].user_count, 1);
+});
+
+for (const status of ["pending", "unknown", "not_sent"]) {
+  test(`unresolved ${status} tasks respect clipped in-window observations`, () => {
+    const rows = Array.from({ length: 150 }, (_, index) => event("controller",
+      status === "not_sent" ? "task_not_sent" : "task_submit", {
+        remote_task_key: index.toString(16).padStart(64, "0"), event_id: `unresolved_${index}`,
+        ...(status === "unknown" ? { remote_outcome: "internal_error", remote_task_status: "unknown" } : {}),
+      }));
+    const report = buildBehaviorOverview(devices, [], rows, "today", now);
+    assert.equal(report.remote_control[`${status}_count`], 100);
+    assert.equal(report.remote_control.submitted_count, status === "not_sent" ? 0 : 100);
+    assert.equal(report.metrics.task_finished_count, 0);
+    const old = rows.map(row => ({ ...row, occurred_at: now - 2 * 86400000 }));
+    assert.equal(buildBehaviorOverview(devices, [], old, "today", now).remote_control[`${status}_count`], 0);
+  });
+}
+
+test("resolved receipts supersede unknown snapshots while B remains authoritative", () => {
+  const submitted = event("controller", "task_submit");
+  const unknown = event("controller", "result_received", { event_id: "receipt_unknown",
+    remote_task_status: "unknown", occurred_at: now - 5000 });
+  const resolved = event("controller", "result_received", { event_id: "receipt_success",
+    remote_task_status: "success", occurred_at: now - 1000, remote_duration_ms: 9000 });
+  for (const rows of [[submitted, unknown, resolved], [resolved, unknown, submitted]]) {
+    const report = buildBehaviorOverview(devices, [], rows, "today", now);
+    assert.equal(report.remote_control.task_count, 1);
+    assert.equal(report.remote_control.succeeded_count, 1);
+    assert.equal(report.remote_control.unknown_count, 0);
+    assert.equal(report.remote_control.result_wait_p50_ms, 9000);
+    const withB = [...rows, event("controlled", "task_terminal", { remote_task_status: "interrupted" })];
+    const authoritative = buildBehaviorOverview(devices, [], withB, "today", now).remote_control;
+    assert.equal(authoritative.succeeded_count, 0);
+    assert.equal(authoritative.failed_count, 1);
+  }
+});
+
+test("dashboard sections reuse the remote join and refresh after ingestion, retention and installation changes", () => {
+  const directory = mkdtempSync(join(tmpdir(), "pinvou-remote-projection-"));
+  const store = new TelemetryStore(directory, "remote-projection-test-pepper-at-least-24-chars");
+  try {
+    for (const device of devices) store.devices.set(device.device_id, { ...device });
+    let stageReads = 0;
+    store.behaviorEvents = invocation().map(row => {
+      const stage = row.remote_stage;
+      return { ...row, occurred_at: Date.now() - 10000,
+        get remote_stage() { stageReads++; return stage; } };
+    });
+    // Avoid unrelated due-compaction replacing the source between section reads.
+    store.lastEventCompactionAt = Date.now();
+    assert.equal(store.behaviorOverview("today").remote_control.task_count, 1);
+    stageReads = 0;
+    store.behaviorModels("today"); store.behaviorTools("today", "call"); store.behaviorScenes("today");
+    store.overview(); store.deviceList();
+    assert.equal(stageReads, 0, "adjacent section requests must not regroup remote tasks");
+    const second = invocation().map(row => ({ ...row, remote_task_key: "b".repeat(64),
+      event_id: `second_${row.event_id}`, occurred_at: Date.now() - 5000 }));
+    store.behaviorEvents.push(...second);
+    assert.equal(store.behaviorOverview("today").remote_control.task_count, 2);
+    // Device identity upgrades can change eligibility without changing events.
+    store.devices.get("B").hardware_source = "system_uuid";
+    assert.equal(store.behaviorOverview("today").remote_control.execution_terminal_count, 0);
+    store.devices.get("B").hardware_source = "installation_id";
+    assert.equal(store.behaviorOverview("today").remote_control.execution_terminal_count, 2);
+    store.behaviorEvents = store.behaviorEvents.filter(row => row.remote_role !== "controller");
+    store.devices.delete("A");
+    const passive = store.behaviorOverview("today");
+    assert.equal(passive.remote_control.unattributed_count, 2);
+    assert.equal(passive.metrics.wsta_installations, 0);
+    assert.equal(passive.metrics.task_active_installations, 0);
+    // Same length, different source: retention/reload must not reuse old facts.
+    store.behaviorEvents = second.filter(row => row.remote_role === "controlled")
+      .concat(second.filter(row => row.remote_role === "controlled"));
+    assert.equal(store.behaviorOverview("today").remote_control.task_count, 1);
+    store.behaviorEvents = [];
+    assert.equal(store.behaviorOverview("today").remote_control.task_count, 0);
+  } finally {
+    if (store.saveTimer) clearTimeout(store.saveTimer);
+    rmSync(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+  }
+});
+
+
+test("admitted installation failures cannot also count as rejection from legacy clients or retries", () => {
+  const submit = event("controlled", "task_submit");
+  const rejected = event("controlled", "task_rejected", { remote_outcome: "internal_error" });
+  const admitted = event("controlled", "task_admit");
+  const failed = event("controlled", "task_terminal", { remote_outcome: "internal_error", remote_task_status: "failed" });
+  for (const rows of [[submit, admitted, failed, rejected], [submit, failed, rejected],
+    [rejected, failed, admitted, submit]]) {
+    const report = buildBehaviorOverview(devices, [], rows, "today", now);
+    assert.equal(report.remote_control.failed_count, 1);
+    assert.equal(report.remote_control.rejected_count, 0);
+    assert.equal(report.metrics.task_rejected_count, 0);
+    assert.equal(report.metrics.task_finished_count, 1);
+  }
+  const beforeAdmission = buildBehaviorOverview(devices, [], [submit, rejected], "today", now);
+  assert.equal(beforeAdmission.remote_control.rejected_count, 1);
+  assert.equal(beforeAdmission.metrics.task_finished_count, 0);
 });

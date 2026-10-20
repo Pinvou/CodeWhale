@@ -1173,22 +1173,12 @@ impl BehaviorTelemetry {
     }
 
     pub async fn delete_local_data(&self) -> Result<BehaviorTelemetryStatus> {
-        self.outbox
-            .lock()
-            .map_err(|_| anyhow::anyhow!("behavior outbox lock poisoned"))?
-            .clear()?;
-        if let Ok(mut tasks) = self.tasks.lock() {
-            tasks.clear();
-            persist_task_attempts(&tasks)?;
-        }
-        if let Ok(mut submissions) = self.voice_submissions.lock() {
-            submissions.clear();
-        }
-        if let Ok(mut artifacts) = self.artifacts.lock() {
-            artifacts.clear();
-        }
-        if let Ok(mut latest_turns) = self.latest_turns.lock() {
-            latest_turns.clear();
+        let failures = self.clear_local_transient_state();
+        if !failures.is_empty() {
+            anyhow::bail!(
+                "delete local behavior data cleanup incomplete: {}",
+                failures.join("; ")
+            );
         }
         Ok(self.status().await)
     }

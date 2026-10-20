@@ -360,7 +360,7 @@
 
 以下各项是父仓（闭源仓）相对开源仓的有意行为分歧：双方可共存、不构成同步缺陷，也不进入上述减量顺序；每项登记分歧内容、取舍口径与钉定位置，避免后续同步或回流时被当作漂移“修复”。
 
-1. 行为/设备遥测：开源仓经社区决议（Pinvou/pinvou-agent#616）移除 opt-in telemetry client；闭源仓按企业口径保留该客户端与设备运营统计链路（`pinvou3-app/src-tauri/src/features/behavior_telemetry.rs` 为 #616 对应的 opt-in client，`pinvou3-app/src-tauri/src/platform/telemetry.rs` 为设备登记/用量统计，设计见 `docs/设备运营统计-初版.md`），随行的 access-policy 差异一并保留。此分歧属发布面差异，不回流、不上游化。
+1. 行为/设备遥测：开源仓经社区决议（Pinvou/pinvou-agent#616）移除 opt-in telemetry client；闭源仓按企业口径保留该客户端与设备运营统计链路（`pinvou3-app/src-tauri/src/features/behavior_telemetry.rs` 为 #616 对应的 opt-in client，`pinvou3-app/src-tauri/src/platform/telemetry.rs` 为设备登记/用量统计，设计见 `docs/设备运营统计-初版.md`），随行的 access-policy 差异一并保留。此分歧属发布面差异，不回流、不上游化。本轮在父仓扩展双端远控观测：`features/behavior_telemetry/remote_execution.rs` 保留受授权代际约束的本地上下文，以实际执行回合绑定模型/工具观测；启动恢复、关闭和删除沿用原采集边界。Relay 的 `remote-control-relay/remote-telemetry.js` 按匿名任务键归并 A/B 事实，并复用已有贡献裁剪与被动端活跃排除，详见 `docs/remote-control-telemetry.md`。这些改动均在 app/Relay 层，不新增 CodeWhale 底座分歧，不改变 gitlink 或引擎指纹；行为覆盖由独立遥测测试及 Relay 聚合回归承载。
 2. 语音 closeVoice/dismissVoice 语义分化：闭源对完成态语音通知的 dismiss 保留草稿 provenance、仅进行中录音视为显式取消，与开源的 dismissal-sweep 时序不同；该时序适配由 `pinvou3-app/tests/voice_operation_lifecycle.test.mjs` 钉定，不随开源实现回移。
 3. 开源 bridge shared-cluster 机制（上游 `pinvou3-app/src/shared/bridge-shared-helpers.js`，本仓无此文件）闭源有意不采纳：闭源把对应函数体逐 lane 内联镜像（`src/platform/web/bridge.js`、`src/platform/tauri/bridge.js` 及 `src/platform/tauri/bridge/` 分文件），保持各 lane 独立演进与可验证；同步时逐函数对照，不做文件级合并。
 4. wire DTO 闭源超集：闭源 wire DTO 字段为开源面的超集，已在 Pinvou/pinvou3#463 登记，以该登记为准，此处不重复展开。

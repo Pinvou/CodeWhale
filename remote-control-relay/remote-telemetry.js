@@ -24,11 +24,16 @@ export function remoteTaskGroups(events) {
     const notSent = rows.find(e => e.remote_stage === "task_not_sent"
       || (e.remote_stage === "task_submit" && e.remote_outcome !== "ok" && e.remote_task_status !== "unknown"));
     const authoritative = rows.find(e => e.remote_role === "controlled" && e.remote_stage === "task_terminal");
-    const received = rows.find(e => e.remote_role === "controller" && e.remote_stage === "result_received");
+    // A later resolved receipt supersedes an earlier result-unknown snapshot.
+    // B's ledger remains authoritative when both ends report a terminal.
+    const receipts = rows.filter(e => e.remote_role === "controller" && e.remote_stage === "result_received");
+    const received = receipts.findLast(e => TERMINAL.has(e.remote_task_status)) || receipts[0];
     // Unknown on B cannot be overwritten by an optimistic observer on A.
     const terminal = authoritative || received;
     const admitted = rows.find(e => e.remote_role === "controlled" && e.remote_stage === "task_admit");
-    const rejected = rows.find(e => e.remote_stage === "task_rejected");
+    // An execution/receipt proves admission even if its admission event was
+    // unavailable. Ignore a stale rejection from an older client or failed retry.
+    const rejected = !admitted && !terminal ? rows.find(e => e.remote_stage === "task_rejected") : undefined;
     const owner = submitted || admitted || terminal || rows[0];
     const mode = rows.find(e => ["assistant", "code"].includes(e.remote_mode))?.remote_mode;
     return { key, rows, submitted, admitted, terminal, received, rejected, notSent, owner, mode,
@@ -39,11 +44,12 @@ export function remoteTaskGroups(events) {
   });
 }
 
-export function projectRemoteTasks(events) {
+export function projectRemoteTasks(events, taskGroups = null) {
   // Idempotent: callers may pass an already projected report to sub-builders.
   const raw = events.filter(e => !e.remote_projection);
   const projected = [];
-  const tasks = remoteTaskGroups(raw);
+  const tasks = taskGroups || remoteTaskGroups(raw);
+  if (!tasks.length) return raw;
   for (const task of tasks) {
     if (!task.mode) continue; // Older clients remain diagnostics, never guesses.
     const base = {
@@ -87,7 +93,7 @@ export function projectRemoteTasks(events) {
   return [...normalized, ...projected];
 }
 
-export function buildRemoteOverview(events, start, end, minimumSample = 30, countedTaskKeys = null, countedEvents = null) {
+export function buildRemoteOverview(events, start, end, minimumSample = 30, countedTaskKeys = null, countedEvents = null, taskGroups = null) {
   const inWindow = event => time(event) >= start && time(event) <= end;
   const raw = (countedEvents || events).filter(e => e.event_name === "remote_control_event" && inWindow(e));
   const stageKeys = new Map();
@@ -98,7 +104,7 @@ export function buildRemoteOverview(events, start, end, minimumSample = 30, coun
   }
   const allowed = (task, stage) => !countedEvents || stageKeys.get(stage)?.has(task.key);
   // Resolve attribution across the whole retained history before time slicing.
-  const tasks = remoteTaskGroups(events).filter(t => t.rows.some(inWindow));
+  const tasks = (taskGroups || remoteTaskGroups(events)).filter(t => t.rows.some(inWindow));
   const completed = tasks.filter(t => t.terminal && inWindow(t.terminal) && TERMINAL.has(t.status)
     && (!countedTaskKeys || countedTaskKeys.has(t.key)));
   // Receipt coverage uses the same clipped completion cohort as call counts,
@@ -119,6 +125,8 @@ export function buildRemoteOverview(events, start, end, minimumSample = 30, coun
   const visibleReceipts = new Set(raw.filter(e => e.remote_stage === "result_received").map(e => e.event_id));
   const resultWait = tasks.filter(t => t.received && inWindow(t.received)
     && visibleReceipts.has(t.received.event_id)).flatMap(t => t.received.remote_duration_ms ?? []);
+  const visibleTaskKeys = new Set(raw.map(e => e.remote_task_key));
+  const visibleTask = task => !countedEvents || visibleTaskKeys.has(task.key);
   const rows = new Map();
   for (const event of raw) {
     const key = [event.remote_stage, event.remote_outcome, event.remote_reason].join("|");
@@ -134,9 +142,9 @@ export function buildRemoteOverview(events, start, end, minimumSample = 30, coun
     failed_count: completed.filter(t => ["failed", "interrupted"].includes(t.status)).length,
     cancelled_count: completed.filter(t => t.status === "cancelled").length,
     rejected_count: tasks.filter(t => t.rejected && inWindow(t.rejected) && allowed(t, "task_rejected")).length,
-    unknown_count: tasks.filter(t => t.status === "unknown").length,
-    pending_count: tasks.filter(t => t.status === "pending").length,
-    not_sent_count: tasks.filter(t => t.status === "not_sent").length,
+    unknown_count: tasks.filter(t => t.status === "unknown" && visibleTask(t)).length,
+    pending_count: tasks.filter(t => t.status === "pending" && visibleTask(t)).length,
+    not_sent_count: tasks.filter(t => t.status === "not_sent" && visibleTask(t)).length,
     unattributed_count: completed.filter(t => !t.attributed).length,
     controller_installations: new Set(raw.filter(e => e.remote_role === "controller").map(identity).filter(Boolean)).size,
     controlled_installations: new Set(raw.filter(e => e.remote_role === "controlled").map(identity).filter(Boolean)).size,
