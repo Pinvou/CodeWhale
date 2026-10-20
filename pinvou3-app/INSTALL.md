@@ -1,14 +1,27 @@
 # pinvou3 安装说明（本地 LLM 版）
 
-> 本包为 **arm64 (aarch64)** 架构，仅限 ARM64 Linux（如 NVIDIA Jetson、Raspberry Pi 5、Apple Silicon Linux VM 等）。
+> 本包提供 **arm64 (aarch64)** 与 **LoongArch64（dpkg 架构 `loong64`，新世界）** 两个 Linux 架构的安装包：
+> - **arm64**：Ubuntu 22.04 及以上（glibc 2.35+，WebKitGTK 2.40+），典型设备如 NVIDIA Jetson、Raspberry Pi 5、Apple Silicon Linux VM 等；
+> - **LoongArch64**：UOS V25（2500 版本）或 deepin 23 及以上（glibc 2.38+，WebKitGTK 2.40+）。
+>
+> 旧世界（old-world）龙芯系统（UOS V20 龙芯版、Loongnix 20、麒麟 V10 时代）**不受支持**：这些系统没有 Tauri 2 依赖的 webkit2gtk-4.1/libsoup3。
+> 更老的发行版（如基于 Ubuntu 20.04 的 Jetson L4T）缺少所需 glibc 符号，安装后无法运行。
 > 默认连接 **本机 127.0.0.1:8000** 的 vLLM 服务，**不依赖外网**。
 
 ---
 
 ## 1. 安装
 
+安装包按架构发布（以下示例以 `<版本>` 占位，请替换为实际下载的版本号）：
+
+| 架构 | 发布资产名 | 系统基线 |
+|------|------------|----------|
+| arm64 (aarch64) | `pinvou3_<版本>_arm64.deb` | Ubuntu 22.04+（glibc 2.35+） |
+| LoongArch64 (loong64) | `pinvou3_<版本>_loong64.deb`（由 release-packages.yml 的 build-linux-loongarch64 job 交叉构建；tauri-bundler 无法处理 loongarch64，deb 由 `scripts/package-deb-loongarch64.sh` 按 bundler 布局手工组装，`scripts/release-deb.sh` 不适用于 loong64） | UOS V25 / deepin 23+（glibc 2.38+） |
+
 ```bash
-sudo dpkg -i pinvou3_0.6.2_arm64.deb
+# <arch> 按下载的安装包替换为 arm64 或 loong64
+sudo dpkg -i pinvou3_<版本>_<arch>.deb
 # 若报依赖缺失，自动补装：
 sudo apt-get install -f
 ```
@@ -18,6 +31,16 @@ sudo apt-get install -f
 安装包会声明 Tauri UI 运行时依赖，并推荐以下文档处理工具：
 - `libwebkit2gtk-4.1-0`、`libgtk-3-0`（Tauri UI 运行时）
 - 推荐（非强制）：`poppler-utils`、`tesseract-ocr`、`tesseract-ocr-chi-sim`、`pandoc`、`p7zip-full`、`python3`（文档/图片处理工具）、`libreoffice`、`libemail-outlook-message-perl`
+
+### UOS（统信）注意事项
+
+- UOS V25 已自带本包所需的 WebKitGTK（webkit2gtk-4.1）与 glibc 运行库，安装 deb 前无需额外准备依赖。
+- UOS 可能要求应用经过签名：第三方未签名 deb 在默认策略下会被拦截安装。遇到拦截时，需先在系统设置中开启**开发者模式**（Developer Mode），或改用统信开发者证书签名后的安装包 / 应用商店分发渠道。
+- LoongArch64 版的已知能力差异（arm64 版不受影响）：
+  - 连接器 CLI（钉钉 / 飞书 / 企业微信等）上游暂未发布 loong64 安装制品，本包因此不附带连接器锁定文件：pin 校验与托管安装不可用，已在系统 PATH 中的连接器命令行工具仍可正常使用。
+  - 本地向量嵌入在编译期关闭，知识库语义检索自动退化为全文检索：建库、导入、挂载与检索（全文）在 loong64 上完整可用；界面中的本地嵌入模型下载入口会显示「当前平台暂不支持本地向量嵌入模型」。
+  - 官方 Codex / Claude / Kimi CLI 原生安装器均仅覆盖 x86_64 与 arm64，loong64 上应用内安装不可用；系统 PATH 中的同名二进制仍可使用。
+  - 语音识别（SenseVoice 引擎）已随包提供（loong64 交叉构建，启用 ggml LASX）。
 
 ---
 
@@ -134,5 +157,6 @@ rm -rf ~/.pinvou3
 
 | 文件 | 说明 |
 |------|------|
-| `pinvou3_<版本>_arm64.deb` | 主安装包 |
+| `pinvou3_<版本>_arm64.deb` | 主安装包（arm64） |
+| `pinvou3_<版本>_loong64.deb` | 主安装包（LoongArch64） |
 | `INSTALL.md` | 本安装说明 |

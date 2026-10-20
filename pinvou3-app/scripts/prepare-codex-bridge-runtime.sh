@@ -310,7 +310,25 @@ for node_target in "${NODE_TARGETS[@]}"; do
   node_archive="node-v${NODE_VERSION}-${node_target}.${node_archive_ext}"
   node_archive_path="$BUILD_DIR/$node_archive"
   downloaded=false
-  for base_url in "https://nodejs.org/dist/v${NODE_VERSION}" "https://npmmirror.com/mirrors/node/v${NODE_VERSION}"; do
+# Per-target download sources. Official nodejs.org publishes no linux-loong64
+# build; that architecture ships from unofficial-builds.nodejs.org at the same
+# pinned NODE_VERSION, with npmmirror's node-unofficial-builds mirror as the
+# fallback. The pinned sha256 in node_sha256 comes from that release's
+# SHASUMS256.txt, so the verify-after-download discipline is unchanged.
+node_dist_urls() {
+  case "$1" in
+    linux-loong64)
+      echo "https://unofficial-builds.nodejs.org/download/release/v${NODE_VERSION}"
+      echo "https://npmmirror.com/mirrors/node-unofficial-builds/v${NODE_VERSION}"
+      ;;
+    *)
+      echo "https://nodejs.org/dist/v${NODE_VERSION}"
+      echo "https://npmmirror.com/mirrors/node/v${NODE_VERSION}"
+      ;;
+  esac
+}
+
+  for base_url in $(node_dist_urls "$node_target"); do
     if curl --fail --location --retry 2 --connect-timeout 15 \
       "$base_url/$node_archive" --output "$node_archive_path"; then
       downloaded=true

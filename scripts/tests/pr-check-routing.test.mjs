@@ -433,7 +433,7 @@ test("required-gate rejects skipped applicable Go checks and permits unrelated s
   assert.match(gate, /ACCOUNT_PLATFORM_RESULT: \$\{\{ needs\.account-platform-test\.result \}\}/);
   const run = gate.match(/        run: \|\r?\n([\s\S]*)/)[1].replace(/^ {10}/gm, "");
   const baseEnv = { ...process.env, GITHUB_EVENT_NAME: "pull_request", WINDOWS_RUST_REQUIRED_BY_POLICY: "false" };
-  for (const match of gate.matchAll(/^          ([A-Z_]+_RESULT):/gm)) baseEnv[match[1]] = "success";
+  for (const match of gate.matchAll(/^          ([A-Z0-9_]+_RESULT):/gm)) baseEnv[match[1]] = "success";
   for (const event of ["pull_request", "merge_group"]) {
     for (const applicable of ["true", "false"]) {
       for (const status of ["success", "skipped", "failure", "cancelled", ""]) {

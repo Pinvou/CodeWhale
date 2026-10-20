@@ -13,9 +13,11 @@ ASR_BUILD_SCRIPT = ROOT / "scripts" / "asr" / "build-sensevoice-runtime.sh"
 ASR_SETUP_SCRIPT = ROOT / "scripts" / "asr" / "setup-sensevoice.sh"
 LINUX_OVERLAY = ROOT / "pinvou3-app/src-tauri/config/platforms/linux/tauri.conf.json"
 
-# Linux 发布基线是 Ubuntu 22.04 (glibc 2.35) x86_64/arm64。发布二进制链接
-# 构建机 glibc,runner 升级会静默抬高基线,因此 runner 标签与 glibc 守护
-# 都是有意决策,本测试防止无意的基线漂移。
+# Linux 发布基线:Ubuntu 22.04 (glibc 2.35) x86_64/arm64 + loongarch64 的
+# deepin 23/25 / UOS V25 (glibc 2.38)。x86_64/arm64 发布二进制链接构建机
+# glibc,runner 升级会静默抬高基线,因此 runner 标签与 glibc 守护都是有
+# 意决策;loongarch64 走交叉工具链 + deepin sysroot,基线由 sysroot 决定。
+# 本测试防止无意的基线漂移。
 
 
 def _without_yaml_comments(block):
@@ -35,8 +37,11 @@ class ReleaseLinuxFloorPolicyTests(unittest.TestCase):
             "\n  build-linux-arm64:", maxsplit=1
         )[0]
         self.arm64_job = self.workflow.split("\n  build-linux-arm64:", maxsplit=1)[1].split(
-            "\n  validate-windows-runtime-pr:", maxsplit=1
+            "\n  build-linux-loongarch64:", maxsplit=1
         )[0]
+        self.loong64_job = self.workflow.split(
+            "\n  build-linux-loongarch64:", maxsplit=1
+        )[1].split("\n  validate-windows-runtime-pr:", maxsplit=1)[0]
 
     def test_linux_builds_pin_ubuntu_22_04_runners(self):
         # 带换行断言,避免 x64 段误匹配 ubuntu-22.04-arm 这类更长标签。
@@ -44,19 +49,32 @@ class ReleaseLinuxFloorPolicyTests(unittest.TestCase):
         self.assertIn("runs-on: ubuntu-22.04-arm\n", self.arm64_job)
         self.assertNotIn("ubuntu-latest", self.x64_job.split("\n    steps:")[0])
         self.assertNotIn("ubuntu-24.04", self.arm64_job.split("\n    steps:")[0])
+        # loongarch64 没有 GitHub 托管 loong64 runner:交叉构建必须钉在
+        # x86_64 ubuntu-22.04(工具链资产按宿主架构 sha256 钉死),不允许
+        # 漂到 arm 基座或 latest。
+        self.assertIn("runs-on: ubuntu-22.04\n", self.loong64_job)
+        self.assertNotIn("runs-on: ubuntu-22.04-arm", self.loong64_job)
+        self.assertNotIn("ubuntu-latest", self.loong64_job.split("\n    steps:")[0])
+        self.assertNotIn("ubuntu-24.04", self.loong64_job.split("\n    steps:")[0])
 
     def test_linux_builds_run_arch_and_glibc_guard_before_upload(self):
-        # 守护必须覆盖两个 Linux job、传入对应 deb 架构，且位于上传之前。
-        for job, arch in ((self.x64_job, "amd64"), (self.arm64_job, "arm64")):
+        # 守护必须覆盖三个 Linux job、传入对应 deb 架构，且位于上传之前。
+        for job in (self.x64_job, self.arm64_job, self.loong64_job):
             guard = job.find("check-linux-glibc-floor.sh")
             upload = job.find("uses: actions/upload-artifact@")
             self.assertGreater(guard, 0, "missing glibc floor guard step")
             self.assertGreater(upload, guard, "glibc floor guard must run before upload")
-            guard_step = self._step_block(job, "check-linux-glibc-floor.sh")
-            self.assertRegex(guard_step, rf'\.deb" {arch}\s*$')
         self.assertEqual(
-            self.workflow.count("run: ./scripts/check-linux-glibc-floor.sh"), 2
+            self.workflow.count("run: ./scripts/check-linux-glibc-floor.sh"), 3
         )
+        # 每个守护必须拿到自己的 deb 架构参数,其他架构的 ELF 不可能混进包里。
+        for job, arch in (
+            (self.x64_job, "amd64"),
+            (self.arm64_job, "arm64"),
+            (self.loong64_job, "loongarch64"),
+        ):
+            step = self._step_block(job, "check-linux-glibc-floor.sh")
+            self.assertRegex(step, rf'\.deb" {arch}\s*$')
 
     def test_linux_builds_carry_no_rust_cache(self):
         # The runner base and the rust-cache key had to rotate together:
@@ -79,6 +97,14 @@ class ReleaseLinuxFloorPolicyTests(unittest.TestCase):
         self.assertNotIn(
             "Swatinem/rust-cache", _without_yaml_comments(self.arm64_job)
         )
+        # The loongarch64 job is cross-compiled cold by design and restores
+        # the release-linux-loong64-jammy-* plain actions/cache keys
+        # (toolchain/sysroot) read-only — pinned by
+        # test_release_loongarch64_policy; it deliberately holds no
+        # rust-cache either.
+        self.assertNotIn(
+            "Swatinem/rust-cache", _without_yaml_comments(self.loong64_job)
+        )
 
     def _step_block(self, job, needle):
         # 提取含 needle 的步骤块(步骤以 6 空格 + '- ' 开始),供单步骤断言。
@@ -91,8 +117,8 @@ class ReleaseLinuxFloorPolicyTests(unittest.TestCase):
 
     def test_glibc_floor_guard_step_cannot_be_neutralized(self):
         # continue-on-error 或步骤级 if: 会让超基线产物绿着通过守护,把启动
-        # 崩溃留给 22.04 用户;守护步骤必须无条件执行且直接调用脚本。
-        for job in (self.x64_job, self.arm64_job):
+        # 崩溃留给用户;守护步骤必须无条件执行且直接调用脚本。
+        for job in (self.x64_job, self.arm64_job, self.loong64_job):
             step = self._step_block(job, "check-linux-glibc-floor.sh")
             self.assertIn("run: ./scripts/check-linux-glibc-floor.sh", step)
             self.assertNotIn("continue-on-error", step)
@@ -100,8 +126,13 @@ class ReleaseLinuxFloorPolicyTests(unittest.TestCase):
 
     def test_linux_deb_unified_name_consistent_across_rename_guard_upload(self):
         # deb 统一名横跨 重命名/校验→守护→上传 手工同步;失配只会在长时间
-        # 发布构建末尾暴露,因此在轻量契约层直接钉住。
-        for job, arch in ((self.x64_job, "x64"), (self.arm64_job, "arm64")):
+        # 发布构建末尾暴露,因此在轻量契约层直接钉住。loong64 deb 由编排脚本
+        # 直接按该命名产出(打包脚本按 dpkg 架构命名),无重命名步骤。
+        for job, arch in (
+            (self.x64_job, "x64"),
+            (self.arm64_job, "arm64"),
+            (self.loong64_job, "loong64"),
+        ):
             local_name = "pinvou3_${VERSION}_" + arch + ".deb"
             upload_name = (
                 "pinvou3_${{ needs.check-version-bump.outputs.version }}_" + arch + ".deb"
@@ -117,15 +148,21 @@ class ReleaseLinuxFloorPolicyTests(unittest.TestCase):
                 job.count(upload_name), 2, f"{arch}: upload deb name must appear in both upload paths"
             )
 
-    def test_guard_script_defaults_to_2204_glibc_floor(self):
-        # 通用 ELF 守卫统一持有基线，deb wrapper 只负责解包和传递目标架构。
-        source = ELF_POLICY_SCRIPT.read_text(encoding="utf-8")
-        self.assertIn('glibc_floor="${3:-2.35}"', source)
-        self.assertIn('"3.4.30"', source)  # GLIBCXX_ (jammy gcc 12)
-        self.assertIn('"1.3.13"', source)  # CXXABI_ (jammy gcc 12)
-        wrapper = GUARD_SCRIPT.read_text(encoding="utf-8")
-        self.assertIn('expected_arch="${2:-}"', wrapper)
-        self.assertIn("check-linux-elf-policy.sh", wrapper)
+    def test_guard_script_defaults_to_per_arch_glibc_floors(self):
+        # deb wrapper 的 glibc 基线按架构取默认值,通用 ELF 守卫持有按架构的
+        # 默认映射与 jammy (gcc 12) 的 GLIBCXX_/CXXABI_ 基线。amd64/arm64 默认
+        # Ubuntu 22.04 基线(workflow 不传基线);loongarch64 默认 2.38,即其
+        # 交叉 sysroot 构建自的 deepin 23/25 + UOS V25 基线。
+        source = GUARD_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('amd64|arm64) glibc_floor="${glibc_floor:-2.35}" ;;', source)
+        self.assertIn('loongarch64) glibc_floor="${glibc_floor:-2.38}" ;;', source)
+        self.assertIn("check-linux-elf-policy.sh", source)
+        policy = ELF_POLICY_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('default_glibc_floor="2.35"', policy)
+        self.assertIn('loongarch64) expected_machine="LoongArch";', policy)
+        self.assertIn('default_glibc_floor="2.38"; baseline_label="deepin 23/25 / UOS V25 (glibc 2.38)"', policy)
+        self.assertIn('"3.4.30"', policy)  # GLIBCXX_ (jammy gcc 12)
+        self.assertIn('"1.3.13"', policy)  # CXXABI_ (jammy gcc 12)
 
     def test_guard_script_is_valid_bash(self):
         for script in (GUARD_SCRIPT, ELF_POLICY_SCRIPT, ASR_BUILD_SCRIPT, ASR_SETUP_SCRIPT):

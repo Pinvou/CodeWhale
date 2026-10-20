@@ -306,6 +306,172 @@ function usesValidatedNsisStaging(args) {
 }
 
 /**
+ * Remove every `--bundles none` request from `args` and report whether at
+ * least one was present.
+ *
+ * `none` is a value owned by this wrapper, not by the Tauri CLI: the pinned
+ * @tauri-apps/cli 2.11.4 rejects it at arg-parse time ("error: invalid value
+ * 'none'" — its `--bundles` possible values on Linux are deb/rpm/appimage),
+ * and tauri-bundler could not bundle it anyway (`binary_arch()` has no
+ * LoongArch variant and panics on the loongarch64 triple). It means "run the
+ * full pipeline (frontend, sidecar preparation, tauri build) but skip
+ * bundling", for pipelines that assemble the installer themselves — the
+ * loong64 release build hands the compiled binary to
+ * `scripts/package-deb-loongarch64.sh`. The CLI's own equivalent is
+ * `--no-bundle` ("Skip the bundling step even if `bundle > active` is
+ * `true`"), which `prepareTauriArgs` injects in its place.
+ *
+ * Accepted spellings mirror `windowsBundleTargets` (`--bundles none`,
+ * `-b none`, plus the `=` forms). A `none` mixed with real bundle types
+ * (`--bundles none,deb`) is deliberately NOT absorbed: it stays in the args
+ * and fails at the CLI's value validation, exactly like any other unknown
+ * bundle type, instead of silently degrading to no-bundle.
+ *
+ * @param {string[]} args Full argument list passed to tauri.
+ * @returns {{args: string[], noBundle: boolean}} The args without the
+ *   request, and whether at least one `none` request was found.
+ */
+function extractBundlesNone(args) {
+  const rest = [];
+  let none = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (
+      (argument === "--bundles" || argument === "-b")
+      && args[index + 1] === "none"
+    ) {
+      none = true;
+      index += 1;
+    } else if (
+      argument === "--bundles=none"
+      || argument === "-b=none"
+    ) {
+      none = true;
+    } else {
+      rest.push(argument);
+    }
+  }
+  return { args: rest, noBundle: none };
+}
+
+/**
+ * The wrapper-owned `--bundles none` error for a subcommand that has no
+ * `--no-bundle`. Shared by the fail-fast validation and the translation so
+ * the wording cannot drift between the two sites.
+ */
+function bundlesNoneCommandError() {
+  return new Error(
+    "--bundles none is a wrapper-owned build request: the `bundle` subcommand has"
+      + " no --no-bundle and cannot skip bundling. Use `tauri build --bundles none`"
+      + " (compile without bundling, package yourself) or pass real bundle types.",
+  );
+}
+
+/**
+ * The wrapper-owned error for a real bundle type requested next to an
+ * absorbed `--bundles none`. Shared by both conflict shapes (a second
+ * `--bundles` spelling, a space-separated continuation of the absorbed one)
+ * so the wording cannot drift between them.
+ */
+function bundlesNoneConflictError() {
+  return new Error(
+    "conflicting --bundles requests: a real bundle type was requested alongside"
+      + " `--bundles none`, and the CLI's --no-bundle would silently win."
+      + " Drop one of the two --bundles spellings.",
+  );
+}
+
+/**
+ * Bundle-type words the pinned @tauri-apps/cli 2.11.4 accepts for `--bundles`:
+ * the `PackageType::short_name()` values of tauri-bundler 2.9.4, exposed as
+ * the CLI's BundleFormat value enum (verified against the CLI source; the
+ * --help listing filters them by host platform and hides `updater`, but the
+ * value parser accepts the full set on every host). The wrapper needs the
+ * cross-platform set to recognize a space-separated continuation of an
+ * absorbed `--bundles none` request (see `bundlesNonePlan`).
+ */
+const CLI_BUNDLE_TYPES = new Set([
+  "app",
+  "appimage",
+  "deb",
+  "dmg",
+  "ios",
+  "msi",
+  "nsis",
+  "rpm",
+  "updater",
+]);
+
+/**
+ * Absorb the wrapper-owned `--bundles none` request and validate it. The
+ * request shapes that can never succeed fail here, from argv alone:
+ * `bundle --bundles none` (the subcommand has no --no-bundle), and a real
+ * bundle type requested NEXT to an absorbed `none`. The latter has three
+ * shapes: a second `--bundles` spelling (after absorption the leftover
+ * spelling would sit next to the injected `--no-bundle`, where the CLI
+ * silently lets --no-bundle win — the same silent degradation the `none,deb`
+ * value mix above refuses); a space-separated continuation of the absorbed
+ * spelling (the CLI's `--bundles` is multi-value (`Vec<BundleFormat>` with
+ * `num_args(0..)`), so `--bundles none deb` is upstream ONE option with two
+ * values, and absorbing only `none` leaves `deb` as a bare runner positional);
+ * and the `=` spelling of the absorbed request followed by a bundle-type word
+ * (`--bundles=none deb`). The CLI's usage is `tauri build [OPTIONS]
+ * [ARGS]...`, so those bare words pass arg-parse and only die deep inside the
+ * build with an error that never mentions `--bundles`.
+ *
+ * `main()` calls this before any preparation work (the sidecar steps take
+ * minutes and the outcome is knowable from argv); `prepareTauriArgs` calls
+ * it again on the same raw argv next to the translation.
+ *
+ * @param {string[]} args Full argument list passed to tauri.
+ * @returns {{args: string[], noBundle: boolean}} The args without the
+ *   request, and whether at least one `none` request was found.
+ */
+function bundlesNonePlan(args) {
+  const { args: rest, noBundle } = extractBundlesNone(args);
+  if (noBundle) {
+    const commandIndex = tauriCommandIndex(rest);
+    if (commandIndex >= 0) {
+      if (rest[commandIndex] === "bundle") throw bundlesNoneCommandError();
+      if (rest[commandIndex] === "build") {
+        // Every remaining `--bundles`/`-b` spelling carries a real bundle
+        // type: the `none` values were absorbed above.
+        const conflicting = rest.some((argument) =>
+          argument === "--bundles"
+          || argument === "-b"
+          || argument.startsWith("--bundles=")
+          || argument.startsWith("-b="));
+        if (conflicting) throw bundlesNoneConflictError();
+        // The space-separated continuation of the absorbed spelling, same
+        // conflict: `--bundles none deb` is one multi-value option upstream,
+        // so the wrapper absorbs `none` and `deb` is left behind as a bare
+        // runner positional (the CLI's usage is `tauri build [OPTIONS]
+        // [ARGS]...`, so the bare word passes arg-parse and only dies deep in
+        // the build with an error that never mentions --bundles). Both the
+        // space form and the `=` form of the absorbed spelling are scanned,
+        // and the raw args cover both flag orders.
+        for (let index = 0; index < args.length; index += 1) {
+          if (
+            (args[index] === "--bundles" || args[index] === "-b")
+            && args[index + 1] === "none"
+            && CLI_BUNDLE_TYPES.has(args[index + 2])
+          ) {
+            throw bundlesNoneConflictError();
+          }
+          if (
+            (args[index] === "--bundles=none" || args[index] === "-b=none")
+            && CLI_BUNDLE_TYPES.has(args[index + 1])
+          ) {
+            throw bundlesNoneConflictError();
+          }
+        }
+      }
+    }
+  }
+  return { args: rest, noBundle };
+}
+
+/**
  * `--target` 三元组的机器段 → node 的 arch 记法。
  *
  * 往这里加新架构时，`codex-bridge.js` 里反向的那张 machine 映射必须同步加——两张
@@ -316,6 +482,7 @@ const TARGET_MACHINE_ARCHITECTURES = {
   aarch64: "arm64",
   amd64: "x64",
   arm64: "arm64",
+  loongarch64: "loong64",
   x86_64: "x64",
 };
 
@@ -335,29 +502,21 @@ const HOST_FALLBACK_TARGET_TRIPLES = new Set(["universal-apple-darwin"]);
  * 交叉构建时必须按**目标**架构挑 overlay，不能按宿主架构：否则
  * `--target aarch64-unknown-linux-gnu` 会套上 x86_64 的配置，既引用了错误架构
  * 的资源（报「安装包资源不存在」），又漏掉目标架构 overlay 里真正要打的东西。
- *
- * 没传 --target 时返回 null，调用方回退到 process.arch，原行为不变。
- *
- * 机器段**不认识**时（`riscv64gc-…`、`armv7-…`）不能也回 null：闸门对
- * `!targetArch` 是直接放行的，overlay、ASR、共享知识库服务会全部回落宿主架构，
- * 产出的正是闸门要防的那种「主程序是目标架构、侧车全是宿主架构」的静默错包，
- * 只是换了个入口进来。所以这种情况硬失败——宁可现在失败，不要静默错包。
- *
- * 两个例外仍然回落，因为它们根本不是「交叉构建到未知架构」：
- *   - 三元组在 `HOST_FALLBACK_TARGET_TRIPLES` 里（通用二进制没有单一目标架构）；
- *   - 宿主自己的 arch 就不在表里（比如在 riscv64 机器上原生构建
- *     `riscv64gc-unknown-linux-gnu`），这时我们无从判断是不是交叉，不该越权拦。
- * 同理只在 Linux 宿主上拦：这套「按宿主架构备料」的侧车只存在于 Linux 打包路径。
- *
- * @param {string[]} args 传给 tauri 的完整参数。
- * @param {object} [options] 宿主平台与宿主架构，用来判断是不是真的在交叉构建。
- * @returns {string|null} "arm64" / "x64"；无法判定且允许回落时 null。
- * @throws {Error} Linux 宿主确实在交叉构建，而机器段不在映射表里。
  */
-function targetArchitecture(
-  args,
-  { platform = process.platform, hostArch = process.arch } = {},
-) {
+/**
+ * Extract the `--target <triple>` value (`--target X` or `--target=X`); the
+ * last occurrence wins, matching cargo's override semantics.
+ *
+ * The parsing rules and their error messages are shared with
+ * `targetArchitecture`, which consumes the machine segment. `main()` also uses
+ * the full triple to locate pre-built cross artifacts: cargo target
+ * directories are keyed by the whole triple, not by the machine segment.
+ *
+ * @param {string[]} args Full argument list passed to tauri.
+ * @returns {string|null} The triple, or null without `--target`.
+ * @throws {Error} `--target` is present without a usable value.
+ */
+function targetTriple(args) {
   let triple = null;
   for (let i = 0; i < args.length; i += 1) {
     if (args[i] === "--target") {
@@ -379,6 +538,38 @@ function targetArchitecture(
       triple = value;
     }
   }
+  return triple;
+}
+
+/**
+ * Parse the target architecture (Node notation) from `--target <triple>`.
+ *
+ * 没传 --target 时返回 null，调用方回退到 process.arch，原行为不变。
+ *
+ * `--target` 的解析复用 `targetTriple`（`--target X` 与 `--target=X` 都认，
+ * 最后一次出现生效）。
+ *
+ * 机器段**不认识**时（`riscv64gc-…`、`armv7-…`）不能也回 null：闸门对
+ * `!targetArch` 是直接放行的，overlay、ASR、共享知识库服务会全部回落宿主架构，
+ * 产出的正是闸门要防的那种「主程序是目标架构、侧车全是宿主架构」的静默错包，
+ * 只是换了个入口进来。所以这种情况硬失败——宁可现在失败，不要静默错包。
+ *
+ * 两个例外仍然回落，因为它们根本不是「交叉构建到未知架构」：
+ *   - 三元组在 `HOST_FALLBACK_TARGET_TRIPLES` 里（通用二进制没有单一目标架构）；
+ *   - 宿主自己的 arch 就不在表里（比如在 riscv64 机器上原生构建
+ *     `riscv64gc-unknown-linux-gnu`），这时我们无从判断是不是交叉，不该越权拦。
+ * 同理只在 Linux 宿主上拦：这套「按宿主架构备料」的侧车只存在于 Linux 打包路径。
+ *
+ * @param {string[]} args 传给 tauri 的完整参数。
+ * @param {object} [options] 宿主平台与宿主架构，用来判断是不是真的在交叉构建。
+ * @returns {string|null} "arm64" / "loong64" / "x64"；无法判定且允许回落时 null。
+ * @throws {Error} Linux 宿主确实在交叉构建，而机器段不在映射表里。
+ */
+function targetArchitecture(
+  args,
+  { platform = process.platform, hostArch = process.arch } = {},
+) {
+  const triple = targetTriple(args);
   if (!triple) return null;
   if (platform === "darwin" && HOST_FALLBACK_TARGET_TRIPLES.has(triple)) return null;
   const machine = triple.split("-")[0];
@@ -391,7 +582,7 @@ function targetArchitecture(
       + `宿主是 ${hostArch}，回落宿主架构会挑错 overlay，并让语音识别运行时和共享`
       + `知识库服务按宿主架构备料，产出「主程序是目标架构、侧车全是宿主架构」的`
       + `静默错包，所以这里直接拒绝。要支持这个架构，下面几处都要补——漏②或④`
-      + `会重新引入静默错包，漏①、③或⑤会在构建时当场报错：`
+      + `会重新引入静默错包，漏①、③、⑤或⑥会在构建时当场报错：`
       + `①本文件的 TARGET_MACHINE_ARCHITECTURES；`
       + `②scripts/tauri/platform-config.js 的 ARCHITECTURE_CONFIG_NAMES（漏了它 `
       + `platformArchitectureConfigPath 返回 null，整层架构 overlay 会被静默跳过）；`
@@ -400,7 +591,8 @@ function targetArchitecture(
       + `④scripts/tauri/codex-bridge.js 里 node arch → 机器段的那张 machine 映射`
       + `（漏了它 machine 会是 undefined，环境变量不注入，备料脚本回落 uname -m 按`
       + `**宿主**架构备 Node，包里的 Bridge node 架构就错了，而且全程零报错）；`
-      + `⑤scripts/prepare-codex-bridge-runtime.sh 的目标词表（漏了它落到 *) 硬失败）。`
+      + `⑤scripts/prepare-codex-bridge-runtime.sh 的目标词表（漏了它落到 *) 硬失败）；`
+      + `⑥scripts/tauri/linux-asr-runtime.js 的 LINUX_ASR_ARCHITECTURES 表。`
       + `若它是通用二进制那类没有单一目标架构的三元组（仅 darwin 宿主回落），`
       + `则加进 HOST_FALLBACK_TARGET_TRIPLES。`,
   );
@@ -509,7 +701,7 @@ function platformConfigWithoutKnowledgeHost(configPath) {
 /**
  * 目标架构 ≠ 宿主架构时，检查那些「只会按宿主架构备料」的步骤有没有被妥善处理。
  *
- * 为什么必须是**硬失败**而不是警告：忘掉开关的后果要么报错报得晚、要么**静默地错**——
+ * 为什么必须是**硬失败**而不是警告：不做决定的后果要么报错报得晚、要么**静默地错**——
  *   - 忘开 `PINVOU3_SKIP_LINUX_ASR`：备料脚本被要求的是**宿主**架构，
  *     `requested_arch == host_arch` 断言照常通过；构建要到后面 effective-config
  *     的资源存在性校验才停下来——目标架构的 overlay 声明了一个从没备出来的文件；
@@ -518,11 +710,17 @@ function platformConfigWithoutKnowledgeHost(configPath) {
  *     包里，构建全程零警告。
  *     用户要等到在设备上用共享知识库时才发现，而那时候根本想不到是构建的问题。
  *
+ * 每个侧车对同一个决定有两种可接受的解法：跳过该步（并摘掉它的资源声明），或者
+ * 用配套的 `PINVOU3_*_PREBUILT=1` 开关预先保证目标架构产物就位。预构建路线保留
+ * overlay 声明，产物照常打包；`main()` 把同一个决定传给备料步骤（此时 ASR 步骤
+ * 要求引擎已在 `target/linux-asr-runtime/<machine>/sense-voice-main`，共享知识库
+ * 从 `pinvou-knowledge/target/<triple>/release/` 复制）。
+ *
  * codex-bridge 不在这张清单上：它已经改成按目标架构备料了（见
  * `prepare-codex-bridge-runtime.sh` 里的 `PINVOU3_BRIDGE_TARGET_ARCH`），
  * 交叉构建能产出**正确**的包，不需要跳过、也就不需要闸门。
  *
- * @param {object} options 目标/宿主架构与两个跳过开关。
+ * @param {object} options 目标/宿主架构与跳过/预构建开关。
  * @returns {string[]} 违规项的说明；空数组表示没问题。
  */
 function crossBuildViolations({
@@ -531,17 +729,21 @@ function crossBuildViolations({
   hostArch,
   skipLinuxAsr,
   skipKnowledgeHost,
+  prebuiltLinuxAsr = false,
+  prebuiltKnowledgeHost = false,
 }) {
   if (platform !== "linux" || !targetArch || targetArch === hostArch) return [];
   const problems = [];
-  if (!skipLinuxAsr) {
+  if (!skipLinuxAsr && !prebuiltLinuxAsr) {
     problems.push(
-      "语音识别运行时（SenseVoice）只能在目标架构上原生构建，交叉构建请设 PINVOU3_SKIP_LINUX_ASR=1",
+      "语音识别运行时（SenseVoice）只能在目标架构上原生构建，交叉构建请设 PINVOU3_SKIP_LINUX_ASR=1，"
+        + "或预先构建目标架构引擎并设 PINVOU3_LINUX_ASR_PREBUILT=1",
     );
   }
-  if (!skipKnowledgeHost) {
+  if (!skipKnowledgeHost && !prebuiltKnowledgeHost) {
     problems.push(
-      "共享知识库服务的构建不认 --target，只会编出宿主架构的二进制，交叉构建请设 PINVOU3_SKIP_KNOWLEDGE_HOST=1",
+      "共享知识库服务的构建不认 --target，只会编出宿主架构的二进制，交叉构建请设 PINVOU3_SKIP_KNOWLEDGE_HOST=1，"
+        + "或预先构建目标三元组的服务端并设 PINVOU3_KNOWLEDGE_HOST_PREBUILT=1",
     );
   }
   return problems;
@@ -568,7 +770,18 @@ function prepareTauriArgs(
     skipKnowledgeHost = process.env.PINVOU3_SKIP_KNOWLEDGE_HOST === "1",
   } = {},
 ) {
-  const prepared = [...args];
+  // Absorb the wrapper-owned `--bundles none` request (see the helper doc):
+  // the value never reaches the Tauri CLI, which rejects it at arg-parse
+  // time. `main()` hands the raw argv here unfiltered — its own
+  // `windowsBundleTargets` pre-parse is unaffected because staging returns
+  // null unless the targets include "nsis" — so this is the single point
+  // where the request is translated into the CLI's `--no-bundle`. The plan
+  // also fails the two never-succeedable request shapes from argv alone
+  // (bundle+none, none next to a real bundle type); `main()` already ran it
+  // for fail-fast, and re-running it here keeps the translation site honest
+  // for direct callers that bypass `main()`.
+  const { args: withoutBundlesNone, noBundle } = bundlesNonePlan(args);
+  const prepared = [...withoutBundlesNone];
   const commandIndex = tauriCommandIndex(prepared);
   if (commandIndex < 0) {
     // dev 不注入 packaging overlay。macOS 复用平台 overlay 保持原生顶栏一致；
@@ -632,6 +845,23 @@ function prepareTauriArgs(
   // Automatic overlays must precede explicit signing/staging overlays so the
   // caller can intentionally override or remove inherited resource mappings.
   prepared.splice(commandIndex + 1, 0, ...injected);
+  // `build`-gated: `bundlesNonePlan` already threw for `bundle` (no
+  // --no-bundle there) and for a contradictory second spelling, and `dev`
+  // falls through on purpose (it never bundles, so stripping IS the
+  // requested semantics). Translate the absorbed `--bundles none` request
+  // into the flag the pinned @tauri-apps/cli 2.11.4 actually accepts
+  // (verified against `tauri build --help`: `--no-bundle`, "Skip the
+  // bundling step even if `bundle > active` is `true`"). The compiled
+  // binary stays at the cargo target dir (`target/<triple>/release/`) for
+  // the caller's own packager; value-flag pairs (`--config <spec>`) keep
+  // their value adjacency, which is why the flag is spliced before them.
+  // Read the subcommand from `prepared`, not the raw argv: the absorbed
+  // `--bundles none` tokens shift every index after them, so when the
+  // request precedes the subcommand, an index computed on `prepared`
+  // points at the wrong token in `args`.
+  if (noBundle && prepared[commandIndex] === "build") {
+    prepared.splice(commandIndex + 1, 0, "--no-bundle");
+  }
   return prepared;
 }
 
@@ -778,11 +1008,23 @@ async function main() {
 
   const isDev = args.includes("dev");
   const hasTauriBuildCommand = tauriCommandIndex(args) >= 0;
+  // `--bundles none` 里两种注定无法成功的请求形态（bundle+none、none 旁边再要
+  // 一种真实打包类型）只看 argv 就能判定，而下面的备料步骤一跑就是几分钟：
+  // 在任何备料开始前先快速失败。`prepareTauriArgs` 会在翻译点对绕过 `main()`
+  // 的直接调用方再跑一次同一份 plan。
+  bundlesNonePlan(args);
   // 两个跳过开关在整条流程里**只在这里读一次**：闸门、备料和 overlay 摘除
   // （`prepareTauriArgs`）都收这同一份布尔，中间隔着多少 await 都不会读出第二种
   // 结论。不一致的代价是包静默地错，见 `prepareTauriArgs` 的参数注释。
   const skipLinuxAsr = process.env.PINVOU3_SKIP_LINUX_ASR === "1";
   const skipKnowledgeHost = process.env.PINVOU3_SKIP_KNOWLEDGE_HOST === "1";
+  // The pre-built switches are the alternative resolution of the same two
+  // decisions (see crossBuildViolations): they keep the overlay declarations
+  // and make the preparation steps accept a target-architecture artifact
+  // instead of building one. Read once here and passed down, like the skip
+  // switches.
+  const prebuiltLinuxAsr = process.env.PINVOU3_LINUX_ASR_PREBUILT === "1";
+  const prebuiltKnowledgeHost = process.env.PINVOU3_KNOWLEDGE_HOST_PREBUILT === "1";
   const additionalConfigs = [];
   // dev 与 build/bundle 一样经由 cargo 编译,所以半安装的工具链也必须在
   // `tauri dev` 之前修复;下方的 wrapper 注入对两条路径一视同仁。
@@ -825,9 +1067,11 @@ async function main() {
     // requested_arch == host_arch，产物还链接宿主 glibc），所以交叉构建必须显式
     // 跳过它；跳过后 overlay 里的资源声明由 prepareTauriArgs 摘掉。
     const hostArch = process.arch;
+    const triple = targetTriple(args);
     // 机器段不认识时这里会直接抛（见 `targetArchitecture`），不会漏进闸门——
     // 闸门对 `!targetArch` 是放行的，回 null 等于给未知架构开了条静默后门。
     const targetArch = targetArchitecture(args);
+    const isCrossBuild = targetArch !== null && targetArch !== hostArch;
 
     // 交叉构建的一致性闸门：宁可现在就失败，也不要产出一个静默错架构的包。
     const violations = crossBuildViolations({
@@ -836,6 +1080,8 @@ async function main() {
       hostArch,
       skipLinuxAsr,
       skipKnowledgeHost,
+      prebuiltLinuxAsr,
+      prebuiltKnowledgeHost,
     });
     if (violations.length > 0) {
       const detail = violations.map((line) => `  - ${line}`).join("\n");
@@ -844,7 +1090,12 @@ async function main() {
       );
     }
 
-    if (!skipLinuxAsr) prepareLinuxAsrRuntime();
+    // SenseVoice 按设计只能在目标架构上原生构建（build-sensevoice-runtime.sh 要求
+    // requested_arch == host_arch，产物还链接宿主 glibc）。交叉构建改按目标架构
+    // 取引擎：要么流水线已预构建引擎并设 PINVOU3_LINUX_ASR_PREBUILT=1（此步改为
+    // 校验并接受它），要么脚本的架构断言当场失败；只有跳过时才由 prepareTauriArgs
+    // 摘掉 overlay 里的资源声明。
+    if (!skipLinuxAsr) prepareLinuxAsrRuntime(isCrossBuild ? { architecture: targetArch, prebuilt: prebuiltLinuxAsr } : {});
     // Bridge 按**目标**架构备料：它不编译任何东西，只是下 Node 官方 tarball、
     // 校验 sha256、解压，所以交叉构建能产出正确的包，不需要跳过开关。
     // 不传 targetArch 时脚本回落到 uname -m，非交叉场景行为不变。
@@ -852,10 +1103,10 @@ async function main() {
     await prepareChromeDevtoolsMcpForPlatform();
     prepareWindowsCodexBridge(windowsBridgeOptions);
     // 共享知识库服务编的是**宿主架构**的二进制（cargo build 不带 --target），
-    // 交叉构建时它会被打进另一个架构的包里，本来就是错的；而且它的 local-embed
-    // 依赖 ort-sys 要从 parcel.pyke.io 下 ONNX Runtime，国内网络基本下不动。
-    // 跟 SenseVoice 同一类问题：这个包装器不认 --target，只按宿主架构备料。
-    if (!skipKnowledgeHost) prepareKnowledgeHost();
+    // 交叉构建时它会被打进另一个架构的包里，本来就是错的；跟 SenseVoice 同一类
+    // 问题。交叉构建要么跳过它，要么在 PINVOU3_KNOWLEDGE_HOST_PREBUILT=1 时复制
+    // 流水线为精确目标三元组预构建的 server。
+    if (!skipKnowledgeHost) prepareKnowledgeHost(isCrossBuild ? { targetTriple: triple, prebuilt: prebuiltKnowledgeHost } : {});
     if (process.platform === "win32") {
       additionalConfigs.push(WINDOWS_BRIDGE_CONFIG_PATH);
     }
@@ -903,6 +1154,8 @@ module.exports = {
   configureIsolatedWindowsRustToolchain,
   configSpecs,
   crossBuildViolations,
+  bundlesNonePlan,
+  extractBundlesNone,
   platformConfigWithoutKnowledgeHost,
   targetArchitecture,
   chromeDevtoolsMcpEnvironment,
@@ -922,6 +1175,7 @@ module.exports = {
   prepareTauriArgs,
   runTauri,
   supportsChromeDevtoolsMcp,
+  targetTriple,
   tauriRuntimeEnvironment,
   pinnedRustToolchainChannel,
   tauriCommandIndex,

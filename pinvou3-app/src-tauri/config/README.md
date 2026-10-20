@@ -8,7 +8,8 @@ config/
    ├─ linux/
    │  ├─ tauri.conf.json
    │  ├─ x86_64/tauri.conf.json
-   │  └─ aarch64/tauri.conf.json
+   │  ├─ aarch64/tauri.conf.json
+   │  └─ loongarch64/tauri.conf.json
    ├─ macos/tauri.conf.json
    └─ windows/
       ├─ tauri.conf.json
@@ -49,15 +50,29 @@ Windows 例外由统一构建入口先验证并 staging `private-runtimes/window
 架构 overlay 跟随构建入口传入的 `--target <三元组>`（`--target X` 与 `--target=X`
 两种写法都认，最后一次出现生效），而不是宿主架构；不传 `--target` 时与原先一样按
 宿主架构。Linux 宿主交叉构建到 `build.js` 不认识的机器段会直接失败，不会静默回落
-宿主架构。一个例外：Linux 宿主自身的架构就不在表里（x86_64/aarch64 之外）时同样
-回落，因为这时构建无从判断是不是交叉。有两个侧车只能按**宿主**架构备料，交叉构建
-必须显式跳过两者，否则 `build.js` 在任何备料开始前就停止：
+宿主架构。一个例外：Linux 宿主自身的架构就不在表里（x86_64/aarch64/loongarch64
+之外）时同样回落，因为这时构建无从判断是不是交叉。有两个侧车只能按**宿主**架构
+备料，交叉构建必须对两者各自给出一个解决方案，否则 `build.js` 在任何备料开始前就
+停止。每个都有两种可接受的解法：
 
 - `PINVOU3_SKIP_LINUX_ASR=1`：跳过 SenseVoice 运行时（它只能在目标架构上原生
-  构建），并从架构 overlay 里摘掉它的资源声明；
+  构建），并从架构 overlay 里摘掉它的资源声明；或者 `PINVOU3_LINUX_ASR_PREBUILT=1`
+  接受发布流水线预先构建好的目标架构引擎（位于
+  `target/linux-asr-runtime/<arch>/sense-voice-main`，资源声明保留，产物照常打包）；
 - `PINVOU3_SKIP_KNOWLEDGE_HOST=1`：跳过共享知识库服务（它的 cargo build 不认
-  `--target`），并从平台 overlay 里摘掉 `knowledge-host/`。
+  `--target`），并从平台 overlay 里摘掉 `knowledge-host/`；或者
+  `PINVOU3_KNOWLEDGE_HOST_PREBUILT=1` 复制流水线为精确 `--target` 三元组预构建的
+  服务端（位于 `pinvou-knowledge/target/<triple>/release/pinvou-knowledge-server`）。
 
-只有值 `1` 会打开开关。产出的包不带 SenseVoice 引擎和共享知识库 server。Codex ACP
+只有值 `1` 会打开开关。用跳过开关时，产出的包不带 SenseVoice 引擎和共享知识库
+server；用预构建开关时，两者按预先就位的目标构建产物打包。Codex ACP
 Bridge 按目标架构备料（`PINVOU3_BRIDGE_TARGET_ARCH`），npm 由第二份宿主架构的
-Node 运行。
+Node 运行。官方 nodejs.org 没有发行版的架构（loong64）从
+`unofficial-builds.nodejs.org` 取同一钉死版本的 Node，回退源是 npmmirror 的
+`node-unofficial-builds` 镜像；sha256 仍钉在
+`scripts/prepare-codex-bridge-runtime.sh` 中。
+
+loongarch64 交叉构建还必须带 `--bundles none`（tauri CLI 2.x 支持 `--no-bundle`，
+由 `build.js` 翻译该请求）：tauri-bundler 无法处理该三元组、会直接 panic，loong64
+deb 由发布流水线中的 `scripts/package-deb-loongarch64.sh` 单独产出。漏掉该旗标会
+在完整编译之后死于 bundler。
