@@ -85,6 +85,18 @@ impl ModelInventory {
         let mut candidates = Vec::new();
 
         for provider in ApiProvider::all().iter().copied() {
+            // Tachyon is a registered-only dialect, not an implicitly discovered
+            // local endpoint. Sharing vLLM's default port is not evidence that
+            // the operator selected this serving template.
+            if provider == ApiProvider::Tachyon
+                && !crate::config::provider_is_configured_for_active(
+                    config,
+                    provider,
+                    active_provider,
+                )
+            {
+                continue;
+            }
             let Some(auth_source) = auth_source_for_provider(config, provider) else {
                 continue;
             };

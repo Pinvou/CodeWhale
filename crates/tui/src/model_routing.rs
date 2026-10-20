@@ -1227,6 +1227,67 @@ fn truncate_for_auto_router(text: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn forkguard_tachyon_inventory_requires_an_active_or_configured_route() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let mut config = Config {
+            provider: Some("vllm".to_string()),
+            auto: Some(crate::config::AutoConfig {
+                cross_provider: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let model = crate::config::DEFAULT_TACHYON_MODEL;
+        let recommendation =
+            format!(r#"{{"provider":"tachyon","model":"{model}","thinking":"max"}}"#);
+        // Neither an absent table nor an untouched slot in ProvidersConfig
+        // authorizes a Tachyon route to a potentially ordinary vLLM server.
+        for providers in [None, Some(crate::config::ProvidersConfig::default())] {
+            config.providers = providers;
+            let inventory = ModelInventory::from_config(&config);
+            assert!(inventory.candidate(ApiProvider::Tachyon, model).is_none());
+            assert!(!inventory.router_context_json().contains("tachyon"));
+            assert!(resolve_explicit_route_with_inventory(&config, model).is_none());
+            assert!(
+                parse_inventory_auto_route_recommendation(&recommendation, &inventory).is_none()
+            );
+        }
+
+        // Selecting the provider explicitly keeps its default model usable.
+        config.provider = Some("tachyon".to_string());
+        let inventory = ModelInventory::from_config(&config);
+        assert!(inventory.candidate(ApiProvider::Tachyon, model).is_some());
+        assert!(parse_inventory_auto_route_recommendation(&recommendation, &inventory).is_some());
+        assert_eq!(
+            resolve_explicit_route_with_inventory(&config, model)
+                .unwrap()
+                .provider,
+            ApiProvider::Tachyon
+        );
+
+        // A configured route remains available when a different provider is active.
+        config.provider = Some("vllm".to_string());
+        let providers = config.providers.get_or_insert_with(Default::default);
+        providers.tachyon.base_url = Some("http://127.0.0.1:9999/v1".to_string());
+        providers.tachyon.model = Some("tachyon-served-id".to_string());
+        let inventory = ModelInventory::from_config(&config);
+        assert!(
+            inventory
+                .candidate(ApiProvider::Tachyon, "tachyon-served-id")
+                .is_some()
+        );
+        let recommendation =
+            r#"{"provider":"tachyon","model":"tachyon-served-id","thinking":"max"}"#;
+        assert!(parse_inventory_auto_route_recommendation(recommendation, &inventory).is_some());
+        assert_eq!(
+            resolve_explicit_route_with_inventory(&config, "tachyon-served-id")
+                .unwrap()
+                .provider,
+            ApiProvider::Tachyon
+        );
+    }
+
     #[tokio::test]
     async fn forkguard_model_operation_classifier_resolution_failure_is_sanitized() {
         let config = Config::default();
