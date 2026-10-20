@@ -79,6 +79,7 @@ impl BehaviorTelemetry {
         } else {
             (None, None)
         };
+        let (report_tx, report_rx) = mpsc::channel(1);
         let telemetry = Self {
             client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(5))
@@ -96,6 +97,7 @@ impl BehaviorTelemetry {
             collection_period_id,
             outbox,
             tasks,
+            diagnostics: Arc::new(StdMutex::new(super::diagnostics::load())),
             team_sessions: Arc::new(StdMutex::new(HashMap::new())),
             tool_calls: Arc::new(StdMutex::new(HashMap::new())),
             voice_submissions: Arc::new(StdMutex::new(HashMap::new())),
@@ -105,9 +107,17 @@ impl BehaviorTelemetry {
             event_tx,
             control_tx,
             heartbeat_tx,
+            report_tx: Some(report_tx),
         };
+        super::diagnostics::sanitize_authorization(&telemetry);
         if let Some(rx) = heartbeat_rx {
             tauri::async_runtime::spawn(Self::run_heartbeat_worker(rx, telemetry.worker_clone()));
+        }
+        if telemetry.runtime.enabled {
+            tauri::async_runtime::spawn(super::diagnostics::run_report_worker(
+                report_rx,
+                telemetry.worker_clone(),
+            ));
         }
         if let Some(rx) = event_rx {
             tauri::async_runtime::spawn(Self::run_worker(rx, telemetry.worker_clone()));
@@ -241,9 +251,10 @@ impl BehaviorTelemetry {
 
     pub(super) fn try_track_for_lease(
         &self,
-        event: BehaviorEvent,
+        mut event: BehaviorEvent,
         lease: &CollectionLease,
     ) -> bool {
+        super::diagnostics::enrich(self, &mut event, lease);
         let record = match self.prepare_record(event, lease) {
             Ok(record) => record,
             Err(error) => {
@@ -406,6 +417,7 @@ impl BehaviorTelemetry {
         }
         persist_task_attempts(&tasks)?;
         drop(tasks);
+        super::diagnostics::rebind(self, generation, period_id)?;
         if let Ok(mut sessions) = self.team_sessions.lock() {
             sessions.values_mut().for_each(rebind);
         }
@@ -489,6 +501,7 @@ impl BehaviorTelemetry {
             collection_period_id: self.collection_period_id.clone(),
             outbox: self.outbox.clone(),
             tasks: self.tasks.clone(),
+            diagnostics: self.diagnostics.clone(),
             team_sessions: self.team_sessions.clone(),
             tool_calls: self.tool_calls.clone(),
             voice_submissions: self.voice_submissions.clone(),
@@ -498,6 +511,7 @@ impl BehaviorTelemetry {
             event_tx: None,
             control_tx: self.control_tx.clone(),
             heartbeat_tx: None,
+            report_tx: None,
         }
     }
 
@@ -657,7 +671,45 @@ impl BehaviorTelemetry {
             .json()
             .await
             .context("parse behavior event delivery response")?;
-        Ok(delivery_results(records, response))
+        let mut results = delivery_results(records, response);
+        // Additive diagnostics must not cost a terminal event on older relays.
+        // Only rejected IDs are retried, preserving deduplication and counts.
+        let fallback = records
+            .iter()
+            .filter(|record| {
+                record.event.get("diagnostic_id").is_some()
+                    && results
+                        .get(&record.event_id)
+                        .is_some_and(|(status, reason)| {
+                            *status == DeliveryStatus::Rejected
+                                && reason.as_deref() == Some("invalid_field")
+                        })
+            })
+            .cloned()
+            .map(|mut record| {
+                if let Some(fields) = record.event.as_object_mut() {
+                    fields.retain(|key, _| !key.starts_with("diagnostic_"));
+                }
+                record
+            })
+            .collect::<Vec<_>>();
+        if !fallback.is_empty() {
+            match Box::pin(self.send_events(&fallback)).await {
+                Ok(plain) => results.extend(plain),
+                Err(_) => {
+                    for record in fallback {
+                        results.insert(
+                            record.event_id,
+                            (
+                                DeliveryStatus::Retryable,
+                                Some("network_unavailable".into()),
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+        Ok(results)
     }
 
     pub(super) async fn recover_expired_credentials(&self, expired: &Credentials) -> Result<bool> {
@@ -783,6 +835,9 @@ impl BehaviorTelemetry {
 
     pub(super) fn clear_local_transient_state(&self) -> Vec<String> {
         let mut failures = Vec::new();
+        if let Err(error) = super::diagnostics::clear(self) {
+            failures.push(format!("clear diagnostics: {error:#}"));
+        }
         match self.outbox.lock() {
             Ok(mut outbox) => {
                 if let Err(error) = outbox.clear() {

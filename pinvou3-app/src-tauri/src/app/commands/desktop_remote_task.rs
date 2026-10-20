@@ -960,6 +960,9 @@ pub async fn desktop_remote_controlled_task_send(
         started.elapsed().as_millis() as u64,
     );
     if let Ok(value) = &result {
+        if let Some(task) = value.get("task_id").and_then(Value::as_str) {
+            event = event.diagnostic_task(task, true);
+        }
         event = match value.get("modelSource").and_then(Value::as_str) {
             Some(TASK_MODEL_SOURCE_CONTROLLED) => event.model_source(RemoteModelSource::Controlled),
             Some(TASK_MODEL_SOURCE_TEMPORARY) => {
@@ -2242,11 +2245,15 @@ pub async fn desktop_remote_task_commit_a<R: tauri::Runtime>(
             .commit_prepared(&local_session_id, &remote_ref, handle, &attachment_ids)
             .map_err(|error| error.code().to_owned());
         if let Some(outcome) = task_submit_telemetry_outcome(&result) {
-            track_remote_control(
-                &app,
-                RemoteControlEvent::new(RemoteStage::TaskSubmit, outcome)
-                    .latency_ms(started.elapsed().as_millis() as u64),
+            let mut event = RemoteControlEvent::from_result(
+                RemoteStage::TaskSubmit,
+                &result,
+                started.elapsed().as_millis() as u64,
             );
+            if let Ok(report) = &result {
+                event = event.diagnostic_task(&report.retry_handle.task_id, false);
+            }
+            track_remote_control(&app, event.outcome(outcome));
         }
         result
     })

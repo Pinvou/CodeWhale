@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { DiagnosticError, FailureReportStore, diagnosticFingerprint, failureGroups, failureSamples } from "./failure-diagnostics.js";
 import { isIP } from "node:net";
 import {
   appendFileSync,
@@ -1795,12 +1796,12 @@ function readCookies(req) {
   return values;
 }
 
-async function readJson(req) {
+async function readJson(req, limit = MAX_JSON_BYTES) {
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > MAX_JSON_BYTES) throw new Error("payload_too_large");
+    if (size > limit) throw new Error("payload_too_large");
     chunks.push(chunk);
   }
   try {
@@ -1861,6 +1862,7 @@ export class TelemetryStore {
     }
     chmodSync(dataDir, 0o700);
     this.devices = new Map();
+    this.failureReports = new FailureReportStore(dataDir);
     this.devicesByHardwareHash = new Map();
     this.events = [];
     this.eventIds = new Set();
@@ -1943,19 +1945,10 @@ export class TelemetryStore {
     this.loadEvents();
     this.loadBehaviorEvents();
     this.loadBehaviorPipelineEvents();
-    const recoveredDeletion = this.deletionTombstones.some((record) => (
-      record.deletion_request_id && record.status !== "completed"
-    ));
-    if (recoveredDeletion) {
-      const completedAt = Date.now();
-      for (const record of this.deletionTombstones) {
-        if (record.deletion_request_id && record.status !== "completed") {
-          record.status = "completed";
-          record.completed_at = completedAt;
-        }
-      }
-      this.saveDeletionTombstones();
-    }
+    this.finishPendingDeletions();
+    // Completed tombstones must also defeat a restored pre-deletion backup.
+    // Detail endpoints repeat this gate and fail closed if storage is unwritable.
+    try { this.failureReports.prune(this.devices); } catch { console.error("[telemetry-error] diagnostic_compaction_failed"); }
     if (restoredDeletedDevice || restoredTimestampDevice) this.saveNow();
     this.enforcePrivateStoragePermissions();
   }
@@ -2074,6 +2067,7 @@ export class TelemetryStore {
     const record = this.deletionResultsByRequest
       .get(`${tokenHash}:${boundedText(requestId, 128)}`);
     if (record && Number(record.result_expires_at) <= now) return null;
+    if (record?.status === "processing") this.finishPendingDeletions();
     return record ? this.publicDeletionResponse(record) : null;
   }
 
@@ -2085,6 +2079,7 @@ export class TelemetryStore {
     if (Number(record.result_expires_at) <= now) {
       throw new TelemetryHttpError(410, "deletion_result_expired");
     }
+    if (record.status === "processing") this.finishPendingDeletions();
     return this.publicDeletionResponse(record);
   }
 
@@ -2334,6 +2329,7 @@ export class TelemetryStore {
   }
 
   compactExpiredData(now = Date.now()) {
+    try { this.failureReports.prune(this.devices, now); } catch { console.error("[telemetry-error] diagnostic_compaction_failed"); }
     const usageChanged = this.compactEvents(now);
     const behaviorChanged = this.compactBehaviorEvents(now);
     const pipelineChanged = this.compactBehaviorPipelineEvents(now);
@@ -2724,24 +2720,38 @@ export class TelemetryStore {
     };
     this.deletionTombstones.push(tombstone);
     this.saveDeletionTombstones();
-    this.events = this.events.filter((event) => event.device_id !== device.device_id);
-    this.eventIds = new Set(this.events.map((event) => event.event_id));
-    this.behaviorEvents = this.behaviorEvents.filter((event) => event.device_id !== device.device_id);
-    this.behaviorEventIds = new Set(this.behaviorEvents.map((event) => event.event_id));
-    this.behaviorPipelineEvents = this.behaviorPipelineEvents
-      .filter((entry) => entry.device_id !== device.device_id);
-    atomicWriteJsonLines(this.eventsPath, this.events);
-    atomicWriteJsonLines(this.behaviorEventsPath, this.behaviorEvents);
-    atomicWriteJsonLines(this.behaviorPipelinePath, this.behaviorPipelineEvents);
-    this.devices.delete(device.device_id);
-    this.devicesByHardwareHash.delete(device.hardware_hash);
-    this.eventRateBuckets.delete(device.device_id);
-    this.rebuildUsageCounters();
-    this.saveNow();
-    tombstone.status = "completed";
-    tombstone.completed_at = Date.now();
-    this.saveDeletionTombstones();
+    this.finishPendingDeletions();
     return this.publicDeletionResponse(tombstone);
+  }
+
+  finishPendingDeletions() {
+    const pending = this.deletionTombstones.filter(record => record.deletion_request_id && record.status !== "completed");
+    if (!pending.length) return;
+    try {
+      for (const [id, device] of this.devices) {
+        if (this.subjectWasDeleted(id)) {
+          this.devices.delete(id); this.devicesByHardwareHash.delete(device.hardware_hash); this.eventRateBuckets.delete(id);
+        }
+      }
+      this.events = this.events.filter(event => !this.subjectWasDeleted(event.device_id));
+      this.behaviorEvents = this.behaviorEvents.filter(event => !this.subjectWasDeleted(event.device_id));
+      this.behaviorPipelineEvents = this.behaviorPipelineEvents.filter(event => !this.subjectWasDeleted(event.device_id));
+      atomicWriteJsonLines(this.eventsPath, this.events);
+      atomicWriteJsonLines(this.behaviorEventsPath, this.behaviorEvents);
+      atomicWriteJsonLines(this.behaviorPipelinePath, this.behaviorPipelineEvents);
+      this.failureReports.prune(this.devices);
+      this.eventIds = new Set(this.events.map(event => event.event_id));
+      this.behaviorEventIds = new Set(this.behaviorEvents.map(event => event.event_id));
+      this.rebuildUsageCounters(); this.saveNow();
+      const completedAt = Date.now();
+      for (const record of pending) { record.status = "completed"; record.completed_at = completedAt; }
+      try { this.saveDeletionTombstones(); }
+      catch (error) { for (const record of pending) { record.status="processing";record.completed_at=null; } throw error; }
+    } catch {
+      // A durable tombstone blocks re-creation immediately. Never acknowledge
+      // completion before every associated data store has been cleaned.
+      console.error("[telemetry-error] deletion_cleanup_pending");
+    }
   }
 
   behaviorCollectionStatus(device) {
@@ -2887,6 +2897,8 @@ export function createTelemetryService(options = {}) {
     }
     return session;
   }
+  const diagnosticCaseId = event => crypto.createHmac("sha256", devicePepper)
+    .update(`${event.device_id}:${event.diagnostic_id}`).digest("hex");
 
   function rateLimited(buckets, key, limit) {
     const now = Date.now();
@@ -2979,6 +2991,17 @@ export function createTelemetryService(options = {}) {
           return true;
         }
         json(res, 200, store.appendBehaviorEvents(device, events, input.batch_id));
+        return true;
+      }
+      if (req.method === "POST" && routePath === `${STATS_PREFIX}/api/diagnostics/report`) {
+        if (rateLimited(invalidCredentialAttempts, `diagnostic:${requestIp}`, 30)) throw new DiagnosticError(429, "rate_limited");
+        const input = await readJson(req, 2300 * 1024);
+        const device = store.authenticate(input.device_id, bearer(req));
+        if (!device) { rejectUnknownDevice(res, bearer(req), requestIp); return true; }
+        store.failureReports.prune(store.devices);
+        const incident = store.behaviorEvents.find(e => e.device_id === device.device_id && e.diagnostic_id === input.report?.incident_id);
+        if (!incident && store.behaviorEvents.some(e => e.device_id === device.device_id && e.event_id === input.report?.incident_id)) throw new DiagnosticError(422, "diagnostic_incident_metadata_missing");
+        json(res, 200, store.failureReports.append(device, input.report, incident));
         return true;
       }
       if (req.method === "POST" && routePath === `${STATS_PREFIX}/api/behavior/collection/start`) {
@@ -3090,6 +3113,47 @@ export function createTelemetryService(options = {}) {
         });
         return true;
       }
+      if (routePath === `${STATS_PREFIX}/api/behavior/failures` && req.method === "GET") {
+        const session = adminAuthorized(req);
+        const filters = Object.fromEntries(new URL(req.url, "http://localhost").searchParams);
+        const rows = failureGroups(store.behaviorEvents, filters, session.role === "operations_admin" ? 1 : Math.max(20, MIN_PRIVACY_GROUP_SUBJECTS));
+        json(res, 200, { rows: rows.map(row => ({ ...row, ...store.failureReports.issue(row.fingerprint) })), detail_allowed: session.role === "operations_admin" });
+        return true;
+      }
+      if (routePath.startsWith(`${STATS_PREFIX}/api/diagnostics/`)) {
+        const session = adminAuthorized(req);
+        if (session?.role !== "operations_admin") throw new DiagnosticError(403, "forbidden");
+        store.failureReports.prune(store.devices);
+        const actor = crypto.createHash("sha256").update(readCookies(req).pinvou_stats_session).digest("hex");
+        const params = new URL(req.url, "http://localhost").searchParams;
+        if (routePath.endsWith("/samples") && req.method === "GET") {
+          const fingerprint = params.get("fingerprint");
+          store.failureReports.audit("samples_read", /^[a-f0-9]{64}$/.test(fingerprint || "") ? fingerprint : "invalid", actor);
+          const incidents = failureSamples(store.behaviorEvents, fingerprint, Object.fromEntries(params))
+            .map(e => ({ id: diagnosticCaseId(e), at: e.occurred_at, version: e.app_version, mode: e.mode, platform: e.platform, code: e.diagnostic_code }));
+          json(res, 200, { incidents }); return true;
+        }
+        if (routePath.endsWith("/incident") && req.method === "GET") {
+          const incident = store.behaviorEvents.find(e => e.diagnostic_id && diagnosticCaseId(e) === params.get("id"));
+          if (!incident) throw new DiagnosticError(404, "diagnostic_incident_not_found");
+          const detail = store.failureReports.detail(incident, actor);
+          const timeline = store.behaviorEvents.filter(e => e.device_id === incident.device_id && (
+            (incident.turn_id && e.turn_id === incident.turn_id)
+            || (incident.attempt_id && e.attempt_id === incident.attempt_id)
+            || (incident.operation_id && e.operation_id === incident.operation_id)))
+            .sort((a,b)=>a.occurred_at-b.occurred_at).slice(-32).map(e=>Object.fromEntries(
+              ["event_name","occurred_at","status","success","stage","error_category","provider_key","model_key","tool_key","duration_ms","diagnostic_code"].filter(k=>e[k]!==undefined).map(k=>[k,e[k]])));
+          const related = store.behaviorEvents.filter(e => e.diagnostic_id && e.diagnostic_trace_id === incident.diagnostic_trace_id && e !== incident).slice(-24)
+            .map(e => ({id:diagnosticCaseId(e),code:e.diagnostic_code,component:e.diagnostic_component,at:e.occurred_at,routing:e.diagnostic_environment?.routing}));
+          json(res, 200, { ...detail, timeline, related }); return true;
+        }
+        if (routePath.endsWith("/issue") && req.method === "POST") {
+          if (req.headers["x-pinvou-diagnostics"] !== "1") throw new DiagnosticError(403, "diagnostic_csrf_rejected");
+          const input = await readJson(req);
+          if (!store.behaviorEvents.some(e => e.diagnostic_id && diagnosticFingerprint(e) === input.fingerprint)) throw new DiagnosticError(404, "diagnostic_issue_not_found");
+          json(res, 200, store.failureReports.update(input.fingerprint, input.issue, actor)); return true;
+        }
+      }
       if (req.method === "GET" && routePath === `${STATS_PREFIX}/api/devices`) {
         json(res, 200, { devices: store.deviceList() });
         return true;
@@ -3120,7 +3184,7 @@ export function createTelemetryService(options = {}) {
     } catch (error) {
       const code = Number(error?.status)
         || (error?.message === "payload_too_large" ? 413 : 400);
-      if (!(error instanceof TelemetryHttpError)) {
+      if (!(error instanceof TelemetryHttpError) && !(error instanceof DiagnosticError)) {
         console.error("[telemetry-error] request_failed");
       }
       json(res, code, { error: error?.message || "bad_request" });

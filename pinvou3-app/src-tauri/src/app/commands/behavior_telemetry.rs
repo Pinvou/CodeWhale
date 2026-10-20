@@ -1,10 +1,52 @@
 use super::prelude::*;
+use serde_json::Value;
 
 fn telemetry(
     app: &AppHandle,
 ) -> Result<tauri::State<'_, crate::features::behavior_telemetry::BehaviorTelemetry>, String> {
     app.try_state::<crate::features::behavior_telemetry::BehaviorTelemetry>()
         .ok_or_else(|| "behavior telemetry is unavailable".to_string())
+}
+
+#[tauri::command]
+pub async fn list_failure_diagnostics(app: AppHandle) -> Result<Value, String> {
+    let telemetry = telemetry(&app)?.inner().clone();
+    super::settings::join_blocking("diagnostics", move || {
+        crate::features::behavior_telemetry::diagnostic_incidents(&telemetry)
+            .map_err(|_| "diagnostic_storage_unavailable".to_owned())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn preview_failure_diagnostic(
+    app: AppHandle,
+    request: crate::features::behavior_telemetry::DiagnosticPreviewRequest,
+) -> Result<Value, String> {
+    let telemetry = telemetry(&app)?.inner().clone();
+    super::settings::join_blocking("diagnostics", move || {
+        crate::features::behavior_telemetry::preview_diagnostic(&telemetry, request)
+            .map_err(|_| "diagnostic_preview_failed".to_owned())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn submit_failure_diagnostic(
+    app: AppHandle,
+    preview_token: String,
+    confirmed: bool,
+) -> Result<Value, String> {
+    let telemetry = telemetry(&app)?.inner().clone();
+    super::settings::join_blocking("diagnostics", move || {
+        crate::features::behavior_telemetry::confirm_diagnostic(
+            &telemetry,
+            &preview_token,
+            confirmed,
+        )
+        .map_err(|_| "diagnostic_confirmation_failed".to_owned())
+    })
+    .await
 }
 
 #[tauri::command]

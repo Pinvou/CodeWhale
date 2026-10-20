@@ -10,7 +10,7 @@ export const desktopBridgeApi = {
   sessions: ['archiveSession', 'createNewSession', 'deleteSession', 'exportSessionArchive', 'getSessionWorkspaceBinding', 'materializeSession', 'onSessionDeleted', 'pickDraftWorkspace', 'renameSession', 'restoreArchivedSession', 'setDraftWorkspace', 'switchToSession', 'toggleSessionPinned'],
   monitor: ['clearMonitorStats', 'startMonitorPolling', 'stopMonitorPolling'],
   settings: ['listBuiltinFeatures', 'loadBehaviorTelemetryStatus', 'saveSearchSettings', 'saveSearchSettingsAndRestart', 'saveSettings', 'saveSettingsAndRestart', 'setBehaviorTelemetryEnabled', 'setBuiltinFeatureEnabled', 'setGlobalShortcutConfig', 'setSelectedPet', 'testSearchProvider'],
-  feedback: ['submitFeedback'],
+  feedback: ['submitFeedback', 'listFailureDiagnostics', 'previewFailureDiagnostic', 'submitFailureDiagnostic', 'pickDiagnosticFiles'],
   llmapi: ['ensureLlmApiBinding', 'getLlmApiAdminOverview', 'getLlmApiModels', 'getLlmApiStatus', 'loginLlmApiUser', 'refreshLlmApi', 'retryLlmApiProvisioning', 'saveLlmApiUserSession', 'setLlmApiDefaultModel', 'setLlmApiUserEnabled'],
   vllm: ['discoverLocalVllm'],
   multiAgent: ['listSubagentTranscripts', 'readSubagentTranscript'],

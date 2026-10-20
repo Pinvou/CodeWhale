@@ -184,7 +184,11 @@
     sessions: domain(["createNewSession", "materializeSession", "switchToSession", "deleteSession", "renameSession", "toggleSessionPinned", "archiveSession", "restoreArchivedSession", "onSessionDeleted", "getSessionWorkspaceBinding"]),
     monitor: domain(["startMonitorPolling", "stopMonitorPolling", "clearMonitorStats"]),
     settings: domain(["loadBehaviorTelemetryStatus", "setBehaviorTelemetryEnabled", "setSelectedPet", "saveSettings", "saveSettingsAndRestart", "saveSearchSettings", "saveSearchSettingsAndRestart", "testSearchProvider", "listBuiltinFeatures"]),
-    feedback: domain(["submitFeedback"]),
+    feedback: Object.assign(domain(["submitFeedback"]), Object.fromEntries(
+      ["listFailureDiagnostics", "previewFailureDiagnostic", "submitFailureDiagnostic", "pickDiagnosticFiles"].map(function (name) {
+        return [name, function () { return Promise.reject(new Error("diagnostic_platform_unsupported")); }];
+      })
+    )),
     llmapi: {},
     vllm: domain(["discoverLocalVllm"]),
     models: domain(["getEffectiveModelConfig", "loadModels", "saveModel", "revealModelApiKey", "deleteModel", "setActiveModel", "loadSessionModel", "switchModel", "testModelConnection", "getImageInputCapability", "testImageInputCapability", "probeLocalServerKind"]),

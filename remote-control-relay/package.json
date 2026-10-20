@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "test": "node --test --test-concurrency=1 test/*.test.js",
+    "eval:diagnostic-redaction": "node eval/failure-redaction/run.mjs",
     "release:gate": "node scripts/controller-release-gate.mjs",
     "release:evidence": "node scripts/validate-controller-release-evidence.mjs",
     "schema:generate": "node scripts/generate-evidence-schema-validator.mjs",

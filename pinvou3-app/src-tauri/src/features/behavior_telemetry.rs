@@ -106,6 +106,9 @@ const SERVER_LINKABLE_RETENTION_DAYS: u8 = 35;
 const RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
 
 fn client_event_field_allowed(field: &str) -> bool {
+    if diagnostics::known_field(field) {
+        return true;
+    }
     matches!(
         field,
         "session_id"
@@ -179,6 +182,7 @@ fn client_event_field_allowed(field: &str) -> bool {
 }
 
 fn validate_client_event_fields(event: &BehaviorEvent) -> Result<()> {
+    diagnostics::validate(event)?;
     if event.event_name == "remote_control_event" {
         return remote_control::validate_event_fields(event);
     }
@@ -207,6 +211,7 @@ pub struct BehaviorTelemetry {
     collection_period_id: Arc<RwLock<Option<String>>>,
     outbox: Arc<StdMutex<Outbox>>,
     tasks: Arc<StdMutex<HashMap<String, TaskAttempt>>>,
+    diagnostics: Arc<StdMutex<diagnostics::DiagnosticState>>,
     team_sessions: Arc<StdMutex<HashMap<String, CollectionLease>>>,
     tool_calls: Arc<StdMutex<HashMap<String, ToolOperation>>>,
     voice_submissions: Arc<StdMutex<HashMap<String, CollectionLease>>>,
@@ -216,6 +221,7 @@ pub struct BehaviorTelemetry {
     event_tx: Option<mpsc::Sender<()>>,
     control_tx: Option<mpsc::Sender<()>>,
     heartbeat_tx: Option<mpsc::Sender<()>>,
+    report_tx: Option<mpsc::Sender<()>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -244,7 +250,7 @@ impl TaskAttempt {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct CollectionLease {
     generation: u64,
     collection_period_id: String,
@@ -734,6 +740,12 @@ pub struct BehaviorEvent {
     pub occurred_at: u64,
     #[serde(flatten)]
     fields: serde_json::Map<String, Value>,
+    #[serde(skip)]
+    diagnostic_hint: Option<diagnostics::DiagnosticHint>,
+    #[serde(skip)]
+    diagnostic_remote: Option<(String, bool)>,
+    #[serde(skip)]
+    diagnostic_cancelled: bool,
 }
 
 impl BehaviorEvent {
@@ -743,6 +755,9 @@ impl BehaviorEvent {
             event_name,
             occurred_at: now_ms(),
             fields: serde_json::Map::new(),
+            diagnostic_hint: None,
+            diagnostic_remote: None,
+            diagnostic_cancelled: false,
         }
     }
 
@@ -1674,6 +1689,17 @@ fn nonempty(value: String) -> Option<String> {
 
 #[path = "behavior_telemetry/events.rs"]
 mod events;
+
+#[path = "behavior_telemetry/diagnostic_redaction.rs"]
+mod diagnostic_redaction;
+#[path = "behavior_telemetry/diagnostics.rs"]
+mod diagnostics;
+// The standalone lifecycle harness compiles this module without app commands.
+#[cfg_attr(all(test, feature = "behavior-telemetry-test"), allow(unused_imports))]
+pub(crate) use diagnostics::{
+    DiagnosticPreviewRequest, capture_failure_context, confirm_diagnostic, diagnostic_incidents,
+    preview_diagnostic,
+};
 
 #[path = "behavior_telemetry/remote_control.rs"]
 mod remote_control;

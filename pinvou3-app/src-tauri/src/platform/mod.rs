@@ -80,6 +80,9 @@ pub mod behavior_telemetry_test_support {
     pub fn atomic_write_private(path: &Path, content: &[u8]) -> io::Result<()> {
         super::filesystem::atomic_write_private(path, content)
     }
+    pub fn read_private_data_file_bytes_within(path: &Path, max_bytes: u64) -> io::Result<Vec<u8>> {
+        super::filesystem::read_private_data_file_bytes_within(path, max_bytes)
+    }
 
     pub fn open_private_append_file(path: &Path) -> io::Result<std::fs::File> {
         super::filesystem::open_private_append_file(path)

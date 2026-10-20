@@ -171,6 +171,8 @@ impl DesktopTaskEventSink {
             &self.app,
             RemoteControlEvent::new(stage, outcome)
                 .reason(reason)
+                .diagnostic_task(&event.task_id, true)
+                .diagnostic_terminal(event.status == "cancelled", event.outcome_unknown)
                 .model_source(source),
             event_id,
         );

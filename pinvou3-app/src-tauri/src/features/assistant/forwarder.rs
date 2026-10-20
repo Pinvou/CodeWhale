@@ -620,6 +620,7 @@ pub(crate) fn spawn_event_forwarder(
                             (!success).then(|| {
                                 crate::features::behavior_telemetry::error_category(Some(&output))
                             }),
+                            (!success).then_some(output.as_str()),
                         );
                     }
                     #[cfg(feature = "benchmark-hooks")]
@@ -1595,6 +1596,14 @@ pub(crate) fn spawn_event_forwarder(
                     if let Some(turn_id) = current_turn_id.as_deref() {
                         let status =
                             behavior_task_status(terminal_status, terminal_error.as_deref());
+                        if let Some(error) = terminal_error.as_deref() {
+                            crate::features::behavior_telemetry::capture_failure_context(
+                                &app,
+                                &session_id,
+                                error,
+                                false,
+                            );
+                        }
                         crate::features::behavior_telemetry::finish_task(
                             &app,
                             &session_id,

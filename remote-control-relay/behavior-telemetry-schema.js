@@ -29,6 +29,7 @@ function invalid(reason, field) {
 }
 
 function validateValue(field, value, definition) {
+  definition = resolvedDefinition(definition);
   if (definition.const !== undefined && value !== definition.const) return false;
   if (definition.enum && !definition.enum.includes(value)) return false;
   if (definition.type === "boolean" && typeof value !== "boolean") return false;
@@ -40,6 +41,18 @@ function validateValue(field, value, definition) {
     if (definition.minLength !== undefined && value.length < definition.minLength) return false;
     if (definition.maxLength !== undefined && value.length > definition.maxLength) return false;
     if (definition.pattern && !(new RegExp(definition.pattern)).test(value)) return false;
+  }
+  if (definition.type === "array") {
+    if (!Array.isArray(value) || value.length > (definition.maxItems ?? 100)) return false;
+    if (!value.every(item => validateValue(field, item, definition.items))) return false;
+  }
+  if (definition.type === "object") {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    if ((definition.required || []).some(key => value[key] === undefined)) return false;
+    for (const [key, item] of Object.entries(value)) {
+      if (!Object.hasOwn(definition.properties || {}, key)) { if (definition.additionalProperties === false) return false; }
+      else if (!validateValue(key, item, definition.properties[key])) return false;
+    }
   }
   return true;
 }
@@ -56,11 +69,20 @@ export function validateBehaviorEventShape(raw, options = {}) {
   if (Buffer.byteLength(JSON.stringify(raw), "utf8") > MAX_EVENT_BYTES) return invalid("too_large");
   if (raw.schema_version !== 1) return invalid("unsupported_schema", "schema_version");
   const eventName = raw.event_name;
+  if (raw.diagnostic_id !== undefined) {
+    if (raw.diagnostic_id !== raw.event_id || raw.status === "cancelled") return invalid("invalid_diagnostic");
+    const failure = raw.success === false || ["failed", "interrupted"].includes(raw.status)
+      || ["task_rejected", "provider_setup_failed", "voice_recognition_failed"].includes(eventName)
+      || (eventName === "remote_control_event" && raw.remote_outcome !== "ok")
+      || (eventName === "response_feedback_changed" && raw.rating === "negative" && raw.feedback_action === "set");
+    if (!failure || !raw.diagnostic_code || !raw.diagnostic_component || !raw.diagnostic_trace_id || !raw.diagnostic_site) return invalid("invalid_diagnostic");
+  } else if (Object.keys(raw).some(key => key.startsWith("diagnostic_"))) return invalid("invalid_diagnostic");
   const contract = BEHAVIOR_EVENT_CONTRACTS[eventName];
   if (!contract) return invalid("unknown_event", "event_name");
   const eventFields = Array.isArray(contract.allowed)
     ? new Set([...BEHAVIOR_TELEMETRY_SCHEMA.required, ...contract.allowed])
     : CLIENT_FIELDS;
+  for (const field of CLIENT_FIELDS) if (field.startsWith("diagnostic_")) eventFields.add(field);
   for (const field of Object.keys(raw)) {
     if (SERVER_FIELDS.has(field)) return invalid("invalid_field", field);
     if (!eventFields.has(field)) return invalid("invalid_field", field);
