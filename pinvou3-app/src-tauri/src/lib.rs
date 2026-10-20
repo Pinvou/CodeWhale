@@ -2148,6 +2148,8 @@ pub fn run() {
             commands::device::device_remove_external_model,
             commands::device::device_doctor_prompt,
             commands::monitor::discover_local_vllm,
+            commands::model_store::model_store_add_remote,
+            commands::model_store::model_store_remove_remote,
             commands::model_store::model_store_availability,
             commands::model_store::model_store_cards,
             commands::model_store::model_store_library,
