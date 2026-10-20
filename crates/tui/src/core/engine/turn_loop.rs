@@ -2734,11 +2734,13 @@ impl Engine {
                         thought_signature: None,
                         input_buffer: String::new(),
                         input_parse_error: None,
+                        input_parse_hint: Default::default(),
                     });
                 }
             }
 
             for tool in &mut tool_uses {
+                tool.invalidate_input_parse_hint();
                 let Some(schema) = tool_catalog
                     .iter()
                     .find(|candidate| candidate.name == tool.name)
@@ -5999,6 +6001,7 @@ impl Engine {
                             thought_signature,
                             input_buffer: String::new(),
                             input_parse_error: None,
+                            input_parse_hint: Default::default(),
                         });
                     }
                     ContentBlockStart::ServerToolUse { id, name, input } => {
@@ -6021,6 +6024,7 @@ impl Engine {
                             thought_signature: None,
                             input_buffer: String::new(),
                             input_parse_error: None,
+                            input_parse_hint: Default::default(),
                         });
                     }
                 },
@@ -6109,8 +6113,7 @@ impl Engine {
                                     tool_state.name, partial_json, tool_state.input_buffer
                                 ));
                             }
-                            if let Some(value) = parse_tool_input(&tool_state.input_buffer) {
-                                tool_state.input = value.clone();
+                            if tool_state.refresh_partial_input(&partial_json) {
                                 if self.active_turn_tool_security.is_some() {
                                     crate::logging::info(
                                         "Restricted tool input parsed (details redacted)",
@@ -6118,7 +6121,7 @@ impl Engine {
                                 } else if crate::logging::is_verbose() {
                                     crate::logging::info(format!(
                                         "Tool '{}' input parsed: {:?}",
-                                        tool_state.name, value
+                                        tool_state.name, tool_state.input
                                     ));
                                 }
                             }
@@ -6174,6 +6177,7 @@ impl Engine {
                     if let Some(tool_idx) = current_tool_indices.remove(&index)
                         && let Some(tool_state) = tool_uses.get_mut(tool_idx)
                     {
+                        tool_state.invalidate_input_parse_hint();
                         if self.active_turn_tool_security.is_some() {
                             crate::logging::info("Restricted tool block stop (details redacted)");
                         } else {

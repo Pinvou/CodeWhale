@@ -9079,6 +9079,7 @@ use context::{
 use context::{context_input_budget_for_provider, effective_max_output_tokens};
 mod dispatch;
 mod lsp_hooks;
+mod partial_input;
 pub(crate) mod reviewer;
 mod streaming;
 mod token_estimate_cache;
