@@ -493,7 +493,6 @@ const jaBase = {
           updateConfirmStopped:'スクリプト更新により、現在のデプロイが解除され、スクリプトが更新されます。更新後に再デプロイが必要です。続行しますか？',
           resourceManager:'リソース管理',
           storageHint:'重みの保存パス、インポートスキャンディレクトリ、ディスク容量を管理します。',
-          storageButton:'ストレージとインポート',
           enginesConfirmOllama:(name)=>`「${name}」を削除しますか？ollama エンジンとその全モデルデータ（重みを含む、数十GB）が削除されます。再利用には全モデルの再ダウンロードが必要です。`,
           enginesDeleted:(freed,purged)=>`削除しました。${freed} 解放されました。${purged?'注意：モデルデータも削除されました。':''}`,
           enginesDeleteFailed:(m)=>`削除に失敗しました：${m}`,

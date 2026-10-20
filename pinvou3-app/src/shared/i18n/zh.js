@@ -528,7 +528,6 @@ export const dictZh = {
           updateConfirmStopped:'更新脚本会卸载当前部署并更新脚本。更新后需重新部署模型。确定继续吗？',
           resourceManager:'资源管理',
           storageHint:'管理权重存放路径、导入扫描目录和磁盘配额。',
-          storageButton:'存储与导入',
           enginesConfirmOllama:(name)=>`删除「${name}」？此操作会删除 ollama 引擎及其全部模型数据（含权重，通常几十 GB）。如需再用，须重新下载所有模型。`,
           enginesDeleted:(freed,purged)=>`已删除，释放 ${freed}。${purged?'注意：模型数据已一并删除。':''}`,
           enginesDeleteFailed:(m)=>`删除失败：${m}`,

@@ -495,7 +495,6 @@ export const dictEn = {
           updateConfirmStopped:'Updating scripts will remove the current deployment and update scripts. You will need to redeploy afterwards. Continue?',
           resourceManager:'Resources',
           storageHint:'Manage weight storage paths, import scan directories and disk quotas.',
-          storageButton:'Storage & Import',
           enginesConfirmOllama:(name)=>`Delete "${name}"? This removes the ollama engine and ALL its model data (including weights, often tens of GB). You will need to re-download all models to use them again.`,
           enginesDeleted:(freed,purged)=>`Deleted, freed ${freed}.${purged?' Note: model data was also removed.':''}`,
           enginesDeleteFailed:(m)=>`Delete failed: ${m}`,

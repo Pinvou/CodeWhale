@@ -28,9 +28,15 @@ for (const language of ['zh', 'en', 'ja']) {
     test(`${language}: script update actions respect running=${running} busy=${busy}`, () => {
       const html = renderToString(React.createElement(CardScriptsActions, { record: { card_id: 'card', running }, copy, busy, onAction() {} }));
       assert.ok(html.includes(copy.cardScriptsUpdate));
-      assert.ok(html.includes(copy.cardScriptsRollback));
+      // 9c857ede8 removed the rollback UI; only the update action remains.
+      assert.ok(!html.includes(copy.cardScriptsRollback));
+      assert.doesNotMatch(html, /data-testid="model-store-rollback-scripts"/);
+      const buttons = html.match(/<button\b[^>]*>/g) || [];
+      assert.equal(buttons.length, 1);
+      assert.match(buttons[0], /data-testid="model-store-update-scripts"/);
+      assert.equal(/\bdisabled=""/.test(buttons[0]), running || busy);
       assert.ok(html.includes(running ? copy.cardScriptsStopFirst : copy.cardScriptsHint));
-      assert.equal((html.match(/disabled=""/g) || []).length, running || busy ? 2 : 0);
+      assert.equal((html.match(/disabled=""/g) || []).length, running || busy ? 1 : 0);
       assert.doesNotMatch(html, /undefined|NaN/);
     });
   }

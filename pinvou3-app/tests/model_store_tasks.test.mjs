@@ -96,6 +96,26 @@ async function waitFor(predicate, message) {
 
 const taskByRunId = (runId) => getTasks().find((task) => task.runId === runId) || null;
 
+test('启用首次失败保留原始错误及后续身份错误日志，不重新启动', async () => {
+  const first = 'ERROR: 引擎在建立运行记录前已退出；请查看诊断日志';
+  const later = 'ERROR: 发现未被本卡片可靠记录的模型进程，未认领或停止它；请联系管理员核对';
+  const error = `脚本执行失败（退出码 70）：${later}\n${first}\n${later}`;
+  let starts = 0;
+  scripts.set('run-enable-first-error', (from) => from === 0
+    ? { lines: [first], next: 1, done: false, awaiting_input: false }
+    : { lines: [later], next: 2, done: true, ok: false, cancelled: false, error });
+  const result = await runTask({
+    title: '启用模型', kind: 'enable', key: 'lifecycle:first-error',
+    start: async () => { starts += 1; return { run_id: 'run-enable-first-error' }; },
+  });
+  const task = taskByRunId('run-enable-first-error');
+  assert.equal(result.ok, false);
+  assert.equal(starts, 1);
+  assert.equal(task.status, 'error');
+  assert.equal(task.error, error);
+  assert.deepEqual(task.lines, [first, later]);
+});
+
 // 兜底：把这一条测试留下的任务全部关掉。
 //
 // 任务表是模块级的，轮询也是——一条断言挂掉会跳过它自己那句 dismissTask，于是
