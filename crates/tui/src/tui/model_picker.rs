@@ -63,6 +63,17 @@ const DEEPSEEK_PICKER_EFFORTS: &[ReasoningEffort] = &[
     ReasoningEffort::High,
     ReasoningEffort::Max,
 ];
+/// Pinvou fork: Tachyon (驭光) effective tiers are none/low/medium/xhigh —
+/// `high` is rejected 400 by the serving template and `xhigh` is the real
+/// deepest tier, reached through the max family. Offering the generic
+/// `[Auto, Off, High, Max]` ladder would advertise a `high` rung the wire
+/// can never send and hide the real `low`/`medium` tiers.
+const TACHYON_PICKER_EFFORTS: &[ReasoningEffort] = &[
+    ReasoningEffort::Off,
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::Max,
+];
 /// Kimi Code K3 accepts route-specific low and medium controls at the
 /// official membership endpoint. Medium becomes K3's nested high wire effort,
 /// but keeping the selected intent visible is important for recovery and
@@ -2990,6 +3001,12 @@ pub(crate) fn picker_efforts_for_route(
         crate::config::ApiProvider::Deepseek | crate::config::ApiProvider::DeepseekCN
     ) {
         return DEEPSEEK_PICKER_EFFORTS.to_vec();
+    }
+    // Tachyon is registered-only and has no Models.dev catalog offering, so
+    // without its own arm it would inherit the generic DeepSeek-style default
+    // ladder whose `high` rung the local engine rejects with HTTP 400.
+    if provider == crate::config::ApiProvider::Tachyon {
+        return TACHYON_PICKER_EFFORTS.to_vec();
     }
     DEFAULT_PICKER_EFFORTS.to_vec()
 }

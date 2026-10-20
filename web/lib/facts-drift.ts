@@ -153,10 +153,12 @@ function deriveProvidersFromConfig(cfg: string): ProviderFact[] {
   };
   // Log loudly on unmapped variants so a new provider can never be silently
   // dropped from the drift-derived facts again. DeepseekCN (#1104), the
-  // dynamic Custom meta-provider (#1519, user-defined endpoints), and
-  // Antigravity (a non-runnable legacy config tombstone, never a website
-  // provider) are the deliberate exclusions.
-  const EXCLUDED = new Set(["DeepseekCN", "Custom", "Antigravity"]);
+  // dynamic Custom meta-provider (#1519, user-defined endpoints), Antigravity
+  // (a non-runnable legacy config tombstone, never a website provider), and
+  // Tachyon (a registered-only local-engine dialect the Pinvou host selects
+  // after probing; never a selectable catalog row) are the deliberate
+  // exclusions.
+  const EXCLUDED = new Set(["DeepseekCN", "Custom", "Antigravity", "Tachyon"]);
   const unmapped = variants.filter((v) => !EXCLUDED.has(v) && !labelMap[v]);
   if (unmapped.length > 0) {
     console.warn(

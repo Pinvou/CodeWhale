@@ -136,6 +136,23 @@ fn api_provider_metadata_helpers_follow_config_provider_metadata() {
     );
 }
 
+/// `KIND_LOOKUP`/`FROM_KIND_LOOKUP` are indexed by discriminant, and the
+/// existing catalog round-trip above only walks `ProviderKind::ALL` — a
+/// mis-aligned slot for a registered-only kind (e.g. Tachyon, which never
+/// enters `ALL`) would not turn any existing assertion red. Walk the full
+/// registry instead so every slot stays pinned.
+#[test]
+fn api_provider_kind_lookups_round_trip_every_registry_kind() {
+    for provider in codewhale_config::provider::all_providers() {
+        let kind = provider.kind();
+        assert_eq!(
+            ApiProvider::from_kind(kind).kind(),
+            Some(kind),
+            "the ApiProvider slot for {kind:?} must round-trip through the lookup tables"
+        );
+    }
+}
+
 #[test]
 fn retired_antigravity_is_not_selectable_but_has_an_actionable_tombstone() {
     for identity in ["antigravity", "agy"] {

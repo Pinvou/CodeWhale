@@ -1256,6 +1256,66 @@ fn ollama_cloud_normal_turns_preserve_the_documented_reasoning_ladder() {
     );
 }
 
+/// Pinvou fork regression (fork-modifications T10): Tachyon route receipts
+/// must mirror the wire authority in `apply_route_reasoning_controls` —
+/// none/low/medium/xhigh, with `high` defensively reported as the `medium`
+/// the wire actually sends and `max` reported as the real `xhigh` ceiling.
+/// Without its own arm, `normalize_for_route` fell into the generic
+/// Low/Medium → High collapse, silently relabeling tiers in the opposite
+/// direction of the wire (receipts said `high` where the wire sends
+/// `medium`, and could never report `xhigh`).
+#[test]
+fn tachyon_route_receipts_mirror_the_local_engine_dialect() {
+    let base_url = crate::config::DEFAULT_TACHYON_BASE_URL;
+    let model = crate::config::DEFAULT_TACHYON_MODEL;
+    // Real tiers stay distinct: off/low/medium pass through, xhigh is real.
+    for (effort, expected) in [
+        (ReasoningEffort::Off, ReasoningEffort::Off),
+        (ReasoningEffort::Low, ReasoningEffort::Low),
+        (ReasoningEffort::Medium, ReasoningEffort::Medium),
+        (ReasoningEffort::XHigh, ReasoningEffort::XHigh),
+    ] {
+        assert_eq!(
+            effort.normalize_for_route(ApiProvider::Tachyon, base_url, model),
+            expected,
+            "{effort:?} is a real Tachyon tier and must be reported as-is"
+        );
+    }
+    // A requested `high` is wire-clamped to `medium`; the receipt — not the
+    // generic collapse — must say so.
+    assert_eq!(
+        ReasoningEffort::High.normalize_for_route(ApiProvider::Tachyon, base_url, model),
+        ReasoningEffort::Medium
+    );
+    // `max` reaches Tachyon's deepest tier only as `xhigh`.
+    assert_eq!(
+        ReasoningEffort::Max.normalize_for_route(ApiProvider::Tachyon, base_url, model),
+        ReasoningEffort::XHigh
+    );
+}
+
+/// Pinvou fork regression (fork-modifications T10): the `/model` effort
+/// ladder for a Tachyon route is the local engine's real tier list — no
+/// `high` rung (wire rejects it), and low/medium are selectable.
+#[test]
+fn tachyon_picker_offers_the_local_engine_tier_ladder() {
+    let efforts = crate::tui::model_picker::picker_efforts_for_route(
+        ApiProvider::Tachyon,
+        crate::config::DEFAULT_TACHYON_BASE_URL,
+        crate::config::DEFAULT_TACHYON_MODEL,
+        false,
+    );
+    assert_eq!(
+        efforts,
+        vec![
+            ReasoningEffort::Off,
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::Max,
+        ]
+    );
+}
+
 #[test]
 fn reasoning_effort_uses_one_strict_alias_table_and_legacy_fallback() {
     for raw in ["off", "none", "disabled", "false"] {

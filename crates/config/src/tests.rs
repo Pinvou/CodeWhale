@@ -5960,6 +5960,26 @@ fn parse_config_identity_preserves_legacy_table_kinds() {
     assert_eq!(ProviderKind::parse_config_identity("nope"), None);
 }
 
+/// Pinvou fork (T10): Tachyon is registered-only. The catalog parse must
+/// reject it — it is never a selectable `/provider` row — while config-table
+/// identity still resolves it, because the Pinvou host writes
+/// `[providers.tachyon]` after probing `owned_by == "tachyon"`. That split is
+/// the load-bearing wall of the registered-only shape; if `provider!` ever
+/// grows a catalog alias for Tachyon these assertions go red before the
+/// catalog boundary silently erodes.
+#[test]
+fn tachyon_stays_registered_only_on_both_identity_boundaries() {
+    assert_eq!(ProviderKind::parse("tachyon"), None);
+    assert_eq!(
+        ProviderKind::parse_config_identity("tachyon"),
+        Some(ProviderKind::Tachyon)
+    );
+    assert_eq!(
+        ProviderKind::parse_config_identity("TACHYON"),
+        Some(ProviderKind::Tachyon)
+    );
+}
+
 #[test]
 fn legacy_dual_wire_toml_table_supplies_credentials_and_endpoint() {
     let _lock = env_lock();

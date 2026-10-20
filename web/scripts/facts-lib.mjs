@@ -118,7 +118,9 @@ const PROVIDER_LABEL_MAP = {
 // catch-all for user-defined endpoints, not a website-listable provider.
 // Antigravity is a non-runnable legacy config tombstone, never a website
 // provider.
-const EXCLUDED_PROVIDERS = new Set(["DeepseekCN", "Custom", "Antigravity"]);
+// Tachyon is a registered-only local-engine dialect (Pinvou host selects it
+// after probing); it is never a selectable catalog row or website provider.
+const EXCLUDED_PROVIDERS = new Set(["DeepseekCN", "Custom", "Antigravity", "Tachyon"]);
 
 function providerEnumVariants() {
   const cfg = read("crates/tui/src/config.rs");

@@ -312,8 +312,12 @@ impl ReasoningEffort {
     /// to `high`. First-party DeepSeek routes keep `low` (the wire documents
     /// low/high/max) while rounding `medium` up to `high`. Models that publish
     /// a Models.dev `reasoning_options` effort list keep that vocabulary
-    /// instead of the historic Low/Medium collapse. Generic Moonshot and
-    /// every other non-Codex route retain the historic high coercion.
+    /// instead of the historic Low/Medium collapse. Tachyon receipts mirror
+    /// its local engine dialect (none/low/medium/xhigh — `high` is rejected
+    /// 400 by the serving template), so a requested `high` reports the
+    /// `medium` the wire actually sends and `max` reports the real `xhigh`
+    /// ceiling. Generic Moonshot and every other non-Codex route retain the
+    /// historic high coercion.
     /// This intentionally does not change [`Self::normalize_for_provider`],
     /// whose generic wire semantics are used by older callers that do not yet
     /// have a route receipt.
@@ -360,6 +364,19 @@ impl ReasoningEffort {
             return match normalized {
                 Self::Minimal => Self::Low,
                 Self::XHigh | Self::Ultra => Self::Max,
+                other => other,
+            };
+        }
+        // Pinvou fork: Tachyon (驭光) has no Models.dev catalog offering
+        // (registered-only), so without its own arm it would fall into the
+        // generic Low/Medium → High collapse below — the opposite of the wire
+        // authority in `apply_route_reasoning_controls`, which clamps `high`
+        // to `medium` and reaches `xhigh` only through the max/xhigh family.
+        // Keep the receipt vocabulary aligned with what the wire sends.
+        if provider == ApiProvider::Tachyon {
+            return match normalized {
+                Self::High => Self::Medium,
+                Self::Max => Self::XHigh,
                 other => other,
             };
         }
