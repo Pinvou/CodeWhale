@@ -5151,6 +5151,29 @@ function stopMonitorPolling() { return pinvouSharedweb().stopMonitorPolling(); }
 async function loadSettings() { return pinvouSharedweb().loadSettings(); }
 async function loadSelectedPet() { return pinvouSharedweb().loadSelectedPet(); }
 async function setSelectedPet(id) { return pinvouSharedweb().setSelectedPet(id); }
+
+  // Store tasks finish independently of the visible page. Reload all model
+  // consumers after a route commit without changing global/session selection.
+  var modelsRefreshPromise = null;
+  var modelsRefreshPending = false;
+  function refreshChangedModels() {
+    modelsRefreshPending = true;
+    if (modelsRefreshPromise) return modelsRefreshPromise;
+    modelsRefreshPromise = (async function () {
+      do {
+        modelsRefreshPending = false;
+        await loadModels();
+        await loadSettings();
+        await loadEffectiveModelConfig();
+      } while (modelsRefreshPending);
+    })().finally(function () { modelsRefreshPromise = null; });
+    return modelsRefreshPromise;
+  }
+  listen("models:changed", function () {
+    return refreshChangedModels().catch(function () {
+      console.warn("[models] linked model refresh failed");
+    });
+  });
   // Builtin feature switches (docs/builtin-toolset-contract.md §3.3): the web
   // client proxies to the same desktop host, so the registry read is exposed
   // here too (access-policy allowlists list_builtin_features; the write side

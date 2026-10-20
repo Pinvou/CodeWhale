@@ -1220,3 +1220,93 @@ fn rollback_reports_pinned_residuals_after_default_storage_changes() {
     assert!(Path::new(&old).join("old.tachyon").exists());
     assert!(unrelated.join("stable-name/unrelated").exists());
 }
+
+#[test]
+fn legacy_history_cleanup_finds_nested_weights_and_preserves_unrelated_files() {
+    let (_temp, mgr, current, card, pkg, id) = fixture();
+    let root = mgr.settings.models_path().join("legacy");
+    fs::create_dir_all(root.join("nested")).unwrap();
+    fs::rename(root.join("old.tachyon"), root.join("nested/old.tachyon")).unwrap();
+    fs::write(root.join("nested/keep.txt"), b"keep").unwrap();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    let old_id = version_store::active_id(&current);
+    mgr.delete_version(&current.card_id, &old_id, &mut |_| {}, Default::default())
+        .unwrap();
+    assert!(!root.join("nested/old.tachyon").exists());
+    assert_eq!(fs::read(root.join("nested/keep.txt")).unwrap(), b"keep");
+    assert!(
+        version_store::get(&current.card_id, &old_id)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn legacy_missing_weight_retains_history_until_cleanup_has_committed() {
+    let (_temp, mgr, current, card, pkg, id) = fixture();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    let old_id = version_store::active_id(&current);
+    fs::remove_file(mgr.settings.models_path().join("legacy/old.tachyon")).unwrap();
+    assert!(
+        mgr.delete_version(&current.card_id, &old_id, &mut |_| {}, Default::default())
+            .is_err()
+    );
+    let mut old = version_store::get(&current.card_id, &old_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(old.state, "history");
+    assert!(runtime_path(old.record.as_ref().unwrap()).unwrap().exists());
+    old.state = "deleting".into();
+    version_store::put(&old).unwrap();
+    mgr.delete_version(&current.card_id, &old_id, &mut |_| {}, Default::default())
+        .unwrap();
+    assert!(
+        version_store::get(&current.card_id, &old_id)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn legacy_cleanup_retains_history_for_ambiguous_nested_weights() {
+    let (_temp, mgr, current, card, pkg, id) = fixture();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    let old_id = version_store::active_id(&current);
+    let root = mgr.settings.models_path().join("legacy");
+    fs::create_dir(root.join("nested")).unwrap();
+    fs::copy(root.join("old.tachyon"), root.join("nested/old.tachyon")).unwrap();
+    assert!(
+        mgr.delete_version(&current.card_id, &old_id, &mut |_| {}, Default::default())
+            .is_err()
+    );
+    assert_eq!(
+        version_store::get(&current.card_id, &old_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        "history"
+    );
+    assert!(root.join("old.tachyon").exists());
+    assert!(root.join("nested/old.tachyon").exists());
+    fs::remove_dir_all(&root).unwrap();
+    assert!(
+        mgr.delete_version(&current.card_id, &old_id, &mut |_| {}, Default::default())
+            .is_err()
+    );
+    assert_eq!(
+        version_store::get(&current.card_id, &old_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        "history"
+    );
+}
