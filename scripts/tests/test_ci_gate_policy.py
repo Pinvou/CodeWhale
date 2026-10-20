@@ -375,6 +375,35 @@ _CLI_LEG_JOB_IF = (
     ")\n"
     "}}"
 )
+# rust-loongarch64-check 的路由与 cli-test/macos-cli-check 同形(push 无条件、
+# merge_group/ready PR 按 rust_full/cli_rust/knowledge_rust),差异只在输出
+# 集合:该 leg 交叉检查三个 workspace,所以知识库变更也触发它。
+_LOONGARCH64_JOB_IF = (
+    "${{\n"
+    "!cancelled() &&\n"
+    "github.event.action != 'closed' &&\n"
+    "(\n"
+    "github.event_name == 'push' ||\n"
+    "(\n"
+    "github.event_name == 'merge_group' &&\n"
+    "(\n"
+    "needs.changes.outputs.rust_full == 'true' ||\n"
+    "needs.changes.outputs.cli_rust == 'true' ||\n"
+    "needs.changes.outputs.knowledge_rust == 'true'\n"
+    ")\n"
+    ") ||\n"
+    "(\n"
+    "github.event_name == 'pull_request' &&\n"
+    "github.event.pull_request.draft == false &&\n"
+    "(\n"
+    "needs.changes.outputs.rust_full == 'true' ||\n"
+    "needs.changes.outputs.cli_rust == 'true' ||\n"
+    "needs.changes.outputs.knowledge_rust == 'true'\n"
+    ")\n"
+    ")\n"
+    ")\n"
+    "}}"
+)
 _RUST_FULL_JOB_IF = (
     "${{\n"
     "!cancelled() &&\n"
@@ -507,6 +536,7 @@ GATE_JOB_LEVEL_IFS = {
         "github.event.pull_request.draft == false) }}"
     ),
     "macos-cli-check": _CLI_LEG_JOB_IF,
+    "rust-loongarch64-check": _LOONGARCH64_JOB_IF,
     "windows-codex-runtime-test": (
         "${{ !cancelled() && github.event.action != 'closed' && "
         "needs.changes.outputs.pure_release_backflow != 'true' && "
@@ -553,6 +583,13 @@ PINNED_GATE_STEP_NAMES = {
     ),
     "knowledge-rust": (
         "cargo clippy (hard gate, lib/bins/tests + server)",
+    ),
+    "rust-loongarch64-check": (
+        "Set up the pinned loong64 cross toolchain (sha256-pinned asset)",
+        "Set up the deepin glibc-2.38 loong64 sysroot",
+        "cargo check src-tauri (loongarch64 cross)",
+        "cargo check pinvou-knowledge (loongarch64 cross, incl. tests)",
+        "cargo check pinvou-cli (loongarch64 cross)",
     ),
     "macos-rust-check": (
         "macOS Rust all-targets check",
@@ -637,7 +674,8 @@ class CiGatePolicyTests(unittest.TestCase):
         shell = "\n".join(line[10:] for line in body.splitlines())
         environment = {**os.environ, "GITHUB_EVENT_NAME": "pull_request", "BACKFLOW_MODE": "full",
                        "WINDOWS_RUST_REQUIRED_BY_POLICY": "false"}
-        for name in re.findall(r"^          ([A-Z_]+_RESULT):", gate, re.MULTILINE):
+        # [A-Z0-9_]: leg 名可含数字(rust-loongarch64-check → RUST_LOONGARCH64_CHECK_RESULT),纯字母类会漏抓、门禁模拟随之漏喂。
+        for name in re.findall(r"^          ([A-Z0-9_]+_RESULT):", gate, re.MULTILINE):
             environment[name] = "success"
         for required in ("true", "false"):
             for linux in ("success", "skipped", "failure", "cancelled", ""):
@@ -655,7 +693,8 @@ class CiGatePolicyTests(unittest.TestCase):
         shell = "\n".join(line[10:] for line in body.splitlines())
         environment = {**os.environ, "BACKFLOW_MODE": "full",
                        "WINDOWS_RUST_REQUIRED_BY_POLICY": "false"}
-        for name in re.findall(r"^          ([A-Z_]+_RESULT):", gate, re.MULTILINE):
+        # [A-Z0-9_]: leg 名可含数字(rust-loongarch64-check → RUST_LOONGARCH64_CHECK_RESULT),纯字母类会漏抓、门禁模拟随之漏喂。
+        for name in re.findall(r"^          ([A-Z0-9_]+_RESULT):", gate, re.MULTILINE):
             environment[name] = "success"
         for event in ("pull_request", "merge_group"):
             for required in ("true", "false"):
@@ -2341,6 +2380,7 @@ class CiGatePolicyTests(unittest.TestCase):
             ("relay-test", "RELAY_RESULT"),
             ("rust-lint", "RUST_LINT_RESULT"),
             ("macos-codex-runtime-test", "MACOS_CODEX_RESULT"),
+            ("rust-loongarch64-check", "RUST_LOONGARCH64_CHECK_RESULT"),
         ):
             with self.subTest(job=job):
                 self.assert_required_gate_wiring(job, result_env)
