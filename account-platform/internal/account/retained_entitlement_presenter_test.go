@@ -42,7 +42,7 @@ func TestRetainedEntitlementTypedPresenter(t *testing.T) {
 		if approvalV2Command(wrong) != nil {
 			t.Fatal("foreign target type accepted")
 		}
-		if approvalPresenterAvailable("RECONCILIATION_FINANCIAL_REPAIR", 1, 1) {
+		if approvalPresenterAvailable("USAGE_SETTLEMENT_REPAIR", 1, 1) {
 			t.Fatal("future command presenter installed")
 		}
 	})

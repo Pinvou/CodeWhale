@@ -23,6 +23,7 @@ try{
   ['finance-only denied paymentrepair', ['platform.billing.wallets.read'], 'paymentrepair', financeCopy.en.orders],
   ['finance-only denied refundrepair', ['platform.billing.wallets.read'], 'refundrepair', financeCopy.en.orders],
   ['finance-only denied chargebackrepair', ['platform.billing.wallets.read'], 'chargebackrepair', financeCopy.en.orders],
+  ['finance-only denied reconciliationrepair', ['platform.billing.wallets.read'], 'reconciliationrepair', financeCopy.en.orders],
   ['finance-only unknown', ['platform.billing.wallets.read'], 'unknown', financeCopy.en.orders],
   ['finance-only wallets', ['platform.billing.wallets.read'], 'wallets', financeCopy.en.wallet],
   ['finance-only controls', ['platform.billing.wallets.read'], 'controls', financeCopy.en.providerControls],
@@ -32,11 +33,13 @@ try{
   ['repair-only paymentrepair', ['platform.billing.repairs.request'], 'paymentrepair', ledgerRepairCopy.en.paymentRepairTitle],
   ['repair-only refundrepair', ['platform.billing.repairs.request'], 'refundrepair', ledgerRepairCopy.en.refundRepairTitle],
   ['repair-only chargebackrepair', ['platform.billing.repairs.request'], 'chargebackrepair', ledgerRepairCopy.en.chargebackRepairTitle],
+  ['repair-only reconciliationrepair', ['platform.billing.repairs.request'], 'reconciliationrepair', ledgerRepairCopy.en.reconciliationRepairTitle],
   ['approve-only default', ['platform.billing.repairs.approve'], 'ledger', financeCopy.en.approvals],
   ['approve-only denied writeoff', ['platform.billing.repairs.approve'], 'writeoff', financeCopy.en.approvals],
   ['approve-only denied paymentrepair', ['platform.billing.repairs.approve'], 'paymentrepair', financeCopy.en.approvals],
   ['approve-only denied refundrepair', ['platform.billing.repairs.approve'], 'refundrepair', financeCopy.en.approvals],
   ['approve-only denied chargebackrepair', ['platform.billing.repairs.approve'], 'chargebackrepair', financeCopy.en.approvals],
+  ['approve-only denied reconciliationrepair', ['platform.billing.repairs.approve'], 'reconciliationrepair', financeCopy.en.approvals],
  ]) {
   const html = renderToStaticMarkup(React.createElement(AdminFinanceWorkspace, { client: {}, me: { user_id: 'controlled-first-frame', platform_permissions: permissions }, language: 'en', initialTab }));
   const selected = [...html.matchAll(/<button[^>]*aria-pressed="true"[^>]*>(.*?)<\/button>/g)].map(match => match[1]);

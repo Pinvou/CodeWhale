@@ -39,6 +39,11 @@ export const financialRepairInputs = Object.freeze({
     { key: 'payment_evidence_id', kind: 'uuid' },
   ]),
 
+  RECONCILIATION_FINANCIAL_REPAIR: Object.freeze([
+    { key: 'target_resource_id', kind: 'uuid' },
+    { key: 'payment_evidence_id', kind: 'uuid' },
+    { key: 'business_date', kind: 'date' },
+  ]),
 });
 
 export const financialRepairCommandTypes = Object.freeze(Object.keys(financialRepairInputs));
@@ -51,7 +56,8 @@ function closedValue(value, kind) {
   if (kind === 'date') {
     if (!datePattern.test(text)) return false;
     const [year, month, day] = text.split('-').map(Number);
-    const parsed = new Date(Date.UTC(year, month - 1, day));
+    const parsed = new Date(0);
+    parsed.setUTCFullYear(year, month - 1, day);
     return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day;
   }
   try { return integerMoney(text) > 0n; } catch { return false; }

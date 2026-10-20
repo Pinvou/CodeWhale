@@ -324,6 +324,9 @@ func reconciliationRetry(ctx context.Context, action func() error) error {
 }
 
 func (p *PaymentCoordinator) persistStableReconciliationCase(ctx context.Context, tx pgx.Tx, run ReconciliationRun, difference ReconciliationDifference, observedVersions map[string]int64) error {
+	if err := lockTransactionKey(ctx, tx, "reconciliation-repair-source", run.Channel+":"+run.BusinessDate+":"+difference.MerchantOrderNo); err != nil {
+		return err
+	}
 	providerJSON := json.RawMessage(`{}`)
 	if difference.Provider != nil {
 		providerJSON, _ = json.Marshal(difference.Provider)
@@ -364,14 +367,21 @@ func (p *PaymentCoordinator) persistStableReconciliationCase(ctx context.Context
 	}
 	var status string
 	var version int64
-	if err := tx.QueryRow(ctx, `SELECT status,version FROM reconciliation_cases WHERE id=$1 FOR UPDATE`, caseID).Scan(&status, &version); err != nil {
+	var repaired bool
+	if err := tx.QueryRow(ctx, `SELECT c.status,c.version,
+EXISTS(SELECT 1 FROM reconciliation_repair_cases repair WHERE repair.reconciliation_case_id=c.id AND repair.state='EXECUTED')
+FROM reconciliation_cases c WHERE c.id=$1 FOR UPDATE OF c`, caseID).Scan(&status, &version, &repaired); err != nil {
 		return err
 	}
 	// The immutable observation captured this version with its financial
 	// snapshot. The row lock serializes against RESOLVE's version increment.
 	// A late or legacy observation may associate its case, but cannot undo a
-	// newer resolution. A genuine new observation can still reopen it.
-	if status == "RESOLVED" && observedVersions[digest] == version {
+	// newer resolution. A genuine new observation can still reopen an ordinary
+	// resolution. A durable financial-repair receipt instead accepts this exact
+	// immutable difference after provider disposal, without changing its source
+	// financial facts. It must stay resolved when the same difference recurs.
+	// Changed source facts have another digest and still create a new case.
+	if status == "RESOLVED" && observedVersions[digest] == version && !repaired {
 		now := p.now().UTC()
 		claim, response, mitigation, resolution := paymentAnomalyDeadlines(now, difference.Severity)
 		if _, err := tx.Exec(ctx, `UPDATE reconciliation_cases SET status='OPEN',owner_id=NULL,repair_action=NULL,review_result=NULL,resolution=NULL,resolved_at=NULL,version=version+1,updated_at=$2 WHERE id=$1`, caseID, now); err != nil {
@@ -447,8 +457,8 @@ func (p *PaymentCoordinator) persistReadOnlyBillEvidence(ctx context.Context, ru
  WHERE row.reconciliation_run_id=$1 AND row.row_number BETWEEN $2 AND $3 AND progress.processed_at IS NULL
  AND (row.entry_type<>'PAYMENT' OR upper(trim(row.status)) NOT IN ('SUCCESS','PAID','COMPLETED') OR payment.id IS NULL OR payment.provider_id<>$4 OR payment.provider_version<>$5 OR payment.fulfillment_status='CREDITED')
  ), evidence AS (
- INSERT INTO payment_evidence(id,payment_order_id,payment_transaction_id,evidence_type,provider_id,provider_version,evidence_key,merchant_order_no,provider_transaction_id,amount_fen,currency,provider_status,provider_event_at,received_at,payload_digest,payload_snapshot,merge_result)
- SELECT gen_random_uuid(),matched_order_id,matched_transaction_id,'BILL',$4,$5,pipeline_evidence_key,merchant_order_no,NULLIF(channel_transaction_id,''),amount_fen,currency,status,paid_at,$6,pipeline_payload_digest,raw_snapshot,
+ INSERT INTO payment_evidence(id,payment_order_id,payment_transaction_id,evidence_type,provider_id,provider_version,evidence_key,merchant_order_no,provider_transaction_id,provider_refund_id,amount_fen,currency,provider_status,provider_event_at,received_at,payload_digest,payload_snapshot,merge_result)
+ SELECT gen_random_uuid(),matched_order_id,matched_transaction_id,'BILL',$4,$5,pipeline_evidence_key,merchant_order_no,NULLIF(channel_transaction_id,''),CASE WHEN entry_type='REFUND' THEN NULLIF(provider_reference_id,'') END,amount_fen,currency,status,paid_at,$6,pipeline_payload_digest,raw_snapshot,
  CASE WHEN entry_type='PAYMENT' AND matched_transaction_id IS NOT NULL THEN 'DUPLICATE' ELSE 'REVIEW_REQUIRED' END FROM eligible
  ON CONFLICT(provider_id,provider_version,evidence_type,evidence_key,payload_digest) DO NOTHING RETURNING id
  )

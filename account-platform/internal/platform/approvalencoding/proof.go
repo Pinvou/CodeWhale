@@ -26,6 +26,14 @@ type commandSpec struct {
 }
 
 var commandSpecs = map[string]commandSpec{
+	"RECONCILIATION_FINANCIAL_REPAIR": {
+		policyVersion: 1, snapshotVersion: 1, targetType: "RECONCILIATION_CASE", executor: "billing-command-executor",
+		normalizedKeys: []string{"reconciliation_case_id", "payment_evidence_id", "business_date", "resolution_code"},
+		criticalKeys:   []string{"run_id", "case_id", "provider_snapshot_digest", "facts_digest", "policy_version"},
+		financialKeys:  []string{"amount_fen", "currency", "provider_transaction_id", "ledger_effect"},
+		criticalInts:   []string{"policy_version"},
+		financialInts:  []string{"amount_fen"},
+	},
 	"ENTITLEMENT_COMPONENT_ADJUSTMENT": {
 		policyVersion: 2, snapshotVersion: 2, targetType: "ENTITLEMENT_PACKAGE", executor: "billing-command-executor",
 		normalizedKeys: []string{"package_id", "payment_order_id", "reason_code"},
@@ -564,6 +572,26 @@ func validateProofValues(commandType string, spec commandSpec, targetType, targe
 			!validUUIDField(financialObject["package_id"]) || !hexField(financialObject["component_digest"]) ||
 			providerErr != nil || len(providerChargebackID) == 0 || len(providerChargebackID) > 200 ||
 			reasonErr != nil || reasonCode != "BASE_SHORTFALL_COMPENSATION" {
+			return ErrInvalidDocument
+		}
+	case "RECONCILIATION_FINANCIAL_REPAIR":
+		resolutionCode, resolutionErr := stringValue(normalizedObject["resolution_code"])
+		businessDate, businessErr := stringValue(normalizedObject["business_date"])
+		providerTransactionID, providerErr := stringValue(financialObject["provider_transaction_id"])
+		currency, currencyErr := stringValue(financialObject["currency"])
+		ledgerEffect, ledgerErr := stringValue(financialObject["ledger_effect"])
+		businessDateValue, dateErr := time.Parse("2006-01-02", businessDate)
+		if !validUUID(targetID) || !equalString(normalizedObject["reconciliation_case_id"], targetID) ||
+			!validUUIDField(normalizedObject["payment_evidence_id"]) ||
+			integers["c.policy_version"] != spec.policyVersion ||
+			!equalString(criticalObject["case_id"], targetID) ||
+			!validUUIDField(criticalObject["run_id"]) || !hexField(criticalObject["provider_snapshot_digest"]) ||
+			!hexField(criticalObject["facts_digest"]) ||
+			integers["f.amount_fen"] < 1 || currencyErr != nil || len(currency) != 3 ||
+			providerErr != nil || len(providerTransactionID) == 0 || len(providerTransactionID) > 200 ||
+			ledgerErr != nil || ledgerEffect != "NONE" ||
+			businessErr != nil || dateErr != nil || businessDateValue.UTC().Format("2006-01-02") != businessDate ||
+			resolutionErr != nil || resolutionCode != "PROVIDER_REFUND_CONFIRMED" {
 			return ErrInvalidDocument
 		}
 	}

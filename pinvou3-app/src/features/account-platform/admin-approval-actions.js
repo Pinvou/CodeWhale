@@ -1,4 +1,4 @@
-export const approvalCommands = Object.freeze(['WALLET_ADJUSTMENT', 'PAYMENT_PROVIDER_RESUME', 'PAYMENT_PRODUCT_RESUME', 'LEDGER_REPAIR', 'ENTITLEMENT_COMPONENT_ADJUSTMENT', 'RECEIVABLE_WRITE_OFF', 'PAYMENT_FINANCIAL_REPAIR', 'REFUND_EXCEPTION_REPAIR', 'CHARGEBACK_FINANCIAL_REPAIR']);
+export const approvalCommands = Object.freeze(['WALLET_ADJUSTMENT', 'PAYMENT_PROVIDER_RESUME', 'PAYMENT_PRODUCT_RESUME', 'LEDGER_REPAIR', 'ENTITLEMENT_COMPONENT_ADJUSTMENT', 'RECEIVABLE_WRITE_OFF', 'PAYMENT_FINANCIAL_REPAIR', 'REFUND_EXCEPTION_REPAIR', 'CHARGEBACK_FINANCIAL_REPAIR', 'RECONCILIATION_FINANCIAL_REPAIR']);
 export const approvalViews = Object.freeze(['mine', 'pending', 'execution', 'directory']);
 export const executionStatuses = Object.freeze(['EXECUTION_FAILED', 'EXECUTING', 'APPROVED', 'EXECUTED']);
 export const approvalStatuses = Object.freeze(['DRAFT', 'SUBMITTED', 'APPROVED', 'EXECUTING', 'EXECUTION_FAILED', 'EXECUTED', 'REJECTED', 'WITHDRAWN', 'EXPIRED', 'INVALIDATED']);
@@ -40,6 +40,9 @@ export function approvalBusinessRoute(detail) {
     case 'ENTITLEMENT_COMPONENT_ADJUSTMENT':
       return target.resource_type === 'ENTITLEMENT_PACKAGE' && uuid.test(target.resource_id) && detail.command.package_id === target.resource_id
         ? { section: 'finance', tab: 'correction' } : null;
+    case 'RECONCILIATION_FINANCIAL_REPAIR':
+      return target.resource_type === 'RECONCILIATION_CASE' && uuid.test(target.resource_id) && detail.command.reconciliation_case_id === target.resource_id
+        ? { section: 'finance', tab: 'reconciliationrepair' } : null;
     case 'CHARGEBACK_FINANCIAL_REPAIR':
       return target.resource_type === 'CHARGEBACK_CASE' && uuid.test(target.resource_id) && detail.command.chargeback_case_id === target.resource_id
         ? { section: 'finance', tab: 'chargebackrepair' } : null;

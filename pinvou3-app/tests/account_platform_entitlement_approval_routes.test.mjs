@@ -6,7 +6,7 @@ import { entitlementHostFacts, entitlementHostID as id } from './fixtures/entitl
 const command='ENTITLEMENT_COMPONENT_ADJUSTMENT';
 const detail=()=>({approval_request_id:id(9),status:'DRAFT',allowed_actions:['EDIT'],command_type:command,detail_availability:'AVAILABLE',target:{resource_type:'ENTITLEMENT_PACKAGE',resource_id:id(5)},command:entitlementHostFacts().normalized_command,critical_resource_versions:{wallet_version:1, facts_digest:'old'}});
 test('installed ENT joins existing four-view filter and exact package business route without future commands',()=>{
- assert.ok(approvalCommands.includes(command));assert.equal(approvalCommands.includes('RECONCILIATION_FINANCIAL_REPAIR'),false);
+ assert.ok(approvalCommands.includes(command));assert.equal(approvalCommands.includes('USAGE_SETTLEMENT_REPAIR'),false);
  const route=readApprovalRoute(`?approval_view=mine&approval_command_type=${command}&approval_target=${id(5)}`);
  assert.deepEqual(approvalQuery(route,id(1)),{command_type:command,target:id(5),requester_user_id:id(1)});
  assert.deepEqual(approvalBusinessRoute(detail()),{section:'finance',tab:'correction'});

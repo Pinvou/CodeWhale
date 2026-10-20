@@ -9,7 +9,8 @@ export const ledgerRepairCopy = {
       "RECEIVABLE_WRITE_OFF": "应收 ID",
       "PAYMENT_FINANCIAL_REPAIR": "支付订单 ID",
       "REFUND_EXCEPTION_REPAIR": "退款 ID",
-      "CHARGEBACK_FINANCIAL_REPAIR": "拒付案件 ID"
+      "CHARGEBACK_FINANCIAL_REPAIR": "拒付案件 ID",
+      "RECONCILIATION_FINANCIAL_REPAIR": "对账案件 ID"
     },
     "fields": {
       "receivable_id": "应收 ID",
@@ -46,7 +47,14 @@ export const ledgerRepairCopy = {
       "chargeback_case_version": "拒付案件版本",
       "base_shortfall_microcredits": "BASE 短缺金额（微积分）",
       "component_digest": "组件摘要",
-      "provider_chargeback_id": "支付渠道拒付引用"
+      "provider_chargeback_id": "支付渠道拒付引用",
+      "reconciliation_case_id": "对账案件 ID",
+      "business_date": "业务日期",
+      "run_id": "对账运行 ID",
+      "provider_snapshot_digest": "渠道快照摘要",
+      "currency": "币种",
+      "resolution_code": "固定处置码",
+      "ledger_effect": "账务效果"
     },
     "readFacts": "读取冻结事实",
     "reading": "正在读取…",
@@ -68,7 +76,9 @@ export const ledgerRepairCopy = {
     "controlChanged": "审批控制已变化，请重新读取冻结事实。",
     "paymentRepairTitle": "支付财务修复",
     "refundRepairTitle": "退款例外修复",
-    "chargebackRepairTitle": "拒付财务修复"
+    "chargebackRepairTitle": "拒付财务修复",
+    "reconciliationRepairTitle": "对账财务修复",
+    "ledgerEffectNone": "仅根据确认的渠道退款证据结案，账务效果为 NONE；不会补记账、增加钱包余额或发起渠道操作。"
   },
   "en": {
     "title": "Start a financial repair approval",
@@ -80,7 +90,8 @@ export const ledgerRepairCopy = {
       "RECEIVABLE_WRITE_OFF": "Receivable ID",
       "PAYMENT_FINANCIAL_REPAIR": "Payment order ID",
       "REFUND_EXCEPTION_REPAIR": "Refund ID",
-      "CHARGEBACK_FINANCIAL_REPAIR": "Chargeback case ID"
+      "CHARGEBACK_FINANCIAL_REPAIR": "Chargeback case ID",
+      "RECONCILIATION_FINANCIAL_REPAIR": "Reconciliation case ID"
     },
     "fields": {
       "receivable_id": "Receivable ID",
@@ -117,7 +128,14 @@ export const ledgerRepairCopy = {
       "chargeback_case_version": "Chargeback case version",
       "base_shortfall_microcredits": "BASE shortfall (microcredits)",
       "component_digest": "Component digest",
-      "provider_chargeback_id": "Provider chargeback reference"
+      "provider_chargeback_id": "Provider chargeback reference",
+      "reconciliation_case_id": "Reconciliation case ID",
+      "business_date": "Business date",
+      "run_id": "Reconciliation run ID",
+      "provider_snapshot_digest": "Provider snapshot digest",
+      "currency": "Currency",
+      "resolution_code": "Fixed resolution code",
+      "ledger_effect": "Ledger effect"
     },
     "readFacts": "Read frozen facts",
     "reading": "Reading…",
@@ -139,7 +157,9 @@ export const ledgerRepairCopy = {
     "controlChanged": "The approval control changed; read the frozen facts again.",
     "paymentRepairTitle": "Payment financial repair",
     "refundRepairTitle": "Refund exception repair",
-    "chargebackRepairTitle": "Chargeback financial repair"
+    "chargebackRepairTitle": "Chargeback financial repair",
+    "reconciliationRepairTitle": "Reconciliation financial repair",
+    "ledgerEffectNone": "Closes the case using confirmed provider refund evidence. Ledger effect is NONE: no ledger posting, wallet credit or provider action."
   },
   "ja": {
     "title": "財務修復の承認を起動",
@@ -151,7 +171,8 @@ export const ledgerRepairCopy = {
       "RECEIVABLE_WRITE_OFF": "売掛金 ID",
       "PAYMENT_FINANCIAL_REPAIR": "支払注文 ID",
       "REFUND_EXCEPTION_REPAIR": "返金 ID",
-      "CHARGEBACK_FINANCIAL_REPAIR": "チャージバック案件 ID"
+      "CHARGEBACK_FINANCIAL_REPAIR": "チャージバック案件 ID",
+      "RECONCILIATION_FINANCIAL_REPAIR": "照合案件 ID"
     },
     "fields": {
       "receivable_id": "売掛金 ID",
@@ -188,7 +209,14 @@ export const ledgerRepairCopy = {
       "chargeback_case_version": "チャージバック案件版",
       "base_shortfall_microcredits": "BASE 不足額（マイクロクレジット）",
       "component_digest": "構成要素ダイジェスト",
-      "provider_chargeback_id": "決済チャージバック参照"
+      "provider_chargeback_id": "決済チャージバック参照",
+      "reconciliation_case_id": "照合案件 ID",
+      "business_date": "業務日",
+      "run_id": "照合実行 ID",
+      "provider_snapshot_digest": "決済スナップショットダイジェスト",
+      "currency": "通貨",
+      "resolution_code": "固定解決コード",
+      "ledger_effect": "台帳への効果"
     },
     "readFacts": "固定事実を読み込む",
     "reading": "読み込み中…",
@@ -210,7 +238,9 @@ export const ledgerRepairCopy = {
     "controlChanged": "承認制御が変更されました。固定事実を再読み込みしてください。",
     "paymentRepairTitle": "支払財務修復",
     "refundRepairTitle": "返金例外修復",
-    "chargebackRepairTitle": "チャージバック財務修復"
+    "chargebackRepairTitle": "チャージバック財務修復",
+    "reconciliationRepairTitle": "照合財務修復",
+    "ledgerEffectNone": "確認済み決済返金証拠で案件を終了します。台帳への効果は NONE で、仕訳、ウォレット加算、決済操作は行いません。"
   }
 };
 

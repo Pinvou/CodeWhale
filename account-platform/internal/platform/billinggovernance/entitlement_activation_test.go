@@ -66,9 +66,18 @@ func TestEntitlementFirstDeliveryActivationContract(t *testing.T) {
 	}
 	t.Run("later-command-stays-inactive", func(t *testing.T) {
 		s := entitlementFirstDeliverySnapshot()
-		s.Activations[7].State = "ACTIVE"
+		found := false
+		for i := range s.Activations {
+			if s.Activations[i].CommandType == "USAGE_SETTLEMENT_REPAIR" {
+				s.Activations[i].State = "ACTIVE"
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("missing future Usage negative control")
+		}
 		if ValidateSnapshot(s) == nil {
-			t.Fatal("advertised undelivered reconciliation repair")
+			t.Fatal("advertised undelivered usage settlement repair")
 		}
 	})
 }

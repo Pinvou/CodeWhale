@@ -150,13 +150,13 @@ func (p *PaymentCoordinator) mergeProviderBillEvidenceWithinTransaction(ctx cont
 	evidenceID := uuid.Must(uuid.NewV7())
 	_, err = tx.Exec(ctx, `INSERT INTO payment_evidence(
 id,payment_order_id,payment_transaction_id,evidence_type,provider_id,provider_version,evidence_key,
-merchant_order_no,provider_transaction_id,amount_fen,currency,provider_status,provider_event_at,
+merchant_order_no,provider_transaction_id,provider_refund_id,amount_fen,currency,provider_status,provider_event_at,
 received_at,payload_digest,payload_snapshot,merge_result)
-VALUES($1,$2,$3,'BILL',$4,$5,$6,$7,NULLIF($8,''),$9,$10,NULLIF($11,''),$12,$13,$14,$15,$16)
+VALUES($1,$2,$3,'BILL',$4,$5,$6,$7,NULLIF($8,''),CASE WHEN $17='REFUND' THEN NULLIF($18,'') END,$9,$10,NULLIF($11,''),$12,$13,$14,$15,$16)
 ON CONFLICT(provider_id,provider_version,evidence_type,evidence_key,payload_digest) DO NOTHING`,
 		evidenceID, orderID, transactionID, p.Capabilities().ProviderID, p.Capabilities().Version, evidenceKey,
 		row.MerchantOrderNo, strings.TrimSpace(row.ChannelTransactionID), row.AmountFen, row.Currency, row.Status,
-		row.PaidAt.UTC(), receivedAt, hex.EncodeToString(digest[:]), json.RawMessage(payload), mergeResult)
+		row.PaidAt.UTC(), receivedAt, hex.EncodeToString(digest[:]), json.RawMessage(payload), mergeResult, entryType, reference)
 	return err
 }
 

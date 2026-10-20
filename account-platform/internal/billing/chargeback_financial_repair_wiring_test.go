@@ -68,7 +68,7 @@ func TestChargebackPrecheckClosedTransport(t *testing.T) {
 		{"wrong-reason", strings.Replace(valid, "BASE_SHORTFALL_COMPENSATION", "OTHER", 1), false},
 		{"foreign-anomaly", strings.Replace(valid, `"reason_code":`, `"anomaly_case_id":"`+uuid.NewString()+`","reason_code":`, 1), false},
 		{"duplicate-field", strings.Replace(valid, `"command_type":`, `"command_type":"CHARGEBACK_FINANCIAL_REPAIR","command_type":`, 1), false},
-		{"future", strings.Replace(valid, "CHARGEBACK_FINANCIAL_REPAIR", "RECONCILIATION_FINANCIAL_REPAIR", 1), false},
+		{"future", strings.Replace(valid, "CHARGEBACK_FINANCIAL_REPAIR", "USAGE_SETTLEMENT_REPAIR", 1), false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			request, err := decodeBillingApprovalPrecheckRequest([]byte(c.body))

@@ -1,3 +1,4 @@
+import { AdminReconciliationFinancialRepairForm } from './AdminReconciliationFinancialRepairForm.jsx';
 import React, { useEffect, useRef, useState } from 'react';
 import {
   financialRepairInputs, financialRepairPrecheckBody,
@@ -17,6 +18,9 @@ import { requireFinanceID } from './finance-contract.js';
 // The only operator inputs are the target references, the free-text reason and
 // the request key.
 export function AdminFinancialRepairDraftForm(props) {
+  if (props.commandTypes?.length === 1 && props.commandTypes[0] === 'RECONCILIATION_FINANCIAL_REPAIR') {
+    return <AdminReconciliationFinancialRepairForm {...props} />;
+  }
   if (props.commandTypes?.length === 1 && props.commandTypes[0] === 'CHARGEBACK_FINANCIAL_REPAIR') {
     return <AdminChargebackFinancialRepairForm {...props} />;
   }

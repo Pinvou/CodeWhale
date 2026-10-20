@@ -70,6 +70,8 @@ func TestNATSFixedAuthorizationAndOverlap(t *testing.T) {
 	// F11–F14 add exactly INFO and CREATE for the write-off, payment,
 	// refund-repair and chargeback-repair durables. Other grants remain fixed and wildcard-free.
 	for _, want := range []string{
+		"$JS.API.CONSUMER.INFO.ACCOUNT_PLATFORM.billing-reconciliation-financial-repair-executor-p1-v1",
+		"$JS.API.CONSUMER.CREATE.ACCOUNT_PLATFORM.billing-reconciliation-financial-repair-executor-p1-v1.account.approval-command.authorized.v1",
 		"$JS.API.CONSUMER.INFO.ACCOUNT_PLATFORM.billing-chargeback-financial-repair-executor-p1-v1",
 		"$JS.API.CONSUMER.CREATE.ACCOUNT_PLATFORM.billing-chargeback-financial-repair-executor-p1-v1.account.approval-command.authorized.v1",
 		"$JS.API.CONSUMER.INFO.ACCOUNT_PLATFORM.billing-refund-exception-repair-executor-p1-v1",
