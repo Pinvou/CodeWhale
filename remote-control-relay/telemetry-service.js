@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { RetentionFacts, retentionFromEvents } from "./retention-store.js";
 import { isIP } from "node:net";
 import {
   appendFileSync,
@@ -778,43 +779,6 @@ function clipDailySubjectContributions(events) {
   };
 }
 
-function retentionMetric(usageEvents, behaviorEvents, horizon, now) {
-  const today = statsDay(now);
-  const cohorts = new Map();
-  for (const event of behaviorEvents) {
-    if (event.event_name !== "analytics_cohort_started") continue;
-    const identity = eventIdentity(event);
-    const day = statsDay(event.occurred_at);
-    if (!identity || day > today - horizon) continue;
-    if (!cohorts.has(identity) || day < cohorts.get(identity)) cohorts.set(identity, day);
-  }
-  const activity = new Map();
-  const addActivity = (identity, occurredAt) => {
-    if (!identity) return;
-    const bucket = activity.get(identity) || new Set();
-    bucket.add(statsDay(occurredAt));
-    activity.set(identity, bucket);
-  };
-  for (const event of behaviorEvents) {
-    if (event.event_name !== "task_finished"
-      || event.status !== "success"
-      || event.initiator_type !== "user"
-      || !["assistant", "code", "team"].includes(event.mode)) continue;
-    addActivity(eventIdentity(event), event.occurred_at);
-  }
-  let retained = 0;
-  for (const [identity, cohortDay] of cohorts) {
-    if (activity.get(identity)?.has(cohortDay + horizon)) retained += 1;
-  }
-  return {
-    horizon_days: horizon,
-    eligible_installations: cohorts.size,
-    retained_installations: retained,
-    retention_rate: reliableRate(retained, cohorts.size),
-    confidence: sampleConfidence(cohorts.size),
-  };
-}
-
 function buildVersionQuality(windowEvents) {
   const groups = new Map();
   for (const event of windowEvents) {
@@ -1096,7 +1060,7 @@ function behaviorToolType(value) {
   return ["skill", "mcp", "cli", "builtin", "custom", "unknown"].includes(type) ? type : "unknown";
 }
 
-export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, range = "30", now = Date.now(), pipelineEvents = []) {
+export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, range = "30", now = Date.now(), pipelineEvents = [], retentionFacts = null) {
   behaviorEvents = installationBehaviorEvents(devices, behaviorEvents);
   const window = rangeWindow(range, now);
   const activeByDay = activeIdentityByDay(devices, usageEvents, behaviorEvents, window);
@@ -1202,11 +1166,7 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
     if (event.error_category) groups.set(event.error_category, (groups.get(event.error_category) || 0) + 1);
     return groups;
   }, new Map())].sort((left, right) => right[1] - left[1]));
-  const retention = {
-    d1: retentionMetric(usageEvents, behaviorEvents, 1, now),
-    d7: retentionMetric(usageEvents, behaviorEvents, 7, now),
-    d30: retentionMetric(usageEvents, behaviorEvents, 30, now),
-  };
+  const retention = retentionFacts || retentionFromEvents(devices, behaviorEvents, now);
   const voiceFunnel = buildVoiceFunnel(windowEvents, taskFinished);
   const activationFunnel = buildActivationFunnel(behaviorEvents, window, now);
   const versionQuality = buildVersionQuality(windowEvents);
@@ -1940,8 +1900,10 @@ export class TelemetryStore {
       this.devicesByHardwareHash.set(device.hardware_hash, normalized);
     }
     this.rebuildDeletionIndexes();
+    this.retentionFacts = new RetentionFacts(dataDir, loadedAt);
     this.loadEvents();
     this.loadBehaviorEvents();
+    this.persistRetentionFacts(loadedAt);
     this.loadBehaviorPipelineEvents();
     const recoveredDeletion = this.deletionTombstones.some((record) => (
       record.deletion_request_id && record.status !== "completed"
@@ -2030,6 +1992,8 @@ export class TelemetryStore {
       this.behaviorEventsPath,
       this.behaviorPipelinePath,
       this.deletionTombstonesPath,
+      this.retentionFacts.path,
+      this.retentionFacts.marker,
     ]) {
       if (existsSync(path)) enforcePrivateFile(path);
     }
@@ -2038,6 +2002,17 @@ export class TelemetryStore {
   subjectWasDeleted(deviceId) {
     const subjectHash = this.deletionSubjectHash(deviceId);
     return this.removedSubjectHashes.has(subjectHash);
+  }
+
+  persistRetentionFacts(now = Date.now()) {
+    const devices = [...this.devices.values()].filter(device => !this.subjectWasDeleted(device.device_id));
+    try {
+      this.retentionFacts.observe(this.behaviorEvents, devices, now);
+      this.retentionFacts.flush();
+    } catch {
+      console.error("[telemetry-error] retention_facts_persist_failed");
+      throw new TelemetryHttpError(503, "retention_storage_unavailable");
+    }
   }
 
   credentialRemovalReason(token) {
@@ -2369,6 +2344,8 @@ export class TelemetryStore {
   }
 
   compactBehaviorEvents(now = Date.now(), force = false) {
+    // Persist before either age- or capacity-based raw event removal.
+    this.persistRetentionFacts(now);
     const cutoff = now - this.eventRetentionMs;
     let retained = this.behaviorEvents.filter((event) => Number(event.received_at || event.occurred_at) >= cutoff);
     if (retained.length > this.maxEvents) retained = retained.slice(-this.eventCompactionTarget);
@@ -2458,6 +2435,9 @@ export class TelemetryStore {
       results: [],
     };
     this.compactExpiredEventsIfDue(now);
+    // A retry after raw append succeeded must persist pending facts before
+    // acknowledging a duplicate, even when periodic compaction is not due.
+    this.persistRetentionFacts(now);
     if (this.eventRateLimited(device.device_id, inputEvents.length, now)) {
       response.results = inputEvents.map((raw) => ({
         event_id: boundedText(raw?.event_id, 96),
@@ -2556,6 +2536,15 @@ export class TelemetryStore {
       for (const event of accepted) {
         this.behaviorEventIds.add(event.event_id);
         this.behaviorEvents.push(event);
+      }
+      try {
+        this.persistRetentionFacts(now);
+      } catch {
+        for (const index of acceptedResultIndexes) {
+          response.results[index] = { ...response.results[index], status: "retryable", reason_code: "storage_unavailable" };
+        }
+        this.recordBehaviorPipelineResponse(response, now, device.device_id);
+        return response;
       }
       if (this.behaviorEvents.length > this.maxEvents) this.compactBehaviorEvents(now, true);
       device.last_seen_at = now;
@@ -2724,6 +2713,7 @@ export class TelemetryStore {
     };
     this.deletionTombstones.push(tombstone);
     this.saveDeletionTombstones();
+    this.persistRetentionFacts(now);
     this.events = this.events.filter((event) => event.device_id !== device.device_id);
     this.eventIds = new Set(this.events.map((event) => event.event_id));
     this.behaviorEvents = this.behaviorEvents.filter((event) => event.device_id !== device.device_id);
@@ -2774,13 +2764,16 @@ export class TelemetryStore {
 
   behaviorOverview(range) {
     if (this.compactExpiredEventsIfDue()) this.rebuildUsageCounters();
+    const now = Date.now();
+    this.persistRetentionFacts(now);
     return buildBehaviorOverview(
       [...this.devices.values()],
       this.events,
       this.behaviorEvents,
       range,
-      Date.now(),
+      now,
       this.behaviorPipelineEvents,
+      this.retentionFacts.metrics(now),
     );
   }
 

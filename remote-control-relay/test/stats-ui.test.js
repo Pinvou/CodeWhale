@@ -759,7 +759,7 @@ test("behavior ranges refresh only the selected overview or table section", asyn
               retention: {
                 d1: { eligible_installations: 100, retained_installations: 50, retention_rate: 0.5, confidence: "sufficient" },
                 d7: { eligible_installations: 90, retained_installations: 36, retention_rate: 0.4, confidence: "sufficient" },
-                d30: { eligible_installations: 80, retained_installations: 24, retention_rate: 0.3, confidence: "sufficient" },
+                d30: { eligible_installations: 80, retained_installations: 24, retention_rate: 0.3, confidence: "sufficient", provisional_installations: 3, history_status: "partial" },
               },
               funnels: {
                 activation: { cohort_installations: value, confidence: "sufficient" },
@@ -812,6 +812,9 @@ test("behavior ranges refresh only the selected overview or table section", asyn
       document.querySelector("#retentionD30").textContent,
     ];
     const initialFixedMetrics = fixedMetrics();
+    assert.match(document.querySelector("#retentionD30Sample").textContent, /首次成功起算 · 实时更新/);
+    assert.match(document.querySelector("#retentionD30Sample").textContent, /纳入 80 · 留存 24 · 今日观察 3/);
+    assert.match(document.querySelector("#retentionD30Sample").textContent, /历史可能不完整/);
 
     let requestStart = requested.length;
     document.querySelector('[data-behavior-section="toolCalls"] [data-range="today"]').click();

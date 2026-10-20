@@ -1506,6 +1506,11 @@ test("voice funnel operations and successful attempts are isolated by installati
 test("P1 dashboard metrics cover retention funnels version quality and confidence", () => {
   const now = at("2026-08-12T12:00:00");
   const behaviorEvents = [
+    ...[
+      ["retained_d1", "2026-08-10T08:00:00"],
+      ["retained_d7", "2026-08-04T08:00:00"],
+      ["retained_d30", "2026-07-13T08:00:00"],
+    ].map(([identity_id, time]) => ({ event_id: `first_${identity_id}`, attempt_id: `first_${identity_id}`, event_name: "task_finished", status: "success", mode: "assistant", initiator_type: "user", identity_id, occurred_at: at(time) })),
     { event_id: "cohort_d1", event_name: "analytics_cohort_started", identity_id: "retained_d1", occurred_at: at("2026-08-10T08:00:00") },
     { event_id: "opened_only", event_name: "app_opened", identity_id: "not_retained", occurred_at: at("2026-08-11T08:00:00") },
     { event_id: "active_d1", event_name: "task_finished", attempt_id: "retention_attempt_d1", mode: "assistant", initiator_type: "user", status: "success", identity_id: "retained_d1", occurred_at: at("2026-08-11T08:00:00") },
@@ -1530,7 +1535,11 @@ test("P1 dashboard metrics cover retention funnels version quality and confidenc
     );
   }
   const overview = buildBehaviorOverview(installationDevicesFor(behaviorEvents), [], behaviorEvents, "30", now);
-  assert.deepEqual(overview.retention.d1, { horizon_days: 1, eligible_installations: 3, retained_installations: 1, retention_rate: null, confidence: "low" });
+  assert.equal(overview.retention.d1.eligible_installations, 3);
+  assert.equal(overview.retention.d1.retained_installations, 1);
+  assert.equal(overview.retention.d1.retention_rate, null);
+  assert.equal(overview.retention.d1.confidence, "low");
+  assert.equal(overview.retention.d1.basis, "first_success_beijing_day");
   assert.equal(overview.retention.d7.retained_installations, 1);
   assert.equal(overview.retention.d30.retained_installations, 1);
   assert.equal(overview.funnels.voice.entry_clicked, 1);
