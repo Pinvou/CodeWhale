@@ -96,6 +96,7 @@ impl BehaviorTelemetry {
             collection_period_id,
             outbox,
             tasks,
+            remote_executions: Arc::new(StdMutex::new(super::remote_execution::load_state())),
             team_sessions: Arc::new(StdMutex::new(HashMap::new())),
             tool_calls: Arc::new(StdMutex::new(HashMap::new())),
             voice_submissions: Arc::new(StdMutex::new(HashMap::new())),
@@ -489,6 +490,7 @@ impl BehaviorTelemetry {
             collection_period_id: self.collection_period_id.clone(),
             outbox: self.outbox.clone(),
             tasks: self.tasks.clone(),
+            remote_executions: self.remote_executions.clone(),
             team_sessions: self.team_sessions.clone(),
             tool_calls: self.tool_calls.clone(),
             voice_submissions: self.voice_submissions.clone(),
@@ -783,6 +785,9 @@ impl BehaviorTelemetry {
 
     pub(super) fn clear_local_transient_state(&self) -> Vec<String> {
         let mut failures = Vec::new();
+        if let Err(error) = super::remote_execution::clear(self) {
+            failures.push(format!("clear remote telemetry: {error:#}"));
+        }
         match self.outbox.lock() {
             Ok(mut outbox) => {
                 if let Err(error) = outbox.clear() {

@@ -24,7 +24,7 @@ use super::desktop_remote_model::prepare_selected_task_package_snapshot;
 use crate::features::assistant::engine_pool::EnginePool;
 use crate::features::assistant::remote_turn::{EnginePoolChatEngine, EnginePoolChatTurnPort};
 use crate::features::behavior_telemetry::{
-    RemoteControlEvent, RemoteModelSource, RemoteOutcome, RemoteStage, track_remote_control,
+    RemoteControlEvent, RemoteOutcome, RemoteStage, track_remote_control,
 };
 use crate::features::codex_acp::AcpPool;
 use crate::features::codex_acp::remote_turn::{AcpPoolCodeTurnPort, RemoteWorkspaceAuthorizations};
@@ -305,6 +305,20 @@ impl ControllerTaskEventSink for TaskEventBridge {
         payload: Value,
     ) {
         use tauri::Manager as _;
+        if matches!(
+            kind,
+            crate::features::remote_control::controller::journal::JournalKind::AssistantDelta
+        ) && payload
+            .get("text")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty())
+        {
+            if let Some(task_id) = task_id {
+                crate::features::behavior_telemetry::track_remote_task_output(
+                    &self.app, session_id, task_id,
+                );
+            }
+        }
         // B owns this conversation too. Project accepted user/assistant/error
         // text into B's local chat independently of encrypted B -> A delivery.
         // The journal event id is also the frontend idempotency key.
@@ -954,21 +968,17 @@ pub async fn desktop_remote_controlled_task_send(
         Ok(status)
     }
     .await;
-    let mut event = RemoteControlEvent::from_result(
-        RemoteStage::TaskSubmit,
-        &result,
-        started.elapsed().as_millis() as u64,
-    );
-    if let Ok(value) = &result {
-        event = match value.get("modelSource").and_then(Value::as_str) {
-            Some(TASK_MODEL_SOURCE_CONTROLLED) => event.model_source(RemoteModelSource::Controlled),
-            Some(TASK_MODEL_SOURCE_TEMPORARY) => {
-                event.model_source(RemoteModelSource::ControllerTemporary)
-            }
-            _ => event,
-        };
+    // Successful B-local submissions are already correlated at admission.
+    // Keep a diagnostic only for failures before an invocation can be bound.
+    if result.is_err() {
+        let event = RemoteControlEvent::from_result(
+            RemoteStage::TaskSubmit,
+            &result,
+            started.elapsed().as_millis() as u64,
+        )
+        .role(true);
+        track_remote_control(&app, event);
     }
-    track_remote_control(&app, event);
     result
 }
 
@@ -1117,7 +1127,20 @@ fn submit_prepared_bound_task_inner(
     }
     let capabilities = app.state::<CapabilitySnapshotManager>();
     let models = app.state::<SharedTemporaryModelStore>();
-    admit_and_dispatch(
+    let local_submission = local_attachments.is_some();
+    let task_id = validated
+        .get("task_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let mode = validated.get("mode").and_then(Value::as_str);
+    if local_submission {
+        track_remote_control(
+            app,
+            RemoteControlEvent::new(RemoteStage::TaskSubmit, RemoteOutcome::Ok)
+                .task(task_id, true, mode),
+        );
+    }
+    let result = admit_and_dispatch(
         app,
         &validated,
         &lease,
@@ -1130,7 +1153,15 @@ fn submit_prepared_bound_task_inner(
         local_attachments,
         local_attachment_cleanup,
         budget,
-    )
+    );
+    if local_submission && result.is_err() {
+        track_remote_control(
+            app,
+            RemoteControlEvent::from_result(RemoteStage::TaskRejected, &result, 0)
+                .task(task_id, true, mode),
+        );
+    }
+    result
 }
 
 #[cfg(test)]
@@ -2238,13 +2269,24 @@ pub async fn desktop_remote_task_commit_a<R: tauri::Runtime>(
         let service = ready_state::<_, RemoteDispatchService>(&app)?;
         crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
         let started = Instant::now();
+        let telemetry_task_id = handle.task_id.clone();
+        let telemetry_mode = service.telemetry_mode(&local_session_id, &handle);
+        if telemetry_mode.is_some() {
+            crate::features::behavior_telemetry::register_remote_origin(
+                &app,
+                &telemetry_task_id,
+                telemetry_mode,
+            );
+        }
         let result = service
             .commit_prepared(&local_session_id, &remote_ref, handle, &attachment_ids)
             .map_err(|error| error.code().to_owned());
         if let Some(outcome) = task_submit_telemetry_outcome(&result) {
-            track_remote_control(
+            crate::features::behavior_telemetry::track_remote_origin_event(
                 &app,
+                &telemetry_task_id,
                 RemoteControlEvent::new(RemoteStage::TaskSubmit, outcome)
+                    .task(&telemetry_task_id, false, telemetry_mode)
                     .latency_ms(started.elapsed().as_millis() as u64),
             );
         }

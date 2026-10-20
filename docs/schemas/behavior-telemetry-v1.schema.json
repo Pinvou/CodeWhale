@@ -112,13 +112,21 @@
     "rating": { "enum": ["positive", "negative"] },
     "reason_code": { "enum": ["accurate", "helpful", "fast", "incorrect", "incomplete", "unsafe", "too_slow", "other"] },
     "content_type": { "enum": ["text", "code", "table", "other"] },
-    "remote_stage": { "enum": ["start", "stop", "refresh", "claim", "handshake", "connection", "disconnection", "resume", "task_submit", "task_admit", "task_terminal", "permission", "attachment", "artifact"] },
+    "remote_stage": {"enum": ["start", "stop", "refresh", "claim", "handshake", "connection", "disconnection", "resume", "task_submit", "task_admit", "task_terminal", "permission", "attachment", "artifact", "task_running", "first_output", "task_rejected", "result_received", "model_used"]},
     "remote_outcome": { "enum": ["ok", "rejected", "timeout", "busy", "expired", "unsupported", "internal_error"] },
-    "remote_reason": { "enum": ["none", "not_enrolled", "code_invalid", "slot_conflict", "handshake_failed", "receipt_mismatch", "liveness_missing", "watchdog_expired", "resume_failed", "task_conflict", "permission_denied", "permission_timeout", "transfer_budget", "artifact_missing", "rate_limited", "unknown"] },
+    "remote_reason": {"enum": ["none", "not_enrolled", "code_invalid", "slot_conflict", "handshake_failed", "receipt_mismatch", "liveness_missing", "watchdog_expired", "resume_failed", "task_conflict", "permission_denied", "permission_timeout", "transfer_budget", "artifact_missing", "rate_limited", "unknown", "permission_required", "permission_changed", "capability_stale", "model_unavailable", "task_timeout"]},
     "remote_latency_bucket": { "enum": ["lt_50ms", "lt_250ms", "lt_1s", "lt_5s", "lt_30s", "gte_30s"] },
     "remote_model_source": { "enum": ["controlled", "controller_temporary"] },
     "remote_size_bucket": { "enum": ["0_1mib", "1_10mib", "10_100mib", "100mib_plus"] },
     "remote_permission_step": { "enum": ["request", "allowed", "denied", "expired"] },
+    "remote_task_key": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "remote_role": {"enum": ["controller", "controlled"]},
+    "remote_mode": {"enum": ["assistant", "code"]},
+    "remote_task_status": {"enum": ["success", "failed", "cancelled", "interrupted", "unknown"]},
+    "remote_duration_ms": {"type": "integer", "minimum": 0, "maximum": 604800000},
+    "remote_provider_key": {"enum": ["openai", "anthropic", "deepseek", "gemini", "qwen", "kimi", "minimax", "glm", "mimo", "doubao", "xai", "local", "custom", "unknown"]},
+    "remote_model_key": {"enum": ["claude_opus", "claude_sonnet", "claude_haiku", "deepseek_chat", "deepseek_reasoner", "deepseek", "gpt_5", "gpt_4", "o3", "gemini", "qwen", "kimi", "minimax", "glm", "mimo", "doubao", "grok", "llama", "mistral", "custom", "unknown"]},
+    "execution_task_key": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
     "clock_skew_bucket": { "enum": ["normal", "past_1h_plus", "future_5m_plus", "unknown"] }
   },
   "$defs": {
@@ -144,7 +152,8 @@
     "scheduled_task_id", "schedule_type", "task_type", "member_count_bucket", "feedback_id",
     "feedback_action", "rating", "reason_code", "content_type", "remote_stage",
     "remote_outcome", "remote_reason", "remote_latency_bucket", "remote_model_source",
-    "remote_size_bucket", "remote_permission_step"
+    "remote_size_bucket", "remote_permission_step",
+    "remote_task_key", "remote_role", "remote_mode", "remote_task_status", "remote_duration_ms", "remote_provider_key", "remote_model_key", "execution_task_key"
   ],
   "x-server-injected-fields": ["received_at", "device_id", "account_subject_id", "environment", "clock_skew_bucket"],
   "x-event-contracts": {
@@ -199,7 +208,7 @@
     "response_copied": { "required": ["session_id", "turn_id", "content_type"] },
     "remote_control_event": {
       "required": ["remote_stage", "remote_outcome", "remote_reason", "remote_latency_bucket"],
-      "allowed": ["remote_stage", "remote_outcome", "remote_reason", "remote_latency_bucket", "remote_model_source", "remote_size_bucket", "remote_permission_step"]
+      "allowed": ["remote_stage", "remote_outcome", "remote_reason", "remote_latency_bucket", "remote_model_source", "remote_size_bucket", "remote_permission_step", "remote_task_key", "remote_role", "remote_mode", "remote_task_status", "remote_duration_ms", "remote_provider_key", "remote_model_key"]
     }
   }
 }

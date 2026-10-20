@@ -123,6 +123,7 @@ fn test_telemetry(runtime: RuntimeConfig, state: PersistedState) -> BehaviorTele
         collection_period_id: Arc::new(RwLock::new(active_period)),
         outbox: Arc::new(StdMutex::new(Outbox::empty(outbox_path()))),
         tasks: Arc::new(StdMutex::new(HashMap::new())),
+        remote_executions: Arc::new(StdMutex::new(Default::default())),
         team_sessions: Arc::new(StdMutex::new(HashMap::new())),
         tool_calls: Arc::new(StdMutex::new(HashMap::new())),
         voice_submissions: Arc::new(StdMutex::new(HashMap::new())),

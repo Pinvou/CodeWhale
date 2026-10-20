@@ -123,6 +123,20 @@ test("validates required fields, controlled enums and server-owned fields", () =
   });
 });
 
+test("remote invocation accepts only anonymous correlation and fixed roles/results", () => {
+  const valid = remoteControlEvent({ remote_stage: "task_terminal", remote_task_key: "a".repeat(64),
+    remote_role: "controlled", remote_mode: "code", remote_task_status: "success", remote_duration_ms: 1234 });
+  assert.deepEqual(validateBehaviorEventShape(valid, { now: NOW }), { ok: true });
+  for (const changes of [{ remote_task_key: "raw-task" }, { remote_role: "B-device-name" },
+    { remote_duration_ms: -1 }, { remote_duration_ms: 604800001 }, { remote_task_status: "completed-maybe" },
+    { remote_model_key: "private-model" }]) {
+    assert.equal(validateBehaviorEventShape({ ...valid, ...changes }, { now: NOW }).ok, false);
+  }
+  const missingRole = { ...valid }; delete missingRole.remote_role;
+  assert.equal(validateBehaviorEventShape(missingRole, { now: NOW }).ok, false);
+  assert.equal(validateBehaviorEventShape(taskFinished({ remote_task_key: "a".repeat(64) }), { now: NOW }).ok, false);
+});
+
 test("accepts only normalized names on tool events", () => {
   const toolEvent = {
     ...taskFinished(),
@@ -136,6 +150,9 @@ test("accepts only normalized names on tool events", () => {
     duration_ms: 12,
   };
   assert.deepEqual(validateBehaviorEventShape(toolEvent, { now: NOW }), { ok: true });
+  assert.deepEqual(validateBehaviorEventShape({ ...toolEvent, execution_task_key: "a".repeat(64) }, { now: NOW }), { ok: true });
+  assert.equal(validateBehaviorEventShape({ ...toolEvent, execution_task_key: "raw-task" }, { now: NOW }).ok, false);
+  assert.equal(validateBehaviorEventShape(taskFinished({ execution_task_key: "a".repeat(64) }), { now: NOW }).ok, false);
   for (const tool_name of ["https://private.example/tool", "C:\\private\\tool", "tool --secret=value"]) {
     assert.deepEqual(validateBehaviorEventShape({ ...toolEvent, tool_name }, { now: NOW }), {
       ok: false, reason: "invalid_field", field: "tool_name",

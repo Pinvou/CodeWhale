@@ -25,6 +25,7 @@ import {
   validateBehaviorEventShape,
 } from "./behavior-telemetry-schema.js";
 import { normalizeSnapshot as normalizeControllerTelemetrySnapshot } from "./controller-telemetry.js";
+import { projectRemoteTasks, buildRemoteOverview } from "./remote-telemetry.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TELEMETRY_PREFIX = "/pinvou3/telemetry";
@@ -246,7 +247,7 @@ function installationBehaviorEvents(devices, behaviorEvents) {
     .filter(isBehaviorInstallationDevice)
     .map((device) => boundedText(device.device_id, 128))
     .filter(Boolean));
-  return behaviorEvents.filter((event) => installationIds.has(eventIdentity(event)));
+  return projectRemoteTasks(behaviorEvents.filter((event) => installationIds.has(eventIdentity(event))));
 }
 
 function isCoreUserTask(event, eventName) {
@@ -305,8 +306,8 @@ function prepareStatsTaskEvents(devices, behaviorEvents, startDay, endDay, now) 
     if (!submitted && !finished) continue;
     const occurredAt = normalizeUsageOccurredAt(event.occurred_at);
     const key = attemptIdentityKey(event);
-    if (submitted || !submittedAttempts.has(key)) activity.push(event);
-    if (occurredAt <= now && (submitted || !(submittedAttempts.get(key) <= now))) {
+    if (!event.remote_attribution_unknown && (submitted || !submittedAttempts.has(key))) activity.push(event);
+    if (!event.remote_attribution_unknown && occurredAt <= now && (submitted || !(submittedAttempts.get(key) <= now))) {
       observedActivity.push(event);
     }
     const day = statsDay(event.occurred_at);
@@ -357,6 +358,7 @@ function taskActivityByDay(activityEvents, startDay, endDay) {
   const rows = new Map();
   for (let day = startDay; day <= endDay; day += 1) rows.set(day, new Set());
   for (const event of activityEvents) {
+    if (event.remote_attribution_unknown) continue;
     const day = statsDay(event.occurred_at);
     const identity = eventIdentity(event);
     if (rows.has(day) && identity) rows.get(day).add(identity);
@@ -623,7 +625,7 @@ function rate(part, total) {
 function successfulActiveIdentities(behaviorEvents, window) {
   const windowEvents = filteredBehaviorEvents(behaviorEvents, window);
   return new Set(windowEvents
-    .filter((event) => isCoreUserTask(event, "task_finished") && event.status === "success")
+    .filter((event) => !event.remote_attribution_unknown && isCoreUserTask(event, "task_finished") && event.status === "success")
     .map(eventIdentity)
     .filter(Boolean));
 }
@@ -797,6 +799,7 @@ function retentionMetric(usageEvents, behaviorEvents, horizon, now) {
   };
   for (const event of behaviorEvents) {
     if (event.event_name !== "task_finished"
+      || event.remote_attribution_unknown
       || event.status !== "success"
       || event.initiator_type !== "user"
       || !["assistant", "code", "team"].includes(event.mode)) continue;
@@ -948,6 +951,7 @@ export function buildWeeklyExplicitValueMetric(behaviorEvents, now = Date.now())
   });
   const successfulTasks = uniqueAttempts(behaviorEvents.filter((event) => (
     event.event_name === "task_finished"
+      && !event.remote_attribution_unknown
       && event.status === "success"
       && event.initiator_type === "user"
       && ["assistant", "code", "team"].includes(event.mode)
@@ -965,7 +969,10 @@ export function buildWeeklyExplicitValueMetric(behaviorEvents, now = Date.now())
     tasks.push(task);
     diagnosticTerminalsByIdentity.set(identity, tasks);
   }
-  const joinableSuccessfulTasks = successfulTasks.filter(task => sessionTurnIdentityKey(task));
+  // Remote task correlation does not prove which response a user copied or
+  // rated in their local proxy. Keep it out of the explicit-value denominator
+  // until an actual value-signal binding exists.
+  const joinableSuccessfulTasks = successfulTasks.filter(task => !task.remote_projection && sessionTurnIdentityKey(task));
   const weeklySuccessfulInstallations = new Set(successfulTasks.map(eventIdentity).filter(Boolean));
   const explicitValueSampleInstallations = new Set(joinableSuccessfulTasks.map(eventIdentity).filter(Boolean));
   const explicitValueIneligibleInstallations = new Set(
@@ -1042,7 +1049,7 @@ function buildActivationFunnel(behaviorEvents, window, now) {
   const eventsByIdentity = new Map();
   for (const event of behaviorEvents) {
     const identity = eventIdentity(event);
-    if (!identity) continue;
+    if (!identity || event.remote_attribution_unknown) continue;
     const entries = eventsByIdentity.get(identity) || [];
     entries.push(event);
     eventsByIdentity.set(identity, entries);
@@ -1108,7 +1115,7 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
   const taskSubmitted = uniqueAttempts(windowEvents, "task_submitted")
     .filter((event) => isCoreUserTask(event, "task_submitted"));
   const coreAttemptKeys = new Set(taskSubmitted.map(attemptIdentityKey));
-  const activeTaskSubmitted = taskSubmitted;
+  const activeTaskSubmitted = taskSubmitted.filter(event => !event.remote_attribution_unknown);
   const taskAdmitted = uniqueAttempts(windowEvents, "task_admitted")
     .filter((event) => coreAttemptKeys.has(attemptIdentityKey(event)));
   const taskRejected = uniqueAttempts(windowEvents, "task_rejected")
@@ -1210,48 +1217,6 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
   const voiceFunnel = buildVoiceFunnel(windowEvents, taskFinished);
   const activationFunnel = buildActivationFunnel(behaviorEvents, window, now);
   const versionQuality = buildVersionQuality(windowEvents);
-  const remoteEvents = windowEvents.filter((event) => event.event_name === "remote_control_event");
-  const remoteGroups = new Map();
-  const remoteLatencyBuckets = new Map();
-  const remoteModelSources = new Map();
-  const remoteSizeBuckets = new Map();
-  const remotePermissionSteps = new Map([
-    ["request", 0], ["allowed", 0], ["denied", 0], ["expired", 0],
-  ]);
-  for (const event of remoteEvents) {
-    const key = [event.remote_stage, event.remote_outcome, event.remote_reason].join("|");
-    const row = remoteGroups.get(key) || {
-      stage: event.remote_stage,
-      outcome: event.remote_outcome,
-      reason: event.remote_reason,
-      count: 0,
-    };
-    row.count += 1;
-    remoteGroups.set(key, row);
-    remoteLatencyBuckets.set(
-      event.remote_latency_bucket,
-      (remoteLatencyBuckets.get(event.remote_latency_bucket) || 0) + 1,
-    );
-    if (event.remote_model_source) {
-      remoteModelSources.set(
-        event.remote_model_source,
-        (remoteModelSources.get(event.remote_model_source) || 0) + 1,
-      );
-    }
-    if (event.remote_size_bucket) {
-      remoteSizeBuckets.set(
-        event.remote_size_bucket,
-        (remoteSizeBuckets.get(event.remote_size_bucket) || 0) + 1,
-      );
-    }
-    if (event.remote_permission_step) {
-      remotePermissionSteps.set(
-        event.remote_permission_step,
-        (remotePermissionSteps.get(event.remote_permission_step) || 0) + 1,
-      );
-    }
-  }
-  // Event capacity can exceed the engine's function argument limit.
   const latestReceivedAt = behaviorEvents.reduce(
     (latest, event) => Math.max(latest, Number(event.received_at || event.occurred_at) || 0),
     0,
@@ -1339,22 +1304,9 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
     funnels: { activation: activationFunnel, voice: voiceFunnel },
     version_quality: versionQuality,
     error_categories: taskErrors,
-    remote_control: {
-      event_count: remoteEvents.length,
-      rows: [...remoteGroups.values()].sort((left, right) => (
-        left.stage.localeCompare(right.stage)
-          || left.outcome.localeCompare(right.outcome)
-          || left.reason.localeCompare(right.reason)
-      )),
-      latency_buckets: Object.fromEntries([...remoteLatencyBuckets.entries()].sort()),
-      model_sources: Object.fromEntries([...remoteModelSources.entries()].sort()),
-      size_buckets: Object.fromEntries([...remoteSizeBuckets.entries()].sort()),
-      permission_funnel: Object.fromEntries(remotePermissionSteps),
-      success_rate: reliableRate(
-        remoteEvents.filter((event) => event.remote_outcome === "ok").length,
-        remoteEvents.length,
-      ),
-    },
+    remote_control: buildRemoteOverview(behaviorEvents, window.startDay * DAY_MS - STATS_TIMEZONE_OFFSET_MS,
+      Math.min(now, (window.endDay + 1) * DAY_MS - STATS_TIMEZONE_OFFSET_MS - 1), MIN_RELIABLE_SAMPLE,
+      new Set(coreTaskFinished.filter(e => e.remote_projection).map(e => e.remote_task_key)), windowEvents),
     data_quality: {
       minimum_reliable_sample: MIN_RELIABLE_SAMPLE,
       minimum_group_subjects: MIN_PRIVACY_GROUP_SUBJECTS,

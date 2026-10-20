@@ -1864,7 +1864,7 @@ pub(crate) async fn connect_controlling_device(
                         _ => None,
                     };
                     if let Some(event) = event {
-                        track_remote_control(&keeper, event);
+                        track_remote_control(&keeper, event.role(false));
                     }
                     previous_status = current;
                 }

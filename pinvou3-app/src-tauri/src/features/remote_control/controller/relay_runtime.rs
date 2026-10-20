@@ -223,7 +223,7 @@ pub(crate) fn track_controlled_status_transition(app: &AppHandle, status: &Contr
     };
     drop(last);
     if let Some(event) = event {
-        track_remote_control(app, event);
+        track_remote_control(app, event.role(true));
     }
 }
 /// 端点通道就绪等待：单次上限与重试间隔（整体最多 3 次尝试）。

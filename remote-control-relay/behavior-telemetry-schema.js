@@ -74,6 +74,9 @@ export function validateBehaviorEventShape(raw, options = {}) {
     }
   }
   if (eventName === REMOTE_CONTROL_EVENT) {
+    if (raw.remote_task_key !== undefined && raw.remote_role === undefined) {
+      return invalid("invalid_field", "remote_role");
+    }
     const permissionStage = raw.remote_stage === "permission";
     if (permissionStage && raw.remote_permission_step === undefined) {
       return invalid("invalid_field", "remote_permission_step");
@@ -81,6 +84,9 @@ export function validateBehaviorEventShape(raw, options = {}) {
     if (!permissionStage && raw.remote_permission_step !== undefined) {
       return invalid("invalid_field", "remote_permission_step");
     }
+  }
+  if (raw.execution_task_key !== undefined && !["tool_call_started", "tool_call_completed"].includes(eventName)) {
+    return invalid("invalid_field", "execution_task_key");
   }
   for (const [field, value] of Object.entries(raw)) {
     const definition = resolvedDefinition(BEHAVIOR_TELEMETRY_SCHEMA.properties[field]);

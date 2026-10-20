@@ -7,7 +7,8 @@ use parking_lot::Mutex;
 
 use crate::features::behavior_telemetry::{
     RemoteControlEvent, RemoteModelSource, RemoteOutcome, RemoteReason, RemoteStage,
-    track_remote_control_with_event_id,
+    register_remote_execution, track_remote_execution_event, track_remote_origin_event,
+    unregister_remote_execution,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -81,7 +82,7 @@ impl TaskTelemetryDedupe {
     fn decide(&mut self, event: &RemoteTaskEvent) -> Option<String> {
         let lifecycle = match event.status.as_str() {
             "admitted" => TaskTelemetryLifecycle::Admitted,
-            "succeeded" | "failed" | "cancelled" | "interrupted" => {
+            "succeeded" | "failed" | "cancelled" | "interrupted" | "result_unknown" => {
                 TaskTelemetryLifecycle::Terminal
             }
             _ => return None,
@@ -134,7 +135,11 @@ impl DesktopTaskEventSink {
         }
     }
 
-    fn track_task_once(&self, event: &RemoteTaskEvent) {
+    fn track_task_once(
+        &self,
+        event: &RemoteTaskEvent,
+        record: &crate::features::remote_control::controller::task::RemoteTaskRecord,
+    ) {
         let (stage, outcome, reason) = match event.status.as_str() {
             "admitted" => (
                 RemoteStage::TaskAdmit,
@@ -146,7 +151,7 @@ impl DesktopTaskEventSink {
                 RemoteOutcome::Ok,
                 RemoteReason::None,
             ),
-            "failed" => (
+            "failed" | "result_unknown" => (
                 RemoteStage::TaskTerminal,
                 RemoteOutcome::InternalError,
                 RemoteReason::Unknown,
@@ -158,7 +163,7 @@ impl DesktopTaskEventSink {
             ),
             _ => return,
         };
-        let Some(event_id) = self.telemetry_seen.lock().decide(event) else {
+        let Some(_event_id) = self.telemetry_seen.lock().decide(event) else {
             return;
         };
         let source = match event.model_source {
@@ -167,13 +172,37 @@ impl DesktopTaskEventSink {
             crate::features::remote_control::controller::task::RemoteTaskModelSource::ControllerTemporary =>
                 RemoteModelSource::ControllerTemporary,
         };
-        track_remote_control_with_event_id(
-            &self.app,
-            RemoteControlEvent::new(stage, outcome)
-                .reason(reason)
-                .model_source(source),
-            event_id,
-        );
+        if stage == RemoteStage::TaskAdmit {
+            register_remote_execution(&self.app, &event.session_id, &event.task_id, &record.mode);
+        }
+        let mut metric = RemoteControlEvent::new(stage, outcome)
+            .reason(reason)
+            .model_source(source)
+            .task(&event.task_id, true, Some(&record.mode))
+            .duration_ms(record.updated_at_ms.saturating_sub(record.admitted_at_ms));
+        if stage == RemoteStage::TaskTerminal {
+            metric = metric.status(if event.outcome_unknown {
+                "unknown"
+            } else {
+                &event.status
+            });
+            if event.status == "failed" {
+                if let Some(reason) = event.terminal_reason.as_deref() {
+                    metric =
+                        RemoteControlEvent::from_result::<()>(stage, &Err(reason.to_owned()), 0)
+                            .model_source(source)
+                            .task(&event.task_id, true, Some(&record.mode))
+                            .status("failed")
+                            .duration_ms(
+                                record.updated_at_ms.saturating_sub(record.admitted_at_ms),
+                            );
+                }
+            }
+        }
+        track_remote_execution_event(&self.app, &event.session_id, &event.task_id, metric);
+        if stage == RemoteStage::TaskTerminal {
+            unregister_remote_execution(&self.app, &event.session_id, &event.task_id);
+        }
     }
 }
 
@@ -273,6 +302,16 @@ impl RemoteTaskEventSink for DesktopTaskEventSink {
     fn publish_task_event(&self, event: &RemoteTaskEvent) {
         use tauri::Emitter as _;
         use tauri::Manager as _;
+        // Execution telemetry follows B's durable ledger even after transport
+        // loss. UI/journal publication below still requires a current lease.
+        let runtime = self.app.state::<Arc<DesktopRemoteTaskRuntime>>();
+        if let Ok(record) = runtime.service().status(&event.task_id) {
+            if record.session_id == event.session_id
+                && record.lease.remote_control_generation == event.generation
+            {
+                self.track_task_once(event, &record);
+            }
+        }
         let Some(lease) = self
             .app
             .state::<ControlledDeviceManager>()
@@ -306,10 +345,6 @@ impl RemoteTaskEventSink for DesktopTaskEventSink {
         if record.lease.remote_control_generation != lease.remote_control_generation {
             return;
         }
-        // Decide telemetry exactly once per published lifecycle transition.
-        // A bounded local cache suppresses hot replays; its stable anonymous
-        // event ID keeps evicted replays idempotent in the existing pipeline.
-        self.track_task_once(event);
         if self
             .journal
             .bind_generation(&lease.remote_control_generation)
@@ -784,6 +819,9 @@ impl crate::features::remote_control::controller::controlling_service::Controlli
             }
             store.reject_authenticated_remote_request(&local_id, remote_ref, &live, task_id, client_id, code)
                 .map_err(|_| "remote_rejection_mismatch".to_owned())?;
+            track_remote_origin_event(&self.app, task_id, RemoteControlEvent::from_result::<()>(
+                RemoteStage::TaskRejected, &Err(code.to_owned()), 0,
+            ).task(task_id, false, None));
             let record = store.remote_proxy_snapshot(&local_id).ok_or_else(|| "remote_rejection_unknown".to_owned())?;
             self.app.emit("desktop_remote_proxy", serde_json::json!({
                 "localSessionId":local_id, "kind":"rejection", "remoteSessionRef":remote_ref,
@@ -971,7 +1009,7 @@ impl crate::features::remote_control::controller::controlling_service::Controlli
     }
 
     fn publish(&self, frame: &AuthenticatedJournalFrame<'_>) -> Result<(), String> {
-        self.project_frame(
+        let result = self.project_frame(
             frame.operation(),
             frame.lease(),
             &frame.event().session_id,
@@ -1013,7 +1051,18 @@ impl crate::features::remote_control::controller::controlling_service::Controlli
                 )
                 .map_err(|_| "remote_projection_proof_rejected".to_owned())
             },
-        )
+        );
+        if result.is_ok() {
+            if let (Some(task_id), Some(status)) = (
+                frame.event().task_id.as_deref(),
+                frame.event().terminal_status.as_deref(),
+            ) {
+                crate::features::behavior_telemetry::track_remote_result_received(
+                    &self.app, task_id, status,
+                );
+            }
+        }
+        result
     }
 
     fn publish_snapshot(&self, frame: &AuthenticatedSnapshotFrame<'_>) -> Result<(), String> {

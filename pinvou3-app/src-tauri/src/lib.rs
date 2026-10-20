@@ -1404,6 +1404,7 @@ pub fn run() {
                                 RemoteControlEvent::new(RemoteStage::Permission, outcome)
                                     .reason(reason)
                                     .permission_step(step)
+                                    .role(true)
                                     .latency_ms(metric.latency_ms));
                         }));
                         handle.manage(permission_authority.clone());
