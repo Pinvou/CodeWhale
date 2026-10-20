@@ -8,16 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// DownOne retains the frozen package checks before selecting an applied
-// version. Legacy databases may still have a low-numbered latest version.
-func DownOne(ctx context.Context, conn *pgx.Conn, input []migrations.Migration) error {
-	ordered, err := Ordered(input)
-	if err != nil {
-		return err
-	}
-	return migrations.DownOneWithHooks(ctx, conn, ordered, migrations.DownHooks{Guard: retainedRollbackGuard, ApplySQL: applyAccountRollbackSQL})
-}
-
+// retainedRollbackGuard composes frozen closure, governance and append-only policy checks.
 func retainedRollbackGuard(ctx context.Context, tx pgx.Tx, migration migrations.Migration) error {
 	if migration.Version == 28 {
 		// Keep the original SQL identity. Even a legacy database whose latest

@@ -23,6 +23,7 @@ import (
 var ErrWalletProvisioning = errors.New("personal wallet provisioning is incomplete")
 
 type Service struct {
+	auditExports                *AuditExportService
 	approvalPrechecks           ApprovalPrecheckSource
 	organizationsDisabled       bool
 	organizationLifecycle       []OrganizationLifecycleClient
@@ -41,6 +42,11 @@ type Service struct {
 	serviceToken                string
 	now                         func() time.Time
 	smsConfiguration            *VersionedSMSProviderResolver
+}
+
+func (s *Service) WithAuditExports(exports *AuditExportService) *Service {
+	s.auditExports = exports
+	return s
 }
 
 func (s *Service) WithSMSConfiguration(configuration *VersionedSMSProviderResolver) *Service {
@@ -124,6 +130,14 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 		protected.GET("/v1/me/profile-change-requests/:request_id", s.requirePermission(PermissionPersonalProfileUpdate), httpserver.AdaptFunc(s.getProfileChange))
 	}
 	admin := protected.Group("/admin/v1")
+	admin.GET("/audit-logs", s.requirePermission(PermissionPlatformAuditRead), httpserver.AdaptFunc(s.adminAuditLogs))
+	admin.GET("/audit-logs/:audit_id", s.requirePermission(PermissionPlatformAuditRead), httpserver.AdaptFunc(s.adminAuditLog))
+	if s.auditExports != nil {
+		admin.POST("/audit-exports", s.requirePermission(PermissionPlatformAuditExport), approvalpolicy.Require("ACCOUNT_AUDIT_EXPORT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.createAuditExport))
+		admin.GET("/audit-exports/:export_id", s.requirePermission(PermissionPlatformAuditExport), httpserver.AdaptFunc(s.getAuditExport))
+		admin.POST("/audit-exports/:export_id/download-tickets", s.requirePermission(PermissionPlatformAuditExport), approvalpolicy.Require("ACCOUNT_AUDIT_EXPORT_DOWNLOAD_TICKET", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.issueAuditExportDownloadTicket))
+		admin.GET("/audit-exports/:export_id/download", s.requirePermission(PermissionPlatformAuditExport), httpserver.AdaptFunc(s.downloadAuditExport))
+	}
 	admin.GET("/users", s.requirePermission(PermissionPlatformUsersRead), httpserver.AdaptFunc(s.adminUsers))
 	admin.PATCH("/users/:user_id/status", s.requirePermission(PermissionPlatformUsersStatusManage), approvalpolicy.Require("ACCOUNT_USER_STATUS_CHANGE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSetUserStatus))
 	admin.GET("/account-closure-requests", s.requirePermission(PermissionPlatformAccountClosuresRead), httpserver.AdaptFunc(s.adminAccountClosures))
@@ -209,6 +223,12 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusForbidden, "ACCOUNT_FORBIDDEN", "the account action is not permitted"
 	case errors.Is(err, ErrAccountClosing):
 		status, code, message = http.StatusForbidden, "ACCOUNT_CLOSING", "account closure is in progress"
+	case errors.Is(err, ErrInvalidAuditExportRequest):
+		status, code, message = http.StatusBadRequest, "INVALID_AUDIT_EXPORT_REQUEST", "the audit export request is invalid"
+	case errors.Is(err, ErrAuditExportAuthorizationUnavailable):
+		status, code, message = http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is temporarily unavailable"
+	case errors.Is(err, ErrAuditExportQuota):
+		status, code, message = http.StatusTooManyRequests, "AUDIT_EXPORT_QUOTA_EXCEEDED", "the audit export limit was exceeded"
 	case errors.Is(err, ErrConflict):
 		status, code, message = http.StatusConflict, "ACCOUNT_CONFLICT", "the account resource changed or conflicts with existing data"
 	case errors.Is(err, ErrLastOwner):

@@ -120,6 +120,7 @@ func main() {
 	case "down":
 		if domain == "account" {
 			err = accountschema.DownOne(ctx, connection, loaded)
+			break
 		} else if domain == "billing" {
 			err = billingschema.DownOne(ctx, connection, loaded)
 		} else if domain == "token" {
@@ -212,6 +213,7 @@ func protectedMigrationDomain(version int64, name, checksum string) string {
 		name, checksum string
 	}{
 		{"token", 31, "token_command_governance_activation", "d957f8cac9de3566b1e30ab286458f80e78acd2cc9d61917e3367a0c8280ee16"},
+		{"account", 32, "audit_export_protection", "d60a688ed9ee49014725543dbe458ac4386940033f09549877491f8f835be5ad"},
 		{"account", 900001, "first_delivery_permission_metadata", "b14cb9c2e538d20ec869458940d60867090549c027f439ed199d703ef3e7f45d"},
 		{"account", 900002, "approval_execution_frozen_facts", "019fd548cf79e833fd53ef60591a4f714a40268dceb8d1237c53e69b0162215a"},
 		{"account", 87, "registration_bonus_fingerprint", "1d76a6e9aa6b5fcee84e2eabe8912cbfb8fa53c79ba29ce2bb4c29852be070e1"},

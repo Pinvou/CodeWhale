@@ -36,6 +36,9 @@ var retainedPermissions = map[int64][]permissionFact{
 // original versions remain in their order; no applied version is skipped based
 // on MAX(version). Every following delivery carries the same seed bytes.
 func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
+	if err := validateAuditExportMigration(input); err != nil {
+		return nil, err
+	}
 	if err := validateClosureReplayACK(input); err != nil {
 		return nil, err
 	}
@@ -225,7 +228,10 @@ func Up(ctx context.Context, connection *pgx.Conn, input []migrations.Migration)
 			return nil
 		},
 	}
-	return migrations.UpWithHooks(ctx, connection, ordered, hooks)
+	if err := migrations.UpWithHooks(ctx, connection, ordered, hooks); err != nil {
+		return err
+	}
+	return ensureAuditExportImmutability(ctx, connection, ordered)
 }
 
 func validateRetainedBridgeInput(ctx context.Context, tx pgx.Tx, migration migrations.Migration, input []migrations.Migration) error {

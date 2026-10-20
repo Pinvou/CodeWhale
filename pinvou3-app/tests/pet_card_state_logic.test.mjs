@@ -30,7 +30,7 @@ copyFileSync(path.join(here, '..', 'src', 'shared', 'account-closed-grants-i18n.
   copyFileSync(path.join(here, '..', 'src', 'shared', 'token-management-i18n.js'), path.join(dir, 'shared', 'token-management-i18n.js'));
   copyFileSync(path.join(here, '..', 'src', 'shared', 'ledger-repair-i18n.js'), path.join(dir, 'shared', 'ledger-repair-i18n.js'));
 // Include every current shared/i18n.js domain re-export in the isolated tree.
-for (const name of ['organization-i18n.js', 'model-usage-i18n.js', 'account-closure-i18n.js', 'entitlement-correction-i18n.js', 'account-closed-grants-i18n.js']) {
+for (const name of ['organization-i18n.js', 'model-usage-i18n.js', 'account-closure-i18n.js', 'entitlement-correction-i18n.js', 'account-closed-grants-i18n.js', 'audit-i18n.js']) {
   copyFileSync(path.join(here, '..', 'src', 'shared', name), path.join(dir, 'shared', name));
 }
   // i18n.js is split by locale with zh imported directly, so the temporary copy must include

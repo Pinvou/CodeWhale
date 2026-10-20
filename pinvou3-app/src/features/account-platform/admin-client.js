@@ -76,6 +76,11 @@ function requireManagedPriceAck(value, expectedID = '') {
   if (expectedID && value.price_version_id !== expectedID) throw new Error('INVALID_MUTATION_ACK');
   return value;
 }
+function requireAuditExportJob(value, expectedID = '') {
+  try { requireFinanceID(value?.export_id); } catch { throw new Error('INVALID_AUDIT_EXPORT_ACK'); }
+  if ((expectedID && value.export_id !== expectedID) || !['PENDING', 'GENERATING', 'READY', 'DOWNLOADED', 'FAILED', 'EXPIRED'].includes(value.status)) throw new Error('INVALID_AUDIT_EXPORT_ACK');
+  return value;
+}
 export class AdminPlatformClient {
   constructor(baseURL = '') {
     this.baseURL = String(baseURL || '').replace(/\/$/, '');
@@ -239,6 +244,65 @@ export class AdminPlatformClient {
 
   updateSMSConfiguration(input, idempotencyKey = `sms-configuration-${secureRequestID()}`, signal) {
     return this.mutate('account', '/admin/v1/sms-configuration', 'PUT', input, idempotencyKey, signal);
+  }
+
+  audits(filters = {}, signal) {
+    const query = new URLSearchParams();
+    for (const key of ['actor', 'action', 'resource', 'result', 'from', 'to', 'limit']) {
+      if (filters[key]) query.set(key, String(filters[key]));
+    }
+    return this.request('account', `/admin/v1/audit-logs${query.toString() ? `?${query}` : ''}`, signal);
+  }
+
+  audit(auditID, signal) {
+    return this.request('account', `/admin/v1/audit-logs/${requireFinanceID(auditID)}`, signal);
+  }
+
+  async createAuditExport(filter, reason, includePII = false, idempotencyKey, signal) {
+    const result = await this.mutate('account', '/admin/v1/audit-exports', 'POST',
+      { filter, reason, include_pii: includePII, idempotency_key: idempotencyKey }, idempotencyKey, signal, 202);
+    requireAuditExportJob(result);
+    // Wrapped keys are available only on create/replay receipts while retained.
+    if (['PENDING', 'GENERATING', 'READY'].includes(result.status) &&
+        (typeof result.decryption_key !== 'string' || !result.decryption_key)) throw new Error('INVALID_AUDIT_EXPORT_ACK');
+    return result;
+  }
+
+  async auditExport(exportID, signal) {
+    requireFinanceID(exportID);
+    const result = requireAuditExportJob(await this.request('account', `/admin/v1/audit-exports/${exportID}`, signal), exportID);
+    // Ordinary status reads never provide a file key, including malformed upstream replies.
+    const status = { ...result };
+    delete status.decryption_key;
+    delete status.decryption_key_format;
+    return status;
+  }
+
+  async issueAuditExportDownloadTicket(exportID, signal) {
+    requireFinanceID(exportID);
+    const result = await this.mutate('account', `/admin/v1/audit-exports/${exportID}/download-tickets`, 'POST', {}, '', signal, 201);
+    if (result?.export_id !== exportID || !/^[A-Za-z0-9_-]{43}$/.test(result?.download_token || '') ||
+        typeof result.expires_at !== 'string' || !Number.isFinite(Date.parse(result.expires_at))) throw new Error('INVALID_AUDIT_EXPORT_TICKET_ACK');
+    return result;
+  }
+
+  async downloadAuditExport(exportID, token, signal) {
+    requireFinanceID(exportID);
+    if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) throw new Error('INVALID_AUDIT_EXPORT_TICKET_ACK');
+    const response = await fetch(`${this.baseURL}/api/admin/account/admin/v1/audit-exports/${exportID}/download`, {
+      headers: { Accept: 'application/vnd.pinvou.audit-envelope+json', 'X-Pinvou-Download-Token': token },
+      credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal,
+    });
+    this.observeAuthorizationVersions(response.headers);
+    if (!response.ok) throw errorFromResponse(response, await response.json().catch(() => ({})));
+    const length = response.headers.get('Content-Length');
+    const maxBytes = 500 * 1024 * 1024;
+    if (response.status !== 200 || response.headers.get('Content-Type')?.split(';')[0].trim() !== 'application/vnd.pinvou.audit-envelope+json' ||
+        (length !== null && (!/^[0-9]+$/.test(length) || Number(length) < 1 || Number(length) > maxBytes))) throw new Error('INVALID_AUDIT_EXPORT_DOWNLOAD');
+    // Consume the complete Fetch body once. Never retry a one-time ticket or save a partial response.
+    const blob = await response.blob();
+    if (!blob.size || blob.size > maxBytes || (length !== null && blob.size !== Number(length))) throw new Error('INVALID_AUDIT_EXPORT_DOWNLOAD');
+    return blob;
   }
 
   users(searchOrFilters = '', signal, cursor = '') {

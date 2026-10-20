@@ -91,6 +91,8 @@ func Require(commandType string, expected Mode) gin.HandlerFunc {
 func buildPolicies() map[string]Policy {
 	result := make(map[string]Policy)
 	for commandType, permission := range map[string]string{
+		"ACCOUNT_AUDIT_EXPORT_CREATE":                   "platform.audit.export",
+		"ACCOUNT_AUDIT_EXPORT_DOWNLOAD_TICKET":          "platform.audit.export",
 		"TOKEN_ORGANIZATION_LIFECYCLE_APPLY":            "internal.token.organization.lifecycle",
 		"TOKEN_ORGANIZATION_UNIT_LIFECYCLE_APPLY":       "internal.token.organization-unit.lifecycle",
 		"BILLING_ORGANIZATION_LIFECYCLE_APPLY":          "internal.billing.organization.lifecycle",

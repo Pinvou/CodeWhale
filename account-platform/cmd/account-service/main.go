@@ -92,6 +92,14 @@ func main() {
 	if err := configureRegistrationBonus(ctx, repository, enabled("MOBILE_AUTH_ENABLED"), os.Getenv("REGISTRATION_BONUS_FINGERPRINT_KEY_ID"), os.Getenv("REGISTRATION_BONUS_FINGERPRINT_HMAC_KEY_BASE64")); err != nil {
 		log.Fatal("REGISTRATION_BONUS_CONFIGURATION_INVALID")
 	}
+	auditExports, err := configuredAuditExports(repository, cfg.Environment, os.Getenv("AUDIT_EXPORT_MASTER_KEY_BASE64"))
+	if err != nil {
+		log.Fatal("ACCOUNT_AUDIT_EXPORT_CONFIGURATION_INVALID")
+	}
+	service.WithAuditExports(auditExports)
+	if auditExports != nil {
+		go observability.RunBackground(ctx, "audit-export", auditExports.Run)
+	}
 	go observability.RunBackground(ctx, "wallet-provisioning", account.NewWalletProvisioningWorker(repository, wallets, 5*time.Second).Run)
 	go observability.RunBackground(ctx, "role-binding-expiry", account.NewRoleBindingExpiryWorker(repository, time.Minute).Run)
 	closureBilling, closureToken, err := configuredAccountClosureClients(credential)
