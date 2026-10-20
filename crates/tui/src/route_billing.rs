@@ -345,7 +345,7 @@ fn classify(
 ) -> BillingPresentation {
     if matches!(
         provider,
-        ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm
+        ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm | ApiProvider::Tachyon
     ) {
         return BillingPresentation::Local;
     }
@@ -591,7 +591,9 @@ pub fn for_child_route(
     }
     match child_provider {
         // No provider bill exists for a local runtime under any configuration.
-        ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm => BillingPresentation::Local,
+        ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm | ApiProvider::Tachyon => {
+            BillingPresentation::Local
+        }
         _ => BillingPresentation::Unknown,
     }
 }
@@ -635,9 +637,9 @@ pub fn for_child_route_receipt(
     // A child that named a provider string this build cannot parse names no
     // route we can vouch for. That is not a licence to inherit: Unknown.
     match child.provider {
-        Some(ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm) => {
-            BillingPresentation::Local
-        }
+        Some(
+            ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm | ApiProvider::Tachyon,
+        ) => BillingPresentation::Local,
         _ => BillingPresentation::Unknown,
     }
 }
@@ -1661,7 +1663,12 @@ mod tests {
 
         // A local runtime has no provider bill under any configuration, so it
         // is exactly non-metered and is excluded from money coverage.
-        for provider in [ApiProvider::Ollama, ApiProvider::Sglang, ApiProvider::Vllm] {
+        for provider in [
+            ApiProvider::Ollama,
+            ApiProvider::Sglang,
+            ApiProvider::Vllm,
+            ApiProvider::Tachyon,
+        ] {
             let billing = for_child_route(
                 ApiProvider::Deepseek,
                 BillingPresentation::Metered,

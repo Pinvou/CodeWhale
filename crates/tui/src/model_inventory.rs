@@ -85,6 +85,18 @@ impl ModelInventory {
         let mut candidates = Vec::new();
 
         for provider in ApiProvider::all().iter().copied() {
+            // Tachyon is a registered-only dialect, not an implicitly discovered
+            // local endpoint. Sharing vLLM's default port is not evidence that
+            // the operator selected this serving template.
+            if provider == ApiProvider::Tachyon
+                && !crate::config::provider_is_configured_for_active(
+                    config,
+                    provider,
+                    active_provider,
+                )
+            {
+                continue;
+            }
             let Some(auth_source) = auth_source_for_provider(config, provider) else {
                 continue;
             };
@@ -156,7 +168,10 @@ impl ModelInventory {
                 }
                 if matches!(
                     provider,
-                    ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm
+                    ApiProvider::Ollama
+                        | ApiProvider::Sglang
+                        | ApiProvider::Vllm
+                        | ApiProvider::Tachyon
                 ) {
                     tags.push("local");
                 }
@@ -411,6 +426,7 @@ fn provider_default_model(config: &Config, provider: ApiProvider) -> String {
             ApiProvider::OllamaCloud => crate::config::DEFAULT_OLLAMA_CLOUD_MODEL,
             ApiProvider::Sglang => crate::config::DEFAULT_SGLANG_MODEL,
             ApiProvider::Vllm => crate::config::DEFAULT_VLLM_MODEL,
+            ApiProvider::Tachyon => crate::config::DEFAULT_TACHYON_MODEL,
             _ => crate::config::DEFAULT_TEXT_MODEL,
         })
         .to_string()

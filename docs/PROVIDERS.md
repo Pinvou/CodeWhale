@@ -404,6 +404,14 @@ table.
 | `ollama` | `http://localhost:11434/v1` | live tag from `GET /v1/models` (pre-refresh: `unknown`) | `OLLAMA_BASE_URL` |
 | `vllm` | `http://localhost:8000/v1` | `deepseek-ai/DeepSeek-V4-Pro` | `VLLM_BASE_URL` |
 | `sglang` | `http://localhost:30000/v1` | `deepseek-ai/DeepSeek-V4-Pro` | `SGLANG_BASE_URL` |
+| `tachyon` | `http://localhost:8000/v1` | `qwen3.8` | `TACHYON_BASE_URL` |
+
+The `tachyon` row is the Pinvou-registered Tachyon (驭光) engine dialect: it is
+never a selectable `/provider` catalog row — the Pinvou host selects it
+automatically after probing `owned_by == "tachyon"` — but a config table is
+honored for manual setups. Its effort ladder is none/low/medium/xhigh (`high`
+is rejected by the serving template), so it has its own reasoning-effort
+dialect instead of reusing the vLLM `max`→`high` downgrade.
 
 ### DS4 (DwarfStar)
 
@@ -661,6 +669,7 @@ overlay and lets DSH resolve its own keys.
 | `minimax-anthropic` | `[providers.minimax_anthropic]` | `MINIMAX_API_KEY` | `MINIMAX_ANTHROPIC_BASE_URL`; default `https://api.minimax.io/anthropic`; China `https://api.minimaxi.com/anthropic` | `MiniMax-M3`, `MiniMax-M2.7` | MiniMax direct Anthropic-compatible Messages route. Keep the `/anthropic` suffix because Codewhale appends `/v1/messages`; the route uses `x-api-key`. M3 supports adaptive or disabled thinking. M2.7 always keeps thinking enabled. |
 | `sglang` | `[providers.sglang]` | Optional `SGLANG_API_KEY` | `SGLANG_BASE_URL`; default `http://localhost:30000/v1` | `deepseek-ai/DeepSeek-V4-Pro`, `deepseek-ai/DeepSeek-V4-Flash` | Self-hosted OpenAI-compatible route. Localhost deployments commonly omit auth. `SGLANG_MODEL` is accepted. |
 | `vllm` | `[providers.vllm]` | Optional `VLLM_API_KEY` | `VLLM_BASE_URL`; default `http://localhost:8000/v1` | `deepseek-ai/DeepSeek-V4-Pro`, `deepseek-ai/DeepSeek-V4-Flash` | Self-hosted vLLM OpenAI-compatible route. Localhost deployments commonly omit auth. `VLLM_MODEL` is accepted. |
+| `tachyon` | `[providers.tachyon]` | Optional `TACHYON_API_KEY` | `TACHYON_BASE_URL`; default `http://localhost:8000/v1` | `qwen3.8` | Pinvou-registered Tachyon (驭光) local-engine dialect. Registered-only: never a selectable `/provider` row — the Pinvou host selects it after probing `owned_by == "tachyon"` — while a config table still resolves for manual setups. Shares the vLLM wire family (`chat_template_kwargs.enable_thinking` + `reasoning_effort`) but its effort ladder is `none`/`low`/`medium`/`xhigh`: `high` is rejected 400 by the serving template, and `max` reaches the real `xhigh` ceiling instead of the vLLM `max`→`high` downgrade. `TACHYON_MODEL` is not an env override; the model comes from the table or the host. |
 | `ollama` | `[providers.ollama]` | Local optional `OLLAMA_API_KEY` | `OLLAMA_BASE_URL`; default `http://localhost:11434/v1` | live tag from the local catalog; pre-refresh placeholder `unknown`; provider-hinted custom tags pass through | Local Ollama is keyless by default. `OLLAMA_MODEL` is accepted. The header must not paint a hosted id the local daemon did not list. |
 | `ollama-cloud` | `[providers.ollama_cloud]` | `OLLAMA_CLOUD_API_KEY`, then `OLLAMA_API_KEY` | `OLLAMA_CLOUD_BASE_URL`; default `https://ollama.com/v1` | `gpt-oss:120b`; arbitrary provider-owned IDs pass through | Hosted OpenAI-compatible `/v1/chat/completions` route. Save credentials under `ollama-cloud`; the exact released `ollama` + Cloud URL tuple has bounded read-only in-memory compatibility with its legacy table and secret slot. `OLLAMA_CLOUD_MODEL` is accepted. |
 | `huggingface` | `[providers.huggingface]` | `HUGGINGFACE_API_KEY`, `HF_TOKEN` | `HUGGINGFACE_BASE_URL`, `HF_BASE_URL`; default `https://router.huggingface.co/v1` | `deepseek-ai/DeepSeek-V4-Pro`, `deepseek-ai/DeepSeek-V4-Flash` | Hugging Face Inference Providers OpenAI-compatible router route. Accepted aliases: `huggingface`, `hugging-face`, `hugging_face`, `hf`. Org-prefixed model IDs pass through. `HUGGINGFACE_MODEL` and `HF_MODEL` are accepted. Hub browsing/export are separate future features. |

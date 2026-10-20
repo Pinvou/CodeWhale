@@ -1163,6 +1163,7 @@ impl Secrets {
 /// | `moonshot` / `kimi` | `MOONSHOT_API_KEY`, `KIMI_API_KEY` |
 /// | `sglang` | `SGLANG_API_KEY` |
 /// | `vllm` | `VLLM_API_KEY` |
+/// | `tachyon` | `TACHYON_API_KEY` |
 /// | `ollama` | `OLLAMA_API_KEY` |
 /// | `ollama-cloud` | `OLLAMA_CLOUD_API_KEY`, `OLLAMA_API_KEY` |
 /// | `openai` | `OPENAI_API_KEY` |
@@ -1196,6 +1197,9 @@ pub fn env_for(name: &str) -> Option<String> {
         "moonshot" | "moonshot-ai" | "kimi" | "kimi-k2" => &["MOONSHOT_API_KEY", "KIMI_API_KEY"],
         "sglang" | "sg-lang" => &["SGLANG_API_KEY"],
         "vllm" | "v-llm" => &["VLLM_API_KEY"],
+        // Pinvou fork: Tachyon key env (honored only when the route opts
+        // into key auth — same posture as vllm above).
+        "tachyon" => &["TACHYON_API_KEY"],
         "ollama" | "ollama-local" => &["OLLAMA_API_KEY"],
         "ollama-cloud" | "ollama_cloud" => &["OLLAMA_CLOUD_API_KEY", "OLLAMA_API_KEY"],
         "openai" => &["OPENAI_API_KEY"],

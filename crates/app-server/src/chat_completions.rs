@@ -230,6 +230,10 @@ fn endpoint_preserves_raw_model_ids(provider: ProviderKind, base_url: &str) -> b
             | ProviderKind::OllamaCloud
             | ProviderKind::Vllm
             | ProviderKind::Sglang
+            // Pinvou fork: Tachyon serves model-store ids verbatim (same
+            // raw-id pass-through posture as the vllm route; see the tui-side
+            // root_deepseek_model_is_foreign twin).
+            | ProviderKind::Tachyon
             | ProviderKind::OpencodeZen
     ) || provider_preserves_custom_base_url_model(provider, base_url)
 }

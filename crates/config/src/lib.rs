@@ -298,6 +298,10 @@ pub struct ProvidersToml {
     pub sglang: ProviderConfigToml,
     #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
     pub vllm: ProviderConfigToml,
+    /// Pinvou fork: Tachyon (驭光) vendor engine table (see
+    /// `provider_kind::ProviderKind::Tachyon`).
+    #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
+    pub tachyon: ProviderConfigToml,
     #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
     pub ollama: ProviderConfigToml,
     #[serde(
@@ -668,6 +672,7 @@ impl ProvidersToml {
                 .iter()
                 .all(|provider| self.for_provider(*provider).is_empty())
             && self.antigravity.is_empty()
+            && self.tachyon.is_empty()
     }
 
     #[must_use]
@@ -691,6 +696,7 @@ impl ProvidersToml {
             ProviderKind::Moonshot => &self.moonshot,
             ProviderKind::Sglang => &self.sglang,
             ProviderKind::Vllm => &self.vllm,
+            ProviderKind::Tachyon => &self.tachyon,
             ProviderKind::Ollama => &self.ollama,
             ProviderKind::OllamaCloud => &self.ollama_cloud,
             ProviderKind::Huggingface => &self.huggingface,
@@ -744,6 +750,7 @@ impl ProvidersToml {
             ProviderKind::Moonshot => &mut self.moonshot,
             ProviderKind::Sglang => &mut self.sglang,
             ProviderKind::Vllm => &mut self.vllm,
+            ProviderKind::Tachyon => &mut self.tachyon,
             ProviderKind::Ollama => &mut self.ollama,
             ProviderKind::OllamaCloud => &mut self.ollama_cloud,
             ProviderKind::Huggingface => &mut self.huggingface,
@@ -4021,6 +4028,9 @@ fn root_default_model_is_foreign_to_provider(
             | ProviderKind::Together
             | ProviderKind::Sglang
             | ProviderKind::Vllm
+            // Pinvou fork: Tachyon accepts model-store ids (DeepSeek included)
+            // like the vllm route — see the tui-side twin of this list.
+            | ProviderKind::Tachyon
             | ProviderKind::Volcengine
             | ProviderKind::Atlascloud
             | ProviderKind::OpencodeGo
@@ -4517,6 +4527,7 @@ fn default_model_for_provider(provider: ProviderKind) -> &'static str {
         ProviderKind::Moonshot => DEFAULT_MOONSHOT_MODEL,
         ProviderKind::Sglang => DEFAULT_SGLANG_MODEL,
         ProviderKind::Vllm => DEFAULT_VLLM_MODEL,
+        ProviderKind::Tachyon => DEFAULT_TACHYON_MODEL,
         ProviderKind::Ollama => DEFAULT_OLLAMA_MODEL,
         ProviderKind::OllamaCloud => DEFAULT_OLLAMA_CLOUD_MODEL,
         ProviderKind::Huggingface => DEFAULT_HUGGINGFACE_MODEL,
@@ -4570,6 +4581,7 @@ fn default_base_url_for_provider(provider: ProviderKind) -> &'static str {
         ProviderKind::Moonshot => DEFAULT_MOONSHOT_BASE_URL,
         ProviderKind::Sglang => DEFAULT_SGLANG_BASE_URL,
         ProviderKind::Vllm => DEFAULT_VLLM_BASE_URL,
+        ProviderKind::Tachyon => DEFAULT_TACHYON_BASE_URL,
         ProviderKind::Ollama => DEFAULT_OLLAMA_BASE_URL,
         ProviderKind::OllamaCloud => DEFAULT_OLLAMA_CLOUD_BASE_URL,
         ProviderKind::Huggingface => DEFAULT_HUGGINGFACE_BASE_URL,
@@ -4929,9 +4941,11 @@ fn should_skip_secret_store_for_provider(
         return false;
     }
 
-    matches!(provider, ProviderKind::Sglang | ProviderKind::Vllm)
-        || (provider == ProviderKind::Ollama
-            && !provider::is_exact_ollama_cloud_route(provider, base_url))
+    matches!(
+        provider,
+        ProviderKind::Sglang | ProviderKind::Vllm | ProviderKind::Tachyon
+    ) || (provider == ProviderKind::Ollama
+        && !provider::is_exact_ollama_cloud_route(provider, base_url))
         || base_url_uses_local_host(base_url)
 }
 
@@ -6981,6 +6995,7 @@ struct EnvRuntimeOverrides {
     moonshot_base_url: Option<String>,
     sglang_base_url: Option<String>,
     vllm_base_url: Option<String>,
+    tachyon_base_url: Option<String>,
     ollama_base_url: Option<String>,
     ollama_cloud_base_url: Option<String>,
     ollama_cloud_model: Option<String>,
@@ -7200,6 +7215,9 @@ impl EnvRuntimeOverrides {
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
             vllm_base_url: std::env::var("VLLM_BASE_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            tachyon_base_url: std::env::var("TACHYON_BASE_URL")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
             ollama_base_url: std::env::var("OLLAMA_BASE_URL")
@@ -7443,6 +7461,7 @@ impl EnvRuntimeOverrides {
             ProviderKind::Moonshot => self.moonshot_base_url.clone(),
             ProviderKind::Sglang => self.sglang_base_url.clone(),
             ProviderKind::Vllm => self.vllm_base_url.clone(),
+            ProviderKind::Tachyon => self.tachyon_base_url.clone(),
             ProviderKind::Ollama => self.ollama_base_url.clone(),
             ProviderKind::OllamaCloud => self.ollama_cloud_base_url.clone(),
             ProviderKind::Huggingface => self.huggingface_base_url.clone(),

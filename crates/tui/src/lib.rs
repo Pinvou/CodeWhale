@@ -2845,6 +2845,14 @@ fn load_workspace_dotenv_credentials_from_path(path: &Path) -> Result<WorkspaceD
 }
 
 fn is_workspace_dotenv_credential_key(key: &str) -> bool {
+    // Pinvou fork note: the allowlist derives from the selectable display
+    // registry, which intentionally excludes the registered-only Tachyon
+    // engine — `TACHYON_API_KEY` therefore does not load from a workspace
+    // `.env`. That direction is safe: Tachyon is keyless by default, the
+    // ambient `TACHYON_API_KEY` env var is honored once the route opts into
+    // key auth (`auth_mode = "api_key"`, same gating as VLLM_API_KEY), and
+    // `[providers.tachyon] api_key` always works — while host-owned engines
+    // stay out of per-workspace credential files.
     codewhale_config::provider::providers_sorted_for_display()
         .into_iter()
         .any(|provider| provider.env_vars().contains(&key))
@@ -7373,6 +7381,7 @@ fn doctor_auth_scheme(config: &Config) -> &'static str {
         crate::config::ApiProvider::Sglang
             | crate::config::ApiProvider::Vllm
             | crate::config::ApiProvider::Ollama
+            | crate::config::ApiProvider::Tachyon
     ) {
         "optional_bearer"
     } else {

@@ -1017,6 +1017,24 @@
       "transport": "chat-completions"
     },
     {
+      "id": "tachyon",
+      "family": "tachyon",
+      "label": "Tachyon (Pinvou)",
+      "endpoint": "http://localhost:8000/v1",
+      "wire": "chat-completions",
+      "defaultModel": "qwen3.8",
+      "envVars": [
+        "TACHYON_API_KEY"
+      ],
+      "auth": [
+        {
+          "kind": "keyless",
+          "label": "Keyless"
+        }
+      ],
+      "transport": "local-runtime"
+    },
+    {
       "id": "telecomjs",
       "family": "telecomjs",
       "label": "TelecomJS TokenHub",

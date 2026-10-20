@@ -60,6 +60,12 @@ pub enum ProviderKind {
     Moonshot,
     Sglang,
     Vllm,
+    /// Pinvou fork: Tachyon (驭光) vendor engine. Registered for config-table
+    /// identity resolution (`parse_config_identity` → `[providers.tachyon]`)
+    /// but intentionally NOT part of the selectable catalog (`ALL`): the
+    /// Pinvou host selects it programmatically after probing the local
+    /// server; standalone picker surfaces should not offer it.
+    Tachyon,
     Ollama,
     #[serde(alias = "ollama_cloud")]
     OllamaCloud,

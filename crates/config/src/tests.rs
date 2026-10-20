@@ -5250,8 +5250,10 @@ fn meta_model_api_scopes_both_documented_key_names_to_official_endpoint() {
 #[test]
 fn provider_metadata_registry_covers_every_provider_kind_once() {
     let providers = provider::all_providers();
-    // Full registry keeps legacy dialect/plan kinds for provider_for_kind.
-    assert_eq!(providers.len(), 48);
+    // Full registry keeps legacy dialect/plan kinds for provider_for_kind,
+    // plus the Pinvou-fork Tachyon vendor engine (registered-only, like the
+    // dual-wire kinds — not a selectable catalog row).
+    assert_eq!(providers.len(), 49);
     // Catalog surface is one identity per vendor (no dual-wire / plan rows),
     // and never a retired tombstone: Antigravity stays in the full registry
     // so old config parses and can be cleared, but it left `ALL` when it
@@ -5958,6 +5960,59 @@ fn parse_config_identity_preserves_legacy_table_kinds() {
     assert_eq!(ProviderKind::parse_config_identity("nope"), None);
 }
 
+/// Pinvou fork (T10): Tachyon is registered-only. The catalog parse must
+/// reject it — it is never a selectable `/provider` row — while config-table
+/// identity still resolves it, because the Pinvou host writes
+/// `[providers.tachyon]` after probing `owned_by == "tachyon"`. That split is
+/// the load-bearing wall of the registered-only shape; if `provider!` ever
+/// grows a catalog alias for Tachyon these assertions go red before the
+/// catalog boundary silently erodes.
+#[test]
+fn tachyon_stays_registered_only_on_both_identity_boundaries() {
+    assert_eq!(ProviderKind::parse("tachyon"), None);
+    assert_eq!(
+        ProviderKind::parse_config_identity("tachyon"),
+        Some(ProviderKind::Tachyon)
+    );
+    assert_eq!(
+        ProviderKind::parse_config_identity("TACHYON"),
+        Some(ProviderKind::Tachyon)
+    );
+}
+
+#[test]
+fn forkguard_tachyon_only_provider_table_survives_config_store_save() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("config.toml");
+    let mut store = ConfigStore::load(Some(path.clone()))?;
+    store.config.provider = ProviderKind::Tachyon;
+    let provider = &mut store.config.providers.tachyon;
+    provider.base_url = Some("http://127.0.0.1:9999/v1".to_string());
+    provider.model = Some("served-model-id".to_string());
+    provider.auth_mode = Some("api_key".to_string());
+    provider.context_window = Some(32_768);
+    assert!(!store.config.providers.is_empty());
+    assert!(store.rendered_body()?.contains("[providers.tachyon]"));
+    store.save()?;
+
+    let mut restored = ConfigStore::load(Some(path))?;
+    assert_eq!(restored.config.provider, ProviderKind::Tachyon);
+    assert_eq!(
+        toml::to_string(&restored.config.providers.tachyon)?,
+        toml::to_string(&store.config.providers.tachyon)?
+    );
+    // An unrelated settings rewrite must retain the sole provider table too.
+    restored.config.providers.tachyon.model = Some("renamed-served-id".to_string());
+    restored.save()?;
+    let reloaded = ConfigStore::load(Some(restored.path().to_path_buf()))?;
+    assert_eq!(
+        toml::to_string(&reloaded.config.providers.tachyon)?,
+        toml::to_string(&restored.config.providers.tachyon)?
+    );
+    assert!(ProvidersToml::default().is_empty());
+    Ok(())
+}
+
 #[test]
 fn legacy_dual_wire_toml_table_supplies_credentials_and_endpoint() {
     let _lock = env_lock();
@@ -6633,6 +6688,7 @@ fn self_hosted_providers_do_not_probe_secret_store_by_default() {
     for provider in [
         ProviderKind::Sglang,
         ProviderKind::Vllm,
+        ProviderKind::Tachyon,
         ProviderKind::Ollama,
     ] {
         let config = ConfigToml {

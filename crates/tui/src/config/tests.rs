@@ -136,6 +136,23 @@ fn api_provider_metadata_helpers_follow_config_provider_metadata() {
     );
 }
 
+/// `KIND_LOOKUP`/`FROM_KIND_LOOKUP` are indexed by discriminant, and the
+/// existing catalog round-trip above only walks `ProviderKind::ALL` — a
+/// mis-aligned slot for a registered-only kind (e.g. Tachyon, which never
+/// enters `ALL`) would not turn any existing assertion red. Walk the full
+/// registry instead so every slot stays pinned.
+#[test]
+fn api_provider_kind_lookups_round_trip_every_registry_kind() {
+    for provider in codewhale_config::provider::all_providers() {
+        let kind = provider.kind();
+        assert_eq!(
+            ApiProvider::from_kind(kind).kind(),
+            Some(kind),
+            "the ApiProvider slot for {kind:?} must round-trip through the lookup tables"
+        );
+    }
+}
+
 #[test]
 fn retired_antigravity_is_not_selectable_but_has_an_actionable_tombstone() {
     for identity in ["antigravity", "agy"] {
@@ -482,20 +499,20 @@ fn provider_context_scenario() -> Result<()> {
             Some(1_000_000)
         );
     }
-    // from provider_context_window_zero_is_invalid
-    {
-        let config: Config = toml::from_str(
-            r#"
-    [providers.openai]
-    context_window = 0
-    "#,
-        )
+    // Registered-only Tachyon tables obey the same validation as catalog providers.
+    for provider in ["openai", "tachyon"] {
+        let config: Config = toml::from_str(&format!(
+            "provider = \"{provider}\"\n[providers.{provider}]\ncontext_window = 0\n"
+        ))
         .expect("zero is syntactically valid TOML");
 
         let err = config
             .validate()
             .expect_err("zero context_window should be rejected");
-        assert!(err.to_string().contains("providers.openai.context_window"));
+        assert!(
+            err.to_string()
+                .contains(&format!("providers.{provider}.context_window"))
+        );
     }
     Ok(())
 }
@@ -11291,6 +11308,22 @@ fn provider_capability_arcee_direct_models_use_api_docs_shape() {
         mini.request_payload_mode,
         RequestPayloadMode::ChatCompletions
     );
+}
+
+#[test]
+fn forkguard_tachyon_thinking_capability_is_route_scoped() {
+    for model in [DEFAULT_TACHYON_MODEL, "local-served-model"] {
+        assert!(!crate::models::model_supports_reasoning(model));
+        assert!(provider_capability(ApiProvider::Tachyon, model).thinking_supported);
+        assert!(!provider_capability(ApiProvider::Vllm, model).thinking_supported);
+        assert!(!provider_capability(ApiProvider::Openai, model).thinking_supported);
+    }
+    let non_reasoning = "claude-haiku-4-5";
+    assert_eq!(
+        crate::model_catalog::resolved_supports_reasoning(non_reasoning),
+        Some(false)
+    );
+    assert!(!provider_capability(ApiProvider::Tachyon, non_reasoning).thinking_supported);
 }
 
 #[test]
