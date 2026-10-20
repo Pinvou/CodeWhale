@@ -48,10 +48,10 @@ import {
   createAcpGapResyncScheduler,
   mergeAcpTimelineSnapshot,
   updateAcpAttachmentDraft,
-  redactDisplayError,
   resolveAcpSessionControls,
 } from './acp-state.js';
 import { createAcpTimelineProjector } from './acp-timeline-projector.js';
+import { timelineDisplayError } from '../conversation/deepseek-conversation.js';
 import {
   applyNativeChatEvent,
   appendLocalUserMessage,
@@ -1273,7 +1273,7 @@ export function CodexAcpView({
     if (!notice) return null;
     return {
       ...notice,
-      detail: redactDisplayError(notice.detail, acpModelServiceLanguage) || '',
+      detail: timelineDisplayError(notice.detail, { language: acpModelServiceLanguage }) || '',
     };
   }, [events, acpModelServiceLanguage]);
   const visibleRuntimeNotice = runtimeNotice?.key === dismissedNoticeKey

@@ -12,6 +12,7 @@ import { copyClipboardText } from '../../shared/clipboard.js';
 import { formatSessionDate } from '../../shared/date-utils.js';
 import { isBuiltInLlmApiModel, selectableModels } from '../../shared/model-options.js';
 import { can, isWeb } from '../../shared/platform.js';
+import { pathBasename } from '../../shared/path-utils.js';
 import qwenIcon from '../../brand-icons/qwen.svg';
 import {
   MODEL_PRESET_DEFS, PROVIDER_KIND_CODING_PLAN, PROVIDER_KIND_OFFICIAL_API, PROVIDER_KIND_CUSTOM,
@@ -442,28 +443,9 @@ const formatMemoryTime = (item, copy) => {
             detail: value.detail ? String(value.detail) : '',
           };
         }
-        const raw = String(value || '');
-        const httpMatch = raw.match(/HTTP\s+(\d{3})/i);
-        if (httpMatch) {
-          const status = Number(httpMatch[1]);
-          const legacy = {
-            ok: status >= 200 && status < 300,
-            code: status === 401 ? 'auth_invalid' : status === 402 ? 'billing' : status === 403 ? 'auth_forbidden' : status === 429 ? 'rate_limited' : 'http_error',
-            message: status === 401 ? settingsCopy.connectionMessages.auth_invalid
-              : status === 402 ? settingsCopy.connectionMessages.billing
-                : status === 403 ? settingsCopy.connectionMessages.auth_forbidden
-                  : status === 429 ? settingsCopy.connectionMessages.rate_limited
-                    : (status >= 200 && status < 300 ? settingsCopy.connectionMessages.ok : settingsCopy.connectionMessages.http_error),
-            detail: `HTTP ${status}`,
-          };
-          if (isCodingPlanProvider && (status === 404 || status === 405)) {
-            legacy.code = status === 404 ? 'endpoint_not_found' : 'method_not_allowed';
-            legacy.message = settingsCopy.codingPlanTestUnavailable;
-          }
-          return legacy;
-        }
-        if (raw === 'ok') return { ok: true, code: 'ok', message: settingsCopy.connectionMessages.ok, detail: '' };
-        return { ok: false, code: 'unknown', message: settingsCopy.connectionMessages.unknown, detail: '' };
+        // test_model_connection always resolves a serialized object; this
+        // fallback only covers the reject path (a thrown error string).
+        return { ok: false, code: 'unknown', message: settingsCopy.connectionMessages.unknown, detail: String(value || '') };
       }
       function applyCatalogItem(group, item) {
         const p = group.preset;
@@ -2098,7 +2080,7 @@ const formatMemoryTime = (item, copy) => {
       ];
       const feedbackAllowedExt = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'mp4', 'mov', 'webm']);
       const feedbackVideoExt = new Set(['mp4', 'mov', 'webm']);
-      const feedbackBaseName = p => String(p || '').replace(/\\/g, '/').split('/').pop() || String(p || '');
+      const feedbackBaseName = p => pathBasename(p, { fallback: String(p || '') });
       const feedbackExt = p => {
         const name = feedbackBaseName(p);
         const idx = name.lastIndexOf('.');

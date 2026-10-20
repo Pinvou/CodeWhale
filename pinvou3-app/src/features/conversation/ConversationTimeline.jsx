@@ -23,6 +23,7 @@ import {
   externalMarkdownUrl,
   fetchToolDetails,
   isFetchTool,
+  isOperationItemType,
   isSearchTool,
   searchToolDetails,
   terminalStatus,
@@ -744,7 +745,7 @@ function DefaultItem({
       />
     );
   }
-  if (item.type === 'tool' || item.type === 'command_execution' || item.type === 'file_change') {
+  if (isOperationItemType(item.type)) {
     return (
       <ToolItem
         item={item}
@@ -1059,7 +1060,6 @@ function conversationTimelineScrollMargin(timelineElement, scrollElement) {
 export function ConversationTimeline({
   turns = EMPTY_TURNS,
   scrollElementRef,
-  virtualizationThreshold = CONVERSATION_VIRTUALIZATION_THRESHOLD,
   busy = false,
   turnGapPx = DEFAULT_CONVERSATION_ROW_GAP_PX,
   followOutputRef,
@@ -1070,7 +1070,7 @@ export function ConversationTimeline({
   const virtualized = shouldVirtualizeConversationTurns(
     turns.length,
     scrollElementRef,
-    virtualizationThreshold,
+    CONVERSATION_VIRTUALIZATION_THRESHOLD,
   );
   const { historyTurns, liveTurn, liveTurnIndex } = useMemo(
     () => splitConversationLiveTail(turns, virtualized, busy),
