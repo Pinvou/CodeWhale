@@ -65,14 +65,14 @@ const DEEPSEEK_PICKER_EFFORTS: &[ReasoningEffort] = &[
 ];
 /// Pinvou fork: Tachyon (驭光) effective tiers are none/low/medium/xhigh —
 /// `high` is rejected 400 by the serving template and `xhigh` is the real
-/// deepest tier, reached through the max family. Offering the generic
+/// deepest tier, including normalized max-family preferences. The generic
 /// `[Auto, Off, High, Max]` ladder would advertise a `high` rung the wire
 /// can never send and hide the real `low`/`medium` tiers.
 const TACHYON_PICKER_EFFORTS: &[ReasoningEffort] = &[
     ReasoningEffort::Off,
     ReasoningEffort::Low,
     ReasoningEffort::Medium,
-    ReasoningEffort::Max,
+    ReasoningEffort::XHigh,
 ];
 /// Kimi Code K3 accepts route-specific low and medium controls at the
 /// official membership endpoint. Medium becomes K3's nested high wire effort,
@@ -3192,6 +3192,36 @@ mod tests {
             last_mouse_selected: None,
             locale: Locale::En,
             pinned_models: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn forkguard_tachyon_picker_preserves_normalized_effort_on_reopen() {
+        for requested in [
+            ReasoningEffort::Max,
+            ReasoningEffort::XHigh,
+            ReasoningEffort::Ultra,
+        ] {
+            let mut picker = test_picker();
+            picker.initial_provider = ApiProvider::Tachyon;
+            picker.model_rows = vec![ModelPickerRow {
+                id: crate::config::DEFAULT_TACHYON_MODEL.to_string(),
+                ..model_row(ApiProvider::Tachyon, true)
+            }];
+            picker.selected_effort_request = requested;
+            picker.select_effort_for_current_model();
+            assert_eq!(
+                picker.resolved_effort(),
+                ReasoningEffort::XHigh,
+                "{requested:?}"
+            );
+            assert!(matches!(
+                picker.build_event(),
+                ViewEvent::ModelPickerApplied { effort, .. } if effort == requested
+            ));
+            picker.focus = Pane::Effort;
+            picker.move_up();
+            assert_eq!(picker.resolved_effort(), ReasoningEffort::Medium);
         }
     }
 

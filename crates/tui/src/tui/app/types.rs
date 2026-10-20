@@ -375,8 +375,9 @@ impl ReasoningEffort {
         // Keep the receipt vocabulary aligned with what the wire sends.
         if provider == ApiProvider::Tachyon {
             return match normalized {
+                Self::Minimal => Self::Low,
                 Self::High => Self::Medium,
-                Self::Max => Self::XHigh,
+                Self::Max | Self::Ultra => Self::XHigh,
                 other => other,
             };
         }

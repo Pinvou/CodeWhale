@@ -1268,17 +1268,19 @@ fn ollama_cloud_normal_turns_preserve_the_documented_reasoning_ladder() {
 fn tachyon_route_receipts_mirror_the_local_engine_dialect() {
     let base_url = crate::config::DEFAULT_TACHYON_BASE_URL;
     let model = crate::config::DEFAULT_TACHYON_MODEL;
-    // Real tiers stay distinct: off/low/medium pass through, xhigh is real.
+    // Real tiers stay distinct and aliases resolve to their effective wire tier.
     for (effort, expected) in [
         (ReasoningEffort::Off, ReasoningEffort::Off),
+        (ReasoningEffort::Minimal, ReasoningEffort::Low),
         (ReasoningEffort::Low, ReasoningEffort::Low),
         (ReasoningEffort::Medium, ReasoningEffort::Medium),
         (ReasoningEffort::XHigh, ReasoningEffort::XHigh),
+        (ReasoningEffort::Ultra, ReasoningEffort::XHigh),
     ] {
         assert_eq!(
             effort.normalize_for_route(ApiProvider::Tachyon, base_url, model),
             expected,
-            "{effort:?} is a real Tachyon tier and must be reported as-is"
+            "{effort:?} must be reported as its effective Tachyon wire tier"
         );
     }
     // A requested `high` is wire-clamped to `medium`; the receipt — not the
@@ -1311,7 +1313,7 @@ fn tachyon_picker_offers_the_local_engine_tier_ladder() {
             ReasoningEffort::Off,
             ReasoningEffort::Low,
             ReasoningEffort::Medium,
-            ReasoningEffort::Max,
+            ReasoningEffort::XHigh,
         ]
     );
 }

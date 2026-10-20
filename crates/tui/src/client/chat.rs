@@ -3656,6 +3656,12 @@ fn reasoning_stream_style_for_route(
             "Ignoring unrecognized reasoning_stream_style `{configured}`; expected separate_field, inline_tags, or none"
         ));
     }
+    // Tachyon serves arbitrary local model IDs, including the default qwen3.8
+    // which has no catalog entry. Its wire declares reasoning separately;
+    // decoding must not depend on catalog membership or enable history replay.
+    if provider == ApiProvider::Tachyon {
+        return ReasoningStreamStyle::SeparateField;
+    }
     // Google's official OpenAI-compat route returns reasoning summaries in
     // `delta.reasoning_content` (the non-streaming decoder already promotes
     // the same field to a Thinking block), so stream parity applies here.
@@ -3717,19 +3723,85 @@ fn provider_accepts_reasoning_content(provider: ApiProvider) -> bool {
             | ApiProvider::Moonshot // #3016: Kimi thinking traces use reasoning_content
             // Pinvou fork: Tachyon (驭光) streams thinking as
             // `delta.reasoning_content` (same reasoning-parser family as
-            // vLLM). Both consumers below still gate on
-            // `model_supports_reasoning`, so for a served id the model
-            // catalogue does not know (e.g. bare `qwen3.8`) the decode is
-            // guaranteed instead by the Pinvou host writing
-            // `reasoning_stream_style = "separate_field"` into the
-            // `[providers.tachyon]` table (configured styles are consulted
-            // before this classification). Replay follows the model
-            // catalogue gate below: catalogued reasoning ids (qwen3.x
+            // vLLM). Stream decoding defaults to separate_field even for
+            // unknown served IDs; explicit configuration still wins.
+            // Replay follows the model catalogue gate below: catalogued reasoning ids (qwen3.x
             // included) DO replay — a deliberate difference from the vllm
             // route, registered in fork-modifications T10 — while ids the
             // catalogue does not know keep replay off.
             | ApiProvider::Tachyon
     )
+}
+
+#[cfg(test)]
+mod tachyon_stream_tests {
+    use super::*;
+
+    #[test]
+    fn forkguard_tachyon_stream_separates_reasoning_for_unknown_model_ids() {
+        for model in [crate::config::DEFAULT_TACHYON_MODEL, "local-served-model"] {
+            let base_url = crate::config::DEFAULT_TACHYON_BASE_URL;
+            let style =
+                reasoning_stream_style_for_route(ApiProvider::Tachyon, base_url, model, None);
+            let chunk = json!({"choices": [{"index": 0, "delta": {
+                "reasoning_content": "private reasoning",
+                "content": "public answer"
+            }}]});
+            let mut content_index = 0u32;
+            let mut text_started = false;
+            let mut thinking_started = false;
+            let events = parse_sse_chunk_with_reasoning_style(
+                &chunk,
+                &mut content_index,
+                &mut text_started,
+                &mut thinking_started,
+                &mut std::collections::HashMap::new(),
+                &mut std::collections::HashMap::new(),
+                &mut ReasoningDetailsBuffer::default(),
+                false,
+                &mut InlineReasoningTagState::default(),
+                style,
+            );
+            let mut thinking = String::new();
+            let mut answer = String::new();
+            for event in events {
+                match event {
+                    StreamEvent::ContentBlockDelta {
+                        delta: Delta::ThinkingDelta { thinking: text },
+                        ..
+                    } => thinking.push_str(&text),
+                    StreamEvent::ContentBlockDelta {
+                        delta: Delta::TextDelta { text },
+                        ..
+                    } => answer.push_str(&text),
+                    _ => {}
+                }
+            }
+            assert_eq!(thinking, "private reasoning", "{model}");
+            assert_eq!(answer, "public answer", "{model}");
+            assert!(!should_replay_reasoning_content_for_provider_on_route(
+                ApiProvider::Tachyon,
+                base_url,
+                model,
+                None
+            ));
+            for (configured, expected) in [
+                ("none", ReasoningStreamStyle::None),
+                ("inline_tags", ReasoningStreamStyle::InlineTags),
+                ("separate_field", ReasoningStreamStyle::SeparateField),
+            ] {
+                assert_eq!(
+                    reasoning_stream_style_for_route(
+                        ApiProvider::Tachyon,
+                        base_url,
+                        model,
+                        Some(configured)
+                    ),
+                    expected
+                );
+            }
+        }
+    }
 }
 
 fn has_deepseek_r_series_marker(model_lower: &str) -> bool {
