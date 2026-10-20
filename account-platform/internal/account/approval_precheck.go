@@ -40,6 +40,7 @@ var (
 // owns, so a compromised or mismatched owner response can never be presented as
 // a different resource.
 var approvalPrecheckTargetResourceTypes = map[string]string{
+	"CHARGEBACK_FINANCIAL_REPAIR":      "CHARGEBACK_CASE",
 	"REFUND_EXCEPTION_REPAIR":          "REFUND",
 	"PAYMENT_FINANCIAL_REPAIR":         "PAYMENT_ORDER",
 	"ENTITLEMENT_COMPONENT_ADJUSTMENT": "ENTITLEMENT_PACKAGE",
@@ -278,6 +279,17 @@ func decodeApprovalPrecheckResponse(raw []byte, request ApprovalPrecheckRequest)
 			return ApprovalPrecheckProjection{}, ErrApprovalPrecheckInvalid
 		}
 
+	case "CHARGEBACK_FINANCIAL_REPAIR":
+		var selected struct {
+			ChargebackCaseID    string `json:"chargeback_case_id"`
+			PaymentEvidenceID   string `json:"payment_evidence_id"`
+			ExpectedCaseVersion int64  `json:"expected_case_version"`
+			ReasonCode          string `json:"reason_code"`
+		}
+		if json.Unmarshal(wire.NormalizedCommand, &selected) != nil || selected.ChargebackCaseID != request.TargetResourceID || selected.PaymentEvidenceID != request.PaymentEvidenceID || selected.ExpectedCaseVersion < 1 || selected.ReasonCode != request.ReasonCode {
+			return ApprovalPrecheckProjection{}, ErrApprovalPrecheckInvalid
+		}
+
 	default:
 		return ApprovalPrecheckProjection{}, ErrApprovalPrecheckInvalid
 	}
@@ -304,7 +316,7 @@ func closedApprovalPrecheckDocument(raw json.RawMessage) (json.RawMessage, bool)
 }
 
 func validPrecheckVersion(command string, policy int64, snapshot int) bool {
-	return command == "ENTITLEMENT_COMPONENT_ADJUSTMENT" && policy == 2 && snapshot == 2 || (command == "LEDGER_REPAIR" || command == "RECEIVABLE_WRITE_OFF" || command == "PAYMENT_FINANCIAL_REPAIR" || command == "REFUND_EXCEPTION_REPAIR") && policy == 1 && snapshot == 1
+	return command == "ENTITLEMENT_COMPONENT_ADJUSTMENT" && policy == 2 && snapshot == 2 || (command == "LEDGER_REPAIR" || command == "RECEIVABLE_WRITE_OFF" || command == "PAYMENT_FINANCIAL_REPAIR" || command == "REFUND_EXCEPTION_REPAIR" || command == "CHARGEBACK_FINANCIAL_REPAIR") && policy == 1 && snapshot == 1
 }
 
 func validApprovalPrecheckRequest(request ApprovalPrecheckRequest) bool {
@@ -342,6 +354,12 @@ func validApprovalPrecheckRequest(request ApprovalPrecheckRequest) bool {
 			return false
 		}
 		return request.ReasonCode == "PROVIDER_REFUNDED_LOCAL_REVERSAL_MISSING" && request.PaymentOrderID == "" && request.TargetJournalEntryID == "" && request.WrongLedgerAccountID == "" && request.CorrectLedgerAccountID == "" && request.AmountMicrocredits == 0 && request.WriteOffMicrocredits == 0 && request.ExpectedVersion == 0
+
+	case "CHARGEBACK_FINANCIAL_REPAIR":
+		if _, ok := validPrecheckIdentifier(request.PaymentEvidenceID); !ok {
+			return false
+		}
+		return request.ReasonCode == "BASE_SHORTFALL_COMPENSATION" && request.PaymentOrderID == "" && request.TargetJournalEntryID == "" && request.WrongLedgerAccountID == "" && request.CorrectLedgerAccountID == "" && request.AmountMicrocredits == 0 && request.WriteOffMicrocredits == 0 && request.ExpectedVersion == 0
 
 	}
 	return false

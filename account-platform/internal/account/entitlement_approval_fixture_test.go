@@ -24,6 +24,11 @@ import (
 // Installation reuses the owned Account fixture and its official Up/Verify;
 // runtime, writer, relay and operator each connect as their actual login role.
 func newEntitlementApprovalFixture(t *testing.T, ctx context.Context, raw string) (*PostgresRepository, *pgx.Conn, *ApprovalRelayStore, string) {
+	return newEntitlementApprovalFixtureWithRelayConstructor(t, ctx, raw, NewApprovalRelayStore)
+}
+
+// An explicit test constructor keeps diagnostic opt-in separate from the default fixture.
+func newEntitlementApprovalFixtureWithRelayConstructor(t *testing.T, ctx context.Context, raw string, constructRelay func(context.Context, string) (*ApprovalRelayStore, error)) (*PostgresRepository, *pgx.Conn, *ApprovalRelayStore, string) {
 	t.Helper()
 	t.Setenv("PINVOU_TEST_ACCOUNT_DATABASE_URL", raw)
 	f := retainedWalletFenceActors(t)
@@ -66,7 +71,7 @@ func newEntitlementApprovalFixture(t *testing.T, ctx context.Context, raw string
 			repository.approvalWriterPool.Close()
 		}
 	})
-	relay, err := NewApprovalRelayStore(ctx, actorURL("account_approval_relay"))
+	relay, err := constructRelay(ctx, actorURL("account_approval_relay"))
 	if err != nil {
 		t.Fatal("genuine relay readiness failed")
 	}

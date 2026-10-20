@@ -20,7 +20,7 @@ func TestF13ClassifierProductionCreate(t *testing.T) {
 		want          int
 	}{
 		{"installed-refund", "REFUND_EXCEPTION_REPAIR", true, 201},
-		{"future-not-installed", "CHARGEBACK_FINANCIAL_REPAIR", true, 400},
+		{"future-not-installed", "RECONCILIATION_FINANCIAL_REPAIR", true, 400},
 		{"csrf-still-required", "REFUND_EXCEPTION_REPAIR", false, 403},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -82,7 +82,7 @@ func TestF13ClassifierProductionDirectory(t *testing.T) {
 		want          int
 	}{
 		{"installed-refund", "REFUND_EXCEPTION_REPAIR", 200},
-		{"future-not-installed", "CHARGEBACK_FINANCIAL_REPAIR", 503},
+		{"future-not-installed", "RECONCILIATION_FINANCIAL_REPAIR", 503},
 		{"predecessor-entitlement", "ENTITLEMENT_COMPONENT_ADJUSTMENT", 200},
 	} {
 		t.Run(test.name, func(t *testing.T) {

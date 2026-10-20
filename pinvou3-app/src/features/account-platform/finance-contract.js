@@ -2,6 +2,7 @@ const MONEY_KEY = /^(?:amount_fen|price_fen|refund_amount_fen|display_points|bas
 const TOKEN_COMMAND_INTEGER_KEY = /^(?:lifecycle_plan_version|expected_account_version|credential_version|source_catalog_version)$/;
 const PAYMENT_INTEGER_KEY = /^(?:wallet_version|wallet_version_after|applied_to_receivables)$/;
 const REFUND_INTEGER_KEY = /^anomaly_version$/;
+const CHARGEBACK_INTEGER_KEY = /^(?:expected_case_version|chargeback_case_version)$/;
 const RECEIVABLE_INTEGER_KEY = /^(?:expected_receivable_version|receivable_version|receivable_version_before|receivable_version_after)$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -24,8 +25,8 @@ export function integerMoney(value) {
 export function encodeFinanceJSON(value) {
   const seen = new Set();
   const encode = (item, key = '') => {
-    if ((PAYMENT_INTEGER_KEY.test(key) || REFUND_INTEGER_KEY.test(key)) && item !== null && typeof item !== 'number' && typeof item !== 'string') throw new Error('INVALID_FINANCE_AMOUNT');
-    if (MONEY_KEY.test(key) || TOKEN_COMMAND_INTEGER_KEY.test(key) || RECEIVABLE_INTEGER_KEY.test(key) || PAYMENT_INTEGER_KEY.test(key) || REFUND_INTEGER_KEY.test(key) || key === 'expected_version') return item === null ? 'null' : integerMoney(item).toString();
+    if ((PAYMENT_INTEGER_KEY.test(key) || REFUND_INTEGER_KEY.test(key) || CHARGEBACK_INTEGER_KEY.test(key)) && item !== null && typeof item !== 'number' && typeof item !== 'string') throw new Error('INVALID_FINANCE_AMOUNT');
+    if (MONEY_KEY.test(key) || TOKEN_COMMAND_INTEGER_KEY.test(key) || RECEIVABLE_INTEGER_KEY.test(key) || PAYMENT_INTEGER_KEY.test(key) || REFUND_INTEGER_KEY.test(key) || CHARGEBACK_INTEGER_KEY.test(key) || key === 'expected_version') return item === null ? 'null' : integerMoney(item).toString();
     if (item === null || typeof item !== 'object') {
       if (typeof item === 'number' && !Number.isFinite(item)) throw new Error('INVALID_FINANCE_AMOUNT');
       return JSON.stringify(item);
@@ -43,7 +44,7 @@ export function encodeFinanceJSON(value) {
 
 // Personal finance keeps the existing int64 wire contract. Preserve its source
 // digits before JSON.parse; Admin decimal-string money is accepted unchanged.
-export function parseFinanceJSON(text, { paymentIntegers = true, refundIntegers = true } = {}) {
+export function parseFinanceJSON(text, { paymentIntegers = true, refundIntegers = true, chargebackIntegers = true } = {}) {
   let result = '';
   for (let i = 0; i < text.length;) {
     if (text[i] !== '"') { result += text[i++]; continue; }
@@ -56,7 +57,7 @@ export function parseFinanceJSON(text, { paymentIntegers = true, refundIntegers 
     result += token;
     let cursor = i;
     while (cursor < text.length && /\s/.test(text[cursor])) cursor++;
-    if (text[cursor] !== ':' || !(MONEY_KEY.test(JSON.parse(token)) || RECEIVABLE_INTEGER_KEY.test(JSON.parse(token)) || paymentIntegers && PAYMENT_INTEGER_KEY.test(JSON.parse(token)) || refundIntegers && REFUND_INTEGER_KEY.test(JSON.parse(token)))) continue;
+    if (text[cursor] !== ':' || !(MONEY_KEY.test(JSON.parse(token)) || RECEIVABLE_INTEGER_KEY.test(JSON.parse(token)) || paymentIntegers && PAYMENT_INTEGER_KEY.test(JSON.parse(token)) || refundIntegers && REFUND_INTEGER_KEY.test(JSON.parse(token)) || chargebackIntegers && CHARGEBACK_INTEGER_KEY.test(JSON.parse(token)))) continue;
     cursor++;
     while (cursor < text.length && /\s/.test(text[cursor])) cursor++;
     const match = text.slice(cursor).match(/^-?(?:0|[1-9]\d*)(?=\s*[,}\]])/);
@@ -72,8 +73,8 @@ export function parseFinanceJSON(text, { paymentIntegers = true, refundIntegers 
   const validate = value => {
     if (!value || typeof value !== 'object') return;
     for (const [key, child] of Object.entries(value)) {
-      if ((paymentIntegers && PAYMENT_INTEGER_KEY.test(key) || refundIntegers && REFUND_INTEGER_KEY.test(key)) && child !== null && typeof child !== 'number' && typeof child !== 'string') throw new Error('INVALID_FINANCE_AMOUNT');
-      if ((MONEY_KEY.test(key) || RECEIVABLE_INTEGER_KEY.test(key) || paymentIntegers && PAYMENT_INTEGER_KEY.test(key) || refundIntegers && REFUND_INTEGER_KEY.test(key)) && child !== null) integerMoney(child);
+      if ((paymentIntegers && PAYMENT_INTEGER_KEY.test(key) || refundIntegers && REFUND_INTEGER_KEY.test(key) || chargebackIntegers && CHARGEBACK_INTEGER_KEY.test(key)) && child !== null && typeof child !== 'number' && typeof child !== 'string') throw new Error('INVALID_FINANCE_AMOUNT');
+      if ((MONEY_KEY.test(key) || RECEIVABLE_INTEGER_KEY.test(key) || paymentIntegers && PAYMENT_INTEGER_KEY.test(key) || refundIntegers && REFUND_INTEGER_KEY.test(key) || chargebackIntegers && CHARGEBACK_INTEGER_KEY.test(key)) && child !== null) integerMoney(child);
       else validate(child);
     }
   };

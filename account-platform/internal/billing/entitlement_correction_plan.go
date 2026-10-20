@@ -197,6 +197,13 @@ func entitlementCorrectionPlanFrom(ctx context.Context, source entitlementCorrec
 	if hasRefundRepair {
 		return entitlementCorrectionReadPlan{}, ErrConflict
 	}
+	hasChargebackRepair, err := entitlementCorrectionHasChargebackRepairHistory(ctx, source, packageID)
+	if err != nil {
+		return entitlementCorrectionReadPlan{}, err
+	}
+	if hasChargebackRepair {
+		return entitlementCorrectionReadPlan{}, ErrConflict
+	}
 	var journalID uuid.UUID
 	err = source.QueryRow(ctx, `SELECT id FROM journal_entries WHERE business_reference=$1 AND entry_type='RECHARGE'`, sourceReference).Scan(&journalID)
 	if errors.Is(err, pgx.ErrNoRows) {

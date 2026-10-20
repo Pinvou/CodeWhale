@@ -4,6 +4,7 @@ import {
   financialRepairProjectionRows, financialRepairDraftFromProjection,
 } from './admin-financial-repair-form.js';
 
+import { AdminChargebackFinancialRepairForm } from './AdminChargebackFinancialRepairForm.jsx';
 import { AdminRefundExceptionRepairForm } from './AdminRefundExceptionRepairForm.jsx';
 import { AdminPaymentFinancialRepairForm } from './AdminPaymentFinancialRepairForm.jsx';
 import { AdminReceivableWriteOffForm } from './AdminReceivableWriteOffForm.jsx';
@@ -16,6 +17,9 @@ import { requireFinanceID } from './finance-contract.js';
 // The only operator inputs are the target references, the free-text reason and
 // the request key.
 export function AdminFinancialRepairDraftForm(props) {
+  if (props.commandTypes?.length === 1 && props.commandTypes[0] === 'CHARGEBACK_FINANCIAL_REPAIR') {
+    return <AdminChargebackFinancialRepairForm {...props} />;
+  }
   if (props.commandTypes?.length === 1 && props.commandTypes[0] === 'REFUND_EXCEPTION_REPAIR') {
     return <AdminRefundExceptionRepairForm {...props} />;
   }

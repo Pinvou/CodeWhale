@@ -327,7 +327,7 @@ WHERE payment.channel=$1 AND ((forced.resolved_at>=$2 AND forced.resolved_at<$3)
 UNION ALL
 SELECT 'CHARGEBACK',btrim(chargeback.provider_chargeback_id,$7::text),payment.merchant_order_no,payment.id,transaction.amount_fen,transaction.currency,
        jsonb_build_object('payment_order_id',payment.id,'payment_transaction_id',chargeback.payment_transaction_id),to_jsonb(chargeback),
-       COALESCE((SELECT jsonb_agg(to_jsonb(entry) ORDER BY entry.created_at,entry.id) FROM journal_entries entry WHERE entry.business_reference='payment-transaction:'||chargeback.payment_transaction_id::text||':chargeback:'||chargeback.provider_chargeback_id),'[]'::jsonb)
+       COALESCE((SELECT jsonb_agg(to_jsonb(entry) ORDER BY entry.created_at,entry.id) FROM journal_entries entry WHERE entry.business_reference IN ('payment-transaction:'||chargeback.payment_transaction_id::text||':chargeback:'||chargeback.provider_chargeback_id,'chargeback-repair:'||chargeback.id::text)),'[]'::jsonb)
 FROM chargeback_cases chargeback JOIN payment_orders payment ON payment.id=chargeback.payment_order_id JOIN payment_transactions transaction ON transaction.id=chargeback.payment_transaction_id
 WHERE payment.channel=$1 AND ((chargeback.resolved_at>=$2 AND chargeback.resolved_at<$3) OR (btrim(chargeback.provider_chargeback_id,$7::text),payment.merchant_order_no) IN (SELECT reference,merchant FROM jsonb_to_recordset($6::jsonb) AS supplied(reference text,merchant text,kind text) WHERE kind='CHARGEBACK')) AND chargeback.status='CONFIRMED' AND transaction.provider_id=$4 AND transaction.provider_version=$5
 ORDER BY 1,2`, channel, start, end, providerID, providerVersion, references, reconciliationReferenceTrimCharacters)

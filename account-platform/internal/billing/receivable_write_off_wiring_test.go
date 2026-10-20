@@ -400,7 +400,7 @@ func TestReceivableWriteOffFreshActivationIsClosed(t *testing.T) {
 		t.Fatalf("installed refund activation rejected: %v", err)
 	}
 	for i := range snapshot.Activations {
-		if snapshot.Activations[i].CommandType == "CHARGEBACK_FINANCIAL_REPAIR" {
+		if snapshot.Activations[i].CommandType == "RECONCILIATION_FINANCIAL_REPAIR" {
 			snapshot.Activations[i].State = "ACTIVE"
 		}
 	}
