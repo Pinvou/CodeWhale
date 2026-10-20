@@ -49,6 +49,7 @@ pub(crate) mod desktop_remote_state;
 pub(crate) mod desktop_remote_task;
 pub(crate) mod diagnostics;
 pub(crate) mod files;
+pub(crate) mod global_shortcut;
 pub(crate) mod interaction;
 pub(crate) mod knowledge;
 pub(crate) mod marketplace;

@@ -125,6 +125,15 @@ impl AuthenticatedSnapshotFrame<'_> {
 pub(crate) trait ControllingJournalSink: Send + Sync {
     fn publish(&self, frame: &AuthenticatedJournalFrame<'_>) -> Result<(), String>;
 
+    fn publish_task_rejection(
+        &self,
+        _operation: &ControllerOperation,
+        _lease: &LeaseContext,
+        _payload: &Value,
+    ) -> Result<(), String> {
+        Err("remote_rejection_not_configured".into())
+    }
+
     fn publish_capability(
         &self,
         _operation: &ControllerOperation,
@@ -1732,6 +1741,8 @@ fn task_event_projection(lease: &LeaseContext, payload: &Value) -> Option<Value>
         "leaseEpoch": lease.lease_epoch,
         "remoteControlGeneration": lease.remote_control_generation,
         "resultDigest": payload.get("result_digest").and_then(Value::as_str),
+        "rejectionCode": payload.get("rejection_code").and_then(Value::as_str),
+        "clientRequestId": payload.get("client_request_id").and_then(Value::as_str),
         "outcomeUnknown": status == "result_unknown",
     }))
 }
@@ -1873,6 +1884,8 @@ pub(crate) async fn connect_controlling_device(
         let mut on_task = |lease: &LeaseContext, event: Value| {
             if event.get("type").and_then(Value::as_str) == Some("remote_action_result") {
                 let _ = action_sink.publish_action_result(&operation, lease, &event);
+            } else if event.get("rejectionCode").and_then(Value::as_str).is_some() {
+                let _ = action_sink.publish_task_rejection(&operation, lease, &event);
             } else {
                 let _ = manager
                     .with_lane_owner(&operation, || keeper.emit(CONTROLLER_TASK_EVENT, event));
@@ -3570,7 +3583,7 @@ mod tests {
             ControlledBusinessPort, dispatch_decrypted_payload,
         };
 
-        struct TerminalPort;
+        struct TerminalPort(bool);
 
         #[async_trait::async_trait]
         impl ControlledBusinessPort for TerminalPort {
@@ -3605,6 +3618,9 @@ mod tests {
                 payload: &Value,
             ) -> Result<Value, String> {
                 // 与 B 的 RemoteTaskService::status_payload 一致：冻结 wire 形状。
+                if self.0 {
+                    return Err("task_permission_mode_required".to_owned());
+                }
                 Ok(serde_json::json!({
                     "v": 1,
                     "type": "task_status",
@@ -3730,7 +3746,7 @@ mod tests {
         let mut b_lane = EncryptedLane::new(HandshakeRole::B, &lease, b_session).unwrap();
         let (kind, payload) = b_lane.open(&frame, &capabilities).unwrap();
         assert_eq!(kind, "task_submit");
-        let responses = dispatch_decrypted_payload(&TerminalPort, &lease, &kind, &payload)
+        let responses = dispatch_decrypted_payload(&TerminalPort(false), &lease, &kind, &payload)
             .await
             .unwrap();
         assert_eq!(responses.len(), 1);
@@ -3774,11 +3790,30 @@ mod tests {
             )
             .unwrap();
 
+        // A second task is refused before admission. Its encrypted failure
+        // needs no journal event to reach A with both correlation IDs intact.
+        let mut denied = intent.payload.clone();
+        denied["task_id"] = serde_json::json!("task-denied-round-trip");
+        denied["client_request_id"] = serde_json::json!("client-denied-round-trip");
+        denied["request_id"] = serde_json::json!("request-denied-round-trip");
+        let denied_frame = business
+            .seal("task_submit", &denied, &capabilities)
+            .unwrap();
+        let (kind, payload) = b_lane.open(&denied_frame, &capabilities).unwrap();
+        let responses = dispatch_decrypted_payload(&TerminalPort(true), &lease, &kind, &payload)
+            .await
+            .unwrap();
+        assert_eq!(responses.len(), 1);
+        let rejection_frame = b_lane
+            .seal(responses[0].0, &responses[0].1, &capabilities)
+            .unwrap();
+
         // A：保活任务解密并投影到任务状态域。
         let mut lane = TestLane {
             events: VecDeque::from(vec![
                 ControllerLaneEvent::Frame(response_frame.to_string()),
                 ControllerLaneEvent::Frame(journal_frame.to_string()),
+                ControllerLaneEvent::Frame(rejection_frame.to_string()),
             ]),
             ..TestLane::default()
         };
@@ -3812,7 +3847,17 @@ mod tests {
         serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
 
         assert!(session_projections.is_empty());
-        assert_eq!(task_events.len(), 1);
+        assert_eq!(task_events.len(), 2);
+        assert_eq!(task_events[1]["status"], "failed");
+        assert_eq!(task_events[1]["taskId"], "task-denied-round-trip");
+        assert_eq!(
+            task_events[1]["clientRequestId"],
+            "client-denied-round-trip"
+        );
+        assert_eq!(
+            task_events[1]["rejectionCode"],
+            "task_permission_mode_required"
+        );
         assert_eq!(task_events[0]["taskId"], intent.task_id.clone().unwrap());
         assert_eq!(task_events[0]["status"], "succeeded");
         assert_eq!(task_events[0]["sessionId"], session.session_id);

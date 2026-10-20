@@ -311,7 +311,11 @@ test('RemoteProxy system entries exclude tool and lifecycle protocol rows', () =
   for (const kind of ['tool', 'status', 'snapshot_marker']) {
     assert.doesNotMatch(bodyAllowlist, new RegExp(`'${kind}'`));
   }
-  assert.match(systemBranch, /const systemBody = remoteProxySystemBody\(item\)/);
+  assert.match(systemBranch, /const rawBody = remoteProxySystemBody\(item\)/,
+    'failure guidance must start from the allowlisted system body');
+  assert.match(systemBranch, /remotePermissionFailureText\(rawBody, copy\)/);
+  assert.match(systemBranch, /const systemBody = failureHelp \?[^;]+: rawBody;/,
+    'ordinary system rows must retain the allowlisted body');
   assert.match(systemBranch, /data-testid="chat-remote-projection-body"[\s\S]*?\{systemBody\}/);
   assert.doesNotMatch(systemBranch, /dangerouslySetInnerHTML|JSON\.stringify\(item\)/,
     'the presentation branch must not serialize unapproved projection fields');

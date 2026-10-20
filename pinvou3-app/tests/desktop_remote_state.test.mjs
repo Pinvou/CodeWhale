@@ -781,6 +781,7 @@ test('bridge feature gates every desktop call behind the Windows capability', ()
     'adopt_draft_attachment', 'desktop_remote_action_a', 'desktop_remote_client_event',
     'desktop_remote_controlled_capabilities_snapshot', 'desktop_remote_controlled_disconnect_now',
     'desktop_remote_controlled_list_workspaces', 'desktop_remote_controlled_refresh',
+    'desktop_remote_controlled_permissions',
     'desktop_remote_controlled_start', 'desktop_remote_controlled_status', 'desktop_remote_controlled_stop',
     'desktop_remote_controlled_task_send', 'desktop_remote_controlled_task_stop',
     'desktop_remote_controller_capability_send', 'desktop_remote_controller_capability_snapshot',

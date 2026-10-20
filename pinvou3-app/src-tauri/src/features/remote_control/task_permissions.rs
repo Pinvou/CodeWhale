@@ -3,10 +3,62 @@ mod frozen;
 
 use crate::core::mode_state::SerializableMode;
 use crate::features::sessions::SessionStore;
-use crate::platform::prefs::UserPrefs;
+use crate::platform::prefs::{RemoteTaskPermissionPrefs, UserPrefs};
 
 pub(crate) const REQUIRED: &str = "task_permission_mode_required";
 pub(crate) const CHANGED: &str = "task_permission_mode_changed";
+
+/// Enabling B is the explicit authorization boundary, not deserializing prefs.
+/// Preserve an existing Plan choice and persist before starting the listener.
+pub(crate) fn enable_defaults() -> Result<RemoteTaskPermissionPrefs, String> {
+    UserPrefs::update_transaction(|prefs| {
+        validate_existing_settings()?;
+        initialize_defaults(&mut prefs.remote_task_permissions);
+        Ok(())
+    })
+    .map(|prefs| prefs.remote_task_permissions)
+    .map_err(|_| "remote_task_permissions_save_failed".to_owned())
+}
+
+fn initialize_defaults(policy: &mut RemoteTaskPermissionPrefs) {
+    policy.chat.get_or_insert(SerializableMode::Yolo);
+    policy.code.get_or_insert(SerializableMode::Yolo);
+}
+
+/// Called inside the settings transaction's locks. The normal loader tolerates
+/// damaged settings; a permission change must not persist that fallback over
+/// a user's existing configuration.
+fn validate_existing_settings() -> Result<(), String> {
+    let raw = match std::fs::read(crate::platform::paths::settings_path()) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err("remote_task_permissions_save_failed".into()),
+    };
+    let value: serde_json::Value = serde_json::from_slice(&raw)
+        .map_err(|_| "remote_task_permissions_save_failed".to_owned())?;
+    if !value.is_object() {
+        return Err("remote_task_permissions_save_failed".into());
+    }
+    serde_json::from_value::<UserPrefs>(value)
+        .map(|_| ())
+        .map_err(|_| "remote_task_permissions_save_failed".to_owned())
+}
+
+pub(crate) fn save(policy: RemoteTaskPermissionPrefs) -> Result<RemoteTaskPermissionPrefs, String> {
+    // The settings UI saves one lane at a time, including before first enable.
+    // Persist an unconfigured sibling without authorizing it; configured()
+    // still rejects that lane until selected or initialized by explicit enable.
+    if policy.chat.is_none() && policy.code.is_none() {
+        return Err(REQUIRED.to_owned());
+    }
+    UserPrefs::update_transaction(|prefs| {
+        validate_existing_settings()?;
+        prefs.remote_task_permissions = policy;
+        Ok(())
+    })
+    .map(|prefs| prefs.remote_task_permissions)
+    .map_err(|_| "remote_task_permissions_save_failed".to_owned())
+}
 
 pub(crate) fn configured(code: bool) -> Result<SerializableMode, String> {
     let policy = UserPrefs::load().remote_task_permissions;
@@ -90,6 +142,17 @@ pub(crate) fn codex_mode(mode: SerializableMode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn enable_defaults_fills_both_lanes_and_preserves_plan() {
+        let mut policy = RemoteTaskPermissionPrefs::default();
+        initialize_defaults(&mut policy);
+        assert_eq!(policy.chat, Some(SerializableMode::Yolo));
+        assert_eq!(policy.code, Some(SerializableMode::Yolo));
+        policy.chat = Some(SerializableMode::Plan);
+        initialize_defaults(&mut policy);
+        assert_eq!(policy.chat, Some(SerializableMode::Plan));
+        assert_eq!(policy.code, Some(SerializableMode::Yolo));
+    }
     #[test]
     fn local_defaults_do_not_authorize_remote_tasks() {
         let prefs: UserPrefs = serde_json::from_str(r#"{"mode_defaults":{"work":"yolo"},"code_permission":{"last_mode":"yolo","yolo_confirmed":true}}"#).unwrap();

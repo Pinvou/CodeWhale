@@ -52,6 +52,18 @@ import {
 
 const fixtureUrl = new URL("./fixtures/controller-protocol-v1.json", import.meta.url);
 const fixture = JSON.parse(await readFile(fixtureUrl, "utf8"));
+
+test('task rejection preserves closed reason codes and requires failed status and request identity', () => {
+  for (const code of controllerProtocol.TASK_REJECTION_CODES) {
+    const payload = { ...validPayload('task_status'), task_status: 'failed',
+      client_request_id: 'client-rejected', rejection_code: code };
+    assert.doesNotThrow(() => validateControllerPayload(payload, 'B'));
+    assert.throws(() => validateControllerPayload({ ...payload, rejection_code: 'arbitrary_private_error' }, 'B'));
+    assert.throws(() => validateControllerPayload({ ...payload, task_status: 'running' }, 'B'));
+    delete payload.client_request_id;
+    assert.throws(() => validateControllerPayload(payload, 'B'));
+  }
+});
 const ZERO_HASH = "0".repeat(64);
 const ZERO_KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 const ZERO_NONCE = "AAAAAAAAAAAAAAAAAAAAAA==";
