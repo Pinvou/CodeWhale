@@ -2,8 +2,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-const read = name => readFileSync(new URL(`../src-tauri/src/app/commands/${name}.rs`, import.meta.url), 'utf8');
-const feature = name => readFileSync(new URL(`../src-tauri/src/features/${name}.rs`, import.meta.url), 'utf8');
+// Normalize once at the read boundary so all callsite offsets and slices use
+// the same source text, regardless of Git's checkout line endings.
+const readRust = (url, reader = readFileSync) => reader(url, 'utf8').replace(/\r\n/g, '\n');
+const commandUrl = name => new URL(`../src-tauri/src/app/commands/${name}.rs`, import.meta.url);
+const read = name => readRust(commandUrl(name));
+const feature = name => readRust(new URL(`../src-tauri/src/features/${name}.rs`, import.meta.url));
 
 function requiredIndex(source, needle, start = 0) {
   const index = source.indexOf(needle, start);
@@ -20,14 +24,17 @@ function assertBefore(source, first, second) {
   assert(requiredIndex(source, first) < requiredIndex(source, second), `${first} must precede ${second}`);
 }
 
-test('snapshot receipts are recorded only after authenticated projection succeeds', () => {
-  const journal = read('desktop_remote_journal');
+function assertSnapshotReceipts(journal) {
   const snapshot = section(journal, 'fn publish_snapshot(', '#[cfg(test)]\nmod tests');
   assertBefore(snapshot, 'verify_digest()', 'self.project_frame(');
   assertBefore(snapshot, 'AuthenticatedProxyEvent::verify', 'if result.is_ok()');
   assertBefore(snapshot, 'if result.is_ok()', 'track_remote_result_received(');
   assert(snapshot.includes('for event in &frame.snapshot().events'));
   assert(snapshot.includes('event.terminal_status.as_deref()'));
+}
+
+test('snapshot receipts are recorded only after authenticated projection succeeds', () => {
+  assertSnapshotReceipts(read('desktop_remote_journal'));
 });
 
 test('B ingress rejection observes the ledger guard and never invents a B-origin submission', () => {
@@ -45,20 +52,57 @@ test('recovery telemetry uses the injected ledger before consulting live runtime
   const beforeTelemetry = section(journal, 'impl RemoteTaskEventSink for DesktopTaskEventSink', 'self.track_task_once(event, &record)');
   assert(beforeTelemetry.includes('task_telemetry_record(&self.ledger, event)'));
   assert(!beforeTelemetry.includes('.state::<'));
-  const composition = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8');
+  const composition = readRust(new URL('../src-tauri/src/lib.rs', import.meta.url));
   const sink = section(composition, 'DesktopTaskEventSink::new(', 'let recovered = desktop_task_runtime.recover_after_restart()');
   assert(sink.includes('desktop_task_runtime.ledger()'));
 });
 
-test('B local rejection is gated by absence from the durable admission ledger', () => {
-  const task = read('desktop_remote_task');
+function assertLocalRejection(task) {
   const submission = section(task, 'fn submit_prepared_bound_task_inner(', '#[cfg(test)]\nfn admit_bound_task_with_ref');
   assert.match(submission, /if should_report_local_task_rejection\(local_submission, &result, &service\.ledger\(\), task_id\)/);
   const guard = submission.slice(requiredIndex(submission, 'fn should_report_local_task_rejection('));
   assert(guard.includes('local_submission'));
   assert(guard.includes('result.is_err()'));
   assert.match(guard, /matches!\(ledger\.record\(task_id\), Err\(lookup\) if lookup\.code == "task_not_found"\)/);
+}
+
+test('B local rejection is gated by absence from the durable admission ledger', () => {
+  assertLocalRejection(read('desktop_remote_task'));
 });
+
+for (const [name, newline] of [['LF', '\n'], ['CRLF', '\r\n']]) {
+  test(`section contracts accept real Rust source read with ${name} line endings`, () => {
+    for (const [file, check] of [
+      ['desktop_remote_journal', assertSnapshotReceipts],
+      ['desktop_remote_task', assertLocalRejection],
+    ]) {
+      const url = commandUrl(file);
+      const input = readFileSync(url, 'utf8').replace(/\r?\n/g, newline);
+      assert(input.includes(newline));
+      assert.equal(input.includes('\r\n'), name === 'CRLF');
+      check(readRust(url, () => input));
+    }
+  });
+
+  test(`section contracts reject missing boundaries with ${name} line endings`, () => {
+    for (const [file, check, start, end] of [
+      ['desktop_remote_journal', assertSnapshotReceipts, 'fn publish_snapshot(', `#[cfg(test)]${newline}mod tests`],
+      ['desktop_remote_task', assertLocalRejection, 'fn submit_prepared_bound_task_inner(', `#[cfg(test)]${newline}fn admit_bound_task_with_ref`],
+    ]) {
+      const url = commandUrl(file);
+      const input = readFileSync(url, 'utf8').replace(/\r?\n/g, newline);
+      for (const marker of [start, end]) {
+        const missing = input.replace(marker, 'removed_section_boundary');
+        assert.notEqual(missing, input, `${file}: negative control must remove ${marker}`);
+        assert.throws(
+          () => check(readRust(url, () => missing)),
+          /missing contract callsite:/,
+          `${file}: missing section boundary must fail`,
+        );
+      }
+    }
+  });
+}
 
 function assertDurableAdmission(task, journal) {
   const dispatch = section(task, 'fn admit_and_dispatch(', 'let (outcome, mut admission_cleanup)');
