@@ -1933,11 +1933,15 @@ impl ModelManager {
                 }
                 _ => false,
             };
-            if !same_engine {
+            if !same_engine && rec.status == "deployed" {
+                // 已部署状态下引擎版本变了，只换脚本会创建不兼容状态。
                 return Err(ModelManagerError::new(
                     "卡片引擎版本已改变，不能仅更新脚本。已保留原版本和权重。",
                 ));
             }
+            // 「已下载」状态下不拦：智能按钮的更新流程（停止→卸载→更新脚本）
+            // 先卸载了部署再更新脚本，此时没有已装引擎与之冲突。引擎会在下次
+            // 部署时按新脚本的声明自动安装正确版本。
             pkg
         };
         let urls = |files: &BTreeMap<String, db::ScriptBlob>| {
