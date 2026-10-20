@@ -64,7 +64,13 @@ const KEYRING_USERNAME: &str = "hf_token";
 ///    没设过该变量的机器（出厂默认、开发机、CI）完全不受影响。
 fn store_root() -> PathBuf {
     let d = crate::platform::paths::pinvou3_home().join("model-store");
-    let _ = fs::create_dir_all(&d);
+    let _ = {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(&d)
+    };
     d
 }
 
@@ -189,13 +195,25 @@ impl Settings {
 
     pub fn staging_path(&self) -> PathBuf {
         let p = PathBuf::from(&self.staging_dir);
-        let _ = fs::create_dir_all(&p);
+        let _ = {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .recursive(true)
+                .create(&p)
+        };
         p
     }
 
     pub fn models_path(&self) -> PathBuf {
         let p = PathBuf::from(&self.models_dir);
-        let _ = fs::create_dir_all(&p);
+        let _ = {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .recursive(true)
+                .create(&p)
+        };
         p
     }
 }

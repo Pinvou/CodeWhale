@@ -480,10 +480,27 @@ impl ScriptsSource {
         let safe_id = config::safe_path_component(card_id)
             .map_err(|e| ModelManagerError::new(format!("卡片 id 不合法：{e}")))?;
         let dir = config::data_dir().join("cards").join(safe_id);
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| ModelManagerError::new(format!("创建卡片目录失败：{e}")))?;
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .recursive(true)
+                .create(&dir)
+        }
+        .map_err(|e| ModelManagerError::new(format!("创建卡片目录失败：{e}")))?;
 
         let assets = self.asset_contents(policy)?;
+        // Native multi-file cards use CARD_DIR/.runtime. Initialize before any
+        // entry script (including health logging); existing directories are
+        // unchanged and remain subject to the script's identity/mode checks.
+        if assets.contains_key("native_engine_process.py") {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .recursive(true)
+                .create(dir.join(".runtime"))
+                .map_err(|e| ModelManagerError::new(format!("初始化运行目录失败：{e}")))?;
+        }
         script_runner::materialize_assets(&dir, &assets)?;
 
         // 入口脚本也按固定文件名写进包里，这样包内其它脚本也能互相引用

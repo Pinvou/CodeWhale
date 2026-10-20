@@ -971,7 +971,14 @@ pub async fn run_log(
 /// 原始日志只在本机查看；复制/导出另走更严格脱敏后的有界快照。
 pub fn reveal_run_logs_dir() -> Result<Value, String> {
     let dir = run_log_store::logs_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建日志目录失败：{e}"))?;
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(&dir)
+    }
+    .map_err(|e| format!("创建日志目录失败：{e}"))?;
     crate::platform::os::reveal_target(&dir)?;
     Ok(json!({ "path": dir.to_string_lossy() }))
 }
@@ -1139,7 +1146,14 @@ pub fn set_storage_settings(
         }
         // 建不出来就不写进配置。否则要等到下次下载才在脚本里炸，那时的报错
         // （某个 mkdir 失败）离真正的原因——设置页填错了路径——已经很远了。
-        std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建权重目录「{dir}」：{e}"))?;
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .recursive(true)
+                .create(&dir)
+        }
+        .map_err(|e| format!("无法创建权重目录「{dir}」：{e}"))?;
         settings.models_dir = dir;
     }
     if let Some(dirs) = import_scan_dirs {
