@@ -21,6 +21,8 @@ GSA-07 专用审批授权 Relay 的独立凭据、专项就绪与迁移顺序见
 
 公开解析检查（**只 config，不 up/build/run**）：在本目录执行：
 
+受控挂载检查只接受渲染结果中明确的布尔值 `bind.create_host_path: false`，缺字段或 `bind: {}` 均拒绝；不能手工给输出补值绕过检查。Compose 2.39.4 会省略安全的 false，5.4.0 则会省略不安全的 true，两者的空对象语义相反。请使用能够保留显式 false 的 renderer（已用 Compose 5.4.0 真实 config 验证），保持源配置的长语法 `read_only: true` 与 `bind.create_host_path: false`；旧 renderer 的歧义输出须更换 renderer 后从源文件重新渲染。配置检查仍不代表实际部署验收。
+
 ```sh
 docker compose --env-file .env.example --env-file model-token.env.example \
   --env-file ../../test/fixtures/compose-render.env \

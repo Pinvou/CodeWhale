@@ -82,16 +82,26 @@ test('remote remains supported but empty/shared static credentials and native-on
   }
 });
 
-test('native KMS accepts normalized omitted false but rejects unsafe or untyped bind options', () => {
-  const normalized = fixture();
-  for (const service of Object.values(normalized.services)) {
-    for (const volume of service.volumes) delete volume.bind.create_host_path;
-  }
-  checkComposeKMS(normalized);
-  for (const options of [undefined, null, [], Object.create(null), { create_host_path: true },
+test('native KMS requires explicit false and rejects ambiguous or untyped bind options', () => {
+  checkComposeKMS(fixture());
+  for (const options of [undefined, null, [], {}, Object.create(null), { create_host_path: true },
     { create_host_path: 'false' }, { create_host_path: null }, { create_host_path: 0 }, { create_host_path: undefined }]) {
     const c = fixture(); c.services[names[0]].volumes[0].bind = options;
     assert.throws(() => checkComposeKMS(c), /model_token_deployment_kms_mount_unsafe/);
+  }
+});
+
+test('KMS rejects unsafe binds from both real Compose encoding generations', () => {
+  for (const version of ['2.39.4', '5.4.0']) {
+    const rendered = JSON.parse(readFileSync(new URL(`../fixtures/compose-bind/v${version}.json`, import.meta.url), 'utf8'));
+    for (const volume of rendered.services.probe.volumes) {
+      const safe = version === '5.4.0' && volume.target === '/false';
+      assert.equal(isReadOnlyDirectoryBind(volume), safe, `${version} ${volume.target}`);
+      const c = fixture(); c.services[names[0]].volumes[0].bind = volume.bind;
+      if (safe) checkComposeKMS(c);
+      else assert.throws(() => checkComposeKMS(c), /model_token_deployment_kms_mount_unsafe/,
+        `${version} ${volume.target}`);
+    }
   }
 });
 
@@ -141,27 +151,21 @@ test('real Docker Compose merges native without static tokens and validates both
       assert.match(missing.stderr, new RegExp(key), key);
     }
   }
-  // Prove the renderer's representation instead of patching its output in the
-  // test: explicit false omits the bool; true and short syntax must stay unsafe.
+  // Require an unambiguous renderer output; never rewrite omitted fields to
+  // satisfy the checker. True and short syntax must remain unsafe either way.
   const probe = spawnSync(standalone || 'docker', [...(standalone ? [] : ['compose']),
     '--project-name', 'public-bind-config-probe', '-f', '-', 'config', '--format', 'json'], {
     cwd: root, encoding: 'utf8', timeout: 30000,
     env: { ...environment, COMPOSE_CONVERT_WINDOWS_PATHS: '1' },
-    input: YAML.stringify({ services: { probe: {
-      image: 'registry.example.invalid/config-only:never-run',
-      volumes: [
-        { type: 'bind', source: '/opt/fixture-bind-false', target: '/false', read_only: true, bind: { create_host_path: false } },
-        { type: 'bind', source: '/opt/fixture-bind-true', target: '/true', read_only: true, bind: { create_host_path: true } },
-        '/opt/fixture-bind-short:/short:ro',
-      ],
-    } } }),
+    input: readFileSync(new URL('../fixtures/compose-bind/probe.yaml', import.meta.url), 'utf8'),
   });
   assert.equal(probe.error, undefined); assert.equal(probe.status, 0, probe.stderr);
   const volumes = JSON.parse(probe.stdout).services.probe.volumes;
   const find = target => volumes.find(volume => volume.target === target);
+  assert.equal(find('/false').bind.create_host_path, false,
+    'renderer must preserve explicit create_host_path:false; omitted output is ambiguous');
   assert.equal(isReadOnlyDirectoryBind(find('/false')), true);
   for (const target of ['/true', '/short']) {
-    assert.equal(find(target).bind.create_host_path, true);
     assert.equal(isReadOnlyDirectoryBind(find(target)), false);
     const rejected = fixture(); rejected.services[names[0]].volumes[0].bind = find(target).bind;
     assert.throws(() => checkComposeKMS(rejected), /model_token_deployment_kms_mount_unsafe/);
