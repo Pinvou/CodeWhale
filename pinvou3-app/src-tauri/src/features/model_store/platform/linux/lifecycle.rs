@@ -2358,12 +2358,24 @@ impl ModelManager {
         control: script_runner::RunControl,
     ) -> Result<UninstallOutcome, ModelManagerError> {
         let rec = self.get_record(card_id)?;
+        let source = self.local_scripts_source(&rec);
+        let uninstall = source.entry_content("uninstall", source.fetch_policy("uninstall"))?;
+        // Exact published-body backstop for a confirmed destructive version.
+        // Hash the bytes, not cached metadata or the card name. This is NOT a
+        // safety certification for arbitrary other/new card scripts.
+        if script_runner::sha256_hex(&uninstall)
+            == "184de35d3e0844a4a43c8ffc6ab481aeeb65a06843d68410c18fe0f869ec349c"
+        {
+            return Err(ModelManagerError::new(
+                "已拦截存在已知删除风险的旧版卸载脚本：该版本忽略保留权重选项，停用失败后仍会继续删除。\
+                 本次未执行脚本、未停止模型或删除文件。请先获取经过修复的模型卡片包，再继续更新或卸载；无需重新下载现有权重。",
+            ));
+        }
         let mut env = self.env_for_record(&rec);
         env.insert(
             "LMM_PURGE_WEIGHTS".into(),
             if purge_weights { "1" } else { "0" }.into(),
         );
-        let source = self.local_scripts_source(&rec);
 
         // 先量一次基线。**必须在跑脚本之前量**：脚本一跑完目录就没了，事后再
         // 想知道"刚才那儿有多少字节"已经无处可查，只剩下 card.json 里那个标称
@@ -4115,6 +4127,62 @@ exit 0
     }
 
     // ---------------------------------------------- 卸载：保留权重 / 彻底删除
+
+    #[test]
+    fn known_destructive_qwen_uninstall_is_rejected_before_materialization() {
+        let original =
+            include_str!("../../../../../../tests/fixtures/model-store-unsafe-qwen-uninstall.sh");
+        assert_eq!(
+            script_runner::sha256_hex(original),
+            "184de35d3e0844a4a43c8ffc6ab481aeeb65a06843d68410c18fe0f869ec349c"
+        );
+        for purge in [false, true] {
+            let tmp = setup_temp_db();
+            let models = tmp.path().join("models");
+            let weights = models.join("Qwen3.8-27B-NVFP4-Tachyon");
+            make_fake_weights(&weights, 4096);
+            add_stuck_record("unsafe-qwen", "Org/Qwen3.8-27B-NVFP4-Tachyon", 4098);
+            let scripts = BTreeMap::from([
+                (
+                    "uninstall".into(),
+                    db::ScriptBlob {
+                        content: original.into(),
+                        sha256: "forged-metadata".into(),
+                    },
+                ),
+                (
+                    "stop".into(),
+                    db::ScriptBlob {
+                        content:
+                            "#!/bin/bash\necho stop-ran > \"$LMM_MODELS_DIR/stop-ran\"\nexit 70\n"
+                                .into(),
+                        sha256: String::new(),
+                    },
+                ),
+            ]);
+            let assets = BTreeMap::from([("common.sh".into(), db::ScriptBlob {
+                content: "MODEL_DIR=\"$LMM_MODELS_DIR/Qwen3.8-27B-NVFP4-Tachyon\"\nRUNTIME_DIR=\"$LMM_MODELS_DIR/runtime-fixture\"\nDEPLOY_ENV=\"$LMM_MODELS_DIR/env-fixture\"\nENGINE_DIR=\"$LMM_MODELS_DIR/engine-fixture\"\nENGINE_ROOT=\"$LMM_MODELS_DIR/engines-fixture\"\n".into(),
+                sha256: String::new(),
+            })]);
+            db::set_scripts_content("unsafe-qwen", &scripts, &assets).unwrap();
+            db::set_running("unsafe-qwen", true).unwrap();
+            let error = manager_with_models_dir(&models)
+                .uninstall("unsafe-qwen", purge, &mut |_| {}, Default::default())
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("已拦截存在已知删除风险的旧版卸载脚本"),
+                "{error}"
+            );
+            assert!(weights.join("model.safetensors").exists());
+            assert!(!models.join("stop-ran").exists());
+            assert!(!config::data_dir().join("cards/unsafe-qwen").exists());
+            let record = db::get_store_model("unsafe-qwen").unwrap().unwrap();
+            assert!(record.running);
+            assert_eq!(record.status, "deployed");
+        }
+    }
 
     /// 装一条带真脚本的记录，脚本按 `LMM_PURGE_WEIGHTS` 决定删不删权重
     /// ——和六张内置卡的入口脚本用的是同一套约定（规范 4.6）。
