@@ -6,12 +6,20 @@
 #                      即 deb 的基线
 #   GLIBCXX_ <= 3.4.30 (jammy libstdc++, gcc 12)
 #   CXXABI_  <= 1.3.13 (jammy libstdc++, gcc 12)
-# 发布二进制链接构建机 glibc,runner 升级会静默抬高基线;任何超基线的 ELF
-# 在这里于 CI 中失败,而不是在 22.04 用户设备上启动即崩。loongarch64 保持
-# jammy 的 GLIBCXX_/CXXABI_ 基线:其动态链接的 C++ 产物是 unofficial Node
-# bridge 构建,而 ASR 引擎是静态链接(-static-libstdc++ -static-libgcc,
-# 完全没有 GLIBCXX_/CXXABI_ 要求);unofficial Node 构建与其他 ELF 一样按
-# 同一套基线校验(主程序是 Rust)。
+# Release binaries link the build host's glibc, so a runner upgrade silently
+# raises the baseline; any ELF above the floor fails here in CI instead of
+# crashing on launch for 22.04 users. loongarch64 keeps the jammy
+# GLIBCXX_/CXXABI_ floors: its dynamically-linked C++ artifacts are the
+# unofficial Node bridge build and — statically linked — the ASR engine
+# (-static-libstdc++ -static-libgcc, so no GLIBCXX_/CXXABI_ requirements at
+# all); the unofficial Node build is checked against these same floors like
+# every other ELF (the main app binary is Rust).
+# Runs on the release runner (see the
+# glibc floor guard steps in release-packages.yml) and at the end of
+# build-sensevoice-runtime.sh. Depends on dpkg/file/find/readelf, all
+# preinstalled on ubuntu runners (readelf doubles as the machine and the
+# dynamic-symbol probe: it is BFD-independent, so cross-arch trees scan on
+# any host); meaningful only on Linux, use bash -n for a local syntax check.
 set -euo pipefail
 
 usage() {
@@ -38,7 +46,7 @@ case "$expected_arch" in
 esac
 glibc_floor="${glibc_floor_arg:-$default_glibc_floor}"
 
-for command_name in dpkg file find objdump readelf; do
+for command_name in dpkg file find readelf; do
   command -v "$command_name" >/dev/null || {
     echo "missing required command: $command_name" >&2
     exit 1
@@ -56,10 +64,16 @@ display_path() {
 
 dump_dynamic_symbols() {
   local elf="$1" out
-  # LC_ALL=C: objdump 输出被本地化后符号版本字段仍稳定,但报错文案会随环境
-  # 变化;统一 C locale 保证解析与失败判定跨 locale 一致。
-  out="$(LC_ALL=C objdump -T "$elf" 2>&1)" || {
-    echo "FAIL: $(display_path "$elf") objdump 无法解析(文件损坏或 binutils 不支持?):" >&2
+  # readelf, not objdump: readelf parses the ELF structures directly (no BFD
+  # target backend), so it dumps .dynsym of ANY architecture — objdump's BFD
+  # only knows the targets its build enabled, and the x86_64 jammy runner's
+  # binutils has no LoongArch backend (binutils-multiarch's list doesn't
+  # either), so a foreign-arch ELF would fail here with "file format not
+  # recognized" and kill the release job. Versioned symbols print as
+  # "name@GLIBC_2.34" / "name@@GLIBC_2.34", the same shape the version grep
+  # below already parses.
+  out="$(LC_ALL=C readelf -W --dyn-syms "$elf" 2>&1)" || {
+    echo "FAIL: $(display_path "$elf") readelf 无法解析(文件损坏?):" >&2
     printf '%s\n' "$out" >&2
     return 1
   }
