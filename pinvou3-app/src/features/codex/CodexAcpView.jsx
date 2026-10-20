@@ -48,10 +48,10 @@ import {
   createAcpGapResyncScheduler,
   mergeAcpTimelineSnapshot,
   updateAcpAttachmentDraft,
-  redactDisplayError,
   resolveAcpSessionControls,
 } from './acp-state.js';
 import { createAcpTimelineProjector } from './acp-timeline-projector.js';
+import { timelineDisplayError } from '../conversation/deepseek-conversation.js';
 import {
   applyNativeChatEvent,
   appendLocalUserMessage,

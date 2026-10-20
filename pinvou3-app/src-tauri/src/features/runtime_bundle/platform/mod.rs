@@ -2115,11 +2115,10 @@ mod tests {
             r#"{"servers":{"data_analysis":{"command":"python","args":["server.py"]},"weather":{"command":"python","args":["server.py"]}}}"#,
         )
         .unwrap();
-                crate::features::marketplace::scope::save_disabled_bundles_for(
-                    crate::features::marketplace::ConnectorScope::Plain,
-                    &["data_analysis".to_string(), "weather".to_string()],
-                )
-                .unwrap();
+                crate::features::marketplace::save_disabled_connectors(&[
+                    "data_analysis".to_string(),
+                    "weather".to_string(),
+                ]);
 
                 bundle.cleanup_removed_marketplace_tools().unwrap();
 
@@ -2135,9 +2134,7 @@ mod tests {
                     !mcp.contains("data_analysis"),
                     "mcp.json 不应残留 data_analysis server"
                 );
-                let disabled = crate::features::marketplace::scope::load_disabled_bundles_for(
-                    crate::features::marketplace::ConnectorScope::Plain,
-                );
+                let disabled = crate::features::marketplace::load_disabled_connectors();
                 assert!(
                     !disabled.contains(&"data_analysis".to_string()),
                     "disabled_connectors 不应残留 data_analysis"

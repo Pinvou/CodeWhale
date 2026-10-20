@@ -1,8 +1,6 @@
 {
   "schema_version": 1,
-  "migrations": [
-    "rust_dependency_resolution_v1"
-  ],
+  "migrations": ["rust_dependency_resolution_v1"],
   "migration_anchors": {
     "rust_dependency_resolution_v1": "061032e02b60366a8b9a09af134bb8ba4c7a2e19"
   },
@@ -20,13 +18,13 @@
       "assistant->marketplace": 64,
       "assistant->remote_control": 32,
       "assistant->runtime_bundle": 2,
-      "connectors->marketplace": 20,
+      "connectors->marketplace": 8,
       "connectors->runtime_bundle": 7,
       "knowledge->assistant": 9,
       "marketplace->assistant": 1,
       "remote_control->connectors": 2,
       "runtime_bundle->assistant": 2,
-      "runtime_bundle->marketplace": 64
+      "runtime_bundle->marketplace": 60
     },
     "rust_feature_depends_on_app": {},
     "rust_platform_depends_on_upper_layer": {

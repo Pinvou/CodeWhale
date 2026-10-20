@@ -290,29 +290,6 @@ export default function PetWindow({
     ? (t.uiPetSettings.pets[activePet.id]?.name || activePet.name)
     : '';
 
-  useEffect(() => {
-    if (!isTauriAvailable()) return undefined;
-    let disposed = false;
-    let unlisten = null;
-    invokeTauri('get_settings').then((settings) => {
-      const lang = TAG_TO_LANG[settings?.language] || initialSystemLanguage();
-      // en/ja 惰性词典:本窗口入口首帧只引导系统语言,落盘语言可能未装载
-      if (!disposed) ensureLanguage(lang).then((ok) => { if (ok) setLanguage(lang); }).catch(() => {});
-    }).catch(() => {});
-    tauriEvents.listen('ui:language_changed', (event) => {
-      const next = event.payload?.language;
-      // 主窗切换前已 ensure;本窗仍需各自装载(窗口间不共享 dict 装载状态)
-      if (!disposed) ensureLanguage(next).then((ok) => { if (ok) setLanguage(next); }).catch(() => {});
-    }).then((fn) => {
-      if (disposed) fn();
-      else unlisten = fn;
-    }).catch(() => {});
-    return () => {
-      disposed = true;
-      if (unlisten) unlisten();
-    };
-  }, []);
-
   const refresh = () => {
     const now = Date.now();
     const next = deriveActivities(stateRef.current, now, petCopy);
