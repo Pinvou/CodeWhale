@@ -51,7 +51,6 @@ try {
   const {
     appendAcpEvent,
     buildElicitationContent,
-    commandExecutionDetails,
     createAcpEventSeqTracker,
     createAcpGapResyncScheduler,
     mergeAcpTimelineSnapshot,
@@ -60,6 +59,7 @@ try {
     updateAcpAttachmentDraft,
   } = await import(`${pathToFileURL(modulePath).href}?t=${Date.now()}`);
   const {
+    commandExecutionDetails,
     collectToolWorkspaceResources,
     stripTerminalControlSequences,
     toolWorkspaceResources,

@@ -78,10 +78,7 @@ function injectSource() {
         case 'list_marketplace_tools': return Promise.resolve([]);
         case 'get_mode_state': return Promise.resolve({mode:'yolo',plan_phase:'none'});
         case 'get_active_persona': return Promise.resolve(null);
-        // The command returns DeliverableIndex { rows, skipped }: the panel
-        // renders rows and must surface skipped as a partial-result notice.
-        case 'list_deliverable_index_v2':
-        case 'list_deliverable_index': return Promise.resolve({rows: OUTPUTS, skipped: []});
+        case 'list_deliverable_index': return Promise.resolve(OUTPUTS);
         // ---- kb_* ----
         case 'kb_scan_status': return Promise.resolve({running:false,phase:'done',scanned:1248});
         case 'kb_stats': return Promise.resolve({totalFiles:1248,totalBytes:9e9,hashed:1248,duplicateGroups:3,duplicateFiles:7,duplicateWastedBytes:1048576});

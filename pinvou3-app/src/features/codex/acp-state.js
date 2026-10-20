@@ -2,7 +2,6 @@ import {
   countsAsFailedOperation,
   isOperationItemType,
   presentConversationItems,
-  commandExecutionDetails,
 } from '../conversation/conversation-model.js';
 import { timelineDisplayError } from '../conversation/deepseek-conversation.js';
 
@@ -551,5 +550,4 @@ export function buildElicitationContent(groups) {
 }
 
 export {
-  commandExecutionDetails,
 };
