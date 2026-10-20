@@ -447,7 +447,15 @@ impl RunLogFile {
     /// 日志是诊断手段，不是功能；为了记日志而让用户下不了模型是本末倒置。
     pub fn open(run_id: &str, label: &str) -> Option<Self> {
         let dir = logs_dir();
-        if std::fs::create_dir_all(&dir).is_err() {
+        if {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .recursive(true)
+                .create(&dir)
+        }
+        .is_err()
+        {
             return None;
         }
         prune_old_logs(&dir);
