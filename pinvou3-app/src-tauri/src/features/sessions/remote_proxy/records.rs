@@ -6,6 +6,55 @@ use crate::features::sessions::SessionStore;
 use anyhow::{Result, bail};
 
 impl SessionStore {
+    /// Invoked only by the app's AEAD-opened rejection adapter under its exact
+    /// current lane owner guard. Correlate both never-reused IDs and consume
+    /// only an attempted request; receipt persistence and retirement are atomic.
+    pub(crate) fn reject_authenticated_remote_request(
+        &self,
+        id: &str,
+        remote_ref: &str,
+        context: &LiveRemoteContext,
+        task_id: &str,
+        client_request_id: &str,
+        code: &str,
+    ) -> Result<()> {
+        let mut state = self.remote_proxies.lock();
+        require_live_locked(&state, id, remote_ref, context)?;
+        let mut record = state
+            .records
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("unknown RemoteProxy"))?
+            .clone();
+        let disposition = RetiredRequestDisposition::Rejected(code.to_owned());
+        if record.retired_requests.iter().any(|item| {
+            item.task_id == task_id
+                && item.client_request_id == client_request_id
+                && item.disposition == disposition
+        }) {
+            return Ok(());
+        }
+        let index = record
+            .pending
+            .iter()
+            .position(|item| {
+                item.task_id == task_id
+                    && item.client_request_id == client_request_id
+                    && item.dispatch_state == PendingDispatchState::AttemptMayHaveOccurred
+            })
+            .ok_or_else(|| anyhow::anyhow!("rejection does not match an attempted request"))?;
+        if record.retired_requests.len() >= MAX_RETIRED_REQUESTS {
+            bail!("retired remote request capacity reached");
+        }
+        let pending = record.pending.remove(index);
+        record.retired_requests.push(RetiredRemoteRequest {
+            client_request_id: pending.client_request_id,
+            task_id: pending.task_id,
+            request_fingerprint: pending.request_fingerprint,
+            disposition,
+        });
+        persist_changed(&mut state, id, record)
+    }
+
     /// Trusted, single-source list for DEV-31's history adapter. No historic
     /// remote reference or B mapping is exposed to the offline UI.
     pub(crate) fn list_remote_proxy_history(&self) -> Vec<RemoteProxyListItem> {
@@ -42,6 +91,16 @@ impl SessionStore {
                 ui: record.ui.clone(),
                 projection: record.projection.clone(),
                 authenticated_cursor: record.authenticated_cursor.clone(),
+                rejections: record
+                    .retired_requests
+                    .iter()
+                    .filter_map(|item| match &item.disposition {
+                        RetiredRequestDisposition::Rejected(code) => {
+                            Some((item.task_id.clone(), code.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect(),
                 pending_unknown_count: record
                     .pending
                     .iter()
