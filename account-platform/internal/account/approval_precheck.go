@@ -40,6 +40,7 @@ var (
 // owns, so a compromised or mismatched owner response can never be presented as
 // a different resource.
 var approvalPrecheckTargetResourceTypes = map[string]string{
+	"USAGE_SETTLEMENT_REPAIR":          "USAGE_HOLD",
 	"RECONCILIATION_FINANCIAL_REPAIR":  "RECONCILIATION_CASE",
 	"CHARGEBACK_FINANCIAL_REPAIR":      "CHARGEBACK_CASE",
 	"REFUND_EXCEPTION_REPAIR":          "REFUND",
@@ -53,6 +54,8 @@ var approvalPrecheckTargetResourceTypes = map[string]string{
 // wire exactly; empty optional references are dropped instead of being sent as
 // zero values, so the forwarded body carries only the facts the page supplied.
 type ApprovalPrecheckRequest struct {
+	UsageRequestID         string `json:"usage_request_id,omitempty"`
+	LossReviewID           string `json:"loss_review_id,omitempty"`
 	BusinessDate           string `json:"business_date,omitempty"`
 	AnomalyCaseID          string `json:"anomaly_case_id,omitempty"`
 	PaymentEvidenceID      string `json:"payment_evidence_id,omitempty"`
@@ -303,6 +306,18 @@ func decodeApprovalPrecheckResponse(raw []byte, request ApprovalPrecheckRequest)
 			return ApprovalPrecheckProjection{}, ErrApprovalPrecheckInvalid
 		}
 
+	case "USAGE_SETTLEMENT_REPAIR":
+		var selected struct {
+			UsageRequestID string `json:"usage_request_id"`
+			HoldID         string `json:"hold_id"`
+			LossReviewID   string `json:"loss_review_id"`
+			EvidenceKind   string `json:"evidence_kind"`
+			ReasonCode     string `json:"reason_code"`
+		}
+		if json.Unmarshal(wire.NormalizedCommand, &selected) != nil || selected.UsageRequestID != request.UsageRequestID || selected.HoldID != request.TargetResourceID || selected.LossReviewID != request.LossReviewID || selected.EvidenceKind != "LOSS_REVIEW" || selected.ReasonCode != "MISSING_USAGE_SETTLEMENT" {
+			return ApprovalPrecheckProjection{}, ErrApprovalPrecheckInvalid
+		}
+
 	default:
 		return ApprovalPrecheckProjection{}, ErrApprovalPrecheckInvalid
 	}
@@ -329,7 +344,7 @@ func closedApprovalPrecheckDocument(raw json.RawMessage) (json.RawMessage, bool)
 }
 
 func validPrecheckVersion(command string, policy int64, snapshot int) bool {
-	return command == "ENTITLEMENT_COMPONENT_ADJUSTMENT" && policy == 2 && snapshot == 2 || (command == "LEDGER_REPAIR" || command == "RECEIVABLE_WRITE_OFF" || command == "PAYMENT_FINANCIAL_REPAIR" || command == "REFUND_EXCEPTION_REPAIR" || command == "CHARGEBACK_FINANCIAL_REPAIR" || command == "RECONCILIATION_FINANCIAL_REPAIR") && policy == 1 && snapshot == 1
+	return command == "ENTITLEMENT_COMPONENT_ADJUSTMENT" && policy == 2 && snapshot == 2 || (command == "LEDGER_REPAIR" || command == "RECEIVABLE_WRITE_OFF" || command == "PAYMENT_FINANCIAL_REPAIR" || command == "REFUND_EXCEPTION_REPAIR" || command == "CHARGEBACK_FINANCIAL_REPAIR" || command == "RECONCILIATION_FINANCIAL_REPAIR" || command == "USAGE_SETTLEMENT_REPAIR") && policy == 1 && snapshot == 1
 }
 
 func validApprovalPrecheckRequest(request ApprovalPrecheckRequest) bool {
@@ -340,6 +355,9 @@ func validApprovalPrecheckRequest(request ApprovalPrecheckRequest) bool {
 		return false
 	}
 	if request.CommandType != "RECONCILIATION_FINANCIAL_REPAIR" && request.BusinessDate != "" {
+		return false
+	}
+	if request.CommandType != "USAGE_SETTLEMENT_REPAIR" && (request.UsageRequestID != "" || request.LossReviewID != "") {
 		return false
 	}
 	switch request.CommandType {
@@ -383,6 +401,15 @@ func validApprovalPrecheckRequest(request ApprovalPrecheckRequest) bool {
 		}
 		date, err := time.Parse("2006-01-02", request.BusinessDate)
 		return err == nil && date.Format("2006-01-02") == request.BusinessDate && request.ReasonCode == "PROVIDER_REFUND_CONFIRMED" && request.PaymentOrderID == "" && request.TargetJournalEntryID == "" && request.WrongLedgerAccountID == "" && request.CorrectLedgerAccountID == "" && request.AmountMicrocredits == 0 && request.WriteOffMicrocredits == 0 && request.ExpectedVersion == 0
+
+	case "USAGE_SETTLEMENT_REPAIR":
+		if _, ok := validPrecheckIdentifier(request.UsageRequestID); !ok {
+			return false
+		}
+		if _, ok := validPrecheckIdentifier(request.LossReviewID); !ok {
+			return false
+		}
+		return request.ReasonCode == "MISSING_USAGE_SETTLEMENT" && request.PaymentOrderID == "" && request.PaymentEvidenceID == "" && request.TargetJournalEntryID == "" && request.WrongLedgerAccountID == "" && request.CorrectLedgerAccountID == "" && request.AmountMicrocredits == 0 && request.WriteOffMicrocredits == 0 && request.ExpectedVersion == 0
 
 	}
 	return false

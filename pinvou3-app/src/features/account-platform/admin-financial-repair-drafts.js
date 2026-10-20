@@ -54,11 +54,18 @@ export const financialRepairCommands = Object.freeze({
     ],
   },
 
+
   RECONCILIATION_FINANCIAL_REPAIR: {
     targetResourceType: 'RECONCILIATION_CASE', reasonKey: 'resolution_code',
     reasonCode: 'PROVIDER_REFUND_CONFIRMED', targetKey: 'reconciliation_case_id',
     fields: [{ key: 'reconciliation_case_id', kind: 'uuid' }, { key: 'payment_evidence_id', kind: 'uuid' }, { key: 'business_date', kind: 'date' }],
   },
+  USAGE_SETTLEMENT_REPAIR: {
+    targetResourceType: 'USAGE_HOLD', reasonKey: 'reason_code',
+    reasonCode: 'MISSING_USAGE_SETTLEMENT', targetKey: 'hold_id',
+    fields: [{ key: 'usage_request_id', kind: 'uuid' }, { key: 'hold_id', kind: 'uuid' }, { key: 'evidence_kind', kind: 'enum', allowed: ['LOSS_REVIEW'] }, { key: 'loss_review_id', kind: 'uuid' }],
+  },
+
 });
 
 function closedObject(value) {
@@ -115,6 +122,22 @@ export function financialRepairPrecheck(value) {
     if (!validField(normalized[field.key], field)) {
       return null;
     }
+  }
+  if (value.command_type === 'USAGE_SETTLEMENT_REPAIR') {
+    const exactKeys = (object, keys) => Object.keys(object).length === keys.length && keys.every(key => Object.prototype.hasOwnProperty.call(object, key));
+    const timestamp = value => typeof value === 'string' && value.trim() === value && Number.isFinite(Date.parse(value));
+    try {
+      if (normalized.reason_code !== command.reasonCode || critical.policy_version !== 1 ||
+        !exactKeys(critical, ['hold_updated_at', 'loss_review_updated_at', 'facts_digest', 'policy_version']) ||
+        !exactKeys(financial, ['expected_microcredits', 'settled_microcredits', 'settlement_microcredits', 'overage_microcredits', 'wallet_id', 'wallet_version', 'allocations_digest']) ||
+        !timestamp(critical.hold_updated_at) || !timestamp(critical.loss_review_updated_at) ||
+        !/^[0-9a-f]{64}$/.test(critical.facts_digest || '') || !/^[0-9a-f]{64}$/.test(financial.allocations_digest || '') ||
+        !uuidPattern.test(financial.wallet_id || '') || integerMoney(financial.wallet_version) <= 0n ||
+        integerMoney(financial.expected_microcredits) <= 0n || integerMoney(financial.settled_microcredits) < 0n ||
+        integerMoney(financial.settlement_microcredits) !== integerMoney(financial.settled_microcredits) ||
+        integerMoney(financial.overage_microcredits) < 0n ||
+        integerMoney(financial.expected_microcredits) !== integerMoney(financial.settled_microcredits) + integerMoney(financial.overage_microcredits)) return null;
+    } catch { return null; }
   }
   if (value.command_type === 'RECONCILIATION_FINANCIAL_REPAIR') {
     const exactKeys = (object, keys) => Object.keys(object).length === keys.length && keys.every(key => Object.prototype.hasOwnProperty.call(object, key));

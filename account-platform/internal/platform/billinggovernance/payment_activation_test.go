@@ -20,14 +20,13 @@ func TestInstalledPaymentActivationContract(t *testing.T) {
 			}
 		})
 	}
-	for _, command := range []string{"USAGE_SETTLEMENT_REPAIR"} {
+	for _, command := range []string{"UNKNOWN_FINANCIAL_REPAIR"} {
 		t.Run("future-"+command, func(t *testing.T) {
 			s := entitlementFirstDeliverySnapshot()
-			for i := range s.Activations {
-				if s.Activations[i].CommandType == command {
-					s.Activations[i].State = "ACTIVE"
-				}
-			}
+			forged := s.Activations[0]
+			forged.CommandType = command
+			forged.State = "ACTIVE"
+			s.Activations = append(s.Activations, forged)
 			if ValidateSnapshot(s) == nil {
 				t.Fatal("future command became executable")
 			}

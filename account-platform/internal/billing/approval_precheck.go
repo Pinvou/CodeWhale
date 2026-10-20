@@ -29,6 +29,8 @@ type billingApprovalPrecheckRepository interface {
 // send. The decoder rejects unknown fields, so a caller cannot smuggle extra
 // facts into the owner read.
 type billingApprovalPrecheckRequest struct {
+	UsageRequestID         string `json:"usage_request_id,omitempty"`
+	LossReviewID           string `json:"loss_review_id,omitempty"`
 	BusinessDate           string `json:"business_date,omitempty"`
 	AnomalyCaseID          string `json:"anomaly_case_id,omitempty"`
 	PaymentEvidenceID      string `json:"payment_evidence_id,omitempty"`
@@ -80,6 +82,9 @@ func validPrecheckUUID(value string) (uuid.UUID, bool) {
 // disagree about the frozen facts.
 func precheckBillingApprovalCommand(ctx context.Context, repository billingApprovalPrecheckRepository, request billingApprovalPrecheckRequest) (approvalencoding.LegacyProofInput, error) {
 	if request.CommandType != reconciliationFinancialRepairCommand && request.BusinessDate != "" {
+		return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
+	}
+	if request.CommandType != usageSettlementRepairCommand && (request.UsageRequestID != "" || request.LossReviewID != "") {
 		return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
 	}
 	switch request.CommandType {
@@ -177,6 +182,26 @@ func precheckBillingApprovalCommand(ctx context.Context, repository billingAppro
 		}
 		return owner.ReconciliationFinancialRepairProofInput(ctx, ReconciliationFinancialRepairCommandInput{
 			ReconciliationCaseID: caseID, PaymentEvidenceID: evidenceID, BusinessDate: request.BusinessDate,
+		})
+	case usageSettlementRepairCommand:
+		// target_resource_id is the hold the projection is frozen on, exactly as
+		// the other six commands name their target; the usage request and the
+		// unsettled loss review are the evidence references the owner re-reads.
+		holdID, holdOK := validPrecheckUUID(request.TargetResourceID)
+		requestID, requestOK := validPrecheckUUID(request.UsageRequestID)
+		lossReviewID, reviewOK := validPrecheckUUID(request.LossReviewID)
+		if !holdOK || !requestOK || !reviewOK || request.ReasonCode != usageSettlementRepairReason || request.BusinessDate != "" || request.AnomalyCaseID != "" || request.PaymentEvidenceID != "" || request.PaymentOrderID != "" || request.TargetJournalEntryID != "" || request.WrongLedgerAccountID != "" || request.CorrectLedgerAccountID != "" || request.AmountMicrocredits != 0 || request.WriteOffMicrocredits != 0 || request.ExpectedVersion != 0 {
+			return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
+		}
+		owner, ok := repository.(interface {
+			UsageSettlementRepairProofInput(context.Context, UsageSettlementRepairCommandInput) (approvalencoding.LegacyProofInput, error)
+		})
+		if !ok {
+			return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
+		}
+		return owner.UsageSettlementRepairProofInput(ctx, UsageSettlementRepairCommandInput{
+			UsageRequestID: requestID, HoldID: holdID,
+			EvidenceKind: usageSettlementRepairEvidenceKind, LossReviewID: lossReviewID,
 		})
 	}
 	return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable

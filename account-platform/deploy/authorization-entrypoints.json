@@ -1609,6 +1609,12 @@
       "durable": "billing-reconciliation-financial-repair-executor-p1-v1",
       "subject": "account.approval-command.authorized.v1",
       "permission": "internal.event.consume.account-approval-command-authorized"
+    },
+    {
+      "source": "account-platform/cmd/billing-service/main.go",
+      "durable": "billing-usage-settlement-repair-executor-p1-v1",
+      "subject": "account.approval-command.authorized.v1",
+      "permission": "internal.event.consume.account-approval-command-authorized"
     }
   ],
   "cli": [

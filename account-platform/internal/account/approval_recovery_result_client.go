@@ -404,6 +404,35 @@ func validBillingRecoveryPayload(command string, domainResult, ledgerReferences 
 			result.ResolutionCode == "PROVIDER_REFUND_CONFIRMED" && result.RecheckCaseCount == 0 &&
 			lowerHexDigest(result.FactsDigest) && result.LedgerEffect == "NONE" &&
 			result.Status == "SUCCEEDED" && ledger.JournalEntryID == nil
+	case "USAGE_SETTLEMENT_REPAIR":
+		var result struct {
+			CaseID               uuid.UUID  `json:"case_id"`
+			UsageRequestID       uuid.UUID  `json:"usage_request_id"`
+			HoldID               uuid.UUID  `json:"hold_id"`
+			WalletID             uuid.UUID  `json:"wallet_id"`
+			LossReviewID         *uuid.UUID `json:"loss_review_id"`
+			EvidenceKind         string     `json:"evidence_kind"`
+			ExpectedMicrocredits int64      `json:"expected_microcredits"`
+			SettledMicrocredits  int64      `json:"settled_microcredits"`
+			OverageMicrocredits  int64      `json:"overage_microcredits"`
+			AllocationsDigest    string     `json:"allocations_digest"`
+			FactsDigest          string     `json:"facts_digest"`
+			JournalEntryID       uuid.UUID  `json:"journal_entry_id"`
+			ReceivableID         *uuid.UUID `json:"receivable_id"`
+			Status               string     `json:"status"`
+		}
+		var ledger struct {
+			JournalEntryID uuid.UUID `json:"journal_entry_id"`
+		}
+		return decode(domainResult, &result) && decode(ledgerReferences, &ledger) &&
+			result.CaseID != uuid.Nil && result.UsageRequestID != uuid.Nil && result.HoldID != uuid.Nil &&
+			result.WalletID != uuid.Nil && result.LossReviewID != nil && *result.LossReviewID != uuid.Nil &&
+			result.EvidenceKind == "LOSS_REVIEW" && result.ExpectedMicrocredits > 0 &&
+			result.SettledMicrocredits >= 0 && result.OverageMicrocredits >= 0 &&
+			result.SettledMicrocredits+result.OverageMicrocredits == result.ExpectedMicrocredits &&
+			lowerHexDigest(result.AllocationsDigest) && lowerHexDigest(result.FactsDigest) &&
+			result.JournalEntryID != uuid.Nil && result.Status == "SUCCEEDED" &&
+			ledger.JournalEntryID == result.JournalEntryID
 	}
 	return false
 }

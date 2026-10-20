@@ -31,7 +31,7 @@ func TestF09EntitlementThroughProductionPortal(t *testing.T) {
 		{"precheck-required-csrf", "POST", "/api/admin/account/admin/v2/approval-command-prechecks", `{}`, true, false, 403, ""},
 		{"precheck-no-read-alias", "GET", "/api/admin/account/admin/v2/approval-command-prechecks", ``, true, true, 404, ""},
 		{"installed-typed-create", "POST", "/api/admin/approvals/requests", body, true, true, 201, "1"},
-		{"future-command-rejected", "POST", "/api/admin/approvals/requests", strings.Replace(body, "ENTITLEMENT_COMPONENT_ADJUSTMENT", "USAGE_SETTLEMENT_REPAIR", 1), true, true, 400, "1"},
+		{"future-command-rejected", "POST", "/api/admin/approvals/requests", strings.Replace(body, "ENTITLEMENT_COMPONENT_ADJUSTMENT", "UNINSTALLED_FINANCIAL_REPAIR", 1), true, true, 400, "1"},
 		{"create-stale-control-rejected", "POST", "/api/admin/approvals/requests", body, true, true, 400, "2"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

@@ -21,10 +21,10 @@ function errorFromResponse(response, payload) {
 // the original decoding of every other legacy command, including ENT's codec.
 function parseWriteOffApprovalJSON(text, fallback = JSON.parse) {
   const original = fallback(text);
-  if (['RECEIVABLE_WRITE_OFF', 'PAYMENT_FINANCIAL_REPAIR', 'REFUND_EXCEPTION_REPAIR', 'CHARGEBACK_FINANCIAL_REPAIR', 'RECONCILIATION_FINANCIAL_REPAIR'].includes(original?.command_type)) return parseFinanceJSON(text);
-  if (!original?.items?.some(item => ['RECEIVABLE_WRITE_OFF', 'PAYMENT_FINANCIAL_REPAIR', 'REFUND_EXCEPTION_REPAIR', 'CHARGEBACK_FINANCIAL_REPAIR', 'RECONCILIATION_FINANCIAL_REPAIR'].includes(item?.command_type))) return original;
+  if (['RECEIVABLE_WRITE_OFF', 'PAYMENT_FINANCIAL_REPAIR', 'REFUND_EXCEPTION_REPAIR', 'CHARGEBACK_FINANCIAL_REPAIR', 'RECONCILIATION_FINANCIAL_REPAIR', 'USAGE_SETTLEMENT_REPAIR'].includes(original?.command_type)) return parseFinanceJSON(text);
+  if (!original?.items?.some(item => ['RECEIVABLE_WRITE_OFF', 'PAYMENT_FINANCIAL_REPAIR', 'REFUND_EXCEPTION_REPAIR', 'CHARGEBACK_FINANCIAL_REPAIR', 'RECONCILIATION_FINANCIAL_REPAIR', 'USAGE_SETTLEMENT_REPAIR'].includes(item?.command_type))) return original;
   const exact = parseFinanceJSON(text);
-  return { ...original, items: original.items.map((item, i) => ['RECEIVABLE_WRITE_OFF', 'PAYMENT_FINANCIAL_REPAIR', 'REFUND_EXCEPTION_REPAIR', 'CHARGEBACK_FINANCIAL_REPAIR', 'RECONCILIATION_FINANCIAL_REPAIR'].includes(item?.command_type) ? exact.items[i] : item) };
+  return { ...original, items: original.items.map((item, i) => ['RECEIVABLE_WRITE_OFF', 'PAYMENT_FINANCIAL_REPAIR', 'REFUND_EXCEPTION_REPAIR', 'CHARGEBACK_FINANCIAL_REPAIR', 'RECONCILIATION_FINANCIAL_REPAIR', 'USAGE_SETTLEMENT_REPAIR'].includes(item?.command_type) ? exact.items[i] : item) };
 }
 function abortRequestError() {
   if (typeof globalThis.DOMException === 'function') return new globalThis.DOMException('The operation was aborted.', 'AbortError');
@@ -210,7 +210,7 @@ export class AdminPlatformClient {
     return this.mutate('account', '/admin/v2/approval-command-prechecks', 'POST', input, '', signal, 200,
       input?.command_type === ENTITLEMENT_CORRECTION_COMMAND
         ? { encode: encodeEntitlementCorrectionJSON, decode: parseEntitlementCorrectionJSON }
-        : { encode: encodeFinanceJSON, decode: text => parseFinanceJSON(text, { paymentIntegers: ['PAYMENT_FINANCIAL_REPAIR', 'REFUND_EXCEPTION_REPAIR', 'CHARGEBACK_FINANCIAL_REPAIR', 'RECONCILIATION_FINANCIAL_REPAIR'].includes(input?.command_type), refundIntegers: input?.command_type === 'REFUND_EXCEPTION_REPAIR', chargebackIntegers: input?.command_type === 'CHARGEBACK_FINANCIAL_REPAIR' }) });
+        : { encode: encodeFinanceJSON, decode: text => parseFinanceJSON(text, { paymentIntegers: ['PAYMENT_FINANCIAL_REPAIR', 'REFUND_EXCEPTION_REPAIR', 'CHARGEBACK_FINANCIAL_REPAIR', 'RECONCILIATION_FINANCIAL_REPAIR', 'USAGE_SETTLEMENT_REPAIR'].includes(input?.command_type), refundIntegers: input?.command_type === 'REFUND_EXCEPTION_REPAIR', chargebackIntegers: input?.command_type === 'CHARGEBACK_FINANCIAL_REPAIR' }) });
   }
 
 

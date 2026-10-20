@@ -85,6 +85,22 @@ export async function currentApprovalEditDraft(client, detail, reason) {
       projection.reasonCode !== command.reason_code) throw unavailable();
     return entitlementCorrectionApprovalDraft(facts, command.reason_code, reason, `edit:${detail.approval_request_id}`);
   }
+  if (detail.command_type === 'USAGE_SETTLEMENT_REPAIR') {
+    const target = detail.target || { resource_type: detail.target_resource_type, resource_id: detail.target_resource_id };
+    if (!command || target.resource_type !== 'USAGE_HOLD' || !approvalIDPattern.test(target.resource_id) ||
+      command.hold_id !== target.resource_id || !approvalIDPattern.test(command.usage_request_id) ||
+      !approvalIDPattern.test(command.loss_review_id) || command.evidence_kind !== 'LOSS_REVIEW' ||
+      command.reason_code !== 'MISSING_USAGE_SETTLEMENT') throw unavailable();
+    const facts = await client.approvalCommandPrecheck({ command_type: detail.command_type,
+      target_resource_id: command.hold_id, usage_request_id: command.usage_request_id,
+      loss_review_id: command.loss_review_id, reason_code: command.reason_code });
+    const draft = financialRepairApprovalDraft(facts, reason, `edit:${detail.approval_request_id}`);
+    if (draft.command_type !== detail.command_type || draft.target_resource_id !== target.resource_id ||
+      draft.normalized_command.hold_id !== command.hold_id ||
+      draft.normalized_command.usage_request_id !== command.usage_request_id ||
+      draft.normalized_command.loss_review_id !== command.loss_review_id) throw unavailable();
+    return draft;
+  }
   if (detail.command_type === 'RECONCILIATION_FINANCIAL_REPAIR') {
     const target = detail.target || { resource_type: detail.target_resource_type, resource_id: detail.target_resource_id };
     if (!command || target.resource_type !== 'RECONCILIATION_CASE' || !approvalIDPattern.test(target.resource_id) ||

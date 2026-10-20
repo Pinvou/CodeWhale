@@ -412,6 +412,12 @@ func TestReceivableWriteOffFreshActivationIsClosed(t *testing.T) {
 			snapshot.Activations[i].State = "ACTIVE"
 		}
 	}
+	if err := validateApprovalCommandActivationSnapshot(snapshot, now); err != nil {
+		t.Fatalf("installed usage activation rejected: %v", err)
+	}
+	unknown := snapshot.Activations[0]
+	unknown.CommandType = "UNKNOWN_FUTURE_COMMAND"
+	snapshot.Activations = append(snapshot.Activations, unknown)
 	if err := validateApprovalCommandActivationSnapshot(snapshot, now); !errors.Is(err, ErrApprovalActivationUnavailable) {
 		t.Fatal("future activation allowed")
 	}

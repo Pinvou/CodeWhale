@@ -116,7 +116,7 @@ func approvalPresenterAvailable(command string, policyVersion int64, snapshotVer
 	switch command {
 	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
 		return policyVersion == 2 && snapshotVersion == 2
-	case "RECONCILIATION_FINANCIAL_REPAIR", "CHARGEBACK_FINANCIAL_REPAIR", "REFUND_EXCEPTION_REPAIR", "PAYMENT_FINANCIAL_REPAIR", "RECEIVABLE_WRITE_OFF", "LEDGER_REPAIR", "WALLET_ADJUSTMENT", "PAYMENT_PRODUCT_RESUME", "TOKEN_CREDENTIAL_REVOKE":
+	case "USAGE_SETTLEMENT_REPAIR", "RECONCILIATION_FINANCIAL_REPAIR", "CHARGEBACK_FINANCIAL_REPAIR", "REFUND_EXCEPTION_REPAIR", "PAYMENT_FINANCIAL_REPAIR", "RECEIVABLE_WRITE_OFF", "LEDGER_REPAIR", "WALLET_ADJUSTMENT", "PAYMENT_PRODUCT_RESUME", "TOKEN_CREDENTIAL_REVOKE":
 		return policyVersion == 1 && snapshotVersion == 1
 	case "PAYMENT_PROVIDER_RESUME":
 		return policyVersion == 2 && snapshotVersion == 1
@@ -283,6 +283,15 @@ func approvalV2Command(item ApprovalRequest) any {
 			return nil
 		}
 		return approvalReconciliationFinancialRepairSummary{ReconciliationCaseID: id}
+	case "USAGE_SETTLEMENT_REPAIR":
+		if item.TargetResourceType != "USAGE_HOLD" {
+			return nil
+		}
+		id, err := uuid.Parse(value)
+		if err != nil || id == uuid.Nil || id.String() != value {
+			return nil
+		}
+		return approvalUsageSettlementRepairSummary{HoldID: id}
 	}
 	return nil
 }
@@ -443,6 +452,12 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 		command = selected
 	case approvalReconciliationFinancialRepairSummary:
 		selected, e := approvalReconciliationFinancialDetail(target, artifacts.ProofInputJSON)
+		if e != nil {
+			return ApprovalV2Detail{}, e
+		}
+		command = selected
+	case approvalUsageSettlementRepairSummary:
+		selected, e := approvalUsageSettlementDetail(target, artifacts.ProofInputJSON)
 		if e != nil {
 			return ApprovalV2Detail{}, e
 		}
