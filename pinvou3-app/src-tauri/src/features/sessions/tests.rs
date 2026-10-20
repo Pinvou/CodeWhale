@@ -5130,6 +5130,44 @@ fn delete_refuses_case_variant_sched_ids_without_a_record() {
     }
 }
 
+/// The case-variant legs of the remote-namespace gates: ids resolve to file
+/// names without case canonicalization, so on NTFS/APFS a `REMOTE-…` alias
+/// resolves to the same file as the reserved namespace. Every remote gate
+/// (save, delete, session_kind) must therefore classify the alias exactly
+/// like the canonical spelling — otherwise a hand-copied alias file both
+/// escapes the namespace guard and bricks the remote-control subsystem at
+/// startup via the collision probe.
+#[test]
+fn remote_namespace_gates_reject_case_variant_ids() {
+    let (store, _g) = isolated_store();
+    for id in ["REMOTE-ghost", "Remote-ghost", "rEmOtE-ghost"] {
+        let session = chat_model_session(id.to_owned());
+        let error = store
+            .save(&session)
+            .expect_err("a case-variant remote- id must never persist as a local Session");
+        assert!(
+            error.to_string().contains("RemoteProxy cannot be saved"),
+            "the refusal must be the remote-namespace error: {error:#}"
+        );
+        let error = store
+            .delete(id)
+            .expect_err("a case-variant remote- id must never delete through the local path");
+        assert!(
+            error.to_string().contains("RemoteProxy cannot be deleted"),
+            "the refusal must be the remote-namespace error: {error:#}"
+        );
+        let error = store
+            .session_kind(id)
+            .expect_err("a case-variant remote- id must classify as the reserved namespace");
+        assert!(
+            error
+                .to_string()
+                .contains("RemoteProxy record is unavailable"),
+            "the classification must be the reserved-namespace error: {error:#}"
+        );
+    }
+}
+
 /// get-or-create must fail closed on a load error that is not NotFound: a
 /// transient IO failure must never be conflated with "the record is gone" —
 /// with a derived id the creation leg would overwrite the record at the same

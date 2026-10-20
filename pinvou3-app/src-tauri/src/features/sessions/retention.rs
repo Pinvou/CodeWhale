@@ -161,7 +161,7 @@ impl SessionStore {
             .lock()
             .records
             .contains_key(&session.metadata.id)
-            || session.metadata.id.starts_with("remote-")
+            || super::validators::is_remote_session_id(&session.metadata.id)
         {
             bail!("RemoteProxy cannot be persisted as a local Engine/ACP Session");
         }

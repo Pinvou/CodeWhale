@@ -65,6 +65,17 @@ pub fn is_aux_session_id(id: &str) -> bool {
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("aux-"))
 }
 
+/// Case-insensitive `remote-` prefix test — same alias-defeating argument as
+/// [`is_aux_session_id`] (ids resolve to file names without case
+/// canonicalization, so on NTFS/APFS a `REMOTE-…` spelling resolves to the
+/// same file as the reserved namespace). Applied at every remote-namespace
+/// gate: the save/delete guards, `session_kind`, the retention writer, and
+/// the remote_proxy schema/history validators.
+pub fn is_remote_session_id(id: &str) -> bool {
+    id.get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("remote-"))
+}
+
 /// Single-sourced negation for the "global side-effect channel" gates
 /// (memory review, task-completion notification): aux turns must never
 /// trigger them (round-15 MAJOR-4, round-26 minor M3). One helper keeps the

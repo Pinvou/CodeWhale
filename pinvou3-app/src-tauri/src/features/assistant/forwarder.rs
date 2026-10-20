@@ -44,31 +44,6 @@ fn behavior_task_status(status: TurnOutcomeStatus, error: Option<&str>) -> &'sta
     }
 }
 
-#[derive(Default)]
-struct TurnAssistantCollector {
-    text: String,
-}
-
-impl TurnAssistantCollector {
-    fn reset(&mut self) {
-        self.text.clear();
-    }
-
-    fn start_content_block(&mut self, index: usize) {
-        if index == 0 {
-            self.reset();
-        }
-    }
-
-    fn push(&mut self, text: &str) {
-        self.text.push_str(text);
-    }
-
-    fn take(&mut self) -> Option<String> {
-        (!self.text.trim().is_empty()).then(|| std::mem::take(&mut self.text))
-    }
-}
-
 /// Summary detail line for the persistent startup timeline describing a
 /// terminal MCP session-boot receipt. `enabled_servers` counts only enabled
 /// servers: disabled ones are configuration state, not boot participants, and
@@ -343,10 +318,6 @@ pub(crate) fn spawn_event_forwarder(
             .try_state::<crate::features::monitor::MonitorState>()
             .map(|s| s.self_metrics());
         let mut current_turn_id: Option<String> = None;
-        // Last assistant message of the active turn. MessageStarted(index=0)
-        // identifies a new provider response, so tool-loop intermediate text
-        // cannot be mistaken for the final answer.
-        let mut current_assistant = TurnAssistantCollector::default();
         let mut startup_first_output_recorded = false;
         // Dedupe memory for MCP boot receipts: the engine re-reports on every
         // real turn, so only failure-set changes are persisted (see
@@ -448,7 +419,6 @@ pub(crate) fn spawn_event_forwarder(
                     active_transcript_seen = false;
                     active_operation_rejected = false;
                     chat_persistence_error = None;
-                    current_assistant.reset();
                     current_turn_id = Some(turn_id.clone());
                     crate::features::behavior_telemetry::admit_task(&app, &session_id, &turn_id);
                     if let Some(model) = bridge.effective_model_owned() {
@@ -482,11 +452,11 @@ pub(crate) fn spawn_event_forwarder(
                         crate::features::assistant::timing::record_engine_turn_started(&session_id);
                     }
                 }
-                Event::MessageStarted { index } => {
-                    current_assistant.start_content_block(index);
+                Event::MessageStarted { index: _ } => {
+                    // No local projection needs the provider-response boundary:
+                    // the assistant text streams through MessageDelta below.
                 }
                 Event::MessageDelta { content, .. } => {
-                    current_assistant.push(&content);
                     if !content.is_empty() {
                         if !startup_first_output_recorded {
                             crate::features::assistant::timing::record_first_output(&session_id);
@@ -521,7 +491,6 @@ pub(crate) fn spawn_event_forwarder(
                     crate::features::remote_control::forward_app_event(&app, "chat:delta", payload);
                 }
                 Event::ThinkingStarted { index } => {
-                    current_assistant.start_content_block(index);
                     let payload = json!({ "session_id": session_id, "index": index });
                     let _ = app.emit("chat:reasoning_start", payload.clone());
                     crate::features::remote_control::forward_app_event(
@@ -1147,10 +1116,6 @@ pub(crate) fn spawn_event_forwarder(
                         })
                         .flatten();
                     let shell_turn_id = current_turn_id.clone();
-                    // Capture the last assistant message from this exact event
-                    // stream. It is independent of transcript compaction and
-                    // cannot fall back to a previous turn's persisted answer.
-                    let remote_assistant_text = current_assistant.take();
                     #[cfg(feature = "benchmark-hooks")]
                     if let Some(turn_id) = shell_turn_id.as_ref() {
                         first_delta_done.remove(turn_id);
@@ -1495,16 +1460,6 @@ pub(crate) fn spawn_event_forwarder(
                         // must go out first or the frontend stays busy
                         // forever.
                         let generation = turn_lifecycle.current_turn_generation().unwrap_or(0);
-                        if let Some(text) = remote_assistant_text.as_deref() {
-                            let _ = app.emit(
-                                "chat:remote_turn_assistant",
-                                json!({
-                                    "session_id": session_id,
-                                    "generation": generation,
-                                    "text": text,
-                                }),
-                            );
-                        }
                         turn_lifecycle.finish_terminal_emission();
                         emit_chat_terminal(
                             &app,
@@ -2182,37 +2137,6 @@ mod transcript_commit_tests {
             )
             .is_err()
         );
-    }
-}
-
-#[cfg(test)]
-mod remote_assistant_tests {
-    use super::TurnAssistantCollector;
-
-    #[test]
-    fn collector_keeps_only_the_current_turns_last_model_response() {
-        let mut collector = TurnAssistantCollector::default();
-        collector.start_content_block(0);
-        collector.push("first turn answer");
-        assert_eq!(collector.take().as_deref(), Some("first turn answer"));
-
-        collector.reset();
-        collector.start_content_block(0);
-        collector.push("tool-loop preface");
-        collector.start_content_block(0);
-        collector.push("## Final\n\n| A | B |");
-        assert_eq!(collector.take().as_deref(), Some("## Final\n\n| A | B |"));
-        assert_eq!(collector.take(), None);
-    }
-
-    #[test]
-    fn thinking_first_response_resets_prior_assistant_text() {
-        let mut collector = TurnAssistantCollector::default();
-        collector.push("stale");
-        collector.start_content_block(0);
-        collector.start_content_block(1);
-        collector.push("fresh");
-        assert_eq!(collector.take().as_deref(), Some("fresh"));
     }
 }
 

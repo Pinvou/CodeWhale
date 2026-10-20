@@ -93,11 +93,12 @@ mod tests {
 
     #[test]
     fn reaper_uses_the_controller_clock_not_a_second_origin() {
-        assert_eq!(
-            monotonic_millis as fn() -> u64 as usize,
-            crate::features::remote_control::controller::clock::monotonic_millis as fn() -> u64
-                as usize
-        );
+        // 与 capabilities/task 的再导出做跨模块指针比较：一旦本模块重新引入
+        // 私有时钟实现，该断言立刻失败（同 desktop_remote_capabilities 的守卫）。
+        assert!(std::ptr::fn_addr_eq(
+            monotonic_millis as fn() -> u64,
+            super::super::desktop_remote_task::monotonic_millis as fn() -> u64
+        ));
         let before = crate::features::remote_control::controller::clock::monotonic_millis();
         let reaper_now = monotonic_millis();
         let after = crate::features::remote_control::controller::clock::monotonic_millis();

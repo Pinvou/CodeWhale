@@ -742,3 +742,97 @@ async fn endpoint_rotation_round_trip(
     assert_lifecycle_route(&mut restarted_socket, &mut restarted).await;
     drop(restarted);
 }
+
+/// The connection-level controller-lane outage signal (synthesized locally when
+/// the relay negotiates only legacy v2, or relay-sent for a deployment without
+/// the controller dispatcher) must reach the bound controller channel without
+/// poisoning the web endpoint status; endpoint-scoped legacy errors keep their
+/// existing status projection and stay out of the controller lane.
+///
+/// The driver builds the host and the manager so this fixture never names a
+/// host type: the architecture guard permits exactly one such factory here.
+pub(crate) async fn controller_lane_outage_round_trip<T>(
+    build_relay: impl FnOnce() -> (RemoteControlManager, T),
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/relay", listener.local_addr().unwrap());
+    // Process-private overrides only. Both persisted and active configs are
+    // loopback, so even a failure cannot schedule revocation at a real host.
+    unsafe {
+        std::env::set_var("PINVOU3_HOME", directory.path());
+        std::env::set_var("PINVOU_REMOTE_RELAY_WS_URL", &url);
+        std::env::set_var("PINVOU_REMOTE_RUNTIME_RELAY_WS_URL", &url);
+    }
+    // The driver owns host construction. Keep its guard alive through the lane.
+    let (relay, _host) = build_relay();
+    let mut channel = relay
+        .start_controller_relay("generation-lane-outage")
+        .await
+        .unwrap();
+    let _owned = OwnedLane {
+        relay: relay.clone(),
+        generation: "generation-lane-outage".into(),
+        worker: None,
+    };
+    let mut socket = accept(&listener).await;
+    registered(&mut socket).await;
+
+    // relay_client::notify_controller_unavailable 的精确帧形状：
+    // v2、无 endpoint_id、无 request_id。
+    let signal = json!({"v":2,"type":"error","code":"desktop_controller_unavailable",
+        "message":"desktop controller is unavailable"});
+    send(&mut socket, &signal).await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let frame = channel
+                .recv()
+                .await
+                .expect("controller lane must stay open");
+            if frame == signal {
+                return;
+            }
+            assert!(matches!(
+                frame["type"].as_str(),
+                Some("desktop_relay_connection" | "desktop_endpoint_registered")
+            ));
+        }
+    })
+    .await
+    .expect("controller-lane outage signal did not reach the bound channel");
+    // One socket's frames are processed in order: observing the signal means
+    // the earlier registration projection is already committed.
+    let status = relay.status();
+    assert_eq!(
+        status.status,
+        crate::features::remote_control::protocol::WebAccessStatusKind::WaitingWebClient,
+        "connection-level controller-lane signal must not poison web endpoint status"
+    );
+    assert_eq!(status.last_error, None);
+
+    // 同 code 但带匹配 endpoint_id 的帧仍是端点级 legacy 错误：保持原有状态
+    // 投影，且不进入 controller 通道。
+    let scoped = json!({"v":2,"type":"error","code":"desktop_controller_unavailable",
+        "message":"endpoint-scoped outage",
+        "endpoint_id":relay.controller_endpoint_id().unwrap()});
+    send(&mut socket, &scoped).await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while relay.status().status
+            != crate::features::remote_control::protocol::WebAccessStatusKind::Error
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("endpoint-scoped legacy error kept its status projection");
+    assert_eq!(
+        relay.status().last_error.as_deref(),
+        Some("endpoint-scoped outage")
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), channel.recv())
+            .await
+            .is_err(),
+        "endpoint-scoped legacy error must not enter the controller lane"
+    );
+}
