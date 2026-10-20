@@ -336,7 +336,7 @@ pub fn sanitize_for_export(line: &str) -> String {
     redact_private_hosts(&broad)
 }
 
-/// 把点分四段的 IPv4 换掉。**不区分公网私网**：公网 IP 一样是可定位信息，而区分
+/// 隐藏 IPv4 / IPv6。**不区分公网私网**：公网 IP 一样是可定位信息，而区分
 /// 需要一张会过期的网段表——那张表漏一条就是一次泄漏。
 fn redact_private_hosts(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
@@ -346,7 +346,7 @@ fn redact_private_hosts(line: &str) -> String {
             out.push(' ');
         }
         first = false;
-        if looks_like_ipv4(word) {
+        if contains_ip_address(word) {
             out.push_str("[HOST]");
         } else {
             out.push_str(word);
@@ -355,24 +355,40 @@ fn redact_private_hosts(line: &str) -> String {
     out
 }
 
-/// 这个词里是不是嵌着一个点分四段的 IPv4。
-///
-/// 按 `.` 切之后逐段看：四段纯数字且都 ≤ 255 才算。**版本号不能误伤**——
-/// `v0.8.5` 只有三段，`1.2.3.4` 确实会被当成 IP 抹掉，但那个形状在日志里做版本号
-/// 的概率远低于做地址。
-fn looks_like_ipv4(word: &str) -> bool {
-    let core = word.trim_matches(|c: char| !c.is_ascii_digit() && c != '.');
-    let mut segments = 0;
-    for segment in core.split('.') {
-        if segment.is_empty() || segment.len() > 3 || !segment.bytes().all(|b| b.is_ascii_digit()) {
-            return false;
+/// 地址可能出现在 URL、端口、参数或中文标点中，不能只修剪整词两端。
+/// 找出 ASCII 地址候选后用标准库验证；含地址的整个词按导出的保守策略隐藏。
+/// IPv6 zone 在 `%` 处结束，地址部分仍可识别。不识别/猜测主机名。
+fn contains_ip_address(word: &str) -> bool {
+    let bytes = word.as_bytes();
+    for ipv6 in [false, true] {
+        let candidate_byte = |byte: u8| {
+            if ipv6 {
+                byte.is_ascii_hexdigit() || matches!(byte, b':' | b'.')
+            } else {
+                byte.is_ascii_digit() || byte == b'.'
+            }
+        };
+        let mut cursor = 0;
+        while cursor < bytes.len() {
+            if !candidate_byte(bytes[cursor]) {
+                cursor += 1;
+                continue;
+            }
+            let start = cursor;
+            while cursor < bytes.len() && candidate_byte(bytes[cursor]) {
+                cursor += 1;
+            }
+            // ASCII spans always begin/end at UTF-8 boundaries, including when
+            // non-ASCII log text surrounds them. A final full stop is prose.
+            let candidate = word[start..cursor].trim_end_matches('.');
+            if (!ipv6 && candidate.parse::<std::net::Ipv4Addr>().is_ok())
+                || (ipv6 && candidate.parse::<std::net::Ipv6Addr>().is_ok())
+            {
+                return true;
+            }
         }
-        if segment.parse::<u16>().unwrap_or(999) > 255 {
-            return false;
-        }
-        segments += 1;
     }
-    segments == 4
+    false
 }
 
 /// 单行截断 + 去掉换行/回车/制表（一行日志必须是一行）。
@@ -642,6 +658,44 @@ mod tests {
         assert!(sanitize_for_disk("ssh 192.168.31.42 失败").contains("192.168.31.42"));
         // 版本号不能误伤
         assert!(sanitize_for_export("vllm/vllm-openai:v0.8.5").contains("v0.8.5"));
+    }
+
+    #[test]
+    fn export_host_filter_covers_urls_ports_flags_and_ipv6() {
+        for address in [
+            "192.168.31.42:18080",
+            "http://192.168.31.42:18080/v1/models",
+            "--worker=192.168.31.42",
+            "连接192.168.31.42失败",
+            "[2001:db8::42]:18080",
+            "http://[2001:db8::42]:18080/v1",
+            "--host=fe80::42%eth0",
+            "::1",
+            "::ffff:192.168.31.42",
+        ] {
+            assert_eq!(redact_private_hosts(address), "[HOST]", "{address}");
+            assert!(
+                !contains_ip_address(&sanitize_for_export(address)),
+                "{address}"
+            );
+        }
+    }
+
+    #[test]
+    fn export_host_filter_keeps_non_addresses() {
+        for text in [
+            "v0.8.5",
+            "256.168.31.42",
+            "dead:beef",
+            "12:34:56",
+            "中文正文",
+        ] {
+            assert_eq!(redact_private_hosts(text), text);
+        }
+        assert_eq!(
+            redact_private_hosts("worker=192.168.31.42:80 连接失败 code=70"),
+            "[HOST] 连接失败 code=70"
+        );
     }
 
     /// `mkdir -p <目录>` 的目录名不许被抹掉。

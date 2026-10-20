@@ -117,7 +117,7 @@ pub fn humanize_script_message(raw: &str) -> String {
         _ => raw.to_string(),
     };
 
-    let lowered = text.to_lowercase();
+    let lowered = diagnostic_text(&text.to_lowercase());
     for (keyword, translation) in SCRIPT_ERROR_PATTERNS {
         if contains_as_word(&lowered, keyword) {
             return translation.to_string();
@@ -297,20 +297,23 @@ fn is_advice_line(lowered: &str, has_error_signal: bool) -> bool {
 /// 给一行打分：越大越像"失败的真正原因"。
 fn failure_line_score(line: &str) -> i32 {
     let lowered = line.to_lowercase();
-    if is_noise_line(&lowered) {
-        return -12;
-    }
+    let diagnostic = diagnostic_text(&lowered);
     let mut score = 0;
     // 能翻成人话的已知原因，价值最高
     let known_cause = SCRIPT_ERROR_PATTERNS
         .iter()
-        .any(|(keyword, _)| contains_as_word(&lowered, keyword));
+        .any(|(keyword, _)| contains_as_word(&diagnostic, keyword));
     if known_cause {
         score += 6;
     }
     let has_error_token = ERROR_TOKENS
         .iter()
-        .any(|token| contains_as_word(&lowered, token));
+        .any(|token| contains_as_word(&diagnostic, token));
+    // Progress vocabulary can occur in an actual failure ("failed extracting",
+    // "waiting ... connection refused"). Only signal-free progress is noise.
+    if !known_cause && !has_error_token && is_noise_line(&lowered) {
+        return -12;
+    }
     if has_error_token {
         score += 3;
     }
@@ -349,6 +352,42 @@ pub fn pick_failure_line<'a>(lines: &'a [String]) -> Option<&'a str> {
     best.map(|(_, text)| text)
 }
 
+/// Match diagnostic prose, not path/URL/option spellings. Keep the original line
+/// for display and advice detection. This is a lexical filter, not a shell parser:
+/// slash/backslash paths, assignments and dash options are opaque tokens; quoted
+/// paths may contain spaces. A placeholder prevents joining phrases across them.
+fn diagnostic_text(text: &str) -> String {
+    let mut path_quote = None;
+    text.split_whitespace()
+        .map(|part| {
+            if let Some(quote) = path_quote {
+                if part.contains(quote) {
+                    path_quote = None;
+                }
+                return "\u{fffc}";
+            }
+            let token = part.trim_matches(|c: char| {
+                matches!(c, '\'' | '"' | '`' | '[' | ']' | '(' | ')' | ',' | ';')
+            });
+            let path = token.contains('/') || token.contains('\\');
+            if path {
+                let start = part.trim_start_matches(['[', '(']);
+                if let Some(quote @ ('\'' | '"' | '`')) = start.chars().next() {
+                    if !start[quote.len_utf8()..].contains(quote) {
+                        path_quote = Some(quote);
+                    }
+                }
+            }
+            if path || token.contains('=') || token.starts_with('-') {
+                "\u{fffc}"
+            } else {
+                part
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// 关键词必须作为**独立的词**出现，不能是别的单词的一部分。
 ///
 /// 真实踩过的坑：双机卡卸载失败时脚本打出的是
@@ -361,15 +400,8 @@ pub fn pick_failure_line<'a>(lines: &'a [String]) -> Option<&'a str> {
 /// 不算命中，`timeout:` 和 `(timeout)` 算；keyword 本身含空格（如
 /// `no space left on device`）时同样适用。
 ///
-/// **修掉的只有"字母数字粘连"这一类**——`ConnectTimeout`、`StrictHostKeyChecking`、
-/// `timeouts`、`xtimeout`。这条注释原来还写着它能挡住"路径里带 unauthorized 的模型名、
-/// URL 里带 timeout 的查询参数"，那是夸大：`-`、`=`、`/`、`?`、`.` 在这个判据下**都算
-/// 边界**，所以 `models/unauthorized-model`（d 后面是 `-`）和 `?timeout=30`
-/// （`?` 在前、`=` 在后）照样命中，照样被翻成「没有访问权限」/「操作超时」。
-///
-/// 要连这一类一起挡住，就不是收紧边界字符集能了的（`-` 和 `/` 在真实的错误句子里
-/// 本来就是合法的词间分隔），得动"拿整段命令行/URL 当输入去猜原因"这个前提本身。
-/// 那是行为变更，另案处理；在此之前别把这里读成"误伤已经没有了"。
+/// 此处只处理字母数字粘连和 UTF-8 边界；路径、URL 和选项由调用方先经
+/// [`diagnostic_text`] 排除，不把元数据中的标点误当诊断词边界。
 fn contains_as_word(haystack: &str, keyword: &str) -> bool {
     let bytes = haystack.as_bytes();
     let mut from = 0;
@@ -426,6 +458,102 @@ fn strip_error_prefix(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_keywords_do_not_outrank_a_real_diagnostic() {
+        for metadata in [
+            "Downloading models/unauthorized-model/weights.gguf",
+            "GET https://example.invalid/models?timeout=30",
+            "+ curl --timeout 30 https://example.invalid",
+            "Options: timeout=30 --unauthorized-cache",
+            r#"Opening "C:\models\unauthorized model\timeout.gguf""#,
+        ] {
+            let lines = vec![
+                "ERROR: tokenizer initialization failed".into(),
+                metadata.into(),
+            ];
+            assert_eq!(
+                pick_failure_line(&lines),
+                Some(lines[0].as_str()),
+                "{metadata}"
+            );
+            assert!(failure_line_score(metadata) <= 0, "{metadata}");
+        }
+    }
+
+    #[test]
+    fn metadata_keywords_do_not_invent_a_humanized_cause() {
+        for metadata in [
+            "models/unauthorized-model",
+            "https://example.invalid/?timeout=30",
+            "--timeout=30",
+            "--unauthorized",
+            "timeout=30",
+            r#""/models/unauthorized cache/timeout""#,
+        ] {
+            let raw = format!("ERROR: 模型初始化失败，输入 {metadata}");
+            assert_eq!(
+                humanize_script_message(&raw),
+                raw.strip_prefix("ERROR: ").unwrap(),
+                "{metadata}"
+            );
+        }
+    }
+
+    #[test]
+    fn command_arguments_do_not_override_the_exit_diagnostic() {
+        let raw = "Worker: Command ['ssh', '--timeout', '30', '/models/unauthorized'] returned non-zero exit status 255";
+        assert_eq!(
+            humanize_script_message(raw),
+            "无法连接到从机，请检查从机是否开机、直连网线和网口是否正常"
+        );
+        assert_eq!(
+            humanize_script_message("GET https://example.invalid/?unauthorized=1: request timeout"),
+            "操作超时，请稍后重试"
+        );
+    }
+
+    #[test]
+    fn progress_words_inside_errors_are_not_noise() {
+        for diagnostic in [
+            "ERROR: failed extracting archive",
+            "ERROR: waiting for worker failed",
+            "ERROR: extracting: no space left on device",
+            "ERROR: waiting for server: connection refused",
+            "ERROR: destination already exists",
+            "错误：等待 extracting 阶段失败",
+        ] {
+            let lines = vec![diagnostic.into(), "7e1f8fb7d4ba: Waiting".into()];
+            assert_eq!(pick_failure_line(&lines), Some(diagnostic), "{diagnostic}");
+            assert!(failure_line_score(diagnostic) > 0, "{diagnostic}");
+        }
+    }
+
+    #[test]
+    fn diagnostic_context_keeps_real_causes_priority_and_advice() {
+        for (raw, expected) in [
+            ("request timeout after 30s", "操作超时，请稍后重试"),
+            ("HTTP 401 Unauthorized", "没有访问权限，请检查凭据配置"),
+            (
+                "ERROR: /tmp/model: permission denied",
+                "权限不足，请检查当前用户权限（比如是否需要加入 docker 用户组）",
+            ),
+            (
+                "GET https://example.invalid: dial tcp: i/o timeout",
+                "操作超时，请稍后重试",
+            ),
+        ] {
+            assert_eq!(humanize_script_message(raw), expected);
+        }
+        let lines = vec![
+            "ERROR: extracting: no space left on device".into(),
+            "请检查 timeout 配置后重试".into(),
+        ];
+        assert_eq!(
+            humanize_script_message(pick_failure_line(&lines).unwrap()),
+            "磁盘空间不足"
+        );
+    }
 
     #[test]
     fn matches_known_keywords() {
