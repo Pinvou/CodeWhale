@@ -190,6 +190,31 @@ assert_loongarch_elf() {
     || fail "$elf is not a LoongArch64 ELF (readelf Machine: '${machine:-<none>}')"
 }
 
+# ---- link smoke (seconds; the release path's canary for the link env) ---------
+# The pr-check legs are check-only and never link, so without this probe the
+# release job's first link is a full knowledge-server compile — the worst
+# place to discover a broken cross link environment. The tiny link exercises
+# the whole chain end to end: the wrapper linker exec chain (TRIPLE-gcc with
+# the lld-shim -B dir, whose runtime rustc-sysroot resolution is also
+# fail-closed), startfiles from the cross toolchain's bundled relocatable
+# glibc, and R_LARCH_CALL36 resolution through rust-lld. It reuses the same
+# flags the cargo builds below actually see — the job-level RUSTFLAGS remap
+# (see the workflow env; upstream #731's target-scoped rustflags/--sysroot
+# redesign is intentionally not ported: this repo links the bundled toolchain
+# glibc and keeps ld-script bare-name resolution in the sysroot script
+# instead). Word-splitting of RUSTFLAGS is intentional — cargo consumes it
+# the same way. Runs from the repo root so rustup resolves the same pinned
+# toolchain the cargo builds use.
+smoke_dir="$(mktemp -d)"
+printf 'fn main() {}\n' > "$smoke_dir/hello.rs"
+(cd "$REPO_ROOT" && rustc --target "$TRIPLE" \
+  -C linker="$cargo_linker" ${RUSTFLAGS:-} \
+  -o "$smoke_dir/hello" "$smoke_dir/hello.rs") \
+  || fail "cross link smoke failed: the loong64 link environment is broken (see the error above)"
+assert_loongarch_elf "$smoke_dir/hello"
+rm -rf -- "$smoke_dir"
+log "link smoke passed"
+
 # ---- 3. knowledge server (exact target triple) --------------------------------
 if [ "${PINVOU_LOONG64_SKIP_KNOWLEDGE_BUILD:-0}" = "1" ]; then
   log "step 3: skipped by PINVOU_LOONG64_SKIP_KNOWLEDGE_BUILD (reusing an earlier build)"
