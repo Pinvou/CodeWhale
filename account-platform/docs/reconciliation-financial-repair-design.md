@@ -49,6 +49,8 @@
 | 零账务证明 | 有限真实 PG 验证中，结案前后按 §3 禁止清单逐表比较完整行快照（含 `wallets.version` 与 `receivables.settled/outstanding`）；不是运行时全库扫描 |
 | 幂等 | 该案件无既有 `reconciliation_repair_cases`，`reconciliation_cases.status='OPEN'` 且 `resolved_at IS NULL` |
 
+存量 `BILL` 证据的 `provider_refund_id` 若严格为 SQL `NULL`，只读解析同一不可变 `payload_snapshot` 的 `REFUND` 账单，按既有 `billReference` 规则取得引用（先 `provider_reference_id`，为空时使用原 `channel_transaction_id` 回退）；原 Provider/版本、渠道、商户单号、渠道交易、金额、币种、成功状态、证据 ID 与摘要检查仍全部适用。列已有值时仍须为原规范值且与账单引用完全相同，不以替代路径绕过矛盾字段。不会回填或重写历史证据，重复导入的 `DO NOTHING` 也不被改成更新。
+
 判据全部由 Billing 从持久事实重算；proof 不接受浏览器提供的金额、Provider 文本或内部订单号，执行期不调用 Provider。
 
 ## 5. closed command / snapshot / proof / presenter（冻结）
@@ -103,7 +105,8 @@
 ### 7.2 状态推进
 
 - 只允许 `reconciliation_cases.status: OPEN → RESOLVED` 并推进 `version`、更新 `updated_at`；关联手审单同事务更新 `status='RESOLVED'`、`resolved_at` 与 `updated_at`；`resolution_code='PROVIDER_REFUND_CONFIRMED'` 写入 `manual_review_case_events.details` 和不可变修复记录，手审表本身没有 `resolution` 列；`IGNORED`、重复结案、`resolution` 复用其它取值一律拒绝。
-- 既有对账运行/比对链路（`RunReconciliation`）与 `reconciliation_cases` 的其它写入者保持原语义；本命令不改 run 计数、不改其它案件。
+- 同一不可变差异已有 `EXECUTED` 修复回执时，后续对账观测仍持久化，并建立新的 run/案件关联及观测进度，但不得将该精确案件及关联手审从 `RESOLVED` 重开。它接受的是已有外部处置的精确事实，不是抹去原始差异或新增资金效果。
+- 无修复回执的普通 `RESOLVE` 保留原观测版本与复发重开规则；金额、来源等稳定事实变化产生另一 digest，仍可建立新的 `OPEN` 案件。既有 run 计数和其它案件语义保持，不用旧回执接受新事实。
 
 ## 8. 失败分类与 DLQ 收口（GSA-16 合同）
 

@@ -367,14 +367,21 @@ func (p *PaymentCoordinator) persistStableReconciliationCase(ctx context.Context
 	}
 	var status string
 	var version int64
-	if err := tx.QueryRow(ctx, `SELECT status,version FROM reconciliation_cases WHERE id=$1 FOR UPDATE`, caseID).Scan(&status, &version); err != nil {
+	var repaired bool
+	if err := tx.QueryRow(ctx, `SELECT c.status,c.version,
+EXISTS(SELECT 1 FROM reconciliation_repair_cases repair WHERE repair.reconciliation_case_id=c.id AND repair.state='EXECUTED')
+FROM reconciliation_cases c WHERE c.id=$1 FOR UPDATE OF c`, caseID).Scan(&status, &version, &repaired); err != nil {
 		return err
 	}
 	// The immutable observation captured this version with its financial
 	// snapshot. The row lock serializes against RESOLVE's version increment.
 	// A late or legacy observation may associate its case, but cannot undo a
-	// newer resolution. A genuine new observation can still reopen it.
-	if status == "RESOLVED" && observedVersions[digest] == version {
+	// newer resolution. A genuine new observation can still reopen an ordinary
+	// resolution. A durable financial-repair receipt instead accepts this exact
+	// immutable difference after provider disposal, without changing its source
+	// financial facts. It must stay resolved when the same difference recurs.
+	// Changed source facts have another digest and still create a new case.
+	if status == "RESOLVED" && observedVersions[digest] == version && !repaired {
 		now := p.now().UTC()
 		claim, response, mitigation, resolution := paymentAnomalyDeadlines(now, difference.Severity)
 		if _, err := tx.Exec(ctx, `UPDATE reconciliation_cases SET status='OPEN',owner_id=NULL,repair_action=NULL,review_result=NULL,resolution=NULL,resolved_at=NULL,version=version+1,updated_at=$2 WHERE id=$1`, caseID, now); err != nil {

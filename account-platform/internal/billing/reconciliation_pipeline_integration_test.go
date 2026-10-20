@@ -61,20 +61,21 @@ func TestF03PipelineStableCasesAndVerifiedResolution(t *testing.T) {
 	r, ctx := retainedFinanceRepository(t)
 	_, order, _, _ := retainedFinanceOrder(t, r, ctx, 1000000, false)
 	actor := uuid.New()
+	businessDate := r.now().In(time.FixedZone("Asia/Shanghai", 8*60*60))
 	row := pipelineRefundRow(order, r.now())
 	provider := &trackedBillProvider{reconciliationFixtureProvider: reconciliationFixtureProvider{rows: []ProviderBillEntry{row}}}
 	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := c.RunAdminReconciliation(ctx, actor, order.Channel, r.now())
+	first, err := c.RunAdminReconciliation(ctx, actor, order.Channel, businessDate)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := r.pool.Exec(ctx, `UPDATE payment_orders SET updated_at=updated_at+interval '1 second' WHERE id=$1`, order.ID); err != nil {
 		t.Fatal(err)
 	}
-	second, err := c.RunAdminReconciliation(ctx, actor, order.Channel, r.now())
+	second, err := c.RunAdminReconciliation(ctx, actor, order.Channel, businessDate)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +122,7 @@ func TestF03PipelineStableCasesAndVerifiedResolution(t *testing.T) {
 	}
 	// A newer provider observation invalidates an earlier clean proof.
 	provider.rows = []ProviderBillEntry{row}
-	if _, err := c.RunAdminReconciliation(ctx, actor, order.Channel, r.now()); err != nil {
+	if _, err := c.RunAdminReconciliation(ctx, actor, order.Channel, businessDate); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := r.UpdateReconciliationCase(ctx, id, command); !errors.Is(err, ErrConflict) {
@@ -153,7 +154,7 @@ func TestF03PipelineStableCasesAndVerifiedResolution(t *testing.T) {
 	provider.failBill = false
 	provider.sourceVersion = ""
 	provider.rows = []ProviderBillEntry{row}
-	third, err := c.RunAdminReconciliation(ctx, actor, order.Channel, r.now())
+	third, err := c.RunAdminReconciliation(ctx, actor, order.Channel, businessDate)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +165,7 @@ func TestF03PipelineStableCasesAndVerifiedResolution(t *testing.T) {
 	changed := row
 	changed.AmountFen++
 	provider.rows = []ProviderBillEntry{changed}
-	fourth, err := c.RunAdminReconciliation(ctx, actor, order.Channel, r.now())
+	fourth, err := c.RunAdminReconciliation(ctx, actor, order.Channel, businessDate)
 	if err != nil {
 		t.Fatal(err)
 	}
