@@ -525,7 +525,7 @@ impl SessionStore {
 
     pub fn save(&self, session: &SavedSession) -> Result<PathBuf> {
         let _mutation = self.scheduled_mutation.lock();
-        if session.metadata.id.starts_with("remote-")
+        if super::validators::is_remote_session_id(&session.metadata.id)
             || self
                 .remote_proxies
                 .lock()
@@ -577,7 +577,9 @@ impl SessionStore {
         // A remote-proxy record is owned by the remote-control feature's own
         // lifecycle; deleting it through the local Engine/ACP path would
         // strand the proxy state.
-        if id.starts_with("remote-") || self.remote_proxies.lock().records.contains_key(id) {
+        if super::validators::is_remote_session_id(id)
+            || self.remote_proxies.lock().records.contains_key(id)
+        {
             bail!("RemoteProxy cannot be deleted through local Engine/ACP lifecycle");
         }
         if super::validators::is_sched_session_id(id) || self.is_scheduled_session(id)? {
@@ -740,10 +742,10 @@ impl SessionStore {
         // Remote archive availability must not classify or block local records.
         // Only the reserved remote namespace needs permanent-bank authority.
         if self.remote_proxies.lock().records.contains_key(id)
-            || (id.starts_with("remote-") && self.is_archived_remote_proxy(id)?)
+            || (super::validators::is_remote_session_id(id) && self.is_archived_remote_proxy(id)?)
         {
             Ok(SessionKind::RemoteProxy)
-        } else if id.starts_with("remote-") {
+        } else if super::validators::is_remote_session_id(id) {
             bail!("RemoteProxy record is unavailable");
         } else if self.is_scheduled_session(id)? {
             Ok(SessionKind::ScheduledRun)

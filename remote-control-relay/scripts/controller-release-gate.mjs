@@ -20,6 +20,8 @@ function fail(code) {
 function run(command, args, env = process.env) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, { cwd: repoRoot, env, shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    // Drain stdout so a chatty sub-gate cannot fill the pipe and block forever.
+    child.stdout.resume();
     let stderr = "";
     child.stderr.on("data", (chunk) => { stderr += String(chunk); });
     child.once("error", reject);

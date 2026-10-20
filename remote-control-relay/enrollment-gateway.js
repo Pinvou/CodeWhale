@@ -19,6 +19,10 @@ const DEFAULT_MAX_CONNECTIONS = 5000;
 const DEFAULT_MAX_SOURCE_BUCKETS = 100_000;
 const DEFAULT_INGRESS_MESSAGE_LIMIT = 12_000;
 const DEFAULT_INGRESS_BYTE_LIMIT = 512 * 1024 * 1024;
+// Outbound (projected-queue) cap per direction. Without it an authenticated
+// endpoint can grow the shared gateway process's memory without bound by
+// feeding a slow or stalled web client through its own relay path.
+const DEFAULT_EGRESS_BUFFER_LIMIT_BYTES = 8 * 1024 * 1024;
 const execFileAsync = promisify(execFile);
 
 export class EnrollmentGatewayError extends Error {
@@ -147,6 +151,7 @@ export function createEnrollmentGateway({
   connectionWindowMs = DEFAULT_CONNECTION_WINDOW_MS,
   ingressMessageLimit = DEFAULT_INGRESS_MESSAGE_LIMIT,
   ingressByteLimit = DEFAULT_INGRESS_BYTE_LIMIT,
+  egressBufferLimitBytes = DEFAULT_EGRESS_BUFFER_LIMIT_BYTES,
   allowedWebOrigins = [],
   trustedProxyIps = [],
   logger = null,
@@ -173,6 +178,8 @@ export function createEnrollmentGateway({
     "gateway_ingress_limit_invalid");
   ingressByteLimit = boundedInteger(ingressByteLimit, DEFAULT_INGRESS_BYTE_LIMIT, maxPayloadBytes,
     16 * 1024 * 1024 * 1024, "gateway_ingress_limit_invalid");
+  egressBufferLimitBytes = boundedInteger(egressBufferLimitBytes, DEFAULT_EGRESS_BUFFER_LIMIT_BYTES,
+    64 * 1024, 64 * 1024 * 1024, "gateway_egress_limit_invalid");
   const origins = stringSet(allowedWebOrigins, "gateway_origins_invalid", (origin) => {
     let parsed;
     try { parsed = new URL(origin); } catch { fail("gateway_origins_invalid"); }
@@ -394,7 +401,12 @@ export function createEnrollmentGateway({
               return;
             }
           }
-          if (upstream.readyState === WebSocket.OPEN) upstream.send(message, { binary });
+          if (upstream.readyState !== WebSocket.OPEN) return;
+          if (upstream.bufferedAmount + bytes > egressBufferLimitBytes) {
+            closePolicy(client);
+            return;
+          }
+          upstream.send(message, { binary });
         });
         upstream.on("message", (message, binary) => {
           if (client.readyState !== WebSocket.OPEN) return;
@@ -403,6 +415,11 @@ export function createEnrollmentGateway({
               closePolicy(client);
               return;
             }
+          }
+          const bytes = Buffer.isBuffer(message) ? message.length : Buffer.byteLength(String(message), "utf8");
+          if (client.bufferedAmount + bytes > egressBufferLimitBytes) {
+            closePolicy(client);
+            return;
           }
           client.send(message, { binary });
         });

@@ -66,7 +66,10 @@ fn remote_pending_identifier_contract_matches_controlled_task_protocol() {
 }
 
 #[test]
-fn local_chat_command_guard_rejects_remote_proxy_without_backend_dispatch() {
+fn chat_session_guard_rejects_remote_proxy_for_local_transcript_writes() {
+    // Shared `ensure_chat_session` gate: consumed by the transcript write
+    // commands and (since the remote-route rejection fix) by the `chat` send
+    // command itself, so a remote-proxy id fails before reserve_turn.
     use crate::features::sessions::remote_proxy::binding::LiveRemoteContext;
 
     let temp = tempfile::tempdir().unwrap();

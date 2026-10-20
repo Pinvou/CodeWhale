@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use super::binding::LiveRemoteContext;
-use crate::features::sessions::validators::validate_session_id;
+use crate::features::sessions::validators::{is_remote_session_id, validate_session_id};
 
 pub(super) const REMOTE_PROXY_SCHEMA_VERSION: u32 = 3;
 pub(super) const MAX_PENDING_REQUESTS: usize = 64;
@@ -53,7 +53,7 @@ impl RemoteProxyRecord {
     /// strictly decoding the current v3 record.
     pub(super) fn validate_stored(&self) -> Result<()> {
         validate_session_id(&self.local_session_id)?;
-        if !self.local_session_id.starts_with("remote-")
+        if !is_remote_session_id(&self.local_session_id)
             || self.schema_version != REMOTE_PROXY_SCHEMA_VERSION
             || self.peer_id.is_empty()
             || self.remote_session_ref.is_empty()
