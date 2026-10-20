@@ -240,6 +240,8 @@ pub(crate) struct RemoteOfflineView {
     pub(crate) projection: AuthenticatedProjection,
     pub(crate) authenticated_cursor: Option<AuthenticatedCursor>,
     pub(crate) pending_unknown_count: usize,
+    /// Authenticated pre-admission receipts, separate from B's journal cursor.
+    pub(crate) rejections: Vec<(String, String)>,
     /// Only never-attempted handles are discoverable after restart so the UI
     /// can offer explicit abandon. Attempted requests remain outcome-unknown.
     pub(crate) unattempted_pending: Vec<PendingRemoteRequest>,
@@ -329,11 +331,12 @@ pub(crate) struct RetiredRemoteRequest {
     pub(crate) disposition: RetiredRequestDisposition,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RetiredRequestDisposition {
     AbandonedNeverAttempted,
     Terminal,
+    Rejected(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -382,6 +385,14 @@ pub(super) fn validate_request_ids(
         }
     }
     for item in retired {
+        if let RetiredRequestDisposition::Rejected(code) = &item.disposition {
+            if code.is_empty()
+                || code.len() > 80
+                || !code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+            {
+                bail!("invalid remote rejection code");
+            }
+        }
         if !valid_remote_identifier(&item.client_request_id)
             || !valid_remote_identifier(&item.task_id)
             || !valid_request_fingerprint(&item.request_fingerprint)

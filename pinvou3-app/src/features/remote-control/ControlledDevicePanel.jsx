@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Clock, Copy, FolderOpen, Lock, RefreshCw } from '../../components/icons.jsx';
 import { Toggle } from '../../components/Toggle.jsx';
 import { bridge } from '../../hooks/useBridge.js';
@@ -68,7 +68,8 @@ function StatusBanner({ copy, state, errorCode }) {
   let detail = copy[detailKey];
   if (errorCode === 'desktop_controller_relay_unavailable') detail = copy.errorRelayUnavailable;
   if (errorCode === 'desktop_remote_control_unsupported') detail = copy.unsupported;
-  if (errorCode && !['desktop_controller_relay_unavailable', 'desktop_remote_control_unsupported'].includes(errorCode)) {
+  if (errorCode === 'remote_task_permissions_save_failed') detail = copy.taskPermissionSaveFailed;
+  if (errorCode && !['desktop_controller_relay_unavailable', 'desktop_remote_control_unsupported', 'remote_task_permissions_save_failed'].includes(errorCode)) {
     detail = copy.errorGeneric;
   }
   return (
@@ -96,6 +97,9 @@ export default function ControlledDevicePanel({
   const status = device.status || 'disabled';
   const [busy, setBusy] = useState(null);
   const [localError, setLocalError] = useState(null);
+  const [taskPolicy, setTaskPolicy] = useState(null);
+  const [policyPending, setPolicyPending] = useState(false);
+  const policyIntent = useRef(0);
   const previousAuthority = useRef(controlledAuthorityKey(device));
   const authority = useRef(previousAuthority.current);
   const operationGuard = useRef(createAsyncOperationGuard());
@@ -132,6 +136,26 @@ export default function ControlledDevicePanel({
 
   const authorityKey = controlledAuthorityKey(device);
   authority.current = authorityKey;
+
+  const readTaskPolicy = useCallback(async (remote, intent = ++policyIntent.current) => {
+    setTaskPolicy(null);
+    setPolicyPending(true);
+    try {
+      const policy = await remote.controlledPermissions();
+      if (policyIntent.current === intent) setTaskPolicy(policy);
+    } catch {
+      if (policyIntent.current === intent) setLocalError('remote_task_permissions_save_failed');
+    } finally {
+      if (policyIntent.current === intent) setPolicyPending(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const remote = bridge?.available && bridge.desktopRemoteControl;
+    if (!supported || !remote?.controlledPermissions) return undefined;
+    readTaskPolicy(remote);
+    return () => { policyIntent.current += 1; };
+  }, [supported, readTaskPolicy]);
 
   useEffect(() => {
     const guard = createAsyncOperationGuard();
@@ -300,20 +324,73 @@ export default function ControlledDevicePanel({
           <Toggle
             data-testid="controlled-device-toggle"
             checked={active}
-            disabled={!!busy || ['registering', 'retiring_generation', 'stopping'].includes(uiState)}
+            disabled={!!busy || (!active && policyPending && !!taskPolicy) || ['registering', 'retiring_generation', 'stopping'].includes(uiState)}
             aria-label={active ? copy.disable : copy.enable}
             className="focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#007AFF] forced-colors:border forced-colors:border-[ButtonText] motion-reduce:transition-none"
             onChange={() => run('toggle', async remote => {
               if (active) return remote.controlledStop();
-              const result = await remote.controlledStart(null, stagedWorkspaces);
-              setStagedWorkspaces([]);
-              return result;
+              if (policyPending && taskPolicy) return;
+              const intent = ++policyIntent.current;
+              setTaskPolicy(null);
+              setPolicyPending(true);
+              try {
+                const result = await remote.controlledStart(null, stagedWorkspaces);
+                if (policyIntent.current === intent) {
+                  setStagedWorkspaces([]);
+                  await readTaskPolicy(remote, intent);
+                }
+                return result;
+              } finally {
+                if (policyIntent.current === intent) setPolicyPending(false);
+              }
             })}
           />
         </div>
       </div>
 
       <div className="rounded-2xl border border-black/[0.08] bg-white p-4 shadow-[0_1px_2px_rgba(0,0,0,0.03)] dark:border-white/[0.1] dark:bg-white/[0.035]">
+        <fieldset className="mb-4 space-y-2" disabled={!!busy || policyPending || !taskPolicy}>
+          <legend className="text-[13px] font-semibold">{copy.taskPermissionTitle}</legend>
+          <p className="text-[12px] leading-5 opacity-80">{copy.taskPermissionDescription}</p>
+          {['chat', 'code'].map(lane => (
+            <label key={lane} className="flex items-center justify-between gap-3 text-[13px]">
+              <span>{lane === 'chat' ? copy.taskPermissionChat : copy.taskPermissionCode}</span>
+              <select aria-label={lane === 'chat' ? copy.taskPermissionChat : copy.taskPermissionCode}
+                value={taskPolicy?.[lane] || ''}
+                className="rounded border border-black/15 bg-transparent px-2 py-1 dark:border-white/20"
+                onChange={event => {
+                  if (!taskPolicy || policyPending) return;
+                  const next = { ...taskPolicy, [lane]: event.target.value };
+                  run('task-permissions', async remote => {
+                    const intent = ++policyIntent.current;
+                    setPolicyPending(true);
+                    try {
+                      const saved = await remote.controlledPermissions(next);
+                      if (policyIntent.current === intent) setTaskPolicy(saved);
+                    } catch {
+                      if (policyIntent.current === intent) {
+                        setTaskPolicy(null);
+                        setLocalError('remote_task_permissions_save_failed');
+                      }
+                    } finally {
+                      if (policyIntent.current === intent) setPolicyPending(false);
+                    }
+                  });
+                }}>
+                {!taskPolicy?.[lane] && <option value="" disabled>{taskPolicy ? copy.taskPermissionUnconfigured
+                  : policyPending ? copy.taskPermissionLoading : copy.taskPermissionUnavailable}</option>}
+                <option value="yolo">{copy.taskPermissionYolo}</option>
+                <option value="plan">{copy.taskPermissionPlan}</option>
+              </select>
+            </label>
+          ))}
+        </fieldset>
+        {!taskPolicy && !policyPending && <button type="button" data-testid="controlled-policy-retry"
+          onClick={() => run('task-permissions-read', remote => readTaskPolicy(remote))} disabled={!!busy}
+          aria-label={`${copy.refresh} ${copy.taskPermissionTitle}`}
+          className="mb-4 rounded-lg px-3 py-2 text-[12px] font-medium text-[#007AFF] disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#007AFF]">
+          {copy.refresh}
+        </button>}
         <StatusBanner copy={copy} state={uiState} errorCode={visibleError} />
         {localError && <div className="mt-3"><StatusBanner copy={copy} state="error" errorCode={localError} /></div>}
 

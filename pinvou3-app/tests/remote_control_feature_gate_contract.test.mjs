@@ -65,7 +65,7 @@ test('compiled production gate is immutable under runtime environment overrides'
     const env = { ...process.env, PINVOU_DESKTOP_CONTROLLER_BUILD_ENABLED: buildFlag };
     const unit = executable(`capabilities-${buildFlag}-tests`);
     rustc(['--test', capabilities, '-o', unit], env);
-    assert.match(run(unit, env), /6 passed; 0 failed/u);
+    assert.match(run(unit, env), /11 passed; 0 failed/u);
     const binary = executable(`artifact-${buildFlag}`);
     rustc([host, '-o', binary], env);
     for (const runtimeFlag of [undefined, '0', '1', 'true']) {

@@ -3339,7 +3339,10 @@ export function CodexAcpView({
       }
       return <div className="px-1 text-[11px] text-gray-400">{legacy.text}</div>;
     }
-    return undefined;
+    // ConversationTimeline only falls through to its DefaultItem renderer when
+    // renderItem yields undefined — no return statement here (an explicit null
+    // would suppress the default rendering of unhandled types such as
+    // reasoning and tool_group).
   }
 
   async function openWorkspaceResource(resourcePath) {

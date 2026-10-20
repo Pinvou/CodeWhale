@@ -98,6 +98,187 @@ const installationDevicesFor = (events) => [...new Set(events
   .filter(Boolean))]
   .map((device_id) => ({ device_id, hardware_source: "installation_id" }));
 
+test("version coverage groups the same active installations by platform and current version", () => {
+  const now = at("2026-10-19T12:30:00");
+  const devices = [
+    { device_id: "win", platform: "WINDOWS", app_version: "1.0" },
+    { device_id: "linux", platform: "linux", app_version: "2.0" },
+    { device_id: "mac", platform: "macos", app_version: "2.0" },
+    { device_id: "unknown", platform: "unknown" },
+    { device_id: "inactive", platform: "windows", app_version: "old" },
+  ].map(device => ({ ...device, hardware_source: "installation_id" }));
+  devices.push({ device_id: "legacy", hardware_source: "windows_cim_uuid", platform: "windows", app_version: "old" });
+  const events = ["win", "linux", "mac", "unknown", "legacy", "deleted"].map(device_id => ({
+    device_id, event_name: "task_submitted", attempt_id: device_id, mode: "assistant", initiator_type: "user", occurred_at: now,
+  }));
+  events.push({ ...events[0], app_version: "3.0", received_at: now });
+  events.push({ ...events[0], app_version: "1.5", received_at: now - 1 });
+  const report = buildStatsOverview(devices, [], events, now);
+  assert.deepEqual(report.active_versions_by_platform, {
+    windows: [{ version: "3.0", count: 1 }],
+    linux: [{ version: "2.0", count: 1 }],
+    macos: [{ version: "2.0", count: 1 }],
+  });
+  assert.equal(report.active_versions.reduce((sum, row) => sum + row.count, 0), 4);
+  assert.deepEqual(report.active_versions.find(row => row.version === "未知"), { version: "未知", count: 1 });
+  assert.deepEqual(buildStatsOverview(devices, [], [], now).active_versions_by_platform, { windows: [], linux: [], macos: [] });
+});
+
+test("hourly usage includes 24 clock hours with exact boundaries and isolated core-task counts", () => {
+  const now = at("2026-10-19T00:30:00");
+  const start = at("2026-10-18T01:00:00");
+  const hour = 3_600_000;
+  const devices = [
+    { device_id: "a", first_seen_at: start },
+    { device_id: "b", first_seen_at: (start + hour) / 1000 },
+    { device_id: "cross", first_seen_at: start - 1 },
+    { device_id: "future", first_seen_at: now + 1 },
+  ].map(device => ({ ...device, hardware_source: "installation_id" }));
+  devices.push({ device_id: "legacy", hardware_source: "windows_cim_uuid", first_seen_at: start });
+  const event = (device_id, attempt_id, event_name, occurred_at, extra = {}) => ({
+    device_id, attempt_id, event_id: `${device_id}_${attempt_id}_${event_name}_${occurred_at}`,
+    event_name, occurred_at, mode: "assistant", initiator_type: "user", ...extra,
+  });
+  const events = [
+    event("a", "one", "task_submitted", start),
+    event("a", "two", "task_submitted", start + 1),
+    event("a", "one", "task_finished", start + hour - 1, { status: "failed" }),
+    event("a", "one", "task_finished", start + hour), // same attempt, not a second conversation
+    event("b", "one", "task_finished", (start + hour) / 1000), // orphan terminal + seconds
+    event("cross", "cross", "task_submitted", start - 1),
+    event("cross", "cross", "task_finished", now), // completion does not create new activity
+    event("a", "today", "task_submitted", now),
+    event("a", "today", "task_finished", now),
+    event("a", "future", "task_finished", now + 1),
+    event("a", "background", "task_finished", start, { initiator_type: "scheduled" }),
+    event("a", "system", "task_submitted", start, { initiator_type: "system" }),
+    event("legacy", "one", "task_finished", start),
+    event("deleted", "one", "task_finished", start),
+    event("future", "open", "app_opened", start),
+    event("a", "badtime", "task_finished", "invalid"),
+  ];
+  const rows = buildStatsOverview(devices, [{ device_id: "a", occurred_at: start }], events, now).usage_trend_hourly;
+  assert.equal(rows.length, 24);
+  assert.deepEqual(rows[0], { hour: start, active_devices: 1, new_devices: 1, turns: 1 });
+  assert.deepEqual(rows[1], { hour: start + hour, active_devices: 1, new_devices: 1, turns: 1 });
+  assert.deepEqual(rows[2], { hour: start + 2 * hour, active_devices: 0, new_devices: 0, turns: 0 });
+  assert.deepEqual(rows.at(-1), { hour: at("2026-10-19T00:00:00"), active_devices: 1, new_devices: 0, turns: 2 });
+  assert.equal(rows.reduce((sum, row) => sum + row.turns, 0), 4);
+  assert(rows.every((row, index) => row.hour === start + index * hour));
+  const empty = buildStatsOverview([], [], [], now).usage_trend_hourly;
+  assert.equal(empty.length, 24);
+  assert(empty.every(row => row.active_devices === 0 && row.new_devices === 0 && row.turns === 0));
+});
+
+test("hourly calendar comparison aligns Beijing days, keeps yesterday complete and leaves future hours null", () => {
+  const now = at("2026-10-19T00:30:00");
+  const today = at("2026-10-19T00:00:00");
+  const yesterday = today - 86_400_000;
+  const devices = [
+    { device_id: "a", first_seen_at: yesterday },
+    { device_id: "b", first_seen_at: yesterday + 3_599_999 },
+    { device_id: "c", first_seen_at: today },
+    { device_id: "future", first_seen_at: now + 1 },
+  ].map(row => ({ ...row, hardware_source: "installation_id" }));
+  const event = (device_id, attempt_id, occurred_at) => ({
+    device_id, attempt_id, event_name: "task_finished", occurred_at, mode: "assistant", initiator_type: "user",
+  });
+  const events = [
+    event("a", "before", yesterday - 1), event("a", "first", yesterday),
+    event("b", "late", yesterday + 3_599_999), event("a", "last", today - 1),
+    event("c", "today", now), event("future", "future", now + 1),
+  ];
+  const report = buildStatsOverview(devices, [], events, now);
+  const previous = report.usage_trend_hourly_previous;
+  const current = report.usage_trend_hourly_today;
+  assert.equal(previous.length, 24);
+  assert.equal(current.length, 24);
+  assert.deepEqual(previous[0], { hour: yesterday, active_devices: 2, new_devices: 2, turns: 2 });
+  assert.deepEqual(previous[23], { hour: today - 3_600_000, active_devices: 1, new_devices: 0, turns: 1 });
+  assert.deepEqual(current[0], { hour: today, active_devices: 1, new_devices: 1, turns: 1 });
+  assert(current.slice(1).every(row => row.active_devices === null && row.new_devices === null && row.turns === null));
+  assert(current.every((row, index) => row.hour === today + index * 3_600_000 && row.hour - previous[index].hour === 86_400_000));
+  assert.equal(report.usage_trend_hourly.length, 24);
+  assert.equal(report.usage_trend_hourly[0].hour, yesterday + 3_600_000);
+  const boundary = buildStatsOverview([], [], [], today + 3_600_000).usage_trend_hourly_today;
+  assert.deepEqual(boundary[1], { hour: today + 3_600_000, active_devices: 0, new_devices: 0, turns: 0 });
+  assert.equal(boundary[2].turns, null);
+});
+
+test("hourly conversations preserve daily clipping and deduplication before slicing the hourly window", () => {
+  const now = at("2026-10-19T12:30:00");
+  const devices = [{ device_id: "a", hardware_source: "installation_id" }];
+  const event = (attempt_id, occurred_at) => ({ device_id: "a", attempt_id, event_name: "task_finished", mode: "assistant", initiator_type: "user", occurred_at });
+  const events = [
+    ...Array.from({ length: 100 }, (_, index) => event(`cap_${index}`, at("2026-10-18T01:00:00") + index)),
+    event("clipped", at("2026-10-18T14:00:00")),
+    event("old_duplicate", at("2026-10-17T12:00:00")),
+    event("old_duplicate", at("2026-10-19T12:00:00")),
+    event("current", now),
+  ];
+  const report = buildStatsOverview(devices, [], events, now);
+  assert.equal(report.usage_trend_hourly.reduce((sum, row) => sum + row.turns, 0), 1);
+  assert.equal(report.usage_trend_hourly.at(-1).turns, report.usage_trend.at(-1).turns);
+  assert.equal(report.usage_trend_hourly_previous.reduce((sum, row) => sum + row.turns, 0), 100);
+  assert.equal(report.usage_trend_hourly_today.reduce((sum, row) => sum + row.turns, 0), 1);
+});
+
+test("shared chart preprocessing excludes future submissions and completions only from hourly totals", () => {
+  const now = at("2026-10-19T12:30:00");
+  const event = (device_id, attempt_id, event_name, occurred_at) => ({
+    device_id, attempt_id, event_name, occurred_at, mode: "assistant", initiator_type: "user",
+  });
+  const events = [
+    event("submission", "one", "task_submitted", now + 1),
+    event("submission", "one", "task_finished", now),
+    event("duplicate", "one", "task_finished", now + 1),
+    event("duplicate", "one", "task_finished", now),
+    ...Array.from({ length: 100 }, (_, index) => event("capped", `future_${index}`, "task_finished", now + 1)),
+    event("capped", "observed", "task_finished", now),
+    // An observed submission outside the 24-hour window still suppresses fallback
+    // activity even when a duplicate future submission precedes it in storage.
+    event("cross", "one", "task_submitted", now + 1),
+    event("cross", "one", "task_submitted", now - 2 * 86_400_000),
+    event("cross", "one", "task_finished", now),
+  ];
+  const report = buildStatsOverview(installationDevicesFor(events), [], events, now);
+  assert.equal(report.usage_trend.at(-1).turns, 103);
+  assert.equal(report.usage_trend.at(-1).active_devices, 4);
+  assert.deepEqual(report.usage_trend_hourly.at(-1), {
+    hour: at("2026-10-19T12:00:00"), active_devices: 3, new_devices: 0, turns: 4,
+  });
+});
+
+test("one future completion does not rescan historical timestamps for the hourly chart", () => {
+  const now = at("2026-10-19T12:30:00");
+  let timestampReads = 0;
+  const events = Array.from({ length: 50_000 }, (_, index) => ({
+    device_id: `installation_${index % 1000}`,
+    attempt_id: `attempt_${index}`,
+    event_name: "task_finished",
+    mode: "assistant",
+    initiator_type: "user",
+    get occurred_at() {
+      timestampReads += 1;
+      return now - 1;
+    },
+  }));
+  const devices = installationDevicesFor(events);
+  const baseline = buildStatsOverview(devices, [], events, now);
+  const baselineReads = timestampReads;
+  timestampReads = 0;
+  const future = {
+    device_id: "installation_0", attempt_id: "future", event_name: "task_finished",
+    mode: "assistant", initiator_type: "user", occurred_at: now + 1,
+  };
+  const withFuture = buildStatsOverview(devices, [], [future, ...events], now);
+  // Measure work, not wall-clock time: one skewed event must not add another
+  // whole-history pass through contribution clipping and attempt deduplication.
+  assert(timestampReads <= baselineReads, `${timestampReads} historical reads exceeded ${baselineReads}`);
+  assert.deepEqual(withFuture.usage_trend_hourly, baseline.usage_trend_hourly);
+  assert.equal(withFuture.usage_trend.at(-1).turns, baseline.usage_trend.at(-1).turns + 1);
+});
+
 function behaviorEvent(collectionPeriodId, overrides = {}) {
   return {
     schema_version: 1,
@@ -616,6 +797,72 @@ test("scene value signals require the same installation, session, and turn", () 
   assert.equal(sameSession.negative_feedback_rate, 1 / 30);
 });
 
+test("scene value joins preserve time boundaries, unordered signals, and feedback", () => {
+  const now = at("2026-09-04T12:00:00");
+  const windowMs = 30 * 60_000;
+  const cases = [
+    { name: "at_completion", signals: [["response_copied", 0]], valued: true },
+    { name: "at_window_end", signals: [["artifact_exported", windowMs]], valued: true },
+    { name: "after_window", signals: [["response_copied", windowMs + 1]], valued: false },
+    { name: "before_completion", signals: [["response_copied", -1]], valued: false },
+    { name: "unordered", signals: [["artifact_exported", windowMs + 1], ["response_copied", -1], ["response_copied", 1]], valued: true },
+    { name: "other_installation", signals: [["response_copied", 1, { identity_id: "other_installation" }]], valued: false },
+    { name: "other_session", signals: [["response_copied", 1, { session_id: "other_session" }]], valued: false },
+    { name: "other_turn", signals: [["artifact_exported", 1, { turn_id: "other_turn" }]], valued: false },
+    { name: "positive_feedback", signals: [["response_feedback_changed", 1, { feedback_action: "set", rating: "positive" }]], valued: true },
+    { name: "removed_feedback", signals: [["response_feedback_changed", 1, { feedback_action: "set", rating: "positive" }], ["response_feedback_changed", 2, { feedback_action: "remove" }]], valued: false },
+    { name: "negative_and_copy", signals: [["response_copied", 1], ["response_feedback_changed", 2, { feedback_action: "set", rating: "negative" }]], valued: true, negative: true },
+  ];
+  const events = cases.flatMap(scenario => Array.from({ length: 30 }, (_, index) => {
+    const base = now - 2 * 60 * 60_000 + index;
+    const identity = `install_${scenario.name}`;
+    const attemptId = `${scenario.name}_${index}`;
+    const context = { identity_id: identity, session_id: "session", turn_id: `turn_${index}` };
+    return [
+      { event_id: `scene_${attemptId}`, event_name: "scene_submitted", attempt_id: attemptId, scene_l1: "work", scene_l2: scenario.name, ...context, occurred_at: base - 1 },
+      { event_id: `finish_${attemptId}`, event_name: "task_finished", attempt_id: attemptId, status: "success", mode: "assistant", initiator_type: "user", ...context, occurred_at: base },
+      ...scenario.signals.map(([eventName, offset, overrides], signalIndex) => ({
+        event_id: `signal_${attemptId}_${signalIndex}`, event_name: eventName,
+        ...context, ...overrides, occurred_at: base + offset,
+      })),
+    ];
+  }).flat());
+  const report = buildBehaviorSceneRanking(
+    installationDevicesFor(events), [], events, "today", now, { minimumGroupSubjects: 0 },
+  );
+  for (const scenario of cases) {
+    const row = report.rows.find(item => item.scene_l2 === scenario.name);
+    assert.equal(row.explicit_value_sample_size, 30, scenario.name);
+    assert.equal(row.explicit_value_rate, scenario.valued ? 1 : 0, scenario.name);
+    assert.equal(row.negative_feedback_rate, scenario.negative ? 1 : 0, scenario.name);
+  }
+});
+
+test("scene value joins keep work linear when unrelated history grows", () => {
+  const now = at("2026-09-04T12:00:00");
+  let unrelatedTurnReads = 0;
+  const events = Array.from({ length: 10_000 }, (_, index) => ({
+    event_id: `unrelated_${index}`, event_name: "app_opened",
+    identity_id: `unrelated_install_${Math.floor(index / 50)}`,
+    session_id: "unrelated_session", occurred_at: now - 60_000,
+    get turn_id() { unrelatedTurnReads += 1; return "unrelated_turn"; },
+  }));
+  for (let index = 0; index < 30; index += 1) {
+    events.push(
+      { event_id: `scene_${index}`, event_name: "scene_submitted", attempt_id: `attempt_${index}`, scene_l1: "work", scene_l2: "writing", identity_id: "scene_install", occurred_at: now - 2_000 },
+      { event_id: `finish_${index}`, event_name: "task_finished", attempt_id: `attempt_${index}`, session_id: "session", turn_id: `turn_${index}`, status: "success", mode: "assistant", initiator_type: "user", identity_id: "scene_install", occurred_at: now - 1_000 },
+    );
+  }
+  const report = buildBehaviorSceneRanking(
+    installationDevicesFor(events), [], events, "today", now, { minimumGroupSubjects: 0 },
+  );
+  assert.equal(report.rows[0].explicit_value_sample_size, 30);
+  assert.equal(report.rows[0].explicit_value_rate, 0);
+  // A work budget detects repeated full-history joins without a flaky clock limit.
+  assert(unrelatedTurnReads <= events.length,
+    `scene joins revisited unrelated history ${unrelatedTurnReads} times`);
+});
+
 test("tool funnel operation identifiers are isolated by installation", () => {
   const now = at("2026-09-04T12:00:00");
   const events = ["install_a", "install_b"].flatMap((identity) => [
@@ -693,6 +940,51 @@ test("device inventory contains installation registrations only", () => {
     const list = buildDeviceList(devices, [], [], now);
     assert.equal(list.length, expected);
     assert.equal(list.some((device) => device.device_id === "dev_hw_current"), false);
+  }
+});
+
+test("installation heartbeats keep an idle client online without counting behavior activity", (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const dataDir = mkdtempSync(join(tmpdir(), "pinvou-installation-presence-"));
+  let store;
+  try {
+    store = new TelemetryStore(dataDir, "test-device-pepper-at-least-24-chars");
+    const register = (source) => {
+      const credential = store.register({
+        hardware_claim: `heartbeat-test-claim-${source}`,
+        registration_secret: `heartbeat-test-registration-secret-${source}`,
+        hardware_source: source,
+        app_version: "0.10.12",
+        platform: "windows",
+        arch: "x86_64",
+      }, null);
+      return store.authenticate(credential.device_id, credential.device_token);
+    };
+    const installation = register("installation_id");
+    const hardware = ["system_uuid", "ioplatformuuid", "persisted_random"].map(register);
+    for (let minute = 0; minute <= 6; minute += 2) {
+      if (minute) now += 120_000;
+      hardware.forEach(device => store.heartbeat(device, { state: "online" }, null));
+      store.heartbeat(installation, { state: "online" }, null);
+      const devices = [...store.devices.values()];
+      const overview = buildStatsOverview(devices, store.events, store.behaviorEvents, now);
+      assert.deepEqual(overview.counts, { online: 1, active_today: 0, active_7d: 0 });
+      assert(overview.usage_trend.every((day) => day.turns === 0));
+      const list = buildDeviceList(devices, store.events, store.behaviorEvents, now);
+      assert.equal(list.length, 1);
+      assert.equal(list[0].device_id, installation.device_id);
+      assert.equal(list[0].online, true);
+    }
+    assert.equal(store.events.length, 0);
+    assert.equal(store.behaviorEvents.length, 0);
+    // The legacy heartbeat cannot keep a stopped installation online or double count it.
+    now += 300_001;
+    hardware.forEach(device => store.heartbeat(device, { state: "online" }, null));
+    assert.equal(buildStatsOverview([...store.devices.values()], [], [], now).counts.online, 0);
+  } finally {
+    if (store?.saveTimer) clearTimeout(store.saveTimer);
+    rmSync(dataDir, { recursive: true, force: true });
   }
 });
 

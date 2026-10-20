@@ -26,6 +26,7 @@ pub(crate) mod relay_transport;
 pub(crate) mod resume;
 pub(crate) mod shared_transport;
 pub(crate) mod task;
+pub(crate) mod task_rejection;
 pub(crate) mod temporary_model;
 #[cfg(test)]
 pub(crate) mod test_support;
