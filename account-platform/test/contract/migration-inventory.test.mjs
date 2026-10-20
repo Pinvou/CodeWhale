@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -30,7 +31,7 @@ test('first migration manifest freezes the entire actual up/down inventory witho
 });
 
 test('inventory refuses missing pairs, duplicate numeric versions and unsafe version numbers', async () => {
-  const directory = await mkdtemp(path.join(tmpdir(), 'pinvou-migration-inventory-'));
+  const directory = await mkdtemp(path.join(realpathSync(tmpdir()), 'pinvou-migration-inventory-'));
   const domain = path.join(directory, 'token');
   await mkdir(domain);
   try {
@@ -89,7 +90,7 @@ test('supplemental versions never relax the immutability of any recorded migrati
 });
 
 test('manifest CLI appends complete lower ordinary pairs while preserving recorded SQL and checksums', async () => {
-  const directory = await mkdtemp(path.join(tmpdir(), 'pinvou-migration-append-'));
+  const directory = await mkdtemp(path.join(realpathSync(tmpdir()), 'pinvou-migration-append-'));
   const scripts = path.join(directory, 'scripts');
   const migrations = path.join(directory, 'account-platform', 'migrations');
   const executable = path.join(scripts, 'account-platform-migration-manifest.mjs');
@@ -116,6 +117,7 @@ test('manifest CLI appends complete lower ordinary pairs while preserving record
     await mkdir(path.join(migrations, 'account'), { recursive: true });
     await mkdir(path.join(migrations, 'billing'));
     await writeFile(executable, await readFile(new URL('../../../scripts/account-platform-migration-manifest.mjs', import.meta.url)));
+    await writeFile(path.join(scripts, 'account-platform-cli-entry.mjs'), await readFile(new URL('../../../scripts/account-platform-cli-entry.mjs', import.meta.url)));
     await pair('account', 93, 'previous');
     await pair('account', 900006, 'supplemental');
     await pair('billing', 79, 'previous');

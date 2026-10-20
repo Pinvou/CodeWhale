@@ -1,10 +1,10 @@
 #!/usr/bin/env node
+import { isMainModule } from './account-platform-cli-entry.mjs';
 // Public, unauthenticated, read-only preflight. This cannot establish deployment GO.
 import { readFile } from 'node:fs/promises';
 import { Resolver } from 'node:dns/promises';
 import https from 'node:https';
 import { createHash } from 'node:crypto';
-import { pathToFileURL } from 'node:url';
 import { parseReleaseJSON } from './account-platform-model-token-release-plan.mjs';
 import { edgeCheck, validateCredentialEdge } from './account-platform-credential-edge.mjs';
 
@@ -138,6 +138,6 @@ async function main(args) {
   const result = await probeCredentialOrigins(config, { probe: args.length === 3 });
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main(process.argv.slice(2)).catch(error => {
+if (isMainModule(import.meta.url)) main(process.argv.slice(2)).catch(error => {
   process.stderr.write(`${/^CREDENTIAL_EDGE_[A-Z_]+$/.test(error?.message) ? error.message : 'CREDENTIAL_EDGE_PREFLIGHT_FAILED'}\n`); process.exitCode = 1;
 });

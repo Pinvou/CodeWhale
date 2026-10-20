@@ -1,8 +1,8 @@
 #!/usr/bin/env node
+import { isMainModule } from './account-platform-cli-entry.mjs';
 // APT-137 planning validation only: never mutates deployment or attests environment readiness.
 import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { pathToFileURL } from 'node:url';
 
 const require = createRequire(new URL('../account-platform/package.json', import.meta.url));
 const Ajv = require('ajv');
@@ -130,7 +130,7 @@ async function main(args) {
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2)).catch(error => {
     const code = /^model_token_release_[a-z_]+$/.test(error?.message) ? error.message : 'model_token_release_invalid';
     process.stderr.write(`${code}\n`);

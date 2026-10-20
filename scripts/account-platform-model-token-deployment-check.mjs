@@ -1,8 +1,8 @@
 #!/usr/bin/env node
+import { isMainModule } from './account-platform-cli-entry.mjs';
 // Structural verification of real renderer output. No cluster, process or activation mutation.
 import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { pathToFileURL } from 'node:url';
 import { isIP } from 'node:net';
 import { parseReleaseJSON } from './account-platform-model-token-release-plan.mjs';
 import { checkComposeKMS } from './account-platform-kms-compose-check.mjs';
@@ -248,7 +248,7 @@ async function main(args) {
   }
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2)).catch(error => {
     process.stderr.write(`${/^model_token_deployment_[a-z_]+$/.test(error?.message) ? error.message : 'model_token_deployment_invalid'}\n`);
     process.exitCode = 1;

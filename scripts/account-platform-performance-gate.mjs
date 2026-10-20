@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isMainModule } from './account-platform-cli-entry.mjs';
 
 import { readFile } from 'node:fs/promises';
 import { evidenceTimestamp } from './account-platform-evidence-time.mjs';
@@ -98,4 +99,4 @@ async function main() {
   } else { required(process.argv.length === 2, 'performance evidence file is required'); console.log('performance policy passed'); }
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) main().catch((error) => { console.error(`[performance-gate] ${error.message}`); process.exitCode = 1; });
+if (isMainModule(import.meta.url)) main().catch((error) => { console.error(`[performance-gate] ${error.message}`); process.exitCode = 1; });

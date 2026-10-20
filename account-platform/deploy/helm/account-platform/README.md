@@ -48,6 +48,21 @@ Registry names, provider hosts, and CIDRs in the production values file are
 documentation examples; replace every one with the reviewed deployment values
 before rendering a release manifest.
 
+The existing `internal-and-approved-egress` policy selects ordinary release
+pods, including `identity-service`, except pods marked as the New API data plane
+or restricted Token control. Its TCP 443 destinations are the union of
+`external.paymentProviderCidrs`, `external.secretProviderCidrs`,
+`external.modelProviderCidrs`, and `external.telemetryCollectorCidrs`; these lists
+do not isolate destinations by calling service. `external.oidcCidrs` is used by
+the Portal policy and alone does not grant Identity an external Keycloak route.
+Before enabling real SMS or external Keycloak for Identity, review the rendered
+selectors and ensure the endpoints' actual IPs and ports are covered by the
+approved egress configuration. Same-release Keycloak uses the existing internal
+pod route. An uncovered endpoint remains denied: do not disable NetworkPolicy,
+use an all-address CIDR, or assume an HTTPS URL grants connectivity. If the site
+cannot represent its destinations within its approved configuration, stop the
+rollout for network review. Rendering is not a CNI or provider connectivity test.
+
 ```sh
 helm lint account-platform/deploy/helm/account-platform \
   -f account-platform/deploy/helm/account-platform/values-production-new.yaml

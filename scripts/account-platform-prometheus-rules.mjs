@@ -1,9 +1,10 @@
 #!/usr/bin/env node
+import { isMainModule } from './account-platform-cli-entry.mjs';
 // Explicit offline test of a supplied Helm render; never contacts a cluster.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { isAbsolute, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 export function prometheusRuleCommands(args) {
   assert.equal(args.length, 6, 'provide --rendered, --output and --promtool absolute paths');
@@ -27,7 +28,7 @@ function run(executable, args) {
   });
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isMainModule(import.meta.url)) {
   try {
     for (const [executable, args] of prometheusRuleCommands(process.argv.slice(2))) await run(executable, args);
     console.log('actual rendered Prometheus rules and eight isolated promtool cases passed (five alerting cases and three non-alert controls); NOT_DEPLOYED');

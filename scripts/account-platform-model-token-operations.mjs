@@ -1,10 +1,10 @@
 #!/usr/bin/env node
+import { isMainModule } from './account-platform-cli-entry.mjs';
 // Explicit one-operation adapter for existing deployment CLIs. No chaining/retry.
 import { readFile, readdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { isAbsolute, basename, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { parseReleaseJSON } from './account-platform-model-token-release-plan.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -154,6 +154,6 @@ async function main(args) {
   const result = await executeOperation(request, { execute: args.length === 3 });
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main(process.argv.slice(2)).catch(error => {
+if (isMainModule(import.meta.url)) main(process.argv.slice(2)).catch(error => {
   process.stderr.write(`${/^MODEL_TOKEN_OPERATION_[A-Z_]+$/.test(error?.message) ? error.message : 'MODEL_TOKEN_OPERATION_INVALID'}\n`); process.exitCode = 1;
 });

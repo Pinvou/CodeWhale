@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isMainModule } from './account-platform-cli-entry.mjs';
 
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -120,7 +121,7 @@ async function main() {
   console.log(`migration immutability passed: ${Object.values(current).flat().length} files`);
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+if (isMainModule(import.meta.url)) {
   main().catch((error) => {
     console.error(`[migration-manifest] ${error.message}`);
     process.exitCode = 1;

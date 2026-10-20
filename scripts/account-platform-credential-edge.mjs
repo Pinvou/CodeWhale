@@ -1,7 +1,7 @@
 #!/usr/bin/env node
+import { isMainModule } from './account-platform-cli-entry.mjs';
 // Offline, closed configuration -> isolated nginx fragments. Never installs them.
 import { readFile } from 'node:fs/promises';
-import { pathToFileURL } from 'node:url';
 import { parseReleaseJSON } from './account-platform-model-token-release-plan.mjs';
 
 export const credentialOriginPairs = Object.freeze({
@@ -151,6 +151,6 @@ async function main(args) {
   if (args.length === 4) process.stdout.write(await renderCredentialEdge(config, args[3]));
   else process.stdout.write(`${JSON.stringify(validateCredentialEdge(config))}\n`);
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main(process.argv.slice(2)).catch(error => {
+if (isMainModule(import.meta.url)) main(process.argv.slice(2)).catch(error => {
   process.stderr.write(`${/^CREDENTIAL_EDGE_[A-Z_]+$/.test(error?.message) ? error.message : 'CREDENTIAL_EDGE_INVALID'}\n`); process.exitCode = 1;
 });

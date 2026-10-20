@@ -189,8 +189,21 @@ docker compose <compose> exec -T postgres \
 ```
 
 4. 查询四库 `schema_migrations`，与恢复清单核对数量、最高版本和校验和。任何差异先停止，不得修改历史迁移文件或数据库记录。
-5. 按主部署文档第 8.5 节生成的无环迁移计划依次运行迁移服务；不能仅按 Account/Billing/Token 固定顺序猜测。
+5. 按下方“迁移执行清单”核定本次恢复库到目标制品的迁移步骤，再逐项运行迁移服务；不能仅按 Account/Billing/Token 固定顺序猜测。
 6. 按 `backup-restore.md` 执行站点受控只读领域审计并保留真实程序/工件；当前未提供四个历史固定审计 SQL，缺载体不能完成恢复。Billing 账本、权益组成、支付流水和应收任一不平时保持资金写入口关闭。
+
+#### 迁移执行清单
+
+仓库没有自动生成跨域迁移计划的命令。`account-platform-migration-manifest.mjs check` 只校验源码迁移清单的完整性和不可变性，`init` / `append` 是开发时维护清单的命令，均不能代替恢复库检查或生成执行顺序。
+
+恢复负责人和 DBA 在应用、Relay 与公网入口仍关闭时，按以下已有载体编制并复核本次执行清单；清单及批准引用留在站点受控恢复记录，不向仓库写入数据库地址或凭据：
+
+1. 以本节第 4 步的各库实际 `schema_migrations`、恢复清单和目标制品中的 [`../../migrations/manifest.json`](../../migrations/manifest.json) 为输入，列出各域已应用版本、校验和及尚待执行的原始 SQL。已应用记录缺失、checksum 不符或高于目标制品时停止，不通过修改账本、重编号或 down migration 强行适配。
+2. 对每项记录目标库、待执行版本范围、迁移身份/角色、前置条件、准确的制品与命令、成功后的 `migration.post_verification` 核对值和失败停止条件。依据目标制品的 [`../compose/compose.yaml`](../compose/compose.yaml)、实际站点 override 和相关发布说明确认依赖；基础 Compose 中 `token-migrate` 依赖 `billing-migrate` 成功，这条依赖不能被手工逐库执行绕过。Compose 自动依赖也不能代替新角色、授权、备份和业务静默等前置检查。
+3. 涉及受控模型/Token 发布时，逐项使用 [`model-token-release.md`](model-token-release.md) 的角色、迁移与显式 `migrate-up` 操作约束；Account 授权和专项修复启用继续遵循各自发布说明，不用基础 Compose 的自动启动替代专项批准。仅预检/默认 plan 通过不代表已迁移。
+4. DBA 与恢复负责人确认所有前置条件可满足、步骤间没有相互等待后，逐项批准执行。在前一项成功并核对后置结果前不运行依赖它的下一项。未知依赖、缺少命令/授权/可恢复备份证据或验证失败时，保持恢复未完成和写入口关闭，补齐清单后再继续。
+
+本清单是针对真实恢复库的人工复核记录，不是仓库已交付自动规划器或已完成现场迁移的声明。
 
 ### 6.2 NATS JetStream
 

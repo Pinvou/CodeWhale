@@ -1,8 +1,8 @@
 #!/usr/bin/env node
+import { isMainModule } from './account-platform-cli-entry.mjs';
 // Structural fresh-context probe only. No web JS, user interaction or handshake.
 import { createRequire } from 'node:module';
 import { readFile } from 'node:fs/promises';
-import { pathToFileURL } from 'node:url';
 import { isAbsolute } from 'node:path';
 import { edgeCheck, validateCredentialEdge } from './account-platform-credential-edge.mjs';
 import { parseReleaseJSON } from './account-platform-model-token-release-plan.mjs';
@@ -77,6 +77,6 @@ async function main(args) {
   const config = parseReleaseJSON(await readFile(args[1], 'utf8'));
   process.stdout.write(`${JSON.stringify(await probeCredentialBrowser(config, { probe: args.length === 3, executablePath: process.env.CHROME }))}\n`);
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main(process.argv.slice(2)).catch(error => {
+if (isMainModule(import.meta.url)) main(process.argv.slice(2)).catch(error => {
   process.stderr.write(`${/^CREDENTIAL_EDGE_[A-Z_]+$/.test(error?.message) ? error.message : 'CREDENTIAL_EDGE_BROWSER_PREFLIGHT_FAILED'}\n`); process.exitCode = 1;
 });

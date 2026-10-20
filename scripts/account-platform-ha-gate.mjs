@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isMainModule } from './account-platform-cli-entry.mjs';
 
 import { readFile } from 'node:fs/promises';
 import { evidenceTimestamp } from './account-platform-evidence-time.mjs';
@@ -86,7 +87,7 @@ async function main() {
   console.log(JSON.stringify(result));
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+if (isMainModule(import.meta.url)) {
   main().catch((error) => {
     console.error(`[ha-gate] ${error.message}`);
     process.exitCode = 1;

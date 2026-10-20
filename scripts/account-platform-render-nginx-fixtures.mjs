@@ -1,8 +1,8 @@
 #!/usr/bin/env node
+import { isMainModule } from './account-platform-cli-entry.mjs';
 // Public CI fixtures only: no certificate issuance, network, reload or site configuration.
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { renderCredentialEdge, credentialOriginPairs } from './account-platform-credential-edge.mjs';
 
 export async function renderNginxFixtures(outputDirectory, runtimeDirectory) {
@@ -37,7 +37,7 @@ async function main(args) {
   if (args.length !== 4 || args[0] !== '--output' || args[2] !== '--runtime-root') throw new Error('NGINX_FIXTURE_USAGE');
   process.stdout.write(`${JSON.stringify(await renderNginxFixtures(path.resolve(args[1]), args[3]))}\n`);
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main(process.argv.slice(2)).catch(error => {
+if (isMainModule(import.meta.url)) main(process.argv.slice(2)).catch(error => {
   process.stderr.write(`${/^NGINX_FIXTURE_[A-Z_]+$/.test(error?.message) ? error.message : 'NGINX_FIXTURE_FAILED'}\n`);
   process.exitCode = 1;
 });

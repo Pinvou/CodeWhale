@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { realpathSync } from 'node:fs';
 import { mkdtemp, writeFile, readFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -11,7 +12,7 @@ const root = fileURLToPath(new URL('../../../', import.meta.url));
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const release = 'a'.repeat(64); const deployment = 'synthetic-deployment';
 async function fixture(t, kind = 'HA', environment = 'production-new') {
-  const base = await mkdtemp(path.join(tmpdir(), 'pinvou-artifact-boundary-')); t.after(() => rm(base, { recursive: true, force: true }));
+  const base = await mkdtemp(path.join(realpathSync(tmpdir()), 'pinvou-artifact-boundary-')); t.after(() => rm(base, { recursive: true, force: true }));
   const artifactRoot = path.join(base, 'export'); await import('node:fs/promises').then(fs => fs.mkdir(artifactRoot));
   const artifact = Buffer.from('synthetic receipt, not a deployment fact\n'); await writeFile(path.join(artifactRoot, 'receipt.txt'), artifact);
   const evidence = { environment, scenario: { receipt_sha256: sha(artifact) } }; const evidencePath = path.join(artifactRoot, 'evidence.json'); const evidenceBytes = Buffer.from(JSON.stringify(evidence)); await writeFile(evidencePath, evidenceBytes);

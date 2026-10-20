@@ -1,11 +1,11 @@
 #!/usr/bin/env node
+import { isMainModule } from './account-platform-cli-entry.mjs';
 // Offline verification only. Trust roots are external inputs, never report-provided keys.
 import { createHash, createPublicKey, verify } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, open, realpath, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { parseReleaseJSON, validateModelTokenReleasePlan, validateModelTokenEvidenceEnvelope } from './account-platform-model-token-release-plan.mjs';
 import { evidenceKinds, evidenceRejected as reject, evidenceSignedBytes } from './account-platform-model-token-evidence-policy.mjs';
 import { validateReportSemantics } from './account-platform-model-token-evidence-report.mjs';
@@ -188,7 +188,7 @@ async function main(args) {
   process.stdout.write(`${JSON.stringify(result)}\n`);
   if (result.decision !== 'EVIDENCE_VERIFIED') process.exitCode = 1;
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main(process.argv.slice(2)).catch(error => {
+if (isMainModule(import.meta.url)) main(process.argv.slice(2)).catch(error => {
   const code = /^model_token_(?:evidence|release)_[a-z_]+$/.test(error?.message) ? error.message : 'model_token_evidence_invalid';
   process.stderr.write(`${code}\n`); process.exitCode = 1;
 });

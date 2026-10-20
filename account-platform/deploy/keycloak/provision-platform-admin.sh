@@ -1,6 +1,8 @@
 #!/bin/sh
+set +x
 set -eu
 umask 077
+unset KC_CLI_PASSWORD
 
 KEYCLOAK_ADMIN_USERNAME=${KEYCLOAK_ADMIN_USERNAME:-${KC_BOOTSTRAP_ADMIN_USERNAME:-}}
 KEYCLOAK_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD:-${KC_BOOTSTRAP_ADMIN_PASSWORD:-}}
@@ -11,19 +13,29 @@ KEYCLOAK_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD:-${KC_BOOTSTRAP_ADMIN_PASSWORD
 
 KCADM_BINARY=/opt/keycloak/bin/kcadm.sh
 KCADM_CONFIG=$(mktemp "${TMPDIR:-/tmp}/pinvou-admin-kcadm.XXXXXXXX")
-trap 'rm -f "$KCADM_CONFIG"' 0 HUP INT TERM
-kcadm() {
+trap 'rm -f "$KCADM_CONFIG"' 0
+trap 'exit 1' HUP INT TERM
+kcadm() (
+  unset KEYCLOAK_ADMIN_PASSWORD KC_BOOTSTRAP_ADMIN_PASSWORD PINVOU_ADMIN_PASSWORD
   "$KCADM_BINARY" "$@" --config "$KCADM_CONFIG"
-}
+)
 KCADM=kcadm
 REALM=pinvou
 ROLE=platform-admin
 
-"$KCADM" config credentials \
-  --server http://127.0.0.1:8080 \
-  --realm master \
-  --user "$KEYCLOAK_ADMIN_USERNAME" \
-  --password "$KEYCLOAK_ADMIN_PASSWORD" >/dev/null
+# Keycloak 26.7 reads KC_CLI_PASSWORD when the password option is omitted.
+# Scope it to this invocation; do not put a secret in argv (including env argv).
+if ! (
+  KC_CLI_PASSWORD=$KEYCLOAK_ADMIN_PASSWORD
+  export KC_CLI_PASSWORD
+  "$KCADM" config credentials \
+    --server http://127.0.0.1:8080 \
+    --realm master \
+    --user "$KEYCLOAK_ADMIN_USERNAME"
+) >/dev/null 2>&1; then
+  printf '%s\n' 'Keycloak administrator authentication failed' >&2
+  exit 1
+fi
 
 if ! "$KCADM" get "realms/$REALM/roles/$ROLE" >/dev/null 2>&1; then
   "$KCADM" create "realms/$REALM/roles" \
@@ -51,9 +63,15 @@ if [ -z "$user_id" ]; then
     -i)
 fi
 
-"$KCADM" set-password -r "$REALM" \
-  --userid "$user_id" \
-  --new-password "$PINVOU_ADMIN_PASSWORD" >/dev/null
+# set-password uses the same supported environment variable for its new value.
+if ! (
+  KC_CLI_PASSWORD=$PINVOU_ADMIN_PASSWORD
+  export KC_CLI_PASSWORD
+  "$KCADM" set-password -r "$REALM" --userid "$user_id"
+) >/dev/null 2>&1; then
+  printf '%s\n' 'Platform administrator password update failed' >&2
+  exit 1
+fi
 "$KCADM" add-roles -r "$REALM" \
   --uid "$user_id" \
   --rolename "$ROLE" >/dev/null

@@ -103,5 +103,159 @@ kcadm() {
         self.assertIn('account.NewTrustedSourceHandler(service.Handler(verify), os.Getenv("ACCOUNT_TRUSTED_SOURCE_PEER_IPS"))', command)
 
 
+class PlatformAdministratorSecretTransportTests(unittest.TestCase):
+    """Run the real shell with only its fixed executable replaced by a double."""
+
+    FAKE = r'''#!/bin/sh
+set -eu
+for argument in "$@"; do printf '%s\0' "$argument" >> "$CONTROL_ARGS"; done
+config=''; previous=''
+for argument in "$@"; do
+  if [ "$previous" = --config ]; then config=$argument; fi
+  previous=$argument
+done
+[ -f "$config" ] || exit 91
+mode=$(stat -c %a "$config" 2>/dev/null || stat -f %Lp "$config" 2>/dev/null)
+[ "$mode" = 600 ] || exit 91
+printf '%s\0' "$config" >> "$CONTROL_CONFIGS"
+# Only the selected KC_CLI_PASSWORD may reach a CLI child, never both originals.
+[ -z "${KEYCLOAK_ADMIN_PASSWORD+x}${KC_BOOTSTRAP_ADMIN_PASSWORD+x}${PINVOU_ADMIN_PASSWORD+x}" ] || exit 92
+printf '%s %s\n' "$1" "$2" >> "$CONTROL_CALLS"
+case "$1 $2" in
+  'config credentials')
+    [ "$KC_CLI_PASSWORD" = "$CONTROL_EXPECT_AUTH" ] || exit 93
+    if [ "${CONTROL_FAIL:-}" = auth ]; then printf '%s' "$KC_CLI_PASSWORD" >&2; exit 23; fi
+    printf 'inert-token-config\n' > "$config" ;;
+  'set-password -r')
+    [ "$KC_CLI_PASSWORD" = "$CONTROL_EXPECT_TARGET" ] || exit 94
+    if [ "${CONTROL_FAIL:-}" = password ]; then printf '%s' "$KC_CLI_PASSWORD" >&2; exit 24; fi
+    printf 'password-set\n' >> "$CONTROL_STATE/effects" ;;
+  *)
+    [ -z "${KC_CLI_PASSWORD+x}" ] || exit 95
+    case "$1 $2" in
+      'get realms/pinvou/roles/platform-admin') [ -f "$CONTROL_STATE/role" ] ;;
+      'create realms/pinvou/roles') touch "$CONTROL_STATE/role" ;;
+      'get users')
+        if [ -f "$CONTROL_STATE/user" ]; then printf 'existing-id,platform-admin-user\n'; fi ;;
+      'create users') touch "$CONTROL_STATE/user"; printf 'created-id\n' ;;
+      'add-roles -r')
+        if [ "${CONTROL_FAIL:-}" = roles ]; then exit 25; fi
+        printf 'role-assigned\n' >> "$CONTROL_STATE/effects" ;;
+      *) exit 96 ;;
+    esac ;;
+esac
+'''
+
+    def run_provision(self, *, existing=False, failure="", bootstrap=False, traced=False, repeat=False, ambient=False):
+        bash = shutil.which("bash")
+        if not bash and os.name == "nt":
+            bash = str(Path("C:/Program Files/Git/bin/bash.exe"))
+        self.assertTrue(bash and Path(bash).is_file(), "Bash is required for the inert CLI contract")
+        # Synthetic values deliberately contain shell metacharacters, Unicode
+        # and newlines. They are never real credentials or written to evidence.
+        auth = "synthetic-auth-only-'\"\\$();\n\t管理员"
+        target = "synthetic-target-only-'\"\\$();\n\t管理者"
+        with tempfile.TemporaryDirectory(prefix="pinvou-platform-admin-contract-") as directory:
+            root = Path(directory)
+            state = root / "state"
+            state.mkdir()
+            if existing:
+                (state / "role").touch()
+                (state / "user").touch()
+            cli = root / "kcadm.sh"
+            cli.write_text(self.FAKE, encoding="utf-8", newline="\n")
+            cli.chmod(0o700)
+            text = (DEPLOY / "keycloak/provision-platform-admin.sh").read_text(encoding="utf-8")
+            marker = "KCADM_BINARY=/opt/keycloak/bin/kcadm.sh"
+            self.assertEqual(text.count(marker), 1)
+            # Same seam as the existing mobile-auth shell contract: no product
+            # executable override, real network client or credential is used.
+            script = root / "provision.sh"
+            script.write_text(text.replace(marker, f'KCADM_BINARY="{cli.as_posix()}"'), encoding="utf-8", newline="\n")
+            env = dict(os.environ)
+            for name in ["KEYCLOAK_ADMIN_USERNAME", "KEYCLOAK_ADMIN_PASSWORD", "KC_BOOTSTRAP_ADMIN_USERNAME", "KC_BOOTSTRAP_ADMIN_PASSWORD", "KC_CLI_PASSWORD"]:
+                env.pop(name, None)
+            prefix = "KC_BOOTSTRAP_ADMIN" if bootstrap else "KEYCLOAK_ADMIN"
+            env.update({prefix + "_USERNAME": "bootstrap-user", prefix + "_PASSWORD": auth,
+                        "PINVOU_ADMIN_USERNAME": "platform-admin-user", "PINVOU_ADMIN_PASSWORD": target,
+                        "TMPDIR": root.as_posix(), "CONTROL_ARGS": (root / "args").as_posix(),
+                        "CONTROL_CONFIGS": (root / "configs").as_posix(), "CONTROL_CALLS": (root / "calls").as_posix(),
+                        "CONTROL_STATE": state.as_posix(), "CONTROL_EXPECT_AUTH": auth,
+                        "CONTROL_EXPECT_TARGET": target, "CONTROL_FAIL": failure})
+            if ambient:
+                env["KC_CLI_PASSWORD"] = "synthetic-stale-ambient-password"
+            results = []
+            for _ in range(2 if repeat else 1):
+                # File-backed capture avoids an orphaned MSYS child retaining
+                # a pipe on Windows. The deadline is a test bound, not a retry.
+                with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+                    result = subprocess.run([bash, "--posix", *(["-x"] if traced else []), script.as_posix()],
+                                            env=env, stdout=stdout, stderr=stderr, timeout=30)
+                    stdout.seek(0); stderr.seek(0)
+                    output = stdout.read() + stderr.read()
+                self.assertNotIn(auth.encode(), output)
+                self.assertNotIn(target.encode(), output)
+                self.assertNotIn(b"synthetic-auth-only", output)
+                self.assertNotIn(b"synthetic-target-only", output)
+                self.assertNotIn(b"synthetic-stale-ambient-password", output)
+                results.append((result.returncode, output))
+            args = (root / "args").read_bytes().split(b"\0")
+            self.assertNotIn(b"--password", args)
+            self.assertNotIn(b"--new-password", args)
+            self.assertNotIn(b"-p", args)
+            self.assertFalse(any(b"synthetic-auth-only" in a or b"synthetic-target-only" in a for a in args))
+            self.assertFalse(any(b"synthetic-stale-ambient-password" in a for a in args))
+            configs = (root / "configs").read_bytes().decode().split("\0")
+            self.assertTrue(configs[0])
+            self.assertTrue(all(not Path(p).exists() for p in configs if p))
+            self.assertEqual(list(root.glob("pinvou-admin-kcadm.*")), [])
+            calls = (root / "calls").read_text(encoding="utf-8").splitlines()
+            effects = (state / "effects").read_text(encoding="utf-8").splitlines() if (state / "effects").exists() else []
+            return results, calls, effects, args
+
+    def test_create_transports_both_secrets_without_argv(self):
+        results, calls, effects, args = self.run_provision()
+        self.assertEqual(results[0][0], 0, results[0][1])
+        self.assertIn("create realms/pinvou/roles", calls)
+        self.assertIn("create users", calls)
+        self.assertEqual(effects, ["password-set", "role-assigned"])
+        self.assertIn(b"created-id", args)
+        self.assertIn(b"platform-admin", args)
+
+    def test_existing_user_and_role_are_reused(self):
+        results, calls, effects, args = self.run_provision(existing=True, repeat=True)
+        self.assertTrue(all(code == 0 for code, _ in results))
+        self.assertNotIn("create realms/pinvou/roles", calls)
+        self.assertNotIn("create users", calls)
+        self.assertEqual(effects, ["password-set", "role-assigned"] * 2)
+        self.assertIn(b"existing-id", args)
+
+    def test_bootstrap_environment_alias_and_disabled_xtrace(self):
+        results, _, effects, _ = self.run_provision(bootstrap=True, traced=True)
+        self.assertEqual(results[0][0], 0, results[0][1])
+        self.assertEqual(effects, ["password-set", "role-assigned"])
+
+    def test_ambient_cli_password_does_not_reach_other_calls(self):
+        results, _, effects, _ = self.run_provision(ambient=True)
+        self.assertEqual(results[0][0], 0, results[0][1])
+        self.assertEqual(effects, ["password-set", "role-assigned"])
+
+    def test_sensitive_failures_are_redacted_and_cleaned(self):
+        for failure, expected in [("auth", b"Keycloak administrator authentication failed"),
+                                  ("password", b"Platform administrator password update failed")]:
+            with self.subTest(failure=failure):
+                results, calls, effects, _ = self.run_provision(failure=failure)
+                self.assertNotEqual(results[0][0], 0)
+                self.assertIn(expected, results[0][1])
+                self.assertEqual(effects, [])
+                self.assertNotIn("add-roles -r", calls)
+
+    def test_role_failure_cleans_config_and_does_not_report_success(self):
+        results, _, effects, _ = self.run_provision(failure="roles")
+        self.assertNotEqual(results[0][0], 0)
+        self.assertEqual(effects, ["password-set"])
+        self.assertNotIn(b"identity provisioned", results[0][1])
+
+
 if __name__ == "__main__":
     unittest.main()
