@@ -889,8 +889,8 @@ func (r *PostgresRepository) MarkProfileIdentityUpdated(ctx context.Context, id 
 }
 
 func (r *PostgresRepository) CommitProfileChange(ctx context.Context, id uuid.UUID) error {
-	// Discover the immutable subject before starting the transaction, then
-	// share CreateProfileChange's USER-before-profile identity-security mutex.
+	// Discover the immutable subject before opening the transaction; closure
+	// cleanup takes USER before profile, so this writer must use the same order.
 	var userID uuid.UUID
 	if err := r.pool.QueryRow(ctx, `SELECT user_id FROM profile_change_requests WHERE id=$1`, id).Scan(&userID); err != nil {
 		return err
@@ -900,7 +900,8 @@ func (r *PostgresRepository) CommitProfileChange(ctx context.Context, id uuid.UU
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if err := tx.QueryRow(ctx, `SELECT id FROM users WHERE id=$1 FOR UPDATE`, userID).Scan(&userID); err != nil {
+	var userStatus string
+	if err := tx.QueryRow(ctx, `SELECT status FROM users WHERE id=$1 FOR UPDATE`, userID).Scan(&userStatus); err != nil {
 		return err
 	}
 	c, err := scanProfileChange(tx.QueryRow(ctx, profileChangeSelect+` WHERE id=$1 FOR UPDATE`, id))
@@ -912,6 +913,12 @@ func (r *PostgresRepository) CommitProfileChange(ctx context.Context, id uuid.UU
 	}
 	if c.AccountCommittedAt != nil {
 		return nil
+	}
+	// Preserve acknowledged identity facts for closure Prepare to reconcile.
+	// A worker may retry this command after cleanup; committed receipts above
+	// remain read-only, while cancelled or closed subjects cannot regain PII.
+	if userStatus == "CLOSING" || userStatus == "DELETED" || userStatus == "ANONYMIZED" || c.Status == "CANCELLED_ACCOUNT_CLOSURE" {
+		return ErrConflict
 	}
 	if c.IdentityUpdatedAt == nil {
 		return ErrConflict
@@ -952,12 +959,34 @@ func (r *PostgresRepository) CommitProfileChange(ctx context.Context, id uuid.UU
 	return tx.Commit(ctx)
 }
 func (r *PostgresRepository) MarkProfileSessionsRevoked(ctx context.Context, id uuid.UUID) error {
+	// Preserve acknowledged revocation facts using USER, profile, sessions order.
+	var userID uuid.UUID
+	if err := r.pool.QueryRow(ctx, `SELECT user_id FROM profile_change_requests WHERE id=$1`, id).Scan(&userID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `DELETE FROM user_sessions WHERE user_id=(SELECT user_id FROM profile_change_requests WHERE id=$1)`, id); err != nil {
+	var lockedUserID uuid.UUID
+	if err = tx.QueryRow(ctx, `SELECT id FROM users WHERE id=$1 FOR UPDATE`, userID).Scan(&lockedUserID); err != nil {
+		return err
+	}
+	c, err := scanProfileChange(tx.QueryRow(ctx, profileChangeSelect+` WHERE id=$1 FOR UPDATE`, id))
+	if err != nil {
+		return err
+	}
+	if c.UserID != lockedUserID {
+		return ErrConflict
+	}
+	if c.SessionsRevokedAt != nil {
+		return nil
+	}
+	if _, err = tx.Exec(ctx, `DELETE FROM user_sessions WHERE user_id=$1`, userID); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `UPDATE profile_change_requests SET sessions_revoked_at=COALESCE(sessions_revoked_at,$2),version=version+1,updated_at=$2 WHERE id=$1`, id, r.now()); err != nil {
@@ -965,8 +994,9 @@ func (r *PostgresRepository) MarkProfileSessionsRevoked(ctx context.Context, id 
 	}
 	return tx.Commit(ctx)
 }
+
 func (r *PostgresRepository) CompleteProfileChange(ctx context.Context, id uuid.UUID) error {
-	_, err := r.pool.Exec(ctx, `UPDATE profile_change_requests SET status='COMPLETED',last_error_code=NULL,version=version+1,updated_at=$2 WHERE id=$1 AND account_committed_at IS NOT NULL AND sessions_revoked_at IS NOT NULL`, id, r.now())
+	_, err := r.pool.Exec(ctx, `UPDATE profile_change_requests SET status='COMPLETED',last_error_code=NULL,version=version+1,updated_at=$2 WHERE id=$1 AND account_committed_at IS NOT NULL AND sessions_revoked_at IS NOT NULL AND status NOT IN ('COMPLETED','CANCELLED_ACCOUNT_CLOSURE')`, id, r.now())
 	return err
 }
 func (r *PostgresRepository) ScheduleProfileChangeRetry(ctx context.Context, id uuid.UUID, code string) error {

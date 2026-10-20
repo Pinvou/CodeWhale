@@ -6,7 +6,7 @@ import (
 )
 
 func TestOrganizationDeliveredFinancePermissions(t *testing.T) {
-	delivered := []string{"org.wallet.read", "org.entitlements.purchase", "org.quota.read.self", "org.quota.read.all", "org.quota.revoke", "org.roles.read"}
+	delivered := []string{"org.wallet.read", "org.entitlements.purchase", "org.quota.read.self", "org.quota.read.all", "org.quota.revoke", "org.roles.read", "org.grants.reclaim_closed", "personal.account.close.request", "personal.account.close.read", "platform.account-closures.repair", "platform.account-closures.read"}
 	for _, permission := range delivered {
 		t.Run(permission, func(t *testing.T) {
 			if !f01PermissionAllowed(permission) {
@@ -17,7 +17,7 @@ func TestOrganizationDeliveredFinancePermissions(t *testing.T) {
 			}
 		})
 	}
-	for _, permission := range []string{"org.audit.export", "org.grants.reclaim_closed", "personal.account.close.request", "personal.account.close.read", "platform.account-closures.repair"} {
+	for _, permission := range []string{"org.audit.export", "org.grants.force_reclaim", "platform.account-closures.force"} {
 		if f01PermissionAllowed(permission) {
 			t.Fatal("undelivered authority advertised")
 		}

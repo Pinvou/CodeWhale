@@ -46,6 +46,9 @@ func (r *PostgresRepository) BeginUsage(ctx context.Context, request UsageReques
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return UsageRequest{}, false, err
 	}
+	if err := lockReplayUserTx(ctx, tx, request.UserID); err != nil {
+		return UsageRequest{}, false, err
+	}
 	// Accepted immutable receipts above stay replayable after lifecycle changes.
 	// Only new invocations participate in the organization lifecycle gate.
 	if request.OrganizationID != nil {

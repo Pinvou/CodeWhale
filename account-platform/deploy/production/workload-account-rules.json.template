@@ -28,7 +28,8 @@
       "internal.authorization.delegate",
       "internal.approval-execution.begin",
       "internal.approval-execution.complete",
-      "internal.approval-authorization.consume"
+      "internal.approval-authorization.consume",
+      "internal.account.closure.read"
     ]
   },
   {

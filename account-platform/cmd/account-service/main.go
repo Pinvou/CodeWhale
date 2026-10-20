@@ -6,8 +6,10 @@ import (
 	"errors"
 	"log"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/account"
@@ -23,7 +25,9 @@ func main() {
 	if err := httpserver.ConfigureProcessLogging("account-service"); err != nil {
 		log.Fatal("ACCOUNT_LOGGING_CONFIGURATION_INVALID")
 	}
-	ctx := context.Background()
+	// One signal-owned context stops new worker tasks and starts listener drain.
+	ctx, stopWorkers := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopWorkers()
 	cfg, err := config.Load("account-service")
 	if err != nil {
 		log.Fatal("ACCOUNT_CONFIGURATION_INVALID")
@@ -90,6 +94,28 @@ func main() {
 	}
 	go observability.RunBackground(ctx, "wallet-provisioning", account.NewWalletProvisioningWorker(repository, wallets, 5*time.Second).Run)
 	go observability.RunBackground(ctx, "role-binding-expiry", account.NewRoleBindingExpiryWorker(repository, time.Minute).Run)
+	closureBilling, closureToken, err := configuredAccountClosureClients(credential)
+	if err != nil {
+		log.Fatal("ACCOUNT_CLOSURE_CONFIGURATION_INVALID")
+	}
+	closureDone := make(chan struct{})
+	go func() {
+		defer close(closureDone)
+		observability.RunBackground(ctx, "account-closure", account.NewAccountClosureWorker(repository, 5*time.Second, closureBilling, closureToken).WithCleanup(identities, closureBilling, closureToken).Run)
+	}()
+	// Registered after repository.Close's defer, so cancellation and this bounded
+	// wait run before the database pool is closed. A lost ACK resumes by its lease.
+	drainClosure := func() {
+		stopWorkers()
+		timer := time.NewTimer(10 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-closureDone:
+		case <-timer.C:
+			log.Print("ACCOUNT_CLOSURE_SHUTDOWN_TIMEOUT")
+		}
+	}
+	defer drainClosure()
 	if enabled("MOBILE_AUTH_ENABLED") {
 		registrationQueryKey, decodeErr := base64.RawStdEncoding.DecodeString(strings.TrimSpace(os.Getenv("REGISTRATION_QUERY_HMAC_KEY_BASE64")))
 		if decodeErr != nil {
@@ -183,7 +209,10 @@ func main() {
 	if err != nil {
 		log.Fatal("ACCOUNT_TRUSTED_SOURCE_CONFIGURATION_INVALID")
 	}
-	if err := httpserver.RunWithApplicationAndCollectors("account-service", repository.WithApprovalWriterReadiness(handler), repository.Ping, repository.ApprovalPaginationCollectors()...); err != nil {
+	if err := httpserver.RunWithApplicationContext(ctx, "account-service", repository.WithApprovalWriterReadiness(handler), repository.Ping, repository.ApprovalPaginationCollectors()...); err != nil {
+		// log.Fatal bypasses defers; explicitly perform the bounded worker drain.
+		drainClosure()
+		repository.Close()
 		log.Fatal("ACCOUNT_HTTP_SERVER_FAILED")
 	}
 }

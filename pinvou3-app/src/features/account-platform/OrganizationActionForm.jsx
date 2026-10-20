@@ -12,12 +12,12 @@ const currentSelections = (fields, values) => fields.every(field => {
 
 // Each displayed action owns one immutable invocation. Unknown outcomes retain
 // the original hook facts/key; only fresh invocations require user confirmation.
-export function OrganizationActionForm({ client, owner, copy, title, scope, fields, prepare, action, onConfirmed, confirm = false, disabled = false, confirmationTarget = '' }) {
+export function OrganizationActionForm({ client, owner, copy, title, scope, fields, prepare, action, onConfirmed, confirm = false, disabled = false, confirmationTarget = '', useOperation = useFinanceOperation }) {
  const [values, setValues] = useState(() => Object.fromEntries(fields.map(field => [field.name, field.initial ?? (field.multiple ? [] : '')])));
  const [invalid, setInvalid] = useState(false);
  const [confirmation, setConfirmation] = useState(null);
  const [renderedReady, setRenderedReady] = useState(null);
- const operation = useFinanceOperation(owner, copy, client, scope);
+ const operation = useOperation(owner, copy, client, scope);
  const live = useRef(null), ready = useRef(null), generation = useRef(0), pending = useRef(null), dispatching = useRef(null);
  const epoch = client.financeSessionEpoch || 0;
  live.current = { client, owner, scope, epoch, values, fields, prepare, action, onConfirmed, disabled, operation, confirmationTarget, renderedReady };
@@ -40,14 +40,14 @@ export function OrganizationActionForm({ client, owner, copy, title, scope, fiel
  }, [client, owner, scope, epoch]);
  const freshCurrent = snapshot => {
   const current = live.current;
-  if (!snapshot || !sameIdentity(snapshot) || dispatching.current || current.disabled || current.operation.busy || current.operation.unknown || current.operation.pendingFacts || snapshot.confirmationTarget !== current.confirmationTarget) return false;
+  if (!snapshot || !sameIdentity(snapshot) || dispatching.current || current.disabled || current.operation.blocked || current.operation.busy || current.operation.unknown || current.operation.pendingFacts || snapshot.confirmationTarget !== current.confirmationTarget) return false;
   try {
    return JSON.stringify(current.values) === snapshot.valuesJSON && currentSelections(current.fields, current.values) && JSON.stringify(clone(current.prepare(current.values))) === snapshot.factsJSON;
   } catch { return false; }
  };
  useEffect(() => { if (pending.current && !freshCurrent(pending.current)) cancel(pending.current); });
  const execute = async (facts, snapshot) => {
-  if (!sameIdentity(snapshot) || dispatching.current || live.current.operation.busy) return;
+  if (!sameIdentity(snapshot) || dispatching.current || live.current.operation.blocked || live.current.operation.busy) return;
   const marker = {}; dispatching.current = marker;
   try {
    const result = await live.current.operation.mutate(facts, live.current.action);
@@ -64,7 +64,7 @@ export function OrganizationActionForm({ client, owner, copy, title, scope, fiel
   event.preventDefault(); setInvalid(false);
   const current = live.current, active = ready.current;
   if (client !== current.client || owner !== current.owner || scope !== current.scope || epoch !== current.epoch) return;
-  if (!active || !sameIdentity(active) || dispatching.current || current.operation.busy) return;
+  if (!active || !sameIdentity(active) || dispatching.current || current.operation.blocked || current.operation.busy) return;
   if (current.operation.pendingFacts) { void execute(current.operation.pendingFacts, active); return; }
   if (current.operation.unknown || current.disabled) return;
   let facts;
@@ -83,8 +83,8 @@ export function OrganizationActionForm({ client, owner, copy, title, scope, fiel
  }) : [];
  return <form className="ap-org-action" onSubmit={submit}><h4>{title}</h4>
   {displayed && <OrganizationActionConfirmation copy={copy} title={title} target={confirmation.confirmationTarget} details={details} onCancel={() => cancel(confirmation)} onConfirm={() => void accept(confirmation)} canRestoreFocus={() => freshCurrent(confirmation)} />}
-  <fieldset disabled={operation.busy || operation.unknown || disabled}>{fields.map(field => <label key={field.name}>{copy[field.label || field.name]}{field.options ? <select multiple={field.multiple || false} value={values[field.name]} onChange={event => { const value = field.multiple ? [...event.target.selectedOptions].map(option => option.value) : event.target.value; setValues(old => ({ ...old, [field.name]: value })); }}>{!field.multiple && <option value="">{field.optional ? copy.root : '—'}</option>}{fieldOptions(field, values).map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select> : <input type={field.type || 'text'} autoComplete="off" value={values[field.name]} onChange={event => setValues(old => ({ ...old, [field.name]: event.target.value }))} required={!field.optional} />}{field.multiple && <small>{copy.unscopedUnits}</small>}</label>)}</fieldset>
+  <fieldset disabled={operation.busy || operation.unknown || operation.blocked || disabled}>{fields.map(field => <label key={field.name}>{copy[field.label || field.name]}{field.options ? <select multiple={field.multiple || false} value={values[field.name]} onChange={event => { const value = field.multiple ? [...event.target.selectedOptions].map(option => option.value) : event.target.value; setValues(old => ({ ...old, [field.name]: value })); }}>{!field.multiple && <option value="">{field.optional ? copy.root : '—'}</option>}{fieldOptions(field, values).map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select> : <input type={field.type || 'text'} autoComplete="off" value={values[field.name]} onChange={event => setValues(old => ({ ...old, [field.name]: event.target.value }))} required={!field.optional} />}{field.multiple && <small>{copy.unscopedUnits}</small>}</label>)}</fieldset>
   {invalid && <p role="alert">{copy.invalid}</p>}{operation.error && <p role="alert">{operation.error}</p>}{operation.message && <p role="status">{operation.message}</p>}
-  <button disabled={operation.busy || (disabled && !operation.unknown)} type="submit">{operation.unknown ? copy.retry : title}</button>
+  <button disabled={operation.busy || operation.blocked || (disabled && !operation.unknown)} type="submit">{operation.unknown ? copy.retry : title}</button>
  </form>;
 }

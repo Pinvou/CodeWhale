@@ -1,5 +1,5 @@
 {
-  "version": "F06",
+  "version": "F08",
   "description": "Installed entrypoint inventory, not a runtime ACL issuer. Dynamic handler authorization and repository authority checks are preserved; this file does not grant permissions.",
   "routes": [
     {
@@ -865,6 +865,30 @@
         "command": "TOKEN_ORGANIZATION_UNIT_LIFECYCLE_APPLY",
         "mode": "AuditOnly"
       }
+    },
+    {
+      "method": "delete",
+      "path": "/internal/v1/users/{user_id}/replay-payloads",
+      "handler": "anonymizeUserReplayPayloads",
+      "authority": {
+        "kind": "workload",
+        "all": [
+          "internal.token.account-closure.replay-clear"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/internal/v1/users/{user_id}/account-closure-assessment",
+      "handler": "accountClosureAssessment",
+      "authority": {
+        "kind": "workload",
+        "all": [
+          "internal.token.account-closure.assess"
+        ]
+      },
+      "gates": []
     }
   ],
   "commands": [
@@ -1367,6 +1391,34 @@
         "kind": "bearer_organization",
         "all": [
           "org.quota.revoke"
+        ]
+      },
+      "gates": [
+        "MANAGEMENT_ENABLED"
+      ]
+    },
+    {
+      "method": "post",
+      "path": "/v1/organizations/{organization_id}/account-closed-grants/{grant_id}/reclaim",
+      "handler": "reclaimClosedGrant",
+      "authority": {
+        "kind": "bearer_organization",
+        "all": [
+          "org.grants.reclaim_closed"
+        ]
+      },
+      "gates": [
+        "MANAGEMENT_ENABLED"
+      ]
+    },
+    {
+      "method": "post",
+      "path": "/v1/organizations/{organization_id}/account-closed-grants:reclaim-batch",
+      "handler": "reclaimClosedGrantsBatch",
+      "authority": {
+        "kind": "bearer_organization",
+        "all": [
+          "org.grants.reclaim_closed"
         ]
       },
       "gates": [

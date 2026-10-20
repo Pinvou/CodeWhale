@@ -110,20 +110,46 @@ export function managementRoutes(source) {
 
 
 export function organizationFinanceRoutes(source, handlers) {
-  if (!/if !s\.managementEnabled \{\s*return\s*\}/.test(lexicalRouteSource(source).masked)) fail('organization management assembly gate missing');
+  const masked = lexicalRouteSource(source).masked;
+  const assemblyGate = /if !s\.managementEnabled \{\s*return\s*\}/.exec(masked);
+  if (!assemblyGate) fail('organization management assembly gate missing');
+  for (const declaration of masked.matchAll(/\broutes\.(?:GET|POST|PUT)\b/g)) {
+    if (declaration.index < assemblyGate.index + assemblyGate[0].length) fail('organization route precedes management assembly gate');
+  }
+  const maskedHandlers = lexicalRouteSource(handlers).masked;
+  const realFunctionBody = name => {
+    const prefix = `func (s *Service) ${name}(`;
+    const functions = new RegExp('func \\(s \\*Service\\) ' + name + '\\([^\\n]*\\) [^\\n]*\\{([\\s\\S]*?)\\n\\}', 'g');
+    for (const match of handlers.matchAll(functions)) {
+      if (maskedHandlers.startsWith(prefix, match.index)) return match[1];
+    }
+    return undefined;
+  };
   const routes = routeDeclarationLines(source).map(line => {
     const match = line.match(/^\s*routes\.(GET|POST|PUT)\("([^"]+)",\s*(.*)\)$/);
     if (!match) fail('unrecognized organization route declaration');
     const [, method, suffix, expression] = match;
     const handler = expression.match(/httpserver\.AdaptFunc\(s\.(\w+)\)$/)?.[1];
     if (!handler || !/^(?:approvalpolicy\.Require\("[A-Z_]+", approvalpolicy\.\w+\), )?httpserver\.AdaptFunc\(s\.\w+\)$/.test(expression)) fail('unrecognized organization handler');
-    const body = handlers.match(new RegExp('func \\(s \\*Service\\) ' + handler + '\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}'))?.[1];
+    const body = realFunctionBody(handler);
     if (!body) fail('organization handler source missing');
     let permission;
     if (handler === 'organizationModelPolicy') {
       if (!/permission := "org\.models\.read"/.test(body) || !/if r\.Method == http\.MethodPut \{\s*permission = "org\.models\.manage"/.test(body)
         || !body.includes('AuthorizedOrganizationUserID(r.Context(), principal, permission, organizationID)')) fail('organization model authority changed');
       permission = method === 'PUT' ? 'org.models.manage' : 'org.models.read';
+    } else if (handler === 'reclaimClosedGrant' || handler === 'reclaimClosedGrantsBatch') {
+      // These two existing handlers share one explicit authority helper. Keep
+      // the call chain strict; an unknown helper must not acquire an authority.
+      const helper = realFunctionBody('closedGrantClient');
+      const realStatement = (text, statement, selector) => {
+        const lexical = lexicalRouteSource(text);
+        const maskedLines = lexical.masked.split(/\r?\n/);
+        return lexical.lines.some((line, index) => statement.test(line) && maskedLines[index].includes(selector));
+      };
+      if (!helper || !realStatement(body, /^\s*resolved, org, client, ok := s\.closedGrantClient\(w, r\)\s*$/, 's.closedGrantClient(w, r)')) fail('closed grant authority helper missing');
+      if (!realStatement(helper, /^\s*resolved, org, _, ok := s\.resolveOrganizationBilling\(w, r, "org\.grants\.reclaim_closed"\)\s*$/, 's.resolveOrganizationBilling(w, r,')) fail('closed grant authority changed');
+      permission = 'org.grants.reclaim_closed';
     } else permission = body.match(/resolveOrganizationBilling\(w, r, "(org\.[a-z.]+)"\)/)?.[1];
     if (!permission) fail('organization permission source missing');
     const policy = expression.match(/approvalpolicy\.Require\("([^"]+)", approvalpolicy\.(\w+)\)/);
@@ -437,7 +463,7 @@ export function loadInputs(base = root) {
   return {
     routeSource: read('account-platform/internal/token/management_routes.go'),
     organizationFinanceSource: read('account-platform/internal/token/organization_finance_routes.go'),
-    organizationHandlerSource: read('account-platform/internal/token/organization_billing.go') + '\n' + read('account-platform/internal/token/organization_model_policy.go'),
+    organizationHandlerSource: read('account-platform/internal/token/organization_billing.go') + '\n' + read('account-platform/internal/token/organization_model_policy.go') + '\n' + read('account-platform/internal/token/account_closed_grants.go'),
     organizationFinance: json('account-platform/contracts/openapi/organization-finance.yaml'),
     organizationAccountSource: read('account-platform/internal/account/organization_routes.go'),
     memberUnits: json('account-platform/contracts/openapi/organization-member-units.yaml'),

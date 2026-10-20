@@ -19,6 +19,12 @@ func DownOne(ctx context.Context, conn *pgx.Conn, input []migrations.Migration) 
 }
 
 func retainedRollbackGuard(_ context.Context, _ pgx.Tx, migration migrations.Migration) error {
+	if migration.Version == 28 {
+		// Keep the original SQL identity. Even a legacy database whose latest
+		// applied version is 028 must retain cleanup proofs, lifecycle fences
+		// and retention records; a later forward-only migration is not enough.
+		return errors.New("retained account closure cleanup rollback is unsupported: preserve lifecycle, cleanup and retention evidence")
+	}
 	if migration.Version == 39 {
 		// Preserve the retained migration identity. Its original DISTINCT
 		// expression compares void scope-version results and fails at planning,

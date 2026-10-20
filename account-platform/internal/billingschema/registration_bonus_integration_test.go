@@ -106,7 +106,7 @@ func TestRegistrationBonusPublicSchemaAndInputFacts(t *testing.T) {
 'required_facts_check',(SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='wallet_provisioning_jobs'::regclass AND conname='wallet_provisioning_registration_bonus_required_facts_check'))::text`)
 		}
 		// Only the unused 900006 CHECK may roll back. The actual next public
-		// Down stops at 900004 and never executes the older 900003 scope Down.
+		// Down stops at 900005 and never executes the older bonus or scope Down.
 		beforeFacts := bonusInputFacts()
 		before := stageValue(t, ctx, ac, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version<>900006`)
 		if err = migrations.DownOne(ctx, ac, ordered); err != nil {
@@ -127,12 +127,12 @@ func TestRegistrationBonusPublicSchemaAndInputFacts(t *testing.T) {
 		if _, err = migrations.VerifyApplied(ctx, ac, remaining); err != nil {
 			t.Fatal("remaining migration facts changed after safe rollback", err)
 		}
-		if err = ac.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&latest); err != nil || latest != 900004 {
-			t.Fatal("expected actual bonus facts guard as next public rollback", latest, err)
+		if err = ac.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&latest); err != nil || latest != 900005 {
+			t.Fatal("expected actual cleanup ACK guard as next public rollback", latest, err)
 		}
 		var pe *pgconn.PgError
-		if err = migrations.DownOne(ctx, ac, remaining); !errors.As(err, &pe) || pe.Code != "P0001" || pe.Message != "registration bonus required facts guard is forward-only" {
-			t.Fatal("actual forward-only account bonus guard was not reached", err)
+		if err = migrations.DownOne(ctx, ac, remaining); !errors.As(err, &pe) || pe.Code != "55000" || pe.Message != "account closure cleanup acknowledgements are forward-only" {
+			t.Fatal("actual forward-only account cleanup ACK guard was not reached", err)
 		}
 		if after := stageValue(t, ctx, ac, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`); after != before {
 			t.Fatal("failed account Down changed ledger")

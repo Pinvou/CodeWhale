@@ -3,7 +3,7 @@
   "info": {
     "title": "Token organization finance and model policy",
     "version": "1.0.0",
-    "description": "Finite11 existing models-management assembly operations. Personal factory does not install these paths (404); bearer identity plus current Account organization permissions are independently verified. No new authority is introduced. Quota batches bind complete ordered parent facts before allocation and retain their original identity on unknown outcomes. Read Billing projections are explicitly partial, monetary JSON int64 must be decoded losslessly; signed readiness and personal invocation remain separate."
+    "description": "Finite13 existing models-management assembly operations. Personal factory does not install these paths (404); bearer identity plus current Account organization permissions are independently verified. No new authority is introduced. Quota batches bind complete ordered parent facts before allocation and retain their original identity on unknown outcomes. Read Billing projections are explicitly partial, monetary JSON int64 must be decoded losslessly; signed readiness and personal invocation remain separate."
   },
   "paths": {
     "/v1/organizations/{organization_id}/model-policy": {
@@ -623,6 +623,149 @@
           }
         }
       }
+    },
+    "/v1/organizations/{organization_id}/account-closed-grants/{grant_id}/reclaim": {
+      "post": {
+        "operationId": "reclaimClosedGrant",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "x-go-handler": "reclaimClosedGrant",
+        "x-authority": {
+          "kind": "bearer_organization",
+          "all": [
+            "org.grants.reclaim_closed"
+          ]
+        },
+        "x-governance-gates": [
+          "MANAGEMENT_ENABLED"
+        ],
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "grant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 16,
+              "maxLength": 128
+            },
+            "description": "The trimmed original Unicode-character key; batch replay derives stable per-item SHA-256 subkeys."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClosedGrantReclaimRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Existing successful reclaim result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClosedGrantReclaimReceipt"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Existing bearer/current organization permission denial and invalid-input handling. Single uncertain Billing transport maps to 503 COMMAND_RESULT_UNKNOWN and retains original key; batch uncertainty is per item. Definite Billing 4xx remains rejected. No new approval or response policy."
+          }
+        }
+      }
+    },
+    "/v1/organizations/{organization_id}/account-closed-grants:reclaim-batch": {
+      "post": {
+        "operationId": "reclaimClosedGrantsBatch",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "x-go-handler": "reclaimClosedGrantsBatch",
+        "x-authority": {
+          "kind": "bearer_organization",
+          "all": [
+            "org.grants.reclaim_closed"
+          ]
+        },
+        "x-governance-gates": [
+          "MANAGEMENT_ENABLED"
+        ],
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 16,
+              "maxLength": 128
+            },
+            "description": "The trimmed original Unicode-character key; batch replay derives stable per-item SHA-256 subkeys."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClosedGrantReclaimBatchRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "207": {
+            "description": "Independently committed item outcomes, including partial failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClosedGrantReclaimBatchResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Existing bearer/current organization permission denial and invalid-input handling. Single uncertain Billing transport maps to 503 COMMAND_RESULT_UNKNOWN and retains original key; batch uncertainty is per item. Definite Billing 4xx remains rejected. No new approval or response policy."
+          }
+        }
+      }
     }
   },
   "components": {
@@ -808,6 +951,139 @@
             "type": "string"
           }
         }
+      },
+      "ClosedGrantReclaimRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "description": "Whitespace is trimmed before applying the existing Unicode-character bound."
+          }
+        }
+      },
+      "ClosedGrantReclaimBatchRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "grant_ids",
+          "reason"
+        ],
+        "properties": {
+          "grant_ids": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 200,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "A zero UUID is handled as an individual failed item, preserving independently committed batch results."
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "description": "Whitespace is trimmed before applying the existing Unicode-character bound."
+          }
+        }
+      },
+      "ClosedGrantReclaimReceipt": {
+        "type": "object",
+        "description": "Selected frozen receipt projection validated by the gateway; other Billing grant projection fields remain partial.",
+        "required": [
+          "grant",
+          "amount_microcredits",
+          "subject_lifecycle_version",
+          "replayed"
+        ],
+        "properties": {
+          "grant": {
+            "type": "object",
+            "required": [
+              "grant_id",
+              "organization_id",
+              "status"
+            ],
+            "properties": {
+              "grant_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "organization_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "RECLAIMED_ACCOUNT_CLOSED"
+                ]
+              }
+            }
+          },
+          "amount_microcredits": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "subject_lifecycle_version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 2
+          },
+          "replayed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ClosedGrantReclaimBatchResult": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "grant_id",
+                "status"
+              ],
+              "properties": {
+                "grant_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "SUCCEEDED",
+                    "FAILED"
+                  ]
+                },
+                "result": {
+                  "$ref": "#/components/schemas/ClosedGrantReclaimReceipt"
+                },
+                "code": {
+                  "type": "string",
+                  "enum": [
+                    "COMMAND_RESULT_UNKNOWN",
+                    "ACCOUNT_CLOSED_GRANT_RECLAIM_REJECTED"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "description": "Each item commits independently. SUCCEEDED includes result; FAILED includes code. Retry retains the original batch key and stable indexed grant subkeys."
       }
     }
   }

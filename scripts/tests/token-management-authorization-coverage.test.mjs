@@ -178,7 +178,63 @@ test('the installed Token Handler must still register the invocation routes', ()
 
 test('organization finance registration cannot disappear outside the management inventory', () => {
   const result = checkCoverage(inputs);
-  assert.equal(result.organizationFinanceRoutes, 11);
+  assert.equal(result.organizationFinanceRoutes, 13);
+});
+
+test('closed-grant authority helper cannot disappear or change permission', () => {
+  for (const source of [
+    inputs.organizationHandlerSource.replaceAll('s.closedGrantClient(w, r)', 's.unclassifiedClosedGrantClient(w, r)'),
+    inputs.organizationHandlerSource.replace('func (s *Service) closedGrantClient(', 'func (s *Service) unclassifiedClosedGrantClient('),
+    inputs.organizationHandlerSource.replace('s.resolveOrganizationBilling(w, r, "org.grants.reclaim_closed")', 's.resolveOrganizationBilling(w, r, "org.grants.allocate")'),
+  ]) assert.throws(() => checkCoverage({ ...inputs, organizationHandlerSource: source }), /closed grant authority/);
+});
+
+test('comments and strings cannot stand in for the closed-grant authority chain', () => {
+  const caller = 'resolved, org, client, ok := s.closedGrantClient(w, r)';
+  const authority = 'resolved, org, _, ok := s.resolveOrganizationBilling(w, r, "org.grants.reclaim_closed")';
+  for (const [original, replacement, selector, error] of [
+    [caller, 'resolved, org, client, ok := s.unclassifiedClosedGrantClient(w, r)', 's.closedGrantClient(w, r)', /closed grant authority helper/],
+    [authority, 'resolved, org, _, ok := s.resolveOrganizationBilling(w, r, "org.grants.allocate")', 's.resolveOrganizationBilling(w, r, "org.grants.reclaim_closed")', /closed grant authority changed/],
+  ]) {
+    for (const comment of [`// ${selector}`, `/* ${original} */`, `_ = \`${original}\``, `_ = \`\n${original}\n\``]) {
+      const source = inputs.organizationHandlerSource.replaceAll(original, `${replacement}\n\t${comment}`);
+      assert.throws(() => checkCoverage({ ...inputs, organizationHandlerSource: source }), error);
+    }
+  }
+});
+
+test('a commented or stringified whole helper cannot hide changed real authority', () => {
+  const helper = inputs.organizationHandlerSource.match(/func \(s \*Service\) closedGrantClient\([^\n]*\) [^\n]*\{[\s\S]*?\n\}/)?.[0];
+  assert.ok(helper);
+  const changed = inputs.organizationHandlerSource.replace('s.resolveOrganizationBilling(w, r, "org.grants.reclaim_closed")', 's.resolveOrganizationBilling(w, r, "org.grants.allocate")');
+  for (const standIn of [`/*\n${helper}\n*/\n`, `var fakeClosedGrantHelper = \`\n${helper}\n\`\n`]) {
+    assert.throws(() => checkCoverage({ ...inputs, organizationHandlerSource: standIn + changed }), /closed grant authority changed/);
+  }
+});
+
+test('both closed-grant paths must be present in the manifest and contract', () => {
+  const paths = [
+    '/v1/organizations/{organization_id}/account-closed-grants/{grant_id}/reclaim',
+    '/v1/organizations/{organization_id}/account-closed-grants:reclaim-batch',
+  ];
+  for (const path of paths) {
+    const manifest = structuredClone(inputs.manifest);
+    manifest.organizationFinanceRoutes = manifest.organizationFinanceRoutes.filter(route => route.path !== path);
+    assert.throws(() => checkCoverage({ ...inputs, manifest }), /organization route authority/);
+    const organizationFinance = structuredClone(inputs.organizationFinance);
+    delete organizationFinance.paths[path];
+    assert.throws(() => checkCoverage({ ...inputs, organizationFinance }), /organization OpenAPI/);
+  }
+});
+
+test('closed-grant routes cannot bypass their declared management gate', () => {
+  for (const handler of ['reclaimClosedGrant', 'reclaimClosedGrantsBatch']) {
+    const line = inputs.organizationFinanceSource.split(/\r?\n/).find(value => value.includes(`httpserver.AdaptFunc(s.${handler})`));
+    assert.ok(line);
+    const source = inputs.organizationFinanceSource.replace(line, '')
+      .replace('if !s.managementEnabled {', `${line.trim()}\n\tif !s.managementEnabled {`);
+    assert.throws(() => checkCoverage({ ...inputs, organizationFinanceSource: source }), /precedes management assembly gate/);
+  }
 });
 
 test('organization finance path and authority drift are rejected against frozen manifest', () => {

@@ -25,6 +25,7 @@ import (
 )
 
 type Service struct {
+	closureStates                AccountClosureStateVerifier
 	impactPricing                impactPriceRepository
 	modelPriceProjectionEnabled  bool
 	modelPriceProjectionMetrics  *modelPriceProjectionMetrics
@@ -41,6 +42,11 @@ type Service struct {
 	registrationBonuses          registrationBonusRepository
 	registrationBonusEligibility RegistrationBonusEligibilityVerifier
 	now                          func() time.Time
+}
+
+func (s *Service) WithAccountClosureStateVerifier(verifier AccountClosureStateVerifier) *Service {
+	s.closureStates = verifier
+	return s
 }
 
 func (s *Service) WithRechargeProductCatalog(catalog RechargeProductCatalogRepository) *Service {
@@ -97,6 +103,8 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	router := httpserver.NewRouter()
 	protected := router.Group("")
 	protected.Use(serviceauth.GinMiddleware(serviceToken))
+	protected.GET("/internal/v1/users/:user_id/account-closure-assessment", serviceauth.Require("internal.billing.account-closure.assess"), httpserver.AdaptFunc(s.accountClosureAssessment))
+	protected.POST("/internal/v1/users/:user_id/account-closure-grants/isolate", serviceauth.Require("internal.billing.account-closure.isolate"), httpserver.AdaptFunc(s.isolateAccountClosedGrants))
 	if s.payments != nil {
 		protected.POST("/internal/v1/reconciliation/runs", serviceauth.Require("internal.billing.reconciliation.run"), httpserver.AdaptFunc(s.runReconciliation))
 	}

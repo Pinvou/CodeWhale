@@ -7,6 +7,7 @@ import (
 )
 
 func (s *Service) registerOrganizationRoutes(protected *httpserver.RouteGroup) {
+	protected.POST("/internal/v1/organizations/:organization_id/account-closed-grants/:grant_id/reclaim", serviceauth.Require("internal.billing.closed-grant.reclaim"), s.requireHumanDelegation("org.grants.reclaim_closed", "member-quota-grant", "grant_id"), httpserver.AdaptFunc(s.reclaimAccountClosedGrantInternal))
 	protected.PUT("/internal/v1/organizations/:organization_id/lifecycle", serviceauth.Require("internal.billing.organization.lifecycle"), approvalpolicy.Require("BILLING_ORGANIZATION_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.applyOrganizationLifecycle))
 	protected.PUT("/internal/v1/organizations/:organization_id/units/:unit_id/lifecycle", serviceauth.Require("internal.billing.organization-unit.lifecycle"), approvalpolicy.Require("BILLING_ORGANIZATION_UNIT_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.organizationUnitDeletionBlockers))
 	protected.PUT("/internal/v1/organizations/:organization_id/members/:user_id/lifecycle", serviceauth.Require("internal.billing.organization-member.lifecycle"), approvalpolicy.Require("BILLING_ORGANIZATION_MEMBER_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.applyOrganizationMemberLifecycle))

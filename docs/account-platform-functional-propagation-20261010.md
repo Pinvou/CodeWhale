@@ -86,3 +86,15 @@ UI、Native 和资产源码无增量，不重复完整浏览器/Native 或将历
 非作者 CI 检查 routing 14、policy 39、Token phase 8、bonus 合同 Node 8、部署合同 5 全部通过，Node 无跳过；Token checker 为 67/7/19，actionlint、架构和 diffcheck 退出 0。继承 producer 夹具首轮 registration 因未配置 HMAC 失败（11.379 秒，另四态通过）；仅测试补合成指纹与正式 eligibility readiness 前置，原生产、断言及预算不改，故不称全部 incoming 与前序原字节一致。首失败保留。
 
 另一非作者最终真实 PG：gift 一组六子例 19.113 秒、修正 producer 一组五子例 10.883 秒，均退出 0、零跳过，使用 Account/Billing 完整 Up 与 Verify、真实 actor 和受控 HTTP；不是生产 SMS/Identity 或 Token 三域验收。默认 Account 4.241 秒、BillingSchema 2.709 秒、Token 5.531 秒及 vet 退出 0，默认跳过数量未知。新 head CI 待验，CodeWhale 严格公开维护祖先门禁已知失败按用户指示暂缓；不宣称整个 F07 通过，不重复浏览器/Native 或消除 #1681 未知原因。
+
+## F08：保全在途证据与注销接管的相邻承接
+
+从原 F08 本地父 `936834681e1c8af510598eb034844cac4f07e55d` 普通合并签名 F07 `8f8a2acac319843a088cacf0958543111dd0d43f`，同时纳入此前经独立验证、尚未推送的 F08 完整功能修复。109 项原工作区内容与十五项 incoming 的交集仅 Commerce、Profile 与 CI policy；保留 scoped 备份、原失败和独立冻结记录，未用整文件覆盖其他波次功能。
+
+真实注册 PROVISIONING 和已确认 MOBILE 的四种合法状态允许入队，Claim 仍仅 ACTIVE、当前完整 mapping 代际及主体生命周期。旧代际任务禁止重新派发；原有效在途回调与历史证据保留。资料会话撤销采用 USER→profile→sessions 锁序；迟到完成不得覆盖注销取消状态及原因，已完成事实也不重复改写。原锁环和历史覆盖证据已确认；历史覆盖登记 #1682，不能由测试绿冒称外部系统已删除数据。
+
+非作者最终真实 PostgreSQL 组合退出 0、158.842 秒：父七组、二十二子例零失败/零跳过；赠礼父使用三域正式 Up/Verify 和真实运行身份，内部 Account 五子例、Billing 八子例也实际通过且零跳过。资料九例真实并发发生一次 40001，首事务回滚后核同 claim/version/live lease 有效，以原 claim 仅重试一次成功；40P01 和其他错误仍直接失败，未扩超时或放宽资金断言。原观察分类和测试前置失败保留，与产品原缺陷分开记录。
+
+冻结后的主 Go 默认测试及 vet 退出 0；未配置数据库的默认 opt-in 跳过不计 PostgreSQL 验收。独立 routing 14、policy 40、部署合同 5、Token phase 8 均通过且 Node 无跳过；Token checker 69/7/19、actionlint、架构和 diffcheck 退出 0。已冻结未变的前端受控浏览器二十例、客户/恢复合同十四例、完整 Node 1493 通过/四条件跳过及 Native 七十一例沿精确字节保留；本次相邻传播未重复执行，不冒称新的生产 E2E。Token 36→37 与其他未变三域升级证据同样明确为历史正式执行。
+
+新签名 head 远端 CI 待验；严格 CodeWhale 公开维护祖先链阻断继续按用户决定暂缓，门禁不放宽、暂不合入主线。#1663 的实体销毁和外部保留、#1672 的原赠礼丢 ACK 未定位首次失败、#1624/#1681 的历史夹具环境问题继续跟踪；真实 Keycloak/NATS、线上部署和完整桌面 E2E 未执行。前序未合入 PR 已完整刷新审核与评论，未发现新增外部审核问题。

@@ -73,5 +73,8 @@ func finishTokenMigration(ctx context.Context, tx pgx.Tx, m migrations.Migration
 	if err != nil {
 		return err
 	}
+	if _, err := tx.Exec(ctx, `SET ROLE token_schema_owner; DO $$ BEGIN IF to_regclass('public.usage_replay_anonymized_users') IS NOT NULL THEN REVOKE UPDATE,DELETE,TRUNCATE ON public.usage_replay_anonymized_users FROM token_gateway; END IF; END $$; SET ROLE token_gateway;`); err != nil {
+		return err
+	}
 	return bridgeHistoryDefiners(ctx, tx, true)
 }

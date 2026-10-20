@@ -41,6 +41,7 @@ func (s *Service) Handler() http.Handler {
 	}
 	internal := router.Group("/internal/v1")
 	internal.Use(serviceauth.GinMiddleware(s.serviceToken))
+	internal.DELETE("/users/:subject", serviceauth.Require("internal.identity.user.delete"), httpserver.AdaptFunc(s.deleteUser))
 	internal.POST("/registration/password-references/validate", serviceauth.Require("internal.identity.password-reference.validate"), httpserver.AdaptFunc(s.validateReference))
 	internal.POST("/users/mobile", serviceauth.Require("internal.identity.user.create"), httpserver.AdaptFunc(s.createMobileUser))
 	internal.GET("/registration-operations/:operation_id/user", serviceauth.Require("internal.identity.registration.read"), httpserver.AdaptFunc(s.findRegistrationUser))

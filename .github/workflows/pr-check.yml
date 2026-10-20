@@ -235,9 +235,18 @@ jobs:
           filters: |
             account_platform:
               - 'account-platform/**'
+              - 'pinvou3-app/src/features/account-platform/AccountPlatformView.jsx'
+              - 'pinvou3-app/src/features/account-platform/account-closure-flow.js'
+              - 'pinvou3-app/src/features/account-platform/AdminPlatformView.jsx'
+              - 'pinvou3-app/src/features/account-platform/AccountClosureWorkspace.jsx'
+              - 'pinvou3-app/src/features/account-platform/AdminAccountClosureWorkspace.jsx'
+              - 'pinvou3-app/src/shared/account-closure-i18n.js'
+              - 'pinvou3-app/src/shared/i18n.js'
               - 'scripts/account-platform*'
               - 'scripts/test-token-financial-postgres.py'
               - 'scripts/tests/test_token_financial_postgres.py'
+              - 'scripts/test-account-closure-postgres.py'
+              - 'scripts/tests/test_account_closure_postgres.py'
               - 'scripts/check-token-management-authorization-coverage.mjs'
               - 'scripts/tests/token-management-authorization-coverage.test.mjs'
               - 'scripts/tests/token-management-phase-coverage.test.mjs'
@@ -1024,6 +1033,11 @@ jobs:
           node --test scripts/tests/token-management-authorization-coverage.test.mjs
           node --test scripts/tests/token-management-phase-coverage.test.mjs
 
+      - name: Verify Account closure source and API contracts
+        run: |
+          npm --prefix account-platform ci --ignore-scripts --no-audit --fund=false
+          npm --prefix account-platform run test:closure-contracts
+
       - name: Verify Account Platform authorization contracts
         run: |
           node scripts/check-account-platform-authorization-coverage.mjs
@@ -1060,6 +1074,16 @@ jobs:
           set -euo pipefail
           python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py
           python3 scripts/test-token-financial-postgres.py
+
+      - name: Account closure contracts on isolated PostgreSQL
+        shell: bash
+        env:
+          PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable
+          PINVOU_ACCOUNT_CLOSURE_TEST_ARTIFACT_DIR: ${{ runner.temp }}/account-closure-postgres
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s scripts/tests -p test_account_closure_postgres.py
+          python3 scripts/test-account-closure-postgres.py
 
   windows-relay-dacl:
     name: windows-relay-dacl

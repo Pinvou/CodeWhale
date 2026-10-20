@@ -2,7 +2,9 @@
   {
     "subject": "__BILLING_WORKLOAD_SUBJECT__",
     "service": "billing-service",
-    "permissions": ["internal.token.hold-expiry.prove"]
+    "permissions": [
+      "internal.token.hold-expiry.prove"
+    ]
   },
   {
     "subject": "__ACCOUNT_WORKLOAD_SUBJECT__",
@@ -16,7 +18,9 @@
       "internal.token.client-readiness.read",
       "internal.token.client-readiness.attest",
       "internal.token.organization.lifecycle",
-      "internal.token.organization-unit.lifecycle"
+      "internal.token.organization-unit.lifecycle",
+      "internal.token.account-closure.assess",
+      "internal.token.account-closure.replay-clear"
     ]
   },
   {

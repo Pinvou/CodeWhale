@@ -309,7 +309,7 @@ func TestOrganizationMemberUnitProducerPublicPostgres(t *testing.T) {
 			t.Fatal(err)
 		}
 		// The unused role CHECK can roll back. This full chain then stops at
-		// the newer bonus guard; it does not execute the older 900003 scope Down.
+		// the newer cleanup ACK guard; it does not execute the older 900003 scope Down.
 		ledger := func(withoutRoleCheck bool) string {
 			t.Helper()
 			var facts string
@@ -354,19 +354,19 @@ func TestOrganizationMemberUnitProducerPublicPostgres(t *testing.T) {
 		if _, err = migrations.VerifyApplied(ctx, c, remaining); err != nil {
 			t.Fatal("remaining installed history does not match safe rollback", err)
 		}
-		if err = c.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&latest); err != nil || latest != 900004 {
-			t.Fatal("bonus facts guard is not the next public rollback", latest, err)
+		if err = c.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&latest); err != nil || latest != 900005 {
+			t.Fatal("cleanup ACK guard is not the next public rollback", latest, err)
 		}
 		err = migrations.DownOne(ctx, c, remaining)
 		var pg *pgconn.PgError
-		if !errors.As(err, &pg) || pg.Code != "P0001" || pg.Message != "registration bonus required facts guard is forward-only" {
-			t.Fatal("public downgrade did not fail at the actual bonus facts guard", err)
+		if !errors.As(err, &pg) || pg.Code != "55000" || pg.Message != "account closure cleanup acknowledgements are forward-only" {
+			t.Fatal("public downgrade did not fail at the actual cleanup ACK guard", err)
 		}
 		if err = c.QueryRow(ctx, `SELECT count(*) FROM membership_units`).Scan(&after); err != nil || before != after {
 			t.Fatal("failed public rollback changed member attachments", err)
 		}
 		if ledger(false) != expectedRemainingLedger || scopeFacts() != beforeScope {
-			t.Fatal("failed bonus guard rollback changed scope or remaining ledger")
+			t.Fatal("failed cleanup ACK rollback changed scope or remaining ledger")
 		}
 		if _, err = migrations.VerifyApplied(ctx, c, remaining); err != nil {
 			t.Fatal("failed public rollback changed remaining migration facts", err)
