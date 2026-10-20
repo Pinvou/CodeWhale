@@ -215,6 +215,7 @@ pub struct BehaviorTelemetry {
     tool_install_terminals: ToolInstallTerminalCoordinator,
     event_tx: Option<mpsc::Sender<()>>,
     control_tx: Option<mpsc::Sender<()>>,
+    heartbeat_tx: Option<mpsc::Sender<()>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1072,6 +1073,8 @@ fn delivery_results(
     results
 }
 
+#[path = "behavior_telemetry/heartbeat.rs"]
+mod heartbeat;
 #[path = "behavior_telemetry/runtime.rs"]
 mod runtime;
 fn lease_matches_authorization(

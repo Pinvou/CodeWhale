@@ -73,6 +73,12 @@ impl BehaviorTelemetry {
         } else {
             (None, None)
         };
+        let (heartbeat_tx, heartbeat_rx) = if runtime.enabled {
+            let (tx, rx) = mpsc::channel(1);
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
         let telemetry = Self {
             client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(5))
@@ -98,7 +104,11 @@ impl BehaviorTelemetry {
             tool_install_terminals: ToolInstallTerminalCoordinator::default(),
             event_tx,
             control_tx,
+            heartbeat_tx,
         };
+        if let Some(rx) = heartbeat_rx {
+            tauri::async_runtime::spawn(Self::run_heartbeat_worker(rx, telemetry.worker_clone()));
+        }
         if let Some(rx) = event_rx {
             tauri::async_runtime::spawn(Self::run_worker(rx, telemetry.worker_clone()));
             if telemetry
@@ -487,6 +497,7 @@ impl BehaviorTelemetry {
             tool_install_terminals: self.tool_install_terminals.clone(),
             event_tx: None,
             control_tx: self.control_tx.clone(),
+            heartbeat_tx: None,
         }
     }
 
@@ -1093,6 +1104,7 @@ impl BehaviorTelemetry {
             }
             self.collecting.store(true, Ordering::Release);
             drop(guard);
+            self.wake_heartbeat();
             if emit_cohort {
                 let previous_version_present =
                     paths::pinvou3_home().join("settings.json").is_file();

@@ -207,7 +207,12 @@ const expectedProtocolHashes = {
   // list_builtin_features / set_builtin_feature_enabled invoke wrappers (the
   // session-mention feature gate reads the list; the setter is the contract
   // hook for the builtin plugin page).
-  settings: '8032bdf8f4563e77e6be5551302e31f62497dfac23f57976290b758c766adf86',
+  // Recomputed for the global bring-to-front shortcut: settings.js gains
+  // the set_global_shortcut_config invoke (the dedicated command owns both
+  // the plugin registration and the prefs persistence; update_settings
+  // stays untouched).
+// (merged: builtin feature toggles from F-series + set_global_shortcut_config from main)
+  settings: '592f0d2fc06debff8f09378d1023b29f908c001a693196096e725e02178fb309',
   updater: 'd603bbac5c51f3b53bf19272fbafd9c430786fd5e35a9b8da9aa67f4c2334e5f',
   // Official's bridge/voice.js is untouched by this backflow, so the hash
   // stays at the Official base value (the community value differs only via

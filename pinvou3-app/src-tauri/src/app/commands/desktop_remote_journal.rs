@@ -742,6 +742,60 @@ impl ProxyEventVerificationPort for SnapshotFrameProof<'_, '_> {
 impl crate::features::remote_control::controller::controlling_service::ControllingJournalSink
     for DesktopControllerJournalSink
 {
+    fn publish_task_rejection(
+        &self,
+        operation: &crate::features::remote_control::controller::controlling::ControllerOperation,
+        lease: &LeaseContext,
+        payload: &Value,
+    ) -> Result<(), String> {
+        use tauri::{Emitter as _, Manager as _};
+        let field = |key| {
+            payload
+                .get(key)
+                .and_then(Value::as_str)
+                .ok_or_else(|| "remote_rejection_invalid".to_owned())
+        };
+        let code = field("rejectionCode")?;
+        if field("status")? != "failed"
+            || !crate::features::remote_control::controller::task_rejection::is_definite(code)
+        {
+            return Err("remote_rejection_invalid".into());
+        }
+        let remote_ref = field("sessionId")?;
+        let task_id = field("taskId")?;
+        let client_id = field("clientRequestId")?;
+        let manager = self.app.state::<crate::features::remote_control::controller::controlling::ControllingDeviceManager>();
+        let lane = self.app.state::<crate::features::remote_control::controller::encrypted_lane::ControllingLaneState>();
+        let store = self.app.state::<SessionStore>();
+        let identity = manager
+            .authenticated_remote_proxy_identity()
+            .map_err(|_| "remote_rejection_stale".to_owned())?;
+        if &identity.0 != lease {
+            return Err("remote_rejection_stale".into());
+        }
+        manager.with_owned_authenticated_remote_proxy_identity(operation, &lane, &identity, || {
+            let local_id = store.remote_proxy_local_id_for_ref(remote_ref)
+                .ok_or_else(|| "remote_rejection_unknown".to_owned())?;
+            let live = store.remote_dispatch_live_context(&local_id, remote_ref)
+                .map_err(|_| "remote_rejection_stale".to_owned())?;
+            if !super::desktop_remote_task::lease_matches_remote_binding(lease, &live)
+                || identity.1 != live.peer_id || identity.2 != live.resume_boundary_id {
+                return Err("remote_rejection_stale".into());
+            }
+            store.reject_authenticated_remote_request(&local_id, remote_ref, &live, task_id, client_id, code)
+                .map_err(|_| "remote_rejection_mismatch".to_owned())?;
+            let record = store.remote_proxy_snapshot(&local_id).ok_or_else(|| "remote_rejection_unknown".to_owned())?;
+            self.app.emit("desktop_remote_proxy", serde_json::json!({
+                "localSessionId":local_id, "kind":"rejection", "remoteSessionRef":remote_ref,
+                "controlledSessionId":record.controlled_session_id,
+                "connectionId":live.connection_id, "controllerLeaseId":live.controller_lease_id,
+                "leaseEpoch":live.lease_epoch, "relayEpoch":live.relay_epoch, "generation":live.generation,
+                "fields":{"sequence":record.retired_requests.len()},
+            }))
+                .map_err(|_| "remote_rejection_publish_failed".to_owned())
+        })
+    }
+
     fn publish_action_result(
         &self,
         operation: &crate::features::remote_control::controller::controlling::ControllerOperation,

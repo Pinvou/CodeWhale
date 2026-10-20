@@ -247,6 +247,7 @@ fn read_visible(store: &SessionStore, local_session_id: &str) -> Result<Value, S
         "entries": entries,
         "authenticatedCursor": cursor,
         "pendingUnknownCount": view.pending_unknown_count,
+        "rejections": view.rejections.into_iter().map(|(task_id, code)| json!({"taskId":task_id,"code":code})).collect::<Vec<_>>(),
         "unattemptedPending": unattempted_pending,
     }))
 }
