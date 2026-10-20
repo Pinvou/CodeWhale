@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, realpathSync, rmdirSync, symlinkSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, rmdirSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
+import { RetentionFacts } from '../retention-store.js';
 
 const relay = dirname(dirname(fileURLToPath(import.meta.url)));
 const entry = join(relay, 'scripts', 'backfill-retention.mjs');
@@ -29,6 +30,47 @@ test('backfill CLI executes through a directory link instead of silently succeed
   assert.equal(linked.status, 1);
   assert.equal(linked.stdout, canonical.stdout);
   assert.equal(linked.stderr, canonical.stderr);
+});
+
+test('linked backfill CLI applies confirmed offline data and writes reloadable retention facts', t => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pinvou-retention-cli-')));
+  const alias = join(dir, 'relay alias');
+  const dataDir = join(dir, 'fixture data');
+  symlinkSync(relay, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  t.after(() => {
+    // Unlink the repository alias first; recursively remove only our fixture data.
+    unlinkSync(alias);
+    rmSync(dataDir, { recursive:true, force:true });
+    rmdirSync(dir);
+  });
+  mkdirSync(dataDir);
+  const now = Date.now();
+  const firstSuccess = now - 31 * 86_400_000;
+  const device = {
+    device_id:'dev_linked_backfill_fixture', hardware_source:'installation_id',
+    first_seen_at:firstSuccess, last_seen_at:now,
+  };
+  writeFileSync(join(dataDir, 'devices.json'), JSON.stringify({ devices:[device] }));
+  const rawPath = join(dataDir, 'behavior-events.jsonl');
+  const events = [firstSuccess, firstSuccess + 30 * 86_400_000].map((occurred_at, index) => ({
+    device_id:device.device_id, event_id:`linked_backfill_${index}`, attempt_id:`linked_backfill_${index}`,
+    event_name:'task_finished', status:'success', initiator_type:'user', mode:'assistant', occurred_at,
+  }));
+  writeFileSync(rawPath, `${events.map(event => JSON.stringify(event)).join('\n')}\n`);
+  const rawBefore = readFileSync(rawPath);
+  assert.equal(existsSync(join(dataDir, 'retention-facts.json')), false);
+  const result = run(join(alias, 'scripts', 'backfill-retention.mjs'), ['--data-dir', dataDir, '--apply', '--offline']);
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, '');
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.applied, true);
+  assert.equal(report.scanned_events, 2);
+  assert.equal(report.after.d30.retained_installations, 1);
+  assert.equal(readFileSync(join(dataDir, 'retention-facts.initialized'), 'utf8'), '1\n');
+  const reloaded = new RetentionFacts(dataDir);
+  assert.equal(reloaded.rows.size, 1);
+  assert.equal(reloaded.metrics(now).d30.retained_installations, 1);
+  assert.deepEqual(readFileSync(rawPath), rawBefore);
 });
 
 test('backfill CLI accepts Windows casing aliases', { skip:process.platform !== 'win32' }, () => {
