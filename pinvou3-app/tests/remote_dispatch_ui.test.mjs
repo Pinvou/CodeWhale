@@ -13,6 +13,15 @@ const handle = {
   taskId: 'task-1', clientRequestId: 'client-1', requestFingerprint: 'a'.repeat(64),
 };
 
+test('authenticated rejection clears the exact waiting notice without a journal terminal', () => {
+  const id = 'remote-rejection';
+  recordRemoteDispatch(id, 'ref', 'lease', 'do not retry', { state: 'outcome_unknown', retryHandle: handle });
+  assert.equal(remoteDispatchCases(id).length, 1);
+  const history = { localSessionId: id, entries: [], unattemptedPending: [], pendingUnknownCount: 0,
+    rejections: [{ taskId: handle.taskId, code: 'task_permission_mode_required' }] };
+  assert.deepEqual(remoteDispatchCases(id, history), []);
+});
+
 test('only queued is accepted; prepared keeps original text and exact retry handle per local session', () => {
   const prepared = recordRemoteDispatch('remote-a', 'ref-a', 'lease-a', 'original', {
     state: 'prepared_not_sent', retryHandle: handle,

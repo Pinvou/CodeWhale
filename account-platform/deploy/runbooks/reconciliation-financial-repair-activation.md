@@ -63,7 +63,10 @@ SELECT reconciliation_case.id,
                 AND evidence.provider_version = reconciliation_run.provider_version
                 AND evidence.merchant_order_no = reconciliation_case.merchant_order_no
                 AND evidence.provider_transaction_id = reconciliation_case.provider_snapshot->>'channel_transaction_id'
-                AND NULLIF(trim(evidence.provider_refund_id),'') IS NOT NULL
+                AND (NULLIF(trim(evidence.provider_refund_id),'') IS NOT NULL
+                     OR (evidence.provider_refund_id IS NULL
+                         AND COALESCE(NULLIF(trim(evidence.payload_snapshot->>'provider_reference_id'),''),
+                                      NULLIF(trim(evidence.payload_snapshot->>'channel_transaction_id'),'')) IS NOT NULL))
                 AND upper(trim(evidence.provider_status)) IN ('SUCCESS','SUCCEEDED','REFUNDED','COMPLETED')
                 AND upper(trim(evidence.payload_snapshot->>'entry_type')) = 'REFUND'
                 AND evidence.amount_fen = (reconciliation_case.provider_snapshot->>'amount_fen')::bigint
@@ -79,6 +82,8 @@ WHERE reconciliation_case.case_type = 'PROVIDER_PAID_INTERNAL_MISSING'
 ```
 
 上述 SQL 只作候选清单，不是权威 proof：最终还须由 owner 校验持久 REFUND payload 与列身份、状态、渠道、退款参考及金额逐项一致，绑定完整 frozen facts，不能用该清单代替 proof。
+
+存量 `BILL` 的 `provider_refund_id` 为 SQL `NULL` 时，运行时只读使用同一 typed `REFUND` payload 的既有 `billReference`（Provider 引用优先、原渠道交易引用回退），不修改任何历史 evidence。其它列、Provider/版本、渠道、身份、金额、币种、状态及冻结摘要仍须一致；列非 NULL 时不允许用 payload 替代不规范或矛盾的已有值。不要手工回填字段，也不要把重导入 `DO NOTHING` 当作证据已更新。
 
 判据：只有 `internal_orders = 0`、`internal_transactions = 0`、`recheck_open_cases = 0` 且 `disposal_evidence` 为真时，该差异才是首版范围（`in_scope`）。`recheck_open_cases > 0` 说明同一商户单号仍有未处置差异，必须先按既有对账流程收敛；不得用本命令掩盖差异。
 
@@ -114,7 +119,7 @@ WHERE command_type = 'RECONCILIATION_FINANCIAL_REPAIR'
 
 1. 停止该 durable 消费者。
 2. 用 `billing_schema_owner` 把 v1/s1 行翻回 `INACTIVE`（`version = version + 1`）；history 追加而非改写。
-3. 验证 Account 四入口重新失败关闭；已结案的差异与 case 行**保留可读**，禁止破坏性 down，也禁止把案件重开为 `OPEN`。
+3. 验证 Account 四入口重新失败关闭；已结案的差异与 case 行**保留可读**，禁止破坏性 down，也禁止把案件重开为 `OPEN`。同 digest 新观测仍保留新 run 关联与进度；管线以精确案件的不可变 `EXECUTED` 修复回执保持其结案及手审状态。无该回执的普通结案仍按原规则允许真实复发重开，新事实产生新 digest/新案，不由旧回执覆盖。
 4. 仍在 5 分钟执行窗口内的 `APPROVED` 申请按 GSA-16 失败分类收殓，不得盲目重放。
 
 ## 6. 记录

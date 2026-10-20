@@ -17,6 +17,9 @@
 #[path = "../../../src/features/remote_control/controller/protocol.rs"]
 mod protocol;
 
+#[path = "../../../src/features/remote_control/controller/task_rejection.rs"]
+mod task_rejection;
+
 #[path = "../../../src/features/remote_control/controller/crypto.rs"]
 mod crypto;
 

@@ -5033,7 +5033,7 @@ const openChatExternalUrl = (url) => {
             className={`absolute ${isWeb ? 'bottom-2 sm:bottom-8' : 'bottom-8'} inset-x-0 z-20`}
             style={responsiveGutterStyle}
           >
-            <div className="max-w-[800px] w-full mx-auto">
+            <div className="max-w-[800px] w-full mx-auto" data-testid="chat-composer-box">
               {modelContinuationBlocked && (
                 <div className="mb-3 rounded-2xl border border-amber-300/70 bg-amber-50/95 p-3 text-[12px] text-amber-950 shadow-lg backdrop-blur dark:border-amber-700/60 dark:bg-amber-950/90 dark:text-amber-100">
                   <div className="font-semibold">{t.uiModelReplacement.title}</div>
@@ -5047,6 +5047,7 @@ const openChatExternalUrl = (url) => {
                   {replacementError && <div role="alert" className="mt-2 break-words text-red-600 dark:text-red-300">{t.uiSettingsDetail.modelSwitchFailed}</div>}
                 </div>
               )}
+
               {!remoteTranscriptActive && COMPUTER_USE_ENABLED && (
                 <ComputerUseBanner slice={computerUseSlice} copy={computerUseCopy} />
               )}
@@ -6285,7 +6286,10 @@ const openChatExternalUrl = (url) => {
       if (item.remoteProxy && item.type === 'system') {
         const copy = t.remoteConversation;
         const label = copy[remoteProjectionLabelKey(item.remoteKind)] || copy.projectionEvent;
-        const systemBody = remoteProxySystemBody(item);
+        const rawBody = remoteProxySystemBody(item);
+        const failureHelp = remotePermissionFailureText(rawBody, copy)
+          || (item.remoteRejected ? copy.taskRejectedGeneric : null);
+        const systemBody = failureHelp ? `${failureHelp}\n(${rawBody})` : rawBody;
         return (
           <div className="flex justify-center">
             <div data-testid="chat-remote-projection-entry" data-kind={item.remoteKind}

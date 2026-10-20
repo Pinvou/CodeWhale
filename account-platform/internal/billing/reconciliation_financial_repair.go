@@ -191,7 +191,9 @@ provider_snapshot,resolved_at,version,manual_review_case_id FROM reconciliation_
 	plan.Channel = runChannel
 	// The frozen evidence must be the provider-side refund or reversal of this
 	// exact bill row: same merchant order, same channel transaction, same amount
-	// and currency, and it must carry a provider refund reference.
+	// and currency, and it must carry a provider refund reference. Legacy BILL
+	// rows may lack the later typed column; their same immutable bill payload
+	// remains the documented alternative source, without rewriting evidence.
 	var evidenceStatus string
 	var providerRefundID *string
 	var evidenceMerchant, evidenceTransaction, evidenceCurrency, evidenceDigest string
@@ -208,13 +210,17 @@ COALESCE(provider_status,''),payload_digest,provider_id,provider_version,evidenc
 		return ReconciliationFinancialRepairPlan{}, err
 	}
 	if evidenceMerchant != merchantOrderNo || evidenceTransaction != plan.ProviderTransactionID ||
-		providerRefundID == nil || strings.TrimSpace(*providerRefundID) == "" || *providerRefundID != strings.TrimSpace(*providerRefundID) ||
 		evidenceAmount != plan.AmountFen || evidenceCurrency != plan.Currency ||
 		!successfulBillEntryStatus(ProviderBillEntry{EntryType: "REFUND", Status: evidenceStatus}) || !validHexDigest(evidenceDigest) || evidenceProvider != providerID || evidenceVersion != providerVersion || evidenceType != "BILL" {
 		return ReconciliationFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
 	}
 	var refundBill ProviderBillEntry
-	if json.Unmarshal(evidenceRaw, &refundBill) != nil || normalizedBillEntryType(refundBill) != "REFUND" || !successfulBillEntryStatus(refundBill) || billReference(refundBill) != *providerRefundID || refundBill.Channel != runChannel || refundBill.MerchantOrderNo != merchantOrderNo || strings.TrimSpace(refundBill.ChannelTransactionID) != plan.ProviderTransactionID || refundBill.AmountFen != plan.AmountFen || refundBill.Currency != plan.Currency || refundBill.Status != evidenceStatus {
+	if json.Unmarshal(evidenceRaw, &refundBill) != nil || normalizedBillEntryType(refundBill) != "REFUND" || !successfulBillEntryStatus(refundBill) || billReference(refundBill) == "" || refundBill.Channel != runChannel || refundBill.MerchantOrderNo != merchantOrderNo || strings.TrimSpace(refundBill.ChannelTransactionID) != plan.ProviderTransactionID || refundBill.AmountFen != plan.AmountFen || refundBill.Currency != plan.Currency || refundBill.Status != evidenceStatus {
+		return ReconciliationFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	// Only a missing legacy column uses the payload alternative. A present
+	// column must keep the original canonical and exact-reference checks.
+	if providerRefundID != nil && (*providerRefundID == "" || *providerRefundID != strings.TrimSpace(*providerRefundID) || billReference(refundBill) != *providerRefundID) {
 		return ReconciliationFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
 	}
 	if plan.ManualReviewCaseID != nil {

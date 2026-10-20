@@ -305,6 +305,8 @@ test("usage trend exposes exact values on hover and after a range rerender", asy
       active_devices: index === 7 ? 3 : index + 1,
       turns: index === 7 ? 12 : index + 2,
     })),
+    usage_trend_hourly_today: [{ hour: seenAt, active_devices: 3, new_devices: 1, turns: 4 }],
+    usage_trend_hourly_previous: [{ hour: seenAt - 86_400_000, active_devices: 2, new_devices: 1, turns: 3 }],
   };
   const dom = new JSDOM(statsHtml, {
     runScripts: "dangerously",
@@ -333,6 +335,57 @@ test("usage trend exposes exact values on hover and after a range rerender", asy
     assert.match(tooltip.textContent, /活跃设备3 台/);
     assert.match(tooltip.textContent, /新增设备3 台/);
     assert.match(tooltip.textContent, /对话次数12 次/);
+    const controls = [...document.querySelectorAll('[data-daily-metric]')];
+    assert.equal(controls.length, 3);
+    assert(controls.every(input => input.checked && input.labels.length === 1));
+    const hourlyBefore = document.querySelector('#hourlyTrendSvg').innerHTML;
+    const classes = ['line', 'line3', 'line2'];
+    const labels = ['活跃设备', '新增设备', '对话次数'];
+    for (let mask = 0; mask < 8; mask++) {
+      controls.forEach((input, index) => {
+        if (input.checked !== Boolean(mask & (1 << index))) input.click();
+      });
+      for (const range of ['30', '7']) {
+        document.querySelector(`[data-days="${range}"]`).click();
+        controls.forEach((input, index) => {
+          assert.equal(svg.querySelectorAll(`path.${classes[index]}`).length, input.checked ? 1 : 0);
+          assert.equal(svg.querySelectorAll('.trend-dot').length, controls.filter(control => control.checked).length);
+        });
+        assert.equal(Boolean(svg.querySelector('.area')), controls[0].checked);
+        if (mask) {
+          hitArea = document.querySelector('#trendHitArea');
+          assert.equal(hitArea.getAttribute('aria-valuemax'), range === '7' ? '6' : '7');
+          hitArea.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+          labels.forEach((label, index) => {
+            assert.equal(tooltip.textContent.includes(label), controls[index].checked);
+            assert.equal(hitArea.getAttribute('aria-valuetext').includes(label), controls[index].checked);
+          });
+        } else {
+          assert.equal(document.querySelector('#trendHitArea'), null);
+          assert.equal(tooltip.hidden, true);
+          assert.match(svg.textContent, /请选择至少一项指标/);
+        }
+        assert.equal(document.querySelector('#hourlyTrendSvg').innerHTML, hourlyBefore);
+      }
+    }
+    controls[0].click();
+    controls[1].click();
+    document.querySelector('#refreshButton').click();
+    await new Promise(resolve => dom.window.setTimeout(resolve, 20));
+    assert.deepEqual(controls.map(input => input.checked), [false, false, true]);
+    assert.equal(svg.querySelectorAll('path.line2').length, 1);
+    assert.equal(svg.querySelector('.area'), null);
+    const dailyBefore = svg.innerHTML;
+    document.querySelector('[data-hourly-metric="turns"]').click();
+    assert.equal(svg.innerHTML, dailyBefore);
+    controls[2].click();
+    document.querySelector('#refreshButton').click();
+    await new Promise(resolve => dom.window.setTimeout(resolve, 20));
+    assert(controls.every(input => !input.checked));
+    assert.match(svg.textContent, /请选择至少一项指标/);
+    controls.forEach(input => input.click());
+    hitArea = document.querySelector('#trendHitArea');
+    hitArea.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'End', bubbles: true }));
     assert.equal(document.querySelector("#trendHover").getAttribute("visibility"), "visible");
     assert.match(hitArea.getAttribute("aria-valuetext"), /活跃设备 3 台/);
 
@@ -353,6 +406,197 @@ test("usage trend exposes exact values on hover and after a range rerender", asy
   } finally {
     dom.window.close();
   }
+});
+
+test("version coverage shows four independent charts with five versions and remaining share", async () => {
+  const versions = Array.from({ length: 7 }, (_, index) => ({ version: `1.${index}`, count: 7 - index }));
+  const report = {
+    ...overview, active_versions: versions,
+    active_versions_by_platform: {
+      windows: versions.slice(0, 6), linux: [{ version: '<img src=x onerror="alert(1)">', count: 2 }], macos: [],
+    },
+  };
+  const dom = new JSDOM(statsHtml, {
+    runScripts: "dangerously", url: "https://www.pinvou.com/pinvou3/stats",
+    beforeParse(window) {
+      window.fetch = async url => ({ ok: true, status: 200, json: async () => String(url).endsWith("/overview") ? report : { devices } });
+      window.setInterval = () => 1;
+    },
+  });
+  try {
+    await new Promise(resolve => dom.window.setTimeout(resolve, 20));
+    const doc = dom.window.document;
+    assert.equal(doc.querySelectorAll(".version-coverage .version-panel").length, 4);
+    assert.equal(doc.querySelector(".usage-panels .version-coverage"), null);
+    for (const prefix of ["version", "windowsVersion"]) {
+      const labels = [...doc.querySelectorAll(`#${prefix}List .version-row b`)].map(el => el.textContent);
+      assert.deepEqual(labels, ["1.0", "1.1", "1.2", "1.3", "1.4", "其他版本"]);
+    }
+    assert.equal(doc.querySelector("#versionTotal").textContent, "28");
+    assert.equal(doc.querySelector("#windowsVersionTotal").textContent, "27");
+    assert.match(doc.querySelector("#versionList .version-row:last-child").textContent, /3 台 · 11%/);
+    assert.match(doc.querySelector("#windowsVersionList .version-row:last-child").textContent, /2 台 · 7%/);
+    assert.match(doc.querySelector("#linuxVersionList").textContent, /2 台 · 100%/);
+    assert.equal(doc.querySelector("#linuxVersionList img"), null);
+    assert.equal(doc.querySelector("#macosVersionTotal").textContent, "0");
+    assert.match(doc.querySelector("#macosVersionList").textContent, /暂无活跃版本数据/);
+    assert.equal(doc.querySelector("#versionCount").textContent, "版本 7 个");
+  } finally { dom.window.close(); }
+});
+
+test("hourly and daily charts coexist with independent pointers, keyboard navigation and refresh", async () => {
+  const start = Date.parse("2026-10-19T00:00:00+08:00");
+  let report = {
+    ...overview,
+    usage_trend_hourly_today: Array.from({ length: 24 }, (_, index) => ({
+      hour: start + index * 3_600_000, active_devices: index === 23 ? 2 : 0,
+      new_devices: index === 23 ? 1 : 0, turns: index === 23 ? 9 : 0,
+    })),
+  };
+  const dom = new JSDOM(statsHtml, {
+    runScripts: "dangerously", url: "https://www.pinvou.com/pinvou3/stats",
+    beforeParse(window) {
+      window.fetch = async url => ({ ok: true, status: 200, json: async () => String(url).endsWith("/overview") ? report : { devices } });
+      window.setInterval = () => 1;
+    },
+  });
+  try {
+    const wait = () => new Promise(resolve => dom.window.setTimeout(resolve, 20));
+    await wait();
+    const doc = dom.window.document;
+    assert.equal(doc.querySelectorAll(".usage-panels .chart").length, 2);
+    assert.equal(doc.querySelectorAll("#hourlyTrendSvg path.line,#hourlyTrendSvg path.line2,#hourlyTrendSvg path.line3").length, 3);
+    const hourlySvg = doc.querySelector("#hourlyTrendSvg");
+    hourlySvg.getBoundingClientRect = () => ({ left: 0, width: 780 });
+    let hit = doc.querySelector("#hourlyTrendHitArea");
+    const tooltip = doc.querySelector("#hourlyTrendTooltip");
+    hit.dispatchEvent(new dom.window.MouseEvent("pointermove", { clientX: 770, bubbles: true }));
+    assert.equal(tooltip.hidden, false);
+    assert.match(tooltip.textContent, /2026-10-19 23:00–00:00（北京时间）/);
+    assert.match(tooltip.textContent, /活跃设备2 台/);
+    assert.match(tooltip.textContent, /新增设备1 台/);
+    assert.match(tooltip.textContent, /对话次数9 次/);
+    assert.equal(doc.querySelector("#trendTooltip").hidden, true);
+    hit.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Home", bubbles: true }));
+    assert.match(hit.getAttribute("aria-valuetext"), /2026-10-19 00:00–01:00/);
+    assert.match(tooltip.textContent, /对话次数0 次/);
+    assert.equal(hit.getAttribute("aria-valuemax"), "23");
+    const before = hourlySvg.innerHTML;
+    doc.querySelector('[data-days="7"]').click();
+    assert.equal(hourlySvg.innerHTML, before);
+    assert.equal(new Set([...doc.querySelectorAll("[id]")].map(el => el.id)).size, doc.querySelectorAll("[id]").length);
+    report = { ...report, usage_trend_hourly_today: report.usage_trend_hourly_today.map(row => ({ ...row, turns: 4 })) };
+    doc.querySelector("#refreshButton").click();
+    await wait();
+    hit = doc.querySelector("#hourlyTrendHitArea");
+    hit.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "End", bubbles: true }));
+    assert.match(tooltip.textContent, /对话次数4 次/);
+    report = { ...report, usage_trend_hourly_today: [] };
+    doc.querySelector("#refreshButton").click();
+    await wait();
+    assert.equal(tooltip.hidden, true);
+    assert.equal(doc.querySelector("#hourlyTrendHitArea"), null);
+    assert.match(hourlySvg.textContent, /暂无趋势数据/);
+  } finally { dom.window.close(); }
+});
+
+test("hourly comparison shares scales, styles yesterday separately and does not draw future zeros", async () => {
+  const today = Date.parse("2026-10-19T00:00:00+08:00");
+  let report = {
+    ...overview,
+    usage_trend_hourly_today: Array.from({ length: 24 }, (_, index) => ({
+      hour: today + index * 3_600_000, active_devices: index === 0 ? 1 : null,
+      new_devices: index === 0 ? 0 : null, turns: index === 0 ? 10 : null,
+    })),
+    usage_trend_hourly_previous: Array.from({ length: 24 }, (_, index) => ({
+      hour: today - 86_400_000 + index * 3_600_000, active_devices: 2, new_devices: 1, turns: 20,
+    })).reverse(), // Match timestamps, never rely on transport ordering.
+  };
+  const dom = new JSDOM(statsHtml, {
+    runScripts: "dangerously", url: "https://www.pinvou.com/pinvou3/stats",
+    beforeParse(window) {
+      window.fetch = async url => ({ ok: true, status: 200, json: async () => String(url).endsWith("/overview") ? report : { devices } });
+      window.setInterval = () => 1;
+    },
+  });
+  try {
+    const wait = () => new Promise(resolve => dom.window.setTimeout(resolve, 20));
+    await wait();
+    const doc = dom.window.document;
+    const svg = doc.querySelector("#hourlyTrendSvg");
+    assert.equal(svg.querySelectorAll("path.previous-day").length, 3);
+    const turns = svg.querySelector("path.line2:not(.previous-day)");
+    const previous = svg.querySelector("path.line2.previous-day");
+    assert.equal(turns.getAttribute("d"), "M35.0 103.0"); // 10 on the shared 20 scale.
+    assert.match(previous.getAttribute("d"), /^M35\.0 22\.0 L/);
+    assert.equal(dom.window.getComputedStyle(turns).strokeDasharray, "none");
+    assert.equal(dom.window.getComputedStyle(previous).strokeDasharray, "5 5");
+    assert.equal(dom.window.getComputedStyle(previous).opacity, "0.5");
+    assert.equal(svg.querySelectorAll("circle.current-point").length, 3);
+    assert.match(svg.parentElement.querySelector(".chart-axis").textContent, /^00:00.*23:00$/);
+    let hit = doc.querySelector("#hourlyTrendHitArea");
+    const tooltip = doc.querySelector("#hourlyTrendTooltip");
+    hit.dispatchEvent(new dom.window.Event("focus"));
+    assert.equal(hit.getAttribute("aria-valuenow"), "0");
+    assert.match(tooltip.textContent, /今日.*对话次数10 次.*昨日 2026-10-18 00:00.*对话次数20 次/);
+    hit.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "End", bubbles: true }));
+    assert.match(tooltip.textContent, /今日尚未到达.*昨日 2026-10-18 23:00.*对话次数20 次/);
+    assert.match(hit.getAttribute("aria-valuetext"), /尚未到达.*昨日.*对话次数 20 次/);
+    assert.equal(doc.querySelector("#hourlyTrendDotTurns").style.display, "none");
+    hit.dispatchEvent(new dom.window.MouseEvent("pointerleave"));
+    assert.equal(tooltip.hidden, true);
+    assert.equal(doc.querySelector("#hourlyTrendHover").getAttribute("visibility"), "hidden");
+    const controls = [...doc.querySelectorAll('[data-hourly-metric]')];
+    assert.equal(controls.length, 3);
+    assert(controls.every(input => input.checked && input.labels.length === 1));
+    const dailyBefore = doc.querySelector('#trendSvg').innerHTML;
+    for (const [key, className, label] of [
+      ['active_devices', 'line', '活跃设备'],
+      ['new_devices', 'line3', '新增设备'],
+      ['turns', 'line2', '对话次数'],
+    ]) {
+      const input = doc.querySelector(`[data-hourly-metric="${key}"]`);
+      input.click();
+      assert.equal(svg.querySelectorAll(`path.${className}`).length, 0);
+      assert.equal(svg.querySelectorAll('path.previous-day').length, 2);
+      assert.equal(svg.querySelectorAll('circle.current-point').length, 2);
+      if (key === 'active_devices') assert.equal(svg.querySelector('.area'), null);
+      hit = doc.querySelector('#hourlyTrendHitArea');
+      hit.dispatchEvent(new dom.window.Event('focus'));
+      assert(!tooltip.textContent.includes(label));
+      assert(!hit.getAttribute('aria-valuetext').includes(label));
+      assert.equal(doc.querySelector('#trendSvg').innerHTML, dailyBefore);
+      input.click();
+      assert.equal(svg.querySelectorAll(`path.${className}`).length, 2);
+      assert.equal(tooltip.hidden, true);
+    }
+    controls[0].click();
+    controls[1].click();
+    doc.querySelector('#refreshButton').click();
+    await wait();
+    assert.deepEqual(controls.map(input => input.checked), [false, false, true]);
+    assert.equal(svg.querySelectorAll('path.previous-day').length, 1);
+    assert.equal(svg.querySelectorAll('path.line2').length, 2);
+    assert.equal(svg.querySelectorAll('.area').length, 0);
+    controls[2].click();
+    assert.equal(svg.querySelectorAll('path,circle,rect.trend-hit').length, 0);
+    assert.match(svg.textContent, /请选择至少一项指标/);
+    assert.equal(tooltip.hidden, true);
+    doc.querySelector('#refreshButton').click();
+    await wait();
+    assert(controls.every(input => !input.checked));
+    assert.match(svg.textContent, /请选择至少一项指标/);
+    controls.forEach(input => input.click());
+    assert.equal(svg.querySelectorAll('path.previous-day').length, 3);
+    assert.equal(svg.querySelectorAll('circle.current-point').length, 3);
+    report = { ...report, usage_trend_hourly_previous: [] };
+    doc.querySelector("#refreshButton").click();
+    await wait();
+    assert.equal(svg.querySelectorAll("path.previous-day").length, 0);
+    hit = doc.querySelector("#hourlyTrendHitArea");
+    hit.dispatchEvent(new dom.window.Event("focus"));
+    assert.match(tooltip.textContent, /昨日.*暂无数据/);
+  } finally { dom.window.close(); }
 });
 
 test("behavior analytics views render alongside the device dashboard", async () => {

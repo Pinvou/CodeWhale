@@ -67,7 +67,15 @@ test('empty workspace selection does not disable chat-only B start', () => {
     [null, 'stopped', false], ['toggle', 'stopped', true],
     [null, 'registering', true], [null, 'retiring_generation', true], [null, 'stopping', true],
   ]) {
-    assert.equal(vm.runInNewContext(disabled, { busy, uiState, stagedWorkspaces: [] }), expected);
+    assert.equal(vm.runInNewContext(disabled, {
+      busy, uiState, stagedWorkspaces: [], active: false, policyPending: false, taskPolicy: null,
+    }), expected);
+  }
+  for (const active of [false, true]) {
+    assert.equal(vm.runInNewContext(disabled, {
+      busy: null, uiState: active ? 'connected' : 'stopped', active,
+      policyPending: true, taskPolicy: { chat: 'plan', code: 'plan' },
+    }), !active, 'a pending policy save blocks enabling but never the off switch');
   }
   assert.match(toggle, /controlledStart\(null, stagedWorkspaces\)/);
 });
