@@ -407,6 +407,7 @@ impl BehaviorTelemetry {
         }
         persist_task_attempts(&tasks)?;
         drop(tasks);
+        super::remote_execution::rebind(self, generation, period_id)?;
         if let Ok(mut sessions) = self.team_sessions.lock() {
             sessions.values_mut().for_each(rebind);
         }

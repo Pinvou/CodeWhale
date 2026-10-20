@@ -112,7 +112,11 @@ export function buildRemoteOverview(events, start, end, minimumSample = 30, coun
   };
   const firstOutputDurations = tasks.filter(t => allowed(t, "task_first_output")).flatMap(t => t.rows.find(e => e.remote_stage === "first_output" && inWindow(e))?.remote_duration_ms ?? []);
   const taskDurations = completed.flatMap(t => t.authoritative?.remote_duration_ms ?? []);
-  const resultWait = tasks.flatMap(t => t.received?.remote_duration_ms ?? []);
+  // Wait-time samples belong to the receipt day, unlike the execution-cohort
+  // coverage above. Honor the same raw-event contribution clipping as rows.
+  const visibleReceipts = new Set(raw.filter(e => e.remote_stage === "result_received").map(e => e.event_id));
+  const resultWait = tasks.filter(t => t.received && inWindow(t.received)
+    && visibleReceipts.has(t.received.event_id)).flatMap(t => t.received.remote_duration_ms ?? []);
   const rows = new Map();
   for (const event of raw) {
     const key = [event.remote_stage, event.remote_outcome, event.remote_reason].join("|");

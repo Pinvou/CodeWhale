@@ -70,6 +70,26 @@ pub(super) fn clear(telemetry: &BehaviorTelemetry) -> Result<()> {
     persist(&contexts)
 }
 
+/// Credential renewal preserves consent generation, but replaces the server
+/// collection period. Never migrate work from a withdrawn authorization.
+pub(super) fn rebind(telemetry: &BehaviorTelemetry, generation: u64, period: &str) -> Result<()> {
+    let mut contexts = telemetry
+        .remote_executions
+        .lock()
+        .map_err(|_| anyhow::anyhow!("remote telemetry lock poisoned"))?;
+    for execution in contexts.executions.values_mut() {
+        if execution.lease.generation == generation {
+            execution.lease.collection_period_id = period.to_owned();
+        }
+    }
+    for origin in contexts.origins.values_mut() {
+        if origin.lease.generation == generation {
+            origin.lease.collection_period_id = period.to_owned();
+        }
+    }
+    persist(&contexts)
+}
+
 pub(crate) fn register_remote_origin<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     task: &str,

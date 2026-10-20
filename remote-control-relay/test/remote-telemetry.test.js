@@ -147,6 +147,24 @@ test("day boundary uses execution completion day and keeps prior-day attribution
   assert.equal(report.remote_control.unattributed_count, 0);
 });
 
+test("result wait samples use receipt time and obey raw-event clipping", () => {
+  const rows = invocation();
+  rows.at(-1).remote_duration_ms = 9000;
+  const beforeReceipt = buildRemoteOverview(rows, now - 10000, now - 2000);
+  assert.equal(beforeReceipt.task_count, 1);
+  assert.equal(beforeReceipt.result_wait_p50_ms, null);
+  const receivedToday = buildRemoteOverview(rows, now - 1500, now);
+  assert.equal(receivedToday.task_count, 0);
+  assert.equal(receivedToday.result_wait_p50_ms, 9000);
+  const clipped = projectRemoteTasks(rows).filter(e => e.event_id !== rows.at(-1).event_id);
+  const report = buildRemoteOverview(rows, now - 20000, now, 30, null, clipped);
+  assert.equal(report.result_wait_p50_ms, null);
+  assert.equal(report.result_wait_p90_ms, null);
+  // Coverage remains an execution-completion cohort observed over history;
+  // it is deliberately independent of the receipt-day duration sample.
+  assert.equal(report.result_received_count, 1);
+});
+
 test("legacy uncorrelated events stay diagnostic and small samples hide rates", () => {
   const rows = invocation().map(({ remote_task_key, ...e }) => e);
   const report = buildBehaviorOverview(devices, [], rows, "today", now);

@@ -533,6 +533,64 @@ async fn installation_heartbeat_expired_credentials_renew_same_installation() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn remote_contexts_follow_credential_renewal_but_never_cross_consent_generations() {
+    let _home = TestHome::new();
+    let (base, server) = mock_http(vec![
+        (410, r#"{"error":"device_credentials_expired"}"#),
+        (200, r#"{"device_id":"renewed_device","device_token":"renewed_token"}"#),
+        (200, r#"{"collection_period_id":"renewed_period"}"#),
+    ]).await;
+    let runtime = test_runtime(&base);
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    let original = telemetry.current_lease().unwrap();
+    let foreign = CollectionLease { generation: original.generation + 1, collection_period_id: "foreign_period".into() };
+    let execution = |lease: &CollectionLease| json!({
+        "task_id": "random-task", "mode": "assistant", "started_at": now_ms(),
+        "turn_id": "turn", "first_output": false, "lease": lease,
+    });
+    let origin = |lease: &CollectionLease| json!({ "mode": "assistant", "started_at": now_ms(), "lease": lease });
+    *telemetry.remote_executions.lock().unwrap() = serde_json::from_value(json!({
+        "executions": { "session": execution(&original), "foreign": execution(&foreign) },
+        "origins": { "random-task": origin(&original), "foreign": origin(&foreign) },
+    })).unwrap();
+
+    // Exercise the real 410 -> registration -> collection/start transition.
+    telemetry.send_heartbeat().await.unwrap();
+    assert_eq!(server.await.unwrap().len(), 3);
+    let renewed = telemetry.current_lease().unwrap();
+    assert_eq!(renewed.generation, original.generation);
+    assert_eq!(renewed.collection_period_id, "renewed_period");
+    assert!(!telemetry.lease_is_current(&original));
+    let restored = serde_json::to_value(super::remote_execution::load_state()).unwrap();
+    for (kind, key) in [("executions", "session"), ("origins", "random-task")] {
+        let bound: CollectionLease = serde_json::from_value(restored[kind][key]["lease"].clone()).unwrap();
+        assert_eq!(bound, renewed);
+        assert!(telemetry.lease_is_current(&bound));
+    }
+    for kind in ["executions", "origins"] {
+        assert_eq!(restored[kind]["foreign"]["lease"], json!(foreign));
+    }
+    for (stage, controlled) in [(RemoteStage::TaskTerminal, true), (RemoteStage::ResultReceived, false)] {
+        assert!(telemetry.try_track_for_lease(RemoteControlEvent::new(stage, RemoteOutcome::Ok)
+            .task("random-task", controlled, Some("chat")).status("success").into_behavior(), &renewed));
+    }
+    assert_eq!(telemetry.outbox.lock().unwrap().records.len(), 2);
+
+    // Explicit reauthorization has a different generation. Old work must not
+    // acquire the new consent even if a lifecycle migration is requested.
+    let next_generation = original.generation + 2;
+    telemetry.rebind_lifecycle_state(next_generation, "new_consent_period").unwrap();
+    telemetry.authorization_generation.store(next_generation, Ordering::Release);
+    *telemetry.collection_period_id.write().unwrap() = Some("new_consent_period".into());
+    assert!(!telemetry.lease_is_current(&renewed));
+    let restored = serde_json::to_value(super::remote_execution::load_state()).unwrap();
+    assert_eq!(restored["origins"]["random-task"]["lease"], json!(renewed));
+    assert!(telemetry.clear_local_transient_state().is_empty());
+    let cleared = serde_json::to_value(super::remote_execution::load_state()).unwrap();
+    assert_eq!(cleared, json!({"executions": {}, "origins": {}}));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn installation_heartbeat_unknown_errors_preserve_identity_and_allow_retry() {
     let _home = TestHome::new();
     let (base, server) = mock_http(vec![
