@@ -1811,14 +1811,30 @@ async function readJson(req, limit = MAX_JSON_BYTES) {
   }
 }
 
-function loadJson(path, fallback) {
-  if (!existsSync(path)) return fallback;
+function loadJson(path, fallback, validate) {
   try {
-    return JSON.parse(readFileSync(path, "utf8"));
+    enforcePrivateFile(path);
+    const saved = JSON.parse(readFileSync(path, "utf8"));
+    if (!validate(saved)) throw new Error("invalid persisted inventory");
+    return saved;
   } catch (error) {
+    if (error.code === "ENOENT") return fallback;
     console.error("[telemetry-error] persistence_read_failed");
-    return fallback;
+    throw new TelemetryHttpError(503, "telemetry_storage_unavailable");
   }
+}
+
+function validDeviceInventory(saved) {
+  if (!saved || typeof saved !== "object" || Array.isArray(saved) || !Array.isArray(saved.devices)
+    || (saved.deletion_ledger_required !== undefined && saved.deletion_ledger_required !== true)) return false;
+  const ids = new Set(), hardwareHashes = new Set();
+  return saved.devices.every(device => {
+    if (!device || typeof device !== "object" || Array.isArray(device)
+      || ![device.device_id, device.hardware_hash, device.device_token].every(value => typeof value === "string" && value.length > 0)
+      || ids.has(device.device_id) || hardwareHashes.has(device.hardware_hash)) return false;
+    ids.add(device.device_id); hardwareHashes.add(device.hardware_hash);
+    return true;
+  });
 }
 
 function atomicWriteJson(path, value) {
@@ -1862,7 +1878,6 @@ export class TelemetryStore {
     }
     chmodSync(dataDir, 0o700);
     this.devices = new Map();
-    this.failureReports = new FailureReportStore(dataDir);
     this.devicesByHardwareHash = new Map();
     this.events = [];
     this.eventIds = new Set();
@@ -1870,6 +1885,7 @@ export class TelemetryStore {
     this.behaviorEventIds = new Set();
     this.behaviorPipelineEvents = [];
     this.deletionTombstones = [];
+    this.deletionLedgerPersisted = false;
     this.removedSubjectHashes = new Set();
     this.removedCredentialReasons = new Map();
     this.deletedRegistrationIdentities = new Set();
@@ -1902,13 +1918,26 @@ export class TelemetryStore {
       1_000_000,
     );
 
-    this.loadDeletionTombstones();
-    const saved = loadJson(this.devicesPath, { devices: [] });
+    // Absence is only a fresh deployment when no dependent inventory exists.
+    // Unknown/partial identity state must never authorize report pruning or
+    // overwrite the evidence needed for an operator to recover the store.
+    let saved = loadJson(this.devicesPath, null, validDeviceInventory);
+    if (saved === null && [this.eventsPath, this.behaviorEventsPath, this.behaviorPipelinePath,
+      this.deletionTombstonesPath, join(dataDir, "failure-diagnostic-reports.json")].some(path => existsSync(path))) {
+      console.error("[telemetry-error] persistence_read_failed");
+      throw new TelemetryHttpError(503, "telemetry_storage_unavailable");
+    }
+    if (saved === null) {
+      // Anchor a proven-fresh inventory before creating dependent files, so
+      // an interrupted first startup can safely repeat the ledger migration.
+      saved = {version: 2, devices: []};
+      atomicWriteJson(this.devicesPath, saved);
+    }
+    this.loadDeletionTombstones(saved?.deletion_ledger_required === true);
     let restoredDeletedDevice = false;
     let restoredTimestampDevice = false;
     const loadedAt = Date.now();
-    for (const device of Array.isArray(saved.devices) ? saved.devices : []) {
-      if (!device?.device_id || !device?.hardware_hash || !device?.device_token) continue;
+    for (const device of saved?.devices ?? []) {
       if (this.removedSubjectHashes.has(this.deletionSubjectHash(device.device_id))) {
         restoredDeletedDevice = true;
         continue;
@@ -1941,6 +1970,11 @@ export class TelemetryStore {
       this.devices.set(device.device_id, normalized);
       this.devicesByHardwareHash.set(device.hardware_hash, normalized);
     }
+    // Migrate legacy installations only after a durable ledger exists, and
+    // before report migration or any event rewrite. Interrupted migration is
+    // repeatable; the device file never requires a ledger that was not saved.
+    if (saved.deletion_ledger_required !== true) this.saveNow();
+    this.failureReports = new FailureReportStore(dataDir);
     this.rebuildDeletionIndexes();
     this.loadEvents();
     this.loadBehaviorEvents();
@@ -1965,18 +1999,24 @@ export class TelemetryStore {
       .digest("hex");
   }
 
-  loadDeletionTombstones() {
-    const saved = loadJson(this.deletionTombstonesPath, { records: [] });
-    this.deletionTombstones = (Array.isArray(saved.records) ? saved.records : [])
-      .filter((record) => record?.subject_hash)
+  loadDeletionTombstones(required = false) {
+    const saved = loadJson(this.deletionTombstonesPath, null, value => value
+      && typeof value === "object" && !Array.isArray(value) && Array.isArray(value.records)
+      && value.records.every(record => record && typeof record === "object" && !Array.isArray(record)
+        && typeof record.subject_hash === "string" && record.subject_hash.length > 0));
+    if (saved === null && required) {
+      console.error("[telemetry-error] persistence_read_failed");
+      throw new TelemetryHttpError(503, "telemetry_storage_unavailable");
+    }
+    this.deletionLedgerPersisted = saved !== null;
+    this.deletionTombstones = (saved?.records ?? [])
       .map((record) => ({
         ...record,
         removal_reason: record.removal_reason
           || (record.deletion_request_id || record.request_id ? "deleted" : "expired"),
       }));
     this.rebuildDeletionIndexes();
-    if (existsSync(this.deletionTombstonesPath)
-      && JSON.stringify(this.deletionTombstones) !== JSON.stringify(saved.records || [])) {
+    if (saved === null || JSON.stringify(this.deletionTombstones) !== JSON.stringify(saved.records)) {
       this.saveDeletionTombstones();
     }
   }
@@ -2013,6 +2053,7 @@ export class TelemetryStore {
       version: 3,
       records: this.deletionTombstones,
     });
+    this.deletionLedgerPersisted = true;
   }
 
   enforcePrivateStoragePermissions() {
@@ -2191,7 +2232,8 @@ export class TelemetryStore {
   }
 
   saveNow() {
-    atomicWriteJson(this.devicesPath, { version: 2, devices: [...this.devices.values()] });
+    if (!this.deletionLedgerPersisted || !existsSync(this.deletionTombstonesPath)) this.saveDeletionTombstones();
+    atomicWriteJson(this.devicesPath, { version: 2, deletion_ledger_required: true, devices: [...this.devices.values()] });
   }
 
   updateRegion(device, region, now = Date.now()) {

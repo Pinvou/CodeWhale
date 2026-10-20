@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import http from "node:http";
@@ -51,7 +51,7 @@ test("privacy thresholds apply to version subgroups and account subjects",()=>{
   assert.equal(failureGroups(events,{},1)[0].versions["one-off-version"],1);
 });
 
-test("deletion remains processing across storage failure and restart until reports are durably removed",()=>{
+test("deletion remains processing across storage failure and restart until reports are durably removed",async()=>{
   const directory=mkdtempSync(join(tmpdir(),"pinvou-diag-delete-recovery-"));
   const originalPrune=FailureReportStore.prototype.prune;
   let store;
@@ -64,6 +64,7 @@ test("deletion remains processing across storage failure and restart until repor
     const event=witness({collection_period_id:period});store.appendBehaviorEvents(device,[event]);
     store.failureReports.append(device,report({collection_period_id:period}),{...event,device_id:device.device_id});
     const beforeDeletion=readFileSync(join(directory,"failure-diagnostic-reports.json"));
+    clearTimeout(store.saveTimer);
     FailureReportStore.prototype.prune=function(){throw new Error("simulated_disk_failure");};
     const deletion=store.deleteBehaviorData(device,{request_id:"diagnostic_delete_request"}); assert.equal(deletion.status,"processing");
     const restored=new TelemetryStore(directory,pepper);
@@ -71,13 +72,169 @@ test("deletion remains processing across storage failure and restart until repor
     assert.equal(JSON.parse(readFileSync(join(directory,"failure-diagnostic-reports.json"),"utf8")).reports.length,1);
     FailureReportStore.prototype.prune=originalPrune;
     const recovered=new TelemetryStore(directory,pepper);
-    assert.equal(recovered.deletionStatus(deletion.deletion_request_id,credential.device_token).status,"completed");
+    // Windows can briefly refuse a real atomic rename after restart. Exercise
+    // the real status-driven recovery, but a sustained failure must still fail.
+    const recoveryDeadline=Date.now()+3000;
+    let recoveredStatus=recovered.deletionStatus(deletion.deletion_request_id,credential.device_token);
+    while(recoveredStatus.status!=="completed" && Date.now()<recoveryDeadline){
+      await new Promise(resolve=>setTimeout(resolve,25));
+      recoveredStatus=recovered.deletionStatus(deletion.deletion_request_id,credential.device_token);
+    }
+    assert.equal(recoveredStatus.status,"completed");
     assert.equal(JSON.parse(readFileSync(join(directory,"failure-diagnostic-reports.json"),"utf8")).reports.length,0);
     writeFileSync(join(directory,"failure-diagnostic-reports.json"),beforeDeletion);
     const restoredBackup=new TelemetryStore(directory,pepper);
     assert.equal(restoredBackup.deletionStatus(deletion.deletion_request_id,credential.device_token).status,"completed");
+    const backupDeadline=Date.now()+3000;
+    while(JSON.parse(readFileSync(join(directory,"failure-diagnostic-reports.json"),"utf8")).reports.length!==0 && Date.now()<backupDeadline){
+      await new Promise(resolve=>setTimeout(resolve,25));
+      restoredBackup.compactExpiredData();
+    }
     assert.equal(JSON.parse(readFileSync(join(directory,"failure-diagnostic-reports.json"),"utf8")).reports.length,0);
   }finally{clearTimeout(store?.saveTimer);FailureReportStore.prototype.prune=originalPrune;rmSync(directory,{recursive:true,force:true});}
+});
+
+test("unknown device inventory or deletion ledger cannot destroy an acknowledged report on restart", t => {
+  const directory = mkdtempSync(join(tmpdir(), "pinvou-diag-inventory-recovery-"));
+  const pepper = "diagnostic-fixture-device-pepper";
+  let store;
+  t.mock.method(console, "error", () => {});
+  try {
+    store = new TelemetryStore(directory, pepper);
+    const credential = store.register({hardware_claim:"diagnostic-inventory-hardware",registration_secret:"diagnostic-inventory-registration-secret",app_version:"0.10.12",platform:"windows",arch:"x64"}, null);
+    const device = store.devices.get(credential.device_id);
+    const period = store.startBehaviorCollection(device, {request_id:"diagnostic_inventory_start"}).collection_period_id;
+    const event = witness({collection_period_id:period});
+    store.appendBehaviorEvents(device, [event]);
+    const packet = report({collection_period_id:period});
+    const incident = {...event, device_id:device.device_id};
+    assert.equal(store.failureReports.append(device, packet, incident).status, "received");
+    store.saveDeletionTombstones();
+    store.saveNow();
+    clearTimeout(store.saveTimer);
+    const devicesPath = join(directory, "devices.json");
+    const ledgerPath = join(directory, "behavior-deletion-tombstones.json");
+    const files = [devicesPath, ledgerPath, join(directory, "failure-diagnostic-reports.json"),
+      join(directory, "behavior-events.jsonl"), join(directory, "behavior-pipeline.jsonl")].filter(existsSync);
+    const original = new Map(files.map(path => [path, readFileSync(path)]));
+    const invalidDeviceRows = [null, ...["device_id", "hardware_hash", "device_token"].map(key => ({...device, [key]:undefined})),
+      {...device, device_id:17}, {...device, device_token:""}];
+    const corruptions = [
+      ...["broken", "null", "{}", '{"devices":{}}', ...invalidDeviceRows.map(row => JSON.stringify({devices:[device, row]})),
+        JSON.stringify({devices:[device, {...device}]}),
+        JSON.stringify({devices:[device, {...device, device_id:"duplicate_hardware_fixture"}]}),
+        ...[false, null, "true"].map(marker => JSON.stringify({devices:[device], deletion_ledger_required:marker}))]
+        .map(content => [devicesPath, content]),
+      ...["broken", "null", "{}", '{"records":{}}', '{"records":[null]}', '{"records":[{}]}']
+        .map(content => [ledgerPath, content]),
+      [devicesPath, null],
+      [ledgerPath, null],
+    ];
+    for (const [path, content] of corruptions) {
+      if (content === null) unlinkSync(path);
+      else writeFileSync(path, content);
+      assert.throws(() => new TelemetryStore(directory, pepper), error => error.status === 503
+        && error.message === "telemetry_storage_unavailable");
+      for (const file of files) {
+        if (file === path) {
+          if (content === null) assert.equal(existsSync(file), false);
+          else assert.equal(readFileSync(file, "utf8"), content, "preserve the corrupt inventory for recovery");
+        } else assert.deepEqual(readFileSync(file), original.get(file), "startup failure must not rewrite dependent stores");
+      }
+      writeFileSync(path, original.get(path));
+    }
+    const recovered = new TelemetryStore(directory, pepper);
+    assert.equal(recovered.failureReports.detail(incident, "operator").reports.length, 1);
+    assert.equal(recovered.failureReports.append(recovered.devices.get(device.device_id), packet, incident).status, "received");
+    assert.equal(recovered.deleteBehaviorData(recovered.devices.get(device.device_id), {request_id:"diagnostic_inventory_delete"}).status, "completed");
+    assert.equal(new FailureReportStore(directory).state.reports.length, 0);
+    clearTimeout(recovered.saveTimer);
+  } finally { clearTimeout(store?.saveTimer); rmSync(directory, {recursive:true, force:true}); }
+});
+
+test("a fresh store and an authoritative empty device inventory remain valid", () => {
+  const directory = mkdtempSync(join(tmpdir(), "pinvou-diag-empty-inventory-"));
+  try {
+    assert.equal(new TelemetryStore(directory, "diagnostic-fixture-device-pepper").devices.size, 0);
+    assert.equal(new TelemetryStore(directory, "diagnostic-fixture-device-pepper").devices.size, 0);
+    writeFileSync(join(directory, "devices.json"), JSON.stringify({version:2, devices:[]}));
+    assert.equal(new TelemetryStore(directory, "diagnostic-fixture-device-pepper").devices.size, 0);
+  } finally { rmSync(directory, {recursive:true, force:true}); }
+});
+
+test("legacy ledger migration is durable, repeatable and preserves report evidence on write failure", t => {
+  const directory = mkdtempSync(join(tmpdir(), "pinvou-diag-ledger-migration-"));
+  const pepper = "diagnostic-fixture-device-pepper";
+  let store;
+  try {
+    store = new TelemetryStore(directory, pepper);
+    const credential = store.register({hardware_claim:"diagnostic-legacy-hardware",registration_secret:"diagnostic-legacy-registration-secret"}, null);
+    const device = store.devices.get(credential.device_id);
+    const period = store.startBehaviorCollection(device, {request_id:"diagnostic_legacy_start"}).collection_period_id;
+    const event = witness({collection_period_id:period});
+    store.appendBehaviorEvents(device, [event]);
+    store.failureReports.append(device, report({collection_period_id:period}), {...event, device_id:device.device_id});
+    store.saveNow(); clearTimeout(store.saveTimer);
+    const devicesPath = join(directory, "devices.json"), ledgerPath = join(directory, "behavior-deletion-tombstones.json");
+    const reportPath = join(directory, "failure-diagnostic-reports.json");
+    const legacy = JSON.parse(readFileSync(devicesPath, "utf8"));
+    delete legacy.deletion_ledger_required;
+    writeFileSync(devicesPath, JSON.stringify(legacy)); unlinkSync(ledgerPath);
+    const originalDevices = readFileSync(devicesPath), originalReports = readFileSync(reportPath);
+    const failedLedger = t.mock.method(TelemetryStore.prototype, "saveDeletionTombstones", () => { throw new Error("simulated_ledger_write_failure"); });
+    assert.throws(() => new TelemetryStore(directory, pepper), /simulated_ledger_write_failure/);
+    assert.deepEqual(readFileSync(devicesPath), originalDevices);
+    assert.deepEqual(readFileSync(reportPath), originalReports);
+    assert.equal(existsSync(ledgerPath), false);
+    failedLedger.mock.restore();
+    const failedMarker = t.mock.method(TelemetryStore.prototype, "saveNow", () => { throw new Error("simulated_marker_write_failure"); });
+    assert.throws(() => new TelemetryStore(directory, pepper), /simulated_marker_write_failure/);
+    assert.deepEqual(readFileSync(devicesPath), originalDevices);
+    assert.deepEqual(readFileSync(reportPath), originalReports);
+    assert.deepEqual(JSON.parse(readFileSync(ledgerPath, "utf8")).records, []);
+    failedMarker.mock.restore();
+    const migrated = new TelemetryStore(directory, pepper);
+    assert.equal(JSON.parse(readFileSync(devicesPath, "utf8")).deletion_ledger_required, true);
+    assert.equal(migrated.failureReports.state.reports.length, 1);
+    assert.equal(new TelemetryStore(directory, pepper).failureReports.state.reports.length, 1);
+    assert.deepEqual(readFileSync(reportPath), originalReports);
+  } finally { clearTimeout(store?.saveTimer); rmSync(directory, {recursive:true, force:true}); }
+});
+
+test("missing device inventory with dependent history is not a fresh deployment", () => {
+  for (const file of ["usage-events.jsonl", "behavior-events.jsonl", "behavior-pipeline.jsonl", "failure-diagnostic-reports.json", "behavior-deletion-tombstones.json"]) {
+    const directory = mkdtempSync(join(tmpdir(), "pinvou-diag-missing-inventory-"));
+    try {
+      writeFileSync(join(directory, file), "historic evidence");
+      assert.throws(() => new TelemetryStore(directory, "diagnostic-fixture-device-pepper"), /telemetry_storage_unavailable/);
+      assert.equal(readFileSync(join(directory, file), "utf8"), "historic evidence");
+      assert.equal(existsSync(join(directory, "devices.json")), false);
+    } finally { rmSync(directory, {recursive:true, force:true}); }
+  }
+});
+
+test("first startup can repeat an interrupted marker write and routine saves do not rewrite the ledger", t => {
+  const directory = mkdtempSync(join(tmpdir(), "pinvou-diag-ledger-initialization-"));
+  const pepper = "diagnostic-fixture-device-pepper";
+  try {
+    const failedMarker = t.mock.method(TelemetryStore.prototype, "saveNow", () => { throw new Error("simulated_marker_write_failure"); });
+    assert.throws(() => new TelemetryStore(directory, pepper), /simulated_marker_write_failure/);
+    const devicesPath = join(directory, "devices.json"), ledgerPath = join(directory, "behavior-deletion-tombstones.json");
+    assert.deepEqual(JSON.parse(readFileSync(devicesPath, "utf8")), {version:2, devices:[]});
+    assert.deepEqual(JSON.parse(readFileSync(ledgerPath, "utf8")).records, []);
+    failedMarker.mock.restore();
+    const recovered = new TelemetryStore(directory, pepper);
+    const ledgerWrites = t.mock.method(recovered, "saveDeletionTombstones");
+    const originalLedger = readFileSync(ledgerPath);
+    recovered.saveNow(); recovered.saveNow();
+    assert.equal(ledgerWrites.mock.callCount(), 0);
+    assert.deepEqual(readFileSync(ledgerPath), originalLedger);
+    unlinkSync(ledgerPath);
+    recovered.saveNow();
+    assert.equal(ledgerWrites.mock.callCount(), 1);
+    assert.deepEqual(readFileSync(ledgerPath), originalLedger);
+    assert.equal(JSON.parse(readFileSync(devicesPath, "utf8")).deletion_ledger_required, true);
+  } finally { rmSync(directory, {recursive:true, force:true}); }
 });
 
 test("report retries survive credential-period renewal without authorizing another incident",()=>{

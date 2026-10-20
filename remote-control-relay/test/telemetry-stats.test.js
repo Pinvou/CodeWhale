@@ -1771,6 +1771,9 @@ test("legacy behavior files are rewritten without raw tool or model aliases", ()
   const privateTool = "customer-private-tool-alias";
   const privateModel = "customer-private-model-alias";
   try {
+    // This fixture has an authoritative empty registry, rather than lost
+    // identity storage beside existing event history.
+    writeFileSync(join(dataDir, "devices.json"), JSON.stringify({version:2, devices:[]}));
     writeFileSync(join(dataDir, "behavior-events.jsonl"), [
       JSON.stringify({ event_id: "legacy_tool_event_0001", event_name: "tool_call_completed", device_id: "legacy_device", tool_name: privateTool, tool_type: "custom", success: true, occurred_at: Date.now(), received_at: Date.now() }),
       JSON.stringify({ event_id: "legacy_model_event_0001", event_name: "model_used", device_id: "legacy_device", provider_name: "private-provider", model_name: privateModel, occurred_at: Date.now(), received_at: Date.now() }),
