@@ -325,6 +325,30 @@ func validBillingRecoveryPayload(command string, domainResult, ledgerReferences 
 			result.AppliedToReceivables >= 0 && result.AppliedToReceivables <= result.CreditMicrocredits &&
 			result.WalletVersionAfter > 0 && lowerHexDigest(result.FactsDigest) &&
 			result.Status == "SUCCEEDED" && ledger.JournalEntryID == result.JournalEntryID
+	case "REFUND_EXCEPTION_REPAIR":
+		var result struct {
+			CaseID                uuid.UUID  `json:"case_id"`
+			RefundID              uuid.UUID  `json:"refund_id"`
+			WalletID              uuid.UUID  `json:"wallet_id"`
+			PackageID             uuid.UUID  `json:"package_id"`
+			RevokedMicrocredits   int64      `json:"revoked_microcredits"`
+			ShortfallMicrocredits int64      `json:"shortfall_microcredits"`
+			JournalEntryID        uuid.UUID  `json:"journal_entry_id"`
+			ReceivableID          *uuid.UUID `json:"receivable_id"`
+			ProviderRefundID      string     `json:"provider_refund_id"`
+			FactsDigest           string     `json:"facts_digest"`
+			Status                string     `json:"status"`
+		}
+		var ledger struct {
+			JournalEntryID uuid.UUID `json:"journal_entry_id"`
+		}
+		return decode(domainResult, &result) && decode(ledgerReferences, &ledger) &&
+			result.CaseID != uuid.Nil && result.RefundID != uuid.Nil && result.WalletID != uuid.Nil &&
+			result.PackageID != uuid.Nil && result.JournalEntryID != uuid.Nil &&
+			result.RevokedMicrocredits >= 0 && result.ShortfallMicrocredits >= 0 &&
+			result.RevokedMicrocredits+result.ShortfallMicrocredits > 0 &&
+			strings.TrimSpace(result.ProviderRefundID) != "" && lowerHexDigest(result.FactsDigest) &&
+			result.Status == "SUCCEEDED" && ledger.JournalEntryID == result.JournalEntryID
 	}
 	return false
 }

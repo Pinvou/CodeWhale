@@ -232,6 +232,14 @@ connection open.
   against `WS_MAX_BUFFERED_BYTES`. A slow recipient is terminated when the
   high-water mark would be crossed; the Relay does not accumulate an unbounded
   per-client queue.
+- HTTP analytics and WebSockets currently share the Node event loop. Long
+  synchronous statistics queries can delay application heartbeats and transport
+  pongs until a desktop disconnects. Scene value joins index copy/export signals
+  by installation, session and turn, then search the completion-time window;
+  they must not rescan the full event history for each scene task. Regression
+  coverage checks join boundaries, result isolation and a deterministic work
+  budget. If heavier analytics are added, move them off the Relay event loop
+  rather than extending authenticated liveness deadlines.
 - Browser WebSocket upgrades must use either a same-host `Origin` or an origin
   listed in `PINVOU_REMOTE_ALLOWED_WEB_ORIGINS`. Native desktop clients may omit
   `Origin`. The check assumes the reverse proxy preserves the public `Host` and
@@ -682,8 +690,17 @@ text “连接码无效或已失效”. A legacy conflict remains exactly
 `{"v":2,"type":"error","code":"endpoint_not_found","message":"endpoint not found"}`
 plus close code `1008`.
 
+Pre-admission task refusals use `task_status: failed` with optional
+`rejection_code` and `client_request_id` fields. When `rejection_code` is present,
+the status must be `failed`, the original client request ID is required, and the
+code must belong to the executable `TASK_REJECTION_CODES` registry. No raw
+exception, prompt or model package is returned. A retires only the exact
+attempted request on the current authenticated lease; ambiguous execution
+outcomes and already-admitted requests are not refusal receipts. Both clients
+must support these fields; older strict decoders may reject such receipts.
+
 The contract digest is
-`98ab9cc1835d7b617b142b7e26b8583a96245107db574465b46a836f43217a6b`.
+`63db457fd305cf8d758133fa8996b853bd3073892fa8bfe93aec7de8f873e242`.
 It is SHA-256 over canonical JSON (object keys recursively sorted, array order
 preserved, compact JSON scalars) of `{contract,fixture}`. `contract` is the
 executable manifest containing every schema required/optional field, role

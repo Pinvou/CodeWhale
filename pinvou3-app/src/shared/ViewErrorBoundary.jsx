@@ -7,15 +7,30 @@ import React from 'react';
 // (panelLoadFailed,嵌进面板位而非占满视图,ChatView 懒面板等局部挂载用)。
 // `heading` overrides the default title (the settings boundary keeps its own failure heading; all others fall back to viewLoadFailed).
 // `detail` overrides the raw error message body (设置页边界固定展示友好文案 settingsLoadFailedDetail，不外抛错误堆栈)。
+// `resetKey`: when it changes (e.g. the app shell switches views), a tripped
+// boundary clears its error so the next view renders normally. Without it, the
+// app shell's single persistent view boundary stays tripped forever after one
+// failed chunk and every later view switch only moves the sidebar highlight.
+// The reset follows React's adjust-state-on-prop-change pattern: it happens in
+// getDerivedStateFromProps during render (single commit) instead of a
+// setState-in-componentDidUpdate follow-up, which is an oxlint correctness
+// error in this repo.
 // 文案均走 i18n 三语,不引入单语言硬编码。
 export class ViewErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
-    this.state = { error: null };
+    this.state = { error: null, prevResetKey: props.resetKey };
   }
 
   static getDerivedStateFromError(error) {
     return { error };
+  }
+
+  static getDerivedStateFromProps(props, state) {
+    if (props.resetKey !== state.prevResetKey) {
+      return { prevResetKey: props.resetKey, error: null };
+    }
+    return null;
   }
 
   componentDidCatch(error, info) {

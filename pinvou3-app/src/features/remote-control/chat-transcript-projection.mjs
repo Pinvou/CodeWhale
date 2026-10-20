@@ -4,9 +4,30 @@
 
 export function remotePermissionFailureText(code, copy = {}) {
   const keys = {
+    task_rejection_capacity: 'taskRejectedCapacity',
     task_permission_mode_required: 'permissionModeRequired',
     task_permission_mode_changed: 'permissionModeChanged',
     task_permission_mode_unsupported: 'permissionModeUnsupported',
+    task_session_busy: 'taskRejectedBusy',
+    task_session_lane_conflict: 'permissionModeChanged',
+    task_session_lane_unknown: 'permissionModeChanged',
+    task_session_lane_mismatch: 'permissionModeChanged',
+    task_input_invalid: 'taskRejectedInvalid',
+    task_input_digest_invalid: 'taskRejectedInvalid',
+    task_skill_invalid: 'taskRejectedInvalid',
+    task_mode_unsupported: 'taskRejectedInvalid',
+    task_workspace_required: 'taskRejectedWorkspace',
+    task_workspace_not_authorized: 'taskRejectedWorkspace',
+    task_workspace_unexpected: 'taskRejectedWorkspace',
+    capability_workspace_not_authorized: 'taskRejectedWorkspace',
+    capability_snapshot_missing: 'taskRejectedCapability',
+    capability_snapshot_stale: 'taskRejectedCapability',
+    capability_snapshot_expired: 'taskRejectedCapability',
+    model_binding_invalid: 'taskRejectedModel',
+    model_binding_stale: 'taskRejectedModel',
+    model_credential_unavailable: 'controlledModelCredentialUnavailable',
+    model_package_missing: 'taskRejectedModel',
+    model_not_exportable: 'taskRejectedModel',
   };
   return typeof code === 'string' && Object.hasOwn(keys, code)
     ? copy[keys[code]] || null : null;

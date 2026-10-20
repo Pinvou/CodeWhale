@@ -485,7 +485,7 @@
     })) return state;
     if (!/^remote-[A-Za-z0-9._:-]+$/.test(item.localSessionId || "")
       || !item.remoteSessionRef || !item.controlledSessionId
-      || ["journal", "snapshot", "terminal", "capability"].indexOf(item.kind) < 0) return state;
+      || ["journal", "snapshot", "terminal", "capability", "rejection"].indexOf(item.kind) < 0) return state;
     if (item.localSessionId !== live.localSessionId
       || item.remoteSessionRef !== live.sessionRef) return state;
     var detail = item.fields && typeof item.fields === "object" ? item.fields : {};
@@ -857,6 +857,9 @@
             sequence: record.authenticatedCursor.sequence,
           } : null,
       pendingUnknownCount: record.pendingUnknownCount,
+      rejections: (Array.isArray(record.rejections) ? record.rejections : []).slice(0, 4096)
+        .filter(function (item) { return item && /^[A-Za-z0-9._:-]{1,128}$/.test(item.taskId || "") && /^[a-z_]{1,80}$/.test(item.code || ""); })
+        .map(function (item) { return { taskId: item.taskId, code: item.code }; }),
       unattemptedPending: record.unattemptedPending.map(function (item) {
         return {
           taskId: item.taskId,
