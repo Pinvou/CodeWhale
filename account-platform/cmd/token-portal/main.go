@@ -44,12 +44,16 @@ func main() {
 }
 
 func loadPortalConfig(environment string, getenv func(string) string) (portal.Config, error) {
-	cfg := portal.Config{Environment: environment, ClientID: getenv("PORTAL_OIDC_CLIENT_ID"), PrivateCAFile: strings.TrimSpace(getenv("PORTAL_PRIVATE_CA_FILE")), HandoffClientID: getenv("PORTAL_HANDOFF_OIDC_CLIENT_ID"), SessionHandoffTTL: 30 * time.Second}
+	cfg := portal.Config{SystemProbeCAFile: strings.TrimSpace(getenv("PORTAL_SYSTEM_PROBE_CA_FILE")), Environment: environment, ClientID: getenv("PORTAL_OIDC_CLIENT_ID"), PrivateCAFile: strings.TrimSpace(getenv("PORTAL_PRIVATE_CA_FILE")), HandoffClientID: getenv("PORTAL_HANDOFF_OIDC_CLIENT_ID"), SessionHandoffTTL: 30 * time.Second}
 	trustedProxies, err := portal.ParseTrustedProxyIPs(getenv("PORTAL_TRUSTED_PROXY_IPS"))
 	if err != nil {
 		return portal.Config{}, err
 	}
 	cfg.TrustedProxyIPs = trustedProxies
+	cfg.SystemProbes, err = loadSystemProbes(getenv("SYSTEM_PROBES_JSON"))
+	if err != nil {
+		return portal.Config{}, err
+	}
 	endpoints := []struct {
 		name   string
 		target **url.URL
@@ -67,6 +71,12 @@ func loadPortalConfig(environment string, getenv func(string) string) (portal.Co
 		name   string
 		target *bool
 	}{
+		{"PORTAL_ADMIN_MODEL_TOKEN_IA_ENABLED", &cfg.AdminModelTokenIAEnabled},
+		{"PORTAL_ADMIN_TOKEN_RESOURCE_FORMS_ENABLED", &cfg.AdminTokenResourceFormsEnabled},
+		{"PORTAL_ADMIN_MODEL_OPERATIONS_DETAILS_ENABLED", &cfg.AdminModelOperationsDetailsEnabled},
+		{"PORTAL_ADMIN_MODEL_DETAILS_ENABLED", &cfg.AdminModelDetailsEnabled},
+		{"PORTAL_ADMIN_MODEL_PRICING_EDIT_ENABLED", &cfg.AdminModelPricingEditEnabled},
+		{"PORTAL_ADMIN_MODEL_TOKEN_ACTIONS_ENABLED", &cfg.AdminModelTokenActionsEnabled},
 		{"PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED", &cfg.AdminModelOperationsOverviewEnabled},
 		{"PORTAL_ADMIN_MODEL_TOKEN_PAGE_OVERVIEWS_ENABLED", &cfg.AdminModelTokenPageOverviewsEnabled},
 	} {

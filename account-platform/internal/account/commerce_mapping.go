@@ -267,6 +267,12 @@ func (r *PostgresRepository) ClaimCommerceCustomerSyncJob(ctx context.Context, p
 	return &job, tx.Commit(ctx)
 }
 
+// Both callbacks reject retired USER lifecycles before touching their mapping,
+// job or evidence. Non-USER callbacks retain the original status-only fence.
+func commerceCallbackLifecycleConflict(subjectType string, expected, actual int64, status string) bool {
+	return subjectType == "USER" && actual != expected || status == "DELETED" || status == "ANONYMIZED"
+}
+
 func (r *PostgresRepository) CompleteCommerceCustomerSyncJob(ctx context.Context, job CommerceCustomerSyncJob, result commerce.CustomerProvisionResult) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -277,7 +283,7 @@ func (r *PostgresRepository) CompleteCommerceCustomerSyncJob(ctx context.Context
 	if err != nil {
 		return err
 	}
-	if job.SubjectType == "USER" && lifecycle != job.SubjectLifecycleVersion || userStatus == "DELETED" || userStatus == "ANONYMIZED" {
+	if commerceCallbackLifecycleConflict(job.SubjectType, job.SubjectLifecycleVersion, lifecycle, userStatus) {
 		return ErrConflict
 	}
 	if userStatus != "ACTIVE" && userStatus != "DISABLED" {
@@ -367,7 +373,7 @@ func (r *PostgresRepository) RetryCommerceCustomerSyncJob(ctx context.Context, j
 	if err != nil {
 		return err
 	}
-	if job.SubjectType == "USER" && lifecycle != job.SubjectLifecycleVersion || status == "DELETED" || status == "ANONYMIZED" {
+	if commerceCallbackLifecycleConflict(job.SubjectType, job.SubjectLifecycleVersion, lifecycle, status) {
 		return ErrConflict
 	}
 	if status != "ACTIVE" && status != "DISABLED" {

@@ -9,17 +9,18 @@ import (
 )
 
 type memoryStore struct {
-	mu       sync.Mutex
-	flows    map[string]LoginFlow
-	sessions map[string]Session
-	locks    map[string]string
-	roots    map[string]string
-	markers  map[string]time.Time
-	handoffs map[string]SessionHandoff
+	mu              sync.Mutex
+	flows           map[string]LoginFlow
+	sessions        map[string]Session
+	locks           map[string]string
+	roots           map[string]string
+	markers         map[string]time.Time
+	classifications map[string]ApprovalClassification
+	handoffs        map[string]SessionHandoff
 }
 
 func newMemoryStore() *memoryStore {
-	return &memoryStore{flows: map[string]LoginFlow{}, sessions: map[string]Session{}, locks: map[string]string{}, roots: map[string]string{}, markers: map[string]time.Time{}, handoffs: map[string]SessionHandoff{}}
+	return &memoryStore{classifications: map[string]ApprovalClassification{}, flows: map[string]LoginFlow{}, sessions: map[string]Session{}, locks: map[string]string{}, roots: map[string]string{}, markers: map[string]time.Time{}, handoffs: map[string]SessionHandoff{}}
 }
 func (s *memoryStore) SaveFlow(_ context.Context, key string, value LoginFlow) error {
 	s.mu.Lock()
@@ -179,9 +180,25 @@ func testService(t *testing.T, store Store) *Service {
 		}
 		return parsed
 	}
-	service, err := NewService(Config{Environment: "test", IssuerURL: parse("https://identity.example"), JWKSURL: parse("https://identity.example/keys"), PublicURL: parse("https://portal.example"), AuthorizationURL: parse("https://identity.example/auth"), TokenURL: parse("https://identity.example/token"), ClientID: "portal", AccountURL: parse("https://account.example"), TokenGatewayURL: parse("https://token.example"), BillingURL: parse("https://billing.example"), SecureCookies: true}, store)
+	service, err := NewService(Config{AdminModelTokenActionsEnabled: true, Environment: "test", IssuerURL: parse("https://identity.example"), JWKSURL: parse("https://identity.example/keys"), PublicURL: parse("https://portal.example"), AuthorizationURL: parse("https://identity.example/auth"), TokenURL: parse("https://identity.example/token"), ClientID: "portal", AccountURL: parse("https://account.example"), TokenGatewayURL: parse("https://token.example"), BillingURL: parse("https://billing.example"), SecureCookies: true}, store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return service
+}
+
+func (s *memoryStore) SaveApprovalClassification(_ context.Context, p ApprovalClassification) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.classifications[approvalClassificationKey(p.SessionID, p.ApprovalRequestID)] = p
+	return nil
+}
+func (s *memoryStore) GetApprovalClassification(_ context.Context, session, id string) (ApprovalClassification, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.classifications[approvalClassificationKey(session, id)]
+	if !ok {
+		return p, ErrSessionNotFound
+	}
+	return p, nil
 }

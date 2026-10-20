@@ -15,6 +15,7 @@ import (
 type PostgresStore struct {
 	pool               *pgxpool.Pool
 	excludedEventTypes []string
+	accountReplay      bool
 }
 
 type OutboxStats struct {
@@ -25,6 +26,23 @@ type OutboxStats struct {
 
 func NewPostgresStore(ctx context.Context, databaseURL string) (*PostgresStore, error) {
 	return newPostgresStore(ctx, databaseURL, nil)
+}
+
+// NewAccountReplayPostgresStore explicitly selects the restricted Account
+// replay capability. Ordinary relay delivery and generic Billing/Token stores
+// retain their existing constructors and do not acquire a new startup gate.
+func NewAccountReplayPostgresStore(ctx context.Context, databaseURL string) (*PostgresStore, error) {
+	store, err := newPostgresStore(ctx, databaseURL, []string{"account.approval-command.authorized.v1"})
+	if err != nil {
+		return nil, err
+	}
+	var session, actor string
+	if err := store.pool.QueryRow(ctx, `SELECT session_user,current_user`).Scan(&session, &actor); err != nil || session != "account_service" || actor != "account_service" {
+		store.Close()
+		return nil, errors.New("Account replay requires the dedicated runtime identity")
+	}
+	store.accountReplay = true
+	return store, nil
 }
 
 // NewPartitionedPostgresStore creates a generic outbox store whose claim and

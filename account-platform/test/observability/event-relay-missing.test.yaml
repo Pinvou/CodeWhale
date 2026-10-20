@@ -1,0 +1,110 @@
+rule_files:
+  - event-relay-rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: all-three-domains-missing
+    interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: PinvouAccountPlatformEventRelayMissing
+        exp_alerts:
+          - exp_labels: { severity: p1 }
+            exp_annotations: { summary: "One or more Account Platform event relays are not being scraped" }
+  - name: only-account-domain-present
+    interval: 1m
+    input_series:
+      - series: 'pinvou_outbox_pending_events{source="account",instance="a1"}'
+        values: '0+0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: PinvouAccountPlatformEventRelayMissing
+        exp_alerts:
+          - exp_labels: { severity: p1 }
+            exp_annotations: { summary: "One or more Account Platform event relays are not being scraped" }
+  - name: two-domains-present
+    interval: 1m
+    input_series:
+      - series: 'pinvou_outbox_pending_events{source="account",instance="a1"}'
+        values: '0+0x10'
+      - series: 'pinvou_outbox_pending_events{source="billing",instance="b1"}'
+        values: '0+0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: PinvouAccountPlatformEventRelayMissing
+        exp_alerts:
+          - exp_labels: { severity: p1 }
+            exp_annotations: { summary: "One or more Account Platform event relays are not being scraped" }
+  - name: missing-token-is-not-hidden-by-other-domain-replicas
+    interval: 1m
+    input_series:
+      - series: 'pinvou_outbox_pending_events{source="account",instance="a1"}'
+        values: '0+0x10'
+      - series: 'pinvou_outbox_pending_events{source="account",instance="a2"}'
+        values: '0+0x10'
+      - series: 'pinvou_outbox_pending_events{source="billing",instance="b1"}'
+        values: '0+0x10'
+      - series: 'pinvou_outbox_pending_events{source="billing",instance="b2"}'
+        values: '0+0x10'
+      - series: 'pinvou_outbox_pending_events{source="other",instance="x1"}'
+        values: '0+0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: PinvouAccountPlatformEventRelayMissing
+        exp_alerts:
+          - exp_labels: { severity: p1 }
+            exp_annotations: { summary: "One or more Account Platform event relays are not being scraped" }
+  - name: complete-domains-and-replicas-do-not-alert
+    interval: 1m
+    input_series:
+      - series: 'pinvou_outbox_pending_events{source="account",instance="a1"}'
+        values: '0+0x10'
+      - series: 'pinvou_outbox_pending_events{source="account",instance="a2"}'
+        values: '0+0x10'
+      - series: 'pinvou_outbox_pending_events{source="billing",instance="b1"}'
+        values: '0+0x10'
+      - series: 'pinvou_outbox_pending_events{source="billing",instance="b2"}'
+        values: '0+0x10'
+      - series: 'pinvou_outbox_pending_events{source="token",instance="t1"}'
+        values: '0+0x10'
+      - series: 'pinvou_outbox_pending_events{source="token",instance="t2"}'
+        values: '0+0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: PinvouAccountPlatformEventRelayMissing
+        exp_alerts: []
+  - name: complete-three-domains-one-replica-do-not-alert
+    interval: 1m
+    input_series:
+      - series: 'pinvou_outbox_pending_events{source="account",instance="a1"}'
+        values: '0+0x10'
+      - series: 'pinvou_outbox_pending_events{source="billing",instance="b1"}'
+        values: '0+0x10'
+      - series: 'pinvou_outbox_pending_events{source="token",instance="t1"}'
+        values: '0+0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: PinvouAccountPlatformEventRelayMissing
+        exp_alerts: []
+  - name: unknown-source-replicas-do-not-fill-known-domains
+    interval: 1m
+    input_series:
+      - series: 'pinvou_outbox_pending_events{source="other",instance="x1"}'
+        values: '0+0x10'
+      - series: 'pinvou_outbox_pending_events{source="other",instance="x2"}'
+        values: '0+0x10'
+      - series: 'pinvou_outbox_pending_events{source="other",instance="x3"}'
+        values: '0+0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: PinvouAccountPlatformEventRelayMissing
+        exp_alerts:
+          - exp_labels: { severity: p1 }
+            exp_annotations: { summary: "One or more Account Platform event relays are not being scraped" }
+  - name: missing-domains-before-five-minute-hold-do-not-alert
+    interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PinvouAccountPlatformEventRelayMissing
+        exp_alerts: []

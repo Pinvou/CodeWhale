@@ -247,6 +247,7 @@ jobs:
               - 'pinvou3-app/src/shared/account-closure-i18n.js'
               - 'pinvou3-app/src/shared/i18n.js'
               - 'scripts/account-platform*'
+              - 'scripts/check-account-platform*'
               - 'scripts/test-token-financial-postgres.py'
               - 'scripts/tests/test_token_financial_postgres.py'
               - 'scripts/test-account-closure-postgres.py'
@@ -558,6 +559,17 @@ jobs:
               - 'pinvou3-app/eslint.config.mjs'
               - '.github/workflows/pr-check.yml'
             frontend:
+              - 'account-platform/package.json'
+              - 'account-platform/package-lock.json'
+              - 'account-platform/contracts/deployment/model-token-release-plan.schema.json'
+              - 'account-platform/contracts/deployment/model-token-release-evidence.schema.json'
+              - 'account-platform/deploy/nginx/credential-edge.example.json'
+              - 'account-platform/internal/portal/credential-handoff.v1.js'
+              - 'account-platform/internal/portal/credential_handoff_hash_generated.go'
+              - 'scripts/account-platform-credential-browser-scope.mjs'
+              - 'scripts/account-platform-credential-origin-probe.mjs'
+              - 'scripts/account-platform-credential-edge.mjs'
+              - 'scripts/account-platform-model-token-release-plan.mjs'
               - 'pinvou3-app/src/**'
               - 'pinvou3-app/tests/**'
               - 'account-platform/internal/portal/static/**'
@@ -891,9 +903,15 @@ jobs:
           cache-dependency-path: |
             pinvou3-app/package-lock.json
             remote-control-relay/package-lock.json
+            account-platform/package-lock.json
 
       - name: 安装前端依赖
         run: npm ci --prefer-offline --no-audit
+
+      # The Node probe imports AP schema tooling before any browser skip.
+      # Draft logic tests need the same locked dependencies as Ready tests.
+      - name: Install Account Platform probe dependencies
+        run: npm --prefix ../account-platform ci --ignore-scripts --prefer-offline --no-audit
 
       # test:webui smoke (本 job 末尾) 会 spawn remote-control-relay/server.js,
       # 其顶层 require('ws') 解析自 remote-control-relay/node_modules,故必须装 relay 依赖。
@@ -1085,6 +1103,20 @@ jobs:
         run: |
           set -euo pipefail
           PINVOU_TEST_BASH="$(command -v bash)" python3 account-platform/deploy/keycloak/test/provision_mobile_auth_test.py
+
+      - name: Install Account Platform contract dependencies
+        working-directory: account-platform
+        run: npm ci --ignore-scripts --prefer-offline --no-audit
+
+      - name: Account Platform Node contracts
+        working-directory: account-platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test --test-reporter=tap test/contract/*.test.mjs | tee "$RUNNER_TEMP/f18-account-contracts.tap"
+          # A green process with no matched cases is not a contract validation.
+          grep -Eq '^# pass [1-9][0-9]*$' "$RUNNER_TEMP/f18-account-contracts.tap"
+          grep -Eq '^# fail 0$' "$RUNNER_TEMP/f18-account-contracts.tap"
 
       - name: Test and vet all Account Platform Go modules
         shell: bash
@@ -1836,7 +1868,7 @@ jobs:
         with:
           node-version: "24"
           cache: npm
-          # Same two-lockfile key as frontend-test/windows-codex-runtime-test:
+          # Shared App/relay key with windows-codex-runtime-test; frontend adds AP tools:
           # one shared npm cache namespace instead of per-job keys fragmenting
           # the 10GB quota with duplicate 107MB entries.
           cache-dependency-path: |
@@ -3508,7 +3540,7 @@ jobs:
         with:
           node-version: "24"
           cache: npm
-          # Same two-lockfile key as frontend-test/rust-test: one shared npm
+          # Shared App/relay key with rust-test; frontend additionally keys AP tools.
           # cache namespace instead of per-job keys.
           cache-dependency-path: |
             pinvou3-app/package-lock.json

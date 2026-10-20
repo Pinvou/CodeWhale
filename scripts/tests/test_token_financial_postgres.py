@@ -251,6 +251,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestF06OrganizationStatusProjectionVersionPublicPostgres",
             "TestF06OrganizationDeletionVersionAndTerminalScope",
             "TestF06Review5566377593PublicPostgres",
+            "TestOrdinaryDeadLetterReplayRuntimePostgres",
         })
         for name in RUNNER.ACCOUNT_REQUIRED:
             with self.subTest(name=name), self.assertRaises(RuntimeError):

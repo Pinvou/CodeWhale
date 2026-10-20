@@ -161,6 +161,28 @@ function assertFiniteAuditPGSetup(job) {
     "        env:", "          F17_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable",
     "          F17_TEST_DATABASE_PROFILE: github-actions-service",
   ].join("\n"));
+  // F16's two separately bounded suites use only the other ephemeral service.
+  // Validate each whole step before removing it from the audit-only env ban;
+  // arbitrary env, commands, conditions and extra steps remain rejected.
+  let outsidePGSteps = text.replace(pg, "");
+  for (const [name, environment, commands] of [
+    ["Token financial contracts on isolated PostgreSQL", [
+      "PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable",
+    ], ["set -euo pipefail", "python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py", "python3 scripts/test-token-financial-postgres.py"]],
+    ["Account closure contracts on isolated PostgreSQL", [
+      "PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable",
+      "PINVOU_ACCOUNT_CLOSURE_TEST_ARTIFACT_DIR: ${{ runner.temp }}/account-closure-postgres",
+    ], ["set -euo pipefail", "python3 -m unittest discover -s scripts/tests -p test_account_closure_postgres.py", "python3 scripts/test-account-closure-postgres.py"]],
+  ]) {
+    const step = namedStep(text, name);
+    assert.equal(step.trimEnd(), [
+      `      - name: ${name}`, "        shell: bash", "        env:",
+      ...environment.map(value => `          ${value}`), "        run: |",
+      ...commands.map(value => `          ${value}`),
+    ].join("\n"));
+    outsidePGSteps = outsidePGSteps.replace(step, "");
+  }
+  assert.doesNotMatch(outsidePGSteps, /DATABASE_URL|DATABASE_PROFILE|F17_TEST_/);
   const defaultStep = namedStep(job, goStepName);
   const jobEnv = text.match(/^ {4}env:\n[\s\S]*?(?=^ {4}\S|$(?![\s\S]))/m);
   assert.ok(jobEnv);
@@ -214,7 +236,7 @@ test("Account Platform changes cannot bypass the Go gate at any PR or queue stag
   for (const path of ["scripts/check-account-platform-authorization-coverage.mjs", "scripts/tests/account-platform-authorization-coverage.test.mjs"]) {
     assert.ok(paths.includes(path), `authorization changes must trigger the Go gate: ${path}`);
   }
-  for (const path of ["account-platform/**", "scripts/account-platform*", "scripts/check-token-management-authorization-coverage.mjs", "scripts/tests/token-management-authorization-coverage.test.mjs", "scripts/tests/token-management-phase-coverage.test.mjs", ".github/workflows/pr-check.yml", "scripts/tests/pr-check-routing.test.mjs"]) {
+  for (const path of ["account-platform/**", "scripts/account-platform*", "scripts/check-account-platform*", "scripts/check-token-management-authorization-coverage.mjs", "scripts/tests/token-management-authorization-coverage.test.mjs", "scripts/tests/token-management-phase-coverage.test.mjs", ".github/workflows/pr-check.yml", "scripts/tests/pr-check-routing.test.mjs"]) {
     assert.ok(paths.includes(path), `Go routing must cover ${path}`);
   }
   assert.match(workflow, /account_platform: \$\{\{ steps\.filter\.outputs\.account_platform \}\}/);
@@ -263,6 +285,27 @@ test("whole Account Platform authorization failures block the CI gate", () => {
     assert.equal(result.stdout, expectedOutput);
   }
   assertFiniteAuditPGSetup(job);
+});
+
+test("Account Platform Node gate executes its contracts and rejects empty or failed runs", () => {
+  const job = jobBlock("account-platform-test");
+  const install = namedStep(job, "Install Account Platform contract dependencies");
+  assert.match(install, /working-directory: account-platform/);
+  assert.match(install, /npm ci --ignore-scripts --prefer-offline --no-audit/);
+  const nodeStep = namedStep(job, "Account Platform Node contracts");
+  assert.match(nodeStep, /working-directory: account-platform/);
+  const run = stepRun(job, "Account Platform Node contracts");
+  assert.match(run, /node --test --test-reporter=tap test\/contract\/\*\.test\.mjs/);
+  const directory = mkdtempSync(join(tmpdir(), "pinvou-node-gate-"));
+  try {
+    for (const [passed, failed, exit, expected] of [[1, 0, 0, 0], [0, 0, 0, 1], [2, 1, 1, 1], [1, 0, 7, 7]]) {
+      const prefix = `node() { printf '# pass ${passed}\\n# fail ${failed}\\n'; return ${exit}; }; export -f node;\n`;
+      const result = spawnSync(bash, ["-c", prefix + run], { cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true, env: { ...process.env, RUNNER_TEMP: directory.replaceAll("\\", "/") } });
+      assert.equal(result.status, expected, `${passed}/${failed}/${exit}: ${result.stderr}`);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("Go gate executes test and vet for root and future nested modules, and fails on errors", () => {
@@ -321,6 +364,10 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
     ["        ports:", "        volumes:\n          - shared-data:/var/lib/postgresql/data\n        ports:"],
     ["F17_TEST_DATABASE_PROFILE: github-actions-service", "F17_TEST_DATABASE_PROFILE: local-owned"],
     ["postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable", "postgres://postgres@remote.invalid:5432/postgres?sslmode=disable"],
+    ["PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable", "PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: postgres://postgres@remote.invalid:5433/postgres?sslmode=disable"],
+    ["PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable", "PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable"],
+    ["python3 scripts/test-token-financial-postgres.py", "python3 scripts/test-token-financial-postgres.py || true"],
+    ["python3 scripts/test-account-closure-postgres.py", "python3 scripts/test-account-closure-postgres.py || true"],
     ["      GOTOOLCHAIN: local", "      F17_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres\n      GOTOOLCHAIN: local"],
     ["        shell: bash", "        env:\n          F17_TEST_DATABASE_PROFILE: github-actions-service\n        shell: bash"],
     ["          POSTGRES_HOST_AUTH_METHOD: trust", "          POSTGRES_PASSWORD: ${{ secrets.DB_PASSWORD }}"],
@@ -386,7 +433,7 @@ test("required-gate rejects skipped applicable Go checks and permits unrelated s
   assert.match(gate, /ACCOUNT_PLATFORM_RESULT: \$\{\{ needs\.account-platform-test\.result \}\}/);
   const run = gate.match(/        run: \|\r?\n([\s\S]*)/)[1].replace(/^ {10}/gm, "");
   const baseEnv = { ...process.env, GITHUB_EVENT_NAME: "pull_request", WINDOWS_RUST_REQUIRED_BY_POLICY: "false" };
-  for (const match of gate.matchAll(/^          ([A-Z_]+_RESULT):/gm)) baseEnv[match[1]] = "success";
+  for (const match of gate.matchAll(/^          ([A-Z0-9_]+_RESULT):/gm)) baseEnv[match[1]] = "success";
   for (const event of ["pull_request", "merge_group"]) {
     for (const applicable of ["true", "false"]) {
       for (const status of ["success", "skipped", "failure", "cancelled", ""]) {
@@ -551,4 +598,63 @@ test("title gate enforces the convention on the live PR title (squash subject)",
     chain,
     "title gate must retry-fetch the live title and validate exactly that file in subject-only mode",
   );
+});
+
+
+const frontendProbeDependencyPaths = [
+  "account-platform/package.json",
+  "account-platform/package-lock.json",
+  "account-platform/contracts/deployment/model-token-release-plan.schema.json",
+  "account-platform/contracts/deployment/model-token-release-evidence.schema.json",
+  "account-platform/deploy/nginx/credential-edge.example.json",
+  "account-platform/internal/portal/credential-handoff.v1.js",
+  "account-platform/internal/portal/credential_handoff_hash_generated.go",
+  "scripts/account-platform-credential-browser-scope.mjs",
+  "scripts/account-platform-credential-origin-probe.mjs",
+  "scripts/account-platform-credential-edge.mjs",
+  "scripts/account-platform-model-token-release-plan.mjs",
+];
+const frontendProbeInstallStep = "Install Account Platform probe dependencies";
+const frontendLogicStep = "前端逻辑测试 (pet 全套 + diff parser + markdown)";
+
+function assertFrontendProbeDependencies(text) {
+  const job = jobBlock("frontend-test", text).replaceAll("\r\n", "\n");
+  assert.match(job, /^ {8}working-directory: pinvou3-app$/m);
+  const install = namedStep(job, frontendProbeInstallStep);
+  assert.match(install, /^ {8}run: npm --prefix \.\.\/account-platform ci --ignore-scripts --prefer-offline --no-audit$/m);
+  assert.doesNotMatch(install, /^ {8}(?:if|continue-on-error|working-directory):/m,
+    "The logic test loads AP dependencies on Draft too, in the inherited app cwd");
+  assert.ok(job.indexOf(install) < job.indexOf(namedStep(job, frontendLogicStep)),
+    "AP tools must be installed before npm test module discovery");
+  const setup = job.match(/^ {6}- uses: actions\/setup-node@\S+\n[\s\S]*?(?=^ {6}- |$(?![\s\S]))/m);
+  assert.ok(setup, "frontend setup-node block not found");
+  assert.match(setup[0], /^ {12}account-platform\/package-lock\.json$/m);
+  const paths = filterPaths(text, "frontend");
+  for (const path of frontendProbeDependencyPaths) {
+    assert.ok(paths.includes(path), `${path} must route the frontend module-loading gate`);
+  }
+}
+
+test("frontend probe tool dependencies are installed before logic tests on Draft and Ready", () => {
+  assertFrontendProbeDependencies(workflow);
+});
+
+test("frontend probe dependency guard rejects incomplete or conditional installation and missing imports", () => {
+  const job = jobBlock("frontend-test");
+  const install = namedStep(job, frontendProbeInstallStep);
+  const variants = [
+    job.replace(install, ""),
+    job.replace(install, install.replace("        run:", "        if: ${{ github.event.pull_request.draft == false }}\n        run:")),
+    job.replace(install, install.replace("        run:", "        continue-on-error: true\n        run:")),
+    job.replace(install, install.replace("../account-platform", "../../account-platform")),
+    job.replace(install, "") + install,
+    job.replace(/^ {12}account-platform\/package-lock\.json\r?\n/m, ""),
+  ];
+  for (const variant of variants) {
+    assert.throws(() => assertFrontendProbeDependencies(workflow.replace(job, variant)));
+  }
+  for (const path of frontendProbeDependencyPaths) {
+    assert.throws(() => assertFrontendProbeDependencies(
+      workflow.replace(`              - '${path}'`, "")), `missing route ${path}`);
+  }
 });

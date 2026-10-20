@@ -12,6 +12,26 @@ current Account-produced `account-platform/test/fixtures/provisioning-password-l
 CLI double; it does not provision a real realm. Full deployment/E2E validation
 is separate from these component tests.
 
+## Platform administrator provisioning
+
+`provision-platform-admin.sh` keeps the existing login-identity and realm-role
+workflow; it does not grant Account business permissions. Supply its passwords
+through the existing controlled environment, without shell tracing. The pinned
+Keycloak 26.7.0 CLI supports `KC_CLI_PASSWORD` for both
+[`config credentials`](https://github.com/keycloak/keycloak/blob/26.7.0/docs/documentation/server_admin/topics/admin-cli.adoc#authenticating)
+and [`set-password`](https://github.com/keycloak/keycloak/blob/26.7.0/integration/client-cli/admin-cli/src/main/java/org/keycloak/client/admin/cli/commands/SetPasswordCmd.java).
+The script supplies each password only to its corresponding invocation, omits
+password arguments, and removes the original password variables from CLI child
+environments. Sensitive-command errors use fixed diagnostics instead of raw CLI
+output. Its temporary token configuration is created with mode 0600 and removed
+on success, failure or a handled termination signal. This is not an assurance
+against a privileged observer of the process environment or a real deployment
+acceptance result.
+
+The local CLI-double tests in `scripts/tests/test_personal_deployment_security.py`
+exercise creation, reruns, secret transport and cleanup without connecting to
+Keycloak or using real credentials.
+
 ## Realm and client provisioning
 
 Import `pinvou-dev-realm.json` only for local development. It defines the

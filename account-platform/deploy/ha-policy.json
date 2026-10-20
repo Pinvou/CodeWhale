@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "minimum_failure_domains": 2,
+  "minimum_post_failure_headroom_percent": 30,
+  "maximum_core_failover_seconds": 300,
+  "maximum_noncritical_failover_seconds": 900,
+  "required_replicated_workloads": [
+    "account-service",
+    "billing-service",
+    "token-gateway",
+    "token-portal",
+    "account-event-relay",
+    "billing-event-relay",
+    "token-event-relay",
+    "keycloak",
+    "new-api"
+  ],
+  "required_dependency_failovers": ["postgresql", "redis", "nats", "keycloak", "new-api"],
+  "required_scenarios": ["pod_loss", "node_loss", "zone_loss", "rolling_upgrade", "dependency_primary_loss"]
+}

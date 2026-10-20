@@ -24,7 +24,15 @@ import (
 )
 
 type Config struct {
+	SystemProbeCAFile                   string
+	SystemProbes                        []SystemProbe
 	TokenAdminProxyHMACKey              []byte
+	AdminModelTokenIAEnabled            bool
+	AdminTokenResourceFormsEnabled      bool
+	AdminModelOperationsDetailsEnabled  bool
+	AdminModelDetailsEnabled            bool
+	AdminModelPricingEditEnabled        bool
+	AdminModelTokenActionsEnabled       bool
 	AdminModelOperationsOverviewEnabled bool
 	AdminModelTokenPageOverviewsEnabled bool
 	AdminTokenDetailsEnabled            bool
@@ -48,6 +56,7 @@ type Config struct {
 	TrustedProxyIPs                     []netip.Addr
 }
 type Service struct {
+	probeClient     *http.Client
 	config          Config
 	store           Store
 	client          *http.Client
@@ -135,9 +144,16 @@ func NewService(config Config, store Store) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
+	probeClient := client
+	if strings.TrimSpace(config.SystemProbeCAFile) != "" {
+		probeClient, err = newPortalHTTPClient(config.SystemProbeCAFile)
+		if err != nil {
+			return nil, err
+		}
+	}
 	keyContext := oidc.ClientContext(context.Background(), client)
 	verifier := oidc.NewVerifier(strings.TrimRight(config.IssuerURL.String(), "/"), oidc.NewRemoteKeySet(keyContext, config.JWKSURL.String()), &oidc.Config{ClientID: config.ClientID})
-	return &Service{config: config, store: store, client: client, verifier: verifier, trustedProxyIPs: trustedProxies, now: func() time.Time { return time.Now().UTC() }}, nil
+	return &Service{config: config, store: store, client: client, probeClient: probeClient, verifier: verifier, trustedProxyIPs: trustedProxies, now: func() time.Time { return time.Now().UTC() }}, nil
 }
 func (s *Service) Handler(static http.Handler) http.Handler {
 	router := httpserver.NewRouter()
@@ -145,6 +161,7 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 	router.GET("/auth/callback", httpserver.AdaptFunc(s.callback))
 	router.POST("/portal-session-handoff", httpserver.AdaptFunc(s.createSessionHandoff))
 	router.POST("/portal-session-handoff/consume", httpserver.AdaptFunc(s.consumeSessionHandoff))
+	router.GET("/api/admin/system/status", httpserver.AdaptFunc(s.adminSystemStatus))
 	router.GET("/health/session-lineage", httpserver.AdaptFunc(s.sessionLineageStatus))
 	router.GET("/portal-session-handoff", httpserver.AdaptFunc(func(w http.ResponseWriter, r *http.Request) {
 		if static == nil {
@@ -374,7 +391,7 @@ func (s *Service) sessionStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setSessionCookies(w, session)
-	api.WriteJSON(w, http.StatusOK, map[string]any{"authenticated": true, "csrf_token": session.CSRFToken, "credential_origin": credentialOriginProjection(s.config), "feature_flags": map[string]bool{"admin_model_operations_overview": s.config.AdminModelOperationsOverviewEnabled, "admin_model_token_page_overviews": s.config.AdminModelTokenPageOverviewsEnabled}})
+	api.WriteJSON(w, http.StatusOK, map[string]any{"authenticated": true, "csrf_token": session.CSRFToken, "credential_origin": credentialOriginProjection(s.config), "feature_flags": map[string]bool{"admin_model_token_ia": s.config.AdminModelTokenIAEnabled, "admin_token_resource_forms": s.config.AdminTokenResourceFormsEnabled, "admin_model_operations_details": s.config.AdminModelOperationsDetailsEnabled, "admin_model_details": s.config.AdminModelDetailsEnabled, "admin_model_pricing_edit": s.config.AdminModelPricingEditEnabled, "admin_model_token_actions": s.config.AdminModelTokenActionsEnabled, "admin_model_operations_overview": s.config.AdminModelOperationsOverviewEnabled, "admin_model_token_page_overviews": s.config.AdminModelTokenPageOverviewsEnabled, "admin_token_details": s.config.AdminTokenDetailsEnabled}})
 }
 func (s *Service) sessionLineageStatus(w http.ResponseWriter, r *http.Request) {
 	api.WriteJSON(w, http.StatusOK, map[string]any{"schema_version": 1, "capable": true, "enabled": true})

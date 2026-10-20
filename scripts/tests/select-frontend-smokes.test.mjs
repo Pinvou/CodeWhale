@@ -25,6 +25,12 @@ test("the archive smoke is an executable Knip entry, not an ignored file", () =>
   assert.ok(!knip.ignore.includes("tests/remote_archive_smoke.mjs"));
 });
 
+test("system status participates in full and feature-local Account Platform browser validation", () => {
+  const status = "npm:test:account-platform-system-status-ui";
+  assert.ok(fullLabels.includes(status));
+  assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/features/account-platform/AdminSystemStatusWorkspace.jsx"])).includes(status));
+});
+
 const fullSuiteCases = [
   [
     "shared frontend paths fail closed to the full browser suite",
