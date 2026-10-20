@@ -76,6 +76,25 @@ function nativeNATSFixture(operator = false) {
 }
 const nativeSeed = (config, name = 'billing-service') => config.services[name].volumes.find(volume => volume.target === '/var/run/secrets/pinvou/nats');
 
+test('workload and native NATS binds accept normalized false omission and reject unsafe types', () => {
+  for (const native of [false, true]) {
+    const make = () => native ? nativeNATSFixture(true) : composeFixture();
+    const normalized = make();
+    for (const service of Object.values(normalized.services)) {
+      for (const volume of service.volumes || []) delete volume.bind.create_host_path;
+    }
+    assert.equal(checkGovernedComposeConfiguration(normalized).deployment_status, 'NOT_DEPLOYED');
+    for (const options of [undefined, null, [], Object.create(null), { create_host_path: true },
+      { create_host_path: 'false' }, { create_host_path: null }, { create_host_path: 0 }, { create_host_path: undefined }]) {
+      const config = make();
+      const volume = native ? nativeSeed(config) : config.services['token-credential-portal'].volumes[0];
+      volume.bind = options;
+      assert.throws(() => checkGovernedComposeConfiguration(config),
+        native ? /model_token_deployment_nats_mount_unsafe/ : /model_token_deployment_workload_identity_missing/);
+    }
+  }
+});
+
 test('native NKey Compose uses only five real broker clients and optional explicit resource tool', () => {
   for (const operator of [false, true]) {
     const config = nativeNATSFixture(operator);

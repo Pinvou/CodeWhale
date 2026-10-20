@@ -63,12 +63,42 @@ use an all-address CIDR, or assume an HTTPS URL grants connectivity. If the site
 cannot represent its destinations within its approved configuration, stop the
 rollout for network review. Rendering is not a CNI or provider connectivity test.
 
+When `newApi.enabled=true` (the default), rendering also requires the New API TLS
+Secret name, public CA ConfigMap name, and approved TLS image reference. Supply
+`newApi.tlsSecretName`, `newApi.caConfigMap`, `images.newApiTLS.repository`, and
+`images.newApiTLS.digest` explicitly. The ingress TLS Secret and native KMS CA
+are different resources and do not satisfy these inputs. Build/review the
+`newapi-tls` image and provision Ready resources as described in
+[the New API TLS contract](README.newapi-status.md); use its actual immutable
+SHA-256 digest, never the all-zero test fixture digest. Rendering cannot establish
+that those resources or the image exist.
+
+With reviewed operator inputs in the shell environment, validate the production
+values and **actually render** them (do not print or supply private keys):
+
 ```sh
+: "${NEWAPI_TLS_SECRET_NAME:?set the Ready TLS Secret name}"
+: "${NEWAPI_CA_CONFIGMAP_NAME:?set the Ready public CA ConfigMap name}"
+: "${NEWAPI_TLS_IMAGE_REPOSITORY:?set the approved image repository}"
+: "${NEWAPI_TLS_IMAGE_DIGEST:?set the approved sha256 image digest}"
 helm lint account-platform/deploy/helm/account-platform \
-  -f account-platform/deploy/helm/account-platform/values-production-new.yaml
+  -f account-platform/deploy/helm/account-platform/values-production-new.yaml \
+  --set-string newApi.tlsSecretName="$NEWAPI_TLS_SECRET_NAME" \
+  --set-string newApi.caConfigMap="$NEWAPI_CA_CONFIGMAP_NAME" \
+  --set-string images.newApiTLS.repository="$NEWAPI_TLS_IMAGE_REPOSITORY" \
+  --set-string images.newApiTLS.digest="$NEWAPI_TLS_IMAGE_DIGEST"
 helm template pinvou account-platform/deploy/helm/account-platform \
-  -f account-platform/deploy/helm/account-platform/values-production-new.yaml > rendered.yaml
+  -f account-platform/deploy/helm/account-platform/values-production-new.yaml \
+  --set-string newApi.tlsSecretName="$NEWAPI_TLS_SECRET_NAME" \
+  --set-string newApi.caConfigMap="$NEWAPI_CA_CONFIGMAP_NAME" \
+  --set-string images.newApiTLS.repository="$NEWAPI_TLS_IMAGE_REPOSITORY" \
+  --set-string images.newApiTLS.digest="$NEWAPI_TLS_IMAGE_DIGEST" > rendered.yaml
 ```
+
+The base, staging and production values intentionally omit these environment-owned
+inputs and fail closed until supplied. `helm lint` alone is insufficient: it can
+report a template `required`/`fail` diagnostic as INFO and still exit zero.
+Require `helm template` to succeed and inspect its manifest before proceeding.
 
 Migration hooks run before ordinary chart resources. Before the first install,
 the deployment operator must provision the Secret named by `global.runtimeSecret`
@@ -202,15 +232,36 @@ model-token-release.md section 6 and separate environment authorization, never
 Helm install/upgrade hooks. Keep the digest-matched old control artifact for SAFE.
 
 `values-model-token-test.yaml` is an intentionally non-deployable public rendering
-fixture. Render it with the default chart, then run
+fixture. It includes nonexistent New API TLS resource names, an invalid registry
+and an all-zero image digest solely to exercise the actual templates. From the
+repository root, render the remote provider fixture with:
+
+```sh
+helm template fixture account-platform/deploy/helm/account-platform \
+  -f account-platform/deploy/helm/account-platform/values-model-token-test.yaml > fixture-rendered.yaml
+```
+
+For the native KMS fixture append
+`-f account-platform/deploy/helm/account-platform/values-kms-native-test.yaml`
+before the output redirect. Then run
 `node scripts/account-platform-model-token-deployment-check.mjs --helm-render <output>`
 from the repository root. The checker validates every selecting NetworkPolicy's
 permits (including the control Job), not policy names alone; unbounded peers,
 ports, all-address CIDRs and out-of-scope component/port pairs are rejected.
 CIDR ownership and endpoint identity still require actual environment evidence.
+To run both real rendering positive controls and the missing-input negative
+controls with an installed Helm binary, use
+`PINVOU_TEST_KMS_HELM=1 node --test account-platform/test/contract/kms-helm.test.mjs`.
+Set `PINVOU_TEST_KMS_HELM_BINARY` to a reviewed local binary when it is not on PATH.
+Without opt-in, the real rendering case is skipped, not passed. These commands
+never install a release, issue certificates, or prove runtime readiness.
 The checker validates structure, isolation and shared
 event-cluster wiring, and always retains ENV_PENDING/NOT_DEPLOYED. For production
 rendering use the matching production origin pair and explicit provider/Secret
 references; do not weaken production image, HA or identity validation.
 
-G6 CI preserves all existing gates and validates the four Helm profiles with real lint/render plus the semantic checker. Local isolated rendering is not proof of a successful remote Actions run or production rollout; see [release validation and environment boundaries](../../runbooks/model-token-release.md#9-g6-持续门禁与环境交接).
+The real Helm/Compose cases are opt-in and are not currently enabled by the
+repository workflows. Default contract success therefore does not prove either
+renderer ran. Record the exact command, input and result for an explicit run;
+local isolated rendering is not proof of a successful remote Actions run or
+production rollout. See [release validation and environment boundaries](../../runbooks/model-token-release.md#9-g6-持续门禁与环境交接).

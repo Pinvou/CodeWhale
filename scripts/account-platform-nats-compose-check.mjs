@@ -1,5 +1,6 @@
 // Pure checks of normalized Compose configuration. No file, credential or network access.
 import path from 'node:path';
+import { isReadOnlyDirectoryBind } from './account-platform-compose-bind.mjs';
 
 const consumers = ['billing-service', 'account-event-relay', 'billing-event-relay', 'token-event-relay', 'token-command-executor'];
 const legacyConsumers = ['account-service', 'token-gateway', ...consumers];
@@ -28,7 +29,7 @@ function binding(service, target) {
   const matches = (service.volumes || []).filter(item => item.target === target);
   check(matches.length === 1, 'mount_missing');
   const item = matches[0];
-  check(item.type === 'bind' && item.read_only === true && item.bind?.create_host_path === false, 'mount_unsafe');
+  check(isReadOnlyDirectoryBind(item), 'mount_unsafe');
   return directory(item.source);
 }
 

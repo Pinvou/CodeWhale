@@ -491,3 +491,9 @@ adminPlatformCopy.ja.runbooks = {
   "serviceIdentitiesHelp": "非機密の境界と監査事実だけを表示し、認証情報、Token、再利用可能な検証情報は表示しません。",
   "noExecution": "このページに実行操作はありません。承認済みの管理端末から正式ランブックに従ってください。"
 };
+
+// HTTP permission failures reuse the existing localized access-denied message.
+for (const language of ['zh', 'en', 'ja']) {
+  const copy = adminPlatformCopy[language];
+  copy.errors.PERMISSION_DENIED = copy.permissionDenied;
+}

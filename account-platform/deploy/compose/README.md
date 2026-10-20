@@ -19,7 +19,21 @@ GSA-07 专用审批授权 Relay 的独立凭据、专项就绪与迁移顺序见
 
 `compose.model-token.yaml` 是受控发布 overlay，不由开发 `dev up` 自动加载。新 credential/executor 仅在 `model-token` profile 中；`token-governance-check` 独立 `governance-operations` profile、默认空参数只检查、无自动 apply。[发布说明](../runbooks/model-token-release.md) 已交付离线计划/配置校验与 G3 显式运维程序；版本/角色/迁移须按其第6节受控步骤和独立现场授权执行，不得直接创建实例；不能直接拿开发基线与新 overlay 启动来冒充 CLOUD_UAT。继承的开发 Keycloak/NATS、支付模拟器、迁移自动启动规则与站点覆盖仍须现场逐项审查，工具已交付不等于具备现场切换证据，不得未经审批用该 overlay 执行正式切换。
 
-公开解析检查（**只 config，不 up/build/run**）：在本目录执行 `docker compose --env-file .env.example --env-file model-token.env.example -f compose.yaml -f compose.model-token.yaml --profile model-token --profile governance-operations --profile real-newapi config --format json`。`model-token.env.example` 只有不可用占位值；正式 URL/令牌目录/数据库凭据不得写回此文件。把解析输出放受控临时文件，运行根目录 `node scripts/account-platform-model-token-deployment-check.mjs --compose-render <文件>`，只得到 DEPLOYMENT_CONFIG_VALID/ENV_PENDING，不代表网络/权限实测。
+公开解析检查（**只 config，不 up/build/run**）：在本目录执行：
+
+```sh
+docker compose --env-file .env.example --env-file model-token.env.example \
+  --env-file ../../test/fixtures/compose-render.env \
+  -f compose.yaml -f compose.model-token.yaml \
+  --profile model-token --profile governance-operations --profile real-newapi \
+  config --format json > fixture-compose.json
+```
+
+三个 env 文件均为公开夹具输入。`.env.example` 的必填值刻意留空，单独与 `model-token.env.example` 组合仍会失败关闭；`compose-render.env` 仅补齐明显不可用的解析标记，编码密钥也刻意无效，不能用来启动服务。原生 KMS 解析在上述三个 env 文件之后追加 `--env-file kms-native.env.example`，在两个 `-f` 文件之后追加 `-f compose.kms-native.yaml`。不要加载站点 `.env` 或让同名站点环境变量覆盖这些夹具；Windows 本地 Compose 使用 `COMPOSE_CONVERT_WINDOWS_PATHS=1` 输出供 Linux 部署 checker 核验的挂载路径。把输出留在受控临时目录，运行仓库根目录的 `node scripts/account-platform-model-token-deployment-check.mjs --compose-render <文件>`，只得到 DEPLOYMENT_CONFIG_VALID/ENV_PENDING，不代表网络、凭据或权限实测。正式 URL、令牌目录、数据库凭据及独立可信摘要不得写回任何公开夹具。
+
+`NATS_PUBLIC_AUTHORIZATION_DIRECTORY` 指向独立的只读公开授权制品目录，不能与 `NATS_CREDENTIAL_DIRECTORY` 的秘密身份目录共用；`APPROVAL_RELAY_NATS_CURRENT_PUBLIC_KEYS_SHA256` 必须来自独立可信渠道，绑定 current-v2 制品，而不是对任意本地文件自算后当作信任依据。`model-token.env.example` 中的不存在目录和全零摘要仅让 config 解析完整，不提供授权就绪证据；正式配置与投递要求见[审批授权 Relay 手册](../runbooks/approval-authorization-relay.md)。
+
+从仓库根执行 `PINVOU_TEST_KMS_COMPOSE=1 node --test account-platform/test/contract/kms-compose.test.mjs` 可真实解析 remote/native 两种组合，并验证缺必填值仍被拒绝；仅运行 config，不需要 Docker daemon，也不启动容器。默认使用 `docker compose`；可用 `PINVOU_TEST_KMS_COMPOSE_BINARY` 指定已审核的独立 Compose 二进制。测试主动隔离站点环境变量；未显式启用时该用例是跳过，不算真实解析通过。
 
 外部可信签发器必须为每个 `pinvou:service:<service>` 主体提供独立、短期、可轮换的 `token` 文件；每服务只挂自己的目录且禁止 Docker 自动创建不存在的目录。Account/Identity/Billing/Token 接收端使用 overlay 的精确 rules，Keycloak 使用既有 `PINVOU_WORKLOAD_IDENTITY_TOKEN_FILE`；清空共享开发静态 Token，不自建或伪造签发器。三服务、三个 Relay 和 Token executor 共用唯一 `MODEL_TOKEN_NATS_URL`，各服务从 `NATS_CREDENTIAL_DIRECTORY/<service>/client.creds` 取最小 NATS 凭据；现场必须证明同一集群/JetStream 历史与 ACL/轮换，不能仅启动一个新总线替代旧审批事件。
 

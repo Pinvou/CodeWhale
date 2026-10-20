@@ -1,5 +1,6 @@
 // Pure structural checks of normalized Linux Compose output; never reads secrets or connects.
 import path from 'node:path';
+import { isReadOnlyDirectoryBind } from './account-platform-compose-bind.mjs';
 
 const consumers = ['token-gateway', 'token-credential-portal'];
 const tokenTarget = '/var/run/secrets/pinvou/kms';
@@ -53,7 +54,7 @@ export function checkComposeKMS(config) {
       const matches = (service.volumes || []).filter(volume => volume.target === target);
       check(matches.length === 1, 'mount_missing');
       const volume = matches[0];
-      check(volume.type === 'bind' && volume.read_only === true && volume.bind?.create_host_path === false, 'mount_unsafe');
+      check(isReadOnlyDirectoryBind(volume), 'mount_unsafe');
       return canonicalDirectory(volume.source);
     });
   });

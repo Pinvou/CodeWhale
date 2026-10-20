@@ -8,6 +8,7 @@ import { parseReleaseJSON } from './account-platform-model-token-release-plan.mj
 import { checkComposeKMS } from './account-platform-kms-compose-check.mjs';
 import { checkHelmKMS } from './account-platform-kms-helm-check.mjs';
 import { checkComposeNATS } from './account-platform-nats-compose-check.mjs';
+import { isReadOnlyDirectoryBind } from './account-platform-compose-bind.mjs';
 const require = createRequire(new URL('../account-platform/package.json', import.meta.url));
 const YAML = require('yaml');
 const success = () => ({ decision: 'DEPLOYMENT_CONFIG_VALID', environment_status: 'ENV_PENDING', deployment_status: 'NOT_DEPLOYED' });
@@ -231,7 +232,7 @@ export function checkGovernedComposeConfiguration(config) {
     check(service.read_only === true && service.healthcheck?.test?.includes('/healthcheck'), 'readiness_invalid');
     check(!(Object.keys(service.networks || {})).includes('backend'), 'network_union_widened');
     check((service.volumes || []).some(volume => volume.target === '/var/run/secrets/pinvou/workload'
-      && volume.read_only === true && volume.bind?.create_host_path === false), 'workload_identity_missing');
+      && isReadOnlyDirectoryBind(volume)), 'workload_identity_missing');
   }
   return success();
 }

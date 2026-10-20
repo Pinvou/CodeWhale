@@ -22,7 +22,7 @@
 
 部署前用真实 Compose `config --format json` 的合并输出执行 `account-platform-model-token-deployment-check.mjs --compose-render <受控文件>`。输出可能包含其他业务秘密，必须限制文件权限，禁止写入日志/提交或打印完整输出。仅允许固定成功/失败状态。静态 PASS 不证明宿主路径/UID、真实角色权限、网络隔离或 TLS；另行核验实际外部网络为 internal、两 sink 的所有权/有效短期身份、CA 链、挂载只读及不包含引导材料。门禁未齐不得启动业务。
 
-`kms-native.env.example` 仅为解析 fixture，不能用于部署。CI 通过 `PINVOU_TEST_KMS_COMPOSE=1 node --test account-platform/test/contract/kms-compose.test.mjs` 实际解析 remote/native 两条路径；该测试不创建网络/容器、不开启 KMS、不读取真实身份，也不构成现场运行验收。Helm 原生接线与 fresh-install 安全门禁仍独立验收，不能拿 Compose 配置通过替代。
+`kms-native.env.example` 仅为解析 fixture，不能用于部署。从仓库根显式运行 `PINVOU_TEST_KMS_COMPOSE=1 node --test account-platform/test/contract/kms-compose.test.mjs` 才会实际解析 remote/native 两条路径；当前工作流未启用此开关，默认跳过不能当作真实解析通过。测试使用独立公开 `test/fixtures/compose-render.env`，隔离站点变量，不创建网络/容器、不开启 KMS、不读取真实身份，也不构成现场运行验收。Helm 原生接线与 fresh-install 安全门禁仍独立验收，不能拿 Compose 配置通过替代。
 
 ### 原生 KMS 的 Helm 配置（SECINF-04B2）
 
@@ -32,7 +32,7 @@ Chart 为每个网关/凭据 Pod 增加固定镜像摘要的 Agent，只挂载�
 
 Agent 首次登录前业务可能启动失败并重启，readiness 必须等待真实应用就绪；不能用空 token 或降低校验来抢先启动。Pod UID/GID/fsGroup 固定 65532，Agent sink 0600、目录挂载不使用 subPath。集群需落实 Secret/etcd 加密、最小 RBAC、节点转储/swap 控制、实际 CNI 执行、Agent 续租及 bootstrap 轮换。当前仅交付 chart 和实际渲染验证，不新建集群，不把该步骤当作 Kubernetes 现场上线证明。
 
-`values-kms-native-test.yaml` 是叠加在 `values-model-token-test.yaml` 后的公开 fixture；CI 使用实际 Helm 进行 lint/template，并对合并资源运行部署校验与负例测试。发布前仍需原生/fresh-install 安全门禁和现场证据。
+`values-kms-native-test.yaml` 是叠加在 `values-model-token-test.yaml` 后的公开 fixture。显式运行 `PINVOU_TEST_KMS_HELM=1 node --test account-platform/test/contract/kms-helm.test.mjs` 使用实际 Helm 进行 lint/template，并对合并资源运行部署校验与负例测试；当前工作流未启用此开关。公开 fixture 中不存在的 TLS/CA 名和全零镜像摘要只满足渲染输入，不能用于部署。发布前仍需原生/fresh-install 安全门禁和现场证据。
 
 `node scripts/account-platform-model-token-release-plan.mjs --plan <本地JSON文件>`
 
@@ -64,7 +64,7 @@ G0～G5 已按依赖独立验证/签署，G6 代码与隔离门禁已验证，�
 
 G1 已独立提交 `33209285`。本组使用现有 Go Dockerfile的 SERVICE 参数构建 credential portal、executor 与 token-governance，不增加业务服务职责：gateway 内仍唯一拥有两个 worker。Compose overlay/profile 需显式加载；Helm 三新组件默认 false，governance Job suspend=true、无 hook/自动 apply/重试。runtime 与运维 Secret 分离，executor 不获得数据库/KMS，Token Relay 与 gateway 同代 writer 共同停止/fence/恢复，不能沿用已退休登录。实际角色准备与受控启用程序见第6节，但不得据模板直接切换，现场操作仍须明确批准与独占窗口。
 
-公开配置仅用于解析。Compose 在 deploy/compose 目录运行 `docker compose --env-file .env.example --env-file model-token.env.example -f compose.yaml -f compose.model-token.yaml --profile model-token --profile governance-operations --profile real-newapi config --format json`，输出保存到本次受控临时文件，再从仓库根运行 `node scripts/account-platform-model-token-deployment-check.mjs --compose-render <文件>`；不能读现场 .env 或用这些不可用占位值 up/run。Helm 对已有默认、staging、production-new 与新增 `values-model-token-test.yaml` lint，渲染 fixture 后用同一 checker 的 `--helm-render <文件>`。真实 Docker/Helm 解析不是静态字符串替代，结构合法仍输出 DEPLOYMENT_CONFIG_VALID/ENV_PENDING/NOT_DEPLOYED。
+公开配置仅用于解析。Compose 在 deploy/compose 目录运行 `docker compose --env-file .env.example --env-file model-token.env.example --env-file ../../test/fixtures/compose-render.env -f compose.yaml -f compose.model-token.yaml --profile model-token --profile governance-operations --profile real-newapi config --format json`，输出保存到本次受控临时文件，再从仓库根运行 `node scripts/account-platform-model-token-deployment-check.mjs --compose-render <文件>`；不能读现场 .env、继承同名站点变量或用这些不可用占位值 up/run。原生 KMS 的叠加顺序和 Windows 路径选项见 [Compose 说明](../compose/README.md)。Helm 必须实际渲染公开 fixture，再用同一 checker 的 `--helm-render <文件>`；base/staging/production-new 在没有操作员 New API TLS/CA/镜像输入时仍应失败关闭，不能拿 `helm lint` 的 exit 0 代替成功渲染。真实 Docker/Helm 解析不是静态字符串替代，结构合法仍输出 DEPLOYMENT_CONFIG_VALID/ENV_PENDING/NOT_DEPLOYED。
 
 十五 gate 环境值透传到既有所属服务，不改变领域逻辑；两个页面概览 gate 默认关闭并遵循 Token 后 Portal 的启用顺序、Portal 后 Token 的回滚顺序。正式配对为 account.pinvou.com / credentials.pinvou.com，公开 UAT fixture 配对为 account-uat.pinvou.com / credentials-uat.pinvou.com。credential OIDC issuer 与 authorization/token/JWKS 必须精确同 origin HTTPS、无任何显式端口，不采用普通 Portal 内网 HTTP JWKS路径。外部可信短期 workload token-file/投射身份和各服务独立 NATS creds 必须就绪；不得继续共享开发静态 Token，也不在本任务临时造签发器。
 

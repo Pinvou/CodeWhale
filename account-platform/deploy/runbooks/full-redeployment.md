@@ -135,25 +135,23 @@ sha256sum -c <recovery-set>/nats/SHA256SUMS
 2. 核对目标 Commit 和源制品摘要。
 3. 从 Secret 管理系统恢复 `/etc/pinvou-account-platform/account-platform.env`，从私有配置备份恢复 `compose.site.yaml`。
 4. 将运行副本安装到版本目录，或在所有部署命令中直接引用 `/etc` 下的受控文件；不得让发布目录成为唯一 Secret 来源。
-5. 使用全部 Compose 文件渲染并检查：
+5. 从恢复包的 `deployment/deployment-manifest.json` 取得原部署的项目名、工作目录、全部 `--env-file`、按原顺序排列的 `-f` 文件和启用的 profiles，逐项核对摘要后形成受审计的命令清单。下文 `<compose>` 只代表这份清单中的完整参数，不预设文件组合：
 
 ```sh
 export RELEASE_DIR=/opt/pinvou-account-platform-<commit>-<timestamp>
 export SECRET_ENV=/etc/pinvou-account-platform/account-platform.env
-export SITE_OVERRIDE=/etc/pinvou-account-platform/compose.site.yaml
-
-cd "$RELEASE_DIR/account-platform/deploy/compose"
-docker compose --env-file "$SECRET_ENV" \
-  -f compose.yaml -f compose.remote.yaml -f "$SITE_OVERRIDE" config --quiet
-docker compose --env-file "$SECRET_ENV" \
-  -f compose.yaml -f compose.remote.yaml -f "$SITE_OVERRIDE" config --services
+# 将 <compose> 替换为已核验的站点命令清单参数；它不是可直接执行的 Shell 参数。
+docker compose <compose> config --quiet
+docker compose <compose> config --services
 ```
+
+`deploy/compose/compose.yaml` / `compose.remote.yaml` 是开发与远程演练载体，不是生产恢复的默认组合。生产依赖与 NATS 分别见 [`../production/compose.dependencies.yaml`](../production/compose.dependencies.yaml) 和 [`../production/compose.nats.yaml`](../production/compose.nats.yaml)，它们是独立载体，不得与开发 Compose 自动叠加；生产应用也须使用恢复清单中固定的站点编排和 Secret 引用。原来分开部署的工作负载须分别渲染、启动和验收，不能为套用本 Runbook 临时合成一个项目。清单缺失、文件摘要不符或无法确定原拓扑时保持 NO-GO，先由恢复负责人复核，不用开发拓扑替代。
 
 渲染结果中不得出现未替换占位符、Mock/Simulator 生产工作负载、意外公网端口、空必填 Secret、错误 Provider、`APP_ENV=development/test` 或未记录的站点覆盖。UAT 环境必须显式记录其测试开关，不能与正式环境混淆。
 
 ## 6. 基础设施和状态恢复顺序
 
-以下命令中的 `<compose>` 表示同一组 `--env-file` 与 `-f` 参数。`--clean` 恢复会覆盖目标库，只允许在已确认的全新隔离 PostgreSQL 实例执行。
+以下命令中的 `<compose>` 表示上节已核验命令清单中对应工作负载的参数，服务名也须与该载体一致；没有对应服务时按站点恢复程序执行，不得切换到开发拓扑或新建替代服务。`--clean` 恢复会覆盖目标库，只允许在已确认的全新隔离 PostgreSQL 实例执行。
 
 ### 6.1 PostgreSQL 与四库
 

@@ -27,15 +27,19 @@ test('identity cleanup is lifecycle-versioned, irreversible, and releases identi
   assert.match(worker, /DeleteUser/);
   assert.match(worker, /IsolateGrants/);
   assert.match(commerce, /subject_lifecycle_version/);
+  const lifecyclePredicate = commerce.match(/func commerceCallbackLifecycleConflict\(subjectType string, expected, actual int64, status string\) bool \{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(lifecyclePredicate, 'the shared callback lifecycle fence is installed');
+  assert.match(lifecyclePredicate, /subjectType == "USER" && actual != expected/);
+  assert.match(lifecyclePredicate, /status == "DELETED"/);
+  assert.match(lifecyclePredicate, /status == "ANONYMIZED"/);
   for (const callback of ['CompleteCommerceCustomerSyncJob', 'RetryCommerceCustomerSyncJob']) {
     const body = commerce.match(new RegExp(`func \\(r \\*PostgresRepository\\) ${callback}\\([^\\n]*\\) error \\{([\\s\\S]*?)\\n\\}`))?.[1];
     assert.ok(body, `${callback} is installed`);
     const subjectLock = body.indexOf('lockCommerceSubjectTx');
-    const generationFence = body.indexOf('lifecycle != job.SubjectLifecycleVersion');
+    const generationFence = body.indexOf('commerceCallbackLifecycleConflict(');
     const mappingWrite = body.indexOf('UPDATE commerce_customer_mappings');
     assert.ok(subjectLock >= 0 && generationFence > subjectLock && mappingWrite > generationFence, `${callback} checks the locked subject generation before a mapping write`);
-    assert.match(body, /(?:userStatus|status) == "DELETED"/);
-    assert.match(body, /(?:userStatus|status) == "ANONYMIZED"/);
+    assert.match(body, /if commerceCallbackLifecycleConflict\(job\.SubjectType, job\.SubjectLifecycleVersion, lifecycle, (?:userStatus|status)\) \{\s*return ErrConflict\s*\}/);
   }
 });
 

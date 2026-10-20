@@ -95,6 +95,20 @@ test('real Helm native and remote rendering preserve isolation and reject invali
     }
     assert.ok(consumer('token-command-executor').spec.template.spec.containers.every(v => v.name !== 'kms-agent'));
   }
+  // A successful lint alone does not prove a template can render: Helm lint can
+  // downgrade required/fail diagnostics. Keep actual template negative controls.
+  for (const native of [false, true]) {
+    for (const [override, diagnostic] of [
+      ['newApi.tlsSecretName=', /newApi\.tlsSecretName/],
+      ['newApi.caConfigMap=', /newApi\.caConfigMap/],
+      ['images.newApiTLS.repository=', /images\.newApiTLS\.repository/],
+      ['images.newApiTLS.digest=', /images\.newApiTLS\.digest/],
+    ]) {
+      const result = run('template', native, [override]);
+      assert.notEqual(result.status, 0, override);
+      assert.match(result.stderr, diagnostic, override);
+    }
+  }
   for (const override of ['nativeKms.credentialBootstrapSecret=fixture-kms-gateway-approle',
     'nativeKms.gatewayBootstrapSecret=fixture-token-gateway-release', 'nativeKms.endpoint=http://kms',
     'nativeKms.endpoint=https://kms:8443', 'nativeKms.endpoint=https://kms:443', 'nativeKms.credentialBootstrapSecret=',

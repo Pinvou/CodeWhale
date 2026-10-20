@@ -1,4 +1,13 @@
 # Public rendering fixture only; not an approved deployable environment.
+# These nonexistent TLS resources and all-zero digest satisfy rendering only.
+# They do not provision certificates, an image, or any runtime credentials.
+newApi:
+  tlsSecretName: fixture-newapi-tls-not-provisioned
+  caConfigMap: fixture-newapi-ca-not-provisioned
+images:
+  newApiTLS:
+    repository: registry.example.invalid/fixture-newapi-tls
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
 public:
   portalUrl: https://account-uat.pinvou.com
 nats:

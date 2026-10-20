@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
 import { formatSystemCount, parseSystemStatusJSON, requireSystemStatus, systemDiagnosticMessage } from '../src/features/account-platform/admin-system-status.js';
 import { adminPlatformCopy } from '../src/shared/i18n.js';
+import { localizedAccountPlatformError } from '../src/features/account-platform/error-localization.js';
 
 test('actual client uses same-origin readonly status route, preserves raw int64 and float age', async () => {
   const original = globalThis.fetch;
@@ -28,6 +29,20 @@ for (const status of [401, 403, 503]) test(`actual client rejects HTTP ${status}
   globalThis.fetch = async () => new Response('{"code":"PERMISSION_DENIED"}', { status });
   try { await assert.rejects(new AdminPlatformClient().systemStatus(), error => error.status === status); }
   finally { globalThis.fetch = original; }
+});
+
+test('a revoked admin permission reports access denial in each supported language', async t => {
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  globalThis.fetch = async () => new Response('{"code":"PERMISSION_DENIED"}', { status: 403 });
+  await assert.rejects(new AdminPlatformClient().systemStatus(), error => {
+    for (const language of ['zh', 'en', 'ja']) {
+      const copy = adminPlatformCopy[language];
+      assert.equal(localizedAccountPlatformError(copy, error), copy.permissionDenied);
+      assert.notEqual(copy.permissionDenied, copy.requestFailed);
+    }
+    return true;
+  });
 });
 test('missing counts stay unavailable rather than displayed as healthy zero', () => {
   for (const value of [null, undefined, true, {}, '', '1.5', -1, 9007199254740992, '9223372036854775808']) assert.equal(formatSystemCount(value, 'en'), '—');
