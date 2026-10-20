@@ -137,6 +137,48 @@ fn test_telemetry(runtime: RuntimeConfig, state: PersistedState) -> BehaviorTele
     }
 }
 
+#[test]
+fn client_privacy_allowlist_keeps_diagnostic_delegation_bounded() {
+    let schema: Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/schemas/behavior-telemetry-v1.schema.json"
+    )))
+    .unwrap();
+    for field in schema["x-client-optional-fields"].as_array().unwrap() {
+        let field = field.as_str().unwrap();
+        assert!(client_event_field_allowed(field), "{field}");
+        assert_eq!(
+            diagnostics::known_field(field),
+            field.starts_with("diagnostic_")
+        );
+    }
+    for field in schema["x-server-injected-fields"].as_array().unwrap() {
+        assert!(!client_event_field_allowed(field.as_str().unwrap()));
+    }
+    for field in [
+        "message",
+        "content",
+        "file_path",
+        "raw_error",
+        "diagnostic_raw_error",
+    ] {
+        assert!(!client_event_field_allowed(field), "{field}");
+        assert!(
+            validate_client_event_fields(
+                &BehaviorEvent::new("task_finished").string(field, "private fixture")
+            )
+            .is_err()
+        );
+    }
+    // Known field names alone do not authorize orphaned or untyped evidence.
+    assert!(
+        validate_client_event_fields(
+            &BehaviorEvent::new("task_finished").string("diagnostic_steps", "private fixture")
+        )
+        .is_err()
+    );
+}
+
 fn diagnostic_failure(session: &str, turn: &str) -> BehaviorEvent {
     BehaviorEvent::new("task_finished")
         .session(session)

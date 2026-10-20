@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, cpSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -19,15 +19,8 @@ try {
   copyFileSync(src, tmp);
   copyFileSync(i18nSrc, path.join(dir, 'shared', 'i18n.js'));
   copyFileSync(connectorI18nSrc, path.join(dir, 'shared', 'connector-i18n.js'));
-  // i18n.js is split by locale with zh imported directly, so the temporary copy must include
-  // zh and its shared browser dictionary.
-  mkdirSync(path.join(dir, 'shared', 'i18n'), { recursive: true });
-  for (const f of ['zh.js', 'browser.js', 'chat-recovery.js']) {
-    copyFileSync(
-      path.join(here, '..', 'src', 'shared', 'i18n', f),
-      path.join(dir, 'shared', 'i18n', f),
-    );
-  }
+  // Preserve the locale modules' transitive imports as dictionaries evolve.
+  cpSync(path.join(here, '..', 'src', 'shared', 'i18n'), path.join(dir, 'shared', 'i18n'), { recursive: true });
   const cards = await import(`${pathToFileURL(tmp).href}?t=${Date.now()}`);
 
   const initial = cards.createPetCardUiState();

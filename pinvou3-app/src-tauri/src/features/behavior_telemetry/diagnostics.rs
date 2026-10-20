@@ -60,14 +60,17 @@ pub(super) fn validate(event: &BehaviorEvent) -> Result<()> {
         failure(event) && id.as_str() == Some(&event.event_id),
         "invalid diagnostic identity"
     );
-    static SCHEMA: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
-    let schema = SCHEMA.get_or_init(|| {
-        serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../docs/schemas/behavior-telemetry-v1.schema.json"
-        )))
-        .expect("diagnostic schema")
-    });
+    static SCHEMA: std::sync::OnceLock<std::result::Result<Value, serde_json::Error>> =
+        std::sync::OnceLock::new();
+    let schema = SCHEMA
+        .get_or_init(|| {
+            serde_json::from_str(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../docs/schemas/behavior-telemetry-v1.schema.json"
+            )))
+        })
+        .as_ref()
+        .map_err(|error| anyhow::anyhow!("parse diagnostic schema: {error}"))?;
     for required in [
         "diagnostic_trace_id",
         "diagnostic_code",
@@ -512,10 +515,11 @@ pub(super) fn enrich(
             }),
         );
     }
-    let context = state
-        .contexts
-        .get_mut(&key)
-        .expect("inserted diagnostic context");
+    let Some(context) = state.contexts.get_mut(&key) else {
+        // Enrichment is best effort; a missing observer context must not panic
+        // or interfere with the original business event.
+        return;
+    };
     if context.lease != *lease {
         return;
     }

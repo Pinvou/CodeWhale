@@ -107,10 +107,10 @@ command_protocol!(
     behavior_telemetry_protocol,
     "behavior_telemetry.rs",
     [
-        "get_behavior_telemetry_status",
         "list_failure_diagnostics",
         "preview_failure_diagnostic",
         "submit_failure_diagnostic",
+        "get_behavior_telemetry_status",
         "set_behavior_telemetry_enabled",
         "track_behavior_event",
     ]

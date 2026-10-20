@@ -5,6 +5,7 @@ import test from 'node:test';
 import { behaviorTelemetryRust } from './behavior_telemetry_source.mjs';
 
 const rust = behaviorTelemetryRust;
+const diagnosticRust = readFileSync(new URL('../src-tauri/src/features/behavior_telemetry/diagnostics.rs', import.meta.url), 'utf8');
 const usageRust = readFileSync(new URL('../src-tauri/src/platform/telemetry.rs', import.meta.url), 'utf8');
 const command = readFileSync(new URL('../src-tauri/src/app/commands/behavior_telemetry.rs', import.meta.url), 'utf8');
 const settingsBridge = readFileSync(new URL('../src/platform/tauri/bridge/settings.js', import.meta.url), 'utf8');
@@ -103,7 +104,10 @@ test('provider setup and first task environment use the v1 lifecycle events', ()
 
 test('client privacy allowlist stays aligned with schema and excludes server identity', () => {
   const allowlistBody = rust.match(/fn client_event_field_allowed[\s\S]*?fn validate_client_event_fields/)?.[0] || '';
-  const actual = Array.from(allowlistBody.matchAll(/\|?\s*"([a-z0-9_]+)"/g), match => match[1])
+  assert.match(allowlistBody, /if diagnostics::known_field\(field\)\s*\{\s*return true;/);
+  const diagnosticAllowlist = diagnosticRust.match(/fn known_field[\s\S]*?pub\(super\) fn validate/)?.[0] || '';
+  assert.notEqual(diagnosticAllowlist, '', 'the delegated diagnostic allowlist must be inspected');
+  const actual = Array.from(`${allowlistBody}\n${diagnosticAllowlist}`.matchAll(/\|?\s*"([a-z0-9_]+)"/g), match => match[1])
     .toSorted((left, right) => left.localeCompare(right));
   const expected = schema['x-client-optional-fields'].toSorted((left, right) => left.localeCompare(right));
   assert.deepEqual(actual, expected);

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, cpSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -13,14 +13,8 @@ mkdirSync(path.join(dir, 'shared'), { recursive: true });
 copyFileSync(path.join(here, '..', 'src', 'features', 'pet', 'pet-scheduled-notice.js'), tmp);
 copyFileSync(path.join(here, '..', 'src', 'shared', 'i18n.js'), path.join(dir, 'shared', 'i18n.js'));
 copyFileSync(path.join(here, '..', 'src', 'shared', 'connector-i18n.js'), path.join(dir, 'shared', 'connector-i18n.js'));
-// i18n.js 现按语言拆分（zh 内嵌），临时副本需带上 zh 词典才能解析。
-mkdirSync(path.join(dir, 'shared', 'i18n'), { recursive: true });
-for (const f of ['zh.js', 'browser.js', 'chat-recovery.js']) {
-  copyFileSync(
-    path.join(here, '..', 'src', 'shared', 'i18n', f),
-    path.join(dir, 'shared', 'i18n', f),
-  );
-}
+// Preserve the locale modules' transitive imports as dictionaries evolve.
+cpSync(path.join(here, '..', 'src', 'shared', 'i18n'), path.join(dir, 'shared', 'i18n'), { recursive: true });
 
 try {
 const {
