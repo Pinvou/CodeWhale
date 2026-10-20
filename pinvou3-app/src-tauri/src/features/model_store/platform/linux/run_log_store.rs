@@ -59,7 +59,7 @@
 //! SIGKILL）。这个模块只挂在 `RunLog::push` 之后——也就是「已经 `strip_ansi` 过、
 //! 已经切好行」的那条既有出口上，一个新的读取点都不开。
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use parking_lot::Mutex;
@@ -71,6 +71,9 @@ use super::config;
 /// 一次 168GB 的下载能打出几万行。**必须有上限**：这个目录跟用户的权重同盘，
 /// 日志把盘写满的后果是下载失败，而且是以一种完全看不懂的方式失败。
 const MAX_RUN_LOG_BYTES: u64 = 4 * 1024 * 1024;
+
+// A final UTF-8 line and truncation notice can slightly exceed the write cap.
+const MAX_EXPORT_LOG_BYTES: u64 = MAX_RUN_LOG_BYTES + (MAX_LINE_CHARS as u64 * 4) + 1024;
 
 /// 单行上限（字符）。脚本可以打出一行几 MB 的 base64。
 const MAX_LINE_CHARS: usize = 4_000;
@@ -558,24 +561,35 @@ fn prune_old_logs(dir: &Path) {
 ///
 /// 为什么不直接把落盘那份给出去：落盘那份刻意保留了路径和内网地址（不保留就没法
 /// 诊断），而导出意味着这份内容会离开这台机器。
-pub fn export_run_log(run_id: &str) -> Result<PathBuf, String> {
+pub fn export_run_log(run_id: &str) -> Result<(PathBuf, String), String> {
     let source = logs_dir().join(format!("{}.log", safe_stem(run_id)));
-    let content = std::fs::read_to_string(&source)
+    let mut content = String::new();
+    std::fs::File::open(&source)
+        .and_then(|file| {
+            file.take(MAX_EXPORT_LOG_BYTES + 1)
+                .read_to_string(&mut content)
+        })
         .map_err(|e| format!("读不到这次运行的日志（{}）：{e}", source.display()))?;
+    if content.len() as u64 > MAX_EXPORT_LOG_BYTES {
+        return Err("运行日志超过安全导出上限，未导出或复制；请在本机检查日志".into());
+    }
+    let mut snapshot = String::with_capacity(content.len());
+    for line in content.lines() {
+        snapshot.push_str(&sanitize_for_export(line));
+        snapshot.push('\n');
+    }
     let target = logs_dir().join(format!("{}.export.log", safe_stem(run_id)));
     // 导出文件同样 0600：它比原始日志更敏感（更容易被顺手发出去），不该更宽松。
     // 先清空再追加——导出是"这一刻的快照"，追加到上一次的尾巴上只会让人拿错。
     let _ = std::fs::remove_file(&target);
     let mut file = crate::platform::filesystem::open_private_append_file(&target)
         .map_err(|e| format!("创建导出文件失败：{e}"))?;
-    for line in content.lines() {
-        let cleaned = sanitize_for_export(line);
-        file.write_all(cleaned.as_bytes())
-            .and_then(|()| file.write_all(b"\n"))
-            .map_err(|e| format!("写导出文件失败：{e}"))?;
-    }
+    file.write_all(snapshot.as_bytes())
+        .map_err(|e| format!("写导出文件失败：{e}"))?;
     file.flush().map_err(|e| format!("写导出文件失败：{e}"))?;
-    Ok(target)
+    // Clipboard consumers receive these exact sanitized bytes, never a reread
+    // of the export path and never the less-redacted live frontend buffer.
+    Ok((target, snapshot))
 }
 
 #[cfg(test)]
@@ -819,18 +833,33 @@ mod tests {
         file.append("ssh 192.168.31.42 连接超时，权重在 /home/l28756/.pinvou3/model-store/models");
         file.finish("失败");
 
-        let exported = export_run_log("run-export").unwrap();
+        let (exported, snapshot) = export_run_log("run-export").unwrap();
         let content = std::fs::read_to_string(&exported).unwrap();
+        assert_eq!(snapshot, content);
         assert!(!content.contains("192.168.31.42"), "{content}");
         assert!(content.contains("[HOST]"), "{content}");
         // 连跑两次不许把内容叠起来——导出是"这一刻的快照"，叠加只会让人拿错
-        let again = export_run_log("run-export").unwrap();
+        let (again, snapshot) = export_run_log("run-export").unwrap();
+        assert_eq!(snapshot, std::fs::read_to_string(&again).unwrap());
         assert_eq!(
             std::fs::read_to_string(&again).unwrap().len(),
             content.len()
         );
         // 没有这次运行时给一句人话，而不是 panic
         assert!(export_run_log("run-nope").is_err());
+    }
+
+    #[test]
+    fn oversized_logs_never_return_an_export_or_clipboard_snapshot() {
+        let _home = config::TempHome::new();
+        let file = RunLogFile::open("run-oversize", "测试").unwrap();
+        let source = std::fs::OpenOptions::new()
+            .write(true)
+            .open(file.path())
+            .unwrap();
+        source.set_len(MAX_EXPORT_LOG_BYTES + 1).unwrap();
+        assert!(export_run_log("run-oversize").is_err());
+        assert!(!logs_dir().join("run-oversize.export.log").exists());
     }
 
     /// 只留最近若干份，别让日志目录无限涨。
