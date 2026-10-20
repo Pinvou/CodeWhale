@@ -200,4 +200,10 @@ func TestReconciliationFrozenExecutionPostgres(t *testing.T) {
 			t.Fatalf("pipeline writer %s %v", ref, err)
 		}
 	})
+	t.Run("repaired-difference-new-run-keeps-terminal-case", func(t *testing.T) {
+		testReconciliationRepairRecurrence(t, ctx, r, v)
+	})
+	t.Run("legacy-null-bill-evidence", func(t *testing.T) {
+		testReconciliationLegacyBillEvidence(t, ctx, r, v)
+	})
 }

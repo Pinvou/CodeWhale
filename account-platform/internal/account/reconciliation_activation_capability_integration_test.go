@@ -208,7 +208,11 @@ func TestF15ReconciliationActivationOwnerCapabilityPostgres(t *testing.T) {
 	}
 	futureSQL := `CREATE TABLE public.f14_capability_future(id integer PRIMARY KEY)`
 	digest := sha256.Sum256([]byte(futureSQL))
-	future := migrations.Migration{Version: 900021, Name: "f14_capability_future", UpSQL: futureSQL, DownSQL: `DO $$ BEGIN RAISE EXCEPTION 'forward only' USING ERRCODE='55000'; END $$;`, Checksum: hex.EncodeToString(digest[:])}
+	futureVersion, badVersion, err := capabilityFixtureFutureVersions(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	future := migrations.Migration{Version: futureVersion, Name: "f14_capability_future", UpSQL: futureSQL, DownSQL: `DO $$ BEGIN RAISE EXCEPTION 'forward only' USING ERRCODE='55000'; END $$;`, Checksum: hex.EncodeToString(digest[:])}
 	all := append(append([]migrations.Migration{}, loaded...), future)
 	if err := billingschema.Up(ctx, operator, all); err != nil {
 		t.Fatal("official future prepare/finish rejected valid capability")
@@ -222,13 +226,13 @@ func TestF15ReconciliationActivationOwnerCapabilityPostgres(t *testing.T) {
 	}
 	badSQL := `CREATE FUNCTION public.f14_unreviewed_capability() RETURNS integer LANGUAGE sql SECURITY DEFINER AS 'SELECT 1'`
 	badDigest := sha256.Sum256([]byte(badSQL))
-	bad := migrations.Migration{Version: 900022, Name: "f14_unreviewed_capability", UpSQL: badSQL, DownSQL: "SELECT 1", Checksum: hex.EncodeToString(badDigest[:])}
+	bad := migrations.Migration{Version: badVersion, Name: "f14_unreviewed_capability", UpSQL: badSQL, DownSQL: "SELECT 1", Checksum: hex.EncodeToString(badDigest[:])}
 	if err := billingschema.Up(ctx, operator, append(all, bad)); err == nil {
 		t.Fatal("future hardener must reject unreviewed public SECURITY DEFINER")
 	}
 	migrations.Unlock(ctx, operator)
 	var absent bool
-	if err := pool.QueryRow(ctx, `SELECT to_regprocedure('public.f14_unreviewed_capability()') IS NULL AND NOT EXISTS(SELECT 1 FROM public.schema_migrations WHERE version=900022)`).Scan(&absent); err != nil || !absent {
+	if err := pool.QueryRow(ctx, `SELECT to_regprocedure('public.f14_unreviewed_capability()') IS NULL AND NOT EXISTS(SELECT 1 FROM public.schema_migrations WHERE version=$1)`, badVersion).Scan(&absent); err != nil || !absent {
 		t.Fatal("failed future capability migration must roll back function and ledger")
 	}
 	if after := qualification(); after != before {
