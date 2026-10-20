@@ -46,6 +46,9 @@
     "^/@id/react$",
     "^/@id/react-dom/client$",
     "^/features/team-relay/TeamRelayView.jsx$",
+    "^/features/model-store/ModelVersionsDialog\\.jsx$",
+    "^/features/settings/SettingsView\\.jsx$",
+    "^/shared/i18n/zh\\.js$",
     "^/shared/i18n.js$"
   ],
   "ignoreDependencies": [

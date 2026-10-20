@@ -51,6 +51,36 @@ test("diagnostics consent smoke is executable and selected for all entry points"
   }
 });
 
+test("model versions regression is an executable package script and full CI smoke", () => {
+  const packageJson = JSON.parse(readFileSync(
+    new URL("../../pinvou3-app/package.json", import.meta.url), "utf8",
+  ));
+  const knip = JSON.parse(readFileSync(
+    new URL("../../pinvou3-app/knip.json", import.meta.url), "utf8",
+  ));
+  assert.equal(
+    packageJson.scripts["test:model-store-versions-ui"],
+    "node tests/model_store_versions_smoke.mjs",
+  );
+  assert.ok(!knip.ignore.includes("tests/model_store_versions_smoke.mjs"));
+  assert.ok(fullLabels.includes("npm:test:model-store-versions-ui"));
+});
+
+test("model store changes run the real versions and settings regression", () => {
+  const paths = [
+    "pinvou3-app/src/features/model-store/ModelVersionsDialog.jsx",
+    "pinvou3-app/src/features/model-store/pinvou-model-link.js",
+  ];
+  for (const path of paths) {
+    assert.deepEqual(labels(selectFrontendSmokes([path])), [
+      "npm:test:ui-smoke", "npm:test:model-store-versions-ui",
+    ]);
+  }
+  assert.equal(labels(selectFrontendSmokes([
+    ...paths, "pinvou3-app/src/features/settings/SettingsView.jsx",
+  ])).filter((label) => label === "npm:test:model-store-versions-ui").length, 1);
+});
+
 const fullSuiteCases = [
   [
     "shared frontend paths fail closed to the full browser suite",
@@ -102,6 +132,7 @@ test("feature-local changes select core and feature smokes", () => {
     [
       "npm:test:ui-smoke",
       "npm:test:settings-ui",
+      "npm:test:model-store-versions-ui",
       "npm:test:composer-tools-smoke",
       "npm:test:composer-pending-enable-smoke",
       "npm:test:failure-diagnostics-ui",

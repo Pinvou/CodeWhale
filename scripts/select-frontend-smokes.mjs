@@ -16,6 +16,7 @@ export const FULL_FRONTEND_SMOKES = Object.freeze([
   command("npm", "test:reader-diff-ui"),
   command("node", "tests/remote_archive_smoke.mjs"),
   command("npm", "test:team-relay-ui"),
+  command("npm", "test:model-store-versions-ui"),
   command("npm", "test:markdown-artifact-ui"),
   command("node", "tests/detached_boot_smoke.js"),
   command("node", "tests/drag_gesture_smoke.js"),
@@ -33,9 +34,10 @@ export const FULL_FRONTEND_SMOKES = Object.freeze([
 const CORE_SMOKE = command("npm", "test:ui-smoke");
 const FEATURE_COMMANDS = new Map([
   ["knowledge", [command("npm", "test:kb-smoke")]],
+  ["model-store", [command("npm", "test:model-store-versions-ui")]],
   ["pet", [command("node", "tests/pet_selector_ui_smoke.js")]],
   ["scheduled", [command("node", "tests/scheduled_tasks_smoke.js")]],
-  ["settings", [command("npm", "test:settings-ui"), command("npm", "test:composer-tools-smoke"), command("npm", "test:composer-pending-enable-smoke"), command("npm", "test:failure-diagnostics-ui")]],
+  ["settings", [command("npm", "test:settings-ui"), command("npm", "test:model-store-versions-ui"), command("npm", "test:composer-tools-smoke"), command("npm", "test:composer-pending-enable-smoke"), command("npm", "test:failure-diagnostics-ui")]],
   ["failure-diagnostics", [command("npm", "test:failure-diagnostics-ui")]],
   ["team-relay", [command("npm", "test:team-relay-ui")]],
   ["tools", [command("npm", "test:tool-store"), command("npm", "test:tool-store-import"), command("npm", "test:tool-store-grouping"), command("npm", "test:tool-store-recycle-bin")]],

@@ -133,6 +133,7 @@
     "test:ui-smoke": "node tests/ui_smoke.js",
     "test:settings-ui": "node tests/settings_ui_smoke.js",
     "test:failure-diagnostics-ui": "node tests/failure_diagnostics_ui_smoke.mjs",
+    "test:model-store-versions-ui": "node tests/model_store_versions_smoke.mjs",
     "test:acp-providers-ui": "node tests/acp_providers_ui_smoke.js",
     "test:kb-smoke": "node tests/kb_smoke.js",
     "test:knowledge-host-packaging": "node --test tests/knowledge_host_packaging.test.mjs",
