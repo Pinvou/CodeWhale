@@ -1217,9 +1217,7 @@ pub fn total_managed_bytes() -> rusqlite::Result<i64> {
 // Keep the public db API stable while testing its actual key SQL without Tauri.
 #[path = "api_keys.rs"]
 mod api_keys;
-pub use api_keys::{
-    ApiKeyRecord, add_api_key, delete_api_key, find_api_key, list_api_keys_for_card,
-};
+pub use api_keys::{add_api_key, delete_api_key, find_api_key, list_api_keys_for_card};
 
 #[cfg(test)]
 mod tests {
