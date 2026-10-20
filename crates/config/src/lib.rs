@@ -672,6 +672,7 @@ impl ProvidersToml {
                 .iter()
                 .all(|provider| self.for_provider(*provider).is_empty())
             && self.antigravity.is_empty()
+            && self.tachyon.is_empty()
     }
 
     #[must_use]

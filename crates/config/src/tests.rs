@@ -5981,6 +5981,39 @@ fn tachyon_stays_registered_only_on_both_identity_boundaries() {
 }
 
 #[test]
+fn forkguard_tachyon_only_provider_table_survives_config_store_save() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("config.toml");
+    let mut store = ConfigStore::load(Some(path.clone()))?;
+    store.config.provider = ProviderKind::Tachyon;
+    let provider = &mut store.config.providers.tachyon;
+    provider.base_url = Some("http://127.0.0.1:9999/v1".to_string());
+    provider.model = Some("served-model-id".to_string());
+    provider.auth_mode = Some("api_key".to_string());
+    provider.context_window = Some(32_768);
+    assert!(!store.config.providers.is_empty());
+    assert!(store.rendered_body()?.contains("[providers.tachyon]"));
+    store.save()?;
+
+    let mut restored = ConfigStore::load(Some(path))?;
+    assert_eq!(restored.config.provider, ProviderKind::Tachyon);
+    assert_eq!(
+        toml::to_string(&restored.config.providers.tachyon)?,
+        toml::to_string(&store.config.providers.tachyon)?
+    );
+    // An unrelated settings rewrite must retain the sole provider table too.
+    restored.config.providers.tachyon.model = Some("renamed-served-id".to_string());
+    restored.save()?;
+    let reloaded = ConfigStore::load(Some(restored.path().to_path_buf()))?;
+    assert_eq!(
+        toml::to_string(&reloaded.config.providers.tachyon)?,
+        toml::to_string(&restored.config.providers.tachyon)?
+    );
+    assert!(ProvidersToml::default().is_empty());
+    Ok(())
+}
+
+#[test]
 fn legacy_dual_wire_toml_table_supplies_credentials_and_endpoint() {
     let _lock = env_lock();
     let _env = EnvGuard::without_deepseek_runtime_overrides();

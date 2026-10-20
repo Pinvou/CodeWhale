@@ -4117,6 +4117,7 @@ impl ProvidersConfig {
             ("providers.moonshot", &self.moonshot),
             ("providers.sglang", &self.sglang),
             ("providers.vllm", &self.vllm),
+            ("providers.tachyon", &self.tachyon),
             ("providers.ollama", &self.ollama),
             ("providers.ollama_cloud", &self.ollama_cloud),
             ("providers.huggingface", &self.huggingface),

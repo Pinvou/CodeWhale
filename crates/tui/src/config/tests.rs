@@ -499,20 +499,20 @@ fn provider_context_scenario() -> Result<()> {
             Some(1_000_000)
         );
     }
-    // from provider_context_window_zero_is_invalid
-    {
-        let config: Config = toml::from_str(
-            r#"
-    [providers.openai]
-    context_window = 0
-    "#,
-        )
+    // Registered-only Tachyon tables obey the same validation as catalog providers.
+    for provider in ["openai", "tachyon"] {
+        let config: Config = toml::from_str(&format!(
+            "provider = \"{provider}\"\n[providers.{provider}]\ncontext_window = 0\n"
+        ))
         .expect("zero is syntactically valid TOML");
 
         let err = config
             .validate()
             .expect_err("zero context_window should be rejected");
-        assert!(err.to_string().contains("providers.openai.context_window"));
+        assert!(
+            err.to_string()
+                .contains(&format!("providers.{provider}.context_window"))
+        );
     }
     Ok(())
 }
