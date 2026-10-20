@@ -6708,6 +6708,7 @@ dependencies = [
  "agent-client-protocol",
  "anyhow",
  "async-trait",
+ "axum",
  "atspi",
  "base64 0.22.1",
  "block2",

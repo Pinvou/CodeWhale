@@ -92,6 +92,12 @@ function createApiKey(cardId, label = null) {
   return invokeTauri('model_store_create_api_key', { cardId, label });
 }
 
+function fetchLanStatus(cardId) { return invokeTauri('model_store_lan_status', { cardId }); }
+function setLanSharing(cardId, enabled, address, port = 8090) {
+  return invokeTauri('model_store_set_lan_sharing', { cardId, enabled: enabled === true, address, port });
+}
+function revokeApiKey(keyId) { return invokeTauri('model_store_revoke_api_key', { keyId }); }
+
 /**
  * 发起下载。长操作：立刻返回 run_id，进度靠 `pollRunLog` 读。
  * @param {string} cardId - 卡片 ID。
@@ -295,6 +301,9 @@ export {
   deleteInstalledEngine,
   fetchApiKeys,
   createApiKey,
+  fetchLanStatus,
+  setLanSharing,
+  revokeApiKey,
   startDownload,
   startCardScripts,
   startDeploy,

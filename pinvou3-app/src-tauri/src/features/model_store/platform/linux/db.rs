@@ -15,7 +15,6 @@ use std::fs;
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
-use rand::Rng as _;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::config;
@@ -1215,124 +1214,12 @@ pub fn total_managed_bytes() -> rusqlite::Result<i64> {
     )
 }
 
-// ---------------- API 网关密钥 ----------------
-// 每把 key 绑定一个具体模型（card_id），只能用来调用那一个模型——不同应用要接入
-// 不同模型时分开发 key、分开吊销，互不影响。card_id 为空代表老版本遗留下的
-// "全局 key"（改造前生成的），继续当成"可以调用任意模型"处理，不强行作废。
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct ApiKeyRecord {
-    pub id: String,
-    pub card_id: Option<String>,
-    pub label: Option<String>,
-    pub key_value: String,
-    pub created_at: String,
-}
-
-impl ApiKeyRecord {
-    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
-        Ok(Self {
-            id: row.get("id")?,
-            card_id: row.get("card_id")?,
-            label: row.get("label")?,
-            key_value: row.get("key_value")?,
-            created_at: row.get("created_at")?,
-        })
-    }
-}
-
-fn random_hex(num_bytes: usize) -> String {
-    let mut bytes = vec![0u8; num_bytes];
-    rand::rng().fill_bytes(&mut bytes);
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn random_urlsafe_token(num_bytes: usize) -> String {
-    use base64::Engine;
-    let mut bytes = vec![0u8; num_bytes];
-    rand::rng().fill_bytes(&mut bytes);
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
-}
-
-pub fn add_api_key(card_id: &str, label: Option<&str>) -> rusqlite::Result<ApiKeyRecord> {
-    let key_id = random_hex(8);
-    let key_value = format!("lmm-{}", random_urlsafe_token(32));
-    let now = now_iso();
-    let conn = connect()?;
-    conn.execute(
-        "INSERT INTO api_keys (id, card_id, label, key_value, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![key_id, card_id, label, key_value, now],
-    )?;
-    Ok(ApiKeyRecord {
-        id: key_id,
-        card_id: Some(card_id.to_string()),
-        label: label.map(|s| s.to_string()),
-        key_value,
-        created_at: now,
-    })
-}
-
-/// 这个模型专属的 key，加上改造前生成的、没绑定具体模型的老 key。
-pub fn list_api_keys_for_card(card_id: &str) -> rusqlite::Result<Vec<ApiKeyRecord>> {
-    let conn = connect()?;
-    let mut stmt = conn.prepare(
-        "SELECT * FROM api_keys WHERE card_id = ?1 OR card_id IS NULL ORDER BY created_at DESC",
-    )?;
-    let rows = stmt
-        .query_map(params![card_id], ApiKeyRecord::from_row)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
-}
-
-/// 按 id 吊销一把 key。
-///
-/// # 目前零调用点
-///
-/// 没有 service 包装、`app/commands/` 里没有对应的命令入口、没有按钮：单独吊销这条能力
-/// **在界面上还不存在**，唯一能让存量 key 失效的动作是把整张卡片移出模型库
-/// （`delete_store_model` 在同一个事务里连 `api_keys` 一起删）。「仅卸载」
-/// 走的是 `mark_uninstalled`，key 原样留着照样能用。
-///
-/// 这个缺口曾经**是个真 bug，而且是文案层面的**：详情页 `keysHint` 三语都写着
-/// 「可以按调用方分发、单独吊销」，用户照着找吊销入口找不到，只能以为是自己没
-/// 看见——实际上他发出去的 key 永远收不回来。已经把三语文案改成如实描述
-/// （见 `src/shared/i18n/{zh,en,ja}.js` 的 `keysHint`）。**接线前不要把那句
-/// 文案改回去**：能力和承诺必须一起动。
-///
-/// # 接线之后才能解决的一个更窄的洞
-///
-/// `list_api_keys_for_card` 会把 `card_id IS NULL` 的**老全局 key**（card_id
-/// 改造之前生成的）一并列进详情页，可全仓两条 `DELETE FROM api_keys` 都够不着
-/// 它们：`delete_store_model` 删的是 `WHERE card_id = ?1`，而 SQL 里
-/// `NULL = 'xxx'` 恒不成立。也就是说这些 key 用户看得见、能复制、能拿去调用，
-/// 却连"把卡片整张删掉"都清不掉——本函数是它们唯一可能的出口。
-///
-/// 留着不删，是因为接线只差「service 包装 + 命令 + 详情页一个按钮（带二次确认，
-/// 删除不可逆）」这三步，而那三步动的是别人正在改的文件，不该塞进这个 PR。
-/// 下面的单测锁住它的语义——接上去的那天不用再从头验一遍「会不会把别的 key
-/// 一起删掉」。
-///
-/// 删干净了吗：干净。网关 key 只有 sqlite 这一份，不进密钥环
-/// （`config.rs` 那套 `codewhale_secrets` 存的是 HF token，跟这里无关），
-/// 所以删掉这一行就是删干净了，不会留下"库里没了、别处还认"的半吊子状态。
-pub fn delete_api_key(key_id: &str) -> rusqlite::Result<()> {
-    let conn = connect()?;
-    conn.execute("DELETE FROM api_keys WHERE id = ?1", params![key_id])?;
-    Ok(())
-}
-
-pub fn find_api_key(key_value: &str) -> rusqlite::Result<Option<ApiKeyRecord>> {
-    if key_value.is_empty() {
-        return Ok(None);
-    }
-    let conn = connect()?;
-    conn.query_row(
-        "SELECT * FROM api_keys WHERE key_value = ?1",
-        params![key_value],
-        ApiKeyRecord::from_row,
-    )
-    .optional()
-}
+// Keep the public db API stable while testing its actual key SQL without Tauri.
+#[path = "api_keys.rs"]
+mod api_keys;
+pub use api_keys::{
+    ApiKeyRecord, add_api_key, delete_api_key, find_api_key, list_api_keys_for_card,
+};
 
 #[cfg(test)]
 mod tests {
@@ -1817,8 +1704,7 @@ mod tests {
         );
     }
 
-    /// `delete_api_key` 还没接到命令和按钮上（见它自己的说明），所以这条测试是
-    /// 它目前**唯一**的使用者。锁的是「按 id 精确吊销」这个语义：
+    /// Key 详情入口和 LAN 网关共用这些函数；锁住按 id 精确撤销的语义：
     ///
     /// - 只有点名的那一把没了，同一张卡下的兄弟 key 必须毫发无损。少写一次
     ///   `WHERE id = ?1`（或者哪天有人顺手改成按 card_id 删）就是把用户发给

@@ -142,6 +142,22 @@ pub fn create_api_key(_card_id: String, _label: Option<String>) -> Result<Value,
     nope()
 }
 
+pub async fn lan_status(_service: &Arc<ModelStoreService>, _card: String) -> Result<Value, String> {
+    nope()
+}
+pub async fn set_lan_sharing(
+    _service: &Arc<ModelStoreService>,
+    _card: String,
+    _enabled: bool,
+    _address: Option<String>,
+    _port: u16,
+) -> Result<Value, String> {
+    nope()
+}
+pub fn revoke_api_key(_id: String) -> Result<Value, String> {
+    nope()
+}
+
 pub fn force_remove(
     _service: &Arc<ModelStoreService>,
     _card_id: String,

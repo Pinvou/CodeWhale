@@ -21,11 +21,12 @@
 //! | `errors` | 把技术错误翻译成用户看得懂的话 |
 //! | `disk` | 字节格式化与目录体积统计 |
 //! | `import_scan` | 下载前去哪找已在本机的权重（可配的搜索根目录） |
+//! | `lan_gateway` / `lan_store` / `lan_network` | 主动开启的模型级 LAN 认证代理、数据库适配及接口/原端口隔离证据 |
 //!
 //! 相对 LMM **刻意没有搬**的：`admin.rs`（上游 919 行，本地 HTTP 管理接口——那是 sidecar
 //! 形态的产物，原生实现后前端直接走 Tauri 命令）、`updater.rs`（LMM 自己的 OTA，
-//! 品悟有自己的更新机制）、`gateway.rs` / `worker.rs` / `system_probe.rs`（分别是
-//! 局域网暴露、双机从机控制、硬件探测，排在后面的阶段）。
+//! 品悟有自己的更新机制）、`worker.rs` / `system_probe.rs`（双机从机控制、硬件探测）。
+//! LAN 共享由本模块自己的窄代理实现，不复用 sidecar 管理接口。
 
 mod card_update;
 pub mod config;
@@ -33,6 +34,9 @@ pub mod db;
 pub mod disk;
 pub mod errors;
 pub mod import_scan;
+mod lan_gateway;
+mod lan_network;
+mod lan_store;
 pub mod lifecycle;
 mod memory_policy;
 mod native_process;
@@ -47,6 +51,7 @@ pub mod store_client;
 
 // 服务层的操作直接对外，签名与 `platform/unsupported.rs` 里的桩一一对应。
 // 命令层因此不必分平台分支。
+pub use lan_store::{lan_status, revoke_api_key, set_lan_sharing};
 pub use service::{
     ModelStoreService, active_runs, answer_run, api_keys, cancel_run, create_api_key,
     delete_engine, export_run_log, force_remove, installed_engines, library, list_cards,

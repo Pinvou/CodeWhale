@@ -223,6 +223,28 @@ pub fn model_store_create_api_key(card_id: String, label: Option<String>) -> Res
     model_store::create_api_key(card_id, label)
 }
 
+#[tauri::command]
+pub async fn model_store_lan_status(
+    service: State<'_, Arc<ModelStoreService>>,
+    card_id: String,
+) -> Result<Value, String> {
+    model_store::lan_status(&service, card_id).await
+}
+#[tauri::command]
+pub async fn model_store_set_lan_sharing(
+    service: State<'_, Arc<ModelStoreService>>,
+    card_id: String,
+    enabled: bool,
+    address: Option<String>,
+    port: u16,
+) -> Result<Value, String> {
+    model_store::set_lan_sharing(&service, card_id, enabled, address, port).await
+}
+#[tauri::command]
+pub fn model_store_revoke_api_key(key_id: String) -> Result<Value, String> {
+    model_store::revoke_api_key(key_id)
+}
+
 // 这里原来有 `model_store_test_store_state` / `model_store_unlock_test_store` /
 // `model_store_disable_test_store` 三个命令，服务的是内置测试商店那个隐藏开关。
 // 内置测试商店 2026-09-30 整体拿掉，三个命令连同 lib.rs 里的注册、前端

@@ -6,7 +6,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { KeyRound, Plus } from '../../components/icons.jsx';
 import { EmptyState } from '../../components/EmptyState.jsx';
 import { Spinner } from '../../components/Spinner.jsx';
-import { createApiKey, fetchApiKeys, fetchModelDetail } from './model-store-api.js';
+import { createApiKey, fetchApiKeys, fetchModelDetail, revokeApiKey } from './model-store-api.js';
+import { LanSharingPanel } from './LanSharingPanel.jsx';
+import { lanError } from './lan-access.js';
 import { tryGetTauriBridge } from '../../platform/tauri/client.js';
 import { buildSavedModel, checkLinkable, findLinkedRows, pickApiKey } from './pinvou-model-link.js';
 import { formatBytes, libraryStatusOf } from './model-store-logic.js';
@@ -68,6 +70,8 @@ function CopyRow({ label, value, hint, copyLabel, onCopy, testId }) {
 function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onToast, savedModels, cardBusy, scriptUpdates, onUninstall, onUpdateWithCleanup }) {
   const [detail, setDetail] = useState(null);
   const [keys, setKeys] = useState([]);
+  const [keysKnown, setKeysKnown] = useState(false);
+  const [revokePending, setRevokePending] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
   // 重试单独一个忙态,不借用 busy:busy 是「建 Key / 接入品悟」那两个动作的,
@@ -92,11 +96,12 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
       // Key 拿不到不算致命:模型本身的信息照样该显示出来。
       const [modelDetail, keyList] = await Promise.all([
         fetchModelDetail(cardId),
-        fetchApiKeys(cardId).catch(() => []),
+        fetchApiKeys(cardId).then((items) => ({ items, known: true })).catch(() => ({ items: [], known: false })),
       ]);
       if (stale()) return;
       setDetail(modelDetail);
-      setKeys(Array.isArray(keyList) ? keyList : []);
+      setKeys(Array.isArray(keyList.items) ? keyList.items : []);
+      setKeysKnown(keyList.known);
       // 成功了就把上一次的错误擦掉。load() 不只在打开弹窗时跑——建 Key、接入品悟
       // 之后都会重拉一次。少了这一句,任何一次瞬时失败都会把 error 永久钉住:渲染
       // 分支是 `{error ? … }` / `{!error && detail ? … }`,于是整个详情页(状态、
@@ -114,6 +119,8 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
     // eslint-disable-next-line react-hooks/set-state-in-effect -- 换一张卡时先把上一张的详情/Key 清空再拉新的;不清会让新卡短暂显示旧卡的运行时和 Key
     setDetail(null);
     setKeys([]);
+    setKeysKnown(false);
+    setRevokePending(null);
     setError(null);
     setUpdateConfirmation(null);
     load();
@@ -153,12 +160,28 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
     }
   };
 
+  const revokeKey = async (id) => {
+    const token = loadTokenRef.current;
+    setBusy(true);
+    try {
+      await revokeApiKey(id);
+      if (token !== loadTokenRef.current) return;
+      setRevokePending(null);
+      onToast(copy.keyRevoked);
+      await load();
+    } catch (e) {
+      if (token === loadTokenRef.current) onToast(lanError(copy, e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   // 一键把这个模型接进品悟自己的模型列表。
   //
   // **直连推理容器**，不经 API 网关。模型商店改成原生实现之后，品悟和模型在同一台
   // 机器上，`endpoint_url` 就是现成的、可直接调的地址；中间再架一层网关只是多一个
   // 会出故障的环节（sidecar 时代要网关，是因为它同时承担了给**局域网其他应用**
-  // 分发的职责——那件事排在后面的阶段，跟"品悟自己用"是两回事）。
+  // 分发的职责——现在由下方显式开启的 LAN 面板提供）。
   //
   // `model` 要填 `endpoint_model` 而不是 `model_name`：前者是推理服务真正认的 id。
   // 经网关时填 model_name 是对的（网关按它查表再替换），直连时填错就是 404。
@@ -207,8 +230,7 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
   // 很容易出现"按钮灰着但没给原因"或者反过来。
   const linkable = checkLinkable(detail);
   // 推理服务自己的地址。**这是本机地址**,粘到别的机器上连不通——要给局域网里的
-  // 其他应用用,得先有 API 网关,那一块还没做（见 docs/模型商店-框架与移植基线.md
-  // 的分期表）。这里如实显示本机地址,并在下面那行提示里说清楚。
+  // 其他应用用，走下方 LAN 面板的认证共享地址，不替换本机直连地址。
   const apiUrl = record?.endpoint_url ?? '';
   // 直连推理服务时要填的是它自己认的那个 id。
   const modelId = record?.endpoint_model || record?.model_name || '';
@@ -341,14 +363,14 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
                     <EmptyState
                       testId="model-store-keys-empty"
                       className={`rounded-[12px] px-3 py-2 text-left text-[12px] ${SUBTLE_SURFACE} ${TEXT_SECONDARY}`}
-                      title={copy.keysEmpty}
+                      title={keysKnown ? copy.keysEmpty : copy.lanKeyUnknown}
                     />
                   ) : (
                     <div className="space-y-1.5">
                       {keys.map((key) => (
                         <div key={key.id} className={`flex items-center gap-2 rounded-[12px] px-3 py-1.5 ${SUBTLE_SURFACE}`}>
                           <KeyRound size={13} className={TEXT_SECONDARY} />
-                          <code className={`min-w-0 flex-1 break-all text-[12px] ${TEXT_PRIMARY}`}>{key.key_value}</code>
+                          <div className="min-w-0 flex-1 text-[12px]"><code>••••{key.key_value.slice(-6)}</code><span className={`ml-2 ${TEXT_SECONDARY}`}>{key.card_id ? copy.keyActive : copy.keyLegacy}</span></div>
                           <button
                             type="button"
                             className={`shrink-0 rounded-full px-2 py-0.5 text-[12px] ${TEXT_SECONDARY} ${HOVER_SURFACE}`}
@@ -356,6 +378,8 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
                           >
                             {copy.copy}
                           </button>
+                          <MsButton tone="ghost" busy={busy} onClick={() => revokePending === key.id ? revokeKey(key.id) : setRevokePending(key.id)}>{revokePending === key.id ? copy.keyRevokeConfirm : copy.keyRevoke}</MsButton>
+                          {revokePending === key.id ? <MsButton tone="ghost" disabled={busy} onClick={() => setRevokePending(null)}>{copy.lanCancel}</MsButton> : null}
                         </div>
                       ))}
                     </div>
@@ -375,6 +399,7 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
                 {copy.addKey}
               </MsButton>
             </div>
+            <LanSharingPanel key={cardId} cardId={cardId} copy={copy} keys={keys} keysKnown={keysKnown} onCopy={copyText} />
           </div>
 
           <div className="mt-6 flex items-center justify-between">

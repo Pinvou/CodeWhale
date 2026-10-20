@@ -269,6 +269,7 @@ impl RunLog {
 /// 依据，各持一份等于没有约束。真机上踩过——两个 `hf download` 抢同一批文件的锁，
 /// 速度从 2.2MB/s 掉到 569KB/s。
 pub struct ModelStoreService {
+    pub(super) lan: super::lan_gateway::Gateway,
     registry: CancelRegistry,
     active: Arc<ActiveCardOps>,
     queue: Arc<DownloadQueue>,
@@ -285,6 +286,7 @@ impl Default for ModelStoreService {
 impl ModelStoreService {
     pub fn new() -> Self {
         Self {
+            lan: super::lan_gateway::Gateway::default(),
             registry: CancelRegistry::default(),
             active: Arc::new(ActiveCardOps::default()),
             queue: Arc::new(DownloadQueue::default()),
