@@ -26,6 +26,19 @@ const { dict } = await import('./helpers/i18n-all.js');
 // 非空、而 task.error 是 null」这个组合，桩词典很容易把它抹平掉。
 const copy = dict.zh.uiModelStore;
 
+test('启用失败展开日志保留首次错误，即使摘要是后续身份错误', () => {
+  const first = 'ERROR: 引擎在建立运行记录前已退出；请查看诊断日志';
+  const later = 'ERROR: 发现未被本卡片可靠记录的模型进程，未认领或停止它；请联系管理员核对';
+  const error = `脚本执行失败（退出码 70）：${later}\n${later}`;
+  const html = render(task({
+    kind: 'enable', status: 'error', expanded: true,
+    lines: [first, later], error,
+  }));
+  assert.ok(html.includes(first));
+  assert.ok(html.includes(later));
+  assert.ok(html.includes('脚本执行失败（退出码 70）'));
+});
+
 test('下载字节达到100%但任务未结束时，不显示完成百分比和虚假的剩余0秒', () => {
   const html = render(task({ progress: { done: 100, total: 100 }, speed: 10 }));
   assert.ok(html.includes(copy.taskAwaitingCompletion));
