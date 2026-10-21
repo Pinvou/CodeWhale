@@ -177,9 +177,11 @@ impl DeviceState {
     pub fn new() -> Self {
         // Linux 上 sysinfo 默认会缓存接近一半 FD 上限的 /proc stat 句柄；ACP
         // ledger（platform/process_resources.rs）以全局 `set_open_files_limit(0)`
-        // 换取有界描述符占用。这是进程级开关，这里显式表达同一立场：本模块的
-        // CPU% 只依赖两次刷新的计数值差，不需要 FD 缓存；谁先初始化谁生效，
-        // 与其让"设备页先采样"悄悄把全局策略定为缓存，不如两边一致关掉。
+        // 换取有界描述符占用。这是进程级全局开关，且 sysinfo 的语义是
+        // last-writer-wins（每次调用都会覆盖全局值，并非"谁先初始化谁生效"——
+        // 第九轮评审修正旧注释）；今天两处调用点（本处与 process_resources.rs）
+        // 都写 0，行为因此一致：本模块的 CPU% 只依赖两次刷新的计数值差，不需要
+        // FD 缓存。任一侧将来想改值，必须两处同步决策，不能依赖初始化顺序。
         let _ = sysinfo::set_open_files_limit(0);
         Self(Arc::new(DeviceStateInner {
             system: Mutex::new(System::new()),
@@ -1270,6 +1272,10 @@ mod tests {
 
     #[test]
     fn snapshot_serialization_smoke_has_contract_fields() {
+        // 全量填充的构造快照（非字符串字面量自证）：前端按这些键取数，serde
+        // rename 掉任一**内层**字段时，Rust 测试与两套 JS 套件可能照样全绿而
+        // 出厂应用把 undefined 渲染出来（第九轮评审 P1）——每类元素的内层键集
+        // 在这里钉死。
         let snapshot = DeviceSnapshot {
             generated_at_ms: 1,
             os: OsInfo {
@@ -1288,13 +1294,48 @@ mod tests {
                     max: Some(80.0),
                 }],
             }],
-            disks: Vec::new(),
-            network: Vec::new(),
+            disks: vec![DiskSnapshot {
+                name: Some("nvme0n1".to_string()),
+                mount_point: "/".to_string(),
+                fs_type: "ext4".to_string(),
+                kind: "ssd".to_string(),
+                total_bytes: 1000,
+                available_bytes: 500,
+                is_removable: false,
+            }],
+            network: vec![NetIfaceSnapshot {
+                name: "eth0".to_string(),
+                iface_type: "ethernet".to_string(),
+                is_up: true,
+                mac: Some("aa:bb:cc:dd:ee:ff".to_string()),
+                rx_bytes: 10,
+                tx_bytes: 20,
+                rx_bytes_per_sec: 1.5,
+                tx_bytes_per_sec: 2.5,
+            }],
             processes: ProcessSummary {
-                top_cpu: Vec::new(),
-                top_memory: Vec::new(),
+                top_cpu: vec![ProcInfo {
+                    pid: 7,
+                    name: "cpu-hog".to_string(),
+                    cpu_pct: 90.5,
+                    memory_bytes: 1024,
+                }],
+                top_memory: vec![ProcInfo {
+                    pid: 9,
+                    name: "mem-hog".to_string(),
+                    cpu_pct: 0.5,
+                    memory_bytes: 8192,
+                }],
             },
-            gpu_ext: None,
+            gpu_ext: Some(GpuExtSnapshot {
+                driver_version: Some("580.02".to_string()),
+                cuda_version: Some("12.3".to_string()),
+                compute_processes: vec![GpuProcInfo {
+                    pid: 7,
+                    name: "python3".to_string(),
+                    used_mib: 64,
+                }],
+            }),
         };
         let value = serde_json::to_value(&snapshot).expect("serialize");
         // 设计 §2.2 契约字段名（前端按这些键取数）。
@@ -1309,7 +1350,86 @@ mod tests {
         ] {
             assert!(value.get(key).is_some(), "missing contract key: {key}");
         }
+        assert_eq!(value["generated_at_ms"], 1);
+        // os 子键。
+        for key in ["product_name", "pretty_name", "kernel", "arch"] {
+            assert!(value["os"].get(key).is_some(), "missing os key: {key}");
+        }
         assert_eq!(value["os"]["product_name"], "LinSeer MegaCube");
+        assert_eq!(value["os"]["kernel"], "6.0.0");
+        // sensors：组键 + 条目内层键。
+        for key in ["chip", "entries"] {
+            assert!(
+                value["sensors"][0].get(key).is_some(),
+                "missing sensor group key: {key}"
+            );
+        }
+        assert_eq!(value["sensors"][0]["chip"], "coretemp");
+        for key in ["kind", "name", "value", "critical", "max"] {
+            assert!(
+                value["sensors"][0]["entries"][0].get(key).is_some(),
+                "missing sensor entry key: {key}"
+            );
+        }
+        assert_eq!(value["sensors"][0]["entries"][0]["critical"], 100.0);
+        // disks。
+        for key in [
+            "name",
+            "mount_point",
+            "fs_type",
+            "kind",
+            "total_bytes",
+            "available_bytes",
+            "is_removable",
+        ] {
+            assert!(
+                value["disks"][0].get(key).is_some(),
+                "missing disk key: {key}"
+            );
+        }
+        assert_eq!(value["disks"][0]["mount_point"], "/");
+        // network。
+        for key in [
+            "name",
+            "iface_type",
+            "is_up",
+            "mac",
+            "rx_bytes",
+            "tx_bytes",
+            "rx_bytes_per_sec",
+            "tx_bytes_per_sec",
+        ] {
+            assert!(
+                value["network"][0].get(key).is_some(),
+                "missing network key: {key}"
+            );
+        }
+        assert_eq!(value["network"][0]["rx_bytes_per_sec"], 1.5);
+        // processes：top_cpu / top_memory 同一 ProcInfo 键集。
+        for list in ["top_cpu", "top_memory"] {
+            assert!(value["processes"].get(list).is_some(), "missing: {list}");
+            for key in ["pid", "name", "cpu_pct", "memory_bytes"] {
+                assert!(
+                    value["processes"][list][0].get(key).is_some(),
+                    "missing process key in {list}: {key}"
+                );
+            }
+        }
+        assert_eq!(value["processes"]["top_memory"][0]["memory_bytes"], 8192);
+        // gpu_ext：版本字段 + 计算进程内层键。
+        for key in ["driver_version", "cuda_version", "compute_processes"] {
+            assert!(
+                value["gpu_ext"].get(key).is_some(),
+                "missing gpu_ext key: {key}"
+            );
+        }
+        assert_eq!(value["gpu_ext"]["driver_version"], "580.02");
+        for key in ["pid", "name", "used_mib"] {
+            assert!(
+                value["gpu_ext"]["compute_processes"][0].get(key).is_some(),
+                "missing gpu process key: {key}"
+            );
+        }
     }
 
     #[test]

@@ -26,6 +26,10 @@ pub struct ExternalModel {
     pub id: String,
     pub name: String,
     pub kind: String,
+    /// 非 ollama 行 = 登记的服务地址；kind == "ollama" 的行（daemon 行与注册
+    /// 表行）恒为设置推导的守护进程基地址 + `/v1`——展示、链接与删除统一对准
+    /// 后端实际管理的实例，不回显记录里手写的地址（第九轮评审 P2：前端
+    /// linkTargetOf 硬编码 11434 的口径修正，移除链本就忽略 record.base_url）。
     pub base_url: Option<String>,
     pub model: Option<String>,
     pub weights_path: Option<String>,
@@ -125,6 +129,18 @@ fn weights_under_ollama_root(weights: &str) -> bool {
     path_is_under(Path::new(weights), &root)
 }
 
+/// blob 目录布局签名（第九轮评审 P2，纯函数测试直打）：任一路径分量等于
+/// `blobs` 即命中。`ollama_models_root_from` 只能读到**应用进程自己的**环境，
+/// daemon 由 systemd 管理（`Environment=OLLAMA_MODELS=…`）时迁移目录对应用
+/// 不可见，环境臂会整体失明；blob 目录布局（models/blobs/sha256-…）是 Ollama
+/// 的权威存储签名——按原始路径分量判定，属布局签名而非 canonicalize 的文件
+/// 系统问题，宁拒勿删。
+fn path_has_ollama_blob_component(weights: &str) -> bool {
+    Path::new(weights)
+        .components()
+        .any(|component| component.as_os_str() == std::ffi::OsStr::new("blobs"))
+}
+
 // ---------------------------------------------------------------- 视图
 
 /// 本机全部外部模型：注册表 + Ollama 在线列表（去重已注册者）。
@@ -146,16 +162,18 @@ pub async fn get_external_models() -> Result<ExternalModelsView, String> {
                 }
             }
             for name in names {
-                // 去重与 ollama_status 同一把大小写尺子（daemon 归一小写）：
-                // 记录写 `Qwen3:30B` 时大小写敏感比较会让同一 tag 既标
-                // available 又以未登记行重复出现（第六轮评审 P3）。
+                // 去重与 ollama_status 同一把尺子（ollama_name_matches：小写 +
+                // 去 tag 归一）：记录写 `Qwen3:30B` 时大小写敏感比较会让同一 tag
+                // 既标 available 又以未登记行重复出现（第六轮评审 P3）；裸名记录
+                // 撞上 daemon 的 `mymodel:latest` 也按同款命中，否则同一模型既标
+                // unreachable 又以未登记行重复出现（第九轮评审 P3）。
                 let already_listed = models.iter().any(|model| {
                     model.kind == "ollama"
                         && (model
                             .model
                             .as_deref()
-                            .is_some_and(|m| m.eq_ignore_ascii_case(&name))
-                            || model.name.eq_ignore_ascii_case(&name))
+                            .is_some_and(|m| ollama_name_matches(m, &name))
+                            || ollama_name_matches(&model.name, &name))
                 });
                 if !already_listed {
                     models.push(ExternalModel {
@@ -184,6 +202,17 @@ pub async fn get_external_models() -> Result<ExternalModelsView, String> {
     }
     // 非 Ollama 模型并发探测：每个不可达端点要吃满 1.5s 超时，串行会让 N 个
     // 失效端点把整次刷新拖到 N×1.5s；join_all 并发后总耗时 ≈ 最慢的一个。
+    // ollama 行的展示/链接地址统一回填设置推导的 daemon 基地址 + `/v1`（第九
+    // 轮评审 P2）：注册行自带的 base_url 一并覆盖、daemon 行不再落 None——
+    // 展示、链接与删除都指向后端实际管理的同一实例（探测/删除走的就是
+    // `ollama_base()`；daemon 不可达分支同样覆盖）。
+    let ollama_link_base = super::ollama_base().await;
+    let ollama_link_url = format!("{}/v1", ollama_link_base.trim_end_matches('/'));
+    for model in &mut models {
+        if model.kind == "ollama" {
+            model.base_url = Some(ollama_link_url.clone());
+        }
+    }
     let probe_indices: Vec<usize> = models
         .iter()
         .enumerate()
@@ -206,10 +235,24 @@ pub async fn get_external_models() -> Result<ExternalModelsView, String> {
     Ok(ExternalModelsView { models, warnings })
 }
 
+/// Ollama 名字归一匹配（第九轮评审 P3）：daemon 的 /api/tags 恒带 `:tag`
+/// （未显式给 tag 时 Ollama 默认补 `:latest`），注册表记录/AI 手写常只有裸名
+/// ——原串比较会让无 tag 记录恒判 unreachable，且同一模型再以未登记 daemon 行
+/// 重复出现。与商店边界（model_store boundary 的去 tag 兜底）同一把尺子：去掉
+/// 首个 `:` 起的 tag 后缀再按小写比较。
+fn ollama_name_matches(record_name: &str, daemon_name: &str) -> bool {
+    ollama_tagless_name(record_name).eq_ignore_ascii_case(ollama_tagless_name(daemon_name))
+}
+
+fn ollama_tagless_name(name: &str) -> &str {
+    name.split(':').next().unwrap_or(name)
+}
+
 fn ollama_status(expected: &str, names: &[String]) -> String {
-    // daemon 标签按小写归一（与商店边界 Ollama 臂的 NOCASE 同一事实）：记录里
-    // 手写 "Qwen3:30B" 时精确比较会恒判 unreachable（五轮评审 P3）。
-    if names.iter().any(|name| name.eq_ignore_ascii_case(expected)) {
+    // 归一匹配走 ollama_name_matches（小写 + 去 tag）：记录里手写 "Qwen3:30B"
+    // 时精确比较会恒判 unreachable（五轮评审 P3）；裸名记录撞 daemon 的
+    // `mymodel:latest` 是同一刀的另一半（九轮评审 P3）。
+    if names.iter().any(|name| ollama_name_matches(expected, name)) {
         "available".to_string()
     } else {
         "unreachable".to_string()
@@ -311,6 +354,19 @@ pub async fn register_external_model(
     // 来就不产这个字段，这里把契约落成硬校验；移除端对存量记录同步跳过权重删除。
     if kind == "ollama" && weights_path.is_some() {
         return Err("Ollama 模型的权重由本机守护进程统一管理，weights_path 必须留空".to_string());
+    }
+    // blob 布局签名臂（第九轮评审 P2）：kind 只是自我声明的元数据，"other" 记
+    // 录带 `…/models/blobs` 权重路径时，环境臂对 systemd 迁移目录失明、深度臂
+    // 放行——任何 kind 的路径含 blobs 分量一律拒绝登记，错误说明权重由 daemon
+    // 统一管理、不能登记来删。
+    if weights_path
+        .as_deref()
+        .is_some_and(path_has_ollama_blob_component)
+    {
+        return Err(format!(
+            "“{}”指向 Ollama 守护进程的 blob 存储布局（models/blobs/sha256-…），权重由守护进程统一管理，不能登记为权重路径",
+            weights_path.unwrap_or_default()
+        ));
     }
 
     // Ollama 记录实际删除的目标名：登记端点类别名时 model ≠ name（移除同一口径），
@@ -674,6 +730,27 @@ pub async fn remove_external_model(
                                     target.display()
                                 ));
                             }
+                            // 商店权重根删除时刻复查（第九轮评审 P3）：边界臂的
+                            // 根集合只在守卫链早段查过一次，与上方 ollama 根同一
+                            // 模式在闭包内重推导；查询失败按拒绝（与边界臂
+                            // fail-closed 同口径）。canonicalize（守卫）→ 删除
+                            // 之间剩余的同用户竞速窗口沿用上方免责：能写
+                            // settings/HOME 的本地进程本就可以直接 rm -rf，这里
+                            // 收窄的是"守卫时刻判断正确、删除时刻目录已被换进
+                            // 商店根"的构造场景。
+                            let store_roots =
+                                crate::features::model_store::store_weights_roots_checked()
+                                    .map_err(|error| {
+                                        format!(
+                                            "拒绝删除：商店权重根读取失败（{error}），为防误删已拒绝"
+                                        )
+                                    })?;
+                            if path_under_any(&recheck, &store_roots) {
+                                return Err(
+                                    "拒绝删除：目标位于模型商店目录之下，由模型商店管理，请在模型商店中操作"
+                                        .to_string(),
+                                );
+                            }
                             std::fs::remove_dir_all(&recheck).map_err(|error| {
                                 format!("权重目录删除失败（{}）：{error}", recheck.display())
                             })?;
@@ -744,8 +821,11 @@ fn removal_boundary_error(
     // 双侧都 trim：登记端写入的名字已 trim，但 AI/手写的存量记录可能带空白，
     // 只 trim 输入侧会让这条记录怎么输都删不掉。
     if confirm_name.trim() != record_name.trim() {
+        // 名字回显限长（第九轮评审 P3）：record_name 来自手写注册表文件，超长
+        // 名字不该逐字搬进错误与日志——与本文件其余回显同一 truncate_echo 纪律。
         return Err(format!(
-            "确认名不匹配：为防误删，请输入模型名“{record_name}”以确认移除"
+            "确认名不匹配：为防误删，请输入模型名“{}”以确认移除",
+            truncate_echo(record_name)
         ));
     }
     if let Some(store_name) = store_name_hit {
@@ -789,6 +869,16 @@ pub(crate) fn weights_deletion_guard(
             weights_path.display()
         ));
     }
+    // blob 布局签名臂（第九轮评审 P2）：与 ollama 根臂同口径硬拒——
+    // OLLAMA_MODELS 只能读到应用自己的环境，daemon 的 systemd 环境不可见，
+    // blob 目录布局（models/blobs/sha256-…）是权威签名，宁拒勿删。按原始
+    // 路径分量判定，不依赖根目录推导。
+    if path_has_ollama_blob_component(weights_path.to_string_lossy().as_ref()) {
+        return Err(
+            "拒绝删除：权重路径指向 Ollama 守护进程的 blob 存储布局（models/blobs/…），权重由守护进程统一管理"
+                .to_string(),
+        );
+    }
     let target = weights_path
         .canonicalize()
         .map_err(|_| format!("拒绝删除：权重目录不存在（{}）", weights_path.display()))?;
@@ -830,6 +920,12 @@ pub(crate) fn weights_deletion_guard(
     let home_canonical = home
         .canonicalize()
         .map_err(|_| "拒绝删除：无法解析家目录".to_string())?;
+    // 退化家目录 fail-closed（第九轮评审 P3）：canonicalized home 是文件系统根
+    // `/`（或空）时，下面的 containment 臂对一切绝对路径恒真、形同虚设——解析
+    // 成这种形状说明环境异常（HOME=/ 或未设的兜底），直接拒绝而不是放行。
+    if home_canonical.as_os_str().is_empty() || home_canonical.parent().is_none() {
+        return Err("拒绝删除：家目录解析异常（家目录为文件系统根），为防误删已拒绝".to_string());
+    }
     if target == home_canonical {
         return Err("拒绝删除：目标路径就是家目录本身".to_string());
     }
@@ -972,9 +1068,19 @@ fn parse_record(text: &str) -> Result<RegistryRecord, String> {
 
 fn read_registry(dir: &Path) -> (Vec<ExternalModel>, Vec<String>) {
     let mut warnings = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
         // 目录不存在 = 还没有任何外部模型，属正常首跑。
-        return (Vec::new(), warnings);
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (Vec::new(), warnings);
+        }
+        // 目录存在却读不了（权限/挂载异常）：按空列表静默返回会让用户面对
+        // "模型全消失"的假象（第九轮评审 P3）——推一条警告进 warnings 通道，
+        // 视图如实呈现。
+        Err(error) => {
+            warnings.push(format!("注册表目录无法读取（{}）：{error}", dir.display()));
+            return (Vec::new(), warnings);
+        }
     };
     let mut paths: Vec<PathBuf> = entries
         .filter_map(|entry| entry.ok())
@@ -982,21 +1088,23 @@ fn read_registry(dir: &Path) -> (Vec<ExternalModel>, Vec<String>) {
         .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
         .collect();
     paths.sort();
+    // 扫描顺带重收敛权限（第七轮评审 P3）：doctor 安装模板教 AI 用 mkdir+cat
+    // 自写注册表文件，chmod 被跳过时目录/记录（含 base_url/weights_path）会按
+    // 进程 umask 留下组/其他可读位。写入端 atomic_write_private 的 open 时 0600
+    // 仍是主防线，这里对既有文件做尽力补偿；本函数整个跑在 blocking 池里，
+    // 权限调用失败也不影响读取本身。硬收敛必须排在截断**之前**、覆盖全部发现
+    // 的 .json 文件（第九轮评审 P3：原先只收敛截断后保留的条目，被
+    // MAX_REGISTRY_FILES 挤出的文件永远得不到收敛）。
+    super::platform::harden_dir_owner_only(dir);
+    for path in &paths {
+        super::platform::harden_file_owner_only(path);
+    }
     if paths.len() > MAX_REGISTRY_FILES {
         warnings.push(format!(
             "注册表文件数超过 {MAX_REGISTRY_FILES}，已忽略其余；请检查 {}",
             dir.display()
         ));
         paths.truncate(MAX_REGISTRY_FILES);
-    }
-    // 扫描顺带重收敛权限（第七轮评审 P3）：doctor 安装模板教 AI 用 mkdir+cat
-    // 自写注册表文件，chmod 被跳过时目录/记录（含 base_url/weights_path）会按
-    // 进程 umask 留下组/其他可读位。写入端 atomic_write_private 的 open 时 0600
-    // 仍是主防线，这里对既有文件做尽力补偿；本函数整个跑在 blocking 池里，
-    // 权限调用失败也不影响读取本身。
-    super::platform::harden_dir_owner_only(dir);
-    for path in &paths {
-        super::platform::harden_file_owner_only(path);
     }
     let mut loaded: Vec<(String, ExternalModel)> = Vec::new();
     for path in paths {
@@ -1232,12 +1340,18 @@ async fn weights_dir_present(path: &str) -> bool {
 }
 
 /// `http://host:port/v1` → `http://host:port/v1/models`（已带 /models 则原样）。
+/// 带 query/fragment 的基地址（`…/v1?x=1`）把 `/models` 插到 `?`/`#` 之前：
+/// 按整串追加会产出 `…/v1?x=1/models`，探测永远 404（第九轮评审 P3）。
 fn endpoint_models_url(base_url: &str) -> String {
-    let trimmed = base_url.trim_end_matches('/');
+    let cut = base_url
+        .find(|c: char| c == '?' || c == '#')
+        .unwrap_or(base_url.len());
+    let (base, suffix) = base_url.split_at(cut);
+    let trimmed = base.trim_end_matches('/');
     if trimmed.ends_with("/models") {
-        trimmed.to_string()
+        format!("{trimmed}{suffix}")
     } else {
-        format!("{trimmed}/models")
+        format!("{trimmed}/models{suffix}")
     }
 }
 
@@ -1415,8 +1529,9 @@ mod tests {
         let grandchild = child.join("sub");
         std::fs::create_dir_all(&grandchild).expect("create grandchild");
         assert!(weights_deletion_guard(home.path(), None, None, &grandchild).is_err());
-        // 孙目录（深度 3）放行。
-        let great = grandchild.join("blobs");
+        // 孙目录（深度 3）放行。名字避开 "blobs" 分量——它是 blob 布局签名臂
+        // 的硬拒签名（第九轮评审 P2），无论深度一律拒绝。
+        let great = grandchild.join("qwen3");
         std::fs::create_dir_all(&great).expect("create great");
         assert!(weights_deletion_guard(home.path(), None, None, &great).is_ok());
     }
@@ -1815,5 +1930,125 @@ mod tests {
             vec!["a".to_string(), "b".to_string()]
         );
         assert!(parse_ollama_tag_names(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn path_has_ollama_blob_component_matches_layout_signature() {
+        // 布局签名按原始路径分量判定（第九轮评审 P2）：默认根与 OLLAMA_MODELS
+        // 迁移根下的 blobs 都命中，分量不在末尾也命中。
+        assert!(path_has_ollama_blob_component(
+            "/home/u/.ollama/models/blobs"
+        ));
+        assert!(path_has_ollama_blob_component("/mnt/ollama-models/blobs"));
+        assert!(path_has_ollama_blob_component("/data/blobs/sha256-abc"));
+        // 普通权重目录与 "blobs" 前缀的名字不误伤。
+        assert!(!path_has_ollama_blob_component("/home/u/ai/weights/qwen3"));
+        assert!(!path_has_ollama_blob_component("/home/u/blobstore/weights"));
+        assert!(!path_has_ollama_blob_component("relative/weights"));
+    }
+
+    #[test]
+    fn weights_deletion_guard_rejects_blob_layout_paths_without_needing_the_root() {
+        // blobs 分量签名臂（第九轮评审 P2）：ollama 根臂依赖环境推导，systemd
+        // 迁移目录对应用失明；签名臂不依赖根——深度臂本会放行的 blobs 目录
+        // 硬拒，同深度、无 blobs 分量的目录不受牵连（对照）。
+        let home = TempDir::new("guard-blobs");
+        let migrated = home.path().join("mnt").join("ollama").join("blobs");
+        std::fs::create_dir_all(&migrated).expect("create migrated blobs");
+        let error = weights_deletion_guard(home.path(), None, None, &migrated).unwrap_err();
+        assert!(error.contains("blob"), "unexpected error: {error}");
+        // 同深度、无 blobs 分量的目录照常放行。
+        let normal = home.path().join("mnt").join("ollama").join("models");
+        std::fs::create_dir_all(&normal).expect("create normal");
+        assert!(weights_deletion_guard(home.path(), None, None, &normal).is_ok());
+    }
+
+    #[test]
+    fn weights_deletion_guard_refuses_degenerate_home_root() {
+        // canonicalized home 为 `/` 时 containment 臂对一切绝对路径恒真（第九
+        // 轮评审 P3）：守卫必须直接拒绝，而不是让层级/包含臂全部落空。
+        let deep = TempDir::new("guard-root-home");
+        let weights = deep.path().join("a").join("b").join("c");
+        std::fs::create_dir_all(&weights).expect("create weights dir");
+        let error = weights_deletion_guard(Path::new("/"), None, None, &weights).unwrap_err();
+        assert!(error.contains("家目录"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    async fn register_rejects_blob_layout_weights_path_for_any_kind() {
+        // blob 布局签名臂（第九轮评审 P2）：kind:"other" 记录带迁移目录下的
+        // blobs 路径时，环境臂对 systemd 的 OLLAMA_MODELS 失明——登记端按
+        // 签名拒绝。校验发生在商店边界查询之前，本测试不需要临时 HOME。
+        let error = register_external_model(
+            "blob-layout".to_string(),
+            "other".to_string(),
+            None,
+            None,
+            Some("/mnt/ollama-models/blobs".to_string()),
+        )
+        .await
+        .expect_err("blob-layout weights_path must be rejected");
+        assert!(error.contains("blob"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn ollama_name_matches_detags_tags_and_folds_case() {
+        // 裸名记录 ↔ 带 tag daemon（两个方向都要命中，第九轮评审 P3）。
+        assert!(ollama_name_matches("mymodel", "mymodel:latest"));
+        assert!(ollama_name_matches("mymodel:latest", "mymodel"));
+        // 大小写折叠加去 tag（与商店 NOCASE 同一事实）。
+        assert!(ollama_name_matches("MyModel", "mymodel:latest"));
+        assert!(ollama_name_matches("Qwen3:30B", "qwen3"));
+        // 不同 base 名不得互相命中。
+        assert!(!ollama_name_matches("mymodel", "othermodel:latest"));
+        assert!(!ollama_name_matches("mymodel:latest", "mymodel2"));
+    }
+
+    #[test]
+    fn endpoint_models_url_inserts_models_before_query_or_fragment() {
+        // 带 query/fragment 的基地址：/models 必须插在 `?`/`#` 之前，否则探测
+        // 永远 404（第九轮评审 P3）。
+        assert_eq!(
+            endpoint_models_url("http://h:8080/v1?x=1"),
+            "http://h:8080/v1/models?x=1"
+        );
+        assert_eq!(
+            endpoint_models_url("http://h:8080/v1#frag"),
+            "http://h:8080/v1/models#frag"
+        );
+        // 已带 /models 的 query 形态原样保留。
+        assert_eq!(
+            endpoint_models_url("http://h:8080/v1/models?x=1"),
+            "http://h:8080/v1/models?x=1"
+        );
+    }
+
+    #[test]
+    fn read_registry_warns_when_existing_dir_cannot_be_read() {
+        // 目录存在但 read_dir 失败：这里用"路径是普通文件"稳定制造非 NotFound
+        // 错误——按空列表静默返回会让"模型全消失"，必须进 warnings（第九轮
+        // 评审 P3）。NotFound（首跑无目录）仍是无警告的空列表。
+        let host = TempDir::new("registry-notadir");
+        let not_a_dir = host.path().join("plain.txt");
+        std::fs::write(&not_a_dir, b"x").expect("write file");
+        let (models, warnings) = read_registry(&not_a_dir);
+        assert!(models.is_empty());
+        assert!(
+            warnings.iter().any(|warning| warning.contains("无法读取")),
+            "unreadable dir must surface a warning, got: {warnings:?}"
+        );
+        // 首跑（目录不存在）零警告。
+        let (models, warnings) = read_registry(&host.path().join("missing"));
+        assert!(models.is_empty() && warnings.is_empty());
+    }
+
+    #[test]
+    fn confirm_mismatch_echo_is_truncated() {
+        // 确认名回显限长（第九轮评审 P3）：record_name 来自手写文件，超长名字
+        // 不逐字进错误与日志。
+        let long_name = "长".repeat(100);
+        let error = removal_boundary_error(&long_name, "mismatch", false, None, None).unwrap_err();
+        assert!(error.contains(&"长".repeat(32)));
+        assert!(!error.contains(&"长".repeat(33)), "echo must be truncated");
     }
 }

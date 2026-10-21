@@ -357,7 +357,7 @@ const jaBase = {
           storeManaged:'モデルストアが管理', gotoModelStore:'モデルストアを開く', statusRunning:'実行中', statusDeployed:'デプロイ済み', statusPending:'未デプロイ',
           kindOllama:'Ollama', kindEndpoint:'エンドポイント', kindWeights:'ローカル重み', kindOther:'その他',
           registeredBadge:'登録済み', statusAvailable:'利用可能', statusUnreachable:'到達不可',
-          linked:'連携済み', link:'PINVOU で使う', linkDone:'PINVOU に接続し、新規チャットの既定モデルに設定しました。',
+          linked:'接続済み', link:'PINVOU で使う', linkDone:'PINVOU に接続し、新規チャットの既定モデルに設定しました。',
           linkDisabledRemote:'リモートのサービスアドレスはここでは接続できません：接続すると新規チャットの既定モデルがそちらへ向き、削除時に行を自動的に後始末できません。設定から手動で構成してください。',
           localSourceHint:'上記の外部モデル一覧は設定された Ollama サービスと登録済みのモデルエンドポイントによるもので、ローカルの任意のプロセスがこれらのサービスになりすます可能性があります。',
           servicesFailed:e=>`モデルサービスの確認に失敗しました：${e}`,

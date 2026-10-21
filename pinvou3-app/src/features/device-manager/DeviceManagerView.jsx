@@ -56,9 +56,12 @@ const OLLAMA_LINK_BASE_URL = 'http://127.0.0.1:11434/v1';
 // near-critical bands the bridge computes).
 const DISK_WARN_PCT = 85;
 const DISK_CRIT_PCT = 95;
-// Header GPU temperature chip thresholds (degrees Celsius).
-const GPU_TEMP_WARN_C = 80;
-const GPU_TEMP_CRIT_C = 90;
+// RAM usage thresholds. The values intentionally match the disk bands today
+// (the embedded MonitorView renders RAM as a static blue bar, so there is no
+// cross-screen color conflict to clash with); dedicated constants keep a
+// future edit to one band from silently retuning the other (round-9 review).
+const MEM_WARN_PCT = 85;
+const MEM_CRIT_PCT = 95;
 const QUESTION_MAX = 2000;
 // The counter only appears near the limit so it never becomes noise.
 const COUNTER_THRESHOLD = 1800;
@@ -155,17 +158,24 @@ const pctLevel = (pct, warnAt, critAt) => {
 // thresholds used to contradict the per-channel limit the card showed for the
 // very same reading (round-4 review P3). "Top sensor temp" is the max across
 // ALL temperature channels (NVMe, board, ...): the snapshot has no dedicated
-// GPU temperature source, and a GPU-specific label would mislead.
+// GPU temperature source, and a GPU-specific label would mislead. Snapshot
+// entries are pre-formatted (no `.value` field), so the parsed max is tracked
+// in a local `{ value, level }` — storing the entry itself left `top.value`
+// undefined ("undefined°C" in the header chip) and made every later
+// `value > top.value` compare false, so the first entry won instead of the
+// hottest (round-9 review P1).
 const maxSensorTemperature = (sensors) => {
   let top = null;
   for (const group of Array.isArray(sensors) ? sensors : []) {
     for (const entry of Array.isArray(group?.entries) ? group.entries : []) {
       if (entry?.kind !== 'temperature') continue;
       const value = parseFloat(entry.valueText);
-      if (Number.isFinite(value) && (top == null || value > top.value)) top = entry;
+      if (Number.isFinite(value) && (top == null || value > top.value)) {
+        top = { value, level: entry.level };
+      }
     }
   }
-  return top == null ? null : { value: top.value, level: top.level };
+  return top;
 };
 
 const friendlyChipName = (group, copy) => {
@@ -351,8 +361,11 @@ const ProcList = ({ title, rows, metricKey, testId, placeholder = null }) => (
       <div className={`text-[12px] ${MUTED_TEXT}`}>{placeholder || '\u2014'}</div>
     ) : (
       <div className="space-y-2">
-        {rows.map((proc) => (
-          <div key={`${proc.pid}`} className="flex items-center justify-between gap-3 text-[13px]">
+        {rows.map((proc, index) => (
+          // pid alone is not a unique key: nvidia-smi emits one row per
+          // (process, GPU) for multi-GPU processes, so the index is the
+          // final tiebreak (round-9 review P3).
+          <div key={`${proc.pid}-${index}`} className="flex items-center justify-between gap-3 text-[13px]">
             <span className="min-w-0 truncate text-black/75 dark:text-white/75">
               {proc.name} <span className={`font-mono text-[11px] ${MUTED_TEXT}`}>#{proc.pid}</span>
             </span>
@@ -824,16 +837,16 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                 <HealthChip
                   label={copy.chipMemory}
                   value={`${Math.round(ramPct)}%`}
-                  level={pctLevel(ramPct, DISK_WARN_PCT, DISK_CRIT_PCT)}
+                  level={pctLevel(ramPct, MEM_WARN_PCT, MEM_CRIT_PCT)}
                 />
               )}
               {topTemp != null && (
                 <HealthChip
                   label={copy.chipMaxTemp}
                   value={`${topTemp.value}\u00B0C`}
-                  // Same bridge-computed level as the sensor card; the fixed
-                  // thresholds only apply when the level is missing.
-                  level={topTemp.level || pctLevel(topTemp.value, GPU_TEMP_WARN_C, GPU_TEMP_CRIT_C)}
+                  // Same bridge-computed warn/crit level as the sensor card;
+                  // no client-side fallback thresholds (round-9 review P3).
+                  level={topTemp.level}
                 />
               )}
               {deviceFmt?.gpuExt?.driverVersion && (
@@ -990,7 +1003,12 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                   <MsButton
                     tone="primary"
                     busy={doctorBusy === 'install_model'}
-                    disabled={!!doctorBusy && doctorBusy !== 'install_model'}
+                    // Cross-slot exclusion (round-9 review P3): doctor actions
+                    // navigate to chat, which would silently discard the
+                    // aggregated removal toast while a row op (busyKey) is
+                    // still in flight — the whole interactive cluster stays
+                    // mutually exclusive for the duration.
+                    disabled={(!!doctorBusy && doctorBusy !== 'install_model') || !!busyKey}
                     onClick={() => runDoctor('install_model')}
                     data-testid="device-manager-install-model"
                   >
@@ -1131,18 +1149,21 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                     // registration); pre-disable with the same managed hint so
                     // the user learns before arming (round-4 review P3). For
                     // ollama rows the backend also checks the effective deletion
-                    // name (record.model, falling back to name, case-insensitive)
-                    // — mirror that arm so an alias registry row whose MODEL is
-                    // store-managed pre-disables too instead of arming into a
-                    // guaranteed rejection (round-6 review).
+                    // name (model, falling back to name) — mirror that arm so an
+                    // alias registry row whose MODEL is store-managed
+                    // pre-disables too instead of arming into a guaranteed
+                    // rejection (round-6 review). Case sensitivity mirrors the
+                    // backend's two arms exactly (round-9 review P2): the name
+                    // arm is a CASE-SENSITIVE exact compare, and only the ollama
+                    // effective-deletion-name arm is de-tagged +
+                    // case-insensitive — lowercasing both sides used to also
+                    // pre-disable case variants the backend would happily remove.
                     const managedByStore = storeRows.some((record) => {
-                      const storeName = String(record.model_name || '').toLowerCase();
-                      if (storeName === stripModelTag(row.name)) return true;
-                      return (
-                        row.kind === 'ollama' &&
-                        !!row.model &&
-                        storeName === stripModelTag(row.model)
-                      );
+                      const storeName = String(record.model_name || '');
+                      if (row.kind !== 'ollama') return storeName === row.name;
+                      // Backend effective deletion name: model, falling back to name.
+                      const effectiveName = row.model || row.name;
+                      return stripModelTag(storeName) === stripModelTag(effectiveName);
                     });
                     return (
                       <div
@@ -1330,7 +1351,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                     key={kind}
                     type="button"
                     data-testid={`device-manager-doctor-${kind}`}
-                    disabled={!!doctorBusy}
+                    disabled={!!doctorBusy || !!busyKey}
                     onClick={() => runDoctor(kind)}
                     className={`${CARD_CLASS} flex flex-col items-start gap-2 p-5 text-left transition-all duration-300 hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60`}
                   >
@@ -1366,7 +1387,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                   <MsButton
                     tone="primary"
                     busy={doctorBusy === 'custom'}
-                    disabled={questionInvalid || (!!doctorBusy && doctorBusy !== 'custom')}
+                    disabled={questionInvalid || (!!doctorBusy && doctorBusy !== 'custom') || !!busyKey}
                     onClick={sendCustom}
                     data-testid="device-manager-doctor-send"
                   >

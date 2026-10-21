@@ -374,7 +374,7 @@ export const dictZh = {
           doctorFailed:e=>`排查失败：${e}`,
           refreshFailed:e=>`外部模型刷新失败：${e}`,
           linkRowStale:(name,e)=>`「${name}」已移除，但品悟模型列表里的对应配置没能移除（${e}）。它已不可用，请到设置里手动删除。`,
-          linkReasonBridge:'品悟桥接不可用', linkReasonUnknown:'原因不明', registerNoId:'登记接口未返回模型 id，请重试',
+          linkReasonBridge:'品悟桥接不可用', linkReasonUnknown:'原因不明', registerNoId:'登记接口未返回模型 ID，请重试',
           removeDone:name=>`已移除「${name}」`, removeFailed:e=>`移除失败：${e}`, warn:w=>`提示：${w}`,
           ollamaOfflineHint:'这台设备上还没有可管理的模型。可以点「安装新模型」，让 AI 助手帮你安装（例如通过 Ollama）。',
           doctorPackages:'检查系统更新', doctorPackagesDesc:'看看系统和软件有哪些可升级，只查不改',

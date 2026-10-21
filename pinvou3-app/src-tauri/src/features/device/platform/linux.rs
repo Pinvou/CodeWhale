@@ -3,22 +3,37 @@
 //! （graceful degrade，与 monitor 采样同一原则）。
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use super::ExtraSensor;
 
 /// DMI 产品名：候选字段清单与读取收敛在 `platform::dmi`（能力位同一份清单），
-/// 这里取第一个非空字段用于设备页展示。
+/// 这里取第一个非空字段用于设备页展示。进程内 OnceLock 缓存（第九轮评审 P3，
+/// 性能）：产品名是静态硬件事实，运行期不会变，而 `sample_snapshot` 每 2s 一次
+/// 全量采样没必要反复扫 DMI 目录；读不到按 None 缓存，同样避免每拍重试一个
+/// 必然失败的读取。缓存收在本文件（features/device 的平台适配层），不动
+/// `platform/dmi.rs` 的共享读取实现。
 pub(crate) fn dmi_product_name() -> Option<String> {
-    crate::platform::dmi::dmi_first_nonempty()
+    static CACHE: OnceLock<Option<String>> = OnceLock::new();
+    CACHE
+        .get_or_init(crate::platform::dmi::dmi_first_nonempty)
+        .clone()
 }
 
 /// `/etc/os-release` 的 `PRETTY_NAME="..."`（引号可省略）；`/etc` 没有时按规范
 /// 回退 `/usr/lib/os-release`（usrmerge/部分容器镜像里 /etc 不必有这份文件）。
+/// 同 DMI 产品名：进程内 OnceLock 缓存静态 OS 事实，不随 2s 采样反复读盘
+/// （第九轮评审 P3）。解析逻辑仍是纯函数，测试直打不受缓存影响。
 pub(crate) fn os_pretty_name() -> Option<String> {
-    std::fs::read_to_string("/etc/os-release")
-        .or_else(|_| std::fs::read_to_string("/usr/lib/os-release"))
-        .ok()
-        .and_then(|text| parse_os_release_pretty_name(&text))
+    static CACHE: OnceLock<Option<String>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            std::fs::read_to_string("/etc/os-release")
+                .or_else(|_| std::fs::read_to_string("/usr/lib/os-release"))
+                .ok()
+                .and_then(|text| parse_os_release_pretty_name(&text))
+        })
+        .clone()
 }
 
 fn parse_os_release_pretty_name(text: &str) -> Option<String> {
@@ -574,6 +589,51 @@ mod tests {
                 error.contains("Ollama"),
                 "rejection must name the daemon directory, got: {error}"
             );
+        });
+    }
+
+    /// 视图装配对 ollama 行统一回填设置推导的 daemon 基地址 + `/v1`（第九轮
+    /// 评审 P2）：前端 linkTargetOf 曾硬编码 11434、注册行回显自带 base_url，
+    /// 而后端探测/删除全部走 `ollama_base()`——展示、链接与删除必须对准同一
+    /// 实例（注册行自带的 11434 地址被覆盖）。daemon 不可达分支同样要覆盖
+    /// （死端口配置即触发 warnings 路径）。
+    #[test]
+    fn external_models_view_pins_ollama_base_url_to_settings_daemon() {
+        use crate::features::device::external_models::registry_dir;
+        use crate::features::device::get_external_models;
+        use crate::features::model_store::platform::linux::config;
+        let _ctx = config::TempHome::new();
+        point_ollama_at_dead_port();
+        let dir = registry_dir();
+        std::fs::create_dir_all(&dir).expect("registry dir");
+        // 存量记录自带 base_url（早期模板/前端写的 11434），视图装配必须覆盖。
+        std::fs::write(
+            dir.join("m-legacy01.json"),
+            r#"{"schema":1,"id":"m-legacy01","name":"legacy-ollama","kind":"ollama","base_url":"http://127.0.0.1:11434/v1","model":"legacy:latest"}"#,
+        )
+        .expect("write legacy ollama record");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async move {
+            let view = get_external_models().await.expect("list external models");
+            let ollama_rows: Vec<_> = view
+                .models
+                .iter()
+                .filter(|model| model.kind == "ollama")
+                .collect();
+            assert!(
+                !ollama_rows.is_empty(),
+                "registry ollama row must be listed"
+            );
+            for model in ollama_rows {
+                assert_eq!(
+                    model.base_url.as_deref(),
+                    Some("http://127.0.0.1:1/v1"),
+                    "ollama rows must carry the settings-derived daemon base + /v1"
+                );
+            }
         });
     }
 }

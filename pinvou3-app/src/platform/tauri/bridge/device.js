@@ -281,12 +281,24 @@
     return true;
   }
 
+  // 快照轮询世代号：pollDevice 过 in-flight 守卫后捕获 seq，invoke 决算后先对
+  // 世代再动 state/notify，finally 只在最新世代清 in-flight 旗。否则
+  // startDevicePolling 复位卡死旗（round-8）后，慢而未死的旧拍会在新拍在飞时
+  // 再清一次旗（双发），旧快照/旧错误也可能晚于新拍落地——旧错误会在恢复后
+  // 重新点亮横幅。startDevicePolling 重启时 bump 一次，让任何在飞旧拍整体
+  // 作废：不能再发布、不能清旗、也不会压制新拍（round-9 review P2）。
+  var devicePollSeq = 0;
+
   // eslint-disable-next-line sonarjs/cognitive-complexity -- legacy bridge; refactor tracked separately
   async function pollDevice() {
     if (devicePollInFlight) return;
     devicePollInFlight = true;
+    var seq = ++devicePollSeq;
     try {
       var snap = await invoke("get_device_snapshot");
+      // 世代已前进（重启过）→ 本拍整体作废：不发布、不动 state；下面的
+      // finally 也不清 in-flight 旗（旗只归最新世代所有）。
+      if (seq !== devicePollSeq) return;
       // The previous round errored → this round must notify once so the
       // "read failed" banner switches back to the normal panel.
       var hadDeviceError = !!state.deviceError;
@@ -318,6 +330,9 @@
         notifyDomains(["device"]);
       }
     } catch (e) {
+      // 旧世代的错误晚到不得再动横幅：恢复拍可能早已落地，旧错误重新点亮
+      // 就是横幅回归。
+      if (seq !== devicePollSeq) return;
       // 同文案的失败拍不重复发布：后台 2s 轮询在故障期间每拍都会走到这里，
       // 无条件 notify 会让设备页每 2s 全量重渲染一块不变的横幅（第七轮评审
       // P3；services 通道同款守卫见下）。恢复拍由 success 分支的 hadDeviceError
@@ -329,7 +344,9 @@
         notifyDomains(["device"]);
       }
     } finally {
-      devicePollInFlight = false;
+      if (seq === devicePollSeq) {
+        devicePollInFlight = false;
+      }
     }
   }
 
@@ -339,8 +356,14 @@
     // never settles, pollDevice's finally never runs, and every later tick
     // would no-op — the page freezes on stale data with no error banner.
     // Restart paths (mount/retry) are the recovery point, so clear the flag
-    // here (round-8 review P3).
+    // here (round-8 review P3). 复位同时 bump 两个通道的世代号：任何在飞旧拍
+    // 随之作废——不能再发布、不能清 in-flight 旗、也不会压制新拍；否则慢而
+    // 未死的旧拍会在新拍在飞时二次清旗（双发），旧错误还会在恢复后重新点亮
+    // 横幅（round-9 review P2/P3）。
     devicePollInFlight = false;
+    devicePollSeq += 1;
+    deviceServicesInFlight = false;
+    deviceServicesPollSeq += 1;
     pollDevice();
     deviceIntervalId = setInterval(pollDevice, 2000);
   }
@@ -358,13 +381,20 @@
   // 也不能让过时的 running 状态无限期冒充事实（第六轮评审 P2）。
   var SERVICES_STALE_FAILURES = 3;
   var deviceServicesFailures = 0;
+  // services 探测世代号：与快照通道同一纪律（round-9 review P3）。stale 世代
+  // 的失败不得推进连续失败计数（否则阈值提前打满、错误旗早立），也不得替
+  // 最新世代清 in-flight 旗；成功拍同样先对世代——stale 成功不得把计数清零。
+  var deviceServicesPollSeq = 0;
   async function pollDeviceServices() {
     // 与快照轮询同一 in-flight 纪律：10s 定时 + 手动刷新可并发，docker 探测最坏
     // 3s+，上一拍未返回时本拍直接跳过，避免响应乱序把旧探测结果倒灌回来。
     if (deviceServicesInFlight) return;
     deviceServicesInFlight = true;
+    var seq = ++deviceServicesPollSeq;
     try {
       var services = await invoke("get_device_services");
+      // 世代已前进 → 本拍作废：不动 state、不动计数（成功清零也是计数变更）。
+      if (seq !== deviceServicesPollSeq) return;
       var next = Array.isArray(services) ? services : [];
       deviceServicesFailures = 0;
       // 内容没变不下发（与快照的显示等价抑制同一目标）。
@@ -381,6 +411,8 @@
       }
       if (changed) notifyDomains(["device"]);
     } catch (e) {
+      // stale 世代的失败：不推进计数、不立旗、不留日志——它已不属于当下。
+      if (seq !== deviceServicesPollSeq) return;
       // 探测失败保留上一份结果：瞬时抖动不该被渲染成「全部停止」。首拍就失败
       // 必须立即可见——null 悬着只会让视图的"探测中"无限驻留；有基线后连续
       // SERVICES_STALE_FAILURES 拍失败也要把错误旗立起来（旧 chips 保留显示，
@@ -397,13 +429,26 @@
         }
       }
     } finally {
-      deviceServicesInFlight = false;
+      if (seq === deviceServicesPollSeq) {
+        deviceServicesInFlight = false;
+      }
     }
   }
 
   // ── External models ──────────────────────────────────────────────
+  // 回读世代号：调用入口捕获 seq，invoke 决算后世代已前进（有更新的回读发起）
+  // 则整包丢弃——不发布、不动 state，仅为调用方兼容返回当前
+  // state.externalModels。register/remove 的内部回读在操作 invoke 决算之后才
+  // 发起，seq 严格大于操作前发起的任何回读：操作前的慢回读无论多晚到都会被
+  // 丢弃——被删的行不会复活、新登记的行不会消失；后发起的调用永远持更高
+  // seq、永远胜出，其回读在时间上必然不早于被丢弃者（round-9 review P1）。
+  var externalModelsFetchSeq = 0;
   async function fetchExternalModels() {
+    var seq = ++externalModelsFetchSeq;
     var view = await invoke("get_external_models");
+    if (seq !== externalModelsFetchSeq) {
+      return state.externalModels;
+    }
     // 无变化不下发（登记/移除后的回读常常逐字节一致，不值得一次全域重渲染）。
     // 结构比较而非 JSON.stringify：键序翻转不再击穿抑制（第四轮评审 P3）。
     var next = view || null;

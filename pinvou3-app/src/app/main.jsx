@@ -3015,9 +3015,10 @@ const App = () => {
       // handleNewChat/handleSwitchSession 同款（hideMode/sessionTarget 第四轮
       // 评审补齐）。失败不打断用户：设备管理页上的按钮各自有 loading 态。
       const openDeviceDoctorChat = useCallback(async (prompt) => {
-        // 返回值契约（设备管理页依赖）：true=已送达新会话；false=没发出去（桥
-        // 不可用 / 中途离开设备页 / 发送失败）。视图据此保留用户输入并提示重试，
-        // 不再静默吞掉失败（评审 P3：失败仅 console、输入被无声清空）。
+        // 返回值契约（设备管理页依赖）：true=提示词已送达新会话（发送成功后无
+        // 论视图切换是否被更新的会话转换取代，都按已送达计）；false=没发出去
+        // （桥不可用 / 发送前转换已被取代 / 发送失败）。视图据此保留用户输入并
+        // 提示重试，不再静默吞掉失败（评审 P3：失败仅 console、输入被无声清空）。
         if (!bridge.available || !prompt) return false;
         if (!bridge.chat?.sendMessageToSession) return false;
         try {
@@ -3046,12 +3047,16 @@ const App = () => {
             // 发送 round-trip 期间用户可能已点侧栏离开设备页：与
             // handleSwitchSession 同款落定后复查，不把用户从别的页面拽进聊天
             // （serialize 通道上后入队的 switch 转换会紧接着把视图切走，先跳转
-            // 只剩一次闪跳）（第八轮评审 P3）。
-            if (!isCurrent()) return false;
-            setCodeModeOn(false);
-            closeMobileSidebar();
-            setCurrentView('chat');
-            setActiveChat(sid);
+            // 只剩一次闪跳）（第八轮评审 P3）。此复查只跳过视图切换：消息此时
+            // 已真实送达新会话（侧栏历史可见），返回值必须如实报 true——原实现
+            // 在这里返回 false，设备页会对已存在的消息再弹「没发出去」并保留
+            // 输入（第九轮评审 P1）。
+            if (isCurrent()) {
+              setCodeModeOn(false);
+              closeMobileSidebar();
+              setCurrentView('chat');
+              setActiveChat(sid);
+            }
             return true;
           }, {
             channel: 'session',
@@ -4005,11 +4010,14 @@ const App = () => {
       // 未读红点与侧栏入口同源，避免两套提醒逻辑漂移。
       const scheduledUnread = !!(bs && ((bs.scheduledTasks || []).some(task => task.hasUnreadRuns)
         || (bs.scheduledTaskRecentRuns || []).some(run => run && run.unread)));
+      // MegaCube 一体机把「运行状态」入口换成「设备管理」：视图已是
+      // DeviceManagerView，顶栏标题须与侧栏 label 同用 megacubeDevice 口径，
+      // 否则顶栏仍写「运行状态」与实际视图漂移（第九轮评审 P3）。
       const mobileTitle = currentView === 'chat'
         ? ((((chatHistory || []).find(c => c.id === activeChat)) || {}).title || 'PINVOU')
         : currentView === 'codex'
           ? ((((codexHistory || []).find(c => c.id === activeCodexId)) || {}).title || t.uiCodex.untitledSession)
-        : ({ search: t.searchChats, scheduled: t.scheduledPlans, monitor: t.monitor, cardpool: t.cardPool, toolStore: t.toolStore, teamRelay: t.teamRelay, outputs: t.outputs, knowledge: t.knowledge, modelStore: t.modelStore, settings: t.settings, browser: t.browser }[currentView] || 'PINVOU');
+        : ({ search: t.searchChats, scheduled: t.scheduledPlans, monitor: megacubeDevice ? t.deviceMgr : t.monitor, cardpool: t.cardPool, toolStore: t.toolStore, teamRelay: t.teamRelay, outputs: t.outputs, knowledge: t.knowledge, modelStore: t.modelStore, settings: t.settings, browser: t.browser }[currentView] || 'PINVOU');
       const mobileNavigate = (view, beforeNavigate) => {
         setMobileMoreOpen(false);
         navigateFromScheduledRun(view, beforeNavigate);

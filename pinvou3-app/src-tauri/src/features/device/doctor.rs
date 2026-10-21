@@ -273,6 +273,14 @@ mod tests {
                 // dist-upgrade 禁令此前两侧都未锚定，锚着的 `apt upgrade` 落在
                 // 许可半句里，削弱禁令的编辑照样全绿（第八轮评审 P3）。
                 "禁止 `dist-upgrade`",
+                // contains 锚点钉的是 token 不是义务（第九轮评审 P3）：只锚
+                // "rm -rf" 时删掉"带通配符或模糊路径"限定语照样全绿；sudo 解释
+                // 义务、系统目录清单、"不得虚构"禁令同理。各补唯一子串（grep
+                // 验证唯一后落锚）。
+                "带通配符或模糊路径",
+                "先解释为什么需要、会做什么",
+                "/etc、/usr、/boot、/var/lib",
+                "不得虚构",
                 "sudo",
                 "磁盘剩余空间",
                 "短超时",
@@ -360,6 +368,11 @@ mod tests {
         assert!(skill.contains("external-models.d"));
         assert!(skill.contains("model-store"));
         assert!(skill.contains("永远不要手工增删改"));
+        // 系统目录清单与"不得虚构"禁令（第九轮评审 P3）：SKILL 侧此前只锚了
+        // rm -rf 限定语与豁免限定词，这两条硬约束同样可被删句绕过——doctor
+        // 侧与 SKILL 侧的两份独立文本都要锚住（grep 验证唯一后落锚）。
+        assert!(skill.contains("`/etc`、`/usr`、`/boot`、`/var/lib`"));
+        assert!(skill.contains("不得虚构命令输出"));
         // 注册表文件契约：文件名=<id>.json、weights_path 教 null、示例带
         // chmod 600、命令白名单三步之外禁 && 拼接（对齐 install_model 模板）。
         assert!(skill.contains("文件名必须与内容里的 `id` 字段完全一致"));

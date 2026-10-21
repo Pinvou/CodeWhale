@@ -615,8 +615,10 @@ impl Pinvou3Bundle {
             let content = match dir_name {
                 "visual-design" => VISUAL_DESIGN_SKILL_MD,
                 "device-doctor" => Self::DEVICE_DOCTOR_SKILL_MD,
-                // 常量与内嵌资源树有互锁测试把守（builtin_released_skill_dirs_
-                // match_embedded_resources），新增技能时在此登记内容映射。
+                // 常量的互锁测试把守：builtin_released_skill_dirs_match_
+                // embedded_resources 钉常量↔内嵌资源树；漏登记 match 臂时
+                // unreachable! 会在 write_builtin_skills_releases_exactly_
+                // the_listed_dirs 的真臂内爆掉。新增技能时在此登记内容映射。
                 other => unreachable!("未登记的内置技能目录：{other}"),
             };
             let dir = self.skills_dir.join(dir_name);
