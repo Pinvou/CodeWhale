@@ -27,6 +27,19 @@ async fn remote_send_joint_preparation_and_reserved_dispatch_freeze_credentials_
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let home = TestHome::new();
+    // Preparation reloads preferences and replaces the bridge's seed model.
+    // Pin the global route in this isolated home so the ordinary remote leg
+    // cannot probe an unrelated service on the default localhost endpoint.
+    let mut prefs = UserPrefs::default();
+    let mut model = SavedModel::builtin_llmapi();
+    model.id = "fixture-global-model".into();
+    model.model = "fixture-global-wire".into();
+    model.preset = crate::platform::prefs::ModelPreset::Deepseek;
+    model.provider_kind = None;
+    model.base_url = "https://example.invalid/v1".into();
+    prefs.advanced.active_model_id = Some(model.id.clone());
+    prefs.advanced.saved_models = vec![model];
+    prefs.save().unwrap();
     let store = SessionStore::boot().unwrap();
     for temporary in [false, true] {
         for (session_id, persona, caller) in [
@@ -97,6 +110,14 @@ async fn remote_send_joint_preparation_and_reserved_dispatch_freeze_credentials_
                     )
                     .await?;
                     let wire_model = prepared.model.model.clone();
+                    assert_eq!(
+                        wire_model,
+                        if temporary {
+                            "fixture-task-wire"
+                        } else {
+                            "fixture-global-wire"
+                        }
+                    );
                     let mut bridge =
                         EnginePool::finalize_runtime_bridge(bridge, &prepared, pins).await;
                     bridge.workspace = home_ref.directory.path().to_owned();
