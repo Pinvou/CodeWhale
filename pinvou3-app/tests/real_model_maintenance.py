@@ -236,18 +236,18 @@ def main():
         assert model.exists() and not gate()['maintenance']
         report['checks'].append('failed deploy leaves downloaded row; reservation cancel/recovery and cleanup never grant lifecycle authority or rerun scripts')
         (root / 'fail-deploy').unlink()
-        status, value = api('/v1/install_local', {'card_id':card_id},'pinvou')
+        status, value = api('/v1/ui/deploy', {'card_id':card_id,'profile_id':None},'pinvou')
         assert status==200,value
-        installed = finish(value['run_id'])
+        installed = finish(value['result']['run_id'])
         assert installed['status']=='succeeded',installed
         observed = next(m for m in api('/v1/models')[1]['models'] if m['card']==card_id)
         assert not observed['managed'] and observed['can_adopt'],observed
         success('uninstall',False)
         assert model.exists() and not gate()['maintenance']
         report['checks'].append('never-enabled deployed card can uninstall with weights retained without first enabling')
-        status,value=api('/v1/install_local',{'card_id':card_id},'pinvou')
+        status,value=api('/v1/ui/deploy',{'card_id':card_id,'profile_id':None},'pinvou')
         assert status==200,value
-        installed=finish(value['run_id'])
+        installed=finish(value['result']['run_id'])
         assert installed['status'] == 'succeeded', installed
         subprocess.run(['docker', 'create', '--pull=never', '--name', name, '--label', 'pinvou.acceptance=maintenance',
                         '--memory', '2g', '--cpus', '2', '--restart=no',

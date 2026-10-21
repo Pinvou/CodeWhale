@@ -149,7 +149,8 @@ def main():
         with sqlite3.connect(store/'models.db') as database:
             assert database.execute('SELECT status,running FROM store_models WHERE card_id=?',(card_id,)).fetchone()==('downloaded',0)
         report['checks'].append('never-enabled native fixture: ordinary stop denied; reserved uninstall keeps artifact and downloaded record')
-        install()
+        run=api('/v1/ui/deploy',{'card_id':card_id,'profile_id':None},True)['result']['run_id']
+        deployed=wait(lambda:done(run));assert deployed['status']=='succeeded',deployed
         lifecycle('uninstall',True)
         assert not (model/artifact).exists() and shared.read_text()=='must survive metadata purge\n'
         assert not card.exists()

@@ -88,7 +88,7 @@ class CmsdHandler(socketserver.StreamRequestHandler):
             if s.mode == "query-failed":
                 code, value = 503, {"error": {"code": "fixture_busy"}}
             elif s.mode in ("observed", "adoptable", "receipt-failed"):
-                value = {"models": [{"card": s.card, "managed": s.owned,
+                value = {"models": [{"card": s.card, "model_id": "qa-authority-model", "managed": s.owned,
                          "can_adopt": s.mode != "observed", "can_reserve_uninstall": False}]}
             else:
                 value = {"models": []}
