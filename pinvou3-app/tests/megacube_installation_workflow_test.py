@@ -6,15 +6,206 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import stat
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from megacube_mcp_smoke import FakeCmsd, McpClient, SERVER
 
 spec = importlib.util.spec_from_file_location("megacube_workflow", SERVER)
 server = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(server)
+
+
+class CardMaterializationTests(unittest.TestCase):
+    """Use actual materialization methods; no socket, daemon, network or worker."""
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.cards = self.root / "cards"
+        self.card = self.cards / "fixture"
+        self.card.mkdir(parents=True)
+        environment = patch.dict(os.environ, {"MEGACUBE_CARDS_DIR": str(self.cards)})
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.content = b"#!/bin/sh\nexit 0\n"
+
+    def snapshot(self):
+        result = {}
+        for base, directories, files in os.walk(self.root, followlinks=False):
+            for name in directories + files:
+                path = Path(base) / name
+                metadata = path.lstat()
+                value = [metadata.st_ino, metadata.st_mode, metadata.st_nlink]
+                if stat.S_ISREG(metadata.st_mode):
+                    value.append(path.read_bytes())
+                elif stat.S_ISLNK(metadata.st_mode):
+                    value.append(os.readlink(path))
+                result[str(path.relative_to(self.root))] = value
+        return result
+
+    def assert_preserved_rejection(self, job):
+        before = self.snapshot()
+        with self.assertRaises((server._CardError, OSError)):
+            job()
+        self.assertEqual(self.snapshot(), before)
+
+    def materialize(self, name="download_model.sh"):
+        return server._materialize_card("fixture", {name: self.content})
+
+    def test_new_and_genuinely_missing_files_complete_without_replacing_matches(self):
+        self.card.rmdir()
+        files = {"download_model.sh": self.content, "vendor/start.sh": self.content,
+                 "card.json": b"{}"}
+        self.assertEqual(server._materialize_card("fixture", files), "ok_new")
+        before = self.snapshot()
+        self.assertEqual(server._materialize_card("fixture", files), "ok_same")
+        self.assertEqual(self.snapshot(), before)
+        (self.card / "vendor/start.sh").unlink()
+        retained = (self.card / "download_model.sh").stat().st_ino
+        self.assertEqual(server._materialize_card("fixture", files), "ok_completed")
+        self.assertEqual((self.card / "download_model.sh").stat().st_ino, retained)
+        for name, content in files.items():
+            self.assertEqual((self.card / name).read_bytes(), content)
+        self.assertEqual((self.card / "vendor/start.sh").stat().st_mode & 0o777, 0o755)
+
+    def test_matching_and_different_regular_files_preserve_inode_mode_and_bytes(self):
+        leaf = self.card / "download_model.sh"
+        for content, expected in ((self.content, "ok_same"), (b"different", None),
+                                  (self.content + b"x" * 1000000, None)):
+            with self.subTest(size=len(content)):
+                leaf.write_bytes(content)
+                leaf.chmod(0o640)
+                before = self.snapshot()
+                if expected:
+                    self.assertEqual(self.materialize(), expected)
+                    self.assertEqual(self.snapshot(), before)
+                else:
+                    self.assert_preserved_rejection(self.materialize)
+
+    def test_unknown_file_leaves_are_preserved(self):
+        leaf = self.card / "download_model.sh"
+        makers = {"fifo": lambda: os.mkfifo(leaf, 0o600),
+                  "directory": leaf.mkdir,
+                  "dangling_link": lambda: leaf.symlink_to("missing"),
+                  "looping_link": lambda: leaf.symlink_to(leaf.name)}
+        for kind, create in makers.items():
+            with self.subTest(kind=kind):
+                create()
+                try:
+                    self.assert_preserved_rejection(self.materialize)
+                finally:
+                    if leaf.is_dir() and not leaf.is_symlink():
+                        leaf.rmdir()
+                    else:
+                        leaf.unlink()
+        target = self.root / "fifo-target"
+        os.mkfifo(target, 0o600)
+        leaf.symlink_to(target)
+        self.assert_preserved_rejection(self.materialize)
+
+    def test_live_regular_file_aliases_keep_the_existing_content_contract(self):
+        target = self.root / "shared-script"
+        leaf = self.card / "download_model.sh"
+        target.write_bytes(self.content)
+        target.chmod(0o640)
+        leaf.symlink_to(target)
+        before = self.snapshot()
+        self.assertEqual(self.materialize(), "ok_same")
+        self.assertEqual(self.snapshot(), before)
+        target.write_bytes(b"different script")
+        self.assert_preserved_rejection(self.materialize)
+
+    def test_existing_live_directory_aliases_allow_matching_and_missing_files(self):
+        actual = self.root / "actual-card"
+        self.card.rename(actual)
+        self.card.symlink_to(actual, target_is_directory=True)
+        vendor = self.root / "shared-vendor"
+        vendor.mkdir()
+        (actual / "vendor").symlink_to(vendor, target_is_directory=True)
+        links = {path: path.lstat().st_ino for path in (self.card, actual / "vendor")}
+        self.assertEqual(self.materialize("vendor/start.sh"), "ok_completed")
+        self.assertEqual((vendor / "start.sh").read_bytes(), self.content)
+        before = self.snapshot()
+        self.assertEqual(self.materialize("vendor/start.sh"), "ok_same")
+        self.assertEqual(self.snapshot(), before)
+        for path, inode in links.items():
+            self.assertEqual(path.lstat().st_ino, inode)
+        alias = self.root / "cards-alias"
+        alias.symlink_to(self.cards, target_is_directory=True)
+        with patch.dict(os.environ, {"MEGACUBE_CARDS_DIR": str(alias)}):
+            self.assertEqual(self.materialize("enable.sh"), "ok_completed")
+        self.assertTrue(alias.is_symlink())
+
+    def test_missing_leaf_under_unknown_ancestors_is_preserved(self):
+        parent = self.card / "vendor"
+        makers = {"non_directory": lambda: parent.write_bytes(b"keep"),
+                  "dangling_alias": lambda: parent.symlink_to("missing"),
+                  "looping_alias": lambda: parent.symlink_to(parent.name),
+                  "fifo": lambda: os.mkfifo(parent, 0o600)}
+        for kind, create in makers.items():
+            with self.subTest(kind=kind):
+                create()
+                self.assert_preserved_rejection(lambda: self.materialize("vendor/start.sh"))
+                parent.unlink()
+
+    def test_unknown_target_card_entries_are_preserved(self):
+        self.card.rmdir()
+        makers = {"regular": lambda: self.card.write_bytes(b"keep"),
+                  "fifo": lambda: os.mkfifo(self.card, 0o600),
+                  "dangling_alias": lambda: self.card.symlink_to("missing"),
+                  "looping_alias": lambda: self.card.symlink_to(self.card.name)}
+        for kind, create in makers.items():
+            with self.subTest(kind=kind):
+                create()
+                self.assert_preserved_rejection(self.materialize)
+                self.card.unlink()
+
+    def test_new_file_and_directory_permissions_keep_the_original_umask_policy(self):
+        for mask in (0o002, 0o022, 0o077):
+            with self.subTest(umask=oct(mask)):
+                name = "mode-" + str(mask)
+                previous = os.umask(mask)
+                try:
+                    result = server._materialize_card(name, {
+                        "card.json": b"{}", "vendor/start.sh": self.content,
+                        "vendor/config.json": b"{}"})
+                finally:
+                    os.umask(previous)
+                self.assertEqual(result, "ok_new")
+                card = self.cards / name
+                self.assertEqual(card.stat().st_mode & 0o777, 0o777 & ~mask)
+                self.assertEqual((card / "vendor").stat().st_mode & 0o777, 0o777 & ~mask)
+                self.assertEqual((card / "card.json").stat().st_mode & 0o777, 0o666 & ~mask)
+                self.assertEqual((card / "vendor/config.json").stat().st_mode & 0o777, 0o666 & ~mask)
+                self.assertEqual((card / "vendor/start.sh").stat().st_mode & 0o777, 0o755)
+
+    def test_unavailable_root_is_rejected_without_an_ancestor_loop(self):
+        with patch.object(server.os, "stat", side_effect=FileNotFoundError), \
+                patch.object(server.os, "lstat", side_effect=FileNotFoundError) as lookup:
+            with self.assertRaises(server._CardError):
+                server._card_path_stat("/unavailable/card/file")
+        self.assertLessEqual(lookup.call_count, 5)
+
+    def test_file_writer_never_replaces_an_existing_entry(self):
+        leaf = self.card / "download_model.sh"
+        makers = {"matching_regular": lambda: leaf.write_bytes(self.content),
+                  "different_regular": lambda: leaf.write_bytes(b"keep"),
+                  "fifo": lambda: os.mkfifo(leaf, 0o600),
+                  "dangling_alias": lambda: leaf.symlink_to("missing")}
+        for kind, create in makers.items():
+            with self.subTest(kind=kind):
+                create()
+                try:
+                    self.assert_preserved_rejection(lambda: server._write_card_file(
+                        str(self.card), leaf.name, self.content))
+                finally:
+                    leaf.unlink()
+        self.assertIsNone(server._write_card_file(str(self.card), leaf.name, self.content))
+        self.assertEqual(leaf.read_bytes(), self.content)
 
 
 class LocalReuseTests(unittest.TestCase):

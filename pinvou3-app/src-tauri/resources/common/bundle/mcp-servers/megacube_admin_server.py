@@ -34,7 +34,9 @@ import os
 import re
 import shutil
 import socket
+import stat
 import sys
+import uuid
 import time
 import urllib.error
 import urllib.parse
@@ -1912,58 +1914,103 @@ def _render_sglang_card_files(probe, card_id):
     return files
 
 
+def _card_path_stat(path):
+    """Follow supported aliases, but only treat a provably missing path as absent."""
+    try:
+        return os.stat(path)
+    except FileNotFoundError:
+        current = absolute = os.path.abspath(path)
+        while True:
+            try:
+                os.lstat(current)
+            except FileNotFoundError:
+                parent = os.path.dirname(current)
+                if parent == current:
+                    raise _CardError("卡片路径无法核实，不改动：%s" % path)
+                current = parent
+                continue
+            except OSError as error:
+                raise _CardError("卡片路径无法核实，不改动：%s" % path) from error
+            try:
+                metadata = os.stat(current)
+            except OSError as error:
+                # A dangling/looping alias is present, not a missing directory.
+                raise _CardError("卡片路径无法核实，不改动：%s" % path) from error
+            if current != absolute and not stat.S_ISDIR(metadata.st_mode):
+                raise _CardError("卡片父路径不是目录，不改动：%s" % path)
+            return metadata if current == absolute else None
+    except OSError as error:
+        raise _CardError("卡片路径无法核实，不改动：%s" % path) from error
+
+
 def _write_card_file(base_dir, fname, content):
-    """写一个卡片文件（先写同级 .tmp 再 rename，不留半截文件）；带子目录的
-    文件名（sglang 通用卡的 vendor/*.sh）先建父目录。"""
+    """Atomically create one missing card file without replacing existing entries."""
     path = os.path.join(base_dir, fname)
+    if _card_path_stat(path) is not None:
+        raise _CardError("卡片文件已存在，不覆写：%s" % fname)
     parent = os.path.dirname(path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    tmpf = os.path.join(base_dir, ".tmp-%d-%s" % (os.getpid(), os.path.basename(fname)))
-    with open(tmpf, "wb") as f:
-        f.write(content)
-    if fname.endswith(".sh"):
-        os.chmod(tmpf, 0o755)
-    os.rename(tmpf, path)
+    metadata = _card_path_stat(parent)
+    if metadata is not None and not stat.S_ISDIR(metadata.st_mode):
+        raise _CardError("卡片父路径不是目录，不改动：%s" % parent)
+    os.makedirs(parent, exist_ok=True)
+    temporary = os.path.join(parent, ".tmp-" + uuid.uuid4().hex)
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(content)
+            if fname.endswith(".sh"):
+                os.chmod(temporary, 0o755)
+        # link publishes complete bytes atomically and refuses every existing leaf.
+        os.link(temporary, path)
+    finally:
+        os.unlink(temporary)
 
 
 def _materialize_card(card_id, files):
-    """把卡片文件原子物化到 cards_dir/<card_id>/（先写同级 .tmp-<pid> 再 rename）。
+    """Publish a new card, or complete only genuinely missing delivery files.
 
-    返回 "ok_new" / "ok_same" / "ok_completed"；目录已存在时：内容一致的跳过，
-    **缺的文件就地补齐**（品悟商店链路物化的卡可能缺 uninstall.sh——它只进了
-    商店数据库，不在盘上；补齐缺失不是覆写），任一现存文件内容对不上抛
-    _CardError（覆写现存内容才是红线）。已部署卡的运行产物（.deploy-env/
-    .runtime/）不参与比对。
+    Existing byte-identical regular files (including verified file aliases) are
+    retained. Unknown paths and different content are never replaced. Runtime
+    output such as .deploy-env/ and .runtime/ is outside this comparison.
     """
     base = _cards_dir()
     target = os.path.join(base, card_id)
-    if os.path.isdir(target):
+    metadata = _card_path_stat(target)
+    if metadata is not None:
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise _CardError("卡片路径已存在且不是目录，不覆写：%s" % target)
         completed = False
         for fname, content in files.items():
             path = os.path.join(target, fname)
-            if not os.path.isfile(path):
-                # 就地补齐：先写临时文件再 rename，不留半截文件
+            metadata = _card_path_stat(path)
+            if metadata is None:
                 _write_card_file(target, fname, content)
                 completed = True
                 continue
-            with open(path, "rb") as f:
-                if f.read() != content:
+            if not stat.S_ISREG(metadata.st_mode):
+                raise _CardError("现有卡片文件不是普通文件，不覆写：%s" % fname)
+            # Preserve live file aliases; pin the read to a nonblocking regular FD.
+            with os.fdopen(os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)), "rb") as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    raise _CardError("现有卡片文件不是普通文件，不覆写：%s" % fname)
+                if stream.read(len(content) + 1) != content:
                     raise _CardError(
                         "卡片目录已存在且 %s 与现有卡片内容不一致，不覆写。" % fname)
         return "ok_completed" if completed else "ok_same"
-    if os.path.exists(target):
-        raise _CardError("卡片路径已存在且不是目录，不覆写：%s" % target)
+    metadata = _card_path_stat(base)
+    if metadata is not None and not stat.S_ISDIR(metadata.st_mode):
+        raise _CardError("卡片父路径不是目录，不改动：%s" % base)
     os.makedirs(base, exist_ok=True)
-    tmp = os.path.join(base, ".tmp-%d" % os.getpid())
-    shutil.rmtree(tmp, ignore_errors=True)
-    os.mkdir(tmp)
+    temporary = os.path.join(base, ".tmp-" + uuid.uuid4().hex)
+    os.mkdir(temporary)
     try:
         for fname, content in files.items():
-            _write_card_file(tmp, fname, content)
-        os.rename(tmp, target)
+            _write_card_file(temporary, fname, content)
+        if _card_path_stat(target) is not None:
+            raise _CardError("卡片路径已存在，不覆写：%s" % target)
+        os.rename(temporary, target)
     except Exception:
-        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(temporary, ignore_errors=True)
         raise
     return "ok_new"
 
