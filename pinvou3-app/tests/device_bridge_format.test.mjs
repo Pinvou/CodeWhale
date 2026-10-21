@@ -641,4 +641,157 @@ assert.doesNotMatch(
   assert.equal(packagesInvoke[1].question, null);
 }
 
+// ── 外部模型回读 epoch：后发先至，迟到的旧回读不得倒灌（round-9 P1）──
+{
+  const env = loadDeviceFeature();
+  const staleList = { models: [{ id: 'm-old', name: 'stale-model', kind: 'ollama', registered: true, source: 'registry' }], warnings: [] };
+  const freshList = { models: [{ id: 'm-new', name: 'fresh-model', kind: 'ollama', registered: true, source: 'registry' }], warnings: [] };
+  let releasePre;
+  let fetchCount = 0;
+  env.setRespond(command => {
+    if (command !== 'get_external_models') return null;
+    fetchCount += 1;
+    if (fetchCount === 1) return new Promise(resolve => { releasePre = () => resolve(staleList); });
+    return freshList;
+  });
+  // fetch A（先发，挂起）→ fetch B（后发，立即带回新列表）：B 必须先落地。
+  const preFetch = env.api.fetchExternalModels();
+  await env.api.fetchExternalModels();
+  assert.equal(env.state.externalModels, freshList, 'the later-started fetch must win');
+  assert.equal(env.notifyCount(), 1, 'only the winning fetch may publish');
+  // A 晚到（携带操作前的旧列表）：整包丢弃——不改 state、不 notify，
+  // 但仍返回当前 state.externalModels（调用方兼容）。
+  releasePre();
+  const staleReturn = await preFetch;
+  assert.equal(env.state.externalModels, freshList, 'stale fetch must not overwrite the fresh registry');
+  assert.equal(staleReturn, freshList, 'stale fetch must return current state for caller compatibility');
+  assert.equal(env.notifyCount(), 1, 'stale fetch must not publish');
+}
+
+// ── remove 内部回读与操作前回读的竞态：被删行不得复活（round-9 P1）──
+{
+  const env = loadDeviceFeature();
+  const preRemoveList = { models: [{ id: 'm-9', name: 'qwen3-30b', kind: 'ollama', registered: true, source: 'registry' }], warnings: [] };
+  const postRemoveList = { models: [], warnings: [] };
+  const outcome = { removed_registry: true, removed_weights: true, ollama_deleted: false, warnings: [] };
+  let releasePreRemove;
+  let fetchCount = 0;
+  env.setRespond(command => {
+    if (command === 'device_remove_external_model') return outcome;
+    if (command !== 'get_external_models') return null;
+    fetchCount += 1;
+    if (fetchCount === 1) return new Promise(resolve => { releasePreRemove = () => resolve(preRemoveList); });
+    return postRemoveList;
+  });
+  // 操作前发起的回读先挂起；remove 的内部回读在操作 invoke 决算后发起，
+  // seq 必然更高 → 立即落地移除后列表；晚到的操作前列表必须被丢弃。
+  const preRemoveFetch = env.api.fetchExternalModels();
+  const removed = await env.api.removeExternalModel({ id: 'm-9', deleteWeights: true, confirmName: 'qwen3-30b' });
+  assert.equal(removed, outcome);
+  assert.equal(env.state.externalModels, postRemoveList, 'remove refetch must publish the post-remove registry');
+  releasePreRemove();
+  assert.equal(await preRemoveFetch, postRemoveList, 'stale pre-remove fetch must be discarded');
+  assert.equal(env.state.externalModels, postRemoveList, 'removed row must not resurrect');
+  assert.equal(env.notifyCount(), 1, 'only the post-remove refetch may publish');
+}
+
+// ── 快照轮询世代：startDevicePolling 重启作废在飞旧拍（round-9 P2）──
+{
+  const env = loadDeviceFeature();
+  const deferred = [];
+  env.setRespond(command => command === 'get_device_snapshot'
+    ? new Promise((resolve, reject) => { deferred.push({ resolve, reject }); })
+    : null);
+  env.api.startDevicePolling();               // P1 未决（立即拍 + 定时器）
+  assert.equal(env.interval().started, 1);
+  env.api.stopDevicePolling();
+  env.api.startDevicePolling();               // 重启：复位卡死旗 + bump 世代 → P2
+  assert.equal(env.interval().started, 2, 'restart must re-establish the interval');
+  // 旧拍带着快照晚到：不得发布、不得 notify。
+  deferred[0].resolve(fixtureSnapshot());
+  await flush();
+  assert.equal(env.state.device, null, 'stale poll must not publish its snapshot');
+  assert.equal(env.state.deviceError, null, 'stale poll must not touch the banner state');
+  assert.equal(env.notifyCount(), 0, 'stale poll must not notify');
+  // 旧拍的 finally 不得清 in-flight 旗：新拍未决期间的重入 tick 必须被吞。
+  const invokesBeforeTick = env.invokes.length;
+  await env.interval().fn();
+  assert.equal(env.invokes.length, invokesBeforeTick, 'in-flight flag must stay owned by the fresh poll');
+  // 新拍正常发布。
+  deferred[1].resolve(fixtureSnapshot());
+  await flush();
+  assert.ok(env.state.device && env.state.device._fmt, 'fresh poll must publish');
+  assert.equal(env.notifyCount(), 1);
+  // 错误路径同理：慢旧拍的错误晚到，不得在恢复后重新点亮横幅。
+  // 在拍未决：fire-and-forget，await 会挂住测试（轮询 promise 要到决算才 settle）。
+  void env.interval().fn();                   // P3 未决
+  env.api.stopDevicePolling();
+  env.api.startDevicePolling();               // P4；bump → P3 作废
+  deferred[2].reject(new Error('stale poll error'));
+  await flush();
+  assert.equal(env.state.deviceError, null, 'stale error must not re-light the banner');
+  assert.equal(env.notifyCount(), 1, 'stale error must not notify');
+  deferred[3].resolve(fixtureSnapshot());
+  await flush();
+  assert.equal(env.state.deviceError, null);
+  assert.equal(env.notifyCount(), 1, 'display-equal fresh round stays suppressed');
+  env.api.stopDevicePolling();
+}
+
+// ── services 探测世代：stale 失败不推进连续失败计数、不清在飞旗（round-9 P3）──
+{
+  const env = loadDeviceFeature();
+  const baseline = [{ key: 'ollama', running: true, detail: null }];
+  let servicesCall = 0;
+  let rejectHeld;
+  let rejectFresh;
+  env.setRespond(command => {
+    if (command === 'get_device_snapshot') return fixtureSnapshot();
+    if (command !== 'get_device_services') return null;
+    servicesCall += 1;
+    if (servicesCall === 2) return new Promise((resolve, reject) => { rejectHeld = reject; });
+    if (servicesCall === 3) return new Promise((resolve, reject) => { rejectFresh = reject; });
+    if (servicesCall === 1 || servicesCall >= 6) return baseline;
+    throw new Error('probe timeout');
+  });
+  await env.api.pollDeviceServices();          // call1：基线成功
+  const held = env.api.pollDeviceServices();   // call2：未决（将被作废的旧世代）
+  env.api.startDevicePolling();                // bump services 世代 + 复位卡死旗
+  const fresh = env.api.pollDeviceServices();  // call3：新世代，未决
+  await flush();                               // 等重启立即拍的快照发布落定，notify 基线此后只含 services 事件
+  const notifiesAfterRestart = env.notifyCount();
+  // 旧世代的失败晚到：静默吞掉——不立旗、不动基线。
+  rejectHeld(new Error('late probe boom'));
+  await held;
+  assert.equal(env.state.deviceServicesError, null, 'stale failure must not raise the flag');
+  assert.equal(env.state.deviceServices.length, 1, 'stale failure must keep the baseline visible');
+  assert.equal(env.notifyCount(), notifiesAfterRestart, 'stale failure must not publish');
+  // stale 的 finally 不得替新世代清旗：fresh 未决期间重入必须被吞。
+  const servicesInvokesBefore = env.invokes.filter(([command]) => command === 'get_device_services').length;
+  await env.api.pollDeviceServices();
+  assert.equal(
+    env.invokes.filter(([command]) => command === 'get_device_services').length,
+    servicesInvokesBefore,
+    'stale finally must not clear the in-flight flag owned by the fresh generation',
+  );
+  // 新世代失败 #1：有基线、未达阈值 → 静默。stale 失败不得推进计数——否则
+  // 这里已是第 2 拍、下一拍即提前立旗（3 拍节奏被破坏）。
+  rejectFresh(new Error('probe timeout'));
+  await fresh;
+  assert.equal(env.state.deviceServicesError, null);
+  await env.api.pollDeviceServices();          // 失败 #2 → 仍静默
+  assert.equal(env.state.deviceServicesError, null);
+  assert.equal(env.notifyCount(), notifiesAfterRestart);
+  await env.api.pollDeviceServices();          // 失败 #3 → 立旗一次，精确域发布
+  assert.equal(env.state.deviceServicesError, 'probe timeout');
+  assert.equal(env.notifyCount(), notifiesAfterRestart + 1);
+  assert.deepEqual([...env.domainCalls().at(-1)], ['device']);
+  // 恢复拍：旗翻清必须发布，即便内容与基线一致。
+  await env.api.pollDeviceServices();
+  assert.equal(env.state.deviceServicesError, null);
+  assert.deepEqual(env.state.deviceServices, baseline);
+  assert.equal(env.notifyCount(), notifiesAfterRestart + 2, 'recovery must publish even when content unchanged');
+  env.api.stopDevicePolling();
+}
+
 console.log('device bridge _fmt formatting, display-equality suppression and polling contract passed');

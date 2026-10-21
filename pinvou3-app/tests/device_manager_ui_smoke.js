@@ -89,6 +89,49 @@ function deviceSnapshotFixture() {
   };
 }
 
+// 内嵌运行状态页的内存快照只取用 ram 两个数字：头部「内存」健康 chip 的期望值
+// 由这两个常量推导（51/129 ≈ 40%），桩与断言共用同一来源，不发明第二份数字。
+const MONITOR_RAM_TOTAL_KIB = 129 * 1024 * 1024;
+const MONITOR_RAM_USED_KIB = 51 * 1024 * 1024;
+
+// 从 deviceSnapshotFixture 推导各渲染位的期望文本（与 bridge/device.js 的
+// _fmt 同一口径：fmtBytes 1024 进制 GB/MB 一位小数、fmtRate 十进制 KB/s/MB/s、
+// 温度取整、进程 CPU% 截 0 取整）。步骤 ④-b 的断言读这些「值」而不只数个数——
+// 只数个数曾放过头部最高温 chip 渲染 undefined°C（九轮评审 P1）。
+function expectedSnapshotValues(fixture) {
+  const fmtBytes = bytes => (bytes >= 1024 * 1024 * 1024)
+    ? (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB'
+    : (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  const fmtRate = v => (v >= 1e6 ? (v / 1e6).toFixed(1) + ' MB/s' : (v / 1e3).toFixed(1) + ' KB/s');
+  const temperatures = fixture.sensors
+    .flatMap(group => group.entries)
+    .filter(entry => entry.kind === 'temperature')
+    .map(entry => Math.round(entry.value));
+  const root = fixture.disks.find(disk => disk.mount_point === '/');
+  const wifi = fixture.network.find(iface => iface.iface_type === 'wifi');
+  const topCpu = fixture.processes.top_cpu[0];
+  const topMem = fixture.processes.top_memory[0];
+  return {
+    diskPct: Math.round((root.total_bytes - root.available_bytes) / root.total_bytes * 100) + '%',
+    diskAvailable: fmtBytes(root.available_bytes),
+    diskTotal: fmtBytes(root.total_bytes),
+    ramPct: Math.round(MONITOR_RAM_USED_KIB / MONITOR_RAM_TOTAL_KIB * 100) + '%',
+    maxTemp: Math.max(...temperatures) + '°C',
+    driver: fixture.gpu_ext.driver_version,
+    cuda: fixture.gpu_ext.cuda_version,
+    netRxTotal: fmtBytes(wifi.rx_bytes),
+    netTxTotal: fmtBytes(wifi.tx_bytes),
+    netRxRate: fmtRate(wifi.rx_bytes_per_sec),
+    netTxRate: fmtRate(wifi.tx_bytes_per_sec),
+    procName: topCpu.name,
+    procCpuPct: Math.round(topCpu.cpu_pct) + '%',
+    procMemText: fmtBytes(topMem.memory_bytes),
+  };
+}
+
+// 步骤 ④-b 断言用的期望值：全部从 fixture 推导（见 expectedSnapshotValues）。
+const EXPECTED = expectedSnapshotValues(deviceSnapshotFixture());
+
 function externalModelsFixture() {
   return {
     models: [
@@ -195,7 +238,7 @@ function injectSource() {
         // 内嵌运行状态页每秒轮询；给一份最小快照，避免错误轮刷屏（内存 chip 也随 bs.monitor._fmt 生效）。
         case 'get_monitor_snapshot': return Promise.resolve({
           cpu: { name: 'NVIDIA GB10', total_usage_pct: 12 },
-          ram: { total_kib: 129*1024*1024, used_kib: 51*1024*1024, swap_total_kib: 0, swap_used_kib: 0 },
+          ram: { total_kib: ${MONITOR_RAM_TOTAL_KIB}, used_kib: ${MONITOR_RAM_USED_KIB}, swap_total_kib: 0, swap_used_kib: 0 },
           gpu: null, vllm: null, self_perf: null,
           app: { pinvou3_version: '0.10.6', deepseek_tui_version: '0.0.0', session_uptime_secs: 60 },
         });
@@ -373,6 +416,46 @@ async function clickTestId(page, testId) {
     && headerState.netRows === 2 && headerState.noErrorBanner,
     JSON.stringify({ ...headerState, procGpuRendered }));
 
+  // ④-b fixture 真值断言：健康 chips 的 label+value、网络行的速率/累计、进程行
+  // 的 CPU%/内存、磁盘行的容量文本——期望值全部从 fixture 推导（EXPECTED）。
+  // 此前的断言只数元素个数、从不读值，头部最高温 chip 渲染成 undefined°C 也
+  // 全绿逃逸（九轮评审 P1）；这里同时要求整页不出现 "undefined"。
+  const renderedValues = await page.evaluate(expected => {
+    const normalize = node => (node?.innerText || '').replace(/\s+/g, ' ').trim();
+    const chips = [...document.querySelectorAll('[data-testid="device-manager-health-chip"]')].map(normalize);
+    const wifiRow = [...document.querySelectorAll('[data-testid="device-manager-net-row"]')]
+      .find(row => (row.innerText || '').includes('wlP1s0'));
+    return {
+      viewText: document.querySelector('[data-testid="device-manager-view"]')?.innerText || '',
+      chips,
+      wifiRow: wifiRow ? normalize(wifiRow) : null,
+      cpuRow: normalize(document.querySelector('[data-testid="device-manager-proc-cpu"]')),
+      memRow: normalize(document.querySelector('[data-testid="device-manager-proc-mem"]')),
+      rootDiskRow: normalize(document.querySelector('[data-testid="device-manager-disk-row"]')),
+    };
+  }, EXPECTED);
+  // chip 断言按 label→value 配对（文案为 zh-Hans，与 fixture 同源推导的数值配对），
+  // 单独断言 "45°C" 之类无法防止 chip 串位/值缺失。
+  const expectedChipPairs = [
+    ['系统盘', EXPECTED.diskPct],
+    ['内存', EXPECTED.ramPct],
+    ['最高温度', EXPECTED.maxTemp],
+    ['驱动', EXPECTED.driver],
+    ['CUDA', EXPECTED.cuda],
+  ];
+  const chipValuesOk = expectedChipPairs.every(([label, value]) =>
+    renderedValues.chips.some(chip => chip.includes(label) && chip.includes(value)));
+  rec('④-b 健康 chips/网络/进程/磁盘渲染 fixture 推导的真值且无 undefined',
+    !renderedValues.viewText.includes('undefined')
+    && chipValuesOk
+    && !!renderedValues.wifiRow
+    && renderedValues.wifiRow.includes(EXPECTED.netRxTotal) && renderedValues.wifiRow.includes(EXPECTED.netRxRate)
+    && renderedValues.wifiRow.includes(EXPECTED.netTxTotal) && renderedValues.wifiRow.includes(EXPECTED.netTxRate)
+    && renderedValues.cpuRow.includes(EXPECTED.procName) && renderedValues.cpuRow.includes(EXPECTED.procCpuPct)
+    && renderedValues.memRow.includes(EXPECTED.procMemText)
+    && renderedValues.rootDiskRow.includes(`${EXPECTED.diskAvailable} / ${EXPECTED.diskTotal}`),
+    JSON.stringify({ expected: EXPECTED, rendered: renderedValues }));
+
   // ⑤ 模型管理：商店行锁定（由模型商店管理 + 禁用按钮 + 前往模型商店），
   //    外部模型行显示类别/登记/状态徽标与接入按钮。
   await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-store-row"]'), { timeout: 8000 });
@@ -449,14 +532,26 @@ async function clickTestId(page, testId) {
     removed_registry: true, removed_weights: false, ollama_deleted: false,
     warnings: ['ollama 删除失败（smoke 注入）'],
   }));
-  await clickTestId(page, 'device-manager-remove');
-  await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-remove-confirm"]'), { timeout: 4000 });
   // 确认按钮 400ms 死区：armed 面板与「移除」按钮同坐标原地替换，双击的第二击
   // 会落在确认按钮（或勾选框）上——死区把这个手势还原成两步（第四轮 P2）。
-  const confirmDisabledAtFirstSight = await page.evaluate(() => {
-    const confirm = document.querySelector('[data-testid="device-manager-remove-confirm"]');
-    return !!confirm && confirm.disabled;
-  });
+  // 点击与首见观察放在同一个 in-page Promise 里 5ms 粒度轮询（与 ⑥-b 同款）：
+  // 跨 CDP 往返的两次 evaluate（click → 等存在 → 再读 disabled）在负载下会
+  // 错过 400ms 窗口，把活着的死区误报成回归（九轮评审 P2）。
+  const confirmDisabledAtFirstSight = await page.evaluate(() => new Promise(resolve => {
+    document.querySelector('[data-testid="device-manager-remove"]')?.click();
+    let tries = 0;
+    const timer = setInterval(() => {
+      tries += 1;
+      const confirm = document.querySelector('[data-testid="device-manager-remove-confirm"]');
+      if (confirm) {
+        clearInterval(timer);
+        resolve(confirm.disabled);
+      } else if (tries > 400) {
+        clearInterval(timer);
+        resolve(null);
+      }
+    }, 5);
+  }));
   await page.waitForFunction(() => {
     const confirm = document.querySelector('[data-testid="device-manager-remove-confirm"]');
     return !!confirm && !confirm.disabled;
