@@ -195,31 +195,45 @@ fn replace_idle_host(health: &Value) -> Result<(), String> {
     {
         return Err("store_protocol: host retirement unconfirmed".into());
     }
+    match wait_for_retired_host(health)? {
+        RetiredHost::Released => start_host(),
+        RetiredHost::ReplacementReady => Ok(()),
+    }
+}
+
+enum RetiredHost {
+    Released,
+    ReplacementReady,
+}
+
+/// The acknowledged host is now draining its listener. Connecting to that
+/// endpoint can succeed just before shutdown resets the queued connection.
+/// Wait for its lifetime lock instead of using a transient health failure as
+/// either a fatal business error or proof that a second host may start.
+fn wait_for_retired_host(health: &Value) -> Result<RetiredHost, String> {
     for _ in 0..50 {
-        match ui_call("health", json!({})) {
-            Ok(current) if current["host"] != health["host"] => return check_health(&current),
-            Err(error) if error.starts_with("store_offline:") => {
-                // The listener is removed just before the lifetime lock drops.
-                // Wait for that exact exclusion domain instead of racing exec.
-                let lock = std::fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(config::data_dir().join("host.lock"))
-                    .map_err(|e| e.to_string())?;
-                match lock.try_lock() {
-                    Ok(()) => {
-                        drop(lock);
-                        return start_host();
-                    }
-                    Err(std::fs::TryLockError::WouldBlock) => {
-                        std::thread::sleep(Duration::from_millis(100))
-                    }
-                    Err(error) => return Err(error.to_string()),
-                }
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(config::data_dir().join("host.lock"))
+            .map_err(|e| e.to_string())?;
+        match lock.try_lock() {
+            Ok(()) => return Ok(RetiredHost::Released),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                std::thread::sleep(Duration::from_millis(100));
             }
-            Err(error) => return Err(error),
-            _ => std::thread::sleep(Duration::from_millis(100)),
+            Err(error) => return Err(error.to_string()),
         }
+    }
+    // Another desktop may already have started the replacement and taken the
+    // same lock. Only a complete, compatible new host observation proves that
+    // handoff; malformed health, wrong peer and the old host stay errors.
+    let current = ui_call("health", json!({})).map_err(|error| {
+        format!("store_upgrade_pending: retired host release unconfirmed; {error}")
+    })?;
+    if current["host"] != health["host"] {
+        check_health(&current)?;
+        return Ok(RetiredHost::ReplacementReady);
     }
     Err("store_upgrade_pending: previous host has not released its socket".into())
 }
@@ -428,5 +442,42 @@ mod tests {
         assert!(check_health(&health).is_ok());
         health["version"] = json!("older-build");
         assert!(check_health(&health).is_err());
+    }
+    #[test]
+    fn acknowledged_retirement_waits_for_the_lifetime_lock_without_probing_the_drain() {
+        let _home = config::TempHome::new();
+        let root = config::data_dir();
+        let lock = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(root.join("host.lock"))
+            .unwrap();
+        lock.try_lock().unwrap();
+        let socket = root.join("service.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let closing = std::thread::spawn(move || {
+            // Model the interval after retire's response is closed but before
+            // the accept loop observes shutdown and releases the lifetime lock.
+            std::thread::sleep(Duration::from_millis(150));
+            let unexpected_probe = listener.accept().is_ok();
+            drop(listener);
+            std::fs::remove_file(socket).unwrap();
+            drop(lock);
+            unexpected_probe
+        });
+        assert!(matches!(
+            wait_for_retired_host(&json!({"host":{"instance":"retiring"}})).unwrap(),
+            RetiredHost::Released
+        ));
+        assert!(!closing.join().unwrap(), "retiring listener was probed");
+        assert!(!root.join("service.sock").exists());
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(root.join("host.lock"))
+            .unwrap();
+        lock.try_lock().unwrap();
     }
 }
