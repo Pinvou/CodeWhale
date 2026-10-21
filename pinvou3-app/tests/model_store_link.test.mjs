@@ -6,9 +6,11 @@ import {
   buildSavedModel,
   checkLinkable,
   findLinkedRows,
+  findLinkedRowsForEndpoint,
   isLocalGatewayUrl,
   isOpenAiChatEndpoint,
   makeModelId,
+  normalizeLoopbackEndpoint,
   pickApiKey,
 } from '../src/features/model-store/pinvou-model-link.js';
 
@@ -249,4 +251,39 @@ test('endpoint_url 不指向本机的模型不许接入', () => {
     checkLinkable({ record: { ...remote, endpoint_url: 'https://evil.example.com/generate' } }).reason,
     'linkNotChatModel'
   );
+});
+
+test('findLinkedRowsForEndpoint：同名不同端口的行互不代办（十轮评审 P2）', () => {
+  // 设备管理的外部模型：一台机器上 8000/v1 和 8001/v1 可以各挂一个 qwen3。
+  // 宽版 findLinkedRows 按“任意回环”匹配，移除 8000 的记录会把 8001 的品悟
+  // 配置一起交给 deleteModel；接入处复用首个 existingId 也会顶掉另一端。
+  const rows = [
+    { id: 'a-8000', model: 'qwen3', base_url: 'http://127.0.0.1:8000/v1' },
+    { id: 'a-8001', model: 'qwen3', base_url: 'http://127.0.0.1:8001/v1' },
+    // 规范化等价：尾斜杠、host 大小写不改变端点身份
+    { id: 'a-8000-slash', model: 'qwen3', base_url: 'http://127.0.0.1:8000/v1/' },
+    // 非回环行永远不匹配（删除侧安全网不因端点匹配而放宽）
+    { id: 'remote', model: 'qwen3', base_url: 'http://192.0.2.10:8000/v1' },
+  ];
+  assert.deepEqual(
+    findLinkedRowsForEndpoint(rows, 'http://127.0.0.1:8000/v1', 'qwen3').map((r) => r.id),
+    ['a-8000', 'a-8000-slash']
+  );
+  assert.deepEqual(
+    findLinkedRowsForEndpoint(rows, 'http://127.0.0.1:8001/v1', 'qwen3').map((r) => r.id),
+    ['a-8001']
+  );
+  // 端点缺失/不可解析：宁可返回空，不能退化回“任意回环”
+  assert.deepEqual(findLinkedRowsForEndpoint(rows, null, 'qwen3'), []);
+  assert.deepEqual(findLinkedRowsForEndpoint(rows, 'not a url', 'qwen3'), []);
+});
+
+test('normalizeLoopbackEndpoint：规范化形态稳定', () => {
+  assert.equal(normalizeLoopbackEndpoint('http://127.0.0.1:8000/v1'), 'http://127.0.0.1:8000/v1');
+  assert.equal(normalizeLoopbackEndpoint('http://127.0.0.1:8000/v1/'), 'http://127.0.0.1:8000/v1');
+  assert.equal(normalizeLoopbackEndpoint('http://LOCALHOST:11434/v1'), 'http://localhost:11434/v1');
+  assert.equal(normalizeLoopbackEndpoint('http://[::1]:11434/v1'), 'http://[::1]:11434/v1');
+  assert.equal(normalizeLoopbackEndpoint('http://127.0.0.1:8000'), 'http://127.0.0.1:8000');
+  assert.equal(normalizeLoopbackEndpoint(null), null);
+  assert.equal(normalizeLoopbackEndpoint(42), null);
 });

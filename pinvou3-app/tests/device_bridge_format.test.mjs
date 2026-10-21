@@ -78,7 +78,8 @@ const fixtureSnapshot = () => ({
     { chip: 'acpi_fan', entries: [{ kind: 'fan', name: 'fan1', value: 1200, critical: null, max: null }] },
     { chip: 'mt7925_wifi', entries: [
       { kind: 'temperature', name: 'wifi_temp', value: 52.3, critical: 90, max: 80 },
-      { kind: 'temperature', name: 'wifi_max_warn', value: 72, critical: 90, max: 80 },
+      // 峰值 80 不是预警线（十轮评审 P2）：72 距 critical 90 尚远，必须 ok。
+      { kind: 'temperature', name: 'wifi_peak_not_threshold', value: 72, critical: 90, max: 80 },
     ] },
     { chip: 'INA3221', entries: [
       { kind: 'voltage', name: 'in0', value: 12.06, critical: null, max: 12.1 },
@@ -185,10 +186,11 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   assert.equal(fan.entries[0].level, 'ok');
   assert.equal(wifi.chipKey, 'wifi');
   assert.equal(wifi.entries[0].valueText, '52°C');
-  // 79.4 四舍五入后是 79，但告警档位必须用原始值判定（≥ max-10 前 52.3 未达 70）。
+  // 79.4 四舍五入后是 79，但告警档位必须用原始值判定（≥ critical-10 前 52.3 未达 80）。
   assert.equal(wifi.entries[0].level, 'ok');
-  // ≥ max-10 → warn（max 口径）。
-  assert.equal(wifi.entries[1].level, 'warn');
+  // 历史峰值不是预警线（十轮评审 P2）：max=80 只是 tempN_highest，72 距
+  // critical 90 还差 18，旧口径 ≥ max-10 会误报 warn。
+  assert.equal(wifi.entries[1].level, 'ok');
   // 未知 chip 保留小写原文做 key，交给视图兜底。
   assert.equal(power.chipKey, 'ina3221');
   assert.equal(power.entries[0].valueText, '12.1 V');
@@ -795,3 +797,49 @@ assert.doesNotMatch(
 }
 
 console.log('device bridge _fmt formatting, display-equality suppression and polling contract passed');
+
+// ── 温度档位：历史峰值只用于展示，升/降温序列不翻转（十轮评审 P2）──
+{
+  const env = loadDeviceFeature();
+  const sensors = (value, max) => [
+    {
+      chip: 'coretemp',
+      entries: [{ kind: 'temperature', name: 'Package', value, critical: 100, max }],
+    },
+  ];
+  const levelAt = async (value, max) => {
+    env.state.device = null;
+    env.setRespond(async command =>
+      command === 'get_device_snapshot'
+        ? { ...fixtureSnapshot(), sensors: sensors(value, max) }
+        : null
+    );
+    await env.api.pollDevice();
+    return env.state.device._fmt.sensors[0].entries[0].level;
+  };
+  // 升温：45°C（峰值 46，critical 100）→ ok，不得因贴近峰值误报 warn；
+  // 46°C：后端对相等峰值省略 max，档位不得反而变化；95°C → warn；100°C → crit。
+  assert.equal(await levelAt(45, 46), 'ok');
+  assert.equal(await levelAt(46, null), 'ok');
+  assert.equal(await levelAt(95, 96), 'warn');
+  assert.equal(await levelAt(100, 100), 'crit');
+  // 降温：峰值仍挂着 46，回落到 45 依旧是 ok（无 critical 的芯片不伪造档位）。
+  assert.equal(await levelAt(45, 46), 'ok');
+  // 后端没给 critical 时温度只有 ok 一档——没有真阈值就不造预警。
+  const noCrit = await (async () => {
+    env.state.device = null;
+    env.setRespond(async command =>
+      command === 'get_device_snapshot'
+        ? {
+            ...fixtureSnapshot(),
+            sensors: [
+              { chip: 'coretemp', entries: [{ kind: 'temperature', name: 'Package', value: 99, critical: null, max: 100 }] },
+            ],
+          }
+        : null
+    );
+    await env.api.pollDevice();
+    return env.state.device._fmt.sensors[0].entries[0].level;
+  })();
+  assert.equal(noCrit, 'ok');
+}
