@@ -80,6 +80,11 @@ function fetchModelDetail(cardId) {
   return invokeTauri('model_store_model_detail', { cardId });
 }
 
+/** Clear only this linked model's fixed context cap, then refresh its consumers. */
+export function followDeploymentContext(cardId, modelId) {
+  return invokeTauri('model_store_follow_deployment_context', { cardId, modelId });
+}
+
 /** Read the latest recipe and compare it with the installed card. */
 function checkCardUpdate(cardId) {
   return invokeTauri('model_store_check_card_update', { cardId });

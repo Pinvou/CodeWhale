@@ -148,6 +148,133 @@ fn optional_provenance_round_trips_without_breaking_legacy_settings() {
     );
 }
 
+fn running_card() {
+    db::init_db().unwrap();
+    db::add_store_model(db::AddStoreModelParams {
+        card_id: "qwen-card",
+        model_name: "wire",
+        card_name: "Qwen",
+        org: None,
+        description: None,
+        engine_name: "native",
+        engine_version: None,
+        size_bytes: 11,
+        quantization: None,
+        source_repo_id: None,
+        source_filename: None,
+        scripts: &Default::default(),
+        status: "deployed",
+        profiles: &[],
+        deploy_topology: super::super::store_client::DeployTopology::Single,
+        card_source: "store",
+    })
+    .unwrap();
+    db::set_endpoint_info("qwen-card", Some("http://127.0.0.1:8000/v1"), Some("wire")).unwrap();
+    db::set_running("qwen-card", true).unwrap();
+}
+
+#[test]
+fn explicit_follow_changes_only_target_context_and_survives_reload() {
+    let _home = super::super::config::TempHome::new();
+    running_card();
+    let mut target = saved("target", "wire", "http://127.0.0.1:8000/v1");
+    target.model_store_card_id = Some("qwen-card".into());
+    target.context_window_tokens = Some(32768);
+    let mut other = target.clone();
+    other.id = "manual-limit".into();
+    UserPrefs::update_transaction(|prefs| {
+        prefs.advanced.saved_models = vec![target.clone(), other.clone()];
+        prefs.advanced.active_model_id = Some(other.id.clone());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(current_linked_ids("qwen-card"), ["target", "manual-limit"]);
+    follow_deployment_context("qwen-card", "target").unwrap();
+    target.context_window_tokens = None;
+    let reloaded = UserPrefs::load();
+    assert_eq!(reloaded.model_by_id("target"), Some(&target));
+    assert_eq!(reloaded.model_by_id("manual-limit"), Some(&other));
+    assert_eq!(
+        reloaded.advanced.active_model_id.as_deref(),
+        Some("manual-limit")
+    );
+    // Both a larger upgrade and a smaller rollback use the newly probed window.
+    for window in [262144, 8192] {
+        assert_eq!(
+            crate::core::model_context::resolve_context_window(
+                reloaded
+                    .model_by_id("target")
+                    .unwrap()
+                    .context_window_tokens,
+                Some(window),
+                None,
+            )
+            .0,
+            Some(window)
+        );
+    }
+    assert_eq!(
+        crate::core::model_context::resolve_context_window(
+            other.context_window_tokens,
+            Some(262144),
+            None,
+        )
+        .0,
+        Some(32768)
+    );
+    assert!(sync().unwrap().is_empty()); // Never write a probe back as a fixed cap.
+    assert!(
+        UserPrefs::load()
+            .model_by_id("target")
+            .unwrap()
+            .context_window_tokens
+            .is_none()
+    );
+}
+
+#[test]
+fn follow_rejects_stale_unlinked_detached_and_stopped_models_without_mutation() {
+    let _home = super::super::config::TempHome::new();
+    running_card();
+    let mut row = saved("target", "wire", "http://127.0.0.1:8000/v1");
+    row.model_store_card_id = Some("qwen-card".into());
+    let original = row.clone();
+    for mode in [
+        "stale",
+        "remote",
+        "unlinked",
+        "detached",
+        "stopped",
+        "wrong-card",
+    ] {
+        let mut row = original.clone();
+        match mode {
+            "stale" => row.model = "old-wire".into(),
+            "remote" => row.base_url = "https://example.com/v1".into(),
+            "unlinked" => row.model_store_card_id = None,
+            "detached" => row.model_store_link_detached = true,
+            "stopped" => db::set_running("qwen-card", false).unwrap(),
+            _ => row.model_store_card_id = Some("another-card".into()),
+        }
+        UserPrefs::update_transaction(|prefs| {
+            prefs.advanced.saved_models = vec![row.clone()];
+            Ok(())
+        })
+        .unwrap();
+        let before = UserPrefs::load();
+        assert!(
+            follow_deployment_context("qwen-card", "target").is_err(),
+            "{mode}"
+        );
+        assert!(current_linked_ids("qwen-card").is_empty(), "{mode}");
+        assert_eq!(
+            UserPrefs::load().advanced.saved_models,
+            before.advanced.saved_models
+        );
+        db::set_running("qwen-card", true).unwrap();
+    }
+}
+
 #[test]
 fn sync_commits_existing_rows_and_selection_and_reloads_after_restart() {
     let _home = super::super::config::TempHome::new();

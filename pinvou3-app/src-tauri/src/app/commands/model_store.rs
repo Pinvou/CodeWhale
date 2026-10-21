@@ -52,6 +52,15 @@ pub async fn model_store_model_detail(card_id: String) -> Result<Value, String> 
 }
 
 #[tauri::command]
+pub async fn model_store_follow_deployment_context(
+    service: State<'_, Arc<ModelStoreService>>,
+    card_id: String,
+    model_id: String,
+) -> Result<Value, String> {
+    model_store::follow_deployment_context(Arc::clone(&service), card_id, model_id).await
+}
+
+#[tauri::command]
 pub async fn model_store_check_card_update(card_id: String) -> Result<Value, String> {
     model_store::check_card_update(card_id).await
 }

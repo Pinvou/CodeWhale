@@ -159,12 +159,22 @@ impl ModelStoreService {
 
     fn sync_linked_models(&self, card_id: Option<&str>) -> Result<(), String> {
         let changed = super::linked_models::sync(card_id)?;
+        self.notify_models_changed(&changed);
+        Ok(())
+    }
+
+    fn notify_models_changed(&self, changed: &[String]) {
         if !changed.is_empty() {
             let handler = self.models_changed.lock().clone();
             if let Some(handler) = handler {
-                handler(&changed);
+                handler(changed);
             }
         }
+    }
+
+    fn refresh_enabled_model(&self, card_id: &str) -> Result<(), String> {
+        self.sync_linked_models(Some(card_id))?;
+        self.notify_models_changed(&super::linked_models::current_linked_ids(card_id));
         Ok(())
     }
 
@@ -500,6 +510,20 @@ pub async fn model_detail(card_id: String) -> Result<Value, String> {
     .map_err(|e| e.to_string())?
 }
 
+pub async fn follow_deployment_context(
+    service: Arc<ModelStoreService>,
+    card_id: String,
+    model_id: String,
+) -> Result<Value, String> {
+    tokio::task::spawn_blocking(move || {
+        super::linked_models::follow_deployment_context(&card_id, &model_id)?;
+        service.notify_models_changed(&[model_id]);
+        Ok(json!({"ok": true}))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 pub async fn check_card_update(card_id: String) -> Result<Value, String> {
     tokio::task::spawn_blocking(move || {
         ModelManager::new(None, None)
@@ -723,7 +747,7 @@ pub fn start_lifecycle(
                 service_for_job.sync_linked_models(Some(&card))?;
                 mgr.enable(&card, &mut cb, control)
                     .map_err(|e| e.to_string())?;
-                let link_sync_error = service_for_job.sync_linked_models(Some(&card)).err();
+                let link_sync_error = service_for_job.refresh_enabled_model(&card).err();
                 Ok(json!({"link_sync_error": link_sync_error}))
             }
             "stop" => mgr
@@ -1062,8 +1086,8 @@ pub fn force_remove(
 mod tests {
     use super::*;
 
-    #[test]
-    fn enable_synchronizes_linked_route_and_notifies_after_commit_without_a_view() {
+    #[tokio::test]
+    async fn enable_synchronizes_linked_route_and_notifies_after_commit_without_a_view() {
         use crate::platform::prefs::{SavedModel, UserPrefs};
         let _home = config::TempHome::new();
         db::init_db().unwrap();
@@ -1144,6 +1168,46 @@ mod tests {
         assert_eq!(
             reloaded.advanced.active_model_id.as_deref(),
             Some("stable-id")
+        );
+        drop(observations);
+        // A second enable keeps the exact same route. Its engine may now serve
+        // a different context profile, so the next turn still needs a fresh probe.
+        observed.lock().clear();
+        let restarted =
+            start_lifecycle(&service, "sync-card".into(), "enable".into(), false).unwrap();
+        let restarted_log = service.run(restarted["run_id"].as_str().unwrap()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while restarted_log.outcome.lock().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            restarted_log
+                .outcome
+                .lock()
+                .as_ref()
+                .is_some_and(Result::is_ok)
+        );
+        assert_eq!(observed.lock().len(), 1);
+        assert_eq!(observed.lock()[0].0, ["stable-id"]);
+        assert_eq!(
+            UserPrefs::load().advanced.saved_models,
+            reloaded.advanced.saved_models
+        );
+        // Routine library synchronization must not repeatedly invalidate engines.
+        observed.lock().clear();
+        service.sync_linked_models(None).unwrap();
+        assert!(observed.lock().is_empty());
+        // Explicit recovery notifies only after the changed settings are durable.
+        follow_deployment_context(Arc::clone(&service), "sync-card".into(), "stable-id".into())
+            .await
+            .unwrap();
+        assert_eq!(observed.lock().len(), 1);
+        assert!(
+            UserPrefs::load()
+                .model_by_id("stable-id")
+                .unwrap()
+                .context_window_tokens
+                .is_none()
         );
     }
 

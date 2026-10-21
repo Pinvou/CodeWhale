@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { KeyRound, Plus } from '../../components/icons.jsx';
 import { EmptyState } from '../../components/EmptyState.jsx';
 import { Spinner } from '../../components/Spinner.jsx';
-import { createApiKey, fetchApiKeys, fetchModelDetail } from './model-store-api.js';
+import { createApiKey, fetchApiKeys, fetchModelDetail, followDeploymentContext } from './model-store-api.js';
 import { tryGetTauriBridge } from '../../platform/tauri/client.js';
 import { buildSavedModel, checkLinkable, findCardLinkedRows, pickApiKey } from './pinvou-model-link.js';
 import { formatBytes, libraryStatusOf } from './model-store-logic.js';
@@ -202,6 +202,21 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
   };
 
   const record = detail?.record;
+  const linkedModels = findCardLinkedRows(savedModels, cardId);
+  const followContext = async (modelId) => {
+    setBusy(true);
+    try {
+      await followDeploymentContext(cardId, modelId);
+      onToast(copy.contextFollowDone);
+      await load();
+    } catch (contextError) {
+      const message = String(contextError?.message || contextError);
+      onToast(message.includes('store_context_follow_unsupported') || message.startsWith('store_protocol:')
+        ? copy.contextFollowHostUpdate : copy.contextFollowFailed);
+    } finally {
+      setBusy(false);
+    }
+  };
   // 能不能接进品悟。算一次给按钮的禁用态和下面那行原因共用——两处各算一次的话,
   // 很容易出现"按钮灰着但没给原因"或者反过来。
   const linkable = checkLinkable(detail);
@@ -343,6 +358,26 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
               </MsButton>
             </div>
           </div>
+
+          {linkedModels.length > 0 ? (
+            <div className={`mt-4 rounded-[12px] p-3 ${SUBTLE_SURFACE}`} data-testid="model-store-context-settings">
+              <p className={`text-[12px] ${TEXT_SECONDARY}`}>{copy.contextFollowHint}</p>
+              {linkedModels.map((model) => (
+                <div key={model.id} className="mt-2 flex items-center justify-between gap-3">
+                  <span className={`text-[12px] ${TEXT_PRIMARY}`}>
+                    {model.name || model.model} · {model.context_window_tokens
+                      ? copy.contextFixed(model.context_window_tokens.toLocaleString()) : copy.contextAutomatic}
+                  </span>
+                  {model.context_window_tokens ? (
+                    <MsButton tone="ghost" disabled={busy || !linkable.ok} onClick={() => followContext(model.id)}
+                      data-testid="model-store-follow-context">
+                      {copy.contextFollow}
+                    </MsButton>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          ) : null}
 
           <div className="mt-6 flex items-center justify-between">
             {/* 修复入口:部署被外部破坏(比如手删了 vendor 目录)时需要能重来一次。
