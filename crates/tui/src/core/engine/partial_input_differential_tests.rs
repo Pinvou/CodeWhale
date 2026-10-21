@@ -72,6 +72,11 @@ fn partial_input_differential_prefixes_preserve_parser_disposition_and_mirror() 
         "{\"a\":\"raw\u{0001}control\"}",
         "{\"a\":\"raw\nline\tcontrol\"}",
         r#"{"a":"foo`bar"}"#,
+        // Fence stripping after a closed raw root can change quote parity.
+        "{\"a\": \"}\"}\n```z\" tail",
+        // Quote-unaware closer removal can merge escape runs. The invalid
+        // escape must disable reuse before that repair can change the value.
+        r#"{"k": "\]\" tail"#,
         r#"{"中文🙂":"text🙂","nested":[{"a":true}],}"#,
         r#"[1,"text"]"#,
         " ",
@@ -116,6 +121,68 @@ fn partial_input_differential_prefixes_preserve_parser_disposition_and_mirror() 
         assert_eq!(text.len(), size);
         compare_trace(&text, 65536);
     }
+}
+
+#[test]
+fn partial_input_differential_repair_parity_at_adversarial_delta_boundaries() {
+    for deltas in [
+        vec!["{\"a\": \"}", "\"}\n```z\""],
+        vec![r#"{"k": ""#, "\\", "]", "\\\"", " tail"],
+    ] {
+        let mut baseline = tool_state(json!({}), "");
+        let mut candidate = baseline.clone();
+        for delta in deltas {
+            compare_delta(&mut baseline, &mut candidate, delta);
+        }
+    }
+}
+
+#[test]
+fn partial_input_proof_reuses_dispositions_and_rechecks_changed_segments() {
+    use super::partial_input::PartialInputProof;
+
+    for (prefix, expected_some) in [(r#"{"content":""#, false), (r#"{"s":"[1]"#, true)] {
+        let mut proof = PartialInputProof::default();
+        let mut buffer = prefix.to_owned();
+        assert_eq!(proof.reuse(&buffer, prefix), None);
+        assert_eq!(parse_tool_input(&buffer).is_some(), expected_some);
+        proof.record(expected_some);
+        buffer.push_str(" more");
+        assert_eq!(proof.reuse(&buffer, " more"), Some(expected_some));
+        assert_eq!(parse_tool_input(&buffer).is_some(), expected_some);
+
+        // A newly completed raw root takes precedence over an extracted array.
+        buffer.push_str("}");
+        assert_eq!(proof.reuse(&buffer, "}"), None);
+        let some = parse_tool_input(&buffer).is_some();
+        proof.record(some);
+        buffer.push_str(" tail");
+        assert_eq!(proof.reuse(&buffer, " tail"), Some(some));
+        assert_eq!(parse_tool_input(&buffer).is_some(), some);
+    }
+}
+
+#[test]
+fn partial_input_proof_rejects_stale_buffers_and_explicit_invalidation() {
+    use super::partial_input::PartialInputProof;
+
+    let prefix = r#"{"content":""#;
+    let mut certified = PartialInputProof::default();
+    assert_eq!(certified.reuse(prefix, prefix), None);
+    certified.record(false);
+    assert_eq!(
+        certified.clone().reuse(&format!("{prefix}x"), "x"),
+        Some(false)
+    );
+
+    // Wrong previous length and wrong suffix are independent stale hints.
+    for (buffer, delta) in [(format!("{prefix}xx"), "x"), (format!("{prefix}x"), "y")] {
+        let mut proof = certified.clone();
+        assert_eq!(proof.reuse(&buffer, delta), None);
+    }
+    let mut invalidated = certified;
+    invalidated.invalidate();
+    assert_eq!(invalidated.reuse(&format!("{prefix}x"), "x"), None);
 }
 
 #[test]
