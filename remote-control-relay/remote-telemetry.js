@@ -69,7 +69,7 @@ export function projectRemoteTasks(events, taskGroups = null) {
     // out. Such evidence contributes to calls, never passive-device activity.
     emit("task_submitted", task.submitted || task.admitted);
     emit("task_admitted", task.admitted);
-    emit("task_rejected", task.rejected, { error_category: taskError(task.rejected?.remote_reason), stage: "admission" });
+    emit("task_rejected", task.rejected, { error_category: taskError(task.rejected?.remote_reason), stage: "submission" });
     const output = task.rows.find(e => e.remote_stage === "first_output");
     emit("task_first_output", output, { duration_ms: output?.remote_duration_ms, output_type: "text" });
     if (TERMINAL.has(task.status)) {

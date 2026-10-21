@@ -3267,3 +3267,23 @@ fn tool_names_are_normalized_at_the_event_boundary() {
         assert_eq!(event.fields.get("tool_name"), Some(&json!(expected_name)));
     }
 }
+
+#[test]
+fn remote_fields_use_the_dedicated_gateway_and_cannot_enter_generic_events() {
+    let event = RemoteControlEvent::new(RemoteStage::TaskSubmit, RemoteOutcome::Ok)
+        .task("gateway_fixture_task", false, Some("assistant"))
+        .into_behavior();
+    validate_client_event_fields(&event).unwrap();
+    for (field, value) in &event.fields {
+        assert!(field.starts_with("remote_"));
+        assert!(!client_event_field_allowed(field));
+        let mut generic = BehaviorEvent::new("task_submitted");
+        generic.fields.insert(field.clone(), value.clone());
+        assert!(validate_client_event_fields(&generic).is_err());
+    }
+    let mut private = event;
+    private
+        .fields
+        .insert("file_path".into(), json!("private-fixture"));
+    assert!(validate_client_event_fields(&private).is_err());
+}

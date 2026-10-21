@@ -105,8 +105,9 @@ test('client privacy allowlist stays aligned with schema and excludes server ide
   const allowlistBody = rust.match(/fn client_event_field_allowed[\s\S]*?fn validate_client_event_fields/)?.[0] || '';
   const actual = Array.from(allowlistBody.matchAll(/\|?\s*"([a-z0-9_]+)"/g), match => match[1])
     .toSorted((left, right) => left.localeCompare(right));
-  const expected = schema['x-client-optional-fields'].toSorted((left, right) => left.localeCompare(right));
+  const expected = schema['x-client-optional-fields'].filter(field => !field.startsWith('remote_')).toSorted((left, right) => left.localeCompare(right));
   assert.deepEqual(actual, expected);
+  assert.match(rust, /if event\.event_name == "remote_control_event" \{\s*return remote_control::validate_event_fields\(event\)/);
   assert.ok(schema['x-server-injected-fields'].includes('account_subject_id'));
   for (const forbidden of ['message', 'content', 'file_path', 'tool_arguments', 'raw_error']) {
     assert.ok(!actual.includes(forbidden));

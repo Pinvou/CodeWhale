@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { buildRemoteOverview, projectRemoteTasks } from "../remote-telemetry.js";
 import { buildBehaviorOverview, buildStatsOverview, buildDeviceList, buildBehaviorModelRanking, buildBehaviorToolRanking, TelemetryStore } from "../telemetry-service.js";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -486,4 +486,22 @@ test("admitted installation failures cannot also count as rejection from legacy 
   const beforeAdmission = buildBehaviorOverview(devices, [], [submit, rejected], "today", now);
   assert.equal(beforeAdmission.remote_control.rejected_count, 1);
   assert.equal(beforeAdmission.metrics.task_finished_count, 0);
+});
+
+test("remote rejection projection uses the task schema's submission stage without admitting or counting a call", () => {
+  const schema = JSON.parse(readFileSync(new URL('../../docs/schemas/behavior-telemetry-v1.schema.json', import.meta.url), 'utf8'));
+  const rows = [event('controlled', 'task_submit'), event('controlled', 'task_rejected', {
+    remote_outcome:'rejected', remote_reason:'permission_required',
+  })];
+  const projected = projectRemoteTasks(rows).filter(row => row.remote_projection);
+  const rejected = projected.find(row => row.event_name === 'task_rejected');
+  assert.ok(rejected);
+  assert.ok(schema.properties.stage.enum.includes(rejected.stage));
+  assert.equal(rejected.stage, 'submission');
+  assert.equal(rejected.error_category, 'configuration_missing');
+  assert.equal(projected.some(row => row.event_name === 'task_admitted' || row.event_name === 'task_finished'), false);
+  const report = buildBehaviorOverview(devices, [], rows, 'today', now);
+  assert.equal(report.remote_control.submitted_count, 1);
+  assert.equal(report.remote_control.rejected_count, 1);
+  assert.equal(report.remote_control.task_count, 0);
 });

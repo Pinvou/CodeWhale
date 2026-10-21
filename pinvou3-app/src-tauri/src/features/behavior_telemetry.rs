@@ -105,6 +105,7 @@ const OUTBOX_MAX_BYTES: usize = 64 * 1024 * 1024;
 const SERVER_LINKABLE_RETENTION_DAYS: u8 = 35;
 const RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
 
+// Remote-control fields use the dedicated, event-specific gateway below.
 fn client_event_field_allowed(field: &str) -> bool {
     matches!(
         field,
@@ -168,20 +169,6 @@ fn client_event_field_allowed(field: &str) -> bool {
             | "rating"
             | "reason_code"
             | "content_type"
-            | "remote_stage"
-            | "remote_outcome"
-            | "remote_reason"
-            | "remote_latency_bucket"
-            | "remote_model_source"
-            | "remote_size_bucket"
-            | "remote_permission_step"
-            | "remote_task_key"
-            | "remote_role"
-            | "remote_mode"
-            | "remote_task_status"
-            | "remote_duration_ms"
-            | "remote_provider_key"
-            | "remote_model_key"
             | "execution_task_key"
     )
 }
