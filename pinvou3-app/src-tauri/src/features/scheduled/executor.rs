@@ -967,6 +967,7 @@ mod tests {
             model: wire_name.to_string(),
             model_store_card_id: None,
             model_store_link_detached: false,
+            model_store_link_requested: false,
             preserve_model_store_route: false,
             base_url: "https://example.invalid/v1".to_string(),
             provider_kind: None,

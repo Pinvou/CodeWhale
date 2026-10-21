@@ -559,6 +559,14 @@ function uninstallDoneText(copy, name, outcome) {
   return copy.uninstallDoneKept(name);
 }
 
+/** Preserve all uninstall recovery warnings after linked-model cleanup finishes. */
+function uninstallCleanupWarning(copy, name, linksCleaned, syncError) {
+  return [
+    !linksCleaned ? copy.uninstallLinksLeft(name) : null,
+    syncError ? copy.linkSyncFailed(syncError) : null,
+  ].filter(Boolean).join(' ');
+}
+
 export {
   selectedDeployProfile,
   deployProfileLabel,
@@ -567,6 +575,7 @@ export {
   LOG_WAIT_SECONDS,
   formatBytes,
   uninstallDoneText,
+  uninstallCleanupWarning,
   uninstallOptionsFor,
   splitDuration,
   parseProgressLine,

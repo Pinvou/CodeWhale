@@ -72,7 +72,7 @@ export function CardUpdateDialog({ record, copy, theme, busy, onClose, onUpdate,
               {compatibility ? (
                 <div className="space-y-3" data-testid="card-update-compatibility">
                   <p role="status">{copy.compatibilityKinds[compatibility.kind] || copy.compatibilityKinds.unverified}</p>
-                  {!canUpdate && copy.compatibilityReasons[compatibility.reason] ? <p className={TEXT_SECONDARY}>{copy.compatibilityReasons[compatibility.reason]}</p> : null}
+                  {!canUpdate ? <p className={TEXT_SECONDARY}>{copy.compatibilityReasons[compatibility.reason] || copy.compatibilityKinds[compatibility.reason] || copy.compatibilityReasonUnknown}</p> : null}
                   {canStage ? <p className={TEXT_SECONDARY}>{copy.versionUpgradeNextStep}</p> : null}
                   {blocked ? <p className={TEXT_SECONDARY}>{copy.versionUpgradeBlocked}</p> : null}
                   {compatibility.changes?.map((change) => (

@@ -194,7 +194,8 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
       onToast(copy.linkDone);
       await load();
     } catch (linkError) {
-      onToast(String(linkError?.message || linkError));
+      const message = String(linkError?.message || linkError);
+      onToast(message.includes("model store endpoint changed or is unavailable") ? copy.linkEndpointChanged : message);
     } finally {
       setBusy(false);
     }

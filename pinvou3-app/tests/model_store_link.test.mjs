@@ -56,8 +56,10 @@ test('model 填推理服务自己认的 id', () => {
 test('接入时记录稳定卡片关联，升级后仍沿用保存模型 id', () => {
   const row = buildSavedModel({ ...OK, cardId: 'stable-card', existingId: 'saved-id' });
   assert.equal(row.model_store_card_id, 'stable-card');
+  assert.equal(row.model_store_link_requested, true);
   assert.equal(row.id, 'saved-id');
   assert.equal(buildSavedModel(OK).model_store_card_id, null);
+  assert.equal(buildSavedModel(OK).model_store_link_requested, false);
 });
 
 test('缺任何一个必要取值都要当场报错，不能拼出半截配置', () => {
@@ -185,18 +187,18 @@ test('卡片关联优先且不复用或删除另一张卡的同名接口', () =>
     { id: 'same-card', model_store_card_id: 'tachyon', model: 'old-model', base_url: 'http://127.0.0.1:8001/v1' },
     { id: 'remote', model_store_card_id: 'tachyon', model: 'shared-model', base_url: 'https://example.com/v1' },
   ];
-  assert.deepEqual(findCardLinkedRows(rows, 'tachyon', 'shared-model').map(row => row.id), ['same-card']);
-  assert.deepEqual(findCardLinkedRows(rows, 'sglang', 'old-model').map(row => row.id), ['other-card']);
-  assert.deepEqual(findCardLinkedRows(rows, null, 'shared-model'), []);
+  assert.deepEqual(findCardLinkedRows(rows, 'tachyon').map(row => row.id), ['same-card']);
+  assert.deepEqual(findCardLinkedRows(rows, 'sglang').map(row => row.id), ['other-card']);
+  assert.deepEqual(findCardLinkedRows(rows, null), []);
 });
 
 test('解除关联后的同名本机接口不会被再次接入覆盖或在卸载时清理', () => {
   const detached = { id: 'user-edited', model: 'same-wire', base_url: 'http://127.0.0.1:9999/v1', model_store_card_id: null };
   const managed = { ...detached, id: 'managed', provider_kind: 'coding_plan', model_store_card_id: 'original-card' };
   const optedOut = { ...detached, model_store_card_id: 'original-card', model_store_link_detached: true };
-  assert.deepEqual(findCardLinkedRows([detached, managed, optedOut], 'original-card', 'same-wire'), []);
+  assert.deepEqual(findCardLinkedRows([detached, managed, optedOut], 'original-card'), []);
   const bound = { ...detached, id: 'bound', model_store_card_id: 'original-card' };
-  assert.deepEqual(findCardLinkedRows([detached, bound], 'original-card', 'same-wire'), [bound]);
+  assert.deepEqual(findCardLinkedRows([detached, bound], 'original-card'), [bound]);
 });
 
 test('isLocalGatewayUrl：认回环地址，不认局域网地址', () => {

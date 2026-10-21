@@ -443,7 +443,13 @@ pub(super) fn save_model_inner(
     UserPrefs::update_transaction_with_post_commit(
         |prefs| {
             let old = prefs.model_by_id(&model.id).cloned();
-            if model.preserve_model_store_route && model.is_operator_owned_endpoint() {
+            let explicit_store_link_requested = model.model_store_link_requested
+                || (old.is_none() && model.model_store_card_id.is_some());
+            model.model_store_link_requested = false;
+            if model.preserve_model_store_route
+                && !explicit_store_link_requested
+                && model.is_operator_owned_endpoint()
+            {
                 if let Some(latest) = old.as_ref().filter(|row| {
                     row.model_store_card_id.is_some() && !row.model_store_link_detached
                 }) {
@@ -470,7 +476,9 @@ pub(super) fn save_model_inner(
                     !model.model_store_link_detached
                         && !model.is_builtin_llmapi()
                         && model.is_operator_owned_endpoint()
-                        && ((same_route && previous == Some(*card))
+                        && ((!explicit_store_link_requested
+                            && same_route
+                            && previous == Some(*card))
                             || crate::features::model_store::matches_current_model_route(
                                 card,
                                 &model.base_url,
@@ -478,6 +486,15 @@ pub(super) fn save_model_inner(
                             ))
                 })
                 .map(str::to_owned);
+            // A card may stop or enter its update window after the client read
+            // its endpoint. Reject that stale explicit link before writing either
+            // settings or credentials; it is not an intentional manual detach.
+            if explicit_store_link_requested && model.model_store_card_id.is_none() {
+                return Err(
+                    "model store endpoint changed or is unavailable; refresh the card and retry"
+                        .to_string(),
+                );
+            }
             model.model_store_link_detached = model.model_store_card_id.is_none()
                 && (model.model_store_link_detached
                     || old.as_ref().is_none_or(|old| {
@@ -2159,6 +2176,7 @@ mod tests {
             model: "active-model".to_string(),
             model_store_card_id: None,
             model_store_link_detached: false,
+            model_store_link_requested: false,
             preserve_model_store_route: false,
             base_url: "https://active.example/v1".to_string(),
             provider_kind: None,

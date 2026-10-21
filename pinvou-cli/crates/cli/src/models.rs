@@ -1250,6 +1250,7 @@ fn add<S: CredentialStore>(
         base_url: base_url.to_owned(),
         model_store_card_id: None,
         model_store_link_detached: true,
+        model_store_link_requested: false,
         preserve_model_store_route: false,
         provider_kind: metadata.provider_kind,
         vendor: metadata.vendor,

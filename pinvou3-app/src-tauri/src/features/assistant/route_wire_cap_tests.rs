@@ -172,6 +172,7 @@ async fn boot_wire_cap_engine(
         model: model.to_string(),
         model_store_card_id: None,
         model_store_link_detached: false,
+        model_store_link_requested: false,
         preserve_model_store_route: false,
         base_url: base_url.to_string(),
         provider_kind: None,

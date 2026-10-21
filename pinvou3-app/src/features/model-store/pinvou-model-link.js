@@ -63,6 +63,7 @@ function buildSavedModel({
     base_url: baseUrl,
     model_store_card_id: cardId,
     model_store_link_detached: false,
+    model_store_link_requested: !!cardId,
     context_window_tokens: contextWindow || null,
     max_output_tokens: null,
     reasoning_effort: null,

@@ -28,6 +28,7 @@ import {
   reduceLogChunk,
   splitDuration,
   uninstallDoneText,
+  uninstallCleanupWarning,
   uninstallOptionsFor,
   trimSamples,
 } from '../src/features/model-store/model-store-logic.js';
@@ -256,6 +257,17 @@ test('uninstallDoneText：结果缺失时退回"已保留"，宁可少说也不�
   assert.equal(uninstallDoneText(COPY, 'Qwen', null), 'kept:Qwen');
   assert.equal(uninstallDoneText(COPY, 'Qwen', undefined), 'kept:Qwen');
   assert.equal(uninstallDoneText(COPY, 'Qwen', {}), 'kept:Qwen');
+});
+
+test('uninstall cleanup keeps sync failures visible and combines both recovery warnings', () => {
+  const copy = {
+    uninstallLinksLeft: (name) => `links-left:${name}`,
+    linkSyncFailed: (error) => `sync-failed:${error}`,
+  };
+  assert.equal(uninstallCleanupWarning(copy, 'Qwen', true, null), '');
+  assert.equal(uninstallCleanupWarning(copy, 'Qwen', true, 'disk full'), 'sync-failed:disk full');
+  assert.equal(uninstallCleanupWarning(copy, 'Qwen', false, null), 'links-left:Qwen');
+  assert.equal(uninstallCleanupWarning(copy, 'Qwen', false, 'disk full'), 'links-left:Qwen sync-failed:disk full');
 });
 
 // ---------------------------------------------- 卸载对话框该给几个选项
