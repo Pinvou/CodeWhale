@@ -243,18 +243,20 @@ fn ollama_status(expected: &str, names: &[String]) -> String {
 }
 
 /// 把 daemon 在线列表按身份去重后并进视图（纯函数，测试直打）：已注册记录
-/// （按 ollama_name_matches 身份）命中过的名字不再重复成未登记行；没命中过
-/// 的名字——包括同 base 名的另一个显式 tag——必须以未登记行现身，否则用户
-/// 看不到 daemon 上真实存在的模型（十轮评审 P2）。
+/// 命中过的名字不再重复成未登记行；没命中过的名字——包括同 base 名的另一
+/// 个显式 tag——必须以未登记行现身，否则用户看不到 daemon 上真实存在的模型
+/// （十轮评审 P2）。匹配用与 ollama_status 完全相同的**有效身份**（显式
+/// model 优先，缺失才回退展示 name，十一轮评审 P2）：name 只是展示别名，
+/// 登记了显式 model 仍拿 name 兜底，会把 daemon 真实存在的另一个模型当
+/// “重复行”隐藏。
 fn push_ollama_daemon_rows(models: &mut Vec<ExternalModel>, names: &[String]) {
     for name in names {
         let already_listed = models.iter().any(|model| {
-            model.kind == "ollama"
-                && (model
-                    .model
-                    .as_deref()
-                    .is_some_and(|m| ollama_name_matches(m, name))
-                    || ollama_name_matches(&model.name, name))
+            if model.kind != "ollama" {
+                return false;
+            }
+            let identity = model.model.as_deref().unwrap_or(model.name.as_str());
+            ollama_name_matches(identity, name)
         });
         if !already_listed {
             models.push(ExternalModel {
@@ -2062,6 +2064,40 @@ mod tests {
             ),
             "available"
         );
+    }
+
+    #[test]
+    fn daemon_rows_dedup_by_effective_model_not_display_name() {
+        let make = |name: &str, model: Option<&str>| ExternalModel {
+            id: format!("reg-{}", name.replace([':', ' '], "-")),
+            name: name.to_string(),
+            kind: "ollama".to_string(),
+            base_url: None,
+            model: model.map(str::to_string),
+            weights_path: None,
+            status: "unreachable".to_string(),
+            registered: true,
+            source: "registry".to_string(),
+        };
+        // 展示名 qwen3:30b、显式 model qwen3:8b（十一轮评审 P2 的负控）：
+        // daemon 只挂着真实的 30b 时，去重不得拿展示名命中把它当“重复行”
+        // 隐藏——状态链按 model 判 8b unreachable，去重必须同一把有效身份。
+        let mut models = vec![make("qwen3:30b", Some("qwen3:8b"))];
+        push_ollama_daemon_rows(&mut models, &["qwen3:30b".to_string()]);
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[1].name, "qwen3:30b");
+        assert_eq!(models[1].source, "ollama");
+        assert!(!models[1].registered);
+
+        // daemon 真挂着显式 model（8b）时仍按 model 去重，不重复成未登记行。
+        let mut models = vec![make("qwen3:30b", Some("qwen3:8b"))];
+        push_ollama_daemon_rows(&mut models, &["qwen3:8b".to_string()]);
+        assert_eq!(models.len(), 1);
+
+        // model 缺失才回退展示 name（登记裸名的既有口径不变）。
+        let mut models = vec![make("qwen3:30b", None)];
+        push_ollama_daemon_rows(&mut models, &["qwen3:30b".to_string()]);
+        assert_eq!(models.len(), 1);
     }
 
     #[test]

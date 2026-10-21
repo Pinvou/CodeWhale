@@ -247,14 +247,17 @@ function findLinkedRows(savedModels, ...names) {
 }
 
 /**
- * 端点身份的规范化形式：scheme + 小写 host:port + 去尾斜杠的 path。
+ * 端点身份的规范化形式：scheme + 小写 host:port + 去尾斜杠的 path + 原样 query。
  *
  * 外部模型注册表（设备管理）的每条记录都带自己的 base_url，接入时原样写进
  * 品悟那一行的 base_url，所以“这条记录接进了哪行”可以按端点精确回查。
  * isLocalGatewayUrl 回答“能不能接/该不该清”（回环宽尺子），这里回答
  * “是哪一行”（端点身份）：同一台机器上 8000 和 8001 是两个独立服务，同名
- * 模型互不代办（十轮评审 P2）。query/hash 不归一——base_url 不该带这些，
- * 带了就当不同端点，清理侧宁漏不误删。
+ * 模型互不代办（十轮评审 P2）。query 参与身份（十一轮评审 P2）：登记校验
+ * 与探测 URL（Rust `endpoint_models_url`）都保留 query，vLLM 等服务靠它路由
+ * 租户，`?tenant=a` 与 `?tenant=b` 是两份独立配置——丢掉 query 会把接入复用
+ * 和移除回收静默合到另一份上。fragment 只活在浏览器侧、从不发往服务端，
+ * 不参与身份。
  * @param {unknown} url - base_url。
  * @returns {string|null} 规范化端点；解析失败返回 null。
  */
@@ -262,7 +265,7 @@ function normalizeLoopbackEndpoint(url) {
   if (typeof url !== 'string' || !url) return null;
   try {
     const u = new URL(url);
-    return `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, '')}`;
+    return `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, '')}${u.search}`;
   } catch {
     return null;
   }
