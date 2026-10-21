@@ -81,11 +81,15 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
   // 回来」之前,弹窗会短暂显示 A 的名字、运行时和接入地址——用户以为自己看的是 B。
   // ModelStoreView 里那个测试商店的 effect 用的是同一个套路(cancelled 标志)。
   const loadTokenRef = useRef(0);
+  // A request generation cannot protect callbacks that start a *new* request
+  // after an older mutation finishes. Scope those callbacks to this open card.
+  const viewTokenRef = useRef(0);
 
   const load = useCallback(async () => {
     if (!cardId) return;
     const token = (loadTokenRef.current += 1);
-    const stale = () => token !== loadTokenRef.current;
+    const viewToken = viewTokenRef.current;
+    const stale = () => token !== loadTokenRef.current || viewToken !== viewTokenRef.current;
     try {
       // Key 拿不到不算致命:模型本身的信息照样该显示出来。
       const [modelDetail, keyList] = await Promise.all([
@@ -109,44 +113,52 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
   }, [cardId]);
 
   useEffect(() => {
+    viewTokenRef.current += 1;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- 换一张卡时先把上一张的详情/Key 清空再拉新的;不清会让新卡短暂显示旧卡的运行时和 Key
     setDetail(null);
     setKeys([]);
     setError(null);
+    setBusy(false);
+    setRetrying(false);
     load();
+    return () => { viewTokenRef.current += 1; };
   }, [load]);
 
   // 错误态的重试入口。就是再跑一次 load()——失败原因基本都是瞬时的
   // (后端刚重启、请求超时、Key 接口抖了一下),重来一次往往就好了。
   const retry = async () => {
+    const viewToken = viewTokenRef.current;
     setRetrying(true);
     try {
       await load();
     } finally {
-      setRetrying(false);
+      if (viewToken === viewTokenRef.current) setRetrying(false);
     }
   };
 
   const copyText = async (text) => {
+    const viewToken = viewTokenRef.current;
     try {
       await navigator.clipboard.writeText(text);
-      onToast(copy.copied);
+      if (viewToken === viewTokenRef.current) onToast(copy.copied);
     } catch {
       // 没有剪贴板权限时不谎报成功 —— 内容本来就是可见可手选的。
-      onToast(copy.copyFailed);
+      if (viewToken === viewTokenRef.current) onToast(copy.copyFailed);
     }
   };
 
   const addKey = async () => {
+    const viewToken = viewTokenRef.current;
     setBusy(true);
     try {
       await createApiKey(cardId, null);
+      if (viewToken !== viewTokenRef.current) return;
       onToast(copy.keyCreated);
       await load();
     } catch (keyError) {
-      onToast(String(keyError?.message || keyError));
+      if (viewToken === viewTokenRef.current) onToast(String(keyError?.message || keyError));
     } finally {
-      setBusy(false);
+      if (viewToken === viewTokenRef.current) setBusy(false);
     }
   };
 
@@ -160,6 +172,7 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
   // `model` 要填 `endpoint_model` 而不是 `model_name`：前者是推理服务真正认的 id。
   // 经网关时填 model_name 是对的（网关按它查表再替换），直连时填错就是 404。
   const useInPinvou = async () => {
+    const viewToken = viewTokenRef.current;
     const bridge = tryGetTauriBridge();
     if (!bridge?.models?.saveModel) {
       onToast(copy.linkBridgeMissing);
@@ -191,30 +204,33 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
       await bridge.models.saveModel(saved);
       // 选为当前模型。注意这只影响**新建的会话**，不会打断正在生成的那些。
       if (bridge.models.setActiveModel) await bridge.models.setActiveModel(saved.id);
+      if (viewToken !== viewTokenRef.current) return;
       onToast(copy.linkDone);
       await load();
     } catch (linkError) {
       const message = String(linkError?.message || linkError);
-      onToast(message.includes("model store endpoint changed or is unavailable") ? copy.linkEndpointChanged : message);
+      if (viewToken === viewTokenRef.current) onToast(message.includes("model store endpoint changed or is unavailable") ? copy.linkEndpointChanged : message);
     } finally {
-      setBusy(false);
+      if (viewToken === viewTokenRef.current) setBusy(false);
     }
   };
 
   const record = detail?.record;
   const linkedModels = findCardLinkedRows(savedModels, cardId);
   const followContext = async (modelId) => {
+    const viewToken = viewTokenRef.current;
     setBusy(true);
     try {
       await followDeploymentContext(cardId, modelId);
+      if (viewToken !== viewTokenRef.current) return;
       onToast(copy.contextFollowDone);
       await load();
     } catch (contextError) {
       const message = String(contextError?.message || contextError);
-      onToast(message.includes('store_context_follow_unsupported') || message.startsWith('store_protocol:')
+      if (viewToken === viewTokenRef.current) onToast(message.includes('store_context_follow_unsupported') || message.startsWith('store_protocol:')
         ? copy.contextFollowHostUpdate : copy.contextFollowFailed);
     } finally {
-      setBusy(false);
+      if (viewToken === viewTokenRef.current) setBusy(false);
     }
   };
   // 能不能接进品悟。算一次给按钮的禁用态和下面那行原因共用——两处各算一次的话,

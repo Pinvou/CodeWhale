@@ -193,6 +193,150 @@ try {
     const reactModule = await import('/@id/react');
     const { createElement } = reactModule.default || reactModule;
     const client = await import('/@id/react-dom/client');
+    const { ModelStoreView } = await import('/features/model-store/ModelStoreView.jsx');
+    const { dictZh } = await import('/shared/i18n/zh.js');
+    /* eslint-enable import-x/no-unresolved, n/no-missing-import */
+    const createRoot = client.createRoot || client.default?.createRoot;
+    const root = createRoot(document.getElementById('root'));
+    const records = ['alpha', 'beta'].map((id) => ({ card_id: id, card_name: id,
+      model_name: id, status: 'deployed', running: false, size_bytes: 128, deploy_topology: 'single' }));
+    const completed = new Map();
+    const pending = new Map();
+    let serial = 0;
+    window.versionRuns = [];
+    window.finishVersionRun = (runId, result = {}) => {
+      const chunk = { done: true, ok: true, lines: [], next: 0, result };
+      completed.set(runId, chunk);
+      pending.get(runId)?.(chunk);
+    };
+    window.__TAURI__ = { core: { invoke: async (command, payload) => {
+      if (command === 'model_store_availability') return { available: true };
+      if (command === 'model_store_cards' || command === 'model_store_active_runs') return [];
+      if (command === 'model_store_library') return { models: records, corrected: [] };
+      if (command === 'model_store_test_store_state') return { enabled: false };
+      if (command === 'model_store_take_startup_cleanup') return null;
+      if (command === 'model_store_check_card_update') return { changed: true, revision: 'new',
+        compatibility: { kind: 'weights_changed', can_stage: true, can_update: false } };
+      if (command === 'model_store_versions') return [{ version_id: `${payload.cardId}-old`,
+        filename: 'old.weights', state: 'history', can_delete: true, size_bytes: 128 }];
+      if (command === 'model_store_start_version_action') {
+        const runId = `${payload.cardId}-${payload.action}-${++serial}`;
+        window.versionRuns.push(runId);
+        return { run_id: runId };
+      }
+      if (command === 'model_store_start_lifecycle' && payload.action === 'uninstall') return { run_id: `failed-uninstall-${payload.cardId}` };
+      if (command === 'model_store_force_remove') {
+        return new Promise((resolve) => { window.finishForceRemove = () => resolve({
+          residual_paths: [`/${payload.cardId}/force-retained.weights`], warning: 'files retained',
+        }); });
+      }
+      if (command === 'model_store_run_log') {
+        if (payload.runId.startsWith('failed-uninstall-')) return { done: true, ok: false, lines: [], next: 0, error: 'uninstall failed' };
+        if (completed.has(payload.runId)) return completed.get(payload.runId);
+        return new Promise((resolve) => pending.set(payload.runId, resolve));
+      }
+      throw Error(`Unexpected command: ${command}`);
+    } } };
+    window.renderVersionStore = (visible) => root.render(visible ? createElement(ModelStoreView, {
+      theme: 'light', t: dictZh, bs: { savedModels: [] },
+    }) : null);
+    window.openVersionHistory = (cardId) => {
+      const row = document.querySelector(`[data-card-id="${cardId}"]`);
+      [...row.querySelectorAll('button')].find((button) => button.textContent === dictZh.uiModelStore.versionHistory).click();
+    };
+    window.renderVersionStore(true);
+  });
+  const openStage = async () => {
+    await page.waitForSelector('[data-card-id="alpha"] [data-testid="model-store-check-card-update"]');
+    await page.click('[data-card-id="alpha"] [data-testid="model-store-check-card-update"]');
+    await page.waitForSelector('[data-testid="model-store-stage-version"]');
+    await page.click('[data-testid="model-store-stage-version"]');
+  };
+  const openHistory = async (cardId) => {
+    await page.evaluate((id) => window.openVersionHistory(id), cardId);
+    await page.waitForSelector('[data-testid="model-version-row"]');
+  };
+  // Long staging must preserve both kinds of dialog the user opened meanwhile.
+  await openStage();
+  await page.click('[data-card-id="beta"] [data-testid="model-store-check-card-update"]');
+  await page.waitForSelector('[data-testid="model-store-card-update-dialog"]');
+  await page.evaluate(() => window.finishVersionRun(window.versionRuns[0]));
+  await page.waitForSelector('[data-testid="model-version-operation-result"]');
+  assert.ok(await page.$eval('#card-update-title', (element) => element.textContent.includes('beta')));
+  assert.equal(await page.$('[data-testid="model-store-versions-dialog"]'), null);
+  await page.keyboard.press('Escape');
+  await openStage();
+  await openHistory('beta');
+  await page.evaluate(() => window.finishVersionRun(window.versionRuns[1]));
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="model-version-operation-result"]').length === 2);
+  assert.ok(await page.$eval('#model-versions-title', (element) => element.textContent.includes('beta')));
+  assert.equal(await page.$('[data-testid="model-store-card-update-dialog"]'), null);
+  await page.keyboard.press('Escape');
+  await page.$$eval('[data-testid="model-version-operation-result"] button', (buttons) => buttons.forEach((button) => button.click()));
+  await page.waitForFunction(() => !document.querySelector('[data-testid="model-version-results"]'));
+  // Two independent cleanup results arrive while ModelStoreView is unmounted.
+  // Remounting must disclose both path lists; acknowledging one cannot erase the other.
+  for (const cardId of ['alpha', 'beta']) {
+    await openHistory(cardId);
+    await page.click('[data-testid="model-version-row"] button');
+    await page.waitForSelector('[data-testid="model-version-delete-confirm"]');
+    await page.$eval('[data-testid="model-version-delete-confirm"]', (element) => element.querySelectorAll('button')[1].click());
+  }
+  await page.evaluate(() => window.renderVersionStore(false));
+  await page.waitForFunction(() => !document.querySelector('[data-testid="model-store-view"]'));
+  await page.evaluate(() => {
+    window.finishVersionRun(window.versionRuns[2], { freed_bytes: 128, remaining_paths: ['/alpha/retained.weights'] });
+    window.finishVersionRun(window.versionRuns[3], { freed_bytes: 256, remaining_paths: ['/beta/retained.weights'] });
+  });
+  // Let both task pumps settle before bringing the view back.
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await page.evaluate(() => window.renderVersionStore(true));
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="model-version-cleanup-result"]').length === 2);
+  assert.deepEqual(await page.$$eval('[data-testid="model-version-cleanup-result"] li',
+    (items) => items.map((item) => item.textContent)), ['/alpha/retained.weights', '/beta/retained.weights']);
+  await page.click('[data-testid="model-version-operation-result"] button');
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="model-version-cleanup-result"]').length === 1);
+  await page.evaluate(() => window.renderVersionStore(false));
+  await page.waitForFunction(() => !document.querySelector('[data-testid="model-store-view"]'));
+  await page.evaluate(() => window.renderVersionStore(true));
+  await page.waitForSelector('[data-testid="model-version-cleanup-result"]');
+  assert.deepEqual(await page.$$eval('[data-testid="model-version-cleanup-result"] li',
+    (items) => items.map((item) => item.textContent)), ['/beta/retained.weights']);
+  const beginForceRemove = async (cardId) => {
+    await page.click(`[data-card-id="${cardId}"] [data-testid="model-store-uninstall"]`);
+    await page.waitForSelector('[data-testid="model-store-uninstall-keep"]');
+    await page.click('[data-testid="model-store-uninstall-keep"]');
+    await page.waitForSelector('[data-testid="model-store-task-force-remove"]');
+    await page.click('[data-testid="model-store-task-force-remove"]');
+    await page.waitForSelector('[data-testid="model-store-force-remove-confirm"]');
+    await page.click('[data-testid="model-store-force-remove-confirm"]');
+  };
+  await beginForceRemove('alpha');
+  await page.waitForFunction(() => typeof window.finishForceRemove === 'function');
+  await page.evaluate(() => window.renderVersionStore(false));
+  await page.waitForFunction(() => !document.querySelector('[data-testid="model-store-view"]'));
+  await page.evaluate(() => window.finishForceRemove());
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await page.evaluate(() => window.renderVersionStore(true));
+  await page.waitForSelector('[data-operation-kind="force_remove"]');
+  assert.deepEqual(await page.$$eval('[data-testid="model-version-cleanup-result"] li',
+    (items) => items.map((item) => item.textContent)), ['/beta/retained.weights', '/alpha/force-retained.weights']);
+  await page.click('[data-operation-kind="force_remove"] button');
+  await page.evaluate(() => { window.finishForceRemove = null; });
+  await beginForceRemove('beta');
+  await page.waitForFunction(() => typeof window.finishForceRemove === 'function');
+  await page.evaluate(() => window.finishForceRemove());
+  await page.waitForSelector('[data-testid="model-store-force-remove-done"]');
+  await page.click('[data-testid="model-store-force-remove-done"]');
+  assert.deepEqual(await page.$$eval('[data-testid="model-version-cleanup-result"] li',
+    (items) => items.map((item) => item.textContent)), ['/beta/retained.weights'],
+  'closing the force-remove result only acknowledges its own queued disclosure');
+  await page.reload();
+  await page.evaluate(async () => {
+    /* eslint-disable import-x/no-unresolved, n/no-missing-import */
+    const reactModule = await import('/@id/react');
+    const { createElement } = reactModule.default || reactModule;
+    const client = await import('/@id/react-dom/client');
     const { ModelDetailDialog } = await import('/features/model-store/ModelDetailDialog.jsx');
     const { dictZh } = await import('/shared/i18n/zh.js');
     /* eslint-enable import-x/no-unresolved, n/no-missing-import */
@@ -272,6 +416,83 @@ try {
   assert.match(await page.$eval('[data-testid="model-store-context-settings"]', (node) => node.textContent), /上下文自动跟随部署/);
   await page.reload();
   await page.evaluate(async () => {
+    /* eslint-disable import-x/no-unresolved, n/no-missing-import */
+    const reactModule = await import('/@id/react');
+    const { createElement } = reactModule.default || reactModule;
+    const client = await import('/@id/react-dom/client');
+    const { ModelDetailDialog } = await import('/features/model-store/ModelDetailDialog.jsx');
+    const { dictZh } = await import('/shared/i18n/zh.js');
+    /* eslint-enable import-x/no-unresolved, n/no-missing-import */
+    const createRoot = client.createRoot || client.default?.createRoot;
+    const root = createRoot(document.getElementById('root'));
+    window.detailLoads = [];
+    window.detailMutations = [];
+    window.detailToasts = [];
+    window.detailActivations = [];
+    const deferMutation = (kind, cardId) => new Promise((resolve, reject) => {
+      window.detailMutations.push({ kind, cardId, resolve, reject });
+    });
+    window.finishDetailMutation = (cardId, kind, fail) => {
+      const index = window.detailMutations.findIndex((operation) => operation.cardId === cardId && operation.kind === kind);
+      const [operation] = window.detailMutations.splice(index, 1);
+      if (fail) operation.reject(Error('mutation failed'));
+      else operation.resolve({ ok: true });
+    };
+    window.__TAURI__ = { core: { invoke: async (command, payload) => {
+      if (command === 'model_store_model_detail') {
+        window.detailLoads.push(payload.cardId);
+        return { record: { card_id: payload.cardId, card_name: payload.cardId, model_name: payload.cardId,
+          endpoint_model: payload.cardId, endpoint_url: 'http://127.0.0.1:8911/v1', running: true, status: 'deployed' } };
+      }
+      if (command === 'model_store_api_keys') return [];
+      if (command === 'model_store_follow_deployment_context') return deferMutation('context', payload.cardId);
+      if (command === 'model_store_create_api_key') return deferMutation('key', payload.cardId);
+      throw Error(`Unexpected command: ${command}`);
+    } } };
+    window.TauriBridge = { models: {
+      saveModel: (model) => deferMutation('link', model.model_store_card_id),
+      setActiveModel: async (id) => { window.detailActivations.push(id); },
+    } };
+    window.renderScopedDetail = (cardId) => root.render(createElement(ModelDetailDialog, {
+      cardId, copy: dictZh.uiModelStore, theme: 'light', onClose() {},
+      onToast: (message) => window.detailToasts.push(message),
+      savedModels: ['alpha', 'beta'].map((id) => ({ id: `${id}-linked`, model_store_card_id: id,
+        model: id, base_url: 'http://127.0.0.1:8911/v1', context_window_tokens: 32768 })),
+    }));
+  });
+  const detailActions = [
+    ['context', 'model-store-follow-context'], ['key', 'model-store-add-key'], ['link', 'model-store-use-in-pinvou'],
+  ];
+  for (const [kind, testId] of detailActions) {
+    for (const fail of [false, true]) {
+      await page.evaluate(() => window.renderScopedDetail('alpha'));
+      await page.waitForFunction(() => document.querySelector('#model-store-detail-title')?.textContent === 'alpha');
+      await page.click(`[data-testid="${testId}"]`);
+      await page.waitForFunction(() => window.detailMutations.some((operation) => operation.cardId === 'alpha'));
+      await page.evaluate(() => window.renderScopedDetail(null));
+      await page.waitForFunction(() => !document.querySelector('[data-testid="model-store-detail-dialog"]'));
+      await page.evaluate(() => window.renderScopedDetail('beta'));
+      await page.waitForFunction(() => document.querySelector('#model-store-detail-title')?.textContent === 'beta');
+      await page.click('[data-testid="model-store-add-key"]');
+      await page.waitForFunction(() => window.detailMutations.some((operation) => operation.cardId === 'beta'));
+      const before = await page.evaluate(() => ({ loads: [...window.detailLoads], toasts: window.detailToasts.length }));
+      await page.evaluate(({ action, shouldFail }) => window.finishDetailMutation('alpha', action, shouldFail), { action: kind, shouldFail: fail });
+      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      assert.equal(await page.$eval('#model-store-detail-title', (node) => node.textContent), 'beta');
+      assert.deepEqual(await page.evaluate(() => window.detailLoads), before.loads, `${kind} must not start a stale alpha refresh`);
+      assert.equal(await page.evaluate(() => window.detailToasts.length), before.toasts, 'old result must not toast over the new card');
+      assert.equal(await page.$eval('[data-testid="model-store-add-key"]', (button) => button.disabled), true,
+        'old finally must not clear the new card’s in-flight mutation');
+      await page.evaluate(() => window.finishDetailMutation('beta', 'key', false));
+      await page.waitForFunction(() => !document.querySelector('[data-testid="model-store-add-key"]').disabled);
+      await page.evaluate(() => window.renderScopedDetail(null));
+      await page.waitForFunction(() => !document.querySelector('[data-testid="model-store-detail-dialog"]'));
+    }
+  }
+  assert.deepEqual(await page.evaluate(() => window.detailActivations), ['alpha-linked'],
+    'a committed explicit link retains its requested global activation without repainting another card');
+  await page.reload();
+  await page.evaluate(async () => {
     // The real settings form stays mounted while its model props refresh, just
     // like a background models:changed event in the application.
     /* eslint-disable import-x/no-unresolved, n/no-missing-import */
@@ -344,6 +565,9 @@ try {
   console.log('PASS: existing settings forms preserve untouched routes after migration; edited routes and new drafts opt out');
   console.log('PASS: unknown compatibility reasons remain visible; uninstall cleanup preserves sync failures');
   console.log('PASS: stale details retain explicit re-link intent and surface rejection without changing the active model');
+  console.log('PASS: staging preserves other cards’ dialogs; concurrent cleanup disclosures survive navigation and individual acknowledgement');
+  console.log('PASS: force-remove results survive navigation; closing one result preserves other unread cleanup paths');
+  console.log('PASS: late context/key/link results cannot refresh another card, overwrite its busy state, or show stale toasts');
 } finally {
   await browser?.close();
   await vite?.close();

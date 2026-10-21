@@ -3,6 +3,9 @@ use super::{card_update, db};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
+mod downloads;
+pub use downloads::{DownloadReservation, download_paths};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Version {
     pub card_id: String,
@@ -31,17 +34,11 @@ fn connection() -> Result<rusqlite::Connection, String> {
 /// any of those stages. Destructive operations wait for those holders rather
 /// than failing immediately; all waiting is cancellable before any mutation.
 fn operation_lock_file(name: &str) -> Result<std::fs::File, String> {
-    use std::os::unix::fs::OpenOptionsExt;
     let root = super::config::data_dir();
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-    std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .open(root.join(name))
-        .map_err(|e| e.to_string())
+    // Keep the existing inode/path: moving locks while older processes are
+    // alive would silently split their mutual exclusion.
+    crate::platform::filesystem::open_private_lock_file(&root.join(name)).map_err(|e| e.to_string())
 }
 
 fn try_resource_lock(lock: &std::fs::File, exclusive: bool) -> Result<(), std::fs::TryLockError> {
@@ -290,6 +287,13 @@ pub fn retained_bytes_without_reservation(card_id: &str, version_id: &str) -> Re
 /// the best-effort UI measurement, propagate every scan error except a positively
 /// absent root. Do not follow links, including a replaced root directory.
 pub(super) fn quota_dir_size_bytes(root: &std::path::Path) -> Result<u64, String> {
+    quota_dir_size_bytes_excluding(root, &[])
+}
+
+fn quota_dir_size_bytes_excluding(
+    root: &std::path::Path,
+    excluded: &[std::path::PathBuf],
+) -> Result<u64, String> {
     let scan_error = |path: &std::path::Path, error: std::io::Error| {
         format!("无法核算版本目录配额 {}：{error}", path.display())
     };
@@ -315,6 +319,9 @@ pub(super) fn quota_dir_size_bytes(root: &std::path::Path) -> Result<u64, String
         for entry in std::fs::read_dir(&directory).map_err(|error| scan_error(&directory, error))? {
             let entry = entry.map_err(|error| scan_error(&directory, error))?;
             let path = entry.path();
+            if excluded.contains(&path) {
+                continue;
+            }
             let meta = path
                 .symlink_metadata()
                 .map_err(|error| scan_error(&path, error))?;
@@ -387,9 +394,10 @@ fn retained_bytes_replacing(replacing: Option<(&str, &str)>) -> Result<u64, Stri
         resource.0 = resource.0.max(charge);
         resource.1 = resource.1.saturating_add(covered);
     }
-    Ok(resources.values().fold(0u64, |total, (charge, covered)| {
+    let version_bytes = resources.values().fold(0u64, |total, (charge, covered)| {
         total.saturating_add(charge.saturating_sub(*covered))
-    }))
+    });
+    Ok(version_bytes.saturating_add(downloads::retained_download_bytes()?))
 }
 
 pub fn engine_is_retained(name: &str, version: Option<&str>) -> Result<bool, String> {
@@ -406,18 +414,12 @@ pub fn engine_is_retained(name: &str, version: Option<&str>) -> Result<bool, Str
 /// A process crash releases the operation lock. Expose interrupted candidates
 /// for retry/cleanup without touching scripts, processes or downloaded files.
 pub fn recover_interrupted(card_id: &str) -> Result<(), String> {
-    use std::os::unix::fs::OpenOptionsExt;
     let safe = super::config::safe_path_component(card_id)?;
     let lock_dir = super::config::data_dir().join("operation-locks");
     std::fs::create_dir_all(&lock_dir).map_err(|e| e.to_string())?;
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .open(lock_dir.join(format!("{safe}.lock")))
-        .map_err(|e| e.to_string())?;
+    let file =
+        crate::platform::filesystem::open_private_lock_file(&lock_dir.join(format!("{safe}.lock")))
+            .map_err(|e| e.to_string())?;
     if file.try_lock().is_err() {
         return Ok(());
     }
@@ -431,4 +433,22 @@ pub fn recover_interrupted(card_id: &str) -> Result<(), String> {
         put(&version)?;
     }
     Ok(())
+}
+
+/// Explicit abandonment keeps every byte and removes all metadata atomically.
+/// Only the force-remove endpoint may call this; ordinary deletion retains its
+/// history/shared-resource guards. The caller discloses registered paths first.
+pub fn abandon_card_records(card_id: &str) -> Result<(), String> {
+    let mut conn = connection()?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    downloads::forget_on(&tx, card_id)?;
+    tx.execute("DELETE FROM model_versions WHERE card_id=?1", [card_id])
+        .map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM store_models WHERE card_id=?1", [card_id])
+        .map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM api_keys WHERE card_id=?1", [card_id])
+        .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
 }

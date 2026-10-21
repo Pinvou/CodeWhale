@@ -1,4 +1,6 @@
 import { ModelVersionsDialog } from "./ModelVersionsDialog.jsx";
+import { ModelStoreOperationResults } from './ModelStoreOperationResults.jsx';
+import { dismissModelStoreOperationResult, rememberForceRemoveResult } from './operation-results.js';
 // 模型商店:浏览 / 下载 / 在本机部署大模型。
 //
 // 数据来自本进程的 model_store 命令(见 model-store-api.js),本文件不直接碰
@@ -129,7 +131,6 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
   const [detailCardId, setDetailCardId] = useState(null);
   const [updateRecord, setUpdateRecord] = useState(null);
   const [versionsRecord, setVersionsRecord] = useState(null);
-  const [versionCleanupResult, setVersionCleanupResult] = useState(null);
   const [confirmUninstall, setConfirmUninstall] = useState(null);
   // 卸载失败后的逃生路径。两段:'confirm' 是二次确认,'result' 是移除之后把
   // LMM 报回来的残留路径摊开给用户看。
@@ -546,8 +547,7 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
       start: () => startVersionAction(record.card_id, action, versionId),
       doneText: (outcome) => action === 'delete' ? copy.versionDeleted((outcome?.freed_bytes || 0) / 1024 ** 3) : (action === 'stage' ? copy.versionStaged : copy.versionSwitched),
     });
-    if (result?.ok && action === 'stage') setVersionsRecord(record);
-    if (result?.ok && action === 'delete' && result.result?.remaining_paths?.length) setVersionCleanupResult(result.result);
+    return result;
   }, [copy, runLifecycle]);
 
   const handleDeploy = useCallback(
@@ -683,7 +683,10 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
     [mergedModels]
   );
 
-  const closeForceRemove = useCallback(() => setForceRemove(null), []);
+  const closeForceRemove = useCallback(() => {
+    if (forceRemove?.stage === 'result') dismissModelStoreOperationResult(forceRemove.resultId);
+    setForceRemove(null);
+  }, [forceRemove]);
 
   const confirmForceRemove = useCallback(async () => {
     const target = forceRemove;
@@ -691,6 +694,9 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
     setForceRemoveBusy(true);
     try {
       const result = await forceRemoveModel(target.cardId);
+      // Register before any follow-up await: navigation or linked-row cleanup
+      // failures must not lose the only disclosure of files left on disk.
+      const resultId = rememberForceRemoveResult(target, result);
       // 那张失败的任务卡该走了:它指向的记录已经不存在,留着只会让用户再点一次
       // 同一个入口,然后收到一句「没有这张卡」。
       dismissTask(target.taskId);
@@ -714,7 +720,7 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
       // 会在同一 tick 把它盖掉,用户永远看不到。残留信息结果页上本来就有,让位给
       // 那条更要紧的。
       if (linksCleaned) showToast(copy.forceRemoveDone(target.cardName, residual.length));
-      setForceRemove({ ...target, stage: 'result', result: { ...result, residual_paths: residual } });
+      setForceRemove({ ...target, stage: 'result', resultId, result: { ...result, residual_paths: residual } });
     } catch (error) {
       // 失败就把框关掉、只留一句话:记录还在,那张任务卡也还在,用户可以再试。
       setForceRemove(null);
@@ -1018,6 +1024,7 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
               ) : null}
             </div>
           ) : null}
+          <ModelStoreOperationResults copy={copy} hiddenResultId={forceRemove?.stage === 'result' ? forceRemove.resultId : null} />
           {renderBody()}
         </div>
       </main>
@@ -1045,12 +1052,6 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
         }}
       />
 
-      {versionCleanupResult ? <MsDialog open onClose={() => setVersionCleanupResult(null)} theme={theme} labelledBy="version-cleanup-result" testId="model-version-cleanup-result">
-        <MsDialogTitle id="version-cleanup-result" onClose={() => setVersionCleanupResult(null)} closeLabel={copy.detailClose}>{copy.versionCleanupTitle}</MsDialogTitle>
-        <p>{copy.versionDeleted((versionCleanupResult.freed_bytes || 0) / 1024 ** 3)}</p>
-        <p className="mt-3 text-[13px]">{copy.versionRemaining}</p>
-        <ul className="mt-2 space-y-1 break-all text-[12px]">{versionCleanupResult.remaining_paths.map((path) => <li key={path}>{path}</li>)}</ul>
-      </MsDialog> : null}
       {versionsRecord ? <ModelVersionsDialog record={library.models?.find((r) => r.card_id === versionsRecord.card_id) || versionsRecord} copy={copy} theme={theme} busy={!!runningTask(lifecycleTaskKey(versionsRecord.card_id))} onClose={() => setVersionsRecord(null)} onAction={handleVersionAction} /> : null}
       {updateRecord ? (
         <CardUpdateDialog

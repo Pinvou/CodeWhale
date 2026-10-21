@@ -12,6 +12,12 @@
 //      接回来之后的能力跟自己发起的完全一样（进度 / 取消 / 应答）。
 import assert from 'node:assert/strict';
 import test, { afterEach } from 'node:test';
+import {
+  dismissModelStoreOperationResult,
+  getModelStoreOperationResults,
+  rememberForceRemoveResult,
+  subscribeModelStoreOperationResults,
+} from '../src/features/model-store/operation-results.js';
 
 // ---------------------------------------------------------------- 假后端
 //
@@ -88,6 +94,74 @@ const taskByRunId = (runId) => getTasks().find((task) => task.runId === runId) |
 // 它持续增长的轮询计数污染。这两件事都真的发生过。
 afterEach(() => {
   for (const task of [...getTasks()]) dismissTask(task.id);
+  for (const result of getModelStoreOperationResults()) dismissModelStoreOperationResult(result.id);
+});
+
+test('版本清理在没有视图订阅时完成，重挂后仍逐项保留所有残留路径', async () => {
+  const before = getModelStoreOperationResults();
+  let notifications = 0;
+  const unsubscribe = subscribeModelStoreOperationResults(() => { notifications += 1; });
+  unsubscribe(); // ModelStoreView navigated away before either cleanup completed.
+  for (const cardId of ['cleanup-a', 'cleanup-b']) {
+    scripts.set(cardId, (from) => ({ done: true, ok: true, next: from, lines: [],
+      result: { freed_bytes: 1024, remaining_paths: [`/${cardId}/retained.weights`] } }));
+    await runTask({ title: cardId, kind: 'version_delete', key: `card:${cardId}`,
+      start: async () => ({ run_id: cardId }) });
+  }
+  assert.equal(notifications, 0);
+  assert.deepEqual(before, [], 'published snapshots must not mutate in place');
+  assert.deepEqual(getModelStoreOperationResults().map((entry) => entry.result.remaining_paths),
+    [['/cleanup-a/retained.weights'], ['/cleanup-b/retained.weights']]);
+  const unsubscribeNext = subscribeModelStoreOperationResults(() => { notifications += 1; });
+  dismissModelStoreOperationResult(getModelStoreOperationResults()[0].id);
+  assert.equal(notifications, 1);
+  assert.deepEqual(getModelStoreOperationResults().map((entry) => entry.result.remaining_paths),
+    [['/cleanup-b/retained.weights']], 'acknowledging one result must retain the other cleanup');
+  unsubscribeNext();
+});
+
+test('再附着版本清理也登记结果，不依赖已消失的发起调用方', async () => {
+  scripts.set('reattach-cleanup', (from) => ({ done: true, ok: true, next: from, lines: [],
+    result: { remaining_paths: ['/reattached/remaining'] } }));
+  reattachRuns([{ run_id: 'reattach-cleanup', card_id: 'cleanup', kind: 'version_delete' }],
+    () => ({ title: 'cleanup', key: 'card:cleanup' }));
+  await waitFor(() => getModelStoreOperationResults().length === 1, 'reattached cleanup result was lost');
+  assert.deepEqual(getModelStoreOperationResults()[0].result.remaining_paths, ['/reattached/remaining']);
+});
+
+test('版本下载和切换完成保留结果，取消和失败不登记成功', async () => {
+  for (const [kind, extra] of [
+    ['version_stage', { ok: true }], ['version_switch', { ok: true }],
+    ['version_delete', { ok: true, cancelled: true }], ['version_stage', { ok: false, error: 'failed' }],
+  ]) {
+    const runId = `result-${kind}-${getTasks().length}-${getModelStoreOperationResults().length}`;
+    scripts.set(runId, (from) => ({ done: true, next: from, lines: [], ...extra }));
+    await runTask({ title: kind, kind, key: `card:${runId}`, start: async () => ({ run_id: runId }) });
+  }
+  assert.deepEqual(getModelStoreOperationResults().map((entry) => entry.kind), ['version_stage', 'version_switch']);
+});
+
+test('卸载残留与强制移除分别保留，确认一个结果不抹掉另一个', async () => {
+  scripts.set('normal-uninstall-residual', (from) => ({ done: true, ok: true, next: from, lines: [],
+    result: { purged_weights: true, remaining_paths: ['/uninstall/remaining'] } }));
+  await runTask({ title: 'uninstall', kind: 'uninstall', key: 'card:uninstall',
+    start: async () => ({ run_id: 'normal-uninstall-residual' }) });
+  const target = { taskId: 99, cardName: 'force removal' };
+  const forceId = rememberForceRemoveResult(target, { residual_paths: ['/force/remaining'] });
+  rememberForceRemoveResult(target, { residual_paths: ['/force/remaining'] });
+  assert.equal(getModelStoreOperationResults().length, 2, 'same force removal must not be duplicated');
+  dismissModelStoreOperationResult(forceId);
+  assert.deepEqual(getModelStoreOperationResults().map((entry) => entry.result.remaining_paths), [['/uninstall/remaining']]);
+});
+
+test('同一个后台run的版本结果只披露一次，不因重新接回重复入列', async () => {
+  scripts.set('same-completed-run', (from) => ({ done: true, ok: true, next: from, lines: [],
+    result: { remaining_paths: ['/same/remaining'] } }));
+  for (let i = 0; i < 2; i += 1) {
+    await runTask({ title: 'same', kind: 'version_delete', key: 'card:same',
+      start: async () => ({ run_id: 'same-completed-run' }) });
+  }
+  assert.equal(getModelStoreOperationResults().length, 1);
 });
 
 /**

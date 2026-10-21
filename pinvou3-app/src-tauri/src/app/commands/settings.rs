@@ -588,29 +588,7 @@ fn is_store_link_cleanup_target(model: &SavedModel, card_id: &str) -> bool {
     {
         return false;
     }
-    let Ok(url) = reqwest::Url::parse(&model.base_url) else {
-        return false;
-    };
-    if !matches!(url.scheme(), "http" | "https")
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || !matches!(
-            url.path().trim_end_matches('/'),
-            "/v1" | "/v1/chat/completions"
-        )
-    {
-        return false;
-    }
-    url.host_str().is_some_and(|host| {
-        let host = host.trim_start_matches('[').trim_end_matches(']');
-        let host = host.strip_suffix('.').unwrap_or(host);
-        host.eq_ignore_ascii_case("localhost")
-            || host
-                .parse::<std::net::IpAddr>()
-                .is_ok_and(|ip| ip.is_loopback())
-    })
+    crate::features::model_store::is_store_managed_route(&model.base_url)
 }
 
 pub(super) fn delete_model_if_store_link_inner(

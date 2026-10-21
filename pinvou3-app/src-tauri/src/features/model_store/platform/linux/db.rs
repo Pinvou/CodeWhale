@@ -747,6 +747,23 @@ pub struct AddStoreModelParams<'a> {
 }
 
 pub fn add_store_model(p: AddStoreModelParams<'_>) -> rusqlite::Result<StoreModelRecord> {
+    add_store_model_at_root(p, None)
+}
+
+/// Persist the fixed download directory in the same commit as the new model.
+/// A crash before clearing its quota plan must not make deployment use a later
+/// default directory instead of the one that actually received the files.
+pub fn add_store_model_with_root(
+    p: AddStoreModelParams<'_>,
+    models_root: &str,
+) -> rusqlite::Result<StoreModelRecord> {
+    add_store_model_at_root(p, Some(models_root))
+}
+
+fn add_store_model_at_root(
+    p: AddStoreModelParams<'_>,
+    models_root: Option<&str>,
+) -> rusqlite::Result<StoreModelRecord> {
     let now = now_iso();
     let deployed_at = if p.status == "deployed" {
         Some(now.clone())
@@ -765,8 +782,8 @@ pub fn add_store_model(p: AddStoreModelParams<'_>) -> rusqlite::Result<StoreMode
              size_bytes, quantization, source_repo_id, source_filename, status,
              script_install_engine, script_deploy, script_download_model,
              script_enable, script_stop, script_uninstall,
-             downloaded_at, deployed_at, profiles_json, deploy_topology, card_source)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+             downloaded_at, deployed_at, profiles_json, deploy_topology, card_source, models_root)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
          ON CONFLICT(card_id) DO UPDATE SET
              model_name=excluded.model_name, card_name=excluded.card_name,
              org=excluded.org, description=excluded.description, engine_name=excluded.engine_name,
@@ -782,7 +799,8 @@ pub fn add_store_model(p: AddStoreModelParams<'_>) -> rusqlite::Result<StoreMode
              deployed_at=COALESCE(excluded.deployed_at, store_models.deployed_at),
              profiles_json=excluded.profiles_json,
              deploy_topology=excluded.deploy_topology,
-             card_source=excluded.card_source",
+             card_source=excluded.card_source,
+             models_root=COALESCE(excluded.models_root, store_models.models_root)",
         params![
             p.card_id,
             p.model_name,
@@ -810,6 +828,7 @@ pub fn add_store_model(p: AddStoreModelParams<'_>) -> rusqlite::Result<StoreMode
                 .ok()
                 .and_then(|v| v.as_str().map(str::to_string)),
             p.card_source,
+            models_root,
         ],
     )?;
     conn.query_row(
@@ -1456,6 +1475,39 @@ mod tests {
         };
         assert_eq!(src("same-id-from-test"), "builtin");
         assert_eq!(src("same-id-from-store"), "store");
+    }
+
+    #[test]
+    fn downloaded_model_keeps_its_root_before_quota_finalization_or_later_upserts() {
+        let _ctx = setup_temp_db();
+        let scripts = Default::default();
+        let params = || AddStoreModelParams {
+            card_id: "fixed-root",
+            model_name: "fixed-root",
+            card_name: "Fixed root",
+            org: None,
+            description: None,
+            engine_name: "engine",
+            engine_version: None,
+            size_bytes: 1024,
+            quantization: None,
+            source_repo_id: None,
+            source_filename: None,
+            scripts: &scripts,
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: DeployTopology::Single,
+            card_source: "store",
+        };
+        // No reservation-finalization UPDATE runs before these independent reads.
+        let rec = add_store_model_with_root(params(), "/fixed-download-root").unwrap();
+        assert_eq!(rec.models_root.as_deref(), Some("/fixed-download-root"));
+        assert_eq!(
+            get_store_model("fixed-root").unwrap().unwrap().models_root,
+            rec.models_root
+        );
+        let updated = add_store_model(params()).unwrap();
+        assert_eq!(updated.models_root.as_deref(), Some("/fixed-download-root"));
     }
 
     #[test]

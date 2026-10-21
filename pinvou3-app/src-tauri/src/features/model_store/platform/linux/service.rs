@@ -371,18 +371,15 @@ impl Drop for OpCleanup {
 
 /// Cross-process serialization for all mutations of one public card.
 fn card_operation_lock(card_id: &str) -> Result<std::fs::File, String> {
-    use std::os::unix::fs::OpenOptionsExt;
     let safe_id = config::safe_path_component(card_id)?;
     let lock_dir = config::data_dir().join("operation-locks");
     std::fs::create_dir_all(&lock_dir).map_err(|e| e.to_string())?;
-    let operation_lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .open(lock_dir.join(format!("{safe_id}.lock")))
-        .map_err(|e| e.to_string())?;
+    // Keep the established path: moving a live lock would split exclusion
+    // between processes running different app versions.
+    let operation_lock = crate::platform::filesystem::open_private_lock_file(
+        &lock_dir.join(format!("{safe_id}.lock")),
+    )
+    .map_err(|e| e.to_string())?;
     operation_lock
         .try_lock()
         .map_err(|_| "该模型正在其他窗口操作，请稍后重试".to_string())?;
@@ -1311,5 +1308,31 @@ mod tests {
         }
         assert!(log.outcome.lock().as_ref().is_some_and(Result::is_ok));
         assert!(spawn_op(&second, "shared-card", OP_ENABLE, |_, _, _| Ok(Value::Null)).is_ok());
+    }
+
+    #[test]
+    fn card_operation_lock_refuses_symlinks_and_tightens_existing_permissions() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let _home = config::TempHome::new();
+        let lock_dir = config::data_dir().join("operation-locks");
+        std::fs::create_dir_all(&lock_dir).unwrap();
+        let target = lock_dir.join("unrelated");
+        std::fs::write(&target, "keep").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(&target, lock_dir.join("linked.lock")).unwrap();
+        assert!(card_operation_lock("linked").is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        let existing = lock_dir.join("existing.lock");
+        std::fs::write(&existing, "").unwrap();
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let _lock = card_operation_lock("existing").unwrap();
+        assert_eq!(
+            std::fs::metadata(&existing).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }

@@ -5,7 +5,6 @@ use super::super::{
     weight_identity,
 };
 use super::*;
-use base64::Engine as _;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
@@ -66,58 +65,6 @@ fn existing_owned_directory(path: &Path) -> Result<bool, ModelManagerError> {
     Ok(path.canonicalize().map_err(|e| fail(e.to_string()))? == path)
 }
 
-/// Credit only the declared single weight or its known HF local-dir resume
-/// file, never arbitrary contents, links, sparse holes or duplicate temp copies.
-fn resumable_bytes(root: &Path, name: &str, hash: &str) -> Result<(u64, u64), ModelManagerError> {
-    let name = Path::new(name);
-    let basename = name
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| fail("无效权重文件名"))?;
-    let metadata_hash = ring::digest::digest(
-        &ring::digest::SHA1_FOR_LEGACY_USE_ONLY,
-        format!("{basename}.metadata").as_bytes(),
-    );
-    let expected_prefix = base64::engine::general_purpose::URL_SAFE.encode(metadata_hash.as_ref());
-    let cache_suffix = Path::new(".cache/huggingface/download")
-        .join(name.parent().unwrap_or_else(|| Path::new("")));
-    let mut stack = vec![(root.to_path_buf(), 0)];
-    let mut visited = 0;
-    let mut allocated = 0;
-    let mut logical = 0;
-    while let Some((dir, depth)) = stack.pop() {
-        if depth > 5 || visited > 10000 {
-            return Err(fail("权重目录过于复杂，无法可靠确认续传文件。"));
-        }
-        for entry in fs::read_dir(dir).map_err(|e| fail(e.to_string()))? {
-            let entry = entry.map_err(|e| fail(e.to_string()))?;
-            visited += 1;
-            let path = entry.path();
-            let meta = path.symlink_metadata().map_err(|e| fail(e.to_string()))?;
-            if meta.is_dir() {
-                stack.push((path, depth + 1));
-            } else if meta.is_file() && meta.nlink() == 1 {
-                // huggingface_hub local-dir paths use a URL-safe hash of the
-                // metadata filename followed by the LFS etag. Require the
-                // declared content digest; another etag cannot be resumed.
-                let hf_resume = path.parent().is_some_and(|p| p.ends_with(&cache_suffix))
-                    && entry.file_name().to_str().is_some_and(|n| {
-                        n.strip_suffix(".incomplete")
-                            .and_then(|n| n.rsplit_once('.'))
-                            .is_some_and(|(prefix, etag)| {
-                                prefix == expected_prefix && etag.eq_ignore_ascii_case(hash)
-                            })
-                    });
-                if path.ends_with(name) || hf_resume {
-                    allocated = allocated.max(meta.len().min(meta.blocks().saturating_mul(512)));
-                    logical = logical.max(meta.len());
-                }
-            }
-        }
-    }
-    Ok((allocated, logical))
-}
-
 /// Path::exists treats permission errors and dangling links as absence. A
 /// record-only cleanup needs a positive NotFound result without linked parents.
 fn resource_presence(path: &Path) -> Result<bool, ModelManagerError> {
@@ -138,10 +85,27 @@ fn resource_presence(path: &Path) -> Result<bool, ModelManagerError> {
 fn file_digest(
     path: &Path,
     control: &script_runner::RunControl,
+    on_progress: &mut ProgressFn<'_>,
 ) -> Result<String, ModelManagerError> {
     let mut file = fs::File::open(path).map_err(|e| fail(e.to_string()))?;
     let before = file.metadata().map_err(|e| fail(e.to_string()))?;
     let mut hash = Sha256::new();
+    let mut read_bytes = 0u64;
+    let mut last_progress = Instant::now();
+    let report = |bytes: u64, progress: &mut ProgressFn<'_>| {
+        progress(&format!(
+            "校验权重 {}：{} / {} 字节（{:.1}%）",
+            path.display(),
+            bytes,
+            before.len(),
+            if before.len() == 0 {
+                100.0
+            } else {
+                bytes as f64 * 100.0 / before.len() as f64
+            },
+        ));
+    };
+    report(0, on_progress);
     let mut buffer = vec![0; 1024 * 1024];
     loop {
         if control.cancelled() {
@@ -152,6 +116,11 @@ fn file_digest(
             break;
         }
         hash.update(&buffer[..n]);
+        read_bytes = read_bytes.saturating_add(n as u64);
+        if last_progress.elapsed() >= Duration::from_secs(1) {
+            report(read_bytes, on_progress);
+            last_progress = Instant::now();
+        }
     }
     let after = file.metadata().map_err(|e| fail(e.to_string()))?;
     if (before.len(), before.mtime(), before.mtime_nsec())
@@ -159,6 +128,7 @@ fn file_digest(
     {
         return Err(fail("校验期间权重发生变化，请重试。"));
     }
+    report(read_bytes, on_progress);
     Ok(crate::platform::encoding::hex_lower(&hash.finalize()))
 }
 
@@ -672,15 +642,12 @@ impl ModelManager {
             {
                 return Err(fail("失败版本目录归属不符，已保留原记录和资源。"));
             }
-            let (name, hash) = files.iter().next().ok_or_else(|| fail("缺少权重文件名"))?;
-            let (allocated, logical) = resumable_bytes(&root, name, hash)?;
-            // retained_bytes includes this candidate's logical bytes already.
-            // Unknown files remain charged and grant no download-space credit.
-            (
-                root,
-                card.summary.size_bytes.saturating_sub(allocated),
-                card.summary.size_bytes.saturating_sub(logical),
-            )
+            // Scripts own their output layout, including HF cache directories.
+            // Existing bytes remain charged, but neither a matching basename
+            // nor an etag proves those bytes will be reused by this attempt.
+            // Reserve a complete additional copy; the original script may still
+            // resume and retain any required configuration side effects.
+            (root, card.summary.size_bytes, card.summary.size_bytes)
         } else {
             // Preserve the normal download path's ability to create a newly
             // configured target root before owned_directory canonicalizes it.
@@ -812,7 +779,7 @@ impl ModelManager {
             on_progress("独立校验新版权重 SHA-256；通过后才允许切换。");
             for (name, hash) in &files {
                 let path = find_weight(&models_root, name)?;
-                if file_digest(&path, &control)? != *hash {
+                if file_digest(&path, &control, on_progress)? != *hash {
                     return Err(fail("新版权重完整性校验失败，当前部署未改变。"));
                 }
             }
@@ -926,7 +893,7 @@ impl ModelManager {
             let old_file = find_weight(&resource, &name).map_err(|_| {
                 fail("当前权重缺失，不能保证升级后回退；请先修复当前部署，未切换版本。")
             })?;
-            if file_digest(&old_file, &control)? != hash {
+            if file_digest(&old_file, &control, on_progress)? != hash {
                 return Err(fail(
                     "当前权重校验失败，不能保证升级后回退；请先修复当前部署，未切换版本。",
                 ));
@@ -951,7 +918,7 @@ impl ModelManager {
             .ok_or_else(|| fail("无法确认目标权重目录"))?;
         ensure_unused(&runtime_path(rec)?, Some(&root))?;
         on_progress("校验目标版本权重；当前卡片记录保持不变。");
-        if file_digest(&find_weight(&root, &name)?, &control)? != hash {
+        if file_digest(&find_weight(&root, &name)?, &control, on_progress)? != hash {
             return Err(fail("目标权重校验失败，未切换版本。"));
         }
         let source = self.local_scripts_source(rec)?;
@@ -967,7 +934,15 @@ impl ModelManager {
         }
         let probe = self.engine_probe(&source, card_id, &env);
         if !probe.installed {
-            self.install_engine(&source, &env, on_progress, control.clone(), probe.need_root)?;
+            let lines =
+                self.install_engine(&source, &env, on_progress, control.clone(), probe.need_root)?;
+            db::mark_engine_installed(
+                &rec.engine_name,
+                rec.engine_version.as_deref(),
+                extract_marker(&lines, "LMM_ENGINE_IMAGE=").as_deref(),
+                source.script_hash("install_engine").as_deref(),
+            )
+            .map_err(|e| fail(format!("记录引擎安装状态失败：{e}")))?;
         }
         self.run_card_script(&source, "deploy", &env, on_progress, control.clone(), false)?;
         if control.cancelled() {
@@ -1119,8 +1094,10 @@ impl ModelManager {
                     {
                         return Err(fail("旧版权重路径越界"));
                     }
-                    if file_digest(&file, &control)? != hash {
-                        return Err(fail("旧版权重已变化，未删除资源。"));
+                    if file_digest(&file, &control, on_progress)? != hash {
+                        return Err(fail(
+                            "旧版权重已变化，未删除资源。请确认没有其他模型共享后手动移走或删除该权重，再重试清理；也可使用“只移除记录”保留全部文件并移除本卡及历史记录。",
+                        ));
                     }
                     if meta.nlink() == 1 {
                         freed = meta.blocks() * 512;

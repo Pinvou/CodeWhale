@@ -167,7 +167,6 @@ fn prepare_switch_rollback_and_cleanup_preserve_credentials_and_old_weights() {
             .is_err()
     );
     assert!(mgr.delete_engine("native", Some("old")).is_err());
-    assert!(mgr.force_remove_record(&current.card_id).is_err());
     mgr.switch_version(&current.card_id, &old_id, &mut |_| {}, Default::default())
         .unwrap();
     let restored = db::get_store_model(&current.card_id).unwrap().unwrap();
@@ -1438,11 +1437,13 @@ fn legacy_cleanup_retains_history_for_ambiguous_nested_weights() {
 }
 
 #[test]
-fn failed_candidate_resumes_at_quota_boundary_without_counting_partial_weight_twice() {
+fn failed_hf_candidate_requires_full_capacity_then_resumes_without_stacking_stale_plan() {
     let (_temp, mut mgr, current, card, mut pkg, id) = fixture();
-    pkg.scripts.insert("download_model".into(), blob(
-        "#!/bin/bash\nset -e\nmkdir -p \"$LMM_MODELS_DIR/new\"\nweight=\"$LMM_MODELS_DIR/new/new.tachyon\"\nif [ -f \"$weight\" ]; then printf eights >> \"$weight\"; else printf new-w > \"$weight\"; echo '完整性校验失败' >&2; exit 1; fi\n"
-    ));
+    let hash = script_runner::sha256_hex("new-weights");
+    let prefix = "KBv97_iyz3IQ9bCSq3sTENHhlOw=";
+    pkg.scripts.insert("download_model".into(), blob(&format!(
+        "#!/bin/bash\nset -e\ncache=\"$LMM_MODELS_DIR/new/.cache/huggingface/download\"\nmkdir -p \"$cache\"\nweight=\"$cache/{prefix}.{hash}.incomplete\"\nif [ -f \"$weight\" ]; then printf eights >> \"$weight\"; mv \"$weight\" \"$LMM_MODELS_DIR/new/new.tachyon\"; else printf new-w > \"$weight\"; echo '完整性校验失败' >&2; exit 1; fi\n"
+    )));
     assert!(
         mgr.stage_verified(
             &current,
@@ -1457,28 +1458,40 @@ fn failed_candidate_resumes_at_quota_boundary_without_counting_partial_weight_tw
     let failed = version_store::get(&current.card_id, &id).unwrap().unwrap();
     assert_eq!(failed.state, "failed");
     let root = Path::new(failed.models_root.as_deref().unwrap());
-    let (allocated, logical) = resumable_bytes(
-        root,
-        "new.tachyon",
-        &script_runner::sha256_hex("new-weights"),
-    )
-    .unwrap();
-    assert_eq!((allocated, logical), (5, 5));
+    let cache_file = root.join(format!(
+        "new/.cache/huggingface/download/{prefix}.{hash}.incomplete"
+    ));
+    assert_eq!(fs::read(&cache_file).unwrap(), b"new-w");
     let used = db::total_managed_bytes().unwrap() as u64 + version_store::retained_bytes().unwrap();
     mgr.settings.storage_quota_gb = Some((used + 6) as f64 / 1073741824.0);
-    assert!(
-        !mgr.check_can_download(11).ok,
-        "full-copy accounting reproduces the rejection"
+    let error = mgr
+        .stage_verified(
+            &current,
+            &card,
+            &id,
+            pkg.clone(),
+            &mut |_| {},
+            Default::default(),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("超出存储配额"), "{error}");
+    assert_eq!(fs::read(&cache_file).unwrap(), b"new-w");
+    assert!(!root.join("new/new.tachyon").exists());
+    let rejected = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    assert_eq!(rejected.state, "failed");
+    assert_eq!(rejected.planned_bytes, 0);
+    assert_eq!(
+        db::total_managed_bytes().unwrap() as u64 + version_store::retained_bytes().unwrap(),
+        used
     );
-    let check = mgr.check_can_download_increment(6, 6, root);
-    assert!(check.ok, "{}", check.reason);
-    assert_eq!(check.required_bytes, 6);
-    // Simulate a crash before interruption recovery. Its old larger plan must
-    // be replaced, so a retry at the current quota still fits exactly.
+    // Simulate a crash before interruption recovery. The stale plan is replaced
+    // rather than added to the full new reservation; the script still performs
+    // actual HF continuation with its side effects intact.
     let mut interrupted = failed.clone();
     interrupted.state = "downloading".into();
     interrupted.planned_bytes = used + 1024;
     version_store::put(&interrupted).unwrap();
+    mgr.settings.storage_quota_gb = Some((used + card.summary.size_bytes) as f64 / 1073741824.0);
     mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
         .unwrap();
     let ready = version_store::get(&current.card_id, &id).unwrap().unwrap();
@@ -1813,64 +1826,6 @@ fn retry_rejects_replaced_marker_without_losing_registered_resources() {
 }
 
 #[test]
-fn resume_credit_ignores_sparse_holes_links_unknown_files_and_duplicate_parts() {
-    use std::os::unix::fs::symlink;
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    fs::write(root.join("unrelated"), vec![0; 100]).unwrap();
-    let sparse = fs::File::create(root.join("new.tachyon")).unwrap();
-    sparse.set_len(1024 * 1024).unwrap();
-    assert_eq!(
-        resumable_bytes(
-            root,
-            "new.tachyon",
-            &script_runner::sha256_hex("new-weights")
-        )
-        .unwrap(),
-        (0, 1024 * 1024)
-    );
-    fs::remove_file(root.join("new.tachyon")).unwrap();
-    symlink(root.join("unrelated"), root.join("new.tachyon")).unwrap();
-    assert_eq!(
-        resumable_bytes(
-            root,
-            "new.tachyon",
-            &script_runner::sha256_hex("new-weights")
-        )
-        .unwrap(),
-        (0, 0)
-    );
-    fs::remove_file(root.join("new.tachyon")).unwrap();
-    let cache = root.join(".cache/huggingface/download");
-    fs::create_dir_all(&cache).unwrap();
-    let hash = script_runner::sha256_hex("new-weights");
-    fs::write(
-        cache.join(format!("KBv97_iyz3IQ9bCSq3sTENHhlOw=.{hash}.incomplete")),
-        b"partial",
-    )
-    .unwrap();
-    fs::write(
-        cache.join(format!("another-prefix.{hash}.incomplete")),
-        vec![0; 100],
-    )
-    .unwrap();
-    fs::write(
-        cache.join(format!("unknown.{}.incomplete", "f".repeat(64))),
-        vec![0; 100],
-    )
-    .unwrap();
-    assert_eq!(
-        resumable_bytes(
-            root,
-            "new.tachyon",
-            &script_runner::sha256_hex("new-weights")
-        )
-        .unwrap(),
-        (7, 7)
-    );
-}
-
-#[test]
 fn missing_legacy_directory_link_is_not_treated_as_absent() {
     use std::os::unix::fs::symlink;
     let (_temp, mgr, current, card, pkg, id) = fixture();
@@ -1963,21 +1918,6 @@ fn new_candidate_can_create_a_new_default_root_while_current_version_stays_pinne
             .unwrap()
             .models_root,
         active.models_root
-    );
-}
-
-#[test]
-fn hf_lfs_resume_credit_recognizes_real_hashed_incomplete_filename() {
-    let temp = tempfile::tempdir().unwrap();
-    let cache = temp.path().join("model/.cache/huggingface/download");
-    fs::create_dir_all(&cache).unwrap();
-    let hash = script_runner::sha256_hex("new-weights");
-    // Python: urlsafe_b64encode(sha1(b"new.tachyon.metadata").digest()).decode().
-    let prefix = "KBv97_iyz3IQ9bCSq3sTENHhlOw=";
-    fs::write(cache.join(format!("{prefix}.{hash}.incomplete")), b"new-w").unwrap();
-    assert_eq!(
-        resumable_bytes(temp.path(), "new.tachyon", &hash).unwrap(),
-        (5, 5)
     );
 }
 
@@ -2438,4 +2378,249 @@ fn new_upgrade_requires_current_managed_ownership_but_history_can_recover() {
             id
         );
     }
+}
+
+#[test]
+fn changed_legacy_history_has_manual_recovery_and_explicit_record_only_escape() {
+    let (_temp, mgr, current, card, pkg, id) = fixture();
+    let key = db::add_api_key(&current.card_id, Some("escape")).unwrap();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    let old_id = version_store::active_id(&current);
+    let damaged = mgr.settings.models_path().join("legacy/old.tachyon");
+    fs::write(&damaged, b"externally changed").unwrap();
+    let error = mgr
+        .delete_version(&current.card_id, &old_id, &mut |_| {}, Default::default())
+        .unwrap_err();
+    assert!(error.to_string().contains("手动移走或删除"));
+    assert!(error.to_string().contains("只移除记录"));
+    let staged = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    // No global exclusive lock is needed: abandoning metadata never touches a
+    // resource another card's long-running shared operation is using.
+    let _other_download = version_store::resource_operation_lock(false).unwrap();
+    let outcome = mgr.force_remove_record(&current.card_id).unwrap();
+    assert!(db::get_store_model(&current.card_id).unwrap().is_none());
+    assert!(
+        version_store::list(Some(&current.card_id))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(db::find_api_key(&key.key_value).unwrap().is_none());
+    assert_eq!(fs::read(&damaged).unwrap(), b"externally changed");
+    assert!(
+        Path::new(staged.models_root.as_deref().unwrap())
+            .join("new/new.tachyon")
+            .exists()
+    );
+    assert!(
+        outcome
+            .residual_paths
+            .contains(&mgr.settings.models_path().to_string_lossy().into_owned())
+    );
+    assert!(
+        outcome
+            .residual_paths
+            .contains(staged.models_root.as_ref().unwrap())
+    );
+    assert!(outcome.warning.contains("没有被删除"));
+}
+
+#[test]
+fn abandoning_history_rolls_back_model_versions_and_credentials_together() {
+    let (_temp, mgr, current, card, pkg, id) = fixture();
+    let key = db::add_api_key(&current.card_id, Some("rollback")).unwrap();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    let connection = db::connect().unwrap();
+    connection.execute_batch("CREATE TRIGGER refuse_credential_delete BEFORE DELETE ON api_keys BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+    assert!(mgr.force_remove_record(&current.card_id).is_err());
+    assert!(db::get_store_model(&current.card_id).unwrap().is_some());
+    assert!(version_store::get(&current.card_id, &id).unwrap().is_some());
+    assert!(db::find_api_key(&key.key_value).unwrap().is_some());
+    assert!(
+        mgr.settings
+            .models_path()
+            .join("legacy/old.tachyon")
+            .exists()
+    );
+}
+
+#[test]
+fn weight_hash_reports_file_bytes_and_remains_cancellable_before_reading() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("large.tachyon");
+    fs::write(&path, vec![b'x'; 2 * 1024 * 1024]).unwrap();
+    let mut progress = Vec::new();
+    let digest = file_digest(&path, &Default::default(), &mut |line| {
+        progress.push(line.to_owned())
+    })
+    .unwrap();
+    assert_eq!(
+        digest,
+        script_runner::sha256_hex(&"x".repeat(2 * 1024 * 1024))
+    );
+    assert!(progress.first().unwrap().contains("0 / 2097152"));
+    assert!(progress.last().unwrap().contains("2097152 / 2097152"));
+    assert!(progress.last().unwrap().contains("100.0%"));
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let control = script_runner::RunControl {
+        cancel: Some(cancel.clone()),
+        prompt: None,
+    };
+    let error = file_digest(&path, &control, &mut |_| {
+        cancel.store(true, std::sync::atomic::Ordering::SeqCst)
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("已取消"));
+}
+
+#[test]
+fn ordinary_download_reservation_blocks_overlapping_stage_until_released() {
+    let (_temp, mut manager, current, mut card, package, _) = fixture();
+    card.summary.size_bytes = 64 * 1024;
+    let revision = card_update::revision(&card_update::remote_manifest(&card));
+    manager.settings.storage_quota_gb = Some(100.0 * 1024.0 / 1073741824.0);
+    let ordinary = version_store::DownloadReservation::acquire(
+        "ordinary",
+        &manager.settings.models_path(),
+        || false,
+        || {},
+    )
+    .unwrap();
+    ordinary.publish(80 * 1024).unwrap();
+    let error = manager
+        .stage_verified(
+            &current,
+            &card,
+            &revision,
+            package.clone(),
+            &mut |_| {},
+            Default::default(),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("超出存储配额"), "{error}");
+    assert!(
+        version_store::get(&current.card_id, &revision)
+            .unwrap()
+            .is_none()
+    );
+    drop(ordinary);
+    manager
+        .stage_verified(
+            &current,
+            &card,
+            &revision,
+            package,
+            &mut |_| {},
+            Default::default(),
+        )
+        .unwrap();
+}
+
+#[test]
+fn relocated_ordinary_weight_backup_cannot_reduce_stage_retry_reservation() {
+    let (_temp, mut manager, current, card, mut package, revision) = fixture();
+    // The script itself is unchanged between attempts. A user moves its failed
+    // ordinary output aside as evidence, so the next run would write a new copy.
+    package.scripts.insert("download_model".into(), blob(
+        "#!/bin/bash\nset -e\nmkdir -p \"$LMM_MODELS_DIR/new\"\nprintf ran >> \"$LMM_MODELS_DIR/attempts\"\nprintf bad-weights > \"$LMM_MODELS_DIR/new/new.tachyon\"\necho '完整性校验失败' >&2\nexit 1\n",
+    ));
+    assert!(
+        manager
+            .stage_verified(
+                &current,
+                &card,
+                &revision,
+                package.clone(),
+                &mut |_| {},
+                Default::default()
+            )
+            .is_err()
+    );
+    let failed = version_store::get(&current.card_id, &revision)
+        .unwrap()
+        .unwrap();
+    let root = Path::new(failed.models_root.as_deref().unwrap());
+    fs::create_dir(root.join("backup")).unwrap();
+    fs::rename(
+        root.join("new/new.tachyon"),
+        root.join("backup/new.tachyon"),
+    )
+    .unwrap();
+    let used = db::total_managed_bytes().unwrap() as u64 + version_store::retained_bytes().unwrap();
+    manager.settings.storage_quota_gb = Some(used as f64 / 1073741824.0);
+    let error = manager
+        .stage_verified(
+            &current,
+            &card,
+            &revision,
+            package,
+            &mut |_| {},
+            Default::default(),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("超出存储配额"), "{error}");
+    assert_eq!(fs::read(root.join("attempts")).unwrap(), b"ran");
+    assert_eq!(
+        fs::read(root.join("backup/new.tachyon")).unwrap(),
+        b"bad-weights"
+    );
+    assert!(!root.join("new/new.tachyon").exists());
+    assert_eq!(
+        version_store::get(&current.card_id, &revision)
+            .unwrap()
+            .unwrap()
+            .state,
+        "failed"
+    );
+}
+
+#[test]
+fn relocated_hf_cache_backup_cannot_reduce_full_retry_reservation() {
+    let (_temp, mut manager, current, card, mut package, revision) = fixture();
+    let hash = script_runner::sha256_hex("new-weights");
+    let prefix = "KBv97_iyz3IQ9bCSq3sTENHhlOw=";
+    package.scripts.insert("download_model".into(), blob(&format!(
+        "#!/bin/bash\nset -e\ncache=\"$LMM_MODELS_DIR/new/.cache/huggingface/download\"\nmkdir -p \"$cache\"\nprintf ran >> \"$LMM_MODELS_DIR/attempts\"\nweight=\"$cache/{prefix}.{hash}.incomplete\"\nif [ -f \"$weight\" ]; then printf eights >> \"$weight\"; mv \"$weight\" \"$LMM_MODELS_DIR/new/new.tachyon\"; else printf new-w > \"$weight\"; echo '完整性校验失败' >&2; exit 1; fi\n"
+    )));
+    assert!(
+        manager
+            .stage_verified(
+                &current,
+                &card,
+                &revision,
+                package.clone(),
+                &mut |_| {},
+                Default::default()
+            )
+            .is_err()
+    );
+    let failed = version_store::get(&current.card_id, &revision)
+        .unwrap()
+        .unwrap();
+    let root = Path::new(failed.models_root.as_deref().unwrap());
+    fs::create_dir(root.join("backup")).unwrap();
+    fs::rename(root.join("new/.cache"), root.join("backup/.cache")).unwrap();
+    let cached = root.join(format!(
+        "backup/.cache/huggingface/download/{prefix}.{hash}.incomplete"
+    ));
+    let used = db::total_managed_bytes().unwrap() as u64 + version_store::retained_bytes().unwrap();
+    manager.settings.storage_quota_gb = Some((used + 6) as f64 / 1073741824.0);
+    let error = manager
+        .stage_verified(
+            &current,
+            &card,
+            &revision,
+            package,
+            &mut |_| {},
+            Default::default(),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("超出存储配额"), "{error}");
+    assert_eq!(fs::read(&cached).unwrap(), b"new-w");
+    assert_eq!(fs::read(root.join("attempts")).unwrap(), b"ran");
+    assert!(!root.join("new/.cache").exists());
+    assert!(!root.join("new/new.tachyon").exists());
 }
