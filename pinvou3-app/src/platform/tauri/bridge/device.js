@@ -8,7 +8,6 @@
   registry["device"] = function (context) {
     var state = context.state;
     var notify = context.notify;
-    var notifyDomains = context.notifyDomains || notify;
     var invoke = context.invoke;
     var deviceIntervalId = null;
     var devicePollInFlight = false;
@@ -326,9 +325,9 @@
       var prevFmt = state.device && state.device._fmt;
       if (hadDeviceError || !prevFmt || !deviceFmtEqual(prevFmt, snap._fmt)) {
         state.device = snap;
-        // 精确域发布(与 monitor 同款):快照速率文本几乎每拍都变,全域 notify 会让
-        // 设备页打开期间每 2s 触发一次全 21 域的结构化重投影(含整个 chat 树)。
-        notifyDomains(["device"]);
+        // 主线 #727 收敛为单快照发布,精确域通道已不存在;真正的限频是上面的
+        // 结构比较——无变化不下发,变了才走全域 notify。
+        notify();
       }
     } catch (e) {
       // 旧世代的错误晚到不得再动横幅：恢复拍可能早已落地，旧错误重新点亮
@@ -342,7 +341,7 @@
       if (state.deviceError !== message) {
         state.deviceError = message;
         console.warn("[pinvou3][device] poll failed", e);
-        notifyDomains(["device"]);
+        notify();
       }
     } finally {
       if (seq === devicePollSeq) {
@@ -410,7 +409,7 @@
         state.deviceServices = next;
         changed = true;
       }
-      if (changed) notifyDomains(["device"]);
+      if (changed) notify();
     } catch (e) {
       // stale 世代的失败：不推进计数、不立旗、不留日志——它已不属于当下。
       if (seq !== deviceServicesPollSeq) return;
@@ -426,7 +425,7 @@
         var message = e && e.message ? e.message : String(e || "services probe failed");
         if (state.deviceServicesError !== message) {
           state.deviceServicesError = message;
-          notifyDomains(["device"]);
+          notify();
         }
       }
     } finally {
@@ -455,7 +454,7 @@
     var next = view || null;
     if (!structuralEqual(next, state.externalModels || null)) {
       state.externalModels = next;
-      notifyDomains(["device"]);
+      notify();
     }
     return state.externalModels;
   }

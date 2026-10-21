@@ -33,7 +33,6 @@ function loadDeviceFeature() {
   });
   const state = { device: null, deviceError: null, deviceServices: null, deviceServicesError: null, externalModels: null };
   let notifyCount = 0;
-  const domainCalls = [];
   const invokes = [];
   let respond = async () => null;
   const invoke = async (command, args) => {
@@ -42,21 +41,16 @@ function loadDeviceFeature() {
   };
   const factory = windowObject.__PINVOU_TAURI_BRIDGE_FEATURES__.device;
   assert.equal(typeof factory, 'function', 'device.js must register a bridge feature factory');
+  // 主线 #727 收敛后只有全域 notify 一条通道；发布与否/几次由 notifyCount 钉。
   const api = factory({
     state,
     notify() { notifyCount += 1; },
-    // 精确域发布spy:device 域只允许 ["device"],全域 notify 是评审指出的回归。
-    notifyDomains(domains) {
-      notifyCount += 1;
-      domainCalls.push(domains);
-    },
     invoke,
   });
   return {
     api, state, invokes,
     setRespond(fn) { respond = fn; },
     notifyCount: () => notifyCount,
-    domainCalls: () => domainCalls,
     interval: () => ({ fn: intervalFn, ms: intervalMs, started: startedCount, cleared: clearedCount }),
   };
 }
@@ -292,9 +286,6 @@ assert.doesNotMatch(
   const first = env.state.device;
   const notifiesAfterFirst = env.notifyCount();
   assert.equal(notifiesAfterFirst, 1);
-  // 必须是精确域发布(["device"])而不是全域 notify。
-  // domainCalls 内层数组产自 vm 域:展开成宿主域副本再比较(同文件既有纪律)。
-  assert.deepEqual(env.domainCalls().map(call => [...call]), [['device']]);
   await env.api.pollDevice();
   assert.equal(env.state.device, first, 'display-equal snapshot must not replace state.device');
   assert.equal(env.notifyCount(), notifiesAfterFirst, 'display-equal snapshot must not notify');
@@ -354,8 +345,6 @@ assert.doesNotMatch(
   await env.api.pollDevice();
   assert.equal(env.state.deviceError, 'snapshot backend down');
   assert.equal(env.notifyCount(), 2);
-  // 失败轮同样精确域发布（全域 notify 会连带 21 域重投影）。
-  assert.deepEqual([...env.domainCalls().at(-1)], ['device']);
 
   // 同文案失败拍不重复发布（第七轮评审 P3）：后台 2s 轮询在故障期间每拍重入
   // 这里，无条件 notify 会让设备页每 2s 全量重渲染一块不变的横幅。
@@ -412,11 +401,10 @@ assert.doesNotMatch(
   await env.api.pollDeviceServices();
   assert.equal(env.state.deviceServicesError, null);
   assert.equal(env.notifyCount(), baselineNotifies);
-  // 第 3 拍：立旗一次，精确域发布。
+  // 第 3 拍：立旗一次并发布。
   await env.api.pollDeviceServices();
   assert.equal(env.state.deviceServicesError, 'probe timeout');
   assert.equal(env.notifyCount(), baselineNotifies + 1);
-  assert.deepEqual([...env.domainCalls().at(-1)], ['device']);
   // 旗已立：同文案的后续失败拍不重复 notify。
   await env.api.pollDeviceServices();
   assert.equal(env.notifyCount(), baselineNotifies + 1);
@@ -497,7 +485,6 @@ assert.doesNotMatch(
     { key: 'docker', running: false, detail: 'command not found' },
   ]);
   assert.equal(env.notifyCount(), 1);
-  assert.deepEqual([...env.domainCalls().at(-1)], ['device']);
 
   // 内容完全没变 → 不重复下发（与快照的显示等价抑制同一目标）。
   await env.api.pollDeviceServices();
@@ -574,7 +561,6 @@ assert.doesNotMatch(
   assert.equal(env.state.deviceServices, null);
   assert.equal(env.state.deviceServicesError, 'first probe down');
   assert.equal(env.notifyCount(), 1);
-  assert.deepEqual([...env.domainCalls().at(-1)], ['device']);
 
   // 恢复轮清掉错误旗并落地结果。
   env.setRespond(async command => (command === 'get_device_services' ? [] : null));
@@ -595,7 +581,6 @@ assert.doesNotMatch(
   assert.equal(fetched, modelsView);
   assert.equal(env.state.externalModels, modelsView);
   assert.equal(env.notifyCount(), 1);
-  assert.deepEqual([...env.domainCalls().at(-1)], ['device']);
 
   // 注册成功后必须回读注册表刷新 externalModels。
   const record = { id: 'm-9', name: 'qwen3-30b' };
@@ -784,10 +769,9 @@ assert.doesNotMatch(
   await env.api.pollDeviceServices();          // 失败 #2 → 仍静默
   assert.equal(env.state.deviceServicesError, null);
   assert.equal(env.notifyCount(), notifiesAfterRestart);
-  await env.api.pollDeviceServices();          // 失败 #3 → 立旗一次，精确域发布
+  await env.api.pollDeviceServices();          // 失败 #3 → 立旗一次并发布
   assert.equal(env.state.deviceServicesError, 'probe timeout');
   assert.equal(env.notifyCount(), notifiesAfterRestart + 1);
-  assert.deepEqual([...env.domainCalls().at(-1)], ['device']);
   // 恢复拍：旗翻清必须发布，即便内容与基线一致。
   await env.api.pollDeviceServices();
   assert.equal(env.state.deviceServicesError, null);

@@ -2144,8 +2144,9 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
   var clearMonitorStats = monitorFeature.clearMonitorStats;
   var pollBackendStatus = monitorFeature.pollBackendStatus;
   // MegaCube 设备管理（bridge/device.js）：快照轮询、服务探测、外部模型与
-  // 故障排查提示词都在 feature 内组装，facade 只暴露方法面。
-  var deviceFeature = installBridgeFeature("device", { state: state, notify: notify, notifyDomains: notifyDomains, invoke: invoke });
+  // 故障排查提示词都在 feature 内组装，facade 只暴露方法面。#727 收敛后
+  // notify 即单快照全域发布，不再有 notifyDomains 通道。
+  var deviceFeature = installBridgeFeature("device", { state: state, notify: notify, invoke: invoke });
   var startDevicePolling = deviceFeature.startDevicePolling;
   var stopDevicePolling = deviceFeature.stopDevicePolling;
   var pollDeviceServices = deviceFeature.pollDeviceServices;
