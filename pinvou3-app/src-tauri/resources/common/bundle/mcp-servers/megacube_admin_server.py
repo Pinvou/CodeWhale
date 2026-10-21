@@ -2128,7 +2128,7 @@ def _tool_capacity():
     )
     if resident:
         summary += " 常驻模型：" + "、".join(
-            "%s %.1f GiB" % (r.get("card"), r.get("measured_footprint_gib") or 0)
+            "%s %s" % (r.get("card"), _fmt_gib(r.get("measured_footprint_gib")))
             for r in resident
         )
     return {

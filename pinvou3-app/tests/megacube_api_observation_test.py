@@ -280,4 +280,17 @@ class ApiObservationTests(unittest.TestCase):
         self.assertEqual(result['data']['observation_error_code'],'store_unreachable')
         self.assertNotIn('已成功',result['summary'])
 
+    def test_capacity_summary_preserves_unknown_and_real_measurements(self):
+        for measured, expected in ((None, '未知'), (0.0, '0.0 GiB'), (24.6, '24.6 GiB')):
+            payload = {'memory':{'total_gib':128.0,'available_gib':64.0},
+                       'safety_margin_gib':10.2,
+                       'resident_models':[{'card':'starting-model','weights_gib':24.0,
+                                           'measured_footprint_gib':measured}]}
+            raw = json.dumps(payload)
+            with self.subTest(measured=measured), patch.object(server,'_http_get',return_value=(200,raw)):
+                result = server._tool_capacity()
+            self.assertIn('常驻模型：starting-model ' + expected, result['summary'])
+            self.assertEqual(result['data'], json.loads(raw))
+            self.assertEqual(json.dumps(payload), raw)
+
 if __name__=='__main__': unittest.main()
