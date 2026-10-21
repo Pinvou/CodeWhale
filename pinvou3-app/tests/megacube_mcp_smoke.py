@@ -543,7 +543,16 @@ def pure_render_checks(http_port):
             # runtime/vendor parameters must still match the calibrated card.
             if name == "download_model.sh":
                 continue
-            gen = files[name].decode().splitlines()
+            generated = files[name].decode()
+            if name in ("vendor/start.sh", "vendor/stop.sh", "vendor/uninstall.sh"):
+                # Only this declared data-reader repair differs from the
+                # calibrated runtime. Its actual behavior has a separate CI
+                # lifecycle suite; all other vendor parameters stay compared.
+                reader = m._DEPLOY_ENV_READ_SH + '\nlmm_read_deploy_env "$SCRIPT_DIR/.deploy-env"'
+                check("B1 " + name + " 使用唯一字面部署读取器", generated.count(reader) == 1, "")
+                generated = generated.replace(reader,
+                    '[ -f "$SCRIPT_DIR/.deploy-env" ] && . "$SCRIPT_DIR/.deploy-env"', 1)
+            gen = generated.splitlines()
             # 母本源目录里 vendor 脚本放在 package/ 下（商店物化时才改名 vendor/）
             mother_name = name.replace("vendor/", "package/", 1)
             with open(os.path.join(MOTHER_CARD_DIR, mother_name), encoding="utf-8") as f:
@@ -554,7 +563,7 @@ def pure_render_checks(http_port):
                     continue
                 if not any(p.match(line) for p in _B1_ALLOWED):
                     bad_lines.append("%s: %s" % (name, line))
-        check("B1 除独立下载器外，渲染与母本仅参数化差异", not bad_lines,
+        check("B1 除已验证下载和字面读取外，运行参数与母本一致", not bad_lines,
               "\n".join(bad_lines[:12]))
 
         # B2：MTP 两档快照——EAGLE 参数组整组出现/消失

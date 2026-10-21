@@ -571,6 +571,7 @@ lmm_copy_import_file() {
 # ---------------------------------------------------------------------------
 # sglang 容器卡模板（第二形态）：以真机卡 qwen38-27b-sglang0519 为母本参数化，
 # 引擎参数沿用母本；独立下载器额外处理宿主候选校验与非破坏性复用。
+# 部署记录按字面数据读取，使用户目录中的 shell 特殊字符保持原值。
 # 其余参数化差异全部来自「仓库相关量」：
 #   1. 仓库标识：REPO_ID / MODEL_SUBDIR / SERVED_MODEL_NAME / CONTAINER_NAME /
 #      VENDOR_SNAPSHOT_DIR（ModelScope 缓存目录名）；
