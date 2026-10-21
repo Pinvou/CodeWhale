@@ -504,6 +504,13 @@ export const dictZh = {
           etaSec:n=>`${n} 秒`, etaMin:n=>`${n} 分钟`, etaHour:(h,m)=>`${h} 小时 ${m} 分`,
           promptTitle:'需要你补充几项信息', promptSubmit:'确定', promptCancel:'取消', promptYes:'是', promptNo:'否',
 
+          contextFollow: '恢复跟随部署',
+          contextAutomatic: '上下文自动跟随部署',
+          contextFixed: (tokens) => `固定上下文上限：${tokens} tokens`,
+          contextFollowHint: '自动模式使用当前服务实际提供的上下文。恢复跟随部署会清除此模型的固定上限，其他参数保持不变。',
+          contextFollowDone: '已恢复跟随部署，下一轮对话将重新探测上下文',
+          contextFollowHostUpdate: '后台商店需要更新。请在当前安装任务结束后，更新并重启后台商店，再恢复跟随部署。',
+          contextFollowFailed: '无法恢复跟随部署，请确认模型正在运行并刷新详情后重试',
           linkUse: '在品悟里使用',
           linkDone: '已接入品悟，可以直接开始对话了',
           linkFailed: '接入失败',

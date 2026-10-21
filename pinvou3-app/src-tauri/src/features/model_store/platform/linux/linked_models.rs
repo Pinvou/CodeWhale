@@ -161,5 +161,43 @@ pub(super) fn sync(card_id: Option<&str>) -> Result<Vec<String>, String> {
     Ok(changed)
 }
 
+fn is_current_link(row: &SavedModel, card_id: &str) -> bool {
+    row.model_store_card_id.as_deref() == Some(card_id)
+        && !row.model_store_link_detached
+        && !row.is_builtin_llmapi()
+        && row.is_operator_owned_endpoint()
+        && matches_current_model_route(card_id, &row.base_url, &row.model)
+}
+
+/// A deployment can change its context window while keeping the same wire route.
+/// Rebuild its consumers after enable even when no saved field needed changing.
+pub(super) fn current_linked_ids(card_id: &str) -> Vec<String> {
+    UserPrefs::load()
+        .advanced
+        .saved_models
+        .iter()
+        .filter(|row| is_current_link(row, card_id))
+        .map(|row| row.id.clone())
+        .collect()
+}
+
+/// Explicitly restore automatic probing, without resaving a stale editor snapshot
+/// or touching credentials, manual limits on other rows, or model selection.
+pub(super) fn follow_deployment_context(card_id: &str, model_id: &str) -> Result<(), String> {
+    UserPrefs::update_transaction(|prefs| {
+        let row = prefs
+            .advanced
+            .saved_models
+            .iter_mut()
+            .find(|row| row.id == model_id && is_current_link(row, card_id))
+            .ok_or("model store endpoint changed or is unavailable; refresh the card and retry")?;
+        // None is the existing automatic-mode representation. Probe results must
+        // never be persisted here: that would turn a runtime fact into a fixed cap.
+        row.context_window_tokens = None;
+        Ok(())
+    })
+    .map(|_| ())
+}
+
 #[cfg(test)]
 mod tests;

@@ -2015,6 +2015,7 @@ pub fn run() {
             commands::model_store::model_store_cards,
             commands::model_store::model_store_library,
             commands::model_store::model_store_model_detail,
+            commands::model_store::model_store_follow_deployment_context,
             commands::model_store::model_store_check_card_update,
             commands::model_store::model_store_startup_update_check,
             commands::model_store::model_store_versions,

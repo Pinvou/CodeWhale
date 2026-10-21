@@ -50,6 +50,14 @@ pub async fn model_detail(_card_id: String) -> Result<Value, String> {
     nope()
 }
 
+pub async fn follow_deployment_context(
+    _service: Arc<ModelStoreService>,
+    _card_id: String,
+    _model_id: String,
+) -> Result<Value, String> {
+    nope()
+}
+
 pub async fn check_card_update(_card_id: String) -> Result<Value, String> {
     nope()
 }

@@ -472,6 +472,13 @@ const jaBase = {
           etaSec:n=>`${n} 秒`, etaMin:n=>`${n} 分`, etaHour:(h,m)=>`${h} 時間 ${m} 分`,
           promptTitle:'いくつか入力が必要です', promptSubmit:'OK', promptCancel:'キャンセル', promptYes:'はい', promptNo:'いいえ',
 
+          contextFollow: 'デプロイに追従',
+          contextAutomatic: 'コンテキストはデプロイに自動追従',
+          contextFixed: (tokens) => `固定コンテキスト上限：${tokens} tokens`,
+          contextFollowHint: '自動モードでは現在のサービスが提供するコンテキストを使用します。追従に戻すと、このモデルの固定上限だけが解除されます。',
+          contextFollowDone: '次のターンでコンテキストを再検出します',
+          contextFollowHostUpdate: 'バックグラウンドのモデルストアを更新する必要があります。現在のインストール完了後に更新・再起動してから、追従に戻してください。',
+          contextFollowFailed: '追従に戻せませんでした。モデルが実行中であることを確認し、詳細を更新して再試行してください。',
           linkUse: 'PINVOU で使う',
           linkDone: 'PINVOU に接続しました。すぐに会話を開始できます。',
           linkFailed: '接続に失敗しました',

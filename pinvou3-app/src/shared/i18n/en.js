@@ -474,6 +474,13 @@ export const dictEn = {
           etaSec:n=>`${n}s`, etaMin:n=>`${n} min`, etaHour:(h,m)=>`${h} h ${m} min`,
           promptTitle:'A few details are needed', promptSubmit:'OK', promptCancel:'Cancel', promptYes:'Yes', promptNo:'No',
 
+          contextFollow: 'Follow deployment',
+          contextAutomatic: 'Context follows deployment',
+          contextFixed: (tokens) => `Fixed context limit: ${tokens} tokens`,
+          contextFollowHint: 'Automatic mode uses the context actually served by the current deployment. Following deployment clears only this model’s fixed context limit.',
+          contextFollowDone: 'Context will be detected again on the next turn',
+          contextFollowHostUpdate: 'The background Model Store needs an update. Finish current installations, then update and restart it before following deployment.',
+          contextFollowFailed: 'Could not follow deployment. Make sure the model is running, refresh its details, and retry.',
           linkUse: 'Use in PINVOU',
           linkDone: 'Connected to PINVOU. You can start chatting now.',
           linkFailed: 'Failed to connect',

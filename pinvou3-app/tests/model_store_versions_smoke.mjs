@@ -20,6 +20,8 @@ let vite;
 try {
   vite = await createServer({
     root: path.join(appRoot, 'src'), configFile: false, appType: 'mpa', logLevel: 'error',
+    // Worktrees can share node_modules; optimizer caches must stay fixture-local.
+    cacheDir: path.join(profile, 'vite-cache'),
     plugins: [{
       name: 'model-versions-regression',
       enforce: 'pre',
@@ -204,7 +206,15 @@ try {
     window.detailToast = null;
     window.staleLinkError = 'model store endpoint changed or is unavailable; refresh the card and retry';
     window.staleLinkCopy = dictZh.uiModelStore.linkEndpointChanged;
-    window.__TAURI__ = { core: { invoke: async (command) => {
+    window.contextRequests = [];
+    window.failContext = true;
+    window.__TAURI__ = { core: { invoke: async (command, payload) => {
+      if (command === 'model_store_follow_deployment_context') {
+        window.contextRequests.push(payload);
+        if (window.failContext) throw Error(window.contextError || 'stale endpoint');
+        window.renderDetail('old-wire', record.endpoint_url, null);
+        return { ok: true };
+      }
       if (command === 'model_store_model_detail') return { record };
       if (command === 'model_store_api_keys') return [];
       throw Error(`Unexpected command: ${command}`);
@@ -216,11 +226,11 @@ try {
       },
       setActiveModel: async () => { window.detailActiveCalls += 1; },
     } };
-    window.renderDetail = (model, baseUrl) => root.render(createElement(ModelDetailDialog, {
+    window.renderDetail = (model, baseUrl, contextWindow = 32768) => root.render(createElement(ModelDetailDialog, {
       cardId: record.card_id, copy: dictZh.uiModelStore, theme: 'light', onClose() {},
       onToast: (message) => { window.detailToast = message; },
       savedModels: [{ id: 'existing-store-link', model_store_card_id: record.card_id,
-        model, base_url: baseUrl, provider_kind: 'custom' }],
+        model, base_url: baseUrl, provider_kind: 'custom', context_window_tokens: contextWindow }],
     }));
     window.renderDetail('old-wire', record.endpoint_url);
   });
@@ -236,6 +246,30 @@ try {
   assert.equal(staleDetailLink.base_url, 'http://127.0.0.1:8911/v1');
   assert.equal(staleDetailLink.model_store_link_requested, true);
   assert.equal(await page.evaluate(() => window.detailActiveCalls), 0);
+  // Restoring automatic context is a narrow backend patch. It must not re-import
+  // the model, replace other options, or change global/session selection.
+  await page.click('[data-testid="model-store-follow-context"]');
+  await page.waitForFunction(() => window.detailToast?.includes('无法恢复跟随部署'));
+  assert.equal(await page.$eval('[data-testid="model-store-follow-context"]', (button) => button.disabled), false);
+  await page.evaluate(() => { window.contextError = 'store_context_follow_unsupported'; });
+  await page.click('[data-testid="model-store-follow-context"]');
+  await page.waitForFunction(() => window.detailToast?.includes('后台商店需要更新'));
+  await page.evaluate(() => { window.contextError = 'store_protocol: incompatible host'; window.detailToast = null; });
+  await page.click('[data-testid="model-store-follow-context"]');
+  await page.waitForFunction(() => window.detailToast?.includes('后台商店需要更新'));
+  await page.evaluate(() => { window.failContext = false; });
+  await page.click('[data-testid="model-store-follow-context"]');
+  await page.waitForFunction(() => window.detailToast?.includes('已恢复跟随部署'));
+  await page.waitForFunction(() => !document.querySelector('[data-testid="model-store-follow-context"]'));
+  assert.deepEqual(await page.evaluate(() => window.contextRequests), [
+    { cardId: 'isolated-card', modelId: 'existing-store-link' },
+    { cardId: 'isolated-card', modelId: 'existing-store-link' },
+    { cardId: 'isolated-card', modelId: 'existing-store-link' },
+    { cardId: 'isolated-card', modelId: 'existing-store-link' },
+  ]);
+  assert.equal(await page.evaluate(() => window.detailActiveCalls), 0);
+  assert.equal(await page.evaluate(() => window.savedDetailPayloads.length), 1);
+  assert.match(await page.$eval('[data-testid="model-store-context-settings"]', (node) => node.textContent), /上下文自动跟随部署/);
   await page.reload();
   await page.evaluate(async () => {
     // The real settings form stays mounted while its model props refresh, just
