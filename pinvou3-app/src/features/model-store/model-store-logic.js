@@ -365,6 +365,9 @@ function reduceLogChunk(state, chunk, now) {
         speed = null;
         progress = null;
         layers = null;
+        // step 是阶段的从属物,换阶段一并清——不清的话新阶段开头顶着上一阶段的
+        // 「第 N 步/共 M 步」假步进(评审 P3,探针实证)。
+        step = null;
       }
       stage = parsedStage;
       continue;

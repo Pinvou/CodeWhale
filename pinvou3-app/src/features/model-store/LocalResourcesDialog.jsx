@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { fetchLocalResources } from './model-store-api.js';
 import { formatBytes } from './model-store-logic.js';
 import { MsButton, MsDialog, MsDialogTitle, TEXT_PRIMARY, TEXT_SECONDARY } from './model-store-ui.jsx';
@@ -13,17 +13,23 @@ function LocalResourcesDialog({ open, onClose, onStorageSettings, theme, copy })
   const [data, setData] = useState({ resources: [], scan_dirs: [] });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  // 过期响应闸门（评审 P2）：快速开关弹窗时，旧一轮扫描的慢响应不得覆盖新一轮
+  // 的结果/错误态。照搬 ModelDetailDialog 的 loadToken 模式。
+  const loadTokenRef = useRef(0);
 
   const load = async () => {
+    const token = (loadTokenRef.current += 1);
     setLoading(true);
     setError(null);
     try {
       const next = await fetchLocalResources();
+      if (token !== loadTokenRef.current) return;
       setData(next || { resources: [], scan_dirs: [] });
     } catch (cause) {
+      if (token !== loadTokenRef.current) return;
       setError(String(cause?.message || cause));
     } finally {
-      setLoading(false);
+      if (token === loadTokenRef.current) setLoading(false);
     }
   };
 

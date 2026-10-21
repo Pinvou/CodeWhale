@@ -8,18 +8,20 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const source = fs.readFileSync(path.join(root, 'src/shared/render-stage-probe.js'), 'utf8');
 
-function harness({ stallRecorded = true } = {}) {
+function harness({ stallRecorded = true, visibility = 'visible' } = {}) {
   const recorded = [];
   const rafQueue = [];
+  const cancelled = new Set();
   const window = {
     requestAnimationFrame: fn => { rafQueue.push(fn); return rafQueue.length; },
+    cancelAnimationFrame: handle => { cancelled.add(handle); },
     // 探针模块以 window 为 root（浏览器侧），诊断桩必须挂在同一对象上
     PinvouAuthoritySyncDiagnostics: stallRecorded ? { record: (event, details) => recorded.push({ event, details }) } : undefined,
   };
-  const sandbox = { window };
+  const sandbox = { window, document: { visibilityState: visibility } };
   vm.createContext(sandbox);
   vm.runInContext(source, sandbox, { filename: 'render-stage-probe.js' });
-  return { probe: window.RenderStageProbe || sandbox.globalThis.RenderStageProbe, recorded, rafQueue, window };
+  return { probe: window.RenderStageProbe || sandbox.globalThis.RenderStageProbe, recorded, rafQueue, cancelled, window, document: sandbox.document };
 }
 
 function flushFrames(h) {
@@ -93,4 +95,46 @@ test('诊断模块不可用时探针不抛错', () => {
   h.probe.markDispatched('s6');
   flushFrames(h);
   assert.equal(h.recorded.length, 0);
+});
+
+// ---- 2026-10-21 评审 P2 三条：隐藏窗口误报 / 上报节流 / rAF 句柄取消 ----
+
+function makeStall(h, sid) {
+  h.probe.begin(sid);
+  const entry = h.probe._liveEntry(sid);
+  entry.t_recv -= 500;
+  h.probe.markDispatched(sid);
+  flushFrames(h);
+}
+
+test('隐藏窗口不上报（定时器节流造成的假 stall 不挤占诊断队列）', () => {
+  const h = harness({ visibility: 'hidden' });
+  makeStall(h, 'hidden1');
+  makeStall(h, 'hidden2');
+  makeStall(h, 'hidden3');
+  assert.equal(h.recorded.length, 0, '隐藏窗口的时差不可信，全部不上报');
+  // 恢复可见后真实卡顿仍能上报
+  h.document.visibilityState = 'visible';
+  makeStall(h, 'hidden4');
+  assert.equal(h.recorded.length, 1);
+});
+
+test('持续卡顿按间隔节流：10 秒内不重复上报', () => {
+  const h = harness();
+  makeStall(h, 't1');
+  makeStall(h, 't2');
+  makeStall(h, 't3');
+  assert.equal(h.recorded.length, 1, '同一时间窗内的重复 stall 只记第一条');
+});
+
+test('周期被下一事件收尾时，已武装的帧回调被取消（隐藏窗口 rAF 不堆积）', () => {
+  const h = harness();
+  h.probe.begin('leak');
+  h.probe.markDispatched('leak'); // 武装了 rAF，还没触发
+  const armed = h.rafQueue.length;
+  assert.equal(armed, 1);
+  h.probe.begin('leak'); // 下一周期到达 → finalize 上一条 → 取消其 rAF
+  assert.ok(h.cancelled.size >= 1, '收尾时调用了 cancelAnimationFrame');
+  const entry = h.probe._liveEntry('leak');
+  assert.equal(entry.rafHandle, null, '新条目没有遗留句柄');
 });

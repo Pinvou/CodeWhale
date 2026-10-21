@@ -109,3 +109,5 @@ pinvou3-app/src-tauri/resources/platforms/macos/.codex-bridge-build.*/
 
 # 可选的本地 Windows 私有规则目录
 /.agents/rules/windows-private/
+# permissions harness 的 CARGO_TARGET_DIR（评审 P3）
+tests/target/

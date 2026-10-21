@@ -1490,6 +1490,15 @@ jobs:
         working-directory: pinvou3-app/src-tauri
         run: cargo test --locked --manifest-path tests/controller-crypto-harness/Cargo.toml
 
+      # 模型商店两条独立门禁 harness（评审 B1，2026-10-21 接线）：lan_gateway 在
+      # 生产 crate 内零 #[cfg(test)]，这两个 crate 是它唯一可执行的测试；不接进
+      # CI，烂了/被测代码改了语义时所有门禁照样全绿。照抄上一条 harness 的先例
+      # （Draft 也跑），二者各自空 [workspace]，与主工程缓存互不污染。
+      - name: Model store LAN gateway security regression
+        run: cargo test --locked --manifest-path tests/model-store-lan/Cargo.toml
+      - name: Model store permissions harness (umask 0002/0022/0077)
+        run: bash tests/model-store-permissions/run.sh
+
       # clippy 需要 Tauri/WebKit 系统库；Draft 不安装，避免每次 push 消耗 ~70s。
       - name: 装 Tauri + pinvou3 Linux 系统依赖
         if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' }}

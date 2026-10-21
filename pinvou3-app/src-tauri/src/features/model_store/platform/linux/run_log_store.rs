@@ -162,11 +162,31 @@ const SECRET_QUERY_KEYS: [&str; 10] = [
     "signature",
 ];
 
+/// query 参数名带这些**前缀**的，取值也一律抹掉。SigV4 签名全家
+/// （`X-Amz-Signature` / `X-Amz-Credential` / `X-Amz-Security-Token`……）逐名
+/// 枚举永远追不全（评审 P2：整名精确匹配漏掉大小写/新参数），按前缀收——
+/// `X-Amz-Algorithm`、`X-Amz-Date` 不是机密，但一起抹掉只是少一个非必要信息，
+/// 漏一个签名值却是签名本身持久化落盘。
+const SECRET_QUERY_PREFIXES: [&str; 1] = ["x-amz-"];
+
+/// query 参数名是否命中机密名单（整名或前缀，均大小写不敏感）。
+fn query_key_is_secret(key: &str) -> bool {
+    SECRET_QUERY_KEYS
+        .iter()
+        .any(|known| key.eq_ignore_ascii_case(known))
+        || SECRET_QUERY_PREFIXES
+            .iter()
+            .any(|prefix| key.to_ascii_lowercase().starts_with(prefix))
+}
+
 /// 命令行上叫这些名字的开关，紧跟的取值一律抹掉（`--token abc` 和 `--token=abc`）。
 ///
 /// **刻意不收 `-p`**（`mysql -p<密码>` 那个）：它跟 `mkdir -p` 撞名，收进来会把脚本
 /// 里每一个 `mkdir -p <目录>` 的目录名抹掉。单字母开关的歧义没法靠这张表消除，而
 /// 抹掉路径的代价（日志读不懂）比这一档能挡住的风险大。
+///
+/// `--header` / `-H` 是**两段式**取值（`名字: 值` 可能拆成两个词），它们不走
+/// `redact_next` 的"整词抹掉"，走 [`HeaderExpect`] 的名字保留/取值抹掉。
 const SECRET_FLAGS: [&str; 7] = [
     "--token",
     "--password",
@@ -176,6 +196,12 @@ const SECRET_FLAGS: [&str; 7] = [
     "--apikey",
     "--header",
 ];
+
+/// `--header` / `-H` 之后处于等名字还是等取值。
+enum HeaderExpect {
+    Name,
+    Value,
+}
 
 /// 这些环境变量名后面跟的取值一律抹掉（脚本 `set -x` / `env` 时会整行打出来）。
 const SECRET_ENV_KEYS: [&str; 7] = [
@@ -248,11 +274,7 @@ fn redact_url_secrets(word: &str) -> String {
                 }
                 first = false;
                 match pair.split_once('=') {
-                    Some((key, _))
-                        if SECRET_QUERY_KEYS
-                            .iter()
-                            .any(|known| key.eq_ignore_ascii_case(known)) =>
-                    {
+                    Some((key, _)) if query_key_is_secret(key) => {
                         out.push_str(key);
                         out.push('=');
                         out.push_str(REDACTED);
@@ -295,6 +317,9 @@ pub fn sanitize_for_disk(line: &str) -> String {
     out.push_str(&indent);
     // 上一个词要求把下一个词抹掉（`--token abc` / `Bearer abc` 这种分开写的）。
     let mut redact_next = false;
+    // `--header` / `-H` 的两段式取值：先等 `名字:`、再等值。名字要留着（排查靠
+    // 它认出是哪个头），值才是机密——整词抹掉会把"哪个头"一起丢掉。
+    let mut header_expect: Option<HeaderExpect> = None;
     let mut first = true;
     for word in masked.split_whitespace() {
         if !first {
@@ -306,9 +331,34 @@ pub fn sanitize_for_disk(line: &str) -> String {
             redact_next = false;
             continue;
         }
+        if let Some(HeaderExpect::Value) = header_expect {
+            out.push_str(REDACTED);
+            header_expect = None;
+            continue;
+        }
+        if let Some(HeaderExpect::Name) = header_expect.take() {
+            let trimmed = word.trim_end_matches(',');
+            match trimmed.split_once(':') {
+                Some((name, value)) if !value.is_empty() => {
+                    out.push_str(name);
+                    out.push(':');
+                    out.push_str(REDACTED);
+                }
+                Some((name, _)) => {
+                    out.push_str(name);
+                    out.push(':');
+                    header_expect = Some(HeaderExpect::Value);
+                }
+                None => {
+                    out.push_str(trimmed);
+                    header_expect = Some(HeaderExpect::Value);
+                }
+            }
+            continue;
+        }
         if word_is_secret(word) {
             out.push_str(REDACTED);
-        } else if let Some((key, _)) = word.split_once('=') {
+        } else if let Some((key, rest)) = word.split_once('=') {
             // `KEY=VALUE`：只看 KEY。命令行开关（`--token=abc`）和环境变量
             // （`HF_TOKEN=abc`）共用这一支。
             let flag_secret = SECRET_FLAGS
@@ -317,6 +367,22 @@ pub fn sanitize_for_disk(line: &str) -> String {
             if flag_secret || key_is_secret(key) {
                 out.push_str(key);
                 out.push('=');
+                // `--header=X-Api-Key:value`：`= ` 形式里 header 的名字同样要留。
+                if key.eq_ignore_ascii_case("--header") {
+                    match rest.split_once(':') {
+                        Some((name, value)) if !value.is_empty() => {
+                            out.push_str(name);
+                            out.push(':');
+                            out.push_str(REDACTED);
+                        }
+                        _ => {
+                            out.push_str(rest);
+                            header_expect = Some(HeaderExpect::Value);
+                        }
+                    }
+                    // 状态已在上面落好，不能再走底部的 bare 检查（会把它覆写回等名字）
+                    continue;
+                }
                 out.push_str(REDACTED);
             } else {
                 out.push_str(&redact_url_secrets(word));
@@ -325,9 +391,22 @@ pub fn sanitize_for_disk(line: &str) -> String {
             out.push_str(&redact_url_secrets(word));
         }
         let bare = word.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | ';' | ':'));
-        redact_next = bare.eq_ignore_ascii_case("bearer")
-            || SECRET_FLAGS.contains(&bare)
-            || SECRET_ENV_KEYS.contains(&bare);
+        // `--TOKEN x`（空格形态）此前大小写敏感漏网——`=` 形态早已不敏感，两处对齐。
+        if bare.eq_ignore_ascii_case("bearer")
+            || SECRET_ENV_KEYS.contains(&bare)
+            || SECRET_FLAGS
+                .iter()
+                .any(|known| bare.eq_ignore_ascii_case(known))
+        {
+            if bare.eq_ignore_ascii_case("--header") {
+                header_expect = Some(HeaderExpect::Name);
+            } else {
+                redact_next = true;
+            }
+        } else if bare == "-H" {
+            // curl 的 `-H`（大写）与 `--header` 同义；`-h` 是 help，刻意不收。
+            header_expect = Some(HeaderExpect::Name);
+        }
     }
     clamp_line(&out)
 }
@@ -337,10 +416,43 @@ pub fn sanitize_for_disk(line: &str) -> String {
 /// `AGENTS.md` 的禁写清单里内网 IP 和主机名跟凭证并列。落盘时不抹它们是刻意的
 /// （「这个模型在哪台从机上起不来」全靠它），但日志一旦要离开这台机器，那条理由
 /// 就不成立了。
+///
+/// 行首时间戳先摘出去再脱敏：`append` 盖的 RFC3339 毫秒章恰好 24 字符且含字母
+/// 数字，credential_store 的粗尺（≥24 含字母数字）100% 命中——不摘的话导出件的
+/// 时间列整列变 `[REDACTED]`（评审 P2 实测时间戳与正文"双灭"）。时间戳不含机密。
 pub fn sanitize_for_export(line: &str) -> String {
-    let targeted = sanitize_for_disk(line);
+    let (stamp, rest) = split_leading_timestamp(line);
+    let targeted = sanitize_for_disk(rest);
     let broad = crate::platform::credential_store::redact_secret(&targeted);
-    redact_private_hosts(&broad)
+    let masked = redact_private_hosts(&broad);
+    if stamp.is_empty() {
+        masked
+    } else {
+        format!("{stamp}{masked}")
+    }
+}
+
+/// 把行首的 `2026-10-21T06:42:39.191Z ` 时间戳前缀（含尾随空格）摘出来。
+/// 形状不合（非本模块盖的章）就原样返回，脱敏继续从行首做。
+fn split_leading_timestamp(line: &str) -> (&str, &str) {
+    let bytes = line.as_bytes();
+    let shape_ok = bytes.len() > 25
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[10] == b'T'
+        && bytes[13] == b':'
+        && bytes[16] == b':'
+        && bytes[19] == b'.'
+        && bytes[23] == b'Z'
+        && bytes[24] == b' '
+        && bytes[..23]
+            .iter()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'-' | b'T' | b':' | b'.' | b'Z'));
+    if shape_ok {
+        (&line[..25], &line[25..])
+    } else {
+        ("", line)
+    }
 }
 
 /// 隐藏 IPv4 / IPv6。**不区分公网私网**：公网 IP 一样是可定位信息，而区分
@@ -689,6 +801,68 @@ mod tests {
         // 太短的不登记：会把正常文本打成筛子。
         register_secret("abc");
         assert_eq!(sanitize_for_disk("abc def"), "abc def");
+    }
+
+    /// 2026-10-21 评审 P2 脱敏长尾四形态：
+    /// ① `--TOKEN <值>` 空格形态大小写敏感漏网；
+    /// ② `--header`/`-H` 的 `名字: 值` 两段式——名字留着（排查靠它认头），值抹掉；
+    /// ③ SigV4 的 `X-Amz-Signature` 整名匹配不上（前缀收）；
+    /// ④ 导出时行首时间戳被 ≥24 粗尺整列抹掉。
+    #[test]
+    fn sanitiser_covers_the_long_tails_the_review_found() {
+        // ① 空格形态 + 大小写
+        for line in [
+            "hf download --Token shortsecret123 Qwen/Qwen3-8B",
+            "hf download --TOKEN shortsecret123 Qwen/Qwen3-8B",
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(!cleaned.contains("shortsecret123"), "{line} -> {cleaned}");
+        }
+        // ② 两段式 header：`名字:` 留、值抹；一段式 `名字:值` 同样只抹值
+        for (line, name) in [
+            (
+                "curl --header X-Api-Key: shortsecret123 https://x",
+                "X-Api-Key",
+            ),
+            ("curl -H X-Api-Key: shortsecret123 https://x", "X-Api-Key"),
+            ("curl -H X-Api-Key:shortsecret123 https://x", "X-Api-Key"),
+            (
+                "curl --header=X-Api-Key: shortsecret123 https://x",
+                "X-Api-Key",
+            ),
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(!cleaned.contains("shortsecret123"), "{line} -> {cleaned}");
+            assert!(
+                cleaned.contains(name),
+                "header 名字不该一起抹掉：{line} -> {cleaned}"
+            );
+        }
+        // ③ SigV4 签名参数：前缀匹配（大小写不敏感）
+        for line in [
+            "GET https://s3.example.com/?X-Amz-Signature=abcdef0123456789abcdef&X=1",
+            "GET https://s3.example.com/?x-amz-credential=AKIAIOSFODNN7EXAMPLE/20261021&X=1",
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(
+                !cleaned.contains("abcdef0123456789abcdef")
+                    && !cleaned.contains("AKIAIOSFODNN7EXAMPLE/20261021"),
+                "{line} -> {cleaned}"
+            );
+            assert!(
+                cleaned.contains("s3.example.com"),
+                "主机路径留着才有诊断价值：{cleaned}"
+            );
+        }
+        // ④ 导出的时间戳列必须原样保留（粗尺会把 24 字符时间戳打成 [REDACTED]）
+        let exported = sanitize_for_export(
+            "2026-10-21T06:42:39.191Z curl --header X-Api-Key: shortsecret123 https://x",
+        );
+        assert!(
+            exported.starts_with("2026-10-21T06:42:39.191Z "),
+            "时间戳被抹掉了：{exported}"
+        );
+        assert!(!exported.contains("shortsecret123"), "{exported}");
     }
 
     /// 落盘时**不能**上全量启发式。

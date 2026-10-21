@@ -717,6 +717,12 @@ const DOCKER_RMI_TIMEOUT: Duration = Duration::from_secs(600);
 /// 每次续传前先看取消信号（用户随时能停），次数用尽仍失败才抛给用户。
 const DOWNLOAD_RESUME_LIMIT: u32 = 30;
 
+/// 引擎清理契约补取的会话级负缓存（见 `refresh_native_engine_cleanup_contracts`）。
+/// ModelManager 每次调用都是新实例，进程级 static 是唯一能跨调用记住失败的层。
+static CONTRACT_SYNC_FAILED_CARDS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::OnceLock::new();
+
 impl ModelManager {
     /// `store` 用于在测试里注入假的商店数据源；不传则连生产商店
     /// （`config::STORE_URL`，固定地址，见那里的说明）。
@@ -1993,10 +1999,24 @@ impl ModelManager {
         &self,
         rec: &db::StoreModelRecord,
     ) -> Result<(), ModelManagerError> {
+        self.require_actually_stopped(rec, "更新脚本")
+    }
+
+    /// 三重真实核验（容器 inspect / 原生进程指纹 / 端口存活）+ DB 标志，
+    /// `action` 只用于错误文案（"更新脚本" / "卸载"）。
+    ///
+    /// 为什么不能只信 `rec.running`：stop 半成功（`stop.sh || echo 继续` 模式）时
+    /// 标志已是 false 而进程还活——只看标志会在活进程脚下更新脚本/卸载（评审 P2：
+    /// 智能更新流 stop→uninstall→card_scripts 串行正踩这条路径）。
+    pub fn require_actually_stopped(
+        &self,
+        rec: &db::StoreModelRecord,
+        action: &str,
+    ) -> Result<(), ModelManagerError> {
         if rec.running {
-            return Err(ModelManagerError::new(
-                "请先停用此模型，再更新或回退卡片脚本；不会自动停止模型。",
-            ));
+            return Err(ModelManagerError::new(format!(
+                "请先停用此模型，再{action}；不会自动停止模型。"
+            )));
         }
         if let Some(name) = rec.container_name.as_deref() {
             match proc_timeout::query(
@@ -2005,9 +2025,9 @@ impl ModelManager {
             ) {
                 Some(state) if state.trim() == "false" => return Ok(()),
                 _ => {
-                    return Err(ModelManagerError::new(
-                        "模型容器仍在运行或无法确认已停止，请先检查并停用，再更新脚本。",
-                    ));
+                    return Err(ModelManagerError::new(format!(
+                        "模型容器仍在运行或无法确认已停止，请先检查并停用，再{action}。"
+                    )));
                 }
             }
         }
@@ -2035,25 +2055,25 @@ impl ModelManager {
                         == fingerprint.get(..8)
                 })
             {
-                return Err(ModelManagerError::new(
-                    "此原生引擎仍有运行实例或状态无法确认，请先停用使用该引擎的模型再更新脚本。",
-                ));
+                return Err(ModelManagerError::new(format!(
+                    "此原生引擎仍有运行实例或状态无法确认，请先停用使用该引擎的模型再{action}。"
+                )));
             }
         } else if rec.status == "deployed" {
             // Unknown deployment must not be treated as safely stopped just
             // because a stale database flag says false.
-            return Err(ModelManagerError::new(
-                "无法可靠确认此部署已停止。请先卸载部署（保留权重），再更新卡片脚本。",
-            ));
+            return Err(ModelManagerError::new(format!(
+                "无法可靠确认此部署已停止，请先停用后再{action}。"
+            )));
         }
         if rec
             .endpoint_url
             .as_deref()
             .is_some_and(openai_compatible_endpoint_alive)
         {
-            return Err(ModelManagerError::new(
-                "模型端口仍有服务或状态无法确认，请先停用后再更新脚本。",
-            ));
+            return Err(ModelManagerError::new(format!(
+                "模型端口仍有服务或状态无法确认，请先停用后再{action}。"
+            )));
         }
         Ok(())
     }
@@ -2796,6 +2816,14 @@ impl ModelManager {
             if already_present {
                 continue;
             }
+            // 会话级负缓存（评审 P2）：商店不可达时 get_card 的 3 次重试+退避
+            // ≈18s/卡，而引擎管理页每次打开都无条件走一遍——离线存量设备每进
+            // 一次页就再撞一轮。失败的卡本进程内不再重试；重启即清。
+            let failed: &std::sync::Mutex<std::collections::HashSet<String>> =
+                CONTRACT_SYNC_FAILED_CARDS.get_or_init(Default::default);
+            if failed.lock().is_ok_and(|set| set.contains(&model.card_id)) {
+                continue;
+            }
             let card = match self.store.get_card(&model.card_id) {
                 Ok(card) => card,
                 Err(error) => {
@@ -2803,6 +2831,9 @@ impl ModelManager {
                         "[model-store] 无法同步原生引擎清理契约（{}）：{error}",
                         model.card_id
                     );
+                    if let Ok(mut set) = failed.lock() {
+                        set.insert(model.card_id.clone());
+                    }
                     continue;
                 }
             };

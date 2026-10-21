@@ -286,6 +286,7 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
     if (copyingRef.current) return;
     if (!task.runId) {
       setCopied('fail');
+      setLogNotice({ tone: 'error', text: copy.copyFailed });
       return;
     }
     copyingRef.current = true;
@@ -298,8 +299,14 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
       const ok = typeof text === 'string' && text.trim().length > 0
         && await copyClipboardText(text);
       setCopied(ok ? 'ok' : 'fail');
+      // 菜单已收起，按钮上的成败文案无人看见（评审 P2：反馈完全不可见）——
+      // 结果同走常驻的 logNotice，成败都有出口。
+      setLogNotice(ok
+        ? { tone: 'ok', text: copy.copied }
+        : { tone: 'error', text: copy.copyFailed });
     } catch {
       setCopied('fail');
+      setLogNotice({ tone: 'error', text: copy.copyFailed });
     } finally {
       copyingRef.current = false;
       setCopying(false);

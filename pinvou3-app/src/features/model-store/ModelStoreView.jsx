@@ -254,18 +254,6 @@ const ModelStoreView = ({ theme, t, bs }) => {
     return map;
   }, [cards, library]);
 
-  /** 智能操作按钮的「更新脚本」：停止 → 卸载部署 → 更新脚本 → 刷新。
-   * 更新后卡片回到「已下载」状态，按钮显示「部署模型」。 */
-  const handleUpdateWithCleanup = useCallback(async (record, wasRunning) => {
-    try {
-      await updateScriptsWithCleanup({ record, wasRunning, copy });
-    } catch (cause) {
-      showToast(String(cause?.message || cause));
-    } finally {
-      loadAll();
-    }
-  }, [copy, loadAll, showToast]);
-
   const guide = storeGuideState(status);
 
   useEffect(() => {
@@ -570,6 +558,32 @@ const ModelStoreView = ({ theme, t, bs }) => {
     const result = await handleStop(pending.record);
     if (result?.ok) dismissTask(pending.taskId);
   }, [handleStop, retainedStop]);
+
+  /** 智能操作按钮的「更新脚本」：停止 → 卸载部署 → 更新脚本 → 刷新。
+   * 更新后卡片回到「已下载」状态，按钮显示「部署模型」。 */
+  const handleUpdateWithCleanup = useCallback(async (record, wasRunning) => {
+    try {
+      await updateScriptsWithCleanup({
+        record,
+        wasRunning,
+        copy,
+        // 卸载部署成功即清品悟模型列表死行——与手动卸载（handleUninstall）同一
+        // 判据。不清的话，更新失败或用户不再重部署时，那一行指向已停服务，
+        // 下一次新建会话第一句话就失败（2026-09-22 真机事故，评审 P2 补齐）。
+        onUninstalled: async () => {
+          const linksCleaned = await cleanLinkedRows(
+            [record.endpoint_model, record.model_name],
+            record.card_name,
+          );
+          if (!linksCleaned) showToast(copy.uninstallLinksLeft(record.card_name));
+        },
+      });
+    } catch (cause) {
+      showToast(String(cause?.message || cause));
+    } finally {
+      loadAll();
+    }
+  }, [cleanLinkedRows, copy, loadAll, showToast]);
 
   /**
    * 卸载 / 删除。`purgeWeights` 就是用户在对话框上按的那个按钮：

@@ -883,15 +883,15 @@ fn start_lifecycle_checked(
     // 默认值也只在最外层定，方法签名里留必填参数（见 lifecycle.rs 里 uninstall 的
     // 文档注释）。
     if op == OP_UNINSTALL {
-        if let Ok(Some(rec)) = db::get_store_model(&card_id) {
-            if rec.running {
-                return Err(format!(
-                    "「{}」正在运行，请先停用再卸载。直接卸载会在服务还没停干净时\
-                     就删掉权重和库记录，之后那个还在跑的进程就没有任何界面能停得掉了。",
-                    rec.card_name
-                ));
-            }
-        }
+        // DB 读错必须显式失败（评审 P2：静默放行 = 带病卸载）；running 检查升级为
+        // 三重真实核验——stop 半成功时标志是 false 而进程还活，只信标志会在活进程
+        // 脚下卸载并抹掉 container_name（reconcile 反向认领靠它，清掉即永久失控）。
+        let rec = db::get_store_model(&card_id)
+            .map_err(|e| format!("读取模型记录失败，已取消卸载：{e}"))?
+            .ok_or_else(|| "该模型尚未下载".to_string())?;
+        ModelManager::new(None, None)
+            .require_actually_stopped(&rec, "卸载")
+            .map_err(|e| format!("「{}」{}", rec.card_name, e))?;
     }
 
     let card = card_id.clone();

@@ -95,14 +95,17 @@ function MsPill({ tone = 'neutral', children, className = '', testId }) {
  */
 function MsDialog({ open, onClose, theme, labelledBy, wide = false, testId, children }) {
   const isDark = theme === 'dark';
+  // onClose 允许缺省：调用方用 undefined 表达「此刻不可关」（busy 期 Esc/遮罩
+  // 闸门，评审 P2）。守卫放组件里，调用方不必包一层空函数。
+  const guardedClose = onClose ? () => onClose() : undefined;
   useEffect(() => {
-    if (!open) return () => {};
+    if (!open || !guardedClose) return () => {};
     const onKey = (event) => {
-      if (event.key === 'Escape') onClose();
+      if (event.key === 'Escape') guardedClose();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [open, onClose]);
+  }, [open, guardedClose]);
 
   if (!open) return null;
   return (
@@ -115,7 +118,7 @@ function MsDialog({ open, onClose, theme, labelledBy, wide = false, testId, chil
         backdropFilter: 'blur(14px) saturate(140%)',
         WebkitBackdropFilter: 'blur(14px) saturate(140%)',
       }}
-      onClick={onClose}
+      onClick={guardedClose}
     >
       {/* biome-ignore lint/a11y/useKeyWithClickEvents: 弹窗主体只阻止冒泡,避免误触背板关闭;它本身不是可交互控件 */}
       <div
