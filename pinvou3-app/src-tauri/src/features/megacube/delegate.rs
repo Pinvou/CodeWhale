@@ -81,6 +81,16 @@ fn remember_ownership(card: &str) -> Result<(), String> {
         .map_err(|e| format!("ownership_persist_failed: {e}"))
 }
 
+/// Prepare the asynchronous reader before an exclusive store resource lock.
+/// Facts read here grant no permission; the transaction rechecks them under its
+/// own locks. Waiting while holding that resource lock would block cmsd's reader.
+pub(crate) fn prepare_reader(card_id: &str) -> Result<(), String> {
+    if let Some(client) = local_client(card_id)? {
+        client.model_fact(card_id)?;
+    }
+    Ok(())
+}
+
 /// Resolve ownership once before opening a cross-process store transaction.
 pub(crate) fn maintenance_client(card_id: &str) -> Result<Option<Client>, String> {
     let Some(client) = local_client(card_id)? else {

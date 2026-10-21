@@ -10,7 +10,7 @@
 use serde_json::Value;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const DEFAULT_SOCKET_PATH: &str = "/run/megacube/cmsd.sock";
 /// 设备级默认别名：网关改写为活跃模型的真实 id；具体卡片连接使用各自已确认的模型 id。
@@ -18,6 +18,62 @@ pub const GATEWAY_MODEL_ALIAS: &str = "megacube-default";
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+/// One budget covers the first observation, enrollment and every readiness probe.
+const READER_READY_TIMEOUT: Duration = Duration::from_secs(12);
+const READER_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
+#[cfg(unix)]
+struct RequestStream {
+    stream: std::os::unix::net::UnixStream,
+    deadline: Option<Instant>,
+}
+#[cfg(unix)]
+impl RequestStream {
+    fn timeout(&self) -> std::io::Result<Duration> {
+        match self.deadline {
+            None => Ok(IO_TIMEOUT),
+            Some(deadline) => deadline
+                .checked_duration_since(Instant::now())
+                .filter(|remaining| !remaining.is_zero())
+                .map(|remaining| remaining.min(IO_TIMEOUT))
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "cmsd reader readiness deadline exceeded",
+                    )
+                }),
+        }
+    }
+}
+#[cfg(unix)]
+impl Read for RequestStream {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        self.stream.set_read_timeout(Some(self.timeout()?))?;
+        self.stream.read(bytes)
+    }
+}
+#[cfg(unix)]
+impl Write for RequestStream {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.stream.set_write_timeout(Some(self.timeout()?))?;
+        self.stream.write(bytes)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.flush()
+    }
+}
+
+fn readable_models(value: &Value) -> bool {
+    value.get("models").is_some_and(Value::is_array)
+        && value.get("error").is_none_or(Value::is_null)
+        && value
+            .get("http_status")
+            .and_then(Value::as_u64)
+            .is_none_or(|status| status == 200)
+}
+fn selection_pending(value: &Value) -> bool {
+    value["http_status"] == 503 && value["error"]["code"] == "store_selection_unavailable"
+}
 
 /// socket 路径：`CMSD_SOCKET` 覆盖 > 生产默认。
 pub fn socket_path() -> PathBuf {
@@ -87,21 +143,34 @@ impl Client {
     }
 
     fn roundtrip_body(&self, method: &str, path: &str, body: &str) -> Result<Value, String> {
+        self.roundtrip_body_until(method, path, body, None)
+    }
+
+    fn roundtrip_body_until(
+        &self,
+        method: &str,
+        path: &str,
+        body: &str,
+        deadline: Option<Instant>,
+    ) -> Result<Value, String> {
         #[cfg(unix)]
         {
-            let mut stream = super::platform::connect_timeout(&self.socket, CONNECT_TIMEOUT)
+            let timeout = match deadline {
+                Some(deadline) => deadline
+                    .checked_duration_since(Instant::now())
+                    .filter(|remaining| !remaining.is_zero())
+                    .ok_or("cmsd_reader_unconfirmed: readiness deadline exceeded")?
+                    .min(CONNECT_TIMEOUT),
+                None => CONNECT_TIMEOUT,
+            };
+            let stream = super::platform::connect_timeout(&self.socket, timeout)
                 .map_err(|e| format!("connect_failed: {e}"))?;
+            let mut stream = RequestStream { stream, deadline };
             if method == "POST" {
                 // Persist before any management request can be accepted, even
                 // when its response is lost and no model fact was read first.
                 super::authority::remember_local_device()?;
             }
-            stream
-                .set_read_timeout(Some(IO_TIMEOUT))
-                .map_err(|e| format!("io_failed: {e}"))?;
-            stream
-                .set_write_timeout(Some(IO_TIMEOUT))
-                .map_err(|e| format!("io_failed: {e}"))?;
             let request = format!(
                 "{method} {path} HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}",
                 body.len()
@@ -117,7 +186,7 @@ impl Client {
         }
         #[cfg(not(unix))]
         {
-            let _ = (method, path, body);
+            let _ = (method, path, body, deadline);
             Err("unsupported_platform: MegaCube 管理面（cmsd）只在 Linux 设备上存在".to_string())
         }
     }
@@ -131,40 +200,88 @@ impl Client {
     }
 
     pub fn models(&self) -> Result<Value, String> {
-        let value = self.roundtrip("GET", "/v1/models")?;
-        if value.get("models").is_some_and(Value::is_array)
-            && value.get("error").is_none_or(Value::is_null)
-            && value
+        self.models_until(Instant::now() + READER_READY_TIMEOUT)
+    }
+
+    fn models_until(&self, deadline: Instant) -> Result<Value, String> {
+        let value = self.roundtrip_body_until("GET", "/v1/models", "", Some(deadline))?;
+        let readable = readable_models(&value);
+        if readable {
+            super::authority::remember_local_device()?;
+        }
+        // A reader can already be registered while its first snapshot is still
+        // pending (including after an interrupted first enrollment). Do not wait
+        // on unrelated HTTP failures or turn an unknown observation into facts.
+        if !readable && !selection_pending(&value) {
+            return Ok(value);
+        }
+        let profile = crate::platform::paths::pinvou3_home();
+        let needs_enrollment = selection_pending(&value)
+            || (value["store_enrollment"] == 1
+                && (value["store_reader"]["program"]
+                    .as_str()
+                    .is_none_or(|path| !std::path::Path::new(path).is_file())
+                    || value["store_reader"]["profile"].as_str() != profile.to_str()));
+        if !needs_enrollment {
+            return Ok(value);
+        }
+        let program = std::env::current_exe()
+            .and_then(|path| path.canonicalize())
+            .map_err(|error| error.to_string())?;
+        // This endpoint independently checks the same-user/profile/cards-root
+        // binding. Only an acknowledged enrollment permits waiting for it.
+        let registered = self.roundtrip_body_until(
+            "POST",
+            "/v1/store-enrollment",
+            &serde_json::json!({"program":program,"profile":profile}).to_string(),
+            Some(deadline),
+        )?;
+        if registered["registered"] != true
+            || registered
+                .get("error")
+                .is_some_and(|error| !error.is_null())
+            || registered
                 .get("http_status")
                 .and_then(Value::as_u64)
-                .is_none_or(|status| status == 200)
+                .is_some_and(|status| status != 200)
         {
-            // Observing a device grants no lifecycle authority, but must be
-            // remembered before an accepted adoption can outlive this client.
-            super::authority::remember_local_device()?;
-            if value["store_enrollment"] == 1 {
-                let program = std::env::current_exe()
-                    .and_then(|p| p.canonicalize())
-                    .map_err(|e| e.to_string())?;
-                let profile = crate::platform::paths::pinvou3_home();
-                if value["store_reader"]["program"]
-                    .as_str()
-                    .is_none_or(|p| !std::path::Path::new(p).is_file())
-                    || value["store_reader"]["profile"].as_str() != profile.to_str()
-                {
-                    // Existing facts remain readable if enrollment is blocked
-                    // by maintenance or an administrator's explicit binding.
-                    // Ownership itself is granted later by cmsd after checking
-                    // completed standard store records and actual resources.
-                    let _ = self.roundtrip_body(
-                        "POST",
-                        "/v1/store-enrollment",
-                        &serde_json::json!({"program":program,"profile":profile}).to_string(),
-                    );
-                }
+            // An explicit rejection (maintenance or an administrator's binding)
+            // must not hide already readable facts. A lost/failed response may
+            // follow an accepted write, so it cannot be treated as rejection.
+            if registered
+                .get("http_status")
+                .and_then(Value::as_u64)
+                .is_some_and(|status| (400..500).contains(&status))
+                && registered
+                    .get("error")
+                    .is_some_and(|error| !error.is_null())
+            {
+                return Ok(value);
             }
+            return Err("cmsd_reader_unconfirmed: store enrollment was not confirmed".into());
         }
-        Ok(value)
+        loop {
+            // Deliberately bypass models(): at most one enrollment POST and no
+            // lifecycle POST is replayed by this observation-only readiness wait.
+            let fresh = self.roundtrip_body_until("GET", "/v1/models", "", Some(deadline))?;
+            if readable_models(&fresh) {
+                if fresh["store_reader"]["program"].as_str() != program.to_str()
+                    || fresh["store_reader"]["profile"].as_str() != profile.to_str()
+                {
+                    return Err("cmsd_reader_unconfirmed: store reader binding changed".into());
+                }
+                super::authority::remember_local_device()?;
+                return Ok(fresh);
+            }
+            if !selection_pending(&fresh) {
+                return Ok(fresh);
+            }
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|remaining| !remaining.is_zero())
+                .ok_or("cmsd_reader_unconfirmed: readiness deadline exceeded")?;
+            std::thread::sleep(remaining.min(READER_RETRY_INTERVAL));
+        }
     }
 
     pub(crate) fn model_fact(&self, card: &str) -> Result<Option<Value>, String> {
@@ -561,3 +678,7 @@ mod tests {
         assert!(validate_maintenance("model", "owner.with.dot").is_err());
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "platform/client_enrollment_tests.rs"]
+mod enrollment_tests;
