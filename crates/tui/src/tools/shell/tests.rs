@@ -215,7 +215,8 @@ fn windows_python_stdio_fixture() -> (tempfile::TempDir, String) {
     assert!(
         crate::shell_dispatcher::global_dispatcher()
             .kind()
-            .is_powershell()
+            .is_powershell(),
+        "requires a PowerShell dispatcher; run from PowerShell or cmd with SHELL unset"
     );
     let workspace = tempdir().expect("workspace");
     let program = std::env::var_os("CODEWHALE_TEST_PYTHON")

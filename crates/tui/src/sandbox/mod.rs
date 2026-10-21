@@ -971,10 +971,12 @@ mod tests {
     }
 
     #[cfg(windows)]
-    #[test]
-    fn forkguard_windows_shell_env_overlays_keep_python_stdio_utf8() {
+    #[tokio::test]
+    async fn forkguard_windows_shell_env_overlays_keep_python_stdio_utf8() {
         use crate::shell_dispatcher::ShellKind;
 
+        let _lock = crate::test_support::lock_test_env();
+        let _legacy_python = crate::test_support::EnvVarGuard::set("PYTHONIOENCODING", "gbk");
         let kind = crate::shell_dispatcher::global_dispatcher().kind();
         let command = if kind.is_powershell() {
             "Write-Output $env:PYTHONIOENCODING; Write-Output '中文-output'"
@@ -1005,14 +1007,19 @@ mod tests {
                 .with_env(extra_env)
                 .with_policy(SandboxPolicy::DangerFullAccess);
                 let exec = SandboxManager::new().prepare(&spec);
-                let mut cmd = std::process::Command::new(exec.program());
-                cmd.args(exec.args()).current_dir(&spec.cwd);
-                crate::utils::suppress_console_window(&mut cmd);
-                crate::child_env::apply_to_command(
+                let mut cmd = tokio::process::Command::new(exec.program());
+                cmd.args(exec.args())
+                    .current_dir(&spec.cwd)
+                    .kill_on_drop(true);
+                crate::utils::suppress_console_window(cmd.as_std_mut());
+                crate::child_env::apply_to_tokio_command(
                     &mut cmd,
                     crate::child_env::string_map_env(&exec.env),
                 );
-                let output = cmd.output().expect("run shell with overlaid environment");
+                let output = tokio::time::timeout(spec.timeout, cmd.output())
+                    .await
+                    .expect("shell environment probe timed out")
+                    .expect("run shell with overlaid environment");
                 assert!(output.status.success(), "{output:?}");
                 let stdout = String::from_utf8(output.stdout).expect("UTF-8 shell output");
                 assert!(stdout.lines().any(|line| line == "utf-8"), "{stdout:?}");
