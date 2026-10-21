@@ -77,7 +77,9 @@ try {
     const reactDomClient = await import('/@id/react-dom/client');
     const createRoot = reactDomClient.createRoot || reactDomClient.default?.createRoot;
     const { TeamRelayView } = await import('/features/team-relay/TeamRelayView.jsx');
-    const { dict } = await import('/shared/i18n.js');
+    const i18n = await import('/shared/i18n.js');
+    await i18n.ensureLanguage('zh');
+    const dict = i18n.dict;
     const now = new Date().toISOString();
     const me = { id: 'member-me', display_name: '测试成员', email: 'member@example.com' };
     const team = { id: 'team-1', name: '测试团队', join_password_configured: true };
