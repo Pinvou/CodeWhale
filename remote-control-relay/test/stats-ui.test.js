@@ -9,6 +9,46 @@ import { JSDOM } from "jsdom";
 const testDir = fileURLToPath(new URL(".", import.meta.url));
 const statsHtml = readFileSync(join(testDir, "..", "web", "stats.html"), "utf8");
 
+test('behavior metric switch uses instance metadata in Beijing time and marks unknown dates honestly', async () => {
+  let startedAt = Date.parse('2034-02-04T23:21:00Z');
+  let revision = 0;
+  const dom = new JSDOM(statsHtml, {
+    runScripts:'dangerously', url:'https://www.pinvou.com/pinvou3/stats',
+    beforeParse(window) {
+      window.fetch = async url => ({ ok:true, status:200, json:async () => String(url).endsWith('/session')
+        ? { role:'behavior_analyst' }
+        : { range:'30', data_status:'ready', metric_version:revision ? `behavior-v1.5-${revision}` : 'behavior-v1.5', metric_version_started_at:startedAt } });
+      window.setInterval = () => 1;
+      window.clearInterval = () => {};
+    },
+  });
+  const meta = () => dom.window.document.querySelector('#behaviorMeta').textContent;
+  const until = async expected => {
+    for (let attempt = 0; attempt < 100 && !expected.test(meta()); attempt++) {
+      await new Promise(resolve => dom.window.setTimeout(resolve, 10));
+    }
+    assert.match(meta(), expected);
+  };
+  try {
+    await until(/本实例切换时间 2034\/02\/05 07:21/);
+    // Complete the startup refresh's trailing microtasks before another refresh
+    // or JSDOM teardown. Its fetch mocks resolve without external I/O.
+    await new Promise(setImmediate);
+    assert.match(meta(), /behavior-v1\.5/);
+    assert.doesNotMatch(meta(), /2026-09-10|2026-09-11/);
+    for (const value of [null, undefined, '2034-02-05', -1, 1e99]) {
+      startedAt = value;
+      revision++;
+      // Await the complete production refresh, including its DOM bookkeeping,
+      // rather than treating renderBehavior's earlier mutation as completion.
+      await dom.window.refreshData(true);
+      await until(new RegExp(`behavior-v1\\.5-${revision}`));
+      await until(/本实例切换时间未记录/);
+      assert.doesNotMatch(meta(), /2034\/02\/05|2026-09-10|2026-09-11/);
+    }
+  } finally { dom.window.close(); }
+});
+
 for (const [olderStatus, newerStatus] of [[200, 200], [500, 200], [401, 200], [200, 500]]) {
   test(`overlapping refreshes ignore older ${olderStatus} after newer ${newerStatus}`, async () => {
     let batch = -1;
@@ -757,9 +797,9 @@ test("behavior ranges refresh only the selected overview or table section", asyn
                 negative_feedback_rate: 0.1,
               },
               retention: {
-                d1: { eligible_installations: 100, retained_installations: 50, retention_rate: 0.5, confidence: "sufficient" },
-                d7: { eligible_installations: 90, retained_installations: 36, retention_rate: 0.4, confidence: "sufficient" },
-                d30: { eligible_installations: 80, retained_installations: 24, retention_rate: 0.3, confidence: "sufficient" },
+                d1: { basis:"first_success_beijing_day", observation:"realtime", eligible_installations: 100, retained_installations: 50, retention_rate: 0.5, confidence: "sufficient" },
+                d7: { basis:"first_success_beijing_day", observation:"realtime", eligible_installations: 90, retained_installations: 36, retention_rate: 0.4, confidence: "sufficient" },
+                d30: { basis:"first_success_beijing_day", observation:"realtime", eligible_installations: 80, retained_installations: 24, retention_rate: 0.3, confidence: "sufficient", provisional_installations: 3, history_status: "partial" },
               },
               funnels: {
                 activation: { cohort_installations: value, confidence: "sufficient" },
@@ -812,6 +852,9 @@ test("behavior ranges refresh only the selected overview or table section", asyn
       document.querySelector("#retentionD30").textContent,
     ];
     const initialFixedMetrics = fixedMetrics();
+    assert.match(document.querySelector("#retentionD30Sample").textContent, /首次成功起算 · 实时更新/);
+    assert.match(document.querySelector("#retentionD30Sample").textContent, /纳入 80 · 留存 24 · 今日观察 3/);
+    assert.match(document.querySelector("#retentionD30Sample").textContent, /历史可能不完整/);
 
     let requestStart = requested.length;
     document.querySelector('[data-behavior-section="toolCalls"] [data-range="today"]').click();
@@ -873,4 +916,43 @@ test("behavior ranges refresh only the selected overview or table section", asyn
   } finally {
     dom.window.close();
   }
+});
+
+test('retention labels follow known API semantics and behavior timestamps explicitly use Beijing time', async () => {
+  const instant = Date.parse('2034-02-04T23:21:00Z');
+  let row = { basis:'first_success_beijing_day', observation:'realtime', eligible_installations:31, retained_installations:20 };
+  const dom = new JSDOM(statsHtml, {
+    runScripts:'dangerously', url:'https://www.pinvou.com/pinvou3/stats',
+    beforeParse(window) {
+      const format = window.Date.prototype.toLocaleString;
+      // Simulate a browser whose local zone differs from the report's zone.
+      window.Date.prototype.toLocaleString = function(locale, options) {
+        return format.call(this, locale, { timeZone:'America/Los_Angeles', ...options });
+      };
+      window.fetch = async url => ({ ok:true, status:200, json:async () => String(url).endsWith('/session')
+        ? { role:'behavior_analyst' }
+        : { range:'30', data_status:'ready', metric_version:'behavior-v1.5', metric_version_started_at:instant,
+          latest_event_received_at:instant, generated_at:instant, retention:{ d1:row } } });
+      window.setInterval = () => 1;
+      window.clearInterval = () => {};
+    },
+  });
+  try {
+    const { document } = dom.window;
+    for (let attempt = 0; attempt < 100 && !document.querySelector('#retentionD1Sample').textContent.includes('纳入 31'); attempt++) {
+      await new Promise(resolve => dom.window.setTimeout(resolve, 10));
+    }
+    await new Promise(setImmediate);
+    const sample = () => document.querySelector('#retentionD1Sample').textContent;
+    assert.match(sample(), /首次成功起算 · 实时更新 · 纳入 31 · 留存 20/);
+    const meta = document.querySelector('#behaviorMeta').textContent;
+    assert.match(meta, /最后事件（北京时间）：2034\/02\/05 07:21/);
+    assert.match(meta, /报表更新（北京时间）：2034\/02\/05 07:21/);
+    for (const value of [undefined, '<private-unrecognized-value>']) {
+      row = { ...row, basis:value, observation:value };
+      await dom.window.refreshData(true);
+      assert.match(sample(), /起算口径未知 · 更新口径未知/);
+      assert.doesNotMatch(sample(), /首次成功起算|实时更新|private-unrecognized/);
+    }
+  } finally { dom.window.close(); }
 });
