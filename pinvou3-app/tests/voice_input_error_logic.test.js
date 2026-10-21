@@ -8,6 +8,10 @@ const bridgePath = path.join(__dirname, "..", "src", "platform", "tauri", "bridg
 const source = fs.readFileSync(bridgePath, "utf8");
 const rustVoicePath = path.join(__dirname, "..", "src-tauri", "src", "app", "commands", "voice.rs");
 const rustVoiceSource = fs.readFileSync(rustVoicePath, "utf8");
+const dialectSource = fs.readFileSync(path.join(__dirname, "..", "src-tauri", "src", "core", "reasoning_dialect.rs"), "utf8");
+// reasoning dialect 写 body 的 match 已收敛到 core/reasoning_dialect.rs（去重）；
+// voice.rs 保留构造入口。契约跨两个文件断言。
+const voiceReasoningSource = rustVoiceSource + dialectSource;
 // Multi-model services may list A before the selected B. Runtime preparation
 // already preserves B; voice must use that resolved name for both attempts,
 // never run the first-entry-only monitoring probe again.
@@ -43,7 +47,10 @@ const voiceHookPath = path.join(__dirname, "..", "src", "features", "voice-compo
 const voiceHookSource = fs.readFileSync(voiceHookPath, "utf8");
 const settingsPath = path.join(__dirname, "..", "src", "features", "settings", "SettingsView.jsx");
 const settingsSource = fs.readFileSync(settingsPath, "utf8");
-const webBridgeSource = fs.readFileSync(path.join(__dirname, "..", "src", "platform", "web", "bridge.js"), "utf8");
+// startVoiceInput/cancelVoiceInput 的 web 实现已随 dead-code dedup 移入共享 payload；
+// 相关结构 pin 的 haystack 需要 payload 一并纳入。
+const webBridgeSource = fs.readFileSync(path.join(__dirname, "..", "src", "platform", "web", "bridge.js"), "utf8") +
+  fs.readFileSync(path.join(__dirname, "..", "src", "shared", "bridge-shared-helpers.js"), "utf8");
 const rustShortcutPlatformPath = path.join(__dirname, "..", "src-tauri", "src", "features", "voice_shortcut", "platform", "mod.rs");
 const rustShortcutPlatformSource = fs.existsSync(rustShortcutPlatformPath) ? fs.readFileSync(rustShortcutPlatformPath, "utf8") : "";
 // voice.js copy comes from bridge.js's BT_TABLE (bt(key): per-language lookup
@@ -207,10 +214,16 @@ assert.deepStrictEqual(
   "run_llm",
   "long poster dictation from Alt or mic must run LLM",
 );
-assert.match(rustVoiceSource, /除极短自然句外，默认整理成结构化 Markdown 列表/);
-assert.match(rustVoiceSource, /内容包含目标、用途、功能、字段、截止时间、进度、多个事项、多个条件、步骤、约束或明显需求表达时，必须整理成 Markdown 列表/);
-assert.match(rustVoiceSource, /制作一个个人工作台，用于企业录入工作事项进度，包括截止时间/);
-assert.match(rustVoiceSource, /12月36日下午3点/);
+// The postprocess prompt texts moved into the shared CLI contract module
+// (features/voice/contract.rs); the application path stays in voice.rs.
+const rustVoiceContractSource = fs.readFileSync(
+  path.join(__dirname, "..", "src-tauri", "src", "features", "voice", "contract.rs"),
+  "utf8",
+);
+assert.match(rustVoiceContractSource, /除极短自然句外，默认整理成结构化 Markdown 列表/);
+assert.match(rustVoiceContractSource, /内容包含目标、用途、功能、字段、截止时间、进度、多个事项、多个条件、步骤、约束或明显需求表达时，必须整理成 Markdown 列表/);
+assert.match(rustVoiceContractSource, /制作一个个人工作台，用于企业录入工作事项进度，包括截止时间/);
+assert.match(rustVoiceContractSource, /12月36日下午3点/);
 assert.match(
   rustVoiceSource,
   /\[voice_postprocess\] empty_output[\s\S]{0,800}\(String::new\(\), false\)/,
@@ -222,13 +235,13 @@ assert.doesNotMatch(
   "structured must not remain a standalone voice postprocess chain",
 );
 assert.match(
-  rustVoiceSource,
-  /VoiceReasoningDialect::ThinkingDisabled[\s\S]*body\["thinking"\] = json!\(\{ "type": "disabled" \}\)/,
+  voiceReasoningSource,
+  /ReasoningDialect::ThinkingDisabled[\s\S]*body\["thinking"\] = json!\(\{ "type": "disabled" \}\)/,
   "voice postprocess must disable thinking for DeepSeek-style providers",
 );
 assert.match(
-  rustVoiceSource,
-  /VoiceReasoningDialect::QwenEnableThinking[\s\S]*body\["enable_thinking"\] = json!\(false\)/,
+  voiceReasoningSource,
+  /ReasoningDialect::QwenEnableThinking[\s\S]*body\["enable_thinking"\] = json!\(false\)/,
   "voice postprocess must disable Qwen thinking with enable_thinking=false",
 );
 assert.match(
@@ -518,11 +531,11 @@ assert.match(
 );
 const voiceRecordingStopAt = voiceHookSource.indexOf("if (voiceInput.status === 'recording') {");
 const voiceBusyGateAt = voiceHookSource.indexOf("if (voiceBusy) return false;", voiceRecordingStopAt);
-const voiceBeforeStartAt = voiceHookSource.indexOf("current.onBeforeStart(nextMode)", voiceRecordingStopAt);
+const voiceCanStartGateAt = voiceHookSource.indexOf("current.canStart(nextMode)", voiceRecordingStopAt);
 assert.ok(voiceRecordingStopAt >= 0 && voiceBusyGateAt > voiceRecordingStopAt,
   "recording stop must run before busy startup gates");
-assert.ok(voiceRecordingStopAt >= 0 && voiceBeforeStartAt > voiceRecordingStopAt,
-  "recording stop must run before the ASR-ready shortcut intro gate");
+assert.ok(voiceRecordingStopAt >= 0 && voiceCanStartGateAt > voiceRecordingStopAt,
+  "recording stop must run before the post-stop startup gates");
 assert.match(
   voiceHookSource,
   /if \(mode === 'edit'\) \{[\s\S]*?setEditPreview\(\{[\s\S]*?original,[\s\S]*?next,[\s\S]*?instruction:[\s\S]*?context,[\s\S]*?\}\);[\s\S]*?return;/,
@@ -530,7 +543,7 @@ assert.match(
 );
 assert.match(
   voiceHookSource,
-  /next === original[\s\S]*onEditUnchanged/,
+  /next === original[\s\S]*?discardVoiceResult\(context\)/,
   "edit mode must not silently swallow unchanged model output",
 );
 assert.match(
@@ -559,7 +572,7 @@ assert.match(
 assert.match(
   webBridgeSource,
   /function normalizeVoiceMode\(mode\) \{[\s\S]*?mode === "edit" \? "edit"/,
-  "web bridge must preserve edit mode instead of folding it into dictation",
+  "web bridge must preserve edit mode (incl. the voice_edit/draft_edit aliases, round-9) instead of folding it into dictation",
 );
 // The web lane has no LLM postprocess, so edit must be downgraded to
 // appended dictation before writeback; otherwise the uncorrected raw ASR
@@ -695,7 +708,9 @@ assert.strictEqual(deviceTimeout.category, "device_unavailable");
 assert.match(deviceTimeout.message, /检测超时/);
 
 const mediaStart = source.indexOf("  function stopMediaTracks(");
-const mediaEnd = source.indexOf("\n  function mergeFloatChunks(", mediaStart);
+// mergeFloatChunks 已随 dedup 移入共享 payload：lane 侧只剩无缩进的转发函数。
+let mediaEnd = source.indexOf("\n  function mergeFloatChunks(", mediaStart);
+if (mediaEnd === -1) mediaEnd = source.indexOf("\nfunction mergeFloatChunks(", mediaStart);
 assert.notStrictEqual(mediaStart, -1, "voice media helpers must exist");
 assert.notStrictEqual(mediaEnd, -1, "voice media helper boundary must exist");
 
@@ -712,8 +727,26 @@ const mediaContext = {
   clearTimeout,
 };
 vm.createContext(mediaContext);
+// requestVoiceMedia 已随 dedup 移入共享 payload：lane 侧该位置只剩转发函数。
+// 在切片末尾追加 payload 里的真实实现（同名声明后者覆盖前者），行为契约不变。
+function extractBalancedFunction(src0, name) {
+  const start0 = src0.indexOf(`function ${name}(`);
+  if (start0 === -1) throw new Error(`function ${name} not found`);
+  const braceStart = src0.indexOf("{", start0);
+  let depth = 0;
+  for (let i = braceStart; i < src0.length; i++) {
+    if (src0[i] === "{") depth++;
+    else if (src0[i] === "}") { depth--; if (depth === 0) return src0.slice(start0, i + 1); }
+  }
+  throw new Error(`function ${name} 花括号未闭合`);
+}
+const helpersVoiceSrc = fs.readFileSync(path.join(__dirname, "..", "src", "shared", "bridge-shared-helpers.js"), "utf8");
+const voiceClusterSrc = helpersVoiceSrc.slice(
+  helpersVoiceSrc.indexOf('function sharedBridgeBase(deps)'),
+  helpersVoiceSrc.indexOf('"tauriMain"'),
+);
 vm.runInContext(
-  `${source.slice(mediaStart, mediaEnd)}\nthis.probeVoiceAudioInput = probeVoiceAudioInput; this.requestVoiceMedia = requestVoiceMedia;`,
+  `${source.slice(mediaStart, mediaEnd)}\n${extractBalancedFunction(voiceClusterSrc, "voiceFlowError")}\n${extractBalancedFunction(voiceClusterSrc, "requestVoiceMedia")}\nthis.probeVoiceAudioInput = probeVoiceAudioInput; this.requestVoiceMedia = requestVoiceMedia;`,
   mediaContext,
   { filename: bridgePath },
 );

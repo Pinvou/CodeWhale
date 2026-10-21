@@ -27,13 +27,25 @@ mod store;
 pub mod workspace;
 
 // 纯提取：连接池自身仍是本 facade 的 impl 块；安装、登录与 Kimi 内省的
-// 无副作用自由函数已迁入对应子模块，这里 glob 引入以保持调用点不变。
-#[allow(unused_imports)]
-use install::*;
-#[allow(unused_imports)]
-use introspect::*;
-#[allow(unused_imports)]
-use login::*;
+// 无副作用自由函数已迁入对应子模块，这里显式引入 mod.rs 实际使用的符号。
+use install::{
+    brew_install_args, brew_package_installed, bundled_adapter_candidates,
+    claude_version_supported, clear_install_outcome, clear_install_progress,
+    codex_path_for_adapter, codex_upgrade_required, codex_version_changed, command_version_output,
+    detect_install_source, fill_install_outcome, fill_install_progress, find_in_path,
+    install_action_for, installed_node_version, kimi_version_supported,
+    move_official_binaries_aside, node_major_version, npm_executable, npm_package,
+    official_script_supported, official_script_urls, parse_install_action, path_install_source,
+    record_install_outcome, resolve_adapter_from, resolve_claude_adapter_from, resolve_claude_cli,
+    resolve_codex_cli, resolve_kimi_path, run_brew_install, run_npm_global_upgrade,
+    run_official_install_script, script_url_reachable, settle_install_result,
+    stale_official_target,
+};
+use introspect::{kimi_diagnostic_cursor, kimi_failure_after};
+use login::{
+    agent_login_command, capture_agent_login_output, cli_status_success, kimi_login_failure_detail,
+    nonempty_env, setup_hint_message,
+};
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -55,7 +67,7 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 use agent_probe::{CliProbeCache, CliProbeGates, ResolvedCli};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use auth_probe::{AgentAuthProbeState, CachedAuthStatus};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -110,6 +122,9 @@ pub use crate::platform::process::GIT_IDENTITY_KEYS;
 // `MIN_CODEX_VERSION` 通过本 facade 公开再导出：同仓 `pinvou-cli` 与运行时共用
 // 同一最低版本约束，消除手工副本漂移；行为不变。
 pub use runtime::MIN_CODEX_VERSION;
+// kimi 登录失败脱敏的凭据标记表经本 facade 公开再导出：headless CLI 的登录
+// 回显 withholding 门直接复用同一列表（原先 CLI 逐字手抄、无对齐测试）。
+pub use login::KIMI_CREDENTIAL_MARKERS;
 /// The comparison itself, not only the constants: `pinvou-cli`'s `code`
 /// gates (`agents status`, override resolution) consume this so a
 /// comparison-semantics change app-side cannot drift behind a CLI-local
@@ -247,7 +262,6 @@ where
 /// created before the bundled bridge moved past 1.1.5. This is not the
 /// bundled adapter version and must not be written to `acp-state.json`.
 pub const CODEX_ACP_VERSION: &str = "1.1.5";
-pub const CODEX_ACP_SESSION_MODEL: &str = "Codex (ACP)";
 const CODEX_ACP_PACKAGE: &str = "@agentclientprotocol/codex-acp";
 /// Bundled codex-acp adapter pin. Kept separate from the legacy managed
 /// runtime directory schema above so session diagnostics report the truth.
@@ -258,9 +272,17 @@ const CODEX_ACP_ADAPTER_VERSION: &str = "2.2.2";
 /// `forkguard_declared_adapter_versions_match_the_bridge_pin` pins the invariant.
 pub const CLAUDE_ACP_VERSION: &str = "0.93.0";
 const CLAUDE_ACP_PACKAGE: &str = "@agentclientprotocol/claude-agent-acp";
-const CLAUDE_ACP_SESSION_MODEL: &str = "Claude Code (ACP)";
 const KIMI_ACP_PACKAGE: &str = "kimi acp";
-const KIMI_ACP_SESSION_MODEL: &str = "Kimi (ACP)";
+/// Single source of the persisted ACP session-model string
+/// (`"{display_name} (ACP)"`): the session creator in `app/commands/codex`
+/// writes it, `acp_session_backend` parses it back, and the headless CLI's
+/// `code sessions` family consumes it through the facade instead of a
+/// hand-copied table (the drift class the GIT_OVERRIDE_KEYS re-exports
+/// eliminate). Round-trip pinned by
+/// `acp_session_model_name_round_trips_through_acp_session_backend`.
+pub fn acp_session_model_name(backend: AgentBackend) -> String {
+    format!("{} (ACP)", backend.display_name())
+}
 /// claude-agent-acp 要求的最低 claude CLI 版本（输出形如 `2.1.163 (Claude Code)`）。
 /// `pub` 导出供同仓 `pinvou-cli` 直接引用：CLI 的 `agents status/login` 与本
 /// 运行时使用同一最低版本，消除手工副本漂移；GUI 语义不变。
@@ -299,17 +321,16 @@ const REAP_INTERVAL_SECS: u64 = 5 * 60;
 const RESOURCE_SAMPLE_INTERVAL_SECS: u64 = 60;
 
 /// 空闲回收判定（纯函数，便于单测）：busy（prompt 在途，含等待权限/问询的
-/// turn）、configuring（配置同步中）与当前 active 会话一律不回收。
+/// turn）、configuring（配置同步中）与当前 active 会话一律不回收。判定本体
+/// 与 EnginePool 侧共用 `core::reaper::should_reap_idle`，这里保留 ACP 的
+/// 参数语义命名。
 fn should_reap_idle_session(
     busy: bool,
     configuring: bool,
     is_active_session: bool,
     idle_for: Duration,
 ) -> bool {
-    !busy
-        && !configuring
-        && !is_active_session
-        && idle_for >= Duration::from_secs(IDLE_EVICT_AFTER_SECS)
+    crate::core::reaper::should_reap_idle(busy, configuring, is_active_session, idle_for)
 }
 
 /// `evict_if_idle` 的锁内复核 + 原子移除（泛型抽出以便用裸组件确定性测试）：
@@ -541,11 +562,10 @@ async fn rebind_blocking_from_sessions<T>(
 
 /// 会话类型判定：ACP 后端直接生效；否则按创建时持久化的 `* (ACP)` 模型串兜底。
 fn acp_session_backend(backend: AgentBackend, model: &str) -> Option<AgentBackend> {
-    backend.is_acp().then_some(backend).or_else(|| match model {
-        CODEX_ACP_SESSION_MODEL => Some(AgentBackend::CodexAcp),
-        CLAUDE_ACP_SESSION_MODEL => Some(AgentBackend::ClaudeAcp),
-        KIMI_ACP_SESSION_MODEL => Some(AgentBackend::KimiAcp),
-        _ => None,
+    backend.is_acp().then_some(backend).or_else(|| {
+        AgentBackend::ACP_BACKENDS
+            .into_iter()
+            .find(|&candidate| acp_session_model_name(candidate) == model)
     })
 }
 
@@ -981,13 +1001,8 @@ pub struct CodexAcpStatus {
     /// Agent 明确报告必须升级；这是不可暂缓的动态门禁。
     pub update_required: bool,
     pub bridge_ready: bool,
-    pub adapter_path: Option<String>,
-    pub node_version: Option<String>,
     pub node_supported: bool,
-    pub npm_available: bool,
     pub codex_available: bool,
-    pub codex_path: Option<String>,
-    pub codex_version: Option<String>,
     pub runtime_source: Option<&'static str>,
     /// 该 Agent CLI 的最低版本要求（"0.144.6" / "2.0.0" / "0.9.0"）。
     pub min_version: &'static str,
@@ -1012,11 +1027,41 @@ pub struct CodexAcpStatus {
     /// 安装进行中的输出最新一行（同样供重挂载恢复展示）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_latest_line: Option<String>,
+    /// The outcome of the most recent install/upgrade (recorded when
+    /// `install_agent` wraps up, cleared when the next install starts). An
+    /// install spanning a settings-panel close/section switch outlives the
+    /// initiating frontend instance, so the command return value reaches no
+    /// mounted component — the remounted panel converges the restored
+    /// in-progress phase from this field instead of stranding forever.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_finished: Option<InstallFinishedInfo>,
     pub error: Option<String>,
     /// 稳定的英文提示代码，前端映射 i18n 文案：
     /// "kimi_cli_missing" / "kimi_auth_required" / "claude_auth_required"。
     pub setup_hint: Option<&'static str>,
 }
+
+/// Overall install/upgrade outcome: the frontend maps `ok=false` to "failed"
+/// and `cancelled=true` to "cancelled" (no red-error echo, matching the
+/// await-side cancel handling). On failure (non-cancelled) `error` carries
+/// this run's error chain for the cross-mount heal to echo — some failure
+/// paths never write `runtime_errors`, so `status.error` is not necessarily
+/// this run's cause.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct InstallFinishedInfo {
+    pub ok: bool,
+    pub cancelled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Shared install-outcome store (tauri managed state): `install_agent`
+/// records the backend's most recent install/upgrade outcome when it wraps
+/// up. Complements the one-shot command return value, which only reaches the
+/// frontend instance alive at initiation time — after unmount/remount the
+/// outcome is only observable through status.
+#[derive(Default)]
+struct InstallOutcomeStore(parking_lot::RwLock<HashMap<AgentBackend, InstallFinishedInfo>>);
 
 /// 安装进度共享 store（tauri managed state）：安装子进程逐行 emit 时同步记录
 /// 执行命令与最新一行，status 查询时带回——前端设置页/App 关闭重开后从
@@ -1622,22 +1667,6 @@ impl AcpSession {
         }
     }
 
-    async fn set_model(&self, model_id: &str) -> Result<()> {
-        let mut options = self.config_options.read().clone();
-        apply_config_option(
-            &self.connection,
-            &self.acp_session_id,
-            &mut options,
-            "model",
-            model_id,
-        )
-        .await?;
-        let current_model = current_config_value(&options, "model");
-        *self.config_options.write() = options;
-        *self.current_model.write() = current_model;
-        Ok(())
-    }
-
     async fn set_config_option(&self, config_id: &str, value_id: &str) -> Result<()> {
         let mut options = self.config_options.read().clone();
         apply_config_option(
@@ -1712,6 +1741,14 @@ pub struct AcpPool {
     install_children: Arc<
         parking_lot::Mutex<HashMap<AgentBackend, crate::platform::process::ManagedProcessTree>>,
     >,
+    /// Active-window registry for `install_agent` (registered at entry,
+    /// unregistered after the outcome is recorded): covers the preflight
+    /// window and the post-command probe/finalize window. Together with
+    /// `install_operations` it keeps `status.installing` up so that
+    /// `installing=false` implies `install_finished` is already in place,
+    /// and the remounted panel's install poller never stops in the gap (see
+    /// the ProvidersSection heal effect).
+    install_active: Arc<parking_lot::RwLock<HashSet<AgentBackend>>>,
     login_states: Arc<parking_lot::RwLock<HashMap<AgentBackend, AgentLoginState>>>,
     login_inputs: Arc<Mutex<HashMap<AgentBackend, ChildStdin>>>,
     codex_upgrade_required: Arc<AtomicBool>,
@@ -1744,6 +1781,9 @@ pub struct AcpPool {
 
 /// 后台巡检任务句柄：Drop 时先 cancel 再 abort，双保险停止巡检
 /// （参考 scheduled/tasks.rs ScheduledTaskState 的 Drop 清理模式）。
+/// 本仓保留本地实现（资源采样巡检节拍与生命周期特化的
+/// `take_session_if_still_idle` 都在本文手写，不上收 `core::reaper` 的
+/// 巡检循环；判定谓词仍经 [`should_reap_idle_session`] 共用 core::reaper）。
 struct IdleReaperGuard {
     cancel: tokio_util::sync::CancellationToken,
     handle: tauri::async_runtime::JoinHandle<()>,
@@ -1783,6 +1823,14 @@ impl InstallOperationState {
         }
         self.cancelled.insert(backend);
         true
+    }
+
+    /// Arms the cancel marker without requiring an active external command:
+    /// covers the preflight / post-command finalize window of the install
+    /// active registry, where there is no process tree to terminate. The
+    /// spawn-time recheck or the record-time consumption picks it up.
+    fn arm_cancel(&mut self, backend: AgentBackend) {
+        self.cancelled.insert(backend);
     }
 
     fn is_active(&self, backend: AgentBackend) -> bool {
@@ -1837,6 +1885,12 @@ fn capture_cancelled_install_tree_at_boundary(
     Ok(tree)
 }
 
+/// Mutually exclusive install/upgrade per Agent; different Agents stay
+/// isolated. The guard only covers the external command itself and is
+/// dropped explicitly once it finishes: the authenticated gate lifts with it,
+/// while `status.installing` keeps being covered by the `install_active`
+/// active-window registry until the outcome is recorded (see
+/// `install_agent`); Drop still cleans up on early returns and panics.
 struct AgentInstallGuard {
     operations: InstallOperationStore,
     backend: AgentBackend,
@@ -1860,6 +1914,45 @@ impl Drop for AgentInstallGuard {
     }
 }
 
+/// Active-window guard for `install_agent`: registers at the entry and is
+/// unregistered after the outcome is recorded (Drop also covers early
+/// returns and panics). Complements `AgentInstallGuard`, which only covers
+/// the external command itself — this guard keeps `status.installing` up
+/// from the command entry to the recorded outcome.
+struct InstallActiveGuard {
+    install_active: Arc<parking_lot::RwLock<HashSet<AgentBackend>>>,
+    backend: AgentBackend,
+}
+
+impl InstallActiveGuard {
+    /// Registers the backend for its whole install lifecycle. `None` when an
+    /// install for the same backend is already inside its active window: the
+    /// caller must then reject without clearing that run's outcome or cancel
+    /// marker, and without recording an outcome of its own — a rejected call
+    /// never installed anything, so the stored outcome keeps describing the
+    /// most recent real install.
+    fn try_start(
+        install_active: &Arc<parking_lot::RwLock<HashSet<AgentBackend>>>,
+        backend: AgentBackend,
+    ) -> Option<Self> {
+        if !install_active.write().insert(backend) {
+            return None;
+        }
+        Some(Self {
+            install_active: install_active.clone(),
+            backend,
+        })
+    }
+}
+
+impl Drop for InstallActiveGuard {
+    fn drop(&mut self) {
+        self.install_active.write().remove(&self.backend);
+    }
+}
+
+/// 安装子进程 pid 登记 guard：spawn 成功后登记，drop 时（完成/失败/超时/取消
+/// 任意出口）统一注销，避免残留 pid 在后续取消时误杀被系统复用的进程。
 /// 安装进程树登记 guard：spawn 成功并建立平台归属后登记，drop 时（完成/失败/
 /// 超时/取消任意出口）统一注销；只有明确成功才解除异常回收。Windows 保存 Job
 /// Object，而非可复用的裸 PID。
@@ -2123,6 +2216,7 @@ impl AcpPool {
             }
         }
         app.manage(InstallProgressStore::default());
+        app.manage(InstallOutcomeStore::default());
         Ok(Self {
             app,
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -2136,6 +2230,7 @@ impl AcpPool {
             acp_metadata_backends: Arc::new(parking_lot::RwLock::new(acp_metadata_backends)),
             session_store,
             install_operations: Arc::new(parking_lot::Mutex::new(InstallOperationState::default())),
+            install_active: Arc::new(parking_lot::RwLock::new(HashSet::new())),
             install_children: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             login_states: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             login_inputs: Arc::new(Mutex::new(HashMap::new())),
@@ -2362,10 +2457,6 @@ impl AcpPool {
         }
     }
 
-    async fn status_async(&self) -> CodexAcpStatus {
-        self.status_for_async(AgentBackend::CodexAcp).await
-    }
-
     /// 「重新检测」入口：忽略探测缓存强制重新探测后返回最新状态，
     /// 供用户在 App 外手动安装/升级 CLI 后刷新（安装/升级成功路径
     /// 已通过 refresh_agent_cli_probe 自动失效缓存）。
@@ -2426,10 +2517,13 @@ impl AcpPool {
             .unwrap_or_default();
         if backend == AgentBackend::KimiAcp {
             let kimi = self.cli_probe_for(backend);
-            let installing = self.install_operations.lock().is_active(backend);
-            let kimi_path = kimi
-                .as_ref()
-                .map(|cli| cli.path.to_string_lossy().into_owned());
+            // status.installing covers the whole install_agent lifecycle
+            // (preflight and the post-command probe/finalize window alike);
+            // the authenticated gate keeps looking at the install lock only —
+            // probes keep running inside the active window and an installed,
+            // authenticated agent must not flash as unauthenticated.
+            let guard_installing = self.install_operations.lock().is_active(backend);
+            let installing = guard_installing || self.install_active.read().contains(&backend);
             let kimi_version = kimi.as_ref().and_then(|cli| cli.version.clone());
             let install_source = kimi
                 .as_ref()
@@ -2441,14 +2535,14 @@ impl AcpPool {
             let cli_ready = kimi.is_some() && version_supported;
             let installed = cli_ready;
             let authenticated = !login.in_progress
-                && !installing
+                && !guard_installing
                 && kimi
                     .as_ref()
                     .is_some_and(|cli| self.cached_agent_authenticated(backend, &cli.path));
             let mut status = CodexAcpStatus {
                 agent_id: "kimi",
                 agent_name: "Kimi",
-                version: kimi_version.clone(),
+                version: kimi_version,
                 latest_version: None,
                 installed,
                 update_available: false,
@@ -2456,14 +2550,9 @@ impl AcpPool {
                 // Kimi 直接运行原生 CLI，不依赖独立 Bridge。CLI 是否可用由
                 // installed 单独表达，避免未安装时被前端 Bridge 错误分支截断。
                 bridge_ready: true,
-                adapter_path: kimi_path.clone(),
                 // Kimi 不经 Node bridge，Node 字段不适用；node_supported 视为无门槛满足。
-                node_version: None,
                 node_supported: true,
-                npm_available: npm_executable().is_some(),
                 codex_available: cli_ready,
-                codex_path: kimi_path,
-                codex_version: kimi_version,
                 runtime_source: kimi.as_ref().map(|_| "system"),
                 min_version: MIN_KIMI_VERSION,
                 install_action: if installed {
@@ -2485,6 +2574,7 @@ impl AcpPool {
                 error: login.error.or_else(|| self.runtime_errors.get(backend)),
                 install_command: None,
                 install_latest_line: None,
+                install_finished: None,
                 setup_hint: if !cli_ready {
                     Some("kimi_cli_missing")
                 } else if !authenticated {
@@ -2494,6 +2584,7 @@ impl AcpPool {
                 },
             };
             fill_install_progress(&self.app, backend, &mut status);
+            fill_install_outcome(&self.app, backend, &mut status);
             return status;
         }
 
@@ -2575,9 +2666,16 @@ impl AcpPool {
         };
         // 登录命令运行期间不要再启动同一 CLI 的 auth status。部分 CLI 会让两条
         // 命令争用凭证锁，原来的 750ms 状态轮询因此可能拖住 Tauri 的 IPC/UI。
-        let installing = self.install_operations.lock().is_active(backend);
+        // status.installing covers the whole install_agent lifecycle (preflight
+        // and the post-command probe/finalize window alike) so that
+        // `installing=false` implies `install_finished` is already in place;
+        // the authenticated gate keeps looking at the install lock only —
+        // probes keep running inside the active window and an authenticated
+        // agent must not flash as unauthenticated.
+        let guard_installing = self.install_operations.lock().is_active(backend);
+        let installing = guard_installing || self.install_active.read().contains(&backend);
         let authenticated = !login.in_progress
-            && !installing
+            && !guard_installing
             && match backend {
                 AgentBackend::CodexAcp => codex.as_ref().is_some_and(|resolved| {
                     self.cached_agent_authenticated(backend, &resolved.probe_path)
@@ -2590,29 +2688,14 @@ impl AcpPool {
         let mut status = CodexAcpStatus {
             agent_id,
             agent_name,
-            version: provider_version.clone(),
+            version: provider_version,
             latest_version: None,
             installed,
             update_available: false,
             update_required: dynamic_codex_upgrade_required,
             bridge_ready,
-            adapter_path: adapter
-                .as_ref()
-                .map(|path| path.to_string_lossy().into_owned()),
-            node_version,
             node_supported,
-            npm_available: npm_executable().is_some(),
             codex_available,
-            codex_path: if backend == AgentBackend::CodexAcp {
-                codex
-                    .as_ref()
-                    .map(|resolved| resolved.path.to_string_lossy().into_owned())
-            } else {
-                claude
-                    .as_ref()
-                    .map(|cli| cli.path.to_string_lossy().into_owned())
-            },
-            codex_version: provider_version,
             runtime_source: if backend == AgentBackend::CodexAcp {
                 codex.as_ref().map(|resolved| resolved.source.as_str())
             } else {
@@ -2662,8 +2745,10 @@ impl AcpPool {
             },
             install_command: None,
             install_latest_line: None,
+            install_finished: None,
         };
         fill_install_progress(&self.app, backend, &mut status);
+        fill_install_outcome(&self.app, backend, &mut status);
         status
     }
 
@@ -2788,7 +2873,7 @@ impl AcpPool {
     /// 验证 Codex Bridge 与 CLI 已就绪；不会隐式安装或执行外部脚本。
     async fn ensure_codex_ready(&self) -> Result<CodexAcpStatus> {
         self.refresh_runtime_probe(false).await;
-        let status = self.status_async().await;
+        let status = self.status_for_async(AgentBackend::CodexAcp).await;
         if !status.bridge_ready {
             bail!("Pinvou 安装包缺少可用的 Codex ACP Bridge，请重新安装或重新生成 Bridge Runtime");
         }
@@ -2826,7 +2911,7 @@ impl AcpPool {
             !self.codex_upgrade_required.load(Ordering::Acquire)
                 || codex_version_changed(
                     previous_codex_version.as_deref(),
-                    status.codex_version.as_deref(),
+                    status.version.as_deref(),
                 )
         } else {
             true
@@ -3056,6 +3141,64 @@ impl AcpPool {
         if !backend.is_acp() {
             bail!("Agent 不是 ACP 后端: {agent_id}");
         }
+        // Register the active window before touching any shared install
+        // state: status.installing must stay up from the entry to the
+        // recorded outcome, so the remounted panel's poller never stops
+        // before the heal data exists (see the ProvidersSection cross-mount
+        // heal). A second install for the same backend is rejected here
+        // without clearing the running one's outcome or cancel marker and
+        // without recording an outcome — a rejected call never installed
+        // anything, so install_finished keeps describing the most recent
+        // real install.
+        let Some(install_active_guard) =
+            InstallActiveGuard::try_start(&self.install_active, backend)
+        else {
+            bail!("{} 正在安装，请稍候", backend.display_name());
+        };
+        // Clear the previous outcome and any stale cancel marker before this
+        // run starts: install_finished describes only the most recent
+        // install, and a marker left over by an earlier run whose window
+        // ended abnormally must not kill this run at the spawn-time recheck.
+        clear_install_outcome(&self.app, backend);
+        self.install_operations.lock().take_cancelled(backend);
+        let result = self.install_agent_inner(backend, action).await;
+        // Record the real outcome when wrapping up. The command return value
+        // only reaches the frontend instance alive at initiation time — once
+        // the panel is closed/switched away mid-install that instance is
+        // unmounted, and the remounted panel learns the outcome only from
+        // install_finished in status (see the ProvidersSection cross-mount
+        // heal). Record before leaving the active window: installing=false
+        // and a missing outcome never coexist. Also consume a cancel marker
+        // still armed here: it can only come from a preflight-window cancel
+        // whose natural failure won the race against the spawn-time recheck,
+        // so the run reports cancelled per user intent (an in-command cancel
+        // has already consumed the marker to rewrite its own failure).
+        let cancel_pending = self.install_operations.lock().take_cancelled(backend);
+        let error_detail = result.as_ref().err().map(|error| format!("{error:#}"));
+        let (outcome, returned_error) = settle_install_result(
+            result.is_ok(),
+            cancel_pending,
+            error_detail.as_deref(),
+            backend,
+        );
+        record_install_outcome(&self.app, backend, outcome);
+        drop(install_active_guard);
+        match returned_error {
+            // Cancellation settlement: the recorded outcome says cancelled,
+            // so the return value must classify the same way — the
+            // initiating instance's catch classifies via the structured
+            // marker and would otherwise overwrite the cancelled phase with
+            // failed plus a red error (see settle_install_result).
+            Some(detail) => Err(anyhow!(detail)),
+            None => result,
+        }
+    }
+
+    async fn install_agent_inner(
+        &self,
+        backend: AgentBackend,
+        action: Option<&str>,
+    ) -> Result<CodexAcpStatus> {
         // 分派前强制刷新探测，确保 install_action 基于当前真实环境。
         self.refresh_agent_cli_probe(backend).await;
         let status = self.status_for_async(backend).await;
@@ -3450,24 +3593,39 @@ impl AcpPool {
         }
     }
 
-    /// 取消正在进行的 Agent CLI 安装：写入取消标记并终止登记的 managed tree。
-    /// 等待侧检测到取消标记后以「安装已取消」收尾，installing 随其出口恢复 false。
+    /// Cancels a running Agent CLI install: arms the cancel marker and terminates the
+    /// registered managed process tree. The wait side sees the marker and
+    /// wraps up as cancelled, and `installing` drops when that run exits.
+    /// The preflight / post-command finalize window (active window already
+    /// registered, external command not yet spawned or already exited) has
+    /// no pid to kill: the marker is left for the spawn-time recheck to
+    /// consume, or is consumed when the outcome is recorded.
     pub async fn cancel_agent_install(&self, agent_id: &str) -> Result<CodexAcpStatus> {
         let backend = AgentBackend::parse(Some(agent_id))?;
         if !backend.is_acp() {
             bail!("Agent 不是 ACP 后端: {agent_id}");
         }
-        let process_tree = capture_cancelled_install_tree(
-            &self.install_operations,
-            &self.install_children,
-            backend,
-        )?;
-        if let Some(process_tree) = process_tree {
-            if let Err(error) = process_tree.terminate() {
-                eprintln!(
-                    "[pinvou3-app] failed to terminate {} install process tree: {error:#}",
-                    backend.display_name()
-                );
+        let guard_held = self.install_operations.lock().is_active(backend);
+        if !guard_held && !self.install_active.read().contains(&backend) {
+            bail!("{} 当前没有正在进行的安装", backend.display_name());
+        }
+        // Arm the marker even outside the external-command window: a
+        // preflight / post-command finalize cancel has no tree to terminate —
+        // the spawn-time recheck or the record-time consumption handles it.
+        self.install_operations.lock().arm_cancel(backend);
+        if guard_held {
+            let process_tree = capture_cancelled_install_tree(
+                &self.install_operations,
+                &self.install_children,
+                backend,
+            )?;
+            if let Some(process_tree) = process_tree {
+                if let Err(error) = process_tree.terminate() {
+                    eprintln!(
+                        "[pinvou3-app] failed to terminate {} install process tree: {error:#}",
+                        backend.display_name()
+                    );
+                }
             }
         }
         Ok(self.status_for_async(backend).await)
@@ -4124,8 +4282,9 @@ impl AcpPool {
     fn login_executable(&self, backend: AgentBackend) -> Option<PathBuf> {
         match backend {
             AgentBackend::CodexAcp => {
-                let adapter = self.resolve_adapter()?;
-                self.resolve_codex(&adapter).map(|resolved| resolved.path)
+                // Bridge adapter 存在性保留为 Codex 登录入口的前置检查。
+                self.resolve_adapter()?;
+                self.resolve_codex().map(|resolved| resolved.path)
             }
             AgentBackend::ClaudeAcp => {
                 let adapter = self.resolve_claude_adapter()?;
@@ -5560,7 +5719,7 @@ impl AcpPool {
             AgentBackend::CodexAcp => {
                 let adapter = self.resolve_adapter().context("Codex ACP 尚未安装")?;
                 let mut command = self.adapter_command(&adapter)?;
-                self.configure_codex_path(&mut command, &adapter)?;
+                self.configure_codex_path(&mut command)?;
                 self.configure_codex_provider_env(&mut command, pinvou_session_id)
                     .await?;
                 (
@@ -6161,7 +6320,7 @@ impl AcpPool {
         None
     }
 
-    fn resolve_codex(&self, _adapter: &Path) -> Option<ResolvedCodex> {
+    fn resolve_codex(&self) -> Option<ResolvedCodex> {
         self.runtime_probe.read().codex.clone()
     }
 
@@ -6169,9 +6328,9 @@ impl AcpPool {
         platform::adapter_command(adapter, self.resolve_node(adapter).as_deref())
     }
 
-    fn configure_codex_path(&self, command: &mut Command, adapter: &Path) -> Result<()> {
+    fn configure_codex_path(&self, command: &mut Command) -> Result<()> {
         let codex = self
-            .resolve_codex(adapter)
+            .resolve_codex()
             .context("未检测到可用 Codex；请通过官方方式安装或升级 Codex")?;
         command.env(
             "CODEX_PATH",
@@ -7469,18 +7628,54 @@ mod tests {
         );
     }
 
+    /// Round-trip pin: the model string the session creator writes
+    /// (`acp_session_model_name`, also consumed by the CLI's `code sessions`
+    /// family) parses back to the same backend, so a `display_name()` or
+    /// helper rename can never silently fall back to Deepseek.
+    #[test]
+    fn acp_session_model_name_round_trips_through_acp_session_backend() {
+        // The exact spellings already persisted into existing sessions'
+        // metadata: a display_name() rebrand must ship a migration for these
+        // strings, not silently orphan them (the derived round-trip below
+        // alone stays green through any rename).
+        assert_eq!(
+            acp_session_model_name(AgentBackend::CodexAcp),
+            "Codex (ACP)"
+        );
+        assert_eq!(
+            acp_session_model_name(AgentBackend::ClaudeAcp),
+            "Claude Code (ACP)"
+        );
+        assert_eq!(acp_session_model_name(AgentBackend::KimiAcp), "Kimi (ACP)");
+        for backend in AgentBackend::ACP_BACKENDS {
+            assert_eq!(
+                acp_session_backend(AgentBackend::Deepseek, &acp_session_model_name(backend)),
+                Some(backend)
+            );
+        }
+    }
+
     #[test]
     fn acp_session_classification_survives_missing_auxiliary_index() {
         assert_eq!(
-            acp_session_backend(AgentBackend::Deepseek, CODEX_ACP_SESSION_MODEL),
+            acp_session_backend(
+                AgentBackend::Deepseek,
+                &acp_session_model_name(AgentBackend::CodexAcp)
+            ),
             Some(AgentBackend::CodexAcp)
         );
         assert_eq!(
-            acp_session_backend(AgentBackend::Deepseek, CLAUDE_ACP_SESSION_MODEL),
+            acp_session_backend(
+                AgentBackend::Deepseek,
+                &acp_session_model_name(AgentBackend::ClaudeAcp)
+            ),
             Some(AgentBackend::ClaudeAcp)
         );
         assert_eq!(
-            acp_session_backend(AgentBackend::Deepseek, KIMI_ACP_SESSION_MODEL),
+            acp_session_backend(
+                AgentBackend::Deepseek,
+                &acp_session_model_name(AgentBackend::KimiAcp)
+            ),
             Some(AgentBackend::KimiAcp)
         );
         assert_eq!(

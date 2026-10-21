@@ -14,9 +14,22 @@ const sources = {
   web: read('src/platform/web/bridge.js'),
 };
 
+// #566 合并后锚点适配：共享簇收敛后，lane 内的原完整函数体可能只剩顶格薄委托
+// （'function x()' / 'async function x()'），区块结束锚点需同时兼容两空格缩进与
+// 顶格、以及 async 前缀的有无。
+function blockEnd(source, from, name) {
+  const hit = new RegExp(`\\n(?:  )?(?:async )?function ${name}\\(`).exec(source.slice(from));
+  return hit === null ? -1 : from + hit.index;
+}
+
 function harness(source) {
   const start = source.indexOf('  function voiceToken(');
-  const end = source.indexOf('\n  function setVoiceInputStatus(', start);
+  // #566 合并后锚点适配：web lane 的 setVoiceInputStatus 收敛进共享簇后，lane 内只剩
+  // 顶格薄委托（无两空格缩进）；边界锚点同时兼容两种缩进形态。
+  const end = ['\n  function setVoiceInputStatus(', '\nfunction setVoiceInputStatus(']
+    .map(marker => source.indexOf(marker, start))
+    .filter(index => index !== -1)
+    .reduce((a, b) => Math.min(a, b), Number.MAX_SAFE_INTEGER);
   const events = [];
   const state = { activeSessionId: null, voiceInput: {} };
   const context = {
@@ -48,7 +61,10 @@ function harness(source) {
 // （sessionMentionEnabledRef 保持上游的 fail-open 缺省，草稿键按当前
 // 会话/纪元推同形字符串）。
 function injectChatViewMentionScope(ctx, chat) {
-  const helpers = chat.slice(chat.indexOf('const refsSurvivingAcceptance'), chat.indexOf('const legacyMarkdownCache'));
+  // #566 合并后锚点适配：ChatView 的 legacy markdown 缓存已采纳上游 weak-cache 形态
+  // （renderLegacyMarkdownCached = createWeakCache(...)），旧的 const legacyMarkdownCache
+  // 切片锚点不复存在；模块级 helper 区段改以新锚点收尾。
+  const helpers = chat.slice(chat.indexOf('const refsSurvivingAcceptance'), chat.indexOf('const renderLegacyMarkdownCached = createWeakCache('));
   if (!ctx.mentionDraftKeyRef || ctx.mentionDraftKeyRef.current === null) ctx.mentionDraftKeyRef = { current: (ctx.activeSessionId ? 'session:' + ctx.activeSessionId + ':' : 'draft:') + (ctx.draftEpoch || 0) };
   if (!ctx.sessionMentionEnabledRef) ctx.sessionMentionEnabledRef = { current: true };
   if (!ctx.setSessionRefs) ctx.setSessionRefs = () => {};
@@ -317,7 +333,7 @@ test('desktop waits for Rust ownership and cannot open a microphone after a reje
     invoke: async command => command === 'voice_asr_status' ? { ready: true } : undefined,
   });
   const start = sources.desktop.indexOf('  async function startVoiceInput(');
-  const end = sources.desktop.indexOf('  function cancelVoiceInput(', start);
+  const end = blockEnd(sources.desktop, start, 'cancelVoiceInput');
   vm.runInContext(`${sources.desktop.slice(start, end)}\nthis.startVoiceInput = startVoiceInput;`, h.context);
   const starting = h.context.startVoiceInput('', () => {}, { mode: 'dictation' });
   await new Promise(resolve => setImmediate(resolve));
@@ -796,7 +812,7 @@ test('desktop: actual session restore refuses missing buffers and failed remote 
 test('web: enterDraft closes the operation of a finished first-turn submission and leaves an in-flight one to its RPC', () => {
   const webSource = sources.web;
   const start = webSource.indexOf('  function enterDraft() {');
-  const end = webSource.indexOf('  async function createNewSession()', start);
+  const end = blockEnd(webSource, start, 'createNewSession');
   assert.ok(start >= 0 && end > start, 'web bridge must keep the enterDraft function');
   const state = {
     chatItems: [{ clientMessageId: 'c-finished' }, { clientMessageId: 'c-inflight' }, { clientMessageId: 'c-novoice' }],

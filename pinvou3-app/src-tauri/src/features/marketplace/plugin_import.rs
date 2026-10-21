@@ -273,8 +273,9 @@ fn collect_landed_disk_files(
 }
 
 /// Whether a relative path ('/'-separated) belongs to the Python run cache: any path level is a `__pycache__`
-/// directory, or the file name ends with `.pyc` (case-insensitive). The single predicate shared by three walkers —
-/// package import comparison, package export packing, and skill-marketplace fingerprinting; symlink/directory-traversal policy is decided by each walker
+/// directory, or the file name ends with `.pyc` (case-insensitive). The single predicate shared by four walkers —
+/// package import comparison, package export packing, skill-marketplace fingerprinting, and runtime_bundle's
+/// embedded-bundle extraction; symlink/directory-traversal policy is decided by each walker
 /// on its own (export skips symlinks, import compare and skill fingerprints follow) and is not part of this predicate.
 pub(crate) fn is_python_cache_rel_path(rel: &str) -> bool {
     rel.split('/').any(|c| c == "__pycache__") || rel.to_ascii_lowercase().ends_with(".pyc")
@@ -384,15 +385,14 @@ pub(crate) fn checked_zip_entry_path(
 /// `translate_plugin_import_error` anchors on; they are single-sourced here
 /// so the anchor test below pins the production strings, not hand copies
 /// (round-38 review: the copies had drifted from being a test of anything).
-pub(crate) const REJECT_TRAVERSAL: &str = "zip 含不安全路径(穿越),拒绝";
-pub(crate) const REJECT_SYMLINK: &str = "zip 含 symlink,拒绝";
-pub(crate) const REJECT_FORGED_HEADER: &str =
-    " 实际解压大小超过 zip 头声明（疑似伪造头部/zip bomb），拒绝";
+const REJECT_TRAVERSAL: &str = "zip 含不安全路径(穿越),拒绝";
+const REJECT_SYMLINK: &str = "zip 含 symlink,拒绝";
+const REJECT_FORGED_HEADER: &str = " 实际解压大小超过 zip 头声明（疑似伪造头部/zip bomb），拒绝";
 
 /// Declared-size cap rejection (the head-declared budget `checked_zip_entry_path`
 /// enforces). `label` names the entry; the fixed halves carry the substrings
 /// the headless CLI's `translate_plugin_import_error` anchors on (解压+上限).
-pub(crate) fn reject_declared_cap(label: &str, max_bytes: u64) -> String {
+fn reject_declared_cap(label: &str, max_bytes: u64) -> String {
     format!("{label}解压超过 {} MiB 上限", max_bytes / 1024 / 1024)
 }
 
@@ -401,7 +401,7 @@ pub(crate) fn reject_declared_cap(label: &str, max_bytes: u64) -> String {
 /// format sites (pass-1 read and pass-2 write) now share this helper
 /// (round-39 review: rewording either site silently reverted the CLI's cap
 /// rejection to verbatim Chinese while the anchor test stayed green).
-pub(crate) fn reject_actual_cap(max_bytes: u64) -> String {
+fn reject_actual_cap(max_bytes: u64) -> String {
     format!(
         "插件包实际解压超过 {} MiB 上限（zip 头声明与真实大小不符，可能为 zip bomb）",
         max_bytes / 1024 / 1024
@@ -1332,25 +1332,17 @@ pub fn import_plugin_package_gated(
         let mut entry = archive
             .by_index(i)
             .map_err(|e| format!("zip 条目 #{i}: {e}"))?;
-        let Some(enclosed) = entry.enclosed_name() else {
-            return Err("zip 含不安全路径(穿越),拒绝".to_string());
-        };
-        if let Some(mode) = entry.unix_mode() {
-            if mode & 0o170000 == 0o120000 {
-                return Err("zip 含 symlink,拒绝".to_string());
-            }
-        }
-        declared_total = declared_total.saturating_add(entry.size());
-        if declared_total > MAX_PLUGIN_SIZE_BYTES {
-            return Err(format!(
-                "插件包解压超过 {} MiB 上限",
-                MAX_PLUGIN_SIZE_BYTES / 1024 / 1024
-            ));
-        }
+        // pass1 安全闸（穿越/symlink/声明大小上限）+ 净化路径，与技能 zip
+        // 导入通道共用 `checked_zip_entry_path`。
+        let path_str = checked_zip_entry_path(
+            &mut entry,
+            &mut declared_total,
+            MAX_PLUGIN_SIZE_BYTES,
+            "插件包",
+        )?;
         if entry.is_dir() {
             continue;
         }
-        let path_str = enclosed.to_string_lossy().replace('\\', "/");
         all_paths.push(path_str.clone());
         if path_str == "plugin.json" {
             let buf = read_bounded_checked(&mut entry, "plugin.json")?;
@@ -1908,14 +1900,6 @@ pub fn import_plugin_package_gated(
         id.clone(),
         super::store::BundleSource::Upload(display_name.to_string()),
     );
-    // upsert_preserving 的 credential_keys 取新值：供给的镜像写（install_upload）
-    // 已从 manifest 收敛凭据 key，这里必须带上同一份，否则补写会把它们冲成空表。
-    if let Some(manifest) = mgr.load_manifest(&id) {
-        record.credential_keys = super::bundle::tool_credentials(&manifest)
-            .into_iter()
-            .map(|c| c.key)
-            .collect();
-    }
     // 真实内容指纹（与 mcp_catalog 释放/技能 install 同一 dir_fingerprint 口径；
     // 计算失败不留假指纹，降级为 None）。
     record.content_fingerprint = match super::skill_marketplace::dir_fingerprint(&pkg_dir) {

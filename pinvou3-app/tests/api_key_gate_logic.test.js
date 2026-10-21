@@ -12,6 +12,12 @@ const mainSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'app', 'mai
 const bridgeSource = fs.readFileSync(
   path.join(__dirname, '..', 'src', 'platform', 'tauri', 'bridge', 'settings.js'),
   'utf8',
+) + fs.readFileSync(
+  // switchModel/loadSessionModel 的实现已随 dead-code dedup 移入共享 payload
+  // （bridge_domain_protocol 的 per-domain 哈希同样只覆盖 tauri bridge 文件），
+  // 结构 pin 需要把 payload 一并纳入 haystack。
+  path.join(__dirname, '..', 'src', 'shared', 'bridge-shared-helpers.js'),
+  'utf8',
 );
 const start = source.indexOf('function baseUrlIsLoopback(');
 const end = source.indexOf('\nexport {', start);
@@ -94,7 +100,7 @@ assert.strictEqual(
     requires_user_api_key: false,
   }), 'chat', true),
   false,
-  'runtime-managed credentials must not open the user API Key gate',
+  'explicit requires_user_api_key=false must not open the user API Key gate',
 );
 assert.strictEqual(
   shouldShowModelAccessGate(state('unavailable', {

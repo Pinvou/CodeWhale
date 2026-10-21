@@ -20,7 +20,8 @@
 //!
 //! 为何不复用底座 `skills::install`:那条通路对 monorepo / 带 plugin.json / 超
 //! 5MiB 的仓库一律拒装,且选路逻辑私有硬编码。此处只做"已知来源的精确落盘",
-//! 自带等价的路径穿越/symlink/大小安全防护(参照底座 install.rs 的判断)。
+//! zip pass-1 的路径穿越/symlink/大小安全闸与统一插件包导入共用
+//! `plugin_import::checked_zip_entry_path`(对齐底座 install.rs 的判断)。
 
 use std::path::{Path, PathBuf};
 
@@ -212,12 +213,6 @@ pub struct SkillMarketplaceManager {
     bundle_store: super::store::BundleStore,
     /// 回收站写入口（Upload 来源卸载 = 整包搬入回收站，用户唯一副本不删）
     recycle_bin: super::recycle_bin::RecycleBin,
-}
-
-impl Default for SkillMarketplaceManager {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 /// Builtin-ownership predicate for the skill lane (review round-3 M2): a
@@ -1088,23 +1083,6 @@ impl SkillMarketplaceManager {
     /// with a pre-teardown owner snapshot (its callers are the ones that
     /// know the owner), and the tool uninstall's companion legs strip inside
     /// `cleanup_uninstalled_tool_state` instead.
-
-    /// Uninstall plus the caller-side scope strip, with the per-id import
-    /// lock held across BOTH: the teardown and the strip share one critical
-    /// section, so a deny-first registration a concurrent same-id install
-    /// makes after this function returns survives, and the strip can never
-    /// delete a just-registered fresh entry. The residual is the same
-    /// in-section window the MCP tool lane has: a gate that reads the store
-    /// in the instant between the record removal and the strip still
-    /// registers and is then stripped (microsecond scale, fail-open,
-    /// disclosed in capability-governance §3.2). A vacuous `Ok(false)`
-    /// strips nothing; a refused strip only logs (the leftover entry fails
-    /// closed). The strip targets the pre-teardown owner snapshot via the
-    /// exact form. Only for teardown paths with no outer transaction lock
-    /// (ima logout); the skill command lane keeps its own post-return strip
-    /// with a pre-teardown owner snapshot (its callers are the ones that
-    /// know the owner), and the tool uninstall's companion legs strip inside
-    /// `cleanup_uninstalled_tool_state` instead.
     pub fn uninstall_and_strip_scope(&self, skill_id: &str) -> Result<bool, String> {
         let dir_name = self.precheck_uninstall(skill_id)?;
         let import_lock = super::plugin_import::import_lock_for(skill_id);
@@ -1126,10 +1104,14 @@ impl SkillMarketplaceManager {
         Ok(torn_down)
     }
 
-    /// 导入用户上传的 zip 技能包:解压找 SKILL.md → 安全校验 → 落盘到
-    /// `bundle/skills/<name>/`。穿越/symlink/大小防护对齐底座 install.rs。
-    /// 返回落盘技能名(frontmatter name)。生产通道走 `import_package_named`;
-    /// 本封装仅剩契约测试在用。
+    /// Test-only scaffolding: imports a user-uploaded zip skill package
+    /// (unpack, locate SKILL.md, safety-check, install under
+    /// `bundle/skills/<name>`; the zip-entry guard is the shared
+    /// `plugin_import::checked_zip_entry_path`, aligned with the foundation
+    /// install.rs; returns the installed skill name from the frontmatter).
+    /// The production zip channel is `plugin_import::import_plugin_package`
+    /// behind the plugin-package commands; the legacy command surface this
+    /// served was removed as dead code.
     #[cfg(test)]
     pub fn import_package(&self, zip_path: &str) -> Result<String, String> {
         let fname = Path::new(zip_path)
@@ -1139,9 +1121,12 @@ impl SkillMarketplaceManager {
         self.import_package_named(zip_path, &fname)
     }
 
-    /// `display_name` 仅写入 `.installed-from=upload:<display_name>` 标记
-    /// (保留用户原始 zip 名,便于卸载提示),其余行为与 `import_package` 一致。
-    /// 拖放字节通道落临时文件导入时,zip 名已丢,由命令层传入净化后的展示名。
+    /// Test-only scaffolding (see `import_package`): `display_name` is only
+    /// written into the `.installed-from=upload:<display_name>` marker (it
+    /// keeps the user's original zip name for uninstall hints). The drag-drop
+    /// bytes channel that used to pass a sanitized display name from the
+    /// command layer was removed as dead code.
+    #[cfg(test)]
     pub fn import_package_named(
         &self,
         zip_path: &str,
@@ -1151,34 +1136,23 @@ impl SkillMarketplaceManager {
         let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("读取 zip: {e}"))?;
 
         // pass1:逐 entry 安全校验 + 累计头部声明大小（真实解压字节由 pass2 兜底
-        // 计量，声明可被伪造）+ 找最优 SKILL.md(定 skill_root)。
+        // 计量，声明可被伪造）+ 找最优 SKILL.md(定 skill_root)。安全闸与统一插件
+        // 包导入共用 `plugin_import::checked_zip_entry_path`（对齐底座 install.rs）。
         let mut best: Option<(usize, String)> = None; // (rank, skill_root)
         let mut total: u64 = 0;
         for i in 0..archive.len() {
-            let entry = archive
+            let mut entry = archive
                 .by_index(i)
                 .map_err(|e| format!("zip 条目 #{i}: {e}"))?;
-            // 路径穿越:enclosed_name 为 None 即不安全(.. / 绝对路径)。
-            let Some(enclosed) = entry.enclosed_name() else {
-                return Err("zip 含不安全路径(穿越),拒绝".to_string());
-            };
-            // symlink/hardlink 拒绝
-            if let Some(mode) = entry.unix_mode() {
-                if mode & 0o170000 == 0o120000 {
-                    return Err("zip 含 symlink,拒绝".to_string());
-                }
-            }
-            total = total.saturating_add(entry.size());
-            if total > MAX_SKILL_SIZE_BYTES {
-                return Err(format!(
-                    "技能包解压超过 {} MiB 上限",
-                    MAX_SKILL_SIZE_BYTES / 1024 / 1024
-                ));
-            }
+            let path_str = super::plugin_import::checked_zip_entry_path(
+                &mut entry,
+                &mut total,
+                MAX_SKILL_SIZE_BYTES,
+                "技能包",
+            )?;
             if entry.is_dir() {
                 continue;
             }
-            let path_str = enclosed.to_string_lossy().replace('\\', "/");
             if let Some(rank) = skill_md_rank(&path_str) {
                 let root = skill_root_of(&path_str);
                 if best.as_ref().is_none_or(|(r, _)| rank < *r) {
@@ -1600,7 +1574,8 @@ impl SkillMarketplaceManager {
                         report.removed_stale.push(name);
                     }
                 } else {
-                    report.kept.push(name);
+                    // 无标记且非 CLI companion（如内置释放技能 visual-design）→
+                    // 原地保留（读路径 find_skill_dir 回退；自愈第 4 步收敛残旧）。
                 }
                 continue;
             }
@@ -1665,7 +1640,6 @@ impl SkillMarketplaceManager {
                 target.display(),
                 dir.display()
             );
-            report.kept.push(name.to_string());
             return false;
         }
         // The migration target is joined from the root, so it always has a
@@ -1676,7 +1650,6 @@ impl SkillMarketplaceManager {
                 "[skill-marketplace] failed to migrate {name}: target dir has no parent ({}), keeping the old location",
                 target.display()
             );
-            report.kept.push(name.to_string());
             return false;
         };
         let result = std::fs::create_dir_all(parent).and_then(|()| std::fs::rename(dir, target));
@@ -1691,7 +1664,6 @@ impl SkillMarketplaceManager {
                     dir.display(),
                     target.display()
                 );
-                report.kept.push(name.to_string());
                 false
             }
         }
@@ -1788,11 +1760,6 @@ pub struct SkillsMigrationReport {
     pub moved: Vec<String>,
     /// 连接器不可见而按门控语义删除的 CLI companion 残留
     pub removed_stale: Vec<String>,
-    /// Untouched: builtin-released skills / migration-failed dirs kept at the
-    /// old location. (`bundle/skills/` unmarked residue is converged by
-    /// self-heal step 4; hand-placed user skills belong in
-    /// `~/.pinvou3/user/skills/`.)
-    pub kept: Vec<String>,
 }
 
 /// 自愈对账报告（启动标记/日志观测用），见
@@ -1973,10 +1940,10 @@ fn collect_disk_files_under(
 /// 递归写出 `include_dir` 子目录到 `dest`,strip 掉 `source_dir` 前缀
 /// (`file.path()` 是相对最外层 include_dir 根的完整路径,如 "pua/SKILL.md")。
 /// 跳过 vendored 来源标注文件 SOURCE.md(非 skill 运行内容)。
-/// 同样排除 `__pycache__/` 与 `*.pyc`:include_dir! 按文件系统内嵌(不受
-/// .gitignore 约束),在仓库里直接运行技能脚本产生的 Python 编译缓存若不
-/// 排除,会在用户安装预置技能时物化到运行时目录(跨平台 cpython 版本耦合)。
-/// 与 runtime_bundle::platform 的 extract_dir 排除规则保持一致。
+/// 同样排除 `__pycache__/` 与 `*.pyc`(判定复用
+/// `plugin_import::is_python_cache_rel_path`):include_dir! 按文件系统内嵌
+/// (不受 .gitignore 约束),在仓库里直接运行技能脚本产生的 Python 编译缓存
+/// 若不排除,会在用户安装预置技能时物化到运行时目录(跨平台 cpython 版本耦合)。
 fn extract_embedded_subdir(dir: &Dir<'_>, source_dir: &str, dest: &Path) -> std::io::Result<()> {
     let prefix = format!("{source_dir}/");
     for file in dir.files() {
@@ -2837,6 +2804,7 @@ pub fn sanitize_skill_name(name: &str) -> String {
 mod tests {
     use super::*;
     use crate::features::marketplace::mcp_catalog;
+    use crate::platform::test_support::with_temp_home;
 
     /// `extract_embedded_subdir` 的 Python 编译缓存排除与 runtime_bundle 的
     /// `extract_dir` 同规则:仓库内跑技能脚本产生的 `__pycache__/`/`*.pyc`
@@ -3145,7 +3113,7 @@ mod tests {
     /// 与并发的 env 测试互相干扰（实测竞态 flake）。
     #[test]
     fn install_then_uninstall_preset_roundtrip() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillmigrate", || {
             let mgr = SkillMarketplaceManager::new();
 
             mgr.install("government-writing").unwrap();
@@ -3273,7 +3241,7 @@ mod tests {
         // Hermetic: every phase runs under a clean PINVOU3_HOME — the guard's
         // claim lookup reads the marketplace store, and a developer machine's
         // live store (flocked by a running app) must not leak into the test.
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillmigrate", || {
             // Self-claimed standalone skill (owner == the skill itself): the
             // builtin guard must NOT fire. The predicate is the guard —
             // uninstall returns exactly this error — so the predicate
@@ -3378,7 +3346,7 @@ mod tests {
     /// strip); after the release the teardown completes and the row is gone.
     #[test]
     fn uninstall_and_strip_scope_strips_under_import_lock() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillmigrate", || {
             let id = "visualizer";
             SkillMarketplaceManager::new()
                 .install(id)
@@ -3439,7 +3407,7 @@ mod tests {
     /// fixture holds the lock, install must stay parked.
     #[test]
     fn install_waits_for_the_per_id_import_lock() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillmigrate", || {
             // The uninstall lane's shape: the fixture holds the per-id lock
             // across the lane's whole body.
             let lock = crate::features::marketplace::plugin_import::import_lock_for("visualizer");
@@ -3811,7 +3779,7 @@ mod tests {
     #[test]
     fn import_rejects_companion_claimed_skill_name() {
         use std::io::Write;
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillmigrate", || {
             let home = paths::pinvou3_home();
             // Installed custom MCP package claiming "helper-skill" as companion.
             let manifest_dir = home.join("bundles/custom-mcp/mcp");
@@ -3854,7 +3822,7 @@ mod tests {
     /// env 隔离原因同 install_then_uninstall_preset_roundtrip。
     #[test]
     fn install_then_uninstall_pptx_preset_roundtrip() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillmigrate", || {
             let mgr = SkillMarketplaceManager::new();
 
             mgr.install("pptx").unwrap();
@@ -4012,7 +3980,7 @@ mod tests {
     fn install_tencent_docs_preset_with_official_references() {
         // env 隔离原因同 install_then_uninstall_preset_roundtrip（tencent-docs
         // 被同名 MCP 条件认领，owner 推导读 env 安装态）。
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillmigrate", || {
             let mgr = SkillMarketplaceManager::new();
 
             mgr.install("tencent-docs-skill").unwrap();
@@ -4688,39 +4656,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// 把 PINVOU3_HOME 指到干净临时目录跑闭包（迁移涉及 connector_state /
-    /// manifest 扫描等 env 路径，必须 env 隔离 + ENV_LOCK 串行）。
-    fn with_temp_home<F: FnOnce()>(f: F) {
-        let _g = crate::platform::paths::tests::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let dir = std::env::temp_dir().join(format!(
-            "pinvou3-skillmigrate-{}-{}",
-            std::process::id(),
-            crate::platform::paths::tests::unique_suffix()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let prev = std::env::var("PINVOU3_HOME").ok();
-        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
-        unsafe { std::env::set_var("PINVOU3_HOME", &dir) };
-        f();
-        match prev {
-            // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
-            Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
-            // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
-            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     /// 旧扁平布局 → 按包聚合迁移：四个分支（纯技能 / MCP companion / CLI companion /
     /// 上传）+ 内置技能不动 + 预置指纹补写 + 幂等。companion 归属是条件认领（M-7）：
     /// 所属 MCP 已装（installed.json → import_legacy 登记）才归 MCP 包目录；未装的
     /// MCP companion 按独立包迁移。
     #[test]
     fn migrate_flat_skills_layout_covers_all_branches() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillmigrate", || {
             let home = paths::pinvou3_home();
             let legacy = paths::bundle_skills_dir();
             let seed = |rel: &str, content: &str| {
@@ -4827,7 +4769,6 @@ mod tests {
             );
             assert!(!legacy.join("visualizer").exists(), "旧位置已搬空");
             assert!(report.moved.len() == 5, "应移动 5 个: {report:?}");
-            assert!(report.kept.contains(&"visual-design".to_string()));
 
             // 预置指纹补写（update_available 比对基准）
             let fp = store
@@ -4848,7 +4789,7 @@ mod tests {
     /// 不迁移（immutable 资源，重连重解包）。
     #[test]
     fn migrate_removes_stale_cli_skills_when_connector_hidden() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillmigrate", || {
             let home = paths::pinvou3_home();
             let legacy = paths::bundle_skills_dir();
             let dir = legacy.join("lark-shared");
@@ -4872,7 +4813,7 @@ mod tests {
     /// 构造 wecomcli-message 一个）正常搬移。
     #[test]
     fn migrate_deletes_retired_wecom_skills_instead_of_moving() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillmigrate", || {
             let home = paths::pinvou3_home();
             let legacy = paths::bundle_skills_dir();
             // 退役名 + 一个新名（连接器可见 = 无 wecom_disabled 文件）

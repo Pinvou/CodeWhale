@@ -15,6 +15,7 @@ import { isImeComposing } from '../../shared/ime-guard.mjs';
 import { formatCompactCount } from '../../shared/format-number.js';
 import { getSyntaxHighlightVersion, subscribeSyntaxHighlight } from '../../shared/syntax-highlighter.js';
 import { renderMarkdown } from '../../shared/markdown-renderer.js';
+import { createWeakCache } from '../../shared/weak-cache.js';
 import { AppIcon, DEPT_ORDER, deptColor, deptLabelFor, personaText } from '../personas/persona-shared.jsx';
 import { ComposerModelSelector, ComposerToolMenu } from '../settings/composer-shared.jsx';
 import { ComposerPopover, POPOVER_SURFACE, useOutsidePointerClose } from '../../components/ComposerPopover.jsx';
@@ -28,8 +29,8 @@ import { annotateAgentSpawnGroups } from '../multiagent/spawn-aggregation.mjs';
 import { RunningAgentsOverlay } from '../multiagent/RunningAgentsOverlay.jsx';
 import { ComputerUseBanner, ComputerUseDialogs } from '../computer-use/ComputerUseConsent.jsx';
 import {
-  ConversationActivityIndicator,
   ConversationTimeline,
+  LiveConversationActivityIndicator,
 } from '../conversation/ConversationTimeline.jsx';
 import { useConversationSecondClock } from '../../hooks/useConversationSecondClock.js';
 import { AuxQuoteSelection } from '../aux-chat/AuxQuoteSelection.jsx';
@@ -48,10 +49,9 @@ import {
   projectDeepSeekConversation,
 } from '../conversation/deepseek-conversation.js';
 import {
-  measureConversationScrollGeometry,
   shouldForceScrollFollow,
-  startConversationBottomFollower,
   transitionConversationScrollState,
+  useConversationBottomFollower,
 } from '../conversation/conversation-scroll.js';
 import {
   captureConversationScrollPosition,
@@ -259,15 +259,23 @@ import {
   shouldUsePptDesignScene,
 } from './work-scene-routes.js';
 import {
-  createPersonalWorkbenchMessageMeta,
-  PERSONAL_WORKBENCH_SCENE_KEY,
   PERSONAL_WORKBENCH_TEMPLATES,
+  createPersonalWorkbenchMessageMeta,
   findPersonalWorkbenchTemplateDraft,
   getPersonalWorkbenchTemplate,
   getPersonalWorkbenchTemplateById,
   isPersonalWorkbenchTemplateDraftForTemplate,
   shouldUsePersonalWorkbenchScene,
 } from './personal-workbench-scene.js';
+import {
+  DATA_VISUALIZATION_SCENE_KEY,
+  DOCUMENT_WRITING_SCENE_KEY,
+  PERSONAL_WORKBENCH_SCENE_KEY,
+  PINVOU_SCENE_KEYS,
+  PPT_DESIGN_SCENE_KEY,
+  POSTER_SCENE_KEY,
+  pinvouSceneTag,
+} from './scene-registry.js';
 import { canPrepareSceneCapabilities, prepareSceneCapabilities, requiredCapabilitiesForMeta } from './scene-capabilities.js';
 import { consumeWelcomeOptIn, resolveSendCapabilityStatus, runSharedWelcomeOptIn } from './welcome-optin.js';
 import { invokeTauri } from '../../platform/tauri/client.js';
@@ -324,43 +332,20 @@ const COMPUTER_USE_ENABLED = can('computerUse');
 // and must not also trigger submit — otherwise one Enter both commits and sends. Matches PetWindow.
 const isPlainEnter = (e) => e.key === 'Enter' && !e.shiftKey && !isImeComposing(e);
 
-// Second-clock wrapper for the composer activity indicator: the tick used to live on ChatView
-// top-level state, so while busy the whole ChatView (including all transcript coordination)
-// re-rendered once per second; the indicator is the only place showing elapsed time, and now the
-// tick re-renders just this small subtree.
-/**
- * @param {object} props - component props
- * @param {{ status: string } | null} props.turn - active conversation turn, if any
- * @param {() => void} props.onRequestAttention - scroll-to-bottom request handler
- * @param {string} props.className - extra class for the indicator
- * @param {object} props.copy - conversation copy table
- * @returns {React.ReactElement | null} the ticking activity indicator
- */
-function LiveConversationActivityIndicator({ turn, onRequestAttention, className, copy }) {
-  const running = !!turn && turn.status === 'running';
-  const now = useConversationSecondClock(running);
-  return (
-    <ConversationActivityIndicator
-      turn={turn}
-      now={now}
-      onRequestAttention={onRequestAttention}
-      className={className}
-      copy={copy}
-    />
-  );
-}
-
 // Unified scene table after the design lane was merged into work: a scene
 // only expresses "the professional context of this message" and is
 // lane-independent; scene cards render below the empty-state greeting
 // (scene-cards.jsx).
-const SCENE_TABS = [
-  { key: PERSONAL_WORKBENCH_SCENE_KEY, labelKey: 'personalWorkbench', Icon: Briefcase },
-  { key: 'document-writing', labelKey: 'documentWriting', Icon: FileText },
-  { key: 'poster', labelKey: 'poster', Icon: ImageIcon },
-  { key: 'data-visualization', labelKey: 'dataVisualization', Icon: BarChart2 },
-  { key: 'ppt', labelKey: 'pptDesign', Icon: Presentation },
-];
+// Presentation for the canonical scene registry (scene-registry.js owns the
+// key order and the lane tags); this table only adds the UI label key + icon.
+const SCENE_TAB_PRESENTATION = {
+  [PERSONAL_WORKBENCH_SCENE_KEY]: { labelKey: 'personalWorkbench', Icon: Briefcase },
+  [DOCUMENT_WRITING_SCENE_KEY]: { labelKey: 'documentWriting', Icon: FileText },
+  [POSTER_SCENE_KEY]: { labelKey: 'poster', Icon: ImageIcon },
+  [DATA_VISUALIZATION_SCENE_KEY]: { labelKey: 'dataVisualization', Icon: BarChart2 },
+  [PPT_DESIGN_SCENE_KEY]: { labelKey: 'pptDesign', Icon: Presentation },
+};
+const SCENE_TABS = PINVOU_SCENE_KEYS.map((key) => ({ key, ...SCENE_TAB_PRESENTATION[key] }));
 // Chips that survive a truly-accepted send: exactly the refs the send
 // serialized are consumed; chips picked during the send await were never sent
 // and stay armed (mirroring the failure path's merge). When the feature gate
@@ -577,18 +562,12 @@ const recordSendMaterialization = (draftKey, meta) => {
 // 重渲染,长会话下每次全量重跑 marked+DOMPurify。content-visibility(#275)只省
 // 浏览器合成,不省 React 渲染。item 引用稳定(bridge 会话数据),按 item 键控、
 // text+syntaxVersion 未变直接复用上次结果;版本号 bump(懒语言注册)自然失效重算。
-const legacyMarkdownCache = new WeakMap();
-function renderLegacyMarkdownCached(item, syntaxVersion) {
-  const cached = legacyMarkdownCache.get(item);
-  if (cached && cached.text === item.text && cached.version === syntaxVersion) {
-    return cached.html;
-  }
-  const html = renderMarkdown(item.text);
-  legacyMarkdownCache.set(item, { text: item.text, version: syntaxVersion, html });
-  return html;
-}
+const renderLegacyMarkdownCached = createWeakCache(
+  // biome-ignore lint/correctness/noUnusedFunctionParameters: createWeakCache cache-key contract — parameters are positional, not all are read
+  (item, text, syntaxVersion) => renderMarkdown(text), // eslint-disable-line no-unused-vars -- syntaxVersion only keys the cache (lazy language registration invalidation); renderMarkdown needs just the text
+);
 
-// Same idea as legacyMarkdownCache: every composer keystroke, streaming
+// Same idea as renderLegacyMarkdownCached: every composer keystroke, streaming
 // delta, and clock tick re-renders the full view, and each render of an
 // assistant bubble ran three rounds of pre/code regex parsing (persona
 // draft, scheduled-task draft, card-question follow-up) plus the streaming
@@ -597,47 +576,33 @@ function renderLegacyMarkdownCached(item, syntaxVersion) {
 // per item and reused while the tuple is unchanged; while streaming, the
 // item gets a new reference per delta so the cache invalidates naturally —
 // behavior unchanged.
-const assistantParseCache = new WeakMap();
-function parseAssistantBubblesCached(item, html, streaming, allowScheduledTaskDraft, streamingDraftLabel) {
-  const cached = assistantParseCache.get(item);
-  if (cached
-    && cached.html === html
-    && cached.streaming === streaming
-    && cached.allowScheduledTaskDraft === allowScheduledTaskDraft
-    && cached.streamingDraftLabel === streamingDraftLabel) {
-    return cached.parsed;
-  }
-  const pd = streaming ? { draft: null, html: hideStreamingDraft(html, streamingDraftLabel) } : parsePersonaDraft(html);
-  const sd = (streaming || !allowScheduledTaskDraft) ? { draft: null, html: pd.html } : parseScheduledTaskDraft(pd.html);
-  const cq = streaming ? { q: null, html: sd.html } : parseCardQuestion(sd.html);
-  const parsed = { pd, sd, cq };
-  assistantParseCache.set(item, { html, streaming, allowScheduledTaskDraft, streamingDraftLabel, parsed });
-  return parsed;
-}
+const parseAssistantBubblesCached = createWeakCache(
+  // biome-ignore lint/correctness/noUnusedFunctionParameters: createWeakCache cache-key contract — parameters are positional, not all are read
+  (item, html, streaming, allowScheduledTaskDraft, streamingDraftLabel) => {
+    const pd = streaming ? { draft: null, html: hideStreamingDraft(html, streamingDraftLabel) } : parsePersonaDraft(html);
+    const sd = (streaming || !allowScheduledTaskDraft) ? { draft: null, html: pd.html } : parseScheduledTaskDraft(pd.html);
+    const cq = streaming ? { q: null, html: sd.html } : parseCardQuestion(sd.html);
+    return { pd, sd, cq };
+  },
+);
 
 // The memory status label map depends only on the current language
 // dictionary t (a module singleton); caching per t avoids rebuilding the
 // same map on every render of every bubble.
-const memoryStatusLabelsCache = new WeakMap();
-function getMemoryStatusLabels(t) {
-  let labels = memoryStatusLabelsCache.get(t);
-  if (!labels) {
-    const chatCopy = t.uiChat;
-    const chatViewCopy = t.uiChatView;
-    labels = {
-      '已忽略': chatCopy.ignoreOnce,
-      '不再提示': chatCopy.neverAsk,
-      '已记住': chatViewCopy.memStatusRemembered,
-      '已归档': chatViewCopy.memStatusArchived,
-      '已删除': chatViewCopy.memStatusDeleted,
-      '记忆已更新': chatCopy.memoryUpdated,
-      '记忆已归档': chatViewCopy.memStatusArchivedNotice,
-      '记忆已删除': chatViewCopy.memStatusDeletedNotice,
-    };
-    memoryStatusLabelsCache.set(t, labels);
-  }
-  return labels;
-}
+const getMemoryStatusLabels = createWeakCache((t) => {
+  const chatCopy = t.uiChat;
+  const chatViewCopy = t.uiChatView;
+  return {
+    '已忽略': chatCopy.ignoreOnce,
+    '不再提示': chatCopy.neverAsk,
+    '已记住': chatViewCopy.memStatusRemembered,
+    '已归档': chatViewCopy.memStatusArchived,
+    '已删除': chatViewCopy.memStatusDeleted,
+    '记忆已更新': chatCopy.memoryUpdated,
+    '记忆已归档': chatViewCopy.memStatusArchivedNotice,
+    '记忆已删除': chatViewCopy.memStatusDeletedNotice,
+  };
+});
 
 function localizeSceneTabs(items, copy) {
   return items.map(item => ({
@@ -646,21 +611,13 @@ function localizeSceneTabs(items, copy) {
   }));
 }
 
+// Derived from SCENE_TABS: a projected `lane:key` scene tag maps back to the
+// same tab entry, so a scene tag and its scene card can never drift apart.
 function pinvouSceneDisplay(scene, copy) {
-  switch (scene) {
-    case 'work:document-writing':
-      return { label: copy.documentWriting, Icon: FileText };
-    case 'work:personal-workbench':
-      return { label: copy.personalWorkbench, Icon: Briefcase };
-    case 'design:poster':
-      return { label: copy.poster, Icon: ImageIcon };
-    case 'design:data-visualization':
-      return { label: copy.dataVisualization, Icon: BarChart2 };
-    case 'design:ppt':
-      return { label: copy.pptDesign, Icon: Presentation };
-    default:
-      return null;
-  }
+  const tab = scene
+    ? SCENE_TABS.find((item) => pinvouSceneTag(item.key) === scene)
+    : null;
+  return tab ? { label: copy[tab.labelKey], Icon: tab.Icon } : null;
 }
 
 const openChatExternalUrl = (url) => {
@@ -886,8 +843,8 @@ const openChatExternalUrl = (url) => {
       // popover is expanded). The second tick reuses ConversationTimeline's second clock (timer
       // created only while active, cleaned up on unmount). Do not fold the second tick into the
       // global chatItems reconcile — that would re-render all of ChatView every second while a
-      // background task lives (why the second clock left ChatView top level; see the comment
-      // above LiveConversationActivityIndicator).
+      // background task lives (why the second clock left ChatView top level; see the
+      // LiveConversationActivityIndicator comment in ConversationTimeline).
       const now = useConversationSecondClock(true);
       // 服务端 elapsedMs 变化（新输出触发 reconcile）时，渲染期同步换基线
       // （React "adjust state when a prop changes" 模式）；基线时间戳直接用
@@ -1020,7 +977,6 @@ const openChatExternalUrl = (url) => {
         });
       }, []);
       // Artifacts live in the app-level Right Dock; its host owns narrow-layout fallback.
-      const artColRef = useRef(null);
       // Warm the deferred sender-card chunk at view entry: delivered messages
       // render it above the body, and the mount-time prefetch keeps the lazy
       // split (entry-budget policy) free of visible first-render delay.
@@ -1035,7 +991,6 @@ const openChatExternalUrl = (url) => {
       const lastScrollHeightRef = useRef(0);
       const subagentPanelScrollRef = useRef(null);
       const [showScrollBottom, setShowScrollBottom] = useState(false);
-      const chatRootRef = useRef(null);
       const composerRef = useRef(null);
       const pendingVoiceAfterIntroRef = useRef(null);
       const voiceIntroResolveRef = useRef(null);
@@ -2117,6 +2072,7 @@ const openChatExternalUrl = (url) => {
       }, [prefill, prefillAppend]);
 
       // 用户向上翻历史时暂停流式自动贴底；回到底部或发送新消息后恢复。
+      // transitionConversationScrollState 只回传消费的字段（following/scrollTop/scrollHeight）。
       useEffect(() => {
         const el = scrollRef.current;
         if (!el) return;
@@ -2225,32 +2181,18 @@ const openChatExternalUrl = (url) => {
       // Session content can finish measuring after the active-session effect runs, especially
       // when an inactive WebView resumes or content-visibility replaces intrinsic estimates.
       // Keep following the bottom across those layout changes, but never override a user who
-      // deliberately scrolled up.
-      useEffect(() => {
-        const scrollElement = scrollRef.current;
-        const contentElement = conversationContentRef.current;
-        if (!scrollElement || !contentElement) return undefined;
-        return startConversationBottomFollower({
-          scrollElement,
-          contentElement,
-          isFollowing: () => autoScrollRef.current,
-          onMeasured: () => {
-            const measurement = measureConversationScrollGeometry({
-              scrollElement,
-              following: autoScrollRef.current,
-              previousScrollTop: lastScrollTopRef.current,
-              previousScrollHeight: lastScrollHeightRef.current,
-            });
-            lastScrollTopRef.current = measurement.scrollTop;
-            lastScrollHeightRef.current = measurement.scrollHeight;
-          },
-          onRestored: (scrollTop) => {
-            lastScrollTopRef.current = scrollTop;
-            lastScrollHeightRef.current = scrollElement.scrollHeight;
-            setShowScrollBottom(false);
-          },
-        });
-      }, [activeSessionId, hasMessages]);
+      // deliberately scrolled up. (Wiring shared via useConversationBottomFollower; the dep
+      // pair is ChatView's original effect dep array.)
+      useConversationBottomFollower({
+        scrollRef,
+        contentRef: conversationContentRef,
+        autoScrollRef,
+        lastScrollTopRef,
+        lastScrollHeightRef,
+        setShowScrollBottom,
+        activeSessionId,
+        hasMessages,
+      });
 
       // 安装工具后新建会话 → 本地显示欢迎卡片（不发 LLM query，不浪费 token）。
       // welcomeToolId 是一次性引导态,必须跟随会话身份:只有"装完工具"(justInstalledTool 非
@@ -4413,7 +4355,6 @@ const openChatExternalUrl = (url) => {
         bs,
         t,
         onClose: closeArtifactsPanel,
-        isWide: true,
         preferredArtifactPath: activeArtifactPath,
         onPreviewArtifact: handlePreviewArtifact,
         onGotoSettings,
@@ -4432,7 +4373,7 @@ const openChatExternalUrl = (url) => {
 
       return (
         <div className="flex-1 flex flex-row w-full h-full min-h-0 relative z-10 animate-in fade-in duration-300">
-          <div ref={chatRootRef} className="flex-1 flex flex-col min-w-0 relative h-full">
+          <div className="flex-1 flex flex-col min-w-0 relative h-full">
             <ComposerAttachmentDropOverlay
               enabled={!remoteChatActive && bridge.available && (!isWeb || can('deviceFileUpload'))}
               onFiles={files => bridge.attachments.uploadDeviceFiles(files)}
@@ -5422,7 +5363,7 @@ const openChatExternalUrl = (url) => {
                 }
                 className="w-full bg-transparent resize-none outline-none text-gray-800 dark:text-gray-100 text-[16px] leading-relaxed min-h-[48px] overflow-y-auto hide-scrollbar placeholder:text-gray-400 dark:placeholder:text-gray-500"
               />
-              <TextareaContextMenu inputRef={composerRef} setValue={setInputText} theme={theme} t={t} />
+              <TextareaContextMenu inputRef={composerRef} setValue={setInputText} t={t} />
               {inputLimitReached && (
                 <div role="status" aria-live="polite" data-testid="chat-input-limit-notice"
                   className={`px-1 pb-1 text-[12px] ${'text-[#C5221F] dark:text-[#F28B82]'}`}>
@@ -5593,7 +5534,6 @@ const openChatExternalUrl = (url) => {
 
           {artifactsVisible && artifactsFullscreen && artifactFullscreenPublicationReady && createPortal(
             <div
-              ref={artColRef}
               className="fixed left-0 right-0 bottom-0 z-[1000] pointer-events-auto"
               style={{ top: can('desktopChrome') ? '36px' : 0 }}
               data-testid="artifact-fullscreen-panel">
@@ -5628,7 +5568,6 @@ const openChatExternalUrl = (url) => {
               initialAgentId={subagentPanel.agentId}
               selectionRequestId={subagentPanel.selectionRequestId}
               t={t}
-              theme={theme}
               language={modelServiceLanguage}
               modelServiceState={chatModelServiceState}
               onClose={closeSubagentPanel}
@@ -5934,7 +5873,7 @@ const openChatExternalUrl = (url) => {
       const SceneIcon = sceneDisplay && sceneDisplay.Icon;
       const [editing, setEditing] = useState(false);
       const [val, setVal] = useState(mentionSplit.text);
-      const [copied, copyToClipboard] = useCopyFlash(1200);
+      const [copied, copyToClipboard] = useCopyFlash();
       // Edit-resend keeps layer 2 of the feature gate: with the feature off
       // only the body is resent — the injection block is never re-injected.
       function commit() {
@@ -6244,12 +6183,12 @@ const openChatExternalUrl = (url) => {
       // skip its whole-tree walk. Both parse calls are per-item caches (see
       // renderLegacyMarkdownCached / parseAssistantBubblesCached), so this is a
       // cache hit for renders that reach the branch and a no-op for other item
-      // types. Official 适配:renderLegacyMarkdownCached 在本仓签名是
-      // (item, syntaxVersion)(内部读 item.text),且 remote 投影项不得在本地
+      // types. renderLegacyMarkdownCached 为 weak-cache 形态,签名是
+      // (item, text, syntaxVersion),且 remote 投影项不得在本地
       // 伪造 persona/question 动作,故 remoteProxy 的旁路解析一同上提。
       const assistantHtml = item.type === 'assistant'
         ? ((!item.streaming && item.text)
-          ? renderLegacyMarkdownCached(item, syntaxVersion)
+          ? renderLegacyMarkdownCached(item, item.text, syntaxVersion)
           : (item.html || ''))
         : null;
       const assistantDraftLabel = item.type === 'assistant'
@@ -6310,7 +6249,7 @@ const openChatExternalUrl = (url) => {
         );
       }
 
-      if (item.type === 'artifact_card') return <ArtifactCard item={item} theme={theme} t={t} isLatest={isLatestArtifact} />;
+      if (item.type === 'artifact_card') return <ArtifactCard item={item} t={t} isLatest={isLatestArtifact} />;
       if (item.type === 'plan_card') return <PlanCard item={item} t={t} onPrefill={onPrefill} />;
       if (item.type === 'plan_stuck') return <PlanStuckCard item={item} t={t} onGo={onPlanStuckGo} />;
       if (item.type === 'careful_blocked') return <CarefulBlockedCard item={item} t={t} />;
@@ -6572,11 +6511,5 @@ const openChatExternalUrl = (url) => {
     // references from the bridge session data; the syntaxVersion subscription
     // lives inside the component, so the memo cannot block the re-render
     // after lazy language registration.
-
-    // ==========================================
-    // Artifact Card — present_artifact 成品卡（点击打开预览）
-    // ==========================================
-    // 产物类型 → { 角标/标签文字, tile 配色, lucide 内联 SVG 路径 }（零下载；仅无封面紧凑态显图标）。
-    // 配色/字形照搬 产物卡图标预览.html（唯一权威）。
 
 export { ChatView };

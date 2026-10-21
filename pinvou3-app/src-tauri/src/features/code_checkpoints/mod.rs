@@ -163,6 +163,9 @@ pub struct CheckpointMeta {
     /// 影子仓库中的 commit sha（orphan commit，互不为父子）。
     pub commit: String,
     pub created_at: i64,
+    // 注：旧版 index.json 里的 `label` 字段（截断的展示标签，从未有读者）已被
+    // 移除；CheckpointMeta 反序列化不 deny_unknown_fields，旧索引里的残留键被
+    // serde 忽略，无需迁移。
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -857,9 +860,11 @@ pub fn create_checkpoint(
     execution_root: &Path,
     turn: Option<u32>,
     kind: CheckpointKind,
-    label: &str,
+    // 形参保留以减少既有调用方的联动改动（标签本身已不再持久化：
+    // CheckpointMeta.label 因截断且无读者被移除，见结构体注释）。
+    _label: &str,
 ) -> Result<CheckpointMeta> {
-    create_checkpoint_preserving(ledger_root, execution_root, turn, kind, label, &[])
+    create_checkpoint_preserving(ledger_root, execution_root, turn, kind, _label, &[])
 }
 
 /// Display-label normalization before persisting: trims and caps at 80
@@ -1499,6 +1504,17 @@ pub fn drop_checkpoint(ledger_root: &Path, checkpoint_id: &str) -> Result<bool> 
     Ok(invalidate_entries_if(ledger_root, |e| e.id == checkpoint_id)? > 0)
 }
 
+/// 测试专用 git 可用性探测，供本模块测试与命令层测试
+/// （`app/commands/checkpoints.rs`）共用：无 git 的环境里相关用例跳过而非报错。
+#[cfg(test)]
+pub(crate) fn git_available() -> bool {
+    crate::platform::process::HiddenCommand::new("git")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2022,7 +2038,7 @@ mod tests {
             id: "c1-1".into(),
             turn: Some(1),
             kind: CheckpointKind::Turn,
-            label: "legacy".into(),
+            label: String::new(),
             commit: commit.clone(),
             created_at: 0,
         };
@@ -2112,7 +2128,7 @@ mod tests {
                     id: "c1-1".into(),
                     turn: Some(1),
                     kind: CheckpointKind::Turn,
-                    label: "legacy".into(),
+                    label: String::new(),
                     commit,
                     created_at: 0,
                 }],
@@ -2393,8 +2409,8 @@ mod tests {
         );
     }
 
-    /// legacy 快照（迁移前打的，tree 含 .env）的 diff 预览：清单与 patch 都
-    /// 不得带敏感条目/秘密原文上屏；普通文件变更照常展示。
+    /// 对迁移前的 legacy 快照做 diff 预览（快照树里含 .env）：变更列表不得
+    /// 泄露敏感条目或密钥明文；普通文件变更正常渲染。
     #[test]
     fn diff_preview_filters_secret_paths_from_legacy_snapshot() {
         if !git_available() {
@@ -2445,7 +2461,7 @@ mod tests {
                     id: "c1-1".into(),
                     turn: Some(1),
                     kind: CheckpointKind::Turn,
-                    label: "legacy".into(),
+                    label: String::new(),
                     commit,
                     created_at: 0,
                 }],

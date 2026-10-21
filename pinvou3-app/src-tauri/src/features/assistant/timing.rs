@@ -773,8 +773,9 @@ fn parse_timeline_line(line: &str) -> Option<TimelineEvent> {
         return None;
     }
     let event = v.get("event")?.as_str()?;
-    // A context snapshot has no paired user_start. compute_stats only aggregates paired
-    // (user_start, assistant_done) records, so snapshots cannot affect turn totals.
+    // A context snapshot has no paired user_start, and turn pairing only
+    // reads (user_start, assistant_done) records, so snapshots cannot affect
+    // turn totals.
     let is_base_event = matches!(event, "user_start" | "assistant_done" | "context_snapshot");
     #[cfg(any(feature = "benchmark-hooks", test))]
     let is_observation_event = matches!(
@@ -1553,6 +1554,12 @@ mod tests {
         let timeline = read_timeline(sid).unwrap();
         assert_eq!(timeline.len(), 2);
         assert_eq!(compute_stats(sid).unwrap().turn_count, 1);
+        // 注入的 user_start 缺 turn_id / 事件名未知,均被整条跳过。
+        assert!(
+            timeline
+                .iter()
+                .all(|e| e.turn_id != "missing-event" && e.turn_id != "unknown-event")
+        );
 
         let _ = std::fs::remove_dir_all(tmp);
     }

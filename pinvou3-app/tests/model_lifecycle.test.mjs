@@ -53,6 +53,7 @@ assert.equal(await refreshNativeTurnTimeline(preSubmit, async () => preparedDisk
 assert.deepEqual(latestModelLifecycleRejection(preSubmit.timeline), rejection);
 
 const sandbox = { window: {} };
+vm.runInNewContext(fs.readFileSync(new URL('../src/shared/bridge-shared-helpers.js', import.meta.url), 'utf8'), sandbox);
 vm.runInNewContext(fs.readFileSync(new URL('../src/platform/tauri/bridge/chat-events.js', import.meta.url), 'utf8'), sandbox);
 const install = sandbox.window.__PINVOU_TAURI_BRIDGE_FEATURES__['chat-events'];
 function fixture() {

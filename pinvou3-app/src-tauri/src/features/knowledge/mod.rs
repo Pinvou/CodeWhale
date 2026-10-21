@@ -22,11 +22,15 @@ pub mod model_download;
 // cannot name the transitive `pinvou-knowledge` crate, and a copy silently
 // desynced the two surfaces every time the manifest changed.
 pub use pinvou_knowledge::model_download::model_directory_is_complete;
+// The headless CLI's `model status` consumes the same env-override-first
+// resolution (and the injectable variant the app tests drive) through these
+// re-exports instead of its former five-line mirror.
+pub use model_download::{configured_model_dir, configured_model_dir_from};
 mod query;
 mod scanner;
 mod store;
 
-pub use exclude::Excluder;
+pub(crate) use exclude::Excluder;
 pub use import_jobs::{FailedImportFilePage, ImportJobState as IndexState};
 pub use kb_tool::{KbOpenSourceTool, KbSearchTool};
 pub use l1::{Collection, Document};
@@ -39,11 +43,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tauri::State;
 
-pub use store::{FileHit, Stats, TypeCount};
-use store::{SearchQuery, Store};
+use store::Store;
+pub use store::{FileHit, SearchQuery, Stats, TypeCount};
 
 /// Background scan progress (polled by the frontend). The frontend reads
 /// running/phase/scanned/finishedAt; `roots` (added with the headless
@@ -57,6 +61,8 @@ pub struct ScanState {
     /// refreshes L0 only on `done`, so `interrupted` cannot read as
     /// "scanned".
     pub phase: String,
+    /// `roots`（headless 面加入）报告本轮扫描根,GUI 今日忽略;CLI `scan status`
+    /// 渲染它。上游 #566 曾在无 CLI 消费的树上删字段,本仓 CLI 在用,恢复。
     pub roots: Vec<String>,
     pub scanned: u64,
     pub started_at: i64,
@@ -347,10 +353,7 @@ impl KnowledgeService {
             .latest_state()
             .ok()
             .flatten()
-            .unwrap_or_else(|| IndexState {
-                phase: "idle".into(),
-                ..Default::default()
-            })
+            .unwrap_or_default()
     }
 
     /// Import state of the NAMED job (not "the latest job").
@@ -763,7 +766,6 @@ impl KnowledgeService {
                 running: true,
                 phase: "scanning".into(),
                 roots: roots.iter().map(|p| p.display().to_string()).collect(),
-                started_at: now(),
                 ..Default::default()
             };
         }
@@ -897,7 +899,7 @@ impl KnowledgeService {
 
     /// Instant search (same semantics as `kb_search`, including the NL-rule
     /// merge through `merge_nl_rules`).
-    pub fn search(&self, query: SearchQueryDto) -> Result<Vec<FileHit>, String> {
+    pub fn search(&self, query: SearchQuery) -> Result<Vec<FileHit>, String> {
         let sq = merge_nl_rules(query.into());
         self.store.search(&sq).map_err(|e| e.to_string())
     }
@@ -1294,39 +1296,6 @@ fn now() -> i64 {
 
 // ───────────────────────── Tauri 命令层 ─────────────────────────
 
-/// 前端搜索条件（camelCase）。空 text + 各过滤可组合。
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct SearchQueryDto {
-    pub text: Option<String>,
-    #[serde(default)]
-    pub exts: Vec<String>,
-    pub mtime_after: Option<i64>,
-    pub mtime_before: Option<i64>,
-    /// Tie half of the `(mtime, id)` keyset cursor (`idBefore` on the wire).
-    /// Only valid together with `mtimeBefore`; a half cursor is rejected.
-    pub id_before: Option<i64>,
-    pub min_size: Option<u64>,
-    pub max_size: Option<u64>,
-    #[serde(default)]
-    pub limit: usize,
-}
-
-impl From<SearchQueryDto> for SearchQuery {
-    fn from(d: SearchQueryDto) -> Self {
-        SearchQuery {
-            text: d.text,
-            exts: d.exts,
-            mtime_after: d.mtime_after,
-            mtime_before: d.mtime_before,
-            id_before: d.id_before,
-            min_size: d.min_size,
-            max_size: d.max_size,
-            limit: d.limit,
-        }
-    }
-}
-
 /// 把阻塞的 DB 查询挪出主线程执行。Tauri 同步命令(`fn`)在**主线程**跑，大库(百万行)
 /// 全表 COUNT/GROUP BY 会冻死整个 UI——慢查询命令一律改 `async fn` + 本 helper。
 async fn spawn_db<T, F>(f: F) -> Result<T, String>
@@ -1480,9 +1449,6 @@ fn merge_nl_rules(mut sq: SearchQuery) -> SearchQuery {
         if sq.mtime_after.is_none() {
             sq.mtime_after = parsed.mtime_after;
         }
-        if sq.mtime_before.is_none() {
-            sq.mtime_before = parsed.mtime_before;
-        }
         if sq.min_size.is_none() {
             sq.min_size = parsed.min_size;
         }
@@ -1499,9 +1465,9 @@ fn merge_nl_rules(mut sq: SearchQuery) -> SearchQuery {
 /// are not overwritten.
 pub async fn kb_search(
     state: State<'_, KnowledgeService>,
-    query: SearchQueryDto,
+    query: SearchQuery,
 ) -> Result<Vec<FileHit>, String> {
-    let sq = merge_nl_rules(query.into());
+    let sq = merge_nl_rules(query);
     let store = state.store.clone();
     spawn_db(move || store.search(&sq).map_err(|e| e.to_string())).await
 }
@@ -1901,11 +1867,11 @@ mod tests {
     #[test]
     fn scan_panic_guard_always_clears_the_running_flag() {
         let state = Mutex::new(ScanState {
+            roots: Vec::new(),
             raw_seen: 0,
             started_at: 0,
             running: true,
             phase: "scanning".into(),
-            roots: vec!["/tmp".into()],
             scanned: 7,
             finished_at: 0,
         });
@@ -1967,7 +1933,7 @@ mod tests {
         // Explicit structured search: text goes through FTS/LIKE on the same
         // store path as the GUI command.
         let hits = svc
-            .search(SearchQueryDto {
+            .search(SearchQuery {
                 text: Some("季度报告".into()),
                 limit: 10,
                 ..Default::default()
@@ -1980,7 +1946,7 @@ mod tests {
         // + empty residual text. Without the merge (raw FTS on "上周的 pdf")
         // nothing would match.
         let hits = svc
-            .search(SearchQueryDto {
+            .search(SearchQuery {
                 text: Some("上周的 pdf".into()),
                 limit: 10,
                 ..Default::default()
@@ -1992,7 +1958,7 @@ mod tests {
         // Explicit exts win over the parsed result and are not overwritten
         // (GUI contract).
         let hits = svc
-            .search(SearchQueryDto {
+            .search(SearchQuery {
                 text: Some("上周的 pdf".into()),
                 exts: vec!["txt".into()],
                 limit: 10,
@@ -2124,7 +2090,7 @@ mod tests {
         // The bound is inclusive: at mtime_before == old_mt only the old
         // file passes (newer file excluded) — pin that exclusion direction.
         let old_only = svc
-            .search(SearchQueryDto {
+            .search(SearchQuery {
                 mtime_before: Some(old_mt),
                 limit: 10,
                 ..Default::default()
@@ -2140,7 +2106,7 @@ mod tests {
         // An inclusive boundary means mtime_before == new_mt still returns
         // BOTH files (<= matches at the boundary value itself).
         let both = svc
-            .search(SearchQueryDto {
+            .search(SearchQuery {
                 mtime_before: Some(new_mt),
                 limit: 10,
                 ..Default::default()
@@ -2154,7 +2120,7 @@ mod tests {
 
         // Below the oldest mtime, nothing.
         let none = svc
-            .search(SearchQueryDto {
+            .search(SearchQuery {
                 mtime_before: Some(old_mt - 1),
                 limit: 10,
                 ..Default::default()
@@ -2165,7 +2131,7 @@ mod tests {
         // The two-sided window (after old, before new] excludes nothing here;
         // a tighter after bound proves composition.
         let window = svc
-            .search(SearchQueryDto {
+            .search(SearchQuery {
                 mtime_after: Some(old_mt + 1),
                 mtime_before: Some(new_mt),
                 limit: 10,

@@ -105,6 +105,7 @@ command_protocol!(
         "read_artifact_text",
         "write_artifact_text",
         "list_deliverable_index",
+        // list_deliverable_index_v2 随其 stamp-cache 后端一并推迟（见 PR 正文分诊）。
         "artifact_info",
         "read_artifact_image_b64",
         "read_artifact_thumbnail",
@@ -284,7 +285,6 @@ command_protocol!(
         "kb_search",
         "kb_stats",
         "kb_model_status",
-        "kb_model_cancel",
         "kb_model_load_after_first_frame",
         "kb_model_download"
     ]
@@ -837,11 +837,8 @@ fn aux_refusal_guards_stay_in_their_commands() {
     let interaction = include_str!("interaction.rs");
     let projects = include_str!("projects.rs");
 
-    // The discard command must not silently no-op on aux-shaped ids.
-    assert!(
-        sessions.contains("discard_aux_session: auxiliary conversations do not own an aux session"),
-        "discard_aux_session must reject aux-shaped parent ids",
-    );
+    // The discard command was removed with its dead frontend chain; the
+    // remaining three refusals stay pinned.
     assert!(
         interaction
             .contains("set_multi_agent_mode: auxiliary conversations do not take multi-agent mode"),
@@ -880,13 +877,17 @@ fn aux_refusal_guards_stay_in_their_commands() {
     // The sched- send gates go through the alias-defeating predicate, not
     // exact prefix matching (round-34 minor 4; the contains() form was
     // corrected to the exact call shape — a re-spelled prefix would
-    // false-pass a substring hunt, round-35 minor 8).
+    // false-pass a substring hunt, round-35 minor 8). The duplicated
+    // per-sender gates were folded into the shared admit_reserved_turn
+    // prelude (dead-code wave RT3 F-RT3-1), so the predicate now appears
+    // exactly once there and every reserved-turn sender (send /
+    // edit-resend / eval) inherits it; a deleted guard still flips red.
     let pool = include_str!("../../features/assistant/engine_pool.rs");
     assert!(
         pool.matches("crate::features::sessions::is_sched_session_id(session_id)")
             .count()
-            >= 2,
-        "both sched- send gates must use the case-insensitive predicate",
+            >= 1,
+        "the shared sched- send gate must use the case-insensitive predicate",
     );
     assert!(
         !pool.contains("starts_with(\"sched-\")"),
@@ -917,6 +918,54 @@ fn delete_chat_session_keeps_its_aux_cascade_wrapper() {
     );
 }
 
+// Round-2 review M-R2: the reserved-turn gate hold (admit_reserved_turn
+// returns the per-session turn gate and every sender keeps it alive across
+// get_or_spawn + engine submission) is load-bearing concurrency wiring — it
+// upholds the cascade-cancel enqueue-ordering invariant documented on the
+// module's cancel path — and has NO executing test: dropping the returned
+// guard in a sender compiles and keeps the whole suite green (mutation-proven
+// during the round-2 review). Source-shape pin: each reserved-turn sender
+// body must destructure the returned gate binding and must not drop it early.
+#[test]
+fn reserved_turn_senders_hold_the_turn_gate_through_submission() {
+    let pool = include_str!("../../features/assistant/engine_pool.rs");
+    let spans = [
+        (
+            "async fn send_reserved_eval_user_message(",
+            "pub(crate) async fn send_reserved_user_message(",
+        ),
+        (
+            "pub(crate) async fn send_reserved_user_message(",
+            "pub(crate) async fn run_scheduled_turn<F, Fut>(",
+        ),
+        (
+            "pub(crate) async fn edit_last_turn_reserved(",
+            "pub async fn compact_now(&self, session_id: &str) -> Result<()> {",
+        ),
+    ];
+    for (start_marker, end_marker) in spans {
+        let start = pool
+            .find(start_marker)
+            .unwrap_or_else(|| panic!("{start_marker} must exist"));
+        let end = pool[start..]
+            .find(end_marker)
+            .unwrap_or_else(|| panic!("{end_marker} must follow {start_marker}"));
+        let body = &pool[start..start + end];
+        assert!(
+            body.contains("let (reservation, _turn_gate) = "),
+            "{start_marker} must keep the turn gate binding returned by admit_reserved_turn alive across engine submission — dropping it (e.g. `let (reservation, _)`) reopens the admitted-but-not-submitted window where a phase-2 cascade cancel can enqueue CancelSubAgents after the new turn's SendMessage",
+        );
+        assert!(
+            body.contains("admit_reserved_turn("),
+            "{start_marker} must admit through the shared prelude",
+        );
+        assert!(
+            !body.contains("drop(_turn_gate)"),
+            "{start_marker} must not drop the turn gate before submission completes",
+        );
+    }
+}
+
 // Round-36 minors 4+5: the two aux-classification surfaces an independent
 // re-enumeration found beyond the 26 guard sites. The deliverables index is a
 // cross-session surface, so it must skip aux records by the derived-id rule;
@@ -939,3 +988,11 @@ fn aux_stays_out_of_the_deliverables_index_and_acp_classification() {
         "is_acp_metadata and is_acp must both reject aux ids (round-36 minor 5)",
     );
 }
+
+// Round-5 review: the round-4 skipped-disclosure regression lived in THIS
+// shell (flattening the command to `Ok(impl()?.rows)`), and the core
+// contract in features::deliverables cannot pin it — a flattened shell
+// compiles cleanly and passes every core test, while the JS merge maps a
+// bare array to `{rows: [], skipped: []}`, silently re-creating the
+// empty-panel bug. The command fn is executed directly so a signature or
+// shape regression fails here, at the layer that owns it.

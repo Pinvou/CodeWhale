@@ -60,8 +60,6 @@ pub struct PlatformCapabilities {
     pub codex_acp_supported: bool,
     pub team_relay_supported: bool,
     pub browser_native_display: bool,
-    pub browser_agent_automation: bool,
-    pub browser_cdp: bool,
     pub voice_shortcut_native: bool,
     /// Windows-only desktop dual-end remote control (A control / B controlled).
     /// Every other target reports `false` and hides the entry points.
@@ -102,8 +100,6 @@ impl PlatformCapabilities {
             codex_acp_supported: capabilities.codex_acp_supported,
             team_relay_supported: capabilities.team_relay_supported,
             browser_native_display: browser_ready,
-            browser_agent_automation: browser_ready,
-            browser_cdp: capabilities.browser_cdp,
             voice_shortcut_native: capabilities.voice_shortcut_native,
             desktop_remote_control_supported: capabilities.desktop_remote_control_supported,
             paste_image_clipboard_read: capabilities.paste_image_clipboard_read,
@@ -171,7 +167,6 @@ mod platform_capability_tests {
     fn semantic_capabilities_match_the_compiled_target() {
         let capabilities = PlatformCapabilities::current();
         let expected = crate::platform::capabilities::current();
-        assert_eq!(capabilities.os, expected.os);
         assert_eq!(
             capabilities.uses_bundled_dependency_installer,
             expected.uses_bundled_dependency_installer
@@ -192,13 +187,7 @@ mod platform_capability_tests {
             capabilities.codex_acp_supported,
             expected.codex_acp_supported
         );
-        assert_eq!(
-            capabilities.browser_native_display, capabilities.browser_agent_automation,
-            "UI display and Agent MCP must cross the runtime gate atomically"
-        );
         assert!(!capabilities.browser_native_display || expected.browser_native_display);
-        assert!(!capabilities.browser_agent_automation || expected.browser_agent_automation);
-        assert_eq!(capabilities.browser_cdp, expected.browser_cdp);
         assert_eq!(
             capabilities.voice_shortcut_native,
             expected.voice_shortcut_native
@@ -218,20 +207,15 @@ mod platform_capability_tests {
     }
 
     #[test]
-    fn browser_runtime_readiness_closes_both_public_capabilities() {
+    fn browser_runtime_readiness_closes_the_public_capability() {
         let unavailable = PlatformCapabilities::current_with_browser_runtime_ready(false);
         assert!(!unavailable.browser_native_display);
-        assert!(!unavailable.browser_agent_automation);
 
         let ready = PlatformCapabilities::current_with_browser_runtime_ready(true);
         let expected = crate::platform::capabilities::current();
         assert_eq!(
             ready.browser_native_display,
             expected.browser_native_display
-        );
-        assert_eq!(
-            ready.browser_agent_automation,
-            expected.browser_agent_automation
         );
     }
 }

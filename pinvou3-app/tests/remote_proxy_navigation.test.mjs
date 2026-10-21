@@ -14,6 +14,11 @@ function install(read, remove, select) {
   const root = { __PINVOU_TAURI_BRIDGE_FEATURES__: {} };
   const sandbox = { window: root, console };
   vm.createContext(sandbox);
+  // #566 共享模块移植：sessions/chat feature 工厂的共享函数体在 bridge-shared-helpers.js，
+  // 必须先于工厂文件装载（与 index.html 脚本序一致）。
+  const sharedHelpers = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)),
+    '../src/shared/bridge-shared-helpers.js'), 'utf8');
+  vm.runInContext(sharedHelpers, sandbox);
   vm.runInContext(source, sandbox);
   vm.runInContext(chatSource, sandbox);
   const invokes = [];

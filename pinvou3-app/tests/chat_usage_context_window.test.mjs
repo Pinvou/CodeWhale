@@ -11,7 +11,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (...parts) => readFileSync(path.join(root, ...parts), 'utf8');
 
 // ── tauri 端行为测试：dirty 工具轮仍更新 context window、但不更新 input ──
-const source = read('src', 'platform', 'tauri', 'bridge', 'chat-events.js');
+const source = read('src', 'shared', 'bridge-shared-helpers.js') + '\n' + read('src', 'platform', 'tauri', 'bridge', 'chat-events.js');
 const windowObject = { __PINVOU_TAURI_BRIDGE_FEATURES__: {} };
 vm.runInContext(source, vm.createContext({
   window: windowObject,
@@ -136,7 +136,9 @@ const tauriBridgeSource = read('src', 'platform', 'tauri', 'bridge.js');
 const tauriMonitorSource = read('src', 'platform', 'tauri', 'bridge', 'monitor.js');
 assert.ok(tauriBridgeSource.includes('tokens: { input: 0, max: 0 }'), 'tauri bridge initializes max=0 (unknown window)');
 assert.ok(webSource.includes('tokens: { input: 0, max: 0 }'), 'web bridge initializes max=0 (unknown window)');
-assert.ok(!webSource.includes('var maxModelLen = 32768'), 'web monitor must not fall back to a fake 32K window');
-assert.ok(tauriMonitorSource.includes('state.tokens.max || 0'), 'tauri monitor must not fall back to a fake 32K window');
+assert.ok(!/(var|let) maxModelLen = 32768/.test(webSource), 'web monitor must not fall back to a fake 32K window');
+assert.ok(tauriMonitorSource.includes('state.tokens.max = snap.vllm.max_model_len;'),
+  'tauri monitor must not fall back to a fake 32K window (only real snapshot max_model_len lands)');
+assert.ok(!tauriMonitorSource.includes('32768'), 'tauri monitor keeps no 32K fake denominator');
 
 console.log('chat_usage_context_window.test.mjs: OK');

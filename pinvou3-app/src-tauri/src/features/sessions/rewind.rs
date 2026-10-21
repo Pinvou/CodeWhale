@@ -6,11 +6,11 @@
 //!   `role = "user"` 落盘，按 role 定位会切在工具往返中间。
 //! - 被截段落写入 sidecar `_rewound_turns.json`（纯数据备份，UI 不暴露 redo）。
 //! - 本方法是 [`super::transcript::looks_like_truncating_overwrite`] 守卫的显式
-//!   放行路径：守卫只拦 `update_messages` / `compare_and_swap_messages` 两个通用
-//!   入口，回退走这里的专用方法、不经过它们，既有守卫对其他调用方的保护不变。
-//! - revision/CAS：截断后 `transcript_revision` 自然变化，持有旧 revision 的
-//!   `compare_and_swap_messages` 会自然 CAS 失败——这是期望行为（远程控制编辑
-//!   不得覆盖回退结果），无需额外处理。
+//!   放行路径：守卫只拦 `update_messages` 这一通用入口，回退走这里的专用方法、
+//!   不经过它，既有守卫对其他调用方的保护不变。
+//! - revision：截断后 `transcript_revision` 自然变化，任何持有旧 revision 的
+//!   通用写入路径都无法凭旧快照覆盖回退结果（远程控制编辑不得覆盖回退结果），
+//!   无需额外处理。
 
 use std::collections::HashMap;
 use std::io::ErrorKind;
@@ -110,7 +110,10 @@ fn system_prompt_has_compaction_summary(system_prompt: Option<&String>) -> bool 
 pub struct RewoundTurnsRecord {
     /// 截断时间（RFC3339）。
     pub rewound_at: String,
-    /// 截断前 transcript 的 revision（恢复线索 + 调试锚点）。
+    /// 截断前 transcript 的 revision（恢复线索 + 调试锚点）。业务逻辑虽不再读取，
+    /// 但旧版 reader（无 serde default）要求该字段：缺失会让整个 sidecar map 反序列化
+    /// 失败并被整体隔离（round-7 review P2——同一 `~/.pinvou3` 下新版 app + 旧版 CLI
+    /// 并存即触发），因此必须继续随记录落盘，旧值经 read-modify-write 原样保留。
     pub original_revision: String,
     /// 截断后保留的用户 turn 数（即「回退到第 N 轮」的 N）。
     pub kept_turns: u32,
@@ -320,6 +323,9 @@ impl SessionStore {
         }
         // turn_prompt_indices[keep_turns] 即第 N+1 个用户 turn prompt 的下标。
         let cut = turn_prompt_indices[keep_turns as usize];
+        // Compatibility field (see RewoundTurnsRecord::original_revision):
+        // recomputed per rewind and written for older readers even though
+        // this build never reads it back.
         let original_revision = transcript_revision(&session.messages)?;
         let removed_messages: Vec<Message> = session.messages.split_off(cut);
         // New revision after truncation (undo re-check condition; the same data is counted only once).
@@ -351,8 +357,8 @@ impl SessionStore {
         session.metadata.message_count = session.messages.len();
         session.metadata.updated_at = Utc::now();
         let had_compaction = system_prompt_has_compaction_summary(session.system_prompt.as_ref());
-        // 显式放行路径：直接持久化截断结果，不走 update_messages /
-        // compare_and_swap_messages，因此不触发 looks_like_truncating_overwrite；
+        // 显式放行路径：直接持久化截断结果，不走 update_messages，
+        // 因此不触发 looks_like_truncating_overwrite；
         // 该守卫对其它调用方的保护保持不变。
         self.persist_then_reconcile(&session, "turn rewind truncation")?;
         Ok(TruncateToTurnOutcome {
@@ -383,11 +389,11 @@ impl SessionStore {
     /// 回退反悔：把最新备份记录的被截消息追加回 transcript 尾部并持久化，随后从
     /// sidecar 删除该条记录，返回恢复的消息条数。
     ///
-    /// 与 `truncate_to_user_turn` 同级的显式专用路径：不经过 update_messages /
-    /// compare_and_swap_messages 的 `looks_like_truncating_overwrite` 守卫入口，
-    /// 守卫对其它调用方的保护不变。revision/CAS 语义与截断一致：恢复后
-    /// `transcript_revision` 自然变化，持旧 revision 的 CAS 自然失败（期望行为，
-    /// 远程控制编辑不得覆盖反悔结果），无需额外处理。
+    /// 与 `truncate_to_user_turn` 同级的显式专用路径：不经过 update_messages 的
+    /// `looks_like_truncating_overwrite` 守卫入口，
+    /// 守卫对其它调用方的保护不变。revision 语义与截断一致：恢复后
+    /// `transcript_revision` 自然变化，任何凭旧 revision 的通用写入都无法覆盖
+    /// 反悔结果（期望行为，远程控制编辑不得覆盖反悔结果），无需额外处理。
     ///
     /// 可反悔条件（当前 turn 数 == 记录的 kept_turns，且记录带 truncated_revision 时
     /// 当前 revision 精确匹配，即回退后未发过新轮次、尾部未被编辑）在 mutation 锁

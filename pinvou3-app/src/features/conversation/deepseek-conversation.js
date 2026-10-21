@@ -1,5 +1,6 @@
 import {
   countsAsFailedOperation,
+  isOperationItemType,
   presentConversationItems,
 } from './conversation-model.js';
 import { SHELL_TOOL_NAMES as SHELL_TOOLS } from '../../shared/shell-tools.mjs';
@@ -154,10 +155,9 @@ export function timelineUserError(event, options = {}) {
   const helper = globalThis.PinvouModelServiceErrors;
   if (!error || !helper || typeof helper.build !== 'function') return null;
   if (typeof helper.isModelServiceError === 'function' && !helper.isModelServiceError(error)) return null;
-  const providerLabel = options.providerLabel
-    || (typeof helper.providerLabelFromState === 'function'
-      ? helper.providerLabelFromState(options.modelServiceState, options.language)
-      : '');
+  const providerLabel = typeof helper.providerLabelFromState === 'function'
+    ? helper.providerLabelFromState(options.modelServiceState, options.language)
+    : '';
   return helper.build(error, {
     language: options.language,
     modelServiceState: options.modelServiceState,
@@ -344,7 +344,6 @@ export function projectDeepSeekConversation({
   timelineEvents = [],
   allowScheduledTaskDraft = false,
   language = 'zh-Hans',
-  providerLabel = '',
   modelServiceState = null,
 } = {}) {
   const turns = [];
@@ -380,9 +379,7 @@ export function projectDeepSeekConversation({
 
   for (const turn of turns) {
     turn.presentation = presentConversationItems(turn.items);
-    const operations = turn.items.filter(item => (
-      ['command_execution', 'file_change', 'tool'].includes(item.type)
-    ));
+    const operations = turn.items.filter(item => isOperationItemType(item.type));
     turn.operationCount = operations.length;
     turn.failedOperationCount = operations.filter(countsAsFailedOperation).length;
     turn.waitingPermission = turn.items.some(item => (
@@ -397,7 +394,7 @@ export function projectDeepSeekConversation({
     ));
   }
 
-  assignDeepSeekTimelines(userTurns, timelineEvents, busy, { language, providerLabel, modelServiceState });
+  assignDeepSeekTimelines(userTurns, timelineEvents, busy, { language, modelServiceState });
   if (!busy) transferSteeredRunTerminals(turns);
 
   const activeTurn = turns[turns.length - 1];

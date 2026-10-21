@@ -33,7 +33,7 @@ function loadDesktopBridge() {
     setInterval: () => 0, clearInterval() {}, structuredClone,
   });
   const html = fs.readFileSync(new URL('index.html', sourceRoot), 'utf8');
-  const scripts = [...html.matchAll(/<script src="%BASE_URL%(shared\/bridge-messages\.js|features\/remote-control\/remote-control-state\.js|platform\/tauri\/bridge(?:\.js|\/[^" ]+))"[^>]*><\/script>/g)]
+  const scripts = [...html.matchAll(/<script src="%BASE_URL%(shared\/(?:bridge-messages|bridge-shared-helpers)\.js|features\/remote-control\/remote-control-state\.js|platform\/tauri\/bridge(?:\.js|\/[^" ]+))"[^>]*><\/script>/g)]
     .map((match) => match[1]);
   assert.ok(scripts.includes('platform/tauri/bridge.js'));
   for (const path of scripts) {

@@ -1,22 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
-import { isVoiceActive } from './voice-ui-policy.mjs';
 import { voicePostprocessEnabled } from '../chat/voice-shortcut-settings.mjs';
 import {
   getActiveVoiceTarget,
   isActiveVoiceTarget,
   registerVoiceTarget,
 } from './voice-target-registry.mjs';
-
-function normalizeMode(mode) {
-  if (mode === 'task') return 'task';
-  if (['edit', 'voice_edit', 'draft_edit'].includes(mode)) return 'edit';
-  return 'dictation';
-}
-
-function activeStatus(status) {
-  return ['requesting_permission', 'recording', 'transcribing', 'postprocessing'].includes(status);
-}
+// 与 voice-ui-policy 共用同一份模式归一/活动态判定,不再本地复制。
+// (normalizeMode 别名保留:触发路径的调用点拼写保持不变。)
+import { isVoiceActive, normalizeVoiceMode as normalizeMode } from './voice-ui-policy.mjs';
 
 let fallbackVoiceSessionCounter = 0;
 
@@ -237,9 +229,6 @@ function useComposerVoiceInput(adapter) {
         // An unchanged edit yields no preview and no unsent result: abandon
         // the operation instead of leaving it recorded on the draft.
         discardVoiceResult(context);
-        if (next === original && typeof current.onEditUnchanged === 'function') {
-          current.onEditUnchanged({ original, instruction: trimDraft(context && context.rawText), context });
-        }
         return;
       }
       setEditPreview({
@@ -342,10 +331,6 @@ function useComposerVoiceInput(adapter) {
     }
     if (voiceBusy) return false;
     if (typeof current.canStart === 'function' && !current.canStart(nextMode)) return false;
-    if (!options.skipBeforeStart && typeof current.onBeforeStart === 'function'
-      && current.onBeforeStart(nextMode) === false) {
-      return false;
-    }
 
     // A pending edit preview is keyed to the old draft snapshot. Starting a
     // fresh session counts as abandoning it: a leftover preview would let the
@@ -381,7 +366,7 @@ function useComposerVoiceInput(adapter) {
   useEffect(() => {
     const current = adapterRef.current || {};
     const status = current.voiceInput && current.voiceInput.status;
-    if (!activeStatus(status)) {
+    if (!isVoiceActive({ status })) {
       voiceSessionIdRef.current = null;
       setVoiceSessionId(null);
     }

@@ -134,7 +134,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
-pub use crate::core::mode_state::{ModeLane, SerializableMode};
+pub use crate::core::mode_state::SerializableMode;
 use crate::platform::paths;
 use crate::platform::prefs::{CodePermissionPrefs, ModeDefaultPrefs, ModelSelectionRef};
 use parking_lot::{Mutex, RwLock};
@@ -188,6 +188,9 @@ pub(crate) use self::store::is_not_found_error;
 /// Re-export transcript helpers (consumed across engine / remote-control).
 pub use self::transcript::transcript_revision;
 pub use self::validators::is_aux_session_id;
+/// Re-export the crate-visible remote-namespace predicate: the store and
+/// retention guards, the remote_proxy validators, and the tests that pin it.
+pub use self::validators::is_remote_session_id;
 /// Re-export the crate-visible sched-id predicate: the send gates
 /// (alias-defeating, round-34 minor 4) and the tests that pin the
 /// predicate itself.

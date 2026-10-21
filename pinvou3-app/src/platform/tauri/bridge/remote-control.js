@@ -149,9 +149,6 @@
         await eventForwardersReady;
       });
 
-      // Forwarders remain installed for the lifetime of the authoritative main
-      // WebView. Rust filters delivery according to the current Web lease.
-      var unsubscribeListenerReady = listen("web_access:event_unsubscribe", function () {});
       // Keep the desktop indicator in sync with the actual browser connection.
       // The access endpoint is intentionally persistent, so `active` only means
       // that the QR/link remains valid; it does not mean a phone is connected.
@@ -166,7 +163,6 @@
           eventForwardersReady,
           rpcListenerReady,
           subscribeListenerReady,
-          unsubscribeListenerReady,
           statusListenerReady,
         ]);
         await invoke("web_access_bridge_ready", { generation: bridgeGeneration });
@@ -274,23 +270,14 @@
       return info;
     }
 
-    async function resetWebRelayAddress() {
-      var seq = ++webAccessIntentSeq;
-      var info = await invoke("web_access_reset_relay");
-      if (seq !== webAccessIntentSeq) return info;
-      await refreshRemoteControlStatus(seq);
-      return info;
-    }
-
     return {
-      startDesktopProxy: startDesktopProxy,
-      refreshRemoteControlStatus: refreshRemoteControlStatus,
-      startRemoteControl: startRemoteControl,
-      stopRemoteControl: stopRemoteControl,
-      refreshRemoteControlQr: refreshRemoteControlQr,
-      getWebRelaySettings: getWebRelaySettings,
-      setWebRelayAddress: setWebRelayAddress,
-      resetWebRelayAddress: resetWebRelayAddress,
+      startDesktopProxy,
+      refreshRemoteControlStatus,
+      startRemoteControl,
+      stopRemoteControl,
+      refreshRemoteControlQr,
+      getWebRelaySettings,
+      setWebRelayAddress,
     };
   };
 })(window);

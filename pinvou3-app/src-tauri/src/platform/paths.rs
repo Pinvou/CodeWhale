@@ -58,7 +58,7 @@ pub fn bundle_mcp_servers_dir() -> PathBuf {
     bundle_root().join("mcp-servers")
 }
 
-pub fn managed_connectors_dir() -> PathBuf {
+fn managed_connectors_dir() -> PathBuf {
     pinvou3_home().join("connectors")
 }
 /// 旧版（无版本）CLI 布局：`connectors/<platform>/bin/`。Phase 2 第四刀起新装
@@ -66,14 +66,14 @@ pub fn managed_connectors_dir() -> PathBuf {
 pub fn managed_connector_bin_dir() -> Option<PathBuf> {
     managed_connector_bin_dir_for(std::env::consts::OS, std::env::consts::ARCH)
 }
-pub fn managed_connector_bin_dir_for(os: &str, arch: &str) -> Option<PathBuf> {
+fn managed_connector_bin_dir_for(os: &str, arch: &str) -> Option<PathBuf> {
     connector_platform_dir(os, arch)
         .map(|platform| managed_connectors_dir().join(platform).join("bin"))
 }
 
 /// `~/.pinvou3/assets/` —— 版本化外部资产库（marketplace-unification §4：
 /// 包只引用不拥有，生命周期由 lock 表驱动）。
-pub fn assets_root() -> PathBuf {
+fn assets_root() -> PathBuf {
     pinvou3_home().join("assets")
 }
 
@@ -121,7 +121,7 @@ pub fn set_runtime_resource_dir(path: PathBuf) {
     let _ = RUNTIME_RESOURCE_DIR.set(path);
 }
 
-pub fn runtime_resource_dir() -> Option<PathBuf> {
+fn runtime_resource_dir() -> Option<PathBuf> {
     RUNTIME_RESOURCE_DIR
         .get()
         .cloned()
@@ -325,7 +325,7 @@ pub fn managed_python_command() -> Result<String, String> {
     }
 }
 
-pub fn user_root() -> PathBuf {
+fn user_root() -> PathBuf {
     pinvou3_home().join("user")
 }
 pub fn user_instructions() -> PathBuf {
@@ -407,7 +407,7 @@ pub fn sessions_root() -> PathBuf {
 }
 
 /// Scheduled-run data is separated from ordinary chat history.
-pub fn scheduled_runs_root() -> PathBuf {
+fn scheduled_runs_root() -> PathBuf {
     pinvou3_home().join("scheduled-runs")
 }
 
@@ -428,7 +428,7 @@ pub fn scheduled_run_profiles_path() -> PathBuf {
 }
 
 /// `~/.pinvou3/projects/` —— 项目层(会话逻辑归档分组)落盘根目录。
-pub fn projects_root() -> PathBuf {
+fn projects_root() -> PathBuf {
     pinvou3_home().join("projects")
 }
 

@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -385,8 +385,51 @@ pub(super) fn persist_pending_revocations_to(
     }
 }
 
-pub(super) fn queue_pending_revocation(config: &WebAccessConfig) -> Result<(), String> {
-    queue_pending_revocation_at(&pending_revocations_path(), PendingRevocation::from(config))
+pub(super) fn queue_pending_revocation_for_removal(config: &WebAccessConfig) -> Result<(), String> {
+    queue_pending_revocation_for_removal_at(
+        &pending_revocations_path(),
+        PendingRevocation::from(config),
+    )
+}
+
+/// Record the revocation intent for a config that is being removed right now
+/// (stop/rotate). A full queue must never block that lifecycle — once 32
+/// permanently unreachable relays accumulated, the user could otherwise never
+/// stop or rotate Web access again. When the queue is full the oldest entry is
+/// dropped for the newest revocation, and the drop is permanent: the ledger no
+/// longer holds that intent, so it can never be replayed. The dropped relay
+/// keeps serving its (no longer referenced) token until external expiry or a
+/// manual cleanup, while the removal the user asked for always succeeds.
+pub(super) fn queue_pending_revocation_for_removal_at(
+    path: &Path,
+    pending: PendingRevocation,
+) -> Result<(), String> {
+    validate_pending_revocation(&pending)?;
+    let mut ledger = load_pending_revocations_from(path)?;
+    let key = pending_revocation_key(&pending);
+    if let Some(existing) = ledger
+        .entries
+        .iter()
+        .find(|entry| pending_revocation_key(entry) == key)
+    {
+        return if existing == &pending {
+            Ok(())
+        } else {
+            Err(format!(
+                "conflicting pending Web revocation credentials for {}",
+                pending.endpoint_id
+            ))
+        };
+    }
+    if ledger.entries.len() >= super::MAX_PENDING_REVOCATIONS {
+        ledger.entries.pop_front();
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "pending_revocation_queue_full",
+            "evicted_oldest",
+        );
+    }
+    ledger.entries.push_back(pending);
+    persist_pending_revocations_to(path, &ledger)
 }
 
 pub(super) fn queue_pending_revocation_at(
@@ -530,62 +573,23 @@ pub(super) fn atomic_write_private_json<T: Serialize>(
         .map_err(|error| format!("create {}: {error}", parent.display()))?;
     let data =
         serde_json::to_vec_pretty(value).map_err(|error| format!("serialize {label}: {error}"))?;
-
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("web-access");
-    let mut temporary = None;
-    for _ in 0..16 {
-        let candidate = parent.join(format!(
-            ".{file_name}.tmp-{}-{}",
-            std::process::id(),
-            crate::features::remote_control::short_token(12)
-        ));
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        platform::configure_private_open_options(&mut options);
-        match options.open(&candidate) {
-            Ok(file) => {
-                platform::enforce_private_permissions(&file, &candidate).map_err(|error| {
-                    format!(
-                        "set private permissions on {}: {error}",
-                        candidate.display()
-                    )
-                })?;
-                temporary = Some((candidate, file));
-                break;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(format!("create {}: {error}", candidate.display())),
-        }
-    }
-    let (temporary, mut file) =
-        temporary.ok_or_else(|| format!("allocate a temporary file next to {}", path.display()))?;
-    let result = (|| {
-        file.write_all(&data)
-            .map_err(|error| format!("write {}: {error}", temporary.display()))?;
-        file.sync_all()
-            .map_err(|error| format!("sync {}: {error}", temporary.display()))?;
-        drop(file);
-        platform::atomic_replace(&temporary, path)
-            .map_err(|error| format!("commit {}: {error}", path.display()))?;
-        platform::sync_parent_directory(parent)
-            .map_err(|error| format!("sync {}: {error}", parent.display()))?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    result
+    // Private temp file + fsync + atomic replace + failure cleanup are provided
+    // by the shared platform filesystem helper.
+    crate::platform::filesystem::atomic_write_private(path, &data)
+        .map_err(|error| format!("write {}: {error}", path.display()))
 }
 
 pub(super) fn remove_private_file(path: &Path) -> Result<(), String> {
     match std::fs::remove_file(path) {
         Ok(()) => {
             if let Some(parent) = path.parent() {
-                platform::sync_parent_directory(parent)
-                    .map_err(|error| format!("sync {}: {error}", parent.display()))?;
+                // Best-effort durability for the directory-entry deletion; on
+                // platforms where a directory cannot be opened as a file the
+                // sync is skipped.
+                if let Ok(dir) = std::fs::File::open(parent) {
+                    dir.sync_all()
+                        .map_err(|error| format!("sync {}: {error}", parent.display()))?;
+                }
             }
             Ok(())
         }

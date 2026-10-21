@@ -5,7 +5,7 @@ use tokio::io::AsyncWriteExt;
 
 use super::file_ingest::{self, IngestResult, MAX_FILE_BYTES};
 
-pub(crate) const MAX_ATTACHMENT_CHUNK_BYTES: usize = 256 * 1024;
+const MAX_ATTACHMENT_CHUNK_BYTES: usize = 256 * 1024;
 const STALE_ATTACHMENT_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const CONVERSATION_ATTACHMENT_REFS_FILE: &str = "conversation-attachments.json";
 static CONVERSATION_ATTACHMENT_REFS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -154,13 +154,30 @@ fn record_matches_session(
         || (allow_legacy_unscoped && record.session_id.is_none())
 }
 
+/// Shared shape check for opaque Web Access identifiers: optional required
+/// prefix, inclusive length bounds, and an ASCII alphanumeric plus `-`/`_`
+/// charset. Length bounds are deliberately per call site; do not unify them.
+pub(crate) fn validate_opaque_token(
+    token: &str,
+    min_len: usize,
+    max_len: usize,
+    prefix: Option<&str>,
+) -> bool {
+    if token.len() < min_len || token.len() > max_len {
+        return false;
+    }
+    if let Some(prefix) = prefix {
+        if !token.starts_with(prefix) {
+            return false;
+        }
+    }
+    token
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
 fn validate_upload_id(upload_id: &str) -> Result<&str, String> {
-    if upload_id.len() < 8
-        || upload_id.len() > 128
-        || !upload_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
+    if !validate_opaque_token(upload_id, 8, 128, None) {
         return Err("附件上传 ID 无效".into());
     }
     Ok(upload_id)
@@ -202,7 +219,7 @@ fn upload_completed_dir(workspace: &Path, upload_id: &str) -> PathBuf {
     completed_root(workspace).join(upload_id)
 }
 
-pub(crate) fn draft_attachment_workspace() -> PathBuf {
+fn draft_attachment_workspace() -> PathBuf {
     crate::platform::paths::pinvou3_home().join("draft-attachments")
 }
 

@@ -196,7 +196,9 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
 
     const ScheduledSelect = ({
       value, options, onChange, testId, ariaLabel, theme, minWidth = 180,
-      multiple = false, minSelected = 0, onClose, emptyLabel = '—', separator = '、',
+      // minSelected/emptyLabel/separator 不设默认值：仅 multiple 分支消费 separator，
+      // 而现有调用点（重复/间隔/星期/模型）全部显式传入所需项；缺省即「无最少保留数」。
+      multiple = false, minSelected, onClose, emptyLabel, separator,
       footerAction, alwaysCommit = false,
     }) => {
       const [open, setOpen] = useState(false);
@@ -212,6 +214,8 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
         ? (options || []).filter(option => selectedValues.includes(option.value))
           .map(option => option.shortLabel || option.label).join(separator)
         : (selected ? selected.label : emptyLabel);
+      // DOM 契约：scheduled smoke 直接读触发按钮的 .value（HTMLButtonElement 反射
+      // value 属性），不能省略。
       const serializedValue = multiple ? selectedValues.join(',') : (value || '');
       const closeMenu = () => {
         setOpen(false);
@@ -447,14 +451,16 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
     const dialogOverlayClass = 'fixed inset-0 z-[200] flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-[6px]';
     const dialogBodyClass = 'min-h-0 flex-1 space-y-5 overflow-y-auto px-6 pb-5 custom-scrollbar';
     const dialogPanelClass = (maxWidth) => `mx-4 flex max-h-[calc(100vh-48px)] w-full ${maxWidth} flex-col overflow-hidden rounded-[28px] shadow-[0_18px_60px_rgba(0,0,0,0.22)] bg-white dark:bg-[#1C1C1E]`;
-    const dialogFooterSurface = (separator) => `border-t px-6 py-4 ${separator} bg-white/95 dark:bg-[#1C1C1E]/95 backdrop-blur-xl`;
-    /** @param {{ task: ScheduledTask, toggleTask: (event: { stopPropagation(): void }, task: ScheduledTask) => Promise<void>, busyAction?: string | null, scheduledCopy: ScheduledCopy }} props - Task switch state and actions. */
-    const MacSwitch = ({ task, toggleTask, busyAction, scheduledCopy }) => {
+    // 两个对话框页脚共用同一分隔线样式（与组件内 iosSeparator 常量同值）：常量串，
+    // 不再留 separator 参数（历史调用恒传同一个 iosSeparator）。
+    const dialogFooterSurface = 'border-t px-6 py-4 border-[#3C3C43]/20 dark:border-[#545458]/50 bg-white/95 dark:bg-[#1C1C1E]/95 backdrop-blur-xl';
+    /** @param {{ task: ScheduledTask, onToggle: (task: ScheduledTask) => Promise<void>, busyAction?: string | null, scheduledCopy: ScheduledCopy }} props - Task switch state and actions. The switch itself stops row-click propagation and forwards only the task. */
+    const MacSwitch = ({ task, onToggle, busyAction, scheduledCopy }) => {
       const checked = task.status === 'active';
       return (
         <button
           type="button"
-          onClick={(event) => toggleTask(event, task)}
+          onClick={(event) => { event.stopPropagation(); onToggle(task); }}
           disabled={!!busyAction}
           aria-pressed={checked}
           aria-label={checked ? scheduledCopy.pause(task.name) : scheduledCopy.resume(task.name)}
@@ -918,11 +924,6 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
         } catch (_) {}
       }
 
-      async function toggleTask(e, task) {
-        if (e) e.stopPropagation();
-        return toggleTaskPaused(task);
-      }
-
       async function startChatCreation() {
         if (!bridge || !bridge.scheduled.startScheduledTaskChat) {
           if (onOpenChat) onOpenChat();
@@ -1274,7 +1275,7 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
 
             </div>
 
-            <div className={`flex shrink-0 justify-end gap-3 ${dialogFooterSurface(iosSeparator)}`}>
+            <div className={`flex shrink-0 justify-end gap-3 ${dialogFooterSurface}`}>
               <button type="submit" data-testid="scheduled-create-submit"
                 disabled={!!busyAction || !String(createForm.name || '').trim() || !String(createForm.prompt || '').trim()}
                 className="h-11 rounded-full bg-[#007AFF] px-6 text-[15px] font-medium text-white shadow-sm transition-colors hover:bg-[#0066D6] disabled:opacity-40">
@@ -1335,9 +1336,9 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
       /**
        * @param {ScheduledTask} task - Scheduled task.
        * @param {number} index - Row index.
-       * @param {ScheduledTask[]} [list] - Task list used for the last-row separator.
+       * @param {ScheduledTask[]} list - Task list used for the last-row separator.
        */
-      const renderTaskRow = (task, index, list = filtered) => {
+      const renderTaskRow = (task, index, list) => {
         const { Icon, className } = taskIconMeta(task);
         return (
           <div key={task.id} className="task-item" data-status={task.status === 'active' ? 'active' : 'paused'}>
@@ -1373,7 +1374,7 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
                 </span>
               </button>
               <div className="flex shrink-0 items-center gap-2 pr-2">
-                <MacSwitch task={task} toggleTask={toggleTask} busyAction={busyAction} scheduledCopy={scheduledCopy} />
+                <MacSwitch task={task} onToggle={toggleTaskPaused} busyAction={busyAction} scheduledCopy={scheduledCopy} />
               </div>
             </div>
             {index !== list.length - 1 && (
@@ -1505,7 +1506,7 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
                 </div>
                 <div className="flex items-center justify-between gap-3">
                   <span className={mutedValue}>{scheduledCopy.enableTask}</span>
-                  <MacSwitch task={selected} toggleTask={toggleTask} busyAction={busyAction} scheduledCopy={scheduledCopy} />
+                  <MacSwitch task={selected} onToggle={toggleTaskPaused} busyAction={busyAction} scheduledCopy={scheduledCopy} />
                 </div>
               </div>
 
@@ -1572,7 +1573,7 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
               </section>
             </div>
 
-            <div className={`flex shrink-0 flex-wrap items-center justify-between gap-3 ${dialogFooterSurface(iosSeparator)}`}>
+            <div className={`flex shrink-0 flex-wrap items-center justify-between gap-3 ${dialogFooterSurface}`}>
               <button type="button" data-testid="scheduled-detail-delete"
                 onClick={(event) => requestDeleteTask(event, selected)}
                 disabled={!!busyAction}

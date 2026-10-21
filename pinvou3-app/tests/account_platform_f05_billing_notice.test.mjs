@@ -29,13 +29,11 @@ function liveBillingNotices() {
   const sessionStates = { deleted: {}, other: {} };
   const scheduledRunSessionOwners = {};
   const bridge = readFileSync(new URL('../src/platform/tauri/bridge.js', import.meta.url), 'utf8');
-  const predicateStart = bridge.indexOf('function isScheduledRunSession(sid)');
-  const predicateEnd = bridge.indexOf('\n  }', predicateStart) + '\n  }'.length;
-  assert.ok(predicateStart >= 0 && predicateEnd > predicateStart);
-  const isScheduledRunSession = vm.runInNewContext(`(${bridge.slice(predicateStart, predicateEnd)})`, {
+  const window = { __PINVOU_TAURI_BRIDGE_FEATURES__: {} };
+  vm.runInNewContext(readFileSync(new URL('../src/shared/bridge-shared-helpers.js', import.meta.url), 'utf8'), { window });
+  const { isScheduledRunSession } = window.PinvouBridgeShared.create('tauriMain', {
     state, sessionStates, scheduledRunSessionOwners,
   });
-  const window = { __PINVOU_TAURI_BRIDGE_FEATURES__: {} };
   const observedObject = new Proxy(Object, {
     get(target, key) {
       if (key === 'create') return prototype => {

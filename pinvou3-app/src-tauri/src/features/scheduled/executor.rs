@@ -78,10 +78,17 @@ impl EngineScheduledRuntime {
     }
 }
 
+/// Shell 开关的唯一读取点：与普通 Yolo 会话同口径（`Pinvou3Bridge::allow_shell_for_prefs`）。
+/// 任务创建（tasks.rs 的 build_create_request）与运行时（下面的 trait impl）共用，
+/// 避免两份同样的偏好读取各自漂移。
+pub(crate) fn current_yolo_allow_shell() -> bool {
+    Pinvou3Bridge::allow_shell_for_prefs(&UserPrefs::load())
+}
+
 #[async_trait]
 impl ScheduledConversationRuntime for EngineScheduledRuntime {
     fn yolo_allow_shell(&self) -> bool {
-        Pinvou3Bridge::allow_shell_for_prefs(&UserPrefs::load())
+        current_yolo_allow_shell()
     }
 
     fn model_id_for_automation(&self, automation_id: &str, model: &str) -> Option<String> {
@@ -220,7 +227,7 @@ impl ScheduledChatExecutor {
         match organized {
             Ok(report) => TaskExecutionResult {
                 status: TaskStatus::Completed,
-                result_text: Some(memory_organize_summary(&report)),
+                result_text: Some(report.summary()),
                 error: None,
                 terminal_reason: TaskTerminalReason::Completed,
             },
@@ -239,24 +246,6 @@ impl ScheduledChatExecutor {
             },
         }
     }
-}
-
-/// A human-readable summary at run completion (goes only into the base Task's
-/// result_summary, never into the run record).
-fn memory_organize_summary(report: &MemoryOrganizeReport) -> String {
-    let total =
-        |counts: &std::collections::BTreeMap<String, u32>| counts.values().copied().sum::<u32>();
-    let scanned = total(&report.scanned);
-    if report.no_change {
-        return format!("Memory organize completed: scanned {scanned}, no changes needed");
-    }
-    format!(
-        "Memory organize completed: scanned {scanned}, deleted {}, updated {}, merged {}, skipped sensitive {}",
-        total(&report.deleted),
-        total(&report.updated),
-        total(&report.merged),
-        report.skipped_sensitive,
-    )
 }
 
 #[async_trait]

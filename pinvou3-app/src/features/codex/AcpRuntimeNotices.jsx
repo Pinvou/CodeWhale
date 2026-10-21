@@ -146,7 +146,7 @@ export function RuntimeNotice({
           <div className="text-[13px] font-semibold">{waitingForLogin ? waitingTitle : signedOutTitle}</div>
           <div className="text-[12px] text-gray-500">
             {loginUrlReady
-              ? (copy.finishAgentAuth ? copy.finishAgentAuth(agentName) : copy.finishBrowserAuth)
+              ? copy.finishAgentAuth(agentName)
               : waitingForLogin
                 ? copy.openingAuth
                 : loginHint}

@@ -41,36 +41,33 @@ for (const f of ['zh.js', 'browser.js', 'chat-recovery.js']) {
 }
 
 try {
-  const {
-    ACTIVITY_PRIORITY,
-    ACTIVITY_TTL_MS,
-    SNAPSHOT_REMOVAL_GRACE_MS,
-    applyActivitySnapshot,
-    applyEvent,
-    createPetState,
-    deriveActivities,
-    deriveAnimation,
-    markSessionViewed,
-    removeSessionActivity,
-    syncSessionTitles,
-  } = await import(`${pathToFileURL(tmp).href}?t=${Date.now()}`);
-
-  assert.deepEqual(ACTIVITY_PRIORITY, { waiting: 0, failed: 1, review: 2, running: 3 });
-  assert.deepEqual(ACTIVITY_TTL_MS, {
+  // Timing fixtures mirror the module-private ACTIVITY_TTL_MS /
+  // SNAPSHOT_REMOVAL_GRACE_MS constants (production values asserted
+  // behaviorally by the expiry cases below).
+  const ACTIVITY_TTL_MS = {
     running: 3 * 60 * 1000,
     failed: 60 * 60 * 1000,
     waiting: 24 * 60 * 60 * 1000,
     review: 7 * 24 * 60 * 60 * 1000,
-  });
+  };
+  const SNAPSHOT_REMOVAL_GRACE_MS = 2500;
+  const {
+    applyActivitySnapshot,
+    applyEvent,
+    createPetState,
+    deriveActivities,
+    markSessionViewed,
+    removeSessionActivity,
+  } = await import(`${pathToFileURL(tmp).href}?t=${Date.now()}`);
 
   const now = 1_000_000;
   const state = createPetState();
-  syncSessionTitles(state, [
+  applyActivitySnapshot(state, [
     { id: 'run', title: '实现宠物动画' },
     { id: 'wait', title: '确认发布范围' },
     { id: 'fail', title: '修复构建' },
     { id: 'done', title: '完成文档' },
-  ]);
+  ], 1, now);
 
   applyEvent(state, 'pet:turn_start', { session_id: 'run' }, now);
   applyEvent(state, 'chat:delta', { session_id: 'run', text: '正在逐帧实现官方动画' }, now + 1);
@@ -82,12 +79,11 @@ try {
   assert.deepEqual(activities.map((item) => item.sessionId), ['wait', 'fail', 'done', 'run']);
   assert.deepEqual(activities.map((item) => item.status), ['waiting', 'failed', 'review', 'running']);
   assert.equal(activities[0].title, '确认发布范围');
-  assert.equal(deriveAnimation(state, now + 5), 'waiting');
 
   const authoritative = createPetState();
   applyEvent(authoritative, 'pet:turn_start', { session_id: 'present' }, now);
   applyEvent(authoritative, 'chat:done', { session_id: 'missing', status: 'Completed' }, now + 1);
-  syncSessionTitles(authoritative, [{ id: 'present', title: '仍然存在的任务' }]);
+  applyActivitySnapshot(authoritative, [{ id: 'present', title: '仍然存在的任务' }], 1, now);
   assert.deepEqual(
     deriveActivities(authoritative, now + 2).map((item) => item.sessionId),
     ['present'],

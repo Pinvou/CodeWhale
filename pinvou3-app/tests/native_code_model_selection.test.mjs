@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import fs from 'node:fs';
+import vm from 'node:vm';
 import { resolveNativeModelRef, persistNativeSessionModelRef, claimNativeControlsRefreshId, canApplyNativeControlsRefresh, finalizePreparedSessionCreation } from '../src/features/codex/native-session-handoff.js';
 const platform = { source: 'ACCOUNT_PLATFORM', model_id: 'public-a' };
 const local = { source: 'LOCAL_CONFIG', saved_model_id: 'local-a' };
@@ -51,4 +52,42 @@ test('main and detached Code hosts pass real account client and Code selector re
   assert.match(codex,/accountPlatformClient=\{accountPlatformClient\}/);
   for(const file of ['../src/app/main.jsx','../src/app/DetachedShell.jsx'])assert.match(source(file),/accountPlatformClient=\{personalAccountClient\}/);
   assert.doesNotMatch(codex,/invoke\('set_session_model_ref'/);
+});
+
+// Execute the production callbacks: the shared control helper keeps KB errors
+// handled in the UI, while typed model selection retains its rejecting contract.
+function nativeControlCallbacks(context) {
+  const source = fs.readFileSync(new URL('../src/features/codex/CodexAcpView.jsx', import.meta.url), 'utf8');
+  const start = source.indexOf('  async function applyNativeControlChange(');
+  const end = source.indexOf('  async function switchNativeMultiAgent(', start);
+  assert.ok(start >= 0 && end > start);
+  return vm.runInNewContext(`(() => { ${source.slice(start, end)}; return { applyNativeControlChange, switchNativeModelRef }; })()`, context);
+}
+
+test('KB control failures remain handled for host and refresh rejection', async () => {
+  for (const failedStage of ['invoke', 'refresh']) {
+    const failure = new Error(`controlled ${failedStage} failure`);
+    const errors = [];
+    const controls = nativeControlCallbacks({
+      setError() {}, showError(error) { errors.push(error); },
+      async invoke() { if (failedStage === 'invoke') throw failure; },
+      async refreshNativeControls() { if (failedStage === 'refresh') throw failure; },
+    });
+    for (const command of ['session_mount_collection', 'session_unmount_collection']) {
+      await assert.doesNotReject(controls.applyNativeControlChange({ sessionId: 'code-a', command, args: {} }));
+    }
+    assert.deepEqual(errors, [failure, failure]);
+  }
+});
+
+test('typed model callback still reports and rejects its own host failure', async () => {
+  const failure = new Error('controlled model failure');
+  const errors = [];
+  const controls = nativeControlCallbacks({
+    busy: false, working: false, activeIdRef: { current: 'code-a' },
+    setError() {}, showError(error) { errors.push(error); }, invoke() {},
+    async persistNativeSessionModelRef() { throw failure; },
+  });
+  await assert.rejects(controls.switchNativeModelRef('code-a', platform), error => error === failure);
+  assert.deepEqual(errors, [failure]);
 });

@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use tauri::{AppHandle, Manager};
 
 use crate::features::connectors::connector_cli::{self as cc, CliCtx, ConnectorConn};
-use crate::features::connectors::skill_gate::ConnectorSkillGate;
+use crate::features::connectors::skill_gate::{ConnectorGate, ConnectorSkillGate};
 
 const ID: &str = "dingtalk";
 const DINGTALK_CTX: CliCtx = CliCtx {
@@ -215,18 +215,13 @@ fn auth_status_message() -> String {
 
 /// 引导:首次使用时下载并校验锁定版本的 dws，已装则秒返回。
 pub async fn dingtalk_ensure_cli() -> Result<Value, String> {
-    tokio::task::spawn_blocking(|| {
-        if dws_cli_present() {
-            return Ok::<Value, String>(json!({ "ok": true, "already": true }));
-        }
-        crate::features::connectors::native_installer::ensure_native_cli("dws")?;
-        if !dws_cli_present() {
-            return Err("钉钉 CLI 安装完成但无法执行，请重试".to_string());
-        }
-        Ok::<Value, String>(json!({ "ok": true, "already": false }))
-    })
+    cc::ensure_cli_with(
+        "dingtalk",
+        dws_cli_present,
+        "钉钉 CLI 安装完成但无法执行，请重试",
+        || crate::features::connectors::native_installer::ensure_native_cli("dws"),
+    )
     .await
-    .map_err(|e| format!("spawn_blocking: {e}"))?
 }
 
 /// 查询当前钉钉连接状态。只返回布尔,不把身份信息带进 webview。
@@ -344,10 +339,7 @@ fn phase_scan(app: &AppHandle, generation: u64) -> Result<(), FlowError> {
                 user_code = Some(c);
             }
             Ok(AuthEvent::Line(line)) => {
-                if auth_lines.len() >= 32 {
-                    auth_lines.pop_front();
-                }
-                auth_lines.push_back(line);
+                cc::remember_auth_line(&mut auth_lines, Some(line));
             }
             Err(_) => {
                 let _ = child.kill();
@@ -397,10 +389,7 @@ fn phase_scan(app: &AppHandle, generation: u64) -> Result<(), FlowError> {
         while let Ok(event) = rx.try_recv() {
             match event {
                 AuthEvent::Line(line) => {
-                    if auth_lines.len() >= 32 {
-                        auth_lines.pop_front();
-                    }
-                    auth_lines.push_back(line);
+                    cc::remember_auth_line(&mut auth_lines, Some(line));
                 }
                 AuthEvent::Url(_) | AuthEvent::UserCode(_) => {}
             }
@@ -517,6 +506,14 @@ fn is_dingtalk_disabled() -> bool {
 pub fn dingtalk_skills_should_show() -> bool {
     !is_dingtalk_disabled() && is_authenticated()
 }
+
+/// 钉钉门控表项:停用标志 + 就绪探测;
+/// skills_state 命令公共体见 [`ConnectorGate`]。
+pub(crate) static DINGTALK_GATE: ConnectorGate = ConnectorGate {
+    disabled_filename: "dingtalk_disabled",
+    ready_probe: is_authenticated,
+};
+
 pub async fn dingtalk_apply_skills() -> Result<Value, String> {
     let show = tokio::task::spawn_blocking(|| -> Result<bool, String> {
         let show = dingtalk_skills_should_show();
@@ -569,17 +566,7 @@ pub(crate) fn dingtalk_gate_step() -> Result<bool, String> {
 }
 
 pub async fn dingtalk_skills_state() -> Result<Value, String> {
-    tokio::task::spawn_blocking(|| {
-        let disabled = is_dingtalk_disabled();
-        let connected = is_authenticated();
-        Ok::<Value, String>(json!({
-            "connected": connected,
-            "enabled": !disabled,
-            "visible": connected && !disabled,
-        }))
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking: {e}"))?
+    DINGTALK_GATE.skills_state_command().await
 }
 
 #[cfg(test)]

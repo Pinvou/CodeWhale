@@ -20,6 +20,9 @@ function featureRegistry(calls, notifyDuringStartup) {
         get(_target, method) {
           return function (...args) {
             calls.push({ kind: 'feature', feature, method: String(method), args });
+            // The publication observer is synchronous and never publishes
+            // recursively; only startup loaders simulate their own notify.
+            if (feature === 'chat-events' && method === 'refreshActiveStreamRender') return;
             if (notifyDuringStartup && /^(load|refresh|enterDraft)/.test(String(method))) context.notify();
             if (feature === 'sessions' && method === 'switchToSession') return Promise.resolve(true);
             return Promise.resolve(undefined);
@@ -68,6 +71,7 @@ async function initialize(search, options = {}) {
     URL,
     Blob,
   });
+  vm.runInContext(fs.readFileSync(path.join(root, 'src', 'shared', 'bridge-shared-helpers.js'), 'utf8'), context, { filename: 'shared/bridge-shared-helpers.js' });
   vm.runInContext(bridgeSource, context, { filename: 'tauri-bridge.js' });
   let notifications = 0;
   windowObject.TauriBridge.state.subscribe('settings', function () { notifications += 1; });
