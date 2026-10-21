@@ -1,7 +1,7 @@
 //! Durable cross-process ownership of a managed model's uninstall transaction.
 //! Public summaries contain no maintenance credential; recovery never reruns a script.
 use std::fs::{self, File};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -70,17 +70,30 @@ fn lock(card: &str) -> Result<File, String> {
 }
 fn load(card: &str) -> Result<Option<Record>, String> {
     let path = path(card)?;
-    if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
-        return Err("maintenance_record_unsafe".into());
-    }
-    match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|_| {
-            "maintenance_record_corrupt: 维护记录损坏，请从备份恢复，不自动解锁".into()
-        }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.to_string()),
-    }
+    let Some(bytes) = super::control_file::read_optional(&path, 16 * 1024 * 1024)
+        .map_err(|error| format!("maintenance_record_unsafe: {error}"))?
+    else {
+        return Ok(None);
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|_| "maintenance_record_corrupt: 维护记录损坏，请从备份恢复，不自动解锁".into())
 }
+/// Terminal proof ignores the unbounded immutable log array, but still reads
+/// the original journal through one trusted, non-blocking regular descriptor.
+fn original_task_finished(path: &Path) -> Result<bool, String> {
+    #[derive(Deserialize)]
+    struct OriginalRun {
+        outcome: Option<Value>,
+    }
+    let file = super::control_file::open_optional(path, None)
+        .map_err(|error| format!("maintenance_original_task_unknown: {error}"))?
+        .ok_or("maintenance_original_task_unknown")?;
+    let original: OriginalRun = serde_json::from_reader(std::io::BufReader::new(file))
+        .map_err(|_| "maintenance_original_task_unknown")?;
+    Ok(original.outcome.is_some())
+}
+
 fn save(record: &mut Record) -> Result<(), String> {
     record.updated_at = now();
     private_write(
@@ -426,8 +439,13 @@ impl Drop for Transaction {
 
 pub fn summaries() -> Result<Vec<Summary>, String> {
     let mut summaries = Vec::new();
-    if !root().exists() {
+    let Some(metadata) = super::control_file::metadata_optional(&root())
+        .map_err(|error| format!("maintenance_index_unknown: {error}"))?
+    else {
         return Ok(summaries);
+    };
+    if !metadata.is_dir() {
+        return Err("maintenance_index_unknown: not a directory".into());
     }
     for entry in fs::read_dir(root()).map_err(|e| e.to_string())? {
         let path = entry.map_err(|e| e.to_string())?.path();
@@ -501,11 +519,7 @@ pub fn recover(
         let path = config::data_dir()
             .join("runs")
             .join(format!("{}.json", config::safe_path_component(run)?));
-        let value: Value = serde_json::from_slice(
-            &fs::read(path).map_err(|e| format!("maintenance_original_task_unknown: {e}"))?,
-        )
-        .map_err(|_| "maintenance_original_task_unknown".to_string())?;
-        if value.get("outcome").is_none_or(Value::is_null) {
+        if !original_task_finished(&path)? {
             return Err(
                 "maintenance_original_task_active: 原任务尚未终结，请先恢复后台任务记录".into(),
             );
@@ -599,6 +613,55 @@ mod tests {
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     };
+
+    #[test]
+    fn special_and_unknown_maintenance_records_never_clear_admission() {
+        use std::os::unix::fs::{FileTypeExt, symlink};
+        let _home = config::TempHome::new();
+        fs::create_dir_all(root()).unwrap();
+        let record = path("record-io").unwrap();
+        let name = std::ffi::CString::new(record.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: name is a terminated path under this test's temporary home.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(ensure_clear("record-io").is_err());
+        assert!(record.symlink_metadata().unwrap().file_type().is_fifo());
+        fs::remove_file(&record).unwrap();
+        symlink("missing", &record).unwrap();
+        assert!(ensure_clear("record-io").is_err());
+        fs::remove_file(&record).unwrap();
+        fs::remove_dir(root()).unwrap();
+        symlink("missing", root()).unwrap();
+        assert!(ensure_clear("record-io").is_err());
+        assert!(summaries().is_err());
+        fs::remove_file(root()).unwrap();
+        assert!(ensure_clear("record-io").is_ok());
+        assert!(summaries().unwrap().is_empty());
+    }
+
+    #[test]
+    fn original_terminal_proof_streams_large_logs_and_refuses_special_evidence() {
+        use std::io::Write;
+        let _home = config::TempHome::new();
+        let path = config::data_dir().join("large-original.json");
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .unwrap();
+        file.write_all(b"{\"lines\":[\"").unwrap();
+        for _ in 0..17 {
+            file.write_all(&vec![b'x'; 1024 * 1024]).unwrap();
+        }
+        file.write_all(b"\"],\"outcome\":{\"Ok\":null}}").unwrap();
+        drop(file);
+        assert!(original_task_finished(&path).unwrap());
+        fs::remove_file(&path).unwrap();
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: name is a terminated path owned by the temporary test home.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(original_task_finished(&path).is_err());
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink("missing", &path).unwrap();
+        assert!(original_task_finished(&path).is_err());
+    }
 
     #[derive(Default)]
     struct State {

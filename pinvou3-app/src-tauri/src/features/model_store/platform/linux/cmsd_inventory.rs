@@ -132,10 +132,11 @@ fn envelope(
 fn inventory_at(root: &Path) -> Result<Value, String> {
     let database = root.join("models.db");
     let cards = root.join("cards");
-    if !database.exists() {
+    let Some(meta) = super::control_file::metadata_optional(&database)
+        .map_err(|error| format!("store_inventory_database_unavailable: {error}"))?
+    else {
         return Ok(envelope(&cards, vec![], vec![], vec![], vec![]));
-    }
-    let meta = std::fs::symlink_metadata(&database).map_err(|e| e.to_string())?;
+    };
     // SAFETY: these identity getters have no preconditions or side effects.
     let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
     if !meta.is_file()
@@ -449,6 +450,43 @@ mod tests {
         let missing = root.path().join("absent");
         assert_eq!(inventory_at(&missing).unwrap()["models"], json!([]));
         assert!(!missing.exists());
+    }
+
+    #[test]
+    fn unknown_database_paths_do_not_publish_an_empty_selection() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("models.db");
+        symlink("missing-database", &database).unwrap();
+        assert!(inventory_at(root.path()).is_err());
+        assert!(
+            database
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let linked = root.path().join("linked");
+        symlink("missing-store", &linked).unwrap();
+        assert!(inventory_at(&linked).is_err());
+        std::fs::remove_file(&linked).unwrap();
+        std::fs::write(&linked, b"not a directory").unwrap();
+        assert!(inventory_at(&linked).is_err());
+        assert_eq!(std::fs::read(&linked).unwrap(), b"not a directory");
+    }
+
+    #[test]
+    fn denied_database_path_is_unknown_without_changing_its_permissions() {
+        let root = tempfile::tempdir().unwrap();
+        let blocked = root.path().join("blocked");
+        std::fs::create_dir(&blocked).unwrap();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0)).unwrap();
+        // SAFETY: geteuid only reads the process identity.
+        if unsafe { libc::geteuid() } != 0 {
+            assert!(inventory_at(&blocked).is_err());
+        }
+        assert_eq!(blocked.symlink_metadata().unwrap().mode() & 0o777, 0);
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     #[test]

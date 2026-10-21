@@ -2,7 +2,7 @@
 //! A revoked execution ticket prevents a late child from starting after recovery.
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone)]
@@ -60,9 +60,22 @@ pub(super) fn private_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
 
 pub(super) fn open_lock(path: &Path) -> Result<File, String> {
     let parent = path.parent().ok_or("invalid_lock_path")?;
-    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
-    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+    if super::control_file::metadata_optional(parent)
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)
+            .map_err(|error| error.to_string())?;
+    }
+    let metadata = super::control_file::metadata_optional(parent)
+        .map_err(|error| error.to_string())?
+        .ok_or("unsafe_lock_path")?;
+    // SAFETY: geteuid only reads the effective identity.
+    let uid = unsafe { libc::geteuid() };
+    if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o022 != 0 {
         return Err("unsafe_lock_path".into());
     }
     let file = OpenOptions::new()
@@ -71,10 +84,10 @@ pub(super) fn open_lock(path: &Path) -> Result<File, String> {
         .create(true)
         .truncate(false)
         .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
         .map_err(|e| e.to_string())?;
-    file.set_permissions(fs::Permissions::from_mode(0o600))
-        .map_err(|e| e.to_string())?;
+    super::control_file::verify_file(&file, None).map_err(|error| error.to_string())?;
     Ok(file)
 }
 
@@ -125,10 +138,10 @@ impl ExecutionFence {
             .map_err(|_| "maintenance_script_active: 卸载脚本仍在执行，不能解除维护".to_string())?;
         private_write(&self.directory.join("ticket"), b"revoked")?;
         let path = self.directory.join("process.json");
-        let bytes = match fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(lock),
-            Err(e) => return Err(format!("maintenance_process_unknown: {e}")),
+        let Some(bytes) = super::control_file::read_optional(&path, 16 * 1024)
+            .map_err(|error| format!("maintenance_process_unknown: {error}"))?
+        else {
+            return Ok(lock);
         };
         let identity: Identity = serde_json::from_slice(&bytes)
             .map_err(|_| "maintenance_process_unknown: 脚本进程记录损坏".to_string())?;
@@ -192,6 +205,48 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .unwrap()
+    }
+
+    #[test]
+    fn fifo_or_writable_locks_cannot_prove_quiescence_or_be_repaired() {
+        use std::os::unix::fs::FileTypeExt;
+        let root = tempfile::tempdir().unwrap();
+        let fence = ExecutionFence::prepare(root.path().join("fence")).unwrap();
+        let path = fence.directory.join("script.lock");
+        fs::remove_file(&path).unwrap();
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: name is a terminated path owned by this temporary fixture.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let inode = path.symlink_metadata().unwrap().ino();
+        assert!(fence.quiesce().is_err());
+        assert!(path.symlink_metadata().unwrap().file_type().is_fifo());
+        assert_eq!(path.symlink_metadata().unwrap().ino(), inode);
+        assert_eq!(fs::read(fence.directory.join("ticket")).unwrap(), b"armed");
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, b"retained").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o660)).unwrap();
+        let inode = path.metadata().unwrap().ino();
+        assert!(fence.quiesce().is_err());
+        assert_eq!(path.metadata().unwrap().ino(), inode);
+        assert_eq!(path.metadata().unwrap().mode() & 0o777, 0o660);
+        assert_eq!(fs::read(&path).unwrap(), b"retained");
+    }
+
+    #[test]
+    fn unknown_process_evidence_is_preserved_and_never_released() {
+        let root = tempfile::tempdir().unwrap();
+        let fence = ExecutionFence::prepare(root.path().join("fence")).unwrap();
+        let path = fence.directory.join("process.json");
+        std::os::unix::fs::symlink("missing", &path).unwrap();
+        assert!(fence.quiesce().is_err());
+        assert!(path.symlink_metadata().unwrap().file_type().is_symlink());
+        fs::remove_file(&path).unwrap();
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: name is a terminated path owned by this test.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(fence.quiesce().is_err());
+        fs::remove_file(&path).unwrap();
+        assert!(fence.quiesce().is_ok());
     }
 
     #[test]
