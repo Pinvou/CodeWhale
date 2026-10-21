@@ -25,7 +25,7 @@ struct RemoteOrigin {
 pub(super) struct RemoteTelemetryState {
     executions: HashMap<String, RemoteExecution>,
     origins: HashMap<String, RemoteOrigin>,
-    // In-flight admission snapshots cannot survive an explicit local deletion.
+    // In-flight origin/admission snapshots cannot survive an explicit local deletion.
     // Tokens never cross process boundaries, so this epoch is not persisted.
     #[serde(skip)]
     registration_epoch: Arc<()>,
@@ -165,14 +165,25 @@ pub(crate) fn register_remote_origin<R: tauri::Runtime>(
     let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
         return;
     };
-    let Some(lease) = telemetry.current_lease() else {
+    let Some(token) = capture_execution_lease(&telemetry) else {
         return;
     };
+    register_origin(&telemetry, task, mode, &token);
+}
+
+pub(super) fn register_origin(
+    telemetry: &BehaviorTelemetry,
+    task: &str,
+    mode: Option<&str>,
+    token: &RemoteExecutionLease,
+) {
     if let Ok(mut contexts) = telemetry.remote_executions.lock() {
-        if !telemetry.lease_is_current(&lease) {
+        if !Arc::ptr_eq(&contexts.registration_epoch, &token.registration_epoch)
+            || !telemetry.lease_is_current(&token.lease)
+        {
             return;
         }
-        if insert_origin(&mut contexts, task, mode, lease) {
+        if insert_origin(&mut contexts, task, mode, token.lease.clone()) {
             let _ = persist(&contexts);
         }
     }

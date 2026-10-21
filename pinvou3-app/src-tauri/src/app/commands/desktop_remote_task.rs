@@ -945,6 +945,7 @@ pub async fn desktop_remote_controlled_task_send(
     runtime: RuntimeState<'_>,
 ) -> Result<Value, String> {
     let started = Instant::now();
+    let mut submission_delegated = false;
     let result = async {
         ensure_supported(&controlled)?;
         let (lease, _) = controlled
@@ -972,6 +973,7 @@ pub async fn desktop_remote_controlled_task_send(
             skill_ids,
             attachments,
         )?;
+        submission_delegated = true;
         let result = app
             .state::<crate::app::desktop_remote_composition::DesktopLocalExecutionPort>()
             .submit_local(input)
@@ -1009,9 +1011,10 @@ pub async fn desktop_remote_controlled_task_send(
         Ok(status)
     }
     .await;
-    // Successful B-local submissions are already correlated at admission.
-    // Keep a diagnostic only for failures before an invocation can be bound.
-    if result.is_err() {
+    // The delegated owner reports correlated submission/rejection/terminal
+    // events. Only command preparation failures get this unbound diagnostic;
+    // an error returned after delegation does not prove absence of admission.
+    if result.is_err() && !submission_delegated {
         let event = RemoteControlEvent::from_result(
             RemoteStage::TaskSubmit,
             &result,
@@ -1214,9 +1217,7 @@ fn should_report_local_task_rejection(
     // Installation failures happen after admission and already publish a durable
     // failed terminal. Replays can also fail a newer policy: neither is a new
     // rejection. Only a confirmed absent task authorizes rejection telemetry.
-    local_submission
-        && result.is_err()
-        && matches!(ledger.record(task_id), Err(lookup) if lookup.code == "task_not_found")
+    local_submission && result.is_err() && ledger.confirms_absence(task_id)
 }
 
 #[cfg(test)]

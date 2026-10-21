@@ -41,9 +41,9 @@ test('B ingress rejection observes the ledger guard and never invents a B-origin
   const business = read('desktop_remote_controller_business');
   const ingress = section(business, 'async fn submit_task(', 'async fn task_status(');
   assertBefore(ingress, 'task_rejection::is_definite(code)', 'RemoteStage::TaskRejected');
-  assertBefore(ingress, 'ledger.record(', 'RemoteStage::TaskRejected');
+  assertBefore(ingress, 'ledger.confirms_absence(', 'RemoteStage::TaskRejected');
   assertBefore(ingress, 'return "task_request_conflict"', 'RemoteStage::TaskRejected');
-  assert(ingress.includes('true, payload.get("mode")') || /true,\s*payload.get\("mode"\)/.test(ingress));
+  assert(/true,\s*payload.get\("mode"\)/.test(ingress));
   assert(!ingress.includes('RemoteStage::TaskSubmit'));
 });
 
@@ -63,7 +63,10 @@ function assertLocalRejection(task) {
   const guard = submission.slice(requiredIndex(submission, 'fn should_report_local_task_rejection('));
   assert(guard.includes('local_submission'));
   assert(guard.includes('result.is_err()'));
-  assert.match(guard, /matches!\(ledger\.record\(task_id\), Err\(lookup\) if lookup\.code == "task_not_found"\)/);
+  assert(guard.includes('ledger.confirms_absence(task_id)'));
+  const ledger = feature('remote_control/controller/task');
+  const absence = section(ledger, 'pub(crate) fn confirms_absence(', 'pub(crate) fn records(');
+  assert.match(absence, /matches!\(self\.record\(task_id\), Err\(lookup\) if lookup\.code == "task_not_found"\)/);
 }
 
 test('B local rejection is gated by absence from the durable admission ledger', () => {
@@ -165,4 +168,58 @@ test('admission and turn contracts reject missing registration or binding callsi
       `${file}: missing ${needle} must fail`,
     );
   }
+});
+
+function assertTrustedDuration(journal) {
+  const track = section(journal, 'fn track_task_once(', 'const TASK_STATUS_EVENT');
+  assert.equal((track.match(/\.duration_ms\(/g) || []).length, 1);
+  assertBefore(track, 'if event.status == "failed"', 'if let Some(duration) = task_telemetry_duration_ms(event, record)');
+  assertBefore(track, 'metric = metric.duration_ms(duration)', 'track_remote_execution_event(');
+  const duration = section(journal, 'fn task_telemetry_duration_ms(', 'impl DesktopTaskEventSink');
+  assert(duration.includes('event.status == "admitted"'));
+  assert(duration.includes('record.terminal_reason.as_deref() == Some("process_restart")'));
+  assert(duration.includes('record.updated_at_ms.checked_sub(record.admitted_at_ms)'));
+}
+
+test('journal omits unmeasured admission/recovery durations after every metric construction branch', () => {
+  const journal = read('desktop_remote_journal');
+  assertTrustedDuration(journal);
+  for (const needle of ['if let Some(duration) = task_telemetry_duration_ms(event, record)', 'record.terminal_reason.as_deref() == Some("process_restart")', 'event.status == "admitted"']) {
+    assert.throws(() => assertTrustedDuration(journal.replace(needle, 'removed_guard')));
+  }
+});
+
+function assertLocalDiagnosticOwnership(task, business) {
+  const command = section(task, 'pub async fn desktop_remote_controlled_task_send(', '/// B-local task stop.');
+  assertBefore(command, 'submission_delegated = true', '.submit_local(input)');
+  assert(command.includes('if result.is_err() && !submission_delegated'));
+  const admission = section(business, 'fn admit_and_dispatch(&self, prepared: PreparedControlledTask)', 'fn submit_prevalidated_remote');
+  assertBefore(admission, '*self.diagnostic_task.lock() = Some(prepared.task_id.clone())', 'route_prepared_controlled_task(');
+  const worker = section(business, 'async fn submit_controlled_on_worker(', 'impl ControlledExecutionPort');
+  assertBefore(worker, 'let result = async', 'TurnBudget::from_environment()');
+  assertBefore(worker, 'run_controlled_submission_worker(', 'if local && result.is_err()');
+  assertBefore(worker, 'should_report_unbound_local_failure(&ledger, observation.lock().as_deref())', 'track_remote_control(');
+  assert(worker.includes('task_id.is_none_or(|task_id| ledger.confirms_absence(task_id))'));
+}
+
+test('local preparation diagnostics retain ownership through worker errors without reclassifying admitted tasks', () => {
+  const task = read('desktop_remote_task');
+  const business = read('desktop_remote_controller_business');
+  assertLocalDiagnosticOwnership(task, business);
+  assert.throws(() => assertLocalDiagnosticOwnership(task.replace('if result.is_err() && !submission_delegated', 'if result.is_err()'), business));
+  for (const needle of ['*self.diagnostic_task.lock() = Some(prepared.task_id.clone())', 'should_report_unbound_local_failure(&ledger, observation.lock().as_deref())', 'ledger.confirms_absence(task_id)']) {
+    assert.throws(() => assertLocalDiagnosticOwnership(task, business.replace(needle, 'removed_guard')));
+  }
+});
+
+test('origin registration captures and checks the deletion epoch before persistence', () => {
+  const source = feature('behavior_telemetry/remote_execution');
+  const registration = section(source, 'pub(crate) fn register_remote_origin', 'pub(crate) fn track_remote_result_received');
+  function check(text) {
+    assertBefore(text, 'capture_execution_lease(&telemetry)', 'register_origin(&telemetry, task, mode, &token)');
+    assertBefore(text, 'Arc::ptr_eq(&contexts.registration_epoch, &token.registration_epoch)', 'insert_origin(');
+    assertBefore(text, '!telemetry.lease_is_current(&token.lease)', 'insert_origin(');
+  }
+  check(registration);
+  assert.throws(() => check(registration.replace('Arc::ptr_eq(&contexts.registration_epoch, &token.registration_epoch)', 'true')));
 });

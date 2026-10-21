@@ -620,6 +620,12 @@ async fn deletion_and_withdrawal_invalidate_pending_admission_and_terminal_conte
             "chat",
             &pending,
         );
+        super::remote_execution::register_origin(
+            &telemetry,
+            "existing-origin",
+            Some("chat"),
+            &pending,
+        );
         match action {
             "local_delete" => {
                 telemetry.delete_local_data().await.unwrap();
@@ -652,6 +658,7 @@ async fn deletion_and_withdrawal_invalidate_pending_admission_and_terminal_conte
             "chat",
             &pending,
         );
+        super::remote_execution::register_origin(&telemetry, "late-origin", Some("chat"), &pending);
         for (session, task) in [
             ("existing-session", "existing-task"),
             ("late-session", "late-task"),
@@ -681,6 +688,12 @@ async fn deletion_and_withdrawal_invalidate_pending_admission_and_terminal_conte
         // New work can use current consent; invalidating captured work does
         // not permanently disable collection or poison future admissions.
         let fresh = super::remote_execution::capture_execution_lease(&telemetry).unwrap();
+        super::remote_execution::register_origin(&telemetry, "fresh-origin", Some("chat"), &fresh);
+        assert!(
+            serde_json::to_value(super::remote_execution::load_state()).unwrap()["origins"]
+                .get("fresh-origin")
+                .is_some()
+        );
         super::remote_execution::register_execution(
             &telemetry,
             "fresh-session",
