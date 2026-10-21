@@ -841,13 +841,13 @@ async fn submit_controlled_on_worker(
         .await
     }
     .await;
-    if local && result.is_err() {
+    if let (true, Err(submit_failure)) = (local, &result) {
         let ledger = app.state::<Arc<RemoteTaskLedger>>();
         if should_report_unbound_local_failure(&ledger, observation.lock().as_deref()) {
             use crate::features::behavior_telemetry::{
                 RemoteControlEvent, RemoteStage, track_remote_control,
             };
-            let error = Err::<(), _>(result.as_ref().unwrap_err().code().to_owned());
+            let error = Err::<(), _>(submit_failure.code().to_owned());
             track_remote_control(
                 &app,
                 RemoteControlEvent::from_result(

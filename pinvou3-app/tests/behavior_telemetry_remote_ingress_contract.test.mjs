@@ -197,7 +197,9 @@ function assertLocalDiagnosticOwnership(task, business) {
   assertBefore(admission, '*self.diagnostic_task.lock() = Some(prepared.task_id.clone())', 'route_prepared_controlled_task(');
   const worker = section(business, 'async fn submit_controlled_on_worker(', 'impl ControlledExecutionPort');
   assertBefore(worker, 'let result = async', 'TurnBudget::from_environment()');
-  assertBefore(worker, 'run_controlled_submission_worker(', 'if local && result.is_err()');
+  assertBefore(worker, 'run_controlled_submission_worker(', 'if let (true, Err(submit_failure)) = (local, &result)');
+  assert(worker.includes('let error = Err::<(), _>(submit_failure.code().to_owned())'));
+  assert(!worker.includes('unwrap_err()'));
   assertBefore(worker, 'should_report_unbound_local_failure(&ledger, observation.lock().as_deref())', 'track_remote_control(');
   assert(worker.includes('task_id.is_none_or(|task_id| ledger.confirms_absence(task_id))'));
 }
@@ -207,7 +209,7 @@ test('local preparation diagnostics retain ownership through worker errors witho
   const business = read('desktop_remote_controller_business');
   assertLocalDiagnosticOwnership(task, business);
   assert.throws(() => assertLocalDiagnosticOwnership(task.replace('if result.is_err() && !submission_delegated', 'if result.is_err()'), business));
-  for (const needle of ['*self.diagnostic_task.lock() = Some(prepared.task_id.clone())', 'should_report_unbound_local_failure(&ledger, observation.lock().as_deref())', 'ledger.confirms_absence(task_id)']) {
+  for (const needle of ['*self.diagnostic_task.lock() = Some(prepared.task_id.clone())', 'if let (true, Err(submit_failure)) = (local, &result)', 'submit_failure.code().to_owned()', 'should_report_unbound_local_failure(&ledger, observation.lock().as_deref())', 'ledger.confirms_absence(task_id)']) {
     assert.throws(() => assertLocalDiagnosticOwnership(task, business.replace(needle, 'removed_guard')));
   }
 });
