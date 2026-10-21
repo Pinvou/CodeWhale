@@ -506,8 +506,7 @@ async fn partial_input_engine_network_error_preserves_partial_tool_feedback() {
     assert!(
         completions[0]
             .as_ref()
-            .err()
-            .expect("partial writer validation failure")
+            .expect_err("partial writer validation failure")
             .to_string()
             .contains("missing required field 'content'")
     );

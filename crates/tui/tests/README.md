@@ -16,7 +16,7 @@ the `codewhale-tui` bin unit tests):
 
 | harness | binary | what lives there | why it stays separate |
 |---|---|---|---|
-| `tests/integration/main.rs` | `integration` | 15 plain `#[test]`/`#[tokio::test]` suites: `adaptive_evidence_acceptance`, `diagnostic_read_only`, `dotenv_authority`, `eval_harness`, `exec_persistent_service`, `exec_stream_drop_acceptance`, `exec_turn_usage`, `integration_mock_llm`, `lifecycle_outbox_exec`, `palette_audit`, `protocol_recovery`, `skill_cli`, `telemetry_contract`, `verifiers_harness_contract`, `workflow_tool_stream_acceptance` | All are process-level but require no PTY or Gherkin runner; they share `wiremock`/`tempfile` and link the TUI once instead of 15 times. `crate::` for `eval`/`models`/`llm_client`/`palette`/`network_policy`/`config`/`install` is satisfied by `integration/main.rs` re-exporting those `#[path]` modules at the harness crate root so `crate::config` etc. resolve. |
+| `tests/integration/main.rs` | `integration` | 16 plain `#[test]`/`#[tokio::test]` suites: `adaptive_evidence_acceptance`, `diagnostic_read_only`, `dotenv_authority`, `eval_harness`, `exec_persistent_service`, `exec_stream_drop_acceptance`, `exec_turn_usage`, `integration_mock_llm`, `lifecycle_outbox_exec`, `palette_audit`, `partial_input_engine`, `protocol_recovery`, `skill_cli`, `telemetry_contract`, `verifiers_harness_contract`, `workflow_tool_stream_acceptance` | All are process-level but require no PTY or Gherkin runner; they share `wiremock`/`tempfile` and link the TUI once instead of 16 times. `crate::` for `eval`/`models`/`llm_client`/`palette`/`network_policy`/`config`/`install` is satisfied by `integration/main.rs` re-exporting those `#[path]` modules at the harness crate root so `crate::config` etc. resolve. |
 | `tests/cucumber/main.rs` | `cucumber` | 5 Gherkin runners: `core_session_command_extraction`, `directory_listing_acceptance`, `epic_acceptance_harness`, `eval_smoke_acceptance`, `tool_lifecycle_acceptance` | Each defines a distinct `cucumber::World`; steps are registered per-World via inventory, so merging is safe and cuts the `cucumber` link jobs. `plugin_e2e_acceptance` is no longer a Gherkin runner: its production-mirror scanner World/steps were removed with the worthless-test sweep (the real `scan_plugin_dir` contract stays covered by unit tests in `src/tools/plugin.rs`), leaving the plain binary smoke + `#[cfg(all(unix, feature="long-running-tests"))]` PTY acceptance, dormant in the default run. |
 The former `tests/pty` harness was removed. It accumulated full-screen copy,
 color, timing, and geometry assertions that were expensive to link and made the
@@ -33,6 +33,7 @@ Filtering still works via the module path:
 cargo test -p codewhale-tui --tests -- --list | grep adaptive_evidence
 cargo test -p codewhale-tui --test integration adaptive_evidence_acceptance -- --nocapture
 cargo test -p codewhale-tui --test cucumber tool_lifecycle -- --nocapture
+cargo test -p codewhale-tui --test integration partial_input_engine -- --nocapture
 ```
 
 The shared helpers in `crates/tui/tests/support/` (`qa_harness`, `llm_client`) and fixtures in `crates/tui/tests/fixtures/` are untouched — harnesses reach them via `../support`.

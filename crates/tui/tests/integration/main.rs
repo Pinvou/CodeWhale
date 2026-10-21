@@ -102,6 +102,7 @@ mod exec_turn_usage;
 mod integration_mock_llm;
 mod lifecycle_outbox_exec;
 mod palette_audit;
+mod partial_input_engine;
 mod protocol_recovery;
 mod skill_cli;
 mod telemetry_contract;
