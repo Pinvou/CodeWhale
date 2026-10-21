@@ -27,6 +27,7 @@ import {
   normalizeEngines,
   normalizeModels,
   normalizeStatus,
+  normalizeTasks,
 } from './cms-view-model.js';
 
 /** @param {{ title?: string, hint?: string, icon?: any, children?: any }} props */
@@ -152,6 +153,7 @@ export function CmsSettingsPanel({ copy, onOpenModelStore }) {
     /** @type {import('./cms-view-model.js').CapacityView | null} */ (null),
   );
   const [tasks, setTasks] = useState(/** @type {Array<Record<string, any>>|null} */ (null));
+  const [tasksPartial, setTasksPartial] = useState(false);
   const [operationError, setOperationError] = useState('');
   const [partialError, setPartialError] = useState('');
   const [busy, setBusy] = useState('');
@@ -227,12 +229,10 @@ export function CmsSettingsPanel({ copy, onOpenModelStore }) {
       const enginesKnown = unwrap(enginesRes)?.available && Array.isArray(unwrap(enginesRes).data?.engines);
       const nextModels = modelsKnown ? normalizeModels(unwrap(modelsRes).data) : null;
       const nextEngines = enginesKnown ? normalizeEngines(unwrap(enginesRes).data) : null;
-      const allTasks = unwrap(tasksRes)?.data?.tasks;
-      const tasksKnown = unwrap(tasksRes)?.available && Array.isArray(allTasks);
-      const nextTasks = tasksKnown ? allTasks.filter(task => task.source !== 'store'
-        || !allTasks.some(parent => parent.source === 'cmsd' && parent.store_run_id === task.id)) : null;
+      const taskObservation = normalizeTasks(unwrap(tasksRes));
+      const nextTasks = taskObservation.tasks;
       const partial = [modelsRes, enginesRes, capacityRes, tasksRes]
-        .map((r, i) => !(i === 0 ? modelsKnown : i === 1 ? enginesKnown : i === 3 ? tasksKnown : unwrap(r)?.available)
+        .map((r, i) => !(i === 0 ? modelsKnown : i === 1 ? enginesKnown : i === 3 ? taskObservation.complete : unwrap(r)?.available)
           ? ['models', 'engines', 'capacity', 'tasks'][i] : null)
         .filter(Boolean).join(',');
       observeNotices(noticeScope.current, cmsNoticeObservations({
@@ -246,6 +246,7 @@ export function CmsSettingsPanel({ copy, onOpenModelStore }) {
         normalizeCapacity(unwrap(capacityRes)?.available ? unwrap(capacityRes).data : undefined),
       );
       setTasks(nextTasks);
+      setTasksPartial(!taskObservation.complete);
       setPartialError(partial);
       setLastRefresh(new Date());
     } catch (error) {
@@ -548,11 +549,11 @@ export function CmsSettingsPanel({ copy, onOpenModelStore }) {
             <summary>
               <span className="cms-icon-tile" aria-hidden="true"><ClipboardList size={18} /></span>
               <span className="cms-disclosure-label"><span className="cms-heading">{copy.sectionTasks}</span></span>
-              <span className={attentionTasks.length ? 'cms-disclosure-meta cms-task-attention' : 'cms-disclosure-meta cms-muted'}>{attentionTasks.length ? copy.taskAttention(attentionTasks.length) : tasks ? copy.completedTasks(finishedTasks.length) : '—'}</span>
+              <span className={attentionTasks.length ? 'cms-disclosure-meta cms-task-attention' : 'cms-disclosure-meta cms-muted'}>{attentionTasks.length ? copy.taskAttention(attentionTasks.length) : tasks && !tasksPartial ? copy.completedTasks(finishedTasks.length) : '—'}</span>
             </summary>
             <p className="cms-muted px-5 pb-3 text-xs">{copy.backgroundHelp}</p>
-            {!tasks && <Row label={loading ? copy.loading : copy.queryFailed} />}
-            {tasks?.length === 0 && <Row label={copy.noTasks} />}
+            {(!tasks || (tasksPartial && tasks.length === 0)) && <Row label={loading ? copy.loading : copy.queryFailed} />}
+            {!tasksPartial && tasks?.length === 0 && <Row label={copy.noTasks} />}
             {attentionTasks.length > 0 && <div aria-label={copy.attentionTasks} data-testid="cms-task-attention">{attentionTasks.map(renderTask)}</div>}
             {finishedTasks.length > 0 && <details className="cms-details mx-5 mb-4" data-testid="cms-task-history">
               <summary>{copy.completedTasks(finishedTasks.length)}</summary>

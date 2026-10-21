@@ -233,3 +233,12 @@ export function modelIdNeedsNameFallback(modelId) {
   const v = String(modelId || '').trim();
   return v === '' || v.startsWith('/');
 }
+
+/** Retain confirmed device tasks while an unavailable store makes the aggregate partial. */
+export function normalizeTasks(result) {
+  const payload = result?.data;
+  if (result?.available !== true || !Array.isArray(payload?.tasks)) return { tasks: null, complete: false };
+  const tasks = payload.tasks.filter(task => task.source !== 'store'
+    || !payload.tasks.some(parent => parent.source === 'cmsd' && parent.store_run_id === task.id));
+  return { tasks, complete: payload.store_query?.available === true };
+}

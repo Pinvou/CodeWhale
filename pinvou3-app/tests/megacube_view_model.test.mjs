@@ -14,6 +14,7 @@ import {
   normalizeEngines,
   normalizeModels,
   normalizeStatus,
+  normalizeTasks,
 } from '../src/features/megacube/cms-view-model.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -314,4 +315,37 @@ test('matching a card name does not turn an observed container into managed auth
   assert.equal(rows[0].instances[0].source, 'external');
   assert.equal(rows[0].instances[0].modelId, 'Shared model name');
   assert.equal(normalizeModels({models:[{card:'known-card',managed:false,status:'running'}]}).models[0].managed, false);
+});
+
+// The device task index merges independently fallible CMS and store producers.
+import { CMS_LAYOUT_COPY } from '../src/shared/i18n/cms-layout.js';
+
+test('task observation: store failure retains known device tasks without confirming aggregate absence', () => {
+  const device = { id: 'task-a', source: 'cmsd', kind: 'install', status: 'running', store_run_id: 'run-a' };
+  const receiver = { id: 'run-a', source: 'store', kind: 'install_local', status: 'running' };
+  const independent = { id: 'run-b', source: 'store', kind: 'download', status: 'running' };
+  for (const store_query of [undefined, { available: false, error: { code: 'store_unreachable' } }]) {
+    assert.deepEqual(normalizeTasks({ available: true, data: { tasks: [], store_query } }), { tasks: [], complete: false });
+    assert.deepEqual(normalizeTasks({ available: true, data: { tasks: [device], store_query } }), { tasks: [device], complete: false });
+  }
+  assert.deepEqual(normalizeTasks({ available: true, data: { tasks: [device, receiver, independent], store_query: { available: true } } }), { tasks: [device, independent], complete: true });
+  assert.deepEqual(normalizeTasks({ available: true, data: { tasks: [], store_query: { available: true } } }), { tasks: [], complete: true });
+  assert.deepEqual(normalizeTasks({ available: false }), { tasks: null, complete: false });
+  assert.deepEqual(normalizeTasks({ available: true, data: {} }), { tasks: null, complete: false });
+});
+
+test('task names cover actual store producers and the current CMS task contract in all three languages', () => {
+  const rust = file => fs.readFileSync(path.join(ROOT, 'src-tauri/src/features/model_store/platform/linux', file), 'utf8').split('#[cfg(test)]')[0];
+  const storeKinds = [...new Set([...rust('run_state.rs').matchAll(/kind:\s*"([^"\n]+)"/g), ...rust('service.rs').matchAll(/kind:\s*"([^"\n]+)"/g)].map(match => match[1]))]
+    // force_remove is synchronous and explicitly never gets a run/task record.
+    .filter(kind => kind !== 'force_remove');
+  assert.ok(storeKinds.includes('uninstall_recovery') && storeKinds.includes('version_switch'));
+  const cmsKinds = ['adopt-store', 'enable', 'disable', 'switch', 'install', 'purge', 'recover', 'set_default'];
+  for (const [language, copy] of Object.entries(CMS_LAYOUT_COPY)) {
+    for (const kind of new Set([...storeKinds, ...cmsKinds])) {
+      assert.equal(typeof copy.taskKinds[kind], 'string', `${language}: task kind ${kind} needs a readable name`);
+      assert.ok(copy.taskKinds[kind].trim() && copy.taskKinds[kind] !== kind, `${language}: ${kind} must not expose the protocol identifier`);
+    }
+    assert.equal(copy.taskKinds['set-default'], undefined, 'the HTTP route spelling is not a produced task kind');
+  }
 });

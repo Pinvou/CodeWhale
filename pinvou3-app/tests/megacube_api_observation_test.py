@@ -242,4 +242,42 @@ class ApiObservationTests(unittest.TestCase):
         self.assertEqual(result['data']['local_error'],ERROR['error'])
         self.assertEqual(result['data']['models'][0]['local_state'],'unknown')
 
+    def test_partial_task_index_retains_store_query_and_never_claims_no_records(self):
+        query = {'available':False,'error':{'code':'store_unreachable','message':'socket missing'}}
+        for store_query in (None, query):
+            snapshot = {'tasks':[]}
+            if store_query is not None:
+                snapshot['store_query'] = store_query
+            with self.subTest(store_query=store_query), patch.object(server,'_http_get',return_value=(200,json.dumps(snapshot))), patch.object(server.megacube_tools.transfers,'list_tasks',return_value=[]):
+                result = server._tool_task({})
+            self.assertEqual(result['data']['cmsd_task_observation'],'available')
+            self.assertEqual(result['data']['store_task_observation'],'unconfirmed')
+            self.assertEqual(result['data']['store_query'],store_query)
+            self.assertNotIn('没有任务记录',result['summary'])
+            self.assertIn('商店任务尚未核实',result['summary'])
+
+    def test_partial_task_index_retains_known_device_and_independent_jobs(self):
+        query = {'available':False,'error':{'code':'store_unreachable','message':'socket missing'}}
+        device = {'id':'device-a','kind':'switch','card':'target','status':'running','created_at':1}
+        independent = {'id':'fetch-'+'a'*32,'kind':'fetch','status':'running','created_at':2}
+        with patch.object(server,'_http_get',return_value=(200,json.dumps({'tasks':[device],'store_query':query}))), patch.object(server.megacube_tools.transfers,'list_tasks',return_value=[independent]):
+            result = server._tool_task({})
+        self.assertEqual({row['id'] for row in result['data']['tasks']},{device['id'],independent['id']})
+        self.assertEqual(result['data']['store_query'],query)
+        self.assertIn('商店任务尚未核实',result['summary'])
+
+    def test_confirmed_empty_task_index_is_distinct_from_partial(self):
+        with patch.object(server,'_http_get',return_value=(200,json.dumps({'tasks':[],'store_query':{'available':True}}))), patch.object(server.megacube_tools.transfers,'list_tasks',return_value=[]):
+            result = server._tool_task({})
+        self.assertEqual(result['data']['store_task_observation'],'available')
+        self.assertIn('管理面没有任务记录',result['summary'])
+
+    def test_partial_index_change_preserves_exact_task_lookup_failures(self):
+        error={'error':{'code':'store_unreachable','message':'socket missing'}}
+        with patch.object(server,'_http_get',return_value=(503,json.dumps(error))):
+            result=server._tool_task({'task_id':'device-a','wait_seconds':0})
+        self.assertEqual(result['data']['status'],'unknown')
+        self.assertEqual(result['data']['observation_error_code'],'store_unreachable')
+        self.assertNotIn('已成功',result['summary'])
+
 if __name__=='__main__': unittest.main()

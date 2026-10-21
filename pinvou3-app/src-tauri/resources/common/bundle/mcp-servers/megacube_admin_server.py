@@ -2328,6 +2328,12 @@ def _tool_task(args):
         cmsd_tasks = (data or {}).get("tasks")
         observed = isinstance(cmsd_tasks, list)
         observation_error = data.get("error") if isinstance(data, dict) else None
+        store_query = data.get("store_query") if isinstance(data, dict) else None
+        store_observed = isinstance(store_query, dict) and store_query.get("available") is True
+        observation = {"cmsd_task_observation": "available" if observed else "unconfirmed",
+                       "observation_error": observation_error,
+                       "store_task_observation": "available" if store_observed else "unconfirmed",
+                       "store_query": store_query}
         tasks = (cmsd_tasks if observed else []) + megacube_tools.transfers.list_tasks()
         recent = sorted(
             tasks,
@@ -2349,10 +2355,13 @@ def _tool_task(args):
                 if task.get("source") == "store":
                     task["id"] = handle
         if not recent:
+            summary = "当前无法核实设备任务，独立任务索引为空。"
+            if observed:
+                summary = ("管理面没有任务记录。" if store_observed else
+                           "设备任务已取得，商店任务尚未核实；当前未取得任务记录。")
             return {
-                "summary": "管理面没有任务记录。" if observed else "当前无法核实设备任务，独立任务索引为空。",
-                "data": {"tasks": [], "cmsd_task_observation": "available" if observed else "unconfirmed",
-                         "observation_error": observation_error},
+                "summary": summary,
+                "data": {"tasks": [], **observation},
                 "next": "用 cube_list_incomplete_installs 检查尚未进入模型库的商店失败；同时核实管理连接。没有查到记录不能证明没有任务，不让用户先手工摘日志。",
             }
         lines = []
@@ -2364,9 +2373,8 @@ def _tool_task(args):
                 line += "——%s" % str(t["error"])[:80]
             lines.append(line)
         return {
-            "summary": "最近 %d 个任务（失败/取消在前）：%s" % (len(recent), "；".join(lines)),
-            "data": {"tasks": recent, "cmsd_task_observation": "available" if observed else "unconfirmed",
-                         "observation_error": observation_error},
+            "summary": "最近 %d 个任务（失败/取消在前）：%s" % (len(recent), "；".join(lines)) + (" 商店任务尚未核实，列表可能不完整。" if not store_observed else ""),
+            "data": {"tasks": recent, **observation},
             "next": "挑中要处理的任务，带它的 id 再调 cube_get_task 看事件流与错误细节。",
         }
     data = _api("/v1/tasks/%s" % task_id)
