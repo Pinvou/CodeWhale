@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import socket
 import subprocess
 import tempfile
@@ -40,11 +41,21 @@ def main():
     gateway_port = probe.getsockname()[1]
     probe.close()
     env_base = {**os.environ, 'CMSD_SOCKET': str(sock), 'PINVOU3_CMSD_UNIT': unit,
-                'PINVOU3_CMSD_GATEWAY': f'127.0.0.1:{gateway_port}'}
+                'PINVOU3_CMSD_GATEWAY': f'127.0.0.1:{gateway_port}',
+                'XDG_CONFIG_HOME': str(Path.home()/'.config')}
     profiles = {key: {**env_base, 'PINVOU3_HOME': str(work/key)} for key in ('a', 'b')}
     profiles['c'] = {**env_base, 'PINVOU3_HOME': str(work/'c'),
                      'XDG_CONFIG_HOME': str(work/'other-config')}
     checks = []
+    component = work/'a/megacube/cmsd-component'
+    state = component/'state'
+    namespace = 'megacube-model-' + hashlib.sha256(os.fsencode(state/'env')).hexdigest()[:16]
+    template = unit_file.parent/(namespace+'@.service')
+    template_backup = template.with_suffix('.service.cmsd-before-profile-v1')
+    for owned in (template, template_backup):
+        assert not owned.exists() and not owned.is_symlink(), 'private template namespace already exists'
+    template_sha256 = None
+    removed_templates = []
 
     def systemd(*values):
         return subprocess.check_output(['systemctl', '--user', *values], text=True, timeout=40).strip()
@@ -87,8 +98,83 @@ def main():
             time.sleep(.15)
         raise TimeoutError((profile, name))
 
+    def quiesce_workers():
+        for profile in (work/'a', work/'b', work/'c'):
+            quiesce_worker(profile)
+
+    def quiesce_worker(profile):
+        component = profile/'megacube/cmsd-component'
+        operation_path = component/'operation.json'
+        if not operation_path.exists():
+            return
+        operation = json.loads(operation_path.read_text())
+        operation_id = operation.get('id', '')
+        assert operation_id.startswith('component-') and all(
+            letter.isascii() and (letter.isalnum() or letter == '-') for letter in operation_id)
+        assert hasattr(os, 'pidfd_open') and hasattr(signal, 'pidfd_send_signal')
+        for entry in Path('/proc').iterdir():
+            if not entry.name.isdigit():
+                continue
+            descriptor = None
+            try:
+                if entry.stat().st_uid != os.geteuid():
+                    continue
+                descriptor = os.pidfd_open(int(entry.name), 0)
+                if (entry/'exe').resolve(strict=True) != pinvou:
+                    continue
+                argv = [part for part in (entry/'cmdline').read_bytes().split(b'\0') if part]
+                if argv[1:] != [b'--cmsd-component-worker', operation_id.encode()]:
+                    continue
+                environment = dict(item.split(b'=', 1) for item in (entry/'environ').read_bytes().split(b'\0') if b'=' in item)
+                if environment.get(b'PINVOU3_HOME') != os.fsencode(profile):
+                    continue
+                signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+                deadline = time.monotonic()+3
+                while time.monotonic() < deadline:
+                    try:
+                        process_state = (entry/'stat').read_text().rsplit(') ', 1)[1].split()[0]
+                    except FileNotFoundError:
+                        break
+                    if process_state in ('Z', 'X'):
+                        break
+                    time.sleep(.02)
+                else:
+                    raise TimeoutError('test-owned worker did not exit')
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
+                continue
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
+
+    def remove_private_template():
+        marker = state/'native-unit-namespace-v1'
+        if any(owned.exists() or owned.is_symlink() for owned in (template, template_backup)):
+            assert marker.is_file() and not marker.is_symlink(), 'private namespace receipt is missing'
+        if marker.exists() or marker.is_symlink():
+            assert marker.is_file() and not marker.is_symlink() and marker.stat().st_uid == os.geteuid()
+            assert marker.read_text() == 'cmsd-native-unit-namespace-v1\n'+namespace+'\n'
+        assert not systemd('list-units', namespace+'@*.service', '--all', '--no-legend', '--plain'), (
+            'private namespace unexpectedly has a native model instance')
+        unexpected = [path for path in unit_file.parent.glob(namespace+'@*.service*')
+                      if path not in (template, template_backup)]
+        assert not unexpected, 'private namespace unexpectedly has an instance registration'
+        for owned in (template, template_backup):
+            if not owned.exists() and not owned.is_symlink():
+                continue
+            metadata = owned.lstat()
+            assert owned.is_file() and not owned.is_symlink() and metadata.st_uid == os.geteuid()
+            assert metadata.st_size <= 65536 and metadata.st_mode & 0o022 == 0
+            content = owned.read_text()
+            assert content.startswith('[Unit]\nDescription=MegaCube model engine (card %i)\n')
+            assert 'EnvironmentFile='+str(state/'env'/'%i.env')+'\n' in content
+            if owned == template and template_sha256:
+                assert hashlib.sha256(owned.read_bytes()).hexdigest() == template_sha256
+            owned.unlink()
+            removed_templates.append(owned.name)
+
     try:
         action('a', 'install', package)
+        template_sha256 = hashlib.sha256(template.read_bytes()).hexdigest()
         status = cli('a', 'status')
         assert status['installed'] and status['ownedUnit']
         baseline_pid = pid()
@@ -253,25 +339,47 @@ def main():
         record('restore-refuses-foreign-unit-and-works-after-removal', {'passed': True})
         assert pid('cmsd.service') == original_pid
         assert hashlib.sha256((package/'cmsd').read_bytes()).hexdigest() == original_hash
-        report = {'passed': True, 'cases': checks, 'seconds': time.monotonic()-started,
+        report = {'passed': False, 'functional_checks_passed': True, 'cleanup_completed': False, 'cases': checks, 'seconds': time.monotonic()-started,
                   'pinvou_sha256': hashlib.sha256(pinvou.read_bytes()).hexdigest(),
                   'package_sha256': original_hash, 'original_cmsd_pid_unchanged': True,
                   'scope': 'real isolated systemd user service and real cmsd; no model inference or native desktop input'}
         (evidence/'report.json').write_text(json.dumps(report, indent=2)+'\n')
     finally:
-        subprocess.run(['systemctl', '--user', 'stop', unit], capture_output=True, timeout=40)
-        subprocess.run(['systemctl', '--user', 'disable', unit], capture_output=True, timeout=40)
-        if unit_file.exists():
-            unit_file.unlink()
-        override_dir = unit_file.parent/(unit+'.d')
-        if override_dir.exists():
-            shutil.rmtree(override_dir)
-        subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True, timeout=40)
-        # Retain receipts on failure for diagnosis, never delete shared/user data.
-        if (evidence/'report.json').exists():
-            shutil.rmtree(work)
-        else:
+        try:
+            quiesce_workers()
+            subprocess.run(['systemctl', '--user', 'stop', unit], capture_output=True, timeout=40)
+            subprocess.run(['systemctl', '--user', 'disable', unit], capture_output=True, timeout=40)
+            subprocess.run(['systemctl', '--user', '--runtime', 'disable', unit], capture_output=True, timeout=40)
+            subprocess.run(['systemctl', '--user', 'reset-failed', unit], capture_output=True, timeout=40)
+            assert pid() == '0', 'test-owned component must exit before template cleanup'
+            if unit_file.exists():
+                unit_file.unlink()
+            override_dir = unit_file.parent/(unit+'.d')
+            if override_dir.exists():
+                shutil.rmtree(override_dir)
+            remove_private_template()
+            subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True, timeout=40)
+            # Publish success only after the private registrations and work are gone.
+            if (evidence/'report.json').exists():
+                report = json.loads((evidence/'report.json').read_text())
+                shutil.rmtree(work)
+                report.update(passed=report.get('functional_checks_passed') is True,
+                              cleanup_completed=True, private_namespace_templates_removed=removed_templates,
+                              no_test_native_unit_instances=True)
+                (evidence/'report.json').write_text(json.dumps(report, indent=2)+'\n')
+            else:
+                (evidence/'retained-work.txt').write_text(str(work)+'\n')
+        except Exception as error:
             (evidence/'retained-work.txt').write_text(str(work)+'\n')
+            try:
+                report = json.loads((evidence/'report.json').read_text())
+            except (OSError, ValueError):
+                report = {}
+            report.update(passed=False, cleanup_completed=False, cleanup_error=repr(error),
+                          private_work_retained=str(work), private_namespace_templates_removed=removed_templates)
+            (evidence/'report.json').write_text(json.dumps(report, indent=2)+'\n')
+            raise
+
 
 
 if __name__ == '__main__':

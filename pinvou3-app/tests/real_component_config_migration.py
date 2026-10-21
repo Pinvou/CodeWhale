@@ -11,7 +11,6 @@ import argparse
 import hashlib
 import json
 import os
-import re
 from pathlib import Path
 import shutil
 import signal
@@ -65,6 +64,7 @@ def main():
     assert digest(old_package/'cmsd') == manifest['sha256']
     started, events, owned = time.monotonic(), [], []
     component_by_unit = {}
+    template_hash_by_unit = {}
     removed_templates = []
 
     def systemd(*values, check=True):
@@ -127,6 +127,37 @@ def main():
                 if descriptor is not None:
                     os.close(descriptor)
 
+    def remove_private_template(unit, unit_file):
+        state = component_by_unit[unit]/'state'
+        namespace = 'megacube-model-' + hashlib.sha256(os.fsencode(state/'env')).hexdigest()[:16]
+        template = unit_file.parent/(namespace+'@.service')
+        template_backup = template.with_suffix('.service.cmsd-before-profile-v1')
+        template_sha256 = template_hash_by_unit.get(unit)
+        marker = state/'native-unit-namespace-v1'
+        if any(owned.exists() or owned.is_symlink() for owned in (template, template_backup)):
+            assert marker.is_file() and not marker.is_symlink(), 'private namespace receipt is missing'
+        if marker.exists() or marker.is_symlink():
+            assert marker.is_file() and not marker.is_symlink() and marker.stat().st_uid == os.geteuid()
+            assert marker.read_text() == 'cmsd-native-unit-namespace-v1\n'+namespace+'\n'
+        assert not systemd('list-units', namespace+'@*.service', '--all', '--no-legend', '--plain'), (
+            'private namespace unexpectedly has a native model instance')
+        unexpected = [path for path in unit_file.parent.glob(namespace+'@*.service*')
+                      if path not in (template, template_backup)]
+        assert not unexpected, 'private namespace unexpectedly has an instance registration'
+        for owned in (template, template_backup):
+            if not owned.exists() and not owned.is_symlink():
+                continue
+            metadata = owned.lstat()
+            assert owned.is_file() and not owned.is_symlink() and metadata.st_uid == os.geteuid()
+            assert metadata.st_size <= 65536 and metadata.st_mode & 0o022 == 0
+            content = owned.read_text()
+            assert content.startswith('[Unit]\nDescription=MegaCube model engine (card %i)\n')
+            assert 'EnvironmentFile='+str(state/'env'/'%i.env')+'\n' in content
+            if owned == template and template_sha256:
+                assert hashlib.sha256(owned.read_bytes()).hexdigest() == template_sha256
+            owned.unlink()
+            removed_templates.append(owned.name)
+
     def cleanup(unit, unit_file):
         quiesce_worker(unit)
         facts = properties(unit)
@@ -143,26 +174,10 @@ def main():
         systemd('disable', unit, check=False)
         systemd('--runtime', 'disable', unit, check=False)
         systemd('reset-failed', unit, check=False)
+        assert properties(unit).get('MainPID') == '0', 'test-owned component must exit before template cleanup'
         if unit_file.exists():
             unit_file.unlink()
-        # cmsd installs a template isolated by this private state directory.
-        # No model is installed, so no instance may remain before removing it.
-        component = component_by_unit[unit]
-        for template in unit_file.parent.glob('megacube-model-*@.service'):
-            if not re.fullmatch(r'megacube-model-[0-9a-f]{16}@\.service', template.name):
-                continue
-            if template.is_symlink():
-                continue
-            text = template.read_text()
-            if str(component/'state')+'/' not in text:
-                continue
-            assert template.stat().st_uid == os.geteuid()
-            assert text.startswith('[Unit]\nDescription=MegaCube model engine (card %i)\n')
-            instances = systemd('list-units', template.name.replace('@.service', '@*.service'),
-                               '--all', '--no-legend', '--plain').stdout
-            assert not instances.strip(), 'private fixture unexpectedly left a native model instance'
-            template.unlink()
-            removed_templates.append(template.name)
+        remove_private_template(unit, unit_file)
         systemd('daemon-reload')
         assert properties(unit).get('MainPID') == '0' and not unit_file.exists()
 
@@ -190,6 +205,11 @@ def main():
                    'XDG_CONFIG_HOME': str(Path.home()/'.config')}
             component = profile/'megacube/cmsd-component'
             component_by_unit[unit] = component
+            namespace = 'megacube-model-' + hashlib.sha256(os.fsencode(component/'state/env')).hexdigest()[:16]
+            template = unit_file.parent/(namespace+'@.service')
+            template_backup = template.with_suffix('.service.cmsd-before-profile-v1')
+            for owned_template in (template, template_backup):
+                assert not owned_template.exists() and not owned_template.is_symlink(), 'private template namespace already exists'
             service = component/'service.json'
             marker, armed = root/'worker-interrupted', root/'interrupt-armed'
             if interrupted:
@@ -246,6 +266,7 @@ def main():
                 return json.loads(body)
 
             action('install', old_package)
+            template_hash_by_unit[unit] = digest(template)
             assert daemon_status()['version'] == old_version
             original = json.loads(service.read_text())
             identity = component/'state/device-identity.json'
@@ -290,6 +311,7 @@ def main():
             if updated_status['activeState'] != 'active':
                 action('start')
             assert daemon_status()['version'] == new_version
+            template_hash_by_unit[unit] = digest(template)
             assert Path('/proc', properties(unit)['MainPID'], 'exe').resolve() == Path(installed['binary'])
             record(case+'-update-starts-new-real-daemon', {'version': new_version, 'binary_sha256': digest(Path(installed['binary'])),
                    'backup_config_digest_updated': True})
@@ -300,6 +322,7 @@ def main():
             assert restored['registration']['config_sha256'] == digest(config)
             assert Path('/proc', properties(unit)['MainPID'], 'exe').resolve() == Path(original['binary'])
             assert daemon_status()['version'] == old_version
+            template_hash_by_unit[unit] = digest(template)
             assert digest(identity) == identity_hash
             assert not (component/'state/component-maintenance.json').exists()
             assert not (component/'config-migration.json').exists()
@@ -308,7 +331,7 @@ def main():
             cleanup(unit, unit_file)
             owned.remove((unit, unit_file))
             record(case+'-unique-unit-cleaned', {'unit': unit, 'MainPID': properties(unit)['MainPID']})
-        report = {'passed': True, 'seconds': time.monotonic()-started, 'cases': events,
+        report = {'passed': False, 'functional_checks_passed': True, 'cleanup_completed': False, 'seconds': time.monotonic()-started, 'cases': events,
                   'pinvou_sha256': digest(frozen), 'source_head': args.source_head,
                   'package_sha256': digest(old_package/'cmsd'), 'upgrade_fixture_sha256': digest(new_package/'cmsd'),
                   'private_namespace_templates_removed': removed_templates, 'no_test_native_unit_instances': True,
@@ -319,15 +342,32 @@ def main():
         raise
     finally:
         errors = []
-        for unit, unit_file in owned:
+        try:
+            for unit, unit_file in owned:
+                try:
+                    cleanup(unit, unit_file)
+                except Exception as error:
+                    errors.append({'unit': unit, 'error': repr(error)})
+            if errors:
+                (evidence/'cleanup-errors.json').write_text(json.dumps(errors, indent=2)+'\n')
+                raise RuntimeError('Could not safely clean the private fixture; inspect cleanup-errors.json')
+            shutil.rmtree(work)
+            if (evidence/'report.json').exists():
+                report = json.loads((evidence/'report.json').read_text())
+                report.update(passed=report.get('functional_checks_passed') is True, cleanup_completed=True)
+                (evidence/'report.json').write_text(json.dumps(report, indent=2)+'\n')
+        except Exception as error:
+            (evidence/'retained-work.txt').write_text(str(work)+'\n')
             try:
-                cleanup(unit, unit_file)
-            except Exception as error:
-                errors.append({'unit': unit, 'error': repr(error)})
-        if errors:
-            (evidence/'cleanup-errors.json').write_text(json.dumps(errors, indent=2)+'\n')
-            raise RuntimeError('Could not safely clean the private fixture; inspect cleanup-errors.json')
-        shutil.rmtree(work)
+                report = json.loads((evidence/'report.json').read_text())
+            except (OSError, ValueError):
+                report = {}
+            report.update(passed=False, cleanup_completed=False, cleanup_error=repr(error),
+                          cleanup_errors=errors, private_work_retained=str(work),
+                          private_namespace_templates_removed=removed_templates)
+            (evidence/'report.json').write_text(json.dumps(report, indent=2)+'\n')
+            raise
+
 
 
 if __name__ == '__main__':
