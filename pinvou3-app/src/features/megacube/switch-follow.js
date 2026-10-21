@@ -90,7 +90,8 @@ export function createCmsdSwitchFollow({
       // A later switch supersedes this one. Never route a stale completion to
       // the new default's alias, even if both tasks finish between two polls.
       if (status.data?.active_model !== target?.runtime) { intent.done = true; return; }
-      if (!entry?.model_id || entry.status !== 'running' || entry.healthy !== true) {
+      if (typeof entry?.model_id !== 'string' || !entry.model_id.trim()
+        || entry.status !== 'running' || entry.healthy !== true) {
         throw new Error('model_readiness_unconfirmed');
       }
       const gateway = `http://${status.data.gateway}/v1`;
@@ -110,7 +111,10 @@ export function createCmsdSwitchFollow({
       if (row && [logicalCard, target.runtime].includes(linkedCard(row))) {
         const endpointMatches = row.base_url.replace(/\/$/, '') === gateway
           || (entry.port && Number(new URL(row.base_url).port) === entry.port);
-        const wireModel = modelIdNeedsNameFallback(entry.model_id) ? 'megacube-default' : entry.model_id;
+        // A path-like ID needs a display-name fallback, but remains the exact
+        // API identity. A device-default alias would subscribe this chat to
+        // later unrelated default changes.
+        const wireModel = entry.model_id;
         const aliasNeedsGateway = wireModel === 'megacube-default'
           && row.base_url.replace(/\/$/, '') !== gateway;
         if (!endpointMatches || row.model !== wireModel || aliasNeedsGateway || linkedCard(row) !== logicalCard) {
@@ -127,7 +131,7 @@ export function createCmsdSwitchFollow({
         const id = await makeRegistrationId(registrationScope || gateway, logicalCard);
         if (saved.models.some(model => model.id === id)) throw new Error('registration_identity_conflict');
         row = buildSavedModel({
-          modelName: fallback ? 'megacube-default' : entry.model_id,
+          modelName: entry.model_id,
           displayName: (fallback && cards?.find(card => card.id === logicalCard)?.name)
             || cmsdCardRowName(logicalCard, fallback ? logicalCard : entry.model_id),
           baseUrl: gateway, storeCardId: logicalCard, cardId: target.fromStore ? logicalCard : null,

@@ -223,14 +223,14 @@ test('an exact-card legacy alias reconnects using factual wire identity and the 
   }
 });
 
-test('a path-model alias is only used through the gateway, even when its direct port is current', async () => {
+test('a path-model legacy alias is repaired to the concrete ID through the gateway', async () => {
   const f = fixture({ rows: [{ id: 'legacy-path', model: 'megacube-default', store_card_id: 'target',
     base_url: 'http://127.0.0.1:19999/v1' }], api: {
     queryModels: async () => ({ available: true, data: { models: [{ card: 'target',
       model_id: '/models/target', port: 19999, status: 'running', healthy: true }] } }),
   } });
   await f.api.settled(task); assert.equal(f.saved.length, 1);
-  assert.equal(f.saved[0].id, 'legacy-path'); assert.equal(f.saved[0].model, 'megacube-default');
+  assert.equal(f.saved[0].id, 'legacy-path'); assert.equal(f.saved[0].model, '/models/target');
   assert.equal(f.saved[0].base_url, 'http://127.0.0.1:8000/v1');
 });
 
@@ -250,6 +250,7 @@ test('optional card display-name failure does not block a healthy path-model reg
     listCards: async () => { throw new Error('display catalog offline'); },
   } });
   await f.api.observe(task); assert.equal(f.saved.length, 1); assert.equal(f.selected.length, 1);
+  assert.equal(f.saved[0].model, '/models/target');
 });
 
 test('a device switch during registration supersedes the pending selection', async () => {
@@ -449,5 +450,63 @@ test('reconnecting an existing store registration requests validated linkage and
       assert.equal(f.rows[0].model, 'OldTarget');
       assert.equal(f.bindings.get('conversation-a'), 'source');
     }
+  }
+});
+
+
+test('specific cards retain exact normal and path IDs for new and reused registrations', async () => {
+  for (const modelId of ['Target', '/models/target']) {
+    for (const fromStore of [false, true]) {
+      for (const existing of [false, true]) {
+        const runtime = fromStore ? 'target--v2' : 'target';
+        const receipt = { ...task, card: runtime, requested_card: 'target', selected_version: 'v2' };
+        const old = { id: 'registered', name: 'Retained user name', model: 'megacube-default',
+          store_card_id: 'target', ...(fromStore ? { model_store_card_id: 'target' } : {}),
+          base_url: 'http://127.0.0.1:19999/v1', context_window_tokens: 4096, max_output_tokens: 1024 };
+        const f = fixture({ arm: false, rows: existing ? [old] : [], api: {
+          queryModels: async () => ({ available: true, data: {
+            ...(fromStore ? { store_bindings: { target: runtime } } : {}),
+            models: [{ card: runtime, managed: true, model_id: modelId, version_id: 'v2',
+              status: 'running', healthy: true, max_model_len: 65536, port: 19999 }],
+          } }),
+          queryStatus: async () => ({ available: true, data: { active_model: runtime, gateway: '127.0.0.1:8000' } }),
+          listCards: async () => [{ id: 'target', name: 'Catalog display name' }],
+        } });
+        f.api.accept({ task: receipt, sessionId: 'conversation-a', binding: 'source', fallback: 'global', started: Date.now() });
+        await f.api.settled(receipt);
+        assert.equal(f.saved.length, 1); assert.equal(f.selected.length, 1);
+        const saved = f.saved[0];
+        assert.equal(saved.model, modelId);
+        assert.equal(saved.store_card_id, 'target');
+        assert.equal(saved.model_store_card_id, fromStore ? 'target' : null);
+        assert.equal(saved.model_store_link_requested, fromStore);
+        if (existing) {
+          assert.equal(saved.id, old.id); assert.equal(saved.name, old.name);
+          assert.equal(saved.context_window_tokens, 4096); assert.equal(saved.max_output_tokens, 1024);
+          assert.equal(saved.credential_action, 'keep'); assert.equal(saved.api_key, null);
+        } else if (modelId.startsWith('/')) {
+          assert.equal(saved.name, 'Catalog display name');
+        }
+        // A later default change is irrelevant to the persisted registration's
+        // concrete wire identity; replay cannot turn it into a subscription.
+        f.supersede(); await f.api.observe(receipt);
+        assert.equal(f.saved.length, 1); assert.equal(f.selected.length, 1);
+        assert.equal(saved.model, modelId);
+        f.api.dispose();
+      }
+    }
+  }
+});
+
+test('missing or unknown card model identity never saves or selects a default alias', async () => {
+  for (const modelId of [undefined, null, '', '  ', {}, 123]) {
+    const f = fixture({ api: {
+      queryModels: async () => ({ available: true, data: { models: [{ card: 'target',
+        model_id: modelId, status: 'running', healthy: true }] } }),
+    } });
+    await f.api.settled(task);
+    assert.equal(f.saved.length, 0); assert.equal(f.selected.length, 0);
+    assert.equal(f.bindings.get('conversation-a'), 'source');
+    f.api.dispose();
   }
 });
