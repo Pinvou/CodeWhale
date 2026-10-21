@@ -1538,6 +1538,7 @@ fn apply_general_settings_patch(current: &mut UserPrefs, patch: GeneralSettingsP
         // 模型列表和激活项有各自的专用写命令。即使高级设置来自旧快照，也无权覆盖它们。
         advanced.saved_models = current.advanced.saved_models.clone();
         advanced.active_model_id = current.advanced.active_model_id.clone();
+        advanced.model_store_context_repairs = current.advanced.model_store_context_repairs.clone();
         current.advanced = advanced;
     }
 }
@@ -2214,6 +2215,11 @@ mod tests {
         current.migrate_models();
         current.search.provider = SearchProvider::Metaso;
         current.pet.enabled = true;
+        current
+            .advanced
+            .model_store_context_repairs
+            .insert("stable-id".into(), "verified-256k-v1/card".into());
+        let context_repairs = current.advanced.model_store_context_repairs.clone();
         let saved_models = current.advanced.saved_models.clone();
         let active_model_id = current.advanced.active_model_id.clone();
 
@@ -2221,6 +2227,7 @@ mod tests {
             &mut current,
             GeneralSettingsPatch {
                 language: Some(Language::En),
+                advanced: Some(Default::default()),
                 ..Default::default()
             },
         );
@@ -2231,6 +2238,10 @@ mod tests {
         assert!(current.pet.enabled);
         assert_eq!(current.advanced.saved_models, saved_models);
         assert_eq!(current.advanced.active_model_id, active_model_id);
+        assert_eq!(
+            current.advanced.model_store_context_repairs,
+            context_repairs
+        );
     }
 
     #[test]

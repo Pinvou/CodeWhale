@@ -774,6 +774,10 @@ pub struct AdvancedPrefs {
     /// (见 `UserPrefs::migrate_models`),把旧 model_preset+custom_* 合成一条。
     #[serde(default)]
     pub saved_models: Vec<SavedModel>,
+    /// One-time corrections of the store's erroneous 32K defaults. Kept with
+    /// the model list so later intentional limits survive restarts and upgrades.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub model_store_context_repairs: std::collections::BTreeMap<String, String>,
     /// 全局默认/当前激活模型 id(新建会话继承它)。None = 回退列表首条。
     #[serde(default)]
     pub active_model_id: Option<String>,
@@ -1850,6 +1854,7 @@ impl UserPrefs {
     /// 删一条模型;若删的是当前 active,回退到列表首条。
     pub fn remove_model(&mut self, id: &str) {
         self.advanced.saved_models.retain(|m| m.id != id);
+        self.advanced.model_store_context_repairs.remove(id);
         if self.advanced.active_model_id.as_deref() == Some(id) {
             self.advanced.active_model_id =
                 self.advanced.saved_models.first().map(|m| m.id.clone());

@@ -1,13 +1,16 @@
 //! Reconcile existing Pinvou model routes after a store engine reports its actual endpoint.
-//! Only route identity and card provenance are changed; credentials and user options stay intact.
+//! Preserve user options except the explicitly versioned correction of erroneous store defaults.
 use super::{db, lifecycle::endpoint_url_is_loopback, version_store};
 use crate::platform::prefs::{SavedModel, UserPrefs};
+
+mod context_repair;
 
 struct Route {
     card_id: String,
     base_url: String,
     model: String,
     ready: bool,
+    context_repair_stamp: Option<String>,
     previous: Vec<(String, String)>,
 }
 
@@ -133,7 +136,15 @@ fn routes() -> Result<Vec<Route>, String> {
                 card_id: rec.card_id.clone(),
                 base_url,
                 model,
-                ready: rec.running && rec.status == "deployed" && !rec.card_update_pending,
+                ready: rec.running
+                    && rec.status == "deployed"
+                    && !rec.card_update_pending
+                    && !versions.iter().any(|version| {
+                        version.card_id == rec.card_id
+                            && version.version_id == version_store::active_id(rec)
+                            && version.state == "deleting"
+                    }),
+                context_repair_stamp: context_repair::deployment_stamp(rec),
                 previous,
             })
         })
@@ -141,21 +152,49 @@ fn routes() -> Result<Vec<Route>, String> {
 }
 
 pub(super) fn sync(card_id: Option<&str>) -> Result<Vec<String>, String> {
-    let prefs = UserPrefs::load();
-    if prefs.advanced.saved_models.is_empty() {
+    sync_inner(card_id, true)
+}
+
+/// Bind legacy routes before enable, but do not repair limits until enable succeeds.
+pub(super) fn sync_routes(card_id: Option<&str>) -> Result<Vec<String>, String> {
+    sync_inner(card_id, false)
+}
+
+fn sync_inner(card_id: Option<&str>, repair_context: bool) -> Result<Vec<String>, String> {
+    let mut preview = UserPrefs::load();
+    if preview.advanced.saved_models.is_empty() {
         return Ok(Vec::new());
     }
     let routes = routes()?;
-    // Most library reads require no write. Recompute under the prefs transaction so
-    // concurrent model edits, selection changes and keyring writes are preserved.
-    if reconcile(&mut prefs.advanced.saved_models.clone(), &routes, card_id).is_empty() {
+    let mut changed = reconcile(&mut preview.advanced.saved_models, &routes, card_id);
+    // Probe only eligible legacy 32K rows, outside the settings lock and on the
+    // caller's blocking worker. Ordinary reads after repair perform no request.
+    let proofs = if repair_context {
+        context_repair::probe(&preview, &routes, card_id)
+    } else {
+        Vec::new()
+    };
+    if repair_context {
+        changed.extend(context_repair::apply(
+            &mut preview,
+            &routes,
+            &proofs,
+            card_id,
+        ));
+    }
+    if changed.is_empty() {
         return Ok(Vec::new());
     }
-    let mut changed = Vec::new();
     UserPrefs::update_transaction(|prefs| {
-        // Read again under the settings lock: a concurrent enable may have
-        // committed a newer endpoint while this pass waited for that lock.
-        changed = reconcile(&mut prefs.advanced.saved_models, &self::routes()?, card_id);
+        // A concurrent enable may have committed a different deployment while
+        // this pass probed or waited for the settings lock. Revalidate its stamp.
+        let routes = self::routes()?;
+        changed = reconcile(&mut prefs.advanced.saved_models, &routes, card_id);
+        if repair_context {
+            changed.extend(context_repair::apply(prefs, &routes, &proofs, card_id));
+        }
+        changed.sort();
+        changed.dedup();
         Ok(())
     })?;
     Ok(changed)
