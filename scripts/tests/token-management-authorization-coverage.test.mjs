@@ -87,6 +87,42 @@ test('real CRLF route sources preserve declaration offsets and complete inventor
 });
 
 const invocationDocument = JSON.parse(readFileSync(new URL('../../account-platform/contracts/openapi/token-invocation.yaml', import.meta.url), 'utf8'));
+for (const handler of ['getOwnedUsageByIdempotencyKey', 'cancelUsageRequest']) {
+  for (const [name, replacement] of Object.entries({
+    currentContextResolver: 's.resolveModelUsagePermission(w, r, "personal.usage.cancel")',
+    removedPersonalResolver: 's.authorizePersonalUsageUser(w, r, "personal.usage.cancel")',
+    wrongPermission: 's.authorizeOriginalUsageUser(w, r, "personal.usage.read")',
+  })) {
+    test(`original-owner ${handler} rejects ${name} authority drift`, () => {
+      const file = 'token/personal_execution_http.go';
+      const original = inputs.invocationSources[file];
+      const start = original.indexOf(`func (s *Service) ${handler}(`);
+      assert.ok(start >= 0);
+      const next = original.indexOf('\nfunc ', start + 1);
+      const end = next < 0 ? original.length : next;
+      const body = original.slice(start, end);
+      const authority = 's.authorizeOriginalUsageUser(w, r, "personal.usage.cancel")';
+      assert.equal(body.split(authority).length - 1, 1);
+      const source = original.slice(0, start) + body.replace(authority, replacement) + original.slice(end);
+      assert.throws(() => checkCoverage({ ...inputs, invocationSources: { ...inputs.invocationSources, [file]: source } }), /invocation handler authority/);
+    });
+  }
+}
+
+for (const [name, mutate] of Object.entries({
+  missing: op => { op.parameters = op.parameters.filter(item => item.name !== 'Idempotency-Key'); },
+  optional: op => { op.parameters.find(item => item.name === 'Idempotency-Key').required = false; },
+  nonString: op => { op.parameters.find(item => item.name === 'Idempotency-Key').schema.type = 'number'; },
+  shortMinimum: op => { op.parameters.find(item => item.name === 'Idempotency-Key').schema.minLength = 15; },
+  longMaximum: op => { op.parameters.find(item => item.name === 'Idempotency-Key').schema.maxLength = 129; },
+})) {
+  test(`original-owner lookup rejects ${name} original idempotency key contract`, () => {
+    const invocation = structuredClone(invocationDocument);
+    mutate(invocation.paths['/v1/usage-requests/by-idempotency-key'].get);
+    assert.throws(() => checkCoverage({ ...inputs, invocation }), /invocation idempotency key drift/);
+  });
+}
+
 for (const [name, mutate] of Object.entries({
   missingRoute: document => { delete document.paths['/v1/models']; },
   extraRoute: document => { document.paths['/v1/uninstalled'] = document.paths['/v1/models']; },

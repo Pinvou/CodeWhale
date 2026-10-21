@@ -294,9 +294,9 @@ export function checkInvocationCoverage({ invocation, invocationSources }) {
     listCatalogModels: ['personal.models.read', 'token/personal_catalog_http.go', 'resolveModelUsagePermission'],
     modelProtocols: ['personal.models.read', 'token/personal_execution_http.go', 'resolveModelUsagePermission'],
     chatCompletions: ['personal.model.invoke', 'token/proxy.go', 'resolveModelUsagePermission'],
-    getPersonalUsageByIdempotencyKey: ['personal.usage.cancel', 'token/personal_execution_http.go', 'authorizePersonalUsageUser'],
+    getOwnedUsageByIdempotencyKey: ['personal.usage.cancel', 'token/personal_execution_http.go', 'authorizeOriginalUsageUser'],
     getUsageRequest: ['personal.usage.read', 'token/personal_execution_http.go', 'resolveModelUsagePermission'],
-    cancelUsageRequest: ['personal.usage.cancel', 'token/personal_execution_http.go', 'authorizePersonalUsageUser'],
+    cancelUsageRequest: ['personal.usage.cancel', 'token/personal_execution_http.go', 'authorizeOriginalUsageUser'],
     listMyUsageRequests: ['personal.usage.read', 'token/personal_execution_http.go', 'resolveModelUsagePermission'],
     listMyUsageTurns: ['personal.usage.read', 'token/personal_execution_http.go', 'resolveModelUsagePermission'],
   };
@@ -317,7 +317,7 @@ export function checkInvocationCoverage({ invocation, invocationSources }) {
         const [expected, file, resolver] = human[handler];
         const functionBody = actualFunction(read(file), handler);
         const { code, masked } = goSource(functionBody);
-        const calls = [...code.matchAll(/\bs\.(resolveModelUsagePermission|authorizePersonalUsageUser)\(\s*w,\s*r,\s*"([^"]+)"/g)].filter(match => masked[match.index] !== ' ');
+        const calls = [...code.matchAll(/\bs\.(resolveModelUsagePermission|authorizeOriginalUsageUser)\(\s*w,\s*r,\s*"([^"]+)"/g)].filter(match => masked[match.index] !== ' ');
         assert.equal(calls.length, 1, 'invocation handler authority shape drift');
         assert.equal(calls[0][1], resolver, 'invocation handler authority resolver drift');
         assert.equal(calls[0][2], expected, 'invocation handler authority drift');
@@ -334,7 +334,7 @@ export function checkInvocationCoverage({ invocation, invocationSources }) {
   }
   const ops = operations(invocation);
   assert.deepEqual(sorted(ops.map(({ method, path, op }) => ({ service: op['x-service'], method, path }))), sorted(routes.map(({ service, method, path }) => ({ service, method, path }))), 'invocation path/service drift');
-  const keyed = new Set(['chatCompletions', 'getPersonalUsageByIdempotencyKey', 'cancelUsageRequest']);
+  const keyed = new Set(['chatCompletions', 'getOwnedUsageByIdempotencyKey', 'cancelUsageRequest']);
   for (const { method, path: url, op } of ops) {
     const route = routes.find(item => item.service === op['x-service'] && item.method === method && item.path === url);
     assert.equal(op['x-go-handler'], route.handler, 'invocation handler drift');
