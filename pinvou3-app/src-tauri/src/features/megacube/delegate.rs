@@ -158,7 +158,7 @@ fn wait_task(
             _ => {
                 if cancelled() {
                     return Err(
-                        "已取消等待（Cube Manage Software 侧任务仍在继续推进，可稍后在 设置→MegaCube 查看结果）"
+                        "已取消等待（Cube Manage Software 侧任务仍在继续推进，可稍后在侧栏设备管理（普通设备为运行状态）→MegaCube→Cube Manage Software 查看结果）"
                             .to_string(),
                     );
                 }
