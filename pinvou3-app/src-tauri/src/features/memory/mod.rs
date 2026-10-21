@@ -38,10 +38,13 @@ pub use self::types::{
 pub use self::types::profile_label_would_be_wiped;
 
 // ---- 路径访问器（io）----
+// E2E 集成测试（src-tauri/tests/memory_e2e.rs）经 crate 根使用其中一部分，
+// 因此这些保持 pub；仅内部使用的访问器（organize_history_path /
+// pending_memory_path / never_memory_path）已在 io 内降为 pub(crate)，
+// 调用方经 `io::` 路径使用，无需 re-export。
 pub use self::io::{
-    current_focus_path, never_memory_path, organize_history_path, pending_memory_path,
-    profile_path, recent_activity_path, recent_work_path, runtime_prompt_path, snapshot_path,
-    work_context_dir,
+    current_focus_path, profile_path, recent_activity_path, recent_work_path, runtime_prompt_path,
+    snapshot_path, work_context_dir,
 };
 
 // ---- 实体存储读写 pub 入口（io）----
@@ -113,10 +116,9 @@ pub use self::llm_review::review_turn_candidates_with_llm;
 pub use self::organize::{MemoryOrganizeReport, load_organize_history, organize_memory_with_llm};
 
 // ---- 渲染 / runtime prompt 文件管理（render）----
-pub use self::render::{
-    ensure_runtime_prompt, refresh_runtime_prompt, render_memory_block, runtime_snapshot,
-    write_memory_snapshot_document,
-};
+// render_memory_block 仅记忆模块内部（渲染与测试）使用，已在 render 内降为
+// pub(crate)，调用方经 `render::` 路径使用，无需 re-export。
+pub use self::render::{ensure_runtime_prompt, runtime_snapshot, write_memory_snapshot_document};
 
 #[cfg(test)]
 mod tests;

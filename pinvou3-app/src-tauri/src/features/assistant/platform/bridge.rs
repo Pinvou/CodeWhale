@@ -4689,10 +4689,10 @@ mod tests {
                 .contains("## 市场 MCP 应用发现"),
             "inventory interpretation belongs in the static session prompt"
         );
-        use crate::features::marketplace::{ConnectorScope, save_disabled_connectors_for};
-        save_disabled_connectors_for(ConnectorScope::Plain, &["weather".into(), "qcc".into()])
+        use crate::features::marketplace::{ConnectorScope, save_disabled_bundles_for};
+        save_disabled_bundles_for(ConnectorScope::Plain, &["weather".into(), "qcc".into()])
             .unwrap();
-        save_disabled_connectors_for(ConnectorScope::Code, &[]).unwrap();
+        save_disabled_bundles_for(ConnectorScope::Code, &[]).unwrap();
 
         let inventory = |sid: &str| -> serde_json::Value {
             let Op::SendMessage { content, .. } = bridge
@@ -4747,7 +4747,7 @@ mod tests {
             crate::features::marketplace::unavailable_tool_names_for(ConnectorScope::Plain);
         assert!(denied.contains(&"mcp_weather_get_weather".to_string()));
         assert!(denied.contains(&"mcp_qcc-company_*".to_string()));
-        save_disabled_connectors_for(ConnectorScope::Plain, &[]).unwrap();
+        save_disabled_bundles_for(ConnectorScope::Plain, &[]).unwrap();
         assert!(
             inventory("plain")
                 .as_array()
@@ -4918,9 +4918,8 @@ mod tests {
         }));
 
         use crate::features::marketplace::ConnectorScope;
-        // plain disables weather (simulating the user turning weather off in an
-        // ordinary session).
-        crate::features::marketplace::save_disabled_connectors_for(
+        // plain 禁 weather(模拟普通会话里用户关了天气)。
+        crate::features::marketplace::save_disabled_bundles_for(
             ConnectorScope::Plain,
             &["weather".to_string()],
         )
@@ -4936,9 +4935,8 @@ mod tests {
         // scheme).
         assert!(shaped.contains(&"load_skill".to_string()));
 
-        // code explicitly disables only pptx → weather recovers, pptx stays
-        // denied; plain's weather disable no longer affects code sessions.
-        crate::features::marketplace::save_disabled_connectors_for(
+        // code 显式只禁 pptx → weather 恢复,pptx 仍禁;plain 的 weather 禁用不再影响代码会话。
+        crate::features::marketplace::save_disabled_bundles_for(
             ConnectorScope::Code,
             &["pptx".to_string()],
         )
@@ -5042,7 +5040,7 @@ mod tests {
             "an uninitialized plain denies the built-in CLI packs by default (the DenyAll convergence)"
         );
 
-        // plain explicitly disables only feishu → just the lark-cli deny remains.
+        // plain 禁 feishu → 仅 lark-cli deny（裸名 + .exe/.cmd 变体各一条，R4）。
         crate::features::marketplace::save_disabled_bundles_for(
             ConnectorScope::Plain,
             &["feishu".to_string()],
@@ -5074,9 +5072,8 @@ mod tests {
             "every non-messaging rule stays a deny"
         );
 
-        // code explicitly disables only dingtalk → only dws remains
-        // hard-denied (with .exe/.cmd variants).
-        crate::features::marketplace::save_disabled_connectors_for(
+        // code 显式只禁 dingtalk → 仅剩 dws 被硬拒（含 .exe/.cmd 变体）。
+        crate::features::marketplace::save_disabled_bundles_for(
             ConnectorScope::Code,
             &["dingtalk".to_string()],
         )
@@ -5142,7 +5139,7 @@ mod tests {
         bridge.set_code_session_predicate(std::sync::Arc::new(|_| false));
 
         use crate::features::marketplace::ConnectorScope;
-        crate::features::marketplace::save_disabled_connectors_for(
+        crate::features::marketplace::save_disabled_bundles_for(
             ConnectorScope::Plain,
             &["feishu".to_string()],
         )
@@ -5374,7 +5371,7 @@ mod tests {
         );
 
         // plain disables my-skill → contains a deny rule pointing at the script
-        crate::features::marketplace::skill_scope::save_disabled_skills_for(
+        crate::features::marketplace::scope::save_disabled_bundles_for(
             ConnectorScope::Plain,
             &["my-skill".to_string()],
         )
@@ -5392,11 +5389,8 @@ mod tests {
 
         // Re-enabled → script rule disappears (same computation as the hot
         // refresh; safety-net rules remain)
-        crate::features::marketplace::skill_scope::save_disabled_skills_for(
-            ConnectorScope::Plain,
-            &[],
-        )
-        .unwrap();
+        crate::features::marketplace::scope::save_disabled_bundles_for(ConnectorScope::Plain, &[])
+            .unwrap();
         assert!(
             bridge
                 .scope_deny_ruleset("sess-plain")
@@ -10342,39 +10336,6 @@ mod tests {
         assert_eq!(bridge.provider(), "env-provider");
         assert_eq!(bridge.base_url(), "http://env:8000/v1");
         assert_eq!(bridge.api_key(), "env-key");
-    }
-
-    #[test]
-    fn runtime_credential_is_final_and_reaches_model_client_config() {
-        let (_lock, _env) = locked_env(&[
-            "DEEPSEEK_MODEL",
-            "DEEPSEEK_PROVIDER",
-            "DEEPSEEK_BASE_URL",
-            "DEEPSEEK_API_KEY",
-        ]);
-        let mut bridge = fixture_bridge();
-        set_active_model(
-            &mut bridge,
-            ModelPreset::OpenaiCompatible,
-            "runtime-model",
-            "https://api.openai.com/v1",
-            "saved-key",
-        );
-        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
-        unsafe { std::env::set_var("DEEPSEEK_API_KEY", "env-key") };
-        bridge.runtime_model_credential =
-            Some(RuntimeModelCredential::api_key("runtime-key").expect("runtime credential"));
-
-        assert_eq!(bridge.api_key(), "runtime-key");
-        let config = bridge.build_dt_config();
-        assert_eq!(config.api_key.as_deref(), Some("runtime-key"));
-        assert_eq!(
-            config
-                .providers
-                .as_ref()
-                .and_then(|providers| providers.openai.api_key.as_deref()),
-            Some("runtime-key")
-        );
     }
 
     #[test]

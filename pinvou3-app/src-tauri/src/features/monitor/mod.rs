@@ -15,6 +15,7 @@
 //!   （`VllmSnapshot` / `snapshot_for_model_config`）。
 //! - 本 facade：系统资源采集（GPU/CPU/RAM）+ `sample_all` 聚合 + `MonitorState`。
 
+mod cpu_math;
 mod model_probe;
 mod platform;
 mod self_metrics;
@@ -65,8 +66,6 @@ pub struct GpuSnapshot {
 pub struct CpuSnapshot {
     pub name: String,
     pub total_usage_pct: Option<f64>,
-    pub process_usage_pct: Option<f64>,
-    pub logical_processors: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -80,7 +79,6 @@ pub struct RamSnapshot {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct AppSnapshot {
     pub pinvou3_version: &'static str,
-    pub deepseek_tui_version: &'static str,
     pub session_uptime_secs: u64,
 }
 
@@ -141,7 +139,6 @@ async fn sample_all_with_cpu(state: &MonitorState, cpu: Option<CpuSnapshot>) -> 
         self_perf: state.self_metrics.snapshot(),
         app: AppSnapshot {
             pinvou3_version: env!("CARGO_PKG_VERSION"),
-            deepseek_tui_version: env!("CARGO_PKG_VERSION"), // TODO: 从 deepseek-tui crate 取
             session_uptime_secs: state.session_uptime_secs(),
         },
     }

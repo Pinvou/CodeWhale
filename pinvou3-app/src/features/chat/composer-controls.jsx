@@ -28,11 +28,8 @@ const ComposerKbSelector = ({
   bs,
   compact,
   mountedId: mountedIdProp,
-  mountedCollections: mountedCollectionsProp,
   onMount,
   onUnmount,
-  onSetCollectionEnabled,
-  onRemoveCollection,
 }) => {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef(null);
@@ -40,14 +37,12 @@ const ComposerKbSelector = ({
   const [modelStatus, setModelStatus] = useState(null); // null=未知；新后端同时返回 installed/ready/loading
   // 显式会话态驱动（代码车道）优先；否则读 bridge 聊天 active 的挂载态。
   // 代码车道当前仍可只传 mountedId/onMount/onUnmount，保持原单库契约兼容。
-  const explicitMountState = mountedIdProp !== undefined || mountedCollectionsProp !== undefined;
-  const localMountedSource = mountedCollectionsProp !== undefined
-    ? mountedCollectionsProp
-    : (mountedIdProp !== undefined
-      ? (mountedIdProp == null ? [] : [{ collectionId: mountedIdProp, enabled: true }])
-      : ((bs && Array.isArray(bs.mountedCollections))
-        ? bs.mountedCollections
-        : ((bs && bs.mountedCollection != null) ? [{ collectionId: bs.mountedCollection, enabled: true }] : [])));
+  const explicitMountState = mountedIdProp !== undefined;
+  const localMountedSource = mountedIdProp === undefined
+    ? ((bs && Array.isArray(bs.mountedCollections))
+      ? bs.mountedCollections
+      : ((bs && bs.mountedCollection != null) ? [{ collectionId: bs.mountedCollection, enabled: true }] : []))
+    : (mountedIdProp == null ? [] : [{ collectionId: mountedIdProp, enabled: true }]);
   const remoteMountedSource = explicitMountState ? [] : ((bs && Array.isArray(bs.mountedRemoteCollections)) ? bs.mountedRemoteCollections : []);
   const mountedSource = localMountedSource.map(entry => (typeof entry === 'object' ? { ...entry, source: 'local' } : { collectionId: entry, enabled: true, source: 'local' }))
     .concat(remoteMountedSource.map(entry => ({ ...entry, source: 'remote' })));
@@ -187,7 +182,6 @@ const ComposerKbSelector = ({
       }
       return;
     }
-    if (onSetCollectionEnabled) { onSetCollectionEnabled(collection.id, !entry.enabled); return; }
     if (!explicitMountState && bridge.available) {
       bridge.knowledge.setCollectionEnabled(entry.collectionId, !entry.enabled);
     }
@@ -202,8 +196,10 @@ const ComposerKbSelector = ({
       }
       return;
     }
-    if (onRemoveCollection) { onRemoveCollection(collection.id); return; }
-    if (explicitMountState) { if (onUnmount) onUnmount(); return; }
+    if (explicitMountState) {
+      if (onUnmount) onUnmount();
+      return;
+    }
     if (bridge.available) {
       bridge.knowledge.removeCollection(entry.collectionId);
     }

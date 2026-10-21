@@ -68,6 +68,7 @@ async function initialize(search, options = {}) {
     URL,
     Blob,
   });
+  vm.runInContext(fs.readFileSync(path.join(root, 'src', 'shared', 'bridge-shared-helpers.js'), 'utf8'), context, { filename: 'shared/bridge-shared-helpers.js' });
   vm.runInContext(bridgeSource, context, { filename: 'tauri-bridge.js' });
   let notifications = 0;
   windowObject.TauriBridge.state.subscribe('settings', function () { notifications += 1; });

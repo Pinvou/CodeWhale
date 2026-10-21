@@ -4,17 +4,24 @@
  */
 (function (root) {
   "use strict";
-  var registry = root.__PINVOU_TAURI_BRIDGE_FEATURES__ = root.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
-  registry["monitor"] = function (context) {
-    var state = context.state;
-    var notifyDomains = context.notifyDomains;
-    var invoke = context.invoke;
-    var bt = context.bt;
-    var safeConsoleInfo = context.safeConsoleInfo;
-    var sessionStates = context.sessionStates;
-    var monitorIntervalId = null;
-    var monitorPollInFlight = false;
-    var gpuUtilHistory = [];
+  // biome-ignore lint/suspicious/noAssignInExpressions: registry bootstrap of the verbatim payload; splitting the statements would diverge from the artifact
+  const registry = root.__PINVOU_TAURI_BRIDGE_FEATURES__ = root.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
+  registry["monitor"] = function (context) {let pinvouSharedtauriMonitorCache = null;
+function pinvouSharedtauriMonitor() {
+  if (!pinvouSharedtauriMonitorCache) pinvouSharedtauriMonitorCache = window.PinvouBridgeShared.create("tauriMonitor", { monitorBaseline: { get value() { return monitorBaseline; }, set value(v) { monitorBaseline = v; } }, clearMonitorBaseline, monitorIntervalId: { get value() { return monitorIntervalId; }, set value(v) { monitorIntervalId = v; } }, gpuUtilHistory: { get value() { return gpuUtilHistory; }, set value(v) { gpuUtilHistory = v; } }, pollMonitor });
+  return pinvouSharedtauriMonitorCache;
+}
+
+
+    const state = context.state;
+    const notify = context.notify;
+    const invoke = context.invoke;
+    const bt = context.bt;
+    const notifyDomains = context.notifyDomains;
+    const sessionStates = context.sessionStates;
+    let monitorIntervalId = null;
+    let monitorPollInFlight = false;
+    let gpuUtilHistory = [];
     // 0 = no real max_model_len received yet from get_backend_status or the
     // monitor snapshot; write state.tokens.max back only for real values
     // (both assignment sites are truthiness-guarded).
@@ -33,7 +40,7 @@
   var fmtTok = PinvouFU.fmtTok || function (n) { return n == null ? "—" : String(n); };
 
 
-  function numOr0(x) { return (typeof x === "number" && isFinite(x)) ? x : 0; }
+function numOr0(x) { return pinvouSharedtauriMonitor().numOr0(x); }
 
   // 用基准点把累计 counter 换算成「自清除以来」的区间值。sp=app 自测(snap.self_perf,
   // TTFT/TPS/tokens 全从这);v=vllm(仅 KV 的本地 prefix_cache 分支要它)。无基准 → 直接
@@ -41,47 +48,7 @@
   // → 丢弃失效基准，回落到累计值，避免负数。
   // KV 命中率(混合):本地 vLLM 用 /metrics prefix_cache(vllmKvPct);拿不到再用 usage 的
   // cache token 口径(selfKvPct,给云端/D3)。二者都按区间(扣基准)重算。
-  function adjustCounters(sp, v) {
-    sp = sp || {};
-    var kvRatio = function (hit, miss) {
-      var d = hit + miss;
-      return d > 0 ? (hit / d * 100) : null;
-    };
-    var b = monitorBaseline;
-    if (b) {
-      var reset =
-        numOr0(sp.ttft_sum_s) < b.ttft_sum_s ||
-        numOr0(sp.tps_time_s) < b.tps_time_s ||
-        numOr0(sp.gen_tokens_total) < b.gen_tokens ||
-        numOr0(sp.prompt_tokens_total) < b.prompt_tokens ||
-        numOr0(sp.cache_hit_tokens) < b.cache_hit ||
-        numOr0(sp.cache_miss_tokens) < b.cache_miss ||
-        (v && numOr0(v.prefix_cache_queries) < numOr0(b.pc_queries));
-      if (reset) { clearMonitorBaseline(); b = null; }
-    }
-    var base = function (k) { return b ? numOr0(b[k]) : 0; };
-    var vllmKvPct = null;
-    if (v) {
-      var pcH = numOr0(v.prefix_cache_hits) - base("pc_hits");
-      var pcQ = numOr0(v.prefix_cache_queries) - base("pc_queries");
-      vllmKvPct = pcQ > 0 ? (pcH / pcQ * 100) : null;
-    }
-    return {
-      cleared: !!b,
-      ttft_sum_s: numOr0(sp.ttft_sum_s) - base("ttft_sum_s"),
-      ttft_count: numOr0(sp.ttft_count) - base("ttft_count"),
-      tps_tokens: numOr0(sp.tps_tokens) - base("tps_tokens"),
-      tps_time_s: numOr0(sp.tps_time_s) - base("tps_time_s"),
-      gen: numOr0(sp.gen_tokens_total) - base("gen_tokens"),
-      prompt: numOr0(sp.prompt_tokens_total) - base("prompt_tokens"),
-      vllmKvPct: vllmKvPct,
-      selfKvPct: kvRatio(
-        numOr0(sp.cache_hit_tokens) - base("cache_hit"),
-        numOr0(sp.cache_miss_tokens) - base("cache_miss")
-      ),
-      clearedAt: b ? (b.at || null) : null,
-    };
-  }
+function adjustCounters(sp, v) { return pinvouSharedtauriMonitor().adjustCounters(sp, v); }
 
   function clearMonitorBaseline() {
     monitorBaseline = null;
@@ -191,20 +158,15 @@
       var kvShown = sadj ? (sadj.vllmKvPct != null ? sadj.vllmKvPct
         : (sadj.selfKvPct != null ? sadj.selfKvPct : null)) : null;
       // Format values for display
-      var vllm = snap.vllm || null;
-      var metricsApplicable = vllm ? vllm.metrics_applicable !== false : false;
-      var metricNotApplicableText = bt("metricNotApplicable");
-      var metricUnavailableText = bt("metricUnavailable");
-      var diagnostic = vllm && vllm.diagnostic ? vllm.diagnostic : null;
-      var metricDiagnostic = vllm && vllm.metric_diagnostics && vllm.metric_diagnostics.length
-        ? vllm.metric_diagnostics[0] : null;
-      var targetKind = vllm && vllm.target_kind ? vllm.target_kind : "invalid";
-      var targetKindLabel = targetKind === "remote" ? bt("targetKindRemote") : (targetKind === "local" ? bt("targetKindLocal") : bt("targetKindInvalid"));
-      var vllmDisplayModel = vllm ? (vllm.model || vllm.configured_model || "—") : "—";
-      var healthStatus = vllm && vllm.health_status ? vllm.health_status : (vllm ? "verified" : "offline");
-      var appQueue = appQueueSnapshot();
-      var cpu = snap.cpu || null;
-      var cpuUsage = cpu && typeof cpu.total_usage_pct === "number" && isFinite(cpu.total_usage_pct)
+      const vllm = snap.vllm || null;
+      const metricsApplicable = vllm ? vllm.metrics_applicable !== false : false;
+      const metricUnavailableText = bt("metricUnavailable");
+      const targetKind = vllm && vllm.target_kind ? vllm.target_kind : "invalid";
+      const vllmDisplayModel = vllm ? (vllm.model || vllm.configured_model || "—") : "—";
+      const healthStatus = vllm && vllm.health_status ? vllm.health_status : (vllm ? "verified" : "offline");
+      const appQueue = appQueueSnapshot();
+      const cpu = snap.cpu || null;
+      const cpuUsage = cpu && typeof cpu.total_usage_pct === "number" && Number.isFinite(cpu.total_usage_pct)
         ? Math.round(Math.max(0, Math.min(100, cpu.total_usage_pct)))
         : null;
       var computeName = snap.gpu ? snap.gpu.name : (cpu && cpu.name ? cpu.name : bt("gpuUnavailable"));
@@ -213,25 +175,18 @@
         cpuName: cpu && cpu.name ? cpu.name : "",
         cpuAvailable: !!cpu,
         computeAvailable: !!(snap.gpu || cpu),
-        computeName: computeName,
-        gpuVram: snap.gpu && snap.gpu.vram_total_mib > 0
-          ? fmtMiB(snap.gpu.vram_used_mib) + " / " + fmtMiB(snap.gpu.vram_total_mib) : "—",
+        computeName,
         gpuVramPct: snap.gpu && snap.gpu.vram_total_mib > 0
           ? Math.round(snap.gpu.vram_used_mib / snap.gpu.vram_total_mib * 100) : 0,
-        gpuUtil: snap.gpu ? (snap.gpu._utilMax + "%") : "—",
         gpuUtilPct: snap.gpu ? snap.gpu._utilMax : 0,
-        processorUtil: cpuUsage != null
-          ? cpuUsage + "%"
-          : (snap.gpu && snap.gpu.processor_utilization_pct != null ? snap.gpu.processor_utilization_pct + "%" : "—"),
-        processorUtilPct: cpuUsage != null
-          ? cpuUsage
-          : (snap.gpu && snap.gpu.processor_utilization_pct != null ? snap.gpu.processor_utilization_pct : 0),
+        processorUtilPct: cpuUsage == null
+          ? (snap.gpu && snap.gpu.processor_utilization_pct != null ? snap.gpu.processor_utilization_pct : 0)
+          : cpuUsage,
         gpuSharedMemory: snap.gpu && snap.gpu.shared_memory_used_mib != null ? fmtMiB(snap.gpu.shared_memory_used_mib) : "—",
         gpuTemp: snap.gpu && snap.gpu.temperature_c != null ? snap.gpu.temperature_c + "°C" : null,
         gpuPower: snap.gpu && snap.gpu.power_w != null ? snap.gpu.power_w.toFixed(1) + " W" : null,
         gpuAvailable: !!snap.gpu,
         gpuHasVram: !!(snap.gpu && snap.gpu.vram_total_mib > 0),
-        ramUsed: snap.ram ? fmtKiB(snap.ram.used_kib) : "—",
         ramTotal: snap.ram ? fmtKiB(snap.ram.total_kib) : "—",
         ramPct: snap.ram && snap.ram.total_kib > 0 ? Math.round(snap.ram.used_kib / snap.ram.total_kib * 100) : 0,
         ramUsedGiB: snap.ram ? (snap.ram.used_kib / 1024 / 1024).toFixed(1) : "—",
@@ -239,28 +194,15 @@
         swapTotal: snap.ram ? fmtKiB(snap.ram.swap_total_kib) : "—",
         swapPct: snap.ram && snap.ram.swap_total_kib > 0 ? Math.round(snap.ram.swap_used_kib / snap.ram.swap_total_kib * 100) : 0,
         vllmModel: vllmDisplayModel,
-        vllmConfiguredModel: vllm ? (vllm.configured_model || null) : null,
-        vllmModelMismatch: vllm && vllm.configured_model && vllm.model
-          ? vllm.configured_model !== vllm.model : false,
-        vllmStatus: vllm ? vllm.status.toUpperCase() : "OFFLINE",
         vllmHealthStatus: healthStatus,
         vllmOnline: vllm ? (healthStatus === "verified" && (vllm.status === "ready" || vllm.status === "busy")) : false,
-        vllmUpstream: vllm ? (vllm.upstream || "—") : "—",
-        vllmTargetKind: targetKindLabel,
         // 云端(remote)不做健康探测(无 auth 的 /v1/models 必 401)→ 不显示 OFFLINE。
         // 暴露原始 kind 供前端判定(别比本地化 label)。
         vllmIsRemote: targetKind === "remote",
-        vllmDiagnostic: diagnostic ? diagnostic.message : null,
-        vllmDiagnosticCode: diagnostic ? diagnostic.code : null,
-        vllmMetricsApplicable: metricsApplicable,
-        vllmMetricDiagnostic: metricDiagnostic ? metricDiagnostic.message : null,
         vllmMaxLen: vllm ? (metricsApplicable ? (vllm.max_model_len || "—") : (vllm.max_model_len || metricUnavailableText)) : "—",
         // 本地推理引擎(target_kind=local)且探测窗口 < 128k(131072):监控卡给告警。
         // 云端(remote)/v1/models 不返回 max_model_len,自然不触发。传原始值供前端拼文案。
-        vllmCtxWarn: (vllm && targetKind === "local" && vllm.max_model_len && vllm.max_model_len < 131072)
-          ? vllm.max_model_len : null,
         vllmQueue: appQueue.running + " / " + appQueue.waiting,
-        vllmQueueSource: "app",
         // TTFT/TPS/tokens 一律用 app 侧自测——任何后端(vLLM/LM Studio/Ollama/云端)都有值,
         // 不再受 metricsApplicable 门控。KV 见 kvShown(本地 prefix_cache / 云端 usage 口径),
         // 拿不到则 "—"。队列仍归 vLLM(见 vllmQueue)。
@@ -272,8 +214,6 @@
           ? (sadj.tps_tokens / sadj.tps_time_s).toFixed(1) + " tok/s" : "—",
         vllmTokTotal: sadj
           ? fmtTok(sadj.gen) + " / " + fmtTok(sadj.prompt) : "—",
-        vllmStatsCleared: !!(sadj && sadj.cleared),
-        vllmClearedAt: sadj && sadj.cleared ? (sadj.clearedAt || null) : null,
         // 区间原始数值（已扣基准），供前端「长按清除」的数字归零插值动画用。
         vllmRaw: sadj ? {
           kvPct: kvShown,
@@ -283,7 +223,6 @@
           prompt: sadj.prompt != null ? sadj.prompt : null,
         } : null,
         appVersion: snap.app ? snap.app.pinvou3_version + bt("betaVersionSuffix") : "—",
-        dtVersion: snap.app ? snap.app.deepseek_tui_version : "—",
         uptime: snap.app ? fmtDuration(snap.app.session_uptime_secs) : "—",
       };
       var monitorDomains = ["monitor"];
@@ -317,18 +256,8 @@
     }
   }
 
-  function startMonitorPolling() {
-    if (monitorIntervalId) return;
-    gpuUtilHistory = [];
-    pollMonitor();
-    monitorIntervalId = setInterval(pollMonitor, 1000);
-  }
-  function stopMonitorPolling() {
-    if (monitorIntervalId) {
-      clearInterval(monitorIntervalId);
-      monitorIntervalId = null;
-    }
-  }
+function startMonitorPolling() { return pinvouSharedtauriMonitor().startMonitorPolling(); }
+function stopMonitorPolling() { return pinvouSharedtauriMonitor().stopMonitorPolling(); }
 
   // ── Backend status (live dot) ────────────────────────────────────
   async function pollBackendStatus() {

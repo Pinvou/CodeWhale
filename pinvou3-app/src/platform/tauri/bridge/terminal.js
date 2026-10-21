@@ -1,16 +1,23 @@
 /** Shell polling and terminal output normalization for bridge tool cards. */
 (function (root) {
   "use strict";
-  var registry = root.__PINVOU_TAURI_BRIDGE_FEATURES__ = root.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
-  registry.terminal = function (context) {
-    var state = context.state;
-    var notify = context.notify;
-    var invoke = context.invoke;
-    var bt = context.bt;
-    var runSyncOnSession = context.runSyncOnSession;
-    var addChatItem = context.addChatItem;
-    var shellNotifyTimer = null;
-    var shellPollState = Object.create(null);
+  // biome-ignore lint/suspicious/noAssignInExpressions: registry bootstrap of the verbatim payload; splitting the statement would diverge from the artifact
+  const registry = root.__PINVOU_TAURI_BRIDGE_FEATURES__ = root.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
+  registry.terminal = function (context) {let pinvouSharedtauriTerminalCache = null;
+function pinvouSharedtauriTerminal() {
+  if (!pinvouSharedtauriTerminalCache) pinvouSharedtauriTerminalCache = window.PinvouBridgeShared.create("tauriTerminal", { SHELL_TOOL_NAMES, bt, normalizeTerminalTail, runSyncOnSession, notify, latestShellToolIsWaitObserver, state, addChatItem, shellPollState, invoke });
+  return pinvouSharedtauriTerminalCache;
+}
+
+
+    const state = context.state;
+    const notify = context.notify;
+    const invoke = context.invoke;
+    const bt = context.bt;
+    const runSyncOnSession = context.runSyncOnSession;
+    const addChatItem = context.addChatItem;
+    let shellNotifyTimer = null;
+    const shellPollState = Object.create(null);
   function updateToolItem(toolId, output, success) {
     for (var i = 0; i < state.chatItems.length; i++) {
       if (state.chatItems[i].type === "tool" && state.chatItems[i].toolId === toolId) {
@@ -27,9 +34,7 @@
   const SHELL_TOOL_NAMES = ["bash", "exec_shell", "exec_shell_wait", "exec_wait", "task_shell_start", "task_shell_wait", "shell", "Bash"];
   const SHELL_WAIT_TOOL_NAMES = ["exec_shell_wait", "exec_wait", "task_shell_wait"];
 
-  function isShellExecutionTool(name) {
-    return SHELL_TOOL_NAMES.indexOf(name) >= 0;
-  }
+function isShellExecutionTool(name) { return pinvouSharedtauriTerminal().isShellExecutionTool(name); }
 
   function latestShellToolIsWaitObserver() {
     for (let i = state.chatItems.length - 1; i >= 0; i--) {
@@ -53,10 +58,7 @@
     return SHELL_TOOL_NAMES.some((name) => raw.includes(name));
   }
 
-  function utf8Length(text) {
-    try { return new TextEncoder().encode(String(text || "")).length; }
-    catch (_) { return String(text || "").length; }
-  }
+function utf8Length(text) { return pinvouSharedtauriTerminal().utf8Length(text); }
 
   // Shell snapshots are a tail view, not an append-only byte stream. Normalize
   // terminal control sequences and state omissions explicitly instead of
@@ -81,180 +83,19 @@
     return out.join("\n");
   }
 
-  function formatShellSnapshot(job) {
-    function section(raw, total, kind) {
-      raw = String(raw || "");
-      var visibleRaw = raw.replace(/^\.\.\.\s*/, "");
-      var omitted = /^\.\.\./.test(raw) || Number(total || 0) > utf8Length(visibleRaw);
-      var body = normalizeTerminalTail(visibleRaw);
-      if (omitted) body = bt("shellOutputOmitted")(kind) + "\n" + body;
-      return body;
-    }
-    var stdout = section(job.stdout_tail, job.stdout_len, "stdout");
-    var stderr = section(job.stderr_tail, job.stderr_len, "stderr");
-    var parts = [];
-    if (stdout) parts.push(stdout);
-    if (stderr) parts.push((stdout ? "[STDERR]\n" : "") + stderr);
-    if (String(job.status || "").toLowerCase() !== "running") {
-      var code = job.exit_code == null ? bt("shellUnknownExit") : String(job.exit_code);
-      parts.push(bt("shellTaskFinished")(code));
-    }
-    return parts.join("\n");
-  }
+function formatShellSnapshot(job) { return pinvouSharedtauriTerminal().formatShellSnapshot(job); }
 
-  function shellCommandForItem(item) {
-    return item && item.args && typeof item.args.command === "string" ? item.args.command : "";
-  }
+function shellCommandForItem(item) { return pinvouSharedtauriTerminal().shellCommandForItem(item); }
 
-  function shellSnapshotKey(job) {
-    return JSON.stringify([
-      job.id, job.status, job.exit_code, job.stdout_len, job.stderr_len,
-      job.stdout_tail, job.stderr_tail,
-    ]);
-  }
+function shellSnapshotKey(job) { return pinvouSharedtauriTerminal().shellSnapshotKey(job); }
 
-  function terminalShellHistoryMatch(item, job) {
-    if (!item || item.type !== "tool" || item.taskId || item.state === "running" ||
-        !isShellExecutionTool(item.name) || shellCommandForItem(item) !== String(job.command || "")) {
-      return false;
-    }
-    var output = normalizeTerminalTail(String(item.output || ""));
-    if (output.indexOf(String(job.id || "")) >= 0 && job.id) return true;
-    var evidence = [job.stdout_tail, job.stderr_tail].map(function (raw) {
-      return normalizeTerminalTail(String(raw || "").replace(/^\.\.\.\s*/, "")).trim();
-    }).filter(Boolean);
-    if (evidence.length) return evidence.every(function (text) { return output.indexOf(text) >= 0; });
-    return /\(no output\)|no output|无输出|出力なし/i.test(output);
-  }
+function terminalShellHistoryMatch(item, job) { return pinvouSharedtauriTerminal().terminalShellHistoryMatch(item, job); }
 
-  function applyShellSnapshots(sid, jobs) {
-    var anyRunning = false;
-    var changed = false;
-    var runningCommandCounts = {};
-    (jobs || []).forEach(function (job) {
-      if (String(job.status || "").toLowerCase() !== "running") return;
-      var command = String(job.command || "");
-      runningCommandCounts[command] = (runningCommandCounts[command] || 0) + 1;
-    });
-    runSyncOnSession(sid, function () {
-      // A wait tool only observes existing work and cannot create a job, and
-      // the manager retains completed jobs across later waits, so an
-      // unmatched terminal snapshot beside a trailing wait card belongs to
-      // earlier work and must not be appended after newer results. Decide
-      // once per poll from the pre-poll timeline: the synthetic card of a
-      // running job from this same batch (the manager lists running jobs
-      // first) would otherwise disarm the guard for the jobs after it.
-      // Accepted limits when no card binds: a start tool can still race with
-      // a very short detached job whose first snapshot is terminal (the guard
-      // is off when the latest card is a start tool; origin identity shields
-      // root jobs there, but subagent-owned and legacy origin-less jobs can
-      // still append), and a brand-new subagent job started after the wait
-      // card is conservatively hidden like retained older work.
-      const suppressUnmatchedTerminal = latestShellToolIsWaitObserver();
-      (jobs || []).forEach(function (job) {
-        var status = String(job.status || "").toLowerCase();
-        var running = status === "running";
-        if (running) anyRunning = true;
-        var item = state.chatItems.find(function (it) {
-          return it.type === "tool" && it.taskId === job.id;
-        });
-        if (!item && job.origin_tool_call_id) {
-          // Never steal a card already bound to another job: origins are
-          // unique per root job on the current engine, and if an engine ever
-          // shares one, the later job must fall through to a synthetic card
-          // or the terminal suppression guard instead of redirecting output.
-          item = state.chatItems.find(function (it) {
-            return it.type === "tool" && it.toolId === job.origin_tool_call_id &&
-              (!it.taskId || it.taskId === job.id);
-          });
-        }
-        // Only legacy snapshots without an origin may match by command or
-        // output. A missing origin card must not redirect another tool call.
-        if (!item && running && !job.origin_tool_call_id) {
-          const command = String(job.command || "");
-          const candidates = state.chatItems.filter(function (it) {
-            return it.type === "tool" && isShellExecutionTool(it.name) && !it.taskId &&
-              it.state === "running" && shellCommandForItem(it) === command;
-          });
-          // Command text is only a temporary bridge until tool_end exposes the
-          // task id. Never guess when identical commands are concurrent.
-          if (runningCommandCounts[command] === 1 && candidates.length === 1) item = candidates[0];
-        }
-        if (!item && !running && !job.origin_tool_call_id) {
-          item = state.chatItems.find(function (it) {
-            return terminalShellHistoryMatch(it, job);
-          });
-          if (item) item.shellHistoryReconciled = true;
-        }
-        if (!item && !running && suppressUnmatchedTerminal) return;
-        // An identified completed root job must only update its origin card.
-        // If compaction or reload removed that card, do not append historical
-        // output at the current tail. Keep running jobs visible through a
-        // synthetic card; their live status must not disappear after reload.
-        if (!item && !running && job.origin_tool_call_id && !job.owner_agent_id) return;
-        if (!item) {
-          item = {
-            type: "tool", toolId: "shell-task:" + job.id, name: "bash",
-            args: { command: job.command || "" }, output: null, success: null,
-            state: running ? "running" : "failed", shellSnapshot: true,
-          };
-          addChatItem(item);
-          changed = true;
-        }
-        var snapshotKey = shellSnapshotKey(job);
-        if (item.shellSnapshotKey === snapshotKey) return;
-        item.taskId = job.id;
-        item.sessionId = sid;
-        item.shellStatus = job.status;
-        item.originToolCallId = job.origin_tool_call_id || null;
-        item.originTurnId = job.origin_turn_id || null;
-        item.exitCode = job.exit_code;
-        item.elapsedMs = job.elapsed_ms;
-        if (!item.shellHistoryReconciled || item.output == null || running) {
-          item.output = formatShellSnapshot(job);
-        }
-        item.state = running ? "running" : (status === "completed" ? "done" : "failed");
-        item.success = running ? null : status === "completed";
-        item.shellSnapshotKey = snapshotKey;
-        changed = true;
-      });
-    });
-    if (changed) notify();
-    return anyRunning;
-  }
+function applyShellSnapshots(sid, jobs) { return pinvouSharedtauriTerminal().applyShellSnapshots(sid, jobs); }
 
-  function scheduleShellPoll(sid, immediate) {
-    if (!sid) return;
-    var poll = shellPollState[sid] || (shellPollState[sid] = {
-      timer: null, inFlight: false, waitBudget: 0,
-    });
-    poll.waitBudget = Math.max(poll.waitBudget, 12);
-    if (poll.timer || poll.inFlight) return;
-    poll.timer = setTimeout(function () { runShellPoll(sid); }, immediate ? 0 : 250);
-  }
+function scheduleShellPoll(sid, immediate) { return pinvouSharedtauriTerminal().scheduleShellPoll(sid, immediate); }
 
-  async function runShellPoll(sid) {
-    var poll = shellPollState[sid];
-    if (!poll || poll.inFlight) return;
-    poll.timer = null;
-    poll.inFlight = true;
-    var running = false;
-    try {
-      var jobs = await invoke("list_shell_tasks", { sessionId: sid });
-      running = applyShellSnapshots(sid, Array.isArray(jobs) ? jobs : []);
-      if (!running) poll.waitBudget = Math.max(0, poll.waitBudget - 1);
-    } catch (error) {
-      console.warn("shell task polling failed", error);
-      poll.waitBudget = Math.max(0, poll.waitBudget - 1);
-    } finally {
-      poll.inFlight = false;
-    }
-    if (running || poll.waitBudget > 0) {
-      poll.timer = setTimeout(function () { runShellPoll(sid); }, 250);
-    } else {
-      delete shellPollState[sid];
-    }
-  }
+async function runShellPoll(sid) { return pinvouSharedtauriTerminal().runShellPoll(sid); }
 
   function scheduleShellNotify() {
     if (shellNotifyTimer != null) return;

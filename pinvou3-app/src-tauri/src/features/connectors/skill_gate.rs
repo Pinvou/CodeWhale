@@ -1,19 +1,22 @@
-//! Skill-gate trait shared by the four CLI connectors (tmeet/dingtalk/feishu/
+//! Skill-gate shared by the four CLI connectors (tmeet/dingtalk/feishu/
 //! wecom): a per-connector disabled-flag file plus skill apply/discard.
 //!
-//! Each connector only supplies `id`, `disabled_filename`, and `apply_skills`
-//! (pointing at its `Pinvou3Bundle::apply_*_skills`); the flag-file path
-//! resolution and the read-side existence check are default implementations.
+//! 每个连接器模块在自己的文件里声明 [`ConnectorSkillGate`] 实现(deny-first
+//! 的 apply/refresh 走 trait 的 `apply_with_consent`)与 [`ConnectorGate`]
+//! 表项(就绪探测指向本模块函数);`*_skills_state` 命令公共体收编为
+//! [`ConnectorGate`] 的公共方法,启动刷新由 `connector_cli` 的 GateEntry
+//! 表驱动各连接器的 `*_gate_step`。
 //!
 //! Disable semantics: the `~/.pinvou3/<id>_disabled` file existing means the
 //! user manually disabled that connector's skills, orthogonal to connection
 //! state (auth). The write side (`set_disabled_flag`) was removed together
 //! with the retired `set_*_enabled` commands; connector switches now persist
 //! through the unified scope state (`set_disabled_connectors` → marketplace
-//! scope), so this trait only reads the flag.
+//! scope), so the gate only reads the flag.
 
 use std::path::PathBuf;
 
+use serde_json::{Value, json};
 /// Retain error origin: callers may localize materialization, never consent.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SkillApplyError {
@@ -42,10 +45,6 @@ fn apply_registered_skills<G: ConnectorSkillGate + ?Sized>(
         .map_err(SkillApplyError::Materialization)
 }
 
-/// Skill-gate abstraction for a single CLI connector.
-///
-/// Implementors supply three connector-specific items and reuse the default
-/// flag-file path resolution and read-side check.
 pub(crate) trait ConnectorSkillGate {
     /// 连接器 id(事件前缀 / 日志标签,如 `"tmeet"`)。
     fn id(&self) -> &'static str;
@@ -76,10 +75,48 @@ pub(crate) trait ConnectorSkillGate {
     }
 }
 
+/// 单个 CLI 连接器的门控表项(skills_state 命令公共体 + 停用标志路径/读侧
+/// 判定)。deny-first 的 apply/refresh 走各连接器的 [`ConnectorSkillGate`]
+/// 实现,启动刷新由 `connector_cli` 的 GateEntry 表驱动。
+pub(crate) struct ConnectorGate {
+    /// 停用标志文件名(如 `"tmeet_disabled"`)。
+    pub disabled_filename: &'static str,
+    /// 实时就绪探测(spawn 对应 CLI 查 auth 状态;未装返回 false)。
+    pub ready_probe: fn() -> bool,
+}
+
+impl ConnectorGate {
+    /// 停用标志文件完整路径:`~/.pinvou3/<disabled_filename>`。
+    pub fn disabled_path(&self) -> PathBuf {
+        crate::platform::paths::pinvou3_home().join(self.disabled_filename)
+    }
+
+    /// 是否被手动停用(停用标志文件存在即停用)。与连接状态正交。
+    pub fn is_disabled(&self) -> bool {
+        self.disabled_path().exists()
+    }
+
+    /// `*_skills_state` 命令公共体:给前端渲染开关态
+    /// `{connected, enabled(=未停用), visible(=connected&&enabled)}`。
+    pub async fn skills_state_command(&'static self) -> Result<Value, String> {
+        tokio::task::spawn_blocking(|| {
+            let disabled = self.is_disabled();
+            let connected = (self.ready_probe)();
+            Ok::<Value, String>(json!({
+                "connected": connected,
+                "enabled": !disabled,
+                "visible": connected && !disabled,
+            }))
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking: {e}"))?
+    }
+}
+
 /// 连接器「转为可用」后的默认关同意同步 —— review #455 R13-B3 的 fail-visible
-/// 契约在 Official 四连接器 trait 设计下的落点（上游集中在
-/// `ConnectorGate::apply_skills_command`，此处为等价共享实现，四个连接器的
-/// `*_apply_skills` 共用）：吞掉错误会让连接器在零同意状态下对模型可见。
+/// 契约的落点（上游集中在 `ConnectorGate::apply_skills_command`，本树的
+/// Official trait 设计下由四个连接器的 `*_apply_skills` / `*_gate_step`
+/// 共用）：吞掉错误会让连接器在零同意状态下对模型可见。
 /// 错误文案由 `scope::consent_sync_failure_message` 单源生成（携带前端共享
 /// 标记 `scope::CONSENT_SYNC_FAILURE_MARKER`，两侧由
 /// consent_marker_frontend.test.mjs 与 Rust 发射端 pin 住），并把原始原因记入日志。
@@ -114,24 +151,16 @@ pub(crate) fn refresh_gate_consent_sync(id: &str, display_name: &str) -> Result<
         format!("{}技能门控刷新后的默认关同意同步失败: {e}", display_name)
     })
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::paths::tests::ENV_LOCK;
 
-    /// Minimal fake impl driving the default implementations: exercises the
-    /// disabled-path derivation under a temporary `PINVOU3_HOME`.
-    struct FakeGate;
-    impl ConnectorSkillGate for FakeGate {
-        fn id(&self) -> &'static str {
-            "fake"
-        }
-        fn disabled_filename(&self) -> &'static str {
-            "fake_disabled"
-        }
-        fn apply_skills(&self, _visible: bool) -> Result<(), String> {
-            Ok(())
+    /// Minimal hand-built gate driving the default implementations: exercises
+    /// the disabled-path derivation under a temporary `PINVOU3_HOME`.
+    fn fake_gate() -> ConnectorGate {
+        ConnectorGate {
+            disabled_filename: "fake_disabled",
+            ready_probe: || false,
         }
     }
 
@@ -235,7 +264,9 @@ mod tests {
     /// `disabled_path` 跟随 `PINVOU3_HOME`,且文件名由 `disabled_filename` 决定。
     #[test]
     fn disabled_path_is_derived_from_pinvou3_home() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let tmp = format!(
             "{}/pinvou3-skillgate-path-{}-{}",
             std::env::temp_dir().display(),
@@ -250,11 +281,14 @@ mod tests {
         // serialized in-process.
         unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
 
-        let gate = FakeGate;
+        let gate = fake_gate();
         assert_eq!(
             gate.disabled_path(),
             crate::platform::paths::pinvou3_home().join("fake_disabled")
         );
+        // 标志文件不存在 → 未停用;ready_probe 恒 false → 技能不应显示。
+        assert!(!gate.is_disabled());
+        assert!(!(gate.ready_probe)());
 
         match previous {
             // SAFETY: platform::paths::tests::ENV_LOCK is held; env writes

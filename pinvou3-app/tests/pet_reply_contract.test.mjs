@@ -52,9 +52,13 @@ assert.match(petWindow, /dangerouslySetInnerHTML=\{\{ __html: renderPetMarkdown\
 // 整个 SVG/MathML 标签集)。
 const petMarkdown = readFileSync(path.join(here, '..', 'src', 'features', 'pet', 'pet-markdown.js'), 'utf8');
 const markdownRenderer = readFileSync(path.join(here, '..', 'src', 'shared', 'markdown-renderer.js'), 'utf8');
-assert.match(petMarkdown, /SANITIZE_OPTIONS/);
-assert.doesNotMatch(petMarkdown, /FORBID_TAGS/);
-assert.match(markdownRenderer, /export const SANITIZE_OPTIONS/);
+// #566 合并后形态适配：上游把 pet-markdown 收敛为直接复用 markdown-renderer 的
+// 禁列表单一来源（MARKDOWN_FORBID_TAGS / MARKDOWN_FORBID_ATTR + neutralizeRawDangerousTags），
+// 渲染器内部的 SANITIZE_OPTIONS 不再导出。共享配置的意图不变：宠物窗口与主窗口
+// 消费同一份 DOMPurify 配置，不允许再拼一份更宽的白名单。
+assert.match(petMarkdown, /MARKDOWN_FORBID_TAGS/);
+assert.match(petMarkdown, /neutralizeRawDangerousTags/);
+assert.match(markdownRenderer, /const SANITIZE_OPTIONS/);
 assert.match(petWindow, /event\.key === ['"]Enter['"] && !event\.shiftKey/);
 assert.match(petWindow, /event\.key === ['"]Escape['"]/);
 assert.match(petWindow, /useAutoResizeTextarea\(/);

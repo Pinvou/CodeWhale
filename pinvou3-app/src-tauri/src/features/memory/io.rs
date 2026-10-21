@@ -103,11 +103,13 @@ pub fn snapshot_path() -> PathBuf {
     paths::user_memory_snapshot()
 }
 
-pub fn organize_history_path() -> PathBuf {
+// Internal-only path accessors: no command path or integration test reaches
+// them through the crate root, so they stay crate-private.
+pub(crate) fn organize_history_path() -> PathBuf {
     paths::user_memory_organize_history()
 }
 
-pub fn pending_memory_path() -> PathBuf {
+pub(crate) fn pending_memory_path() -> PathBuf {
     paths::user_memory_pending()
 }
 
@@ -161,7 +163,7 @@ pub(crate) fn try_lock_organize_pass() -> io::Result<std::fs::File> {
     }
 }
 
-pub fn never_memory_path() -> PathBuf {
+pub(crate) fn never_memory_path() -> PathBuf {
     paths::user_memory_never()
 }
 
@@ -327,14 +329,6 @@ pub fn load_profile() -> io::Result<MemoryProfile> {
     }
 }
 
-pub fn save_profile(profile: &MemoryProfile) -> io::Result<()> {
-    let _guard = write_lock().lock();
-    let mut normalized = profile.clone();
-    normalized.normalize();
-    let path = profile_path();
-    write_json_atomic(&path, &normalized)
-}
-
 pub fn update_profile(patch: ProfilePatch) -> io::Result<MemoryProfile> {
     let _guard = write_lock().lock();
     let mut profile = load_profile()?;
@@ -361,6 +355,14 @@ pub fn update_profile(patch: ProfilePatch) -> io::Result<MemoryProfile> {
     let path = profile_path();
     write_json_atomic(&path, &profile)?;
     Ok(profile)
+}
+
+pub fn save_profile(profile: &MemoryProfile) -> io::Result<()> {
+    let _guard = write_lock().lock();
+    let mut normalized = profile.clone();
+    normalized.normalize();
+    let path = profile_path();
+    write_json_atomic(&path, &normalized)
 }
 
 pub fn clear_profile() -> io::Result<MemoryProfile> {
@@ -1126,26 +1128,6 @@ pub(super) fn upsert_timed_memory_locked(
     upsert_timed_memory_unlocked(kind, topic, content, source, ttl_days)
 }
 
-pub(super) fn archive_timed_memory_unlocked(kind: &str, id: &str) -> io::Result<bool> {
-    let kind = normalize_timed_memory_kind(kind);
-    let id = clean_id(id);
-    let path = timed_memory_path(&kind);
-    let now = Utc::now().to_rfc3339();
-    let mut items = load_timed_memory_file(&path, &kind)?;
-    let mut changed = false;
-    for item in &mut items {
-        if item.id == id && item.status != "archived" {
-            item.status = "archived".to_string();
-            item.updated_at = now.clone();
-            changed = true;
-        }
-    }
-    if changed {
-        write_timed_memory_file(&path, &items, &kind)?;
-    }
-    Ok(changed)
-}
-
 pub fn update_timed_memory(
     kind: &str,
     id: &str,
@@ -1225,6 +1207,31 @@ pub(super) fn delete_timed_memory_unlocked(kind: &str, id: &str) -> io::Result<b
     }
     write_timed_memory_file(&path, &items, &kind)?;
     Ok(true)
+}
+
+/// Archive every active row of one timed store (`current_focus` /
+/// `recent_activity`): the organize flow archives expired items while the
+/// legacy recent-work sweep archives an id across all stores at once.
+/// Caller must hold [`write_lock`] (same invariant as
+/// [`delete_timed_memory_unlocked`]).
+pub(super) fn archive_timed_memory_unlocked(kind: &str, id: &str) -> io::Result<bool> {
+    let kind = normalize_timed_memory_kind(kind);
+    let id = clean_id(id);
+    let path = timed_memory_path(&kind);
+    let now = Utc::now().to_rfc3339();
+    let mut items = load_timed_memory_file(&path, &kind)?;
+    let mut changed = false;
+    for item in &mut items {
+        if item.id == id && item.status != "archived" {
+            item.status = "archived".to_string();
+            item.updated_at = now.clone();
+            changed = true;
+        }
+    }
+    if changed {
+        write_timed_memory_file(&path, &items, &kind)?;
+    }
+    Ok(changed)
 }
 
 fn load_timed_memory_file(path: &std::path::Path, kind: &str) -> io::Result<Vec<TimedMemoryItem>> {

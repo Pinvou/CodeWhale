@@ -38,7 +38,6 @@ import {
 } from '../../components/icons.jsx';
 import {
   EMPTY_PERSISTENCE_WARNING,
-  isPersistenceStatusCurrent,
   persistenceWarningReducer,
   visiblePersistenceWarning,
 } from './persistence-warning.mjs';
@@ -308,9 +307,12 @@ export function BrowserView({
   }, [sessionId, surfaceEpoch, shouldSuspendNativeSurface]);
 
   // ---- State synchronization ----
+  // Resolves true when the snapshot request settled without throwing — including
+  // stale/aborted rounds (unmount, session switch, superseded epoch), which must
+  // not be retried like a genuine failure. Only an RPC rejection resolves false.
   const refreshStatus = useCallback(async ({ preserveError = false } = {}) => {
     const requestedSessionId = sessionId;
-    if (!browserViewMountedRef.current) return 'stale';
+    if (!browserViewMountedRef.current) return true;
     const requestEpoch = statusRequestEpochRef.current + 1;
     statusRequestEpochRef.current = requestEpoch;
     const lifecycleEventEpoch = lifecycleEventEpochRef.current;
@@ -329,7 +331,7 @@ export function BrowserView({
         'workspace_restore_status_ms',
         browserPerformanceNow() - statusStartedAt,
       );
-      if (!isCurrent() || st?.sessionId !== requestedSessionId) return 'stale';
+      if (!isCurrent() || st?.sessionId !== requestedSessionId) return true;
       if (isBrowserSnapshotDomainCurrent(
         lifecycleEventEpoch,
         lifecycleEventEpochRef.current,
@@ -367,7 +369,11 @@ export function BrowserView({
           setControlRevision(nextRevision);
         }
       }
-      if (isPersistenceStatusCurrent(
+      // Status is a point-in-time snapshot, while warning/restored events are newer
+      // authoritative transitions: a response may hydrate only when no persistence
+      // event has arrived since that request started (same epoch guard as the other
+      // snapshot domains).
+      if (isBrowserSnapshotDomainCurrent(
         persistenceEventEpoch,
         persistenceEventEpochRef.current,
       )) {
@@ -382,9 +388,9 @@ export function BrowserView({
         setError(st.restoreError || '');
       }
       setInitialStatusResolved(true);
-      return 'success';
+      return true;
     } catch (e) {
-      if (!isCurrent()) return 'stale';
+      if (!isCurrent()) return true;
       if (isBrowserSnapshotDomainCurrent(
         lifecycleEventEpoch,
         lifecycleEventEpochRef.current,
@@ -409,7 +415,7 @@ export function BrowserView({
         setError(typeof e === 'string' ? e : String(e));
       }
       setInitialStatusResolved(true);
-      return 'failed';
+      return false;
     }
   }, [clearNavigationWatchdog, publishCommittedUrl, sessionId]);
   const refreshTabs = useCallback(async () => {
@@ -628,8 +634,10 @@ export function BrowserView({
         console.error('[browser] listener registration timed out; enabling reconciliation');
       }
       const hydrateInitialStatus = async (failedAttempt = 0) => {
-        const outcome = await refreshStatus();
-        if (disposed || outcome !== 'failed' || listenerRegistrationFailed) return;
+        // ok is false only when refreshStatus's own status RPC threw; stale
+        // rounds resolve true and must not schedule a bounded retry.
+        const ok = await refreshStatus();
+        if (disposed || ok || listenerRegistrationFailed) return;
         const retryDelay = browserStatusRetryDelay(failedAttempt);
         if (retryDelay == null) return;
         statusRetryTimer = window.setTimeout(() => {

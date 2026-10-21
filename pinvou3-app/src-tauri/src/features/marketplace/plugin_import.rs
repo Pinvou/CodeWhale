@@ -1332,25 +1332,17 @@ pub fn import_plugin_package_gated(
         let mut entry = archive
             .by_index(i)
             .map_err(|e| format!("zip 条目 #{i}: {e}"))?;
-        let Some(enclosed) = entry.enclosed_name() else {
-            return Err("zip 含不安全路径(穿越),拒绝".to_string());
-        };
-        if let Some(mode) = entry.unix_mode() {
-            if mode & 0o170000 == 0o120000 {
-                return Err("zip 含 symlink,拒绝".to_string());
-            }
-        }
-        declared_total = declared_total.saturating_add(entry.size());
-        if declared_total > MAX_PLUGIN_SIZE_BYTES {
-            return Err(format!(
-                "插件包解压超过 {} MiB 上限",
-                MAX_PLUGIN_SIZE_BYTES / 1024 / 1024
-            ));
-        }
+        // pass1 安全闸（穿越/symlink/声明大小上限）+ 净化路径，与技能 zip
+        // 导入通道共用 `checked_zip_entry_path`。
+        let path_str = checked_zip_entry_path(
+            &mut entry,
+            &mut declared_total,
+            MAX_PLUGIN_SIZE_BYTES,
+            "插件包",
+        )?;
         if entry.is_dir() {
             continue;
         }
-        let path_str = enclosed.to_string_lossy().replace('\\', "/");
         all_paths.push(path_str.clone());
         if path_str == "plugin.json" {
             let buf = read_bounded_checked(&mut entry, "plugin.json")?;
@@ -1908,14 +1900,6 @@ pub fn import_plugin_package_gated(
         id.clone(),
         super::store::BundleSource::Upload(display_name.to_string()),
     );
-    // upsert_preserving 的 credential_keys 取新值：供给的镜像写（install_upload）
-    // 已从 manifest 收敛凭据 key，这里必须带上同一份，否则补写会把它们冲成空表。
-    if let Some(manifest) = mgr.load_manifest(&id) {
-        record.credential_keys = super::bundle::tool_credentials(&manifest)
-            .into_iter()
-            .map(|c| c.key)
-            .collect();
-    }
     // 真实内容指纹（与 mcp_catalog 释放/技能 install 同一 dir_fingerprint 口径；
     // 计算失败不留假指纹，降级为 None）。
     record.content_fingerprint = match super::skill_marketplace::dir_fingerprint(&pkg_dir) {

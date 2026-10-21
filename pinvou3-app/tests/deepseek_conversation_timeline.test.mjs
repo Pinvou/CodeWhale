@@ -458,6 +458,7 @@ try {
 
   const chatView = readFileSync(path.join(root, 'src', 'features', 'chat', 'ChatView.jsx'), 'utf8');
   const conversationView = readFileSync(path.join(root, 'src', 'features', 'conversation', 'ConversationTimeline.jsx'), 'utf8');
+  const conversationScroll = readFileSync(path.join(root, 'src', 'features', 'conversation', 'conversation-scroll.js'), 'utf8');
   const questionChoiceCard = readFileSync(path.join(root, 'src', 'features', 'conversation', 'QuestionChoiceCard.jsx'), 'utf8');
   const toolRenderers = readFileSync(path.join(root, 'src', 'features', 'tools', 'tool-renderers.jsx'), 'utf8');
   const userInputShared = readFileSync(path.join(root, 'src', 'shared', 'user-input-shared.js'), 'utf8');
@@ -485,8 +486,9 @@ try {
     && chatView.includes('const artifactsVisible = Boolean(activeSessionId && artifactsOpen && !remoteTranscriptActive)')
     && chatView.includes('if (!activeSessionId) setArtifactsOpen(false)'),
   'the empty Work home and RemoteProxy must hide the local artifacts dock until a local session exists');
-  assert.ok(chatView.includes('<ConversationActivityIndicator')
+  assert.ok(chatView.includes('<LiveConversationActivityIndicator')
     && chatView.includes('turn={activeConversationTurn}')
+    && conversationView.includes('export function LiveConversationActivityIndicator')
     && conversationView.includes("if (!turn || turn.status !== 'running') return null"),
   'the composer activity timer must be shared and visible only while a turn is active');
   assert.ok(chatView.includes('!isSearchTool(item.tool)') && chatView.includes('!isFetchTool(item.tool)'),
@@ -661,9 +663,10 @@ try {
   assert.ok(chatView.includes('previousScrollHeight: lastScrollHeightRef.current')
     && chatView.includes('lastScrollHeightRef.current = transition.scrollHeight'),
     'a shrink-induced scrollTop clamp must not be mistaken for the user browsing history');
-  assert.ok(chatView.includes('startConversationBottomFollower({')
-    && chatView.includes('isFollowing: () => autoScrollRef.current')
-    && chatView.includes('onMeasured: () => {'),
+  assert.ok(chatView.includes('useConversationBottomFollower({')
+    && conversationScroll.includes('startConversationBottomFollower({')
+    && conversationScroll.includes('isFollowing: () => autoScrollRef.current')
+    && conversationScroll.includes('onMeasured: () => {'),
     'bottom-following conversations must recover after delayed layout and window visibility changes');
 
   console.log('deepseek_conversation_timeline: ok');

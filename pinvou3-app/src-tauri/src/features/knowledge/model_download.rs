@@ -26,6 +26,8 @@ const DISPLAY_DOWNLOAD_BYTES: u64 =
 pub const MODEL_VERSION: &str = "bge-m3";
 
 static DOWNLOADING: AtomicBool = AtomicBool::new(false);
+
+/// 取消进行中的下载（下次网络数据块或文件校验边界生效）。
 static CANCEL: AtomicBool = AtomicBool::new(false);
 static MODEL_LOAD: ModelLoadCoordinator = ModelLoadCoordinator::new();
 static MODEL_LOAD_ERROR: Mutex<Option<String>> = Mutex::new(None);
@@ -142,6 +144,8 @@ pub(crate) fn model_installed() -> bool {
     model_directory_is_complete(&configured_model_dir())
 }
 
+/// 当前模型状态（camelCase 回前端）。`failed` 由前端用 installed/ready/loading/error
+/// 本地推导，不再单独下发。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KbModelStatus {
@@ -151,8 +155,6 @@ pub struct KbModelStatus {
     pub ready: bool,
     /// 启动后的后台模型加载仍在进行。
     pub loading: bool,
-    /// 模型文件存在，但最近一次进程内加载失败。
-    pub failed: bool,
     /// 模型已安装，但因本地无已入库内容且远程无连接被首帧门控故意延迟加载；
     /// 语义检索退化为全文（既有降级语义），区别于真实加载失败。
     pub deferred_no_usage: bool,
@@ -181,7 +183,6 @@ pub(crate) fn current_status(service: &KnowledgeService) -> KbModelStatus {
         installed,
         ready,
         loading,
-        failed: installed && !ready && !loading && error.is_some(),
         deferred_no_usage: deferred_no_usage(
             MODEL_DEFERRED_NO_USAGE.load(Ordering::Acquire),
             installed,

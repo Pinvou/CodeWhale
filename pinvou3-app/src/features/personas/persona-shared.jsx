@@ -6,9 +6,9 @@
 import React, { useState } from 'react';
 import { AppWindow, Award, Briefcase, Cpu, Feather, Globe, Lock, Navigation, Palette, Radio, Terminal, TrendingUp, User } from '../../components/icons.jsx';
 import { expertAvatarSrc } from '../../shared/expert-avatar.mjs';
-const DEPT_LABELS = { academic:'学术', design:'设计', engineering:'工程', finance:'金融', 'game-development':'游戏', gis:'地理信息', hr:'人力', legal:'法务', marketing:'营销', 'paid-media':'投放', product:'产品', 'project-management':'项管', sales:'销售', security:'安全', 'spatial-computing':'空间计算', specialized:'专项', 'supply-chain':'供应链', support:'客服', testing:'测试', tool:'工具' };
-    // 部门标签按当前 UI 语言取词(t.depts),DEPT_LABELS(中文)兜底
-export function deptLabelFor(t, k) { return (t && t.depts && t.depts[k]) || DEPT_LABELS[k] || k; }
+import { dict } from '../../shared/i18n.js';
+    // 部门标签按当前 UI 语言取词(t.depts),中文词典(dict.zh.depts)兜底
+export function deptLabelFor(t, k) { return (t && t.depts && t.depts[k]) || (dict.zh.depts && dict.zh.depts[k]) || k; }
 import { personaOverlayFor } from '../../shared/persona-overlay.js';
     // iOS-style font stack shared by the Persona surfaces (5 call sites in
     // Personas/persona-shared/SavedPersonaConfirmDialog); the promo banner in

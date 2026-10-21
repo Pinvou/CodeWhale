@@ -27,7 +27,7 @@ function host() {
     setTimeout, clearTimeout, setInterval: () => 0, clearInterval() {}, structuredClone,
   });
   const html = fs.readFileSync(path.join(root, 'src/index.html'), 'utf8');
-  const scripts = [...html.matchAll(/<script src="%BASE_URL%(shared\/bridge-messages\.js|features\/remote-control\/remote-control-state\.js|platform\/tauri\/bridge(?:\.js|\/[^"]+))"[^>]*><\/script>/g)]
+  const scripts = [...html.matchAll(/<script src="%BASE_URL%(shared\/(?:bridge-messages|bridge-shared-helpers)\.js|features\/remote-control\/remote-control-state\.js|platform\/tauri\/bridge(?:\.js|\/[^"]+))"[^>]*><\/script>/g)]
     .map(match => match[1]);
   assert.ok(scripts.includes('platform/tauri/bridge.js'));
   for (const script of scripts) vm.runInContext(fs.readFileSync(path.join(root, 'src', script), 'utf8'), context, { filename: script });

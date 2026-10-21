@@ -106,12 +106,7 @@ pub(super) fn append_web_attachment_upload_chunk(
     commit: bool,
     sha256: Option<&str>,
 ) -> Result<Option<(String, Vec<u8>)>, String> {
-    if upload_id.len() < 8
-        || upload_id.len() > 128
-        || !upload_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
+    if !crate::features::files::attachment_upload::validate_opaque_token(upload_id, 8, 128, None) {
         return Err("远程控制附件上传 ID 无效".into());
     }
     let file_name = file_name.trim();

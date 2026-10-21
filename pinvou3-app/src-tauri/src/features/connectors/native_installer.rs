@@ -169,7 +169,7 @@ fn artifact_download_urls_with_prefix(prefix: Option<&str>, artifact: &Artifact)
 /// 不再原地覆盖；同版本同哈希已在盘 → 直接返回（幂等语义不变）。
 /// 下载/解包暂存收编到 `assets/.staging/`（旧 `cache/connectors/` 退役，
 /// 残留不清理——内容只是缓存，重下自愈）。
-pub fn ensure_native_cli(name: &str) -> Result<bool, String> {
+pub fn ensure_native_cli(name: &str) -> Result<(), String> {
     let _guard = INSTALL_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -192,7 +192,7 @@ pub fn ensure_native_cli(name: &str) -> Result<bool, String> {
     if file_sha256_matches(&destination, &artifact.binary_sha256) {
         // 二进制已就位(hash 比对通过)时 license 必然随上次释放落过盘,不再重写,
         // 避免每次按需检查都白写一次 license 文件。
-        return Ok(false);
+        return Ok(());
     }
     write_license(&version_dir, name)?;
 
@@ -249,7 +249,7 @@ pub fn ensure_native_cli(name: &str) -> Result<bool, String> {
     // GC 策略：同 name 的旧版本目录**保守保留暂不删**——资产按「包只引用不拥有」
     // 共享（§4），删除需要引用计数支撑；CLI 二进制体积小，滞留成本低。
     // 引用计数/GC 随存储布局迁移 PR 一并落地。
-    Ok(true)
+    Ok(())
 }
 
 /// 旧布局（`connectors/<platform>/bin/`，无版本）→ 版本化资产库的一次性迁移
@@ -625,6 +625,7 @@ fn sha256_bytes(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::platform::test_support::managed_connector_bin_dir_or_assert_unsupported;
+    use crate::platform::test_support::with_temp_home;
 
     #[test]
     fn lock_matches_current_target_and_has_three_pinned_artifacts() {
@@ -821,31 +822,6 @@ mod tests {
         ));
     }
 
-    /// 把 PINVOU3_HOME 指到干净临时目录跑闭包（借 ENV_LOCK 与其它 env 测试串行）。
-    fn with_temp_home<F: FnOnce()>(f: F) {
-        let _g = crate::platform::paths::tests::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let dir = std::env::temp_dir().join(format!(
-            "pinvou3-native-installer-test-{}-{}",
-            std::process::id(),
-            crate::platform::paths::tests::unique_suffix()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let prev = std::env::var("PINVOU3_HOME").ok();
-        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
-        unsafe { std::env::set_var("PINVOU3_HOME", &dir) };
-        f();
-        match prev {
-            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
-            Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
-            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
-            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     /// 旧布局迁移（§9.3）：SHA-256 匹配 → 移动到版本目录并清理腾空的 bin 目录；
     /// 钉住版本已在版本目录校验通过时，同名旧文件一律删除——内容相同属重复
     /// 残留，内容不同属滞留旧版本（滞留只会在按名解析/PATH 中遮蔽升级后的
@@ -853,7 +829,7 @@ mod tests {
     /// 全程幂等。
     #[test]
     fn migrate_legacy_binary_moves_match_and_reaps_stale_leftover() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-native-installer-test", || {
             let Some(bin_dir) = managed_connector_bin_dir_or_assert_unsupported() else {
                 return; // 当前平台无旧布局目录（不支持的架构），无从断言
             };
@@ -911,7 +887,7 @@ mod tests {
     /// upgrade).
     #[test]
     fn mismatched_legacy_binary_kept_without_verified_pinned_copy() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-native-installer-test", || {
             let Some(bin_dir) = managed_connector_bin_dir_or_assert_unsupported() else {
                 return;
             };

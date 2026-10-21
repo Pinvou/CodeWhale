@@ -10,6 +10,7 @@ import { FileTypeIcon } from '../../components/files/FileTypeIcon.jsx';
 import { invokeTauri, isTauriAvailable, listenTauri, openTauriDialog, saveTauriDialog } from '../../platform/tauri/client.js';
 import { copyClipboardText } from '../../shared/clipboard.js';
 import { formatBytes } from '../../shared/format-number.js';
+import { pathBasename } from '../../shared/path-utils.js';
 import { applyDocumentDelta, stableAccentColor } from '../../shared/knowledge-utils.js';
 import remoteKnowledgeHeroImage from '../../assets/remote-knowledge/remote-knowledge-hero.webp';
 
@@ -144,7 +145,8 @@ function OverlayDialog({
   return typeof document === 'undefined' ? dialog : createPortal(dialog, document.body);
 }
 
-function RemoteKnowledgeView({ t, embedded = false, localEmbedSupported }) {
+// eslint-disable-next-line sonarjs/cognitive-complexity -- the main view aggregates the connection/collection/document/member data flows; splitting would break the existing structure
+function RemoteKnowledgeView({ t, localEmbedSupported }) {
   // 本机作为共享知识库宿主时的「下载嵌入模型」入口与 KnowledgeView 的模型卡共用同一条
   // 服务端下载漏斗（begin_model_download），后者在不支持的平台（linux/loongarch64）会
   // 直接拒绝。入口按 === true 判定（fail closed）：快照未到达或未来新增渲染点漏传 prop
@@ -1076,7 +1078,7 @@ function RemoteKnowledgeView({ t, embedded = false, localEmbedSupported }) {
   // the same queue item shape; only how a path maps to a display name differs
   // (publish reuses the local document's own name, pickers derive it from the
   // path). Every item starts queued with no error and no poll timeout.
-  const uploadEntryName = path => String(path).split(/[\\/]/).pop() || String(path);
+  const uploadEntryName = path => pathBasename(path, { fallback: String(path) });
   const queueUploads = entries => setUploadQueue(entries.map(({ path, name }) => ({
     path,
     name,
@@ -1400,18 +1402,18 @@ function RemoteKnowledgeView({ t, embedded = false, localEmbedSupported }) {
   }
 
   if (!isTauriAvailable()) {
-    return <div className={embedded ? `mx-auto max-w-[1400px] py-8 ${muted}` : `p-8 ${muted}`}>{t.remoteKbDesktopOnly}</div>;
+    return <div className={`mx-auto max-w-[1400px] py-8 ${muted}`}>{t.remoteKbDesktopOnly}</div>;
   }
 
   const activeShares = ownerShares.filter(item => !item.stoppedAt && item.expiresAt > Date.now() / 1000); // eslint-disable-line react-hooks/purity -- expiry is computed relative to the current time; the list only renders while the panel is open
 
   return (
     <div
-      className={embedded
-        ? `w-full ${ink}`
-        : `h-full overflow-y-auto bg-[#f7f8fa] p-5 dark:bg-[#111113] md:p-8 ${ink}`}
+      // 唯一挂载点（KnowledgeView 的 remote 子页）恒为嵌入式：类名按 embedded=true
+      // 写死；data-embedded="true" 保留为外部契约（kb_smoke 钉住该属性）。
+      className={`w-full ${ink}`}
       data-testid="remote-knowledge-panel"
-      data-embedded={embedded ? 'true' : 'false'}
+      data-embedded="true"
     >
       <div className="mx-auto max-w-[1400px] space-y-5">
         <header
