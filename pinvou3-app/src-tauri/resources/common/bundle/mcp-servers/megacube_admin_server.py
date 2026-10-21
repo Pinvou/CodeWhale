@@ -1245,6 +1245,28 @@ else
 fi
 """
 
+# .deploy-env is literal KEY="VALUE" data shared with the Rust inventory readers.
+# Never source it: user-selected paths may contain shell metacharacters.
+_DEPLOY_ENV_READ_SH = r"""
+lmm_read_deploy_env() {
+    local lmm_line lmm_key lmm_value
+    [ -f "$1" ] || return 0
+    while IFS= read -r lmm_line || [ -n "$lmm_line" ]; do
+        case "$lmm_line" in ''|\#*) continue ;; esac
+        case "$lmm_line" in
+            IMAGE=\"*\"|CONTAINER_NAME=\"*\"|PORT=\"*\"|MODEL_DIR=\"*\"|GPU_FLAGS=\"*\")
+                lmm_key="${lmm_line%%=*}"
+                lmm_value="${lmm_line#*=}"
+                lmm_value="${lmm_value#\"}"
+                lmm_value="${lmm_value%\"}"
+                printf -v "$lmm_key" '%s' "$lmm_value"
+                ;;
+            *) echo "ERROR: Invalid literal deployment record: $1" >&2; return 1 ;;
+        esac
+    done < "$1"
+}
+"""
+
 _TS_PKG_DEPLOY_SH = r"""#!/usr/bin/env bash
 # ============================================================================
 # deploy.sh — One-shot deployment for the card's model on NVIDIA GB10 (DGX Spark)
@@ -1482,7 +1504,7 @@ fi
 # Write .deploy-env for the other scripts
 # --------------------------------------------------------------------------
 cat > "$ENV_FILE" <<EOF
-# Written by deploy.sh on $(date -Is). Sourced by start.sh / stop.sh / uninstall.sh.
+# Written by deploy.sh on $(date -Is). Literal data; never source or eval.
 IMAGE="$IMAGE"
 CONTAINER_NAME="$CONTAINER_NAME"
 PORT="$PORT"
@@ -1535,7 +1557,8 @@ CONTAINER_NAME="__CONTAINER_NAME__"
 PORT="30000"
 MODEL_DIR="$SCRIPT_DIR/models/__MODEL_SUBDIR__"
 GPU_FLAGS="--gpus all"
-[ -f "$SCRIPT_DIR/.deploy-env" ] && . "$SCRIPT_DIR/.deploy-env"
+__DEPLOY_ENV_READ__
+lmm_read_deploy_env "$SCRIPT_DIR/.deploy-env"
 PORT="${_ENV_PORT:-$PORT}"
 
 MEM_FRACTION_STATIC="${MEM_FRACTION_STATIC:-0.60}"
@@ -1685,7 +1708,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONTAINER_NAME="__CONTAINER_NAME__"
-[ -f "$SCRIPT_DIR/.deploy-env" ] && . "$SCRIPT_DIR/.deploy-env"
+__DEPLOY_ENV_READ__
+lmm_read_deploy_env "$SCRIPT_DIR/.deploy-env"
 
 log()  { printf '\033[1;32m[stop]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[stop]\033[0m %s\n' "$*"; }
@@ -1748,7 +1772,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE="lmsysorg/sglang:v0.5.19"
 CONTAINER_NAME="__CONTAINER_NAME__"
 MODEL_DIR="$SCRIPT_DIR/models/__MODEL_SUBDIR__"
-[ -f "$SCRIPT_DIR/.deploy-env" ] && . "$SCRIPT_DIR/.deploy-env"
+__DEPLOY_ENV_READ__
+lmm_read_deploy_env "$SCRIPT_DIR/.deploy-env"
 
 REMOVE_ALL=0 ASSUME_YES=0 KEEP_MODEL=0
 for arg in "$@"; do
@@ -1891,6 +1916,7 @@ def _render_sglang_card_files(probe, card_id):
     files = {}
     for fname, tpl in _SGLANG_CARD_TEMPLATES.items():
         text = tpl.replace("__IMPORT_ROOTS__", _IMPORT_ROOTS_SH)
+        text = text.replace("__DEPLOY_ENV_READ__", _DEPLOY_ENV_READ_SH)
         for key, val in values.items():
             text = text.replace("__%s__" % key, val)
         for key, val in blocks.items():

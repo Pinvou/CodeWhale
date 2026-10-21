@@ -44,3 +44,6 @@ class MegaCubeMcpTests(unittest.TestCase):
 
     def test_management_observations_are_verified(self):
         self.run_suite("megacube_api_observation_test.py")
+
+    def test_generated_deployment_paths_are_literal(self):
+        self.run_suite("megacube_generated_env_test.py")
