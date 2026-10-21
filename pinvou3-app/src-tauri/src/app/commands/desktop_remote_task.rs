@@ -242,6 +242,7 @@ impl RemoteSessionProvisioner for DesktopRemoteSessionProvisioner {
                 crate::features::codex_acp::AgentBackend::CodexAcp,
                 crate::features::codex_acp::CodexWorkspaceKind::Project,
                 Some(path.to_path_buf()),
+                Vec::new(),
             )
             .map_err(|_| "task_session_backend_bind_failed".to_owned())?;
         self.pending_modes.lock().remove(session_id);
