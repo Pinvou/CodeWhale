@@ -227,4 +227,3 @@ test('「导出日志（可外发）」的显示条件：失败且有运行日�
   assert.equal(exportLogEligible({ status: 'completed', runId: 'run-1' }), false, '完成 → 不给');
   assert.equal(exportLogEligible({}), false, '空对象 → 不给（不得抛错）');
 });
-
