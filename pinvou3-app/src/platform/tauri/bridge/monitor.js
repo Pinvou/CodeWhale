@@ -3,6 +3,7 @@
  * Registered before bridge.js builds the backwards-compatible facade.
  */
 (function (root) {
+  // biome-ignore lint/suspicious/noRedundantUseStrict: verbatim copy of a classic-script artifact; strict mode is part of the payload
   "use strict";
   // biome-ignore lint/suspicious/noAssignInExpressions: registry bootstrap of the verbatim payload; splitting the statements would diverge from the artifact
   const registry = root.__PINVOU_TAURI_BRIDGE_FEATURES__ = root.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
@@ -17,27 +18,36 @@ function pinvouSharedtauriMonitor() {
     const notify = context.notify;
     const invoke = context.invoke;
     const bt = context.bt;
-    const notifyDomains = context.notifyDomains;
     const sessionStates = context.sessionStates;
     let monitorIntervalId = null;
     let monitorPollInFlight = false;
     let gpuUtilHistory = [];
-    // 0 = no real max_model_len received yet from get_backend_status or the
-    // monitor snapshot; write state.tokens.max back only for real values
-    // (both assignment sites are truthiness-guarded).
-    var maxModelLen = state.tokens.max || 0;
-    var MONITOR_BASELINE_KEY = "pinvou3.monitorStatsBaseline.self";
-    var monitorBaseline = null;
+    // state.tokens.max is written back only for real max_model_len values from
+    // get_backend_status or the monitor snapshot (both assignment sites are
+    // truthiness-guarded).
+    const MONITOR_BASELINE_KEY = "pinvou3.monitorStatsBaseline.self";
+    let monitorBaseline = null;
     try {
-      var storedBaseline = localStorage.getItem(MONITOR_BASELINE_KEY);
+      const storedBaseline = localStorage.getItem(MONITOR_BASELINE_KEY);
       if (storedBaseline) monitorBaseline = JSON.parse(storedBaseline);
-    } catch (error) { monitorBaseline = null; }
+    } catch { monitorBaseline = null; }
   // ── Monitor ──────────────────────────────────────────────────────
-  var PinvouFU = window.PinvouFormatUtils || {};
-  var fmtMiB = PinvouFU.fmtMiB || function (mib) { return mib == null ? "—" : String(mib); };
-  var fmtKiB = PinvouFU.fmtKiB || function (kib) { return kib == null ? "—" : String(kib); };
-  var fmtDuration = PinvouFU.fmtDuration || function (secs) { return secs == null ? "—" : String(secs); };
-  var fmtTok = PinvouFU.fmtTok || function (n) { return n == null ? "—" : String(n); };
+  // The shared format-utils script is loaded statically; the inline fallbacks
+  // are verbatim copies of its bodies so the monitor never falls back to raw
+  // numbers when the shared script is missing.
+  const PinvouFU = window.PinvouFormatUtils || {};
+  const fmtMiB = PinvouFU.fmtMiB || function (mib) {
+    if (mib == null) return "—";
+    return mib >= 1024 ? (mib / 1024).toFixed(1) + " GB" : mib + " MB";
+  };
+  const fmtKiB = PinvouFU.fmtKiB || function (kib) {
+    if (kib == null) return "—";
+    if (kib >= 1024 * 1024) return (kib / 1024 / 1024).toFixed(1) + " GB";
+    if (kib >= 1024) return (kib / 1024).toFixed(0) + " MB";
+    return kib + " KB";
+  };
+  const fmtDuration = PinvouFU.fmtDuration || function (secs) { return secs == null ? "—" : String(secs); };
+  const fmtTok = PinvouFU.fmtTok || function (n) { return n == null ? "—" : String(n); };
 
 
 function numOr0(x) { return pinvouSharedtauriMonitor().numOr0(x); }
@@ -52,15 +62,15 @@ function adjustCounters(sp, v) { return pinvouSharedtauriMonitor().adjustCounter
 
   function clearMonitorBaseline() {
     monitorBaseline = null;
-    try { localStorage.removeItem(MONITOR_BASELINE_KEY); } catch (e) {}
+    try { localStorage.removeItem(MONITOR_BASELINE_KEY); } catch { /* ignore when localStorage is unavailable */ }
   }
 
   // 把当前 counter 快照存为基准点 → 监控页「后 4 项」从此刻起重新计。
   // 自测计数(TTFT/TPS/tokens/usage-cache)+ vLLM prefix_cache(供本地 KV 分支)一起存。
   function clearMonitorStats() {
-    var sp = state.monitor && state.monitor.self_perf;
+    const sp = state.monitor && state.monitor.self_perf;
     if (!sp) return false;
-    var v = (state.monitor && state.monitor.vllm) || {};
+    const v = (state.monitor && state.monitor.vllm) || {};
     monitorBaseline = {
       ttft_sum_s: numOr0(sp.ttft_sum_s),
       ttft_count: numOr0(sp.ttft_count),
@@ -74,25 +84,25 @@ function adjustCounters(sp, v) { return pinvouSharedtauriMonitor().adjustCounter
       pc_queries: numOr0(v.prefix_cache_queries),
       at: Date.now(),  // 记录清除时刻，供「统计自 HH:MM 起」状态文字
     };
-    try { localStorage.setItem(MONITOR_BASELINE_KEY, JSON.stringify(monitorBaseline)); } catch (e) {}
+    try { localStorage.setItem(MONITOR_BASELINE_KEY, JSON.stringify(monitorBaseline)); } catch { /* ignore when localStorage is unavailable */ }
     pollMonitor();  // 立即刷新显示，无需等下一个轮询周期
     return true;
   }
 
   function appQueueSnapshot() {
-    var running = 0;
-    var waiting = state.queued ? state.queued.length : 0;
-    var busyMap = {};
-    for (var id in sessionStates) {
+    let waiting = state.queued ? state.queued.length : 0;
+    const busyMap = {};
+    for (const id in sessionStates) {
+      // biome-ignore lint/suspicious/noPrototypeBuiltins: Safari 14 is the floor and Object.hasOwn is unavailable; this call is already the safe form
       if (!Object.prototype.hasOwnProperty.call(sessionStates, id)) continue;
       if (id === state.activeSessionId) continue;
-      var buf = sessionStates[id] || {};
+      const buf = sessionStates[id] || {};
       if (buf.busy) busyMap[id] = true;
       if (Array.isArray(buf.queued)) waiting += buf.queued.length;
     }
     if (state.activeSessionId && state.busy) busyMap[state.activeSessionId] = true;
-    running = Object.keys(busyMap).length;
-    return { running: running, waiting: waiting };
+    const running = Object.keys(busyMap).length;
+    return { running, waiting };
   }
 
   // MonitorView only consumes state.monitor._fmt (plus one level of vllmRaw
@@ -139,24 +149,24 @@ function adjustCounters(sp, v) { return pinvouSharedtauriMonitor().adjustCounter
     if (monitorPollInFlight) return;
     monitorPollInFlight = true;
     try {
-      var snap = await invoke("get_monitor_snapshot");
+      const snap = await invoke("get_monitor_snapshot");
       // The previous round errored → this round must notify once so the
       // "read failed" banner switches back to the normal panel.
-      var hadMonitorError = !!state.monitorError;
+      const hadMonitorError = !!state.monitorError;
       state.monitorError = null;
       // GPU util sliding window
       if (snap.gpu) {
         gpuUtilHistory.push(snap.gpu.utilization_pct);
         if (gpuUtilHistory.length > 5) gpuUtilHistory.shift();
-        snap.gpu._utilMax = Math.max.apply(null, [0].concat(gpuUtilHistory));
+        snap.gpu._utilMax = Math.max(...[0, ...gpuUtilHistory]);
       }
       // 监控页「后 4 项」累计指标：TTFT/TPS/tokens 来自 app 侧自测(snap.self_perf,
       // 任何后端都有);KV 混合(本地 vLLM prefix_cache 优先,否则 usage 口径)。
       // 按「清除统计」基准点换算成区间值后再格式化。
-      var sadj = adjustCounters(snap.self_perf, snap.vllm);
+      const sadj = adjustCounters(snap.self_perf, snap.vllm);
       // KV 显示值:本地 vLLM 的 /metrics prefix_cache 优先,拿不到用 usage cache 口径(云端)。
-      var kvShown = sadj ? (sadj.vllmKvPct != null ? sadj.vllmKvPct
-        : (sadj.selfKvPct != null ? sadj.selfKvPct : null)) : null;
+      const kvShown = sadj ? (sadj.vllmKvPct == null ? (sadj.selfKvPct == null ? null : sadj.selfKvPct)
+        : sadj.vllmKvPct) : null;
       // Format values for display
       const vllm = snap.vllm || null;
       const metricsApplicable = vllm ? vllm.metrics_applicable !== false : false;
@@ -169,7 +179,7 @@ function adjustCounters(sp, v) { return pinvouSharedtauriMonitor().adjustCounter
       const cpuUsage = cpu && typeof cpu.total_usage_pct === "number" && Number.isFinite(cpu.total_usage_pct)
         ? Math.round(Math.max(0, Math.min(100, cpu.total_usage_pct)))
         : null;
-      var computeName = snap.gpu ? snap.gpu.name : (cpu && cpu.name ? cpu.name : bt("gpuUnavailable"));
+      const computeName = snap.gpu ? snap.gpu.name : (cpu && cpu.name ? cpu.name : bt("gpuUnavailable"));
       snap._fmt = {
         gpuName: computeName,
         cpuName: cpu && cpu.name ? cpu.name : "",
@@ -206,7 +216,7 @@ function adjustCounters(sp, v) { return pinvouSharedtauriMonitor().adjustCounter
         // TTFT/TPS/tokens 一律用 app 侧自测——任何后端(vLLM/LM Studio/Ollama/云端)都有值,
         // 不再受 metricsApplicable 门控。KV 见 kvShown(本地 prefix_cache / 云端 usage 口径),
         // 拿不到则 "—"。队列仍归 vLLM(见 vllmQueue)。
-        vllmKv: kvShown != null ? kvShown.toFixed(1) + "%" : "0%",
+        vllmKv: kvShown == null ? "0%" : kvShown.toFixed(1) + "%",
         vllmKvHasData: kvShown != null,
         vllmTtft: sadj && sadj.ttft_count > 0
           ? (sadj.ttft_sum_s / sadj.ttft_count).toFixed(2) + " s" : "—",
@@ -219,38 +229,26 @@ function adjustCounters(sp, v) { return pinvouSharedtauriMonitor().adjustCounter
           kvPct: kvShown,
           ttftS: sadj.ttft_count > 0 ? sadj.ttft_sum_s / sadj.ttft_count : null,
           tps: sadj.tps_time_s > 0 ? sadj.tps_tokens / sadj.tps_time_s : null,
-          gen: sadj.gen != null ? sadj.gen : null,
-          prompt: sadj.prompt != null ? sadj.prompt : null,
+          gen: sadj.gen == null ? null : sadj.gen,
+          prompt: sadj.prompt == null ? null : sadj.prompt,
         } : null,
         appVersion: snap.app ? snap.app.pinvou3_version + bt("betaVersionSuffix") : "—",
         uptime: snap.app ? fmtDuration(snap.app.session_uptime_secs) : "—",
       };
-      var monitorDomains = ["monitor"];
-      var tokenLimitChanged = false;
       if (snap.vllm && snap.vllm.max_model_len) {
-        maxModelLen = snap.vllm.max_model_len;
-        tokenLimitChanged = state.tokens.max !== maxModelLen;
-        if (tokenLimitChanged) monitorDomains.push("chat");
-        state.tokens.max = maxModelLen;
+        state.tokens.max = snap.vllm.max_model_len;
       }
-      // Display-equivalent snapshots do not overwrite state.monitor. A token
-      // denominator change still publishes chat below, even when the monitor
-      // card itself is unchanged.
+      // Display-equivalent snapshots neither overwrite state.monitor nor
+      // notify (must send on the first frame or after an errored round).
       const prevFmt = state.monitor && state.monitor._fmt;
-      const monitorChanged = hadMonitorError || !prevFmt || !monitorFmtEqual(prevFmt, snap._fmt);
-      if (monitorChanged) {
+      if (hadMonitorError || !prevFmt || !monitorFmtEqual(prevFmt, snap._fmt)) {
         state.monitor = snap;
-        notifyDomains(monitorDomains);
-      } else if (tokenLimitChanged) {
-        // Another model/status path may have changed tokens.max while the
-        // monitor card stayed display-equivalent. Publish the restored token
-        // denominator even though the monitor slice itself can stay cached.
-        notifyDomains(["chat"]);
+        notify();
       }
     } catch (e) {
       state.monitorError = e && e.message ? e.message : String(e || "monitor poll failed");
       console.warn("monitor poll failed", e);
-      notifyDomains(["monitor"]);
+      notify();
     } finally {
       monitorPollInFlight = false;
     }
@@ -261,27 +259,24 @@ function stopMonitorPolling() { return pinvouSharedtauriMonitor().stopMonitorPol
 
   // ── Backend status (live dot) ────────────────────────────────────
   async function pollBackendStatus() {
-    var changedDomains = ["platform"];
     try {
-      var s = await invoke("get_backend_status");
+      const s = await invoke("get_backend_status");
       state.backendOnline = !!s.vllm_online;
       // 修 token 分母时机 bug：不再依赖用户打开监控页才拿到真实 max_model_len
       if (s.max_model_len) {
-        maxModelLen = s.max_model_len;
-        if (state.tokens.max !== maxModelLen) changedDomains.push("chat");
-        state.tokens.max = maxModelLen;
+        state.tokens.max = s.max_model_len;
       }
-    } catch (e) {
+    } catch {
       state.backendOnline = false;
     }
-    notifyDomains(changedDomains);
+    notify();
   }
 
     return {
-      startMonitorPolling: startMonitorPolling,
-      stopMonitorPolling: stopMonitorPolling,
-      clearMonitorStats: clearMonitorStats,
-      pollBackendStatus: pollBackendStatus
+      startMonitorPolling,
+      stopMonitorPolling,
+      clearMonitorStats,
+      pollBackendStatus
     };
   };
 })(window);

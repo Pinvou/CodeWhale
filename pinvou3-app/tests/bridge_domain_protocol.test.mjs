@@ -179,7 +179,11 @@ const expectedProtocolHashes = {
   // display-equality gate — listener body-internal edits only, no new invoke
   // or listen entries (capture-text refresh). Recomputed for per-frame stream
   // notification coalescing; event names and invoke shapes remain unchanged.
-  chat: '0833a8d0a3f9cb5fa8b19ed4973f0a4c81a65657a98aac804fbc0930d9057aa1',
+  // Recomputed for the per-frame stream notification coalescing backflow
+  // (Community #727): chat:delta/chat:tool_start/chat:done listener bodies moved
+  // to the shared single-publication flush (notify() without domains, one
+  // refreshActiveStreamRender hook) — event names and invoke shapes unchanged.
+  chat: 'c660db74258acda5026f88a5670e58a93b59fe1eb482ec2915244be7084a8bb9',
   dependencies: 'd39f5a46b8e34c1c30d8f8e08ef62baccfe822ffb7fad8dbf3301c69c566e31c',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.
