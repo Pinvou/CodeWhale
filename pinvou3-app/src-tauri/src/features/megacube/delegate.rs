@@ -168,28 +168,64 @@ fn wait_task(
     }
 }
 
-/// 管理面端点事实（公共面）：cmsd 在场返回 Some((固定端点 URL, 别名))，
-/// 不在场 None。商店融合的自愈端点修复用它。
+/// Return only a confirmed gateway observation. Callers performing optional
+/// reconciliation retain their existing endpoint when the daemon is unavailable.
 pub fn gateway_endpoint() -> Option<(String, String)> {
     let client = Client::connect().ok()?;
-    Some(gateway_endpoint_for(&client))
+    gateway_endpoint_for(&client).ok()
 }
 
-/// 网关端点（D0 固定端点）：从 cmsd status 拿真实监听地址，拿不到用默认。
-fn gateway_endpoint_for(client: &Client) -> (String, String) {
-    let gateway = client
+fn gateway_endpoint_for(client: &Client) -> Result<(String, String), String> {
+    let status = client
         .status()
-        .ok()
-        .and_then(|s| {
-            s.get("gateway")
-                .and_then(|g| g.as_str())
-                .map(|s| s.to_string())
-        })
-        .unwrap_or_else(|| "127.0.0.1:8000".to_string());
-    (
+        .map_err(|error| format!("cmsd_gateway_unavailable: {error}"))?;
+    gateway_endpoint_from_status(&status)
+}
+
+fn gateway_endpoint_from_status(status: &serde_json::Value) -> Result<(String, String), String> {
+    let unavailable =
+        || "cmsd_gateway_unavailable: 无法核实设备网关端点，请恢复设备服务后重试".to_owned();
+    if status["service"] != "cmsd"
+        || status.get("error").is_some_and(|error| !error.is_null())
+        || status
+            .get("http_status")
+            .is_some_and(|code| code.as_u64() != Some(200))
+    {
+        return Err(unavailable());
+    }
+    let gateway = status
+        .get("gateway")
+        .and_then(serde_json::Value::as_str)
+        .filter(|gateway| !gateway.trim().is_empty())
+        .ok_or_else(unavailable)?;
+    Ok((
         format!("http://{gateway}/v1/chat/completions"),
         GATEWAY_MODEL_ALIAS.to_string(),
-    )
+    ))
+}
+
+/// Resolve a specific managed card through the authoritative logical/current
+/// mapping. Missing observations cannot become the device-wide default alias.
+pub(crate) fn endpoint_model_for(client: &Client, card_id: &str) -> Result<String, String> {
+    let model = client
+        .model_fact(card_id)
+        .map_err(|error| format!("cmsd_model_identity_unavailable: {error}"))?;
+    endpoint_model_from_fact(model)
+}
+
+fn endpoint_model_from_fact(model: Option<serde_json::Value>) -> Result<String, String> {
+    model
+        .filter(|model| model["managed"] == true)
+        .and_then(|model| {
+            model["model_id"]
+                .as_str()
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_owned)
+        })
+        .ok_or_else(|| {
+            "cmsd_model_identity_unavailable: 无法核实该模型的真实连接标识，请恢复设备观测后重试"
+                .to_owned()
+        })
 }
 
 /// 委托启用。返回 Ok(NotManaged) 表示不接管（调用方走老路径）。
@@ -240,25 +276,20 @@ pub fn enable(
         .ok_or_else(|| "管理面应答缺 task_id".to_string())?;
     log(&format!("[cmsd] 任务 {task_id} 已创建，等待就绪…"));
     wait_task(&client, task_id, log, cancelled)?;
-    if !managed_by_cmsd(&client, card_id)? {
-        return Err("ownership_unconfirmed: 启用结束但未确认设备已接管，请核实状态".into());
+    let connection_unconfirmed = |error: String| {
+        format!(
+            "{error}；设备启用任务 {task_id} 已成功，但连接信息尚未核实；未更新连接信息，请在设备页核实状态"
+        )
+    };
+    if !managed_by_cmsd(&client, card_id).map_err(&connection_unconfirmed)? {
+        return Err(connection_unconfirmed(
+            "ownership_unconfirmed: 启用结束但未确认设备已接管，请核实状态".into(),
+        ));
     }
-    let (endpoint_url, _) = gateway_endpoint_for(&client);
-    // 接入写真名（用户拍板）：启用成功后问管理面要引擎自报的真实模型 id，
-    // 问不到才退回别名兜底。
-    let real_model_id = client
-        .models()
-        .ok()
-        .and_then(|v| {
-            v.get("models")?.as_array()?.iter().find_map(|m| {
-                if m.get("card")?.as_str()? == card_id {
-                    m.get("model_id")?.as_str().map(|s| s.to_string())
-                } else {
-                    None
-                }
-            })
-        })
-        .unwrap_or_else(|| GATEWAY_MODEL_ALIAS.to_string());
+    let (endpoint_url, _) = gateway_endpoint_for(&client).map_err(&connection_unconfirmed)?;
+    // A named store row must stay on its own current physical deployment.
+    // The global default alias can name another card and is not an identity fallback.
+    let real_model_id = endpoint_model_for(&client, card_id).map_err(connection_unconfirmed)?;
     log(&format!(
         "[cmsd] 服务就绪，固定端点 {endpoint_url}（模型 {real_model_id}）"
     ));
@@ -381,6 +412,7 @@ pub fn cmsd_states() -> Option<std::collections::BTreeMap<String, CmsdModelState
                 model_id: m
                     .get("model_id")
                     .and_then(|x| x.as_str())
+                    .filter(|id| !id.trim().is_empty())
                     .map(|s| s.to_string()),
                 degraded: status == "degraded" || degraded_reason.is_some(),
                 status,
@@ -407,6 +439,55 @@ pub fn cmsd_states() -> Option<std::collections::BTreeMap<String, CmsdModelState
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn specific_card_connections_require_a_confirmed_nonempty_model_identity() {
+        let known = serde_json::json!({"card":"physical-b","managed":true,"model_id":"Model-B"});
+        assert_eq!(endpoint_model_from_fact(Some(known)).unwrap(), "Model-B");
+        for model in [
+            None,
+            Some(serde_json::json!({"managed":false,"model_id":"Model-B"})),
+            Some(serde_json::json!({"managed":true})),
+            Some(serde_json::json!({"managed":true,"model_id":null})),
+            Some(serde_json::json!({"managed":true,"model_id":""})),
+            Some(serde_json::json!({"managed":true,"model_id":"  "})),
+        ] {
+            assert!(
+                endpoint_model_from_fact(model)
+                    .unwrap_err()
+                    .starts_with("cmsd_model_identity_unavailable:")
+            );
+        }
+    }
+
+    #[test]
+    fn gateway_endpoints_require_confirmed_status_and_preserve_configured_addresses() {
+        for gateway in ["127.0.0.1:18081", "127.0.0.2:18082", "[::1]:18083"] {
+            let status = serde_json::json!({"service":"cmsd","gateway":gateway});
+            assert_eq!(
+                gateway_endpoint_from_status(&status).unwrap(),
+                (
+                    format!("http://{gateway}/v1/chat/completions"),
+                    GATEWAY_MODEL_ALIAS.to_owned()
+                )
+            );
+        }
+        for status in [
+            serde_json::json!({"http_status":503,"error":{"code":"store_selection_unavailable"}}),
+            serde_json::json!({"service":"cmsd","gateway":"127.0.0.1:18081","http_status":503}),
+            serde_json::json!({"service":"cmsd","gateway":"127.0.0.1:18081","error":"unavailable"}),
+            serde_json::json!({"service":"other","gateway":"127.0.0.1:18081"}),
+            serde_json::json!({"service":"cmsd"}),
+            serde_json::json!({"service":"cmsd","gateway":null}),
+            serde_json::json!({"service":"cmsd","gateway":"  "}),
+        ] {
+            assert!(
+                gateway_endpoint_from_status(&status)
+                    .unwrap_err()
+                    .starts_with("cmsd_gateway_unavailable:")
+            );
+        }
+    }
 
     #[test]
     fn cmsd_states_parses_real_shape() {

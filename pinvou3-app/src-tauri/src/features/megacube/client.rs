@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 pub const DEFAULT_SOCKET_PATH: &str = "/run/megacube/cmsd.sock";
-/// 固定端点别名（D0）：客户端永远写它，网关改写成活跃模型的真实 id。
+/// 设备级默认别名：网关改写为活跃模型的真实 id；具体卡片连接使用各自已确认的模型 id。
 pub const GATEWAY_MODEL_ALIAS: &str = "megacube-default";
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
