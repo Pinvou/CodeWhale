@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Bound RUSTSEC-2026-0381's wrapper exception to the reviewed lock graphs.
+"""Enforce change control for the reviewed webpki-roots wrapper graphs.
 
 Requires Python 3.11+. No Cargo, network, registry cache or submodule is needed.
-Run this before cargo-deny: its advisory ignore cannot express graph conditions.
+Run this before cargo-deny; advisory scanning remains independent and unignored.
 """
 
 from pathlib import Path
@@ -33,14 +33,14 @@ class GuardError(ValueError):
 
 
 def validate_lock(value, label):
-    if not isinstance(value, dict) or value.get("version") != 4:
+    if not isinstance(value, dict) or type(value.get("version")) is not int or value["version"] != 4:
         raise GuardError(f"{label}: unsupported lockfile format")
     packages = value.get("package")
     if not isinstance(packages, list) or not all(isinstance(row, dict) for row in packages):
         raise GuardError(f"{label}: invalid package inventory")
     roots = [row for row in packages if row.get("name") == "webpki-roots"]
     # Exactly two packages: duplicate versions (including alternate sources),
-    # older roots and unreviewed future versions cannot share this exception.
+    # older roots and unreviewed future versions require a new graph review.
     if (len(roots) != 2
             or not all(isinstance(row.get("version"), str) for row in roots)
             or sorted(row["version"] for row in roots) != sorted(REVIEWED)):
@@ -50,9 +50,9 @@ def validate_lock(value, label):
         if row.get("source") != REGISTRY:
             raise GuardError(f"{label}: webpki-roots source is not the reviewed registry")
         if row.get("checksum") != expected["checksum"]:
-            raise GuardError(f"{label}: webpki-roots checksum changed; reassess the exception")
+            raise GuardError(f"{label}: webpki-roots checksum changed; reassess the reviewed graph")
         if row.get("dependencies") != expected["dependencies"]:
-            raise GuardError(f"{label}: webpki-roots dependency edge changed; reassess the exception")
+            raise GuardError(f"{label}: webpki-roots dependency edge changed; reassess the reviewed graph")
 
 
 def validate_repository(root):
@@ -62,7 +62,7 @@ def validate_repository(root):
         try:
             with (root / relative).open("rb") as lock:
                 value = tomllib.load(lock)
-        except (OSError, tomllib.TOMLDecodeError) as error:
+        except (OSError, ValueError, RecursionError) as error:
             raise GuardError(f"{relative}: cannot read a valid lockfile") from error
         validate_lock(value, relative)
 
@@ -74,9 +74,9 @@ def main():
     try:
         validate_repository(Path(__file__).resolve().parents[1])
     except GuardError as error:
-        print(f"webpki-roots exception rejected: {error}", file=sys.stderr)
+        print(f"webpki-roots graph rejected: {error}; see docs/webpki-roots-exception.md", file=sys.stderr)
         return 1
-    print("webpki-roots exception: all three reviewed lock graphs verified")
+    print("webpki-roots graph: all three reviewed lock graphs verified")
     return 0
 
 

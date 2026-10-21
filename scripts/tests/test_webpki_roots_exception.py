@@ -127,6 +127,20 @@ class WebpkiExceptionTests(unittest.TestCase):
             with self.assertRaises(GUARD.GuardError):
                 GUARD.validate_repository(self.root)
 
+    def test_lock_format_version_requires_an_integer(self):
+        with (ROOT / EXPECTED_LOCKFILES[0]).open('rb') as stream:
+            value = tomllib.load(stream)
+        for version in [4.0, '4', True]:
+            with self.subTest(version=version), self.assertRaises(GUARD.GuardError):
+                GUARD.validate_lock({**value, 'version': version}, 'fixture')
+
+    def test_invalid_utf8_and_deep_nesting_are_clean_guard_failures(self):
+        path = self.root / EXPECTED_LOCKFILES[0]
+        for content in [b'\xff', b'x = ' + b'[' * 2000 + b'0' + b']' * 2000]:
+            path.write_bytes(content)
+            with self.assertRaises(GUARD.GuardError):
+                GUARD.validate_repository(self.root)
+
     def assert_cli_rejects_bad_locks(self, entry):
         original = {path: (self.root / path).read_bytes() for path in EXPECTED_LOCKFILES}
         cases = ['missing_cli', 'old_roots', 'old_parent', 'wrong_checksum']
@@ -207,7 +221,7 @@ def cargo_deny_commands(workflow):
             if not scalar.endswith("'"):
                 raise AssertionError('unterminated run scalar')
             scalar = scalar[1:-1].replace("''", "'")
-        elif not scalar or scalar.startswith(('*', '&', '{', '[')):
+        elif not scalar or scalar.startswith(('*', '&', '{', '[', '|', '>', '!', '#')):
             raise AssertionError('unrecognized run scalar; inspect its cargo-deny coverage')
         commands.extend(re.findall(r'\bcargo\s+deny\b', scalar))
     return commands
@@ -254,6 +268,16 @@ class WebpkiCiContractTests(unittest.TestCase):
     def test_both_shared_policy_consumers_have_mandatory_locked_scan(self):
         self.verify_workflow(WORKFLOW.read_text(encoding='utf-8'))
 
+    def test_unrecognized_run_headers_cannot_hide_an_unguarded_scan(self):
+        workflow = WORKFLOW.read_text(encoding='utf-8')
+        for header in ['| # audit', '|2', '|2-', '>|', '>- # audit', '!!str |', '&audit |']:
+            with self.subTest(header=header):
+                changed = workflow + ('\n  unguarded-audit:\n    steps:\n'
+                                      f'      - run: {header}\n'
+                                      '          cargo deny check advisories\n')
+                with self.assertRaises(AssertionError):
+                    self.verify_workflow(changed)
+
     def test_workflow_mutations_cannot_silently_bypass_guard(self):
         workflow = WORKFLOW.read_text(encoding='utf-8')
         for prefix in ['', '../../']:
@@ -280,10 +304,12 @@ class WebpkiCiContractTests(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 self.verify_workflow(changed)
 
-    def test_policy_keeps_affected_1x_denied_despite_advisory_exception(self):
+    def test_policy_scans_roots_advisory_without_an_ignore_and_keeps_bans(self):
         with (ROOT / 'pinvou3-app/src-tauri/deny.toml').open('rb') as stream:
             policy = tomllib.load(stream)
-        self.assertIn('RUSTSEC-2026-0381', policy['advisories']['ignore'])
+        ignores = [item if isinstance(item, str) else item['id'] for item in policy['advisories']['ignore']]
+        self.assertNotIn('RUSTSEC-2026-0381', ignores)
+        self.assertNotIn('RUSTSEC-2026-0383', ignores)
         self.assertIn({'name': 'webpki-roots', 'version': '>=1.0.0, <1.0.10'}, policy['bans']['deny'])
 
 
