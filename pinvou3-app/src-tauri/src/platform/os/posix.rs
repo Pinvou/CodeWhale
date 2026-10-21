@@ -1,15 +1,15 @@
 //! Unix 通用 helper —— linux 与 macos 共享的纯 POSIX 逻辑。
 //!
-//! Wave 3 提取：原先 `linux/linux_path.rs` 和 `unsupported.rs`（macOS 经 glob
-//! `pub use super::unsupported::*` 继承）各自维护一份相同实现。此文件收口
-//! 真正等价的 Unix helper，消除重复源。
+//! Wave 3 起分批把核对过逐语义一致的实现收口到此，`linux/linux_path.rs`、
+//! `macos/macos_path.rs` 与 `unsupported.rs`（macOS 经 glob
+//! `pub use super::unsupported::*` 继承）只保留 re-export 与平台特有差异，
+//! 调用面（各平台 mod.rs 的 `pub use`）不变。
 //!
-//! **不提取的 helper**（各有平台差异，保留在各自文件）：
-//! - `user_home_dir`：linux 硬编码 `/tmp`（品悟临时产物目录），macOS 用 `temp_dir()`
-//! - `kill_pid_tree`：linux 与 macOS 的组杀实现统一直接调用 kill(2)，不再委托外部 kill 命令
-//! - `connector_cli_command` / `apply_user_npm_prefix`：有结构性差异
-//!
-//! `validate_upload_location` 不提取：其 body 调用 `user_home_dir()`，后者按平台不同。
+//! **保留在各自文件的 helper**（有真实平台差异，不强行合并）：
+//! - `user_home_dir`：linux HOME 缺失时硬编码 `/tmp`（品悟临时产物目录），
+//!   macOS/兜底平台用 `std::env::temp_dir()`。因此
+//!   [`validate_upload_location_under_home`] 把 home 作为参数，由各适配器先
+//!   解析自己的 `user_home_dir` 再传入，本文件不做平台探测。
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -303,6 +303,15 @@ mod tests {
     #[test]
     fn platform_compat_path_is_identity() {
         assert_eq!(platform_compat_path("/usr/bin"), PathBuf::from("/usr/bin"));
+    }
+
+    #[test]
+    fn upload_location_rejects_outside_home() {
+        // home_raw 会被 canonicalize(macOS 的 /tmp 是 →/private/tmp 的符号链接)。
+        assert!(
+            validate_upload_location_under_home(Path::new("/tmp"), Path::new("/etc/passwd"))
+                .is_err()
+        );
     }
 
     #[test]

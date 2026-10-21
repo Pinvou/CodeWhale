@@ -221,7 +221,9 @@ pub fn preview_workspace_file(root: &Path, relative_path: &str) -> Result<Worksp
             });
         }
         let bytes = fs::read(&path).with_context(|| format!("读取图片失败: {}", path.display()))?;
-        let mime = image_mime_type(&path);
+        // 扩展名→MIME 统一走 attachments 的共享映射表；表外扩展名沿用
+        // 原行为回退 image/png。
+        let mime = super::attachments::image_mime_type(&path).unwrap_or("image/png");
         return Ok(WorkspacePreview {
             name,
             relative_path: relative,
@@ -1234,23 +1236,6 @@ fn looks_like_text(path: &Path) -> bool {
         Ok(_) => true,
         // 8KB 截断点恰好落在多字节字符中间时，容忍末尾不完整序列（≤4 字节）。
         Err(error) => error.valid_up_to() > 0 && sample.len() - error.valid_up_to() <= 4,
-    }
-}
-
-fn image_mime_type(path: &Path) -> &'static str {
-    match path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "svg" => "image/svg+xml",
-        "bmp" => "image/bmp",
-        _ => "image/png",
     }
 }
 

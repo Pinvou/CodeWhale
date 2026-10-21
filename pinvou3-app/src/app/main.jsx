@@ -1324,7 +1324,6 @@ const NAV_PREFETCH = {
       // bs.settings 加载后 useEffect 同步进来。
       const [searchProvider, setSearchProvider] = useState('bing');
       const [enabledSearchProviders, setEnabledSearchProviders] = useState(['bing']);
-      const [searchApiKey, setSearchApiKey] = useState('');
       const [searchKeyDrafts, setSearchKeyDrafts] = useState({});
       const [searchKeyActions, setSearchKeyActions] = useState({});
       // 模型配置（动态适配）——草稿模式，确认后才保存
@@ -1793,7 +1792,6 @@ const NAV_PREFETCH = {
           }
           setSearchProvider(saved.provider);
           setEnabledSearchProviders(saved.enabledProviders);
-          setSearchApiKey(drafts[saved.provider] || '');
           setSearchKeyDrafts(drafts);
           setSearchKeyActions(actions);
           savedSearchConfigRef.current = saved;
@@ -1839,13 +1837,13 @@ const NAV_PREFETCH = {
         const state = credential.credential_state || (credential.has_secret ? 'configured' : 'missing');
         return !!credential.has_secret || state === 'configured' || state === 'env_override';
       }
-      function searchProviderKeyAction(provider) {
-        return searchKeyActions[provider] || 'keep_existing';
-      }
       function searchProviderCredentialDirty(provider) {
         const action = searchProviderKeyAction(provider);
         const draft = searchKeyDrafts[provider] || '';
         return action === 'delete' || (action === 'replace' && !!draft.trim());
+      }
+      function searchProviderKeyAction(provider) {
+        return searchKeyActions[provider] || 'keep_existing';
       }
       function buildSearchSettingsPayload() {
         const baseSearch = (bs && bs.settings && bs.settings.search) || {};
@@ -3557,7 +3555,6 @@ const NAV_PREFETCH = {
         if (p === searchProvider) return;
         setEnabledSearchProviders(prev => Array.from(new Set(['bing', ...prev, p])));
         setSearchProvider(p);
-        setSearchApiKey(searchKeyDrafts[p] || '');
       }
 
       function handleAddSearchProvider(p) {
@@ -3576,16 +3573,8 @@ const NAV_PREFETCH = {
         if (searchProvider === p) handleSetSearchProvider('bing');
       }
 
-      function handleTestSearchProvider(p) {
-        if (!bridge.available || !bridge.settings.testSearchProvider) return Promise.resolve(t.uiMainApp.searchTestUnavailable);
-        const action = searchProviderKeyAction(p);
-        const draft = searchKeyDrafts[p] || '';
-        return bridge.settings.testSearchProvider(p, action === 'replace' ? draft : '');
-      }
-
       function handleSetSearchApiKey(k, providerOverride) {
         const targetProvider = providerOverride || searchProvider;
-        if (targetProvider === searchProvider) setSearchApiKey(k);
         setSearchKeyDrafts(prev => ({ ...prev, [targetProvider]: k }));
         setSearchKeyActions(prev => ({ ...prev, [targetProvider]: k.trim() ? 'replace' : 'keep_existing' }));
       }
@@ -4733,9 +4722,7 @@ const NAV_PREFETCH = {
                   enabledSearchProviders={enabledSearchProviders}
                   onAddSearchProvider={handleAddSearchProvider}
                   onDeleteSearchProvider={handleDeleteSearchProvider}
-                  onTestSearchProvider={handleTestSearchProvider}
-                  searchApiKey={searchApiKey} setSearchApiKey={handleSetSearchApiKey}
-                  searchHasSavedKey={searchHasSavedKey(searchProvider)}
+                  setSearchApiKey={handleSetSearchApiKey}
                   savedModels={(bs && bs.savedModels) || []}
                   activeModelId={bs && bs.activeModelId}
                   onSaveModel={(m) => bridge.available && bridge.models.saveModel(m)}
@@ -4866,7 +4853,7 @@ const NAV_PREFETCH = {
             {can('webAccessAdmin') && webAccessOpen && browserOverlayPublicationReady && (
               <ViewErrorBoundary t={t}>
               <Suspense fallback={null}>
-              <LazyWebAccessModal theme={activeTheme} bs={bs} t={t} onClose={() => setWebAccessOpen(false)} />
+              <LazyWebAccessModal bs={bs} t={t} onClose={() => setWebAccessOpen(false)} />
             </Suspense>
             </ViewErrorBoundary>
             )}
@@ -4903,7 +4890,7 @@ const NAV_PREFETCH = {
             {personaEditor && browserOverlayPublicationReady && (
               <ViewErrorBoundary t={t}>
               <Suspense fallback={null}>
-              <LazyPersonaEditorModal initial={personaEditor.initial} isDark={activeTheme === 'dark'} t={t}
+              <LazyPersonaEditorModal initial={personaEditor.initial} t={t}
                 onClose={() => setPersonaEditor(null)}
                 onSaved={(sum) => { const isEdit = personaEditor.initial && personaEditor.initial.id; setPersonaEditor(null); if (!isEdit) setSavedConfirm({ name: sum && sum.name }); }}
                 onDeleted={() => setPersonaEditor(null)} />

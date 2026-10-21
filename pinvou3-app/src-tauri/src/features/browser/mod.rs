@@ -5744,10 +5744,7 @@ fn hosted_prepare_quarantine_state_path(slot: &Path, state_kind: &str) -> PathBu
 }
 
 fn valid_prepare_quarantine_token(value: &str) -> bool {
-    value.len() == 16
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    is_fixed_len_lowercase_hex(value, 16)
 }
 
 fn prepare_journal_token_from_path(path: &Path) -> Result<Option<String>, String> {

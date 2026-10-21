@@ -1,8 +1,15 @@
 (function () {
   "use strict";
 
-  var registry = window.__PINVOU_TAURI_BRIDGE_FEATURES__ = window.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
-  registry.chat = function (context) {
+  // biome-ignore lint/suspicious/noAssignInExpressions: registry bootstrap of the verbatim payload; splitting statements would diverge from the artifact
+  const registry = window.__PINVOU_TAURI_BRIDGE_FEATURES__ = window.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
+  registry.chat = function (context) {let pinvouSharedtauriChatCache = null;
+function pinvouSharedtauriChat() {
+  if (!pinvouSharedtauriChatCache) pinvouSharedtauriChatCache = window.PinvouBridgeShared.create("tauriChat", { state, sessionStates, messageHasToolBlock, addChatItem, notify, bt, summonPinvou, invoke });
+  return pinvouSharedtauriChatCache;
+}
+
+
     var state = context.state;
     var voice = context.voice || function () { return {}; };
     var invoke = context.invoke;
@@ -262,69 +269,14 @@
     })) return true;
     return messageHasToolBlock("tool_use", toolCallId);
   }
-  function toolCallAlreadyFinished(toolCallId) {
-    return messageHasToolBlock("tool_result", toolCallId);
-  }
-  function hasChatItemForTool(type, toolCallId) {
-    return !!toolCallId && state.chatItems.some(function (item) {
-      return item && item.type === type && item.toolCallId === toolCallId;
-    });
-  }
-  // 成品卡是否"重复出卡":从 chatItems 末尾往前扫——先遇到该文件的修改工具(write/append/edit)
-  // → 不算重复(文件改过了,该出新版卡/续卡,即"二次修改弹新卡");先遇到同名成品卡 → 算重复
-  // (同一产物没改又 present 一次,模型常见啰嗦)。判据=「上一张同名卡之后有没有改过这个文件」。
-  // 例外:扫到**用户发言**就放行——用户在上一张卡之后又开了口(典型「再推一次」「没看到」),
-  // 这次 present 是新请求的响应,不是模型自发啰嗦;再去重 = 用户主动要却看不到任何反馈(实测 bug)。
-  function addSystemItem(text, meta) {
-    var item = { type: "system", text: text, time: timeStr() };
-    if (meta) {
-      for (var k in meta) item[k] = meta[k];
-    }
-    addChatItem(item);
-    notify();
-  }
-  function addAuthoritySyncNotice(text) {
-    if (state.chatItems.some(function (item) {
-      return item && item.authoritySyncNotice;
-    })) return;
-    addSystemItem(text, { authoritySyncNotice: true });
-  }
-  function compactPruneRollupText(count) {
-    return bt("compactDone") + bt("compactAuto") + " " +
-      bt("compactPruneMerged") + " ×" + count;
-  }
-  function removeCompactionStartItem(compactId) {
-    if (!compactId) return;
-    for (var i = state.chatItems.length - 1; i >= 0; i--) {
-      var it = state.chatItems[i];
-      if (it.type === "system" && it.compactId === compactId && it.compactPhase === "start") {
-        state.chatItems.splice(i, 1);
-        return;
-      }
-    }
-  }
-  function addOrMergePruneCompaction(compactId) {
-    removeCompactionStartItem(compactId);
-    var last = state.chatItems[state.chatItems.length - 1];
-    if (last && last.type === "system" && last.compactPruneRollup) {
-      last.compactPruneCount = (last.compactPruneCount || 1) + 1;
-      last.text = compactPruneRollupText(last.compactPruneCount);
-      last.time = timeStr();
-      notify();
-      return;
-    }
-    addChatItem({
-      type: "system",
-      text: compactPruneRollupText(1),
-      time: timeStr(),
-      compactPruneRollup: true,
-      compactPruneCount: 1,
-    });
-    notify();
-  }
-  function timeStr() {
-    return new Date().toTimeString().slice(0, 5);
-  }
+function toolCallAlreadyFinished(toolCallId) { return pinvouSharedtauriChat().toolCallAlreadyFinished(toolCallId); }
+function hasChatItemForTool(type, toolCallId) { return pinvouSharedtauriChat().hasChatItemForTool(type, toolCallId); }
+function addSystemItem(text, meta) { return pinvouSharedtauriChat().addSystemItem(text, meta); }
+function addAuthoritySyncNotice(text) { return pinvouSharedtauriChat().addAuthoritySyncNotice(text); }
+function compactPruneRollupText(count) { return pinvouSharedtauriChat().compactPruneRollupText(count); }
+function removeCompactionStartItem(compactId) { return pinvouSharedtauriChat().removeCompactionStartItem(compactId); }
+function addOrMergePruneCompaction(compactId) { return pinvouSharedtauriChat().addOrMergePruneCompaction(compactId); }
+function timeStr() { return pinvouSharedtauriChat().timeStr(); }
 
   // ── Flush helpers (same as main.js) ──────────────────────────────
   function flushPendingTextBlock() {
@@ -809,7 +761,6 @@
     if (snap && state.activeSessionId === sid) {
       state.scheduledTaskPendingGuide = snap.scheduledTaskPendingGuide;
       state.scheduledTaskCreationSessionId = snap.scheduledTaskCreationSessionId;
-      state.scheduledTaskDraft = snap.scheduledTaskDraft;
       state.activeSkill = snap.activeSkill;
     }
     // Whether restoreSteerText actually handed the text back (a refs-only
@@ -896,6 +847,11 @@
       var voiceOperationId = voice().getVoiceOperationId && voice().getVoiceOperationId(state.activeSessionId, "chat");
       if (voiceOperationId) meta = Object.assign({}, meta || {}, { voiceOperationId: voiceOperationId });
     }
+let pinvouSharedtauriChatN31666Cache = null;
+function pinvouSharedtauriChatN31666() {
+  if (!pinvouSharedtauriChatN31666Cache) pinvouSharedtauriChatN31666Cache = window.PinvouBridgeShared.create("tauriChat:31666", { state, sid: { get value() { return sid; } } });
+  return pinvouSharedtauriChatN31666Cache;
+}
     text = (text || "").trim();
     var readyAttachments = state.attachments.filter(function (a) { return a.status === "ready" && a.result; });
     if (!text && readyAttachments.length === 0) return false;
@@ -993,7 +949,6 @@
       var consumed = {
         scheduledTaskPendingGuide: state.scheduledTaskPendingGuide,
         scheduledTaskCreationSessionId: state.scheduledTaskCreationSessionId,
-        scheduledTaskDraft: state.scheduledTaskDraft,
         activeSkill: state.activeSkill,
       };
       var requestedPayloadText = meta && meta.pinvouPayloadText
@@ -1007,18 +962,11 @@
         restrictTools = true;
         state.scheduledTaskPendingGuide = null;
         state.scheduledTaskCreationSessionId = sid;
-        state.scheduledTaskDraft = null;
       }
       state.activeSkill = null;
       return { snapshot: consumed, payloadText: payloadText, restrictTools: restrictTools };
     }
-    function restoreUiTurnState(consumed) {
-      if (!consumed || state.activeSessionId !== sid) return;
-      state.scheduledTaskPendingGuide = consumed.scheduledTaskPendingGuide;
-      state.scheduledTaskCreationSessionId = consumed.scheduledTaskCreationSessionId;
-      state.scheduledTaskDraft = consumed.scheduledTaskDraft;
-      state.activeSkill = consumed.activeSkill;
-    }
+function restoreUiTurnState(consumed) { return pinvouSharedtauriChatN31666().restoreUiTurnState(consumed); }
     function queuePrepared(prepared) {
       state.queued.push(makeQueuedMessage(
         ++context.itemIdSeq,
@@ -1548,21 +1496,11 @@
   }
 
   // 通盘体检(覆盖镜头):查产物"全不全"=缺哪些完整性维度。独立入口,走 mode=coverage。
-  function inspectPinvou(focus) {
-    return summonPinvou(focus, "coverage");
-  }
+function inspectPinvou(focus) { return pinvouSharedtauriChat().inspectPinvou(focus); }
 
   // B2: 审查卡进 sidecar 时间线(pos=当前 messages 数),落盘。同 recordPersonaEvent
   // 范式,**不进 messages/LLM**;rerenderFromMessages 按 pos 插回,切会话/重载不丢。
-  function recordPinvouReview(review) {
-    if (!state.activeSessionId || !review) return null;
-    var pos = state.messages.length;
-    state.pinvouReviews.push({ pos: pos, review: review });
-    var sid = state.activeSessionId;
-    var snapshot = JSON.parse(JSON.stringify(state.pinvouReviews));
-    invoke("save_session_pinvou_reviews", { sessionId: sid, reviews: snapshot }).catch(function () {});
-    return pos; // 供卡片记 reviewPos,裁决时按 pos 定位原 state 写 resolution
-  }
+function recordPinvouReview(review) { return pinvouSharedtauriChat().recordPinvouReview(review); }
 
   // §2 按勾选裁决:resolution 已由前端写回 review 对象(引用→sidecar),这里持久化 +
   // 把勾「让AI改」的条目走 B1 发定向修订指令(只改对应段落、禁全文重写)。Boss 驾驶,非自动。
@@ -1621,20 +1559,9 @@
   }
 
   // 整卡跳过:Boss 看了不处理这次检阅 → 直接关窗(sidecar entry 留着、无 resolution,无害)。
-  function dismissPinvouReview() {
-    // 关窗即解召唤守卫:否则若在 await 期间被关(切 session 等路径),会留下"窗没了但
-    // pinvouSummoning 仍 held"的死区——重复点品/悟在守卫处(summonPinvou 开头)被吞,要等
-    // 整个直连 vLLM 调用(≤30s)返回才解锁。in-flight 结果靠 summonPinvou 内 `if (state.pinvouModal)` 守卫自然丢弃。
-    state.pinvouModal = null;
-    state.pinvouSummoning = false;
-    notify();
-  }
+function dismissPinvouReview() { return pinvouSharedtauriChat().dismissPinvouReview(); }
   // 把当前 session 的审查时间线(含勾选写回的 resolution)重新落盘。返回 promise 供 await。
-  function persistPinvouReviews() {
-    if (!state.activeSessionId) return Promise.resolve();
-    var snapshot = JSON.parse(JSON.stringify(state.pinvouReviews));
-    return invoke("save_session_pinvou_reviews", { sessionId: state.activeSessionId, reviews: snapshot }).catch(function () {});
-  }
+function persistPinvouReviews() { return pinvouSharedtauriChat().persistPinvouReviews(); }
 
   // Mid-turn inject channel (thin wrapper over the steer_chat command).
   // steer_id contract: steer_chat resolves with an opaque steer_id (the pool

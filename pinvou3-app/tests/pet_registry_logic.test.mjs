@@ -62,6 +62,11 @@ try {
     assert.equal(typeof PET_LOADERS[id].atlas, 'function');
   }
 
+  for (const id of manifestIds) {
+    assert.equal(typeof PET_REGISTRY[id].cover, 'function');
+    assert.equal(typeof PET_REGISTRY[id].atlas, 'function');
+  }
+
   const hasEagerWebpImport = registrySource
     .split('\n')
     .some((line) => line.trimStart().startsWith('import ') && line.includes('.webp'));

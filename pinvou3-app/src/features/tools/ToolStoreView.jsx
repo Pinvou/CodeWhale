@@ -293,7 +293,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         : (flow.active === 'runtime' ? copy.extract(Math.round(flow.pct || 0)) : copy.connecting));
       return (
         <button type="button" onClick={(e) => { e.stopPropagation(); onClick(); }} title={copy.title} className="shrink-0 flex items-center gap-1.5 pl-1.5 pr-2.5 py-1.5 rounded-full bg-blue-50 dark:bg-blue-500/10 border border-blue-200 dark:border-blue-500/30 text-blue-600 dark:text-blue-300 text-[12px] font-medium">
-          <Spinner size={12} />
+          <Spinner size={12} tone="brand" />
           <span className="tabular-nums whitespace-nowrap">{label}</span>
         </button>
       );
@@ -503,8 +503,6 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         // 收起弹窗只释放自己的槽位:此时用户可能已发起另一个工具操作。
         setBusyId(busy => releaseBusy(busy, cfg.key));
       };
-      // Retry: ensure_cli is idempotent, so simply rerun the whole connection flow.
-      const retry = (deps) => { connect(deps); };
       const disconnect = async ({ setBusyId, busyRef, storeCopy, detailCopy, loadBackendState, setAlert }) => {
         if (busyRef.current) return;
         setBusyId(cfg.key);
@@ -523,7 +521,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           setBusyId(busy => releaseBusy(busy, cfg.key));
         }
       };
-      return { conn, ensureListeners, connect, disconnect, resetFlow, retry };
+      return { conn, ensureListeners, connect, disconnect, resetFlow };
     };
 
     const feishuFlowApi = createConnectorFlow({
@@ -736,14 +734,6 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                 </button>
               )}
               {/* 引导链接放最上,不夹在输入框中间 */}
-              {fields.find(f => f.helpUrl) && (
-                <button
-                  onClick={() => invokeTauri('open_external_url', { url: fields.find(f => f.helpUrl).helpUrl }).catch(onOpenError)}
-                  className={`text-[13px] mb-4 inline-block text-[#007AFF] dark:text-[#0A84FF] hover:underline`}
-                >
-                  {copy.configHelpFeishu}
-                </button>
-              )}
               {/* 所有输入框紧挨着 */}
               {fields.map((field) => (
                 <div key={field.key} className="text-left mb-3">
@@ -783,7 +773,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                     : 'text-slate-300 dark:text-slate-600'
                 }`}
               >
-                {copy.configConnect}
+                {fields.length > 0 ? copy.configConnect : copy.configInstall}
               </button>
             </div>
           </div>
@@ -1307,9 +1297,9 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       // { phase:'running'|'qr'|'error'|'done', steps:{runtime,cli,connect,qr}, active, pct, sec, log, err, qr, qrUrl, qrPhase }
       const [feishuFlow, setFeishuFlow] = useState(feishuConn.flow); // 从跨视图 store 水合：切走再回来不丢进度
 
-      // 企业微信(CLI 路线)连接流程卡(跨视图水合);连接态由 bundleStates 派生(见上)
+      // 企业微信(CLI 路线)连接流程卡(跨视图水合);连接态由 bundleStates 派生(见上)。
+      // 扫码弹窗不单独存 state:直接由流程态派生(phase==='qr' 时弹出,渲染 wecomFlow.qr/qrUrl)。
       const [wecomFlow, setWecomFlow] = useState(wecomConn.flow); // 企微连接流程卡(跨视图水合)
-      const [wecomQr, setWecomQr] = useState(null); // { qr: dataUrl, url } 扫码弹窗(单段)
 
       // 钉钉(CLI 路线)连接流程卡;连接态由 bundleStates 派生
       const [dingtalkFlow, setDingtalkFlow] = useState(dingtalkConn.flow);
@@ -1453,7 +1443,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       // Subscribe to the tmeet store (mirrors the dingtalk one): mirror into rendering + done/failure finalization (done toast uses a dedicated phrase)
       useConnectorFlowSubscription({ enabled: externalAuthAvailable, conn: tmeetConn, ensureListeners: ensureTmeetListeners, setFlow: setTmeetFlow, detailCopy, setBusyId, loadBackendState, setAlert, doneTitle: detailCopy.actions.connectedTmeet, toolId: 'tmeet', finishToolConfiguration });
 
-      // 企微/EIP/知道 连接编排事件:后端推进度,前端驱动 UI。
+      // EIP/知道 连接编排事件:后端推进度,前端驱动 UI(企微已收口 createConnectorFlow 流程卡)。
       useEffect(() => {
         const ev = isTauriAvailable() ? tauriEvents : null;
         if (!ev) return;
@@ -1466,28 +1456,6 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           if (disposed) { try { u(); } catch { /* silent: listeners may already be stale at unmount */ } return; }
           unlisten.push(u);
         });
-        track(ev.listen('wecom:qr', (e) => {
-          const p = e.payload || {};
-          // 二维码到了 → 清掉一直显示的"正在生成…"loading,再弹出二维码弹窗。
-          setAlert(a => ({ ...a, visible: false, loading: false }));
-          setWecomQr({ qr: p.qr_data_url, url: p.url, phase: p.phase });
-        }));
-        track(ev.listen('wecom:connected', () => {
-          finishToolConfiguration('wecom', true);
-          setWecomQr(null); setBusyId(busy => releaseBusy(busy, 'wecom'));
-          // 连上 → 按规则写技能(默认启用),企微技能即刻对模型可见;连接态经 readiness 重取。
-          invokeTauri('wecom_apply_skills').catch(() => {});
-          loadBackendState();
-          setAlert({ visible: true, loading: false, title: storeCopy.connectedTool(storeCopy.toolNames.wecom), subtitle: '', isInstall: true, isError: false, toolId: 'wecom' });
-          notifyComposerToolsChanged();
-        }));
-        track(ev.listen('wecom:error', (e) => {
-          finishToolConfiguration('wecom', false);
-          const p = e.payload || {};
-          setWecomQr(null); setBusyId(busy => releaseBusy(busy, 'wecom'));
-          const failure = reportConnectorFailure('wecom', p, p.phase || 'authorize');
-          setAlert({ visible: true, loading: false, connectorAlert: 'failed', errorCode: failure.errorCode, isError: true, toolId: 'wecom' });
-        }));
         // 节流/等旧流程期间的进度,让用户看到"约 N 秒后出码"并能取消(见 sso_wait 弹窗状态)。
         track(ev.listen('eip:sso_wait', (e) => {
           // 已连接后迟到的等待/二维码事件(Reuse 重放恰逢旧流程完成):不再弹窗,
@@ -2638,11 +2606,14 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             />
           ), document.body)}
           {/* 飞书扫码二维码已内联进 FeishuFlowCard（详情弹窗内），不再单独浮层 */}
-          {wecomQr && (() => {
-            // Mirrors the wecom flow reset (factory resetFlow): backend cancel is now
-            // silent (no wecom:error cleanup), so we must clear the flow here, otherwise
-            // the detail/mini flow cards stay stale on "waiting for scan".
-            const cancel = () => { finishToolConfiguration('wecom', false); wecomConn.stopTick(); invokeTauri('wecom_cancel').catch(() => {}); wecomConn.setFlow(null); setWecomQr(null); setBusyId(busy => releaseBusy(busy, 'wecom')); };
+          {/* 企微扫码弹窗由流程态派生（无独立 state）：factory 的 wecom:qr 监听把
+              qr/qrUrl 写进跨视图流程卡，phase==='qr' 时弹出；取消/成功/失败都会让
+              流程离开 qr 相位，弹窗随之关闭。 */}
+          {wecomFlow && wecomFlow.phase === 'qr' && (() => {
+            // Factory resetFlow：backend cancel is silent (no wecom:error cleanup),
+            // so the cancel must clear the flow itself, otherwise the detail/mini
+            // flow cards stay stale on "waiting for scan".
+            const cancel = () => resetConnectorFlow('wecom');
             return createPortal((
             <div className="fixed inset-0 z-[200] flex items-center justify-center p-4" style={{ backgroundColor: 'rgba(0,0,0,0.5)', WebkitBackdropFilter: 'blur(8px)', backdropFilter: 'blur(8px)' }} onClick={cancel}>
               <div className="bg-white dark:bg-[#1C1C1E] rounded-3xl p-7 w-full max-w-[440px] flex flex-col items-center text-center shadow-2xl" onClick={e => e.stopPropagation()}>
@@ -2650,14 +2621,14 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                 {/* Real auth QR emitted by the backend (wecom-cli --output-qrcode PNG), one scan straight to authorization.
                     Previously an iframe embedded the /ai/qc/gen landing page: WKWebView often failed to render the code,
                     and encoding the landing-page URL as a QR made users scan a second time. */}
-                {wecomQr.qr && (
-                  <img src={wecomQr.qr} alt={storeCopy.wecomQrAlt} decoding="async" className="w-52 h-52 rounded-2xl border border-slate-200 bg-white p-1 dark:border-white/10" />
+                {wecomFlow.qr && (
+                  <img src={wecomFlow.qr} alt={storeCopy.wecomQrAlt} decoding="async" className="w-52 h-52 rounded-2xl border border-slate-200 bg-white p-1 dark:border-white/10" />
                 )}
                 <div className="mt-4 text-[13px] text-slate-500 dark:text-slate-400">{storeCopy.wecomScanHint}</div>
                 <div className="flex items-center gap-1.5 mt-2 text-[13px] text-slate-500 dark:text-slate-400">
                   <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span> {storeCopy.waitingAuth}
                 </div>
-                <button type="button" onClick={() => { if (wecomQr.url) invokeTauri('open_external_url', { url: wecomQr.url }).catch(browserOpenFailed); }} className="mt-4 text-[13px] text-blue-600 dark:text-blue-400 hover:underline">{storeCopy.openInBrowser}</button>
+                <button type="button" onClick={() => { if (wecomFlow.qrUrl) invokeTauri('open_external_url', { url: wecomFlow.qrUrl }).catch(browserOpenFailed); }} className="mt-4 text-[13px] text-blue-600 dark:text-blue-400 hover:underline">{storeCopy.openInBrowser}</button>
                 <button type="button" onClick={cancel} className="mt-3 px-6 py-2 rounded-full text-[14px] font-semibold bg-slate-100 dark:bg-[#2C2C2E] text-slate-600 dark:text-slate-300">{storeCopy.cancel}</button>
               </div>
             </div>
@@ -2760,7 +2731,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                   <EmptyState
                     testId="recycle-bin-loading"
                     className="py-24 flex flex-col items-center"
-                    icon={<Spinner size={24} className="mb-4" />}
+                    icon={<Spinner size={24} tone="brand" className="mb-4" />}
                     title={storeCopy.recycleBinLoading}
                     titleClassName="text-slate-500 dark:text-slate-400"
                   />

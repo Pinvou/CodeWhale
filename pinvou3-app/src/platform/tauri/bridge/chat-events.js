@@ -1,8 +1,15 @@
 (function () {
   "use strict";
 
-  var registry = window.__PINVOU_TAURI_BRIDGE_FEATURES__ = window.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
-  registry["chat-events"] = function (context) {
+  // biome-ignore lint/suspicious/noAssignInExpressions: registry bootstrap of the verbatim payload; splitting statements would diverge from the artifact
+  const registry = window.__PINVOU_TAURI_BRIDGE_FEATURES__ = window.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
+  registry["chat-events"] = function (context) {let pinvouSharedtauriChatEventsCache = null;
+function pinvouSharedtauriChatEvents() {
+  if (!pinvouSharedtauriChatEventsCache) pinvouSharedtauriChatEventsCache = window.PinvouBridgeShared.create("tauriChatEvents", { state });
+  return pinvouSharedtauriChatEventsCache;
+}
+
+
     var state = context.state;
     var recordAuthoritySyncDiagnostic = context.recordAuthoritySyncDiagnostic || function () {};
     var authoritySyncBufferSnapshot = context.authoritySyncBufferSnapshot || function () { return {}; };
@@ -665,32 +672,11 @@
     notify();
   }); });
 
-  function reasoningEventIndex(e) {
-    var value = e && e.payload && e.payload.index;
-    if (value === undefined || value === null || value === "") return null;
-    var parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : String(value);
-  }
+function reasoningEventIndex(e) { return pinvouSharedtauriChatEvents().reasoningEventIndex(e); }
 
-  function streamingReasoningItem(index) {
-    for (var itemIndex = state.chatItems.length - 1; itemIndex >= 0; itemIndex--) {
-      var item = state.chatItems[itemIndex];
-      if (!item || item.type !== "reasoning" || !item.streaming) continue;
-      if (index === undefined || index === null || item.reasoningIndex === index) return item;
-    }
-    return null;
-  }
+function streamingReasoningItem(index) { return pinvouSharedtauriChatEvents().streamingReasoningItem(index); }
 
-  function finalizeStreamingReasoning(index) {
-    var completedAt = Date.now();
-    for (var itemIndex = state.chatItems.length - 1; itemIndex >= 0; itemIndex--) {
-      var item = state.chatItems[itemIndex];
-      if (!item || item.type !== "reasoning" || !item.streaming) continue;
-      if (index !== undefined && index !== null && item.reasoningIndex !== index) continue;
-      item.streaming = false;
-      item.completedAt = completedAt;
-    }
-  }
+function finalizeStreamingReasoning(index) { return pinvouSharedtauriChatEvents().finalizeStreamingReasoning(index); }
 
   // ── Streaming markdown render throttle ────────────────────────────
   // Rust emits one chat:delta per engine delta (the forwarder does not
@@ -1456,20 +1442,8 @@
   // 桌面端 chip 仍显旧状态直到用户切 session 强制重读。
   // 新 payload 带 collections；collection_id 保留给旧远程端兼容。
   // 只处理当前 active session 的变更(其他 session 的挂载不影响当前视图)。
-  var kbMountSyncGeneration = 0;
-  function normalizeMountedCollections(value) {
-    if (!Array.isArray(value)) return [];
-    var seen = Object.create(null);
-    return value.map(function (entry) {
-      if (entry == null) return null;
-      var collectionId = typeof entry === "object"
-        ? (entry.collectionId != null ? entry.collectionId : entry.collection_id)
-        : entry;
-      if (collectionId == null || seen[String(collectionId)]) return null;
-      seen[String(collectionId)] = true;
-      return { collectionId: collectionId, enabled: typeof entry === "object" ? entry.enabled !== false : true };
-    }).filter(Boolean);
-  }
+  let kbMountSyncGeneration = 0;
+function normalizeMountedCollections(value) { return pinvouSharedtauriChatEvents().normalizeMountedCollections(value); }
   function normalizeMountedRemoteCollections(value) {
     if (!Array.isArray(value)) return [];
     var seen = Object.create(null);

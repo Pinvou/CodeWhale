@@ -52,7 +52,6 @@ pub(crate) fn project_session_list_for_web(items: &mut [SessionListItem]) {
 pub struct HiddenSessionListItem {
     #[serde(flatten)]
     pub metadata: SessionMetadata,
-    pub hidden_at: Option<String>,
     #[serde(rename = "archived_at")]
     pub archived_at: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -659,11 +658,9 @@ pub async fn list_archived_sessions(
     Ok(metas
         .into_iter()
         .map(|metadata| {
-            let hidden_at = store.hidden_at(&metadata.id);
             let title_attachment_names = session_title_attachment_names(&store, &metadata);
             HiddenSessionListItem {
-                archived_at: hidden_at.clone(),
-                hidden_at,
+                archived_at: store.hidden_at(&metadata.id),
                 title_attachment_names,
                 metadata,
             }
@@ -1540,7 +1537,7 @@ pub(crate) fn reset_aux_session_finish<T, E>(
 }
 
 /// 落盘 session 的产物 paths 列表。前端跟踪 File.write / File.edit 调用后调用,
-/// 跟 save_session_messages 一起落 (TurnComplete 时)。重启/切换 session 后,
+/// 在 TurnComplete 时落盘。重启/切换 session 后,
 /// 从 SavedSession.artifacts 重建前端产物列表。
 #[tauri::command]
 pub async fn save_session_artifacts(
@@ -1554,33 +1551,37 @@ pub async fn save_session_artifacts(
         .map_err(|e| format!("save_session_artifacts: {e:#}"))
 }
 
-fn normalize_pinvou_scene_events(events: serde_json::Value) -> Result<serde_json::Value, String> {
+/// Shared skeleton for the two position-keyed sidecar normalizers
+/// (`normalize_pinvou_scene_events` / `normalize_steered_messages`): array
+/// check, 10000-entry cap, per-entry `pos` validation, BTreeMap dedupe +
+/// ascending sort, array rebuild. `extract_payload` validates/extracts the
+/// entry payload and `singular`/`plural` thread the command-specific error
+/// message prefixes.
+fn normalize_position_keyed_entries(
+    events: serde_json::Value,
+    plural: &str,
+    singular: &str,
+    payload_key: &str,
+    extract_payload: impl Fn(&serde_json::Value) -> Result<String, String>,
+) -> Result<serde_json::Value, String> {
     let entries = events
         .as_array()
-        .ok_or_else(|| "pinvou scene events 必须是数组".to_string())?;
+        .ok_or_else(|| format!("{plural} 必须是数组"))?;
     if entries.len() > 10_000 {
-        return Err("pinvou scene events 超过 10000 条上限".to_string());
+        return Err(format!("{plural} 超过 10000 条上限"));
     }
-    let mut normalized = std::collections::BTreeMap::<u64, &'static str>::new();
+    let mut normalized = std::collections::BTreeMap::<u64, String>::new();
     for entry in entries {
         let pos = entry
             .get("pos")
             .and_then(serde_json::Value::as_u64)
-            .ok_or_else(|| "pinvou scene event 缺少有效 pos".to_string())?;
-        let scene = match entry.get("scene").and_then(serde_json::Value::as_str) {
-            Some("work:document-writing") => "work:document-writing",
-            Some("work:personal-workbench") => "work:personal-workbench",
-            Some("design:poster") => "design:poster",
-            Some("design:data-visualization") => "design:data-visualization",
-            Some("design:ppt") => "design:ppt",
-            _ => return Err("pinvou scene event 包含无效 scene".to_string()),
-        };
-        normalized.insert(pos, scene);
+            .ok_or_else(|| format!("{singular} 缺少有效 pos"))?;
+        normalized.insert(pos, extract_payload(entry)?);
     }
     Ok(serde_json::Value::Array(
         normalized
             .into_iter()
-            .map(|(pos, scene)| serde_json::json!({ "pos": pos, "scene": scene }))
+            .map(|(pos, payload)| serde_json::json!({ "pos": pos, payload_key: payload }))
             .collect(),
     ))
 }
@@ -1618,6 +1619,29 @@ pub(super) fn read_session_sidecar(
         .map_err(|error| format!("failed to parse session {label} sidecar: {error}"))
 }
 
+fn normalize_pinvou_scene_events(events: serde_json::Value) -> Result<serde_json::Value, String> {
+    normalize_position_keyed_entries(
+        events,
+        "pinvou scene events",
+        "pinvou scene event",
+        "scene",
+        |entry| {
+            match entry.get("scene").and_then(serde_json::Value::as_str) {
+                Some(scene @ ("work:document-writing" | "work:personal-workbench")) => {
+                    Ok(scene.to_string())
+                }
+                // design:poster / design:data-visualization / design:ppt are
+                // historical persisted scene names from the merged design lane
+                // and must stay accepted.
+                Some(scene @ ("design:poster" | "design:data-visualization" | "design:ppt")) => {
+                    Ok(scene.to_string())
+                }
+                _ => Err("pinvou scene event 包含无效 scene".to_string()),
+            }
+        },
+    )
+}
+
 /// 保存用户消息专业场景标签。sidecar 独立于 messages，但属于 session 持久数据，
 /// 因此通过后端共享给桌面端和 WebUI，而不是只留在某个宿主的 localStorage。
 #[tauri::command]
@@ -1646,33 +1670,22 @@ pub async fn get_session_pinvou_scene_events(
 }
 
 fn normalize_steered_messages(events: serde_json::Value) -> Result<serde_json::Value, String> {
-    let entries = events
-        .as_array()
-        .ok_or_else(|| "steered messages 必须是数组".to_string())?;
-    if entries.len() > 10_000 {
-        return Err("steered messages 超过 10000 条上限".to_string());
-    }
-    let mut normalized = std::collections::BTreeMap::<u64, String>::new();
-    for entry in entries {
-        let pos = entry
-            .get("pos")
-            .and_then(serde_json::Value::as_u64)
-            .ok_or_else(|| "steered message 缺少有效 pos".to_string())?;
-        let text = entry
-            .get("text")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "steered message 缺少有效 text".to_string())?;
-        if text.len() > 64_000 {
-            return Err("steered message text 超过 64000 字符上限".to_string());
-        }
-        normalized.insert(pos, text.to_string());
-    }
-    Ok(serde_json::Value::Array(
-        normalized
-            .into_iter()
-            .map(|(pos, text)| serde_json::json!({ "pos": pos, "text": text }))
-            .collect(),
-    ))
+    normalize_position_keyed_entries(
+        events,
+        "steered messages",
+        "steered message",
+        "text",
+        |entry| {
+            let text = entry
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "steered message 缺少有效 text".to_string())?;
+            if text.len() > 64_000 {
+                return Err("steered message text 超过 64000 字符上限".to_string());
+            }
+            Ok(text.to_string())
+        },
+    )
 }
 
 /// 保存 mid-turn steer 消息的位置标记。steer 落盘与普通 admission 对齐、不含

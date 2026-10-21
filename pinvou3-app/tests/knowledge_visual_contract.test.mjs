@@ -45,9 +45,13 @@ test('the remote owner-model download entry is capability-gated, fail closed', (
   // loongarch64 的服务端下载漏斗（begin_model_download）必然拒绝；共享知识库宿主面板的
   // 下载按钮必须与 KnowledgeView 的模型卡同向门控：prop 为 true 才渲染，快照未到达或
   // 渲染点漏传时隐藏，而不是渲染一个必然失败的按钮。
-  // Official 在 Community 基线之上为该视图新增了 embedded prop(产出物内嵌渲染),
-  // 门控 prop 与它并存,断言相应放宽。
-  assert.match(remoteKnowledgeSource, /function RemoteKnowledgeView\(\{ t, embedded = false, localEmbedSupported \}\)/);
+  // Official 在 Community 基线之上为该视图新增了 embedded prop(产出物内嵌渲染)。
+  // #566 合并后形态适配:唯一挂载点(KnowledgeView 的 remote 子页)恒为嵌入式,
+  // 合并视图按 embedded=true 写死类名并把 data-embedded="true" 固化为外部契约
+  // (kb_smoke 消费),embedded prop 与门控 prop 的存续断言相应更新。
+  assert.match(remoteKnowledgeSource, /function RemoteKnowledgeView\(\{ t, localEmbedSupported \}\)/);
+  assert.match(remoteKnowledgeSource, /data-embedded="true"/);
+  assert.match(remoteKnowledgeSource, /className=\{`w-full \$\{ink\}`\}/);
   assert.match(remoteKnowledgeSource, /const localEmbedReady = localEmbedSupported === true;/);
   assert.match(
     remoteKnowledgeSource,

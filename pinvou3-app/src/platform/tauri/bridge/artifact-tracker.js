@@ -2,7 +2,12 @@
   "use strict";
 
   var registry = window.__PINVOU_TAURI_BRIDGE_FEATURES__ = window.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
-  registry["artifact-tracker"] = function (context) {
+  registry["artifact-tracker"] = function (context) {let pinvouSharedtauriArtifactTrackerCache = null;
+function pinvouSharedtauriArtifactTracker() {
+  if (!pinvouSharedtauriArtifactTrackerCache) pinvouSharedtauriArtifactTrackerCache = window.PinvouBridgeShared.create("tauriArtifactTracker", { state, notify, DELIVERABLE_EXTS, extractArtifactPaths, parseToolResultPayload });
+  return pinvouSharedtauriArtifactTrackerCache;
+}
+
     var state = context.state;
     var invoke = context.invoke;
     var notify = context.notify;
@@ -358,9 +363,7 @@
     extractPatchHeaderPaths(args.patch, paths);
     return paths;
   }
-  function extractArtifactPath(args) {
-    return extractArtifactPaths(args)[0] || null;
-  }
+function extractArtifactPath(args) { return pinvouSharedtauriArtifactTracker().extractArtifactPath(args); }
 
   function fileMutationAction(name, args) {
     if (typeof args === "string") {
@@ -376,10 +379,7 @@
   }
 
 
-  function isPresentArtifactTool(name) {
-    return name === "present_artifact" ||
-      (typeof name === "string" && name.endsWith("present_artifact"));
-  }
+function isPresentArtifactTool(name) { return pinvouSharedtauriArtifactTracker().isPresentArtifactTool(name); }
 
   // 成品卡路径:优先用 server(present_artifact_server.py)解析并验证过的绝对路径 abs_path——
   // 模型常给相对路径,直接拿 args.path 渲染会让卡片 path 是相对,点 Open 报「path must be

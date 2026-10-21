@@ -538,16 +538,7 @@ impl RemoteKnowledgeService {
             legacy_insecure_http: false,
         };
         let _persistence = self.persistence.lock();
-        let mut next = self.configured_connections();
-        let slot = next
-            .iter_mut()
-            .find(|item| item.server_id == server.server_id)
-            .ok_or_else(|| "本机共享知识库连接已发生变化，请重试".to_string())?;
-        *slot = connection.clone();
-        next.sort_by(|left, right| left.name.cmp(&right.name));
-        save_connections(&self.path, &next)?;
-        *self.connections.write() = next;
-        Ok(connection)
+        self.upsert_owner_connection(connection, false, &_persistence)
     }
 
     pub fn pending_joins(&self) -> Vec<PendingJoin> {

@@ -69,20 +69,10 @@ fn emit_memory_write_events(
     );
 }
 
-fn emit_memory_snapshot(
-    app: &AppHandle,
-    session_id: &str,
-    snapshot: &crate::features::memory::RuntimeMemorySnapshot,
-) {
-    let _ = app.emit(
-        "chat:memory",
-        serde_json::json!({
-            "session_id": session_id,
-            "items": &snapshot.items,
-            "runtime_path": &snapshot.runtime_path,
-        }),
-    );
-}
+// No `chat:memory` emission on the command path: the frontend listens only to
+// `chat:memory_write` plus the code-native lane whose events originate in
+// chat.rs/forwarder.rs. Command callers read the fresh snapshot from the
+// command's return value instead.
 
 /// Single home of the runtime-refresh fallback ladder (resolve → snapshot →
 /// on failure the shared "render runtime memory" detail string, stderr log,

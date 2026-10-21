@@ -80,6 +80,18 @@ fn setup_isolated_home(name: &str) -> (EnvGuard, PathBuf) {
     (env, root)
 }
 
+fn write_profile_fixture(profile: &MemoryProfile) {
+    // save_profile was removed as a dead production entry point (update_profile
+    // writes inline); fixtures land the JSON directly. load_profile normalizes
+    // on read, matching the previous write-side normalize behavior.
+    let path = memory::profile_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create memory dir");
+    }
+    std::fs::write(&path, serde_json::to_vec_pretty(profile).unwrap())
+        .expect("write profile fixture");
+}
+
 fn setup_memory_fixture(name: &str) -> (EnvGuard, PathBuf) {
     let (env, root) = setup_isolated_home(name);
 
@@ -108,7 +120,7 @@ fn setup_memory_fixture(name: &str) -> (EnvGuard, PathBuf) {
         },
         pending_sensitive_identity: pending,
     };
-    memory::save_profile(&profile).expect("save memory profile");
+    write_profile_fixture(&profile);
 
     let pref_dir = paths::user_memory_preferences_dir();
     std::fs::create_dir_all(&pref_dir).expect("create preferences dir");

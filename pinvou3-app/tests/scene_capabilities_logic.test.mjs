@@ -5,6 +5,14 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { companionPackageMap } from '../src/shared/companion-packages.js';
+// #566 共享模块移植：scene-capabilities.js 现从 scene-registry.js 引入场景键与
+// pinvouSceneTag；import 语句会被下面的正则剥掉，vm ctx 需手工注入同一来源的绑定。
+import {
+  DATA_VISUALIZATION_SCENE_KEY,
+  DOCUMENT_WRITING_SCENE_KEY,
+  PPT_DESIGN_SCENE_KEY,
+  pinvouSceneTag,
+} from '../src/features/chat/scene-registry.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -16,6 +24,10 @@ const code = fs.readFileSync(logicPath, 'utf8')
 
 const ctx = {
   companionPackageMap,
+  DATA_VISUALIZATION_SCENE_KEY,
+  DOCUMENT_WRITING_SCENE_KEY,
+  PPT_DESIGN_SCENE_KEY,
+  pinvouSceneTag,
 };
 vm.createContext(ctx);
 vm.runInContext(`${code}

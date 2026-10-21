@@ -188,7 +188,7 @@ pub async fn submit_feedback_with_uploader(
     }
 }
 
-pub fn validate_feedback_request(request: &FeedbackSubmitRequest) -> Result<(), FeedbackError> {
+fn validate_feedback_request(request: &FeedbackSubmitRequest) -> Result<(), FeedbackError> {
     let desc_len = request.description.trim().chars().count();
     if desc_len == 0 {
         return Err(FeedbackError::Validation("请填写反馈说明。".to_string()));

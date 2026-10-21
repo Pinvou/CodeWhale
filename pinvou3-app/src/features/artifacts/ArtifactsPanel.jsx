@@ -5,6 +5,7 @@ import { bridge } from '../../hooks/useBridge.js';
 import { formatLocalDateTime } from '../../shared/date-utils.js';
 import { formatBytes } from '../../shared/format-number.js';
 import { can, isWeb } from '../../shared/platform.js';
+import { OFFICE_HTML_STYLE } from '../../shared/artifact-utils.js';
 import { ScaledHtmlPreview } from '../settings/composer-shared.jsx';
 import { cardBtnCls } from '../../shared/card-buttons.mjs';
 import { useConversationSecondClock } from '../../hooks/useConversationSecondClock.js';
@@ -43,21 +44,12 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
       { key: 'actual', labelKey: 'zoomActual' },
     ];
     const clampHtmlScale = (value) => Math.max(0.1, Math.min(3, Number(value) || 1));
-    // 注入到 office→HTML 预览 iframe 末尾:LibreOffice 导出的表格 border=0、字号 x-small,
-    // 这里补网格线/字号/单元格换行,让 xlsx 读起来像表格。放在文档后 → 同特异性下后定义胜出。
-    const OFFICE_HTML_STYLE = '<style>'
-      + 'body{margin:14px;background:#fff;color:#1f1f1f;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;}'
-      + 'table{border-collapse:collapse;width:auto;max-width:100%;}'
-      + 'td,th{border:1px solid #d4d7dc;padding:5px 9px;font-size:13px!important;vertical-align:top;max-width:460px;overflow-wrap:anywhere;}'
-      + 'tr:first-child td{background:#eef2f8;font-weight:600;}'
-      + 'img{max-width:100%;height:auto;}'
-      + '</style>';
 
     // Stable empty-array default: an inline [] is a new reference on every render, which makes memoized children re-render repeatedly.
     const EMPTY_DESIGN_CHANGES = [];
 
     // eslint-disable-next-line sonarjs/cognitive-complexity -- unified preview/design workbench panel: every state-machine branch maps to a preview kind or a design runtime event; splitting would sever the pv/sel linkage
-    const ArtifactsPanel = ({ bs, t, onClose, isWide, onGotoSettings, isFullscreen = false, onToggleFullscreen, preferredArtifactPath, onPreviewArtifact, designCommand, selectedDesignElement, designChanges = EMPTY_DESIGN_CHANGES, onDesignElementSelected, onDesignChangeApplied, onDesignMutation, onDesignApplyChange, onDesignClearChanges, onDesignAiSubmit, designAiState, onDesignAiStateChange }) => {
+    const ArtifactsPanel = ({ bs, t, onClose, onGotoSettings, isFullscreen = false, onToggleFullscreen, preferredArtifactPath, onPreviewArtifact, designCommand, selectedDesignElement, designChanges = EMPTY_DESIGN_CHANGES, onDesignElementSelected, onDesignChangeApplied, onDesignMutation, onDesignApplyChange, onDesignClearChanges, onDesignAiSubmit, designAiState, onDesignAiStateChange }) => {
       const uiA = t.uiArtifacts;
       // Visual editing (design workbench) is now a manual in-panel toggle:
       // no longer triggered by the session lane — any HTML artifact can
@@ -81,7 +73,6 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
       const [htmlCustomScale, setHtmlCustomScale] = useState(1);
       const [htmlZoomMenuOpen, setHtmlZoomMenuOpen] = useState(false);
       const [artifactMenuOpen, setArtifactMenuOpen] = useState(false);
-      const [localDesignAiState, setLocalDesignAiState] = useState({ text: '', status: 'idle', lastPrompt: '', pendingPath: '', startedAt: 0 });
       const showDesignWorkbench = isFullscreen && designEditMode && pv.kind === 'html';
       const mdPreviewRef = useRef(null);
       const designFrameRef = useRef(null);
@@ -104,12 +95,11 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
         setHtmlCustomScale(clampHtmlScale(scale));
         setHtmlZoomMode('custom');
       };
-      const currentDesignAiState = designAiState || localDesignAiState;
-      const designAiText = currentDesignAiState.text || '';
-      const designAiStatus = currentDesignAiState.status || 'idle';
-      const designAiLastPrompt = currentDesignAiState.lastPrompt || '';
-      const designAiPendingPath = currentDesignAiState.pendingPath || '';
-      const designAiStartedAt = Number(currentDesignAiState.startedAt || 0);
+      const designAiText = designAiState.text || '';
+      const designAiStatus = designAiState.status || 'idle';
+      const designAiLastPrompt = designAiState.lastPrompt || '';
+      const designAiPendingPath = designAiState.pendingPath || '';
+      const designAiStartedAt = Number(designAiState.startedAt || 0);
       // 1s tick: only while a design AI request is in flight (sending/running); the baseline syncs on mount/activation.
       const designAiNow = useConversationSecondClock(designAiStatus === 'sending' || designAiStatus === 'running');
       const designAiElapsedSec = designAiStartedAt > 0 ? Math.max(0, Math.round((designAiNow - designAiStartedAt) / 1000)) : 0;
@@ -119,8 +109,7 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
           const patch = typeof patchOrUpdater === 'function' ? patchOrUpdater(base) : patchOrUpdater;
           return { ...base, ...(patch || {}) };
         };
-        if (onDesignAiStateChange) onDesignAiStateChange(apply);
-        else setLocalDesignAiState(apply);
+        onDesignAiStateChange(apply);
       };
       const describeDesignAiActivity = () => {
         if (designAiStatus === 'updated') return uiA.aiRefreshed;
@@ -417,12 +406,14 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
         if (!change?.seq || !sel || tab !== 'preview') return;
         if (!changeMatchesSession(change, bs)) return;
         if (!sameArtifactPath(change.path, sel.path)) return;
-        if (designAiStatus === 'sending' || designAiStatus === 'running' || designAiStatus === 'refreshing') {
+        if (['sending', 'running', 'refreshing'].includes(designAiStatus)) {
+          // The state lives in ChatView (onDesignAiStateChange); synchronously flip it when a disk change arrives, avoiding a stale status indicator.
           setDesignAiStatePatch({ status: 'updated', startedAt: 0 });
           resetDesignAiStatusSoon();
         }
         if (change.event === 'removed') {
           if (hasDirtyMarkdownPreview()) {
+            // eslint-disable-next-line react-hooks/set-state-in-effect -- deleted externally while local unsaved edits exist: synchronously flag the interception so dirty data is not overwritten
             setExternalUpdateBlocked('removed');
             return;
           }
@@ -444,6 +435,7 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
 
       useEffect(() => {
         if (designAiStatus === 'sending' && bs && bs.busy) {
+          // The state lives in ChatView (onDesignAiStateChange); synchronously advance the AI state machine sending→running on the busy edge.
           setDesignAiStatePatch((current) => ({ status: 'running', startedAt: current.startedAt || Date.now() }));
         }
         if ((designAiStatus === 'sending' || designAiStatus === 'running') && bs && !bs.busy) {
@@ -631,7 +623,6 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
               <iframe sandbox="allow-same-origin" className="w-full flex-1 min-h-[480px] border-0 block bg-white"
                 title={(sel && sel.path) || t.apTabPreview}
                 data-testid="artifact-html-preview-frame"
-                onLoad={(e) => handlePreviewFrameLoad(e.currentTarget)}
                 srcDoc={(vis.html || '') + OFFICE_HTML_STYLE} />
             </div>
           );
@@ -665,9 +656,8 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
       };
 
       return (
-        <div className={isWide ? "relative w-full h-full" : "absolute inset-0 z-30 flex justify-end pointer-events-auto"}>
-          {!isWide && <div className="absolute inset-0 bg-black/40" onClick={handleClose}></div>}
-          <div className={`relative h-full flex flex-col bg-white dark:bg-[#1E1F20] ${isWide ? 'w-full border-l border-black/10 dark:border-white/10' : 'w-[680px] max-w-[88vw] shadow-2xl animate-in slide-in-from-right duration-200'}`}>
+        <div className="relative w-full h-full">
+          <div className="relative h-full flex flex-col bg-white dark:bg-[#1E1F20] w-full border-l border-black/10 dark:border-white/10">
             {/* header + tabs */}
             <div className={`flex items-center justify-between px-3 py-2.5 border-b border-black/10 dark:border-white/10`}>
               {renderArtifactSwitcher()}
@@ -894,7 +884,6 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
                           changes={designChanges}
                           onApplyChange={onDesignApplyChange}
                           onClearChanges={onDesignClearChanges}
-                          docked
                         />
                       </div>
                     )}
@@ -939,4 +928,8 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
       );
     };
 
-export { OFFICE_HTML_STYLE, ArtifactsPanel };
+export { ArtifactsPanel };
+
+// Re-export for the pre-existing KnowledgeView import path; KnowledgeView should
+// import from shared/artifact-utils.js directly when that file changes next.
+export { OFFICE_HTML_STYLE } from '../../shared/artifact-utils.js';

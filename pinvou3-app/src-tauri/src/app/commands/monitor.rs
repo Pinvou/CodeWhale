@@ -2,8 +2,6 @@ use super::prelude::*;
 
 use crate::core::model_endpoint::LocalServerKind;
 
-use crate::features::monitor::VllmStatus;
-
 /// Monitor 视图完整数据。**按需采样**——前端只在监控页面 mount 时启 1s
 /// interval 调本 command，每次都重新跑 sample_all。GPU util 瞬时易错过推理
 /// 峰，前端维护 5 个值滑窗 max 弥补。
@@ -40,7 +38,6 @@ pub struct LocalVllmModelEntry {
 #[derive(Debug, Clone, Serialize)]
 pub struct LocalVllmCandidate {
     pub base_url: String,
-    pub status: VllmStatus,
     pub provider: String,
     pub label: String,
     pub model: Option<String>,
@@ -81,7 +78,6 @@ pub async fn discover_local_vllm(
         let first = probe.models.first();
         candidates.push(LocalVllmCandidate {
             base_url,
-            status: VllmStatus::Ready,
             provider: provider.to_string(),
             label: label.to_string(),
             model: first.map(|model| model.id.clone()),
@@ -255,7 +251,6 @@ fn local_model_provider(kind: LocalServerKind, port: Option<u16>) -> (&'static s
 #[derive(Debug, Clone, Serialize)]
 pub struct BackendStatus {
     pub vllm_online: bool,
-    pub last_check_ms: u64,
     /// vLLM 真实上下文窗口（前端 token 进度数据的分母）。
     /// 随 live-dot 轮询下发，监控页未打开时也能保持准确。
     pub max_model_len: Option<u32>,
@@ -267,13 +262,8 @@ pub async fn get_backend_status() -> Result<BackendStatus, String> {
     let vllm = crate::features::monitor::active_model_snapshot().await;
     let vllm_online = vllm.as_ref().is_some_and(VllmSnapshot::is_online);
     let max_model_len = vllm.as_ref().and_then(|v| v.max_model_len);
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
     Ok(BackendStatus {
         vllm_online,
-        last_check_ms: now_ms,
         max_model_len,
     })
 }

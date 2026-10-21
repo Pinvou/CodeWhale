@@ -86,7 +86,7 @@ pub(crate) fn current() -> DesktopCapabilities {
     }
 }
 
-pub(crate) fn supports_codex_acp(os: &str) -> bool {
+fn supports_codex_acp(os: &str) -> bool {
     matches!(os, "linux" | "windows" | "macos")
 }
 
