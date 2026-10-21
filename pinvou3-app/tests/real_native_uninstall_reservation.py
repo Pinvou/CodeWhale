@@ -96,11 +96,14 @@ def main():
               'checks':[],'errors':[],'binary_sha256':{k:hashlib.sha256(p.read_bytes()).hexdigest() for k,p in frozen.items()}}
     started = time.monotonic()
 
-    def api(path,body=None,host=False):
+    def api(path,body=None,host=False,allow_pending=False):
         connection=UnixHTTP(str(store/'service.sock' if host else sock),timeout=15)
         try:
             connection.request('GET' if body is None else 'POST',path,None if body is None else json.dumps(body))
             response=connection.getresponse();value=json.loads(response.read())
+            if (allow_pending and response.status==503
+                    and value.get('error',{}).get('code')=='store_selection_unavailable'):
+                return None
             assert response.status==200,value
             return value
         finally:connection.close()
@@ -117,6 +120,11 @@ def main():
     def healthy(path,body=None,host=False):
         try:return api(path,body,host)
         except (OSError,ValueError):return False
+
+    def observed_model():
+        # Enrollment is durable before the supervisor publishes its first snapshot.
+        value=api('/v1/models',allow_pending=True)
+        return next((row for row in (value or {}).get('models',[]) if row['card']==card_id),None)
 
     def done(run):
         value=api('/v1/tasks/'+run,host=True)
@@ -137,7 +145,7 @@ def main():
         processes.append(subprocess.Popen([str(frozen['pinvou']),'--model-store-host'],env=env,stdout=log,stderr=log))
         wait(lambda:healthy('/v1/ui/health',{},True))
         install()
-        row=next(row for row in api('/v1/models')['models'] if row['card']==card_id)
+        row=wait(observed_model)
         assert not row['managed'] and row['can_adopt'] and row['can_reserve_uninstall'],row
         lifecycle('stop',expected='failed')
         assert not (root/'unexpected-stop').exists()

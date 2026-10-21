@@ -129,6 +129,14 @@ def main():
         finally:
             connection.close()
 
+    def observed_model():
+        # Enrollment is durable before the supervisor publishes its first snapshot.
+        status, value = api('/v1/models')
+        if status == 503 and value.get('error', {}).get('code') == 'store_selection_unavailable':
+            return None
+        assert status == 200, value
+        return next((row for row in value['models'] if row['card'] == card_id), None)
+
     def wait(check, timeout=45):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -212,7 +220,7 @@ def main():
         assert status == 200, value
         installed = finish(value['run_id'])
         assert installed['status'] == 'failed' and '19' in installed['error'], installed
-        observed = next(m for m in api('/v1/models')[1]['models'] if m['card'] == card_id)
+        observed = wait(observed_model)
         assert not observed['managed'] and not observed['can_adopt'] and observed['can_reserve_uninstall'], observed
         rejected_status,rejected=api(f'/v1/models/{card_id}/disable',{})
         assert rejected_status in (403,404,409) and 'error' in rejected and 'task_id' not in rejected,(rejected_status,rejected)
@@ -229,7 +237,7 @@ def main():
             wait(lambda: args.ui_checkpoint.exists(),120)
         success('recover_maintenance')
         assert count() == before and model.exists() and not gate()['maintenance']
-        observed = next(m for m in api('/v1/models')[1]['models'] if m['card'] == card_id)
+        observed = wait(observed_model)
         assert not observed['managed'], observed
         (root / 'pause').unlink()
         success('uninstall',False)
@@ -240,7 +248,7 @@ def main():
         assert status==200,value
         installed = finish(value['result']['run_id'])
         assert installed['status']=='succeeded',installed
-        observed = next(m for m in api('/v1/models')[1]['models'] if m['card']==card_id)
+        observed = wait(observed_model)
         assert not observed['managed'] and observed['can_adopt'],observed
         success('uninstall',False)
         assert model.exists() and not gate()['maintenance']
@@ -257,7 +265,7 @@ def main():
         created = True
         success('enable')
         assert (profile / 'megacube/installations/ownership' / card_id).is_file()
-        observed=next(m for m in api('/v1/models')[1]['models'] if m['card']==card_id)
+        observed=wait(observed_model)
         assert observed['managed'] and observed['recovery_owner']=='cmsd',observed
         connection = http.client.HTTPConnection('127.0.0.1', args.gateway_port, timeout=40)
         connection.request('POST', '/v1/chat/completions', json.dumps({
