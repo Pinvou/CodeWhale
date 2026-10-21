@@ -23,13 +23,27 @@ pub(super) fn is_mutable_runtime_asset(path: &str) -> bool {
     let Ok(path) = super::script_runner::sanitize_relative_path(path) else {
         return false;
     };
-    path.components().any(|part| {
+    let generated_tree = path.components().any(|part| {
         matches!(part, std::path::Component::Normal(name)
-            if matches!(name.to_str(), Some(".runtime" | ".deploy-env" | ".env" | ".cache" | "__pycache__" | "logs"))
+            if matches!(name.to_str(), Some(".runtime" | ".cache" | "__pycache__"))
                 || name.to_string_lossy().starts_with(".tmp-"))
-    }) || path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-        matches!(e, "part" | "incomplete" | "log" | "pyc" | "pyo")
-    })
+    });
+    // State lives at the card root (and the known legacy vendor environment),
+    // not in arbitrary source subdirectories named logs or containing .env.
+    let known_state = path == std::path::Path::new(".env")
+        || path == std::path::Path::new(".deploy-env")
+        || path == std::path::Path::new("vendor/.env")
+        || path == std::path::Path::new("vendor/.deploy-env")
+        || path.starts_with("logs");
+    let state_file_parent = path
+        .parent()
+        .is_some_and(|p| p.as_os_str().is_empty() || p == std::path::Path::new("vendor"));
+    generated_tree
+        || known_state
+        || path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+            matches!(e, "pyc" | "pyo")
+                || (state_file_parent && matches!(e, "part" | "incomplete" | "log"))
+        })
 }
 
 #[cfg(test)]
@@ -50,6 +64,9 @@ mod tests {
         for path in [
             "vendor/cache.py",
             "vendor/.cache-tools/helper.py",
+            "vendor/logs/helper.py",
+            "vendor/pkg/.env",
+            "vendor/pkg/fixture.log",
             ".venv/lib/module.py",
             "../.cache/file",
             "/.cache/file",
@@ -80,6 +97,9 @@ mod tests {
         for path in [
             ".venv/lib/module.py",
             "venv/bin/activate",
+            "vendor/logs/helper.py",
+            "vendor/pkg/.env",
+            "vendor/pkg/fixture.log",
             "node_modules/package/index.js",
             "vendor/.cache-tools/helper.py",
             "vendor/cache.py",

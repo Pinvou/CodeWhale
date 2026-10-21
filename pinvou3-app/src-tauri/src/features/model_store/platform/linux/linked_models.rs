@@ -16,7 +16,8 @@ fn chat_base(url: &str) -> Option<String> {
         return None;
     }
     let mut url = reqwest::Url::parse(url).ok()?;
-    if !url.username().is_empty()
+    if !["http", "https"].contains(&url.scheme())
+        || !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
         || url.fragment().is_some()

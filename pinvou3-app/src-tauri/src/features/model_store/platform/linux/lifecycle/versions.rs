@@ -5,6 +5,7 @@ use super::super::{
     weight_identity,
 };
 use super::*;
+use base64::Engine as _;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
@@ -43,6 +44,95 @@ fn owned_directory(root: &Path, parts: &[&str]) -> Result<PathBuf, ModelManagerE
         }
     }
     Ok(path)
+}
+
+/// Existing retry locations are immutable: do not follow a replaced ancestor,
+/// create another default tree, or accept a missing/mismatched ownership marker.
+fn existing_owned_directory(path: &Path) -> Result<bool, ModelManagerError> {
+    let uid = fs::metadata("/proc/self")
+        .map_err(|e| fail(e.to_string()))?
+        .uid();
+    // Creation checks .versions, the public card and the revision directory.
+    // Retrying must recheck all three: a private leaf cannot protect its name
+    // when another user can replace it through a writable parent.
+    for directory in path.ancestors().take(3) {
+        let meta = directory
+            .symlink_metadata()
+            .map_err(|e| fail(e.to_string()))?;
+        if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o022 != 0 {
+            return Ok(false);
+        }
+    }
+    Ok(path.canonicalize().map_err(|e| fail(e.to_string()))? == path)
+}
+
+/// Credit only the declared single weight or its known HF local-dir resume
+/// file, never arbitrary contents, links, sparse holes or duplicate temp copies.
+fn resumable_bytes(root: &Path, name: &str, hash: &str) -> Result<(u64, u64), ModelManagerError> {
+    let name = Path::new(name);
+    let basename = name
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| fail("无效权重文件名"))?;
+    let metadata_hash = ring::digest::digest(
+        &ring::digest::SHA1_FOR_LEGACY_USE_ONLY,
+        format!("{basename}.metadata").as_bytes(),
+    );
+    let expected_prefix = base64::engine::general_purpose::URL_SAFE.encode(metadata_hash.as_ref());
+    let cache_suffix = Path::new(".cache/huggingface/download")
+        .join(name.parent().unwrap_or_else(|| Path::new("")));
+    let mut stack = vec![(root.to_path_buf(), 0)];
+    let mut visited = 0;
+    let mut allocated = 0;
+    let mut logical = 0;
+    while let Some((dir, depth)) = stack.pop() {
+        if depth > 5 || visited > 10000 {
+            return Err(fail("权重目录过于复杂，无法可靠确认续传文件。"));
+        }
+        for entry in fs::read_dir(dir).map_err(|e| fail(e.to_string()))? {
+            let entry = entry.map_err(|e| fail(e.to_string()))?;
+            visited += 1;
+            let path = entry.path();
+            let meta = path.symlink_metadata().map_err(|e| fail(e.to_string()))?;
+            if meta.is_dir() {
+                stack.push((path, depth + 1));
+            } else if meta.is_file() && meta.nlink() == 1 {
+                // huggingface_hub local-dir paths use a URL-safe hash of the
+                // metadata filename followed by the LFS etag. Require the
+                // declared content digest; another etag cannot be resumed.
+                let hf_resume = path.parent().is_some_and(|p| p.ends_with(&cache_suffix))
+                    && entry.file_name().to_str().is_some_and(|n| {
+                        n.strip_suffix(".incomplete")
+                            .and_then(|n| n.rsplit_once('.'))
+                            .is_some_and(|(prefix, etag)| {
+                                prefix == expected_prefix && etag.eq_ignore_ascii_case(hash)
+                            })
+                    });
+                if path.ends_with(name) || hf_resume {
+                    allocated = allocated.max(meta.len().min(meta.blocks().saturating_mul(512)));
+                    logical = logical.max(meta.len());
+                }
+            }
+        }
+    }
+    Ok((allocated, logical))
+}
+
+/// Path::exists treats permission errors and dangling links as absence. A
+/// record-only cleanup needs a positive NotFound result without linked parents.
+fn resource_presence(path: &Path) -> Result<bool, ModelManagerError> {
+    let mut missing = false;
+    for ancestor in path.ancestors() {
+        match ancestor.symlink_metadata() {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(fail("拒绝清理链接资源路径。"));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => missing = true,
+            Err(e) => return Err(fail(e.to_string())),
+        }
+    }
+    Ok(!missing)
 }
 
 fn file_digest(
@@ -92,6 +182,7 @@ fn locate_weight(root: &Path, name: &str) -> Result<Option<PathBuf>, ModelManage
     let mut stack = vec![(root.to_path_buf(), 0)];
     let mut found = Vec::new();
     let mut visited = 0;
+    let mut unresolved_link = false;
     while let Some((dir, depth)) = stack.pop() {
         if depth > 5 || visited > 10000 {
             return Err(fail("权重目录过于复杂，无法可靠确认文件归属。"));
@@ -102,8 +193,11 @@ fn locate_weight(root: &Path, name: &str) -> Result<Option<PathBuf>, ModelManage
             let kind = entry.file_type().map_err(|e| fail(e.to_string()))?;
             if kind.is_dir() {
                 stack.push((entry.path(), depth + 1));
-            } else if entry.path().ends_with(name) && kind.is_symlink() {
-                return Err(fail("拒绝使用链接权重文件。"));
+            } else if kind.is_symlink() {
+                if entry.path().ends_with(name) {
+                    return Err(fail("拒绝使用链接权重文件。"));
+                }
+                unresolved_link = true;
             } else if kind.is_file() && entry.path().ends_with(name) {
                 let path = entry
                     .path()
@@ -117,6 +211,9 @@ fn locate_weight(root: &Path, name: &str) -> Result<Option<PathBuf>, ModelManage
     }
     if found.len() > 1 {
         return Err(fail("无法唯一确认隔离目录中的权重文件，未切换部署。"));
+    }
+    if found.is_empty() && unresolved_link {
+        return Err(fail("权重目录包含未解析的链接，无法确认文件已不存在。"));
     }
     Ok(found.pop())
 }
@@ -192,6 +289,33 @@ fn valid_resource_marker(
             .is_none(),
         _ => false,
     })
+}
+
+/// A snapshot's saved path must still name the private tree that staging
+/// registered. Check it before canonicalization can hide a replaced ancestor.
+fn managed_version_root(
+    version: &Version,
+    card_id: &str,
+    version_id: &str,
+) -> Result<PathBuf, ModelManagerError> {
+    let root = PathBuf::from(
+        version
+            .models_root
+            .as_deref()
+            .ok_or_else(|| fail("版本缺少存储目录记录"))?,
+    );
+    let expected = serde_json::json!({"card_id":card_id,"version_id":version_id}).to_string();
+    if version.resource_dir != version.models_root
+        || version.record.as_ref().is_none_or(|r| {
+            r.models_root != version.models_root
+                || r.runtime_card_id.as_deref() != Some(version.runtime_card_id.as_str())
+        })
+        || !existing_owned_directory(&root)?
+        || !valid_resource_marker(&root, &expected, false)?
+    {
+        return Err(fail("版本目录归属或权限不符，未切换部署。"));
+    }
+    Ok(root)
 }
 
 /// Downloaded legacy cards have no deploy-env yet. Their missing runtime path
@@ -280,7 +404,15 @@ pub(super) fn current_purge_preflight(
     }
     let version = version.ok_or_else(|| fail("当前托管版本缺少归属记录，已保留资源。"))?;
     let root = root.ok_or_else(|| fail("无法确认当前托管版本的权重目录，已保留资源。"))?;
-    if root.exists() {
+    if resource_presence(&runtime)?
+        && !runtime
+            .symlink_metadata()
+            .map_err(|e| fail(e.to_string()))?
+            .is_dir()
+    {
+        return Err(fail("运行目录归属异常，已保留资源和记录。"));
+    }
+    if resource_presence(&root)? {
         let expected = serde_json::json!({"card_id":rec.card_id,"version_id":id}).to_string();
         if !root
             .symlink_metadata()
@@ -305,10 +437,10 @@ pub(super) fn purge_current_storage(
     ensure_unused(&runtime, Some(&root))?;
     version.state = "deleting".into();
     version_store::put(&version).map_err(fail)?;
-    if root.exists() {
+    if resource_presence(&root)? {
         remove_managed_resource(&root)?;
     }
-    if runtime.exists() {
+    if resource_presence(&runtime)? {
         fs::remove_dir_all(runtime).map_err(|e| fail(e.to_string()))?;
     }
     Ok(())
@@ -419,6 +551,7 @@ impl ModelManager {
                 created_at: current.downloaded_at.clone(),
                 record: Some(current),
                 error: None,
+                planned_bytes: 0,
             },
         );
         Ok(serde_json::json!(versions.iter().map(|v|serde_json::json!({
@@ -439,7 +572,12 @@ impl ModelManager {
         on_progress: &mut ProgressFn<'_>,
         control: script_runner::RunControl,
     ) -> Result<serde_json::Value, ModelManagerError> {
-        let _resources = version_store::resource_operation_lock(false).map_err(fail)?;
+        let _resources = version_store::wait_resource_operation_lock(
+            false,
+            || control.cancelled(),
+            || on_progress("等待其他模型资源操作完成，可取消…"),
+        )
+        .map_err(fail)?;
         let current = self.get_record(card_id)?;
         ensure_not_deleting(&current)?;
         let card = self.store.get_card(card_id)?;
@@ -490,25 +628,104 @@ impl ModelManager {
         if files.len() != 1 {
             return Err(fail("暂不支持多文件隔离升级"));
         }
-        if let Some(v) = version_store::get(card_id, revision).map_err(fail)? {
+        let reservation = version_store::wait_quota_reservation_lock(
+            || control.cancelled(),
+            || on_progress("等待其他新版下载登记存储配额，可取消…"),
+        )
+        .map_err(fail)?;
+        let existing = version_store::get(card_id, revision).map_err(fail)?;
+        if let Some(v) = &existing {
             if ["ready", "current", "history"].contains(&v.state.as_str()) {
                 return Ok(serde_json::json!({"version_id":revision}));
             }
+            if !["failed", "downloading"].contains(&v.state.as_str()) {
+                return Err(fail("此版本正在清理，请先完成删除后重试。"));
+            }
         }
-        let space = self.check_can_download(card.summary.size_bytes);
-        if !space.ok {
-            return Err(fail(space.reason));
-        }
+        // Exclude only this candidate's old reservation, retaining its actual
+        // files. Refuse unreadable retained trees before creating a new one.
+        let retained = if self.settings.storage_quota_gb.is_some() {
+            version_store::retained_bytes_without_reservation(card_id, revision).map_err(fail)?
+        } else {
+            0
+        };
         let safe = config::safe_path_component(card_id).map_err(fail)?;
         // Full revision IDs are validated before any path construction.
         if revision.len() != 64 || !revision.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(fail("无效版本标识"));
         }
-        let models_root = owned_directory(
-            &self.settings.models_path(),
-            &[".versions", &safe, revision],
-        )?;
         let storage_id = format!("{safe}--{}", &revision[..32]);
+        let marker = serde_json::json!({"card_id":card_id,"version_id":revision}).to_string();
+        let (models_root, required, quota_growth) = if let Some(v) = &existing {
+            let root = PathBuf::from(
+                v.models_root
+                    .as_deref()
+                    .ok_or_else(|| fail("失败版本缺少权重目录记录"))?,
+            );
+            let expected = serde_json::json!({"card_id":card_id,"version_id":revision}).to_string();
+            if !v.managed
+                || v.runtime_card_id != storage_id
+                || v.resource_dir.as_deref() != v.models_root.as_deref()
+                || !root.ends_with(Path::new(".versions").join(&safe).join(revision))
+                || !existing_owned_directory(&root)?
+                || !valid_resource_marker(&root, &expected, false)?
+            {
+                return Err(fail("失败版本目录归属不符，已保留原记录和资源。"));
+            }
+            let (name, hash) = files.iter().next().ok_or_else(|| fail("缺少权重文件名"))?;
+            let (allocated, logical) = resumable_bytes(&root, name, hash)?;
+            // retained_bytes includes this candidate's logical bytes already.
+            // Unknown files remain charged and grant no download-space credit.
+            (
+                root,
+                card.summary.size_bytes.saturating_sub(allocated),
+                card.summary.size_bytes.saturating_sub(logical),
+            )
+        } else {
+            // Preserve the normal download path's ability to create a newly
+            // configured target root before owned_directory canonicalizes it.
+            let initial_space = self.check_can_download_increment_with_retained(
+                card.summary.size_bytes,
+                card.summary.size_bytes,
+                &self.settings.models_path(),
+                retained,
+            );
+            if !initial_space.ok {
+                return Err(fail(initial_space.reason));
+            }
+            (
+                owned_directory(
+                    &self.settings.models_path(),
+                    &[".versions", &safe, revision],
+                )?,
+                card.summary.size_bytes,
+                card.summary.size_bytes,
+            )
+        };
+        let actual = version_store::quota_dir_size_bytes(&models_root).map_err(fail)?;
+        let marker_bytes = if models_root.join(".pinvou-version.json").exists() {
+            0
+        } else {
+            marker.len() as u64
+        };
+        let planned_bytes = actual
+            .saturating_add(quota_growth)
+            .saturating_add(marker_bytes);
+        i64::try_from(planned_bytes).map_err(|e| fail(e.to_string()))?;
+        let additional = if existing.is_some() {
+            quota_growth.saturating_add(marker_bytes)
+        } else {
+            planned_bytes
+        };
+        let space = self.check_can_download_increment_with_retained(
+            required,
+            additional,
+            &models_root,
+            retained,
+        );
+        if !space.ok {
+            return Err(fail(space.reason));
+        }
         let cards = config::data_dir().join("cards");
         fs::create_dir_all(&cards).map_err(|e| fail(e.to_string()))?;
         owned_directory(&cards, &[&storage_id])?;
@@ -516,7 +733,6 @@ impl ModelManager {
             &config::data_dir().join("cards").join(&storage_id),
             Some(&models_root),
         )?;
-        let marker = serde_json::json!({"card_id":card_id,"version_id":revision}).to_string();
         let marker_path = models_root.join(".pinvou-version.json");
         match fs::OpenOptions::new()
             .write(true)
@@ -551,11 +767,19 @@ impl ModelManager {
             runtime_card_id: storage_id.clone(),
             resource_dir: Some(models_root.to_string_lossy().into_owned()),
             managed: true,
-            created_at: now(),
+            created_at: existing
+                .as_ref()
+                .map(|v| v.created_at.clone())
+                .unwrap_or_else(now),
             error: None,
+            planned_bytes,
         };
         version_store::put(&version).map_err(fail)?;
+        drop(reservation);
         let result = (|| {
+            if control.cancelled() {
+                return Err(fail("已取消"));
+            }
             on_progress("下载并校验新版卡片；当前部署与旧版权重保持可用。");
             let source = ScriptsSource::Local {
                 blobs: pkg.scripts.clone(),
@@ -628,11 +852,13 @@ impl ModelManager {
             rec.active_version_id = Some(revision.into());
             version.record = Some(rec);
             version.state = "ready".into();
+            version.planned_bytes = 0;
             version.error = None;
             Ok(())
         })();
         if let Err(error) = result {
             version.state = "failed".into();
+            version.planned_bytes = 0;
             version.error = Some(error.to_string());
             version_store::put(&version).map_err(fail)?;
             return Err(error);
@@ -649,7 +875,12 @@ impl ModelManager {
         on_progress: &mut ProgressFn<'_>,
         control: script_runner::RunControl,
     ) -> Result<serde_json::Value, ModelManagerError> {
-        let _resources = version_store::resource_operation_lock(true).map_err(fail)?;
+        let _resources = version_store::wait_resource_operation_lock(
+            true,
+            || control.cancelled(),
+            || on_progress("等待其他模型资源操作完成，可取消…"),
+        )
+        .map_err(fail)?;
         let current = self.get_record(card_id)?;
         ensure_not_deleting(&current)?;
         if current.running {
@@ -671,9 +902,25 @@ impl ModelManager {
         if !["ready", "history"].contains(&target.state.as_str()) {
             return Err(fail("目标版本尚未验证完成"));
         }
+        let managed_root = if target.managed {
+            Some(managed_version_root(&target, card_id, id)?)
+        } else {
+            None
+        };
         if target.state == "ready" {
             // A new upgrade promises a usable rollback. A history target is
             // also a recovery route and remains usable if the current file broke.
+            if managed {
+                let active_id = version_store::active_id(&current);
+                let active = version_store::get(card_id, &active_id)
+                    .map_err(fail)?
+                    .ok_or_else(|| fail("当前托管版本缺少归属记录，未切换部署。"))?;
+                if managed_version_root(&active, card_id, &active_id)? != resource
+                    || current.runtime_card_id.as_deref() != Some(active.runtime_card_id.as_str())
+                {
+                    return Err(fail("当前版本目录归属不符，不能保证回退；未切换部署。"));
+                }
+            }
             on_progress("校验当前版本权重，确认升级后仍可回退。");
             let (name, hash) = single_weight(&current)?;
             let old_file = find_weight(&resource, &name).map_err(|_| {
@@ -699,7 +946,8 @@ impl ModelManager {
             }
         }
         let (name, hash) = single_weight(rec)?;
-        let root = legacy_resource_dir(rec, &self.settings.models_path())
+        let root = managed_root
+            .or_else(|| legacy_resource_dir(rec, &self.settings.models_path()))
             .ok_or_else(|| fail("无法确认目标权重目录"))?;
         ensure_unused(&runtime_path(rec)?, Some(&root))?;
         on_progress("校验目标版本权重；当前卡片记录保持不变。");
@@ -745,6 +993,7 @@ impl ModelManager {
             created_at: current.downloaded_at.clone(),
             record: Some(current.clone()),
             error: None,
+            planned_bytes: 0,
         };
         old.models_root = Some(
             current
@@ -767,7 +1016,12 @@ impl ModelManager {
         on_progress: &mut ProgressFn<'_>,
         control: script_runner::RunControl,
     ) -> Result<serde_json::Value, ModelManagerError> {
-        let _resources = version_store::resource_operation_lock(true).map_err(fail)?;
+        let _resources = version_store::wait_resource_operation_lock(
+            true,
+            || control.cancelled(),
+            || on_progress("等待其他模型资源操作完成，可取消…"),
+        )
+        .map_err(fail)?;
         let current = self.get_record(card_id)?;
         if version_store::active_id(&current) == id {
             return Err(fail("当前版本不能从历史版本中删除。"));
@@ -819,7 +1073,7 @@ impl ModelManager {
                 "此版本的权重或运行目录仍被其他版本引用，未删除任何资源。",
             ));
         }
-        if runtime.exists()
+        if resource_presence(&runtime)?
             && !runtime
                 .symlink_metadata()
                 .map_err(|e| fail(e.to_string()))?
@@ -830,7 +1084,8 @@ impl ModelManager {
         let mut freed = 0u64;
         let mut legacy_file = None;
         let mut remaining = Vec::new();
-        if resource.exists() {
+        let resource_present = resource_presence(&resource)?;
+        if resource_present {
             if !resource
                 .symlink_metadata()
                 .map_err(|e| fail(e.to_string()))?
@@ -848,13 +1103,10 @@ impl ModelManager {
                 freed = allocated_exclusive(&resource)?;
             } else if let Some(rec) = version.record.as_ref() {
                 let (name, hash) = single_weight(rec)?;
-                // Match the same bounded, unique nested layout accepted during
-                // activation. Missing weights are only a successful retry after
-                // the durable deletion commit point, never a cleared history.
+                // A complete bounded search also proves that externally removed
+                // weights are absent. Ambiguous, unreadable or linked files still
+                // fail before any record or unrelated resource can be removed.
                 let file = locate_weight(&resource, &name)?;
-                if file.is_none() && version.state != "deleting" {
-                    return Err(fail("无法确认旧版权重位置，版本记录已保留。"));
-                }
                 if let Some(file) = file {
                     let meta = file.symlink_metadata().map_err(|e| fail(e.to_string()))?;
                     if !meta.is_file() {
@@ -880,9 +1132,6 @@ impl ModelManager {
                 return Err(fail("旧版缺少文件清单，未删除资源。"));
             }
         }
-        if !version.managed && !resource.exists() && version.state != "deleting" {
-            return Err(fail("无法确认旧版权重目录，版本记录已保留。"));
-        }
         if control.cancelled() {
             return Err(fail("已取消"));
         }
@@ -890,13 +1139,13 @@ impl ModelManager {
         // a rollbackable history item whose weights might already be gone.
         version.state = "deleting".into();
         version_store::put(&version).map_err(fail)?;
-        if version.managed && resource.exists() {
+        if version.managed && resource_presence(&resource)? {
             remove_managed_resource(&resource)?;
         }
         if let Some(file) = legacy_file {
             fs::remove_file(file).map_err(|e| fail(e.to_string()))?;
         }
-        if runtime.exists() {
+        if resource_presence(&runtime)? {
             fs::remove_dir_all(&runtime).map_err(|e| fail(e.to_string()))?;
         }
         version_store::remove(card_id, id).map_err(fail)?;

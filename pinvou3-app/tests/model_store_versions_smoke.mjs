@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
 import puppeteer from 'puppeteer-core';
 import { createServer } from 'vite';
+import { matchesViteModule } from './helpers/vite-fixture-module.mjs';
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const chrome = process.env.CHROME || [
@@ -24,7 +25,7 @@ try {
       enforce: 'pre',
       transform(source, id) {
         // Expose the real form only inside this isolated browser fixture.
-        if (id.split('?')[0] === path.join(appRoot, 'src/features/settings/SettingsView.jsx')) {
+        if (matchesViteModule(id, path.join(appRoot, 'src/features/settings/SettingsView.jsx'))) {
           return `${source}\nexport { ModelFormModal as __TestModelForm };\n`;
         }
       },
@@ -71,17 +72,18 @@ try {
       record, copy: dictZh.uiModelStore, theme: 'light', busy,
       onClose() {}, onAction() {},
     }));
-    window.answerVersions = (state) => window.pendingVersions.shift()([{
+    window.answerVersions = ({ state, error = null }) => window.pendingVersions.shift()([{
       version_id: 'test-version', filename: 'test.weights', state,
       can_switch: state === 'ready', can_retry: state === 'failed',
-      can_delete: state !== 'downloading', size_bytes: 128,
+      can_delete: state !== 'downloading', size_bytes: 128, error,
     }]);
+    window.interruptedCopy = dictZh.uiModelStore.versionInterrupted;
     window.renderVersions(true);
   });
   const waitRequest = () => page.waitForFunction(() => window.pendingVersions.length > 0);
-  const answer = async (state) => {
+  const answer = async (state, error = null) => {
     await waitRequest();
-    await page.evaluate((value) => window.answerVersions(value), state);
+    await page.evaluate((value) => window.answerVersions(value), { state, error });
   };
   const expectActions = async (count) => {
     await page.waitForFunction((expected) => {
@@ -91,12 +93,16 @@ try {
   };
   // The dialog is opened while a download is still running. Success and failure
   // must expose their actions in the same mounted dialog, including cancellation.
-  for (const state of ['ready', 'failed', 'failed']) {
+  for (const [state, error] of [['ready', null], ['failed', 'test download failure'], ['failed', 'version_download_interrupted']]) {
     await answer('downloading');
     await page.waitForSelector('[data-testid="model-version-row"]');
     await page.evaluate(() => window.renderVersions(false));
-    await answer(state);
+    await answer(state, error);
     await expectActions(2);
+    if (error === 'version_download_interrupted') {
+      assert.equal(await page.$eval('[data-testid="model-version-row"] [role="alert"]', (element) => element.textContent),
+        await page.evaluate(() => window.interruptedCopy));
+    }
     await page.evaluate(() => window.renderVersions(true));
   }
   // A response from the previous busy state cannot overwrite the newer result.
@@ -111,6 +117,125 @@ try {
     version_id: 'test-version', state: 'downloading', can_switch: false, can_delete: false,
   }]));
   await expectActions(2);
+  await page.reload();
+  await page.evaluate(async () => {
+    /* eslint-disable import-x/no-unresolved, n/no-missing-import */
+    const reactModule = await import('/@id/react');
+    const { createElement } = reactModule.default || reactModule;
+    const client = await import('/@id/react-dom/client');
+    const { CardUpdateDialog } = await import('/features/model-store/CardUpdateDialog.jsx');
+    const { dictZh } = await import('/shared/i18n/zh.js');
+    /* eslint-enable import-x/no-unresolved, n/no-missing-import */
+    window.__TAURI__ = { core: { invoke: async (command) => {
+      if (command !== 'model_store_check_card_update') throw Error(`Unexpected command: ${command}`);
+      return { changed: true, compatibility: { kind: 'unverified', reason: 'future_unknown_reason', can_update: false, can_stage: false } };
+    } } };
+    window.unknownCompatibilityCopy = dictZh.uiModelStore.compatibilityReasonUnknown;
+    const createRoot = client.createRoot || client.default?.createRoot;
+    createRoot(document.getElementById('root')).render(createElement(CardUpdateDialog, {
+      record: { card_id: 'isolated-card', card_name: 'Test' }, copy: dictZh.uiModelStore,
+      theme: 'light', busy: false, onClose() {}, onUpdate() {}, onStage() {},
+    }));
+  });
+  await page.waitForSelector('[data-testid="card-update-compatibility"]');
+  assert.ok(await page.evaluate(() => document.querySelector('[data-testid="card-update-compatibility"]').textContent.includes(window.unknownCompatibilityCopy)));
+  await page.reload();
+  await page.evaluate(async () => {
+    /* eslint-disable import-x/no-unresolved, n/no-missing-import */
+    const reactModule = await import('/@id/react');
+    const { createElement } = reactModule.default || reactModule;
+    const client = await import('/@id/react-dom/client');
+    const { ModelStoreView } = await import('/features/model-store/ModelStoreView.jsx');
+    const { dictZh } = await import('/shared/i18n/zh.js');
+    /* eslint-enable import-x/no-unresolved, n/no-missing-import */
+    const record = { card_id: 'isolated-card', card_name: 'Test', model_name: 'test-wire',
+      status: 'deployed', running: false, size_bytes: 128, deploy_topology: 'single' };
+    window.cleanupFinished = false;
+    window.uninstallFinished = false;
+    window.__TAURI__ = { core: { invoke: async (command, payload) => {
+      if (command === 'model_store_availability') return { available: true };
+      if (command === 'model_store_cards' || command === 'model_store_active_runs') return [];
+      if (command === 'model_store_library') return { models: window.uninstallFinished ? [] : [record], corrected: [] };
+      if (command === 'model_store_test_store_state') return { enabled: false };
+      if (command === 'model_store_take_startup_cleanup') return null;
+      if (command === 'model_store_start_lifecycle' && payload.action === 'uninstall') return { run_id: 'isolated-uninstall' };
+      if (command === 'model_store_run_log') {
+        window.uninstallFinished = true;
+        return { done: true, ok: true, lines: [], next: 0, result: { link_sync_error: 'test sync failure', purged_weights: false } };
+      }
+      throw Error(`Unexpected command: ${command}`);
+    } } };
+    window.TauriBridge = { models: { deleteModelIfStoreLink: async (id, cardId) => {
+      if (id !== 'isolated-linked-row' || cardId !== record.card_id) throw Error('cleanup ownership mismatch');
+      window.cleanupFinished = true;
+      return true;
+    } } };
+    window.syncFailureCopy = dictZh.uiModelStore.linkSyncFailed('test sync failure');
+    const createRoot = client.createRoot || client.default?.createRoot;
+    createRoot(document.getElementById('root')).render(createElement(ModelStoreView, {
+      theme: 'light', t: dictZh,
+      bs: { savedModels: [{ id: 'isolated-linked-row', model_store_card_id: record.card_id, base_url: 'http://127.0.0.1:8911/v1' }] },
+    }));
+  });
+  await page.waitForSelector('[data-testid="model-store-uninstall"]');
+  await page.click('[data-testid="model-store-uninstall"]');
+  await page.waitForSelector('[data-testid="model-store-uninstall-keep"]');
+  await page.click('[data-testid="model-store-uninstall-keep"]');
+  await page.waitForFunction(() => window.cleanupFinished);
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.equal(await page.$eval('[data-testid="model-store-toast"]', (element) => element.textContent),
+    await page.evaluate(() => window.syncFailureCopy));
+  await page.reload();
+  await page.evaluate(async () => {
+    /* eslint-disable import-x/no-unresolved, n/no-missing-import */
+    const reactModule = await import('/@id/react');
+    const { createElement } = reactModule.default || reactModule;
+    const client = await import('/@id/react-dom/client');
+    const { ModelDetailDialog } = await import('/features/model-store/ModelDetailDialog.jsx');
+    const { dictZh } = await import('/shared/i18n/zh.js');
+    /* eslint-enable import-x/no-unresolved, n/no-missing-import */
+    const createRoot = client.createRoot || client.default?.createRoot;
+    const root = createRoot(document.getElementById('root'));
+    const record = { card_id: 'isolated-card', card_name: 'Test', model_name: 'old-wire',
+      endpoint_model: 'old-wire', endpoint_url: 'http://127.0.0.1:8911/v1',
+      running: true, status: 'deployed' };
+    window.savedDetailPayloads = [];
+    window.detailActiveCalls = 0;
+    window.detailToast = null;
+    window.staleLinkError = 'model store endpoint changed or is unavailable; refresh the card and retry';
+    window.staleLinkCopy = dictZh.uiModelStore.linkEndpointChanged;
+    window.__TAURI__ = { core: { invoke: async (command) => {
+      if (command === 'model_store_model_detail') return { record };
+      if (command === 'model_store_api_keys') return [];
+      throw Error(`Unexpected command: ${command}`);
+    } } };
+    window.TauriBridge = { models: {
+      saveModel: async (model) => {
+        window.savedDetailPayloads.push(model);
+        throw Error(window.staleLinkError);
+      },
+      setActiveModel: async () => { window.detailActiveCalls += 1; },
+    } };
+    window.renderDetail = (model, baseUrl) => root.render(createElement(ModelDetailDialog, {
+      cardId: record.card_id, copy: dictZh.uiModelStore, theme: 'light', onClose() {},
+      onToast: (message) => { window.detailToast = message; },
+      savedModels: [{ id: 'existing-store-link', model_store_card_id: record.card_id,
+        model, base_url: baseUrl, provider_kind: 'custom' }],
+    }));
+    window.renderDetail('old-wire', record.endpoint_url);
+  });
+  await page.waitForSelector('[data-testid="model-store-use-in-pinvou"]');
+  // Background route synchronization updates props while the same detail dialog
+  // still displays the reviewed old endpoint. Reusing the id is an explicit link.
+  await page.evaluate(() => window.renderDetail('new-wire', 'http://127.0.0.1:8912/v1'));
+  await page.click('[data-testid="model-store-use-in-pinvou"]');
+  await page.waitForFunction(() => window.detailToast === window.staleLinkCopy);
+  const staleDetailLink = await page.evaluate(() => window.savedDetailPayloads[0]);
+  assert.equal(staleDetailLink.id, 'existing-store-link');
+  assert.equal(staleDetailLink.model, 'old-wire');
+  assert.equal(staleDetailLink.base_url, 'http://127.0.0.1:8911/v1');
+  assert.equal(staleDetailLink.model_store_link_requested, true);
+  assert.equal(await page.evaluate(() => window.detailActiveCalls), 0);
   await page.reload();
   await page.evaluate(async () => {
     // The real settings form stays mounted while its model props refresh, just
@@ -183,6 +308,8 @@ try {
   assert.deepEqual(errors, []);
   console.log('PASS: versions refresh after success/failure/cancellation and ignore stale responses');
   console.log('PASS: existing settings forms preserve untouched routes after migration; edited routes and new drafts opt out');
+  console.log('PASS: unknown compatibility reasons remain visible; uninstall cleanup preserves sync failures');
+  console.log('PASS: stale details retain explicit re-link intent and surface rejection without changing the active model');
 } finally {
   await browser?.close();
   await vite?.close();

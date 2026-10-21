@@ -732,6 +732,116 @@ fn explicit_purge_after_history_cleanup_removes_the_active_isolated_storage() {
 }
 
 #[test]
+fn inaccessible_current_storage_or_runtime_keeps_records_and_can_be_retried() {
+    use std::os::unix::fs::PermissionsExt;
+    assert_ne!(
+        fs::metadata("/proc/self").unwrap().uid(),
+        0,
+        "permission-denial regression must run as an unprivileged user"
+    );
+    for lock_runtime in [false, true] {
+        let (_temp, mgr, current, card, pkg, id) = fixture();
+        let key = db::add_api_key(&current.card_id, Some("permission test")).unwrap();
+        mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+            .unwrap();
+        mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+            .unwrap();
+        mgr.delete_version(
+            &current.card_id,
+            &version_store::active_id(&current),
+            &mut |_| {},
+            Default::default(),
+        )
+        .unwrap();
+        let active = mgr.get_record(&current.card_id).unwrap();
+        let root = PathBuf::from(active.models_root.as_ref().unwrap());
+        let runtime = runtime_path(&active).unwrap();
+        let locked = if lock_runtime {
+            runtime.parent().unwrap()
+        } else {
+            root.parent().unwrap()
+        };
+        let permissions = fs::metadata(locked).unwrap().permissions();
+        fs::set_permissions(locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = mgr.uninstall(&current.card_id, true, &mut |_| {}, Default::default());
+        fs::set_permissions(locked, permissions).unwrap();
+        assert!(
+            result.is_err(),
+            "inaccessible path must not authorize record-only removal"
+        );
+        assert_eq!(
+            fs::read(root.join("new/new.tachyon")).unwrap(),
+            b"new-weights"
+        );
+        assert!(runtime.exists());
+        assert_eq!(
+            serde_json::to_value(mgr.get_record(&current.card_id).unwrap()).unwrap(),
+            serde_json::to_value(&active).unwrap()
+        );
+        assert_eq!(
+            version_store::get(&current.card_id, &id)
+                .unwrap()
+                .unwrap()
+                .state,
+            "current"
+        );
+        assert!(db::find_api_key(&key.key_value).unwrap().is_some());
+        mgr.uninstall(&current.card_id, true, &mut |_| {}, Default::default())
+            .unwrap();
+        assert!(!root.exists());
+        assert!(!runtime.exists());
+        assert!(db::get_store_model(&current.card_id).unwrap().is_none());
+        assert!(
+            version_store::list(Some(&current.card_id))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(db::find_api_key(&key.key_value).unwrap().is_none());
+    }
+}
+
+#[test]
+fn inaccessible_history_runtime_does_not_delete_its_weights_or_record() {
+    use std::os::unix::fs::PermissionsExt;
+    assert_ne!(
+        fs::metadata("/proc/self").unwrap().uid(),
+        0,
+        "permission-denial regression must run as an unprivileged user"
+    );
+    let (_temp, mgr, current, card, pkg, id) = fixture();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    let version = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    let root = PathBuf::from(version.models_root.as_ref().unwrap());
+    let runtime = config::data_dir()
+        .join("cards")
+        .join(&version.runtime_card_id);
+    let parent = runtime.parent().unwrap();
+    let permissions = fs::metadata(parent).unwrap().permissions();
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o000)).unwrap();
+    let result = mgr.delete_version(&current.card_id, &id, &mut |_| {}, Default::default());
+    fs::set_permissions(parent, permissions).unwrap();
+    assert!(result.is_err());
+    assert_eq!(
+        fs::read(root.join("new/new.tachyon")).unwrap(),
+        b"new-weights"
+    );
+    assert_eq!(
+        version_store::get(&current.card_id, &id)
+            .unwrap()
+            .unwrap()
+            .state,
+        "ready"
+    );
+    assert!(runtime.exists());
+    mgr.delete_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    assert!(!root.exists());
+    assert!(!runtime.exists());
+    assert!(version_store::get(&current.card_id, &id).unwrap().is_none());
+}
+
+#[test]
 fn interrupted_current_purge_can_retry_without_a_marker_after_the_commit_point() {
     use std::os::unix::fs::PermissionsExt;
     let (_temp, mgr, current, card, pkg, id) = fixture();
@@ -1145,39 +1255,45 @@ fn shared_resource_locks_allow_readers_and_exclude_reference_deletion() {
     let first = version_store::resource_operation_lock(false).unwrap();
     let second = version_store::resource_operation_lock(false).unwrap();
     assert!(version_store::resource_operation_lock(true).is_err());
+    let cancelled = || script_runner::RunControl {
+        cancel: Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            true,
+        ))),
+        ..Default::default()
+    };
     assert!(
-        mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        mgr.switch_version(&current.card_id, &id, &mut |_| {}, cancelled())
             .unwrap_err()
             .to_string()
-            .contains("资源操作")
+            .contains("已取消")
     );
     assert!(
-        mgr.delete_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        mgr.delete_version(&current.card_id, &id, &mut |_| {}, cancelled())
             .unwrap_err()
             .to_string()
-            .contains("资源操作")
+            .contains("已取消")
     );
     assert!(
-        mgr.uninstall(&current.card_id, true, &mut |_| {}, Default::default())
+        mgr.uninstall(&current.card_id, true, &mut |_| {}, cancelled())
             .unwrap_err()
             .to_string()
-            .contains("资源操作")
+            .contains("已取消")
     );
     drop(first);
     drop(second);
     let writer = version_store::resource_operation_lock(true).unwrap();
     assert!(version_store::resource_operation_lock(false).is_err());
     assert!(
-        mgr.deploy(&current.card_id, None, &mut |_| {}, Default::default())
+        mgr.deploy(&current.card_id, None, &mut |_| {}, cancelled())
             .unwrap_err()
             .to_string()
-            .contains("资源操作")
+            .contains("已取消")
     );
     assert!(
-        mgr.enable(&current.card_id, &mut |_| {}, Default::default())
+        mgr.enable(&current.card_id, &mut |_| {}, cancelled())
             .unwrap_err()
             .to_string()
-            .contains("资源操作")
+            .contains("已取消")
     );
     drop(writer);
     mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
@@ -1262,7 +1378,7 @@ fn legacy_history_cleanup_finds_nested_weights_and_preserves_unrelated_files() {
 }
 
 #[test]
-fn legacy_missing_weight_retains_history_until_cleanup_has_committed() {
+fn legacy_missing_weight_can_clear_history_without_manual_database_repair() {
     let (_temp, mgr, current, card, pkg, id) = fixture();
     mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
         .unwrap();
@@ -1270,18 +1386,13 @@ fn legacy_missing_weight_retains_history_until_cleanup_has_committed() {
         .unwrap();
     let old_id = version_store::active_id(&current);
     fs::remove_file(mgr.settings.models_path().join("legacy/old.tachyon")).unwrap();
-    assert!(
-        mgr.delete_version(&current.card_id, &old_id, &mut |_| {}, Default::default())
-            .is_err()
-    );
-    let mut old = version_store::get(&current.card_id, &old_id)
-        .unwrap()
+    let result = mgr
+        .delete_version(&current.card_id, &old_id, &mut |_| {}, Default::default())
         .unwrap();
-    assert_eq!(old.state, "history");
-    assert!(runtime_path(old.record.as_ref().unwrap()).unwrap().exists());
-    old.state = "deleting".into();
-    version_store::put(&old).unwrap();
-    mgr.delete_version(&current.card_id, &old_id, &mut |_| {}, Default::default())
+    assert_eq!(result["freed_bytes"], 0);
+    assert!(!version_store::has_history(&current.card_id).unwrap());
+    // This public recovery route must unblock normal uninstall as well.
+    mgr.uninstall(&current.card_id, false, &mut |_| {}, Default::default())
         .unwrap();
     assert!(
         version_store::get(&current.card_id, &old_id)
@@ -1315,15 +1426,1016 @@ fn legacy_cleanup_retains_history_for_ambiguous_nested_weights() {
     assert!(root.join("old.tachyon").exists());
     assert!(root.join("nested/old.tachyon").exists());
     fs::remove_dir_all(&root).unwrap();
+    let result = mgr
+        .delete_version(&current.card_id, &old_id, &mut |_| {}, Default::default())
+        .unwrap();
+    assert_eq!(result["freed_bytes"], 0);
+    assert!(
+        version_store::get(&current.card_id, &old_id)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn failed_candidate_resumes_at_quota_boundary_without_counting_partial_weight_twice() {
+    let (_temp, mut mgr, current, card, mut pkg, id) = fixture();
+    pkg.scripts.insert("download_model".into(), blob(
+        "#!/bin/bash\nset -e\nmkdir -p \"$LMM_MODELS_DIR/new\"\nweight=\"$LMM_MODELS_DIR/new/new.tachyon\"\nif [ -f \"$weight\" ]; then printf eights >> \"$weight\"; else printf new-w > \"$weight\"; echo '完整性校验失败' >&2; exit 1; fi\n"
+    ));
+    assert!(
+        mgr.stage_verified(
+            &current,
+            &card,
+            &id,
+            pkg.clone(),
+            &mut |_| {},
+            Default::default()
+        )
+        .is_err()
+    );
+    let failed = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    assert_eq!(failed.state, "failed");
+    let root = Path::new(failed.models_root.as_deref().unwrap());
+    let (allocated, logical) = resumable_bytes(
+        root,
+        "new.tachyon",
+        &script_runner::sha256_hex("new-weights"),
+    )
+    .unwrap();
+    assert_eq!((allocated, logical), (5, 5));
+    let used = db::total_managed_bytes().unwrap() as u64 + version_store::retained_bytes().unwrap();
+    mgr.settings.storage_quota_gb = Some((used + 6) as f64 / 1073741824.0);
+    assert!(
+        !mgr.check_can_download(11).ok,
+        "full-copy accounting reproduces the rejection"
+    );
+    let check = mgr.check_can_download_increment(6, 6, root);
+    assert!(check.ok, "{}", check.reason);
+    assert_eq!(check.required_bytes, 6);
+    // Simulate a crash before interruption recovery. Its old larger plan must
+    // be replaced, so a retry at the current quota still fits exactly.
+    let mut interrupted = failed.clone();
+    interrupted.state = "downloading".into();
+    interrupted.planned_bytes = used + 1024;
+    version_store::put(&interrupted).unwrap();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    let ready = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    assert_eq!(ready.state, "ready");
+    assert_eq!(ready.planned_bytes, 0);
+    assert_eq!(
+        fs::read(root.join("new/new.tachyon")).unwrap(),
+        b"new-weights"
+    );
+}
+
+#[test]
+fn parallel_stages_reserve_quota_before_scripts_and_release_after_failure() {
+    use std::sync::mpsc;
+    let (_temp, mut mgr, current, mut card, pkg, _) = fixture();
+    // Leave enough quota for either candidate, but not both. A stopped script
+    // has not written any weights yet, so only its reservation can exclude B.
+    card.summary.size_bytes = 64 * 1024;
+    let id = card_update::revision(&card_update::remote_manifest(&card));
+    let mut other = current.clone();
+    other.card_id = "parallel-version".into();
+    other.model_name = "parallel-model".into();
+    db::add_store_model(db::AddStoreModelParams {
+        card_id: &other.card_id,
+        model_name: &other.model_name,
+        card_name: &other.card_name,
+        org: other.org.as_deref(),
+        description: other.description.as_deref(),
+        engine_name: &other.engine_name,
+        engine_version: other.engine_version.as_deref(),
+        size_bytes: other.size_bytes,
+        quantization: other.quantization.as_deref(),
+        source_repo_id: other.source_repo_id.as_deref(),
+        source_filename: other.source_filename.as_deref(),
+        scripts: &Default::default(),
+        status: &other.status,
+        profiles: &other.profiles,
+        deploy_topology: other.deploy_topology,
+        card_source: &other.card_source,
+    })
+    .unwrap();
+    let mut other_card = card.clone();
+    other_card.summary.id = other.card_id.clone();
+    let other_id = card_update::revision(&card_update::remote_manifest(&other_card));
+    mgr.settings.storage_quota_gb = Some(96.0 * 1024.0 / 1073741824.0);
+    let settings = mgr.settings.clone();
+    let first = current.clone();
+    let first_id = id.clone();
+    let mut failed_pkg = pkg.clone();
+    failed_pkg.scripts.insert(
+        "download_model".into(),
+        blob("#!/bin/bash\necho '完整性校验失败' >&2\nexit 1\n"),
+    );
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let first_thread = std::thread::spawn(move || {
+        let manager = ModelManager::new(Some(settings), None);
+        manager.stage_verified(
+            &first,
+            &card,
+            &first_id,
+            failed_pkg,
+            &mut move |line| {
+                if line.starts_with("下载并校验新版卡片") {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                }
+            },
+            Default::default(),
+        )
+    });
+    entered_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    let during = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    let actual = super::super::super::disk::dir_size_bytes(Path::new(
+        during.models_root.as_deref().unwrap(),
+    ));
+    let retained = version_store::retained_bytes().unwrap();
+    let second = mgr.stage_verified(
+        &other,
+        &other_card,
+        &other_id,
+        pkg.clone(),
+        &mut |_| {},
+        Default::default(),
+    );
+    release_tx.send(()).unwrap();
+    let first_result = first_thread.join().unwrap();
+    assert_eq!(during.state, "downloading");
+    assert!(during.planned_bytes >= 64 * 1024);
+    assert!(actual < during.planned_bytes);
+    assert_eq!(retained, during.planned_bytes);
+    assert!(second.unwrap_err().to_string().contains("配额"));
+    assert!(
+        version_store::get(&other.card_id, &other_id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(first_result.is_err());
+    let failed = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    assert_eq!(failed.state, "failed");
+    assert_eq!(failed.planned_bytes, 0);
+    assert_eq!(version_store::retained_bytes().unwrap(), actual);
+    mgr.stage_verified(
+        &other,
+        &other_card,
+        &other_id,
+        pkg,
+        &mut |_| {},
+        Default::default(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn interrupted_download_releases_reservation_but_keeps_actual_files_charged() {
+    let (_temp, mgr, current, card, mut pkg, id) = fixture();
+    pkg.scripts.insert(
+        "download_model".into(),
+        blob("#!/bin/bash\nprintf part > \"$LMM_MODELS_DIR/new.tachyon\"\necho '完整性校验失败' >&2\nexit 1\n"),
+    );
+    assert!(
+        mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+            .is_err()
+    );
+    let mut interrupted = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    let root = Path::new(interrupted.models_root.as_deref().unwrap());
+    let actual = super::super::super::disk::dir_size_bytes(root);
+    assert_eq!(interrupted.planned_bytes, 0);
+    assert_eq!(version_store::retained_bytes().unwrap(), actual);
+    interrupted.state = "downloading".into();
+    interrupted.planned_bytes = actual + 1000;
+    version_store::put(&interrupted).unwrap();
+    assert_eq!(version_store::retained_bytes().unwrap(), actual + 1000);
+    version_store::recover_interrupted(&current.card_id).unwrap();
+    let recovered = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    assert_eq!(recovered.state, "failed");
+    assert_eq!(recovered.planned_bytes, 0);
+    assert_eq!(version_store::retained_bytes().unwrap(), actual);
+    assert_eq!(fs::read(root.join("new.tachyon")).unwrap(), b"part");
+}
+
+#[test]
+fn cancelling_quota_reservation_wait_never_registers_a_candidate() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let (_temp, mgr, current, card, pkg, id) = fixture();
+    let _lock = version_store::wait_quota_reservation_lock(|| false, || {}).unwrap();
+    let flag = Arc::new(AtomicBool::new(false));
+    let control = script_runner::RunControl {
+        cancel: Some(flag.clone()),
+        ..Default::default()
+    };
+    let result = mgr.stage_verified(
+        &current,
+        &card,
+        &id,
+        pkg,
+        &mut |line| {
+            if line.contains("登记存储配额") {
+                flag.store(true, Ordering::SeqCst);
+            }
+        },
+        control,
+    );
+    assert!(result.unwrap_err().to_string().contains("已取消"));
+    assert!(
+        version_store::list(Some(&current.card_id))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!mgr.settings.models_path().join(".versions").exists());
+}
+
+#[test]
+fn failed_candidate_keeps_registered_directory_after_default_storage_changes() {
+    let (temp, mgr, current, card, pkg, id) = fixture();
+    mgr.stage_verified(
+        &current,
+        &card,
+        &id,
+        pkg.clone(),
+        &mut |_| {},
+        Default::default(),
+    )
+    .unwrap();
+    mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    let active = db::get_store_model(&current.card_id).unwrap().unwrap();
+    let next_id = "a".repeat(64);
+    let mut failed_pkg = pkg.clone();
+    failed_pkg.scripts.insert("download_model".into(), blob("#!/bin/bash\nmkdir -p \"$LMM_MODELS_DIR/new\"\nprintf new-w > \"$LMM_MODELS_DIR/new/new.tachyon\"\necho '完整性校验失败' >&2\nexit 1\n"));
+    assert!(
+        mgr.stage_verified(
+            &active,
+            &card,
+            &next_id,
+            failed_pkg,
+            &mut |_| {},
+            Default::default()
+        )
+        .is_err()
+    );
+    let before = version_store::get(&current.card_id, &next_id)
+        .unwrap()
+        .unwrap();
+    let old_root = PathBuf::from(before.models_root.as_deref().unwrap());
+    let mut settings = mgr.settings.clone();
+    let new_default = temp.path().join("new-default");
+    fs::create_dir_all(&new_default).unwrap();
+    settings.models_dir = new_default.to_string_lossy().into_owned();
+    let relocated = ModelManager::new(Some(settings), None);
+    relocated
+        .stage_verified(
+            &active,
+            &card,
+            &next_id,
+            pkg,
+            &mut |_| {},
+            Default::default(),
+        )
+        .unwrap();
+    let after = version_store::get(&current.card_id, &next_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.models_root, before.models_root);
+    assert_eq!(after.resource_dir, before.resource_dir);
+    assert_eq!(after.runtime_card_id, before.runtime_card_id);
+    assert_eq!(after.created_at, before.created_at);
+    assert_eq!(
+        fs::read(old_root.join("new/new.tachyon")).unwrap(),
+        b"new-weights"
+    );
+    assert!(!new_default.join(".versions").exists());
+    relocated
+        .delete_version(&current.card_id, &next_id, &mut |_| {}, Default::default())
+        .unwrap();
+    assert!(
+        !old_root.exists(),
+        "the original partial directory remains tracked for cleanup"
+    );
+}
+
+#[test]
+fn retry_rechecks_permissions_of_both_managed_ancestors() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_temp, mgr, current, card, mut pkg, id) = fixture();
+    let successful_pkg = pkg.clone();
+    pkg.scripts.insert(
+        "download_model".into(),
+        blob("#!/bin/bash\nprintf partial > \"$LMM_MODELS_DIR/new.tachyon\"\necho '完整性校验失败' >&2\nexit 1\n"),
+    );
+    assert!(
+        mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+            .is_err()
+    );
+    let before = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    let root = PathBuf::from(before.models_root.as_deref().unwrap());
+    for ancestor in root.ancestors().skip(1).take(2) {
+        let permissions = fs::metadata(ancestor).unwrap().permissions();
+        fs::set_permissions(ancestor, fs::Permissions::from_mode(0o770)).unwrap();
+        let result = mgr.stage_verified(
+            &current,
+            &card,
+            &id,
+            successful_pkg.clone(),
+            &mut |_| {},
+            Default::default(),
+        );
+        fs::set_permissions(ancestor, permissions).unwrap();
+        assert!(result.unwrap_err().to_string().contains("归属"));
+        assert_eq!(
+            serde_json::to_value(version_store::get(&current.card_id, &id).unwrap().unwrap())
+                .unwrap(),
+            serde_json::to_value(&before).unwrap()
+        );
+        assert_eq!(fs::read(root.join("new.tachyon")).unwrap(), b"partial");
+    }
+    // Remove the deliberate partial at a different layout before the successful
+    // recipe creates its own file, so final verification remains unambiguous.
+    fs::remove_file(root.join("new.tachyon")).unwrap();
+    mgr.stage_verified(
+        &current,
+        &card,
+        &id,
+        successful_pkg,
+        &mut |_| {},
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        version_store::get(&current.card_id, &id)
+            .unwrap()
+            .unwrap()
+            .state,
+        "ready"
+    );
+}
+
+#[test]
+fn retry_rejects_replaced_marker_without_losing_registered_resources() {
+    let (_temp, mgr, current, card, mut pkg, id) = fixture();
+    pkg.scripts.insert(
+        "download_model".into(),
+        blob("#!/bin/bash\nprintf partial > \"$LMM_MODELS_DIR/new.tachyon\"\necho '完整性校验失败' >&2\nexit 1\n"),
+    );
+    assert!(
+        mgr.stage_verified(
+            &current,
+            &card,
+            &id,
+            pkg.clone(),
+            &mut |_| {},
+            Default::default()
+        )
+        .is_err()
+    );
+    let before = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    let root = Path::new(before.models_root.as_deref().unwrap());
+    fs::write(root.join(".pinvou-version.json"), b"foreign owner").unwrap();
+    assert!(
+        mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+            .unwrap_err()
+            .to_string()
+            .contains("归属")
+    );
+    let after = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    assert_eq!(after.models_root, before.models_root);
+    assert_eq!(after.state, "failed");
+    assert_eq!(fs::read(root.join("new.tachyon")).unwrap(), b"partial");
+}
+
+#[test]
+fn resume_credit_ignores_sparse_holes_links_unknown_files_and_duplicate_parts() {
+    use std::os::unix::fs::symlink;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    fs::write(root.join("unrelated"), vec![0; 100]).unwrap();
+    let sparse = fs::File::create(root.join("new.tachyon")).unwrap();
+    sparse.set_len(1024 * 1024).unwrap();
+    assert_eq!(
+        resumable_bytes(
+            root,
+            "new.tachyon",
+            &script_runner::sha256_hex("new-weights")
+        )
+        .unwrap(),
+        (0, 1024 * 1024)
+    );
+    fs::remove_file(root.join("new.tachyon")).unwrap();
+    symlink(root.join("unrelated"), root.join("new.tachyon")).unwrap();
+    assert_eq!(
+        resumable_bytes(
+            root,
+            "new.tachyon",
+            &script_runner::sha256_hex("new-weights")
+        )
+        .unwrap(),
+        (0, 0)
+    );
+    fs::remove_file(root.join("new.tachyon")).unwrap();
+    let cache = root.join(".cache/huggingface/download");
+    fs::create_dir_all(&cache).unwrap();
+    let hash = script_runner::sha256_hex("new-weights");
+    fs::write(
+        cache.join(format!("KBv97_iyz3IQ9bCSq3sTENHhlOw=.{hash}.incomplete")),
+        b"partial",
+    )
+    .unwrap();
+    fs::write(
+        cache.join(format!("another-prefix.{hash}.incomplete")),
+        vec![0; 100],
+    )
+    .unwrap();
+    fs::write(
+        cache.join(format!("unknown.{}.incomplete", "f".repeat(64))),
+        vec![0; 100],
+    )
+    .unwrap();
+    assert_eq!(
+        resumable_bytes(
+            root,
+            "new.tachyon",
+            &script_runner::sha256_hex("new-weights")
+        )
+        .unwrap(),
+        (7, 7)
+    );
+}
+
+#[test]
+fn missing_legacy_directory_link_is_not_treated_as_absent() {
+    use std::os::unix::fs::symlink;
+    let (_temp, mgr, current, card, pkg, id) = fixture();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    let old_id = version_store::active_id(&current);
+    let root = mgr.settings.models_path().join("legacy");
+    fs::remove_dir_all(&root).unwrap();
+    symlink(root.join("missing-target"), &root).unwrap();
     assert!(
         mgr.delete_version(&current.card_id, &old_id, &mut |_| {}, Default::default())
             .is_err()
     );
-    assert_eq!(
+    assert!(
         version_store::get(&current.card_id, &old_id)
             .unwrap()
-            .unwrap()
-            .state,
-        "history"
+            .is_some()
     );
+}
+
+#[test]
+fn legacy_absence_cannot_be_proven_through_a_linked_subdirectory() {
+    use std::os::unix::fs::symlink;
+    let (temp, mgr, current, card, pkg, id) = fixture();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    let old_id = version_store::active_id(&current);
+    let root = mgr.settings.models_path().join("legacy");
+    let external = temp.path().join("external-weight");
+    fs::create_dir(&external).unwrap();
+    fs::rename(root.join("old.tachyon"), external.join("old.tachyon")).unwrap();
+    symlink(&external, root.join("nested")).unwrap();
+    assert!(
+        mgr.delete_version(&current.card_id, &old_id, &mut |_| {}, Default::default())
+            .is_err()
+    );
+    assert!(
+        version_store::get(&current.card_id, &old_id)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        fs::read(external.join("old.tachyon")).unwrap(),
+        b"old-weights"
+    );
+}
+
+#[test]
+fn new_candidate_can_create_a_new_default_root_while_current_version_stays_pinned() {
+    let (temp, mgr, current, card, pkg, id) = fixture();
+    mgr.stage_verified(
+        &current,
+        &card,
+        &id,
+        pkg.clone(),
+        &mut |_| {},
+        Default::default(),
+    )
+    .unwrap();
+    mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    let active = db::get_store_model(&current.card_id).unwrap().unwrap();
+    let mut settings = mgr.settings.clone();
+    let next_root = temp.path().join("not-created-yet/nested/models");
+    settings.models_dir = next_root.to_string_lossy().into_owned();
+    assert!(!next_root.exists());
+    let relocated = ModelManager::new(Some(settings), None);
+    let next_id = "b".repeat(64);
+    relocated
+        .stage_verified(
+            &active,
+            &card,
+            &next_id,
+            pkg,
+            &mut |_| {},
+            Default::default(),
+        )
+        .unwrap();
+    let prepared = version_store::get(&current.card_id, &next_id)
+        .unwrap()
+        .unwrap();
+    assert!(Path::new(prepared.models_root.as_deref().unwrap()).starts_with(&next_root));
+    assert_eq!(
+        db::get_store_model(&current.card_id)
+            .unwrap()
+            .unwrap()
+            .models_root,
+        active.models_root
+    );
+}
+
+#[test]
+fn hf_lfs_resume_credit_recognizes_real_hashed_incomplete_filename() {
+    let temp = tempfile::tempdir().unwrap();
+    let cache = temp.path().join("model/.cache/huggingface/download");
+    fs::create_dir_all(&cache).unwrap();
+    let hash = script_runner::sha256_hex("new-weights");
+    // Python: urlsafe_b64encode(sha1(b"new.tachyon.metadata").digest()).decode().
+    let prefix = "KBv97_iyz3IQ9bCSq3sTENHhlOw=";
+    fs::write(cache.join(format!("{prefix}.{hash}.incomplete")), b"new-w").unwrap();
+    assert_eq!(
+        resumable_bytes(temp.path(), "new.tachyon", &hash).unwrap(),
+        (5, 5)
+    );
+}
+
+#[test]
+fn isolated_version_residuals_include_its_runtime_directory() {
+    let (_temp, mgr, current, card, pkg, id) = fixture();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    let active = mgr.get_record(&current.card_id).unwrap();
+    let runtime = runtime_path(&active).unwrap();
+    assert!(runtime.exists());
+    let residuals = mgr.residual_paths(&active);
+    assert!(residuals.contains(&runtime.to_string_lossy().into_owned()));
+    assert!(residuals.contains(active.models_root.as_ref().unwrap()));
+}
+
+#[test]
+fn managed_residuals_remain_charged_after_retry_activation_and_archival() {
+    let (_temp, mut mgr, current, card, pkg, id) = fixture();
+    let mut failed_pkg = pkg.clone();
+    failed_pkg.scripts.insert(
+        "download_model".into(),
+        blob(
+            "#!/bin/bash\nset -e\nmkdir -p \"$LMM_MODELS_DIR/new\"\nprintf new-w > \"$LMM_MODELS_DIR/new/new.tachyon\"\nhead -c 65536 /dev/zero > \"$LMM_MODELS_DIR/unknown.part\"\necho '完整性校验失败' >&2\nexit 1\n",
+        ),
+    );
+    assert!(
+        mgr.stage_verified(
+            &current,
+            &card,
+            &id,
+            failed_pkg,
+            &mut |_| {},
+            Default::default()
+        )
+        .is_err()
+    );
+    let failed = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    let root = PathBuf::from(failed.models_root.as_deref().unwrap());
+    let actual = super::super::super::disk::dir_size_bytes(&root);
+    assert_eq!(failed.state, "failed");
+    assert_eq!(failed.planned_bytes, 0);
+    assert_eq!(version_store::retained_bytes().unwrap(), actual);
+
+    mgr.stage_verified(
+        &current,
+        &card,
+        &id,
+        pkg.clone(),
+        &mut |_| {},
+        Default::default(),
+    )
+    .unwrap();
+    let ready = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    let actual = super::super::super::disk::dir_size_bytes(&root);
+    assert_eq!(ready.state, "ready");
+    assert_eq!(ready.planned_bytes, 0);
+    assert_eq!(
+        fs::metadata(root.join("unknown.part")).unwrap().len(),
+        65536
+    );
+    assert!(actual > card.summary.size_bytes + 65536);
+    assert_eq!(version_store::retained_bytes().unwrap(), actual);
+
+    // Removing only the residual's charge would admit the next candidate. It
+    // must remain excluded in ready, current and history states alike.
+    let check_next_stage = |manager: &mut ModelManager, active: &db::StoreModelRecord| {
+        let charged =
+            db::total_managed_bytes().unwrap() as u64 + version_store::retained_bytes().unwrap();
+        manager.settings.storage_quota_gb = Some((charged - 32768) as f64 / 1073741824.0);
+        let next_id = "d".repeat(64);
+        let error = manager
+            .stage_verified(
+                active,
+                &card,
+                &next_id,
+                pkg.clone(),
+                &mut |_| {},
+                Default::default(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("配额"));
+        assert!(
+            version_store::get(&current.card_id, &next_id)
+                .unwrap()
+                .is_none()
+        );
+    };
+    check_next_stage(&mut mgr, &current);
+
+    mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    let active = db::get_store_model(&current.card_id).unwrap().unwrap();
+    let current_version = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    assert_eq!(current_version.state, "current");
+    assert_eq!(current_version.planned_bytes, 0);
+    let legacy_bytes = current.size_bytes as u64;
+    assert_eq!(
+        version_store::retained_bytes().unwrap(),
+        legacy_bytes + actual.saturating_sub(active.size_bytes as u64)
+    );
+    check_next_stage(&mut mgr, &active);
+    let mut shared = current_version.clone();
+    shared.card_id = "shared-resource-record".into();
+    shared.version_id = "e".repeat(64);
+    shared.state = "history".into();
+    version_store::put(&shared).unwrap();
+    assert_eq!(
+        version_store::retained_bytes().unwrap(),
+        legacy_bytes + actual.saturating_sub(active.size_bytes as u64),
+        "a retained reference and the current generation charge one resource"
+    );
+    version_store::remove(&shared.card_id, &shared.version_id).unwrap();
+
+    mgr.switch_version(
+        &current.card_id,
+        &version_store::active_id(&current),
+        &mut |_| {},
+        Default::default(),
+    )
+    .unwrap();
+    let active = db::get_store_model(&current.card_id).unwrap().unwrap();
+    let history = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    assert_eq!(history.state, "history");
+    assert_eq!(history.planned_bytes, 0);
+    assert_eq!(version_store::retained_bytes().unwrap(), actual);
+    check_next_stage(&mut mgr, &active);
+    assert_eq!(
+        fs::metadata(root.join("unknown.part")).unwrap().len(),
+        65536
+    );
+}
+
+#[test]
+fn unreadable_residuals_block_quota_admission_in_every_retained_state() {
+    use std::os::unix::fs::PermissionsExt;
+    assert_ne!(
+        fs::metadata("/proc/self").unwrap().uid(),
+        0,
+        "permission-denial regression must run as an unprivileged user"
+    );
+    for state in ["failed", "ready", "current", "history"] {
+        let (_temp, mut mgr, current, card, pkg, id) = fixture();
+        mgr.stage_verified(
+            &current,
+            &card,
+            &id,
+            pkg.clone(),
+            &mut |_| {},
+            Default::default(),
+        )
+        .unwrap();
+        if ["current", "history"].contains(&state) {
+            mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+                .unwrap();
+        }
+        if state == "history" {
+            mgr.switch_version(
+                &current.card_id,
+                &version_store::active_id(&current),
+                &mut |_| {},
+                Default::default(),
+            )
+            .unwrap();
+        }
+        let mut retained = version_store::get(&current.card_id, &id).unwrap().unwrap();
+        if state == "failed" {
+            retained.state = state.into();
+            retained.record = None;
+            version_store::put(&retained).unwrap();
+        }
+        assert_eq!(retained.state, state);
+        let root = PathBuf::from(retained.models_root.as_deref().unwrap());
+        let residual = root.join("residual");
+        fs::create_dir(&residual).unwrap();
+        let partial = residual.join("partial.bin");
+        fs::write(&partial, vec![0; 65536]).unwrap();
+        // Counting while holding the existing reservation lock must not take
+        // that lock recursively. The admission caller owns synchronization.
+        let reservation = version_store::wait_quota_reservation_lock(|| false, || {}).unwrap();
+        let charged =
+            db::total_managed_bytes().unwrap() as u64 + version_store::retained_bytes().unwrap();
+        drop(reservation);
+        mgr.settings.storage_quota_gb = Some((charged - 32768) as f64 / 1073741824.0);
+        let active = db::get_store_model(&current.card_id).unwrap().unwrap();
+        let next_id = "f".repeat(64);
+        let permissions = fs::metadata(&residual).unwrap().permissions();
+        fs::set_permissions(&residual, fs::Permissions::from_mode(0o000)).unwrap();
+        let measurement = version_store::retained_bytes();
+        let replacing = version_store::retained_bytes_without_reservation(&current.card_id, &id);
+        let blocked = mgr.stage_verified(
+            &active,
+            &card,
+            &next_id,
+            pkg.clone(),
+            &mut |_| {},
+            Default::default(),
+        );
+        let retry = (state == "failed").then(|| {
+            mgr.stage_verified(
+                &active,
+                &card,
+                &id,
+                pkg.clone(),
+                &mut |_| {},
+                Default::default(),
+            )
+        });
+        fs::set_permissions(&residual, permissions).unwrap();
+        assert!(measurement.is_err(), "{state} hid an unreadable residual");
+        assert!(
+            replacing.is_err(),
+            "{state} retry hid an unreadable residual"
+        );
+        assert!(blocked.unwrap_err().to_string().contains("无法核算"));
+        if let Some(retry) = retry {
+            assert!(retry.unwrap_err().to_string().contains("无法核算"));
+        }
+        // Restoring access makes the scan possible, but the retained bytes
+        // still prevent a second stage from fitting into the configured quota.
+        assert_eq!(
+            db::total_managed_bytes().unwrap() as u64 + version_store::retained_bytes().unwrap(),
+            charged
+        );
+        let error = mgr
+            .stage_verified(
+                &active,
+                &card,
+                &next_id,
+                pkg,
+                &mut |_| {},
+                Default::default(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("配额"));
+        assert!(
+            version_store::get(&current.card_id, &next_id)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(fs::metadata(&partial).unwrap().len(), 65536);
+        assert_eq!(
+            serde_json::to_value(version_store::get(&current.card_id, &id).unwrap().unwrap())
+                .unwrap(),
+            serde_json::to_value(&retained).unwrap()
+        );
+    }
+}
+
+#[test]
+fn managed_switch_rechecks_registered_directory_ownership() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    for mutation in [
+        "marker",
+        "root_link",
+        "card_permissions",
+        "versions_permissions",
+        "resource_record",
+        "record_root",
+    ] {
+        let (temp, mgr, current, card, pkg, id) = fixture();
+        mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+            .unwrap();
+        let target = version_store::get(&current.card_id, &id).unwrap().unwrap();
+        let root = PathBuf::from(target.models_root.as_deref().unwrap());
+        let marker = root.join(".pinvou-version.json");
+        let saved_marker = fs::read(&marker).unwrap();
+        let moved = temp.path().join("moved-ready-version");
+        let changed_parent = match mutation {
+            "card_permissions" => Some(root.parent().unwrap()),
+            "versions_permissions" => Some(root.parent().unwrap().parent().unwrap()),
+            _ => None,
+        };
+        let saved_permissions = changed_parent.map(|p| fs::metadata(p).unwrap().permissions());
+        match mutation {
+            "marker" => fs::write(&marker, "wrong-owner").unwrap(),
+            "root_link" => {
+                fs::rename(&root, &moved).unwrap();
+                symlink(&moved, &root).unwrap();
+            }
+            "resource_record" | "record_root" => {
+                let mut changed = target.clone();
+                if mutation == "resource_record" {
+                    changed.resource_dir = Some(temp.path().join("other").display().to_string());
+                } else {
+                    changed.record.as_mut().unwrap().models_root =
+                        Some(temp.path().join("other").display().to_string());
+                }
+                version_store::put(&changed).unwrap();
+            }
+            _ => fs::set_permissions(changed_parent.unwrap(), fs::Permissions::from_mode(0o770))
+                .unwrap(),
+        }
+        let before_switch = version_store::get(&current.card_id, &id).unwrap().unwrap();
+        let result = mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default());
+        assert!(result.is_err(), "managed target accepted {mutation}");
+        assert_eq!(
+            serde_json::to_value(db::get_store_model(&current.card_id).unwrap().unwrap()).unwrap(),
+            serde_json::to_value(&current).unwrap(),
+            "rejected target must leave the active deployment unchanged"
+        );
+        assert_eq!(
+            serde_json::to_value(version_store::get(&current.card_id, &id).unwrap().unwrap())
+                .unwrap(),
+            serde_json::to_value(&before_switch).unwrap(),
+            "rejected target must keep its complete version record"
+        );
+        assert_eq!(
+            fs::read(root.join("new/new.tachyon")).unwrap(),
+            b"new-weights"
+        );
+        match mutation {
+            "marker" => fs::write(&marker, saved_marker).unwrap(),
+            "root_link" => {
+                fs::remove_file(&root).unwrap();
+                fs::rename(moved, &root).unwrap();
+            }
+            "resource_record" | "record_root" => version_store::put(&target).unwrap(),
+            _ => fs::set_permissions(changed_parent.unwrap(), saved_permissions.unwrap()).unwrap(),
+        }
+        mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+            .unwrap();
+        mgr.switch_version(
+            &current.card_id,
+            &version_store::active_id(&current),
+            &mut |_| {},
+            Default::default(),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn new_upgrade_requires_current_managed_ownership_but_history_can_recover() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    for mutation in [
+        "marker",
+        "root_link",
+        "card_permissions",
+        "versions_permissions",
+    ] {
+        let (temp, mut mgr, current, mut card, mut pkg, id) = fixture();
+        mgr.stage_verified(
+            &current,
+            &card,
+            &id,
+            pkg.clone(),
+            &mut |_| {},
+            Default::default(),
+        )
+        .unwrap();
+        mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+            .unwrap();
+        let active = mgr.get_record(&current.card_id).unwrap();
+        let root = PathBuf::from(active.models_root.as_deref().unwrap());
+
+        // Put B on a separate root so changing A's ancestors cannot merely
+        // trigger the target's ownership guard instead of the current guard.
+        mgr.settings.models_dir = temp.path().join("second-models").display().to_string();
+        pkg.scripts.insert(
+            "download_model".into(),
+            blob("#!/bin/bash\nset -e\nmkdir -p \"$LMM_MODELS_DIR/new\"\nprintf third-weights > \"$LMM_MODELS_DIR/new/new.tachyon\"\n"),
+        );
+        pkg.assets.insert(
+            "weights.sha256".into(),
+            blob(&format!(
+                "{}  new.tachyon\n",
+                script_runner::sha256_hex("third-weights")
+            )),
+        );
+        card.summary.size_bytes = 13;
+        card.script_sha256 = Some(
+            pkg.scripts
+                .iter()
+                .map(|(k, v)| (k.clone(), v.sha256.clone()))
+                .collect(),
+        );
+        card.asset_sha256 = Some(
+            pkg.assets
+                .iter()
+                .map(|(k, v)| (k.clone(), v.sha256.clone()))
+                .collect(),
+        );
+        let next_id = card_update::revision(&card_update::remote_manifest(&card));
+        mgr.stage_verified(
+            &active,
+            &card,
+            &next_id,
+            pkg,
+            &mut |_| {},
+            Default::default(),
+        )
+        .unwrap();
+        let ready = version_store::get(&current.card_id, &next_id)
+            .unwrap()
+            .unwrap();
+        let marker = root.join(".pinvou-version.json");
+        let saved_marker = fs::read(&marker).unwrap();
+        let moved = temp.path().join("moved-current-version");
+        let changed_parent = match mutation {
+            "card_permissions" => Some(root.parent().unwrap()),
+            "versions_permissions" => Some(root.parent().unwrap().parent().unwrap()),
+            _ => None,
+        };
+        let saved_permissions = changed_parent.map(|p| fs::metadata(p).unwrap().permissions());
+        match mutation {
+            "marker" => fs::write(&marker, "wrong-owner").unwrap(),
+            "root_link" => {
+                fs::rename(&root, &moved).unwrap();
+                symlink(&moved, &root).unwrap();
+            }
+            _ => fs::set_permissions(changed_parent.unwrap(), fs::Permissions::from_mode(0o770))
+                .unwrap(),
+        }
+        let result =
+            mgr.switch_version(&current.card_id, &next_id, &mut |_| {}, Default::default());
+        assert!(
+            result.is_err(),
+            "upgrade accepted unsafe current {mutation}"
+        );
+        assert_eq!(
+            serde_json::to_value(mgr.get_record(&current.card_id).unwrap()).unwrap(),
+            serde_json::to_value(&active).unwrap(),
+        );
+        assert_eq!(
+            serde_json::to_value(
+                version_store::get(&current.card_id, &next_id)
+                    .unwrap()
+                    .unwrap()
+            )
+            .unwrap(),
+            serde_json::to_value(&ready).unwrap(),
+        );
+        match mutation {
+            "marker" => fs::write(&marker, saved_marker).unwrap(),
+            "root_link" => {
+                fs::remove_file(&root).unwrap();
+                fs::rename(moved, &root).unwrap();
+            }
+            _ => fs::set_permissions(changed_parent.unwrap(), saved_permissions.unwrap()).unwrap(),
+        }
+        mgr.switch_version(&current.card_id, &next_id, &mut |_| {}, Default::default())
+            .unwrap();
+
+        // A validated history target remains an escape route when the active
+        // generation's ownership has subsequently become invalid.
+        fs::write(
+            Path::new(ready.models_root.as_deref().unwrap()).join(".pinvou-version.json"),
+            "wrong-owner",
+        )
+        .unwrap();
+        mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+            .unwrap();
+        assert_eq!(
+            version_store::active_id(&mgr.get_record(&current.card_id).unwrap()),
+            id
+        );
+    }
 }

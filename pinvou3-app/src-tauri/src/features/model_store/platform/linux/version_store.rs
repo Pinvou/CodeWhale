@@ -15,6 +15,10 @@ pub struct Version {
     pub managed: bool,
     pub created_at: String,
     pub error: Option<String>,
+    /// Total candidate bytes reserved while downloading, including existing
+    /// unrelated files. Failed/interrupted candidates charge actual files only.
+    #[serde(default)]
+    pub planned_bytes: u64,
 }
 
 fn connection() -> Result<rusqlite::Connection, String> {
@@ -22,28 +26,84 @@ fn connection() -> Result<rusqlite::Connection, String> {
     Ok(conn)
 }
 
-/// Readers may prepare/download independent cards concurrently. A switch or
-/// deletion excludes all reference-producing operations through their commit.
-pub fn resource_operation_lock(exclusive: bool) -> Result<std::fs::File, String> {
+/// Shared holders retain references throughout preparation, download, deployment
+/// and enablement, including queue waits: scripts may create shared resources at
+/// any of those stages. Destructive operations wait for those holders rather
+/// than failing immediately; all waiting is cancellable before any mutation.
+fn operation_lock_file(name: &str) -> Result<std::fs::File, String> {
     use std::os::unix::fs::OpenOptionsExt;
     let root = super::config::data_dir();
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-    let lock = std::fs::OpenOptions::new()
+    std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
         .mode(0o600)
-        .open(root.join("version-operations.lock"))
-        .map_err(|e| e.to_string())?;
-    let result = if exclusive {
+        .open(root.join(name))
+        .map_err(|e| e.to_string())
+}
+
+fn try_resource_lock(lock: &std::fs::File, exclusive: bool) -> Result<(), std::fs::TryLockError> {
+    if exclusive {
         lock.try_lock()
     } else {
         lock.try_lock_shared()
-    };
-    result.map_err(|_| "另一个模型资源操作正在进行，请稍后重试".to_string())?;
+    }
+}
+
+#[cfg(test)]
+pub fn resource_operation_lock(exclusive: bool) -> Result<std::fs::File, String> {
+    let lock = operation_lock_file("version-operations.lock")?;
+    try_resource_lock(&lock, exclusive).map_err(|e| e.to_string())?;
     Ok(lock)
 }
+
+pub fn wait_resource_operation_lock(
+    exclusive: bool,
+    cancelled: impl Fn() -> bool,
+    on_wait: impl FnMut(),
+) -> Result<std::fs::File, String> {
+    wait_operation_lock("version-operations.lock", exclusive, cancelled, on_wait)
+}
+
+/// Serialize quota checking and publishing its reservation across app processes.
+/// Release before running scripts; downloads still hold shared resource locks.
+pub fn wait_quota_reservation_lock(
+    cancelled: impl Fn() -> bool,
+    on_wait: impl FnMut(),
+) -> Result<std::fs::File, String> {
+    wait_operation_lock("version-quota.lock", true, cancelled, on_wait)
+}
+
+fn wait_operation_lock(
+    name: &str,
+    exclusive: bool,
+    cancelled: impl Fn() -> bool,
+    mut on_wait: impl FnMut(),
+) -> Result<std::fs::File, String> {
+    let lock = operation_lock_file(name)?;
+    let mut reported = false;
+    loop {
+        if cancelled() {
+            return Err("已取消等待模型资源操作".into());
+        }
+        match try_resource_lock(&lock, exclusive) {
+            Ok(()) => return Ok(lock),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if !reported {
+                    on_wait();
+                    reported = true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.to_string()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod resource_lock_tests;
 
 fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Version> {
     let raw: Option<String> = row.get("record_json")?;
@@ -64,6 +124,7 @@ fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Version> {
         managed: row.get("managed")?,
         created_at: row.get("created_at")?,
         error: row.get("error")?,
+        planned_bytes: row.get::<_, i64>("planned_bytes")?.max(0) as u64,
     })
 }
 
@@ -96,12 +157,17 @@ fn put_on(conn: &rusqlite::Connection, version: &Version) -> Result<(), String> 
         .map(serde_json::to_string)
         .transpose()
         .map_err(|e| e.to_string())?;
-    conn.execute("INSERT INTO model_versions(card_id,version_id,state,record_json,models_root,runtime_card_id,resource_dir,managed,created_at,error)
-        VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(card_id,version_id) DO UPDATE SET
+    let planned = if version.state == "downloading" {
+        i64::try_from(version.planned_bytes).map_err(|e| e.to_string())?
+    } else {
+        0
+    };
+    conn.execute("INSERT INTO model_versions(card_id,version_id,state,record_json,models_root,runtime_card_id,resource_dir,managed,created_at,error,planned_bytes)
+        VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(card_id,version_id) DO UPDATE SET
         state=excluded.state,record_json=excluded.record_json,models_root=excluded.models_root,
-        runtime_card_id=excluded.runtime_card_id,resource_dir=excluded.resource_dir,managed=excluded.managed,error=excluded.error",
+        runtime_card_id=excluded.runtime_card_id,resource_dir=excluded.resource_dir,managed=excluded.managed,error=excluded.error,planned_bytes=excluded.planned_bytes",
         params![version.card_id,version.version_id,version.state,record,version.models_root,
-            version.runtime_card_id,version.resource_dir,version.managed,version.created_at,version.error])
+            version.runtime_card_id,version.resource_dir,version.managed,version.created_at,version.error,planned])
         .map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -166,6 +232,7 @@ pub fn activate(
     put_on(&tx, old)?;
     let mut active = next.clone();
     active.state = "current".into();
+    active.planned_bytes = 0;
     let rec = active.record.as_mut().ok_or("目标版本尚未完成下载验证")?;
     rec.card_id = current.card_id.clone();
     rec.model_name = current.model_name.clone();
@@ -210,38 +277,119 @@ pub fn has_history(card_id: &str) -> Result<bool, String> {
 }
 
 pub fn retained_bytes() -> Result<u64, String> {
-    let mut seen = std::collections::BTreeSet::new();
+    retained_bytes_replacing(None)
+}
+
+/// A retry replaces its own reservation while keeping its existing files
+/// charged. Call under the quota reservation lock before publishing the new plan.
+pub fn retained_bytes_without_reservation(card_id: &str, version_id: &str) -> Result<u64, String> {
+    retained_bytes_replacing(Some((card_id, version_id)))
+}
+
+/// Quota admission must not treat an unreadable retained tree as empty. Unlike
+/// the best-effort UI measurement, propagate every scan error except a positively
+/// absent root. Do not follow links, including a replaced root directory.
+pub(super) fn quota_dir_size_bytes(root: &std::path::Path) -> Result<u64, String> {
+    let scan_error = |path: &std::path::Path, error: std::io::Error| {
+        format!("无法核算版本目录配额 {}：{error}", path.display())
+    };
+    for ancestor in root.ancestors().skip(1) {
+        match ancestor.symlink_metadata() {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err("无法核算版本目录配额：祖先路径包含链接。".into());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(scan_error(ancestor, error)),
+        }
+    }
+    match root.symlink_metadata() {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => return Err("无法核算版本目录配额：根路径不是普通目录。".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(scan_error(root, error)),
+    }
     let mut total = 0u64;
-    for version in list(None)?.into_iter().filter(|v| v.state != "current") {
-        if version.state == "deleting"
-            && db::get_store_model(&version.card_id)
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).map_err(|error| scan_error(&directory, error))? {
+            let entry = entry.map_err(|error| scan_error(&directory, error))?;
+            let path = entry.path();
+            let meta = path
+                .symlink_metadata()
+                .map_err(|error| scan_error(&path, error))?;
+            if meta.is_dir() {
+                pending.push(path);
+            } else if meta.is_file() {
+                total = total
+                    .checked_add(meta.len())
+                    .ok_or("版本目录配额统计溢出，已中止下载。")?;
+            }
+        }
+    }
+    Ok(total)
+}
+
+#[cfg(test)]
+mod quota_tests;
+
+fn retained_bytes_replacing(replacing: Option<(&str, &str)>) -> Result<u64, String> {
+    // A current managed generation is already charged by store_models. Keep
+    // charging its files above that amount, and deduplicate shared resources
+    // before subtracting the active record's contribution.
+    let mut resources = std::collections::BTreeMap::<String, (u64, u64)>::new();
+    for version in list(None)? {
+        let active = if ["current", "deleting"].contains(&version.state.as_str()) {
+            db::get_store_model(&version.card_id)
                 .map_err(|e| e.to_string())?
-                .as_ref()
-                .is_some_and(|r| active_id(r) == version.version_id)
-        {
+                .filter(|r| active_id(r) == version.version_id)
+        } else {
+            None
+        };
+        // Legacy generations retain their registered-size accounting. Their
+        // models_root may be a shared parent containing unrelated models.
+        if !version.managed && (version.state == "current" || active.is_some()) {
             continue;
         }
         let key = version
             .resource_dir
             .clone()
             .unwrap_or_else(|| format!("{}:{}", version.card_id, version.version_id));
-        if seen.insert(key) {
-            total = total.saturating_add(
-                version
-                    .record
-                    .as_ref()
-                    .map(|r| r.size_bytes.max(0) as u64)
-                    .unwrap_or_else(|| {
-                        version
-                            .models_root
-                            .as_ref()
-                            .map(|p| super::disk::dir_size_bytes(std::path::Path::new(p)))
-                            .unwrap_or(0)
-                    }),
-            );
-        }
+        let actual = || {
+            version
+                .models_root
+                .as_ref()
+                .map(|p| quota_dir_size_bytes(std::path::Path::new(p)))
+                .unwrap_or(Ok(0))
+        };
+        let registered = version.record.as_ref().map(|r| r.size_bytes.max(0) as u64);
+        let covered = active.as_ref().map_or(0, |r| r.size_bytes.max(0) as u64);
+        let charge = if active.is_some() {
+            actual()?.max(covered)
+        } else if version.state == "downloading" {
+            let actual = actual()?;
+            if replacing == Some((version.card_id.as_str(), version.version_id.as_str())) {
+                actual
+            } else {
+                actual.max(version.planned_bytes)
+            }
+        } else if version.state == "failed" {
+            actual()?
+        } else if version.managed {
+            actual()?.max(registered.unwrap_or(0))
+        } else {
+            match registered {
+                Some(bytes) => bytes,
+                None => actual()?,
+            }
+        };
+        let resource = resources.entry(key).or_default();
+        resource.0 = resource.0.max(charge);
+        resource.1 = resource.1.saturating_add(covered);
     }
-    Ok(total)
+    Ok(resources.values().fold(0u64, |total, (charge, covered)| {
+        total.saturating_add(charge.saturating_sub(*covered))
+    }))
 }
 
 pub fn engine_is_retained(name: &str, version: Option<&str>) -> Result<bool, String> {
@@ -278,6 +426,7 @@ pub fn recover_interrupted(card_id: &str) -> Result<(), String> {
         .filter(|v| v.state == "downloading")
     {
         version.state = "failed".into();
+        version.planned_bytes = 0;
         version.error = Some("version_download_interrupted".into());
         put(&version)?;
     }

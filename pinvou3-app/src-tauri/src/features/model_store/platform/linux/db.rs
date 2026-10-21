@@ -83,7 +83,8 @@ CREATE TABLE IF NOT EXISTS model_versions (
  card_id TEXT NOT NULL, version_id TEXT NOT NULL, state TEXT NOT NULL,
  record_json TEXT, models_root TEXT, runtime_card_id TEXT NOT NULL,
  resource_dir TEXT, managed INTEGER NOT NULL DEFAULT 0,
- created_at TEXT NOT NULL, error TEXT, PRIMARY KEY(card_id,version_id));
+ created_at TEXT NOT NULL, error TEXT, planned_bytes INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY(card_id,version_id));
 
 CREATE TABLE IF NOT EXISTS api_keys (
     id TEXT PRIMARY KEY,
@@ -98,6 +99,10 @@ CREATE TABLE IF NOT EXISTS api_keys (
 /// 安装的设备上了，`CREATE TABLE IF NOT EXISTS` 不会给已存在的表补列，这里做
 /// 一个很轻量的迁移：缺哪列就补哪列。
 const MIGRATION_COLUMNS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "model_versions",
+        &[("planned_bytes", "INTEGER NOT NULL DEFAULT 0")],
+    ),
     (
         "store_models",
         &[
@@ -996,7 +1001,7 @@ pub(super) fn startup_card_manifest(card_id: &str) -> rusqlite::Result<Option<se
                 "engine_version":row.get::<_,Option<String>>("engine_version")?, "size_bytes":row.get::<_,i64>("size_bytes")?,
                 "quantization":row.get::<_,Option<String>>("quantization")?, "source_repo_id":row.get::<_,Option<String>>("source_repo_id")?,
                 "source_filename":row.get::<_,Option<String>>("source_filename")?, "profiles":profiles,
-                "deploy_topology":row.get::<_,String>("deploy_topology")?,
+                "deploy_topology":row.get::<_,Option<String>>("deploy_topology")?.unwrap_or_else(|| "single".into()),
                 "scripts":digests(row,"scripts_content_json")?, "assets":digests(row,"assets_content_json")?,
             }))
         }
@@ -1552,6 +1557,34 @@ mod tests {
     }
 
     #[test]
+    fn migration_preserves_version_rows_and_defaults_quota_reservations_to_zero() {
+        let _ctx = setup_temp_db();
+        let conn = connect().unwrap();
+        conn.execute_batch(
+            "DROP TABLE model_versions;
+            CREATE TABLE model_versions (
+                card_id TEXT NOT NULL, version_id TEXT NOT NULL, state TEXT NOT NULL,
+                record_json TEXT, models_root TEXT, runtime_card_id TEXT NOT NULL,
+                resource_dir TEXT, managed INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL, error TEXT, PRIMARY KEY(card_id,version_id));
+            INSERT INTO model_versions(card_id,version_id,state,runtime_card_id,created_at)
+            VALUES('legacy-card','legacy-version','failed','legacy-runtime','2026-01-01');",
+        )
+        .unwrap();
+        drop(conn);
+        init_db().unwrap();
+        // Idempotent on subsequent launches, including databases created by
+        // the first version-store implementation before reservations existed.
+        init_db().unwrap();
+        let old = super::super::version_store::get("legacy-card", "legacy-version")
+            .unwrap()
+            .unwrap();
+        assert_eq!(old.state, "failed");
+        assert_eq!(old.runtime_card_id, "legacy-runtime");
+        assert_eq!(old.planned_bytes, 0);
+    }
+
+    #[test]
     fn migration_adds_missing_columns() {
         let _ctx = setup_temp_db();
         let conn = connect().unwrap();
@@ -1737,5 +1770,19 @@ mod tests {
                 .as_bool()
                 .unwrap()
         );
+    }
+    #[test]
+    fn startup_manifest_uses_single_topology_for_legacy_null_rows() {
+        let _ctx = setup_temp_db();
+        let (old, _) = update_fixture();
+        connect()
+            .unwrap()
+            .execute(
+                "UPDATE store_models SET deploy_topology=NULL WHERE card_id=?1",
+                [&old.card_id],
+            )
+            .unwrap();
+        let manifest = startup_card_manifest(&old.card_id).unwrap().unwrap();
+        assert_eq!(manifest["deploy_topology"], "single");
     }
 }

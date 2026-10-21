@@ -3217,6 +3217,94 @@ fn save_model_inner_commits_prefs_before_the_deferred_delete() {
 }
 
 #[test]
+fn save_model_rejects_a_new_stale_store_link_before_settings_or_credentials_change() {
+    crate::platform::test_support::with_temp_home("store-model-stale-new-link", || {
+        seed_model_deletion_prefs(&[model_deletion_test_model("keep-existing", false)]);
+        let before = std::fs::read(crate::platform::paths::settings_path()).unwrap();
+        let store = crate::platform::credential_store::RecordingCredentialStore::new();
+        let mut new_link = model_deletion_test_model("new-store-link", false);
+        new_link.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+        new_link.base_url = "http://127.0.0.1:8000/v1".into();
+        new_link.model_store_card_id = Some("no-longer-available-card".into());
+        new_link.api_key = "local-test-key".into();
+        new_link.credential_action = Some(CredentialEditAction::Replace);
+
+        let error = super::settings::save_model_inner(new_link, &store).unwrap_err();
+        assert!(error.contains("refresh the card and retry"), "{error}");
+        assert!(UserPrefs::load().model_by_id("new-store-link").is_none());
+        assert_eq!(
+            std::fs::read(crate::platform::paths::settings_path()).unwrap(),
+            before,
+            "a stale link must not commit a detached row or overwrite existing settings"
+        );
+        assert!(store.ops().is_empty(), "reject before writing credentials");
+    });
+}
+
+#[test]
+fn save_model_rejects_an_existing_explicit_stale_store_link_without_mutation() {
+    for same_route in [false, true] {
+        crate::platform::test_support::with_temp_home("store-model-stale-relink", || {
+            let mut latest = model_deletion_test_model("existing-store-link", true);
+            latest.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+            latest.provider_kind = Some("custom".into());
+            latest.model = "new-wire".into();
+            latest.base_url = "http://127.0.0.1:8001/v1".into();
+            latest.model_store_card_id = Some("unavailable-card".into());
+            seed_model_deletion_prefs(&[latest.clone()]);
+            let before = std::fs::read(crate::platform::paths::settings_path()).unwrap();
+            let store = crate::platform::credential_store::RecordingCredentialStore::new();
+            let mut stale = latest;
+            if !same_route {
+                // An open detail dialog still holds the pre-upgrade endpoint.
+                stale.model = "old-wire".into();
+                stale.base_url = "http://127.0.0.1:8000/v1".into();
+            }
+            stale.model_store_link_requested = true;
+            // Explicit linking must validate the reviewed route even if another
+            // editor's route-preservation intent was accidentally carried over.
+            stale.preserve_model_store_route = true;
+            stale.api_key = "replacement-local-key".into();
+            stale.credential_action = Some(CredentialEditAction::Replace);
+
+            let error = super::settings::save_model_inner(stale, &store).unwrap_err();
+            assert!(error.contains("refresh the card and retry"), "{error}");
+            assert_eq!(
+                std::fs::read(crate::platform::paths::settings_path()).unwrap(),
+                before,
+                "reject both changed routes and unavailable same-route re-links"
+            );
+            assert!(store.ops().is_empty(), "reject before writing credentials");
+            let saved = UserPrefs::load()
+                .model_by_id("existing-store-link")
+                .unwrap()
+                .clone();
+            assert_eq!(saved.model, "new-wire");
+            assert_eq!(saved.base_url, "http://127.0.0.1:8001/v1");
+            assert_eq!(
+                saved.model_store_card_id.as_deref(),
+                Some("unavailable-card")
+            );
+            assert!(!saved.model_store_link_detached);
+        });
+    }
+}
+
+#[test]
+fn explicit_store_link_intent_is_incoming_only() {
+    let model = model_deletion_test_model("incoming-intent", false);
+    assert!(!model.model_store_link_requested);
+    let mut request = serde_json::to_value(&model).unwrap();
+    request["model_store_link_requested"] = serde_json::json!(true);
+    let model: SavedModel = serde_json::from_value(request).unwrap();
+    assert!(model.model_store_link_requested);
+    let serialized = serde_json::to_value(&model).unwrap();
+    assert!(serialized.get("model_store_link_requested").is_none());
+    let reloaded: SavedModel = serde_json::from_value(serialized).unwrap();
+    assert!(!reloaded.model_store_link_requested);
+}
+
+#[test]
 fn save_model_preserves_store_provenance_for_options_but_clears_it_for_route_edits() {
     crate::platform::test_support::with_temp_home("store-model-link-edit", || {
         let mut original = model_deletion_test_model("local-store", false);
@@ -3238,6 +3326,7 @@ fn save_model_preserves_store_provenance_for_options_but_clears_it_for_route_edi
             persisted.model_store_card_id.as_deref(),
             Some("stable-card")
         );
+        assert!(!persisted.model_store_link_detached);
         // A full-object client may retain the old optional field while editing
         // its local port. That must not silently opt back into route rewrites.
         let mut full_route_edit = persisted.clone();

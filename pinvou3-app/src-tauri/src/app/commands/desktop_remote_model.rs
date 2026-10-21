@@ -295,6 +295,7 @@ mod tests {
             model: "deepseek-chat".into(),
             model_store_card_id: None,
             model_store_link_detached: false,
+            model_store_link_requested: false,
             preserve_model_store_route: false,
             base_url: "https://api.deepseek.com/v1".into(),
             provider_kind: Some("official_api".into()),

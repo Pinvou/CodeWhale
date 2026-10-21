@@ -2,7 +2,10 @@
 """Validate a model-card native_engine_process.py without model weights or a GPU.
 
 Usage: python3 scripts/test-native-engine-launch-receipt.py /path/to/controller.py
-The controller comes from the card publisher; no network or user runtime is used.
+Accepts the audited BROKEN, LAUNCH_FIXED or FIXED publisher controller. A repaired
+copy is tested in a temporary directory; the input file is never modified.
+No network, user runtime, model weights or GPU is used. This is a manual check,
+not a CI gate: the publisher's complete controller is not vendored here.
 """
 
 import importlib.util
@@ -20,13 +23,44 @@ import unittest
 from unittest import mock
 
 
-CONTROLLER_PATH = Path(sys.argv.pop(1)).resolve()
+RUST_PATH = (Path(__file__).resolve().parents[1] / "pinvou3-app/src-tauri/src/features/"
+             "model_store/platform/linux/native_card_compat.rs")
+
+
+def prepare_controller(source_path, directory):
+    """Mirror the fingerprint-guarded Rust repair before importing any source."""
+    rust = RUST_PATH.read_text(encoding="utf-8")
+
+    def block(name):
+        return re.search(rf'const {name}: &str = r#"(.*?)"#;', rust, re.S).group(1)
+
+    def digest(name):
+        return re.search(rf'pub const {name}: &str = "([a-f0-9]{{64}})";', rust).group(1)
+
+    source = source_path.read_bytes()
+    source_digest = hashlib.sha256(source).hexdigest()
+    known = {digest(name): name for name in ("BROKEN", "LAUNCH_FIXED", "FIXED")}
+    if source_digest not in known:
+        raise ValueError(f"unsupported controller SHA-256: {source_digest}")
+    content = source.decode("utf-8")
+    if known[source_digest] == "BROKEN":
+        if content.count(block("OLD")) != 1:
+            raise ValueError("BROKEN controller does not contain exactly one launch repair source")
+        content = content.replace(block("OLD"), block("NEW"), 1)
+    if known[source_digest] != "FIXED":
+        if content.count(block("NEW")) != 1 or content.count(block("IDENTITY_OLD")) != 1:
+            raise ValueError("controller does not contain the audited repair source blocks")
+        content = content.replace(block("IDENTITY_OLD"), block("IDENTITY_NEW"), 1)
+    if hashlib.sha256(content.encode("utf-8")).hexdigest() != digest("FIXED"):
+        raise ValueError("repaired controller SHA-256 does not match FIXED")
+    destination = Path(directory) / "native_engine_process.py"
+    destination.write_bytes(content.encode("utf-8"))
+    return destination
 
 
 class NativeLaunchReceiptTests(unittest.TestCase):
     def test_rust_repair_matches_the_real_published_controller_and_fixed_result(self):
-        rust = (Path(__file__).resolve().parents[1] / "pinvou3-app/src-tauri/src/features/"
-                "model_store/platform/linux/native_card_compat.rs").read_text(encoding="utf-8")
+        rust = RUST_PATH.read_text(encoding="utf-8")
         old = re.search(r'const OLD: &str = r#"(.*?)"#;', rust, re.S).group(1)
         new = re.search(r'const NEW: &str = r#"(.*?)"#;', rust, re.S).group(1)
         broken_hash = re.search(r'pub const BROKEN: &str = "([a-f0-9]{64})";', rust).group(1)
@@ -182,4 +216,12 @@ class NativeLaunchReceiptTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    if len(sys.argv) < 2 or sys.argv[1].startswith("-"):
+        sys.exit("Usage: python3 scripts/test-native-engine-launch-receipt.py /path/to/controller.py [unittest options]")
+    source_path = Path(sys.argv.pop(1)).resolve()
+    with tempfile.TemporaryDirectory(prefix="pinvou-controller-repair-test-") as directory:
+        try:
+            CONTROLLER_PATH = prepare_controller(source_path, directory)
+        except (OSError, UnicodeError, ValueError) as error:
+            sys.exit(f"Cannot prepare audited controller: {error}")
+        unittest.main(verbosity=2)

@@ -248,6 +248,7 @@ fn may_run_as_root(script_type: &str) -> bool {
 }
 
 /// 一张卡片抓下来的完整脚本包：六个入口脚本 + 附属文件。
+#[cfg_attr(test, derive(Clone))]
 struct CardPackage {
     scripts: BTreeMap<String, db::ScriptBlob>,
     assets: BTreeMap<String, db::ScriptBlob>,
@@ -775,16 +776,47 @@ impl ModelManager {
     /// 只查 staging 的后果是双向的：外部盘满了却放行，下到一半 ENOSPC；
     /// 或者 staging 盘小、目标盘很空，平白把用户拦住。
     pub fn check_can_download(&self, size_bytes: u64) -> disk::SpaceCheck {
+        self.check_can_download_increment(size_bytes, size_bytes, &self.settings.models_path())
+    }
+
+    /// Resuming a registered candidate needs only its additional allocation.
+    /// Quota growth is separate because retained_bytes already counts its files.
+    fn check_can_download_increment(
+        &self,
+        required_bytes: u64,
+        quota_growth: u64,
+        models: &std::path::Path,
+    ) -> disk::SpaceCheck {
+        let retained = if self.settings.storage_quota_gb.is_some() {
+            super::version_store::retained_bytes().unwrap_or(u64::MAX / 2)
+        } else {
+            0
+        };
+        self.check_can_download_increment_with_retained(
+            required_bytes,
+            quota_growth,
+            models,
+            retained,
+        )
+    }
+
+    fn check_can_download_increment_with_retained(
+        &self,
+        required_bytes: u64,
+        quota_growth: u64,
+        models: &std::path::Path,
+        retained_bytes: u64,
+    ) -> disk::SpaceCheck {
         let staging = self.settings.staging_path();
-        let models = self.settings.models_path();
-        let mut check = disk::check_space(&staging, size_bytes, self.settings.min_free_space_gb);
+        let mut check =
+            disk::check_space(&staging, required_bytes, self.settings.min_free_space_gb);
         // 判据是**路径字符串**：两个路径一模一样才省掉第二次查询，不做任何挂载点
         // 归一化——要判断两个路径是不是同一个文件系统得读 /proc/mounts 再做前缀
         // 匹配，为这点收益不值当。代价只是同盘异路径（默认就是这样：staging 是
         // models 的兄弟目录）会对同一个文件系统多查一次余量，两次拿到的是同一个
         // free_bytes，重复检查无害。
         if check.ok && models != staging {
-            let target = disk::check_space(&models, size_bytes, self.settings.min_free_space_gb);
+            let target = disk::check_space(models, required_bytes, self.settings.min_free_space_gb);
             if !target.ok {
                 check = target;
             }
@@ -793,15 +825,15 @@ impl ModelManager {
             return check;
         }
         if let Some(quota) = self.settings.storage_quota_gb {
-            let used = db::total_managed_bytes().unwrap_or(0).max(0) as u64
-                + super::version_store::retained_bytes().unwrap_or(u64::MAX / 2);
-            let projected = used + size_bytes;
+            let used = (db::total_managed_bytes().unwrap_or(0).max(0) as u64)
+                .saturating_add(retained_bytes);
+            let projected = used.saturating_add(quota_growth);
             let quota_bytes = (quota * 1024.0 * 1024.0 * 1024.0) as u64;
             if projected > quota_bytes {
                 return disk::SpaceCheck {
                     ok: false,
                     free_bytes: check.free_bytes,
-                    required_bytes: size_bytes,
+                    required_bytes,
                     reason: format!(
                         "超出存储配额：当前已用 {}，加上本次下载将达到 {}，配额为 {}GB",
                         disk::format_bytes(used as f64),
@@ -963,8 +995,12 @@ impl ModelManager {
         control: script_runner::RunControl,
         mut wait_for_slot: Option<&mut dyn FnMut() -> Result<(), ModelManagerError>>,
     ) -> Result<DownloadResult, ModelManagerError> {
-        let _resources =
-            super::version_store::resource_operation_lock(false).map_err(ModelManagerError::new)?;
+        let _resources = super::version_store::wait_resource_operation_lock(
+            false,
+            || control.cancelled(),
+            || on_progress("等待其他模型资源操作完成，可取消…"),
+        )
+        .map_err(ModelManagerError::new)?;
         let card = self.store.get_card(card_id)?;
         validate_remote_assets(&card.assets)?;
         if let Some(existing) =
@@ -1717,8 +1753,12 @@ impl ModelManager {
         on_progress: &mut ProgressFn<'_>,
         control: script_runner::RunControl,
     ) -> Result<serde_json::Value, ModelManagerError> {
-        let _resources =
-            super::version_store::resource_operation_lock(false).map_err(ModelManagerError::new)?;
+        let _resources = super::version_store::wait_resource_operation_lock(
+            false,
+            || control.cancelled(),
+            || on_progress("等待其他模型资源操作完成，可取消…"),
+        )
+        .map_err(ModelManagerError::new)?;
         let rec = self.get_record(card_id)?;
         versions::ensure_not_deleting(&rec)?;
         if rec.running {
@@ -1779,8 +1819,12 @@ impl ModelManager {
         on_progress: &mut ProgressFn<'_>,
         control: script_runner::RunControl,
     ) -> Result<(), ModelManagerError> {
-        let _resources =
-            super::version_store::resource_operation_lock(false).map_err(ModelManagerError::new)?;
+        let _resources = super::version_store::wait_resource_operation_lock(
+            false,
+            || control.cancelled(),
+            || on_progress("等待其他模型资源操作完成，可取消…"),
+        )
+        .map_err(ModelManagerError::new)?;
         let rec = self.get_record(card_id)?;
         versions::ensure_not_deleting(&rec)?;
         let source = self.local_scripts_source(&rec)?;
@@ -1840,8 +1884,12 @@ impl ModelManager {
         on_progress: &mut ProgressFn<'_>,
         control: script_runner::RunControl,
     ) -> Result<(), ModelManagerError> {
-        let _resources =
-            super::version_store::resource_operation_lock(false).map_err(ModelManagerError::new)?;
+        let _resources = super::version_store::wait_resource_operation_lock(
+            false,
+            || control.cancelled(),
+            || on_progress("等待其他模型资源操作完成，可取消…"),
+        )
+        .map_err(ModelManagerError::new)?;
         let rec = self.get_record(card_id)?;
         versions::ensure_not_deleting(&rec)?;
         if rec.card_update_pending {
@@ -1972,8 +2020,12 @@ impl ModelManager {
         on_progress: &mut ProgressFn<'_>,
         control: script_runner::RunControl,
     ) -> Result<UninstallOutcome, ModelManagerError> {
-        let _resources = super::version_store::resource_operation_lock(purge_weights)
-            .map_err(ModelManagerError::new)?;
+        let _resources = super::version_store::wait_resource_operation_lock(
+            purge_weights,
+            || control.cancelled(),
+            || on_progress("等待其他模型资源操作完成，可取消…"),
+        )
+        .map_err(ModelManagerError::new)?;
         if super::version_store::has_history(card_id).map_err(ModelManagerError::new)? {
             return Err(ModelManagerError::new(
                 "请先在历史版本中清理保留版本，再卸载或删除当前模型。",
@@ -2182,7 +2234,20 @@ impl ModelManager {
     fn candidate_paths(&self, rec: &db::StoreModelRecord) -> Vec<PathBuf> {
         if rec.runtime_card_id.is_some() {
             if let Some(root) = &rec.models_root {
-                return vec![std::path::PathBuf::from(root)];
+                let root = PathBuf::from(root);
+                let mut paths = vec![root.clone()];
+                if let Some(id) = rec
+                    .runtime_card_id
+                    .as_deref()
+                    .and_then(|id| config::safe_path_component(id).ok())
+                {
+                    let runtime = config::data_dir().join("cards").join(id);
+                    if !runtime.starts_with(&root) {
+                        paths.retain(|path| !path.starts_with(&runtime));
+                        paths.push(runtime);
+                    }
+                }
+                return paths;
             }
         }
 

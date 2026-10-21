@@ -47,6 +47,7 @@ import {
   sortModels,
   storeGuideState,
   uninstallDoneText,
+  uninstallCleanupWarning,
   uninstallOptionsFor,
 } from './model-store-logic.js';
 import { tryGetTauriBridge } from '../../platform/tauri/client.js';
@@ -631,8 +632,10 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
     const linksCleaned = await cleanLinkedRows(
       record.card_id,
       record.card_name,
+      { quiet: !!result.result?.link_sync_error },
     );
-    if (!linksCleaned) showToast(copy.uninstallLinksLeft(record.card_name));
+    const warning = uninstallCleanupWarning(copy, record.card_name, linksCleaned, result.result?.link_sync_error);
+    if (warning) showToast(warning);
   }, [cleanLinkedRows, confirmUninstall, copy, runLifecycle, showToast]);
 
   /**

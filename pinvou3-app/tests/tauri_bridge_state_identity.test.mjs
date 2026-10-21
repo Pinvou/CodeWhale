@@ -290,7 +290,7 @@ assert.equal(updatedModels.effectiveModelConfig.model, 'new-wire-id');
 assert.equal(modelLoads, 2, 'an event during refresh must trigger a final fresh snapshot');
 assert.ok(refreshCommands.includes('get_settings'));
 assert.ok(refreshCommands.includes('get_effective_model_config'));
-assert.ok(!refreshCommands.some(command => /set_active_model|set_session_model|save_model/.test(command)),
+assert.ok(!refreshCommands.some(command => /set_active_model|set_session_model|load_session_model|save_model/.test(command)),
   'refresh must never select or recreate models');
 
 // Store uninstall must forward the card ownership guard, preserve backend no-op

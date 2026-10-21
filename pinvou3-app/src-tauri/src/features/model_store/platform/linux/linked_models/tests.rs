@@ -265,6 +265,7 @@ fn archived_version_identity_repairs_an_already_upgraded_legacy_row() {
     .unwrap();
     let old = db::get_store_model("qwen-card").unwrap().unwrap();
     version_store::put(&version_store::Version {
+        planned_bytes: 0,
         card_id: "qwen-card".into(),
         version_id: "old-version".into(),
         state: "history".into(),
@@ -303,4 +304,12 @@ fn archived_version_identity_repairs_an_already_upgraded_legacy_row() {
         UserPrefs::load().advanced.active_model_id.as_deref(),
         Some("stable-id")
     );
+}
+
+#[test]
+fn store_routes_only_accept_http_chat_endpoints() {
+    assert!(chat_base("http://127.0.0.1:8000/v1").is_some());
+    assert!(chat_base("https://localhost:8000/v1/chat/completions").is_some());
+    assert!(chat_base("ftp://127.0.0.1:8000/v1").is_none());
+    assert!(chat_base("ws://127.0.0.1:8000/v1").is_none());
 }
