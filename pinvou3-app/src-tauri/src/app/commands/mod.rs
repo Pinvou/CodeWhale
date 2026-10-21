@@ -8,6 +8,7 @@
 //! - `get_monitor_snapshot()`— Monitor 视图完整数据
 //! - `get_backend_status()`  — ChatRoom 顶部 live dot 用，简版健康指示
 //! - `discover_local_vllm()` — 设置页手动探测本机 vLLM 候选端点
+//! - `cms_status/models/engines/capacity/tasks()` — MegaCube 管理面（cmsd socket）查询，能力门控
 //!
 //! 阶段 C 新增（多对话历史）：
 //! - `list_sessions()` / `create_session()` / `load_session(id)`
@@ -27,6 +28,7 @@ pub(crate) mod browser;
 pub(crate) mod builtin;
 pub(crate) mod chat;
 pub(crate) mod checkpoints;
+pub(crate) mod cms;
 pub(crate) mod codex;
 pub(crate) mod computer_use;
 pub(crate) mod connectors;
@@ -54,6 +56,8 @@ pub(crate) mod global_shortcut;
 pub(crate) mod interaction;
 pub(crate) mod knowledge;
 pub(crate) mod marketplace;
+#[cfg(feature = "megacube-handoff-acceptance")]
+pub(crate) mod megacube_handoff_acceptance;
 pub(crate) mod memory;
 pub(crate) mod model_store;
 pub(crate) mod monitor;

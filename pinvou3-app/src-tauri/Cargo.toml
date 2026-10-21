@@ -39,6 +39,11 @@ name = "dump_system_prompt"
 path = "src/bin/dump_system_prompt.rs"
 required-features = ["dev-tools"]
 
+[[bin]]
+name = "megacube-handoff-acceptance"
+path = "src/bin/megacube_handoff_acceptance.rs"
+required-features = ["megacube-handoff-acceptance"]
+
 [lib]
 name = "pinvou3_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -53,6 +58,7 @@ default = ["local-embed"]
 local-embed = ["pinvou-knowledge/local-embed"]
 dev-tools = []
 benchmark-hooks = ["dep:agent-backend-api", "deepseek-tui/benchmark-eval-controls"]
+megacube-handoff-acceptance = ["benchmark-hooks"]
 # Non-default adapters used only by the standalone behavior-telemetry test
 # target. Keeping those tests out of the monolithic lib-test harness bounds
 # rustc/ThinLTO memory without exposing the adapters in release builds.

@@ -1,0 +1,151 @@
+#!/usr/bin/env node
+// Production components with a recorded transport: browser integration, not native or model E2E.
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import react from '@vitejs/plugin-react';
+import puppeteer from 'puppeteer-core';
+import { createServer } from 'vite';
+
+const root = fileURLToPath(new URL('..', import.meta.url));
+process.chdir(root);
+const chrome = process.env.CHROME || ['C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/chromium', '/snap/bin/chromium', '/usr/bin/google-chrome'].find(p => fs.existsSync(p));
+if (!chrome) { console.error('SKIP: Chrome is required'); process.exit(2); }
+const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-management-ui-'));
+const output = process.env.CMS_UI_EVIDENCE || path.resolve(root, '../../.qa/device-ui-browser');
+fs.mkdirSync(output, { recursive: true });
+const report = { scope: 'Production components with fixture transport; no native clicks or model lifecycle execution', checks: [], screenshots: [] };
+const vite = await createServer({ root, configFile: false, appType: 'mpa', logLevel: 'error', plugins: [react()], server: { host: '127.0.0.1', port: 0, watch: null } });
+let browser;
+try {
+  await vite.listen();
+  const url = `http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/megacube_management_smoke.html`;
+  browser = await puppeteer.launch({ executablePath: chrome, headless: true, userDataDir: profile, args: ['--no-sandbox', '--disable-gpu'] });
+  const page = await browser.newPage();
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  const visibleText = () => page.evaluate(() => document.body.innerText);
+  async function boot(query = '') {
+    await page.goto(url + query, { waitUntil: 'networkidle0' });
+    await page.waitForSelector('[data-testid="cms-overview"]');
+    await page.waitForFunction(() => window.__cmsCalls.some(call => call.command === 'cms_models') && document.querySelector('[data-testid="cms-service-panel"]'));
+  }
+  for (const lang of ['zh', 'en', 'ja']) for (const width of [1200, 390]) {
+    await page.setViewport({ width, height: 900, deviceScaleFactor: 1 });
+    await boot(`?lang=${lang}${width === 390 ? '&dark=1' : ''}`);
+    let text = await visibleText();
+    for (const hidden of ['/run/megacube', 'engine-sha-internal', 'completed detail', 'task-complete-0', 'key-internal-id', 'plan-history', 'op-history']) assert.ok(!text.includes(hidden), `secondary text visible: ${hidden}`);
+    for (const shown of ['Ornith', 'network_interrupted']) assert.ok(text.includes(shown), `critical text hidden: ${shown}`);
+    assert.equal(await page.$('[data-testid="cms-local-control-panel"]'), null);
+    assert.equal(await page.$('[data-testid="cms-remote-panel"]'), null);
+    assert.equal(await page.evaluate(() => window.__cmsCalls.some(call => /cms_(control|remote)_/.test(call.command))), false);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `${lang}/${width} overflow`);
+    await page.$eval('[data-testid="device-management-view"] .custom-scrollbar', node => { node.scrollTop = 0; });
+    const screenshot = path.join(output, `${lang}-${width}.png`); await page.screenshot({path: screenshot}); report.screenshots.push(screenshot);
+    // Native summary activation and Enter are both supported without an ARIA reimplementation.
+    const summary = await page.$('[data-testid="cms-advanced"] > summary');
+    await summary.focus(); await page.keyboard.press('Enter');
+    assert.ok(!(await visibleText()).includes('engine-sha-internal'));
+    assert.ok(await page.$('[data-testid="cms-engine-row"]'));
+    await page.click('[data-testid="cms-engine-row"] details > summary');
+    assert.ok((await visibleText()).includes('engine-sha-internal'));
+    await page.click('[data-testid="cms-engine-row"] details > summary');
+    await summary.focus();
+    await page.keyboard.press('Enter');
+    assert.ok(!(await visibleText()).includes('engine-sha-internal'));
+    report.checks.push(`${lang}/${width}: consolidated dashboard, friendly engine name with inspectable ID, live failures, keyboard disclosure, no overflow`);
+  }
+  await page.setViewport({ width: 1200, height: 900 }); await boot();
+  const stop = await page.$('.cms-model button.cms-danger'); await stop.click();
+  assert.ok(await page.$('[role="alertdialog"]'));
+  assert.equal(await page.evaluate(() => document.activeElement.closest('[role="alertdialog"]') !== null), true);
+  await page.keyboard.press('Escape');
+  assert.equal(await page.$('[role="alertdialog"]'), null);
+  assert.equal(await page.evaluate(() => document.activeElement.classList.contains('cms-danger')), true);
+  assert.equal(await page.evaluate(() => window.__cmsCalls.some(call => call.command === 'cms_model_action')), false);
+  const externalDisabled = await page.$$eval('.cms-model', rows => [...rows[1].querySelectorAll('button')].every(button => button.disabled));
+  assert.equal(externalDisabled, true);
+  report.checks.push('Stop impact is visible, Escape cancels and returns focus; external model actions disabled; no lifecycle writes');
+  const history = await page.evaluateHandle(() => [...document.querySelectorAll('details')].find(details => details.querySelector(':scope > summary')?.textContent.includes('已结束的任务')));
+  await history.evaluate(details => details.querySelector('summary').click());
+  const historyText = await visibleText();
+  assert.ok(historyText.includes('Completed model')); assert.ok(!historyText.includes('completed detail')); assert.ok(historyText.includes('默认显示最近 20 条'));
+  assert.equal(await history.evaluate(details => details.querySelectorAll('.cms-task').length), 20);
+  await history.evaluate(details => details.querySelector('.cms-task details summary').click());
+  assert.ok((await visibleText()).includes('completed detail'));
+  await history.evaluate(details => [...details.querySelectorAll('button')].find(button => button.textContent.includes('查看全部')).click());
+  await page.waitForFunction(() => [...document.querySelectorAll('details')].some(details => details.querySelector(':scope > summary')?.textContent.includes('已结束的任务') && details.querySelectorAll('.cms-task').length === 25));
+  report.checks.push('Completed task history shows 20 entries initially, expands all 25 on request and retains per-task details');
+  await stop.click();
+  await page.click('[role="alertdialog"] button.cms-danger');
+  await page.waitForFunction(() => document.body.innerText.includes('fixture_action_failure'));
+  assert.equal(await page.evaluate(() => window.__cmsCalls.filter(call => call.command === 'cms_model_action').length), 1);
+  report.checks.push('A rejected fixture action displays the actual error without retrying');
+
+  await boot('?scenario=error');
+  assert.ok((await visibleText()).includes('health_probe_failed'));
+  report.checks.push('Degraded model and unhealthy engine errors visible with advanced details closed');
+  await boot('?scenario=stopped-default');
+  assert.ok(await page.$('[data-testid="cms-default-not-ready"]'));
+  assert.ok(!(await visibleText()).includes('Secondary stopped model'));
+  await page.click('[data-testid="cms-stopped-models"] > summary');
+  assert.ok((await visibleText()).includes('Secondary stopped model'));
+  assert.equal(await page.$eval('[data-testid="cms-overview"]', element => element.innerText.includes('健康')), false);
+  report.checks.push('A stopped default with a reachable health endpoint warns that the gateway may be unavailable');
+  await boot('?scenario=partial');
+  assert.ok((await visibleText()).includes('部分设备查询失败'));
+  assert.ok(!(await visibleText()).includes('暂无登记模型'));
+  report.checks.push('Partial failure is explicit and never shown as an empty inventory');
+  await boot('?scenario=offline');
+  let text = await visibleText();
+  assert.ok(text.includes('设备服务失联')); assert.ok(text.includes('恢复')); assert.ok(!text.includes('External model'));
+  await page.evaluate(() => { window.__cmsOffline = false; });
+  await page.click('[data-testid="cms-panel-refresh"]');
+  await page.waitForFunction(() => document.querySelector('.cms-model')?.innerText.includes('Ornith'));
+  report.checks.push('Offline management pauses model controls, preserves service recovery, refresh reconnects');
+  await boot('?scenario=boot-race');
+  const bootSwitch = '[data-testid="cms-model-startup-ornith15-35b-a3b-nvfp4-tachyon"] [role="switch"]';
+  await page.waitForFunction(selector => !document.querySelector(selector).disabled, {}, bootSwitch);
+  await page.click(bootSwitch);
+  await page.waitForFunction(() => typeof window.__commitBootChange === 'function');
+  await page.evaluate(() => { window.__pauseNextModels = true; });
+  await page.click('[data-testid="cms-panel-refresh"]');
+  await page.waitForFunction(() => typeof window.__releaseOldModels === 'function');
+  await page.evaluate(() => { window.__commitBootChange(); });
+  assert.equal(await page.$eval(bootSwitch, node => node.disabled), true);
+  await page.evaluate(() => { window.__releaseOldModels(); });
+  await page.waitForFunction(selector => {
+    const button = document.querySelector(selector);
+    return !button.disabled && button.getAttribute('aria-checked') === 'false';
+  }, {}, bootSwitch);
+  assert.equal(await page.evaluate(() => window.__cmsCalls.filter(call => call.command === 'cms_model_action').length), 1);
+  report.checks.push('An old in-flight poll cannot re-enable the boot switch before a fresh post-write read confirms the changed preference');
+  await boot('?scenario=quiet');
+  assert.equal(await page.$eval('[data-testid="cms-tasks-panel"]', node => node.open), false);
+  assert.equal(await page.$eval('[data-testid="cms-service-introduction"] details', node => node.open), false);
+  assert.equal(await page.$eval('[data-testid="cms-advanced"]', node => node.open), false);
+  assert.ok(await page.$('.cms-model'));
+  report.checks.push('Idle dashboard keeps models and service accessible while tasks, introduction and diagnostics stay collapsed');
+  assert.ok(!(await visibleText()).includes('runtime_missing'));
+  assert.ok((await page.$eval('[data-testid="cms-stopped-models"] > summary', node => node.innerText)).includes('1 项需关注'));
+  await page.click('[data-testid="cms-stopped-models"] > summary');
+  assert.ok((await visibleText()).includes('runtime_missing'));
+  assert.ok((await visibleText()).includes('legacy-stopped-card'));
+  report.checks.push('Stopped failures retain a visible attention count, original error and recovery controls; blank model names fall back to the card identity');
+  await boot('?scenario=service-repair');
+  assert.equal(await page.$eval('[data-testid="cms-service-advanced"]', node => node.open), false);
+  assert.equal(await page.$eval('[data-testid="cms-service-rollback"]', node => node.offsetParent !== null), true);
+  await page.click('[data-testid="cms-service-rollback"]');
+  await page.waitForSelector('[data-testid="cms-service-confirm"]');
+  await page.keyboard.press('Escape');
+  assert.equal(await page.$('[data-testid="cms-service-confirm"]'), null);
+  assert.equal(await page.evaluate(() => window.__cmsCalls.some(call => call.command === 'cms_service_action')), false);
+  report.checks.push('A broken installation with a retained backup exposes rollback directly; confirmation can be cancelled without a service write');
+  assert.deepEqual(errors, []); report.pageErrors = errors; report.passed = true;
+  fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(report, null, 2));
+  console.log(JSON.stringify({ passed: true, checks: report.checks.length, evidence: output }));
+} catch (error) {
+  report.passed = false; report.error = String(error); fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(report, null, 2)); throw error;
+} finally { await browser?.close(); await vite.close(); fs.rmSync(profile, {recursive: true, force: true}); }

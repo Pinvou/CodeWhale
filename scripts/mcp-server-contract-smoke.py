@@ -1019,8 +1019,11 @@ def main():
         "tencent-docs",
         "session-reader",
         "app-automations",
+        "megacube-admin",
     }
-    print("✅ manifest: 13 个可安装 MCP 清单完整且目录 ID 一致")
+    assert manifests["megacube-admin"]["builtin"] is True
+    assert manifests["megacube-admin"]["visibility"] == "system"
+    print("✅ manifest: 14 个可安装 MCP 清单完整且目录 ID 一致（含引擎释放的 MegaCube 内置工具）")
 
     expected = {
         "weather": {"get_weather"},

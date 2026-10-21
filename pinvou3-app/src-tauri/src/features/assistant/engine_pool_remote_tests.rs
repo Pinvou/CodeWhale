@@ -30,16 +30,18 @@ async fn remote_send_joint_preparation_and_reserved_dispatch_freeze_credentials_
     // Preparation reloads preferences and replaces the bridge's seed model.
     // Pin the global route in this isolated home so the ordinary remote leg
     // cannot probe an unrelated service on the default localhost endpoint.
-    let mut prefs = UserPrefs::default();
-    let mut model = SavedModel::builtin_account_platform();
-    model.id = "fixture-global-model".into();
-    model.model = "fixture-global-wire".into();
-    model.preset = crate::platform::prefs::ModelPreset::Deepseek;
-    model.provider_kind = None;
-    model.base_url = "https://example.invalid/v1".into();
-    prefs.advanced.active_model_id = Some(model.id.clone());
-    prefs.advanced.saved_models = vec![model];
-    prefs.save().unwrap();
+    UserPrefs::update_transaction(|prefs| {
+        let mut model = SavedModel::builtin_account_platform();
+        model.id = "fixture-global-model".into();
+        model.model = "fixture-global-wire".into();
+        model.preset = crate::platform::prefs::ModelPreset::Deepseek;
+        model.provider_kind = None;
+        model.base_url = "https://example.invalid/v1".into();
+        prefs.advanced.active_model_id = Some(model.id.clone());
+        prefs.advanced.saved_models = vec![model];
+        Ok(())
+    })
+    .unwrap();
     let store = SessionStore::boot().unwrap();
     for temporary in [false, true] {
         for (session_id, persona, caller) in [
@@ -1003,4 +1005,186 @@ pub(in crate::features::assistant) mod panic_owner_fixture {
             assert_eq!(self.releases.load(Ordering::SeqCst), count);
         }
     }
+}
+
+/// r3 评审 P2-3：`switch_idle_session_model` 的 CAS 各臂（原会话换模接续是本
+/// PR 的核心声明，此前只有前端 mock 钉 invoke 参数，Rust 侧零覆盖）。
+/// 直接测语义核心（switch_idle_session_model_core）：headless CI 无显示不能
+/// 初始化 GTK 事件循环，凡需要 AppHandle 的池级夹具在那不可用。
+#[tokio::test(flavor = "current_thread")]
+async fn switch_idle_session_model_cas_arms_are_enforced() {
+    let _lock = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let home = TestHome::new();
+    let store = crate::features::sessions::SessionStore::boot().unwrap();
+    let session = store
+        .create_new(
+            "fixture-model".into(),
+            Some("m-current".into()),
+            home.directory.path().to_path_buf(),
+        )
+        .unwrap();
+    let session_id = session.metadata.id.clone();
+    assert_eq!(
+        store.session_model_id(&session_id).as_deref(),
+        Some("m-current")
+    );
+
+    let lifecycles = SessionTurnLifecycles::default();
+    let locks = SessionTurnLocks::default();
+    let core = |sid: &str,
+                model_id: Option<String>,
+                expected: Option<String>,
+                expected_default: Option<String>| {
+        let lifecycles = &lifecycles;
+        let locks = &locks;
+        let store = &store;
+        let sid = sid.to_string();
+        async move {
+            switch_idle_session_model_core(
+                lifecycles,
+                locks,
+                store,
+                &sid,
+                model_id,
+                expected,
+                expected_default,
+                async {},
+            )
+            .await
+        }
+    };
+
+    // 期望失配：stale handoff 不得覆盖当前选择。
+    let stale = core(
+        &session_id,
+        Some("m-new".into()),
+        Some("m-stale".into()),
+        None,
+    )
+    .await;
+    assert!(
+        matches!(&stale, Err(error) if error.to_string() == "session_model_changed"),
+        "stale expectation must be rejected, got {:?}",
+        stale.map_err(|error| error.to_string())
+    );
+    assert_eq!(
+        store.session_model_id(&session_id).as_deref(),
+        Some("m-current")
+    );
+
+    // 无会话模型时走默认模型期望臂：与临时 home 的空默认失配同样拒绝。
+    let stale_default = core(
+        &session_id,
+        Some("m-new".into()),
+        None,
+        Some("m-default".into()),
+    )
+    .await;
+    assert!(
+        matches!(&stale_default, Err(error) if error.to_string() == "session_model_changed"),
+        "stale default expectation must be rejected, got {:?}",
+        stale_default.map_err(|error| error.to_string())
+    );
+
+    // 已删除会话：持久化 handoff 不得复活被删除的对话。
+    let deleted = core("no-such-session", Some("m-new".into()), None, None).await;
+    assert!(deleted.is_err(), "deleted session must be rejected");
+
+    // 在途回合：try_lock 失败必须显式拒绝而不是排队覆盖。
+    let turn_lock = locks.for_session(&session_id).await;
+    let held = turn_lock.lock().await;
+    let busy = core(
+        &session_id,
+        Some("m-new".into()),
+        Some("m-current".into()),
+        None,
+    )
+    .await;
+    assert!(
+        matches!(&busy, Err(error) if error.to_string() == "session_turn_in_progress"),
+        "busy turn must be rejected, got {:?}",
+        busy.map_err(|error| error.to_string())
+    );
+    drop(held);
+
+    // 期望命中：唯一允许写入的臂。
+    let applied = core(
+        &session_id,
+        Some("m-new".into()),
+        Some("m-current".into()),
+        None,
+    )
+    .await;
+    assert!(
+        applied.is_ok(),
+        "matching expectation must apply: {:?}",
+        applied.map_err(|error| error.to_string())
+    );
+    assert_eq!(
+        store.session_model_id(&session_id).as_deref(),
+        Some("m-new")
+    );
+}
+
+/// r5 台账 #1：`switch_session_model_ref` 的锁纪律行为钉。还原为无锁直写时
+/// 本测试必须变红——写入只允许发生在回合锁内（在途回合期间不得改写模型引用，
+/// 否则 handoff CAS 与本路径并发时一侧写入被静默覆盖）。
+#[tokio::test(flavor = "current_thread")]
+async fn switch_session_model_ref_writes_only_inside_the_turn_lock() {
+    let _lock = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let home = TestHome::new();
+    let store = crate::features::sessions::SessionStore::boot().unwrap();
+    let session = store
+        .create_new(
+            "fixture-model".into(),
+            Some("m-current".into()),
+            home.directory.path().to_path_buf(),
+        )
+        .unwrap();
+    let session_id = session.metadata.id.clone();
+    assert_eq!(
+        store.session_model_id(&session_id).as_deref(),
+        Some("m-current")
+    );
+
+    let locks = SessionTurnLocks::default();
+    let turn_lock = locks.for_session(&session_id).await;
+    let held = turn_lock.lock().await;
+
+    let locks_for_task = locks.clone();
+    let sid = session_id.clone();
+    let store_for_task = store.clone();
+    let task = tokio::spawn(async move {
+        switch_session_model_ref_core(
+            &locks_for_task,
+            &store_for_task,
+            &sid,
+            Some(crate::platform::prefs::ModelSelectionRef::local("m-next")),
+            async {},
+        )
+        .await
+    });
+    // current_thread 运行时下，子任务推进到 lock().await 让出为止；足够
+    // 让渡后仍未写入即证明写在锁内。
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        store.session_model_id(&session_id).as_deref(),
+        Some("m-current"),
+        "在途回合期间不得改写模型引用"
+    );
+
+    drop(held);
+    task.await
+        .expect("ref switch task must not panic")
+        .expect("ref switch must apply after the turn lock releases");
+    assert_eq!(
+        store.session_model_id(&session_id).as_deref(),
+        Some("m-next")
+    );
 }

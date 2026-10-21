@@ -158,19 +158,20 @@ function delay(ms) {
 /**
  * 把一次运行从头读到尾。
  * @param {string} runId - 运行 ID。
- * @param {{onChunk:(lines:Array<string>, meta:{awaitingInput:boolean|undefined})=>void, isAlive:()=>boolean, replayLimit?:number|null}} hooks - 行回调、存活判定与回放上限。
+ * @param {{onChunk:(lines:Array<string>, meta:object)=>void, isAlive:()=>boolean, replayLimit?:number|null}} hooks - 行回调、存活判定与回放上限。
  * @returns {Promise<{ok?:boolean, cancelled?:boolean, result?:unknown, error?:unknown, aborted?:boolean}>} 终态。
  */
 async function drainRun(runId, { onChunk, isAlive, replayLimit = null }) {
   let cursor = 0;
+  let fromByte = 0;
+  let partialLine = null;
   let failures = 0;
-  // 第一批可能是整段回放(再附着时游标从 0 起)。只有这一批要裁。
   let pendingReplayTrim = replayLimit !== null;
   for (;;) {
     if (!isAlive()) return { aborted: true };
     let chunk;
     try {
-      chunk = await pollRunLog(runId, cursor);
+      chunk = await pollRunLog(runId, cursor, undefined, fromByte);
       failures = 0;
     } catch (error) {
       failures += 1;
@@ -180,29 +181,52 @@ async function drainRun(runId, { onChunk, isAlive, replayLimit = null }) {
       await delay(POLL_RETRY_MS);
       continue;
     }
-    cursor = Number(chunk?.next ?? cursor);
+    const next = Number(chunk?.next ?? cursor);
+    const nextByte = Number(chunk?.next_byte ?? 0);
     let lines = chunk?.lines || [];
-    if (pendingReplayTrim) {
+    const fragment = chunk?.fragment;
+    if (fragment) {
+      if (fragment.line !== cursor + lines.length || fragment.offset !== fromByte
+        || (partialLine && partialLine.line !== fragment.line)) {
+        return { ok: false, error: 'invalid_log_fragment_cursor' };
+      }
+      partialLine ??= { line: fragment.line, parts: [] };
+      partialLine.parts.push(fragment.text);
+      if (fragment.complete) {
+        lines = [...lines, partialLine.parts.join('')];
+        partialLine = null;
+      }
+    } else if (partialLine) {
+      return { ok: false, error: 'missing_log_fragment' };
+    }
+    const more = next < Number(chunk?.total ?? next) || nextByte > 0;
+    if ((fragment || more) && next === cursor && nextByte <= fromByte) {
+      return { ok: false, error: 'log_cursor_did_not_advance' };
+    }
+    cursor = next;
+    fromByte = nextByte;
+    if (pendingReplayTrim && lines.length > 0) {
       pendingReplayTrim = false;
       if (lines.length > replayLimit) lines = lines.slice(-replayLimit);
     }
-    onChunk(lines, { awaitingInput: chunk?.awaiting_input });
-    if (chunk?.done) {
-      // done 之后再补一次零等待的轮询,把可能漏掉的收尾几行捞回来。
-      //
-      // 服务端取日志快照时,是先拿 lines 的锁、算完行数放掉,再去拿 outcome 的锁。
-      // 工作线程正好在这两个动作之间 push 了最后一行然后 finish() 的话,这次响应
-      // 就是「done:true,但行数少了最后那几行」。而 done 一到我们就不再轮询,
-      // 那几行从此拿不到——偏偏它们通常就是真正的错误原文。
-      //
-      // 窗口很窄,代价也只是一次本机调用,而且整个任务只发这一次。
-      try {
-        const tail = await pollRunLog(runId, cursor, 0);
-        if (tail?.lines?.length) onChunk(tail.lines, { awaitingInput: tail.awaiting_input });
-      } catch {
-        // 补捞失败不影响结论——结论在上一次响应里已经拿到了。
+    // A past prompt from a backlog page cannot be the current input request.
+    onChunk(lines, { awaitingInput: more ? false : chunk?.awaiting_input,
+      backendPending: chunk?.backend_pending === true, unconfirmed: chunk?.unconfirmed === true });
+    if (chunk?.done && !more && !partialLine) {
+      // Legacy servers can take the line snapshot before publishing outcome.
+      // New servers snapshot outcome first and expose total, so all terminal
+      // pages have already been consumed when this branch is reached.
+      if (chunk?.total == null) {
+        try {
+          const tail = await pollRunLog(runId, cursor, 0);
+          if (tail?.lines?.length) onChunk(tail.lines, { awaitingInput: tail.awaiting_input });
+        } catch {
+          // The already observed terminal outcome remains valid.
+        }
       }
-      return { ok: !!chunk.ok, cancelled: !!chunk.cancelled, result: chunk.result, error: chunk.error };
+      return { ok: !!chunk.ok, cancelled: !!chunk.cancelled, result: chunk.result, error: chunk.error,
+        ...(chunk.result_truncated ? { resultTruncated: true } : {}),
+        ...(chunk.error_truncated ? { errorTruncated: true } : {}) };
     }
   }
 }
@@ -225,7 +249,7 @@ function pumpRun(id, runId, { replayLimit = null } = {}) {
   // 用户可能在 run_id 回来之前就点了取消。那一刻 cancelRun 无处可发,意图被记在
   // cancelWanted 里,这里补发——否则作业会照跑到底,而卡片永远停在"取消中…"。
   if (cancelWanted.delete(id)) {
-    cancelRun(runId).catch(() => {});
+    sendCancellation(id, runId);
   }
   return drainRun(runId, {
     replayLimit,
@@ -233,9 +257,9 @@ function pumpRun(id, runId, { replayLimit = null } = {}) {
     // 几十 GB 的下载失去进度和取消入口。用户在面板上关掉任务卡才算真的不要了。
     isAlive: () => taskList.some((task) => task.id === id),
     onChunk: (lines, meta) => {
-      if (lines.length === 0) return;
+      if (lines.length === 0 && !meta?.backendPending && !meta?.unconfirmed && !findTask(id)?.backendPending && !findTask(id)?.unconfirmed) return;
       patch(id, (task) => {
-        const next = reduceLogChunk(task, lines, Date.now());
+        const next = { ...(lines.length ? reduceLogChunk(task, lines, Date.now()) : task), backendPending: meta?.backendPending === true, unconfirmed: meta?.unconfirmed === true };
         // 服务端说现在没人在等输入,那日志里这条提示就是**上一轮已经答过的**。
         // 回放时再弹一次不只是多点一下:用户填的答案会写进一个没人来取的应答槽,
         // 等脚本下一次真的提问时被这份陈答案顶掉(双机部署里那就是拿旧 IP 去连
@@ -273,7 +297,8 @@ function settleTask(id, outcome) {
   if (outcome.ok) {
     // 成功的任务直接从面板上移除,由调用方用一条 toast 报喜。
     dropTask(id);
-    const result = { ok: true, result: outcome.result };
+    const result = { ok: true, result: outcome.result,
+      ...(outcome.resultTruncated ? { resultTruncated: true } : {}) };
     rememberTaskOperationResult(task, result);
     notifySettled(task, result);
     return result;
@@ -281,7 +306,8 @@ function settleTask(id, outcome) {
   const message = outcome.error ? String(outcome.error) : '';
   // 失败的任务留在面板上并自动展开日志,用户可以看清原因再手动关掉。
   patch(id, () => ({ status: 'error', error: message, prompt: null, expanded: true }));
-  const result = { ok: false, error: message };
+  const result = { ok: false, error: message,
+    ...(outcome.errorTruncated ? { errorTruncated: true } : {}) };
   notifySettled(task, result);
   return result;
 }
@@ -389,11 +415,21 @@ async function reattachActiveRuns(describe) {
  * @param {number} id - 任务 id。
  * @returns {void} 无返回。
  */
+function sendCancellation(id, runId) {
+  cancelRun(runId).catch((error) => {
+    // A rejected or unconfirmed cancellation is not a cancelled installation.
+    // Keep polling the accepted task and let the user retry cancellation.
+    patch(id, (task) => task.status === 'cancelling' ? {
+      status: 'running', cancelError: String(error?.message || error), expanded: true,
+    } : {});
+  });
+}
+
 function cancelTask(id) {
   const runId = runIds.get(id);
-  patch(id, () => ({ status: 'cancelling', prompt: null }));
+  patch(id, () => ({ status: 'cancelling', prompt: null, cancelError: null }));
   if (runId) {
-    cancelRun(runId).catch(() => {});
+    sendCancellation(id, runId);
   } else {
     // run_id 还没回来。记下意图,等它落地时补发(见 pumpRun)。
     cancelWanted.add(id);

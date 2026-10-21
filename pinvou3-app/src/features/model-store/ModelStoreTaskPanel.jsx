@@ -161,6 +161,8 @@ function taskSubtitle(task, copy) {
   // 用户会以为是出错了。
   if (task.status === 'cancelled') return copy.taskCancelled;
   if (task.status === 'cancelling') return copy.taskCancelling;
+  if (task.unconfirmed) return copy.taskBackendUnconfirmed;
+  if (task.status === 'running' && task.backendPending) return copy.taskBackendPending;
   if (task.prompt) return copy.taskWaitingInput;
   const percent = progressPercent(task.progress);
   if (percent === null) return task.lines[task.lines.length - 1] || copy.taskRunning;
@@ -220,6 +222,8 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
           <ChevronIcon size={14} />
         </button>
       </div>
+
+      {task.cancelError && !isTerminal ? <p role="alert" className={`mx-4 mt-2 break-words text-[11px] ${TEXT_DANGER}`}>{copy.taskCancelUnconfirmed} {task.cancelError}</p> : null}
 
       {percent === null || isTerminal ? null : (
         <div className="mt-2 px-4">

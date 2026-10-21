@@ -134,7 +134,7 @@ fn setup(card: &str, base: &str) -> SavedModel {
     let row: SavedModel = serde_json::from_value(serde_json::json!({
         "id":"stable-id", "name":"My label", "alias":"My alias",
         "preset":"openai_compatible", "provider_kind":"custom", "model":"wire",
-        "base_url":base, "model_store_card_id":card, "context_window_tokens":32768,
+        "base_url":base, "model_store_card_id":card, "store_card_id":card, "context_window_tokens":32768,
         "max_output_tokens":4096, "reasoning_effort":"high", "vision_model_id":"vision"
     }))
     .unwrap();
@@ -508,6 +508,7 @@ fn successful_enable_repairs_same_route_and_notifies_only_after_persistence() {
                     run_id.into(),
                     from,
                     Some(1),
+                    None,
                 ))
                 .unwrap();
             if result["done"] == true {

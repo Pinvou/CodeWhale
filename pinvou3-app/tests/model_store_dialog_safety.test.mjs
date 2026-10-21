@@ -26,6 +26,13 @@ const STORE_UI = read('src', 'features', 'model-store', 'model-store-ui.jsx');
 const LANGS = ['zh', 'en', 'ja'];
 const DICTS = new Map(LANGS.map((lang) => [lang, read('src', 'shared', 'i18n', `${lang}.js`)]));
 
+test('key creation and secret retrieval require declared authentication enforcement', () => {
+  assert.match(DETAIL_DIALOG, /modelDetail\?\.api_key_enforced === true\s*\? await fetchApiKeys/);
+  assert.match(DETAIL_DIALOG, /detail\.api_key_enforced === true && <div[\s\S]*?data-testid="model-store-add-key"/);
+  assert.match(DETAIL_DIALOG, /model-store-key-auth-unavailable/);
+  for (const text of DICTS.values()) assert.ok(text.includes('keysUnavailable:'));
+});
+
 /**
  * 取出词典里某个键的字符串字面量值。
  *

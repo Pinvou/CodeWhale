@@ -23,6 +23,8 @@ const MobileTopBar = lazy(() =>
   import('../components/layout/MobileShell.jsx').then((m) => ({ default: m.MobileTopBar })));
 const ControlledOpenRecovery = lazy(() => import('../features/remote-control/ControlledOpenRecovery.jsx'));
 import { bridge, useBridgeState, usePlatformCapability, activeModelIsLocal } from '../hooks/useBridge.js';
+const CmsdTaskRuntime = lazy(() => VIEW_LOADERS.cmsdTaskRuntime().then(module => ({ default: module.CmsdTaskRuntime })));
+import { useCmsdEventBuffer } from '../features/megacube/use-cmsd-event-buffer.js';
 import { useCompactViewport, useVisualViewportHeight } from '../hooks/useViewport.js';
 import { useSystemDarkMode } from '../hooks/useSystemDarkMode.js';
 import { useModalIsolation } from '../hooks/useModalIsolation.js';
@@ -142,9 +144,9 @@ const LazyScheduledTasksView = lazy(() => VIEW_LOADERS.scheduled().then(m => ({ 
 const LazyBrowserView = lazy(() => VIEW_LOADERS.browser().then(m => ({ default: m.BrowserView })));
 const LazyKnowledgeView = lazy(() => VIEW_LOADERS.knowledge().then(m => ({ default: m.KnowledgeView })));
 const LazyModelStoreView = lazy(() => VIEW_LOADERS.modelStore().then(m => ({ default: m.ModelStoreView })));
-const LazyMonitorView = lazy(() => VIEW_LOADERS.monitor().then(m => ({ default: m.MonitorView })));
-// MegaCube 设备管理页：内嵌 MonitorView（chunk 间静态依赖，预取 deviceManager
-// 会连带拉下 monitor chunk），仅 megacubeDevice 平台经渲染开关挂载。
+const LazyMonitorView = lazy(() => VIEW_LOADERS.monitor().then(m => ({ default: m.DeviceManagementView })));
+const LazyModelGuidancePanel = lazy(() => VIEW_LOADERS.modelGuidance().then(m => ({ default: m.ModelGuidancePanel })));
+// The parent device overview stays inside the existing device destination.
 const LazyDeviceManagerView = lazy(() => VIEW_LOADERS.deviceManager().then(m => ({ default: m.DeviceManagerView })));
 const LazySearchView = lazy(() => VIEW_LOADERS.search().then(m => ({ default: m.SearchView })));
 const LazyTeamRelayView = lazy(() => VIEW_LOADERS.teamRelay().then(m => ({ default: m.TeamRelayView })));
@@ -270,7 +272,7 @@ const NAV_PREFETCH = {
   modelStore: () => prefetchView('modelStore'),
   outputs: () => prefetchView('knowledge'),
   monitor: () => prefetchView('monitor'),
-  deviceManager: () => prefetchView('deviceManager'),
+  deviceManager: () => Promise.all([prefetchView('monitor'), prefetchView('deviceManager')]),
   toolStore: () => prefetchView('toolStore'),
   cardpool: () => prefetchView('cardpool'),
   browser: () => prefetchView('browser'),
@@ -1198,6 +1200,15 @@ const App = () => {
       // `model_store_availability`,而这一处漏改——调用抛「命令不存在」、被吞掉、
       // 入口永远不渲染。界面上没有任何异常,只是那个功能凭空消失了,查了一轮才找到。
       const [modelStoreAvailable, setModelStoreAvailable] = useState(false);
+      const localSetupSupported = usePlatformCapability('localModelSetup');
+      const [deviceManagement, setDeviceManagement] = useState({ isCube: false, managementAvailable: false });
+      const [monitorSection, setMonitorSectionState] = useState(null);
+      const setMonitorSection = useCallback((section) => {
+        // A tab switch owns navigation just like leaving the device destination.
+        // Late diagnostics still deliver once, but cannot reopen the chat view.
+        browserUiTransitionGateRef.current?.invalidate('view');
+        setMonitorSectionState(section);
+      }, []);
       const { updates: modelStoreUpdates, hasUnread: modelStoreHasUnread, reconcile: reconcileModelStoreUpdates } = useModelStoreStartupUpdates(modelStoreAvailable, currentView === 'modelStore');
       useEffect(() => {
         let alive = true;
@@ -1466,6 +1477,11 @@ const App = () => {
       // 兜底 zh 是活腿:入口 ensureLanguageWithZhFallback 在首选语言 chunk 装载
       // 失败时已装载 zh,此处 zhDict() 因此非空(两者都失败才落空表,见该函数注释)。
       const t = dict[language] || zhDict();
+      const monitorDevice = {
+        ...deviceManagement,
+        isCube: deviceManagement.isCube || megacubeDevice,
+      };
+      const monitorTitle = megacubeDevice ? t.deviceMgr : monitorDevice.isCube ? t.deviceManagement : t.monitor;
       // The desk-pet reply consumption loop (mounted once) reads a latest-ref mirror of current-language error copy.
       const petI18nTextRef = useRef(null);
       petI18nTextRef.current = t.uiMainApp;
@@ -1976,6 +1992,9 @@ const App = () => {
       // 长文案调用方自带 duration；multiline（r8）再放开宽度截断——窄窗口上
       // 80vw 单行仍会裁掉补救指引的尾部，改为可换行 + 圆角大卡形态。
       const [settingsToast, setSettingsToast] = useState('');
+      // Explicit switch tasks hand the originating conversation to their target;
+      // unrelated device-default changes do not select a conversation model.
+      const cmsdEventBuffer = useCmsdEventBuffer({ bridge, snapshot: bs });
       const settingsToastText = (settingsToast && typeof settingsToast === 'object') ? settingsToast.text : settingsToast;
       const settingsToastDuration = (settingsToast && typeof settingsToast === 'object' && Number.isFinite(settingsToast.duration))
         ? settingsToast.duration : 3000;
@@ -2789,6 +2808,10 @@ const App = () => {
       }, [closeMobileSidebar, runBrowserUiTransition, setCurrentView]);
 
       function openSettingsSection(section = 'general') {
+        if (section === 'megacube') {
+          setMonitorSection('management');
+          return navigateFromScheduledRun('monitor');
+        }
         // 记录进入设置前的页面（代码页齿轮等深链入口），关闭设置时原路返回，
         // 而不是一律回工作页。
         if (currentView !== 'settings') settingsReturnViewRef.current = currentView;
@@ -4042,14 +4065,13 @@ const App = () => {
       // 未读红点与侧栏入口同源，避免两套提醒逻辑漂移。
       const scheduledUnread = !!(bs && ((bs.scheduledTasks || []).some(task => task.hasUnreadRuns)
         || (bs.scheduledTaskRecentRuns || []).some(run => run && run.unread)));
-      // MegaCube 一体机把「运行状态」入口换成「设备管理」：视图已是
-      // DeviceManagerView，顶栏标题须与侧栏 label 同用 megacubeDevice 口径，
-      // 否则顶栏仍写「运行状态」与实际视图漂移（第九轮评审 P3）。
+      // The shared device destination uses one title for sidebar and mobile;
+      // its status tab hosts diagnostics on MegaCube and runtime metrics elsewhere.
       const mobileTitle = currentView === 'chat'
         ? ((((chatHistory || []).find(c => c.id === activeChat)) || {}).title || 'PINVOU')
         : currentView === 'codex'
           ? ((((codexHistory || []).find(c => c.id === activeCodexId)) || {}).title || t.uiCodex.untitledSession)
-        : ({ search: t.searchChats, scheduled: t.scheduledPlans, monitor: megacubeDevice ? t.deviceMgr : t.monitor, cardpool: t.cardPool, toolStore: t.toolStore, teamRelay: t.teamRelay, outputs: t.outputs, knowledge: t.knowledge, modelStore: t.modelStore, settings: t.settings, browser: t.browser }[currentView] || 'PINVOU');
+        : ({ search: t.searchChats, scheduled: t.scheduledPlans, monitor: monitorTitle, cardpool: t.cardPool, toolStore: t.toolStore, teamRelay: t.teamRelay, outputs: t.outputs, knowledge: t.knowledge, modelStore: t.modelStore, settings: t.settings, browser: t.browser }[currentView] || 'PINVOU');
       const mobileNavigate = (view, beforeNavigate) => {
         setMobileMoreOpen(false);
         navigateFromScheduledRun(view, beforeNavigate);
@@ -4164,11 +4186,11 @@ const App = () => {
       }), [navigateFromScheduledRun]);
       const navPickUpHandlers = useMemo(() => ({
         outputs: (geom) => beginTearOff('outputs', undefined, t.outputs, geom),
-        monitor: (geom) => beginTearOff('monitor', undefined, t.monitor, geom),
+        monitor: (geom) => beginTearOff('monitor', undefined, monitorTitle, geom),
         toolstore: (geom) => beginTearOff('toolstore', undefined, t.toolStore, geom),
         cardpool: (geom) => beginTearOff('cardpool', undefined, t.cardPool, geom),
         knowledge: (geom) => beginTearOff('knowledge', undefined, t.knowledge, geom),
-      }), [t, beginTearOff]);
+      }), [t, monitorTitle, beginTearOff]);
       const openSearchOverlay = useCallback(() => {
         prefetchView('searchOverlay');
         setSearchOverlayOpen(true);
@@ -4401,6 +4423,11 @@ const App = () => {
             </ViewErrorBoundary>,
             document.body
           )}
+
+          <ViewErrorBoundary t={t}><Suspense fallback={null}>
+            <CmsdTaskRuntime bridge={bridge} snapshot={bs} modelStoreAvailable={modelStoreAvailable}
+              copy={t.uiMegacube} onNotice={setSettingsToast} eventBuffer={cmsdEventBuffer} onDeviceChange={setDeviceManagement} />
+          </Suspense></ViewErrorBoundary>
 
           {settingsToast && createPortal(
             // Layer sits above modal overlays (picker backdrop is z-[200]) so a
@@ -4725,7 +4752,7 @@ const App = () => {
                   显式关闭拖拽拆离（dragKind/onPickUp 传 undefined）。悬停预取切换
                   到 deviceManager loader（其 chunk 静态依赖 monitor，一并拉取）。 */}
               <NavItem
-                icon={NAV_ICON_MONITOR} label={megacubeDevice ? t.deviceMgr : t.monitor}
+                icon={NAV_ICON_MONITOR} label={monitorTitle}
                 active={currentView === 'monitor'}
                 theme={activeTheme}
                 isSidebarOpen={isSidebarOpen}
@@ -5150,8 +5177,16 @@ const App = () => {
           {bridge.available && <ViewErrorBoundary t={t}><Suspense fallback={null}><LazyModelAccessController modelsBridge={bridge.models} accountTransport={bridge.accountPlatform} onClient={setPersonalAccountClient} enabled sessionId={bs?.activeSessionId} selectionKey={JSON.stringify(bs?.pendingDraftModelRef || bs?.currentSessionModelRef || bs?.defaultModelRef)} modelState={bs} onChange={setModelAccess} /></Suspense></ViewErrorBoundary>}
           <div className={`flex-1 flex relative min-w-0 overflow-hidden ${activeTheme === 'dark' ? 'bg-[#131314]' : 'bg-white'} ${isCompactShell ? '' : 'rounded-tl-[28px]'}`}>
             <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
+            {localSetupSupported && currentView === 'chat' && !isControlledChatActive && !isRemoteChatActive && <div className="relative z-10 max-h-[55vh] shrink-0 overflow-auto">
+              <ViewErrorBoundary t={t}><Suspense fallback={null}>
+                <LazyModelGuidancePanel copy={t.uiMegacube.guidance} device={deviceManagement}
+                  modelSelection={{ modelRef: bs?.pendingDraftModelRef || bs?.currentSessionModelRef || bs?.defaultModelRef, currentSessionModelId: bs?.currentSessionModelId, activeModelId: bs?.activeModelId, effectiveModelConfig: bs?.effectiveModelConfig }}
+                  savedModels={bs?.savedModels || []}
+                  onOpenSettings={() => openSettingsSection('megacube')}
+                  onOpenModelStore={modelStoreAvailable ? () => setCurrentView('modelStore') : undefined} />
+              </Suspense></ViewErrorBoundary>
+            </div>}
             {modelAccessNoticeOpen && <ViewErrorBoundary t={t}><Suspense fallback={null}><LazyModelAccessGate variant="notice" access={modelAccessState} language={language} theme={activeTheme} t={t} busy={modelAccess.refreshStatus === 'checking'} onLogin={() => setModelAccessLoginOpen(true)} onRetry={() => void modelAccess.refresh()} onUseExternalModels={openModelAccessSettings} /></Suspense></ViewErrorBoundary>}
-
 
             {/* Gemini Style Background Glow */}
             {(currentView === 'chat'
@@ -5171,18 +5206,17 @@ const App = () => {
                 复位,其余视图不受一次失败牵连。 */}
             <ViewErrorBoundary t={t} resetKey={currentView}>
               <Suspense fallback={<ViewFallback />}>
-            {/* MegaCube：monitor 视图位渲染设备管理页（内嵌 MonitorView）；
-                其余平台保持原运行状态页，行为零变化。 */}
-            {currentView === 'monitor' && (megacubeDevice ? (
-              <LazyDeviceManagerView
-                theme={activeTheme} t={t} bs={bs}
-                onOpenChat={openDeviceDoctorChat}
-                captureChatOwnership={captureDeviceChatOwnership}
-                onOpenModelStore={openModelStoreFromDevice}
-              />
-            ) : (
-              <LazyMonitorView theme={activeTheme} t={t} bs={bs} />
-            ))}
+            {currentView === 'monitor' && <LazyMonitorView theme={activeTheme} t={t} bs={bs}
+              device={monitorDevice} section={monitorSection} onSectionChange={setMonitorSection}
+              onOpenModelStore={modelStoreAvailable ? navNavigateHandlers.modelStore : undefined}
+              statusContent={megacubeDevice ? (
+                <LazyDeviceManagerView
+                  theme={activeTheme} t={t} bs={bs}
+                  onOpenChat={openDeviceDoctorChat}
+                  captureChatOwnership={captureDeviceChatOwnership}
+                  onOpenModelStore={openModelStoreFromDevice}
+                />
+              ) : undefined} />}
             {currentView === 'settings' && (
               <ViewErrorBoundary heading={t.uiSettingsDetail.settingsLoadFailed} detail={t.uiSettingsDetail.settingsLoadFailedDetail} t={t}>
                 <LazySettingsView
@@ -5566,7 +5600,7 @@ const App = () => {
                 onClick: () => mobileNavigate('chat') },
               { key: 'cardpool', label: t.cardPool, icon: <Layers size={18} />,
                 active: currentView === 'cardpool', onClick: () => mobileNavigate('cardpool', () => setPoolMyOnly(false)) },
-              { key: 'monitor', label: megacubeDevice ? t.deviceMgr : t.monitor, icon: <BarChart2 size={18} />,
+              { key: 'monitor', label: monitorTitle, icon: <BarChart2 size={18} />,
                 active: currentView === 'monitor',
                 onClick: () => mobileNavigate('monitor', () => {
                   const liveBridge = window.TauriBridge || bridge;

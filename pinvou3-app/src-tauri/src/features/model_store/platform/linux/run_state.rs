@@ -28,6 +28,8 @@ impl CancelRegistry {
         let control = RunControl {
             cancel: Some(Arc::new(AtomicBool::new(false))),
             prompt: Some(Arc::new(PromptSlot::default())),
+            run_id: Some(run_id.to_string()),
+            ..Default::default()
         };
         self.0.lock().insert(run_id.to_string(), control.clone());
         control
@@ -155,12 +157,12 @@ impl ActiveCardOps {
     }
 
     /// 现在有没有下载在跑。清理下载缓存前要确认——别把正在写的临时块删了。
-    /// 只看下载：部署/启用这些不碰 .incomplete，没必要一并挡住。
+    /// 只看下载类操作（商店下载 + 本地卡片安装，后者同样会跑 download_model）：
+    /// 部署/启用这些不碰 .incomplete，没必要一并挡住。
     pub fn any_download_running(&self) -> bool {
-        self.0
-            .lock()
-            .values()
-            .any(|e| e.op == OP_DOWNLOAD || e.op.kind == "version_stage")
+        self.0.lock().values().any(|e| {
+            e.op == OP_DOWNLOAD || e.op == OP_INSTALL_LOCAL || e.op.kind == "version_stage"
+        })
     }
 
     /// 这张卡上还在跑的那次长操作。界面按卡片接回任务卡时问的就是它。
@@ -197,6 +199,13 @@ pub const OP_DOWNLOAD: CardOp = CardOp {
     kind: "download",
     label: "下载",
 };
+/// 本地卡片安装（install_local）：执行已经物化在 cards/<id>/ 的卡。含的段比
+/// 商店下载多一步部署，但权重那段同样走下载队列、同样碰 .incomplete，
+/// 所以排队/缓存清理都按下载类操作对待。
+pub const OP_INSTALL_LOCAL: CardOp = CardOp {
+    kind: "install_local",
+    label: "安装本地卡片",
+};
 pub const OP_DEPLOY: CardOp = CardOp {
     kind: "deploy",
     label: "部署",
@@ -212,6 +221,10 @@ pub const OP_STOP: CardOp = CardOp {
 pub const OP_UNINSTALL: CardOp = CardOp {
     kind: "uninstall",
     label: "卸载",
+};
+pub const OP_UNINSTALL_RECOVERY: CardOp = CardOp {
+    kind: "uninstall_recovery",
+    label: "核实并恢复模型维护",
 };
 /// 强制移除只借用卡片互斥（真有卸载正在删文件时不能把记录抽走），它同步做完、
 /// 没有 run_id，所以不会出现在「活跃运行」里——界面也没有东西需要接回去。
@@ -352,6 +365,13 @@ mod tests {
         assert!(ops.any_download_running());
 
         ops.finish("card-b");
+        assert!(!ops.any_download_running());
+
+        // 本地卡片安装同样会跑 download_model、碰 .incomplete，必须一并挡住清理
+        ops.try_begin("card-c", OP_INSTALL_LOCAL, Some("run-c"))
+            .unwrap();
+        assert!(ops.any_download_running());
+        ops.finish("card-c");
         assert!(!ops.any_download_running());
     }
 

@@ -63,6 +63,7 @@ function specLine(model) {
  */
 function PrimaryAction({ model, copy, busyKind, onDownload, onDeploy, onEnable, onStop }) {
   const busy = !!busyKind;
+  const observed = model.record?.cmsd?.managed === false;
   // 正在跑的那个操作才显示进行时文案。不分命令一律显示「启用中…」的话，点「重新
   // 部署」时界面会写着「启用中…」而任务卡写着「部署…」，自相矛盾。
   const label = (kind, running, idle) => (busyKind === kind ? running : idle);
@@ -99,7 +100,7 @@ function PrimaryAction({ model, copy, busyKind, onDownload, onDeploy, onEnable, 
       <button
         type="button"
         className={`${BTN_PRIMARY} ${ACTION_MIN_W}`}
-        disabled={busy}
+        disabled={busy || (observed && !model.record.cmsd.canAdopt)}
         data-testid="model-store-enable"
         onClick={(event) => { event.stopPropagation(); onEnable(model.record); }}
       >
@@ -112,7 +113,7 @@ function PrimaryAction({ model, copy, busyKind, onDownload, onDeploy, onEnable, 
     <button
       type="button"
       className={`${BTN_DANGER} ${ACTION_MIN_W}`}
-      disabled={busy}
+      disabled={busy || observed}
       data-testid="model-store-stop"
       onClick={(event) => { event.stopPropagation(); onStop(model.record); }}
     >
@@ -196,6 +197,30 @@ function ModelRow({ model, copy, busyKind, onOpen, onDownload, onDeploy, onEnabl
         <div className="mt-0.5 truncate text-[13px] font-medium text-slate-500 dark:text-slate-400">
           {specLine(model)}
         </div>
+        {/* 管理归属单列展示，避免与下载/部署/运行状态混为一谈。 */}
+        {model.record?.cmsd && <div className="mt-1 flex flex-wrap items-center gap-1 text-[10px] text-slate-500 dark:text-slate-400" data-testid="model-store-row-ownership">
+          <span>{copy.cmsdOwnership}</span>
+          <span
+              data-testid="model-store-row-cmsd"
+              title={
+                !model.record.cmsd.managed ? copy.cmsdObservedHint : model.record.cmsd.restartCount > 0
+                  ? copy.cmsdRestarts(model.record.cmsd.restartCount)
+                  : copy.cmsdManagedHint
+              }
+              className={`shrink-0 rounded-full px-1.5 py-0.5 font-semibold ${model.record.cmsd.managed ? 'bg-violet-50 text-violet-700 dark:bg-violet-500/10 dark:text-violet-300' : 'bg-slate-100 text-slate-600 dark:bg-white/5 dark:text-slate-400'}`}
+            >
+              {model.record.cmsd.managed ? copy.cmsdManaged : copy.cmsdObserved}
+          </span>
+          {model.record?.cmsd?.degraded ? (
+            <span
+              data-testid="model-store-row-cmsd-degraded"
+              title={model.record.cmsd.degradedReason || ''}
+              className="shrink-0 rounded-full bg-red-50 px-1.5 py-0.5 text-[10px] font-semibold text-red-700 dark:bg-red-500/10 dark:text-red-300"
+            >
+              {copy.cmsdDegraded}
+            </span>
+          ) : null}
+        </div>}
         {model.record && model.record.card_source !== 'builtin' ? (
           <>
           <button

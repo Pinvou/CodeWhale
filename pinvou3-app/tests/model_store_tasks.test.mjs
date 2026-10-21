@@ -27,6 +27,7 @@ import {
 const scripts = new Map();
 /** 每个命令被调了多少次，用来断言"轮询真的停了"。 */
 const callCounts = new Map();
+let cancelFailure = null;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -42,13 +43,14 @@ globalThis.__TAURI__ = {
       if (command === 'model_store_run_log') {
         const script = scripts.get(payload.runId);
         if (!script) throw new Error(`没有这个运行记录：${payload.runId}`);
-        const chunk = script(payload.from);
+        const chunk = script(payload.from, payload.fromByte ?? 0);
         // 没有新行的那一档要稍微挂一下：真实服务端 wait=25 秒，测试里挂几毫秒
         // 就够，否则轮询循环会变成忙等把这个文件跑成死循环。
         if (!chunk.done && (chunk.lines || []).length === 0) await sleep(5);
         return chunk;
       }
       if (command === 'model_store_cancel_run' || command === 'model_store_answer_run') {
+        if (command === 'model_store_cancel_run' && cancelFailure) throw cancelFailure;
         return { ok: true };
       }
       if (command === 'model_store_active_runs') return { runs: [] };
@@ -59,6 +61,7 @@ globalThis.__TAURI__ = {
 
 const {
   REATTACH_REPLAY_LINES,
+  cancelTask,
   dismissTask,
   getTasks,
   reattachRuns,
@@ -93,6 +96,7 @@ const taskByRunId = (runId) => getTasks().find((task) => task.runId === runId) |
 // 「没有接回进度」的失败就变成 CI 上一个没有任何线索的超时；后面的测试还会被
 // 它持续增长的轮询计数污染。这两件事都真的发生过。
 afterEach(() => {
+  cancelFailure = null;
   for (const task of [...getTasks()]) dismissTask(task.id);
   for (const result of getModelStoreOperationResults()) dismissModelStoreOperationResult(result.id);
 });
@@ -166,6 +170,72 @@ test('同一个后台run的版本结果只披露一次，不因重新接回重�
       start: async () => ({ run_id: 'same-completed-run' }) });
   }
   assert.equal(getModelStoreOperationResults().length, 1);
+});
+
+test('清理结果未完整取得时保留null和截短事实，卸载结果也不能丢弃', async () => {
+  for (const kind of ['version_delete', 'uninstall']) {
+    const runId = `unavailable-${kind}`;
+    scripts.set(runId, (from) => ({ done: true, ok: true, next: from, lines: [],
+      result: null, result_truncated: true }));
+    const outcome = await runTask({ title: kind, kind, key: `card:${runId}`,
+      start: async () => ({ run_id: runId }) });
+    assert.equal(outcome.ok, true);
+    assert.equal(outcome.resultTruncated, true);
+    const stored = getModelStoreOperationResults().find(entry => entry.id === runId);
+    assert.ok(stored, 'a missing result must not hide the completed uninstall');
+    assert.equal(stored.result, null, 'unknown cleanup facts must not become zero or empty paths');
+    assert.equal(stored.resultTruncated, true);
+  }
+});
+
+test('仅展示说明被摘要时保留实际清理计数和路径', async () => {
+  const result = { freed_bytes: 1073741824, purged_weights: true,
+    remaining_paths: ['/retained/model.weights'], summary: 'shortened summary' };
+  scripts.set('summary-only-cleanup', (from) => ({ done: true, ok: true, next: from, lines: [],
+    result, result_truncated: true }));
+  await runTask({ title: 'cleanup', kind: 'version_delete', key: 'card:summary-only-cleanup',
+    start: async () => ({ run_id: 'summary-only-cleanup' }) });
+  const [stored] = getModelStoreOperationResults();
+  assert.equal(stored.resultTruncated, true);
+  assert.deepEqual(stored.result, result);
+  assert.notEqual(stored.result.remaining_paths, result.remaining_paths, 'retained result owns its path snapshot');
+});
+
+test('已受理但商店尚无日志：保持游标并在真实日志出现后保留回放边界', async () => {
+  let materialized = false;
+  const backlog = Array.from({ length: 1000 }, (_, i) => `真实行 ${i}`);
+  scripts.set('run-pending', (from) => {
+    if (!materialized) {
+      assert.equal(from, 0, '等待转交不能消耗商店日志游标');
+      return idleChunk(from, { backend_pending: true });
+    }
+    return from === 0 ? { lines: backlog, next: 1000, done: false } : idleChunk(from);
+  });
+  reattachRuns([{ card_id: 'pending-card', run_id: 'run-pending', kind: 'install_local' }], describe);
+  await waitFor(() => taskByRunId('run-pending')?.backendPending, '没有显示已受理等待状态');
+  assert.deepEqual(taskByRunId('run-pending').lines, []);
+  materialized = true;
+  await waitFor(() => taskByRunId('run-pending')?.lines.length > 0, '没有接上真实日志');
+  const task = taskByRunId('run-pending');
+  assert.equal(task.backendPending, false);
+  assert.equal(task.lines.length, REATTACH_REPLAY_LINES);
+  assert.equal(task.lines.at(-1), '真实行 999');
+});
+
+test('状态无法核实和取消失败不会冒称任务结束，恢复后仍可取消', async () => {
+  scripts.set('run-unconfirmed', (from) => idleChunk(from, { unconfirmed: true }));
+  reattachRuns([{ card_id: 'unknown-card', run_id: 'run-unconfirmed', kind: 'install_local' }], describe);
+  await waitFor(() => taskByRunId('run-unconfirmed')?.unconfirmed, '未知状态被丢弃');
+  const task = taskByRunId('run-unconfirmed');
+  cancelFailure = new Error('installation_cancel_unconfirmed');
+  cancelTask(task.id);
+  await waitFor(() => taskByRunId('run-unconfirmed')?.cancelError, '取消错误被静默吞掉');
+  assert.equal(taskByRunId('run-unconfirmed').status, 'running');
+  cancelFailure = null;
+  cancelTask(task.id);
+  assert.equal(taskByRunId('run-unconfirmed').status, 'cancelling');
+  scripts.set('run-unconfirmed', (from) => ({ lines: [], next: from, done: true, cancelled: true }));
+  await waitFor(() => taskByRunId('run-unconfirmed')?.status === 'cancelled', '未接收到真实取消终态');
 });
 
 /**
@@ -341,4 +411,39 @@ test('关掉任务卡才算真的不要了：轮询随之停下', async () => {
   const before = callCounts.get('model_store_run_log');
   await sleep(60);
   assert.equal(callCounts.get('model_store_run_log'), before, '任务已经关掉，轮询还在继续');
+});
+
+
+test('终态日志跨三页以上仍读至真实total再返回原结果', async () => {
+  const seen = [];
+  scripts.set('run-terminal-pages', (from) => {
+    seen.push(from);
+    return { lines: [`page-${from}`], from, next: from + 1, total: 4, next_byte: 0,
+      done: true, ok: true, result: { original: true }, awaiting_input: false };
+  });
+  const outcome = await runTask({ title: 'paged', kind: 'download', key: 'paged', start: async () => ({ run_id: 'run-terminal-pages' }) });
+  assert.deepEqual(seen, [0, 1, 2, 3]);
+  assert.deepEqual(outcome, { ok: true, result: { original: true } });
+});
+
+test('UTF-8和NUL超长行片段按byte游标无损重组，不冒充新行或提前结束', async () => {
+  const original = '猫\0\\"'.repeat(10000);
+  const parts = [original.slice(0, 10000), original.slice(10000, 20000), original.slice(20000)];
+  const offsets = [0, Buffer.byteLength(parts[0]), Buffer.byteLength(parts[0] + parts[1])];
+  const observed = [];
+  scripts.set('run-fragments', (from, fromByte) => {
+    observed.push([from, fromByte]);
+    if (from === 1) return { lines: ['last line'], next: 2, next_byte: 0, total: 2, done: true, ok: false, error: 'original failure' };
+    const index = offsets.indexOf(fromByte);
+    assert.notEqual(index, -1);
+    const complete = index === 2;
+    return { lines: [], from: 0, next: complete ? 1 : 0,
+      next_byte: complete ? 0 : offsets[index + 1], total: 2,
+      fragment: { line: 0, offset: fromByte, text: parts[index], complete },
+      done: true, ok: false, error: 'original failure' };
+  });
+  const outcome = await runTask({ title: 'fragmented', kind: 'download', key: 'fragmented', start: async () => ({ run_id: 'run-fragments' }) });
+  assert.deepEqual(observed, [[0, 0], [0, offsets[1]], [0, offsets[2]], [1, 0]]);
+  assert.deepEqual(outcome, { ok: false, error: 'original failure' });
+  assert.deepEqual(taskByRunId('run-fragments').lines, [original, 'last line']);
 });

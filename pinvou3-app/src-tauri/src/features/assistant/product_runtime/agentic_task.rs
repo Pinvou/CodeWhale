@@ -1970,10 +1970,7 @@ async fn prompt_with_attachments(
     // drops only the borrow (and with it the setup future) — the blocking
     // task stays joinable for the failure arms instead of detaching
     // mid-write.
-    *staging_in_flight = Some(join);
-    let join = staging_in_flight
-        .as_mut()
-        .expect("the staging handle was parked above");
+    let join = staging_in_flight.insert(join);
     let staged = (&mut *join).await;
     // The await above consumed the parked handle's output: tokio retires the
     // task on that first poll, and any further poll of the handle panics. The
