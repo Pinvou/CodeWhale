@@ -245,7 +245,8 @@ test("report retries survive credential-period renewal without authorizing anoth
     const packet=report();store.append(device,packet,incident);
     device.behavior_collection.collection_period_id="renewed_collection_period";
     assert.equal(store.append(device,{...packet,collection_period_id:"renewed_collection_period",incident_period_id:"fixture_collection_period"},incident).status,"received");
-    assert.throws(()=>store.append(device,{...packet,collection_period_id:"renewed_collection_period",incident_period_id:"another_incident_period"},incident),/incident_not_received/);
+    assert.throws(()=>store.append(device,{...packet,collection_period_id:"renewed_collection_period",incident_period_id:"another_incident_period"},incident),/report_conflict/);
+    assert.throws(()=>store.append(device,{...packet,report_id:"report_other_period_fixture",collection_period_id:"renewed_collection_period",incident_period_id:"another_incident_period"},incident),/incident_period_mismatch/);
   }finally{rmSync(directory,{recursive:true,force:true});}
 });
 
@@ -285,7 +286,7 @@ test("report storage requires incident ownership and active original consent; re
     assert.throws(()=>store.append(device,{...packet,notice_version:""},incident),/consent_invalid/);
     assert.throws(()=>store.append(device,packet,{...incident,device_id:"B"}),/incident_not_received/);
     assert.throws(()=>store.append({...device,behavior_collection:{...device.behavior_collection,status:"ended"}},packet,incident),/collection_inactive/);
-    assert.throws(()=>store.append(device,{...packet,collection_period_id:"other_collection_period"},incident),/incident_not_received/);
+    assert.throws(()=>store.append(device,{...packet,collection_period_id:"other_collection_period"},incident),/collection_inactive/);
     assert.equal(store.append(device,packet,incident).status,"received");
     assert.equal(store.append(device,packet,incident).status,"received");
     assert.throws(()=>store.append(device,{...packet,notes:"different"},incident),/report_conflict/);
@@ -352,12 +353,28 @@ test("HTTP closes the collection/authorization/admin/CSRF/delete loop without pu
   const admin=await call(prefix+"/login",{password:environment.PINVOU_STATS_ADMIN_PASSWORD});
   const analyst=await call(prefix+"/login",{password:environment.PINVOU_BEHAVIOR_ANALYTICS_PASSWORD});
   const groups=await call(prefix+"/behavior/failures",undefined,{cookie:admin.cookie});assert.equal(groups.json.rows.length,1);
+  for (const now of ["0", "abc", "9999999999999"]) {
+    const bounded = await call(prefix+`/behavior/failures?now=${now}`,undefined,{cookie:admin.cookie});
+    assert.equal(bounded.status,200);assert.deepEqual(bounded.json.rows,groups.json.rows);
+  }
   assert.equal((await call(prefix+"/behavior/failures",undefined,{cookie:analyst.cookie})).json.rows.length,0);
   const fingerprint=groups.json.rows[0].fingerprint;
   assert.equal((await call(prefix+`/diagnostics/samples?fingerprint=${fingerprint}`,undefined,{cookie:analyst.cookie})).status,403);
   const samples=await call(prefix+`/diagnostics/samples?fingerprint=${fingerprint}`,undefined,{cookie:admin.cookie});assert.equal(samples.json.incidents.length,1);
   const packet=report({collection_period_id:collection.json.collection_period_id});
   assert.equal((await call(prefix+"/diagnostics/report",{device_id:creds.device_id,report:packet},auth)).status,200);
+  const rebound = witness({event_id:"beh_renewed_incident_fixture",diagnostic_id:"beh_renewed_incident_fixture",
+    collection_period_id:collection.json.collection_period_id,diagnostic_origin_period_id:"fixture_original_period"});
+  const reboundReceipt = await call(prefix+"/behavior/events",{device_id:creds.device_id,events:[rebound]},auth);
+  assert.equal(reboundReceipt.status,200);assert.equal(reboundReceipt.json.results[0].status,"accepted");
+  const frozen = report({report_id:"report_renewed_incident_fixture",incident_id:rebound.diagnostic_id,
+    collection_period_id:"fixture_original_period",incident_period_id:"fixture_original_period"});
+  const exact = JSON.stringify(frozen);
+  const renewed = {device_id:creds.device_id,collection_period_id:collection.json.collection_period_id,report:frozen};
+  assert.equal((await call(prefix+"/diagnostics/report",renewed,auth)).status,200);
+  assert.equal((await call(prefix+"/diagnostics/report",renewed,auth)).status,200);
+  assert.equal(JSON.stringify(frozen),exact);
+  assert.equal((await call(prefix+"/diagnostics/report",{...renewed,collection_period_id:"fixture_original_period"},auth)).status,409);
   const detail=await call(prefix+`/diagnostics/incident?id=${samples.json.incidents[0].id}`,undefined,{cookie:admin.cookie});assert.equal(detail.json.reports.length,1);
   assert.equal((await call(prefix+`/diagnostics/incident?id=${event.diagnostic_id}`,undefined,{cookie:admin.cookie})).status,404);
   const update={fingerprint,issue:{status:"reproduced",fixed_version:""}};

@@ -41,11 +41,28 @@ try {
   await click('Choose logs, text or screenshots');
   await page.waitForFunction(() => document.body.textContent.includes('The operation failed'));
   assert.equal(await page.evaluate(() => window.diagnosticTest.previews.length), 2);
+  await page.evaluate(() => { window.diagnosticTest.previewError = 'diagnostic_preview_expired'; });
+  await click('Create redacted preview');
+  await page.waitForFunction(() => document.body.textContent.includes('The preview expired'));
+  await page.evaluate(() => { window.diagnosticTest.previewError = ''; });
+  await click('Create redacted preview'); await page.waitForSelector('input[type=checkbox]');
+  await page.click('input[type=checkbox]');
+  for (const [code, text] of [['diagnostic_authorization_changed', 'Analytics consent changed'], ['diagnostic_queue_full', 'The report queue is full']]) {
+    await page.evaluate(code => { window.diagnosticTest.submitError = code; }, code);
+    await click('Confirm and queue');
+    await page.waitForFunction(text => document.body.textContent.includes(text), {}, text);
+  }
+  assert.equal(await page.evaluate(() => window.diagnosticTest.submitted.length), 1);
+  await page.evaluate(() => {
+    window.diagnosticTest.reports = [{ report_id: 'ended_report', incident_id: 'incident_fixture_1', status: 'rejected', reason: 'collection_inactive' }];
+  });
+  await click('Refresh');
+  await page.waitForFunction(() => document.body.textContent.includes('The collection period ended and this report was not sent'));
   await page.evaluate(() => { window.diagnosticTest.enabled = false; }); await click('Refresh');
   await page.waitForFunction(() => document.body.textContent.includes('Usage analytics is off'));
   assert.equal(await page.$$eval('button', buttons => buttons.find(item => item.textContent === 'Create redacted preview').disabled), true);
   assert.deepEqual(errors, []);
-  console.log('PASS: diagnostics turn isolation, exact preview consent, edits, attachment limit, queued receipt and opt-out');
+  console.log('PASS: diagnostics turn isolation, exact preview consent, edits, attachment limit, queued receipt, actionable errors, ended-period state and opt-out');
 } finally {
   await browser?.close(); await server?.close(); fs.rmSync(profile, { recursive: true, force: true });
 }

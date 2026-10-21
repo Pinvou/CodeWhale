@@ -993,6 +993,53 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertFalse(_matches_paths_filter("docs/schemas/unrelated.schema.json", rust_full_paths),
                          "do not widen schema routing beyond actual Rust compile inputs")
 
+    def test_diagnostic_redaction_parity_runs_for_both_production_implementations(self):
+        workflow = self.pr_workflow
+        job = _extract_job_block(workflow, "rust-test")
+        step = _step_named(job, "Native and Relay diagnostic redaction parity")
+        self.assertIn("PINVOU_TEST_NATIVE_REDACTION: '1'", step)
+        self.assertIn("run: node --test remote-control-relay/test/diagnostic-redaction.test.js", step)
+        self.assertIn("if: ${{ github.event_name != 'push' }}", step)
+        self.assertNotIn("continue-on-error", step)
+        paths = _rust_full_filter_entries(workflow)
+        expression = _extract_job_level_if(job)[3:-2]
+        for path in [
+            "pinvou3-app/src-tauri/src/features/behavior_telemetry/diagnostic_redaction.rs",
+            "remote-control-relay/diagnostic-redaction.js",
+            "remote-control-relay/test/diagnostic-redaction.test.js",
+            "remote-control-relay/eval/failure-redaction/native-runner.mjs",
+            "remote-control-relay/eval/failure-redaction/native-runner.Cargo.lock",
+        ]:
+            self.assertTrue((ROOT / path).is_file())
+            self.assertTrue(_matches_paths_filter(path, paths), f"parity input skips Rust CI: {path}")
+            for event in ["pull_request", "merge_group"]:
+                self.assertTrue(_evaluate_github_condition(expression, event_name=event,
+                    draft=False, mode="ordinary", rust_full=_matches_paths_filter(path, paths)))
+
+    def test_diagnostic_parity_route_and_opt_in_cannot_be_removed(self):
+        original = self.pr_workflow
+        try:
+            for old in ["              - 'remote-control-relay/diagnostic-redaction.js'\n",
+                        "          PINVOU_TEST_NATIVE_REDACTION: '1'\n"]:
+                self.pr_workflow = original.replace(old, "", 1)
+                self.assertNotEqual(self.pr_workflow, original)
+                with self.assertRaises(AssertionError):
+                    self.test_diagnostic_redaction_parity_runs_for_both_production_implementations()
+        finally:
+            self.pr_workflow = original
+
+    def test_diagnostic_native_runner_lock_uses_existing_production_dependencies(self):
+        fixture = ROOT / "remote-control-relay/eval/failure-redaction/native-runner.Cargo.lock"
+        lock = tomllib.loads(fixture.read_text(encoding="utf-8"))
+        app = tomllib.loads((ROOT / "pinvou3-app/src-tauri/Cargo.lock").read_text(encoding="utf-8"))
+        identity = lambda p: (p["name"], p["version"], p.get("source"), p.get("checksum"))
+        production = {identity(p) for p in app["package"]}
+        native = {identity(p) for p in lock["package"] if p.get("source")}
+        self.assertTrue(native and native.issubset(production))
+        runner = (fixture.parent / "native-runner.mjs").read_text(encoding="utf-8")
+        self.assertIn('"--offline", "--locked"', runner)
+        self.assertIn('readFileSync(new URL("./native-runner.Cargo.lock", import.meta.url))', runner)
+
     def test_rust_telemetry_input_extractor_tracks_both_embedding_forms(self):
         source = ROOT / "pinvou3-app/src-tauri/src/features/behavior_telemetry_tests.rs"
         self.assertEqual(_rust_embedded_telemetry_inputs('''

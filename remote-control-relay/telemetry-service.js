@@ -1796,13 +1796,26 @@ function readCookies(req) {
   return values;
 }
 
-async function readJson(req, limit = MAX_JSON_BYTES) {
+async function readJson(req, limit = MAX_JSON_BYTES, idleTimeoutMs = 0) {
   const chunks = [];
   let size = 0;
-  for await (const chunk of req) {
-    size += chunk.length;
-    if (size > limit) throw new Error("payload_too_large");
-    chunks.push(chunk);
+  let timeout;
+  const armTimeout = () => {
+    if (idleTimeoutMs <= 0) return;
+    clearTimeout(timeout);
+    timeout = setTimeout(() => req.destroy(new Error("request_body_timeout")), idleTimeoutMs);
+    timeout.unref?.();
+  };
+  armTimeout();
+  try {
+    for await (const chunk of req) {
+      armTimeout();
+      size += chunk.length;
+      if (size > limit) throw new Error("payload_too_large");
+      chunks.push(chunk);
+    }
+  } finally {
+    clearTimeout(timeout);
   }
   try {
     return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
@@ -1923,7 +1936,8 @@ export class TelemetryStore {
     // overwrite the evidence needed for an operator to recover the store.
     let saved = loadJson(this.devicesPath, null, validDeviceInventory);
     if (saved === null && [this.eventsPath, this.behaviorEventsPath, this.behaviorPipelinePath,
-      this.deletionTombstonesPath, join(dataDir, "failure-diagnostic-reports.json")].some(path => existsSync(path))) {
+      this.deletionTombstonesPath, join(dataDir, "failure-diagnostic-reports.json"),
+      join(dataDir, "failure-diagnostic-metadata.json")].some(path => existsSync(path))) {
       console.error("[telemetry-error] persistence_read_failed");
       throw new TelemetryHttpError(503, "telemetry_storage_unavailable");
     }
@@ -2030,7 +2044,12 @@ export class TelemetryStore {
     for (const record of this.deletionTombstones) {
       this.removedSubjectHashes.add(record.subject_hash);
       if (record.token_hash) {
-        this.removedCredentialReasons.set(record.token_hash, record.removal_reason || "deleted");
+        const reason = record.removal_reason || "deleted";
+        // A historical expiry row must never downgrade a known deletion to
+        // renewable credentials when both facts survive compaction.
+        if (!this.removedCredentialReasons.has(record.token_hash) || reason === "deleted") {
+          this.removedCredentialReasons.set(record.token_hash, reason);
+        }
       }
       if (record.removal_reason === "deleted"
         && record.hardware_hash && record.registration_secret_hash) {
@@ -2064,6 +2083,8 @@ export class TelemetryStore {
       this.behaviorEventsPath,
       this.behaviorPipelinePath,
       this.deletionTombstonesPath,
+      join(this.dataDir, "failure-diagnostic-reports.json"),
+      join(this.dataDir, "failure-diagnostic-metadata.json"),
     ]) {
       if (existsSync(path)) enforcePrivateFile(path);
     }
@@ -2382,13 +2403,10 @@ export class TelemetryStore {
   }
 
   compactDeletionTombstones(now = Date.now()) {
-    const bySubject = new Map();
+    const byFact = new Map();
     for (const record of this.deletionTombstones) {
-      const current = bySubject.get(record.subject_hash);
-      if (Number(record.result_expires_at) > now) {
-        bySubject.set(record.subject_hash, record);
-      } else if (!current || Number(current.result_expires_at) <= now) {
-        bySubject.set(record.subject_hash, {
+      const active = Number(record.result_expires_at) > now;
+      const compact = active ? record : {
           subject_hash: record.subject_hash,
           ...(record.token_hash ? { token_hash: record.token_hash } : {}),
           removal_reason: record.removal_reason || "deleted",
@@ -2396,10 +2414,17 @@ export class TelemetryStore {
           ...(record.registration_secret_hash
             ? { registration_secret_hash: record.registration_secret_hash }
             : {}),
-        });
-      }
+        };
+      // A subject may have multiple removed credentials or registration
+      // identities. Preserve every blocking fact, independently of row order
+      // and whether an earlier minimal record has an expiry field.
+      const key = JSON.stringify([compact.subject_hash, compact.token_hash, compact.removal_reason,
+        compact.hardware_hash, compact.registration_secret_hash,
+        active ? compact.deletion_request_id : null, active ? compact.request_id : null]);
+      const prior = byFact.get(key);
+      if (!prior || (active && Number(compact.result_expires_at) > Number(prior.result_expires_at))) byFact.set(key, compact);
     }
-    const compacted = [...bySubject.values()];
+    const compacted = [...byFact.values()];
     if (JSON.stringify(compacted) === JSON.stringify(this.deletionTombstones)) return false;
     this.deletionTombstones = compacted;
     this.saveDeletionTombstones();
@@ -3037,13 +3062,12 @@ export function createTelemetryService(options = {}) {
       }
       if (req.method === "POST" && routePath === `${STATS_PREFIX}/api/diagnostics/report`) {
         if (rateLimited(invalidCredentialAttempts, `diagnostic:${requestIp}`, 30)) throw new DiagnosticError(429, "rate_limited");
-        const input = await readJson(req, 2300 * 1024);
+        const input = await readJson(req, 2300 * 1024, 15000);
         const device = store.authenticate(input.device_id, bearer(req));
         if (!device) { rejectUnknownDevice(res, bearer(req), requestIp); return true; }
         store.failureReports.prune(store.devices);
-        const incident = store.behaviorEvents.find(e => e.device_id === device.device_id && e.diagnostic_id === input.report?.incident_id);
-        if (!incident && store.behaviorEvents.some(e => e.device_id === device.device_id && e.event_id === input.report?.incident_id)) throw new DiagnosticError(422, "diagnostic_incident_metadata_missing");
-        json(res, 200, store.failureReports.append(device, input.report, incident));
+        const incident = store.behaviorEvents.find(e => e.device_id === device.device_id && (e.diagnostic_id === input.report?.incident_id || e.event_id === input.report?.incident_id));
+        json(res, 200, store.failureReports.append(device, input.report, incident, input.collection_period_id ?? input.report?.collection_period_id));
         return true;
       }
       if (req.method === "POST" && routePath === `${STATS_PREFIX}/api/behavior/collection/start`) {
@@ -3157,7 +3181,8 @@ export function createTelemetryService(options = {}) {
       }
       if (routePath === `${STATS_PREFIX}/api/behavior/failures` && req.method === "GET") {
         const session = adminAuthorized(req);
-        const filters = Object.fromEntries(new URL(req.url, "http://localhost").searchParams);
+        const filters = Object.fromEntries([...new URL(req.url, "http://localhost").searchParams]
+          .filter(([key]) => ["days", "app_version", "platform", "mode", "provider_key", "diagnostic_code"].includes(key)));
         const rows = failureGroups(store.behaviorEvents, filters, session.role === "operations_admin" ? 1 : Math.max(20, MIN_PRIVACY_GROUP_SUBJECTS));
         json(res, 200, { rows: rows.map(row => ({ ...row, ...store.failureReports.issue(row.fingerprint) })), detail_allowed: session.role === "operations_admin" });
         return true;

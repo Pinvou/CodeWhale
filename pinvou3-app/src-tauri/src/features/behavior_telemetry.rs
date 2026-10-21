@@ -1020,17 +1020,41 @@ impl Outbox {
         Ok(())
     }
 
-    fn rebind_period(&mut self, period_id: &str, generation: u64) -> Result<()> {
-        for record in &mut self.records {
+    fn rebind_period(
+        &mut self,
+        period_id: &str,
+        generation: u64,
+        origins: &HashMap<String, String>,
+    ) -> Result<()> {
+        let mut rebound = self.records.clone();
+        for record in &mut rebound {
             record.collection_period_id = period_id.to_string();
             record.generation = generation;
             if let Some(event) = record.event.as_object_mut() {
+                if let Some(id) = event.get("diagnostic_id").and_then(Value::as_str) {
+                    let known = event
+                        .get("diagnostic_origin_period_id")
+                        .and_then(Value::as_str);
+                    let origin = origins
+                        .get(id)
+                        .map(String::as_str)
+                        .or(known)
+                        .or_else(|| event.get("collection_period_id").and_then(Value::as_str))
+                        .context("diagnostic origin missing")?;
+                    anyhow::ensure!(
+                        known.is_none_or(|prior| prior == origin),
+                        "diagnostic_origin_conflict"
+                    );
+                    let origin = origin.to_owned();
+                    event.insert("diagnostic_origin_period_id".to_owned(), json!(origin));
+                }
                 event.insert(
                     "collection_period_id".to_string(),
                     Value::String(period_id.to_string()),
                 );
             }
         }
+        self.records = rebound;
         self.recalculate_bytes();
         self.rewrite()
     }
@@ -1697,8 +1721,8 @@ mod diagnostics;
 // The standalone lifecycle harness compiles this module without app commands.
 #[cfg_attr(all(test, feature = "behavior-telemetry-test"), allow(unused_imports))]
 pub(crate) use diagnostics::{
-    DiagnosticPreviewRequest, capture_failure_context, confirm_diagnostic, diagnostic_incidents,
-    preview_diagnostic,
+    DiagnosticPreviewRequest, capture_failure_context, confirm_diagnostic, diagnostic_error_code,
+    diagnostic_incidents, preview_diagnostic,
 };
 
 #[path = "behavior_telemetry/remote_control.rs"]

@@ -56,7 +56,7 @@ function boundedText(value, max, bytes = false, redact = redactDiagnosticText) {
 }
 
 export function failureGroups(events, filters = {}, minimumSubjects = 1) {
-  const now = filters.now ?? Date.now();
+  const now = Number.isSafeInteger(filters.now) && filters.now >= 0 ? filters.now : Date.now();
   const days = [1, 7, 30].includes(Number(filters.days)) ? Number(filters.days) : 7;
   const groups = new Map();
   const seen = new Set();
@@ -129,19 +129,38 @@ function validateReport(input, redact = redactDiagnosticText) {
 export class FailureReportStore {
   constructor(directory) {
     this.path = join(directory, "failure-diagnostic-reports.json");
+    this.metadataPath = join(directory, "failure-diagnostic-metadata.json");
+    this.reportEncoding = new WeakMap();
+    this.materialBytes = 2;
     this.state = { reports: [], issues: {}, audit: [], redaction_key: randomBytes(32).toString("hex") };
     this.healthy = true;
+    // A surviving access ledger is evidence of an initialized/interrupted
+    // store, not permission to replace a missing material snapshot with empty
+    // data. Preserve both the orphan and the failure for operator recovery.
+    if (!existsSync(this.path) && existsSync(this.metadataPath)) this.healthy = false;
     if (existsSync(this.path)) {
       try {
         const stat = lstatSync(this.path);
         if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 32 * 1024 * 1024) throw new Error("unsafe");
         this.state = JSON.parse(readFileSync(this.path, "utf8"));
-        if (!this.state || Object.keys(this.state).some(k => !["reports", "audit", "issues", "redaction_key"].includes(k))
+        if (!this.state || Object.keys(this.state).some(k => !["reports", "audit", "issues", "redaction_key", "metadata_version"].includes(k))
           || !Array.isArray(this.state.reports) || this.state.reports.length > 1000
           || !Array.isArray(this.state.audit) || this.state.audit.length > 2000
           || !this.state.issues || typeof this.state.issues !== "object" || Array.isArray(this.state.issues)
           || Object.keys(this.state.issues).length > 2000) throw new Error("corrupt");
-        let migrated = false;
+        let migrated = this.state.metadata_version === undefined;
+        if (this.state.metadata_version !== undefined) {
+          if (this.state.metadata_version !== 1) throw new Error("corrupt");
+          const metadataStat = lstatSync(this.metadataPath);
+          if (!metadataStat.isFile() || metadataStat.isSymbolicLink() || metadataStat.size > 4 * 1024 * 1024) throw new Error("unsafe");
+          const metadata = JSON.parse(readFileSync(this.metadataPath, "utf8"));
+          if (!metadata || metadata.version !== 1 || Object.keys(metadata).some(k => !["version", "audit", "issues"].includes(k))) throw new Error("corrupt");
+          this.state.audit = metadata.audit;
+          this.state.issues = metadata.issues;
+          if (!Array.isArray(this.state.audit) || this.state.audit.length > 2000
+            || !this.state.issues || typeof this.state.issues !== "object" || Array.isArray(this.state.issues)
+            || Object.keys(this.state.issues).length > 2000) throw new Error("corrupt");
+        }
         if (this.state.redaction_key === undefined) {
           this.state.redaction_key = randomBytes(32).toString("hex");
           migrated = true;
@@ -173,24 +192,69 @@ export class FailureReportStore {
             || ![entry.target,entry.actor].every(s=>typeof s==="string" && s.length<=128)) throw new Error("corrupt");
         }
         if (migrated) this.save(this.state);
+        else this.materialBytes = this.encodedReports(this.state.reports).size;
       } catch { this.healthy = false; }
     }
   }
-  ensureHealthy() { if (!this.healthy) fail("diagnostic_storage_unavailable", 503); }
+  ensureHealthy() {
+    if (!this.healthy) fail("diagnostic_storage_unavailable", 503);
+    if (this.state.metadata_version === 1) {
+      try {
+        const stat = lstatSync(this.metadataPath);
+        if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("unsafe");
+      } catch { this.healthy = false; fail("diagnostic_storage_unavailable", 503); }
+    }
+  }
   redactionScope(device, report) {
     return createHmac("sha256",this.state.redaction_key).update(JSON.stringify([device,report])).digest("hex");
   }
-  save(next) {
-    this.ensureHealthy();
-    const bytes = JSON.stringify(next);
-    if (Buffer.byteLength(bytes) > 32 * 1024 * 1024) fail("diagnostic_storage_capacity", 503);
-    if (existsSync(this.path) && lstatSync(this.path).isSymbolicLink()) fail("diagnostic_storage_unavailable", 503);
-    const temporary = `${this.path}.${randomBytes(8).toString("hex")}.tmp`;
+  writePrivate(path, bytes) {
+    if (existsSync(path) && (!lstatSync(path).isFile() || lstatSync(path).isSymbolicLink())) fail("diagnostic_storage_unavailable", 503);
+    const temporary = `${path}.${randomBytes(8).toString("hex")}.tmp`;
     try {
       writeFileSync(temporary, bytes, { mode: 0o600, flag: "wx" });
-      renameSync(temporary, this.path);
-      chmodSync(this.path, 0o600);
+      renameSync(temporary, path);
+      chmodSync(path, 0o600);
     } catch { try { unlinkSync(temporary); } catch { /* original storage failure */ } fail("diagnostic_storage_unavailable", 503); }
+  }
+  encodedReports(reports) {
+    let size = 2 + Math.max(0, reports.length - 1);
+    const records = reports.map(report => {
+      let encoded = this.reportEncoding.get(report);
+      if (encoded === undefined) { encoded = JSON.stringify(report); this.reportEncoding.set(report, encoded); }
+      size += Buffer.byteLength(encoded);
+      return encoded;
+    });
+    return { records, size };
+  }
+  metadataBytes(next) {
+    const bytes = JSON.stringify({ version: 1, audit: next.audit, issues: next.issues });
+    if (Buffer.byteLength(bytes) > 4 * 1024 * 1024) fail("diagnostic_storage_capacity", 503);
+    return bytes;
+  }
+  save(next) {
+    this.ensureHealthy();
+    const encoded = this.encodedReports(next.reports);
+    if (encoded.size > REPORT_MATERIAL_BYTES) fail("diagnostic_report_capacity", 503);
+    const { reports, audit, issues, ...control } = next; void reports; void audit; void issues;
+    // Control data has exactly one authoritative on-disk copy. Leaving stale
+    // audit/issues in the material snapshot would retain them past pruning.
+    const bytes = `${JSON.stringify({ ...control, audit: [], issues: {}, metadata_version: 1 }).slice(0, -1)},"reports":[${encoded.records.join(",")}]}`;
+    if (Buffer.byteLength(bytes) > 32 * 1024 * 1024) fail("diagnostic_storage_capacity", 503);
+    // Publish metadata before its snapshot marker. An interrupted migration
+    // retains the old self-contained snapshot, while a marked snapshot never
+    // silently replaces a missing or corrupt access ledger with an empty one.
+    this.writePrivate(this.metadataPath, this.metadataBytes(next));
+    this.writePrivate(this.path, bytes);
+    this.state = { ...next, metadata_version: 1 };
+    this.materialBytes = encoded.size;
+  }
+  saveMetadata(next) {
+    this.ensureHealthy();
+    if (this.state.metadata_version !== 1) { this.save(next); return; }
+    // Mandatory audit remains synchronous and must succeed before disclosing
+    // material. Only this small bounded ledger is rewritten on read/triage.
+    this.writePrivate(this.metadataPath, this.metadataBytes(next));
     this.state = next;
   }
   prune(devices, now = Date.now()) {
@@ -198,14 +262,13 @@ export class FailureReportStore {
     const reports = this.state.reports.filter(r => devices.has(r.device_id) && r.received_at >= now - 14 * DAY);
     const audit = this.state.audit.filter(r => r.at >= now - 14 * DAY).slice(-2000);
     const issues = Object.fromEntries(Object.entries(this.state.issues).filter(([, issue]) => issue.updated_at >= now - 35 * DAY));
-    if (reports.length !== this.state.reports.length || audit.length !== this.state.audit.length || Object.keys(issues).length !== Object.keys(this.state.issues).length) this.save({ ...this.state, reports, issues, audit });
+    if (reports.length !== this.state.reports.length) this.save({ ...this.state, reports, issues, audit });
+    else if (audit.length !== this.state.audit.length || Object.keys(issues).length !== Object.keys(this.state.issues).length) this.saveMetadata({ ...this.state, issues, audit });
   }
-  append(device, input, incident) {
+  append(device, input, incident, deliveryPeriod = input?.collection_period_id) {
     this.ensureHealthy();
     const report = validateReport(input, diagnosticRedactor(this.redactionScope(device.device_id,input?.report_id)));
-    if (!incident || incident.device_id !== device.device_id || incident.diagnostic_id !== report.incident_id
-      || incident.collection_period_id !== (report.incident_period_id ?? report.collection_period_id)) fail("diagnostic_incident_not_received", 409);
-    if (device.behavior_collection?.status !== "active" || report.collection_period_id !== device.behavior_collection.collection_period_id) fail("collection_inactive", 409);
+    if (device.behavior_collection?.status !== "active" || deliveryPeriod !== device.behavior_collection.collection_period_id) fail("collection_inactive", 409);
     const prior = this.state.reports.find(r => r.device_id === device.device_id && r.report_id === report.report_id);
     if (prior) {
       const currentMatches = prior.redaction_version === 2 && prior.digest === reportDigest(report);
@@ -213,18 +276,23 @@ export class FailureReportStore {
       if (!currentMatches && !legacyMatches) fail("diagnostic_report_conflict", 409);
       return { report_id: prior.report_id, status: "received" };
     }
+    if (incident?.device_id === device.device_id && incident.event_id === report.incident_id && !incident.diagnostic_id) fail("diagnostic_incident_metadata_missing", 422);
+    if (!incident || incident.device_id !== device.device_id || incident.diagnostic_id !== report.incident_id) fail("diagnostic_incident_not_received", 409);
+    if ((incident.diagnostic_origin_period_id ?? incident.collection_period_id) !== (report.incident_period_id ?? report.collection_period_id)) fail("diagnostic_incident_period_mismatch", 409);
     const today = Date.now() - DAY;
     if (this.state.reports.filter(r => r.device_id === device.device_id && r.received_at >= today).length >= 10
       || this.state.reports.length >= 1000) fail("diagnostic_report_rate_limited", 429);
     const stored = { ...report, device_id: device.device_id, fingerprint: diagnosticFingerprint(incident),
       received_at: Date.now(), digest: reportDigest(report), redaction_version: 2 };
     const reports=[...this.state.reports, stored];
-    if (Buffer.byteLength(JSON.stringify(reports)) > REPORT_MATERIAL_BYTES) fail("diagnostic_report_capacity",503);
+    const encoded = JSON.stringify(stored);
+    if (this.materialBytes + Number(this.state.reports.length > 0) + Buffer.byteLength(encoded) > REPORT_MATERIAL_BYTES) fail("diagnostic_report_capacity",503);
+    this.reportEncoding.set(stored, encoded);
     this.save({ ...this.state, reports });
     return { report_id: report.report_id, status: "received" };
   }
   audit(action, target, actor) {
-    this.save({ ...this.state, audit: [...this.state.audit, { at: Date.now(), action, target, actor }].slice(-2000) });
+    this.saveMetadata({ ...this.state, audit: [...this.state.audit, { at: Date.now(), action, target, actor }].slice(-2000) });
   }
   issue(fingerprint) { this.ensureHealthy(); return this.state.issues[fingerprint] || { status: "open", fixed_version: "" }; }
   update(fingerprint, value, actor) {
@@ -233,7 +301,7 @@ export class FailureReportStore {
       || !/^[A-Za-z0-9.+_-]{0,48}$/.test(value.fixed_version) || (value.status === "fixed" && !value.fixed_version)) fail();
     const issue = { ...value, updated_at: Date.now() };
     const issues = Object.fromEntries(Object.entries({ ...this.state.issues, [fingerprint]: issue }).sort((a,b)=>b[1].updated_at-a[1].updated_at).slice(0,2000));
-    this.save({ ...this.state, issues, audit:[...this.state.audit,{at:Date.now(),action:"issue_update",target:fingerprint,actor}].slice(-2000) });
+    this.saveMetadata({ ...this.state, issues, audit:[...this.state.audit,{at:Date.now(),action:"issue_update",target:fingerprint,actor}].slice(-2000) });
     return issue;
   }
   detail(incident, actor) {

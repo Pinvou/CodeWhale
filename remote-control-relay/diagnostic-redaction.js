@@ -105,7 +105,6 @@ const categories = new Set([
   "status",
   "ataskstatus",
   "btaskstatus",
-  "previous_task_status",
   "previoustaskstatus",
   "relayreason",
   "tool",

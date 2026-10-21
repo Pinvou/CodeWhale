@@ -129,7 +129,7 @@ test('retryable delivery and pending privacy controls keep bounded background re
   assert.match(rust, /async fn migrate_endpoint_locked/);
   assert.match(rust, /StatusCode::GONE[\s\S]*device_credentials_expired[\s\S]*recover_expired_credentials/);
   assert.match(rust, /async fn recover_expired_credentials/);
-  assert.match(rust, /rebind_period\(&started\.collection_period_id, generation\)/);
+  assert.match(rust, /diagnostics::origin_periods\(self, generation\)\?[\s\S]*rebind_period\(&started\.collection_period_id, generation, &origins\)/);
   assert.match(rust, /device_data_deleted[\s\S]*handle_authoritative_deletion/);
   assert.match(rust, /async fn handle_authoritative_deletion_locked[\s\S]*collecting\.store\(false[\s\S]*persist_state\(&fresh\)[\s\S]*outbox\.clear\(\)[\s\S]*tasks\.clear\(\)/);
   assert.match(rust, /fn state_after_authoritative_deletion[\s\S]*PersistedState::fresh/);

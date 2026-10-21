@@ -1,6 +1,6 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-window.diagnosticTest = { enabled: true, submitted: [], previews: [], files: [] };
+window.diagnosticTest = { enabled: true, submitted: [], previews: [], files: [], reports: [] };
 window.TauriBridge = {
   available: true,
   state: { getMany: () => ({ platformCapabilities: { failureDiagnosticsSupported: true } }), subscribe: () => () => {} },
@@ -8,13 +8,15 @@ window.TauriBridge = {
     listFailureDiagnostics: async () => ({ enabled: window.diagnosticTest.enabled, incidents: [
       { diagnostic_id: 'incident_fixture_1', session_id: 'session_fixture', turn_id: 'turn_fixture', diagnostic_code: 'rate_limited', diagnostic_steps: [{ stage: 'model', offset_ms: 12 }] },
       { diagnostic_id: 'incident_other_turn', session_id: 'session_fixture', turn_id: 'other_turn', diagnostic_code: 'unknown' },
-    ], reports: window.diagnosticTest.submitted.map(id => ({ report_id: id, incident_id: 'incident_fixture_1', status: 'queued' })) }),
+    ], reports: [...window.diagnosticTest.submitted.map(id => ({ report_id: id, incident_id: 'incident_fixture_1', status: 'queued' })), ...window.diagnosticTest.reports] }),
     pickDiagnosticFiles: async () => window.diagnosticTest.files,
     previewFailureDiagnostic: async request => {
+      if (window.diagnosticTest.previewError) throw new Error(window.diagnosticTest.previewError);
       window.diagnosticTest.previews.push(request);
       return { preview_token: 'preview_fixture_1', report: { notes: request.notes, attachments: [] } };
     },
     submitFailureDiagnostic: async token => {
+      if (window.diagnosticTest.submitError) throw new Error(window.diagnosticTest.submitError);
       window.diagnosticTest.submitted.push(token); return { status: 'queued' };
     },
   },

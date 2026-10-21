@@ -1001,10 +1001,11 @@ impl BehaviorTelemetry {
             generation,
         );
         self.collecting.store(false, Ordering::Release);
+        let origins = super::diagnostics::origin_periods(self, generation)?;
         self.outbox
             .lock()
             .map_err(|_| anyhow::anyhow!("behavior outbox lock poisoned"))?
-            .rebind_period(&started.collection_period_id, generation)?;
+            .rebind_period(&started.collection_period_id, generation, &origins)?;
         self.rebind_lifecycle_state(generation, &started.collection_period_id)?;
         state.device_id = Some(renewed.device_id);
         state.device_token = Some(renewed.device_token);

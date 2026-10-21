@@ -1,6 +1,8 @@
 export const failureDiagnosticsZh = {
+  previewExpired: '预览已过期，请重新预览并确认。', authorizationChanged: '统计授权已变化，请刷新后重新预览。', queueFull: '待发送报告已满，请等待现有报告送达后重试。',
+  collectionInactive: '采集期已结束，本报告未发送；重新开启统计后，请重新预览并确认。',
   remove: '移除附件', serverUpgrade: '服务端尚未支持报告；升级后将自动重试。', incidentPending: '等待故障事件送达后台后重试。',
-  title: '故障诊断与报告', report: '报告此问题', refresh: '刷新', close: '关闭',
+  title: '故障诊断与报告', report: '报告此问题', refresh: '刷新',
   automatic: '开启使用统计时，失败任务会发送不含正文、路径或凭证的错误码和阶段轨迹。详细材料仅在本次预览确认后发送。',
   disabled: '使用统计已关闭。请在数据管理中开启后再提交诊断；关闭统计会清除未发送的诊断包。',
   empty: '没有可关联的故障记录。记录可能尚未生成、已过期，或发生在开启统计之前。',
@@ -11,11 +13,13 @@ export const failureDiagnosticsZh = {
   submit: '确认并排队发送', queued: '已排队；联网后自动重试。可刷新查看接收状态。',
   received: '后台已接收', rejected: '后台拒收，请检查材料后重新预览', busy: '处理中…',
   error: '操作失败。请检查统计状态、文件类型和大小，刷新后重试；已有排队报告不会重复创建。',
-  unavailable: '当前平台不支持本机诊断报告。', timeline: '结构化阶段证据',
+  timeline: '结构化阶段证据',
 };
 export const failureDiagnosticsEn = {
+  previewExpired: 'The preview expired. Create and confirm a new preview.', authorizationChanged: 'Analytics consent changed. Refresh and create a new preview.', queueFull: 'The report queue is full. Wait for pending reports to be delivered.',
+  collectionInactive: 'The collection period ended and this report was not sent. Enable analytics, then create and confirm a new preview.',
   remove: 'Remove attachment', serverUpgrade: 'The server needs an update to accept reports. Delivery will retry.', incidentPending: 'Waiting for the failure event to reach the server before retrying.',
-  title: 'Failure diagnostics and reports', report: 'Report this problem', refresh: 'Refresh', close: 'Close',
+  title: 'Failure diagnostics and reports', report: 'Report this problem', refresh: 'Refresh',
   automatic: 'When usage analytics is enabled, failed tasks send error codes and stage traces without content, paths or credentials. Detailed material is sent only after this preview is confirmed.',
   disabled: 'Usage analytics is off. Enable it in Data management to submit diagnostics. Turning it off clears unsent diagnostic packages.',
   empty: 'No matching failure record. It may not be ready, may have expired, or may predate analytics consent.',
@@ -26,11 +30,13 @@ export const failureDiagnosticsEn = {
   submit: 'Confirm and queue', queued: 'Queued. Delivery retries when online. Refresh to check receipt status.',
   received: 'Received by the server', rejected: 'Rejected by the server. Check the material and create a new preview.', busy: 'Working…',
   error: 'The operation failed. Check analytics status, file type and size, then refresh and retry. Existing queued reports are not duplicated.',
-  unavailable: 'Local diagnostic reports are unavailable on this platform.', timeline: 'Structured stage evidence',
+  timeline: 'Structured stage evidence',
 };
 export const failureDiagnosticsJa = {
+  previewExpired: 'プレビューの有効期限が切れました。再作成して確認してください。', authorizationChanged: '統計への同意が変更されました。更新して再度プレビューしてください。', queueFull: '送信待ちの報告が上限に達しました。送信完了を待ってください。',
+  collectionInactive: '収集期間が終了したため、この報告は未送信です。統計を有効にして再度プレビューし、確認してください。',
   remove: '添付を削除', serverUpgrade: '報告の受信にはサーバーの更新が必要です。自動的に再試行します。', incidentPending: '障害イベントの到着を待って再試行します。',
-  title: '障害診断と報告', report: 'この問題を報告', refresh: '更新', close: '閉じる',
+  title: '障害診断と報告', report: 'この問題を報告', refresh: '更新',
   automatic: '利用統計が有効な場合、失敗したタスクのエラーコードと処理段階を送信します。本文、パス、認証情報は含みません。詳細資料は今回のプレビューを確認した後にのみ送信します。',
   disabled: '利用統計が無効です。診断の送信にはデータ管理で有効にしてください。無効にすると未送信の診断資料は削除されます。',
   empty: '該当する障害記録がありません。未生成、有効期限切れ、または統計への同意前の記録です。',
@@ -41,5 +47,5 @@ export const failureDiagnosticsJa = {
   submit: '確認して送信待ちに追加', queued: '送信待ちです。オンライン時に再試行します。更新して受信状況を確認できます。',
   received: 'サーバーで受信済み', rejected: 'サーバーが拒否しました。資料を確認して再度プレビューしてください。', busy: '処理中…',
   error: '操作に失敗しました。統計の状態、ファイルの種類とサイズを確認し、更新して再試行してください。送信待ちの報告は重複作成されません。',
-  unavailable: 'このプラットフォームではローカル診断の報告を利用できません。', timeline: '構造化された処理段階',
+  timeline: '構造化された処理段階',
 };

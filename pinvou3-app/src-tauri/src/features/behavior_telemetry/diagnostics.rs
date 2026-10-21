@@ -34,6 +34,7 @@ pub(super) fn known_field(field: &str) -> bool {
     matches!(
         field,
         "diagnostic_id"
+            | "diagnostic_origin_period_id"
             | "diagnostic_trace_id"
             | "diagnostic_code"
             | "diagnostic_component"
@@ -92,6 +93,12 @@ pub(super) fn validate(event: &BehaviorEvent) -> Result<()> {
             anyhow::ensure!(values.contains(value), "invalid diagnostic enum");
         }
         match key.as_str() {
+            "diagnostic_origin_period_id" => anyhow::ensure!(
+                value.as_str().is_some_and(|s| (12..=128).contains(&s.len())
+                    && s.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))),
+                "invalid diagnostic origin"
+            ),
             "diagnostic_trace_id" => anyhow::ensure!(
                 value.as_str().is_some_and(|s| s.len() == 64
                     && s.bytes()
@@ -161,6 +168,8 @@ struct Context {
     trace: String,
     lease: CollectionLease,
     started: u64,
+    #[serde(default)]
+    last_used: u64,
     turn: Option<String>,
     steps: Vec<Value>,
     code: Option<String>,
@@ -240,8 +249,8 @@ fn prune(state: &mut DiagnosticState) {
     );
     let cutoff = now_ms().saturating_sub(RETENTION);
     state.contexts.retain(|_, c| c.started >= cutoff);
-    if state.contexts.len() > 128 {
-        state.contexts.clear();
+    while state.contexts.len() > 128 {
+        evict_oldest_context(state);
     }
     state.incidents.retain(|i| i.at >= cutoff);
     if state.incidents.len() > 50 {
@@ -261,6 +270,16 @@ fn prune(state: &mut DiagnosticState) {
     }
     if previous.2 != state.pending.len() {
         let _ = persist_reports(state);
+    }
+}
+fn evict_oldest_context(state: &mut DiagnosticState) {
+    let oldest = state
+        .contexts
+        .iter()
+        .min_by_key(|(key, context)| (context.last_used.max(context.started), *key))
+        .map(|(key, _)| key.clone());
+    if let Some(key) = oldest {
+        state.contexts.remove(&key);
     }
 }
 pub(super) fn load() -> DiagnosticState {
@@ -325,12 +344,49 @@ pub(super) fn rebind(telemetry: &BehaviorTelemetry, generation: u64, period: &st
     }
     for report in &mut state.pending {
         renew(&mut report.lease);
-        report.payload["collection_period_id"] = json!(report.lease.collection_period_id);
     }
     // A preview is an exact-content authorization; renewing invalidates it.
     state.previews.clear();
     persist(&state)?;
     persist_reports(&state)
+}
+pub(super) fn origin_periods(
+    telemetry: &BehaviorTelemetry,
+    generation: u64,
+) -> Result<HashMap<String, String>> {
+    let state = telemetry
+        .diagnostics
+        .lock()
+        .map_err(|_| anyhow::anyhow!("diagnostic lock poisoned"))?;
+    let mut origins = HashMap::new();
+    // The incident snapshot and confirmed report preserve the original period
+    // even if an older client already rebound its queued event. Never infer it
+    // from another generation or silently choose between conflicting evidence.
+    let incidents = state
+        .incidents
+        .iter()
+        .filter(|i| i.lease.generation == generation)
+        .map(|i| (&i.event["diagnostic_id"], &i.event["collection_period_id"]));
+    let reports = state
+        .pending
+        .iter()
+        .filter(|p| p.lease.generation == generation)
+        .map(|p| {
+            (
+                &p.payload["incident_id"],
+                p.payload
+                    .get("incident_period_id")
+                    .unwrap_or(&p.payload["collection_period_id"]),
+            )
+        });
+    for (id, period) in incidents.chain(reports) {
+        if let (Some(id), Some(period)) = (id.as_str(), period.as_str()) {
+            if let Some(prior) = origins.insert(id.to_owned(), period.to_owned()) {
+                anyhow::ensure!(prior == period, "diagnostic_origin_conflict");
+            }
+        }
+    }
+    Ok(origins)
 }
 fn digest(value: &str) -> String {
     crate::platform::encoding::hex_lower(&Sha256::digest(value.as_bytes()))
@@ -408,8 +464,14 @@ pub(super) fn classify(error: &str) -> (&'static str, Option<u16>) {
             format!("status {status}"),
         ]
         .iter()
-        .any(|n| lower.contains(n))
-        {
+        .any(|n| {
+            lower.match_indices(n).any(|(at, _)| {
+                !lower
+                    .as_bytes()
+                    .get(at + n.len())
+                    .is_some_and(u8::is_ascii_digit)
+            })
+        }) {
             return (
                 match status {
                     401 | 403 => "authentication_failed",
@@ -466,6 +528,16 @@ pub(super) fn enrich(
     if !telemetry.lease_is_current(lease) {
         return;
     }
+    // Stateless observations have no lifecycle to correlate. Failures still
+    // receive their own bounded witness, but unrelated settings/install events
+    // must not evict active task traces.
+    if event.diagnostic_remote.is_none()
+        && field(event, "session_id").is_none()
+        && field(event, "operation_id").is_none()
+        && !failure(event)
+    {
+        return;
+    }
     let mut key = event
         .diagnostic_remote
         .as_ref()
@@ -496,8 +568,8 @@ pub(super) fn enrich(
                     .cloned()
             })
             .flatten();
-        if state.contexts.len() >= 128 {
-            state.contexts.clear();
+        if state.contexts.len() >= 128 && !state.contexts.contains_key(&key) {
+            evict_oldest_context(&mut state);
         }
         state.contexts.insert(
             key.clone(),
@@ -505,6 +577,7 @@ pub(super) fn enrich(
                 trace: digest(&format!("failure-trace-v1|{}", event.event_id)),
                 lease: lease.clone(),
                 started: event.occurred_at,
+                last_used: event.occurred_at,
                 turn: None,
                 steps: Vec::new(),
                 code: None,
@@ -523,6 +596,7 @@ pub(super) fn enrich(
     if context.lease != *lease {
         return;
     }
+    context.last_used = context.last_used.max(event.occurred_at);
     if let Some(turn) = field(event, "turn_id") {
         if context.turn.as_deref().is_some_and(|t| t != turn) {
             return;
@@ -556,10 +630,46 @@ pub(super) fn enrich(
             context.environment.insert(key.into(), json!(value));
         }
     }
-    for key in ["mode", "input_type", "has_attachment"] {
-        if let Some(value) = event.fields.get(key) {
-            context.environment.insert(key.into(), value.clone());
+    for (key, choices) in [
+        (
+            "mode",
+            &["assistant", "code", "scheduled", "team", "system"][..],
+        ),
+        (
+            "input_type",
+            &["text", "voice", "attachment", "mixed", "system"][..],
+        ),
+    ] {
+        if context
+            .environment
+            .get(key)
+            .is_some_and(|value| !value.as_str().is_some_and(|value| choices.contains(&value)))
+        {
+            context.environment.remove(key);
         }
+        if let Some(value) = event.fields.get(key) {
+            if value.as_str().is_some_and(|value| choices.contains(&value)) {
+                context.environment.insert(key.into(), value.clone());
+            } else {
+                context.environment.remove(key);
+            }
+        }
+    }
+    if context
+        .environment
+        .get("has_attachment")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        context.environment.remove("has_attachment");
+    }
+    if let Some(value) = event
+        .fields
+        .get("has_attachment")
+        .filter(|value| value.is_boolean())
+    {
+        context
+            .environment
+            .insert("has_attachment".into(), value.clone());
     }
     if context.steps.last().and_then(|s| s["stage"].as_str()) != Some(stage) {
         context.steps.push(json!({"stage": stage, "offset_ms": event.occurred_at.saturating_sub(context.started).min(604800000)}));
@@ -631,6 +741,10 @@ pub(super) fn enrich(
         event
             .fields
             .insert("diagnostic_id".into(), json!(event.event_id));
+        event.fields.insert(
+            "diagnostic_origin_period_id".into(),
+            json!(lease.collection_period_id),
+        );
         event
             .fields
             .insert("diagnostic_trace_id".into(), json!(context.trace));
@@ -748,6 +862,32 @@ pub(crate) struct DiagnosticPreviewRequest {
     #[serde(default)]
     pub attachments: Vec<String>,
 }
+// Public command errors remain a closed vocabulary: never expose a path,
+// decoder message or arbitrary storage error through the IPC/UI boundary.
+pub(crate) fn diagnostic_error_code(error: &anyhow::Error, fallback: &'static str) -> String {
+    for cause in error.chain() {
+        let text = cause.to_string();
+        if matches!(
+            text.as_str(),
+            "diagnostic_collection_disabled"
+                | "diagnostic_incident_unavailable"
+                | "diagnostic_preview_expired"
+                | "diagnostic_authorization_changed"
+                | "diagnostic_queue_full"
+                | "diagnostic_confirmation_required"
+                | "diagnostic_input_too_large"
+                | "diagnostic_attachment_invalid"
+                | "diagnostic_attachment_too_large"
+                | "diagnostic_text_attachment_too_large"
+                | "diagnostic_image_invalid"
+                | "diagnostic_image_too_large"
+                | "diagnostic_report_too_large"
+        ) {
+            return text;
+        }
+    }
+    fallback.to_owned()
+}
 fn clean_image(bytes: &[u8], format: xcap::image::ImageFormat) -> Result<Vec<u8>> {
     use xcap::image::{ImageReader, Limits};
     let mut limits = Limits::default();
@@ -799,7 +939,7 @@ pub(crate) fn preview_diagnostic(
                 base64::engine::general_purpose::STANDARD
                     .encode(clean_image(&bytes, xcap::image::ImageFormat::Png)?),
             )
-        } else if bytes.starts_with(b"\xff\xd8\xff") && bytes.ends_with(b"\xff\xd9") {
+        } else if bytes.starts_with(b"\xff\xd8\xff") {
             (
                 "image/jpeg",
                 base64::engine::general_purpose::STANDARD
@@ -913,11 +1053,24 @@ pub(super) async fn bounded_reply(response: &mut reqwest::Response) -> Result<Va
     Ok(serde_json::from_slice(&bytes)?)
 }
 pub(super) async fn run_report_worker(mut rx: mpsc::Receiver<()>, telemetry: BehaviorTelemetry) {
-    let mut delay = 5u64;
     loop {
-        tokio::select! {
-            signal = rx.recv() => if signal.is_none() { break; },
-            _ = tokio::time::sleep(Duration::from_secs(delay)) => {},
+        let wait = telemetry.diagnostics.lock().ok().and_then(|mut state| {
+            prune(&mut state);
+            state
+                .pending
+                .iter()
+                .filter(|p| p.status == "queued")
+                .map(|p| p.next_attempt_at.saturating_sub(now_ms()).max(1))
+                .min()
+                .map(Duration::from_millis)
+        });
+        if let Some(wait) = wait {
+            tokio::select! {
+                signal = rx.recv() => if signal.is_none() { break; },
+                _ = tokio::time::sleep(wait) => {},
+            }
+        } else if rx.recv().await.is_none() {
+            break;
         }
         let report = telemetry.diagnostics.lock().ok().and_then(|mut s| {
             prune(&mut s);
@@ -928,13 +1081,15 @@ pub(super) async fn run_report_worker(mut rx: mpsc::Receiver<()>, telemetry: Beh
                 .cloned()
         });
         let Some(report) = report else {
-            delay = 5;
             continue;
         };
         if !telemetry.lease_is_current(&report.lease) {
+            // Renewal/revocation owns the pending state; do not busy-loop while
+            // its control transaction has temporarily unpublished the lease.
+            tokio::time::sleep(Duration::from_secs(5)).await;
             continue;
         }
-        let result: Result<(bool, bool, u16)> = async {
+        let result: Result<(bool, bool, u16, bool)> = async {
             let credentials = telemetry.ensure_credentials().await?;
             let gate = telemetry.control_gate.lock().await;
             anyhow::ensure!(
@@ -951,7 +1106,8 @@ pub(super) async fn run_report_worker(mut rx: mpsc::Receiver<()>, telemetry: Beh
                 .client
                 .post(endpoint)
                 .bearer_auth(&credentials.device_token)
-                .json(&json!({"device_id":credentials.device_id,"report":report.payload}))
+                .json(&json!({"device_id":credentials.device_id,
+                    "collection_period_id":report.lease.collection_period_id,"report":report.payload}))
                 .send()
                 .await?;
             let status = response.status();
@@ -976,24 +1132,23 @@ pub(super) async fn run_report_worker(mut rx: mpsc::Receiver<()>, telemetry: Beh
             } else {
                 false
             };
-            let rejected_conflict = if status == reqwest::StatusCode::CONFLICT {
+            let conflict_code = if status == reqwest::StatusCode::CONFLICT {
                 let reply = bounded_reply(&mut response).await?;
-                matches!(
-                    reply["error"].as_str(),
-                    Some("diagnostic_report_conflict" | "collection_inactive")
-                )
+                reply["error"].as_str().unwrap_or("unknown").to_owned()
             } else {
-                false
+                String::new()
             };
             Ok((
                 received,
-                rejected_conflict || matches!(status.as_u16(), 400 | 403 | 413 | 422),
+                matches!(conflict_code.as_str(), "diagnostic_report_conflict" | "collection_inactive" | "diagnostic_incident_period_mismatch")
+                    || matches!(status.as_u16(), 400 | 403 | 413 | 422),
                 status.as_u16(),
+                conflict_code == "collection_inactive",
             ))
         }
         .await;
         match result {
-            Ok((success, permanent, _)) if success || permanent => {
+            Ok((success, permanent, _, inactive)) if success || permanent => {
                 if let Ok(mut state) = telemetry.diagnostics.lock() {
                     if let Some(pending) = state
                         .pending
@@ -1001,13 +1156,13 @@ pub(super) async fn run_report_worker(mut rx: mpsc::Receiver<()>, telemetry: Beh
                         .find(|p| p.payload["report_id"] == report.payload["report_id"])
                     {
                         pending.status = if success { "received" } else { "rejected" }.into();
+                        pending.reason = if inactive { "collection_inactive" } else { "" }.into();
                         // Keep only the receipt locally once delivery is settled.
                         pending.payload["notes"] = json!("");
                         pending.payload["attachments"] = json!([]);
                     }
                     let _ = persist_reports(&state);
                 }
-                delay = 5;
             }
             retry => {
                 if let Ok(mut state) = telemetry.diagnostics.lock() {
@@ -1017,8 +1172,8 @@ pub(super) async fn run_report_worker(mut rx: mpsc::Receiver<()>, telemetry: Beh
                         .find(|p| p.payload["report_id"] == report.payload["report_id"])
                     {
                         pending.reason = match retry {
-                            Ok((_, _, 404)) => "server_upgrade_required",
-                            Ok((_, _, 409)) => "incident_pending",
+                            Ok((_, _, 404, _)) => "server_upgrade_required",
+                            Ok((_, _, 409, _)) => "incident_pending",
                             _ => "retry_pending",
                         }
                         .into();
@@ -1029,7 +1184,6 @@ pub(super) async fn run_report_worker(mut rx: mpsc::Receiver<()>, telemetry: Beh
                     }
                     let _ = persist_reports(&state);
                 }
-                delay = 5;
             }
         }
     }
@@ -1048,6 +1202,11 @@ mod tests {
             classify("context_length_exceeded private prompt"),
             ("context_length_exceeded", None)
         );
+        assert_eq!(classify("status 5001 fixture"), ("unknown", None));
+        assert_eq!(
+            classify("HTTP 500 fixture"),
+            ("provider_unavailable", Some(500))
+        );
         let cleaned = super::super::diagnostic_redaction::Redactor::new("test-only-scope").redact(
             "Authorization: Bearer secret\napi_key=secret\nC:\\Users\\private\\a.txt https://private.invalid/a\nreproduce with empty response",
         );
@@ -1058,6 +1217,21 @@ mod tests {
             super::super::diagnostic_redaction::Redactor::new("test-only-scope")
                 .redact("reproduce with empty response")
                 .contains("empty response")
+        );
+    }
+    #[test]
+    fn public_errors_preserve_actionable_codes_without_exposing_private_causes() {
+        let error = anyhow::anyhow!("diagnostic_preview_expired").context("private fixture");
+        assert_eq!(
+            diagnostic_error_code(&error, "diagnostic_preview_failed"),
+            "diagnostic_preview_expired"
+        );
+        assert_eq!(
+            diagnostic_error_code(
+                &anyhow::anyhow!("private path or decoder detail"),
+                "diagnostic_preview_failed"
+            ),
+            "diagnostic_preview_failed"
         );
     }
     #[test]
@@ -1076,5 +1250,18 @@ mod tests {
                 .any(|bytes| bytes == b"hidden-private-fixture")
         );
         assert!(clean_image(b"\x89PNG\r\n\x1a\nnot-an-image", ImageFormat::Png).is_err());
+        let mut jpeg = std::io::Cursor::new(Vec::new());
+        DynamicImage::new_rgb8(2, 2)
+            .write_to(&mut jpeg, ImageFormat::Jpeg)
+            .unwrap();
+        let mut jpeg = jpeg.into_inner();
+        jpeg.extend_from_slice(b"hidden-private-fixture");
+        let cleaned = clean_image(&jpeg, ImageFormat::Jpeg).unwrap();
+        assert!(cleaned.ends_with(b"\xff\xd9"));
+        assert!(
+            !cleaned
+                .windows(22)
+                .any(|bytes| bytes == b"hidden-private-fixture")
+        );
     }
 }

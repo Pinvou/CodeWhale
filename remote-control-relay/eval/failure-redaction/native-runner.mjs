@@ -17,6 +17,9 @@ export function nativeRedact(records, work) {
     join(runner, "Cargo.toml"),
     '[package]\nname="diagnostic-redaction-eval"\nversion="0.0.0"\nedition="2024"\n[workspace]\n[dependencies]\nserde_json="1"\nsha2="0.11"\n',
   );
+  // Keep the native comparison reproducible and inside the production app's
+  // already-fetched dependency graph. Do not resolve newer crates in offline CI.
+  writeFileSync(join(runner, "Cargo.lock"), readFileSync(new URL("./native-runner.Cargo.lock", import.meta.url)));
   writeFileSync(
     join(runner, "src/main.rs"),
     `#[path=${JSON.stringify(rustPath)}] mod redaction;
@@ -29,7 +32,7 @@ for line in input.lines(){let p:Vec<_>=line.splitn(4,'\\t').collect();let text=S
   const target = join(root, ".cache/failure-redaction-comparison/native-target");
   execFileSync(
     "cargo",
-    ["build", "--offline", "--manifest-path", join(runner, "Cargo.toml"), "--target-dir", target],
+    ["build", "--offline", "--locked", "--manifest-path", join(runner, "Cargo.toml"), "--target-dir", target],
     { stdio: "pipe", timeout: 180000 },
   );
   const input = join(work, "native-input.tsv"),

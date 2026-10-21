@@ -24,7 +24,12 @@ export default function DiagnosticsPanel({ copy, sessionId, turnId, compact = fa
   const run = async action => {
     if (locked.current) return;
     locked.current = true; setBusy(true); setMessage('');
-    try { await action(); } catch { setMessage(copy.error); }
+    try { await action(); } catch (error) {
+      const code = String(error?.message || error);
+      setMessage(code === 'diagnostic_preview_expired' ? copy.previewExpired
+        : ['diagnostic_authorization_changed', 'diagnostic_collection_disabled'].includes(code) ? copy.authorizationChanged
+          : code === 'diagnostic_queue_full' ? copy.queueFull : copy.error);
+    }
     finally { locked.current = false; setBusy(false); }
   };
   const incidents = (data?.incidents || []).filter(item => (!sessionId || item.session_id === sessionId) && (!turnId || item.turn_id === turnId));
@@ -72,7 +77,7 @@ export default function DiagnosticsPanel({ copy, sessionId, turnId, compact = fa
           })}>{copy.submit}</button>
         </div>}
       </>}
-      {(data?.reports || []).map(report => <p key={report.report_id} className="text-xs">{report.incident_id} · {report.status === 'received' ? copy.received : report.status === 'rejected' ? copy.rejected : report.reason === 'server_upgrade_required' ? copy.serverUpgrade : report.reason === 'incident_pending' ? copy.incidentPending : copy.queued}</p>)}
+      {(data?.reports || []).map(report => <p key={report.report_id} className="text-xs">{report.incident_id} · {report.status === 'received' ? copy.received : report.reason === 'collection_inactive' ? copy.collectionInactive : report.status === 'rejected' ? copy.rejected : report.reason === 'server_upgrade_required' ? copy.serverUpgrade : report.reason === 'incident_pending' ? copy.incidentPending : copy.queued}</p>)}
       {busy && <p role="status">{copy.busy}</p>}
       {message && <p role="status">{message}</p>}
     </div>}

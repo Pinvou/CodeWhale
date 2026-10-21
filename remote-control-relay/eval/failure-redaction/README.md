@@ -35,6 +35,6 @@ $env:PINVOU_TEST_NATIVE_REDACTION='1'
 node --test test/diagnostic-redaction.test.js
 ```
 
-常规 Relay 测试不要求安装 Rust；Rust 模块另有随应用运行的单元测试和预览集成测试。
+常规 Relay 测试不要求安装 Rust；Ready PR 和 Merge Queue 的 `rust-test` 作业显式启用上述跨语言用例，两个生产实现、测试语料或助手锁变化都会触发该作业。助手使用 `native-runner.Cargo.lock` 和 `--offline --locked`，锁定的依赖来自现有应用依赖图；修改助手依赖时须同步复核锁及对应 CI 路由。Windows 本地执行还需要 MSVC C++ 链接工具，不把缺工具的失败或未启用的跳过算作跨语言验证通过。Rust 模块另有随应用运行的单元测试和预览集成测试。
 
 C 是为本实验设计的字段级原型，仅用于说明可保留哪些信息；本实验不构成其通用隐私安全或未知样本泛化验证。

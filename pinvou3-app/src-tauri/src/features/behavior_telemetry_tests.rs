@@ -330,6 +330,212 @@ fn diagnostic_preview_requires_exact_current_authorization_and_survives_restart_
 }
 
 #[test]
+fn diagnostic_renewal_freezes_confirmed_bytes_and_restores_legacy_event_origin() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://localhost:1");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    let failure = diagnostic_failure("renew_session", "renew_turn");
+    let id = failure.event_id.clone();
+    telemetry.track(failure);
+    let preview = diagnostics::preview_diagnostic(
+        &telemetry,
+        DiagnosticPreviewRequest {
+            incident_id: id.clone(),
+            notes: "reproduce empty response".into(),
+            attachments: vec![],
+        },
+    )
+    .unwrap();
+    diagnostics::confirm_diagnostic(&telemetry, preview["preview_token"].as_str().unwrap(), true)
+        .unwrap();
+    let original = preview["report"].clone();
+    // Simulate an earlier client's defective rebind: the queued wire period
+    // already moved, but the local incident and confirmed bytes are intact.
+    {
+        let mut outbox = telemetry.outbox.lock().unwrap();
+        let event = outbox.records[0].event.as_object_mut().unwrap();
+        event.remove("diagnostic_origin_period_id");
+        event.insert(
+            "collection_period_id".into(),
+            json!("already_renewed_period"),
+        );
+    }
+    let lease = telemetry.current_lease().unwrap();
+    let origins = diagnostics::origin_periods(&telemetry, lease.generation).unwrap();
+    telemetry
+        .outbox
+        .lock()
+        .unwrap()
+        .rebind_period("second_renewed_period", lease.generation, &origins)
+        .unwrap();
+    diagnostics::rebind(&telemetry, lease.generation, "second_renewed_period").unwrap();
+    let event = telemetry.outbox.lock().unwrap().records[0].event.clone();
+    assert_eq!(event["collection_period_id"], "second_renewed_period");
+    assert_eq!(
+        event["diagnostic_origin_period_id"],
+        original["incident_period_id"]
+    );
+    let reports: Value = serde_json::from_slice(
+        &std::fs::read(paths::pinvou3_home().join("failure-diagnostic-reports.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(reports[0]["payload"], original);
+    assert_eq!(
+        reports[0]["lease"]["collection_period_id"],
+        "second_renewed_period"
+    );
+    assert!(
+        diagnostics::origin_periods(&telemetry, lease.generation + 1)
+            .unwrap()
+            .is_empty()
+    );
+    let mut conflicting = origins;
+    conflicting.insert(id, "conflicting_origin_period".into());
+    let mut outbox = telemetry.outbox.lock().unwrap();
+    assert!(
+        outbox
+            .rebind_period("third_renewed_period", lease.generation, &conflicting)
+            .is_err()
+    );
+    assert_eq!(outbox.records[0].event, event);
+}
+
+#[test]
+fn diagnostic_environment_discards_invalid_current_and_persisted_values() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://localhost:1");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    let lease = telemetry.current_lease().unwrap();
+    let mut first = diagnostic_failure("environment_session", "environment_turn")
+        .string("mode", "private-invalid-mode")
+        .string("input_type", "private-invalid-input");
+    diagnostics::enrich(&telemetry, &mut first, &lease);
+    assert!(diagnostics::validate(&first).is_ok());
+    let environment = first.fields["diagnostic_environment"].as_object().unwrap();
+    assert!(!environment.contains_key("mode"));
+    assert!(!environment.contains_key("input_type"));
+    // Upgrading must also recover a context written by the old implementation.
+    let mut persisted = serde_json::to_value(&*telemetry.diagnostics.lock().unwrap()).unwrap();
+    persisted["contexts"]["environment_session"]["environment"]["input_type"] =
+        json!("private-stored-input");
+    *telemetry.diagnostics.lock().unwrap() = serde_json::from_value(persisted).unwrap();
+    let mut next = diagnostic_failure("environment_session", "environment_turn");
+    next.fields.remove("input_type");
+    diagnostics::enrich(&telemetry, &mut next, &lease);
+    assert!(diagnostics::validate(&next).is_ok());
+    assert!(
+        next.fields["diagnostic_environment"]
+            .get("input_type")
+            .is_none()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn diagnostic_rebound_report_sends_frozen_preview_with_current_delivery_authorization() {
+    let _home = TestHome::new();
+    for (http, expected) in [(200, "received"), (409, "rejected")] {
+        let runtime = test_runtime("http://localhost:1");
+        let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+        let failure = diagnostic_failure("delivery_session", "delivery_turn");
+        let id = failure.event_id.clone();
+        telemetry.track(failure);
+        let preview = diagnostics::preview_diagnostic(
+            &telemetry,
+            DiagnosticPreviewRequest {
+                incident_id: id,
+                notes: "reproduce empty response".into(),
+                attachments: vec![],
+            },
+        )
+        .unwrap();
+        diagnostics::confirm_diagnostic(
+            &telemetry,
+            preview["preview_token"].as_str().unwrap(),
+            true,
+        )
+        .unwrap();
+        let lease = telemetry.current_lease().unwrap();
+        let origins = diagnostics::origin_periods(&telemetry, lease.generation).unwrap();
+        telemetry
+            .outbox
+            .lock()
+            .unwrap()
+            .rebind_period("current_delivery_period", lease.generation, &origins)
+            .unwrap();
+        diagnostics::rebind(&telemetry, lease.generation, "current_delivery_period").unwrap();
+        *telemetry.collection_period_id.write().unwrap() = Some("current_delivery_period".into());
+        let receipt: &'static str = Box::leak(
+            (if http == 200 {
+                json!({"report_id":preview["report"]["report_id"],"status":"received"})
+            } else {
+                json!({"error":"diagnostic_incident_period_mismatch"})
+            })
+            .to_string()
+            .into_boxed_str(),
+        );
+        let (base, server) = mock_http(vec![(http, receipt)]).await;
+        {
+            let mut state = telemetry.state.lock().await;
+            let state = state.as_mut().unwrap();
+            state.behavior_events_url = format!("{base}/behavior/events");
+            state.control.collection_period_id = Some("current_delivery_period".into());
+        }
+        let mut worker_telemetry = telemetry.worker_clone();
+        let mut runtime = (*worker_telemetry.runtime).clone();
+        runtime.behavior_events_url = format!("{base}/behavior/events");
+        worker_telemetry.runtime = Arc::new(runtime);
+        let (tx, rx) = mpsc::channel(1);
+        let worker = tokio::spawn(diagnostics::run_report_worker(rx, worker_telemetry));
+        let requests = tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(tx);
+        worker.await.unwrap();
+        let body: Value =
+            serde_json::from_str(requests[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["collection_period_id"], "current_delivery_period");
+        assert_eq!(body["report"], preview["report"]);
+        assert_eq!(
+            diagnostics::diagnostic_incidents(&telemetry).unwrap()["reports"][0]["status"],
+            expected
+        );
+    }
+}
+
+#[test]
+fn diagnostic_context_capacity_evicts_one_cold_trace_without_stateless_pollution() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://localhost:1");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    let lease = telemetry.current_lease().unwrap();
+    let started = now_ms().saturating_sub(10000);
+    for index in 0..128 {
+        let mut event = BehaviorEvent::new("model_used").session(&format!("session_{index}"));
+        event.occurred_at = started + index;
+        diagnostics::enrich(&telemetry, &mut event, &lease);
+    }
+    let mut active = BehaviorEvent::new("task_first_output").session("session_0");
+    diagnostics::enrich(&telemetry, &mut active, &lease);
+    for _ in 0..140 {
+        diagnostics::enrich(
+            &telemetry,
+            &mut BehaviorEvent::new("model_selected"),
+            &lease,
+        );
+    }
+    let mut added = BehaviorEvent::new("model_used").session("new_session");
+    diagnostics::enrich(&telemetry, &mut added, &lease);
+    let state = serde_json::to_value(&*telemetry.diagnostics.lock().unwrap()).unwrap();
+    let contexts = state["contexts"].as_object().unwrap();
+    assert_eq!(contexts.len(), 128);
+    assert!(contexts.contains_key("session_0"));
+    assert!(contexts.contains_key("new_session"));
+    assert!(!contexts.contains_key("session_1"));
+    assert_eq!(contexts["session_0"]["steps"].as_array().unwrap().len(), 2);
+}
+
+#[test]
 fn diagnostic_preview_correlates_notes_and_attachments_without_linking_separate_reports() {
     let _home = TestHome::new();
     let runtime = test_runtime("http://localhost:1");
@@ -1493,7 +1699,9 @@ fn outbox_rebinds_pending_events_after_server_identity_expiry() {
     outbox
         .enqueue(outbox_record("event_rebind", "period_expired", now_ms()))
         .unwrap();
-    outbox.rebind_period("period_renewed", 2).unwrap();
+    outbox
+        .rebind_period("period_renewed", 2, &HashMap::new())
+        .unwrap();
     assert_eq!(outbox.records[0].collection_period_id, "period_renewed");
     assert_eq!(outbox.records[0].generation, 2);
     assert_eq!(

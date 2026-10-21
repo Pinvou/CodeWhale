@@ -25,8 +25,14 @@ pub async fn preview_failure_diagnostic(
 ) -> Result<Value, String> {
     let telemetry = telemetry(&app)?.inner().clone();
     super::settings::join_blocking("diagnostics", move || {
-        crate::features::behavior_telemetry::preview_diagnostic(&telemetry, request)
-            .map_err(|_| "diagnostic_preview_failed".to_owned())
+        crate::features::behavior_telemetry::preview_diagnostic(&telemetry, request).map_err(
+            |error| {
+                crate::features::behavior_telemetry::diagnostic_error_code(
+                    &error,
+                    "diagnostic_preview_failed",
+                )
+            },
+        )
     })
     .await
 }
@@ -44,7 +50,12 @@ pub async fn submit_failure_diagnostic(
             &preview_token,
             confirmed,
         )
-        .map_err(|_| "diagnostic_confirmation_failed".to_owned())
+        .map_err(|error| {
+            crate::features::behavior_telemetry::diagnostic_error_code(
+                &error,
+                "diagnostic_confirmation_failed",
+            )
+        })
     })
     .await
 }
