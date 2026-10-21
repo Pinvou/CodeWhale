@@ -288,6 +288,16 @@ impl Client {
         card_fact_from_response(&self.models()?, card)
     }
 
+    /// Maintenance already prepared the reader before taking the store writer
+    /// lock. Never enroll or wait for a child reader under that exclusive lock.
+    pub(crate) fn model_snapshot(&self) -> Result<Value, String> {
+        self.roundtrip("GET", "/v1/models")
+    }
+
+    pub(crate) fn model_fact_cached(&self, card: &str) -> Result<Option<Value>, String> {
+        card_fact_from_response(&self.model_snapshot()?, card)
+    }
+
     pub(crate) fn supports(&self, capability: &str) -> Result<bool, String> {
         let device = self.device()?;
         if device.get("error").is_some_and(|error| !error.is_null())

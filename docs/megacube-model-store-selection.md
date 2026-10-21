@@ -7,11 +7,11 @@
 `--cmsd-store-inventory` 保持 `format=pinvou-installed-models-v1`、`models`、`skipped`，新增：
 
 - `selection_policy=latest-installed-v1`。
-- `selections=[{logical_card,card,version_id}]`：同一 SQLite 只读事务中的权威当前选择，仅 `card_source=store/local`、成功下载且 `status=deployed` 的记录参与。配置损坏、待重新部署、删除未完成或快照不一致时保留选择身份，禁止旧目录回落，但不输出有效 `models`。
-- `archived_models=[{logical_card,card,version_id}]`：所有非当前版本，包括 history、ready、失败/中断及已卸载的保留记录。排除当前物理卡的重复快照，保留逻辑 ID，使“仅剩归档”的自然卡请求也能失败关闭。普通启动不能把 ready 当作 current；完成显式部署和原子发布后才可启动。
+- `selections=[{logical_card,card,version_id}]`：同一 SQLite 只读事务中的权威当前选择，仅 `card_source=store/local`、成功下载且当前版本绑定一致的记录参与；有效的 downloaded/pending current 也保留身份，但不授予启动权。已有真实生命周期归属的当前实例仍保留安全停止入口，未托管实例不能借清理身份取得停止权。配置损坏、待重新部署、删除未完成或快照不一致时保留选择身份，禁止旧目录回落，但不输出有效 `models`。
+- `archived_models=[{logical_card,card,version_id}]`：所有非当前版本，包括 history、ready、失败/中断的版本记录。当前下载在部署失败或保留权重卸载后仍保留 selections 身份，仅可申请清理预留，不归为历史。排除当前物理卡的重复快照，保留逻辑 ID，使“仅剩归档”的自然卡请求也能失败关闭。普通启动不能把 ready 当作 current；完成显式部署和原子发布后才可启动。
 - `models[]` 仅含当前有效条目，增加 `version_id`、`deployment_revision`；`fingerprint` 同步采用该部署修订。修订包含当前脚本、附属文件、实际部署配置、引擎及 profile。相同 wire 模型名、端口或 active_version_id 不能证明实例版本一致。
 
-已卸载而保留权重的 downloaded/pending 行不进入 selections/models；其 runtime 进入归档围栏。整条卡片删除后，剩余版本记录继续只作为归档。首次真正旧 schema 无版本指针时允许明确的 legacy 当前绑定，其不透明 ID 为 `legacy-<当前固化配方摘要>`；有版本 ID 却缺 runtime、重复绑定、schema 损坏或清单读取失败均失败关闭，不猜目录名、不按时间或哈希大小推选最新。
+已卸载而保留权重的 downloaded/pending current 行不进入 models；其 selections 身份和 current_not_deployed 跳过原因只允许清理预留。版本关系必须与 model_versions 的 current 一致，deleting、history、ready、缺失或错配均不取得清理权。整条卡片删除后，剩余版本记录继续只作为归档。首次真正旧 schema 无版本指针时允许明确的 legacy 当前绑定，其不透明 ID 为 `legacy-<当前固化配方摘要>`；有版本 ID 却缺 runtime、重复绑定、schema 损坏或清单读取失败均失败关闭，不猜目录名、不按时间或哈希大小推选最新。
 
 读取器有界读取同账号元数据及小型交付文件，不迁移数据库，不读密钥表，不执行脚本，不访问网络，也不读取大权重。必要的权重、实际 PID、引擎及运行参数核实由 cmsd 准入和实例身份链路完成；本清单不代替这些检查。
 
@@ -32,6 +32,8 @@
 隔离下载/检查使用共享 `model-store/version-operations.lock`。当前包替换、当前部署配置写入、版本发布及删除使用独占锁；cmsd 从选择解析到启动就绪持共享锁并核实预期修订。共享启动不能与配置写入交错。每逻辑卡操作锁继续防止多个商店执行者互相覆盖。
 
 版本切换遵循商店 PR #1995：已验证的新版本和历史版本均可由用户手动切换。切换完整恢复目标版本的本地卡片、脚本、附属文件、权重路径和部署配置，再原子提交 current。新升级要求旧版权重完整以保留回退能力；当前权重损坏时，已保存的历史版本仍可作为显式恢复目标。cmsd 接受商店回切后发布的当前指针，不自行挑选历史目录。归档清理无法证明安全时保留残留并说明错误。
+
+卸载在资源独占锁内核对数据库的当前 physical、设备事实的 logical/physical 及清理预留能力；本机管理已配置时，权威 current 不可见、物理不符或事实未知均拒绝回退旧脚本。未配置本机管理的独立商店行为保留。
 
 已有维护事务持有固定 physical 对象和租约。带 owner 的 disable/purge 不重新解析逻辑别名，也不嵌套申请版本共享锁；保留停止核实和原有删除授权。版本切换只部署及发布，不持独占锁同步调用普通 cmsd enable。
 

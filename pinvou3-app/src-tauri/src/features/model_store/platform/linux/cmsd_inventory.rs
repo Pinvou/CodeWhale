@@ -286,29 +286,46 @@ fn inventory_at(root: &Path) -> Result<Value, String> {
             ),
         };
         let selection = json!({"logical_card":logical,"card":card,"version_id":version});
-        if status != "deployed" {
-            archived.push(selection);
-            skipped.push(json!({"card":logical,"reason":"current_not_deployed"}));
-            continue;
-        }
+        // A completed current download remains an explicit cleanup identity even
+        // before deploy or after keep-weights uninstall. A retained history/ready
+        // row cannot become current merely because the top-level row names it.
+        let binding_error = if versioned {
+            let mut matches = versions.iter().filter(|(owner, id, runtime, _)| {
+                owner == &logical && id == &version && runtime == &card
+            });
+            match (matches.next().map(|row| row.3.as_str()), matches.next()) {
+                (Some("current"), None) => None,
+                (Some("deleting"), None) => Some("store_deletion_incomplete"),
+                _ => Some("store_inventory_current_version_mismatch"),
+            }
+        } else if status != "deployed"
+            && (card != logical || versions.iter().any(|(_, _, runtime, _)| runtime == &card))
+        {
+            Some("store_inventory_current_version_mismatch")
+        } else {
+            None
+        };
         if !seen.insert(card.clone()) {
             return Err("store_inventory_duplicate_runtime_card".into());
         }
         // Publish identity BEFORE filesystem checks: a broken current package must block old-directory fallbacks.
         selections.push(selection);
+        if status != "deployed" {
+            let reason =
+                binding_error.unwrap_or(if matches!(status.as_str(), "downloaded" | "pending") {
+                    "current_not_deployed"
+                } else {
+                    "store_inventory_invalid_status"
+                });
+            skipped.push(json!({"card":logical,"reason":reason}));
+            continue;
+        }
         let result = (|| -> Result<Value, String> {
+            if let Some(reason) = binding_error {
+                return Err(reason.into());
+            }
             if pending {
                 return Err("store_redeploy_required".into());
-            }
-            if versioned {
-                let snapshot = versions.iter().find(|(owner, id, runtime, _)| {
-                    owner == &logical && id == &version && runtime == &card
-                });
-                match snapshot.map(|v| v.3.as_str()) {
-                    Some("current") => {}
-                    Some("deleting") => return Err("store_deletion_incomplete".into()),
-                    _ => return Err("store_inventory_current_version_mismatch".into()),
-                }
             }
             let directory = cards.join(&card);
             let mut files = serde_json::Map::new();
@@ -602,14 +619,18 @@ mod tests {
             db.execute("UPDATE store_models SET status=?1", [status])
                 .unwrap();
             let value = inventory_at(root.path()).unwrap();
-            assert_eq!(value["selections"], json!([]));
+            assert_eq!(
+                value["selections"],
+                json!([{"logical_card":"qwen","card":"qwen--v2","version_id":"v2"}])
+            );
             assert_eq!(value["models"], json!([]));
+            assert_eq!(value["skipped"][0]["reason"], "current_not_deployed");
             assert!(
                 value["archived_models"]
                     .as_array()
                     .unwrap()
                     .iter()
-                    .any(|v| v["logical_card"] == "qwen" && v["card"] == "qwen--v2")
+                    .all(|v| v["card"] != "qwen--v2")
             );
         }
         db.execute("DELETE FROM store_models", []).unwrap();
@@ -905,5 +926,89 @@ mod tests {
         // an existing runtime remains observable and needs no script replay.
         let old_schema = versioned_fixture();
         assert!(inventory_at(old_schema.path()).unwrap()["models"][0]["models_root"].is_null());
+    }
+
+    #[test]
+    fn cleanup_current_legacy_download_requires_positive_store_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Connection::open(root.path().join("models.db")).unwrap();
+        db.execute_batch("CREATE TABLE store_models(card_id TEXT,status TEXT,downloaded_at TEXT,card_source TEXT); INSERT INTO store_models VALUES('local','downloaded','today','local'),('incomplete','downloaded',NULL,'local'),('artifact','downloaded','today','artifact');").unwrap();
+        let value = inventory_at(root.path()).unwrap();
+        assert_eq!(value["selections"].as_array().unwrap().len(), 1);
+        assert_eq!(value["selections"][0]["card"], "local");
+        assert_eq!(value["models"], json!([]));
+        assert_eq!(value["archived_models"], json!([]));
+        assert!(
+            value["skipped"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["card"] == "local" && row["reason"] == "current_not_deployed")
+        );
+        assert!(
+            !root.path().join("cards").exists(),
+            "a current receipt is distinct from directory discovery"
+        );
+    }
+
+    #[test]
+    fn cleanup_current_versioned_download_never_promotes_history_ready_or_deleting() {
+        for state in ["current", "history", "ready", "deleting", "failed"] {
+            let root = versioned_fixture();
+            let db = Connection::open(root.path().join("models.db")).unwrap();
+            db.execute("UPDATE store_models SET status='downloaded'", [])
+                .unwrap();
+            db.execute(
+                "UPDATE model_versions SET state=?1 WHERE version_id='v2'",
+                [state],
+            )
+            .unwrap();
+            let value = inventory_at(root.path()).unwrap();
+            assert_eq!(value["selections"][0]["card"], "qwen--v2");
+            assert_eq!(value["models"], json!([]));
+            assert_eq!(
+                value["skipped"][0]["reason"] == "current_not_deployed",
+                state == "current",
+                "{state}"
+            );
+            assert!(
+                value["archived_models"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|row| row["card"] != "qwen--v2")
+            );
+            assert!(
+                value["archived_models"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|row| row["card"] == "qwen--v3")
+            );
+        }
+        for mutation in [
+            "UPDATE model_versions SET runtime_card_id='other' WHERE version_id='v2'",
+            "UPDATE model_versions SET card_id='other' WHERE version_id='v2'",
+            "UPDATE store_models SET active_version_id='missing'",
+            "INSERT INTO model_versions VALUES('qwen','v2','qwen--v2','history')",
+            "UPDATE store_models SET active_version_id=NULL,runtime_card_id='qwen'",
+        ] {
+            let root = versioned_fixture();
+            let db = Connection::open(root.path().join("models.db")).unwrap();
+            db.execute("UPDATE store_models SET status='pending'", [])
+                .unwrap();
+            db.execute_batch(mutation).unwrap();
+            if let Ok(value) = inventory_at(root.path()) {
+                assert!(
+                    value["skipped"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|row| row["reason"] != "current_not_deployed"),
+                    "{mutation}"
+                );
+                assert_eq!(value["models"], json!([]));
+            }
+        }
     }
 }

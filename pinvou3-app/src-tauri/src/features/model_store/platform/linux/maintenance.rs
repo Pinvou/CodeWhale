@@ -181,14 +181,30 @@ impl Transaction {
         }
         let guard = lock(card)?;
         ensure_clear(card)?;
-        let Some(client) = delegate::maintenance_client(card)? else {
+        // Called under the store's exclusive resource lock. Pin the database
+        // current object, rather than accepting a cached old logical alias.
+        let expected = super::db::get_store_model(card)
+            .map_err(|error| error.to_string())?
+            .filter(|record| {
+                matches!(record.card_source.as_str(), "store" | "local")
+                    && !record.downloaded_at.trim().is_empty()
+            })
+            .map(|record| {
+                record
+                    .runtime_card_id
+                    .unwrap_or_else(|| record.card_id.clone())
+            });
+        let Some(client) = delegate::maintenance_client(card, expected.as_deref())? else {
             return Ok(None);
         };
         let mut record = Record {
             card_id: card.to_string(),
-            runtime_card_id: client
-                .model_fact(card)?
-                .and_then(|m| m["card"].as_str().map(str::to_owned)),
+            runtime_card_id: match expected {
+                Some(runtime) => Some(runtime),
+                None => client
+                    .model_fact_cached(card)?
+                    .and_then(|m| m["card"].as_str().map(str::to_owned)),
+            },
             card_name: name.to_string(),
             transaction_id: uuid::Uuid::new_v4().simple().to_string(),
             owner: uuid::Uuid::new_v4().simple().to_string(),
@@ -358,7 +374,7 @@ impl Transaction {
         if self.record.reservation_only {
             return Ok(());
         }
-        let models = checked(self.client.models()?)?;
+        let models = checked(self.client.model_snapshot()?)?;
         let models = models
             .get("models")
             .and_then(Value::as_array)

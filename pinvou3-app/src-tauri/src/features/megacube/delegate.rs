@@ -92,27 +92,23 @@ pub(crate) fn prepare_reader(card_id: &str) -> Result<(), String> {
 }
 
 /// Resolve ownership once before opening a cross-process store transaction.
-pub(crate) fn maintenance_client(card_id: &str) -> Result<Option<Client>, String> {
+pub(crate) fn maintenance_client(
+    card_id: &str,
+    expected_runtime: Option<&str>,
+) -> Result<Option<Client>, String> {
     let Some(client) = local_client(card_id)? else {
         return Ok(None);
     };
-    let Some(model) = client.model_fact(card_id)? else {
-        if ownership_known(card_id)? {
-            return Err("ownership_conflict: 原托管模型记录缺失，请先恢复设备记录".into());
-        }
+    let Some(model) = maintenance_fact(
+        client.model_fact_cached(expected_runtime.unwrap_or(card_id))?,
+        card_id,
+        expected_runtime,
+        ownership_known(card_id)?,
+    )?
+    else {
         return Ok(None);
     };
     let owned = model.get("managed").and_then(serde_json::Value::as_bool) == Some(true);
-    if !owned
-        && model
-            .get("can_reserve_uninstall")
-            .and_then(serde_json::Value::as_bool)
-            != Some(true)
-    {
-        return Err(
-            "ownership_required: 此资源只能观察，未获标准卸载预留权，不能回退旧脚本".into(),
-        );
-    }
     if !client.supports("model.maintenance.reservation")? {
         return Err("maintenance_unsupported: 请先更新设备服务以支持安全卸载预留和仅撤登记的 scoped purge；未执行卸载脚本".into());
     }
@@ -120,6 +116,34 @@ pub(crate) fn maintenance_client(card_id: &str) -> Result<Option<Client>, String
         remember_ownership(card_id)?;
     }
     Ok(Some(client))
+}
+
+// Known current store identities must be represented by a positive cleanup
+// fact. Absence or a stale physical alias never authorizes the old script path.
+fn maintenance_fact(
+    model: Option<serde_json::Value>,
+    logical_card: &str,
+    expected_runtime: Option<&str>,
+    owned_before: bool,
+) -> Result<Option<serde_json::Value>, String> {
+    let Some(model) = model else {
+        if expected_runtime.is_some() || owned_before {
+            return Err(
+                "ownership_conflict: 当前商店清理对象未获设备服务确认，不能回退旧脚本".into(),
+            );
+        }
+        return Ok(None);
+    };
+    if expected_runtime.is_some_and(|expected| {
+        model["card"].as_str() != Some(expected)
+            || model["logical_card"].as_str() != Some(logical_card)
+    }) {
+        return Err("maintenance_target_changed: 设备服务清理对象与当前商店部署不一致".into());
+    }
+    if model["can_reserve_uninstall"].as_bool() != Some(true) {
+        return Err("ownership_required: 此资源未获标准卸载预留权，不能回退旧脚本".into());
+    }
+    Ok(Some(model))
 }
 
 pub(crate) fn forget_ownership(card_id: &str) -> Result<(), String> {
@@ -571,5 +595,37 @@ mod tests {
         let json = serde_json::to_value(ornith).unwrap();
         assert_eq!(json["restartCount"], 1);
         assert_eq!(json["maxModelLen"], 128000);
+    }
+
+    #[test]
+    fn cleanup_current_fact_never_falls_back_or_crosses_physical_identity() {
+        assert!(maintenance_fact(None, "logical", Some("physical"), false).is_err());
+        assert!(maintenance_fact(None, "logical", None, true).is_err());
+        assert!(
+            maintenance_fact(None, "standalone", None, false)
+                .unwrap()
+                .is_none()
+        );
+        let fact = serde_json::json!({"card":"physical","logical_card":"logical","managed":false,"can_reserve_uninstall":true});
+        assert_eq!(
+            maintenance_fact(Some(fact.clone()), "logical", Some("physical"), false).unwrap(),
+            Some(fact.clone())
+        );
+        for (field, replacement) in [
+            ("card", serde_json::json!("old-physical")),
+            ("logical_card", serde_json::json!("another-logical")),
+            ("can_reserve_uninstall", serde_json::json!(false)),
+        ] {
+            let mut changed = fact.clone();
+            changed[field] = replacement;
+            assert!(
+                maintenance_fact(Some(changed), "logical", Some("physical"), false).is_err(),
+                "{field}"
+            );
+        }
+        let mut owned_unknown = fact;
+        owned_unknown["managed"] = serde_json::json!(true);
+        owned_unknown["can_reserve_uninstall"] = serde_json::Value::Null;
+        assert!(maintenance_fact(Some(owned_unknown), "logical", Some("physical"), true).is_err());
     }
 }
