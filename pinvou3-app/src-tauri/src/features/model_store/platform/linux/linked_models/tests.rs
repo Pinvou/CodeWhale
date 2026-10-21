@@ -23,6 +23,7 @@ fn route() -> Route {
         base_url: "http://127.0.0.1:8001/v1".into(),
         model: "new-wire-id".into(),
         ready: true,
+        context_repair_stamp: None,
         previous: vec![("http://127.0.0.1:8000/v1".into(), "old-wire-id".into())],
     }
 }

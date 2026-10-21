@@ -744,7 +744,8 @@ pub fn start_lifecycle(
             "enable" => {
                 // Bind legacy rows while the old endpoint still exists. The second
                 // pass commits the actual new route even if the view was unmounted.
-                service_for_job.sync_linked_models(Some(&card))?;
+                let changed = super::linked_models::sync_routes(Some(&card))?;
+                service_for_job.notify_models_changed(&changed);
                 mgr.enable(&card, &mut cb, control)
                     .map_err(|e| e.to_string())?;
                 let link_sync_error = service_for_job.refresh_enabled_model(&card).err();
