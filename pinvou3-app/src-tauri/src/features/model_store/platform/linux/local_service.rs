@@ -1360,11 +1360,11 @@ mod tests {
         let sock = home.path().join("svc/life.sock");
         let service = Arc::new(ModelStoreService::new());
 
-        // 造一个上次的残留：普通文件占着路径，bind 要清掉它再绑
+        // 造一个上次退出留下的真实 socket；普通文件不属于可清理残留。
         std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
-        std::fs::write(&sock, b"stale").unwrap();
+        drop(UnixListener::bind(&sock).unwrap());
         let svc = LocalService::bind(Arc::clone(&service), sock.clone(), true)
-            .expect("残留文件不该挡住绑定");
+            .expect("已确认 stale 的同账号 socket 不该挡住绑定");
 
         use std::os::unix::fs::PermissionsExt as _;
         let mode = std::fs::metadata(&sock).unwrap().permissions().mode() & 0o777;
