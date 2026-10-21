@@ -1,5 +1,7 @@
 {{- $root := . -}}
 {{- include "pinvou.requireNewApiTLS" . -}}
+{{- include "pinvou.validateIdentityKeycloak" . -}}
+{{- $identityFiles := include "pinvou.identityKeycloakFiles" . -}}
 {{- $fullname := include "pinvou.fullname" . -}}
 {{- $jwksURL := .Values.oidc.jwksUrl -}}
 {{- $oidcTokenURL := .Values.oidc.tokenUrl -}}
@@ -57,10 +59,23 @@ spec:
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets: {{ toYaml . | nindent 8 }}
       {{- end }}
-      {{- if and (eq $app.name "token-gateway") (eq $root.Values.tokenGateway.secretProvider "vault-transit") }}
+      {{- if or (and (eq $app.name "identity-service") $identityFiles) (and (eq $app.name "token-gateway") (eq $root.Values.tokenGateway.secretProvider "vault-transit")) }}
       securityContext: { runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532, seccompProfile: { type: RuntimeDefault } }
       {{- else }}
       securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+      {{- end }}
+      {{- if and (eq $app.name "identity-service") $identityFiles }}
+      initContainers:
+        - name: prepare-keycloak-secret
+          image: "{{ $app.image.repository }}:{{ $app.image.tag }}"
+          imagePullPolicy: {{ $app.image.pullPolicy }}
+          command: ["/service"]
+          args: ["prepare-keycloak-secret", "/var/run/bootstrap/pinvou/keycloak/client-secret", "/run/pinvou/keycloak-private/client-secret"]
+          securityContext: { runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
+          resources: { requests: { cpu: 10m, memory: 16Mi }, limits: { cpu: 100m, memory: 32Mi } }
+          volumeMounts:
+            - { name: keycloak-provisioner-source, mountPath: /var/run/bootstrap/pinvou/keycloak, readOnly: true }
+            - { name: keycloak-private, mountPath: /run/pinvou/keycloak-private }
       {{- end }}
       containers:
         - name: {{ $app.name }}
@@ -169,13 +184,18 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: owner-candidate-cursor-hmac-key-base64 } }
             {{- else if eq $app.name "identity-service" }}
             - { name: MOBILE_AUTH_ENABLED, value: {{ $root.Values.sms.enabled | quote }} }
-            - { name: KEYCLOAK_ADMIN_API_URL, value: {{ printf "http://%s-keycloak:8080" $fullname | quote }} }
-            - { name: KEYCLOAK_PROVISIONER_TOKEN_URL, value: {{ $oidcTokenURL | quote }} }
+            - { name: KEYCLOAK_ADMIN_API_URL, value: {{ include "pinvou.identityKeycloakOrigin" $root | quote }} }
+            - { name: KEYCLOAK_PROVISIONER_TOKEN_URL, value: {{ include "pinvou.identityKeycloakTokenURL" $root | quote }} }
             - { name: KEYCLOAK_REALM, value: "pinvou" }
             - name: KEYCLOAK_PROVISIONER_CLIENT_ID
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: keycloak-provisioner-client-id } }
+            {{- if $identityFiles }}
+            - { name: KEYCLOAK_PROVISIONER_CLIENT_SECRET_FILE, value: /run/pinvou/keycloak-private/client-secret }
+            - { name: KEYCLOAK_CA_FILE, value: /run/pinvou/keycloak-trust/ca.crt }
+            {{- else }}
             - name: KEYCLOAK_PROVISIONER_CLIENT_SECRET
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: keycloak-provisioner-client-secret } }
+            {{- end }}
             - name: IDENTITY_PASSWORD_HMAC_KEY_BASE64
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: identity-password-hmac-key-base64, optional: true } }
             {{- if $root.Values.security.authRiskEnabled }}
@@ -293,6 +313,10 @@ spec:
           livenessProbe: { httpGet: { path: /health/live, port: http }, periodSeconds: 20, timeoutSeconds: 3 }
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
+            {{- if and (eq $app.name "identity-service") $identityFiles }}
+            - { name: keycloak-private, mountPath: /run/pinvou/keycloak-private, readOnly: true }
+            - { name: keycloak-identity-ca, mountPath: /run/pinvou/keycloak-trust/ca.crt, subPath: ca.crt, readOnly: true }
+            {{- end }}
             {{- if and $root.Values.newApi.enabled (or (eq $app.name "token-gateway") (eq $app.name "token-portal")) }}
             - { name: newapi-public-ca, mountPath: {{ if eq $app.name "token-gateway" }}/run/pinvou/provider-trust/ca.crt{{ else }}/run/pinvou/probe-trust/ca.crt{{ end }}, subPath: ca.crt, readOnly: true }
             {{- end }}
@@ -311,6 +335,13 @@ spec:
         {{- include "pinvou.nativeKmsAgent" $root | nindent 8 }}
         {{- end }}
       volumes:
+        {{- if and (eq $app.name "identity-service") $identityFiles }}
+        - name: keycloak-provisioner-source
+          secret: { secretName: {{ $root.Values.global.runtimeSecret }}, defaultMode: 288, items: [{ key: keycloak-provisioner-client-secret, path: client-secret }] }
+        - { name: keycloak-private, emptyDir: { medium: Memory, sizeLimit: 1Mi } }
+        - name: keycloak-identity-ca
+          configMap: { name: {{ $root.Values.keycloak.caConfigMap }}, defaultMode: 292, items: [{ key: ca.crt, path: ca.crt }] }
+        {{- end }}
         {{- if and $root.Values.newApi.enabled (or (eq $app.name "token-gateway") (eq $app.name "token-portal")) }}
         - name: newapi-public-ca
           configMap: { name: {{ $root.Values.newApi.caConfigMap }}, defaultMode: 292, items: [{ key: ca.crt, path: ca.crt }] }

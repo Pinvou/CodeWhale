@@ -287,21 +287,27 @@ test("whole Account Platform authorization failures block the CI gate", () => {
   assertFiniteAuditPGSetup(job);
 });
 
-test("Account Platform Node gate executes its contracts and rejects empty or failed runs", () => {
+test("Account Platform Node gate executes its contracts and rejects empty, failed or skipped runs", () => {
   const job = jobBlock("account-platform-test");
   const install = namedStep(job, "Install Account Platform contract dependencies");
   assert.match(install, /working-directory: account-platform/);
   assert.match(install, /npm ci --ignore-scripts --prefer-offline --no-audit/);
   const nodeStep = namedStep(job, "Account Platform Node contracts");
   assert.match(nodeStep, /working-directory: account-platform/);
+  assert.match(nodeStep, /PINVOU_TEST_KMS_HELM: "1"/);
+  assert.match(nodeStep, /PINVOU_TEST_KMS_COMPOSE: "1"/);
   const run = stepRun(job, "Account Platform Node contracts");
   assert.match(run, /node --test --test-reporter=tap test\/contract\/\*\.test\.mjs/);
   const directory = mkdtempSync(join(tmpdir(), "pinvou-node-gate-"));
   try {
-    for (const [passed, failed, exit, expected] of [[1, 0, 0, 0], [0, 0, 0, 1], [2, 1, 1, 1], [1, 0, 7, 7]]) {
-      const prefix = `node() { printf '# pass ${passed}\\n# fail ${failed}\\n'; return ${exit}; }; export -f node;\n`;
+    for (const [passed, failed, skipped, exit, expected] of [
+      [1, 0, 0, 0, 0], [0, 0, 0, 0, 1], [2, 1, 0, 0, 1],
+      [2, 1, 0, 1, 1], [1, 0, 0, 7, 7], [1, 0, 1, 0, 1], [1, 0, null, 0, 1],
+    ]) {
+      const skipSummary = skipped === null ? "" : `# skipped ${skipped}\\n`;
+      const prefix = `node() { printf '# pass ${passed}\\n# fail ${failed}\\n${skipSummary}'; return ${exit}; }; export -f node;\n`;
       const result = spawnSync(bash, ["-c", prefix + run], { cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true, env: { ...process.env, RUNNER_TEMP: directory.replaceAll("\\", "/") } });
-      assert.equal(result.status, expected, `${passed}/${failed}/${exit}: ${result.stderr}`);
+      assert.equal(result.status, expected, `${passed}/${failed}/${skipped}/${exit}: ${result.stderr}`);
     }
   } finally {
     rmSync(directory, { recursive: true, force: true });

@@ -156,7 +156,7 @@ spec:
 {{- $outbound := list
   (dict "name" "redis-clients" "callers" $redisCallers "cidrs" .Values.external.redisCidrs "port" 6379)
   (dict "name" "event-clients" "callers" (list "account-service" "billing-service" "token-gateway" "account-event-relay" "billing-event-relay" "token-event-relay") "cidrs" .Values.external.natsCidrs "port" 4222)
-  (dict "name" "workload-verifiers" "callers" (list "account-service" "billing-service" "token-gateway") "cidrs" .Values.external.workloadJwksCidrs "port" 443)
+  (dict "name" "workload-verifiers" "callers" (list "account-service" "billing-service" "token-gateway" "identity-service") "cidrs" .Values.external.workloadJwksCidrs "port" 443)
   (dict "name" "portal-oidc" "callers" (list "token-portal") "cidrs" .Values.external.oidcCidrs "port" 443)
   (dict "name" "portal-nats-monitor" "callers" (list "token-portal") "cidrs" .Values.external.natsMonitorCidrs "port" 443)
 -}}

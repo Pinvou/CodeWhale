@@ -15,6 +15,13 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "prepare-keycloak-secret" {
+		if len(os.Args) != 4 || identityadapter.StageKeycloakClientSecret(os.Args[2], os.Args[3]) != nil {
+			log.Print("IDENTITY_KEYCLOAK_SECRET_PREPARATION_FAILED")
+			os.Exit(2)
+		}
+		return
+	}
 	if err := httpserver.ConfigureProcessLogging("identity-service"); err != nil {
 		log.Fatal(err)
 	}

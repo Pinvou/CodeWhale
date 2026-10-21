@@ -286,6 +286,11 @@
       "type": "object",
       "required": ["hostname", "adminHostname", "realmUpgradeEnabled", "oidcClientId"],
       "properties": {
+        "enabled": { "type": "boolean" },
+        "tlsSecretName": { "$ref": "#/definitions/kmsResourceName" },
+        "caConfigMap": { "$ref": "#/definitions/kmsResourceName" },
+        "adminApiUrl": { "type": "string" },
+        "provisionerTokenUrl": { "type": "string" },
         "hostname": { "type": "string", "format": "uri" },
         "adminHostname": { "type": "string", "format": "uri" },
         "realmUpgradeEnabled": { "type": "boolean" },

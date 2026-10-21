@@ -42,7 +42,11 @@ func TestSystemProbePrivateCAIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ca := filepath.Join(t.TempDir(), "issuer-ca.pem")
+	directory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca := filepath.Join(directory, "issuer-ca.pem")
 	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -92,8 +96,8 @@ func TestSystemProbePrivateCAIsolation(t *testing.T) {
 		}
 	})
 	for _, c := range []struct{ name, filename, content string }{
-		{"missing", filepath.Join(t.TempDir(), "absent.pem"), ""},
-		{"malformed", filepath.Join(t.TempDir(), "invalid.pem"), "not a certificate"},
+		{"missing", filepath.Join(directory, "absent.pem"), ""},
+		{"malformed", filepath.Join(directory, "invalid.pem"), "not a certificate"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if c.content != "" {
