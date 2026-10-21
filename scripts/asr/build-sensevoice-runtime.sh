@@ -103,7 +103,7 @@ fi
 # 指向目标 strip(默认按钉死交叉工具链的 binutils 命名,Debian 交叉
 # binutils 的命名可通过 STRIP 覆盖继续使用)。
 if [ "$cross_mode" -eq 1 ]; then
-  for command_name in cmake git make sha256sum dpkg file objdump readelf; do
+  for command_name in cmake git make sha256sum dpkg file readelf; do
     command -v "$command_name" >/dev/null || {
       echo "missing SenseVoice build dependency: $command_name" >&2
       exit 1
@@ -127,7 +127,7 @@ if [ "$cross_mode" -eq 1 ]; then
     strip_bin="${STRIP:-loongarch64-unknown-linux-gnu-strip}"
   fi
 else
-  for command_name in cmake g++ git make sha256sum dpkg file objdump readelf; do
+  for command_name in cmake g++ git make sha256sum dpkg file readelf; do
     command -v "$command_name" >/dev/null || {
       echo "missing SenseVoice build dependency: $command_name" >&2
       exit 1

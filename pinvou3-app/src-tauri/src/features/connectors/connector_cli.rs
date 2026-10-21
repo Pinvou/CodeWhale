@@ -521,10 +521,12 @@ pub fn png_data_url(bytes: &[u8]) -> Option<String> {
 /// 后台线程:逐行排空一个管道(防写满阻塞),每行经 channel 送回
 /// `(首个本连接器 URL, 脱敏安全行)` 二元组。URL 供二维码;安全行(已按
 /// [`safe_auth_log_line`] 脱敏 + 截断)供连接器收进失败原因环形缓冲。
-/// bare-"token" 兜底关闭:飞书/企微 CLI 的正常输出行可能含含 token 字样的
-/// 字段名,开启会把非敏感行整体吞成占位符,失败原因就没了(与 dingtalk 同款取舍)。
+/// `redact_bare_token` 透传给 [`safe_auth_log_line`]:飞书/企微传 `false`(CLI 的
+/// 正常输出行可能含含 token 字样的字段名,开启会把非敏感行整体吞成占位符,
+/// 失败原因就没了),tmeet 传 `true`(与 dingtalk 同款取舍)。
 pub fn drain_for_url<R: std::io::Read + Send + 'static>(
     ctx: CliCtx,
+    redact_bare_token: bool,
     r: R,
     tx: mpsc::Sender<(Option<String>, Option<String>)>,
 ) -> std::thread::JoinHandle<()> {
@@ -538,7 +540,7 @@ pub fn drain_for_url<R: std::io::Read + Send + 'static>(
                     break;
                 }
             };
-            let safe = safe_auth_log_line(&line, false);
+            let safe = safe_auth_log_line(&line, redact_bare_token);
             let url = ctx.extract_url(&line);
             let _ = tx.send((url, safe));
         }
@@ -1058,7 +1060,7 @@ mod tests {
     #[test]
     fn drain_for_url_stops_after_read_error() {
         let (tx, _rx) = mpsc::channel();
-        let handle = drain_for_url(TEST_CTX, ReadErrorThenPanic { failed: false }, tx);
+        let handle = drain_for_url(TEST_CTX, false, ReadErrorThenPanic { failed: false }, tx);
         assert!(handle.join().is_ok(), "读取错误后应退出排空线程");
     }
 

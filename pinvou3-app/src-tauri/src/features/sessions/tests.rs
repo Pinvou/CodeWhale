@@ -7,6 +7,7 @@
 // architecture-guard: allow-target-cfg -- the legacy-table sync-failure regression needs POSIX permission modes to make the atomic rewrite fail deterministically, and the symlink-alias regression needs a real directory symlink to emulate macOS /var → /private/var ancestor resolution; PermissionsExt/from_mode and std::os::unix::fs::symlink do not exist on Windows, so those tests are cfg(unix)-gated and no platform behavior leaks into shared code.
 
 use super::*;
+use crate::core::mode_state::ModeLane;
 use crate::platform::paths;
 use crate::platform::paths::tests::{ENV_LOCK, EnvVarGuard};
 use crate::platform::prefs::UserPrefs;
@@ -1494,10 +1495,7 @@ fn scheduled_engine_state_persists_full_snapshot_and_preserves_identity_and_prof
             scheduled_engine_state(
                 messages.clone(),
                 ScheduledRunMode::Yolo,
-                ScheduledTokenAccounting::EngineCumulative {
-                    base_total_tokens: 40,
-                    engine_total_tokens: 12,
-                },
+                ScheduledTokenAccounting::PreservePersisted,
             ),
         )
         .expect("persist scheduled engine state");
@@ -1506,7 +1504,10 @@ fn scheduled_engine_state_persists_full_snapshot_and_preserves_identity_and_prof
     assert_eq!(persisted.metadata.title, before.metadata.title);
     assert_eq!(persisted.metadata.created_at, before.metadata.created_at);
     assert_eq!(persisted.metadata.message_count, messages.len());
-    assert_eq!(persisted.metadata.total_tokens, 52);
+    assert_eq!(
+        persisted.metadata.total_tokens,
+        before.metadata.total_tokens
+    );
     assert_eq!(persisted.metadata.model, "/engine-model");
     assert_eq!(
         persisted.metadata.workspace,
@@ -1525,13 +1526,16 @@ fn scheduled_engine_state_persists_full_snapshot_and_preserves_identity_and_prof
     let reloaded = reopen_store(&store).expect("reboot");
     assert_eq!(reloaded.scheduled_profile(&id), Some(expected_profile));
     let from_disk = reloaded.load(&id).expect("load persisted engine state");
-    assert_eq!(from_disk.metadata.total_tokens, 52);
+    assert_eq!(
+        from_disk.metadata.total_tokens,
+        before.metadata.total_tokens
+    );
     assert_eq!(from_disk.messages, persisted.messages);
     assert_eq!(from_disk.system_prompt, persisted.system_prompt);
 }
 
 #[test]
-fn scheduled_engine_token_accounting_preserves_updates_and_accumulates_across_restarts() {
+fn scheduled_engine_token_accounting_preserves_persisted_totals_across_restarts() {
     let (store, _g) = isolated_store();
     let scheduled = store
         .create_scheduled_run(scheduled_profile("task-token-accounting"))
@@ -1539,18 +1543,8 @@ fn scheduled_engine_token_accounting_preserves_updates_and_accumulates_across_re
     let id = scheduled.metadata.id.clone();
 
     store
-        .persist_scheduled_engine_state(
-            &id,
-            scheduled_engine_state(
-                vec![text_message("user", "first turn")],
-                ScheduledRunMode::Plan,
-                ScheduledTokenAccounting::EngineCumulative {
-                    base_total_tokens: 0,
-                    engine_total_tokens: 100,
-                },
-            ),
-        )
-        .expect("persist first engine snapshot");
+        .persist_scheduled_token_total(&id, 0, 100)
+        .expect("persist terminal token total");
     store
         .persist_scheduled_engine_state(
             &id,
@@ -1580,35 +1574,19 @@ fn scheduled_engine_token_accounting_preserves_updates_and_accumulates_across_re
             scheduled_engine_state(
                 vec![text_message("assistant", "later turn")],
                 ScheduledRunMode::Yolo,
-                ScheduledTokenAccounting::EngineCumulative {
-                    base_total_tokens: 100,
-                    engine_total_tokens: 25,
-                },
+                ScheduledTokenAccounting::PreservePersisted,
             ),
         )
         .expect("persist later engine snapshot");
-    reloaded
-        .persist_scheduled_engine_state(
-            &id,
-            scheduled_engine_state(
-                vec![text_message("assistant", "same engine next turn")],
-                ScheduledRunMode::Yolo,
-                ScheduledTokenAccounting::EngineCumulative {
-                    base_total_tokens: 100,
-                    engine_total_tokens: 40,
-                },
-            ),
-        )
-        .expect("persist cumulative same-engine snapshot");
 
     assert_eq!(
         reloaded
             .load(&id)
-            .expect("load accumulated total")
+            .expect("load preserved total")
             .metadata
             .total_tokens,
-        140,
-        "same-engine cumulative usage must not be added twice"
+        100,
+        "engine-state persistence must keep the durable token total"
     );
 }
 
@@ -1629,10 +1607,7 @@ fn scheduled_engine_state_entry_rejects_normal_chat_without_mutation() {
             scheduled_engine_state(
                 vec![text_message("user", "must not persist")],
                 ScheduledRunMode::Plan,
-                ScheduledTokenAccounting::EngineCumulative {
-                    base_total_tokens: 0,
-                    engine_total_tokens: 99,
-                },
+                ScheduledTokenAccounting::PreservePersisted,
             ),
         )
         .expect_err("normal chat must not use scheduled persistence");
@@ -2537,6 +2512,123 @@ fn set_title_updates_metadata() {
         .expect("rename");
     let loaded = store.load(&s.metadata.id).expect("load");
     assert_eq!(loaded.metadata.title, "改个名字");
+}
+
+/// The engine spawn path must record the provider route it actually resolved
+/// onto the session record. The foundation create path stamps the engine
+/// default ("deepseek") into every new record; a session bound to a
+/// vendor-kimi saved model ("k3" on the Kimi Coding Plan, whose resolved
+/// route the bridge pins to "moonshot" in
+/// coding_plan_vendor_routes_reasoning_without_model_name_heuristics) must
+/// read back as the canonical ("moonshot", Some("moonshot")) pair after the
+/// spawn-time stamp, survive a store reopen, and the stamp must fail soft —
+/// an unstampable session errors instead of panicking or touching any record
+/// (the spawn caller logs and continues, never aborting the spawn).
+#[test]
+fn stamp_resolved_provider_records_vendor_route_over_engine_default() {
+    let (store, _g) = isolated_store();
+    let s = store
+        .create_new("k3".into(), None, std::env::temp_dir())
+        .expect("create");
+    // Baseline poison being fixed: creation itself cannot know the route and
+    // carries the foundation default.
+    assert_eq!(s.metadata.model_provider, "deepseek");
+    assert_eq!(s.metadata.model_provider_id, None);
+
+    store
+        .stamp_resolved_provider(&s.metadata.id, "moonshot", Some("moonshot"))
+        .expect("stamp resolved provider");
+    let loaded = store.load(&s.metadata.id).expect("load");
+    assert_eq!(loaded.metadata.model_provider, "moonshot");
+    // Built-in routes stamp the kind as both fields — the exact pair the
+    // foundation's resolve_persisted_provider_identity re-derives a built-in
+    // route from, so a later shared-home resume resolves instead of failing
+    // closed on a mismatched pair.
+    assert_eq!(
+        loaded.metadata.model_provider_id.as_deref(),
+        Some("moonshot")
+    );
+
+    // The stamp is forensic data: it must survive an app restart.
+    let reopened = reopen_store(&store).expect("reopen");
+    let reloaded = reopened.load(&s.metadata.id).expect("reload");
+    assert_eq!(reloaded.metadata.model_provider, "moonshot");
+    assert_eq!(
+        reloaded.metadata.model_provider_id.as_deref(),
+        Some("moonshot")
+    );
+
+    // Fail-soft seam contract: an absent record is a clean Err — no panic,
+    // no write — so the spawn caller can log and continue.
+    let error = reopened
+        .stamp_resolved_provider("no-such-session", "moonshot", Some("moonshot"))
+        .expect_err("stamping an absent session must fail soft");
+    assert!(
+        error.to_string().contains("provider stamp"),
+        "error must name the stamp step: {error:#}"
+    );
+}
+
+/// A record created by the CodeWhale CLI in a shared home can carry a
+/// non-None exact provider id naming a different route than the one the GUI
+/// spawn resolved. The stamp must rewrite the whole pair coherently: keeping
+/// the stale id next to the new kind produces exactly the mismatch the
+/// foundation's fail-closed resolve_persisted_provider_identity rejects at
+/// the next resume (review #713 round 2: ("moonshot", Some("openai")) —
+/// "declares built-in kind 'moonshot' but exact provider id 'openai' names
+/// a different route") even with both providers configured, and
+/// persist_chat_engine_state preserves the metadata fields verbatim, so
+/// nothing downstream heals it.
+#[test]
+fn stamp_resolved_provider_rewrites_stale_exact_id_on_route_switch() {
+    let (store, _g) = isolated_store();
+    let s = store
+        .create_new("k3".into(), None, std::env::temp_dir())
+        .expect("create");
+    // Seed the shared-home CLI shape: kind + exact id naming one route.
+    let mut seeded = store.load(&s.metadata.id).expect("load");
+    seeded.metadata.model_provider = "openai".to_string();
+    seeded.metadata.model_provider_id = Some("openai".to_string());
+    store
+        .manager
+        .save_session(&seeded)
+        .expect("seed CLI-shaped record");
+
+    // The GUI spawn resolves a different route (kimi vendor → moonshot).
+    store
+        .stamp_resolved_provider(&s.metadata.id, "moonshot", Some("moonshot"))
+        .expect("stamp resolved provider");
+    let loaded = store.load(&s.metadata.id).expect("load");
+    assert_eq!(loaded.metadata.model_provider, "moonshot");
+    // The stale "openai" id must not survive next to the "moonshot" kind.
+    assert_eq!(
+        loaded.metadata.model_provider_id.as_deref(),
+        Some("moonshot")
+    );
+}
+
+/// The Responses wire route resolves `cfg.provider` to the named-custom key
+/// ("pinvou_responses") — an exact provider key, not a canonical kind. The
+/// canonical pair the engine hands the stamp is the generic `custom` kind
+/// plus that key as the exact id, and the stamp must persist it verbatim:
+/// that is the shape the foundation resolver re-derives the
+/// `[providers.pinvou_responses]` table from (review #713 round 2).
+#[test]
+fn stamp_resolved_provider_persists_named_custom_responses_pair() {
+    let (store, _g) = isolated_store();
+    let s = store
+        .create_new("k3".into(), None, std::env::temp_dir())
+        .expect("create");
+
+    store
+        .stamp_resolved_provider(&s.metadata.id, "custom", Some("pinvou_responses"))
+        .expect("stamp resolved provider");
+    let loaded = store.load(&s.metadata.id).expect("load");
+    assert_eq!(loaded.metadata.model_provider, "custom");
+    assert_eq!(
+        loaded.metadata.model_provider_id.as_deref(),
+        Some("pinvou_responses")
+    );
 }
 
 #[test]
@@ -5009,6 +5101,44 @@ fn delete_refuses_case_variant_sched_ids_without_a_record() {
                 .to_string()
                 .contains("Scheduled-run sessions are deleted through their automation"),
             "the refusal must be the automation-ownership error, not NotFound: {error:#}"
+        );
+    }
+}
+
+/// The case-variant legs of the remote-namespace gates: ids resolve to file
+/// names without case canonicalization, so on NTFS/APFS a `REMOTE-…` alias
+/// resolves to the same file as the reserved namespace. Every remote gate
+/// (save, delete, session_kind) must therefore classify the alias exactly
+/// like the canonical spelling — otherwise a hand-copied alias file both
+/// escapes the namespace guard and bricks the remote-control subsystem at
+/// startup via the collision probe.
+#[test]
+fn remote_namespace_gates_reject_case_variant_ids() {
+    let (store, _g) = isolated_store();
+    for id in ["REMOTE-ghost", "Remote-ghost", "rEmOtE-ghost"] {
+        let session = chat_model_session(id.to_owned());
+        let error = store
+            .save(&session)
+            .expect_err("a case-variant remote- id must never persist as a local Session");
+        assert!(
+            error.to_string().contains("RemoteProxy cannot be saved"),
+            "the refusal must be the remote-namespace error: {error:#}"
+        );
+        let error = store
+            .delete(id)
+            .expect_err("a case-variant remote- id must never delete through the local path");
+        assert!(
+            error.to_string().contains("RemoteProxy cannot be deleted"),
+            "the refusal must be the remote-namespace error: {error:#}"
+        );
+        let error = store
+            .session_kind(id)
+            .expect_err("a case-variant remote- id must classify as the reserved namespace");
+        assert!(
+            error
+                .to_string()
+                .contains("RemoteProxy record is unavailable"),
+            "the classification must be the reserved-namespace error: {error:#}"
         );
     }
 }

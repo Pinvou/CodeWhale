@@ -40,8 +40,8 @@ use persistence::{
     fresh_config, load_config, load_or_initialize_rpc_ledger, load_pending_revocations,
     load_relay_settings, new_stream_epoch, normalize_relay_address, pairing_info,
     pending_revocation_key, persist_config, persist_rpc_ledger, process_lock_path, public_url,
-    queue_pending_revocation, relay_settings_path, remote_public_base_url, remote_relay_ws_url,
-    remove_config, remove_private_file, remove_rpc_ledger, validate_config,
+    queue_pending_revocation_for_removal, relay_settings_path, remote_public_base_url,
+    remote_relay_ws_url, remove_config, remove_private_file, remove_rpc_ledger, validate_config,
     validate_relay_settings,
 };
 
@@ -64,12 +64,16 @@ use rpc::{
 use transfer::{
     append_web_attachment_upload_chunk, clear_web_attachments, discard_web_attachment_upload,
     ensure_web_session_download_capacity, finish_web_attachment_reservation_inner,
-    is_owned_session_download_id, open_web_session_downloads_base,
-    prune_expired_web_session_transfers, read_web_session_download_chunk,
-    remove_web_attachment_upload_dir, request_web_attachment_discard,
-    sweep_stale_web_session_downloads, take_web_session_download,
+    open_web_session_downloads_base, prune_expired_web_session_transfers,
+    read_web_session_download_chunk, remove_web_attachment_upload_dir,
+    request_web_attachment_discard, sweep_stale_web_session_downloads, take_web_session_download,
 };
-pub(crate) use transfer::{sweep_stale_web_attachment_uploads, web_attachment_uploads_base};
+// The download-id ownership rule is the mint-side contract (`begin_web_session_download`
+// issues ids through it); the command-layer cancel gate re-uses it so the two
+// cannot drift again.
+pub(crate) use transfer::{
+    is_owned_session_download_id, sweep_stale_web_attachment_uploads, web_attachment_uploads_base,
+};
 use workspace_grants::{
     WebWorkspaceGrantReservation, WebWorkspaceGrantStore, WebWorkspaceIdentity,
     require_host_workspace_authorization,
@@ -364,6 +368,18 @@ fn owned_legacy_relay_error(
         return None;
     }
     Some(message.to_owned())
+}
+
+/// 连接级 controller 通道故障信号：本地在 Relay 只协商出 legacy v2 时合成
+/// （见 relay_client 的 `notify_controller_unavailable`），或 Relay 对未启用
+/// controller 分发器的部署直接下发。形状为 v2 error、无 endpoint_id、code 为
+/// `desktop_controller_unavailable`。它属于已绑定的 controller 通道
+/// （`wait_for_registration` 据此收敛为 `desktop_controller_relay_unavailable`），
+/// 不是端点级 legacy 错误，不得写入 Web 端点的 status/last_error。
+fn controller_lane_unavailable_error(value: &Value) -> bool {
+    value.get("v").and_then(Value::as_u64) == Some(2)
+        && value.get("code").and_then(Value::as_str) == Some("desktop_controller_unavailable")
+        && value.get("endpoint_id").is_none()
 }
 
 #[derive(Clone)]
@@ -1482,7 +1498,7 @@ impl RemoteControlManager {
             .map(|endpoint| endpoint.config.clone())
             .or_else(|| persisted_previous.clone());
         if let Some(previous) = previous_config.as_ref() {
-            queue_pending_revocation(previous)?;
+            queue_pending_revocation_for_removal(previous)?;
         }
         let allow_host_workspace = previous_config
             .as_ref()
@@ -1627,7 +1643,7 @@ impl RemoteControlManager {
             .map(|endpoint| endpoint.config.clone())
             .or_else(|| persisted.clone());
         if let Some(config) = current_config.as_ref() {
-            queue_pending_revocation(config)?;
+            queue_pending_revocation_for_removal(config)?;
         }
         // A failed removal leaves the old config authoritative. Its queued
         // entry therefore remains dormant instead of revoking a live link.
@@ -2609,6 +2625,19 @@ impl RemoteControlManager {
             return;
         }
         if value.get("type").and_then(Value::as_str) == Some("error") {
+            if controller_lane_unavailable_error(&value) {
+                // v1 controller 帧校验要求 relay-role error 必带 request_id，该
+                // 连接级信号没有可对应的请求，因此绕过 controller_relay_message
+                // 直推已绑定通道（reader 身份已在上方校验），且不触碰端点状态。
+                let inner = self.inner.lock();
+                if let Some(sender) = &inner.controller_inbound {
+                    let _ = sender.try_send(ControllerRelayFrame {
+                        message: value,
+                        receipt: None,
+                    });
+                }
+                return;
+            }
             let accepted = {
                 let mut inner = self.inner.lock();
                 let Some(endpoint) = inner.endpoint.as_mut() else {
@@ -2901,6 +2930,48 @@ impl RemoteControlManager {
         prune_rpc_cache(inner);
     }
 
+    /// Shared admission tail of the two Pending branches in `handle_rpc_request`
+    /// (reconstructed-tombstone and fresh-durable): insert the Pending cache
+    /// entry, queue the request id, prune, then map the bridge generation to the
+    /// dispatch action. Both arms were token-identical; this is the single home
+    /// of the idempotency bookkeeping (`settle_complete` is the Complete-insert
+    /// analogue). The cache entry clones `command`/`args`; the dispatch consumes
+    /// the originals — exactly the pre-extraction sharing.
+    fn admit_pending_rpc(
+        inner: &mut Inner,
+        request_id: &str,
+        lease_id: String,
+        command: String,
+        args: Value,
+        fingerprint: String,
+        bridge_generation: Option<String>,
+    ) -> RpcRequestAction {
+        inner.rpc_cache.insert(
+            request_id.to_string(),
+            RpcCacheEntry::Pending(PendingRpc {
+                lease_id,
+                command: command.clone(),
+                args: args.clone(),
+                fingerprint,
+                dispatched_generation: bridge_generation.clone(),
+                acknowledged_generation: None,
+                dispatched_at: Instant::now(),
+            }),
+        );
+        inner.rpc_order.push_back(request_id.to_string());
+        prune_rpc_cache(inner);
+        if let Some(bridge_generation) = bridge_generation {
+            RpcRequestAction::Dispatch(RpcDispatch {
+                request_id: request_id.to_string(),
+                command,
+                args,
+                bridge_generation,
+            })
+        } else {
+            RpcRequestAction::None
+        }
+    }
+
     fn handle_rpc_request(&self, value: &Value) {
         let request_id = value
             .get("client_request_id")
@@ -3083,30 +3154,15 @@ impl RemoteControlManager {
                                     rpc_response(&endpoint_id, &lease_id, &request_id, &completion),
                                 )
                             } else {
-                                inner.rpc_cache.insert(
-                                    request_id.clone(),
-                                    RpcCacheEntry::Pending(PendingRpc {
-                                        lease_id,
-                                        command: command.clone(),
-                                        args: args.clone(),
-                                        fingerprint,
-                                        dispatched_generation: bridge_generation.clone(),
-                                        acknowledged_generation: None,
-                                        dispatched_at: Instant::now(),
-                                    }),
-                                );
-                                inner.rpc_order.push_back(request_id.clone());
-                                prune_rpc_cache(&mut inner);
-                                if let Some(bridge_generation) = bridge_generation {
-                                    RpcRequestAction::Dispatch(RpcDispatch {
-                                        request_id: request_id.clone(),
-                                        command,
-                                        args,
-                                        bridge_generation,
-                                    })
-                                } else {
-                                    RpcRequestAction::None
-                                }
+                                Self::admit_pending_rpc(
+                                    &mut inner,
+                                    &request_id,
+                                    lease_id,
+                                    command,
+                                    args,
+                                    fingerprint,
+                                    bridge_generation,
+                                )
                             }
                         }
                     } else {
@@ -3153,30 +3209,15 @@ impl RemoteControlManager {
                                     )
                                 } else {
                                     inner.rpc_ledger = next_ledger;
-                                    inner.rpc_cache.insert(
-                                        request_id.clone(),
-                                        RpcCacheEntry::Pending(PendingRpc {
-                                            lease_id,
-                                            command: command.clone(),
-                                            args: args.clone(),
-                                            fingerprint,
-                                            dispatched_generation: bridge_generation.clone(),
-                                            acknowledged_generation: None,
-                                            dispatched_at: Instant::now(),
-                                        }),
-                                    );
-                                    inner.rpc_order.push_back(request_id.clone());
-                                    prune_rpc_cache(&mut inner);
-                                    if let Some(bridge_generation) = bridge_generation {
-                                        RpcRequestAction::Dispatch(RpcDispatch {
-                                            request_id: request_id.clone(),
-                                            command,
-                                            args,
-                                            bridge_generation,
-                                        })
-                                    } else {
-                                        RpcRequestAction::None
-                                    }
+                                    Self::admit_pending_rpc(
+                                        &mut inner,
+                                        &request_id,
+                                        lease_id,
+                                        command,
+                                        args,
+                                        fingerprint,
+                                        bridge_generation,
+                                    )
                                 }
                             }
                             Err(error) => {
@@ -3616,9 +3657,9 @@ impl RemoteControlManager {
 mod tests {
     use super::persistence::{
         acknowledge_pending_revocation_at, load_config_from, load_pending_revocations_from,
-        queue_pending_revocation_at,
+        queue_pending_revocation_at, queue_pending_revocation_for_removal_at,
     };
-    use super::rpc::{WebSessionScope, web_scope_admits_absent_session, web_session_scope};
+    use super::rpc::{WebSessionScope, web_session_scope};
     use super::*;
 
     const TEST_ENDPOINT_ID: &str = "ep_test";
@@ -3683,6 +3724,22 @@ mod tests {
                 owned_legacy_relay_error(&malformed, TEST_ENDPOINT_ID, &current, &same).is_none()
             );
         }
+        // 连接级 controller 通道故障信号（relay_client 本地合成或 Relay 下发）：
+        // v2、无 endpoint_id、无 request_id。它绕过 legacy 归属与 v1 schema，
+        // 由路由层直推 controller 通道（全链路布线见 Windows loopback 回归）。
+        let lane_signal = json!({"v":2,"type":"error","code":"desktop_controller_unavailable",
+            "message":"desktop controller is unavailable"});
+        assert!(controller_lane_unavailable_error(&lane_signal));
+        assert!(!controller_relay_message(&lane_signal));
+        assert!(
+            owned_legacy_relay_error(&lane_signal, TEST_ENDPOINT_ID, &current, &same).is_some(),
+            "路由特判必须先于 legacy 归属生效，否则该信号仍会污染端点状态"
+        );
+        let mut endpoint_scoped = lane_signal.clone();
+        endpoint_scoped["endpoint_id"] = json!(TEST_ENDPOINT_ID);
+        assert!(!controller_lane_unavailable_error(&endpoint_scoped));
+        assert!(!controller_lane_unavailable_error(&legacy));
+        assert!(!controller_lane_unavailable_error(&controller));
     }
 
     #[test]
@@ -4390,15 +4447,11 @@ mod tests {
             );
         }
         // The auxiliary conversation (aux session) commands: the WebUI
-        // auxChat domain (bridge.js auxChatEnsure/auxChatDiscard/auxChatReset)
+        // auxChat domain (bridge.js auxChatEnsure/auxChatReset)
         // depends on them directly; once allowed, the central validator's
         // Required("sessionId") scope constraint pins them to an explicit
         // session.
-        for command in [
-            "get_or_create_aux_session",
-            "discard_aux_session",
-            "reset_aux_session",
-        ] {
+        for command in ["get_or_create_aux_session", "reset_aux_session"] {
             assert!(
                 policy.commands.contains(command),
                 "{command} must be allowed on Web (aux chat)"
@@ -4724,7 +4777,6 @@ mod tests {
             ("cancel_generation", "sessionId"),
             ("web_access_chat", "sessionId"),
             ("get_or_create_aux_session", "sessionId"),
-            ("discard_aux_session", "sessionId"),
             ("reset_aux_session", "sessionId"),
             ("delete_session", "id"),
             ("rename_session", "id"),
@@ -4750,27 +4802,6 @@ mod tests {
             web_session_scope("get_effective_model_config"),
             Some(WebSessionScope::Optional("sessionId"))
         );
-    }
-
-    #[test]
-    fn discard_aux_session_admits_an_absent_main_session() {
-        // Round-24 minor-10: desktop `discard_aux_session` is idempotent on an
-        // unmapped main id (a deleted main leaves no mapping and the command
-        // returns Ok(())), so the central validator must skip its
-        // `store.load` admission for it — the Web lane otherwise fails with
-        // `web_session_unavailable` exactly where desktop succeeds. Only the
-        // discard leg: the create leg needs the parent record, and every
-        // other command acts on the session itself.
-        assert!(web_scope_admits_absent_session("discard_aux_session"));
-        assert!(!web_scope_admits_absent_session(
-            "get_or_create_aux_session"
-        ));
-        // M6: reset CREATES the fresh session itself, so like the create leg
-        // it needs the parent record and must fail admission on an absent
-        // main — only the idempotent discard leg skips the load.
-        assert!(!web_scope_admits_absent_session("reset_aux_session"));
-        assert!(!web_scope_admits_absent_session("web_access_chat"));
-        assert!(!web_scope_admits_absent_session("delete_session"));
     }
 
     #[test]
@@ -5153,6 +5184,34 @@ mod tests {
         );
         acknowledge_pending_revocation_at(&path, &second).unwrap();
         assert!(!path.exists(), "an empty revocation ledger is removed");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn removal_queueing_evicts_the_oldest_entry_instead_of_blocking_the_lifecycle() {
+        let directory = std::env::temp_dir().join(format!(
+            "pinvou-web-revocation-evict-{}-{}",
+            std::process::id(),
+            crate::features::remote_control::short_token(12)
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("pending.json");
+        let mut queued = VecDeque::new();
+        for index in 0..MAX_PENDING_REVOCATIONS {
+            let pending = test_pending_revocation(&format!("ep_retired_{index:02}"));
+            queue_pending_revocation_at(&path, pending.clone()).unwrap();
+            queued.push_back(pending);
+        }
+        // The strict queue is full now; a plain queue would fail the
+        // stop/refresh lifecycle right here.
+        let newest = test_pending_revocation("ep_retired_newest");
+        queue_pending_revocation_for_removal_at(&path, newest.clone())
+            .expect("removal queueing must never be blocked by a full queue");
+        let restored = load_pending_revocations_from(&path).unwrap();
+        let mut expected = queued.clone();
+        expected.pop_front();
+        expected.push_back(newest);
+        assert_eq!(restored.entries, expected);
         std::fs::remove_dir_all(directory).unwrap();
     }
 

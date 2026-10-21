@@ -783,7 +783,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                     : 'text-slate-300 dark:text-slate-600'
                 }`}
               >
-                {config.backendId === 'feishu' || fields.length > 0 ? copy.configConnect : copy.configInstall}
+                {copy.configConnect}
               </button>
             </div>
           </div>

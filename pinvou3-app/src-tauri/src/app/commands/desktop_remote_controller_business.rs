@@ -198,6 +198,7 @@ fn submit_error(code: &str) -> UseCaseError {
             UseCaseError::new("task_session_binding_mismatch", false)
         }
         "task_lease_mismatch" => UseCaseError::new("task_lease_mismatch", true),
+        "task_session_limit_exceeded" => UseCaseError::new("task_session_limit_exceeded", false),
         "task_session_provisioner_unavailable" => {
             UseCaseError::new("task_session_provisioner_unavailable", true)
         }
@@ -1390,22 +1391,22 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
     }
 }
 
-/// 一次回放最多回传的帧数：journal 保留窗口有界，但仍给回放本身一个硬上限。
-const MAX_REPLAY_FRAMES: usize = 256;
-
 fn build_replay_frames(
     lease: &LeaseContext,
     session_ref: &str,
     events: &[crate::features::remote_control::controller::journal::JournalEvent],
 ) -> Result<Vec<(String, Value)>, String> {
+    // The journal retention window is itself bounded (512 events / 256 KiB),
+    // so replay returns the whole retained window. There is deliberately no
+    // additional frame cap here: a real per-call page limit would need a
+    // continuation protocol on the A side, which does not exist yet — a
+    // no-op chunking would only fake one.
     let mut frames = Vec::with_capacity(events.len());
-    for page in events.chunks(MAX_REPLAY_FRAMES) {
-        for event in page {
-            let payload = crate::features::remote_control::controller::relay_runtime::build_journal_event_payload(
-                lease, session_ref, event,
-            ).ok_or_else(|| "journal_event_not_exportable".to_owned())?;
-            frames.push(("journal_event".to_owned(), payload));
-        }
+    for event in events {
+        let payload = crate::features::remote_control::controller::relay_runtime::build_journal_event_payload(
+            lease, session_ref, event,
+        ).ok_or_else(|| "journal_event_not_exportable".to_owned())?;
+        frames.push(("journal_event".to_owned(), payload));
     }
     Ok(frames)
 }
@@ -1704,7 +1705,7 @@ mod dev19_replay_tests {
     }
 
     #[test]
-    fn replay_over_256_is_fully_paged_without_silent_truncation() {
+    fn replay_returns_the_full_retained_window_without_silent_truncation() {
         let journal = RemoteJournal::new("epoch-1");
         for sequence in 1..=300 {
             journal

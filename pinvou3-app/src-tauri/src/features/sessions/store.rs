@@ -440,7 +440,7 @@ impl SessionStore {
     }
 
     pub fn load(&self, id: &str) -> Result<SavedSession> {
-        self.load_with_context(id, || format!("load_session({id})"))
+        self.load_with_context(id)
     }
 
     /// Engine replacement must observe every already-admitted writer from
@@ -450,15 +450,11 @@ impl SessionStore {
         self.load(id)
     }
 
-    fn load_with_context(
-        &self,
-        id: &str,
-        context: impl FnOnce() -> String,
-    ) -> Result<SavedSession> {
+    fn load_with_context(&self, id: &str) -> Result<SavedSession> {
         let session = self
             .manager
             .load_session_snapshot(id)
-            .with_context(context)?;
+            .with_context(|| format!("load_session({id})"))?;
         // Fail closed on case-variant aliases of AUX records: on
         // case-insensitive filesystems `AUX-<suffix>.json` resolves to the
         // real `aux-…` record while case-sensitive identity tests miss the
@@ -525,7 +521,7 @@ impl SessionStore {
 
     pub fn save(&self, session: &SavedSession) -> Result<PathBuf> {
         let _mutation = self.scheduled_mutation.lock();
-        if session.metadata.id.starts_with("remote-")
+        if super::validators::is_remote_session_id(&session.metadata.id)
             || self
                 .remote_proxies
                 .lock()
@@ -577,7 +573,9 @@ impl SessionStore {
         // A remote-proxy record is owned by the remote-control feature's own
         // lifecycle; deleting it through the local Engine/ACP path would
         // strand the proxy state.
-        if id.starts_with("remote-") || self.remote_proxies.lock().records.contains_key(id) {
+        if super::validators::is_remote_session_id(id)
+            || self.remote_proxies.lock().records.contains_key(id)
+        {
             bail!("RemoteProxy cannot be deleted through local Engine/ACP lifecycle");
         }
         if super::validators::is_sched_session_id(id) || self.is_scheduled_session(id)? {
@@ -740,10 +738,10 @@ impl SessionStore {
         // Remote archive availability must not classify or block local records.
         // Only the reserved remote namespace needs permanent-bank authority.
         if self.remote_proxies.lock().records.contains_key(id)
-            || (id.starts_with("remote-") && self.is_archived_remote_proxy(id)?)
+            || (super::validators::is_remote_session_id(id) && self.is_archived_remote_proxy(id)?)
         {
             Ok(SessionKind::RemoteProxy)
-        } else if id.starts_with("remote-") {
+        } else if super::validators::is_remote_session_id(id) {
             bail!("RemoteProxy record is unavailable");
         } else if self.is_scheduled_session(id)? {
             Ok(SessionKind::ScheduledRun)
@@ -911,6 +909,42 @@ impl SessionStore {
         // In-place workspace rewrite: no session created or removed, so the
         // post-persist retention rescan is skipped (round-18 MAJOR-4).
         self.persist_in_place(&session, "workspace rebind")?;
+        Ok(())
+    }
+
+    /// Persist the provider route the engine spawn actually resolved onto the
+    /// session record (same load→patch→persist pattern as [`Self::set_title`]).
+    ///
+    /// The foundation's create path
+    /// (`create_saved_session_with_id_and_mode`) stamps every new record with
+    /// the engine default `model_provider = "deepseek"`; the app resolves the
+    /// real route only at spawn, so without this write a session riding the
+    /// moonshot/zai/... wire reads back as "deepseek" and misleads diagnosis.
+    ///
+    /// The caller supplies the canonical `(kind, exact id)` pair for the
+    /// resolved route (`bridge::persisted_provider_route`), and both fields
+    /// are written together: a record created by the CodeWhale CLI in a
+    /// shared home can carry a non-None `model_provider_id` naming the
+    /// previous route, and rewriting only the kind would leave exactly the
+    /// mismatched pair the foundation's fail-closed
+    /// `resolve_persisted_provider_identity` rejects at the next resume
+    /// (review #713 round 2) — even with both providers configured.
+    pub fn stamp_resolved_provider(
+        &self,
+        id: &str,
+        kind: &str,
+        provider_id: Option<&str>,
+    ) -> Result<()> {
+        let _mutation = self.scheduled_mutation.lock();
+        let mut session = self
+            .manager
+            .load_session_snapshot(id)
+            .with_context(|| format!("load_session({id}) for provider stamp"))?;
+        session.metadata.model_provider = kind.to_string();
+        session.metadata.model_provider_id = provider_id.map(str::to_string);
+        // In-place metadata rewrite: no session created or removed, so the
+        // post-persist retention rescan is skipped (round-18 MAJOR-4).
+        self.persist_in_place(&session, "provider stamp")?;
         Ok(())
     }
 
@@ -1174,8 +1208,7 @@ impl SessionStore {
     /// at the same path, so an unreadable record (transient fault OR
     /// permanent corruption) must never fall into the creation leg
     /// (round-30 B4/B8). The panel surfaces the error as ensureFailed; the
-    /// user's recovery for a truly dead record is an explicit discard
-    /// (`discard_aux_session` deletes by id without parsing the record).
+    /// user's recovery for a truly dead record is an explicit discard.
     /// An auxiliary conversation must not own an aux session (aux-of-aux): an
     /// aux session is itself a Chat kind, so the command layer's
     /// `ensure_chat_session` cannot catch it — the single creation entry point

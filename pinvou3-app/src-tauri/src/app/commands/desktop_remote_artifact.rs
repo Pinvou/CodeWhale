@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
 use crate::features::codex_acp::remote_turn::{RemoteCodeArtifactPort, RemoteCodeCaptureToken};
+use crate::features::remote_control::controller::clock::monotonic_millis;
 #[cfg(test)]
 use crate::features::remote_control::controller::journal::JournalKind;
 use crate::features::remote_control::controller::protocol::LeaseContext;
@@ -1081,14 +1082,6 @@ fn artifact_journal_payload(descriptor: ArtifactDescriptor) -> serde_json::Value
     })
 }
 
-fn monotonic_millis() -> u64 {
-    use std::sync::OnceLock;
-    use std::time::Instant;
-    static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    let origin = ORIGIN.get_or_init(Instant::now);
-    u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX)
-}
-
 fn private_artifact_files(
     store: &SessionStore,
     session_id: &str,
@@ -1572,6 +1565,28 @@ mod tests {
         runtime_with_tasks(Arc::new(RemoteTaskService::new(Arc::new(
             RemoteTaskLedger::in_memory(),
         ))))
+    }
+
+    #[test]
+    fn artifact_clocks_share_the_controller_monotonic_origin() {
+        use super::super::{desktop_remote_capabilities, desktop_remote_task};
+        for clocks in [
+            [
+                monotonic_millis as fn() -> u64,
+                desktop_remote_task::monotonic_millis as fn() -> u64,
+            ],
+            [
+                desktop_remote_task::monotonic_millis as fn() -> u64,
+                monotonic_millis as fn() -> u64,
+            ],
+        ] {
+            assert!(std::ptr::fn_addr_eq(clocks[0], clocks[1]));
+            assert!(std::ptr::fn_addr_eq(
+                clocks[0],
+                desktop_remote_capabilities::monotonic_millis as fn() -> u64
+            ));
+            assert!(clocks[0]() <= clocks[1]());
+        }
     }
 
     #[test]

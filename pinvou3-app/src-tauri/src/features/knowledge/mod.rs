@@ -22,6 +22,10 @@ pub mod model_download;
 // cannot name the transitive `pinvou-knowledge` crate, and a copy silently
 // desynced the two surfaces every time the manifest changed.
 pub use pinvou_knowledge::model_download::model_directory_is_complete;
+// The headless CLI's `model status` consumes the same env-override-first
+// resolution (and the injectable variant the app tests drive) through these
+// re-exports instead of its former five-line mirror.
+pub use model_download::{configured_model_dir, configured_model_dir_from};
 mod query;
 mod scanner;
 mod store;
@@ -39,11 +43,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tauri::State;
 
-pub use store::{FileHit, Stats, TypeCount};
-use store::{SearchQuery, Store};
+use store::Store;
+pub use store::{FileHit, SearchQuery, Stats, TypeCount};
 
 /// Background scan progress (polled by the frontend). The frontend reads
 /// running/phase/scanned/finishedAt; `roots` (added with the headless
@@ -283,20 +287,26 @@ impl KnowledgeService {
     /// 路径（deferred→导入）上的**首次也是唯一**一次加载，绕过它会让空闲卸载
     /// 巡检永不启动，~570MB 常驻直到退出。
     fn reload_embedder_if_import_needed(&self) {
-        self.reload_embedder_if_import_needed_with(model_download::model_installed(), || {
-            Self::load_embedder(Some(&model_dir()))
-        });
+        self.reload_embedder_if_import_needed_with(
+            crate::platform::capabilities::current().local_embed_supported,
+            model_download::model_installed(),
+            || Self::load_embedder(Some(&model_dir())),
+        );
     }
 
-    /// 上一方法的可测核心：`model_installed` 与加载器注入，便于断言门控与
-    /// 失败路径不落 embedder、不误起巡检。成功路径经 install_embedder 语义
-    /// 由既有 KbModelStatus/deferred 契约测试覆盖。
+    /// 上一方法的可测核心：`local_embed_supported`、`model_installed` 与加载器
+    /// 注入，便于断言门控与失败路径不落 embedder、不误起巡检。成功路径经
+    /// install_embedder 语义由既有 KbModelStatus/deferred 契约测试覆盖。
     fn reload_embedder_if_import_needed_with(
         &self,
+        local_embed_supported: bool,
         model_installed: bool,
         load: impl FnOnce() -> Result<Arc<pinvou_knowledge::embedding::Embedder>, String>,
     ) {
-        if self.l1.has_embedder() || !model_installed {
+        // 与 load_installed_embedder 入口闸同语义：不支持平台（linux/loongarch64）
+        // 上 stub 注定拒载，peer 残留的完整模型目录只会制造假失败诊断——加载
+        // 短路必须先于 model_installed 的磁盘探测与失败落账。
+        if self.l1.has_embedder() || !local_embed_supported || !model_installed {
             return;
         }
         // 门控放行 = 即将真实加载:清除「故意延迟」标记,此后的失败按真实失败
@@ -891,7 +901,7 @@ impl KnowledgeService {
 
     /// Instant search (same semantics as `kb_search`, including the NL-rule
     /// merge through `merge_nl_rules`).
-    pub fn search(&self, query: SearchQueryDto) -> Result<Vec<FileHit>, String> {
+    pub fn search(&self, query: SearchQuery) -> Result<Vec<FileHit>, String> {
         let sq = merge_nl_rules(query.into());
         self.store.search(&sq).map_err(|e| e.to_string())
     }
@@ -1288,39 +1298,6 @@ fn now() -> i64 {
 
 // ───────────────────────── Tauri 命令层 ─────────────────────────
 
-/// 前端搜索条件（camelCase）。空 text + 各过滤可组合。
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct SearchQueryDto {
-    pub text: Option<String>,
-    #[serde(default)]
-    pub exts: Vec<String>,
-    pub mtime_after: Option<i64>,
-    pub mtime_before: Option<i64>,
-    /// Tie half of the `(mtime, id)` keyset cursor (`idBefore` on the wire).
-    /// Only valid together with `mtimeBefore`; a half cursor is rejected.
-    pub id_before: Option<i64>,
-    pub min_size: Option<u64>,
-    pub max_size: Option<u64>,
-    #[serde(default)]
-    pub limit: usize,
-}
-
-impl From<SearchQueryDto> for SearchQuery {
-    fn from(d: SearchQueryDto) -> Self {
-        SearchQuery {
-            text: d.text,
-            exts: d.exts,
-            mtime_after: d.mtime_after,
-            mtime_before: d.mtime_before,
-            id_before: d.id_before,
-            min_size: d.min_size,
-            max_size: d.max_size,
-            limit: d.limit,
-        }
-    }
-}
-
 /// 把阻塞的 DB 查询挪出主线程执行。Tauri 同步命令(`fn`)在**主线程**跑，大库(百万行)
 /// 全表 COUNT/GROUP BY 会冻死整个 UI——慢查询命令一律改 `async fn` + 本 helper。
 async fn spawn_db<T, F>(f: F) -> Result<T, String>
@@ -1493,9 +1470,9 @@ fn merge_nl_rules(mut sq: SearchQuery) -> SearchQuery {
 /// are not overwritten.
 pub async fn kb_search(
     state: State<'_, KnowledgeService>,
-    query: SearchQueryDto,
+    query: SearchQuery,
 ) -> Result<Vec<FileHit>, String> {
-    let sq = merge_nl_rules(query.into());
+    let sq = merge_nl_rules(query);
     let store = state.store.clone();
     spawn_db(move || store.search(&sq).map_err(|e| e.to_string())).await
 }
@@ -1524,9 +1501,9 @@ mod tests {
         KnowledgeService::new(&dir.join("index.db")).expect("KnowledgeService::new")
     }
 
-    /// 导入补载的门控契约：模型未安装或已在位时不发起加载（加载器注入计数
-    /// 验证门控短路），加载失败不落 embedder、不误起空闲巡检（补载失败走
-    /// 纯全文降级，起巡检只会空转）。
+    /// 导入补载的门控契约：模型未安装、已在位或不支持本地嵌入时不发起加载
+    /// （加载器注入计数验证门控短路），加载失败不落 embedder、不误起空闲巡检
+    /// （补载失败走纯全文降级，起巡检只会空转）。
     #[test]
     fn import_reload_skips_when_installed_or_ready_and_survives_load_failure() {
         // 本测试向进程级 MODEL_LOAD_ERROR 写入失败诊断并精确断言其值，与
@@ -1534,7 +1511,7 @@ mod tests {
         let _guard = model_download::MODEL_LOAD_ERROR_TEST_LOCK.blocking_lock();
         let svc = service();
         let mut calls = 0;
-        svc.reload_embedder_if_import_needed_with(false, || {
+        svc.reload_embedder_if_import_needed_with(true, false, || {
             calls += 1;
             unreachable!("模型未安装不应触发加载")
         });
@@ -1542,7 +1519,7 @@ mod tests {
         assert!(!svc.semantic_ready());
 
         let svc = service();
-        svc.reload_embedder_if_import_needed_with(true, || Err("模拟加载失败".into()));
+        svc.reload_embedder_if_import_needed_with(true, true, || Err("模拟加载失败".into()));
         assert!(!svc.semantic_ready(), "加载失败不得落入 embedder 槽");
         assert!(
             svc.embedder_reaper.lock().is_none(),
@@ -1557,12 +1534,36 @@ mod tests {
         );
 
         let svc = service();
-        svc.reload_embedder_if_import_needed_with(true, || Err("再次失败".into()));
+        svc.reload_embedder_if_import_needed_with(true, true, || Err("再次失败".into()));
         assert!(!svc.semantic_ready(), "失败后再次导入仍应重试补载");
         assert_eq!(
             model_download::model_load_error().as_deref(),
             Some("再次失败"),
             "后续失败覆盖旧诊断，状态不得停留在上一次的错误上"
+        );
+    }
+
+    /// loong64 回归锚点（round-3 自审揪出）：不支持本地嵌入的平台上，peer 残留
+    /// 的完整模型目录曾让导入补载真实发起加载——stub 必然拒载，拒载错误经
+    /// `set_model_load_error` 永久盖进此后每次 `kb_model_status` 的 `model_error`，
+    /// 与 `load_installed_embedder` 入口闸要消灭的假失败完全同形。能力闸必须
+    /// 先于 `model_installed` 的磁盘探测：不支持 + 已安装同样静默降级为纯全文。
+    #[test]
+    fn import_reload_skips_unsupported_platform_even_with_model_installed() {
+        let _guard = model_download::MODEL_LOAD_ERROR_TEST_LOCK.blocking_lock();
+        // 同锁兄弟测试会留下失败诊断:先清零,才能断言「短路没有伪造错误」。
+        model_download::set_model_load_error(None);
+        let svc = service();
+        let mut calls = 0;
+        svc.reload_embedder_if_import_needed_with(false, true, || {
+            calls += 1;
+            unreachable!("不支持平台不得触发导入补载加载")
+        });
+        assert_eq!(calls, 0);
+        assert!(!svc.semantic_ready());
+        assert!(
+            model_download::model_load_error().is_none(),
+            "能力闸短路不得伪造 model_error"
         );
     }
 
@@ -1937,7 +1938,7 @@ mod tests {
         // Explicit structured search: text goes through FTS/LIKE on the same
         // store path as the GUI command.
         let hits = svc
-            .search(SearchQueryDto {
+            .search(SearchQuery {
                 text: Some("季度报告".into()),
                 limit: 10,
                 ..Default::default()
@@ -1950,7 +1951,7 @@ mod tests {
         // + empty residual text. Without the merge (raw FTS on "上周的 pdf")
         // nothing would match.
         let hits = svc
-            .search(SearchQueryDto {
+            .search(SearchQuery {
                 text: Some("上周的 pdf".into()),
                 limit: 10,
                 ..Default::default()
@@ -1962,7 +1963,7 @@ mod tests {
         // Explicit exts win over the parsed result and are not overwritten
         // (GUI contract).
         let hits = svc
-            .search(SearchQueryDto {
+            .search(SearchQuery {
                 text: Some("上周的 pdf".into()),
                 exts: vec!["txt".into()],
                 limit: 10,
@@ -2094,7 +2095,7 @@ mod tests {
         // The bound is inclusive: at mtime_before == old_mt only the old
         // file passes (newer file excluded) — pin that exclusion direction.
         let old_only = svc
-            .search(SearchQueryDto {
+            .search(SearchQuery {
                 mtime_before: Some(old_mt),
                 limit: 10,
                 ..Default::default()
@@ -2110,7 +2111,7 @@ mod tests {
         // An inclusive boundary means mtime_before == new_mt still returns
         // BOTH files (<= matches at the boundary value itself).
         let both = svc
-            .search(SearchQueryDto {
+            .search(SearchQuery {
                 mtime_before: Some(new_mt),
                 limit: 10,
                 ..Default::default()
@@ -2124,7 +2125,7 @@ mod tests {
 
         // Below the oldest mtime, nothing.
         let none = svc
-            .search(SearchQueryDto {
+            .search(SearchQuery {
                 mtime_before: Some(old_mt - 1),
                 limit: 10,
                 ..Default::default()
@@ -2135,7 +2136,7 @@ mod tests {
         // The two-sided window (after old, before new] excludes nothing here;
         // a tighter after bound proves composition.
         let window = svc
-            .search(SearchQueryDto {
+            .search(SearchQuery {
                 mtime_after: Some(old_mt + 1),
                 mtime_before: Some(new_mt),
                 limit: 10,

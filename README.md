@@ -114,6 +114,8 @@ CodeWhale（Agent 底座 submodule）
 
 模型调用、流式输出、工具循环、Session、MCP client、Skills、Hooks 和 Compaction 由 [CodeWhale](https://github.com/Pinvou/CodeWhale) 底座提供。`pinvou3-app/` 负责桌面 UI、运行时配置、业务编排和系统集成，不重复实现底座能力。
 
+源码树支持 **Linux、Windows 与 macOS**。Linux 发布包面向 x86_64 与 arm64 的 Ubuntu 22.04 或更新（glibc 2.35+），以及 LoongArch64（新世界；UOS V25 或 deepin 23 或更新，glibc 2.38+）；deb 另需 WebKitGTK 2.40+（任意应用过标准 updates 源的 22.04 系统即满足）。旧世界 LoongArch 系统（UOS V20 龙芯版、Loongnix 20 与麒麟 V10 一代）不受支持——它们既没有 Tauri 2 运行时必需的 webkit2gtk-4.1/libsoup3，rustc 工具链也止步于 1.58。macOS 发布包为 universal（Apple Silicon 与 Intel）构建，面向 macOS 11 或更新。语音识别引擎可按构建配置打包；文件解析（PDF / Office / OCR / 归档）依赖可选外部工具，可用各平台的包管理器安装（见 `pinvou3-app/INSTALL.md`）。
+
 扩展能力时按以下边界落位：
 
 | 需求 | 扩展位置 |

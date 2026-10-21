@@ -46,6 +46,7 @@ try {
     connectionWindowMs: optionalInteger(process.env.WS_CONNECT_WINDOW_MS),
     ingressMessageLimit: optionalInteger(process.env.WS_INGRESS_MESSAGE_LIMIT),
     ingressByteLimit: optionalInteger(process.env.WS_INGRESS_BYTE_LIMIT),
+    egressBufferLimitBytes: optionalInteger(process.env.WS_EGRESS_BUFFER_LIMIT_BYTES),
   });
   const address = await gateway.listen({ host, port: port(process.env.PINVOU_REMOTE_GATEWAY_PORT) });
   if (loadEnrollmentCoverageControlConfig(process.env)) {

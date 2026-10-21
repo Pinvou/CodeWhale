@@ -281,7 +281,9 @@ fn is_owned_session_snapshot_name(name: &std::ffi::OsStr) -> bool {
     is_owned_session_download_id(download_id)
 }
 
-pub(super) fn is_owned_session_download_id(download_id: &str) -> bool {
+// pub(crate): the command-layer cancel gate re-uses this mint-side rule
+// (re-exported through `manager`) instead of re-deriving a laxer one.
+pub(crate) fn is_owned_session_download_id(download_id: &str) -> bool {
     download_id.starts_with("download_")
         && download_id.len() > "download_".len()
         && download_id.len() <= 128
