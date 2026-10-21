@@ -1,6 +1,7 @@
 //! Reconcile existing Pinvou model routes after a store engine reports its actual endpoint.
 //! Preserve user options except the explicitly versioned correction of erroneous store defaults.
-use super::{db, lifecycle::endpoint_url_is_loopback, version_store};
+use super::{db, version_store};
+use crate::features::model_store::linked_model_route::chat_base;
 use crate::platform::prefs::{SavedModel, UserPrefs};
 
 mod context_repair;
@@ -12,26 +13,6 @@ struct Route {
     ready: bool,
     context_repair_stamp: Option<String>,
     previous: Vec<(String, String)>,
-}
-
-fn chat_base(url: &str) -> Option<String> {
-    if !endpoint_url_is_loopback(url) {
-        return None;
-    }
-    let mut url = reqwest::Url::parse(url).ok()?;
-    if !["http", "https"].contains(&url.scheme())
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return None;
-    }
-    match url.path().trim_end_matches('/') {
-        "/v1" | "/v1/chat/completions" => url.set_path("/v1"),
-        _ => return None,
-    }
-    Some(url.to_string())
 }
 
 fn identity(record: &db::StoreModelRecord) -> Option<(String, String)> {

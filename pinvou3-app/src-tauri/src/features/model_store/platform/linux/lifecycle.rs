@@ -79,7 +79,7 @@ pub struct ForcedRemoval {
     /// 记录里登记的体积。注意它**不是**"释放了多少空间"——这次什么都没释放。
     /// 名字特意不叫 freed_bytes，免得调用方顺手当成回收量显示给用户。
     pub recorded_bytes: i64,
-    /// 已确认此刻仍在磁盘上的目录（可能为空，为空也不等于干净，见 warning）
+    /// 仍在磁盘上或因链接/权限无法确认缺失的登记路径；并非独占归属声明。
     pub residual_paths: Vec<String>,
     /// 一句可以直接显示给用户的话
     pub warning: String,
@@ -1028,12 +1028,18 @@ impl ModelManager {
         }
         let model_name = suggest_model_name(&card);
 
-        let check = self.check_can_download(card.summary.size_bytes);
-        if !check.ok {
-            return Err(ModelManagerError::new(check.reason));
-        }
-
-        let env = self.env_for_card(&card, &model_name);
+        let mut reservation = super::version_store::DownloadReservation::acquire(
+            card_id,
+            &PathBuf::from(&self.settings.models_dir),
+            || control.cancelled(),
+            || on_progress("等待同一卡片下载完成，可取消…"),
+        )
+        .map_err(ModelManagerError::new)?;
+        let mut env = self.env_for_card(&card, &model_name);
+        env.insert(
+            "LMM_MODELS_DIR".into(),
+            reservation.root.to_string_lossy().into_owned(),
+        );
 
         // 仅供最后 toast 提示措辞参考，不用来决定要不要跑脚本
         let engine_reused = db::is_engine_installed(
@@ -1080,6 +1086,33 @@ impl ModelManager {
                 (ScriptsSource::from_card(&card, self.builtin_store), None)
             }
         };
+
+        // Publish under the same short cross-process lock used by version
+        // staging. Admission sees every in-flight ordinary download as well as
+        // retained files; the lease releases only the plan on error/cancellation.
+        let quota_lock = super::version_store::wait_quota_reservation_lock(
+            || control.cancelled(),
+            || on_progress("等待其他模型下载登记存储配额，可取消…"),
+        )
+        .map_err(ModelManagerError::new)?;
+        reservation
+            .publish(card.summary.size_bytes)
+            .map_err(ModelManagerError::new)?;
+        let retained = if self.settings.storage_quota_gb.is_some() {
+            super::version_store::retained_bytes().map_err(ModelManagerError::new)?
+        } else {
+            0
+        };
+        let check = self.check_can_download_increment_with_retained(
+            card.summary.size_bytes,
+            0,
+            &reservation.root,
+            retained,
+        );
+        if !check.ok {
+            return Err(ModelManagerError::new(check.reason));
+        }
+        drop(quota_lock);
 
         on_progress(&format!(
             "检查 {} 引擎是否已安装…",
@@ -1246,36 +1279,46 @@ impl ModelManager {
             "download_model",
             &env,
             &mut |line| on_progress(&format!("[下载模型] {line}")),
-            control,
+            control.clone(),
             false,
         )?;
 
         // 已经在库里的话保留原有状态（比如已部署过），不要因为重新走了一遍
         // 下载就把状态退回"仅下载"；只有全新记录才用 "downloaded" 起步。
         let status = existing_status.unwrap_or_else(|| "downloaded".to_string());
-        db::add_store_model(db::AddStoreModelParams {
-            card_id: &card.summary.id,
-            model_name: &model_name,
-            card_name: &card.summary.name,
-            org: card.summary.org.as_deref(),
-            description: card.summary.description.as_deref(),
-            engine_name: &card.summary.engine_name,
-            engine_version: card.summary.engine_version.as_deref(),
-            size_bytes: card.summary.size_bytes as i64,
-            quantization: card.summary.quantization.as_deref(),
-            source_repo_id: card.source_repo_id.as_deref(),
-            source_filename: card.source_filename.as_deref(),
-            scripts: &card.scripts,
-            status: &status,
-            profiles: &card.profiles,
-            deploy_topology: card.summary.deploy_topology,
-            card_source: if self.builtin_store {
-                "builtin"
-            } else {
-                "store"
+        let quota_lock = super::version_store::wait_quota_reservation_lock(
+            || control.cancelled(),
+            || on_progress("等待提交模型下载记录，可取消…"),
+        )
+        .map_err(ModelManagerError::new)?;
+        db::add_store_model_with_root(
+            db::AddStoreModelParams {
+                card_id: &card.summary.id,
+                model_name: &model_name,
+                card_name: &card.summary.name,
+                org: card.summary.org.as_deref(),
+                description: card.summary.description.as_deref(),
+                engine_name: &card.summary.engine_name,
+                engine_version: card.summary.engine_version.as_deref(),
+                size_bytes: card.summary.size_bytes as i64,
+                quantization: card.summary.quantization.as_deref(),
+                source_repo_id: card.source_repo_id.as_deref(),
+                source_filename: card.source_filename.as_deref(),
+                scripts: &card.scripts,
+                status: &status,
+                profiles: &card.profiles,
+                deploy_topology: card.summary.deploy_topology,
+                card_source: if self.builtin_store {
+                    "builtin"
+                } else {
+                    "store"
+                },
             },
-        })
+            &reservation.root.to_string_lossy(),
+        )
         .map_err(|e| ModelManagerError::new(format!("记录模型下载状态失败：{e}")))?;
+        reservation.complete().map_err(ModelManagerError::new)?;
+        drop(quota_lock);
 
         // 把六类脚本的正文固化到本地：从这一刻起，这个模型的部署/启用/停用/
         // 卸载全部用本地副本执行，不再依赖商店可达——商店重启、上架、改脚本
@@ -2167,22 +2210,44 @@ impl ModelManager {
     /// --------------
     /// 返回值里必须带着残留信息。这条路径没有做任何清理，调用方（以及最终的
     /// 用户）必须知道磁盘上可能还留着几十上百 GB，得自己去删——所以
-    /// `residual_paths` 装的是**此刻确认还在磁盘上**的目录，`warning` 是一句能
+    /// `residual_paths` 装的是仍在或无法确认缺失的登记路径，`warning` 是一句能
     /// 直接贴到界面上的话。绝不能让用户以为点完就干净了。
     ///
     /// 这是破坏性且不可逆的操作（连这张卡的 API Key 一并删掉），调用方必须显式
     /// 走这条方法/这个端点，普通卸载不会拐到这里来。
     pub fn force_remove_record(&self, card_id: &str) -> Result<ForcedRemoval, ModelManagerError> {
-        if super::version_store::has_history(card_id).map_err(ModelManagerError::new)? {
-            return Err(ModelManagerError::new(
-                "请先清理历史版本，避免遗留无法管理的权重。",
-            ));
-        }
         let rec = self.get_record(card_id)?;
-        let residual_paths = self.residual_paths(&rec);
-
-        db::delete_store_model(card_id)
-            .map_err(|e| ModelManagerError::new(format!("删除模型记录失败：{e}")))?;
+        let mut paths = self.candidate_paths(&rec);
+        paths
+            .extend(super::version_store::download_paths(card_id).map_err(ModelManagerError::new)?);
+        for version in super::version_store::list(Some(card_id)).map_err(ModelManagerError::new)? {
+            paths.extend(version.models_root.into_iter().map(PathBuf::from));
+            paths.extend(version.resource_dir.into_iter().map(PathBuf::from));
+            if let Ok(id) = config::safe_path_component(&version.runtime_card_id) {
+                paths.push(config::data_dir().join("cards").join(id));
+            }
+        }
+        let mut residual_paths = Vec::new();
+        for path in paths {
+            // Do not follow symlinks or discard permission-denied paths as absent.
+            // This endpoint only reports names; it never claims their ownership.
+            let unresolved_ancestor =
+                path.ancestors()
+                    .any(|ancestor| match ancestor.symlink_metadata() {
+                        Ok(metadata) => metadata.file_type().is_symlink(),
+                        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+                    });
+            if unresolved_ancestor
+                || !matches!(path.symlink_metadata(), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+            {
+                let path = path.to_string_lossy().into_owned();
+                if !residual_paths.contains(&path) {
+                    residual_paths.push(path);
+                }
+            }
+        }
+        super::version_store::abandon_card_records(card_id)
+            .map_err(|e| ModelManagerError::new(format!("删除模型及历史记录失败：{e}")))?;
 
         let warning = if residual_paths.is_empty() {
             "已从模型库移除这条记录。本操作只删记录、没有删除任何文件；\
@@ -2191,7 +2256,7 @@ impl ModelManager {
         } else {
             format!(
                 "已从模型库移除这条记录，但**磁盘上的文件没有被删除**。\
-                 以下目录仍然存在，需要手动清理：{}",
+                 以下已登记或疑似残留路径需要核查；共享目录可能还含其他模型或用户文件，确认归属后再手动清理：{}",
                 residual_paths.join("、")
             )
         };
@@ -3581,6 +3646,77 @@ echo '权重就绪'
         // 卡片里的"URL"是本地文件路径，只有内置测试商店这一位放行它。
         mgr.builtin_store = true;
         mgr
+    }
+
+    #[test]
+    fn ordinary_download_does_not_reuse_another_cards_same_basename_for_quota() {
+        for new_contents in ["aaaaaaaaaa", "bbbbbbbbbb"] {
+            let tmp = setup_temp_db();
+            let root = tmp.path().join("models");
+            std::fs::create_dir_all(root.join("A")).unwrap();
+            std::fs::write(root.join("A/model.safetensors"), b"aaaaaaaaaa").unwrap();
+            db::add_store_model_with_root(
+                db::AddStoreModelParams {
+                    card_id: "A",
+                    model_name: "A",
+                    card_name: "A",
+                    org: None,
+                    description: None,
+                    engine_name: "native",
+                    engine_version: None,
+                    size_bytes: 10,
+                    quantization: None,
+                    source_repo_id: None,
+                    source_filename: Some("model.safetensors"),
+                    scripts: &BTreeMap::new(),
+                    status: "downloaded",
+                    profiles: &[],
+                    deploy_topology: DeployTopology::Single,
+                    card_source: "store",
+                },
+                &root.to_string_lossy(),
+            )
+            .unwrap();
+            let scripts = tmp.path().join("scripts");
+            let mut card = local_script_card(&scripts, None);
+            card.summary.size_bytes = 10;
+            card.source_filename = Some("model.safetensors".into());
+            let body = format!(
+                "#!/bin/sh\nmkdir -p \"$LMM_MODELS_DIR/B\"\nprintf '%s' '{new_contents}' > \"$LMM_MODELS_DIR/B/model.safetensors\"\n"
+            );
+            std::fs::write(scripts.join("download_model.sh"), &body).unwrap();
+            card.script_sha256
+                .as_mut()
+                .unwrap()
+                .insert("download_model".into(), script_runner::sha256_hex(&body));
+            let manifest = format!(
+                "{}  model.safetensors\n",
+                script_runner::sha256_hex(new_contents)
+            );
+            let manifest_path = scripts.join("weights.sha256");
+            std::fs::write(&manifest_path, &manifest).unwrap();
+            card.assets.insert(
+                "weights.sha256".into(),
+                manifest_path.to_string_lossy().into_owned(),
+            );
+            card.asset_sha256 = Some(BTreeMap::from([(
+                "weights.sha256".into(),
+                script_runner::sha256_hex(&manifest),
+            )]));
+            let mut settings = download_settings(&root);
+            settings.storage_quota_gb = Some(15.0 / 1073741824.0);
+            let manager = manager_with_card(settings, card);
+            let error = manager
+                .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+                .unwrap_err();
+            assert!(error.to_string().contains("超出存储配额"), "{error}");
+            assert_eq!(
+                std::fs::read(root.join("A/model.safetensors")).unwrap(),
+                b"aaaaaaaaaa"
+            );
+            assert!(!root.join("B").exists());
+            assert!(db::get_store_model("card-dl").unwrap().is_none());
+        }
     }
 
     #[test]

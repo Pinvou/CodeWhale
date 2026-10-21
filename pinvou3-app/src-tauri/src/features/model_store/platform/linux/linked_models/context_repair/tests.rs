@@ -252,6 +252,47 @@ fn unassociated_detached_unknown_and_other_limits_are_not_promoted() {
 }
 
 #[test]
+fn completion_endpoint_uses_the_canonical_models_probe_path() {
+    let _home = config::TempHome::new();
+    let server = Server::new();
+    setup(CARD, &server.base);
+    let mut prefs = UserPrefs::load();
+    prefs.advanced.saved_models[0]
+        .base_url
+        .push_str("/chat/completions/");
+    let routes = super::super::routes().unwrap();
+    // Server rejects any path other than /v1/models. A saved completions URL
+    // is accepted by the shared route grammar and must use the same base here.
+    let proofs = probe(&prefs, &routes, None);
+    assert_eq!(proofs.len(), 1);
+    assert_eq!(server.count(), 1);
+    assert_eq!(apply(&mut prefs, &routes, &proofs, None), ["stable-id"]);
+    assert_eq!(
+        prefs.advanced.saved_models[0].context_window_tokens,
+        Some(262144)
+    );
+}
+
+#[test]
+fn missing_deployment_stamp_never_probes_or_records_a_repair() {
+    let _home = config::TempHome::new();
+    let server = Server::new();
+    setup(CARD, &server.base);
+    let mut prefs = UserPrefs::load();
+    let mut routes = super::super::routes().unwrap();
+    routes[0].context_repair_stamp = None;
+    let proofs = probe(&prefs, &routes, None);
+    assert!(proofs.is_empty());
+    assert_eq!(server.count(), 0);
+    assert!(apply(&mut prefs, &routes, &proofs, None).is_empty());
+    assert_eq!(
+        prefs.advanced.saved_models[0].context_window_tokens,
+        Some(32768)
+    );
+    assert!(prefs.advanced.model_store_context_repairs.is_empty());
+}
+
+#[test]
 fn probe_cannot_be_applied_to_a_different_deployment_at_commit() {
     let _home = config::TempHome::new();
     let server = Server::new();

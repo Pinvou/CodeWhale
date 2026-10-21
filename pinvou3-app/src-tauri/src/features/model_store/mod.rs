@@ -43,6 +43,7 @@
 //!
 //! 只在 Linux 上真正编译，见 `platform/mod.rs` 的说明。
 
+mod linked_model_route;
 mod platform;
 
 /// Called after linked model routes commit. The app invalidates engine caches and
@@ -52,6 +53,12 @@ pub type ModelsChangedHandler = std::sync::Arc<dyn Fn(&[String]) + Send + Sync>;
 /// Validate an explicit association after a settings editor changes a model route.
 pub(crate) fn matches_current_model_route(card_id: &str, base_url: &str, model: &str) -> bool {
     platform::backend::matches_current_model_route(card_id, base_url, model)
+}
+
+/// Shared syntactic boundary for linked routes, including cleanup of imported
+/// settings on platforms where the store backend itself is unavailable.
+pub(crate) fn is_store_managed_route(base_url: &str) -> bool {
+    linked_model_route::chat_base(base_url).is_some()
 }
 
 /// 非 Linux 平台上给用户看的原因。放在这里而不是桩文件里，是为了让

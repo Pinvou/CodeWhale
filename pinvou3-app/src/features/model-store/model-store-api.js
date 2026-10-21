@@ -176,7 +176,7 @@ function startUninstall(cardId, purgeWeights) {
 /**
  * 强制从模型库移除：**只删记录，一个字节都不删**。
  *
- * 只在正常卸载反复失败时用。它不可逆（记录和这张卡的 API Key 一起没），而且删完
+ * 只在正常卸载反复失败时用。它不可逆（当前及全部历史记录、这张卡的 API Key 一起没），而且删完
  * 之后磁盘上的几十 GB 就再也没有界面能管到了——所以要显式 confirm。
  * @param {string} cardId - 卡片 ID。
  * @returns {Promise<object>} 移除结果，含仍在磁盘上的残留路径。

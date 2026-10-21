@@ -25,6 +25,7 @@
 import { useCallback, useSyncExternalStore } from 'react';
 import { answerRun, cancelRun, fetchActiveRuns, pollRunLog } from './model-store-api.js';
 import { reduceLogChunk } from './model-store-logic.js';
+import { rememberTaskOperationResult } from './operation-results.js';
 
 // 连续多少次轮询失败才判定这次运行真的断了。单次失败很常见(命令层短暂不可用、
 // 系统挂起唤醒),直接报错会把一个还在正常下载的任务标成失败。
@@ -272,6 +273,7 @@ function settleTask(id, outcome) {
     // 成功的任务直接从面板上移除,由调用方用一条 toast 报喜。
     dropTask(id);
     const result = { ok: true, result: outcome.result };
+    rememberTaskOperationResult(task, result);
     notifySettled(task, result);
     return result;
   }

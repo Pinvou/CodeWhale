@@ -109,9 +109,10 @@ fn reports_verified_window(
     timeout: Duration,
 ) -> bool {
     let Some(key) = bearer(row) else { return false };
-    let mut request = client
-        .get(format!("{}/models", row.base_url.trim_end_matches('/')))
-        .timeout(timeout);
+    let Some(base_url) = chat_base(&row.base_url) else {
+        return false;
+    };
+    let mut request = client.get(format!("{base_url}/models")).timeout(timeout);
     if let Some(key) = key {
         request = request.bearer_auth(key);
     }
@@ -156,7 +157,12 @@ pub(super) fn probe(prefs: &UserPrefs, routes: &[Route], card_id: Option<&str>) 
             (row.context_window_tokens == Some(LEGACY_WINDOW))
                 .then(|| pending_route(prefs, row, routes, card_id))
                 .flatten()
-                .map(|route| (row, route))
+                .and_then(|route| {
+                    route
+                        .context_repair_stamp
+                        .as_deref()
+                        .map(|stamp| (row, stamp))
+                })
         })
         .collect();
     if candidates.is_empty() {
@@ -179,14 +185,14 @@ pub(super) fn probe(prefs: &UserPrefs, routes: &[Route], card_id: Option<&str>) 
     };
     let deadline = Instant::now() + Duration::from_secs(3);
     let mut proofs = Vec::new();
-    for (row, route) in candidates {
+    for (row, stamp) in candidates {
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
             break;
         };
         if reports_verified_window(&client, row, remaining.min(Duration::from_secs(1))) {
             proofs.push(Proof {
                 model_id: row.id.clone(),
-                stamp: route.context_repair_stamp.clone().unwrap(),
+                stamp: stamp.to_string(),
             });
         }
     }
