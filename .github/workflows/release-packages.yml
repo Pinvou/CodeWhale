@@ -785,7 +785,12 @@ jobs:
   build-linux-loongarch64:
     name: 构建 Linux loongarch64 deb
     needs: check-version-bump
-    if: needs.check-version-bump.outputs.build_required == 'true'
+    # 与 x64/arm64/macos 同一触发合同:gate 对 pull_request 无条件放行
+    # build_required,缺了这层守卫每个发布链路 PR 都会发起 135 分钟重交叉构建。
+    if: >-
+      needs.check-version-bump.outputs.build_required == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     # GitHub 托管 runner 没有 loong64,job 跑在 x86_64 ubuntu-22.04 上,由
     # scripts/ci-build-linux-loongarch64.sh 全程交叉:sha256 钉死的
     # loong64/cross-tools 20260912(stable, gcc 14.4/glibc 2.38;只有 bfd,
