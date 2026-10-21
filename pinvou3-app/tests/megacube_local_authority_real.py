@@ -140,10 +140,15 @@ def main():
                        CODEWHALE_SECRET_BACKEND="file", PINVOU3_SKIP_LINUX_ASR="1", PINVOU3_SKIP_KNOWLEDGE_HOST="1")
             cube, records = profile / "megacube", profile / "megacube/installations"
             card, sentinel = "qa-authority-sentinel", work / "sentinel"
-            allowed = mode in ("fresh", "remote", "remote-download", "remote-retry", "live-empty")
+            legacy_actions = ["enable", "stop", "uninstall"] if mode in (
+                "fresh", "remote", "remote-download", "remote-retry") else []
+            if mode == "live-empty":
+                # An observed empty daemon may leave legacy enable/stop to the
+                # scripts, but cannot confirm this store deployment for cleanup.
+                legacy_actions = ["enable", "stop"]
             server, child, log = None, None, (work / "host.log").open("wb")
             restore = []
-            item = {"case": mode, "expected_legacy_scripts": allowed, "actions": []}
+            item = {"case": mode, "expected_legacy_actions": legacy_actions, "actions": []}
             try:
                 if mode.startswith("remote"):
                     remote = cube / "remote-connections"
@@ -230,16 +235,24 @@ def main():
                     run = accepted["result"]["run_id"]
                     task = wait_task(sock, run)
                     item["actions"].append(task)
-                    if allowed or mode == "adoptable":
+                    if action in legacy_actions or mode == "adoptable":
                         assert task["status"] == "succeeded", task
                     else:
                         assert task["status"] == "failed", task
-                        assert any(word in task.get("error", "") for word in ("cmsd_unavailable", "ownership_", "device_record_failed", "invalid_response")), task
+                        if mode == "observed" and action == "uninstall":
+                            # This synthetic observation has no logical store
+                            # binding. Current cleanup rejects the target before
+                            # it can consider ownership or post a reservation.
+                            assert task.get("error", "").startswith("maintenance_target_changed:"), task
+                        elif mode == "live-empty" and action == "uninstall":
+                            assert task.get("error", "").startswith("ownership_conflict:"), task
+                        else:
+                            assert any(word in task.get("error", "") for word in ("cmsd_unavailable", "ownership_", "device_record_failed", "invalid_response")), task
                 lines = sentinel.read_text().splitlines() if sentinel.exists() else []
-                assert lines == (["enable", "stop", "uninstall"] if allowed else []), lines
+                assert lines == legacy_actions, lines
                 item["sentinel_lines"] = lines
-                script_env = (work / "script-authority-env").read_text().splitlines() if allowed else []
-                assert script_env == ([env.get("CMSD_SOCKET", ""), env.get("PINVOU3_CMSD_UNIT", "")] * 3 if allowed else [])
+                script_env = (work / "script-authority-env").read_text().splitlines() if legacy_actions else []
+                assert script_env == ([env.get("CMSD_SOCKET", ""), env.get("PINVOU3_CMSD_UNIT", "")] * len(legacy_actions) if legacy_actions else [])
                 item["actual_script_authority_environment"] = script_env
                 if server:
                     item["synthetic_cmsd_requests"] = server.requests
