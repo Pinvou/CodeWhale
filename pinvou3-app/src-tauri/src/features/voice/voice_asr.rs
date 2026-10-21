@@ -5,8 +5,10 @@
 //!
 //! 其中 model_available、download_current_model、transcribe、
 //! model_file_verified 等函数仅被 `platform/{windows,linux}.rs` 调用;macOS 用系统
-//! Speech 框架(见 `platform/voice_asr_speech.rs`),不引用这些函数。因此它们在 macOS
-//! 编译目标下被 clippy 误报为 dead code,但删除会破坏 Windows/Linux 构建。
+//! Speech 框架(见 `platform/voice_asr_speech.rs`),不引用这些函数。因此仅 macOS
+//! 编译目标需要压制该误报(这些函数不能删,删了会破坏 Windows/Linux 构建)。
+//! 本 allow 无条件开启、不按 target 门控:linux/windows 下每一项当前均可达,
+//! 多余的 allow 无害,而 cfg 门控会让三平台行号漂移、增加维护成本。
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
@@ -163,6 +165,16 @@ fn compose_status(engine: bool, ffmpeg: bool, model: bool, installable: bool) ->
     }
 }
 
+/// Per-spec download cap carried in `DownloadRequest.max_bytes`: the expected
+/// model size with a 16 MiB floor, doubled, so the band scales with the spec
+/// instead of a flat cap silently over- or under-fitting a future model bump.
+/// Shared verbatim with pinvou-cli through
+/// [`crate::features::voice::contract`], whose `asr-install` size gate must
+/// scale with the spec identically.
+pub fn asr_download_max_bytes(expected_size: u64) -> u64 {
+    expected_size.max(16 * 1024 * 1024) * 2
+}
+
 pub async fn download_current_model(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     download_asr_model(app, current_model_spec()).await
 }
@@ -216,7 +228,7 @@ pub async fn download_asr_model(
         // 进度按它算 100%)。max_bytes 只做离谱大文件挡板,刻意与 total 分开——此前
         // 复用单字段会让进度停在约 50%(2*expected_size 当 total)。
         let total_hint = spec.expected_size;
-        let max_bytes = spec.expected_size.max(16 * 1024 * 1024) * 2;
+        let max_bytes = asr_download_max_bytes(spec.expected_size);
         // `verify` 事件恢复到重构前时点:下载成功后、sha256 校验开始前 emit(helper 在
         // sync_all 后、sha256_file 前调用此闭包)。frontend 据此从下载进度(0–95%)
         // 切到「校验中」(96%),不再出现 96%→0% 倒退。

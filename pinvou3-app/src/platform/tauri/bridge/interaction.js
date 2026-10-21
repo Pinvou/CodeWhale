@@ -1,30 +1,37 @@
 (function () {
   "use strict";
 
-  var registry = window.__PINVOU_TAURI_BRIDGE_FEATURES__ = window.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
-  registry.interaction = function (context) {
-    var state = context.state;
-    var recordAuthoritySyncDiagnostic = context.recordAuthoritySyncDiagnostic || function () {};
-    var authoritySyncBufferSnapshot = context.authoritySyncBufferSnapshot || function () { return {}; };
-    var invoke = context.invoke;
-    var notify = context.notify;
-    var bt = context.bt;
-    var addSystemItem = context.addSystemItem;
-    var addAuthoritySyncNotice = context.addAuthoritySyncNotice;
-    var addChatItem = context.addChatItem;
-    var timeStr = context.timeStr;
-    var runSyncOnSession = context.runSyncOnSession;
-    var flushAssistantMessageToHistory = context.flushAssistantMessageToHistory;
-    var resetPendingAssistant = context.resetPendingAssistant;
-    var rerenderFromMessages = context.rerenderFromMessages;
-    var turnUsageDirty = context.turnUsageDirty;
-    var sendMessage = context.sendMessage;
-    var getBuffer = context.getBuffer;
-    var reconcileRemoteTurn = context.reconcileRemoteTurn;
-    var isBusyFor = context.isBusyFor;
-    var markRemoteTurn = context.markRemoteTurn;
-    var sendMessageToSession = context.sendMessageToSession;
-    var userMessageDisplayText = context.userMessageDisplayText;
+  // biome-ignore lint/suspicious/noAssignInExpressions: registry bootstrap of the verbatim payload; splitting statements would diverge from the artifact
+  const registry = window.__PINVOU_TAURI_BRIDGE_FEATURES__ = window.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
+  registry.interaction = function (context) {let pinvouSharedtauriInteractionCache = null;
+function pinvouSharedtauriInteraction() {
+  if (!pinvouSharedtauriInteractionCache) pinvouSharedtauriInteractionCache = window.PinvouBridgeShared.create("tauriInteraction", { state, invoke, notify, currentDraftModeState, runSyncOnSession, addSystemItem, setDraftMode, applyAuthoritativeModeState, bt, sendMessage, pushUserEcho, flushAssistantMessageToHistory });
+  return pinvouSharedtauriInteractionCache;
+}
+
+
+    const state = context.state;
+    const recordAuthoritySyncDiagnostic = context.recordAuthoritySyncDiagnostic || function () {};
+    const authoritySyncBufferSnapshot = context.authoritySyncBufferSnapshot || function () { return {}; };
+    const invoke = context.invoke;
+    const notify = context.notify;
+    const bt = context.bt;
+    const addSystemItem = context.addSystemItem;
+    const addAuthoritySyncNotice = context.addAuthoritySyncNotice;
+    const addChatItem = context.addChatItem;
+    const timeStr = context.timeStr;
+    const runSyncOnSession = context.runSyncOnSession;
+    const flushAssistantMessageToHistory = context.flushAssistantMessageToHistory;
+    const resetPendingAssistant = context.resetPendingAssistant;
+    const rerenderFromMessages = context.rerenderFromMessages;
+    const turnUsageDirty = context.turnUsageDirty;
+    const sendMessage = context.sendMessage;
+    const getBuffer = context.getBuffer;
+    const reconcileRemoteTurn = context.reconcileRemoteTurn;
+    const isBusyFor = context.isBusyFor;
+    const markRemoteTurn = context.markRemoteTurn;
+    const userMessageDisplayText = context.userMessageDisplayText;
+    const sendMessageToSession = context.sendMessageToSession;
     // 共享的 modeState epoch 表与权威写回收敛点（bridge.js 注入，评审 P1）：
     // interaction 与 chat-events 必须用同一份 epoch 表，否则事件直写与
     // 本模块的读取校验互不感知，竞态照样敞口。
@@ -34,14 +41,7 @@
     var currentDraftModeState = context.currentDraftModeState;
 
   // ── Super permission ─────────────────────────────────────────────
-  async function refreshSuperPerm() {
-    try {
-      state.superPermEnabled = !!(await invoke("get_super_permission_status"));
-    } catch (e) {
-      state.superPermEnabled = false;
-    }
-    notify();
-  }
+async function refreshSuperPerm() { return pinvouSharedtauriInteraction().refreshSuperPerm(); }
   async function toggleSuperPerm() {
     var target = !state.superPermEnabled;
     try {
@@ -115,15 +115,7 @@
     }
   }
   // ChatView 随 pinvouMode 传入当前 lane；草稿态立即按新 lane 默认刷新显示。
-  function setModeLane(lane) {
-    var next = lane === "code" ? "code" : "work";
-    if (state.modeLane === next) return;
-    state.modeLane = next;
-    if (!state.activeSessionId) {
-      state.modeState = currentDraftModeState();
-      notify();
-    }
-  }
+function setModeLane(lane) { return pinvouSharedtauriInteraction().setModeLane(lane); }
   // 草稿态 chip 切换：写本 lane 全局默认（setDraftMode 不物化会话——
   // 物化时由 ensureSession 把 lane 默认应用到新会话）。
   // Bound-workspace drafts share the code mode's safety posture: a switch
@@ -168,11 +160,7 @@
   }
 
   // ── 卡片动作辅助 ─────────────────────────────────────────────────
-  function patchItemById(id, patch) {
-    for (var i = 0; i < state.chatItems.length; i++) {
-      if (state.chatItems[i].id === id) { Object.assign(state.chatItems[i], patch); break; }
-    }
-  }
+function patchItemById(id, patch) { return pinvouSharedtauriInteraction().patchItemById(id, patch); }
   function pushUserEcho(text, persist) {
     var item = { type: "user", text: text, time: timeStr() };
     addChatItem(item);
@@ -183,34 +171,28 @@
     }
     return { item: item, message: message };
   }
-  function markResolved(id, statusLabel) { patchItemById(id, { resolved: true, statusLabel: statusLabel || "" }); notify(); }
+function markResolved(id, statusLabel) { return pinvouSharedtauriInteraction().markResolved(id, statusLabel); }
 
   // ── Per-session UI 路由 ─────────────────────────────────────────
   // 卡片动作链路有多个 await 边界,用户可能中途切 session。所有 UI 写入(chatItem 增改、
   // pending* 标记、modeState 同步)必须落在【触发 session】的 buffer 上,不能跟着
   // state.activeSessionId 漂走。一律 wrap 进 runSyncOnSession 是因为:sid === active
   // 时它是 no-op 直通,sid !== active 时它 swap-load-fn-save 回 sid 的 buffer。
-  function runOnSession(sid, fn) { runSyncOnSession(sid || state.activeSessionId, fn); }
-  function addSystemItemFor(sid, text) { runOnSession(sid, function () { addSystemItem(text); }); }
+function runOnSession(sid, fn) { return pinvouSharedtauriInteraction().runOnSession(sid, fn); }
+function addSystemItemFor(sid, text) { return pinvouSharedtauriInteraction().addSystemItemFor(sid, text); }
   function addAuthoritySyncNoticeFor(sid, text) {
     runOnSession(sid, function () { addAuthoritySyncNotice(text); });
   }
-  function patchItemByIdFor(sid, id, patch) { runOnSession(sid, function () { patchItemById(id, patch); }); }
+function patchItemByIdFor(sid, id, patch) { return pinvouSharedtauriInteraction().patchItemByIdFor(sid, id, patch); }
 
 
   // ── 思考指示器状态（每次阶段切换重置计时）──────────────────────
-  function startThinking() { state.thinking = { active: true, phase: "thinking", toolName: "", startedAt: Date.now() }; }
-  function thinkingTool(name) { state.thinking = { active: true, phase: "tool", toolName: name || "", startedAt: Date.now() }; }
-  function thinkingIdle() { state.thinking = { active: true, phase: "thinking", toolName: "", startedAt: Date.now() }; }
-  function stopThinking() { state.thinking = { active: false, phase: "thinking", toolName: "", startedAt: 0 }; }
+function startThinking() { return pinvouSharedtauriInteraction().startThinking(); }
+function thinkingTool(name) { return pinvouSharedtauriInteraction().thinkingTool(name); }
+function thinkingIdle() { return pinvouSharedtauriInteraction().thinkingIdle(); }
+function stopThinking() { return pinvouSharedtauriInteraction().stopThinking(); }
 
-  function isActionablePlanCard(sid, itemId, planId) {
-    if (!sid || sid !== state.activeSessionId || !itemId || !planId) return false;
-    return state.chatItems.some(function (item) {
-      return item && item.id === itemId && item.type === "plan_card" &&
-        item.cardState === "active" && !item.resolved && String(item.planId || "") === planId;
-    });
-  }
+function isActionablePlanCard(sid, itemId, planId) { return pinvouSharedtauriInteraction().isActionablePlanCard(sid, itemId, planId); }
 
   // ── Plan/YOLO 命令 ───────────────────────────────────────────────
   // sid 在 entry 捕获一次,thread through 所有 await —— 防用户切 session 后,
@@ -352,17 +334,7 @@
     notify();
   }
   // 灯泡 toggle：plan ↔ yolo
-  async function setPlanModeNext() {
-    // 草稿态：不物化会话，改写本 lane 全局默认（两分 lane 语义；旧实现会先
-    // ensureSession 物化——草稿页点 Plan 凭空造出空会话）。
-    var sid = state.activeSessionId;
-    if (!sid) { await setDraftMode("plan"); return; }
-    try {
-      var st = await invoke("set_plan_mode_next", { sessionId: sid });
-      applyAuthoritativeModeState(sid, st);
-    } catch (e) { addSystemItemFor(sid, bt("switchModeFailed") + e); }
-    notify();
-  }
+async function setPlanModeNext() { return pinvouSharedtauriInteraction().setPlanModeNext(); }
   // 多智能体开关（ADR-0006）：模型列表下方的会话级开关。后端做名册装配
   // + 名册装配与即时推送；前端只认返回的权威状态。
   // in-flight 期间丢弃**同会话**的后续调用（防重入兜底）：第二次点击会带
@@ -424,10 +396,7 @@
     notify();
   }
   // plan-stuck / fallback / execution-stuck 卡片动作
-  async function planStuckReplan(itemId) {
-    patchItemById(itemId, { resolved: true, statusLabel: bt("replanRequested") }); notify();
-    await sendMessage(bt("planStuckReplanPrompt"));
-  }
+async function planStuckReplan(itemId) { return pinvouSharedtauriInteraction().planStuckReplan(itemId); }
   async function planStuckGo(itemId, targetSessionId) {
     // The plan-stuck card's session is captured when the card is rendered;
     // gate callers pass it explicitly. A no-arg call (legacy) targets
@@ -455,39 +424,7 @@
   // 卡片动作链路有 await 边界：entry 先捕获触发会话 sid，invoke 与后续全部 UI 写入
   // 都定向到 sid（runOnSession / patchItemByIdFor），避免用户提交期间切会话导致
   // echo/restoredAnswers 漏写触发会话或污染当前会话（与 acceptPlan 同一约定）。
-  async function submitUserInput(itemId, toolCallId, answers, questions) {
-    var sid = state.activeSessionId;
-    if (!sid) return;
-    patchItemByIdFor(sid, itemId, { submitting: true }); notify();
-    try {
-      await invoke("submit_user_input", { toolCallId: toolCallId, answers: answers, sessionId: sid });
-      // 摘要按 question 分组拼接：answers 是按选项展开的（multi_select 时同一题多条），
-      // 不能按 answers 索引一一对应 questions（会越界抛 TypeError，复核 P1）。
-      // 用无原型对象：question id 仅后端校验非空，constructor/toString/__proto__ 是合法输入，
-      // 普通 {} 会让这些键命中 Object.prototype 继承属性，.push 抛 TypeError（复核 P1）。
-      var byId = Object.create(null);
-      answers.forEach(function (a) { if (a && a.id != null) (byId[a.id] = byId[a.id] || []).push(a); });
-      var summary = questions.map(function (q, qi) {
-        var list = byId[q.id];
-        if (!list || !list.length) return null;
-        var header = q.header || ("Q" + (qi + 1));
-        return header + ": " + list.map(function (a) {
-          var text = (a.other || a.label === "其他") ? bt("echoOtherPrefix") + a.value : a.label;
-          return text;
-        }).join(" · ");
-      }).filter(Boolean).join(" · ");
-      runOnSession(sid, function () {
-        pushUserEcho("✓ " + summary, false);
-        flushAssistantMessageToHistory();
-      });
-      // 提交时即存答案：切走视图再切回（ChatView 重挂载但 bridge state 保留）时，
-      // QuestionChoiceCard 用 restoredAnswers 恢复选中态；会话级 rerender 另有解析。
-      patchItemByIdFor(sid, itemId, { resolved: true, cardState: "submitted", submitting: false, restoredAnswers: answers });
-    } catch (e) {
-      patchItemByIdFor(sid, itemId, { submitting: false, error: String(e) });
-    }
-    notify();
-  }
+async function submitUserInput(itemId, toolCallId, answers, questions) { return pinvouSharedtauriInteraction().submitUserInput(itemId, toolCallId, answers, questions); }
   async function cancelUserInput(itemId, toolCallId) {
     var sid = state.activeSessionId;
     if (!sid) return;
@@ -577,14 +514,7 @@
       notify();
     }
   }
-  async function compactNow() {
-    var sid = state.activeSessionId;
-    if (!sid) return;
-    try { await invoke("compact_now", { sessionId: state.activeSessionId }); } catch (e) {
-      var compactErr = String(e || "");
-      addSystemItemFor(sid, bt("compactFail") + ": " + (compactErr.indexOf("session_engine_not_running") >= 0 ? bt("compactInactive") : compactErr));
-    }
-  }
+async function compactNow() { return pinvouSharedtauriInteraction().compactNow(); }
 
 
     return {

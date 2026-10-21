@@ -23,6 +23,7 @@ import {
   externalMarkdownUrl,
   fetchToolDetails,
   isFetchTool,
+  isOperationItemType,
   isSearchTool,
   searchToolDetails,
   terminalStatus,
@@ -38,6 +39,7 @@ import {
   observeCodeCopyButtons,
 } from './code-block-copy.js';
 import { applyStreamFade } from './stream-fade.js';
+import { createWeakCache } from '../../shared/weak-cache.js';
 import { assistantResponseAvailable, assistantResponseText } from './message-clipboard.js';
 import {
   CONVERSATION_VIRTUALIZATION_THRESHOLD,
@@ -58,14 +60,11 @@ const FALLBACK_COPY = dict.zh?.uiConversation || {};
 // rebuilt that object for every turn on every keystroke/stream chunk. The merged
 // table is immutable and `copy` identities are stable (i18n dict tables), so cache
 // the merge per source table (same WeakMap trick as ChatView's legacyMarkdownCache).
-const conversationCopyCache = new WeakMap();
+const cachedConversationCopy = createWeakCache((copy) => ({ ...FALLBACK_COPY, ...copy }));
 function conversationCopy(copy) {
+  // Non-object keys never enter the WeakMap-backed cache (WeakMap contract).
   if (!copy) return FALLBACK_COPY;
-  const cached = conversationCopyCache.get(copy);
-  if (cached) return cached;
-  const merged = { ...FALLBACK_COPY, ...copy };
-  conversationCopyCache.set(copy, merged);
-  return merged;
+  return cachedConversationCopy(copy);
 }
 
 // Streaming markdown throttle window: rerun marked+DOMPurify+hljs on a 200ms budget instead of
@@ -257,6 +256,33 @@ export function ConversationActivityIndicator({
     );
   }
   return <div role="status" aria-live="polite" className={sharedClass}>{content}</div>;
+}
+
+// Second-clock wrapper for the composer activity indicator: the tick used to live on ChatView
+// top-level state, so while busy the whole ChatView (including all transcript coordination)
+// re-rendered once per second; the indicator is the only place showing elapsed time, and now the
+// tick re-renders just this small subtree. Lives next to ConversationActivityIndicator (and the
+// second clock below) so every host composing the timeline shares the same ticking wrapper.
+/**
+ * @param {object} props - component props
+ * @param {{ status: string } | null} props.turn - active conversation turn, if any
+ * @param {() => void} props.onRequestAttention - scroll-to-bottom request handler
+ * @param {string} props.className - extra class for the indicator
+ * @param {object} props.copy - conversation copy table
+ * @returns {React.ReactElement | null} the ticking activity indicator
+ */
+export function LiveConversationActivityIndicator({ turn, onRequestAttention, className, copy }) {
+  const running = !!turn && turn.status === 'running';
+  const now = useConversationSecondClock(running);
+  return (
+    <ConversationActivityIndicator
+      turn={turn}
+      now={now}
+      onRequestAttention={onRequestAttention}
+      className={className}
+      copy={copy}
+    />
+  );
 }
 
 function TerminalBlock({ label, text }) {
@@ -744,7 +770,7 @@ function DefaultItem({
       />
     );
   }
-  if (item.type === 'tool' || item.type === 'command_execution' || item.type === 'file_change') {
+  if (isOperationItemType(item.type)) {
     return (
       <ToolItem
         item={item}
@@ -1059,7 +1085,6 @@ function conversationTimelineScrollMargin(timelineElement, scrollElement) {
 export function ConversationTimeline({
   turns = EMPTY_TURNS,
   scrollElementRef,
-  virtualizationThreshold = CONVERSATION_VIRTUALIZATION_THRESHOLD,
   busy = false,
   turnGapPx = DEFAULT_CONVERSATION_ROW_GAP_PX,
   followOutputRef,
@@ -1070,7 +1095,7 @@ export function ConversationTimeline({
   const virtualized = shouldVirtualizeConversationTurns(
     turns.length,
     scrollElementRef,
-    virtualizationThreshold,
+    CONVERSATION_VIRTUALIZATION_THRESHOLD,
   );
   const { historyTurns, liveTurn, liveTurnIndex } = useMemo(
     () => splitConversationLiveTail(turns, virtualized, busy),

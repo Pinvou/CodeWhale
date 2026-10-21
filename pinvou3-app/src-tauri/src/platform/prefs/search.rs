@@ -9,7 +9,12 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::platform::credential_store::CredentialReference;
+use crate::platform::credential_store::{
+    CredentialEditAction, CredentialReference, CredentialState,
+};
+
+// 凭据状态机与 `SavedModel` 共用一份实现(见 super::CredentialStateOps)。
+use super::{CredentialStateAccess, CredentialStateOps, sealed};
 
 /// Search 后端选择。
 /// - `Bing`(默认): HTML scrape,无需 key,但对中文长复合查询相关性差。
@@ -83,29 +88,35 @@ pub struct SearchCredential {
 }
 
 impl SearchCredential {
-    pub fn clear_plaintext_key(&mut self) {
-        self.api_key.clear();
-        self.credential_action = None;
+    /// CLI(pinvou-cli)在 prefs 模块树外消费;内部走 [`CredentialStateOps`]
+    /// 单一实现(理由同 SavedModel 同名壳)。
+    pub fn mark_configured(&mut self, reference: crate::platform::prefs::CredentialReference) {
+        use crate::platform::prefs::CredentialStateOps;
+        CredentialStateOps::mark_configured(self, reference)
     }
-
-    pub fn mark_configured(&mut self, reference: CredentialReference) {
-        self.credential_ref = Some(reference);
-        self.credential_state = crate::platform::credential_store::CredentialState::Configured;
-        self.has_secret = true;
-        self.clear_plaintext_key();
-    }
-
     pub fn mark_missing(&mut self) {
-        self.credential_ref = None;
-        self.credential_state = crate::platform::credential_store::CredentialState::Missing;
-        self.has_secret = false;
-        self.clear_plaintext_key();
+        use crate::platform::prefs::CredentialStateOps;
+        CredentialStateOps::mark_missing(self)
     }
+}
 
-    pub fn mark_unavailable(&mut self) {
-        self.credential_state = crate::platform::credential_store::CredentialState::Unavailable;
-        self.has_secret = self.credential_ref.is_some();
-        self.clear_plaintext_key();
+impl sealed::Sealed for SearchCredential {}
+
+impl CredentialStateAccess for SearchCredential {
+    fn api_key_mut(&mut self) -> &mut String {
+        &mut self.api_key
+    }
+    fn credential_ref_mut(&mut self) -> &mut Option<CredentialReference> {
+        &mut self.credential_ref
+    }
+    fn credential_state_mut(&mut self) -> &mut CredentialState {
+        &mut self.credential_state
+    }
+    fn has_secret_mut(&mut self) -> &mut bool {
+        &mut self.has_secret
+    }
+    fn credential_action_mut(&mut self) -> &mut Option<CredentialEditAction> {
+        &mut self.credential_action
     }
 }
 

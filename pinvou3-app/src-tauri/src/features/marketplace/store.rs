@@ -171,7 +171,7 @@ pub struct BundleRecord {
 impl BundleRecord {
     /// 安装/连接登记的构造入口：`installed=true`、时间为现在、指纹留空
     /// （磁盘遍历只在完整性校验时发生，§4 规则 4）。调用方按需再填
-    /// `credential_keys` / `assets` / `degraded`。
+    /// `degraded`。
     pub fn installed_now(id: impl Into<String>, source: BundleSource) -> Self {
         Self {
             id: id.into(),
@@ -560,6 +560,11 @@ fn apply_display_meta(
 /// 反斜杠/首尾单引号，见 `rewrite_frontmatter_description`）——同一值在非
 /// 单技能包可存、在单技能包会被整体拒绝，这是同步能力差异使然，不是本函数的
 /// 口径不一致。
+/// 上传来源展示名的长度上限（字符数）：GUI 的 `sanitize_display_name`
+/// 与 headless CLI 的导入净化共用同一截断口径（与上面 64 字符的展示元数据
+/// 校验上限是两个不同的口径，勿混用）。
+pub const MAX_IMPORT_DISPLAY_NAME_CHARS: usize = 128;
+
 /// 展示字段值的不可见字符拒绝集：`Cc`（控制字符/换行）之外，补充对卡片标题/
 /// composer 菜单/SKILL.md 回写都有实际危害或显示异常的不可见字符——
 /// - 双向控制（U+202A–202E、U+2066–2069）：可视觉重排/隐藏文本（bidi 欺骗）；
@@ -569,7 +574,9 @@ fn apply_display_meta(
 ///   无法表达，效果等同换行。
 /// std 无通用 Unicode 类别 API，此处按具名范围精确拒绝；未列出的 Cf 变体
 /// （如变体选择符）不拦——宁可少拦可见字符，不误伤正常文案。
-fn is_display_unsafe_char(c: char) -> bool {
+/// `pub`：headless CLI 的 plugins 家族为共享 `bundles.json` 的导入显示名
+/// 直接复用本判定（曾因 crate-private 而逐字手抄镜像）。
+pub fn is_display_unsafe_char(c: char) -> bool {
     c.is_control()
         || matches!(c,
             '\u{00AD}' // SOFT HYPHEN
@@ -1237,11 +1244,6 @@ mod tests {
                 .expect("gongwen 应登记");
             assert_eq!(gongwen.source, BundleSource::Preset);
             assert!(gongwen.installed);
-            assert_eq!(
-                gongwen.credential_keys,
-                vec!["GONGWEN_KEY".to_string()],
-                "凭据 key 应从 manifest 现算收敛"
-            );
 
             let preset = file
                 .records
@@ -1268,7 +1270,6 @@ mod tests {
                     feishu.degraded.is_some(),
                     "二进制与 lock 表不符应记 degraded"
                 );
-                assert!(feishu.assets.is_empty(), "校验不过不得登记 assets");
                 assert!(report.degraded.contains(&"feishu".to_string()));
             }
             // companion 技能目录自身不独立登记
@@ -1479,16 +1480,14 @@ mod tests {
                 .insert("future_key".to_string(), serde_json::json!(1));
             store.upsert(first).unwrap();
 
-            // 重装：新记录只带新凭据列表，时间/extra/指纹应保留
-            let mut again = BundleRecord::installed_now("gongwen", BundleSource::Preset);
-            again.credential_keys = vec!["GONGWEN_KEY".to_string()];
+            // 重装：新记录只带新 degraded/installed 值，时间/extra/指纹应保留
+            let again = BundleRecord::installed_now("gongwen", BundleSource::Preset);
             store.upsert_preserving(again).unwrap();
 
             let merged = store.get("gongwen").unwrap().unwrap();
             assert_eq!(merged.installed_at, "2026-01-01T00:00:00+00:00");
             assert_eq!(merged.extra.get("future_key"), Some(&serde_json::json!(1)));
             assert_eq!(merged.content_fingerprint, Some("fp-v1".to_string()));
-            assert_eq!(merged.credential_keys, vec!["GONGWEN_KEY".to_string()]);
             assert_eq!(store.records().unwrap().len(), 1, "不得产生重复记录");
         });
     }

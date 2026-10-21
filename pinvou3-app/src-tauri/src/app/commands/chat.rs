@@ -57,6 +57,10 @@ pub async fn chat(
     if acp_pool.is_acp(&sid) {
         return Err("ACP 代码会话必须通过独立代码页面发送".to_string());
     }
+    // Remote-proxy sessions have no local Engine turn: reject them here with
+    // the stable remote-route error instead of the incidental store load
+    // failure that reserve_turn would produce.
+    super::sessions::ensure_chat_session(&store, &sid, "chat")?;
     let reservation = pool
         .reserve_turn(&sid)
         .map_err(|error| format!("reserve chat turn: {error:#}"))?;

@@ -12,10 +12,14 @@ use serde_json::{Value, json};
 use tauri::{AppHandle, Manager};
 
 use crate::features::connectors::connector_cli::{self as cc, CliCtx, ConnectorConn};
-use crate::features::connectors::skill_gate::ConnectorSkillGate;
+use crate::features::connectors::skill_gate::{ConnectorGate, ConnectorSkillGate};
 
 const ID: &str = "tmeet";
-const TMEET_NPM_SPEC: &str = "@tencentcloud/tmeet@1.0.18";
+/// `pub` + the facade re-export: single-sourced with the CLI's connectors
+/// family (same rationale as `TMEET_MIN_VERSION` below) — a GUI bump of the
+/// spec must move the CLI's install lane with it, and the in-file pin test
+/// keeps the spec tail on the imported version floor.
+pub const TMEET_NPM_SPEC: &str = "@tencentcloud/tmeet@1.0.18";
 /// `pub` + the facade re-export: single-sourced with the CLI's connectors
 /// family (round-51 review, same rationale as `LARK_MIN_VERSION`).
 pub const TMEET_MIN_VERSION: (u64, u64, u64) = (1, 0, 18);
@@ -119,7 +123,7 @@ fn install_tmeet_cli() -> Result<bool, String> {
     // not lost.
     let attempt = |registry: Option<&str>| -> Result<bool, String> {
         let mut c = TMEET_CTX.base_cmd("npm");
-        cc::apply_user_npm_prefix(&mut c);
+        crate::platform::os::apply_user_npm_prefix(&mut c);
         c.args(["install", "-g", TMEET_NPM_SPEC]);
         if let Some(registry) = registry {
             c.arg(format!("--registry={registry}"));
@@ -160,20 +164,23 @@ fn install_tmeet_cli() -> Result<bool, String> {
 
 /// Bootstrap: ensure the tmeet CLI is installed and at least 1.0.18.
 pub async fn tmeet_ensure_cli() -> Result<Value, String> {
-    tokio::task::spawn_blocking(|| {
-        if tmeet_cli_present() {
-            return Ok::<Value, String>(json!({ "ok": true, "already": true }));
-        }
-        if !install_tmeet_cli()? {
-            return Err("腾讯会议 CLI 安装失败，请查看 ~/.pinvou3/cli-install.log".to_string());
-        }
-        if !tmeet_cli_present() {
-            return Err("腾讯会议 CLI 安装完成但无法执行，请重试或修复应用运行时".to_string());
-        }
-        Ok::<Value, String>(json!({ "ok": true, "already": false }))
-    })
+    cc::ensure_cli_with(
+        "tmeet",
+        tmeet_cli_present,
+        "腾讯会议 CLI 安装完成但无法执行，请重试或修复应用运行时",
+        // install_tmeet_cli 的 bool 语义：false = npm 安装失败（中国网络镜像重试
+        // 也失败），与「装完不可执行」是两种故障，分别报各自的用户文案。
+        || {
+            install_tmeet_cli().and_then(|installed| {
+                if installed {
+                    Ok(())
+                } else {
+                    Err("腾讯会议 CLI 安装失败，请查看 ~/.pinvou3/cli-install.log".to_string())
+                }
+            })
+        },
+    )
     .await
-    .map_err(|e| format!("spawn_blocking: {e}"))?
 }
 
 /// 查询当前腾讯会议连接状态。只返回布尔,不把身份 / token 信息带进 webview。
@@ -251,27 +258,6 @@ fn run_connect_flow(app: &AppHandle, generation: u64) {
     }
 }
 
-fn drain_for_auth_url<R: std::io::Read + Send + 'static>(
-    r: R,
-    tx: mpsc::Sender<(Option<String>, Option<String>)>,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        for line in std::io::BufRead::lines(std::io::BufReader::new(r)) {
-            let line = match line {
-                Ok(line) => line,
-                Err(error) => {
-                    // 管道读取错误通常不可恢复；继续迭代可能反复返回 Err 并空转。
-                    log::warn!("[tmeet] 授权输出读取失败，停止排空：{error}");
-                    break;
-                }
-            };
-            let safe = cc::safe_auth_log_line(&line, true);
-            let url = TMEET_CTX.extract_url(&line);
-            let _ = tx.send((url, safe));
-        }
-    })
-}
-
 fn phase_scan(app: &AppHandle, generation: u64) -> Result<(), String> {
     let mut cmd = tmeet(&["auth", "login", "--no-browser"]);
     // 独立进程组:npm shim(shell→node)派生的孙进程与 shim 同组,退出收割的
@@ -289,10 +275,10 @@ fn phase_scan(app: &AppHandle, generation: u64) -> Result<(), String> {
 
     let (tx, rx) = mpsc::channel::<(Option<String>, Option<String>)>();
     if let Some(o) = child.stdout.take() {
-        drain_for_auth_url(o, tx.clone());
+        cc::drain_for_url(TMEET_CTX, true, o, tx.clone());
     }
     if let Some(e) = child.stderr.take() {
-        drain_for_auth_url(e, tx.clone());
+        cc::drain_for_url(TMEET_CTX, true, e, tx.clone());
     }
     drop(tx);
 
@@ -504,6 +490,13 @@ pub fn tmeet_skills_should_show() -> bool {
     !is_tmeet_disabled() && is_logged_in()
 }
 
+/// 腾讯会议门控表项:停用标志 + 就绪探测;
+/// skills_state 命令公共体见 [`ConnectorGate`]。
+pub(crate) static TMEET_GATE: ConnectorGate = ConnectorGate {
+    disabled_filename: "tmeet_disabled",
+    ready_probe: is_logged_in,
+};
+
 pub async fn tmeet_apply_skills() -> Result<Value, String> {
     let show = tokio::task::spawn_blocking(|| -> Result<bool, String> {
         let show = tmeet_skills_should_show();
@@ -557,17 +550,7 @@ pub(crate) fn tmeet_gate_step() -> Result<bool, String> {
 }
 
 pub async fn tmeet_skills_state() -> Result<Value, String> {
-    tokio::task::spawn_blocking(|| {
-        let disabled = is_tmeet_disabled();
-        let connected = is_logged_in();
-        Ok::<Value, String>(json!({
-            "connected": connected,
-            "enabled": !disabled,
-            "visible": connected && !disabled,
-        }))
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking: {e}"))?
+    TMEET_GATE.skills_state_command().await
 }
 
 #[cfg(test)]
@@ -598,6 +581,24 @@ mod tests {
         assert_eq!(parse_tmeet_version("v2.3.4"), Some((2, 3, 4)));
         assert_eq!(parse_tmeet_version("tmeet version 1.2"), Some((1, 2, 0)));
         assert_eq!(parse_tmeet_version("hello"), None);
+    }
+
+    /// Drift pin: `TMEET_NPM_SPEC` installs exactly the version the
+    /// `TMEET_MIN_VERSION` gate requires. If the floor is raised alone, the
+    /// npm lane keeps installing the old CLI and `tmeet_cli_present` stays
+    /// false — a guaranteed "installed but cannot execute" loop. (Mirrors the
+    /// CLI's `tmeet_npm_spec_version_matches_the_imported_min_version_floor`.)
+    #[test]
+    fn tmeet_npm_spec_version_matches_the_imported_min_version_floor() {
+        let suffix = TMEET_NPM_SPEC
+            .strip_prefix("@tencentcloud/tmeet@")
+            .expect("TMEET_NPM_SPEC must keep installing the tmeet package");
+        assert_eq!(
+            parse_tmeet_version(suffix),
+            Some(TMEET_MIN_VERSION),
+            "TMEET_NPM_SPEC must pin exactly the TMEET_MIN_VERSION floor; \
+             raise both in the same change"
+        );
     }
 
     #[test]

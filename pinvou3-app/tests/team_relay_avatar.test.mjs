@@ -127,5 +127,10 @@ test('Team Relay switches GIF sources at runtime when reduced-motion changes', (
   assert.match(component, /useReducedMotion\(\)/);
   assert.match(component, /sourceRequest\.reducedMotion/);
   assert.match(component, /\[digest, loadSource, name, ready, seed, sourceRequest, teamId\]/);
-  assert.match(hook, /addEventListener\?\.\('change', onChange\)/);
+  assert.match(hook, /useMediaQuery\('\(prefers-reduced-motion: reduce\)'\)/);
+  const mediaQueryHook = fs.readFileSync(
+    new URL('../src/hooks/useMediaQuery.js', import.meta.url),
+    'utf8',
+  );
+  assert.match(mediaQueryHook, /addEventListener\?\.\('change', onChange\)/);
 });

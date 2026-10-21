@@ -4,24 +4,24 @@
  */
 (function (root) {
   "use strict";
-  var registry = root.__PINVOU_TAURI_BRIDGE_FEATURES__ = root.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
-  registry["dependencies"] = function (context) {
-    var state = context.state;
-    var notify = context.notify;
-    var invoke = context.invoke;
-    var listen = context.listen;
-    var bt = context.bt;
+  // biome-ignore lint/suspicious/noAssignInExpressions: registry bootstrap of the verbatim payload; splitting statements would diverge from the artifact
+  const registry = root.__PINVOU_TAURI_BRIDGE_FEATURES__ = root.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
+  registry["dependencies"] = function (context) {let pinvouSharedtauriDependenciesCache = null;
+function pinvouSharedtauriDependencies() {
+  if (!pinvouSharedtauriDependenciesCache) pinvouSharedtauriDependenciesCache = window.PinvouBridgeShared.create("tauriDependencies", { state, notify, invoke });
+  return pinvouSharedtauriDependenciesCache;
+}
+
+
+    const state = context.state;
+    const notify = context.notify;
+    const invoke = context.invoke;
+    const listen = context.listen;
+    const bt = context.bt;
   // ── 依赖体检 ─────────────────────────────────────────────────────
   // 实时检测各文件解析能力(PDF/Office/OCR/压缩包/邮件)的系统依赖是否齐全,
   // 设置页展示缺失项 + 一键 apt 命令。后端 check_dependencies 不走缓存,装完可复检。
-  async function checkDependencies() {
-    if (state.depsChecking) return;
-    state.depsChecking = true; state.depsInstallError = null; notify();
-    try {
-      state.deps = await invoke("check_dependencies");
-    } catch (e) { state.deps = []; }
-    state.depsChecking = false; notify();
-  }
+async function checkDependencies() { return pinvouSharedtauriDependencies().checkDependencies(); }
   // 一键安装缺失依赖: 收集缺失项的包名 → 后端 pkexec apt 提权安装 → 装完实时重检。
   async function installDependencies() {
     var deps = state.deps || [];

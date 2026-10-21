@@ -15,7 +15,6 @@ const DEFAULT_DESKTOP_CAPABILITIES = Object.freeze({
   desktopNotifications: true,
   hostFilePicker: true,
   artifactDownload: false,
-  browserMicrophone: true,
   sessionModelSwitch: true,
   modelManagement: true,
   toolStoreMutations: true,

@@ -26,7 +26,7 @@ use super::state::{
     NativeTabLease, NavigationCommitDecision, RequestLedger, RetainedAgentOperation, SurfaceEntry,
     TabRegistry, UserNavigationState, WorkspaceControl,
 };
-use super::{NativeSurfaceCapabilities, NativeWorkspaceRestore};
+use super::{HOST_BLANK_MARKER_TAB_PREFIX, NativeSurfaceCapabilities, NativeWorkspaceRestore};
 
 const BROWSER_CORE_RUNTIME: &str =
     include_str!("../../../../resources/common/bundle/mcp-servers/browser-core-runtime.js");
@@ -167,6 +167,10 @@ struct PrepareGeneration {
     revision: u64,
 }
 
+/// The only native browser surface: desktop (Windows/macOS/Linux) via
+/// `NativeBrowserSurface`. Mobile targets are unsupported until a real
+/// surface lands — do not re-introduce no-op fallback stubs; the drift they
+/// accumulate makes them non-compiling and silently unsupported anyway.
 pub(crate) struct DesktopBrowserSurface<P: PlatformWebviewConfig> {
     platform: P,
     data_directory: Option<PathBuf>,
@@ -425,7 +429,7 @@ impl<P: PlatformWebviewConfig> DesktopBrowserSurface<P> {
         for url in &restore.urls {
             let tab_token = self.fresh_tab_token(&tab_tokens);
             let initial_url = if requires_automation_binding {
-                format!("about:blank#pinvou-tab-{tab_token}")
+                format!("{HOST_BLANK_MARKER_TAB_PREFIX}{tab_token}")
             } else {
                 marked_blank_url(url, &tab_token)
             };
@@ -3323,7 +3327,7 @@ fn build_webview<P: PlatformWebviewConfig>(
             if binding_marker {
                 return true;
             }
-            if let Some(interaction) = user_takeover_interaction(url) {
+            if user_takeover_interaction(url).is_some() {
                 // CDP/platform input may also produce isTrusted=true. Only the
                 // short input window explicitly opened by the wrapper after lease
                 // validation can suppress this fail-safe takeover.
@@ -3339,15 +3343,6 @@ fn build_webview<P: PlatformWebviewConfig>(
                 // hand-back window; timers created by earlier activity then
                 // fail their revision CAS instead of stealing control back.
                 let snapshot = navigation_control.bump(Some(NativeControlOwner::User));
-                let _ = navigation_app.emit(
-                    "browser:user-takeover",
-                    json!({
-                        "sessionId": navigation_session_id,
-                        "tabToken": navigation_tab_token,
-                        "interaction": interaction,
-                        "revision": snapshot.revision,
-                    }),
-                );
                 emit_control_changed(
                     &navigation_app,
                     &navigation_session_id,
@@ -4078,7 +4073,7 @@ fn internal_marker_token(url: &str) -> Option<&str> {
 
 fn marked_blank_url(url: &str, tab_token: &str) -> String {
     if url == "about:blank" {
-        format!("about:blank#pinvou-tab-{tab_token}")
+        format!("{HOST_BLANK_MARKER_TAB_PREFIX}{tab_token}")
     } else {
         url.to_string()
     }
@@ -4183,6 +4178,7 @@ fn is_valid_token(token: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::browser::platform::state::issue_authorized_lease;
 
     #[test]
     fn native_page_ids_are_incarnation_scoped_and_javascript_safe() {
@@ -4966,15 +4962,7 @@ mod tests {
         );
 
         let control = Arc::clone(&surface.workspaces["session-a"].control);
-        let (snapshot, opaque_lease) = control.issue_agent_lease();
-        let authorization = NativeTabLease::from_assertion(
-            "session-a",
-            "0123456789abcdef",
-            "target-a",
-            snapshot.revision,
-            opaque_lease,
-        )
-        .unwrap();
+        let (_snapshot, authorization) = issue_authorized_lease(&control);
         assert!(control.begin_agent_operation(&authorization, true));
 
         surface
@@ -5494,15 +5482,7 @@ mod tests {
                 .unwrap();
             Arc::clone(&workspace.control)
         };
-        let (snapshot, opaque_lease) = control.issue_agent_lease();
-        let authorization = NativeTabLease::from_assertion(
-            "session-a",
-            "0123456789abcdef",
-            "target-a",
-            snapshot.revision,
-            opaque_lease,
-        )
-        .unwrap();
+        let (_snapshot, authorization) = issue_authorized_lease(&control);
         assert!(control.begin_agent_operation(&authorization, false));
 
         let dispatches = std::sync::atomic::AtomicUsize::new(0);
@@ -5545,15 +5525,7 @@ mod tests {
             .tabs
             .bind_target("0123456789abcdef", "target-a")
             .unwrap();
-        let (snapshot, opaque_lease) = workspace.control.issue_agent_lease();
-        let authorization = NativeTabLease::from_assertion(
-            "session-a",
-            "0123456789abcdef",
-            "target-a",
-            snapshot.revision,
-            opaque_lease,
-        )
-        .unwrap();
+        let (_snapshot, authorization) = issue_authorized_lease(&workspace.control);
         let epoch = AgentCallerEpoch::new(41, "0123456789abcdef0123456789abcdef").unwrap();
         assert!(workspace.control.begin_agent_operation_for_caller(
             &authorization,
@@ -5581,15 +5553,7 @@ mod tests {
             .tabs
             .bind_target("0123456789abcdef", "target-a")
             .unwrap();
-        let (snapshot, opaque_lease) = workspace.control.issue_agent_lease();
-        let authorization = NativeTabLease::from_assertion(
-            "session-a",
-            "0123456789abcdef",
-            "target-a",
-            snapshot.revision,
-            opaque_lease,
-        )
-        .unwrap();
+        let (_snapshot, authorization) = issue_authorized_lease(&workspace.control);
 
         assert!(
             workspace

@@ -12,6 +12,7 @@ import { copyClipboardText } from '../../shared/clipboard.js';
 import { formatSessionDate } from '../../shared/date-utils.js';
 import { isBuiltInLlmApiModel, selectableModels } from '../../shared/model-options.js';
 import { can, isWeb } from '../../shared/platform.js';
+import { pathBasename } from '../../shared/path-utils.js';
 import qwenIcon from '../../brand-icons/qwen.svg';
 import {
   MODEL_PRESET_DEFS, PROVIDER_KIND_CODING_PLAN, PROVIDER_KIND_OFFICIAL_API, PROVIDER_KIND_CUSTOM,
@@ -22,8 +23,7 @@ import {
   catalogImageCapableForModel,
   groupModelsForSelector,
   selectorMainLabel,
-  reasoningEffortTiersForModel, reasoningEffortForModelSwitch, normalizeStoredReasoningEffort,
-  alwaysThinkingSpecForModel, localReasoningTiers, reasoningEffortDisplayForTiers, baseUrlUsesLocalOrPrivate,
+  reasoningEffortForModelSwitch, normalizeStoredReasoningEffort,
 } from './model-catalog.js';
 import { CommunityPanel } from './CommunityPanel.jsx';
 import {
@@ -52,7 +52,8 @@ import {
   normalizeGlobalShortcutDraft,
 } from './globalShortcutSettings.mjs';
 import { VoiceShortcutIntroModal } from '../voice-composer/VoiceShortcutIntroModal.jsx';
-import { ReasoningTierPicker, useLocalServerKindProbe } from './local-server-tiers.jsx';
+import { ReasoningTierPicker, useModelReasoningTierState } from './local-server-tiers.jsx';
+import { StatusChip } from './StatusChip.jsx';
 
 function isReadonlyModel(model) {
   return !!(model && (model.readonly || model.system));
@@ -400,32 +401,25 @@ const formatMemoryTime = (item, copy) => {
       // 当前表单模型可切换的思考深度档位（底座不支持的模型为空 = 不提供切换）。
       // 本地/私网 openai_compatible 端点：按 Rust 探测结果下发真实档位
       // （vllm→四档、ollama→off/high、lmstudio/generic→不支持），避免 UI
-      // 显示档位但 wire 层空操作的「调了个寂寞」。
-      const isLocalCompatible = preset === 'openai_compatible' && baseUrlUsesLocalOrPrivate(baseUrl.trim());
+      // 显示档位但 wire 层空操作的「调了个寂寞」。探测+档位+高亮映射的共享胶水
+      // 在 useModelReasoningTierState（与输入框模型选择器同一份）。
       // Form entry: baseUrl/apiKey are per-keystroke input state, so the probe is debounced 400ms (fires only
       // after typing stops); for the pre-probe trim and raw-input dependency semantics see useLocalServerKindProbe.
-      const { probedKind, probePending } = useLocalServerKindProbe({
-        enabled: isLocalCompatible,
+      const {
+        isLocalCompatible,
+        probePending,
+        reasoningEffortTiers,
+        noControlThinking: localNoControlThinking,
+        reasoningEffortDisplay,
+      } = useModelReasoningTierState({
+        model: { preset, model, vendor, base_url: baseUrl, provider_kind: providerKind },
+        storedEffort: reasoningEffort,
         baseUrl,
         apiKey,
         modelId: initial.__new ? null : initial.id,
         debounceMs: 400,
         trimInputs: true,
       });
-      const reasoningEffortTiers = isLocalCompatible
-        ? (probePending ? [] : (localReasoningTiers(model, probedKind) || []))
-        : (reasoningEffortTiersForModel({ preset, model, vendor, base_url: baseUrl, provider_kind: providerKind }) || []);
-      // Local routes (vllm preset / local-compatible endpoints) hit the "always-thinking,
-      // no-control" knowledge table: the effort-tier area shows an "always on" hint instead of probe-unsupported.
-      const localNoControlThinking = (preset === 'local_vllm' || isLocalCompatible)
-        && !!(alwaysThinkingSpecForModel(model) || {}).noControl;
-      // Highlight fallback: the form value is normalized against the static
-      // four tiers (stored low/medium keep their values), but once ollama is
-      // probed only the off/high tiers render, so those values would land on
-      // no button; the display maps to the nearest tier while saving still
-      // uses the original form value, so a stored tier survives switching back
-      // to a four-tier endpoint.
-      const reasoningEffortDisplay = reasoningEffortDisplayForTiers(reasoningEffort, reasoningEffortTiers);
       // eslint-disable-next-line sonarjs/cognitive-complexity -- settings page aggregates many form branches; splitting needs a dedicated design; tracked via this suppression for now
       function normalizeConnectionTestResult(value, isCodingPlanProvider) {
         if (value && typeof value === 'object' && !Array.isArray(value)) {
@@ -442,28 +436,9 @@ const formatMemoryTime = (item, copy) => {
             detail: value.detail ? String(value.detail) : '',
           };
         }
-        const raw = String(value || '');
-        const httpMatch = raw.match(/HTTP\s+(\d{3})/i);
-        if (httpMatch) {
-          const status = Number(httpMatch[1]);
-          const legacy = {
-            ok: status >= 200 && status < 300,
-            code: status === 401 ? 'auth_invalid' : status === 402 ? 'billing' : status === 403 ? 'auth_forbidden' : status === 429 ? 'rate_limited' : 'http_error',
-            message: status === 401 ? settingsCopy.connectionMessages.auth_invalid
-              : status === 402 ? settingsCopy.connectionMessages.billing
-                : status === 403 ? settingsCopy.connectionMessages.auth_forbidden
-                  : status === 429 ? settingsCopy.connectionMessages.rate_limited
-                    : (status >= 200 && status < 300 ? settingsCopy.connectionMessages.ok : settingsCopy.connectionMessages.http_error),
-            detail: `HTTP ${status}`,
-          };
-          if (isCodingPlanProvider && (status === 404 || status === 405)) {
-            legacy.code = status === 404 ? 'endpoint_not_found' : 'method_not_allowed';
-            legacy.message = settingsCopy.codingPlanTestUnavailable;
-          }
-          return legacy;
-        }
-        if (raw === 'ok') return { ok: true, code: 'ok', message: settingsCopy.connectionMessages.ok, detail: '' };
-        return { ok: false, code: 'unknown', message: settingsCopy.connectionMessages.unknown, detail: '' };
+        // test_model_connection always resolves a serialized object; this
+        // fallback only covers the reject path (a thrown error string).
+        return { ok: false, code: 'unknown', message: settingsCopy.connectionMessages.unknown, detail: String(value || '') };
       }
       function applyCatalogItem(group, item) {
         const p = group.preset;
@@ -1530,14 +1505,8 @@ const formatMemoryTime = (item, copy) => {
         {active && <span className="block w-2 h-2 rounded-full bg-[#007AFF] mx-auto mt-[3px]" />}
       </span>
     );
-    /** @param {{ children: import('react').ReactNode, tone?: string }} props - Inline status chip. */
-    const Tag = ({ children, tone = 'green' }) => (
-      <span className={`shrink-0 text-[12px] px-2 py-0.5 rounded-md ${
-        tone === 'gray'
-          ? ('bg-[#E5E5EA] text-[#636366] dark:bg-white/[0.08] dark:text-[#C7C7CC]')
-          : 'bg-[#34C759]/15 text-[#248A3D]'
-      }`}>{children}</span>
-    );
+    /** @param {{ children: import('react').ReactNode, tone?: string }} props - Inline status chip. Shared implementation: StatusChip.jsx. */
+    const Tag = ({ children, tone = 'green' }) => <StatusChip variant="tag" tone={tone}>{children}</StatusChip>;
     /**
      * @param {{
      *   provider: string, isNew: boolean, onClose: () => void, searchOptions: { key: string, label: string, desc: string }[],
@@ -2065,7 +2034,7 @@ const formatMemoryTime = (item, copy) => {
       const modelEnvLocked = (bs && bs.effectiveModelConfig && bs.effectiveModelConfig.env_overrides) || [];
       const [feedbackOpen, setFeedbackOpen] = useState(false);
       const [feedbackDraft, setFeedbackDraft] = useState({ type: 'issue', title: '', description: '', attachments: [] });
-      const [feedbackStatus, setFeedbackStatus] = useState({ state: 'idle', message: '', receipt: null });
+      const [feedbackStatus, setFeedbackStatus] = useState({ state: 'idle', message: '' });
       const [feedbackNotice, setFeedbackNotice] = useState('');
       const [archivedDeleteConfirm, setArchivedDeleteConfirm] = useState(null);
       const [llmApiModelBusy, setLlmApiModelBusy] = useState(false);
@@ -2098,7 +2067,7 @@ const formatMemoryTime = (item, copy) => {
       ];
       const feedbackAllowedExt = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'mp4', 'mov', 'webm']);
       const feedbackVideoExt = new Set(['mp4', 'mov', 'webm']);
-      const feedbackBaseName = p => String(p || '').replace(/\\/g, '/').split('/').pop() || String(p || '');
+      const feedbackBaseName = p => pathBasename(p, { fallback: String(p || '') });
       const feedbackExt = p => {
         const name = feedbackBaseName(p);
         const idx = name.lastIndexOf('.');
@@ -2215,7 +2184,7 @@ const formatMemoryTime = (item, copy) => {
       }
       const resetFeedback = () => {
         setFeedbackDraft({ type: 'issue', title: '', description: '', attachments: [] });
-        setFeedbackStatus({ state: 'idle', message: '', receipt: null });
+        setFeedbackStatus({ state: 'idle', message: '' });
       };
       const closeFeedback = () => {
         const dirty = feedbackDraft.title.trim() || feedbackDraft.description.trim() || feedbackDraft.attachments.length > 0;
@@ -2232,7 +2201,7 @@ const formatMemoryTime = (item, copy) => {
       };
       const pickFeedbackAttachments = async () => {
         if (!bridge.available || !bridge.files.pickFeedbackFiles) {
-          setFeedbackStatus({ state: 'failed_validation', message: t.feedbackPickUnavailable, receipt: null });
+          setFeedbackStatus({ state: 'failed_validation', message: t.feedbackPickUnavailable });
           return;
         }
         const paths = await bridge.files.pickFeedbackFiles();
@@ -2241,12 +2210,12 @@ const formatMemoryTime = (item, copy) => {
           const next = prev.attachments.slice();
           for (const path of paths) {
             if (next.length >= 5) {
-              setFeedbackStatus({ state: 'failed_validation', message: t.feedbackTooManyFiles, receipt: null });
+              setFeedbackStatus({ state: 'failed_validation', message: t.feedbackTooManyFiles });
               break;
             }
             const ext = feedbackExt(path);
             if (!feedbackAllowedExt.has(ext)) {
-              setFeedbackStatus({ state: 'failed_validation', message: t.feedbackUnsupportedFile, receipt: null });
+              setFeedbackStatus({ state: 'failed_validation', message: t.feedbackUnsupportedFile });
               continue;
             }
             const name = feedbackBaseName(path);
@@ -2263,10 +2232,10 @@ const formatMemoryTime = (item, copy) => {
       };
       const submitFeedbackDraft = async () => {
         if (!feedbackDraft.description.trim()) {
-          setFeedbackStatus({ state: 'failed_validation', message: t.feedbackBodyRequired, receipt: null });
+          setFeedbackStatus({ state: 'failed_validation', message: t.feedbackBodyRequired });
           return;
         }
-        setFeedbackStatus({ state: 'submitting', message: '', receipt: null });
+        setFeedbackStatus({ state: 'submitting', message: '' });
         try {
           const receipt = await bridge.feedback.submitFeedback({
             type: feedbackDraft.type,
@@ -2289,10 +2258,9 @@ const formatMemoryTime = (item, copy) => {
           setFeedbackStatus({
             state: 'failed_retryable',
             message: (receipt && receipt.message) || '',
-            receipt,
           });
         } catch (e) {
-          setFeedbackStatus({ state: 'failed_validation', message: String(e), receipt: null });
+          setFeedbackStatus({ state: 'failed_validation', message: String(e) });
         }
       };
       const confirmArchivedDelete = () => {
@@ -2343,7 +2311,8 @@ const formatMemoryTime = (item, copy) => {
         { key: 'baidu', label: t.uiSettingsView.searchProviderBaidu, desc: settingsCopy.searchDescriptions.baidu },
         { key: 'tavily', label: 'Tavily', desc: settingsCopy.searchDescriptions.tavily },
       ];
-      const enabledSearchSet = new Set(['bing', ...(enabledSearchProviders || [])]);
+      // main.jsx's enabledSearchProviders state always seeds 'bing', so no union needed here.
+      const enabledSearchSet = new Set(enabledSearchProviders || []);
       const enabledSearchList = searchOptions.filter(item => enabledSearchSet.has(item.key));
       const searchCredentialFor = provider => {
         const credentials = (bs && bs.settings && bs.settings.search && bs.settings.search.credentials) || {};
@@ -2453,6 +2422,16 @@ const formatMemoryTime = (item, copy) => {
       const [memoryDeleteConfirm, setMemoryDeleteConfirm] = useState(/** @type {MemoryItem | null} */ (null));
       const [memoryDeleteError, setMemoryDeleteError] = useState('');
       const [behaviorTelemetryConfirm, setBehaviorTelemetryConfirm] = useState(/** @type {boolean | null} */ (null));
+      // The three memory error banners (delete / profile-save / load-or-warning) share the
+      // identical banner chrome and priority order; only the copy differs, so collapse them
+      // into one computed message and render a single banner.
+      const memoryBannerMessage = memoryDeleteError
+        ? settingsCopy.memoryDeleteFailed
+        : profileSaveError
+          ? settingsCopy.memorySaveFailed
+          : memoryError
+            ? memoryErrorMessage
+            : '';
       const openMemoryItemViewer = item => {
         setMemoryEditor({
           mode: 'memory',
@@ -2462,9 +2441,7 @@ const formatMemoryTime = (item, copy) => {
           subtitle: '',
           label: settingsCopy.content,
           value: item.text || item.content || '',
-          originalValue: item.text || item.content || '',
           multiline: true,
-          editing: false,
         });
       };
       const saveMemoryEditor = async () => {
@@ -2865,17 +2842,9 @@ const formatMemoryTime = (item, copy) => {
           </IOSSection>
           {memoryEnabled && (
             <>
-              {memoryDeleteError ? (
-                <div data-testid="memory-settings-error" role="alert" aria-live="polite" className="mb-4 rounded-[14px] bg-[#FF3B30]/10 px-4 py-3 text-[13px] leading-5 text-[#FF3B30]">
-                  {settingsCopy.memoryDeleteFailed}
-                </div>
-              ) : profileSaveError ? (
-                <div data-testid="memory-settings-error" role="alert" aria-live="polite" className="mb-4 rounded-[14px] bg-[#FF3B30]/10 px-4 py-3 text-[13px] leading-5 text-[#FF3B30]">
-                  {settingsCopy.memorySaveFailed}
-                </div>
-              ) : memoryError && (
+              {memoryBannerMessage && (
                 <div data-testid="memory-settings-error" role="alert" aria-live="polite" className={`mb-4 rounded-[14px] bg-[#FF3B30]/10 px-4 py-3 text-[13px] leading-5 text-[#FF3B30]`}>
-                  {memoryErrorMessage}
+                  {memoryBannerMessage}
                 </div>
               )}
               <IOSSection>

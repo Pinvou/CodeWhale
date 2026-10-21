@@ -425,8 +425,8 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
       const [sub, setSub] = useState(outputsOnly ? 'output' : 'kb'); // 'output' | 'files' | 'kb' | 'remote'；统一知识库入口默认落本地知识库
 
       // ---------- 共用 ----------
-      const openFile = (p) => canOpenSystemFiles ? inv('open_in_system', { path: p }).catch(() => {}) : Promise.resolve(false);
-      const openFolder = (p) => canOpenSystemFiles ? inv('open_containing_folder', { path: p }).catch(() => {}) : Promise.resolve(false);
+      const openFile = (p) => canOpenSystemFiles ? invokeTauri('open_in_system', { path: p }).catch(() => {}) : Promise.resolve(false);
+      const openFolder = (p) => canOpenSystemFiles ? invokeTauri('open_containing_folder', { path: p }).catch(() => {}) : Promise.resolve(false);
       // Byte / date formatting consolidated into shared (formatBytes GB tier unified from 2 decimals to 1; fmtDate takes seconds and converts to ms).
       const fmtSize = (b) => formatBytes(b, { missing: '' });
       const fmtDate = (s) => formatLocalDate(s ? s * 1000 : null);
@@ -542,7 +542,7 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
       const refreshOutputs = useCallback(async () => {
         const list = bridge && bridge.artifacts.listDeliverableIndex
           ? await bridge.artifacts.listDeliverableIndex().catch(() => [])
-          : await inv('list_deliverable_index').catch(() => []);
+          : await invokeTauri('list_deliverable_index').catch(() => []);
         // Unmount cleanup already released the big table: an in-flight
         // request started before unmount must not write the index back into
         // the module-level cache once it resolves, or it would undo the
@@ -673,9 +673,9 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
       const refreshL0 = useCallback(async () => {
         // 三个查询并行(原顺序 await 累加延迟);拉完更新缓存 + loaded,供 remount 秒显。
         const [s, st, ty] = await Promise.all([
-          inv('kb_scan_status').catch(() => null),
-          inv('kb_stats').catch(() => null),
-          inv('kb_type_counts').catch(() => []),
+          invokeTauri('kb_scan_status').catch(() => null),
+          invokeTauri('kb_stats').catch(() => null),
+          invokeTauri('kb_type_counts').catch(() => []),
         ]);
         if (s) setScan(s);
         if (st) setStats(st);
@@ -817,7 +817,7 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
       const loadDocs = async (cid) => { try { setDocs(await inv('kb_documents', { collectionId: cid, limit: 0 }) || []); } catch (e) {} };
       const loadColls = useCallback(async () => {
         try {
-          const c = await inv('kb_collection_list') || [];
+          const c = await invokeTauri('kb_collection_list') || [];
           setColls(c);
           setActiveColl((current) => (current ? c.find((item) => item.id === current.id) || null : null));
           kbCache.colls = c;
@@ -890,7 +890,7 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
         if (!indexing) return;
         const id = setInterval(async () => {
           try {
-            const s = await inv('kb_index_status'); replaceIndexState(s);
+            const s = await invokeTauri('kb_index_status'); replaceIndexState(s);
             if (!s.running) { loadColls(); if (activeColl) loadDocs(activeColl.id); }
           } catch (e) {}
         }, 1000);
@@ -902,7 +902,7 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
         invalidateFailedPagination();
         setImportError('');
         try {
-          replaceIndexState(await inv('kb_index_resume', { jobId: idx.jobId }));
+          replaceIndexState(await invokeTauri('kb_index_resume', { jobId: idx.jobId }));
         } catch (e) {
           setImportError(`${t.kbResumeImportFailed}: ${String((e && e.message) || e)}`);
           try { replaceIndexState(await inv('kb_index_status')); } catch (_) {}
@@ -913,8 +913,8 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
         invalidateFailedPagination();
         setImportError('');
         try {
-          await inv('kb_index_cancel');
-          replaceIndexState(await inv('kb_index_status'));
+          await invokeTauri('kb_index_cancel');
+          replaceIndexState(await invokeTauri('kb_index_status'));
           loadColls();
         } catch (e) {
           setImportError(`${t.kbCancelImportFailed}: ${String((e && e.message) || e)}`);
@@ -926,7 +926,7 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
         invalidateFailedPagination();
         setImportError('');
         try {
-          replaceIndexState(await inv('kb_index_retry_file', { jobId: idx.jobId, itemId }));
+          replaceIndexState(await invokeTauri('kb_index_retry_file', { jobId: idx.jobId, itemId }));
         } catch (e) {
           setImportError(`${t.kbRetryImportFailed}: ${String((e && e.message) || e)}`);
           try { replaceIndexState(await inv('kb_index_status')); } catch (_) {}
@@ -948,7 +948,7 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
           return;
         }
         try {
-          const page = await inv('kb_index_failed_files', { jobId: request.jobId, offset: request.offset, limit: 50 });
+          const page = await invokeTauri('kb_index_failed_files', { jobId: request.jobId, offset: request.offset, limit: 50 });
           const currentPage = failedPaginationRef.current;
           if (currentPage.jobId !== request.jobId || currentPage.generation !== request.generation) return;
           failedPaginationRef.current = {
@@ -982,10 +982,10 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
         const name = newColl.name.trim(), category = (newColl.category || '').trim() || null;
         try {
           if (newColl.id) {
-            await inv('kb_collection_update', { id: newColl.id, name, category, description: newColl.description ?? null });
+            await invokeTauri('kb_collection_update', { id: newColl.id, name, category, description: newColl.description ?? null });
             if (activeColl && activeColl.id === newColl.id) setActiveColl({ ...activeColl, name, category });
           } else {
-            await inv('kb_collection_create', { name, category, description: null });
+            await invokeTauri('kb_collection_create', { name, category, description: null });
           }
         } catch (e) {}
         setNewColl(null); loadColls();
@@ -1007,7 +1007,7 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
         // Optimistic collection-count update (docCount/chunkCount/totalBytes all lowered on delete, clamped >= 0) consolidated into shared.
         setColls((current) => applyDocumentDelta(current, document.collectionId, document, -1));
         try {
-          await inv('kb_remove_document', { docId: document.id });
+          await invokeTauri('kb_remove_document', { docId: document.id });
         } catch (error) {
           setRemoveDocError(`${t.kbRemoveFailed}: ${String((error && error.message) || error)}`);
           const currentCollectionId = activeCollRef.current?.id;
@@ -1327,7 +1327,7 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
                 )}
               </div>
             )}
-            {outputPreview && <FilePreviewModal path={outputPreview.path} sessionId={outputPreview.sessionId} theme={theme} t={t} onClose={() => setOutputPreview(null)} />}
+            {outputPreview && <FilePreviewModal path={outputPreview.path} sessionId={outputPreview.sessionId} t={t} onClose={() => setOutputPreview(null)} />}
 
             {sub === 'remote' && <RemoteKnowledgeView t={t} embedded localEmbedSupported={localEmbedSupported} />}
 

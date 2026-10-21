@@ -1557,7 +1557,10 @@ impl TurnLifecycle {
 /// same reasoning as #483's shell-reclaim finalize bound. The caller presets
 /// the terminal to `Failed` on `None`: an unverified persistence must not be
 /// reported as clean, even though the detached save can still land later.
-async fn bounded_join_detached_on_timeout<T>(
+/// This is the single bounded-join core of the assistant lane: the pool's
+/// [`crate::features::assistant::engine_pool::bounded_join_while_holding_turn_gate`]
+/// is a thin adapter over it.
+pub(super) async fn bounded_join_detached_on_timeout<T>(
     what: &str,
     budget: std::time::Duration,
     task: tokio::task::JoinHandle<T>,
@@ -2295,14 +2298,8 @@ impl AppEngine {
     /// 编辑/重发最后一轮 user 消息（点 ✏️ 编辑或 🔄 重发按钮）。
     /// 上游 [`Op::EditLastTurn`] 行为：砍掉 session 末尾最近的 user 消息及之后
     /// 所有消息，然后用 `new_message` 当成新 user 消息重新发送。
-    pub async fn edit_last_turn(&self, new_message: String) -> Result<()> {
-        self.send_turn_op(Op::EditLastTurn {
-            new_message,
-            submission_id: Some(self.bridge.next_submission_id()),
-        })
-        .await
-    }
-
+    /// 命令路径统一走 [`Self::edit_last_turn_reserved`]（turn 预约内提交，
+    /// 避免与重建/回收竞态）。
     pub(crate) async fn edit_last_turn_reserved(
         &self,
         new_message: String,

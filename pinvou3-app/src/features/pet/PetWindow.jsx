@@ -9,6 +9,7 @@ import React, {
 import { createPetActivationState, loadActivePet } from './pet-active.js';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
 import { useAutoResizeTextarea } from '../../hooks/useAutoResizeTextarea.js';
+import { useFollowMainWindowLanguage } from '../../hooks/useFollowMainWindowLanguage.js';
 import { loadImage } from './load-image.js';
 import {
   buildAnimationSequence,
@@ -72,7 +73,7 @@ import {
   resolvePet,
 } from './pet-registry.js';
 import { useReducedMotion } from '../../hooks/useReducedMotion.js';
-import { dict, ensureLanguage, initialSystemLanguage, TAG_TO_LANG } from '../../shared/i18n.js';
+import { dict } from '../../shared/i18n.js';
 import './pet.css';
 
 const TICK_MS = 600;
@@ -88,8 +89,6 @@ const PET_BOTTOM_PADDING = 8;
 const PET_ACTIVITY_WINDOW_HEIGHT = 260;
 // workArea 已给出无装饰窗口的真实 client 边界，只留 1px 消除整数取整抖动。
 const PET_VERTICAL_FLIP_MARGIN = 1;
-const PET_FRAME_WIDTH = PET_FRAME_W;
-const PET_FRAME_HEIGHT = PET_FRAME_H;
 
 const PET_EVENTS = [
   'pet:turn_start', 'pet:turn_end',
@@ -116,10 +115,10 @@ function PetSprite({ pet, animation }) {
     <div
       className="pet-sprite"
       style={{
-        width: PET_FRAME_WIDTH,
-        height: PET_FRAME_HEIGHT,
+        width: PET_FRAME_W,
+        height: PET_FRAME_H,
         backgroundImage: `url(${pet.sheetUrl})`,
-        backgroundPosition: `-${frame.column * PET_FRAME_WIDTH}px -${frame.row * PET_FRAME_HEIGHT}px`,
+        backgroundPosition: `-${frame.column * PET_FRAME_W}px -${frame.row * PET_FRAME_H}px`,
       }}
     />
   );
@@ -168,7 +167,7 @@ export default function PetWindow({
     ? Math.min(MAX_SCALE, Math.max(DEFAULT_SCALE, configuredScale))
     : DEFAULT_SCALE;
   const stateRef = useRef(createPetState());
-  const [language, setLanguage] = useState(initialSystemLanguage);
+  const language = useFollowMainWindowLanguage({ enabled: isTauriAvailable() });
   const t = dict[language] || dict.zh;
   const petCopy = t.uiPet;
   // pet.html 的 <title>/<html lang> 是静态中文,按当前语言同步一次。
@@ -244,7 +243,7 @@ export default function PetWindow({
       ...geometry,
       fallback: edgeAlignRef.current,
       currentAlignment: initial ? undefined : edgeAlignRef.current,
-      characterWidth: PET_FRAME_WIDTH * scaleRef.current * dpr,
+      characterWidth: PET_FRAME_W * scaleRef.current * dpr,
       horizontalPadding: PET_EDGE_PADDING * dpr,
     });
     if (next !== edgeAlignRef.current) {
@@ -289,29 +288,6 @@ export default function PetWindow({
     ? (t.uiPetSettings.pets[activePet.id]?.name || activePet.name)
     : '';
 
-  useEffect(() => {
-    if (!isTauriAvailable()) return undefined;
-    let disposed = false;
-    let unlisten = null;
-    invokeTauri('get_settings').then((settings) => {
-      const lang = TAG_TO_LANG[settings?.language] || initialSystemLanguage();
-      // en/ja 惰性词典:本窗口入口首帧只引导系统语言,落盘语言可能未装载
-      if (!disposed) ensureLanguage(lang).then((ok) => { if (ok) setLanguage(lang); }).catch(() => {});
-    }).catch(() => {});
-    tauriEvents.listen('ui:language_changed', (event) => {
-      const next = event.payload?.language;
-      // 主窗切换前已 ensure;本窗仍需各自装载(窗口间不共享 dict 装载状态)
-      if (!disposed) ensureLanguage(next).then((ok) => { if (ok) setLanguage(next); }).catch(() => {});
-    }).then((fn) => {
-      if (disposed) fn();
-      else unlisten = fn;
-    }).catch(() => {});
-    return () => {
-      disposed = true;
-      if (unlisten) unlisten();
-    };
-  }, []);
-
   const refresh = () => {
     const now = Date.now();
     const next = deriveActivities(stateRef.current, now, petCopy);
@@ -320,7 +296,6 @@ export default function PetWindow({
     // even when idle (each card re-runs its markdown render). The
     // value-based stable comparison skips unchanged commits.
     setActivities((prev) => (sameActivities(prev, next) ? prev : next));
-    // deriveAnimation only reads the first card's status: it reuses the derivation above, avoiding a second sort per tick.
     const nextAnimation = next.length ? next[0].status : null;
     setBaseAnimation((prev) => (prev === nextAnimation ? prev : (nextAnimation || 'idle')));
   };
@@ -436,11 +411,8 @@ export default function PetWindow({
         }).catch(() => {});
       }
     }));
-    subscriptions.push(ev.listen('scheduled_task:run_updated', (event) => {
-      const payload = event.payload || {};
-      const run = payload.run || payload;
-      if (String(run.status || '').toLowerCase() === 'completed') scheduleNoticeRefresh();
-    }));
+    // scheduled_task:run_updated 不订阅：唯一 emit 方（file_watcher）payload 恒为
+    // 空对象，任何读取 run.status 的分支都是死路；完成通知刷新由上面 chat:done 路径承担。
     subscriptions.push(ev.listen('pet:scheduled_notice_opened', (event) => {
       const payload = event.payload || {};
       const runId = String(payload.run_id || payload.runId || '');
@@ -564,14 +536,15 @@ export default function PetWindow({
 
   useEffect(() => {
     if (!isTauriAvailable()) return undefined;
-    const scaleRequest = Number.isFinite(configuredScale)
-      ? invokeTauri('set_pet_scale', {
-        scale: startupScale,
-        activityVisible: activityVisibleRef.current,
-        activityHeight: activityHeightRef.current,
-        verticalAlignment: edgeVAlignRef.current,
-      })
-      : invokeTauri('get_pet_scale');
+    // pet-main.jsx 恒定传入 configuredScale(固定 0.5),窗口总是以启动缩放
+    // 初始化原生侧;get_pet_scale 读取分支不可达,已删(Rust 命令保留,由
+    // 协议测试钉住)。
+    const scaleRequest = invokeTauri('set_pet_scale', {
+      scale: startupScale,
+      activityVisible: activityVisibleRef.current,
+      activityHeight: activityHeightRef.current,
+      verticalAlignment: edgeVAlignRef.current,
+    });
     scaleRequest.then((value) => {
       if (value > 0) setScale(value);
     }).catch(() => {});
@@ -746,8 +719,8 @@ export default function PetWindow({
       verticalAlignment: currentVAlign,
       viewportHeight: Number(drag.windowSize && drag.windowSize.height)
         || window.innerHeight * monitorScale,
-      characterWidth: PET_FRAME_WIDTH * scaleRef.current * monitorScale,
-      characterHeight: PET_FRAME_HEIGHT * scaleRef.current * monitorScale,
+      characterWidth: PET_FRAME_W * scaleRef.current * monitorScale,
+      characterHeight: PET_FRAME_H * scaleRef.current * monitorScale,
       horizontalPadding: PET_EDGE_PADDING * monitorScale,
       verticalPadding: PET_BOTTOM_PADDING * monitorScale,
       // 竖向 bounds 用起手实测的人物矩形(物理像素),规避 X11 outerSize 回读不准。
@@ -772,8 +745,8 @@ export default function PetWindow({
         drag.localRect = measurePetLocalRect(drag);
         metrics.viewportHeight = Number(drag.windowSize && drag.windowSize.height)
           || window.innerHeight * nextScale;
-        metrics.characterWidth = PET_FRAME_WIDTH * scaleRef.current * nextScale;
-        metrics.characterHeight = PET_FRAME_HEIGHT * scaleRef.current * nextScale;
+        metrics.characterWidth = PET_FRAME_W * scaleRef.current * nextScale;
+        metrics.characterHeight = PET_FRAME_H * scaleRef.current * nextScale;
         metrics.horizontalPadding = PET_EDGE_PADDING * nextScale;
         metrics.verticalPadding = PET_BOTTOM_PADDING * nextScale;
         metrics.localTop = drag.localRect ? drag.localRect.t : undefined;
@@ -1253,7 +1226,7 @@ export default function PetWindow({
     <div
       ref={petRootRef}
       className={`pet-root pet-align-${edgeAlign} pet-valign-${edgeVAlign}`}
-      style={{ '--pet-character-width': `${PET_FRAME_WIDTH * scale}px` }}
+      style={{ '--pet-character-width': `${PET_FRAME_W * scale}px` }}
       onContextMenu={suppressContextMenu}
     >
       {activityVisible && (
@@ -1446,7 +1419,7 @@ export default function PetWindow({
       <div
         ref={characterSlotRef}
         className="pet-character-slot"
-        style={{ width: PET_FRAME_WIDTH * scale, height: PET_FRAME_HEIGHT * scale }}
+        style={{ width: PET_FRAME_W * scale, height: PET_FRAME_H * scale }}
       >
         {activePet && (
           <div className="pet-stage" style={{ transform: `translateX(-50%) scale(${scale})` }}>

@@ -108,8 +108,8 @@ const codexWorkspacePanel = readSource(
   path.join(root, 'src', 'features', 'codex', 'CodexWorkspacePanel.jsx'),
   'utf8',
 );
-const codeViewerModal = readSource(
-  path.join(root, 'src', 'features', 'codex', 'CodeViewerModal.jsx'),
+const codeViewerContent = readSource(
+  path.join(root, 'src', 'features', 'codex', 'CodeViewerContent.jsx'),
   'utf8',
 );
 const acpPlatformClient = readSource(path.join(root, 'src', 'features', 'codex', 'acpClient.js'), 'utf8');
@@ -131,7 +131,6 @@ function rustCommandBlock(source, command) {
 for (const command of [
   'chat',
   'ingest_file',
-  'save_session_messages',
   'transcribe_voice_audio',
   'save_model',
   'delete_model',
@@ -272,8 +271,9 @@ for (const command of [
 // cleanup: connector toggles go through set_disabled_connectors.
 // This list must stay in sync with the connector registration surface in lib.rs.
 // The retired *_status commands left the frontend (ToolStoreView now uses
-// *_skills_state / bundle_readiness); they were dropped from the allowlist and
-// are reverse-pinned here so they cannot quietly return.
+// *_skills_state / bundle_readiness); they were never web-allowed (not in the
+// allowlist on main either) and are reverse-pinned here so they cannot
+// quietly return.
 for (const command of [
   'feishu_status',
   'wecom_status',
@@ -408,8 +408,8 @@ assert.match(codexWorkspacePanel, /can\('externalSystemOpen'\)/,
 assert.match(codexWorkspacePanel, /onOpen=\{systemOpenAvailable/);
 assert.match(codexWorkspacePanel, /onReveal=\{systemOpenAvailable/);
 assert.match(codexWorkspacePanel, /onOpenInNewWindow=\{systemOpenAvailable/);
-assert.match(codeViewerModal, /\{!diff && onReveal && \(/);
-assert.match(codeViewerModal, /\{!diff && onOpen && \(/,
+assert.match(codeViewerContent, /\{!hideDesktopActions && onReveal && \(/);
+assert.match(codeViewerContent, /\{!hideDesktopActions && onOpen && \(/,
   'the shared code preview must omit desktop system actions when callbacks are unavailable');
 
 // 浏览器本机上传:双入口按能力协商门控,分块有界,取消/失败路径完备。
@@ -437,10 +437,11 @@ assert.match(webBridge, /web_access_discard_attachment/,
   'removed or late-cancelled attachments must release their opaque desktop handle');
 assert.match(remoteControlCommands, /stage_uploaded_attachments\(attachments, &session_id, &?store\)/,
   'uploaded attachments must be staged into the Session workspace before the engine sees their paths');
-// Agent 安装命令行/输出可能含内部镜像源或主机路径，Web status 投影必须清除。
+// Agent 安装命令行/输出可能含内部镜像源或主机路径，Web status 投影必须清除；
+// 安装终局的 error 字段同为错误链，一并仅桌面端展示。
 assert.match(remoteControlCommands,
-  /project_acp_status_for_web[\s\S]*?status\.install_command = None[\s\S]*?status\.install_latest_line = None/,
-  'the Web agent-status projection must strip install command and output lines');
+  /project_acp_status_for_web[\s\S]*?status\.install_command = None[\s\S]*?status\.install_latest_line = None[\s\S]*?status\.install_finished = None/,
+  'the Web agent-status projection must strip install command/output lines and the install outcome');
 assert.match(remoteControlCommands, /redact_workspace_path_for_web|list_codex_acp_sessions_for_web/,
   'the Web session list must redact host workspace paths to a directory name');
 assert.match(remoteControlCommands,
@@ -462,7 +463,11 @@ assert.match(webBridge,
   /IS_WEB \? "web_access_list_sessions" : "list_sessions"[\s\S]*?IS_WEB \? "web_access_list_archived_sessions" : "list_archived_sessions"/,
   'Web history refreshes must use path-redacted session list commands');
 assert.match(remoteControlCommands,
-  /fn web_workspace_result[\s\S]*?web_workspace_\{\}_failed", operation\.as_str\(\)[\s\S]*?web_access_list_codex_workspace[\s\S]*?web_workspace_result\(WebWorkspaceOperation::Listing, result\)[\s\S]*?web_access_search_codex_workspace[\s\S]*?web_workspace_result\(WebWorkspaceOperation::Search, result\)[\s\S]*?web_access_preview_codex_workspace_file[\s\S]*?web_workspace_result\(WebWorkspaceOperation::Preview, result\)[\s\S]*?web_access_get_codex_workspace_changes[\s\S]*?web_workspace_result\(WebWorkspaceOperation::Changes, result\)[\s\S]*?web_access_get_codex_workspace_diff[\s\S]*?web_workspace_result\(WebWorkspaceOperation::Diff, result\)/,
+  // 合并后形态适配：通用 web_operation_result(prefix, operation) 已收敛为三个
+  // 具名 helper（web_session_result / web_workspace_result / web_acp_result），
+  // 各自内联 format!("web_{lane}_{operation}_failed", operation.as_str())。
+  // 稳定错误码、不回传宿主路径的安全意图不变。
+  /fn web_workspace_result[\s\S]*?format!\("web_workspace_\{\}_failed", operation\.as_str\(\)\)[\s\S]*?web_access_list_codex_workspace[\s\S]*?web_workspace_result\(WebWorkspaceOperation::Listing, result\)[\s\S]*?web_access_search_codex_workspace[\s\S]*?web_workspace_result\(WebWorkspaceOperation::Search, result\)[\s\S]*?web_access_preview_codex_workspace_file[\s\S]*?web_workspace_result\(WebWorkspaceOperation::Preview, result\)[\s\S]*?web_access_get_codex_workspace_changes[\s\S]*?web_workspace_result\(WebWorkspaceOperation::Changes, result\)[\s\S]*?web_access_get_codex_workspace_diff[\s\S]*?web_workspace_result\(WebWorkspaceOperation::Diff, result\)/,
   'Web workspace RPC failures must not return host paths embedded in native errors');
 assert.match(remoteControlCommands,
   /web_access_get_codex_acp_timeline[\s\S]*?web_acp_result\(WebAcpOperation::Timeline/,
@@ -559,7 +564,7 @@ assert.equal((i18n.match(/deviceUploadIntegrityMismatch:/g) || []).length, 3,
 // an envelope-seq hole; the listener must detect the jump and debounce-refetch
 // the authoritative timeline to self-heal (instead of waiting for a
 // reconnect/session reopen), merging the snapshot and rebasing the tracker.
-assert.match(codexView, /acpEventSeqTrackerRef\.current\.note\(incoming\.sessionId, incoming\.seq\) === 'gap'[\s\S]*?scheduleAcpGapResync\(incoming\.sessionId\)/,
+assert.match(codexView, /acpEventSeqTrackerRef\.current\.note\(incoming\.sessionId, incoming\.seq\) === 'gap'[\s\S]*?acpGapResyncRef\.current\.schedule\(incoming\.sessionId\)/,
   'the live acp:event listener must detect envelope-seq gaps and schedule a resync');
 assert.match(codexView, /createAcpGapResyncScheduler\(sessionId => \{[\s\S]*?resyncAcpSessionAfterGap\(sessionId\);[\s\S]*?\}, \{/,
   'the gap resync must go through the bounded-retry scheduler wrapping resyncAcpSessionAfterGap');

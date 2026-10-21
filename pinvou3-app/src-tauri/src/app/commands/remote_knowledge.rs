@@ -374,8 +374,10 @@ fn publish_remote_kb_mount_change(
     session_id: &str,
     remote_collections: &[MountedRemoteCollection],
 ) {
-    // Preserve the existing local-mount event contract while extending it with the authoritative
-    // remote list. Older clients re-read the local snapshot; newer clients can update remote chips
+    // Shared builder with the local mount commands (see knowledge.rs): same
+    // enabled-collection pick, emit, forward, and warn tail. The
+    // `remote_collections` field is the only remote-specific drift — older
+    // clients re-read the local snapshot; newer ones update remote chips
     // immediately without another IPC round trip.
     let snapshot = sessions.mounted_collections_snapshot(session_id);
     let collection_id = snapshot
@@ -425,24 +427,15 @@ pub async fn remote_kb_documents(
     offset: Option<usize>,
 ) -> Result<Vec<Document>, String> {
     let include_deleted = include_deleted.unwrap_or(false);
-    match (limit, offset) {
-        (None, None) => {
-            state
-                .documents(&server_id, collection_id, include_deleted)
-                .await
-        }
-        (limit, offset) => {
-            state
-                .documents_page(
-                    &server_id,
-                    collection_id,
-                    include_deleted,
-                    limit,
-                    offset.unwrap_or(0),
-                )
-                .await
-        }
-    }
+    state
+        .documents_page(
+            &server_id,
+            collection_id,
+            include_deleted,
+            limit,
+            offset.unwrap_or(0),
+        )
+        .await
 }
 
 #[tauri::command]

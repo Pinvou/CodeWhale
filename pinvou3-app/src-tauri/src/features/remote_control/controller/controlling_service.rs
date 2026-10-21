@@ -1763,6 +1763,51 @@ fn controller_status_log_detail(status: &ControllingStatus) -> String {
     }
 }
 
+/// 连接入口的早期准备：取待决连接码、加载 Relay 信任根、生成握手密钥。
+/// 任何失败都与 `run_controlling_connection` 的失败路径走同一收敛
+/// （`fail_connection`：清空待决连接码并投影有界公共错误码），不让 manager
+/// 停在 Connecting；返回给命令层的错误码保持调用方原有语义。
+fn prepare_connect_materials(
+    manager: &ControllingDeviceManager,
+    operation: ControllerOperation,
+    trust_lookup: impl Fn(&str) -> Option<String>,
+    on_status: &mut impl FnMut(&ControllingStatus),
+) -> Result<(String, AuthenticatedRelayTrustConfig, HandshakeKeyPair), String> {
+    let code = match manager.pending_code(operation.clone()) {
+        Ok(code) => code,
+        Err(error) => {
+            let code = error.code;
+            let _ = fail_connection(manager, operation, GENERIC_CONNECT_ERROR, on_status);
+            return Err(code.to_owned());
+        }
+    };
+    // 部署期预置的信任根缺失或非法时失败关闭：没有受信 Relay 就不存在可验签
+    // 的 transcript，绝不能降级为「无认证握手」。
+    let trust = match load_relay_trust_config(trust_lookup) {
+        Ok(trust) => trust,
+        Err(_) => {
+            return Err(fail_connection(
+                manager,
+                operation,
+                GENERIC_CONNECT_ERROR,
+                on_status,
+            ));
+        }
+    };
+    let keys = match HandshakeKeyPair::generate() {
+        Ok(keys) => keys,
+        Err(_) => {
+            return Err(fail_connection(
+                manager,
+                operation,
+                GENERIC_CONNECT_ERROR,
+                on_status,
+            ));
+        }
+    };
+    Ok((code, trust, keys))
+}
+
 /// A 端连接入口：加载信任根、生成握手密钥、绑定受控 Relay 通道、推进握手，
 /// 并在成功后把通道保活交给后台任务。
 pub(crate) async fn connect_controlling_device(
@@ -1772,14 +1817,21 @@ pub(crate) async fn connect_controlling_device(
     operation: ControllerOperation,
     journal: Arc<dyn ControllingJournalSink>,
 ) -> Result<ControllingStatus, String> {
-    let code = manager
-        .pending_code(operation.clone())
-        .map_err(|error| error.code.to_owned())?;
-    // 部署期预置的信任根缺失或非法时失败关闭：没有受信 Relay 就不存在可验签
-    // 的 transcript，绝不能降级为「无认证握手」。
-    let trust = load_relay_trust_config(|name| std::env::var(name).ok())
-        .map_err(|_| GENERIC_CONNECT_ERROR.to_owned())?;
-    let keys = HandshakeKeyPair::generate().map_err(|_| GENERIC_CONNECT_ERROR.to_owned())?;
+    let mut emit = {
+        let operation = operation.clone();
+        move |status: &ControllingStatus| {
+            let _ = manager.with_lane_owner(&operation, || {
+                log_controller_event("status", &controller_status_log_detail(status));
+                let _ = app.emit(CONTROLLER_STATUS_EVENT, status);
+            });
+        }
+    };
+    let (code, trust, keys) = prepare_connect_materials(
+        manager,
+        operation.clone(),
+        |name| std::env::var(name).ok(),
+        &mut emit,
+    )?;
     let mut handshake = ControllingHandshake::new(
         format!("request-{}", Uuid::new_v4().simple()),
         operation.claim_request_id().to_owned(),
@@ -1792,6 +1844,7 @@ pub(crate) async fn connect_controlling_device(
     let business = app.state::<ControllingLaneState>();
     if let Err(error) = manager.replace_owned_transport(&operation, sender.clone(), &business) {
         sender.stop();
+        let _ = fail_connection(manager, operation, GENERIC_CONNECT_ERROR, &mut emit);
         return Err(error.code.to_owned());
     }
 
@@ -1800,12 +1853,6 @@ pub(crate) async fn connect_controlling_device(
     // 「码不对」与「两端其实在各自的 Relay 上」。
     let endpoint_detail = relay.controller_endpoint_log_detail();
     log_controller_event("connect_started", &endpoint_detail);
-    let mut emit = |status: &ControllingStatus| {
-        let _ = manager.with_lane_owner(&operation, || {
-            log_controller_event("status", &controller_status_log_detail(status));
-            let _ = app.emit(CONTROLLER_STATUS_EVENT, status);
-        });
-    };
     let status = match run_controlling_connection(
         manager,
         operation.clone(),
@@ -2170,6 +2217,27 @@ mod tests {
     /// 状态所有者的私有字段。
     fn projection(status: &ControllingStatus) -> Value {
         serde_json::to_value(status).unwrap()
+    }
+
+    #[test]
+    fn early_connect_material_failure_projects_error_and_clears_pending_code() {
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("234-4567").unwrap();
+        let mut projected = Vec::new();
+        // 只配一半的信任根必然失败关闭（lookup 注入，不触碰进程级环境变量）。
+        let result = prepare_connect_materials(
+            &manager,
+            operation.clone(),
+            |name| (name == "PINVOU_REMOTE_RELAY_SIGNING_KEY_ID").then(|| "relay-key-1".to_owned()),
+            &mut |status: &ControllingStatus| projected.push(projection(status)),
+        );
+        assert_eq!(result.err().unwrap(), GENERIC_CONNECT_ERROR);
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0]["status"], "error");
+        assert_eq!(projected[0]["errorCode"], GENERIC_CONNECT_ERROR);
+        // 待决连接码已清空：同一 operation 取不到码，用户可以直接重新连接。
+        assert!(manager.pending_code(operation).is_err());
+        assert!(manager.connect("234-4567").is_ok());
     }
 
     #[tokio::test]

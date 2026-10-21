@@ -20,7 +20,9 @@ impl SessionStore {
             .get(local_session_id)
             .ok_or_else(|| anyhow::anyhow!("remote_proxy_not_found"))?
             .clone();
-        if record.local_session_id != local_session_id || !local_session_id.starts_with("remote-") {
+        if record.local_session_id != local_session_id
+            || !crate::features::sessions::validators::is_remote_session_id(&local_session_id)
+        {
             bail!("remote_proxy_not_found");
         }
         if record

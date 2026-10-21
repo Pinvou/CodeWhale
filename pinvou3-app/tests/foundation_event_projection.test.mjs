@@ -10,7 +10,7 @@ const read = (...parts) => readFileSync(path.join(root, ...parts), 'utf8');
 
 // Execute the modular Tauri bridge and prove both v0.9.12 foundation events
 // reach a user-visible system item, rather than stopping at an unconsumed emit.
-const tauriSource = read('src', 'platform', 'tauri', 'bridge', 'chat-events.js');
+const tauriSource = read('src', 'shared', 'bridge-shared-helpers.js') + '\n' + read('src', 'platform', 'tauri', 'bridge', 'chat-events.js');
 const windowObject = { __PINVOU_TAURI_BRIDGE_FEATURES__: {} };
 vm.runInContext(tauriSource, vm.createContext({
   window: windowObject,
