@@ -540,6 +540,137 @@ mod tests {
         });
     }
 
+    /// 非 ollama 记录 + `delete_weights=true` 的**端到端删除接线**（十二轮评审
+    /// P2）：此前唯一的真删路径——守卫通过 → recheck 复核 → 删除时刻商店根复查
+    /// → `remove_dir_all`——整段没有任何测试执行过，把 recheck 比对或复查整段
+    /// 删掉、或改删原始路径，当时全部测试照绿。这里钉住"权重目录真的被删、
+    /// 注册记录随之消失"；纯函数臂（深度/保护根/blob 签名）由 external_models
+    /// 与上方符号链接逃逸测试直打。
+    #[test]
+    fn non_ollama_removal_deletes_guard_approved_weights_end_to_end() {
+        use crate::features::device::{
+            external_models::registry_dir, get_external_models, remove_external_model,
+        };
+        use crate::features::model_store::platform::linux::{config, db};
+        use crate::platform::paths::user_home_dir;
+        let _ctx = config::TempHome::new();
+        point_ollama_at_dead_port();
+        db::init_db().expect("init store db");
+        // 家目录下第 3 层（深度臂放行的最浅形状），且不在任何商店权重根之下。
+        let weights = user_home_dir()
+            .join("wiring-e2e")
+            .join("deep")
+            .join("models");
+        std::fs::create_dir_all(&weights).expect("create weights dir");
+        std::fs::write(weights.join("weight.bin"), b"weights").expect("write weight");
+        let dir = registry_dir();
+        std::fs::create_dir_all(&dir).expect("registry dir");
+        std::fs::write(
+            dir.join("m-wiring01.json"),
+            format!(
+                r#"{{"schema":1,"id":"m-wiring01","name":"wiring-e2e","kind":"other","weights_path":{}}}"#,
+                serde_json::to_string(&weights.to_string_lossy()).expect("json string")
+            ),
+        )
+        .expect("write registry record");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async move {
+            let outcome =
+                remove_external_model("m-wiring01".to_string(), true, "wiring-e2e".to_string())
+                    .await
+                    .expect("removal must succeed");
+            assert!(
+                outcome.removed_weights,
+                "guard-approved weights must be deleted"
+            );
+            assert!(outcome.removed_registry, "registry file should be removed");
+            assert!(
+                !weights.exists(),
+                "weight dir must be gone after delete_weights=true"
+            );
+            let view = get_external_models().await.expect("list external models");
+            assert!(
+                view.models.iter().all(|model| model.id != "m-wiring01"),
+                "registry record must disappear from the listing"
+            );
+        });
+    }
+
+    /// 商店权重根**内置导入扫描根臂**的端到端接线（十二轮评审 P1）：
+    /// `LMM_IMPORT_DIRS` 给脚本下发的是含 `~/Downloads` 等内置根的同一张列表，
+    /// 卡片会就地复用其中的既有权重——这些目录下的权重同属"由模型商店管理"，
+    /// 登记端必须拒绝、移除端必须拒删。此前 boundary 只收 settings 里的
+    /// import_scan_dirs，内置根裸奔：别名记录指向内置根下三层目录即可真删
+    /// 商店复用的权重。
+    #[test]
+    fn builtin_scan_root_weights_are_store_managed_end_to_end() {
+        use crate::features::device::{
+            external_models::registry_dir, register_external_model, remove_external_model,
+        };
+        use crate::features::model_store::platform::linux::{config, db};
+        use crate::platform::paths::user_home_dir;
+        let _ctx = config::TempHome::new();
+        point_ollama_at_dead_port();
+        db::init_db().expect("init store db");
+        // ~/Downloads/<a>/<b>：家目录三层（深度臂本会放行），落在内置扫描根
+        // ~/Downloads 之下（本测试钉的新臂）。
+        let weights = user_home_dir().join("Downloads").join("hf").join("qwen");
+        std::fs::create_dir_all(&weights).expect("create weights dir");
+        std::fs::write(weights.join("weight.bin"), b"weights").expect("write weight");
+
+        // 登记端：权重在内置扫描根之下 → 必须按商店管理拒绝。
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let error = register_external_model(
+                "dl-model".to_string(),
+                "other".to_string(),
+                Some("http://127.0.0.1:1".to_string()),
+                None,
+                Some(weights.to_string_lossy().into_owned()),
+            )
+            .await
+            .expect_err("weights under a builtin scan root must be rejected");
+            assert!(
+                error.contains("模型商店"),
+                "rejection must say the weights are store-managed, got: {error}"
+            );
+        });
+
+        // 移除端：手写存量记录（登记端修复前/AI 手写可能存在）同样必须拒删，
+        // 且目录与记录都原样保留。
+        let dir = registry_dir();
+        std::fs::create_dir_all(&dir).expect("registry dir");
+        std::fs::write(
+            dir.join("m-dlroot01.json"),
+            format!(
+                r#"{{"schema":1,"id":"m-dlroot01","name":"dl-model","kind":"other","weights_path":{}}}"#,
+                serde_json::to_string(&weights.to_string_lossy()).expect("json string")
+            ),
+        )
+        .expect("write legacy record");
+        runtime.block_on(async move {
+            let error =
+                remove_external_model("m-dlroot01".to_string(), true, "dl-model".to_string())
+                    .await
+                    .expect_err("removal must be rejected for builtin-scan-root weights");
+            assert!(
+                error.contains("模型商店"),
+                "rejection must say the weights are store-managed, got: {error}"
+            );
+            assert!(weights.exists(), "weight dir must survive the rejection");
+            assert!(
+                dir.join("m-dlroot01.json").exists(),
+                "registry record must survive the rejection"
+            );
+        });
+    }
+
     /// operstate 判定表：unknown（回环/VPN 口）必须算 up，down 家族与 dormant
     /// 判 down。此前这段 matches! 长在 /sys 读取里零覆盖——把它改成 "down" 会
     /// 让 lo/tun 口持续假"断开"而测试全绿（五轮评审 P3）。

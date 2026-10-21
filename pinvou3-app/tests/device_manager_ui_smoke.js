@@ -179,6 +179,26 @@ function injectSource() {
     ];
     var activeModelId = 'cloud-deepseek';
     var removeOutcome = { removed_registry: true, removed_weights: false, ollama_deleted: true, warnings: [] };
+    // 平台能力桩收敛为可变量：末尾的非 MegaCube 负控要把 megacubeDevice 翻成
+    // false 后整页重载，断言入口与页面回到主线形态（十二轮评审 P2）。覆盖值走
+    // sessionStorage——injectSource 每次导航都会重新执行，闭包变量扛不住 reload。
+    var platformCaps = {
+      os: 'linux',
+      megacubeDevice: sessionStorage.getItem('__testMegacubeDevice') !== '0',
+      showMegacubeSite: false,
+      showSuperPermissionSettings: false,
+      usesBundledDependencyInstaller: true,
+      taskCompletionNotificationsDefault: true,
+      voiceShortcutNative: false,
+      browserNativeDisplay: false,
+      codexAcpSupported: false,
+      localVllmSupported: false,
+      teamRelaySupported: true,
+    };
+    window.__testPlatformCaps = platformCaps;
+    window.__testSetMegacubeDevice = function (value) {
+      sessionStorage.setItem('__testMegacubeDevice', value ? '1' : '0');
+    };
     function record(cmd, args) { calls.push({ cmd: cmd, args: args || null }); }
     function emit(name, payload) {
       return Promise.all((handlers[name] || []).slice().map(function (handler) {
@@ -188,19 +208,7 @@ function injectSource() {
     function invoke(cmd, args) {
       record(cmd, args);
       switch (cmd) {
-        case 'get_platform_capabilities': return Promise.resolve({
-          os: 'linux',
-          megacubeDevice: true,
-          showMegacubeSite: false,
-          showSuperPermissionSettings: false,
-          usesBundledDependencyInstaller: true,
-          taskCompletionNotificationsDefault: true,
-          voiceShortcutNative: false,
-          browserNativeDisplay: false,
-          codexAcpSupported: false,
-          localVllmSupported: false,
-          teamRelaySupported: true,
-        });
+        case 'get_platform_capabilities': return Promise.resolve(Object.assign({}, platformCaps));
         case 'get_settings': return Promise.resolve(settings);
         case 'get_effective_model_config': return Promise.resolve({ model: 'deepseek-v4-flash', base_url: 'https://api.deepseek.com', preset: 'deepseek', api_key_set: true });
         case 'list_models': return Promise.resolve({ models: models.slice(), active_model_id: activeModelId });
@@ -824,6 +832,35 @@ async function clickTestId(page, testId) {
   await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-external-row"]'), { timeout: 8000 });
   await sleep(300);
   rec('⑩ 后半窗无运行时报错（⑩-b/⑩-c/刷新路径，⑨ 预期噪音除外）', errors.length === 0, errors.slice(0, 3).join(' | '));
+
+  // ⑪ 非 MegaCube 负控：megacubeDevice=false 整页重载后，侧栏回到「运行状态」、
+  // 无「设备管理」入口，点击后是旧 MonitorView 而非设备管理页（十二轮评审 P2：
+  // 门控此前只钉了正向臂——main.jsx 把 megacubeDevice 恒置 true 时当时全部
+  // 测试照绿，非 MegaCube 平台入口会被静默换掉）。
+  await page.evaluate(() => { window.__testSetMegacubeDevice(false); });
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.waitForFunction(() => window.TauriBridge && document.querySelector('[data-testid="app-root"]'), { timeout: 20000 });
+  await sleep(1000);
+  const plainState = await page.evaluate(() => {
+    // 侧栏收起时 label 只落在 title 属性（与 clickNavByLabel 同一双判据）。
+    const spanLabels = [...document.querySelectorAll('span')].map(node => (node.textContent || '').trim());
+    const has = text => spanLabels.includes(text) || !!document.querySelector(`[title="${text}"]`);
+    return {
+      monitorEntry: has('运行状态'),
+      deviceEntryAbsent: !has('设备管理'),
+    };
+  });
+  rec('⑪ 非 MegaCube 平台侧栏保持运行状态且无设备管理入口',
+    plainState.monitorEntry && plainState.deviceEntryAbsent, JSON.stringify(plainState));
+  await clickNavByLabel(page, '运行状态');
+  await page.waitForFunction(() => document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view') === 'monitor', { timeout: 8000 });
+  await sleep(300);
+  const monitorOnly = await page.evaluate(() => ({
+    deviceViewAbsent: !document.querySelector('[data-testid="device-manager-view"]'),
+  }));
+  rec('⑪-b 非 MegaCube 平台运行状态页不渲染设备管理视图', monitorOnly.deviceViewAbsent,
+    JSON.stringify(monitorOnly));
+
   await browser.close();
 
   const failed = results.filter(result => !result.pass).length;
