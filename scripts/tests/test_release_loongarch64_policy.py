@@ -77,6 +77,21 @@ class ReleaseLoongArch64PolicyTests(unittest.TestCase):
 
     # ---- release job: runner + orchestrator ----
 
+    def test_release_job_runs_only_on_main_push_or_manual_dispatch(self):
+        # The gate passes pull_request events unconditionally (PRs only run
+        # the light contract jobs), so this trigger contract is what keeps
+        # the 135-minute cross build off every release-chain PR. Same pin as
+        # test_release_arm64_policy.test_public_package_jobs_skip_pull_requests
+        # makes for the x64/arm64/macos siblings.
+        job_header = self.job_code.split("\n    steps:", maxsplit=1)[0]
+        self.assertIn(
+            "needs.check-version-bump.outputs.build_required == 'true'",
+            job_header,
+        )
+        self.assertIn("github.event_name == 'workflow_dispatch'", job_header)
+        self.assertIn("github.event_name == 'push'", job_header)
+        self.assertIn("github.ref == 'refs/heads/main'", job_header)
+
     def test_release_job_cross_builds_on_x86_64(self):
         # GitHub has no loong64 hosted runner: the cross build must be pinned
         # to the x86_64 jammy image the toolchain asset's sha256 pin was
