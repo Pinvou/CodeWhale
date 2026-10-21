@@ -38,17 +38,12 @@ pub(super) fn pending() -> bool {
     std::fs::symlink_metadata(path()).is_ok()
 }
 fn text_at(path: &Path) -> Result<Option<String>, String> {
-    match std::fs::symlink_metadata(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err(invalid()),
-        Ok(_) => {
-            binding::hash(path, 512 * 1024)?;
-            std::fs::read_to_string(path)
-                .map(Some)
-                .map_err(|_| invalid())
-        }
-    }
+    super::control_file::read_optional(path, 512 * 1024)
+        .map_err(|_| invalid())?
+        .map(|bytes| String::from_utf8(bytes).map_err(|_| invalid()))
+        .transpose()
 }
+
 fn clear() -> Result<(), String> {
     std::fs::remove_file(path()).map_err(|e| e.to_string())?;
     sync_directory(&super::root())
@@ -59,10 +54,13 @@ fn sync_directory(path: &Path) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-fn stopped_daemon(record: &Record) -> Result<std::fs::File, String> {
+pub(super) fn stopped_daemon(record: &Record, create: bool) -> Result<std::fs::File, String> {
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
+        .create(create)
+        .truncate(false)
+        .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(record.state.join("daemon.lock"))
         .map_err(|_| invalid())?;
@@ -301,7 +299,7 @@ pub(super) fn recover_locked() -> Result<(), String> {
     }
     let intent: Intent = super::read_json(&path())?;
     intent.verify_disk()?;
-    let _daemon = stopped_daemon(&intent.before)?;
+    let _daemon = stopped_daemon(&intent.before, false)?;
     intent.rollback_locked()
 }
 
@@ -380,7 +378,7 @@ fn apply(intent: Intent, target: &mut Record) -> Result<(), String> {
     {
         return Err(invalid());
     }
-    let daemon = stopped_daemon(&intent.before)?;
+    let daemon = stopped_daemon(&intent.before, false)?;
     super::write_json(&path(), &intent)?;
     let result: Result<(), String> = (|| {
         intent.publish_text(&intent.new_text)?;
@@ -416,7 +414,7 @@ fn apply(intent: Intent, target: &mut Record) -> Result<(), String> {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 
     fn intent(directory: &Path, external: bool) -> Intent {
         let config = directory.join("cmsd.toml");
@@ -572,16 +570,52 @@ mod tests {
         let path = record.state.join("daemon.lock");
         std::fs::write(&path, b"").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let guard = stopped_daemon(&record).unwrap();
+        let guard = stopped_daemon(&record, false).unwrap();
         assert_eq!(
-            stopped_daemon(&record).unwrap_err(),
+            stopped_daemon(&record, false).unwrap_err(),
             "service_still_running"
         );
         drop(guard);
-        drop(stopped_daemon(&record).unwrap());
+        drop(stopped_daemon(&record, false).unwrap());
         std::fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink(directory.path().join("old-cmsd"), &path).unwrap();
-        assert!(stopped_daemon(&record).is_err());
+        assert!(stopped_daemon(&record, false).is_err());
+    }
+
+    #[test]
+    fn offline_lock_creation_rejects_special_or_writable_existing_files_without_repair() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut record = intent(directory.path(), false).before;
+        record.state = directory.path().join("state");
+        std::fs::create_dir(&record.state).unwrap();
+        let path = record.state.join("daemon.lock");
+        assert!(stopped_daemon(&record, false).is_err());
+        assert!(!path.exists());
+        drop(stopped_daemon(&record, true).unwrap());
+        assert!(std::fs::metadata(&path).unwrap().is_file());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        drop(stopped_daemon(&record, true).unwrap());
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o620)).unwrap();
+        assert!(stopped_daemon(&record, true).is_err());
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o620
+        );
+        std::fs::remove_file(&path).unwrap();
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: name is a live terminated path and mode is valid for mkfifo.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(stopped_daemon(&record, true).is_err());
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
     }
 
     #[test]

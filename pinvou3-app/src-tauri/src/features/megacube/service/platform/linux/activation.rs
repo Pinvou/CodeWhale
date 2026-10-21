@@ -201,9 +201,9 @@ mod tests {
         let job: Job = serde_json::from_value(serde_json::json!({"id":"component-test","action":"rollback","package":null,
             "status":"running","stage":"starting","created_at":1,"finished_at":null,"pid":null,"start_ticks":null,"boot_id":"test","error":null})).unwrap();
         let path = directory.path().join("component-maintenance.json");
-        std::fs::write(&path, br#"{"owner":"another-owner"}"#).unwrap();
+        super::super::write_json(&path, &serde_json::json!({"owner":"another-owner"})).unwrap();
         assert!(ensure_fence(&mut record, &job).is_err());
-        std::fs::write(&path, br#"{"owner":"this-owner"}"#).unwrap();
+        super::super::write_json(&path, &serde_json::json!({"owner":"this-owner"})).unwrap();
         assert!(ensure_fence(&mut record, &job).is_ok());
         std::fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink(directory.path().join("missing"), &path).unwrap();

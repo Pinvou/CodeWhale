@@ -3,6 +3,7 @@ mod binding;
 mod bootstrap;
 mod bundled;
 mod config_migration;
+mod control_file;
 pub use bundled::bundled_package;
 mod operation_lock;
 mod package;
@@ -10,9 +11,9 @@ mod registration;
 mod selection_policy;
 mod systemd;
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -20,6 +21,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+// Match the daemon Store persistence contract; valid task history may exceed
+// 16 MiB. Smaller component/configuration receipts keep their own limits.
+const MAX_CMS_STATE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -118,13 +123,18 @@ pub(super) fn write_json(path: &Path, value: &impl Serialize) -> Result<(), Stri
     )
 }
 
+fn read_json_optional<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Option<T>, String> {
+    control_file::read_optional(path, 512 * 1024)
+        .map_err(|error| format!("invalid_component_record: {error}"))?
+        .map(|bytes| {
+            serde_json::from_slice(&bytes)
+                .map_err(|error| format!("invalid_component_record: {error}"))
+        })
+        .transpose()
+}
+
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {
-    let metadata = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 512 * 1024 {
-        return Err("invalid_component_record".into());
-    }
-    serde_json::from_slice(&std::fs::read(path).map_err(|e| e.to_string())?)
-        .map_err(|e| format!("invalid_component_record: {e}"))
+    read_json_optional(path)?.ok_or_else(|| format!("component_record_missing: {}", path.display()))
 }
 
 fn lock() -> Result<operation_lock::Guard, String> {
@@ -133,10 +143,9 @@ fn lock() -> Result<operation_lock::Guard, String> {
 
 fn saved_record() -> Result<Option<Record>, String> {
     let path = root().join("service.json");
-    if !path.exists() {
+    let Some(record): Option<Record> = read_json_optional(&path)? else {
         return Ok(None);
-    }
-    let record: Record = read_json(&path)?;
+    };
     if !systemd::unit_valid(&record.unit)
         || configured_unit()?.is_some_and(|unit| unit != record.unit)
         || record.socket != crate::features::megacube::socket_path()
@@ -220,11 +229,7 @@ fn public_job(mut job: Job) -> Job {
 
 fn current_job() -> Result<Option<Job>, String> {
     let path = root().join("operation.json");
-    if path.exists() {
-        read_json::<Job>(&path).map(public_job).map(Some)
-    } else {
-        Ok(None)
-    }
+    read_json_optional::<Job>(&path).map(|job| job.map(public_job))
 }
 
 pub fn status() -> Result<Value, String> {
@@ -241,9 +246,9 @@ pub fn status() -> Result<Value, String> {
     // Record a verified component binding without changing service/model
     // ownership. This keeps rescue controls usable after the daemon goes down.
     if let Some(binding) = record.as_ref() {
-        if !root().join("service.json").exists() {
+        if saved_record()?.is_none() {
             if let Ok(_guard) = lock() {
-                if !root().join("service.json").exists() {
+                if saved_record()?.is_none() {
                     persist(binding)?;
                 }
             }
@@ -517,15 +522,12 @@ fn persist(record: &Record) -> Result<(), String> {
 
 fn state_has_pending(record: &Record) -> Result<bool, String> {
     let path = record.state.join("state.json");
-    if !path.exists() {
+    let Some(bytes) = control_file::read_optional(&path, MAX_CMS_STATE_BYTES)
+        .map_err(|error| format!("task_state_unreadable: {error}"))?
+    else {
         return Ok(false);
-    }
-    let metadata = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
-    if metadata.file_type().is_symlink() || metadata.len() > 16 * 1024 * 1024 {
-        return Err("task_state_unreadable".into());
-    }
-    let state: Value = serde_json::from_slice(&std::fs::read(&path).map_err(|e| e.to_string())?)
-        .map_err(|_| "task_state_unreadable")?;
+    };
+    let state: Value = serde_json::from_slice(&bytes).map_err(|_| "task_state_unreadable")?;
     let tasks = state
         .get("tasks")
         .and_then(Value::as_object)
@@ -545,18 +547,7 @@ fn begin_maintenance(record: &mut Record, job: &Job) -> Result<(), String> {
         .is_some_and(|v| v == "active" || v == "activating");
     if !active {
         private_directory(&record.state)?;
-        let daemon_lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(record.state.join("daemon.lock"))
-            .map_err(|e| e.to_string())?;
-        daemon_lock
-            .try_lock()
-            .map_err(|_| "service_still_running")?;
+        let _daemon_lock = registration::stopped_daemon(record, true)?;
         if state_has_pending(record)? {
             return Err(
                 "task_in_progress: start Cube Manage Software and reconcile its persistent tasks first".into(),
@@ -567,13 +558,10 @@ fn begin_maintenance(record: &mut Record, job: &Job) -> Result<(), String> {
             .clone()
             .unwrap_or_else(|| job.id.clone());
         let path = record.state.join("component-maintenance.json");
-        if path.exists()
-            && read_json::<Value>(&path)?
-                .get("owner")
-                .and_then(Value::as_str)
-                != Some(owner.as_str())
-        {
-            return Err("maintenance_owned".into());
+        if let Some(value) = read_json_optional::<Value>(&path)? {
+            if value.get("owner").and_then(Value::as_str) != Some(owner.as_str()) {
+                return Err("maintenance_owned".into());
+            }
         }
         record.maintenance_owner = Some(owner.clone());
         persist(record)?;
@@ -618,21 +606,9 @@ fn end_stopped_maintenance(record: &mut Record) -> Result<(), String> {
     let Some(owner) = record.maintenance_owner.clone() else {
         return Ok(());
     };
-    let daemon_lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(record.state.join("daemon.lock"))
-        .map_err(|e| e.to_string())?;
-    daemon_lock
-        .try_lock()
-        .map_err(|_| "service_still_running")?;
+    let _daemon_lock = registration::stopped_daemon(record, true)?;
     let path = record.state.join("component-maintenance.json");
-    if path.exists() {
-        let value: Value = read_json(&path)?;
+    if let Some(value) = read_json_optional::<Value>(&path)? {
         if value.get("owner").and_then(Value::as_str) != Some(owner.as_str()) {
             return Err("maintenance_owned".into());
         }
@@ -645,23 +621,23 @@ fn end_stopped_maintenance(record: &mut Record) -> Result<(), String> {
 fn archive_state(record: &Record, job: &Job) -> Result<(), String> {
     let directory = root().join("backups").join(&job.id);
     private_directory(&directory)?;
-    for (name, path) in [
-        ("cmsd.toml", record.config.clone()),
-        ("state.json", record.state.join("state.json")),
+    for (name, path, limit) in [
+        ("cmsd.toml", record.config.clone(), 16 * 1024 * 1024),
+        (
+            "state.json",
+            record.state.join("state.json"),
+            MAX_CMS_STATE_BYTES,
+        ),
         (
             "device-identity.json",
             record.state.join("device-identity.json"),
+            16 * 1024 * 1024,
         ),
     ] {
-        if path.exists() {
-            let metadata = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
-            if metadata.file_type().is_symlink() || metadata.len() > 16 * 1024 * 1024 {
-                return Err("component_backup_refused".into());
-            }
-            write_bytes(
-                &directory.join(name),
-                &std::fs::read(path).map_err(|e| e.to_string())?,
-            )?;
+        if let Some(bytes) = control_file::read_optional(&path, limit)
+            .map_err(|error| format!("component_backup_refused: {error}"))?
+        {
+            write_bytes(&directory.join(name), &bytes)?;
         }
     }
     write_json(&directory.join("service.json"), record)
@@ -1180,10 +1156,31 @@ mod tests {
             r#"{"tasks":{"t1":{"kind":"switch","status":"running"}}}"#,
         )
         .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(state_has_pending(&record).unwrap());
         std::fs::write(&path, r#"{"tasks":{"t1":{"status":"succeeded"}}}"#).unwrap();
         assert!(!state_has_pending(&record).unwrap());
         std::fs::write(&path, b"corrupt").unwrap();
+        assert!(state_has_pending(&record).is_err());
+        std::fs::remove_file(&path).unwrap();
+        assert!(!state_has_pending(&record).unwrap());
+        std::os::unix::fs::symlink(directory.path().join("missing-state"), &path).unwrap();
+        assert!(state_has_pending(&record).is_err());
+        std::fs::remove_file(&path).unwrap();
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: name is a live terminated path and mode is valid for mkfifo.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(state_has_pending(&record).is_err());
+        std::fs::remove_file(&path).unwrap();
+        // CMS may persist up to 64 MiB. JSON whitespace keeps this a real,
+        // valid daemon state without making a mirror of its task implementation.
+        let mut large = br#"{"tasks":{"t1":{"status":"running"}}}"#.to_vec();
+        large.resize(17 * 1024 * 1024, b' ');
+        std::fs::write(&path, &large).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(state_has_pending(&record).unwrap());
+        let oversized = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        oversized.set_len(MAX_CMS_STATE_BYTES + 1).unwrap();
         assert!(state_has_pending(&record).is_err());
     }
 }
