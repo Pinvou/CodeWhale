@@ -38,10 +38,7 @@ pub(super) fn pending() -> bool {
     std::fs::symlink_metadata(path()).is_ok()
 }
 fn text_at(path: &Path) -> Result<Option<String>, String> {
-    super::control_file::read_optional(path, 512 * 1024)
-        .map_err(|_| invalid())?
-        .map(|bytes| String::from_utf8(bytes).map_err(|_| invalid()))
-        .transpose()
+    super::control_file::read_registration_text(path, 512 * 1024).map_err(|_| invalid())
 }
 
 fn clear() -> Result<(), String> {

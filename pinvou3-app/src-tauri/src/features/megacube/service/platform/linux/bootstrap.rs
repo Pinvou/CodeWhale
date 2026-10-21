@@ -224,9 +224,10 @@ fn verify_receipt(record: &Record, root: &Path, journal: &Journal) -> Result<(),
     {
         return Err(invalid());
     }
-    let config: toml::Value =
-        toml::from_str(&std::fs::read_to_string(&record.config).map_err(|_| invalid())?)
-            .map_err(|_| invalid())?;
+    let text = super::control_file::read_registration_text(&record.config, 512 * 1024)
+        .map_err(|_| invalid())?
+        .ok_or_else(invalid)?;
+    let config: toml::Value = toml::from_str(&text).map_err(|_| invalid())?;
     let unit_dir = config
         .get("unit_dir")
         .and_then(toml::Value::as_str)
@@ -252,6 +253,7 @@ fn verify_receipt(record: &Record, root: &Path, journal: &Journal) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     fn fixture() -> (tempfile::TempDir, Record, Value) {
         let directory = tempfile::tempdir().unwrap();
@@ -272,6 +274,8 @@ mod tests {
             ),
         )
         .unwrap();
+        // Production bootstrap configuration is private (inspect verifies 0600).
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
         let record: Record = serde_json::from_value(json!({"unit":"cmsd-bootstrap-fixture.service", "socket":root.join("cmsd.sock"),
             "config":config,"state":root.join("state"),"binary":binary,"version":"0.2.0","owned_unit":false,"managed":false,
             "installed":true,"original_unit":"fixture original unit","previous":null})).unwrap();

@@ -81,10 +81,10 @@ pub(super) fn override_text(record: &Record) -> Result<String, String> {
 }
 
 pub(super) fn config_matches(record: &Record) -> Result<(), String> {
-    hash(&record.config, 512 * 1024)?;
-    let value: toml::Value =
-        toml::from_str(&std::fs::read_to_string(&record.config).map_err(|_| drift())?)
-            .map_err(|_| drift())?;
+    let text = super::control_file::read_registration_text(&record.config, 512 * 1024)
+        .map_err(|_| drift())?
+        .ok_or_else(drift)?;
+    let value: toml::Value = toml::from_str(&text).map_err(|_| drift())?;
     for (key, expected) in [
         ("socket_path", &record.socket),
         ("state_dir", &record.state),
@@ -368,7 +368,7 @@ pub(super) fn same_target(previous: &Record, current: &Record) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 
     fn fixture(path: &Path) -> (Record, BTreeMap<String, String>) {
         let record = Record {
@@ -513,5 +513,28 @@ mod tests {
         assert!(plan_config_revision(&record, &"b".repeat(64), &"c".repeat(64)).is_err());
         record.previous.as_mut().unwrap().config = directory.path().join("foreign-config");
         assert!(plan_config_revision(&record, &old, &"c".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn service_config_unknown_files_are_refused_without_waiting_or_repairing() {
+        let directory = tempfile::tempdir().unwrap();
+        let (record, _) = fixture(directory.path());
+        std::fs::set_permissions(&record.config, std::fs::Permissions::from_mode(0o644)).unwrap();
+        config_matches(&record).unwrap();
+        std::fs::remove_file(&record.config).unwrap();
+        assert!(config_matches(&record).is_err());
+        std::os::unix::fs::symlink(directory.path().join("missing"), &record.config).unwrap();
+        assert!(config_matches(&record).is_err());
+        std::fs::remove_file(&record.config).unwrap();
+        let name = std::ffi::CString::new(record.config.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: name is a terminated path owned by this temporary test.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(config_matches(&record).is_err());
+        assert!(
+            std::fs::symlink_metadata(&record.config)
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
     }
 }

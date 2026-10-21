@@ -242,11 +242,10 @@ pub(super) fn bind_process(
                 .unwrap_or_else(|| home.join(".config"))
                 .join("megacube/cmsd.toml")
         });
-    let config_value = if config.exists() {
-        parse_config_document(&std::fs::read_to_string(&config).map_err(|e| e.to_string())?)?
-    } else {
-        toml::Value::Table(Default::default())
-    };
+    let config_value = read_registration_text(&config)?
+        .map(|text| parse_config_document(&text))
+        .transpose()?
+        .unwrap_or_else(|| toml::Value::Table(Default::default()));
     let state = env
         .get("CMSD_STATE_DIR")
         .map(PathBuf::from)
@@ -265,7 +264,9 @@ pub(super) fn bind_process(
     let original_unit = properties
         .get("FragmentPath")
         .filter(|path| Path::new(path.as_str()) == unit_directory().join(unit))
-        .and_then(|path| std::fs::read_to_string(path).ok());
+        .map(|path| read_registration_text(Path::new(path)))
+        .transpose()?
+        .flatten();
     Ok(Record {
         unit: unit.to_owned(),
         socket: socket.to_owned(),
@@ -284,6 +285,11 @@ pub(super) fn bind_process(
         bootstrap_import: None,
         factory_import: None,
     })
+}
+
+fn read_registration_text(path: &Path) -> Result<Option<String>, String> {
+    super::control_file::read_registration_text(path, 512 * 1024)
+        .map_err(|error| format!("unverified_service_file: {error}"))
 }
 
 fn parse_config_document(text: &str) -> Result<toml::Value, String> {

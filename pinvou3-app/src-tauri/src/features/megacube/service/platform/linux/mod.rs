@@ -914,10 +914,10 @@ fn verify_cached(record: &Record) -> Result<(), String> {
 }
 
 fn state_namespace_required(record: &Record) -> Result<bool, String> {
-    let config: toml::Value = toml::from_str(
-        &std::fs::read_to_string(&record.config).map_err(|_| "unverified_service_config")?,
-    )
-    .map_err(|_| "unverified_service_config")?;
+    let text = control_file::read_registration_text(&record.config, 512 * 1024)
+        .map_err(|_| "unverified_service_config")?
+        .ok_or("unverified_service_config")?;
+    let config: toml::Value = toml::from_str(&text).map_err(|_| "unverified_service_config")?;
     match config
         .get("native_unit_namespace")
         .and_then(toml::Value::as_str)
@@ -959,10 +959,10 @@ fn model_boot_policy_required(record: &Record) -> Result<bool, String> {
 }
 
 fn profile_budget_required(record: &Record) -> Result<bool, String> {
-    let config: toml::Value = toml::from_str(
-        &std::fs::read_to_string(&record.config).map_err(|_| "unverified_service_config")?,
-    )
-    .map_err(|_| "unverified_service_config")?;
+    let text = control_file::read_registration_text(&record.config, 512 * 1024)
+        .map_err(|_| "unverified_service_config")?
+        .ok_or("unverified_service_config")?;
+    let config: toml::Value = toml::from_str(&text).map_err(|_| "unverified_service_config")?;
     match config.get("require_native_profile_budget") {
         None => Ok(false),
         Some(value) if value.as_str() == Some("v1") => Ok(true),
