@@ -213,14 +213,21 @@ impl CommandSpec {
         self
     }
 
-    /// Add environment variables for this command.
+    /// Add environment variables without discarding shell defaults.
     pub fn with_env(mut self, env: HashMap<String, String>) -> Self {
-        self.env = env;
+        for (key, value) in env {
+            self = self.with_env_var(&key, &value);
+        }
         self
     }
 
     /// Add a single environment variable.
     pub fn with_env_var(mut self, key: &str, value: &str) -> Self {
+        // Windows environment names are case-insensitive. Remove an earlier
+        // spelling so the override cannot depend on HashMap iteration order.
+        #[cfg(windows)]
+        self.env
+            .retain(|existing, _| !existing.eq_ignore_ascii_case(key));
         self.env.insert(key.to_string(), value.to_string());
         self
     }
@@ -946,6 +953,99 @@ mod tests {
             env.get("PYTHONIOENCODING").map(String::as_str),
             Some("utf-8")
         );
+    }
+
+    #[test]
+    fn command_spec_env_overlays_preserve_existing_values() {
+        let spec = CommandSpec::program("test", vec![], PathBuf::from("."), Duration::from_secs(5))
+            .with_env_var("FIRST", "original")
+            .with_env(HashMap::new())
+            .with_env(HashMap::from([("SECOND".to_string(), "added".to_string())]));
+        assert_eq!(spec.env.get("FIRST").map(String::as_str), Some("original"));
+        assert_eq!(spec.env.get("SECOND").map(String::as_str), Some("added"));
+        let spec = spec.with_env(HashMap::from([(
+            "FIRST".to_string(),
+            "override".to_string(),
+        )]));
+        assert_eq!(spec.env.get("FIRST").map(String::as_str), Some("override"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn forkguard_windows_shell_env_overlays_keep_python_stdio_utf8() {
+        use crate::shell_dispatcher::ShellKind;
+
+        let kind = crate::shell_dispatcher::global_dispatcher().kind();
+        let command = if kind.is_powershell() {
+            "Write-Output $env:PYTHONIOENCODING; Write-Output '中文-output'"
+        } else if matches!(kind, ShellKind::Cmd) {
+            "echo %PYTHONIOENCODING%& echo 中文-output"
+        } else {
+            "printf '%s\\n' \"$PYTHONIOENCODING\" '中文-output'"
+        };
+        for encoded in [false, true] {
+            if encoded && !kind.is_powershell() {
+                continue;
+            }
+            for extra_env in [
+                HashMap::new(),
+                HashMap::from([(
+                    "CODEWHALE_ENCODING_PROBE".to_string(),
+                    "present".to_string(),
+                )]),
+            ] {
+                let cwd = std::env::temp_dir();
+                let timeout = Duration::from_secs(30);
+                let spec = if encoded {
+                    CommandSpec::powershell_encoded_shell(command, cwd, timeout)
+                        .expect("Windows PowerShell encoded form")
+                } else {
+                    CommandSpec::shell(command, cwd, timeout)
+                }
+                .with_env(extra_env)
+                .with_policy(SandboxPolicy::DangerFullAccess);
+                let exec = SandboxManager::new().prepare(&spec);
+                let mut cmd = std::process::Command::new(exec.program());
+                cmd.args(exec.args()).current_dir(&spec.cwd);
+                crate::utils::suppress_console_window(&mut cmd);
+                crate::child_env::apply_to_command(
+                    &mut cmd,
+                    crate::child_env::string_map_env(&exec.env),
+                );
+                let output = cmd.output().expect("run shell with overlaid environment");
+                assert!(output.status.success(), "{output:?}");
+                let stdout = String::from_utf8(output.stdout).expect("UTF-8 shell output");
+                assert!(stdout.lines().any(|line| line == "utf-8"), "{stdout:?}");
+                assert!(stdout.contains("中文-output"), "{stdout:?}");
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_shell_env_explicit_override_is_case_insensitive() {
+        let spec = CommandSpec::shell(
+            "Write-Output 'probe'",
+            std::env::temp_dir(),
+            Duration::from_secs(5),
+        )
+        .with_env(HashMap::from([(
+            "pythonioencoding".to_string(),
+            "gbk".to_string(),
+        )]));
+        let matches: Vec<_> = spec
+            .env
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case("PYTHONIOENCODING"))
+            .collect();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].1, "gbk");
+        let spec = spec.with_env_var("PYTHONIOENCODING", "utf-8");
+        assert_eq!(
+            spec.env.get("PYTHONIOENCODING").map(String::as_str),
+            Some("utf-8")
+        );
+        assert!(!spec.env.contains_key("pythonioencoding"));
     }
 
     // The UTF-8 output contract keys on the PowerShell family: a custom
