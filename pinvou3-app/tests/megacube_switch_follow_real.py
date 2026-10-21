@@ -128,8 +128,8 @@ def main():
     weight_files = sorted(weights.glob('*.safetensors'))
     assert weight_files and (weights/'config.json').is_file()
     hashes = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in weight_files}
-    profile = root / ('mcp-switch-real-' + nonce)
-    profile.mkdir(mode=0o700)
+    profile = root / '.qa' / ('mcp-switch-real-' + nonce)
+    profile.mkdir(mode=0o700, parents=True)
     for name in ['cards', 'state', 'units', 'engines', 'models', 'staging', 'credentials']:
         (root/name).mkdir(mode=0o700)
     sock = Path('/run/user')/str(os.getuid())/('cmsd-handoff-'+nonce+'.sock')
