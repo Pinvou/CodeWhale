@@ -16,7 +16,7 @@ export async function updateScriptsWithCleanup({ record, wasRunning, copy }) {
     },
     {
       kind: 'card_scripts', title: copy.cardScriptsTask(name),
-      start: () => startCardScripts(cardId, false, true),
+      start: () => startCardScripts(cardId, true),
     },
   ];
   let result;
