@@ -45,6 +45,8 @@ pub fn interfaces() -> Result<Vec<Interface>, String> {
     struct Guard(*mut libc::ifaddrs);
     impl Drop for Guard {
         fn drop(&mut self) {
+            // SAFETY: 释放的正是 getifaddrs 返回、且仅在此处释放一次的链表头；
+            // Drop 只会执行一次，不会双重释放。
             unsafe {
                 libc::freeifaddrs(self.0);
             }
@@ -58,11 +60,14 @@ pub fn interfaces() -> Result<Vec<Interface>, String> {
         let item = unsafe { &*cursor };
         if !item.ifa_addr.is_null()
             && !item.ifa_netmask.is_null()
+            // SAFETY: 读一个 C 整型字段；指针已判非空，生命周期由 guard 保证。
             && unsafe { (*item.ifa_addr).sa_family } as i32 == libc::AF_INET
             && item.ifa_flags & libc::IFF_UP as u32 != 0
             && item.ifa_flags & (libc::IFF_LOOPBACK | libc::IFF_POINTOPOINT) as u32 == 0
         {
             let address = Ipv4Addr::from(
+                // SAFETY: sa_family 已确认是 AF_INET，sockaddr 指针实为 sockaddr_in；
+                // 生命周期由 guard 保证。
                 unsafe {
                     (*(item.ifa_addr as *const libc::sockaddr_in))
                         .sin_addr
@@ -71,6 +76,7 @@ pub fn interfaces() -> Result<Vec<Interface>, String> {
                 .to_ne_bytes(),
             );
             let mask = Ipv4Addr::from(
+                // SAFETY: 同上——netmask 指针非空、族为 AF_INET，生命周期由 guard 保证。
                 unsafe {
                     (*(item.ifa_netmask as *const libc::sockaddr_in))
                         .sin_addr
@@ -78,6 +84,8 @@ pub fn interfaces() -> Result<Vec<Interface>, String> {
                 }
                 .to_ne_bytes(),
             );
+            // SAFETY: getifaddrs 契约保证 ifa_name 指向以 NUL 结尾的接口名；
+            // 只读、不拥有，生命周期由 guard 保证。
             let name = unsafe { CStr::from_ptr(item.ifa_name) }
                 .to_string_lossy()
                 .into_owned();

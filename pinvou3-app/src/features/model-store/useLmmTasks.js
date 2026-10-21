@@ -168,7 +168,7 @@ function delay(ms) {
 /**
  * 把一次运行从头读到尾。
  * @param {string} runId - 运行 ID。
- * @param {{onChunk:(lines:Array<string>, meta:{awaitingInput:boolean|undefined})=>void, isAlive:()=>boolean, replayLimit?:number|null}} hooks - 行回调、存活判定与回放上限。
+ * @param {{onChunk:(lines:Array<string>, meta:{awaitingInput:boolean|undefined, retainedNativeProcess:boolean|undefined})=>void, isAlive:()=>boolean, replayLimit?:number|null}} hooks - 行回调、存活判定与回放上限。
  * @returns {Promise<{ok?:boolean, cancelled?:boolean, result?:unknown, error?:unknown, aborted?:boolean}>} 终态。
  */
 async function drainRun(runId, { onChunk, isAlive, replayLimit = null }) {
@@ -196,7 +196,7 @@ async function drainRun(runId, { onChunk, isAlive, replayLimit = null }) {
       pendingReplayTrim = false;
       if (lines.length > replayLimit) lines = lines.slice(-replayLimit);
     }
-    onChunk(lines, { awaitingInput: chunk?.awaiting_input });
+    onChunk(lines, { awaitingInput: chunk?.awaiting_input, retainedNativeProcess: chunk?.retained_native_process === true });
     if (chunk?.done) {
       // done 之后再补一次零等待的轮询,把可能漏掉的收尾几行捞回来。
       //
@@ -208,7 +208,7 @@ async function drainRun(runId, { onChunk, isAlive, replayLimit = null }) {
       // 窗口很窄,代价也只是一次本机调用,而且整个任务只发这一次。
       try {
         const tail = await pollRunLog(runId, cursor, 0);
-        if (tail?.lines?.length) onChunk(tail.lines, { awaitingInput: tail.awaiting_input });
+        if (tail?.lines?.length) onChunk(tail.lines, { awaitingInput: tail.awaiting_input, retainedNativeProcess: tail.retained_native_process === true });
       } catch {
         // 补捞失败不影响结论——结论在上一次响应里已经拿到了。
       }
@@ -259,7 +259,12 @@ function pumpRun(id, runId, { replayLimit = null } = {}) {
         // 回放时再弹一次不只是多点一下:用户填的答案会写进一个没人来取的应答槽,
         // 等脚本下一次真的提问时被这份陈答案顶掉(双机部署里那就是拿旧 IP 去连
         // 从机)。只在服务端明确说"没在等"时清掉,不因为它说"在等"而凭空弹出来。
-        return meta?.awaitingInput === false ? { ...next, prompt: null } : next;
+        const answered = meta?.awaitingInput === false ? { ...next, prompt: null } : next;
+        // 「保留原生进程」的结构化声明只升不降:回放裁剪会丢掉声明行,而这个入口
+        // (二次确认停用)恰恰要在任务过期后仍然常驻——行可以裁,声明不能裁。
+        return meta?.retainedNativeProcess === true
+          ? { ...answered, retainedNativeProcess: true }
+          : answered;
       });
     },
   });

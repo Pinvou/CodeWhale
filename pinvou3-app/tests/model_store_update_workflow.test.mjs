@@ -87,7 +87,7 @@ test('run_id 返回后仍等待终态，stop → uninstall(false) → scripts(fa
   assert.deepEqual(api.starts.map(({ command, payload }) => ({ command, payload })), [
     { command: 'model_store_start_lifecycle', payload: { cardId: record.card_id, action: 'stop' } },
     { command: 'model_store_start_lifecycle', payload: { cardId: record.card_id, action: 'uninstall', purgeWeights: false } },
-    { command: 'model_store_start_card_scripts', payload: { cardId: record.card_id, rollback: false, confirmed: true } },
+    { command: 'model_store_start_card_scripts', payload: { cardId: record.card_id, confirmed: true } },
   ]);
 });
 

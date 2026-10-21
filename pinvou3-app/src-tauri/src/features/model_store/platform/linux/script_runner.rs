@@ -750,20 +750,32 @@ const ERROR_TAIL_LINES: usize = 20;
 /// 那个被日本客户实锤过的缺陷上了。
 const SUMMARY_SEARCH_LINES: usize = 60;
 
-/// 超上限时丢掉最老的一半，但**协议行一行都不丢**。
+/// 超上限时丢掉最老的一半，但**协议行一行都不丢**——唯一的例外是
+/// [`PROGRESS_MARKER`]：高频单调计数器没有历史价值，同前缀只留最后一条。
 ///
 /// 不能简单丢最老的：`LMM_ENGINE_IMAGE=` 可能在第一百行就打出来了，而
 /// `lifecycle::extract_marker` 是在整个 Vec 上找它的。丢掉它的后果是"已安装引擎"
 /// 的删除功能再也精确 `docker rmi` 不了——盘上留下一个几 GB 的孤儿镜像，而且没有
 /// 任何界面管得到它。
+///
+/// 2026-10-20 评审 P2：`LMM_PROGRESS_BYTES` 若与其他协议行同等待遇，168GB 下载
+/// 按 1MB 粒度 ≈ 16.8 万行会全部留在环里（15-20MB 常驻整个运行期）；界面要的
+/// 只是最新一条。
 fn cap_output_lines(output_lines: &mut Vec<String>, scanned_lines: &mut usize) {
     if output_lines.len() <= MAX_OUTPUT_LINES {
         return;
     }
     let drop_before = MAX_OUTPUT_LINES / 2;
     let total = output_lines.len();
+    let last_progress = output_lines
+        .iter()
+        .rposition(|line| line.trim_start().starts_with(PROGRESS_MARKER));
     let mut kept: Vec<String> = Vec::with_capacity(output_lines.len() - drop_before);
     for (index, line) in output_lines.drain(..).enumerate() {
+        // 进度行只保留最后一条（单调计数器，历史值无诊断价值）。
+        if Some(index) != last_progress && line.trim_start().starts_with(PROGRESS_MARKER) {
+            continue;
+        }
         if index >= drop_before || is_control_line(&line) {
             kept.push(line);
         }
@@ -2211,7 +2223,9 @@ printf '[1A[2K7e1f8fb7d4ba: Pulling fs layer
     fn cap_output_lines_preserves_control_lines_and_reports_them_as_kept() {
         // 协议行不丢是既有承诺；被保留的协议行不能计入"丢弃数"把游标多退
         // （多退最多造成重复扫描一行非提示行，无害但不必）。
-        let mut lines: Vec<String> = (0..MAX_OUTPUT_LINES)
+        // 2026-10-20 评审 P2：原先恰好造 MAX_OUTPUT_LINES 行，cap 首行 `<=` 判定
+        // 直接早退——测试从未进入裁剪分支，恒假绿。必须**超过**上限。
+        let mut lines: Vec<String> = (0..MAX_OUTPUT_LINES + 5)
             .map(|i| format!("layer-{i}"))
             .collect();
         lines[3] = "LMM_ENGINE_IMAGE=example/img:tag".to_string();
@@ -2220,6 +2234,37 @@ printf '[1A[2K7e1f8fb7d4ba: Pulling fs layer
         assert!(
             lines.iter().any(|l| l.starts_with("LMM_ENGINE_IMAGE=")),
             "协议行被 cap 丢掉了"
+        );
+        assert!(lines.len() < MAX_OUTPUT_LINES + 5, "cap 没有真正裁剪");
+    }
+
+    #[test]
+    fn cap_output_lines_keeps_only_the_latest_progress_line() {
+        // 评审 P2：LMM_PROGRESS_BYTES 是高频单调计数器，同前缀留最后一条；
+        // 一次性协议行（LMM_ENGINE_IMAGE 等）待遇不变。
+        let mut lines: Vec<String> = (0..MAX_OUTPUT_LINES + 20)
+            .map(|i| format!("LMM_PROGRESS_BYTES={i}/1000000"))
+            .collect();
+        lines.insert(4, "LMM_ENGINE_IMAGE=example/img:tag".to_string());
+        let mut scanned = 0;
+        cap_output_lines(&mut lines, &mut scanned);
+        let progress: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.starts_with("LMM_PROGRESS_BYTES="))
+            .collect();
+        assert_eq!(
+            progress.len(),
+            1,
+            "同前缀只留最后一条，实际留下 {progress:?}"
+        );
+        assert_eq!(
+            progress[0].as_str(),
+            "LMM_PROGRESS_BYTES=5019/1000000",
+            "留下的必须是最新一条"
+        );
+        assert!(
+            lines.iter().any(|l| l.starts_with("LMM_ENGINE_IMAGE=")),
+            "一次性协议行仍保留"
         );
     }
 }

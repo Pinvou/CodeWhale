@@ -43,7 +43,11 @@
 //!   `sk-*` / `ghp_*` 这类前缀、`Bearer <x>`、URL 里的 userinfo 和 query 参数、
 //!   `--token=<x>` 这类命令行取值。
 //! - [`sanitize_for_export`]：导出/上报用。在上面之外**再过一道**
-//!   `credential_store::redact_secret`（全仓通用的那把尺子）以及内网 IP / 主机名。
+//!   `credential_store::redact_secret`（全仓通用的那把尺子）以及 IP 地址
+//!   （IPv4/IPv6，含 `IP:端口`、URL、参数、中文标点包裹等内嵌形态——按标准库
+//!   逐候选验证，不区分公网私网）。**主机名不识别也不猜测**：没有可靠的
+//!   「这是主机名而非普通单词」判据，猜错的代价是把整份日志变得读不懂；
+//!   这是保守取舍，不是疏漏。
 //!
 //! 为什么分两道，而不是落盘时就上 `redact_secret`：它的通用判据是「长度 ≥ 24 且
 //! 同时含字母和数字」，而 `/home/l28756/.pinvou3/model-store/models` 正好命中——
@@ -440,12 +444,14 @@ struct FileState {
     /// 写到上限之后置成 `None`，此后这条运行不再落盘。
     file: Option<std::fs::File>,
     written: u64,
+    /// 进度行的"日志省略"说明只留一次。
+    progress_notice_emitted: bool,
 }
 
 impl RunLogFile {
     /// 为一次运行开一个日志文件。**开不出来就返回 `None`，绝不让操作本身失败**：
     /// 日志是诊断手段，不是功能；为了记日志而让用户下不了模型是本末倒置。
-    pub fn open(run_id: &str, label: &str) -> Option<Self> {
+    pub fn open(run_id: &str, label: &str, active_run_ids: &[String]) -> Option<Self> {
         let dir = logs_dir();
         if {
             use std::os::unix::fs::DirBuilderExt;
@@ -458,7 +464,7 @@ impl RunLogFile {
         {
             return None;
         }
-        prune_old_logs(&dir);
+        prune_old_logs(&dir, active_run_ids);
         let path = dir.join(format!("{}.log", safe_stem(run_id)));
         // 0600，且每次打开都重新收紧权限——早先版本或外部工具留下的松权限文件
         // 会一直松着（见 `filesystem::open_private_append_file` 的说明）。
@@ -477,6 +483,7 @@ impl RunLogFile {
             state: Mutex::new(FileState {
                 file: Some(file),
                 written: written + header.len() as u64,
+                progress_notice_emitted: false,
             }),
         })
     }
@@ -488,6 +495,22 @@ impl RunLogFile {
     /// 落一行。入参是**已经 `strip_ansi` 过、已经切好行**的那条既有出口上的行
     /// （`service::RunLog::push`）。
     pub fn append(&self, line: &str) {
+        // 进度行不落盘（2026-10-20 评审 P2）：`LMM_PROGRESS_BYTES` 是高频单调计数器
+        // ——168GB 下载按 1MB 粒度 ≈ 16.8 万行，会把 4MiB 预算在下载中途吃光，之后
+        // 真正的报错不再落盘。界面实时显示进度；这里只留一次说明。
+        if line
+            .trim_start()
+            .starts_with(super::script_runner::PROGRESS_MARKER)
+        {
+            let mut state = self.state.lock();
+            if state.progress_notice_emitted {
+                return;
+            }
+            state.progress_notice_emitted = true;
+            drop(state);
+            self.append("…… 下载进度已在界面实时显示，日志省略重复的进度行 ……");
+            return;
+        }
         let text = sanitize_for_disk(line);
         if text.trim().is_empty() {
             return;
@@ -536,17 +559,27 @@ impl RunLogFile {
 
 /// 只留最近 `MAX_RUN_FILES` 份。按 mtime 排，拿不到 mtime 的排最后（宁可留着
 /// 也不要因为读不到元数据就删掉一份可能有用的日志）。
-fn prune_old_logs(dir: &Path) {
+///
+/// 两个不能删的例外（2026-10-20 评审 P2）：
+/// - **活跃运行的日志**（`active_run_ids`）：脚本静默期（等输入最长 600s）里它的
+///   mtime 会变旧，下一次别的运行 open 触发轮转时它正落在删除线上——fd 还开着，
+///   删掉后写入全进孤儿 inode，「导出日志」从此读不到这次运行；
+/// - **`.export.log`**：那是用户手动导出的产物，不是运行日志——不该吃 20 份预算，
+///   更不该被静默删掉。
+fn prune_old_logs(dir: &Path, active_run_ids: &[String]) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
+    let active: std::collections::HashSet<String> =
+        active_run_ids.iter().map(|id| safe_stem(id)).collect();
     let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
         .flatten()
         .filter(|entry| {
-            entry
-                .path()
-                .extension()
-                .is_some_and(|extension| extension == "log")
+            let path = entry.path();
+            path.extension().is_some_and(|extension| extension == "log")
+                && !path
+                    .file_stem()
+                    .is_some_and(|stem| stem.to_string_lossy().ends_with(".export"))
         })
         .map(|entry| {
             let modified = entry
@@ -561,6 +594,13 @@ fn prune_old_logs(dir: &Path) {
     }
     files.sort_by(|a, b| b.0.cmp(&a.0));
     for (_, path) in files.into_iter().skip(MAX_RUN_FILES - 1) {
+        // 活跃运行的日志宁可让预算临时超一份，也不能删。
+        if path
+            .file_stem()
+            .is_some_and(|stem| active.contains(stem.to_string_lossy().as_ref()))
+        {
+            continue;
+        }
         let _ = std::fs::remove_file(path);
     }
 }
@@ -772,7 +812,8 @@ mod tests {
     fn nothing_secret_ever_reaches_the_file_on_disk() {
         let _home = config::TempHome::new();
         register_secret("literal-secret-value-42");
-        let file = RunLogFile::open("run-TeStId_1", "下载 hf_HeaderTokenAbCdEf0123456789").unwrap();
+        let file =
+            RunLogFile::open("run-TeStId_1", "下载 hf_HeaderTokenAbCdEf0123456789", &[]).unwrap();
         file.append("+ export HF_TOKEN=hf_AbCdEfGhIjKlMnOpQrStUvWxYz012345");
         file.append("curl -H 'Authorization: Bearer hf_AbCdEfGhIjKlMnOpQrStUvWxYz012345' https://hf-mirror.com");
         file.append("openai key sk-proj-0123456789abcdefghijklmnop");
@@ -814,7 +855,7 @@ mod tests {
     #[test]
     fn a_single_run_log_stops_growing_at_the_cap() {
         let _home = config::TempHome::new();
-        let file = RunLogFile::open("run-cap", "封顶测试").unwrap();
+        let file = RunLogFile::open("run-cap", "封顶测试", &[]).unwrap();
         let line = "x".repeat(MAX_LINE_CHARS - 1);
         // 略多于上限所需的行数，确保踩过界
         for _ in 0..(MAX_RUN_LOG_BYTES as usize / MAX_LINE_CHARS + 4) {
@@ -833,11 +874,37 @@ mod tests {
         );
     }
 
+    /// 进度行不吃落盘预算（2026-10-20 评审 P2）：16.8 万行进度若逐行落盘，
+    /// 4MiB 预算在下载中途耗尽，之后真正的报错不再落盘。
+    #[test]
+    fn progress_lines_do_not_consume_the_disk_budget() {
+        let _home = config::TempHome::new();
+        let file = RunLogFile::open("run-progress", "进度测试", &[]).unwrap();
+        for i in 0..2_000 {
+            file.append(&format!("LMM_PROGRESS_BYTES={i}/999999"));
+        }
+        file.append("真实错误：磁盘空间不足");
+        file.finish("失败");
+
+        let content = std::fs::read_to_string(file.path()).unwrap();
+        assert!(
+            !content.contains("LMM_PROGRESS_BYTES"),
+            "进度行不该落盘：\n{}",
+            &content[..content.len().min(400)]
+        );
+        assert_eq!(
+            content.matches("省略重复的进度行").count(),
+            1,
+            "说明只留一次"
+        );
+        assert!(content.contains("真实错误"), "报错必须落盘：\n{content}");
+    }
+
     /// 导出那份比落盘那份更严，而且是**重新生成**的快照。
     #[test]
     fn export_rewrites_the_log_through_the_stricter_sanitizer() {
         let _home = config::TempHome::new();
-        let file = RunLogFile::open("run-export", "导出测试").unwrap();
+        let file = RunLogFile::open("run-export", "导出测试", &[]).unwrap();
         file.append("ssh 192.168.31.42 连接超时，权重在 /home/l28756/.pinvou3/model-store/models");
         file.finish("失败");
 
@@ -860,7 +927,7 @@ mod tests {
     #[test]
     fn oversized_logs_never_return_an_export_or_clipboard_snapshot() {
         let _home = config::TempHome::new();
-        let file = RunLogFile::open("run-oversize", "测试").unwrap();
+        let file = RunLogFile::open("run-oversize", "测试", &[]).unwrap();
         let source = std::fs::OpenOptions::new()
             .write(true)
             .open(file.path())
@@ -875,7 +942,7 @@ mod tests {
     fn old_run_logs_get_pruned() {
         let _home = config::TempHome::new();
         for index in 0..(MAX_RUN_FILES + 5) {
-            let file = RunLogFile::open(&format!("run-{index:03}"), "轮转测试").unwrap();
+            let file = RunLogFile::open(&format!("run-{index:03}"), "轮转测试", &[]).unwrap();
             file.append("一行");
             file.finish("成功");
         }
@@ -885,6 +952,74 @@ mod tests {
             .filter(|entry| entry.path().extension().is_some_and(|e| e == "log"))
             .count();
         assert!(count <= MAX_RUN_FILES, "轮转没生效，目录里有 {count} 份");
+    }
+
+    fn set_mtime(path: &std::path::Path, when: std::time::SystemTime) {
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        file.set_times(
+            std::fs::FileTimes::new()
+                .set_accessed(when)
+                .set_modified(when),
+        )
+        .unwrap();
+    }
+
+    /// 活跃运行的日志不能被轮转删掉（2026-10-20 评审 P2）：等输入的静默期
+    /// （最长 600s）里它的 mtime 会变旧——下一次别的运行 open 触发轮转时，
+    /// 它恰好落在删除线上；fd 还开着，删掉后写入全进孤儿 inode，
+    /// 「导出日志」从此读不到这次运行。
+    #[test]
+    fn an_active_run_log_is_never_pruned_even_when_oldest() {
+        let _home = config::TempHome::new();
+        let dir = logs_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let ancient = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        for index in 0..(MAX_RUN_FILES + 3) {
+            let path = dir.join(format!("stale-{index:03}.log"));
+            std::fs::write(&path, "stale").unwrap();
+            set_mtime(
+                &path,
+                ancient + std::time::Duration::from_secs(1 + index as u64),
+            );
+        }
+        // 活跃那份的 mtime 最旧（等输入静默期的形态），没有保护必被删
+        let active_path = dir.join("run-waiting-input.log");
+        std::fs::write(&active_path, "waiting for input").unwrap();
+        set_mtime(&active_path, ancient);
+        RunLogFile::open("run-new", "新运行", &["run-waiting-input".to_string()]).unwrap();
+        assert!(active_path.exists(), "活跃运行的日志被轮转删掉了");
+        let count = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                let path = entry.path();
+                path.extension().is_some_and(|e| e == "log")
+                    && !path
+                        .file_stem()
+                        .is_some_and(|stem| stem.to_string_lossy().ends_with(".export"))
+            })
+            .count();
+        assert!(
+            count <= MAX_RUN_FILES + 1,
+            "其余陈旧日志照常轮转（活跃那份允许临时超一份），目录里有 {count} 份"
+        );
+    }
+
+    /// `.export.log` 是用户手动导出的产物：不吃 20 份预算，也不被静默删除。
+    #[test]
+    fn user_export_files_are_not_part_of_the_run_log_budget() {
+        let _home = config::TempHome::new();
+        let dir = logs_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let export = dir.join("run-old.export.log");
+        std::fs::write(&export, "exported snapshot").unwrap();
+        set_mtime(&export, std::time::SystemTime::UNIX_EPOCH);
+        for index in 0..(MAX_RUN_FILES + 5) {
+            let file = RunLogFile::open(&format!("run-e{index:03}"), "导出预算测试", &[]).unwrap();
+            file.append("一行");
+            file.finish("成功");
+        }
+        assert!(export.exists(), "用户导出的文件被轮转删掉了");
     }
 
     #[test]

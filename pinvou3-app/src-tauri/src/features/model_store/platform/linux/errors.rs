@@ -269,12 +269,17 @@ fn strip_stage_prefix(line: &str) -> &str {
 /// 8 个字的依据：中文建议句的引导词都很短（`也可以` / `建议` / `提示：` / `请先`），
 /// 而合格的报错句在把话说到 `请检查` 之前一定先说了发生什么
 /// （`拉取引擎镜像失败，` 就已经 9 个字）。窗口再宽就会开始吃掉好句子。
+/// 建议词落进窗口但**窗口前半已有错误词**的行不算建议（见 [`is_advice_line`]），
+/// 所以 `下载失败，请检查网络后重试` 这类四字报错 + 建议尾巴的短句不会被误伤。
 const ADVICE_LEAD_CHARS: usize = 8;
 
 /// 这一行是不是**通篇建议**。判据看位置，理由见 [`ADVICE_MARKERS`]。
 ///
 /// `has_error_signal` 是"这行含错误词吗"。两条判据：
-/// 1. 建议词落在行首那一小段里 —— 整句话从建议开头，它不是原因；
+/// 1. 建议词落在行首那一小段里、且 marker 之前**没有错误词** —— 整句话从建议开头，
+///    它不是原因。2026-10-20 评审 A3：`下载失败，请检查网络后重试` 这类短句的
+///    建议词也挤得进行首窗口，但它前半句已经把"发生了什么"说完了——回看
+///    marker 之前：已有错误词的是「报错带建议尾巴」，不是通篇建议。
 /// 2. 整行一个错误词都没有、却有建议词 —— 那也只是一句好心的下一步。
 fn is_advice_line(lowered: &str, has_error_signal: bool) -> bool {
     // 先扒掉 `[安装引擎] ` 这类阶段前缀和 `ERROR:` / `错误：` 这类错误前缀，否则
@@ -285,13 +290,28 @@ fn is_advice_line(lowered: &str, has_error_signal: bool) -> bool {
     // 因为"输入没有前缀"这个前提写在另一个文件里，而它一旦变了，失效是静默的。
     let stripped = strip_error_prefix(&strip_stage_prefix(lowered));
     let lead: String = stripped.chars().take(ADVICE_LEAD_CHARS).collect();
-    if ADVICE_MARKERS.iter().any(|marker| lead.contains(marker)) {
-        return true;
+    if let Some(marker_start) = ADVICE_MARKERS
+        .iter()
+        .filter_map(|marker| lead.find(marker))
+        .min()
+    {
+        return !contains_error_word(&lead[..marker_start]);
     }
     !has_error_signal
         && ADVICE_MARKERS
             .iter()
             .any(|marker| stripped.contains(marker))
+}
+
+/// 文本里有没有错误词（[`SCRIPT_ERROR_PATTERNS`] 的关键词或 [`ERROR_TOKENS`]）。
+/// [`is_advice_line`] 回看窗口前半时用——和打分同一把尺子，两个口径才不会各自漂移。
+fn contains_error_word(text: &str) -> bool {
+    SCRIPT_ERROR_PATTERNS
+        .iter()
+        .any(|(keyword, _)| contains_as_word(text, keyword))
+        || ERROR_TOKENS
+            .iter()
+            .any(|token| contains_as_word(text, token))
 }
 
 /// 给一行打分：越大越像"失败的真正原因"。
@@ -553,6 +573,40 @@ mod tests {
             humanize_script_message(pick_failure_line(&lines).unwrap()),
             "磁盘空间不足"
         );
+    }
+
+    /// 2026-10-20 评审 A3：短口语句式——错误词和建议词都挤在行首窗口里。
+    /// 「下载失败，请检查网络后重试」此前被判成通篇建议（+3−12=−9），输给 0 分的
+    /// 中性行乃至 `LMM_PROGRESS_BYTES` 协议行，摘要把进度行当"失败原因"呈现。
+    /// 判据修法：marker 落在行首窗口时回看前半——已有错误词的是「报错带建议尾巴」。
+    #[test]
+    fn short_failure_with_advice_tail_beats_neutral_lines() {
+        for sentence in [
+            "下载失败，请检查网络后重试",
+            "启动失败，请确认显存充足",
+            "连接失败，请确认从机已开机",
+        ] {
+            let lines = vec![
+                "LMM_PROGRESS_BYTES=1024/2048".to_string(),
+                "正在清理临时文件".to_string(),
+                sentence.to_string(),
+            ];
+            assert_eq!(pick_failure_line(&lines), Some(sentence), "{sentence}");
+            assert!(failure_line_score(sentence) > 0, "{sentence}");
+        }
+    }
+
+    /// 回看判据只救「报错带建议尾巴」的句子：marker 之前没有错误词的通篇建议
+    /// （从建议词开头、或者整行无错误信号）仍然要被压到负分。
+    #[test]
+    fn pure_advice_lines_still_score_negative() {
+        for advice in [
+            "也可以在别的机器上拉好后用 docker save/load 拷进来",
+            "请检查 timeout 配置后重试",
+            "建议配置镜像加速器",
+        ] {
+            assert!(failure_line_score(advice) < 0, "{advice}");
+        }
     }
 
     #[test]

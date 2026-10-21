@@ -103,8 +103,8 @@ function revokeApiKey(keyId) { return invokeTauri('model_store_revoke_api_key', 
  * @param {string} cardId - 卡片 ID。
  * @returns {Promise<{run_id:string}>} 运行句柄。
  */
-function startCardScripts(cardId, rollback = false, confirmed = false) {
-  return invokeTauri('model_store_start_card_scripts', { cardId, rollback: rollback === true, confirmed: confirmed === true });
+function startCardScripts(cardId, confirmed = false) {
+  return invokeTauri('model_store_start_card_scripts', { cardId, confirmed: confirmed === true });
 }
 
 function startDownload(cardId) {

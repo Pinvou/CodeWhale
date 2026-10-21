@@ -165,20 +165,27 @@ struct RunLog {
     /// 脚本于是拿着错误的输入继续往下跑（双机部署里那就是拿旧 IP 去连从机）。
     /// 所以"还在不在等"得由后端说了算，它是唯一知道真相的一方。
     awaiting_prompt: Mutex<bool>,
+    /// 脚本有没有声明「失败后保留原生引擎进程」（`LMM_RETAINED_NATIVE_PROCESS=1`）。
+    ///
+    /// 声明过就**置位到底**：界面的「二次确认停用」入口靠它，而它以前只能从日志行
+    /// 里认——回放一裁剪（前端只回放末尾 200 行）标志就丢，任务过期后残存进程占着
+    /// 内存却没有任何常驻停用入口。和 `awaiting_prompt` 一样由后端结构化下发。
+    retained_native: Mutex<bool>,
     finished_at: Mutex<Option<Instant>>,
     /// 有新行或结束时唤醒正在长轮询的调用
     notify: Arc<tokio::sync::Notify>,
 }
 
 impl RunLog {
-    fn new(run_id: &str, label: &str) -> Self {
+    fn new(run_id: &str, label: &str, active_run_ids: &[String]) -> Self {
         Self {
             lines: Mutex::new(LineRing::new()),
-            disk: RunLogFile::open(run_id, label),
+            disk: RunLogFile::open(run_id, label, active_run_ids),
             docker_progress_notice_emitted: Mutex::new(false),
             outcome: Mutex::new(None),
             cancelled: Mutex::new(false),
             awaiting_prompt: Mutex::new(false),
+            retained_native: Mutex::new(false),
             finished_at: Mutex::new(None),
             notify: Arc::new(tokio::sync::Notify::new()),
         }
@@ -188,6 +195,10 @@ impl RunLog {
         // 提示行之后脚本就阻塞在 read 上，再出现任何一行输出就说明它已经拿到
         // 答案往下走了——这是日志流里唯一能看出"还在不在等"的地方。
         *self.awaiting_prompt.lock() = is_prompt_line(line);
+        // 「失败后保留进程」是一次性声明，置位后不回退（后续行不会撤销它）。
+        if line.trim() == "LMM_RETAINED_NATIVE_PROCESS=1" {
+            *self.retained_native.lock() = true;
+        }
         // 落盘挂在这里、而不是在 pty 读取循环里另开一个出口：这一条是「已经
         // strip_ansi 过、已经切好行、已经加过阶段前缀」的唯一汇聚点，挂在它后面
         // 就自动继承了那些处理。落盘前还要过一道定向脱敏，见 run_log_store。
@@ -221,6 +232,7 @@ impl RunLog {
             outcome: Mutex::new(None),
             cancelled: Mutex::new(false),
             awaiting_prompt: Mutex::new(false),
+            retained_native: Mutex::new(false),
             finished_at: Mutex::new(None),
             notify: Arc::new(tokio::sync::Notify::new()),
         }
@@ -297,7 +309,11 @@ impl ModelStoreService {
 
     fn new_run(&self, run_id: &str, label: &str) -> Arc<RunLog> {
         self.sweep_old_runs();
-        let log = Arc::new(RunLog::new(run_id, label));
+        // 新建日志前把「现有活跃 + 自己」交给轮转：正在跑的运行日志不能被
+        // prune 删掉（等输入的静默期里 mtime 会变旧，恰好落在删除线上）。
+        let mut active: Vec<String> = self.runs.lock().keys().cloned().collect();
+        active.push(run_id.to_string());
+        let log = Arc::new(RunLog::new(run_id, label, &active));
         self.runs
             .lock()
             .insert(run_id.to_string(), Arc::clone(&log));
@@ -728,11 +744,10 @@ pub fn start_download(service: &Arc<ModelStoreService>, card_id: String) -> Resu
 pub fn start_card_scripts(
     service: &Arc<ModelStoreService>,
     card_id: String,
-    rollback: bool,
     confirmed: bool,
 ) -> Result<Value, String> {
     if !confirmed {
-        return Err("更新或回退卡片脚本需要明确确认；不会下载或删除模型权重。".into());
+        return Err("更新卡片脚本需要明确确认；不会下载或删除模型权重。".into());
     }
     let card = card_id.clone();
     let op = CardOp {
@@ -743,14 +758,14 @@ pub fn start_card_scripts(
         let _startup_guard = super::runtime_guard::StartupGuard::acquire()?;
         log.push("检查模型运行状态及完整脚本包；不修改权重或引擎文件…");
         let changed = ModelManager::new(None, None)
-            .change_card_scripts(&card, rollback, &control)
+            .change_card_scripts(&card, &control)
             .map_err(|e| e.to_string())?;
         log.push(if changed {
-            "脚本包已安全保存。已部署模型请重新部署后再启用；如有问题可回退上次脚本。"
+            "脚本包已安全保存。已部署模型请重新部署后再启用。"
         } else {
             "本地脚本包已是当前版本，没有修改。"
         });
-        Ok(json!({"changed": changed, "rollback": rollback}))
+        Ok(json!({ "changed": changed }))
     })
 }
 
@@ -957,6 +972,10 @@ pub async fn run_log(
                 // 再弹一次，用户填的答案落进一个没人来取的槽，下一次真正的提问
                 // 会被这份陈答案顶掉。
                 "awaiting_input": *log.awaiting_prompt.lock(),
+                // 「这次运行声明过保留原生进程吗」。结构化下发而不是让前端从日志
+                // 行里认：回放一裁剪，行可以丢，声明不能丢——丢了它，残存进程就
+                // 没有常驻的停用入口了。
+                "retained_native_process": *log.retained_native.lock(),
                 "result": result,
                 "error": error,
             }));
@@ -1289,6 +1308,28 @@ mod tests {
         log.push("LMM_PROMPT=password|输入本机密码");
         log.answered();
         assert!(!*log.awaiting_prompt.lock());
+    }
+
+    /// 「失败后保留原生进程」是一次性声明：置位后不随后续行回退，运行结束也保留——
+    /// 结束后正是残存进程占内存的时段，「二次确认停用」入口恰恰这时候最不能消失。
+    /// 2026-10-20 评审 A5：此前前端只能从日志行里认这行声明，回放一裁剪（末尾
+    /// 200 行）标志就丢。结构化字段跟着 run_log 走，行被裁掉声明仍在。
+    #[test]
+    fn retained_native_declaration_is_sticky() {
+        let log = RunLog::new_memory_only();
+        assert!(!*log.retained_native.lock());
+
+        // 协议行经 prefix_log_line 原样透传（不加阶段前缀），到达这里就是裸行
+        log.push("LMM_RETAINED_NATIVE_PROCESS=1");
+        assert!(*log.retained_native.lock(), "声明行一出现就置位");
+
+        // 后续输出不撤销声明
+        log.push("引擎进程已保留，等待手动停止");
+        assert!(*log.retained_native.lock());
+
+        // 结束也不撤销——任务过期后仍要有常驻的停用入口
+        log.finish(Err("启用失败".to_string()), false);
+        assert!(*log.retained_native.lock());
     }
 
     /// 跑完了就没有什么可答的了。留着这个标志，界面接回一条已结束的运行时会弹出

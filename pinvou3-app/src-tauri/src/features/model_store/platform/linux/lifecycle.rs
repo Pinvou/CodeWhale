@@ -1869,12 +1869,13 @@ impl ModelManager {
         })
     }
 
-    /// Explicit, non-executing update/rollback. Caller holds card and startup
+    /// Explicit, non-executing update. Caller holds card and startup
     /// locks; complete fetch/validation precedes one atomic DB transaction.
+    /// （「回退上次脚本」已随界面入口一并移除：更新永远向前取商店当前版本，
+    /// 历史快照不再保留。）
     pub fn change_card_scripts(
         &self,
         card_id: &str,
-        rollback: bool,
         control: &script_runner::RunControl,
     ) -> Result<bool, ModelManagerError> {
         let rec = self.get_record(card_id)?;
@@ -1882,11 +1883,7 @@ impl ModelManager {
         if control.cancelled() {
             return Err(ModelManagerError::new("已取消，原脚本未修改。"));
         }
-        let pkg = if rollback {
-            let (scripts, assets) =
-                db::card_package_backup(card_id).map_err(ModelManagerError::new)?;
-            CardPackage { scripts, assets }
-        } else {
+        let pkg = {
             let card = self.store.get_card(card_id)?;
             let empty = BTreeMap::new();
             super::card_update::validate_inventory(

@@ -79,15 +79,9 @@ pub async fn model_store_delete_engine(
 pub fn model_store_start_card_scripts(
     service: State<'_, Arc<ModelStoreService>>,
     card_id: String,
-    rollback: Option<bool>,
     confirmed: Option<bool>,
 ) -> Result<Value, String> {
-    model_store::start_card_scripts(
-        &service,
-        card_id,
-        rollback.unwrap_or(false),
-        confirmed.unwrap_or(false),
-    )
+    model_store::start_card_scripts(&service, card_id, confirmed.unwrap_or(false))
 }
 
 #[tauri::command]

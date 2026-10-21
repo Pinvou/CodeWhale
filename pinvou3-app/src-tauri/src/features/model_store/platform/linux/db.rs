@@ -335,12 +335,9 @@ fn migrate_engine_primary_key(conn: &Connection) -> rusqlite::Result<()> {
 pub fn init_db() -> rusqlite::Result<()> {
     let conn = connect()?;
     conn.execute_batch(SCHEMA)?;
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS card_script_backup (
-        card_id TEXT PRIMARY KEY REFERENCES store_models(card_id) ON DELETE CASCADE,
-        scripts_json TEXT NOT NULL, assets_json TEXT NOT NULL
-    );",
-    )?;
+    // card_script_backup 是「回退上次脚本」功能的快照表，该功能已随界面入口移除
+    // （2026-10-19）：更新永远向前取商店当前版本。新库不再建表；存量库里的表和
+    // 陈旧快照在下次成功更新时由 replace_card_package 顺带清掉。
     migrate(&conn)?;
     // 顺序要紧：先把缺的列补齐（老表可能还没有 docker_image），再重建主键，
     // 否则搬数据那句 SELECT 会因为列不存在而失败。
@@ -822,8 +819,11 @@ pub fn set_scripts_content(
     Ok(())
 }
 
-/// Replace the complete cached package and its one-step rollback snapshot in a
-/// single SQLite transaction. No weights, engine files or runtime state change.
+/// Replace the complete cached package in a single SQLite transaction. No
+/// weights, engine files or runtime state change. The legacy rollback
+/// snapshot (`card_script_backup`) is dropped, not refreshed: the rollback
+/// entry point was removed with its UI, and a stale snapshot would only
+/// suggest a capability that no longer exists.
 pub fn replace_card_package(
     expected: &StoreModelRecord,
     scripts: &std::collections::BTreeMap<String, ScriptBlob>,
@@ -852,10 +852,23 @@ pub fn replace_card_package(
     let encode = |value: &std::collections::BTreeMap<String, ScriptBlob>| {
         serde_json::to_string(value).map_err(|e| e.to_string())
     };
-    tx.execute("INSERT INTO card_script_backup(card_id, scripts_json, assets_json) VALUES (?1, ?2, ?3)
-        ON CONFLICT(card_id) DO UPDATE SET scripts_json=excluded.scripts_json, assets_json=excluded.assets_json",
-        params![expected.card_id, encode(&current.scripts_content)?, encode(&current.assets_content)?])
+    // 存量库可能还挂着「回退」时代的快照行；表不在则跳过（新库不建这张表）。
+    let has_backup_table = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master \
+             WHERE type='table' AND name='card_script_backup')",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|found| found != 0)
+        .unwrap_or(false);
+    if has_backup_table {
+        tx.execute(
+            "DELETE FROM card_script_backup WHERE card_id=?1",
+            [&expected.card_id],
+        )
         .map_err(|e| e.to_string())?;
+    }
     // Any asset/entry can affect deployment; comparing only deploy.sh misses
     // common.sh fixes. Empty fingerprint explicitly requires a redeploy.
     tx.execute(
@@ -872,32 +885,6 @@ pub fn replace_card_package(
     tx.commit()
         .map_err(|e| format!("保存更新失败，已保留原版本：{e}"))?;
     Ok(true)
-}
-
-pub fn card_package_backup(
-    card_id: &str,
-) -> Result<
-    (
-        std::collections::BTreeMap<String, ScriptBlob>,
-        std::collections::BTreeMap<String, ScriptBlob>,
-    ),
-    String,
-> {
-    let conn = connect().map_err(|e| e.to_string())?;
-    let row: Option<(String, String)> = conn
-        .query_row(
-            "SELECT scripts_json, assets_json FROM card_script_backup WHERE card_id=?1",
-            [card_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(|e| e.to_string())?;
-    let (scripts, assets) =
-        row.ok_or("没有可回退的脚本版本。可以先检查卡片更新；模型和权重不会被删除。")?;
-    Ok((
-        serde_json::from_str(&scripts).map_err(|e| format!("回退副本无法读取：{e}"))?,
-        serde_json::from_str(&assets).map_err(|e| format!("回退副本无法读取：{e}"))?,
-    ))
 }
 
 pub struct AddStoreModelParams<'a> {
@@ -1532,8 +1519,24 @@ mod tests {
         )])
     }
 
+    fn backup_table_exists() -> bool {
+        connect()
+            .unwrap()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master \
+                 WHERE type='table' AND name='card_script_backup')",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|found| found != 0)
+            .unwrap_or(false)
+    }
+
+    /// 「回退上次脚本」移除后（2026-10-19）：更新只向前，新库不建
+    /// card_script_backup，成功更新也不留快照；模型数据（大小/状态/权重时间戳）
+    /// 照旧不被脚本更新触碰。
     #[test]
-    fn package_update_backup_and_rollback_preserve_model_data() {
+    fn package_update_preserves_model_data_and_leaves_no_rollback_snapshot() {
         let _ctx = setup_temp_db();
         let rec = script_update_record();
         let old = test_package("old");
@@ -1547,13 +1550,36 @@ mod tests {
         assert_eq!(updated.status, expected.status);
         assert_eq!(updated.weights_ready_at, expected.weights_ready_at);
         assert_eq!(updated.deployed_script_sha256.as_deref(), Some(""));
-        assert_eq!(card_package_backup(&rec.card_id).unwrap().0, old);
+        assert!(!backup_table_exists(), "新库不建回退快照表");
         assert!(!replace_card_package(&updated, &new, &assets).unwrap());
-        assert_eq!(card_package_backup(&rec.card_id).unwrap().0, old);
-        assert!(replace_card_package(&updated, &old, &assets).unwrap());
-        assert_eq!(card_package_backup(&rec.card_id).unwrap().0, new);
         delete_store_model(&rec.card_id).unwrap();
-        assert!(card_package_backup(&rec.card_id).is_err());
+    }
+
+    /// 存量库还挂着「回退」时代的快照表：下次成功更新要把它清掉，
+    /// 别留一个指向已不存在能力的死快照。
+    #[test]
+    fn package_update_clears_legacy_rollback_snapshot() {
+        let _ctx = setup_temp_db();
+        let rec = script_update_record();
+        let conn = connect().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE card_script_backup (card_id TEXT PRIMARY KEY, \
+             scripts_json TEXT NOT NULL, assets_json TEXT NOT NULL);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO card_script_backup VALUES (?1, '{}', '{}')",
+            [&rec.card_id],
+        )
+        .unwrap();
+        assert!(replace_card_package(&rec, &test_package("new"), &Default::default()).unwrap());
+        let left: i64 = connect()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM card_script_backup", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(left, 0, "陈旧快照随更新清除");
     }
 
     #[test]
@@ -1569,11 +1595,11 @@ mod tests {
                 .scripts_content
                 .is_empty()
         );
-        assert!(card_package_backup(&rec.card_id).is_err());
+        assert!(!backup_table_exists());
     }
 
     #[test]
-    fn failed_package_commit_leaves_original_and_backup_unchanged() {
+    fn failed_package_commit_leaves_original_unchanged() {
         let _ctx = setup_temp_db();
         let rec = script_update_record();
         connect().unwrap().execute_batch("CREATE TRIGGER reject_package BEFORE UPDATE OF scripts_content_json ON store_models
@@ -1586,7 +1612,7 @@ mod tests {
                 .scripts_content
                 .is_empty()
         );
-        assert!(card_package_backup(&rec.card_id).is_err());
+        assert!(!backup_table_exists());
     }
 
     #[test]

@@ -10,14 +10,14 @@ const { ModelDetailDialog } = await loadJsx('../src/features/model-store/ModelDe
 const { ModelStoreView } = await loadJsx('../src/features/model-store/ModelStoreView.jsx', import.meta.url);
 const { dict } = await import('./helpers/i18n-all.js');
 
-test('script changes require explicit boolean confirmation and rollback choice', async () => {
+test('script changes require explicit boolean confirmation', async () => {
   const previous = globalThis.__TAURI__;
   const calls = [];
   globalThis.__TAURI__ = { core: { invoke: async (name, args) => { calls.push([name, args]); return {}; } } };
   try {
     for (const value of [undefined, null, false, 'true', 'false', {}, true]) {
-      await startCardScripts('card', value, value);
-      assert.deepEqual(calls.at(-1), ['model_store_start_card_scripts', { cardId: 'card', rollback: value === true, confirmed: value === true }]);
+      await startCardScripts('card', value);
+      assert.deepEqual(calls.at(-1), ['model_store_start_card_scripts', { cardId: 'card', confirmed: value === true }]);
     }
   } finally {
     if (previous === undefined) delete globalThis.__TAURI__;
@@ -154,7 +154,6 @@ for (const language of ['zh', 'en', 'ja']) {
       assert.equal(button.textContent, copy.actionUpdate);
       assert.equal(button.disabled, busy);
       assert.equal(ui.container.querySelectorAll('[data-testid="model-store-rollback-scripts"]').length, 0);
-      assert.ok(!ui.container.textContent.includes(copy.cardScriptsRollback));
       assert.equal(ui.container.querySelectorAll('[data-testid="model-store-detail-action-uninstall"]').length, 0);
       assert.equal(ui.container.querySelectorAll('[data-testid="model-store-detail-action-deploy"]').length, 0);
       await ui.click('[data-testid="model-store-detail-action-update"]');
@@ -195,7 +194,7 @@ for (const running of [false, true]) {
     const expected = [
       ...(running ? [{ cardId: 'card', action: 'stop' }] : []),
       { cardId: 'card', action: 'uninstall', purgeWeights: false },
-      { cardId: 'card', rollback: false, confirmed: true },
+      { cardId: 'card', confirmed: true },
     ];
     for (let index = 0; index < expected.length; index += 1) {
       // The backend has returned run_id, but run_log remains pending.
