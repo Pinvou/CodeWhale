@@ -194,7 +194,7 @@ func TestF03PipelineFailedAuthorityDoesNotStarveOtherRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = c.ImportProviderBill(ctx, actor, first.Channel, now, provider.rows)
+	_, err = c.ImportProviderBill(ctx, actor, first.Channel, reconciliationFixtureDateForPaidAt(now), provider.rows)
 	var pending *reconciliationPendingError
 	if !errors.As(err, &pending) {
 		t.Fatal("failed provider incorrectly completed", err)
@@ -301,7 +301,7 @@ func TestF03PipelineHundredThousandRowsWithoutFinancialLock(t *testing.T) {
 		}
 	}()
 	start := time.Now()
-	run, err := c.ImportProviderBill(ctx, uuid.New(), order.Channel, r.now(), input)
+	run, err := c.ImportProviderBill(ctx, uuid.New(), order.Channel, reconciliationFixtureDateForPaidAt(r.now()), input)
 	close(stop)
 	<-writerDone
 	<-samplerDone
@@ -338,7 +338,7 @@ func TestF03PipelineDistinctCasesResumeAfterCommittedProgress(t *testing.T) {
 	defer cancel()
 	result := make(chan error, 1)
 	go func() {
-		_, err := c.ImportProviderBill(operation, uuid.New(), order.Channel, r.now(), rows)
+		_, err := c.ImportProviderBill(operation, uuid.New(), order.Channel, reconciliationFixtureDateForPaidAt(r.now()), rows)
 		result <- err
 	}()
 	progress := 0
@@ -401,16 +401,16 @@ func TestF03ScheduledUnchangedBillObservesLateInternalFacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := c.RunScheduledReconciliation(ctx, "ALIPAY", r.now())
+	first, err := c.RunScheduledReconciliation(ctx, "ALIPAY", reconciliationFixtureDateForPaidAt(r.now()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	same, err := c.RunScheduledReconciliation(ctx, "ALIPAY", r.now())
+	same, err := c.RunScheduledReconciliation(ctx, "ALIPAY", reconciliationFixtureDateForPaidAt(r.now()))
 	if err != nil || same.ID != first.ID {
 		t.Fatal("unchanged duplicated", same, err)
 	}
 	_, order, _, _ := retainedFinanceOrder(t, r, ctx, 1000000, true)
-	second, err := c.RunScheduledReconciliation(ctx, "ALIPAY", r.now())
+	second, err := c.RunScheduledReconciliation(ctx, "ALIPAY", reconciliationFixtureDateForPaidAt(r.now()))
 	if err != nil || second.ID == first.ID {
 		t.Fatal("late facts cached", second, err)
 	}
@@ -418,7 +418,7 @@ func TestF03ScheduledUnchangedBillObservesLateInternalFacts(t *testing.T) {
 	if err != nil || len(cases) != 1 || cases[0].MerchantOrderNo != order.MerchantOrderNo || cases[0].CaseType != "INTERNAL_PAID_PROVIDER_MISSING" {
 		t.Fatal(cases, err)
 	}
-	same, err = c.RunScheduledReconciliation(ctx, "ALIPAY", r.now())
+	same, err = c.RunScheduledReconciliation(ctx, "ALIPAY", reconciliationFixtureDateForPaidAt(r.now()))
 	if err != nil || same.ID != second.ID {
 		t.Fatal("changed observation not stable", same, err)
 	}
@@ -464,7 +464,7 @@ func TestF03ResumeAdmissionRechecksCompletedReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := c.RunScheduledReconciliation(ctx, "ALIPAY", r.now())
+	first, err := c.RunScheduledReconciliation(ctx, "ALIPAY", reconciliationFixtureDateForPaidAt(r.now()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -521,7 +521,7 @@ func TestF03ScheduledProviderOnlyFactsObserveNewOrderBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := c.RunScheduledReconciliation(ctx, row.Channel, r.now())
+	first, err := c.RunScheduledReconciliation(ctx, row.Channel, reconciliationFixtureDateForPaidAt(r.now()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -540,7 +540,7 @@ func TestF03ScheduledProviderOnlyFactsObserveNewOrderBinding(t *testing.T) {
 	if _, err = r.pool.Exec(ctx, `UPDATE payment_orders SET merchant_order_no=$2 WHERE id=$1`, order.ID, row.MerchantOrderNo); err != nil {
 		t.Fatal(err)
 	}
-	second, err := c.RunScheduledReconciliation(ctx, row.Channel, r.now())
+	second, err := c.RunScheduledReconciliation(ctx, row.Channel, reconciliationFixtureDateForPaidAt(r.now()))
 	if err != nil || second.ID == first.ID {
 		t.Fatal("uncredited binding omitted from observation", second, err)
 	}
@@ -552,7 +552,7 @@ func TestF03ScheduledProviderOnlyFactsObserveNewOrderBinding(t *testing.T) {
 	if err != nil || oldCases[0].Status != "IGNORED" {
 		t.Fatal("old acceptance overwritten", oldCases, err)
 	}
-	same, err := c.RunScheduledReconciliation(ctx, row.Channel, r.now())
+	same, err := c.RunScheduledReconciliation(ctx, row.Channel, reconciliationFixtureDateForPaidAt(r.now()))
 	if err != nil || same.ID != second.ID {
 		t.Fatal("same binding duplicated", same, err)
 	}
@@ -567,18 +567,18 @@ func TestF03ScheduledLegacyReceiptWithoutObservationIsPreserved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacy, err := c.RunScheduledReconciliation(ctx, "ALIPAY", r.now())
+	legacy, err := c.RunScheduledReconciliation(ctx, "ALIPAY", reconciliationFixtureDateForPaidAt(r.now()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err = r.pool.Exec(ctx, `UPDATE reconciliation_runs SET active_observation_id=NULL WHERE id=$1`, legacy.ID); err != nil {
 		t.Fatal(err)
 	}
-	observed, err := c.RunScheduledReconciliation(ctx, "ALIPAY", r.now())
+	observed, err := c.RunScheduledReconciliation(ctx, "ALIPAY", reconciliationFixtureDateForPaidAt(r.now()))
 	if err != nil || observed.ID == legacy.ID {
 		t.Fatal("legacy cached without verifiable observation", observed, err)
 	}
-	same, err := c.RunScheduledReconciliation(ctx, "ALIPAY", r.now())
+	same, err := c.RunScheduledReconciliation(ctx, "ALIPAY", reconciliationFixtureDateForPaidAt(r.now()))
 	if err != nil || same.ID != observed.ID {
 		t.Fatal("new observation duplicated", same, err)
 	}

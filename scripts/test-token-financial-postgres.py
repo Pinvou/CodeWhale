@@ -32,6 +32,8 @@ REQUIRED = {
     "TestF05UnsettledContentRetention",
     "TestF05ExpiredUnacquiredDispatchRecovery",
     "TestF05PersonalHistoryAndCancellationPersistedOwnerScope",
+    "TestOrganizationOriginalOwnerCancellationPublicPostgres",
+    "TestRuntimeProtocolPublicationPublicPostgres",
     "TestF05AdminUsageGateOffUsesSafeCollectionProjection",
     "TestPersonalExecutionSameKeyReplaysAtInflightLimit",
     "TestPersonalExecutionPublicPostgresFundsAndReplay",
@@ -42,6 +44,7 @@ REQUIRED = {
 
 ACCOUNT_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/account"
 ACCOUNT_REQUIRED = {
+    "TestMemberUnitsReceiptSurvivesLegalUnitDeletion",
     "TestF06OrganizationStatusProjectionVersionPublicPostgres",
     "TestF06OrganizationDeletionVersionAndTerminalScope",
     "TestF06Review5566377593PublicPostgres",
@@ -52,7 +55,25 @@ BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
 SCHEMA_REQUIRED = {"TestF09EntitlementPackageIndexPublicMigration"}
 OWNER_REQUIRED = {"TestF06OrganizationWalletRequiresLifecycleEvidence"}
+REFUND_REQUIRED = {
+    "TestRefundPersistedSuccessReferenceUsesPublishedCanonicalIdentityPostgres",
+    "TestReviewRefundReconcileRequiresTerminalProviderEvidence",
+    "TestReviewRefundReconcileRejectsMismatchedEvidence",
+    "TestRefundRejectsExistingSuspendedGrantsBeforeReservationPostgres",
+    "TestRefundLegacySuspendedDispatchNeverCallsProviderPostgres",
+    "TestRefundVerifiedSuccessRepairsOriginalSuspendedGrantPostgres",
+    "TestRefundRepairRetainsZeroHistoricalCorrectionSourcePostgres",
+    "TestRefundCorrectedZeroSourceAndPriorSuspensionRecoverTogetherPostgres",
+    "TestRefundPriorSuspensionRepairFrozenGrantChangesFailWithoutEffectsPostgres",
+    "TestRefundUnknownQueryCannotInventSuccessOrDispatchPostgres",
+    "TestRefundOriginalSuccessQueryRetainsCompetingFinancialFreezePostgres",
+    "TestRefundNeverDispatchedReviewCannotBecomeNewProviderRequestPostgres",
+    "TestRefundLegacyUnknownSuccessQueriesOriginalSimulatorThenRepairsPostgres",
+    "TestRefundUnknownMissingSimulatorResultNeverCreatesRefundPostgres",
+    "TestRefundOriginalUnknownSuccessQueriesAndSettlesOrdinaryGrantsPostgres",
+}
 RETAINED_REQUIRED = {
+    *REFUND_REQUIRED,
     "TestLedgerRepairClaimActivationReadErrorsPostgres",
     "TestF06MemberQuotaRestoreUsesOrdinaryPackageExpiry",
     "TestMemberQuotaBatchPersistedFactsAndFinancialReplay",
@@ -62,9 +83,17 @@ RETAINED_REQUIRED = {
     "TestPersonalUsageHoldClockBoundaries",
     "TestF05ExpiredHoldRenewalIsConflictAndUnprovenFundsStayReserved",
 }
-# This original regression is one named leaf test. Other retained roots must
-# still produce their original child-case evidence, not just a parent PASS.
-BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - {"TestF05ExpiredHoldRenewalIsConflictAndUnprovenFundsStayReserved"}
+# These exact roots are named leaves. Every other retained root must still
+# produce completed child-case evidence, not just a parent PASS.
+BILLING_LEAF_REQUIRED = {
+    "TestF05ExpiredHoldRenewalIsConflictAndUnprovenFundsStayReserved",
+    "TestRefundRepairRetainsZeroHistoricalCorrectionSourcePostgres",
+    "TestRefundOriginalSuccessQueryRetainsCompetingFinancialFreezePostgres",
+    "TestRefundNeverDispatchedReviewCannotBecomeNewProviderRequestPostgres",
+    "TestRefundUnknownMissingSimulatorResultNeverCreatesRefundPostgres",
+    "TestRefundOriginalUnknownSuccessQueriesAndSettlesOrdinaryGrantsPostgres",
+}
+BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 
 
 def local_database_url(raw):

@@ -164,10 +164,10 @@ INSERT INTO identities(issuer,subject,user_id,created_at,last_seen_at) VALUES
 			t.Fatal("begin retry fixture")
 		}
 		defer tx.Rollback(context.Background())
-		if _, err = tx.Exec(ctx, `UPDATE approval_executions SET financial_snapshot=financial_snapshot,critical_resource_versions=critical_resource_versions,status='FAILED' WHERE approval_request_id=$1`, item.ID); err != nil {
+		if _, err = tx.Exec(ctx, `UPDATE approval_executions SET financial_snapshot=financial_snapshot,critical_resource_versions=critical_resource_versions,status='FAILED',error_class='INFRASTRUCTURE' WHERE approval_request_id=$1`, item.ID); err != nil {
 			t.Fatal("guard rejected unchanged facts or legal failure")
 		}
-		if _, err = tx.Exec(ctx, `UPDATE approval_executions SET status='EXECUTING' WHERE approval_request_id=$1`, item.ID); err != nil {
+		if _, err = tx.Exec(ctx, `UPDATE approval_executions SET status='EXECUTING',error_class=NULL WHERE approval_request_id=$1`, item.ID); err != nil {
 			t.Fatal("guard rejected legal retry")
 		}
 	})

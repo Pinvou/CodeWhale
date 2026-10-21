@@ -56,14 +56,15 @@ func TestF01ReviewBoundariesPostgres(t *testing.T) {
 		if err != nil || v.ContextVersion != me.ActiveContext.ContextVersion || v.AuthorizationVersion != me.ActiveContext.AuthorizationVersion || v.PersonalAuthorizationVersion != 9 || v.PlatformAuthorizationVersion != 9 || v.OrganizationAuthorizationVersion != me.ActiveContext.OrganizationAuthorizationVersion {
 			t.Fatal("live versions differ", err)
 		}
-		org := uuid.New()
-		if _, err = r.pool.Exec(ctx, `INSERT INTO organizations(id,name,status,created_by,created_at,updated_at) VALUES($1,'controlled organization','ACTIVE',$2,now(),now())`, org, user); err != nil {
+		createdOrg, err := r.AdminCreateOrganization(ctx, p, user, "controlled organization", uuid.NewString())
+		if err != nil {
 			t.Fatal(err)
 		}
+		org := createdOrg.ID
 		if _, err = r.pool.Exec(ctx, `UPDATE user_active_contexts SET context_type='ORGANIZATION',organization_id=$2,context_version=context_version+1,updated_at=now() WHERE user_id=$1`, user, org); err != nil {
 			t.Fatal(err)
 		}
-		if _, err = r.pool.Exec(ctx, `INSERT INTO authorization_versions(user_id,scope,scope_id,version,updated_at) VALUES($1,'ORGANIZATION',$2,12,now())`, user, org); err != nil {
+		if _, err = r.pool.Exec(ctx, `INSERT INTO authorization_versions(user_id,scope,scope_id,version,updated_at) VALUES($1,'ORGANIZATION',$2,12,now()) ON CONFLICT(user_id,scope,scope_id) DO UPDATE SET version=12,updated_at=now()`, user, org); err != nil {
 			t.Fatal(err)
 		}
 		me, err = r.GetMe(ctx, p)

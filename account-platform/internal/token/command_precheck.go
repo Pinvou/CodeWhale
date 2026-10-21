@@ -594,7 +594,8 @@ func catalogDraftFingerprint(draft CatalogDraft) string {
 		MaximumOutputTokens int64     `json:"maximum_output_tokens"`
 		SupportedModalities []string  `json:"supported_modalities"`
 		TokenizerVersion    string    `json:"tokenizer_version"`
-	}{draft.ModelID, draft.BaseCatalogVersion, draft.DraftVersion, draft.DisplayName, draft.Description, draft.Aliases, draft.ProtocolCode, draft.ProtocolVersion, draft.ContextLength, draft.MaximumOutputTokens, draft.SupportedModalities, draft.TokenizerVersion})
+		RuntimeProtocol     string    `json:"runtime_protocol"`
+	}{draft.ModelID, draft.BaseCatalogVersion, draft.DraftVersion, draft.DisplayName, draft.Description, draft.Aliases, draft.ProtocolCode, draft.ProtocolVersion, draft.ContextLength, draft.MaximumOutputTokens, draft.SupportedModalities, draft.TokenizerVersion, draft.RuntimeProtocol})
 	digest := sha256.Sum256(payload)
 	return hex.EncodeToString(digest[:])
 }
@@ -794,7 +795,7 @@ func loadCommandPrecheckSnapshot(ctx context.Context, tx pgx.Tx, commandType, ta
 		}
 		var draft CatalogDraft
 		var modalities []byte
-		err = tx.QueryRow(ctx, `SELECT model_id,base_catalog_version,draft_version,display_name,description,aliases,protocol_code,protocol_version,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,updated_by,updated_at FROM model_catalog_drafts WHERE model_id=$1`, modelID).Scan(&draft.ModelID, &draft.BaseCatalogVersion, &draft.DraftVersion, &draft.DisplayName, &draft.Description, &draft.Aliases, &draft.ProtocolCode, &draft.ProtocolVersion, &draft.ContextLength, &draft.MaximumOutputTokens, &modalities, &draft.TokenizerVersion, &draft.UpdatedBy, &draft.UpdatedAt)
+		err = tx.QueryRow(ctx, `SELECT model_id,base_catalog_version,draft_version,display_name,description,aliases,protocol_code,protocol_version,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,updated_by,updated_at,runtime_protocol FROM model_catalog_drafts WHERE model_id=$1`, modelID).Scan(&draft.ModelID, &draft.BaseCatalogVersion, &draft.DraftVersion, &draft.DisplayName, &draft.Description, &draft.Aliases, &draft.ProtocolCode, &draft.ProtocolVersion, &draft.ContextLength, &draft.MaximumOutputTokens, &modalities, &draft.TokenizerVersion, &draft.UpdatedBy, &draft.UpdatedAt, &draft.RuntimeProtocol)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return commandPrecheckSnapshot{}, ErrNotFound
 		}

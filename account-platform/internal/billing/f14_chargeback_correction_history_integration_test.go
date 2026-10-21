@@ -104,8 +104,22 @@ func TestF14CorrectionWithoutChargebackRepairFacilityPostgres(t *testing.T) {
 				expected = "chargeback_financial_repair_cases"
 			case 71:
 				expected = "chargeback_financial_repair_proof_claim_allowlist"
+			case 72:
+				expected = "reconciliation_repair_cases"
+			case 73:
+				expected = "reconciliation_financial_repair_proof_claim_allowlist"
+			case 74:
+				expected = "usage_settlement_repair_cases"
+			case 75:
+				expected = "usage_loss_review_settled_state"
+			case 76:
+				expected = "usage_settlement_repair_proof_claim_allowlist"
 			case 900019:
 				expected = "chargeback_activation_execution_lock"
+			case 900020:
+				expected = "reconciliation_activation_execution_lock"
+			case 900021:
+				expected = "usage_activation_execution_lock"
 			}
 			if expected != "" {
 				if migration.Name != expected {
@@ -116,8 +130,8 @@ func TestF14CorrectionWithoutChargebackRepairFacilityPostgres(t *testing.T) {
 			}
 			selected = append(selected, migration)
 		}
-		if removed != 3 {
-			return nil, errors.New("absent chargeback facility fixture requires exactly its case/proof-allowlist/owner-lock migrations")
+		if removed != 10 {
+			return nil, errors.New("absent chargeback fixture requires its original three migrations and complete dependent financial phases")
 		}
 		return selected, nil
 	})

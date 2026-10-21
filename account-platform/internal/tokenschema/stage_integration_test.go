@@ -23,6 +23,7 @@ func TestManagementPublicMigrationInstallation(t *testing.T) {
 	t.Run("installed-f05-34-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 34, false) })
 	t.Run("retained-management-lifecycle-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 34, true) })
 	t.Run("installed-f07-36-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 36, false) })
+	t.Run("installed-pre-runtime-37-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 37, false) })
 }
 func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previousStage int, retainedManagement bool) {
 	dsn := os.Getenv("PINVOU_TEST_TOKEN_DATABASE_URL")
@@ -148,10 +149,11 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 	var retainedHistory string
 	var retainedVersions []int64
 	var previousAccountFacts string
+	var previousRuntimeCapabilityFacts string
 	if previousStage > 0 {
 		previous := []migrations.Migration{}
 		for _, m := range loaded {
-			if m.Version != 900004 && (previousStage == 36 || (m.Version != 8 && m.Version != 9 && (previousStage == 34 || ((m.Version < 900002 || (previousStage == 30 && m.Version == 900002)) && m.Version != 16 && m.Version != 17 && m.Version != 34)))) {
+			if m.Version != 35 && (previousStage == 37 || (m.Version != 900004 && (previousStage == 36 || (m.Version != 8 && m.Version != 9 && (previousStage == 34 || ((m.Version < 900002 || (previousStage == 30 && m.Version == 900002)) && m.Version != 16 && m.Version != 17 && m.Version != 34)))))) {
 				previous = append(previous, m)
 			}
 		}
@@ -168,6 +170,17 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 				t.Fatal("preclosure runtime account fixture", e)
 			}
 			if e = connection.QueryRow(ctx, `SELECT to_jsonb(account)::text FROM token_accounts account WHERE id='11111111-1111-4111-8111-111111111111'`).Scan(&previousAccountFacts); e != nil {
+				t.Fatal(e)
+			}
+		}
+		if previousStage == 37 {
+			if _, e := connection.Exec(ctx, `INSERT INTO model_identities(id,provider_id,adapter_version,upstream_model_ref,upstream_model_ref_digest,created_by,created_at)
+VALUES('11111111-1111-4111-8111-111111111115','RETAINED','fixture-v1','retained-model',encode(digest('retained-model','sha256'),'hex'),'22222222-2222-4222-8222-222222222222','2026-01-01');
+INSERT INTO model_capability_versions(id,model_id,version,protocol_definition_id,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,created_by,created_at)
+VALUES('11111111-1111-4111-8111-111111111116','11111111-1111-4111-8111-111111111115',1,'00000000-0000-7000-8200-000000000000',4096,1024,'["text"]','retained-tokenizer','22222222-2222-4222-8222-222222222222','2026-01-01')`); e != nil {
+				t.Fatal("pre-runtime retained capability", e)
+			}
+			if e := connection.QueryRow(ctx, `SELECT to_jsonb(capability)::text FROM model_capability_versions capability WHERE id='11111111-1111-4111-8111-111111111116'`).Scan(&previousRuntimeCapabilityFacts); e != nil {
 				t.Fatal(e)
 			}
 		}
@@ -194,7 +207,7 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 		}
 		old := []migrations.Migration{}
 		for _, m := range loaded {
-			if m.Version < 900001 && m.Version != 8 && m.Version != 9 && m.Version != 16 && m.Version != 17 && m.Version != 34 {
+			if m.Version < 900001 && m.Version != 8 && m.Version != 9 && m.Version != 16 && m.Version != 17 && m.Version != 34 && m.Version != 35 {
 				old = append(old, m)
 			}
 		}
@@ -303,6 +316,12 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 	if err = Up(ctx, connection, loaded); err != nil {
 		t.Fatalf("exact installed migration replay: %v", err)
 	}
+	if previousStage == 37 {
+		var retainedFacts, profile string
+		if err := connection.QueryRow(ctx, `SELECT (to_jsonb(capability)-'runtime_protocol')::text,runtime_protocol FROM model_capability_versions capability WHERE id='11111111-1111-4111-8111-111111111116'`).Scan(&retainedFacts, &profile); err != nil || retainedFacts != previousRuntimeCapabilityFacts || profile != "" {
+			t.Fatalf("runtime protocol upgrade rewrote or guessed old capability: profile=%q err=%v", profile, err)
+		}
+	}
 	var activation string
 	if err = connection.QueryRow(ctx, `SELECT state FROM public.token_command_governance_activation WHERE singleton`).Scan(&activation); err != nil || activation != "PRE_ACTIVATION" {
 		t.Fatalf("migration must not fabricate runtime authority: %q err=%v", activation, err)
@@ -408,7 +427,7 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 				if strings.Contains(mutation, "unreviewed_projection") {
 					_, e = tx.Exec(ctx, `SET ROLE token_schema_owner; SELECT public.harden_token_runtime_objects()`)
 				} else {
-					e = prepareTokenMigration(ctx, tx, migrations.Migration{Version: 35})
+					e = prepareTokenMigration(ctx, tx, migrations.Migration{Version: 36})
 				}
 				if e == nil {
 					t.Fatal("unreviewed definer accepted", mutation)
@@ -420,7 +439,7 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 	t.Run("subsequent-low-version-migration-rehardens-storage", func(t *testing.T) {
 		// The generic migration engine is exercised with a synthetic next-stage DDL;
 		// Ordered still rejects this unsupported version after the F06 stage union.
-		next := migrations.Migration{Version: 35, Name: "controlled_future_storage", UpSQL: `CREATE TABLE public.controlled_future_storage(id UUID PRIMARY KEY); CREATE INDEX controlled_future_usage_idx ON usage_requests(id); SET ROLE token_schema_owner; GRANT CREATE ON SCHEMA public TO token_cap_policy_deployer; SET ROLE token_cap_policy_deployer; CREATE TABLE public.controlled_future_policy(id UUID PRIMARY KEY); SET ROLE token_schema_owner; REVOKE CREATE ON SCHEMA public FROM token_cap_policy_deployer; SET ROLE token_gateway;`}
+		next := migrations.Migration{Version: 36, Name: "controlled_future_storage", UpSQL: `CREATE TABLE public.controlled_future_storage(id UUID PRIMARY KEY); CREATE INDEX controlled_future_usage_idx ON usage_requests(id); SET ROLE token_schema_owner; GRANT CREATE ON SCHEMA public TO token_cap_policy_deployer; SET ROLE token_cap_policy_deployer; CREATE TABLE public.controlled_future_policy(id UUID PRIMARY KEY); SET ROLE token_schema_owner; REVOKE CREATE ON SCHEMA public FROM token_cap_policy_deployer; SET ROLE token_gateway;`}
 		if err := migrations.UpWithHooks(ctx, connection, []migrations.Migration{next}, migrations.UpHooks{BeforeApply: prepareTokenMigration, AfterApply: finishTokenMigration, LedgerRole: "token_schema_owner"}); err != nil {
 			t.Fatal(err)
 		}
@@ -432,7 +451,7 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 			t.Fatal("ledger ownership regressed", ledgerOwner, err)
 		}
 		var ledgerRow bool
-		if err := connection.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=35 AND name='controlled_future_storage')`).Scan(&ledgerRow); err != nil || !ledgerRow {
+		if err := connection.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=36 AND name='controlled_future_storage')`).Scan(&ledgerRow); err != nil || !ledgerRow {
 			t.Fatal("owner ledger pin failed", ledgerRow, err)
 		}
 		var policyGuard bool

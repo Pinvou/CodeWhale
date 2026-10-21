@@ -118,9 +118,6 @@ func (r *PostgresRepository) ReplaceMemberUnits(ctx context.Context, principal i
 	if orgStatus != "ACTIVE" {
 		return MembershipMutationResult{}, ErrConflict
 	}
-	if err = validateAdminUnits(ctx, tx, organizationID, units); err != nil {
-		return MembershipMutationResult{}, err
-	}
 	canonical, _ := json.Marshal(map[string]any{"target": targetID, "expected_version": expectedVersion, "unit_ids": units})
 	digest := sha256.Sum256(canonical)
 	hash := hex.EncodeToString(digest[:])
@@ -143,6 +140,12 @@ func (r *PostgresRepository) ReplaceMemberUnits(ctx context.Context, principal i
 			return MembershipMutationResult{}, err
 		}
 		return MembershipMutationResult{OrganizationID: organizationID, Member: member, Replayed: true}, tx.Commit(ctx)
+	}
+	// Only a new mutation requires its requested units to remain ACTIVE. An
+	// exact, currently authorized receipt survives later removal of those units
+	// and returns the current member without repeating the original write.
+	if err = validateAdminUnits(ctx, tx, organizationID, units); err != nil {
+		return MembershipMutationResult{}, err
 	}
 	var membershipID uuid.UUID
 	var version int64

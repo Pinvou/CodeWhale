@@ -46,6 +46,7 @@ type CatalogModel struct {
 	MaximumOutputTokens        int64      `json:"maximum_output_tokens"`
 	SupportedModalities        []string   `json:"supported_modalities"`
 	TokenizerVersion           string     `json:"tokenizer_version"`
+	RuntimeProtocol            string     `json:"runtime_protocol"`
 	SourceAvailable            bool       `json:"source_available"`
 	SourceMissingSince         *time.Time `json:"source_missing_since,omitempty"`
 	SourceMissingConfirmations int        `json:"source_missing_confirmations"`
@@ -72,6 +73,7 @@ type CatalogDraft struct {
 	MaximumOutputTokens int64     `json:"maximum_output_tokens"`
 	SupportedModalities []string  `json:"supported_modalities"`
 	TokenizerVersion    string    `json:"tokenizer_version"`
+	RuntimeProtocol     string    `json:"runtime_protocol"`
 	UpdatedBy           uuid.UUID `json:"updated_by"`
 	UpdatedAt           time.Time `json:"updated_at"`
 }
@@ -93,6 +95,7 @@ type CatalogDraftInput struct {
 	MaximumOutputTokens    int64
 	SupportedModalities    []string
 	TokenizerVersion       string
+	RuntimeProtocol        string
 }
 
 type CatalogRepository interface {
@@ -104,7 +107,7 @@ type CatalogRepository interface {
 
 const catalogSelect = `SELECT e.model_id,e.catalog_version,e.display_name,e.description,e.aliases,e.lifecycle_status,
 p.protocol_code,p.version,p.id,e.model_capability_version_id,c.version,c.context_length,c.maximum_output_tokens,
-c.supported_modalities,c.tokenizer_version,e.source_available,e.source_missing_since,e.source_missing_confirmations,
+c.supported_modalities,c.tokenizer_version,c.runtime_protocol,e.source_available,e.source_missing_since,e.source_missing_confirmations,
 e.deprecation_effective_at,e.replacement_model_id,e.new_session_cutoff_at,e.continuation_cutoff_at,e.force_cancel_inflight,
 i.provider_id,i.adapter_version,i.upstream_model_ref
 FROM model_catalog_entries e
@@ -117,7 +120,7 @@ func scanCatalogModel(row interface{ Scan(...any) error }) (CatalogModel, error)
 	var modalities []byte
 	err := row.Scan(&item.ModelID, &item.CatalogVersion, &item.DisplayName, &item.Description, &item.Aliases, &item.LifecycleStatus,
 		&item.ProtocolCode, &item.ProtocolVersion, &item.ProtocolDefinitionID, &item.ModelCapabilityVersionID, &item.CapabilityVersion,
-		&item.ContextLength, &item.MaximumOutputTokens, &modalities, &item.TokenizerVersion, &item.SourceAvailable,
+		&item.ContextLength, &item.MaximumOutputTokens, &modalities, &item.TokenizerVersion, &item.RuntimeProtocol, &item.SourceAvailable,
 		&item.SourceMissingSince, &item.SourceMissingConfirmations, &item.DeprecationEffectiveAt, &item.ReplacementModelID,
 		&item.NewSessionCutoffAt, &item.ContinuationCutoffAt, &item.ForceCancelInflight, &item.ProviderID, &item.AdapterVersion, &item.UpstreamModelRef)
 	if err == nil {
@@ -239,7 +242,7 @@ func (r *PostgresRepository) AdminCatalogModels(ctx context.Context) (int64, []A
 		items[index].CatalogModel = models[index]
 		byID[models[index].ModelID] = &items[index]
 	}
-	rows, err := r.pool.Query(ctx, `SELECT model_id,base_catalog_version,draft_version,display_name,description,aliases,protocol_code,protocol_version,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,updated_by,updated_at FROM model_catalog_drafts ORDER BY updated_at DESC`)
+	rows, err := r.pool.Query(ctx, `SELECT model_id,base_catalog_version,draft_version,display_name,description,aliases,protocol_code,protocol_version,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,updated_by,updated_at,runtime_protocol FROM model_catalog_drafts ORDER BY updated_at DESC`)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -247,7 +250,7 @@ func (r *PostgresRepository) AdminCatalogModels(ctx context.Context) (int64, []A
 	for rows.Next() {
 		var draft CatalogDraft
 		var modalities []byte
-		if err := rows.Scan(&draft.ModelID, &draft.BaseCatalogVersion, &draft.DraftVersion, &draft.DisplayName, &draft.Description, &draft.Aliases, &draft.ProtocolCode, &draft.ProtocolVersion, &draft.ContextLength, &draft.MaximumOutputTokens, &modalities, &draft.TokenizerVersion, &draft.UpdatedBy, &draft.UpdatedAt); err != nil {
+		if err := rows.Scan(&draft.ModelID, &draft.BaseCatalogVersion, &draft.DraftVersion, &draft.DisplayName, &draft.Description, &draft.Aliases, &draft.ProtocolCode, &draft.ProtocolVersion, &draft.ContextLength, &draft.MaximumOutputTokens, &modalities, &draft.TokenizerVersion, &draft.UpdatedBy, &draft.UpdatedAt, &draft.RuntimeProtocol); err != nil {
 			return 0, nil, err
 		}
 		_ = json.Unmarshal(modalities, &draft.SupportedModalities)
@@ -281,6 +284,10 @@ func validateCatalogDraft(input *CatalogDraftInput) error {
 	input.Description = strings.TrimSpace(input.Description)
 	input.ProtocolCode = strings.ToUpper(strings.TrimSpace(input.ProtocolCode))
 	input.TokenizerVersion = strings.TrimSpace(input.TokenizerVersion)
+	input.RuntimeProtocol = strings.TrimSpace(input.RuntimeProtocol)
+	if !validRuntimeProtocol(input.RuntimeProtocol) {
+		return ErrForbidden
+	}
 	input.Aliases = normalizeCatalogList(input.Aliases)
 	input.SupportedModalities = normalizeCatalogList(input.SupportedModalities)
 	if input.DisplayName == "" || len(input.DisplayName) > 160 || input.ProtocolCode == "" || input.ProtocolVersion <= 0 || input.ContextLength <= 0 || input.MaximumOutputTokens < 0 || input.MaximumOutputTokens > input.ContextLength || input.TokenizerVersion == "" || len(input.SupportedModalities) == 0 {
@@ -342,7 +349,7 @@ func publishCatalogDraftEffect(ctx context.Context, tx pgx.Tx, modelID uuid.UUID
 	}
 	var draft CatalogDraft
 	var modalities []byte
-	if err := tx.QueryRow(ctx, `SELECT model_id,base_catalog_version,draft_version,display_name,description,aliases,protocol_code,protocol_version,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,updated_by,updated_at FROM model_catalog_drafts WHERE model_id=$1 FOR UPDATE`, modelID).Scan(&draft.ModelID, &draft.BaseCatalogVersion, &draft.DraftVersion, &draft.DisplayName, &draft.Description, &draft.Aliases, &draft.ProtocolCode, &draft.ProtocolVersion, &draft.ContextLength, &draft.MaximumOutputTokens, &modalities, &draft.TokenizerVersion, &draft.UpdatedBy, &draft.UpdatedAt); errors.Is(err, pgx.ErrNoRows) {
+	if err := tx.QueryRow(ctx, `SELECT model_id,base_catalog_version,draft_version,display_name,description,aliases,protocol_code,protocol_version,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,updated_by,updated_at,runtime_protocol FROM model_catalog_drafts WHERE model_id=$1 FOR UPDATE`, modelID).Scan(&draft.ModelID, &draft.BaseCatalogVersion, &draft.DraftVersion, &draft.DisplayName, &draft.Description, &draft.Aliases, &draft.ProtocolCode, &draft.ProtocolVersion, &draft.ContextLength, &draft.MaximumOutputTokens, &modalities, &draft.TokenizerVersion, &draft.UpdatedBy, &draft.UpdatedAt, &draft.RuntimeProtocol); errors.Is(err, pgx.ErrNoRows) {
 		return CatalogModel{}, ErrNotFound
 	} else if err != nil {
 		return CatalogModel{}, err
@@ -364,7 +371,7 @@ func publishCatalogDraftEffect(ctx context.Context, tx pgx.Tx, modelID uuid.UUID
 	} else if err != nil {
 		return CatalogModel{}, err
 	}
-	capabilityID, err := ensureCapabilityVersion(ctx, tx, modelID, protocolID, draft.ContextLength, draft.MaximumOutputTokens, modalities, draft.TokenizerVersion, actor, now)
+	capabilityID, err := ensureCapabilityVersion(ctx, tx, modelID, protocolID, draft.ContextLength, draft.MaximumOutputTokens, modalities, draft.TokenizerVersion, draft.RuntimeProtocol, actor, now)
 	if err != nil {
 		return CatalogModel{}, err
 	}
@@ -393,9 +400,9 @@ SELECT $1,e.model_id,$2,$3,$4,$5,'PUBLISHED',$6,$7,e.source_available,e.source_m
 	return item, nil
 }
 
-func ensureCapabilityVersion(ctx context.Context, tx pgx.Tx, modelID, protocolID uuid.UUID, contextLength, maximumOutput int64, modalities []byte, tokenizer string, actor uuid.UUID, now time.Time) (uuid.UUID, error) {
+func ensureCapabilityVersion(ctx context.Context, tx pgx.Tx, modelID, protocolID uuid.UUID, contextLength, maximumOutput int64, modalities []byte, tokenizer, runtimeProtocol string, actor uuid.UUID, now time.Time) (uuid.UUID, error) {
 	var existing uuid.UUID
-	err := tx.QueryRow(ctx, `SELECT id FROM model_capability_versions WHERE model_id=$1 AND protocol_definition_id=$2 AND context_length=$3 AND maximum_output_tokens=$4 AND supported_modalities=$5 AND tokenizer_version=$6 ORDER BY version DESC LIMIT 1`, modelID, protocolID, contextLength, maximumOutput, modalities, tokenizer).Scan(&existing)
+	err := tx.QueryRow(ctx, `SELECT id FROM model_capability_versions WHERE model_id=$1 AND protocol_definition_id=$2 AND context_length=$3 AND maximum_output_tokens=$4 AND supported_modalities=$5 AND tokenizer_version=$6 AND runtime_protocol=$7 ORDER BY version DESC LIMIT 1`, modelID, protocolID, contextLength, maximumOutput, modalities, tokenizer, runtimeProtocol).Scan(&existing)
 	if err == nil {
 		return existing, nil
 	}
@@ -407,7 +414,7 @@ func ensureCapabilityVersion(ctx context.Context, tx pgx.Tx, modelID, protocolID
 		return uuid.Nil, err
 	}
 	id := uuid.Must(uuid.NewV7())
-	_, err = tx.Exec(ctx, `INSERT INTO model_capability_versions(id,model_id,version,protocol_definition_id,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, id, modelID, next, protocolID, contextLength, maximumOutput, modalities, tokenizer, actor, now)
+	_, err = tx.Exec(ctx, `INSERT INTO model_capability_versions(id,model_id,version,protocol_definition_id,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,created_by,created_at,runtime_protocol) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, id, modelID, next, protocolID, contextLength, maximumOutput, modalities, tokenizer, actor, now, runtimeProtocol)
 	return id, err
 }
 
@@ -546,7 +553,7 @@ func (r *PostgresRepository) syncCatalogTx(ctx context.Context, tx pgx.Tx, provi
 			currentItem, err = scanCatalogModel(tx.QueryRow(ctx, catalogSelect+` WHERE e.catalog_version=$1 AND e.model_id=$2`, current, modelID))
 		}
 		if current == 0 || errors.Is(err, pgx.ErrNoRows) {
-			capabilityID, capErr := ensureCapabilityVersion(ctx, tx, modelID, protocolID, contextLength, maximumOutput, modalities, "ADAPTER_DECLARED_V1", actor, now)
+			capabilityID, capErr := ensureCapabilityVersion(ctx, tx, modelID, protocolID, contextLength, maximumOutput, modalities, "ADAPTER_DECLARED_V1", "", actor, now)
 			if capErr != nil {
 				return 0, false, capErr
 			}
@@ -636,7 +643,7 @@ func mutationFromCatalog(item CatalogModel, available bool, missingSince *time.T
 }
 
 func (item CatalogModel) Snapshot() map[string]any {
-	return map[string]any{"model_id": item.ModelID, "catalog_version": item.CatalogVersion, "display_name": item.DisplayName, "lifecycle_status": item.LifecycleStatus, "deprecation_effective_at": item.DeprecationEffectiveAt, "protocol_definition_id": item.ProtocolDefinitionID, "protocol_code": item.ProtocolCode, "protocol_version": item.ProtocolVersion, "model_capability_version_id": item.ModelCapabilityVersionID, "capability_version": item.CapabilityVersion, "context_length": item.ContextLength, "maximum_output_tokens": item.MaximumOutputTokens, "supported_modalities": item.SupportedModalities, "tokenizer_version": item.TokenizerVersion}
+	return map[string]any{"model_id": item.ModelID, "catalog_version": item.CatalogVersion, "display_name": item.DisplayName, "lifecycle_status": item.LifecycleStatus, "deprecation_effective_at": item.DeprecationEffectiveAt, "protocol_definition_id": item.ProtocolDefinitionID, "protocol_code": item.ProtocolCode, "protocol_version": item.ProtocolVersion, "model_capability_version_id": item.ModelCapabilityVersionID, "capability_version": item.CapabilityVersion, "context_length": item.ContextLength, "maximum_output_tokens": item.MaximumOutputTokens, "supported_modalities": item.SupportedModalities, "tokenizer_version": item.TokenizerVersion, "runtime_protocol": item.RuntimeProtocol}
 }
 
 func (item CatalogModel) ValidateRequestLimits(input, output int64) error {

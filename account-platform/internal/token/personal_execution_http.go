@@ -63,9 +63,9 @@ func (s *Service) getUsageRequest(w http.ResponseWriter, r *http.Request) {
 
 // A lost response header is recovered by a read of the original invocation
 // identity. Missing facts never authorize a new invocation or release funds.
-func (s *Service) getPersonalUsageByIdempotencyKey(w http.ResponseWriter, r *http.Request) {
+func (s *Service) getOwnedUsageByIdempotencyKey(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	userID, ok := s.authorizePersonalUsageUser(w, r, "personal.usage.cancel")
+	userID, ok := s.authorizeOriginalUsageUser(w, r, "personal.usage.cancel")
 	if !ok {
 		return
 	}
@@ -75,7 +75,7 @@ func (s *Service) getPersonalUsageByIdempotencyKey(w http.ResponseWriter, r *htt
 		return
 	}
 	usage, err := s.repository.FindUsageByIdempotency(r.Context(), userID, digestString([]byte(key)))
-	if err != nil || usage.UserID != userID || usage.OrganizationID != nil {
+	if err != nil || !cancellationOwnerMatches(usage, userID) {
 		if err != nil && !errors.Is(err, ErrNotFound) {
 			s.writeError(w, r, err)
 			return
@@ -87,7 +87,7 @@ func (s *Service) getPersonalUsageByIdempotencyKey(w http.ResponseWriter, r *htt
 }
 
 func (s *Service) cancelUsageRequest(w http.ResponseWriter, r *http.Request) {
-	userID, ok := s.authorizePersonalUsageUser(w, r, "personal.usage.cancel")
+	userID, ok := s.authorizeOriginalUsageUser(w, r, "personal.usage.cancel")
 	if !ok {
 		return
 	}
@@ -102,7 +102,27 @@ func (s *Service) cancelUsageRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	result, preDispatch, err := s.repository.RequestCancellation(r.Context(), usageID, userID, digestString([]byte(key)), cancellationFingerprint(usageID), s.executionUpstream.AdapterVersion())
+	usage, err := s.repository.GetUsage(r.Context(), usageID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if !cancellationOwnerMatches(usage, userID) {
+		s.writeError(w, r, ErrNotFound)
+		return
+	}
+	var result CancellationResult
+	var preDispatch bool
+	if usage.OrganizationID == nil {
+		result, preDispatch, err = s.repository.RequestCancellation(r.Context(), usageID, userID, digestString([]byte(key)), cancellationFingerprint(usageID), s.executionUpstream.AdapterVersion())
+	} else if store, supported := s.repository.(interface {
+		RequestOrganizationCancellation(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, string, string) (CancellationResult, bool, error)
+	}); supported {
+		result, preDispatch, err = store.RequestOrganizationCancellation(r.Context(), usageID, userID, *usage.OrganizationID, digestString([]byte(key)), cancellationFingerprint(usageID), s.executionUpstream.AdapterVersion())
+	} else {
+		api.WriteError(w, http.StatusServiceUnavailable, "ORGANIZATION_CANCELLATION_UNAVAILABLE", "original organization request cancellation is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
 	if err != nil {
 		s.writeError(w, r, err)
 		return

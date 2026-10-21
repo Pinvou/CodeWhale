@@ -50,6 +50,7 @@ var installed = map[int64]identity{
 	32:     {name: "token_account_owner_cap_lock", checksum: "cabd925dcab9b2f4e00e35281f807fd4cb2c25f550d84ae0d13da01368e19ca4", downChecksum: "88094ab65e8a81c9aee6b4d9de8b791b869a51c2da83adaef7fcca426eb301f5"},
 	33:     {name: "model_token_page_overview_indexes", checksum: "a17e2fb2855c376b3a0b41961aa3ad0bc45f4193ebd445d6f4db31c430d3e0d6", downChecksum: "e064ed383496dad953f2d555bfafa501232ad3f50b35648d1bdbe9ec9dc47fd9"},
 	34:     {name: "usage_history_groups", checksum: "8f25256da33ce045b00f5f96471dee1169f92047a82fefa42d5485add44a4948", downChecksum: "7ffd599821fb4aa220ca06ef305af84527cbd5b3f27a9fbc9dbadf803f6099c0"},
+	35:     {name: "model_runtime_protocol", checksum: "97770d3a72a6e2d5a6f42e49445b93617ed3c11fca863360a6be4cf44a40b639", downChecksum: "8b128dcfdb9ad5333785828bb42e194f277ee060c962c98d58807af695753e32"},
 	900001: {name: "runtime_storage_hardening", checksum: "4590d925d2575b0b1076c864f9cfe3b9a8115a9eee864a8a19fba48003f85bac", downChecksum: "3d4e34c2499153f8d63292ccdae47c3cf4bb5a2ba93ad5093cc0cfdbcd4ada92"},
 	900002: {name: "hold_expiry_dispatch_fence", checksum: "70e1ab2e4df09da798f8960aef356fb91ed6cef675dcb0613b5e7f303839af55", downChecksum: "718410daef7dece72847123a0db47c6636ce7a7c008c4fd4d15470ddd058581d"},
 	900003: {name: "usage_history_storage_compatibility", checksum: "4bb49b9651b476a0eb6496e775c89e4a3f9da9c53d683064317d5364841bc840", downChecksum: "96991acf88092a3cbbd9eaf7c8d90743d919cca342c364aac59498db78506194"},

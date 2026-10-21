@@ -30,10 +30,10 @@ func TestF09ReaderFirstBeforeAndAfterCorrectionMigration(t *testing.T) {
 	// migrations except the four correction phases and their dependent lock.
 	var predecessor []migrations.Migration
 	for _, m := range loaded {
-		// Preserve the original F09 hardened predecessor. The F10 Ledger
-		// 061/062/900014 phases require the correction capability; the
+		// Preserve the complete F09 hardened prefix. Later financial
+		// cases and owner capabilities are dependent phases; the
 		// complete public upgrade below still includes every migration.
-		if (m.Version >= 56 && m.Version <= 59) || m.Version == 900013 || m.Version == 61 || m.Version == 62 || m.Version == 900014 {
+		if (m.Version >= 56 && m.Version < 900000) || m.Version >= 900013 {
 			continue
 		}
 		predecessor = append(predecessor, m)

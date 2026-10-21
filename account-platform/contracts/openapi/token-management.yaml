@@ -4313,7 +4313,7 @@
           "command": {
             "type": "object",
             "additionalProperties": true,
-            "description": "Command-specific exact JSON facts; no float conversion is permitted for version facts."
+            "description": "Command-specific exact JSON facts; no float conversion is permitted for version facts. TOKEN_MODEL_DRAFT_SAVE accepts runtime_protocol: empty (unconfigured), OPENAI_CHAT_V1 or DEEPSEEK_V4_CHAT_V1. An explicit profile is published as an immutable model capability; changing it changes the capability and approval fingerprint. Missing profiles block desktop invocation and must never be inferred from display names or upstream references. After a model has an explicit published profile, draft saves must explicitly carry a supported profile; missing or empty values cannot clear it and are rejected without writing."
           }
         },
         "required": [

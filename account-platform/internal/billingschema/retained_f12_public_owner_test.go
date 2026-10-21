@@ -75,10 +75,10 @@ func TestPrivateF12PublicOwnerIntegration(t *testing.T) {
 			before79 := ""
 			if upgrade {
 				parent := slices.DeleteFunc(slices.Clone(all), func(m migrations.Migration) bool {
-					return m.Version == 65 || m.Version == 66 || m.Version == 77 || m.Version == 900016 || m.Version == 900017
+					return (m.Version >= 65 && m.Version <= 77 && m.Version != 69) || (m.Version >= 900016 && m.Version <= 900021)
 				})
 				// Preserve the complete inherited F11 prefix, excluding all five
-				// F12 Billing identities (approval columns/allowlist/requester/lock/lookup).
+				// F12 identities and later financial phases dependent on its owner lock.
 				// In particular, the lock capability must accompany its original columns.
 				if e = Up(ctx, c, parent); e != nil {
 					t.Fatal("inherited pre-F12 SQL install", e)

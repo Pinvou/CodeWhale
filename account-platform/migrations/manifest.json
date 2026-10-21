@@ -2380,6 +2380,16 @@
         "sha256": "8f25256da33ce045b00f5f96471dee1169f92047a82fefa42d5485add44a4948"
       },
       {
+        "file": "000035_model_runtime_protocol.down.sql",
+        "version": 35,
+        "sha256": "8b128dcfdb9ad5333785828bb42e194f277ee060c962c98d58807af695753e32"
+      },
+      {
+        "file": "000035_model_runtime_protocol.up.sql",
+        "version": 35,
+        "sha256": "97770d3a72a6e2d5a6f42e49445b93617ed3c11fca863360a6be4cf44a40b639"
+      },
+      {
         "file": "900001_runtime_storage_hardening.down.sql",
         "version": 900001,
         "sha256": "3d4e34c2499153f8d63292ccdae47c3cf4bb5a2ba93ad5093cc0cfdbcd4ada92"

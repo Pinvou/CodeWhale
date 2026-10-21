@@ -51,7 +51,7 @@ func TestF05PersonalHistoryAndCancellationPersistedOwnerScope(t *testing.T) {
 	request := func(method, path string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, nil)
 		req.Header.Set("Authorization", "Bearer controlled-token")
-		req.Header.Set("Idempotency-Key", "f05-cancel-controlled-key")
+		req.Header.Set("Idempotency-Key", "f05-cancel-controlled-key-"+digestString([]byte(path)))
 		out := httptest.NewRecorder()
 		s.Handler(successfulBillingVerify).ServeHTTP(out, req)
 		return out
@@ -78,10 +78,13 @@ func TestF05PersonalHistoryAndCancellationPersistedOwnerScope(t *testing.T) {
 	if got := lookup("f05-nonexistent-original-key"); got.Code != 404 {
 		t.Fatal("unknown identity must remain unknown", got.Code)
 	}
-	for _, key := range []string{organizationKey, foreignKey} {
-		if got := lookup(key); got.Code != 404 {
-			t.Fatal("lookup escaped personal owner scope", got.Code)
-		}
+	// TOK-38 recovery follows the original user across personal/organization
+	// contexts; listing and detail remain scoped to the selected context.
+	if got := lookup(organizationKey); got.Code != 200 || !strings.Contains(got.Body.String(), organizationUsage.String()) {
+		t.Fatal("original organization invocation cannot be recovered", got.Code)
+	}
+	if got := lookup(foreignKey); got.Code != 404 {
+		t.Fatal("lookup escaped original user scope", got.Code)
 	}
 	if got := lookup("short"); got.Code != 400 {
 		t.Fatal("invalid original key accepted", got.Code)
@@ -94,12 +97,16 @@ func TestF05PersonalHistoryAndCancellationPersistedOwnerScope(t *testing.T) {
 		if got := request("GET", "/v1/usage-requests/"+id.String()); got.Code != 404 {
 			t.Fatal("foreign detail accessible", got.Code)
 		}
-		if got := request("POST", "/v1/usage-requests/"+id.String()+"/cancel"); got.Code != 404 {
-			t.Fatal("foreign cancellation accepted", got.Code)
+		wantStatus, wantCommands := http.StatusNotFound, 0
+		if id == organizationUsage {
+			wantStatus, wantCommands = http.StatusOK, 1
+		}
+		if got := request("POST", "/v1/usage-requests/"+id.String()+"/cancel"); got.Code != wantStatus {
+			t.Fatal("original owner cancellation boundary", got.Code, got.Body.String())
 		}
 		var count int
-		if err = r.pool.QueryRow(ctx, `SELECT count(*) FROM usage_cancel_commands WHERE usage_request_id=$1`, id).Scan(&count); err != nil || count != 0 {
-			t.Fatal("rejected resource wrote cancellation", count, err)
+		if err = r.pool.QueryRow(ctx, `SELECT count(*) FROM usage_cancel_commands WHERE usage_request_id=$1`, id).Scan(&count); err != nil || count != wantCommands {
+			t.Fatal("original owner cancellation command count", count, err)
 		}
 	}
 	// Selecting an organization must not remove the existing ability to stop a

@@ -48,7 +48,7 @@ func TestF03ReconciliationAuthorityAndReceipts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	date := normalizedReconciliationBusinessDate(now)
+	date := reconciliationFixtureDateForPaidAt(now)
 	actor := uuid.New()
 	t.Run("bill-cannot-synthesize-customer-authority", func(t *testing.T) {
 		run, err := c.RunAdminReconciliation(ctx, actor, order.Channel, date)
@@ -190,5 +190,31 @@ func TestF03StatusSpelling(t *testing.T) {
 				t.Fatalf("accepted successful spelling skipped actual authority: queries=%d cases=%d posted=%d", supplier.queryCount, run.CaseCount, wallet.PostedMicrocredits)
 			}
 		})
+	}
+}
+
+// A supplier paid_at is an instant; the API argument is a Shanghai calendar
+// label. Do not pass the UTC date of r.now() as that label around local midnight.
+func reconciliationFixtureDateForPaidAt(paidAt time.Time) time.Time {
+	return normalizedReconciliationBusinessDate(paidAt.In(time.FixedZone("Asia/Shanghai", 8*60*60)))
+}
+
+func TestReconciliationFixturePaidAtUsesShanghaiDayAcrossMidnight(t *testing.T) {
+	for _, tc := range []struct {
+		at         time.Time
+		want       string
+		oldDiffers bool
+	}{
+		{time.Date(2026, 10, 21, 15, 59, 59, 0, time.UTC), "2026-10-21", false},
+		{time.Date(2026, 10, 21, 16, 0, 0, 0, time.UTC), "2026-10-22", true},
+	} {
+		date := reconciliationFixtureDateForPaidAt(tc.at)
+		start, end := reconciliationBusinessDateRange(date)
+		if date.Format("2006-01-02") != tc.want || tc.at.Before(start) || !tc.at.Before(end) {
+			t.Fatal("paid_at is outside its actual Shanghai business date")
+		}
+		if old := normalizedReconciliationBusinessDate(tc.at); (old != date) != tc.oldDiffers {
+			t.Fatal("UTC-label negative control failed")
+		}
 	}
 }

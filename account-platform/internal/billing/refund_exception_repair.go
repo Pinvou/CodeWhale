@@ -89,6 +89,7 @@ type RefundExceptionRepairPlan struct {
 	ProviderRefundID      string
 	RefundUpdatedAt       time.Time
 	Reclaims              []refundExceptionReclaim
+	ReclaimGrants         []refundRepairGrant
 	ExpectedGrants        int64
 	FactsDigest           string
 }
@@ -288,11 +289,11 @@ WHERE reservation.refund_id=$1 ORDER BY reservation.component_id`, plan.RefundID
 	if len(reclaims) == 0 || reservationTotal != plan.CreditMicrocredits {
 		return RefundExceptionRepairPlan{}, ErrApprovalSnapshotMismatch
 	}
-	var expectedGrants int64
-	if err := source.QueryRow(ctx, `SELECT count(*) FROM refund_grant_reservations WHERE refund_id=$1`, plan.RefundID).Scan(&expectedGrants); err != nil {
+	grants, err := refundRepairGrantsFrom(ctx, source, plan.RefundID, plan.PackageID, reclaims)
+	if err != nil {
 		return RefundExceptionRepairPlan{}, err
 	}
-	plan.ExpectedGrants = expectedGrants
+	plan.ReclaimGrants, plan.ExpectedGrants = grants, int64(len(grants))
 	for _, item := range reclaims {
 		if item.Reclaimable {
 			plan.RevokedMicrocredits += item.ReclaimableSize
@@ -508,14 +509,18 @@ func (r *PostgresRepository) ApplyRefundExceptionRepair(ctx context.Context, inp
 			continue
 		}
 		amount := item.ReclaimableSize
-		if err := insertPosting(ctx, tx, entryID, walletAccount, -amount, &item.CreditLotID, now); err != nil {
-			return RefundExceptionRepairResult{}, err
+		// A fully reclassified historical source has no remaining money to
+		// post, but its frozen component must still reach the refund terminal.
+		if amount > 0 {
+			if err := insertPosting(ctx, tx, entryID, walletAccount, -amount, &item.CreditLotID, now); err != nil {
+				return RefundExceptionRepairResult{}, err
+			}
+			tag, err := tx.Exec(ctx, `UPDATE credit_lots SET remaining_microcredits=remaining_microcredits-$2 WHERE id=$1 AND remaining_microcredits>=$2`, item.CreditLotID, amount)
+			if err != nil || tag.RowsAffected() != 1 {
+				return RefundExceptionRepairResult{}, refundExceptionConflict("credit_lot_cas", err)
+			}
 		}
-		tag, err := tx.Exec(ctx, `UPDATE credit_lots SET remaining_microcredits=remaining_microcredits-$2 WHERE id=$1 AND remaining_microcredits>=$2`, item.CreditLotID, amount)
-		if err != nil || tag.RowsAffected() != 1 {
-			return RefundExceptionRepairResult{}, refundExceptionConflict("credit_lot_cas", err)
-		}
-		tag, err = tx.Exec(ctx, `UPDATE entitlement_components SET available_microcredits=0,active_grant_microcredits=0,
+		tag, err := tx.Exec(ctx, `UPDATE entitlement_components SET available_microcredits=0,active_grant_microcredits=0,
 suspended_grant_microcredits=0,revoked_microcredits=revoked_microcredits+$2,status='REVOKED',updated_at=$3
 WHERE id=$1 AND status='FROZEN' AND available_microcredits=$4 AND active_grant_microcredits=$5 AND suspended_grant_microcredits=$6
 AND used_microcredits=0 AND reserved_microcredits=0 AND expired_microcredits=0`,
@@ -525,14 +530,18 @@ AND used_microcredits=0 AND reserved_microcredits=0 AND expired_microcredits=0`,
 		}
 	}
 	if plan.ExpectedGrants > 0 {
-		tag, err := tx.Exec(ctx, `UPDATE member_quota_grants AS quota_grant SET revoked_microcredits=revoked_microcredits+reservation.available_microcredits,
+		grantIDs := make([]uuid.UUID, 0, len(plan.ReclaimGrants))
+		for _, grant := range plan.ReclaimGrants {
+			tag, err := tx.Exec(ctx, `UPDATE member_quota_grants SET revoked_microcredits=revoked_microcredits+$4,
 available_microcredits=0,status='REVOKED',suspension_reason=NULL,allocation_version=allocation_version+1,updated_at=$2
-FROM refund_grant_reservations reservation
-WHERE reservation.refund_id=$1 AND reservation.grant_id=quota_grant.id AND quota_grant.available_microcredits=reservation.available_microcredits
-AND quota_grant.used_microcredits=0 AND quota_grant.reserved_microcredits=0 AND quota_grant.expired_microcredits=0 AND quota_grant.revoked_microcredits=0
-AND quota_grant.status='SUSPENDED' AND quota_grant.suspension_reason='REFUND_PENDING'`, plan.RefundID, now)
-		if err != nil || tag.RowsAffected() != plan.ExpectedGrants {
-			return RefundExceptionRepairResult{}, refundExceptionConflict("grant_cas", err)
+ WHERE id=$1 AND package_id=$3 AND component_id=$5 AND available_microcredits=$4
+ AND status=$6 AND suspension_reason IS NOT DISTINCT FROM $7 AND allocation_version=$8
+ AND used_microcredits=0 AND reserved_microcredits=0 AND expired_microcredits=0 AND revoked_microcredits=0`,
+				grant.ID, now, plan.PackageID, grant.Available, grant.ComponentID, grant.Status, grant.SuspensionReason, grant.AllocationVersion)
+			if err != nil || tag.RowsAffected() != 1 {
+				return RefundExceptionRepairResult{}, refundExceptionConflict("grant_cas", err)
+			}
+			grantIDs = append(grantIDs, grant.ID)
 		}
 		// Preserve the ordinary refund grant audit and event contract. Read and
 		// close the result set before using the same pgx transaction to write.
@@ -543,7 +552,7 @@ quota_grant.expired_microcredits,quota_grant.revoked_microcredits,quota_grant.st
 quota_grant.membership_version,quota_grant.allocation_version,quota_grant.created_by,quota_grant.expires_at,
 quota_grant.created_at,quota_grant.updated_at,reservation.available_microcredits
 FROM refund_grant_reservations reservation JOIN member_quota_grants AS quota_grant ON quota_grant.id=reservation.grant_id
-WHERE reservation.refund_id=$1 ORDER BY quota_grant.id`, plan.RefundID)
+WHERE reservation.refund_id=$1 AND quota_grant.id=ANY($2::uuid[]) ORDER BY quota_grant.id`, plan.RefundID, grantIDs)
 		if err != nil {
 			return RefundExceptionRepairResult{}, err
 		}

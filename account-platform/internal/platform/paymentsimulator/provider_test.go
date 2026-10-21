@@ -38,6 +38,10 @@ func TestProviderRequiresExactSuccessAndFullBoundedJSON(t *testing.T) {
 			_, err := p.Refund(context.Background(), "owned-order", "owned-refund", 1)
 			return err
 		}},
+		{"refund-query", 200, func(p *Provider) error {
+			_, err := p.QueryRefund(context.Background(), "owned-order", "owned-refund")
+			return err
+		}},
 		{"bill", 200, func(p *Provider) error { _, err := p.Bill(context.Background(), "ALIPAY", time.Now()); return err }},
 	}
 	for _, method := range methods {

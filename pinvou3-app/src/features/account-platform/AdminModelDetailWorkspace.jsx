@@ -48,6 +48,7 @@ function OverviewTab({ detail, copy }) {
       <Fact label={copy.maximumOutputTokens}>{Number(model.maximum_output_tokens || 0).toLocaleString()}</Fact>
       <Fact label={copy.modalities}>{(model.supported_modalities || []).join(', ') || '—'}</Fact>
       <Fact label={copy.tokenizerVersion}>{model.tokenizer_version || '—'}</Fact>
+      <Fact label={copy.runtimeProtocol}>{model.runtime_protocol || copy.runtimeProtocolMissing}</Fact>
       <Fact label={copy.source}><Status value={model.source_available ? 'ACTIVE' : 'UNAVAILABLE'} copy={copy} /></Fact>
     </Facts>
     {model.description && <p className="adm-model-detail-description">{model.description}</p>}
@@ -86,6 +87,7 @@ function CapabilitiesTab({ detail, client, copy, historyQuery, onQueryChange, cu
         <Fact label={copy.capabilityVersion}>{model.capability_version}</Fact>
         <Fact label={copy.capabilityVersionID}><span className="adm-mono">{model.model_capability_version_id}</span></Fact>
         <Fact label={copy.protocol}>{protocol.protocol_code} · v{protocol.version}</Fact>
+        <Fact label={copy.runtimeProtocol}>{model.runtime_protocol || copy.runtimeProtocolMissing}</Fact>
         <Fact label={copy.protocolID}><span className="adm-mono">{protocol.protocol_definition_id}</span></Fact>
         <Fact label={copy.schemaSummary}>{copy.schemaFields(protocol.schema_field_count)}</Fact>
         <Fact label={copy.status}><Status value={protocol.status} copy={copy} /></Fact>
@@ -100,6 +102,7 @@ function CapabilitiesTab({ detail, client, copy, historyQuery, onQueryChange, cu
         <Fact label={copy.version}>{model.draft.draft_version}</Fact>
         <Fact label={copy.catalogVersion}>{model.draft.base_catalog_version}</Fact>
         <Fact label={copy.protocol}>{model.draft.protocol_code} · v{model.draft.protocol_version}</Fact>
+        <Fact label={copy.runtimeProtocol}>{model.draft.runtime_protocol || copy.runtimeProtocolMissing}</Fact>
         <Fact label={copy.updatedAt}>{formatDate(model.draft.updated_at)}</Fact>
       </Facts> : <p className="adm-source-lead">{copy.noDraft}</p>}
     </section>

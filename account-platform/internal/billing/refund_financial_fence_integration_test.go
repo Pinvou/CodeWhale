@@ -276,16 +276,13 @@ func TestFailedRefundRestoresOnlyItsOwnGrantSuspension(t *testing.T) {
 	if _, err := r.pool.Exec(ctx, `UPDATE entitlement_components SET available_microcredits=800000,active_grant_microcredits=100000,suspended_grant_microcredits=100000 WHERE id=$1`, component); err != nil {
 		t.Fatal(err)
 	}
-	c.AllowNormalRefundCreation(true)
-	refund, _, err := c.CreateRefund(ctx, order.ID, order.RequesterID, transaction, pack, uuid.NewString(), "controlled member grant refund")
-	if err != nil {
-		t.Fatal(err)
-	}
+	// New refunds now reject existing administrative suspensions. Retain this
+	// old-reservation recovery assertion using the predecessor's frozen shape.
+	refund := refundRecoveryLegacyReservation(t, ctx, r, order, transaction, pack)
 	if _, err := r.pool.Exec(ctx, `UPDATE member_quota_grants SET suspension_reason='MEMBER_REMOVED' WHERE id=$1`, suspended); err != nil {
 		t.Fatal(err)
 	}
-	c.provider = &reviewRefundProvider{refund: ProviderRefund{Status: "FAILED"}}
-	if err := c.ProcessRefund(ctx, refund.ID); err != nil {
+	if _, _, err := c.finishRefund(ctx, refund, ProviderRefund{MerchantRefundNo: refund.MerchantRefundNo, AmountFen: refund.AmountFen, Status: "FAILED"}, false); err != nil {
 		t.Fatal(err)
 	}
 	var restored, held, heldReason string

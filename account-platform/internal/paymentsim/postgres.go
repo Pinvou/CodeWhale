@@ -273,6 +273,20 @@ func (r *PostgresRepository) Refund(ctx context.Context, merchantOrderNo, mercha
 	return refund, true, tx.Commit(ctx)
 }
 
+// QueryRefund is deliberately read-only, including when the original key does
+// not exist. It neither creates a refund nor acquires a dispatch reservation.
+func (r *PostgresRepository) QueryRefund(ctx context.Context, merchantOrderNo, merchantRefundNo string) (Refund, error) {
+	var result Refund
+	err := r.pool.QueryRow(ctx, `SELECT r.merchant_refund_no,COALESCE(r.channel_refund_id,''),r.amount_fen,r.status,r.updated_at
+ FROM simulator_refunds r JOIN simulator_orders o ON o.id=r.order_id
+ WHERE o.merchant_order_no=$1 AND r.merchant_refund_no=$2`, merchantOrderNo, merchantRefundNo).
+		Scan(&result.MerchantRefundNo, &result.ChannelRefundID, &result.AmountFen, &result.Status, &result.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Refund{}, ErrNotFound
+	}
+	return result, err
+}
+
 func (r *PostgresRepository) ListBill(ctx context.Context, channel string, businessDate time.Time) ([]BillEntry, error) {
 	channel = strings.ToUpper(channel)
 	if !validChannel(channel) {

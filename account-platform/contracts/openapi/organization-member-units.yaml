@@ -17,7 +17,7 @@
             "UserBearer": []
           }
         ],
-        "description": "Subject/session identity and current ALL old/new unit authority required. Current membership CAS and actor/org/target/facts-bound immutable receipt. Exact replay returns current member projection without another mutation. Unknown lifecycle ACK is 503; retry the same key/body, never infer effect from response absence.",
+        "description": "Subject/session identity and current ALL old/new unit authority required. Current membership CAS and actor/org/target/facts-bound immutable receipt. Exact replay returns current member projection without another mutation, including after the originally requested units were legally deleted. ACTIVE-unit admission applies to new commands; existing organization-state and current actor-authority checks still apply. Unknown lifecycle ACK is 503; retry the same key/body, never infer effect from response absence.",
         "parameters": [
           {
             "name": "organization_id",
@@ -215,7 +215,7 @@
             "UserBearer": []
           }
         ],
-        "description": "Subject/session identity and current ALL old/new unit authority required. Current membership CAS and actor/org/target/facts-bound immutable receipt. Exact replay returns current member projection without another mutation. Unknown lifecycle ACK is 503; retry the same key/body, never infer effect from response absence.",
+        "description": "Subject/session identity and current ALL old/new unit authority required. Current membership CAS and actor/org/target/facts-bound immutable receipt. Exact replay returns current member projection without another mutation, including after the originally requested units were legally deleted. ACTIVE-unit admission applies to new commands; existing organization-state and current actor-authority checks still apply. Unknown lifecycle ACK is 503; retry the same key/body, never infer effect from response absence.",
         "parameters": [
           {
             "name": "organization_id",

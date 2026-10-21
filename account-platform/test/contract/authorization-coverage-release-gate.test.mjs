@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { runAuthorizationCoverage } from '../../../scripts/check-account-platform-authorization-coverage.mjs';
+import { authorizationRoutes, runAuthorizationCoverage } from '../../../scripts/check-account-platform-authorization-coverage.mjs';
 
 const catalogURL = new URL('../../deploy/authorization-entrypoints.json', import.meta.url);
 
@@ -22,7 +22,7 @@ async function rejectedMutation(mutate, expected) {
 
 test('authorization release gate classifies every HTTP task event callback and CLI entrypoint', async () => {
   const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
-  // The six existing Portal transports use Any, alongside the 372 verb-specific
+  // The six existing Portal transports use Any, alongside the 373 verb-specific
   // registrations. Keep the expected complete graph independent of its parser.
   const wildcardPaths = [
     '/api/account/*resource', '/api/token/*resource',
@@ -36,7 +36,23 @@ test('authorization release gate classifies every HTTP task event callback and C
   for (const route of wildcardPaths) assert.ok(portal.includes(`router.Any("${route}",`), `missing existing Portal transport ${route}`);
   // The real checker still rejects missing, stale, duplicate or mis-scoped
   // entries before returning these exact inventory sizes.
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 378, tasks: 32, events: 18, cli: 26 });
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 379, tasks: 32, events: 18, cli: 26 });
+});
+
+test('original refund query has one read-only workload route bound to both original resource keys', async () => {
+  const source = 'account-platform/internal/paymentsim/service.go';
+  const text = await readFile(new URL('../../internal/paymentsim/service.go', import.meta.url), 'utf8');
+  const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
+  assert.ok(catalog.http_sources.includes(source));
+  const routes = authorizationRoutes(source, text).filter(route => route.path === '/v1/orders/:merchant_order_no/refunds/:merchant_refund_no');
+  assert.equal(routes.length, 1);
+  assert.equal(routes[0].receiver, 'management');
+  assert.equal(routes[0].method, 'GET');
+  assert.match(routes[0].registration, /serviceauth\.Require\("internal\.payment-simulator\.refund\.read"\).*s\.getRefund/);
+  assert.match(text, /QueryRefund\(r\.Context\(\), r\.PathValue\("merchant_order_no"\), r\.PathValue\("merchant_refund_no"\)\)/);
+  // Workload routes are classified from their exact Require declarations by
+  // the real coverage scanner, so there is no public/human policy fallback.
+  assert.equal(catalog.http_policies.some(route => route.source === source && route.path === routes[0].path), false);
 });
 
 test('Token proof endpoint requires a dedicated Account-only permission', async () => {

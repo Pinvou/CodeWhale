@@ -20,12 +20,31 @@
         "parameters": [],
         "responses": {
           "200": {
-            "description": "Actual current success projection.",
+            "description": "Published catalog. Each item includes runtime_protocol bound to model_id and model_capability_version_id. Desktop invocation requires an explicit supported value; display_name and aliases never select a runtime protocol. Discovery and old rows may expose an empty profile until governed publication.",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true
+                  "additionalProperties": true,
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true,
+                        "properties": {
+                          "runtime_protocol": {
+                            "type": "string",
+                            "enum": [
+                              "",
+                              "OPENAI_CHAT_V1",
+                              "DEEPSEEK_V4_CHAT_V1"
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -187,34 +206,79 @@
     },
     "/v1/usage-requests/by-idempotency-key": {
       "get": {
-        "operationId": "token_getPersonalUsageByIdempotencyKey",
-        "x-go-handler": "getPersonalUsageByIdempotencyKey",
+        "operationId": "token_getOwnedUsageByIdempotencyKey",
+        "x-go-handler": "getOwnedUsageByIdempotencyKey",
         "x-service": "token",
         "x-permission": "personal.usage.cancel",
-        "description": "Read-only recovery using the original invocation key. Persisted owner must match and organization must be null. Current context selection and login session do not authorize organization resources. A missing receipt never proves no effect or authorizes a new invocation.",
-        "security": [{ "UserBearer": [] }],
-        "parameters": [{
-          "name": "Idempotency-Key", "in": "header", "required": true,
-          "schema": { "type": "string", "minLength": 16, "maxLength": 128 }
-        }],
+        "description": "Read-only recovery using the original invocation key. Current stable authenticated user must own the original personal or organizational invocation. Current context and membership changes do not change that ownership. Full list/detail remain context-scoped. A missing receipt never proves no effect or authorizes a new invocation.",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 16,
+              "maxLength": 128
+            }
+          }
+        ],
         "responses": {
           "200": {
-            "description": "The original personal usage identity and current durable states; no dispatch, cancellation write or funds release.",
-            "headers": { "Cache-Control": { "schema": { "type": "string", "const": "no-store" } } },
-            "content": { "application/json": { "schema": {
-              "type": "object", "additionalProperties": false,
-              "required": ["usage_request_id", "execution_status", "delivery_status", "cancel_status", "settlement_status"],
-              "properties": {
-                "usage_request_id": { "type": "string", "format": "uuid" },
-                "execution_status": { "type": "string" },
-                "delivery_status": { "type": "string" },
-                "cancel_status": { "type": "string" },
-                "settlement_status": { "type": "string" }
+            "description": "The original owned usage identity and current durable states; no dispatch, cancellation write or funds release.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
               }
-            } } }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "usage_request_id",
+                    "execution_status",
+                    "delivery_status",
+                    "cancel_status",
+                    "settlement_status"
+                  ],
+                  "properties": {
+                    "usage_request_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "execution_status": {
+                      "type": "string"
+                    },
+                    "delivery_status": {
+                      "type": "string"
+                    },
+                    "cancel_status": {
+                      "type": "string"
+                    },
+                    "settlement_status": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
           },
-          "404": { "description": "No readable personal receipt found. The original outcome remains unknown; do not infer no effect or redispatch." },
-          "default": { "description": "Authorization, invalid-key or temporary failure; never a no-effect receipt." }
+          "404": {
+            "description": "No readable original-owner receipt found. The original outcome remains unknown; do not infer no effect or redispatch."
+          },
+          "default": {
+            "description": "Authorization, invalid-key or temporary failure; never a no-effect receipt."
+          }
         }
       }
     },

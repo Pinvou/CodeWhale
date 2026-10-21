@@ -36,6 +36,7 @@ func (s *Service) Handler(serviceToken string) http.Handler {
 	management.GET("/v1/orders/:merchant_order_no", serviceauth.Require("internal.payment-simulator.order.read"), httpserver.AdaptFunc(s.getOrder))
 	management.POST("/v1/orders/:merchant_order_no/close", serviceauth.Require("internal.payment-simulator.order.close"), httpserver.AdaptFunc(s.closeOrder))
 	management.POST("/v1/orders/:merchant_order_no/refunds", serviceauth.Require("internal.payment-simulator.refund.create"), httpserver.AdaptFunc(s.refundOrder))
+	management.GET("/v1/orders/:merchant_order_no/refunds/:merchant_refund_no", serviceauth.Require("internal.payment-simulator.refund.read"), httpserver.AdaptFunc(s.getRefund))
 	management.GET("/v1/bills/:business_date", serviceauth.Require("internal.payment-simulator.bill.read"), httpserver.AdaptFunc(s.getBill))
 	router.GET("/pay/:token", httpserver.AdaptFunc(s.paymentPage))
 	router.POST("/pay/:token/complete", httpserver.AdaptFunc(s.completePayment))
@@ -111,6 +112,22 @@ func (s *Service) refundOrder(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusCreated
 	}
 	api.WriteJSON(w, status, refund)
+}
+
+func (s *Service) getRefund(w http.ResponseWriter, r *http.Request) {
+	reader, ok := s.repository.(interface {
+		QueryRefund(context.Context, string, string) (Refund, error)
+	})
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "REFUND_QUERY_UNAVAILABLE", "refund query is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	refund, err := reader.QueryRefund(r.Context(), r.PathValue("merchant_order_no"), r.PathValue("merchant_refund_no"))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, refund)
 }
 
 func (s *Service) getBill(w http.ResponseWriter, r *http.Request) {

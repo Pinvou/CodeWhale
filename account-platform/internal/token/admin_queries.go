@@ -117,6 +117,7 @@ type AdminModelVersion struct {
 	MaximumOutputTokens      int64     `json:"maximum_output_tokens"`
 	SupportedModalities      []string  `json:"supported_modalities"`
 	TokenizerVersion         string    `json:"tokenizer_version"`
+	RuntimeProtocol          string    `json:"runtime_protocol"`
 	SourceAvailable          bool      `json:"source_available"`
 	PublishedAt              time.Time `json:"published_at"`
 }
@@ -728,7 +729,7 @@ func (r *PostgresRepository) adminModelsByIDs(ctx context.Context, resourceIDs [
 	if err = rows.Err(); err != nil {
 		return nil, err
 	}
-	draftRows, err := r.pool.Query(ctx, `SELECT model_id,base_catalog_version,draft_version,display_name,description,aliases,protocol_code,protocol_version,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,updated_by,updated_at FROM model_catalog_drafts WHERE model_id=ANY($1::uuid[])`, ids)
+	draftRows, err := r.pool.Query(ctx, `SELECT model_id,base_catalog_version,draft_version,display_name,description,aliases,protocol_code,protocol_version,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,updated_by,updated_at,runtime_protocol FROM model_catalog_drafts WHERE model_id=ANY($1::uuid[])`, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -736,7 +737,7 @@ func (r *PostgresRepository) adminModelsByIDs(ctx context.Context, resourceIDs [
 	for draftRows.Next() {
 		var draft CatalogDraft
 		var modalities []byte
-		if err = draftRows.Scan(&draft.ModelID, &draft.BaseCatalogVersion, &draft.DraftVersion, &draft.DisplayName, &draft.Description, &draft.Aliases, &draft.ProtocolCode, &draft.ProtocolVersion, &draft.ContextLength, &draft.MaximumOutputTokens, &modalities, &draft.TokenizerVersion, &draft.UpdatedBy, &draft.UpdatedAt); err != nil {
+		if err = draftRows.Scan(&draft.ModelID, &draft.BaseCatalogVersion, &draft.DraftVersion, &draft.DisplayName, &draft.Description, &draft.Aliases, &draft.ProtocolCode, &draft.ProtocolVersion, &draft.ContextLength, &draft.MaximumOutputTokens, &modalities, &draft.TokenizerVersion, &draft.UpdatedBy, &draft.UpdatedAt, &draft.RuntimeProtocol); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(modalities, &draft.SupportedModalities)
@@ -772,7 +773,7 @@ func (r *PostgresRepository) adminModelDetail(ctx context.Context, modelID uuid.
 	adminModel := AdminCatalogModel{CatalogModel: model}
 	var draft CatalogDraft
 	var draftModalities []byte
-	err = tx.QueryRow(ctx, `SELECT model_id,base_catalog_version,draft_version,display_name,description,aliases,protocol_code,protocol_version,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,updated_by,updated_at FROM model_catalog_drafts WHERE model_id=$1`, modelID).Scan(&draft.ModelID, &draft.BaseCatalogVersion, &draft.DraftVersion, &draft.DisplayName, &draft.Description, &draft.Aliases, &draft.ProtocolCode, &draft.ProtocolVersion, &draft.ContextLength, &draft.MaximumOutputTokens, &draftModalities, &draft.TokenizerVersion, &draft.UpdatedBy, &draft.UpdatedAt)
+	err = tx.QueryRow(ctx, `SELECT model_id,base_catalog_version,draft_version,display_name,description,aliases,protocol_code,protocol_version,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,updated_by,updated_at,runtime_protocol FROM model_catalog_drafts WHERE model_id=$1`, modelID).Scan(&draft.ModelID, &draft.BaseCatalogVersion, &draft.DraftVersion, &draft.DisplayName, &draft.Description, &draft.Aliases, &draft.ProtocolCode, &draft.ProtocolVersion, &draft.ContextLength, &draft.MaximumOutputTokens, &draftModalities, &draft.TokenizerVersion, &draft.UpdatedBy, &draft.UpdatedAt, &draft.RuntimeProtocol)
 	if err == nil {
 		_ = json.Unmarshal(draftModalities, &draft.SupportedModalities)
 		adminModel.Draft = &draft
@@ -862,7 +863,7 @@ func (r *PostgresRepository) adminModelVersionsByIDs(ctx context.Context, modelI
 	rows, err := r.pool.Query(ctx, `
 SELECT entry.catalog_version,entry.display_name,entry.lifecycle_status,
        capability.id,capability.version,protocol.id,protocol.protocol_code,protocol.version,protocol.request_schema,
-       capability.context_length,capability.maximum_output_tokens,capability.supported_modalities,capability.tokenizer_version,
+       capability.context_length,capability.maximum_output_tokens,capability.supported_modalities,capability.tokenizer_version,capability.runtime_protocol,
        entry.source_available,catalog.published_at
 FROM model_catalog_entries entry
 JOIN model_catalog_versions catalog ON catalog.version=entry.catalog_version
@@ -880,7 +881,7 @@ WHERE entry.model_id=$1 AND entry.catalog_version=ANY($2::bigint[])
 		var requestSchema, modalities []byte
 		if err = rows.Scan(&item.CatalogVersion, &item.DisplayName, &item.LifecycleStatus,
 			&item.ModelCapabilityVersionID, &item.CapabilityVersion, &item.ProtocolDefinitionID, &item.ProtocolCode, &item.ProtocolVersion, &requestSchema,
-			&item.ContextLength, &item.MaximumOutputTokens, &modalities, &item.TokenizerVersion,
+			&item.ContextLength, &item.MaximumOutputTokens, &modalities, &item.TokenizerVersion, &item.RuntimeProtocol,
 			&item.SourceAvailable, &item.PublishedAt); err != nil {
 			return nil, err
 		}

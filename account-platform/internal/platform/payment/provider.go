@@ -156,3 +156,9 @@ type Provider interface {
 	Refund(context.Context, string, string, int64) (Refund, error)
 	Bill(context.Context, string, time.Time) ([]BillEntry, error)
 }
+
+// RefundQuerier is optional: reading an existing original refund must never be
+// implemented by issuing Refund again. Providers without it require review.
+type RefundQuerier interface {
+	QueryRefund(context.Context, string, string) (Refund, error)
+}

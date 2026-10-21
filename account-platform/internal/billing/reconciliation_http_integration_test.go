@@ -130,7 +130,7 @@ func TestF03ImportHTTPPendingReceiptResumesSameDurableRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := NewService(r).WithPayments(c)
-	raw, _ := json.Marshal(map[string]any{"channel": order.Channel, "business_date": normalizedReconciliationBusinessDate(now).Format("2006-01-02"), "items": []ProviderBillEntry{row}})
+	raw, _ := json.Marshal(map[string]any{"channel": order.Channel, "business_date": reconciliationFixtureDateForPaidAt(now).Format("2006-01-02"), "items": []ProviderBillEntry{row}})
 	call := func() *httptest.ResponseRecorder {
 		request := httptest.NewRequest(http.MethodPost, "/admin/v1/reconciliation-imports", strings.NewReader(string(raw)))
 		request.Header.Set("Authorization", "Bearer controlled-human")

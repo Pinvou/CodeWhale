@@ -26,18 +26,16 @@ func TestF09HardenedEntitlementUpgradeKeepsPhasePrivileges(t *testing.T) {
 	stage := func(maximum int64) []migrations.Migration {
 		var selected []migrations.Migration
 		for _, m := range loaded {
-			// Keep the original F09 migration identities for this entitlement
-			// phase fixture. F10 Ledger 061/062/900014 require their own v1
-			// activation sequence and are covered by the Ledger upgrade tests.
-			if m.Version == 61 || m.Version == 62 || m.Version == 900014 {
+			// Keep an actual F09 prefix. Later financial cases and their owner
+			// capabilities form dependent phases; retaining only half of a later
+			// phase is correctly rejected by the production migration guards.
+			if m.Version < 900000 && m.Version > maximum {
 				continue
 			}
-			if m.Version == 900013 && maximum < 59 {
+			if m.Version >= 900013 && (m.Version != 900013 || maximum < 59) {
 				continue
 			} // Original lock function is delivered after 059.
-			if m.Version < 56 || m.Version > 59 || m.Version <= maximum {
-				selected = append(selected, m)
-			}
+			selected = append(selected, m)
 		}
 		return selected
 	}

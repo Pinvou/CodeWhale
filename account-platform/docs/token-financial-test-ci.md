@@ -14,7 +14,7 @@ Token 全包和 F06 组织状态 CAS、既有组织钱包、成员额度及追�
 2. `owner-wallet`：单独运行原 `TestF06OrganizationWalletRequiresLifecycleEvidence`。
    该正式测试仅在 Billing 角色不存在时创建、使用并清理自己的角色，拒绝复用未知角色。
 3. 核实数据库、角色、对象及连接全部还原后，按既有合同创建三个受限 Billing 角色，
-   执行 `retained-token`：Token 全包和 20 个必跑根（原 18 根、组织准入临界根及追加预留投影根）。测试自行创建 UUID 数据库和
+   执行 `retained-token`：Token 全包和显式必跑根集合，包含组织准入临界、追加预留投影及原 owner 组织取消恢复。测试自行创建 UUID 数据库和
    Token 角色，安装原生产迁移并通过真实运行时仓储操作。
 4. 再次核实当前阶段的角色、数据库、对象和连接集合后，执行 `retained-billing`：
    原 `TestMemberHoldIdentityMutationBoundaries`、`TestPersonalUsageHoldBoundaries`，
@@ -50,13 +50,16 @@ Account、钱包和有子用例的四个定向 Billing 根还要求实际命中�
 追加预留套件覆盖真实 Billing HTTP 提交后 ACK 丢失、原操作 ID 重放及本地上限单调投影；
 协议边界见 [追加操作幂等](hold-extension-idempotency.md)。
 
-主动取消仍是既有个人资源边界：`personal.usage.cancel` 不能取消持久化的组织请求；
-当前选择组织上下文也不改变已属于该用户的个人请求归属。
-`TestF05PersonalHistoryAndCancellationPersistedOwnerScope` 使用真实 PostgreSQL 验证
-组织请求 404 且无写入。F06 的个人 HTTP 测试遵守同一拒绝边界；另一个直接调用共享
-`finishPreDispatchCancellation` 的测试只验证已授权内部恢复遇成员版本冲突仍保留
-不确定证据、不会盲目释放资金，不表示向组织用户提供主动取消入口。
-
+原 owner 可通过 `personal.usage.cancel` 取消其持久化的个人或组织请求，并用原幂等键
+恢复执行状态；切换当前上下文或原组织成员资格失效不改变该资源归属。HTTP 仅从原 usage
+取得组织域，并由仓储锁内再次核对原 user 和精确 organization；外来用户仍 404，失效身份
+不能借此新增权限。个人历史列表与详情的个人资源隔离保持不变。
+`TestOrganizationOriginalOwnerCancellationPublicPostgres` 在真实组织 CHAT、公开 Token/Billing
+迁移与运行时角色下，覆盖派发前、派发后未知用量、成员撤销、原键 lost ACK 恢复和外来用户。
+`TestF05PersonalHistoryAndCancellationPersistedOwnerScope` 同时保留个人列表/详情隔离和
+原 owner 取消恢复的持久化归属回归。正常 release ACK 后派发前取消可本地确认；release ACK
+未知时仍保留既有 REVIEW/CANCEL_REQUESTED 与 pending 结果，不能伪造释放确认或再次派发。
+已派发未知用量不改变既有资金预留、人工复核或 24 小时政策。上游提供方与 issuer 仍为受控依赖。
 本地重现需要仓库指定 Go、Python 3、`psql` 及一个独占的一次性 PostgreSQL 16+
 实例。下面的固定容器和端口专用于测试；同名容器已存在时先确认归属，勿复用未知实例。
 
@@ -76,3 +79,5 @@ docker stop pinvou-token-financial-ci
 非 PATH 工具可通过 `PINVOU_ACCOUNT_TEST_GO`、`PINVOU_ACCOUNT_TEST_PSQL` 指定。
 执行器清除继承的 `PINVOU_TEST_*`，仅向各阶段正式测试注入其所需的本次独占实例
 数据库连接，避免其他本地或部署连接进入此门禁。
+
+运行协议回归 `TestRuntimeProtocolPublicationPublicPostgres` 使用公开 Token 迁移与 `token_gateway` 角色，执行实际发现、受控草稿解析/持久化/发布域操作和模型目录 HTTP 序列化，核对显式 profile、改名稳定性、新能力版本、旧事实及回滚拒绝。控制权限服务是测试端点；草稿发布域测试不能代表完整管理审批 UI 或真实部署验收。跨语言验证将该 HTTP 的原始 JSON 直接交给实际桌面目录解码/运行协议选择函数；隔离 Rust harness 不等于整个 Tauri 默认原生构建通过。

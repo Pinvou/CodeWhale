@@ -39,6 +39,23 @@ func (p *reviewRefundProvider) Refund(_ context.Context, _, merchant string, amo
 	return result, nil
 }
 
+// Only these recovery fixtures expose the optional read-only query. The base
+// Refund-only double still proves that missing query capability cannot dispatch.
+type reviewRefundReadProvider struct {
+	*reviewRefundProvider
+	queries        int
+	originalOrder  string
+	originalRefund string
+}
+
+func (p *reviewRefundReadProvider) QueryRefund(_ context.Context, order, refund string) (ProviderRefund, error) {
+	p.queries++
+	if order != p.originalOrder || refund != p.originalRefund {
+		return ProviderRefund{}, ErrConflict
+	}
+	return p.refund, nil
+}
+
 // Human resolution text cannot substitute for the original provider's proof.
 func TestReviewRefundReconcileRequiresTerminalProviderEvidence(t *testing.T) {
 	for _, state := range []string{"PENDING", "SUCCESS", "FAILED"} {
@@ -50,10 +67,12 @@ func TestReviewRefundReconcileRequiresTerminalProviderEvidence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err = r.pool.Exec(ctx, `UPDATE refunds SET status='MANUAL_REVIEW' WHERE id=$1`, refund.ID); err != nil {
+			// The original dispatch was possible and its ACK was lost. A manual
+			// NOT_STARTED request is separately required never to create a refund.
+			if _, err = r.pool.Exec(ctx, `UPDATE refunds SET status='MANUAL_REVIEW',dispatch_state='RESULT_UNKNOWN' WHERE id=$1`, refund.ID); err != nil {
 				t.Fatal(err)
 			}
-			provider := &reviewRefundProvider{refund: ProviderRefund{Status: state, ChannelRefundID: "controlled-original-refund"}}
+			provider := &reviewRefundReadProvider{reviewRefundProvider: &reviewRefundProvider{refund: ProviderRefund{MerchantRefundNo: refund.MerchantRefundNo, AmountFen: refund.AmountFen, Status: state, ChannelRefundID: "controlled-original-refund"}}, originalOrder: order.MerchantOrderNo, originalRefund: refund.MerchantRefundNo}
 			c.provider = provider
 			result, err := c.processRefund(ctx, refund.ID, true)
 			var status string
@@ -61,8 +80,8 @@ func TestReviewRefundReconcileRequiresTerminalProviderEvidence(t *testing.T) {
 			if queryErr := r.pool.QueryRow(ctx, `SELECT r.status,w.posted_microcredits FROM refunds r JOIN payment_orders o ON o.id=r.payment_order_id JOIN wallets w ON w.id=o.wallet_id WHERE r.id=$1`, refund.ID).Scan(&status, &posted); queryErr != nil {
 				t.Fatal(queryErr)
 			}
-			if provider.calls != 1 {
-				t.Fatalf("provider calls=%d", provider.calls)
+			if provider.calls != 0 || provider.queries != 1 {
+				t.Fatalf("refund calls=%d query calls=%d", provider.calls, provider.queries)
 			}
 			switch state {
 			case "PENDING":
@@ -70,11 +89,11 @@ func TestReviewRefundReconcileRequiresTerminalProviderEvidence(t *testing.T) {
 					t.Fatalf("unknown evidence changed money: status=%s posted=%d err=%v", status, posted, err)
 				}
 			case "SUCCESS":
-				if err != nil || result.Status != "SUCCEEDED" || status != "SUCCEEDED" || posted != 0 {
+				if err != nil || result.Status != "SUCCEEDED" || status != "SUCCEEDED" || posted != 0 || result.ChannelRefundID == nil || *result.ChannelRefundID != "controlled-original-refund" {
 					t.Fatalf("confirmed success did not settle once: %s %d %v", status, posted, err)
 				}
 				replayed, replayErr := c.processRefund(ctx, refund.ID, true)
-				if replayErr != nil || replayed.Status != "SUCCEEDED" || provider.calls != 1 {
+				if replayErr != nil || replayed.Status != "SUCCEEDED" || provider.calls != 0 || provider.queries != 1 {
 					t.Fatalf("terminal replay redispatched: calls=%d err=%v", provider.calls, replayErr)
 				}
 			case "FAILED":
@@ -170,10 +189,10 @@ func TestReviewRefundReconcileRejectsMismatchedEvidence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err = r.pool.Exec(ctx, `UPDATE refunds SET status='MANUAL_REVIEW' WHERE id=$1`, refund.ID); err != nil {
+			if _, err = r.pool.Exec(ctx, `UPDATE refunds SET status='MANUAL_REVIEW',dispatch_state='RESULT_UNKNOWN' WHERE id=$1`, refund.ID); err != nil {
 				t.Fatal(err)
 			}
-			proof := ProviderRefund{Status: "SUCCESS", ChannelRefundID: "controlled-provider-reference"}
+			proof := ProviderRefund{MerchantRefundNo: refund.MerchantRefundNo, AmountFen: refund.AmountFen, Status: "SUCCESS", ChannelRefundID: "controlled-provider-reference"}
 			switch mismatch {
 			case "merchant":
 				proof.MerchantRefundNo = "another-original-refund"
@@ -182,7 +201,7 @@ func TestReviewRefundReconcileRejectsMismatchedEvidence(t *testing.T) {
 			case "missing-success-reference":
 				proof.ChannelRefundID = ""
 			}
-			provider := &reviewRefundProvider{refund: proof}
+			provider := &reviewRefundReadProvider{reviewRefundProvider: &reviewRefundProvider{refund: proof}, originalOrder: order.MerchantOrderNo, originalRefund: refund.MerchantRefundNo}
 			c.provider = provider
 			if _, err = c.processRefund(ctx, refund.ID, true); !errors.Is(err, ErrConflict) {
 				t.Fatalf("invalid proof accepted: %v", err)
@@ -193,7 +212,7 @@ func TestReviewRefundReconcileRejectsMismatchedEvidence(t *testing.T) {
 			if err := r.pool.QueryRow(ctx, `SELECT r.status,r.dispatch_state,r.dispatch_lease_until IS NULL,w.posted_microcredits FROM refunds r JOIN payment_orders o ON o.id=r.payment_order_id JOIN wallets w ON w.id=o.wallet_id WHERE r.id=$1`, refund.ID).Scan(&status, &dispatch, &leaseCleared, &posted); err != nil {
 				t.Fatal(err)
 			}
-			if provider.calls != 1 || status != "MANUAL_REVIEW" || dispatch != "RESULT_UNKNOWN" || !leaseCleared || posted != 1000000 {
+			if provider.calls != 0 || provider.queries != 1 || status != "MANUAL_REVIEW" || dispatch != "RESULT_UNKNOWN" || !leaseCleared || posted != 1000000 {
 				t.Fatalf("invalid proof changed money or blocked retry: calls=%d status=%s dispatch=%s cleared=%v posted=%d", provider.calls, status, dispatch, leaseCleared, posted)
 			}
 		})

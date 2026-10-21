@@ -50,6 +50,8 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_context_and_reconciliation_storage_regressions_are_required(self):
         required = {
             "TestContextEligibilityUsesCurrentScopedProductionRoutes",
+            "TestOrganizationOriginalOwnerCancellationPublicPostgres",
+    "TestRuntimeProtocolPublicationPublicPostgres",
             "TestReconciliationEvidenceMatchesPublicSchema",
             "TestF06OrganizationAdmissionBoundariesPublicPostgres",
         }
@@ -248,6 +250,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
 
     def test_account_phase_requires_real_cas_lifecycle_and_review_governance_roots(self):
         self.assertEqual(RUNNER.ACCOUNT_REQUIRED, {
+            "TestMemberUnitsReceiptSurvivesLegalUnitDeletion",
             "TestF06OrganizationStatusProjectionVersionPublicPostgres",
             "TestF06OrganizationDeletionVersionAndTerminalScope",
             "TestF06Review5566377593PublicPostgres",
@@ -372,25 +375,62 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 with self.subTest(name=name), self.assertRaises(RuntimeError):
                     RUNNER.verify_results(events, required, package=package)
 
-    def test_only_original_expiry_leaf_can_omit_children(self):
-        leaf = "TestF05ExpiredHoldRenewalIsConflictAndUnprovenFundsStayReserved"
-        self.assertEqual(RUNNER.BILLING_CHILD_REQUIRED, RUNNER.RETAINED_REQUIRED - {leaf})
+    def test_only_explicit_original_and_refund_leaves_can_omit_children(self):
+        leaves = {
+            "TestF05ExpiredHoldRenewalIsConflictAndUnprovenFundsStayReserved",
+            "TestRefundRepairRetainsZeroHistoricalCorrectionSourcePostgres",
+            "TestRefundOriginalSuccessQueryRetainsCompetingFinancialFreezePostgres",
+            "TestRefundNeverDispatchedReviewCannotBecomeNewProviderRequestPostgres",
+            "TestRefundUnknownMissingSimulatorResultNeverCreatesRefundPostgres",
+            "TestRefundOriginalUnknownSuccessQueriesAndSettlesOrdinaryGrantsPostgres",
+        }
+        self.assertEqual(RUNNER.BILLING_LEAF_REQUIRED, leaves)
+        self.assertEqual(RUNNER.BILLING_CHILD_REQUIRED, RUNNER.RETAINED_REQUIRED - leaves)
         valid = [event for event in self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
-                 if not event.get("Test", "").startswith(leaf + "/")]
-        self.assertGreater(RUNNER.verify_results(valid, RUNNER.RETAINED_REQUIRED,
-                           package=RUNNER.BILLING_PACKAGE, require_children=True, exact_roots=True,
-                           children_required=RUNNER.BILLING_CHILD_REQUIRED), 0)
+                 if event.get("Test", "").split("/", 1)[0] not in leaves or "/" not in event.get("Test", "")]
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
+                   "children_required": RUNNER.BILLING_CHILD_REQUIRED}
+        self.assertGreater(RUNNER.verify_results(valid, RUNNER.RETAINED_REQUIRED, **options), 0)
         for name in RUNNER.BILLING_CHILD_REQUIRED:
             without_child = [event for event in valid if not event.get("Test", "").startswith(name + "/")]
             with self.subTest(name=name), self.assertRaises(RuntimeError):
-                RUNNER.verify_results(without_child, RUNNER.RETAINED_REQUIRED, package=RUNNER.BILLING_PACKAGE,
-                                      require_children=True, exact_roots=True, children_required=RUNNER.BILLING_CHILD_REQUIRED)
-        for event in [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": leaf},
-                      {"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": leaf + "/unexpected"}]:
-            with self.subTest(event=event), self.assertRaises(RuntimeError):
-                RUNNER.verify_results(valid + [event], RUNNER.RETAINED_REQUIRED, package=RUNNER.BILLING_PACKAGE,
-                                      require_children=True, exact_roots=True, children_required=RUNNER.BILLING_CHILD_REQUIRED)
+                RUNNER.verify_results(without_child, RUNNER.RETAINED_REQUIRED, **options)
+        for leaf in leaves:
+            for name in [leaf, leaf + "/unexpected"]:
+                with self.subTest(name=name), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(valid + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name}],
+                                          RUNNER.RETAINED_REQUIRED, **options)
 
+    def test_all_refund_fund_paths_are_selected_and_each_missing_or_skipped_root_is_rejected(self):
+        expected = {
+            "TestRefundPersistedSuccessReferenceUsesPublishedCanonicalIdentityPostgres",
+            "TestReviewRefundReconcileRequiresTerminalProviderEvidence",
+            "TestReviewRefundReconcileRejectsMismatchedEvidence",
+            "TestRefundRejectsExistingSuspendedGrantsBeforeReservationPostgres",
+            "TestRefundLegacySuspendedDispatchNeverCallsProviderPostgres",
+            "TestRefundVerifiedSuccessRepairsOriginalSuspendedGrantPostgres",
+            "TestRefundRepairRetainsZeroHistoricalCorrectionSourcePostgres",
+            "TestRefundCorrectedZeroSourceAndPriorSuspensionRecoverTogetherPostgres",
+            "TestRefundPriorSuspensionRepairFrozenGrantChangesFailWithoutEffectsPostgres",
+            "TestRefundUnknownQueryCannotInventSuccessOrDispatchPostgres",
+            "TestRefundOriginalSuccessQueryRetainsCompetingFinancialFreezePostgres",
+            "TestRefundNeverDispatchedReviewCannotBecomeNewProviderRequestPostgres",
+            "TestRefundLegacyUnknownSuccessQueriesOriginalSimulatorThenRepairsPostgres",
+            "TestRefundUnknownMissingSimulatorResultNeverCreatesRefundPostgres",
+            "TestRefundOriginalUnknownSuccessQueriesAndSettlesOrdinaryGrantsPostgres",
+        }
+        self.assertEqual(RUNNER.REFUND_REQUIRED, expected)
+        self.assertTrue(expected <= RUNNER.RETAINED_REQUIRED)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 23)
+        valid = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
+                   "children_required": RUNNER.BILLING_CHILD_REQUIRED}
+        for root in expected:
+            missing = [event for event in valid if event.get("Test", "").split("/", 1)[0] != root]
+            for invalid in [missing, valid + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root}],
+                            valid + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/actual"}]]:
+                with self.subTest(root=root), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, RUNNER.RETAINED_REQUIRED, **options)
     def test_required_suites_cannot_be_supplied_by_another_package(self):
         for required, package in [(RUNNER.REQUIRED, RUNNER.TOKEN_PACKAGE),
                                   (RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE)]:

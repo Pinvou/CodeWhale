@@ -20,6 +20,16 @@
 
 ## 3. 与相邻流程的职责边界（避免重复建设）
 
+### 既有暂停授予与未知回执恢复
+
+新普通退款只接受未消费、未预留且原状态为 `ACTIVE`、无暂停原因的授予；预留与实际外呼前均检查同一资格。原为 `MEMBER_REMOVED`、`ACCOUNT_CLOSED` 等暂停的授予在新请求预留前拒绝。旧请求若从未可能 dispatch，保持 `NOT_STARTED` 并转人工复核，不能据此捏造外部退款事实。
+
+旧请求已经可能 dispatch 时，协调器先复用同一原退款已持久化的 `SUCCESS`；否则仅在 Provider 实现可选 `payment.RefundQuerier` 时查询原订单号与原退款号。读取既有 `SUCCESS` 时，证据查询键沿用原写方的 `strings.TrimSpace` 规则，保持 nil 对应 SQL NULL；原退款字段、原 payload 和摘要保留原值并严格校验。缺能力、`NOT_FOUND`、`UNKNOWN`、金额或引用不匹配均保留人工复核，不以 `Refund` 代替查询或更换幂等键。开发模拟器提供受鉴权的只读 GET；H3C 的不支持退款能力保持不变。普通退款产品门禁仍默认关闭。
+
+原 Provider `SUCCESS` 与原预留可证明时，普通成功 CAS 继续只回收本退款的 `REFUND_PENDING` 授予，其他既有暂停进入既有 `local-conflict` 证据与受控审批。F13 冻结原预留、当前授予状态/原因/金额/版本；仅精确匹配原 `MEMBER_REMOVED` 或 `ACCOUNT_CLOSED` 的未消费授予，或本退款的 `REFUND_PENDING` 授予，才按来源回收合同推进 `REVOKED`。不恢复成员身份、账号或可用额度。组成更正后金额为零的历史源保留预留事实并推进组件终态，跳过零 posting 与零额 lot 扣减；账本非零约束不变。
+
+现有 `scripts/test-token-financial-postgres.py` 的 Billing 定向阶段登记 15 个退款回归根（含既有 terminal/mismatch 原退款查询合同），覆盖预留拒绝、全部 dispatch 边界、原 SUCCESS 恢复、零额历史源、两项组合、冻结事实漂移及未知 ACK。仅显式列出的叶根不要求子项，其余根必须有完成的子项；任何根缺失、包身份不匹配或必需项 skip 都拒绝通过。真实模拟器恢复回归独占创建 `payment_simulator` 受限角色与 UUID 数据库，以该角色运行原公开迁移及业务 SQL，结束后按归属和零连接检查清理。供应商仍为开发模拟器，不代表真实收退款或生产激活。
+
 - 普通退款成功/失败/评审仍由 `refunds.go` 既有链路拥有；本命令不改其冻结预留、不动 `refund_component_reservations`/`refund_grant_reservations` 的历史行，也不重发 Provider 退款。
 - 拒付触发的退款冲销属 GSA-31；支付未入账补记属 GSA-27；应收核销属 GSA-25；组成错配属 GSA-21。
 - 本命令**不开放任何退款入口**：不创建退款单、不调用 Provider、不改变退款金额或可退基数。

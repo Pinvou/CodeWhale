@@ -545,7 +545,7 @@ func entitlementRepositoryWithStage(t *testing.T, ctx context.Context, raw strin
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		cleanup, done := context.WithTimeout(context.Background(), 10*time.Second)
+		cleanup, done := context.WithTimeout(context.Background(), 45*time.Second)
 		defer done()
 		var owner string
 		var active int
@@ -625,17 +625,16 @@ func selectEntitlementFixtureStage(loaded []migrations.Migration, maximum int64)
 			}
 			continue
 		}
-		// Historical correction stages inherit the approved Ledger exclusions;
-		// high forward prefixes above and full installation retain all Ledger SQL.
-		if maximum != 0 && (migration.Version == 61 || migration.Version == 62 || migration.Version == 900014) {
+		// Historical correction stages retain the independent journal enum fix,
+		// but exclude later financial cases and their dependent owner capabilities
+		// together. Full installation still contains every original identity.
+		if maximum != 0 && migration.Version < 900000 && migration.Version > maximum && migration.Version != 60 {
 			continue
 		}
-		if migration.Version == 900013 && maximum != 0 && maximum < 59 {
+		if maximum != 0 && migration.Version >= 900013 && (migration.Version != 900013 || maximum < 59) {
 			continue
 		}
-		if maximum == 0 || migration.Version < 56 || migration.Version > 59 || migration.Version <= maximum {
-			selected = append(selected, migration)
-		}
+		selected = append(selected, migration)
 	}
 	return selected
 }

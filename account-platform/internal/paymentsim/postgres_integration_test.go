@@ -543,3 +543,52 @@ func TestPostgresSimulatorBillIndependentPaymentAndRefund(t *testing.T) {
 		})
 	}
 }
+
+func TestPostgresSimulatorRefundQueryIsAuthenticatedAndReadOnly(t *testing.T) {
+	t.Setenv("APP_ENV", "test")
+	r, order := simulatorFixture(t, "SUCCESS")
+	ctx := context.Background()
+	if _, err := r.Complete(ctx, r.paymentToken(order.MerchantOrderNo)); err != nil {
+		t.Fatal(err)
+	}
+	const key = "original-controlled-query-refund"
+	refund, _, err := r.Refund(ctx, order.MerchantOrderNo, key, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const token = "controlled-simulator-query-service-token"
+	server := httptest.NewServer(NewService(r).Handler(token))
+	defer server.Close()
+	provider, err := paymentsimulator.New(server.URL, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := func() string {
+		var facts string
+		if err := r.pool.QueryRow(ctx, `SELECT jsonb_build_array((SELECT jsonb_agg(to_jsonb(o) ORDER BY id) FROM simulator_orders o),(SELECT jsonb_agg(to_jsonb(f) ORDER BY id) FROM simulator_refunds f),(SELECT jsonb_agg(to_jsonb(n) ORDER BY id) FROM simulator_notifications n))::text`).Scan(&facts); err != nil {
+			t.Fatal(err)
+		}
+		return facts
+	}
+	before := snapshot()
+	got, err := provider.QueryRefund(ctx, order.MerchantOrderNo, key)
+	if err != nil || got.MerchantRefundNo != refund.MerchantRefundNo || got.ChannelRefundID != refund.ChannelRefundID || got.AmountFen != refund.AmountFen || got.Status != refund.Status {
+		t.Fatal("original query response lost authoritative stored facts", err)
+	}
+	for _, args := range [][2]string{{order.MerchantOrderNo, "missing-original"}, {"different-order", key}} {
+		if _, err := provider.QueryRefund(ctx, args[0], args[1]); err == nil {
+			t.Fatal("query returned a missing or foreign original")
+		}
+	}
+	response, err := http.Get(server.URL + "/internal/v1/orders/" + order.MerchantOrderNo + "/refunds/" + key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatal("private refund query exposed without authentication")
+	}
+	if snapshot() != before {
+		t.Fatal("query wrote refund/order/notification facts")
+	}
+}

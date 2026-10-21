@@ -31,6 +31,7 @@ type governedModelDraftCommand struct {
 	MaximumOutputTokens    int64     `json:"maximum_output_tokens"`
 	SupportedModalities    []string  `json:"supported_modalities"`
 	TokenizerVersion       string    `json:"tokenizer_version"`
+	RuntimeProtocol        string    `json:"runtime_protocol"`
 }
 
 type governedAccountCreateCommand struct {
@@ -119,11 +120,12 @@ func parseGovernedModelDraft(target string, raw json.RawMessage) (governedModelD
 	command.DisplayName, command.Description = input.DisplayName, input.Description
 	command.Aliases, command.ProtocolCode = input.Aliases, input.ProtocolCode
 	command.SupportedModalities, command.TokenizerVersion = input.SupportedModalities, input.TokenizerVersion
+	command.RuntimeProtocol = input.RuntimeProtocol
 	return command, nil
 }
 
 func (c governedModelDraftCommand) catalogInput() CatalogDraftInput {
-	return CatalogDraftInput{ExpectedCatalogVersion: c.ExpectedCatalogVersion, ExpectedDraftVersion: c.ExpectedDraftVersion, DisplayName: c.DisplayName, Description: c.Description, Aliases: c.Aliases, ProtocolCode: c.ProtocolCode, ProtocolVersion: c.ProtocolVersion, ContextLength: c.ContextLength, MaximumOutputTokens: c.MaximumOutputTokens, SupportedModalities: c.SupportedModalities, TokenizerVersion: c.TokenizerVersion}
+	return CatalogDraftInput{ExpectedCatalogVersion: c.ExpectedCatalogVersion, ExpectedDraftVersion: c.ExpectedDraftVersion, DisplayName: c.DisplayName, Description: c.Description, Aliases: c.Aliases, ProtocolCode: c.ProtocolCode, ProtocolVersion: c.ProtocolVersion, ContextLength: c.ContextLength, MaximumOutputTokens: c.MaximumOutputTokens, SupportedModalities: c.SupportedModalities, TokenizerVersion: c.TokenizerVersion, RuntimeProtocol: c.RuntimeProtocol}
 }
 
 func parseGovernedAccountCreate(target string, raw json.RawMessage) (governedAccountCreateCommand, error) {
@@ -570,14 +572,28 @@ func saveCatalogDraftEffect(ctx context.Context, tx pgx.Tx, modelID uuid.UUID, i
 		}
 		return CatalogDraft{}, err
 	}
+	if input.RuntimeProtocol == "" {
+		var publishedProtocol string
+		if err := tx.QueryRow(ctx, `SELECT capability.runtime_protocol FROM model_catalog_entries entry
+ JOIN model_capability_versions capability ON capability.id=entry.model_capability_version_id
+ WHERE entry.catalog_version=$1 AND entry.model_id=$2`, current, modelID).Scan(&publishedProtocol); err != nil {
+			return CatalogDraft{}, err
+		}
+		// An older/missing field must not silently clear a configured protocol
+		// when editing presentation metadata. Require an explicit supported
+		// value; no display-name fallback or implicit compatibility inheritance.
+		if publishedProtocol != "" {
+			return CatalogDraft{}, ErrForbidden
+		}
+	}
 	modalities, _ := json.Marshal(input.SupportedModalities)
 	var draft CatalogDraft
 	var storedModalities []byte
-	err = tx.QueryRow(ctx, `INSERT INTO model_catalog_drafts(model_id,base_catalog_version,draft_version,display_name,description,aliases,protocol_code,protocol_version,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,updated_by,updated_at)
-VALUES($1,$2,1,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-ON CONFLICT(model_id) DO UPDATE SET base_catalog_version=EXCLUDED.base_catalog_version,draft_version=model_catalog_drafts.draft_version+1,display_name=EXCLUDED.display_name,description=EXCLUDED.description,aliases=EXCLUDED.aliases,protocol_code=EXCLUDED.protocol_code,protocol_version=EXCLUDED.protocol_version,context_length=EXCLUDED.context_length,maximum_output_tokens=EXCLUDED.maximum_output_tokens,supported_modalities=EXCLUDED.supported_modalities,tokenizer_version=EXCLUDED.tokenizer_version,updated_by=EXCLUDED.updated_by,updated_at=EXCLUDED.updated_at
+	err = tx.QueryRow(ctx, `INSERT INTO model_catalog_drafts(model_id,base_catalog_version,draft_version,display_name,description,aliases,protocol_code,protocol_version,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,updated_by,updated_at,runtime_protocol)
+VALUES($1,$2,1,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$15)
+ON CONFLICT(model_id) DO UPDATE SET base_catalog_version=EXCLUDED.base_catalog_version,draft_version=model_catalog_drafts.draft_version+1,display_name=EXCLUDED.display_name,description=EXCLUDED.description,aliases=EXCLUDED.aliases,protocol_code=EXCLUDED.protocol_code,protocol_version=EXCLUDED.protocol_version,context_length=EXCLUDED.context_length,maximum_output_tokens=EXCLUDED.maximum_output_tokens,supported_modalities=EXCLUDED.supported_modalities,tokenizer_version=EXCLUDED.tokenizer_version,runtime_protocol=EXCLUDED.runtime_protocol,updated_by=EXCLUDED.updated_by,updated_at=EXCLUDED.updated_at
 WHERE model_catalog_drafts.draft_version=$14
-RETURNING model_id,base_catalog_version,draft_version,display_name,description,aliases,protocol_code,protocol_version,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,updated_by,updated_at`, modelID, current, input.DisplayName, input.Description, input.Aliases, input.ProtocolCode, input.ProtocolVersion, input.ContextLength, input.MaximumOutputTokens, modalities, input.TokenizerVersion, actor, now, input.ExpectedDraftVersion).Scan(&draft.ModelID, &draft.BaseCatalogVersion, &draft.DraftVersion, &draft.DisplayName, &draft.Description, &draft.Aliases, &draft.ProtocolCode, &draft.ProtocolVersion, &draft.ContextLength, &draft.MaximumOutputTokens, &storedModalities, &draft.TokenizerVersion, &draft.UpdatedBy, &draft.UpdatedAt)
+RETURNING model_id,base_catalog_version,draft_version,display_name,description,aliases,protocol_code,protocol_version,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,updated_by,updated_at,runtime_protocol`, modelID, current, input.DisplayName, input.Description, input.Aliases, input.ProtocolCode, input.ProtocolVersion, input.ContextLength, input.MaximumOutputTokens, modalities, input.TokenizerVersion, actor, now, input.ExpectedDraftVersion, input.RuntimeProtocol).Scan(&draft.ModelID, &draft.BaseCatalogVersion, &draft.DraftVersion, &draft.DisplayName, &draft.Description, &draft.Aliases, &draft.ProtocolCode, &draft.ProtocolVersion, &draft.ContextLength, &draft.MaximumOutputTokens, &storedModalities, &draft.TokenizerVersion, &draft.UpdatedBy, &draft.UpdatedAt, &draft.RuntimeProtocol)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return CatalogDraft{}, ErrCatalogVersionConflict
 	}

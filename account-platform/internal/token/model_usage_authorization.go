@@ -63,7 +63,9 @@ func (s *Service) resolveModelUsagePermission(w http.ResponseWriter, r *http.Req
 	return resolved, true
 }
 
-func (s *Service) authorizePersonalUsageUser(w http.ResponseWriter, r *http.Request, permission string) (uuid.UUID, bool) {
+// Cancellation is a stable original-user permission. Current organization
+// membership or the selected context cannot revoke ownership of an old call.
+func (s *Service) authorizeOriginalUsageUser(w http.ResponseWriter, r *http.Request, permission string) (uuid.UUID, bool) {
 	if s.authorizer == nil {
 		api.WriteError(w, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is temporarily unavailable", httpserver.RequestID(r.Context()))
 		return uuid.Nil, false

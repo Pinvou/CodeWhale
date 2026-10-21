@@ -23,6 +23,8 @@ struct RuntimeCatalogItem {
     model_capability_version_id: String,
     context_length: u64,
     maximum_output_tokens: u64,
+    #[serde(default)]
+    runtime_protocol: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -35,14 +37,17 @@ struct RuntimeModelLimits {
     output_tokens: u32,
 }
 
-fn engine_model_name(item: &RuntimeCatalogItem) -> String {
-    match item.display_name.trim().to_ascii_lowercase().as_str() {
+fn engine_model_name(item: &RuntimeCatalogItem) -> Result<String> {
+    match item.runtime_protocol.as_str() {
         // CodeWhale must see the protocol-bearing model identity so its existing
         // DeepSeek thinking-mode replay path keeps reasoning_content across tool
         // calls. The local Account Platform proxy rewrites this back to the
         // stable catalog UUID before the request leaves the desktop.
-        "deepseek-flash" => "deepseek-v4-flash".to_string(),
-        _ => item.model_id.clone(),
+        "DEEPSEEK_V4_CHAT_V1" => Ok("deepseek-v4-flash".to_string()),
+        "OPENAI_CHAT_V1" => Ok(item.model_id.clone()),
+        _ => anyhow::bail!(
+            "account platform model runtime protocol is missing or unsupported; publish its capability before invoking"
+        ),
     }
 }
 
@@ -154,7 +159,7 @@ fn runtime_model_limits(body: serde_json::Value, model_id: &str) -> Result<Runti
     }
     Ok(RuntimeModelLimits {
         gateway_model_id: item.model_id.clone(),
-        engine_model: engine_model_name(&item),
+        engine_model: engine_model_name(&item)?,
         catalog_version: catalog.catalog_version,
         capability_version_id: item.model_capability_version_id,
         context_tokens,
@@ -339,10 +344,45 @@ mod tests {
     use crate::platform::prefs::{ModelPreset, SavedModel};
 
     #[test]
+    fn runtime_protocol_is_independent_of_display_name() {
+        let id = "0199a100-0001-7000-8000-000000000107";
+        let catalog = |name: &str, protocol: &str| {
+            json!({ "catalog_version": 1, "items": [{
+            "model_id": id, "display_name": name, "runtime_protocol": protocol,
+            "model_capability_version_id": "0199a100-0001-7000-8000-000000000201",
+            "context_length": 8192, "maximum_output_tokens": 1024
+        }] })
+        };
+        for name in ["deepseek-flash", "Renamed for people", "ordinary name"] {
+            let deepseek = runtime_model_limits(catalog(name, "DEEPSEEK_V4_CHAT_V1"), id).unwrap();
+            assert_eq!(deepseek.engine_model, "deepseek-v4-flash");
+            assert_eq!(deepseek.gateway_model_id, id);
+            let ordinary = runtime_model_limits(catalog(name, "OPENAI_CHAT_V1"), id).unwrap();
+            assert_eq!(ordinary.engine_model, id);
+        }
+        for protocol in ["", "UNKNOWN", "deepseek-flash", "openai_chat_v1"] {
+            let error = runtime_model_limits(catalog("deepseek-flash", protocol), id).unwrap_err();
+            assert!(error.to_string().contains("publish its capability"));
+            assert!(error.downcast_ref::<super::BoundModelAbsent>().is_none());
+            assert!(
+                error
+                    .downcast_ref::<super::BoundLegacyModelAbsent>()
+                    .is_none()
+            );
+        }
+        let mut missing = catalog("deepseek-flash", "DEEPSEEK_V4_CHAT_V1");
+        missing["items"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("runtime_protocol");
+        assert!(runtime_model_limits(missing, id).is_err());
+    }
+
+    #[test]
     fn missing_legacy_binding_offers_only_explicit_reselection() {
         let catalog = json!({ "catalog_version": 1, "items": [{
             "model_id": "0199a100-0001-7000-8000-000000000107",
-            "display_name": "deepseek-flash",
+            "display_name": "deepseek-flash", "runtime_protocol": "OPENAI_CHAT_V1",
             "model_capability_version_id": "0199a100-0001-7000-8000-000000000201",
             "context_length": 8192, "maximum_output_tokens": 1024
         }] });
@@ -400,7 +440,7 @@ mod tests {
         for catalog in [
             json!({ "catalog_version": 0, "items": [] }),
             json!({ "catalog_version": 1, "items": [{ "model_id": "bad" }] }),
-            json!({ "catalog_version": 1, "items": [{ "model_id": "0199a100-0001-7000-8000-000000000107", "display_name": "other", "model_capability_version_id": "bad", "context_length": 8192, "maximum_output_tokens": 1024 }] }),
+            json!({ "catalog_version": 1, "items": [{ "model_id": "0199a100-0001-7000-8000-000000000107", "display_name": "other", "runtime_protocol": "OPENAI_CHAT_V1", "model_capability_version_id": "bad", "context_length": 8192, "maximum_output_tokens": 1024 }] }),
         ] {
             let error = runtime_model_limits(catalog, "deepseek-v4-flash").unwrap_err();
             assert!(
@@ -461,7 +501,7 @@ mod tests {
             (valid_model, "00000000-0000-0000-0000-000000000000"),
         ] {
             let body = json!({ "catalog_version": 1, "items": [{
-                "model_id": model_id, "display_name": "complete decoded item",
+                "model_id": model_id, "display_name": "complete decoded item", "runtime_protocol": "OPENAI_CHAT_V1",
                 "model_capability_version_id": capability_id,
                 "context_length": 8192, "maximum_output_tokens": 4096
             }] });
@@ -473,12 +513,12 @@ mod tests {
         }
         // One valid matching model does not hide an invalid unrelated item.
         let error = runtime_model_limits(json!({ "catalog_version": 1, "items": [
-            { "model_id": selected, "display_name": "selected", "model_capability_version_id": valid_capability, "context_length": 8192, "maximum_output_tokens": 4096 },
-            { "model_id": "not-a-uuid", "display_name": "unrelated", "model_capability_version_id": valid_capability, "context_length": 8192, "maximum_output_tokens": 4096 }
+            { "model_id": selected, "display_name": "selected", "runtime_protocol": "OPENAI_CHAT_V1", "model_capability_version_id": valid_capability, "context_length": 8192, "maximum_output_tokens": 4096 },
+            { "model_id": "not-a-uuid", "display_name": "unrelated", "runtime_protocol": "OPENAI_CHAT_V1", "model_capability_version_id": valid_capability, "context_length": 8192, "maximum_output_tokens": 4096 }
         ] }), selected).unwrap_err();
         assert!(error.downcast_ref::<super::BoundModelAbsent>().is_none());
         assert!(runtime_model_limits(json!({ "catalog_version": 1, "items": [{
-            "model_id": valid_model, "display_name": "valid unrelated", "model_capability_version_id": valid_capability, "context_length": 8192, "maximum_output_tokens": 4096
+            "model_id": valid_model, "display_name": "valid unrelated", "runtime_protocol": "OPENAI_CHAT_V1", "model_capability_version_id": valid_capability, "context_length": 8192, "maximum_output_tokens": 4096
         }] }), selected).unwrap_err().downcast_ref::<super::BoundModelAbsent>().is_some());
     }
 
@@ -493,7 +533,7 @@ mod tests {
             json!({ "catalog_version": 0, "items": [] }),
             json!({ "items": [] }),
             json!({ "catalog_version": 1, "items": [{}] }),
-            json!({ "catalog_version": 1, "items": [{ "model_id": id, "display_name": "bound", "model_capability_version_id": "0199a100-0001-7000-8000-000000000201", "context_length": 1, "maximum_output_tokens": 2 }] }),
+            json!({ "catalog_version": 1, "items": [{ "model_id": id, "display_name": "bound", "runtime_protocol": "OPENAI_CHAT_V1", "model_capability_version_id": "0199a100-0001-7000-8000-000000000201", "context_length": 1, "maximum_output_tokens": 2 }] }),
         ] {
             assert!(
                 runtime_model_limits(body, id)
@@ -522,7 +562,7 @@ mod tests {
             let error = runtime_model_limits(
                 json!({ "catalog_version": 1, "items": [{
                 "model_id": "0199a100-0001-7000-8000-000000000107",
-                "display_name": "unrelated",
+                "display_name": "unrelated", "runtime_protocol": "OPENAI_CHAT_V1",
                 "model_capability_version_id": "0199a100-0001-7000-8000-000000000201",
                 "context_length": context_length, "maximum_output_tokens": maximum_output_tokens
             }] }),
@@ -534,7 +574,7 @@ mod tests {
         let error = runtime_model_limits(
             json!({ "catalog_version": 1, "items": [{
             "model_id": "0199a100-0001-7000-8000-000000000107",
-            "display_name": "unrelated output-zero row",
+            "display_name": "unrelated output-zero row", "runtime_protocol": "OPENAI_CHAT_V1",
             "model_capability_version_id": "0199a100-0001-7000-8000-000000000201",
             "context_length": 8, "maximum_output_tokens": 0
         }] }),
@@ -552,7 +592,7 @@ mod tests {
                 "items": [
                     {
                         "model_id": "0199a100-0001-7000-8000-000000000106",
-                        "display_name": "DeepSeek Flash",
+                        "display_name": "DeepSeek Flash", "runtime_protocol": "OPENAI_CHAT_V1",
                         "model_capability_version_id": "0199a100-0001-7000-8000-000000000202",
                         "context_length": 128000,
                         "maximum_output_tokens": 4096
@@ -584,7 +624,7 @@ mod tests {
                 "catalog_version": 8,
                 "items": [{
                     "model_id": "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c",
-                    "display_name": "deepseek-flash",
+                    "display_name": "deepseek-flash", "runtime_protocol": "DEEPSEEK_V4_CHAT_V1",
                     "model_capability_version_id": "0199a100-0001-7000-8000-000000000203",
                     "context_length": 128000,
                     "maximum_output_tokens": 8192
@@ -612,7 +652,7 @@ mod tests {
                 "catalog_version": 9,
                 "items": [{
                     "model_id": "00000000-0000-7000-8000-000000000099",
-                    "display_name": "future-model",
+                    "display_name": "future-model", "runtime_protocol": "OPENAI_CHAT_V1",
                     "model_capability_version_id": "0199a100-0001-7000-8000-000000000204",
                     "context_length": 128000,
                     "maximum_output_tokens": 8192
@@ -636,7 +676,7 @@ mod tests {
                     "catalog_version": 1,
                     "items": [{
                         "model_id": "0199a100-0001-7000-8000-000000000108",
-                        "display_name": "bad",
+                        "display_name": "bad", "runtime_protocol": "OPENAI_CHAT_V1",
                         "model_capability_version_id": "0199a100-0001-7000-8000-000000000205",
                         "context_length": 4096,
                         "maximum_output_tokens": 8192

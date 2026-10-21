@@ -13,6 +13,20 @@ import (
 )
 
 func (r *PostgresRepository) RequestCancellation(ctx context.Context, usageID, userID uuid.UUID, keyDigest, fingerprint, adapterVersion string) (CancellationResult, bool, error) {
+	return r.requestCancellation(ctx, usageID, userID, nil, keyDigest, fingerprint, adapterVersion)
+}
+
+// Organization cancellation belongs to the original invocation, not the user's
+// current membership or active context. Keep the personal entry point separate
+// and recheck this explicit organization under the same lock as dispatch.
+func (r *PostgresRepository) RequestOrganizationCancellation(ctx context.Context, usageID, userID, organizationID uuid.UUID, keyDigest, fingerprint, adapterVersion string) (CancellationResult, bool, error) {
+	if organizationID == uuid.Nil {
+		return CancellationResult{}, false, ErrNotFound
+	}
+	return r.requestCancellation(ctx, usageID, userID, &organizationID, keyDigest, fingerprint, adapterVersion)
+}
+
+func (r *PostgresRepository) requestCancellation(ctx context.Context, usageID, userID uuid.UUID, organizationID *uuid.UUID, keyDigest, fingerprint, adapterVersion string) (CancellationResult, bool, error) {
 	if usageID == uuid.Nil || userID == uuid.Nil || len(keyDigest) != 64 || len(fingerprint) != 64 || strings.TrimSpace(adapterVersion) == "" {
 		return CancellationResult{}, false, ErrForbidden
 	}
@@ -27,10 +41,7 @@ func (r *PostgresRepository) RequestCancellation(ctx context.Context, usageID, u
 	} else if err != nil {
 		return CancellationResult{}, false, err
 	}
-	// Personal cancellation is scoped to the persisted resource, under the
-	// same row lock that serializes dispatch. A personal permission never
-	// authorizes cancellation of an organization invocation.
-	if usage.UserID != userID || usage.OrganizationID != nil {
+	if !cancellationOwnerMatches(usage, userID) || !sameCancellationOrganization(usage.OrganizationID, organizationID) {
 		return CancellationResult{}, false, ErrNotFound
 	}
 	var storedFingerprint string
@@ -91,6 +102,20 @@ func (r *PostgresRepository) RequestCancellation(ctx context.Context, usageID, u
 		return CancellationResult{}, false, err
 	}
 	return cancellationSnapshot(usage), preDispatch, nil
+}
+
+// Public cancellation/recovery exposes only the caller's own original resource.
+// Its persisted organization is authoritative; current membership, context and
+// optional historical snapshot fields cannot change the original ownership.
+func cancellationOwnerMatches(usage UsageRequest, userID uuid.UUID) bool {
+	return userID != uuid.Nil && usage.UserID == userID && (usage.OrganizationID == nil || *usage.OrganizationID != uuid.Nil)
+}
+
+func sameCancellationOrganization(left, right *uuid.UUID) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 func isCancellationKeyConflict(err error) bool {

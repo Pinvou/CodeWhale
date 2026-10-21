@@ -17,4 +17,8 @@ go run ./cmd/payment-simulator
 
 账单参数为 `YYYY-MM-DD` 业务日期标签，范围为上海自然日的半开区间。成功付款保留原交易引用、金额和付款时刻；成功退款形成独立 `REFUND` 行，使用真实退款引用、退款金额和成功时刻。退款不会覆盖 `PAYMENT` 行，失败退款不会出现在成功账单中。该接口不执行或导入每日四方对账。
 
+原退款查询使用 `GET /internal/v1/orders/:merchant_order_no/refunds/:merchant_refund_no`，需要 `internal.payment-simulator.refund.read` 权限。它只读取同一订单、同一原退款号的已存结果；不存在返回 `NOT_FOUND`，不会创建退款、改写订单或补发通知。退款创建接口与查询接口保持独立，查询失败不得回退到创建接口。
+
 真实 PG 回归使用 `PINVOU_TEST_PAYMENT_SIM_DATABASE_URL`，未提供时可使用 `PINVOU_TEST_ACCOUNT_DATABASE_URL`。测试只创建随机独有 schema，通过生产迁移包装器安装并在结束时核对清理；没有配置时会明确跳过。受控 HTTP/PG 测试不代表真实供应商、部署或整套 E2E 验收。
+
+Billing 的原退款恢复回归使用其独立测试实例，独占创建与部署一致的受限 `payment_simulator` 角色及 UUID 数据库。公开迁移和模拟器业务 SQL 均以该非超级用户运行，禁止复用未知已有角色；结束时先核对自有数据库归属与零连接，再清理数据库和无外部依赖的角色。

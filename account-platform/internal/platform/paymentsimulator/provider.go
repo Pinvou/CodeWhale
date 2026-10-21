@@ -69,6 +69,12 @@ func (p *Provider) Refund(ctx context.Context, merchantOrderNo, merchantRefundNo
 	return result, err
 }
 
+func (p *Provider) QueryRefund(ctx context.Context, merchantOrderNo, merchantRefundNo string) (payment.Refund, error) {
+	var result payment.Refund
+	err := p.doJSON(ctx, http.MethodGet, "/internal/v1/orders/"+url.PathEscape(merchantOrderNo)+"/refunds/"+url.PathEscape(merchantRefundNo), nil, &result)
+	return result, err
+}
+
 func (p *Provider) Bill(ctx context.Context, channel string, businessDate time.Time) ([]payment.BillEntry, error) {
 	var result struct {
 		Items []payment.BillEntry `json:"items"`

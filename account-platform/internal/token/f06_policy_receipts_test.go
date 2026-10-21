@@ -249,7 +249,7 @@ func (*f06UnconfirmedCancelBilling) Release(context.Context, uuid.UUID, uuid.UUI
 	panic("possible earlier hold was blindly released")
 }
 
-func TestF06InstalledPersonalCancellationRejectsOrganizationUsage(t *testing.T) {
+func TestF06OrganizationCancellationRequiresOriginalOwnerRepository(t *testing.T) {
 	user, org, usage := uuid.New(), uuid.New(), uuid.New()
 	version := int64(3)
 	snapshot, _ := json.Marshal(frozenUsageSnapshot{ContextType: "ORGANIZATION", OrganizationID: &org, OrganizationMembershipVersion: &version})
@@ -268,13 +268,13 @@ func TestF06InstalledPersonalCancellationRejectsOrganizationUsage(t *testing.T) 
 	req.Header.Set("Idempotency-Key", "f06-cancel-original-key")
 	out := httptest.NewRecorder()
 	s.Handler(successfulBillingVerify).ServeHTTP(out, req)
-	if out.Code != http.StatusNotFound || out.Header().Get("Cache-Control") != "no-store" || repo.requested != 0 || repo.reviewed != 0 || billing.reserved != 0 || repo.usage.HoldID != nil {
-		t.Fatalf("personal handler crossed persisted organization scope: HTTP=%d body=%s", out.Code, out.Body)
+	if out.Code != http.StatusServiceUnavailable || out.Header().Get("Cache-Control") != "no-store" || repo.requested != 0 || repo.reviewed != 0 || billing.reserved != 0 || repo.usage.HoldID != nil {
+		t.Fatalf("missing original-owner organization repository crossed personal fallback: HTTP=%d body=%s", out.Code, out.Body)
 	}
 }
 
-// Internal recovery operates on an already authorized cancellation. This does
-// not make the personal HTTP cancel endpoint available to organization requests.
+// Internal recovery operates on an already authorized original-owner
+// cancellation, including organization requests after membership changes.
 func TestF06SharedCancellationMemberConflictRemainsUnconfirmed(t *testing.T) {
 	user, org, usage := uuid.New(), uuid.New(), uuid.New()
 	version := int64(3)

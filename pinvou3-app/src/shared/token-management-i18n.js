@@ -2,6 +2,7 @@
 function completeTokenManagementCopy(translations) {
   const additions = {
     zh: {
+      runtimeProtocol: "运行协议", runtimeProtocolMissing: "尚未配置；桌面调用已阻止，请发布明确的运行协议",
       pricingControls: { cancel: '取消', save: '保存', reason: '操作原因', lastUpdated: '最后更新' },
       sourceMissingPolicy: '来源缺失会标记为不可用，不会自动弃用模型或改写会话截止时间。弃用和移除仍须通过受控生命周期审批；来源恢复不会撤销人工设置的生命周期。',
       scope: '所属范围', enumLabels: { USER_STOPPED: '用户已停止显示' },
@@ -25,6 +26,7 @@ function completeTokenManagementCopy(translations) {
       },
     },
     en: {
+      runtimeProtocol: "Runtime protocol", runtimeProtocolMissing: "Not configured; desktop invocation is blocked until an explicit runtime protocol is published",
       pricingControls: { cancel: 'Cancel', save: 'Save', reason: 'Reason', lastUpdated: 'Last updated' },
       sourceMissingPolicy: 'A missing source is marked unavailable without automatically deprecating the model or changing session cutoffs. Deprecation and removal still require governed lifecycle approval; source recovery does not undo the manually selected lifecycle.',
       scope: 'Scope', enumLabels: { USER_STOPPED: 'Display stopped by user' },
@@ -48,6 +50,7 @@ function completeTokenManagementCopy(translations) {
       },
     },
     ja: {
+      runtimeProtocol: "実行プロトコル", runtimeProtocolMissing: "未設定のためデスクトップからの呼び出しは拒否されます。明示的な実行プロトコルを公開してください",
       pricingControls: { cancel: 'キャンセル', save: '保存', reason: '操作理由', lastUpdated: '最終更新' },
       sourceMissingPolicy: 'ソースの欠落は利用不可として記録し、モデルの自動非推奨化やセッション期限の変更は行いません。非推奨化と削除には引き続き管理されたライフサイクル承認が必要です。ソースが復旧しても手動で設定したライフサイクルは取り消しません。',
       scope: '範囲', enumLabels: { USER_STOPPED: 'ユーザーが表示を停止' },

@@ -228,6 +228,31 @@ func (p *PaymentCoordinator) processRefund(ctx context.Context, refundID uuid.UU
 	if !p.Capabilities().RefundSupported || !p.Capabilities().RefundIdempotencySupported {
 		return refund, payment.ErrUnsupported
 	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	refund, eligible, err := p.refundDispatchGrantPreflight(ctx, refund, reconcile)
+	if err != nil {
+		return refund, err
+	}
+	// Once dispatch was possible, only read the original refund's result. A
+	// stable key does not authorize using the creation endpoint as a query.
+	if recovered, handled, err := p.recoverDispatchedRefund(ctx, refund); handled || err != nil {
+		if err == nil && recovered.Status == "MANUAL_REVIEW" && reconcile {
+			err = ErrConflict
+		}
+		return recovered, err
+	}
+	if !eligible {
+		if reconcile && refund.Status == "MANUAL_REVIEW" {
+			return refund, ErrConflict
+		}
+		return refund, nil
+	}
+	if refund.Status == "MANUAL_REVIEW" {
+		// A human reconciliation cannot turn a never-dispatched review into a
+		// new refund. Only the original REQUESTED/NOT_STARTED writer may send.
+		return refund, ErrConflict
+	}
 	// Persist the possible-dispatch boundary before taking the financial gate.
 	// The stable merchant refund number is the provider's idempotency key.
 	claimed, err := p.repository.pool.Exec(ctx, `UPDATE refunds SET dispatch_state='IN_PROGRESS',dispatch_started_at=COALESCE(dispatch_started_at,$2),dispatch_lease_until=$2+interval '2 minutes' WHERE id=$1 AND status IN ('REQUESTED','MANUAL_REVIEW') AND (dispatch_lease_until IS NULL OR dispatch_lease_until<$2)`, refundID, p.now())
@@ -237,8 +262,6 @@ func (p *PaymentCoordinator) processRefund(ctx context.Context, refundID uuid.UU
 	if claimed.RowsAffected() != 1 {
 		return refund, ErrConflict
 	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
 	tx, err := p.repository.pool.Begin(ctx)
 	if err != nil {
 		return refund, err
@@ -257,6 +280,23 @@ func (p *PaymentCoordinator) processRefund(ctx context.Context, refundID uuid.UU
 	}
 	if refund.Status != "REQUESTED" && !(reconcile && refund.Status == "MANUAL_REVIEW") {
 		return refund, ErrConflict
+	}
+	eligible, err = ordinaryRefundReservationsEligible(ctx, tx, refund.ID)
+	if err != nil {
+		return refund, err
+	}
+	if !eligible {
+		refund, err = markRefundGrantReview(ctx, tx, refund, p.now())
+		if err != nil {
+			return refund, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return refund, err
+		}
+		if reconcile {
+			return refund, ErrConflict
+		}
+		return refund, nil
 	}
 	blocked, err := packageFinancialFreezeBlocked(ctx, tx, refund.EntitlementPackageID, order.WalletID, refund.ID, uuid.Nil)
 	if err != nil {
@@ -446,7 +486,7 @@ func (p *PaymentCoordinator) reserveRefund(ctx context.Context, orderID, request
 		return Refund{}, false, ErrConflict
 	}
 	var invalidGrant bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM member_quota_grants WHERE package_id=$1 AND (used_microcredits>0 OR reserved_microcredits>0 OR expired_microcredits>0 OR revoked_microcredits>0))`, packageID).Scan(&invalidGrant); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM member_quota_grants WHERE package_id=$1 AND (status<>'ACTIVE' OR suspension_reason IS NOT NULL OR used_microcredits>0 OR reserved_microcredits>0 OR expired_microcredits>0 OR revoked_microcredits>0))`, packageID).Scan(&invalidGrant); err != nil {
 		return Refund{}, false, err
 	}
 	if invalidGrant {
@@ -559,6 +599,17 @@ func (p *PaymentCoordinator) finishRefundTransaction(ctx context.Context, tx pgx
 		refund.Status, refund.FailureReason, refund.UpdatedAt = "FAILED", &failure, now
 		return refund, created, tx.Commit(ctx)
 	}
+	eligible, err := ordinaryRefundReservationsEligible(ctx, tx, refund.ID)
+	if err != nil {
+		return refund, created, err
+	}
+	if !eligible {
+		refund, err = p.recordRefundSuccessConflict(ctx, tx, order, refund, provider, "refundable grant state changed after provider refund", now)
+		if err != nil {
+			return refund, created, err
+		}
+		return refund, created, tx.Commit(ctx)
+	}
 	rows, err := tx.Query(ctx, `SELECT component_id,credit_lot_id,component_type,available_microcredits,active_grant_microcredits,suspended_grant_microcredits FROM refund_component_reservations WHERE refund_id=$1 ORDER BY component_id FOR UPDATE`, refund.ID)
 	if err != nil {
 		return Refund{}, created, err
@@ -584,21 +635,10 @@ func (p *PaymentCoordinator) finishRefundTransaction(ctx context.Context, tx pgx
 		return Refund{}, created, err
 	}
 	if len(components) == 0 || total != refund.CreditMicrocredits || wallet.PostedMicrocredits < total {
-		_, updateErr := tx.Exec(ctx, `UPDATE refunds SET dispatch_state='RESULT_UNKNOWN',dispatch_lease_until=NULL,status='MANUAL_REVIEW',failure_reason='local refundable balance changed after provider refund',channel_refund_id=$2,intent_version=intent_version+1,updated_at=$3 WHERE id=$1`, refund.ID, provider.ChannelRefundID, now)
-		if updateErr != nil {
-			return Refund{}, created, updateErr
+		refund, err = p.recordRefundSuccessConflict(ctx, tx, order, refund, provider, "local refundable balance changed after provider refund", now)
+		if err != nil {
+			return refund, created, err
 		}
-		if updateErr = events.AppendOutbox(ctx, tx, "billing.refund.review-required.v1", refund.ID, 2, map[string]any{"refund_id": refund.ID, "payment_transaction_id": refund.PaymentTransactionID, "entitlement_package_id": refund.EntitlementPackageID}); updateErr != nil {
-			return Refund{}, created, updateErr
-		}
-		if _, updateErr = p.insertRefundSuccessEvidence(ctx, tx, order, refund, provider, now); updateErr != nil {
-			return Refund{}, created, updateErr
-		}
-		if _, updateErr = createPaymentAnomalyWithinTransaction(ctx, tx, "REFUND_FAILURE", "P0", "refund:"+refund.ID.String()+":local-conflict", paymentAnomalyReference{PaymentOrderID: &refund.PaymentOrderID, PaymentTransactionID: &refund.PaymentTransactionID, RefundID: &refund.ID}, map[string]any{"failure_reason": "local refundable balance changed after provider refund", "provider_refund_id": provider.ChannelRefundID}, now); updateErr != nil {
-			return Refund{}, created, updateErr
-		}
-		refund.Status = "MANUAL_REVIEW"
-		refund.ChannelRefundID = &provider.ChannelRefundID
 		return refund, created, tx.Commit(ctx)
 	}
 	entryID := uuid.Must(uuid.NewV7())

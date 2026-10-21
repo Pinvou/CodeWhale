@@ -15,10 +15,14 @@ import (
 // Uses the inherited opt-in, owned UUID database and real runtime roles. The
 // operator only activates the already installed approval command; all financial
 // operations below call production coordinators/repositories.
-func correctedRefundFixture(t *testing.T, actualBase, expectedBase int64) (*PostgresRepository, context.Context, *PaymentCoordinator, PaymentOrder, uuid.UUID, uuid.UUID) {
+func correctedRefundFixture(t *testing.T, actualBase, expectedBase int64, organization ...bool) (*PostgresRepository, context.Context, *PaymentCoordinator, PaymentOrder, uuid.UUID, uuid.UUID) {
 	t.Helper()
 	r, ctx := retainedFinanceRepository(t)
-	c, pending, _, _ := retainedFinanceOrder(t, r, ctx, 100, false)
+	createOrder := retainedFinanceOrder
+	if len(organization) > 0 && organization[0] {
+		createOrder = retainedOrganizationFinanceOrder
+	}
+	c, pending, _, _ := createOrder(t, r, ctx, 100, false)
 	now := r.now()
 	order := pending
 	order.ID, order.MerchantOrderNo, order.Status, order.FulfillmentStatus = uuid.New(), "corrected-"+uuid.NewString(), "PAID", "CREDITED"
@@ -37,7 +41,7 @@ func correctedRefundFixture(t *testing.T, actualBase, expectedBase int64) (*Post
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO payment_orders(id,merchant_order_no,requester_id,payer_user_id,wallet_id,product_id,product_snapshot,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,expires_at,provider_payable_until,late_review_boundary_at,final_archive_eligible_at,created_at,updated_at,provider_id,provider_version) VALUES($1,$2,$3,$3,$4,$5,$6,'ALIPAY',100,'CNY',100,'PAID','CREDITED',$7,$7,$8,$9,$10,$10,'controlled','v1')`, order.ID, order.MerchantOrderNo, order.RequesterID, order.WalletID, order.ProductID, product, now.Add(time.Hour), now.Add(72*time.Hour), now.Add(8*24*time.Hour), now); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO payment_orders(id,merchant_order_no,requester_id,payer_user_id,wallet_id,product_id,product_snapshot,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,expires_at,provider_payable_until,late_review_boundary_at,final_archive_eligible_at,created_at,updated_at,provider_id,provider_version,beneficiary_organization_id) VALUES($1,$2,$3,$3,$4,$5,$6,'ALIPAY',100,'CNY',100,'PAID','CREDITED',$7,$7,$8,$9,$10,$10,'controlled','v1',$11)`, order.ID, order.MerchantOrderNo, order.RequesterID, order.WalletID, order.ProductID, product, now.Add(time.Hour), now.Add(72*time.Hour), now.Add(8*24*time.Hour), now, order.BeneficiaryOrganizationID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO payment_transactions(id,payment_order_id,channel,provider_transaction_id,status,amount_fen,currency,source,provider_paid_at,verified_at,created_at,updated_at,fulfillment_status,fulfilled_at,provider_id,provider_version) VALUES($1,$2,'ALIPAY',$3,'PAID',100,'CNY','QUERY',$4,$4,$4,$4,'CREDITED',$4,'controlled','v1')`, transaction, order.ID, "corrected-txn-"+transaction.String(), now); err != nil {
@@ -67,7 +71,11 @@ func correctedRefundFixture(t *testing.T, actualBase, expectedBase int64) (*Post
 			t.Fatal(err)
 		}
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO entitlement_packages(id,user_id,wallet_id,payment_order_id,source_payment_transaction_id,credit_lot_id,product_id,plan_name,sku_code,amount_fen,points_total,points_remaining,credited_at,valid_from,valid_until,status,created_at,updated_at,source_type,source_reference) VALUES($1,$2,$3,$4,$5,$6,$7,'controlled','',100,100,100,$8,$8,$9,'ACTIVE',$8,$8,'PAYMENT',$10)`, pack, order.RequesterID, order.WalletID, order.ID, transaction, components[0].id, order.ProductID, now, now.Add(30*24*time.Hour), reference); err != nil {
+	var packageUser any = order.RequesterID
+	if order.BeneficiaryOrganizationID != nil {
+		packageUser = nil
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO entitlement_packages(id,user_id,wallet_id,payment_order_id,source_payment_transaction_id,credit_lot_id,product_id,plan_name,sku_code,amount_fen,points_total,points_remaining,credited_at,valid_from,valid_until,status,created_at,updated_at,source_type,source_reference) VALUES($1,$2,$3,$4,$5,$6,$7,'controlled','',100,100,100,$8,$8,$9,'ACTIVE',$8,$8,'PAYMENT',$10)`, pack, packageUser, order.WalletID, order.ID, transaction, components[0].id, order.ProductID, now, now.Add(30*24*time.Hour), reference); err != nil {
 		t.Fatal(err)
 	}
 	for _, component := range components {
