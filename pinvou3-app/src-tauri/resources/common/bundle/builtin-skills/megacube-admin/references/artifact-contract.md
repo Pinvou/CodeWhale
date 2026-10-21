@@ -4,7 +4,7 @@
 
 1. `cube_validate_artifact(directory)` 观察文件、体积、格式和可能的入口，不执行脚本，不要求模型满足六脚本或 OpenAI 接口契约。符号链接和临时下载被跳过并报告，必要时使用其他工具补查。
 2. `cube_verify_artifacts(directory, files?)` 后台计算/比较摘要。明确清单可检查缺失文件、预期大小和摘要；省略清单只检查当前普通文件，不能证明上游应有的文件全部齐全。结果由 `cube_get_task` 获取，可取消/恢复。
-3. 通过已有终端安装引擎、启动目标模型。`cube_validate_runtime(directory, base_url, model, max_tokens?)` 验证回环 OpenAI 兼容端点的模型身份、聊天和可选流式；它不会启动服务。输出预算默认128，允许32—512；预算耗尽且无正文时返回 `status=inconclusive`，不要直接判模型不可用，可增加预算重验。工具调用、视觉、取消、质量和负载没有测试就必须标为未测。其他协议或远端服务用已有工具补测。
+3. 通过已有终端安装引擎、启动目标模型。`cube_validate_runtime(directory, base_url, model, max_tokens?)` 验证回环 OpenAI 兼容端点的模型身份、聊天和可选流式；它不会启动服务。验证直连指定回环端点，不使用环境 HTTP 代理，仅允许同协议、主机与有效端口的路径重定向；其他端点的响应不作为本机证据。输出预算默认128，允许32—512；预算耗尽且无正文时返回 `status=inconclusive`，不要直接判模型不可用，可增加预算重验。工具调用、视觉、取消、质量和负载没有测试就必须标为未测。其他协议或远端服务用已有工具补测。
 4. 在产物目录写 `INSTALLATION.md`，包含来源与固定版本、位置、引擎/依赖、启动/停止命令、端点、验证证据、清理方法、已改环境和未知项。不记录 Token、密码、私有 URL 或含密钥的启动命令。
 5. 推理首次成功就用 `cube_register_artifact(directory, name?, source_url?, instructions_file?, verification_task_id?, runtime_validation_id?)` 保存外部成果，再尝试可选接入。`instructions_file` 是目录内相对路径，不会被执行。证据只能引用真实工具产生的 id；重复登记未传的来源、说明和证据沿用已有值。`file_evidence`、`runtime_evidence` 是带时间的历史观察，最近证据引用保存在 `evidence_history`，不证明当前健康、配置未变或进程归属。
 

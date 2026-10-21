@@ -174,9 +174,27 @@ def public_url(value):
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
 
 
+def http_origin(value):
+    parsed = urllib.parse.urlsplit(http_url(value))
+    try:
+        port = parsed.port
+    except ValueError:
+        raise ToolError("INVALID_URL", "HTTP(S) 端口非法。") from None
+    return parsed.scheme, parsed.hostname, port if port is not None else {"http": 80, "https": 443}[parsed.scheme]
+
+
+def require_origin(value, origin):
+    if origin is not None and http_origin(value) != origin:
+        raise ToolError("LOCAL_ENDPOINT_REQUIRED", "运行验证只访问指定的回环端点，不能重定向到其他主机、端口或协议。")
+
+
 class RedirectHandler(urllib.request.HTTPRedirectHandler):
+    def __init__(self, required_origin=None):
+        self.required_origin = required_origin
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         http_url(newurl)
+        require_origin(newurl, self.required_origin)
         if req.type == "https" and urllib.parse.urlsplit(newurl).scheme != "https":
             raise ToolError("INSECURE_REDIRECT", "拒绝 HTTPS 降级重定向。")
         redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
@@ -185,8 +203,9 @@ class RedirectHandler(urllib.request.HTTPRedirectHandler):
         return redirected
 
 
-def open_url(url, credential_env=None, headers=None, method=None, body=None):
+def open_url(url, credential_env=None, headers=None, method=None, body=None, *, required_origin=None):
     http_url(url)
+    require_origin(url, required_origin)
     request_headers = {"User-Agent": "megacube-admin/2", **(headers or {})}
     if credential_env:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", credential_env):
@@ -198,13 +217,18 @@ def open_url(url, credential_env=None, headers=None, method=None, body=None):
             raise ToolError("INSECURE_AUTH", "凭据只允许通过 HTTPS 发送。")
         request_headers["Authorization"] = "Bearer " + token
     req = urllib.request.Request(url, data=body, headers=request_headers, method=method)
-    return urllib.request.build_opener(RedirectHandler()).open(req, timeout=20)
+    handlers = [RedirectHandler(required_origin)]
+    if required_origin is not None:
+        # Runtime evidence must reach the selected local endpoint directly.
+        # Downloads retain the normal environment proxy and redirect policy.
+        handlers.insert(0, urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener(*handlers).open(req, timeout=20)
 
 
-def request_json(url, credential_env=None, method=None, value=None):
+def request_json(url, credential_env=None, method=None, value=None, *, required_origin=None):
     body = None if value is None else json.dumps(value).encode("utf-8")
     headers = {} if value is None else {"Content-Type": "application/json"}
-    with open_url(url, credential_env, headers, method, body) as response:
+    with open_url(url, credential_env, headers, method, body, required_origin=required_origin) as response:
         raw = response.read(16 * 1024 * 1024 + 1)
     if len(raw) > 16 * 1024 * 1024:
         raise ToolError("METADATA_TOO_LARGE", "元数据响应超过 16 MiB；可改用专用 CLI。")

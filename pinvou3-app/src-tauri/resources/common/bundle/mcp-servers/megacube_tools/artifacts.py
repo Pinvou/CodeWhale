@@ -8,7 +8,7 @@ import uuid
 import hashlib
 
 from .state import (ToolError, absolute_dir, error_reply, http_url, open_url,
-                    read_json, reply, root, request_json, sha256_file,
+                    read_json, reply, root, request_json, sha256_file, http_origin,
                     target_file, write_json)
 
 
@@ -199,6 +199,7 @@ def validate_runtime(args):
     parsed = urllib.parse.urlsplit(base)
     if parsed.hostname not in ("localhost", "127.0.0.1", "::1") or parsed.query or parsed.fragment:
         raise ToolError("LOCAL_ENDPOINT_REQUIRED", "内置冒烟只访问显式指定的本机回环端点；其他协议或远端服务请使用已有终端工具验证。")
+    origin = http_origin(base)
     model = args.get("model")
     if not isinstance(model, str) or not model:
         raise ToolError("MODEL_REQUIRED", "请提供服务实际报告的 model id。")
@@ -208,13 +209,13 @@ def validate_runtime(args):
     checks = []
     request = {"model": model, "messages": [{"role": "user", "content": "Reply with OK."}], "max_tokens": max_tokens, "stream": False}
     try:
-        models = request_json(base + "/models", args.get("credential_env"))
+        models = request_json(base + "/models", args.get("credential_env"), required_origin=origin)
         found = any(m.get("id") == model for m in models.get("data", []) if isinstance(m, dict))
         checks.append({"capability": "model_identity", "passed": found})
     except Exception as exc:
         checks.append({"capability": "model_identity", "passed": False, "error": error_reply(exc)["data"]["error_code"]})
     try:
-        data = request_json(base + "/chat/completions", args.get("credential_env"), "POST", request)
+        data = request_json(base + "/chat/completions", args.get("credential_env"), "POST", request, required_origin=origin)
         choice = (data.get("choices") or [{}])[0]
         message = choice.get("message") or {}
         passed = isinstance(message.get("content"), str) and bool(message["content"].strip())
@@ -231,7 +232,8 @@ def validate_runtime(args):
             request["stream"] = True
             content, done, valid, read, finish_reason = False, False, True, 0, None
             with open_url(base + "/chat/completions", args.get("credential_env"),
-                          {"Content-Type": "application/json"}, "POST", json.dumps(request).encode()) as response:
+                          {"Content-Type": "application/json"}, "POST", json.dumps(request).encode(),
+                          required_origin=origin) as response:
                 for _ in range(2048):
                     line = response.readline(65537)
                     read += len(line)

@@ -39,5 +39,8 @@ class MegaCubeMcpTests(unittest.TestCase):
     def test_switch_plan_positive_readiness(self):
         self.run_suite("megacube_switch_plan_test.py")
 
+    def test_runtime_stays_on_the_selected_local_endpoint(self):
+        self.run_suite("megacube_runtime_boundary_test.py")
+
     def test_management_observations_are_verified(self):
         self.run_suite("megacube_api_observation_test.py")
