@@ -77,8 +77,8 @@ fn socket_entry(path: &std::path::Path) -> std::io::Result<Option<std::fs::File>
     };
     let pinned = entry.metadata()?;
     let current = std::fs::symlink_metadata(path)?;
-    // SAFETY: geteuid reads the current process identity.
     if !pinned.file_type().is_socket()
+        // SAFETY: geteuid reads the current process identity.
         || pinned.uid() != unsafe { libc::geteuid() }
         || !current.file_type().is_socket()
         || (current.dev(), current.ino(), current.uid())
