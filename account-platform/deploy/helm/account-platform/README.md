@@ -48,6 +48,42 @@ Registry names, provider hosts, and CIDRs in the production values file are
 documentation examples; replace every one with the reviewed deployment values
 before rendering a release manifest.
 
+### Identity Keycloak backchannel
+
+When mobile authentication is enabled in a `production*` environment, Identity
+requires direct HTTPS admin/token endpoints, a private client-secret file, and a
+public CA file. The existing runtime checks remain mandatory. For bundled
+Keycloak, supply `keycloak.tlsSecretName` (a Ready TLS Secret with `tls.crt` and
+`tls.key`) and `keycloak.caConfigMap` (a Ready ConfigMap with `ca.crt`). The server
+certificate must cover the exact rendered `<fullname>-keycloak` Service
+DNS name and chain to that CA. This is separate from public ingress TLS. Identity
+connects directly to that Service on 8443; public token requests retain the
+Identity proxy. Existing ingress/backchannel HTTP consumers retain their routes;
+the management interface explicitly retains HTTP on 9000 for the existing probes.
+
+With external Keycloak (`keycloak.enabled=false`), also supply
+`keycloak.adminApiUrl` and `keycloak.provisionerTokenUrl`. Use an HTTPS admin origin
+and its same-origin `/realms/pinvou/protocol/openid-connect/token` endpoint,
+without credentials, query, fragment or encoded path. These must reach Keycloak
+directly, bypassing the public Identity token proxy; reusing the public proxy URL
+would create a loop. The CA is still required. Review the actual endpoint IP/port
+against the site's approved egress rules; configuring TLS does not grant egress.
+
+The existing runtime Secret retains `keycloak-provisioner-client-secret`. A narrow
+init mode in the same Identity image reads only that projected key and writes a
+complete, owner-only 0400 real file into a Memory `emptyDir`, as UID/GID 65532.
+The main container mounts that private volume read-only and receives only its
+path. This avoids both Kubernetes projected symlinks and root-owned 0400 files
+that the non-root runtime cannot read. The public CA uses a read-only file
+`subPath`; no CA or secret bytes enter values, argv or logs. Secret/CA replacement
+requires a controlled rollout that recreates Pods: the prepared file and CA
+subPath are snapshots; restarting only the main container does not refresh them.
+Prepare the capable Identity image before the chart rollout and reference it in
+that rollout; older images do not implement the init mode. Provision TLS/CA resources
+first, render and inspect both built-in/external forms, then perform the separately
+authorized rollout and real Keycloak/issuer/connectivity acceptance. Rendering
+does not prove Kubernetes ownership, certificate issuance or cluster reachability.
+
 The existing `internal-and-approved-egress` policy selects ordinary release
 pods, including `identity-service`, except pods marked as the New API data plane
 or restricted Token control. Its TCP 443 destinations are the union of
@@ -55,13 +91,19 @@ or restricted Token control. Its TCP 443 destinations are the union of
 `external.modelProviderCidrs`, and `external.telemetryCollectorCidrs`; these lists
 do not isolate destinations by calling service. `external.oidcCidrs` is used by
 the Portal policy and alone does not grant Identity an external Keycloak route.
-Before enabling real SMS or external Keycloak for Identity, review the rendered
+Before enabling real SMS for Account Service or external Keycloak for Identity, review the rendered
 selectors and ensure the endpoints' actual IPs and ports are covered by the
 approved egress configuration. Same-release Keycloak uses the existing internal
 pod route. An uncovered endpoint remains denied: do not disable NetworkPolicy,
 use an all-address CIDR, or assume an HTTPS URL grants connectivity. If the site
 cannot represent its destinations within its approved configuration, stop the
 rollout for network review. Rendering is not a CNI or provider connectivity test.
+
+`identity-service` also belongs to the dedicated `workload-verifiers` bucket,
+which grants TCP 443 only to `external.workloadJwksCidrs` for its remote workload
+key set. Keep those reviewed CIDRs distinct from ordinary approved-HTTPS lists;
+the selector is scoped to the same release. Verify the complete rendered policy
+union and real CNI reachability before rollout.
 
 When `newApi.enabled=true` (the default), rendering also requires the New API TLS
 Secret name, public CA ConfigMap name, and approved TLS image reference. Supply
@@ -86,13 +128,17 @@ helm lint account-platform/deploy/helm/account-platform \
   --set-string newApi.tlsSecretName="$NEWAPI_TLS_SECRET_NAME" \
   --set-string newApi.caConfigMap="$NEWAPI_CA_CONFIGMAP_NAME" \
   --set-string images.newApiTLS.repository="$NEWAPI_TLS_IMAGE_REPOSITORY" \
-  --set-string images.newApiTLS.digest="$NEWAPI_TLS_IMAGE_DIGEST"
+  --set-string images.newApiTLS.digest="$NEWAPI_TLS_IMAGE_DIGEST" \
+  --set-string keycloak.tlsSecretName="${KEYCLOAK_TLS_SECRET_NAME:?set the Ready internal TLS Secret name}" \
+  --set-string keycloak.caConfigMap="${KEYCLOAK_CA_CONFIGMAP_NAME:?set the Ready Keycloak public CA ConfigMap name}"
 helm template pinvou account-platform/deploy/helm/account-platform \
   -f account-platform/deploy/helm/account-platform/values-production-new.yaml \
   --set-string newApi.tlsSecretName="$NEWAPI_TLS_SECRET_NAME" \
   --set-string newApi.caConfigMap="$NEWAPI_CA_CONFIGMAP_NAME" \
   --set-string images.newApiTLS.repository="$NEWAPI_TLS_IMAGE_REPOSITORY" \
-  --set-string images.newApiTLS.digest="$NEWAPI_TLS_IMAGE_DIGEST" > rendered.yaml
+  --set-string images.newApiTLS.digest="$NEWAPI_TLS_IMAGE_DIGEST" \
+  --set-string keycloak.tlsSecretName="$KEYCLOAK_TLS_SECRET_NAME" \
+  --set-string keycloak.caConfigMap="$KEYCLOAK_CA_CONFIGMAP_NAME" > rendered.yaml
 ```
 
 The base, staging and production values intentionally omit these environment-owned

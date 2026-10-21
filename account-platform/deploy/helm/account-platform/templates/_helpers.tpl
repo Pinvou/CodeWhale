@@ -35,6 +35,7 @@ topologySpreadConstraints:
 {{- end }}
 {{- end -}}
 {{- define "pinvou.validate" -}}
+{{- include "pinvou.validateIdentityKeycloak" . -}}
 {{- include "pinvou.validateNativeKms" . -}}
 {{- include "pinvou.validateTokenGovernance" . -}}
 {{- if eq .Values.global.environment "production-new" -}}

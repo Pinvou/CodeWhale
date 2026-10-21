@@ -65,13 +65,16 @@ spec:
       serviceAccountName: {{ $fullname }}-keycloak
       automountServiceAccountToken: false
       {{- include "pinvou.availabilityPodSpec" (dict "root" $root "component" "keycloak") | nindent 6 }}
-      securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+      securityContext: { runAsNonRoot: true, {{ if .Values.keycloak.tlsSecretName }}runAsUser: 1000, fsGroup: 1000, {{ end }}seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: keycloak
           image: "{{ .Values.images.keycloak.repository }}:{{ .Values.images.keycloak.tag }}"
           args: ["start", "--health-enabled=true", "--http-enabled=true"]
           ports:
             - { name: http, containerPort: 8080 }
+            {{- if .Values.keycloak.tlsSecretName }}
+            - { name: https, containerPort: 8443 }
+            {{- end }}
             - { name: management, containerPort: 9000 }
           startupProbe:
             httpGet: { path: /health/started, port: management, scheme: HTTP }
@@ -85,6 +88,12 @@ spec:
             failureThreshold: 3
           securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } }
           env:
+            {{- if .Values.keycloak.tlsSecretName }}
+            - { name: KC_HTTPS_CERTIFICATE_FILE, value: /var/run/secrets/pinvou/keycloak-tls/tls.crt }
+            - { name: KC_HTTPS_CERTIFICATE_KEY_FILE, value: /var/run/secrets/pinvou/keycloak-tls/tls.key }
+            # Retain the existing management HTTP probes when main TLS is enabled.
+            - { name: KC_HTTP_MANAGEMENT_SCHEME, value: http }
+            {{- end }}
             - { name: PINVOU_ACCOUNT_AUTH_URL, value: {{ printf "http://%s-account-service:8080" $fullname | quote }} }
             - { name: PINVOU_OIDC_ISSUER, value: {{ .Values.oidc.issuer | quote }} }
             - { name: PINVOU_IDENTITY_AUTH_URL, value: {{ printf "http://%s-identity-service:8080" $fullname | quote }} }
@@ -101,8 +110,15 @@ spec:
             - name: KC_DB_PASSWORD
               valueFrom: { secretKeyRef: { name: {{ .Values.global.runtimeSecret }}, key: keycloak-database-password } }
           volumeMounts:
+            {{- if .Values.keycloak.tlsSecretName }}
+            - { name: keycloak-tls, mountPath: /var/run/secrets/pinvou/keycloak-tls, readOnly: true }
+            {{- end }}
             - { name: workload-identity, mountPath: /var/run/secrets/pinvou/workload, readOnly: true }
       volumes:
+        {{- if .Values.keycloak.tlsSecretName }}
+        - name: keycloak-tls
+          secret: { secretName: {{ .Values.keycloak.tlsSecretName }}, defaultMode: 288, items: [{ key: tls.crt, path: tls.crt }, { key: tls.key, path: tls.key }] }
+        {{- end }}
         - name: workload-identity
           projected:
             sources:

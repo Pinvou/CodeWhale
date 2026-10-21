@@ -238,6 +238,13 @@ ingress:
 
 keycloak:
   enabled: true
+  # Site-owned TLS/CA resources; identity production requires these for the
+  # direct Keycloak backchannel, independently of the public ingress TLS Secret.
+  tlsSecretName: ""
+  caConfigMap: ""
+  # Required only with an external Keycloak and mobile authentication enabled.
+  adminApiUrl: ""
+  provisionerTokenUrl: ""
   hostname: https://accounts.example.invalid
   adminHostname: http://127.0.0.1:18081
   replicas: 2

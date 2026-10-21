@@ -16,6 +16,9 @@ spec:
     - name: http
       port: 8080
       targetPort: http
+    {{- if and (eq $component "keycloak") $root.Values.keycloak.enabled $root.Values.keycloak.tlsSecretName }}
+    - { name: https, port: 8443, targetPort: https }
+    {{- end }}
 {{- end }}
 {{- range $component := list "redis" "nats" }}
 {{- if (index (index $root.Values $component) "enabled") }}
