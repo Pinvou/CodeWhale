@@ -87,6 +87,19 @@ pub struct SearchCredential {
     pub credential_action: Option<crate::platform::credential_store::CredentialEditAction>,
 }
 
+impl SearchCredential {
+    /// CLI(pinvou-cli)在 prefs 模块树外消费;内部走 [`CredentialStateOps`]
+    /// 单一实现(理由同 SavedModel 同名壳)。
+    pub fn mark_configured(&mut self, reference: crate::platform::prefs::CredentialReference) {
+        use crate::platform::prefs::CredentialStateOps;
+        CredentialStateOps::mark_configured(self, reference)
+    }
+    pub fn mark_missing(&mut self) {
+        use crate::platform::prefs::CredentialStateOps;
+        CredentialStateOps::mark_missing(self)
+    }
+}
+
 impl sealed::Sealed for SearchCredential {}
 
 impl CredentialStateAccess for SearchCredential {

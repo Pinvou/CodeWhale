@@ -61,6 +61,9 @@ pub struct ScanState {
     /// refreshes L0 only on `done`, so `interrupted` cannot read as
     /// "scanned".
     pub phase: String,
+    /// `roots`（headless 面加入）报告本轮扫描根,GUI 今日忽略;CLI `scan status`
+    /// 渲染它。上游 #566 曾在无 CLI 消费的树上删字段,本仓 CLI 在用,恢复。
+    pub roots: Vec<String>,
     pub scanned: u64,
     pub started_at: i64,
     /// Raw entries enumerated pre-prune. The GUI ignores this; the headless
@@ -762,6 +765,7 @@ impl KnowledgeService {
             *st = ScanState {
                 running: true,
                 phase: "scanning".into(),
+                roots: roots.iter().map(|p| p.display().to_string()).collect(),
                 ..Default::default()
             };
         }
@@ -1863,6 +1867,7 @@ mod tests {
     #[test]
     fn scan_panic_guard_always_clears_the_running_flag() {
         let state = Mutex::new(ScanState {
+            roots: Vec::new(),
             raw_seen: 0,
             started_at: 0,
             running: true,

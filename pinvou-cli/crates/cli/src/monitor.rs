@@ -655,8 +655,6 @@ mod tests {
             cpu: Some(pinvou3_lib::features::monitor::CpuSnapshot {
                 name: "test-cpu".to_owned(),
                 total_usage_pct: Some(12.5),
-                process_usage_pct: None,
-                logical_processors: 0,
             }),
             ..MonitorSnapshot::default()
         };

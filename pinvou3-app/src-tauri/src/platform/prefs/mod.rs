@@ -696,6 +696,18 @@ impl SavedModel {
     }
 }
 
+impl SavedModel {
+    /// CLI(pinvou-cli)在 prefs 模块树外消费这两个迁移;本仓 CLI 的 models 面
+    /// 是 fork 保留面,上游 #566 收编 trait 时其 CLI 无此消费,故固有壳仅本仓
+    /// 需要,内部仍走 [`CredentialStateOps`] 单一实现。
+    pub fn mark_configured(&mut self, reference: CredentialReference) {
+        CredentialStateOps::mark_configured(self, reference)
+    }
+    pub fn mark_missing(&mut self) {
+        CredentialStateOps::mark_missing(self)
+    }
+}
+
 impl sealed::Sealed for SavedModel {}
 
 impl CredentialStateAccess for SavedModel {
