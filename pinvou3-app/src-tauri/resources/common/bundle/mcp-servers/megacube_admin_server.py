@@ -871,21 +871,45 @@ mkdir -p "$MODEL_DIR"
 # 文件——HF 只对这些公布内容寻址 sha256，正好是权重的绝对主体；其余是几 KB 的
 # 配置文件，官方只给 git blob 的 sha1，由 lmm_model_complete 查存在。
 #
-# 算完在权重目录里留个记号，记的是清单自己的哈希：清单变了（换了模型版本）记号
-# 自然失效会重新校验；没变就不必每点一次下载都再啃一遍几十 GB。
+# 缓存绑定清单摘要与实际权重的文件身份、大小和纳秒修改/变更时间。
+# 清单不变但权重补回或同尺寸改写时必须重算；真正未改的完整权重才走快速路径。
+lmm_weights_fingerprint() {
+    local dir="$1" entry name
+    (
+        for entry in "${LMM_BIG_FILES[@]}"; do
+            name="${entry%%:*}"
+            stat -L -c '%d:%i:%s:%y:%z' -- "$dir/$name" || exit 1
+        done
+    ) | sha256sum | cut -d' ' -f1
+}
+
 verify_weights() {
-    local dir="$1" want_mark
+    local dir="$1" manifest_hash before after want_mark
     [ -f "$LMM_WEIGHTS_MANIFEST" ] || {
+        rm -f -- "$LMM_VERIFIED_MARK"
         echo "ERROR: 卡片包不完整，缺少权重清单 weights.sha256" >&2
         return 1
     }
-    want_mark="$(sha256sum "$LMM_WEIGHTS_MANIFEST" | cut -d' ' -f1)"
+    manifest_hash="$(sha256sum "$LMM_WEIGHTS_MANIFEST" | cut -d' ' -f1)" || {
+        rm -f -- "$LMM_VERIFIED_MARK"; return 1
+    }
+    before="$(lmm_weights_fingerprint "$dir")" || {
+        rm -f -- "$LMM_VERIFIED_MARK"; return 1
+    }
+    want_mark="v2:$manifest_hash:$before"
     if [ -f "$LMM_VERIFIED_MARK" ] && [ "$(cat "$LMM_VERIFIED_MARK" 2>/dev/null)" = "$want_mark" ]; then
         return 0
     fi
+    # An old or changed receipt cannot survive a failed new verification.
+    rm -f -- "$LMM_VERIFIED_MARK" || return 1
     echo "校验权重摘要（大文件需要几分钟）…"
     ( cd "$dir" && sha256sum -c "$LMM_WEIGHTS_MANIFEST" ) &
     lmm_heartbeat $! "正在校验权重摘要" || return 1
+    after="$(lmm_weights_fingerprint "$dir")" || return 1
+    [ "$before" = "$after" ] || {
+        echo "ERROR: 权重在校验期间发生变化，请待文件稳定后重试。" >&2
+        return 1
+    }
     printf '%s' "$want_mark" > "$LMM_VERIFIED_MARK"
     echo "权重摘要校验通过。"
 }
@@ -900,6 +924,10 @@ if lmm_model_complete "$MODEL_DIR"; then
     echo "LMM_PROGRESS_BYTES=$TOTAL/$TOTAL"
     exit 0
 fi
+
+# Missing/truncated files require writes. Retire the old receipt before any
+# import or downloader can replace bytes, including after an interrupted retry.
+rm -f -- "$LMM_VERIFIED_MARK"
 
 # ---------------------------------------------------------------------------
 # 用户可能已经把权重拷到 U 盘或某个暂存目录里了，先找一圈，找到就不走网络。

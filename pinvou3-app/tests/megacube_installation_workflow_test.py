@@ -314,6 +314,124 @@ class LocalReuseTests(unittest.TestCase):
 
 
 
+
+class GeneratedVerificationCacheTests(unittest.TestCase):
+    """Actual generated downloader with offline CLI stubs; no listener or model."""
+    def setUp(self):
+        import shutil
+        import sys
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.card = self.root / "card"
+        self.card.mkdir()
+        self.good, self.bad = b"good weights", b"evil weights"
+        self.files = server._render_sglang_card_files({
+            "repo_id": "test/fixture-NVFP4", "model_name": "fixture", "weights_bytes": len(self.good),
+            "lfs_files": [{"name": "model.safetensors", "size": len(self.good),
+                           "sha256": hashlib.sha256(self.good).hexdigest()}],
+            "small_files": ["config.json"], "quantization": "NVFP4"}, "fixture")
+        for name, content in self.files.items():
+            path = self.card / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+            if name.endswith(".sh"):
+                path.chmod(0o755)
+        self.model = self.root / "models/fixture-NVFP4-test"
+        self.model.mkdir(parents=True)
+        (self.model / "config.json").write_text("{}")
+        self.weight = self.model / "model.safetensors"
+        self.marker = self.model / ".lmm-verified"
+        self.log = self.root / "sha-checks"
+        self.commands = self.root / "commands"
+        self.commands.mkdir()
+        # Prevent searching host volumes and prevent all network fallbacks.
+        for name in ("timeout", "find"):
+            path = self.commands / name
+            path.write_text("#!/bin/sh\nexit 0\n")
+            path.chmod(0o755)
+        for name in ("python3", "curl", "wget"):
+            path = self.commands / name
+            path.write_text("#!/bin/sh\necho unexpected-network-fallback >&2\nexit 97\n")
+            path.chmod(0o755)
+        sleeper = self.commands / "sleep"
+        sleeper.write_text("#!/bin/sh\nexec " + shutil.which("sleep") + " 0.005\n")
+        sleeper.chmod(0o755)
+        checker = self.commands / "sha256sum"
+        checker.write_text("#!" + sys.executable + "\n" +
+            "import os, sys\nfrom pathlib import Path\n" +
+            "if '-c' in sys.argv:\n    with open(os.environ['SHA_CHECK_LOG'], 'a') as log: log.write('checked\\n')\n" +
+            "os.execv(" + repr(shutil.which("sha256sum")) + ", ['sha256sum', *sys.argv[1:]])\n")
+        checker.chmod(0o755)
+        hf = self.card / ".venv/bin/hf"
+        hf.parent.mkdir(parents=True)
+        hf.write_text("#!" + sys.executable + "\n" +
+            "import os\nfrom pathlib import Path\np=Path(os.environ['MODEL_DIR'])\n" +
+            "p.joinpath('model.safetensors').write_bytes(bytes.fromhex(os.environ['HF_BYTES_HEX']))\n" +
+            "p.joinpath('config.json').write_text('{}')\n")
+        hf.chmod(0o755)
+        self.env = {key: value for key, value in os.environ.items() if not key.startswith("LMM_")}
+        self.env.update(HOME=str(self.root / "home"), PATH=str(self.commands) + os.pathsep + os.environ["PATH"],
+                        LMM_MODELS_DIR=str(self.root / "models"), LMM_IMPORT_DIRS="", LMM_IMPORT_CANDIDATES="",
+                        SHA_CHECK_LOG=str(self.log), HF_BYTES_HEX=self.bad.hex())
+
+    def run_download(self):
+        return subprocess.run(["bash", str(self.card / "download_model.sh")], env=self.env,
+                              capture_output=True, text=True, timeout=10)
+
+    def legacy_marker(self):
+        self.marker.write_text(hashlib.sha256(self.files["weights.sha256"]).hexdigest())
+
+    def check_count(self):
+        return len(self.log.read_text().splitlines()) if self.log.exists() else 0
+
+    def test_missing_weight_retires_legacy_marker_before_bad_same_size_download(self):
+        self.legacy_marker()
+        result = self.run_download()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.weight.read_bytes(), self.bad)
+        self.assertFalse(self.marker.exists())
+        self.assertEqual(self.check_count(), 1)
+
+    def test_same_size_overwrite_with_restored_mtime_invalidates_complete_cache(self):
+        self.weight.write_bytes(self.good)
+        first = self.run_download()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertTrue(self.marker.is_file())
+        before = self.weight.stat()
+        time.sleep(.01)
+        self.weight.write_bytes(self.bad)
+        os.utime(self.weight, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.assertEqual(self.weight.stat().st_mtime_ns, before.st_mtime_ns)
+        self.assertNotEqual(self.weight.stat().st_ctime_ns, before.st_ctime_ns)
+        changed = self.run_download()
+        self.assertNotEqual(changed.returncode, 0, changed.stdout + changed.stderr)
+        self.assertEqual(self.check_count(), 2)
+        self.assertFalse(self.marker.exists())
+
+    def test_legacy_complete_bad_file_and_repeated_failure_never_leave_reusable_marker(self):
+        self.weight.write_bytes(self.bad)
+        self.legacy_marker()
+        for expected in (1, 2):
+            result = self.run_download()
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(self.marker.exists())
+            self.assertEqual(self.check_count(), expected)
+            self.assertEqual(self.weight.read_bytes(), self.bad)
+
+    def test_unchanged_complete_data_keeps_fast_path_without_another_content_hash(self):
+        self.weight.write_bytes(self.good)
+        first = self.run_download()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        marker = self.marker.read_bytes()
+        self.assertEqual(self.check_count(), 1)
+        second = self.run_download()
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(self.check_count(), 1)
+        self.assertEqual(self.marker.read_bytes(), marker)
+        self.assertEqual(self.weight.read_bytes(), self.good)
+
+
 class TaskDeliveryTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
