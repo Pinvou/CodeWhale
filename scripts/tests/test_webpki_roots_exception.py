@@ -1,0 +1,291 @@
+import importlib.util
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import tomllib
+import unittest
+from unittest import mock
+
+
+ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = ROOT / "scripts/guard-webpki-roots-exception.py"
+SPEC = importlib.util.spec_from_file_location("webpki_guard", SCRIPT)
+GUARD = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(GUARD)
+WORKFLOW = ROOT / ".github/workflows/pr-check.yml"
+EXPECTED_LOCKFILES = (
+    "pinvou-knowledge/Cargo.lock",
+    "pinvou3-app/src-tauri/Cargo.lock",
+    "pinvou-cli/Cargo.lock",
+)
+
+
+class WebpkiExceptionTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        for relative in EXPECTED_LOCKFILES:
+            target = self.root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((ROOT / relative).read_bytes())
+
+    def mutate_roots(self, relative, version, transform):
+        path = self.root / relative
+        text = path.read_text(encoding="utf-8")
+        pattern = rf'\[\[package\]\]\nname = "webpki-roots"\nversion = "{re.escape(version)}"\n.*?(?=\n\[\[package\]\]|\Z)'
+        text, count = re.subn(pattern, lambda match: transform(match[0]), text, flags=re.S)
+        self.assertEqual(count, 1, "mutation must hit an actual package exactly once")
+        path.write_text(text, encoding="utf-8")
+
+    def test_three_real_locks_pass_without_modification(self):
+        self.assertEqual(GUARD.LOCKFILES, EXPECTED_LOCKFILES)
+        before = {path: (ROOT / path).read_bytes() for path in EXPECTED_LOCKFILES}
+        GUARD.validate_repository(ROOT)
+        result = subprocess.run([sys.executable, str(SCRIPT)], cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(before, {path: (ROOT / path).read_bytes() for path in EXPECTED_LOCKFILES})
+
+    def assert_every_consumer_required(self):
+        # Expected consumers are independent of the production selector, so
+        # accidentally deleting a selector cannot shrink this test with it.
+        for relative in EXPECTED_LOCKFILES:
+            path = self.root / relative
+            original = path.read_bytes()
+            path.unlink()
+            try:
+                with self.assertRaises(GUARD.GuardError):
+                    GUARD.validate_repository(self.root)
+            finally:
+                path.write_bytes(original)
+
+    def test_every_consumer_is_required_and_not_selectable(self):
+        self.assert_every_consumer_required()
+        result = subprocess.run([sys.executable, str(SCRIPT), EXPECTED_LOCKFILES[0]], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+
+    def test_removing_each_production_consumer_breaks_the_missing_lock_contract(self):
+        for omitted in EXPECTED_LOCKFILES:
+            with self.subTest(omitted=omitted), mock.patch.object(
+                GUARD, "LOCKFILES", tuple(path for path in EXPECTED_LOCKFILES if path != omitted)
+            ):
+                with self.assertRaises(AssertionError):
+                    self.assert_every_consumer_required()
+
+    def test_downgrades_and_unreviewed_versions_fail_in_each_real_lock(self):
+        for relative in EXPECTED_LOCKFILES:
+            original = (self.root / relative).read_bytes()
+            for old, new in [("1.0.10", "1.0.9"), ("1.0.10", "1.0.11"), ("0.26.11", "0.26.10"), ("0.26.11", "0.26.12")]:
+                with self.subTest(lock=relative, version=new):
+                    self.mutate_roots(relative, old, lambda block: block.replace(f'version = "{old}"', f'version = "{new}"'))
+                    with self.assertRaises(GUARD.GuardError):
+                        GUARD.validate_repository(self.root)
+                    (self.root / relative).write_bytes(original)
+
+    def test_edges_sources_and_checksums_fail_closed(self):
+        changes = [
+            ("0.26.11", lambda block: block.replace('"webpki-roots 1.0.10"', '"webpki-roots 1.0.9"')),
+            ("0.26.11", lambda block: block.replace('"webpki-roots 1.0.10"', '"webpki-roots"')),
+            ("0.26.11", lambda block: block.replace('"webpki-roots 1.0.10",', '"webpki-roots 1.0.10",\n "rustls-pki-types",')),
+            ("1.0.10", lambda block: block.replace('"rustls-pki-types",', '')),
+        ]
+        for version in GUARD.REVIEWED:
+            changes.extend([
+                (version, lambda block: block.replace(GUARD.REGISTRY, "git+https://example.invalid/roots")),
+                (version, lambda block: re.sub(r'^source = .*\n', '', block, flags=re.M)),
+                (version, lambda block: re.sub(r'checksum = "[a-f0-9]+"', 'checksum = "' + '0' * 64 + '"', block)),
+                (version, lambda block: re.sub(r'^checksum = .*\n', '', block, flags=re.M)),
+            ])
+        for relative in EXPECTED_LOCKFILES:
+            original = (self.root / relative).read_bytes()
+            for index, (version, transform) in enumerate(changes):
+                with self.subTest(lock=relative, mutation=index):
+                    self.mutate_roots(relative, version, transform)
+                    with self.assertRaises(GUARD.GuardError):
+                        GUARD.validate_repository(self.root)
+                    (self.root / relative).write_bytes(original)
+
+    def test_missing_extra_duplicate_and_ambiguous_packages_fail(self):
+        relative = EXPECTED_LOCKFILES[0]
+        path = self.root / relative
+        original = path.read_bytes()
+        for transform in [lambda block: '', lambda block: block + '\n' + block,
+                          lambda block: block + '\n' + block.replace(GUARD.REGISTRY, 'git+https://example.invalid/roots'),
+                          lambda block: block + '\n' + block.replace('version = "0.26.11"', 'version = "0.25.0"')]:
+            self.mutate_roots(relative, "0.26.11", transform)
+            with self.assertRaises(GUARD.GuardError):
+                GUARD.validate_repository(self.root)
+            path.write_bytes(original)
+
+    def test_unreadable_or_malformed_lock_is_not_empty_success(self):
+        path = self.root / EXPECTED_LOCKFILES[1]
+        for text in ['', 'version = 3\n', 'version = 4\npackage = "bad"', '[broken']:
+            path.write_text(text, encoding="utf-8")
+            with self.assertRaises(GUARD.GuardError):
+                GUARD.validate_repository(self.root)
+
+    def assert_cli_rejects_bad_locks(self, entry):
+        original = {path: (self.root / path).read_bytes() for path in EXPECTED_LOCKFILES}
+        cases = ['missing_cli', 'old_roots', 'old_parent', 'wrong_checksum']
+        for case in cases:
+            try:
+                if case == 'missing_cli':
+                    (self.root / EXPECTED_LOCKFILES[2]).unlink()
+                elif case == 'old_roots':
+                    self.mutate_roots(EXPECTED_LOCKFILES[0], '1.0.10',
+                                      lambda block: block.replace('version = "1.0.10"', 'version = "1.0.9"'))
+                elif case == 'old_parent':
+                    self.mutate_roots(EXPECTED_LOCKFILES[1], '0.26.11',
+                                      lambda block: block.replace('webpki-roots 1.0.10', 'webpki-roots 1.0.9'))
+                else:
+                    self.mutate_roots(EXPECTED_LOCKFILES[2], '1.0.10',
+                                      lambda block: block.replace(GUARD.REVIEWED['1.0.10']['checksum'], '0' * 64))
+                snapshot = {path: (self.root / path).read_bytes() if (self.root / path).exists() else None
+                            for path in EXPECTED_LOCKFILES}
+                # cwd deliberately differs from the copied entry's repository.
+                result = subprocess.run([sys.executable, str(entry)], cwd=ROOT, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0, case)
+                self.assertEqual(snapshot, {path: (self.root / path).read_bytes() if (self.root / path).exists() else None
+                                            for path in EXPECTED_LOCKFILES})
+            finally:
+                for path, content in original.items():
+                    (self.root / path).write_bytes(content)
+
+    def test_real_cli_entry_rejects_bad_locks_without_writes(self):
+        entry = self.root / 'scripts/guard-webpki-roots-exception.py'
+        entry.parent.mkdir()
+        entry.write_bytes(SCRIPT.read_bytes())
+        self.assert_cli_rejects_bad_locks(entry)
+
+    def test_removing_main_validation_is_caught_by_cli_negative_control(self):
+        entry = self.root / 'scripts/guard-webpki-roots-exception.py'
+        entry.parent.mkdir()
+        source = SCRIPT.read_text(encoding='utf-8')
+        target = 'validate_repository(Path(__file__).resolve().parents[1])'
+        self.assertEqual(source.count(target), 1)
+        entry.write_text(source.replace(target, 'pass'), encoding='utf-8')
+        with self.assertRaises(AssertionError):
+            self.assert_cli_rejects_bad_locks(entry)
+
+
+def job_block(workflow, name):
+    match = re.search(rf'^  {re.escape(name)}:\n(.*?)(?=^  [\w-]+:|\Z)', workflow, re.M | re.S)
+    if not match:
+        raise AssertionError(f"missing job {name}")
+    return match[1]
+
+
+def cargo_deny_commands(workflow):
+    """Inspect actual run scalars, including block and quoted single-line runs.
+
+    This deliberately supports the workflow's explicit scalar style, not YAML
+    aliases or arbitrary objects. Unrecognized run forms require a test update.
+    """
+    lines = workflow.splitlines()
+    commands = []
+    for index, line in enumerate(lines):
+        match = re.match(r'^(\s+)(?:-\s+)?run:\s*(.*?)\s*$', line)
+        if not match:
+            continue
+        scalar = match[2]
+        # defaults.run is a mapping (shell/cwd), not an executable step.
+        if not scalar and index > 0 and lines[index - 1].strip() == 'defaults:':
+            continue
+        if scalar in ('|', '|-', '|+', '>', '>-', '>+'):
+            body = []
+            for following in lines[index + 1:]:
+                if following.strip() and len(following) - len(following.lstrip()) <= len(match[1]):
+                    break
+                body.append(following)
+            scalar = '\n'.join(body)
+        elif scalar.startswith('"'):
+            scalar = json.loads(scalar)
+        elif scalar.startswith("'"):
+            if not scalar.endswith("'"):
+                raise AssertionError('unterminated run scalar')
+            scalar = scalar[1:-1].replace("''", "'")
+        elif not scalar or scalar.startswith(('*', '&', '{', '[')):
+            raise AssertionError('unrecognized run scalar; inspect its cargo-deny coverage')
+        commands.extend(re.findall(r'\bcargo\s+deny\b', scalar))
+    return commands
+
+
+class WebpkiCiContractTests(unittest.TestCase):
+    def verify_workflow(self, workflow):
+        workflow = '\n'.join(line for line in workflow.splitlines()
+                             if not line.lstrip().startswith('#')) + '\n'
+        self.assertEqual(len(cargo_deny_commands(workflow)), 2,
+                         'a new cargo-deny entry must join this guarded-entry contract')
+        cases = [
+            ("knowledge-rust", "cargo deny check", "needs.changes.outputs.knowledge_dependencies == 'true'",
+             "python3 scripts/guard-webpki-roots-exception.py",
+             "cargo deny --locked --manifest-path pinvou-knowledge/Cargo.toml --config pinvou3-app/src-tauri/deny.toml check advisories licenses bans sources"),
+            ("rust-lint", "cargo deny check (hard gate)", "env.RUN_HEAVY_RUST_CHECKS == 'true' && needs.changes.outputs.rust_dependencies == 'true'",
+             "python3 ../../scripts/guard-webpki-roots-exception.py", "cargo deny --locked check advisories licenses bans sources"),
+        ]
+        for job, step_name, condition, guard, deny in cases:
+            block = job_block(workflow, job)
+            steps = block.split('\n      - ')
+            scan = next(step for step in steps if step.startswith(f'name: {step_name}\n'))
+            setup = next(step for step in steps if step.startswith('name: Python for dependency exception guard\n'))
+            self.assertLess(steps.index(setup), steps.index(scan))
+            for step in [scan, setup]:
+                self.assertIn('        if: ${{ ' + condition + ' }}\n', step)
+                self.assertNotIn('continue-on-error', step)
+            self.assertIn('uses: actions/setup-python@v7', setup)
+            self.assertIn("python-version: '3.12'", setup)
+            run = re.search(r'        run: \|\n((?:          [^\n]*\n|\n)*)', scan)
+            self.assertIsNotNone(run)
+            commands = [line.strip() for line in run[1].splitlines() if line.strip()]
+            self.assertEqual(commands, [guard, deny], "guard must succeed before the locked scan in the same step")
+            self.assertNotIn('shell:', scan, 'keep the runner default fail-fast shell')
+        changes = job_block(workflow, 'changes')
+        for group in ['rust_dependencies', 'knowledge_dependencies']:
+            block = re.search(rf'^            {group}:\n(.*?)(?=^            \w+:|\Z)', changes, re.M | re.S)[1]
+            for path in ['scripts/guard-webpki-roots-exception.py', 'scripts/tests/test_webpki_roots_exception.py']:
+                self.assertIn(f"- '{path}'", block)
+                self.assertNotIn(f"- '!{path}'", block)
+        fast = job_block(workflow, 'fast-gate')
+        self.assertIn("python3 -m unittest discover -s scripts/tests -p 'test_*.py'", fast)
+
+    def test_both_shared_policy_consumers_have_mandatory_locked_scan(self):
+        self.verify_workflow(WORKFLOW.read_text(encoding='utf-8'))
+
+    def test_workflow_mutations_cannot_silently_bypass_guard(self):
+        workflow = WORKFLOW.read_text(encoding='utf-8')
+        for prefix in ['', '../../']:
+            guard = f'          python3 {prefix}scripts/guard-webpki-roots-exception.py\n'
+            for replacement in ['', guard.rstrip() + ' || true\n', guard.replace('python3', '# python3')]:
+                with self.subTest(prefix=prefix, replacement=replacement):
+                    changed = workflow.replace(guard, replacement)
+                    self.assertNotEqual(changed, workflow)
+                    with self.assertRaises(AssertionError):
+                        self.verify_workflow(changed)
+        for changed in [workflow.replace('cargo deny --locked', 'cargo deny'),
+                        workflow.replace("python-version: '3.12'", "python-version: '3.10'"),
+                        workflow.replace("              - 'scripts/guard-webpki-roots-exception.py'\n", ''),
+                        re.sub(r'(          python3 [^\n]+\n)(          cargo deny [^\n]+\n)', r'\2\1', workflow),
+                        workflow + '\n  unguarded-audit:\n    runs-on: ubuntu-22.04\n    steps:\n      - name: extra scan\n        run: |\n          cargo deny check advisories\n',
+                        workflow.replace('          cargo deny --locked check advisories licenses bans sources\n',
+                                         '          cargo deny --locked check advisories licenses bans sources\n      - run: cargo deny check advisories\n'),
+                        workflow + '\n  unguarded-audit:\n    steps:\n      - run: \'cargo deny check advisories\'\n',
+                        workflow + '\n  unguarded-audit:\n    steps:\n      - run: "cargo deny check advisories"\n',
+                        workflow.replace('      - name: cargo deny check\n', '      - name: cargo deny check\n        continue-on-error: true\n'),
+                        workflow.replace("        if: ${{ needs.changes.outputs.knowledge_dependencies == 'true' }}\n        run: |", "        if: ${{ false }}\n        run: |"),
+                        workflow.replace("        if: ${{ needs.changes.outputs.knowledge_dependencies == 'true' }}\n        run: |", "        # old if: ${{ needs.changes.outputs.knowledge_dependencies == 'true' }}\n        if: ${{ false }}\n        run: |"),
+                        workflow.replace("              - 'scripts/guard-webpki-roots-exception.py'", "              # - 'scripts/guard-webpki-roots-exception.py'")]:
+            with self.assertRaises(AssertionError):
+                self.verify_workflow(changed)
+
+    def test_policy_keeps_affected_1x_denied_despite_advisory_exception(self):
+        with (ROOT / 'pinvou3-app/src-tauri/deny.toml').open('rb') as stream:
+            policy = tomllib.load(stream)
+        self.assertIn('RUSTSEC-2026-0381', policy['advisories']['ignore'])
+        self.assertIn({'name': 'webpki-roots', 'version': '>=1.0.0, <1.0.10'}, policy['bans']['deny'])
+
+
+if __name__ == '__main__':
+    unittest.main()
