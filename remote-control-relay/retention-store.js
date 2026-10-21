@@ -1,8 +1,8 @@
 // Durable, minimal retention facts. Raw telemetry can expire independently.
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { MIN_RELIABLE_SAMPLE, isSuccessfulCoreUserTask, normalizeUsageOccurredAt, statsDay as retentionDay, statsDayFromMilliseconds } from './telemetry-primitives.js';
-import { atomicWriteJson, enforcePrivateFile } from './telemetry-storage.js';
+import { atomicWriteJson, atomicWritePrivateFile, enforcePrivateFile } from './telemetry-storage.js';
 export { statsDay as retentionDay } from './telemetry-primitives.js';
 
 // The last Beijing calendar day containing a representable JavaScript Date.
@@ -49,12 +49,19 @@ export class RetentionFacts {
         || !row.successful_days.includes(row.first_success_day)
         || row.successful_days.some(day => !validRetentionDay(day)
           || day < row.first_success_day || day > row.first_success_day + 30)) throw new Error('invalid retention row');
-      this.rows.set(row.device_id, { ...row, successful_days: [...new Set(row.successful_days)] });
+      const days = [...new Set(row.successful_days)].sort((a, b) => a - b);
+      if (days.length !== row.successful_days.length || days.some((day, index) => day !== row.successful_days[index])) this.dirty = true;
+      this.rows.set(row.device_id, { ...row, successful_days: days });
     }
     this.unresolvedInstallations = [...this.rows.values()].filter(row => !row.history_complete).length;
   }
 
-  observe(events, devices, now = Date.now()) {
+  observe(events, devices, now = Date.now(), wasDeleted = () => false) {
+    const inventoryIds = new Set(devices.map(device => device.device_id));
+    const unexplained = [...this.rows.keys()].filter(id => !inventoryIds.has(id) && !wasDeleted(id)).length;
+    // Preserve inventory-authoritative reconciliation, but never hide an
+    // unmatched facts restore. Counts only: no subject IDs or hashes in logs.
+    if (unexplained) console.warn(JSON.stringify({ event:'retention_inventory_omission', rows:unexplained }));
     const eligible = new Map(devices.filter(d => d.hardware_source === 'installation_id').map(d => [d.device_id, d]));
     for (const id of this.rows.keys()) {
       if (!eligible.has(id)) { this.rows.delete(id); this.dirty = true; }
@@ -105,7 +112,7 @@ export class RetentionFacts {
     const metricVersionStartedAt = this.metricVersionStartedAt ?? Date.now();
     atomicWriteJson(this.path, { version: 1, initialized_at: this.initializedAt,
       metric_version_started_at: metricVersionStartedAt, rows: [...this.rows.values()] });
-    if (!existsSync(this.marker)) writeFileSync(this.marker, '1\n', { mode: 0o600, flag: 'wx' });
+    if (!existsSync(this.marker)) atomicWritePrivateFile(this.marker, '1\n');
     enforcePrivateFile(this.marker);
     this.metricVersionStartedAt = metricVersionStartedAt;
     this.dirty = false;

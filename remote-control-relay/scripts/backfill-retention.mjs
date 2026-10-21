@@ -22,10 +22,11 @@ export async function backfillRetention({ dataDir, sources = [], apply = false, 
   const devices = (saved.devices || []).filter(row => !removedSubjects.has(
     deletionSubjectHash(row.device_id, pepper || ''),
   ));
+  const wasDeleted = id => removedSubjects.has(deletionSubjectHash(id, pepper || ''));
   const facts = new RetentionFacts(dataDir, now);
   const before = facts.metrics(now);
   const beforeRows = facts.rows.size;
-  facts.observe([], devices, now);
+  facts.observe([], devices, now, wasDeleted);
   const rowsDropped = beforeRows - facts.rows.size;
   const legacyCohorts = new Map();
   const legacyActivity = new Map();
@@ -63,9 +64,9 @@ export async function backfillRetention({ dataDir, sources = [], apply = false, 
           legacyActivity.get(id).add(day);
           chunk.push(event);
         }
-        if (chunk.length >= 1000) { facts.observe(chunk, devices, now); chunk = []; }
+        if (chunk.length >= 1000) { facts.observe(chunk, devices, now, wasDeleted); chunk = []; }
       }
-      facts.observe(chunk, devices, now);
+      facts.observe(chunk, devices, now, wasDeleted);
     } finally { lines.close(); stream.destroy(); }
   }
   const after = facts.metrics(now);
@@ -82,7 +83,7 @@ export async function backfillRetention({ dataDir, sources = [], apply = false, 
   };
 }
 
-const USAGE = 'usage: node backfill-retention.mjs --data-dir DIR [--source JSONL] [--apply --offline]';
+const USAGE = 'usage: node backfill-retention.mjs --data-dir DIR [--source JSONL] [--apply --offline]\nOn storage errors, check the paired device inventory, retention facts/marker and input backups offline.';
 function argumentError(message) {
   return Object.assign(new Error(message), { cliMessage:`${message}\n${USAGE}` });
 }
@@ -115,7 +116,7 @@ try {
   if (isDirectCliEntry(import.meta.url)) {
     const options = parseArguments(process.argv.slice(2));
     if (options.help) {
-      console.log(`${USAGE}\nDefault: read-only dry run. --source may be repeated.\nUse --data-dir=DIR or --source=JSONL for paths beginning with --.\nDeletion filtering requires PINVOU_TELEMETRY_DEVICE_PEPPER when tombstones exist.`);
+      console.log(`${USAGE}\nDefault: no-content-write dry run. Existing authority permissions are tightened to 0600; writable metadata is required. --source may be repeated.\nUse --data-dir=DIR or --source=JSONL for paths beginning with --.\nDeletion filtering requires PINVOU_TELEMETRY_DEVICE_PEPPER when tombstones exist.`);
     } else {
       console.log(JSON.stringify(await backfillRetention(options), null, 2));
     }

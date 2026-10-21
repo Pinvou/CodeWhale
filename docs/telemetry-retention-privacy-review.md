@@ -17,7 +17,7 @@
 | 单安装存储 | `device_id`、`first_success_day`、`successful_days`、`history_complete`；最多首次成功日起 31 个成功日期，后续日期不扩大集合。支持乱序与更早成功重锚 | `retention-facts.json` 的行结构及加载校验 |
 | 全局元数据 | 格式版本、`initialized_at`、`metric_version_started_at` 与独立初始化标记；不含单安装任务内容。两种时间分别用于历史完整性和本版首次成功启用记录，不能互换 | `RetentionFacts` 构造/保存与 overview 元数据 |
 | 输出 | 行为概览仅返回 D1/D7/D30 聚合数量、比例和完整性信息；不足 30 个合格安装不显示留存率，分子/分母仍展示。API 不导出留存行或主体标识，不开放新的单安装联查或导出 | `RetentionFacts.metrics`、`behaviorOverview`、`web/stats.html` |
-| 离线回算 | 经运维停写确认后读取已有日志/备份，排除删除主体、仅保存同一最小结构；默认只读，显式 `--apply --offline` 才写，输出汇总而非安装身份，不恢复原始事件到在线日志 | `scripts/backfill-retention.mjs` |
+| 离线回算 | 经运维停写确认后读取已有日志/备份，排除删除主体、仅保存同一最小结构；默认不写内容，但加载事实/标记仍会 chmod 0600（需允许权限元数据写入，只读挂载可能失败），显式 `--apply --offline` 才写回算内容，输出汇总而非安装身份，不恢复原始事件到在线日志 | `scripts/backfill-retention.mjs` |
 
 只持久保存 D1/D7/D30 三个布尔值不足以支持更早成功迟到后重锚，需要保留首 31 天的成功日期。继续只依赖 35 天日志无法满足长期保留已发生留存的需求；长期保存整份原始事件则保留更多字段。当前有限日期集合是本次准确重锚和单主体可删除需求下的取舍，不是任何未来用途的无限保留授权。
 

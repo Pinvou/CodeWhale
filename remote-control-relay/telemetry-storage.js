@@ -22,7 +22,7 @@ export function enforcePrivateFile(path) {
   chmodSync(path, 0o600);
 }
 
-function atomicWritePrivateFile(path, content) {
+export function atomicWritePrivateFile(path, content) {
   if (existsSync(path)) enforcePrivateFile(path);
   const temporary = `${path}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
   let descriptor;

@@ -88,6 +88,8 @@ test('backfill help and argument failures are readable without a stack trace', (
   const help = run(entry, ['--help']);
   assert.equal(help.status, 0);
   assert.match(help.stdout, /--apply --offline/);
+  assert.match(help.stdout, /no-content-write dry run/);
+  assert.match(help.stdout, /0600; writable metadata is required/);
   const combinedHelp = run(entry, ['--data-dir', 'unused-fixture', '--help']);
   assert.equal(combinedHelp.status, 0);
   assert.equal(combinedHelp.stdout, help.stdout);

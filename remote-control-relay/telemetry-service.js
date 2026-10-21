@@ -1972,7 +1972,7 @@ export class TelemetryStore {
   persistRetentionFacts(now = Date.now(), events = this.behaviorEvents) {
     const devices = [...this.devices.values()].filter(device => !this.subjectWasDeleted(device.device_id));
     try {
-      this.retentionFacts.observe(events, devices, now);
+      this.retentionFacts.observe(events, devices, now, id => this.subjectWasDeleted(id));
     } catch {
       console.error("[telemetry-error] retention_facts_persist_failed");
       throw new TelemetryHttpError(503, "retention_storage_unavailable");
