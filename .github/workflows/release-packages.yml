@@ -818,7 +818,9 @@ jobs:
       # RUSTFLAGS 只带 --remap-path-prefix(与 x64/arm64/macos 产物一致地把
       # 构建机绝对路径从 panic Location 里洗掉;该旗标是 rustc 侧的,不依赖
       # lld)。其余 arm64 的链接旗标刻意不复制:钉死的交叉工具链没有 lld
-      # (只有 bfd ld),-C link-arg=-fuse-ld=lld 在这里必然失败;--icf=safe
+      # (只有 bfd ld),-C link-arg=-fuse-ld=lld 在这里必然失败;cargo 的
+      # 链接改走工具链脚本物化的 rust-lld wrapper(bfd 2.41 解不了 rustc
+      # LLVM 的 R_LARCH_CALL36,见 ci-loongarch64-toolchain.sh);--icf=safe
       # 同样是 lld 专属,loong64 deb 不做 identical-code folding,体积代价
       # 已知并接受。LTO 也不在此覆盖:Cargo.toml 的 thin LTO 由 rustc 进程内
       # 执行,与链接器无关(env 覆盖反而偏离已审计的 profile)。
