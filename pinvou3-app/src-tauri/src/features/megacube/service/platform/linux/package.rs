@@ -1,7 +1,7 @@
 //! Offline artifacts are operator-selected, not an arbitrary update URL. A
 //! checksum proves integrity against the supplied manifest, not publisher trust.
 use std::io::{Read, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -40,7 +40,19 @@ pub fn verify(directory: &Path) -> Result<(Manifest, PathBuf), String> {
             return Err("linked_package_file".into());
         }
     }
-    let raw = std::fs::read(&manifest_path).map_err(|e| e.to_string())?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&manifest_path)
+        .map_err(|e| e.to_string())?;
+    let metadata = file.metadata().map_err(|e| e.to_string())?;
+    if !metadata.is_file() || metadata.len() > 16384 {
+        return Err("invalid_package_manifest".into());
+    }
+    let mut raw = Vec::new();
+    file.take(16385)
+        .read_to_end(&mut raw)
+        .map_err(|e| e.to_string())?;
     if raw.len() > 16384 {
         return Err("invalid_package_manifest".into());
     }
@@ -214,6 +226,23 @@ mod tests {
         )
         .unwrap();
         (directory, manifest)
+    }
+
+    #[test]
+    fn manifest_limit_accepts_exact_boundary_and_rejects_one_more_byte() {
+        let (directory, manifest) = fixture();
+        let path = directory.path().join("manifest.json");
+        let mut bytes = serde_json::to_vec(&manifest).unwrap();
+        bytes.resize(16384, b' ');
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(verify(directory.path()).is_ok());
+        bytes.push(b' ');
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            verify(directory.path()).unwrap_err(),
+            "invalid_package_manifest"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
 
     #[test]
