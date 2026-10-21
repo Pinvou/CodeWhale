@@ -5,9 +5,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
-  activateRightDockPanel,
   createRightDockState,
-  hideRightDockPanel,
+  reduceRightDockState,
   rightDockSnapshot,
 } from '../src/components/layout/right-dock-state.mjs';
 
@@ -15,16 +14,28 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, '..');
 const source = path.join(root, 'src', 'features', 'codex', 'acp-state.js');
 const temp = mkdtempSync(path.join(tmpdir(), 'pinvou3-codex-acp-'));
-const moduleDir = path.join(temp, 'codex');
-const conversationDir = path.join(temp, 'conversation');
+const moduleDir = path.join(temp, 'features', 'codex');
+const conversationDir = path.join(temp, 'features', 'conversation');
+const sharedDir = path.join(temp, 'shared');
 mkdirSync(moduleDir, { recursive: true });
 mkdirSync(conversationDir, { recursive: true });
+mkdirSync(sharedDir, { recursive: true });
 writeFileSync(path.join(temp, 'package.json'), '{"type":"module"}\n');
 const modulePath = path.join(moduleDir, 'acp-state.js');
 copyFileSync(source, modulePath);
+for (const file of ['conversation-model.js', 'deepseek-conversation.js']) {
+  copyFileSync(
+    path.join(root, 'src', 'features', 'conversation', file),
+    path.join(conversationDir, file),
+  );
+}
 copyFileSync(
-  path.join(root, 'src', 'features', 'conversation', 'conversation-model.js'),
-  path.join(conversationDir, 'conversation-model.js'),
+  path.join(root, 'src', 'shared', 'shell-tools.mjs'),
+  path.join(sharedDir, 'shell-tools.mjs'),
+);
+copyFileSync(
+  path.join(root, 'src', 'shared', 'path-utils.js'),
+  path.join(sharedDir, 'path-utils.js'),
 );
 
 const event = (seq, type, data, turnId = 'turn-1') => ({
@@ -40,7 +51,6 @@ try {
   const {
     appendAcpEvent,
     buildElicitationContent,
-    commandExecutionDetails,
     createAcpEventSeqTracker,
     createAcpGapResyncScheduler,
     mergeAcpTimelineSnapshot,
@@ -49,6 +59,7 @@ try {
     updateAcpAttachmentDraft,
   } = await import(`${pathToFileURL(modulePath).href}?t=${Date.now()}`);
   const {
+    commandExecutionDetails,
     collectToolWorkspaceResources,
     stripTerminalControlSequences,
     toolWorkspaceResources,
@@ -962,10 +973,13 @@ try {
     && codexView.includes('bottom-full')
     && !codexView.includes('bottom-[106px]'),
   'Codex streaming must pause auto-follow and place the return action above, not over, the composer');
-  assert.ok(codexView.includes('const contentElement = conversationContentRef.current')
-    && codexView.includes('return startConversationBottomFollower({')
-    && codexView.includes('onMeasured: () => {')
-    && codexView.includes('lastScrollHeightRef.current = scrollElement.scrollHeight'),
+  // Bottom following is wired through the shared useConversationBottomFollower
+  // hook (its shrink/async-layout behavior is pinned by
+  // conversation_scroll_follow.test.mjs); the codex view must consume it with
+  // its own scroll/content refs.
+  assert.ok(codexView.includes('useConversationBottomFollower({')
+    && codexView.includes('scrollRef: scroller')
+    && codexView.includes('contentRef: conversationContentRef'),
   'Codex streaming must retain bottom following across content shrink and asynchronous layout changes');
   // 虚拟化门控（#607 精修 ③④）：虚拟化下原生锚定与虚拟izer补偿双重作用会打架、
   // 平滑回底会拖着估高抖动，两视图都必须按同一 shouldVirtualizeConversationTurns
@@ -1053,10 +1067,10 @@ try {
   'the code-mode aux chat must reuse the shared Right Dock panel, remember scroll on open, keep its entry highlight tied to real dock visibility, and gate the panel mount and the quote selection on isNativeAgent like the entry button (external-ACP tasks must never reach the aux session)');
 
   let codexDockState = createRightDockState();
-  codexDockState = activateRightDockPanel(codexDockState, 'codex-workspace');
-  codexDockState = activateRightDockPanel(codexDockState, 'subagent-transcript');
+  codexDockState = reduceRightDockState(codexDockState, { type: 'activate', panelId: 'codex-workspace' });
+  codexDockState = reduceRightDockState(codexDockState, { type: 'activate', panelId: 'subagent-transcript' });
   assert.equal(rightDockSnapshot(codexDockState).activePanelId, 'subagent-transcript');
-  codexDockState = hideRightDockPanel(codexDockState, 'subagent-transcript');
+  codexDockState = reduceRightDockState(codexDockState, { type: 'hide', panelId: 'subagent-transcript' });
   assert.equal(rightDockSnapshot(codexDockState).activePanelId, 'codex-workspace',
     'closing the active subagent panel must reveal the still-mounted workspace');
   assert.ok(codexWorkspace.includes('listAcpWorkspace({')
@@ -1077,7 +1091,7 @@ try {
   assert.ok(conversationView.includes('className={`codex-markdown'), 'conversation Markdown must keep the isolated Codex style scope');
   assert.ok(codexView.includes('<ConversationTimeline') && codexView.includes('scrollElementRef={scroller}'),
     'Codex must render through the shared virtualizable timeline by default');
-  assert.ok(codexView.includes('<ConversationActivityIndicator')
+  assert.ok(codexView.includes('<LiveConversationActivityIndicator')
     && codexView.includes('turn={activeConversationTurn}')
     && conversationView.includes("if (!turn || turn.status !== 'running') return null"),
   'Codex must show the shared composer timer only while the active turn is running');
@@ -1169,11 +1183,17 @@ try {
     && codexView.includes('function CodexComposerConfigSelect')
     && codexView.includes('data-testid={testId || `codex-config-${id}`}'),
   'the plain lane must keep its self-drawn config select group while the shared config select keeps the ACP testid contract');
+  // switchNativeModel / mountNativeKb / unmountNativeKb share
+  // applyNativeControlChange, which routes every change through
+  // invoke(command, { sessionId, ...args }) — the per-session commands stay
+  // explicit as the helper's call-site arguments.
   assert.ok(codexView.includes("invoke('get_session_model_id'")
     && codexView.includes("invoke('set_session_model'")
-    && codexView.includes("invoke('session_mount_collection'")
-    && codexView.includes("invoke('session_unmount_collection'")
     && codexView.includes("invoke('session_mounted_collection'")
+    && codexView.includes("command: 'set_session_model'")
+    && codexView.includes("command: 'session_mount_collection'")
+    && codexView.includes("command: 'session_unmount_collection'")
+    && codexView.includes('await invoke(command, { sessionId, ...args })')
     && codexView.includes("invoke('get_mode_state'")
     && codexView.includes("invoke('set_plan_mode_next'")
     && codexView.includes("invoke('exit_plan_to_yolo'")
@@ -1190,8 +1210,13 @@ try {
   const nativeCreateFinalize = codexView.indexOf('return finalizePreparedSessionCreation({', nativeCreateStart);
   const nativeCreatePrepare = codexView.indexOf('prepareSession,', nativeCreateFinalize);
   const nativeCreateLoad = codexView.indexOf('loadSession,', nativeCreateFinalize);
-  const nativeSendCreate = codexView.indexOf('const created = await createSession({', codexView.indexOf('async function sendNative'));
-  const nativeSendPrepare = codexView.indexOf('prepareSession: async sessionId => {', nativeSendCreate);
+  // sendNative persists its staged controls through the shared send pipeline
+  // (runAcpSendPipeline owns the createSession call); the clear must only run
+  // after the persist+handoff inside sendNative's materializeDraft step.
+  const nativeSendStart = codexView.indexOf('async function sendNative');
+  const nativeSendPipelineStart = codexView.indexOf('async function runAcpSendPipeline({');
+  const nativeSendPipelineCreate = codexView.indexOf('const created = await createSession({', nativeSendPipelineStart);
+  const nativeSendPrepare = codexView.indexOf('prepareSession: async sessionId => {', nativeSendStart);
   const nativeSendApply = codexView.indexOf('const prepared = await persistNativeDraftControls(', nativeSendPrepare);
   const nativeSendClear = codexView.indexOf('clearNativeDraftControls(nativeDraftControlsAtSend)', nativeSendApply);
   assert.ok(codexView.includes('nativeDraftControls')
@@ -1200,10 +1225,11 @@ try {
     && nativeCreateFinalize > nativeCreateStart
     && nativeCreatePrepare > nativeCreateFinalize
     && nativeCreatePrepare < nativeCreateLoad
-    && nativeSendCreate >= 0
-    && nativeSendPrepare > nativeSendCreate
+    && nativeSendStart >= 0
+    && nativeSendPrepare > nativeSendStart
     && nativeSendApply > nativeSendPrepare
-    && nativeSendClear > nativeSendApply,
+    && nativeSendClear > nativeSendApply
+    && nativeSendPipelineCreate > nativeSendPipelineStart,
   'draft-state control selections, including multi-agent mode, must be persisted before the first session load and cleared only after handoff');
   assert.ok(
     codexView.includes('nativeDraftControlsHandoffRef.current?.sessionId === activeId')

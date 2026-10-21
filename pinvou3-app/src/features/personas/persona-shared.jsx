@@ -6,9 +6,9 @@
 import React, { useState } from 'react';
 import { AppWindow, Award, Briefcase, Cpu, Feather, Globe, Lock, Navigation, Palette, Radio, Terminal, TrendingUp, User } from '../../components/icons.jsx';
 import { expertAvatarSrc } from '../../shared/expert-avatar.mjs';
-const DEPT_LABELS = { academic:'学术', design:'设计', engineering:'工程', finance:'金融', 'game-development':'游戏', gis:'地理信息', hr:'人力', legal:'法务', marketing:'营销', 'paid-media':'投放', product:'产品', 'project-management':'项管', sales:'销售', security:'安全', 'spatial-computing':'空间计算', specialized:'专项', 'supply-chain':'供应链', support:'客服', testing:'测试', tool:'工具' };
-    // 部门标签按当前 UI 语言取词(t.depts),DEPT_LABELS(中文)兜底
-export function deptLabelFor(t, k) { return (t && t.depts && t.depts[k]) || DEPT_LABELS[k] || k; }
+import { dict } from '../../shared/i18n.js';
+    // 部门标签按当前 UI 语言取词(t.depts),中文词典(dict.zh.depts)兜底
+export function deptLabelFor(t, k) { return (t && t.depts && t.depts[k]) || (dict.zh.depts && dict.zh.depts[k]) || k; }
 import { personaOverlayFor } from '../../shared/persona-overlay.js';
     // iOS-style font stack shared by the Persona surfaces (5 call sites in
     // Personas/persona-shared/SavedPersonaConfirmDialog); the promo banner in
@@ -22,7 +22,7 @@ export function personaText(c, t) {
     }
 export const DEPT_ORDER = ['engineering','marketing','specialized','design','product','finance','sales','testing','project-management','paid-media','support','academic','game-development','spatial-computing','gis','security','supply-chain','hr','legal','tool'];
 export const ALL_DEPT = '__all__'; // 分类「全部」哨兵(语言中立,显示走 t.cpAll)
-const DEPT_COLOR = { academic:'#8B5CF6', design:'#EC4899', engineering:'#06B6D4', finance:'#10B981', 'game-development':'#F59E0B', gis:'#0EA5E9', hr:'#F472B6', legal:'#6B7280', marketing:'#F97316', 'paid-media':'#EF4444', product:'#7C3AED', 'project-management':'#3B82F6', sales:'#14B8A6', security:'#F43F5E', 'spatial-computing':'#6366F1', specialized:'#64748B', 'supply-chain':'#84CC16', support:'#22D3EE', testing:'#A855F7', tool:'#7C3AED' };
+const DEPT_COLOR = { academic:'#8B5CF6', design:'#EC4899', engineering:'#06B6D4', finance:'#10B981', 'game-development':'#F59E0B', gis:'#0EA5E9', hr:'#F472B6', legal:'#6B7280', marketing:'#F97316', 'paid-media':'#EF4444', product:'#7C3AED', 'project-management':'#3B82F6', sales:'#14B8A6', security:'#F43F5E', 'spatial-computing':'#6366F1', specialized:'#64748B', 'supply-chain':'#84CC16', support:'#22D3EE', testing:'#A855F7' };
     // 可在编辑器下拉选的部门(排除 tool —— 那是内置工具卡专用)
 export const DEPT_OPTIONS = DEPT_ORDER.filter(function(d){ return d !== 'tool'; });
 export const deptColor = (d) => DEPT_COLOR[d] || '#9aa0a6';

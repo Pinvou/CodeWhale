@@ -11,7 +11,7 @@ export function normalizeAssistantMessageText(value) {
   return normalized.replace(/[ \t]+$/, '');
 }
 
-export function extractBalancedJson(value) {
+function extractBalancedJson(value) {
   const source = String(value || '');
   const start = source.indexOf('{');
   if (start < 0) return null;
@@ -34,7 +34,7 @@ export function extractBalancedJson(value) {
   return null;
 }
 
-export function parseJsonChain(value) {
+function parseJsonChain(value) {
   const source = String(value || '');
   try { return JSON.parse(source); } catch {}
   try { return JSON.parse(source.replace(/,(\s*[}\]])/g, '$1')); } catch {}

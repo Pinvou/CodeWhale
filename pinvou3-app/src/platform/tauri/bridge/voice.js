@@ -5,7 +5,12 @@
 (function (root) {
   "use strict";
   var registry = root.__PINVOU_TAURI_BRIDGE_FEATURES__ = root.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
-  registry["voice"] = function (context) {
+  registry["voice"] = function (context) {let pinvouSharedtauriVoiceCache = null;
+function pinvouSharedtauriVoice() {
+  if (!pinvouSharedtauriVoiceCache) pinvouSharedtauriVoiceCache = window.PinvouBridgeShared.create("tauriVoice", { state, notify, activeVoiceInput: { get value() { return activeVoiceInput; }, set value(v) { activeVoiceInput = v; } }, stopMediaTracks, bt, VOICE_DEVICE_REQUEST_TIMEOUT_MS, finishVoiceInput });
+  return pinvouSharedtauriVoiceCache;
+}
+
     var state = context.state;
     var notify = context.notify;
     var invoke = context.invoke;
@@ -1075,10 +1080,7 @@
     }
   }
 
-  function closeVoiceAsrSetup() {
-    state.voiceAsrSetup = Object.assign({}, state.voiceAsrSetup, { open: false });
-    notify();
-  }
+function closeVoiceAsrSetup() { return pinvouSharedtauriVoice().closeVoiceAsrSetup(); }
 
 
   // eslint-disable-next-line sonarjs/cognitive-complexity -- single entry covering permission/recording/mode branches; split tracked separately
@@ -1305,9 +1307,7 @@
     }
   }
 
-  function cancelVoiceInput() {
-    finishVoiceInput(true, false);
-  }
+function cancelVoiceInput() { return pinvouSharedtauriVoice().cancelVoiceInput(); }
 
   function clearVoiceInput() {
     if (activeVoiceInput) {

@@ -7,7 +7,6 @@ const DESIGN_MESSAGE_TYPES = {
   CLEAR_CHANGES: 'pinvou:design-clear-changes',
   ERROR: 'pinvou:design-runtime-error',
   DESTROY: 'pinvou:design-runtime-destroy',
-  DESTROYED: 'pinvou:design-runtime-destroyed',
 };
 
 function buildDesignRuntimeScript() {
@@ -21,7 +20,6 @@ function buildDesignRuntimeScript() {
       CLEAR_CHANGES: 'pinvou:design-clear-changes',
       ERROR: 'pinvou:design-runtime-error',
       DESTROY: 'pinvou:design-runtime-destroy',
-      DESTROYED: 'pinvou:design-runtime-destroyed',
     };
     var STYLE_FIELDS = ['color','backgroundColor','fontSize','fontWeight','width','height','minWidth','maxWidth','minHeight','maxHeight','display','position','top','right','bottom','left','zIndex','opacity','lineHeight','letterSpacing','textAlign','fontFamily','backgroundImage','backgroundSize','backgroundPosition','backgroundRepeat','marginTop','marginRight','marginBottom','marginLeft','paddingTop','paddingRight','paddingBottom','paddingLeft','gap','rowGap','columnGap','flexDirection','justifyContent','alignItems','overflow','borderTopColor','borderTopLeftRadius','borderRadius','visibility','cursor'];
     var DATA_ID = 'data-pinvou-design-id';
@@ -687,7 +685,6 @@ function buildDesignRuntimeScript() {
       currentHover = null;
       currentSelected = null;
       window.__PINVOU_DESIGN_RUNTIME__ = null;
-      post(TYPES.DESTROYED);
     }
 
     try {

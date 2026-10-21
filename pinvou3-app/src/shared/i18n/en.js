@@ -629,7 +629,7 @@ export const dictEn = {
         depHint_email_manual: 'Manual install required: run `sudo cpan -i Email::Outlook::Message` in Terminal (no Homebrew formula). See https://metacpan.org/pod/Email::Outlook::Message',
         communityQrAlt: 'Pinvou QQ group QR code', communityQrPlaceholder: 'QR placeholder', communityChannelTag: 'Chinese QQ community',
         communityQrHint: 'Scan with mobile QQ to join, or copy the group ID to search manually.',
-        communityGroupLabel: 'Group ID', communityGroupPending: 'To be added', communityCopyGroup: 'Copy group ID', communityCopied: 'Group ID copied',
+        communityGroupLabel: 'Group ID', communityCopyGroup: 'Copy group ID', communityCopied: 'Group ID copied',
         communityDiscussions: 'GitHub Discussions',
         communitySupportNotice: 'The QQ group is a community space, not an official support or ticket channel. Continue to submit reproducible issues through feedback, and never post suspected vulnerabilities in the group.',
         feedbackTitle: 'Help & Feedback', feedbackDesc: 'Send issues or suggestions with screenshots or short videos.',
@@ -884,7 +884,7 @@ dictEn.uiChatView = {
   designAdjustSelected:(label, raw)=>`Adjust the currently selected ${label}: ${raw}`,
 };
 
-dictEn.uiMainApp = { petSummon:'Summon Companion', closeNavigation:'Close navigation', superPermFailed:'Unable to enable advanced execution permission', searchTestUnavailable:'Search sources cannot be tested in this environment', searchSaveFailed:'Failed to save search settings. Please try again', petSessionMissing:'Target session does not exist', petTaskStartFailed:'Task failed to start', detachedSessionMissing:'The target Coding session does not exist or was deleted', detachedSessionLoadFailed:'Failed to load the Coding session. Close this window and try again', panelLoadFailed:err=>`Panel failed to load: ${err}`, viewLoadFailed:'Failed to load this page. Check your network and try again', viewReload:'Reload' };
+dictEn.uiMainApp = { petSummon:'Summon Companion', closeNavigation:'Close navigation', superPermFailed:'Unable to enable advanced execution permission', searchSaveFailed:'Failed to save search settings. Please try again', petSessionMissing:'Target session does not exist', petTaskStartFailed:'Task failed to start', detachedSessionMissing:'The target Coding session does not exist or was deleted', detachedSessionLoadFailed:'Failed to load the Coding session. Close this window and try again', panelLoadFailed:err=>`Panel failed to load: ${err}`, viewLoadFailed:'Failed to load this page. Check your network and try again', viewReload:'Reload' };
 
 dictEn.uiToolCommon = {
   open: 'Open', coverAlt: 'Cover',
@@ -1052,7 +1052,6 @@ dictEn.uiSettingsView = {
   memoryRecentHint: 'Recent memories record what is in progress or just finished, helping PINVOU pick up the context. They fade automatically over time, and you can archive or delete them manually.',
   memoryEditDesc: 'Changes take effect immediately for future memory injection.',
   visualDesignSkillName: 'Visual Design',
-  visualDesignSkillDesc: 'Design system → web pages, banners, posters, résumés…',
   serviceFeishu: 'Feishu (Lark)',
   serviceWecom: 'WeCom',
   serviceDingtalk: 'DingTalk',

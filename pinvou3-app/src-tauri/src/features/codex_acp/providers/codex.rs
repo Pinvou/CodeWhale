@@ -13,7 +13,7 @@ use toml::Value;
 
 use super::{
     AgentConfigWriter, EffectiveConfig, EffectiveEntry, PROVIDER_ID_PREFIX, ProviderTarget,
-    atomic_write,
+    atomic_write, read_toml_config, remove_prefixed_entries,
 };
 
 const ENV_KEY_NAME: &str = "OPENAI_API_KEY";
@@ -44,17 +44,7 @@ impl CodexConfigWriter {
 
     /// 读取当前配置；文件缺失时视为空表，不可解析时**拒绝覆盖**并明确报错。
     fn read_config(&self) -> Result<Value> {
-        if !self.config_path.exists() {
-            return Ok(Value::Table(Default::default()));
-        }
-        let raw = fs::read_to_string(&self.config_path)
-            .with_context(|| format!("读取 {} 失败", self.config_path.display()))?;
-        toml::from_str::<Value>(&raw).with_context(|| {
-            format!(
-                "{} 不是有效的 TOML，拒绝覆盖；请手动修复或删除该文件后重试",
-                self.config_path.display()
-            )
-        })
+        read_toml_config(&self.config_path)
     }
 
     /// 生成/更新受管模型 catalog（幂等）。`context_window` 未指定时用保守默认。
@@ -221,36 +211,12 @@ impl AgentConfigWriter for CodexConfigWriter {
         let Some(table) = config.as_table_mut() else {
             return Ok(());
         };
-        let mut changed = false;
-        let managed_ids = table
-            .get("model_providers")
-            .and_then(Value::as_table)
-            .map(|providers| {
-                providers
-                    .keys()
-                    .filter(|key| key.starts_with(PROVIDER_ID_PREFIX))
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        if !managed_ids.is_empty() {
-            // managed_ids was just collected from the model_providers table of the
-            // same in-memory config, so it must be retrievable again; failure means
-            // an abnormal data shape and should error rather than panic.
-            let Some(providers) = table
-                .get_mut("model_providers")
-                .and_then(Value::as_table_mut)
-            else {
-                anyhow::bail!("codex config.toml model_providers table vanished during rollback");
-            };
-            for id in managed_ids {
-                providers.remove(&id);
-            }
-            changed = true;
-            if providers.is_empty() {
-                table.remove("model_providers");
-            }
-        }
+        let mut changed = remove_prefixed_entries(
+            table,
+            "model_providers",
+            PROVIDER_ID_PREFIX,
+            "codex config.toml model_providers table vanished during rollback",
+        )?;
         let provider_ref = table
             .get("model_provider")
             .and_then(Value::as_str)
@@ -308,36 +274,20 @@ impl AgentConfigWriter for CodexConfigWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::codex_acp::providers::ProviderWireApi;
-
-    /// 按测试名区分目录（cargo 并行跑时同 pid 共享目录会互删，见 kimi.rs）。
-    fn tmp_dir() -> PathBuf {
-        let test = std::thread::current()
-            .name()
-            .unwrap_or_default()
-            .replace(['/', '\\', ':'], "_");
-        let dir = std::env::temp_dir().join(format!("codex-writer-test-{test}"));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
+    use crate::features::codex_acp::providers::{ProviderWireApi, fixture_target, writer_test_dir};
 
     fn target(provider_id: &str) -> ProviderTarget {
-        ProviderTarget {
-            provider_id: provider_id.into(),
-            name: "中转".into(),
-            base_url: "https://api.example.com/v1".into(),
-            model: Some("gpt-5.2".into()),
-            model_slots: None,
-            context_window: None,
-            wire_api: ProviderWireApi::Openai,
-            api_key: Some("test-api-key-1234567890".into()),
-        }
+        fixture_target(
+            provider_id,
+            "https://api.example.com/v1",
+            "gpt-5.2",
+            ProviderWireApi::Openai,
+        )
     }
 
     #[test]
     fn apply_writes_provider_and_preserves_other_tables() {
-        let dir = tmp_dir();
+        let dir = writer_test_dir("codex-writer-test");
         let writer = CodexConfigWriter::new(&dir);
         fs::write(
             dir.join("config.toml"),
@@ -361,7 +311,7 @@ mod tests {
 
     #[test]
     fn revert_removes_only_managed_blocks() {
-        let dir = tmp_dir();
+        let dir = writer_test_dir("codex-writer-test");
         let writer = CodexConfigWriter::new(&dir);
         fs::write(
             dir.join("config.toml"),
@@ -393,7 +343,7 @@ mod tests {
 
     #[test]
     fn apply_uses_custom_context_window_in_catalog() {
-        let dir = tmp_dir();
+        let dir = writer_test_dir("codex-writer-test");
         let writer = CodexConfigWriter::new(&dir);
         let mut custom = target("pv-aaaaaaaaaaaa");
         custom.context_window = Some(1_048_576);
@@ -411,7 +361,7 @@ mod tests {
 
     #[test]
     fn apply_writes_model_catalog_and_revert_cleans_it() {
-        let dir = tmp_dir();
+        let dir = writer_test_dir("codex-writer-test");
         let writer = CodexConfigWriter::new(&dir);
         writer.apply(&target("pv-aaaaaaaaaaaa")).unwrap();
         let raw = fs::read_to_string(dir.join("config.toml")).unwrap();
@@ -445,7 +395,7 @@ mod tests {
 
     #[test]
     fn revert_keeps_user_owned_top_level_model() {
-        let dir = tmp_dir();
+        let dir = writer_test_dir("codex-writer-test");
         let writer = CodexConfigWriter::new(&dir);
         fs::write(
             dir.join("config.toml"),
@@ -469,7 +419,7 @@ mod tests {
 
     #[test]
     fn effective_errors_on_unparseable_file() {
-        let dir = tmp_dir();
+        let dir = writer_test_dir("codex-writer-test");
         let writer = CodexConfigWriter::new(&dir);
         fs::write(
             dir.join("config.toml"),

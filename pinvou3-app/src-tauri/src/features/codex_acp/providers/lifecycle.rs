@@ -15,58 +15,27 @@ pub struct UninstallPlan {
     pub script_paths: Vec<PathBuf>,
 }
 
-/// Builds the uninstall plan per backend: brew/npm package names and official script paths.
+/// Builds the uninstall plan per backend: brew/npm package names and official
+/// script paths. The package and script-path tables are single-sourced in
+/// `install.rs` (`brew_package` / `npm_package` / `official_cli_install_path`)
+/// so a rename there cannot leave the uninstall lane cleaning a stale location.
 fn uninstall_plan(backend: AgentBackend) -> UninstallPlan {
-    let brew_package = match backend {
-        AgentBackend::CodexAcp => Some(("codex", true)),
-        AgentBackend::ClaudeAcp => Some(("claude-code", true)),
-        AgentBackend::KimiAcp => Some(("kimi-code", false)),
-        AgentBackend::Deepseek => None,
-    };
-    let npm_package = match backend {
-        AgentBackend::CodexAcp => Some("@openai/codex"),
-        AgentBackend::ClaudeAcp => Some("@anthropic-ai/claude-code"),
-        AgentBackend::KimiAcp => Some("@moonshot-ai/kimi-code"),
-        AgentBackend::Deepseek => None,
-    };
     UninstallPlan {
-        brew_package,
-        npm_package,
+        brew_package: crate::features::codex_acp::install::brew_package(backend),
+        npm_package: crate::features::codex_acp::install::npm_package(backend),
         script_paths: official_script_paths(backend),
     }
 }
 
 /// 官方安装脚本的目标路径（与 resolve_*_path 的官方目录一致）。
 pub fn official_script_paths(backend: AgentBackend) -> Vec<PathBuf> {
-    let home = crate::platform::os::user_home_dir();
-    let executable = match std::env::consts::OS {
-        "windows" => ".exe",
-        _ => "",
-    };
-    match backend {
-        AgentBackend::CodexAcp => {
-            vec![super::super::platform::codex_official_install_path()]
-        }
-        AgentBackend::ClaudeAcp => {
-            vec![
-                home.join(".local")
-                    .join("bin")
-                    .join(format!("claude{executable}")),
-            ]
-        }
-        AgentBackend::KimiAcp => {
-            vec![
-                home.join(".kimi-code")
-                    .join("bin")
-                    .join(format!("kimi{executable}")),
-            ]
-        }
-        AgentBackend::Deepseek => Vec::new(),
-    }
+    crate::features::codex_acp::install::official_cli_install_path(backend)
+        .into_iter()
+        .collect()
 }
 
 /// 按安装来源构造卸载命令参数；None 表示该来源不适用（回退 script 路径清理）。
-pub fn brew_uninstall_args(plan: &UninstallPlan) -> Option<(String, Vec<String>)> {
+fn brew_uninstall_args(plan: &UninstallPlan) -> Option<(String, Vec<String>)> {
     let (package, is_cask) = plan.brew_package?;
     let mut args = vec!["uninstall".to_string()];
     if is_cask {
@@ -80,7 +49,7 @@ fn npm_uninstall_args(plan: &UninstallPlan) -> Option<(String, Vec<String>)> {
     let package = plan.npm_package?;
     // Windows 上 npm 是 npm.cmd：必须用解析后的完整路径（裸名 "npm" 会被当成
     // 原生可执行文件直接 CreateProcess，报 program not found）。
-    let npm = crate::features::codex_acp::npm_executable()?;
+    let npm = crate::features::codex_acp::install::npm_executable()?;
     Some((
         npm.to_string_lossy().into_owned(),
         vec![

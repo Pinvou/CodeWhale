@@ -217,19 +217,18 @@ const MONITOR_CLOCK_LOCALE = { zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' };
       const isDark = theme === 'dark';
       const fmt = bs && bs.monitor && bs.monitor._fmt;
       const monitorError = bs && bs.monitorError;
-      const monitorBridgeReady = !!(window.TauriBridge?.monitor && typeof window.TauriBridge.monitor.startMonitorPolling === 'function');
-      const loadingValue = !monitorBridgeReady ? t.uiMonitor.bridgeNotReady : (monitorError ? t.uiMonitor.readFailed : t.uiMonitor.reading);
+      const monitorBridgeReady = !!(bridge.monitor && typeof bridge.monitor.startMonitorPolling === 'function');
+      const loadingValue = monitorBridgeReady ? (monitorError ? t.uiMonitor.readFailed : t.uiMonitor.reading) : t.uiMonitor.bridgeNotReady;
 
       // Start/stop polling when view mounts/unmounts
       useEffect(() => {
-        const liveBridge = window.TauriBridge || bridge;
-        if (liveBridge?.monitor && typeof liveBridge.monitor.startMonitorPolling === 'function') {
-          liveBridge.monitor.startMonitorPolling();
+        if (bridge.monitor && typeof bridge.monitor.startMonitorPolling === 'function') {
+          bridge.monitor.startMonitorPolling();
         } else {
           console.warn('[monitor] TauriBridge polling API unavailable');
         }
         return () => {
-          if (liveBridge?.monitor && typeof liveBridge.monitor.stopMonitorPolling === 'function') liveBridge.monitor.stopMonitorPolling();
+          if (bridge.monitor && typeof bridge.monitor.stopMonitorPolling === 'function') bridge.monitor.stopMonitorPolling();
         };
       }, []);
 
@@ -513,8 +512,8 @@ const MONITOR_CLOCK_LOCALE = { zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' };
                     </div>
                     <div className="flex items-center gap-2">
                       <span className="px-3.5 py-2 rounded-full bg-black/[0.04] dark:bg-[#2C2C2E] text-[12px] font-bold tracking-[0.04em] text-black/55 dark:text-white/60 border border-black/[0.04] dark:border-white/[0.055]">{runModeText}</span>
-                      <button className="bg-black/5 dark:bg-[#2C2C2E] hover:bg-black/10 dark:hover:bg-[#3A3A3C] px-4 py-2 rounded-full text-[12px] font-bold tracking-[0.04em] transition-colors">{statusText}</button>
-                      <button
+                      <span className="bg-black/5 dark:bg-[#2C2C2E] hover:bg-black/10 dark:hover:bg-[#3A3A3C] px-4 py-2 rounded-full text-[12px] font-bold tracking-[0.04em] transition-colors">{statusText}</span>
+                      <button type="button"
                         onMouseDown={handleModelClearStart}
                         onMouseUp={handleModelClearEnd}
                         onMouseLeave={handleModelClearEnd}

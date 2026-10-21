@@ -169,8 +169,6 @@ pub struct MarketplaceToolInfo {
     pub name: String,
     pub description: String,
     pub version: String,
-    pub icon: String,
-    pub category: String,
     pub installed: bool,
     /// 配套技能 id(来自 manifest `companion_skills`)。前端据此把「有配套 MCP 的技能卡」的
     /// 状态/装卸联动到本 MCP,单一真源在 manifest,避免命名不一致(gongwen↔government-writing)
@@ -298,8 +296,6 @@ mod tests {
             name: "Weather".into(),
             description: "d".into(),
             version: "1".into(),
-            icon: "x".into(),
-            category: "c".into(),
             installed: true,
             companion_skills: vec![],
             source: "builtin".into(),

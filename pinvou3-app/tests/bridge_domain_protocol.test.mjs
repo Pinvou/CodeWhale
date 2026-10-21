@@ -85,6 +85,12 @@ const protocolSources = {
 };
 
 const expectedProtocolHashes = {
+  // #566 共享模块移植后的重算：invoke/listen 函数体按字节等价合并进
+  // shared/bridge-shared-helpers.js（其共享面哈希单独立钉于 expectedSharedBaseHash），
+  // 各 lane feature 文件的原始文本摘要随之变化；命令面（命令名/事件名集合）
+  // 经合并前后逐命令比对确认无增删（knowledge 的 kb_model_cancel、
+  // remoteControl 的 web_access_reset_relay / web_access:event_unsubscribe
+  // 为上游 #566 判定的死代码，随 PR 一并移除）。
   // Aux-chat domain debut (community #433 backflow): three commands —
   // get_or_create_aux_session / discard_aux_session / reset_aux_session —
   // plus the desktop send dispatch chat(restrictTools:true); buffer loading
@@ -102,8 +108,8 @@ const expectedProtocolHashes = {
   // consumed from the artifact-tracker feature); same command surface, no new
   // invoke or listen entries (the extractor scans raw source, so body/comment
   // text is part of the digest).
-  // Adds native diagnostic list/preview/confirm wrappers; existing calls stay intact.
-  orchestration: '8e0003adb7291e190bda3c597721870d6cbe0ffe7246758cfe9c7d6e531f358a',
+  // Recomputed from the merged main shared-helper surface plus diagnostic wrappers.
+  orchestration: "ea8b35e2f9997a51a527387e5cddc94d1ece231dd546529e79eb108fdae18045",
   // Recomputed for artifact export telemetry after a successful external open;
   // attribution is now isolated to the explicitly targeted session.
   // Recomputed again for the Linux clipboard-image paste fallback (community
@@ -117,7 +123,7 @@ const expectedProtocolHashes = {
   // stale-absolute heal arm + rebasing save — same command surface, no new
   // invoke or listen entries (the extractor scans raw source, so
   // body/comment text is part of the digest).
-  artifacts: '4d30777de23d38d7d48a1c9cbbb693877b248874ab5076d63e32fa6764406abb',
+  artifacts: 'd227317f84f5ef929e020d051d96287e9b61c7514d41169c20cffd57aabaa3fe',
 // New domain: computer-use consent commands/events (desktop-only; the web
   // RPC allowlist excludes them, same policy as browser:*).
   // Recomputed when the 30s deny-suppression cooldown was removed: a deny now
@@ -174,20 +180,20 @@ const expectedProtocolHashes = {
   // display-equality gate — listener body-internal edits only, no new invoke
   // or listen entries (capture-text refresh). Recomputed for per-frame stream
   // notification coalescing; event names and invoke shapes remain unchanged.
-  chat: 'cad6c1cb471c97240673b9706fc6d799c81e64224f4fbaf56f5f44b3698cdc1e',
-  dependencies: '257468e4f9e2e9270de6ef75f685d5eafcd000226d44cfb81a1b04c0e7615707',
+  chat: '0833a8d0a3f9cb5fa8b19ed4973f0a4c81a65657a98aac804fbc0930d9057aa1',
+  dependencies: 'd39f5a46b8e34c1c30d8f8e08ef62baccfe822ffb7fad8dbf3301c69c566e31c',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.
-  interaction: 'b62238d0404da126673ed75d74887bae4088861f46f893083c29412fa03d5636',
-  knowledge: '96d4f6a1534f0aedf10714e7b945e0a29579b224ec98cbf27659237b5aac59b6',
+  interaction: '0665060ac9dcb1cb487c1a8521ad7b539c3638c65bb5f2c336423741f40f685e',
+  knowledge: '5d84a1ea660205ae2d13c85643b07b1feeebb0c3e99fb23214fc7d1cc3c16cdc',
   // memory recomputed for the backflowed memory-maintenance feature
   // (Community #419): organize_memory + get_memory_organize_history invokes
   // added to bridge/memory.js.
-  memory: 'fc10a0538ac12c7b43b9d14d9846726f5847d1f21d578d1e918b9c68cdca35fd',
+  memory: 'b2556cc01a987850633365edcaa152dfe750cdbec37053170c7e5b29b2a66316',
   monitor: '01bf9a7c9b9b3f313cf49e975e6503627ff373caed0f4b3be07a6a98492a7c43',
-  personas: '75845688a405c5dc3590e176238969d846d61810eaeb3d632a0a741d30370239',
-  remoteControl: '07b52395ae8c4af6547c9bbbe84d76399884fec0e64f3bcad31cd757b839b798',
-  scheduled: '6492813eabb2472f892cb4b199a27b09d78355f56fc3aff24b8409af236799b6',
+  personas: '08b63778c3da39e2e551d555c860919887d2652450894d2d5359d7e23fb71ca7',
+  remoteControl: '8a47f7ef3fbf569a6ae380153f84640d245025e0beb2215eb365287fe06aa00c',
+  scheduled: '3c95cd9aa37173dd5a3490da45191aad1ee608107d8a513e458561ba62ae95cb',
   // Recomputed for the combined session archive and #445 workspace binding
   // surfaces while retaining Official's materialization behavior.
   // Recomputed for the rebind wave (community #463): the session:list_changed
@@ -205,7 +211,7 @@ const expectedProtocolHashes = {
   // the plugin registration and the prefs persistence; update_settings
   // stays untouched).
   settings: '3c1b77d8cc6494021baae197d9e08a640c8422156b26bd937431aa80abb651c8',
-  updater: 'd603bbac5c51f3b53bf19272fbafd9c430786fd5e35a9b8da9aa67f4c2334e5f',
+  updater: '30a3762ee45f378d476efec934dc4be50522a02a5b9a97111191496510d4d7d4',
   // Official's bridge/voice.js is untouched by this backflow, so the hash
   // stays at the Official base value (the community value differs only via
   // comment differences inside its own voice.js; no invoke/listen surface).
@@ -232,6 +238,20 @@ for (const [domain, files] of Object.entries(protocolSources)) {
   if (!expectedProtocolHashes[domain]) console.log(`${domain}: ${hash}`);
   else assert.equal(hash, expectedProtocolHashes[domain], `${domain} bridge protocol changed`);
 }
+
+// The shared payload base carries the invoke/listen bodies that the batch dedup
+// relocated out of the per-lane files, so the domain hashes above no longer
+// cover that text. Hash the shared file's surface with the same extractor to
+// pin payload edits inside the shared base the same way the lane files are.
+const expectedSharedBaseHash = '4e63e15a4ec6b41f2f38a667d9e94d9761c230ab927e91d0c5ae49f3c4abedb4';
+const sharedBaseSource = fs.readFileSync(path.join(root, 'src', 'shared', 'bridge-shared-helpers.js'), 'utf8');
+const sharedBaseSignatures = [
+  ...extractCalls(sharedBaseSource, 'invoke').map(call => `shared/bridge-shared-helpers.js:invoke:${call}`),
+  ...extractCalls(sharedBaseSource, 'listen').map(call => `shared/bridge-shared-helpers.js:listen:${call}`),
+];
+const sharedBaseHash = crypto.createHash('sha256').update(sharedBaseSignatures.join('\n')).digest('hex');
+if (!expectedSharedBaseHash) console.log(`sharedBase: ${sharedBaseHash} (${sharedBaseSignatures.length} signatures)`);
+else assert.equal(sharedBaseHash, expectedSharedBaseHash, 'shared bridge payload protocol changed');
 
 const featureRegistry = new Proxy({}, {
   get() {
@@ -260,6 +280,10 @@ const context = vm.createContext({
   URL,
   Blob,
 });
+// bridge.js delegates shared helpers to window.PinvouBridgeShared; index.html loads
+// the shared payload before the bridges, so the harness loads it first too.
+vm.runInContext(fs.readFileSync(path.join(root, 'src', 'shared', 'bridge-shared-helpers.js'), 'utf8'),
+  context, { filename: 'shared/bridge-shared-helpers.js' });
 vm.runInContext(read('bridge.js'), context, { filename: 'bridge.js' });
 
 const api = windowObject.TauriBridge;

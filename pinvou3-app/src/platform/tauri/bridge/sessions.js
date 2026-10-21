@@ -1,9 +1,16 @@
 /** Session working sets, switching, hydration, and lifecycle operations. */
 (function (root) {
   "use strict";
-  var registry = root.__PINVOU_TAURI_BRIDGE_FEATURES__ = root.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
-  registry.sessions = function (context) {
-    var state = context.state;
+  // biome-ignore lint/suspicious/noAssignInExpressions: registry bootstrap of the verbatim payload; splitting statements would diverge from the artifact
+  const registry = root.__PINVOU_TAURI_BRIDGE_FEATURES__ = root.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
+  registry.sessions = function (context) {let pinvouSharedtauriSessionsCache = null;
+function pinvouSharedtauriSessions() {
+  if (!pinvouSharedtauriSessionsCache) pinvouSharedtauriSessionsCache = window.PinvouBridgeShared.create("tauriSessions", { sessionStates, freshBuffer, restoreEvictedSessionDraft, state, sessionBufferTouchClock: { get value() { return sessionBufferTouchClock; }, set value(v) { sessionBufferTouchClock = v; } }, pruneScheduledSessionBuffers, pruneSessionBuffers, scheduledRunSessionOwners, scheduledRunOwnerTouchClock: { get value() { return scheduledRunOwnerTouchClock; }, set value(v) { scheduledRunOwnerTouchClock = v; } }, MAX_SCHEDULED_RUN_SESSION_OWNERS, enterDraft, setScheduledTaskError, notify, addSystemItem, bt, hydratedMessageKey, basename, switchToSessionInternal, openScheduledRunChatOnce, scheduledRunOpenInFlight, loadWorkingSetFrom, invalidateScheduledRecentRunsForSession, purgeSessionBuffer, invoke, personaPlaceholderTitles, refreshHistoryList, sessionSwitchRequestToken: { get value() { return sessionSwitchRequestToken; }, set value(v) { sessionSwitchRequestToken = v; } }, saveWorkingSetTo, loadScheduledTaskRecentRuns });
+  return pinvouSharedtauriSessionsCache;
+}
+
+
+    const state = context.state;
     // Optional hook: clean host-side per-session side tables when a
     // session buffer is reclaimed/deleted (bridge.js's modeStateEpochs,
     // the scene-events localStorage key).
@@ -133,7 +140,6 @@
       mountedCollection: null, // 知识库: 该 session 挂载的知识集 id 或 null
       mountedCollections: [], // 多知识库挂载项 [{ collectionId, enabled }]
       mountedCollectionsRevision: 0,
-      scheduledTaskDraft: null,
       scheduledRunSession: false,
       scheduledInitialTurnPhase: null,
       lastTouched: 0,
@@ -144,23 +150,8 @@
       },
     };
   }
-  function getBuffer(id) {
-    if (!id) return null;
-    if (!sessionStates[id]) {
-      sessionStates[id] = freshBuffer();
-      restoreEvictedSessionDraft(id, sessionStates[id]);
-    }
-    return touchSessionBuffer(id, sessionStates[id], id.indexOf("sched-") === 0);
-  }
-  function isProtectedScheduledBuffer(id, buf) {
-    return id === state.activeSessionId ||
-      !!buf.busy ||
-      !!buf.remoteTurnActive ||
-      buf.scheduledInitialTurnPhase === "active" ||
-      !!(buf.queued && buf.queued.length) ||
-      !!(state.scheduledRunContext && state.scheduledRunContext.sessionId === id) ||
-      state.scheduledTaskCreationSessionId === id;
-  }
+function getBuffer(id) { return pinvouSharedtauriSessions().getBuffer(id); }
+function isProtectedScheduledBuffer(id, buf) { return pinvouSharedtauriSessions().isProtectedScheduledBuffer(id, buf); }
   function pruneScheduledSessionBuffers(keepId) {
     var scheduledIds = Object.keys(sessionStates).filter(function (id) {
       return !!sessionStates[id].scheduledRunSession;
@@ -187,14 +178,7 @@
       overflow -= 1;
     }
   }
-  function touchSessionBuffer(id, buf, scheduled) {
-    if (!buf) return null;
-    if (scheduled) buf.scheduledRunSession = true;
-    buf.lastTouched = ++sessionBufferTouchClock;
-    if (buf.scheduledRunSession) pruneScheduledSessionBuffers(id);
-    pruneSessionBuffers(id);
-    return buf;
-  }
+function touchSessionBuffer(id, buf, scheduled) { return pinvouSharedtauriSessions().touchSessionBuffer(id, buf, scheduled); }
   // All-session LRU: the scheduled protection predicates still apply (busy/
   // queued/remote turns are never reclaimed); only idle buffers are evicted.
   // messages/chatItems rehydrate from disk; non-rehydratable drafts such as
@@ -244,28 +228,9 @@
       loadWorkingSetFrom(freshBuffer());
     }
   }
-  function registerScheduledRunOwner(id, phase) {
-    if (typeof id !== "string" || !id) return null;
-    var owner = scheduledRunSessionOwners[id];
-    if (!owner) owner = scheduledRunSessionOwners[id] = { phase: null, lastTouched: 0 };
-    if (owner.phase !== "terminal" && phase) owner.phase = phase;
-    owner.lastTouched = ++scheduledRunOwnerTouchClock;
-    pruneScheduledRunSessionOwners();
-    return owner;
-  }
-  function scheduledRunOwnerVisibleRank(id) {
-    var runs = state.scheduledTaskRuns || [];
-    for (var i = 0; i < runs.length; i++) {
-      if (runs[i] && runs[i].sessionId === id) return i;
-    }
-    return -1;
-  }
-  function scheduledRunOwnerPriority(id) {
-    if (id === state.activeSessionId ||
-        (state.scheduledRunContext && state.scheduledRunContext.sessionId === id)) return 3;
-    if (scheduledRunOwnerVisibleRank(id) >= 0) return 2;
-    return 1;
-  }
+function registerScheduledRunOwner(id, phase) { return pinvouSharedtauriSessions().registerScheduledRunOwner(id, phase); }
+function scheduledRunOwnerVisibleRank(id) { return pinvouSharedtauriSessions().scheduledRunOwnerVisibleRank(id); }
+function scheduledRunOwnerPriority(id) { return pinvouSharedtauriSessions().scheduledRunOwnerPriority(id); }
   function isProtectedScheduledRunOwner(id) {
     return scheduledRunOwnerPriority(id) > 1;
   }
@@ -273,107 +238,14 @@
     if (!scheduledRunSessionOwners[id] || isProtectedScheduledRunOwner(id, null)) return;
     delete scheduledRunSessionOwners[id];
   }
-  function pruneScheduledRunSessionOwners() {
-    var ids = Object.keys(scheduledRunSessionOwners);
-    if (ids.length <= MAX_SCHEDULED_RUN_SESSION_OWNERS) return;
-    ids.sort(function (left, right) {
-      var priorityDelta = scheduledRunOwnerPriority(right) - scheduledRunOwnerPriority(left);
-      if (priorityDelta) return priorityDelta;
-      var leftVisibleRank = scheduledRunOwnerVisibleRank(left);
-      var rightVisibleRank = scheduledRunOwnerVisibleRank(right);
-      if (leftVisibleRank >= 0 || rightVisibleRank >= 0) {
-        if (leftVisibleRank < 0) return 1;
-        if (rightVisibleRank < 0) return -1;
-        if (leftVisibleRank !== rightVisibleRank) return leftVisibleRank - rightVisibleRank;
-      }
-      var touchDelta = (scheduledRunSessionOwners[right].lastTouched || 0) -
-        (scheduledRunSessionOwners[left].lastTouched || 0);
-      return touchDelta || left.localeCompare(right);
-    });
-    for (var i = MAX_SCHEDULED_RUN_SESSION_OWNERS; i < ids.length; i++) {
-      delete scheduledRunSessionOwners[ids[i]];
-    }
-  }
-  function isScheduledRunTerminal(status) {
-    var value = String(status || "").toLowerCase();
-    return value === "completed" || value === "failed" || value === "canceled";
-  }
-  function rememberScheduledRunOwner(run) {
-    if (!run) return;
-    var id = typeof run.sessionId === "string" ? run.sessionId.trim() : "";
-    if (!id) return;
-    var status = String(run.status || "").toLowerCase();
-    var phase = isScheduledRunTerminal(status)
-      ? "terminal"
-      : (status === "queued" || status === "running" ? "active" : null);
-    registerScheduledRunOwner(id, phase);
-  }
-  function scheduledRunBuffer(id) {
-    var buf = getBuffer(id);
-    if (!buf) return null;
-    registerScheduledRunOwner(id, null);
-    return touchSessionBuffer(id, buf, true);
-  }
-  function markScheduledInitialTurnActive(id) {
-    var buf = scheduledRunBuffer(id);
-    var owner = registerScheduledRunOwner(id, "active");
-    if (!buf) return buf;
-    if (buf.scheduledInitialTurnPhase === "terminal" || (owner && owner.phase === "terminal")) {
-      buf.scheduledInitialTurnPhase = "terminal";
-      buf.busy = false;
-      if (state.activeSessionId === id) state.busy = false;
-      return buf;
-    }
-    buf.scheduledInitialTurnPhase = "active";
-    buf.busy = true;
-    if (state.activeSessionId === id) state.busy = true;
-    return buf;
-  }
-  function markScheduledInitialTurnTerminal(id) {
-    var buf = scheduledRunBuffer(id);
-    registerScheduledRunOwner(id, "terminal");
-    if (!buf || buf.scheduledInitialTurnPhase === "terminal") return buf;
-    if (buf.scheduledInitialTurnPhase !== "active") {
-      buf.scheduledInitialTurnPhase = "active";
-    }
-    buf.scheduledInitialTurnPhase = "terminal";
-    return buf;
-  }
-  function beginScheduledOpenActivation(id) {
-    var previous = sessionStates[id] || null;
-    var snapshot = {
-      id: id,
-      existed: !!previous,
-      previousPhase: previous && previous.scheduledInitialTurnPhase,
-      previousBusy: previous ? !!previous.busy : false,
-      previousStateBusy: state.activeSessionId === id ? !!state.busy : null,
-    };
-    var buf = markScheduledInitialTurnActive(id);
-    snapshot.buffer = buf;
-    snapshot.activationTouch = buf && buf.lastTouched;
-    snapshot.changed = !!buf && (
-      !snapshot.existed ||
-      snapshot.previousPhase !== buf.scheduledInitialTurnPhase ||
-      snapshot.previousBusy !== !!buf.busy
-    );
-    return snapshot;
-  }
-  function rollbackScheduledOpenActivation(snapshot) {
-    if (!snapshot || !snapshot.changed) return;
-    var current = sessionStates[snapshot.id];
-    if (!current || current !== snapshot.buffer) return;
-    if (current.scheduledInitialTurnPhase === "terminal") return;
-    if (current.lastTouched !== snapshot.activationTouch) return;
-    if (!snapshot.existed) {
-      delete sessionStates[snapshot.id];
-    } else {
-      current.scheduledInitialTurnPhase = snapshot.previousPhase;
-      current.busy = snapshot.previousBusy;
-    }
-    if (state.activeSessionId === snapshot.id && snapshot.previousStateBusy !== null) {
-      state.busy = snapshot.previousStateBusy;
-    }
-  }
+function pruneScheduledRunSessionOwners() { return pinvouSharedtauriSessions().pruneScheduledRunSessionOwners(); }
+function isScheduledRunTerminal(status) { return pinvouSharedtauriSessions().isScheduledRunTerminal(status); }
+function rememberScheduledRunOwner(run) { return pinvouSharedtauriSessions().rememberScheduledRunOwner(run); }
+function scheduledRunBuffer(id) { return pinvouSharedtauriSessions().scheduledRunBuffer(id); }
+function markScheduledInitialTurnActive(id) { return pinvouSharedtauriSessions().markScheduledInitialTurnActive(id); }
+function markScheduledInitialTurnTerminal(id) { return pinvouSharedtauriSessions().markScheduledInitialTurnTerminal(id); }
+function beginScheduledOpenActivation(id) { return pinvouSharedtauriSessions().beginScheduledOpenActivation(id); }
+function rollbackScheduledOpenActivation(snapshot) { return pinvouSharedtauriSessions().rollbackScheduledOpenActivation(snapshot); }
   function saveWorkingSetTo(buf) {
     if (!buf) return;
     buf.messages = state.messages; buf.chatItems = state.chatItems; buf.artifacts = state.artifacts;
@@ -391,7 +263,6 @@
     buf.mountedCollection = state.mountedCollection;
     buf.mountedCollections = state.mountedCollections;
     buf.mountedCollectionsRevision = state.mountedCollectionsRevision;
-    buf.scheduledTaskDraft = state.scheduledTaskDraft;
     buf.stream = {
       currentStreamText: context.currentStreamText, currentStreamId: context.currentStreamId,
       pendingAssistantText: context.pendingAssistantText, pendingAssistantBlocks: context.pendingAssistantBlocks,
@@ -420,8 +291,7 @@
       ? buf.mountedCollections
       : (state.mountedCollection == null ? [] : [{ collectionId: state.mountedCollection, enabled: true }]);
     state.mountedCollectionsRevision = Number(buf.mountedCollectionsRevision || 0);
-    state.scheduledTaskDraft = buf.scheduledTaskDraft || null;
-    var s = buf.stream || {};
+    const s = buf.stream || {};
     context.currentStreamText = s.currentStreamText || ""; context.currentStreamId = s.currentStreamId || 0;
     context.pendingAssistantText = s.pendingAssistantText || ""; context.pendingAssistantBlocks = s.pendingAssistantBlocks || [];
     context.itemIdSeq = s.itemIdSeq || 0; context.toolMeta = s.toolMeta || {};
@@ -614,7 +484,7 @@
     notify();
   }
   // 公开「新建对话」入口(侧边栏按钮)= 进草稿态。名字保留以兼容前端调用。
-  async function createNewSession() { enterDraft(); }
+async function createNewSession() { return pinvouSharedtauriSessions().createNewSession(); }
 
   // 团队接力等显式工作入口需要立即获得稳定 session id 以建立本机关联；
   // 这类用户动作已经确认要开始工作，不适用侧边栏空草稿的 lazy 语义。
@@ -922,14 +792,7 @@
     return result;
   }
 
-  function reportSessionSwitchFailure(error, errorScope) {
-    if (errorScope === "scheduled") {
-      setScheduledTaskError(error, "navigation");
-      notify();
-      return;
-    }
-    addSystemItem(bt("loadChatFailed") + error);
-  }
+function reportSessionSwitchFailure(error, errorScope) { return pinvouSharedtauriSessions().reportSessionSwitchFailure(error, errorScope); }
 
   function hydratedMessageKey(message, hideInternalEnvelope) {
     var blocks = message && Array.isArray(message.content) ? message.content : [];
@@ -951,23 +814,7 @@
     try { return JSON.stringify(message); } catch (_) { return String(message); }
   }
 
-  function mergeHydratedMessages(durableMessages, liveMessages, hideInternalEnvelope) {
-    var durable = Array.isArray(durableMessages) ? durableMessages.slice() : [];
-    var counts = Object.create(null);
-    durable.forEach(function (message) {
-      var key = hydratedMessageKey(message, hideInternalEnvelope);
-      counts[key] = (counts[key] || 0) + 1;
-    });
-    (Array.isArray(liveMessages) ? liveMessages : []).forEach(function (message) {
-      var key = hydratedMessageKey(message, hideInternalEnvelope);
-      if (counts[key]) {
-        counts[key] -= 1;
-      } else {
-        durable.push(message);
-      }
-    });
-    return durable;
-  }
+function mergeHydratedMessages(durableMessages, liveMessages, hideInternalEnvelope) { return pinvouSharedtauriSessions().mergeHydratedMessages(durableMessages, liveMessages, hideInternalEnvelope); }
 
   function mergeHydratedArtifacts(durableArtifacts, liveArtifacts) {
     var merged = [];
@@ -989,66 +836,18 @@
     return merged;
   }
 
-  function hydratedChatItemKey(item) {
-    if (!item || !item.type) return "";
-    if (item.type === "assistant") return "assistant:" + String(item.html || item.text || "");
-    if (item.type === "reasoning") return "reasoning:" + String(item.text || "");
-    if (item.type === "tool" && item.toolId) return "tool:" + item.toolId;
-    if (item.type === "artifact_card") return "artifact:" + basename(item.path);
-    if (item.type === "user_input" && item.toolCallId) return "user_input:" + item.toolCallId;
-    if (item.type === "careful_blocked" && item.toolCallId) return "careful_blocked:" + item.toolCallId;
-    if (item.type === "plan_card" && item.planId) return "plan:" + item.planId;
-    if (item.type === "user") return "user:" + String(item.text || item.html || "");
-    if (item.type === "system") return "system:" + String(item.text || "");
-    var stable = Object.assign({}, item);
-    delete stable.id;
-    delete stable.time;
-    delete stable.streaming;
-    try { return item.type + ":" + JSON.stringify(stable); } catch (_) { return item.type + ":" + String(stable); }
-  }
+function hydratedChatItemKey(item) { return pinvouSharedtauriSessions().hydratedChatItemKey(item); }
 
-  function mergeHydratedChatItems(liveChatItems, liveCurrentStreamId) {
-    var remappedCurrentStreamId = 0;
-    var availableByKey = Object.create(null);
-    function interruptedDisplayRange(item) {
-      if (!item || item.interruptedDisplayOnly !== true) return null;
-      var anchorIndex = -1;
-      var nextUserIndex = -1;
-      var afterMessageIndex = Number(item.afterMessageIndex);
-      if (Number.isFinite(afterMessageIndex) && afterMessageIndex >= 0) {
-        for (var index = 0; index < state.chatItems.length; index++) {
-          var candidate = state.chatItems[index];
-          if (!candidate || candidate.type !== "user") continue;
-          var candidateMessageIndex = Number(candidate.messageIndex);
-          if (candidateMessageIndex === afterMessageIndex) anchorIndex = index;
-          else if (anchorIndex >= 0 && candidateMessageIndex > afterMessageIndex) {
-            nextUserIndex = index;
-            break;
-          }
-        }
-      }
-      var afterUserOrdinal = Number(item.afterUserOrdinal);
-      if (anchorIndex < 0 && Number.isInteger(afterUserOrdinal) && afterUserOrdinal >= 0) {
-        var userOrdinal = -1;
-        for (var fallbackIndex = 0; fallbackIndex < state.chatItems.length; fallbackIndex++) {
-          var fallback = state.chatItems[fallbackIndex];
-          if (!fallback || fallback.type !== "user") continue;
-          userOrdinal += 1;
-          if (userOrdinal === afterUserOrdinal) anchorIndex = fallbackIndex;
-          else if (userOrdinal > afterUserOrdinal) {
-            nextUserIndex = fallbackIndex;
-            break;
-          }
-        }
-      }
-      if (anchorIndex < 0) {
-        return { start: state.chatItems.length, end: state.chatItems.length };
-      }
-      return {
-        start: anchorIndex + 1,
-        end: nextUserIndex >= 0 ? nextUserIndex : state.chatItems.length,
-      };
-    }
+  function mergeHydratedChatItems(liveChatItems, liveCurrentStreamId) {let pinvouSharedtauriSessionsN47342Cache = null;
+function pinvouSharedtauriSessionsN47342() {
+  if (!pinvouSharedtauriSessionsN47342Cache) pinvouSharedtauriSessionsN47342Cache = window.PinvouBridgeShared.create("tauriSessions:47342", { state });
+  return pinvouSharedtauriSessionsN47342Cache;
+}
+
+
+    let remappedCurrentStreamId = 0;
+    const availableByKey = Object.create(null);
+function interruptedDisplayRange(item) { return pinvouSharedtauriSessionsN47342().interruptedDisplayRange(item); }
     state.chatItems.forEach(function (item, index) {
       var key = hydratedChatItemKey(item);
       if (!key) return;
@@ -1264,9 +1063,7 @@
     return true;
   }
 
-  async function switchToSession(id) {
-    return switchToSessionInternal(id, false, "chat");
-  }
+async function switchToSession(id) { return pinvouSharedtauriSessions().switchToSession(id); }
 
   async function openScheduledRunChatOnce(run, task) {
     var sessionId = run && typeof run.sessionId === "string" ? run.sessionId.trim() : "";
@@ -1336,42 +1133,11 @@
     return true;
   }
 
-  function openScheduledRunChat(run, task) {
-    var sessionId = run && typeof run.sessionId === "string" ? run.sessionId.trim() : "";
-    if (!sessionId) return openScheduledRunChatOnce(run, task);
-    if (scheduledRunOpenInFlight[sessionId]) return scheduledRunOpenInFlight[sessionId];
-    var opening = openScheduledRunChatOnce(run, task);
-    scheduledRunOpenInFlight[sessionId] = opening;
-    function clearOpening() {
-      if (scheduledRunOpenInFlight[sessionId] === opening) {
-        delete scheduledRunOpenInFlight[sessionId];
-      }
-    }
-    opening.then(clearOpening, clearOpening);
-    return opening;
-  }
+function openScheduledRunChat(run, task) { return pinvouSharedtauriSessions().openScheduledRunChat(run, task); }
 
-  async function exitScheduledRunChat() {
-    var context = state.scheduledRunContext;
-    if (!context) return false;
-    if (context.returnSessionId && context.returnSessionId !== context.sessionId) {
-      var restored = await switchToSessionInternal(context.returnSessionId, true, "scheduled");
-      if (restored) {
-        state.scheduledRunContext = null;
-        notify();
-        return true;
-      }
-      return false;
-    }
-    enterDraft();
-    return true;
-  }
+async function exitScheduledRunChat() { return pinvouSharedtauriSessions().exitScheduledRunChat(); }
 
-  function recentScheduledRunForSession(id) {
-    return (state.scheduledTaskRecentRuns || []).find(function (run) {
-      return run && run.sessionId === id;
-    }) || null;
-  }
+function recentScheduledRunForSession(id) { return pinvouSharedtauriSessions().recentScheduledRunForSession(id); }
 
   // 离开正在查看的会话:清 active + 换空工作集,并清掉指向它的定时运行上下文。
   // 必须连 scheduledRunContext 一起清 —— main.jsx 只按该字段真值决定渲染

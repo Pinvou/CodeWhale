@@ -653,7 +653,7 @@ export const dictZh = {
         depHint_email_manual: '需手动安装：在终端执行 `sudo cpan -i Email::Outlook::Message`（Homebrew 无此 formula）。详见 https://metacpan.org/pod/Email::Outlook::Message',
         communityQrAlt: 'Pinvou QQ 群二维码', communityQrPlaceholder: '二维码占位', communityChannelTag: '中文 QQ 社区',
         communityQrHint: '使用手机 QQ 扫码加入；无法扫码时，也可以复制群号手动查找。',
-        communityGroupLabel: '群号', communityGroupPending: '待补充', communityCopyGroup: '复制群号', communityCopied: '群号已复制',
+        communityGroupLabel: '群号', communityCopyGroup: '复制群号', communityCopied: '群号已复制',
         communityDiscussions: 'GitHub Discussions',
         communitySupportNotice: 'QQ群用于社区交流，不等同于官方支持或工单。可复现的问题请继续提交反馈；疑似安全漏洞请勿发到群内。',
         feedbackTitle: '帮助与反馈', feedbackDesc: '反馈使用中的问题和建议，可附带截图或短视频。',
@@ -924,7 +924,7 @@ dictZh.uiChatView = {
 };
 
 
-dictZh.uiMainApp = { petSummon:'召唤公仔', closeNavigation:'关闭导航', superPermFailed:'无法开启高级执行权限', searchTestUnavailable:'当前环境不可测试搜索源', searchSaveFailed:'搜索配置保存失败，请重试', petSessionMissing:'目标会话不存在', petTaskStartFailed:'任务未能启动', detachedSessionMissing:'目标 Coding 会话不存在或已被删除', detachedSessionLoadFailed:'Coding 会话加载失败，请关闭窗口后重试', panelLoadFailed:err=>`面板加载失败:${err}`, viewLoadFailed:'页面加载失败，请检查网络后重试', viewReload:'重新加载' };
+dictZh.uiMainApp = { petSummon:'召唤公仔', closeNavigation:'关闭导航', superPermFailed:'无法开启高级执行权限', searchSaveFailed:'搜索配置保存失败，请重试', petSessionMissing:'目标会话不存在', petTaskStartFailed:'任务未能启动', detachedSessionMissing:'目标 Coding 会话不存在或已被删除', detachedSessionLoadFailed:'Coding 会话加载失败，请关闭窗口后重试', panelLoadFailed:err=>`面板加载失败:${err}`, viewLoadFailed:'页面加载失败，请检查网络后重试', viewReload:'重新加载' };
 
 
 // tool-common.jsx(产物卡 aria/alt、diff 展开收起、天气卡、股票卡、工具商店动作按钮)。
@@ -1107,7 +1107,6 @@ dictZh.uiSettingsView = {
   memoryRecentHint: '近期记忆会记录最近正在推进和刚完成的事情，用来帮助 PINVOU 接上上下文。它会随时间自动淡出，你也可以手动归档或删除。',
   memoryEditDesc: '修改后会立即影响后续记忆注入。',
   visualDesignSkillName: '视觉设计',
-  visualDesignSkillDesc: '设计系统直出网页/banner/海报/简历…',
   serviceFeishu: '飞书（Lark）',
   serviceWecom: '企业微信',
   serviceDingtalk: '钉钉',

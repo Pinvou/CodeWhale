@@ -311,7 +311,6 @@ pinvou3-app/src/platform/tauri/bridge/scheduled.js
 - `startScheduledTaskChat`
 - `normalizeScheduledTaskDraft`
 - `autoCreateScheduledTaskDraft`
-- `confirmScheduledTaskDraft`
 - `createScheduledTask`
 
 需要强化：

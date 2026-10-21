@@ -58,7 +58,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::features::assistant::engine::{
     AppEngine, EngineTurnSignal, TranscriptOperation, TurnIdentity, TurnLifecycle, TurnReservation,
-    dispatch_remote_turn_cancel, dispatch_turn_bound_cancel,
+    bounded_join_detached_on_timeout, dispatch_remote_turn_cancel, dispatch_turn_bound_cancel,
 };
 #[cfg(any(feature = "benchmark-hooks", test))]
 use crate::features::assistant::eval::{EvalModelSelection, EvalSuiteModelSnapshot, ModelIdentity};
@@ -252,25 +252,13 @@ impl RemoteRuntimeModelBundle {
     }
 }
 
-/// Engine 空闲回收阈值：engine 是进程内 task（非子进程），但每个都占一份通道、
-/// 工具集与注水后的对话上下文，池无上限、内存随会话数线性涨。空闲超过该时长
-/// 且无 in-flight turn 且非 active 会话时回收（复用 `reclaim_engine_entry` 的
-/// 回收序列）。回收回到 lazy spawn 语义，下次发消息重建 + SyncSession 注水，
-/// 无损；30 分钟取偏保守值，宁可少回收也不误伤刚要使用的会话。
-/// Engine idle-reclaim threshold: an engine is an in-process task (not a
-/// subprocess), but each occupies a channel, a toolset, and a hydrated
-/// conversation context; the pool is unbounded and memory grows linearly
-/// with session count. Reclaim engines idle beyond this threshold with no
-/// in-flight turn that are not the active session (reusing
-/// `reclaim_engine_entry`'s reclaim sequence). Reclaiming returns to
-/// lazy-spawn semantics: the next message rebuilds + rehydrates via
-/// SyncSession, losslessly. 30 minutes is a deliberately conservative
-/// value — better to under-reclaim than to evict a session about to be used.
-const IDLE_EVICT_AFTER_SECS: u64 = 30 * 60;
-/// Idle-reclaim sweep interval: one pass every 5 minutes, a balance between
-/// timeliness and sweep overhead (in step with the AcpPool idle reclaim and
-/// embedder idle unload cadence).
-const REAP_INTERVAL_SECS: u64 = 5 * 60;
+// 空闲回收阈值与巡检间隔（IDLE_EVICT_AFTER_SECS / REAP_INTERVAL_SECS）收敛
+// 到 `core::reaper`：engine 是进程内 task（非子进程），但每个都占一份通道、
+// 工具集与注水后的对话上下文，池无上限、内存随会话数线性涨。空闲超过阈值
+// 且无 in-flight turn 且非 active 会话时回收（复用 `reclaim_engine_entry` 的
+// 回收序列）。回收回到 lazy spawn 语义，下次发消息重建 + SyncSession 注水，
+// 无损；30 分钟取偏保守值，宁可少回收也不误伤刚要使用的会话。
+use crate::core::reaper::{IDLE_EVICT_AFTER_SECS, IdleReaperGuard};
 
 fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
@@ -328,10 +316,12 @@ fn should_reap_idle_engine(
     is_active_session: bool,
     idle_for_secs: u64,
 ) -> bool {
-    !turn_active
-        && !scheduled_running
-        && !is_active_session
-        && idle_for_secs >= IDLE_EVICT_AFTER_SECS
+    crate::core::reaper::should_reap_idle(
+        turn_active,
+        scheduled_running,
+        is_active_session,
+        std::time::Duration::from_secs(idle_for_secs),
+    )
 }
 
 /// Rebind eviction recheck (pure function, unit-testable; review #463
@@ -757,7 +747,7 @@ pub(crate) fn forward_forced_turn_restrict<F>(
 /// the engine dispatch are folded into one function so the wiring (not only
 /// the pure helper) is covered by an executing test (round-31 M9-rust: this
 /// was the second unpinned `merge_aux_scoped_tool_reminder` call site).
-pub(crate) fn forward_edit_resend_with_reminder<F>(
+fn forward_edit_resend_with_reminder<F>(
     session_id: &str,
     new_message: String,
     send: impl FnOnce(String) -> F,
@@ -1241,26 +1231,24 @@ enum BoundedJoinOutcome {
 /// never complete its own bookkeeping. The budget is a parameter so the
 /// `Detached` outcome stays reachable from behavior tests without waiting
 /// on the real 5s clock; production callers always pass
-/// [`TURN_GATE_AWAIT_TIMEOUT`].
+/// [`TURN_GATE_AWAIT_TIMEOUT`]. The bounded join itself is the shared
+/// [`bounded_join_detached_on_timeout`] core (its `Detached` log line is
+/// that core's wording); this wrapper only maps the outcome onto the
+/// panic-distinguishing [`BoundedJoinOutcome`].
 async fn bounded_join_while_holding_turn_gate<T>(
     what: &str,
     budget: std::time::Duration,
     task: tokio::task::JoinHandle<T>,
 ) -> BoundedJoinOutcome {
-    match tokio::time::timeout(budget, task).await {
-        Ok(Ok(_)) => BoundedJoinOutcome::Settled,
-        Ok(Err(join_error)) => {
+    match bounded_join_detached_on_timeout(what, budget, task).await {
+        Some(Ok(_)) => BoundedJoinOutcome::Settled,
+        Some(Err(join_error)) => {
             eprintln!(
                 "[engine_pool] {what} task panicked: {join_error}; treating it as not settled"
             );
             BoundedJoinOutcome::Panicked(join_error)
         }
-        Err(_) => {
-            eprintln!(
-                "[engine_pool] {what} did not settle within {budget:?} while holding the turn gate; letting it finish in the background"
-            );
-            BoundedJoinOutcome::Detached
-        }
+        None => BoundedJoinOutcome::Detached,
     }
 }
 
@@ -1280,23 +1268,34 @@ fn shutdown_op_name(op: &Op) -> &'static str {
     }
 }
 
-/// Delivers the reclaim shutdown ops in order, each send bounded by
-/// [`TURN_GATE_AWAIT_TIMEOUT`] (issue #255): reclaim runs inside the session
-/// turn gate, so a stalled engine with a full ops channel must not extend
-/// the gate hold. Returns the number of ops delivered in order from the
-/// front; the caller re-sends any remainder from a detached task (see
-/// [`retry_shutdown_sends`]). A timed-out send is never enqueued (tokio
-/// mpsc send is cancel-safe), so skipping ahead cannot duplicate an op.
-async fn bounded_shutdown_sends<S, Fut>(mut send: S, ops: impl IntoIterator<Item = Op>) -> usize
+/// Shared loop of the two bounded shutdown-send lanes ([`bounded_shutdown_sends`]
+/// first pass and [`retry_shutdown_sends`] detached retry): delivers `ops`
+/// in order, each send bounded by `budget` (a timed-out send is never
+/// enqueued — tokio mpsc send is cancel-safe, so skipping ahead cannot
+/// duplicate an op), and stops at the first failed or timed-out send.
+/// Returns the number of ops delivered in order from the front;
+/// `on_delivered` observes each delivered op's static name (the gate-held
+/// first pass logs nothing; the retry reports the late delivery once the
+/// engine drained).
+async fn deliver_shutdown_ops<S, Fut, OnDelivered>(
+    mut send: S,
+    ops: impl IntoIterator<Item = Op>,
+    budget: std::time::Duration,
+    on_delivered: OnDelivered,
+) -> usize
 where
     S: FnMut(Op) -> Fut,
     Fut: Future<Output = Result<()>>,
+    OnDelivered: Fn(&str),
 {
     let mut delivered = 0;
     for op in ops {
         let op_name = shutdown_op_name(&op);
-        match tokio::time::timeout(TURN_GATE_AWAIT_TIMEOUT, send(op)).await {
-            Ok(Ok(())) => delivered += 1,
+        match tokio::time::timeout(budget, send(op)).await {
+            Ok(Ok(())) => {
+                on_delivered(op_name);
+                delivered += 1;
+            }
             Ok(Err(e)) => {
                 eprintln!(
                     "[engine_pool] shutdown {op_name} send failed: {e:#}; abandoning remaining shutdown ops"
@@ -1305,13 +1304,28 @@ where
             }
             Err(_) => {
                 eprintln!(
-                    "[engine_pool] shutdown {op_name} send timed out after {TURN_GATE_AWAIT_TIMEOUT:?} while holding the turn gate; abandoning remaining shutdown ops"
+                    "[engine_pool] shutdown {op_name} send timed out after {budget:?}; abandoning remaining shutdown ops"
                 );
                 break;
             }
         }
     }
     delivered
+}
+
+/// Delivers the reclaim shutdown ops in order, each send bounded by
+/// [`TURN_GATE_AWAIT_TIMEOUT`] (issue #255): reclaim runs inside the session
+/// turn gate, so a stalled engine with a full ops channel must not extend
+/// the gate hold. Returns the number of ops delivered in order from the
+/// front; the caller re-sends any remainder from a detached task (see
+/// [`retry_shutdown_sends`]). A timed-out send is never enqueued (tokio
+/// mpsc send is cancel-safe), so skipping ahead cannot duplicate an op.
+async fn bounded_shutdown_sends<S, Fut>(send: S, ops: impl IntoIterator<Item = Op>) -> usize
+where
+    S: FnMut(Op) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    deliver_shutdown_ops(send, ops, TURN_GATE_AWAIT_TIMEOUT, |_| {}).await
 }
 
 /// Retries the shutdown ops that [`bounded_shutdown_sends`] could not
@@ -1325,33 +1339,15 @@ where
 /// (MCP shutdown, subagent flush included). Each send is bounded by
 /// `patience`, so a permanently stalled engine stops the retry after at
 /// most `pending.len() × patience` instead of waiting forever.
-async fn retry_shutdown_sends<S, Fut>(mut send: S, pending: Vec<Op>, patience: std::time::Duration)
+async fn retry_shutdown_sends<S, Fut>(send: S, pending: Vec<Op>, patience: std::time::Duration)
 where
     S: FnMut(Op) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
-    for op in pending {
-        let op_name = shutdown_op_name(&op);
-        match tokio::time::timeout(patience, send(op)).await {
-            Ok(Ok(())) => {
-                eprintln!(
-                    "[engine_pool] shutdown {op_name} retry delivered after the engine drained"
-                );
-            }
-            Ok(Err(e)) => {
-                eprintln!(
-                    "[engine_pool] shutdown {op_name} retry stopped: engine channel closed ({e:#})"
-                );
-                break;
-            }
-            Err(_) => {
-                eprintln!(
-                    "[engine_pool] shutdown {op_name} retry timed out after {patience:?}; the engine task may linger until process exit"
-                );
-                break;
-            }
-        }
-    }
+    deliver_shutdown_ops(send, pending, patience, |op_name| {
+        eprintln!("[engine_pool] shutdown {op_name} retry delivered after the engine drained");
+    })
+    .await;
 }
 
 /// Bounded Shutdown delivery and retry for unpublished-engine cleanup.
@@ -2154,20 +2150,8 @@ impl Drop for ExecutionRootRewindGuard {
     }
 }
 
-/// Background sweep task handle: on Drop it cancels first, then aborts —
-/// a double safeguard for stopping the sweep (same pattern as the Drop
-/// cleanup of scheduled/tasks.rs `ScheduledTaskState`).
-struct IdleReaperGuard {
-    cancel: CancellationToken,
-    handle: JoinHandle<()>,
-}
-
-impl Drop for IdleReaperGuard {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        self.handle.abort();
-    }
-}
+// `IdleReaperGuard`（Drop 时先 cancel 再 abort 双保险停止巡检）与巡检循环
+// 收敛到 `core::reaper`，与 ACP 侧共用同一实现。
 
 /// M-7: a steer must have a live engine to deliver to. When the engine is
 /// absent (the session is not running) return Err — otherwise no
@@ -2312,36 +2296,12 @@ impl EnginePool {
     /// a light task waking every 5 minutes).
     pub fn start_idle_reaper(&self) {
         let mut slot = self.idle_reaper.lock();
-        if slot.is_some() {
-            return;
-        }
-        let cancel = CancellationToken::new();
-        let task_cancel = cancel.clone();
-        let pool = self.clone();
-        let handle = tauri::async_runtime::spawn(async move {
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_secs(REAP_INTERVAL_SECS));
-            // tokio::interval 首个 tick 立即到期：跳过，统一走周期节奏。
-            interval.tick().await;
-            loop {
-                tokio::select! {
-                    _ = task_cancel.cancelled() => break,
-                    _ = interval.tick() => {}
-                }
-                // 单轮 panic 隔离：回收逻辑 panic 会连坐整个巡检 async task
-                // （静默停摆，engines 从此常驻）。每轮独立 spawn，panic 只终止
-                // 当轮，外层循环下轮照常继续。
-                let round_pool = pool.clone();
-                let round =
-                    tauri::async_runtime::spawn(
-                        async move { round_pool.reap_idle_engines().await },
-                    );
-                if let Err(error) = round.await {
-                    eprintln!("[engine_pool] 空闲巡检单轮失败（已隔离，下轮继续）: {error}");
-                }
-            }
-        });
-        *slot = Some(IdleReaperGuard { cancel, handle });
+        crate::core::reaper::start_idle_reaper(
+            &mut slot,
+            self.clone(),
+            |pool| async move { pool.reap_idle_engines().await },
+            "engine_pool",
+        );
     }
 
     /// One round of idle reclaim. The decision first takes a read-only
@@ -2498,7 +2458,8 @@ impl EnginePool {
     }
 
     /// 为独立调用构造该 session 的 bridge。与 EnginePool lazy spawn 共用同一套
-    /// runtime provider，保证检阅等旁路入口也不会绕过运行时凭据准备。
+    /// 运行时模型解析（prepare_runtime_model），保证检阅等旁路入口与正式 spawn
+    /// 的模型路由行为一致。
     pub(crate) async fn fresh_bridge_for(&self, session_id: &str) -> Result<Pinvou3Bridge> {
         #[cfg(any(feature = "benchmark-hooks", test))]
         let eval_model = self.eval_model_snapshots.for_session(session_id);
@@ -2614,6 +2575,8 @@ impl EnginePool {
                 scheduled_unattended,
             )
         })?;
+        // Community 默认准备路径固定 passthrough：模型原样保留，不注入运行时
+        // 凭据/revision；凭据照常走环境变量与本地凭据库（bridge.api_key()）。
         let selected = bridge
             .effective_model_owned()
             .context("No effective model is available for runtime preparation")?;
@@ -3489,8 +3452,8 @@ impl EnginePool {
     }
 
     /// Atomically reset a task's auxiliary conversation (M6): delete the
-    /// existing aux session through the same turn gate as
-    /// `discard_aux_session` / chat delete, then create a fresh one and
+    /// existing aux session through the same turn gate as chat delete, then
+    /// create a fresh one and
     /// return its metadata together with the deleted aux id (so the caller
     /// can emit `session:deleted`). One primitive, one outcome — the
     /// frontend's old two-invoke restart (discard, then ensure) had no
@@ -4466,6 +4429,56 @@ impl EnginePool {
         .await
     }
 
+    /// Shared turn-admission prelude of the reserved-turn senders (send /
+    /// edit-resend / eval send): stamp the display message onto the
+    /// reservation's baseline, take the session turn gate, re-verify the
+    /// store under the gate (a scheduled session re-validates against its
+    /// owning task; every other session must still exist), re-activate the
+    /// reservation, and refresh the idle clock so the idle sweep cannot
+    /// reclaim the engine between reserve and send (attachment resolution
+    /// and other time-consuming steps sit in that window). `role` only
+    /// names the admission in the deleted-session error ("turn" / "edit" /
+    /// "eval turn"). Returns the reservation with the held turn gate for the
+    /// caller's divergent tail; the eval lane's session ids are never
+    /// `sched-`, so its scheduled arm is a no-op.
+    ///
+    /// The caller MUST keep the returned gate alive until the engine
+    /// submission is enqueued: the cascade-cancel ordering invariant (see
+    /// `should_retry_cascade`) depends on a phase-two cancel never being able
+    /// to interleave between this admission and the next turn's
+    /// `SendMessage` enqueue.
+    async fn admit_reserved_turn(
+        &self,
+        session_id: &str,
+        op: TranscriptOperation,
+        display_message: Message,
+        role: &str,
+        mut reservation: TurnReservation,
+    ) -> Result<(TurnReservation, tokio::sync::OwnedMutexGuard<()>)> {
+        let baseline_revision = reservation
+            .base_transcript_revision()
+            .context("turn reservation has no base transcript revision")?
+            .to_string();
+        reservation.set_transcript_with_baseline(op, display_message, baseline_revision)?;
+        let scheduled_profile = self.store.scheduled_profile(session_id);
+        if scheduled_profile.is_none() && crate::features::sessions::is_sched_session_id(session_id)
+        {
+            bail!("Scheduled session '{session_id}' no longer exists");
+        }
+        let turn_lock = self.turn_locks.for_session(session_id).await;
+        let turn_gate = turn_lock.lock_owned().await;
+        if let Some(profile) = scheduled_profile {
+            scheduled_profile_after_turn_gate(&self.store, session_id, &profile.task_id)?;
+        } else {
+            self.store.load(session_id).with_context(|| {
+                format!("Session '{session_id}' was deleted before the {role} could start")
+            })?;
+        }
+        reservation.ensure_active()?;
+        self.touch_engine_activity(session_id).await;
+        Ok((reservation, turn_gate))
+    }
+
     #[cfg(any(feature = "benchmark-hooks", test))]
     async fn send_reserved_eval_user_message(
         &self,
@@ -4473,23 +4486,19 @@ impl EnginePool {
         content: String,
         display_message: Message,
         policy: &crate::features::assistant::product_runtime::eval_tool_policy::EvalTurnPolicy,
-        mut reservation: TurnReservation,
+        reservation: TurnReservation,
     ) -> Result<()> {
-        let baseline_revision = reservation
-            .base_transcript_revision()
-            .context("turn reservation has no base transcript revision")?
-            .to_string();
-        reservation.set_transcript_with_baseline(
-            TranscriptOperation::Append,
-            display_message,
-            baseline_revision,
-        )?;
-        let turn_lock = self.turn_locks.for_session(session_id).await;
-        let _turn = turn_lock.lock().await;
-        self.store.load(session_id).with_context(|| {
-            format!("Session '{session_id}' was deleted before the eval turn could start")
-        })?;
-        reservation.ensure_active()?;
+        // Hold the turn gate through engine submission (cascade-cancel
+        // enqueue ordering — see admit_reserved_turn).
+        let (reservation, _turn_gate) = self
+            .admit_reserved_turn(
+                session_id,
+                TranscriptOperation::Append,
+                display_message,
+                "eval turn",
+                reservation,
+            )
+            .await?;
         self.get_or_spawn(session_id)
             .await?
             .send_reserved_eval_message(content, policy, reservation)
@@ -4540,41 +4549,23 @@ impl EnginePool {
         restrict_tools_for_turn: bool,
         expert_snapshot: Option<std::sync::Arc<ExpertRosterSnapshot>>,
         expert_candidates: Vec<String>,
-        mut reservation: TurnReservation,
+        reservation: TurnReservation,
         remote_policy: RemoteTurnRuntimePolicy,
         model_override: Option<SavedModel>,
         remote_bundle: Option<RemoteRuntimeModelBundle>,
         remote_skills: Option<Arc<super::skill_materialization::RemoteTurnSkills>>,
     ) -> Result<()> {
-        let baseline_revision = reservation
-            .base_transcript_revision()
-            .context("turn reservation has no base transcript revision")?
-            .to_string();
-        reservation.set_transcript_with_baseline(
-            TranscriptOperation::Append,
-            display_message,
-            baseline_revision,
-        )?;
-        let scheduled_profile = self.store.scheduled_profile(session_id);
-        if scheduled_profile.is_none() && crate::features::sessions::is_sched_session_id(session_id)
-        {
-            bail!("Scheduled session '{session_id}' no longer exists");
-        }
-        let turn_lock = self.turn_locks.for_session(session_id).await;
-        let _turn = turn_lock.lock().await;
-        if let Some(profile) = scheduled_profile {
-            scheduled_profile_after_turn_gate(&self.store, session_id, &profile.task_id)?;
-        } else {
-            self.store.load(session_id).with_context(|| {
-                format!("Session '{session_id}' was deleted before the turn could start")
-            })?;
-        }
-        reservation.ensure_active()?;
-        // The turn is formally submitted: refresh the idle clock (attachment
-        // resolution and other time-consuming steps sit between reserve and
-        // send; keep the idle sweep from reclaiming the engine in this
-        // window).
-        self.touch_engine_activity(session_id).await;
+        // Hold the turn gate through engine submission (cascade-cancel
+        // enqueue ordering — see admit_reserved_turn).
+        let (reservation, _turn_gate) = self
+            .admit_reserved_turn(
+                session_id,
+                TranscriptOperation::Append,
+                display_message,
+                "turn",
+                reservation,
+            )
+            .await?;
         // Side B card pool: when this session is wearing an expert mask,
         // inject a light anchor (short) every turn to maintain the identity.
         // The full body was injected once with the first equip message
@@ -5105,14 +5096,21 @@ impl EnginePool {
     /// engine is not running read their initial value from the persisted list
     /// at the next spawn (build_engine_config), so new windows / new
     /// conversations all inherit the same governance state.
-    pub async fn set_disallowed_all(&self, tools: Vec<String>) {
-        let targets = self
-            .entries
+    /// Snapshot of every running engine entry (session id + engine handle)
+    /// for a broadcast loop: the entries lock is taken momentarily and
+    /// released before any send, so the global engine-table lock is never
+    /// held across an await.
+    async fn live_engine_targets(&self) -> Vec<(String, AppEngine)> {
+        self.entries
             .lock()
             .await
             .iter()
             .map(|(sid, entry)| (sid.clone(), entry.engine.clone()))
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+    }
+
+    pub async fn set_disallowed_all(&self, tools: Vec<String>) {
+        let targets = self.live_engine_targets().await;
         for (sid, engine) in targets {
             // The global hot refresh is shaped per session as well (code
             // sessions keep present_artifact hidden), and the entries lock is
@@ -5139,13 +5137,7 @@ impl EnginePool {
     /// from build_engine_config_for_session_roots — both share
     /// `bridge.scope_deny_ruleset`.
     pub async fn refresh_permission_rulesets(&self) {
-        let targets = self
-            .entries
-            .lock()
-            .await
-            .iter()
-            .map(|(sid, entry)| (sid.clone(), entry.engine.clone()))
-            .collect::<Vec<_>>();
+        let targets = self.live_engine_targets().await;
         for (sid, engine) in targets {
             if let Err(e) = engine
                 .handle
@@ -5178,35 +5170,19 @@ impl EnginePool {
         session_id: &str,
         new_message: String,
         display_message: Message,
-        mut reservation: TurnReservation,
+        reservation: TurnReservation,
     ) -> Result<()> {
-        let baseline_revision = reservation
-            .base_transcript_revision()
-            .context("turn reservation has no base transcript revision")?
-            .to_string();
-        reservation.set_transcript_with_baseline(
-            TranscriptOperation::EditLast,
-            display_message,
-            baseline_revision,
-        )?;
-        let scheduled_profile = self.store.scheduled_profile(session_id);
-        if scheduled_profile.is_none() && crate::features::sessions::is_sched_session_id(session_id)
-        {
-            bail!("Scheduled session '{session_id}' no longer exists");
-        }
-        let turn_lock = self.turn_locks.for_session(session_id).await;
-        let _turn = turn_lock.lock().await;
-        if let Some(profile) = scheduled_profile {
-            scheduled_profile_after_turn_gate(&self.store, session_id, &profile.task_id)?;
-        } else {
-            self.store.load(session_id).with_context(|| {
-                format!("Session '{session_id}' was deleted before the edit could start")
-            })?;
-        }
-        reservation.ensure_active()?;
-        // A resend is also a turn submission: refresh the idle clock (same
-        // reason as send_reserved_user_message).
-        self.touch_engine_activity(session_id).await;
+        // Hold the turn gate through engine submission (cascade-cancel
+        // enqueue ordering — see admit_reserved_turn).
+        let (reservation, _turn_gate) = self
+            .admit_reserved_turn(
+                session_id,
+                TranscriptOperation::EditLast,
+                display_message,
+                "edit",
+                reservation,
+            )
+            .await?;
         // Aux scoped-tool reminder for edit resends (round-14 minor-1): this
         // path bypasses send_reserved_user_message, so the reminder is merged
         // into the resent message by forward_edit_resend_with_reminder —
@@ -5813,36 +5789,15 @@ mod scheduled_model_tests {
     };
     use crate::platform::paths::tests::ENV_LOCK;
     use crate::platform::prefs::{ImageCapabilityOverride, ModelPreset, SavedModel};
+    use crate::platform::test_support::EnvRestore;
     use async_trait::async_trait;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
 
-    struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
-
-    impl EnvRestore {
-        fn capture(names: &[&'static str]) -> Self {
-            Self(
-                names
-                    .iter()
-                    .map(|name| (*name, std::env::var_os(name)))
-                    .collect(),
-            )
-        }
-    }
-
-    impl Drop for EnvRestore {
-        fn drop(&mut self) {
-            for (name, value) in self.0.drain(..) {
-                match value {
-                    // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
-                    Some(value) => unsafe { std::env::set_var(name, value) },
-                    // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
-                    None => unsafe { std::env::remove_var(name) },
-                }
-            }
-        }
-    }
+    // `EnvRestore`（快照 + Drop 恢复一组 env，SAFETY 前提是测试全程持有
+    // platform::paths::tests::ENV_LOCK）收敛到 `platform::test_support`，
+    // 与 engine.rs / multiagent 回归测试共用同一实现。
 
     fn isolated_eval_bridge() -> (Pinvou3Bridge, std::path::PathBuf, EnvRestore) {
         let restore = EnvRestore::capture(&[
@@ -8519,8 +8474,8 @@ mod scheduled_model_tests {
     }
 
     /// PR #433 review regression: `delete_session`'s Chat branch cascades the
-    /// auxiliary session through the gate (same pipeline as
-    /// `discard_aux_session`) — first `pool.delete_chat_session(aux)`
+    /// auxiliary session through the gate (the same pipeline as the aux
+    /// discard leg) — first `pool.delete_chat_session(aux)`
     /// (reclaim the engine + store.delete + late sweep inside the turn gate),
     /// then delete the main session; `store.delete`'s on-disk cascade only
     /// removes the record and would leave a running aux engine as a
@@ -8632,8 +8587,8 @@ mod scheduled_model_tests {
         let _ = std::fs::remove_dir_all(home);
     }
 
-    /// Regression: the eval teardown paths (`EnginePoolRuntime::close` /
-    /// `delete_eval_session`) reuse delete_chat_session, but submit already
+    /// Regression: the eval teardown paths (the product runtime port's
+    /// `close` / `delete_eval_session`) reuse delete_chat_session, but submit already
     /// ran `timing::start_turn`; deletion must clear the session's unpaired
     /// queue key in ACTIVE_TURNS, or a single GAIA pass's ~165 create/delete
     /// cycles would grow the process-level map unbounded.
@@ -11064,32 +11019,9 @@ mod probed_facts_wiring_tests {
     use crate::platform::credential_store::CredentialState;
     use crate::platform::paths::tests::ENV_LOCK;
     use crate::platform::prefs::{ImageCapabilityOverride, ModelPreset, SavedModel, UserPrefs};
+    use crate::platform::test_support::EnvRestore;
 
-    struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
-
-    impl EnvRestore {
-        fn capture(names: &[&'static str]) -> Self {
-            Self(
-                names
-                    .iter()
-                    .map(|name| (*name, std::env::var_os(name)))
-                    .collect(),
-            )
-        }
-    }
-
-    impl Drop for EnvRestore {
-        fn drop(&mut self) {
-            for (name, value) in self.0.drain(..) {
-                match value {
-                    // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
-                    Some(value) => unsafe { std::env::set_var(name, value) },
-                    // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
-                    None => unsafe { std::env::remove_var(name) },
-                }
-            }
-        }
-    }
+    // `EnvRestore` 复用 `platform::test_support` 的共享实现（同 tests 模块上方注释）。
 
     /// Isolates env vars related to base_url/api_key (`Pinvou3Bridge::
     /// base_url`/`api_key` prioritize env over session model); the returned

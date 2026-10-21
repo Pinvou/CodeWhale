@@ -624,7 +624,7 @@ const jaBase = {
         depHint_email_manual: '手動インストールが必要：ターミナルで `sudo cpan -i Email::Outlook::Message` を実行（Homebrew に formula はありません）。詳細: https://metacpan.org/pod/Email::Outlook::Message',
         communityQrAlt: 'Pinvou QQ グループの QR コード', communityQrPlaceholder: 'QR コード準備中', communityChannelTag: '中国語 QQ コミュニティ',
         communityQrHint: 'モバイル QQ でスキャンするか、グループ番号をコピーして手動で検索してください。',
-        communityGroupLabel: 'グループ番号', communityGroupPending: '準備中', communityCopyGroup: 'グループ番号をコピー', communityCopied: 'グループ番号をコピーしました',
+        communityGroupLabel: 'グループ番号', communityCopyGroup: 'グループ番号をコピー', communityCopied: 'グループ番号をコピーしました',
         communityDiscussions: 'GitHub Discussions',
         communitySupportNotice: 'QQ グループはコミュニティ交流用であり、公式サポートやチケット窓口ではありません。再現可能な問題はフィードバックから送信し、脆弱性の疑いがある情報はグループに投稿しないでください。',
         feedbackTitle: 'ヘルプとフィードバック', feedbackDesc: '問題や提案をスクリーンショットや短い動画付きで送信できます。',
@@ -882,7 +882,7 @@ dictJa.uiChatView = {
   designAdjustSelected:(label, raw)=>`現在選択中の ${label} を調整：${raw}`,
 };
 
-dictJa.uiMainApp = { petSummon:'コンパニオンを呼び出す', closeNavigation:'ナビゲーションを閉じる', superPermFailed:'高度な実行権限を有効にできません', searchTestUnavailable:'現在の環境では検索ソースをテストできません', searchSaveFailed:'検索設定の保存に失敗しました。もう一度お試しください', petSessionMissing:'対象のセッションが存在しません', petTaskStartFailed:'タスクを開始できませんでした', detachedSessionMissing:'対象の Coding セッションが存在しないか、削除されました', detachedSessionLoadFailed:'Coding セッションの読み込みに失敗しました。ウィンドウを閉じて再試行してください', panelLoadFailed:err=>`パネルの読み込みに失敗しました: ${err}`, viewLoadFailed:'ページの読み込みに失敗しました。ネットワークを確認して再試行してください', viewReload:'再読み込み' };
+dictJa.uiMainApp = { petSummon:'コンパニオンを呼び出す', closeNavigation:'ナビゲーションを閉じる', superPermFailed:'高度な実行権限を有効にできません', searchSaveFailed:'検索設定の保存に失敗しました。もう一度お試しください', petSessionMissing:'対象のセッションが存在しません', petTaskStartFailed:'タスクを開始できませんでした', detachedSessionMissing:'対象の Coding セッションが存在しないか、削除されました', detachedSessionLoadFailed:'Coding セッションの読み込みに失敗しました。ウィンドウを閉じて再試行してください', panelLoadFailed:err=>`パネルの読み込みに失敗しました: ${err}`, viewLoadFailed:'ページの読み込みに失敗しました。ネットワークを確認して再試行してください', viewReload:'再読み込み' };
 
 dictJa.uiToolCommon = {
   open: '開く', coverAlt: 'カバー',
@@ -1050,7 +1050,6 @@ dictJa.uiSettingsView = {
   memoryRecentHint: '最近のメモリは進行中または完了したばかりの事項を記録し、PINVOU がコンテキストを引き継ぐのに役立ちます。時間とともに自動で薄れますが、手動でアーカイブ・削除もできます。',
   memoryEditDesc: '変更は今後のメモリ注入に即座に反映されます。',
   visualDesignSkillName: 'ビジュアルデザイン',
-  visualDesignSkillDesc: 'デザインシステムからWebページ/バナー/ポスター/履歴書を直接生成…',
   serviceFeishu: 'Feishu（Lark）',
   serviceWecom: 'WeCom',
   serviceDingtalk: 'DingTalk',

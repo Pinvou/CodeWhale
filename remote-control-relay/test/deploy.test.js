@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { access, chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -9,6 +10,18 @@ import { test } from "node:test";
 const repoRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const deployScript = join(repoRoot, "scripts", "deploy-remote-relay.sh");
 const productionHardening = join(repoRoot, "remote-control-relay", "10-hardening.conf");
+
+function bashExecutable() {
+  if (process.platform !== "win32") return "bash";
+  // Resolve the active Git installation instead of assuming a drive or folder.
+  const gitPaths = spawnSync("where.exe", ["git"], { encoding: "utf8", timeout: 10_000 });
+  for (const path of (gitPaths.stdout || "").trim().split(/\r?\n/).filter(Boolean)) {
+    const candidate = join(dirname(dirname(path)), "bin", "bash.exe");
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error("Deployment tests require Git for Windows on PATH");
+}
+
 
 test("production hardening keeps deployment-specific proxy addresses out of the repository", async () => {
   const source = await readFile(productionHardening, "utf8");
@@ -23,7 +36,7 @@ test("production deployment requires explicit confirmed targets before network o
   const source = await readFile(deployScript, "utf8");
   const config = source.match(/^SERVER=[^]*?(?=^BASE_PATH=)/m)?.[0];
   assert.ok(config, "execute the actual production configuration gate");
-  const bash = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash";
+  const bash = bashExecutable();
   const valid = {
     PINVOU_REMOTE_DEPLOY_SERVER: "fixture@relay.invalid",
     PINVOU_REMOTE_EXPECTED_DEPLOY_SERVER: "fixture@relay.invalid",
@@ -136,7 +149,7 @@ test("staged controller smoke resolves its protocol after the real module instal
   const source = await readFile(deployScript, "utf8");
   const loop = source.match(/for module in "\$code_stage"\/\*\.js; do[\s\S]*?\r?\ndone/);
   assert.ok(loop, "the deployment must install the complete root module set");
-  const bash = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash";
+  const bash = bashExecutable();
   const copied = spawnSync(bash, ["-c", `set -euo pipefail\ncode_stage=stage\nremote_dir=installed\n${loop[0]}`], { cwd: root, encoding: "utf8", timeout: 10_000 });
   assert.equal(copied.status, 0, copied.stderr || String(copied.error));
   const loaded = spawnSync(process.execPath, [
@@ -167,7 +180,7 @@ test("deploy module collection does not require mapfile and preserves relative n
   for (const name of ["server.js", "extra module.js", "ignored.txt"]) {
     await writeFile(join(relayDir, name), "");
   }
-  const bash = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash";
+  const bash = bashExecutable();
   const collected = spawnSync(bash, ["-c", [
     "set -euo pipefail",
     "enable -n mapfile 2>/dev/null || true",
@@ -229,6 +242,29 @@ async function ensureMinimalWebDist(t) {
   });
 }
 
+function mockedChecksumScript() {
+  // sha256sum -c consumes stdin. An early-exiting replacement can close the
+  // pipe before echo writes, aborting the deploy fixture with SIGPIPE (141).
+  return "#!/usr/bin/env bash\ncat >/dev/null\nexit 0\n";
+}
+
+test("deployment checksum mock consumes all piped input under pipefail", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pinvou-deploy-checksum-mock-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const checksum = join(root, "sha256sum");
+  await executable(checksum, mockedChecksumScript());
+  const bash = bashExecutable();
+  // Exceed pipe capacity so an early-exiting consumer fails deterministically.
+  const result = spawnSync(bash, [
+    "-c", 'set -euo pipefail\n{ for ((i=0;i<4096;i++)); do printf "%01024d\\n" 0; done; } | bash "$1" -c --status',
+    "checksum-fixture", checksum.replaceAll("\\", "/"),
+  ], {
+    encoding: "utf8", timeout: 20_000,
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
 function mockedSshScript(log) {
   return `#!/usr/bin/env bash
 cat >/dev/null
@@ -260,7 +296,7 @@ test("deployment SSH mock recognizes timestamped rollback and rejects unknown ca
   const shellLog = process.platform === "win32"
     ? log.replaceAll("\\\\", "/").replace(/^([A-Za-z]):/, (_, drive) => `/${drive.toLowerCase()}`)
     : log;
-  const bash = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash";
+  const bash = bashExecutable();
   const remoteDir = "/opt/fixture-relay";
   const remoteCommand = (...args) => spawnSync(bash, [
     "-c", mockedSshScript(shellLog), "mock-ssh", "-i", "fixture-key",
@@ -298,7 +334,7 @@ test("deploy script rolls back when post-deploy public verification fails", {
 
   await executable(join(bin, "node"), "#!/usr/bin/env bash\nexit 0\n");
   await executable(join(bin, "npm"), "#!/usr/bin/env bash\nexit 0\n");
-  await executable(join(bin, "sha256sum"), "#!/usr/bin/env bash\nexit 0\n");
+  await executable(join(bin, "sha256sum"), mockedChecksumScript());
   await executable(join(bin, "scp"), `#!/usr/bin/env bash\necho scp >> "${log}"\n`);
   await executable(join(bin, "ssh"), mockedSshScript(log));
   await executable(join(bin, "curl"), `#!/usr/bin/env bash

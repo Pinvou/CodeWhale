@@ -1,8 +1,10 @@
-const ESC = String.fromCharCode(0x1b);
-const BEL = String.fromCharCode(0x07);
-const C1_CSI = String.fromCharCode(0x9b);
-const OSC_SEQUENCE = new RegExp(`${ESC}\\][\\s\\S]*?(?:${BEL}|${ESC}\\\\)`, 'g');
-const CSI_SEQUENCE = new RegExp(`(?:${ESC}\\[|${C1_CSI})[0-?]*[ -/]*[@-~]`, 'g');
+import { pathBasename } from '../../shared/path-utils.js';
+
+const ESC = String.fromCodePoint(0x1b);
+const BEL = String.fromCodePoint(0x07);
+const C1_CSI = String.fromCodePoint(0x9b);
+const OSC_SEQUENCE = new RegExp(String.raw`${ESC}\][\s\S]*?(?:${BEL}|${ESC}\\)`, 'g');
+const CSI_SEQUENCE = new RegExp(String.raw`(?:${ESC}\[|${C1_CSI})[0-?]*[ -/]*[@-~]`, 'g');
 const SINGLE_ESCAPE_SEQUENCE = new RegExp(`${ESC}[()][0-2A-Z]`, 'g');
 /**
  * 底座 `agent` 工具的 spawn 判定（与协调操作区分）。
@@ -58,6 +60,13 @@ export function expertDelegationText(args) {
 }
 
 const OPERATION_ITEM_TYPES = new Set(['command_execution', 'file_change', 'tool']);
+
+/// Single source for the operation-item membership so every lane filters with
+/// the same list (exported for the codex/ACP lane and the shared timeline).
+export function isOperationItemType(type) {
+  return OPERATION_ITEM_TYPES.has(type);
+}
+
 const SEARCH_TOOL_NAMES = new Set([
   'web_search',
   'mcp_iwencai_news_search',
@@ -87,7 +96,7 @@ export function toolWorkspaceResources(tool) {
     const path = String(value || '').trim();
     if (!path || seen.has(path)) return;
     seen.add(path);
-    const basename = path.split(/[\\/]/).pop() || path;
+    const basename = pathBasename(path, { fallback: path });
     const label = String(name || '').trim();
     resources.push({ path, name: !label || label === path ? basename : label });
   };
@@ -214,8 +223,7 @@ function searchSourceLabel(name, rawOutput) {
 }
 
 function validSearchUrl(value) {
-  const url = decodeSearchFragment(value);
-  return /^https?:\/\/[^\s]+$/i.test(url) ? url : '';
+  return externalMarkdownUrl(decodeSearchFragment(value));
 }
 
 function collectSearchResults(rawOutput) {
@@ -308,7 +316,6 @@ export function fetchToolDetails(tool) {
     || '');
   return {
     url,
-    hostname,
     target: target || hostname || '网页',
     status: Number.isFinite(status) ? status : null,
     contentType,
@@ -392,7 +399,7 @@ export function commandExecutionDetails(tool) {
   };
 }
 
-export function timestampMs(value) {
+function timestampMs(value) {
   if (typeof value === 'number') return Number.isFinite(value) ? value : NaN;
   const parsed = Date.parse(value || '');
   return Number.isFinite(parsed) ? parsed : NaN;

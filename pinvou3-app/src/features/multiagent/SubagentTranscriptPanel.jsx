@@ -35,6 +35,15 @@ import { isNeutralEndingStatus } from './overlay-model.mjs';
 
 const TRANSCRIPT_WINDOW_STEP = 120;
 
+/// A ledger entry is settled when terminal (done) or an orphan transcript
+/// (its status token was pruned by the foundation) — the latter is historical
+/// leftover, not live work. One predicate drives the list poll's active state
+/// and the dormant gate; the two complement spellings previously had to be
+/// kept in sync by hand.
+function isSettledEntry(entry) {
+  return !!entry && (entry.done || entry.status == null);
+}
+
 /** Codex 式紧凑工具行：图标底 + 标题 + 一行 meta，点开看原始入出参。 */
 function CompactToolRow({ item, conversationCopy }) {
   const [open, setOpen] = useState(false);
@@ -95,14 +104,12 @@ export function SubagentTranscriptPanel({
   initialAgentId,
   selectionRequestId,
   t,
-  theme,
   language,
   modelServiceState,
   onClose,
 }) {
   const copy = t.uiMultiAgent;
   const conversationCopy = t.uiConversation;
-  const isDark = theme === 'dark';
   const personas = bridge.available && bridge.personas ? bridge.personas.getPersonas() : [];
 
   const [selectedAgentId, setSelectedAgentId] = useState(initialAgentId || null);
@@ -140,20 +147,19 @@ export function SubagentTranscriptPanel({
       // leftover, so it must not hold the poll at the 2s cadence forever.
       // The real-time listener below wakes one read when a new subagent
       // appears after everything went terminal.
-      active: (list) => !Array.isArray(list)
-        || list.some((entry) => !entry.done && entry.status != null),
+      active: (list) => !Array.isArray(list) || !list.every(isSettledEntry),
       intervalMs: 2000,
     });
   }, [sessionId, listWake]);
 
   // Dormant = nothing running and no failed read, so the wake listener below
-  // can take over from the poll. Orphan transcripts (no status token) count as
-  // settled history here exactly as in the poll predicate above — otherwise a
+  // can take over from the poll. Orphan transcripts count as settled history
+  // via isSettledEntry (same predicate as the poll above) — otherwise a
   // single orphan row would keep dormant false forever, and with the poll
   // stopped a newly spawned agent would have neither discovery path.
   const listPollingDormant = Array.isArray(agents)
     && !listReadFailed
-    && agents.every((entry) => entry.done || entry.status == null);
+    && agents.every(isSettledEntry);
   useEffect(() => {
     if (!listPollingDormant || typeof window === 'undefined') return undefined;
     const wakeForNewAgent = (event) => {
@@ -326,7 +332,6 @@ export function SubagentTranscriptPanel({
             {detailIdentity && (
               <AppIcon
                 card={{ id: detailIdentity.avatarKey, name: detailSubtitle || detailName, dept: detailIdentity.personaDept }}
-                isDark={isDark}
                 cls="h-8 w-8 shrink-0 overflow-hidden rounded-[10px]"
                 fb={14}
               />
@@ -415,7 +420,6 @@ export function SubagentTranscriptPanel({
                 assistantAvatar={detailIdentity ? (
                   <AppIcon
                     card={{ id: detailIdentity.avatarKey, name: detailSubtitle || detailName, dept: detailIdentity.personaDept }}
-                    isDark={isDark}
                     cls="mt-1 h-7 w-7 shrink-0 overflow-hidden rounded-xl"
                     fb={13}
                   />
@@ -477,7 +481,6 @@ export function SubagentTranscriptPanel({
                 >
                   <AppIcon
                     card={{ id: identity.avatarKey, name: subtitle || name, dept: identity.personaDept }}
-                    isDark={isDark}
                     cls="h-8 w-8 shrink-0 overflow-hidden rounded-[10px]"
                     fb={14}
                   />

@@ -170,34 +170,11 @@ impl SessionStore {
     }
 
     fn boot_inner(recover_interrupted_tools: bool) -> Result<Self> {
-        let store = Self::from_paths(
-            paths::sessions_root(),
-            paths::scheduled_run_profiles_path(),
+        Self::boot_inner_with(
             paths::scheduled_tasks_root(),
-        )?;
-        // Sidecars historically load later in the Tauri setup hook. Loading
-        // them here too lets reconciliation discard scheduled-only runtime
-        // state immediately instead of resurrecting it after stale profiles
-        // have already been removed.
-        store.load_multi_agent_flags();
-        store.load_session_models();
-        store.load_pinned_sessions();
-        store.load_hidden_sessions();
-        store.load_session_mode_states();
-        // Legacy of the pre-redesign aux mapping (round-30 B8): the main→aux
-        // association is now derived from the id itself (`aux-{parent_id}`),
-        // so the sidecar is dead state — remove it instead of leaving it
-        // behind forever. Best-effort; a leftover file is inert either way.
-        store.remove_legacy_aux_sessions_sidecar();
-        {
-            let _mutation = store.scheduled_mutation.lock();
-            if recover_interrupted_tools {
-                store.recover_interrupted_tool_histories_locked()?;
-            }
-            store.enforce_session_retention_locked()?;
-        }
-        store.purge_all_scheduled_side_maps();
-        Ok(store)
+            recover_interrupted_tools,
+            false,
+        )
     }
 
     /// Test-only boot over an isolated root; production boot paths are
@@ -216,11 +193,35 @@ impl SessionStore {
     /// the legacy binding table explicitly after the shared boot sequence.
     #[cfg(test)]
     pub(crate) fn boot_with_scheduled_root(scheduled_root: PathBuf) -> Result<Self> {
+        Self::boot_inner_with(scheduled_root, false, true)
+    }
+
+    /// Shared boot sequence: open the store over the ordinary sessions root
+    /// with the given scheduled root, load the five sidecar maps, then —
+    /// optionally after repairing interrupted tool histories — enforce
+    /// retention and purge scheduled side maps.
+    ///
+    /// `migrate_legacy` converges the intermediate legacy global binding table
+    /// before any consumer reads a binding: this is the "next boot" half of
+    /// the rebind crash-window contract (the legacy table is rewritten before
+    /// the sidecars move, so a boot heals forward — review #464 round-6
+    /// finding 5). Only boot paths that may run before the startup migration
+    /// in [`Self::boot_for_process_startup`] set it; plain [`Self::boot`]
+    /// must not repeat the migration.
+    fn boot_inner_with(
+        scheduled_root: PathBuf,
+        recover_interrupted_tools: bool,
+        migrate_legacy: bool,
+    ) -> Result<Self> {
         let store = Self::from_paths(
             paths::sessions_root(),
             paths::scheduled_run_profiles_path(),
             scheduled_root,
         )?;
+        // Sidecars historically load later in the Tauri setup hook. Loading
+        // them here too lets reconciliation discard scheduled-only runtime
+        // state immediately instead of resurrecting it after stale profiles
+        // have already been removed.
         store.load_multi_agent_flags();
         store.load_session_models();
         store.load_pinned_sessions();
@@ -231,10 +232,15 @@ impl SessionStore {
         // crash-window contract (the legacy table is rewritten before the
         // sidecars move, so a boot heals forward — review #464 round-6
         // finding 5).
-        store.migrate_legacy_session_workspaces();
+        if migrate_legacy {
+            store.migrate_legacy_session_workspaces();
+        }
         store.remove_legacy_aux_sessions_sidecar();
         {
             let _mutation = store.scheduled_mutation.lock();
+            if recover_interrupted_tools {
+                store.recover_interrupted_tool_histories_locked()?;
+            }
             store.enforce_session_retention_locked()?;
         }
         store.purge_all_scheduled_side_maps();
@@ -440,7 +446,7 @@ impl SessionStore {
     }
 
     pub fn load(&self, id: &str) -> Result<SavedSession> {
-        self.load_with_context(id, || format!("load_session({id})"))
+        self.load_with_context(id)
     }
 
     /// Engine replacement must observe every already-admitted writer from
@@ -450,15 +456,11 @@ impl SessionStore {
         self.load(id)
     }
 
-    fn load_with_context(
-        &self,
-        id: &str,
-        context: impl FnOnce() -> String,
-    ) -> Result<SavedSession> {
+    fn load_with_context(&self, id: &str) -> Result<SavedSession> {
         let session = self
             .manager
             .load_session_snapshot(id)
-            .with_context(context)?;
+            .with_context(|| format!("load_session({id})"))?;
         // Fail closed on case-variant aliases of AUX records: on
         // case-insensitive filesystems `AUX-<suffix>.json` resolves to the
         // real `aux-…` record while case-sensitive identity tests miss the
@@ -523,7 +525,11 @@ impl SessionStore {
             .map(|metadata| metadata.len())
     }
 
-    pub fn save(&self, session: &SavedSession) -> Result<PathBuf> {
+    /// Persist a whole session snapshot. Crate-internal: every durable write
+    /// goes through [`Self::update_messages`] / [`Self::update_artifacts`] /
+    /// the persist helpers above; direct whole-snapshot saves are reserved
+    /// for the store's own create/recovery paths.
+    pub(crate) fn save(&self, session: &SavedSession) -> Result<PathBuf> {
         let _mutation = self.scheduled_mutation.lock();
         if super::validators::is_remote_session_id(&session.metadata.id)
             || self
@@ -1212,8 +1218,7 @@ impl SessionStore {
     /// at the same path, so an unreadable record (transient fault OR
     /// permanent corruption) must never fall into the creation leg
     /// (round-30 B4/B8). The panel surfaces the error as ensureFailed; the
-    /// user's recovery for a truly dead record is an explicit discard
-    /// (`discard_aux_session` deletes by id without parsing the record).
+    /// user's recovery for a truly dead record is an explicit discard.
     /// An auxiliary conversation must not own an aux session (aux-of-aux): an
     /// aux session is itself a Chat kind, so the command layer's
     /// `ensure_chat_session` cannot catch it — the single creation entry point
