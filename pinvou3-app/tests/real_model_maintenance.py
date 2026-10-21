@@ -137,6 +137,28 @@ def main():
         assert status == 200, value
         return next((row for row in value['models'] if row['card'] == card_id), None)
 
+    def current_deployment():
+        # A successful store task precedes the daemon's periodic publication.
+        # Pin the exact read-only inventory identity, never an earlier cached row.
+        inventory = json.loads(subprocess.check_output(
+            [str(frozen['pinvou']), '--cmsd-store-inventory'], env=env, text=True, timeout=15))
+        assert inventory['format'] == 'pinvou-installed-models-v1', inventory
+        entry = next(row for row in inventory['models']
+                     if row['card'] == card_id and row['logical_card'] == card_id)
+        assert entry['store_status'] == 'deployed' and entry['deployment_revision'], entry
+        return entry
+
+    def observed_deployment(expected, managed=False):
+        row = observed_model()
+        if not row or any(row.get(key) != expected[key]
+                          for key in ['version_id', 'deployment_revision']):
+            return None
+        if row.get('selected_version') != expected['version_id']:
+            return None
+        if managed and not (row.get('managed') and row.get('recovery_owner') == 'cmsd'):
+            return None
+        return row
+
     def wait(check, timeout=45):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -248,8 +270,18 @@ def main():
         assert status==200,value
         installed = finish(value['result']['run_id'])
         assert installed['status']=='succeeded',installed
-        observed = wait(observed_model)
-        assert not observed['managed'] and observed['can_adopt'],observed
+        expected = current_deployment()
+        observed = wait(lambda: observed_deployment(expected))
+        assert observed['status'] == 'stopped' and observed['weights_complete'] is True, observed
+        assert observed['managed'] or observed['can_adopt'], observed
+        if observed['managed']:
+            assert observed['recovery_owner'] == 'cmsd', observed
+        if observed.get('recovery') is not None:
+            assert observed['recovery']['desired_running'] is False, observed
+        status, state = api('/v1/status')
+        assert status == 200 and state['active_model'] is None, state
+        containers = subprocess.check_output(['docker', 'ps', '-a', '--format', '{{.Names}}'], text=True)
+        assert name not in containers.splitlines(), containers
         success('uninstall',False)
         assert model.exists() and not gate()['maintenance']
         report['checks'].append('never-enabled deployed card can uninstall with weights retained without first enabling')
@@ -265,8 +297,9 @@ def main():
         created = True
         success('enable')
         assert (profile / 'megacube/installations/ownership' / card_id).is_file()
-        observed=wait(observed_model)
-        assert observed['managed'] and observed['recovery_owner']=='cmsd',observed
+        expected = current_deployment()
+        observed = wait(lambda: observed_deployment(expected, managed=True))
+        assert observed['managed'] and observed['recovery_owner'] == 'cmsd', observed
         connection = http.client.HTTPConnection('127.0.0.1', args.gateway_port, timeout=40)
         connection.request('POST', '/v1/chat/completions', json.dumps({
             'model': 'megacube-default', 'messages': [{'role': 'user', 'content': 'Say hello.'}],
