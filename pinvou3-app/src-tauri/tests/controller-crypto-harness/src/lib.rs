@@ -114,6 +114,12 @@ mod features {
                 );
                 Ok(())
             }
+            // Mirrors src/features/sessions/validators.rs::is_remote_session_id
+            // (single source); schema.rs reaches it through the archive seam.
+            pub(crate) fn is_remote_session_id(id: &str) -> bool {
+                id.get(..7)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("remote-"))
+            }
         }
     }
     pub(crate) mod files {

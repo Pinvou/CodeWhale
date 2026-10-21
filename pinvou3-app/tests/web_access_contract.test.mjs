@@ -108,8 +108,8 @@ const codexWorkspacePanel = readSource(
   path.join(root, 'src', 'features', 'codex', 'CodexWorkspacePanel.jsx'),
   'utf8',
 );
-const codeViewerModal = readSource(
-  path.join(root, 'src', 'features', 'codex', 'CodeViewerModal.jsx'),
+const codeViewerContent = readSource(
+  path.join(root, 'src', 'features', 'codex', 'CodeViewerContent.jsx'),
   'utf8',
 );
 const acpPlatformClient = readSource(path.join(root, 'src', 'features', 'codex', 'acpClient.js'), 'utf8');
@@ -408,8 +408,8 @@ assert.match(codexWorkspacePanel, /can\('externalSystemOpen'\)/,
 assert.match(codexWorkspacePanel, /onOpen=\{systemOpenAvailable/);
 assert.match(codexWorkspacePanel, /onReveal=\{systemOpenAvailable/);
 assert.match(codexWorkspacePanel, /onOpenInNewWindow=\{systemOpenAvailable/);
-assert.match(codeViewerModal, /\{!diff && onReveal && \(/);
-assert.match(codeViewerModal, /\{!diff && onOpen && \(/,
+assert.match(codeViewerContent, /\{!hideDesktopActions && onReveal && \(/);
+assert.match(codeViewerContent, /\{!hideDesktopActions && onOpen && \(/,
   'the shared code preview must omit desktop system actions when callbacks are unavailable');
 
 // 浏览器本机上传:双入口按能力协商门控,分块有界,取消/失败路径完备。
@@ -437,10 +437,11 @@ assert.match(webBridge, /web_access_discard_attachment/,
   'removed or late-cancelled attachments must release their opaque desktop handle');
 assert.match(remoteControlCommands, /stage_uploaded_attachments\(attachments, &session_id, &?store\)/,
   'uploaded attachments must be staged into the Session workspace before the engine sees their paths');
-// Agent 安装命令行/输出可能含内部镜像源或主机路径，Web status 投影必须清除。
+// Agent 安装命令行/输出可能含内部镜像源或主机路径，Web status 投影必须清除；
+// 安装终局的 error 字段同为错误链，一并仅桌面端展示。
 assert.match(remoteControlCommands,
-  /project_acp_status_for_web[\s\S]*?status\.install_command = None[\s\S]*?status\.install_latest_line = None/,
-  'the Web agent-status projection must strip install command and output lines');
+  /project_acp_status_for_web[\s\S]*?status\.install_command = None[\s\S]*?status\.install_latest_line = None[\s\S]*?status\.install_finished = None/,
+  'the Web agent-status projection must strip install command/output lines and the install outcome');
 assert.match(remoteControlCommands, /redact_workspace_path_for_web|list_codex_acp_sessions_for_web/,
   'the Web session list must redact host workspace paths to a directory name');
 assert.match(remoteControlCommands,

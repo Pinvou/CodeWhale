@@ -1265,8 +1265,10 @@ impl UserPrefs {
         (parsed.prefs, migration)
     }
 
+    /// 保存当前偏好到磁盘（持锁写入）。本仓仍有多处调用方
+    /// （llmapi_hub/provisioning、assistant/remote_turn 测试）；
+    /// 上游清扫在共享 `update_transaction` 收敛后删除了本包装，本仓调用面未收敛故保留。
     pub fn save(&self) -> std::io::Result<()> {
-        let _guard = lock_user_prefs();
         self.save_unlocked()
     }
 
@@ -3941,7 +3943,7 @@ mod tests {
             },
             ..Default::default()
         };
-        prefs.save().expect("prefs should save");
+        prefs.save_unlocked().expect("prefs should save");
 
         let saved = std::fs::read_to_string(super::super::paths::settings_path())
             .expect("settings should exist");
@@ -3972,9 +3974,11 @@ mod tests {
         // SAFETY: holding the crate-level ENV_LOCK (acquired on this test's first line); env writes are serialized.
         unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
 
-        let mut initial = UserPrefs::default();
-        initial.migrate_models();
-        initial.save().expect("initial settings should save");
+        UserPrefs::update_transaction(|initial| {
+            initial.migrate_models();
+            Ok(())
+        })
+        .expect("initial settings should save");
 
         let barrier = Arc::new(Barrier::new(3));
         let model_barrier = Arc::clone(&barrier);

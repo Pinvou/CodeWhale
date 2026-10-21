@@ -7,6 +7,7 @@
 // architecture-guard: allow-target-cfg -- the legacy-table sync-failure regression needs POSIX permission modes to make the atomic rewrite fail deterministically, and the symlink-alias regression needs a real directory symlink to emulate macOS /var → /private/var ancestor resolution; PermissionsExt/from_mode and std::os::unix::fs::symlink do not exist on Windows, so those tests are cfg(unix)-gated and no platform behavior leaks into shared code.
 
 use super::*;
+use crate::core::mode_state::ModeLane;
 use crate::platform::paths;
 use crate::platform::paths::tests::{ENV_LOCK, EnvVarGuard};
 use crate::platform::prefs::UserPrefs;
@@ -1494,10 +1495,7 @@ fn scheduled_engine_state_persists_full_snapshot_and_preserves_identity_and_prof
             scheduled_engine_state(
                 messages.clone(),
                 ScheduledRunMode::Yolo,
-                ScheduledTokenAccounting::EngineCumulative {
-                    base_total_tokens: 40,
-                    engine_total_tokens: 12,
-                },
+                ScheduledTokenAccounting::PreservePersisted,
             ),
         )
         .expect("persist scheduled engine state");
@@ -1506,7 +1504,10 @@ fn scheduled_engine_state_persists_full_snapshot_and_preserves_identity_and_prof
     assert_eq!(persisted.metadata.title, before.metadata.title);
     assert_eq!(persisted.metadata.created_at, before.metadata.created_at);
     assert_eq!(persisted.metadata.message_count, messages.len());
-    assert_eq!(persisted.metadata.total_tokens, 52);
+    assert_eq!(
+        persisted.metadata.total_tokens,
+        before.metadata.total_tokens
+    );
     assert_eq!(persisted.metadata.model, "/engine-model");
     assert_eq!(
         persisted.metadata.workspace,
@@ -1525,13 +1526,16 @@ fn scheduled_engine_state_persists_full_snapshot_and_preserves_identity_and_prof
     let reloaded = reopen_store(&store).expect("reboot");
     assert_eq!(reloaded.scheduled_profile(&id), Some(expected_profile));
     let from_disk = reloaded.load(&id).expect("load persisted engine state");
-    assert_eq!(from_disk.metadata.total_tokens, 52);
+    assert_eq!(
+        from_disk.metadata.total_tokens,
+        before.metadata.total_tokens
+    );
     assert_eq!(from_disk.messages, persisted.messages);
     assert_eq!(from_disk.system_prompt, persisted.system_prompt);
 }
 
 #[test]
-fn scheduled_engine_token_accounting_preserves_updates_and_accumulates_across_restarts() {
+fn scheduled_engine_token_accounting_preserves_persisted_totals_across_restarts() {
     let (store, _g) = isolated_store();
     let scheduled = store
         .create_scheduled_run(scheduled_profile("task-token-accounting"))
@@ -1539,18 +1543,8 @@ fn scheduled_engine_token_accounting_preserves_updates_and_accumulates_across_re
     let id = scheduled.metadata.id.clone();
 
     store
-        .persist_scheduled_engine_state(
-            &id,
-            scheduled_engine_state(
-                vec![text_message("user", "first turn")],
-                ScheduledRunMode::Plan,
-                ScheduledTokenAccounting::EngineCumulative {
-                    base_total_tokens: 0,
-                    engine_total_tokens: 100,
-                },
-            ),
-        )
-        .expect("persist first engine snapshot");
+        .persist_scheduled_token_total(&id, 0, 100)
+        .expect("persist terminal token total");
     store
         .persist_scheduled_engine_state(
             &id,
@@ -1580,35 +1574,19 @@ fn scheduled_engine_token_accounting_preserves_updates_and_accumulates_across_re
             scheduled_engine_state(
                 vec![text_message("assistant", "later turn")],
                 ScheduledRunMode::Yolo,
-                ScheduledTokenAccounting::EngineCumulative {
-                    base_total_tokens: 100,
-                    engine_total_tokens: 25,
-                },
+                ScheduledTokenAccounting::PreservePersisted,
             ),
         )
         .expect("persist later engine snapshot");
-    reloaded
-        .persist_scheduled_engine_state(
-            &id,
-            scheduled_engine_state(
-                vec![text_message("assistant", "same engine next turn")],
-                ScheduledRunMode::Yolo,
-                ScheduledTokenAccounting::EngineCumulative {
-                    base_total_tokens: 100,
-                    engine_total_tokens: 40,
-                },
-            ),
-        )
-        .expect("persist cumulative same-engine snapshot");
 
     assert_eq!(
         reloaded
             .load(&id)
-            .expect("load accumulated total")
+            .expect("load preserved total")
             .metadata
             .total_tokens,
-        140,
-        "same-engine cumulative usage must not be added twice"
+        100,
+        "engine-state persistence must keep the durable token total"
     );
 }
 
@@ -1629,10 +1607,7 @@ fn scheduled_engine_state_entry_rejects_normal_chat_without_mutation() {
             scheduled_engine_state(
                 vec![text_message("user", "must not persist")],
                 ScheduledRunMode::Plan,
-                ScheduledTokenAccounting::EngineCumulative {
-                    base_total_tokens: 0,
-                    engine_total_tokens: 99,
-                },
+                ScheduledTokenAccounting::PreservePersisted,
             ),
         )
         .expect_err("normal chat must not use scheduled persistence");
@@ -5126,6 +5101,44 @@ fn delete_refuses_case_variant_sched_ids_without_a_record() {
                 .to_string()
                 .contains("Scheduled-run sessions are deleted through their automation"),
             "the refusal must be the automation-ownership error, not NotFound: {error:#}"
+        );
+    }
+}
+
+/// The case-variant legs of the remote-namespace gates: ids resolve to file
+/// names without case canonicalization, so on NTFS/APFS a `REMOTE-…` alias
+/// resolves to the same file as the reserved namespace. Every remote gate
+/// (save, delete, session_kind) must therefore classify the alias exactly
+/// like the canonical spelling — otherwise a hand-copied alias file both
+/// escapes the namespace guard and bricks the remote-control subsystem at
+/// startup via the collision probe.
+#[test]
+fn remote_namespace_gates_reject_case_variant_ids() {
+    let (store, _g) = isolated_store();
+    for id in ["REMOTE-ghost", "Remote-ghost", "rEmOtE-ghost"] {
+        let session = chat_model_session(id.to_owned());
+        let error = store
+            .save(&session)
+            .expect_err("a case-variant remote- id must never persist as a local Session");
+        assert!(
+            error.to_string().contains("RemoteProxy cannot be saved"),
+            "the refusal must be the remote-namespace error: {error:#}"
+        );
+        let error = store
+            .delete(id)
+            .expect_err("a case-variant remote- id must never delete through the local path");
+        assert!(
+            error.to_string().contains("RemoteProxy cannot be deleted"),
+            "the refusal must be the remote-namespace error: {error:#}"
+        );
+        let error = store
+            .session_kind(id)
+            .expect_err("a case-variant remote- id must classify as the reserved namespace");
+        assert!(
+            error
+                .to_string()
+                .contains("RemoteProxy record is unavailable"),
+            "the classification must be the reserved-namespace error: {error:#}"
         );
     }
 }

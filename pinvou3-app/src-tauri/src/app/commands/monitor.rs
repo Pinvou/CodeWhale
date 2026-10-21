@@ -2,6 +2,8 @@ use super::prelude::*;
 
 use crate::core::model_endpoint::LocalServerKind;
 
+use crate::features::monitor::VllmStatus;
+
 /// Monitor 视图完整数据。**按需采样**——前端只在监控页面 mount 时启 1s
 /// interval 调本 command，每次都重新跑 sample_all。GPU util 瞬时易错过推理
 /// 峰，前端维护 5 个值滑窗 max 弥补。
@@ -263,9 +265,7 @@ pub struct BackendStatus {
 pub async fn get_backend_status() -> Result<BackendStatus, String> {
     // Lightweight: 只 probe 当前 active model,不跑 nvidia-smi / RAM 采样。
     let vllm = crate::features::monitor::active_model_snapshot().await;
-    let vllm_online = vllm.as_ref().is_some_and(|v| {
-        v.health_status == "verified" && matches!(v.status, VllmStatus::Ready | VllmStatus::Busy)
-    });
+    let vllm_online = vllm.as_ref().is_some_and(VllmSnapshot::is_online);
     let max_model_len = vllm.as_ref().and_then(|v| v.max_model_len);
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

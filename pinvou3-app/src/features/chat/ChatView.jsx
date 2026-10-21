@@ -258,7 +258,6 @@ import {
 } from './work-scene-routes.js';
 import {
   createPersonalWorkbenchMessageMeta,
-  PERSONAL_WORKBENCH_SCENE_KEY,
   PERSONAL_WORKBENCH_TEMPLATES,
   findPersonalWorkbenchTemplateDraft,
   getPersonalWorkbenchTemplate,
@@ -266,6 +265,14 @@ import {
   isPersonalWorkbenchTemplateDraftForTemplate,
   shouldUsePersonalWorkbenchScene,
 } from './personal-workbench-scene.js';
+import {
+  DATA_VISUALIZATION_SCENE_KEY,
+  DOCUMENT_WRITING_SCENE_KEY,
+  PERSONAL_WORKBENCH_SCENE_KEY,
+  PPT_DESIGN_SCENE_KEY,
+  POSTER_SCENE_KEY,
+  pinvouSceneTag,
+} from './scene-registry.js';
 import { canPrepareSceneCapabilities, prepareSceneCapabilities, requiredCapabilitiesForMeta } from './scene-capabilities.js';
 import { consumeWelcomeOptIn, resolveSendCapabilityStatus, runSharedWelcomeOptIn } from './welcome-optin.js';
 import { invokeTauri } from '../../platform/tauri/client.js';
@@ -5882,7 +5889,7 @@ const openChatExternalUrl = (url) => {
       const SceneIcon = sceneDisplay && sceneDisplay.Icon;
       const [editing, setEditing] = useState(false);
       const [val, setVal] = useState(mentionSplit.text);
-      const [copied, copyToClipboard] = useCopyFlash(1200);
+      const [copied, copyToClipboard] = useCopyFlash();
       // Edit-resend keeps layer 2 of the feature gate: with the feature off
       // only the body is resent — the injection block is never re-injected.
       function commit() {

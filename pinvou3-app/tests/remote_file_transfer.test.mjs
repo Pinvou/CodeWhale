@@ -76,6 +76,48 @@ test('artifact download preserves ordered chunks and aborts malformed progress',
   assert.throws(() => validateRemoteFiles([]), /remote_attachment_count_invalid/);
 });
 
+test('downloads enforce the same single-file byte bound as uploads and abort on violation', async () => {
+  let aborts = 0;
+  const api = {
+    artifactDownloadBegin: async () => ({
+      transferId: 'download-oversize', chunkBytes: 4, totalBytes: 33 * 1024 * 1024,
+    }),
+    artifactDownloadChunk: async () => assert.fail('an over-limit begin must not request chunks'),
+    artifactDownloadAbort: async () => { aborts += 1; },
+  };
+  await assert.rejects(
+    downloadRemoteArtifact(api, { localSessionId: 'remote-one', remoteRef: 'ref-one' }, {
+      taskId: 'task-1', artifactId: 'artifact-1', mimeType: 'text/plain', displayName: 'big.bin',
+    }),
+    /remote_artifact_size_limit/,
+  );
+  assert.equal(aborts, 1);
+});
+
+test('a download whose chunks exceed the declared total stops before unbounded growth', async () => {
+  const chunk = 'AAAA'; // 3 decoded bytes per chunk; the stream keeps going past the declared total.
+  let calls = 0;
+  let aborts = 0;
+  const api = {
+    artifactDownloadBegin: async () => ({
+      transferId: 'download-lying-stream', chunkBytes: 3, totalBytes: 3,
+    }),
+    artifactDownloadChunk: async () => {
+      calls += 1;
+      return { chunkB64: chunk, chunkBytes: 3, completed: false, nextChunk: calls };
+    },
+    artifactDownloadAbort: async () => { aborts += 1; },
+  };
+  await assert.rejects(
+    downloadRemoteArtifact(api, { localSessionId: 'remote-one', remoteRef: 'ref-one' }, {
+      taskId: 'task-1', artifactId: 'artifact-1', mimeType: 'text/plain', displayName: 'lie.bin',
+    }),
+    /remote_artifact_size_limit/,
+  );
+  assert.equal(calls, 2, 'the second chunk crosses the declared total and must stop');
+  assert.equal(aborts, 1);
+});
+
 test('uncertain transfer results remain reconcilable and do not trigger destructive aborts', async () => {
   let uploadAborts = 0;
   const uploadApi = {
