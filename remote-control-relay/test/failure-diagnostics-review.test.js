@@ -125,15 +125,17 @@ test("an orphan access ledger cannot turn a lost material snapshot into a fresh 
   assert.equal(existsSync(store.path), false);
 });
 
-test("missing identity inventory with only metadata remaining rejects startup before creating files", t => {
-  const path = directory(t), metadataPath = join(path, "failure-diagnostic-metadata.json");
-  const bytes = JSON.stringify({ version: 1, audit: [], issues: {} });
-  writeFileSync(metadataPath, bytes);
-  assert.throws(() => new TelemetryStore(path, "review-missing-inventory-pepper"), /telemetry_storage_unavailable/);
-  assert.equal(existsSync(join(path, "devices.json")), false);
-  assert.equal(existsSync(join(path, "failure-diagnostic-reports.json")), false);
-  assert.equal(readFileSync(metadataPath, "utf8"), bytes);
-});
+for (const material of ['failure-diagnostic-metadata.json', 'failure-diagnostic-reports.json', 'retention-facts.json', 'retention-facts.initialized']) {
+  test(`missing identity inventory with only ${material} rejects startup before creating files`, t => {
+    const path = directory(t), materialPath = join(path, material);
+    const bytes = JSON.stringify({ preserve:'fixture-authority' });
+    writeFileSync(materialPath, bytes);
+    assert.throws(() => new TelemetryStore(path, "review-missing-inventory-pepper"), /telemetry_storage_unavailable/);
+    assert.equal(existsSync(join(path, "devices.json")), false);
+    assert.equal(existsSync(join(path, "behavior-deletion-tombstones.json")), false);
+    assert.equal(readFileSync(materialPath, "utf8"), bytes);
+  });
+}
 
 test("metadata migration interruption retains the old self-contained report and retries safely", t => {
   const path = directory(t), store = new FailureReportStore(path);

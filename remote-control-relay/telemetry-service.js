@@ -1,5 +1,13 @@
 import crypto from "node:crypto";
 import { DiagnosticError, FailureReportStore, diagnosticFingerprint, failureGroups, failureSamples } from "./failure-diagnostics.js";
+import { RetentionFacts, retentionFromEvents } from "./retention-store.js";
+import {
+  DAY_MS, STATS_TIMEZONE_OFFSET_MS, MIN_RELIABLE_SAMPLE,
+  boundedText, deletionSubjectHash, isCoreUserTask, isSuccessfulCoreUserTask,
+  normalizeUsageOccurredAt, statsDay,
+} from "./telemetry-primitives.js";
+import { atomicWriteJson, atomicWriteJsonLines, enforcePrivateFile, validDeviceInventory } from "./telemetry-storage.js";
+
 import { isIP } from "node:net";
 import {
   appendFileSync,
@@ -8,8 +16,6 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
-  renameSync,
-  writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -54,10 +60,8 @@ const RANGE_DAYS = new Map([
 ]);
 const ONLINE_WINDOW_MS = 5 * 60_000;
 const ADMIN_SESSION_MS = 12 * 60 * 60_000;
-const DAY_MS = 24 * 60 * 60_000;
 const HOUR_MS = 60 * 60_000;
 const REGION_REFRESH_MS = DAY_MS;
-const STATS_TIMEZONE_OFFSET_MS = 8 * 60 * 60_000;
 const DEFAULT_EVENT_RETENTION_MS = 35 * DAY_MS;
 const DEFAULT_MAX_EVENTS = 100_000;
 const DEFAULT_MAX_DEVICES = 10_000;
@@ -98,10 +102,6 @@ function safeEqual(a, b) {
 
 function randomId(prefix, bytes = 18) {
   return `${prefix}${crypto.randomBytes(bytes).toString("base64url")}`;
-}
-
-function boundedText(value, max = 128) {
-  return String(value || "").trim().slice(0, max);
 }
 
 function boundedCount(value) {
@@ -222,18 +222,6 @@ export function createIpRegionResolver(options = {}) {
   };
 }
 
-function statsDay(timestamp) {
-  const normalizedTimestamp = normalizeUsageOccurredAt(timestamp);
-  return Math.floor((normalizedTimestamp + STATS_TIMEZONE_OFFSET_MS) / DAY_MS);
-}
-
-function normalizeUsageOccurredAt(value) {
-  const occurredAt = Number(value);
-  if (!Number.isFinite(occurredAt) || occurredAt <= 0) return Number.NaN;
-  if (occurredAt >= 1_000_000_000_000) return occurredAt;
-  return occurredAt * 1_000;
-}
-
 function statsDayLabel(day) {
   return new Date(day * DAY_MS).toISOString().slice(0, 10);
 }
@@ -248,12 +236,6 @@ function installationBehaviorEvents(devices, behaviorEvents) {
     .map((device) => boundedText(device.device_id, 128))
     .filter(Boolean));
   return behaviorEvents.filter((event) => installationIds.has(eventIdentity(event)));
-}
-
-function isCoreUserTask(event, eventName) {
-  return event?.event_name === eventName
-    && event.initiator_type === "user"
-    && ["assistant", "code", "team"].includes(event.mode);
 }
 
 function attemptIdentityKey(event) {
@@ -624,7 +606,7 @@ function rate(part, total) {
 function successfulActiveIdentities(behaviorEvents, window) {
   const windowEvents = filteredBehaviorEvents(behaviorEvents, window);
   return new Set(windowEvents
-    .filter((event) => isCoreUserTask(event, "task_finished") && event.status === "success")
+    .filter(isSuccessfulCoreUserTask)
     .map(eventIdentity)
     .filter(Boolean));
 }
@@ -636,7 +618,6 @@ function intersectionSize(values, eligible) {
 }
 
 const EXPLICIT_VALUE_WINDOW_MS = 30 * 60_000;
-const MIN_RELIABLE_SAMPLE = 30;
 const MIN_PRIVACY_GROUP_SUBJECTS = 1;
 
 function reliableRate(part, total) {
@@ -779,43 +760,6 @@ function clipDailySubjectContributions(events) {
   };
 }
 
-function retentionMetric(usageEvents, behaviorEvents, horizon, now) {
-  const today = statsDay(now);
-  const cohorts = new Map();
-  for (const event of behaviorEvents) {
-    if (event.event_name !== "analytics_cohort_started") continue;
-    const identity = eventIdentity(event);
-    const day = statsDay(event.occurred_at);
-    if (!identity || day > today - horizon) continue;
-    if (!cohorts.has(identity) || day < cohorts.get(identity)) cohorts.set(identity, day);
-  }
-  const activity = new Map();
-  const addActivity = (identity, occurredAt) => {
-    if (!identity) return;
-    const bucket = activity.get(identity) || new Set();
-    bucket.add(statsDay(occurredAt));
-    activity.set(identity, bucket);
-  };
-  for (const event of behaviorEvents) {
-    if (event.event_name !== "task_finished"
-      || event.status !== "success"
-      || event.initiator_type !== "user"
-      || !["assistant", "code", "team"].includes(event.mode)) continue;
-    addActivity(eventIdentity(event), event.occurred_at);
-  }
-  let retained = 0;
-  for (const [identity, cohortDay] of cohorts) {
-    if (activity.get(identity)?.has(cohortDay + horizon)) retained += 1;
-  }
-  return {
-    horizon_days: horizon,
-    eligible_installations: cohorts.size,
-    retained_installations: retained,
-    retention_rate: reliableRate(retained, cohorts.size),
-    confidence: sampleConfidence(cohorts.size),
-  };
-}
-
 function buildVersionQuality(windowEvents) {
   const groups = new Map();
   for (const event of windowEvents) {
@@ -948,10 +892,7 @@ export function buildWeeklyExplicitValueMetric(behaviorEvents, now = Date.now())
       && event.rating === "positive";
   });
   const successfulTasks = uniqueAttempts(behaviorEvents.filter((event) => (
-    event.event_name === "task_finished"
-      && event.status === "success"
-      && event.initiator_type === "user"
-      && ["assistant", "code", "team"].includes(event.mode)
+    isSuccessfulCoreUserTask(event)
       && Number(event.occurred_at) >= week.start
       && Number(event.occurred_at) <= week.end
   )), "task_finished");
@@ -1097,7 +1038,7 @@ function behaviorToolType(value) {
   return ["skill", "mcp", "cli", "builtin", "custom", "unknown"].includes(type) ? type : "unknown";
 }
 
-export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, range = "30", now = Date.now(), pipelineEvents = []) {
+export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, range = "30", now = Date.now(), pipelineEvents = [], retentionFacts = null, metricVersionStartedAt = null) {
   behaviorEvents = installationBehaviorEvents(devices, behaviorEvents);
   const window = rangeWindow(range, now);
   const activeByDay = activeIdentityByDay(devices, usageEvents, behaviorEvents, window);
@@ -1203,11 +1144,7 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
     if (event.error_category) groups.set(event.error_category, (groups.get(event.error_category) || 0) + 1);
     return groups;
   }, new Map())].sort((left, right) => right[1] - left[1]));
-  const retention = {
-    d1: retentionMetric(usageEvents, behaviorEvents, 1, now),
-    d7: retentionMetric(usageEvents, behaviorEvents, 7, now),
-    d30: retentionMetric(usageEvents, behaviorEvents, 30, now),
-  };
+  const retention = retentionFacts || retentionFromEvents(devices, behaviorEvents, now);
   const voiceFunnel = buildVoiceFunnel(windowEvents, taskFinished);
   const activationFunnel = buildActivationFunnel(behaviorEvents, window, now);
   const versionQuality = buildVersionQuality(windowEvents);
@@ -1275,8 +1212,8 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
     range: window.range,
     subject: "installation",
     timezone: "Asia/Shanghai",
-    metric_version: "behavior-v1.4",
-    metric_version_started_at: Date.parse("2026-09-11T00:00:00+08:00"),
+    metric_version: "behavior-v1.5",
+    metric_version_started_at: metricVersionStartedAt,
     data_status: dataStatus,
     latest_event_received_at: latestReceivedAt || null,
     active_installations: activeTotal,
@@ -1837,43 +1774,6 @@ function loadJson(path, fallback, validate) {
   }
 }
 
-function validDeviceInventory(saved) {
-  if (!saved || typeof saved !== "object" || Array.isArray(saved) || !Array.isArray(saved.devices)
-    || (saved.deletion_ledger_required !== undefined && saved.deletion_ledger_required !== true)) return false;
-  const ids = new Set(), hardwareHashes = new Set();
-  return saved.devices.every(device => {
-    if (!device || typeof device !== "object" || Array.isArray(device)
-      || ![device.device_id, device.hardware_hash, device.device_token].every(value => typeof value === "string" && value.length > 0)
-      || ids.has(device.device_id) || hardwareHashes.has(device.hardware_hash)) return false;
-    ids.add(device.device_id); hardwareHashes.add(device.hardware_hash);
-    return true;
-  });
-}
-
-function atomicWriteJson(path, value) {
-  const temporary = `${path}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-  renameSync(temporary, path);
-  enforcePrivateFile(path);
-}
-
-function atomicWriteJsonLines(path, values) {
-  const temporary = `${path}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
-  const content = values.length
-    ? `${values.map((value) => JSON.stringify(value)).join("\n")}\n`
-    : "";
-  writeFileSync(temporary, content, { mode: 0o600, flag: "wx" });
-  renameSync(temporary, path);
-  enforcePrivateFile(path);
-}
-
-function enforcePrivateFile(path) {
-  const metadata = lstatSync(path);
-  if (metadata.isSymbolicLink() || !metadata.isFile()) {
-    throw new Error("unsafe telemetry storage file");
-  }
-  chmodSync(path, 0o600);
-}
 
 export class TelemetryStore {
   constructor(dataDir, pepper, options = {}) {
@@ -1932,12 +1832,13 @@ export class TelemetryStore {
     );
 
     // Absence is only a fresh deployment when no dependent inventory exists.
-    // Unknown/partial identity state must never authorize report pruning or
+    // Unknown/partial identity state must never authorize report/retention pruning or
     // overwrite the evidence needed for an operator to recover the store.
     let saved = loadJson(this.devicesPath, null, validDeviceInventory);
     if (saved === null && [this.eventsPath, this.behaviorEventsPath, this.behaviorPipelinePath,
       this.deletionTombstonesPath, join(dataDir, "failure-diagnostic-reports.json"),
-      join(dataDir, "failure-diagnostic-metadata.json")].some(path => existsSync(path))) {
+      join(dataDir, "failure-diagnostic-metadata.json"), join(dataDir, "retention-facts.json"),
+      join(dataDir, "retention-facts.initialized")].some(path => existsSync(path))) {
       console.error("[telemetry-error] persistence_read_failed");
       throw new TelemetryHttpError(503, "telemetry_storage_unavailable");
     }
@@ -1952,6 +1853,7 @@ export class TelemetryStore {
     let restoredTimestampDevice = false;
     const loadedAt = Date.now();
     for (const device of saved?.devices ?? []) {
+
       if (this.removedSubjectHashes.has(this.deletionSubjectHash(device.device_id))) {
         restoredDeletedDevice = true;
         continue;
@@ -1990,8 +1892,10 @@ export class TelemetryStore {
     if (saved.deletion_ledger_required !== true) this.saveNow();
     this.failureReports = new FailureReportStore(dataDir);
     this.rebuildDeletionIndexes();
+    this.retentionFacts = new RetentionFacts(dataDir, loadedAt);
     this.loadEvents();
     this.loadBehaviorEvents();
+    this.persistRetentionFacts(loadedAt);
     this.loadBehaviorPipelineEvents();
     this.finishPendingDeletions();
     // Completed tombstones must also defeat a restored pre-deletion backup.
@@ -2002,9 +1906,7 @@ export class TelemetryStore {
   }
 
   deletionSubjectHash(deviceId) {
-    return crypto.createHmac("sha256", this.pepper)
-      .update(`deletion-subject:${boundedText(deviceId, 96)}`)
-      .digest("hex");
+    return deletionSubjectHash(deviceId, this.pepper);
   }
 
   deletionTokenHash(token) {
@@ -2024,6 +1926,7 @@ export class TelemetryStore {
     }
     this.deletionLedgerPersisted = saved !== null;
     this.deletionTombstones = (saved?.records ?? [])
+
       .map((record) => ({
         ...record,
         removal_reason: record.removal_reason
@@ -2085,6 +1988,9 @@ export class TelemetryStore {
       this.deletionTombstonesPath,
       join(this.dataDir, "failure-diagnostic-reports.json"),
       join(this.dataDir, "failure-diagnostic-metadata.json"),
+      this.retentionFacts.path,
+      this.retentionFacts.marker,
+
     ]) {
       if (existsSync(path)) enforcePrivateFile(path);
     }
@@ -2093,6 +1999,26 @@ export class TelemetryStore {
   subjectWasDeleted(deviceId) {
     const subjectHash = this.deletionSubjectHash(deviceId);
     return this.removedSubjectHashes.has(subjectHash);
+  }
+
+  persistRetentionFacts(now = Date.now(), events = this.behaviorEvents) {
+    const devices = [...this.devices.values()].filter(device => !this.subjectWasDeleted(device.device_id));
+    try {
+      this.retentionFacts.observe(events, devices, now, id => this.subjectWasDeleted(id));
+    } catch {
+      console.error("[telemetry-error] retention_facts_persist_failed");
+      throw new TelemetryHttpError(503, "retention_storage_unavailable");
+    }
+    this.flushRetentionFacts();
+  }
+
+  flushRetentionFacts() {
+    try {
+      this.retentionFacts.flush();
+    } catch {
+      console.error("[telemetry-error] retention_facts_persist_failed");
+      throw new TelemetryHttpError(503, "retention_storage_unavailable");
+    }
   }
 
   credentialRemovalReason(token) {
@@ -2432,6 +2358,8 @@ export class TelemetryStore {
   }
 
   compactBehaviorEvents(now = Date.now(), force = false) {
+    // Persist before either age- or capacity-based raw event removal.
+    this.persistRetentionFacts(now);
     const cutoff = now - this.eventRetentionMs;
     let retained = this.behaviorEvents.filter((event) => Number(event.received_at || event.occurred_at) >= cutoff);
     if (retained.length > this.maxEvents) retained = retained.slice(-this.eventCompactionTarget);
@@ -2521,6 +2449,9 @@ export class TelemetryStore {
       results: [],
     };
     this.compactExpiredEventsIfDue(now);
+    // A retry after raw append succeeded must persist pending facts before
+    // acknowledging a duplicate, even when periodic compaction is not due.
+    this.flushRetentionFacts();
     if (this.eventRateLimited(device.device_id, inputEvents.length, now)) {
       response.results = inputEvents.map((raw) => ({
         event_id: boundedText(raw?.event_id, 96),
@@ -2619,6 +2550,15 @@ export class TelemetryStore {
       for (const event of accepted) {
         this.behaviorEventIds.add(event.event_id);
         this.behaviorEvents.push(event);
+      }
+      try {
+        this.persistRetentionFacts(now, accepted);
+      } catch {
+        for (const index of acceptedResultIndexes) {
+          response.results[index] = { ...response.results[index], status: "retryable", reason_code: "storage_unavailable" };
+        }
+        this.recordBehaviorPipelineResponse(response, now, device.device_id);
+        return response;
       }
       if (this.behaviorEvents.length > this.maxEvents) this.compactBehaviorEvents(now, true);
       device.last_seen_at = now;
@@ -2788,6 +2728,7 @@ export class TelemetryStore {
     this.deletionTombstones.push(tombstone);
     this.saveDeletionTombstones();
     this.finishPendingDeletions();
+
     return this.publicDeletionResponse(tombstone);
   }
 
@@ -2800,6 +2741,9 @@ export class TelemetryStore {
           this.devices.delete(id); this.devicesByHardwareHash.delete(device.hardware_hash); this.eventRateBuckets.delete(id);
         }
       }
+      // Retention is another durable subject store: never complete a deletion
+      // until its minimal facts are gone, including after a failed attempt.
+      this.persistRetentionFacts();
       this.events = this.events.filter(event => !this.subjectWasDeleted(event.device_id));
       this.behaviorEvents = this.behaviorEvents.filter(event => !this.subjectWasDeleted(event.device_id));
       this.behaviorPipelineEvents = this.behaviorPipelineEvents.filter(event => !this.subjectWasDeleted(event.device_id));
@@ -2851,13 +2795,17 @@ export class TelemetryStore {
 
   behaviorOverview(range) {
     if (this.compactExpiredEventsIfDue()) this.rebuildUsageCounters();
+    const now = Date.now();
+    this.persistRetentionFacts(now);
     return buildBehaviorOverview(
       [...this.devices.values()],
       this.events,
       this.behaviorEvents,
       range,
-      Date.now(),
+      now,
       this.behaviorPipelineEvents,
+      this.retentionFacts.metrics(now),
+      this.retentionFacts.metricVersionStartedAt,
     );
   }
 

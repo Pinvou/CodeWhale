@@ -82,7 +82,7 @@ function pinvouSharedtauriMain() {
       console.warn("[platform] capability detection failed", error);
       state.platformCapabilities = Object.assign({}, state.platformCapabilities, { loaded: false, desktopRemoteControl: false });
     }
-    notify(["platform"]);
+    notify();
     if (state.platformCapabilities.desktopRemoteControl === true && desktopRemoteControlFeature) {
       desktopRemoteControlFeature.controllerStatus().catch(function () {});
     }
@@ -1737,17 +1737,16 @@ function copySubscriptionStateObject(source) { return pinvouSharedtauriMain().co
       ancestors.delete(value);
     }
   }
-  // Slice caches are invalidated by the domains that actually changed. The
-  // legacy notify() path still invalidates every domain, so features can move
-  // to precise publication one audited boundary at a time without risking a
-  // stale snapshot in untouched call sites.
-  var subscriptionSliceRevisions = Object.create(null);
+  // Slice caches are invalidated by the single publication revision: #727
+  // replaced per-domain precise publication with one host-snapshot publish
+  // per notify, so every domain advances together.
   var subscriptionSliceCache = Object.create(null);
+  let subscriptionSliceRevision = 0;
   function subscriptionStateSlice(domain) {
     var fields = STATE_SLICE_FIELDS[domain];
     if (!fields) throw new Error("Unknown Tauri bridge state slice: " + domain);
     var cached = subscriptionSliceCache[domain];
-    var revision = subscriptionSliceRevisions[domain] || 0;
+    var revision = subscriptionSliceRevision;
     if (cached && cached.revision === revision) return cached.snapshot;
     var current = {};
     var source = domain === "desktopRemoteControl" ? state.desktopRemoteControl : state;
@@ -1787,39 +1786,16 @@ function copySubscriptionStateObject(source) { return pinvouSharedtauriMain().co
   // loaders therefore used to expose a succession of partial snapshots and
   // re-render the root once per completed IPC. Keep their state ownership and
   // parallelism, but publish the initialized state as one coherent revision.
-  var startupNotificationBatching = false;
-  function invalidatedSubscriptionDomains(changedDomains) {
-    var domains = changedDomains === undefined ? Object.keys(STATE_SLICE_FIELDS) : changedDomains;
-    if (!Array.isArray(domains) || domains.length === 0) {
-      throw new Error("Tauri bridge notify domains must be a non-empty array");
-    }
-    var invalidated = Object.create(null);
-    for (var i = 0; i < domains.length; i++) {
-      var domain = domains[i];
-      if (!STATE_SLICE_FIELDS[domain]) {
-        throw new Error("Unknown Tauri bridge notify domain: " + domain);
-      }
-      invalidated[domain] = true;
-    }
-    // chat busy is projected into sessions.sessionBusy. Any precise chat
-    // publication must therefore refresh the sessions slice as well.
-    if (invalidated.chat) invalidated.sessions = true;
-    return Object.keys(invalidated);
-  }
-  function notify(changedDomains) {
+  let startupNotificationBatching = false;
+  let refreshActiveStreamRender = null;
+  function notify() {
     if (suppressNotify || startupNotificationBatching) return;
-    var invalidatedDomains = invalidatedSubscriptionDomains(changedDomains);
-    if (invalidatedDomains.indexOf("sessions") >= 0) {
-      // 会话列表「工作中」指示:active 取活动工作集 state.busy,其余取各自 buffer.busy
-      state.sessionBusy = {};
-      for (var id in sessionStates) state.sessionBusy[id] = !!sessionStates[id].busy;
-      if (state.activeSessionId) state.sessionBusy[state.activeSessionId] = !!state.busy;
-    }
-    for (var domainIndex = 0; domainIndex < invalidatedDomains.length; domainIndex++) {
-      var invalidatedDomain = invalidatedDomains[domainIndex];
-      subscriptionSliceRevisions[invalidatedDomain] =
-        (subscriptionSliceRevisions[invalidatedDomain] || 0) + 1;
-    }
+    if (refreshActiveStreamRender) refreshActiveStreamRender();
+    // 会话列表「工作中」指示:active 取活动工作集 state.busy,其余取各自 buffer.busy
+    state.sessionBusy = {};
+    for (const id in sessionStates) state.sessionBusy[id] = !!sessionStates[id].busy;
+    if (state.activeSessionId) state.sessionBusy[state.activeSessionId] = !!state.busy;
+    subscriptionSliceRevision += 1;
     // Membership and state are fixed when a round is queued. Subscribe or
     // unsubscribe during a callback affects only rounds queued afterwards.
     var members = subscribers.slice();
@@ -1842,9 +1818,6 @@ function copySubscriptionStateObject(source) { return pinvouSharedtauriMain().co
     } finally {
       notificationDispatching = false;
     }
-  }
-  function notifyDomains(domains) {
-    notify(domains);
   }
   function subscribe(snapshot, callback) {
     var subscriber = { snapshot: snapshot, callback: callback };
@@ -2371,8 +2344,9 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
     get toolMeta() { return toolMeta; },
     set toolMeta(value) { toolMeta = value; },
   });
+  refreshActiveStreamRender = chatEventsFeature.refreshActiveStreamRender;
 
-  var monitorFeature = installBridgeFeature("monitor", { state: state, notify: notify, notifyDomains: notifyDomains, invoke: invoke, bt: bt, safeConsoleInfo: safeConsoleInfo, sessionStates: sessionStates });
+  var monitorFeature = installBridgeFeature("monitor", { state: state, notify: notify, invoke: invoke, bt: bt, safeConsoleInfo: safeConsoleInfo, sessionStates: sessionStates });
   var startMonitorPolling = monitorFeature.startMonitorPolling;
   var stopMonitorPolling = monitorFeature.stopMonitorPolling;
   var clearMonitorStats = monitorFeature.clearMonitorStats;

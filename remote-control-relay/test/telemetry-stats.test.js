@@ -1506,6 +1506,11 @@ test("voice funnel operations and successful attempts are isolated by installati
 test("P1 dashboard metrics cover retention funnels version quality and confidence", () => {
   const now = at("2026-08-12T12:00:00");
   const behaviorEvents = [
+    ...[
+      ["retained_d1", "2026-08-10T08:00:00"],
+      ["retained_d7", "2026-08-04T08:00:00"],
+      ["retained_d30", "2026-07-13T08:00:00"],
+    ].map(([identity_id, time]) => ({ event_id: `first_${identity_id}`, attempt_id: `first_${identity_id}`, event_name: "task_finished", status: "success", mode: "assistant", initiator_type: "user", identity_id, occurred_at: at(time) })),
     { event_id: "cohort_d1", event_name: "analytics_cohort_started", identity_id: "retained_d1", occurred_at: at("2026-08-10T08:00:00") },
     { event_id: "opened_only", event_name: "app_opened", identity_id: "not_retained", occurred_at: at("2026-08-11T08:00:00") },
     { event_id: "active_d1", event_name: "task_finished", attempt_id: "retention_attempt_d1", mode: "assistant", initiator_type: "user", status: "success", identity_id: "retained_d1", occurred_at: at("2026-08-11T08:00:00") },
@@ -1530,7 +1535,11 @@ test("P1 dashboard metrics cover retention funnels version quality and confidenc
     );
   }
   const overview = buildBehaviorOverview(installationDevicesFor(behaviorEvents), [], behaviorEvents, "30", now);
-  assert.deepEqual(overview.retention.d1, { horizon_days: 1, eligible_installations: 3, retained_installations: 1, retention_rate: null, confidence: "low" });
+  assert.equal(overview.retention.d1.eligible_installations, 3);
+  assert.equal(overview.retention.d1.retained_installations, 1);
+  assert.equal(overview.retention.d1.retention_rate, null);
+  assert.equal(overview.retention.d1.confidence, "low");
+  assert.equal(overview.retention.d1.basis, "first_success_beijing_day");
   assert.equal(overview.retention.d7.retained_installations, 1);
   assert.equal(overview.retention.d30.retained_installations, 1);
   assert.equal(overview.funnels.voice.entry_clicked, 1);
@@ -1771,14 +1780,24 @@ test("legacy behavior files are rewritten without raw tool or model aliases", ()
   const privateTool = "customer-private-tool-alias";
   const privateModel = "customer-private-model-alias";
   try {
-    // This fixture has an authoritative empty registry, rather than lost
-    // identity storage beside existing event history.
-    writeFileSync(join(dataDir, "devices.json"), JSON.stringify({version:2, devices:[]}));
+    const inventory = new TelemetryStore(dataDir, "test-device-pepper-at-least-24-chars");
+    let registered;
+    try {
+      registered = ["legacy", "xai", "local"].map(name => inventory.register({
+        hardware_claim: `fixture-legacy-alias-${name}`,
+        registration_secret: `fixture-registration-secret-${name}-at-least-32`,
+        hardware_source: "installation_id",
+      }));
+      inventory.saveNow();
+    } finally {
+      clearTimeout(inventory.saveTimer);
+    }
+
     writeFileSync(join(dataDir, "behavior-events.jsonl"), [
-      JSON.stringify({ event_id: "legacy_tool_event_0001", event_name: "tool_call_completed", device_id: "legacy_device", tool_name: privateTool, tool_type: "custom", success: true, occurred_at: Date.now(), received_at: Date.now() }),
-      JSON.stringify({ event_id: "legacy_model_event_0001", event_name: "model_used", device_id: "legacy_device", provider_name: "private-provider", model_name: privateModel, occurred_at: Date.now(), received_at: Date.now() }),
-      JSON.stringify({ event_id: "xai_model_event_0001", event_name: "model_used", device_id: "xai_device", provider_key: "xai", model_key: "grok", occurred_at: Date.now(), received_at: Date.now() }),
-      JSON.stringify({ event_id: "local_model_event_0001", event_name: "model_used", device_id: "local_device", provider_key: "local", model_key: "qwen", occurred_at: Date.now(), received_at: Date.now() }),
+      JSON.stringify({ event_id: "legacy_tool_event_0001", event_name: "tool_call_completed", device_id: registered[0].device_id, tool_name: privateTool, tool_type: "custom", success: true, occurred_at: Date.now(), received_at: Date.now() }),
+      JSON.stringify({ event_id: "legacy_model_event_0001", event_name: "model_used", device_id: registered[0].device_id, provider_name: "private-provider", model_name: privateModel, occurred_at: Date.now(), received_at: Date.now() }),
+      JSON.stringify({ event_id: "xai_model_event_0001", event_name: "model_used", device_id: registered[1].device_id, provider_key: "xai", model_key: "grok", occurred_at: Date.now(), received_at: Date.now() }),
+      JSON.stringify({ event_id: "local_model_event_0001", event_name: "model_used", device_id: registered[2].device_id, provider_key: "local", model_key: "qwen", occurred_at: Date.now(), received_at: Date.now() }),
     ].join("\n") + "\n");
     const store = new TelemetryStore(dataDir, "test-device-pepper-at-least-24-chars");
     assert.equal(store.behaviorEvents[0].tool_key, "custom");
