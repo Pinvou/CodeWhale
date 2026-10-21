@@ -284,6 +284,35 @@ test('normalizeLoopbackEndpoint：规范化形态稳定', () => {
   assert.equal(normalizeLoopbackEndpoint('http://LOCALHOST:11434/v1'), 'http://localhost:11434/v1');
   assert.equal(normalizeLoopbackEndpoint('http://[::1]:11434/v1'), 'http://[::1]:11434/v1');
   assert.equal(normalizeLoopbackEndpoint('http://127.0.0.1:8000'), 'http://127.0.0.1:8000');
+  // query 原样参与身份（十一轮评审 P2）；fragment 不发往服务端，不参与。
+  assert.equal(
+    normalizeLoopbackEndpoint('http://127.0.0.1:8000/v1?tenant=a'),
+    'http://127.0.0.1:8000/v1?tenant=a'
+  );
+  assert.equal(normalizeLoopbackEndpoint('http://127.0.0.1:8000/v1#f'), 'http://127.0.0.1:8000/v1');
   assert.equal(normalizeLoopbackEndpoint(null), null);
   assert.equal(normalizeLoopbackEndpoint(42), null);
+});
+
+test('findLinkedRowsForEndpoint：query 不同的端点互不代办（十一轮评审 P2）', () => {
+  // 登记校验与探测 URL（Rust endpoint_models_url）都保留 query，vLLM 等服务
+  // 靠它路由租户，所以 `?tenant=a` 与 `?tenant=b` 是两份独立配置。接入复用
+  // （linkExternal 取 [0] 当 existingId）与移除回收（confirmRemove 的
+  // linkedRows 全部 deleteModel）都走本函数：静默合并会顶掉/删掉另一份。
+  const rows = [
+    { id: 'row-a', model: 'qwen3', base_url: 'http://127.0.0.1:8000/v1?tenant=a' },
+    { id: 'row-b', model: 'qwen3', base_url: 'http://127.0.0.1:8000/v1?tenant=b' },
+  ];
+  // 从 b 接入只复用 b 自己的行，不得顶掉 a 的配置；从 a 接入同理（回收侧
+  // 同一调用形状：回收 a 的记录不得把 b 的行交给 deleteModel）。
+  assert.deepEqual(
+    findLinkedRowsForEndpoint(rows, 'http://127.0.0.1:8000/v1?tenant=b', 'qwen3').map((r) => r.id),
+    ['row-b']
+  );
+  assert.deepEqual(
+    findLinkedRowsForEndpoint(rows, 'http://127.0.0.1:8000/v1?tenant=a', 'qwen3').map((r) => r.id),
+    ['row-a']
+  );
+  // 不带 query 的目标是第三种身份，谁都不匹配——宁漏不误删。
+  assert.deepEqual(findLinkedRowsForEndpoint(rows, 'http://127.0.0.1:8000/v1', 'qwen3'), []);
 });
