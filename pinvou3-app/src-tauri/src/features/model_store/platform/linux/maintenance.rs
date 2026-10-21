@@ -704,13 +704,16 @@ mod tests {
                 }
                 json!({"capabilities":capabilities})
             }
+            ("GET", "/v1/status") => {
+                json!({"service":"cmsd","gateway":"127.0.0.1:18801"})
+            }
             ("GET", "/v1/models") => {
                 let bindings: BTreeMap<_, _> = state
                     .logical_card
                     .as_ref()
                     .map(|logical| BTreeMap::from([(logical.as_str(), "model-a")]))
                     .unwrap_or_default();
-                json!({"store_bindings":bindings,"models":if state.present { vec![json!({"card":"model-a","managed":state.owned,"can_adopt":state.adoptable,"can_reserve_uninstall":true,"status":if state.running {"running"} else {state.status_override.as_deref().unwrap_or("stopped")}})] } else {vec![]}})
+                json!({"store_bindings":bindings,"models":if state.present { vec![json!({"card":"model-a","model_id":"Fixture-Model-A","managed":state.owned,"can_adopt":state.adoptable,"can_reserve_uninstall":true,"status":if state.running {"running"} else {state.status_override.as_deref().unwrap_or("stopped")}})] } else {vec![]}})
             }
             ("GET", "/v1/tasks") => {
                 let mut tasks: Vec<_> = state.tasks.values().cloned().collect();
@@ -973,7 +976,15 @@ mod tests {
                 .exists()
         );
         let result = delegate::enable("model-a", &mut |_| {}, &|| false).unwrap();
-        assert!(matches!(result, delegate::DelegateOutcome::Enabled { .. }));
+        let delegate::DelegateOutcome::Enabled {
+            endpoint_url,
+            endpoint_model,
+        } = result
+        else {
+            panic!("explicit adoption must enable the requested fixture model");
+        };
+        assert_eq!(endpoint_url, "http://127.0.0.1:18801/v1/chat/completions");
+        assert_eq!(endpoint_model, "Fixture-Model-A");
         assert!(fixture.state.lock().unwrap().owned);
         assert!(Client::connect().unwrap().manages_card("model-a").unwrap());
         assert!(
