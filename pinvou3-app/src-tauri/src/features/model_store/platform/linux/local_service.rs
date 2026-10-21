@@ -36,7 +36,9 @@
 //! 权限只会让「界面看到的状态」和「cmsd 看到的状态」分叉。
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::fs::{
+    FileTypeExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _,
+};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -60,16 +62,143 @@ const IO_TIMEOUT: Duration = Duration::from_secs(30);
 /// 单任务详情带的日志行数上限（末尾 N 行）。
 const TASK_LOG_TAIL: usize = 500;
 
-/// 监听句柄。`shutdown()` 幂等：置标志、用一个空连接唤醒 accept、join 掉
-/// 接受线程、删掉 sock 文件；Drop 走同一条路。两条路都跑过一遍之后，
+/// Pin the filesystem entry while inspecting it. A live socket descriptor is
+/// a different inode; an O_PATH fd keeps this pathname's inode from being reused
+/// after an unlink. This read-only handle never removes anything on Drop.
+fn socket_entry(path: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
+    let entry = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+    {
+        Ok(entry) => entry,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let pinned = entry.metadata()?;
+    let current = std::fs::symlink_metadata(path)?;
+    // SAFETY: geteuid reads the current process identity.
+    if !pinned.file_type().is_socket()
+        || pinned.uid() != unsafe { libc::geteuid() }
+        || !current.file_type().is_socket()
+        || (current.dev(), current.ino(), current.uid())
+            != (pinned.dev(), pinned.ino(), pinned.uid())
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "store endpoint is not the same owned Unix socket; original path retained",
+        ));
+    }
+    Ok(Some(entry))
+}
+
+/// Preserve a conflicting path or live/busy endpoint. Only two explicit stale
+/// observations of the same pinned Unix socket authorize removing that entry.
+fn prepare_socket(path: &std::path::Path) -> std::io::Result<()> {
+    let Some(entry) = socket_entry(path)? else {
+        return Ok(());
+    };
+    let before = entry.metadata()?;
+    for attempt in 0..2 {
+        match crate::platform::os::local_socket::connect_timeout(path, Duration::from_millis(200)) {
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AddrInUse,
+                    "store socket has an active listener; original endpoint retained",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if socket_entry(path)?.is_none() {
+                    return Ok(());
+                }
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AddrInUse,
+                    "store socket changed during probe; original endpoint retained",
+                ));
+            }
+            Err(error) => return Err(error),
+        }
+        if attempt == 0 {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    let Some(current) = socket_entry(path)? else {
+        return Ok(());
+    };
+    let after = current.metadata()?;
+    if (before.dev(), before.ino(), before.uid()) != (after.dev(), after.ino(), after.uid()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            "store socket inode changed during probe; original endpoint retained",
+        ));
+    }
+    // `entry` and `current` remain open through this unlink.
+    std::fs::remove_file(path)
+}
+
+/// Only the exact socket entry published by this listener may be cleaned up.
+/// Keep the same guard during partial construction and normal shutdown.
+struct OwnedSocketPath {
+    path: PathBuf,
+    entry: std::fs::File,
+    cleanup_attempted: AtomicBool,
+}
+
+impl OwnedSocketPath {
+    fn capture(path: PathBuf) -> std::io::Result<Self> {
+        let entry = socket_entry(&path)?.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "published store socket identity unavailable",
+            )
+        })?;
+        Ok(Self {
+            path,
+            entry,
+            cleanup_attempted: AtomicBool::new(false),
+        })
+    }
+
+    fn remove_if_owned(&self) {
+        // Explicit shutdown and field Drop share one cleanup attempt. Once our
+        // entry is removed, later pathname/inode reuse must not authorize more.
+        if self.cleanup_attempted.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let Ok(pinned) = self.entry.metadata() else {
+            return;
+        };
+        // SAFETY: geteuid reads the current process identity.
+        if pinned.uid() != unsafe { libc::geteuid() } {
+            return;
+        }
+        if std::fs::symlink_metadata(&self.path).is_ok_and(|metadata| {
+            metadata.file_type().is_socket()
+                && (metadata.dev(), metadata.ino(), metadata.uid())
+                    == (pinned.dev(), pinned.ino(), pinned.uid())
+        }) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+impl Drop for OwnedSocketPath {
+    fn drop(&mut self) {
+        self.remove_if_owned();
+    }
+}
+
+/// 监听句柄。`shutdown()` 幂等：置标志、join 掉接受线程，再清理自己发布的
+/// 同一 socket；Drop 走同一条路。两条路都跑过一遍之后，
 /// 「fd 泄漏 / 僵尸线程」在构造上就不成立：
 /// - accept 线程：shutdown 返回时已被 join，必然死透；
 /// - 连接线程：每个请求处理完即终（应答写完、流 drop），最坏被 30 秒 IO
 ///   超时兜底，不持有任何句柄；
-/// - sock 文件：启动时清掉上次的残留（活监听者除外，那直接报错），退出时
-///   由 shutdown 删除。
+/// - sock 文件：启动只清理明确的同账号 stale socket；退出只删除本监听者
+///   发布的同一文件，替换后的普通文件、链接和其他端点保持原样。
 pub struct LocalService {
-    sock_path: PathBuf,
+    socket_path: OwnedSocketPath,
     shutdown: Arc<AtomicBool>,
     accept_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     stopped: AtomicBool,
@@ -86,31 +215,22 @@ impl LocalService {
         if let Some(parent) = sock_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        if sock_path.exists() {
-            // 上次异常退出留下的旧 sock 文件。能 connect 上说明真有活着的
-            // 监听者（比如第二个应用实例）——那不能抢，报错让调用方记日志；
-            // 连不上就是死残留，删掉重绑。socket 文件不是数据，删了无损。
-            if UnixStream::connect(&sock_path).is_ok() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AddrInUse,
-                    format!("{} 上已有活着的监听者，不重复绑定", sock_path.display()),
-                ));
-            }
-            let _ = std::fs::remove_file(&sock_path);
-        }
+        prepare_socket(&sock_path)?;
         let listener = UnixListener::bind(&sock_path)?;
+        let socket_path = OwnedSocketPath::capture(sock_path)?;
+        listener.set_nonblocking(true)?;
         // 0600：本机同用户语义，与 cmsd socket 同级。同机其它用户不该能往
         // 这里灌下载任务——socket 一开放，等于把「以本用户身份跑卡片脚本」
         // 的入口交了出去。
-        std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(&socket_path.path, std::fs::Permissions::from_mode(0o600))?;
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&shutdown);
-        let accept_thread = std::thread::spawn(move || {
-            accept_loop(listener, service, test_mode, flag);
-        });
+        let accept_thread = std::thread::Builder::new()
+            .name("pinvou-model-store".into())
+            .spawn(move || accept_loop(listener, service, test_mode, flag))?;
         Ok(Self {
-            sock_path,
+            socket_path,
             shutdown,
             accept_thread: Mutex::new(Some(accept_thread)),
             stopped: AtomicBool::new(false),
@@ -123,13 +243,12 @@ impl LocalService {
             return;
         }
         self.shutdown.store(true, Ordering::SeqCst);
-        // accept 在阻塞等连接：用一个空连接把它唤醒，它看到标志位自然退出。
-        // 连不上（比如监听者自己已经没了）也无所谓，join 照样收得住。
-        let _ = UnixStream::connect(&self.sock_path);
+        // The owned listener polls the flag. Its pathname may have disappeared
+        // or been replaced; shutdown must not connect to that replacement.
         if let Some(thread) = self.accept_thread.lock().take() {
             let _ = thread.join();
         }
-        let _ = std::fs::remove_file(&self.sock_path);
+        self.socket_path.remove_if_owned();
     }
 }
 
@@ -145,24 +264,21 @@ fn accept_loop(
     test_mode: bool,
     shutdown: Arc<AtomicBool>,
 ) {
-    for stream in listener.incoming() {
-        if shutdown.load(Ordering::SeqCst) {
-            break;
-        }
-        let Ok(stream) = stream else {
-            // 临时性接受失败（比如被信号打断）：不是关停就继续听
-            if shutdown.load(Ordering::SeqCst) {
-                break;
+    while !shutdown.load(Ordering::SeqCst) {
+        let stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
             }
-            continue;
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return,
         };
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
         let svc = Arc::clone(&service);
-        // 一连接一线程：请求都是毫秒级能答完的（下发即 spawn 即回、查询是
-        // 内存快照），唯一的长阻塞是 /v1/install 下发前的商店卡片确认
-        // （一次 https，有超时兜底）。线程随请求结束而终结，不攒句柄。
+        // Each request retains its existing independent I/O deadline.
         std::thread::spawn(move || handle_connection(stream, svc, test_mode));
     }
 }
@@ -613,6 +729,136 @@ fn handle_cancel(service: &Arc<ModelStoreService>, run_id: &str) -> Response {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn startup_retains_conflicting_files_and_busy_sockets_but_recovers_owned_stale_socket() {
+        use std::os::fd::AsRawFd;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("service.sock");
+        std::fs::write(&path, b"retained file").unwrap();
+        assert!(prepare_socket(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"retained file");
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink("missing", &path).unwrap();
+        assert!(prepare_socket(&path).is_err());
+        assert!(path.symlink_metadata().unwrap().file_type().is_symlink());
+        std::fs::remove_file(&path).unwrap();
+        let listener = UnixListener::bind(&path).unwrap();
+        let before = path.metadata().unwrap().ino();
+        // SAFETY: listener owns a live Unix listening descriptor.
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 1) }, 0);
+        let mut clients = Vec::new();
+        for _ in 0..8 {
+            match crate::platform::os::local_socket::try_connect(&path) {
+                Ok(stream) => clients.push(stream),
+                Err(_) => break,
+            }
+        }
+        let started = std::time::Instant::now();
+        assert!(prepare_socket(&path).is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(path.metadata().unwrap().ino(), before);
+        drop(clients);
+        drop(listener);
+        prepare_socket(&path).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn published_socket_guard_handles_partial_construction_without_deleting_replacements() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("service.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let guard = OwnedSocketPath::capture(path.clone()).unwrap();
+        drop(listener);
+        drop(guard);
+        assert!(!path.exists());
+        let listener = UnixListener::bind(&path).unwrap();
+        let guard = OwnedSocketPath::capture(path.clone()).unwrap();
+        drop(listener);
+        guard.remove_if_owned();
+        let replacement = UnixListener::bind(&path).unwrap();
+        drop(guard);
+        assert!(path.symlink_metadata().unwrap().file_type().is_socket());
+        drop(replacement);
+        std::fs::remove_file(&path).unwrap();
+        let listener = UnixListener::bind(&path).unwrap();
+        let guard = OwnedSocketPath::capture(path.clone()).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"retained replacement").unwrap();
+        drop(listener);
+        drop(guard);
+        assert_eq!(std::fs::read(&path).unwrap(), b"retained replacement");
+    }
+
+    #[test]
+    fn pinned_socket_guard_retains_a_rebound_endpoint_after_the_listener_closes() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("rebound.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let guard = OwnedSocketPath::capture(path.clone()).unwrap();
+        drop(listener);
+        std::fs::remove_file(&path).unwrap();
+        let replacement = UnixListener::bind(&path).unwrap();
+        let replacement_inode = path.symlink_metadata().unwrap().ino();
+        drop(guard);
+        assert_eq!(path.symlink_metadata().unwrap().ino(), replacement_inode);
+        assert!(path.symlink_metadata().unwrap().file_type().is_socket());
+        drop(replacement);
+    }
+
+    #[test]
+    fn shutdown_retains_a_rebound_endpoint_between_listener_exit_and_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("join-gap.sock");
+        let service = Arc::new(
+            LocalService::bind(Arc::new(ModelStoreService::new()), path.clone(), false).unwrap(),
+        );
+        // Hold the normal join mutex while production accept_loop sees the
+        // shutdown flag, exits, and drops the original listening descriptor.
+        let held_join = service.accept_thread.lock();
+        let worker = Arc::clone(&service);
+        let (done, joined) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            worker.shutdown();
+            done.send(()).unwrap();
+        });
+        let started = std::time::Instant::now();
+        while !service.shutdown.load(Ordering::SeqCst) || !held_join.as_ref().unwrap().is_finished()
+        {
+            assert!(started.elapsed() < Duration::from_secs(1));
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        std::fs::remove_file(&path).unwrap();
+        let replacement = UnixListener::bind(&path).unwrap();
+        let replacement_inode = path.symlink_metadata().unwrap().ino();
+        drop(held_join);
+        joined.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(path.symlink_metadata().unwrap().ino(), replacement_inode);
+        drop(service);
+        assert_eq!(path.symlink_metadata().unwrap().ino(), replacement_inode);
+        drop(replacement);
+    }
+
+    #[test]
+    fn shutdown_joins_its_listener_when_the_original_path_has_been_replaced() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("service.sock");
+        let service =
+            LocalService::bind(Arc::new(ModelStoreService::new()), path.clone(), false).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"retained replacement").unwrap();
+        let (done, joined) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            service.shutdown();
+            drop(service);
+            done.send(()).unwrap();
+        });
+        joined
+            .recv_timeout(Duration::from_secs(1))
+            .expect("shutdown must join independently of a replaced socket path");
+        assert_eq!(std::fs::read(&path).unwrap(), b"retained replacement");
+    }
 
     /// 环境变量隔离：模型商店的路径全部由 HOME / PINVOU3_HOME 推导，而它们是
     /// 进程全局。锁的顺序全仓统一：先 platform::paths::tests::ENV_LOCK，
