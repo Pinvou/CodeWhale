@@ -1078,6 +1078,15 @@ fn parse_record(text: &str) -> Result<RegistryRecord, String> {
     if record.name.trim().is_empty() {
         return Err("缺少模型名（name）".to_string());
     }
+    // 写路径恒写 schema:1；更高版本意味着字段语义变化，按 v1 规则给缺省值
+    // 静默误读比直接拒绝危险——注册表是 AI/手写共用文件（十二轮评审 P3）。
+    // 未知**新增**字段 serde 天然容忍，不受此限。
+    if record.schema > 1 {
+        return Err(format!(
+            "注册表记录 schema 版本过新（{0} > 1），请升级应用后再试",
+            record.schema
+        ));
+    }
     Ok(record)
 }
 
@@ -1425,6 +1434,8 @@ mod tests {
     #[test]
     fn parse_record_rejects_broken_files() {
         assert!(parse_record("not json at all").is_err());
+        // schema 版本过新：按 v1 默认值静默误读比拒绝危险（十二轮评审 P3）。
+        assert!(parse_record(r#"{"name": "x", "schema": 2}"#).is_err());
         // 缺 name（schema 必填）。
         assert!(parse_record(r#"{"id": "m-1"}"#).is_err());
         assert!(parse_record(r#"{"name": ""}"#).is_err());

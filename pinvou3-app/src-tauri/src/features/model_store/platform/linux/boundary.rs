@@ -72,6 +72,18 @@ fn weights_roots_from(settings: &config::Settings) -> Vec<std::path::PathBuf> {
             roots.push(root);
         }
     }
+    // 内置导入扫描根（~/models、~/Downloads、~/下载、~/Desktop、~/桌面）与脚本
+    // 侧同源（import_scan::builtin_home_roots）：LMM_IMPORT_DIRS 把它们下发给
+    // 全部卡片，卡片会就地复用其中的既有权重（复用不搬家），商店在册权重因此
+    // 可能落在这些目录下——不收进来，「别名登记 → 移除」就能真删这些权重
+    // （十二轮评审 P1）。可移动介质挂载点刻意不收：它们在家目录之外，删除守卫
+    // 的「必须位于家目录之下」臂本来就够不着；收进来反而会把「登记 U 盘上的
+    // 外部模型」这一合法场景误拒。
+    for root in super::import_scan::builtin_home_roots() {
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
     roots
 }
 
@@ -228,37 +240,38 @@ mod tests {
     #[test]
     fn weights_roots_cover_default_plus_custom_models_dir() {
         let _ctx = TempHome::new();
+        // 内置导入扫描根与脚本侧同一份清单（TempHome 隔离 HOME 后即临时家目录
+        // 下的五个静态目录），排在 settings 派生根之后（十二轮评审 P1）。
+        let builtin = super::super::import_scan::builtin_home_roots();
+        assert_eq!(builtin.len(), 5, "内置静态扫描根清单变化时同步本测试");
         // 未配置：数据根 + 回填的默认 models_dir + 回填的默认 staging_dir
         // （load_settings 把空值分别回填为数据根下的 models/ 与 staging/）——
         // 三个根都算商店管理的权重。
-        let default_roots = store_weights_roots();
-        assert_eq!(
-            default_roots,
-            vec![
-                config::data_dir(),
-                config::data_dir().join("models"),
-                config::data_dir().join("staging"),
-            ]
-        );
+        let mut expected = vec![
+            config::data_dir(),
+            config::data_dir().join("models"),
+            config::data_dir().join("staging"),
+        ];
+        expected.extend(builtin.clone());
+        assert_eq!(store_weights_roots(), expected);
         // 自定义 models_dir：替换默认回填值、追加为第二个根（与数据根相同则不重复）。
         write_config(r#"{"models_dir": "/data/llm-weights"}"#);
-        let roots = store_weights_roots();
-        assert_eq!(
-            roots,
-            vec![
-                config::data_dir(),
-                std::path::PathBuf::from("/data/llm-weights"),
-                config::data_dir().join("staging"),
-            ]
-        );
+        let mut expected = vec![
+            config::data_dir(),
+            std::path::PathBuf::from("/data/llm-weights"),
+            config::data_dir().join("staging"),
+        ];
+        expected.extend(builtin);
+        assert_eq!(store_weights_roots(), expected);
         write_config(&format!(
             r#"{{"models_dir": "{}"}}"#,
             config::data_dir().display()
         ));
         // staging 根独立存在，custom == data root 只是不重复数据根本身。
+        // （+5 = 内置导入扫描根，十二轮评审 P1。）
         assert_eq!(
             store_weights_roots().len(),
-            2,
+            2 + 5,
             "custom == data root must not duplicate the data root"
         );
     }
@@ -280,17 +293,16 @@ mod tests {
         assert!(roots.contains(&std::path::PathBuf::from("/usb/llm")));
         assert!(roots.contains(&std::path::PathBuf::from("/data/new-weights")));
         // 空白项滤掉、与当前 models_dir 重复的导入目录不重复占位；回填的默认
-        // staging 根排在最后。
-        assert_eq!(
-            roots,
-            vec![
-                config::data_dir(),
-                std::path::PathBuf::from("/data/new-weights"),
-                std::path::PathBuf::from("/data/old-weights"),
-                std::path::PathBuf::from("/usb/llm"),
-                config::data_dir().join("staging"),
-            ]
-        );
+        // staging 根排在 settings 派生段最后，内置导入扫描根收尾。
+        let mut expected = vec![
+            config::data_dir(),
+            std::path::PathBuf::from("/data/new-weights"),
+            std::path::PathBuf::from("/data/old-weights"),
+            std::path::PathBuf::from("/usb/llm"),
+            config::data_dir().join("staging"),
+        ];
+        expected.extend(super::super::import_scan::builtin_home_roots());
+        assert_eq!(roots, expected);
     }
 
     #[test]
@@ -302,7 +314,12 @@ mod tests {
         let roots = store_weights_roots();
         assert!(roots.contains(&std::path::PathBuf::from("/data/llm-staging")));
         // 自定义 staging 与数据根/models_dir 都不重复占位。
-        assert_eq!(roots.len(), 3, "data + backfilled models + custom staging");
+        //（+5 = 内置导入扫描根，十二轮评审 P1。）
+        assert_eq!(
+            roots.len(),
+            3 + 5,
+            "data + backfilled models + custom staging"
+        );
     }
 
     #[test]

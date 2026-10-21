@@ -171,6 +171,7 @@ struct DeviceStateInner {
     system: Mutex<System>,
     networks: Mutex<Networks>,
     last_network_poll: Mutex<Option<Instant>>,
+    last_process_poll: Mutex<Option<Instant>>,
 }
 
 impl DeviceState {
@@ -187,6 +188,7 @@ impl DeviceState {
             system: Mutex::new(System::new()),
             networks: Mutex::new(Networks::new()),
             last_network_poll: Mutex::new(None),
+            last_process_poll: Mutex::new(None),
         }))
     }
 }
@@ -495,6 +497,21 @@ fn is_bare_bridge_name(name: &str) -> bool {
         .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
+/// 距上次进程刷新不足 [`sysinfo::MINIMUM_CPU_UPDATE_INTERVAL`] 时跳过重刷新：
+/// sysinfo 的进程 CPU% 依赖 /proc/stat 的全局 CPU 时间差，而该文件在窗口内不
+/// 重读——此时 per-process utime/stime 照常前进、全局差值却为 0，cpu_usage 会
+/// 算出 inf 并被封顶成"核数×100"的荒谬值。设备页 2s 轮询与 AI 排查上下文共用
+/// 同一个 [`DeviceState`]，两次采样撞进窗口时后到的一拍就会呈现假 CPU%
+/// （十二轮评审 P2）。窗口内沿用上一次的进程表：CPU% 仍是上次真实差值，内存
+/// 最多陈旧 <200ms。纯函数便于测试直打（进程级 OnceLock/实例缓存没法安全变换
+/// 时钟，与 megacube_device_decision 同款拆法）。
+fn should_refresh_processes(last: Option<Instant>, now: Instant) -> bool {
+    match last {
+        None => true,
+        Some(last) => now.duration_since(last) >= sysinfo::MINIMUM_CPU_UPDATE_INTERVAL,
+    }
+}
+
 /// 进程 top 列表：CPU% 依赖同一个 System 实例两次刷新的差值（DeviceState 持久
 /// 实例保证这一点）；首拍全部为 0 属预期，第二拍起出真实值。
 fn collect_processes(state: &DeviceStateInner) -> ProcessSummary {
@@ -503,11 +520,15 @@ fn collect_processes(state: &DeviceStateInner) -> ProcessSummary {
     // exe、tasks——每个进程每拍多读 /proc/<pid>/io、exe 与 task/ 目录，数百进程
     // 的机器上是无谓放大。内存字段来自 refresh_processes 的 with_memory，本模块
     // 不消费系统级内存，refresh_memory() 是死代码（评审确认），不调用。
-    system.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::nothing().with_cpu().with_memory(),
-    );
+    let now = Instant::now();
+    if should_refresh_processes(*state.last_process_poll.lock(), now) {
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing().with_cpu().with_memory(),
+        );
+        *state.last_process_poll.lock() = Some(now);
+    }
     let procs: Vec<ProcInfo> = system
         .processes()
         .values()
@@ -1038,6 +1059,34 @@ mod tests {
         // 非正间隔（时钟回拨/同拍重入）按 0，绝不出除零或负速率。
         assert_eq!(rate_from_delta(1500, 0.0), 0.0);
         assert_eq!(rate_from_delta(1500, -1.0), 0.0);
+    }
+
+    #[test]
+    fn process_refresh_skips_within_sysinfo_cpu_update_window() {
+        // 窗口内（<200ms）跳过重刷新：否则 /proc/stat 不重读而 per-process
+        // 时间前进，CPU% 变 inf 封顶成核数×100（十二轮评审 P2）。
+        let now = Instant::now();
+        assert!(should_refresh_processes(None, now), "首拍必须刷新");
+        assert!(
+            !should_refresh_processes(Some(now), now),
+            "同刻二次采样必须沿用上次进程表"
+        );
+        let just_under = now
+            .checked_sub(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL)
+            .expect("clock permits subtracting 200ms")
+            + std::time::Duration::from_millis(1);
+        assert!(
+            !should_refresh_processes(Some(just_under), now),
+            "窗口边缘内侧仍须跳过"
+        );
+        let just_over = now
+            .checked_sub(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL)
+            .expect("clock permits subtracting 200ms")
+            - std::time::Duration::from_millis(1);
+        assert!(
+            should_refresh_processes(Some(just_over), now),
+            "窗口外侧必须刷新"
+        );
     }
 
     #[test]

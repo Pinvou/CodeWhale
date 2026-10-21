@@ -21,7 +21,8 @@ pub(crate) fn dmi_field(field: &str) -> Option<String> {
 
 /// 第一个非空字段值（设备页头部展示用）。
 pub(crate) fn dmi_first_nonempty() -> Option<String> {
-    DMI_ID_FIELDS.iter().find_map(|field| dmi_field(field))
+    let values: Vec<Option<String>> = DMI_ID_FIELDS.iter().map(|field| dmi_field(field)).collect();
+    first_nonempty(&values)
 }
 
 /// 任一字段含 `needle`（小写匹配，能力位用）。读取 sysfs 后走
@@ -31,6 +32,11 @@ pub(crate) fn dmi_first_nonempty() -> Option<String> {
 pub(crate) fn any_field_contains(needle: &str) -> bool {
     let values: Vec<Option<String>> = DMI_ID_FIELDS.iter().map(|field| dmi_field(field)).collect();
     any_value_contains(&values, needle)
+}
+
+/// 聚合口径（纯函数，测试直打）：第一个非空值。
+fn first_nonempty(values: &[Option<String>]) -> Option<String> {
+    values.iter().flatten().next().cloned()
 }
 
 /// 聚合口径（纯函数，测试直打）：任一非空字段值小写化后包含 needle 即命中。
@@ -45,16 +51,18 @@ fn any_value_contains(values: &[Option<String>], needle: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// 纯聚合口径直打：从给定字段值集合里取第一个非空。
+    /// 聚合口径直打（与生产同一条路径；any_value_contains 同款拆法——此前
+    /// 本测试把迭代表达式抄了一遍，生产口径改坏照样全绿，十二轮评审 P3）。
     #[test]
     fn first_nonempty_prefers_earlier_fields() {
-        let values = [
+        let values = vec![
             None,
             Some("GB10 Family".to_string()),
             Some("MegaCube".to_string()),
         ];
-        let first = values.iter().flatten().next().map(String::as_str);
-        assert_eq!(first, Some("GB10 Family"));
+        assert_eq!(first_nonempty(&values).as_deref(), Some("GB10 Family"));
+        assert_eq!(first_nonempty(&[]), None);
+        assert_eq!(first_nonempty(&[None, None]), None);
     }
 
     #[test]

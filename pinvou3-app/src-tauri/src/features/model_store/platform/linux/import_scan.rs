@@ -86,6 +86,23 @@ fn home() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("/"))
 }
 
+/// 内置的静态家目录扫描根（`~/models`、`~/Downloads`、`~/下载`、`~/Desktop`、
+/// `~/桌面`）。[`roots`] 与设备侧「商店权重根全集」（model_store boundary.rs）
+/// 必须共用这一份清单：下载/安装脚本拿到的是含这些目录的同一张
+/// `LMM_IMPORT_DIRS` 列表，卡片会**就地复用**其中的既有权重（复用不搬家），
+/// 商店在册权重因此可能落在这些目录下——两边目录清单同源，单边增删就会漂移
+/// （十二轮评审 P1）。可移动介质挂载点不在此列：它们在家目录之外，见 `roots`。
+pub(crate) fn builtin_home_roots() -> Vec<PathBuf> {
+    let home = home();
+    vec![
+        home.join("models"),
+        home.join("Downloads"),
+        home.join("下载"),
+        home.join("Desktop"),
+        home.join("桌面"),
+    ]
+}
+
 /// 当前挂着的可移动介质。
 ///
 /// `/media/<用户>/<卷标>` 和 `/run/media/<用户>/<卷标>` 两层都收进来：有的发行版
@@ -131,7 +148,6 @@ fn removable_mounts() -> Vec<PathBuf> {
 /// 一遍（`-maxdepth 3`），在主目录塞满东西的机器上这一步能耗掉整个时间预算，
 /// 挤掉后面真正该看的 U 盘。要扫主目录，用户可以自己把它加进 `extra`。
 pub fn roots(extra: &[String], models_dir: &Path, staging_dir: &Path) -> Vec<PathBuf> {
-    let home = home();
     let mut out: Vec<PathBuf> = Vec::new();
     let mut push = |p: PathBuf| {
         if p.as_os_str().is_empty() || out.contains(&p) {
@@ -152,11 +168,9 @@ pub fn roots(extra: &[String], models_dir: &Path, staging_dir: &Path) -> Vec<Pat
     push(staging_dir.to_path_buf());
     // LMM 作为独立应用时的默认权重目录。老用户、以及照着旧文档操作的人会把
     // 模型放这儿，2026-09-20 踩到的正是这一条。
-    push(home.join("models"));
-    push(home.join("Downloads"));
-    push(home.join("下载"));
-    push(home.join("Desktop"));
-    push(home.join("桌面"));
+    for root in builtin_home_roots() {
+        push(root);
+    }
     for mount in removable_mounts() {
         push(mount);
     }
