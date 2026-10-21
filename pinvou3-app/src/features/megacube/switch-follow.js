@@ -14,6 +14,7 @@ export function createCmsdSwitchFollow({
   const timers = new Set();
   let disposed = false;
   let activeIntent = null;
+  let globalSelectionEpoch = 0;
   const wait = (intent, delay) => {
     intent.waiting = true;
     const timer = schedule(() => {
@@ -176,8 +177,9 @@ export function createCmsdSwitchFollow({
   return {
     accept,
     manualSelection({ sessionId } = {}) {
+      if (!sessionId) globalSelectionEpoch += 1;
       for (const [id, call] of calls) {
-        if (!sessionId || call.sessionId === sessionId) calls.delete(id);
+        if (sessionId && call.sessionId === sessionId) calls.delete(id);
       }
       for (const intent of intents.values()) {
         if (sessionId ? intent.sessionId === sessionId : intent.binding == null) intent.done = true;
@@ -196,7 +198,7 @@ export function createCmsdSwitchFollow({
       // Attach a rejection handler now; a failed tool may never produce an end.
       const context = Promise.resolve(binding).then(value => ({ binding: value || null }), () => null);
       calls.set(payload.id, { sessionId: payload.session_id, card: args.card,
-        fallback: state.activeModelId || null, started: now(), context });
+        fallback: state.activeModelId || null, started: now(), context, globalSelectionEpoch });
       if (calls.size > 100) calls.delete(calls.keys().next().value);
     },
     async toolEnded(payload) {
@@ -209,6 +211,10 @@ export function createCmsdSwitchFollow({
         // still loading. A manual choice wins even when its value returns to A.
         const context = await call.context;
         if (disposed || calls.get(payload.id) !== call) return;
+        // A global default choice only supersedes calls that depended on it.
+        // Compare the event generation after the original binding resolves so
+        // a background call and an A -> B -> A choice keep the same boundary.
+        if (context?.binding == null && call.globalSelectionEpoch !== globalSelectionEpoch) return;
         const receipt = switchReceipt(payload.output);
         if (!context || !receipt || (receipt.requested_card && receipt.requested_card !== call.card)) return;
         accept({ task: { ...receipt, kind: 'switch', card: receipt.card || call.card, requested_card: call.card }, sessionId: call.sessionId,

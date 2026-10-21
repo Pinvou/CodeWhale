@@ -510,3 +510,104 @@ test('missing or unknown card model identity never saves or selects a default al
     f.api.dispose();
   }
 });
+
+// Global model choices affect new/default-bound chats. Pending tool receipts
+// must use the original session binding even when that read resolves later.
+function callCaptureFixture({ bound = true, background = false, deferred = false } = {}) {
+  const originalBinding = bound ? 'source' : null;
+  const bindings = new Map([['origin', originalBinding]]);
+  const state = { activeSessionId: background ? 'other' : 'origin',
+    currentSessionModelId: originalBinding, activeModelId: 'global-a', sessionBusy: {} };
+  const rows = [{ id: 'target-row', model: 'Target', store_card_id: 'target',
+    base_url: 'http://127.0.0.1:8000/v1' }];
+  const selected = [], notices = [];
+  let pending = [], resolveBinding, initialRead = deferred, bindingReads = 0;
+  const bindingPromise = new Promise(resolve => { resolveBinding = resolve; });
+  const api = createCmsdSwitchFollow({
+    getState: () => state,
+    queryModels: async () => ({ available: true, data: { store_bindings: {}, models: [{
+      card: 'target', model_id: 'Target', status: 'running', healthy: true, port: 18080,
+    }] } }),
+    queryStatus: async () => ({ available: true, data: { active_model: 'target', gateway: '127.0.0.1:8000' } }),
+    listModels: async () => ({ models: rows, active_model_id: state.activeModelId }),
+    sessionModelId: async id => { bindingReads += 1; return initialRead ? bindingPromise : bindings.get(id); },
+    saveModel: async () => { throw new Error('existing exact registration should be reused'); },
+    switchModel: async (session, model, options) => {
+      selected.push({ session, model, options }); bindings.set(session, model);
+    },
+    listCards: async () => [], notify: (...args) => notices.push(args),
+    savePending: values => { pending = values; },
+  });
+  return { api, state, selected, notices, bindings,
+    get pending() { return pending; }, get bindingReads() { return bindingReads; },
+    start(id = 'captured-call') { api.toolStarted({ id, session_id: 'origin',
+      name: 'mcp_megacube_admin_cube_switch_model', args: { card: 'target' } }); },
+    end(id = 'captured-call', taskId = 'captured-task') { return api.toolEnded({ id,
+      session_id: 'origin', success: true, output: { data: { task_id: taskId, card: 'target' } } }); },
+    observe(taskId = 'captured-task') { return api.observe({ id: taskId,
+      kind: 'switch', card: 'target', status: 'succeeded' }); },
+    chooseGlobal(id) { state.activeModelId = id; api.manualSelection({ sessionId: null }); },
+    releaseBinding() { initialRead = false; resolveBinding(originalBinding); },
+  };
+}
+
+for (const bound of [true, false]) {
+  for (const restored of [false, true]) {
+    test(`${bound ? 'bound' : 'unbound'} captured call handles global choice${restored ? ' A to B to A' : ''} before receipt`, async () => {
+      const f = callCaptureFixture({ bound });
+      try {
+        f.start(); f.chooseGlobal('global-b');
+        if (restored) f.chooseGlobal('global-a');
+        await f.end(); await f.observe();
+        assert.equal(f.selected.length, bound ? 1 : 0);
+        assert.equal(f.bindings.get('origin'), bound ? 'target-row' : null);
+      } finally { f.api.dispose(); }
+    });
+  }
+  test(`${bound ? 'bound' : 'unbound'} background call applies global generation after delayed binding`, async () => {
+    const f = callCaptureFixture({ bound, background: true, deferred: true });
+    try {
+      f.start(); const ending = f.end(); await Promise.resolve();
+      assert.equal(f.bindingReads, 1);
+      f.chooseGlobal('global-b'); f.chooseGlobal('global-a');
+      f.releaseBinding(); await ending; await f.observe();
+      assert.equal(f.selected.length, bound ? 1 : 0);
+      assert.equal(f.bindings.get('origin'), bound ? 'target-row' : null);
+    } finally { f.api.dispose(); }
+  });
+  test(`${bound ? 'bound' : 'unbound'} captured call preserves same-session manual priority during delayed binding`, async () => {
+    const f = callCaptureFixture({ bound, background: true, deferred: true });
+    try {
+      f.start(); const ending = f.end(); await Promise.resolve();
+      assert.equal(f.bindingReads, 1);
+      f.api.manualSelection({ sessionId: 'origin' });
+      f.releaseBinding(); await ending; await f.observe();
+      assert.equal(f.pending.length, 0); assert.equal(f.selected.length, 0);
+    } finally { f.api.dispose(); }
+  });
+  test(`${bound ? 'bound' : 'unbound'} captured call ignores another session's manual selection`, async () => {
+    const f = callCaptureFixture({ bound, background: true, deferred: true });
+    try {
+      f.start(); const ending = f.end(); await Promise.resolve();
+      assert.equal(f.bindingReads, 1);
+      f.api.manualSelection({ sessionId: 'other' });
+      f.releaseBinding(); await ending; await f.observe();
+      assert.equal(f.selected.length, 1);
+      assert.equal(f.selected[0].options.expectedModelId, bound ? 'source' : null);
+    } finally { f.api.dispose(); }
+  });
+}
+
+test('an old delayed ending after a global choice cannot consume a new call with the same ID', async () => {
+  const f = callCaptureFixture({ bound: true, background: true, deferred: true });
+  try {
+    f.start(); const oldEnding = f.end('captured-call', 'old-task'); await Promise.resolve();
+    assert.equal(f.bindingReads, 1);
+    f.chooseGlobal('global-b');
+    f.start();
+    f.releaseBinding(); await oldEnding;
+    await f.end('captured-call', 'new-task'); await f.observe('new-task');
+    assert.equal(f.selected.length, 1);
+    assert.equal(f.bindings.get('origin'), 'target-row');
+  } finally { f.api.dispose(); }
+});
