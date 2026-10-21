@@ -139,7 +139,7 @@ def main():
         if marker.exists() or marker.is_symlink():
             assert marker.is_file() and not marker.is_symlink() and marker.stat().st_uid == os.geteuid()
             assert marker.read_text() == 'cmsd-native-unit-namespace-v1\n'+namespace+'\n'
-        assert not systemd('list-units', namespace+'@*.service', '--all', '--no-legend', '--plain'), (
+        assert not systemd('list-units', namespace+'@*.service', '--all', '--no-legend', '--plain').stdout.strip(), (
             'private namespace unexpectedly has a native model instance')
         unexpected = [path for path in unit_file.parent.glob(namespace+'@*.service*')
                       if path not in (template, template_backup)]
