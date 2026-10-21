@@ -175,6 +175,7 @@ def main():
             root = work/case
             profile, sock = root/'profile', root/'cmsd.sock'
             profile.mkdir(parents=True, mode=0o700)
+            (profile/'model-store').mkdir(mode=0o700)
             unit = 'pinvou-cmsd-r04mig-'+uuid.uuid4().hex[:12]+'.service'
             unit_file = Path.home()/'.config/systemd/user'/unit
             assert not unit_file.exists() and not unit_file.with_name(unit+'.d').exists()
@@ -241,7 +242,7 @@ def main():
                     while block := connection.recv(65536):
                         data += block
                 head, body = data.split(b'\r\n\r\n', 1)
-                assert head.startswith(b'HTTP/1.1 200 '), head
+                assert head.startswith(b'HTTP/1.1 200 '), (head, body)
                 return json.loads(body)
 
             action('install', old_package)
