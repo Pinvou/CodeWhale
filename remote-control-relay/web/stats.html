@@ -165,6 +165,7 @@
   const escapeHtml=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const platform=value=>({linux:'Linux',windows:'Windows',macos:'macOS'}[String(value||'').toLowerCase()]||value||'—');
   const dateTime=value=>value?new Date(value).toLocaleString('zh-CN',{hour12:false,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'—';
+  const duration=value=>value!==null&&value!==undefined&&Number.isFinite(Number(value))?(Number(value)<1000?`${nf.format(value)} ms`:`${(Number(value)/1000).toFixed(1)} s`):'—';
   const relativeTime=value=>{if(!value)return'—';const seconds=Math.max(0,Math.floor((Date.now()-value)/1000));if(seconds<60)return'刚刚';if(seconds<3600)return`${Math.floor(seconds/60)} 分钟前`;if(seconds<86400)return`${Math.floor(seconds/3600)} 小时前`;return dateTime(value)};
   const percent=(part,total)=>total?`${Math.round(part/total*100)}%`:'—';
   const ratio=value=>Number.isFinite(Number(value))?`${Math.round(Number(value)*100)}%`:'—';
@@ -275,7 +276,6 @@
     const report=state.behavior||{},metrics=report.metrics||{},quality=report.data_quality||{};
     const guardedRatioFor=(source,value,confidence=source?.data_quality?.confidence)=>confidence==='low'||value===null||value===undefined?'<span class="confidence-low">样本不足</span>':ratio(value);
     const guardedRatio=(value,confidence=quality.confidence)=>guardedRatioFor(report,value,confidence);
-    const duration=value=>value!==null&&value!==undefined&&Number.isFinite(Number(value))?(Number(value)<1000?`${nf.format(value)} ms`:`${(Number(value)/1000).toFixed(1)} s`):'—';
     const dataLabels={ready:'数据正常',no_data:'已启用但暂无事件',tracking_not_enabled:'埋点尚未启用',delayed:'数据延迟'};$('behaviorMeta').textContent=`${dataLabels[report.data_status]||'状态未知'} · 主体：安装实例 · 时区：${report.timezone||'Asia/Shanghai'} · 周期：${report.range==='today'?'今日':`${report.range||30} 天`} · 口径：${report.metric_version||'—'}（切换日 2026-09-10） · 最后事件：${report.latest_event_received_at?dateTime(report.latest_event_received_at):'—'} · 报表更新：${dateTime(report.generated_at)}`;$('behaviorMeta').classList.toggle('ok',report.data_status==='ready');
     if(state.behavior){
     $('taskPerActive').textContent=decimal(metrics.task_submitted_per_active_installation_day);
@@ -320,7 +320,7 @@
   function renderRemote(){
     const report=state.behaviorSectionReports.remote,r=report?.remote_control;
     if(!r||!Number.isFinite(r.task_count)){$('remoteMeta').textContent=report?'当前服务端尚未提供完整远控统计，请升级 Relay。':'等待远控统计';for(const id of ['remoteTasks','remoteSuccess','remoteAwaiting','remoteDevices'])$(id).textContent='—';renderSimpleRows('remoteSummaryRows',[],[()=>'',()=>'']);renderSimpleRows('remoteEventRows',r?.rows||[],[row=>escapeHtml(row.stage),row=>escapeHtml(row.outcome),row=>escapeHtml(row.reason),row=>nf.format(row.count||0)]);return}
-    const n=v=>nf.format(v||0),pct=v=>v===null||v===undefined?'样本不足':ratio(v),ms=v=>v===null||v===undefined?'—':`${nf.format(v)} ms`;
+    const n=v=>nf.format(v||0),pct=v=>v===null||v===undefined?'样本不足':ratio(v),ms=duration;
     $('remoteMeta').textContent=`双端匿名任务去重 · 北京时间 · ${report.range==='today'?'今日':`${report.range} 天`} · 未归属调用 ${n(r.unattributed_count)} · 未关联任务事件 ${n(r.legacy_event_count)}`;
     $('remoteTasks').textContent=n(r.task_count);$('remoteSubmitted').textContent=`提交 ${n(r.submitted_count)} · 接纳 ${n(r.admitted_count)} · 拒绝 ${n(r.rejected_count)}`;
     $('remoteSuccess').textContent=pct(r.success_rate);$('remoteOutcomes').textContent=`成功 ${n(r.succeeded_count)} · 失败 ${n(r.failed_count)} · 取消 ${n(r.cancelled_count)}`;

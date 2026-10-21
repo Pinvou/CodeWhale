@@ -1,5 +1,6 @@
 // One logical invocation may be observed by two consenting installations.
 // Keep diagnostics from both, but project a single task into existing metrics.
+import { namedBehaviorEvents } from './behavior-event-view.js';
 const TERMINAL = new Set(["success", "failed", "cancelled", "interrupted"]);
 const identity = event => event.identity_id || event.device_id;
 const time = event => Number(event.occurred_at);
@@ -95,7 +96,7 @@ export function projectRemoteTasks(events, taskGroups = null) {
 
 export function buildRemoteOverview(events, start, end, minimumSample = 30, countedTaskKeys = null, countedEvents = null, taskGroups = null) {
   const inWindow = event => time(event) >= start && time(event) <= end;
-  const raw = (countedEvents || events).filter(e => e.event_name === "remote_control_event" && inWindow(e));
+  const raw = namedBehaviorEvents(countedEvents || events, "remote_control_event").filter(inWindow);
   const stageKeys = new Map();
   for (const event of countedEvents || []) {
     if (!event.remote_projection) continue;
@@ -112,7 +113,29 @@ export function buildRemoteOverview(events, start, end, minimumSample = 30, coun
   const knownExecutions = completed.filter(t => t.authoritative
     && t.submitted?.remote_role !== "controlled");
   const awaitingReceipt = knownExecutions.filter(t => !t.received);
-  const count = (stage, outcome) => raw.filter(e => e.remote_stage === stage && (!outcome || e.remote_outcome === outcome)).length;
+  const stageCounts = new Map(), outcomeCounts = new Map();
+  const groupedFields = ["remote_permission_step", "remote_size_bucket", "remote_latency_bucket", "remote_model_source"];
+  const groups = new Map(groupedFields.map(field => [field, new Map()]));
+  const rows = new Map(), controllerIds = new Set(), controlledIds = new Set();
+  let legacyCount = 0;
+  for (const event of raw) {
+    stageCounts.set(event.remote_stage, (stageCounts.get(event.remote_stage) || 0) + 1);
+    const outcomeKey = `${event.remote_stage}|${event.remote_outcome}`;
+    outcomeCounts.set(outcomeKey, (outcomeCounts.get(outcomeKey) || 0) + 1);
+    const key = [event.remote_stage, event.remote_outcome, event.remote_reason].join("|");
+    const row = rows.get(key) || { stage: event.remote_stage, outcome: event.remote_outcome, reason: event.remote_reason, count: 0 };
+    row.count++; rows.set(key, row);
+    const id = identity(event);
+    if (id && event.remote_role === "controller") controllerIds.add(id);
+    if (id && event.remote_role === "controlled") controlledIds.add(id);
+    if (!event.remote_task_key && ["task_submit", "task_admit", "task_rejected", "task_terminal"].includes(event.remote_stage)) legacyCount++;
+    for (const field of groupedFields) {
+      const value = event[field];
+      if (value) groups.get(field).set(value, (groups.get(field).get(value) || 0) + 1);
+    }
+  }
+  const count = (stage, outcome) => outcome
+    ? outcomeCounts.get(`${stage}|${outcome}`) || 0 : stageCounts.get(stage) || 0;
   const ratio = (part, total) => total >= minimumSample ? part / total : null;
   const percentile = (values, fraction) => {
     const ordered = values.filter(v => typeof v === "number" && Number.isFinite(v)).sort((a, b) => a - b);
@@ -127,13 +150,7 @@ export function buildRemoteOverview(events, start, end, minimumSample = 30, coun
     && visibleReceipts.has(t.received.event_id)).flatMap(t => t.received.remote_duration_ms ?? []);
   const visibleTaskKeys = new Set(raw.map(e => e.remote_task_key));
   const visibleTask = task => !countedEvents || visibleTaskKeys.has(task.key);
-  const rows = new Map();
-  for (const event of raw) {
-    const key = [event.remote_stage, event.remote_outcome, event.remote_reason].join("|");
-    const row = rows.get(key) || { stage: event.remote_stage, outcome: event.remote_outcome, reason: event.remote_reason, count: 0 };
-    row.count++; rows.set(key, row);
-  }
-  const group = field => Object.fromEntries([...new Set(raw.map(e => e[field]).filter(Boolean))].sort().map(key => [key, raw.filter(e => e[field] === key).length]));
+  const group = field => Object.fromEntries([...groups.get(field)].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0));
   return {
     task_count: completed.length,
     submitted_count: tasks.filter(t => t.submitted && inWindow(t.submitted) && allowed(t, "task_submitted")).length,
@@ -146,8 +163,8 @@ export function buildRemoteOverview(events, start, end, minimumSample = 30, coun
     pending_count: tasks.filter(t => t.status === "pending" && visibleTask(t)).length,
     not_sent_count: tasks.filter(t => t.status === "not_sent" && visibleTask(t)).length,
     unattributed_count: completed.filter(t => !t.attributed).length,
-    controller_installations: new Set(raw.filter(e => e.remote_role === "controller").map(identity).filter(Boolean)).size,
-    controlled_installations: new Set(raw.filter(e => e.remote_role === "controlled").map(identity).filter(Boolean)).size,
+    controller_installations: controllerIds.size,
+    controlled_installations: controlledIds.size,
     success_rate: ratio(completed.filter(t => t.status === "success").length, completed.length),
     execution_terminal_count: knownExecutions.length,
     result_received_count: knownExecutions.filter(t => t.received).length,
@@ -168,6 +185,6 @@ export function buildRemoteOverview(events, start, end, minimumSample = 30, coun
     permission_funnel: { request: 0, allowed: 0, denied: 0, expired: 0, ...group("remote_permission_step") }, size_buckets: group("remote_size_bucket"),
     latency_buckets: group("remote_latency_bucket"), model_sources: group("remote_model_source"),
     rows: [...rows.values()].sort((a, b) => a.stage.localeCompare(b.stage) || a.outcome.localeCompare(b.outcome) || a.reason.localeCompare(b.reason)), event_count: raw.length,
-    legacy_event_count: raw.filter(e => !e.remote_task_key && ["task_submit", "task_admit", "task_terminal"].includes(e.remote_stage)).length,
+    legacy_event_count: legacyCount,
   };
 }

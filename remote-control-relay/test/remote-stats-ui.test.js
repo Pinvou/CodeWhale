@@ -16,6 +16,8 @@ function openDashboard({ failSeven = false, legacy = false } = {}) {
         task_count: range === "7" ? 7 : 3, submitted_count: 4, admitted_count: 3,
         succeeded_count: 2, failed_count: 1, cancelled_count: 0, success_rate: null,
         awaiting_receipt_count: 1, controller_installations: 1, controlled_installations: 1,
+        first_output_p50_ms: 500, first_output_p90_ms: 1500,
+        task_duration_p50_ms: 0, task_duration_p90_ms: null,
         rows: [{ stage: "task_rejected", outcome: "rejected", reason: "<unsafe>", count: 1 }],
       } };
       if (legacy) value.remote_control = { event_count: 0, rows: [] };
@@ -36,6 +38,8 @@ test("analyst can use independent remote tab, change its range, and keep other r
     assert.equal(d.querySelector("#remoteView").classList.contains("hidden"), false);
     assert.equal(d.querySelector("#remoteTasks").textContent, "3");
     assert.equal(d.querySelector("#remoteSuccess").textContent, "样本不足");
+    assert.match(d.querySelector("#remoteSummaryRows").textContent, /500 ms \/ 1\.5 s/);
+    assert.match(d.querySelector("#remoteSummaryRows").textContent, /0 ms \/ —/);
     assert.match(d.querySelector("#remoteEventRows").textContent, /<unsafe>/);
     assert.equal(d.querySelector("#remoteEventRows unsafe"), null);
     d.querySelector('[data-behavior-section="remote"] [data-range="7"]').click();

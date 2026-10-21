@@ -26,6 +26,7 @@ import {
 } from "./behavior-telemetry-schema.js";
 import { normalizeSnapshot as normalizeControllerTelemetrySnapshot } from "./controller-telemetry.js";
 import { projectRemoteTasks, remoteTaskGroups, buildRemoteOverview } from "./remote-telemetry.js";
+import { prepareBehaviorEventView, isBehaviorEventView, namedBehaviorEvents, windowedBehaviorEvents } from "./behavior-event-view.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TELEMETRY_PREFIX = "/pinvou3/telemetry";
@@ -262,7 +263,7 @@ function installationBehaviorEvents(devices, behaviorEvents) {
   const taskGroups = remoteTaskGroups(rawEvents);
   const events = projectRemoteTasks(rawEvents, taskGroups);
   installationEventSnapshots.set(events, { installationKey, rawEvents, taskGroups });
-  return events;
+  return prepareBehaviorEventView(events);
 }
 
 function isCoreUserTask(event, eventName) {
@@ -290,13 +291,19 @@ function sessionTurnIdentityKey(event) {
   return identity && session && turn ? `${identity}\u001f${session}\u001f${turn}` : "";
 }
 
+const coreFinishedSnapshots = new WeakMap();
 function coreTaskFinishedEvents(devices, behaviorEvents, startDay, endDay) {
-  const eligible = installationBehaviorEvents(devices, behaviorEvents).filter((event) => {
-    if (!isCoreUserTask(event, "task_finished")) return false;
-    const day = statsDay(event.occurred_at);
-    return day >= startDay && day <= endDay;
-  });
-  return uniqueAttempts(clipDailySubjectContributions(eligible).events, "task_finished");
+  const windowRows = filteredBehaviorEvents(installationBehaviorEvents(devices, behaviorEvents),
+    { startDay, endDay }, "task_finished");
+  const cached = coreFinishedSnapshots.get(windowRows);
+  if (cached) return cached;
+  // Filter core tasks before clipping, preserving this metric's existing cap
+  // semantics even when system tasks share the same installation/event name.
+  const filtered = windowRows.filter(event => isCoreUserTask(event, "task_finished"));
+  const eligible = prepareBehaviorEventView(filtered.length === windowRows.length ? windowRows : filtered);
+  const result = uniqueAttempts(clipDailySubjectContributions(eligible).events, "task_finished");
+  coreFinishedSnapshots.set(windowRows, result);
+  return result;
 }
 
 function prepareStatsTaskEvents(devices, behaviorEvents, startDay, endDay, now) {
@@ -304,7 +311,7 @@ function prepareStatsTaskEvents(devices, behaviorEvents, startDay, endDay, now) 
   // Keep submissions outside either chart window when identifying orphaned terminals.
   // The earliest timestamp also distinguishes future-only submissions for the hour chart.
   const submittedAttempts = new Map();
-  for (const event of installationEvents) {
+  for (const event of namedBehaviorEvents(installationEvents, "task_submitted")) {
     if (!isCoreUserTask(event, "task_submitted")) continue;
     const key = attemptIdentityKey(event);
     if (!key) continue;
@@ -383,12 +390,11 @@ function taskActivityByDay(activityEvents, startDay, endDay) {
 
 function coreTaskActivityByDay(devices, behaviorEvents, startDay, endDay) {
   const installationEvents = installationBehaviorEvents(devices, behaviorEvents);
-  const submittedAttempts = new Set(installationEvents
-    .filter((event) => isCoreUserTask(event, "task_submitted"))
-    .map(attemptIdentityKey)
-    .filter(Boolean));
-  const activity = installationEvents.filter((event) => isCoreUserTask(event, "task_submitted")
-    || (isCoreUserTask(event, "task_finished") && !submittedAttempts.has(attemptIdentityKey(event))));
+  const submissions = namedBehaviorEvents(installationEvents, "task_submitted")
+    .filter((event) => isCoreUserTask(event, "task_submitted"));
+  const submittedAttempts = new Set(submissions.map(attemptIdentityKey).filter(Boolean));
+  const activity = submissions.concat(namedBehaviorEvents(installationEvents, "task_finished")
+    .filter(event => isCoreUserTask(event, "task_finished") && !submittedAttempts.has(attemptIdentityKey(event))));
   return taskActivityByDay(activity, startDay, endDay);
 }
 
@@ -599,11 +605,8 @@ function activeIdentityByDay(_devices, _usageEvents, behaviorEvents, window) {
 }
 
 function filteredBehaviorEvents(events, window, eventName = null) {
-  return events.filter((event) => {
-    if (eventName && event.event_name !== eventName) return false;
-    const day = statsDay(event.occurred_at);
-    return day >= window.startDay && day <= window.endDay;
-  });
+  const rows = windowedBehaviorEvents(events, window, statsDay);
+  return eventName ? namedBehaviorEvents(rows, eventName) : rows;
 }
 
 function perActiveInstallationDay(events, activeByDay) {
@@ -615,14 +618,22 @@ function perActiveInstallationDay(events, activeByDay) {
   };
 }
 
+const uniqueAttemptSnapshots = new WeakMap();
 function uniqueAttempts(events, eventName) {
+  const cached = uniqueAttemptSnapshots.get(events)?.get(eventName);
+  if (cached) return cached;
   const attempts = new Map();
-  for (const event of events) {
-    if (event.event_name !== eventName) continue;
+  for (const event of namedBehaviorEvents(events, eventName)) {
     const key = attemptIdentityKey(event);
     if (key && !attempts.has(key)) attempts.set(key, event);
   }
-  return [...attempts.values()];
+  const result = [...attempts.values()];
+  if (isBehaviorEventView(events)) {
+    let names = uniqueAttemptSnapshots.get(events);
+    if (!names) uniqueAttemptSnapshots.set(events, names = new Map());
+    names.set(eventName, result);
+  }
+  return result;
 }
 
 function periodActiveCount(activeByDay) {
@@ -638,7 +649,7 @@ function rate(part, total) {
 }
 
 function successfulActiveIdentities(behaviorEvents, window) {
-  const windowEvents = filteredBehaviorEvents(behaviorEvents, window);
+  const windowEvents = filteredBehaviorEvents(behaviorEvents, window, "task_finished");
   return new Set(windowEvents
     .filter((event) => !event.remote_attribution_unknown && isCoreUserTask(event, "task_finished") && event.status === "success")
     .map(eventIdentity)
@@ -766,7 +777,10 @@ function contributionLimit(eventName) {
   return 100;
 }
 
+const contributionSnapshots = new WeakMap();
 function clipDailySubjectContributions(events) {
+  const cached = contributionSnapshots.get(events);
+  if (cached) return cached;
   const counts = new Map();
   const subjects = new Set();
   const clippedSubjects = new Set();
@@ -787,19 +801,25 @@ function clipDailySubjectContributions(events) {
     counts.set(key, count + 1);
     retained.push(event);
   }
-  return {
+  const result = {
     events: retained,
     subject_count: subjects.size,
     clipped_subject_count: clippedSubjects.size,
     clipped_subject_rate: rate(clippedSubjects.size, subjects.size),
   };
+  if (isBehaviorEventView(events)) {
+    // With no clipping, the immutable input already represents this exact view.
+    // Reuse its named index rather than retaining a duplicate array and index.
+    result.events = retained.length === events.length ? events : prepareBehaviorEventView(retained);
+    contributionSnapshots.set(events, result);
+  }
+  return result;
 }
 
 function retentionMetric(usageEvents, behaviorEvents, horizon, now) {
   const today = statsDay(now);
   const cohorts = new Map();
-  for (const event of behaviorEvents) {
-    if (event.event_name !== "analytics_cohort_started") continue;
+  for (const event of namedBehaviorEvents(behaviorEvents, "analytics_cohort_started")) {
     const identity = eventIdentity(event);
     const day = statsDay(event.occurred_at);
     if (!identity || day > today - horizon) continue;
@@ -812,7 +832,7 @@ function retentionMetric(usageEvents, behaviorEvents, horizon, now) {
     bucket.add(statsDay(occurredAt));
     activity.set(identity, bucket);
   };
-  for (const event of behaviorEvents) {
+  for (const event of namedBehaviorEvents(behaviorEvents, "task_finished")) {
     if (event.event_name !== "task_finished"
       || event.remote_attribution_unknown
       || event.status !== "success"
@@ -945,8 +965,8 @@ function currentBeijingWeek(now) {
 export function buildWeeklyExplicitValueMetric(behaviorEvents, now = Date.now()) {
   const week = currentBeijingWeek(now);
   const latestFeedback = new Map();
-  for (const event of behaviorEvents) {
-    if (event.event_name !== "response_feedback_changed" || Number(event.occurred_at) > now) continue;
+  for (const event of namedBehaviorEvents(behaviorEvents, "response_feedback_changed")) {
+    if (Number(event.occurred_at) > now) continue;
     const turnKey = sessionTurnIdentityKey(event);
     const key = event.feedback_id && turnKey ? `${turnKey}\u001f${event.feedback_id}` : turnKey;
     const current = latestFeedback.get(key);
@@ -964,7 +984,7 @@ export function buildWeeklyExplicitValueMetric(behaviorEvents, now = Date.now())
       && event.feedback_action === "set"
       && event.rating === "positive";
   });
-  const successfulTasks = uniqueAttempts(behaviorEvents.filter((event) => (
+  const successfulTasks = uniqueAttempts(namedBehaviorEvents(behaviorEvents, "task_finished").filter((event) => (
     event.event_name === "task_finished"
       && !event.remote_attribution_unknown
       && event.status === "success"
@@ -973,7 +993,7 @@ export function buildWeeklyExplicitValueMetric(behaviorEvents, now = Date.now())
       && Number(event.occurred_at) >= week.start
       && Number(event.occurred_at) <= week.end
   )), "task_finished");
-  const diagnosticTaskTerminals = behaviorEvents.filter((event) => (
+  const diagnosticTaskTerminals = namedBehaviorEvents(behaviorEvents, "task_finished").filter((event) => (
     isCoreUserTask(event, "task_finished") && Number(event.occurred_at) <= now
   ));
   const diagnosticTerminalsByIdentity = new Map();
@@ -1185,19 +1205,19 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
   const compensatedCount = [...taskRejected, ...taskFinished]
     .filter((event) => event.stage === "shutdown").length;
   const activeDayMetric = perActiveInstallationDay(activeTaskSubmitted, activeByDay);
-  const toolCallStarted = uniqueAttempts(windowEvents.map((event) => ({
+  const toolCallStarted = uniqueAttempts(namedBehaviorEvents(windowEvents, "tool_call_started").map((event) => ({
     ...event,
     attempt_id: event.operation_id,
   })), "tool_call_started");
-  const toolCallCompleted = uniqueAttempts(windowEvents.map((event) => ({
+  const toolCallCompleted = uniqueAttempts(namedBehaviorEvents(windowEvents, "tool_call_completed").map((event) => ({
     ...event,
     attempt_id: event.operation_id,
   })), "tool_call_completed");
-  const toolInstallStarted = uniqueAttempts(windowEvents.map((event) => ({
+  const toolInstallStarted = uniqueAttempts(namedBehaviorEvents(windowEvents, "tool_install_started").map((event) => ({
     ...event,
     attempt_id: event.operation_id,
   })), "tool_install_started");
-  const toolInstallCompleted = uniqueAttempts(windowEvents.map((event) => ({
+  const toolInstallCompleted = uniqueAttempts(namedBehaviorEvents(windowEvents, "tool_install_completed").map((event) => ({
     ...event,
     attempt_id: event.operation_id,
   })), "tool_install_completed");
@@ -1376,7 +1396,7 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
   const clippedWindowEvents = clipDailySubjectContributions(
     filteredBehaviorEvents(behaviorEvents, window),
   ).events;
-  for (const event of clippedWindowEvents.filter(event => event.event_name === eventName)) {
+  for (const event of namedBehaviorEvents(clippedWindowEvents, eventName)) {
     if (eventName === "tool_install_completed" && event.success !== true) continue;
     const toolKey = controlledKey(event.tool_key, CONTROLLED_TOOL_KEYS);
     const toolName = normalizedToolName(event.tool_name) || toolKey;
@@ -1549,8 +1569,7 @@ export function buildBehaviorSceneRanking(devices, usageEvents, behaviorEvents, 
   const finishedByAttempt = new Map(uniqueAttempts(windowEvents, "task_finished")
     .map(event => [attemptIdentityKey(event), event]));
   const latestFeedbackByTurn = new Map();
-  for (const event of windowEvents) {
-    if (event.event_name !== "response_feedback_changed") continue;
+  for (const event of namedBehaviorEvents(windowEvents, "response_feedback_changed")) {
     const turnKey = sessionTurnIdentityKey(event);
     if (!turnKey) continue;
     const previous = latestFeedbackByTurn.get(turnKey);
@@ -1656,7 +1675,7 @@ export function buildBehaviorModelRanking(devices, usageEvents, behaviorEvents, 
   ).events;
   const finishedByAttempt = new Map(uniqueAttempts(windowEvents, "task_finished")
     .map(event => [attemptIdentityKey(event), event]));
-  for (const event of windowEvents.filter(event => event.event_name === "model_used")) {
+  for (const event of namedBehaviorEvents(windowEvents, "model_used")) {
     const modelId = controlledKey(event.model_key, CONTROLLED_MODEL_KEYS);
     const providerKey = controlledKey(event.provider_key, CONTROLLED_PROVIDER_KEYS);
     const key = `${providerKey}:${modelId}`;
@@ -2342,9 +2361,11 @@ export class TelemetryStore {
     let retained = this.behaviorEvents.filter((event) => Number(event.received_at || event.occurred_at) >= cutoff);
     if (retained.length > this.maxEvents) retained = retained.slice(-this.eventCompactionTarget);
     const changed = force || retained.length !== this.behaviorEvents.length;
-    this.behaviorEvents = retained;
-    this.behaviorEventIds = new Set(retained.map((event) => event.event_id));
-    if (changed) atomicWriteJsonLines(this.behaviorEventsPath, retained);
+    if (changed) {
+      this.behaviorEvents = retained;
+      this.behaviorEventIds = new Set(retained.map((event) => event.event_id));
+      atomicWriteJsonLines(this.behaviorEventsPath, retained);
+    }
     return changed;
   }
 
@@ -2728,7 +2749,8 @@ export class TelemetryStore {
     const previous = this.behaviorProjectionSnapshot;
     // Stored events are append-only. Ingestion grows this array; retention and
     // deletion replace it. Include the installation set for identity upgrades
-    // and deletion, and never cache date-window or active-collection metrics.
+    // and deletion. Derived views cache calendar selections only; wall-clock
+    // maturity, hourly and active-collection results are recomputed per request.
     if (previous?.source === this.behaviorEvents && previous.length === this.behaviorEvents.length
       && previous.installationKey === installationKey) return previous.events;
     const events = installationBehaviorEvents(devices, this.behaviorEvents);

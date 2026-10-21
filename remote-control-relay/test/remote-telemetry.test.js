@@ -72,7 +72,7 @@ test("passive B success cannot become first-day activation or technical value", 
     ...invocation().filter(e => e.remote_role === "controlled")
       .map(e => ({ ...e, occurred_at: now - 10 * 3600000 })),
   ];
-  const report = buildBehaviorOverview(devices, [], rows, "7d", now);
+  const report = buildBehaviorOverview(devices, [], rows, "7", now);
   assert.equal(report.metrics.cohort_matured_installations, 1);
   assert.equal(report.metrics.task_finished_count, 1);
   assert.equal(report.metrics.first_technical_value_24h_installations, 0);
@@ -188,6 +188,32 @@ test("legacy uncorrelated events stay diagnostic and small samples hide rates", 
   assert.equal(report.remote_control.success_rate, null);
 });
 
+test("uncorrelated legacy rejections are diagnostic, never invented invocations", () => {
+  const row = event("controlled", "task_rejected", { remote_task_key: undefined, remote_reason: "permission_required" });
+  const report = buildBehaviorOverview(devices, [], [row], "today", now);
+  assert.equal(report.remote_control.legacy_event_count, 1);
+  assert.equal(report.remote_control.task_count, 0);
+  assert.equal(report.metrics.task_submitted_count, 0);
+});
+
+test("daily clipping cannot turn a known B-local submission into a missing-controller receipt", () => {
+  const local = Array.from({ length: 100 }, (_, index) => ({
+    event_name: "task_submitted", event_id: `local_${index}`, attempt_id: `local_${index}`,
+    device_id: "B", mode: "assistant", initiator_type: "user", occurred_at: now - 10000,
+  }));
+  const rows = invocation();
+  rows[0] = event("controlled", "task_submit");
+  const report = buildBehaviorOverview(devices, [], [...local, ...rows], "today", now);
+  assert.equal(report.metrics.task_submitted_count, 100);
+  assert.equal(report.remote_control.submitted_count, 0);
+  assert.equal(report.remote_control.task_count, 1);
+  assert.equal(report.remote_control.execution_terminal_count, 0);
+  assert.equal(report.remote_control.awaiting_receipt_count, 0);
+  // Truly missing submission evidence remains the documented conservative cohort.
+  assert.equal(buildBehaviorOverview(devices, [], rows.slice(1), "today", now)
+    .remote_control.execution_terminal_count, 1);
+});
+
 test("failed/cancelled tasks count once and model source never changes ownership", () => {
   for (const status of ["failed", "cancelled", "interrupted"]) {
     const rows = invocation().map(e => ({ ...e, remote_mode: "code", remote_model_source: "controller_temporary",
@@ -290,7 +316,7 @@ test("clipped execution cohort finds cross-day receipts without including overfl
       occurred_at: now - 1000, remote_task_status: "success", remote_duration_ms: 9000,
     }));
   const rows = [...executions, ...receipts];
-  const report = buildBehaviorOverview(devices, [], rows, "7d", now);
+  const report = buildBehaviorOverview(devices, [], rows, "7", now);
   assert.equal(report.metrics.task_finished_count, 100);
   assert.equal(report.remote_control.task_count, 100);
   assert.equal(report.remote_control.execution_terminal_count, 100);
@@ -369,6 +395,11 @@ test("dashboard sections reuse the remote join and refresh after ingestion, rete
     // Avoid unrelated due-compaction replacing the source between section reads.
     store.lastEventCompactionAt = Date.now();
     assert.equal(store.behaviorOverview("today").remote_control.task_count, 1);
+    const source = store.behaviorEvents;
+    const prepared = store.preparedBehaviorEvents([...store.devices.values()]);
+    assert.equal(store.compactBehaviorEvents(Date.now()), false);
+    assert.equal(store.behaviorEvents, source, "no-op compaction must not replace the source");
+    assert.equal(store.preparedBehaviorEvents([...store.devices.values()]), prepared);
     stageReads = 0;
     store.behaviorModels("today"); store.behaviorTools("today", "call"); store.behaviorScenes("today");
     store.overview(); store.deviceList();
@@ -400,6 +431,44 @@ test("dashboard sections reuse the remote join and refresh after ingestion, rete
   }
 });
 
+
+test("cached store views recompute maturity and advance calendar windows without new events", t => {
+  let clock = now;
+  t.mock.method(Date, "now", () => clock);
+  const directory = mkdtempSync(join(tmpdir(), "remote-calendar-"));
+  const store = new TelemetryStore(directory, "calendar-test-pepper-at-least-24-characters");
+  try {
+    for (const device of devices) store.devices.set(device.device_id, { ...device });
+    store.behaviorEvents = [
+      { event_name: "analytics_cohort_started", event_id: "near_maturity", device_id: "A",
+        occurred_at: now - 86400000 + 1000 },
+      ...invocation(),
+      ...invocation().map(row => ({ ...row, remote_task_key: "d".repeat(64),
+        event_id: `soon_${row.event_id}`, occurred_at: now + 1000 })),
+      ...invocation().map(row => ({ ...row, remote_task_key: "c".repeat(64),
+        event_id: `tomorrow_${row.event_id}`, occurred_at: now + 86400000 })),
+    ];
+    store.lastEventCompactionAt = clock;
+    const prepared = store.preparedBehaviorEvents([...store.devices.values()]);
+    assert.equal(store.behaviorOverview("7").metrics.cohort_matured_installations, 0);
+    assert.equal(store.behaviorOverview("today").remote_control.task_count, 1);
+    const hourlyTurns = () => store.overview().usage_trend_hourly_today
+      .reduce((total, row) => total + (row.turns || 0), 0);
+    assert.equal(hourlyTurns(), 1, "future facts stay excluded from the live hourly chart");
+    clock += 2000;
+    assert.equal(store.behaviorOverview("7").metrics.cohort_matured_installations, 1);
+    assert.equal(store.behaviorOverview("today").remote_control.task_count, 2);
+    assert.equal(hourlyTurns(), 2, "a cached terminal becomes visible when its timestamp is reached");
+    clock += 86400000;
+    assert.equal(store.behaviorOverview("today").remote_control.task_count, 1);
+    assert.equal(store.behaviorOverview("7").remote_control.task_count, 3);
+    assert.equal(store.preparedBehaviorEvents([...store.devices.values()]), prepared,
+      "calendar rollover and maturity must update even when the projection is reused");
+  } finally {
+    if (store.saveTimer) clearTimeout(store.saveTimer);
+    rmSync(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+  }
+});
 
 test("admitted installation failures cannot also count as rejection from legacy clients or retries", () => {
   const submit = event("controlled", "task_submit");
