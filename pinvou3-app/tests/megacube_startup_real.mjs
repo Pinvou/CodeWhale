@@ -22,6 +22,8 @@ const output = path.resolve(input.evidence); fs.mkdirSync(output, { recursive: f
 const nonce = crypto.randomBytes(5).toString('hex');
 const work = fs.mkdtempSync('/tmp/pinvou-startup-');
 const profile = path.join(work, '.qa', 'mcp-switch-real-' + nonce); fs.mkdirSync(profile, { recursive: true, mode: 0o700 });
+// The desktop creates this data root before it can register its inventory reader.
+fs.mkdirSync(path.join(profile, 'model-store'), { mode: 0o700 });
 const unit = `pinvou-cmsd-startup-${nonce}.service`, container = `megacube-startup-${nonce}`, card = `qa-startup-${nonce}`;
 const command = promisify(execFile);
 const run = async (program, args, options = {}) => (await command(program, args, { timeout: 60000, maxBuffer: 4*1024*1024, ...options })).stdout.trim();
@@ -120,6 +122,13 @@ if(host){host.stdin.end();host.kill('SIGTERM');}if(browser)await browser.close()
 }
 
 try{
+ // Exercise the real acceptance ELF's read-only CLI before entering stdio mode.
+ const inventory = JSON.parse(await run(input.host, ['--cmsd-store-inventory'], { env }));
+ assert.equal(inventory.format, 'pinvou-installed-models-v1');
+ assert.equal(inventory.selection_policy, 'latest-installed-v1');
+ assert.deepEqual(inventory.models, []);
+ assert.equal(fs.existsSync(path.join(profile, 'model-store', 'models.db')), false);
+ report.checks.push('Acceptance executable serves the production read-only inventory CLI for a fresh profile without creating a database');
  const absent=await cli('status');assert.equal(absent.canInstall,true);assert.equal(absent.installed,false);
  hostLog=fs.createWriteStream(path.join(output,'native-host.log'));
  host=spawn(input.host,[],{env,stdio:['pipe','pipe','pipe']});host.stderr.pipe(hostLog);
