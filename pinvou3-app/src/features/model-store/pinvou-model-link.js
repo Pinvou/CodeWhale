@@ -246,12 +246,57 @@ function findLinkedRows(savedModels, ...names) {
   return savedModels.filter((row) => wanted.has(row?.model) && isLocalGatewayUrl(row?.base_url));
 }
 
+/**
+ * 端点身份的规范化形式：scheme + 小写 host:port + 去尾斜杠的 path。
+ *
+ * 外部模型注册表（设备管理）的每条记录都带自己的 base_url，接入时原样写进
+ * 品悟那一行的 base_url，所以“这条记录接进了哪行”可以按端点精确回查。
+ * isLocalGatewayUrl 回答“能不能接/该不该清”（回环宽尺子），这里回答
+ * “是哪一行”（端点身份）：同一台机器上 8000 和 8001 是两个独立服务，同名
+ * 模型互不代办（十轮评审 P2）。query/hash 不归一——base_url 不该带这些，
+ * 带了就当不同端点，清理侧宁漏不误删。
+ * @param {unknown} url - base_url。
+ * @returns {string|null} 规范化端点；解析失败返回 null。
+ */
+function normalizeLoopbackEndpoint(url) {
+  if (typeof url !== 'string' || !url) return null;
+  try {
+    const u = new URL(url);
+    return `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, '')}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * findLinkedRows 的端点精确版：同名回环行里再要求 base_url 指向同一端点。
+ *
+ * 设备管理的外部模型接入/移除必须用它：同一台机器经常同时跑两个推理服务
+ * （如 8000/v1 与 8001/v1 都挂着 qwen3），按“任意回环”匹配，移除 8000 的
+ * 记录会把 8001 的品悟配置一起交给 deleteModel，接入处复用首个 existingId
+ * 也会顶掉另一端的配置。模型商店卡片继续用宽版 findLinkedRows——卡片的
+ * 端口由脚本版本决定，换一版端口就变，宽尺子才清得掉历史行（见上）。
+ * @param {Array<object>|null} savedModels - 品悟的模型列表（bs.savedModels）。
+ * @param {unknown} baseUrl - 这条记录自己的 base_url（linkTargetOf 的产物）。
+ * @param {...(string|null|undefined)} names - 与 findLinkedRows 相同的标识集。
+ * @returns {Array<object>} 命中的行（仅限同一端点）。
+ */
+function findLinkedRowsForEndpoint(savedModels, baseUrl, ...names) {
+  const endpoint = normalizeLoopbackEndpoint(baseUrl);
+  if (!endpoint) return [];
+  return findLinkedRows(savedModels, ...names).filter(
+    (row) => normalizeLoopbackEndpoint(row?.base_url) === endpoint
+  );
+}
+
 export {
   buildSavedModel,
   checkLinkable,
   findLinkedRows,
+  findLinkedRowsForEndpoint,
   isLocalGatewayUrl,
   isOpenAiChatEndpoint,
   makeModelId,
+  normalizeLoopbackEndpoint,
   pickApiKey,
 };

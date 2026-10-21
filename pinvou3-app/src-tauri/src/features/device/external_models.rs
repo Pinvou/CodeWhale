@@ -161,34 +161,8 @@ pub async fn get_external_models() -> Result<ExternalModelsView, String> {
                     model.status = ollama_status(expected, &names);
                 }
             }
-            for name in names {
-                // 去重与 ollama_status 同一把尺子（ollama_name_matches：小写 +
-                // 去 tag 归一）：记录写 `Qwen3:30B` 时大小写敏感比较会让同一 tag
-                // 既标 available 又以未登记行重复出现（第六轮评审 P3）；裸名记录
-                // 撞上 daemon 的 `mymodel:latest` 也按同款命中，否则同一模型既标
-                // unreachable 又以未登记行重复出现（第九轮评审 P3）。
-                let already_listed = models.iter().any(|model| {
-                    model.kind == "ollama"
-                        && (model
-                            .model
-                            .as_deref()
-                            .is_some_and(|m| ollama_name_matches(m, &name))
-                            || ollama_name_matches(&model.name, &name))
-                });
-                if !already_listed {
-                    models.push(ExternalModel {
-                        id: format!("ollama-{name}"),
-                        name,
-                        kind: "ollama".to_string(),
-                        base_url: None,
-                        model: None,
-                        weights_path: None,
-                        status: "available".to_string(),
-                        registered: false,
-                        source: "ollama".to_string(),
-                    });
-                }
-            }
+            // 去重与 ollama_status 同一把尺子（push_ollama_daemon_rows 内注释）。
+            push_ollama_daemon_rows(&mut models, &names);
         }
         Err(reason) => {
             // Ollama 不可达不是错误：注册表照常返回，相关模型标 unreachable。
@@ -235,27 +209,66 @@ pub async fn get_external_models() -> Result<ExternalModelsView, String> {
     Ok(ExternalModelsView { models, warnings })
 }
 
-/// Ollama 名字归一匹配（第九轮评审 P3）：daemon 的 /api/tags 恒带 `:tag`
-/// （未显式给 tag 时 Ollama 默认补 `:latest`），注册表记录/AI 手写常只有裸名
-/// ——原串比较会让无 tag 记录恒判 unreachable，且同一模型再以未登记 daemon 行
-/// 重复出现。与商店边界（model_store boundary 的去 tag 兜底）同一把尺子：去掉
-/// 首个 `:` 起的 tag 后缀再按小写比较。
+/// Ollama 名字归一匹配：**只**把缺省 tag 补成 `:latest`，显式 tag 原样保留，
+/// 大小写折叠交给比较侧。daemon 的 /api/tags 恒带 `:tag`（未显式给 tag 时
+/// Ollama 默认补 `:latest`），注册表记录/AI 手写常只有裸名——原串比较会让无
+/// tag 记录恒判 unreachable，且同一模型再以未登记 daemon 行重复出现（第九轮
+/// 评审 P3）；但无条件去 tag 会把 `qwen3:8b` 与 `qwen3:30b` 也当成同一个——
+/// tag 是模型身份，列表去重会把 daemon 真实存在的另一个 tag 当"重复行"隐藏，
+/// 只装了 30b 却登记 8b 也会被误标 available（十轮评审 P2）。商店边界
+/// （model_store boundary）的去 tag 是防误删的保守兜底，不是身份判断，
+/// 两把尺子用途不同，不能互借。
 fn ollama_name_matches(record_name: &str, daemon_name: &str) -> bool {
-    ollama_tagless_name(record_name).eq_ignore_ascii_case(ollama_tagless_name(daemon_name))
+    ollama_canonical_name(record_name).eq_ignore_ascii_case(&ollama_canonical_name(daemon_name))
 }
 
-fn ollama_tagless_name(name: &str) -> &str {
-    name.split(':').next().unwrap_or(name)
+fn ollama_canonical_name(name: &str) -> String {
+    if name.contains(':') {
+        name.to_string()
+    } else {
+        format!("{name}:latest")
+    }
 }
 
 fn ollama_status(expected: &str, names: &[String]) -> String {
-    // 归一匹配走 ollama_name_matches（小写 + 去 tag）：记录里手写 "Qwen3:30B"
-    // 时精确比较会恒判 unreachable（五轮评审 P3）；裸名记录撞 daemon 的
-    // `mymodel:latest` 是同一刀的另一半（九轮评审 P3）。
+    // 归一匹配走 ollama_name_matches（小写折叠 + 缺省 tag 补 latest、显式 tag
+    // 保留）：记录里手写 "Qwen3:30B" 时精确比较会恒判 unreachable（五轮评审
+    // P3）；裸名记录撞 daemon 的 `mymodel:latest` 是同一刀的另一半（九轮评审
+    // P3）；显式 tag 是身份，不得跨 tag 冒充 available（十轮评审 P2）。
     if names.iter().any(|name| ollama_name_matches(expected, name)) {
         "available".to_string()
     } else {
         "unreachable".to_string()
+    }
+}
+
+/// 把 daemon 在线列表按身份去重后并进视图（纯函数，测试直打）：已注册记录
+/// （按 ollama_name_matches 身份）命中过的名字不再重复成未登记行；没命中过
+/// 的名字——包括同 base 名的另一个显式 tag——必须以未登记行现身，否则用户
+/// 看不到 daemon 上真实存在的模型（十轮评审 P2）。
+fn push_ollama_daemon_rows(models: &mut Vec<ExternalModel>, names: &[String]) {
+    for name in names {
+        let already_listed = models.iter().any(|model| {
+            model.kind == "ollama"
+                && (model
+                    .model
+                    .as_deref()
+                    .is_some_and(|m| ollama_name_matches(m, name))
+                    || ollama_name_matches(&model.name, name))
+        });
+        if !already_listed {
+            models.push(ExternalModel {
+                id: format!("ollama-{name}"),
+                name: name.clone(),
+                kind: "ollama".to_string(),
+                base_url: None,
+                model: None,
+                weights_path: None,
+                status: "available".to_string(),
+                registered: false,
+                source: "ollama".to_string(),
+            });
+        }
     }
 }
 
@@ -1992,16 +2005,63 @@ mod tests {
     }
 
     #[test]
-    fn ollama_name_matches_detags_tags_and_folds_case() {
-        // 裸名记录 ↔ 带 tag daemon（两个方向都要命中，第九轮评审 P3）。
+    fn ollama_name_matches_defaults_to_latest_and_keeps_explicit_tags() {
+        // 裸名记录 ↔ daemon 默认 tag（两个方向都要命中，第九轮评审 P3）。
         assert!(ollama_name_matches("mymodel", "mymodel:latest"));
         assert!(ollama_name_matches("mymodel:latest", "mymodel"));
-        // 大小写折叠加去 tag（与商店 NOCASE 同一事实）。
+        // 大小写折叠仍在（记录里手写 "Qwen3:30B"，五轮评审 P3）。
         assert!(ollama_name_matches("MyModel", "mymodel:latest"));
-        assert!(ollama_name_matches("Qwen3:30B", "qwen3"));
+        assert!(ollama_name_matches("Qwen3:30B", "qwen3:30b"));
+        // 显式 tag 是身份：不同 tag 互不命中，裸名也不得冒充显式 tag——
+        // 无条件去 tag 的旧口径会把 qwen3:8b 与 qwen3:30b 判成同一模型
+        // （十轮评审 P2）。
+        assert!(!ollama_name_matches("qwen3:8b", "qwen3:30b"));
+        assert!(!ollama_name_matches("Qwen3:30B", "qwen3"));
+        assert!(!ollama_name_matches("mymodel", "mymodel:8b"));
+        assert!(!ollama_name_matches("mymodel:8b", "mymodel"));
         // 不同 base 名不得互相命中。
         assert!(!ollama_name_matches("mymodel", "othermodel:latest"));
         assert!(!ollama_name_matches("mymodel:latest", "mymodel2"));
+    }
+
+    #[test]
+    fn daemon_rows_keep_every_explicit_tag_and_status_never_impersonates() {
+        let make = |name: &str, model: &str| ExternalModel {
+            id: format!("reg-{name}"),
+            name: name.to_string(),
+            kind: "ollama".to_string(),
+            base_url: None,
+            model: Some(model.to_string()),
+            weights_path: None,
+            status: "unreachable".to_string(),
+            registered: true,
+            source: "registry".to_string(),
+        };
+        // 注册了 qwen3:8b，daemon 同时挂着 8b 与 30b：8b 不重复成未登记行，
+        // 30b 是另一个模型，必须以未登记行现身（无条件去 tag 会把它隐藏）。
+        let mut models = vec![make("qwen3 8b", "qwen3:8b")];
+        push_ollama_daemon_rows(
+            &mut models,
+            &["qwen3:8b".to_string(), "qwen3:30b".to_string()],
+        );
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[1].name, "qwen3:30b");
+        assert_eq!(models[1].source, "ollama");
+        assert!(!models[1].registered);
+
+        // 只装了 30b 却登记 8b：8b 不得冒充 available（链接/删除发的是完整
+        // 8b 名，daemon 会 404）；补上 8b 后恢复 available。
+        assert_eq!(
+            ollama_status("qwen3:8b", &["qwen3:30b".to_string()]),
+            "unreachable"
+        );
+        assert_eq!(
+            ollama_status(
+                "qwen3:8b",
+                &["qwen3:30b".to_string(), "qwen3:8b".to_string()]
+            ),
+            "available"
+        );
     }
 
     #[test]

@@ -73,10 +73,13 @@
     return v.toFixed(1);
   }
 
-  // 告警档位：≥critical → crit；温度量另有 ±10 预警带（≥max-10 或 ≥critical-10
-  // → warn）。±10 带只对温度有意义：电压/电流/功率贴着 max 是常态读数
-  // （如 INA3221 的 12.06V vs 12.1V max），套预警带会常年误报 warn；这些量只有
-  // 真正越过 critical（或 max）才算 crit，其余一律 ok。
+  // 告警档位：≥critical → crit；温度量另有 critical-10 预警带。max 对温度是
+  // **历史峰值**（hwmon tempN_highest，后端只在严格高于当前读数时才给），不是
+  // 阈值——拿峰值当预警线，当前 45°C/峰值 46°C/critical 100°C 会恒 warn，升到
+  // 46°C 后后端省略相等峰值反而"恢复"ok（十轮评审 P2）。峰值只用于展示，档位
+  // 只看真正的安全阈值 critical。电压/电流/功率贴着 max 是常态读数（如 INA3221
+  // 的 12.06V vs 12.1V max），套预警带会常年误报 warn；这些量只有真正越过
+  // critical（或 max）才算 crit，其余一律 ok。
   function sensorLevel(kind, value, critical, max) {
     var v = typeof value === "number" && isFinite(value) ? value : null;
     if (v == null) return "ok";
@@ -87,9 +90,7 @@
       if (hasMax && v >= max) return "crit";
       return "ok";
     }
-    var nearMax = hasMax && v >= max - 10;
-    var nearCrit = hasCritical && v >= critical - 10;
-    if (nearMax || nearCrit) return "warn";
+    if (hasCritical && v >= critical - 10) return "warn";
     return "ok";
   }
 

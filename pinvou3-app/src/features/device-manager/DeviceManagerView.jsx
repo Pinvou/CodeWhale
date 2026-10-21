@@ -38,7 +38,11 @@ import { bridge } from '../../hooks/useBridge.js';
 import { MonitorView, MONITOR_CLOCK_LOCALE } from '../monitor/MonitorView.jsx';
 import { fetchLibrary, storeAvailability } from '../model-store/model-store-api.js';
 import { libraryStatusOf } from '../model-store/model-store-logic.js';
-import { buildSavedModel, findLinkedRows, isLocalGatewayUrl } from '../model-store/pinvou-model-link.js';
+import {
+  buildSavedModel,
+  findLinkedRowsForEndpoint,
+  isLocalGatewayUrl,
+} from '../model-store/pinvou-model-link.js';
 import { MsButton, MsPill, MsToast } from '../model-store/model-store-ui.jsx';
 
 const TOAST_MS = 3200;
@@ -579,7 +583,11 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   // P3). Kind never changes for a row, so the identity survives the id swap.
   const rowKey = (row) => `${row.source || 'registry'}:${row.kind || ''}:${row.name}`;
 
-  const isRowLinked = (row) => findLinkedRows(bs?.savedModels, row.model, row.name).length > 0;
+  // Endpoint-precise button state (round-10 review P2): two inference
+  // services on one machine can serve the same model name, so "linked" only
+  // looks at rows saved from THIS record's endpoint.
+  const isRowLinked = (row) =>
+    findLinkedRowsForEndpoint(bs?.savedModels, linkTargetOf(row).baseUrl, row.model, row.name).length > 0;
 
   // Same shape as ModelDetailDialog.useInPinvou: build a SavedModel via the
   // shared pinvou-model-link helpers, save it, and make it the active model
@@ -606,10 +614,13 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     if (busyKey) return;
     setBusyKey(`link:${rowKey(row)}`);
     try {
-      // findLinkedRows takes (...names): pass both the registry model and the
-      // listing name so a relink updates the already-saved row in place
-      // (existingId) instead of duplicating it in Pinvou's model list.
-      const existing = findLinkedRows(bs?.savedModels, row.model, row.name)[0] || null;
+      // findLinkedRowsForEndpoint takes (...names): pass both the registry
+      // model and the listing name so a relink updates THIS record's row in
+      // place (existingId) instead of duplicating it — endpoint-precise, so a
+      // same-name model on another loopback port keeps its own row untouched
+      // (round-10 review P2).
+      const existing =
+        findLinkedRowsForEndpoint(bs?.savedModels, target.baseUrl, row.model, row.name)[0] || null;
       const saved = buildSavedModel({
         modelName: target.model,
         displayName: row.name,
@@ -697,7 +708,16 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
       let cleanupOk = true;
       let cleanupErrorText = null;
       if (Array.isArray(bs?.savedModels)) {
-        const linkedRows = findLinkedRows(bs.savedModels, row.model, row.name);
+        // Endpoint-precise recycle (round-10 review P2): only rows linked from
+        // THIS record's endpoint go to deleteModel — a same-name model linked
+        // from another loopback service is an independent config that must
+        // survive this removal.
+        const linkedRows = findLinkedRowsForEndpoint(
+          bs.savedModels,
+          linkTargetOf(row).baseUrl,
+          row.model,
+          row.name
+        );
         const liveBridge = window.TauriBridge || bridge;
         // Assign the OUTER variable (an inner `let` here used to shadow it and
         // every cleanup failure surfaced as "unknown" — round-3 review P2).
