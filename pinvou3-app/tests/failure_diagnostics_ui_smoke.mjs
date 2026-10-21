@@ -58,11 +58,23 @@ try {
   });
   await click('Refresh');
   await page.waitForFunction(() => document.body.textContent.includes('The collection period ended and this report was not sent'));
+  await page.evaluate(() => {
+    window.diagnosticTest.reports = [{ report_id: 'legacy_report', incident_id: 'incident_fixture_1', status: 'rejected', reason: 'incident_period_mismatch' }];
+  });
+  await click('Refresh');
+  await page.waitForFunction(() => document.body.textContent.includes('Previewing the same failure cannot restore it'));
+  assert.equal(await page.evaluate(() => window.diagnosticTest.submitted.length), 1);
+  await page.evaluate(() => {
+    window.diagnosticTest.reports = [{ report_id: 'old_rejected_report', incident_id: 'incident_fixture_1', status: 'rejected', reason: '' }];
+  });
+  await click('Refresh');
+  await page.waitForFunction(() => document.body.textContent.includes('A new preview may not restore a legacy failure association'));
+  assert.equal(await page.evaluate(() => window.diagnosticTest.submitted.length), 1);
   await page.evaluate(() => { window.diagnosticTest.enabled = false; }); await click('Refresh');
   await page.waitForFunction(() => document.body.textContent.includes('Usage analytics is off'));
   assert.equal(await page.$$eval('button', buttons => buttons.find(item => item.textContent === 'Create redacted preview').disabled), true);
   assert.deepEqual(errors, []);
-  console.log('PASS: diagnostics turn isolation, exact preview consent, edits, attachment limit, queued receipt, actionable errors, ended-period state and opt-out');
+  console.log('PASS: diagnostics turn isolation, exact preview consent, edits, attachment limit, queued receipt, actionable errors, ended-period and unrecoverable legacy states, no automatic resubmission, and opt-out');
 } finally {
   await browser?.close(); await server?.close(); fs.rmSync(profile, { recursive: true, force: true });
 }

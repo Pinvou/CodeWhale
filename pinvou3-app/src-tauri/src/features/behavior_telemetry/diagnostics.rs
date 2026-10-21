@@ -1089,7 +1089,7 @@ pub(super) async fn run_report_worker(mut rx: mpsc::Receiver<()>, telemetry: Beh
             tokio::time::sleep(Duration::from_secs(5)).await;
             continue;
         }
-        let result: Result<(bool, bool, u16, bool)> = async {
+        let result: Result<(bool, bool, u16, &'static str)> = async {
             let credentials = telemetry.ensure_credentials().await?;
             let gate = telemetry.control_gate.lock().await;
             anyhow::ensure!(
@@ -1143,12 +1143,16 @@ pub(super) async fn run_report_worker(mut rx: mpsc::Receiver<()>, telemetry: Beh
                 matches!(conflict_code.as_str(), "diagnostic_report_conflict" | "collection_inactive" | "diagnostic_incident_period_mismatch")
                     || matches!(status.as_u16(), 400 | 403 | 413 | 422),
                 status.as_u16(),
-                conflict_code == "collection_inactive",
+                match conflict_code.as_str() {
+                    "collection_inactive" => "collection_inactive",
+                    "diagnostic_incident_period_mismatch" => "incident_period_mismatch",
+                    _ => "",
+                },
             ))
         }
         .await;
         match result {
-            Ok((success, permanent, _, inactive)) if success || permanent => {
+            Ok((success, permanent, _, reason)) if success || permanent => {
                 if let Ok(mut state) = telemetry.diagnostics.lock() {
                     if let Some(pending) = state
                         .pending
@@ -1156,7 +1160,7 @@ pub(super) async fn run_report_worker(mut rx: mpsc::Receiver<()>, telemetry: Beh
                         .find(|p| p.payload["report_id"] == report.payload["report_id"])
                     {
                         pending.status = if success { "received" } else { "rejected" }.into();
-                        pending.reason = if inactive { "collection_inactive" } else { "" }.into();
+                        pending.reason = if success { "" } else { reason }.into();
                         // Keep only the receipt locally once delivery is settled.
                         pending.payload["notes"] = json!("");
                         pending.payload["attachments"] = json!([]);

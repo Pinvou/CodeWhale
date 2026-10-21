@@ -1,5 +1,6 @@
 export const failureDiagnosticsZh = {
   previewExpired: '预览已过期，请重新预览并确认。', authorizationChanged: '统计授权已变化，请刷新后重新预览。', queueFull: '待发送报告已满，请等待现有报告送达后重试。',
+  incidentPeriodMismatch: '旧故障记录无法关联，本报告已停止重试。重新预览同一故障无法恢复；请通过现有反馈渠道手工报告，或在故障再次发生后选择新记录。',
   collectionInactive: '采集期已结束，本报告未发送；重新开启统计后，请重新预览并确认。',
   remove: '移除附件', serverUpgrade: '服务端尚未支持报告；升级后将自动重试。', incidentPending: '等待故障事件送达后台后重试。',
   title: '故障诊断与报告', report: '报告此问题', refresh: '刷新',
@@ -11,12 +12,13 @@ export const failureDiagnosticsZh = {
   preview: '生成脱敏预览', previewTitle: '本次将发送的内容',
   consent: '我已检查预览和图片，确认这些材料可以发送给排障管理员。图片中的私人信息需要我自行遮挡。',
   submit: '确认并排队发送', queued: '已排队；联网后自动重试。可刷新查看接收状态。',
-  received: '后台已接收', rejected: '后台拒收，请检查材料后重新预览', busy: '处理中…',
+  received: '后台已接收', rejected: '后台拒收，本报告已停止重试。请检查原因；重新预览可能无法恢复旧故障关联。', busy: '处理中…',
   error: '操作失败。请检查统计状态、文件类型和大小，刷新后重试；已有排队报告不会重复创建。',
   timeline: '结构化阶段证据',
 };
 export const failureDiagnosticsEn = {
   previewExpired: 'The preview expired. Create and confirm a new preview.', authorizationChanged: 'Analytics consent changed. Refresh and create a new preview.', queueFull: 'The report queue is full. Wait for pending reports to be delivered.',
+  incidentPeriodMismatch: 'This legacy failure cannot be linked, so the report will not retry. Previewing the same failure cannot restore it. Use an existing feedback channel to report it manually, or select a new record if the failure happens again.',
   collectionInactive: 'The collection period ended and this report was not sent. Enable analytics, then create and confirm a new preview.',
   remove: 'Remove attachment', serverUpgrade: 'The server needs an update to accept reports. Delivery will retry.', incidentPending: 'Waiting for the failure event to reach the server before retrying.',
   title: 'Failure diagnostics and reports', report: 'Report this problem', refresh: 'Refresh',
@@ -28,12 +30,13 @@ export const failureDiagnosticsEn = {
   preview: 'Create redacted preview', previewTitle: 'Material to be sent this time',
   consent: 'I reviewed the preview and images and approve sending this material to troubleshooting administrators. I must obscure private information in images myself.',
   submit: 'Confirm and queue', queued: 'Queued. Delivery retries when online. Refresh to check receipt status.',
-  received: 'Received by the server', rejected: 'Rejected by the server. Check the material and create a new preview.', busy: 'Working…',
+  received: 'Received by the server', rejected: 'Rejected by the server; this report will not retry. Check the cause. A new preview may not restore a legacy failure association.', busy: 'Working…',
   error: 'The operation failed. Check analytics status, file type and size, then refresh and retry. Existing queued reports are not duplicated.',
   timeline: 'Structured stage evidence',
 };
 export const failureDiagnosticsJa = {
   previewExpired: 'プレビューの有効期限が切れました。再作成して確認してください。', authorizationChanged: '統計への同意が変更されました。更新して再度プレビューしてください。', queueFull: '送信待ちの報告が上限に達しました。送信完了を待ってください。',
+  incidentPeriodMismatch: '古い障害記録を関連付けられないため、この報告は再試行しません。同じ障害を再プレビューしても復旧しません。既存の窓口から手動で報告するか、再発した際の新しい記録を選択してください。',
   collectionInactive: '収集期間が終了したため、この報告は未送信です。統計を有効にして再度プレビューし、確認してください。',
   remove: '添付を削除', serverUpgrade: '報告の受信にはサーバーの更新が必要です。自動的に再試行します。', incidentPending: '障害イベントの到着を待って再試行します。',
   title: '障害診断と報告', report: 'この問題を報告', refresh: '更新',
@@ -45,7 +48,7 @@ export const failureDiagnosticsJa = {
   preview: '匿名化プレビューを作成', previewTitle: '今回送信する内容',
   consent: 'プレビューと画像を確認し、調査管理者への送信に同意します。画像内の個人情報は自分で隠す必要があります。',
   submit: '確認して送信待ちに追加', queued: '送信待ちです。オンライン時に再試行します。更新して受信状況を確認できます。',
-  received: 'サーバーで受信済み', rejected: 'サーバーが拒否しました。資料を確認して再度プレビューしてください。', busy: '処理中…',
+  received: 'サーバーで受信済み', rejected: 'サーバーが拒否したため、この報告は再試行しません。原因を確認してください。再プレビューしても古い障害の関連付けが復旧しない場合があります。', busy: '処理中…',
   error: '操作に失敗しました。統計の状態、ファイルの種類とサイズを確認し、更新して再試行してください。送信待ちの報告は重複作成されません。',
   timeline: '構造化された処理段階',
 };

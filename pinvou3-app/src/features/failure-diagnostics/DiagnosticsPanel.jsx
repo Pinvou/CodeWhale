@@ -77,7 +77,7 @@ export default function DiagnosticsPanel({ copy, sessionId, turnId, compact = fa
           })}>{copy.submit}</button>
         </div>}
       </>}
-      {(data?.reports || []).map(report => <p key={report.report_id} className="text-xs">{report.incident_id} · {report.status === 'received' ? copy.received : report.reason === 'collection_inactive' ? copy.collectionInactive : report.status === 'rejected' ? copy.rejected : report.reason === 'server_upgrade_required' ? copy.serverUpgrade : report.reason === 'incident_pending' ? copy.incidentPending : copy.queued}</p>)}
+      {(data?.reports || []).map(report => <p key={report.report_id} className="text-xs">{report.incident_id} · {report.status === 'received' ? copy.received : report.reason === 'collection_inactive' ? copy.collectionInactive : report.reason === 'incident_period_mismatch' ? copy.incidentPeriodMismatch : report.status === 'rejected' ? copy.rejected : report.reason === 'server_upgrade_required' ? copy.serverUpgrade : report.reason === 'incident_pending' ? copy.incidentPending : copy.queued}</p>)}
       {busy && <p role="status">{copy.busy}</p>}
       {message && <p role="status">{message}</p>}
     </div>}

@@ -433,7 +433,22 @@ fn diagnostic_environment_discards_invalid_current_and_persisted_values() {
 #[tokio::test(flavor = "current_thread")]
 async fn diagnostic_rebound_report_sends_frozen_preview_with_current_delivery_authorization() {
     let _home = TestHome::new();
-    for (http, expected) in [(200, "received"), (409, "rejected")] {
+    for (http, conflict, expected, reason) in [
+        (200, "", "received", ""),
+        (
+            409,
+            "diagnostic_incident_period_mismatch",
+            "rejected",
+            "incident_period_mismatch",
+        ),
+        (
+            409,
+            "collection_inactive",
+            "rejected",
+            "collection_inactive",
+        ),
+        (409, "diagnostic_report_conflict", "rejected", ""),
+    ] {
         let runtime = test_runtime("http://localhost:1");
         let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
         let failure = diagnostic_failure("delivery_session", "delivery_turn");
@@ -468,7 +483,7 @@ async fn diagnostic_rebound_report_sends_frozen_preview_with_current_delivery_au
             (if http == 200 {
                 json!({"report_id":preview["report"]["report_id"],"status":"received"})
             } else {
-                json!({"error":"diagnostic_incident_period_mismatch"})
+                json!({"error":conflict})
             })
             .to_string()
             .into_boxed_str(),
@@ -496,10 +511,14 @@ async fn diagnostic_rebound_report_sends_frozen_preview_with_current_delivery_au
             serde_json::from_str(requests[0].split_once("\r\n\r\n").unwrap().1).unwrap();
         assert_eq!(body["collection_period_id"], "current_delivery_period");
         assert_eq!(body["report"], preview["report"]);
-        assert_eq!(
-            diagnostics::diagnostic_incidents(&telemetry).unwrap()["reports"][0]["status"],
-            expected
-        );
+        for reload in [false, true] {
+            if reload {
+                *telemetry.diagnostics.lock().unwrap() = diagnostics::load();
+            }
+            let reports = diagnostics::diagnostic_incidents(&telemetry).unwrap();
+            assert_eq!(reports["reports"][0]["status"], expected);
+            assert_eq!(reports["reports"][0]["reason"], reason);
+        }
     }
 }
 
