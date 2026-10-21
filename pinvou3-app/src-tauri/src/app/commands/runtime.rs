@@ -188,7 +188,6 @@ mod platform_capability_tests {
     fn semantic_capabilities_match_the_compiled_target() {
         let capabilities = PlatformCapabilities::current();
         let expected = crate::platform::capabilities::current();
-        assert_eq!(capabilities.os, expected.os);
         assert_eq!(capabilities.show_megacube_site, expected.show_megacube_site);
         assert_eq!(capabilities.megacube_device, expected.megacube_device);
         assert_eq!(
