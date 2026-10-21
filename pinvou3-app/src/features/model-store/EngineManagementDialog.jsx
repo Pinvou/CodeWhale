@@ -55,7 +55,9 @@ function EngineManagementDialog({ open, onClose, onChanged, theme, copy }) {
   };
 
   return (
-    <MsDialog open={open} onClose={onClose} theme={theme} labelledBy="model-store-engines-title" testId="model-store-engines-dialog">
+    /* busy 期（删除进行中）Esc/遮罩不可关（评审 P2）：这时关掉的话，删除失败的
+     * 红字会落进一个看不见的弹窗——Close 按钮同样 busy 禁用，Esc 原先却畅通。 */
+    <MsDialog open={open} onClose={busy ? undefined : onClose} theme={theme} labelledBy="model-store-engines-title" testId="model-store-engines-dialog">
       <MsDialogTitle id="model-store-engines-title">{copy.enginesTitle}</MsDialogTitle>
       <p className={`mb-4 text-[13px] leading-6 ${TEXT_SECONDARY}`}>
         {copy.enginesIntro}

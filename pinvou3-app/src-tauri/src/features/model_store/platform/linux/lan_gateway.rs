@@ -102,13 +102,27 @@ struct App {
 impl Gateway {
     pub async fn status(&self, store: &Arc<dyn Store>, card: &str) -> Result<Status, String> {
         let interfaces = store.interfaces()?;
-        let mut session = self.session.lock().await;
-        if session.as_ref().is_some_and(|s| {
-            *s.stop.borrow() || s.task.is_finished() || !interfaces.contains(&s.interface)
-        }) && let Some(s) = session.take()
-        {
-            let _ = s.stop.send(true);
-        }
+        // 快照在锁内拿全，慢检查一律在锁外（评审 P2）：route 验证含 docker inspect
+        // 与上游 GET（各 ~3s），而前端 3s 一轮轮询 status——此前慢检查全程持
+        // session 锁，set() 每次都要等一轮让路。
+        let (enabled, address, port) = {
+            let mut session = self.session.lock().await;
+            if session.as_ref().is_some_and(|s| {
+                *s.stop.borrow() || s.task.is_finished() || !interfaces.contains(&s.interface)
+            }) && let Some(s) = session.take()
+            {
+                let _ = s.stop.send(true);
+            }
+            let enabled = match session.as_ref() {
+                Some(s) => s.cards.lock().await.contains_key(card),
+                None => false,
+            };
+            let (address, port) = session
+                .as_ref()
+                .map(|s| (Some(s.interface.address), s.port))
+                .unwrap_or((None, 8090));
+            (enabled, address, port)
+        };
         let route = match store.route(card).await {
             Ok(route) => match local_client() {
                 Ok(client) => verify_model(&client, &route)
@@ -118,15 +132,6 @@ impl Gateway {
             },
             Err(e) => Err(e),
         };
-        let enabled = if let Some(s) = session.as_ref() {
-            s.cards.lock().await.contains_key(card)
-        } else {
-            false
-        };
-        let (address, port) = session
-            .as_ref()
-            .map(|s| (Some(s.interface.address), s.port))
-            .unwrap_or((None, 8090));
         let base_url = if enabled {
             address.map(|ip| format!("http://{ip}:{port}/v1"))
         } else {
@@ -580,6 +585,7 @@ async fn chat(
     let (sender, receiver) = mpsc::channel::<Result<Bytes, reqwest::Error>>(2);
     let producer = tokio::spawn(async move {
         let _monitor = monitor;
+        let mut last_key_check = std::time::Instant::now();
         let pump = async {
             let mut bytes = response.bytes_stream();
             loop {
@@ -594,9 +600,14 @@ async fn chat(
                             return false;
                         }
                     };
-                    // Retain the original per-upstream-chunk key check as well.
-                    if recheck_key(&app, &key, &card).await.is_err() {
-                        return false;
+                    // Retain the original per-upstream-chunk key check, but
+                    // throttled (评审 P2): 撤销即时性已有 1s 时钟 + POST 前
+                    // reauthorize 兜底，逐 chunk 的 SQLite 重开连接只是冗余放大。
+                    if last_key_check.elapsed() >= Duration::from_millis(500) {
+                        last_key_check = std::time::Instant::now();
+                        if recheck_key(&app, &key, &card).await.is_err() {
+                            return false;
+                        }
                     }
                     for part in chunk.chunks(16 * 1024) {
                         if sender.send(Ok(Bytes::copy_from_slice(part))).await.is_err() {
