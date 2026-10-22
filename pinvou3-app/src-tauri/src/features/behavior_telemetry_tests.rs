@@ -147,12 +147,27 @@ fn client_privacy_allowlist_keeps_diagnostic_delegation_bounded() {
     .unwrap();
     for field in schema["x-client-optional-fields"].as_array().unwrap() {
         let field = field.as_str().unwrap();
-        assert!(client_event_field_allowed(field), "{field}");
+        // Remote fields belong to the event-specific gateway, never the
+        // general allowlist. Diagnostic extensions still delegate by name.
+        assert_eq!(
+            client_event_field_allowed(field),
+            !field.starts_with("remote_"),
+            "{field}"
+        );
         assert_eq!(
             diagnostics::known_field(field),
             field.starts_with("diagnostic_")
         );
     }
+    let mut remote =
+        RemoteControlEvent::new(RemoteStage::TaskTerminal, RemoteOutcome::InternalError)
+            .task("privacy_gateway_fixture", true, Some("chat"))
+            .status("unknown")
+            .into_behavior();
+    assert!(validate_client_event_fields(&remote).is_ok());
+    // The same valid fields must be rejected when reused on an ordinary event.
+    remote.event_name = "task_finished";
+    assert!(validate_client_event_fields(&remote).is_err());
     for field in schema["x-server-injected-fields"].as_array().unwrap() {
         assert!(!client_event_field_allowed(field.as_str().unwrap()));
     }
