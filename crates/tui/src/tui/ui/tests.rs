@@ -6561,6 +6561,7 @@ fn setup_presets_cannot_override_managed_runtime_requirements() {
 
 #[test]
 fn tool_result_api_content_is_the_engine_model_view() {
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
     // #6508: the TUI's API-message mirror (what `SyncSession` sends back to
     // the engine) must hold exactly what the engine gave the model. It used
     // to swap anything over 12,000 characters for a 240-character receipt

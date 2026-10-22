@@ -1310,6 +1310,25 @@ fn request_builder_deduplicates_medium_identical_tool_results_to_earlier_message
 }
 
 #[test]
+fn request_builder_never_deduplicates_unsaved_output_previews() {
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
+    let output = format!(
+        "{}\n[the full output could not be saved; {}]",
+        "preview\n".repeat(200),
+        crate::tools::truncate::unsaved_output_recovery_instruction(),
+    );
+    let messages = vec![
+        tool_use_message("tool-1", "bash", json!({"command": "probe"})),
+        tool_result_message("tool-1", &output),
+        tool_use_message("tool-2", "bash", json!({"command": "probe"})),
+        tool_result_message("tool-2", &output),
+    ];
+    let built = build_chat_messages(None, &messages, "deepseek-v4-flash");
+    assert_eq!(tool_message_content(&built, 0), output);
+    assert_eq!(tool_message_content(&built, 1), output);
+}
+
+#[test]
 fn request_builder_never_dedups_large_identical_write_file_confirmations() {
     with_tool_result_sha_spillover_root(|| {
         // A `write_file` result embeds the unified diff + summary; it is a

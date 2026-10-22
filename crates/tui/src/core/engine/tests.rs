@@ -19615,6 +19615,119 @@ fn structured_run_tests_summary_is_recoverable_and_leads_with_failures() {
 }
 
 #[test]
+fn forkguard_complete_structured_results_do_not_request_recovery() {
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
+    let cases = [
+        (
+            "agent",
+            json!({"action": "roster", "members": [{"name": "reader"}]}),
+        ),
+        (
+            "agent",
+            json!({"agent_id": "child-1", "status": "completed", "result": "answer"}),
+        ),
+        (
+            "run_tests",
+            json!({"success": true, "exit_code": 0, "command": "cargo test", "stdout": "1 passed", "stderr": ""}),
+        ),
+        (
+            "run_verifiers",
+            json!({"summary": "1 passed", "gates": [{"name": "check", "ecosystem": "rust", "status": "passed", "exit_code": 0, "stdout": "", "stderr": ""}]}),
+        ),
+        (
+            "task_gate_run",
+            json!({"gate": {"gate": "check", "status": "passed", "command": "cargo check", "summary": "ok"}}),
+        ),
+    ];
+    for (tool, payload) in cases {
+        let output = ToolResult::success(payload.to_string());
+        let view = view_128k(tool, &output);
+        assert!(
+            !view.needs_full_output_artifact,
+            "complete {tool}: {}",
+            view.text
+        );
+        assert!(!view.text.contains("full output"), "{tool}: {}", view.text);
+        assert!(
+            !view.text.contains("retrieve_tool_result"),
+            "{tool}: {}",
+            view.text
+        );
+        assert!(!view.text.contains("re-run"), "{tool}: {}", view.text);
+    }
+}
+
+#[test]
+fn forkguard_structured_field_cuts_still_request_recovery() {
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
+    let cases = [
+        (
+            "agent",
+            json!({"action": "roster", "description": "x".repeat(3_000)}),
+        ),
+        (
+            "agent",
+            json!({"agent_id": "child-1", "status": "completed", "result": "x".repeat(2_000)}),
+        ),
+        (
+            "run_verifiers",
+            json!({"gates": [{"name": "check", "status": "failed", "stderr": "x".repeat(1_000)}]}),
+        ),
+        (
+            "run_verifiers",
+            json!({"gates": [{"name": "check", "status": "passed", "stdout": "omitted success details"}]}),
+        ),
+        (
+            "task_gate_run",
+            json!({"gate": {"gate": "check", "status": "failed", "command": "cargo check", "summary": "x".repeat(1_000)}}),
+        ),
+    ];
+    for (tool, payload) in cases {
+        let raw = payload.to_string();
+        assert!(
+            raw.chars().count() < budget_128k(),
+            "fixture must be under the route budget"
+        );
+        let view = view_128k(tool, &ToolResult::success(raw));
+        assert!(view.needs_full_output_artifact, "cut {tool}: {}", view.text);
+        assert_eq!(
+            view.text
+                .matches("the full output could not be saved")
+                .count(),
+            1
+        );
+        assert!(view.text.chars().count() <= budget_128k());
+    }
+}
+
+#[test]
+fn forkguard_structured_recovery_footer_is_single_and_route_bounded() {
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
+    let output =
+        ToolResult::success(json!({"action": "roster", "members": "x".repeat(4_000)}).to_string());
+    for window in [1, 64, 1_024, 4_096, 128_000] {
+        let view = super::context::tool_result_context_view(
+            ApiProvider::Deepseek,
+            ROUTE_128K,
+            Some(codewhale_config::route::RouteLimits {
+                context_tokens: Some(window),
+                ..Default::default()
+            }),
+            "agent",
+            &output,
+        );
+        let budget = crate::route_budget::route_inline_char_budget(Some(window as u32));
+        assert!(view.needs_full_output_artifact);
+        assert!(
+            view.text.chars().count() <= budget,
+            "window={window}: {}",
+            view.text
+        );
+        assert!(view.text.matches("recovery").count() <= 1, "{}", view.text);
+    }
+}
+
+#[test]
 fn structured_run_tests_summary_bounds_metadata_and_scales_both_streams() {
     let raw = json!({
         "success": false,
