@@ -142,7 +142,9 @@ prepare 程序只从 `TOKEN_RELEASE_DBA_DATABASE_URL` 连接 DBA；`--operation 
 
 ### 7.2 实际调用与证据归属
 
-所有可用CLI参数见 当前 `scripts/account-platform-credential-edge.mjs`、`account-platform-credential-origin-probe.mjs` 的 CLI 参数及其受控配置（原 nginx 手册当前未恢复），其相对文件、三模板与公开edge config均在本组。配置校验默认零网络；显式render只输出片段，不运行nginx/certbot；HTTP与scope只有显式--probe才访问固定目标。现场CLI不提供fixture resolver/TLS绕过；真实scope测试要求显式CHROME与app锁定puppeteer-core。与scope分开，`credential-domain-rename.test.mjs`直接执行G0实际脚本完整READY/BIND/SUBMIT，四正例恰一次指定目标POST、三十负例零POST/DOM；该VM不是原生浏览器TLS/完整现场登录。
+所有可用 CLI 参数见当前 `scripts/account-platform-credential-edge.mjs`、`scripts/account-platform-credential-origin-probe.mjs` 及其受控配置（原 nginx 手册当前未恢复），其相对文件、三模板与公开 edge config 均在本组。配置校验默认零网络；显式 render 只输出片段，不运行 nginx/certbot；HTTP 与 scope 只有显式 `--probe` 才访问固定目标。现场 CLI 不提供 fixture resolver/TLS 绕过；真实 scope 测试要求显式 CHROME 与 app 锁定的 puppeteer-core。
+
+当前脚本握手回归位于 `account-platform/test/contract/credential-handoff-runtime.test.mjs`，可运行 `node --test account-platform/test/contract/credential-handoff-runtime.test.mjs`，并已接入 Account Platform 的正式合同测试通配入口。它在受控 VM 中直接执行当前 `credential-handoff.v1.js` 的完整 READY/BIND/SUBMIT：四种合法 origin 配对各恰一次固定目标 POST、拒绝重复提交，三十种无效启动/绑定/提交场景均零 POST/DOM。此处的 POST 是受控 form stub 记录，不产生网络请求；这项证据不等同原生浏览器、TLS、真实登录或现场完整握手。边缘配置和只读探针另由 `credential-edge.test.mjs`、`credential-origin-probe.test.mjs` 覆盖；原生浏览器 scope 为独立验收项，不能借用 VM 的通过数。
 
 静态/Node/Chrome与隔离nginx实测按根精确候选分项记录；可以在G4模板/固定域/相关原服务字节一致时明确继承新域nginx解析/回环证据，不能继承旧域525候选作为新域已验收。G6的通用renderer、nginx测试镜像/helper和workflow未随本组提交，不声称这些持续门禁已交付或GitHub已绿。完整双origin/IdP握手、安全日志、权限撤销与回滚仍要独立现场证据，不由scope或无Cookie/session401探针替代。
 

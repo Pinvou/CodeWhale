@@ -8,6 +8,15 @@
 
 所需 Secret/受控身份仅由已有安全设施提供，不能写进 argv、仓库、工单或日志。当前缺载体、签署、可信来源或真实执行记录时保持未验收；不能以历史 DONE/PASS、JSON 格式或自造收据代替。恢复工件绑定与现场独立审批的区别见 [运维证据](operational-evidence.md)。
 
+当前有两套独立投放入口，固定版本不相同：
+
+| 入口 | 当前源码固定版本 | 适用边界 |
+| --- | --- | --- |
+| `deploy/compose/compose.yaml`、`deploy/helm/account-platform/values.yaml` | rc.26，摘要 `7b82c866e9c0fb02faca7d5068e9d1261e47edf52462d63d9db7b614e7f1027d` | 各自已有 Compose/Helm 配置及兼容性门禁 |
+| `deploy/production/newapi.yaml.template` | rc.11，摘要 `bd30213d808857bb569ef47d3c9209d061a66ea089c2472ef46ce51e75517f19` | `README.newapi.md` 的受控同 Pod TLS 入口 |
+
+表中路径均相对 `account-platform/`。下文 rc.26 的历史运行证据不能用来验收 rc.11；两套配置不是可互换的升级方案。本次只明确实际输入，不改变镜像或为任一版本补作部署/兼容性通过结论。若统一版本，须另行确定实际部署入口及现有数据库边界，再执行对应升级验证。
+
 ## 保留的原手册
 
 账号平台使用上游 `QuantumNous/new-api` 的官方容器作为真实模型数据面。开发 Compose 与 Helm 当前固定为 `calciumion/new-api:v1.0.0-rc.26`，并锁定多架构镜像摘要 `sha256:7b82c866e9c0fb02faca7d5068e9d1261e47edf52462d63d9db7b614e7f1027d`。该 RC 经本次部署负责人明确选用，并非官方稳定版；固定候选镜像不代表生产验收通过。升级版本前必须重新执行兼容、安全和流式结算测试，不得改用 `latest`。
