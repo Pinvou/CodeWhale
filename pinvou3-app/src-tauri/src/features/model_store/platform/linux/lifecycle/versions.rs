@@ -551,6 +551,50 @@ fn argv_candidate_may_reference(
         .unwrap_or(false)
 }
 
+const PROCESS_CMDLINE_LIMIT: usize = 8 * 1024 * 1024;
+
+#[derive(Debug, PartialEq, Eq)]
+enum CmdlineReadError {
+    Io,
+    TooLarge,
+    TimedOut,
+}
+
+/// Read complete arguments before treating a process as unrelated. One extra
+/// byte distinguishes an exactly-at-limit command line from a truncated one;
+/// it never grows the retained buffer past the cap. The caller's budget spans
+/// every process, including this read and the subsequent argument parsing.
+fn read_process_cmdline(
+    mut reader: impl Read,
+    mut budget_exhausted: impl FnMut() -> bool,
+) -> Result<Vec<u8>, CmdlineReadError> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0; 16 * 1024];
+    loop {
+        if budget_exhausted() {
+            return Err(CmdlineReadError::TimedOut);
+        }
+        let remaining = PROCESS_CMDLINE_LIMIT - bytes.len();
+        let requested = remaining.clamp(1, buffer.len());
+        let result = reader.read(&mut buffer[..requested]);
+        if budget_exhausted() {
+            return Err(CmdlineReadError::TimedOut);
+        }
+        let read = match result {
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(CmdlineReadError::Io),
+        };
+        if read == 0 {
+            return Ok(bytes);
+        }
+        if remaining == 0 {
+            return Err(CmdlineReadError::TooLarge);
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+}
+
 fn ensure_unused(runtime: &Path, resource: Option<&Path>) -> Result<(), ModelManagerError> {
     // Read only; neither PID files nor discovered processes authorize signals.
     let uid = fs::metadata("/proc/self")
@@ -587,11 +631,23 @@ fn ensure_unused(runtime: &Path, resource: Option<&Path>) -> Result<(), ModelMan
         let Ok(file) = fs::File::open(entry.path().join("cmdline")) else {
             continue;
         };
-        let mut bytes = Vec::new();
-        if file.take(65537).read_to_end(&mut bytes).is_err() {
-            continue;
-        }
+        let bytes = match read_process_cmdline(file, || std::time::Instant::now() > deadline) {
+            Ok(bytes) => bytes,
+            // The process may exit between discovery, opening and reading.
+            Err(CmdlineReadError::Io) => continue,
+            Err(CmdlineReadError::TimedOut) => {
+                return Err(fail("进程检查超时，未删除或切换任何资源。"));
+            }
+            Err(CmdlineReadError::TooLarge) => {
+                return Err(fail(
+                    "进程命令行超过 8MiB 检查上限，无法排除资源引用，未删除或切换任何资源。",
+                ));
+            }
+        };
         for arg in bytes.split(|b| *b == 0).skip(1) {
+            if std::time::Instant::now() > deadline {
+                return Err(fail("进程检查超时，未删除或切换任何资源。"));
+            }
             // Lossy decoding keeps the resource-root prefix comparable even
             // when a trailing filename carries non-UTF-8 bytes.
             let text = String::from_utf8_lossy(arg);
@@ -608,6 +664,9 @@ fn ensure_unused(runtime: &Path, resource: Option<&Path>) -> Result<(), ModelMan
                 return Err(fail("此版本的权重仍被运行进程使用，未删除或切换资源。"));
             }
         }
+    }
+    if std::time::Instant::now() > deadline {
+        return Err(fail("进程检查超时，未删除或切换任何资源。"));
     }
     Ok(())
 }
