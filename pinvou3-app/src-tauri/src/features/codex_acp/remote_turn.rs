@@ -866,6 +866,12 @@ impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
             Arc::clone(&events),
         );
 
+        crate::features::behavior_telemetry::bind_remote_execution_turn(
+            &self.app,
+            session_id,
+            task_id,
+            reservation.turn_id(),
+        );
         let mut result = budget
             .run(&cancel, async {
                 reservation

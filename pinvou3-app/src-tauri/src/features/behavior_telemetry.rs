@@ -105,6 +105,7 @@ const OUTBOX_MAX_BYTES: usize = 64 * 1024 * 1024;
 const SERVER_LINKABLE_RETENTION_DAYS: u8 = 35;
 const RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
 
+// Remote-control fields use the dedicated, event-specific gateway below.
 fn client_event_field_allowed(field: &str) -> bool {
     matches!(
         field,
@@ -168,13 +169,7 @@ fn client_event_field_allowed(field: &str) -> bool {
             | "rating"
             | "reason_code"
             | "content_type"
-            | "remote_stage"
-            | "remote_outcome"
-            | "remote_reason"
-            | "remote_latency_bucket"
-            | "remote_model_source"
-            | "remote_size_bucket"
-            | "remote_permission_step"
+            | "execution_task_key"
     )
 }
 
@@ -183,6 +178,19 @@ fn validate_client_event_fields(event: &BehaviorEvent) -> Result<()> {
         return remote_control::validate_event_fields(event);
     }
     for field in event.fields.keys() {
+        if field == "execution_task_key"
+            && (!matches!(
+                event.event_name,
+                "tool_call_started" | "tool_call_completed"
+            ) || !event.fields[field].as_str().is_some_and(|key| {
+                key.len() == 64
+                    && key
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            }))
+        {
+            anyhow::bail!("invalid execution task correlation");
+        }
         if field.starts_with("remote_") {
             anyhow::bail!("remote-control event field is not allowed on another event");
         }
@@ -207,6 +215,7 @@ pub struct BehaviorTelemetry {
     collection_period_id: Arc<RwLock<Option<String>>>,
     outbox: Arc<StdMutex<Outbox>>,
     tasks: Arc<StdMutex<HashMap<String, TaskAttempt>>>,
+    remote_executions: Arc<StdMutex<remote_execution::RemoteTelemetryState>>,
     team_sessions: Arc<StdMutex<HashMap<String, CollectionLease>>>,
     tool_calls: Arc<StdMutex<HashMap<String, ToolOperation>>>,
     voice_submissions: Arc<StdMutex<HashMap<String, CollectionLease>>>,
@@ -244,7 +253,7 @@ impl TaskAttempt {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct CollectionLease {
     generation: u64,
     collection_period_id: String,
@@ -273,6 +282,7 @@ struct ToolOperation {
     tool_name: String,
     tool_type: &'static str,
     lease: CollectionLease,
+    execution_task_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1748,10 +1758,19 @@ mod events;
 #[path = "behavior_telemetry/remote_control.rs"]
 mod remote_control;
 
+#[path = "behavior_telemetry/remote_execution.rs"]
+mod remote_execution;
+pub(crate) use remote_execution::{
+    bind_remote_execution_turn, capture_remote_execution_lease,
+    register_remote_execution_with_lease, register_remote_origin, track_remote_execution_event,
+    track_remote_origin_event, track_remote_result_received, track_remote_task_output,
+    unregister_remote_execution,
+};
+
 pub use events::*;
 pub(crate) use remote_control::{
     RemoteControlEvent, RemoteModelSource, RemoteOutcome, RemotePermissionStep, RemoteReason,
-    RemoteStage, track_remote_control, track_remote_control_with_event_id,
+    RemoteStage, track_remote_control, track_remote_transfer,
 };
 
 #[cfg(all(test, feature = "behavior-telemetry-test"))]

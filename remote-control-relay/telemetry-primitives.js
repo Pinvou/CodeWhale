@@ -30,7 +30,14 @@ export function isCoreUserTask(event, eventName) {
 }
 
 export function isSuccessfulCoreUserTask(event) {
-  return isCoreUserTask(event, 'task_finished') && event.status === 'success';
+  return isCoreUserTask(event, 'task_finished') && event.status === 'success'
+    && !event.remote_attribution_unknown;
+}
+
+// Projected remote successes belong to the initiating installation's clock.
+// Missing owner-clock evidence fails closed rather than borrowing B's clock.
+export function retentionOccurredAt(event) {
+  return normalizeUsageOccurredAt(event.remote_projection ? event.retention_occurred_at : event.occurred_at);
 }
 
 export function deletionSubjectHash(deviceId, pepper) {

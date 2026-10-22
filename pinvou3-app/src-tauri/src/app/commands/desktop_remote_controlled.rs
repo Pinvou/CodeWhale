@@ -302,7 +302,8 @@ pub async fn desktop_remote_controlled_start(
             RemoteStage::Start,
             &result,
             started.elapsed().as_millis() as u64,
-        ),
+        )
+        .role(true),
     );
     result
 }
@@ -396,7 +397,8 @@ pub async fn desktop_remote_controlled_refresh(
             RemoteStage::Refresh,
             &result,
             started.elapsed().as_millis() as u64,
-        ),
+        )
+        .role(true),
     );
     result
 }
@@ -444,7 +446,8 @@ pub fn desktop_remote_controlled_stop(
             RemoteStage::Stop,
             &result,
             started.elapsed().as_millis() as u64,
-        ),
+        )
+        .role(true),
     );
     result
 }

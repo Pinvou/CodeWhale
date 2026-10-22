@@ -1177,6 +1177,12 @@ impl RemoteTaskLedger {
         self.record_locked(&inner, task_id)
     }
 
+    /// Only a confirmed absence authorizes a new rejection observation; a
+    /// previously admitted task (including a terminal) is never rejected anew.
+    pub(crate) fn confirms_absence(&self, task_id: &str) -> bool {
+        matches!(self.record(task_id), Err(lookup) if lookup.code == "task_not_found")
+    }
+
     pub(crate) fn records(&self) -> Vec<RemoteTaskRecord> {
         let inner = self.inner.lock();
         let mut records: Vec<RemoteTaskRecord> = inner.tasks.values().cloned().collect();

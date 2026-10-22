@@ -220,6 +220,28 @@ pub(crate) struct RemoteDispatchService {
 }
 
 impl RemoteDispatchService {
+    /// Expose only a fixed mode category from the prepared request to telemetry.
+    pub(crate) fn telemetry_mode(
+        &self,
+        local_session_id: &str,
+        handle: &RemoteRetryHandle,
+    ) -> Option<&'static str> {
+        let entries = self.ephemeral.lock();
+        let entry = entries.get(&(
+            local_session_id.to_owned(),
+            handle.client_request_id.clone(),
+            handle.task_id.clone(),
+        ))?;
+        if entry.fingerprint != handle.request_fingerprint {
+            return None;
+        }
+        match entry.semantics.mode.as_str() {
+            "chat" => Some("assistant"),
+            "code" => Some("code"),
+            _ => None,
+        }
+    }
+
     pub(crate) fn new(store: SessionStore, port: Arc<dyn RemoteTaskDispatchPort>) -> Self {
         Self {
             store,
