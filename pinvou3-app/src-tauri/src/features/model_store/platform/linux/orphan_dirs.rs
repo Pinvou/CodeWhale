@@ -39,9 +39,18 @@ impl Blocked {
         }
         // 原始形式对不上再比规范化形式：记录里的路径可能是带冗余分量的写法，
         // 目录项是 join 出来的干净形式，硬比较会漏判。
-        path.canonicalize()
-            .map(|c| self.dirs.contains(&c))
-            .unwrap_or(false)
+        let Ok(canonical) = path.canonicalize() else {
+            return false;
+        };
+        if self.dirs.contains(&canonical) {
+            return true;
+        }
+        // 祖先链兜底：误配置把 models_dir 本身登记成权重根时，一级祖先推不
+        // 出任何东西，但它下面的每个子目录都该被拦——精确匹配拦不住。
+        canonical
+            .ancestors()
+            .skip(1)
+            .any(|ancestor| self.dirs.contains(ancestor))
     }
 
     fn insert(&mut self, models_dir: &Path, path: PathBuf) {
@@ -242,7 +251,14 @@ fn card_weight_dirs(card_id: &str, models_dir: &Path) -> Option<Vec<PathBuf>> {
             None => name.to_string(),
         };
         let lowered = super::lifecycle::lower_model_name(&base);
-        if let Ok(safe) = config::safe_path_component(&lowered) {
+        // 空名回退与 suggest_model_name 对齐（它回退卡片 id）：名字整体是
+        // 非法字符时目录名就是 card_id，不回退会让这类卡的进行中目录漏排。
+        let candidate = if lowered.is_empty() {
+            card_id.to_string()
+        } else {
+            lowered
+        };
+        if let Ok(safe) = config::safe_path_component(&candidate) {
             dirs.push(models_dir.join(safe));
         }
     }

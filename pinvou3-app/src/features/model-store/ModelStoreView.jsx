@@ -74,7 +74,7 @@ import { StoreGuide } from './ModelStoreCards.jsx';
 import { MemoizedModelRow as ModelRow } from './ModelRow.jsx';
 import { CardUpdateDialog } from './CardUpdateDialog.jsx';
 import { ModelStoreTaskPanel } from './ModelStoreTaskPanel.jsx';
-import { DownloadCenterView, activeDownloadTasks } from './DownloadCenterView.jsx';
+import { DownloadCenterView, activeDownloadTasks, downloadBadgeCount } from './DownloadCenterView.jsx';
 import { MaintenanceRecoveryPanel } from './MaintenanceRecoveryPanel.jsx';
 import { IncompleteInstallPanel, describeIncompleteError } from './IncompleteInstallPanel.jsx';
 import { ModelDetailDialog } from './ModelDetailDialog.jsx';
@@ -864,7 +864,9 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
    * filterModels 管道。徽标是横幅之外的主动提醒：未完成安装是耐久事实，用户
    * 不点进任何视图都该知道它存在。
    */
-  const downloadBadge = activeDownloadTasks(tasks).length + (library.incompleteInstallations || []).length;
+  // 徽标计数在 downloadBadgeCount 里按卡片去重：续传进行中时，同一张卡的
+  // 活跃任务和它依据的失败回执只算一次。
+  const downloadBadge = downloadBadgeCount(tasks, library.incompleteInstallations);
   const FILTERS = [
     { key: 'all', label: copy.filterAll },
     { key: 'installed', label: copy.filterInstalled },

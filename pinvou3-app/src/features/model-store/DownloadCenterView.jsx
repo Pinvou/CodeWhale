@@ -23,15 +23,39 @@ const EMPTY = Object.freeze([]);
 
 // 正在下载 = 下载任务里还活着的那部分。取消完成/失败的是终态，归右下角任务
 // 面板管，这里不重复摆——两处同时渲染同一张卡，用户会点两次「取消」。
+// install_local（AI/MCP 代办的下载类安装）与 UI 下载按同一张卡归一
+// （与 describeActiveRun 同一规则），否则同一件事出现两种形态。
 const ACTIVE_STATUS = new Set(['running', 'cancelling']);
+const DOWNLOAD_KINDS = new Set(['download', 'install_local']);
 
 /**
- * 还在进行的下载任务。导出给徽标计数用：徽标 = 这个数 + 未完成安装数。
+ * 还在进行的下载任务。
  * @param {Array<object>} tasks - 任务表快照。
  * @returns {Array<object>} 活跃下载任务。
  */
 export function activeDownloadTasks(tasks) {
-  return (tasks || []).filter((task) => task.kind === 'download' && ACTIVE_STATUS.has(task.status));
+  return (tasks || []).filter((task) => DOWNLOAD_KINDS.has(task.kind) && ACTIVE_STATUS.has(task.status));
+}
+
+/** 任务 key（`download:<cardId>` / `card:<cardId>`）→ 卡片 ID。 */
+function taskCardId(task) {
+  const key = task?.key || '';
+  const at = key.indexOf(':');
+  return at >= 0 ? key.slice(at + 1) : '';
+}
+
+/**
+ * 徽标计数 = 活跃下载任务数 + 未完成安装数，**按卡片去重**：续传进行中时，
+ * 同一张卡既有活跃任务又有它作为依据的失败回执，直接相加会把一次下载数成
+ * 两次。有活跃任务的卡片整体由任务侧代表。
+ * @param {Array<object>} tasks - 任务表快照。
+ * @param {Array<object>} installations - 未完成安装列表。
+ * @returns {number} 徽标数。
+ */
+export function downloadBadgeCount(tasks, installations) {
+  const active = activeDownloadTasks(tasks);
+  const activeCards = new Set(active.map(taskCardId));
+  return active.length + (installations || []).filter((item) => !activeCards.has(item.cardId)).length;
 }
 
 /**
@@ -158,9 +182,13 @@ export function DownloadCenterView({
   isRetrying,
 }) {
   const active = activeDownloadTasks(tasks);
+  // 有活跃任务的卡片由「正在下载」分区代表：它的失败回执（续传的依据）或
+  // 未终结行不再重复出现在「已中断」，一页两次同样让人分不清哪个是现状。
+  const activeCards = new Set(active.map(taskCardId));
+  const interrupted = installations.filter((item) => !activeCards.has(item.cardId));
   // 列表读取失败时不能走空态：EmptyState 没有错误行，incompleteError 会
   // 被整个吞掉。让 IncompleteInstallPanel 渲染，由它展示 role=alert 的错误。
-  const empty = active.length === 0 && installations.length === 0 && !incompleteError;
+  const empty = active.length === 0 && interrupted.length === 0 && !incompleteError;
   return (
     <div data-testid="model-store-download-center">
       {empty ? (
@@ -203,7 +231,7 @@ export function DownloadCenterView({
             </section>
           ) : null}
           <IncompleteInstallPanel
-            installations={installations}
+            installations={interrupted}
             error={incompleteError}
             copy={copy}
             onRetry={onRetry}

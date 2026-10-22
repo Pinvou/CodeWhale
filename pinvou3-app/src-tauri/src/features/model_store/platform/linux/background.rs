@@ -13,6 +13,21 @@ use super::{config, local_service::LocalService, service};
 const MAINTAINED_UNINSTALL: &str = "model.uninstall_maintenance";
 const RESERVED_UNINSTALL: &str = "model.uninstall_reservation";
 
+/// 常规 UI 请求的读超时。这个值是给 25 秒长轮询留余量设计的。
+const UI_READ_TIMEOUT: Duration = Duration::from_secs(35);
+/// 残留扫描要整树量体积、删除是分钟级：它们的应答等的是磁盘，不是网络。
+/// 客户端超时提前掐断的话，界面 busy 提前结束而 host 还在删——用户一重试
+/// 就是对同一目录的并发删除。放宽到小时级，busy 态由前端一直撑着。
+const LONG_OP_READ_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
+fn read_timeout_for(method: &str) -> Duration {
+    if matches!(method, "orphan_scan" | "orphan_remove") {
+        LONG_OP_READ_TIMEOUT
+    } else {
+        UI_READ_TIMEOUT
+    }
+}
+
 /// One health request on the healthy path. Only an unavailable transport starts
 /// recovery; a request whose bytes may have been sent is never replayed here.
 pub fn call(method: &str, args: Value) -> Result<Value, String> {
@@ -35,6 +50,7 @@ pub fn call(method: &str, args: Value) -> Result<Value, String> {
                     "/v1/host/task",
                     json!({"host":host,"method":method,"args":args}),
                     Some(&host),
+                    UI_READ_TIMEOUT,
                 )?
                 .0,
             );
@@ -44,7 +60,8 @@ pub fn call(method: &str, args: Value) -> Result<Value, String> {
         check_health(&health)?;
     }
     let host = controlled_host(&health)?;
-    result(request_bound(&format!("/v1/ui/{method}"), args, Some(&host))?.0)
+    let read_timeout = read_timeout_for(method);
+    result(request_bound(&format!("/v1/ui/{method}"), args, Some(&host), read_timeout)?.0)
 }
 fn result(value: Value) -> Result<Value, String> {
     value
@@ -68,12 +85,13 @@ fn ui_call(method: &str, args: Value) -> Result<Value, String> {
     Ok(value)
 }
 fn request(path: &str, args: Value) -> Result<(Value, u32), String> {
-    request_bound(path, args, None)
+    request_bound(path, args, None, UI_READ_TIMEOUT)
 }
 fn request_bound(
     path: &str,
     args: Value,
     expected: Option<&super::host_control::Identity>,
+    read_timeout: Duration,
 ) -> Result<(Value, u32), String> {
     use std::os::fd::AsRawFd;
     let socket = config::data_dir().join("service.sock");
@@ -112,7 +130,7 @@ fn request_bound(
         expected.verify_peer(peer.pid as u32)?;
     }
     stream
-        .set_read_timeout(Some(Duration::from_secs(35)))
+        .set_read_timeout(Some(read_timeout))
         .map_err(|e| e.to_string())?;
     stream
         .set_write_timeout(Some(Duration::from_secs(5)))
@@ -187,6 +205,7 @@ fn replace_idle_host(health: &Value) -> Result<(), String> {
         "/v1/host/retire",
         serde_json::to_value(&old).map_err(|e| e.to_string())?,
         Some(&old),
+        UI_READ_TIMEOUT,
     )
     .map_err(|error| format!("store_upgrade_pending: original tasks retained; {error}"))?;
     if peer != old.pid

@@ -26,10 +26,14 @@ const DICTS = new Map(LANGS.map((lang) => [lang, read('src', 'shared', 'i18n', `
 
 test('download center lists only active download tasks and reuses the interrupted panel', () => {
   // 活跃判据必须是白名单：running/cancelling。error/cancelled 是终态，归任务面板。
+  // install_local（AI/MCP 代办的下载类安装）与 UI 下载按同一张卡归一。
   assert.match(CENTER, /new Set\(\['running', 'cancelling'\]\)/);
-  assert.match(CENTER, /task\.kind === 'download' && ACTIVE_STATUS\.has\(task\.status\)/);
+  assert.match(CENTER, /new Set\(\['download', 'install_local'\]\)/);
+  assert.match(CENTER, /DOWNLOAD_KINDS\.has\(task\.kind\) && ACTIVE_STATUS\.has\(task\.status\)/);
   // 已中断分区复用 IncompleteInstallPanel，不实现第二遍。
   assert.match(CENTER, /<IncompleteInstallPanel/);
+  // 有活跃任务的卡片由「正在下载」代表：它的回执行不再重复出现在「已中断」。
+  assert.match(CENTER, /const interrupted = installations\.filter\(\(item\) => !activeCards\.has\(item\.cardId\)\)/);
   // 空态要把「中断可续传」说出来。
   assert.match(CENTER, /downloadsEmptyHint/);
 });
@@ -69,8 +73,11 @@ test('downloads filter switches the whole list and retires duplicate surfaces', 
   // 徽标挂在筛选胶囊上，且只在有内容时渲染。
   assert.match(VIEW, /model-store-filter-\$\{item\.key\}-badge/);
   assert.match(VIEW, /item\.badge \? \(\s*\n?\s*<span/);
-  // 徽标 = 活跃下载任务 + 未完成安装。
-  assert.match(VIEW, /activeDownloadTasks\(tasks\)\.length \+ \(library\.incompleteInstallations \|\| \[\]\)\.length/);
+  // 徽标走按卡片去重的统一实现：续传进行中时，活跃任务和它依据的失败回执
+  // 只算一次。
+  assert.match(VIEW, /const downloadBadge = downloadBadgeCount\(tasks, library\.incompleteInstallations\);/);
+  assert.match(CENTER, /export function downloadBadgeCount\(tasks, installations\)/);
+  assert.match(CENTER, /\.filter\(\(item\) => !activeCards\.has\(item\.cardId\)\)\.length/);
 });
 
 test('downloads copy exists in all three languages', () => {
