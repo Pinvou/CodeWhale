@@ -3773,7 +3773,7 @@ fn untouched_route_form_preserves_a_later_responses_route_context_and_credential
 fn route_preservation_keeps_latest_metadata_even_when_the_old_form_was_not_operator_owned() {
     crate::platform::test_support::with_temp_home("store-form-old-official-route", || {
         let original = model_deletion_test_model("changed-provider", false);
-        seed_model_deletion_prefs(&[original.clone()]);
+        seed_model_deletion_prefs(std::slice::from_ref(&original));
         UserPrefs::update_transaction(|prefs| {
             let mut latest = original.clone();
             latest.preset = crate::platform::prefs::ModelPreset::OpenaiResponses;
