@@ -19,6 +19,7 @@ func (s *Service) registerManagementRoutes(router *httpserver.Router, personal *
 	internal.DELETE("/users/:user_id/replay-payloads", serviceauth.Require("internal.token.account-closure.replay-clear"), httpserver.AdaptFunc(s.anonymizeUserReplayPayloads))
 	internal.PUT("/organizations/:organization_id/lifecycle", serviceauth.Require("internal.token.organization.lifecycle"), approvalpolicy.Require("TOKEN_ORGANIZATION_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.applyOrganizationLifecycle))
 	internal.PUT("/organizations/:organization_id/units/:unit_id/lifecycle", serviceauth.Require("internal.token.organization-unit.lifecycle"), approvalpolicy.Require("TOKEN_ORGANIZATION_UNIT_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.organizationUnitDeletionBlockers))
+	internal.POST("/usage-waivers", serviceauth.Require("internal.token.usage.waive"), httpserver.AdaptFunc(s.internalUsageWaiver))
 	internal.POST("/holds/expiry-proof", serviceauth.Require("internal.token.hold-expiry.prove"), httpserver.AdaptFunc(s.expiredHoldProof))
 	internal.GET("/token-governance/activation", serviceauth.Require("internal.authorization.check"), httpserver.AdaptFunc(s.internalTokenGovernanceActivation))
 	internal.GET("/approval-effects/:approval_request_id", serviceauth.Require("internal.token.approval-effect.read"), httpserver.AdaptFunc(s.approvalEffectObservation))

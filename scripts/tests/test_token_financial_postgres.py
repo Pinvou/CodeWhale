@@ -84,7 +84,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
 
     def run_main_fixture(self, *, existing_roles=False, user_objects=False, leftover=False,
                          owner_leftover=False, account_leftover=False, schema_leftover=False, provisioning_leftover=False, active_client=False, external_dependency=False,
-                         go_fail_phase=None, empty_phase=None, skipped_phase=None):
+                         go_fail_phase=None, empty_phase=None, skipped_phase=None, missing_token_children=False):
         writes, commands, phases, trace = [], [], [], []
         state = {"bootstrapped": False, "account_done": False, "owner_done": False, "schema_done": False, "provisioning_done": False, "retained_done": False}
 
@@ -136,6 +136,10 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 else:
                     self.assertNotIn("PINVOU_TEST_TOKEN_DATABASE_URL", kwargs["env"])
                 events = self.events(required, package, children=phase != "retained-token")
+                if phase == "retained-token" and not missing_token_children:
+                    for name in RUNNER.TOKEN_CHILD_REQUIRED:
+                        events += [{"Action": "run", "Package": package, "Test": name + "/actual"},
+                                   {"Action": "pass", "Package": package, "Test": name + "/actual"}]
                 if empty_phase == phase:
                     events = [{"Action": "pass", "Package": package}]
                 if skipped_phase == phase:
@@ -233,12 +237,13 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_package_index_schema_contract_is_selected_and_cannot_skip(self):
         self.run_main_fixture()
         roots, package = RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE
-        self.assertEqual(roots, {"TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres"})
+        self.assertEqual(roots, {"TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres"})
         command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
         selection = command[command.index("-run") + 1]
         self.assertIn("TestF09EntitlementPackageIndexPublicMigration", selection)
         self.assertIn("TestTokenWalletReceiptSchemaPostgres", selection)
         self.assertIn("TestLegacyEntitlementUpgradeAdmissionPostgres", selection)
+        self.assertIn("TestUsageWaiverHistoricalSchemaPostgres", selection)
         valid = self.events(roots, package, children=True)
         self.assertGreater(RUNNER.verify_results(valid, roots, package=package, require_children=True, exact_roots=True), 0)
         for invalid in (
@@ -313,6 +318,38 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 ):
                     with self.assertRaises(RuntimeError):
                         RUNNER.verify_results(missing, roots, package=package, require_children=True, exact_roots=True)
+
+    def test_actual_main_requires_token_waiver_children(self):
+        self.assertEqual(RUNNER.TOKEN_CHILD_REQUIRED, {"TestUsageWaiverCoordinatorRecoveryPostgres"})
+        with self.assertRaisesRegex(RuntimeError, "no completed child"):
+            self.run_main_fixture(missing_token_children=True)
+        self.assertEqual(self.fixture_phases[-1], "retained-token")
+
+    def test_usage_waiver_roots_require_real_scoped_child_evidence(self):
+        self.run_main_fixture()
+        for phase, roots, package, required in (
+            ("owner-schema", RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE, {"TestUsageWaiverHistoricalSchemaPostgres"}),
+            ("retained-token", RUNNER.REQUIRED, RUNNER.TOKEN_PACKAGE, {"TestUsageWaiverCoordinatorRecoveryPostgres"}),
+            ("retained-billing", RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, {
+                "TestUsageWaiverFinancialConservationPostgres", "TestUsageWaiverCommitWinnerPostgres",
+                "TestUsageWaiverMemberReservationPostgres", "TestUsageWaiverExpiryRepairWinnerPostgres",
+            }),
+        ):
+            command = self.fixture_commands[self.fixture_phases.index(phase)]
+            valid = self.events(roots, package, children=True)
+            for name in required:
+                with self.subTest(phase=phase, root=name):
+                    self.assertIn(name, roots)
+                    if phase != "retained-token":
+                        self.assertIn(name, command[command.index("-run") + 1])
+                    self.assertGreater(RUNNER.verify_results(valid, roots, package=package, require_children=True), 0)
+                    for invalid in (
+                        [event for event in valid if event.get("Test", "").split("/")[0] != name],
+                        [event for event in valid if not event.get("Test", "").startswith(name + "/")],
+                        valid + [{"Action": "skip", "Package": package, "Test": name + "/actual"}],
+                    ):
+                        with self.assertRaises(RuntimeError):
+                            RUNNER.verify_results(invalid, roots, package=package, require_children=True)
 
     def test_registration_dispatch_root_requires_actual_completed_children(self):
         name = "TestRegistrationCreateDispatchRuntimePostgres"
@@ -518,7 +555,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         }
         self.assertEqual(RUNNER.REFUND_REQUIRED, expected)
         self.assertTrue(expected <= RUNNER.RETAINED_REQUIRED)
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 23)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 27)
         valid = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
         options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
                    "children_required": RUNNER.BILLING_CHILD_REQUIRED}

@@ -70,7 +70,18 @@ func knownOriginalWalletReceiptHistory(ctx context.Context, source walletReceipt
 }
 
 func VerifyApplied(ctx context.Context, connection *pgx.Conn, loaded []migrations.Migration) (migrations.Verification, error) {
+	if err := validateUsageWaivers(loaded); err != nil {
+		return migrations.Verification{}, err
+	}
 	if err := validateWalletReceipts(loaded); err != nil {
+		return migrations.Verification{}, err
+	}
+	if err := validateUsageWaiverHistoryDelivery(loaded); err != nil {
+		return migrations.Verification{}, err
+	}
+	var err error
+	loaded, err = expectedUsageWaiverHistory(ctx, connection, loaded)
+	if err != nil {
 		return migrations.Verification{}, err
 	}
 	original, err := knownOriginalWalletReceiptHistory(ctx, connection)

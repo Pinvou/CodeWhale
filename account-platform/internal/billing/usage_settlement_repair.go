@@ -173,6 +173,13 @@ COALESCE(usage_snapshot->>'release_reason',''),updated_at FROM usage_holds WHERE
 	if holdStatus != "RELEASED" || releaseReason != "ENTITLEMENT_EXPIRED_UNCERTAIN" || maxMicrocredits < 0 {
 		return UsageSettlementRepairPlan{}, ErrApprovalSnapshotMismatch
 	}
+	var waiverPending bool
+	if err := source.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM usage_waiver_hold_claims WHERE hold_id=$1)`, plan.HoldID).Scan(&waiverPending); err != nil {
+		return UsageSettlementRepairPlan{}, err
+	}
+	if waiverPending {
+		return UsageSettlementRepairPlan{}, wrapSnapshotMismatch("pending original release-only waiver decision")
+	}
 	if actual != nil {
 		plan.ActualBefore = *actual
 	}

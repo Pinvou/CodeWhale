@@ -436,6 +436,12 @@ func (r *UsageReconciler) runOnce(ctx context.Context) {
 			}
 			continue
 		}
+		if handled, err := r.reconcileUsageWaiver(ctx, item); handled {
+			if err != nil {
+				_ = r.store.RescheduleReconciliation(ctx, item.ID, "ADMIN_WAIVER_RESULT_UNKNOWN", r.now().Add(reconciliationBackoff(item.Attempts)))
+			}
+			continue
+		}
 		if err := r.reconcile(ctx, item); err != nil {
 			r.logger.Warn("request reconciliation deferred", "usage_request_id", item.ID, "attempt", item.Attempts, "error", err)
 			errorCode := reconciliationErrorCode(err)
@@ -558,6 +564,13 @@ func (r *UsageReconciler) commit(ctx context.Context, item ReconciliationItem, u
 	}
 	if store, ok := r.store.(missingReferenceDeadlineStore); ok {
 		if fenced, err := store.PreserveMissingReferenceLateUsage(ctx, item.ID, usage); err != nil {
+			return err
+		} else if fenced {
+			return nil
+		}
+	}
+	if store, ok := r.store.(usageWaiverEvidenceStore); ok {
+		if fenced, err := store.PreserveUsageWaiverEvidence(ctx, item.ID, usage); err != nil {
 			return err
 		} else if fenced {
 			return nil

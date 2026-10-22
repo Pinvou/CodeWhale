@@ -25,6 +25,7 @@ import (
 )
 
 type Service struct {
+	usageWaiverClient            UsageWaiverTokenClient
 	closureStates                AccountClosureStateVerifier
 	impactPricing                impactPriceRepository
 	modelPriceProjectionEnabled  bool
@@ -123,6 +124,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		protected.POST("/internal/v1/holds/reserve", serviceauth.Require("internal.billing.hold.reserve"), httpserver.AdaptFunc(s.reserve))
 		protected.POST("/internal/v1/holds/extend", serviceauth.Require("internal.billing.hold.extend"), httpserver.AdaptFunc(s.extendHold))
 		protected.POST("/internal/v1/holds/commit", serviceauth.Require("internal.billing.hold.commit"), httpserver.AdaptFunc(s.commit))
+		protected.POST("/internal/v1/holds/waiver", serviceauth.Require("internal.billing.hold.waive"), httpserver.AdaptFunc(s.executeUsageWaiver))
 		protected.POST("/internal/v1/holds/release", serviceauth.Require("internal.billing.hold.release"), httpserver.AdaptFunc(s.release))
 	}
 	protected.GET("/internal/v1/pricing/current", serviceauth.Require("internal.billing.pricing.read"), httpserver.AdaptFunc(s.currentPrice))
@@ -185,6 +187,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.Use(identity.GinMiddleware(adminVerify[0]))
 		admin.PUT("/registration-bonus-policy", s.authorizer.Require("platform.registration-bonus.manage"), s.requireRecentProductAuthentication(), approvalpolicy.Require("BILLING_REGISTRATION_BONUS_POLICY_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpdateRegistrationBonusPolicy))
 		admin.GET("/registration-bonus-policy", s.authorizer.Require("platform.registration-bonus.read"), httpserver.AdaptFunc(s.adminRegistrationBonusPolicy))
+		admin.POST("/usage-holds/:hold_id/release", s.authorizer.Require("platform.billing.holds.release"), approvalpolicy.Require("BILLING_USAGE_HOLD_SAFE_RELEASE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUsageWaiver))
 		admin.GET("/reconciliation-runs", s.authorizer.Require("platform.billing.reconciliation.read"), httpserver.AdaptFunc(s.adminReconciliationRuns))
 		admin.POST("/reconciliation-runs", s.authorizer.Require("platform.billing.reconciliation.run"), approvalpolicy.Require("BILLING_RECONCILIATION_RUN", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRunReconciliation))
 		admin.POST("/reconciliation-imports", s.authorizer.Require("platform.billing.reconciliation.run"), approvalpolicy.Require("BILLING_PROVIDER_BILL_IMPORT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminImportReconciliation))

@@ -22,7 +22,7 @@ async function rejectedMutation(mutate, expected) {
 
 test('authorization release gate classifies every HTTP task event callback and CLI entrypoint', async () => {
   const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
-  // The six existing Portal transports use Any, alongside the 376 verb-specific
+  // The six existing Portal transports use Any, alongside the 379 verb-specific
   // registrations. Keep the expected complete graph independent of its parser.
   const wildcardPaths = [
     '/api/account/*resource', '/api/token/*resource',
@@ -36,7 +36,32 @@ test('authorization release gate classifies every HTTP task event callback and C
   for (const route of wildcardPaths) assert.ok(portal.includes(`router.Any("${route}",`), `missing existing Portal transport ${route}`);
   // The real checker still rejects missing, stale, duplicate or mis-scoped
   // entries before returning these exact inventory sizes.
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 382, tasks: 32, events: 18, cli: 26 });
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 385, tasks: 32, events: 18, cli: 26 });
+});
+
+test('usage waiver restores one human audit-only command and two distinct workload routes', async () => {
+  const bindings = [
+    {source: 'account-platform/internal/billing/service.go', receiver: 'admin', path: '/usage-holds/:hold_id/release',
+      registration: 'admin.POST("/usage-holds/:hold_id/release", s.authorizer.Require("platform.billing.holds.release"), approvalpolicy.Require("BILLING_USAGE_HOLD_SAFE_RELEASE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUsageWaiver))'},
+    {source: 'account-platform/internal/billing/service.go', receiver: 'protected', path: '/internal/v1/holds/waiver',
+      registration: 'protected.POST("/internal/v1/holds/waiver", serviceauth.Require("internal.billing.hold.waive"), httpserver.AdaptFunc(s.executeUsageWaiver))'},
+    {source: 'account-platform/internal/token/management_routes.go', receiver: 'internal', path: '/usage-waivers',
+      registration: 'internal.POST("/usage-waivers", serviceauth.Require("internal.token.usage.waive"), httpserver.AdaptFunc(s.internalUsageWaiver))'},
+  ];
+  for (const entry of bindings) {
+    const text = await readFile(new URL(`../../../${entry.source}`, import.meta.url), 'utf8');
+    const routes = authorizationRoutes(entry.source, text).filter(route => route.path === entry.path);
+    assert.equal(routes.length, 1);
+    assert.equal(routes[0].receiver, entry.receiver);
+    assert.equal(routes[0].method, 'POST');
+    assert.equal(routes[0].registration.trim(), entry.registration);
+    if (entry.receiver !== 'protected') {
+      const {code, masked} = goSource(text);
+      const groups = [...code.matchAll(new RegExp(`\\b${entry.receiver}\\s*(?::=|=)\\s*router\\.Group\\("([^"]+)"\\)`, 'g'))]
+        .filter(match => masked[match.index] !== ' ');
+      assert.deepEqual(groups.map(match => match[1]), [entry.receiver === 'admin' ? '/admin/v1' : '/internal/v1']);
+    }
+  }
 });
 
 test('history recovery routes retain exact workload permissions and handlers without human fallback', async () => {

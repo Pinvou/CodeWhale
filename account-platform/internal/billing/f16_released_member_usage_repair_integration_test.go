@@ -25,6 +25,7 @@ type f16MemberRepairFixture struct {
 }
 
 type f16MemberRepairOptions struct {
+	BeforeExpiry       func(*testing.T, *f16MemberRepairFixture)
 	Grants             []int64
 	HoldMaximum        int64
 	NoSurvivingPackage bool
@@ -109,6 +110,9 @@ func f16ActualReleasedMemberFixture(t *testing.T, options f16MemberRepairOptions
 	f.HoldA, err = r.ReserveMemberQuotaPriced(ctx, f.UsageRequestA, wallet.ID, f.OrganizationID, f.MemberID, 1, maximum, &priceID, clock.Add(time.Hour), holdPricing)
 	if err != nil {
 		t.Fatal("actual priced member reserve", err)
+	}
+	if options.BeforeExpiry != nil {
+		options.BeforeExpiry(t, &f)
 	}
 	clock = origin.AddDate(0, 0, 30).Add(time.Minute)
 	if count, err := r.ExpirePackages(ctx, 1); err != nil || count != 1 {

@@ -1395,6 +1395,11 @@ func (s *Service) settlePrepared(ctx context.Context, usageID, holdID uuid.UUID,
 			return "SETTLEMENT_REVIEW_REQUIRED"
 		}
 	}
+	if store, ok := s.repository.(usageWaiverEvidenceStore); ok {
+		if fenced, err := store.PreserveUsageWaiverEvidence(ctx, usageID, usage); err != nil || fenced {
+			return "SETTLEMENT_REVIEW_REQUIRED"
+		}
+	}
 	if err := s.executionBilling.Commit(ctx, usageID, holdID, actual, usage); err != nil {
 		if definitiveSettlementConflict(err) {
 			if markErr := s.repository.MarkReview(ctx, usageID, "settlement_conflict", snapshot); markErr != nil {
@@ -1424,6 +1429,11 @@ func (s *Service) authorizeAdditional(ctx context.Context, usageID, holdID uuid.
 	// Late usage remains evidence; it cannot extend that customer's reservation.
 	if store, ok := s.repository.(missingReferenceDeadlineStore); ok {
 		if fenced, err := store.PreserveMissingReferenceLateUsage(ctx, usageID, usage); err != nil || fenced {
+			return maximum, "", false
+		}
+	}
+	if store, ok := s.repository.(usageWaiverEvidenceStore); ok {
+		if fenced, err := store.PreserveUsageWaiverEvidence(ctx, usageID, usage); err != nil || fenced {
 			return maximum, "", false
 		}
 	}

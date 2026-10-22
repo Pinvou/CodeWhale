@@ -89,6 +89,17 @@ func main() {
 		log.Fatal("BILLING_ACCOUNT_CLOSURE_CONFIGURATION_INVALID")
 	}
 	service.WithAccountClosureStateVerifier(closureStates)
+	if endpoint := strings.TrimSpace(os.Getenv("TOKEN_USAGE_WAIVER_URL")); endpoint != "" {
+		workloadHTTP, e := serviceauth.NewWorkloadHTTPClient(os.Getenv("WORKLOAD_IDENTITY_CA_FILE"))
+		if e != nil {
+			log.Fatal("BILLING_USAGE_WAIVER_CONFIGURATION_INVALID")
+		}
+		waiver, e := billing.NewHTTPUsageWaiverTokenClient(endpoint, credential, workloadHTTP)
+		if e != nil {
+			log.Fatal("BILLING_USAGE_WAIVER_CONFIGURATION_INVALID")
+		}
+		service.WithUsageWaiverClient(waiver)
+	}
 	keys, err := humandelegation.DecodeVerificationKeysJSON(os.Getenv("HUMAN_DELEGATION_VERIFICATION_KEYS_JSON"))
 	if err != nil {
 		log.Fatal("BILLING_HUMAN_DELEGATION_KEYS_INVALID")

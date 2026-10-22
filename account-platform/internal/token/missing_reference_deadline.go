@@ -340,6 +340,14 @@ func (r *PostgresRepository) PrepareMissingReferenceRelease(ctx context.Context,
 	} else if pending != nil {
 		return pending, true, tx.Commit(ctx)
 	}
+	// Both coordinators decide under this original usage-row lock. Preserve an
+	// already recorded deadline intent above; otherwise an admitted release-only
+	// waiver owns recovery instead of waiting for a new automatic deadline.
+	if waiver, err := tokenWaiverCommandTx(ctx, tx, usageID); err != nil {
+		return nil, false, err
+	} else if waiver != nil {
+		return nil, false, tx.Commit(ctx)
+	}
 	var now time.Time
 	if err := tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&now); err != nil {
 		return nil, false, err

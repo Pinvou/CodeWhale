@@ -153,6 +153,9 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 	if previousStage > 0 {
 		previous := []migrations.Migration{}
 		for _, m := range loaded {
+			if m.Version == 900005 {
+				continue // Waiver intents are not part of the retained predecessor.
+			}
 			if m.Version != 35 && (previousStage == 37 || (m.Version != 900004 && (previousStage == 36 || (m.Version != 8 && m.Version != 9 && (previousStage == 34 || ((m.Version < 900002 || (previousStage == 30 && m.Version == 900002)) && m.Version != 16 && m.Version != 17 && m.Version != 34)))))) {
 				previous = append(previous, m)
 			}

@@ -53,6 +53,9 @@ const memberQuotaBatchDownChecksum = "034594db8fcf381883b49a917c2b67b48efe4dbd17
 // numeric versions remains possible after the high-numbered fence is recorded.
 // The same validation is required before DownOne to prevent rollback-file edits.
 func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
+	if err := validateUsageWaivers(input); err != nil {
+		return nil, err
+	}
 	if err := validateWalletReceipts(input); err != nil {
 		return nil, err
 	}
@@ -229,11 +232,18 @@ func Up(ctx context.Context, connection *pgx.Conn, input []migrations.Migration)
 	if _, err := validateLegacyEntitlementDelivery(ordered); err != nil {
 		return err
 	}
-	if _, err := knownOriginalWalletReceiptHistory(ctx, connection); err != nil {
+	if err := validateUsageWaiverHistoryDelivery(ordered); err != nil {
 		return err
 	}
 	return withLegacyEntitlementAdmission(ctx, connection, ordered, func() error {
-		return migrations.UpWithHooks(ctx, connection, ordered, migrations.UpHooks{BeforeApply: prepareBillingMigration, AfterApply: finishBillingMigration, ApplySQL: applyBillingMigration, LedgerRole: "billing_schema_owner"})
+		expected, err := expectedUsageWaiverHistory(ctx, connection, ordered)
+		if err != nil {
+			return err
+		}
+		if _, err := knownOriginalWalletReceiptHistory(ctx, connection); err != nil {
+			return err
+		}
+		return migrations.UpWithHooks(ctx, connection, expected, migrations.UpHooks{BeforeApply: prepareBillingMigration, AfterApply: finishBillingMigration, ApplySQL: applyBillingMigration, LedgerRole: "billing_schema_owner"})
 	})
 }
 

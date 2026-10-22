@@ -466,7 +466,7 @@ const billingWorkloadPermissions = {
     'internal.billing.payment-capability.read', 'internal.billing.recharge-order.create',
     'internal.billing.recharge-order.read', 'internal.billing.recharge-order.close',
     'internal.billing.payment-claim.create', 'internal.billing.token-account-wallet-provision.execute',
-    'internal.billing.token-account-wallet-provision.read',
+    'internal.billing.token-account-wallet-provision.read', 'internal.billing.hold.waive',
   ],
 };
 

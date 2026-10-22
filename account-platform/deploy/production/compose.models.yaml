@@ -67,6 +67,7 @@ services:
   billing-service:
     environment:
       BILLING_ADMIN_MODEL_PRICE_PROJECTION_ENABLED: "true"
+      TOKEN_USAGE_WAIVER_URL: ${TOKEN_USAGE_WAIVER_URL:?set verified HTTPS Token internal base URL for usage waiver}
       TOKEN_HOLD_EXPIRY_URL: ${TOKEN_HOLD_EXPIRY_URL:?set verified HTTPS Token internal endpoint for expiry recovery}
   token-portal:
     image: ${TOKEN_PORTAL_IMAGE:?set reviewed same-source F04 Portal image including current generated assets}

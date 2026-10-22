@@ -141,6 +141,7 @@ func buildPolicies() map[string]Policy {
 		"BILLING_RECHARGE_PRODUCT_DRAFT_UPDATE":         "platform.products.create",
 		"BILLING_RECHARGE_PRODUCT_PUBLISH":              "platform.products.publish",
 		"BILLING_RECHARGE_PRODUCT_UNPUBLISH":            "platform.products.unpublish",
+		"BILLING_USAGE_HOLD_SAFE_RELEASE":               "platform.billing.holds.release",
 		"BILLING_RECONCILIATION_RUN":                    "platform.billing.reconciliation.run",
 		"BILLING_PROVIDER_BILL_IMPORT":                  "platform.billing.reconciliation.run",
 		"BILLING_RECONCILIATION_CASE_UPDATE":            "platform.billing.reconciliation.manage",

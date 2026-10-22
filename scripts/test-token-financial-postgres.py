@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 REQUIRED = {
+    "TestUsageWaiverCoordinatorRecoveryPostgres",
     "TestF05AdditionalReservationProjectionPublicPostgres",
     "TestF06OrganizationAdmissionBoundariesPublicPostgres",
     "TestContextEligibilityUsesCurrentScopedProductionRoutes",
@@ -54,9 +55,10 @@ ACCOUNT_REQUIRED = {
     "TestRegistrationCreateDispatchRuntimePostgres",
 }
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
+TOKEN_CHILD_REQUIRED = {"TestUsageWaiverCoordinatorRecoveryPostgres"}
 BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
-SCHEMA_REQUIRED = {"TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres"}
+SCHEMA_REQUIRED = {"TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres"}
 OWNER_REQUIRED = {
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
     "TestTokenWalletReceiptSignedClientRecoveryPostgres",
@@ -81,6 +83,10 @@ REFUND_REQUIRED = {
     "TestRefundOriginalUnknownSuccessQueriesAndSettlesOrdinaryGrantsPostgres",
 }
 RETAINED_REQUIRED = {
+    "TestUsageWaiverFinancialConservationPostgres",
+    "TestUsageWaiverCommitWinnerPostgres",
+    "TestUsageWaiverMemberReservationPostgres",
+    "TestUsageWaiverExpiryRepairWinnerPostgres",
     *REFUND_REQUIRED,
     "TestLedgerRepairClaimActivationReadErrorsPostgres",
     "TestF06MemberQuotaRestoreUsesOrdinaryPackageExpiry",
@@ -222,8 +228,8 @@ def main():
         if result.returncode:
             raise RuntimeError("Go financial phase failed: " + label)
         count = verify_results([json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")],
-                               required, package=package, require_children=scoped, exact_roots=scoped,
-                               children_required=BILLING_CHILD_REQUIRED if label == "retained-billing" else None)
+                               required, package=package, require_children=scoped or label == "retained-token", exact_roots=scoped,
+                               children_required=TOKEN_CHILD_REQUIRED if label == "retained-token" else BILLING_CHILD_REQUIRED if label == "retained-billing" else None)
         print(f"Financial phase {label}: {count} named passes; all {len(required)} required roots completed", flush=True)
 
     # Each existing owner fixture requires its own absent actors. Restoration

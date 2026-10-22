@@ -268,6 +268,7 @@ services:
       PAYMENT_CALLBACK_TOKEN_KEY_ID: ${PAYMENT_CALLBACK_TOKEN_KEY_ID:-payment-callback-v1}
       PAYMENT_CALLBACK_TOKEN_TTL_SECONDS: ${PAYMENT_CALLBACK_TOKEN_TTL_SECONDS:-300}
       BILLING_PAYMENT_EXPIRY_INTERVAL_SECONDS: "15"
+      TOKEN_USAGE_WAIVER_URL: http://token-gateway:8080
     depends_on:
       postgres:
         condition: service_healthy

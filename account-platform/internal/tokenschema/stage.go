@@ -17,6 +17,7 @@ import (
 type identity struct{ name, checksum, downChecksum string }
 
 var installed = map[int64]identity{
+	900005: {name: "usage_waiver_intents", checksum: "110f4c6961fa6c213e270e1ee047ffc512233941f374c809474ea16a8eeef2fe", downChecksum: "c3c6638e29d450571d15a3a88254fa116241442dc08e7691e05155fd34c2100c"},
 	1:      {name: "foundation", checksum: "8d9b0e0a9a025079fb0c3549b19fde8d15bba429199756c1fb3696427d5b6530", downChecksum: "694f148cedb118328e90ee64d56d747f98819e13455eb4ab13f1f49ad644b4a9"},
 	2:      {name: "token_domain", checksum: "ab5175d41e0627cc5d7a8227ccc055b93ec4cc4be09ed857dcdd7455dfaa1fb1", downChecksum: "53ec51ea986293088294a20c181bb04d339f65d279df2dfeb198a7b0fa25a528"},
 	3:      {name: "token_management_audit", checksum: "0c785bf4c2f92f34e283e392b9a552ea34d2f7857975727d2416f5c3b6b4bf3c", downChecksum: "f58dde2cd385347dff75d09b9c479e17dd483cbdfe5cfb414e08213b80116ce2"},

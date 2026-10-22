@@ -199,6 +199,13 @@ func (r *PostgresRepository) extendHoldWithinTransaction(ctx context.Context, tx
 	if hold.Status != "ACTIVE" {
 		return Hold{}, ErrUsageAlreadyTerminal
 	}
+	var waiverPending bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM usage_waiver_hold_claims WHERE hold_id=$1)`, hold.ID).Scan(&waiverPending); err != nil {
+		return Hold{}, err
+	}
+	if waiverPending {
+		return Hold{}, ErrConflict
+	}
 	now := r.now()
 	if !expiresAt.After(now) || !hold.ExpiresAt.After(now) {
 		return Hold{}, ErrConflict

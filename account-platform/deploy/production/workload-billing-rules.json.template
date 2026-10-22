@@ -41,6 +41,7 @@
       "internal.billing.pricing.bind",
       "internal.billing.hold.reserve",
       "internal.billing.hold.release",
+      "internal.billing.hold.waive",
       "internal.billing.hold.extend",
       "internal.billing.hold.commit",
       "internal.billing.quota.read",
