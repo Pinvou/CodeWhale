@@ -77,6 +77,15 @@ pub async fn model_store_retry_incomplete(
 }
 
 #[tauri::command]
+pub async fn model_store_dismiss_incomplete(
+    service: State<'_, Arc<ModelStoreService>>,
+    run_id: String,
+) -> Result<Value, String> {
+    let service = Arc::clone(&service);
+    model_store::dismiss_incomplete(&service, run_id).await
+}
+
+#[tauri::command]
 pub async fn model_store_model_detail(card_id: String) -> Result<Value, String> {
     model_store::model_detail(card_id).await
 }

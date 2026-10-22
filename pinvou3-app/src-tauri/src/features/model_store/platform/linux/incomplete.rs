@@ -53,6 +53,11 @@ struct Receipt {
     cancelled: bool,
     #[serde(default)]
     install_context: Option<Context>,
+    /// 用户已放弃这条记录：不再提醒，也不再提供重试。打标改写由 service.rs 完
+    /// 成（SavedRun 的所有者）；旧回执没有这个字段，读出来是 false——放弃是本
+    /// 版才有的动作，存量记录的行为保持不变。
+    #[serde(default)]
+    dismissed: bool,
 }
 
 fn safe_id(id: &str) -> Result<(), String> {
@@ -191,10 +196,33 @@ fn failed_install(receipt: &Receipt) -> bool {
         && !matches!(receipt.outcome, Some(Ok(_)))
 }
 
+/// 放弃一条安装回执前的全部校验。真正的改写在 service.rs——它是 SavedRun（含
+/// lines 的完整落盘格式）的所有者，这里只负责把「不能放弃」的情况全数拦下。
+///
+/// 三道闸各对应一种真实误用：
+///   * 未终结的记录还在跑，放弃等于把活着的任务从界面上抹掉，结局从此没人写；
+///   * 未完成面板只列失败的 download / install_local，别的种类没有「放弃」语义；
+///   * 脚本进程必须确认已退出（复用重试前的同一道进程检查）——刚点完取消，
+///     进程还在收尾时就放弃，会留下一个再也没人看的活进程。
+pub(super) fn ensure_dismissable(run_id: &str) -> Result<(), String> {
+    let receipt = read(run_id)?;
+    if receipt.outcome.is_none() {
+        return Err("installation_not_terminal".into());
+    }
+    if !failed_install(&receipt) {
+        return Err("installation_not_dismissable".into());
+    }
+    super::orphans::ensure_run_quiet(run_id)?;
+    Ok(())
+}
+
 pub(super) fn summaries() -> Result<Vec<Value>, String> {
     let mut items = Vec::new();
     for (_, (id, receipt)) in latest()? {
-        if !failed_install(&receipt)
+        // 已放弃的记录整条沉默：这是「不再提示」的全部语义。同卡之后**新的**
+        // 失败会生成更新的回执，照常出现——放弃只针对这一次尝试，不是拉黑卡片。
+        if receipt.dismissed
+            || !failed_install(&receipt)
             || db::get_store_model(&receipt.card_id)
                 .map_err(|error| error.to_string())?
                 .is_some()
@@ -261,6 +289,11 @@ fn candidate(run_id: &str, accepted_run: Option<&str>) -> Result<Receipt, String
     if !failed_install(&receipt) || receipt.outcome.is_none() {
         return Err("installation_not_terminal".into());
     }
+    // 放弃过的记录不能从预览/重试这条侧门复活：面板上它已经消失了，一个看不
+    // 见的条目更不该还能发起安装。
+    if receipt.dismissed {
+        return Err("installation_dismissed".into());
+    }
     if db::get_store_model(&receipt.card_id)
         .map_err(|error| error.to_string())?
         .is_some()
@@ -314,6 +347,9 @@ pub(super) fn request_identity(run_id: &str) -> Result<(String, String, Context)
     if !failed_install(&receipt) || receipt.outcome.is_none() {
         return Err("installation_not_terminal".into());
     }
+    if receipt.dismissed {
+        return Err("installation_dismissed".into());
+    }
     let context = context(&receipt)?;
     Ok((receipt.card_id, receipt.kind, context))
 }
@@ -359,6 +395,9 @@ pub(super) fn preview_for_retry(
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    // 放弃的改写在 service.rs（SavedRun 的所有者），测试直接驱动那条真实路径。
+    use super::super::service::{ModelStoreService, dismiss_incomplete_local};
 
     fn receipt(id: &str, kind: &str, time: &str, outcome: Value) {
         let value = json!({"card_id":"local-fixture","kind":kind,"created_at":time,"outcome":outcome,"cancelled":false,"lines":[]});
@@ -536,5 +575,85 @@ mod tests {
         assert!(read("private").err().unwrap().contains("untrusted"));
         std::fs::remove_file(linked).unwrap();
         assert!(read("private").is_ok());
+    }
+
+    /// 放弃的完整契约：面板沉默、预览/重试的侧门堵死、回执只是被打标而不是
+    /// 删除——信任校验（属主/权限/链接数）在改写后必须照常通过。
+    #[test]
+    fn dismissed_receipts_leave_summaries_and_cannot_retry() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        receipt(
+            "failure",
+            "download",
+            "2026-10-18T00:00:00Z",
+            json!({"Err":"fixture failure"}),
+        );
+        let service = ModelStoreService::new();
+        assert_eq!(summaries().unwrap().len(), 1);
+        dismiss_incomplete_local(&service, "failure").unwrap();
+        assert!(summaries().unwrap().is_empty(), "放弃后面板必须沉默");
+        assert!(
+            preview("failure").err().unwrap().contains("dismissed"),
+            "放弃过的记录不能从预览复活"
+        );
+        // 打标不删文件：记录还在，信任校验照常通过，dismissed 已落盘。
+        let receipt = read("failure").unwrap();
+        assert!(receipt.dismissed);
+        // 再放弃一次是幂等的空转，不是错误。
+        dismiss_incomplete_local(&service, "failure").unwrap();
+    }
+
+    #[test]
+    fn dismiss_rejects_running_and_non_install_records() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        let service = ModelStoreService::new();
+        // 还没终结的任务不能放弃：它还活着，结局还没写。
+        receipt(
+            "running",
+            "download",
+            "2026-10-18T00:00:00Z",
+            Value::Null,
+        );
+        assert!(dismiss_incomplete_local(&service, "running")
+            .err()
+            .unwrap()
+            .contains("not_terminal"));
+        // 未完成面板只列失败的下载/本地安装；stop 这类记录没有「放弃」语义。
+        receipt(
+            "stopped",
+            "stop",
+            "2026-10-18T00:00:01Z",
+            json!({"Ok":null}),
+        );
+        assert!(dismiss_incomplete_local(&service, "stopped")
+            .err()
+            .unwrap()
+            .contains("not_dismissable"));
+    }
+
+    /// 放弃只针对那一次尝试：同卡之后新的失败照常出现，不做一键拉黑。
+    #[test]
+    fn a_newer_failure_still_surfaces_after_dismiss() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        receipt(
+            "old",
+            "download",
+            "2026-10-18T00:00:00Z",
+            json!({"Err":"old failure"}),
+        );
+        let service = ModelStoreService::new();
+        dismiss_incomplete_local(&service, "old").unwrap();
+        receipt(
+            "new",
+            "download",
+            "2026-10-18T00:00:01Z",
+            json!({"Err":"new failure"}),
+        );
+        let items = summaries().unwrap();
+        assert_eq!(items.len(), 1, "只有最新一条会出现在面板上");
+        assert_eq!(items[0]["runId"], "new");
     }
 }

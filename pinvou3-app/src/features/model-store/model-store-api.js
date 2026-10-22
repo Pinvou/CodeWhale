@@ -136,6 +136,8 @@ function startDownload(cardId) {
 
 function previewIncomplete(runId) { return invokeTauri('model_store_preview_incomplete', { runId }); }
 function retryIncomplete(runId, expectedSha256) { return invokeTauri('model_store_retry_incomplete', { runId, expectedSha256 }); }
+// 放弃一条失败的安装：只撤提醒和重试凭据，后端不删任何已下载文件。
+function dismissIncomplete(runId) { return invokeTauri('model_store_dismiss_incomplete', { runId }); }
 
 /**
  * 发起部署。
@@ -340,6 +342,7 @@ export {
   previewIncomplete,
   retryIncomplete,
   startCardScripts,
+  dismissIncomplete,
   startDeploy,
   startEnable,
   startStop,

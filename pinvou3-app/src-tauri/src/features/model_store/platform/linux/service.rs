@@ -132,6 +132,9 @@ struct RunLog {
     /// 用户主动取消。取消在底层也是一个 Err，但对用户是两回事——"你点了取消"
     /// 和"它炸了"不该长得一样，调用方要能分别给出提示。
     cancelled: Mutex<bool>,
+    /// 用户已放弃这条失败的安装：未完成面板不再列它，重试入口一并关死。
+    /// 只作用于这一条回执（见 [`RunLog::dismiss`]）。
+    dismissed: Mutex<bool>,
     /// 现在是不是有一条脚本提示在等人作答。
     ///
     /// 界面把「要不要弹输入框」从日志行里解析出来，而日志是可回放的——切走再
@@ -175,6 +178,7 @@ impl RunLog {
             docker_progress_notice_emitted: Mutex::new(false),
             outcome: Mutex::new(None),
             cancelled: Mutex::new(false),
+            dismissed: Mutex::new(false),
             awaiting_prompt: Mutex::new(false),
             retained_native: Mutex::new(false),
             finished_at_epoch: Mutex::new(None),
@@ -314,6 +318,21 @@ impl RunLog {
     /// 那一瞬间再回来的话，回放会把同一条提示又弹一次。
     fn answered(&self) {
         *self.awaiting_prompt.lock() = false;
+    }
+
+    /// 用户放弃了这条失败的安装。只打标并落盘，不删任何文件。
+    ///
+    /// 调用方（dismiss_incomplete_local）已经按磁盘上的回执做过完整校验；这里
+    /// 再拦一次"没终结"，是因为内存里的 log 和磁盘文件由同一路 persist 保持
+    /// 一致，但校验和改写之间仍可能插入一次 finish——兜住这条窄竞态的代价是
+    /// 一个 if，漏过去的后果是活任务的记录被打上"已放弃"。
+    fn dismiss(&self) -> Result<(), String> {
+        if self.outcome.lock().is_none() {
+            return Err("installation_not_terminal".into());
+        }
+        *self.dismissed.lock() = true;
+        self.persist_result()
+            .map_err(|error| format!("installation_dismiss_persist_failed: {error}"))
     }
 
     fn finish(&self, outcome: Result<Value, String>, cancelled: bool) {
@@ -715,6 +734,10 @@ struct SavedRun {
     install_context: Option<super::incomplete::Context>,
     #[serde(default)]
     retry_reference: Option<super::incomplete::RetryReference>,
+    /// 用户已放弃这条失败的安装：不再提醒，也不再提供重试。只打标，不删文件——
+    /// 回执是耐久任务事实，删除会把同卡更早的失败记录顶上来，弹窗换个 ID 复活。
+    #[serde(default)]
+    dismissed: bool,
 }
 
 /// Restore old terminal receipts without changing their completion age. Legacy
@@ -784,6 +807,7 @@ fn load_saved_run(path: &std::path::Path) -> Result<Option<RunLog>, String> {
     *log.line_bytes.lock() = bytes;
     *log.lines.lock() = lines;
     *log.cancelled.lock() = saved.cancelled;
+    *log.dismissed.lock() = saved.dismissed;
     if let Some(outcome) = saved.outcome {
         *log.outcome.lock() = Some(outcome);
         *log.finished_at_epoch.lock() = saved.finished_at_epoch.or_else(|| {
@@ -865,6 +889,7 @@ impl RunLog {
             progress,
             outcome: self.outcome.lock().clone(),
             cancelled: *self.cancelled.lock(),
+            dismissed: *self.dismissed.lock(),
             finished_at_epoch: *self.finished_at_epoch.lock(),
             install_context: self.install_context.lock().clone(),
             retry_reference: self.retry_reference.lock().clone(),
@@ -1762,6 +1787,45 @@ pub async fn preview_incomplete(
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+/// 放弃一条失败的安装：未完成面板不再提示，重试入口一并关死。已下载的文件
+/// 原样保留——断点续传是刻意设计，放弃撤的是提醒和重试凭据，不是数据。
+pub async fn dismiss_incomplete(
+    service: &Arc<ModelStoreService>,
+    run_id: String,
+) -> Result<Value, String> {
+    let service = Arc::clone(service);
+    tokio::task::spawn_blocking(move || {
+        if service.remote {
+            return super::background::call("incomplete_dismiss", json!({"run_id":run_id}));
+        }
+        dismiss_incomplete_local(&service, &run_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// 放弃的本地执行路径。校验在 [`super::incomplete::ensure_dismissable`]（终结
+/// 与否、种类、脚本进程已退出），改写走 SavedRun 的所有者这条唯一的落盘路——
+/// 内存里还热着的 log 直接打标持久化；冷的（超出保留期、只剩磁盘文件）经
+/// load_saved_run 原样装回再打标，不进内存表。
+pub(super) fn dismiss_incomplete_local(
+    service: &ModelStoreService,
+    run_id: &str,
+) -> Result<Value, String> {
+    super::incomplete::ensure_dismissable(run_id)?;
+    let log = match service.run(run_id) {
+        Some(log) => log,
+        None => {
+            // 校验已经确认回执存在、受信且已终结；load_saved_run 在这条路上
+            // 不会走到"补写中断结局"的分支。
+            let path = config::data_dir().join("runs").join(format!("{run_id}.json"));
+            Arc::new(load_saved_run(&path)?.ok_or("installation_record_unavailable")?)
+        }
+    };
+    log.dismiss()?;
+    Ok(json!({ "ok": true }))
 }
 
 pub fn retry_incomplete(
@@ -5105,6 +5169,7 @@ mod durable_history_tests {
             progress: None,
             outcome,
             cancelled: false,
+            dismissed: false,
             finished_at_epoch: epoch,
             install_context: None,
             retry_reference: None,

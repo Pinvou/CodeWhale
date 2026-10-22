@@ -82,7 +82,7 @@ pub mod weight_identity;
 pub use lan_store::{lan_status, revoke_api_key, set_lan_sharing};
 pub use service::{
     ModelStoreService, active_runs, answer_run, api_keys, cancel_run, check_card_update,
-    create_api_key, delete_engine, export_run_log, follow_deployment_context, force_remove,
+    create_api_key, delete_engine, dismiss_incomplete, export_run_log, follow_deployment_context, force_remove,
     installed_engines, library, list_cards, local_resources, memory_admission, model_detail,
     preview_incomplete, retry_incomplete, reveal_run_logs_dir, run_log, run_startup_cleanup,
     run_startup_linked_sync, set_storage_settings, start_card_scripts, start_card_update,

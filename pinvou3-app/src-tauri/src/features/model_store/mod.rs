@@ -103,7 +103,7 @@ pub type ModelStoreService = platform::backend::ModelStoreService;
 // 解释」这件事收在 platform 里，命令层不必分支。
 pub use platform::backend::{
     active_runs, answer_run, api_keys, cancel_run, check_card_update, create_api_key,
-    delete_engine, export_run_log, follow_deployment_context, force_remove, installed_engines,
+    delete_engine, dismiss_incomplete, export_run_log, follow_deployment_context, force_remove, installed_engines,
     lan_status, library, list_cards, local_resources, memory_admission, model_detail,
     preview_incomplete, retry_incomplete, reveal_run_logs_dir, revoke_api_key, run_log,
     run_startup_cleanup, run_startup_linked_sync, set_lan_sharing, set_storage_settings,

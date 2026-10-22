@@ -2255,6 +2255,7 @@ pub fn run() {
             commands::model_store::model_store_library,
             commands::model_store::model_store_preview_incomplete,
             commands::model_store::model_store_retry_incomplete,
+            commands::model_store::model_store_dismiss_incomplete,
             commands::model_store::model_store_model_detail,
             commands::model_store::model_store_installed_engines,
             commands::model_store::model_store_local_resources,

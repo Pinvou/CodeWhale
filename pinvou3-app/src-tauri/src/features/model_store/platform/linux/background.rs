@@ -346,6 +346,9 @@ pub fn dispatch(
         "incomplete_retry" => {
             service::retry_incomplete(service, string("run_id")?, string("expected_sha256")?)
         }
+        "incomplete_dismiss" => {
+            tauri::async_runtime::block_on(service::dismiss_incomplete(service, string("run_id")?))
+        }
         "download" => service::start_download(service, string("card_id")?),
         "version_action" => service::start_version_action(
             service,
