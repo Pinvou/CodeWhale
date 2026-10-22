@@ -2,7 +2,8 @@
  * tauri-bridge.js — Tauri 后端通信桥
  *
  * 封装所有 invoke/listen，维护前端状态，通过 pub/sub 推给 React。
- * window.__TAURI__ 由先加载的 platform/web/bootstrap.js 保证存在（桌面为原生注入，Web 为客户端 shim），不再保留无 Tauri 的降级桩。
+ * 桌面由原生注入 window.__TAURI__；Web 由 platform/web/bootstrap.js 和独立 web bridge 承担。
+ * 缺少原生注入的独立预览仅导出 available:false 和安全渲染器，不提供后端能力。
  */
 (function () {
   "use strict";
@@ -28,7 +29,7 @@ function pinvouSharedtauriMain() {
         subscribe: function () { return function () {}; },
         subscribeMany: function () { return function () {}; },
       },
-      rendering: { renderMarkdown: function (text) { return String(text || ""); } },
+      rendering: { renderMarkdown: renderMarkdown },
     };
     return;
   }
