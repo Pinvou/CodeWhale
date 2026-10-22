@@ -276,3 +276,11 @@ test('unused relay configurations cannot replace actual broker authentication or
   const changedSubject = main.replace('source + ".>"', '"billing.>"').replace('relay := events.Relay{', 'unusedRelay := events.Relay{AllowedSubjects: []string{source + ".>"}}\n _ = unusedRelay\n relay := events.Relay{');
   assert.throws(() => authorizationConsumers(relaySourceName, changedSubject, '', approval), /unrecognized_event_relay/);
 });
+
+test('exact user-code lookup remains classified by its Account-owned permission', async () => {
+  await withActualCatalog(catalog => {
+    catalog.http_policies = catalog.http_policies.filter(item => item.path !== '/user-code-lookups/:user_code');
+  }, async file => {
+    await assert.rejects(() => runAuthorizationCoverage(file), /unclassified_http_entrypoint:.*user-code-lookups/);
+  });
+});

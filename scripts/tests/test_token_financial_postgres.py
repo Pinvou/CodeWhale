@@ -313,10 +313,32 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestIdentityRecoveryClaimsRuntimePostgres",
             "TestProfileSessionRevocationRecoveryRuntimePostgres",
             "TestRegistrationCreateDispatchRuntimePostgres",
+            "TestUserCodeLookupRuntimePostgres",
+            "TestAuditSearchOriginalMigrationRuntimePostgres",
         })
         for name in RUNNER.ACCOUNT_REQUIRED:
             with self.subTest(name=name), self.assertRaises(RuntimeError):
                 RUNNER.verify_results([e for e in self.events(RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE, True) if e.get("Test", "").split("/")[0] != name], RUNNER.ACCOUNT_REQUIRED, package=RUNNER.ACCOUNT_PACKAGE, require_children=True, exact_roots=True)
+
+    def test_user_code_and_original_audit_roots_are_selected_with_real_children(self):
+        self.run_main_fixture()
+        roots, package = RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        valid = self.events(roots, package, children=True)
+        for root in ("TestUserCodeLookupRuntimePostgres", "TestAuditSearchOriginalMigrationRuntimePostgres"):
+            with self.subTest(root=root):
+                self.assertIn(root, roots)
+                self.assertIn(root, command[command.index("-run") + 1])
+                self.assertGreater(RUNNER.verify_results(valid, roots, package=package, require_children=True, exact_roots=True), 0)
+                for invalid in (
+                    [event for event in valid if event.get("Test", "").split("/", 1)[0] != root],
+                    [event for event in valid if not event.get("Test", "").startswith(root + "/")],
+                    valid + [{"Action": "skip", "Package": package, "Test": root}],
+                    valid + [{"Action": "skip", "Package": package, "Test": root + "/actual"}],
+                    [{**event, "Package": RUNNER.BILLING_PACKAGE} if event.get("Test", "").split("/", 1)[0] == root else event for event in valid],
+                ):
+                    with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                        RUNNER.verify_results(invalid, roots, package=package, require_children=True, exact_roots=True)
 
     def test_review_governance_and_batch_are_selected_with_mandatory_child_evidence(self):
         required = {

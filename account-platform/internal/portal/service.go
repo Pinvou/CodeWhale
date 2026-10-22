@@ -788,6 +788,9 @@ func tokenPathAllowed(method, resource string) bool {
 	return method == http.MethodGet && len(parts) == 4 || method == http.MethodPost && len(parts) == 5 && (parts[4] == "close" || parts[4] == "payment-claims")
 }
 func accountAdminPathAllowed(method, resource string) bool {
+	if userCodeLookupPath(resource) {
+		return method == http.MethodGet
+	}
 	if resource == "/admin/v2/approval-command-prechecks" {
 		return method == http.MethodPost
 	}
@@ -973,15 +976,40 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 	_, _ = io.Copy(w, io.LimitReader(response.Body, 32<<20))
 }
 
+// This read has an Account-owned durable audit and quota outcome. HEAD is not
+// an alias; arbitrary paths, batching and queries are not a code lookup.
+func userCodeLookupPath(resource string) bool {
+	const prefix = "/admin/v1/user-code-lookups/"
+	if !strings.HasPrefix(resource, prefix) {
+		return false
+	}
+	value := strings.TrimPrefix(resource, prefix)
+	if len(value) == 0 || len(value) > 64 {
+		return false
+	}
+	for _, c := range value {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
 // Risk attribution is separate from device proofs: public admission endpoints
 // need the trusted client source without gaining any additional browser proof.
 func accountRiskSourceAllowed(method, resource string) bool {
+	if method == http.MethodGet && userCodeLookupPath(resource) {
+		return true
+	}
 	return method == http.MethodPost && (resource == "/v1/auth/registration/precheck" || resource == "/v1/auth/captcha/challenges" || accountProofHeaderAllowed(method, resource, "X-Device-ID"))
 }
 
 // These proofs belong to the individual registration or SMS operation, not to
 // the browser's authentication authority. All other request headers stay stripped.
 func accountProofHeaderAllowed(method, resource, name string) bool {
+	if name == "X-Device-ID" && method == http.MethodGet && userCodeLookupPath(resource) {
+		return true
+	}
 	if name == "X-Pinvou-Download-Token" {
 		return auditExportDownloadPath(method, resource)
 	}

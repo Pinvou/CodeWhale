@@ -44,6 +44,16 @@
         "sha256": "5d2a37eef79b42a7b9149f49c5e0e98b9966530aa02d67250f8eda28f9e7fd62"
       },
       {
+        "file": "000005_audit_search.down.sql",
+        "version": 5,
+        "sha256": "9f2a552b32b226081a9c8676bc9b1c41de31788108b7165bfef32a5ce3b57ece"
+      },
+      {
+        "file": "000005_audit_search.up.sql",
+        "version": 5,
+        "sha256": "a238129aa085e74884f21f118f1e65d302df17c2e934ac62f95e854d4f98881d"
+      },
+      {
         "file": "000006_mobile_identity.down.sql",
         "version": 6,
         "sha256": "8618731751779bd5d53e57a75a03020f5f79a6b00d0821b821c3fee45dd37245"

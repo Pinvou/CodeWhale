@@ -1328,8 +1328,8 @@
       "permissions": [
         "platform.system.status.read"
       ]
-      },
-      {
+    },
+    {
       "source": "account-platform/internal/portal/service.go",
       "receiver": "router",
       "method": "ANY",
@@ -1376,6 +1376,17 @@
       "path": "/api/admin/approvals/requests/*resource",
       "scope": "authenticated",
       "strategy": "authenticated.portal-approval-actions-session-csrf-account-authorized"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "admin",
+      "method": "GET",
+      "path": "/user-code-lookups/:user_code",
+      "scope": "platform",
+      "permissions": [
+        "platform.users.read"
+      ],
+      "strategy": "domain.user-code.exact-lookup-audit"
     }
   ],
   "tasks": [

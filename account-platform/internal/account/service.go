@@ -138,6 +138,8 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 		admin.POST("/audit-exports/:export_id/download-tickets", s.requirePermission(PermissionPlatformAuditExport), approvalpolicy.Require("ACCOUNT_AUDIT_EXPORT_DOWNLOAD_TICKET", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.issueAuditExportDownloadTicket))
 		admin.GET("/audit-exports/:export_id/download", s.requirePermission(PermissionPlatformAuditExport), httpserver.AdaptFunc(s.downloadAuditExport))
 	}
+	// Exact-code lookup owns permission, digest-only denial audit and limits in its repository.
+	admin.GET("/user-code-lookups/:user_code", httpserver.AdaptFunc(s.adminUserByCode))
 	admin.GET("/users", s.requirePermission(PermissionPlatformUsersRead), httpserver.AdaptFunc(s.adminUsers))
 	admin.PATCH("/users/:user_id/status", s.requirePermission(PermissionPlatformUsersStatusManage), approvalpolicy.Require("ACCOUNT_USER_STATUS_CHANGE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSetUserStatus))
 	admin.GET("/account-closure-requests", s.requirePermission(PermissionPlatformAccountClosuresRead), httpserver.AdaptFunc(s.adminAccountClosures))

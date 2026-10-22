@@ -319,6 +319,16 @@ export class AdminPlatformClient {
     return this.request('account', `/admin/v1/users?${query}`, signal);
   }
 
+  async userByCode(userCode, signal) {
+    const code = String(userCode || '').trim();
+    if (!/^[A-Za-z0-9-]{1,64}$/.test(code)) throw Object.assign(new Error('USER_CODE_LOOKUP_FAILED'), { code: 'USER_CODE_LOOKUP_FAILED' });
+    const item = await this.request('account', `/admin/v1/user-code-lookups/${encodeURIComponent(code)}`, signal);
+    if (!item || typeof item.user_id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(item.user_id)
+      || typeof item.user_code !== 'string' || item.user_code.replaceAll('-', '').toUpperCase() !== code.replaceAll('-', '').toUpperCase()
+      || typeof item.status !== 'string' || !item.status || item.email != null) throw Object.assign(new Error('INVALID_USER_CODE_LOOKUP_ACK'), { code: 'USER_CODE_LOOKUP_FAILED' });
+    return item;
+  }
+
   setUserStatus(userID, status) {
     if (!['ACTIVE', 'DISABLED'].includes(status)) return Promise.reject(new Error('INVALID_USER_STATUS'));
     return this.mutate('account', `/admin/v1/users/${encodeURIComponent(userID)}/status`, 'PATCH', { status }, '', undefined, 204);

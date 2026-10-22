@@ -20,16 +20,19 @@ import './admin-platform.css';
 
 function Users({ client, copy, canManage }) {
   const [query, setQuery] = useState('');
+  const [userCode, setUserCode] = useState('');
   const [page, setPage] = useState(null);
   const [previous, setPrevious] = useState([]);
   const [cursor, setCursor] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [queryKind, setQueryKind] = useState('directory');
+  const mutationBusy = useRef(false);
   const generation = useRef(0);
   useEffect(() => () => { generation.current++; }, []);
   const load = async (nextCursor = cursor, search = query) => {
     const request = ++generation.current;
-    setBusy(true); setError('');
+    setBusy(true); setError(''); setQueryKind('directory');
     try {
       const result = await client.users({ q: search, cursor: nextCursor });
       if (request !== generation.current) return;
@@ -38,9 +41,22 @@ function Users({ client, copy, canManage }) {
     } catch (reason) { if (request === generation.current) setError(localizedAccountPlatformError(copy, reason)); }
     finally { if (request === generation.current) setBusy(false); }
   };
-  useEffect(() => { void load(''); return () => { generation.current++; }; }, [client]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { mutationBusy.current = false; void load(''); return () => { generation.current++; mutationBusy.current = false; }; }, [client]); // eslint-disable-line react-hooks/exhaustive-deps
+  const lookupCode = async () => {
+    if (mutationBusy.current) return;
+    const request = ++generation.current;
+    setBusy(true); setError(''); setPage(null); setPrevious([]); setCursor(''); setQueryKind('code');
+    try {
+      const item = await client.userByCode(userCode);
+      if (request !== generation.current) return;
+      setPage({ items: [item] });
+    } catch { if (request === generation.current) setError(copy.userManagement.codeLookupFailed); }
+    finally { if (request === generation.current) setBusy(false); }
+  };
   const changeStatus = async (user, status) => {
-    if (!canManage || !['ACTIVE', 'DISABLED'].includes(status)) return;
+    if (!canManage || mutationBusy.current || !['ACTIVE', 'DISABLED'].includes(status)) return;
+    const mutation = {};
+    mutationBusy.current = mutation;
     const request = ++generation.current;
     setBusy(true); setError('');
     try {
@@ -49,12 +65,13 @@ function Users({ client, copy, canManage }) {
       if (result !== null) throw new Error('INVALID_USER_STATUS_ACK');
       await load();
     } catch (reason) { if (request === generation.current) setError(localizedAccountPlatformError(copy, reason)); }
-    finally { if (request === generation.current) setBusy(false); }
+    finally { if (mutationBusy.current === mutation) mutationBusy.current = false; if (request === generation.current) setBusy(false); }
   };
   return <section className="adm-panel"><h2>{copy.nav.users}</h2><form onSubmit={event => { event.preventDefault(); setPrevious([]); void load('', query); }}><label>{copy.search}<input value={query} onChange={event => setQuery(event.target.value)} /></label><button disabled={busy}>{copy.refresh}</button></form>
-    {error && <div role="alert">{error}<button disabled={busy} onClick={() => void load()}>{copy.retry}</button></div>}
+    <form onSubmit={event => { event.preventDefault(); void lookupCode(); }}><label>{copy.userManagement.exactCode}<input disabled={busy && mutationBusy.current} maxLength={64} value={userCode} onChange={event => { if (mutationBusy.current) return; generation.current++; setBusy(false); setPage(null); setError(''); setUserCode(event.target.value); }} placeholder={copy.userManagement.codePlaceholder} /></label><button disabled={busy || !userCode.trim()}>{copy.userManagement.lookup}</button></form>
+    {error && <div role="alert">{error}<button disabled={busy} onClick={() => void (queryKind === 'code' ? lookupCode() : load())}>{copy.retry}</button></div>}
     {busy && <p role="status">{copy.loading}</p>}
-    {page && <table><thead><tr><th>{copy.userManagement.account}</th><th>{copy.accounts.status}</th><th>{copy.accounts.actions}</th></tr></thead><tbody>{page.items.map(user => <tr key={user.user_id}><td>{user.username || user.display_name || user.user_code || user.user_id}</td><td>{user.status}</td><td>{canManage && ['ACTIVE', 'DISABLED'].includes(user.status) && <button disabled={busy} onClick={() => void changeStatus(user, user.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE')}>{user.status === 'ACTIVE' ? copy.accounts.disable : copy.accounts.enable}</button>}</td></tr>)}</tbody></table>}
+    {page && <table><thead><tr><th>{copy.userManagement.account}</th><th>{copy.userManagement.exactCode}</th><th>{copy.accounts.status}</th><th>{copy.accounts.actions}</th></tr></thead><tbody>{page.items.map(user => <tr key={user.user_id}><td>{user.username || user.display_name || user.user_code || user.user_id}</td><td><code>{user.user_code || '—'}</code></td><td>{user.status}</td><td>{canManage && ['ACTIVE', 'DISABLED'].includes(user.status) && <button disabled={busy} onClick={() => void changeStatus(user, user.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE')}>{user.status === 'ACTIVE' ? copy.accounts.disable : copy.accounts.enable}</button>}</td></tr>)}</tbody></table>}
     {page?.items.length === 0 && <p>{copy.noData}</p>}
     <nav><button disabled={busy || previous.length === 0} onClick={() => { const next = [...previous]; const target = next.pop(); setPrevious(next); void load(target); }}>{copy.userManagement.previous}</button><button disabled={busy || !page?.next_cursor} onClick={() => { setPrevious(value => [...value, cursor]); void load(page.next_cursor); }}>{copy.userManagement.next}</button></nav>
   </section>;

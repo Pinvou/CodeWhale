@@ -53,6 +53,8 @@ ACCOUNT_REQUIRED = {
     "TestIdentityRecoveryClaimsRuntimePostgres",
     "TestProfileSessionRevocationRecoveryRuntimePostgres",
     "TestRegistrationCreateDispatchRuntimePostgres",
+    "TestUserCodeLookupRuntimePostgres",
+    "TestAuditSearchOriginalMigrationRuntimePostgres",
 }
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 TOKEN_CHILD_REQUIRED = {"TestUsageWaiverCoordinatorRecoveryPostgres"}
