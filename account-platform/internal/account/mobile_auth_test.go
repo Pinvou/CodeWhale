@@ -251,6 +251,10 @@ func (f *mobileAuthRepositoryFake) CommitRegistration(_ context.Context, operati
 func (*mobileAuthRepositoryFake) ScheduleRegistrationRetry(context.Context, uuid.UUID, string) error {
 	return nil
 }
+func (f *mobileAuthRepositoryFake) MarkRegistrationIdentityRejected(_ context.Context, _ uuid.UUID, code string, _ int64) error {
+	f.operation.Status, f.operation.LastErrorCode = "REPAIR_REQUIRED", code
+	return nil
+}
 func (f *mobileAuthRepositoryFake) CompensatePreIdentityRegistration(_ context.Context, _ uuid.UUID, code string, _ int64) error {
 	f.operation.Status, f.operation.LastErrorCode = "COMPENSATED", code
 	return nil

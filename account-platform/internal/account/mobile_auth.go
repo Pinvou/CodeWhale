@@ -83,12 +83,14 @@ type RegistrationOperation struct {
 }
 
 type RegistrationResult struct {
-	OperationID uuid.UUID  `json:"registration_operation_id"`
-	UserID      *uuid.UUID `json:"user_id,omitempty"`
-	UserCode    string     `json:"user_code,omitempty"`
-	Username    string     `json:"username,omitempty"`
-	Status      string     `json:"status"`
-	NextRetryAt time.Time  `json:"next_retry_at,omitempty"`
+	Reason               string     `json:"reason,omitempty"`
+	ManualReviewRequired bool       `json:"manual_review_required,omitempty"`
+	OperationID          uuid.UUID  `json:"registration_operation_id"`
+	UserID               *uuid.UUID `json:"user_id,omitempty"`
+	UserCode             string     `json:"user_code,omitempty"`
+	Username             string     `json:"username,omitempty"`
+	Status               string     `json:"status"`
+	NextRetryAt          time.Time  `json:"next_retry_at,omitempty"`
 }
 
 type MobileAuthRepository interface {
@@ -112,6 +114,7 @@ type MobileAuthRepository interface {
 	MarkRegistrationIdentityCreated(context.Context, uuid.UUID, string) error
 	CommitRegistration(context.Context, uuid.UUID, string) (RegistrationOperation, error)
 	ScheduleRegistrationRetry(context.Context, uuid.UUID, string) error
+	MarkRegistrationIdentityRejected(context.Context, uuid.UUID, string, int64) error
 	MarkRegistrationCreateAttempted(context.Context, uuid.UUID) (bool, int64, error)
 	CompensatePreIdentityRegistration(context.Context, uuid.UUID, string, int64) error
 }
@@ -298,7 +301,13 @@ func (s *MobileAuthService) Send(ctx context.Context, rawUsername, rawMobile, pa
 	return challenge, nil
 }
 
-func (s *MobileAuthService) VerifyPasswordReset(ctx context.Context, rawMobile string, challengeID uuid.UUID, code string) (bool, error) {
+func (s *MobileAuthService) VerifyPasswordReset(ctx context.Context, rawMobile string, challengeID uuid.UUID, code string) (verified bool, resultErr error) {
+	startedAt := s.now()
+	defer func() {
+		if err := waitForResponseFloor(ctx, startedAt, s.loginResponseFloor); err != nil && resultErr == nil {
+			verified, resultErr = false, err
+		}
+	}()
 	mobile, err := NormalizeMainlandMobile(rawMobile)
 	if err != nil {
 		return false, err
@@ -319,7 +328,7 @@ func (s *MobileAuthService) VerifyPasswordReset(ctx context.Context, rawMobile s
 	if providerErr != nil {
 		return false, ErrSMSUnavailable
 	}
-	verified, err := provider.VerifyCode(ctx, mobile, challengeID, verificationData, code)
+	verified, err = provider.VerifyCode(ctx, mobile, challengeID, verificationData, code)
 	if err != nil {
 		return false, fmt.Errorf("%w: %v", ErrSMSUnavailable, err)
 	}
@@ -390,6 +399,9 @@ func (s *MobileAuthService) Register(ctx context.Context, operationID uuid.UUID,
 	operation, err := s.authorizeRegistrationQuery(ctx, operationID, queryToken)
 	if err != nil {
 		return RegistrationResult{}, err
+	}
+	if registrationIdentityRejected(operation) {
+		return registrationResult(operation), ErrRegistrationRecovering
 	}
 	// The query token selects the immutable registration operation. All identity
 	// and SMS bindings are read back from that server-side record; duplicate
@@ -485,6 +497,9 @@ func (s *MobileAuthService) authorizeRegistrationQuery(ctx context.Context, oper
 }
 
 func (s *MobileAuthService) resumeRegistration(ctx context.Context, operation RegistrationOperation) (RegistrationResult, error) {
+	if registrationIdentityRejected(operation) {
+		return registrationResult(operation), ErrRegistrationRecovering
+	}
 	if operation.Status == "REGISTRATION_IN_PROGRESS" || operation.Status == "IDENTITY_CREATING" {
 		if err := s.repository.MarkRegistrationIdentityCreating(ctx, operation.ID); err != nil {
 			return RegistrationResult{}, err
@@ -503,6 +518,18 @@ func (s *MobileAuthService) resumeRegistration(ctx context.Context, operation Re
 			}
 		}
 		if err != nil {
+			if code := registrationIdentityRejectionCode(err); code != "" && firstAttempt && attemptVersion > 0 {
+				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+				defer cancel()
+				if writeErr := s.repository.MarkRegistrationIdentityRejected(cleanupCtx, operation.ID, code, attemptVersion); writeErr != nil {
+					return registrationResult(operation), writeErr
+				}
+				updated, readErr := s.repository.RegistrationOperation(cleanupCtx, operation.ID)
+				if readErr != nil {
+					return RegistrationResult{}, readErr
+				}
+				return registrationResult(updated), ErrRegistrationRecovering
+			}
 			if errors.Is(err, ErrIdentityCreateNotDispatched) && firstAttempt && attemptVersion > 0 {
 				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 				compensateErr := s.repository.CompensatePreIdentityRegistration(cleanupCtx, operation.ID, "IDENTITY_CREATE_NOT_DISPATCHED", attemptVersion)
@@ -542,7 +569,11 @@ func (s *MobileAuthService) resumeRegistration(ctx context.Context, operation Re
 }
 
 func registrationResult(operation RegistrationOperation) RegistrationResult {
-	return RegistrationResult{OperationID: operation.ID, UserID: operation.UserID, UserCode: operation.UserCode, Username: operation.Username, Status: operation.Status, NextRetryAt: operation.NextRetryAt}
+	result := RegistrationResult{OperationID: operation.ID, UserID: operation.UserID, UserCode: operation.UserCode, Username: operation.Username, Status: operation.Status, NextRetryAt: operation.NextRetryAt}
+	if registrationIdentityRejected(operation) {
+		result.Reason, result.ManualReviewRequired = operation.LastErrorCode, true
+	}
+	return result
 }
 
 func (s *MobileAuthService) VerifyLogin(ctx context.Context, rawMobile string, challengeID uuid.UUID, code string) (subject string, resultErr error) {

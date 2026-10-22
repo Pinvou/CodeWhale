@@ -175,7 +175,15 @@ func (p *HTTPIdentityProvisioner) request(ctx context.Context, method, path stri
 		case "PASSWORD_REFERENCE_CONFLICT":
 			return ErrPasswordReferenceConflict
 		case "USERNAME_ALREADY_REGISTERED":
-			return ErrUsernameAlreadyRegistered
+			if response.StatusCode == http.StatusConflict {
+				return ErrUsernameAlreadyRegistered
+			}
+			return errors.New("identity adapter returned an invalid rejection status")
+		case "MOBILE_ALREADY_REGISTERED":
+			if response.StatusCode == http.StatusConflict {
+				return ErrMobileAlreadyRegistered
+			}
+			return errors.New("identity adapter returned an invalid rejection status")
 		default:
 			return fmt.Errorf("identity adapter returned HTTP %d", response.StatusCode)
 		}

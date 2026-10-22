@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { registrationManualReviewReason } from './registration-recovery-state.js';
 import { PasswordInput } from './PasswordInput.jsx';
 import { ProfileCaptcha } from './ProfileSettings.jsx';
 import { localizedAccountPlatformError } from './error-localization.js';
@@ -39,7 +40,7 @@ export function AccountLogin({ client, copy, onAuthenticated, reauthentication =
         setProgress(result);
         if (result.username) setAccount(result.username);
         if (result.registration_operation_id) setRecovery(value => value?.registration_operation_id === result.registration_operation_id ? value : { registration_operation_id: result.registration_operation_id });
-        if (['ACTIVE', 'COMPENSATED', 'EXPIRED'].includes(result.status)) { if (result.user_id) setMode('password'); return; }
+        if (registrationManualReviewReason(result) || ['ACTIVE', 'COMPENSATED', 'EXPIRED'].includes(result.status)) { if (result.user_id) setMode('password'); return; }
         const suggested = Date.parse(result.next_retry_at || '') - Date.now();
         timer = setTimeout(poll, Math.min(30000, Math.max(2000, Number.isFinite(suggested) ? suggested : 5000)));
       } catch {
@@ -49,6 +50,7 @@ export function AccountLogin({ client, copy, onAuthenticated, reauthentication =
     void poll();
     return () => { stopped = true; clearTimeout(timer); };
   }, [client, recovery?.registration_operation_id, reauthentication]);
+  const manualReviewReason = registrationManualReviewReason(progress);
   const pending = Boolean(progress && !progress.user_id && ['REGISTRATION_IN_PROGRESS', 'IDENTITY_CREATING', 'IDENTITY_CREATED', 'ACCOUNT_COMMITTING', 'REPAIR_REQUIRED', 'RECOVERY_UNAVAILABLE'].includes(progress.status));
   const run = async action => {
     const generation = owner.current;
@@ -151,7 +153,7 @@ export function AccountLogin({ client, copy, onAuthenticated, reauthentication =
     <h1>{reauthentication ? copy.desktopReauthenticationTitle : copy.title}</h1><p>{reauthentication ? copy.desktopReauthenticationLead : copy.desktopLoginIntro}</p>
     {!reauthentication && <nav>{[['password', copy.login], ['sms', copy.authModes.sms], ['register', copy.register], ['forgot', copy.authModes.forgot]].map(([value, label]) => <button key={value} type="button" disabled={busy || pending} aria-pressed={mode === value} onClick={() => changeMode(value)}>{label}</button>)}</nav>}
     {error && <div className="ap-alert error" role="alert">{error}</div>}{notice && <div className="ap-alert" role="status">{notice}</div>}
-    {pending ? <div role="status"><p>{copy.registrationDoNotRepeat}</p><p>{progress.status}</p><button disabled={busy} onClick={recover}>{copy.retry}</button></div> : <form className="ap-stack" onSubmit={submit}>
+    {pending ? <div role="status"><p>{manualReviewReason ? copy.registrationManualReview : copy.registrationDoNotRepeat}</p>{manualReviewReason && <p>{manualReviewReason === 'USERNAME_ALREADY_REGISTERED' ? copy.usernameAlreadyRegistered : copy.mobileAlreadyRegistered}</p>}<p>{progress.status}</p><button disabled={busy} onClick={recover}>{copy.retry}</button></div> : <form className="ap-stack" onSubmit={submit}>
       {(mode === 'password' || mode === 'register') && <label>{mode === 'register' ? copy.registrationUsername : copy.account}<input required value={account} autoComplete="username" disabled={busy} onChange={changeFacts(setAccount)} /></label>}
       {mode !== 'password' && <label>{copy.mobile}<input required value={mobile} inputMode="tel" autoComplete="tel-national" disabled={busy || Boolean(challenge)} onChange={changeFacts(setMobile)} /></label>}
       {mode !== 'sms' && <label>{copy.password}<PasswordInput resetKey={mode} showLabel={copy.showPassword} hideLabel={copy.hidePassword} ariaLabel={copy.password} autoComplete={mode === 'password' ? 'current-password' : 'new-password'} maxLength={128} value={password} disabled={busy || mode === 'register' && Boolean(challenge)} onValueChange={value => { owner.current++; setPassword(value); setReference(null); setChallenge(''); setCode(''); setCaptcha(null); setRecovery(null); }} /></label>}

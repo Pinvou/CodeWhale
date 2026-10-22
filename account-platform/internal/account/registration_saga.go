@@ -404,7 +404,10 @@ UPDATE registration_operations SET
  status=CASE WHEN identity_created_at IS NOT NULL AND identity_created_at+interval '30 minutes'<=$2 THEN 'REPAIR_REQUIRED' ELSE status END,
  attempts=attempts+1,next_retry_at=$2::timestamptz+LEAST(interval '5 minutes',interval '5 seconds'*power(2,LEAST(attempts,6))),
  last_error_code=$3,version=version+1,updated_at=$2
-WHERE id=$1 AND status IN ('REGISTRATION_IN_PROGRESS','IDENTITY_CREATING','IDENTITY_CREATED','ACCOUNT_COMMITTING','REPAIR_REQUIRED')`, operationID, now, code)
+WHERE id=$1 AND status IN ('REGISTRATION_IN_PROGRESS','IDENTITY_CREATING','IDENTITY_CREATED','ACCOUNT_COMMITTING','REPAIR_REQUIRED')
+AND NOT (status='REPAIR_REQUIRED' AND identity_create_attempted_at IS NOT NULL
+         AND identity_subject IS NULL AND committed_user_id IS NULL
+         AND COALESCE(last_error_code,'') IN ('USERNAME_ALREADY_REGISTERED','MOBILE_ALREADY_REGISTERED'))`, operationID, now, code)
 		return err
 	})
 }

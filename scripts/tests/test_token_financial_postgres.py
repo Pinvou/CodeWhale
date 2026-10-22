@@ -313,6 +313,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestIdentityRecoveryClaimsRuntimePostgres",
             "TestProfileSessionRevocationRecoveryRuntimePostgres",
             "TestRegistrationCreateDispatchRuntimePostgres",
+            "TestRegistrationIdentityRejectionRuntimePostgres",
             "TestUserCodeLookupRuntimePostgres",
             "TestAuditSearchOriginalMigrationRuntimePostgres",
         })
@@ -394,20 +395,20 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                             RUNNER.verify_results(invalid, roots, package=package, require_children=True)
 
     def test_registration_dispatch_root_requires_actual_completed_children(self):
-        name = "TestRegistrationCreateDispatchRuntimePostgres"
-        roots, package = RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE
-        self.run_main_fixture()
-        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
-        self.assertIn(name, command[command.index("-run") + 1])
-        valid = self.events(roots, package, children=True)
-        self.assertGreater(RUNNER.verify_results(valid, roots, package=package, require_children=True, exact_roots=True), 0)
-        for invalid in (
-            [event for event in valid if event.get("Test", "").split("/")[0] != name],
-            [event for event in valid if not event.get("Test", "").startswith(name + "/")],
-            valid + [{"Action": "skip", "Package": package, "Test": name + "/actual"}],
-        ):
-            with self.assertRaises(RuntimeError):
-                RUNNER.verify_results(invalid, roots, package=package, require_children=True, exact_roots=True)
+        for name in ("TestRegistrationCreateDispatchRuntimePostgres", "TestRegistrationIdentityRejectionRuntimePostgres"):
+            roots, package = RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE
+            self.run_main_fixture()
+            command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+            self.assertIn(name, command[command.index("-run") + 1])
+            valid = self.events(roots, package, children=True)
+            self.assertGreater(RUNNER.verify_results(valid, roots, package=package, require_children=True, exact_roots=True), 0)
+            for invalid in (
+                [event for event in valid if event.get("Test", "").split("/")[0] != name],
+                [event for event in valid if not event.get("Test", "").startswith(name + "/")],
+                valid + [{"Action": "skip", "Package": package, "Test": name + "/actual"}],
+            ):
+                with self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, roots, package=package, require_children=True, exact_roots=True)
 
     def test_expiry_restore_root_is_selected_and_requires_completed_children(self):
         name = "TestF06MemberQuotaRestoreUsesOrdinaryPackageExpiry"
