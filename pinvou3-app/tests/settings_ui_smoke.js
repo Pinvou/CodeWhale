@@ -1583,6 +1583,46 @@ async function modalWidth(page, headingText) {
   rec('⑥.5i clearing the context window saves null (system default kept, no 0/garbage value)',
     clearedContext && clearedContext.model === 'glm-5.3-flash' && clearedContext.context_window_tokens === null,
     JSON.stringify(clearedContext));
+  // Untouched-field intent: a form opened before a background store sync must
+  // not resubmit its stale window snapshot (overwriting e.g. the verified 256K
+  // repair that a one-time marker then protects). Saving without touching the
+  // field flags the payload so the backend keeps the persisted value; touching
+  // the field submits an intentional value, including a deliberate 32K
+  // downgrade.
+  await clickRowAction(page, 'glm-5.3-flash', '编辑');
+  await sleep(300);
+  await clickExact(page, '保存');
+  await sleep(500);
+  const untouchedContext = await page.evaluate(() => {
+    const call = [...window.__SETTINGS_TEST__.calls].reverse().find(item => item.cmd === 'save_model');
+    return call && call.args && call.args.model;
+  });
+  rec('⑥.5j an untouched context field flags the save so the backend keeps the persisted value',
+    untouchedContext
+      && untouchedContext.model === 'glm-5.3-flash'
+      && untouchedContext.preserve_context_window_tokens === true,
+    JSON.stringify(untouchedContext));
+  await clickRowAction(page, 'glm-5.3-flash', '编辑');
+  await sleep(300);
+  await page.evaluate(() => {
+    const field = document.querySelector('[data-testid="model-form-context-window"]');
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    setter.call(field, '32768');
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await sleep(150);
+  await clickExact(page, '保存');
+  await sleep(500);
+  const explicitContext = await page.evaluate(() => {
+    const call = [...window.__SETTINGS_TEST__.calls].reverse().find(item => item.cmd === 'save_model');
+    return call && call.args && call.args.model;
+  });
+  rec('⑥.5k an explicitly edited context window submits its value without the preserve flag',
+    explicitContext
+      && explicitContext.model === 'glm-5.3-flash'
+      && explicitContext.context_window_tokens === 32768
+      && explicitContext.preserve_context_window_tokens === false,
+    JSON.stringify(explicitContext));
   // Input bound: context_window_tokens is persisted as u32, so oversized input
   // must be truncated to 9 digits; otherwise save_model fails with a raw serde
   // deserialization error (or Infinity silently saves null).
@@ -1597,7 +1637,7 @@ async function modalWidth(page, headingText) {
   await sleep(150);
   const overflowTruncated = await page.evaluate(() =>
     document.querySelector('[data-testid="model-form-context-window"]').value);
-  rec('⑥.5j oversized numeric input is truncated to 9 digits (within the u32 persist bound)', overflowTruncated === '999999999', JSON.stringify({ overflowTruncated }));
+  rec('⑥.5l oversized numeric input is truncated to 9 digits (within the u32 persist bound)', overflowTruncated === '999999999', JSON.stringify({ overflowTruncated }));
   await clickExact(page, '取消');
   await sleep(200);
 

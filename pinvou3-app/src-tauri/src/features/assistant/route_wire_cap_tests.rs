@@ -174,6 +174,7 @@ async fn boot_wire_cap_engine(
         model_store_link_detached: false,
         model_store_link_requested: false,
         preserve_model_store_route: false,
+        preserve_context_window_tokens: false,
         base_url: base_url.to_string(),
         provider_kind: None,
         vendor: None,
