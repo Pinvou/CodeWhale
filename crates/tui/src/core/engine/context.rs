@@ -227,6 +227,12 @@ fn summarize_subagent_snapshot(
     child_route_fallback: Option<&serde_json::Value>,
     lossy: &mut bool,
 ) -> String {
+    // These carry resumable state and the concrete follow-up question, not
+    // formatting metadata. The row projection does not render them, including
+    // when a session projection keeps them outside its `snapshot` wrapper.
+    *lossy |= ["checkpoint", "needs_input"]
+        .iter()
+        .any(|key| snapshot.get(key).is_some_and(|value| !value.is_null()));
     // Session projections (`SubAgentSessionProjection`) keep `transcript_handle`
     // on the outer envelope while the wrapped result row carries none, so the
     // handle is captured before unwrapping and handed down as a fallback: the
@@ -715,6 +721,13 @@ fn compact_task_gate_run_result_for_context(raw: &str) -> Option<ContextSummary>
     let summary = json_text(gate, "summary")
         .or_else(|| json_text(&parsed, "stderr_summary"))
         .or_else(|| json_text(&parsed, "stdout_summary"));
+    // `tasks gate_run` returns both streams even without an active durable
+    // task/log artifact. Its stderr-first gate summary does not represent a
+    // different nonempty stdout stream (or vice versa).
+    lossy |= ["stdout_summary", "stderr_summary"]
+        .iter()
+        .filter_map(|key| json_text(&parsed, key))
+        .any(|stream| Some(stream) != summary);
     let exit = json_number_text(gate, "exit_code")
         .map(|code| format!(", exit_code: {code}"))
         .unwrap_or_default();

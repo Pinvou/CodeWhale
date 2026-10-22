@@ -187,6 +187,76 @@ fn make_snapshot(status: SubAgentStatus) -> SubAgentResult {
     }
 }
 
+#[test]
+fn forkguard_interrupted_snapshot_preserves_checkpoint_recovery() {
+    let _spill = crate::tools::truncate::TEST_SPILLOVER_GUARD
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let home = tempdir().expect("artifact home");
+    crate::tools::truncate::with_test_home(home.path(), || {
+        let reason = "provider timeout";
+        let checkpoint = make_checkpoint("agent_test", 2, Vec::new());
+        let handle = checkpoint.continuation_handle.clone();
+        let needs_input = needs_input_for_interrupted_checkpoint(reason, &checkpoint);
+        assert!(needs_input.question.contains(&handle));
+        let mut snapshot = make_snapshot(SubAgentStatus::Interrupted(reason.to_string()));
+        snapshot.result = Some(reason.to_string());
+        snapshot.checkpoint = Some(checkpoint);
+        snapshot.needs_input = Some(needs_input);
+        let raw = serde_json::to_string(&snapshot).expect("real interrupted DTO");
+        assert!(raw.len() < 15_360, "fixture is a small result");
+        let mut result = ToolResult::success(raw.clone());
+        let view = crate::core::engine::compact_tool_result_for_route(
+            ApiProvider::Deepseek,
+            "deepseek-v3.2-128k",
+            None,
+            "agent",
+            &result,
+        );
+        assert!(
+            view.contains(&handle) || view.contains("the full output could not be saved"),
+            "interrupted coordination must remain actionable: {view}"
+        );
+        if !view.contains(&handle) {
+            assert!(
+                crate::tools::truncate::preserve_full_output_for_model_context(
+                    &mut result,
+                    "coordination",
+                    "agent",
+                    "session-coordination"
+                )
+            );
+            let view = crate::core::engine::compact_tool_result_for_route(
+                ApiProvider::Deepseek,
+                "deepseek-v3.2-128k",
+                None,
+                "agent",
+                &result,
+            );
+            assert!(view.contains("ref=\"art_coordination\""));
+            let retained = std::fs::read_to_string(
+                result.metadata.as_ref().expect("artifact metadata")["artifact_path"]
+                    .as_str()
+                    .expect("full artifact path"),
+            )
+            .expect("retained original DTO");
+            assert_eq!(retained, raw);
+            let restored: SubAgentResult = serde_json::from_str(&retained).expect("restore DTO");
+            assert_eq!(
+                restored.checkpoint.expect("checkpoint").continuation_handle,
+                handle
+            );
+            assert!(
+                restored
+                    .needs_input
+                    .expect("follow-up")
+                    .question
+                    .contains(&handle)
+            );
+        }
+    });
+}
+
 fn make_worker_spec(worker_id: &str, workspace: PathBuf) -> AgentWorkerSpec {
     let tool_profile =
         AgentWorkerToolProfile::Explicit(vec!["read_file".to_string(), "grep_files".to_string()]);
