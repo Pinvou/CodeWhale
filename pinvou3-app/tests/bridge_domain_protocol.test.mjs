@@ -183,7 +183,11 @@ const expectedProtocolHashes = {
   // (Community #727): chat:delta/chat:tool_start/chat:done listener bodies moved
   // to the shared single-publication flush (notify() without domains, one
   // refreshActiveStreamRender hook) — event names and invoke shapes unchanged.
-  chat: 'c660db74258acda5026f88a5670e58a93b59fe1eb482ec2915244be7084a8bb9',
+  // Recomputed for community #748 backflow: the chat:tool_delta listener body
+  // now opts into deferBackgroundNotify so background output chunks ride the
+  // existing terminal 50ms publication timer; invoke and event wire shapes
+  // stay unchanged (publication timing is the deliberate change).
+  chat: 'd494f576c5484c6af93a4b37c949a1844d5055b46043eb7f5ccdad6850896a42',
   dependencies: 'd39f5a46b8e34c1c30d8f8e08ef62baccfe822ffb7fad8dbf3301c69c566e31c',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.
@@ -204,7 +208,14 @@ const expectedProtocolHashes = {
   // and burst-coalesces the history refresh (round-20 R3); same two commands,
   // no new invoke or listen entries (the extractor scans raw source, so
   // body/comment text is part of the digest).
-  sessions: 'ffa253ca04a11fc8e93863e2f9b844376fd75b6d0cc815fe299144578f20f7e0',
+  // Recomputed for the #484 backflow merge: create_session now carries the
+  // keychain snapshot (workspaceRoots) and project ownership (projectId)
+  // captured by the new captureDraftWorkspaceBinding staging helper, and the
+  // sessions feature gains rememberDraftWorkspaceRecent /
+  // maybePruneFailedWorkspaceRecent wiring (single-entry workspace picker);
+  // same command set, no new invoke or listen entries — the extractor scans
+  // raw source, so the merged body/comment text is part of the digest.
+  sessions: '70eebf1ac7f64b49db7db4f1b987dc075672116261d49000515fcfe2d5a2fdbe',
   // Recomputed for the builtin feature toggle hook: settings.js gains the
   // list_builtin_features / set_builtin_feature_enabled invoke wrappers (the
   // session-mention feature gate reads the list; the setter is the contract
@@ -226,8 +237,12 @@ const expectedProtocolHashes = {
   // payload — the dialog's previous report fed back on retry, honored by the
   // backend only as a reporting reclassification inside its own to-lane
   // retry population. Same command surface, no new invoke or listen entries.
-  projects: '90c12ab7494aba3975ac4ece4b23594f4a4fcf309f6252b721ce15575b245979',
-};
+  // Recomputed again after the single-entry workspace picker merge: on top of
+  // the rebind carryover feed-back the domain also gains
+  // ensure_folder_projects / update_project(roots, lastPrimaryRoot) /
+  // projects_set_never_materialize / align_session_to_project
+  // (bridge/projects.js).
+  projects: 'b7b41e3f15a938ab4a5cad8e28e70efe031f382cdced92a4022badf9119027d1',};
 
 for (const [domain, files] of Object.entries(protocolSources)) {
   const signatures = files.flatMap(file => {

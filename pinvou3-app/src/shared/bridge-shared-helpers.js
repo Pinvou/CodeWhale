@@ -43,6 +43,11 @@
     return !!candidate && typeof candidate === "object" && "value" in candidate;
   }
 
+  // Official removed the shared STATE_SLICE_FIELDS registry from this file
+  // (it lives locally in tauri/bridge.js and web/bridge/domain-adapter.js —
+  // locked by tests/bridge_state_domains.test.mjs); theirs' copy has no
+  // consumer on this tree, so it stays removed.
+
   function ensureCells(deps) {
     if (deps == null) throw new TypeError("bridge shared deps object required");
     const wrapped = Object.assign({}, deps);
