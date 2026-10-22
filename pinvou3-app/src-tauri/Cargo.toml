@@ -1,6 +1,6 @@
 [package]
 name = "pinvou3-tauri"
-version = "0.10.12"
+version = "0.10.13"
 description = "品悟智能助手桌面应用后端"
 authors = ["pinvou"]
 license = "MIT"
@@ -113,6 +113,12 @@ deepseek-tui = { path = "../../CodeWhale/crates/tui", package = "codewhale-tui" 
 # 凭证存储复用底座 codewhale-secrets(DefaultKeyringStore + FileKeyringStore 文件回退),
 # 不再在 app 层自建 keyring 封装;headless/无 D-Bus 服务器也能存凭证。
 codewhale-secrets = { path = "../../CodeWhale/crates/secrets" }
+
+# Reuse the foundation codewhale-core MAX_WORKSPACE_ROOTS constant (review
+# #484 round-21 M8): the project roots capacity ceiling stays sourced from
+# the same place as the foundation's intake/delivery, so a foundation-side
+# value change can no longer drift here silently.
+codewhale-core = { path = "../../CodeWhale/crates/core" }
 
 # 复用底座 codewhale-config 的 RouteLimits 类型(填 active_route_limits.context_tokens,
 # 把 vLLM 探测的窗口喂给底座压缩阈值推导)。facade(deepseek-tui)不 re-export 该类型,

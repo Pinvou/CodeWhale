@@ -188,7 +188,16 @@ const expectedProtocolHashes = {
   // listener callback text is included in this source fingerprint.
   // Deleted scheduled notice IDs now take precedence over live/prefix admission; callback text only, no event/command surface changes.
   // Combined Account billing/model receipts with main's shared stream publication.
-  chat: 'e738fd7ce9e132d5a26a0553c11da394c96926bdae866f0be25436a845e9c606',
+  // Recomputed for the per-frame stream notification coalescing backflow
+  // (Community #727): chat:delta/chat:tool_start/chat:done listener bodies moved
+  // to the shared single-publication flush (notify() without domains, one
+  // refreshActiveStreamRender hook) — event names and invoke shapes unchanged.
+  // Recomputed for community #748 backflow: the chat:tool_delta listener body
+  // now opts into deferBackgroundNotify so background output chunks ride the
+  // existing terminal 50ms publication timer; invoke and event wire shapes
+  // stay unchanged (publication timing is the deliberate change).
+  // Combined local lifecycle receipts and main trailing-edge publication.
+  chat: '038bf374fcd2b95cb6eedcc5066612bacc453380bc655c0a9d438320629f107c',
   dependencies: 'd39f5a46b8e34c1c30d8f8e08ef62baccfe822ffb7fad8dbf3301c69c566e31c',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.
@@ -209,7 +218,15 @@ const expectedProtocolHashes = {
   // and burst-coalesces the history refresh (round-20 R3); same two commands,
   // no new invoke or listen entries (the extractor scans raw source, so
   // body/comment text is part of the digest).
-  sessions: '0450181a37d4bdf6a7b3724735b8e00417869c0f9f685361464082a465754fcc',
+  // Recomputed for the #484 backflow merge: create_session now carries the
+  // keychain snapshot (workspaceRoots) and project ownership (projectId)
+  // captured by the new captureDraftWorkspaceBinding staging helper, and the
+  // sessions feature gains rememberDraftWorkspaceRecent /
+  // maybePruneFailedWorkspaceRecent wiring (single-entry workspace picker);
+  // same command set, no new invoke or listen entries — the extractor scans
+  // raw source, so the merged body/comment text is part of the digest.
+  // Combined local model rollback receipts and main workspace keychain carryover.
+  sessions: 'e843ba7a79a9b96d729db1e4c689218124beb52df745c79acc8220da1c125bb1',
   // Recomputed for the builtin feature toggle hook: settings.js gains the
   // list_builtin_features / set_builtin_feature_enabled invoke wrappers (the
   // session-mention feature gate reads the list; the setter is the contract
@@ -232,8 +249,12 @@ const expectedProtocolHashes = {
   // payload — the dialog's previous report fed back on retry, honored by the
   // backend only as a reporting reclassification inside its own to-lane
   // retry population. Same command surface, no new invoke or listen entries.
-  projects: '90c12ab7494aba3975ac4ece4b23594f4a4fcf309f6252b721ce15575b245979',
-};
+  // Recomputed again after the single-entry workspace picker merge: on top of
+  // the rebind carryover feed-back the domain also gains
+  // ensure_folder_projects / update_project(roots, lastPrimaryRoot) /
+  // projects_set_never_materialize / align_session_to_project
+  // (bridge/projects.js).
+  projects: 'b7b41e3f15a938ab4a5cad8e28e70efe031f382cdced92a4022badf9119027d1',};
 
 for (const [domain, files] of Object.entries(protocolSources)) {
   const signatures = files.flatMap(file => {

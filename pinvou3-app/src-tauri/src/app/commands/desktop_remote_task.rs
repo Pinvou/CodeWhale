@@ -24,7 +24,8 @@ use super::desktop_remote_model::prepare_selected_task_package_snapshot;
 use crate::features::assistant::engine_pool::EnginePool;
 use crate::features::assistant::remote_turn::{EnginePoolChatEngine, EnginePoolChatTurnPort};
 use crate::features::behavior_telemetry::{
-    RemoteControlEvent, RemoteModelSource, RemoteOutcome, RemoteStage, track_remote_control,
+    RemoteControlEvent, RemoteOutcome, RemoteStage, capture_remote_execution_lease,
+    register_remote_execution_with_lease, track_remote_control,
 };
 use crate::features::codex_acp::AcpPool;
 use crate::features::codex_acp::remote_turn::{AcpPoolCodeTurnPort, RemoteWorkspaceAuthorizations};
@@ -242,6 +243,7 @@ impl RemoteSessionProvisioner for DesktopRemoteSessionProvisioner {
                 crate::features::codex_acp::AgentBackend::CodexAcp,
                 crate::features::codex_acp::CodexWorkspaceKind::Project,
                 Some(path.to_path_buf()),
+                Vec::new(),
             )
             .map_err(|_| "task_session_backend_bind_failed".to_owned())?;
         self.pending_modes.lock().remove(session_id);
@@ -319,6 +321,20 @@ impl ControllerTaskEventSink for TaskEventBridge {
         payload: Value,
     ) {
         use tauri::Manager as _;
+        if matches!(
+            kind,
+            crate::features::remote_control::controller::journal::JournalKind::AssistantDelta
+        ) && payload
+            .get("text")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty())
+        {
+            if let Some(task_id) = task_id {
+                crate::features::behavior_telemetry::track_remote_task_output(
+                    &self.app, session_id, task_id,
+                );
+            }
+        }
         // B owns this conversation too. Project accepted user/assistant/error
         // text into B's local chat independently of encrypted B -> A delivery.
         // The journal event id is also the frontend idempotency key.
@@ -930,6 +946,7 @@ pub async fn desktop_remote_controlled_task_send(
     runtime: RuntimeState<'_>,
 ) -> Result<Value, String> {
     let started = Instant::now();
+    let mut submission_delegated = false;
     let result = async {
         ensure_supported(&controlled)?;
         let (lease, _) = controlled
@@ -957,6 +974,7 @@ pub async fn desktop_remote_controlled_task_send(
             skill_ids,
             attachments,
         )?;
+        submission_delegated = true;
         let result = app
             .state::<crate::app::desktop_remote_composition::DesktopLocalExecutionPort>()
             .submit_local(input)
@@ -994,21 +1012,18 @@ pub async fn desktop_remote_controlled_task_send(
         Ok(status)
     }
     .await;
-    let mut event = RemoteControlEvent::from_result(
-        RemoteStage::TaskSubmit,
-        &result,
-        started.elapsed().as_millis() as u64,
-    );
-    if let Ok(value) = &result {
-        event = match value.get("modelSource").and_then(Value::as_str) {
-            Some(TASK_MODEL_SOURCE_CONTROLLED) => event.model_source(RemoteModelSource::Controlled),
-            Some(TASK_MODEL_SOURCE_TEMPORARY) => {
-                event.model_source(RemoteModelSource::ControllerTemporary)
-            }
-            _ => event,
-        };
+    // The delegated owner reports correlated submission/rejection/terminal
+    // events. Only command preparation failures get this unbound diagnostic;
+    // an error returned after delegation does not prove absence of admission.
+    if result.is_err() && !submission_delegated {
+        let event = RemoteControlEvent::from_result(
+            RemoteStage::TaskSubmit,
+            &result,
+            started.elapsed().as_millis() as u64,
+        )
+        .role(true);
+        track_remote_control(&app, event);
     }
-    track_remote_control(&app, event);
     result
 }
 
@@ -1157,7 +1172,20 @@ fn submit_prepared_bound_task_inner(
     }
     let capabilities = app.state::<CapabilitySnapshotManager>();
     let models = app.state::<SharedTemporaryModelStore>();
-    admit_and_dispatch(
+    let local_submission = local_attachments.is_some();
+    let task_id = validated
+        .get("task_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let mode = validated.get("mode").and_then(Value::as_str);
+    if local_submission {
+        track_remote_control(
+            app,
+            RemoteControlEvent::new(RemoteStage::TaskSubmit, RemoteOutcome::Ok)
+                .task(task_id, true, mode),
+        );
+    }
+    let result = admit_and_dispatch(
         app,
         &validated,
         &lease,
@@ -1165,12 +1193,32 @@ fn submit_prepared_bound_task_inner(
         Some(expected_remote_ref),
         &capabilities,
         &models,
-        service,
+        service.clone(),
         controlled_monotonic_millis(),
         local_attachments,
         local_attachment_cleanup,
         budget,
-    )
+    );
+    if should_report_local_task_rejection(local_submission, &result, &service.ledger(), task_id) {
+        track_remote_control(
+            app,
+            RemoteControlEvent::from_result(RemoteStage::TaskRejected, &result, 0)
+                .task(task_id, true, mode),
+        );
+    }
+    result
+}
+
+fn should_report_local_task_rejection(
+    local_submission: bool,
+    result: &Result<Value, String>,
+    ledger: &RemoteTaskLedger,
+    task_id: &str,
+) -> bool {
+    // Installation failures happen after admission and already publish a durable
+    // failed terminal. Replays can also fail a newer policy: neither is a new
+    // rejection. Only a confirmed absent task authorizes rejection telemetry.
+    local_submission && result.is_err() && ledger.confirms_absence(task_id)
 }
 
 #[cfg(test)]
@@ -1318,7 +1366,20 @@ fn admit_and_dispatch(
     let authorizations = app
         .state::<Arc<DesktopRemoteTaskRuntime>>()
         .authorizations();
+    let telemetry_lease = capture_remote_execution_lease(app);
     let install = |ticket: &RemoteTaskTicket| {
+        // This callback runs only after durable admission, before any fallible
+        // installation. Capture consent before admission and revalidate it here;
+        // late admitted/failed publication must not acquire a newer consent lease.
+        if let Some(telemetry_lease) = telemetry_lease.as_ref() {
+            register_remote_execution_with_lease(
+                app,
+                session_id,
+                &ticket.record.task_id,
+                &ticket.record.mode,
+                telemetry_lease,
+            );
+        }
         if local_attachments.is_none() {
             let ids = ticket
                 .input
@@ -2278,13 +2339,38 @@ pub async fn desktop_remote_task_commit_a<R: tauri::Runtime>(
         let service = ready_state::<_, RemoteDispatchService>(&app)?;
         crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
         let started = Instant::now();
+        let telemetry_task_id = handle.task_id.clone();
+        let telemetry_mode = service.telemetry_mode(&local_session_id, &handle);
+        if telemetry_mode.is_some() {
+            crate::features::behavior_telemetry::register_remote_origin(
+                &app,
+                &telemetry_task_id,
+                telemetry_mode,
+            );
+        }
         let result = service
             .commit_prepared(&local_session_id, &remote_ref, handle, &attachment_ids)
             .map_err(|error| error.code().to_owned());
-        if let Some(outcome) = task_submit_telemetry_outcome(&result) {
-            track_remote_control(
+        if let Some(observation) = task_submit_telemetry_outcome(&result) {
+            let event = match observation {
+                SubmitTelemetry::Queued => {
+                    RemoteControlEvent::new(RemoteStage::TaskSubmit, RemoteOutcome::Ok)
+                }
+                SubmitTelemetry::Unknown => {
+                    RemoteControlEvent::new(RemoteStage::TaskSubmit, RemoteOutcome::InternalError)
+                        .status("unknown")
+                }
+                SubmitTelemetry::NotSent(code) => RemoteControlEvent::from_result::<()>(
+                    RemoteStage::TaskNotSent,
+                    &Err(code.to_owned()),
+                    0,
+                ),
+            };
+            crate::features::behavior_telemetry::track_remote_origin_event(
                 &app,
-                RemoteControlEvent::new(RemoteStage::TaskSubmit, outcome)
+                &telemetry_task_id,
+                event
+                    .task(&telemetry_task_id, false, telemetry_mode)
                     .latency_ms(started.elapsed().as_millis() as u64),
             );
         }
@@ -2293,19 +2379,31 @@ pub async fn desktop_remote_task_commit_a<R: tauri::Runtime>(
     .await
 }
 
+#[derive(Debug, PartialEq)]
+enum SubmitTelemetry<'a> {
+    Queued,
+    Unknown,
+    NotSent(&'a str),
+}
+
 fn task_submit_telemetry_outcome(
     result: &Result<RemoteDispatchReport, String>,
-) -> Option<RemoteOutcome> {
+) -> Option<SubmitTelemetry<'_>> {
     match result {
-        Err(_) => Some(RemoteOutcome::InternalError),
+        // Errors precede the durable attempt barrier; later send failures
+        // become OutcomeUnknown reports rather than errors.
+        Err(code) => Some(SubmitTelemetry::NotSent(code)),
         Ok(report) if report.attempt == RemoteDispatchAttempt::Reconciled => None,
+        Ok(report) if report.attempt == RemoteDispatchAttempt::NotAttempted => {
+            Some(SubmitTelemetry::NotSent("remote_dispatch_not_attempted"))
+        }
         Ok(report)
             if report.attempt == RemoteDispatchAttempt::FirstAttempt
                 && report.state == RemoteDispatchState::Queued =>
         {
-            Some(RemoteOutcome::Ok)
+            Some(SubmitTelemetry::Queued)
         }
-        Ok(_) => Some(RemoteOutcome::InternalError),
+        Ok(_) => Some(SubmitTelemetry::Unknown),
     }
 }
 
@@ -2775,21 +2873,21 @@ mod tests {
                 RemoteDispatchState::Queued,
                 RemoteDispatchAttempt::FirstAttempt,
             ))),
-            Some(RemoteOutcome::Ok)
+            Some(SubmitTelemetry::Queued)
         );
         assert_eq!(
             task_submit_telemetry_outcome(&Ok(report(
                 RemoteDispatchState::PreparedNotSent,
                 RemoteDispatchAttempt::NotAttempted,
             ))),
-            Some(RemoteOutcome::InternalError)
+            Some(SubmitTelemetry::NotSent("remote_dispatch_not_attempted"))
         );
         assert_eq!(
             task_submit_telemetry_outcome(&Ok(report(
                 RemoteDispatchState::OutcomeUnknown,
                 RemoteDispatchAttempt::FirstAttempt,
             ))),
-            Some(RemoteOutcome::InternalError)
+            Some(SubmitTelemetry::Unknown)
         );
         assert_eq!(
             task_submit_telemetry_outcome(&Ok(report(
@@ -2800,7 +2898,7 @@ mod tests {
         );
         assert_eq!(
             task_submit_telemetry_outcome(&Err("sentinel-must-not-be-classified".into())),
-            Some(RemoteOutcome::InternalError)
+            Some(SubmitTelemetry::NotSent("sentinel-must-not-be-classified"))
         );
     }
 
@@ -2943,6 +3041,64 @@ mod tests {
             "input": {"text": "hello", "attachment_ids": [], "skill_ids": []}
         });
         (manager, service, context, payload)
+    }
+
+    #[test]
+    fn local_installation_failures_are_terminals_not_new_rejections() {
+        for panic_install in [false, true] {
+            let (_, service, context, payload) = task_admission_fixture();
+            let ledger = service.ledger();
+            let rejected = Err("task_workspace_capacity".to_owned());
+            assert!(should_report_local_task_rejection(
+                true,
+                &rejected,
+                &ledger,
+                "task-admission"
+            ));
+            assert!(!should_report_local_task_rejection(
+                false,
+                &rejected,
+                &ledger,
+                "task-admission"
+            ));
+            assert!(!should_report_local_task_rejection(
+                true,
+                &Ok(json!({})),
+                &ledger,
+                "task-admission"
+            ));
+            let prepared = service
+                .prepare_bound_admission(&context, &payload, 3_500, Some("a-ref-admission"), |_| {
+                    if panic_install {
+                        panic!("test model installation panic");
+                    }
+                    Err("task_workspace_capacity")
+                })
+                .unwrap();
+            let result = service
+                .finish_bound_admission(prepared)
+                .map(|_| json!({}))
+                .map_err(|error| error.code.to_owned());
+            assert!(result.is_err());
+            assert_eq!(
+                ledger.record("task-admission").unwrap().wire_status(),
+                "failed"
+            );
+            assert!(!should_report_local_task_rejection(
+                true,
+                &result,
+                &ledger,
+                "task-admission"
+            ));
+            // A retry's policy failure cannot turn an already failed task into
+            // an additional rejected invocation either.
+            assert!(!should_report_local_task_rejection(
+                true,
+                &rejected,
+                &ledger,
+                "task-admission"
+            ));
+        }
     }
 
     #[test]

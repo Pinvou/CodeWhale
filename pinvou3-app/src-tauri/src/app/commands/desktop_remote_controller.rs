@@ -90,7 +90,8 @@ pub async fn desktop_remote_controller_connect(
             RemoteStage::Connection,
             &result,
             started.elapsed().as_millis() as u64,
-        ),
+        )
+        .role(false),
     );
     result
 }
@@ -128,7 +129,8 @@ pub async fn desktop_remote_controller_disconnect(
             RemoteStage::Disconnection,
             &result,
             started.elapsed().as_millis() as u64,
-        ),
+        )
+        .role(false),
     );
     result
 }

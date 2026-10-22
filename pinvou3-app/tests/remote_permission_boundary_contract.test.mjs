@@ -24,7 +24,8 @@ function assertPermissionBoundary(source, engine, root) {
       const ingest = branch.indexOf('tokio::task::spawn_blocking');
       assert.ok(ingest >= 0 && check > branch.indexOf('.await', ingest), 'policy check must follow attachment ingestion');
     }
-    assert.ok(check < branch.indexOf('RemoteChatReservation::take_turn'), 'validate before handing off the occupied turn');
+    const handoff = branch.indexOf('.and_then(|reservation| reservation.take_remote_turn(task_id))');
+    assert.ok(handoff >= 0 && check < handoff, 'validate before handing off the occupied turn');
     assert.match(branch.slice(check), /\.send_remote_user_message(?:_with_attachments)?\(\s*session_id,\s*content,\s*mode,/);
   }
   assert.match(source, /fn remote_chat_permission_mode\(store: &SessionStore, session_id: &str\) -> Result<AppMode, String>\s*\{\s*for_session\(store, session_id, false\)\.map\(\|mode\| mode\.to_app_mode\(\)\)/);
@@ -54,6 +55,23 @@ test('permission wiring contract rejects a missing check or silently substituted
   for (const offset of [first, second]) {
     const omitted = adapter.slice(0, offset) + adapter.slice(offset + check.length);
     assert.throws(() => assertPermissionBoundary(omitted, pool, composition));
+    const substituted = adapter.slice(0, offset) + adapter.slice(offset).replace(
+      /(\.send_remote_user_message(?:_with_attachments)?\(\s*session_id,\s*content,\s*)mode,/,
+      '$1AppMode::Agent,',
+    );
+    assert.notEqual(substituted, adapter);
+    assert.throws(() => assertPermissionBoundary(substituted, pool, composition));
+  }
+  const handoff = '.and_then(|reservation| reservation.take_remote_turn(task_id))';
+  const firstHandoff = adapter.indexOf(handoff);
+  const secondHandoff = adapter.indexOf(handoff, firstHandoff + handoff.length);
+  assert.ok(firstHandoff >= 0 && secondHandoff > firstHandoff);
+  for (const offset of [firstHandoff, secondHandoff]) {
+    const omitted = adapter.slice(0, offset) + adapter.slice(offset + handoff.length);
+    assert.throws(
+      () => assertPermissionBoundary(omitted, pool, composition),
+      /validate before handing off the occupied turn/,
+    );
   }
   assert.throws(() => assertPermissionBoundary(adapter.replace(/\bcontent,\s*mode,/g, 'content, AppMode::Agent,'), pool, composition));
   assert.throws(() => assertPermissionBoundary(adapter, pool.replace(/(pub\(crate\) async fn send_remote_user_message\([\s\S]*?display_message,)\s*mode,/, '$1 AppMode::Agent,'), composition));

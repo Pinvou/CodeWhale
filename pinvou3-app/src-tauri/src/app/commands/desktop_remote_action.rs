@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Manager as _};
 use tokio::sync::oneshot;
 
-use crate::features::behavior_telemetry::{RemoteControlEvent, RemoteStage, track_remote_control};
+use crate::features::behavior_telemetry::{RemoteControlEvent, RemoteStage};
 use crate::features::remote_control::controller::controlling::ControllingDeviceManager;
 use crate::features::remote_control::controller::controlling_session::ControllingSessionManager;
 use crate::features::remote_control::controller::encrypted_lane::ControllingLaneState;
@@ -568,8 +568,18 @@ pub async fn desktop_remote_action_a(
     })?;
     let started = std::time::Instant::now();
     let metric = match &intent {
-        RemoteActionIntent::AttachmentChunk { .. } => Some(RemoteStage::Attachment),
-        RemoteActionIntent::ArtifactDownloadChunk { .. } => Some(RemoteStage::Artifact),
+        RemoteActionIntent::AttachmentBegin { .. } => {
+            Some((RemoteStage::Attachment, request_id.clone()))
+        }
+        RemoteActionIntent::ArtifactDownloadBegin { .. } => {
+            Some((RemoteStage::Artifact, request_id.clone()))
+        }
+        RemoteActionIntent::AttachmentChunk { transfer_id, .. } => {
+            Some((RemoteStage::Attachment, transfer_id.clone()))
+        }
+        RemoteActionIntent::ArtifactDownloadChunk { transfer_id, .. } => {
+            Some((RemoteStage::Artifact, transfer_id.clone()))
+        }
         _ => None,
     };
     let result = async {
@@ -677,7 +687,7 @@ pub async fn desktop_remote_action_a(
         Ok(_) => log_remote_action_event("controller", "remote_action_completed", operation, "ok"),
         Err(code) => log_remote_action_event("controller", "remote_action_failed", operation, code),
     }
-    if let Some(stage) = metric {
+    if let Some((stage, transfer_id)) = metric {
         let completed = match (stage, &result) {
             (RemoteStage::Attachment, Ok(body)) => {
                 body.get("state").and_then(Value::as_str) == Some("completed")
@@ -703,7 +713,7 @@ pub async fn desktop_remote_action_a(
                     event = event.size_bytes(bytes);
                 }
             }
-            track_remote_control(&app, event);
+            crate::features::behavior_telemetry::track_remote_transfer(&app, event, &transfer_id);
         }
     }
     result

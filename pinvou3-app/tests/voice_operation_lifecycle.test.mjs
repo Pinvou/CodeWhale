@@ -394,7 +394,10 @@ for (const navigation of ['none', 'session', 'new-draft', 'after-rollback']) {
         return null;
       },
     });
-    vm.runInContext(['ensureSession', 'enterDraft'].map(name => bridgeFunction(sessionSource, name)).join('\n')
+    // #484 backflow: the merged ensureSession captures its materialization
+    // payload through captureDraftWorkspaceBinding; load the real helper
+    // (matching name from the merged source) alongside the sliced functions.
+    vm.runInContext(['captureDraftWorkspaceBinding', 'ensureSession', 'enterDraft'].map(name => bridgeFunction(sessionSource, name)).join('\n')
       + '\n' + ['restoreTaskDraft', 'restoreSteerText', 'prefillComposer', 'getComposerDraft'].map(name => bridgeFunction(chatSource, name)).join('\n'), ctx);
     const owner = { sessionId: null, draftEpoch: 4, operationId: operation.operationId };
     const creating = ctx.ensureSession(owner);
@@ -555,7 +558,14 @@ for (const lane of ['desktop', 'web']) {
             invoke: async () => { await gate; if (outcome === 'draft-failed-switched') throw new Error('create failed');
               return { id: 'created-session' }; },
           });
-          vm.runInContext(bridgeFunction(sessionSource, 'ensureSession'), ctx);
+          // #484 backflow: the desktop ensureSession captures its materialization
+          // payload through captureDraftWorkspaceBinding and, on the
+          // create-failure path, prunes workspace recents via
+          // maybePruneFailedWorkspaceRecent; load the real helpers (matching
+          // names from the merged source) beside the sliced function.
+          vm.runInContext((lane === 'desktop'
+            ? ['captureDraftWorkspaceBinding', 'maybePruneFailedWorkspaceRecent'].map(name => bridgeFunction(sessionSource, name)).join('\n') + '\n'
+            : '') + bridgeFunction(sessionSource, 'ensureSession'), ctx);
         }
         const bridgeTargets = [];
         ctx.bridge = { available: true, voice: h.api, chat: {

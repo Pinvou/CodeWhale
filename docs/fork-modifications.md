@@ -377,7 +377,7 @@
 
 以下各项是父仓（闭源仓）相对开源仓的有意行为分歧：双方可共存、不构成同步缺陷，也不进入上述减量顺序；每项登记分歧内容、取舍口径与钉定位置，避免后续同步或回流时被当作漂移“修复”。
 
-1. 行为/设备遥测：开源仓经社区决议（Pinvou/pinvou-agent#616）移除 opt-in telemetry client；闭源仓按企业口径保留该客户端与设备运营统计链路（`pinvou3-app/src-tauri/src/features/behavior_telemetry.rs` 为 #616 对应的 opt-in client，`pinvou3-app/src-tauri/src/platform/telemetry.rs` 为设备登记/用量统计，设计见 `docs/设备运营统计-初版.md`），随行的 access-policy 差异一并保留。此分歧属发布面差异，不回流、不上游化。
+1. 行为/设备遥测：开源仓经社区决议（Pinvou/pinvou-agent#616）移除 opt-in telemetry client；闭源仓按企业口径保留该客户端与设备运营统计链路（`pinvou3-app/src-tauri/src/features/behavior_telemetry.rs` 为 #616 对应的 opt-in client，`pinvou3-app/src-tauri/src/platform/telemetry.rs` 为设备登记/用量统计，设计见 `docs/设备运营统计-初版.md`），随行的 access-policy 差异一并保留。此分歧属发布面差异，不回流、不上游化。本轮在父仓扩展双端远控观测：`features/behavior_telemetry/remote_execution.rs` 保留受授权代际约束的本地上下文，以实际执行回合绑定模型/工具观测；启动恢复、关闭和删除沿用原采集边界。Relay 的 `remote-control-relay/remote-telemetry.js` 按匿名任务键归并 A/B 事实，并复用已有贡献裁剪与被动端活跃排除，详见 `docs/remote-control-telemetry.md`。这些改动均在 app/Relay 层，不新增 CodeWhale 底座分歧，不改变 gitlink 或引擎指纹；行为覆盖由独立遥测测试及 Relay 聚合回归承载。
 2. 语音 closeVoice/dismissVoice 语义分化：闭源对完成态语音通知的 dismiss 保留草稿 provenance、仅进行中录音视为显式取消，与开源的 dismissal-sweep 时序不同；该时序适配由 `pinvou3-app/tests/voice_operation_lifecycle.test.mjs` 钉定，不随开源实现回移。
 3. 开源 bridge shared-cluster 机制（上游 `pinvou3-app/src/shared/bridge-shared-helpers.js`，本仓无此文件）闭源有意不采纳：闭源把对应函数体逐 lane 内联镜像（`src/platform/web/bridge.js`、`src/platform/tauri/bridge.js` 及 `src/platform/tauri/bridge/` 分文件），保持各 lane 独立演进与可验证；同步时逐函数对照，不做文件级合并。
 4. wire DTO 闭源超集：闭源 wire DTO 字段为开源面的超集，已在 Pinvou/pinvou3#463 登记，以该登记为准，此处不重复展开。
@@ -405,7 +405,9 @@
 
 本节记录 2026-10-14 批次：消费当时已外部批准并合入的 `803e672bb87f5ee4e0ab56f1e23fa408ddbeeaa0`（当前维护头以第 0 节为准），直接继承 #107 的 `f27672935`。#54 最终审核头 `be2cd01efd6fb606e19765c7e00c565191ebea56` 与维护合入提交树同为 `31a81e54a288045aca63786288601a98b94b1f8b`；外部 7 项成功 source checks 属于该原提交，不代表新父仓或本机编译已验证。新增能力沿既有 T1 宿主配置/Session 和 T2 工具权限登记，不增加主题。该底座批次实际为 100 个文件、+14904/-945；既包含 workspace-roots 生命周期，也改变单根 operand cwd、symlink 与缺失路径后 `..` 的判断，不能以“单根入口未变”声称底座行为不变。
 
-父仓 `build_engine_config` 的输入仍仅为 `EngineConfig::default()`，显式传空 `workspace_roots`；普通/项目绑定/计划和多智能体配置只用既有 execution 根，`SessionRoots.ledger` 仍仅提供 `subagent_state_root`。`sync_session` 同样显式空附件，由底座替换为当前 primary 的单根集合，不继承上个 Session 的附件。六个既有 `ExecPolicyContext` 测试补齐空根字段，原 deny、wrapper 和 approval 断言保留；不新增磁盘根登记、multi-root UI 或授权入口。
+2026-10-14 当时的父仓适配：`build_engine_config` 的输入仅为 `EngineConfig::default()`，显式传空 `workspace_roots`；普通/项目绑定/计划和多智能体配置只用既有 execution 根，`SessionRoots.ledger` 仍仅提供 `subagent_state_root`。当时 `sync_session` 同样显式空附件，由底座替换为当前 primary 的单根集合，不继承上个 Session 的附件。六个既有 `ExecPolicyContext` 测试补齐空根字段，原 deny、wrapper 和 approval 断言保留；该批次未新增磁盘根登记、multi-root UI 或授权入口。
+
+2026-10-22 集成 main 工作区能力后的宿主接线：默认配置仍为空附件；实际非辅助会话的 spawn、普通同步和发布前冷同步都消费当前会话冻结的 keychain，不把 `SessionRoots.ledger` 当作工具授权。底座 `SyncSession` 会无条件替换根集合，因此冷同步不能再发送空附件清掉刚由 spawn 安装的 keychain。两同步入口共用 `sync_session_workspace_roots`，辅助会话不调用 resolver，旧无快照会话仍按空附件退化为 primary 单根。普通 `send`、冷同步 `try_send` 和公开 entry 的顺序不变；新增两个宿主 resolver/payload 回归，保留 main 的 keychain payload 与本分支轮次所有权回归。Web 逐根脱敏改用等价的完整 `std::path::PathBuf` 名称，并同步指纹；未改 CodeWhale 源码或 gitlink。这些指纹只登记覆盖，隔离函数测试不代替完整原生应用验收。
 
 持久化或导入的 `SessionMetadata.workspace_roots` 仍可能非空。普通 Web/Relay 元数据、Web saved session 和 native-code Web session list 已消费同一 `redact_session_metadata_for_web_in_place`；现在每项复用原 `redact_workspace_path_for_web`，仅传末级目录名。Native 元数据保留原始根集合。父仓行为测试 `forkguard_web_session_projection_redacts_attached_roots_and_keeps_native_metadata` 对 Unix/Windows 非空集合断言实际序列化 JSON、两个 Web 投影、Native 原值和旧空字段省略；`forkguard_engine_config_keeps_only_execution_root` 断言实际宿主配置不纳 ledger，底座原单根物化回归另由指纹绑定，原 scheduled 测试继续断言空附件。
 

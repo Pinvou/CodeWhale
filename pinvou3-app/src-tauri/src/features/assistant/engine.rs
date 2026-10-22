@@ -155,6 +155,9 @@ struct TurnLifecycleState {
     /// this field's lifetime: arming stores the token and the forwarder
     /// matches the event echo against it.
     submission_id: Option<String>,
+    /// Exact reserved submission that owns remote telemetry, never the first
+    /// arbitrary TurnStarted arriving for this session.
+    remote_telemetry_submission: Option<(u64, String, String)>,
 }
 
 /// The durable, user-visible meaning of a submitted engine operation.
@@ -271,6 +274,7 @@ pub(crate) struct TurnReservation {
     base_transcript_revision: Option<String>,
     transcript: Option<ReservedTranscript>,
     admission_metadata: Option<TurnAdmissionMetadata>,
+    remote_task_id: Option<String>,
     submitted: bool,
 }
 
@@ -283,6 +287,7 @@ impl TurnReservation {
             base_transcript_revision: None,
             transcript: None,
             admission_metadata: None,
+            remote_task_id: None,
             submitted: false,
         }
     }
@@ -299,6 +304,28 @@ impl TurnReservation {
     /// this survives persistence compaction and is unique for the session.
     pub(crate) fn generation(&self) -> u64 {
         self.generation
+    }
+
+    pub(crate) fn set_remote_task_id(&mut self, task_id: &str) {
+        self.remote_task_id = Some(task_id.to_owned());
+    }
+
+    fn bind_remote_submission(&self, submission_id: Option<&str>) -> Result<()> {
+        let Some(task_id) = self.remote_task_id.as_ref() else {
+            return Ok(());
+        };
+        let submission_id = submission_id
+            .ok_or_else(|| anyhow::anyhow!("remote turn requires a submission identity"))?;
+        let mut state = self.lifecycle.state.lock();
+        if !state.active || state.active_reservation_id != Some(self.reservation_id) {
+            anyhow::bail!("turn reservation invalidated or no longer active");
+        }
+        state.remote_telemetry_submission = Some((
+            self.reservation_id,
+            submission_id.to_owned(),
+            task_id.clone(),
+        ));
+        Ok(())
     }
 
     pub(crate) fn set_transcript(
@@ -781,6 +808,7 @@ impl TurnLifecycle {
             state.active_reservation_id = Some(reservation_id);
             state.pending_cancel = None;
             state.submission_id = None;
+            state.remote_telemetry_submission = None;
             (reservation_id, state.turn_epoch)
         };
         crate::features::connectors::visibility::turn_submitted();
@@ -876,6 +904,13 @@ impl TurnLifecycle {
 
     fn on_reservation_failed(&self, reservation_id: u64) {
         let mut state = self.state.lock();
+        if state
+            .remote_telemetry_submission
+            .as_ref()
+            .is_some_and(|(owner, _, _)| *owner == reservation_id)
+        {
+            state.remote_telemetry_submission = None;
+        }
         if let Some(index) = state
             .transcript_rules
             .iter()
@@ -902,6 +937,7 @@ impl TurnLifecycle {
         state.active = false;
         state.submitted = false;
         state.active_reservation_id = None;
+        state.remote_telemetry_submission = None;
         drop(state);
         crate::features::connectors::visibility::turn_finished();
     }
@@ -1118,6 +1154,21 @@ impl TurnLifecycle {
         true
     }
 
+    fn take_remote_task_for_submission(&self, submission_id: Option<&str>) -> Option<String> {
+        let mut state = self.state.lock();
+        let (_, submitted, _) = state.remote_telemetry_submission.as_ref()?;
+        if submission_id != Some(submitted.as_str()) {
+            return None;
+        }
+        // An autonomous turn can finish before this submitted operation starts,
+        // clearing active_reservation_id. Its terminal does not revoke the
+        // queued operation; only the exact submission echo consumes its owner.
+        state
+            .remote_telemetry_submission
+            .take()
+            .map(|(_, _, task)| task)
+    }
+
     fn claim_terminal_transition(&self) -> Option<TerminalTransition> {
         let transition = {
             let mut state = self.state.lock();
@@ -1158,6 +1209,7 @@ impl TurnLifecycle {
             let admission = Self::take_admission_locked(&mut state);
             let fallback = Self::active_transcript_fallback_locked(&state);
             state.reclaimed = true;
+            state.remote_telemetry_submission = None;
             state.terminal_emitted = true;
             state.terminal_closing = true;
             state.active = false;
@@ -1267,6 +1319,7 @@ impl TurnLifecycle {
             return false;
         }
         state.reclaimed = true;
+        state.remote_telemetry_submission = None;
         if let Some(reservation_id) = state.active_reservation_id.take() {
             Self::remove_unsubmitted_rule_locked(&mut state, reservation_id);
         }
@@ -1305,6 +1358,7 @@ impl TurnLifecycle {
             return false;
         }
         state.reclaimed = true;
+        state.remote_telemetry_submission = None;
         if let Some(reservation_id) = state.active_reservation_id.take() {
             Self::remove_unsubmitted_rule_locked(&mut state, reservation_id);
         }
@@ -2255,6 +2309,7 @@ impl AppEngine {
             _ => anyhow::bail!("reserved turn requires a user-message operation"),
         };
         reservation.prepare_actual_user_content(actual_user_content)?;
+        reservation.bind_remote_submission(submission_id.as_deref())?;
         let shell_scope = match self.turn_shell_tasks.as_ref() {
             Some(registry) => Some(
                 registry
@@ -2391,35 +2446,84 @@ impl AppEngine {
     /// `{{PINVOU3_WORKSPACE}}` 占位符。原先 sync 时重写 disk + 传 SystemPrompt::Text
     /// 都是 disk-API-限制的副作用,现在彻底走掉。
     pub async fn sync_session(&self, session_id: String, messages: Vec<Message>) -> Result<()> {
-        self.handle
-            .send(self.sync_session_op(session_id, messages))
-            .await?;
+        // Round-31 minor 9: aux exclusion parity with the spawn lane's pin
+        // (bridge.rs) — a stray aux-id snapshot must not reach a live aux
+        // engine through the hydration/align push either; all in-repo
+        // writers are aux-guarded, this is the backstop the bridge comment
+        // has claimed all along.
+        let roots =
+            sync_session_workspace_roots(&session_id, |id| self.bridge.session_workspace_roots(id));
+        let op = Self::sync_session_op(
+            &session_id,
+            messages,
+            self.bridge.model(),
+            self.workspace.clone(),
+            // Restore-path keychain backfill (§6): the full roots locked at
+            // creation are not lost across session restarts; no snapshot
+            // (legacy/temporary sessions) = empty = single root, the base normalizes by cwd.
+            roots,
+        );
+        self.handle.send(op).await?;
         Ok(())
     }
 
     /// Queue mandatory identity/history in a fresh mailbox before publication.
+    /// (fork send 门：发布前冷同步走 try_send，不阻塞不丢令牌；调用点
+    /// engine_pool 的 PreparedRuntimeModel 供给链依赖本入口。)
     pub(crate) fn try_sync_new_session(
         &self,
         session_id: String,
         messages: Vec<Message>,
     ) -> Result<()> {
-        self.handle
-            .try_send(self.sync_session_op(session_id, messages))
+        let roots =
+            sync_session_workspace_roots(&session_id, |id| self.bridge.session_workspace_roots(id));
+        let op = Self::sync_session_op(
+            &session_id,
+            messages,
+            self.bridge.model(),
+            self.workspace.clone(),
+            // SyncSession replaces the foundation's roots even immediately
+            // after spawn. Carry the same frozen keychain as the awaited sync;
+            // an empty legacy/aux snapshot still normalizes to the primary root.
+            roots,
+        );
+        self.handle.try_send(op)
     }
 
-    fn sync_session_op(&self, session_id: String, messages: Vec<Message>) -> Op {
+    /// Payload construction for `sync_session` (review #484 round-13 M4 extracted
+    /// & pinned): the only channel by which the keychain backfill enters the base —
+    /// deleting/altering field names, serde shapes, or the backfill behavior fails
+    /// compilation or turns tests red. EngineHandle is not constructible across
+    /// crates, so pin at the payload layer; call sites pass the bridge-resolved
+    /// snapshot through unchanged.
+    pub(crate) fn sync_session_op(
+        session_id: &str,
+        messages: Vec<Message>,
+        model: String,
+        workspace: std::path::PathBuf,
+        workspace_roots: Vec<std::path::PathBuf>,
+    ) -> Op {
         Op::SyncSession {
-            session_id: Some(session_id),
+            session_id: Some(session_id.to_string()),
             messages,
             system_prompt: None,
             system_prompt_override: false,
-            model: self.bridge.model(),
-            workspace: self.workspace.clone(),
-            // CodeWhale #54 normalizes this empty list to the existing single
-            // workspace for both awaited sync and unpublished cold hydration.
-            workspace_roots: Vec::new(),
+            model,
+            workspace,
+            workspace_roots,
             mode: AppMode::Agent,
         }
+    }
+}
+
+fn sync_session_workspace_roots(
+    session_id: &str,
+    resolve: impl FnOnce(&str) -> Vec<std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
+    if crate::features::sessions::is_aux_session_id(session_id) {
+        Vec::new()
+    } else {
+        resolve(session_id)
     }
 }
 
@@ -2756,6 +2860,131 @@ mod turn_lifecycle_tests {
         );
         // 消费 reservation 避免 Drop 副作用。
         reservation.mark_submitted(None);
+    }
+
+    #[test]
+    fn remote_telemetry_ownership_requires_the_exact_reserved_submission() {
+        let lifecycle = Arc::new(TurnLifecycle::default());
+        let mut remote = lifecycle.reserve().unwrap();
+        remote.set_remote_task_id("remote-task-1");
+        assert!(remote.bind_remote_submission(None).is_err());
+        remote
+            .bind_remote_submission(Some("remote-submission-1"))
+            .unwrap();
+        // A local/autonomous turn arriving first cannot consume this owner.
+        assert_eq!(lifecycle.take_remote_task_for_submission(None), None);
+        assert_eq!(
+            lifecycle.take_remote_task_for_submission(Some("local-submission")),
+            None
+        );
+        assert_eq!(
+            lifecycle
+                .take_remote_task_for_submission(Some("remote-submission-1"))
+                .as_deref(),
+            Some("remote-task-1")
+        );
+        drop(remote);
+        assert_eq!(
+            lifecycle.take_remote_task_for_submission(Some("remote-submission-1")),
+            None
+        );
+        let local = lifecycle.reserve().unwrap();
+        assert_eq!(
+            lifecycle.take_remote_task_for_submission(Some("remote-submission-1")),
+            None
+        );
+        drop(local);
+    }
+
+    #[test]
+    fn remote_telemetry_owner_survives_an_overtaking_autonomous_terminal() {
+        let lifecycle = Arc::new(TurnLifecycle::default());
+        let mut remote = lifecycle.reserve().unwrap();
+        remote.set_remote_task_id("remote-task");
+        remote
+            .bind_remote_submission(Some("remote-submission"))
+            .unwrap();
+        remote.mark_submitted(Some("remote-submission".into()));
+
+        lifecycle.on_started("autonomous-turn".into());
+        assert_eq!(lifecycle.take_remote_task_for_submission(None), None);
+        assert_eq!(
+            lifecycle.claim_terminal().unwrap().turn_id.as_deref(),
+            Some("autonomous-turn")
+        );
+        lifecycle.finish_terminal_emission();
+        assert!(lifecycle.state.lock().active_reservation_id.is_none());
+
+        lifecycle.on_started("remote-turn".into());
+        assert_eq!(
+            lifecycle
+                .take_remote_task_for_submission(Some("remote-submission"))
+                .as_deref(),
+            Some("remote-task")
+        );
+        assert_eq!(
+            lifecycle.take_remote_task_for_submission(Some("remote-submission")),
+            None
+        );
+        lifecycle.claim_terminal().unwrap();
+        lifecycle.finish_terminal_emission();
+    }
+
+    #[test]
+    fn remote_telemetry_pending_owner_is_revoked_by_failed_cancelled_or_replaced_turns() {
+        for boundary in ["drop", "cancel", "invalidate", "reclaim", "replacement"] {
+            let lifecycle = Arc::new(TurnLifecycle::default());
+            let mut remote = lifecycle.reserve().unwrap();
+            remote.set_remote_task_id("remote-task");
+            remote
+                .bind_remote_submission(Some("remote-submission"))
+                .unwrap();
+            match boundary {
+                "drop" => drop(remote),
+                "cancel" => {
+                    assert!(lifecycle.claim_unsubmitted_terminal());
+                    drop(remote);
+                    lifecycle.finish_terminal_emission();
+                }
+                "invalidate" => {
+                    assert!(lifecycle.invalidate_unsubmitted_reservation());
+                    drop(remote);
+                }
+                "reclaim" => {
+                    remote.mark_submitted(Some("remote-submission".into()));
+                    assert!(lifecycle.claim_reclaimed_once());
+                    lifecycle.finish_terminal_emission();
+                }
+                "replacement" => {
+                    remote.mark_submitted(Some("remote-submission".into()));
+                    lifecycle.on_started("autonomous-turn".into());
+                    lifecycle.claim_terminal().unwrap();
+                    lifecycle.finish_terminal_emission();
+                    let newer = lifecycle.reserve().unwrap();
+                    // A late failure of the old reservation cannot clear the
+                    // current reservation's identity.
+                    let mut newer = newer;
+                    newer.set_remote_task_id("new-task");
+                    newer
+                        .bind_remote_submission(Some("new-submission"))
+                        .unwrap();
+                    lifecycle.on_reservation_failed(1);
+                    assert_eq!(
+                        lifecycle
+                            .take_remote_task_for_submission(Some("new-submission"))
+                            .as_deref(),
+                        Some("new-task")
+                    );
+                    drop(newer);
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                lifecycle.take_remote_task_for_submission(Some("remote-submission")),
+                None,
+                "{boundary} must revoke the old pending owner"
+            );
+        }
     }
 
     #[test]
@@ -4344,6 +4573,96 @@ mod runtime_turn_observation_tests {
             !lifecycle.with_current_turn_generation(second, &mut || panic!("aborted reservation"))
         );
         assert!(!lifecycle.with_current_turn_generation(0, &mut || panic!("zero sentinel")));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_sync_root_selection_preserves_the_frozen_non_aux_keychain() {
+        let expected = vec![
+            std::path::PathBuf::from("/primary"),
+            std::path::PathBuf::from("/attached"),
+        ];
+        let roots = sync_session_workspace_roots("session-keyed", |id| {
+            assert_eq!(id, "session-keyed");
+            expected.clone()
+        });
+        let op = AppEngine::sync_session_op(
+            "session-keyed",
+            Vec::new(),
+            "model".into(),
+            std::path::PathBuf::from("/primary"),
+            roots,
+        );
+        match op {
+            Op::SyncSession {
+                workspace_roots, ..
+            } => assert_eq!(workspace_roots, expected),
+            other => panic!("unexpected op: {other:?}"),
+        }
+        assert!(sync_session_workspace_roots("legacy", |_| Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn session_sync_root_selection_never_resolves_aux_keychains() {
+        for id in ["aux-session", "AUX-session", "aUx-session"] {
+            let roots =
+                sync_session_workspace_roots(id, |_| panic!("aux must not resolve attachments"));
+            let op = AppEngine::sync_session_op(
+                id,
+                Vec::new(),
+                "model".into(),
+                std::path::PathBuf::from("/primary"),
+                roots,
+            );
+            match op {
+                Op::SyncSession {
+                    workspace_roots, ..
+                } => assert!(workspace_roots.is_empty()),
+                other => panic!("unexpected op: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn sync_session_op_carries_the_keychain_backfill() {
+        // Round-13 M4: the SyncSession payload is the keychain backfill's only
+        // channel into the foundation — the builder pins the field's presence
+        // and serde shape (deleting the field fails to compile here, renaming
+        // it reds this assert). The call site passes the bridge-resolved
+        // snapshot through unchanged.
+        let op = AppEngine::sync_session_op(
+            "s-backfill",
+            Vec::new(),
+            "test-model".to_string(),
+            std::path::PathBuf::from("/w"),
+            vec![
+                std::path::PathBuf::from("/w"),
+                std::path::PathBuf::from("/x"),
+            ],
+        );
+        match op {
+            Op::SyncSession {
+                session_id,
+                messages,
+                workspace_roots,
+                ..
+            } => {
+                assert_eq!(session_id.as_deref(), Some("s-backfill"));
+                assert!(messages.is_empty());
+                assert_eq!(
+                    workspace_roots,
+                    vec![
+                        std::path::PathBuf::from("/w"),
+                        std::path::PathBuf::from("/x")
+                    ]
+                );
+            }
+            other => panic!("unexpected op: {other:?}"),
+        }
     }
 }
 

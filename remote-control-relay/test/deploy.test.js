@@ -22,7 +22,6 @@ function bashExecutable() {
   throw new Error("Deployment tests require Git for Windows on PATH");
 }
 
-
 test("production hardening keeps deployment-specific proxy addresses out of the repository", async () => {
   const source = await readFile(productionHardening, "utf8");
   assert.doesNotMatch(source, /PINVOU_REMOTE_(?:ALLOWED|TRUSTED)_PROXY_IPS=/);
@@ -255,6 +254,8 @@ test("deployment checksum mock consumes all piped input under pipefail", async (
   await executable(checksum, mockedChecksumScript());
   const bash = bashExecutable();
   // Exceed pipe capacity so an early-exiting consumer fails deterministically.
+  // The inner Bash runs the mock script; -c/--status are its positional
+  // arguments, matching the real sha256sum invocation (not Bash options).
   const result = spawnSync(bash, [
     "-c", 'set -euo pipefail\n{ for ((i=0;i<4096;i++)); do printf "%01024d\\n" 0; done; } | bash "$1" -c --status',
     "checksum-fixture", checksum.replaceAll("\\", "/"),

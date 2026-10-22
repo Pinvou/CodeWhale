@@ -31,7 +31,9 @@
     // 但 APP_BRIDGE_STATE_DOMAINS 的订阅列表双端共享;Web 端补一个空桩
     // (没有 bridge.projects 方法面,列表恒空),防止启动期 getMany 抛
     // "Unknown Tauri bridge state slice: projects"(栈内 #448 的根因)。
-    projects: ["projectsList"],
+    // projectsAssignmentDegradedAt 是 #484 的降级提示戳(round-36 P2b);
+    // Web 桩字段必须与桌面 STATE_SLICE_FIELDS 逐键一致。
+    projects: ["projectsList", "projectsAssignmentDegradedAt"],
     // desktopRemoteControl 整域桌面专属（Windows 双端远控）：Web 端补空桩，
     // 字段集必须与桌面 STATE_SLICE_FIELDS 完全一致（见 bridge_state_domains）。
     desktopRemoteControl: [
@@ -197,7 +199,7 @@
     artifacts: domain(["artifactInfo", "readArtifactText", "writeArtifactText", "readArtifactImageB64", "readArtifactThumbnail", "renderArtifactVisual", "openContainingFolder", "revealSessionFolder", "openScheduledTaskFolder", "openInSystem", "openArtifactExternal", "downloadArtifact", "listDeliverableIndex", "openExternalUrl", "openUserExternalUrl"]),
     attachments: domain(["addAttachmentByPath", "addPasteImage", "removeAttachment", "clearAttachments", "pickAndAttach", "uploadDeviceFiles", "resolveConversationAttachment", "openConversationAttachment", "revealConversationAttachment"]),
     resolutions: domain(["markResolved"]),
-    files: domain(["pickFiles", "pickFolders", "pickRebindFolder", "pickFeedbackFiles"]),
+    files: domain(["pickFiles", "pickFolders", "pickManageFolder", "pickRebindFolder", "pickWorkspaceFolder", "pickFeedbackFiles"]),
     personas: domain(["loadPersonas", "getPersonas", "readPersonaBody", "equipPersona", "unequipPersona", "postCardCreatorIntro", "createPersona", "updatePersona", "deletePersona"]),
     memory: domain(["loadMemoryOverview", "saveMemoryProfilePatch", "updateMemoryItem", "deleteMemoryItem", "confirmMemoryCandidate", "ignoreMemoryCandidate", "neverMemoryCandidate", "organizeMemory", "loadOrganizeHistory"]),
     updater: domain(["checkForUpdate", "downloadAndInstallUpdate", "cancelUpdate", "restartApp"]),

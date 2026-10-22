@@ -3,9 +3,10 @@ import { createReadStream, existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { RetentionFacts, retentionDay } from '../retention-store.js';
-import { deletionSubjectHash, isSuccessfulCoreUserTask, normalizeUsageOccurredAt, statsDayFromMilliseconds } from '../telemetry-primitives.js';
+import { deletionSubjectHash, isSuccessfulCoreUserTask, normalizeUsageOccurredAt, retentionOccurredAt, statsDayFromMilliseconds } from '../telemetry-primitives.js';
 import { isDirectCliEntry } from '../cli-entrypoint.js';
 import { validDeviceInventory } from '../telemetry-storage.js';
+import { collectRemoteRetentionEvidence, projectRemoteTasks } from '../remote-telemetry.js';
 
 export async function backfillRetention({ dataDir, sources = [], apply = false, now = Date.now(), pepper = process.env.PINVOU_TELEMETRY_DEVICE_PEPPER }) {
   const saved = JSON.parse(readFileSync(join(dataDir, 'devices.json'), 'utf8'));
@@ -30,6 +31,7 @@ export async function backfillRetention({ dataDir, sources = [], apply = false, 
   const rowsDropped = beforeRows - facts.rows.size;
   const legacyCohorts = new Map();
   const legacyActivity = new Map();
+  const remoteEvidence = new Map();
   const eligibleIds = new Set(devices.filter(d => d.hardware_source === 'installation_id').map(d => d.device_id));
   let malformed = 0, scanned = 0, invalidEvents = 0, invalidTimestamps = 0;
   const excluded = { ineligible_identity:0, future_timestamp:0, identity_mismatch:0 };
@@ -59,9 +61,17 @@ export async function backfillRetention({ dataDir, sources = [], apply = false, 
         if (event.event_name === 'analytics_cohort_started') {
           legacyCohorts.set(id, Math.min(day, legacyCohorts.get(id) ?? day));
         }
+        // Filter identity/deletion/time boundaries before joining. A deleted or
+        // ineligible controller must never lend attribution to a passive B.
+        if (event.event_name === 'remote_control_event') {
+          collectRemoteRetentionEvidence(remoteEvidence, { ...event, occurred_at:timestamp });
+        }
         if (isSuccessfulCoreUserTask(event)) {
+          const successTimestamp = retentionOccurredAt(event);
+          const successDay = statsDayFromMilliseconds(successTimestamp);
+          if (!Number.isInteger(successDay) || successDay < 1 || successTimestamp > now) continue;
           if (!legacyActivity.has(id)) legacyActivity.set(id, new Set());
-          legacyActivity.get(id).add(day);
+          legacyActivity.get(id).add(successDay);
           chunk.push(event);
         }
         if (chunk.length >= 1000) { facts.observe(chunk, devices, now, wasDeleted); chunk = []; }
@@ -69,6 +79,23 @@ export async function backfillRetention({ dataDir, sources = [], apply = false, 
       facts.observe(chunk, devices, now, wasDeleted);
     } finally { lines.close(); stream.destroy(); }
   }
+  let remoteChunk = [];
+  for (const evidence of remoteEvidence.values()) {
+    for (const event of projectRemoteTasks(evidence)) {
+      if (!isSuccessfulCoreUserTask(event)) continue;
+      const id = event.identity_id || event.device_id;
+      const day = statsDayFromMilliseconds(retentionOccurredAt(event));
+      if (!Number.isInteger(day) || day < 1 || retentionOccurredAt(event) > now) continue;
+      if (!legacyActivity.has(id)) legacyActivity.set(id, new Set());
+      legacyActivity.get(id).add(day);
+      remoteChunk.push(event);
+    }
+    if (remoteChunk.length >= 1000) {
+      facts.observe(remoteChunk, devices, now, wasDeleted);
+      remoteChunk = [];
+    }
+  }
+  facts.observe(remoteChunk, devices, now, wasDeleted);
   const after = facts.metrics(now);
   const legacy = Object.fromEntries([1, 7, 30].map(h => {
     const rows = [...legacyCohorts].filter(([, day]) => day + h <= retentionDay(now));

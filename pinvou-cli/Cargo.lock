@@ -6849,7 +6849,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pinvou-cli"
-version = "0.10.12"
+version = "0.10.13"
 dependencies = [
  "adapter-gaia",
  "adapter-smoke",
@@ -6873,7 +6873,7 @@ dependencies = [
 
 [[package]]
 name = "pinvou-knowledge"
-version = "0.10.12"
+version = "0.10.13"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6908,7 +6908,7 @@ dependencies = [
 
 [[package]]
 name = "pinvou3-tauri"
-version = "0.10.12"
+version = "0.10.13"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -6925,6 +6925,7 @@ dependencies = [
  "cc",
  "chrono",
  "codewhale-config",
+ "codewhale-core",
  "codewhale-execpolicy",
  "codewhale-secrets",
  "codewhale-tui",
@@ -9696,7 +9697,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",

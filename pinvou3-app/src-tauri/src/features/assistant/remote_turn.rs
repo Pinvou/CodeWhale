@@ -64,6 +64,13 @@ impl RemoteChatReservation {
     fn take_turn(&mut self) -> Option<TurnReservation> {
         self.turn.take()
     }
+
+    fn take_remote_turn(&mut self, task_id: &str) -> Option<TurnReservation> {
+        self.take_turn().map(|mut turn| {
+            turn.set_remote_task_id(task_id);
+            turn
+        })
+    }
 }
 
 fn reserve_remote_chat_turn(
@@ -577,7 +584,7 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
                 owner,
                 reserved
                     .as_mut()
-                    .and_then(RemoteChatReservation::take_turn)
+                    .and_then(|reservation| reservation.take_remote_turn(task_id))
                     .ok_or_else(|| "task_turn_reservation_missing".to_owned())?,
             )
             .await
@@ -653,7 +660,7 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
                 owner,
                 reserved
                     .as_mut()
-                    .and_then(RemoteChatReservation::take_turn)
+                    .and_then(|reservation| reservation.take_remote_turn(task_id))
                     .ok_or_else(|| "task_turn_reservation_missing".to_owned())?,
             )
             .await
