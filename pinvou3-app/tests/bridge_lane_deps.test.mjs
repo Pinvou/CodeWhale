@@ -192,10 +192,12 @@ let m;
 while ((m = clusterRe.exec(helpers)) !== null) {
   snapshot.clusters[m[1]] = [...m[2].matchAll(/([\w$]+): b\.([\w$]+)/g)].map((p) => `${p[1]}:${p[2]}`);
 }
-// Official 313 = upstream 312 + clearVoiceInput（官方合并体保留在基座，裁决②
-// 旁路的 F/X 双重身份面；T0-e 台账登记）。
+// Official 314 = upstream 312（#746 后 313）+ clearVoiceInput（官方合并体保留
+// 在基座，裁决②旁路的 F/X 双重身份面；T0-e 台账登记）。#746 新增 replay 结果
+// 写入器 applyToolItemResult：私有、仅参数依赖。AST 范围审计：updateToolItem
+// 只新增该 helper；replay 另加标准 Map。无新簇依赖/导出/转发，REQUIRED 不变。
 const EXPECTED_SURFACE = {
-  sharedFnCount: 313,
+  sharedFnCount: 314,
 };
 
 assert.equal(
