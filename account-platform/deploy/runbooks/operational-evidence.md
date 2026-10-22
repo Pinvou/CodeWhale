@@ -36,4 +36,4 @@ node scripts/account-platform-recovery-gate.mjs --local-only --deployment-id "$E
 
 证据路径也必须在导出根内。全本机业务恢复去掉 `--bootstrap`，仍需原完整恢复集、域审计和保留扫描，不以基础恢复替代。命令成功仅输出 `ARTIFACT_BINDINGS_VERIFIED`，明确 `exercise_verified=false`、`release_authorized=false`、`deployment_status=NOT_DEPLOYED`；本机原状态仅作为 `declared_status` 输出。摘要相同不证明收据中的测量真实，复核人必须核原始来源、目标集群/备份、实际执行及权限，另行批准发布。未经该独立审查的自造 JSON 和自造工件不能放行部署。
 
-本仓库没有通用现场备份/恢复采集器，也未提供固定 `account-restore-audit.sql`、`billing-ledger-audit.sql`、`token-restore-audit.sql`、`outbox-inventory.sql` 四个审计脚本。站点必须使用已有受控只读审计程序完整核对原领域守恒、权限、Outbox/Inbox 和恢复点，并由独立复核人留原始工件；缺少可执行审计或真实记录时保持恢复验收未完成，不能用门禁单元测试替代。完整部署/E2E 当前延期，离线格式及绑定测试不代表现场验收通过。
+本仓库没有通用现场备份/恢复采集器。Billing 现提供[手动只读全账本核查](billing-ledger-audit.md)及 `sql/billing-ledger-audit.sql`，必须以真实只读身份完整执行并独立复核；其存在和受控测试不代表现场恢复验收。`account-restore-audit.sql`、`token-restore-audit.sql`、`outbox-inventory.sql` 三个固定审计脚本仍未提供。站点必须使用已有受控只读审计程序完整核对原领域守恒、权限、Outbox/Inbox 和恢复点，并由独立复核人留原始工件；缺少可执行审计或真实记录时保持恢复验收未完成，不能用门禁单元测试替代。完整部署/E2E 当前延期，离线格式及绑定测试不代表现场验收通过。

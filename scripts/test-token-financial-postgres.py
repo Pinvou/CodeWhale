@@ -67,6 +67,8 @@ OWNER_REQUIRED = {
     "TestTokenWalletReceiptConservationAndLifecyclePostgres",
     "TestOrganizationPlanPurchaseActualClientPostgres",
     "TestOrganizationPlanPurchaseLifecycleFencePostgres",
+    "TestBillingLedgerAuditReadOnlyPublicPostgres",
+    "TestBillingFinancialEventOutboxContractsPostgres",
 }
 PROVISIONING_REQUIRED = {"TestTokenWalletSupplierActualProvisioningConsumerPostgres"}
 REFUND_REQUIRED = {
