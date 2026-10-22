@@ -124,6 +124,12 @@ const policy = JSON.parse(readSource(path.join(root, 'src', 'platform', 'web', '
 const allowed = new Set(policy.allowed_commands);
 const allowedEvents = new Set(policy.allowed_events);
 
+const rustForwardedEvents = remoteControlManager.match(/const RUST_FORWARDED_EVENTS: &\[&str\] = &\[([^\]]*)\];/);
+assert.ok(rustForwardedEvents, 'the Rust direct-forward deduplication contract must remain explicit');
+assert.equal(allowedEvents.has('models:changed'), true, 'store model refreshes must reach Web clients');
+assert.match(rustForwardedEvents[1], /"models:changed"/,
+  'store model refreshes use Rust forwarding and must suppress the desktop proxy duplicate');
+
 function rustCommandBlock(source, command) {
   const signature = source.indexOf(`fn ${command}(`);
   assert.notEqual(signature, -1, `missing Rust command ${command}`);

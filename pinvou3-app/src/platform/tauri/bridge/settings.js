@@ -194,11 +194,13 @@ function pinvouSharedtauriSettings() {
   async function setSelectedPet(id) { return pinvouSharedtauriSettings().setSelectedPet(id); }
   async function loadEffectiveModelConfig(sessionId) {
     var requestedSessionId = arguments.length ? (sessionId || null) : (state.activeSessionId || null);
+    var read = window.PinvouBridgeShared.beginModelRead(state, requestedSessionId);
     try {
       var config = await invoke("get_effective_model_config", { sessionId: requestedSessionId });
-      if (requestedSessionId !== (state.activeSessionId || null)) return;
+      if (!read.configIsCurrent()) return;
       state.effectiveModelConfig = modelAvailabilityError(requestedSessionId) ? null : config;
     } catch (e) {
+      if (!read.configIsCurrent()) return;
       state.effectiveModelConfig = null;
     }
     notify();
@@ -566,15 +568,18 @@ function pinvouSharedtauriSettings() {
   // 读某会话当前绑定的模型 id(切会话时刷新 chip)。
   async function loadSessionModel(sessionId) {
     var requestedSessionId = sessionId || null;
+    var read = window.PinvouBridgeShared.beginModelRead(state, requestedSessionId, true);
     var results = await Promise.all([
       requestedSessionId
         ? invoke("get_session_model_id", { sessionId: requestedSessionId }).catch(function () { return null; })
         : Promise.resolve(null),
       invoke("get_effective_model_config", { sessionId: requestedSessionId }).catch(function () { return null; }),
     ]);
-    if (requestedSessionId !== (state.activeSessionId || null)) return;
+    if (!read.selectionIsCurrent()) return;
     state.currentSessionModelId = results[0];
-    state.effectiveModelConfig = modelAvailabilityError(requestedSessionId) ? null : results[1];
+    if (read.configIsCurrent()) {
+      state.effectiveModelConfig = modelAvailabilityError(requestedSessionId) ? null : results[1];
+    }
     notify();
   }
   // 切当前会话模型(chip 热切)。无 session(草稿态)时改全局默认。
