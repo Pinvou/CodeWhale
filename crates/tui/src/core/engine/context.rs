@@ -31,31 +31,65 @@ pub(super) const EMERGENCY_TRIM_MARGIN_DIVISOR: usize = 5;
 pub(super) fn emergency_trim_budget(input_budget: usize) -> usize {
     input_budget.saturating_sub(input_budget / EMERGENCY_TRIM_MARGIN_DIVISOR)
 }
-/// Hard cap for any tool output inserted into model context.
-const TOOL_RESULT_CONTEXT_HARD_LIMIT_CHARS: usize = 12_000;
-/// Soft cap for known noisy tools inserted into model context.
-const TOOL_RESULT_CONTEXT_SOFT_LIMIT_CHARS: usize = 2_000;
-/// Snippet length kept when compacting tool output for model context.
-const TOOL_RESULT_CONTEXT_SNIPPET_CHARS: usize = 900;
-/// Hard cap for tool output inserted into a large-context model.
-const LARGE_CONTEXT_TOOL_RESULT_HARD_LIMIT_CHARS: usize = 48_000;
-/// Soft cap for known noisy tools inserted into a large-context model.
-const LARGE_CONTEXT_TOOL_RESULT_SOFT_LIMIT_CHARS: usize = 8_000;
-/// Snippet length kept when compacting large-context noisy output.
-const LARGE_CONTEXT_TOOL_RESULT_SNIPPET_CHARS: usize = 4_000;
-/// Context window size at which tool output limits can be relaxed.
-const LARGE_CONTEXT_WINDOW_TOKENS: u32 = 500_000;
 /// Max chars to keep from metadata-provided output summaries.
 const TOOL_RESULT_METADATA_SUMMARY_CHARS: usize = 320;
 
 #[cfg(test)]
 pub(super) use crate::compaction::COMPACTION_SUMMARY_MARKER;
 
-#[derive(Debug, Clone, Copy)]
-struct ToolResultContextLimits {
-    hard_limit_chars: usize,
-    noisy_soft_limit_chars: usize,
-    snippet_chars: usize,
+/// What the model sees of one tool result (#6508).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ToolResultContextView {
+    pub(crate) text: String,
+    /// The view leaves out bytes of the result and no session artifact holds
+    /// them yet. The engine saves the full output before the result fans out,
+    /// so the view it builds afterwards can name a ref instead.
+    pub(crate) needs_full_output_artifact: bool,
+}
+
+impl ToolResultContextView {
+    fn whole(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            needs_full_output_artifact: false,
+        }
+    }
+}
+
+/// A structured summary and whether it left anything of the raw result out.
+struct ContextSummary {
+    text: String,
+    lossy: bool,
+}
+
+/// Where the full output of a tool call can be read back, from its metadata.
+struct RecoveryRef<'a> {
+    path: &'a str,
+    /// The `art_<id>` ref `retrieve_tool_result` resolves. `None` for a
+    /// legacy spill authorized by the existing ownership sidecar.
+    artifact_id: Option<&'a str>,
+}
+
+fn recovery_ref(metadata: Option<&Value>) -> Option<RecoveryRef<'_>> {
+    let obj = metadata?.as_object()?;
+    let text = |key: &str| {
+        obj.get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+    };
+    if let Some(artifact_id) = text("artifact_id").filter(|id| id.starts_with("art_")) {
+        let path = text("artifact_path").or_else(|| text("spillover_path"))?;
+        return Some(RecoveryRef {
+            path,
+            artifact_id: Some(artifact_id),
+        });
+    }
+    text("spillover_path")
+        .filter(|_| obj.get("retained_head_bytes").is_some())
+        .map(|path| RecoveryRef {
+            path,
+            artifact_id: None,
+        })
 }
 
 pub(super) fn summarize_text(text: &str, limit: usize) -> String {
@@ -90,26 +124,6 @@ fn summarize_text_head_tail(text: &str, limit: usize) -> String {
     let tail_vec: Vec<char> = text.chars().rev().take(tail_len).collect();
     let tail: String = tail_vec.into_iter().rev().collect();
     format!("{head}{marker}{tail}")
-}
-
-fn tool_result_is_noisy(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "exec_shell"
-            | "exec_shell_wait"
-            | "exec_shell_interact"
-            | "exec_shell_cancel"
-            | "task_shell_start"
-            | "task_shell_wait"
-            | "run_tests"
-            | "run_verifiers"
-            | "task_gate_run"
-            | "multi_tool_use.parallel"
-            | "Web"
-            | "web_search"
-            | "web.run"
-            | "fetch_url"
-    )
 }
 
 fn tool_result_metadata_summary(metadata: Option<&serde_json::Value>) -> Option<String> {
@@ -661,35 +675,6 @@ fn compact_structured_tool_result_for_context(tool_name: &str, raw: &str) -> Opt
     }
 }
 
-fn tool_result_context_limits_for_window(context_window: u32) -> ToolResultContextLimits {
-    let is_large_context = context_window >= LARGE_CONTEXT_WINDOW_TOKENS;
-
-    let mut limits = if is_large_context {
-        ToolResultContextLimits {
-            hard_limit_chars: LARGE_CONTEXT_TOOL_RESULT_HARD_LIMIT_CHARS,
-            noisy_soft_limit_chars: LARGE_CONTEXT_TOOL_RESULT_SOFT_LIMIT_CHARS,
-            snippet_chars: LARGE_CONTEXT_TOOL_RESULT_SNIPPET_CHARS,
-        }
-    } else {
-        ToolResultContextLimits {
-            hard_limit_chars: TOOL_RESULT_CONTEXT_HARD_LIMIT_CHARS,
-            noisy_soft_limit_chars: TOOL_RESULT_CONTEXT_SOFT_LIMIT_CHARS,
-            snippet_chars: TOOL_RESULT_CONTEXT_SNIPPET_CHARS,
-        }
-    };
-    if let Some(bytes) =
-        crate::tools::large_output_router::WorkshopConfig::active_tool_result_max_bytes()
-    {
-        // Opt-in long-context profiles may raise the model-visible budget.
-        // Never lower the compile-time floor; cap at 2 MiB (#5367).
-        let raised = bytes.clamp(limits.hard_limit_chars, 2 * 1024 * 1024);
-        limits.hard_limit_chars = raised;
-        limits.snippet_chars = (raised / 3).max(limits.snippet_chars);
-        limits.noisy_soft_limit_chars = limits.noisy_soft_limit_chars.max(raised / 6);
-    }
-    limits
-}
-
 #[cfg(test)]
 pub(crate) fn compact_tool_result_for_context(
     model: &str,
@@ -706,70 +691,141 @@ pub(crate) fn compact_tool_result_for_route(
     tool_name: &str,
     output: &ToolResult,
 ) -> String {
+    tool_result_context_view(provider, model, route_limits, tool_name, output).text
+}
+
+/// The model's view of one tool result (#6508).
+///
+/// There is one size authority: [`crate::route_budget::route_inline_char_budget`].
+/// A result within it reaches the model whole, whatever the tool. A larger
+/// one is cut to a head and tail around a footer that names where the full
+/// output lives and the `art_<id>` ref `retrieve_tool_result` reads it back
+/// with. The view never writes anything: when it would leave bytes out and no
+/// artifact holds them, it says so through `needs_full_output_artifact`, and
+/// the engine saves the full output and builds the view again.
+///
+/// Structured summaries (`run_tests`, `run_verifiers`, gate results,
+/// sub-agent snapshots) keep their shape, scale their detail with the same
+/// budget, and follow the same rule whenever they leave something out.
+pub(crate) fn tool_result_context_view(
+    provider: ApiProvider,
+    model: &str,
+    route_limits: Option<RouteLimits>,
+    tool_name: &str,
+    output: &ToolResult,
+) -> ToolResultContextView {
     let raw = output.content.trim();
     if raw.is_empty() {
-        return String::new();
+        return ToolResultContextView::whole(String::new());
     }
+    let metadata = output.metadata.as_ref();
+    let budget =
+        crate::route_budget::route_inline_char_budget_for_route(provider, model, route_limits);
 
-    // A result already bounded by the adaptive evidence envelope is an
-    // honest, context-sized preview whose footer names the artifact path and
-    // a recovery instruction. Re-compacting it would strip that recovery
-    // contract and double-truncate the output, so pass it through unchanged.
-    if output
-        .metadata
-        .as_ref()
+    // Keep an evidence preview that fits this route unchanged. A preview
+    // produced for a larger budget is refitted below with its existing ref.
+    if metadata
         .and_then(|metadata| metadata.get("evidence_available"))
-        .and_then(serde_json::Value::as_bool)
+        .and_then(Value::as_bool)
         .unwrap_or(false)
+        && raw.chars().count() <= budget
     {
-        return raw.to_string();
+        return ToolResultContextView::whole(raw);
     }
 
-    // A `read` result that already fit its byte budget carries a resume
-    // footer instead of mid-line truncation; compacting it again would
-    // discard content the budget deliberately kept. A result that somehow
-    // exceeded its declared budget still falls through to the ordinary
-    // limits below.
-    if output
-        .metadata
-        .as_ref()
+    // The `read` primitive already bounds itself to an explicit per-call byte
+    // budget and, when that budget truncates the file, ends with a footer
+    // naming the exact offset to continue from. Compacting it a second time
+    // would drop content the caller deliberately budgeted for *and* delete the
+    // continuation contract. A result that stayed inside its declared budget
+    // therefore passes through; one that exceeded it takes the path below.
+    if metadata
         .and_then(|metadata| metadata.get("read_budget_bytes"))
-        .and_then(serde_json::Value::as_u64)
+        .and_then(Value::as_u64)
         .is_some_and(|budget| raw.len() as u64 <= budget)
     {
-        return raw.to_string();
+        return ToolResultContextView::whole(raw);
     }
 
-    if let Some(summary) = compact_subagent_tool_result_for_context(tool_name, raw) {
-        return summary;
-    }
+    let recovery = recovery_ref(metadata);
+    let recovery_path = recovery.as_ref().map(|recovery| recovery.path);
+    let retrieval_ref = recovery.as_ref().and_then(|recovery| recovery.artifact_id);
 
-    if let Some(summary) = compact_structured_tool_result_for_context(tool_name, raw) {
-        return summary;
-    }
-
-    let context_window =
-        crate::route_budget::route_context_window_tokens(provider, model, route_limits);
-    let limits = tool_result_context_limits_for_window(context_window);
-    let raw_chars = raw.chars().count();
-    let should_compact = raw_chars > limits.hard_limit_chars
-        || (tool_result_is_noisy(tool_name) && raw_chars > limits.noisy_soft_limit_chars);
-    if !should_compact {
-        return raw.to_string();
-    }
-
-    let snippet = summarize_text_head_tail(raw, limits.snippet_chars);
-    let omitted = raw_chars.saturating_sub(snippet.chars().count());
-    let summary = tool_result_metadata_summary(output.metadata.as_ref());
-
+    let summary = compact_subagent_tool_result_for_context(tool_name, raw)
+        .or_else(|| compact_structured_tool_result_for_context(tool_name, raw))
+        .map(|text| ContextSummary {
+            lossy: text != raw,
+            text,
+        });
     if let Some(summary) = summary {
-        format!(
-            "[{tool_name} output compacted to protect context]\nSummary: {summary}\nSnippet: {snippet}\n(Original: {raw_chars} chars, omitted: {omitted} chars.)"
+        return summary_view(summary, budget, recovery.as_ref());
+    }
+
+    // Spillover already saved the full output and left a preview. Re-fit that
+    // preview to the budget and keep its ref; never save the preview itself.
+    if let Some(metadata) =
+        metadata.filter(|metadata| metadata.get("retained_head_bytes").is_some())
+        && let Some(text) = crate::tools::truncate::refit_spilled_preview(
+            &output.content,
+            metadata,
+            budget,
+            recovery_path,
+            retrieval_ref,
         )
-    } else {
-        format!(
-            "[{tool_name} output compacted to protect context]\nSnippet: {snippet}\n(Original: {raw_chars} chars, omitted: {omitted} chars.)"
-        )
+    {
+        return ToolResultContextView::whole(text.trim().to_string());
+    }
+
+    if raw.chars().count() <= budget {
+        return ToolResultContextView::whole(raw);
+    }
+
+    let lead = tool_result_metadata_summary(metadata)
+        .map(|summary| format!("Summary: {summary}\n"))
+        .unwrap_or_default();
+    let body = crate::tools::truncate::fit_to_inline_budget(
+        raw,
+        budget.saturating_sub(lead.chars().count()),
+        recovery_path,
+        retrieval_ref,
+    );
+    ToolResultContextView {
+        text: format!("{lead}{body}"),
+        needs_full_output_artifact: recovery.is_none(),
+    }
+}
+
+/// Finish a structured summary: when it left anything out, end it with the
+/// same recovery instruction every other cut carries.
+fn summary_view(
+    summary: ContextSummary,
+    budget: usize,
+    recovery: Option<&RecoveryRef<'_>>,
+) -> ToolResultContextView {
+    if !summary.lossy {
+        return ToolResultContextView::whole(summary.text);
+    }
+    let recovery_path = recovery.map(|recovery| recovery.path);
+    let retrieval_ref = recovery.and_then(|recovery| recovery.artifact_id);
+    let footer = match recovery_path {
+        Some(path) => format!(
+            "[full output at {path}; {}]",
+            crate::tools::truncate::spillover_recovery_instruction(retrieval_ref)
+        ),
+        None => format!(
+            "[the full output could not be saved; {}]",
+            crate::tools::truncate::unsaved_output_recovery_instruction()
+        ),
+    };
+    let text = crate::tools::truncate::fit_to_inline_budget(
+        &summary.text,
+        budget.saturating_sub(footer.chars().count() + 1),
+        recovery_path,
+        retrieval_ref,
+    );
+    ToolResultContextView {
+        text: format!("{text}\n{footer}"),
+        needs_full_output_artifact: recovery.is_none(),
     }
 }
 
