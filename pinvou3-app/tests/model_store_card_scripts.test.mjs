@@ -193,7 +193,6 @@ for (const running of [false, true]) {
     assert.equal(ui.container.querySelectorAll('[data-testid="model-store-detail-dialog"]').length, 0);
     const expected = [
       ...(running ? [{ cardId: 'card', action: 'stop' }] : []),
-      { cardId: 'card', action: 'uninstall', purgeWeights: false },
       { cardId: 'card', confirmed: true },
     ];
     for (let index = 0; index < expected.length; index += 1) {

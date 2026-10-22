@@ -66,13 +66,12 @@ function backend(t) {
   };
 }
 
-test('run_id 返回后仍等待终态，stop → uninstall(false) → scripts(false,true) 串行', async (t) => {
+test('run_id 返回后仍等待终态，stop → scripts 两步串行（2026-10-22 根治：不再卸载）', async (t) => {
   const api = backend(t);
   const workflow = api.start();
   for (const [index, kind, title] of [
     [0, 'stop', copy.taskStop(record.card_name)],
-    [1, 'uninstall', copy.taskUninstall(record.card_name)],
-    [2, 'card_scripts', copy.cardScriptsTask(record.card_name)],
+    [1, 'card_scripts', copy.cardScriptsTask(record.card_name)],
   ]) {
     const pending = await api.pending(index);
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -86,13 +85,12 @@ test('run_id 返回后仍等待终态，stop → uninstall(false) → scripts(fa
   assert.equal((await workflow).ok, true);
   assert.deepEqual(api.starts.map(({ command, payload }) => ({ command, payload })), [
     { command: 'model_store_start_lifecycle', payload: { cardId: record.card_id, action: 'stop' } },
-    { command: 'model_store_start_lifecycle', payload: { cardId: record.card_id, action: 'uninstall', purgeWeights: false } },
     { command: 'model_store_start_card_scripts', payload: { cardId: record.card_id, confirmed: true } },
   ]);
 });
 
-for (const failedIndex of [0, 1]) {
-  test(`${failedIndex === 0 ? 'stop' : 'uninstall'} 终态失败不继续且保留错误`, async (t) => {
+for (const failedIndex of [0]) {
+  test(`${failedIndex === 0 ? 'stop' : 'card_scripts'} 终态失败不继续且保留错误`, async (t) => {
     const api = backend(t);
     const workflow = api.start();
     if (failedIndex === 1) (await api.pending(0)).finish();
@@ -126,13 +124,12 @@ test('重复工作流被真实 runTask 拒绝，不发起任何额外步骤', as
   assert.equal(api.starts.length, 1);
 });
 
-test('未运行时跳过 stop，仍等待卸载完成才更新脚本', async (t) => {
+test('未运行时直接更新脚本（无卸载步骤）', async (t) => {
   const api = backend(t);
   const workflow = api.start(false);
-  const uninstall = await api.pending(0);
-  assert.deepEqual(api.starts.map((step) => step.kind), ['uninstall']);
-  uninstall.finish();
-  (await api.pending(1)).finish();
+  const scripts = await api.pending(0);
+  assert.deepEqual(api.starts.map((step) => step.kind), ['card_scripts']);
+  scripts.finish();
   assert.equal((await workflow).ok, true);
-  assert.deepEqual(api.starts.map((step) => step.kind), ['uninstall', 'card_scripts']);
+  assert.deepEqual(api.starts.map((step) => step.kind), ['card_scripts']);
 });

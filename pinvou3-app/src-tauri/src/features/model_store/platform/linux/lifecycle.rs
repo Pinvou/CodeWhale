@@ -723,6 +723,62 @@ static CONTRACT_SYNC_FAILED_CARDS: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashSet<String>>,
 > = std::sync::OnceLock::new();
 
+/// 存量设备的目录链安全迁移（2026-10-22 根治）。
+///
+/// 旧客户端用不带 mode 的 `create_dir_all` 在 umask 0002 下把模型商店自有目录
+/// 建成了 **775（组可写）**；新版安全脚本（安全卸载 / v3 生命周期）按设计拒绝在
+/// 组可写目录下操作——不迁移的话存量设备一更新脚本就撞「删除路径父链不安全」，
+/// 且无自助出路（用户设备实锤）。每次启动执行，幂等：
+/// - 范围：商店根目录、cards/、logs/、模型权重根目录，以及 cards 与权重根下的
+///   **一级子目录**（每张卡一个，数量有限）；不递归更深——卡片/权重内部由脚本
+///   自己管。
+/// - 只做**收紧**：属主是当前用户且带组/其他写位的目录去掉这些写位
+///   （775→755）。不放宽任何目录、不碰属主不是自己的目录、不改文件。
+/// - 失败只记日志不拦流程：迁移尽力而为，真正的安全判定仍在卡片脚本侧
+///   fail-closed。
+fn tighten_store_directory_permissions(settings: &Settings) {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    let uid = unsafe { libc::getuid() };
+    let mut roots = vec![
+        config::data_dir(),
+        config::data_dir().join("cards"),
+        config::data_dir().join("logs"),
+        settings.models_path(),
+    ];
+    // 一级子目录（cards/<card> 与 models/<model>）
+    for root in roots.clone() {
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    roots.push(entry.path());
+                }
+            }
+        }
+    }
+    for dir in roots {
+        let Ok(meta) = std::fs::metadata(&dir) else {
+            continue;
+        };
+        if !meta.is_dir() || meta.uid() != uid {
+            continue;
+        }
+        let mode = meta.permissions().mode();
+        if mode & 0o022 == 0 {
+            continue; // 无组/其他写位，无需收紧
+        }
+        let tightened =
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode & !0o022));
+        if let Err(error) = tightened {
+            eprintln!(
+                "[model-store] 目录安全迁移失败（{}）：{error}",
+                dir.display()
+            );
+        }
+    }
+}
+
 impl ModelManager {
     /// `store` 用于在测试里注入假的商店数据源；不传则连生产商店
     /// （`config::STORE_URL`，固定地址，见那里的说明）。
@@ -734,6 +790,7 @@ impl ModelManager {
         let settings = settings.unwrap_or_else(config::load_settings);
         let store = store.unwrap_or_else(|| Box::new(StoreClient::new(config::STORE_URL)));
         let _ = db::init_db();
+        tighten_store_directory_permissions(&settings);
         Self {
             settings,
             store,
@@ -1921,47 +1978,12 @@ impl ModelManager {
                     "卡片权重校验清单已改变，不能仅更新脚本。已保留原版本和权重，请联系维护者提供兼容升级。",
                 ));
             }
-            let native = |scripts: &BTreeMap<String, db::ScriptBlob>,
-                          assets: &BTreeMap<String, db::ScriptBlob>,
-                          version: Option<&str>| {
-                scripts
-                    .get("install_engine")
-                    .and_then(|install| {
-                        native_tachyon_identity(
-                            &install.content,
-                            assets.get("common.sh").map(|blob| blob.content.as_str()),
-                            version,
-                        )
-                    })
-                    .map(|(_, hash)| hash)
-            };
-            let old_native = native(
-                &rec.scripts_content,
-                &rec.assets_content,
-                rec.engine_version.as_deref(),
-            );
-            let new_native = native(
-                &pkg.scripts,
-                &pkg.assets,
-                card.summary.engine_version.as_deref(),
-            );
-            let same_engine = match (&old_native, &new_native) {
-                (Some(old), Some(new)) => old == new,
-                (None, None) => {
-                    rec.engine_name == card.summary.engine_name
-                        && rec.engine_version == card.summary.engine_version
-                }
-                _ => false,
-            };
-            if !same_engine && rec.status == "deployed" {
-                // 已部署状态下引擎版本变了，只换脚本会创建不兼容状态。
-                return Err(ModelManagerError::new(
-                    "卡片引擎版本已改变，不能仅更新脚本。已保留原版本和权重。",
-                ));
-            }
-            // 「已下载」状态下不拦：智能按钮的更新流程（停止→卸载→更新脚本）
-            // 先卸载了部署再更新脚本，此时没有已装引擎与之冲突。引擎会在下次
-            // 部署时按新脚本的声明自动安装正确版本。
+            // 引擎版本变化不拦（含已部署状态，2026-10-22 根治）：部署流程会按
+            // 本地缓存脚本探测并补装正确引擎（prepare_deployment_engine），「先换
+            // 脚本→重部署」是安全路径。此前在此拦截迫使更新链先卸载，而卸载一步
+            // 又可能被危险旧脚本拦截器/旧运行时结构/组可写目录卡住，形成设备无
+            // 自助出路的死锁（用户设备实锤三连）。更新脚本会重置
+            // deployed_script_sha256，界面据此提示重新部署。
             pkg
         };
         let urls = |files: &BTreeMap<String, db::ScriptBlob>| {
@@ -2078,7 +2100,7 @@ impl ModelManager {
                     // 同一引擎二进制被多张卡共用（两张驭光卡同指纹）：只有**属于
                     // 本卡**的运行实例才拦（2026-10-22 用户实锤：Ornith 在跑时
                     // 更新 Qwen 卡被误拦——纯脚本更新/卸载不碰引擎，跨引擎风险
-                    // 由 same_engine 检查单独把关）。归属无法确认（进程无
+                    // 跨引擎场景由部署时的引擎补装把关）。归属无法确认（进程无
                     // --model-id）的保守起见仍然拦。
                     match process.model_id.as_deref() {
                         None => true,
