@@ -13,6 +13,7 @@ import (
 // This resource is the original published 053, not an instruction to record it
 // on fresh databases. It contributes to expected history only when already
 // installed with its exact original LF/CRLF checksum.
+//
 //go:embed retained/000053_token_account_wallet_provisioning_receipts.up.sql
 var originalWalletReceiptSQL string
 
