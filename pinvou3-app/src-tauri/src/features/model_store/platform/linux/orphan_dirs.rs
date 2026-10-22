@@ -22,9 +22,10 @@ use super::{config, db};
 /// 全盘枚举；真攒到这个量级说明有别的问题，先截断并如实报告 partial。
 const MAX_ENTRIES: usize = 512;
 
-/// 「不准碰」的目录集合：库记录派生的权重目录 + 进行中下载的目标目录。
+/// 「不准碰」的目录集合：库记录派生的权重目录（含其 models_dir 一级祖先）+
+/// 进行中下载/版本任务的目标目录。
 ///
-/// `unresolved` 是想排除却推导失败的进行中下载个数（物化卡片缺失或解析失败）。
+/// `unresolved` 是想排除却推导失败的进行中任务个数（物化卡片缺失或解析失败）。
 /// 扫描对它只提示「列表可能不完整」；**删除对它整题拒绝**——删错不可逆。
 struct Blocked {
     dirs: HashSet<PathBuf>,
@@ -41,16 +42,38 @@ impl Blocked {
         path.canonicalize().map(|c| self.dirs.contains(&c)).unwrap_or(false)
     }
 
-    fn insert(&mut self, path: PathBuf) {
-        self.dirs.insert(path.clone());
+    fn insert(&mut self, models_dir: &Path, path: PathBuf) {
+        self.insert_exact(path.clone());
         if let Ok(c) = path.canonicalize() {
-            self.dirs.insert(c);
+            self.insert_exact(c);
         }
+        // 一级祖先也要拦：库记录可能指向**深层**目录（版本化权重在
+        // models_dir/.versions/<card>/<revision>，记录的 models_root 指向
+        // revision 层）。精确匹配拦不住它的祖先 .versions——而不拦祖先，
+        // 整棵 .versions 会被当成一个"无主目录"列出来、然后被连根删掉。
+        if let Ok(relative) = path.strip_prefix(models_dir) {
+            if let Some(first) = relative.components().next() {
+                self.insert_exact(models_dir.join(first));
+            }
+        }
+    }
+
+    fn insert_exact(&mut self, path: PathBuf) {
+        self.dirs.insert(path);
     }
 }
 
+/// 安装类回执的 kind 白名单：这些任务还没写库（或写到库记录推导不到的深目录），
+/// 目标目录必须从卡片元数据反推并排除。version_stage 也算——它把新版本权重
+/// 下载进 models_dir/.versions，同样没有任何"已入库目录"可拦。
+const IN_FLIGHT_KINDS: [&str; 3] = ["download", "install_local", "version_stage"];
+
+pub(super) fn is_in_flight_kind(kind: &str) -> bool {
+    IN_FLIGHT_KINDS.contains(&kind)
+}
+
 /// 一次运行回执的最小读取：只要 card_id/kind/outcome 三个字段。完整格式
-/// （SavedRun）的 owner 在 service.rs；这里读它只为分辨「下载还没结束」，
+/// （SavedRun）的 owner 在 service.rs；这里读它只为分辨「任务还没结束」，
 /// 读不出来就当不存在——最坏后果是少排除一个目录（漏报），不是误删。
 fn non_terminal_install_cards(out: &mut HashSet<String>) {
     let runs_dir = config::data_dir().join("runs");
@@ -65,7 +88,7 @@ fn non_terminal_install_cards(out: &mut HashSet<String>) {
         let Ok(bytes) = std::fs::read(&path) else { continue };
         let Ok(value) = serde_json::from_slice::<Value>(&bytes) else { continue };
         let kind = value.get("kind").and_then(Value::as_str).unwrap_or("");
-        if matches!(kind, "download" | "install_local") && value.get("outcome").is_some_and(Value::is_null) {
+        if is_in_flight_kind(kind) && value.get("outcome").is_some_and(Value::is_null) {
             if let Some(card) = value.get("card_id").and_then(Value::as_str) {
                 out.insert(card.to_string());
             }
@@ -73,7 +96,7 @@ fn non_terminal_install_cards(out: &mut HashSet<String>) {
     }
 }
 
-/// 未终结的下载/本地安装回执的 run_id（run id 就是回执文件名）。
+/// 未终结的安装类回执的 run_id（run id 就是回执文件名）。
 fn non_terminal_install_run_ids() -> Vec<String> {
     let mut ids = Vec::new();
     let runs_dir = config::data_dir().join("runs");
@@ -88,7 +111,7 @@ fn non_terminal_install_run_ids() -> Vec<String> {
         let Ok(bytes) = std::fs::read(&path) else { continue };
         let Ok(value) = serde_json::from_slice::<Value>(&bytes) else { continue };
         let kind = value.get("kind").and_then(Value::as_str).unwrap_or("");
-        if matches!(kind, "download" | "install_local") && value.get("outcome").is_some_and(Value::is_null) {
+        if is_in_flight_kind(kind) && value.get("outcome").is_some_and(Value::is_null) {
             if let Some(id) = path.file_stem().and_then(|value| value.to_str()) {
                 ids.push(id.to_string());
             }
@@ -106,25 +129,31 @@ fn blocked_dirs(service: Option<&super::service::ModelStoreService>) -> Result<B
 
     let records = db::list_store_models().map_err(|error| error.to_string())?;
     for rec in &records {
-        // 原生（runtime）/版本化卡片的权重根指向实际隔离目录，原样收进集合；
-        // 它可能不在 models_dir 下，只有落在 models_dir 下时才会被列举命中。
+        // 原生（runtime）/版本化卡片的权重根指向实际隔离目录（版本化记录指向
+        // models_dir/.versions/<card>/<revision> 深层），原样收进集合；它可能
+        // 不在 models_dir 下，只有落在 models_dir 下时才会被列举命中。
         if let Some(root) = &rec.models_root {
-            blocked.insert(PathBuf::from(root));
+            blocked.insert(&models_dir, PathBuf::from(root));
+        }
+        // 旧记录的权威实际目录：部署脚本写在卡片 .deploy-env 里的 MODEL_DIR，
+        // 与 candidate_paths 同一份真相，不能在扫描里再猜一遍。
+        if let Some(actual) = super::lifecycle::legacy_resource_dir_for_scan(rec, &models_dir) {
+            blocked.insert(&models_dir, actual);
         }
         // 商店卡片的权重目录：卡片脚本统一放 ${LMM_MODELS_DIR}/<HF 仓库名>。
         // 末段必须过 safe_path_component——"x/.." 的末段就是 ".."（
         // lifecycle::candidate_paths 里踩过的坑）。
         if let Some(repo) = rec.source_repo_id.as_deref().and_then(|repo| repo.rsplit('/').next()) {
             if let Ok(safe) = config::safe_path_component(repo) {
-                blocked.insert(models_dir.join(safe));
+                blocked.insert(&models_dir, models_dir.join(safe));
             }
         }
         if let Ok(safe) = config::safe_path_component(&rec.model_name) {
-            blocked.insert(models_dir.join(safe));
+            blocked.insert(&models_dir, models_dir.join(safe));
         }
     }
 
-    // 进行中下载的卡片集合。
+    // 进行中任务的卡片集合。
     let mut cards: HashSet<String> = HashSet::new();
     if let Some(service) = service {
         for run in service.active_installs() {
@@ -137,7 +166,7 @@ fn blocked_dirs(service: Option<&super::service::ModelStoreService>) -> Result<B
         match card_weight_dirs(card, &models_dir) {
             Some(dirs) => {
                 for dir in dirs {
-                    blocked.insert(dir);
+                    blocked.insert(&models_dir, dir);
                 }
             }
             // 推导不出目标目录就不能假装它不存在：扫描里少排一个目录是漏报，
@@ -194,6 +223,13 @@ pub(super) fn scan(service: Option<&super::service::ModelStoreService>) -> Resul
         if file_type.is_symlink() || !file_type.is_dir() {
             continue;
         }
+        // 点开头的目录是商店的内部结构（如版本化的 .versions），不是任何卡片
+        // 脚本的权重目录命名形态，整类不出现在列表里——它们由库记录的一级
+        // 祖先规则保护（见 Blocked::insert），这里再兜一层。
+        let name = entry.file_name();
+        if name.to_str().is_some_and(|value| value.starts_with('.')) {
+            continue;
+        }
         let path = entry.path();
         if blocked.contains(&path) {
             continue;
@@ -226,11 +262,14 @@ pub(super) fn remove(
     let target = PathBuf::from(path_text);
 
     // 1) 只许删 models_dir 的直接子目录：上级路径对不上、路径分量不安全
-    //    （".."、绝对路径逃逸）一律拒绝。
+    //    （".."、绝对路径逃逸）一律拒绝。点开头的名字同样拒绝——那是商店
+    //    的内部目录（.versions 等），不属于"残留"，删了会端掉全部版本化权重。
     let Some(name) = target.file_name().and_then(|value| value.to_str()) else {
         return Err("orphan_path_unsafe".into());
     };
-    config::safe_path_component(name)?;
+    if name.starts_with('.') || config::safe_path_component(name).is_err() {
+        return Err("orphan_path_unsafe".into());
+    }
     if target.parent().map(|parent| parent != models_dir).unwrap_or(true) {
         return Err("orphan_path_unsafe".into());
     }
@@ -397,5 +436,126 @@ mod tests {
         for bad in [models.clone(), models.parent().unwrap().to_path_buf(), PathBuf::from("/tmp")] {
             assert!(remove(None, &bad.to_string_lossy()).is_err(), "{bad:?} 不该被放行");
         }
+    }
+
+    /// 版本化权重根 models_dir/.versions 绝不能出现在可删列表，也绝不能被删：
+    /// 它装着**所有**已入库模型的版本化权重，而库记录的 models_root 指向的是
+    /// 它下面的深层 revision 目录——只按精确路径匹配拦不住这个祖先。
+    #[test]
+    fn versioned_weight_root_is_never_listed_or_removable() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        let models = config::load_settings().models_path();
+        let revisions = models.join(".versions").join("versioned-card").join("rev-1");
+        std::fs::create_dir_all(&revisions).unwrap();
+        std::fs::write(revisions.join("weights.safetensors"), "weights").unwrap();
+        // 记录的 models_root 指向深层 revision 目录。
+        let record = db::add_store_model_with_root(
+            db::AddStoreModelParams {
+                card_id: "versioned-card",
+                model_name: "versioned-model",
+                card_name: "Versioned Model",
+                org: None,
+                description: None,
+                engine_name: "test-engine",
+                engine_version: None,
+                size_bytes: 1,
+                quantization: None,
+                source_repo_id: None,
+                source_filename: None,
+                scripts: &std::collections::BTreeMap::new(),
+                status: "downloaded",
+                profiles: &[],
+                deploy_topology: Default::default(),
+                card_source: "store",
+            },
+            &revisions.to_string_lossy(),
+        )
+        .unwrap();
+        assert!(record.models_root.is_some(), "测试前提：记录带 models_root");
+
+        let report = scan(None).unwrap();
+        let names: Vec<&str> = report["entries"].as_array().unwrap()
+            .iter()
+            .map(|entry| entry["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            names.iter().all(|name| *name != ".versions"),
+            "版本化权重根不该被列出：{names:?}"
+        );
+
+        let error = remove(None, &models.join(".versions").to_string_lossy()).err().unwrap();
+        assert!(
+            error.contains("unsafe") || error.contains("owned"),
+            "点开头的内部目录必须被拒绝：{error}"
+        );
+        assert!(models.join(".versions").exists(), ".versions 必须原样保留");
+    }
+
+    /// 库记录的深层路径要连它所在的 models_dir 一级祖先一起拦——这是上一条
+    /// 测试的通用形态（不限于 .versions 这个名字）。
+    #[test]
+    fn deep_library_paths_block_their_first_level_ancestor() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        let models = config::load_settings().models_path();
+        let deep = models.join("some-root").join("inner").join("weights");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("w.bin"), "w").unwrap();
+        db::add_store_model_with_root(
+            db::AddStoreModelParams {
+                card_id: "deep-card",
+                model_name: "deep-model",
+                card_name: "Deep Model",
+                org: None,
+                description: None,
+                engine_name: "test-engine",
+                engine_version: None,
+                size_bytes: 1,
+                quantization: None,
+                source_repo_id: None,
+                source_filename: None,
+                scripts: &std::collections::BTreeMap::new(),
+                status: "downloaded",
+                profiles: &[],
+                deploy_topology: Default::default(),
+                card_source: "store",
+            },
+            &deep.to_string_lossy(),
+        )
+        .unwrap();
+
+        let report = scan(None).unwrap();
+        let names: Vec<&str> = report["entries"].as_array().unwrap()
+            .iter()
+            .map(|entry| entry["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            names.iter().all(|name| *name != "some-root"),
+            "库记录深层路径的一级祖先不该被列出：{names:?}"
+        );
+        let error = remove(None, &models.join("some-root").to_string_lossy()).err().unwrap();
+        assert!(error.contains("owned"), "实际错误：{error}");
+    }
+
+    /// 进行中的版本暂存（version_stage）同样把权重写进 .versions：它的回执
+    /// 必须纳入目标排除与进程核查的输入（kind 白名单），删除则被某道闸拦下。
+    #[test]
+    fn in_flight_version_stage_receipt_gates_removal() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        let (orphan, _owned) = seed_models_dir();
+        write_receipt(
+            "staging",
+            &json!({"card_id":"versioned-card","kind":"version_stage","created_at":"2026-10-22T00:00:00Z","outcome":null,"cancelled":false,"lines":[]}),
+        );
+        // kind 白名单必须覆盖 version_stage：回执进入进程核查与目标排除。
+        assert_eq!(non_terminal_install_run_ids(), vec!["staging".to_string()]);
+        let mut cards = HashSet::new();
+        non_terminal_install_cards(&mut cards);
+        assert!(cards.contains("versioned-card"), "卡片必须进入排除推导");
+        // 此处未终结的 version_stage 卡片推导不出目标目录，删除被 unresolved
+        // 闸拦下；有物化卡片时则由进程核查拦——无论哪道闸，都不能放行。
+        assert!(remove(None, &orphan.to_string_lossy()).is_err(), "进行中的版本任务期间不允许删除残留");
     }
 }

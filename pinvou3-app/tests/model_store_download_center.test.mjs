@@ -63,6 +63,9 @@ test('downloads filter switches the whole list and retires duplicate surfaces', 
   assert.match(VIEW, /\{filter === 'downloads' \? null : \(\s*\n\s*<IncompleteInstallPanel/);
   // 搜索框在「下载」视图里隐藏：它筛的是操作实例，搜索没有意义。
   assert.match(VIEW, /\{filter === 'downloads' \? null : \(\s*\n\s*<IosSearchField/);
+  // 浮层在「下载」视图里必须剔除活跃下载卡：同一张卡两处渲染，日志展开/
+  // 应答状态会各走各的。这是双渲染互斥的另一半（中心只列活跃是前一半）。
+  assert.match(VIEW, /tasks=\{filter === 'downloads'\s*\n\s*\? tasks\.filter\(\(task\) => !activeDownloadTasks\(\[task\]\)\.length\)\s*\n\s*: tasks\}/);
   // 徽标挂在筛选胶囊上，且只在有内容时渲染。
   assert.match(VIEW, /model-store-filter-\$\{item\.key\}-badge/);
   assert.match(VIEW, /item\.badge \? \(\s*\n?\s*<span/);

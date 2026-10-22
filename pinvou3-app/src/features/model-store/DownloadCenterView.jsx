@@ -34,11 +34,21 @@ export function activeDownloadTasks(tasks) {
   return (tasks || []).filter((task) => task.kind === 'download' && ACTIVE_STATUS.has(task.status));
 }
 
-/** 残留目录的后端错误码 → 人话。与 describeIncompleteError 同一套路。 */
+/**
+ * 残留目录的后端错误码 → 人话。与 describeIncompleteError 同一套路。
+ *
+ * 先查本分区的 orphanErrors；查不到回落 incompleteErrors——删除前的进程
+ * 核查复用的是安装链路的那组错误码（installation_process_still_alive 等），
+ * 两张表各查各的等于让用户看到一半的原始错误码。
+ */
 export function describeOrphanError(copy, value) {
   const detail = String(value);
-  const translated = Object.entries(copy.orphanErrors).find(([key]) => detail.includes(key))?.[1];
-  return translated ? `${translated} (${detail})` : detail;
+  const tables = [copy.orphanErrors, copy.incompleteErrors];
+  for (const table of tables) {
+    const translated = Object.entries(table || EMPTY).find(([key]) => detail.includes(key))?.[1];
+    if (translated) return `${translated} (${detail})`;
+  }
+  return detail;
 }
 
 /**

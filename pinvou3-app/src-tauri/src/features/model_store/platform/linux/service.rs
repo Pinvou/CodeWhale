@@ -331,8 +331,14 @@ impl RunLog {
             return Err("installation_not_terminal".into());
         }
         *self.dismissed.lock() = true;
-        self.persist_result()
-            .map_err(|error| format!("installation_dismiss_persist_failed: {error}"))
+        if let Err(error) = self.persist_result() {
+            // 落盘失败就回滚内存标记：内存说"已放弃"而磁盘没记，重启后横幅
+            // 会带着"已放弃"的内存态复活成两条不一样的世界线。回滚让两边
+            // 始终一致——这次放弃失败，用户重按一次就是了。
+            *self.dismissed.lock() = false;
+            return Err(format!("installation_dismiss_persist_failed: {error}"));
+        }
+        Ok(())
     }
 
     fn finish(&self, outcome: Result<Value, String>, cancelled: bool) {
@@ -627,13 +633,13 @@ impl ModelStoreService {
         }
     }
 
-    /// 还在进行的安装类操作（下载/本地安装），供残留目录扫描排除「正在写权重
-    /// 的目录」。只暴露这一类：部署/启停的目标目录已由库记录覆盖。
+    /// 还在进行的安装类操作（下载/本地安装/版本暂存），供残留目录扫描排除
+    /// 「正在写权重的目录」。只暴露这一类：部署/启停的目标目录已由库记录覆盖。
     pub(super) fn active_installs(&self) -> Vec<super::run_state::ActiveRun> {
         self.active
             .active_runs()
             .into_iter()
-            .filter(|run| matches!(run.kind, "download" | "install_local"))
+            .filter(|run| super::orphan_dirs::is_in_flight_kind(run.kind))
             .collect()
     }
 

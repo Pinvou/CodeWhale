@@ -31,6 +31,8 @@ test('dismiss goes through the dedicated command with a two-step inline confirma
   assert.match(PANEL, /confirmingId && <div role="alertdialog"[\s\S]*?data-testid="incomplete-dismiss-confirm"/);
   assert.match(PANEL, /data-testid="incomplete-dismiss-confirm-button"/);
   assert.match(PANEL, /setConfirmingId\(item\.runId\)/);
+  // 确认条打开期间记录可能被整表刷新移除：target 缺失必须安静收回，不能崩。
+  assert.match(PANEL, /if \(!item\) \{\s*\n\s*setConfirmingId\(null\);\s*\n\s*return;/);
 });
 
 test('dismiss copy promises files are kept and resumable in all three languages', () => {
@@ -41,6 +43,9 @@ test('dismiss copy promises files are kept and resumable in all three languages'
     // 错误码文案同步补齐：放弃后的重试会被后端 installation_dismissed 拒绝。
     assert.ok(text.includes('installation_dismissed:'), 'installation_dismissed 文案缺失');
     assert.ok(text.includes('installation_not_dismissable:'), 'installation_not_dismissable 文案缺失');
+    // 落盘失败与记录缺失也是放弃按钮可直接触达的错误，缺词就是裸奔错误码。
+    assert.ok(text.includes('installation_dismiss_persist_failed:'), 'installation_dismiss_persist_failed 文案缺失');
+    assert.ok(text.includes('installation_record_unavailable:'), 'installation_record_unavailable 文案缺失');
   }
   // 三个语言的确认文案都必须把「文件保留」说出口——这是本功能最重要的承诺。
   assert.match(DICTS.get('zh'), /incompleteDismissConfirmHint:'[^']*原样保留[^']*'/);

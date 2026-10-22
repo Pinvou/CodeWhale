@@ -34,6 +34,12 @@ export function IncompleteInstallPanel({ installations = EMPTY, error, copy, onR
     }
   };
   const dismiss = async item => {
+    // 确认条打开期间列表可能被整表刷新（同卡卸载完成/新失败顶掉），这条记录
+    // 已经不在了：安静收回确认条，而不是对着 undefined 崩掉组件树。
+    if (!item) {
+      setConfirmingId(null);
+      return;
+    }
     setDismissing(true);
     setRequestError('');
     try {

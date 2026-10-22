@@ -1500,8 +1500,13 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
         ) : null}
       </MsDialog>
 
+      {/* 「下载」视图里活跃下载卡已由 DownloadCenterView 渲染，浮层必须剔除
+          它们——同一张卡两处渲染，日志展开/应答状态就会各走各的。终态卡
+          （失败/取消）仍归浮层，中心视图不收。 */}
       <ModelStoreTaskPanel
-        tasks={tasks}
+        tasks={filter === 'downloads'
+          ? tasks.filter((task) => !activeDownloadTasks([task]).length)
+          : tasks}
         copy={copy}
         onCancel={cancelTask}
         onDismiss={dismissTask}
