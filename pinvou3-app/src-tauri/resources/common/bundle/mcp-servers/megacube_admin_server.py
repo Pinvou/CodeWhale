@@ -2294,7 +2294,22 @@ def _selected_model_inventory(data):
                 or runtime in logical_by_runtime or logical != runtime and logical in by_runtime):
             invalid()
         logical_by_runtime[runtime] = logical
-    return by_runtime, bindings, logical_by_runtime
+    # store_bindings proves existing management and is validated above. Current
+    # selection metadata also exists on unowned rows; use it only to associate
+    # observations and resolve a preview, never to change the row's permissions.
+    current_targets = dict(bindings)
+    for runtime, row in by_runtime.items():
+        logical = row.get("logical_card")
+        if logical is None:
+            continue
+        if (not safe(logical)
+                or logical != runtime and logical in by_runtime
+                or logical in current_targets and current_targets[logical] != runtime
+                or runtime in logical_by_runtime and logical_by_runtime[runtime] != logical):
+            invalid()
+        current_targets[logical] = runtime
+        logical_by_runtime[runtime] = logical
+    return by_runtime, current_targets, logical_by_runtime
 
 
 def _tool_plan_switch(args):
@@ -2310,11 +2325,11 @@ def _tool_plan_switch(args):
         if observation.get("error"):
             return _observation_reply(observation)
     try:
-        by_runtime, bindings, _ = _selected_model_inventory(models)
+        by_runtime, current_targets, _ = _selected_model_inventory(models)
     except megacube_tools.ToolError as error:
         return megacube_tools.error_reply(error)
     active = status.get("active_model")
-    runtime = bindings.get(card, card)
+    runtime = current_targets.get(card, card)
     capacity = _api("/v1/capacity?card=%s" % runtime)
     if capacity is None:
         return _unavailable()
