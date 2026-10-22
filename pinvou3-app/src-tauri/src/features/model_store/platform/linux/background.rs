@@ -349,6 +349,12 @@ pub fn dispatch(
         "incomplete_dismiss" => {
             tauri::async_runtime::block_on(service::dismiss_incomplete(service, string("run_id")?))
         }
+        "orphan_scan" => {
+            tauri::async_runtime::block_on(service::scan_orphans(service))
+        }
+        "orphan_remove" => {
+            tauri::async_runtime::block_on(service::remove_orphan(service, string("path")?))
+        }
         "download" => service::start_download(service, string("card_id")?),
         "version_action" => service::start_version_action(
             service,

@@ -34,6 +34,22 @@ test('download center lists only active download tasks and reuses the interrupte
   assert.match(CENTER, /downloadsEmptyHint/);
 });
 
+test('orphan section scans on demand and deletes only after an explicit confirmation', () => {
+  const API = read('src', 'features', 'model-store', 'model-store-api.js');
+  assert.match(API, /scanOrphans\(\)[\s\S]{0,60}model_store_scan_orphans/);
+  assert.match(API, /removeOrphan\(path\)[\s\S]{0,60}model_store_remove_orphan/);
+  // 扫描必须由按钮触发，本分区没有自动扫描的 effect——进页面就 du 上百 GB
+  // 等于惩罚打开这个视图的人。
+  assert.match(CENTER, /data-testid="model-store-orphan-scan"/);
+  assert.doesNotMatch(CENTER, /useEffect\([\s\S]{0,200}scanOrphans/);
+  // 删除两步确认：先出确认条（含完整路径与「不可恢复」承诺），再发请求。
+  assert.match(CENTER, /data-testid="model-store-orphan-delete"/);
+  assert.match(CENTER, /data-testid="model-store-orphan-confirm-button"/);
+  assert.match(CENTER, /removeOrphan\(target\.path\)/);
+  // 删除完成后必须重扫，不能让用户对着幽灵条目。
+  assert.match(CENTER, /setResult\(await scanOrphans\(\)\)/);
+});
+
 test('task card has an inline variant without the floating-panel chrome', () => {
   assert.match(PANEL, /export \{ ModelStoreTaskPanel, ModelStoreTaskCard/);
   assert.match(PANEL, /inline = false/);
@@ -60,4 +76,21 @@ test('downloads copy exists in all three languages', () => {
       assert.ok(text.includes(key), `${key} 缺失`);
     }
   }
+});
+
+test('orphan copy exists in all three languages and promises irreversibility', () => {
+  const KEYS = ['orphansTitle:', 'orphansHint:', 'orphansScan:', 'orphansEmpty:', 'orphansDelete:', 'orphansDeleteConfirmTitle:', 'orphansDeleteConfirmHint:', 'orphansDeleted:', 'orphanErrors:'];
+  for (const text of DICTS.values()) {
+    for (const key of KEYS) {
+      assert.ok(text.includes(key), `${key} 缺失`);
+    }
+    // 后端五类拒绝码必须都有人话对应，缺一个界面上就裸奔错误码。
+    for (const code of ['orphan_scan_unavailable', 'orphan_directory_owned', 'orphan_activity_unresolved', 'orphan_path_unsafe', 'orphan_remove_failed']) {
+      assert.ok(text.includes(`${code}:`), `orphanErrors.${code} 缺失`);
+    }
+  }
+  // 删除确认必须把「不可恢复」说出口——这是本分区最重要的承诺。
+  assert.match(DICTS.get('zh'), /orphansDeleteConfirmHint:'[^']*不可恢复[^']*'/);
+  assert.match(DICTS.get('en'), /orphansDeleteConfirmHint:'[^']*irreversib[^']*'/);
+  assert.match(DICTS.get('ja'), /orphansDeleteConfirmHint:'[^']*元に戻せません[^']*'/);
 });

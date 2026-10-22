@@ -253,6 +253,11 @@ fn normalize_model_name(raw: &str) -> String {
     name.trim_matches('-').to_string()
 }
 
+/// 残留扫描与建议名称共用目标分支的归一化规则，保留安全兜底。
+pub(super) fn lower_model_name(raw: &str) -> String {
+    normalize_model_name(raw)
+}
+
 pub fn suggest_model_name(card: &StoreCardDetail) -> String {
     let mut base = card.summary.name.clone();
     if let Some(q) = &card.summary.quantization {

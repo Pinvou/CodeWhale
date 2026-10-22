@@ -964,6 +964,7 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
           installations={library.incompleteInstallations}
           incompleteError={library.incompleteError}
           copy={copy}
+          onToast={showToast}
           onCancel={cancelTask}
           onDismiss={dismissTask}
           onToggle={toggleTaskExpand}

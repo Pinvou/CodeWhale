@@ -627,6 +627,16 @@ impl ModelStoreService {
         }
     }
 
+    /// 还在进行的安装类操作（下载/本地安装），供残留目录扫描排除「正在写权重
+    /// 的目录」。只暴露这一类：部署/启停的目标目录已由库记录覆盖。
+    pub(super) fn active_installs(&self) -> Vec<super::run_state::ActiveRun> {
+        self.active
+            .active_runs()
+            .into_iter()
+            .filter(|run| matches!(run.kind, "download" | "install_local"))
+            .collect()
+    }
+
     /// Operator escape for a lost receiver record. The accept gate serializes
     /// this tombstone with late requests using the same id. No running operation
     /// or orphan writer may exist; corrupt receipts never count as absence.
@@ -1826,6 +1836,36 @@ pub(super) fn dismiss_incomplete_local(
     };
     log.dismiss()?;
     Ok(json!({ "ok": true }))
+}
+
+/// 列举 models_dir 下无库记录的残留目录（取消/失败下载的半截权重）。
+/// 只读；删除走 [`remove_orphan`]，两步分开——扫描可能慢（量体积），
+/// 删除不可逆，不能让一次顺手刷新碰到它。
+pub async fn scan_orphans(service: &Arc<ModelStoreService>) -> Result<Value, String> {
+    let service = Arc::clone(service);
+    tokio::task::spawn_blocking(move || {
+        if service.remote {
+            return super::background::call("orphan_scan", json!({}));
+        }
+        super::orphan_dirs::scan(Some(&service))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// 删除一个残留目录。同步等待删除完成（几十 GB 是分钟级）：调用方用 busy
+/// 态表达"正在删"，比再发明一套任务登记 + 轮询协议便宜得多，也让"删完
+/// 释放了多少"能随应答一次带回。
+pub async fn remove_orphan(service: &Arc<ModelStoreService>, path: String) -> Result<Value, String> {
+    let service = Arc::clone(service);
+    tokio::task::spawn_blocking(move || {
+        if service.remote {
+            return super::background::call("orphan_remove", json!({"path":path}));
+        }
+        super::orphan_dirs::remove(Some(&service), &path)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 pub fn retry_incomplete(
