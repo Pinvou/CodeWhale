@@ -5,7 +5,7 @@
   const registry = root.__PINVOU_TAURI_BRIDGE_FEATURES__ = root.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
   registry.sessions = function (context) {let pinvouSharedtauriSessionsCache = null;
 function pinvouSharedtauriSessions() {
-  if (!pinvouSharedtauriSessionsCache) pinvouSharedtauriSessionsCache = window.PinvouBridgeShared.create("tauriSessions", { sessionStates, freshBuffer, restoreEvictedSessionDraft, state, sessionBufferTouchClock: { get value() { return sessionBufferTouchClock; }, set value(v) { sessionBufferTouchClock = v; } }, pruneScheduledSessionBuffers, pruneSessionBuffers, scheduledRunSessionOwners, scheduledRunOwnerTouchClock: { get value() { return scheduledRunOwnerTouchClock; }, set value(v) { scheduledRunOwnerTouchClock = v; } }, MAX_SCHEDULED_RUN_SESSION_OWNERS, enterDraft, setScheduledTaskError, notify, addSystemItem, bt, hydratedMessageKey, basename, switchToSessionInternal, openScheduledRunChatOnce, scheduledRunOpenInFlight, loadWorkingSetFrom, invalidateScheduledRecentRunsForSession, purgeSessionBuffer, invoke, personaPlaceholderTitles, refreshHistoryList, sessionSwitchRequestToken: { get value() { return sessionSwitchRequestToken; }, set value(v) { sessionSwitchRequestToken = v; } }, saveWorkingSetTo, loadScheduledTaskRecentRuns });
+  if (!pinvouSharedtauriSessionsCache) pinvouSharedtauriSessionsCache = window.PinvouBridgeShared.create("tauriSessions", { sessionStates, freshBuffer, restoreEvictedSessionDraft, state, sessionBufferTouchClock: { get value() { return sessionBufferTouchClock; }, set value(v) { sessionBufferTouchClock = v; } }, pruneScheduledSessionBuffers, pruneSessionBuffers, scheduledRunSessionOwners, scheduledRunOwnerTouchClock: { get value() { return scheduledRunOwnerTouchClock; }, set value(v) { scheduledRunOwnerTouchClock = v; } }, MAX_SCHEDULED_RUN_SESSION_OWNERS, enterDraft, setScheduledTaskError, notify, addSystemItem, bt, hydratedMessageKey, basename, switchToSessionInternal, openScheduledRunChatOnce, scheduledRunOpenInFlight, loadWorkingSetFrom, invalidateScheduledRecentRunsForSession, purgeSessionBuffer, invoke, personaPlaceholderTitles, refreshHistoryList, sessionSwitchRequestToken: { get value() { return sessionSwitchRequestToken; }, set value(v) { sessionSwitchRequestToken = v; } }, saveWorkingSetTo, loadScheduledTaskRecentRuns, reportSidecarReadFailure });
   return pinvouSharedtauriSessionsCache;
 }
 
@@ -63,8 +63,17 @@ function pinvouSharedtauriSessions() {
     var syncPinvouSceneEventsForSession = context.syncPinvouSceneEventsForSession ||
       function (sid) { return Promise.resolve(loadPinvouSceneEventsForSession(sid)); };
     var loadSteeredMessagesForSession = context.loadSteeredMessagesForSession || function () { return []; };
+
     var syncSteeredMessagesForSession = context.syncSteeredMessagesForSession ||
       function (sid) { return Promise.resolve(loadSteeredMessagesForSession(sid)); };
+
+    var reportSidecarReadFailure = context.reportSidecarReadFailure;
+    // Persona events and pinvou reviews have no local migration cache, but the
+    // backend now fails a corrupt sidecar explicitly (missing stays []). Degrade
+    // to [] exactly as before, just not silently — report like the scene/steered
+    // readers so a durable-data defect cannot pose as "no data".
+    function loadPersonaEventsForSession(sid) { return pinvouSharedtauriSessions().loadPersonaEventsForSession(sid); }
+    function loadPinvouReviewsForSession(sid) { return pinvouSharedtauriSessions().loadPinvouReviewsForSession(sid); }
     var MAX_SCHEDULED_SESSION_BUFFERS = 64;
     var MAX_SCHEDULED_RUN_SESSION_OWNERS = 64;
     // All-session buffer cap: each sessionStates entry holds the full
@@ -350,8 +359,8 @@ function rollbackScheduledOpenActivation(snapshot) { return pinvouSharedtauriSes
     // 快照 hydrate 会截断正在流式生成的内容，必须复检后放弃（审计）。
     if (buf.busy || buf.remoteTurnActive) return;
     hydrateWorkingSetFromSaved(buf, saved);
-    try { buf.personaEvents = await invoke("get_session_persona_events", { sessionId: sid }) || []; } catch (e) { buf.personaEvents = []; }
-    try { buf.pinvouReviews = await invoke("get_session_pinvou_reviews", { sessionId: sid }) || []; } catch (e) { buf.pinvouReviews = []; }
+    buf.personaEvents = await loadPersonaEventsForSession(sid);
+    buf.pinvouReviews = await loadPinvouReviewsForSession(sid);
     buf.pinvouSceneEvents = await syncPinvouSceneEventsForSession(sid);
     buf.steeredMessages = await syncSteeredMessagesForSession(sid);
     try { buf.turnTimeline = await invoke("get_session_timeline", { sessionId: sid }) || []; } catch (e) { buf.turnTimeline = []; }
@@ -497,62 +506,20 @@ async function createNewSession() { return pinvouSharedtauriSessions().createNew
 
   // ── Draft-state working directory selection (plain chat, mirroring the code
   // mode draft selector) ────────────────────────────────────────────────
-  // The recents list shares key and semantics with src/shared/workspace-recents.js:
-  // this file is a <script src> classic script and cannot import that ES module,
-  // so what follows is a verbatim mirror of it. Any change to one side must be
-  // mirrored on the other (tests/chat_draft_workspace_logic.test.mjs locks the
-  // bridge-side behavior, tests/workspace_recents_logic.test.mjs the shared module).
-  const DRAFT_WORKSPACE_RECENTS_KEY = "pinvou_codex_recent_workspaces";
-  function rememberDraftWorkspaceRecent(path) {
-    let list;
-    try {
-      const value = JSON.parse(localStorage.getItem(DRAFT_WORKSPACE_RECENTS_KEY) || "[]");
-      list = Array.isArray(value) ? value.filter(function (item) { return typeof item === "string"; }).slice(0, 6) : [];
-    } catch {
-      list = [];
-    }
-    const next = [path, ...list.filter(function (item) { return item !== path; })].slice(0, 6);
-    try {
-      localStorage.setItem(DRAFT_WORKSPACE_RECENTS_KEY, JSON.stringify(next));
-    } catch {
-      // When localStorage is unavailable, skip recording just this one entry;
-      // the directory selection itself is unaffected.
-    }
-  }
-
+  // The recents list shares key and semantics with src/shared/workspace-recents.js.
+  // This file is a <script src> classic script and cannot import that ES module,
+  // so the codec lives in the shared bridge payload
+  // (src/shared/bridge-shared-helpers.js, loaded before both bridges); tests/
+  // chat_draft_workspace_logic.test.mjs locks the bridge-side behavior,
+  // tests/workspace_recents_logic.test.mjs the shared module.
+  function rememberDraftWorkspaceRecent(path) { return pinvouSharedtauriSessions().rememberDraftWorkspaceRecent(path); }
   // Recents-list cleanup policy after create_session fails: prune only when the
   // backend explicitly rejected the path (invalid workspace_path — the directory
   // is stale or deleted); transient errors must not remove valid entries. Prune
   // by the boundWorkspace captured at materialization, not the live
   // draftWorkspacePath — if the user re-picks X2 while X1's creation is in
   // flight, X1 is the one that fails and the valid X2 must survive.
-  function maybePruneFailedWorkspaceRecent(boundWorkspace, error) {
-    if (!boundWorkspace) return;
-    if (!/invalid workspace_path/.test(String((error && error.message) || error || ''))) return;
-    forgetDraftWorkspaceRecent(boundWorkspace);
-  }
-
-  // Remove a single directory from the recents list (mirror of
-  // workspace-recents.js forgetWorkspace): called from the ensureSession failure
-  // path when materialization fails (directory deleted/renamed) so a bad entry
-  // no longer lingers forever. The shared module and this classic script cannot
-  // import each other; keep both sides in sync.
-  function forgetDraftWorkspaceRecent(path) {
-    let list;
-    try {
-      const value = JSON.parse(localStorage.getItem(DRAFT_WORKSPACE_RECENTS_KEY) || "[]");
-      list = Array.isArray(value) ? value.filter(function (item) { return typeof item === "string"; }) : [];
-    } catch {
-      list = [];
-    }
-    const next = list.filter(function (item) { return item !== path; });
-    try {
-      localStorage.setItem(DRAFT_WORKSPACE_RECENTS_KEY, JSON.stringify(next));
-    } catch {
-      // When localStorage is unavailable, skip recording just this one entry;
-      // the directory selection itself is unaffected.
-    }
-  }
+  function maybePruneFailedWorkspaceRecent(boundWorkspace, error) { return pinvouSharedtauriSessions().maybePruneFailedWorkspaceRecent(boundWorkspace, error); }
 
   // Effective in draft state only; path = null means back to the default
   // (session-private directory).
@@ -1023,13 +990,11 @@ function interruptedDisplayRange(item) { return pinvouSharedtauriSessionsN47342(
       return false;
     }
 
-    var personaEvents = [];
-    var pinvouReviews = [];
     var pinvouSceneEvents = await syncPinvouSceneEventsForSession(id);
     var steeredMessages = await syncSteeredMessagesForSession(id);
+    var personaEvents = await loadPersonaEventsForSession(id);
+    var pinvouReviews = await loadPinvouReviewsForSession(id);
     var turnTimeline = [];
-    try { personaEvents = await invoke("get_session_persona_events", { sessionId: id }) || []; } catch (_) {}
-    try { pinvouReviews = await invoke("get_session_pinvou_reviews", { sessionId: id }) || []; } catch (_) {}
     try { turnTimeline = await invoke("get_session_timeline", { sessionId: id }) || []; } catch (_) {}
     if (requestToken !== sessionSwitchRequestToken) return false;
 

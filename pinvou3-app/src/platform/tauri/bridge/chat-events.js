@@ -177,39 +177,9 @@ function pinvouSharedtauriChatEvents() {
 
     function recordTurnCompleted(payload) {
       var openStart = latestOpenTimelineStart();
-      var turnId = state.activeTurnTimelineId || (openStart && openStart.turn_id);
-      if (!turnId) return null;
-      if (payload && payload.error && !(payload.user_error || payload.userError)) {
-        var messages = bridgeMessages();
-        var userError = typeof messages.modelServiceUserError === "function"
-          ? messages.modelServiceUserError(payload, state)
-          : null;
-        if (userError) {
-          payload.user_error = userError;
-          payload.userError = userError;
-        }
-      }
-      var timestamp = Date.now();
-      var start = openStart || (state.turnTimeline || []).find(function (event) {
-        return event && event.turn_id === turnId && event.event === "user_start";
-      });
-      var record = {
-        turn_id: turnId,
-        event: "assistant_done",
-        timestamp: timestamp,
-        ts: new Date(timestamp).toISOString(),
-        status: payload && payload.status || (payload && payload.error ? "Failed" : "Completed"),
-        error: payload && payload.error || null,
-        user_error: payload && (payload.user_error || payload.userError) || null,
-        ui_turn_index: start && start.ui_turn_index,
-      };
-      state.turnTimeline = (state.turnTimeline || []).concat([record]);
-      state.activeTurnTimelineId = null;
-      // The return value drives the terminal-bubble hiding decision: only a
-      // timeline terminal record that was actually written with an error
-      // lets the timeline error card take over (hiding otherwise = silent
-      // swallow).
-      return record;
+      // F-FE13-2：构建器统一在 shared/bridge-shared-helpers.js（web
+      // turn-terminal.js 同源），此处仅保留 openStart 取样与转发。
+      return window.PinvouBridgeShared.buildAssistantDoneTimelineRecord(state, openStart, payload);
     }
 
     function latestTimelineCompletion(events) {

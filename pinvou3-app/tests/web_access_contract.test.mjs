@@ -791,7 +791,10 @@ assert.match(bridge, /remoteAdmissionKeys/);
 assert.match(bridge, /var activePlanCards = Object\.create\(null\)/);
 assert.match(bridge, /var hydratedKey = planCardHydrationKey\(hydratedPlan\)/);
 assert.match(bridge, /hydratedPlan\.cardState = "active"/);
-assert.match(bridge, /if \(item\.type === "plan_card"\) return false/);
+// T0-b: the live-hydration filter moved into the shared payload; pin the
+// plan_card branch in helpers and the lane delegation instead of the inline copy.
+assert.match(readSource(path.join(root, "src", "shared", "bridge-shared-helpers.js"), "utf8"), /if \(item\.type === "plan_card"\) return false/);
+assert.match(webBridge, /liveChatItemKeptForHydration\(item\)/);
 assert.match(bridge, /action === "accept_plan"/);
 assert.match(bridge, /acceptedMode = payload\.mode_state \|\| payload\.modeState/);
 assert.match(bridge, /planNotActive = errorText\.indexOf\("plan_not_active"\)/);

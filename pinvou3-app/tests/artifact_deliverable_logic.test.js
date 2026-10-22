@@ -337,12 +337,16 @@ function evalIsDeliverable(snippet, label) {
     "web exact-path updates must leave the newer same-named card untouched");
 
   const GATE = 'if (dbMutation !== "edit" && isDeliverable(dap)) writtenArtifacts[dap] = true;';
+  // T0-b: the replay pre-scan moved into the shared core; the isDeliverable
+  // gate lives in helpers and each lane keeps only the delegation wrapper.
+  const helpersSrc = fs.readFileSync(path.join(appRoot, "src", "shared", "bridge-shared-helpers.js"), "utf8");
+  assert.ok(helpersSrc.includes(GATE), "shared/bridge-shared-helpers.js 回放预扫兜底补卡应带 isDeliverable 门控");
   for (const rel of [
     path.join("src", "platform", "web", "bridge.js"),
     path.join("src", "platform", "tauri", "bridge.js"),
   ]) {
-    const src = fs.readFileSync(path.join(appRoot, rel), "utf8");
-    assert.ok(src.includes(GATE), `${rel} 回放预扫兜底补卡应带 isDeliverable 门控`);
+    const laneSrc = fs.readFileSync(path.join(appRoot, rel), "utf8");
+    assert.ok(laneSrc.includes("rerenderFromMessagesCore("), `${rel} 回放主体应委托 rerenderFromMessagesCore`);
   }
 }
 

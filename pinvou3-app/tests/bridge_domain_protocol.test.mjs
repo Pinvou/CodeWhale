@@ -196,7 +196,10 @@ const expectedProtocolHashes = {
   // memory recomputed for the backflowed memory-maintenance feature
   // (Community #419): organize_memory + get_memory_organize_history invokes
   // added to bridge/memory.js.
-  memory: 'b2556cc01a987850633365edcaa152dfe750cdbec37053170c7e5b29b2a66316',
+  // T0-b (#701 桥接面对齐) 重算：confirm/ignore/never 三支 invoke 移入
+  // shared/bridge-shared-helpers.js 的 resolveMemoryCandidate（memory.js 留
+  // 参数化薄包装），命令面无增删。
+  memory: '6898f26c4d4a9c57bba0752cf80cb0f399df60007baac4dd35d577d9d09cdc58',
   monitor: '01bf9a7c9b9b3f313cf49e975e6503627ff373caed0f4b3be07a6a98492a7c43',
   personas: '08b63778c3da39e2e551d555c860919887d2652450894d2d5359d7e23fb71ca7',
   remoteControl: '8a47f7ef3fbf569a6ae380153f84640d245025e0beb2215eb365287fe06aa00c',
@@ -215,7 +218,11 @@ const expectedProtocolHashes = {
   // maybePruneFailedWorkspaceRecent wiring (single-entry workspace picker);
   // same command set, no new invoke or listen entries — the extractor scans
   // raw source, so the merged body/comment text is part of the digest.
-  sessions: '70eebf1ac7f64b49db7db4f1b987dc075672116261d49000515fcfe2d5a2fdbe',
+  // T0-b (#701 桥接面对齐) 重算：get_session_persona_events /
+  // get_session_pinvou_reviews 两支 invoke 移入 helpers 的
+  // loadPersonaEventsForSession / loadPinvouReviewsForSession（sessions.js 留
+  // 转发壳 + reportSidecarReadFailure 注入），命令面无增删。
+  sessions: '30af777ca0a8e69f56ff0a7d90d4603168befbaded8e6342f919df97fef05b50',
   // Recomputed for the builtin feature toggle hook: settings.js gains the
   // list_builtin_features / set_builtin_feature_enabled invoke wrappers (the
   // session-mention feature gate reads the list; the setter is the contract
@@ -265,7 +272,10 @@ for (const [domain, files] of Object.entries(protocolSources)) {
 // （create_scheduled_task / save_session_artifacts / list_workspace_files /
 // get_monitor_snapshot / set_super_permission / get_memory_overview /
 // equip_persona / summon_pinvou / get_or_create_aux_session / reset_aux_session）。
-const expectedSharedBaseHash = '96fda42af5daf6a7f12f6e42702c7710b1698c7418c545fa9dd8b31b2086fc88';
+// T0-b 重算：helpers 新增 3 个 invoke 面（get_session_persona_events /
+// get_session_pinvou_reviews / resolveMemoryCandidate 的 invoke(command, args)
+// 参数化入口），合计 74 个签名。
+const expectedSharedBaseHash = '67958905304ecdc1c4f6bb077ac357d0289eb7d8897a84c273683991778af224';
 const sharedBaseSource = fs.readFileSync(path.join(root, 'src', 'shared', 'bridge-shared-helpers.js'), 'utf8');
 const sharedBaseSignatures = [
   ...extractCalls(sharedBaseSource, 'invoke').map(call => `shared/bridge-shared-helpers.js:invoke:${call}`),
