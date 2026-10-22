@@ -1547,6 +1547,8 @@ jobs:
       # 共用现有许可证/来源策略，但审计对象显式指向独立 crate。
       - name: cargo deny check
         if: ${{ needs.changes.outputs.knowledge_dependencies == 'true' }}
+        shell: bash
+        working-directory: .
         run: |
           python3 scripts/guard-webpki-roots-exception.py
           cargo deny --locked --manifest-path pinvou-knowledge/Cargo.toml --config pinvou3-app/src-tauri/deny.toml check advisories licenses bans sources
@@ -1735,6 +1737,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: cargo deny check (hard gate)
+        shell: bash
         if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' && needs.changes.outputs.rust_dependencies == 'true' }}
         working-directory: pinvou3-app/src-tauri
         run: |
