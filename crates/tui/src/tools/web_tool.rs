@@ -154,7 +154,7 @@ impl ToolSpec for WebTool {
                 "fields": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Optional JSONPath projections for JSON responses (action=fetch)"
+                    "description": "Optional JSONPath projections for JSON responses (action=fetch). Supports $, .field, [index], [*], and ['field']; for example $.items[*].name. Recursive descent (..) and filters are not supported; returns matches under fields."
                 },
                 "host": {
                     "type": "string",
