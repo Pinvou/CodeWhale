@@ -37,7 +37,7 @@ func main() {
 	if err != nil {
 		log.Fatal("Token executor activation configuration is invalid")
 	}
-	broker, err := events.NewNATSBroker(ctx, os.Getenv("NATS_URL"), "token-command-executor", events.NATSConfig{Environment: os.Getenv("APP_ENV"), CAFile: os.Getenv("NATS_CA_FILE")})
+	broker, err := events.NewNATSBroker(ctx, os.Getenv("NATS_URL"), "token-command-executor", tokenExecutorNATSConfig())
 	if err != nil {
 		log.Fatal("Token executor event connection is unavailable")
 	}
@@ -65,5 +65,15 @@ func main() {
 	}
 	if stopped.Load() {
 		log.Fatal("TOKEN_APPROVAL_CONSUMER_STOPPED")
+	}
+}
+
+// The privileged consumer uses only pre-provisioned resources and the explicit
+// identity files projected to this process, including in development fixtures.
+func tokenExecutorNATSConfig() events.NATSConfig {
+	return events.NATSConfig{
+		Environment: os.Getenv("APP_ENV"), ResourceMode: "provisioned",
+		CAFile: os.Getenv("NATS_CA_FILE"), SeedFile: os.Getenv("NATS_NKEY_SEED_FILE"),
+		CredentialsFile: os.Getenv("NATS_CREDENTIALS_FILE"), RequireExplicitAuthentication: true,
 	}
 }
