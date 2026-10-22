@@ -505,13 +505,22 @@ fn card_fact_from_response(value: &Value, card_id: &str) -> Result<Option<Value>
         return Err("invalid_response: 模型清单不完整，无法核实管理权".into());
     }
     let bindings = store_bindings(value)?;
-    let runtime = bindings.get(card_id).map(String::as_str).unwrap_or(card_id);
-    for model in models {
-        if model.get("card").and_then(Value::as_str) == Some(runtime) {
-            return Ok(Some(model.clone()));
+    let bound_runtime = bindings.get(card_id).map(String::as_str);
+    // Managed bindings keep their established routing priority. An unowned
+    // current deployment may have only logical_card metadata; retain that
+    // observation so callers can explicitly adopt it or refuse legacy scripts.
+    let mut candidates = models.iter().filter(|model| match bound_runtime {
+        Some(runtime) => model.get("card").and_then(Value::as_str) == Some(runtime),
+        None => {
+            model.get("card").and_then(Value::as_str) == Some(card_id)
+                || model.get("logical_card").and_then(Value::as_str) == Some(card_id)
         }
+    });
+    let found = candidates.next().cloned();
+    if candidates.next().is_some() {
+        return Err("invalid_response: ambiguous_model_identity".into());
     }
-    Ok(None)
+    Ok(found)
 }
 
 /// Store aliases bind a logical store row to its installed runtime version.
@@ -602,6 +611,74 @@ mod tests {
             let mut value = response.clone();
             value["store_bindings"] = invalid;
             assert!(card_fact_from_response(&value, "model").is_err());
+        }
+    }
+
+    #[test]
+    fn unowned_current_logical_fact_is_visible_without_granting_management() {
+        for can_adopt in [true, false] {
+            let response = serde_json::json!({"models":[{
+                "card":"model--v1","logical_card":"model","version_id":"v1",
+                "managed":false,"can_adopt":can_adopt,"deployed":true
+            }],"store_bindings":{}});
+            let fact = card_fact_from_response(&response, "model")
+                .unwrap()
+                .unwrap();
+            assert_eq!(fact["card"], "model--v1");
+            assert_eq!(fact["can_adopt"], can_adopt);
+            assert_eq!(fact["managed"], false);
+            // Stop/purge callers must not mistake a logical observation for
+            // absence and fall back to legacy scripts.
+            assert!(
+                managed_card_from_response(&response, "model")
+                    .unwrap_err()
+                    .starts_with("ownership_required:")
+            );
+        }
+    }
+
+    #[test]
+    fn managed_alias_priority_and_missing_model_semantics_are_preserved() {
+        let response = serde_json::json!({"models":[
+            {"card":"model","managed":false},
+            {"card":"model--v1","logical_card":"model","managed":true}
+        ],"store_bindings":{"model":"model--v1"}});
+        assert_eq!(
+            card_fact_from_response(&response, "model")
+                .unwrap()
+                .unwrap()["card"],
+            "model--v1"
+        );
+        assert!(managed_card_from_response(&response, "model").unwrap());
+        assert!(
+            card_fact_from_response(&response, "absent")
+                .unwrap()
+                .is_none()
+        );
+        assert!(!managed_card_from_response(&response, "absent").unwrap());
+    }
+
+    #[test]
+    fn duplicate_or_conflicting_current_observations_fail_closed() {
+        for rows in [
+            serde_json::json!([
+                {"card":"model--v1","logical_card":"model","managed":false},
+                {"card":"model--v2","logical_card":"model","managed":false}
+            ]),
+            serde_json::json!([
+                {"card":"model","managed":false},
+                {"card":"model--v1","logical_card":"model","managed":false}
+            ]),
+            serde_json::json!([
+                {"card":"model","managed":false},
+                {"card":"model","managed":false}
+            ]),
+        ] {
+            let response = serde_json::json!({"models":rows,"store_bindings":{}});
+            assert_eq!(
+                card_fact_from_response(&response, "model").unwrap_err(),
+                "invalid_response: ambiguous_model_identity"
+            );
         }
     }
 
