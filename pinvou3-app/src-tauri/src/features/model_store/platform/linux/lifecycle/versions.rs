@@ -416,12 +416,146 @@ pub(super) fn purge_current_storage(
     Ok(())
 }
 
+/// Lexically resolves `.` and `..` components. Inputs here are absolute
+/// (procfs cwd results and configured roots), so the result stays absolute.
+fn normalize_absolute(path: &Path) -> PathBuf {
+    let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                parts.pop();
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(part) => parts.push(part),
+            _ => {}
+        }
+    }
+    let mut normalized = PathBuf::from("/");
+    normalized.extend(parts);
+    normalized
+}
+
+/// Resolved spelling of a configured root: procfs reports fully resolved cwds
+/// and argv paths may arrive through symlinked parents, so both spellings are
+/// compared; when the root is gone the lexical form still matches plain text.
+fn canonical_or_lexical(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| normalize_absolute(path))
+}
+
+/// Extracts the filesystem path carried by one argv element, if any. Covers
+/// the forms real launchers produce: the path itself, `--flag=path`, a
+/// single-letter short option with an attached value, and `KEY=value`
+/// assignments passed through argv (e.g. `env LD_PRELOAD=…`). Plain flags and
+/// unrelated text yield None.
+fn argv_path_candidate(arg: &str) -> Option<&str> {
+    let candidate = if let Some(rest) = arg.strip_prefix("--") {
+        rest.split_once('=').map(|(_, value)| value)?
+    } else if let Some(rest) = arg.strip_prefix('-') {
+        let mut chars = rest.chars();
+        let flag = chars.next()?;
+        if !flag.is_ascii_alphabetic() {
+            return None;
+        }
+        let value = chars.as_str();
+        value.strip_prefix('=').unwrap_or(value)
+    } else if let Some((key, value)) = arg.split_once('=') {
+        let env_like = !key.is_empty()
+            && key
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+        if env_like { value } else { arg }
+    } else {
+        arg
+    };
+    // Only path-like spellings can reference the resource: bare words
+    // (`--type=zygote`, `--log=auto`, rewritten process titles) are
+    // configuration values, and resolving them as cwd-relative paths would
+    // let any same-uid process block cleanup.
+    (!candidate.is_empty() && candidate.contains('/')).then_some(candidate)
+}
+
+/// Passwd home of `uid`, used to resolve engine-side `~` expansion. Engines
+/// reach the resource through their own user's home, which is the shared uid
+/// here; an unknown home keeps tilde candidates conservative.
+fn passwd_home(uid: u32) -> Option<PathBuf> {
+    // SAFETY: libc::passwd is a plain C record of integers and raw pointers;
+    // zeroed gives null pointers, the expected input state for getpwuid_r.
+    let mut passwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut buffer = vec![0u8; 4096];
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: getpwuid_r writes only into the supplied record, buffer and
+    // pointer slots, all of which outlive the call.
+    let status = unsafe {
+        libc::getpwuid_r(
+            uid,
+            &mut passwd,
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            &mut result,
+        )
+    };
+    if status != 0 || result.is_null() {
+        return None;
+    }
+    // SAFETY: on success glibc points `result` at `passwd`, whose `pw_dir` is
+    // NUL-terminated within `buffer`.
+    let home = unsafe { std::ffi::CStr::from_ptr(passwd.pw_dir) }
+        .to_str()
+        .ok()?;
+    (!home.is_empty()).then(|| PathBuf::from(home))
+}
+
+/// Whether one argv path candidate may reach `resource`. Candidates that
+/// cannot be ruled out count as references: a blocked cleanup only keeps
+/// resources and records, while a missed reference deletes weights a process
+/// still opens.
+fn argv_candidate_may_reference(
+    candidate: &str,
+    cwd: Option<&Path>,
+    proc_entry: &Path,
+    resource: &Path,
+    home: Option<&Path>,
+) -> bool {
+    let path = if let Some(rest) = candidate.strip_prefix('~') {
+        // Engines expand `~` and `~/…` against their user's home; a `~user/…`
+        // form or an unknown home cannot be confirmed and stays conservative.
+        match (home, rest.strip_prefix('/')) {
+            (Some(home), Some(rest)) => Some(home.join(rest)),
+            (Some(home), None) if rest.is_empty() => Some(home.to_path_buf()),
+            _ => None,
+        }
+    } else if candidate.starts_with('/') {
+        Some(PathBuf::from(candidate))
+    } else {
+        cwd.map(|cwd| cwd.join(candidate))
+    };
+    let Some(path) = path else {
+        return true;
+    };
+    if normalize_absolute(&path).starts_with(resource) {
+        return true;
+    }
+    // Resolve symlinks (and, for relative candidates, the kernel-resolved
+    // procfs cwd base) so they compare equal to the canonical resource root.
+    let resolved = if candidate.starts_with('/') || candidate.starts_with('~') {
+        fs::canonicalize(&path)
+    } else {
+        fs::canonicalize(proc_entry.join("cwd").join(candidate))
+    };
+    resolved
+        .map(|resolved| resolved.starts_with(resource))
+        .unwrap_or(false)
+}
+
 fn ensure_unused(runtime: &Path, resource: Option<&Path>) -> Result<(), ModelManagerError> {
     // Read only; neither PID files nor discovered processes authorize signals.
     let uid = fs::metadata("/proc/self")
         .map_err(|e| fail(e.to_string()))?
         .uid();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let home = passwd_home(uid);
+    let runtime = canonical_or_lexical(runtime);
+    let resource = resource.map(canonical_or_lexical);
     for entry in fs::read_dir("/proc").map_err(|e| fail(e.to_string()))? {
         if std::time::Instant::now() > deadline {
             return Err(fail("进程检查超时，未删除或切换任何资源。"));
@@ -433,25 +567,41 @@ fn ensure_unused(runtime: &Path, resource: Option<&Path>) -> Result<(), ModelMan
         if entry.metadata().map(|m| m.uid() != uid).unwrap_or(true) {
             continue;
         }
-        if fs::read_link(entry.path().join("cwd")).ok().as_deref() == Some(runtime) {
-            return Err(fail("此版本仍有运行进程，请先停用。"));
+        let cwd = fs::read_link(entry.path().join("cwd")).ok();
+        if let Some(resolved_cwd) = cwd.as_deref().map(normalize_absolute) {
+            if resolved_cwd.starts_with(&runtime)
+                || resource
+                    .as_ref()
+                    .is_some_and(|r| resolved_cwd.starts_with(r))
+            {
+                return Err(fail("此版本仍有运行进程，请先停用。"));
+            }
         }
-        if let Some(resource) = resource {
-            let Ok(file) = fs::File::open(entry.path().join("cmdline")) else {
+        let Some(resource) = resource.as_deref() else {
+            continue;
+        };
+        let Ok(file) = fs::File::open(entry.path().join("cmdline")) else {
+            continue;
+        };
+        let mut bytes = Vec::new();
+        if file.take(65537).read_to_end(&mut bytes).is_err() {
+            continue;
+        }
+        for arg in bytes.split(|b| *b == 0).skip(1) {
+            // Lossy decoding keeps the resource-root prefix comparable even
+            // when a trailing filename carries non-UTF-8 bytes.
+            let text = String::from_utf8_lossy(arg);
+            let Some(candidate) = argv_path_candidate(&text) else {
                 continue;
             };
-            let mut bytes = Vec::new();
-            if file.take(65537).read_to_end(&mut bytes).is_err() {
-                continue;
-            }
-            for arg in bytes.split(|b| *b == 0).skip(1) {
-                let Ok(text) = std::str::from_utf8(arg) else {
-                    continue;
-                };
-                let path = Path::new(text);
-                if path.is_absolute() && path.starts_with(resource) {
-                    return Err(fail("此版本的权重仍被运行进程使用，未删除或切换资源。"));
-                }
+            if argv_candidate_may_reference(
+                candidate,
+                cwd.as_deref(),
+                &entry.path(),
+                resource,
+                home.as_deref(),
+            ) {
+                return Err(fail("此版本的权重仍被运行进程使用，未删除或切换资源。"));
             }
         }
     }
