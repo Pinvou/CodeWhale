@@ -230,6 +230,18 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   assert.equal(fmt.gpuExt.cudaVersion, '13.0');
   assert.equal(fmt.gpuExt.computeProcesses[0].usedText, '1.5 GB');
 
+  // 查询失败契约（round-16）：compute_processes null = 查询不可知，bridge 必须
+  // 原样保留为 null（视图靠它显示"查询不可用”），不得折成空数组冒充“零进程"。
+  env.setRespond(async () => ({
+    ...fixtureSnapshot(),
+    generated_at_ms: 1700000000002,
+    gpu_ext: { ...fixtureSnapshot().gpu_ext, compute_processes: null },
+  }));
+  await env.api.pollDevice();
+  const unknownGpu = env.state.device._fmt;
+  assert.equal(unknownGpu.gpuExt.computeProcesses, null,
+    'failed compute-process query must stay null, not collapse to []');
+
   env.setRespond(async () => ({ generated_at_ms: 1700000000001, os: {} }));
   await env.api.pollDevice();
   const degraded = env.state.device._fmt;

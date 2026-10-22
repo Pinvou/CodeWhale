@@ -1005,7 +1005,18 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                   placeholder={deviceFmt ? null : copy.loading}
                 />
               </div>
-              {(deviceFmt?.gpuExt?.computeProcesses || []).length > 0 && (
+              {/* computeProcesses === null means the backend query failed (bridge
+                  contract): show an explicit hint instead of silently hiding the
+                  section; an array (incl. empty) keeps the existing behavior. */}
+              {deviceFmt?.gpuExt?.computeProcesses === null && (
+                <p
+                  data-testid="device-manager-proc-gpu-unavailable"
+                  className={`text-[11px] ${MUTED_TEXT}`}
+                >
+                  {copy.procGpuUnavailable}
+                </p>
+              )}
+              {(deviceFmt?.gpuExt?.computeProcesses?.length > 0) && (
                 <ProcList
                   testId="device-manager-proc-gpu"
                   title={copy.procGpuTitle}

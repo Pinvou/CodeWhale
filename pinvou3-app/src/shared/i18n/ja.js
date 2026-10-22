@@ -351,7 +351,7 @@ const jaBase = {
           sensorWarnAdvice:'危険温度に近づいています。冷却と負荷を確認してください。', sensorCritAdvice:'危険温度に達しました。負荷を下げ、冷却を確認してください。', critLimit:v=>`限界 ${v}`, peakLabel:v=>`ピーク ${v}`,
           storageEmpty:'ディスク情報を取得できませんでした', diskSystemBadge:'システム', diskWarnAdvice:'ディスクの空きが少なくなっています。大きなファイルの整理を検討してください。', diskCritAdvice:'ディスクの空きがほぼありません。早めに空き容量を確保してください。',
           networkEmpty:'ネットワークインターフェースを検出できませんでした', netTypeEthernet:'イーサネット', netTypeWifi:'Wi-Fi', netTypeLoopback:'ループバック', netTypeBridge:'ブリッジ', netTypeVirtual:'仮想', netTypeOther:'その他',
-          procCpuTitle:'CPU 使用率トップ 8', procMemTitle:'メモリ使用量トップ 8', procGpuTitle:'GPU 計算プロセス', procNote:'取得した瞬間の使用状況です。数値は常に変化します。',
+          procCpuTitle:'CPU 使用率トップ 8', procMemTitle:'メモリ使用量トップ 8', procGpuTitle:'GPU 計算プロセス', procGpuUnavailable:'GPU 計算プロセスの取得に失敗しました（nvidia-smi にアクセスできません）。後ほど再試行してください。', procNote:'取得した瞬間の使用状況です。数値は常に変化します。',
           modelsTitle:'この端末のモデル', storeSubtitle:'モデルストア', externalSubtitle:'外部モデル', refresh:'更新', install:'新しいモデルをインストール',
           servicesLoading:'ローカルモデルサービスを確認中…', svcOllama:'Ollama サービス', svcVllm:'vLLM サービス', svcLmStudio:'LM Studio', svcDocker:'Docker',
           storeManaged:'モデルストアが管理', gotoModelStore:'モデルストアを開く', statusRunning:'実行中', statusDeployed:'デプロイ済み', statusPending:'未デプロイ',

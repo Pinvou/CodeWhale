@@ -353,7 +353,7 @@ export const dictEn = {
           sensorWarnAdvice:'Close to its critical temperature. Check cooling and load.', sensorCritAdvice:'Critical temperature reached. Reduce the load now and check cooling.', critLimit:v=>`Crit ${v}`, peakLabel:v=>`Peak ${v}`,
           storageEmpty:'No disk information available', diskSystemBadge:'System', diskWarnAdvice:'Disk is getting full. Consider removing large files.', diskCritAdvice:'Disk is almost full. Free up space soon.',
           networkEmpty:'No network interfaces detected', netTypeEthernet:'Ethernet', netTypeWifi:'Wi-Fi', netTypeLoopback:'Loopback', netTypeBridge:'Bridge', netTypeVirtual:'Virtual', netTypeOther:'Other',
-          procCpuTitle:'Top 8 by CPU', procMemTitle:'Top 8 by memory', procGpuTitle:'GPU compute processes', procNote:'A moment-in-time sample; values keep changing.',
+          procCpuTitle:'Top 8 by CPU', procMemTitle:'Top 8 by memory', procGpuTitle:'GPU compute processes', procGpuUnavailable:'GPU compute process query is unavailable (nvidia-smi failed); try again later.', procNote:'A moment-in-time sample; values keep changing.',
           modelsTitle:'Models on this device', storeSubtitle:'Model Store', externalSubtitle:'External models', refresh:'Refresh', install:'Install a new model',
           servicesLoading:'Probing local model services…', svcOllama:'Ollama service', svcVllm:'vLLM service', svcLmStudio:'LM Studio', svcDocker:'Docker',
           storeManaged:'Managed by Model Store', gotoModelStore:'Open Model Store', statusRunning:'Running', statusDeployed:'Deployed', statusPending:'Not deployed',

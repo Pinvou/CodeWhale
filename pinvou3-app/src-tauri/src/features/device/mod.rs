@@ -137,7 +137,10 @@ pub struct GpuExtSnapshot {
     /// 并列展示时按这个优先级解读（doctor 模板已指示模型对比两者，第七轮评审
     /// P3 补记字段口径）。取值限长 64 字符（与 docker 版本臂同一口径）。
     pub cuda_version: Option<String>,
-    pub compute_processes: Vec<GpuProcInfo>,
+    /// 计算进程列表：`Some(列表)` 是查询成功（空列表 = 确实在跑零个计算进程），
+    /// `None` = 查询失败/不可用（nvidia-smi 调用失败），与“无进程"显式区分——
+    /// 二者混同会让排查上下文把"查询失败"说成"没有计算进程"（十六轮评审）。
+    pub compute_processes: Option<Vec<GpuProcInfo>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -725,17 +728,26 @@ fn parse_nvidia_smi_driver_version(text: &str) -> Option<String> {
 /// 计算进程：`--query-compute-apps=pid,process_name,used_memory`。按 pid 排序：
 /// 传感器/磁盘/网络/进程列表都是确定性排序（见 sort_sensors 的理由），计算进程
 /// 列表沿用 nvidia-smi 输出序会在条目重排时击穿 bridge 的显示等价抑制
-/// （第六轮评审 P3）；pid 唯一，单键即全序。
-fn nvidia_compute_processes() -> Vec<GpuProcInfo> {
-    let Some(out) = run_nvidia_smi(&[
-        "--query-compute-apps=pid,process_name,used_memory",
-        "--format=csv,noheader,nounits",
-    ]) else {
-        return Vec::new();
-    };
+/// （第六轮评审 P3）；pid 唯一，单键即全序。命令失败返回 None（查询不可知），
+/// 不与"成功且零进程"混同（十六轮评审：部分失败曾与"无进程"不可区分）。
+fn nvidia_compute_processes() -> Option<Vec<GpuProcInfo>> {
+    fold_compute_apps_output(
+        run_nvidia_smi(&[
+            "--query-compute-apps=pid,process_name,used_memory",
+            "--format=csv,noheader,nounits",
+        ])
+        .as_deref(),
+    )
+}
+
+/// 纯函数折叠：nvidia-smi 输出 → 计算进程列表。输入 None（命令失败）原样传
+/// None；Some(文本) 逐行解析、坏行丢弃、按 pid 排序。测试直打 None/空/正常
+/// 三态，钉住"查询失败 ≠ 无进程"的契约。
+fn fold_compute_apps_output(out: Option<&str>) -> Option<Vec<GpuProcInfo>> {
+    let out = out?;
     let mut list: Vec<GpuProcInfo> = out.lines().filter_map(parse_compute_app_line).collect();
     list.sort_by(|a, b| a.pid.cmp(&b.pid));
-    list
+    Some(list)
 }
 
 fn parse_compute_app_line(line: &str) -> Option<GpuProcInfo> {
@@ -1219,7 +1231,7 @@ mod tests {
             Some(GpuExtSnapshot {
                 driver_version: Some(driver.to_string()),
                 cuda_version: None,
-                compute_processes: Vec::new(),
+                compute_processes: Some(Vec::new()),
             })
         };
         let start = Instant::now();
@@ -1343,6 +1355,23 @@ mod tests {
     }
 
     #[test]
+    fn fold_compute_apps_output_keeps_failed_query_distinct_from_no_processes() {
+        // “查询失败 ≠ 无进程”契约（十六轮评审）：命令失败（None）必须原样
+        // 传递，不得折成空列表冒充"没在跑任何计算进程"。
+        assert!(fold_compute_apps_output(None).is_none());
+        // 成功且零进程：空输出（甚至只有换行）→ Some(空列表)。
+        let empty = fold_compute_apps_output(Some("")).expect("成功输出不得是 None");
+        assert!(empty.is_empty(), "空输出 = 查询成功且零进程，必须是空列表");
+        // 正常输出：解析 + 坏行丢弃 + pid 排序。
+        let procs = fold_compute_apps_output(Some(
+            "9, /usr/bin/sortd, 8\n1234, /usr/bin/python3, 4096\ngarbage\n",
+        ))
+        .expect("some output must parse");
+        let pids: Vec<u32> = procs.iter().map(|proc| proc.pid).collect();
+        assert_eq!(pids, vec![9, 1234]);
+    }
+
+    #[test]
     fn parse_cuda_toolkit_version_reads_cuda_field() {
         let json =
             r#"{"cuda":{"name":"CUDA SDK","version":"12.3.1"},"nvcc":{"version":"12.3.107"}}"#;
@@ -1452,11 +1481,11 @@ mod tests {
             gpu_ext: Some(GpuExtSnapshot {
                 driver_version: Some("580.02".to_string()),
                 cuda_version: Some("12.3".to_string()),
-                compute_processes: vec![GpuProcInfo {
+                compute_processes: Some(vec![GpuProcInfo {
                     pid: 7,
                     name: "python3".to_string(),
                     used_mib: 64,
-                }],
+                }]),
             }),
         };
         let value = serde_json::to_value(&snapshot).expect("serialize");

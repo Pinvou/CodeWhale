@@ -224,17 +224,10 @@ fn doctor_device_projection(device: &DeviceSnapshot) -> Value {
             json!({
                 "driver_version": ext.driver_version,
                 "cuda_version": ext.cuda_version,
-                "compute_processes": ext
-                    .compute_processes
-                    .iter()
-                    .map(|proc| {
-                        json!({
-                            "pid": proc.pid,
-                            "name": proc.name,
-                            "used_mib": proc.used_mib,
-                        })
-                    })
-                    .collect::<Vec<_>>(),
+                // None（查询失败）序列化为 null：排查上下文里 null = 不可知，
+                // 模型不应读成“没有计算进程”（十六轮评审）；Some(空) = 真的零进程。
+                // GpuProcInfo 自身的序列化键集恰为 pid/name/used_mib，直出即可。
+                "compute_processes": ext.compute_processes,
             })
         }),
     })
@@ -425,11 +418,11 @@ mod tests {
             gpu_ext: Some(crate::features::device::GpuExtSnapshot {
                 driver_version: Some("570.1".into()),
                 cuda_version: Some("13.0".into()),
-                compute_processes: vec![crate::features::device::GpuProcInfo {
+                compute_processes: Some(vec![crate::features::device::GpuProcInfo {
                     pid: 9,
                     name: "/home/u/bin/python3".into(),
                     used_mib: 64,
-                }],
+                }]),
             }),
         }
     }
@@ -540,6 +533,19 @@ mod tests {
         assert_eq!(
             keys_sorted(&device["gpu_ext"]["compute_processes"][0]),
             expected(&["pid", "name", "used_mib"])
+        );
+
+        // 计算进程查询失败（None）→ null（不可知），不折成 [] 冒充“零进程”
+        // （十六轮评审：部分失败曾与“无进程”不可区分）。
+        let mut no_gpu_procs = fixture_snapshot();
+        if let Some(gpu_ext) = no_gpu_procs.gpu_ext.as_mut() {
+            gpu_ext.compute_processes = None;
+        }
+        let degraded = assemble_doctor_context(&no_gpu_procs, None, None, None, &[], None);
+        assert_eq!(
+            degraded["device"]["gpu_ext"]["compute_processes"],
+            Value::Null,
+            "查询失败必须序列化为 null，不得读成“无计算进程”。",
         );
         assert_eq!(
             keys_sorted(&device["processes"]["top_cpu"][0]),

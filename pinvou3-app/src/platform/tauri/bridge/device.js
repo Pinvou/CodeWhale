@@ -185,18 +185,23 @@
 
   function fmtGpuExt(gpu) {
     if (!gpu) return null;
-    var procs = Array.isArray(gpu.compute_processes) ? gpu.compute_processes : [];
+    // 后端契约（十六轮评审）：compute_processes 为 null = 查询失败（不可知），
+    // 数组 = 查询成功（可为空 = 真的零进程）。null 必须原样保留，视图靠它
+    // 区分“没有计算进程”（隐藏区块）与“查询不可用”（显式提示）。
+    var procs = Array.isArray(gpu.compute_processes) ? gpu.compute_processes : null;
     return {
       driverVersion: gpu.driver_version ? String(gpu.driver_version) : null,
       cudaVersion: gpu.cuda_version ? String(gpu.cuda_version) : null,
-      computeProcesses: procs.map(function (proc) {
-        var p = proc || {};
-        return {
-          pid: typeof p.pid === "number" && isFinite(p.pid) ? p.pid : 0,
-          name: truncateName(p.name),
-          usedText: fmtBytes(typeof p.used_mib === "number" && isFinite(p.used_mib) ? p.used_mib * 1024 * 1024 : null),
-        };
-      }),
+      computeProcesses: Array.isArray(procs)
+        ? procs.map(function (proc) {
+            var p = proc || {};
+            return {
+              pid: typeof p.pid === "number" && isFinite(p.pid) ? p.pid : 0,
+              name: truncateName(p.name),
+              usedText: fmtBytes(typeof p.used_mib === "number" && isFinite(p.used_mib) ? p.used_mib * 1024 * 1024 : null),
+            };
+          })
+        : null,
     };
   }
 

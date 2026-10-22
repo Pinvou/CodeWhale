@@ -253,7 +253,10 @@ function injectSource() {
         // ── MegaCube 设备管理命令 ──
         case 'get_device_snapshot':
           if (window.__DEVICE_MGR_TEST__.failSnapshot) return Promise.reject(new Error('snapshot down (smoke)'));
-          return Promise.resolve(${JSON.stringify(deviceSnapshotFixture())});
+          var smokeSnapshot = ${JSON.stringify(deviceSnapshotFixture())};
+          // ④-c 场景开关：compute_processes null = 查询失败（round-16 契约）。
+          if (window.__DEVICE_MGR_TEST__.nullGpuCompute) smokeSnapshot.gpu_ext.compute_processes = null;
+          return Promise.resolve(smokeSnapshot);
         case 'get_device_services': return Promise.resolve([{ key: 'ollama', running: false, detail: 'probe timeout' }, { key: 'docker', running: true, detail: null }]);
         case 'get_external_models':
           if (window.__DEVICE_MGR_TEST__.failExternalModels) return Promise.reject(new Error('external models down (smoke)'));
@@ -285,6 +288,7 @@ function injectSource() {
       callsOf: function (cmd) { return calls.filter(function (item) { return item.cmd === cmd; }); },
       emit: emit,
       // 场景开关：读取失败横幅/重试与发送失败路径此前零覆盖（第四轮评审）。
+      nullGpuCompute: false,
       setRemoveOutcome: function (next) { removeOutcome = next; },
     };
     window.__TAURI__ = {
@@ -463,6 +467,20 @@ async function clickTestId(page, testId) {
     && renderedValues.memRow.includes(EXPECTED.procMemText)
     && renderedValues.rootDiskRow.includes(`${EXPECTED.diskAvailable} / ${EXPECTED.diskTotal}`),
     JSON.stringify({ expected: EXPECTED, rendered: renderedValues }));
+
+  // ④-c GPU 计算进程查询失败（compute_processes null）：bridge 契约 null =
+  // 查询不可知，视图必须出“查询不可用”提示而不是静默隐藏整块（round-16
+  // 收口的披露项）；恢复数组后提示消失、进程列表回归。
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.nullGpuCompute = true; });
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-proc-gpu-unavailable"]')
+    && !document.querySelector('[data-testid="device-manager-proc-gpu"]'), { timeout: 8000 });
+  const gpuUnavailableShown = await page.evaluate(() =>
+    (document.querySelector('[data-testid="device-manager-proc-gpu-unavailable"]')?.innerText || '').length > 0);
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.nullGpuCompute = false; });
+  await page.waitForFunction(() => !document.querySelector('[data-testid="device-manager-proc-gpu-unavailable"]')
+    && !!document.querySelector('[data-testid="device-manager-proc-gpu"]'), { timeout: 8000 });
+  rec('④-c GPU 计算进程查询失败出“查询不可用”提示、恢复后列表回归',
+    gpuUnavailableShown, JSON.stringify({ gpuUnavailableShown }));
 
   // ⑤ 模型管理：商店行锁定（由模型商店管理 + 禁用按钮 + 前往模型商店），
   //    外部模型行显示类别/登记/状态徽标与接入按钮。

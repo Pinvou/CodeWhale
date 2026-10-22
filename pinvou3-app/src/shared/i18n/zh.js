@@ -354,7 +354,7 @@ export const dictZh = {
           sensorWarnAdvice:'接近临界温度，建议检查散热与负载', sensorCritAdvice:'已达临界温度，建议立即降低负载并检查散热', critLimit:v=>`临界 ${v}`, peakLabel:v=>`峰值 ${v}`,
           storageEmpty:'未读到磁盘信息', diskSystemBadge:'系统盘', diskWarnAdvice:'磁盘空间偏高，建议清理大文件', diskCritAdvice:'磁盘空间即将耗尽，请尽快清理',
           networkEmpty:'未读到网络接口', netTypeEthernet:'以太网', netTypeWifi:'无线网络', netTypeLoopback:'本地回环', netTypeBridge:'网桥', netTypeVirtual:'虚拟接口', netTypeOther:'其他接口',
-          procCpuTitle:'CPU 占用前 8', procMemTitle:'内存占用前 8', procGpuTitle:'GPU 计算进程', procNote:'以上是取样瞬间的占用情况，数值会随时变化。',
+          procCpuTitle:'CPU 占用前 8', procMemTitle:'内存占用前 8', procGpuTitle:'GPU 计算进程', procGpuUnavailable:'GPU 计算进程查询暂不可用（nvidia-smi 访问失败），稍后重试。', procNote:'以上是取样瞬间的占用情况，数值会随时变化。',
           modelsTitle:'本机模型', storeSubtitle:'模型商店', externalSubtitle:'外部模型', refresh:'刷新', install:'安装新模型',
           servicesLoading:'正在探测本机模型服务…', svcOllama:'Ollama 服务', svcVllm:'vLLM 服务', svcLmStudio:'LM Studio', svcDocker:'Docker',
           storeManaged:'由模型商店管理', gotoModelStore:'前往模型商店', statusRunning:'运行中', statusDeployed:'已部署', statusPending:'未部署',
