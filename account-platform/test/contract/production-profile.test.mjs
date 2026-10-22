@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { parseDocument } from 'yaml';
+import { findTestBash } from '../fixtures/bash-binary.mjs';
 
 const root = new URL('../../deploy/production/', import.meta.url);
 const readCompose = name => {
@@ -71,10 +72,7 @@ test('a later finance overlay cannot reset the explicit models selection', () =>
 
 test('required operator interpolation refuses both missing and empty mode before configuration', () => {
   assert.equal(finance.services['approval-resources'].environment[mode], requiredMode);
-  const bash = process.platform === 'win32'
-    ? ['C:/Program Files/Git/bin/bash.exe', 'C:/Program Files/Git/usr/bin/bash.exe'].find(existsSync)
-    : '/bin/bash';
-  assert.ok(bash && existsSync(bash), 'Bash is required for the controlled interpolation contract');
+  const bash = findTestBash();
   for (const value of [undefined, '', 'personal', 'models']) {
     const env = { ...process.env };
     delete env[mode];
