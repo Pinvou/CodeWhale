@@ -6,6 +6,13 @@ use serde::{Deserialize, Serialize};
 mod downloads;
 pub use downloads::{DownloadReservation, download_paths};
 
+pub(super) fn retire_download_on(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+) -> rusqlite::Result<()> {
+    downloads::retire_on(conn, card_id)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Version {
     pub card_id: String,

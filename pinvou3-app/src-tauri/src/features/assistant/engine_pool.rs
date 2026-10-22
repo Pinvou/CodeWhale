@@ -1805,6 +1805,10 @@ fn entry_is_fresh(
 #[path = "engine_pool_remote_tests.rs"]
 mod remote_snapshot_tests;
 
+#[cfg(test)]
+#[path = "engine_pool_vision_tests.rs"]
+mod vision_dependency_tests;
+
 fn remote_owner_matches(
     resident: Option<&Arc<super::skill_materialization::RemoteTurnOwner>>,
     incoming: Option<&Arc<super::skill_materialization::RemoteTurnOwner>>,
@@ -2057,6 +2061,19 @@ struct PreparedRuntimeState {
     prepared: PreparedRuntimeModel,
     credential_resolution: RuntimeCredentialResolution,
     model_update_revision: u64,
+    vision_dependency: Option<PreparedVisionDependency>,
+}
+
+/// The image tool owns its config for the engine's lifetime. Track the actual
+/// explicit fallback as well as the primary model before reusing that engine.
+/// Credentials stay in the redacted in-memory wrapper; this state is neither
+/// logged nor serialized.
+#[derive(Clone, PartialEq, Eq)]
+struct PreparedVisionDependency {
+    model: SavedModel,
+    credential: Option<RuntimeModelCredential>,
+    /// Task-scoped snapshots are independent of same-id local model updates.
+    model_update_revision: Option<u64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2086,7 +2103,37 @@ impl PreparedRuntimeState {
             prepared,
             credential_resolution,
             model_update_revision,
+            vision_dependency: None,
         }
+    }
+
+    fn from_bridge(
+        prepared: PreparedRuntimeModel,
+        bridge: &Pinvou3Bridge,
+        revisions: &ModelUpdateRevisions,
+    ) -> Self {
+        let vision_dependency = prepared
+            .model
+            .vision_model_id
+            .as_deref()
+            .and_then(|id| bridge.explicit_vision_model(id))
+            .map(|model| {
+                let task_scoped = bridge
+                    .runtime_vision_model
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.id == model.id);
+                PreparedVisionDependency {
+                    model: model.clone(),
+                    credential: task_scoped
+                        .then(|| bridge.runtime_vision_credential.clone())
+                        .flatten(),
+                    model_update_revision: (!task_scoped).then(|| revisions.current(&model.id)),
+                }
+            });
+        let revision = revisions.current(&prepared.model.id);
+        let mut state = Self::new(prepared, bridge.runtime_model_credential_frozen, revision);
+        state.vision_dependency = vision_dependency;
+        state
     }
 
     /// Whole-struct equality on purpose: the derived `PartialEq` makes every field of
@@ -3025,12 +3072,8 @@ impl EnginePool {
             )
             .await?;
         let prepare_model_ms = elapsed_ms(prepare_model_started);
-        let model_update_revision = self.model_update_revisions.current(&prepared.model.id);
-        let prepared = PreparedRuntimeState::new(
-            prepared,
-            bridge.runtime_model_credential_frozen,
-            model_update_revision,
-        );
+        let prepared =
+            PreparedRuntimeState::from_bridge(prepared, &bridge, &self.model_update_revisions);
         let mcp_config_revision = self.mcp_config_revision.load(Ordering::Acquire);
 
         let (fresh_engine, pending_window, stale) = {
@@ -11261,7 +11304,7 @@ mod probed_facts_wiring_tests {
         }
     }
 
-    fn wiring_bridge(model: SavedModel) -> Pinvou3Bridge {
+    pub(super) fn wiring_bridge(model: SavedModel) -> Pinvou3Bridge {
         Pinvou3Bridge {
             prefs: UserPrefs::default(),
             bundle: Pinvou3Bundle::paths(),
