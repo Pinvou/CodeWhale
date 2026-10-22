@@ -16,8 +16,13 @@ struct Server {
     base: String,
     response: Arc<Mutex<(u16, String)>>,
     requests: Arc<AtomicUsize>,
+    before_reply: Arc<Mutex<Option<ResponseGate>>>,
     stop: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
+}
+struct ResponseGate {
+    entered: std::sync::mpsc::SyncSender<()>,
+    release: std::sync::mpsc::Receiver<()>,
 }
 impl Server {
     fn new() -> Self {
@@ -26,8 +31,10 @@ impl Server {
         let base = format!("http://{}/v1", listener.local_addr().unwrap());
         let response = Arc::new(Mutex::new((200, String::new())));
         let requests = Arc::new(AtomicUsize::new(0));
+        let before_reply = Arc::new(Mutex::new(Option::<ResponseGate>::None));
         let stop = Arc::new(AtomicBool::new(false));
         let (reply, count, done) = (response.clone(), requests.clone(), stop.clone());
+        let gate = before_reply.clone();
         let worker = thread::spawn(move || {
             while !done.load(Ordering::Relaxed) {
                 let Ok((mut stream, _)) = listener.accept() else {
@@ -41,6 +48,12 @@ impl Server {
                 let n = stream.read(&mut buf).unwrap_or(0);
                 assert!(String::from_utf8_lossy(&buf[..n]).starts_with("GET /v1/models "));
                 count.fetch_add(1, Ordering::Relaxed);
+                if let Some(gate) = gate.lock().unwrap().take() {
+                    let _ = gate.entered.send(());
+                    if gate.release.recv_timeout(Duration::from_secs(3)).is_err() {
+                        continue;
+                    }
+                }
                 let (status, body) = reply.lock().unwrap().clone();
                 let _ = write!(
                     stream,
@@ -53,6 +66,7 @@ impl Server {
             base,
             response,
             requests,
+            before_reply,
             stop,
             worker: Some(worker),
         };
@@ -70,6 +84,20 @@ impl Server {
     }
     fn count(&self) -> usize {
         self.requests.load(Ordering::Relaxed)
+    }
+    fn hold_next_response(
+        &self,
+    ) -> (
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::SyncSender<()>,
+    ) {
+        let (entered, incoming) = std::sync::mpsc::sync_channel(1);
+        let (release, resume) = std::sync::mpsc::sync_channel(1);
+        *self.before_reply.lock().unwrap() = Some(ResponseGate {
+            entered,
+            release: resume,
+        });
+        (incoming, release)
     }
 }
 impl Drop for Server {
@@ -155,6 +183,68 @@ fn verified_legacy_32k_is_corrected_once_and_survives_reload_and_later_user_edit
     })
     .unwrap();
     assert_eq!(receipts(), 0);
+}
+
+#[test]
+fn explicit_32k_during_a_successful_probe_survives_with_or_without_a_legacy_card_link() {
+    for already_linked in [false, true] {
+        let _home = config::TempHome::new();
+        let server = Server::new();
+        setup(CARD, &server.base);
+        if !already_linked {
+            UserPrefs::update_transaction(|prefs| {
+                prefs.advanced.saved_models[0].model_store_card_id = None;
+                Ok(())
+            })
+            .unwrap();
+        }
+        let mut preview = UserPrefs::load();
+        let routes = super::super::routes().unwrap();
+        super::super::reconcile(&mut preview.advanced.saved_models, &routes, None);
+        let (entered, release) = server.hold_next_response();
+        let probing = thread::spawn(move || probe(&preview, &routes, None));
+        entered.recv_timeout(Duration::from_secs(3)).unwrap();
+        // The command/CLI tests verify the production writers of this receipt.
+        // Here the same real settings transaction commits while HTTP is held.
+        UserPrefs::update_transaction(|prefs| {
+            prefs.advanced.saved_models[0].context_window_tokens = Some(32768);
+            prefs.record_explicit_model_context_selection("stable-id");
+            Ok(())
+        })
+        .unwrap();
+        release.send(()).unwrap();
+        let proofs = probing.join().unwrap();
+        assert_eq!(
+            proofs.len(),
+            1,
+            "the HTTP probe must succeed with a valid 256K proof, never pass via timeout"
+        );
+        UserPrefs::update_transaction(|prefs| {
+            let routes = super::super::routes()?;
+            super::super::reconcile(&mut prefs.advanced.saved_models, &routes, None);
+            apply(prefs, &routes, &proofs, None);
+            Ok(())
+        })
+        .unwrap();
+        let saved = UserPrefs::load();
+        assert_eq!(window(), Some(32768), "the freshly confirmed 32K must win");
+        assert!(saved.has_explicit_model_context_selection("stable-id"));
+        assert_eq!(
+            saved
+                .model_by_id("stable-id")
+                .unwrap()
+                .model_store_card_id
+                .as_deref(),
+            Some(CARD),
+            "route association must still complete independently"
+        );
+        assert!(super::super::sync(None).unwrap().is_empty());
+        assert_eq!(
+            server.count(),
+            1,
+            "a saved user choice must suppress later probes"
+        );
+    }
 }
 
 #[test]

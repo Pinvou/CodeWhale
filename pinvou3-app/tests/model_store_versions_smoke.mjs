@@ -526,19 +526,28 @@ try {
     model: 'new-wire-model', base_url: 'http://127.0.0.1:8912/v1',
   }));
   await page.type('[data-testid="model-form-alias"]', 'My local alias');
+  await page.click('[data-testid="model-form-save"]');
+  await page.waitForFunction(() => window.savedFormPayloads.length === 1);
+  const aliasOnly = await page.evaluate(() => window.savedFormPayloads[0]);
+  assert.equal(aliasOnly.context_window_tokens, 32000);
+  assert.equal(aliasOnly.preserve_context_window_tokens, true);
+  assert.notEqual(aliasOnly.context_window_edit_requested, true,
+    'an untouched context snapshot must not become an explicit choice after an alias save');
   await page.click('[data-testid="model-form-context-window"]');
   await page.keyboard.down('Control');
   await page.keyboard.press('A');
   await page.keyboard.up('Control');
   await page.type('[data-testid="model-form-context-window"]', '64000');
   await page.click('[data-testid="model-form-save"]');
-  await page.waitForFunction(() => window.savedFormPayloads.length === 1);
-  const unchangedRoute = await page.evaluate(() => window.savedFormPayloads[0]);
+  await page.waitForFunction(() => window.savedFormPayloads.length === 2);
+  const unchangedRoute = await page.evaluate(() => window.savedFormPayloads[1]);
   assert.equal(unchangedRoute.preserve_model_store_route, true);
   assert.equal(unchangedRoute.model, 'old-wire-model');
   assert.equal(unchangedRoute.base_url, 'http://127.0.0.1:8911/v1');
   assert.equal(unchangedRoute.alias, 'My local alias');
   assert.equal(unchangedRoute.context_window_tokens, 64000);
+  assert.equal(unchangedRoute.context_window_edit_requested, true);
+  assert.equal(unchangedRoute.preserve_context_window_tokens, false);
   const routeInput = await page.$('input[value="http://127.0.0.1:8911/v1"]');
   assert.ok(routeInput, 'the existing form still displays its original route');
   await routeInput.click();
@@ -547,8 +556,8 @@ try {
   await page.keyboard.up('Control');
   await routeInput.type('http://127.0.0.1:8999/v1');
   await page.click('[data-testid="model-form-save"]');
-  await page.waitForFunction(() => window.savedFormPayloads.length === 2);
-  const editedRoute = await page.evaluate(() => window.savedFormPayloads[1]);
+  await page.waitForFunction(() => window.savedFormPayloads.length === 3);
+  const editedRoute = await page.evaluate(() => window.savedFormPayloads[2]);
   assert.equal(editedRoute.preserve_model_store_route, false);
   assert.equal(editedRoute.base_url, 'http://127.0.0.1:8999/v1');
   // New drafts must never opt into retaining some existing persisted route,
@@ -558,11 +567,41 @@ try {
   }, 'new'));
   await page.waitForFunction(() => !document.querySelector('[data-testid="model-form-alias"]'));
   await page.click('[data-testid="model-form-save"]');
-  await page.waitForFunction(() => window.savedFormPayloads.length === 3);
-  assert.equal(await page.evaluate(() => window.savedFormPayloads[2].preserve_model_store_route), false);
+  await page.waitForFunction(() => window.savedFormPayloads.length === 4);
+  const newDraft = await page.evaluate(() => window.savedFormPayloads[3]);
+  assert.equal(newDraft.preserve_model_store_route, false);
+  assert.notEqual(newDraft.context_window_edit_requested, true);
+  // A first 256K store probe can be in flight while a user confirms the same
+  // legacy 32K number already shown in the form. The input event, rather than a
+  // value comparison, must distinguish that choice from an untouched snapshot.
+  await page.evaluate(() => window.renderModelForm({
+    ...window.legacyModel, context_window_tokens: 32768,
+  }, 'explicit-context'));
+  await page.waitForSelector('[data-testid="model-form-context-window"]');
+  await page.click('[data-testid="model-form-save"]');
+  await page.waitForFunction(() => window.savedFormPayloads.length === 5);
+  const untouched32k = await page.evaluate(() => window.savedFormPayloads[4]);
+  assert.equal(untouched32k.context_window_tokens, 32768);
+  assert.equal(untouched32k.preserve_context_window_tokens, true);
+  assert.notEqual(untouched32k.context_window_edit_requested, true);
+  for (const [value, count] of [['32768', 6], ['', 7]]) {
+    await page.click('[data-testid="model-form-context-window"]');
+    await page.keyboard.down('Control');
+    await page.keyboard.press('A');
+    await page.keyboard.up('Control');
+    if (value) await page.type('[data-testid="model-form-context-window"]', value);
+    else await page.keyboard.press('Backspace');
+    await page.click('[data-testid="model-form-save"]');
+    await page.waitForFunction((expected) => window.savedFormPayloads.length === expected, {}, count);
+    const explicitChoice = await page.evaluate(() => window.savedFormPayloads.at(-1));
+    assert.equal(explicitChoice.context_window_tokens, value ? 32768 : null);
+    assert.equal(explicitChoice.context_window_edit_requested, true);
+    assert.equal(explicitChoice.preserve_context_window_tokens, false);
+  }
   assert.deepEqual(errors, []);
   console.log('PASS: versions refresh after success/failure/cancellation and ignore stale responses');
   console.log('PASS: existing settings forms preserve untouched routes after migration; edited routes and new drafts opt out');
+  console.log('PASS: alias-only and untouched drafts do not claim context edits; explicit 32K and automatic choices retain their intent');
   console.log('PASS: unknown compatibility reasons remain visible; uninstall cleanup preserves sync failures');
   console.log('PASS: stale details retain explicit re-link intent and surface rejection without changing the active model');
   console.log('PASS: staging preserves other cards’ dialogs; concurrent cleanup disclosures survive navigation and individual acknowledgement');

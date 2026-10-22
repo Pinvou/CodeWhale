@@ -3410,6 +3410,61 @@ fn stale_store_model_form_keeps_the_latest_route_and_explicit_detach_is_durable(
 }
 
 #[test]
+fn explicit_context_edit_records_a_choice_without_claiming_untouched_or_machine_saves() {
+    for (case, requested, preserve, reasoning_only, expected) in [
+        ("explicit", true, false, false, true),
+        ("untouched-wins", true, true, false, false),
+        ("composer-wins", true, false, true, false),
+        ("legacy-machine", false, false, false, false),
+        ("alias-only", false, true, false, false),
+    ] {
+        crate::platform::test_support::with_temp_home(case, || {
+            // No card association yet: the first store sync may already be
+            // probing a preview in which this legacy route has been associated.
+            let mut original = model_deletion_test_model("context-choice", false);
+            original.context_window_tokens = Some(32768);
+            seed_model_deletion_prefs(&[original.clone()]);
+            let mut request = original.clone();
+            request.context_window_edit_requested = requested;
+            request.preserve_context_window_tokens = preserve;
+            request.reasoning_effort_only = reasoning_only;
+            request.reasoning_effort = Some("high".into());
+            let store = crate::platform::credential_store::RecordingCredentialStore::new();
+            super::settings::save_model_inner(request, &store).unwrap();
+            let prefs = UserPrefs::load();
+            assert_eq!(
+                prefs.has_explicit_model_context_selection("context-choice"),
+                expected,
+                "{case} must retain its actual edit intent"
+            );
+            let saved = prefs.model_by_id("context-choice").unwrap();
+            assert_eq!(saved.context_window_tokens, Some(32768));
+            assert!(!saved.context_window_edit_requested);
+            assert!(
+                serde_json::to_value(saved)
+                    .unwrap()
+                    .get("context_window_edit_requested")
+                    .is_none(),
+                "the incoming edit signal must never return with settings"
+            );
+            if expected {
+                UserPrefs::update_transaction(|prefs| {
+                    prefs.upsert_model(model_deletion_test_model("spare", false));
+                    Ok(())
+                })
+                .unwrap();
+                super::settings::delete_model_inner("context-choice", &store).unwrap();
+                super::settings::save_model_inner(original, &store).unwrap();
+                assert!(
+                    !UserPrefs::load().has_explicit_model_context_selection("context-choice"),
+                    "deleting and recreating an id must not inherit its old choice receipt"
+                );
+            }
+        });
+    }
+}
+
+#[test]
 fn untouched_context_window_save_keeps_a_background_store_repair() {
     crate::platform::test_support::with_temp_home("store-model-context-repair-save", || {
         // The row as an editor snapshot saw it: the legacy 32K cap.

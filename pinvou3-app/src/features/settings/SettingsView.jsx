@@ -342,6 +342,7 @@ const formatMemoryTime = (item, copy) => {
       // 把旧 32K 修复为 256K 并落盘一次性迁移标记)。未编辑时保存带
       // preserve_context_window_tokens,后端保留库内最新值;用户编辑过(含目录
       // 切换等显式重置)才提交表单值,显式改回 32K/清空仍然有效。
+      // 独立的编辑意图也保护首次探测期间刚确认的选择，即使仍为原来的 32K。
       const [contextWindowTouched, setContextWindowTouched] = useState(false);
       const [maxOutput, setMaxOutput] = useState(initial.max_output_tokens ? String(initial.max_output_tokens) : '');
       // Thinking effort: initialize from the stored value (normalize first —
@@ -666,6 +667,7 @@ const formatMemoryTime = (item, copy) => {
             alias: showAliasField ? (alias.trim() || null) : null,
             context_window_tokens: Number.isFinite(contextTokens) && contextTokens > 0 ? contextTokens : null,
             preserve_context_window_tokens: !contextWindowTouched,
+            context_window_edit_requested: contextWindowTouched,
             max_output_tokens: Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : null,
             // 仅当前表单模型支持档位时保存；手输 model 变为无档位模型时置 null(#209)。
             reasoning_effort: reasoningEffortTiers.length > 0 ? (reasoningEffort || null) : null,
