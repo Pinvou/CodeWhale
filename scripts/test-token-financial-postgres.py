@@ -61,7 +61,7 @@ TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 TOKEN_CHILD_REQUIRED = {"TestUsageWaiverCoordinatorRecoveryPostgres"}
 BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
-SCHEMA_REQUIRED = {"TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres"}
+SCHEMA_REQUIRED = {"TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres"}
 OWNER_REQUIRED = {
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
     "TestTokenWalletReceiptSignedClientRecoveryPostgres",
@@ -71,6 +71,7 @@ OWNER_REQUIRED = {
     "TestBillingLedgerAuditReadOnlyPublicPostgres",
     "TestBillingFinancialEventOutboxContractsPostgres",
     "TestUsageWaiverOriginal828HTTPReplayPostgres",
+    "TestReconciliationUnknownProviderEntryPublicPostgres",
 }
 PROVISIONING_REQUIRED = {"TestTokenWalletSupplierActualProvisioningConsumerPostgres"}
 REFUND_REQUIRED = {

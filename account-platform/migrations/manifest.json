@@ -2044,6 +2044,16 @@
         "file": "900024_usage_waiver_commands.up.sql",
         "version": 900024,
         "sha256": "b2fb89f6d0a8a952e1f770d3757c917d60369625962154d91ffac0b399d1b5d3"
+      },
+      {
+        "file": "900025_reconciliation_unknown_provider_entry.down.sql",
+        "version": 900025,
+        "sha256": "463559a5d7485a2fa9fc0a3fa4d4bfd4ae8b8e1a62932163470fd35ed48b5dda"
+      },
+      {
+        "file": "900025_reconciliation_unknown_provider_entry.up.sql",
+        "version": 900025,
+        "sha256": "99b24e9021eabd48e23df45c84a56835fcbbaa1b62c19813ae075246b953f7e3"
       }
     ],
     "payment-simulator": [

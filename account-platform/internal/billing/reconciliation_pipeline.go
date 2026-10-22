@@ -44,7 +44,9 @@ func (p *PaymentCoordinator) runReconciliationPipeline(ctx context.Context, chan
 			return ReconciliationRun{}, ErrConflict
 		}
 		kind := normalizedBillEntryType(row)
-		if kind != "PAYMENT" && kind != "REFUND" && kind != "CHARGEBACK" {
+		// Unknown bounded kinds remain original evidence and a manual case.
+		// They are never treated as a successful financial fact.
+		if len(kind) > 64 {
 			return ReconciliationRun{}, ErrConflict
 		}
 	}

@@ -234,10 +234,31 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         self.assertEqual(self.fixture_writes, [])
         self.assertEqual(self.fixture_phases, ["owner-account", "owner-wallet", "owner-schema"])
 
+    def test_unknown_provider_api_and_append_migration_roots_are_mandatory(self):
+        self.run_main_fixture()
+        for phase, root, roots, package in (
+            ("owner-wallet", "TestReconciliationUnknownProviderEntryPublicPostgres", RUNNER.OWNER_REQUIRED, RUNNER.BILLING_PACKAGE),
+            ("owner-schema", "TestUnknownProviderEntryPublicMigrationPostgres", RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE),
+        ):
+            self.assertIn(root, roots)
+            command = self.fixture_commands[self.fixture_phases.index(phase)]
+            self.assertIn(root, command[command.index("-run") + 1])
+            valid = self.events(roots, package, children=True)
+            options = {"package": package, "require_children": True, "exact_roots": True}
+            self.assertGreater(RUNNER.verify_results(valid, roots, **options), 0)
+            for invalid in (
+                [event for event in valid if event.get("Test", "").split("/", 1)[0] != root],
+                [event for event in valid if not event.get("Test", "").startswith(root + "/")],
+                valid + [{"Action": "skip", "Package": package, "Test": root + "/actual"}],
+                [{**event, "Package": RUNNER.TOKEN_PACKAGE} for event in valid],
+            ):
+                with self.subTest(root=root, invalid=invalid), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, roots, **options)
+
     def test_package_index_schema_contract_is_selected_and_cannot_skip(self):
         self.run_main_fixture()
         roots, package = RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE
-        self.assertEqual(roots, {"TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres"})
+        self.assertEqual(roots, {"TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres"})
         command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
         selection = command[command.index("-run") + 1]
         self.assertIn("TestF09EntitlementPackageIndexPublicMigration", selection)
@@ -510,6 +531,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestBillingLedgerAuditReadOnlyPublicPostgres",
             "TestBillingFinancialEventOutboxContractsPostgres",
             "TestUsageWaiverOriginal828HTTPReplayPostgres",
+            "TestReconciliationUnknownProviderEntryPublicPostgres",
         })
         valid = self.events(RUNNER.OWNER_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
         for name in RUNNER.OWNER_REQUIRED:
