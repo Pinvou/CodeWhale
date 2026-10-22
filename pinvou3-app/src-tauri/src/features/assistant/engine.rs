@@ -2364,33 +2364,73 @@ impl AppEngine {
     /// `{{PINVOU3_WORKSPACE}}` 占位符。原先 sync 时重写 disk + 传 SystemPrompt::Text
     /// 都是 disk-API-限制的副作用,现在彻底走掉。
     pub async fn sync_session(&self, session_id: String, messages: Vec<Message>) -> Result<()> {
-        self.handle
-            .send(self.sync_session_op(session_id, messages))
-            .await?;
+        // Round-31 minor 9: aux exclusion parity with the spawn lane's pin
+        // (bridge.rs) — a stray aux-id snapshot must not reach a live aux
+        // engine through the hydration/align push either; all in-repo
+        // writers are aux-guarded, this is the backstop the bridge comment
+        // has claimed all along.
+        let roots = if crate::features::sessions::is_aux_session_id(&session_id) {
+            Vec::new()
+        } else {
+            self.bridge.session_workspace_roots(&session_id)
+        };
+        let op = Self::sync_session_op(
+            &session_id,
+            messages,
+            self.bridge.model(),
+            self.workspace.clone(),
+            // Restore-path keychain backfill (§6): the full roots locked at
+            // creation are not lost across session restarts; no snapshot
+            // (legacy/temporary sessions) = empty = single root, the base normalizes by cwd.
+            roots,
+        );
+        self.handle.send(op).await?;
         Ok(())
     }
 
     /// Queue mandatory identity/history in a fresh mailbox before publication.
+    /// (fork send 门：发布前冷同步走 try_send，不阻塞不丢令牌；调用点
+    /// engine_pool 的 PreparedRuntimeModel 供给链依赖本入口。)
     pub(crate) fn try_sync_new_session(
         &self,
         session_id: String,
         messages: Vec<Message>,
     ) -> Result<()> {
-        self.handle
-            .try_send(self.sync_session_op(session_id, messages))
+        let op = Self::sync_session_op(
+            &session_id,
+            messages,
+            self.bridge.model(),
+            self.workspace.clone(),
+            // CodeWhale #54 normalizes this empty list to the existing single
+            // workspace; the spawn lane already delivers the full keychain via
+            // EngineConfig.workspace_roots (bridge roots resolver), so the
+            // pre-publication gate keeps the fork's empty-roots payload.
+            Vec::new(),
+        );
+        self.handle.try_send(op)
     }
 
-    fn sync_session_op(&self, session_id: String, messages: Vec<Message>) -> Op {
+    /// Payload construction for `sync_session` (review #484 round-13 M4 extracted
+    /// & pinned): the only channel by which the keychain backfill enters the base —
+    /// deleting/altering field names, serde shapes, or the backfill behavior fails
+    /// compilation or turns tests red. EngineHandle is not constructible across
+    /// crates, so pin at the payload layer; call sites pass the bridge-resolved
+    /// snapshot through unchanged.
+    pub(crate) fn sync_session_op(
+        session_id: &str,
+        messages: Vec<Message>,
+        model: String,
+        workspace: std::path::PathBuf,
+        workspace_roots: Vec<std::path::PathBuf>,
+    ) -> Op {
         Op::SyncSession {
-            session_id: Some(session_id),
+            session_id: Some(session_id.to_string()),
             messages,
             system_prompt: None,
             system_prompt_override: false,
-            model: self.bridge.model(),
-            workspace: self.workspace.clone(),
-            // CodeWhale #54 normalizes this empty list to the existing single
-            // workspace for both awaited sync and unpublished cold hydration.
-            workspace_roots: Vec::new(),
+            model,
+            workspace,
+            workspace_roots,
             mode: AppMode::Agent,
         }
     }
@@ -4279,6 +4319,49 @@ mod expert_turn_invariant_tests {
             both.to_string().contains("expert snapshot"),
             "快照守卫必须先于候选行守卫（与生产装配顺序一致）: {both}"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_session_op_carries_the_keychain_backfill() {
+        // Round-13 M4: the SyncSession payload is the keychain backfill's only
+        // channel into the foundation — the builder pins the field's presence
+        // and serde shape (deleting the field fails to compile here, renaming
+        // it reds this assert). The call site passes the bridge-resolved
+        // snapshot through unchanged.
+        let op = AppEngine::sync_session_op(
+            "s-backfill",
+            Vec::new(),
+            "test-model".to_string(),
+            std::path::PathBuf::from("/w"),
+            vec![
+                std::path::PathBuf::from("/w"),
+                std::path::PathBuf::from("/x"),
+            ],
+        );
+        match op {
+            Op::SyncSession {
+                session_id,
+                messages,
+                workspace_roots,
+                ..
+            } => {
+                assert_eq!(session_id.as_deref(), Some("s-backfill"));
+                assert!(messages.is_empty());
+                assert_eq!(
+                    workspace_roots,
+                    vec![
+                        std::path::PathBuf::from("/w"),
+                        std::path::PathBuf::from("/x")
+                    ]
+                );
+            }
+            other => panic!("unexpected op: {other:?}"),
+        }
     }
 }
 
