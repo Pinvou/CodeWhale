@@ -21,7 +21,7 @@
     "local_turn_admission_failed", "local_turn_admitted", "local_turn_claimed",
     "reconcile_attempt_failed", "reconcile_attempt_rejected", "reconcile_deferred_busy",
     "reconcile_exhausted", "reconcile_joined_inflight", "reconcile_started",
-    "reconcile_succeeded", "remote_sync_blocked_action", "render_stage_stall", "remote_turn_marked",
+    "reconcile_succeeded", "remote_sync_blocked_action", "remote_turn_marked",
     "session_download_capability_wait_failed", "session_download_cleanup",
     "transcript_committed_event_received",
   ]);
@@ -36,7 +36,7 @@
     "message_count", "chat_item_count", "queued_count", "expected_assistant_key_length",
     "baseline_message_count", "minimum_terminal_message_count", "attempt", "attempts", "elapsed_ms",
     "saved_message_count", "chunk_count", "bytes_received", "declared_total_bytes",
-    "cleanup_requested_count", "cleanup_failed_count", "cleanup_succeeded_count", "restored_queue_count", "stage_seq", "recv_to_dispatch_ms", "dispatch_to_frame_ms",
+    "cleanup_requested_count", "cleanup_failed_count", "cleanup_succeeded_count", "restored_queue_count",
   ]);
   var BOOLEAN_FIELDS = new Set([
     "buffer_present", "local_turn_owned", "remote_turn_active", "remote_terminal_seen",
