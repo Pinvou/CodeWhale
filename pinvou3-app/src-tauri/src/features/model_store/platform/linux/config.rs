@@ -229,6 +229,12 @@ impl Settings {
 /// 一直"连不上"——而且报错里看不出任何线索。
 const LEGACY_DEFAULT_STORE_URLS: &[&str] = &["http://47.120.8.237/model-store"];
 
+/// 隔离留存的落点：`config.json` → `config.json.bad`。读取端据此区分"全新安装"
+/// 和"上一拍刚隔离改名"——两者在原文件上都表现为 NotFound。
+fn quarantine_bad_path(cfg_file: &Path) -> PathBuf {
+    cfg_file.with_extension("json.bad")
+}
+
 /// 解析不了的配置文件改名留存成 `config.json.bad`，再回退默认值。
 ///
 /// **不能静默**，理由跟 `write_token_fallback` 那条一样，后果还更重：
@@ -241,8 +247,12 @@ const LEGACY_DEFAULT_STORE_URLS: &[&str] = &["http://47.120.8.237/model-store"];
 /// 所以坏文件先改名留在原地：至少还能手工把值抄回来，排查的人在日志里也看得见。
 /// 只留最近一份（`.bad` 已存在时 rename 直接覆盖）——这种文件不该攒成一堆，
 /// 真要看的也是刚坏掉的那一份。
+///
+/// 留存文件同时也是 [`try_load_settings`] 的隔离标记：原文件改名后，后续读取在
+/// 文件系统里看到的就是"缺失"，破坏性消费方必须凭这份残留继续 fail-closed，
+/// 而不是把保护范围未知的半拍当成全新安装（十六轮评审 P1）。
 fn quarantine_broken_config(cfg_file: &Path, reason: &str) {
-    let bad = cfg_file.with_extension("json.bad");
+    let bad = quarantine_bad_path(cfg_file);
     match fs::rename(cfg_file, &bad) {
         Ok(()) => eprintln!(
             "[model-store] 配置文件{reason}，已改名留存为 {}，本次回退默认设置",
@@ -274,10 +284,12 @@ fn apply_settings_defaults(mut settings: Settings) -> Settings {
 }
 
 /// 读取设置（可失败版）：配置文件存在但读不出/解析坏时 `Err`（隔离改名、日志等
-/// 副作用照旧发生），文件缺失（全新安装的正常态）回 `Ok(默认)`。**破坏性消费方
-/// 必须走本函数 fail-closed**——设备移除的商店权重根静默回退默认值，会让自定义
-/// `models_dir` 的保护恰在配置读取失败的一拍失效（五轮评审 P3）；宽松消费方
-/// 继续用 [`load_settings`]。
+/// 副作用照旧发生），文件缺失（全新安装的正常态）回 `Ok(默认)`——但隔离残留
+/// `config.json.bad` 还在时例外：原文件正是上一拍被隔离改名掉的，那不是全新
+/// 安装，保护范围未知，继续 `Err` 直到配置恢复或用户显式删掉残留（十六轮评审
+/// P1）。**破坏性消费方必须走本函数 fail-closed**——设备移除的商店权重根静默
+/// 回退默认值，会让自定义 `models_dir` 的保护恰在配置读取失败的一拍失效（五轮
+/// 评审 P3）；宽松消费方继续用 [`load_settings`]。
 pub fn try_load_settings() -> Result<Settings, String> {
     let mut settings = Settings::default();
     let cfg_file = config_file();
@@ -292,8 +304,19 @@ pub fn try_load_settings() -> Result<Settings, String> {
                 return Err(format!("配置文件解析失败（{e}）"));
             }
         },
-        // 没有配置文件是全新安装的正常状态，不出声。
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        // 没有配置文件通常是全新安装的正常状态，不出声；但隔离残留还在时，
+        // "缺失"只是上一拍改名的结果——首次严格检查被拒后的重试、或宽松读取先
+        // 隔离了配置的随后严格检查，都从这里二次进入。放行默认根等于把自定义
+        // models_dir 等保护整个撤掉（十六轮评审 P1），必须继续拒绝。
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let bad = quarantine_bad_path(&cfg_file);
+            if bad.exists() {
+                return Err(format!(
+                    "配置文件缺失，但此前读取失败的隔离留存 {} 仍在：自定义设置（如权重目录）的保护范围未知。请恢复配置文件，或确认放弃后删除该留存文件",
+                    bad.display()
+                ));
+            }
+        }
         // 文件在、却读不出来（权限、磁盘错误）：**不**改名——内容未必是坏的，而且
         // 连读都读不了多半也 rename 不了。但同样必须出声，否则又是一次无声重置。
         Err(e) => {

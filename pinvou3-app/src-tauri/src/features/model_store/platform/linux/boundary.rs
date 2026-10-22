@@ -258,6 +258,43 @@ mod tests {
     }
 
     #[test]
+    fn quarantined_config_keeps_checked_fail_closed_across_rereads() {
+        let _ctx = TempHome::new();
+        write_config("not json at all");
+        // 第一次严格检查：隔离改名并拒绝。
+        assert!(store_weights_roots_checked().is_err());
+        // 第二次严格检查：原文件已不在（NotFound），但隔离残留还在——保护范围
+        // 未知不能当"全新安装"放行默认根，否则重试一次就把自定义 models_dir 的
+        // 保护整个撤掉（十六轮评审 P1）。
+        let error =
+            store_weights_roots_checked().expect_err("quarantine residue must stay fail-closed");
+        assert!(error.contains("隔离"), "unexpected error: {error}");
+        // 宽松版同场景维持历史行为：默认根集合。
+        assert!(!store_weights_roots().is_empty());
+        // 受控恢复：放回合法配置（留存文件不必手删）后放行，自定义根回到保护
+        // 集合。
+        write_config(r#"{"models_dir": "/data/custom-models"}"#);
+        let roots = store_weights_roots_checked().expect("recovered config must pass");
+        assert!(roots.contains(&std::path::PathBuf::from("/data/custom-models")));
+    }
+
+    #[test]
+    fn lenient_read_quarantine_keeps_later_checked_fail_closed() {
+        let _ctx = TempHome::new();
+        write_config("not json at all");
+        // 普通读取先隔离（宽松端照旧承担隔离副作用，如设备列表读 ollama_base_url）。
+        assert!(!store_weights_roots().is_empty());
+        // 随后的严格检查（移除路径）仍必须拒绝，不能按默认根放行。
+        let error =
+            store_weights_roots_checked().expect_err("post-quarantine check must fail closed");
+        assert!(error.contains("隔离"), "unexpected error: {error}");
+        // 受控放弃：显式删掉留存文件后回到全新安装语义（默认根）。
+        std::fs::remove_file(config::config_dir().join("config.json.bad"))
+            .expect("remove quarantine residue");
+        assert!(store_weights_roots_checked().is_ok());
+    }
+
+    #[test]
     fn legacy_relative_roots_fail_closed_on_checked_and_skip_on_lenient() {
         let _ctx = TempHome::new();
         // 入口校验上线前的存量 config（或手改文件绕过 set_storage_settings）：
