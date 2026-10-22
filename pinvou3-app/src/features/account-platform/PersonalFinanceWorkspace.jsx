@@ -8,8 +8,9 @@ import { localizedProductDisplayName } from './localized-product-display-name.js
 import { secureRequestID } from './request-id.js';
 import { personalRechargeOwner, registerPersonalRechargeReauthentication, recoverPersonalRechargeReauthentication, settlePersonalRechargeReauthentication } from './personal-recharge-reauthentication.js';
 import { PersonalOrderCloseConfirmation } from './PersonalOrderCloseConfirmation.jsx';
+import { createRechargeOrderReader, refreshPaidRechargeRead, startRechargeOrderPolling } from './recharge-order-polling.js';
 
-export function PersonalFinanceWorkspace({ client, me, language }) {
+export function PersonalFinanceWorkspace({ client, me, language, onPaid }) {
   const copy = financeCopy[language];
   const [data, setData] = useState(null);
   const [productID, setProductID] = useState('');
@@ -28,13 +29,16 @@ export function PersonalFinanceWorkspace({ client, me, language }) {
   const operationBusy = useRef(false);
   const currentView = useRef(null);
   const generation = useRef(0);
+  const orderReader = useRef(null);
+  const paidReads = useRef(new WeakSet());
   const intent = useRef(null);
   const canCreate = hasPermission(me, 'personal.recharge.create');
   const canRead = hasPermission(me, 'personal.billing.read');
   const canManage = hasPermission(me, 'personal.recharge.manage');
   const owner = personalRechargeOwner(me);
+  const sessionEpoch = client.financeSessionEpoch || 0;
   // Render-time facts fence an old dialog even before identity cleanup effects.
-  currentView.current = { client, owner, order, canRead, canManage, busy, unknown };
+  currentView.current = { client, owner, sessionEpoch, order, canRead, canManage, busy, unknown, onPaid };
   const cancelClose = useCallback(expected => {
     if (expected && expected !== closeIntent.current) return;
     closeIntent.current = null; setCloseConfirmation(null);
@@ -49,6 +53,11 @@ export function PersonalFinanceWorkspace({ client, me, language }) {
   useEffect(() => {
     if (closeIntent.current && !closeIsCurrent(closeIntent.current)) cancelClose();
   }, [client, owner, order, canRead, canManage, busy, unknown, now, closeIsCurrent, cancelClose]);
+  const ownsView = stamp => {
+    const current = currentView.current;
+    return mounted.current && stamp === generation.current && current.client === client && current.owner === owner
+      && current.sessionEpoch === sessionEpoch && (client.financeSessionEpoch || 0) === sessionEpoch && current.canRead;
+  };
   const load = async (stamp = generation.current, signal) => {
     const [products, capabilities, orders, packages] = await Promise.all([
       client.products(signal), client.paymentCapabilities(signal), client.rechargeOrders(signal), client.entitlementPackages(signal),
@@ -57,34 +66,40 @@ export function PersonalFinanceWorkspace({ client, me, language }) {
     for (const item of result.products) { integerMoney(item.amount_fen); if (!item.product_id || !Array.isArray(item.channels)) throw new Error('INVALID_FINANCE_ACK'); }
     for (const item of result.orders) requirePaymentOrder(item);
     for (const item of result.packages) { requireFinanceID(item.package_id); integerMoney(item.points_remaining_microcredits); integerMoney(item.points_used_microcredits); }
-    if (stamp === generation.current) setData(result);
+    if (ownsView(stamp)) setData(result);
     return result;
   };
   useEffect(() => {
     const controller = new AbortController();
     const stamp = ++generation.current;
+    const reader = createRechargeOrderReader(client, () => ownsView(stamp));
+    orderReader.current = reader;
+    const retire = () => {
+      reader.dispose(); if (orderReader.current === reader) orderReader.current = null;
+      mounted.current = false; generation.current++; closeIntent.current = null; controller.abort();
+    };
     mounted.current = true; operationBusy.current = true; closeIntent.current = null; setCloseConfirmation(null);
     const recovered = recoverPersonalRechargeReauthentication(client, owner);
     intent.current = recovered.intent; setRecoveryBlocked(recovered.blocked);
     setData(null); setOrder(null); setStatement(''); setUnknown(Boolean(recovered.intent)); setError(recovered.blocked ? 'reauthenticationRecoveryUnavailable' : recovered.intent ? 'unknown' : ''); setNotice(''); setBusy(true);
-    if (!canRead) { operationBusy.current = false; setBusy(false); return () => { mounted.current = false; generation.current++; closeIntent.current = null; controller.abort(); }; }
+    if (!canRead) { operationBusy.current = false; setBusy(false); return retire; }
     void load(stamp, controller.signal).catch(reason => { if (stamp === generation.current && reason.name !== 'AbortError') setError('unavailable'); }).finally(() => { if (stamp === generation.current) { operationBusy.current = false; setBusy(false); } });
-    return () => { mounted.current = false; generation.current++; closeIntent.current = null; controller.abort(); };
+    return retire;
     // Identity/version changes invalidate all financial state and pending intent.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, owner]);
+  }, [client, owner, sessionEpoch, canRead]);
   useEffect(() => registerPersonalRechargeReauthentication(client, { owner, epoch: client.financeSessionEpoch || 0, getIntent: () => intent.current }), [client, owner, client.financeSessionEpoch]);
   useEffect(() => { const timer = globalThis.setInterval(() => setNow(Date.now()), 1000); return () => globalThis.clearInterval(timer); }, []);
   const selected = data?.products.find(item => item.product_id === productID) || data?.products[0];
   const selectedChannel = effectivePaymentChannel(selected?.channels, channel);
-  const run = async action => {
+  const run = async (action, { reload = true } = {}) => {
     if (busy || operationBusy.current || !mounted.current) return;
     operationBusy.current = true; cancelClose();
     const stamp = generation.current;
     setBusy(true); setError(''); setNotice('');
     try {
       await action(stamp);
-      if (stamp === generation.current) await load(stamp);
+      if (reload && ownsView(stamp)) await load(stamp);
     } catch (reason) {
       if (stamp === generation.current) setError(reason.message?.startsWith('INVALID_FINANCE') ? 'invalid' : 'unavailable');
     } finally { if (stamp === generation.current) { operationBusy.current = false; setBusy(false); } }
@@ -119,7 +134,24 @@ export function PersonalFinanceWorkspace({ client, me, language }) {
       else { intent.current = null; setUnknown(false); throw reason; }
     }
   });
-  const selectOrder = orderID => run(async stamp => { const result = await client.rechargeOrder(orderID); if (stamp === generation.current) setOrder(result); });
+  const acceptOrderRead = async (latest, request, stamp, refreshList = false) => {
+    if (!ownsView(stamp)) return;
+    setOrder(latest);
+    setData(current => ownsView(stamp) && current ? { ...current,
+      orders: current.orders.map(item => item.order_id === latest.order_id ? latest : item) } : current);
+    if (['PAID', 'PAID_LATE'].includes(latest.status)) {
+      // Manual and automatic consumers share this exact GET Promise. A later
+      // GET of the same order may contain new fulfillment facts and refresh again.
+      await refreshPaidRechargeRead(latest, request, paidReads.current, async () => {
+        await load(stamp);
+        if (ownsView(stamp)) await currentView.current.onPaid?.();
+      });
+    } else if (refreshList) await load(stamp);
+  };
+  const selectOrder = orderID => run(async stamp => {
+    const request = orderReader.current.read(orderID);
+    await acceptOrderRead(await request, request, stamp, true);
+  }, { reload: false });
   const query = () => order && selectOrder(order.order_id);
   const close = () => {
     if (closeIsCurrent(closeIntent.current)) return;
@@ -140,6 +172,24 @@ export function PersonalFinanceWorkspace({ client, me, language }) {
     await client.addPaymentClaim(order.order_id, statement.trim());
     if (stamp === generation.current) { setStatement(''); setNotice('saved'); }
   });
+  useEffect(() => {
+    if (!canRead || busy || unknown || !isPayablePaymentOrder(order, Date.now()) || !orderReader.current) return undefined;
+    const stamp = generation.current, reader = orderReader.current, orderID = order.order_id;
+    const isCurrent = () => {
+      const current = currentView.current;
+      return mounted.current && stamp === generation.current && orderReader.current === reader && current.client === client
+        && current.owner === owner && current.sessionEpoch === sessionEpoch && (client.financeSessionEpoch || 0) === sessionEpoch && current.canRead
+        && !current.busy && !current.unknown && current.order?.order_id === orderID;
+    };
+    return startRechargeOrderPolling({ reader, isCurrent, getOrder: () => currentView.current.order,
+      accept: async (latest, request) => {
+        if (isCurrent()) await acceptOrderRead(latest, request, stamp);
+      },
+      onError: reason => { if (isCurrent()) setError(reason.message?.startsWith('INVALID_FINANCE') ? 'invalid' : 'unavailable'); },
+    });
+    // Only identity/status/window changes restart the original query cadence.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, owner, sessionEpoch, canRead, busy, unknown, order?.order_id, order?.status, order?.close_status, order?.expires_at]);
   const payable = isPayablePaymentOrder(order, now);
   const paymentURL = payable ? safePaymentURL(order?.payment_url) : '';
   const paymentQR = payable ? safePaymentQR(order?.qr_data) : '';

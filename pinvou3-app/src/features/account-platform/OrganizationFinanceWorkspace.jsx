@@ -9,16 +9,36 @@ import { formatBalance } from './balance-view.js';
 import { integerMoney, formatFen, safePaymentURL, safePaymentQR } from './finance-contract.js';
 import { isPayablePaymentOrder, effectivePaymentChannel } from './order-view.js';
 import { localizedProductDisplayName } from './localized-product-display-name.js';
+import { createRechargeOrderReader, refreshPaidRechargeRead, startRechargeOrderPolling } from './recharge-order-polling.js';
 
 export function OrganizationFinanceWorkspace({ client, me, language }) {
  const copy = organizationCopy[language], org = me.active_context.organization_id;
  const api = useMemo(() => new OrganizationClient(client), [client]);
- const owner = `${me.user_id}:${org}:${me.active_context.context_version}:${me.active_context.organization_authorization_version}:${client.financeSessionEpoch || 0}`;
+ const sessionEpoch = client.financeSessionEpoch || 0;
+ const owner = `${me.user_id}:${org}:${me.active_context.context_version}:${me.active_context.organization_authorization_version}:${sessionEpoch}`;
+ const canPurchase = hasPermission(me, 'org.entitlements.purchase');
+ const orderClient = useMemo(() => ({
+  get financeSessionEpoch() { return client.financeSessionEpoch || 0; },
+  rechargeOrder(id, signal) { return api.order(org, id, signal); },
+ }), [client, api, org]);
  const [data, setData] = useState({ packages: [], grants: [], products: [] });
  const memberPage = useOrganizationMemberPages({ api, org, owner, enabled: hasPermission(me, 'org.quota.allocate'), quota: true });
  const [order, setOrder] = useState(null), [orderID, setOrderID] = useState(''), [batch, setBatch] = useState(null);
  const [error, setError] = useState(''), [busy, setBusy] = useState(false), [now, setNow] = useState(Date.now());
  const generation = useRef(0), can = permission => hasPermission(me, permission);
+ const mounted = useRef(false), orderReader = useRef(null), paidReads = useRef(new WeakSet()), currentView = useRef(null);
+ currentView.current = { client, api, owner, org, sessionEpoch, canPurchase, order, busy };
+ const ownsView = stamp => {
+  const current = currentView.current;
+  return mounted.current && stamp === generation.current && current.client === client && current.api === api
+   && current.owner === owner && current.org === org && current.sessionEpoch === sessionEpoch
+   && (client.financeSessionEpoch || 0) === sessionEpoch;
+ };
+ const resetReader = stamp => {
+  orderReader.current?.dispose();
+  orderReader.current = canPurchase ? createRechargeOrderReader(orderClient, () => ownsView(stamp) && currentView.current.canPurchase) : null;
+ };
+
  const load = async (stamp, signal) => {
   const [balance, packages, grants, products, capabilities] = await Promise.all([
    can('org.wallet.read') ? api.balance(org, signal) : null,
@@ -27,19 +47,45 @@ export function OrganizationFinanceWorkspace({ client, me, language }) {
    can('org.entitlements.purchase') ? api.products(org, signal) : [],
    can('org.entitlements.purchase') ? api.capabilities(org, signal) : null,
   ]);
-  if (stamp === generation.current) setData({ balance, packages, grants, products, capabilities });
+  if (ownsView(stamp)) setData({ balance, packages, grants, products, capabilities });
  };
- const refresh = async () => { void memberPage.refresh(); const stamp = ++generation.current; setBusy(true); setError(''); try { await load(stamp); } catch (reason) { if (stamp === generation.current) setError(reason.status === 403 ? copy.permissions : copy.unavailable); } finally { if (stamp === generation.current) setBusy(false); } };
- useEffect(() => { const stamp = ++generation.current, controller = new AbortController(); setData({ packages: [], grants: [], products: [] }); setOrder(null); setOrderID(''); setBatch(null); setError(''); setBusy(true); void load(stamp, controller.signal).catch(reason => { if (stamp === generation.current && reason.name !== 'AbortError') setError(reason.status === 403 ? copy.permissions : copy.unavailable); }).finally(() => { if (stamp === generation.current) setBusy(false); }); return () => { generation.current++; controller.abort(); }; }, [api, owner]); // eslint-disable-line react-hooks/exhaustive-deps
+ const refresh = async () => { void memberPage.refresh(); const stamp = ++generation.current; resetReader(stamp); setBusy(true); setError(''); try { await load(stamp); } catch (reason) { if (ownsView(stamp)) setError(reason.status === 403 ? copy.permissions : copy.unavailable); } finally { if (ownsView(stamp)) setBusy(false); } };
+ useEffect(() => {
+  const stamp = ++generation.current, controller = new AbortController(); mounted.current = true; resetReader(stamp);
+  setData({ packages: [], grants: [], products: [] }); setOrder(null); setOrderID(''); setBatch(null); setError(''); setBusy(true);
+  void load(stamp, controller.signal).catch(reason => { if (ownsView(stamp) && reason.name !== 'AbortError') setError(reason.status === 403 ? copy.permissions : copy.unavailable); }).finally(() => { if (ownsView(stamp)) setBusy(false); });
+  return () => { mounted.current = false; generation.current++; orderReader.current?.dispose(); orderReader.current = null; controller.abort(); };
+ }, [api, owner, sessionEpoch, canPurchase]); // eslint-disable-line react-hooks/exhaustive-deps
  useEffect(() => { const interval = globalThis.setInterval(() => setNow(Date.now()), 1000); return () => globalThis.clearInterval(interval); }, []);
- const query = async () => { if (busy) return; const stamp = generation.current; setBusy(true); setError(''); try { const result = await api.order(org, organizationID(orderID)); if (stamp === generation.current) setOrder(result); } catch (reason) { if (stamp === generation.current) setError(reason.status === 403 ? copy.permissions : copy.unavailable); } finally { if (stamp === generation.current) setBusy(false); } };
+ const acceptOrderRead = async (latest, request, stamp) => {
+  if (!ownsView(stamp) || !currentView.current.canPurchase) return;
+  setOrder(latest);
+  await refreshPaidRechargeRead(latest, request, paidReads.current, () => load(stamp));
+ };
+ const query = async () => {
+  if (busy || !canPurchase || !orderReader.current) return;
+  const stamp = generation.current; setBusy(true); setError('');
+  try { const request = orderReader.current.read(organizationID(orderID)); await acceptOrderRead(await request, request, stamp); }
+  catch (reason) { if (ownsView(stamp) && reason.name !== 'AbortError') setError(reason.status === 403 ? copy.permissions : copy.unavailable); }
+  finally { if (ownsView(stamp)) setBusy(false); }
+ };
+ useEffect(() => {
+  if (!canPurchase || busy || !isPayablePaymentOrder(order, Date.now()) || !orderReader.current) return undefined;
+  const stamp = generation.current, reader = orderReader.current, selectedOrderID = order.order_id;
+  const isCurrent = () => ownsView(stamp) && orderReader.current === reader && currentView.current.canPurchase
+   && !currentView.current.busy && currentView.current.order?.order_id === selectedOrderID;
+  return startRechargeOrderPolling({ reader, getOrder: () => currentView.current.order, isCurrent,
+   accept: async (latest, request) => { if (isCurrent()) await acceptOrderRead(latest, request, stamp); },
+   onError: reason => { if (isCurrent()) setError(reason.status === 403 ? copy.permissions : copy.unavailable); },
+  });
+ }, [orderClient, owner, sessionEpoch, canPurchase, busy, order?.order_id, order?.status, order?.close_status, order?.expires_at]); // eslint-disable-line react-hooks/exhaustive-deps
  const purchaseProducts = data.products.filter(product => organizationPaymentChannels(product, data.capabilities).length > 0);
  const paymentURL = isPayablePaymentOrder(order, now) ? safePaymentURL(order?.payment_url) : '';
  const paymentQR = isPayablePaymentOrder(order, now) ? safePaymentQR(order?.qr_data) : '';
  return <section><h3>{copy.balance}</h3><button disabled={busy} onClick={() => void refresh()}>{copy.refresh}</button>{error && <p role="alert">{error}</p>}{busy && <p role="status">{copy.loading}</p>}
   {data.balance && <dl><dt>{copy.available}</dt><dd>{formatBalance(data.balance.available_microcredits, language)}</dd><dt>{copy.reserved}</dt><dd>{formatBalance(data.balance.reserved_microcredits, language)}</dd></dl>}
   {can('org.wallet.read') && <section><h4>{copy.packages}</h4>{data.packages.map(item => <div key={item.package_id}><p>{item.plan_name} · {item.package_id} · {organizationLabel(copy, 'Status', item.status)} · {formatBalance(item.points_remaining_microcredits, language)}</p><ul>{item.components?.map(component => <li key={component.component_id}>{component.component_id} · {organizationLabel(copy, 'Component', component.component_type)} · {organizationLabel(copy, 'Status', component.status)} · {formatBalance(component.available_microcredits, language)}</li>)}</ul></div>)}</section>}
-  {can('org.entitlements.purchase') && <section>{data.capabilities && <p role="status">{data.capabilities.test_only ? copy.testCollection : data.capabilities.formal_collection_admitted ? copy.formalCollection : copy.collectionUnavailable}</p>}{!busy && !purchaseProducts.length && <p>{copy.noPurchaseChannel}</p>}<OrganizationActionForm disabled={!purchaseProducts.length} client={client} owner={owner} copy={copy} scope="organization-purchase" title={copy.purchase} fields={[{ name: 'product', options: purchaseProducts.map(product => ({ value: product.product_id, label: `${localizedProductDisplayName(product, language)} · ${formatFen(product.amount_fen, language)}` })) }, { name: 'channel', options: values => organizationPaymentChannels(purchaseProducts.find(product => product.product_id === values.product), data.capabilities).map(value => ({ value, label: organizationLabel(copy, 'Channel', value) })) }]} prepare={values => { const product = purchaseProducts.find(item => item.product_id === values.product); const channel = effectivePaymentChannel(organizationPaymentChannels(product, data.capabilities), values.channel); if (!product || !channel || channel !== values.channel) throw new Error('INVALID_ORGANIZATION_INPUT'); return { product_id: product.product_id, channel }; }} action={(facts, key) => api.createOrder(org, facts, key)} onConfirmed={result => { setOrder(result); setOrderID(result.order_id); }} />
+  {can('org.entitlements.purchase') && <section>{data.capabilities && <p role="status">{data.capabilities.test_only ? copy.testCollection : data.capabilities.formal_collection_admitted ? copy.formalCollection : copy.collectionUnavailable}</p>}{!busy && !purchaseProducts.length && <p>{copy.noPurchaseChannel}</p>}<OrganizationActionForm disabled={!purchaseProducts.length} client={client} owner={owner} copy={copy} scope="organization-purchase" title={copy.purchase} fields={[{ name: 'product', options: purchaseProducts.map(product => ({ value: product.product_id, label: `${localizedProductDisplayName(product, language)} · ${formatFen(product.amount_fen, language)}` })) }, { name: 'channel', options: values => organizationPaymentChannels(purchaseProducts.find(product => product.product_id === values.product), data.capabilities).map(value => ({ value, label: organizationLabel(copy, 'Channel', value) })) }]} prepare={values => { const product = purchaseProducts.find(item => item.product_id === values.product); const channel = effectivePaymentChannel(organizationPaymentChannels(product, data.capabilities), values.channel); if (!product || !channel || channel !== values.channel) throw new Error('INVALID_ORGANIZATION_INPUT'); return { product_id: product.product_id, channel }; }} action={(facts, key) => api.createOrder(org, facts, key)} onConfirmed={result => { if (ownsView(generation.current) && currentView.current.canPurchase) { setOrder(result); setOrderID(result.order_id); } }} />
    <form onSubmit={event => { event.preventDefault(); void query(); }}><label>{copy.order}<input value={orderID} onChange={event => setOrderID(event.target.value)} /></label><button disabled={busy || !orderID}>{copy.queryOrder}</button></form>
    {order && <div><p>{order.order_id} · {organizationLabel(copy, 'Status', order.status)} · {organizationLabel(copy, 'Status', order.fulfillment_status)} · {formatFen(order.amount_fen, language)}</p>{paymentURL && <a href={paymentURL} target="_blank" rel="noopener noreferrer">{copy.pay}</a>}{paymentQR && <img src={paymentQR} alt={copy.pay} />}</div>}
   </section>}
