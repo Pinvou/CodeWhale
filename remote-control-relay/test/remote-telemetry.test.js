@@ -226,7 +226,7 @@ test("result wait samples use receipt time and obey raw-event clipping", () => {
   assert.equal(receivedToday.task_count, 0);
   assert.equal(receivedToday.result_wait_p50_ms, 9000);
   const clipped = projectRemoteTasks(rows).filter(e => e.event_id !== rows.at(-1).event_id);
-  const report = buildRemoteOverview(rows, now - 20000, now, 30, null, clipped);
+  const report = buildRemoteOverview(rows, now - 20000, now, { countedEvents: clipped });
   assert.equal(report.result_wait_p50_ms, null);
   assert.equal(report.result_wait_p90_ms, null);
   // Coverage remains an execution-completion cohort observed over history;

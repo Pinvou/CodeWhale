@@ -113,7 +113,9 @@ export function collectRemoteRetentionEvidence(evidence, event) {
   if (selected.length) evidence.set(task.key, selected);
 }
 
-export function buildRemoteOverview(events, start, end, minimumSample = 30, countedTaskKeys = null, countedEvents = null, taskGroups = null) {
+export function buildRemoteOverview(events, start, end, {
+  minimumSample = 30, countedTaskKeys = null, countedEvents = null, taskGroups = null,
+} = {}) {
   const inWindow = event => time(event) >= start && time(event) <= end;
   const raw = namedBehaviorEvents(countedEvents || events, "remote_control_event").filter(inWindow);
   const stageKeys = new Map();

@@ -1278,9 +1278,12 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
     version_quality: versionQuality,
     error_categories: taskErrors,
     remote_control: buildRemoteOverview(behaviorEvents, window.startDay * DAY_MS - STATS_TIMEZONE_OFFSET_MS,
-      Math.min(now, (window.endDay + 1) * DAY_MS - STATS_TIMEZONE_OFFSET_MS - 1), MIN_RELIABLE_SAMPLE,
-      new Set(coreTaskFinished.filter(e => e.remote_projection).map(e => e.remote_task_key)), windowEvents,
-      installationEventSnapshots.get(behaviorEvents)?.taskGroups),
+      Math.min(now, (window.endDay + 1) * DAY_MS - STATS_TIMEZONE_OFFSET_MS - 1), {
+        minimumSample: MIN_RELIABLE_SAMPLE,
+        countedTaskKeys: new Set(coreTaskFinished.filter(e => e.remote_projection).map(e => e.remote_task_key)),
+        countedEvents: windowEvents,
+        taskGroups: installationEventSnapshots.get(behaviorEvents)?.taskGroups,
+      }),
     data_quality: {
       minimum_reliable_sample: MIN_RELIABLE_SAMPLE,
       minimum_group_subjects: MIN_PRIVACY_GROUP_SUBJECTS,
