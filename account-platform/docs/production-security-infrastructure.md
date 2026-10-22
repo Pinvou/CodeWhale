@@ -31,3 +31,7 @@
 本机 Node v24.19.0 对 literal IPv6 TLS 名称验证的实测失败保持拒绝，没有加入身份校验绕过；当前 DNS/IPv4 测试结果不扩展为所有入口兼容性证明。正式环境应在其实际 Node、DNS、CA、身份和部署结构上执行门禁。
 
 恢复工具的 Python 单元和 shell 语法检查不等同于真实 pgBackRest、Linux 进程清理、systemd 调度或 PITR 验收。本轮未执行现场操作，旧现场成功记录不继承为本轮通过。
+
+离线到期报告的原 service/timer、五项指标面板及其证据边界见[离线到期报告与账号平台面板](../deploy/runbooks/offline-expiry-and-dashboard.md)。恢复仓库载体不表示已安装计时器、导入面板或完成现场验收。
+
+Portal 的 session-lineage 注销保护始终启用；无效部署开关已移除，同等保护版本的回滚核对见[Session-lineage 版本与回滚](../deploy/runbooks/session-lineage-version-rollback.md)。此文档不授权实际切换。

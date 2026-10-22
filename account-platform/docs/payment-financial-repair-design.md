@@ -1,6 +1,6 @@
 # 支付财务修复（`PAYMENT_FINANCIAL_REPAIR`）领域设计
 
-当前状态：`PRIVATE_IMPLEMENTATION / INDEPENDENT_REVIEW_PENDING / DEFAULT_INACTIVE / NOT_DEPLOYED`。下述设计冻结记录保留历史边界；当前 F12 候选装配 owner、proof/precheck、typed Detail/EDIT、专属 consumer/result、Portal 与三语言表单，有限实测不等于真实前序传播、完整审批发行或部署验收。首版范围由用户在 2026-09-19 确认为**仅“已确认支付但未入账”的补记**，权限与命令版本复用现有 `platform.billing.repairs.*` 与 `policy_version=1 / snapshot_schema_version=1`（守卫见 §9）。本文冻结 GSA-28 的 closed command/snapshot/proof、外部证据规则、幂等与恢复、失败分类、迁移与回滚及验收映射；当前唯一命令为 `PAYMENT_FINANCIAL_REPAIR` v1/s1，activation 行保持 `INACTIVE`。命令基线见 [十四命令事实与兼容基线](admin-governance-security-command-baseline.md)，治理与激活约束见 [治理与安全重设计](admin-governance-security-redesign.md) §11 与 §14。
+当前状态：`PRIVATE_IMPLEMENTATION / INDEPENDENT_REVIEW_PENDING / DEFAULT_INACTIVE / NOT_DEPLOYED`。下述设计冻结记录保留历史边界；当前 F12 候选装配 owner、proof/precheck、typed Detail/EDIT、专属 consumer/result、Portal 与三语言表单，有限实测不等于真实前序传播、完整审批发行或部署验收。首版范围由用户在 2026-09-19 确认为**仅“已确认支付但未入账”的补记**，权限与命令版本复用现有 `platform.billing.repairs.*` 与 `policy_version=1 / snapshot_schema_version=1`（守卫见 §9）。本文冻结 GSA-28 的 closed command/snapshot/proof、外部证据规则、幂等与恢复、失败分类、迁移与回滚及验收映射；当前唯一命令为 `PAYMENT_FINANCIAL_REPAIR` v1/s1，activation 行保持 `INACTIVE`。命令基线见 [十四命令事实与兼容基线（历史原文）](https://github.com/Pinvou/pinvou3/blob/828242031c42911099792ec78c1f746ed8620c49/account-platform/docs/admin-governance-security-command-baseline.md)，治理与激活约束见 [治理与安全重设计（历史原文）](https://github.com/Pinvou/pinvou3/blob/828242031c42911099792ec78c1f746ed8620c49/account-platform/docs/admin-governance-security-redesign.md) §11 与 §14。
 
 ## 1. 设计冻结时的命令现状（历史）
 

@@ -1,6 +1,6 @@
 # 应收核销（`RECEIVABLE_WRITE_OFF`）领域设计
 
-状态：`DESIGN_FROZEN / PRIVATE_CANDIDATE_IMPLEMENTED / INDEPENDENT_REVIEW_PENDING / NOT_DEPLOYED`。首版范围由用户在 2026-09-19 确认为**仅 `USAGE_OVERAGE` 来源、允许部分核销（同一应收可多次核销）**，权限与命令版本复用现有 `platform.billing.repairs.*` 与 `policy_version=1 / snapshot_schema_version=1`（守卫见 §9）。本文冻结 GSA-26 的 closed command/snapshot/proof、不变量、幂等与恢复、失败分类、迁移与回滚及验收映射；当前 F11 实现已接通原 closed owner/proof/consumer/审批与专属表单，activation 行仍默认 `INACTIVE`；不代表实际前序承接、生产激活或整波审核通过。命令基线见 [十四命令事实与兼容基线](admin-governance-security-command-baseline.md)，治理与激活约束见 [治理与安全重设计](admin-governance-security-redesign.md) §11 与 §14，账本不可改写边界见 [账本修复设计](ledger-repair-design.md) §2。
+状态：`DESIGN_FROZEN / PRIVATE_CANDIDATE_IMPLEMENTED / INDEPENDENT_REVIEW_PENDING / NOT_DEPLOYED`。首版范围由用户在 2026-09-19 确认为**仅 `USAGE_OVERAGE` 来源、允许部分核销（同一应收可多次核销）**，权限与命令版本复用现有 `platform.billing.repairs.*` 与 `policy_version=1 / snapshot_schema_version=1`（守卫见 §9）。本文冻结 GSA-26 的 closed command/snapshot/proof、不变量、幂等与恢复、失败分类、迁移与回滚及验收映射；当前 F11 实现已接通原 closed owner/proof/consumer/审批与专属表单，activation 行仍默认 `INACTIVE`；不代表实际前序承接、生产激活或整波审核通过。命令基线见 [十四命令事实与兼容基线（历史原文）](https://github.com/Pinvou/pinvou3/blob/828242031c42911099792ec78c1f746ed8620c49/account-platform/docs/admin-governance-security-command-baseline.md)，治理与激活约束见 [治理与安全重设计（历史原文）](https://github.com/Pinvou/pinvou3/blob/828242031c42911099792ec78c1f746ed8620c49/account-platform/docs/admin-governance-security-redesign.md) §11 与 §14，账本不可改写边界见 [账本修复设计](ledger-repair-design.md) §2。
 
 ## 1. 设计冻结时的命令基线（历史事实，非当前候选状态）
 

@@ -1,6 +1,6 @@
 # 账本修复（`LEDGER_REPAIR`）领域设计
 
-状态：`DESIGN_FROZEN / PRIVATE_IMPLEMENTATION_READY / FULL_PARENT_REVIEW_PENDING / DEFAULT_INACTIVE / NOT_DEPLOYED`。当前私有候选已实现本章冻结范围，默认 activation 为 `INACTIVE`；尚未部署，也不表示完整父组合已获独立审核通过。首版范围由用户在 2026-09-19 确认为**仅“归属错误”的等额冲正**，权限与命令版本复用现有 `platform.billing.repairs.*` 与 `policy_version=1 / snapshot_schema_version=1`（理由与守卫见 §9）。本文冻结 GSA-24 的 closed command/snapshot/proof、账务守恒、幂等与恢复、失败分类、迁移与回滚及验收映射；下列历史基线解释设计冻结时的缺口；当前实现仍以实时 activation 为授权边界，不自动激活。命令基线见 [十四命令事实与兼容基线](admin-governance-security-command-baseline.md)，治理与激活约束见 [治理与安全重设计](admin-governance-security-redesign.md) §11 与 §14。
+状态：`DESIGN_FROZEN / PRIVATE_IMPLEMENTATION_READY / FULL_PARENT_REVIEW_PENDING / DEFAULT_INACTIVE / NOT_DEPLOYED`。当前私有候选已实现本章冻结范围，默认 activation 为 `INACTIVE`；尚未部署，也不表示完整父组合已获独立审核通过。首版范围由用户在 2026-09-19 确认为**仅“归属错误”的等额冲正**，权限与命令版本复用现有 `platform.billing.repairs.*` 与 `policy_version=1 / snapshot_schema_version=1`（理由与守卫见 §9）。本文冻结 GSA-24 的 closed command/snapshot/proof、账务守恒、幂等与恢复、失败分类、迁移与回滚及验收映射；下列历史基线解释设计冻结时的缺口；当前实现仍以实时 activation 为授权边界，不自动激活。命令基线见 [十四命令事实与兼容基线（历史原文）](https://github.com/Pinvou/pinvou3/blob/828242031c42911099792ec78c1f746ed8620c49/account-platform/docs/admin-governance-security-command-baseline.md)，治理与激活约束见 [治理与安全重设计（历史原文）](https://github.com/Pinvou/pinvou3/blob/828242031c42911099792ec78c1f746ed8620c49/account-platform/docs/admin-governance-security-redesign.md) §11 与 §14。
 
 ## 1. 设计冻结时的命令历史基线
 

@@ -8,7 +8,7 @@
 
 - **只有策略元数据**：Account `approval_command_policies`/`approvalpolicy` 登记 `policy_version=1 / snapshot_schema_version=1 / APPROVAL_REQUIRED`，请求/审批权限 `platform.billing.repairs.request|approve`、`FINANCIAL_FACT_CHANGE`、一名非申请人审批、24 小时有效期、5 分钟执行窗口、执行身份 `billing-command-executor`（`migrations/account/000018_approval_commands.up.sql`）。
 - **静态不可执行**：不在 `executableApprovalCommands` 内，create/update/submit/APPROVE/Begin 全部失败关闭；Billing 侧只有 `('REFUND_EXCEPTION_REPAIR',1,1,'INACTIVE',1)`（`migrations/billing/000054_approval_command_activations.up.sql`），无 handler、proof、executor、consumer durable 或恢复分类。
-- **产品约束**：本命令不得开放普通退款产品入口（[命令基线](admin-governance-security-command-baseline.md) §3.2 与[治理设计](admin-governance-security-redesign.md) §11）。
+- **产品约束**：本命令不得开放普通退款产品入口（[命令基线（历史原文）](https://github.com/Pinvou/pinvou3/blob/828242031c42911099792ec78c1f746ed8620c49/account-platform/docs/admin-governance-security-command-baseline.md) §3.2 与[治理设计（历史原文）](https://github.com/Pinvou/pinvou3/blob/828242031c42911099792ec78c1f746ed8620c49/account-platform/docs/admin-governance-security-redesign.md) §11）。
 
 ## 2. 既有退款链路与异常事实（事实，本命令必须复用）
 

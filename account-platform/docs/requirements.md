@@ -1887,7 +1887,7 @@ APT-123-R2 实测验收补充：ORG_UNIT authority 响应必须含 Account 权�
 
 ### APT-137 G0：固定 credential 域名交付边界
 
-负责人批准正式 Portal `https://account.pinvou.com` 配对 `https://credentials.pinvou.com`，CLOUD_UAT Portal `https://account-uat.pinvou.com` 配对 `https://credentials-uat.pinvou.com`。旧 credential 两域从未上线，不保留旧白名单或重定向。本组只调整既有 Token/Portal 受信常量、handoff 实际精确配对及派生 hash，并补既有 Go 正负测试；开发仅保留双 loopback HTTP，正式 Portal 不向本地 HTTP 降级。DNS 待实施清单见 [模型与 Token 域名清单](../deploy/runbooks/model-token-dns.md)。本地代码交付不以 DNS 添加为前提，但不代表 DNS/TLS、OIDC、workload、KMS 或部署已验收。
+负责人批准正式 Portal `https://account.pinvou.com` 配对 `https://credentials.pinvou.com`，CLOUD_UAT Portal `https://account-uat.pinvou.com` 配对 `https://credentials-uat.pinvou.com`。旧 credential 两域从未上线，不保留旧白名单或重定向。本组只调整既有 Token/Portal 受信常量、handoff 实际精确配对及派生 hash，并补既有 Go 正负测试；开发仅保留双 loopback HTTP，正式 Portal 不向本地 HTTP 降级。DNS 待实施清单见 [模型与 Token 域名清单（历史原文）](https://github.com/Pinvou/pinvou3/blob/828242031c42911099792ec78c1f746ed8620c49/account-platform/deploy/runbooks/model-token-dns.md)。本地代码交付不以 DNS 添加为前提，但不代表 DNS/TLS、OIDC、workload、KMS 或部署已验收。
 
 APT-137 保持 IN_PROGRESS/ENV_PENDING/NOT_DEPLOYED。后续发布计划、部署配置、受控角色工具、安全入口探针、离线证据及持续 CI 按独立功能组依赖顺序另行交付，本组不包含这些后续实现或声明 UI-58 整体完成；无推送或部署操作。
 
