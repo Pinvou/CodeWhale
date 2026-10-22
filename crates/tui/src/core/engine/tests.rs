@@ -19701,6 +19701,45 @@ fn forkguard_structured_field_cuts_still_request_recovery() {
 }
 
 #[test]
+fn forkguard_task_stream_summaries_are_inline_or_recoverable() {
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
+    let output = ToolResult::success(json!({"gate": {"summary": "GATE_STDERR"}, "stdout_summary": "GATE_STDOUT", "stderr_summary": "GATE_STDERR"}).to_string());
+    let view = view_128k("tasks", &output);
+    assert!(
+        view.text.contains("GATE_STDOUT") || view.needs_full_output_artifact,
+        "short gate result silently lost stdout: {}",
+        view.text
+    );
+}
+
+#[test]
+fn forkguard_short_coordination_fields_are_inline_or_recoverable() {
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
+    let cases = [
+        (
+            "agent",
+            json!({"agent_id": "child", "status": {"Interrupted": "provider timeout"}, "result": "provider timeout", "checkpoint": {"continuation_handle": "resume:child:step-2"}, "needs_input": {"question": "continue with resume:child:step-2"}}),
+            "resume:child:step-2",
+        ),
+        (
+            "agent",
+            json!({"snapshot": {"agent_id": "child", "status": "interrupted", "result": "provider timeout"}, "needs_input": {"question": "continue with resume:outer:step-2"}}),
+            "resume:outer:step-2",
+        ),
+    ];
+    for (tool, payload, required) in cases {
+        let raw = payload.to_string();
+        assert!(raw.len() < 2_000);
+        let view = view_128k(tool, &ToolResult::success(raw));
+        assert!(
+            view.text.contains(required) || view.needs_full_output_artifact,
+            "short {tool} result lost {required} without recovery: {}",
+            view.text
+        );
+    }
+}
+
+#[test]
 fn forkguard_structured_recovery_footer_is_single_and_route_bounded() {
     let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
     let output =
