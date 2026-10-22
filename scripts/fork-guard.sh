@@ -286,6 +286,21 @@ fingerprints=(
   "APP|title sentinel, Rust-side literal          |pinvou3-app/src-tauri/src/features/sessions/store.rs|const NEW_CHAT_TITLE: &str = \"新对话\""
   "APP|title sentinel, frontend dict literal      |pinvou3-app/src/shared/i18n.js|DEFAULT_CHAT_TITLES = new Set(['新对话', 'New chat', '新しいチャット'])"
 
+  # ── #701 对齐后 app 层 F 面存在性门禁（a7-f-registry M6 最小集；
+  # 语义登记见 docs/fork-modifications.md §12 分歧 5-8 / 分歧 1）──
+  "APP|F-A1 team-relay 桥整文件             |pinvou3-app/src/platform/tauri/bridge/team-relay.js|registry[\"team-relay\"] = function (context)"
+  "APP|F-A2 desktop-remote-control 桥整文件      |pinvou3-app/src/platform/tauri/bridge/desktop-remote-control.js|registry[\"desktop-remote-control\"] = function (context)"
+  "APP|F-A3 remote-control-state 整文件        |pinvou3-app/src/features/remote-control/remote-control-state.js|function createControlledDevice("
+  "APP|F-B1 llmApi 闭源服务面（tauri lane）      |pinvou3-app/src/platform/tauri/bridge/settings.js|async function prepareBackendManagedModel("
+  "APP|F-B1 modelAvailabilityError 熔断（裁决②）   |pinvou3-app/src/platform/tauri/bridge/settings.js|function modelAvailabilityError(sessionId)"
+  "APP|F-B2 web access/relay（web lane）       |pinvou3-app/src/platform/web/bridge.js|async function refreshWebAccessStatus("
+  "APP|F-B2 web relay 设置（tauri lane）        |pinvou3-app/src/platform/tauri/bridge/remote-control.js|async function getWebRelaySettings("
+  "APP|F-B3 remote proxy 会话视图            |pinvou3-app/src/platform/tauri/bridge/sessions.js|function isKnownRemoteProxy(id)"
+  "APP|F-B4 materializeSession              |pinvou3-app/src/platform/tauri/bridge/sessions.js|async function materializeSession("
+  "APP|F-C1 bridge-messages prompt-cache 谓词    |pinvou3-app/src/shared/bridge-messages.js|function isContextUpdateRuntimeMessage(value)"
+  "APP|F-C1 bridge-messages turn_meta 谓词      |pinvou3-app/src/shared/bridge-messages.js|function isKnownInternalMetadataBlock(value)"
+  "APP|裁决① personaName cn_name 兜底         |pinvou3-app/src/shared/bridge-shared-helpers.js|return (p.name || p.cn_name) || \"\";"
+
   "T9|Custom route honors the config wire channel |CodeWhale/crates/config/src/route/resolver.rs|pub wire_override: Option<RequestProtocol>"
   "T9|Custom wire dialect parsed at a single source |CodeWhale/crates/config/src/provider.rs|pub fn wire_dialect_override"
   "T9|Custom wire dialect read at a single source   |CodeWhale/crates/tui/src/route_runtime.rs|pub(crate) fn custom_wire_override_for"

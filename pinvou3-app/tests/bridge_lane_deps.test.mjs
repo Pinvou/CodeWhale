@@ -192,12 +192,13 @@ let m;
 while ((m = clusterRe.exec(helpers)) !== null) {
   snapshot.clusters[m[1]] = [...m[2].matchAll(/([\w$]+): b\.([\w$]+)/g)].map((p) => `${p[1]}:${p[2]}`);
 }
-// Official 314 = upstream 312（#746 后 313）+ clearVoiceInput（官方合并体保留
-// 在基座，裁决②旁路的 F/X 双重身份面；T0-e 台账登记）。#746 新增 replay 结果
-// 写入器 applyToolItemResult：私有、仅参数依赖。AST 范围审计：updateToolItem
-// 只新增该 helper；replay 另加标准 Map。无新簇依赖/导出/转发，REQUIRED 不变。
+// T4b 后 Official 313 = upstream #746 后 313：裁决③ 定案的 helpers 合并体
+// clearVoiceInput 已整删（两 lane 本地覆盖与 facade 保留，上游同形；
+// a7-f-registry §6）。#746 新增 replay 结果写入器 applyToolItemResult：私有、
+// 仅参数依赖。AST 范围审计：updateToolItem 只新增该 helper；replay 另加标准
+// Map。无新簇依赖/导出/转发，REQUIRED 不变。
 const EXPECTED_SURFACE = {
-  sharedFnCount: 314,
+  sharedFnCount: 313,
 };
 
 assert.equal(
@@ -248,8 +249,9 @@ const EXPECTED_CLUSTER_KEYS = {
     'touchSessionBuffer',
   ],
   'tauriArtifactTracker': ['DELIVERABLE_EXTS', 'invoke', 'isScheduledRunSession', 'notify', 'state'],
-  // Official：无 hasCommand——官方 listDeliverableIndex 为 T0-fix 恢复的 legacy
-  // 本体（不经 v2 协商）；共享体对 hasCommand 有 typeof 守卫，缺键安全。
+  // Official：无 hasCommand——桌面 webview 与后端同包发布（version-locked），
+  // T4b 起 listDeliverableIndex 委托共享核 v2 协商，缺键按 v2 可用处理
+  //（helpers typeof 守卫）。
   'tauriArtifacts': [
     'addAttachmentByPath',
     'addSystemItem',
