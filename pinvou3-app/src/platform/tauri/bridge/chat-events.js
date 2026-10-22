@@ -1330,7 +1330,7 @@ function finalizeStreamingReasoning(index) { return pinvouSharedtauriChatEvents(
   // 桌面前端监听的 DOM CustomEvent 'pinvou:tools-changed'(tool-events.js / 类似入口),
   // 让 chip 上的工具开关计数立即同步。
   listen("remote_control:tools_changed", function () {
-    try { window.dispatchEvent(new CustomEvent('pinvou:tools-changed')); } catch (_) {}
+    try { window.PinvouToolStoreEvents.notifyComposerToolsChanged(); } catch { /* DOM event dispatch failure only affects the count refresh */ }
   });
 
   // 远程 mobile 挂载/摘挂 KB → Rust emit remote_control:kb_mount_changed → 这里同步

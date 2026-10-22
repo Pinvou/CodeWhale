@@ -1398,10 +1398,17 @@ test('both relay legs for the switch broadcast are pinned (round-6 minor 7)', ()
   // web_access_contract). Round-23 asto minor 3: the bare
   // `pinvou:tools-changed` presence pin was satisfied by the file's own
   // comment — deleting the actual re-dispatch line stayed green. Pin the
-  // dispatch itself.
+  // dispatch itself. The dead/duplicated sweep single-sourced the dispatch
+  // into window.PinvouToolStoreEvents.notifyComposerToolsChanged
+  // (tool-store-events.js), so the leg is pinned at both ends: the bridge
+  // must call the helper, and the helper must dispatch the real event on
+  // window (the same object ChatView / composer-shared listen on).
   const chatEvents = readFileSync(new URL('../src/platform/tauri/bridge/chat-events.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   assert.match(chatEvents, /listen\("remote_control:tools_changed"/);
-  assert.match(chatEvents, /window\.dispatchEvent\(new CustomEvent\('pinvou:tools-changed'\)\)/);
+  assert.match(chatEvents, /window\.PinvouToolStoreEvents\.notifyComposerToolsChanged\(\)/);
+  const toolStoreEvents = readFileSync(new URL('../src/shared/tool-store-events.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  assert.match(toolStoreEvents, /root\.dispatchEvent\(new CustomEvent\('pinvou:tools-changed'\)\)/);
+  assert.match(toolStoreEvents, /\}\)\(window\);/);
 });
 
 test('buildSessionMentionBlock caps titles like the parser (round-6 minor 3)', () => {

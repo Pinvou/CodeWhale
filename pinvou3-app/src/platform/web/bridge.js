@@ -4029,8 +4029,8 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
       .then(function () {
         // 新一轮已被后端受理：会话中未提交的「打开」（pending enable）自此进入
         // 上下文并锁死（ComposerToolMenu 监听）。bridge 层不反向依赖 features，
-        // 与 pinvou:tools-changed 一样内联派发。
-        try { window.dispatchEvent(new CustomEvent("pinvou:chat-round-committed", { detail: { scope: "plain" } })); } catch (_) {}
+        // 经 shared/tool-store-events.js 派发。
+        try { window.PinvouToolStoreEvents.notifyChatRoundCommitted(); } catch { /* silently ignored */ }
         recordAuthoritySyncDiagnostic("local_turn_admitted", Object.assign({
           operation: "send",
         }, authoritySyncBufferSnapshot(sid, turnOwnerBuffer)));
@@ -4352,7 +4352,7 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
         submission.requestId,
       );
       // 首轮提交成功 = 新一轮已受理：未提交的「打开」转正锁死（同 doSendFor）。
-      try { window.dispatchEvent(new CustomEvent("pinvou:chat-round-committed", { detail: { scope: "plain" } })); } catch (_) {}
+      try { window.PinvouToolStoreEvents.notifyChatRoundCommitted(); } catch { /* silently ignored */ }
       if (submission.voiceOperationId && metadata && metadata.id) {
         completeVoiceSubmission(submission.voiceOperationId, metadata.id, true);
       }
@@ -5719,7 +5719,7 @@ function presentArtifactAbsPath(toolResultContent, fallbackPath) { return pinvou
   // DOM CustomEvent the desktop bridge (chat-events.js) produces so ChatView's
   // registry subscription hot-refreshes on browser clients too.
   listen("remote_control:tools_changed", function () {
-    try { window.dispatchEvent(new CustomEvent("pinvou:tools-changed")); } catch { /* DOM dispatch failure only affects the refresh timing */ }
+    try { window.PinvouToolStoreEvents.notifyComposerToolsChanged(); } catch { /* DOM dispatch failure only affects the refresh timing */ }
   });
 
   listen("chat:done", function (e) {
@@ -6865,7 +6865,7 @@ function isActionablePlanCard(sid, itemId, planId) { return pinvouSharedweb().is
         planId: planTicket,
       });
       // 接受计划 = 后端受理新一轮（reserve_turn + 重跑）：未提交的「打开」转正锁死。
-      try { window.dispatchEvent(new CustomEvent("pinvou:chat-round-committed", { detail: { scope: "plain" } })); } catch (_) {}
+      try { window.PinvouToolStoreEvents.notifyChatRoundCommitted(); } catch { /* silently ignored */ }
       if (planBuffer) planBuffer.deferredRemoteUserEvent = null;
       applyAuthoritativeModeState(sid, st);
     } catch (e) {
@@ -7062,7 +7062,7 @@ async function submitUserInput(itemId, toolCallId, answers, questions) { return 
         retryReason: options && options.retryReason || "input_changed",
       });
       // 编辑重跑 = 后端受理新一轮：未提交的「打开」转正锁死（同 doSendFor）。
-      try { window.dispatchEvent(new CustomEvent("pinvou:chat-round-committed", { detail: { scope: "plain" } })); } catch (_) {}
+      try { window.PinvouToolStoreEvents.notifyChatRoundCommitted(); } catch { /* silently ignored */ }
       if (editBuffer) editBuffer.deferredRemoteUserEvent = null;
     } catch (e) {
       var errorText = String(e && e.message ? e.message : e || "");
