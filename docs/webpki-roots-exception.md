@@ -2,9 +2,10 @@
 
 RustSec 在 2026-10-21 修订了 [RUSTSEC-2026-0381](https://github.com/RustSec/advisory-db/blob/main/crates/webpki-roots/RUSTSEC-2026-0381.md)
 及 [RUSTSEC-2026-0383](https://github.com/RustSec/advisory-db/blob/main/crates/webpki-root-certs/RUSTSEC-2026-0383.md)，
-显式将各自的 `0.26.11` 兼容包装层列为 `unaffected`。本仓已移除原先针对 0381 的
-ID 忽略，不再需要该公告例外；其他版本仍正常接受扫描，包括包含独立旧根数据的
-`webpki-roots 0.26.10`。这样也避免与 `unused-ignored-advisory = "deny"` 的严格策略冲突。
+显式将各自的 `0.26.11` 兼容包装层列为 `unaffected`。#2035 已移除本 PR 早期提交中
+针对 0381 的 ID 忽略（main 从未包含该忽略项），不再需要该公告例外；其他版本仍
+正常接受扫描，包括包含独立旧根数据的 `webpki-roots 0.26.10`。当前策略对无效忽略
+默认告警；与 #1518 引入的 `unused-ignored-advisory = "deny"` 组合后才会拒绝。
 本文件和守卫保留原路径，供既有 CI 与历史审核链接继续定位。
 
 已审核的 `webpki-roots 0.26.11` 是兼容包装层：发布归档中的 `Cargo.toml` 唯一正常依赖是
@@ -33,6 +34,11 @@ ID 忽略，不再需要该公告例外；其他版本仍正常接受扫描，�
 CI 的两个共享策略入口在同一个失败即停止的步骤内先执行守卫，再用 `--locked`
 扫描，避免元数据解析修改已审查的锁文件。另有 bans 规则独立拒绝受影响的
 `webpki-roots >=1.0.0, <1.0.10`，但它不能取代完整图守卫。
+两处扫描步骤显式使用 [GitHub 内置 `shell: bash`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idstepsshell)（`bash --noprofile --norc -eo pipefail {0}`），
+不依赖 workflow/job 的 shell 默认值；契约测试拒绝删除或替换这两个步骤的 shell。
+Draft 且仅改 CLI 路径时，Ready 前不执行该守卫；Ready/Merge Queue 的依赖路由
+和本地组合命令才执行相应检查。三份主锁之外的测试 harness 锁和 CodeWhale 锁
+不在本守卫覆盖范围，需独立跟进，不能把主锁验证当作它们的扫描结果。
 
 本地需 Python 3.11+ 和 cargo-deny 0.20.2。从仓库根运行以下组合命令；守卫失败
 时必须停止，不得直接执行下一条或新增全局忽略：
@@ -47,5 +53,5 @@ python3 scripts/guard-webpki-roots-exception.py && cargo deny --locked --manifes
 对应扫描。回归命令为 `python3 -m unittest discover -s scripts/tests -p 'test_webpki_roots_exception.py'`。
 其他公告、许可证、来源和依赖策略均继续按既有规则执行；此变更控制不表示产品的
 所有安全风险均已消除，也不替代后续依赖升级。CI 契约检查器只支持其明确识别的
-`run:` 标量形式；带块头注释、缩进标记、tag/anchor 等未支持形式须先更新测试，
+`run:` 标量形式；多行 plain 标量、带块头注释、缩进标记、tag/anchor 等未支持形式须先更新测试，
 当前显式失败，不允许把它们静默当作不含审计命令的普通行。

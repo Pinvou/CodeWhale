@@ -77,7 +77,7 @@ confidence-threshold = 0.8
 # Tauri + CodeWhale 共享图里天然有上百个多版本(reqwest 0.12/0.13、toml_edit×4 等),
 # 逐个去重是长期工程,不该卡 CI,也不应让每次审计输出数十万字的已知重复图。
 # 这里关闭重复版本报告;漏洞、许可证、来源和通配依赖仍按各自规则独立审计。
-# 注意:[bans] 不支持 version 键(只有 [advisories]/[licenses] 支持)。
+# multiple-versions 对整个依赖图生效;下方 bans.deny 条目支持 version 范围。
 multiple-versions = "allow"
 # Defense in depth: affected 1.x root data remains forbidden independently
 # of the lock-graph guard and the advisory database's version classifications.

@@ -205,24 +205,38 @@ def cargo_deny_commands(workflow):
         if not match:
             continue
         scalar = match[2]
+        # In "- run:", the mapping key starts after the list marker. A
+        # sibling step field at that column is not scalar continuation text.
+        run_indent = len(match[1]) + (2 if line.lstrip().startswith('- ') else 0)
         # defaults.run is a mapping (shell/cwd), not an executable step.
         if not scalar and index > 0 and lines[index - 1].strip() == 'defaults:':
             continue
         if scalar in ('|', '|-', '|+', '>', '>-', '>+'):
             body = []
             for following in lines[index + 1:]:
-                if following.strip() and len(following) - len(following.lstrip()) <= len(match[1]):
+                if following.strip() and len(following) - len(following.lstrip()) <= run_indent:
                     break
                 body.append(following)
             scalar = '\n'.join(body)
-        elif scalar.startswith('"'):
-            scalar = json.loads(scalar)
-        elif scalar.startswith("'"):
-            if not scalar.endswith("'"):
-                raise AssertionError('unterminated run scalar')
-            scalar = scalar[1:-1].replace("''", "'")
-        elif not scalar or scalar.startswith(('*', '&', '{', '[', '|', '>', '!', '#')):
-            raise AssertionError('unrecognized run scalar; inspect its cargo-deny coverage')
+        else:
+            # YAML folds multiline plain scalars into one command. Do not
+            # inspect only the first word and silently miss a later "deny".
+            for following in lines[index + 1:]:
+                if not following.strip() or following.lstrip().startswith('#'):
+                    continue
+                indent = len(following) - len(following.lstrip())
+                sibling = indent == run_indent and re.match(r'[\w-]+:', following.lstrip())
+                if indent > len(match[1]) and not sibling:
+                    raise AssertionError('unsupported multiline run scalar; use an explicit block')
+                break
+            if scalar.startswith('"'):
+                scalar = json.loads(scalar)
+            elif scalar.startswith("'"):
+                if not scalar.endswith("'"):
+                    raise AssertionError('unterminated run scalar')
+                scalar = scalar[1:-1].replace("''", "'")
+            elif not scalar or scalar.startswith(('*', '&', '{', '[', '|', '>', '!', '#')):
+                raise AssertionError('unrecognized run scalar; inspect its cargo-deny coverage')
         commands.extend(re.findall(r'\bcargo\s+deny\b', scalar))
     return commands
 
@@ -255,7 +269,8 @@ class WebpkiCiContractTests(unittest.TestCase):
             self.assertIsNotNone(run)
             commands = [line.strip() for line in run[1].splitlines() if line.strip()]
             self.assertEqual(commands, [guard, deny], "guard must succeed before the locked scan in the same step")
-            self.assertNotIn('shell:', scan, 'keep the runner default fail-fast shell')
+            self.assertEqual(re.findall(r'^        shell: (.*)$', scan, re.M), ['bash'],
+                             'pin the built-in fail-fast shell above job/workflow defaults')
         changes = job_block(workflow, 'changes')
         for group in ['rust_dependencies', 'knowledge_dependencies']:
             block = re.search(rf'^            {group}:\n(.*?)(?=^            \w+:|\Z)', changes, re.M | re.S)[1]
@@ -278,6 +293,61 @@ class WebpkiCiContractTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     self.verify_workflow(changed)
 
+    def test_multiline_plain_runs_cannot_hide_an_unguarded_scan(self):
+        workflow = WORKFLOW.read_text(encoding='utf-8')
+        for body in [
+            '      - run: cargo\n          deny check advisories\n',
+            '      - run: cargo\n        deny check advisories\n',
+            '      - name: extra scan\n        run: cargo\n          deny check advisories\n',
+            '      - run: cargo\n\n          deny check advisories\n',
+            '      - run: cargo\n          # continuation follows\n          deny check advisories\n',
+        ]:
+            with self.subTest(body=body):
+                changed = workflow + '\n  unguarded-audit:\n    steps:\n' + body
+                with self.assertRaisesRegex(AssertionError, 'multiline run scalar'):
+                    self.verify_workflow(changed)
+
+    def test_guarded_scans_cannot_inherit_a_non_fail_fast_shell(self):
+        workflow = WORKFLOW.read_text(encoding='utf-8')
+        for job, step_name in [('knowledge-rust', 'cargo deny check'),
+                               ('rust-lint', 'cargo deny check (hard gate)')]:
+            for defaults in ['    defaults:\n      run:\n        shell: bash {0}\n',
+                             '    defaults: {run: {shell: "bash {0}"}}\n']:
+                with self.subTest(job=job, defaults=defaults):
+                    changed = workflow.replace(f'  {job}:\n', f'  {job}:\n{defaults}')
+                    self.verify_workflow(changed)
+                    # An explicit safe step shell must override either form of
+                    # job defaults. Removing it must never silently inherit them.
+                    block = job_block(changed, job)
+                    scan = next(step for step in block.split('\n      - ')
+                                if step.startswith(f'name: {step_name}\n'))
+                    unsafe = changed.replace(scan, scan.replace('        shell: bash\n', ''))
+                    with self.assertRaises(AssertionError):
+                        self.verify_workflow(unsafe)
+
+    def test_workflow_defaults_and_step_shell_mutations_preserve_fail_fast(self):
+        workflow = WORKFLOW.read_text(encoding='utf-8')
+        changed = 'defaults:\n  run:\n    shell: bash {0}\n' + workflow
+        self.verify_workflow(changed)
+        for replacement in ['', '        shell: bash {0}\n', '        shell: sh\n',
+                            '        shell: python\n']:
+            for job, step_name in [('knowledge-rust', 'cargo deny check'),
+                                   ('rust-lint', 'cargo deny check (hard gate)')]:
+                with self.subTest(job=job, replacement=replacement):
+                    scan = next(step for step in job_block(changed, job).split('\n      - ')
+                                if step.startswith(f'name: {step_name}\n'))
+                    unsafe = changed.replace(scan, scan.replace('        shell: bash\n', replacement))
+                    with self.assertRaises(AssertionError):
+                        self.verify_workflow(unsafe)
+
+    def test_run_list_marker_does_not_consume_sibling_step_fields(self):
+        workflow = WORKFLOW.read_text(encoding='utf-8')
+        for scalar in ['echo fixture', '|\n          echo fixture']:
+            changed = workflow + ('\n  unrelated-run:\n    steps:\n'
+                                  f'      - run: {scalar}\n'
+                                  '        env:\n          FIXTURE: value\n')
+            self.verify_workflow(changed)
+
     def test_workflow_mutations_cannot_silently_bypass_guard(self):
         workflow = WORKFLOW.read_text(encoding='utf-8')
         for prefix in ['', '../../']:
@@ -298,9 +368,10 @@ class WebpkiCiContractTests(unittest.TestCase):
                         workflow + '\n  unguarded-audit:\n    steps:\n      - run: \'cargo deny check advisories\'\n',
                         workflow + '\n  unguarded-audit:\n    steps:\n      - run: "cargo deny check advisories"\n',
                         workflow.replace('      - name: cargo deny check\n', '      - name: cargo deny check\n        continue-on-error: true\n'),
-                        workflow.replace("        if: ${{ needs.changes.outputs.knowledge_dependencies == 'true' }}\n        run: |", "        if: ${{ false }}\n        run: |"),
-                        workflow.replace("        if: ${{ needs.changes.outputs.knowledge_dependencies == 'true' }}\n        run: |", "        # old if: ${{ needs.changes.outputs.knowledge_dependencies == 'true' }}\n        if: ${{ false }}\n        run: |"),
+                        workflow.replace("        if: ${{ needs.changes.outputs.knowledge_dependencies == 'true' }}\n        shell: bash\n        run: |", "        if: ${{ false }}\n        shell: bash\n        run: |"),
+                        workflow.replace("        if: ${{ needs.changes.outputs.knowledge_dependencies == 'true' }}\n        shell: bash\n        run: |", "        # old if: ${{ needs.changes.outputs.knowledge_dependencies == 'true' }}\n        if: ${{ false }}\n        shell: bash\n        run: |"),
                         workflow.replace("              - 'scripts/guard-webpki-roots-exception.py'", "              # - 'scripts/guard-webpki-roots-exception.py'")]:
+            self.assertNotEqual(changed, workflow, 'negative control must mutate the workflow')
             with self.assertRaises(AssertionError):
                 self.verify_workflow(changed)
 
