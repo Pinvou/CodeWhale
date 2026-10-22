@@ -74,6 +74,7 @@ import { StoreGuide } from './ModelStoreCards.jsx';
 import { MemoizedModelRow as ModelRow } from './ModelRow.jsx';
 import { CardUpdateDialog } from './CardUpdateDialog.jsx';
 import { ModelStoreTaskPanel } from './ModelStoreTaskPanel.jsx';
+import { DownloadCenterView, activeDownloadTasks } from './DownloadCenterView.jsx';
 import { MaintenanceRecoveryPanel } from './MaintenanceRecoveryPanel.jsx';
 import { IncompleteInstallPanel, describeIncompleteError } from './IncompleteInstallPanel.jsx';
 import { ModelDetailDialog } from './ModelDetailDialog.jsx';
@@ -855,11 +856,20 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
     deployWithProfile(record, selectedId);
   }, [deployWithProfile, profilePick]);
 
-  /** 筛选胶囊。「已安装」= 本机有权重的（下载过就算），这是用户最常问的那个问题。 */
+  /**
+   * 筛选胶囊。「已安装」= 本机有权重的（下载过就算），这是用户最常问的那个问题。
+   *
+   * 「下载」是四个里唯一的例外：它筛的不是卡片列表而是**操作实例**（进行中的
+   * 下载 + 已中断的安装），renderModels 按它整页切到 DownloadCenterView，不走
+   * filterModels 管道。徽标是横幅之外的主动提醒：未完成安装是耐久事实，用户
+   * 不点进任何视图都该知道它存在。
+   */
+  const downloadBadge = activeDownloadTasks(tasks).length + (library.incompleteInstallations || []).length;
   const FILTERS = [
     { key: 'all', label: copy.filterAll },
     { key: 'installed', label: copy.filterInstalled },
     { key: 'running', label: copy.filterRunning },
+    { key: 'downloads', label: copy.filterDownloads, badge: downloadBadge },
   ];
 
   /**
@@ -945,6 +955,26 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
   };
 
   const renderModels = () => {
+    // 「下载」筛的是操作实例不是卡片，整页切走，不进下面的卡片列表管道。
+    // 数据没加载完也照常渲染——任务表在模块级、未完成列表为空数组都是合法状态。
+    if (filter === 'downloads') {
+      return (
+        <DownloadCenterView
+          tasks={tasks}
+          installations={library.incompleteInstallations}
+          incompleteError={library.incompleteError}
+          copy={copy}
+          onCancel={cancelTask}
+          onDismiss={dismissTask}
+          onToggle={toggleTaskExpand}
+          onAnswer={answerTask}
+          onForceRemove={requestForceRemove}
+          onRetry={handleIncompleteRetry}
+          onRefresh={loadLibrary}
+          isRetrying={(cardId) => Boolean(runningTask(lifecycleTaskKey(cardId)) || runningTask(downloadTaskKey(cardId)))}
+        />
+      );
+    }
     if (cards === null && (library.models || []).length === 0) return null;
     if (visibleModels.length === 0) {
       return (
@@ -1057,14 +1087,18 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
           isRecovering={(cardId) => Boolean(runningTask(lifecycleTaskKey(cardId)))}
           onRefresh={loadLibrary}
         />
-        <IncompleteInstallPanel
-          installations={library.incompleteInstallations || []}
-          error={library.incompleteError}
-          copy={copy}
-          onRetry={handleIncompleteRetry}
-          onRefresh={loadLibrary}
-          isRetrying={cardId => Boolean(runningTask(lifecycleTaskKey(cardId)) || runningTask(downloadTaskKey(cardId)))}
-        />
+        {/* 横幅保留常驻提醒；「下载」筛选里它已作为「已中断」分区并入
+            DownloadCenterView，这里让位，避免同一份列表一页出现两次。 */}
+        {filter === 'downloads' ? null : (
+          <IncompleteInstallPanel
+            installations={library.incompleteInstallations || []}
+            error={library.incompleteError}
+            copy={copy}
+            onRetry={handleIncompleteRetry}
+            onRefresh={loadLibrary}
+            isRetrying={cardId => Boolean(runningTask(lifecycleTaskKey(cardId)) || runningTask(downloadTaskKey(cardId)))}
+          />
+        )}
         {renderModels()}
       </>
     );
@@ -1094,15 +1128,19 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
           </h1>
           {guide === 'ready' ? (
             <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-3 sm:ml-8 sm:flex-nowrap">
-              <IosSearchField
-                value={query}
-                compact
-                className="min-w-[220px] flex-1 sm:max-w-[520px]"
-                placeholder={copy.search}
-                clearLabel={copy.clearSearch}
-                inputTestId="model-store-search"
-                onChange={(event) => setQuery(event.target.value)}
-              />
+              {/* 「下载」视图筛的是操作实例不是模型，搜索对它没有意义——藏掉
+                  而不是禁用：留着一个输入框却什么也筛不动，用户只会以为坏了。 */}
+              {filter === 'downloads' ? null : (
+                <IosSearchField
+                  value={query}
+                  compact
+                  className="min-w-[220px] flex-1 sm:max-w-[520px]"
+                  placeholder={copy.search}
+                  clearLabel={copy.clearSearch}
+                  inputTestId="model-store-search"
+                  onChange={(event) => setQuery(event.target.value)}
+                />
+              )}
               {/* 存储设置不再单列顶栏按钮（11-16 用户反馈②：与「资源管理」菜单里的
                   存储项双入口重复）——唯一入口=资源管理菜单，见 ResourceManagerDialog。 */}
               <button
@@ -1145,6 +1183,16 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
                   onClick={() => setFilter(item.key)}
                 >
                   {item.label}
+                  {/* 徽标只在有内容时出现：零状态多一个 "0" 是噪音；有内容时
+                      它是横幅之外唯一的主动提醒，用户不切视图也看得见。 */}
+                  {item.badge ? (
+                    <span
+                      data-testid={`model-store-filter-${item.key}-badge`}
+                      className="ml-1.5 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-[#0B57D0] px-1.5 text-[11px] font-semibold text-white dark:bg-[#A8C7FA] dark:text-black"
+                    >
+                      {item.badge}
+                    </span>
+                  ) : null}
                 </button>
               ))}
             </div>
