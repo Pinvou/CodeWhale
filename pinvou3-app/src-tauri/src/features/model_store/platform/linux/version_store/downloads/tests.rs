@@ -7,6 +7,39 @@ fn setup() -> super::super::super::config::TempHome {
     home
 }
 
+fn complete_download(card_id: &str, root: &Path, size: u64) {
+    let mut download = DownloadReservation::acquire(card_id, root, || false, || {}).unwrap();
+    download.publish(size).unwrap();
+    fs::write(
+        root.join(format!("{card_id}-weights")),
+        vec![0; size as usize],
+    )
+    .unwrap();
+    db::add_store_model_with_root(
+        db::AddStoreModelParams {
+            card_id,
+            model_name: card_id,
+            card_name: card_id,
+            org: None,
+            description: None,
+            engine_name: "native",
+            engine_version: None,
+            size_bytes: size as i64,
+            quantization: None,
+            source_repo_id: None,
+            source_filename: None,
+            scripts: &BTreeMap::new(),
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: super::super::super::store_client::DeployTopology::Single,
+            card_source: "store",
+        },
+        &root.to_string_lossy(),
+    )
+    .unwrap();
+    download.complete().unwrap();
+}
+
 #[test]
 fn ordinary_downloads_share_live_quota_and_failed_files_survive_plan_release() {
     let home = setup();
@@ -41,6 +74,31 @@ fn ordinary_download_crash_recovery_releases_only_plan_and_keeps_registered_root
     let retry = DownloadReservation::acquire("first", &moved_default, || false, || {}).unwrap();
     assert_eq!(retry.root, root);
     assert!(!moved_default.exists());
+}
+
+#[test]
+fn retained_root_schema_preserves_existing_ordinary_retry_reservations() {
+    let home = setup();
+    let root = home.path().join("old-root");
+    fs::create_dir(&root).unwrap();
+    let conn = connection().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE model_download_reservations (
+        card_id TEXT PRIMARY KEY, models_root TEXT NOT NULL, size_bytes INTEGER NOT NULL,
+        downloading INTEGER NOT NULL)",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO model_download_reservations VALUES('card',?1,10,0)",
+        [root.to_string_lossy()],
+    )
+    .unwrap();
+    let retry =
+        DownloadReservation::acquire("card", &home.path().join("new-root"), || false, || {})
+            .unwrap();
+    assert_eq!(retry.root, root);
+    assert_eq!(downloads().unwrap().len(), 1);
+    assert!(retained_roots(None).unwrap().is_empty());
 }
 
 #[test]
@@ -118,6 +176,127 @@ fn completed_ordinary_root_keeps_extra_cache_charged_without_double_billing_reco
     db::delete_store_model("first").unwrap();
     assert_eq!(super::super::retained_bytes().unwrap(), 17);
     assert!(root.join("model").exists());
+}
+
+#[test]
+fn full_delete_releases_install_target_but_keeps_each_old_roots_residuals_charged() {
+    let home = setup();
+    let first = home.path().join("first");
+    complete_download("card", &first, 10);
+    fs::write(first.join("leftover-cache"), vec![0; 7]).unwrap();
+    // The card's uninstall script removes its own weights; unknown shared-root
+    // files survive the successful database deletion and remain quota-visible.
+    fs::remove_file(first.join("card-weights")).unwrap();
+    db::delete_store_model("card").unwrap();
+    assert!(downloads().unwrap().is_empty());
+    assert_eq!(retained_roots(Some("card")).unwrap(), [first.clone()]);
+    assert_eq!(super::super::retained_bytes().unwrap(), 7);
+
+    let second = home.path().join("second");
+    let new_install = DownloadReservation::acquire("card", &second, || false, || {}).unwrap();
+    assert_eq!(new_install.root, second);
+    new_install.publish(10).unwrap();
+    assert_eq!(super::super::retained_bytes().unwrap(), 17);
+    drop(new_install);
+    complete_download("card", &second, 10);
+    fs::write(second.join("leftover-cache"), vec![0; 3]).unwrap();
+    assert_eq!(super::super::retained_bytes().unwrap(), 10);
+    fs::remove_file(second.join("card-weights")).unwrap();
+    db::delete_store_model("card").unwrap();
+    assert_eq!(super::super::retained_bytes().unwrap(), 10);
+    assert_eq!(download_paths("card").unwrap(), [first, second]);
+
+    let third = home.path().join("third");
+    let failed = DownloadReservation::acquire("card", &third, || false, || {}).unwrap();
+    assert_eq!(failed.root, third);
+    failed.publish(10).unwrap();
+    fs::write(third.join("partial"), vec![0; 2]).unwrap();
+    drop(failed);
+    assert_eq!(super::super::retained_bytes().unwrap(), 12);
+    let retry =
+        DownloadReservation::acquire("card", &home.path().join("fourth"), || false, || {}).unwrap();
+    assert_eq!(retry.root, third, "failed retries retain their own target");
+}
+
+#[test]
+fn repeated_same_root_reinstalls_deduplicate_retained_and_current_accounting() {
+    let home = setup();
+    let root = home.path().join("models");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("leftover-cache"), vec![0; 7]).unwrap();
+    for _ in 0..3 {
+        complete_download("card", &root, 10);
+        assert_eq!(super::super::retained_bytes().unwrap(), 7);
+        fs::remove_file(root.join("card-weights")).unwrap();
+        db::delete_store_model("card").unwrap();
+        assert_eq!(retained_roots(Some("card")).unwrap(), [root.clone()]);
+        assert_eq!(super::super::retained_bytes().unwrap(), 7);
+    }
+    complete_download("peer", &root, 10);
+    assert_eq!(super::super::retained_bytes().unwrap(), 7);
+    fs::remove_file(root.join("peer-weights")).unwrap();
+    db::delete_store_model("peer").unwrap();
+    assert_eq!(retained_roots(None).unwrap().len(), 2);
+    assert_eq!(super::super::retained_bytes().unwrap(), 7);
+    let reinstall = DownloadReservation::acquire("card", &root, || false, || {}).unwrap();
+    reinstall.publish(10).unwrap();
+    assert_eq!(super::super::retained_bytes().unwrap(), 17);
+    assert_eq!(download_paths("card").unwrap(), [root]);
+}
+
+#[test]
+fn delete_failure_rolls_back_target_retirement_with_the_model_and_credentials() {
+    let home = setup();
+    let root = home.path().join("models");
+    complete_download("card", &root, 10);
+    let key = db::add_api_key("card", Some("test")).unwrap();
+    let conn = connection().unwrap();
+    conn.execute_batch("CREATE TRIGGER refuse_credential_delete BEFORE DELETE ON api_keys BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+    assert!(db::delete_store_model("card").is_err());
+    assert!(db::get_store_model("card").unwrap().is_some());
+    assert!(db::find_api_key(&key.key_value).unwrap().is_some());
+    assert_eq!(downloads().unwrap()[0].root, root);
+    assert!(retained_roots(Some("card")).unwrap().is_empty());
+    let retry =
+        DownloadReservation::acquire("card", &home.path().join("new-default"), || false, || {})
+            .unwrap();
+    assert_eq!(retry.root, root);
+}
+
+#[test]
+fn force_remove_discloses_and_atomically_forgets_current_and_retired_roots() {
+    let home = setup();
+    let old_root = home.path().join("old");
+    complete_download("card", &old_root, 10);
+    db::delete_store_model("card").unwrap();
+    let current_root = home.path().join("current");
+    complete_download("card", &current_root, 10);
+    let key = db::add_api_key("card", Some("test")).unwrap();
+    let manager = super::super::super::lifecycle::ModelManager::new(None, None);
+    let conn = connection().unwrap();
+    conn.execute_batch("CREATE TRIGGER refuse_credential_delete BEFORE DELETE ON api_keys BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+    assert!(manager.force_remove_record("card").is_err());
+    assert_eq!(retained_roots(Some("card")).unwrap(), [old_root.clone()]);
+    assert_eq!(downloads().unwrap()[0].root, current_root);
+    assert!(db::get_store_model("card").unwrap().is_some());
+    assert!(db::find_api_key(&key.key_value).unwrap().is_some());
+    conn.execute_batch("DROP TRIGGER refuse_credential_delete")
+        .unwrap();
+    let outcome = manager.force_remove_record("card").unwrap();
+    for root in [&old_root, &current_root] {
+        assert!(
+            outcome
+                .residual_paths
+                .contains(&root.to_string_lossy().into_owned())
+        );
+        assert!(root.join("card-weights").exists());
+    }
+    assert_eq!(outcome.warning, "force_remove_residual_paths");
+    assert!(retained_roots(Some("card")).unwrap().is_empty());
+    assert!(downloads().unwrap().is_empty());
+    assert_eq!(super::super::retained_bytes().unwrap(), 0);
+    assert!(db::get_store_model("card").unwrap().is_none());
+    assert!(db::find_api_key(&key.key_value).unwrap().is_none());
 }
 
 #[test]

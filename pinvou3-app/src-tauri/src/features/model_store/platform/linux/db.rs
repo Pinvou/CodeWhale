@@ -1049,7 +1049,7 @@ pub fn get_store_model_by_name(model_name: &str) -> rusqlite::Result<Option<Stor
 
 /// 删掉一个模型的库记录，连同它专属的 API Key。
 ///
-/// **两条 DELETE 必须在同一个事务里。** 分开执行时，第二条失败会留下一个
+/// **记录删除与下载目录转存必须在同一个事务里。** 分开执行时，后续删除失败会留下一个
 /// 「模型没了、key 还在」的中间态——而那些 key 仍然能被 `find_api_key` 命中，
 /// 跟下面那句注释说的「模型卸载了 key 也跟着失效」正好相反。这种状态没有任何
 /// 界面能看见，也没有任何入口能清掉。
@@ -1065,6 +1065,7 @@ pub fn delete_store_model(card_id: &str) -> rusqlite::Result<()> {
     if retained != 0 {
         return Err(rusqlite::Error::InvalidQuery);
     }
+    super::version_store::retire_download_on(&tx, card_id)?;
     tx.execute("DELETE FROM model_versions WHERE card_id=?1", [card_id])?;
     tx.execute(
         "DELETE FROM store_models WHERE card_id = ?1",

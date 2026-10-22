@@ -15,18 +15,20 @@ struct Download {
     downloading: bool,
 }
 
-fn table(conn: &rusqlite::Connection) -> Result<(), String> {
+fn table(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS model_download_reservations (
         card_id TEXT PRIMARY KEY, models_root TEXT NOT NULL, size_bytes INTEGER NOT NULL,
-        downloading INTEGER NOT NULL)",
+        downloading INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS model_download_retained_roots (
+        card_id TEXT NOT NULL, models_root TEXT NOT NULL,
+        PRIMARY KEY(card_id, models_root))",
     )
-    .map_err(|e| e.to_string())
 }
 
 fn downloads() -> Result<Vec<Download>, String> {
     let conn = connection()?;
-    table(&conn)?;
+    table(&conn).map_err(|e| e.to_string())?;
     let mut query = conn
         .prepare("SELECT * FROM model_download_reservations")
         .map_err(|e| e.to_string())?;
@@ -44,6 +46,22 @@ fn downloads() -> Result<Vec<Download>, String> {
         .map_err(|e| e.to_string())
 }
 
+fn retained_roots(card_id: Option<&str>) -> Result<Vec<PathBuf>, String> {
+    let conn = connection()?;
+    table(&conn).map_err(|e| e.to_string())?;
+    let mut query = conn
+        .prepare(
+            "SELECT models_root FROM model_download_retained_roots
+            WHERE (?1 IS NULL OR card_id=?1)",
+        )
+        .map_err(|e| e.to_string())?;
+    query
+        .query_map([card_id], |row| Ok(PathBuf::from(row.get::<_, String>(0)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
 fn lease_file(card_id: &str) -> Result<std::fs::File, String> {
     let safe = super::super::config::safe_path_component(card_id)?;
     let directory = super::super::config::data_dir().join("download-locks");
@@ -54,7 +72,7 @@ fn lease_file(card_id: &str) -> Result<std::fs::File, String> {
 
 fn release_plan(card_id: &str) -> Result<(), String> {
     let conn = connection()?;
-    table(&conn)?;
+    table(&conn).map_err(|e| e.to_string())?;
     conn.execute(
         "UPDATE model_download_reservations SET downloading=0 WHERE card_id=?1",
         [card_id],
@@ -148,7 +166,7 @@ impl DownloadReservation {
     /// preexisting file can safely reduce this full-size reservation.
     pub fn publish(&self, size_bytes: u64) -> Result<(), String> {
         let conn = connection()?;
-        table(&conn)?;
+        table(&conn).map_err(|e| e.to_string())?;
         conn.execute(
             "INSERT INTO model_download_reservations(card_id,models_root,size_bytes,downloading)
             VALUES(?1,?2,?3,1) ON CONFLICT(card_id) DO UPDATE SET
@@ -198,6 +216,13 @@ pub fn retained_download_bytes() -> Result<u64, String> {
         .filter_map(|v| v.models_root.map(PathBuf::from))
         .collect::<Vec<_>>();
     let mut roots = BTreeMap::<PathBuf, (u64, u64)>::new();
+    // A completed uninstall ends this card's retry location, but its shared
+    // download root may still contain caches or unrelated files. Merge those
+    // roots into the same path map so reinstalls and other cards charge them
+    // once without letting them choose the next installation's target.
+    for root in retained_roots(None)? {
+        roots.entry(root).or_default();
+    }
     for mut download in all {
         if download.downloading {
             let lease = lease_file(&download.card_id)?;
@@ -250,17 +275,44 @@ pub fn retained_download_bytes() -> Result<u64, String> {
 }
 
 pub fn download_paths(card_id: &str) -> Result<Vec<PathBuf>, String> {
-    Ok(downloads()?
-        .into_iter()
-        .filter(|d| d.card_id == card_id)
-        .map(|d| d.root)
-        .collect())
+    let mut paths = retained_roots(Some(card_id))?;
+    paths.extend(
+        downloads()?
+            .into_iter()
+            .filter(|d| d.card_id == card_id)
+            .map(|d| d.root),
+    );
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+/// End the installation's retry target in the caller's successful full-delete
+/// transaction. Keep roots separately for conservative residual accounting and
+/// disclosure; a subsequent new installation may use the configured directory.
+pub(super) fn retire_on(conn: &rusqlite::Connection, card_id: &str) -> rusqlite::Result<()> {
+    table(conn)?;
+    conn.execute(
+        "INSERT OR IGNORE INTO model_download_retained_roots(card_id,models_root)
+        SELECT card_id,models_root FROM model_download_reservations WHERE card_id=?1",
+        [card_id],
+    )?;
+    conn.execute(
+        "DELETE FROM model_download_reservations WHERE card_id=?1",
+        [card_id],
+    )?;
+    Ok(())
 }
 
 pub(super) fn forget_on(conn: &rusqlite::Connection, card_id: &str) -> Result<(), String> {
-    table(conn)?;
+    table(conn).map_err(|e| e.to_string())?;
     conn.execute(
         "DELETE FROM model_download_reservations WHERE card_id=?1",
+        [card_id],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM model_download_retained_roots WHERE card_id=?1",
         [card_id],
     )
     .map_err(|e| e.to_string())?;
