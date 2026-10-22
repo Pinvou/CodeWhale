@@ -7,8 +7,10 @@
 /* eslint-disable sonarjs/no-nested-template-literals, sonarjs/no-unenclosed-multiline-block -- compact i18n dictionary: nested templates mirror the copy structure one-to-one; credential field names are false-positive secrets */
 import { browserEn } from './browser.js';
 import { CHAT_RECOVERY_COPY } from './chat-recovery.js';
+import { failureDiagnosticsEn } from './failure-diagnostics.js';
 
 const conversationEn = {
+  failureDiagnostics: failureDiagnosticsEn,
   completed:'Completed', failed:'Failed', interrupted:'Interrupted', cancelled:'Cancelled', limitReached:'Limit reached', processing:'Processing', processingActive:'Processing',
   waitingPermission:'Waiting for permission', waitingInput:'Waiting for your input', waitingInputShort:'Waiting for input',
   goLatest:label=>`${label}. Go to latest message`,
@@ -184,6 +186,7 @@ const acpProvidersEn = {
 };
 
 export const dictEn = {
+  diagnostics: failureDiagnosticsEn,
   steerFailedLost: CHAT_RECOVERY_COPY.en.steerFailedLost,
   ...browserEn,
         langTag: 'en',
@@ -2283,6 +2286,7 @@ behaviorSettingsEn.behaviorAnalyticsEntryDesc = "Manage product improvement and 
 behaviorSettingsEn.behaviorAnalyticsBack = "Back to Help & Feedback";
 behaviorSettingsEn.behaviorAnalyticsLabel = "Help improve PINVOU";
 behaviorSettingsEn.behaviorAnalyticsDesc = "Only controlled feature outcomes, timing, and error categories are collected; conversations, file contents, paths, and credentials are never collected.";
+behaviorSettingsEn.behaviorAnalyticsDesc += " When analytics is enabled, failures also include specific error codes, versions and bounded stage traces. Detailed logs and screenshots require your explicit confirmation of each preview.";
 behaviorSettingsEn.behaviorAnalyticsNotConfigured = "Usage analytics is not configured in this build and remains off.";
 behaviorSettingsEn.behaviorAnalyticsEnableConfirm = "PINVOU will collect controlled feature usage and quality data to improve the product. Conversation text, file contents, paths, tool arguments, and credentials are never collected. Enable analytics?";
 behaviorSettingsEn.behaviorAnalyticsDisableConfirm = "Collection stops immediately and pending events are cleared. An offline withdrawal will retry when connectivity returns. Turn analytics off?";

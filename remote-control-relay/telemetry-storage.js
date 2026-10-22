@@ -5,7 +5,8 @@ import { chmodSync, closeSync, existsSync, lstatSync, openSync, renameSync, rmSy
 // Online startup and offline reconciliation must agree on whether an inventory
 // is trustworthy before either is allowed to remove durable subject facts.
 export function validDeviceInventory(saved) {
-  if (!saved || typeof saved !== 'object' || Array.isArray(saved) || !Array.isArray(saved.devices)) return false;
+  if (!saved || typeof saved !== 'object' || Array.isArray(saved) || !Array.isArray(saved.devices)
+    || (saved.deletion_ledger_required !== undefined && saved.deletion_ledger_required !== true)) return false;
   const ids = new Set(), hardwareHashes = new Set();
   return saved.devices.every(device => {
     if (!device || typeof device !== 'object' || Array.isArray(device)

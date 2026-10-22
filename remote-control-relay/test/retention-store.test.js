@@ -7,6 +7,7 @@ import test from 'node:test';
 import { RetentionFacts, retentionDay } from '../retention-store.js';
 import { TelemetryStore, buildBehaviorOverview } from '../telemetry-service.js';
 import { backfillRetention } from '../scripts/backfill-retention.mjs';
+import { FailureReportStore } from '../failure-diagnostics.js';
 import { collectRemoteRetentionEvidence, projectRemoteTasks } from '../remote-telemetry.js';
 import { deletionSubjectHash, isSuccessfulCoreUserTask } from '../telemetry-primitives.js';
 
@@ -781,15 +782,117 @@ test('deletion removes retention and a restored facts backup cannot resurrect th
   assert.equal(new RetentionFacts(dir).rows.size, 0);
 }));
 
-test('processing deletion is recovered before retention becomes visible', t => fixture(t, dir => {
-  const { store, registered } = registeredStore(dir);
-  store.behaviorEvents = [success('2026-09-01T08:00:00',registered.device_id)];
-  store.persistRetentionFacts(now);
-  store.retentionFacts.flush = () => { throw new Error('fixture disk failure'); };
-  assert.throws(()=>store.deleteBehaviorData(registered,{request_id:'delete_pending_retention_001'}), /retention_storage_unavailable/);
-  const reopened = testStore(dir, store.pepper);
-  assert.equal(reopened.retentionFacts.rows.size, 0);
-  assert.equal(reopened.deletionTombstones.at(-1).status, 'completed');
+for (const recovery of ['retry', 'restart']) {
+  test(`deletion waits for retention and diagnostic cleanup before ${recovery} completes it`, t => fixture(t, dir => {
+    const { store, registered } = registeredStore(dir);
+    const period = store.startBehaviorCollection(registered, { request_id:'start_joint_cleanup_fixture' }).collection_period_id;
+    store.behaviorEvents = [success('2026-09-01T08:00:00', registered.device_id)];
+    store.persistRetentionFacts(now);
+    const incident = { device_id:registered.device_id, event_id:'joint_cleanup_incident', diagnostic_id:'joint_cleanup_incident',
+      collection_period_id:period, diagnostic_code:'tool_failed', diagnostic_component:'tool', stage:'tool' };
+    store.failureReports.append(registered, { report_id:'joint_cleanup_report', incident_id:incident.diagnostic_id,
+      collection_period_id:period, incident_period_id:period, notice_version:'failure-diagnostics-v1',
+      confirmed_at:Date.now(), notes:'error_code=EACCES', attachments:[] }, incident);
+    store.failureReports.detail(incident, 'fixture-reviewer');
+    const paths = [store.retentionFacts.path, store.retentionFacts.marker, store.failureReports.path, store.failureReports.metadataPath];
+    const before = paths.map(path => readFileSync(path));
+    const fault = t.mock.method(store.retentionFacts, 'flush', () => { throw new Error('fixture disk failure'); });
+    const response = store.deleteBehaviorData(registered, { request_id:'delete_pending_retention_001' });
+    assert.equal(response.status, 'processing');
+    assert.equal(response.completed_at, null);
+    assert.equal(store.deletionStatus(response.deletion_request_id, registered.device_token).status, 'processing');
+    assert.equal(JSON.parse(readFileSync(store.deletionTombstonesPath, 'utf8')).records.at(-1).status, 'processing');
+    paths.forEach((path, index) => assert.deepEqual(readFileSync(path), before[index]));
+    let recovered;
+    if (recovery === 'retry') {
+      fault.mock.restore();
+      assert.equal(store.deletionStatus(response.deletion_request_id, registered.device_token).status, 'completed');
+      recovered = store;
+    } else {
+      recovered = testStore(dir, store.pepper);
+      assert.equal(recovered.deletionStatus(response.deletion_request_id, registered.device_token).status, 'completed');
+    }
+    assert.equal(new RetentionFacts(dir).rows.size, 0);
+    const reports = new FailureReportStore(dir);
+    assert.equal(reports.state.reports.length, 0);
+    // Access audit keeps its existing bounded retention; deleting report
+    // material must not silently erase that separate security ledger.
+    assert.deepEqual(reports.state.audit, JSON.parse(before[3].toString('utf8')).audit);
+    assert.equal(recovered.deletionTombstones.at(-1).status, 'completed');
+  }));
+}
+
+for (const failStream of [false, true]) {
+  test(`pending deletion rewrites only dirty streams and retries failed disk commits (${failStream})`, t => fixture(t, dir => {
+    const { store, registered } = registeredStore(dir);
+    const other = store.register({ hardware_claim:'other-retention-fixture', registration_secret:'other-retention-secret-at-least-32', hardware_source:'installation_id' });
+    const rows = [registered.device_id, other.device_id].map((device_id, index) => ({
+      device_id, event_id:`dirty_stream_${index}`, event_name:'app_opened', occurred_at:now, received_at:now,
+    }));
+    store.events = rows.slice(); store.behaviorEvents = rows.slice(); store.behaviorPipelineEvents = rows.slice();
+    const streams = [store.eventsPath, store.behaviorEventsPath, store.behaviorPipelinePath];
+    for (const path of streams) writeFileSync(path, rows.map(row => JSON.stringify(row)).join('\n') + '\n');
+    const writes = [], rename = fs.renameSync;
+    let failNext = failStream;
+    const fault = t.mock.method(fs, 'renameSync', (source, target) => {
+      if (streams.includes(target)) writes.push(target);
+      if (failNext && target === store.behaviorEventsPath) { failNext = false; throw new Error('fixture stream disk failure'); }
+      return rename(source, target);
+    });
+    const prune = failStream ? null : t.mock.method(store.failureReports, 'prune', () => { throw new Error('fixture late cleanup failure'); });
+    syncBuiltinESMExports();
+    try {
+      const response = store.deleteBehaviorData(registered, { request_id:'delete_dirty_streams_fixture' });
+      assert.equal(response.status, 'processing');
+      if (failStream) {
+        assert.equal(store.behaviorEvents.length, 2, 'failed disk commit must not mark memory clean');
+        assert.match(readFileSync(store.behaviorEventsPath, 'utf8'), new RegExp(registered.device_id));
+      } else {
+        for (let count = 0; count < 3; count++) {
+          assert.equal(store.deletionStatus(response.deletion_request_id, registered.device_token).status, 'processing');
+        }
+        assert.deepEqual(writes, streams, 'late cleanup failure must not amplify already-clean stream writes');
+        prune.mock.restore();
+      }
+      assert.equal(store.deletionStatus(response.deletion_request_id, registered.device_token).status, 'completed');
+      assert.equal(writes.filter(path => path === store.eventsPath).length, 1);
+      for (const path of streams) {
+        const saved = readFileSync(path, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+        assert.deepEqual(saved.map(row => row.device_id), [other.device_id]);
+      }
+    } finally {
+      fault.mock.restore(); if (prune) prune.mock.restore(); syncBuiltinESMExports();
+    }
+  }));
+}
+
+for (const marker of [false, null, 'true']) {
+  test(`online and offline inventory reject invalid required-ledger marker ${JSON.stringify(marker)}`, async t => fixture(t, async dir => {
+    const { store } = registeredStore(dir);
+    const inventory = JSON.parse(readFileSync(store.devicesPath, 'utf8'));
+    inventory.deletion_ledger_required = marker;
+    const bytes = JSON.stringify(inventory);
+    writeFileSync(store.devicesPath, bytes);
+    const files = [store.retentionFacts.path, store.retentionFacts.marker, store.deletionTombstonesPath];
+    const before = files.map(path => readFileSync(path));
+    assert.throws(() => testStore(dir, store.pepper), error => error.status === 503 && error.message === 'telemetry_storage_unavailable');
+    for (const apply of [false, true]) await assert.rejects(backfillRetention({ dataDir:dir, now, apply }), /invalid device inventory/);
+    files.forEach((path, index) => assert.deepEqual(readFileSync(path), before[index]));
+    assert.equal(readFileSync(store.devicesPath, 'utf8'), bytes);
+  }));
+}
+
+test('offline reconciliation refuses a missing required ledger before touching retention authority', async t => fixture(t, async dir => {
+  const { store } = registeredStore(dir);
+  assert.equal(JSON.parse(readFileSync(store.devicesPath, 'utf8')).deletion_ledger_required, true);
+  const paths = [store.devicesPath, store.retentionFacts.path, store.retentionFacts.marker];
+  const before = paths.map(path => readFileSync(path));
+  rmSync(store.deletionTombstonesPath);
+  for (const apply of [false, true]) {
+    await assert.rejects(backfillRetention({ dataDir:dir, now, apply }), /missing required deletion inventory/);
+    paths.forEach((path, index) => assert.deepEqual(readFileSync(path), before[index]));
+    assert.equal(existsSync(store.deletionTombstonesPath), false);
+  }
 }));
 
 test('failed retention persistence prevents raw compaction and damaged authority fails closed', t => fixture(t, dir => {

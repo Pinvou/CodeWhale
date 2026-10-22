@@ -107,6 +107,9 @@ const RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
 
 // Remote-control fields use the dedicated, event-specific gateway below.
 fn client_event_field_allowed(field: &str) -> bool {
+    if diagnostics::known_field(field) {
+        return true;
+    }
     matches!(
         field,
         "session_id"
@@ -174,6 +177,7 @@ fn client_event_field_allowed(field: &str) -> bool {
 }
 
 fn validate_client_event_fields(event: &BehaviorEvent) -> Result<()> {
+    diagnostics::validate(event)?;
     if event.event_name == "remote_control_event" {
         return remote_control::validate_event_fields(event);
     }
@@ -215,6 +219,7 @@ pub struct BehaviorTelemetry {
     collection_period_id: Arc<RwLock<Option<String>>>,
     outbox: Arc<StdMutex<Outbox>>,
     tasks: Arc<StdMutex<HashMap<String, TaskAttempt>>>,
+    diagnostics: Arc<StdMutex<diagnostics::DiagnosticState>>,
     remote_executions: Arc<StdMutex<remote_execution::RemoteTelemetryState>>,
     team_sessions: Arc<StdMutex<HashMap<String, CollectionLease>>>,
     tool_calls: Arc<StdMutex<HashMap<String, ToolOperation>>>,
@@ -225,6 +230,7 @@ pub struct BehaviorTelemetry {
     event_tx: Option<mpsc::Sender<()>>,
     control_tx: Option<mpsc::Sender<()>>,
     heartbeat_tx: Option<mpsc::Sender<()>>,
+    report_tx: Option<mpsc::Sender<()>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -620,6 +626,9 @@ struct PersistedState {
     registration_secret: String,
     device_id: Option<String>,
     device_token: Option<String>,
+    /// Durable redo intent, committed before any queue lease is rewritten.
+    #[serde(default)]
+    credential_renewal_checkpoint: Option<CollectionLease>,
     #[serde(default)]
     retired_endpoints: Vec<RetiredEndpointCredentials>,
     #[serde(default)]
@@ -744,6 +753,12 @@ pub struct BehaviorEvent {
     pub occurred_at: u64,
     #[serde(flatten)]
     fields: serde_json::Map<String, Value>,
+    #[serde(skip)]
+    diagnostic_hint: Option<diagnostics::DiagnosticHint>,
+    #[serde(skip)]
+    diagnostic_remote: Option<(String, bool)>,
+    #[serde(skip)]
+    diagnostic_cancelled: bool,
 }
 
 /// `track_behavior_event` 命令的 wire 入参，与命令层共用同一声明（此前命令层
@@ -823,6 +838,9 @@ impl BehaviorEvent {
             event_name,
             occurred_at: now_ms(),
             fields: serde_json::Map::new(),
+            diagnostic_hint: None,
+            diagnostic_remote: None,
+            diagnostic_cancelled: false,
         }
     }
 
@@ -1085,17 +1103,41 @@ impl Outbox {
         Ok(())
     }
 
-    fn rebind_period(&mut self, period_id: &str, generation: u64) -> Result<()> {
-        for record in &mut self.records {
+    fn rebind_period(
+        &mut self,
+        period_id: &str,
+        generation: u64,
+        origins: &HashMap<String, String>,
+    ) -> Result<()> {
+        let mut rebound = self.records.clone();
+        for record in &mut rebound {
             record.collection_period_id = period_id.to_string();
             record.generation = generation;
             if let Some(event) = record.event.as_object_mut() {
+                if let Some(id) = event.get("diagnostic_id").and_then(Value::as_str) {
+                    let known = event
+                        .get("diagnostic_origin_period_id")
+                        .and_then(Value::as_str);
+                    let origin = origins
+                        .get(id)
+                        .map(String::as_str)
+                        .or(known)
+                        .or_else(|| event.get("collection_period_id").and_then(Value::as_str))
+                        .context("diagnostic origin missing")?;
+                    anyhow::ensure!(
+                        known.is_none_or(|prior| prior == origin),
+                        "diagnostic_origin_conflict"
+                    );
+                    let origin = origin.to_owned();
+                    event.insert("diagnostic_origin_period_id".to_owned(), json!(origin));
+                }
                 event.insert(
                     "collection_period_id".to_string(),
                     Value::String(period_id.to_string()),
                 );
             }
         }
+        self.records = rebound;
         self.recalculate_bytes();
         self.rewrite()
     }
@@ -1580,6 +1622,7 @@ impl PersistedState {
             registration_secret: token("rs_", 32),
             device_id: None,
             device_token: None,
+            credential_renewal_checkpoint: None,
             retired_endpoints: Vec::new(),
             control: CollectionControl::default(),
         }
@@ -1587,6 +1630,22 @@ impl PersistedState {
 
     fn has_pending_control(&self) -> bool {
         self.control.pending_request.is_some() || !self.control.pending_deletions.is_empty()
+    }
+
+    fn renewal_checkpoint_is_current(&self, runtime: &RuntimeConfig) -> bool {
+        runtime.enabled
+            && endpoint_matches_runtime(self, runtime)
+            && self.control.enabled
+            && !self.control.collection_blocked
+            && !self.has_pending_control()
+            && self
+                .credential_renewal_checkpoint
+                .as_ref()
+                .is_some_and(|lease| {
+                    lease.generation == self.control.generation
+                        && Some(&lease.collection_period_id)
+                            == self.control.collection_period_id.as_ref()
+                })
     }
 
     fn rebind_endpoint(mut self, runtime: &RuntimeConfig) -> Self {
@@ -1754,6 +1813,17 @@ fn nonempty(value: String) -> Option<String> {
 
 #[path = "behavior_telemetry/events.rs"]
 mod events;
+
+#[path = "behavior_telemetry/diagnostic_redaction.rs"]
+mod diagnostic_redaction;
+#[path = "behavior_telemetry/diagnostics.rs"]
+mod diagnostics;
+// The standalone lifecycle harness compiles this module without app commands.
+#[cfg_attr(all(test, feature = "behavior-telemetry-test"), allow(unused_imports))]
+pub(crate) use diagnostics::{
+    DiagnosticPreviewRequest, capture_failure_context, confirm_diagnostic, diagnostic_error_code,
+    diagnostic_incidents, preview_diagnostic,
+};
 
 #[path = "behavior_telemetry/remote_control.rs"]
 mod remote_control;

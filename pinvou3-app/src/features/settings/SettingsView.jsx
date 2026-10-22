@@ -7,6 +7,7 @@ import PetSettingsSection from '../pet/PetSettingsSection.jsx';
 import { DEFAULT_PET_ID } from '../pet/pet-registry.js';
 import { TeamRelayAccessSettings } from '../team-relay/TeamRelayAccessSettings.jsx';
 import RemoteControlSettingsPage from '../remote-control/RemoteControlSettingsPage.jsx';
+import DiagnosticsPanel from '../failure-diagnostics/DiagnosticsPanel.jsx';
 import { bridge, isLocalModel, useBridgeState } from '../../hooks/useBridge.js';
 import { copyClipboardText } from '../../shared/clipboard.js';
 import { formatSessionDate } from '../../shared/date-utils.js';
@@ -3047,6 +3048,7 @@ const formatMemoryTime = (item, copy) => {
       };
       const renderHelp = () => (
         <>
+          <DiagnosticsPanel copy={t.diagnostics} />
           <IOSSection>
             <IOSRow label={settingsCopy.feedbackTitle} desc={settingsCopy.feedbackDesc}>
               <button onClick={() => setFeedbackOpen(true)} className="h-9 px-4 rounded-full bg-[#007AFF] text-white text-[14px] font-semibold">{settingsCopy.submitFeedback}</button>

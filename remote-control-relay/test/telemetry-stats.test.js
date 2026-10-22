@@ -1792,6 +1792,7 @@ test("legacy behavior files are rewritten without raw tool or model aliases", ()
     } finally {
       clearTimeout(inventory.saveTimer);
     }
+
     writeFileSync(join(dataDir, "behavior-events.jsonl"), [
       JSON.stringify({ event_id: "legacy_tool_event_0001", event_name: "tool_call_completed", device_id: registered[0].device_id, tool_name: privateTool, tool_type: "custom", success: true, occurred_at: Date.now(), received_at: Date.now() }),
       JSON.stringify({ event_id: "legacy_model_event_0001", event_name: "model_used", device_id: registered[0].device_id, provider_name: "private-provider", model_name: privateModel, occurred_at: Date.now(), received_at: Date.now() }),

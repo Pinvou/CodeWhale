@@ -36,7 +36,12 @@ test('marketplace and connector installs have a guarded terminal event', () => {
   assert(telemetry.includes('complete_tool_install_terminal'));
   assert(telemetry.includes('CredentialRenewalTransition'));
   assert.match(telemetry, /renewal_was_in_progress[\s\S]*renewal_in_progress\.load\(Ordering::Acquire\)/);
-  assert.match(telemetry, /collecting\.store\(true, Ordering::Release\);[\s\S]*flush_tool_install_terminals\(generation\)/);
+  const renewal = telemetry.slice(telemetry.indexOf('pub(super) async fn recover_expired_credentials_locked'), telemetry.indexOf('pub(super) fn finish_credential_renewal_checkpoint'));
+  const finish = telemetry.slice(telemetry.indexOf('pub(super) fn finish_credential_renewal_checkpoint'), telemetry.indexOf('pub async fn status'));
+  assert.match(finish, /persist_state\(&committed\)\?[\s\S]*collecting\.store\(true, Ordering::Release\);\s*Ok\(\(\)\)/);
+  assert.match(renewal, /if let Err\(error\) = self\.finish_credential_renewal_checkpoint\(state\)\s*\{[^}]*return Err\(error\);\s*\}\s*renewal_transition\.complete\(\);\s*self\.flush_tool_install_terminals\(generation\);/);
+  const background = telemetry.slice(telemetry.indexOf('pub(super) async fn retry_pending_control('), telemetry.indexOf('pub(super) async fn run_worker'));
+  assert.match(background, /finish_credential_renewal_checkpoint\(state\)[\s\S]*return Err\(error\)[\s\S]*Some\(state\.control\.generation\)[\s\S]*if let Some\(generation\) = recovered_generation\s*\{\s*self\.flush_tool_install_terminals\(generation\);/);
   assert(telemetry.includes('tool_install_terminal_waits_for_renewal_and_drops_after_reauthorization'));
   assert(telemetry.includes('tool_install_persistence_failures_do_not_accumulate_and_recovery_converges'));
 });

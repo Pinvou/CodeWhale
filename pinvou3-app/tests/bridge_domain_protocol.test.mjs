@@ -108,7 +108,8 @@ const expectedProtocolHashes = {
   // consumed from the artifact-tracker feature); same command surface, no new
   // invoke or listen entries (the extractor scans raw source, so body/comment
   // text is part of the digest).
-  orchestration: '11cea82864c529488140a447fbf46e3153a6005ddb6fc42603af1e82bc573bb3',
+  // Recomputed from the merged main shared-helper surface plus diagnostic wrappers.
+  orchestration: "ea8b35e2f9997a51a527387e5cddc94d1ece231dd546529e79eb108fdae18045",
   // Recomputed for artifact export telemetry after a successful external open;
   // attribution is now isolated to the explicitly targeted session.
   // Recomputed again for the Linux clipboard-image paste fallback (community

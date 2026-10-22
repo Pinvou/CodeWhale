@@ -8,8 +8,10 @@
 /* eslint-disable sonarjs/no-nested-template-literals, sonarjs/no-unenclosed-multiline-block -- compact i18n dictionary: nested templates mirror the copy structure one-to-one; credential field names are false-positive secrets */
 import { browserZh } from './browser.js';
 import { CHAT_RECOVERY_COPY } from './chat-recovery.js';
+import { failureDiagnosticsZh } from './failure-diagnostics.js';
 
 const conversationZh = {
+  failureDiagnostics: failureDiagnosticsZh,
   completed:'已完成', failed:'失败', interrupted:'已中断', cancelled:'已取消', limitReached:'达到限制', processing:'处理中', processingActive:'正在处理',
   waitingPermission:'等待授权', waitingInput:'等待你的输入', waitingInputShort:'等待输入',
   goLatest:label=>`${label}，前往最新消息`,
@@ -185,6 +187,7 @@ const acpProvidersZh = {
 };
 
 export const dictZh = {
+  diagnostics: failureDiagnosticsZh,
   steerFailedLost: CHAT_RECOVERY_COPY.zh.steerFailedLost,
   ...browserZh,
         langTag: 'zh',
@@ -2255,6 +2258,7 @@ behaviorSettingsZh.behaviorAnalyticsEntryDesc = "管理产品改进计划与数�
 behaviorSettingsZh.behaviorAnalyticsBack = "返回帮助反馈";
 behaviorSettingsZh.behaviorAnalyticsLabel = "帮助改进 PINVOU";
 behaviorSettingsZh.behaviorAnalyticsDesc = "仅收集受控的功能使用结果、耗时和错误分类，不收集对话、文件内容、路径或凭据。";
+behaviorSettingsZh.behaviorAnalyticsDesc += " 开启使用统计时，失败记录还会包含具体错误码、版本及有界阶段轨迹；详细日志和截图仅在你逐次预览确认后发送。";
 behaviorSettingsZh.behaviorAnalyticsNotConfigured = "此版本未配置行为统计服务，采集保持关闭。";
 behaviorSettingsZh.behaviorAnalyticsEnableConfirm = "启用后，PINVOU 将收集受控的功能使用与质量数据，用于改进产品。不会收集对话正文、文件内容、路径、工具参数或凭据。是否启用？";
 behaviorSettingsZh.behaviorAnalyticsDisableConfirm = "关闭后将立即停止采集并清空待上传事件；离线时撤回请求会在联网后重试。是否关闭？";

@@ -14,7 +14,10 @@ export async function backfillRetention({ dataDir, sources = [], apply = false, 
   // Pending deletions must also be excluded when the service has been stopped.
   let tombstones;
   try { tombstones = JSON.parse(readFileSync(join(dataDir, 'behavior-deletion-tombstones.json'), 'utf8')); }
-  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    if (saved.deletion_ledger_required === true) throw new Error('missing required deletion inventory');
+  }
   if (tombstones !== undefined && (!tombstones || !Array.isArray(tombstones.records)
     || tombstones.records.some(row => !row || typeof row !== 'object'
       || typeof row.subject_hash !== 'string' || !row.subject_hash))) throw new Error('invalid deletion inventory');
@@ -151,7 +154,7 @@ try {
 } catch (error) {
   // Do not echo raw JSON or filesystem contents from a failed backup parse.
   const known = ['deletion filtering requires PINVOU_TELEMETRY_DEVICE_PEPPER', 'missing or invalid retention authority',
-    'invalid retention facts', 'invalid retention row', 'invalid device inventory', 'invalid deletion inventory', 'unsafe telemetry storage file'];
+    'invalid retention facts', 'invalid retention row', 'invalid device inventory', 'invalid deletion inventory', 'missing required deletion inventory', 'unsafe telemetry storage file'];
   console.error(error.cliMessage || (known.includes(error.message) ? error.message
     : `retention backfill failed (${error.code || (error instanceof SyntaxError ? 'invalid_json' : 'storage_error')})`));
   process.exitCode = 1;

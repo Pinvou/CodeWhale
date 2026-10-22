@@ -14,6 +14,12 @@ mod platform {
     pub mod filesystem {
         use std::io;
         use std::path::Path;
+        pub fn read_private_data_file_bytes_within(
+            path: &Path,
+            max_bytes: u64,
+        ) -> io::Result<Vec<u8>> {
+            pinvou3_lib::platform::behavior_telemetry_test_support::read_private_data_file_bytes_within(path, max_bytes)
+        }
 
         pub fn atomic_write_private(path: &Path, content: &[u8]) -> io::Result<()> {
             pinvou3_lib::platform::behavior_telemetry_test_support::atomic_write_private(

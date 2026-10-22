@@ -130,6 +130,9 @@ pub(crate) struct RemoteControlEvent {
     model_source: Option<RemoteModelSource>,
     size_bucket: Option<RemoteSizeBucket>,
     permission_step: Option<RemotePermissionStep>,
+    diagnostic_task: Option<([u8; 32], bool)>,
+    diagnostic_code: Option<(&'static str, Option<u16>)>,
+    diagnostic_cancelled: bool,
     task_key: Option<String>,
     role: Option<&'static str>,
     mode: Option<&'static str>,
@@ -148,6 +151,9 @@ impl RemoteControlEvent {
             model_source: None,
             size_bucket: None,
             permission_step: None,
+            diagnostic_task: None,
+            diagnostic_code: None,
+            diagnostic_cancelled: false,
             task_key: None,
             role: None,
             mode: None,
@@ -159,6 +165,23 @@ impl RemoteControlEvent {
 
     pub(crate) fn reason(mut self, reason: RemoteReason) -> Self {
         self.reason = reason;
+        self
+    }
+    pub(crate) fn diagnostic_terminal(mut self, cancelled: bool, unknown: bool) -> Self {
+        self.diagnostic_cancelled = cancelled;
+        if unknown {
+            self.diagnostic_code = Some(("remote_result_unknown", None));
+        }
+        self
+    }
+
+    /// Task IDs are random protocol identifiers, never device identities.
+    pub(crate) fn diagnostic_task(mut self, task: &str, controlled: bool) -> Self {
+        use sha2::{Digest as _, Sha256};
+        self.diagnostic_task = Some((
+            Sha256::digest(format!("failure-remote-task-v1|{task}")).into(),
+            controlled,
+        ));
         self
     }
 
@@ -209,6 +232,9 @@ impl RemoteControlEvent {
             "code" => Some("code"),
             _ => None,
         });
+        if !task_id.trim().is_empty() {
+            self = self.diagnostic_task(task_id, controlled);
+        }
         self.role(controlled)
     }
 
@@ -247,9 +273,13 @@ impl RemoteControlEvent {
             Ok(_) => (RemoteOutcome::Ok, RemoteReason::None),
             Err(error) => classify_error(error),
         };
-        Self::new(stage, outcome)
+        let mut event = Self::new(stage, outcome)
             .reason(reason)
-            .latency_ms(latency_ms)
+            .latency_ms(latency_ms);
+        if let Err(error) = result {
+            event.diagnostic_code = Some(super::diagnostics::classify(error));
+        }
+        event
     }
 
     pub(super) fn into_behavior(self) -> BehaviorEvent {
@@ -258,6 +288,24 @@ impl RemoteControlEvent {
             .string("remote_outcome", self.outcome.as_str())
             .string("remote_reason", self.reason.as_str())
             .string("remote_latency_bucket", latency_bucket(self.latency_ms));
+        if let Some((trace, controlled)) = self.diagnostic_task {
+            event.diagnostic_remote =
+                Some((crate::platform::encoding::hex_lower(&trace), controlled));
+        }
+        event.diagnostic_cancelled = self.diagnostic_cancelled;
+        if let Some((code, http)) = self.diagnostic_code {
+            if code != "unknown" {
+                event.diagnostic_hint = Some(super::diagnostics::DiagnosticHint {
+                    code: code.into(),
+                    http,
+                    site: if self.stage == RemoteStage::TaskTerminal {
+                        "remote_terminal"
+                    } else {
+                        "remote_admission"
+                    },
+                });
+            }
+        }
         if let Some(source) = self.model_source {
             event = event.string("remote_model_source", source.as_str());
         }
@@ -406,6 +454,9 @@ pub(super) fn validate_event_fields(event: &BehaviorEvent) -> Result<()> {
         "remote_latency_bucket",
     ];
     for field in event.fields.keys() {
+        if super::diagnostics::known_field(field) {
+            continue;
+        }
         if !REQUIRED.contains(&field.as_str())
             && !matches!(
                 field.as_str(),

@@ -6,8 +6,10 @@
 import { dictEn } from './en.js';
 import { browserJa } from './browser.js';
 import { CHAT_RECOVERY_COPY } from './chat-recovery.js';
+import { failureDiagnosticsJa } from './failure-diagnostics.js';
 
 const conversationJa = {
+  failureDiagnostics: failureDiagnosticsJa,
   completed:'完了', failed:'失敗', interrupted:'中断', cancelled:'キャンセル済み', limitReached:'上限に到達', processing:'処理中', processingActive:'処理中',
   waitingPermission:'権限の承認待ち', waitingInput:'入力待ち', waitingInputShort:'入力待ち',
   goLatest:label=>`${label}。最新メッセージへ移動`,
@@ -797,7 +799,7 @@ const jaBase = {
 };
 
 // ja 漏翻的 key 回落英文，避免新增文案后显示 undefined
-export const dictJa = { ...dictEn, ...jaBase };
+export const dictJa = { ...dictEn, ...jaBase, diagnostics: failureDiagnosticsJa };
 
 dictJa.uiToolDetails.flow = {
   incomplete:name=>`${name} の接続が未完了`, connected:name=>`${name} に接続済み`, connecting:name=>`${name} に接続中`,
@@ -2284,6 +2286,7 @@ behaviorSettingsJa.behaviorAnalyticsEntryDesc = "製品改善とデータ利用�
 behaviorSettingsJa.behaviorAnalyticsBack = "ヘルプとフィードバックに戻る";
 behaviorSettingsJa.behaviorAnalyticsLabel = "PINVOU の改善に協力する";
 behaviorSettingsJa.behaviorAnalyticsDesc = "管理された機能の結果、所要時間、エラー分類のみを収集し、会話、ファイル内容、パス、認証情報は収集しません。";
+behaviorSettingsJa.behaviorAnalyticsDesc += " 利用統計が有効な場合、障害の具体的なエラーコード、バージョン、上限のある処理段階も送信します。詳細ログと画像は、毎回プレビューに明示的に同意した後にのみ送信します。";
 behaviorSettingsJa.behaviorAnalyticsNotConfigured = "このビルドでは利用状況分析サービスが設定されていないため、収集は無効です。";
 behaviorSettingsJa.behaviorAnalyticsEnableConfirm = "製品改善のため、管理された機能利用と品質データを収集します。会話本文、ファイル内容、パス、ツール引数、認証情報は収集しません。有効にしますか？";
 behaviorSettingsJa.behaviorAnalyticsDisableConfirm = "収集を直ちに停止し、未送信イベントを削除します。オフライン時の撤回は接続復旧後に再試行されます。無効にしますか？";

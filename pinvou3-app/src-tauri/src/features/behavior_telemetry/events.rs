@@ -775,6 +775,7 @@ pub fn finish_task(
                         operation.tool_type,
                     )
                     .success(false)
+                    .diagnostic_cancellation(matches!(status, "cancelled" | "interrupted"))
                     .integer("duration_ms", now_ms().saturating_sub(operation.started_at))
                     .string(
                         "error_category",
@@ -901,6 +902,7 @@ pub fn track_tool_call_completed(
     _tool_name: &str,
     success: bool,
     error_category: Option<&str>,
+    diagnostic_error: Option<&str>,
 ) {
     let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
         return;
@@ -930,6 +932,9 @@ pub fn track_tool_call_completed(
         .integer("duration_ms", now_ms().saturating_sub(operation.started_at));
     if !success {
         event = event.string("error_category", error_category.unwrap_or("tool_error"));
+        if let Some(error) = diagnostic_error {
+            event = event.diagnostic_error(error, "tool_result");
+        }
     }
     telemetry.track_for_lease(
         execution_fields(event, operation.execution_task_key.as_deref()),

@@ -110,6 +110,10 @@ function injectSource() {
       {role:'user',content:[{type:'tool_result',tool_use_id:'t-mcp',content:'{"path":"/home/x/季度报告.pptx"}'}]},
       {role:'assistant',content:[{type:'text',text:'\\u0060\\u0060\\u0060json\\n{"name":"Reviewer\\\'s Agent","body":"hidden-prompt","description":"It\\\'s a highlighted JSON card"}\\n\\u0060\\u0060\\u0060'}]},
       {role:'assistant',content:[{type:'text',text:'\\u0060\\u0060\\u0060card-question\\n{"question":"继续执行？","options":["继续","取消"]}\\n\\u0060\\u0060\\u0060'}]}]}};
+    function nativeSurfaceAck(promise){
+      const call=window.__TAURI_INVOKES__[window.__TAURI_INVOKES__.length-1];
+      return promise.then(function(result){call.completed=true;call.result=result;return result;});
+    }
     function invoke(cmd,args){
       window.__TAURI_INVOKES__.push({cmd:cmd,args:args||{}});
       switch(cmd){
@@ -187,14 +191,14 @@ function injectSource() {
           return Promise.resolve(window.__BROWSER_SURFACE_GENERATION__);
         case 'browser_show_native_surface':
           if(window.__FAIL_BROWSER_SURFACE_SHOW__) return Promise.reject(new Error('surface show unavailable'));
-          if(window.__DELAY_BROWSER_SHOW__) return new Promise(function(resolve){
+          if(window.__DELAY_BROWSER_SHOW__) return nativeSurfaceAck(new Promise(function(resolve){
             window.__RESOLVE_BROWSER_SHOW__=function(value){
               window.__DELAY_BROWSER_SHOW__=false;
               window.__RESOLVE_BROWSER_SHOW__=null;
               resolve(value !== false);
             };
-          });
-          return Promise.resolve(window.__BROWSER_NATIVE_RESULT__ === true);
+          }));
+          return nativeSurfaceAck(Promise.resolve(window.__BROWSER_NATIVE_RESULT__ === true));
         case 'browser_create_tab': {
           const id='browser-tab-'+(BROWSER_TABS.length+1);
           BROWSER_TABS=BROWSER_TABS.map(function(tab){return Object.assign({},tab,{active:false});});
@@ -214,14 +218,14 @@ function injectSource() {
         case 'browser_stop': window.__BROWSER_RUNNING__=false; return Promise.resolve(null);
         case 'browser_hide_native_surface':
           if(window.__FAIL_BROWSER_HIDE__) return Promise.reject(new Error('surface hide unavailable'));
-          if(window.__DELAY_BROWSER_HIDE__) return new Promise(function(resolve){
+          if(window.__DELAY_BROWSER_HIDE__) return nativeSurfaceAck(new Promise(function(resolve){
             window.__RESOLVE_BROWSER_HIDE__=function(){
               window.__DELAY_BROWSER_HIDE__=false;
               window.__RESOLVE_BROWSER_HIDE__=null;
               resolve(null);
             };
-          });
-          return Promise.resolve(null);
+          }));
+          return nativeSurfaceAck(Promise.resolve(null));
         case 'voice_asr_status': return Promise.resolve(window.__VOICE_ASR_MISSING__
           ? {ready:false,installable:false,missing:['model'],engine:{installed:true}}
           : {ready:true,installable:true,missing:[],engine:{installed:true}});
@@ -643,15 +647,31 @@ async function expand(page) {
     const dockSwitchPublishedAfterHideAck = pane?.getAttribute('aria-hidden') === 'true'
       && document.querySelector('[data-testid="artifact-side-panel"]')
         ?.getAttribute('aria-hidden') === 'false';
-    // Baseline the hide count only once the previous dock switch stopped emitting:
-    // the fullscreen assertion below is negative (no new hide calls), so a baseline
-    // taken mid-flight would blame the fullscreen toggle for an in-flight call.
-    await window.__uiStable__(() => window.__TAURI_INVOKES__
-      .filter(call => call.cmd === 'browser_hide_native_surface').length);
+    // Require the selected artifact tree and a completed physical hide, then
+    // cross a paint/effect turn before taking the negative assertion's baseline.
+    // Two equal timer samples alone can precede the dock-switch effect cleanup.
+    const artifactDockHidden = () => {
+      const last = window.__TAURI_INVOKES__
+        .filter(call => call.cmd === 'browser_show_native_surface' || call.cmd === 'browser_hide_native_surface').at(-1);
+      return pane?.getAttribute('aria-hidden') === 'true'
+        && document.querySelector('[data-testid="artifact-side-panel"]')?.getAttribute('aria-hidden') === 'false'
+        && last?.cmd === 'browser_hide_native_surface' && last.completed;
+    };
+    await window.__uiWait__(artifactDockHidden);
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const artifactDockHiddenBeforeFullscreen = await window.__uiWait__(artifactDockHidden);
     const hideCallsBeforeArtifactFullscreen = window.__TAURI_INVOKES__
       .filter(call => call.cmd === 'browser_hide_native_surface').length;
     document.querySelector('[data-testid="artifact-fullscreen-toggle"]')?.click();
     await window.__uiWait__(() => !!document.querySelector('[data-testid="artifact-fullscreen-panel"]'));
+    const artifactFullscreenObservation = {
+      paneHidden: pane?.getAttribute('aria-hidden') === 'true',
+      panelPresent: !!document.querySelector('[data-testid="artifact-fullscreen-panel"]'),
+      hideBaseline: hideCallsBeforeArtifactFullscreen,
+      hides: window.__TAURI_INVOKES__.filter(call => call.cmd === 'browser_hide_native_surface').length,
+      recentVisibility: window.__TAURI_INVOKES__
+        .filter(call => call.cmd === 'browser_show_native_surface' || call.cmd === 'browser_hide_native_surface').slice(-4),
+    };
     const artifactFullscreenAfterDockHide = pane?.getAttribute('aria-hidden') === 'true'
       && !!document.querySelector('[data-testid="artifact-fullscreen-panel"]')
       && window.__TAURI_INVOKES__
@@ -713,6 +733,17 @@ async function expand(page) {
     await window.__uiWait__(() => pane?.getAttribute('aria-hidden') === 'false');
     const browserRestoredAfterVoiceSetup = pane?.getAttribute('aria-hidden') === 'false';
 
+    // Dock aria state can restore before BrowserView's RAF has shown the native
+    // page. Start this barrier test only after that actual show ACK, otherwise a
+    // valid publication over an already-hidden surface is blamed for a later hide.
+    const nativeSurfaceVisible = () => {
+      const last = window.__TAURI_INVOKES__
+        .filter(call => call.cmd === 'browser_show_native_surface' || call.cmd === 'browser_hide_native_surface').at(-1);
+      return pane?.getAttribute('aria-hidden') === 'false'
+        && last?.cmd === 'browser_show_native_surface' && last.completed && last.result === true
+        && typeof window.__RESOLVE_BROWSER_HIDE__ !== 'function';
+    };
+    const attachmentDropStartedWithNativeSurface = await window.__uiWait__(nativeSurfaceVisible);
     const dragData = new DataTransfer();
     dragData.items.add(new File(['native surface gate'], 'native-surface-gate.txt', {type:'text/plain'}));
     window.__DELAY_BROWSER_HIDE__ = true;
@@ -721,21 +752,17 @@ async function expand(page) {
       cancelable: true,
       dataTransfer: dragData,
     }));
-    // Wait for a DEFINITE overlay state before reading the flag. While inactive
-    // the overlay still renders (invisible, aria-hidden), so a fixed timeout here
-    // raced the dragenter commit on slow runners and sampled the inactive-present
-    // form, which makes the withheld assertion vacuous. The two definite forms are
-    // the overlay removed from the DOM entirely (active committed, publication not
-    // yet acked) and aria-hidden=false (published), so a publication without an ack
-    // still fails the read below. The inactive-present tolerance is kept as the
-    // fallback for a runner slow enough to exhaust the wait deadline.
+    // Observe this drag's pending hide or a premature publication. An inactive
+    // placeholder/removed node alone does not prove the drag has reached its gate.
+    let attachmentDropEarlyPublication = false;
     await window.__uiWait__(() => {
       const overlay = document.querySelector('[data-testid="attachment-drop-overlay"]');
-      return !overlay || overlay.getAttribute('aria-hidden') === 'false';
+      attachmentDropEarlyPublication ||= overlay?.getAttribute('aria-hidden') === 'false';
+      return attachmentDropEarlyPublication || typeof window.__RESOLVE_BROWSER_HIDE__ === 'function';
     });
     const attachmentDropBeforeHideAck = document.querySelector('[data-testid="attachment-drop-overlay"]');
-    const attachmentDropWithheldUntilHideAck = !attachmentDropBeforeHideAck
-      || attachmentDropBeforeHideAck.getAttribute('aria-hidden') !== 'false';
+    const attachmentDropWithheldUntilHideAck = !attachmentDropEarlyPublication
+      && (!attachmentDropBeforeHideAck || attachmentDropBeforeHideAck.getAttribute('aria-hidden') !== 'false');
     const attachmentDropHidePending = typeof window.__RESOLVE_BROWSER_HIDE__ === 'function';
     window.__RESOLVE_BROWSER_HIDE__?.();
     await window.__uiWait__(() => document.querySelector('[data-testid="attachment-drop-overlay"]')
@@ -822,6 +849,8 @@ async function expand(page) {
       dockSwitchPublishedAfterHideAck,
       dockBrowserRestored,
       artifactFullscreenAfterDockHide,
+      artifactDockHiddenBeforeFullscreen,
+      artifactFullscreenObservation,
       composerHideFailureFailClosed,
       composerWithheldUntilHideAck,
       composerHidePending,
@@ -833,6 +862,7 @@ async function expand(page) {
       voiceSetupPublishedAfterHideAck,
       browserRestoredAfterVoiceSetup,
       attachmentDropWithheldUntilHideAck,
+      attachmentDropStartedWithNativeSurface,
       attachmentDropHidePending,
       attachmentDropPublishedAfterHideAck,
       browserRestoredAfterAttachmentDrop,
@@ -861,6 +891,7 @@ async function expand(page) {
       && browserPane.narrowLayoutProtected
       && browserPane.dockSwitchWithheldUntilHideAck && browserPane.dockHidePending
       && browserPane.dockSwitchPublishedAfterHideAck && browserPane.dockBrowserRestored
+      && browserPane.artifactDockHiddenBeforeFullscreen
       && browserPane.artifactFullscreenAfterDockHide
       && browserPane.composerHideFailureFailClosed
       && browserPane.composerWithheldUntilHideAck && browserPane.composerHidePending
@@ -868,6 +899,7 @@ async function expand(page) {
       && browserPane.composerPublishedAfterHideAck && browserPane.browserRestoredAfterComposer
       && browserPane.voiceSetupWithheldUntilHideAck && browserPane.voiceSetupHidePending
       && browserPane.voiceSetupPublishedAfterHideAck && browserPane.browserRestoredAfterVoiceSetup
+      && browserPane.attachmentDropStartedWithNativeSurface
       && browserPane.attachmentDropWithheldUntilHideAck && browserPane.attachmentDropHidePending
       && browserPane.attachmentDropPublishedAfterHideAck && browserPane.browserRestoredAfterAttachmentDrop
       && browserPane.settingsWithheldUntilHideAck && browserPane.delayedHidePending
@@ -2703,27 +2735,32 @@ async function expand(page) {
     }));
     return true;
   });
-  await page.evaluate(() => window.__uiWait__(() =>
-    [...document.querySelectorAll('span,div,button,a')]
-      .some(node => (node.textContent || '').trim() === '收纳')));
-  await clickText(page, '收纳');
-  await page.evaluate(() => window.__uiWait__(() =>
-    [...document.querySelectorAll('span,div,button,a')]
-      .some(node => (node.textContent || '').trim() === '确认收纳')));
-  await clickText(page, '确认收纳');
-  await page.evaluate(() => window.__uiWait__(() =>
-    [...document.querySelectorAll('button')]
-      .some(node => (node.textContent || '').trim() === '前往查看')));
-  const archiveToastBefore = await page.evaluate(() => {
-    const button = [...document.querySelectorAll('button')].find(node => (node.textContent || '').trim() === '前往查看');
-    const rect = button && button.getBoundingClientRect();
-    return {
-      opened: !!button,
-      noWrap: !!rect && rect.width >= 74 && rect.height <= 34,
-      text: document.body.innerText.includes('已收纳到【对话管理-已收纳】'),
+  const archiveToastBefore = await page.evaluate(async () => {
+    const findButton = (label, scope = document) => [...scope.querySelectorAll('button')]
+      .find(node => (node.textContent || '').trim() === label && !node.disabled);
+    const menuActionReady = await window.__uiWait__(() => !!findButton('收纳'));
+    findButton('收纳')?.click();
+    const confirmButton = () => {
+      const dialog = document.querySelector('[role="alertdialog"][aria-labelledby="archive-confirm-title"]');
+      return dialog ? findButton('确认收纳', dialog) : null;
     };
+    const confirmActionReady = await window.__uiWait__(() => !!confirmButton());
+    confirmButton()?.click();
+    const snapshot = { menuActionReady, confirmActionReady, opened: false, noWrap: false, text: false };
+    // The toast lasts 3.5s. Observe, measure and click in the same browser task;
+    // separate CDP calls let a loaded runner expire it between wait and action.
+    await window.__uiWait__(() => {
+      const button = findButton('前往查看');
+      if (!button) return false;
+      const rect = button.getBoundingClientRect();
+      snapshot.opened = true;
+      snapshot.noWrap = rect.width >= 74 && rect.height <= 34;
+      snapshot.text = document.body.innerText.includes('已收纳到【对话管理-已收纳】');
+      button.click();
+      return true;
+    });
+    return snapshot;
   });
-  await clickText(page, '前往查看');
   await page.evaluate(() => window.__uiWait__(() =>
     document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view') === 'search'
       && document.body.innerText.includes('第三季度财报分析')));
@@ -2734,7 +2771,8 @@ async function expand(page) {
     noSettingsError: !document.body.innerText.includes('设置页加载失败'),
   }));
   rec('⑤b 收纳 toast 前往查看直达对话管理-已收纳且按钮不折行',
-    archiveMenuOpened && archiveToastBefore.opened && archiveToastBefore.noWrap && archiveToastBefore.text &&
+    archiveMenuOpened && archiveToastBefore.menuActionReady && archiveToastBefore.confirmActionReady
+      && archiveToastBefore.opened && archiveToastBefore.noWrap && archiveToastBefore.text &&
     archiveToastGoto.currentView === 'search' && archiveToastGoto.archivedTabVisible && archiveToastGoto.archivedVisible && archiveToastGoto.noSettingsError,
     JSON.stringify({ archiveMenuOpened, archiveToastBefore, archiveToastGoto }));
 

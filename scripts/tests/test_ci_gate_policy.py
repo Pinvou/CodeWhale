@@ -159,6 +159,24 @@ def _rust_full_filter_entries(workflow_text):
     )
 
 
+def _rust_embedded_telemetry_inputs(source, source_path):
+    """Resolve the literal and manifest-concat forms used by Rust schema consumers."""
+    targets = set()
+    manifest = ROOT / "pinvou3-app/src-tauri"
+    for match in re.finditer(
+        r'include_(?:str|bytes)!\(\s*'
+        r'(?P<manifest>concat!\(\s*env!\(\s*"CARGO_MANIFEST_DIR"\s*\)\s*,\s*)?'
+        r'"(?P<path>[^"\r\n]+)"',
+        source,
+    ):
+        literal = match.group("path")
+        target = ((manifest / literal.lstrip("/")) if match.group("manifest")
+                  else (source_path.parent / literal)).resolve()
+        if target.parent == (ROOT / "docs/schemas").resolve() and target.name.startswith("behavior-telemetry-"):
+            targets.add(target.relative_to(ROOT).as_posix())
+    return targets
+
+
 def _macos_job(workflow_text):
     return workflow_text.split("\n  macos-rust-check:", maxsplit=1)[1].split(
         "\n  windows-codex-runtime-test:", maxsplit=1
@@ -190,17 +208,21 @@ def _evaluate_github_condition(
     rust_code=False,
     cli_rust=False,
     full_label=False,
+    trusted_backflow=False,
+    action="synchronize",
 ):
     """Replay the checked-in GitHub expression for a deterministic truth table."""
 
     replacements = {
         "!cancelled()": "True",
         "github.event_name": repr(event_name),
+        "github.event.action": repr(action),
         "github.event.pull_request.draft": repr(draft),
         "needs.changes.outputs.backflow_mode": repr(mode),
         "needs.changes.outputs.rust_full": repr(str(rust_full).lower()),
         "needs.changes.outputs.rust_code": repr(str(rust_code).lower()),
         "needs.changes.outputs.cli_rust": repr(str(cli_rust).lower()),
+        "needs.changes.outputs.trusted_backflow": repr(str(trusted_backflow).lower()),
         "contains(github.event.pull_request.labels.*.name, 'ci:full-rust')": repr(
             full_label
         ),
@@ -928,41 +950,123 @@ class CiGatePolicyTests(unittest.TestCase):
             )
 
     def test_behavior_telemetry_schema_contract_fully_routed(self):
-        # 根目录 `docs/schemas/behavior-telemetry-*.json` 被跨语言消费方读取:
-        # behavior_telemetry_model_contract.test.mjs 与
-        # behavior_telemetry_activation_contract.test.mjs readFileSync 两个
-        # 文件(frontend leg),behavior_telemetry_tests.rs include_str! 只读
-        # registries(rust-test leg)。这些路径都不匹配任何按目录前缀的通配
-        # 条目,漏登记时 schema-only PR 的对应门禁会静默 skipped,而
-        # required-gate 的 success|skipped 循环照常放行(fail-open)。按真实
-        # 消费面显式登记:两个 schema 都进 frontend,仅 registries 进
-        # rust_full(v1 schema 无 Rust 消费方,过度登记只是无谓放大
-        # rust-test 触发面);新增 schema 文件时这里会失败,提醒同步登记。
+        # Derive embedded inputs from real consumers instead of pinning a stale
+        # claim that the v1 schema has no Rust caller. Both production and
+        # standalone test consumers must keep schema-only changes on Rust CI.
         workflow = self.pr_workflow
         frontend_paths = _frontend_filter_entries(workflow)
         rust_full_paths = _rust_full_filter_entries(workflow)
-        for schema in (
-            "docs/schemas/behavior-telemetry-v1.schema.json",
-            "docs/schemas/behavior-telemetry-registries.json",
-        ):
+        consumers = {}
+        for directory in (ROOT / "pinvou3-app/src-tauri/src", ROOT / "pinvou3-app/src-tauri/tests"):
+            for source_path in directory.rglob("*.rs"):
+                for schema in _rust_embedded_telemetry_inputs(source_path.read_text(encoding="utf-8"), source_path):
+                    consumers.setdefault(schema, set()).add(source_path.relative_to(ROOT).as_posix())
+        self.assertIn(
+            "pinvou3-app/src-tauri/src/features/behavior_telemetry/diagnostics.rs",
+            consumers.get("docs/schemas/behavior-telemetry-v1.schema.json", set()),
+        )
+        self.assertIn(
+            "pinvou3-app/src-tauri/src/features/behavior_telemetry_tests.rs",
+            consumers.get("docs/schemas/behavior-telemetry-registries.json", set()),
+        )
+        schemas = {path.relative_to(ROOT).as_posix()
+                   for path in (ROOT / "docs/schemas").glob("behavior-telemetry-*.json")}
+        self.assertTrue(set(consumers).issubset(schemas), "embedded telemetry input must exist")
+        for schema in schemas:
             self.assertTrue(
                 _is_covered_by_trigger(schema, frontend_paths),
                 f"遥测 schema {schema} 未被 frontend filter 覆盖,"
                 "schema-only 改动会静默跳过 behavior_telemetry node 门禁",
             )
-        self.assertTrue(
-            _is_covered_by_trigger(
-                "docs/schemas/behavior-telemetry-registries.json", rust_full_paths
-            ),
-            "遥测 registries 未被 rust_full filter 覆盖,"
-            "registries-only 改动会静默跳过 behavior_telemetry include_str! 契约",
-        )
-        self.assertFalse(
-            _is_covered_by_trigger(
-                "docs/schemas/behavior-telemetry-v1.schema.json", rust_full_paths
-            ),
-            "v1 schema 无 Rust 消费方,不应登记进 rust_full(过度触发面)",
-        )
+        rust_expression = _extract_job_level_if(_extract_job_block(workflow, "rust-test"))[3:-2]
+        for schema, sources in consumers.items():
+            self.assertTrue(_matches_paths_filter(schema, rust_full_paths),
+                            f"{schema} is compiled by {sorted(sources)} but skips Rust CI")
+            for event, draft, expected in (("pull_request", False, True),
+                                           ("merge_group", False, True),
+                                           ("pull_request", True, False)):
+                with self.subTest(schema=schema, event=event, draft=draft):
+                    self.assertEqual(_evaluate_github_condition(
+                        rust_expression, event_name=event, draft=draft, mode="ordinary",
+                        rust_full=_matches_paths_filter(schema, rust_full_paths),
+                    ), expected)
+        self.assertFalse(_matches_paths_filter("docs/schemas/unrelated.schema.json", rust_full_paths),
+                         "do not widen schema routing beyond actual Rust compile inputs")
+
+    def test_diagnostic_redaction_parity_runs_for_both_production_implementations(self):
+        workflow = self.pr_workflow
+        job = _extract_job_block(workflow, "rust-test")
+        step = _step_named(job, "Native and Relay diagnostic redaction parity")
+        self.assertIn("PINVOU_TEST_NATIVE_REDACTION: '1'", step)
+        self.assertIn("run: node --test remote-control-relay/test/diagnostic-redaction.test.js", step)
+        self.assertIn("if: ${{ github.event_name != 'push' }}", step)
+        self.assertNotIn("continue-on-error", step)
+        paths = _rust_full_filter_entries(workflow)
+        expression = _extract_job_level_if(job)[3:-2]
+        for path in [
+            "pinvou3-app/src-tauri/src/features/behavior_telemetry/diagnostic_redaction.rs",
+            "remote-control-relay/diagnostic-redaction.js",
+            "remote-control-relay/failure-diagnostics.js",
+            "remote-control-relay/test/diagnostic-redaction.test.js",
+            "remote-control-relay/eval/failure-redaction/native-runner.mjs",
+            "remote-control-relay/eval/failure-redaction/native-runner.Cargo.lock",
+        ]:
+            self.assertTrue((ROOT / path).is_file())
+            self.assertTrue(_matches_paths_filter(path, paths), f"parity input skips Rust CI: {path}")
+            for event in ["pull_request", "merge_group"]:
+                self.assertTrue(_evaluate_github_condition(expression, event_name=event,
+                    draft=False, mode="ordinary", rust_full=_matches_paths_filter(path, paths)))
+
+    def test_diagnostic_parity_route_and_opt_in_cannot_be_removed(self):
+        original = self.pr_workflow
+        try:
+            for old in ["              - 'remote-control-relay/diagnostic-redaction.js'\n",
+                        "              - 'remote-control-relay/failure-diagnostics.js'\n",
+                        "          PINVOU_TEST_NATIVE_REDACTION: '1'\n"]:
+                self.pr_workflow = original.replace(old, "", 1)
+                self.assertNotEqual(self.pr_workflow, original)
+                with self.assertRaises(AssertionError):
+                    self.test_diagnostic_redaction_parity_runs_for_both_production_implementations()
+        finally:
+            self.pr_workflow = original
+
+    def test_diagnostic_native_runner_lock_uses_existing_production_dependencies(self):
+        fixture = ROOT / "remote-control-relay/eval/failure-redaction/native-runner.Cargo.lock"
+        lock = tomllib.loads(fixture.read_text(encoding="utf-8"))
+        app = tomllib.loads((ROOT / "pinvou3-app/src-tauri/Cargo.lock").read_text(encoding="utf-8"))
+        identity = lambda p: (p["name"], p["version"], p.get("source"), p.get("checksum"))
+        production = {identity(p) for p in app["package"]}
+        native = {identity(p) for p in lock["package"] if p.get("source")}
+        self.assertTrue(native and native.issubset(production))
+        runner = (fixture.parent / "native-runner.mjs").read_text(encoding="utf-8")
+        self.assertIn('"--offline", "--locked"', runner)
+        self.assertIn('readFileSync(new URL("./native-runner.Cargo.lock", import.meta.url))', runner)
+
+    def test_rust_telemetry_input_extractor_tracks_both_embedding_forms(self):
+        source = ROOT / "pinvou3-app/src-tauri/src/features/behavior_telemetry_tests.rs"
+        self.assertEqual(_rust_embedded_telemetry_inputs('''
+            include_str!("../../../../docs/schemas/behavior-telemetry-registries.json");
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../docs/schemas/behavior-telemetry-v1.schema.json"
+            ));
+            include_str!("../../../../docs/unrelated.md");
+        ''', source), {
+            "docs/schemas/behavior-telemetry-registries.json",
+            "docs/schemas/behavior-telemetry-v1.schema.json",
+        })
+
+    def test_schema_only_rust_route_cannot_be_removed_while_frontend_route_remains(self):
+        original = self.pr_workflow
+        try:
+            self.pr_workflow = original.replace(
+                "              - 'docs/schemas/behavior-telemetry-v1.schema.json'\n", "", 1,
+            )
+            self.assertNotEqual(self.pr_workflow, original)
+            with self.assertRaisesRegex(AssertionError, "skips Rust CI"):
+                self.test_behavior_telemetry_schema_contract_fully_routed()
+        finally:
+            self.pr_workflow = original
 
     def test_path_extractor_sees_trailing_comment_entries(self):
         # Round-41 review M8 回归锁:行尾同列注释曾让整条条目对提取器
