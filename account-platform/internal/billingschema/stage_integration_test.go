@@ -102,9 +102,16 @@ func TestF02SparseSchemaUpgradeAndRelayFence(t *testing.T) {
 
 	t.Run("billing-first-delivery-data-and-activation", func(t *testing.T) {
 		connections := []*pgx.Conn{f.database(t, ctx, "billing", "billing_schema_owner"), f.database(t, ctx, "billing", "billing_schema_owner")}
-		base := selectVersions(billing, []int64{1, 2})
+		// The supported upgrade baseline is original016. Pre016 refusal and
+		// unchanged financial facts are exercised by the dedicated admission root.
+		var base []migrations.Migration
+		for _, m := range billing {
+			if m.Version <= 16 || m.Version == generationVersion {
+				base = append(base, m)
+			}
+		}
 		for _, c := range connections {
-			if err := migrations.Up(ctx, c, base); err != nil {
+			if err := Up(ctx, c, base); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := c.Exec(ctx, stageBillingSeed); err != nil {

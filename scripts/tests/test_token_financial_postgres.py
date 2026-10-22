@@ -233,11 +233,12 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_package_index_schema_contract_is_selected_and_cannot_skip(self):
         self.run_main_fixture()
         roots, package = RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE
-        self.assertEqual(roots, {"TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres"})
+        self.assertEqual(roots, {"TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres"})
         command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
         selection = command[command.index("-run") + 1]
         self.assertIn("TestF09EntitlementPackageIndexPublicMigration", selection)
         self.assertIn("TestTokenWalletReceiptSchemaPostgres", selection)
+        self.assertIn("TestLegacyEntitlementUpgradeAdmissionPostgres", selection)
         valid = self.events(roots, package, children=True)
         self.assertGreater(RUNNER.verify_results(valid, roots, package=package, require_children=True, exact_roots=True), 0)
         for invalid in (
@@ -245,6 +246,22 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             [event for event in valid if event.get("Test")],
             [{**event, "Package": RUNNER.BILLING_PACKAGE} for event in valid],
             valid + [{"Action": "skip", "Package": package, "Test": next(iter(roots)) + "/actual"}],
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, roots, package=package, require_children=True, exact_roots=True)
+
+    def test_pre016_admission_root_is_real_scoped_and_cannot_skip(self):
+        root = "TestLegacyEntitlementUpgradeAdmissionPostgres"
+        roots, package = RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE
+        self.assertIn(root, roots)
+        valid = self.events(roots, package, children=True)
+        self.assertGreater(RUNNER.verify_results(valid, roots, package=package, require_children=True, exact_roots=True), 0)
+        for invalid in (
+            [event for event in valid if event.get("Test", "").split("/", 1)[0] != root],
+            [event for event in valid if not event.get("Test", "").startswith(root + "/")],
+            valid + [{"Action": "skip", "Package": package, "Test": root}],
+            valid + [{"Action": "skip", "Package": package, "Test": root + "/actual"}],
+            [{**event, "Package": RUNNER.BILLING_PACKAGE} if event.get("Test", "").split("/", 1)[0] == root else event for event in valid],
         ):
             with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
                 RUNNER.verify_results(invalid, roots, package=package, require_children=True, exact_roots=True)

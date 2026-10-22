@@ -55,7 +55,7 @@ ACCOUNT_REQUIRED = {
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
-SCHEMA_REQUIRED = {"TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres"}
+SCHEMA_REQUIRED = {"TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres"}
 OWNER_REQUIRED = {
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
     "TestTokenWalletReceiptSignedClientRecoveryPostgres",

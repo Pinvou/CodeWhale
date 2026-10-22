@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { authorizationRoutes, runAuthorizationCoverage } from '../../../scripts/check-account-platform-authorization-coverage.mjs';
+import { authorizationRoutes, goSource, runAuthorizationCoverage } from '../../../scripts/check-account-platform-authorization-coverage.mjs';
 
 const catalogURL = new URL('../../deploy/authorization-entrypoints.json', import.meta.url);
 
@@ -22,7 +22,7 @@ async function rejectedMutation(mutate, expected) {
 
 test('authorization release gate classifies every HTTP task event callback and CLI entrypoint', async () => {
   const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
-  // The six existing Portal transports use Any, alongside the 373 verb-specific
+  // The six existing Portal transports use Any, alongside the 376 verb-specific
   // registrations. Keep the expected complete graph independent of its parser.
   const wildcardPaths = [
     '/api/account/*resource', '/api/token/*resource',
@@ -36,7 +36,36 @@ test('authorization release gate classifies every HTTP task event callback and C
   for (const route of wildcardPaths) assert.ok(portal.includes(`router.Any("${route}",`), `missing existing Portal transport ${route}`);
   // The real checker still rejects missing, stale, duplicate or mis-scoped
   // entries before returning these exact inventory sizes.
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 379, tasks: 32, events: 18, cli: 26 });
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 382, tasks: 32, events: 18, cli: 26 });
+});
+
+test('history recovery routes retain exact workload permissions and handlers without human fallback', async () => {
+  const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
+  const expected = [
+    {source: 'account-platform/internal/identityadapter/service.go', receiver: 'internal', method: 'POST',
+      path: '/users/:subject/profile-revocations', permission: 'internal.identity.sessions.revoke', handler: 'revokeProfileSessions'},
+    {source: 'account-platform/internal/billing/service.go', receiver: 'protected', method: 'POST',
+      path: '/internal/v1/token-account-wallet-provisioning-receipts', permission: 'internal.billing.token-account-wallet-provision.execute', handler: 'provisionTokenAccountWallet'},
+    {source: 'account-platform/internal/billing/service.go', receiver: 'protected', method: 'GET',
+      path: '/internal/v1/token-account-wallet-provisioning-receipts/:command_reference', permission: 'internal.billing.token-account-wallet-provision.read', handler: 'getTokenAccountWalletProvisioningReceipt'},
+  ];
+  for (const entry of expected) {
+    assert.ok(catalog.http_sources.includes(entry.source));
+    const text = await readFile(new URL(`../../../${entry.source}`, import.meta.url), 'utf8');
+    const routes = authorizationRoutes(entry.source, text).filter(route => route.path === entry.path);
+    assert.equal(routes.length, 1, `missing or duplicate recovery route ${entry.path}`);
+    assert.equal(routes[0].receiver, entry.receiver);
+    assert.equal(routes[0].method, entry.method);
+    assert.equal(routes[0].registration.match(/serviceauth\.Require\("([^"]+)"\)/)?.[1], entry.permission);
+    assert.equal(routes[0].registration.trim(), `${entry.receiver}.${entry.method}("${entry.path}", serviceauth.Require("${entry.permission}"), httpserver.AdaptFunc(s.${entry.handler}))`);
+    assert.equal(catalog.http_policies.some(route => route.source === entry.source && route.path === entry.path), false);
+    if (entry.receiver === 'internal') {
+      const {code, masked} = goSource(text);
+      const groups = [...code.matchAll(/\binternal\s*(?::=|=)\s*router\.Group\("([^"]+)"\)/g)]
+        .filter(match => masked[match.index] !== ' ');
+      assert.deepEqual(groups.map(match => match[1]), ['/internal/v1']);
+    }
+  }
 });
 
 test('original refund query has one read-only workload route bound to both original resource keys', async () => {
