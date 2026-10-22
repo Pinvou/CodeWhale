@@ -61,9 +61,9 @@ func TestClosureClaimACKOrder(t *testing.T) {
 			h.ServeHTTP(w, q)
 		})
 	}
-	billServer := httptest.NewServer(auth(billing.PrivateClosureHTTPHandler(br)))
+	billServer := httptest.NewServer(auth(billing.NewService(br).Handler(fixtureToken)))
 	defer billServer.Close()
-	tokenHandler := token.PrivateClosureHTTPHandler(tr)
+	tokenHandler := token.NewService(nil, nil, nil).WithManagement(tr, nil, token.ProviderURLPolicy{}, fixtureToken, nil).Handler(nil)
 	tokenServer := httptest.NewServer(auth(http.HandlerFunc(func(w http.ResponseWriter, q *http.Request) {
 		if q.Method == http.MethodDelete {
 			calls.Add(1)

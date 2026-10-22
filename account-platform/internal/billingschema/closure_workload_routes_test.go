@@ -53,13 +53,20 @@ func TestClosureRegisteredWorkloadScopes(t *testing.T) {
 		}},
 	} {
 		t.Run(route.name, func(t *testing.T) {
-			rules, _ := json.Marshal([]map[string]any{{"subject": "allowed", "service": "controlled-authority", "permissions": []string{route.permission}}, {"subject": "wrong-scope", "service": "controlled-authority", "permissions": []string{"internal.authorization.check"}}})
+			legacyPermission := "internal.authorization.check"
+			if route.name == "token-clear" {
+				legacyPermission = "internal.token.replay.delete"
+			}
+			if route.name == "token-assess" {
+				legacyPermission = "internal.token.account-closure-assessment.read"
+			}
+			rules, _ := json.Marshal([]map[string]any{{"subject": "allowed", "service": "account-service", "permissions": []string{route.permission}}, {"subject": "wrong-scope", "service": "account-service", "permissions": []string{"internal.authorization.check"}}, {"subject": "retired-scope", "service": "account-service", "permissions": []string{legacyPermission}}, {"subject": "wrong-service", "service": "unrelated-workload", "permissions": []string{"internal.authorization.check"}}})
 			t.Setenv("WORKLOAD_IDENTITY_RULES_JSON", string(rules))
 			handler := route.handler()
 			for _, scenario := range []struct {
 				subject string
 				status  int
-			}{{"allowed", 503}, {"wrong-scope", 403}, {"unregistered", 403}, {"", 401}} {
+			}{{"allowed", 503}, {"wrong-scope", 403}, {"retired-scope", 403}, {"wrong-service", 403}, {"unregistered", 403}, {"", 401}} {
 				t.Run(scenario.subject, func(t *testing.T) {
 					request := httptest.NewRequest(route.method, route.path, strings.NewReader(`{}`))
 					if scenario.subject != "" {
