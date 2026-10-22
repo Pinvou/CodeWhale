@@ -610,16 +610,13 @@ mod tests {
         db::init_db().unwrap();
         let service = ModelStoreService::new();
         // 还没终结的任务不能放弃：它还活着，结局还没写。
-        receipt(
-            "running",
-            "download",
-            "2026-10-18T00:00:00Z",
-            Value::Null,
+        receipt("running", "download", "2026-10-18T00:00:00Z", Value::Null);
+        assert!(
+            dismiss_incomplete_local(&service, "running")
+                .err()
+                .unwrap()
+                .contains("not_terminal")
         );
-        assert!(dismiss_incomplete_local(&service, "running")
-            .err()
-            .unwrap()
-            .contains("not_terminal"));
         // 未完成面板只列失败的下载/本地安装；stop 这类记录没有「放弃」语义。
         receipt(
             "stopped",
@@ -627,10 +624,12 @@ mod tests {
             "2026-10-18T00:00:01Z",
             json!({"Ok":null}),
         );
-        assert!(dismiss_incomplete_local(&service, "stopped")
-            .err()
-            .unwrap()
-            .contains("not_dismissable"));
+        assert!(
+            dismiss_incomplete_local(&service, "stopped")
+                .err()
+                .unwrap()
+                .contains("not_dismissable")
+        );
     }
 
     /// 放弃只针对那一次尝试：同卡之后新的失败照常出现，不做一键拉黑。

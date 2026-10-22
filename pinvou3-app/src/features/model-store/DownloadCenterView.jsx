@@ -158,7 +158,9 @@ export function DownloadCenterView({
   isRetrying,
 }) {
   const active = activeDownloadTasks(tasks);
-  const empty = active.length === 0 && installations.length === 0;
+  // 列表读取失败时不能走空态：EmptyState 没有错误行，incompleteError 会
+  // 被整个吞掉。让 IncompleteInstallPanel 渲染，由它展示 role=alert 的错误。
+  const empty = active.length === 0 && installations.length === 0 && !incompleteError;
   return (
     <div data-testid="model-store-download-center">
       {empty ? (

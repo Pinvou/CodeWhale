@@ -39,21 +39,35 @@ impl Blocked {
         }
         // 原始形式对不上再比规范化形式：记录里的路径可能是带冗余分量的写法，
         // 目录项是 join 出来的干净形式，硬比较会漏判。
-        path.canonicalize().map(|c| self.dirs.contains(&c)).unwrap_or(false)
+        path.canonicalize()
+            .map(|c| self.dirs.contains(&c))
+            .unwrap_or(false)
     }
 
     fn insert(&mut self, models_dir: &Path, path: PathBuf) {
         self.insert_exact(path.clone());
-        if let Ok(c) = path.canonicalize() {
-            self.insert_exact(c);
+        let canonical = path.canonicalize().ok();
+        if let Some(c) = &canonical {
+            self.insert_exact(c.clone());
         }
         // 一级祖先也要拦：库记录可能指向**深层**目录（版本化权重在
         // models_dir/.versions/<card>/<revision>，记录的 models_root 指向
         // revision 层）。精确匹配拦不住它的祖先 .versions——而不拦祖先，
         // 整棵 .versions 会被当成一个"无主目录"列出来、然后被连根删掉。
-        if let Ok(relative) = path.strip_prefix(models_dir) {
+        //
+        // 原始形式与规范化形式各推一遍：models_dir 本身可能含符号链接分量
+        // （用户可配置），此时 legacy/规范化的路径对原始 models_dir 的
+        // strip_prefix 会失败，只推一遍就漏掉那个祖先。
+        self.insert_first_level_ancestor(models_dir, &path);
+        if let (Some(c), Ok(canon_models)) = (&canonical, models_dir.canonicalize()) {
+            self.insert_first_level_ancestor(&canon_models, c);
+        }
+    }
+
+    fn insert_first_level_ancestor(&mut self, root: &Path, path: &Path) {
+        if let Ok(relative) = path.strip_prefix(root) {
             if let Some(first) = relative.components().next() {
-                self.insert_exact(models_dir.join(first));
+                self.insert_exact(root.join(first));
             }
         }
     }
@@ -85,8 +99,12 @@ fn non_terminal_install_cards(out: &mut HashSet<String>) {
         if path.extension().and_then(|value| value.to_str()) != Some("json") {
             continue;
         }
-        let Ok(bytes) = std::fs::read(&path) else { continue };
-        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else { continue };
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+            continue;
+        };
         let kind = value.get("kind").and_then(Value::as_str).unwrap_or("");
         if is_in_flight_kind(kind) && value.get("outcome").is_some_and(Value::is_null) {
             if let Some(card) = value.get("card_id").and_then(Value::as_str) {
@@ -108,8 +126,12 @@ fn non_terminal_install_run_ids() -> Vec<String> {
         if path.extension().and_then(|value| value.to_str()) != Some("json") {
             continue;
         }
-        let Ok(bytes) = std::fs::read(&path) else { continue };
-        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else { continue };
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+            continue;
+        };
         let kind = value.get("kind").and_then(Value::as_str).unwrap_or("");
         if is_in_flight_kind(kind) && value.get("outcome").is_some_and(Value::is_null) {
             if let Some(id) = path.file_stem().and_then(|value| value.to_str()) {
@@ -125,7 +147,10 @@ fn non_terminal_install_run_ids() -> Vec<String> {
 fn blocked_dirs(service: Option<&super::service::ModelStoreService>) -> Result<Blocked, String> {
     let settings = config::load_settings();
     let models_dir = settings.models_path();
-    let mut blocked = Blocked { dirs: HashSet::new(), unresolved: 0 };
+    let mut blocked = Blocked {
+        dirs: HashSet::new(),
+        unresolved: 0,
+    };
 
     let records = db::list_store_models().map_err(|error| error.to_string())?;
     for rec in &records {
@@ -143,7 +168,11 @@ fn blocked_dirs(service: Option<&super::service::ModelStoreService>) -> Result<B
         // 商店卡片的权重目录：卡片脚本统一放 ${LMM_MODELS_DIR}/<HF 仓库名>。
         // 末段必须过 safe_path_component——"x/.." 的末段就是 ".."（
         // lifecycle::candidate_paths 里踩过的坑）。
-        if let Some(repo) = rec.source_repo_id.as_deref().and_then(|repo| repo.rsplit('/').next()) {
+        if let Some(repo) = rec
+            .source_repo_id
+            .as_deref()
+            .and_then(|repo| repo.rsplit('/').next())
+        {
             if let Ok(safe) = config::safe_path_component(repo) {
                 blocked.insert(&models_dir, models_dir.join(safe));
             }
@@ -184,12 +213,25 @@ fn blocked_dirs(service: Option<&super::service::ModelStoreService>) -> Result<B
 /// 推不出任何候选返回 None——调用方据此把这次排除记为 unresolved。
 fn card_weight_dirs(card_id: &str, models_dir: &Path) -> Option<Vec<PathBuf>> {
     let safe = config::safe_path_component(card_id).ok()?;
-    let text = std::fs::read_to_string(config::data_dir().join("cards").join(safe).join("card.json")).ok()?;
+    let text = std::fs::read_to_string(
+        config::data_dir()
+            .join("cards")
+            .join(safe)
+            .join("card.json"),
+    )
+    .ok()?;
     let value: Value = serde_json::from_str(&text).ok()?;
     // 商店卡的元数据有的带 summary 包裹、有的平铺（本地卡），两处都看一眼。
-    let summary = value.get("summary").filter(|value| value.is_object()).unwrap_or(&value);
+    let summary = value
+        .get("summary")
+        .filter(|value| value.is_object())
+        .unwrap_or(&value);
     let mut dirs = Vec::new();
-    if let Some(repo) = summary.get("source_repo_id").and_then(Value::as_str).and_then(|repo| repo.rsplit('/').next()) {
+    if let Some(repo) = summary
+        .get("source_repo_id")
+        .and_then(Value::as_str)
+        .and_then(|repo| repo.rsplit('/').next())
+    {
         if let Ok(safe) = config::safe_path_component(repo) {
             dirs.push(models_dir.join(safe));
         }
@@ -219,7 +261,9 @@ pub(super) fn scan(service: Option<&super::service::ModelStoreService>) -> Resul
     let mut partial = false;
     let read = std::fs::read_dir(&models_dir).map_err(|_| "orphan_scan_unavailable".to_string())?;
     for entry in read.flatten() {
-        let Ok(file_type) = entry.file_type() else { continue };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         if file_type.is_symlink() || !file_type.is_dir() {
             continue;
         }
@@ -270,7 +314,11 @@ pub(super) fn remove(
     if name.starts_with('.') || config::safe_path_component(name).is_err() {
         return Err("orphan_path_unsafe".into());
     }
-    if target.parent().map(|parent| parent != models_dir).unwrap_or(true) {
+    if target
+        .parent()
+        .map(|parent| parent != models_dir)
+        .unwrap_or(true)
+    {
         return Err("orphan_path_unsafe".into());
     }
     // 2) 必须是真实目录，软链接绝对不删——remove_dir_all 会穿过链接删掉目标。
@@ -297,8 +345,17 @@ pub(super) fn remove(
     }
 
     let bytes = super::disk::dir_size_bytes(&target);
-    std::fs::remove_dir_all(&target)
-        .map_err(|error| format!("orphan_remove_failed: {error}"))?;
+    // 5) 临门一脚再验一遍归属与占用：步骤 3/4 与删除之间有毫秒级窗口（用户
+    //    恰好同时点了一次下载，或一条记录恰好落库）。重算一次的成本是毫秒，
+    //    删错的代价不可逆——这一步和步骤 3 是同一段逻辑跑两遍，不是冗余。
+    let final_blocked = blocked_dirs(service)?;
+    if final_blocked.contains(&target) {
+        return Err("orphan_directory_owned".into());
+    }
+    if final_blocked.unresolved > 0 {
+        return Err("orphan_activity_unresolved".into());
+    }
+    std::fs::remove_dir_all(&target).map_err(|error| format!("orphan_remove_failed: {error}"))?;
     Ok(json!({ "freedBytes": bytes }))
 }
 
@@ -322,7 +379,11 @@ mod tests {
         let orphan = models.join("Half-Downloaded-Model");
         std::fs::create_dir_all(orphan.join(".cache/huggingface/download")).unwrap();
         std::fs::write(orphan.join("config.json"), "{}").unwrap();
-        std::fs::write(orphan.join(".cache/huggingface/download/weights.incomplete"), "partial").unwrap();
+        std::fs::write(
+            orphan.join(".cache/huggingface/download/weights.incomplete"),
+            "partial",
+        )
+        .unwrap();
         let owned = models.join("owned-model");
         std::fs::create_dir_all(&owned).unwrap();
         std::fs::write(owned.join("weights.safetensors"), "weights").unwrap();
@@ -414,7 +475,11 @@ mod tests {
 
         let report = scan(None).unwrap();
         assert_eq!(report["unresolvedInFlight"], 1, "推导失败必须如实上报");
-        assert_eq!(report["entries"].as_array().unwrap().len(), 1, "扫描保持尽力而为");
+        assert_eq!(
+            report["entries"].as_array().unwrap().len(),
+            1,
+            "扫描保持尽力而为"
+        );
 
         // 删除是硬闸：只要有一笔推导不出的进行中下载，整题拒绝。
         let error = remove(None, &orphan.to_string_lossy()).err().unwrap();
@@ -433,8 +498,15 @@ mod tests {
 
         // 路径逃逸三连：models_dir 本身、上一级、models_dir 之外——全拒绝。
         let models = config::load_settings().models_path();
-        for bad in [models.clone(), models.parent().unwrap().to_path_buf(), PathBuf::from("/tmp")] {
-            assert!(remove(None, &bad.to_string_lossy()).is_err(), "{bad:?} 不该被放行");
+        for bad in [
+            models.clone(),
+            models.parent().unwrap().to_path_buf(),
+            PathBuf::from("/tmp"),
+        ] {
+            assert!(
+                remove(None, &bad.to_string_lossy()).is_err(),
+                "{bad:?} 不该被放行"
+            );
         }
     }
 
@@ -446,7 +518,10 @@ mod tests {
         let _home = config::TempHome::new();
         db::init_db().unwrap();
         let models = config::load_settings().models_path();
-        let revisions = models.join(".versions").join("versioned-card").join("rev-1");
+        let revisions = models
+            .join(".versions")
+            .join("versioned-card")
+            .join("rev-1");
         std::fs::create_dir_all(&revisions).unwrap();
         std::fs::write(revisions.join("weights.safetensors"), "weights").unwrap();
         // 记录的 models_root 指向深层 revision 目录。
@@ -475,7 +550,9 @@ mod tests {
         assert!(record.models_root.is_some(), "测试前提：记录带 models_root");
 
         let report = scan(None).unwrap();
-        let names: Vec<&str> = report["entries"].as_array().unwrap()
+        let names: Vec<&str> = report["entries"]
+            .as_array()
+            .unwrap()
             .iter()
             .map(|entry| entry["name"].as_str().unwrap())
             .collect();
@@ -484,7 +561,9 @@ mod tests {
             "版本化权重根不该被列出：{names:?}"
         );
 
-        let error = remove(None, &models.join(".versions").to_string_lossy()).err().unwrap();
+        let error = remove(None, &models.join(".versions").to_string_lossy())
+            .err()
+            .unwrap();
         assert!(
             error.contains("unsafe") || error.contains("owned"),
             "点开头的内部目录必须被拒绝：{error}"
@@ -526,7 +605,9 @@ mod tests {
         .unwrap();
 
         let report = scan(None).unwrap();
-        let names: Vec<&str> = report["entries"].as_array().unwrap()
+        let names: Vec<&str> = report["entries"]
+            .as_array()
+            .unwrap()
             .iter()
             .map(|entry| entry["name"].as_str().unwrap())
             .collect();
@@ -534,7 +615,9 @@ mod tests {
             names.iter().all(|name| *name != "some-root"),
             "库记录深层路径的一级祖先不该被列出：{names:?}"
         );
-        let error = remove(None, &models.join("some-root").to_string_lossy()).err().unwrap();
+        let error = remove(None, &models.join("some-root").to_string_lossy())
+            .err()
+            .unwrap();
         assert!(error.contains("owned"), "实际错误：{error}");
     }
 
@@ -556,6 +639,68 @@ mod tests {
         assert!(cards.contains("versioned-card"), "卡片必须进入排除推导");
         // 此处未终结的 version_stage 卡片推导不出目标目录，删除被 unresolved
         // 闸拦下；有物化卡片时则由进程核查拦——无论哪道闸，都不能放行。
-        assert!(remove(None, &orphan.to_string_lossy()).is_err(), "进行中的版本任务期间不允许删除残留");
+        assert!(
+            remove(None, &orphan.to_string_lossy()).is_err(),
+            "进行中的版本任务期间不允许删除残留"
+        );
+    }
+
+    /// models_dir 本身含符号链接分量时的祖先拦截：库记录/legacy 路径是
+    /// canonicalize 过的形式，对原始 models_dir 的 strip_prefix 会失败——
+    /// 只推一遍祖先就漏掉那个一级目录，整棵可被列出并删除。
+    #[test]
+    fn canonical_ancestor_is_blocked_when_models_dir_contains_a_symlink() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        // 默认 models_dir 是 data_dir/models；把它变成指向 real 的符号链接。
+        let store_root = config::data_dir();
+        let real = store_root.join("real-models");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = store_root.join("models");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let deep = real.join("outer").join("inner").join("weights");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("w.bin"), "w").unwrap();
+        db::add_store_model_with_root(
+            db::AddStoreModelParams {
+                card_id: "deep-card",
+                model_name: "deep-model",
+                card_name: "Deep Model",
+                org: None,
+                description: None,
+                engine_name: "test-engine",
+                engine_version: None,
+                size_bytes: 1,
+                quantization: None,
+                source_repo_id: None,
+                source_filename: None,
+                scripts: &std::collections::BTreeMap::new(),
+                status: "downloaded",
+                profiles: &[],
+                deploy_topology: Default::default(),
+                card_source: "store",
+            },
+            &deep.to_string_lossy(),
+        )
+        .unwrap();
+
+        // 列举走原始 models_dir（符号链接形式）；记录路径的 canonical 形式
+        // 对它做 strip_prefix 必然失败。修复后 canonical 祖先仍会被拦。
+        let report = scan(None).unwrap();
+        let names: Vec<&str> = report["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            names.iter().all(|name| *name != "outer"),
+            "canonical 深层路径的一级祖先不该被列出：{names:?}"
+        );
+        let error = remove(None, &link.join("outer").to_string_lossy())
+            .err()
+            .unwrap();
+        assert!(error.contains("owned"), "实际错误：{error}");
+        assert!(link.join("outer").exists(), "有主目录必须原样保留");
     }
 }

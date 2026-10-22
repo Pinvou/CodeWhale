@@ -1836,7 +1836,9 @@ pub(super) fn dismiss_incomplete_local(
         None => {
             // 校验已经确认回执存在、受信且已终结；load_saved_run 在这条路上
             // 不会走到"补写中断结局"的分支。
-            let path = config::data_dir().join("runs").join(format!("{run_id}.json"));
+            let path = config::data_dir()
+                .join("runs")
+                .join(format!("{run_id}.json"));
             Arc::new(load_saved_run(&path)?.ok_or("installation_record_unavailable")?)
         }
     };
@@ -1862,7 +1864,10 @@ pub async fn scan_orphans(service: &Arc<ModelStoreService>) -> Result<Value, Str
 /// 删除一个残留目录。同步等待删除完成（几十 GB 是分钟级）：调用方用 busy
 /// 态表达"正在删"，比再发明一套任务登记 + 轮询协议便宜得多，也让"删完
 /// 释放了多少"能随应答一次带回。
-pub async fn remove_orphan(service: &Arc<ModelStoreService>, path: String) -> Result<Value, String> {
+pub async fn remove_orphan(
+    service: &Arc<ModelStoreService>,
+    path: String,
+) -> Result<Value, String> {
     let service = Arc::clone(service);
     tokio::task::spawn_blocking(move || {
         if service.remote {
