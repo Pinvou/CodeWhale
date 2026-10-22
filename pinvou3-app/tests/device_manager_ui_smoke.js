@@ -594,11 +594,13 @@ async function clickTestId(page, testId) {
     JSON.stringify({ confirmDisabledAtFirstSight, armedState, removeCalls }));
 
   // ⑥-d 聚合 toast：后端警告与移除结果必须同屏（单槽 toast 曾只显示最后一条，
-  // 第三轮修复；本轮补钉其渲染）。
+  // 第三轮修复；本轮补钉其渲染）。⑤-b 接入的那行被回收后必须逐行点名
+  // （round-12 评审建议：逐行列出被回收行）。
   await page.waitForFunction(() => !!document.querySelector('[data-testid="model-store-toast"]'), { timeout: 4000 });
   const aggregateToast = await page.evaluate(() => document.querySelector('[data-testid="model-store-toast"]')?.innerText || '');
-  rec('⑥-d 聚合 toast 同屏携带后端警告与移除结果',
-    aggregateToast.includes('ollama 删除失败（smoke 注入）') && aggregateToast.includes('已移除「qwen3:30b」'),
+  rec('⑥-d 聚合 toast 同屏携带后端警告、移除结果与被回收行',
+    aggregateToast.includes('ollama 删除失败（smoke 注入）') && aggregateToast.includes('已移除「qwen3:30b」')
+    && aggregateToast.includes('已同时从品悟的模型列表移除配置「qwen3:30b」'),
     aggregateToast);
   await page.evaluate(() => window.__DEVICE_MGR_TEST__.setRemoveOutcome({
     removed_registry: true, removed_weights: false, ollama_deleted: true, warnings: [],

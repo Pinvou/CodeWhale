@@ -707,6 +707,9 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
       // explicit "please delete manually" than a false all-clear.
       let cleanupOk = true;
       let cleanupErrorText = null;
+      // Rows actually recycled (declared here: the toast assembles after the
+      // Array.isArray branch closes).
+      const recycledRows = [];
       if (Array.isArray(bs?.savedModels)) {
         // Endpoint-precise recycle (round-10 review P2): only rows linked from
         // THIS record's endpoint go to deleteModel — a same-name model linked
@@ -724,9 +727,15 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
         // Reasons are localized (round-7 review P3): the raw tokens used to
         // leak into the zh/ja toast on this failure path.
         cleanupErrorText = liveBridge?.models?.deleteModel ? null : copy.linkReasonBridge;
+        // Name each recycled row in the toast (round-12 review suggestion,
+        // the last open overall-review item): the rows share the removed
+        // record's (endpoint, model) identity, but the display name is
+        // whatever the user typed at link time and one identity can back
+        // several rows — listing them lets the user audit the recycle scope.
         for (const linked of cleanupErrorText ? [] : linkedRows) {
           try {
             await liveBridge.models.deleteModel(linked.id);
+            recycledRows.push(linked);
           } catch (error) {
             cleanupErrorText = String(error?.message || error);
             break;
@@ -749,6 +758,12 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
       const notices = warnings.map((warning) => copy.warn(warning));
       if (cleanupOk) {
         notices.push(copy.removeDone(row.name));
+        // Only on full success: the failure branch already tells the user to
+        // clean up manually in Settings, so a partial list there would read
+        // as an all-clear for the rows it names.
+        for (const linked of recycledRows) {
+          notices.push(copy.linkRowRecycled(linked.name || linked.model || linked.id));
+        }
       } else {
         // Cleanup failure must be surfaced, not drowned by a plain success toast.
         notices.push(copy.linkRowStale(row.name, cleanupErrorText || copy.linkReasonUnknown));

@@ -216,7 +216,7 @@ for (const language of ['zh', 'en', 'ja']) {
     23,
     `${language}.uiAuxChat must hold exactly the 23 pinned keys`,
   );
-    // All 104 uiDeviceMgr keys are pinned (PR #1661 评审跟进：三语**同时**删掉一个
+    // All 105 uiDeviceMgr keys are pinned (PR #1661 评审跟进：三语**同时**删掉一个
     // key 时 parity 检查全绿、视图渲染 undefined——uiAuxChat round-14 事故的同款
     // 洞；chipGpuTemp→chipMaxTemp 与评审新增键（servicesStale 随 round-6；
     // peakLabel/linkReasonBridge/linkReasonUnknown/registerNoId 随 round-7）随本
@@ -240,7 +240,7 @@ for (const language of ['zh', 'en', 'ja']) {
       'linked', 'link', 'linkDone', 'linkDisabledRemote', 'linkFailed',
       'remove', 'removeArmed', 'removeCancel', 'removeConfirmIntro', 'deleteWeights',
       'removeWeightsPath', 'removeIrreversible', 'linkDisabledUnreachable',
-      'doctorSendFailed', 'doctorFailed', 'refreshFailed', 'linkRowStale', 'removeDone', 'removeFailed', 'warn',
+      'doctorSendFailed', 'doctorFailed', 'refreshFailed', 'linkRowStale', 'linkRowRecycled', 'removeDone', 'removeFailed', 'warn',
       'linkReasonBridge', 'linkReasonUnknown', 'registerNoId',
       'ollamaOfflineHint', 'localSourceHint',
       'doctorPackages', 'doctorPackagesDesc', 'doctorDependencies', 'doctorDependenciesDesc',
@@ -252,8 +252,8 @@ for (const language of ['zh', 'en', 'ja']) {
     // Count guard：清单看不到新增——加键必须同步更新计数（见 uiAuxChat round-36 同款）。
     assert.equal(
       Object.keys(dict[language].uiDeviceMgr).length,
-      104,
-      `${language}.uiDeviceMgr must hold exactly the 104 pinned keys`,
+      105,
+      `${language}.uiDeviceMgr must hold exactly the 105 pinned keys`,
     );
     // Interpolation keys must stay functions in all three languages (round-7
     // review P3): a fn→string flip in one language passes the existence and
@@ -262,7 +262,7 @@ for (const language of ['zh', 'en', 'ja']) {
     for (const key of [
       'updatedAtLabel', 'critLimit', 'peakLabel', 'servicesFailed', 'removeConfirmIntro',
       'removeWeightsPath', 'linkFailed', 'doctorFailed', 'refreshFailed', 'linkRowStale',
-      'removeDone', 'removeFailed', 'warn', 'doctorCharCounter',
+      'linkRowRecycled', 'removeDone', 'removeFailed', 'warn', 'doctorCharCounter',
     ]) {
       assert.equal(
         typeof dict[language].uiDeviceMgr[key],

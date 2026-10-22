@@ -372,6 +372,7 @@ const jaBase = {
           refreshFailed:e=>`外部モデルの更新に失敗しました：${e}`,
           linkRowStale:(name,e)=>`「${name}」は削除されましたが、PINVOU のモデル一覧の対応行を削除できませんでした（${e}）。その行は現在使えないため、設定から手動で削除してください。`,
           linkReasonBridge:'PINVOU ブリッジが利用できません', linkReasonUnknown:'理由不明', registerNoId:'レジストリがモデル ID を返しませんでした。再試行してください。',
+          linkRowRecycled:name=>`PINVOU のモデル一覧からも「${name}」の設定を削除しました`,
           removeDone:name=>`「${name}」を削除しました`, removeFailed:e=>`削除に失敗しました：${e}`, warn:w=>`お知らせ：${w}`,
           ollamaOfflineHint:'この端末にはまだ管理できるモデルがありません。「新しいモデルをインストール」から AI アシスタントにインストールを依頼できます（例：Ollama）。',
           doctorPackages:'システム更新を確認', doctorPackagesDesc:'OS とソフトウェアの更新候補を確認します（照会のみ）',
