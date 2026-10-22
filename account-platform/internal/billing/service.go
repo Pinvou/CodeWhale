@@ -503,14 +503,15 @@ func (s *Service) rejectAdjustment(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		RequesterID            uuid.UUID `json:"requester_id"`
-		WalletID               uuid.UUID `json:"wallet_id"`
-		ProductID              string    `json:"product_id"`
-		Channel                string    `json:"channel"`
-		Mobile                 string    `json:"mobile"`
-		CommerceCustomerStatus string    `json:"commerce_customer_status"`
+		RequesterID               uuid.UUID  `json:"requester_id"`
+		BeneficiaryOrganizationID *uuid.UUID `json:"beneficiary_organization_id"`
+		WalletID                  uuid.UUID  `json:"wallet_id"`
+		ProductID                 string     `json:"product_id"`
+		Channel                   string     `json:"channel"`
+		Mobile                    string     `json:"mobile"`
+		CommerceCustomerStatus    string     `json:"commerce_customer_status"`
 	}
-	if err := api.DecodeJSON(w, r, &body); err != nil || body.RequesterID == uuid.Nil || body.WalletID == uuid.Nil || body.ProductID == "" {
+	if err := api.DecodeJSON(w, r, &body); err != nil || body.RequesterID == uuid.Nil || body.WalletID == uuid.Nil || body.ProductID == "" || (body.BeneficiaryOrganizationID != nil && *body.BeneficiaryOrganizationID == uuid.Nil) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid recharge order", httpserver.RequestID(r.Context()))
 		return
 	}
@@ -518,14 +519,18 @@ func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, ErrCommerceCustomerNotReady)
 		return
 	}
-	if err := s.payments.AdmitCreate(r.Context(), body.RequesterID, nil, paymentRequestSource(r)); err != nil {
+	if err := s.payments.AdmitCreate(r.Context(), body.RequesterID, body.BeneficiaryOrganizationID, paymentRequestSource(r)); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
 	var order PaymentOrder
 	var created bool
 	var err error
-	order, created, err = s.payments.CreateMobileOrder(r.Context(), body.RequesterID, body.WalletID, body.ProductID, body.Channel, body.Mobile, r.Header.Get("Idempotency-Key"))
+	if body.BeneficiaryOrganizationID != nil {
+		order, created, err = s.payments.CreateOrganizationMobileOrder(r.Context(), body.RequesterID, body.WalletID, *body.BeneficiaryOrganizationID, body.ProductID, body.Channel, body.Mobile, r.Header.Get("Idempotency-Key"))
+	} else {
+		order, created, err = s.payments.CreateMobileOrder(r.Context(), body.RequesterID, body.WalletID, body.ProductID, body.Channel, body.Mobile, r.Header.Get("Idempotency-Key"))
+	}
 
 	if err != nil {
 		s.writeError(w, r, err)

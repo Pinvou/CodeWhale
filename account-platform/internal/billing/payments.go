@@ -307,11 +307,20 @@ func (p *PaymentCoordinator) CreateMobileOrder(ctx context.Context, requesterID,
 	return p.createOrder(ctx, requesterID, walletID, nil, productID, channel, mobile, idempotencyKey)
 }
 
+// CreateOrganizationMobileOrder keeps the payer identity separate from the
+// explicitly authorized beneficiary organization and its wallet.
+func (p *PaymentCoordinator) CreateOrganizationMobileOrder(ctx context.Context, requesterID, walletID, organizationID uuid.UUID, productID, channel, mobile, idempotencyKey string) (PaymentOrder, bool, error) {
+	if organizationID == uuid.Nil {
+		return PaymentOrder{}, false, ErrConflict
+	}
+	return p.createOrder(ctx, requesterID, walletID, &organizationID, productID, channel, mobile, idempotencyKey)
+}
+
 func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walletID uuid.UUID, beneficiaryOrganizationID *uuid.UUID, productID, channel, mobile, idempotencyKey string) (PaymentOrder, bool, error) {
 	if p.Capabilities().TestOnly && !p.allowTestOnlyCollection {
 		return PaymentOrder{}, false, ErrConflict
 	}
-	if beneficiaryOrganizationID != nil || requesterID == uuid.Nil || walletID == uuid.Nil {
+	if requesterID == uuid.Nil || walletID == uuid.Nil || (beneficiaryOrganizationID != nil && *beneficiaryOrganizationID == uuid.Nil) {
 		return PaymentOrder{}, false, ErrConflict
 	}
 	channel = strings.ToUpper(channel)
@@ -453,14 +462,16 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 	if !productOrdersEnabled {
 		return PaymentOrder{}, false, ErrConflict
 	}
-	wallet, walletErr := getWallet(ctx, tx, walletID, false)
+	// Serialize a new organization order with the lifecycle wallet fence.
+	// Existing response/binding recovery remains above this new-order check.
+	wallet, walletErr := getWallet(ctx, tx, walletID, beneficiaryOrganizationID != nil)
 	if walletErr != nil {
 		return PaymentOrder{}, false, ErrNotFound
 	}
 	if beneficiaryOrganizationID == nil && (wallet.OwnerType != "PERSONAL" || wallet.OwnerID != requesterID) {
 		return PaymentOrder{}, false, ErrConflict
 	}
-	if beneficiaryOrganizationID != nil && (wallet.OwnerType != "ORGANIZATION" || wallet.OwnerID != *beneficiaryOrganizationID) {
+	if beneficiaryOrganizationID != nil && (wallet.OwnerType != "ORGANIZATION" || wallet.OwnerID != *beneficiaryOrganizationID || wallet.Status != "ACTIVE") {
 		return PaymentOrder{}, false, ErrConflict
 	}
 	merchantDigest := sha256.Sum256([]byte(requesterID.String() + "|" + idempotencyKey))

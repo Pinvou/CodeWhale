@@ -487,7 +487,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
 
     def test_scoped_evidence_requires_exact_package_and_children_and_completion(self):
         valid = self.events(RUNNER.OWNER_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
-        self.assertEqual(RUNNER.verify_results(valid, RUNNER.OWNER_REQUIRED, package=RUNNER.BILLING_PACKAGE, require_children=True, exact_roots=True), 6)
+        self.assertEqual(RUNNER.verify_results(valid, RUNNER.OWNER_REQUIRED, package=RUNNER.BILLING_PACKAGE, require_children=True, exact_roots=True), 2 * len(RUNNER.OWNER_REQUIRED))
         mutations = [
             [{**event, "Package": RUNNER.TOKEN_PACKAGE} for event in valid],
             [event for event in valid if event.get("Test")],
@@ -504,6 +504,8 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestF06OrganizationWalletRequiresLifecycleEvidence",
             "TestTokenWalletReceiptSignedClientRecoveryPostgres",
             "TestTokenWalletReceiptConservationAndLifecyclePostgres",
+            "TestOrganizationPlanPurchaseActualClientPostgres",
+            "TestOrganizationPlanPurchaseLifecycleFencePostgres",
         })
         valid = self.events(RUNNER.OWNER_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
         for name in RUNNER.OWNER_REQUIRED:
