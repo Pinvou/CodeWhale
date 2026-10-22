@@ -285,8 +285,19 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
     setToolsOpen(false);
     if (copyingRef.current) return;
     if (!task.runId) {
-      setCopied('fail');
-      setLogNotice({ tone: 'error', text: copy.copyFailed });
+      // 同步失败（IPC 预检拒绝等）没有运行记录、没有可导出的日志——但错误本身
+      // 就是用户要复制的东西。只复制**后端生成的同步错误字段**（errorKey 的译文
+      // + errorDetail）；task.error 可能嵌脚本输出尾（运行失败的落点），不进
+      // 剪贴板；task.lines 更是脚本原文，永远不走这里。
+      const fields = [
+        task.errorKey && copy[task.errorKey],
+        task.errorDetail,
+      ].filter(Boolean).join(String.fromCharCode(10));
+      const ok = fields.length > 0 && await copyClipboardText(fields);
+      setCopied(ok ? 'ok' : 'fail');
+      setLogNotice(ok
+        ? { tone: 'ok', text: copy.copied }
+        : { tone: 'error', text: copy.copyFailed });
       return;
     }
     copyingRef.current = true;
@@ -305,6 +316,8 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
         ? { tone: 'ok', text: copy.copied }
         : { tone: 'error', text: copy.copyFailed });
     } catch {
+      // run 存在但导出失败：严格 fail-closed（评审 A2）。task.error 可能嵌
+      // 脚本输出尾，剪贴板一个字节都不给。
       setCopied('fail');
       setLogNotice({ tone: 'error', text: copy.copyFailed });
     } finally {

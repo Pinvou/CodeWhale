@@ -2024,7 +2024,26 @@ impl ModelManager {
                 &["inspect", "--format", "{{.State.Running}}", name],
             ) {
                 Some(state) if state.trim() == "false" => return Ok(()),
+                // 容器不存在 = 已停止（2026-10-22 用户验证实锤：sglang0519 的
+                // container_name 留在库里而容器早已删掉，inspect 报 No such object，
+                // 此前落入"无法确认"分支把更新链整个拒掉）。用 ps -a 精确名字过滤
+                // 区分「不存在」与「真的查不动」。
                 _ => {
+                    let exists = proc_timeout::query(
+                        "docker",
+                        &[
+                            "ps",
+                            "-a",
+                            "--filter",
+                            &format!("name=^/{name}$"),
+                            "--format",
+                            "{{.Names}}",
+                        ],
+                    )
+                    .is_some_and(|out| out.lines().any(|l| l.trim() == name));
+                    if !exists {
+                        return Ok(());
+                    }
                     return Err(ModelManagerError::new(format!(
                         "模型容器仍在运行或无法确认已停止，请先检查并停用，再{action}。"
                     )));
@@ -2066,10 +2085,15 @@ impl ModelManager {
                 "无法可靠确认此部署已停止，请先停用后再{action}。"
             )));
         }
-        if rec
-            .endpoint_url
-            .as_deref()
-            .is_some_and(openai_compatible_endpoint_alive)
+        // 端口存活只对**无容器名**的记录有意义（原生引擎）：docker 卡的存活性由
+        // 上面的容器分支负责，而且同端口可能被别的服务占着——z-image 默认 8000
+        // 与品悟内置 vLLM 同端口，拿 endpoint_url 探测会把停用已久的卡误判成
+        // 「端口仍有服务」（2026-10-22 用户验证实锤）。
+        if rec.container_name.is_none()
+            && rec
+                .endpoint_url
+                .as_deref()
+                .is_some_and(openai_compatible_endpoint_alive)
         {
             return Err(ModelManagerError::new(format!(
                 "模型端口仍有服务或状态无法确认，请先停用后再{action}。"

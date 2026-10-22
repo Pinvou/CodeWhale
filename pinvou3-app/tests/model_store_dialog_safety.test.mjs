@@ -224,65 +224,14 @@ test('新增的两个文案键三语齐全', () => {
 // 的"下载完成"判据只是分片文件存不存在，revision 还是浮动的 main。在加这条黄条
 // 之前，两类卡在详情页长得一模一样——用户没有任何自我保护的依据。
 //
-// 判据落在纯逻辑里（weightVerificationOf / weightVerificationNotice，见
-// model_store_logic.test.mjs）；这里只钉"两个详情弹窗真的把它渲染出来了"，
-// 那是纯逻辑测不到、而且掉了也不会有人发现的一环。
-
-test('两个详情弹窗都渲染 WeightVerifyNotice', () => {
-  // 「我的模型」那个详情页：档位来自商店卡片，所以必须把 card 传进去。
-  // 传成 detail/record 的话永远是 undefined —— 于是每张卡都出黄条，等于没做。
-  assert.match(
-    DETAIL_DIALOG,
-    /<WeightVerifyNotice\s+card=\{card\}/,
-    'ModelDetailDialog 没把 card 传给 WeightVerifyNotice —— 库记录里没有档位这一列'
-  );
-  // 商店那个详情页更要紧：它是下载决策点。等下完几十 GB 再说就晚了。
-  assert.match(
-    CARD_DIALOG,
-    /<WeightVerifyNotice\s+card=\{card\}/,
-    'StoreCardDialog 不出这条提示的话，用户是在付出几十 GB 之后才知道的'
-  );
-});
-
-test('WeightVerifyNotice 对达标卡什么都不渲染，且用的是提示色不是危险色', () => {
-  assert.match(
-    STORE_UI,
-    /const notice = weightVerificationNotice\(card\);[\s\S]{0,40}?if \(!notice\) return null;/,
-    'WeightVerifyNotice 丢了"达标就不渲染"那一步 —— 每张卡都挂一条，黄条就成了背景噪音'
-  );
-  // 这是知情权不是恐吓：用户不该因为这条提示就不敢用几张完全正常的卡。
-  assert.match(STORE_UI, /#FEF7E0/, '黄条换掉了模块里既有的提示底色');
-  const start = STORE_UI.indexOf('function WeightVerifyNotice');
-  assert.ok(start >= 0, 'model-store-ui.jsx 里找不到 WeightVerifyNotice —— 改名了就把这条测试一起改');
-  assert.doesNotMatch(
-    STORE_UI.slice(start, STORE_UI.indexOf('function MsToast')),
-    /TEXT_DANGER|text-rose|#C5221F/,
-    '这条提示被做成了危险色。它说的是"这条下载链路上少了一道防线"，不是"这张卡有问题"'
-  );
-});
-
-test('黄条的三句话三语齐全，而且不止一句"未校验"', () => {
+test('权重校验黄条已按产品决定整体移除', () => {
+  // 2026-10-22 用户验证反馈：所有详情卡的黄色区块「一点存在的意义都没有」。
+  // 组件、逻辑函数、i18n 键全部删除；此测试钉住「不再回流」。
+  const STORE_UI = read('src', 'features', 'model-store', 'model-store-ui.jsx');
+  const LOGIC = read('src', 'features', 'model-store', 'model-store-logic.js');
+  assert.ok(!STORE_UI.includes('WeightVerifyNotice'), '组件不应回流');
+  assert.ok(!LOGIC.includes('weightVerificationNotice'), '判定函数不应回流');
   for (const key of ['weightVerifyTitle', 'weightVerifyNone', 'weightVerifyManifest', 'weightVerifyAdvice']) {
-    for (const lang of LANGS) {
-      assert.ok(
-        literal(DICTS.get(lang), key),
-        `${lang}.js 里缺 ${key} —— 缺的那一语会渲染成 undefined`
-      );
-    }
-  }
-  for (const lang of LANGS) {
-    const text = DICTS.get(lang);
-    // none 和 manifest 必须是两句不同的话：manifest 确实逐文件比对过摘要，
-    // 只是参照跟权重同源。把它也说成"没校验"是不实的。
-    assert.notEqual(
-      literal(text, 'weightVerifyNone'),
-      literal(text, 'weightVerifyManifest'),
-      `${lang}.js 把两档说成了同一句话`
-    );
-    // 只说"这意味着什么"不够，还得说"你可以怎么办"，否则留给用户的只有不安。
-    assert.ok(
-      literal(text, 'weightVerifyAdvice').length > 40,
-      `${lang}.js 的 weightVerifyAdvice 短得不像一条可操作的建议`
-    );
+    assert.ok(!read('src', 'shared', 'i18n', 'zh.js').includes(key), `i18n 键 ${key} 不应回流`);
   }
 });

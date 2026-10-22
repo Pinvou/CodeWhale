@@ -14,7 +14,6 @@ import {
   MsPill,
   MsRow,
   TEXT_SECONDARY,
-  WeightVerifyNotice,
 } from './model-store-ui.jsx';
 
 const TITLE_ID = 'model-store-card-title';
@@ -63,7 +62,6 @@ function StoreCardDialog({ card, copy, theme, onClose, onDownload, downloaded, d
             </div>
           ) : null}
 
-          <WeightVerifyNotice card={card} copy={copy} />
 
           {card.description ? (
             <p className={`mt-4 whitespace-pre-wrap text-[12px] leading-5 ${TEXT_SECONDARY}`}>{card.description}</p>
