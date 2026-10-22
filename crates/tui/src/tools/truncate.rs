@@ -20,12 +20,11 @@
 //!
 //! ## Live callers
 //!
-//! * [`apply_spillover_with_artifact`] — invoked from the engine's tool-execution
-//!   path (`turn_loop.rs`) so any successful tool result over
-//!   [`SPILLOVER_THRESHOLD_BYTES`] spills to disk and the model
-//!   receives a bounded plain preview: a [`SPILLOVER_HEAD_BYTES`] head,
-//!   a short retained tail, and an honest footer naming the on-disk
-//!   path of the full output plus a one-line recovery instruction.
+//! * [`apply_spillover_with_artifact`] — invoked from the engine before result
+//!   fan-out. Adaptive routing (the default) selects a token-estimate band
+//!   and stores immutable session evidence when the preview omits content.
+//!   Classic routing retains its byte threshold and ownership-sidecar path.
+//!   Both emit bounded head/tail previews with an honest recovery footer.
 //! * Boot prune in `main.rs` deletes files older than
 //!   [`SPILLOVER_MAX_AGE`].
 //!
@@ -763,6 +762,9 @@ pub(crate) fn fit_to_inline_budget(
         recovery_path,
         retrieval_ref,
     );
+    if footer.len().saturating_add(PREVIEW_FRAME_BYTES) > budget {
+        return footer.chars().take(budget).collect();
+    }
     let room = budget.saturating_sub(footer.len() + PREVIEW_FRAME_BYTES);
     let head_bytes = room * 2 / 3;
     let (head, tail) = head_tail_windows(content, head_bytes, room - head_bytes);
@@ -802,7 +804,7 @@ pub(crate) fn refit_spilled_preview(
     let head_len = field("retained_head_bytes")?;
     let tail_len = field("retained_tail_bytes")?;
     let original_len = field("original_byte_count")?;
-    if head_len + tail_len > preview.len()
+    if head_len.checked_add(tail_len)? > preview.len()
         || !preview.is_char_boundary(head_len)
         || !preview.is_char_boundary(preview.len() - tail_len)
     {
@@ -817,6 +819,9 @@ pub(crate) fn refit_spilled_preview(
         recovery_path,
         retrieval_ref,
     );
+    if footer.len().saturating_add(PREVIEW_FRAME_BYTES) > budget {
+        return Some(footer.chars().take(budget).collect());
+    }
     let room = budget.saturating_sub(footer.len() + PREVIEW_FRAME_BYTES);
     let head_bytes = (room * 2 / 3).min(head_len);
     let tail_bytes = (room - head_bytes).min(tail_len);
@@ -993,6 +998,10 @@ fn apply_adaptive_evidence_inner(
         object.insert("evidence_available".into(), true.into());
         object.insert("truncated".into(), true.into());
         object.insert("original_byte_count".into(), artifact.size_bytes.into());
+        object.insert(
+            "original_line_count".into(),
+            original.lines().count().into(),
+        );
         object.insert("retained_head_bytes".into(), head_len.into());
         object.insert("retained_tail_bytes".into(), tail_len.into());
         object.insert(
@@ -1827,6 +1836,62 @@ mod tests {
             let metadata = result.metadata.expect("metadata stamped");
             assert_eq!(metadata["retained_head_bytes"], 16 * 1024);
             assert_eq!(metadata["retained_tail_bytes"], 4 * 1024);
+            assert_eq!(metadata["original_line_count"], 20_000);
+            let refitted = refit_spilled_preview(
+                &result.content,
+                &metadata,
+                2_000,
+                path.to_str(),
+                Some("art_call-honest"),
+            )
+            .expect("refit adaptive preview");
+            let omitted_lines = refitted
+                .split("of output omitted (")
+                .nth(1)
+                .and_then(|tail| tail.split_whitespace().next())
+                .and_then(|number| number.parse::<usize>().ok())
+                .expect("omitted line count");
+            assert!(
+                omitted_lines > 19_000 && omitted_lines <= 20_000,
+                "{refitted}"
+            );
+            assert!(refitted.chars().count() <= 2_000);
         });
+    }
+
+    #[test]
+    fn refit_spilled_preview_rejects_overflowing_metadata() {
+        let metadata = serde_json::json!({
+            "retained_head_bytes": usize::MAX,
+            "retained_tail_bytes": 1,
+            "original_byte_count": usize::MAX,
+        });
+        assert!(refit_spilled_preview(&"x".repeat(4_000), &metadata, 1_000, None, None).is_none());
+    }
+
+    #[test]
+    fn recovery_previews_respect_budgets_smaller_than_the_footer() {
+        let raw = "line\n".repeat(1_000);
+        let metadata = serde_json::json!({
+            "retained_head_bytes": 2_000,
+            "retained_tail_bytes": 1_000,
+            "original_byte_count": 100_000,
+            "original_line_count": 20_000,
+        });
+        for budget in [1, 32, 128, 512] {
+            assert!(
+                fit_to_inline_budget(&raw, budget, None, None)
+                    .chars()
+                    .count()
+                    <= budget
+            );
+            assert!(
+                refit_spilled_preview(&raw, &metadata, budget, None, None)
+                    .expect("valid preview")
+                    .chars()
+                    .count()
+                    <= budget
+            );
+        }
     }
 }

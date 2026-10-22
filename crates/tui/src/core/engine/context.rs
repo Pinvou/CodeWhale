@@ -139,7 +139,19 @@ fn tool_result_metadata_summary(metadata: Option<&serde_json::Value>) -> Option<
     None
 }
 
-fn summarize_subagent_status(status: &serde_json::Value) -> String {
+// Formatting a payload does not by itself omit its content. Track actual
+// field cuts and dropped rows/streams independently of the rendered text.
+fn keep_text(text: &str, limit: usize, lossy: &mut bool) -> String {
+    *lossy |= text.chars().count() > limit;
+    summarize_text(text, limit)
+}
+
+fn keep_text_head_tail(text: &str, limit: usize, lossy: &mut bool) -> String {
+    *lossy |= text.chars().count() > limit;
+    summarize_text_head_tail(text, limit)
+}
+
+fn summarize_subagent_status(status: &serde_json::Value, lossy: &mut bool) -> String {
     if let Some(raw) = status.as_str() {
         return raw.to_string();
     }
@@ -147,7 +159,7 @@ fn summarize_subagent_status(status: &serde_json::Value) -> String {
         && let Some((kind, value)) = obj.iter().next()
     {
         if let Some(reason) = value.as_str().filter(|s| !s.trim().is_empty()) {
-            return format!("{kind}({})", summarize_text(reason.trim(), 120));
+            return format!("{kind}({})", keep_text(reason.trim(), 120, lossy));
         }
         return kind.to_string();
     }
@@ -168,15 +180,15 @@ const SUBAGENT_ROUTE_LINE_MAX_CHARS: usize = 200;
 /// `None` when the receipt carries nothing printable (missing/empty fields,
 /// a non-object non-string value) — the row then shows no route line rather
 /// than a placeholder.
-fn subagent_route_line(route: &serde_json::Value) -> Option<String> {
+fn subagent_route_line(route: &serde_json::Value, lossy: &mut bool) -> Option<String> {
     if let Some(object) = route.as_object() {
-        let field = |key: &str| -> Option<String> {
+        let mut field = |key: &str| -> Option<String> {
             object
                 .get(key)
                 .and_then(serde_json::Value::as_str)
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
-                .map(|s| summarize_text(s, SUBAGENT_ROUTE_FIELD_PREVIEW_CHARS))
+                .map(|s| keep_text(s, SUBAGENT_ROUTE_FIELD_PREVIEW_CHARS, lossy))
         };
         let provider = field("provider_id")?;
         let model = field("model_id")?;
@@ -192,7 +204,7 @@ fn subagent_route_line(route: &serde_json::Value) -> Option<String> {
             (None, None) => {}
         }
         // Hard guard: field previews alone do not bound the assembled line.
-        return Some(summarize_text(&line, SUBAGENT_ROUTE_LINE_MAX_CHARS));
+        return Some(keep_text(&line, SUBAGENT_ROUTE_LINE_MAX_CHARS, lossy));
     }
     // Defensive: a producer may serialize the receipt as a bare
     // "provider/model" label; anything else shapeless is skipped.
@@ -200,12 +212,11 @@ fn subagent_route_line(route: &serde_json::Value) -> Option<String> {
     if raw.is_empty() {
         return None;
     }
-    Some(summarize_text(
-        &format!(
-            "  route: {}",
-            summarize_text(raw, SUBAGENT_ROUTE_FIELD_PREVIEW_CHARS)
-        ),
+    let route = keep_text(raw, SUBAGENT_ROUTE_FIELD_PREVIEW_CHARS, lossy);
+    Some(keep_text(
+        &format!("  route: {route}"),
         SUBAGENT_ROUTE_LINE_MAX_CHARS,
+        lossy,
     ))
 }
 
@@ -214,6 +225,7 @@ fn summarize_subagent_snapshot(
     index: usize,
     transcript_handle_fallback: Option<&str>,
     child_route_fallback: Option<&serde_json::Value>,
+    lossy: &mut bool,
 ) -> String {
     // Session projections (`SubAgentSessionProjection`) keep `transcript_handle`
     // on the outer envelope while the wrapped result row carries none, so the
@@ -231,13 +243,13 @@ fn summarize_subagent_snapshot(
         let fallback = outer_transcript_handle
             .as_deref()
             .or(transcript_handle_fallback);
-        return summarize_subagent_snapshot(inner, index, fallback, outer_child_route);
+        return summarize_subagent_snapshot(inner, index, fallback, outer_child_route, lossy);
     }
 
     let Some(obj) = snapshot.as_object() else {
         return format!(
             "- item {index}: {}",
-            summarize_text(&snapshot.to_string(), 240)
+            keep_text(&snapshot.to_string(), 240, lossy)
         );
     };
 
@@ -251,7 +263,7 @@ fn summarize_subagent_snapshot(
         .unwrap_or("agent");
     let status = obj
         .get("status")
-        .map(summarize_subagent_status)
+        .map(|status| summarize_subagent_status(status, lossy))
         .unwrap_or_else(|| "unknown".to_string());
     // The hint below names `transcript_handle`, so the summarized rows must
     // carry the value it points at — otherwise the hint would name a value
@@ -269,13 +281,13 @@ fn summarize_subagent_snapshot(
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| summarize_text(s, 220));
+        .map(|s| keep_text(s, 220, lossy));
     let result = obj
         .get("result")
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| summarize_text(s, 1_600));
+        .map(|s| keep_text(s, 1_600, lossy));
     let steps = obj.get("steps_taken").and_then(serde_json::Value::as_u64);
     let duration_ms = obj.get("duration_ms").and_then(serde_json::Value::as_u64);
     // The wrapped row's receipt outranks the envelope fallback; absent or
@@ -283,7 +295,7 @@ fn summarize_subagent_snapshot(
     let route_line = obj
         .get("child_route")
         .or(child_route_fallback)
-        .and_then(subagent_route_line);
+        .and_then(|route| subagent_route_line(route, lossy));
 
     let mut lines = vec![format!("- {agent_id} ({agent_type}) status={status}")];
     if let Some(route_line) = route_line {
@@ -385,12 +397,15 @@ fn transcript_handle_row_value(value: &serde_json::Value) -> Option<String> {
 }
 
 /// Bounded verbatim passthrough for non-snapshot agent action receipts.
-fn bounded_subagent_receipt(raw: &str) -> String {
+fn bounded_subagent_receipt(raw: &str) -> ContextSummary {
     let mut out = String::from("[sub-agent receipt]\n");
     let total_chars = raw.chars().count();
     if total_chars <= SUBAGENT_RECEIPT_PASSTHROUGH_MAX_CHARS {
         out.push_str(raw);
-        return out;
+        return ContextSummary {
+            text: out,
+            lossy: false,
+        };
     }
     out.push_str(
         &raw.chars()
@@ -400,7 +415,10 @@ fn bounded_subagent_receipt(raw: &str) -> String {
     out.push_str(&format!(
         "\n[receipt truncated: showing {SUBAGENT_RECEIPT_PASSTHROUGH_MAX_CHARS} of {total_chars} characters]"
     ));
-    out
+    ContextSummary {
+        text: out,
+        lossy: true,
+    }
 }
 
 /// How the snapshot summarizer should treat a parsed agent receipt.
@@ -414,7 +432,7 @@ enum SubagentSnapshotBatch<'a> {
     FleetStatus(Vec<&'a serde_json::Value>),
 }
 
-fn compact_subagent_tool_result_for_context(tool_name: &str, raw: &str) -> Option<String> {
+fn compact_subagent_tool_result_for_context(tool_name: &str, raw: &str) -> Option<ContextSummary> {
     if tool_name != "agent" {
         return None;
     }
@@ -471,6 +489,7 @@ fn compact_subagent_tool_result_for_context(tool_name: &str, raw: &str) -> Optio
         SubagentSnapshotBatch::FleetStatus(snapshots) => (SUBAGENT_FLEET_SUMMARY_HEADER, snapshots),
     };
 
+    let mut lossy = false;
     let mut out = String::from(header);
     out.push_str(SUBAGENT_SELF_REPORT_NOTICE);
     // Only point at `transcript_handle` when this receipt actually carries
@@ -485,16 +504,26 @@ fn compact_subagent_tool_result_for_context(tool_name: &str, raw: &str) -> Optio
     }
     for (idx, snapshot) in snapshots.iter().enumerate() {
         if idx >= 8 {
+            lossy = true;
             out.push_str(&format!(
                 "- ... {} more sub-agent result(s) omitted from context summary\n",
                 snapshots.len().saturating_sub(idx)
             ));
             break;
         }
-        out.push_str(&summarize_subagent_snapshot(snapshot, idx + 1, None, None));
+        out.push_str(&summarize_subagent_snapshot(
+            snapshot,
+            idx + 1,
+            None,
+            None,
+            &mut lossy,
+        ));
         out.push('\n');
     }
-    Some(out.trim_end().to_string())
+    Some(ContextSummary {
+        text: out.trim_end().to_string(),
+        lossy,
+    })
 }
 
 fn json_text<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
@@ -531,20 +560,21 @@ fn compact_run_tests_result_for_context(
     raw: &str,
     metadata: Option<&Value>,
     budget: usize,
-) -> Option<String> {
+) -> Option<ContextSummary> {
     let parsed: Value = serde_json::from_str(raw).ok()?;
     let success = parsed.get("success")?.as_bool()?;
     let exit_code = json_number_text(&parsed, "exit_code").unwrap_or_else(|| "?".to_string());
     let command = json_text(&parsed, "command").unwrap_or("(unknown command)");
     let stdout = json_text(&parsed, "stdout");
     let stderr = json_text(&parsed, "stderr");
+    let mut lossy = false;
     let mut lines = vec![
         "[run_tests result summarized for context]".to_string(),
         format!(
             "status: {}, exit_code: {exit_code}",
             if success { "passed" } else { "failed" }
         ),
-        format!("command: {}", summarize_text(command, 300)),
+        format!("command: {}", keep_text(command, 300, &mut lossy)),
     ];
     // Keep the failing test names ahead of noisy streams. Metadata is also
     // bounded so it cannot consume the route budget or the recovery footer.
@@ -563,16 +593,19 @@ fn compact_run_tests_result_for_context(
     if let Some(stderr) = stderr {
         lines.push(format!(
             "stderr: {}",
-            summarize_text_head_tail(stderr, stream_limit)
+            keep_text_head_tail(stderr, stream_limit, &mut lossy)
         ));
     }
     if let Some(stdout) = stdout {
         lines.push(format!(
             "stdout: {}",
-            summarize_text_head_tail(stdout, stream_limit)
+            keep_text_head_tail(stdout, stream_limit, &mut lossy)
         ));
     }
-    Some(lines.join("\n"))
+    Some(ContextSummary {
+        text: lines.join("\n"),
+        lossy,
+    })
 }
 
 fn run_verifier_status_rank(status: Option<&str>) -> u8 {
@@ -584,9 +617,10 @@ fn run_verifier_status_rank(status: Option<&str>) -> u8 {
     }
 }
 
-fn compact_run_verifiers_result_for_context(raw: &str) -> Option<String> {
+fn compact_run_verifiers_result_for_context(raw: &str) -> Option<ContextSummary> {
     let parsed: Value = serde_json::from_str(raw).ok()?;
     let gates = parsed.get("gates")?.as_array()?;
+    let mut lossy = false;
     let summary = json_text(&parsed, "summary")
         .map(ToString::to_string)
         .unwrap_or_else(|| {
@@ -619,6 +653,7 @@ fn compact_run_verifiers_result_for_context(raw: &str) -> Option<String> {
 
     for (idx, gate) in ordered.iter().enumerate() {
         if idx >= 12 {
+            lossy = true;
             lines.push(format!(
                 "- ... {} more gate(s) omitted from context summary",
                 ordered.len().saturating_sub(idx)
@@ -634,9 +669,23 @@ fn compact_run_verifiers_result_for_context(raw: &str) -> Option<String> {
             .unwrap_or_default();
         lines.push(format!("- {name} ({ecosystem}): {status}{exit}"));
 
+        // Passed streams and a second nonempty failure stream are not
+        // represented in the compact row; retain recovery for that omission.
+        let stdout = json_text(gate, "stdout");
+        let stderr = json_text(gate, "stderr");
+        lossy |= if status == "passed" {
+            stdout.is_some() || stderr.is_some()
+        } else {
+            (stdout.is_some() && stderr.is_some())
+                || (json_text(gate, "skipped_reason").is_some()
+                    && (stdout.is_some() || stderr.is_some()))
+        };
         if status != "passed" {
             if let Some(command) = json_text(gate, "command") {
-                lines.push(format!("  command: {}", summarize_text(command, 240)));
+                lines.push(format!(
+                    "  command: {}",
+                    keep_text(command, 240, &mut lossy)
+                ));
             }
             if let Some(detail) = json_text(gate, "skipped_reason")
                 .or_else(|| json_text(gate, "stderr"))
@@ -644,18 +693,22 @@ fn compact_run_verifiers_result_for_context(raw: &str) -> Option<String> {
             {
                 lines.push(format!(
                     "  detail: {}",
-                    summarize_text_head_tail(detail, 600)
+                    keep_text_head_tail(detail, 600, &mut lossy)
                 ));
             }
         }
     }
 
-    Some(lines.join("\n"))
+    Some(ContextSummary {
+        text: lines.join("\n"),
+        lossy,
+    })
 }
 
-fn compact_task_gate_run_result_for_context(raw: &str) -> Option<String> {
+fn compact_task_gate_run_result_for_context(raw: &str) -> Option<ContextSummary> {
     let parsed: Value = serde_json::from_str(raw).ok()?;
     let gate = parsed.get("gate")?;
+    let mut lossy = false;
     let gate_name = json_text(gate, "gate").unwrap_or("gate");
     let status = json_text(gate, "status").unwrap_or("unknown");
     let command = json_text(gate, "command").unwrap_or("(unknown command)");
@@ -669,15 +722,18 @@ fn compact_task_gate_run_result_for_context(raw: &str) -> Option<String> {
     let mut lines = vec![
         "[task_gate_run result summarized for context]".to_string(),
         format!("gate: {gate_name}, status: {status}{exit}"),
-        format!("command: {}", summarize_text(command, 300)),
+        format!("command: {}", keep_text(command, 300, &mut lossy)),
     ];
     if let Some(summary) = summary {
-        lines.push(format!("summary: {}", summarize_text(summary, 800)));
+        lines.push(format!("summary: {}", keep_text(summary, 800, &mut lossy)));
     }
     if let Some(log_path) = json_text(gate, "log_path") {
         lines.push(format!("log_path: {log_path}"));
     }
-    Some(lines.join("\n"))
+    Some(ContextSummary {
+        text: lines.join("\n"),
+        lossy,
+    })
 }
 
 fn compact_structured_tool_result_for_context(
@@ -685,7 +741,7 @@ fn compact_structured_tool_result_for_context(
     raw: &str,
     metadata: Option<&Value>,
     budget: usize,
-) -> Option<String> {
+) -> Option<ContextSummary> {
     match tool_name {
         "run_tests" => compact_run_tests_result_for_context(raw, metadata, budget),
         "run_verifiers" => compact_run_verifiers_result_for_context(raw),
@@ -776,11 +832,7 @@ pub(crate) fn tool_result_context_view(
     let retrieval_ref = recovery.as_ref().and_then(|recovery| recovery.artifact_id);
 
     let summary = compact_subagent_tool_result_for_context(tool_name, raw)
-        .or_else(|| compact_structured_tool_result_for_context(tool_name, raw, metadata, budget))
-        .map(|text| ContextSummary {
-            lossy: text != raw,
-            text,
-        });
+        .or_else(|| compact_structured_tool_result_for_context(tool_name, raw, metadata, budget));
     if let Some(summary) = summary {
         return summary_view(summary, budget, recovery.as_ref());
     }
@@ -826,7 +878,7 @@ fn summary_view(
     budget: usize,
     recovery: Option<&RecoveryRef<'_>>,
 ) -> ToolResultContextView {
-    if !summary.lossy {
+    if !summary.lossy && summary.text.chars().count() <= budget {
         return ToolResultContextView::whole(summary.text);
     }
     let recovery_path = recovery.map(|recovery| recovery.path);
@@ -841,14 +893,22 @@ fn summary_view(
             crate::tools::truncate::unsaved_output_recovery_instruction()
         ),
     };
-    let text = crate::tools::truncate::fit_to_inline_budget(
-        &summary.text,
-        budget.saturating_sub(footer.chars().count() + 1),
-        recovery_path,
-        retrieval_ref,
-    );
+    // A second fit_to_inline_budget call would append its own footer before
+    // ours, duplicating recovery instructions and overshooting small routes.
+    let footer_chars = footer.chars().count();
+    let text = if footer_chars >= budget {
+        footer.chars().take(budget).collect()
+    } else {
+        let room = budget - footer_chars - 1;
+        let body = if room < 3 {
+            summary.text.chars().take(room).collect()
+        } else {
+            summarize_text_head_tail(&summary.text, room)
+        };
+        format!("{body}\n{footer}")
+    };
     ToolResultContextView {
-        text: format!("{text}\n{footer}"),
+        text,
         needs_full_output_artifact: recovery.is_none(),
     }
 }

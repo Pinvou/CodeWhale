@@ -2523,7 +2523,8 @@ fn compact_tool_result_for_wire(
     // a back-reference would falsely imply the exact bytes remain available.
     let sent_budget = tool_result_sent_char_budget();
     let dedup_eligible = (TOOL_RESULT_DEDUP_MIN_CHARS..=sent_budget).contains(&original_chars)
-        && !is_mutation_tool(tool_name);
+        && !is_mutation_tool(tool_name)
+        && !content.contains(crate::tools::truncate::SPILLOVER_RECOVERY_HINT);
 
     if dedup_eligible && let Some(previous) = seen_tool_results.get(&sha) {
         let content = format!(
