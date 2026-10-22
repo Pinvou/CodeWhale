@@ -443,6 +443,13 @@ pub(super) fn save_model_inner(
     UserPrefs::update_transaction_with_post_commit(
         |prefs| {
             let old = prefs.model_by_id(&model.id).cloned();
+            // Only a new client's explicit context-field edit records a user
+            // choice. Untouched-field and reasoning-only intent take precedence
+            // over inconsistent payloads; legacy/machine defaults do not opt out.
+            let explicit_context_selection = model.context_window_edit_requested
+                && !model.preserve_context_window_tokens
+                && !model.reasoning_effort_only;
+            model.context_window_edit_requested = false;
             if std::mem::take(&mut model.reasoning_effort_only) {
                 let mut latest = old
                     .clone()
@@ -529,6 +536,9 @@ pub(super) fn save_model_inner(
                 .map_err(|e| sanitize_command_error("save_model", e))?;
             *deferred_delete.borrow_mut() = deferred;
             prefs.upsert_model(model);
+            if explicit_context_selection {
+                prefs.record_explicit_model_context_selection(&model_id);
+            }
             Ok(())
         },
         || {
@@ -2182,6 +2192,7 @@ mod tests {
             model_store_link_requested: false,
             preserve_model_store_route: false,
             preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
             reasoning_effort_only: false,
             base_url: "https://active.example/v1".to_string(),
             provider_kind: None,

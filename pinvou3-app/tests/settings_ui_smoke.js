@@ -1558,7 +1558,8 @@ async function modalWidth(page, headingText) {
       && savedCustomContext.preset === 'openai_compatible'
       && savedCustomContext.provider_kind === 'custom'
       && savedCustomContext.base_url === 'https://example.com/v1'
-      && savedCustomContext.context_window_tokens === 1048576,
+      && savedCustomContext.context_window_tokens === 1048576
+      && savedCustomContext.context_window_edit_requested === true,
     JSON.stringify(savedCustomContext));
   await clickRowAction(page, 'glm-5.3-flash', '编辑');
   await sleep(300);
@@ -1581,7 +1582,9 @@ async function modalWidth(page, headingText) {
     return call && call.args && call.args.model;
   });
   rec('⑥.5i clearing the context window saves null (system default kept, no 0/garbage value)',
-    clearedContext && clearedContext.model === 'glm-5.3-flash' && clearedContext.context_window_tokens === null,
+    clearedContext && clearedContext.model === 'glm-5.3-flash' && clearedContext.context_window_tokens === null
+      && clearedContext.context_window_edit_requested === true
+      && clearedContext.preserve_context_window_tokens === false,
     JSON.stringify(clearedContext));
   // Untouched-field intent: a form opened before a background store sync must
   // not resubmit its stale window snapshot (overwriting e.g. the verified 256K
@@ -1600,7 +1603,8 @@ async function modalWidth(page, headingText) {
   rec('⑥.5j an untouched context field flags the save so the backend keeps the persisted value',
     untouchedContext
       && untouchedContext.model === 'glm-5.3-flash'
-      && untouchedContext.preserve_context_window_tokens === true,
+      && untouchedContext.preserve_context_window_tokens === true
+      && untouchedContext.context_window_edit_requested !== true,
     JSON.stringify(untouchedContext));
   await clickRowAction(page, 'glm-5.3-flash', '编辑');
   await sleep(300);
@@ -1621,6 +1625,7 @@ async function modalWidth(page, headingText) {
     explicitContext
       && explicitContext.model === 'glm-5.3-flash'
       && explicitContext.context_window_tokens === 32768
+      && explicitContext.context_window_edit_requested === true
       && explicitContext.preserve_context_window_tokens === false,
     JSON.stringify(explicitContext));
   // Input bound: context_window_tokens is persisted as u32, so oversized input

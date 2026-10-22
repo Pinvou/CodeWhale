@@ -403,6 +403,8 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+const EXPLICIT_MODEL_CONTEXT_SELECTION: &str = "user-context-choice-v1";
+
 /// 一条用户保存的模型配置:GUI「模型列表」的一项,也是热切换的最小单位。
 /// `id` 稳定(前端生成),被 `active_model_id` / session `model_id` 引用。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -449,6 +451,10 @@ pub struct SavedModel {
     /// value, including a deliberate downgrade. Cleared before persisting.
     #[serde(default, skip_serializing)]
     pub preserve_context_window_tokens: bool,
+    /// Incoming explicit context-field edit. Distinct from an omitted legacy
+    /// field or a machine-created default; never persisted or returned to clients.
+    #[serde(default, skip_serializing)]
+    pub context_window_edit_requested: bool,
     /// Incoming composer intent: update only reasoning effort on the latest row.
     #[serde(default, skip_serializing)]
     pub reasoning_effort_only: bool,
@@ -545,6 +551,7 @@ impl SavedModel {
             model_store_link_requested: false,
             preserve_model_store_route: false,
             preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
             reasoning_effort_only: false,
             provider_kind: Some(MODEL_PROVIDER_KIND_CUSTOM.to_string()),
             vendor: None,
@@ -802,8 +809,9 @@ pub struct AdvancedPrefs {
     /// (见 `UserPrefs::migrate_models`),把旧 model_preset+custom_* 合成一条。
     #[serde(default)]
     pub saved_models: Vec<SavedModel>,
-    /// One-time corrections of the store's erroneous 32K defaults. Kept with
-    /// the model list so later intentional limits survive restarts and upgrades.
+    /// One-time corrections of the store's erroneous 32K defaults, or a stable
+    /// explicit-user-choice receipt independent of a not-yet-migrated card link.
+    /// Kept with the model list so intentional limits survive restarts/upgrades.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub model_store_context_repairs: std::collections::BTreeMap<String, String>,
     /// 全局默认/当前激活模型 id(新建会话继承它)。None = 回退列表首条。
@@ -1547,6 +1555,7 @@ impl UserPrefs {
             model_store_link_requested: false,
             preserve_model_store_route: false,
             preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
             reasoning_effort_only: false,
             base_url,
             provider_kind: None,
@@ -1881,6 +1890,22 @@ impl UserPrefs {
         }
     }
 
+    /// New clients identify actual context-field edits explicitly. Remember the
+    /// choice even before a legacy store route has acquired its card association,
+    /// so an in-flight capability probe cannot replace a freshly confirmed 32K.
+    pub fn record_explicit_model_context_selection(&mut self, id: &str) {
+        self.advanced
+            .model_store_context_repairs
+            .insert(id.to_owned(), EXPLICIT_MODEL_CONTEXT_SELECTION.to_owned());
+    }
+
+    pub fn has_explicit_model_context_selection(&self, id: &str) -> bool {
+        self.advanced
+            .model_store_context_repairs
+            .get(id)
+            .is_some_and(|receipt| receipt == EXPLICIT_MODEL_CONTEXT_SELECTION)
+    }
+
     /// 删一条模型;若删的是当前 active,回退到列表首条。
     pub fn remove_model(&mut self, id: &str) {
         self.advanced.saved_models.retain(|m| m.id != id);
@@ -2029,6 +2054,7 @@ mod tests {
             model_store_link_requested: false,
             preserve_model_store_route: false,
             preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
             reasoning_effort_only: false,
             base_url: "http://127.0.0.1:8000/v1".into(),
             provider_kind: None,
@@ -2090,6 +2116,7 @@ mod tests {
             model_store_link_requested: false,
             preserve_model_store_route: false,
             preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
             reasoning_effort_only: false,
             base_url: "http://127.0.0.1:8000/v1".into(),
             provider_kind: None,
@@ -2447,6 +2474,7 @@ mod tests {
             model_store_link_requested: false,
             preserve_model_store_route: false,
             preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
             reasoning_effort_only: false,
             base_url: "http://127.0.0.1:8000/v1".into(),
             provider_kind: None,
@@ -2552,6 +2580,7 @@ mod tests {
             model_store_link_requested: false,
             preserve_model_store_route: false,
             preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
             reasoning_effort_only: false,
             base_url: "https://example.invalid/v1".into(),
             provider_kind: None,
@@ -2923,6 +2952,7 @@ mod tests {
             model_store_link_requested: false,
             preserve_model_store_route: false,
             preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
             reasoning_effort_only: false,
             base_url: "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions/".into(),
             provider_kind: None,
@@ -2968,6 +2998,7 @@ mod tests {
             model_store_link_requested: false,
             preserve_model_store_route: false,
             preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
             reasoning_effort_only: false,
             base_url: "https://open.bigmodel.cn/api/paas/v4".into(),
             provider_kind: None,
@@ -3018,6 +3049,7 @@ mod tests {
             model_store_link_requested: false,
             preserve_model_store_route: false,
             preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
             reasoning_effort_only: false,
             base_url: "https://api.minimax.chat/v1".into(),
             provider_kind: None,
@@ -3056,6 +3088,7 @@ mod tests {
             model_store_link_requested: false,
             preserve_model_store_route: false,
             preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
             reasoning_effort_only: false,
             base_url: "https://api.minimax.chat".into(),
             provider_kind: Some(MODEL_PROVIDER_KIND_OFFICIAL_API.into()),
@@ -3112,6 +3145,7 @@ mod tests {
                 model_store_link_requested: false,
                 preserve_model_store_route: false,
                 preserve_context_window_tokens: false,
+                context_window_edit_requested: false,
                 reasoning_effort_only: false,
                 base_url: "http://127.0.0.1:8000/v1".into(),
                 provider_kind: None,
@@ -3141,6 +3175,7 @@ mod tests {
                 model_store_link_requested: false,
                 preserve_model_store_route: false,
                 preserve_context_window_tokens: false,
+                context_window_edit_requested: false,
                 reasoning_effort_only: false,
                 base_url: "https://gateway.example.com/v1".into(),
                 provider_kind: Some(MODEL_PROVIDER_KIND_CUSTOM.into()),
@@ -3226,6 +3261,7 @@ mod tests {
             model_store_link_requested: false,
             preserve_model_store_route: false,
             preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
             reasoning_effort_only: false,
             base_url: "http://127.0.0.1:8000/v1".into(),
             provider_kind: None,
@@ -3266,6 +3302,7 @@ mod tests {
             model_store_link_requested: false,
             preserve_model_store_route: false,
             preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
             reasoning_effort_only: false,
             base_url: base_url.into(),
             provider_kind: Some(
@@ -3553,6 +3590,7 @@ mod tests {
             model_store_link_requested: false,
             preserve_model_store_route: false,
             preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
             reasoning_effort_only: false,
             base_url: "https://api.moonshot.cn/v1".into(),
             provider_kind: None,
@@ -4399,6 +4437,7 @@ mod tests {
             model_store_link_requested: false,
             preserve_model_store_route: false,
             preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
             reasoning_effort_only: false,
             base_url: "https://api.deepseek.com".to_string(),
             provider_kind: None,

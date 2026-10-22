@@ -121,6 +121,8 @@ async function assertComposerIntentAcrossRefresh(source) {
   assert.equal(submitted.reasoning_effort, 'high');
   assert.equal(submitted.reasoning_effort_only, true,
     'composer must send reasoning-only edit intent across an asynchronous refresh');
+  assert.notEqual(submitted.context_window_edit_requested, true,
+    'a reasoning-only composer save must not claim an explicit context choice');
   // The stale snapshot intentionally still travels with this incoming-only
   // intent. The backend must project only reasoning_effort onto its latest row.
   assert.equal(submitted.model, 'old-wire');
@@ -150,6 +152,7 @@ for (const contextWindow of [32768, null]) {
     const model = {
       ...makeRow(), alias: 'Explicit settings edit', reasoning_effort: 'high',
       context_window_tokens: contextWindow,
+      context_window_edit_requested: true,
       preserve_context_window_tokens: false, preserve_model_store_route: false,
     };
     const before = structuredClone(model);

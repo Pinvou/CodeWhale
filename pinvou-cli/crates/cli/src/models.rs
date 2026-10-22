@@ -1253,6 +1253,7 @@ fn add<S: CredentialStore>(
         model_store_link_requested: false,
         preserve_model_store_route: false,
         preserve_context_window_tokens: false,
+        context_window_edit_requested: false,
         reasoning_effort_only: false,
         provider_kind: metadata.provider_kind,
         vendor: metadata.vendor,
@@ -1278,6 +1279,9 @@ fn add<S: CredentialStore>(
             .map_err(|error| format!("credential store unavailable: {error}"))?;
         credential_written.store(true, std::sync::atomic::Ordering::Release);
         prefs.upsert_model(stored);
+        if context_window.is_some() {
+            prefs.record_explicit_model_context_selection(&id);
+        }
         if set_active {
             prefs.advanced.active_model_id = Some(active_id.clone());
         }
@@ -1568,6 +1572,9 @@ fn edit<S: CredentialStore>(
             // The plaintext key never reaches settings.json.
             updated.api_key = String::new();
             prefs.upsert_model(updated);
+            if changes.context_window.is_some() {
+                prefs.record_explicit_model_context_selection(&id);
+            }
             if set_active {
                 prefs.advanced.active_model_id = Some(id.to_owned());
             }
@@ -5054,6 +5061,79 @@ mod tests {
             },
             OutputMode::Human,
         )
+    }
+
+    #[test]
+    fn explicit_cli_context_flags_record_choices_and_unrelated_edits_do_not() {
+        let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _home = TempHome::new("explicit-context");
+        let store = RecordingStore::new();
+        let id = add_model(
+            &store,
+            "Legacy route",
+            "wire",
+            "http://127.0.0.1:8000/v1",
+            None,
+        );
+        assert!(!UserPrefs::load().has_explicit_model_context_selection(&id));
+        let edit_fields = |changes| {
+            edit(
+                &store,
+                EditModel {
+                    id: id.clone(),
+                    changes: Box::new(changes),
+                    api_key_env: None,
+                    api_key_stdin: false,
+                    clear_api_key: false,
+                    yes: false,
+                    set_active: false,
+                },
+                OutputMode::Human,
+            )
+            .unwrap();
+        };
+        edit_fields(ModelEdit {
+            alias: Some(Some("Renamed only".into())),
+            ..Default::default()
+        });
+        assert!(!UserPrefs::load().has_explicit_model_context_selection(&id));
+        for context in [Some(32768), None] {
+            UserPrefs::update_transaction(|prefs| {
+                prefs.advanced.model_store_context_repairs.remove(&id);
+                Ok(())
+            })
+            .unwrap();
+            edit_fields(ModelEdit {
+                context_window: Some(context),
+                ..Default::default()
+            });
+            let prefs = UserPrefs::load();
+            assert!(prefs.has_explicit_model_context_selection(&id));
+            assert_eq!(
+                prefs.model_by_id(&id).unwrap().context_window_tokens,
+                context
+            );
+        }
+        let added = add(
+            &store,
+            AddModel {
+                preset: ModelPreset::OpenaiCompatible,
+                name: "Explicit limit".into(),
+                model: "wire".into(),
+                base_url: "http://127.0.0.1:8000/v1".into(),
+                api_key_env: None,
+                api_key_stdin: false,
+                context_window: Some(32768),
+                max_output: None,
+                reasoning_effort: None,
+                metadata: Default::default(),
+                set_active: false,
+            },
+            OutputMode::Human,
+        )
+        .unwrap();
+        let added_id = added.stdout.strip_prefix("id: ").unwrap().trim();
+        assert!(UserPrefs::load().has_explicit_model_context_selection(added_id));
     }
 
     /// Sets (or clears) one search provider's key through the real

@@ -970,6 +970,7 @@ mod tests {
             model_store_link_requested: false,
             preserve_model_store_route: false,
             preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
             reasoning_effort_only: false,
             base_url: "https://example.invalid/v1".to_string(),
             provider_kind: None,

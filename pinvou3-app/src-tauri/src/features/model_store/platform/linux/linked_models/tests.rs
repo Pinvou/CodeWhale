@@ -247,6 +247,7 @@ fn explicit_follow_changes_only_target_context_and_survives_reload() {
     UserPrefs::update_transaction(|prefs| {
         prefs.advanced.saved_models = vec![target.clone(), other.clone()];
         prefs.advanced.active_model_id = Some(other.id.clone());
+        prefs.record_explicit_model_context_selection(&target.id);
         Ok(())
     })
     .unwrap();
@@ -256,6 +257,7 @@ fn explicit_follow_changes_only_target_context_and_survives_reload() {
     let reloaded = UserPrefs::load();
     assert_eq!(reloaded.model_by_id("target"), Some(&target));
     assert_eq!(reloaded.model_by_id("manual-limit"), Some(&other));
+    assert!(reloaded.has_explicit_model_context_selection("target"));
     assert_eq!(
         reloaded.advanced.active_model_id.as_deref(),
         Some("manual-limit")
