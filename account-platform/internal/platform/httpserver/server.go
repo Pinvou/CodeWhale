@@ -256,14 +256,7 @@ func runApplication(ctx context.Context, serviceName string, application http.Ha
 	logger := newLogger(cfg)
 	slog.SetDefault(logger)
 	applicationHandler, metrics := handlerWithMetrics(cfg, application, ready, collectors...)
-	server := &http.Server{
-		Addr:              cfg.Address,
-		Handler:           applicationHandler,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
+	server := NewApplicationServer(cfg, applicationHandler)
 	metricsAddress := strings.TrimSpace(os.Getenv("METRICS_ADDRESS"))
 	if metricsAddress == "" {
 		metricsAddress = ":9090"

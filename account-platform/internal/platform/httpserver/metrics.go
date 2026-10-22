@@ -103,13 +103,13 @@ func (writer *metricResponseWriter) Write(body []byte) (int, error) {
 	return writer.ResponseWriter.Write(body)
 }
 
-func (writer *metricResponseWriter) Flush() {
+func (writer *metricResponseWriter) Flush() { _ = writer.FlushError() }
+
+func (writer *metricResponseWriter) FlushError() error {
 	if !writer.wroteHeader {
 		writer.WriteHeader(http.StatusOK)
 	}
-	if flusher, ok := writer.ResponseWriter.(http.Flusher); ok {
-		flusher.Flush()
-	}
+	return http.NewResponseController(writer.ResponseWriter).Flush()
 }
 
 func (writer *metricResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {

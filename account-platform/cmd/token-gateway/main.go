@@ -297,6 +297,7 @@ func main() {
 		return err
 	}
 	collectors := append(repository.AdminPaginationCollectors(), service.AdminOperationsOverviewCollectors()...)
+	handler = httpserver.WithStreamingWriteDeadline(handler)
 	if err := httpserver.RunWithApplicationContext(workerContext, "token-gateway", handler, ready, collectors...); err != nil {
 		log.Fatal("TOKEN_STARTUP_CONFIGURATION_FAILED")
 	}
