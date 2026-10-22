@@ -5,6 +5,7 @@ import vm from 'node:vm';
 import { createCmsdSwitchFollow } from '../src/features/megacube/switch-follow.js';
 import * as cmsApi from '../src/features/megacube/cms-api.js';
 import { mergeHandoffRecovery } from '../src/features/megacube/handoff-recovery.js';
+import { publishRuntimeTask, subscribeRuntimeTasks, runtimeTasksFromOutput } from '../src/features/megacube/runtime-task-events.js';
 
 const details = JSON.parse(fs.readFileSync(new URL('./fixtures/cmsd-switch-task-details.json', import.meta.url), 'utf8'));
 const task = details.succeeded.body;
@@ -69,7 +70,7 @@ test('the real renderer recovery hook resolves an accepted switch absent from th
     setInterval: (callback, delay) => { intervals.push({ callback, delay }); return intervals.length; }, clearInterval: () => {},
     setTimeout, clearTimeout, console,
   };
-  vm.createContext(context);
+  Object.assign(context, { publishRuntimeTask, subscribeRuntimeTasks, runtimeTasksFromOutput }); vm.createContext(context);
   vm.runInContext(hookSource('use-cmsd-tasks') + '\n' + hookSource('use-cmsd-switch-follow') + '\nthis.hook = useCmsdSwitchFollow;', context);
   context.hook({ bridge: { available: true, state: { getMany: () => state }, models: {
     saveModel: async row => { rows.push(row); }, switchModel: async (_session, id) => { binding = id; selected.push(id); }, loadModels: async () => {},
@@ -205,7 +206,7 @@ test('recovered running tasks remain backgroundable and terminal details never r
   }, useRef: initial => refs[refIndex++] ||= { current: initial }, useEffect: effect => effects.push(effect),
   fetchCmsTasks: async () => ({ available: true, data: { tasks: [] } }), fetchCmsStatus: async () => ({ available: true, data: {} }), probeCmsAvailable: async () => true,
   setInterval, clearInterval, console };
-  vm.createContext(context); vm.runInContext(hookSource('use-cmsd-tasks') + '\nthis.hook = useCmsdTaskWatch;', context);
+  Object.assign(context, { publishRuntimeTask, subscribeRuntimeTasks, runtimeTasksFromOutput }); vm.createContext(context); vm.runInContext(hookSource('use-cmsd-tasks') + '\nthis.hook = useCmsdTaskWatch;', context);
   const render = () => { stateIndex = 0; refIndex = 0; return context.hook({ onTaskSettled: () => { callbacks++; } }); };
   let state = render();
   state.observeRecoveredTask(task); state = render();
@@ -218,9 +219,12 @@ test('recovered running tasks remain backgroundable and terminal details never r
 // Execute both production hooks with stable hook slots. The library mock captures
 // CMS state before awaiting, as model_store_library does before gateway I/O;
 // saveModel mirrors its real current/deployed/running route precondition.
-function routeRefreshHooks({ libraryRead = async () => ({}), indexIncludesTask = false, initiallyAvailable = true } = {}) {
-  const target = { ...task, card: 'target--v2', requested_card: 'target', selected_version: 'v2', deployment_revision: 'recipe2' };
-  let status = 'running', routeReady = false, binding = 'source', storeAvailable = initiallyAvailable, follower, manualListener;
+function routeRefreshHooks({ libraryRead = async () => ({}), indexIncludesTask = false, initiallyAvailable = true, taskKind = 'switch', initialStatus = 'running', taskRead = null, indexRead = null } = {}) {
+  let clock = Date.now(), latestWatch;
+  const toolEvents = new Map(), detailReads = [];
+  const target = { ...task, kind: taskKind, card: 'target--v2', requested_card: 'target', selected_version: 'v2', deployment_revision: 'recipe2' };
+  let indexVisible = indexIncludesTask;
+  let status = initialStatus, routeReady = false, binding = 'source', storeAvailable = initiallyAvailable, follower, manualListener;
   let refIndex = 0, stateIndex = 0, effectIndex = 0, callbackIndex = 0;
   const refs = [], states = [], effects = [], callbacks = [], pendingEffects = [], intervals = [], delayed = [];
   const rows = [], selections = [], notices = [], events = [], storage = new Map();
@@ -261,32 +265,39 @@ function routeRefreshHooks({ libraryRead = async () => ({}), indexIncludesTask =
         const result = await libraryRead({ index, captured });
         if (!result?.link_sync_error) routeReady = captured === 'succeeded';
         events.push(`library:${captured}:end`);
-        return result;
+        return { linked_runtime_cards: ['target', 'target--v2'], linked_runtime_pending: [],
+          models: [{ card_id: 'target', runtime_card_id: 'target--v2', active_version_id: 'v2', status: 'deployed',
+            cmsd: { managed: true, status: 'running', healthy: true, deploymentRevision: 'recipe2' } }], ...result };
       }
       throw Error(`unexpected command ${command}`);
     },
     fetchCmsModels: async () => ({ available: true, data: { store_bindings: { target: 'target--v2' }, models: [{ card: 'target--v2', managed: true, model_id: 'Target', version_id: 'v2', deployment_revision: 'recipe2', status: 'running', healthy: status === 'succeeded' }] } }),
     fetchCmsStatus: async () => ({ available: true, data: { active_model: 'target--v2', gateway: '127.0.0.1:8000' } }),
-    fetchCmsTask: async () => ({ available: true, data: { ...target, status } }),
-    fetchCmsTasks: async () => ({ available: true, data: { tasks: indexIncludesTask ? [{ ...target, status }] : Array.from({ length: 20 }, (_, i) => ({ id: `t-later-${i}`, kind: 'set_default', card: target.card, status: 'succeeded' })) } }),
-    probeCmsAvailable: async () => true, tauriEvents: { listen: async () => () => {} },
+    fetchCmsTask: async id => { detailReads.push(id); return taskRead ? taskRead(id, { ...target, status }) : { available: true, data: { ...target, id, status } }; },
+    fetchCmsTasks: async () => { const result = { available: true, data: { tasks: indexVisible ? [{ ...target, status }] : Array.from({ length: 20 }, (_, i) => ({ id: `t-later-${i}`, kind: 'set_default', card: target.card, status: 'succeeded' })) } }; return indexRead ? indexRead(result) : result; },
+    probeCmsAvailable: async () => true, tauriEvents: { listen: async (name, callback) => { toolEvents.set(name, callback); return () => toolEvents.delete(name); } },
     listenManualModelSelection: callback => { manualListener = callback; return () => {}; },
     localStorage: { get length() { return storage.size; }, key: index => [...storage.keys()][index], getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
     setInterval: (callback, delay) => { const timer = { callback, delay }; intervals.push(timer); return timer; }, clearInterval: () => {},
+    Date: class extends Date { static now() { return clock; } },
     setTimeout: () => {}, clearTimeout: () => {}, console: { warn: () => {} },
   };
-  vm.createContext(context); vm.runInContext(hookSource('use-cmsd-tasks') + '\n' + hookSource('use-cmsd-switch-follow') + '\nthis.hook = useCmsdSwitchFollow;', context);
+  Object.assign(context, { publishRuntimeTask, subscribeRuntimeTasks, runtimeTasksFromOutput }); vm.createContext(context); vm.runInContext(hookSource('use-cmsd-tasks') + '\n' + hookSource('use-cmsd-switch-follow') + '\nthis.hook = useCmsdSwitchFollow;', context);
   const render = () => {
     refIndex = stateIndex = effectIndex = callbackIndex = 0;
     const result = context.hook({ bridge, snapshot: state, modelStoreAvailable: storeAvailable, copy: { linkAutoSelected: () => 'selected', switchAutoSelected: () => 'selected', linkAutoSelectFailed: 'failed' }, onNotice: notice => notices.push(notice) });
+    latestWatch = result;
     for (const effect of pendingEffects.splice(0)) effect();
     return result;
   };
   const destroy = () => { for (const effect of effects) effect?.cleanup?.(); follower?.dispose(); };
   render();
-  return { counts, rows, selections, notices, events, delayed, states,
+  return { counts, rows, selections, notices, events, delayed, states, target, detailReads,
+    accepted: value => latestWatch.observeAcceptedRuntimeTask(value),
+    tool: (kind, payload) => toolEvents.get(`chat:tool_${kind}`)?.({ payload }),
     complete: () => { status = 'succeeded'; },
-    poll: async (index = false) => { intervals.filter(timer => timer.delay === 3000)[index ? 1 : 0].callback(); await flush(); },
+    showTask: () => { indexVisible = true; },
+    poll: async (index = false, advance = 30000) => { clock += advance; intervals.filter(timer => timer.delay === 3000)[index ? 1 : 0].callback(); await flush(); },
     pending: () => [...storage].filter(([key]) => !key.includes('.done.')).map(([, value]) => JSON.parse(value)),
     manual: () => { binding = 'manual'; manualListener({ sessionId: 'origin' }); }, binding: () => binding,
     enableStore: () => { storeAvailable = true; render(); }, render, destroy,
@@ -361,4 +372,186 @@ test('recovery uses the current store capability after the hook initialized with
     assert.equal(f.counts.library, 2); assert.equal(f.counts.saves, 1); assert.deepEqual(f.selections, ['m-route-target']);
     assert.deepEqual(f.delayed, []); assert.equal(f.counts.followers, 1);
   } finally { f.destroy(); }
+});
+
+test('ordinary device/MCP enable success gets one fresh library and no modal or selection', async () => {
+  const f = routeRefreshHooks({ indexIncludesTask: true, taskKind: 'enable' });
+  try {
+    await flush(); assert.equal(f.counts.library, 1);
+    f.complete(); await f.poll(true); await flush();
+    assert.equal(f.counts.library, 2, 'nonmodal enable must start a read after success');
+    await f.poll(true); await f.poll(true);
+    assert.equal(f.counts.library, 2, 'same completed enable is idempotent');
+    assert.equal(f.selections.length, 0); assert.equal(f.rows.length, 0); assert.equal(f.notices.length, 0);
+    assert.ok(!f.states.some(value => value?.kind === 'enable'), 'enable never creates maintenance overlay');
+  } finally { f.destroy(); }
+});
+
+test('first successful enable index establishes one fresh baseline without replaying history effects', async () => {
+  const scan = deferred();
+  const f = routeRefreshHooks({ indexIncludesTask: true, taskKind: 'enable', initialStatus: 'succeeded', libraryRead: ({ index }) => index === 1 ? scan.promise : {} });
+  try {
+    await flush(); assert.equal(f.counts.library, 1, 'old startup scan is still in flight');
+    scan.resolve({}); await flush(); await flush();
+    assert.equal(f.counts.library, 2, 'first success requires a read begun after the old scan');
+    await f.poll(true); await f.poll(true);
+    assert.equal(f.counts.library, 2, 'history baseline is established once');
+    assert.equal(f.selections.length, 0); assert.equal(f.notices.length, 0);
+    assert.ok(!f.states.some(value => value?.kind === 'enable'));
+  } finally { scan.resolve({}); f.destroy(); }
+});
+
+test('failed fresh read retries ordinary enable without replaying completion effects', async () => {
+  const f = routeRefreshHooks({ indexIncludesTask: true, taskKind: 'enable', libraryRead: async ({ index }) => index === 2 ? { link_sync_error: 'unknown' } : {} });
+  try {
+    await flush(); f.complete(); await f.poll(true); await flush(); assert.equal(f.counts.library, 2);
+    await f.poll(true); await flush(); assert.equal(f.counts.library, 3, 'failure remains pending');
+    await f.poll(true); assert.equal(f.counts.library, 3);
+    assert.equal(f.selections.length, 0); assert.equal(f.notices.length, 0);
+  } finally { f.destroy(); }
+});
+
+test('failed/cancelled/unknown enable tasks do not refresh', async () => {
+  for (const initialStatus of ['failed', 'cancelled', 'unknown']) {
+    const f = routeRefreshHooks({ indexIncludesTask: true, taskKind: 'enable', initialStatus });
+    try { await flush(); await f.poll(true); await f.poll(true); assert.equal(f.counts.library, 1); assert.equal(f.selections.length, 0); }
+    finally { f.destroy(); }
+  }
+});
+
+test('an enable first seen already succeeded after monitoring starts is refreshed once', async () => {
+  const f = routeRefreshHooks({ taskKind: 'enable', initialStatus: 'succeeded' });
+  try {
+    await flush(); assert.equal(f.counts.library, 1);
+    f.showTask(); await f.poll(true); await flush();
+    assert.equal(f.counts.library, 2);
+    await f.poll(true); assert.equal(f.counts.library, 2);
+    assert.equal(f.selections.length, 0); assert.equal(f.notices.length, 0);
+  } finally { f.destroy(); }
+});
+
+test('unknown target facts stay pending until a later positive read, without replaying enable UI', async () => {
+  const f = routeRefreshHooks({ indexIncludesTask: true, taskKind: 'enable', libraryRead: ({ index }) => index === 2 ? { linked_runtime_pending: ['target', 'target--v2'], models: [{ card_id: 'target', runtime_card_id: 'target--v2', status: 'deployed', running: false }] } : {} });
+  try {
+    await flush(); f.complete(); await f.poll(true); assert.equal(f.counts.library, 2);
+    await f.poll(true); assert.equal(f.counts.library, 3, 'unknown was not registered as refreshed');
+    await f.poll(true); assert.equal(f.counts.library, 3);
+    assert.equal(f.selections.length, 0); assert.equal(f.notices.length, 0);
+  } finally { f.destroy(); }
+});
+
+test('accepted MCP enable ID absent from the latest-20 index is queried exactly then refreshes', async () => {
+  const f = routeRefreshHooks({ taskKind: 'enable' });
+  try {
+    await flush();
+    f.tool('start', { id: 'call-enable', session_id: 'origin', name: 'mcp__megacube_admin__cube_start_model', args: { card: 'target' } });
+    f.tool('end', { id: 'call-enable', session_id: 'origin', success: true,
+      output: JSON.stringify({ content: [{ type: 'text', text: JSON.stringify({ data: { task_id: f.target.id, kind: 'enable', card: 'target--v2', requested_card: 'target', logical_card: 'target' } }) }] }) });
+    f.complete(); await f.poll(true);
+    assert.deepEqual(f.detailReads, [f.target.id]); assert.equal(f.counts.library, 2);
+    await f.poll(true); assert.equal(f.counts.library, 2);
+    assert.equal(f.selections.length, 0); assert.equal(f.notices.length, 0);
+  } finally { f.destroy(); }
+});
+
+test('accepted device enable and successful MCP get_task can seed the same nonmodal observer', async () => {
+  const f = routeRefreshHooks({ taskKind: 'enable' });
+  const previous = globalThis.__TAURI__;
+  try {
+    await flush();
+    globalThis.__TAURI__ = { core: { invoke: async command => {
+      assert.equal(command, 'cms_model_action'); return { task_id: f.target.id, card: 'target--v2', requested_card: 'target', kind: 'enable' };
+    } } };
+    await cmsApi.actOnCmsModel('target', 'enable');
+    f.complete(); await f.poll(true); assert.deepEqual(f.detailReads, [f.target.id]); assert.equal(f.counts.library, 2);
+    f.tool('start', { id: 'call-detail', session_id: 'origin', name: 'cube_get_task', args: { task_id: 'other-known' } });
+    f.tool('end', { id: 'call-detail', session_id: 'origin', success: true, output: { data: { ...f.target, id: 'other-known', status: 'succeeded' } } });
+    await f.poll(true); assert.equal(f.counts.library, 3); assert.equal(f.selections.length, 0);
+  } finally { globalThis.__TAURI__ = previous; f.destroy(); }
+});
+
+test('known enable ID retains unknown lookup outside the index and retries without a fabricated success', async () => {
+  let queries = 0;
+  const f = routeRefreshHooks({ taskKind: 'enable', taskRead: async (id, target) => ++queries === 1 ? { available: false } : { available: true, data: { ...target, id, status: 'succeeded' } } });
+  try {
+    await flush(); f.accepted({ ...f.target, status: 'unknown' });
+    await f.poll(true); assert.equal(f.counts.library, 1);
+    await f.poll(true); assert.equal(f.counts.library, 2); assert.equal(queries, 2);
+    await f.poll(true); assert.equal(queries, 2);
+  } finally { f.destroy(); }
+});
+
+test('known enable detail polling is serial, bounded to eight per pass and rotates fifty pending IDs', async () => {
+  let active = 0, maximum = 0;
+  const f = routeRefreshHooks({ taskKind: 'enable', taskRead: async (id, target) => { active++; maximum = Math.max(maximum, active); await Promise.resolve(); active--; return { available: true, data: { ...target, id, status: 'running' } }; } });
+  try {
+    await flush(); for (let i = 0; i < 51; i++) f.accepted({ ...f.target, id: `known-${i}`, status: 'unknown' });
+    await f.poll(true); assert.equal(f.detailReads.length, 8); assert.equal(maximum, 1); assert.equal(f.counts.library, 1);
+    for (let i = 0; i < 6; i++) await f.poll(true);
+    assert.equal(new Set(f.detailReads).size, 50); assert.ok(!f.detailReads.includes('known-50'));
+    assert.equal(f.counts.library, 1);
+  } finally { f.destroy(); }
+});
+
+test('runtime classification isolates unrelated stopped rows and recognizes superseded current selection', () => {
+  const source = hookSource('use-cmsd-switch-follow');
+  const context = {}; vm.createContext(context); vm.runInContext(source + '\nthis.classify = runtimeTaskState;', context);
+  const task = { card: 'target--v2', logical_card: 'target', requested_card: 'target', selected_version: 'v2', deployment_revision: 'rev2' };
+  const current = { linked_runtime_cards: ['target', 'target--v2', 'stopped-other'], linked_runtime_pending: ['stopped-other'],
+    models: [{ card_id: 'target', runtime_card_id: 'target--v2', active_version_id: 'v2', status: 'deployed' }] };
+  assert.equal(context.classify(task, current), 'confirmed');
+  const unknown = { ...current, linked_runtime_pending: ['target', 'target--v2'] };
+  assert.equal(context.classify(task, unknown), 'pending');
+  unknown.models[0].active_version_id = 'v3'; unknown.models[0].runtime_card_id = 'target--v3';
+  assert.equal(context.classify(task, unknown), 'superseded');
+  assert.equal(context.classify({ card: 'unlinked' }, unknown), 'irrelevant');
+});
+
+
+test('fact confirmation retries at 3/6/12/24/30 second intervals and never expires unknown as success', async () => {
+  const f = routeRefreshHooks({ indexIncludesTask: true, taskKind: 'enable', libraryRead: () => ({ linked_runtime_pending: ['target'] }) });
+  try {
+    await flush(); f.complete(); await f.poll(true, 0); assert.equal(f.counts.library, 2);
+    for (const delay of [3000, 6000, 12000, 24000, 30000, 30000]) {
+      const previous = f.counts.library;
+      await f.poll(true, delay - 1); assert.equal(f.counts.library, previous);
+      await f.poll(true, 1); assert.equal(f.counts.library, previous + 1);
+    }
+    for (let i = 0; i < 20; i++) await f.poll(true, 30000);
+    assert.ok(f.counts.library > 20, 'no exhausted retry is mislabeled confirmed');
+    assert.equal(f.notices.length, 0); assert.equal(f.selections.length, 0);
+  } finally { f.destroy(); }
+});
+
+test('first-poll historical enable superseded by an explicit different current version establishes only one baseline', async () => {
+  const f = routeRefreshHooks({ indexIncludesTask: true, taskKind: 'enable', initialStatus: 'succeeded', libraryRead: () => ({
+    linked_runtime_pending: ['target'], models: [{ card_id: 'target', runtime_card_id: 'target--v3', active_version_id: 'v3', status: 'deployed', running: false }],
+  }) });
+  try {
+    await flush(); assert.equal(f.counts.library, 2);
+    for (let i = 0; i < 5; i++) await f.poll(true);
+    assert.equal(f.counts.library, 2); assert.equal(f.notices.length, 0); assert.equal(f.selections.length, 0);
+  } finally { f.destroy(); }
+});
+
+
+test('known accepted enable can complete when the public task index query throws', async () => {
+  const f = routeRefreshHooks({ taskKind: 'enable', indexRead: () => { throw new Error('index unavailable'); } });
+  try {
+    await flush(); f.accepted({ ...f.target, status: 'unknown' }); f.complete();
+    await f.poll(true); assert.deepEqual(f.detailReads, [f.target.id]); assert.equal(f.counts.library, 2);
+    await f.poll(true); assert.equal(f.counts.library, 2); assert.equal(f.selections.length, 0);
+  } finally { f.destroy(); }
+});
+
+test('runtime task receipts reject errors, unknown lookup records and oversized or ambiguous identities', () => {
+  for (const data of [
+    { task_id: 'known', card: 'target', kind: 'enable', observation: 'unconfirmed' },
+    { task_id: 'known', card: 'target', kind: 'enable', error: { code: 'unknown' } },
+    { id: 'known', status: 'unknown' },
+    { task_id: '../other', card: 'target', kind: 'enable' },
+    { task_id: 'known', card: 'target', kind: 'switch' },
+  ]) assert.deepEqual(runtimeTasksFromOutput({ data }), []);
+  assert.deepEqual(runtimeTasksFromOutput(' '.repeat(262145)), []);
+  assert.deepEqual(runtimeTasksFromOutput({ isError: true, data: { task_id: 'known', card: 'target', kind: 'enable' } }), []);
 });

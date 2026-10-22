@@ -4,6 +4,29 @@ import { fetchCmsModels, fetchCmsStatus, fetchCmsTask } from './cms-api.js';
 import { createCmsdSwitchFollow } from './switch-follow.js';
 import { useCmsdTaskWatch } from './use-cmsd-tasks.js';
 import { mergeHandoffRecovery } from './handoff-recovery.js';
+import { publishRuntimeTask, subscribeRuntimeTasks, runtimeTasksFromOutput } from './runtime-task-events.js';
+
+// Only current-fact confirmation. No operation, session choice or authority is
+// inferred from a historical task; explicit current selection can supersede it.
+export function runtimeTaskState(task, value) {
+  if (!Array.isArray(value?.linked_runtime_cards) || !Array.isArray(value?.linked_runtime_pending)) return 'pending';
+  const targets = [task.logical_card, task.requested_card, task.card].filter(Boolean);
+  if (!targets.some(card => value.linked_runtime_cards.includes(card))) return 'irrelevant';
+  const models = Array.isArray(value.models) ? value.models : [];
+  const matches = models.filter(model => targets.includes(model.card_id) || targets.includes(model.runtime_card_id));
+  if (matches.length === 1) {
+    const model = matches[0], cmsd = model.cmsd;
+    if (model.status === 'deployed' && model.card_update_pending !== true) {
+      if (task.selected_version && model.active_version_id && task.selected_version !== model.active_version_id) return 'superseded';
+      if (task.logical_card && model.card_id === task.logical_card && model.runtime_card_id
+        && task.card !== task.logical_card && task.card !== model.runtime_card_id) return 'superseded';
+    }
+    if (cmsd?.managed === true && cmsd.status === 'running' && cmsd.healthy === true
+      && task.deployment_revision && cmsd.deploymentRevision
+      && task.deployment_revision !== cmsd.deploymentRevision) return 'superseded';
+  }
+  return targets.some(card => value.linked_runtime_pending.includes(card)) ? 'pending' : 'confirmed';
+}
 
 export function useCmsdSwitchFollow({ bridge, snapshot, copy, onNotice, modelStoreAvailable = false }) {
   const latest = useRef({ snapshot, copy, onNotice });
@@ -15,12 +38,12 @@ export function useCmsdSwitchFollow({ bridge, snapshot, copy, onNotice, modelSto
     if (!modelStoreAvailable) return;
     const previous = routeRefresh.current;
     if (previous) {
-      await previous;
-      if (!fresh) return;
+      const value = await previous;
+      if (!fresh) return value;
     }
     if (!routeRefresh.current) {
       routeRefresh.current = invokeTauri('model_store_library')
-        .then(value => { if (value?.link_sync_error) throw new Error(value.link_sync_error); })
+        .then(value => { if (value?.link_sync_error) throw new Error(value.link_sync_error); return value; })
         .finally(() => { routeRefresh.current = null; });
     }
     return routeRefresh.current;
@@ -28,7 +51,13 @@ export function useCmsdSwitchFollow({ bridge, snapshot, copy, onNotice, modelSto
   const reconcileRoutes = useRef(null);
   // Both index observations and private details must reconcile a snapshot
   // begun after task success; this ref also follows capability changes.
-  reconcileRoutes.current = task => refreshStoreRoutes({ fresh: task?.status === 'succeeded' });
+  reconcileRoutes.current = async task => {
+    const value = await refreshStoreRoutes({ fresh: task?.status === 'succeeded' });
+    if (modelStoreAvailable && task?.status === 'succeeded' && runtimeTaskState(task, value) === 'pending') {
+      throw new Error('model_runtime_unconfirmed');
+    }
+    return value;
+  };
   useEffect(() => { if (bridge.available && modelStoreAvailable) void refreshStoreRoutes().catch(error => console.warn('[megacube] initial route reconciliation failed', error)); }, [bridge, modelStoreAvailable, refreshStoreRoutes]);
   useEffect(() => {
     if (!bridge.available) return undefined;
@@ -38,7 +67,24 @@ export function useCmsdSwitchFollow({ bridge, snapshot, copy, onNotice, modelSto
     // This private recovery path never feeds old tasks into the maintenance UI.
     const recover = () => { void follower.current?.recoverPending(); };
     const recoveryTimer = setInterval(recover, 3000);
+    const runtimeCalls = new Map();
+    unlisten.push(subscribeRuntimeTasks(task => taskWatchRef.current?.observeAcceptedRuntimeTask(task)));
     const queued = [];
+    const observeRuntimeTool = (method, payload) => {
+      if (method === 'toolStarted' && /^(?:mcp_+megacube_admin_+)?cube_(?:start_model|get_task)$/.test(payload?.name || '')) {
+        let args = payload.args;
+        try { if (typeof args === 'string') args = JSON.parse(args); } catch { args = null; }
+        runtimeCalls.set(payload.id, { name: payload.name, session: payload.session_id, card: args?.card });
+        if (runtimeCalls.size > 100) runtimeCalls.delete(runtimeCalls.keys().next().value);
+      } else if (method === 'toolEnded') {
+        const call = runtimeCalls.get(payload?.id);
+        runtimeCalls.delete(payload?.id);
+        if (call && payload.success && payload.session_id === call.session) {
+          const fallback = /cube_start_model$/.test(call.name) ? { kind: 'enable', card: call.card, requested_card: call.card } : {};
+          for (const task of runtimeTasksFromOutput(payload.output, fallback)) publishRuntimeTask(task);
+        }
+      }
+    };
     const dispatch = (method, payload, originalSnapshot) => {
       const state = originalSnapshot || bridge.state?.getMany?.(['sessions', 'models']) || latest.current.snapshot;
       const captured = { activeSessionId: state?.activeSessionId,
@@ -47,7 +93,7 @@ export function useCmsdSwitchFollow({ bridge, snapshot, copy, onNotice, modelSto
       else if (queued.length < 50) queued.push([method, payload, captured]);
     };
     for (const [event, method] of [['chat:tool_start', 'toolStarted'], ['chat:tool_end', 'toolEnded']]) {
-      void tauriEvents.listen(event, message => dispatch(method, message.payload)).then(stop => {
+      void tauriEvents.listen(event, message => { observeRuntimeTool(method, message.payload); dispatch(method, message.payload); }).then(stop => {
         if (disposed) stop(); else unlisten.push(stop);
       }).catch(error => console.warn('[megacube] switch handoff listener unavailable', error));
     }
@@ -141,8 +187,19 @@ export function useCmsdSwitchFollow({ bridge, snapshot, copy, onNotice, modelSto
     };
   }, [bridge]);
   const taskWatch = useCmsdTaskWatch({
+    onRuntimeTasksSucceeded: async tasks => {
+      const value = await refreshStoreRoutes({ fresh: true });
+      const result = { confirmed: [], superseded: [], irrelevant: [] };
+      for (const task of tasks) {
+        const state = modelStoreAvailable ? runtimeTaskState(task, value) : 'irrelevant';
+        if (state !== 'pending') result[state].push(task.id);
+      }
+      return result;
+    },
     onTaskObserved: task => {
-      if (task.status === 'succeeded') void reconcileRoutes.current(task).then(() => follower.current?.observe(task)).catch(error => console.warn('[megacube] route reconciliation pending', error));
+      if (task.status === 'succeeded') return reconcileRoutes.current(task)
+        .then(() => follower.current?.observe(task)).then(() => true)
+        .catch(error => { console.warn('[megacube] route reconciliation pending', error); return false; });
       else follower.current?.observe(task);
     },
     onTaskSettled: task => { void reconcileRoutes.current(task).then(() => follower.current?.settled(task)).catch(error => console.warn('[megacube] route reconciliation pending', error)); },

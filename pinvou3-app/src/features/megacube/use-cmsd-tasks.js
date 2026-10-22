@@ -8,25 +8,35 @@
  * 管理面不在场时完全不轮询（无感缺席）。
  */
 import { useEffect, useRef, useState } from 'react';
-import { fetchCmsStatus, fetchCmsTasks, probeCmsAvailable } from './cms-api.js';
+import { fetchCmsStatus, fetchCmsTasks, fetchCmsTask, probeCmsAvailable } from './cms-api.js';
 
 const POLL_MS = 3000;
+const MAX_PENDING_RUNTIME_TASKS = 50;
+const MAX_RUNTIME_RETRY_MS = 30000;
 // 只盯 switch：唯一会打断当前对话的任务类型。enable/disable/set_default
 // 由发起方（商店 run 日志 / MCP 应答）自行呈现结果，维护窗不掺和。
 const WATCHED_KINDS = ['switch'];
 
 /**
- * @param {{ onTaskSettled?: (task: object) => void, onActiveChanged?: (card: string) => void, onTaskObserved?: (task: object) => void }} opts -
+ * @param {{ onTaskSettled?: (task: object) => void, onActiveChanged?: (card: string) => void, onTaskObserved?: (task: object) => void, onRuntimeTasksSucceeded?: (tasks: object[]) => Promise<{confirmed: string[], superseded: string[], irrelevant: string[]}> }} opts -
  *   任务终结回调 + 默认模型（活跃指针）变化回调。
  * @returns {{ cmsAvailable: boolean|null, activeTask: import('./CmsdTaskModal.jsx').CmsdTask|null, settledTask: import('./CmsdTaskModal.jsx').CmsdTask|null, dismissSettled: () => void }}
  */
-export function useCmsdTaskWatch({ onTaskSettled, onActiveChanged, onTaskObserved } = {}) {
+export function useCmsdTaskWatch({ onTaskSettled, onActiveChanged, onTaskObserved, onRuntimeTasksSucceeded } = {}) {
   const [cmsAvailable, setCmsAvailable] = useState(/** @type {boolean|null} */ (null));
   const [activeTask, setActiveTask] = useState(null);
   const [recoveredActiveTask, setRecoveredActiveTask] = useState(null);
   const [settledTask, setSettledTask] = useState(null);
   const [hiddenTaskId, setHiddenTaskId] = useState(null);
   const settledRef = useRef(new Set());
+  // These are fact confirmations, not executable task receipts. Keep observed
+  // unknowns outside the latest-20 index; one batch read per retry confirms all.
+  const runtimeSettledRef = useRef(new Set());
+  const runtimePendingRef = useRef(new Map());
+  const runtimeCursorRef = useRef(0);
+  const runtimeRetryRef = useRef({ after: 0, delay: POLL_MS });
+  const runtimeCallbackRef = useRef(onRuntimeTasksSucceeded);
+  runtimeCallbackRef.current = onRuntimeTasksSucceeded;
   // 首轮基线：已在终结态的历史任务只登记不回调——否则每次启动都把昨天的
   // 失败/成功重放成弹窗（真机实证：启动后弹出昨天 failtest 的熔断失败卡）。
   const firstPollDoneRef = useRef(false);
@@ -56,20 +66,33 @@ export function useCmsdTaskWatch({ onTaskSettled, onActiveChanged, onTaskObserve
       if (inFlight) return;
       inFlight = true;
       try {
-        const res = await fetchCmsTasks();
+        const res = await fetchCmsTasks().catch(() => ({ available: false }));
         if (!alive) return;
-        if (!res?.available) return;
-        setCmsAvailable(true);
+        if (!res?.available && !runtimePendingRef.current.size) return;
+        if (res?.available) setCmsAvailable(true);
         const tasks = Array.isArray(res.data?.tasks) ? res.data.tasks : [];
         const running = tasks.find(
           (task) => task && task.status === 'running' && WATCHED_KINDS.includes(task.kind)
         ) || null;
-        setActiveTask(running);
+        if (res?.available) setActiveTask(running);
         // 终结检测：running 集合里没有了的被跟踪任务 → 找它的最新记录回调一次。
         // 首轮只建基线不回调（历史终结任务登记为已见）。
         const isFirstPoll = !firstPollDoneRef.current;
+        // A first-poll terminal enable also needs a fresh current-fact baseline:
+        // startup's scan may predate its success. Never replay its UI/selection.
         for (const task of tasks) {
-          if (!task || !task.id || !WATCHED_KINDS.includes(task.kind)) continue;
+          if (!task?.id) continue;
+          if (task.kind === 'enable') {
+            if (['failed', 'cancelled'].includes(task.status)) {
+              runtimePendingRef.current.delete(task.id); runtimeSettledRef.current.add(task.id);
+            }
+            if (task.status === 'succeeded' && !runtimeSettledRef.current.has(task.id)
+              && (runtimePendingRef.current.has(task.id) || runtimePendingRef.current.size < MAX_PENDING_RUNTIME_TASKS)) {
+              runtimePendingRef.current.set(task.id, task);
+            }
+            continue;
+          }
+          if (!WATCHED_KINDS.includes(task.kind)) continue;
           observedCallbackRef.current?.(task);
           if (task.status === 'running') continue;
           if (settledRef.current.has(task.id)) continue;
@@ -78,7 +101,46 @@ export function useCmsdTaskWatch({ onTaskSettled, onActiveChanged, onTaskObserve
           setSettledTask(task);
           callbackRef.current?.(task);
         }
-        firstPollDoneRef.current = true;
+        if (runtimePendingRef.current.size && runtimeCallbackRef.current
+          && Date.now() >= runtimeRetryRef.current.after) {
+          const retryDelay = runtimeRetryRef.current.delay;
+          try {
+            // Tick's inFlight gate serializes this single batch read. There is
+            // no expiry that turns unknown into success; failures back off.
+            // Known accepted IDs survive omission from the public index. At
+            // most eight exact details are queried serially per retry pass.
+            const unresolved = [...runtimePendingRef.current.values()].filter(task => task.status !== 'succeeded');
+            const count = Math.min(8, unresolved.length);
+            for (let index = 0; index < count; index++) {
+              const task = unresolved[(runtimeCursorRef.current + index) % unresolved.length];
+              try {
+                const detail = await fetchCmsTask(task.id);
+                if (!alive) return;
+                if (detail?.available !== true || detail.data?.id !== task.id || detail.data?.kind !== 'enable') continue;
+                if (['failed', 'cancelled'].includes(detail.data.status)) {
+                  runtimePendingRef.current.delete(task.id); runtimeSettledRef.current.add(task.id);
+                } else runtimePendingRef.current.set(task.id, detail.data);
+              } catch { /* Unknown is retained; another ID can still complete. */ }
+            }
+            runtimeCursorRef.current = unresolved.length ? (runtimeCursorRef.current + count) % unresolved.length : 0;
+            const succeeded = [...runtimePendingRef.current.values()].filter(task => task.status === 'succeeded');
+            const result = succeeded.length ? await runtimeCallbackRef.current(succeeded) : null;
+            for (const id of [...(result?.confirmed || []), ...(result?.superseded || []), ...(result?.irrelevant || [])]) {
+              if (runtimePendingRef.current.delete(id)) runtimeSettledRef.current.add(id);
+            }
+            runtimeRetryRef.current.delay = runtimePendingRef.current.size
+              ? Math.min(MAX_RUNTIME_RETRY_MS, runtimeRetryRef.current.delay * 2) : POLL_MS;
+          } catch (error) {
+            console.warn('[megacube] runtime facts pending', error);
+            runtimeRetryRef.current.delay = Math.min(MAX_RUNTIME_RETRY_MS, runtimeRetryRef.current.delay * 2);
+          }
+          runtimeRetryRef.current.after = Date.now() + retryDelay;
+        }
+        const indexedIds = new Set(tasks.map(task => task?.id));
+        for (const id of runtimeSettledRef.current) {
+          if (!indexedIds.has(id)) runtimeSettledRef.current.delete(id);
+        }
+        if (res?.available) firstPollDoneRef.current = true;
         // 活跃指针跟随（set_default 这类无任务长操作的唯一可见通道）
         const statusRes = await fetchCmsStatus();
         if (alive && statusRes?.available) {
@@ -101,6 +163,18 @@ export function useCmsdTaskWatch({ onTaskSettled, onActiveChanged, onTaskObserve
     return () => { alive = false; clearInterval(timer); };
   }, [cmsAvailable]);
 
+  const observeAcceptedRuntimeTask = task => {
+    if (task?.kind !== 'enable' || !task.id || runtimeSettledRef.current.has(task.id)) return;
+    if (['failed', 'cancelled'].includes(task.status)) {
+      runtimePendingRef.current.delete(task.id); runtimeSettledRef.current.add(task.id); return true;
+    }
+    if (runtimePendingRef.current.has(task.id) || runtimePendingRef.current.size < MAX_PENDING_RUNTIME_TASKS) {
+      runtimePendingRef.current.set(task.id, task);
+      return true;
+    }
+    console.warn('[megacube] runtime confirmation queue full; task remains unconfirmed', task.id);
+    return false;
+  };
   const currentTask = activeTask || recoveredActiveTask;
   // Details of an accepted receipt may be older than the public index. Running
   // work keeps the normal backgroundable overlay; old terminal work must never
@@ -113,5 +187,5 @@ export function useCmsdTaskWatch({ onTaskSettled, onActiveChanged, onTaskObserve
     }
   };
   const dismissSettled = () => { setSettledTask(null); if (currentTask) setHiddenTaskId(currentTask.id); };
-  return { cmsAvailable, activeTask: currentTask?.id === hiddenTaskId ? null : currentTask, settledTask, dismissSettled, observeRecoveredTask };
+  return { cmsAvailable, activeTask: currentTask?.id === hiddenTaskId ? null : currentTask, settledTask, dismissSettled, observeRecoveredTask, observeAcceptedRuntimeTask };
 }

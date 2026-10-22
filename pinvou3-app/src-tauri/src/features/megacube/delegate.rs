@@ -408,6 +408,9 @@ pub struct CmsdModelState {
     /// context_window 的事实来源（没有它路由预算落保守兜底，每条消息都
     /// 误触发紧急压缩——真机实测）。
     pub max_model_len: Option<u64>,
+    /// Confirmed current deployment identity, forwarded to the desktop cache.
+    pub deployment_revision: Option<String>,
+    pub version_id: Option<String>,
 }
 
 /// 取 cmsd 的模型实况表（card → 状态）。cmsd 不在场返回 None（调用方原样直行）。
@@ -456,6 +459,14 @@ pub fn cmsd_states() -> Option<std::collections::BTreeMap<String, CmsdModelState
                 port: m.get("port").and_then(|p| p.as_u64()).map(|p| p as u16),
                 measured_footprint_gib: m.get("measured_footprint_gib").and_then(|f| f.as_f64()),
                 max_model_len: m.get("max_model_len").and_then(|l| l.as_u64()),
+                deployment_revision: m
+                    .get("deployment_revision")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                version_id: m
+                    .get("version_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
             },
         );
     }
@@ -579,6 +590,14 @@ mod tests {
                         .get("measured_footprint_gib")
                         .and_then(|f| f.as_f64()),
                     max_model_len: m.get("max_model_len").and_then(|l| l.as_u64()),
+                    deployment_revision: m
+                        .get("deployment_revision")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned),
+                    version_id: m
+                        .get("version_id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned),
                 },
             );
         }

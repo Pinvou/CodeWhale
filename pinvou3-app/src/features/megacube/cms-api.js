@@ -4,6 +4,7 @@
  * （socket 缺失/平台不支持 → available:false），前端不报错、不打扰。
  */
 import { invokeTauri } from '../../platform/tauri/client.js';
+import { publishRuntimeTask } from './runtime-task-events.js';
 
 /**
  * @typedef {object} CmsQueryResult
@@ -39,12 +40,18 @@ export function fetchCmsTasks() {
 }
 
 /** A known accepted task can outlive its entry in the recent task index. */
-export function fetchCmsTask(taskId) {
-  return invokeTauri('cms_task', { taskId });
+export async function fetchCmsTask(taskId) {
+  const result = await invokeTauri('cms_task', { taskId });
+  if (result?.available === true && result.data?.id === taskId) publishRuntimeTask(result.data);
+  return result;
 }
 
 /** @param {string} card @param {string} action @returns {Promise<Record<string, any>>} */
-export function actOnCmsModel(card, action) { return invokeTauri('cms_model_action', { card, action }); }
+export async function actOnCmsModel(card, action) {
+  const result = await invokeTauri('cms_model_action', { card, action });
+  if (action === 'enable') publishRuntimeTask(result, { kind: 'enable', card, requested_card: card });
+  return result;
+}
 /** @param {string} taskId @returns {Promise<Record<string, any>>} */
 export function cancelCmsTask(taskId) { return invokeTauri('cms_cancel_task', { taskId }); }
 
