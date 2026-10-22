@@ -229,6 +229,11 @@ def main():
                             path=request['path'];assert request['method']=='GET'
                             assert path in ['/v1/status','/v1/models','/v1/tasks'] or path.startswith('/v1/tasks/t-')
                             value=api(sock,'GET',path)
+                        elif self.path=='/fill-task-index':
+                            assert request['card'] == cards['b']
+                            for _ in range(21):
+                                action(cards['b'], 'set-default')
+                            value={'completed':21}
                         elif self.path=='/host':value=host.request(request)
                         elif self.path=='/mcp':
                             if mcp is None:start_mcp()

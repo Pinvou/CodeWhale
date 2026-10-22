@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { invokeTauri, tauriEvents, listenManualModelSelection } from '../../platform/tauri/client.js';
-import { fetchCmsModels, fetchCmsStatus } from './cms-api.js';
+import { fetchCmsModels, fetchCmsStatus, fetchCmsTask } from './cms-api.js';
 import { createCmsdSwitchFollow } from './switch-follow.js';
 import { useCmsdTaskWatch } from './use-cmsd-tasks.js';
 import { mergeHandoffRecovery } from './handoff-recovery.js';
@@ -9,9 +9,15 @@ export function useCmsdSwitchFollow({ bridge, snapshot, copy, onNotice, modelSto
   const latest = useRef({ snapshot, copy, onNotice });
   latest.current = { snapshot, copy, onNotice };
   const follower = useRef(null);
+  const taskWatchRef = useRef(null);
   const routeRefresh = useRef(null);
-  const refreshStoreRoutes = useCallback(() => {
-    if (!modelStoreAvailable) return Promise.resolve();
+  const refreshStoreRoutes = useCallback(async ({ fresh = false } = {}) => {
+    if (!modelStoreAvailable) return;
+    const previous = routeRefresh.current;
+    if (previous) {
+      await previous;
+      if (!fresh) return;
+    }
     if (!routeRefresh.current) {
       routeRefresh.current = invokeTauri('model_store_library')
         .then(value => { if (value?.link_sync_error) throw new Error(value.link_sync_error); })
@@ -19,12 +25,19 @@ export function useCmsdSwitchFollow({ bridge, snapshot, copy, onNotice, modelSto
     }
     return routeRefresh.current;
   }, [modelStoreAvailable]);
+  const reconcileRoutes = useRef(null);
+  // Both index observations and private details must reconcile a snapshot
+  // begun after task success; this ref also follows capability changes.
+  reconcileRoutes.current = task => refreshStoreRoutes({ fresh: task?.status === 'succeeded' });
   useEffect(() => { if (bridge.available && modelStoreAvailable) void refreshStoreRoutes().catch(error => console.warn('[megacube] initial route reconciliation failed', error)); }, [bridge, modelStoreAvailable, refreshStoreRoutes]);
   useEffect(() => {
     if (!bridge.available) return undefined;
     let disposed = false;
     let retryTimer;
     const unlisten = [];
+    // This private recovery path never feeds old tasks into the maintenance UI.
+    const recover = () => { void follower.current?.recoverPending(); };
+    const recoveryTimer = setInterval(recover, 3000);
     const queued = [];
     const dispatch = (method, payload, originalSnapshot) => {
       const state = originalSnapshot || bridge.state?.getMany?.(['sessions', 'models']) || latest.current.snapshot;
@@ -81,6 +94,18 @@ export function useCmsdSwitchFollow({ bridge, snapshot, copy, onNotice, modelSto
       follower.current = createCmsdSwitchFollow({
       getState: () => bridge.state?.getMany?.(['sessions', 'chat', 'models']) || latest.current.snapshot,
       queryModels: fetchCmsModels, queryStatus: fetchCmsStatus,
+      queryTask: async taskId => {
+        const result = await fetchCmsTask(taskId);
+        if (!disposed && result?.available === true && result.data?.id === taskId
+          && result.data?.kind === 'switch' && result.data?.status === 'succeeded') {
+          // A completed CMS task can precede the store DB's desktop refresh.
+          // Wait for a read begun after this success, including if startup's
+          // earlier scan is still in flight. Failure keeps the receipt pending
+          // without consuming the follower's readiness/registration retries.
+          await reconcileRoutes.current(result.data);
+        }
+        return result;
+      },
       listModels: () => invokeTauri('list_models'),
       sessionModelId: sessionId => invokeTauri('get_session_model_id', { sessionId }),
       saveModel: model => bridge.models.saveModel(model),
@@ -91,6 +116,7 @@ export function useCmsdSwitchFollow({ bridge, snapshot, copy, onNotice, modelSto
       listCards: () => invokeTauri('model_store_cards', { testMode: false }),
       loadPending, savePending,
       registrationScope: service.recoveryScope,
+      onTaskRecovered: task => taskWatchRef.current?.observeRecoveredTask(task),
       notify: (kind, name) => {
         const { copy: text, onNotice: notice } = latest.current;
         notice(kind === 'failed' ? text.linkAutoSelectFailed
@@ -99,6 +125,7 @@ export function useCmsdSwitchFollow({ bridge, snapshot, copy, onNotice, modelSto
       });
       for (const [method, payload, snapshotAtStart] of queued) dispatch(method, payload, snapshotAtStart);
       queued.length = 0;
+      recover();
     };
     const start = () => { void initialize().catch(error => {
       console.warn('[megacube] switch handoff initialization failed', error);
@@ -108,15 +135,18 @@ export function useCmsdSwitchFollow({ bridge, snapshot, copy, onNotice, modelSto
     return () => {
       disposed = true;
       clearTimeout(retryTimer);
+      clearInterval(recoveryTimer);
       for (const stop of unlisten) stop();
       follower.current?.dispose(); follower.current = null;
     };
   }, [bridge]);
-  return useCmsdTaskWatch({
+  const taskWatch = useCmsdTaskWatch({
     onTaskObserved: task => {
-      if (task.status === 'succeeded') void refreshStoreRoutes().then(() => follower.current?.observe(task)).catch(error => console.warn('[megacube] route reconciliation pending', error));
+      if (task.status === 'succeeded') void reconcileRoutes.current(task).then(() => follower.current?.observe(task)).catch(error => console.warn('[megacube] route reconciliation pending', error));
       else follower.current?.observe(task);
     },
-    onTaskSettled: task => { void refreshStoreRoutes().then(() => follower.current?.settled(task)).catch(error => console.warn('[megacube] route reconciliation pending', error)); },
+    onTaskSettled: task => { void reconcileRoutes.current(task).then(() => follower.current?.settled(task)).catch(error => console.warn('[megacube] route reconciliation pending', error)); },
   });
+  taskWatchRef.current = taskWatch;
+  return taskWatch;
 }

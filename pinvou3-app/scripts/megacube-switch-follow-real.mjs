@@ -43,6 +43,7 @@ const makeFollower = () => createCmsdSwitchFollow({
   getState: () => state,
   queryModels: async () => ({ available: true, data: await get('/v1/models') }),
   queryStatus: async () => ({ available: true, data: await get('/v1/status') }),
+  queryTask: async id => ({ available: true, data: await get(`/v1/tasks/${id}`) }),
   listModels: () => host('models'), sessionModelId: id => host('binding', { sessionId: id }),
   saveModel: async model => { await host('save', { model }); report.savedCalls++; },
   switchModel: async (id, modelId, options) => {
@@ -121,9 +122,19 @@ follower.dispose();
 await rpc('/close-mcp');
 state.activeSessionId = otherSessionId;
 const firstTask = await settled(firstId);
+// Ordinary idempotent default tasks leave B selected but evict the old switch
+// from the real daemon's latest-20 index while the UI is closed.
+await rpc('/fill-task-index', { card: config.cards.b });
+const recent = await get('/v1/tasks');
+assert.ok(!recent.tasks.some(task => task.id === firstId));
+assert.equal((await get(`/v1/tasks/${firstId}`)).status, 'succeeded');
 pending = JSON.parse(await fs.readFile(pendingFile, 'utf8'));
 follower = makeFollower();
-const linked = await follow(firstTask, config.cards.b);
+await follower.recoverPending();
+const recoveredBinding = await host('binding', { sessionId });
+const linked = (await host('models')).models.find(model => model.id === recoveredBinding);
+assert.equal(linked?.store_card_id, config.cards.b);
+report.taskIndexOverflowRecovered = { acceptedTask: firstId, laterTasks: 21, absentFromRecentIndex: true };
 assert.equal(report.savedCalls, 1);
 assert.equal((await host('models')).active_model_id, source.id);
 assert.equal(await host('binding', { sessionId: otherSessionId }), source.id);

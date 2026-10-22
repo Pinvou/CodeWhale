@@ -38,6 +38,11 @@ export function fetchCmsTasks() {
   return invokeTauri('cms_tasks');
 }
 
+/** A known accepted task can outlive its entry in the recent task index. */
+export function fetchCmsTask(taskId) {
+  return invokeTauri('cms_task', { taskId });
+}
+
 /** @param {string} card @param {string} action @returns {Promise<Record<string, any>>} */
 export function actOnCmsModel(card, action) { return invokeTauri('cms_model_action', { card, action }); }
 /** @param {string} taskId @returns {Promise<Record<string, any>>} */

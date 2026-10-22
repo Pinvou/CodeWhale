@@ -101,9 +101,71 @@ pub async fn cms_tasks() -> Result<CmsQueryResult, String> {
     Ok(query("/v1/tasks").await)
 }
 
+/// Retain task execution errors as facts; only transport/error envelopes fail observation.
+fn task_observation(task_id: &str, value: serde_json::Value) -> Result<serde_json::Value, String> {
+    if value.get("id").and_then(serde_json::Value::as_str) != Some(task_id)
+        || !["kind", "card", "status"]
+            .iter()
+            .all(|key| value.get(key).is_some_and(serde_json::Value::is_string))
+        || value
+            .get("error")
+            .is_some_and(|error| !error.is_null() && !error.is_string())
+        || value
+            .get("http_status")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|status| status != 200)
+    {
+        return Err("task_observation_unconfirmed".to_string());
+    }
+    Ok(value)
+}
+
+/// Query one previously accepted task without relying on the recent-task index.
+#[tauri::command]
+pub async fn cms_task(task_id: String) -> Result<CmsQueryResult, String> {
+    crate::features::megacube::validate_card_id(&task_id)
+        .map_err(|_| "invalid_task".to_string())?;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        task_observation(&task_id, Client::connect()?.task(&task_id)?)
+    })
+    .await;
+    Ok(match result {
+        Ok(Ok(value)) => CmsQueryResult::ok(value),
+        Ok(Err(error)) => CmsQueryResult::unavailable(error),
+        Err(error) => CmsQueryResult::unavailable(format!("join_failed: {error}")),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_details_preserve_execution_error_null_string_and_cancelled_facts() {
+        let cases: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/cmsd-switch-task-details.json"
+        ))
+        .unwrap();
+        for name in ["succeeded", "failed", "cancelled"] {
+            let original = cases[name]["body"].clone();
+            let observed = task_observation("t-old-switch", original.clone()).unwrap();
+            assert_eq!(observed, original);
+            assert!(CmsQueryResult::ok(observed).available);
+        }
+        assert!(task_observation("t-old-switch", cases["not_found"]["body"].clone()).is_err());
+        let mut rejected = cases["succeeded"]["body"].clone();
+        rejected["http_status"] = serde_json::json!(404);
+        assert!(task_observation("t-old-switch", rejected).is_err());
+        let wrong = cases["succeeded"]["body"].clone();
+        assert!(task_observation("different-task", wrong).is_err());
+    }
+
+    #[tokio::test]
+    async fn task_detail_rejects_unsafe_ids_before_connecting() {
+        for id in ["", ".", "..", "a/b", "a?b", "a\nb", &"a".repeat(129)] {
+            assert!(matches!(cms_task(id.into()).await, Err(error) if error == "invalid_task"));
+        }
+    }
 
     #[test]
     fn unavailable_shape() {

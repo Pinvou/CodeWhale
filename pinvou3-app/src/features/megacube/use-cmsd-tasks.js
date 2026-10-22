@@ -23,6 +23,7 @@ const WATCHED_KINDS = ['switch'];
 export function useCmsdTaskWatch({ onTaskSettled, onActiveChanged, onTaskObserved } = {}) {
   const [cmsAvailable, setCmsAvailable] = useState(/** @type {boolean|null} */ (null));
   const [activeTask, setActiveTask] = useState(null);
+  const [recoveredActiveTask, setRecoveredActiveTask] = useState(null);
   const [settledTask, setSettledTask] = useState(null);
   const [hiddenTaskId, setHiddenTaskId] = useState(null);
   const settledRef = useRef(new Set());
@@ -100,6 +101,17 @@ export function useCmsdTaskWatch({ onTaskSettled, onActiveChanged, onTaskObserve
     return () => { alive = false; clearInterval(timer); };
   }, [cmsAvailable]);
 
-  const dismissSettled = () => { setSettledTask(null); if (activeTask) setHiddenTaskId(activeTask.id); };
-  return { cmsAvailable, activeTask: activeTask?.id === hiddenTaskId ? null : activeTask, settledTask, dismissSettled };
+  const currentTask = activeTask || recoveredActiveTask;
+  // Details of an accepted receipt may be older than the public index. Running
+  // work keeps the normal backgroundable overlay; old terminal work must never
+  // replay the completion dialog or the first-poll history callbacks.
+  const observeRecoveredTask = task => {
+    if (task?.kind !== 'switch') return;
+    if (task.status === 'running') setRecoveredActiveTask(task);
+    else if (['succeeded', 'failed', 'cancelled'].includes(task.status)) {
+      setRecoveredActiveTask(current => current?.id === task.id ? null : current);
+    }
+  };
+  const dismissSettled = () => { setSettledTask(null); if (currentTask) setHiddenTaskId(currentTask.id); };
+  return { cmsAvailable, activeTask: currentTask?.id === hiddenTaskId ? null : currentTask, settledTask, dismissSettled, observeRecoveredTask };
 }

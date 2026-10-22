@@ -4,10 +4,10 @@ import { isCmsCardId } from './card-id.js';
 
 /** A switch completion is an explicit handoff, not a device-default subscription. */
 export function createCmsdSwitchFollow({
-  getState, queryModels, queryStatus, listModels, sessionModelId, saveModel,
+  getState, queryModels, queryStatus, queryTask, listModels, sessionModelId, saveModel,
   switchModel, listCards, notify, schedule = setTimeout, cancel = clearTimeout,
   now = Date.now, loadPending = () => [], savePending = () => {},
-  registrationScope = '', makeRegistrationId = cmsdRegistrationId,
+  registrationScope = '', makeRegistrationId = cmsdRegistrationId, onTaskRecovered = () => {},
 }) {
   const intents = new Map();
   const calls = new Map();
@@ -15,6 +15,8 @@ export function createCmsdSwitchFollow({
   let disposed = false;
   let activeIntent = null;
   let globalSelectionEpoch = 0;
+  let recoveryInFlight = false;
+  let recoveryCursor = 0;
   const wait = (intent, delay) => {
     intent.waiting = true;
     const timer = schedule(() => {
@@ -176,6 +178,37 @@ export function createCmsdSwitchFollow({
   };
   return {
     accept,
+    async recoverPending() {
+      if (disposed || recoveryInFlight || typeof queryTask !== 'function') return;
+      recoveryInFlight = true;
+      try {
+        // The public task index is bounded and can omit an accepted switch.
+        // Query only our existing receipts, at most eight serial reads per pass;
+        // rotate the batch so an unavailable old task cannot starve newer ones.
+        const pending = [...intents.values()].filter(intent => (!intent.done || intent.recoveredRunning) && !intent.busy && !intent.waiting);
+        if (!pending.length) return;
+        const start = recoveryCursor % pending.length;
+        const batch = Array.from({ length: Math.min(8, pending.length) }, (_, index) => pending[(start + index) % pending.length]);
+        recoveryCursor = start + batch.length;
+        for (const intent of batch) {
+          if (disposed) break;
+          if ((intent.done && !intent.recoveredRunning) || intent.busy || intent.waiting) continue;
+          let result;
+          try { result = await queryTask(intent.task.id); } catch { continue; }
+          if (disposed || (intent.done && !intent.recoveredRunning) || intent.busy || intent.waiting || result?.available !== true) continue;
+          const task = result.data;
+          if (task?.id !== intent.task.id || !['queued', 'running', 'succeeded', 'failed', 'cancelled'].includes(task.status)
+            || !bindActualTask(intent, task)) continue;
+          intent.recoveredRunning = task.status === 'running';
+          onTaskRecovered(task);
+          // A manual choice cancels the handoff, not the accepted device work.
+          // Retain only its progress observation until a definite terminal read.
+          if (intent.done) continue;
+          if (task.status === 'succeeded') await follow(intent);
+          else if (['failed', 'cancelled'].includes(task.status)) { intent.done = true; persist(); }
+        }
+      } finally { recoveryInFlight = false; }
+    },
     manualSelection({ sessionId } = {}) {
       if (!sessionId) globalSelectionEpoch += 1;
       for (const [id, call] of calls) {
