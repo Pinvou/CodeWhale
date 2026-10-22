@@ -122,6 +122,7 @@
   }
 
   // web+tauriMain 共享
+// biome-ignore lint/suspicious/noFunctionAssign: forwarder-dep routing reassigns the shared impl when the lane passes its own (see FORWARDER_DEP_NAMES)
   function isDefaultChatTitle(title) {
     return [BT_TABLE.value.zh.newChatFallbackTitle, BT_TABLE.value.en.newChatFallbackTitle, BT_TABLE.value.ja.newChatFallbackTitle]
       .includes(title);
@@ -248,6 +249,7 @@
   }
 
   // web+tauriSessions 共享
+// biome-ignore lint/suspicious/noFunctionAssign: forwarder-dep routing reassigns the shared impl when the lane passes its own (see FORWARDER_DEP_NAMES)
   function touchSessionBuffer(id, buf, scheduled) {
     if (!buf) return null;
     if (scheduled) buf.scheduledRunSession = true;
@@ -452,6 +454,7 @@
   }
 
   // web+tauriMain 共享
+// biome-ignore lint/suspicious/noFunctionAssign: forwarder-dep routing reassigns the shared impl when the lane passes its own (see FORWARDER_DEP_NAMES)
   function isScheduledRunSession(sid) {
     return !!sid && (
       sid.indexOf("sched-") === 0 ||
@@ -1972,6 +1975,7 @@
   }
 
   // web+tauriChat 共享
+// biome-ignore lint/suspicious/noFunctionAssign: forwarder-dep routing reassigns the shared impl when the lane passes its own (see FORWARDER_DEP_NAMES)
   function isBusyFor(sid) {
     return sid === state.activeSessionId ? state.busy : !!(sessionStates.value[sid] && sessionStates.value[sid].busy);
   }
@@ -3176,6 +3180,7 @@
   // web+tauriSessions 共享（FE14 残余批：原 tauri sessions.js / web bridge.js 逐字镜像；
   // steered sidecar 是桌面 lane 独有的工作集字段，经可选钩子 restoreSteeredWorkingSet /
   // saveSteeredWorkingSet 挂接，web 不传即跳过，写入位置与合并前逐行一致）
+// biome-ignore lint/suspicious/noFunctionAssign: late-binding forwarder wiring reassigns the shared impl after lane wiring
   function loadWorkingSetFrom(buf) {
     if (!buf) return;
     state.messages = buf.messages; state.chatItems = buf.chatItems; state.artifacts = buf.artifacts;
@@ -3205,6 +3210,7 @@
   }
 
   // web+tauriSessions 共享（FE14 残余批：DI 同 loadWorkingSetFrom）
+// biome-ignore lint/suspicious/noFunctionAssign: late-binding forwarder wiring reassigns the shared impl after lane wiring
   function saveWorkingSetTo(buf) {
     if (!buf) return;
     buf.messages = state.messages; buf.chatItems = state.chatItems; buf.artifacts = state.artifacts;
@@ -3333,6 +3339,7 @@
   }
 
   // web+tauriSessions 共享（FE14 wave 6）
+// biome-ignore lint/suspicious/noFunctionAssign: late-binding forwarder wiring reassigns the shared impl after lane wiring
   function freshBuffer() {
     return {
       messages: [], chatItems: [], composerDraft: "", turnTimeline: [], activeTurnTimelineId: null, personaEvents: [], pinvouReviews: [], pinvouSceneEvents: [], artifacts: [], busy: false, queued: [],
@@ -3367,6 +3374,7 @@
   }
 
   // web+tauriSessions 共享（FE14 wave 6）
+// biome-ignore lint/suspicious/noFunctionAssign: late-binding forwarder wiring reassigns the shared impl after lane wiring
   function hydratedMessageKey(message, hideInternalEnvelope) {
     let blocks = message && Array.isArray(message.content) ? message.content : [];
     if (message && message.role === "user") {
@@ -3409,6 +3417,7 @@
   }
 
   // web+tauriArtifactTracker 共享（FE14 wave 6）
+// biome-ignore lint/suspicious/noFunctionAssign: late-binding forwarder wiring reassigns the shared impl after lane wiring
   function parseToolResultPayload(toolResultContent) {
     try {
       const raw = typeof toolResultContent === "string" ? toolResultContent : JSON.stringify(toolResultContent || {});
@@ -3545,6 +3554,7 @@
   // web+tauriChat 共享（FE14 残余批：原 tauri chat.js / web bridge.js 逐字镜像，正文取自 web 侧）
   // Replayed events belong to the current tail in practice. Scan backwards so
   // long-running Sessions do not pay a full-history walk on every tool frame.
+// biome-ignore lint/suspicious/noFunctionAssign: late-binding forwarder wiring reassigns the shared impl after lane wiring
   function messageHasToolBlock(type, toolCallId) {
     if (!toolCallId) return false;
     for (let i = state.messages.length - 1; i >= 0; i--) {
@@ -4191,6 +4201,7 @@
 
   // web+tauriMonitor 共享
   // eslint-disable-next-line sonarjs/cognitive-complexity -- legacy bridge; refactor tracked separately
+// biome-ignore lint/suspicious/noFunctionAssign: late-binding forwarder wiring reassigns the shared impl after lane wiring
   async function pollMonitor() {
     if (monitorPollInFlight.value) return;
     monitorPollInFlight.value = true;
@@ -4371,6 +4382,7 @@
   // await 挂起期间切会话或再次加载，旧响应返回后不得覆盖当前显示(尤其
   // runtime 属于别的会话)，也不得把候选卡 rehydrate 进当前对话流(串台)。
   // 任何新加载都会递增序号使在途读取作废(审计)。
+// biome-ignore lint/suspicious/noFunctionAssign: late-binding forwarder wiring reassigns the shared impl after lane wiring
   async function loadMemoryOverview(options) {
     if (!invoke) return null;
     options = options || {};
@@ -4754,6 +4766,7 @@
   // ── Pinvou v4 召唤式检阅:Boss 主动呼叫,审当前 session 前面的工作 ──
   // 纯召唤、不替 Boss 决策。
   // 审查卡进 chatItems(当前会话可见);跨会话持久化(进 messages/独立存储)是后续增强。
+// biome-ignore lint/suspicious/noFunctionAssign: late-binding forwarder wiring reassigns the shared impl after lane wiring
   async function summonPinvou(focus, mode) {
     if (!state.activeSessionId) { addSystemItem(bt("summonNeedsSession")); return; }
     if (state.pinvouSummoning) return;
