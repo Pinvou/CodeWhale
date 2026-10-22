@@ -3,6 +3,9 @@ use super::*;
 #[path = "operation_tests.rs"]
 mod operation_tests;
 
+#[path = "output_recovery_tests.rs"]
+mod output_recovery_tests;
+
 use super::context::COMPACTION_SUMMARY_MARKER;
 use super::dispatch::ToolExecOutcome;
 use super::streaming::{TOOL_CALL_END_MARKERS, TOOL_CALL_MARKER_PAIRS};
