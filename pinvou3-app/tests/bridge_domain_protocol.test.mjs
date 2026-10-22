@@ -122,7 +122,11 @@ const expectedProtocolHashes = {
   // stale-absolute heal arm + rebasing save — same command surface, no new
   // invoke or listen entries (the extractor scans raw source, so
   // body/comment text is part of the digest).
-  artifacts: 'd6fd511aaf84df324f7dfcadf6e651b3304c72cf297419934f31a339ed2c3e05',
+  // T0-fix 重算：listDeliverableIndex 恢复官方 lane 本地实现（上游共享核走
+  // list_deliverable_index_v2 协商，官方已推迟 v2 命令且视图消费 legacy 数组），
+  // list_deliverable_index / list_workspace_files 两个 invoke 面随之回到 artifacts
+  // 域 —— 命令集与官方 pre-壳化 形态一致，无增删命令。
+  artifacts: 'fc915765774924745d4717a30c3cf500944a5c6c07b3ed4672bc4cee9e857f18',
 // New domain: computer-use consent commands/events (desktop-only; the web
   // RPC allowlist excludes them, same policy as browser:*).
   // Recomputed when the 30s deny-suppression cooldown was removed: a deny now

@@ -9,7 +9,7 @@
 
 let pinvouSharedtauriMainCache = null;
 function pinvouSharedtauriMain() {
-  if (!pinvouSharedtauriMainCache) pinvouSharedtauriMainCache = window.PinvouBridgeShared.create("tauriMain", { state, BT_TABLE, PINVOU_SCENE_EVENTS_STORAGE_PREFIX, invoke, startThinking, recordAuthoritySyncDiagnostic, getBuffer, runSyncOnSession, notify, addChatItem, reportSidecarReadFailure, scheduledRunSessionOwners, sessionStates });
+  if (!pinvouSharedtauriMainCache) pinvouSharedtauriMainCache = window.PinvouBridgeShared.create("tauriMain", { state, BT_TABLE, PINVOU_SCENE_EVENTS_STORAGE_PREFIX, invoke, startThinking, recordAuthoritySyncDiagnostic, getBuffer, runSyncOnSession, notify, addChatItem, reportSidecarReadFailure, extractArtifactPaths, scheduledRunSessionOwners, sessionStates, isDeliverable, personaPlaceholderTitles });
   return pinvouSharedtauriMainCache;
 }
 
