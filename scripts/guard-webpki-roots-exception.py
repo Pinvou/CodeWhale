@@ -7,7 +7,10 @@ Run this before cargo-deny; advisory scanning remains independent and unignored.
 
 from pathlib import Path
 import sys
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:
+    sys.exit('webpki-roots guard requires Python 3.11+ (tomllib)')
 
 
 LOCKFILES = (

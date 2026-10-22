@@ -201,7 +201,23 @@ def cargo_deny_commands(workflow):
     """
     lines = workflow.splitlines()
     commands = []
+    scalar_lines = set()
+    reviewed_actions = {'actions/checkout', 'actions/setup-node', 'actions/setup-python',
+                        'actions/cache/restore', 'actions/cache/save', 'dorny/paths-filter',
+                        'dtolnay/rust-toolchain', 'Swatinem/rust-cache', 'taiki-e/install-action'}
     for index, line in enumerate(lines):
+        if index in scalar_lines or line.lstrip().startswith('#'):
+            continue
+        # This is an explicit workflow dialect, not a YAML parser. Reject
+        # alternate mapping keys before they can disappear from the inventory.
+        key = re.match(r'''^\s*(?:-\s*)?(?:\{\s*)?['"]?(run|uses)['"]?\s*:''', line)
+        if re.match(r'^\s*-\s*\{', line):
+            raise AssertionError('unsupported flow step mapping; extend the entry contract')
+        if key and not re.match(r'^\s+(?:-\s+)?(?:run|uses):', line):
+            raise AssertionError('unsupported run/uses mapping key; extend the entry contract')
+        action = re.match(r'^\s+(?:-\s+)?uses:\s*(.*?)\s*$', line)
+        if action and action[1].split('@')[0] not in reviewed_actions:
+            raise AssertionError('unreviewed action or reusable workflow; inspect cargo-deny coverage')
         match = re.match(r'^(\s+)(?:-\s+)?run:\s*(.*?)\s*$', line)
         if not match:
             continue
@@ -214,10 +230,11 @@ def cargo_deny_commands(workflow):
             continue
         if scalar in ('|', '|-', '|+', '>', '>-', '>+'):
             body = []
-            for following in lines[index + 1:]:
+            for body_index, following in enumerate(lines[index + 1:], index + 1):
                 if following.strip() and len(following) - len(following.lstrip()) <= run_indent:
                     break
                 body.append(following)
+                scalar_lines.add(body_index)
             scalar = '\n'.join(body)
         else:
             # YAML folds multiline plain scalars into one command. Do not
@@ -249,6 +266,7 @@ def cargo_deny_commands(workflow):
             raise AssertionError('unrecognized shell words; inspect cargo-deny coverage') from error
         commands.extend('cargo deny' for first, second in zip(words, words[1:])
                         if first == 'cargo' and second == 'deny')
+        commands.extend('cargo-deny' for word in words if word == 'cargo-deny')
     return commands
 
 
@@ -282,6 +300,9 @@ class WebpkiCiContractTests(unittest.TestCase):
             self.assertEqual(commands, [guard, deny], "guard must succeed before the locked scan in the same step")
             self.assertEqual(re.findall(r'^        shell: (.*)$', scan, re.M), ['bash'],
                              'pin the built-in fail-fast shell above job/workflow defaults')
+            self.assertEqual(re.findall(r'^        working-directory: (.*)$', scan, re.M),
+                             ['.' if job == 'knowledge-rust' else 'pinvou3-app/src-tauri'],
+                             'pin the audited lock and configuration directory')
         changes = job_block(workflow, 'changes')
         for group in ['rust_dependencies', 'knowledge_dependencies']:
             block = re.search(rf'^            {group}:\n(.*?)(?=^            \w+:|\Z)', changes, re.M | re.S)[1]
@@ -304,6 +325,28 @@ class WebpkiCiContractTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     self.verify_workflow(changed)
 
+    def test_alternate_mapping_keys_and_actions_require_explicit_review(self):
+        workflow = WORKFLOW.read_text(encoding='utf-8')
+        for body in ['- {run: cargo deny check advisories, shell: bash}',
+                     "- 'run': cargo deny check advisories", '- "run": cargo deny check advisories',
+                     '- run : cargo deny check advisories',
+                     '- uses: EmbarkStudios/cargo-deny-action@v2',
+                     '- uses: ./.github/actions/audit', '- uses: owner/repo/.github/workflows/audit.yml@main',
+                     '- {uses: audit/action@v1}', "- 'uses': audit/action@v1"]:
+            with self.subTest(body=body), self.assertRaises(AssertionError):
+                self.verify_workflow(workflow + '\n  extra-audit:\n    steps:\n      ' + body + '\n')
+
+    def test_scan_working_directories_cannot_drift_or_inherit_defaults(self):
+        workflow = WORKFLOW.read_text(encoding='utf-8')
+        for job, step_name in [('knowledge-rust', 'cargo deny check'),
+                               ('rust-lint', 'cargo deny check (hard gate)')]:
+            scan = next(step for step in job_block(workflow, job).split('\n      - ')
+                        if step.startswith(f'name: {step_name}\n'))
+            for directory in ['', '        working-directory: pinvou-knowledge\n']:
+                changed = re.sub(r'^        working-directory: .*\n', directory, scan, flags=re.M)
+                with self.subTest(job=job, directory=directory), self.assertRaises(AssertionError):
+                    self.verify_workflow(workflow.replace(scan, changed))
+
     def test_multiline_plain_runs_cannot_hide_an_unguarded_scan(self):
         workflow = WORKFLOW.read_text(encoding='utf-8')
         for body in [
@@ -324,7 +367,7 @@ class WebpkiCiContractTests(unittest.TestCase):
                         'ca"rgo" d"eny" check advisories', r'ca\rgo de\ny check advisories',
                         'cargo\\\n deny check advisories',
                         "true;'cargo' 'deny' check advisories",
-                        'true&&cargo deny check advisories']:
+                        'true&&cargo deny check advisories', 'cargo-deny check advisories']:
             with self.subTest(command=command):
                 # json.dumps produces a real double-quoted YAML scalar, not
                 # a shell-quoted YAML approximation.
@@ -395,10 +438,10 @@ class WebpkiCiContractTests(unittest.TestCase):
                         workflow + '\n  unguarded-audit:\n    steps:\n      - run: \'cargo deny check advisories\'\n',
                         workflow + '\n  unguarded-audit:\n    steps:\n      - run: "cargo deny check advisories"\n',
                         workflow.replace('      - name: cargo deny check\n', '      - name: cargo deny check\n        continue-on-error: true\n'),
-                        workflow.replace("        if: ${{ needs.changes.outputs.knowledge_dependencies == 'true' }}\n        shell: bash\n        run: |", "        if: ${{ false }}\n        shell: bash\n        run: |"),
-                        workflow.replace("        if: ${{ needs.changes.outputs.knowledge_dependencies == 'true' }}\n        shell: bash\n        run: |", "        # old if: ${{ needs.changes.outputs.knowledge_dependencies == 'true' }}\n        if: ${{ false }}\n        shell: bash\n        run: |"),
+                        workflow.replace("        if: ${{ needs.changes.outputs.knowledge_dependencies == 'true' }}\n        shell: bash\n        working-directory: .\n        run: |", "        if: ${{ false }}\n        shell: bash\n        working-directory: .\n        run: |"),
+                        workflow.replace("        if: ${{ needs.changes.outputs.knowledge_dependencies == 'true' }}\n        shell: bash\n        working-directory: .\n        run: |", "        # old if: ${{ needs.changes.outputs.knowledge_dependencies == 'true' }}\n        if: ${{ false }}\n        shell: bash\n        working-directory: .\n        run: |"),
                         workflow.replace("              - 'scripts/guard-webpki-roots-exception.py'", "              # - 'scripts/guard-webpki-roots-exception.py'")]:
-            self.assertNotEqual(changed, workflow, 'negative control must mutate the workflow')
+            self.assertTrue(changed != workflow, 'negative control must mutate the workflow')
             with self.assertRaises(AssertionError):
                 self.verify_workflow(changed)
 
@@ -409,6 +452,7 @@ class WebpkiCiContractTests(unittest.TestCase):
         self.assertNotIn('RUSTSEC-2026-0381', ignores)
         self.assertNotIn('RUSTSEC-2026-0383', ignores)
         self.assertIn({'name': 'webpki-roots', 'version': '>=1.0.0, <1.0.10'}, policy['bans']['deny'])
+        self.assertIn({'name': 'webpki-roots', 'version': '>=0.26.0, <0.26.11'}, policy['bans']['deny'])
 
 
 if __name__ == '__main__':

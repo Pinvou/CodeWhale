@@ -1300,6 +1300,7 @@ jobs:
       - name: cargo deny check
         if: ${{ needs.changes.outputs.knowledge_dependencies == 'true' }}
         shell: bash
+        working-directory: .
         run: |
           python3 scripts/guard-webpki-roots-exception.py
           cargo deny --locked --manifest-path pinvou-knowledge/Cargo.toml --config pinvou3-app/src-tauri/deny.toml check advisories licenses bans sources
