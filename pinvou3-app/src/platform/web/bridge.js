@@ -5203,13 +5203,13 @@ async function setSelectedPet(id) { return pinvouSharedweb().setSelectedPet(id);
   }
   async function loadEffectiveModelConfig(sessionId) {
     var requestedSessionId = arguments.length ? (sessionId || null) : (state.activeSessionId || null);
+    var read = window.PinvouBridgeShared.beginModelRead(state, requestedSessionId);
     try {
       var config = await invoke("get_effective_model_config", { sessionId: requestedSessionId });
-      // 快速切会话时，旧请求可能晚于新请求返回；禁止旧会话配置覆盖当前遮罩状态。
-      if ((state.activeSessionId || null) !== requestedSessionId) return;
+      if (!read.configIsCurrent()) return;
       state.effectiveModelConfig = config;
     } catch (e) {
-      if ((state.activeSessionId || null) !== requestedSessionId) return;
+      if (!read.configIsCurrent()) return;
       state.effectiveModelConfig = null;
     }
     notify();
@@ -5313,6 +5313,7 @@ async function revealModelApiKey(id) { return pinvouSharedweb().revealModelApiKe
   // 读某会话当前绑定的模型 id(切会话时刷新 chip)。
   async function loadSessionModel(sessionId) {
     var requestedSessionId = sessionId || null;
+    var read = window.PinvouBridgeShared.beginModelRead(state, requestedSessionId, true);
     var modelId = null;
     var config = null;
     try {
@@ -5328,10 +5329,9 @@ async function revealModelApiKey(id) { return pinvouSharedweb().revealModelApiKe
       modelId = null;
       config = null;
     }
-    // ChatView effect 可能并发加载相邻两个会话；只提交仍为当前会话的结果。
-    if ((state.activeSessionId || null) !== requestedSessionId) return;
+    if (!read.selectionIsCurrent()) return;
     state.currentSessionModelId = modelId;
-    state.effectiveModelConfig = config;
+    if (read.configIsCurrent()) state.effectiveModelConfig = config;
     notify();
   }
   // 切当前会话模型(chip 热切)。无 session(草稿态)时改全局默认。

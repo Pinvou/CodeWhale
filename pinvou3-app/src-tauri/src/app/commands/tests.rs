@@ -3502,6 +3502,170 @@ fn untouched_context_window_save_keeps_a_background_store_repair() {
     });
 }
 
+#[test]
+fn reasoning_effort_only_save_preserves_the_latest_model_and_repair_receipt() {
+    for detached in [false, true] {
+        for clear_effort in [false, true] {
+            crate::platform::test_support::with_temp_home("reasoning-only-latest-model", || {
+                let mut original = model_deletion_test_model("reasoning-row", false);
+                original.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+                original.provider_kind = Some("custom".into());
+                original.model = "old-wire".into();
+                original.base_url = "http://127.0.0.1:8000/v1".into();
+                original.model_store_card_id = Some("old-card".into());
+                original.context_window_tokens = Some(32768);
+                original.reasoning_effort = Some("low".into());
+                seed_model_deletion_prefs(&[original.clone()]);
+
+                // The composer captured A before a background repair and a
+                // second editor either detached it or linked it to card B.
+                UserPrefs::update_transaction(|prefs| {
+                    let mut latest = model_deletion_test_model("reasoning-row", true);
+                    latest.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+                    latest.provider_kind = Some("custom".into());
+                    latest.name = "Latest name".into();
+                    latest.alias = Some("Latest alias".into());
+                    latest.model = "latest-wire".into();
+                    latest.base_url = "http://127.0.0.1:8001/v1".into();
+                    latest.context_window_tokens = Some(262144);
+                    latest.max_output_tokens = Some(8192);
+                    latest.reasoning_effort = Some("medium".into());
+                    latest.model_store_card_id = (!detached).then(|| "new-card".into());
+                    latest.model_store_link_detached = detached;
+                    prefs.upsert_model(latest);
+                    prefs
+                        .advanced
+                        .model_store_context_repairs
+                        .insert("reasoning-row".into(), "verified-256k-v1/old-card".into());
+                    Ok(())
+                })
+                .unwrap();
+                let before = UserPrefs::load();
+                let mut expected = before.model_by_id("reasoning-row").unwrap().clone();
+                let selected_effort = (!clear_effort).then(|| "high".into());
+                expected.reasoning_effort = selected_effort.clone();
+
+                let mut stale = original;
+                stale.reasoning_effort_only = true;
+                stale.reasoning_effort = selected_effort;
+                // A narrow option update must ignore even credential and link
+                // intents retained by a stale complete-object client.
+                stale.model_store_link_requested = true;
+                stale.api_key = "stale-test-key".into();
+                stale.credential_action = Some(if clear_effort {
+                    CredentialEditAction::Delete
+                } else {
+                    CredentialEditAction::Replace
+                });
+                let store = crate::platform::credential_store::RecordingCredentialStore::new();
+                super::settings::save_model_inner(stale, &store).unwrap();
+
+                let after = UserPrefs::load();
+                assert_eq!(
+                    after.model_by_id("reasoning-row"),
+                    Some(&expected),
+                    "only the selected tier may change; route, ownership, name, alias, provider, limits and credential metadata must use the latest row"
+                );
+                assert_eq!(
+                    after.advanced.model_store_context_repairs,
+                    before.advanced.model_store_context_repairs,
+                    "the permanent receipt must remain paired with the repaired context"
+                );
+                assert!(
+                    store.ops().is_empty(),
+                    "an effort edit must not touch secrets"
+                );
+            });
+        }
+    }
+}
+
+#[test]
+fn reasoning_effort_only_save_cannot_recreate_a_deleted_model_or_touch_its_secret() {
+    crate::platform::test_support::with_temp_home("reasoning-only-deleted-model", || {
+        seed_model_deletion_prefs(&[model_deletion_test_model("keep-model", false)]);
+        let mut stale = model_deletion_test_model("deleted-model", true);
+        stale.reasoning_effort_only = true;
+        stale.reasoning_effort = Some("high".into());
+        stale.api_key = "stale-test-key".into();
+        stale.credential_action = Some(CredentialEditAction::Replace);
+        let before = std::fs::read(crate::platform::paths::settings_path()).unwrap();
+        let store = crate::platform::credential_store::RecordingCredentialStore::new();
+
+        let error = super::settings::save_model_inner(stale, &store).unwrap_err();
+        assert!(error.contains("model not found"), "{error}");
+        assert_eq!(
+            std::fs::read(crate::platform::paths::settings_path()).unwrap(),
+            before,
+            "a stale composer snapshot must not resurrect the deleted row"
+        );
+        assert!(UserPrefs::load().model_by_id("deleted-model").is_none());
+        assert!(
+            store.ops().is_empty(),
+            "reject before any credential access"
+        );
+    });
+}
+
+#[test]
+fn untouched_route_form_preserves_a_later_detach_or_different_card_link() {
+    for detached in [false, true] {
+        crate::platform::test_support::with_temp_home("store-form-latest-ownership", || {
+            let mut original = model_deletion_test_model("latest-route", false);
+            original.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+            original.provider_kind = Some("custom".into());
+            original.model = "old-wire".into();
+            original.base_url = "http://127.0.0.1:8000/v1".into();
+            original.model_store_card_id = Some("old-card".into());
+            seed_model_deletion_prefs(&[original.clone()]);
+            UserPrefs::update_transaction(|prefs| {
+                let mut latest = original.clone();
+                latest.model = "latest-wire".into();
+                latest.base_url = "http://127.0.0.1:8001/v1".into();
+                latest.model_store_card_id = (!detached).then(|| "new-card".into());
+                latest.model_store_link_detached = detached;
+                prefs.upsert_model(latest);
+                Ok(())
+            })
+            .unwrap();
+
+            let mut stale_form = original;
+            stale_form.name = "Edited label".into();
+            stale_form.preserve_model_store_route = true;
+            let store = crate::platform::credential_store::RecordingCredentialStore::new();
+            super::settings::save_model_inner(stale_form, &store).unwrap();
+            let saved = UserPrefs::load()
+                .model_by_id("latest-route")
+                .unwrap()
+                .clone();
+            assert_eq!(saved.name, "Edited label");
+            assert_eq!(saved.model, "latest-wire");
+            assert_eq!(saved.base_url, "http://127.0.0.1:8001/v1");
+            assert_eq!(saved.model_store_link_detached, detached);
+            assert_eq!(
+                saved.model_store_card_id.as_deref(),
+                if detached { None } else { Some("new-card") }
+            );
+            assert!(!saved.preserve_model_store_route);
+            assert!(store.ops().is_empty());
+        });
+    }
+}
+
+#[test]
+fn reasoning_effort_only_intent_is_incoming_only_and_legacy_defaults_to_full_save() {
+    let legacy = model_deletion_test_model("reasoning-intent", false);
+    assert!(!legacy.reasoning_effort_only);
+    let mut request = serde_json::to_value(&legacy).unwrap();
+    request["reasoning_effort_only"] = serde_json::json!(true);
+    let incoming: SavedModel = serde_json::from_value(request).unwrap();
+    assert!(incoming.reasoning_effort_only);
+    let serialized = serde_json::to_value(&incoming).unwrap();
+    assert!(serialized.get("reasoning_effort_only").is_none());
+    let reloaded: SavedModel = serde_json::from_value(serialized).unwrap();
+    assert!(!reloaded.reasoning_effort_only);
+}
+
 // ---- search credential deletion ordering (search settings save commits before the keyring) ----
 
 use crate::platform::prefs::{SearchCredential, SearchProvider};

@@ -138,7 +138,9 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
         if (!current) return;
         if (tier === reasoningEffortValue) return;
         setEffortSaveError('');
-        const next = { ...current, reasoning_effort: tier };
+        // The bridge may await telemetry while another editor or store refresh
+        // updates this row. Commit only this field against the latest settings.
+        const next = { ...current, reasoning_effort: tier, reasoning_effort_only: true };
         if (!bridge.available) { setOpen(false); return; }
         // 保存成功才收弹层；失败保留弹层以便展示 effortSaveError（否则错误渲染
         // 在已关闭的 popover 内不可达）。

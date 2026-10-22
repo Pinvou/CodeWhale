@@ -100,6 +100,27 @@
     projects: ["projectsList", "projectsAssignmentDegradedAt"],
   };
 
+  // Config-only refreshes and selection reads share config ordering, while
+  // a later background refresh must not discard a pending selection ID.
+  const modelReadTokens = new WeakMap();
+  function beginModelRead(state, sessionId, includesSelection = false) {
+    let tokens = modelReadTokens.get(state);
+    if (!tokens) {
+      tokens = {};
+      modelReadTokens.set(state, tokens);
+    }
+    const token = {};
+    const sameSession = () => (state.activeSessionId || null) === sessionId;
+    if (sameSession()) {
+      tokens.config = token;
+      if (includesSelection) tokens.selection = token;
+    }
+    return {
+      configIsCurrent: () => sameSession() && tokens.config === token,
+      selectionIsCurrent: () => sameSession() && tokens.selection === token,
+    };
+  }
+
   // 共享基础工厂：所有 cluster 的函数体只在这里定义一次。
   // deps 解构 = 各 cluster 依赖名的并集（去掉与函数声明同名的名字）。
   function sharedBridgeBase(deps) {
@@ -4335,13 +4356,13 @@
   // web+tauriSettings 共享
   async function loadEffectiveModelConfig(sessionId) {
     const requestedSessionId = arguments.length ? (sessionId || null) : (state.activeSessionId || null);
+    const read = beginModelRead(state, requestedSessionId);
     try {
       const config = await invoke("get_effective_model_config", { sessionId: requestedSessionId });
-      // When switching sessions quickly, an older request may return after the new one; never let the old session's config overwrite the current overlay state.
-      if ((state.activeSessionId || null) !== requestedSessionId) return;
+      if (!read.configIsCurrent()) return;
       state.effectiveModelConfig = config;
     } catch {
-      if ((state.activeSessionId || null) !== requestedSessionId) return;
+      if (!read.configIsCurrent()) return;
       state.effectiveModelConfig = null;
     }
     notify();
@@ -5653,6 +5674,7 @@
     },
     // FE14 wave 5：双 lane 共享的桥接状态切片字段注册表（见上方注释）。
     STATE_SLICE_FIELDS,
+    beginModelRead,
     // F-FE13-2：assistant_done 时间线记录构建器（无 deps，静态共享）。
     buildAssistantDoneTimelineRecord,
   });
