@@ -481,12 +481,9 @@ pub async fn register_external_model(
                     "注册表已满（上限 {MAX_REGISTRY_FILES} 条），请先移除不需要的模型"
                 ));
             }
-            // fresh_record_id 内部已自带 16 次重试；写入失败经 `?` 直接中止，
-            // 不存在值得外层循环的重试路径（第七轮评审 P3：拆掉假循环结构）。
-            let id = fresh_record_id(&dir)?;
-            let record = RegistryRecord {
+            let id = persist_new_record(&dir, random_record_id, |id| RegistryRecord {
                 schema: 1,
-                id: id.clone(),
+                id: id.to_string(),
                 name: name.clone(),
                 kind: kind.clone(),
                 base_url: base_url.clone(),
@@ -494,18 +491,7 @@ pub async fn register_external_model(
                 weights_path: weights_path.clone(),
                 installed_at: Some(chrono::Utc::now().to_rfc3339()),
                 note: None,
-            };
-            let json = serde_json::to_string_pretty(&record)
-                .map_err(|error| format!("注册表序列化失败：{error}"))?;
-            // 原子落盘复用底座 platform::atomic_write_private（第六轮评审
-            // P2：原先手搓 temp+rename，失败路径残留 .tmp、0600 在 open 之后
-            // 才收紧——共享版 open 时即 0600、失败清理 tmp、写后与 rename 后
-            // 都有 fsync）。尾随换行与原实现逐字节一致；fresh_record_id 的
-            // 存在性检查保证不覆盖既有记录。
-            let path = dir.join(format!("{id}.json"));
-            let bytes = format!("{json}\n");
-            crate::platform::atomic_write_private(&path, bytes.as_bytes())
-                .map_err(|error| format!("注册表写入失败：{error}"))?;
+            })?;
             Ok(id)
         }
     })
@@ -582,13 +568,38 @@ fn validate_http_url(raw: &str) -> Result<(), String> {
     }
 }
 
-/// 生成未冲突的记录 id：`m-` + 8 位随机 hex。
-fn fresh_record_id(dir: &Path) -> Result<String, String> {
+/// 随机记录 id：`m-` + 8 位随机十六进制（命名约定见 doctor 模板第 6 步）。
+fn random_record_id() -> String {
+    let uuid = uuid::Uuid::new_v4().simple().to_string();
+    format!("m-{}", &uuid[..8])
+}
+
+/// 落盘一条新注册记录：生成 id → 序列化 → **不覆盖式发布，id 撞车换新 id 重试
+/// （上限 16 次）。此前是"存在性检查 + rename 覆盖写"两步，检查与写之间是
+/// TOCTOU 窗口：两个应用实例并发登记撞上同一 id（2⁻³²）时，后写者把先写者
+/// 刚落盘的记录整个静默覆盖。现改用底座 `create_private_file_once
+/// （rename NOREPLACE / hard_link 兜底，OS 级原子不覆盖，temp 即 0600、失败
+/// 清理临时文件、写后与发布后都有 fsync——私密性与原子性与 atomic_write_private
+/// 同一纪律），碰撞由 `AlreadyExists` 报出，输家用新 id 重试，任何时序下都
+/// 不会吞掉对方的记录。序列化在重试内重复：id 在记录体里，换 id 必须重序列化。
+fn persist_new_record(
+    dir: &Path,
+    mut next_id: impl FnMut() -> String,
+    build: impl Fn(&str) -> RegistryRecord,
+) -> Result<String, String> {
     for _ in 0..16 {
-        let uuid = uuid::Uuid::new_v4().simple().to_string();
-        let id = format!("m-{}", &uuid[..8]);
-        if !dir.join(format!("{id}.json")).exists() {
-            return Ok(id);
+        let id = next_id();
+        let record = build(&id);
+        let json = serde_json::to_string_pretty(&record)
+            .map_err(|error| format!("注册表序列化失败：{error}"))?;
+        let path = dir.join(format!("{id}.json"));
+        match crate::platform::filesystem::create_private_file_once(
+            &path,
+            format!("{json}\n").as_bytes(),
+        ) {
+            Ok(()) => return Ok(id),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("注册表写入失败：{error}")),
         }
     }
     Err("注册表 id 生成冲突，请重试".to_string())
@@ -1829,6 +1840,125 @@ mod tests {
         let (models, warnings) = read_registry(dir.path());
         assert_eq!(models.len(), MAX_REGISTRY_FILES);
         assert!(warnings.iter().any(|warning| warning.contains("超过")));
+    }
+
+    /// 最小合法注册记录（persist_new_record 测试用）。
+    fn minimal_record(id: &str) -> RegistryRecord {
+        RegistryRecord {
+            schema: 1,
+            id: id.to_string(),
+            name: "tiny".to_string(),
+            kind: "other".to_string(),
+            base_url: None,
+            model: None,
+            weights_path: None,
+            installed_at: None,
+            note: None,
+        }
+    }
+
+    #[test]
+    fn persist_new_record_retries_with_fresh_id_and_spares_the_rival_record() {
+        // 撞车 id 的重试语义：占位文件是双实例并发登记里先落盘的对手记录。
+        // 发布永不覆盖既有文件，撞车必须换新 id 成功，对手记录逐字节幸存
+        // （顺序用例只钉语义；新旧实现的判别由下方并发压力测试承担）。
+        let dir = TempDir::new("register-collision");
+        let taken = dir.path().join("m-deadbeef.json");
+        std::fs::write(&taken, "{\"id\": \"m-deadbeef\", \"name\": \"rival\"}\n")
+            .expect("seed rival record");
+        let mut first_call = true;
+        let id = persist_new_record(
+            dir.path(),
+            || {
+                if first_call {
+                    first_call = false;
+                    "m-deadbeef".to_string()
+                } else {
+                    "m-cafebabe".to_string()
+                }
+            },
+            minimal_record,
+        )
+        .expect("must succeed with the retry id");
+        assert_eq!(id, "m-cafebabe");
+        assert_eq!(
+            std::fs::read_to_string(&taken).expect("rival record must survive"),
+            "{\"id\": \"m-deadbeef\", \"name\": \"rival\"}\n"
+        );
+        let written =
+            std::fs::read_to_string(dir.path().join("m-cafebabe.json")).expect("new record");
+        assert!(written.contains("\"m-cafebabe"));
+        assert!(written.ends_with('\n'), "尾随换行与原落盘格式一致");
+    }
+
+    #[test]
+    fn persist_new_record_fails_closed_when_every_generated_id_is_taken() {
+        let dir = TempDir::new("register-exhaust");
+        let taken = dir.path().join("m-00000000.json");
+        std::fs::write(&taken, "keep\n").expect("seed record");
+        let error = persist_new_record(dir.path(), || "m-00000000".to_string(), minimal_record)
+            .expect_err("exhausted ids must surface the conflict");
+        assert!(error.contains("冲突"), "unexpected error: {error}");
+        assert_eq!(
+            std::fs::read_to_string(&taken).expect("existing record must be intact"),
+            "keep\n"
+        );
+    }
+
+    #[test]
+    fn persist_new_record_never_clobbers_under_concurrent_id_pressure() {
+        // 并发压力下的不变量：发布不覆盖。id 生成器只在小空间里抽（碰撞
+        // 频繁），8 线程并发登记——每一次成功都必须独占一个 id：任何"检查
+        // 后覆盖写"的回归都会让输家盖掉赢家的记录，这里以重复 id /
+        // 内容与文件名不符的形式暴露；不覆盖式发布则全部成功且互不相同。
+        let dir = TempDir::new("register-race");
+        let dir_path = dir.path().to_path_buf();
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let dir_path = dir_path.clone();
+                std::thread::spawn(move || {
+                    let mut registered = Vec::new();
+                    for _ in 0..4 {
+                        let id = persist_new_record(
+                            &dir_path,
+                            || format!("m-{:x}", uuid::Uuid::new_v4().as_u128() % 64),
+                            minimal_record,
+                        )
+                        .expect("registration must succeed within retry budget");
+                        registered.push(id);
+                    }
+                    registered
+                })
+            })
+            .collect();
+        let mut all_ids = Vec::new();
+        for handle in handles {
+            all_ids.extend(handle.join().expect("worker must not panic"));
+        }
+        let total = all_ids.len();
+        all_ids.sort();
+        all_ids.dedup();
+        assert_eq!(
+            all_ids.len(),
+            total,
+            "并发登记不得产生重复 id（覆盖即丢失）"
+        );
+        let mut files = 0;
+        for entry in std::fs::read_dir(&dir_path).expect("read registry dir") {
+            let entry = entry.expect("dir entry");
+            let file_id = entry
+                .file_name()
+                .to_string_lossy()
+                .trim_end_matches(".json")
+                .to_string();
+            let content = std::fs::read_to_string(entry.path()).expect("read record");
+            assert!(
+                content.contains(&format!("\"{file_id}")),
+                "记录内容 id 必须与文件名一致：{file_id}"
+            );
+            files += 1;
+        }
+        assert_eq!(files, total, "落盘文件数必须等于成功登记数");
     }
 
     #[test]
