@@ -1367,6 +1367,21 @@ fn remove_managed_resource(root: &Path) -> Result<(), ModelManagerError> {
     fs::remove_dir(root).map_err(|e| fail(e.to_string()))
 }
 
+/// The caller supplies the same disjoint candidate roots before and after
+/// managed-current deletion. Unknown occupancy fails instead of becoming zero;
+/// only a positively absent path contributes no remaining allocated blocks.
+pub(super) fn allocated_exclusive_paths(paths: &[PathBuf]) -> Result<u64, ModelManagerError> {
+    paths.iter().try_fold(0u64, |total, path| {
+        if resource_presence(path)? {
+            total
+                .checked_add(allocated_exclusive(path)?)
+                .ok_or_else(|| fail("独占文件块统计溢出，无法确认释放量。"))
+        } else {
+            Ok(total)
+        }
+    })
+}
+
 fn allocated_exclusive(path: &Path) -> Result<u64, ModelManagerError> {
     let mut total = 0;
     for entry in fs::read_dir(path).map_err(|e| fail(e.to_string()))? {

@@ -2,7 +2,7 @@
 //! Preserve user options except the explicitly versioned correction of erroneous store defaults.
 use super::{db, version_store};
 use crate::features::model_store::linked_model_route::chat_base;
-use crate::platform::prefs::{SavedModel, UserPrefs};
+use crate::platform::prefs::{ModelPreset, SavedModel, UserPrefs};
 
 mod context_repair;
 
@@ -23,6 +23,31 @@ fn identity(record: &db::StoreModelRecord) -> Option<(String, String)> {
         .filter(|m| !m.is_empty())
         .unwrap_or(&record.model_name);
     (!model.is_empty()).then(|| (base, model.to_string()))
+}
+
+fn is_legacy_store_chat_route(row: &SavedModel) -> bool {
+    // Every pre-provenance buildSavedModel emitted this metadata. Matching an
+    // address and model alone cannot establish ownership of a user-configured
+    // Responses/Messages route or another explicitly selected endpoint mode.
+    row.preset == ModelPreset::OpenaiCompatible
+        && row
+            .provider_kind
+            .as_deref()
+            .is_none_or(|kind| kind == "custom")
+        && row
+            .vendor
+            .as_deref()
+            .is_none_or(|vendor| vendor.trim().is_empty())
+        && row
+            .endpoint_mode
+            .as_deref()
+            .is_none_or(|mode| mode.trim().is_empty())
+        && crate::core::model_wire::model_route_wire_api(
+            row.preset.as_str(),
+            row.vendor.as_deref(),
+            &row.model,
+            &row.base_url,
+        ) == "openai_chat_completions"
 }
 
 pub(crate) fn matches_current_model_route(card_id: &str, base_url: &str, model: &str) -> bool {
@@ -57,6 +82,9 @@ fn reconcile(models: &mut [SavedModel], routes: &[Route], card_id: Option<&str>)
         let route = if let Some(card) = row.model_store_card_id.as_deref() {
             routes.iter().find(|route| route.card_id == card)
         } else {
+            if !is_legacy_store_chat_route(row) {
+                continue;
+            }
             // Migrate only an exact, unambiguous legacy route, including a version
             // archived before the wire ID changed. Same-name remote/other-port rows stay put.
             let mut matches = routes.iter().filter(|route| {

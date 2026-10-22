@@ -46,6 +46,67 @@ fn upgrade_migrates_exact_old_route_and_preserves_credentials_and_options() {
 }
 
 #[test]
+fn legacy_chat_metadata_with_a_missing_provider_kind_still_migrates() {
+    let mut old = saved("legacy", "old-wire-id", "http://127.0.0.1:8000/v1");
+    old.provider_kind = None;
+    old.vendor = Some(" ".into());
+    old.endpoint_mode = Some(" ".into());
+    let mut rows = vec![old.clone()];
+    assert_eq!(reconcile(&mut rows, &[route()]), ["legacy"]);
+    let mut expected = old;
+    expected.base_url = "http://127.0.0.1:8001/v1".into();
+    expected.model = "new-wire-id".into();
+    expected.model_store_card_id = Some("qwen-card".into());
+    assert_eq!(rows, [expected]);
+}
+
+#[test]
+fn non_legacy_protocol_metadata_cannot_acquire_a_card_from_an_address_match() {
+    use serde_json::json;
+    for (label, patch) in [
+        ("responses", json!({ "preset": "openai_responses" })),
+        ("messages-preset", json!({ "preset": "anthropic" })),
+        ("messages-vendor", json!({ "vendor": "anthropic" })),
+        ("claude-vendor", json!({ "vendor": "claude" })),
+        ("other-chat-preset", json!({ "preset": "local_vllm" })),
+        ("other-chat-vendor", json!({ "vendor": "openai" })),
+        ("official-kind", json!({ "provider_kind": "official_api" })),
+        (
+            "full-endpoint",
+            json!({ "endpoint_mode": "full_chat_completions" }),
+        ),
+    ] {
+        let mut value =
+            serde_json::to_value(saved(label, "old-wire-id", "http://127.0.0.1:8000/v1")).unwrap();
+        for (field, value_patch) in patch.as_object().unwrap() {
+            value[field] = value_patch.clone();
+        }
+        let original: SavedModel = serde_json::from_value(value).unwrap();
+        for ready in [false, true] {
+            let mut rows = vec![original.clone()];
+            let mut candidate = route();
+            candidate.ready = ready;
+            assert!(reconcile(&mut rows, &[candidate]).is_empty(), "{label}");
+            assert_eq!(rows, [original.clone()], "{label}: ready={ready}");
+        }
+    }
+}
+
+#[test]
+fn explicit_card_links_do_not_require_legacy_protocol_metadata() {
+    for preset in [ModelPreset::OpenaiResponses, ModelPreset::Anthropic] {
+        let mut row = saved("explicit", "old-wire-id", "http://127.0.0.1:8000/v1");
+        row.preset = preset;
+        row.model_store_card_id = Some("qwen-card".into());
+        let mut rows = vec![row.clone()];
+        assert_eq!(reconcile(&mut rows, &[route()]), ["explicit"]);
+        row.base_url = "http://127.0.0.1:8001/v1".into();
+        row.model = "new-wire-id".into();
+        assert_eq!(rows, [row]);
+    }
+}
+
+#[test]
 fn stopped_old_route_is_bound_before_enable_overwrites_wire_identity() {
     let mut rows = vec![saved("same-id", "old-wire-id", "http://127.0.0.1:8000/v1")];
     let mut stopped = route();

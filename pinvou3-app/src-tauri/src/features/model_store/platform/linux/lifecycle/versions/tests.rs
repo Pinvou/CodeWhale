@@ -1006,6 +1006,144 @@ fn explicit_purge_after_history_cleanup_removes_the_active_isolated_storage() {
 }
 
 #[test]
+fn managed_current_purge_reports_allocated_blocks_without_shared_or_sparse_bytes() {
+    for kind in ["hardlink", "sparse", "regular"] {
+        let (temp, mgr, current, card, pkg, id) = fixture();
+        mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+            .unwrap();
+        mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+            .unwrap();
+        mgr.delete_version(
+            &current.card_id,
+            &version_store::active_id(&current),
+            &mut |_| {},
+            Default::default(),
+        )
+        .unwrap();
+        let active = mgr.get_record(&current.card_id).unwrap();
+        let root = PathBuf::from(active.models_root.as_ref().unwrap());
+        let runtime = runtime_path(&active).unwrap();
+        let baseline = allocated_exclusive(&root).unwrap() + allocated_exclusive(&runtime).unwrap();
+        assert!(baseline > 0);
+        let mut expected = baseline;
+        let external = temp.path().join("external-shared-weight");
+        let payload = vec![0x5a; 1024 * 1024];
+        let external_before = match kind {
+            "hardlink" => {
+                fs::write(&external, &payload).unwrap();
+                fs::hard_link(&external, root.join("new/shared.tachyon")).unwrap();
+                let metadata = fs::metadata(&external).unwrap();
+                assert_eq!(metadata.nlink(), 2);
+                Some(metadata)
+            }
+            "sparse" => {
+                let path = root.join("new/sparse.tachyon");
+                fs::File::create(&path)
+                    .unwrap()
+                    .set_len(8 * 1024 * 1024)
+                    .unwrap();
+                let metadata = fs::metadata(path).unwrap();
+                assert_eq!(metadata.blocks(), 0, "fixture must be genuinely sparse");
+                None
+            }
+            _ => {
+                for path in [
+                    root.join("new/exclusive.tachyon"),
+                    runtime.join("exclusive-data"),
+                ] {
+                    fs::write(&path, &payload).unwrap();
+                    let bytes = fs::metadata(path).unwrap().blocks() * 512;
+                    assert!(bytes > 0);
+                    expected += bytes;
+                }
+                None
+            }
+        };
+        let outcome = mgr
+            .uninstall(&current.card_id, true, &mut |_| {}, Default::default())
+            .unwrap();
+        assert_eq!(
+            outcome.freed_bytes, expected,
+            "wrong managed purge measurement for {kind}"
+        );
+        assert!(
+            outcome
+                .summary
+                .contains(&disk::format_bytes(expected as f64))
+        );
+        assert!(!root.exists());
+        assert!(!runtime.exists());
+        assert!(db::get_store_model(&current.card_id).unwrap().is_none());
+        if let Some(before) = external_before {
+            let after = fs::metadata(&external).unwrap();
+            assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
+            assert_eq!(after.blocks(), before.blocks());
+            assert_eq!(after.nlink(), 1);
+            assert_eq!(fs::read(&external).unwrap(), payload);
+        }
+    }
+}
+
+#[test]
+fn unreadable_managed_subtree_refuses_purge_before_scripts_or_deletion() {
+    use std::os::unix::fs::PermissionsExt;
+    assert_ne!(fs::metadata("/proc/self").unwrap().uid(), 0);
+    let (temp, mgr, current, card, mut pkg, id) = fixture();
+    let script_marker = temp.path().join("uninstall-ran");
+    pkg.scripts.insert(
+        "uninstall".into(),
+        blob(&format!(
+            "#!/bin/bash\ntouch '{}'\n",
+            script_marker.display()
+        )),
+    );
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    mgr.delete_version(
+        &current.card_id,
+        &version_store::active_id(&current),
+        &mut |_| {},
+        Default::default(),
+    )
+    .unwrap();
+    let active = mgr.get_record(&current.card_id).unwrap();
+    let root = PathBuf::from(active.models_root.as_ref().unwrap());
+    let locked = root.join("unreadable");
+    fs::create_dir(&locked).unwrap();
+    fs::write(locked.join("retained-weight"), b"keep").unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let result = mgr.uninstall(&current.card_id, true, &mut |_| {}, Default::default());
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(result.is_err());
+    assert!(
+        !script_marker.exists(),
+        "unknown baseline must fail before uninstall executes"
+    );
+    assert_eq!(fs::read(locked.join("retained-weight")).unwrap(), b"keep");
+    assert_eq!(
+        fs::read(root.join("new/new.tachyon")).unwrap(),
+        b"new-weights"
+    );
+    assert_eq!(
+        version_store::get(&current.card_id, &id)
+            .unwrap()
+            .unwrap()
+            .state,
+        "current"
+    );
+    assert_eq!(
+        serde_json::to_value(mgr.get_record(&current.card_id).unwrap()).unwrap(),
+        serde_json::to_value(&active).unwrap()
+    );
+    mgr.uninstall(&current.card_id, true, &mut |_| {}, Default::default())
+        .unwrap();
+    assert!(script_marker.exists());
+    assert!(!root.exists());
+}
+
+#[test]
 fn inaccessible_current_storage_or_runtime_keeps_records_and_can_be_retried() {
     use std::os::unix::fs::PermissionsExt;
     assert_ne!(
