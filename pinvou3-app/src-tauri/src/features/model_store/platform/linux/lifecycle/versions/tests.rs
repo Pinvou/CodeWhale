@@ -2557,7 +2557,7 @@ fn changed_legacy_history_has_manual_recovery_and_explicit_record_only_escape() 
             .residual_paths
             .contains(staged.models_root.as_ref().unwrap())
     );
-    assert!(outcome.warning.contains("没有被删除"));
+    assert!(outcome.warning == "force_remove_residual_paths");
 }
 
 #[test]
@@ -2595,8 +2595,21 @@ fn weight_hash_reports_file_bytes_and_remains_cancellable_before_reading() {
         script_runner::sha256_hex(&"x".repeat(2 * 1024 * 1024))
     );
     assert!(progress.first().unwrap().contains("0 / 2097152"));
-    assert!(progress.last().unwrap().contains("2097152 / 2097152"));
-    assert!(progress.last().unwrap().contains("100.0%"));
+    // 每次汇报产出两行：人类可读文案在前，进度条协议行在后。前端
+    // reduceLogChunk 解析协议行驱动进度条，并把该行从可见日志中过滤
+    // （与脚本下载进度同约定）。
+    let final_report = &progress[progress.len() - 2];
+    assert!(
+        final_report.contains("2097152 / 2097152") && final_report.contains("100.0%"),
+        "收尾汇报必须有人类可读的字节进度：{progress:?}"
+    );
+    assert!(
+        progress
+            .last()
+            .unwrap()
+            .contains("LMM_PROGRESS_BYTES=2097152/2097152"),
+        "收尾汇报必须带上协议行，否则进度条停在不确定态：{progress:?}"
+    );
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let control = script_runner::RunControl {
         cancel: Some(cancel.clone()),

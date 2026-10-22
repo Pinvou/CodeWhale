@@ -82,6 +82,22 @@ function parseProgressLine(line) {
   return { done: total > 0 ? Math.min(done, total) : done, total };
 }
 
+/**
+ * 强制移除结果的结构化警告码 → 界面文案。后端只发码（`force_remove_records_only`
+ * / `force_remove_residual_paths`），正文按当前语言渲染；路径明细不进文案，始终由
+ * `residual_paths` 列表单独渲染。未知字符串（旧版结果、测试桩的纯文本）原样显示，
+ * 保证向后兼容。
+ * @param {object} copy - i18n 文案对象（uiModelStore 段）。
+ * @param {string|null|undefined} warning - 后端警告码或旧版纯文本警告。
+ * @returns {string} 可直接渲染的文案；无警告时为空串。
+ */
+function operationWarningText(copy, warning) {
+  if (!warning) return '';
+  if (warning === 'force_remove_records_only') return copy.forceRemoveRecordsOnlyWarning;
+  if (warning === 'force_remove_residual_paths') return copy.forceRemoveResidualWarning;
+  return String(warning);
+}
+
 const PROMPT_KINDS = ['text', 'password', 'confirm'];
 
 /**
@@ -579,6 +595,7 @@ export {
   uninstallOptionsFor,
   splitDuration,
   parseProgressLine,
+  operationWarningText,
   parsePromptLine,
   computeSpeed,
   trimSamples,

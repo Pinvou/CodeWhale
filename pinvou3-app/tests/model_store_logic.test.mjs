@@ -20,6 +20,7 @@ import {
   libraryStatusOf,
   storeGuideState,
   missingFormFields,
+  operationWarningText,
   weightVerificationNotice,
   weightVerificationOf,
   parseProgressLine,
@@ -339,4 +340,26 @@ test('weightVerificationNotice：达标卡不出黄条，不达标的两档各�
 test('weightVerificationNotice：没声明的卡出黄条，而且出的是最狠那一句', () => {
   assert.deepEqual(weightVerificationNotice({}), { bodyKey: 'weightVerifyNone' });
   assert.deepEqual(weightVerificationNotice(null), { bodyKey: 'weightVerifyNone' });
+});
+
+test('operationWarningText：警告码按语言渲染，未知字符串原样回退', () => {
+  const copy = {
+    forceRemoveRecordsOnlyWarning: '只删了记录，请自行核实磁盘。',
+    forceRemoveResidualWarning: '磁盘文件未删除，请核查以下路径。',
+  };
+  // 后端两个警告码各对应一句文案
+  assert.equal(
+    operationWarningText(copy, 'force_remove_records_only'),
+    '只删了记录，请自行核实磁盘。'
+  );
+  assert.equal(
+    operationWarningText(copy, 'force_remove_residual_paths'),
+    '磁盘文件未删除，请核查以下路径。'
+  );
+  // 旧版结果、测试桩的纯文本警告原样显示，不吞不译
+  assert.equal(operationWarningText(copy, 'files retained'), 'files retained');
+  // 无警告一律空串，界面上不渲染空段落
+  assert.equal(operationWarningText(copy, null), '');
+  assert.equal(operationWarningText(copy, undefined), '');
+  assert.equal(operationWarningText(copy, ''), '');
 });

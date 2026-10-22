@@ -81,8 +81,12 @@ pub struct ForcedRemoval {
     pub recorded_bytes: i64,
     /// 仍在磁盘上或因链接/权限无法确认缺失的登记路径；并非独占归属声明。
     pub residual_paths: Vec<String>,
-    /// 一句可以直接显示给用户的话
-    pub warning: String,
+    /// 结构化警告码，前端按 i18n 渲染（`model-store-logic.js` 的
+    /// `operationWarningText`）：`force_remove_records_only` = 只删了记录、
+    /// 常见位置没发现残留；`force_remove_residual_paths` = 登记路径仍在或
+    /// 无法确认缺失。路径明细始终由 `residual_paths` 单独承载——那条列表
+    /// 在界面上本来就单独渲染，警告文本再拼一份既会溢出也无法按语言翻译。
+    pub warning: &'static str,
 }
 
 /// `uninstall` 的结果。整个结构体只为一件事存在：**如实说出这次到底做了什么**。
@@ -2250,15 +2254,9 @@ impl ModelManager {
             .map_err(|e| ModelManagerError::new(format!("删除模型及历史记录失败：{e}")))?;
 
         let warning = if residual_paths.is_empty() {
-            "已从模型库移除这条记录。本操作只删记录、没有删除任何文件；\
-             常见位置上没有发现残留目录，但卡片可能把权重放在别处，磁盘空间请自行核实。"
-                .to_string()
+            "force_remove_records_only"
         } else {
-            format!(
-                "已从模型库移除这条记录，但**磁盘上的文件没有被删除**。\
-                 以下已登记或疑似残留路径需要核查；共享目录可能还含其他模型或用户文件，确认归属后再手动清理：{}",
-                residual_paths.join("、")
-            )
+            "force_remove_residual_paths"
         };
         // 留一条 stderr：这是不可逆操作，日志里要能查到是谁、什么时候干的
         eprintln!("[force_remove] 强制移除记录 {card_id}，残留：{residual_paths:?}");
@@ -2279,7 +2277,7 @@ impl ModelManager {
     /// `MODEL_PATH` 写在它自己的 .env 里，LMM 读不到），所以这里只能是"候选"。
     /// 正因为是猜的，才必须用 `exists()` 过滤一遍：报一个根本不存在的路径，用户
     /// 去 `ls` 发现没有，下次就不信这条提示了。反过来，漏报也比误报安全——
-    /// warning 里那句"请自行核实"就是为漏报兜底的。
+    /// `force_remove_records_only` 警告码对应的"请自行核实"文案就是为漏报兜底的。
     fn residual_paths(&self, rec: &db::StoreModelRecord) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for p in self.candidate_paths(rec) {
@@ -3279,7 +3277,7 @@ exit 0
             removal.residual_paths
         );
         assert!(
-            removal.warning.contains("没有被删除"),
+            removal.warning == "force_remove_residual_paths",
             "提示必须明说文件还在，不能让用户以为点完就干净了：{}",
             removal.warning
         );
@@ -3311,7 +3309,7 @@ exit 0
             .expect("应当能强制移除");
         assert!(removal.residual_paths.is_empty(), "常见位置本来就没有东西");
         assert!(
-            removal.warning.contains("只删记录") && removal.warning.contains("自行核实"),
+            removal.warning == "force_remove_records_only",
             "扫不到残留时也必须说清楚「没删文件、请自己核实」：{}",
             removal.warning
         );

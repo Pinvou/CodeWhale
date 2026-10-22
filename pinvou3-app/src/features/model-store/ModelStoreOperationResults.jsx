@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import { MsButton, TEXT_SECONDARY } from './model-store-ui.jsx';
+import { operationWarningText } from './model-store-logic.js';
 import {
   dismissModelStoreOperationResult,
   getModelStoreOperationResults,
@@ -30,7 +31,7 @@ export function ModelStoreOperationResults({ copy, hiddenResultId = null }) {
             <div className="min-w-0 text-[13px]">
               <p className="font-semibold">{title}</p>
               <p className={`mt-1 ${TEXT_SECONDARY}`} role="status">{operationDoneText(copy, { kind, title, result })}</p>
-              {result.warning ? <p className="mt-1">{result.warning}</p> : null}
+              {result.warning ? <p className="mt-1">{operationWarningText(copy, result.warning)}</p> : null}
             </div>
             <MsButton tone="ghost" onClick={() => dismissModelStoreOperationResult(id)}>{copy.operationResultDismiss}</MsButton>
           </div>
