@@ -87,7 +87,11 @@ fn non_legacy_protocol_metadata_cannot_acquire_a_card_from_an_address_match() {
             let mut candidate = route();
             candidate.ready = ready;
             assert!(reconcile(&mut rows, &[candidate]).is_empty(), "{label}");
-            assert_eq!(rows, [original.clone()], "{label}: ready={ready}");
+            assert_eq!(
+                rows.as_slice(),
+                std::slice::from_ref(&original),
+                "{label}: ready={ready}"
+            );
         }
     }
 }

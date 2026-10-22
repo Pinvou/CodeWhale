@@ -100,7 +100,10 @@ fn unstarted_crash_recovery_keeps_root_bytes_without_reusing_the_target() {
         let next_root = home.path().join("next");
         let next = DownloadReservation::acquire("first", &next_root, || false, || {}).unwrap();
         assert_eq!(next.root, next_root);
-        assert_eq!(retained_roots(Some("first")).unwrap(), [root.clone()]);
+        assert_eq!(
+            retained_roots(Some("first")).unwrap().as_slice(),
+            std::slice::from_ref(&root)
+        );
         assert_eq!(super::super::retained_bytes().unwrap(), 7);
         assert!(root.join("preexisting-cache").exists());
     }
@@ -250,7 +253,10 @@ fn full_delete_releases_install_target_but_keeps_each_old_roots_residuals_charge
     fs::remove_file(first.join("card-weights")).unwrap();
     db::delete_store_model("card").unwrap();
     assert!(downloads().unwrap().is_empty());
-    assert_eq!(retained_roots(Some("card")).unwrap(), [first.clone()]);
+    assert_eq!(
+        retained_roots(Some("card")).unwrap().as_slice(),
+        std::slice::from_ref(&first)
+    );
     assert_eq!(super::super::retained_bytes().unwrap(), 7);
 
     let second = home.path().join("second");
@@ -291,7 +297,10 @@ fn repeated_same_root_reinstalls_deduplicate_retained_and_current_accounting() {
         assert_eq!(super::super::retained_bytes().unwrap(), 7);
         fs::remove_file(root.join("card-weights")).unwrap();
         db::delete_store_model("card").unwrap();
-        assert_eq!(retained_roots(Some("card")).unwrap(), [root.clone()]);
+        assert_eq!(
+            retained_roots(Some("card")).unwrap().as_slice(),
+            std::slice::from_ref(&root)
+        );
         assert_eq!(super::super::retained_bytes().unwrap(), 7);
     }
     complete_download("peer", &root, 10);
@@ -338,7 +347,10 @@ fn force_remove_discloses_and_atomically_forgets_current_and_retired_roots() {
     let conn = connection().unwrap();
     conn.execute_batch("CREATE TRIGGER refuse_credential_delete BEFORE DELETE ON api_keys BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
     assert!(manager.force_remove_record("card").is_err());
-    assert_eq!(retained_roots(Some("card")).unwrap(), [old_root.clone()]);
+    assert_eq!(
+        retained_roots(Some("card")).unwrap().as_slice(),
+        std::slice::from_ref(&old_root)
+    );
     assert_eq!(downloads().unwrap()[0].root, current_root);
     assert!(db::get_store_model("card").unwrap().is_some());
     assert!(db::find_api_key(&key.key_value).unwrap().is_some());
