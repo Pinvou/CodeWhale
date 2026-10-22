@@ -21,7 +21,6 @@ function pinvouSharedtauriArtifacts() {
     var dialogOpen = context.dialogOpen;
     var basename = context.basename;
     var isDeliverable = context.isDeliverable;
-    var isAbsPath = context.isAbsPath;
     var sessionStates = context.sessionStates;
     var discardManagedAttachment = context.discardManagedAttachment || function () { return Promise.resolve(); };
     var attachIdSeq = 0;
@@ -94,55 +93,15 @@ function pinvouSharedtauriArtifacts() {
 function openContainingFolder(path) { return pinvouSharedtauriArtifacts().openContainingFolder(path); }
 function revealSessionFolder(sessionId) { return pinvouSharedtauriArtifacts().revealSessionFolder(sessionId); }
 function openScheduledTaskFolder(automationId) { return pinvouSharedtauriArtifacts().openScheduledTaskFolder(automationId); }
-  function openInSystem(path) { return invoke("open_in_system", { path }).catch(function (e) { addSystemItem(bt("openFailed") + e); }); }
-  // 仅放白名单 URL (metaso.cn / open.bochaai.com),后端 open_external_url 强制校验。
-  function openExternalUrl(url) { return invoke("open_external_url", { url: url }).catch(function (e) { addSystemItem(bt("openFailed") + e); }); }
   // ACP 消息/产物预览里由用户亲自点击的 HTTP(S) 外链；后端与工具白名单入口分开校验。
   function openUserExternalUrl(url) { return invoke("open_user_external_url", { url }).catch(function (e) { addSystemItem(bt("openFailed") + e); }); }
-function deliverableCategory(path) { return pinvouSharedtauriArtifacts().deliverableCategory(path); }
-function sessionTitleById(sid) { return pinvouSharedtauriArtifacts().sessionTitleById(sid); }
-function currentMemoryArtifacts() { return pinvouSharedtauriArtifacts().currentMemoryArtifacts(); }
   // 跨会话产出物索引:磁盘 session JSON 为主,再合并当前内存工作集。
   // 新产物在 chat:done/save_session_artifacts 前也能立刻出现在「产出物」一级入口。
-  // 官方 lane 分异（不做 helpers 壳化）：上游共享核走 list_deliverable_index_v2 协商并
-  // 返回 {rows,skipped}，而官方已把 v2 命令随 stamp-cache 后端一并推迟
-  //（src-tauri/src/app/commands/protocol_tests.rs），且官方 KnowledgeView 仍消费
-  // legacy 数组契约 —— 此处保持 pre-壳化 的官方 legacy 形态，v2 交付物栈
-  //（命令+视图+skipped 披露）待官方采纳后随 T4 reconcile 一并壳化。
-  async function listDeliverableIndex() {
-    var disk = await invoke("list_deliverable_index").catch(function () { return []; });
-    var byPath = {};
-    (disk || []).forEach(function (x) { if (x && x.path) byPath[x.path] = x; });
-    var mem = currentMemoryArtifacts().filter(function (x) { return x.path && !byPath[x.path]; });
-    var hydrated = await Promise.all(mem.map(async function (x) {
-      var path = x.path;
-      if (!isAbsPath(path) && x.sessionId) {
-        try {
-          var ws = await invoke("list_workspace_files", { sessionId: x.sessionId });
-          var bn = basename(path);
-          var resolved = (ws || []).find(function (p) { return basename(p) === bn; });
-          if (resolved) path = resolved;
-        } catch (_) {}
-      }
-      var info = null;
-      try { info = await artifactInfo(path); } catch (_) {}
-      var ext = (String(path).split(".").pop() || "").toLowerCase();
-      return {
-        name: x.name || basename(path),
-        path: path,
-        ext: ext,
-        category: deliverableCategory(path),
-        sessionId: x.sessionId || "",
-        source: x.source || sessionTitleById(x.sessionId) || "",
-        mtime: info && info.modified ? info.modified : 0,
-        size: info && info.size ? info.size : 0,
-      };
-    }));
-    hydrated.forEach(function (x) { if (x && x.path) byPath[x.path] = x; });
-    return Object.keys(byPath).map(function (p) { return byPath[p]; }).sort(function (a, b) {
-      return (b.mtime || 0) - (a.mtime || 0) || String(a.name || "").localeCompare(String(b.name || ""));
-    });
-  }
+  // #701 T4b 壳化：官方 v2 命令（list_deliverable_index_v2）已随 TB 入主线
+  //（src-tauri/src/app/commands/artifacts.rs + lib.rs 注册），KnowledgeView 亦为
+  // accept-both 双形状 —— lane 改委托共享核（helpers v2 协商版；桌面 webview
+  // 与后端同包发布、version-locked，lane 不传 hasCommand 时按 v2 可用处理）。
+  async function listDeliverableIndex() { return pinvouSharedtauriArtifacts().listDeliverableIndex(); }
   // 外部打开产物：HTML 走 Tauri 独立窗口（绕沙箱），其他走系统应用。
   // sessionId = 卡片携带的产物所属 session。后端 resolve_artifact_path 用它(而非全局
   // active_id)解析相对路径 —— 切回「有 buffer」的会话后端 active 不更新,只有卡片自带
@@ -318,16 +277,6 @@ function conversationAttachmentArgs(reference) { return pinvouSharedtauriArtifac
     state.attachments = state.attachments.filter(function (a) { return a.id !== id; });
     notify();
   }
-  function clearAttachments() {
-    state.attachments.forEach(function (attachment) {
-      attachment.cancelled = true;
-      finishAttachmentTelemetry(attachment, false, "user_cancelled");
-      if (attachment.status === "ready" && attachment.result) {
-        discardManagedAttachment(attachment.result);
-      }
-    });
-    state.attachments = [];
-  }
   // 打开系统文件选择器并摄入为附件
 async function pickAndAttach() { return pinvouSharedtauriArtifacts().pickAndAttach(); }
   // 文件选择按钮在桌面仍走原生路径；HTML5 拖放拿不到路径时通过同一域方法
@@ -372,17 +321,14 @@ async function pickAndAttach() { return pinvouSharedtauriArtifacts().pickAndAtta
       openContainingFolder: openContainingFolder,
       revealSessionFolder: revealSessionFolder,
       openScheduledTaskFolder: openScheduledTaskFolder,
-      openInSystem: openInSystem,
       openArtifactExternal: openArtifactExternal,
       downloadArtifact: downloadArtifact,
       listDeliverableIndex: listDeliverableIndex,
-      openExternalUrl: openExternalUrl,
       openUserExternalUrl: openUserExternalUrl,
       addAttachmentByPath: addAttachmentByPath,
       addPasteImage: addPasteImage,
       addPasteImageFromClipboard: addPasteImageFromClipboard,
       removeAttachment: removeAttachment,
-      clearAttachments: clearAttachments,
       pickAndAttach: pickAndAttach,
       uploadDeviceFiles: uploadDeviceFiles,
       adoptManagedAttachments: adoptManagedAttachments,

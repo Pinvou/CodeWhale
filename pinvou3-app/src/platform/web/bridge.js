@@ -5829,18 +5829,6 @@ async function submitUserInput(itemId, toolCallId, answers, questions) { return 
 function openContainingFolder(path) { return pinvouSharedweb().openContainingFolder(path); }
 function revealSessionFolder(sessionId) { return pinvouSharedweb().revealSessionFolder(sessionId); }
 function openScheduledTaskFolder(automationId) { return pinvouSharedweb().openScheduledTaskFolder(automationId); }
-  function openInSystem(path) {
-    if (IS_WEB) return downloadArtifact(path, null);
-    return invoke("open_in_system", { path: path }).catch(function (e) { addSystemItem(bt("openFailed") + e); });
-  }
-  // 仅放白名单 URL (metaso.cn / open.bochaai.com),后端 open_external_url 强制校验。
-  function openExternalUrl(url) {
-    if (IS_WEB) {
-      var opened = window.open(url, "_blank", "noopener,noreferrer");
-      return Promise.resolve(!!opened);
-    }
-    return invoke("open_external_url", { url: url }).catch(function (e) { addSystemItem(bt("openFailed") + e); });
-  }
   function openUserExternalUrl(url) {
     try {
       var rawUrl = String(url || "").trim();
@@ -6213,12 +6201,6 @@ function conversationAttachmentArgs(reference) { return pinvouSharedweb().conver
     state.attachments = state.attachments.filter(function (a) { return a.id !== id; });
     releaseAttachmentOnDesktop(removed);
     notify();
-  }
-  function clearAttachments() {
-    var removed = state.attachments.slice();
-    state.attachments = [];
-    removed.forEach(function (attachment) { finishAttachmentTelemetry(attachment, false, "user_cancelled"); });
-    removed.forEach(releaseAttachmentOnDesktop);
   }
   // 打开系统文件选择器并摄入为附件
 async function pickAndAttach() { return pinvouSharedweb().pickAndAttach(); }
@@ -7509,17 +7491,14 @@ function appendVoiceText(base, text) { return pinvouSharedweb().appendVoiceText(
     openContainingFolder: openContainingFolder,
     revealSessionFolder: revealSessionFolder,
     openScheduledTaskFolder: openScheduledTaskFolder,
-    openInSystem: openInSystem,
     openArtifactExternal: openArtifactExternal,
     downloadArtifact: downloadArtifact,
     listDeliverableIndex: listDeliverableIndex,
-    openExternalUrl: openExternalUrl,
     openUserExternalUrl: openUserExternalUrl,
     // 附件
     addAttachmentByPath: addAttachmentByPath,
     addPasteImage: addPasteImage,
     removeAttachment: removeAttachment,
-    clearAttachments: clearAttachments,
     pickAndAttach: pickAndAttach,
     uploadDeviceFiles: uploadDeviceFiles,
     resolveConversationAttachment: resolveConversationAttachment,
