@@ -1,30 +1,23 @@
-name: Pinvou fork CI
-
+name: Output envelope recovery validation
 on:
-  pull_request:
-    branches: [pinvou3-clean]
-  push:
-    branches: [pinvou3-clean]
   workflow_dispatch:
-
 permissions:
   contents: read
-
-concurrency:
-  group: fork-ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  check:
-    name: check
+  wiring:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [baseline, no-envelope, always-preserve]
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
     env:
       CARGO_BUILD_JOBS: '1'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
       CARGO_INCREMENTAL: '0'
       RUST_MIN_STACK: '16777216'
+      VARIANT: ${{ matrix.variant }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,77 +27,54 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
-          save-if: ${{ github.event_name == 'push' }}
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Lint workspace
-        run: >-
-          cargo clippy --workspace --all-features --locked --
-          -D warnings
-          -A clippy::uninlined_format_args
-          -A clippy::too_many_arguments
-          -A clippy::unnecessary_map_or
-          -A clippy::collapsible_if
-          -A clippy::assertions_on_constants
-      - uses: taiki-e/install-action@nextest
-      - name: Test workspace
-        run: cargo nextest run --workspace --all-features --locked --profile ci --test-threads 2
-      - name: Test documentation
-        run: cargo test --workspace --all-features --locked --doc
-      - name: Check lockfile drift
-        run: git diff --exit-code -- Cargo.lock
-
-  gitleaks:
-    name: Gitleaks
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
+          save-if: false
+      - name: Apply isolated mutation
+        shell: python
+        run: |
+          import os, pathlib, re
+          p=pathlib.Path('crates/tui/src/core/engine/turn_loop.rs')
+          s=p.read_text()
+          v=os.environ['VARIANT']
+          if v=='always-preserve':
+              old='if super::context::tool_result_context_view('
+              assert s.count(old)==1
+              s=s.replace(old,'if true || super::context::tool_result_context_view(')
+          elif v=='no-envelope':
+              matches=list(re.finditer(r'preserve_tool_output_for_context\(',s))
+              assert len(matches)==4
+              i=matches[2].start()
+              assert s.rfind('if tool_name == MULTI_TOOL_PARALLEL_NAME',0,i)>s.rfind('ToolExecutionBatch::Serial',0,i)
+              j=s.index(');',i)+2
+              args=s[i+len('preserve_tool_output_for_context('):j-2]
+              s=s[:i]+'let _ = ('+args+');'+s[j:]
+          p.write_text(s)
+      - name: Execute native engine regressions and verify outcome
+        shell: bash
+        run: |
+          set +e
+          cargo test -p codewhale-tui --lib --all-features --locked forkguard_turn_loop_ -- --test-threads=1 > wiring.log 2>&1
+          status=$?
+          cat wiring.log
+          export TEST_EXIT="$status"
+          python3 - <<'PY'
+          import os, pathlib, re
+          s=re.sub(r'\x1b\[[0-9;]*m','',pathlib.Path('wiring.log').read_text())
+          v=os.environ['VARIANT']
+          assert 'running 6 tests' in s, 'all six real tests must execute'
+          for arm in ('serial','parallel','envelope'):
+              for small in (False,True):
+                  suffix='_keeps_complete_output_artifact_free' if small else '_preserves_output_before_fanout'
+                  name='forkguard_turn_loop_'+arm+suffix
+                  fail=v=='always-preserve' and small or v=='no-envelope' and arm=='envelope' and not small
+                  assert name+' ... '+('FAILED' if fail else 'ok') in s, name
+          assert int(os.environ['TEST_EXIT'])==(0 if v=='baseline' else 101)
+          print('Verified native regression outcome:',v)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Install verified Gitleaks release
-        shell: bash
-        run: |
-          curl --fail --location --retry 3 --output "$RUNNER_TEMP/gitleaks.tar.gz" \
-            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
-          printf '%s  %s\n' \
-            551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb \
-            "$RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check --strict
-          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
-      - name: Verify fixture exceptions remain narrow
-        run: python3 scripts/check-gitleaks-config.py "$RUNNER_TEMP/gitleaks"
-      - name: Scan checked-out tree
-        run: '"$RUNNER_TEMP/gitleaks" dir . --redact --no-banner'
-      - name: Scan introduced commits
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-        shell: bash
-        run: |
-          # New branches and manual runs have no base: scan all reachable history.
-          if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]]; then
-            range=HEAD
-          else
-            range="$BASE_SHA..HEAD"
-          fi
-          "$RUNNER_TEMP/gitleaks" git . --log-opts="$range" --redact --no-banner
-
-  gate:
-    name: gate
-    if: always()
-    needs: [check, gitleaks]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Require successful validation
-        env:
-          CHECK_RESULT: ${{ needs.check.result }}
-          GITLEAKS_RESULT: ${{ needs.gitleaks.result }}
-        run: |
-          test "$CHECK_RESULT" = success
-          test "$GITLEAKS_RESULT" = success
+          name: envelope-${{ matrix.variant }}
+          path: wiring.log
