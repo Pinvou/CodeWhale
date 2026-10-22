@@ -83,7 +83,7 @@ command_protocol!(
         "read_artifact_text",
         "write_artifact_text",
         "list_deliverable_index",
-        // list_deliverable_index_v2 随其 stamp-cache 后端一并推迟（见 PR 正文分诊）。
+        "list_deliverable_index_v2",
         "artifact_info",
         "read_artifact_image_b64",
         "read_artifact_thumbnail",
@@ -962,3 +962,59 @@ fn aux_stays_out_of_the_deliverables_index_and_acp_classification() {
 // bare array to `{rows: [], skipped: []}`, silently re-creating the
 // empty-panel bug. The command fn is executed directly so a signature or
 // shape regression fails here, at the layer that owns it.
+#[tokio::test]
+async fn gui_command_shell_forwards_rows_and_skipped() {
+    use crate::features::deliverables::DeliverableIndex;
+
+    let (_lock, _home, _host) =
+        crate::features::deliverables::gui_index_contract_tests::run_in_scratch_home();
+
+    let shell: DeliverableIndex = super::artifacts::list_deliverable_index_v2()
+        .await
+        .expect("gui command");
+    assert_eq!(shell.rows.len(), 1, "the shell keeps the rows");
+    assert_eq!(shell.rows[0].session_id, "s-ok");
+    assert_eq!(
+        shell.skipped,
+        vec!["s-huge".to_string()],
+        "the shell must return DeliverableIndex whole, not flatten to rows"
+    );
+}
+
+// Round-9 review (mixed-version web/desktop pairings): the UNVERSIONED
+// command is the legacy wire surface an older, independently deployed web
+// dist still consumes — its shape must stay a bare row array and a scan
+// failure must degrade to an empty array, never a rejection (the dist
+// handles rejections by rendering an empty panel). The rich shape is
+// separately negotiated on list_deliverable_index_v2; this executing test
+// pins the legacy side so the two contracts cannot silently swap.
+#[tokio::test]
+async fn legacy_list_deliverable_index_shell_keeps_the_bare_array_contract() {
+    let (_lock, _home, _host) =
+        crate::features::deliverables::gui_index_contract_tests::run_in_scratch_home();
+
+    let rows: Vec<crate::features::deliverables::DeliverableItem> =
+        super::artifacts::list_deliverable_index()
+            .await
+            .expect("gui command");
+    assert_eq!(rows.len(), 1, "the legacy shell keeps the rows");
+    assert_eq!(rows[0].session_id, "s-ok");
+
+    // The degradation half: an undecidable sessions root must NOT reject
+    // here (main's historical semantics never rejected, and the legacy dist
+    // renders any rejection as an empty panel anyway) — it degrades to an
+    // empty array. Shadow the sessions dir with a regular file so read_dir
+    // fails with something other than NotFound (that arm is the clean-empty
+    // case, not the failure case).
+    let sessions = _home.path().join("sessions");
+    std::fs::remove_dir_all(&sessions).expect("drop seeded sessions dir");
+    std::fs::write(&sessions, b"not a directory").expect("shadow sessions root");
+    let rows: Vec<crate::features::deliverables::DeliverableItem> =
+        super::artifacts::list_deliverable_index()
+            .await
+            .expect("gui command");
+    assert!(
+        rows.is_empty(),
+        "legacy shell degrades a scan failure to an empty array"
+    );
+}
