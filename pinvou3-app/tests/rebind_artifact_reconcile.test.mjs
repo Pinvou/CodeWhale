@@ -100,16 +100,24 @@ assert.match(
   /chain: \[\{ from: payload\.from, to: payload\.to \}\]/,
   'the mark must carry the timestamp and the segment chain',
 );
+// T4a（#701）：save transform 与两处 wholesale save（persistMessagesFor +
+// reconcileArtifacts）已并入共享基座；web lane 壳转发，钉随本体走 shared base
+// （上游同形）。
+assert.match(
+  sharedRebindSource,
+  /function rebaseArtifactPathsForRebind\(sid, paths\)/,
+  'the shared base must carry the save transform',
+);
 assert.match(
   webSource,
-  /function rebaseArtifactPathsForRebind\(sid, paths\)/,
-  'the web host must carry the save transform',
+  /function rebaseArtifactPathsForRebind\(sid, paths\) \{ return pinvouSharedweb\(\)\.rebaseArtifactPathsForRebind\(sid, paths\); \}/,
+  'the web host must forward the save transform',
 );
-const webSaveSites = webSource.match(/save_session_artifacts", \{ id: sid, paths: rebaseArtifactPathsForRebind\(/g) || [];
+const sharedSaveSites = sharedRebindSource.match(/save_session_artifacts", \{ id: sid, paths: rebaseArtifactPathsForRebind\(/g) || [];
 assert.equal(
-  webSaveSites.length,
+  sharedSaveSites.length,
   2,
-  'both web wholesale saves (persistMessagesFor + reconcile) must transform their paths',
+  'both shared wholesale saves (persistMessagesFor + reconcile) must transform their paths',
 );
 // The backend emit site must carry the geometry, cover all three lists, and
 // also fire on the roots-commit error path (round-C minor 1) — otherwise the

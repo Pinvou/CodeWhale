@@ -244,9 +244,11 @@ for (const selector of [
   assert.ok(css.includes(selector), `missing language-specific style: ${selector}`);
 }
 
+// #701 T4a 壳化：web renderMarkdown 已委托共享基座，委托链本体随壳迁至
+// helpers；desktop bridge.js 核心壳化 defer T4b，仍内联钉本体。
 for (const bridgePath of [
   ['src', 'platform', 'tauri', 'bridge.js'],
-  ['src', 'platform', 'web', 'bridge.js'],
+  ['src', 'shared', 'bridge-shared-helpers.js'],
 ]) {
   assert.match(
     readApp(...bridgePath),
@@ -254,6 +256,11 @@ for (const bridgePath of [
     `${bridgePath.join('/')} must delegate to the shared renderer`,
   );
 }
+assert.match(
+  readApp('src', 'platform', 'web', 'bridge.js'),
+  /function renderMarkdown\(text\) \{ return pinvouSharedweb\(\)\.renderMarkdown\(text\); \}/u,
+  'src/platform/web/bridge.js must forward renderMarkdown to the shared cluster',
+);
 assert.match(
   readApp('src', 'features', 'conversation', 'ConversationTimeline.jsx'),
   /import \{ renderMarkdown \} from '\.\.\/\.\.\/shared\/markdown-renderer\.js'/u,
