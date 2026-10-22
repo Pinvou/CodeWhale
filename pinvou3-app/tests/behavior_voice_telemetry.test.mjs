@@ -28,6 +28,17 @@ test('voice telemetry terminal helper is idempotent and uses controlled categori
     Math,
   };
   vm.createContext(context);
+  // #701 T0-c 壳化适配：切片内 trackVoiceTerminal 留在 lane（F 遥测调用点），
+  // 但 rememberVoiceOperation 等已委托 helpers；沙箱按 index.html 顺序补载
+  // 共享基座并接好 lane 簇访问器。
+  vm.runInContext('this.window = this;', context);
+  vm.runInContext(fs.readFileSync(path.join(import.meta.dirname, '../src/shared/bridge-shared-helpers.js'), 'utf8'), context);
+  vm.runInContext(`this.pinvouSharedtauriVoice = () => this.__voiceCluster || (this.__voiceCluster = window.PinvouBridgeShared.create("tauriVoice", {
+    state, notify: () => {}, invoke,
+    activeVoiceInput: { get value() { return activeVoiceInput; }, set value(v) { activeVoiceInput = v; } },
+    stopMediaTracks() {}, bt: (k) => k, VOICE_DEVICE_REQUEST_TIMEOUT_MS: 8000, finishVoiceInput() {},
+    voiceOperations: { get value() { return voiceOperations; } },
+  }));`, context);
   vm.runInContext(`${voice.slice(start, end)}\nthis.api = { trackVoiceTerminal, abandonCompletedVoiceResult, voiceTelemetryErrorCategory, rememberVoiceOperation };`, context);
 
   const session = { operationId: 'voiceop_123456789012', telemetrySessionId: 'session_123456789012' };

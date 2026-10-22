@@ -9,7 +9,7 @@
 
 let pinvouSharedtauriMainCache = null;
 function pinvouSharedtauriMain() {
-  if (!pinvouSharedtauriMainCache) pinvouSharedtauriMainCache = window.PinvouBridgeShared.create("tauriMain", { state, BT_TABLE, PINVOU_SCENE_EVENTS_STORAGE_PREFIX, invoke, startThinking, recordAuthoritySyncDiagnostic, getBuffer, runSyncOnSession, notify, scheduledRunSessionOwners, sessionStates });
+  if (!pinvouSharedtauriMainCache) pinvouSharedtauriMainCache = window.PinvouBridgeShared.create("tauriMain", { state, BT_TABLE, PINVOU_SCENE_EVENTS_STORAGE_PREFIX, invoke, startThinking, recordAuthoritySyncDiagnostic, getBuffer, runSyncOnSession, notify, addChatItem, reportSidecarReadFailure, extractArtifactPaths, scheduledRunSessionOwners, sessionStates, isDeliverable, personaPlaceholderTitles });
   return pinvouSharedtauriMainCache;
 }
 
@@ -140,11 +140,13 @@ function pinvouSharedtauriMain() {
   // 最末级 fallback 必须自带 escapeHtml：共享脚本未加载时 renderMarkdown 仍会被
   // dangerouslySetInnerHTML 消费，原文返回即 fail-open。escapeHtml 作为安全原语保留在本文件
   // （不依赖任何外部脚本），仅 marked.parse+sanitize 这段较重的兜底被抽到共享文件。
+
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, function (c) {
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
     });
   }
+
   function renderMarkdown(text) {
     if (window.PinvouMarkdownRenderer && typeof window.PinvouMarkdownRenderer.renderMarkdown === "function") {
       return window.PinvouMarkdownRenderer.renderMarkdown(text);
@@ -154,6 +156,7 @@ function pinvouSharedtauriMain() {
     }
     return escapeHtml(text || "");
   }
+
 
 
   // The pet is a separate WebView and must not own a second copy of the main
@@ -820,6 +823,7 @@ function authoritySyncBufferSnapshot(sid, buf) { return pinvouSharedtauriMain().
     var m = lang === "en" ? BT_TABLE.en : lang === "ja" ? BT_TABLE.ja : BT_TABLE.zh;
     return m[key] !== undefined ? m[key] : BT_TABLE.zh[key];
   }
+
   // 转交徽标从已持久化的消息正文恢复；消息沿用发送时的界面语言，
   // 因此回放必须同时匹配三语，而不能只匹配当前语言。
 function textMatchesBtKey(text, key) { return pinvouSharedtauriMain().textMatchesBtKey(text, key); }
@@ -879,6 +883,17 @@ function isDefaultChatTitle(title) { return pinvouSharedtauriMain().isDefaultCha
 function pinvouSceneStorageKey(sid) { return pinvouSharedtauriMain().pinvouSceneStorageKey(sid); }
 function normalizePinvouSceneEvents(events) { return pinvouSharedtauriMain().normalizePinvouSceneEvents(events); }
 function loadPinvouSceneEventsForSession(sid) { return pinvouSharedtauriMain().loadPinvouSceneEventsForSession(sid); }
+  // A missing sidecar is a normal empty result (the backend returns []); only
+  // unreadable/malformed/schema-invalid durable data reaches the catch. Scene tags
+  // are decorative metadata, so a bad sidecar must not make the session unopenable —
+  // but it must not be silent either, or a durable-data defect looks like "no tags".
+  // Report it, then degrade to the local migration cache.
+  // The same holds for the one-time localStorage→backend migration write: the session
+  // switch path awaits this function bare, so letting a write error escape would abort
+  // the switch over decorative metadata.
+  function reportSidecarReadFailure(kind, sid, error) {
+    console.warn(`[sidecar] ${kind} read failed for session ${sid}; falling back to the local cache`, error);
+  }
 
   async function syncPinvouSceneEventsForSession(sid) {
     var cached = loadPinvouSceneEventsForSession(sid);
@@ -1037,6 +1052,9 @@ function pinvouSceneForMessagePos(pos) { return pinvouSharedtauriMain().pinvouSc
     isDefaultChatTitle: isDefaultChatTitle,
     notify: function () { return notify.apply(null, arguments); },
     runSyncOnSession: function () { return runSyncOnSession.apply(null, arguments); },
+    // 壳化（#701 T0-c）：chat 域 sendMessageToSession 委托 helpers 后，共享实现
+    // 需要触碰 LRU 时钟；惰性转发（sessionsFeature 在其后安装）。
+    touchSessionBuffer: function () { return touchSessionBuffer.apply(null, arguments); },
     startThinking: function () { return startThinking.apply(null, arguments); },
     stopThinking: function () { return stopThinking.apply(null, arguments); },
     ensureSessionBufferLoaded: function () { return ensureSessionBufferLoaded.apply(null, arguments); },
@@ -1187,6 +1205,7 @@ function pinvouSceneForMessagePos(pos) { return pinvouSharedtauriMain().pinvouSc
     bt: bt, userMessageDisplayText: userMessageDisplayText,
     loadPinvouSceneEventsForSession: loadPinvouSceneEventsForSession,
     syncPinvouSceneEventsForSession: syncPinvouSceneEventsForSession,
+    reportSidecarReadFailure: reportSidecarReadFailure,
     loadSteeredMessagesForSession: loadSteeredMessagesForSession,
     syncSteeredMessagesForSession: syncSteeredMessagesForSession,
     loadMemoryOverview: function () { return loadMemoryOverview.apply(null, arguments); },
@@ -1352,10 +1371,12 @@ function markRemoteTurn(sid, buf, preserveCommittedRevision, cause) { return pin
     runSyncOnSession(sid, fn);
     if (isBg && !(options && options.deferBackgroundNotify)) notify();
   }
+
 function isScheduledRunSession(sid) { return pinvouSharedtauriMain().isScheduledRunSession(sid); }
 
   // Transcript persistence is authoritative in Rust. The UI only persists the
   // presentation-side artifact index and derives the optional auto-title.
+
   async function persistMessagesFor(sid) {
     if (!sid) return;
     if (isScheduledRunSession(sid)) return;
@@ -1406,6 +1427,7 @@ function isScheduledRunSession(sid) { return pinvouSharedtauriMain().isScheduled
       }
     } catch (e) { console.warn("persist failed", e); }
   }
+
 
 function planCardHydrationKey(item) { return pinvouSharedtauriMain().planCardHydrationKey(item); }
 
@@ -1533,16 +1555,7 @@ function planCardHydrationKey(item) { return pinvouSharedtauriMain().planCardHyd
               if (!resolvedPlanTickets[key]) resolvedPlanTickets[key] = [];
               resolvedPlanTickets[key].push(String(item.planId));
             });
-            var liveChatItems = rawLiveChatItems.filter(function (item) {
-              if (!item || item.type === "user") return false;
-              if (item.type === "assistant") return item.interruptedDisplayOnly === true;
-              if (item.turnErrorNotice && !item.legacyConversationOnly) return false;
-              // 后台 Shell 在 chat:done 后仍继续运行；持久化 transcript 只有工具结果文本，
-              // 没有 taskId/background/liveOutput，权威重载时必须保留实时卡片并按 toolId 合并。
-              if (item.type === "tool") return item.background === true && item.state === "running";
-              if (item.type === "plan_card") return false;
-              return true;
-            });
+            var liveChatItems = rawLiveChatItems.filter(function (item) { return pinvouSharedtauriMain().liveChatItemKeptForHydration(item); });
             state.messages = saved.messages;
             state.artifacts = filterSessionArtifacts(
               mergeHydratedArtifacts(saved.artifacts, state.artifacts),
@@ -1630,47 +1643,9 @@ function planCardHydrationKey(item) { return pinvouSharedtauriMain().planCardHyd
 
   // ── Pub/Sub ──────────────────────────────────────────────────────
   var subscribers = [];
-  const STATE_SLICE_FIELDS = {
-    platform: ["appVersion", "backendOnline", "platformCapabilities"],
-    sessions: ["sessions", "archivedSessions", "activeSessionId", "sessionBusy", "draftEpoch", "draftWorkspacePath"],
-    chat: ["activeSkill", "artifacts", "artifactChange", "attachments", "busy", "chatItems", "composerDraft", "composerPrefill", "messages", "modeState", "planSnapshot", "queued", "remoteProxyDraftError", "thinking", "tokens", "turnDirtyArtifacts", "turnPresentedArtifacts", "turnTimeline"],
-    voice: ["voiceInput", "voiceAsrSetup"],
-    knowledge: ["kbModelSetup", "mountedCollection", "mountedCollections", "mountedRemoteCollections", "mountedCollectionsRevision"],
-    scheduled: ["scheduledRunContext", "scheduledTaskAutoOpenId", "scheduledTaskBusyAction", "scheduledTaskCreationSessionId", "scheduledTaskDetail", "scheduledTaskError", "scheduledTaskErrorKind", "scheduledTaskLoading", "scheduledTaskPendingGuide", "scheduledTaskRecentRuns", "scheduledTaskRuns", "scheduledTasks", "scheduledTaskSelectionGeneration", "selectedScheduledTaskId"],
-    monitor: ["monitor", "monitorError"],
-    settings: ["settings", "selectedPet", "behaviorTelemetry"],
-    models: ["activeModelId", "currentSessionModelId", "effectiveModelConfig", "savedModels"],
-    llmapi: ["llmApiModels", "llmApiStatus"],
-    vllm: [],
-    interaction: ["pinvouModal", "pinvouReviews", "pinvouSummoning", "superPermEnabled"],
-    computerUse: ["computerUse"],
-    personas: ["activePersona", "personaEvents", "personaPool"],
-    memory: ["memory"],
-    remoteControl: ["webAccess"],
-    // Windows 双端远程控制（DEV-20）：与 Web 分享完全独立的状态域。
-    desktopRemoteControl: [
-      "controlledDevice",
-      "controlledSession",
-      "controllerConnection",
-      "remoteCapabilities",
-      "remoteModels",
-      "remoteProxyHistories",
-      "remoteProxyHistory",
-      "remoteProxyNotice",
-      "controlledTasks",
-      "controlledTranscript",
-      "remotePermissions",
-    ],
-    updater: ["updateCancelling", "updateCheckError", "updateChecking", "updateDownloading", "updateError", "updateInfo", "updateProgress", "updateReady"],
-    dependencies: ["deps", "depsChecking", "depsInstallError", "depsInstallProgress", "depsInstalling"],
-    teamRelay: ["teamRelay"],
-    // Registered by the projects feature (bridge/projects.js). Must stay in
-    // sync with APP_BRIDGE_STATE_DOMAINS in main.jsx — locked by
-    // tests/bridge_state_domains.test.mjs. projectsAssignmentDegradedAt is
-    // #484's degraded create-channel notice stamp (round-36 P2b): the
-    // projects feature writes it, so the declared domain must carry it.
-    projects: ["projectsList", "projectsAssignmentDegradedAt"],
-  };
+  // FE14 wave 5：切片字段注册表统一在 shared/bridge-shared-helpers.js（两 lane 一份）；
+  // 与 main.jsx 的 APP_BRIDGE_STATE_DOMAINS 的同步由 tests/bridge_state_domains.test.mjs 锁定。
+  const STATE_SLICE_FIELDS = window.PinvouBridgeShared.STATE_SLICE_FIELDS;
   function snapshotStateSlice(domain) {
     var fields = STATE_SLICE_FIELDS[domain];
     if (!fields) throw new Error("Unknown Tauri bridge state slice: " + domain);
@@ -1762,6 +1737,7 @@ function copySubscriptionStateObject(source) { return pinvouSharedtauriMain().co
       ancestors.delete(value);
     }
   }
+
   // Slice caches are invalidated by the single publication revision: #727
   // replaced per-domain precise publication with one host-snapshot publish
   // per notify, so every domain advances together.
@@ -1945,6 +1921,7 @@ function parseCarefulBlocked(text) { return pinvouSharedtauriMain().parseCareful
   // 子智能体完成交接同理：结果必须留在父模型上下文，但不能冒充用户消息上屏。
   // 原始 blocks 必须保留给模型续聊；展示层只隐藏该内部消息，避免伪装成用户气泡/新 Turn。
   // 定时会话还会过滤送模 envelope，只投影真实任务正文。
+
   function userMessageDisplayText(blocks, hideInternalEnvelope) {
     var textParts = (Array.isArray(blocks) ? blocks : [])
       .filter(function (block) { return block && block.type === "text"; })
@@ -1964,6 +1941,7 @@ function parseCarefulBlocked(text) { return pinvouSharedtauriMain().parseCareful
     }).join("");
   }
 
+
   // ── Rerender from messages (session restore) ─────────────────────
   // opts.keepLiveToolMeta: passed when hydrating a live session
   // (hydrateLiveSession) — the buffer's toolMeta may hold entries for
@@ -1971,6 +1949,12 @@ function parseCarefulBlocked(text) { return pinvouSharedtauriMain().parseCareful
   // leave the later chat:tool_end without its meta (stuck selection
   // card / degraded artifact card).
   // eslint-disable-next-line sonarjs/cognitive-complexity -- legacy bridge; refactor tracked separately
+  // ── Rerender from messages (session restore) ─────────────────────
+  // opts.keepLiveToolMeta: passed when hydrating a live session
+  // (hydrateLiveSession) — the buffer's toolMeta may hold entries for
+  // in-flight tools (tool_use not yet in messages), and clearing it would
+  // leave the later chat:tool_end without its meta (stuck selection
+  // card / degraded artifact card).
   function rerenderFromMessages(opts) {let pinvouSharedtauriMainN99856Cache = null;
 function pinvouSharedtauriMainN99856() {
   if (!pinvouSharedtauriMainN99856Cache) pinvouSharedtauriMainN99856Cache = window.PinvouBridgeShared.create("tauriMain:99856", { pe, addChatItem, bt });
@@ -1978,279 +1962,75 @@ function pinvouSharedtauriMainN99856() {
 }
 
 
-    state.chatItems = [];
-    itemIdSeq = 0;
-    // Replay rebuilds toolMeta only for historical tool_uses that still have a
-    // matching tool_result to backfill (write/patch's large args otherwise
-    // duplicate the whole transcript inside the 32-entry all-session LRU).
-    // Durable replay clears first (when not live hydrating), reclaiming only
-    // orphan entries left by interrupted turns (the live event path itself
-    // stays insert/delete balanced); entries are deleted again right after
-    // their tool_result backfill lookup — nothing reads them afterwards.
-    if (!(opts && opts.keepLiveToolMeta)) toolMeta = {};
     // 卡牌事件按 pos 插回原位(pos=事件发生时的 messages 数)。让重载历史不割裂。
     const pe = Array.isArray(state.personaEvents) ? state.personaEvents : [];
 function emitPersonaAt(atOrAfter, isTail) { return pinvouSharedtauriMainN99856().emitPersonaAt(atOrAfter, isTail); }
-    // 预扫 tool_result：tool_use 在 assistant 消息、result 在后续 user 消息，需提前建映射
-    // 才能在还原选择卡/方案卡时拿到结果（选项/快照）。
-    var resultById = {};
-    for (var ri = 0; ri < state.messages.length; ri++) {
-      var rc = state.messages[ri].content;
-      if (!Array.isArray(rc)) continue;
-      for (var rj = 0; rj < rc.length; rj++) {
-        if (rc[rj].type === "tool_result") {
-          resultById[rc[rj].tool_use_id] = { content: rc[rj].content, is_error: !!rc[rj].is_error };
+    // 重放主体在 shared/bridge-shared-helpers.js 的 rerenderFromMessagesCore；
+    // 以下为 desktop lane 的差异 hooks（steer 标记 / toolMeta 重建-清理策略 /
+    // careful_blocked 卡形状 / 未决工具卡终态 sweep）。
+    return pinvouSharedtauriMain().rerenderFromMessagesCore({
+      itemIdSeq: { get value() { return itemIdSeq; }, set value(v) { itemIdSeq = v; } },
+      toolMeta: { get value() { return toolMeta; }, set value(v) { toolMeta = v; } },
+      emitPersonaAt,
+      userMessageDisplayText,
+      updateToolItem,
+      PLAN_TOOLS,
+      renderMarkdown,
+      // A mid-turn steer injection is no admission (no timing record):
+      // the conversation projection must not let it consume a lifecycle
+      // record (phantom "interrupted"). New sessions mark it via the
+      // steered-messages sidecar (pos + text verified); the envelope
+      // check stays as the fallback for pre-alignment persisted sessions.
+      markSteered: function (uitem2, mi, utext, blocks) {
+        if (isSteeredMessagePos(mi, utext) || (Array.isArray(blocks) ? blocks : []).some(function (b) {
+          const t = String(b && b.type === "text" ? b.text : "").trim();
+          return (t.indexOf("<turn_meta>") === 0 && t.endsWith("</turn_meta>")) || t === "<turn_meta_unchanged />";
+        })) uitem2.steeredMidTurn = true;
+      },
+      carefulBlockedItem: function (c, tm, blockedMd) {
+        return { type: "careful_blocked", args: tm.args, metadata: blockedMd, time: "" };
+      },
+      // Delete after backfill: the meta serves exactly this one
+      // tool_result restoration (a late duplicate tool_end exits early
+      // via toolCallAlreadyFinished); leftovers would keep historical
+      // args resident in the session buffer.
+      afterToolResultBackfill: function (toolUseId) { delete toolMeta[toolUseId]; },
+      // Rebuild meta only for historical tool_use entries that still
+      // have a tool_result pending backfill (the backfill loop above
+      // deletes them right after consuming); leftovers from interrupted
+      // turns with no result have no consumer and are no longer inserted.
+      // live hydration exception (keepLiveToolMeta): the tool_end event
+      // of an in-flight tool still needs the meta.
+      rebuildToolMeta: function (b, resultById, coreOpts) {
+        if (resultById[b.id] || (coreOpts && coreOpts.keepLiveToolMeta)) {
+          toolMeta[b.id] = { name: b.name, args: b.input };
         }
-      }
-    }
-    // 预扫:每个产物最后一次被 write/append/edit 改的 tool_use id → rerender 只在最后一次
-    // 续一张成品卡(与实时 chat:done 的一张对齐,不刷一堆)。
-    var lastDirtyArtifactId = {};
-    var writtenArtifacts = {}; // write/append 写过的 path=产物;没 present 时兜底补首卡
-    var presentedArtifacts = {}; // 整篇 present_artifact 过的 path → 别再兜底补首卡(present 会出卡,否则重复)
-    var presentedArtifactNames = {}; // path 可能一边相对一边绝对,basename 去重防重复卡
-    for (var di = 0; di < state.messages.length; di++) {
-      var dc = state.messages[di].content;
-      if (!Array.isArray(dc)) continue;
-      for (var dj = 0; dj < dc.length; dj++) {
-        var db = dc[dj];
-        var dbMutation = db.type === "tool_use" && fileMutationAction(db.name, db.input);
-        if (dbMutation) {
-          extractArtifactPaths(db.input).forEach(function (dap) {
-            lastDirtyArtifactId[dap] = db.id;
-            // 与实时 tool_end 同一门控:tmp/ 中间文件、非成品扩展名不记账,
-            // 否则实时不进面板的文件切 session 重放后反而兜底冒出成品卡。
-            if (dbMutation !== "edit" && isDeliverable(dap)) writtenArtifacts[dap] = true;
-          });
-        } else if (db.type === "tool_use" && isPresentArtifactTool(db.name)) {
-          var pap = extractArtifactPath(db.input);
-          var pres = resultById[db.id];
-          var pp = presentArtifactAbsPath(pres && pres.content, pap);
-          if (pp) {
-            presentedArtifacts[pp] = true;
-            presentedArtifactNames[basename(pp)] = true;
-          }
-        } else if (db.type === "tool_use" && shouldUseToolOutputAsArtifact(db.name)) {
-          var gres = resultById[db.id];
-          if (!(gres && gres.is_error)) {
-            var gp = artifactPathFromToolOutput(gres && gres.content);
-            if (gp && isDeliverable(gp)) {
-              lastDirtyArtifactId[gp] = db.id;
-              writtenArtifacts[gp] = true;
-            }
-          }
-        }
-      }
-    }
-    for (var mi = 0; mi < state.messages.length; mi++) {
-      emitPersonaAt(mi, false); // 该消息之前发生的卡牌事件先插
-      var m = state.messages[mi];
-      var blocks = Array.isArray(m.content) ? m.content : [];
-      if (m.role === "user") {
-        // Always strip exact internal envelopes: sessions saved before the
-        // persistence alignment still carry the engine-baked <turn_meta>
-        // block on mid-turn steered messages, and without the filter the
-        // hydrated bubble rendered the raw envelope after a restart.
-        var utext = userMessageDisplayText(blocks, true);
-        if (utext) {
-          // pinvouTransfer 是展示层标记、不在 messages → rerender 从转交固定措辞还原品/悟样式
-          var uitem2 = { type: "user", text: utext, time: "", messageIndex: mi };
-          // A mid-turn steer injection is no admission (no timing record):
-          // the conversation projection must not let it consume a lifecycle
-          // record (phantom "interrupted"). New sessions mark it via the
-          // steered-messages sidecar (pos + text verified); the envelope
-          // check stays as the fallback for pre-alignment persisted sessions.
-          if (isSteeredMessagePos(mi, utext) || (Array.isArray(blocks) ? blocks : []).some(function (b) {
-            var t = String(b && b.type === "text" ? b.text : "").trim();
-            return (t.indexOf("<turn_meta>") === 0 && t.endsWith("</turn_meta>")) || t === "<turn_meta_unchanged />";
-          })) uitem2.steeredMidTurn = true;
-          var scene = pinvouSceneForMessagePos(mi);
-          if (scene) uitem2.pinvouScene = scene;
-          if (textMatchesBtKey(utext, "reviewFillHeader")) uitem2.pinvouTransfer = "悟";
-          else if (textMatchesBtKey(utext, "reviewFixHeader") || textMatchesBtKey(utext, "reviewAdoptHeader") || textMatchesBtKey(utext, "reviewAskHeader")) uitem2.pinvouTransfer = "品";
-          addChatItem(uitem2);
-        }
-        // tool_result（只回填普通工具卡；选择卡/方案卡的结果已在 tool_use 处还原）
-        for (var ci = 0; ci < blocks.length; ci++) {
-          var c = blocks[ci];
-          if (c.type !== "tool_result") continue;
-          var tm = toolMeta[c.tool_use_id];
-          if (tm) {
-            // careful hook 拦截 → 还原 🛑 红卡(实时由 tool_end metadata 插,重载从文本反解)
-            var blockedMd = parseCarefulBlocked(toolResultText(c.content));
-            if (blockedMd) {
-              updateToolItem(c.tool_use_id, toolResultDisplayContent(c.content), false); // 被拦=失败态,与实时一致
-              addChatItem({ type: "careful_blocked", args: tm.args, metadata: blockedMd, time: "" });
-            } else {
-              // load_skill 同样脱敏：重载历史时也不还原 SKILL.md 全文，展开只见占位。
-              var contentForCard = (tm.name === "load_skill")
-                ? bt("skillContentHidden")
-                : toolResultDisplayContent(c.content);
-              updateToolItem(c.tool_use_id, contentForCard, !c.is_error);
-            }
-          }
-          // Delete after backfill: the meta serves exactly this one
-          // tool_result restoration (a late duplicate tool_end exits early
-          // via toolCallAlreadyFinished); leftovers would keep historical
-          // args resident in the session buffer.
-          delete toolMeta[c.tool_use_id];
-        }
-        continue;
-      }
-      if (m.role !== "assistant") continue;
-      var textBuf = "";
-      var planSnap = null, todosSnap = null, sawPlanTool = false;
-      for (var bi = 0; bi < blocks.length; bi++) {
-        var b = blocks[bi];
-        if (b.type === "text") {
-          textBuf += b.text;
-        } else if (b.type === "thinking") {
-          if (textBuf) {
-            addChatItem({ type: "assistant", text: textBuf, html: renderMarkdown(textBuf), time: "", streaming: false });
-            textBuf = "";
-          }
-          var reasoningText = String(b.thinking || b.text || "");
-          if (reasoningText) {
-            addChatItem({
-              type: "reasoning", text: reasoningText, time: "", streaming: false,
-              startedAt: null, completedAt: null,
-            });
-          }
-        } else if (b.type === "tool_use") {
-          if (textBuf) {
-            addChatItem({ type: "assistant", text: textBuf, html: renderMarkdown(textBuf), time: "", streaming: false });
-            textBuf = "";
-          }
-          // Rebuild meta only for historical tool_use entries that still
-          // have a tool_result pending backfill (the backfill loop above
-          // deletes them right after consuming); leftovers from interrupted
-          // turns with no result have no consumer and are no longer inserted.
-          // live hydration exception (keepLiveToolMeta): the tool_end event
-          // of an in-flight tool still needs the meta.
-          if (resultById[b.id] || (opts && opts.keepLiveToolMeta)) {
-            toolMeta[b.id] = { name: b.name, args: b.input };
-          }
-          // request_user_input → 还原只读选择卡（问题来自 input，选项高亮来自 result）
-          if (b.name === "request_user_input") {
-            var qs = (b.input && b.input.questions) || [];
-            if (Array.isArray(qs) && qs.length) {
-              var res = resultById[b.id];
-              // 快照可能落在 turn 进行中（底座每次落盘）：tool_use 尚无对应
-              // tool_result，不能按历史恢复为 submitted。跳过，等
-              // chat:user_input_required 事件渲染可交互的 active 卡。
-              if (!res) continue;
-              addChatItem({
-                type: "user_input", toolCallId: b.id, questions: qs,
-                resolved: true, cardState: res.is_error ? "cancelled" : "submitted",
-                restoredAnswers: parseUserAnswers(res.content, qs), time: "",
-              });
-            }
-            continue;
-          }
-          // present_artifact → 还原成品卡(切会话不丢)。仅当工具成功时还原:
-          // 失败的调用回退成普通工具卡(下方 default addChatItem)。
-          if (isPresentArtifactTool(b.name)) {
-            var pares = resultById[b.id];
-            if (!(pares && pares.is_error)) {
-              var rpp = presentArtifactAbsPath(pares && pares.content, b.input && b.input.path);
-              var restoredCard = {
-                type: "artifact_card",
-                path: rpp,
-                title: (b.input && b.input.title) || "",
-                description: (b.input && b.input.description) || "",
-                time: "",
-                sessionId: state.activeSessionId,
-              };
-              if (!updatePresentedArtifact(restoredCard)) addChatItem(restoredCard);
-              continue;
-            }
-          }
-          // update_plan / checklist_write / todo_write → 收集快照，本条消息末尾还原方案卡
-          if (PLAN_TOOLS.has(b.name)) {
-            var snap = parsePlanSnapshot(resultById[b.id] && resultById[b.id].content);
-            if (snap) {
-              if (b.name === "update_plan") planSnap = snap; else todosSnap = snap;
-            }
-            sawPlanTool = true;
-            continue;
-          }
-          addChatItem({ type: "tool", toolId: b.id, name: b.name, args: b.input, output: null, success: null, state: "pending" });
-          if (shouldUseToolOutputAsArtifact(b.name)) {
-            var gres2 = resultById[b.id];
-            var gap = artifactPathFromToolOutput(gres2 && gres2.content);
-            if (!(gres2 && gres2.is_error) && gap && isDeliverable(gap) && lastDirtyArtifactId[gap] === b.id && !presentedArtifacts[gap] && !presentedArtifactNames[basename(gap)]) {
-              var gprev = findPresentedArtifact(gap);
-              if (gprev) {
-                var gcard = {
-                  type: "artifact_card", path: gprev.path, title: gprev.title,
-                  description: gprev.description, time: "", sessionId: state.activeSessionId,
-                };
-                if (!updatePresentedArtifact(gcard)) addChatItem(gcard);
-              } else if (writtenArtifacts[gap]) {
-                addChatItem({ type: "artifact_card", path: gap, title: basename(gap), description: "", time: "", sessionId: state.activeSessionId });
-              }
-            }
-          }
-          // 还原"自动续卡":File.write/File.edit 改的文件之前 present 过 → 续一张
-          // 成品卡(与实时 tool_end 的自动续逻辑对齐,切会话不丢)。present 的卡按
-          // 顺序在前(必须先 present 才进集合),此处 findPresentedArtifact 能命中。
-          if (fileMutationAction(b.name, b.input)) {
-            var wres = resultById[b.id];
-            extractArtifactPaths(b.input).forEach(function (wap) {
-              // 去重:同产物只在最后一次修改处补一张卡(与实时对齐)。
-              if ((wres && wres.is_error) || lastDirtyArtifactId[wap] !== b.id) return;
-              var wprev = findPresentedArtifact(wap);
-              if (wprev) {
-                var wcard = {
-                  type: "artifact_card", path: wprev.path, title: wprev.title,
-                  description: wprev.description, time: "", sessionId: state.activeSessionId,
-                };
-                if (!updatePresentedArtifact(wcard)) addChatItem(wcard);
-              } else if (writtenArtifacts[wap] && !presentedArtifacts[wap] && !presentedArtifactNames[basename(wap)]) {
-                // AI 写了产物但全程没 present_artifact → 兜底补首卡(与实时 chat:done 对齐)
-                addChatItem({ type: "artifact_card", path: wap, title: basename(wap), description: "", time: "", sessionId: state.activeSessionId });
-              }
-            });
+      },
+      // Replay-time terminal ratchet (parity with the codex native lane): a
+      // tool_use that never got a matching tool_result in the persisted
+      // transcript is an interrupted in-flight call — it can never complete
+      // after reload, so settle it as failed instead of leaving an eternal
+      // "running" card (a live spawn row would then pulse forever through the
+      // swarm aggregation). Skipped while the session is mid-turn: pending
+      // cards then belong to the live turn and are settled by its own events;
+      // background shells keep running across turns and are excluded; so are
+      // synthetic shell-snapshot cards ("shell-task:" ids never pair with a
+      // tool_use id, and their job may still be running — the terminal poll
+      // settles them itself from the snapshot).
+      sweepUnsettledTools: function (resultById) {
+        if (!state.busy) {
+          for (const item of state.chatItems) {
+            const unsettled = item && item.type === "tool" && item.toolId && item.background !== true
+              && item.shellSnapshot !== true
+              && (item.state === "pending" || item.state === "running") && !resultById[item.toolId];
+            if (!unsettled) continue;
+            item.success = false;
+            item.state = "failed";
           }
         }
-      }
-      if (textBuf) {
-        addChatItem({ type: "assistant", text: textBuf, html: renderMarkdown(textBuf), time: "", streaming: false });
-      }
-      // 本条 assistant 消息用过 plan 工具 → 还原一张只读历史方案卡
-      if (sawPlanTool && (planSnap || todosSnap)) {
-        var snaps = { plan: planSnap, todos: todosSnap };
-        addChatItem({
-          type: "plan_card", plan: planSnap, todos: todosSnap,
-          planMarkdown: composePlanMarkdown(snaps),
-          cardState: "frozen", resolved: true, statusLabel: bt("planHistorical"), time: "",
-        });
-      }
-    }
-    // Replay-time terminal ratchet (parity with the codex native lane): a
-    // tool_use that never got a matching tool_result in the persisted
-    // transcript is an interrupted in-flight call — it can never complete
-    // after reload, so settle it as failed instead of leaving an eternal
-    // "running" card (a live spawn row would then pulse forever through the
-    // swarm aggregation). Skipped while the session is mid-turn: pending
-    // cards then belong to the live turn and are settled by its own events;
-    // background shells keep running across turns and are excluded; so are
-    // synthetic shell-snapshot cards ("shell-task:" ids never pair with a
-    // tool_use id, and their job may still be running — the terminal poll
-    // settles them itself from the snapshot).
-    if (!state.busy) {
-      for (const item of state.chatItems) {
-        const unsettled = item && item.type === "tool" && item.toolId && item.background !== true
-          && item.shellSnapshot !== true
-          && (item.state === "pending" || item.state === "running") && !resultById[item.toolId];
-        if (!unsettled) continue;
-        item.success = false;
-        item.state = "failed";
-      }
-    }
-    emitPersonaAt(state.messages.length, true); // 最后一条消息之后发生的卡牌事件(末尾加持/卸下)
+      },
+    }, opts);
   }
-
   var terminalFeature = installBridgeFeature("terminal", { state: state, notify: notify, invoke: invoke, bt: bt, runSyncOnSession: runSyncOnSession, addChatItem: addChatItem });
   var updateToolItem = terminalFeature.updateToolItem;
   var isShellExecutionTool = terminalFeature.isShellExecutionTool;
@@ -2308,6 +2088,8 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
     toolCallAlreadyFinished: toolCallAlreadyFinished,
     hasChatItemForTool: hasChatItemForTool,
     flushPendingTextBlock: flushPendingTextBlock,
+    // 壳化（#701 T0-c）：chat-events 域流式通知簇委托 helpers 后的共享依赖。
+    autoCreateScheduledTaskDraft: function () { return autoCreateScheduledTaskDraft.apply(null, arguments); },
     flushAssistantMessageToHistory: flushAssistantMessageToHistory,
     resetPendingAssistant: resetPendingAssistant, flushQueued: flushQueued,
     isBusyFor: isBusyFor, doSendFor: doSendFor,
@@ -2402,7 +2184,6 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
   var saveSearchSettingsAndRestart = settingsFeature.saveSearchSettingsAndRestart;
   var submitFeedback = settingsFeature.submitFeedback;
   var discoverLocalVllm = settingsFeature.discoverLocalVllm;
-  var getEffectiveModelConfig = settingsFeature.getEffectiveModelConfig;
   var loadModels = settingsFeature.loadModels;
   var saveModel = settingsFeature.saveModel;
   var revealModelApiKey = settingsFeature.revealModelApiKey;
@@ -2454,7 +2235,6 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
   var syncModeState = interactionFeature.syncModeState;
   var patchItemById = interactionFeature.patchItemById;
   var pushUserEcho = interactionFeature.pushUserEcho;
-  var markResolved = interactionFeature.markResolved;
   var runOnSession = interactionFeature.runOnSession;
   var addSystemItemFor = interactionFeature.addSystemItemFor;
   var patchItemByIdFor = interactionFeature.patchItemByIdFor;
@@ -2477,16 +2257,13 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
   var submitUserInput = interactionFeature.submitUserInput;
   var cancelUserInput = interactionFeature.cancelUserInput;
   var editLastTurn = interactionFeature.editLastTurn;
-  var compactNow = interactionFeature.compactNow;
 
-  var memoryFeature = installBridgeFeature("memory", { state: state, notify: notify, invoke: invoke, bt: bt, addSystemItem: addSystemItem, runSyncOnSession: runSyncOnSession, patchItemById: patchItemById, patchItemByIdFor: patchItemByIdFor, runOnSession: runOnSession, addChatItem: addChatItem, timeStr: timeStr });
+  var memoryFeature = installBridgeFeature("memory", { state: state, notify: notify, invoke: invoke, bt: bt, addSystemItem: addSystemItem, runSyncOnSession: runSyncOnSession, patchItemById: patchItemById, patchItemByIdFor: patchItemByIdFor, runOnSession: runOnSession, addChatItem: addChatItem, timeStr: timeStr , get itemIdSeq() { return itemIdSeq; }, set itemIdSeq(value) { itemIdSeq = value; } });
   var handleMemoryWrite = memoryFeature.handleMemoryWrite;
   var loadMemoryOverview = memoryFeature.loadMemoryOverview;
   var saveMemoryProfilePatch = memoryFeature.saveMemoryProfilePatch;
-  var deleteMemoryPreference = memoryFeature.deleteMemoryPreference;
   var updateMemoryItem = memoryFeature.updateMemoryItem;
   var deleteMemoryItem = memoryFeature.deleteMemoryItem;
-  var archiveRecentWorkMemory = memoryFeature.archiveRecentWorkMemory;
   var confirmMemoryCandidate = memoryFeature.confirmMemoryCandidate;
   var ignoreMemoryCandidate = memoryFeature.ignoreMemoryCandidate;
   var neverMemoryCandidate = memoryFeature.neverMemoryCandidate;
@@ -2519,7 +2296,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
   var resolveConversationAttachment = artifactsFeature.resolveConversationAttachment;
   var openConversationAttachment = artifactsFeature.openConversationAttachment;
   var revealConversationAttachment = artifactsFeature.revealConversationAttachment;
-  var personasFeature = installBridgeFeature("personas", { state: state, sessionStates: sessionStates, notify: notify, invoke: invoke, listen: listen, bt: bt, isDefaultChatTitle: isDefaultChatTitle, addSystemItem: addSystemItem, addChatItem: addChatItem, timeStr: timeStr, ensureSession: ensureSession, runOnSession: runOnSession, personaPlaceholderTitles: personaPlaceholderTitles });
+  var personasFeature = installBridgeFeature("personas", { state: state, sessionStates: sessionStates, notify: notify, invoke: invoke, listen: listen, bt: bt, isDefaultChatTitle: isDefaultChatTitle, addSystemItem: addSystemItem, addChatItem: addChatItem, timeStr: timeStr, ensureSession: ensureSession, runOnSession: runOnSession, personaPlaceholderTitles: personaPlaceholderTitles , get itemIdSeq() { return itemIdSeq; }, set itemIdSeq(value) { itemIdSeq = value; } });
   var loadPersonas = personasFeature.loadPersonas;
   var getPersonas = personasFeature.getPersonas;
   var createPersona = personasFeature.createPersona;
@@ -2837,7 +2614,6 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       ensure: auxChatFeature.ensure,
       send: auxChatFeature.send,
       snapshot: auxChatFeature.snapshot,
-      discard: auxChatFeature.discard,
       reset: auxChatFeature.reset,
     },
     voice: {
@@ -2969,7 +2745,6 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       discoverLocalVllm: discoverLocalVllm,
     },
     models: {
-      getEffectiveModelConfig: getEffectiveModelConfig,
       loadModels: loadModels,
       saveModel: saveModel,
       revealModelApiKey: revealModelApiKey,
@@ -3009,7 +2784,6 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
     dismissPinvouReview: dismissPinvouReview,
     // 编辑/压缩
     editLastTurn: editLastTurn,
-      compactNow: compactNow,
     },
     rendering: { renderMarkdown: renderMarkdown },
     remoteControl: {
@@ -3094,13 +2868,11 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       openConversationAttachment: openConversationAttachment,
       revealConversationAttachment: revealConversationAttachment,
     },
-    resolutions: { markResolved: markResolved },
     multiAgent: {
       listSubagentTranscripts: listMultiAgentSubagents,
       readSubagentTranscript: readMultiAgentSubagent,
     },
     computerUse: {
-      getStatus: computerUseFeature.getStatus,
       refreshStatus: computerUseFeature.refreshStatus,
       grant: computerUseFeature.grant,
       revoke: computerUseFeature.revoke,
@@ -3133,10 +2905,8 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
     memory: {
       loadMemoryOverview: loadMemoryOverview,
       saveMemoryProfilePatch: saveMemoryProfilePatch,
-      deleteMemoryPreference: deleteMemoryPreference,
       updateMemoryItem: updateMemoryItem,
       deleteMemoryItem: deleteMemoryItem,
-      archiveRecentWorkMemory: archiveRecentWorkMemory,
       confirmMemoryCandidate: confirmMemoryCandidate,
       ignoreMemoryCandidate: ignoreMemoryCandidate,
       neverMemoryCandidate: neverMemoryCandidate,

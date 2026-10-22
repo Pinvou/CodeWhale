@@ -8,7 +8,7 @@
   const registry = root.__PINVOU_TAURI_BRIDGE_FEATURES__ = root.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
   registry["artifacts"] = function (context) {let pinvouSharedtauriArtifactsCache = null;
 function pinvouSharedtauriArtifacts() {
-  if (!pinvouSharedtauriArtifactsCache) pinvouSharedtauriArtifactsCache = window.PinvouBridgeShared.create("tauriArtifacts", { invoke, addSystemItem, bt, state, sessionStates, isDeliverable, basename, dialogOpen, addAttachmentByPath });
+  if (!pinvouSharedtauriArtifactsCache) pinvouSharedtauriArtifactsCache = window.PinvouBridgeShared.create("tauriArtifacts", { invoke, addSystemItem, bt, state, sessionStates, isDeliverable, basename, artifactInfo, dialogOpen, addAttachmentByPath });
   return pinvouSharedtauriArtifactsCache;
 }
 
@@ -104,6 +104,11 @@ function sessionTitleById(sid) { return pinvouSharedtauriArtifacts().sessionTitl
 function currentMemoryArtifacts() { return pinvouSharedtauriArtifacts().currentMemoryArtifacts(); }
   // 跨会话产出物索引:磁盘 session JSON 为主,再合并当前内存工作集。
   // 新产物在 chat:done/save_session_artifacts 前也能立刻出现在「产出物」一级入口。
+  // 官方 lane 分异（不做 helpers 壳化）：上游共享核走 list_deliverable_index_v2 协商并
+  // 返回 {rows,skipped}，而官方已把 v2 命令随 stamp-cache 后端一并推迟
+  //（src-tauri/src/app/commands/protocol_tests.rs），且官方 KnowledgeView 仍消费
+  // legacy 数组契约 —— 此处保持 pre-壳化 的官方 legacy 形态，v2 交付物栈
+  //（命令+视图+skipped 披露）待官方采纳后随 T4 reconcile 一并壳化。
   async function listDeliverableIndex() {
     var disk = await invoke("list_deliverable_index").catch(function () { return []; });
     var byPath = {};

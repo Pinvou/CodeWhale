@@ -871,6 +871,9 @@ assert.equal('errorCode' in uncodedState.chatItems[0].userError, false, 'no code
 const terminalSandbox = { window: {}, Date };
 vm.runInNewContext(modelServiceErrorsSource, terminalSandbox, { filename: 'model-service-errors.js' });
 vm.runInNewContext(bridgeMessagesSource, terminalSandbox, { filename: 'bridge-messages.js' });
+// T0-b: turn-terminal.js now forwards to the shared builder, so the helpers
+// payload must be resident in this sandbox too (upstream harness parity).
+vm.runInNewContext(read('src', 'shared', 'bridge-shared-helpers.js'), terminalSandbox, { filename: 'shared/bridge-shared-helpers.js' });
 vm.runInNewContext(webTurnTerminalSource, terminalSandbox, { filename: 'turn-terminal.js' });
 const timelineState = {
   activeTurnTimelineId: 'turn-1',
@@ -1013,8 +1016,14 @@ assert.match(
 );
 assert.match(chatEventsSource, /turnErrorNotice && item\.text === notice/);
 assert.match(chatEventsSource, /addSystemItem\(notice, \{ turnErrorNotice: true \}\)/);
+// T0-b: the live-hydration filter moved into the shared payload; pin the lane
+// delegation plus the shared predicate body instead of the old inline copy.
 assert.match(
   desktopBridgeSource,
+  /return pinvouSharedtauriMain\(\)\.liveChatItemKeptForHydration\(item\)/,
+);
+assert.match(
+  read('src', 'shared', 'bridge-shared-helpers.js'),
   /if \(item\.turnErrorNotice && !item\.legacyConversationOnly\) return false/,
 );
 // Swarm rework: the projection input first goes through the spawn aggregation
@@ -1056,8 +1065,14 @@ assert.match(
 assert.match(chatEventsSource, /sweepUnpairedToolMeta\(\);/);
 
 assert.match(webBridgeSource, /turnErrorNotice && item\.text === notice/);
+// T0-b: the live-hydration filter moved into the shared payload; pin the lane
+// delegation plus the shared predicate body instead of the old inline copy.
 assert.match(
   webBridgeSource,
+  /return pinvouSharedweb\(\)\.liveChatItemKeptForHydration\(item\)/,
+);
+assert.match(
+  read('src', 'shared', 'bridge-shared-helpers.js'),
   /if \(item\.turnErrorNotice && !item\.legacyConversationOnly\) return false/,
 );
 assert.match(

@@ -21,11 +21,14 @@ const css = readFileSync(
   'utf8',
 );
 
-assert.match(bridgeImplementation, /async function sendMessageToSession\(sessionId, text, meta\)/);
-assert.match(bridgeImplementation, /await ensureSessionBufferLoaded\(sid\)/);
-assert.match(bridgeImplementation, /if \(isBusyFor\(sid\)\)/);
-assert.match(bridgeImplementation, /runSyncOnSession\(sid/);
-assert.match(bridgeImplementation, /doSendFor\(sid, content, content, \[\]/);
+// #701 T0-c 壳化：sendMessageToSession 委托 helpers；lane 钉委托壳，本体钉共享基座。
+assert.match(bridgeImplementation, /async function sendMessageToSession\(sessionId, text, meta\) \{ return pinvouSharedtauriChat\(\)\.sendMessageToSession\(sessionId, text, meta\); \}/);
+const sharedHelpersSource = readFileSync(path.join(here, '..', 'src', 'shared', 'bridge-shared-helpers.js'), 'utf8');
+assert.match(sharedHelpersSource, /async function sendMessageToSession\(sessionId, text, meta\)/);
+assert.match(sharedHelpersSource, /await ensureSessionBufferLoaded\(sid\)/);
+assert.match(sharedHelpersSource, /isBusyFor\(sid\)/);
+assert.match(sharedHelpersSource, /runSyncOnSession\(sid/);
+assert.match(sharedHelpersSource, /doSendFor\(sid, content, content, \[\]/);
 assert.match(bridge, /sendMessageToSession:\s*sendMessageToSession/);
 assert.match(main, /listen\(['"]pet:reply_pending['"]/);
 assert.match(main, /invoke\(['"]take_pet_reply['"]\)/);
