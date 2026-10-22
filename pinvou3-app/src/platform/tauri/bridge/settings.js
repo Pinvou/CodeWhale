@@ -123,9 +123,11 @@ function pinvouSharedtauriSettings() {
   // 这里同步进内存副本，保证设置界面立即反映专用命令返回的桌宠状态。
   listen("pet:enabled_changed", function (e) {
     if (state.settings) {
-      state.settings.pet = Object.assign({}, state.settings.pet || {}, {
-        enabled: !!(e.payload && e.payload.enabled),
-      });
+      window.PinvouBridgeShared.publishSettings(state, Object.assign({}, state.settings, {
+        pet: Object.assign({}, state.settings.pet || {}, {
+          enabled: !!(e.payload && e.payload.enabled),
+        }),
+      }));
       notify();
     }
   });
@@ -210,7 +212,8 @@ function pinvouSharedtauriSettings() {
   async function saveSettings(patch) {
     return enqueueSettingsWrite(async function () {
       try {
-        state.settings = await invoke("update_settings", { patch: patch });
+        const settings = await invoke("update_settings", { patch: patch });
+        window.PinvouBridgeShared.publishSettings(state, settings);
         await loadEffectiveModelConfig();
         notify();
         return true;
@@ -234,7 +237,8 @@ function pinvouSharedtauriSettings() {
   async function saveSearchSettings(search) {
     return enqueueSettingsWrite(async function () {
       try {
-        state.settings = await invoke("update_search_settings", { search: search });
+        const settings = await invoke("update_search_settings", { search: search });
+        window.PinvouBridgeShared.publishSettings(state, settings);
         await loadEffectiveModelConfig();
         notify();
         return true;
@@ -652,7 +656,7 @@ function pinvouSharedtauriSettings() {
       if (typeof result.accelerator === "string" && result.accelerator) {
         mirror.global_shortcut_accelerator = result.accelerator;
       }
-      state.settings = Object.assign({}, state.settings, mirror);
+      window.PinvouBridgeShared.publishSettings(state, Object.assign({}, state.settings, mirror));
       notify();
     }
     return result;

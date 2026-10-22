@@ -244,8 +244,9 @@ const expectedProtocolHashes = {
   // the set_global_shortcut_config invoke (the dedicated command owns both
   // the plugin registration and the prefs persistence; update_settings
   // stays untouched).
-  // Mainline shared settings plus guarded cleanup and models:changed refresh.
-  settings: '0c6d39efb7e74a0e3837d6ea4af972c4dab67d979d3ad8f6782e4879e863e64d',
+  // The pet listener now publishes through the shared settings read guard;
+  // invoke payloads and event names are unchanged (the digest includes its body).
+  settings: '9f953948ce711230c2b0151851134acbd294c9315b7e6f5964bdb4258158bcd8',
   updater: 'e5d3ffaed0548bca3a40ee4c8138a59f9a2add9474477d924d4ecd7b8efd73e6',
   // Official's bridge/voice.js is untouched by this backflow, so the hash
   // stays at the Official base value (the community value differs only via

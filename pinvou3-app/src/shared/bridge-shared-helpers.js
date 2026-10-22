@@ -121,6 +121,20 @@
     };
   }
 
+  // All clusters sharing this state also share settings read ordering. A
+  // successful write or event publication invalidates older reads without
+  // making user writes wait for a slow background get_settings request.
+  const settingsReadTokens = new WeakMap();
+  function beginSettingsRead(state) {
+    const token = {};
+    settingsReadTokens.set(state, token);
+    return () => settingsReadTokens.get(state) === token;
+  }
+  function publishSettings(state, settings) {
+    settingsReadTokens.set(state, {});
+    state.settings = settings;
+  }
+
   // 共享基础工厂：所有 cluster 的函数体只在这里定义一次。
   // deps 解构 = 各 cluster 依赖名的并集（去掉与函数声明同名的名字）。
   function sharedBridgeBase(deps) {
@@ -2311,8 +2325,11 @@
 
   // web+tauriSettings 共享
   async function loadSettings() {
+    const isCurrent = beginSettingsRead(state);
     try {
-      state.settings = await invoke("get_settings");
+      const settings = await invoke("get_settings");
+      if (!isCurrent()) return;
+      publishSettings(state, settings);
       // The computer_use master switch is persisted via the dedicated command through
       // prefs (not the update_settings patch); at cold start with no session yet, the
       // persisted value lands first (a session-less computer_use_get_status read fills
@@ -2328,9 +2345,10 @@
         state.computerUse = Object.assign({}, state.computerUse, { enabled: persistedEnabled });
       }
     } catch {
+      if (!isCurrent()) return;
       // Backend unreachable = nothing to judge; fall back to following the
       // system for the color scheme (color_scheme: system).
-      state.settings = { theme: "genesis", color_scheme: "system", language: "zh-Hans" };
+      publishSettings(state, { theme: "genesis", color_scheme: "system", language: "zh-Hans" });
     }
     notify();
   }
@@ -5675,6 +5693,7 @@
     // FE14 wave 5：双 lane 共享的桥接状态切片字段注册表（见上方注释）。
     STATE_SLICE_FIELDS,
     beginModelRead,
+    publishSettings,
     // F-FE13-2：assistant_done 时间线记录构建器（无 deps，静态共享）。
     buildAssistantDoneTimelineRecord,
   });

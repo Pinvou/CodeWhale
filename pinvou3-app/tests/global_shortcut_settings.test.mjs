@@ -251,6 +251,7 @@ function createShortcutBridgeHarness({ respond }) {
   const state = { settings: { global_shortcut_enabled: false, global_shortcut_accelerator: 'control+alt+KeyP' } };
   const invoked = [];
   const context = vm.createContext({ window: {}, console });
+  vm.runInContext(source('shared/bridge-shared-helpers.js'), context, { filename: 'shared/bridge-shared-helpers.js' });
   vm.runInContext(bridgeSettingsSource, context, { filename: 'bridge/settings.js' });
   const feature = context.window.__PINVOU_TAURI_BRIDGE_FEATURES__.settings({
     state,

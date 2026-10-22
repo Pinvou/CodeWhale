@@ -439,7 +439,8 @@ pub struct SavedModel {
     /// Incoming explicit store-link intent; stale card endpoints must be rejected.
     #[serde(default, skip_serializing)]
     pub model_store_link_requested: bool,
-    /// Incoming editor intent only: untouched route fields use the latest store route.
+    /// Incoming editor intent only: untouched endpoint and protocol fields use
+    /// the latest persisted route and store association.
     #[serde(default, skip_serializing)]
     pub preserve_model_store_route: bool,
     /// Incoming editor intent only: the context-window field was not edited,
@@ -575,6 +576,22 @@ impl SavedModel {
             || self.preset == ModelPreset::OpenaiCompatible
             || self.provider_kind.as_deref() == Some("custom"))
             && self.provider_kind.as_deref() != Some("coding_plan")
+    }
+
+    /// Compare the fields that jointly select an endpoint and wire protocol.
+    /// Normalize metadata as persistence does, so an omitted legacy provider
+    /// kind and its inferred value do not detach an otherwise unchanged route.
+    pub fn has_same_endpoint_route(&self, other: &Self) -> bool {
+        let mut left = self.clone();
+        let mut right = other.clone();
+        left.normalize_provider_metadata();
+        right.normalize_provider_metadata();
+        left.preset == right.preset
+            && left.provider_kind == right.provider_kind
+            && left.vendor == right.vendor
+            && left.endpoint_mode == right.endpoint_mode
+            && left.model == right.model
+            && left.base_url == right.base_url
     }
 
     fn normalize_alias(&mut self) {
