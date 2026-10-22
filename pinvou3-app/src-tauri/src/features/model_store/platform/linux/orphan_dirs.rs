@@ -95,10 +95,8 @@ pub(super) fn is_in_flight_kind(kind: &str) -> bool {
     IN_FLIGHT_KINDS.contains(&kind)
 }
 
-/// 一次运行回执的最小读取：只要 card_id/kind/outcome 三个字段。完整格式
-/// （SavedRun）的 owner 在 service.rs；这里读它只为分辨「任务还没结束」，
-/// 读不出来就当不存在——最坏后果是少排除一个目录（漏报），不是误删。
-fn non_terminal_install_cards(out: &mut HashSet<String>) {
+/// 未终结的安装类回执的卡片集合（card_id -> kind）。
+fn non_terminal_install_cards(out: &mut std::collections::HashMap<String, String>) {
     let runs_dir = config::data_dir().join("runs");
     let Ok(entries) = std::fs::read_dir(&runs_dir) else {
         return;
@@ -117,7 +115,7 @@ fn non_terminal_install_cards(out: &mut HashSet<String>) {
         let kind = value.get("kind").and_then(Value::as_str).unwrap_or("");
         if is_in_flight_kind(kind) && value.get("outcome").is_some_and(Value::is_null) {
             if let Some(card) = value.get("card_id").and_then(Value::as_str) {
-                out.insert(card.to_string());
+                out.insert(card.to_string(), kind.to_string());
             }
         }
     }
@@ -191,17 +189,28 @@ fn blocked_dirs(service: Option<&super::service::ModelStoreService>) -> Result<B
         }
     }
 
-    // 进行中任务的卡片集合。
-    let mut cards: HashSet<String> = HashSet::new();
+    // 进行中任务的卡片集合（card_id -> kind）。version_stage 的写入点不走
+    // 卡片名/HF 仓库名启发，单独推导。
+    let mut cards: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     if let Some(service) = service {
         for run in service.active_installs() {
-            cards.insert(run.card_id);
+            cards.insert(run.card_id, run.kind.to_string());
         }
     }
     non_terminal_install_cards(&mut cards);
 
-    for card in &cards {
-        match card_weight_dirs(card, &models_dir) {
+    for (card, kind) in &cards {
+        let dirs = if kind == "version_stage" {
+            // 版本暂存写进 models_dir/.versions/<card>/<revision>。按名字/仓库
+            // 启发推导只会遮住一个可能无关的一级目录；它的真实目标在这里精确
+            // 排除（.versions 本身另有点开头规则兜底）。
+            config::safe_path_component(card)
+                .ok()
+                .map(|safe| vec![models_dir.join(".versions").join(safe)])
+        } else {
+            card_weight_dirs(card, &models_dir)
+        };
+        match dirs {
             Some(dirs) => {
                 for dir in dirs {
                     blocked.insert(&models_dir, dir);
@@ -377,6 +386,7 @@ pub(super) fn remove(
 
 #[cfg(test)]
 mod tests {
+    use super::super::service::ModelStoreService;
     use super::*;
 
     /// 测试用的回执落盘：走 private_write 保持 0600/属主等信任属性，
@@ -637,28 +647,34 @@ mod tests {
         assert!(error.contains("owned"), "实际错误：{error}");
     }
 
-    /// 进行中的版本暂存（version_stage）同样把权重写进 .versions：它的回执
-    /// 必须纳入目标排除与进程核查的输入（kind 白名单），删除则被某道闸拦下。
+    /// 进行中的版本暂存（version_stage）：目标目录 .versions/<card> 被精确
+    /// 排除（.versions 整体另有点开头规则兜底），而**无关**残留目录的删除
+    /// 不受牵连——排除的目的是防误删，不是把整个商店锁死。
     #[test]
-    fn in_flight_version_stage_receipt_gates_removal() {
+    fn in_flight_version_stage_excludes_its_target_but_not_unrelated_orphans() {
         let _home = config::TempHome::new();
         db::init_db().unwrap();
+        let models = config::load_settings().models_path();
         let (orphan, _owned) = seed_models_dir();
         write_receipt(
             "staging",
             &json!({"card_id":"versioned-card","kind":"version_stage","created_at":"2026-10-22T00:00:00Z","outcome":null,"cancelled":false,"lines":[]}),
         );
-        // kind 白名单必须覆盖 version_stage：回执进入进程核查与目标排除。
+        // kind 白名单必须覆盖 version_stage：回执进入目标排除与进程核查。
         assert_eq!(non_terminal_install_run_ids(), vec!["staging".to_string()]);
-        let mut cards = HashSet::new();
+        let mut cards = std::collections::HashMap::new();
         non_terminal_install_cards(&mut cards);
-        assert!(cards.contains("versioned-card"), "卡片必须进入排除推导");
-        // 此处未终结的 version_stage 卡片推导不出目标目录，删除被 unresolved
-        // 闸拦下；有物化卡片时则由进程核查拦——无论哪道闸，都不能放行。
-        assert!(
-            remove(None, &orphan.to_string_lossy()).is_err(),
-            "进行中的版本任务期间不允许删除残留"
+        assert_eq!(
+            cards.get("versioned-card").map(String::as_str),
+            Some("version_stage")
         );
+        // 暂存目标精确进禁删集合（它自身的删除先被点开头规则拦下）。
+        let staging_dir = models.join(".versions").join("versioned-card");
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        assert!(blocked_dirs(None).unwrap().contains(&staging_dir));
+        // 无关残留不牵连：版本任务进行中照样可以删别的残留。
+        remove(None, &orphan.to_string_lossy()).unwrap();
+        assert!(!orphan.exists(), "无关残留应可正常删除");
     }
 
     /// models_dir 本身含符号链接分量时的祖先拦截：库记录/legacy 路径是
@@ -718,5 +734,48 @@ mod tests {
             .unwrap();
         assert!(error.contains("owned"), "实际错误：{error}");
         assert!(link.join("outer").exists(), "有主目录必须原样保留");
+    }
+
+    /// 回执落盘到 RunGuard 登记之间存在窗口，那一刻「正在写权重」的唯一守卫
+    /// 是内存注册表（active_installs）：这条路径必须能独立驱动到，不能只在
+    /// 回执路径上有测试。
+    #[test]
+    fn active_registry_blocks_its_target_without_any_receipt() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        let (orphan, _owned) = seed_models_dir();
+        // 卡片物化了，但盘上没有任何回执：排除依据只剩注册表。
+        let card_id = "qwen-half";
+        let card_dir = config::data_dir().join("cards").join(card_id);
+        std::fs::create_dir_all(&card_dir).unwrap();
+        std::fs::write(
+            card_dir.join("card.json"),
+            r#"{"name":"Qwen","quantization":"NVFP4","source_repo_id":"Qwen/Half-Downloaded-Model"}"#,
+        )
+        .unwrap();
+        let service = ModelStoreService::new();
+        service
+            .active_registry_for_tests()
+            .try_begin(
+                card_id,
+                super::super::run_state::OP_DOWNLOAD,
+                Some("run-registry"),
+            )
+            .unwrap();
+
+        let report = scan(Some(&service)).unwrap();
+        let orphan_text = orphan.to_string_lossy().into_owned();
+        assert!(
+            report["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|entry| entry["path"] != orphan_text),
+            "注册表在跑的下载目标不该被列出：{report:?}"
+        );
+        assert!(
+            remove(Some(&service), &orphan.to_string_lossy()).is_err(),
+            "注册表在跑的下载期间不允许删除残留"
+        );
     }
 }

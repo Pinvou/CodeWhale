@@ -103,10 +103,15 @@ function OrphansSection({ copy, onToast }) {
       const freed = await removeOrphan(target.path);
       setRemoveTarget(null);
       onToast?.(copy.orphansDeleted(formatBytes(freed?.freedBytes ?? 0)));
-      // 删完重扫一次：列表要反映删除后的世界，不能再让用户对着幽灵条目。
-      setResult(await scanOrphans());
+      // 删完重扫一次：列表要反映删除后的世界。重扫失败就把列表整个收回
+      // 未扫描态——攥着删除前的快照，用户会对着幽灵条目再点一次删除。
+      try {
+        setResult(await scanOrphans());
+      } catch {
+        setResult(null);
+      }
     } catch (failure) {
-      setRequestError(describeOrphanError(copy, failure));
+      setRequestError(describe(failure));
     } finally {
       setRemoving(false);
     }

@@ -643,6 +643,14 @@ impl ModelStoreService {
             .collect()
     }
 
+    /// 测试专用：往活跃登记表里塞一条进行中的安装（orphan_dirs 的注册表
+    /// 排除路径需要它——回执落盘到 RunGuard 登记之间的窗口，注册表是唯一
+    /// 守卫，这条路径必须有测试能驱动到）。
+    #[cfg(test)]
+    pub(super) fn active_registry_for_tests(&self) -> &super::run_state::ActiveCardOps {
+        &self.active
+    }
+
     /// Operator escape for a lost receiver record. The accept gate serializes
     /// this tombstone with late requests using the same id. No running operation
     /// or orphan writer may exist; corrupt receipts never count as absence.
