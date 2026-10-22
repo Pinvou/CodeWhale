@@ -510,11 +510,15 @@ pub(super) fn save_model_inner(
                         && ((!explicit_store_link_requested
                             && same_route
                             && previous == Some(*card))
-                            || crate::features::model_store::matches_current_model_route(
-                                card,
-                                &model.base_url,
-                                &model.model,
-                            ))
+                            // Returning the old card id is not explicit re-link
+                            // intent. A full-object client may edit only protocol
+                            // metadata while the card still serves this URL/model.
+                            || ((explicit_store_link_requested || previous != Some(*card))
+                                && crate::features::model_store::matches_current_model_route(
+                                    card,
+                                    &model.base_url,
+                                    &model.model,
+                                )))
                 })
                 .map(str::to_owned);
             // A card may stop or enter its update window after the client read
