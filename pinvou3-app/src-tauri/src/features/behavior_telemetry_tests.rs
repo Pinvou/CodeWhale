@@ -935,7 +935,7 @@ async fn diagnostic_report_gone_renews_credentials_or_honors_authoritative_delet
         } else {
             assert_eq!(requests.len(), 3);
             assert!(requests[1].starts_with("POST /v1/register "));
-            assert!(requests[2].starts_with("POST /collection/start "));
+            assert!(requests[2].starts_with("POST /behavior/collection/start "));
             assert_eq!(state.device_id.as_deref(), Some("renewed_device"));
             assert!(telemetry.collecting.load(Ordering::Acquire));
             assert!(state.credential_renewal_checkpoint.is_none());
