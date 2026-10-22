@@ -22,6 +22,42 @@ import (
 //go:embed testdata/legacy016_alternate.up.sql
 var alternate016FixtureSQL string
 
+func TestBillingUpStaticValidationPrecedesDatabase(t *testing.T) {
+	loaded, err := migrations.Load("../../migrations/billing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"changed-body", "changed-checksum", "changed-name", "missing-016"} {
+		t.Run(kind, func(t *testing.T) {
+			input := append([]migrations.Migration(nil), loaded...)
+			for i := range input {
+				if input[i].Version != 16 {
+					continue
+				}
+				switch kind {
+				case "changed-body":
+					input[i].UpSQL += "\nSELECT 1;"
+				case "changed-checksum":
+					input[i].Checksum = strings.Repeat("a", 64)
+				case "changed-name":
+					input[i].Name = "unrelated"
+				case "missing-016":
+					input = append(input[:i], input[i+1:]...)
+				}
+				break
+			}
+			// Invalid deliveries must be rejected before even reading a database.
+			err := Up(context.Background(), nil, input)
+			if err == nil || !strings.Contains(err.Error(), "016") {
+				t.Fatalf("invalid016 delivery did not fail statically: %v", err)
+			}
+			if kind == "missing-016" && !errors.Is(err, ErrPublishedEntitlementMigrationRequired) {
+				t.Fatalf("missing016 admission error changed: %v", err)
+			}
+		})
+	}
+}
+
 func TestLegacyEntitlementAdmissionIdentity(t *testing.T) {
 	loaded, err := migrations.Load("../../migrations/billing")
 	if err != nil {

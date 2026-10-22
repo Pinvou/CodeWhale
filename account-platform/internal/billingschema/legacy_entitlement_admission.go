@@ -32,13 +32,13 @@ var ErrPublishedEntitlementMigrationRequired = errors.New("billing deliveries af
 // paired here; the generic migrator's acquisition retains its existing caller
 // Unlock contract. Only the exact <=015 foundation can omit016; a later
 // delivery must not evade admission by accidentally omitting the016 resource.
-func withLegacyEntitlementAdmission(ctx context.Context, connection *pgx.Conn, input []migrations.Migration, apply func() error) (err error) {
+func validateLegacyEntitlementDelivery(input []migrations.Migration) (bool, error) {
 	contains016, laterDelivery := false, false
 	for _, m := range input {
 		if m.Version == 16 {
 			contains016 = true
 			if m.Name != "entitlement_components" || m.Checksum != originalComponentMigrationChecksum || sqlChecksum(m.UpSQL) != originalComponentMigrationChecksum || sqlChecksum(originalComponentMigrationSQL) != originalComponentMigrationChecksum {
-				return errors.New("billing entitlement admission requires the exact published migration 016")
+				return false, errors.New("billing entitlement admission requires the exact published migration 016")
 			}
 			continue
 		}
@@ -53,10 +53,18 @@ func withLegacyEntitlementAdmission(ctx context.Context, connection *pgx.Conn, i
 		}
 		laterDelivery = true
 	}
+	if !contains016 && laterDelivery {
+		return false, ErrPublishedEntitlementMigrationRequired
+	}
+	return contains016, nil
+}
+
+func withLegacyEntitlementAdmission(ctx context.Context, connection *pgx.Conn, input []migrations.Migration, apply func() error) (err error) {
+	contains016, err := validateLegacyEntitlementDelivery(input)
+	if err != nil {
+		return err
+	}
 	if !contains016 {
-		if laterDelivery {
-			return ErrPublishedEntitlementMigrationRequired
-		}
 		return apply()
 	}
 	if _, err = connection.Exec(ctx, `SELECT pg_advisory_lock(hashtext('pinvou_account_platform_migrations'))`); err != nil {

@@ -222,11 +222,14 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 }
 
 func Up(ctx context.Context, connection *pgx.Conn, input []migrations.Migration) error {
-	if _, err := knownOriginalWalletReceiptHistory(ctx, connection); err != nil {
-		return err
-	}
 	ordered, err := Ordered(input)
 	if err != nil {
+		return err
+	}
+	if _, err := validateLegacyEntitlementDelivery(ordered); err != nil {
+		return err
+	}
+	if _, err := knownOriginalWalletReceiptHistory(ctx, connection); err != nil {
 		return err
 	}
 	return withLegacyEntitlementAdmission(ctx, connection, ordered, func() error {
