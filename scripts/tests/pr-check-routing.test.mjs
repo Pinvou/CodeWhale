@@ -231,6 +231,34 @@ test("container CI uses immutable official cache images without losing either bu
   }
 });
 
+test("each independently changed Account Platform translation input triggers its release gate", () => {
+  const paths = filterPaths(workflow, "account_platform");
+  // These are independent single-file changes, not a combined PR whose other
+  // account-platform/** changes could conceal a missing UI/catalog route.
+  const inputs = [
+    "pinvou3-app/src/features/account-platform/AccountPlatformPopover.jsx",
+    "pinvou3-app/src/features/account-platform/AccountPlatformView.jsx",
+    "pinvou3-app/src/features/account-platform/AdminPlatformView.jsx",
+    "pinvou3-app/src/app/account-main.jsx",
+    "pinvou3-app/src/app/admin-main.jsx",
+    "pinvou3-app/src/app/portal-session-handoff-main.js",
+    "pinvou3-app/src/portal-session-handoff.html",
+    "pinvou3-app/src/shared/account-platform-i18n.js",
+    "pinvou3-app/src/shared/admin-platform-i18n.js",
+    "pinvou3-app/src/shared/supported-locales.js",
+    "pinvou3-app/src/shared/i18n.js",
+  ];
+  for (const input of inputs) {
+    assert.ok(paths.some(pattern => pattern === input ||
+      (pattern.endsWith("/**") && input.startsWith(pattern.slice(0, -2)))),
+    `a sole change to ${input} must trigger Account Platform contracts`);
+  }
+  const contracts = JSON.parse(readFileSync(new URL("../../account-platform/package.json", import.meta.url), "utf8"));
+  assert.equal(contracts.scripts["test:contracts"], "node --test test/contract/*.test.mjs");
+  const releaseGate = readFileSync(new URL("../../account-platform/test/contract/i18n-release-gate.test.mjs", import.meta.url), "utf8");
+  assert.match(releaseGate, /check-account-platform-i18n\.mjs/);
+});
+
 test("Account Platform changes cannot bypass the Go gate at any PR or queue stage", () => {
   const paths = filterPaths(workflow, "account_platform");
   for (const path of ["scripts/check-account-platform-authorization-coverage.mjs", "scripts/tests/account-platform-authorization-coverage.test.mjs", "scripts/tests/test_postgres_backup.py", "scripts/tests/test_postgres_backup_job.py", "scripts/tests/test_user_realm.py"]) {

@@ -222,10 +222,22 @@ test('actual current Helm preserves original Keycloak management health and isol
   const f = currentRenderFixture('helm', 'models');
   try {
     const values = JSON.parse(readFileSync(f.recipe.valuesFile));
-    values.keycloak.enabled = true; values.keycloak.tlsSecretName = 'public-fixture-keycloak-tls';
+    values.keycloak.enabled = true; values.keycloak.realmUpgradeEnabled = true;
+    values.keycloak.tlsSecretName = 'public-fixture-keycloak-tls';
+    values.public = { ...values.public, portalUrl: 'https://portal.fixture.invalid' };
     writeFileSync(f.recipe.valuesFile, JSON.stringify(values));
     const actual = f.rerender().config;
     await t.test('actual current Keycloak enabled render', () => assert.equal(verifyRenderedKeycloak(actual).deployment_status, 'NOT_DEPLOYED'));
+    await t.test('realm upgrade Job supplies the public Portal URL required by its actual entrypoint', () => {
+      const job = actual.find(r => r.kind === 'Job' && r.metadata.name.endsWith('-keycloak-realm-upgrade'));
+      assert.ok(job, 'enabled realm upgrade Job must be rendered');
+      const container = job.spec.template.spec.containers.find(c => c.name === 'realm-upgrade');
+      assert.deepEqual(container.command, ['/opt/keycloak/bin/pinvou-provision-mobile-auth.sh']);
+      const portal = container.env.filter(entry => entry.name === 'PORTAL_PUBLIC_URL');
+      assert.deepEqual(portal, [{ name: 'PORTAL_PUBLIC_URL', value: values.public.portalUrl }]);
+      const entrypoint = readFileSync(new URL('../../deploy/keycloak/provision-mobile-auth.sh', import.meta.url), 'utf8');
+      assert.match(entrypoint, /\$\{PORTAL_PUBLIC_URL:\?/);
+    });
     for (const [name, mutate, code] of [
       ['wrong management port', c => { c.ports.find(p => p.name === 'management').containerPort = 8080; }, 'keycloak_health'],
       ['wrong startup path', c => { c.startupProbe.httpGet.path = '/health/ready'; }, 'keycloak_health'],

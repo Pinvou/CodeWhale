@@ -1,12 +1,10 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
+import { parseDocument } from 'yaml';
 
-const require = createRequire(new URL('../../pinvou3-app/package.json', import.meta.url));
-const { parseDocument } = require('yaml');
-const root = new URL('../../account-platform/deploy/production/', import.meta.url);
+const root = new URL('../../deploy/production/', import.meta.url);
 const readCompose = name => {
   const document = parseDocument(readFileSync(new URL(name, root), 'utf8'));
   assert.deepEqual(document.errors, []);
