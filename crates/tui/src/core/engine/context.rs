@@ -721,13 +721,6 @@ fn compact_task_gate_run_result_for_context(raw: &str) -> Option<ContextSummary>
     let summary = json_text(gate, "summary")
         .or_else(|| json_text(&parsed, "stderr_summary"))
         .or_else(|| json_text(&parsed, "stdout_summary"));
-    // `tasks gate_run` returns both streams even without an active durable
-    // task/log artifact. Its stderr-first gate summary does not represent a
-    // different nonempty stdout stream (or vice versa).
-    lossy |= ["stdout_summary", "stderr_summary"]
-        .iter()
-        .filter_map(|key| json_text(&parsed, key))
-        .any(|stream| Some(stream) != summary);
     let exit = json_number_text(gate, "exit_code")
         .map(|code| format!(", exit_code: {code}"))
         .unwrap_or_default();
@@ -739,6 +732,17 @@ fn compact_task_gate_run_result_for_context(raw: &str) -> Option<ContextSummary>
     ];
     if let Some(summary) = summary {
         lines.push(format!("summary: {}", keep_text(summary, 800, &mut lossy)));
+    }
+    // The stderr-first gate summary may leave a different stdout stream out,
+    // and ordinary chats have no active-task log to recover it from. Keep
+    // distinct effective streams inline; the producer's empty-stream sentinel
+    // does not warrant an artifact. Real field cuts still request recovery.
+    for key in ["stdout_summary", "stderr_summary"] {
+        if let Some(stream) = json_text(&parsed, key)
+            .filter(|stream| *stream != "(no output)" && Some(*stream) != summary)
+        {
+            lines.push(format!("{key}: {}", keep_text(stream, 800, &mut lossy)));
+        }
     }
     if let Some(log_path) = json_text(gate, "log_path") {
         lines.push(format!("log_path: {log_path}"));

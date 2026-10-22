@@ -19619,6 +19619,14 @@ fn forkguard_complete_structured_results_do_not_request_recovery() {
     let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
     let cases = [
         (
+            "tasks",
+            json!({"gate": {"summary": "stderr detail"}, "stdout_summary": "stdout detail", "stderr_summary": "stderr detail"}),
+        ),
+        (
+            "tasks",
+            json!({"gate": {"summary": "stdout detail"}, "stdout_summary": "stdout detail", "stderr_summary": "(no output)"}),
+        ),
+        (
             "agent",
             json!({"action": "roster", "members": [{"name": "reader"}]}),
         ),
