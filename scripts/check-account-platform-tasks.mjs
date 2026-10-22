@@ -7,8 +7,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const docsRoot = path.join(repositoryRoot, 'account-platform', 'docs');
-const targetPattern = /^(CORE|SCOPE|ID|ACC|TOK|BILL|PAY|UI|ADM|NFR)-(\d+)$/;
+const targetPattern = /^(REQ-ID|CORE|SCOPE|ID|ACC|TOK|BILL|PAY|UI|ADM|NFR)-(\d{2,})$/;
 const incompleteStatuses = new Set(['部分实现', '未实现', '降级实现']);
+const canonicalStatusValues = new Set([...incompleteStatuses, '已实现', '移除', '非当前范围']);
 const taskStatuses = new Set(['PENDING', 'IN_PROGRESS', 'IN_REVIEW', 'DONE', 'BLOCKED_EXTERNAL']);
 const remediationStatuses = new Set(['PENDING', 'IN_PROGRESS', 'IN_REVIEW', 'DONE']);
 const remediationPattern = /^APT-\d{3}-R\d+$/;
@@ -19,22 +20,26 @@ function unquoteCell(value) {
 }
 
 function expandTargets(field) {
+  assert.ok(field, 'target field must not be empty');
   const targets = [];
   for (const token of field.split(/,\s*/)) {
-    const range = token.match(/^([A-Z]+)-(\d+)–\1-(\d+)$/);
+    const range = token.match(/^([A-Z]+(?:-[A-Z]+)*)-(\d+)–\1-(\d+)$/);
     if (range) {
       const [, prefix, rawStart, rawEnd] = range;
       const start = Number(rawStart);
       const end = Number(rawEnd);
-      assert.ok(start <= end, `invalid target range ${token}`);
+      assert.ok(Number.isSafeInteger(start) && Number.isSafeInteger(end) && start <= end && end - start < 10_000, `invalid target range ${token}`);
       for (let value = start; value <= end; value += 1) {
-        targets.push(`${prefix}-${String(value).padStart(2, '0')}`);
+        const target = `${prefix}-${String(value).padStart(rawStart.length, '0')}`;
+        assert.match(target, targetPattern, `invalid target ${target}`);
+        targets.push(target);
       }
       continue;
     }
     assert.match(token, targetPattern, `invalid target ${token}`);
     targets.push(token);
   }
+  assert.equal(new Set(targets).size, targets.length, 'duplicate target');
   return targets;
 }
 
@@ -67,18 +72,43 @@ function expandRemediationDependencies(field) {
 }
 
 function canonicalStatuses(markdown) {
+  const boundary = markdown.search(/^## 1\./m);
+  assert.ok(boundary >= 0, 'canonical status section must end at section 1');
+  const section = markdown.slice(0, boundary);
+  assert.match(section, /\|\s*target_requirement_id\s*\|\s*当前状态\s*\|/, 'canonical status table missing');
   const statuses = new Map();
-  for (const line of markdown.slice(0, markdown.indexOf('\n## 1.')).split(/\r?\n/)) {
+  for (const line of section.split(/\r?\n/)) {
     const columns = line.split('|').map((value) => value.trim());
-    if (columns.length < 4 || !targetPattern.test(columns[1])) continue;
+    if (!/^[A-Z]+(?:-ID)?-\d+$/.test(columns[1] ?? '')) continue;
+    assert.match(columns[1], targetPattern, `invalid canonical target ${columns[1]}`);
+    assert.equal(columns.length, 8, `${columns[1]} must have all six evidence fields`);
+    assert.ok(columns.slice(1, -1).every(Boolean), `${columns[1]} has an empty evidence field`);
     assert.equal(statuses.has(columns[1]), false, `duplicate canonical status ${columns[1]}`);
+    assert.ok(canonicalStatusValues.has(columns[2]), `${columns[1]} has invalid canonical status ${columns[2]}`);
     statuses.set(columns[1], columns[2]);
   }
+  assert.ok(statuses.size > 0, 'canonical status table has no targets');
   return statuses;
 }
 
-export function validateTaskDocuments(statusMarkdown, taskMarkdown) {
+function requirementTargets(markdown) {
+  assert.equal(typeof markdown, 'string', 'requirements document is required');
+  const targets = new Set();
+  for (const line of markdown.split(/\r?\n/)) {
+    const firstColumn = line.split('|')[1]?.trim();
+    if (targetPattern.test(firstColumn ?? '')) targets.add(firstColumn);
+    for (const match of line.matchAll(/\[([A-Z]+(?:-ID)?-\d{2,})\]/g)) {
+      assert.match(match[1], targetPattern, `invalid requirement target ${match[1]}`);
+      targets.add(match[1]);
+    }
+  }
+  assert.ok(targets.size > 0, 'requirements document has no target identifiers');
+  return targets;
+}
+
+export function validateTaskDocuments(statusMarkdown, taskMarkdown, requirementsMarkdown) {
   const canonical = canonicalStatuses(statusMarkdown);
+  assert.deepEqual([...canonical.keys()].sort(), [...requirementTargets(requirementsMarkdown)].sort(), 'canonical targets must exactly cover requirements');
   const expectedIncomplete = new Set(
     [...canonical].filter(([, status]) => incompleteStatuses.has(status)).map(([target]) => target),
   );
@@ -100,7 +130,13 @@ export function validateTaskDocuments(statusMarkdown, taskMarkdown) {
 
   for (const line of taskMarkdown.split(/\r?\n/)) {
     const columns = line.split('|').map((value) => value.trim());
+    if ((columns[1] ?? '').startsWith('APT-') && !remediationPattern.test(columns[1])) {
+      assert.match(columns[1], /^APT-\d{3}$/, 'invalid task identifier');
+    }
     if (!/^APT-\d{3}$/.test(columns[1] ?? '')) continue;
+    assert.equal(columns.length, 8, `${columns[1]} must have all six task fields`);
+    assert.ok(columns.slice(1, -1).every(Boolean), `${columns[1]} has an empty task field`);
+    assert.ok(columns[5] === 'CODE' || columns[5] === 'CODE+ENV', `${columns[1]} has invalid type ${columns[5]}`);
     const taskID = columns[1];
     const taskStatus = columns[6];
     taskNumbers.push(Number(taskID.slice(4)));
@@ -119,6 +155,7 @@ export function validateTaskDocuments(statusMarkdown, taskMarkdown) {
     }
   }
 
+  assert.ok(tasks.size > 0, 'task table has no tasks');
   assert.deepEqual(taskNumbers, Array.from({ length: taskNumbers.length }, (_, index) => index + 1));
 
   for (const line of remediationMarkdown.split(/\r?\n/)) {
@@ -264,11 +301,12 @@ export function validateTaskDocuments(statusMarkdown, taskMarkdown) {
 }
 
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
-  const [statusMarkdown, taskMarkdown] = await Promise.all([
+  const [statusMarkdown, taskMarkdown, requirementsMarkdown] = await Promise.all([
     readFile(path.join(docsRoot, 'implementation-status.md'), 'utf8'),
     readFile(path.join(docsRoot, 'implementation-tasks.md'), 'utf8'),
+    readFile(path.join(docsRoot, 'requirements.md'), 'utf8'),
   ]);
-  const result = validateTaskDocuments(statusMarkdown, taskMarkdown);
+  const result = validateTaskDocuments(statusMarkdown, taskMarkdown, requirementsMarkdown);
   console.log(
     `implementation task coverage passed: ${result.taskCount} tasks and ${result.remediationCount} remediations own ${result.activeOwnerCount} incomplete targets; ${result.completedOwnerCount} completed targets retained for traceability`,
   );

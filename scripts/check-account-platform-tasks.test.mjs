@@ -1,7 +1,20 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { copyFile, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import os from 'node:os';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { validateTaskDocuments } from './check-account-platform-tasks.mjs';
+
+test('actual current requirements and remediation ownership are checked together', async () => {
+  const root = new URL('../account-platform/docs/', import.meta.url);
+  const inputs = await Promise.all(['implementation-status.md', 'implementation-tasks.md', 'requirements.md'].map(name => readFile(new URL(name, root), 'utf8')));
+  const result = validateTaskDocuments(...inputs);
+  assert.ok(result.taskCount > 0);
+  assert.ok(result.activeOwnerCount > 0);
+});
 
 const baseStatuses = new Map([
   ['ADM-60', '部分实现'],
@@ -35,9 +48,9 @@ function cloneRows(rows) {
 function buildStatusMarkdown(statuses = baseStatuses) {
   return `# implementation status
 
-| target_requirement_id | 当前状态 |
-|---|---|
-${[...statuses].map(([target, status]) => `| ${target} | ${status} |`).join('\n')}
+| target_requirement_id | 当前状态 | source_commit | tests | deployment_version | known_gaps |
+|---|---|---|---|---|---|
+${[...statuses].map(([target, status]) => `| ${target} | ${status} | FIXED | TESTED | NOT_DEPLOYED | tracked |`).join('\n')}
 
 ## 1. details
 `;
@@ -67,9 +80,78 @@ ${remediations
 `;
 }
 
-function validateFixture({ statuses = baseStatuses, tasks = baseTasks, remediations = baseRemediations } = {}) {
-  return validateTaskDocuments(buildStatusMarkdown(statuses), buildTaskMarkdown(tasks, remediations));
+function validateFixture({ statuses = baseStatuses, tasks = baseTasks, remediations = baseRemediations, requirements = [...statuses.keys()].map(target => `[${target}] required`).join('\n') } = {}) {
+  return validateTaskDocuments(buildStatusMarkdown(statuses), buildTaskMarkdown(tasks, remediations), requirements);
 }
+
+test('rejects unknown canonical status and requirements omitted from both ownership tables', () => {
+  const statuses = new Map(baseStatuses);
+  statuses.set('ADM-65', 'UNKNOWN');
+  assert.throws(() => validateFixture({ statuses }), /invalid canonical status/);
+  const requirements = [...baseStatuses.keys(), 'ACC-02'].map(target => `[${target}] required`).join('\n');
+  assert.throws(() => validateFixture({ requirements }), /canonical targets must exactly cover requirements/);
+  assert.throws(() => validateTaskDocuments(buildStatusMarkdown(), buildTaskMarkdown()), /requirements document is required/);
+});
+
+test('validates canonical evidence and retains requirement governance identifiers', () => {
+  const status = buildStatusMarkdown().replace('FIXED', '');
+  const tasks = buildTaskMarkdown();
+  const requirements = [...baseStatuses.keys()].map(target => `[${target}] required`).join('\n');
+  assert.throws(() => validateTaskDocuments(status, tasks, requirements), /empty evidence field/);
+  assert.throws(() => validateTaskDocuments(buildStatusMarkdown().replace('## 1.', '## End.'), tasks, requirements), /must end at section 1/);
+  const statuses = new Map(baseStatuses).set('REQ-ID-01', '已实现');
+  assert.equal(validateFixture({ statuses }).activeOwnerCount, 3);
+});
+
+test('rejects empty task queues and malformed identifiers while retaining CRLF input', () => {
+  const requirements = [...baseStatuses.keys()].map(target => `[${target}] required`).join('\n');
+  assert.throws(() => validateTaskDocuments(buildStatusMarkdown(), buildTaskMarkdown([], []), requirements), /task table has no tasks/);
+  const tasks = cloneRows(baseTasks);
+  tasks[3].id = 'APT-4';
+  assert.throws(() => validateFixture({ tasks }), /invalid task identifier/);
+  assert.deepEqual(validateTaskDocuments(buildStatusMarkdown().replaceAll('\n', '\r\n'), buildTaskMarkdown().replaceAll('\n', '\r\n'), requirements.replaceAll('\n', '\r\n')), validateFixture());
+});
+
+test('actual development CLI closes the profile it starts and never removes volumes', async () => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'pinvou-account-cli-test-'));
+  const scripts = path.join(temporaryRoot, 'scripts');
+  const compose = path.join(temporaryRoot, 'account-platform', 'deploy', 'compose');
+  const integration = path.join(temporaryRoot, 'account-platform', 'test', 'integration');
+  try {
+    await Promise.all([mkdir(scripts, { recursive: true }), mkdir(compose, { recursive: true }), mkdir(integration, { recursive: true })]);
+    await writeFile(path.join(compose, '.env'), '# Owned fixture; no credentials.\n');
+    const script = path.join(scripts, 'account-platform.mjs');
+    await copyFile(new URL('./account-platform.mjs', import.meta.url), script);
+    for (const helper of ['workload-credential.mjs', 'compose-test-configuration.mjs']) {
+      await copyFile(new URL(`../account-platform/test/integration/${helper}`, import.meta.url), path.join(integration, helper));
+    }
+    const capture = path.join(temporaryRoot, 'docker-argv.json');
+    const preload = path.join(scripts, 'capture-docker.mjs');
+    await writeFile(preload, `import childProcess from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+childProcess.spawnSync = (command, args, options) => {
+  if (command !== 'docker' || options.shell !== false) throw new Error('unexpected CLI boundary');
+  writeFileSync(process.env.PINVOU_CLI_CAPTURE, JSON.stringify(args));
+  return { status: 0 };
+};
+syncBuiltinESMExports();
+`);
+    for (const action of ['up', 'down']) {
+      const result = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, script, 'dev', action], {
+        encoding: 'utf8', shell: false, timeout: 10_000, windowsHide: true,
+        env: { ...process.env, PINVOU_CLI_CAPTURE: capture },
+      });
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(await readFile(capture, 'utf8')), ['compose', '--env-file', path.join(compose, '.env'), '-f', path.join(compose, 'compose.yaml'), '--profile', 'real-newapi', action, ...(action === 'up' ? ['--build', '-d', '--wait'] : [])]);
+    }
+  } finally {
+    assert.equal(path.dirname(temporaryRoot), path.resolve(os.tmpdir()));
+    assert.ok(path.basename(temporaryRoot).startsWith('pinvou-account-cli-test-'));
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
 
 test('accepts DONE history with one active remediation owner per reopened target', () => {
   assert.deepEqual(validateFixture(), {
