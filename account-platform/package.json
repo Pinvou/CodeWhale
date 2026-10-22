@@ -24,7 +24,8 @@
     "test:closure-contracts": "node --test test/contract/account-closure-saga.test.mjs test/contract/account-closure-cleanup.test.mjs",
     "security:production-readiness": "node ../scripts/account-platform-production-security-gate.mjs",
     "security:prepare-native-rotation": "node ../scripts/account-platform-production-security-gate.mjs --prepare-native-rotation",
-    "test:postgres-backup-tools": "python3 -m unittest discover -s ../scripts/tests -p \"test_postgres_backup*.py\""
+    "test:postgres-backup-tools": "python3 -m unittest discover -s ../scripts/tests -p \"test_postgres_backup*.py\"",
+    "test:user-realm-tools": "python3 -m unittest discover -s ../scripts/tests -p \"test_user_realm.py\""
   },
   "devDependencies": {
     "ajv": "8.17.1",

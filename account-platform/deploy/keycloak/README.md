@@ -32,6 +32,74 @@ The local CLI-double tests in `scripts/tests/test_personal_deployment_security.p
 exercise creation, reruns, secret transport and cleanup without connecting to
 Keycloak or using real credentials.
 
+## Offline production realm bootstrap bundle
+
+From the repository root, `python3 scripts/account-platform-user-realm.py
+--account-origin https://account.example.com` emits a secret-free JSON bundle
+containing `realm`, `user_profile` and `provisioner_roles`. It does not connect
+to Keycloak, import configuration, create users, assign administrator permissions,
+read credentials or generate client secrets. Review it and extract only its
+`realm` object for a separately authorized first import into the current pinned
+Keycloak image with the Pinvou SPI/theme installed. The wrapper itself is not a
+Keycloak realm-import document. Do not overwrite an existing realm with this
+initial configuration; use the existing controlled provisioning workflow below
+and verify its readback and real sessions.
+
+`--account-origin` is the canonical public HTTPS **Portal** origin and supplies
+only its `/auth/callback`. It does not set Keycloak `frontendUrl`. The current
+Compose `keycloak-personal.conf.template`/Helm hostname configuration and exact
+public user issuer remain authoritative, even when issuer and Portal share a
+host. Keep issuer, JWKS, Account/Token verifiers, Desktop and Portal consistent;
+this offline generator does not prove that deployment assembly.
+
+Default client IDs match the current updater: `pinvou-desktop`, `pinvou-portal`,
+`pinvou-account-provisioner`, optional `pinvou-portal-handoff` and optional
+`pinvou-credentials`. The corresponding `--desktop-client`, `--portal-client`,
+`--provisioner-client`, `--handoff-client`, `--credential-client` and
+`--account-audience` options must exactly match deployed settings. The desktop
+retains password/SMS direct grant and `offline_access`; this bundle adds no
+desktop browser callback. Ordinary online Portal keeps authorization code plus
+PKCE and its normal Keycloak session/refresh lifetime, with no `offline_access`.
+`refreshTokenMaxReuse=0` means refresh-token rotation permits zero reuse; it does
+not set Portal `refresh_expires_in` or an online session lifetime to zero.
+
+Add `--handoff` only with the existing matching runtime
+`PORTAL_SESSION_HANDOFF=true` configuration. It includes the separate confidential
+access-only token-exchange client and Desktop audience, with refresh-requested
+token exchange disabled. Add `--credential-origin` only when installing F04:
+the current credential server permits exactly `https://credentials.pinvou.com`
+or `https://credentials-uat.pinvou.com`, distinct from Portal. It receives only
+the current `basic`, `roles`, `profile` scopes, its own audience and sole
+`/oidc/callback`; ordinary Portal receives `basic`, `roles`, `profile`, `email`.
+Omitting either option does not revoke previously installed clients or tokens.
+The initial production realm also retains the original explicit identity baseline:
+`registrationEmailAsUsername=false`, `loginWithEmailAllowed=false`,
+`editUsernameAllowed=true`, `defaultSignatureAlgorithm=RS256`. These do not rely
+on Keycloak import defaults. The local development realm has a different email
+login flag and is not a production replacement; existing production realms are
+not modified by this generator. Managed profile permissions still restrict
+username edits to administrators.
+
+No credential or handoff secret is emitted: establish each through the existing
+private bootstrap and pass the matching secret files to the online updater.
+
+The generated profile is read from the same bounded literal owned by
+`provision-mobile-auth.sh`, including current identity-security/password-reset
+fences. The bundle also carries the current realm hardening/audit baseline.
+Provisioner role scope mappings are **not** real service-account role assignments:
+after installation the existing updater resolves the actual service-account UUID
+and assigns only `manage-users`, `view-users`, `query-users` on `realm-management`.
+It creates no Account platform administrator; that uses the existing separate
+secure Account bootstrap. Never import development users or reuse a workload
+realm as the user realm. The current personal edge supports user realm `pinvou`;
+a custom `--realm` requires a deployment that already supports that exact realm.
+
+`npm --prefix account-platform run test:user-realm-tools` runs offline generator,
+actual CLI and current-producer contract tests with Python 3. They do not import
+a real Keycloak realm or validate actual browser login, refresh/logout, handoff,
+SPI, issuer, secrets or administrator bootstrap. Record those separately before
+production release; no deployment or scheduling is performed by this command.
+
 ## Realm and client provisioning
 
 Import `pinvou-dev-realm.json` only for local development. It defines the

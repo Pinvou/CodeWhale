@@ -254,6 +254,7 @@ jobs:
               - 'scripts/tests/test_account_closure_postgres.py'
               - 'scripts/tests/test_postgres_backup.py'
               - 'scripts/tests/test_postgres_backup_job.py'
+              - 'scripts/tests/test_user_realm.py'
               - 'scripts/check-token-management-authorization-coverage.mjs'
               - 'scripts/tests/token-management-authorization-coverage.test.mjs'
               - 'scripts/tests/token-management-phase-coverage.test.mjs'
@@ -1148,6 +1149,15 @@ jobs:
           npm --prefix account-platform run test:postgres-backup-tools 2>&1 | tee "$RUNNER_TEMP/account-backup-tools.log"
           grep -Eq '^Ran [1-9][0-9]* tests? in ' "$RUNNER_TEMP/account-backup-tools.log"
           grep -Eq '^OK$' "$RUNNER_TEMP/account-backup-tools.log"
+
+      - name: Account Platform offline user realm contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Offline generation only; no realm import, credentials or network access.
+          npm --prefix account-platform run test:user-realm-tools 2>&1 | tee "$RUNNER_TEMP/account-user-realm.log"
+          grep -Eq '^Ran [1-9][0-9]* tests? in ' "$RUNNER_TEMP/account-user-realm.log"
+          grep -Eq '^OK$' "$RUNNER_TEMP/account-user-realm.log"
 
       - name: Account Platform Node contracts
         env:
