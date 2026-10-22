@@ -518,6 +518,9 @@ function enforceLazyChunks() {
 // 493,288 B; 496_000 keeps ~2.7 kB headroom over the larger web entry; the
 // next entry feature again needs a deliberate bump with fresh measurements.
 export const MAIN_ENTRY_BUDGET_BYTES = 496_000;
+// #484 backflow note: the upstream branch raised its own ceiling to 505_000 for
+// the picker/grouping entry weight; on this tree the raise must be re-measured
+// (desktop + web, per policy) before landing, so the current budget stands.
 
 export function assertMainEntryBudget(bundle, budgetBytes = MAIN_ENTRY_BUDGET_BYTES) {
   const mainEntry = Object.values(bundle).find(output => (
