@@ -450,8 +450,12 @@ def _module_stacks(lines):
     rustfmt puts an `fn` on its own line, which is the layout the snapshots
     assume. External `mod <name>;` declarations (children in their own
     files) are returned for the module-graph walk as (name, enclosing
-    inline-module stack) pairs — the stack decides the directory the child
-    file resolves against.
+    inline-module stack, declaration line) triples — the stack decides the
+    directory the child file resolves against, and the line is the
+    declaration's identity for the caller's wired-exclusion (round-18
+    review: excluding by name alone also dropped a cfg-mutex plain twin of
+    the wired declaration, leaving rustc's actually-loaded branch
+    unscanned).
 
     Returns (stacks, externals, clean, stripped). `clean` is False when the
     file ends with unbalanced braces/comments/strings: the simplified lexer
@@ -514,9 +518,15 @@ def _module_stacks(lines):
                     # but never emitted by rustfmt) already sit in `stack`,
                     # and the line-start tuple would resolve `x` one
                     # directory too high (round-12 review: stray files
-                    # there could alias hits into wrong paths)
+                    # there could alias hits into wrong paths). The
+                    # declaration's own line rides along as its identity:
+                    # the caller excludes a wired declaration from the
+                    # conventional probing by this line, not by name —
+                    # a cfg-mutex plain twin is a different declaration
+                    # rustc may actually load, so it keeps its probe
+                    # (round-18 review).
                     externals.append(
-                        (tok.group(1), tuple(name for name, _ in stack))
+                        (tok.group(1), tuple(name for name, _ in stack), idx)
                     )
     in_str, block_depth, raw_hashes = state
     if depth != 0 or block_depth != 0 or in_str or raw_hashes is not None:
@@ -629,7 +639,7 @@ def _path_wired_mods(stripped, lines, stacks, path, plain_file, child_dir, file_
     consumes the pending stem while a same-named `#[path]` twin clears
     it, so the recorded value is the (physical base, directory) pair
     `_record_inline_decl` compares.
-    Returns ([(mod_name, path_value, inline_module_stack)],
+    Returns ([(mod_name, path_value, inline_module_stack, decl_line)],
     {(enclosing_stack, mod_name): directory})."""
     wired = []
     inline_dirs = {}
@@ -705,7 +715,9 @@ def _path_wired_mods(stripped, lines, stacks, path, plain_file, child_dir, file_
             and tok.group(1) is not None
         ):
             if not tok.group(2) and decl[tok.end() :].strip().startswith(";"):
-                wired.append((tok.group(1), pending_value, tuple(stacks[j])))
+                wired.append(
+                    (tok.group(1), pending_value, tuple(stacks[j]), j)
+                )
                 pending_value = None
                 i = j + 1
                 continue
@@ -962,10 +974,20 @@ def _scan_graph():
         # mod.rs-like ownership tag the conventional spot must not carry
         # (round-17 review: `#[path = "shared.rs"] mod shared;` has
         # src/shared.rs sitting at BOTH spots, and the conventional
-        # enqueue won the FIFO race with the wrong ownership).
-        wired_names = {(estack, name) for name, _rel, estack in wired}
-        for name, estack in externals:
-            if (estack, name) in wired_names:
+        # enqueue won the FIFO race with the wrong ownership). The
+        # exclusion is per DECLARATION — (module name, declaration line)
+        # — not per name (round-18 review): a cfg-mutex plain twin of the
+        # wired declaration (`#[cfg(windows)] mod shared;` beside
+        # `#[cfg(unix)] #[path = "unix.rs"] mod shared;`) is a distinct
+        # declaration rustc actually loads on the other host, so its
+        # conventional file must keep its probe; the name-keyed set
+        # silenced exactly that branch and a required pin `#[ignore]`d
+        # there scanned green.
+        wired_names = {
+            (name, decl_idx) for name, _rel, _estack, decl_idx in wired
+        }
+        for name, estack, decl_idx in externals:
+            if (name, decl_idx) in wired_names:
                 continue
             mod_dir = os.path.join(
                 _inline_base(
@@ -1003,7 +1025,7 @@ def _scan_graph():
         # visits (the graph dedups by the (realpath, module path) scan
         # context, so one physical file wired under two module names is
         # scanned under each libtest path it produces).
-        for name, rel, estack in wired:
+        for name, rel, estack, _decl_idx in wired:
             if estack:
                 candidate = os.path.normpath(
                     os.path.join(

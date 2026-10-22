@@ -41,6 +41,11 @@ tree, not in one-off manual runs:
     with the pending file-stem cleared (the earlier fixture here pinned
     the stem-relative location rustc never loads — corrected in
     Round14InlineRedirectTests);
+  - round-18 review: the explicit-`#[path]` exclusion from conventional
+    probing is per declaration — (module name, declaration line) — so a
+    cfg-mutex plain twin of a wired declaration keeps its conventional
+    scan (name-keyed exclusion silenced exactly the branch rustc loads
+    on the other host, green-lighting a pin `#[ignore]`d there);
   - main()'s duplicate-#[test] detection — the guard's original purpose —
     is pinned against a mocked `cargo test --list` registry.
 
@@ -2215,6 +2220,103 @@ class Round17ExplicitPathOwnershipTests(GuardFixture):
             with self.assertRaises(SystemExit) as ctx:
                 guard.ignored_source_pins()
         self.assertIn("circular modules", str(ctx.exception))
+
+
+class Round18CfgTwinExternalTests(GuardFixture):
+    """Round-18 review P2 (comment 4309910884): the wired exclusion was
+    keyed by (enclosing stack, module NAME), so a cfg-mutex plain twin of
+    a wired declaration was excluded too —
+    `#[cfg(unix)] #[path = "unix.rs"] mod shared;` beside
+    `#[cfg(windows)] mod shared;` silenced the Windows branch's
+    conventional probe, and the required pin `#[ignore]`d in the file
+    rustc actually loads there scanned green (the review's four-control
+    ran 0/1/0/1). The exclusion is now per declaration — (module name,
+    declaration line) — so only the declaration carrying the `#[path]`
+    attribute loses its conventional probe; the twin keeps it. Both
+    branches of the cfg split are scanned, which is deliberately
+    conservative: an `#[ignore]` on any candidate source of a required
+    pin fails, whichever host resolution loads it."""
+
+    _LIB = (
+        "#[cfg(unix)]\n"
+        '#[path = "unix.rs"]\n'
+        "mod shared;\n"
+        "\n"
+        "#[cfg(windows)]\n"
+        "mod shared;\n"
+    )
+    _PIN = "shared::tests::critical_pin"
+    _run_main = DuplicateRegistrationTests._run_main
+
+    def test_cfg_twin_plain_branch_is_scanned(self):
+        # The review's false green: the Windows-loaded conventional file
+        # carries the #[ignore], unix.rs is live — main must fail AT THE
+        # REAL Windows source (pre-fix the plain twin was name-excluded
+        # with the wired declaration and never scanned → return 0).
+        code, err = self._run_main(
+            [self._PIN],
+            source=self._LIB,
+            required=[self._PIN],
+            files={"unix.rs": _LIVE_PIN, "shared.rs": _IGNORED_PIN},
+        )
+        self.assertEqual(code, 1)
+        self.assertIn(f"required pin {self._PIN} is #[ignore]d at", err)
+        self.assertIn(str(Path("shared.rs")) + ":4", err)
+        self.assertNotIn("unix.rs", err)
+        self.assertNotIn("outside the scanned lib module graph", err)
+
+    def test_cfg_twin_reverse_control_wired_branch_ignored_fails(self):
+        # Reverse half of the four-control: the wired unix.rs carries the
+        # #[ignore] — the guard must fail at the wired source.
+        code, err = self._run_main(
+            [self._PIN],
+            source=self._LIB,
+            required=[self._PIN],
+            files={"unix.rs": _IGNORED_PIN, "shared.rs": _LIVE_PIN},
+        )
+        self.assertEqual(code, 1)
+        self.assertIn(f"required pin {self._PIN} is #[ignore]d at", err)
+        self.assertIn(str(Path("unix.rs")) + ":4", err)
+
+    def test_cfg_twin_both_live_pass(self):
+        # Both branches live: the required pin is registered and its
+        # sources carry no #[ignore] — the guard must pass.
+        code, err = self._run_main(
+            [self._PIN],
+            source=self._LIB,
+            required=[self._PIN],
+            files={"unix.rs": _LIVE_PIN, "shared.rs": _LIVE_PIN},
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn("is #[ignore]d", err)
+
+    def test_cfg_twin_both_ignored_fail(self):
+        # Both branches ignored: red regardless of which host loads which.
+        code, err = self._run_main(
+            [self._PIN],
+            source=self._LIB,
+            required=[self._PIN],
+            files={"unix.rs": _IGNORED_PIN, "shared.rs": _IGNORED_PIN},
+        )
+        self.assertEqual(code, 1)
+        self.assertIn(f"required pin {self._PIN} is #[ignore]d at", err)
+
+    def test_wired_declaration_itself_still_excluded_from_conventional(self):
+        # The round-17 ownership rule must survive the identity keying:
+        # with NO plain twin, the wired declaration alone is excluded and
+        # the stem-directory decoy at the conventional spot is NOT a lib
+        # source — an #[ignore] planted there must not frame the pin.
+        code, err = self._run_main(
+            [self._PIN],
+            source='#[path = "real.rs"]\nmod shared;\n',
+            required=[self._PIN],
+            files={
+                "real.rs": _LIVE_PIN,
+                "shared.rs": _IGNORED_PIN,
+            },
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn(str(Path("shared.rs")), err)
 
 
 if __name__ == "__main__":
