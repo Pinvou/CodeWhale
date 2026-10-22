@@ -780,10 +780,11 @@ def main():
         # --- cube_plan_switch：换胎预算口径（可用 + 当前模型将释放） ---
         # 场景钉自真机事故：73.4 GiB 模型在跑、可用 35.2、目标需要 94.9——
         # 并行加开口径必拒，换胎口径可行
+        # 此组只验证已托管模型的预算与默认选择；未托管准入另有独立回归。
         cmsd.models = [
-            {"card": "old-model", "status": "running", "healthy": True,
+            {"card": "old-model", "status": "running", "healthy": True, "managed": True,
              "measured_footprint_gib": 73.4, "port": 18080},
-            {"card": "target-card", "status": "stopped", "port": 18081},
+            {"card": "target-card", "status": "stopped", "managed": True, "port": 18081},
         ]
         cmsd.active_model = "old-model"
         cmsd.capacity = {
@@ -812,7 +813,7 @@ def main():
               and "不建议执行" in r["summary"] and "还差" in r["summary"],
               r["summary"])
         # 目标已在跑（非活跃）→ 引导 cube_set_default_model 而非换胎
-        cmsd.models.append({"card": "running-card", "status": "running", "healthy": True, "port": 18082})
+        cmsd.models.append({"card": "running-card", "status": "running", "healthy": True, "managed": True, "port": 18082})
         r = client.tool("cube_plan_switch", {"card": "running-card"})
         check("plan_switch 目标已在跑引导仅挪默认",
               (r.get("data") or {}).get("already_running") is True
