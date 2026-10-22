@@ -2096,6 +2096,14 @@ impl ModelManager {
         );
         let source = self.local_scripts_source(&rec)?;
 
+        // Read before scripts or database deletion can commit. These shared
+        // roots remain quota-visible after full deletion, but are disclosure
+        // only: they must not broaden deletion authority or measured savings.
+        let download_roots = if purge_weights {
+            super::version_store::download_paths(card_id).map_err(ModelManagerError::new)?
+        } else {
+            Vec::new()
+        };
         // 先量一次基线。**必须在跑脚本之前量**：脚本一跑完目录就没了，事后再
         // 想知道"刚才那儿有多少字节"已经无处可查，只剩下 card.json 里那个标称
         // 值可以拿来充数——而那正是要杜绝的事。
@@ -2131,14 +2139,27 @@ impl ModelManager {
 
         let after = total_size(&candidates);
         let freed_bytes = before.saturating_sub(after);
-        let remaining_paths: Vec<String> = candidates
+        let mut remaining_paths: Vec<String> = candidates
             .iter()
             .filter(|p| p.exists())
             .map(|p| p.to_string_lossy().to_string())
             .collect();
+        let mut shared_download_roots_remain = false;
+        for root in download_roots {
+            if residual_path_may_exist(&root) {
+                shared_download_roots_remain = true;
+                if !remaining_paths
+                    .iter()
+                    .any(|parent| root.starts_with(Path::new(parent)))
+                {
+                    remaining_paths.retain(|child| !Path::new(child).starts_with(&root));
+                    remaining_paths.push(root.to_string_lossy().into_owned());
+                }
+            }
+        }
 
         let freed_text = disk::format_bytes(freed_bytes as f64);
-        let summary = if purge_weights {
+        let mut summary = if purge_weights {
             if remaining_paths.is_empty() {
                 format!(
                     "已卸载「{}」并删除模型权重，实测释放 {}。",
@@ -2172,6 +2193,11 @@ impl ModelManager {
                 freed_text
             )
         };
+        if shared_download_roots_remain {
+            summary.push_str(
+                "下载根目录可能包含缓存或其他模型；请先逐项确认归属，再清理对应文件，不要直接删除整个共享目录。",
+            );
+        }
 
         Ok(UninstallOutcome {
             card_id: rec.card_id,
@@ -2233,17 +2259,7 @@ impl ModelManager {
         }
         let mut residual_paths = Vec::new();
         for path in paths {
-            // Do not follow symlinks or discard permission-denied paths as absent.
-            // This endpoint only reports names; it never claims their ownership.
-            let unresolved_ancestor =
-                path.ancestors()
-                    .any(|ancestor| match ancestor.symlink_metadata() {
-                        Ok(metadata) => metadata.file_type().is_symlink(),
-                        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
-                    });
-            if unresolved_ancestor
-                || !matches!(path.symlink_metadata(), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
-            {
+            if residual_path_may_exist(&path) {
                 let path = path.to_string_lossy().into_owned();
                 if !residual_paths.contains(&path) {
                     residual_paths.push(path);
@@ -2682,6 +2698,19 @@ fn format_quota(q: f64) -> String {
 /// 这次卸载头上。只量这张卡自己的目录，宁可漏不肯多。
 fn total_size(paths: &[PathBuf]) -> u64 {
     paths.iter().map(|p| disk::dir_size_bytes(p)).sum()
+}
+
+/// Disclosure only: links and permission errors cannot prove absence, and a
+/// reported path never establishes ownership or permission to delete its tree.
+fn residual_path_may_exist(path: &Path) -> bool {
+    let unresolved_ancestor = path
+        .ancestors()
+        .any(|ancestor| match ancestor.symlink_metadata() {
+            Ok(metadata) => metadata.file_type().is_symlink(),
+            Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+        });
+    unresolved_ancestor
+        || !matches!(path.symlink_metadata(), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// 从脚本输出里提取 `PREFIX=value` 形式的约定标记行。
@@ -3644,6 +3673,68 @@ echo '权重就绪'
         // 卡片里的"URL"是本地文件路径，只有内置测试商店这一位放行它。
         mgr.builtin_store = true;
         mgr
+    }
+
+    #[test]
+    fn full_delete_discloses_quota_retained_download_root_without_inflating_freed_bytes() {
+        let tmp = setup_temp_db();
+        let root = tmp.path().join("models");
+        let scripts = tmp.path().join("scripts");
+        let mut card = local_script_card(&scripts, None);
+        card.summary.size_bytes = 6;
+        let asset = scripts.join("helper.txt");
+        std::fs::write(&asset, "offline package").unwrap();
+        card.assets
+            .insert("helper.txt".into(), asset.to_string_lossy().into_owned());
+        card.asset_sha256 = Some(BTreeMap::from([(
+            "helper.txt".into(),
+            script_runner::sha256_hex("offline package"),
+        )]));
+        for (entry, body) in [
+            ("install_engine", "#!/bin/sh\nexit 0\n"),
+            (
+                "download_model",
+                "#!/bin/sh\nset -eu\nmkdir -p \"$LMM_MODELS_DIR/Ornith-1.5-35B-A3B\" \"$LMM_MODELS_DIR/different-cache\"\nprintf weight > \"$LMM_MODELS_DIR/Ornith-1.5-35B-A3B/model.safetensors\"\nprintf cache > \"$LMM_MODELS_DIR/different-cache/partial\"\n",
+            ),
+            (
+                "uninstall",
+                "#!/bin/sh\nset -eu\n[ \"$LMM_PURGE_WEIGHTS\" = 1 ]\ncase \"$PWD\" in */cards/card-dl) ;; *) exit 1 ;; esac\nrm -rf -- \"$LMM_MODELS_DIR/Ornith-1.5-35B-A3B\"\nrm -rf -- \"$PWD\"\n",
+            ),
+        ] {
+            std::fs::write(scripts.join(format!("{entry}.sh")), body).unwrap();
+            card.script_sha256
+                .as_mut()
+                .unwrap()
+                .insert(entry.into(), script_runner::sha256_hex(body));
+        }
+        let manager = manager_with_card(download_settings(&root), card);
+        manager
+            .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+            .unwrap();
+        let record = db::get_store_model("card-dl").unwrap().unwrap();
+        let measured_before = total_size(&manager.candidate_paths(&record));
+        assert!(measured_before >= 6);
+        assert_eq!(super::super::version_store::retained_bytes().unwrap(), 5);
+
+        let outcome = manager
+            .uninstall("card-dl", true, &mut |_| {}, Default::default())
+            .unwrap();
+        assert!(!root.join("Ornith-1.5-35B-A3B").exists());
+        assert!(!config::data_dir().join("cards/card-dl").exists());
+        assert_eq!(
+            std::fs::read(root.join("different-cache/partial")).unwrap(),
+            b"cache"
+        );
+        assert_eq!(db::total_managed_bytes().unwrap(), 0);
+        assert_eq!(super::super::version_store::retained_bytes().unwrap(), 5);
+        assert_eq!(outcome.freed_bytes, measured_before);
+        assert_eq!(
+            outcome.remaining_paths,
+            [root.canonicalize().unwrap().to_string_lossy().into_owned()]
+        );
+        assert!(outcome.summary.contains("仍在磁盘上"));
+        assert!(outcome.summary.contains("其他模型"));
+        assert!(outcome.summary.contains("确认归属"));
     }
 
     #[test]

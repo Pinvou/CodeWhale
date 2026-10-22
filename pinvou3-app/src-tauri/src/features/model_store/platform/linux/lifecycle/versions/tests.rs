@@ -515,18 +515,101 @@ fn spawn_holding_argv_form(
     argv_form: &str,
     cwd: Option<&Path>,
 ) -> std::process::Child {
+    spawn_holding_argv(held, &[argv_form], cwd)
+}
+
+fn spawn_holding_argv(held: &Path, args: &[&str], cwd: Option<&Path>) -> std::process::Child {
     let mut command = std::process::Command::new("python3");
     command
         .args([
             "-c",
             "import os,time\nf=open(os.environ['PINVOU_TEST_HOLD'],'rb')\ntime.sleep(30)\n",
-            argv_form,
         ])
+        .args(args)
         .env("PINVOU_TEST_HOLD", held);
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
     command.spawn().unwrap()
+}
+
+fn wait_for_long_argv(child: &mut std::process::Child, last_arg: &str) -> bool {
+    let suffix = format!("{last_arg}\0");
+    for _ in 0..150 {
+        if fs::read(format!("/proc/{}/cmdline", child.id()))
+            .is_ok_and(|bytes| bytes.len() > 70_000 && bytes.ends_with(suffix.as_bytes()))
+        {
+            return true;
+        }
+        if child.try_wait().unwrap().is_some() {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+#[test]
+fn cmdline_reader_accepts_complete_limit_and_rejects_one_extra_byte() {
+    let complete = std::io::repeat(b'x').take(PROCESS_CMDLINE_LIMIT as u64);
+    assert_eq!(
+        read_process_cmdline(complete, || false).unwrap().len(),
+        PROCESS_CMDLINE_LIMIT
+    );
+    let oversized = std::io::repeat(b'x').take(PROCESS_CMDLINE_LIMIT as u64 + 1);
+    assert_eq!(
+        read_process_cmdline(oversized, || false),
+        Err(CmdlineReadError::TooLarge)
+    );
+}
+
+#[test]
+fn cmdline_reader_checks_shared_budget_before_and_after_each_read() {
+    assert_eq!(
+        read_process_cmdline(std::io::Cursor::new(b"arg\0"), || true),
+        Err(CmdlineReadError::TimedOut)
+    );
+    // Deterministically expire the caller's shared budget during the read.
+    let mut budget_checks = 0;
+    assert_eq!(
+        read_process_cmdline(std::io::Cursor::new(b"arg\0"), || {
+            budget_checks += 1;
+            budget_checks > 1
+        }),
+        Err(CmdlineReadError::TimedOut)
+    );
+    struct ExitedProcess;
+    impl Read for ExitedProcess {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("process exited"))
+        }
+    }
+    assert_eq!(
+        read_process_cmdline(ExitedProcess, || false),
+        Err(CmdlineReadError::Io)
+    );
+}
+
+#[test]
+fn cmdline_reader_retries_interrupted_reads_before_checking_complete_arguments() {
+    struct InterruptedOnce(u8);
+    impl Read for InterruptedOnce {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.0 += 1;
+            match self.0 {
+                1 => Err(std::io::ErrorKind::Interrupted.into()),
+                2 => {
+                    buffer[..4].copy_from_slice(b"arg\0");
+                    Ok(4)
+                }
+                _ => Ok(0),
+            }
+        }
+    }
+    assert_eq!(
+        read_process_cmdline(InterruptedOnce(0), || false).unwrap(),
+        b"arg\0"
+    );
 }
 
 fn wait_until_resource_blocked(runtime: &Path, resource: &Path) -> bool {
@@ -638,6 +721,65 @@ fn blocked_argv_reference_keeps_version_record_and_allows_retry_after_stop() {
     mgr.delete_version(&current.card_id, &id, &mut |_| {}, Default::default())
         .expect("cleanup succeeds once the holder is gone");
     assert!(!weight.exists());
+}
+
+#[test]
+fn weight_argument_after_long_unrelated_argv_blocks_cleanup_until_process_stops() {
+    let (temp, mgr, current, card, pkg, id) = fixture();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    let staged = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    let resource = PathBuf::from(staged.models_root.as_ref().unwrap());
+    let runtime = config::data_dir()
+        .join("cards")
+        .join(&staged.runtime_card_id);
+    let weight = resource.join("new/new.tachyon");
+    let filler = "X".repeat(70_000);
+    let target_arg = format!("--model={}", weight.display());
+    let mut child = spawn_holding_argv(&weight, &[&filler, &target_arg], Some(temp.path()));
+    let ready = wait_for_long_argv(&mut child, &target_arg);
+    let blocked = ensure_unused(&runtime, Some(&resource)).is_err();
+    let deletion = mgr.delete_version(&current.card_id, &id, &mut |_| {}, Default::default());
+    let kept = version_store::get(&current.card_id, &id).unwrap();
+    let weight_kept = weight.exists();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(ready, "the complete long command line must be visible");
+    assert!(blocked, "the final weight argument must block cleanup");
+    assert!(deletion.is_err());
+    assert_eq!(kept.unwrap().state, "ready");
+    assert!(weight_kept);
+    mgr.delete_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .expect("cleanup succeeds after the long-argv holder exits");
+    assert!(!weight.exists());
+}
+
+#[test]
+fn complete_long_unrelated_argv_does_not_block_version_cleanup() {
+    let (temp, mgr, current, card, pkg, id) = fixture();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    let staged = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    let resource = PathBuf::from(staged.models_root.as_ref().unwrap());
+    let runtime = config::data_dir()
+        .join("cards")
+        .join(&staged.runtime_card_id);
+    let unrelated = temp.path().join("unrelated.bin");
+    fs::write(&unrelated, b"unrelated").unwrap();
+    let filler = "X".repeat(70_000);
+    let unrelated_arg = format!("--model={}", unrelated.display());
+    let mut child = spawn_holding_argv(&unrelated, &[&filler, &unrelated_arg], Some(temp.path()));
+    let ready = wait_for_long_argv(&mut child, &unrelated_arg);
+    let unused = ensure_unused(&runtime, Some(&resource)).is_ok();
+    let deletion = mgr.delete_version(&current.card_id, &id, &mut |_| {}, Default::default());
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(ready, "the complete long command line must be visible");
+    assert!(unused, "complete unrelated arguments must remain allowed");
+    deletion.expect("an unrelated long command line must not block cleanup");
+    assert!(version_store::get(&current.card_id, &id).unwrap().is_none());
+    assert!(!resource.exists());
+    assert!(unrelated.exists());
 }
 
 #[test]
