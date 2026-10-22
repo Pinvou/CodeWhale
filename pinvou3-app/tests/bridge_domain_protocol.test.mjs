@@ -183,7 +183,11 @@ const expectedProtocolHashes = {
   // (Community #727): chat:delta/chat:tool_start/chat:done listener bodies moved
   // to the shared single-publication flush (notify() without domains, one
   // refreshActiveStreamRender hook) — event names and invoke shapes unchanged.
-  chat: 'c660db74258acda5026f88a5670e58a93b59fe1eb482ec2915244be7084a8bb9',
+  // Recomputed for community #748 backflow: the chat:tool_delta listener body
+  // now opts into deferBackgroundNotify so background output chunks ride the
+  // existing terminal 50ms publication timer; invoke and event wire shapes
+  // stay unchanged (publication timing is the deliberate change).
+  chat: 'd494f576c5484c6af93a4b37c949a1844d5055b46043eb7f5ccdad6850896a42',
   dependencies: 'd39f5a46b8e34c1c30d8f8e08ef62baccfe822ffb7fad8dbf3301c69c566e31c',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.
