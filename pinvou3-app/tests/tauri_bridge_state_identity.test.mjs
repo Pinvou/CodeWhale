@@ -111,12 +111,14 @@ assert.equal(settingsSnapshots[0], settingsSnapshots[1],
 
 // 订阅域(models)真实变化:组合快照必须换新身份并携带新值;
 // 未变化的 settings 切片在重组的组合对象里保持身份。
-invokeResponse = async () => ({ models: [{ id: 'm1', name: 'Model One' }], active_model_id: 'm1' });
-await api.models.loadModels();
+// #701（上游 ef98a715e 同形）：草稿态模型发布改由 loadSessionModel(null) 驱动
+// （currentSessionModelId + effectiveModelConfig 单次 models-only 更新）。
+invokeResponse = async command => (command === 'get_effective_model_config' ? { model: 'm1' } : null);
+await api.models.loadSessionModel(null);
 assert.equal(combinedSnapshots.length, 3, 'a subscribed-domain change must publish a new combined snapshot');
 assert.notEqual(combinedSnapshots[1], combinedSnapshots[2],
   'a subscribed-domain change must rebuild the combined snapshot identity');
-assert.equal(combinedSnapshots[2].activeModelId, 'm1',
+assert.equal(combinedSnapshots[2].effectiveModelConfig.model, 'm1',
   'the rebuilt combined snapshot must carry the changed models value');
 assert.ok(Object.isFrozen(combinedSnapshots[2]), 'the rebuilt combined snapshot must be frozen');
 assert.equal(combinedSnapshots[2].settings, combinedSnapshots[1].settings,

@@ -1643,47 +1643,9 @@ function planCardHydrationKey(item) { return pinvouSharedtauriMain().planCardHyd
 
   // ── Pub/Sub ──────────────────────────────────────────────────────
   var subscribers = [];
-  const STATE_SLICE_FIELDS = {
-    platform: ["appVersion", "backendOnline", "platformCapabilities"],
-    sessions: ["sessions", "archivedSessions", "activeSessionId", "sessionBusy", "draftEpoch", "draftWorkspacePath"],
-    chat: ["activeSkill", "artifacts", "artifactChange", "attachments", "busy", "chatItems", "composerDraft", "composerPrefill", "messages", "modeState", "planSnapshot", "queued", "remoteProxyDraftError", "thinking", "tokens", "turnDirtyArtifacts", "turnPresentedArtifacts", "turnTimeline"],
-    voice: ["voiceInput", "voiceAsrSetup"],
-    knowledge: ["kbModelSetup", "mountedCollection", "mountedCollections", "mountedRemoteCollections", "mountedCollectionsRevision"],
-    scheduled: ["scheduledRunContext", "scheduledTaskAutoOpenId", "scheduledTaskBusyAction", "scheduledTaskCreationSessionId", "scheduledTaskDetail", "scheduledTaskError", "scheduledTaskErrorKind", "scheduledTaskLoading", "scheduledTaskPendingGuide", "scheduledTaskRecentRuns", "scheduledTaskRuns", "scheduledTasks", "scheduledTaskSelectionGeneration", "selectedScheduledTaskId"],
-    monitor: ["monitor", "monitorError"],
-    settings: ["settings", "selectedPet", "behaviorTelemetry"],
-    models: ["activeModelId", "currentSessionModelId", "effectiveModelConfig", "savedModels"],
-    llmapi: ["llmApiModels", "llmApiStatus"],
-    vllm: [],
-    interaction: ["pinvouModal", "pinvouReviews", "pinvouSummoning", "superPermEnabled"],
-    computerUse: ["computerUse"],
-    personas: ["activePersona", "personaEvents", "personaPool"],
-    memory: ["memory"],
-    remoteControl: ["webAccess"],
-    // Windows 双端远程控制（DEV-20）：与 Web 分享完全独立的状态域。
-    desktopRemoteControl: [
-      "controlledDevice",
-      "controlledSession",
-      "controllerConnection",
-      "remoteCapabilities",
-      "remoteModels",
-      "remoteProxyHistories",
-      "remoteProxyHistory",
-      "remoteProxyNotice",
-      "controlledTasks",
-      "controlledTranscript",
-      "remotePermissions",
-    ],
-    updater: ["updateCancelling", "updateCheckError", "updateChecking", "updateDownloading", "updateError", "updateInfo", "updateProgress", "updateReady"],
-    dependencies: ["deps", "depsChecking", "depsInstallError", "depsInstallProgress", "depsInstalling"],
-    teamRelay: ["teamRelay"],
-    // Registered by the projects feature (bridge/projects.js). Must stay in
-    // sync with APP_BRIDGE_STATE_DOMAINS in main.jsx — locked by
-    // tests/bridge_state_domains.test.mjs. projectsAssignmentDegradedAt is
-    // #484's degraded create-channel notice stamp (round-36 P2b): the
-    // projects feature writes it, so the declared domain must carry it.
-    projects: ["projectsList", "projectsAssignmentDegradedAt"],
-  };
+  // FE14 wave 5：切片字段注册表统一在 shared/bridge-shared-helpers.js（两 lane 一份）；
+  // 与 main.jsx 的 APP_BRIDGE_STATE_DOMAINS 的同步由 tests/bridge_state_domains.test.mjs 锁定。
+  const STATE_SLICE_FIELDS = window.PinvouBridgeShared.STATE_SLICE_FIELDS;
   function snapshotStateSlice(domain) {
     var fields = STATE_SLICE_FIELDS[domain];
     if (!fields) throw new Error("Unknown Tauri bridge state slice: " + domain);

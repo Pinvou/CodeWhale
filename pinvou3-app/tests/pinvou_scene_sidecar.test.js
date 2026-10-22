@@ -12,6 +12,47 @@ const webBridgeSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'platf
   fs.readFileSync(path.join(__dirname, '..', 'src', 'shared', 'bridge-shared-helpers.js'), 'utf8');
 const sessionsRustSource = fs.readFileSync(path.join(__dirname, '..', 'src-tauri', 'src', 'app', 'commands', 'sessions.rs'), 'utf8');
 
+// #701 T0-e 换装（上游 ef98a715e 同面）：persona/review 旁路装载器已合并进共享
+// 基座（T0-b），两个宿主经簇前向器委托；本段按上游形态钉委托 + 执行共享本体。
+const tauriSessionsSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'platform', 'tauri', 'bridge', 'sessions.js'), 'utf8');
+const sharedBaseSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'shared', 'bridge-shared-helpers.js'), 'utf8');
+
+function extractReadReporter(source) {
+  // Official 适配：上游从 lane 抽取 read+write 双上报助手；官方 lane 暂只保留
+  // read 助手（write 助手随 T4 reconcile 补齐），此处只抽 read。
+  const match = source.match(/function reportSidecarReadFailure\(kind, sid, error\) \{[\s\S]*?\n {2}\}\n/);
+  return match ? match[0] : '';
+}
+function extractSharedPersonaReviewLoaders(src) {
+  const match = src.match(
+    /async function loadPersonaEventsForSession\(sid\) \{[\s\S]*?async function loadPinvouReviewsForSession\(sid\) \{[\s\S]*?return \[\];\n *\}\n *\}\n/,
+  );
+  return match ? match[0] : '';
+}
+async function runPersonaReviewLoaders(reporters, block, { readFails = false } = {}) {
+  const warnings = [];
+  const sandbox = {
+    console: { warn: (...args) => warnings.push(args.map(String).join(' ')) },
+    async invoke(command) {
+      if (readFails) throw new Error('sidecar unreadable');
+      if (command === 'get_session_persona_events') return [{ pos: 0, kind: 'equip' }];
+      if (command === 'get_session_pinvou_reviews') return null;
+      return null;
+    },
+  };
+  vm.runInNewContext(
+    `${reporters}\n${block}\nthis.__loadPersona = loadPersonaEventsForSession;\nthis.__loadReviews = loadPinvouReviewsForSession;`,
+    sandbox,
+    { filename: 'persona-review-sidecar-block.js' },
+  );
+  return {
+    persona: await sandbox.__loadPersona('s1'),
+    reviews: await sandbox.__loadReviews('s1'),
+    warnings,
+  };
+}
+
+
 function callbackDependencyList(sourceText, callbackName) {
   const start = sourceText.indexOf(`const ${callbackName} = useCallback(`);
   if (start < 0) return null;
@@ -296,6 +337,31 @@ function rec(name, pass, detail = '') {
       actual: dispatchChatMessageDependencies,
       required: requiredDispatchChatMessageDependencies,
     }));
+
+  // Persona/review sidecars have no local cache: read failure must report and
+  // degrade to [] (never throw across the bare await in the switch path).
+  const tauriReadReporter = extractReadReporter(tauriBridgeSource);
+  const sharedPersonaReviewLoaders = extractSharedPersonaReviewLoaders(sharedBaseSource);
+  rec('persona/review sidecar 读取助手已合并进共享基座，两个宿主均委托同一实现',
+    sharedPersonaReviewLoaders !== '' &&
+      /function loadPersonaEventsForSession\(sid\) \{ return pinvouSharedtauriSessions\(\)\.loadPersonaEventsForSession\(sid\); \}/.test(tauriSessionsSource) &&
+      /function loadPinvouReviewsForSession\(sid\) \{ return pinvouSharedtauriSessions\(\)\.loadPinvouReviewsForSession\(sid\); \}/.test(tauriSessionsSource) &&
+      /function loadPersonaEventsForSession\(sid\) \{ return pinvouSharedweb\(\)\.loadPersonaEventsForSession\(sid\); \}/.test(webBridgeSource) &&
+      /function loadPinvouReviewsForSession\(sid\) \{ return pinvouSharedweb\(\)\.loadPinvouReviewsForSession\(sid\); \}/.test(webBridgeSource),
+    'shared persona-review loaders + per-host delegation pins');
+  {
+    const ok = await runPersonaReviewLoaders(tauriReadReporter, sharedPersonaReviewLoaders, {});
+    rec('persona/review 读取成功路径保持原值(null 归一为 [])',
+      JSON.stringify(ok.persona) === JSON.stringify([{ pos: 0, kind: 'equip' }]) &&
+        JSON.stringify(ok.reviews) === '[]' && ok.warnings.length === 0,
+      JSON.stringify(ok));
+    const failed = await runPersonaReviewLoaders(tauriReadReporter, sharedPersonaReviewLoaders, { readFails: true });
+    rec('persona/review 读失败时逐项上报后降级为 []，绝不抛给会话切换',
+      JSON.stringify(failed.persona) === '[]' && JSON.stringify(failed.reviews) === '[]' &&
+        failed.warnings.some(text => text.includes('persona events read failed')) &&
+        failed.warnings.some(text => text.includes('pinvou reviews read failed')),
+      JSON.stringify(failed));
+  }
 
   rec('scene sidecar 通过 session 后端在 Tauri/Web 间共享并保留本地迁移缓存',
     /get_session_pinvou_scene_events/.test(tauriBridgeSource) &&

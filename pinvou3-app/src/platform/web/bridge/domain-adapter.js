@@ -11,49 +11,12 @@
   var flat = window.TauriBridge;
   if (!flat || !flat.available || typeof flat.getState !== "function") return;
 
-  const fields = {
-    platform: ["appVersion", "backendOnline", "platformCapabilities"],
-    sessions: ["sessions", "archivedSessions", "activeSessionId", "sessionBusy", "draftEpoch", "draftWorkspacePath"],
-    chat: ["activeSkill", "artifacts", "artifactChange", "attachments", "busy", "chatItems", "composerDraft", "composerPrefill", "messages", "modeState", "planSnapshot", "queued", "remoteProxyDraftError", "thinking", "tokens", "turnDirtyArtifacts", "turnPresentedArtifacts", "turnTimeline"],
-    voice: ["voiceInput", "voiceAsrSetup"],
-    knowledge: ["kbModelSetup", "mountedCollection", "mountedCollections", "mountedCollectionsRevision"],
-    scheduled: ["scheduledRunContext", "scheduledTaskAutoOpenId", "scheduledTaskBusyAction", "scheduledTaskCreationSessionId", "scheduledTaskDetail", "scheduledTaskError", "scheduledTaskErrorKind", "scheduledTaskLoading", "scheduledTaskPendingGuide", "scheduledTaskRecentRuns", "scheduledTaskRuns", "scheduledTasks", "scheduledTaskSelectionGeneration", "selectedScheduledTaskId"],
-    monitor: ["monitor", "monitorError"],
-    settings: ["settings", "selectedPet"],
-    models: ["activeModelId", "currentSessionModelId", "effectiveModelConfig", "savedModels"],
-    llmapi: ["llmApiModels", "llmApiStatus"],
-    vllm: [],
-    interaction: ["pinvouModal", "pinvouReviews", "pinvouSummoning", "superPermEnabled"],
-    computerUse: ["computerUse"],
-    personas: ["activePersona", "personaEvents", "personaPool"],
-    memory: ["memory"],
-    remoteControl: ["webAccess"],
-    // projects 域为桌面专属(整域不出现在 bridgeDomainContract 的 Web 域面),
-    // 但 APP_BRIDGE_STATE_DOMAINS 的订阅列表双端共享;Web 端补一个空桩
-    // (没有 bridge.projects 方法面,列表恒空),防止启动期 getMany 抛
-    // "Unknown Tauri bridge state slice: projects"(栈内 #448 的根因)。
-    // projectsAssignmentDegradedAt 是 #484 的降级提示戳(round-36 P2b);
-    // Web 桩字段必须与桌面 STATE_SLICE_FIELDS 逐键一致。
-    projects: ["projectsList", "projectsAssignmentDegradedAt"],
-    // desktopRemoteControl 整域桌面专属（Windows 双端远控）：Web 端补空桩，
-    // 字段集必须与桌面 STATE_SLICE_FIELDS 完全一致（见 bridge_state_domains）。
-    desktopRemoteControl: [
-      "controlledDevice",
-      "controlledSession",
-      "controllerConnection",
-      "remoteCapabilities",
-      "remoteModels",
-      "remoteProxyHistories",
-      "remoteProxyHistory",
-      "remoteProxyNotice",
-      "controlledTasks",
-      "controlledTranscript",
-      "remotePermissions"
-    ],
-    updater: ["updateCancelling", "updateCheckError", "updateChecking", "updateDownloading", "updateError", "updateInfo", "updateProgress", "updateReady"],
-    dependencies: ["deps", "depsChecking", "depsInstallError", "depsInstalling"]
-    ,teamRelay: ["teamRelay"]
-  };
+  // FE14 wave 5：fields 注册表统一用 shared/bridge-shared-helpers.js 的
+  // STATE_SLICE_FIELDS（与桌面 lane 同一份常量）。projects 域为桌面专属
+  // (整域不出现在 bridgeDomainContract 的 Web 域面)，但 APP_BRIDGE_STATE_DOMAINS
+  // 的订阅列表双端共享；表内的 projects 空桩条目防止启动期 getMany 抛
+  // "Unknown Tauri bridge state slice: projects"(栈内 #448 的根因)。
+  const fields = window.PinvouBridgeShared.STATE_SLICE_FIELDS;
 
   function clone(value) {
     if (typeof structuredClone === "function") {

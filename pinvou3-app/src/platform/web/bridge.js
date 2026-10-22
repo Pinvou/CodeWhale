@@ -96,7 +96,13 @@ function pinvouSharedweb() {
     });
   }
   function normalizeVoiceMode(mode) {
-    return mode === "task" ? "task" : mode === "edit" ? "edit" : "dictation";
+    // 与 features/voice-composer/voice-ui-policy.mjs 和 tauri/bridge/voice.js
+    // 同一映射(voice_edit/draft_edit 是编辑模式的别名;web 拷贝曾漏掉它们,
+    // 把编辑模式误路由到听写后处理 —— round-9 review)。三方一致性由
+    // tests/voice_mode_parity.test.mjs 钉住。
+    if (mode === "task") return "task";
+    if (["edit", "voice_edit", "draft_edit"].includes(mode)) return "edit";
+    return "dictation";
   }
   function webRequestId(prefix) {
     if (window.crypto && typeof window.crypto.randomUUID === "function") {
@@ -6912,6 +6918,7 @@ function isActionablePlanCard(sid, itemId, planId) { return pinvouSharedweb().is
     try {
       var st = await invoke("discard_plan", { sessionId: sid, planId: planTicket });
       applyAuthoritativeModeState(sid, st);
+      patchItemByIdFor(sid, itemId, { planResolutionConfirmed: true });
     } catch (e) {
       var errorText = String(e && e.message ? e.message : e || "");
       var planNotActive = errorText.indexOf("plan_not_active") >= 0;

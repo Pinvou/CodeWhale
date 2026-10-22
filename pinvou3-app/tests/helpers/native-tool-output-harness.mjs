@@ -59,7 +59,7 @@ export function createNativeToolOutputHarness({ eventSource, shellTasks = () => 
   const html = fs.readFileSync(path.join(appRoot, 'src/index.html'), 'utf8');
   // Official's index.html interleaves two feature logic scripts inside the
   // bridge cluster; their factories throw at load when absent.
-  const scripts = [...html.matchAll(/<script src="%BASE_URL%(shared\/bridge-messages\.js|shared\/bridge-shared-helpers\.js|features\/remote-control\/remote-control-state\.js|features\/updater\/update-notice-logic\.js|platform\/tauri\/bridge(?:\.js|\/[^"]+))"[^>]*><\/script>/g)].map(match => match[1]);
+  const scripts = [...html.matchAll(/<script src="%BASE_URL%(shared\/bridge-messages\.js|shared\/tool-store-events\.js|shared\/bridge-shared-helpers\.js|features\/remote-control\/remote-control-state\.js|features\/updater\/update-notice-logic\.js|platform\/tauri\/bridge(?:\.js|\/[^"]+))"[^>]*><\/script>/g)].map(match => match[1]);
   for (const relative of scripts) {
     const source = relative === 'platform/tauri/bridge/chat-events.js' && eventSource !== undefined
       ? eventSource : fs.readFileSync(path.join(appRoot, 'src', relative), 'utf8');
