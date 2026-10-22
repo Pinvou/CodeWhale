@@ -507,6 +507,139 @@ fn unsafe_paths_and_live_unrecorded_processes_block_cleanup() {
     assert!(detected);
 }
 
+/// Spawns a child that really opens `held` (via the environment, never via
+/// argv) while exposing only `argv_form` as a path-shaped argument, so a
+/// detection can only come from the argv parsing under test.
+fn spawn_holding_argv_form(
+    held: &Path,
+    argv_form: &str,
+    cwd: Option<&Path>,
+) -> std::process::Child {
+    let mut command = std::process::Command::new("python3");
+    command
+        .args([
+            "-c",
+            "import os,time\nf=open(os.environ['PINVOU_TEST_HOLD'],'rb')\ntime.sleep(30)\n",
+            argv_form,
+        ])
+        .env("PINVOU_TEST_HOLD", held);
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    command.spawn().unwrap()
+}
+
+fn wait_until_resource_blocked(runtime: &Path, resource: &Path) -> bool {
+    for _ in 0..150 {
+        if ensure_unused(runtime, Some(resource)).is_err() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+#[test]
+fn equals_relative_and_absolute_argv_forms_block_cleanup_and_keep_files() {
+    let (temp, mgr, current, _card, _pkg, _id) = fixture();
+    let runtime = runtime_path(&current).unwrap();
+    let legacy = mgr.settings.models_path().join("legacy");
+    let weight = legacy.join("old.tachyon");
+    // Equals-form flag value (`--model=/abs/…`): the whole argv element is not
+    // an absolute path, yet it references the live weight.
+    let mut child =
+        spawn_holding_argv_form(&weight, &format!("--model={}", weight.display()), None);
+    let blocked = wait_until_resource_blocked(&runtime, &legacy);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(blocked, "equals-form absolute argv must block cleanup");
+    assert!(weight.exists(), "blocked cleanup keeps the weight file");
+    // Relative argument resolved against a cwd outside the resource (the
+    // models root, whose `legacy/…` entry reaches the weight; the runtime cwd
+    // itself is a separate, already-covered signal).
+    let models_root = mgr.settings.models_path();
+    let mut child =
+        spawn_holding_argv_form(&weight, "legacy/old.tachyon", Some(models_root.as_path()));
+    let blocked = wait_until_resource_blocked(&runtime, &legacy);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(blocked, "relative argv must block cleanup");
+    assert!(weight.exists(), "blocked cleanup keeps the weight file");
+    // Standalone absolute argument keeps blocking (pre-existing contract).
+    let mut child = spawn_holding_argv_form(&weight, &weight.to_string_lossy(), Some(&temp.path()));
+    let blocked = wait_until_resource_blocked(&runtime, &legacy);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(blocked, "standalone absolute argv must block cleanup");
+    assert!(weight.exists(), "blocked cleanup keeps the weight file");
+    // Unrelated process: different file, unrelated cwd and arguments must not
+    // block the cleanup of this resource.
+    let unrelated = temp.path().join("unrelated.bin");
+    fs::write(&unrelated, b"unrelated").unwrap();
+    let mut child = spawn_holding_argv_form(&unrelated, "--model=/nowhere/else.bin", None);
+    std::thread::sleep(Duration::from_millis(300));
+    let blocked = ensure_unused(&runtime, Some(&legacy)).is_err();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(!blocked, "an unrelated process must not block cleanup");
+}
+
+#[test]
+fn runtime_cwd_blocks_cleanup_even_with_unrelated_argv() {
+    let (_temp, mgr, current, _card, _pkg, _id) = fixture();
+    let runtime = runtime_path(&current).unwrap();
+    let legacy = mgr.settings.models_path().join("legacy");
+    let weight = legacy.join("old.tachyon");
+    let mut child = spawn_holding_argv_form(&weight, "--model=/nowhere/else.bin", Some(&runtime));
+    let blocked = wait_until_resource_blocked(&runtime, &legacy);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(
+        blocked,
+        "a process running inside the runtime dir must block"
+    );
+}
+
+#[test]
+fn blocked_argv_reference_keeps_version_record_and_allows_retry_after_stop() {
+    let (_temp, mgr, current, card, pkg, id) = fixture();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    let staged = version_store::get(&current.card_id, &id)
+        .unwrap()
+        .expect("staged version row");
+    let resource = PathBuf::from(staged.models_root.as_ref().unwrap());
+    let weight = resource.join("new/new.tachyon");
+    assert!(weight.exists());
+    let mut child =
+        spawn_holding_argv_form(&weight, &format!("--model={}", weight.display()), None);
+    let blocked = wait_until_resource_blocked(
+        &config::data_dir()
+            .join("cards")
+            .join(staged.runtime_card_id.as_str()),
+        &resource,
+    );
+    assert!(blocked, "the holder must block cleanup before the delete");
+    let deletion = mgr.delete_version(&current.card_id, &id, &mut |_| {}, Default::default());
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(
+        deletion.is_err(),
+        "deletion must be rejected while held open"
+    );
+    let kept = version_store::get(&current.card_id, &id)
+        .unwrap()
+        .expect("version record must survive a rejected cleanup");
+    assert_eq!(kept.state, "ready");
+    assert!(
+        weight.exists(),
+        "the weight file must survive the rejection"
+    );
+    mgr.delete_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .expect("cleanup succeeds once the holder is gone");
+    assert!(!weight.exists());
+}
+
 #[test]
 fn interrupted_stage_is_recoverable_and_cancelled_cleanup_does_not_remove_files() {
     let (_temp, mgr, current, card, pkg, id) = fixture();
