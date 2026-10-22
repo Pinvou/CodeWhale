@@ -52,7 +52,7 @@ test('existing registration is reused and the conversation binding changes, not 
   assert.deepEqual(f.selected, [{ session: 'conversation-a', model: 'registered', options: { ifIdle: true, expectedModelId: 'source', expectedDefaultModelId: 'global' } }]);
   assert.equal(f.state.activeModelId, 'global');
 });
-test('unregistered target creates one row with factual context and selects it once', async () => {
+test('unregistered non-store target retains factual context and selects it once', async () => {
   const f = fixture();
   await f.api.settled(task); await f.api.settled(task);
   assert.equal(f.saved.length, 1); assert.equal(f.selected.length, 1);
@@ -376,8 +376,54 @@ test('logical MCP switch follows its physical receipt and retains one logical re
   await f.api.settled(physical);
   assert.equal(f.saved.length, 1); assert.equal(f.selected.length, 1);
   assert.equal(f.saved[0].store_card_id, 'target'); assert.equal(f.saved[0].model_store_card_id, 'target');
-  assert.equal(f.saved[0].id, 'm_cmsd_fixture_target'); assert.equal(f.saved[0].context_window_tokens, 262144);
+  assert.equal(f.saved[0].id, 'm_cmsd_fixture_target'); assert.equal(f.saved[0].context_window_tokens, null);
 });
+
+for (const fixed of [false, true]) {
+  test(`${fixed ? 'existing fixed' : 'new automatic'} store current registration survives a same-route 64K to 256K deployment`, async () => {
+    const runtime = 'target--current';
+    let context = 65536, revision = 'recipe-64';
+    const observed = [];
+    const old = { id: 'registered', name: 'User settings', model: 'Target',
+      model_store_card_id: 'target', store_card_id: 'target', base_url: 'http://127.0.0.1:8000/v1',
+      context_window_tokens: 65536, max_output_tokens: 2048, reasoning_effort: 'high',
+      credential_ref: { service: 'pinvou3-model-api-key', account: 'model:registered', version: 1 },
+      credential_state: 'configured', has_secret: true };
+    const original = structuredClone(old);
+    const f = fixture({ arm: false, rows: fixed ? [old] : [], api: {
+      queryModels: async () => {
+        observed.push({ context, revision });
+        return { available: true, data: { store_bindings: { target: runtime }, models: [{
+          card: runtime, managed: true, version_id: 'v1', deployment_revision: revision,
+          model_id: 'Target', status: 'running', healthy: true, max_model_len: context, port: 18080,
+        }] } };
+      },
+      queryStatus: async () => ({ available: true, data: { active_model: runtime, gateway: '127.0.0.1:8000' } }),
+    } });
+    const followCurrent = async id => {
+      const receipt = { ...task, id, card: runtime, requested_card: 'target', selected_version: 'v1', deployment_revision: revision };
+      f.api.accept({ task: receipt, sessionId: 'conversation-a', binding: f.bindings.get('conversation-a'),
+        fallback: 'global', started: Date.now() });
+      await f.api.settled(receipt);
+    };
+    try {
+      await followCurrent('switch-64');
+      assert.equal(f.rows.length, 1);
+      assert.equal(f.rows[0].model_store_card_id, 'target'); // Genuine current binding, not the external fallback.
+      assert.equal(f.rows[0].context_window_tokens, fixed ? 65536 : null);
+      assert.equal(f.bindings.get('conversation-a'), f.rows[0].id);
+      const beforeUpgrade = structuredClone(f.rows[0]);
+      context = 262144; revision = 'recipe-256';
+      await followCurrent('switch-256');
+      assert.ok(observed.some(value => value.context === 262144 && value.revision === 'recipe-256'));
+      assert.deepEqual(f.rows[0], beforeUpgrade);
+      assert.equal(f.rows[0].context_window_tokens, fixed ? 65536 : null);
+      assert.equal(f.saved.length, fixed ? 0 : 1);
+      assert.equal(f.selected.length, 1);
+      if (fixed) assert.deepEqual(f.rows[0], original);
+    } finally { f.api.dispose(); }
+  });
+}
 
 test('a new current pointer after task completion never redirects the captured switch', async () => {
   const f = fixture({ arm: false, api: {
@@ -462,7 +508,9 @@ test('specific cards retain exact normal and path IDs for new and reused registr
         const receipt = { ...task, card: runtime, requested_card: 'target', selected_version: 'v2' };
         const old = { id: 'registered', name: 'Retained user name', model: 'megacube-default',
           store_card_id: 'target', ...(fromStore ? { model_store_card_id: 'target' } : {}),
-          base_url: 'http://127.0.0.1:19999/v1', context_window_tokens: 4096, max_output_tokens: 1024 };
+          base_url: 'http://127.0.0.1:19999/v1', context_window_tokens: 4096, max_output_tokens: 1024,
+          reasoning_effort: 'high', credential_state: 'configured', has_secret: true,
+          credential_ref: { service: 'pinvou3-model-api-key', account: 'model:registered', version: 1 } };
         const f = fixture({ arm: false, rows: existing ? [old] : [], api: {
           queryModels: async () => ({ available: true, data: {
             ...(fromStore ? { store_bindings: { target: runtime } } : {}),
@@ -483,9 +531,13 @@ test('specific cards retain exact normal and path IDs for new and reused registr
         if (existing) {
           assert.equal(saved.id, old.id); assert.equal(saved.name, old.name);
           assert.equal(saved.context_window_tokens, 4096); assert.equal(saved.max_output_tokens, 1024);
+          assert.equal(saved.reasoning_effort, old.reasoning_effort);
+          assert.deepEqual(saved.credential_ref, old.credential_ref);
+          assert.equal(saved.credential_state, old.credential_state); assert.equal(saved.has_secret, true);
           assert.equal(saved.credential_action, 'keep'); assert.equal(saved.api_key, null);
-        } else if (modelId.startsWith('/')) {
-          assert.equal(saved.name, 'Catalog display name');
+        } else {
+          assert.equal(saved.context_window_tokens, fromStore ? null : 65536);
+          if (modelId.startsWith('/')) assert.equal(saved.name, 'Catalog display name');
         }
         // A later default change is irrelevant to the persisted registration's
         // concrete wire identity; replay cannot turn it into a subscription.
