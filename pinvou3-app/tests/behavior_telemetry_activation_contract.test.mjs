@@ -120,7 +120,10 @@ test('client privacy allowlist stays aligned with schema and excludes server ide
 test('retryable delivery and pending privacy controls keep bounded background retry loops', () => {
   assert.match(rust, /let retryable_remains = telemetry\.outbox[\s\S]*if retryable_remains \{[\s\S]*tokio::time::sleep/);
   assert.match(rust, /retry_delay = retry_delay\.saturating_mul\(2\)\.min\(RETRY_MAX_DELAY\)/);
-  assert.match(rust, /async fn run_control_worker[\s\S]*while telemetry\.has_pending_control\(\)\.await/);
+  assert.match(rust, /async fn run_control_worker[\s\S]*while telemetry\.has_pending_background_work\(\)\.await[\s\S]*retry_pending_control\(\)\.await/);
+  assert.match(rust, /async fn has_pending_background_work[\s\S]*state\.has_pending_control\(\) \|\| state\.renewal_checkpoint_is_current\(&self\.runtime\)/);
+  assert.match(rust, /async fn retry_pending_control\(&self\)[\s\S]*self\.control_gate\.lock\(\)\.await[\s\S]*finish_credential_renewal_checkpoint\(state\)[\s\S]*self\.retry_pending_control_locked\(\)\.await/);
+  assert.match(rust, /has_pending_control_sync\(\) \|\| renewal_pending/);
   assert.match(rust, /pending control retry deferred[\s\S]*tokio::select!/);
   assert.match(rust, /fn wake_control_worker[\s\S]*tx\.try_send/);
   assert.match(rust, /async fn retry_pending_control\(&self\)[\s\S]*self\.control_gate\.lock\(\)\.await/);
@@ -133,6 +136,7 @@ test('retryable delivery and pending privacy controls keep bounded background re
   const renewal = rust.match(/pub\(super\) async fn recover_expired_credentials_locked[\s\S]*?pub\(super\) fn finish_credential_renewal_checkpoint/)?.[0] || '';
   assert.match(renewal, /checkpoint\.credential_renewal_checkpoint = Some[\s\S]*persist_state\(&checkpoint\)[\s\S]*\*state = checkpoint;[\s\S]*finish_credential_renewal_checkpoint\(state\)/);
   assert.doesNotMatch(renewal, /rebind_period\(|rebind_lifecycle_state\(/, 'no child lease may change before the durable checkpoint');
+  assert.match(renewal, /finish_credential_renewal_checkpoint\(state\)[\s\S]*self\.wake_control_worker\(\)/);
   assert.match(rust, /device_data_deleted[\s\S]*handle_authoritative_deletion/);
   assert.match(rust, /async fn handle_authoritative_deletion_locked[\s\S]*collecting\.store\(false[\s\S]*persist_state\(&fresh\)[\s\S]*outbox\.clear\(\)[\s\S]*tasks\.clear\(\)/);
   assert.match(rust, /fn state_after_authoritative_deletion[\s\S]*PersistedState::fresh/);

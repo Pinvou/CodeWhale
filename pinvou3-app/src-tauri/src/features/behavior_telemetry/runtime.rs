@@ -120,17 +120,18 @@ impl BehaviorTelemetry {
         if renewal_pending {
             // This state is not shared with workers yet; never block an async
             // runtime thread while repairing the checkpoint before sanitizing.
-            let mut guard = telemetry
-                .state
-                .try_lock()
-                .expect("new telemetry state is uncontended");
-            if let Some(state) = guard.as_mut() {
-                if let Err(error) = telemetry.finish_credential_renewal_checkpoint(state) {
-                    telemetry.state_healthy.store(false, Ordering::Release);
-                    log::error!(
-                        "[pinvou3][behavior] credential renewal recovery deferred: {error:#}"
-                    );
-                }
+            let recovery = match telemetry.state.try_lock() {
+                Ok(mut guard) => match guard.as_mut() {
+                    Some(state) => telemetry.finish_credential_renewal_checkpoint(state),
+                    None => Err(anyhow::anyhow!("credential renewal state missing")),
+                },
+                Err(error) => Err(anyhow::anyhow!(
+                    "credential renewal state unavailable: {error}"
+                )),
+            };
+            if let Err(error) = recovery {
+                telemetry.state_healthy.store(false, Ordering::Release);
+                log::error!("[pinvou3][behavior] credential renewal recovery deferred: {error:#}");
             }
         }
         if telemetry.state_healthy.load(Ordering::Acquire) {
@@ -161,7 +162,7 @@ impl BehaviorTelemetry {
             let mut control_worker = telemetry.worker_clone();
             control_worker.control_tx = None;
             tauri::async_runtime::spawn(Self::run_control_worker(rx, control_worker));
-            if telemetry.has_pending_control_sync() {
+            if telemetry.has_pending_control_sync() || renewal_pending {
                 telemetry.wake_control_worker();
             }
         }
@@ -579,7 +580,7 @@ impl BehaviorTelemetry {
     pub(super) async fn run_control_worker(mut rx: mpsc::Receiver<()>, telemetry: Self) {
         while rx.recv().await.is_some() {
             let mut retry_delay = Duration::from_secs(1);
-            while telemetry.has_pending_control().await {
+            while telemetry.has_pending_background_work().await {
                 match telemetry.retry_pending_control().await {
                     Ok(()) => retry_delay = Duration::from_secs(1),
                     Err(error) => {
@@ -601,6 +602,40 @@ impl BehaviorTelemetry {
                 }
             }
         }
+    }
+
+    async fn has_pending_background_work(&self) -> bool {
+        self.state.lock().await.as_ref().is_some_and(|state| {
+            state.has_pending_control() || state.renewal_checkpoint_is_current(&self.runtime)
+        })
+    }
+
+    pub(super) async fn retry_pending_control(&self) -> Result<()> {
+        let _control_guard = self.control_gate.lock().await;
+        let recovered_generation = {
+            let mut guard = self.state.lock().await;
+            if let Some(state) = guard.as_mut()
+                && state.renewal_checkpoint_is_current(&self.runtime)
+            {
+                if let Err(error) = self.finish_credential_renewal_checkpoint(state) {
+                    self.state_healthy.store(false, Ordering::Release);
+                    return Err(error);
+                }
+                Some(state.control.generation)
+            } else {
+                None
+            }
+        };
+        if let Some(generation) = recovered_generation {
+            self.flush_tool_install_terminals(generation);
+            if let Some(tx) = &self.event_tx {
+                let _ = tx.try_send(());
+            }
+            if let Some(tx) = &self.report_tx {
+                let _ = tx.try_send(());
+            }
+        }
+        self.retry_pending_control_locked().await
     }
 
     pub(super) async fn run_worker(mut rx: mpsc::Receiver<()>, telemetry: Self) {
@@ -1060,6 +1095,7 @@ impl BehaviorTelemetry {
         *state = checkpoint;
         if let Err(error) = self.finish_credential_renewal_checkpoint(state) {
             self.state_healthy.store(false, Ordering::Release);
+            self.wake_control_worker();
             return Err(error);
         }
         renewal_transition.complete();
@@ -1377,11 +1413,6 @@ impl BehaviorTelemetry {
             self.wake_control_worker();
         }
         self.delete_local_data().await
-    }
-
-    pub(super) async fn retry_pending_control(&self) -> Result<()> {
-        let _control_guard = self.control_gate.lock().await;
-        self.retry_pending_control_locked().await
     }
 
     pub(super) async fn retry_pending_control_locked(&self) -> Result<()> {

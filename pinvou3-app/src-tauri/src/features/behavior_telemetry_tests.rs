@@ -405,37 +405,68 @@ async fn diagnostic_renewal_checkpoint_survives_each_interrupted_write_on_real_s
     for stage in 0..4 {
         let home = TestHome::new();
         let (base, heartbeat_server) = mock_http(vec![(200, "{}")]).await;
-        let (events_base, _events_seen, release_events, events_server) = controlled_http(503, "{}").await;
+        let (events_base, _events_seen, release_events, events_server) =
+            controlled_http(503, "{}").await;
         let events_url = format!("{events_base}/events");
-        let _env = EnvRestore::set(&home, &[
-            ("PINVOU_BEHAVIOR_TELEMETRY_ENABLED", "true"),
-            ("PINVOU_TELEMETRY_BASE_URL", &base),
-            ("PINVOU_BEHAVIOR_EVENTS_URL", &events_url),
-            ("PINVOU_TELEMETRY_ENROLLMENT_TOKEN", "test-enrollment-token-1234567890"),
-        ]);
+        let _env = EnvRestore::set(
+            &home,
+            &[
+                ("PINVOU_BEHAVIOR_TELEMETRY_ENABLED", "true"),
+                ("PINVOU_TELEMETRY_BASE_URL", &base),
+                ("PINVOU_BEHAVIOR_EVENTS_URL", &events_url),
+                (
+                    "PINVOU_TELEMETRY_ENROLLMENT_TOKEN",
+                    "test-enrollment-token-1234567890",
+                ),
+            ],
+        );
         let runtime = RuntimeConfig::from_env();
         let mut state = heartbeat_state(&runtime);
         let telemetry = test_telemetry(runtime, state.clone());
         let failure = diagnostic_failure("checkpoint_session", "checkpoint_turn");
         let incident_id = failure.event_id.clone();
         telemetry.track(failure);
-        let preview = diagnostics::preview_diagnostic(&telemetry, DiagnosticPreviewRequest {
-            incident_id, notes: "reproduce empty response".into(), attachments: vec![],
-        }).unwrap();
-        diagnostics::confirm_diagnostic(&telemetry, preview["preview_token"].as_str().unwrap(), true).unwrap();
+        let preview = diagnostics::preview_diagnostic(
+            &telemetry,
+            DiagnosticPreviewRequest {
+                incident_id,
+                notes: "reproduce empty response".into(),
+                attachments: vec![],
+            },
+        )
+        .unwrap();
+        diagnostics::confirm_diagnostic(
+            &telemetry,
+            preview["preview_token"].as_str().unwrap(),
+            true,
+        )
+        .unwrap();
         let frozen = preview["report"].clone();
         state.device_token = Some("renewed_checkpoint_token".into());
         state.control.collection_period_id = Some("renewed_checkpoint_period".into());
         state.credential_renewal_checkpoint = Some(CollectionLease {
-            generation: state.control.generation, collection_period_id: "renewed_checkpoint_period".into(),
+            generation: state.control.generation,
+            collection_period_id: "renewed_checkpoint_period".into(),
         });
         persist_state(&state).unwrap();
         if stage >= 1 {
-            let origins = diagnostics::origin_periods(&telemetry, state.control.generation).unwrap();
-            telemetry.outbox.lock().unwrap().rebind_period("renewed_checkpoint_period", state.control.generation, &origins).unwrap();
+            let origins =
+                diagnostics::origin_periods(&telemetry, state.control.generation).unwrap();
+            telemetry
+                .outbox
+                .lock()
+                .unwrap()
+                .rebind_period(
+                    "renewed_checkpoint_period",
+                    state.control.generation,
+                    &origins,
+                )
+                .unwrap();
         }
         if stage >= 2 {
-            telemetry.rebind_lifecycle_state(state.control.generation, "renewed_checkpoint_period").unwrap();
+            telemetry
+                .rebind_lifecycle_state(state.control.generation, "renewed_checkpoint_period")
+                .unwrap();
         }
         if stage == 3 {
             // Inject failure of the final state commit after every child file
@@ -443,7 +474,11 @@ async fn diagnostic_renewal_checkpoint_survives_each_interrupted_write_on_real_s
             let backup = state_path().with_extension("checkpoint-backup");
             std::fs::rename(state_path(), &backup).unwrap();
             std::fs::create_dir(state_path()).unwrap();
-            assert!(telemetry.finish_credential_renewal_checkpoint(&mut state).is_err());
+            assert!(
+                telemetry
+                    .finish_credential_renewal_checkpoint(&mut state)
+                    .is_err()
+            );
             std::fs::remove_dir(state_path()).unwrap();
             std::fs::rename(backup, state_path()).unwrap();
         }
@@ -452,25 +487,42 @@ async fn diagnostic_renewal_checkpoint_survives_each_interrupted_write_on_real_s
         // and diagnostic authorization sanitization, with real persisted files.
         let restarted = BehaviorTelemetry::new();
         let workers = Arc::downgrade(&restarted.state);
-        let reports: Value = serde_json::from_slice(&std::fs::read(paths::pinvou3_home().join("failure-diagnostic-reports.json")).unwrap()).unwrap();
+        let reports: Value = serde_json::from_slice(
+            &std::fs::read(paths::pinvou3_home().join("failure-diagnostic-reports.json")).unwrap(),
+        )
+        .unwrap();
         let report_preserved = reports.as_array().is_some_and(|rows| rows.len() == 1)
             && reports[0]["payload"] == frozen
             && reports[0]["lease"]["collection_period_id"] == "renewed_checkpoint_period";
         let committed = load_state().unwrap().unwrap();
         let events = Outbox::load(outbox_path()).unwrap();
-        let event_preserved = events.records.iter().any(|row| row.event["diagnostic_id"] == frozen["incident_id"]
-            && row.event["diagnostic_origin_period_id"] == frozen["incident_period_id"]
-            && row.collection_period_id == "renewed_checkpoint_period");
+        let event_preserved = events.records.iter().any(|row| {
+            row.event["diagnostic_id"] == frozen["incident_id"]
+                && row.event["diagnostic_origin_period_id"] == frozen["incident_period_id"]
+                && row.collection_period_id == "renewed_checkpoint_period"
+        });
         restarted.collecting.store(false, Ordering::Release);
         drop(restarted);
         let _ = release_events.send(());
-        events_server.abort(); let _ = events_server.await;
-        heartbeat_server.abort(); let _ = heartbeat_server.await;
+        events_server.abort();
+        let _ = events_server.await;
+        heartbeat_server.abort();
+        let _ = heartbeat_server.await;
         tokio::time::timeout(Duration::from_secs(5), async {
-            while workers.upgrade().is_some() { tokio::time::sleep(Duration::from_millis(10)).await; }
-        }).await.expect("drain workers before restoring the synthetic home");
-        assert!(report_preserved, "confirmed report must survive interruption stage {stage}");
-        assert!(event_preserved, "original incident must survive interruption stage {stage}");
+            while workers.upgrade().is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("drain workers before restoring the synthetic home");
+        assert!(
+            report_preserved,
+            "confirmed report must survive interruption stage {stage}"
+        );
+        assert!(
+            event_preserved,
+            "original incident must survive interruption stage {stage}"
+        );
         assert!(committed.credential_renewal_checkpoint.is_none());
     }
 }
@@ -482,7 +534,8 @@ fn diagnostic_checkpoint_cannot_restore_withdrawn_or_different_authorization() {
     for boundary in ["disabled", "deleted", "generation", "endpoint"] {
         let mut state = heartbeat_state(&runtime);
         state.credential_renewal_checkpoint = Some(CollectionLease {
-            generation: state.control.generation, collection_period_id: "installation_period".into(),
+            generation: state.control.generation,
+            collection_period_id: "installation_period".into(),
         });
         match boundary {
             "disabled" => state.control.enabled = false,
@@ -493,8 +546,74 @@ fn diagnostic_checkpoint_cannot_restore_withdrawn_or_different_authorization() {
         }
         let telemetry = test_telemetry(runtime.clone(), state.clone());
         assert!(!state.renewal_checkpoint_is_current(&runtime), "{boundary}");
-        assert!(telemetry.finish_credential_renewal_checkpoint(&mut state).is_err(), "{boundary}");
+        assert!(
+            telemetry
+                .finish_credential_renewal_checkpoint(&mut state)
+                .is_err(),
+            "{boundary}"
+        );
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn credential_checkpoint_recovers_in_background_without_queued_reports() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://localhost:1");
+    let mut state = heartbeat_state(&runtime);
+    state.control.collection_period_id = Some("renewed_empty_queue_period".into());
+    state.credential_renewal_checkpoint = Some(CollectionLease {
+        generation: state.control.generation,
+        collection_period_id: "renewed_empty_queue_period".into(),
+    });
+    persist_state(&state).unwrap();
+    let telemetry = test_telemetry(runtime, state.clone());
+    assert_eq!(
+        diagnostics::diagnostic_incidents(&telemetry).unwrap()["reports"],
+        json!([])
+    );
+    assert!(telemetry.outbox.lock().unwrap().records.is_empty());
+    telemetry.collecting.store(false, Ordering::Release);
+    let backup = state_path().with_extension("checkpoint-backup");
+    std::fs::rename(state_path(), &backup).unwrap();
+    std::fs::create_dir(state_path()).unwrap();
+    assert!(
+        telemetry
+            .finish_credential_renewal_checkpoint(&mut state)
+            .is_err()
+    );
+    telemetry.state_healthy.store(false, Ordering::Release);
+    let (tx, rx) = mpsc::channel(1);
+    // Only the control worker runs: no report, event or restart can rescue it.
+    let worker = tokio::spawn(BehaviorTelemetry::run_control_worker(
+        rx,
+        telemetry.worker_clone(),
+    ));
+    tx.send(()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!telemetry.collecting.load(Ordering::Acquire));
+    std::fs::remove_dir(state_path()).unwrap();
+    std::fs::rename(backup, state_path()).unwrap();
+    let recovered = tokio::time::timeout(Duration::from_secs(5), async {
+        while !telemetry.collecting.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    drop(tx);
+    worker.await.unwrap();
+    recovered.expect("disk recovery resumes collection without a queued report or restart");
+    assert!(telemetry.state_healthy.load(Ordering::Acquire));
+    assert!(
+        load_state()
+            .unwrap()
+            .unwrap()
+            .credential_renewal_checkpoint
+            .is_none()
+    );
+    assert_eq!(
+        telemetry.current_lease().unwrap().collection_period_id,
+        "renewed_empty_queue_period"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -505,10 +624,17 @@ async fn diagnostic_worker_settles_a_stale_lease_without_a_renewal_checkpoint() 
     let failure = diagnostic_failure("stale_session", "stale_turn");
     let id = failure.event_id.clone();
     telemetry.track(failure);
-    let preview = diagnostics::preview_diagnostic(&telemetry, DiagnosticPreviewRequest {
-        incident_id: id, notes: "reproduce empty response".into(), attachments: vec![],
-    }).unwrap();
-    diagnostics::confirm_diagnostic(&telemetry, preview["preview_token"].as_str().unwrap(), true).unwrap();
+    let preview = diagnostics::preview_diagnostic(
+        &telemetry,
+        DiagnosticPreviewRequest {
+            incident_id: id,
+            notes: "reproduce empty response".into(),
+            attachments: vec![],
+        },
+    )
+    .unwrap();
+    diagnostics::confirm_diagnostic(&telemetry, preview["preview_token"].as_str().unwrap(), true)
+        .unwrap();
     *telemetry.collection_period_id.write().unwrap() = Some("superseding_period".into());
     let (tx, rx) = mpsc::channel(1);
     let worker = tokio::spawn(diagnostics::run_report_worker(rx, telemetry.worker_clone()));
@@ -516,13 +642,17 @@ async fn diagnostic_worker_settles_a_stale_lease_without_a_renewal_checkpoint() 
     let result = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let snapshot = diagnostics::diagnostic_incidents(&telemetry).unwrap();
-            if snapshot["reports"][0]["status"] == "rejected" { break snapshot; }
+            if snapshot["reports"][0]["status"] == "rejected" {
+                break snapshot;
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await;
+    })
+    .await;
     drop(tx);
     worker.await.unwrap();
-    let snapshot = result.expect("stale lease must settle without network or a five-second polling cycle");
+    let snapshot =
+        result.expect("stale lease must settle without network or a five-second polling cycle");
     assert_eq!(snapshot["reports"][0]["reason"], "authorization_changed");
 }
 
