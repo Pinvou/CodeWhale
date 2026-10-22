@@ -104,11 +104,13 @@ function OrphansSection({ copy, onToast }) {
       setRemoveTarget(null);
       onToast?.(copy.orphansDeleted(formatBytes(freed?.freedBytes ?? 0)));
       // 删完重扫一次：列表要反映删除后的世界。重扫失败就把列表整个收回
-      // 未扫描态——攥着删除前的快照，用户会对着幽灵条目再点一次删除。
+      // 未扫描态，并把原因放上现成的错误行——无声退回「未扫描」，用户只会
+      // 觉得列表凭空消失。
       try {
         setResult(await scanOrphans());
-      } catch {
+      } catch (failure) {
         setResult(null);
+        setRequestError(describeOrphanError(copy, failure));
       }
     } catch (failure) {
       setRequestError(describeOrphanError(copy, failure));
