@@ -64,6 +64,64 @@ func waiverFixtureCommand(t *testing.T, r *PostgresRepository, ctx context.Conte
 	return c, key, actor
 }
 
+// waiverHoldReceiptEqual compares every receipt fact. A PostgreSQL timestamp and
+// its JSON replay may use different locations for the same instant.
+func waiverHoldReceiptEqual(got, want Hold) bool {
+	if !got.ExpiresAt.Equal(want.ExpiresAt) {
+		return false
+	}
+	got.ExpiresAt, want.ExpiresAt = time.Time{}, time.Time{}
+	return reflect.DeepEqual(got, want)
+}
+
+func TestUsageWaiverHoldReceiptEquality(t *testing.T) {
+	price := uuid.New()
+	want := Hold{ID: uuid.New(), UsageRequestID: uuid.New(), WalletID: uuid.New(), PriceVersionID: &price, Status: "ACTIVE", MaxMicrocredits: 50, ExpiresAt: time.Unix(1792684800, 123456000).UTC()}
+	for _, offset := range []int{0, 8 * 60 * 60, -5 * 60 * 60} {
+		t.Run(fmt.Sprintf("same-instant-offset-%d", offset), func(t *testing.T) {
+			got := want
+			got.ExpiresAt = want.ExpiresAt.In(time.FixedZone("controlled distinct location", offset))
+			if got.ExpiresAt.Location() == want.ExpiresAt.Location() || !got.ExpiresAt.Equal(want.ExpiresAt) || reflect.DeepEqual(got, want) {
+				t.Fatal("fixture must differ only in time representation")
+			}
+			if !waiverHoldReceiptEqual(got, want) {
+				t.Fatal("equal receipt instant rejected")
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(*Hold)
+	}{
+		{"expiry", func(h *Hold) { h.ExpiresAt = h.ExpiresAt.Add(time.Microsecond) }},
+		{"hold-id", func(h *Hold) { h.ID = uuid.New() }},
+		{"usage-id", func(h *Hold) { h.UsageRequestID = uuid.New() }},
+		{"wallet-id", func(h *Hold) { h.WalletID = uuid.New() }},
+		{"price-version", func(h *Hold) { v := uuid.New(); h.PriceVersionID = &v }},
+		{"price-version-absent", func(h *Hold) { h.PriceVersionID = nil }},
+		{"status", func(h *Hold) { h.Status = "REVIEW" }},
+		{"maximum", func(h *Hold) { h.MaxMicrocredits++ }},
+		{"actual-presence", func(h *Hold) { v := int64(0); h.ActualMicrocredits = &v }},
+	} {
+		t.Run("changed-"+tc.name, func(t *testing.T) {
+			got := want
+			tc.change(&got)
+			if waiverHoldReceiptEqual(got, want) {
+				t.Fatal("changed receipt fact accepted")
+			}
+		})
+	}
+	withActual := want
+	actual := int64(7)
+	withActual.ActualMicrocredits = &actual
+	changedActual := withActual
+	otherActual := int64(8)
+	changedActual.ActualMicrocredits = &otherActual
+	if waiverHoldReceiptEqual(changedActual, withActual) {
+		t.Fatal("changed actual amount accepted")
+	}
+}
+
 func TestUsageWaiverFinancialConservationPostgres(t *testing.T) {
 	r, ctx := retainedFinanceRepository(t)
 	for _, max := range []int64{0, 40, 100} {
@@ -134,7 +192,7 @@ func TestUsageWaiverFinancialConservationPostgres(t *testing.T) {
 			t.Fatal("pending decision source extended", err)
 		}
 		replay, err := r.ExtendHold(ctx, first)
-		if err != nil || !reflect.DeepEqual(replay, saved) {
+		if err != nil || !waiverHoldReceiptEqual(replay, saved) {
 			t.Fatal("existing successful extension receipt blocked", err)
 		}
 		if before != waiverFixtureSnapshot(t, r, ctx) {
