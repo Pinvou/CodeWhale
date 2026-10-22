@@ -297,6 +297,7 @@ mod tests {
             model_store_link_detached: false,
             model_store_link_requested: false,
             preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
             base_url: "https://api.deepseek.com/v1".into(),
             provider_kind: Some("official_api".into()),
             vendor: Some("deepseek".into()),

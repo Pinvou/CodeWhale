@@ -443,6 +443,17 @@ pub(super) fn save_model_inner(
     UserPrefs::update_transaction_with_post_commit(
         |prefs| {
             let old = prefs.model_by_id(&model.id).cloned();
+            // Editor intent: the context-window field was not edited, so a
+            // background store refresh (e.g. the verified 256K repair, which a
+            // one-time marker then protects) must survive the whole-row save.
+            // An edited field keeps its explicit value, including a deliberate
+            // downgrade or clear.
+            if model.preserve_context_window_tokens {
+                if let Some(old) = old.as_ref() {
+                    model.context_window_tokens = old.context_window_tokens;
+                }
+            }
+            model.preserve_context_window_tokens = false;
             let explicit_store_link_requested = model.model_store_link_requested
                 || (old.is_none() && model.model_store_card_id.is_some());
             model.model_store_link_requested = false;
@@ -2157,6 +2168,7 @@ mod tests {
             model_store_link_detached: false,
             model_store_link_requested: false,
             preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
             base_url: "https://active.example/v1".to_string(),
             provider_kind: None,
             vendor: None,

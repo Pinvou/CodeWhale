@@ -3409,6 +3409,99 @@ fn stale_store_model_form_keeps_the_latest_route_and_explicit_detach_is_durable(
     });
 }
 
+#[test]
+fn untouched_context_window_save_keeps_a_background_store_repair() {
+    crate::platform::test_support::with_temp_home("store-model-context-repair-save", || {
+        // The row as an editor snapshot saw it: the legacy 32K cap.
+        let mut original = model_deletion_test_model("store-context", false);
+        original.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+        original.provider_kind = Some("custom".into());
+        original.model = "stable-wire".into();
+        original.base_url = "http://127.0.0.1:8000/v1".into();
+        original.model_store_card_id = Some("stable-card".into());
+        original.context_window_tokens = Some(32768);
+        seed_model_deletion_prefs(&[original.clone()]);
+        // A background store sync raises the cap to the verified 256K and
+        // records the one-time migration marker (which suppresses later
+        // corrections), while the editor stays open on the stale snapshot.
+        UserPrefs::update_transaction(|prefs| {
+            let mut latest = original.clone();
+            latest.context_window_tokens = Some(262144);
+            prefs.upsert_model(latest);
+            prefs.advanced.model_store_context_repairs.insert(
+                "store-context".into(),
+                "verified-256k-v1/stable-card".into(),
+            );
+            Ok(())
+        })
+        .unwrap();
+        // The editor submits only an alias edit carrying its stale 32K snapshot
+        // plus the untouched-field intent.
+        let mut stale_form = original;
+        stale_form.name = "Renamed only".into();
+        stale_form.context_window_tokens = Some(32768);
+        stale_form.preserve_context_window_tokens = true;
+        let store = crate::platform::credential_store::RecordingCredentialStore::new();
+        super::settings::save_model_inner(stale_form, &store).unwrap();
+        let saved = UserPrefs::load()
+            .model_by_id("store-context")
+            .unwrap()
+            .clone();
+        assert_eq!(saved.name, "Renamed only");
+        assert_eq!(
+            saved.context_window_tokens,
+            Some(262144),
+            "the untouched field must keep the background repair, not the stale 32K"
+        );
+        assert!(!saved.preserve_context_window_tokens);
+        assert!(
+            serde_json::to_value(&saved)
+                .unwrap()
+                .get("preserve_context_window_tokens")
+                .is_none(),
+            "the editor intent flag is transient and never persists"
+        );
+        // An explicitly edited value is honored, including a deliberate
+        // downgrade the migration marker must not "correct" back.
+        let mut explicit = saved;
+        explicit.context_window_tokens = Some(32768);
+        super::settings::save_model_inner(explicit, &store).unwrap();
+        assert_eq!(
+            UserPrefs::load()
+                .model_by_id("store-context")
+                .unwrap()
+                .context_window_tokens,
+            Some(32768),
+            "an explicitly edited 32K must win"
+        );
+        // An explicit clear (system default) is honored the same way.
+        let mut auto = UserPrefs::load()
+            .model_by_id("store-context")
+            .unwrap()
+            .clone();
+        auto.context_window_tokens = None;
+        super::settings::save_model_inner(auto, &store).unwrap();
+        assert_eq!(
+            UserPrefs::load()
+                .model_by_id("store-context")
+                .unwrap()
+                .context_window_tokens,
+            None,
+            "an explicitly cleared window stays cleared"
+        );
+        // The repair marker itself is untouched throughout: the backend repair
+        // lane keeps its own suppression semantics.
+        assert_eq!(
+            UserPrefs::load()
+                .advanced
+                .model_store_context_repairs
+                .get("store-context")
+                .map(String::as_str),
+            Some("verified-256k-v1/stable-card")
+        );
+    });
+}
+
 // ---- search credential deletion ordering (search settings save commits before the keyring) ----
 
 use crate::platform::prefs::{SearchCredential, SearchProvider};
