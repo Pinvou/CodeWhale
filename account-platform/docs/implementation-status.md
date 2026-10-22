@@ -1,5 +1,8 @@
 # 账号平台实现状态与差距
 
+> 2026-10-22 审核勘误：下文 2026-09-20 所称 approval-recovery / zero-effect OpenAPI 已修复，仅是原提交的历史结论；本轮固定基线中该正式合同曾缺失，不能据此宣称现状已覆盖。本轮补入 [Account 恢复权威](../contracts/openapi/approval-recovery.json)、[Billing 结果/效果读取](../contracts/openapi/approval-recovery-billing.json) 与 [Token 结果/效果读取](../contracts/openapi/approval-recovery-token.json)，分别描述已有入口，不新增 API、权限或自动恢复许可。实际 Go DTO 序列化交给同一 Ajv2020 验证器，并检验未知字段及 UNKNOWN/UNCONFIRMED 保守边界；这不等于真实跨域恢复、生产授权、部署或此前未验现场环境通过。
+
+
 > F18 恢复说明（2026-10-10）：下文保留原成熟源码 `828242031c42911099792ec78c1f746ed8620c49` 的需求、架构和任务追溯基线。原文中的“当前”、完成状态、历史审核及部署记录均指该历史基线，不能作为本轮 F01–F18 的运行、完整 E2E、激活或部署证明；本轮实际验证按对应分支冻结证据与 PR 限制说明判定，F19 运维演练/激活及尚未验收的环境任务不因恢复本文而完成。本文恢复用于既有统一 verify 文档合同，不新增业务要求。
 
 > 历史路径说明：本组只恢复所列基线文档，没有恢复全部兄弟文档、旧测试或旧制品。下文指向未交付文件的链接与路径反映该历史提交树，不是当前可执行入口；不得据此补造文件或视为当前验收已完成。当前操作以 `account-platform/deploy/runbooks/` 中实际交付的手册和相应 PR 验证记录为准。
