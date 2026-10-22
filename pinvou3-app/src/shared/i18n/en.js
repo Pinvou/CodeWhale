@@ -476,7 +476,7 @@ export const dictEn = {
           orphansScanning:'Scanning…',
           orphansEmpty:'No leftover files found.',
           orphansPartial:'Too many directories; the list was truncated.',
-          orphansUnresolved:'A download is in progress and its target directory cannot be confirmed; the list may be incomplete. Double-check before deleting.',
+          orphansUnresolved:'A download is in progress and its target directory cannot be confirmed; the list may be incomplete, and deletion is refused until it finishes. Try again later.',
           orphansDelete:'Delete',
           orphansDeleteConfirmTitle:'Permanently delete this directory?',
           orphansDeleteConfirmHint:'The directory and everything inside will be deleted, irreversibly. Models in the library are not affected.',

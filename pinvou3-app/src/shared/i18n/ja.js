@@ -473,7 +473,7 @@ const jaBase = {
           orphansScanning:'スキャン中…',
           orphansEmpty:'残存ファイルは見つかりませんでした。',
           orphansPartial:'ディレクトリが多すぎるため、一覧を切り詰めました。',
-          orphansUnresolved:'ダウンロードが実行中で、対象ディレクトリを確定できません。一覧は不完全な可能性があります。削除前に再度確認してください。',
+          orphansUnresolved:'ダウンロードが実行中で、対象ディレクトリを確定できません。一覧は不完全な可能性があり、終了するまで削除は拒否されます。後ほどお試しください。',
           orphansDelete:'削除',
           orphansDeleteConfirmTitle:'このディレクトリを完全に削除しますか？',
           orphansDeleteConfirmHint:'ディレクトリと中身はすべて削除され、元に戻せません。ライブラリ登録済みのモデルには影響しません。',

@@ -479,7 +479,7 @@ export const dictZh = {
           orphansScanning:'正在扫描…',
           orphansEmpty:'没有发现残留文件。',
           orphansPartial:'目录过多，结果已截断。',
-          orphansUnresolved:'有正在进行的下载，无法完全确认目录归属；列表可能不完整，删除前请再次确认。',
+          orphansUnresolved:'有正在进行的下载，无法完全确认目录归属；列表可能不完整，且在其结束前删除会被拒绝，请稍后再试。',
           orphansDelete:'删除',
           orphansDeleteConfirmTitle:'永久删除这个目录？',
           orphansDeleteConfirmHint:'将删除该目录及其全部内容，不可恢复；已入库的模型不受影响。',
