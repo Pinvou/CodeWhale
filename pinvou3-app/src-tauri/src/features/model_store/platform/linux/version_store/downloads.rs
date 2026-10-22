@@ -19,11 +19,33 @@ fn table(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS model_download_reservations (
         card_id TEXT PRIMARY KEY, models_root TEXT NOT NULL, size_bytes INTEGER NOT NULL,
-        downloading INTEGER NOT NULL);
+        downloading INTEGER NOT NULL, target_started INTEGER NOT NULL DEFAULT 1);
         CREATE TABLE IF NOT EXISTS model_download_retained_roots (
         card_id TEXT NOT NULL, models_root TEXT NOT NULL,
         PRIMARY KEY(card_id, models_root))",
-    )
+    )?;
+    let has_started_column = || {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('model_download_reservations')
+             WHERE name='target_started')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+    };
+    if !has_started_column()? {
+        // Existing rows may already own partial files. Only new attempts can
+        // prove that their scripts have not started; never unpin old targets.
+        if let Err(error) = conn.execute(
+            "ALTER TABLE model_download_reservations ADD COLUMN target_started INTEGER NOT NULL DEFAULT 1",
+            [],
+        ) {
+            // Another process can finish this additive migration first.
+            if !has_started_column()? {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn downloads() -> Result<Vec<Download>, String> {
@@ -71,14 +93,35 @@ fn lease_file(card_id: &str) -> Result<std::fs::File, String> {
 }
 
 fn release_plan(card_id: &str) -> Result<(), String> {
-    let conn = connection()?;
+    let mut conn = connection()?;
     table(&conn).map_err(|e| e.to_string())?;
-    conn.execute(
-        "UPDATE model_download_reservations SET downloading=0 WHERE card_id=?1",
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    // A first attempt rejected before scripts is not a retry target. Preserve
+    // its entire root for quota/residual accounting without pinning the next
+    // installation there. Keep old targets and installed records unchanged.
+    let pending = "card_id=?1 AND target_started=0
+        AND NOT EXISTS(SELECT 1 FROM store_models WHERE card_id=?1)";
+    tx.execute(
+        &format!(
+            "INSERT OR IGNORE INTO model_download_retained_roots(card_id,models_root)
+        SELECT card_id,models_root FROM model_download_reservations WHERE {pending}"
+        ),
         [card_id],
     )
     .map_err(|e| e.to_string())?;
-    Ok(())
+    tx.execute(
+        &format!("DELETE FROM model_download_reservations WHERE {pending}"),
+        [card_id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE model_download_reservations SET downloading=0,target_started=1 WHERE card_id=?1",
+        [card_id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
 }
 
 /// A lease makes process crashes distinguishable from slow active downloads,
@@ -88,6 +131,7 @@ pub struct DownloadReservation {
     pub root: PathBuf,
     _lease: std::fs::File,
     finished: bool,
+    preserve_target: bool,
 }
 
 impl DownloadReservation {
@@ -115,7 +159,11 @@ impl DownloadReservation {
                 Err(std::fs::TryLockError::Error(e)) => return Err(e.to_string()),
             }
         }
+        // Owning the lease proves any previous process has stopped. Recover
+        // an unstarted first attempt before choosing the current target.
+        release_plan(card_id)?;
         let stored = db::get_store_model(card_id).map_err(|e| e.to_string())?;
+        let installed = stored.is_some();
         let registered = downloads()?
             .into_iter()
             .find(|d| d.card_id == card_id)
@@ -150,14 +198,13 @@ impl DownloadReservation {
                 return Err("普通下载目录位于已登记的隔离版本内，未修改任何资源。".into());
             }
         }
-        // A previous owner's lease has ended: a retry replaces its old plan,
-        // while retaining every file in its original root for quota accounting.
-        release_plan(card_id)?;
+        let preserve_target = installed || registered.is_some();
         Ok(Self {
             card_id: card_id.into(),
             root,
             _lease: lease,
             finished: false,
+            preserve_target,
         })
     }
 
@@ -168,16 +215,35 @@ impl DownloadReservation {
         let conn = connection()?;
         table(&conn).map_err(|e| e.to_string())?;
         conn.execute(
-            "INSERT INTO model_download_reservations(card_id,models_root,size_bytes,downloading)
-            VALUES(?1,?2,?3,1) ON CONFLICT(card_id) DO UPDATE SET
-            models_root=excluded.models_root,size_bytes=excluded.size_bytes,downloading=1",
+            "INSERT INTO model_download_reservations(card_id,models_root,size_bytes,downloading,target_started)
+            VALUES(?1,?2,?3,1,?4) ON CONFLICT(card_id) DO UPDATE SET
+            models_root=excluded.models_root,size_bytes=excluded.size_bytes,downloading=1,
+            target_started=MAX(model_download_reservations.target_started,excluded.target_started)",
             params![
                 self.card_id,
                 self.root.to_string_lossy(),
-                i64::try_from(size_bytes).map_err(|e| e.to_string())?
+                i64::try_from(size_bytes).map_err(|e| e.to_string())?,
+                self.preserve_target,
             ],
         )
         .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Persist the target immediately before entering the first script stage.
+    /// A crash or failure after this point must keep possible script outputs in
+    /// the same retry location, including engine probes/installers.
+    pub fn start_scripts(&self) -> Result<(), String> {
+        let changed = connection()?
+            .execute(
+                "UPDATE model_download_reservations SET target_started=1
+                 WHERE card_id=?1 AND models_root=?2 AND downloading=1",
+                params![self.card_id, self.root.to_string_lossy()],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed != 1 {
+            return Err("下载配额登记已变化，未执行模型脚本。".into());
+        }
         Ok(())
     }
 
