@@ -4,12 +4,22 @@
 // in params and layout, extracted here to dedupe. Probe/selection behavior matches both originals.
 import { useEffect, useState } from 'react';
 import { bridge } from '../../hooks/useBridge.js';
+import {
+  alwaysThinkingSpecForModel,
+  baseUrlUsesLocalOrPrivate,
+  localReasoningTiers,
+  reasoningEffortDisplayForTiers,
+  reasoningEffortTiersForModel,
+} from './model-catalog.js';
 
 // Probes the local server kind (vllm/ollama/lmstudio/generic) and returns { probedKind, probePending }.
 // - enabled=false (endpoint not local/private-network) synchronously clears the probe window; tiers fall back to the model catalog;
-// - probePending is true from the moment a probe is scheduled (debounce window included): no tiers are offered inside the window,
-//   so the user cannot pick/save a misleading tier while the probe is undecided; an unreachable probe (bridge
-//   unsupported/call failed) is reset by then/catch/finally to null + pending=false, landing on the default four tiers;
+// - probePending is true from the moment a probe is scheduled (debounce window included). Whether pending hides the tiers is the
+//   consumer's call via pendingHidesTiers (below), not this hook's: the openai_compatible preset keeps the round-6 hiding window
+//   (an "engine kind unknown" endpoint offers no tiers until decided, so the user cannot pick/save a misleading tier), while the
+//   local_vllm preset — whose unprobed route is already known to be vllm wire — shows the static four tiers during pending
+//   (settings_ui_smoke ⑥.5b contract). An unreachable probe (bridge unsupported/call failed) is reset by then/catch/finally to
+//   null + pending=false, landing on the default four tiers;
 // - debounceMs>0 schedules a debounced probe (the form's base_url/api_key are per-keystroke input state; without debouncing
 //   every keystroke would fire a probe, and the Rust-side cache key includes port/path, so every intermediate state is a
 //   new key probed serially, ~12s worst case); debounceMs=0 matches the original session popover, firing inline in the effect;
@@ -29,12 +39,14 @@ export function useLocalServerKindProbe({ enabled, baseUrl, apiKey = '', modelId
       return;
     }
     let cancelled = false;
-    // Enter pending during the debounce window (round-6 P2): no tiers are
-    // offered from the moment the probe is scheduled (the default four
-    // tiers from localProbeTiersForKind(null) are only the fallback for an
-    // unreachable probe; they must not be exposed during the "probe
-    // incoming" window, or the user could pick/save a misleading tier
-    // before the result is known). An unreachable probe (bridge
+    // Enter pending during the debounce window (round-6 P2): this only
+    // marks the probe as undecided — the hook itself never hides tiers.
+    // Consumer-side pendingHidesTiers applies the hiding window for the
+    // openai_compatible preset only (engine kind unknown → offer no tiers
+    // until decided); the local_vllm preset keeps the static four tiers
+    // during pending (its unprobed route is known vllm wire; ⑥.5b). The
+    // default four tiers from localProbeTiersForKind(null) are the fallback
+    // for an unreachable probe. An unreachable probe (bridge
     // unsupported/failed) is reset by then/catch to null + pending=false,
     // landing on the default four tiers.
     setProbePending(true);
@@ -68,6 +80,79 @@ export function useLocalServerKindProbe({ enabled, baseUrl, apiKey = '', modelId
   }, [enabled, baseUrl, apiKey, modelId, debounceMs, probeSupported, trimInputs]);
   return { probedKind, probePending };
 }
+
+// Shared reasoning-tier glue for the two reasoning-effort surfaces (the composer model
+// popover in composer-shared.jsx and the model form in SettingsView.jsx): resolves the
+// local/private-network probe together with the static tier table into one tier state.
+// Both call sites previously carried identical copies of this block; the probe mechanics
+// themselves stay in useLocalServerKindProbe.
+//   model        - the model descriptor driving tier routing (the composer's saved model
+//                  entry, or the form's { preset, model, vendor, base_url, provider_kind }
+//                  snapshot); null (composer without an active model) means "no tiers".
+//   storedEffort - the effort value whose highlight is computed. The composer passes the
+//                  saved model's raw reasoning_effort normalized against the model's static
+//                  table; the form passes its already-normalized live state. Normalization
+//                  stays with the caller — this hook only maps the value onto the resolved
+//                  tiers for display (reasoningEffortDisplayForTiers semantics).
+//   baseUrl/apiKey/modelId/debounceMs/trimInputs - passed through to
+//                  useLocalServerKindProbe (baseUrl also feeds the local/private check; the
+//                  URL parser ignores edge whitespace so callers need not trim).
+// Returns { isLocalCompatible, probedKind, probePending, reasoningEffortTiers,
+//           noControlThinking, reasoningEffortDisplay }.
+export function useModelReasoningTierState({ model, storedEffort = null, baseUrl, apiKey = '', modelId = null, debounceMs = 0, trimInputs = false }) {
+  // local_vllm 预设的本地端点同样探测：本地"检测"流程历史存量把探测到的
+  // Ollama/LM Studio/Tachyon 候选都存成该预设；探测出 tachyon（驭光）时档表
+  // 必须切到 ['off','low','medium','max']（其 wire 无 high、最深档是 xhigh），
+  // 否则表单暴露的 high 实际只能发 medium、真实最深档 max 不可达。
+  const isLocalCompatible = !!model
+    && (model.preset === 'openai_compatible' || model.preset === 'local_vllm')
+    && baseUrlUsesLocalOrPrivate(baseUrl);
+  const { probedKind, probePending } = useLocalServerKindProbe({
+    enabled: isLocalCompatible,
+    baseUrl,
+    apiKey,
+    modelId,
+    debounceMs,
+    trimInputs,
+  });
+  // local_vllm 预设只有探测出 tachyon 才跟随探测档表：Rust 侧 provider() 的
+  // LocalVllm 臂只对 Tachyon 翻转方言，其余探测结果（含 Ollama/LM Studio 的
+  // 历史存量）仍走 vllm wire，档表保持与静态四档一致，避免 UI 与实际路线劈叉。
+  // openai_compatible 预设的所有探测结果都由探测路由消费，维持原语义。
+  const probeKindForRoute = model && model.preset === 'local_vllm'
+    ? (probedKind === 'tachyon' ? 'tachyon' : null)
+    : probedKind;
+  // local_vllm 预设没有 pending 隐藏窗：未探测路线已知是 vllm wire，pending 期
+  // 直接给静态四档（默认 low），探测返回 tachyon 才切 ['off','low','medium',
+  // 'max']。手动添加本地模型的表单契约（settings_ui_smoke ⑥.5b）要求档位
+  // 立即可见且默认选中「低」，pending 期隐藏档位会让保存写入显式 high、绕过
+  // bridge 的本地默认档约束；隐藏窗是 ⑥.5d 为 openai_compatible「引擎类型
+  // 未知」端点设计的，不适用于已知 wire 的本地预设。这也消除了 pending 窗
+  // 内保存把 reasoning_effort 写成 null 的问题。
+  const pendingHidesTiers = probePending && model?.preset !== 'local_vllm';
+  const reasoningEffortTiers = isLocalCompatible
+    ? (pendingHidesTiers ? [] : (localReasoningTiers(model.model, probeKindForRoute) || []))
+    : (model ? (reasoningEffortTiersForModel(model) || []) : []);
+  // Local routes (vllm preset / local-compatible endpoints) hit the "always-thinking,
+  // no-control" knowledge table: the effort-tier area shows an "always on" hint instead of
+  // probe-unsupported.
+  const noControlThinking = !!model
+    && (model.preset === 'local_vllm' || isLocalCompatible)
+    && !!(alwaysThinkingSpecForModel(model.model) || {}).noControl;
+  // Highlight fallback: the display maps a stored tier missing from the (possibly
+  // probed-narrowed) table to the nearest tier (think:true is equivalent to high), while
+  // click/save comparison keeps the caller's original value.
+  const reasoningEffortDisplay = reasoningEffortDisplayForTiers(storedEffort, reasoningEffortTiers);
+  return { isLocalCompatible, probedKind, probePending, reasoningEffortTiers, noControlThinking, reasoningEffortDisplay };
+}
+
+// zh fallback strings for the tier hints: same semantics as the i18n copy, used only when
+// t.uiSettingsDetail lacks the key (matching the inline fallbacks at both call sites before extraction).
+const TIER_FALLBACK_COPY = {
+  pending: '正在探测服务类型…',
+  alwaysOn: '该模型思考始终开启，无法关闭',
+  unsupported: '该端点不支持思考档位调节',
+};
 
 // Tier pill selector: non-empty tiers render the pill group, empty tiers render a hint line ("probing"/"always
 // on"/"unsupported"). variant only switches layout and tone (composer = compact session-popover pills, form =

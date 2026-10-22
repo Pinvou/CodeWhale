@@ -51,6 +51,7 @@
     "test:tauri-effective-config": "node tests/tauri_effective_config.test.js",
     "test:startup-window": "node tests/startup_window_logic.test.mjs",
     "perf:engine-startup": "node scripts/engine-startup-report.mjs",
+    "perf:native-stream": "node scripts/native-stream-performance.mjs",
     "test:connector-online-install": "node tests/connector_online_install_contract.test.js && node tests/connector_skills_contract.test.js",
     "test:mcp-python-dependencies": "node tests/mcp_python_dependencies_contract.test.js",
     "test:macos-phase2": "node tests/macos_phase2_contract.test.js",
@@ -184,7 +185,7 @@
     "puppeteer-core": "^25.8.0",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.9.3",
-    "vite": "^8.2.2",
+    "vite": "^8.3.4",
     "ws": "^8.22.0"
   },
   "dependencies": {

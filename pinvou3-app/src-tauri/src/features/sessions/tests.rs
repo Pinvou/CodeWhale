@@ -1818,8 +1818,8 @@ fn checked_scheduled_delete_removes_profile_json_and_runtime_directory() {
     store
         .set_session_model_id(&id, Some("override-model".to_string()))
         .expect("scheduled conversation model override");
-    store.set_hidden(&id, true);
-    store.set_pinned(&id, true);
+    store.set_hidden(&id, true).unwrap();
+    store.set_pinned(&id, true).unwrap();
 
     let err = store
         .delete(&id)
@@ -1874,8 +1874,8 @@ fn scheduled_delete_notifies_hook_when_record_commit_precedes_cleanup_error() {
     store
         .set_session_model_id(&id, Some("partial-delete-model".to_string()))
         .expect("set scheduled model override");
-    store.set_hidden(&id, true);
-    store.set_pinned(&id, true);
+    store.set_hidden(&id, true).unwrap();
+    store.set_pinned(&id, true).unwrap();
     let deletions = record_session_deletions(&store);
     store
         .inject_post_record_delete_fault(&id, ErrorKind::PermissionDenied)
@@ -1930,8 +1930,8 @@ fn scheduled_delete_retry_finishes_runtime_cleanup_after_profile_removal() {
     store
         .set_session_model_id(&id, Some("stale-model".to_string()))
         .expect("set scheduled model override");
-    store.set_hidden(&id, true);
-    store.set_pinned(&id, true);
+    store.set_hidden(&id, true).unwrap();
+    store.set_pinned(&id, true).unwrap();
     store
         .inject_post_record_delete_fault(&id, ErrorKind::PermissionDenied)
         .expect("leave the runtime directory after durable record deletion");
@@ -3077,7 +3077,7 @@ fn delete_missing_session_file_is_idempotent() {
     std::fs::create_dir_all(&session_dir).expect("session dir");
     std::fs::remove_file(&session_file).expect("remove session file");
     store.set_active(Some(s.metadata.id.clone()));
-    store.set_pinned(&s.metadata.id, true);
+    store.set_pinned(&s.metadata.id, true).unwrap();
 
     store.delete(&s.metadata.id).expect("delete missing file");
 
@@ -3097,7 +3097,7 @@ fn pinned_sessions_persist_and_delete_cleans() {
         .create_new("/model".into(), None, std::env::temp_dir())
         .expect("create");
 
-    store.set_pinned(&s.metadata.id, true);
+    store.set_pinned(&s.metadata.id, true).unwrap();
     assert!(store.is_pinned(&s.metadata.id));
     assert!(
         store.pinned_at(&s.metadata.id).is_some(),
@@ -3140,7 +3140,7 @@ fn hidden_sessions_persist_restore_and_delete_cleans() {
         .create_new("/model".into(), None, std::env::temp_dir())
         .expect("create");
 
-    store.set_hidden(&s.metadata.id, true);
+    store.set_hidden(&s.metadata.id, true).unwrap();
     assert!(store.is_hidden(&s.metadata.id));
     assert!(
         store.hidden_at(&s.metadata.id).is_some(),
@@ -3155,11 +3155,11 @@ fn hidden_sessions_persist_restore_and_delete_cleans() {
         "hidden_at survives reload"
     );
 
-    reloaded.set_hidden(&s.metadata.id, false);
+    reloaded.set_hidden(&s.metadata.id, false).unwrap();
     assert!(!reloaded.is_hidden(&s.metadata.id));
     assert!(reloaded.hidden_at(&s.metadata.id).is_none());
 
-    reloaded.set_hidden(&s.metadata.id, true);
+    reloaded.set_hidden(&s.metadata.id, true).unwrap();
     reloaded.delete(&s.metadata.id).expect("delete");
     assert!(!reloaded.is_hidden(&s.metadata.id));
     assert!(reloaded.hidden_at(&s.metadata.id).is_none());
@@ -3188,10 +3188,10 @@ fn hiding_session_clears_pinned_state() {
         .create_new("/model".into(), None, std::env::temp_dir())
         .expect("create");
 
-    store.set_pinned(&s.metadata.id, true);
+    store.set_pinned(&s.metadata.id, true).unwrap();
     assert!(store.is_pinned(&s.metadata.id));
 
-    store.set_hidden(&s.metadata.id, true);
+    store.set_hidden(&s.metadata.id, true).unwrap();
     assert!(store.is_hidden(&s.metadata.id));
     assert!(!store.is_pinned(&s.metadata.id));
     assert!(store.pinned_at(&s.metadata.id).is_none());

@@ -263,7 +263,6 @@ command_protocol!(
         "kb_search",
         "kb_stats",
         "kb_model_status",
-        "kb_model_cancel",
         "kb_model_load_after_first_frame",
         "kb_model_download"
     ]

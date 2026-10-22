@@ -1256,7 +1256,17 @@ impl Pinvou3Bridge {
             .map(|m| m.preset)
             .unwrap_or_else(|| self.prefs.advanced.model_preset.unwrap_or_default());
         match preset {
-            ModelPreset::LocalVllm => "vllm".to_string(),
+            // The probe is the ground truth of what is actually running: a
+            // LocalVllm-preset entry pointed at a Tachyon (驭光) server (the
+            // local-detect flow used to save probed Tachyon candidates with
+            // this preset, and hand-typed entries land here too) must not ride
+            // the vllm arm — Tachyon's tier ladder differs (`high` is a 400,
+            // `max` maps to xhigh), so a wrong arm would re-expose the exact
+            // tiers this PR exists to fix.
+            ModelPreset::LocalVllm => match self.probed_local_kind {
+                Some(LocalServerKind::Tachyon) => "tachyon".to_string(),
+                _ => "vllm".to_string(),
+            },
             ModelPreset::Deepseek => "deepseek".to_string(),
             ModelPreset::Kimi => "moonshot".to_string(),
             ModelPreset::Doubao => "volcengine".to_string(),
@@ -1277,6 +1287,11 @@ impl Pinvou3Bridge {
                 if base_url_uses_local_or_private(&self.base_url()) {
                     match self.probed_local_kind {
                         Some(LocalServerKind::Ollama) => return "ollama".to_string(),
+                        // Tachyon (驭光) speaks the vLLM wire family but its
+                        // tier ladder differs (none/low/medium/xhigh; `high`
+                        // is a 400), so it routes to its own engine provider
+                        // dialect instead of riding the vllm arm.
+                        Some(LocalServerKind::Tachyon) => return "tachyon".to_string(),
                         // SGLang / llama.cpp / KoboldCpp / LMDeploy / Docker
                         // Model Runner all support passthrough of
                         // chat_template_kwargs.enable_thinking and
@@ -1393,6 +1408,22 @@ impl Pinvou3Bridge {
     /// continuing with the foundation's safe default, never guessing thinking
     /// content from the reply text.
     fn reasoning_stream_style(&self, provider: &str) -> Option<&'static str> {
+        if provider == "vllm" {
+            return Some(SEPARATE_REASONING_FIELD);
+        }
+        // The "tachyon" route is NOT a truly custom interface: it only ever
+        // comes from a probed Tachyon (驭光) engine, and that server places
+        // thinking in the separate reasoning_content field whenever its
+        // reasoning parser is enabled (the Tachyon cards ship with one).
+        // Keeping None here would hit the foundation's wildcard-proxy
+        // fallback, which inlines reasoning-only deltas into the answer text.
+        // The engine-side route classifier (provider_accepts_reasoning_content)
+        // already covers catalogued reasoning model ids; this explicit table
+        // value additionally covers served ids the model catalog has not
+        // cataloged yet.
+        if provider == "tachyon" {
+            return Some(SEPARATE_REASONING_FIELD);
+        }
         if matches!(
             provider,
             "deepseek" | "moonshot" | "zai" | "minimax" | "xiaomi-mimo" | "volcengine"
@@ -1466,14 +1497,28 @@ impl Pinvou3Bridge {
     /// thinking injection, see image_capability.rs).
     fn request_reasoning_effort(&self) -> Option<String> {
         let provider = self.provider();
-        // "Local route": the vllm/ollama providers. When the openai wire
-        // points at a local/private endpoint (LM Studio/generic server), the
-        // engine treats reasoning_effort as a no-op, so knowledge-table
+        let effort = self.request_reasoning_effort_for_provider(&provider);
+        // Tachyon (驭光) wire 有效档为 none/low/medium/xhigh：`high` 会被服务端
+        // 400 拒绝。任何来源的 high（旧版本存储的值、always-thinking 知识表
+        // 命中模型在表内原样透传的 high，如本地 kimi-k3）统一防御性归一为
+        // medium；`max` 原样放行，由底座 tachyon 方言映射为 xhigh。
+        if provider == "tachyon" && effort.as_deref() == Some("high") {
+            return Some("medium".to_string());
+        }
+        effort
+    }
+
+    /// [`Self::request_reasoning_effort`] 的档位推导主体；Tachyon 的
+    /// high→medium 归一在公共入口统一收口，这里不做 provider 特判。
+    fn request_reasoning_effort_for_provider(&self, provider: &str) -> Option<String> {
+        // "Local route": the vllm/ollama/tachyon providers. When the openai
+        // wire points at a local/private endpoint (LM Studio/generic server),
+        // the engine treats reasoning_effort as a no-op, so knowledge-table
         // normalization would be ineffective and is skipped (the stored value
         // is still passed through per "explicit user choice wins" below, so it
         // takes effect once a later probe resolves to vllm); precise cloud
         // routes (moonshot/zai etc.) are likewise skipped.
-        let is_local_route = matches!(provider.as_str(), "vllm" | "ollama");
+        let is_local_route = matches!(provider, "vllm" | "ollama" | "tachyon");
         if is_local_route {
             let model = self.effective_model();
             if let Some(spec) = model.and_then(|m| always_thinking_spec(&m.model)) {
@@ -1515,7 +1560,7 @@ impl Pinvou3Bridge {
         {
             return Some(effort.to_string());
         }
-        match provider.as_str() {
+        match provider {
             // Local models default to the lowest thinking tier instead of
             // off: real-world models (Qwen3.8 family etc.) do not reliably
             // honor thinking=off, and a silently-thinking model stalls the
@@ -1534,6 +1579,9 @@ impl Pinvou3Bridge {
             // per-model capability probe if real-machine reports cluster
             // here.
             "vllm" => Some("low".to_string()),
+            // Tachyon 同样取最低可表达档 low（显式 arm，避免落进下方
+            // `_ => Some("high")` 通配——high 在 Tachyon wire 上是 400）。
+            "tachyon" => Some("low".to_string()),
             "ollama" => Some("high".to_string()),
             // Local OpenAI-compatible endpoints (loopback/private-network LM
             // Studio/generic services) are not injected, preserving the old
@@ -1600,10 +1648,11 @@ impl Pinvou3Bridge {
     /// OpenAI-compatible services explicitly pointing at a local loopback
     /// allow no auth; cloud/LAN addresses still require a Key by default.
     pub fn api_key_required(&self) -> bool {
-        // vLLM and Ollama (including probed LAN Ollama) default to no auth and
-        // the foundation also allows an empty key (Ollama officially works out
-        // of the box); loopback endpoints are likewise exempt.
-        !matches!(self.provider().as_str(), "vllm" | "ollama")
+        // vLLM, Tachyon (驭光) and Ollama (including probed LAN Ollama) default
+        // to no auth and the foundation also allows an empty key (Ollama
+        // officially works out of the box); loopback endpoints are likewise
+        // exempt.
+        !matches!(self.provider().as_str(), "vllm" | "tachyon" | "ollama")
             && !base_url_uses_loopback(&self.base_url())
     }
 
@@ -1650,18 +1699,20 @@ impl Pinvou3Bridge {
                     }
                 }
             }
-            // Local vLLM needs no auth: when the user leaves the key empty,
-            // fall back to local-no-auth (the base requires a non-empty value).
-            if m.preset == ModelPreset::LocalVllm && self.provider() == "vllm" {
-                return LOCAL_VLLM_API_KEY.to_string();
-            }
-            return m.api_key.clone();
+            // Local vLLM/Tachyon needs no auth: when the user leaves the key
+            // empty, fall back to local-no-auth (the base requires a non-empty
+            // value). Tachyon rides the same placeholder — the probe can flip
+            // a LocalVllm entry to the tachyon dialect, and both dialects
+            // tolerate an empty key the same way.
+            let local_endpoint = m.preset == ModelPreset::LocalVllm
+                && matches!(self.provider().as_str(), "vllm" | "tachyon");
+            return Self::credential_for_model(m, local_endpoint, "model");
         }
         match (
             self.prefs.advanced.model_preset.unwrap_or_default(),
             self.provider().as_str(),
         ) {
-            (ModelPreset::LocalVllm, "vllm") => LOCAL_VLLM_API_KEY.into(),
+            (ModelPreset::LocalVllm, "vllm" | "tachyon") => LOCAL_VLLM_API_KEY.into(),
             _ => String::new(),
         }
     }
@@ -1952,7 +2003,9 @@ impl Pinvou3Bridge {
         let saved = self.effective_model().filter(|saved| saved.model == model);
         let configured_context = saved.and_then(|saved| saved.context_window_tokens);
         let inferred_context = crate::core::model_context::resolved_context_window(model);
-        let is_local_vllm = self.provider() == "vllm";
+        // Tachyon (驭光) is a vLLM-family local engine: same 128K no-facts
+        // window fallback and operator-owned endpoint declaration posture.
+        let is_local_vllm = matches!(self.provider().as_str(), "vllm" | "tachyon");
         // The window precedence shares core::model_context's single function
         // with the monitor display (declaration wins, probe min-clamps,
         // inference fills in), so the two paths cannot drift apart by each
@@ -3171,6 +3224,7 @@ impl Pinvou3Bridge {
             // Write base_url + api_key into the provider config matching the provider
             let provider_config = match provider.as_str() {
                 "vllm" => &mut providers.vllm,
+                "tachyon" => &mut providers.tachyon,
                 "ollama" => &mut providers.ollama,
                 "openai" => &mut providers.openai,
                 "deepseek" => &mut providers.deepseek,
@@ -3211,9 +3265,9 @@ impl Pinvou3Bridge {
             );
         }
         cfg.default_text_model = Some(model);
-        // Local models (vLLM / probed Ollama) default to the lowest thinking
-        // tier (see request_reasoning_effort); everything else defaults to
-        // high.
+        // Local models (vLLM / Tachyon / probed Ollama) default to the lowest
+        // thinking tier (see request_reasoning_effort); everything else
+        // defaults to high.
         cfg.reasoning_effort = self.request_reasoning_effort();
         // Default turn budget: the subagent default step count matches the
         // main turn (2000, i.e. the foundation hard cap). `agent` calls that
@@ -4689,10 +4743,10 @@ mod tests {
                 .contains("## 市场 MCP 应用发现"),
             "inventory interpretation belongs in the static session prompt"
         );
-        use crate::features::marketplace::{ConnectorScope, save_disabled_connectors_for};
-        save_disabled_connectors_for(ConnectorScope::Plain, &["weather".into(), "qcc".into()])
+        use crate::features::marketplace::{ConnectorScope, save_disabled_bundles_for};
+        save_disabled_bundles_for(ConnectorScope::Plain, &["weather".into(), "qcc".into()])
             .unwrap();
-        save_disabled_connectors_for(ConnectorScope::Code, &[]).unwrap();
+        save_disabled_bundles_for(ConnectorScope::Code, &[]).unwrap();
 
         let inventory = |sid: &str| -> serde_json::Value {
             let Op::SendMessage { content, .. } = bridge
@@ -4747,7 +4801,7 @@ mod tests {
             crate::features::marketplace::unavailable_tool_names_for(ConnectorScope::Plain);
         assert!(denied.contains(&"mcp_weather_get_weather".to_string()));
         assert!(denied.contains(&"mcp_qcc-company_*".to_string()));
-        save_disabled_connectors_for(ConnectorScope::Plain, &[]).unwrap();
+        save_disabled_bundles_for(ConnectorScope::Plain, &[]).unwrap();
         assert!(
             inventory("plain")
                 .as_array()
@@ -4918,9 +4972,8 @@ mod tests {
         }));
 
         use crate::features::marketplace::ConnectorScope;
-        // plain disables weather (simulating the user turning weather off in an
-        // ordinary session).
-        crate::features::marketplace::save_disabled_connectors_for(
+        // plain 禁 weather(模拟普通会话里用户关了天气)。
+        crate::features::marketplace::save_disabled_bundles_for(
             ConnectorScope::Plain,
             &["weather".to_string()],
         )
@@ -4936,9 +4989,8 @@ mod tests {
         // scheme).
         assert!(shaped.contains(&"load_skill".to_string()));
 
-        // code explicitly disables only pptx → weather recovers, pptx stays
-        // denied; plain's weather disable no longer affects code sessions.
-        crate::features::marketplace::save_disabled_connectors_for(
+        // code 显式只禁 pptx → weather 恢复,pptx 仍禁;plain 的 weather 禁用不再影响代码会话。
+        crate::features::marketplace::save_disabled_bundles_for(
             ConnectorScope::Code,
             &["pptx".to_string()],
         )
@@ -5042,7 +5094,7 @@ mod tests {
             "an uninitialized plain denies the built-in CLI packs by default (the DenyAll convergence)"
         );
 
-        // plain explicitly disables only feishu → just the lark-cli deny remains.
+        // plain 禁 feishu → 仅 lark-cli deny（裸名 + .exe/.cmd 变体各一条，R4）。
         crate::features::marketplace::save_disabled_bundles_for(
             ConnectorScope::Plain,
             &["feishu".to_string()],
@@ -5074,9 +5126,8 @@ mod tests {
             "every non-messaging rule stays a deny"
         );
 
-        // code explicitly disables only dingtalk → only dws remains
-        // hard-denied (with .exe/.cmd variants).
-        crate::features::marketplace::save_disabled_connectors_for(
+        // code 显式只禁 dingtalk → 仅剩 dws 被硬拒（含 .exe/.cmd 变体）。
+        crate::features::marketplace::save_disabled_bundles_for(
             ConnectorScope::Code,
             &["dingtalk".to_string()],
         )
@@ -5142,7 +5193,7 @@ mod tests {
         bridge.set_code_session_predicate(std::sync::Arc::new(|_| false));
 
         use crate::features::marketplace::ConnectorScope;
-        crate::features::marketplace::save_disabled_connectors_for(
+        crate::features::marketplace::save_disabled_bundles_for(
             ConnectorScope::Plain,
             &["feishu".to_string()],
         )
@@ -5374,7 +5425,7 @@ mod tests {
         );
 
         // plain disables my-skill → contains a deny rule pointing at the script
-        crate::features::marketplace::skill_scope::save_disabled_skills_for(
+        crate::features::marketplace::scope::save_disabled_bundles_for(
             ConnectorScope::Plain,
             &["my-skill".to_string()],
         )
@@ -5392,11 +5443,8 @@ mod tests {
 
         // Re-enabled → script rule disappears (same computation as the hot
         // refresh; safety-net rules remain)
-        crate::features::marketplace::skill_scope::save_disabled_skills_for(
-            ConnectorScope::Plain,
-            &[],
-        )
-        .unwrap();
+        crate::features::marketplace::scope::save_disabled_bundles_for(ConnectorScope::Plain, &[])
+            .unwrap();
         assert!(
             bridge
                 .scope_deny_ruleset("sess-plain")
@@ -10345,39 +10393,6 @@ mod tests {
     }
 
     #[test]
-    fn runtime_credential_is_final_and_reaches_model_client_config() {
-        let (_lock, _env) = locked_env(&[
-            "DEEPSEEK_MODEL",
-            "DEEPSEEK_PROVIDER",
-            "DEEPSEEK_BASE_URL",
-            "DEEPSEEK_API_KEY",
-        ]);
-        let mut bridge = fixture_bridge();
-        set_active_model(
-            &mut bridge,
-            ModelPreset::OpenaiCompatible,
-            "runtime-model",
-            "https://api.openai.com/v1",
-            "saved-key",
-        );
-        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
-        unsafe { std::env::set_var("DEEPSEEK_API_KEY", "env-key") };
-        bridge.runtime_model_credential =
-            Some(RuntimeModelCredential::api_key("runtime-key").expect("runtime credential"));
-
-        assert_eq!(bridge.api_key(), "runtime-key");
-        let config = bridge.build_dt_config();
-        assert_eq!(config.api_key.as_deref(), Some("runtime-key"));
-        assert_eq!(
-            config
-                .providers
-                .as_ref()
-                .and_then(|providers| providers.openai.api_key.as_deref()),
-            Some("runtime-key")
-        );
-    }
-
-    #[test]
     fn empty_api_key_env_does_not_hide_saved_credential() {
         let (_lock, _env) = locked_env(&["DEEPSEEK_API_KEY"]);
         let mut bridge = fixture_bridge();
@@ -10751,6 +10766,115 @@ mod tests {
                 bridge.request_reasoning_effort().as_deref(),
                 Some("low"),
                 "{kind:?}"
+            );
+        }
+    }
+
+    /// Tachyon (驭光) 探测命中走独立的 engine provider 方言：默认档 low（不落
+    /// `_ => Some("high")` 通配，high 在 Tachyon wire 上是 400）、本地免密、
+    /// providers.tachyon 槽位携带 separate_field 流式风格（reasoning_content
+    /// 解码为思考而非正文）。
+    #[test]
+    fn local_tachyon_maps_to_own_provider_wire_and_default_low() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ]);
+        let mut bridge = fixture_bridge();
+        set_active_model(
+            &mut bridge,
+            ModelPreset::OpenaiCompatible,
+            "qwen3.8",
+            "http://127.0.0.1:8000/v1",
+            "",
+        );
+        bridge.probed_local_kind = Some(LocalServerKind::Tachyon);
+        assert_eq!(bridge.provider(), "tachyon");
+        assert_eq!(bridge.request_reasoning_effort().as_deref(), Some("low"));
+        assert!(
+            !bridge.api_key_required(),
+            "本地 Tachyon 默认无鉴权，不应强制 key"
+        );
+        let cfg = bridge.build_dt_config();
+        assert_eq!(
+            cfg.api_provider(),
+            deepseek_tui::config::ApiProvider::Tachyon
+        );
+        let providers = cfg.providers.as_ref().expect("providers config");
+        assert_eq!(
+            providers.tachyon.reasoning_stream_style.as_deref(),
+            Some(SEPARATE_REASONING_FIELD)
+        );
+        assert_eq!(
+            providers.tachyon.base_url.as_deref(),
+            Some("http://127.0.0.1:8000/v1")
+        );
+    }
+
+    /// LocalVllm 预设条目实际指向 Tachyon 服务器（本地检测流程历史存量与手填
+    /// 条目都会这样落库）：探测是运行真值，provider 必须跟随探测落 tachyon
+    /// 方言，而不是被预设臂钉死在 vllm（vllm 档表会把 max 降级成 high——
+    /// 恰是 Tachyon 上会 400 的值）。
+    #[test]
+    fn local_vllm_preset_follows_a_tachyon_probe() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ]);
+        let mut bridge = fixture_bridge();
+        set_active_model(
+            &mut bridge,
+            ModelPreset::LocalVllm,
+            "qwen3.8",
+            "http://127.0.0.1:8000/v1",
+            "",
+        );
+        // 未探测时保持既有 LocalVllm → vllm 语义（探测前不改变任何行为）。
+        assert_eq!(bridge.provider(), "vllm");
+        bridge.probed_local_kind = Some(LocalServerKind::Tachyon);
+        assert_eq!(bridge.provider(), "tachyon");
+        assert_eq!(bridge.request_reasoning_effort().as_deref(), Some("low"));
+        let cfg = bridge.build_dt_config();
+        assert_eq!(
+            cfg.api_provider(),
+            deepseek_tui::config::ApiProvider::Tachyon
+        );
+    }
+
+    /// Tachyon 的存量/显式 high 必须防御性归一为 medium（high 会 400），
+    /// max 原样放行（由底座 tachyon 方言映射 xhigh）。
+    #[test]
+    fn local_tachyon_stored_high_normalizes_to_medium_and_max_passes_through() {
+        for (stored, expected) in [("high", "medium"), ("max", "max"), ("low", "low")] {
+            let (_lock, _env) = locked_env(&[
+                "DEEPSEEK_MODEL",
+                "DEEPSEEK_PROVIDER",
+                "DEEPSEEK_BASE_URL",
+                "DEEPSEEK_API_KEY",
+            ]);
+            let mut bridge = fixture_bridge();
+            set_active_model(
+                &mut bridge,
+                ModelPreset::OpenaiCompatible,
+                "qwen3.8",
+                "http://127.0.0.1:8000/v1",
+                "",
+            );
+            bridge.probed_local_kind = Some(LocalServerKind::Tachyon);
+            bridge
+                .prefs
+                .advanced
+                .saved_models
+                .last_mut()
+                .map(|m| m.reasoning_effort = Some(stored.to_string()));
+            assert_eq!(
+                bridge.request_reasoning_effort().as_deref(),
+                Some(expected),
+                "stored {stored} must surface as {expected}"
             );
         }
     }

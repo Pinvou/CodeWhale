@@ -171,7 +171,7 @@ pub struct BundleRecord {
 impl BundleRecord {
     /// 安装/连接登记的构造入口：`installed=true`、时间为现在、指纹留空
     /// （磁盘遍历只在完整性校验时发生，§4 规则 4）。调用方按需再填
-    /// `credential_keys` / `assets` / `degraded`。
+    /// `degraded`。
     pub fn installed_now(id: impl Into<String>, source: BundleSource) -> Self {
         Self {
             id: id.into(),
@@ -1244,11 +1244,6 @@ mod tests {
                 .expect("gongwen 应登记");
             assert_eq!(gongwen.source, BundleSource::Preset);
             assert!(gongwen.installed);
-            assert_eq!(
-                gongwen.credential_keys,
-                vec!["GONGWEN_KEY".to_string()],
-                "凭据 key 应从 manifest 现算收敛"
-            );
 
             let preset = file
                 .records
@@ -1275,7 +1270,6 @@ mod tests {
                     feishu.degraded.is_some(),
                     "二进制与 lock 表不符应记 degraded"
                 );
-                assert!(feishu.assets.is_empty(), "校验不过不得登记 assets");
                 assert!(report.degraded.contains(&"feishu".to_string()));
             }
             // companion 技能目录自身不独立登记
@@ -1486,16 +1480,14 @@ mod tests {
                 .insert("future_key".to_string(), serde_json::json!(1));
             store.upsert(first).unwrap();
 
-            // 重装：新记录只带新凭据列表，时间/extra/指纹应保留
-            let mut again = BundleRecord::installed_now("gongwen", BundleSource::Preset);
-            again.credential_keys = vec!["GONGWEN_KEY".to_string()];
+            // 重装：新记录只带新 degraded/installed 值，时间/extra/指纹应保留
+            let again = BundleRecord::installed_now("gongwen", BundleSource::Preset);
             store.upsert_preserving(again).unwrap();
 
             let merged = store.get("gongwen").unwrap().unwrap();
             assert_eq!(merged.installed_at, "2026-01-01T00:00:00+00:00");
             assert_eq!(merged.extra.get("future_key"), Some(&serde_json::json!(1)));
             assert_eq!(merged.content_fingerprint, Some("fp-v1".to_string()));
-            assert_eq!(merged.credential_keys, vec!["GONGWEN_KEY".to_string()]);
             assert_eq!(store.records().unwrap().len(), 1, "不得产生重复记录");
         });
     }

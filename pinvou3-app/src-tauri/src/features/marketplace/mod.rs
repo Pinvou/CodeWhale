@@ -38,7 +38,6 @@ pub mod recycle_bin;
 pub(crate) mod retirement;
 pub mod scope;
 pub mod skill_marketplace;
-pub mod skill_scope;
 pub mod store;
 
 use std::path::{Path, PathBuf};
@@ -688,6 +687,9 @@ pub use types::{
 // scope.rs 统一落盘单一 `disabled_bundles.json`(取代 `disabled_connectors.json` /
 // `disabled_skills.json` 双文件)。这里 re-export 保留调用路径;连接器/技能/CLI 开关
 // 统一按包 id 落盘,`skill:` 前缀跨文件借道清除。
+// `save_disabled_bundles`（plain 快捷写）仅测试在用，随实现一并 cfg(test)。
+#[cfg(test)]
+pub use crate::features::marketplace::scope::save_disabled_bundles;
 pub use crate::features::marketplace::scope::{
     load_disabled_bundles_for, load_disabled_bundles_startup, load_hidden_bundles_for,
     remove_bundle_from_disabled_scopes, save_disabled_bundles_for, save_hidden_bundles_for,
@@ -709,7 +711,7 @@ pub use crate::features::marketplace::scope::{
 // no command layer or engine surface needs it.
 pub(crate) use crate::features::marketplace::scope::deny_first_register_connector;
 #[cfg(test)]
-pub use crate::features::marketplace::scope::{load_disabled_bundles, save_disabled_bundles};
+pub use crate::features::marketplace::scope::load_disabled_bundles;
 
 /// 按会话类型 scope 持久化连接器禁用列表并刷新技能目录。
 ///
@@ -1381,8 +1383,6 @@ impl<S: CredentialStore> MarketplaceManager<S> {
                     name,
                     description,
                     version: m.version,
-                    icon: m.icon,
-                    category: m.category,
                     companion_skills: m.companion_skills,
                 }
             })
@@ -1591,10 +1591,6 @@ impl<S: CredentialStore> MarketplaceManager<S> {
             source
         };
         let mut record = store::BundleRecord::installed_now(tool_id, source);
-        record.credential_keys = bundle::tool_credentials(&manifest)
-            .into_iter()
-            .map(|c| c.key)
-            .collect();
         record.content_fingerprint = fingerprint;
         if let Err(e) = store::BundleStore::new().upsert_preserving(record) {
             log::warn!("[marketplace] bundles.json 镜像写入失败（install {tool_id}）: {e}");
@@ -6477,11 +6473,11 @@ pub(crate) mod tests {
             assert!(load_disabled_bundles().is_empty());
             save_disabled_bundles(&["weather".to_string(), "pptx".to_string()]);
             assert_eq!(
-                load_disabled_connectors(),
+                load_disabled_bundles(),
                 vec!["weather".to_string(), "pptx".to_string()]
             );
-            save_disabled_connectors(&[]); // 全开回去
-            assert!(load_disabled_connectors().is_empty());
+            save_disabled_bundles(&[]); // 全开回去
+            assert!(load_disabled_bundles().is_empty());
         });
     }
 
@@ -6569,9 +6565,9 @@ pub(crate) mod tests {
                 deny_all_expansion(&["weather", "pptx"])
             );
             // plain 写 weather → code 不受影响(仍默认全禁)。
-            save_disabled_connectors_for(ConnectorScope::Plain, &["weather".to_string()]).unwrap();
+            save_disabled_bundles_for(ConnectorScope::Plain, &["weather".to_string()]).unwrap();
             assert_eq!(
-                load_disabled_connectors_for(ConnectorScope::Plain),
+                load_disabled_bundles_for(ConnectorScope::Plain),
                 vec!["weather".to_string()]
             );
             assert_eq!(
@@ -6579,16 +6575,16 @@ pub(crate) mod tests {
                 deny_all_expansion(&["weather", "pptx"])
             );
             // code 显式写 → 标记初始化,此后以落盘为准。
-            save_disabled_connectors_for(ConnectorScope::Code, &["pptx".to_string()]).unwrap();
+            save_disabled_bundles_for(ConnectorScope::Code, &["pptx".to_string()]).unwrap();
             assert_eq!(
-                load_disabled_connectors_for(ConnectorScope::Code),
+                load_disabled_bundles_for(ConnectorScope::Code),
                 vec!["pptx".to_string()]
             );
             // plain 再写空,不影响 code。
-            save_disabled_connectors_for(ConnectorScope::Plain, &[]).unwrap();
-            assert!(load_disabled_connectors_for(ConnectorScope::Plain).is_empty());
+            save_disabled_bundles_for(ConnectorScope::Plain, &[]).unwrap();
+            assert!(load_disabled_bundles_for(ConnectorScope::Plain).is_empty());
             assert_eq!(
-                load_disabled_connectors_for(ConnectorScope::Code),
+                load_disabled_bundles_for(ConnectorScope::Code),
                 vec!["pptx".to_string()]
             );
         });
@@ -6602,7 +6598,7 @@ pub(crate) mod tests {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, r#"["weather","pptx"]"#).unwrap();
             assert_eq!(
-                load_disabled_connectors(),
+                load_disabled_bundles(),
                 vec!["weather".to_string(), "pptx".to_string()]
             );
             // The legacy format leaves the code scope uninitialized → still fully
@@ -6636,11 +6632,11 @@ pub(crate) mod tests {
             )
             .unwrap();
             assert_eq!(
-                load_disabled_connectors_for(ConnectorScope::Plain),
+                load_disabled_bundles_for(ConnectorScope::Plain),
                 vec!["weather".to_string()]
             );
             assert_eq!(
-                load_disabled_connectors_for(ConnectorScope::Code),
+                load_disabled_bundles_for(ConnectorScope::Code),
                 vec!["pptx".to_string()]
             );
             let file = crate::features::marketplace::scope::load_disabled_bundles_file();
@@ -6675,7 +6671,7 @@ pub(crate) mod tests {
             )
             .unwrap();
             assert_eq!(
-                load_disabled_connectors_for(ConnectorScope::Plain),
+                load_disabled_bundles_for(ConnectorScope::Plain),
                 vec!["weather".to_string()]
             );
             assert_eq!(
@@ -6697,7 +6693,7 @@ pub(crate) mod tests {
                 r#"{"scopes":{"plain":["weather"]},"initialized":["plain"],"future_field":{"v":1}}"#,
             )
             .unwrap();
-            save_disabled_connectors_for(ConnectorScope::Plain, &["pptx".to_string()]).unwrap();
+            save_disabled_bundles_for(ConnectorScope::Plain, &["pptx".to_string()]).unwrap();
             let content = std::fs::read_to_string(&path).unwrap();
             assert!(
                 content.contains("future_field"),

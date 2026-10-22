@@ -539,27 +539,9 @@ fn voice_postprocess_changed(mode: &str, text: &str, draft_text: Option<&str>) -
     text.trim() != draft
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VoiceReasoningDialect {
-    None,
-    ThinkingDisabled,
-    QwenEnableThinking,
-    VllmChatTemplate,
-    Minimax,
-}
-
-impl From<crate::core::reasoning_dialect::ReasoningDialect> for VoiceReasoningDialect {
-    fn from(d: crate::core::reasoning_dialect::ReasoningDialect) -> Self {
-        use crate::core::reasoning_dialect::ReasoningDialect as D;
-        match d {
-            D::None => VoiceReasoningDialect::None,
-            D::ThinkingDisabled => VoiceReasoningDialect::ThinkingDisabled,
-            D::QwenEnableThinking => VoiceReasoningDialect::QwenEnableThinking,
-            D::Minimax => VoiceReasoningDialect::Minimax,
-        }
-    }
-}
-
+/// voice 域的推理控制薄壳：dialect 判定与请求体写入统一委托
+/// `core::reasoning_dialect`（与 review/memory 同一实现；本域的 preset 分发
+/// 保留 memory 同款的 model-name 回退，见下方函数注释）。
 fn apply_voice_reasoning_controls(
     body: &mut Value,
     preset: crate::platform::prefs::ModelPreset,
@@ -567,22 +549,10 @@ fn apply_voice_reasoning_controls(
     base_url: &str,
     model: &str,
 ) {
-    match voice_reasoning_dialect(preset, provider, base_url, model) {
-        VoiceReasoningDialect::ThinkingDisabled => {
-            body["thinking"] = json!({ "type": "disabled" });
-        }
-        VoiceReasoningDialect::QwenEnableThinking => {
-            body["enable_thinking"] = json!(false);
-        }
-        VoiceReasoningDialect::VllmChatTemplate => {
-            body["chat_template_kwargs"] = json!({ "enable_thinking": false });
-        }
-        VoiceReasoningDialect::Minimax => {
-            body["thinking"] = json!({ "type": "disabled" });
-            body["reasoning_split"] = json!(true);
-        }
-        VoiceReasoningDialect::None => {}
-    }
+    crate::core::reasoning_dialect::apply_reasoning_dialect_controls(
+        body,
+        voice_reasoning_dialect(preset, provider, base_url, model),
+    );
 }
 
 fn voice_reasoning_dialect(
@@ -590,27 +560,31 @@ fn voice_reasoning_dialect(
     provider: &str,
     base_url: &str,
     model: &str,
-) -> VoiceReasoningDialect {
-    if provider == "vllm" || preset == crate::platform::prefs::ModelPreset::LocalVllm {
-        return VoiceReasoningDialect::VllmChatTemplate;
+) -> crate::core::reasoning_dialect::ReasoningDialect {
+    use crate::core::reasoning_dialect::ReasoningDialect;
+    if provider == "vllm"
+        || provider == "tachyon"
+        || preset == crate::platform::prefs::ModelPreset::LocalVllm
+    {
+        return ReasoningDialect::VllmChatTemplate;
     }
     if provider == "deepseek" || preset == crate::platform::prefs::ModelPreset::Deepseek {
-        return VoiceReasoningDialect::ThinkingDisabled;
+        return ReasoningDialect::ThinkingDisabled;
     }
 
     match preset {
         crate::platform::prefs::ModelPreset::Kimi => {
             if crate::core::reasoning_dialect::kimi_supports_disabled_thinking(model) {
-                VoiceReasoningDialect::ThinkingDisabled
+                ReasoningDialect::ThinkingDisabled
             } else {
-                VoiceReasoningDialect::None
+                ReasoningDialect::None
             }
         }
-        crate::platform::prefs::ModelPreset::Qwen => VoiceReasoningDialect::QwenEnableThinking,
+        crate::platform::prefs::ModelPreset::Qwen => ReasoningDialect::QwenEnableThinking,
         crate::platform::prefs::ModelPreset::Doubao
         | crate::platform::prefs::ModelPreset::Glm
-        | crate::platform::prefs::ModelPreset::Mimo => VoiceReasoningDialect::ThinkingDisabled,
-        crate::platform::prefs::ModelPreset::Minimax => VoiceReasoningDialect::Minimax,
+        | crate::platform::prefs::ModelPreset::Mimo => ReasoningDialect::ThinkingDisabled,
+        crate::platform::prefs::ModelPreset::Minimax => ReasoningDialect::Minimax,
         crate::platform::prefs::ModelPreset::OpenaiCompatible
         | crate::platform::prefs::ModelPreset::LocalVllm
         | crate::platform::prefs::ModelPreset::Deepseek
@@ -633,16 +607,16 @@ fn voice_reasoning_dialect(
             // user's input box.
             let d =
                 crate::core::reasoning_dialect::reasoning_dialect_from_base_url(base_url, model);
-            if matches!(d, crate::core::reasoning_dialect::ReasoningDialect::None) {
+            if matches!(d, ReasoningDialect::None) {
                 let lower = model.to_ascii_lowercase();
                 if lower.contains("qwen") {
-                    return VoiceReasoningDialect::QwenEnableThinking;
+                    return ReasoningDialect::QwenEnableThinking;
                 }
                 if lower.contains("deepseek") {
-                    return VoiceReasoningDialect::ThinkingDisabled;
+                    return ReasoningDialect::ThinkingDisabled;
                 }
             }
-            d.into()
+            d
         }
     }
 }
@@ -1059,15 +1033,15 @@ pub async fn postprocess_voice_text(
     })
 }
 
-use crate::features::voice::{
-    microphone_permission as microphone_domain, voice_asr as voice_asr_domain,
-};
+use crate::features::voice::voice_asr as voice_asr_domain;
 use voice_asr_domain::*;
 
-async_command_passthrough!(
-    microphone_domain,
-    reset_microphone_permission(window: tauri::WebviewWindow) -> Result<bool, String>
-);
+/// 麦克风权限重置命令：feature 侧为裸 fn（原 microphone_permission 转发壳已扁平化），
+/// 不适用 domain 模块的 passthrough 宏，直接薄转发。
+#[tauri::command]
+pub async fn reset_microphone_permission(window: tauri::WebviewWindow) -> Result<bool, String> {
+    crate::features::voice::reset_microphone_permission(window).await
+}
 async_command_passthrough!(voice_asr_domain, voice_asr_status() -> VoiceAsrStatus);
 async_command_passthrough!(
     voice_asr_domain,
@@ -1282,7 +1256,7 @@ mod voice_postprocess_tests {
                 "https://example.com/v1",
                 "qwen2.5-72b-instruct"
             ),
-            VoiceReasoningDialect::QwenEnableThinking
+            crate::core::reasoning_dialect::ReasoningDialect::QwenEnableThinking
         );
         assert_eq!(
             voice_reasoning_dialect(
@@ -1291,7 +1265,7 @@ mod voice_postprocess_tests {
                 "https://example.com/v1",
                 "deepseek-chat"
             ),
-            VoiceReasoningDialect::ThinkingDisabled
+            crate::core::reasoning_dialect::ReasoningDialect::ThinkingDisabled
         );
         // Unknown URL and unknown model name: no dialect, as before.
         assert_eq!(
@@ -1301,7 +1275,7 @@ mod voice_postprocess_tests {
                 "https://example.com/v1",
                 "meta-llama-3"
             ),
-            VoiceReasoningDialect::None
+            crate::core::reasoning_dialect::ReasoningDialect::None
         );
         // The custom Responses preset rides the same URL-sniff fallback:
         // voice postprocess stays single-shot Chat (no tools), so the
@@ -1314,7 +1288,7 @@ mod voice_postprocess_tests {
                 "https://example.com/v1",
                 "qwen2.5-72b-instruct"
             ),
-            VoiceReasoningDialect::QwenEnableThinking
+            crate::core::reasoning_dialect::ReasoningDialect::QwenEnableThinking
         );
     }
 }

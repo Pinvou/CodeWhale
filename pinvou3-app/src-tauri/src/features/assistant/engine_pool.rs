@@ -252,25 +252,13 @@ impl RemoteRuntimeModelBundle {
     }
 }
 
-/// Engine 空闲回收阈值：engine 是进程内 task（非子进程），但每个都占一份通道、
-/// 工具集与注水后的对话上下文，池无上限、内存随会话数线性涨。空闲超过该时长
-/// 且无 in-flight turn 且非 active 会话时回收（复用 `reclaim_engine_entry` 的
-/// 回收序列）。回收回到 lazy spawn 语义，下次发消息重建 + SyncSession 注水，
-/// 无损；30 分钟取偏保守值，宁可少回收也不误伤刚要使用的会话。
-/// Engine idle-reclaim threshold: an engine is an in-process task (not a
-/// subprocess), but each occupies a channel, a toolset, and a hydrated
-/// conversation context; the pool is unbounded and memory grows linearly
-/// with session count. Reclaim engines idle beyond this threshold with no
-/// in-flight turn that are not the active session (reusing
-/// `reclaim_engine_entry`'s reclaim sequence). Reclaiming returns to
-/// lazy-spawn semantics: the next message rebuilds + rehydrates via
-/// SyncSession, losslessly. 30 minutes is a deliberately conservative
-/// value — better to under-reclaim than to evict a session about to be used.
-const IDLE_EVICT_AFTER_SECS: u64 = 30 * 60;
-/// Idle-reclaim sweep interval: one pass every 5 minutes, a balance between
-/// timeliness and sweep overhead (in step with the AcpPool idle reclaim and
-/// embedder idle unload cadence).
-const REAP_INTERVAL_SECS: u64 = 5 * 60;
+// 空闲回收阈值与巡检间隔（IDLE_EVICT_AFTER_SECS / REAP_INTERVAL_SECS）收敛
+// 到 `core::reaper`：engine 是进程内 task（非子进程），但每个都占一份通道、
+// 工具集与注水后的对话上下文，池无上限、内存随会话数线性涨。空闲超过阈值
+// 且无 in-flight turn 且非 active 会话时回收（复用 `reclaim_engine_entry` 的
+// 回收序列）。回收回到 lazy spawn 语义，下次发消息重建 + SyncSession 注水，
+// 无损；30 分钟取偏保守值，宁可少回收也不误伤刚要使用的会话。
+use crate::core::reaper::{IDLE_EVICT_AFTER_SECS, IdleReaperGuard};
 
 fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
@@ -328,10 +316,12 @@ fn should_reap_idle_engine(
     is_active_session: bool,
     idle_for_secs: u64,
 ) -> bool {
-    !turn_active
-        && !scheduled_running
-        && !is_active_session
-        && idle_for_secs >= IDLE_EVICT_AFTER_SECS
+    crate::core::reaper::should_reap_idle(
+        turn_active,
+        scheduled_running,
+        is_active_session,
+        std::time::Duration::from_secs(idle_for_secs),
+    )
 }
 
 /// Rebind eviction recheck (pure function, unit-testable; review #463
@@ -2160,20 +2150,8 @@ impl Drop for ExecutionRootRewindGuard {
     }
 }
 
-/// Background sweep task handle: on Drop it cancels first, then aborts —
-/// a double safeguard for stopping the sweep (same pattern as the Drop
-/// cleanup of scheduled/tasks.rs `ScheduledTaskState`).
-struct IdleReaperGuard {
-    cancel: CancellationToken,
-    handle: JoinHandle<()>,
-}
-
-impl Drop for IdleReaperGuard {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        self.handle.abort();
-    }
-}
+// `IdleReaperGuard`（Drop 时先 cancel 再 abort 双保险停止巡检）与巡检循环
+// 收敛到 `core::reaper`，与 ACP 侧共用同一实现。
 
 /// M-7: a steer must have a live engine to deliver to. When the engine is
 /// absent (the session is not running) return Err — otherwise no
@@ -2318,36 +2296,12 @@ impl EnginePool {
     /// a light task waking every 5 minutes).
     pub fn start_idle_reaper(&self) {
         let mut slot = self.idle_reaper.lock();
-        if slot.is_some() {
-            return;
-        }
-        let cancel = CancellationToken::new();
-        let task_cancel = cancel.clone();
-        let pool = self.clone();
-        let handle = tauri::async_runtime::spawn(async move {
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_secs(REAP_INTERVAL_SECS));
-            // tokio::interval 首个 tick 立即到期：跳过，统一走周期节奏。
-            interval.tick().await;
-            loop {
-                tokio::select! {
-                    _ = task_cancel.cancelled() => break,
-                    _ = interval.tick() => {}
-                }
-                // 单轮 panic 隔离：回收逻辑 panic 会连坐整个巡检 async task
-                // （静默停摆，engines 从此常驻）。每轮独立 spawn，panic 只终止
-                // 当轮，外层循环下轮照常继续。
-                let round_pool = pool.clone();
-                let round =
-                    tauri::async_runtime::spawn(
-                        async move { round_pool.reap_idle_engines().await },
-                    );
-                if let Err(error) = round.await {
-                    eprintln!("[engine_pool] 空闲巡检单轮失败（已隔离，下轮继续）: {error}");
-                }
-            }
-        });
-        *slot = Some(IdleReaperGuard { cancel, handle });
+        crate::core::reaper::start_idle_reaper(
+            &mut slot,
+            self.clone(),
+            |pool| async move { pool.reap_idle_engines().await },
+            "engine_pool",
+        );
     }
 
     /// One round of idle reclaim. The decision first takes a read-only
@@ -2504,7 +2458,8 @@ impl EnginePool {
     }
 
     /// 为独立调用构造该 session 的 bridge。与 EnginePool lazy spawn 共用同一套
-    /// runtime provider，保证检阅等旁路入口也不会绕过运行时凭据准备。
+    /// 运行时模型解析（prepare_runtime_model），保证检阅等旁路入口与正式 spawn
+    /// 的模型路由行为一致。
     pub(crate) async fn fresh_bridge_for(&self, session_id: &str) -> Result<Pinvou3Bridge> {
         #[cfg(any(feature = "benchmark-hooks", test))]
         let eval_model = self.eval_model_snapshots.for_session(session_id);
@@ -2620,6 +2575,8 @@ impl EnginePool {
                 scheduled_unattended,
             )
         })?;
+        // Community 默认准备路径固定 passthrough：模型原样保留，不注入运行时
+        // 凭据/revision；凭据照常走环境变量与本地凭据库（bridge.api_key()）。
         let selected = bridge
             .effective_model_owned()
             .context("No effective model is available for runtime preparation")?;
@@ -2667,14 +2624,19 @@ impl EnginePool {
         // thinking control follows the detected foundation wire protocol; a
         // LocalVllm preset resolves provider from the preset arm instead, so
         // for those routes the kind feeds only the native served-window
-        // follow-up below. LocalVllm presets must probe too: discovery saves
+        // follow-up below — except Tachyon, which additionally flips the wire
+        // dialect (see below). LocalVllm presets must probe too: discovery saves
         // Ollama/LM Studio endpoints under that preset, and `/v1/models`
         // there never carries a window fact — without the kind probe the
         // native fetch below can never fire and the route keeps the 128K
-        // fallback while the monitor shows the real window. The probe result
-        // cannot flip the wire route for these presets (`provider()` resolves
-        // LocalVllm to "vllm" from the preset arm before ever consulting the
-        // probed kind), so a real vLLM classified `Vllm` is inert here.
+        // fallback while the monitor shows the real window. For LocalVllm the
+        // probe only flips the wire route when it identifies Tachyon
+        // (`provider()` follows the probed kind for the Tachyon dialect —
+        // its tier ladder differs, so riding the vllm arm would re-expose the
+        // 400-tier); a real vLLM classified `Vllm` is inert here.
+        // fork: 运行时模型供给(PinnedRuntime/RuntimeModelProvider)是本仓超集,
+        // 上游 #733 的 finalize 只做 session_model 赋值;这里的注入调用承载
+        // runtime_model_credential 与 provider 路由,必须先于端点探测。
         apply_prepared_runtime_model(&mut bridge, prepared);
         // A probe failure (service not started/timeout/auth failure) is
         // classified as generic, keeping the existing openai wire route. The
@@ -2712,22 +2674,25 @@ impl EnginePool {
         // engine loads B" chain break; only follow the served name on a
         // single-model server that does not expose the configured name.
         // Non-vLLM operator-owned routes do no name correction and adopt
-        // facts only when the configured name exactly hits the list
-        // (`adopts_probed_facts`) — a single-entry "borrowed name" returns
-        // facts belonging to another model and must not be misattributed.
-        // Cloud presets and coding_plan are not operator-owned and are not
-        // probed.
-        if !bridge.runtime_route_is_locked() {
-            let is_vllm_route = bridge.provider() == "vllm";
-            if let Some(model) = bridge.effective_model_owned() {
-                Self::adopt_probed_endpoint_facts(
-                    &mut bridge,
-                    model,
-                    is_vllm_route,
-                    pins_scheduled_model,
-                )
-                .await;
-            }
+        // facts only when the sent name is the served one
+        // (`adopts_probed_facts`): a kept multi-entry name trivially is
+        // (served == configured), while a single-entry "borrowed name"
+        // returns facts belonging to another model and must not be
+        // misattributed. Cloud presets and coding_plan are not
+        // operator-owned and are not probed.
+        // Tachyon rides the same served-name correction as vLLM: the wire
+        // family is identical (`/v1/models` listing, single-model rename),
+        // so a configured name that misses the served list gets the same
+        // rename/facts treatment instead of a hard model_not_found.
+        let is_vllm_route = matches!(bridge.provider().as_str(), "vllm" | "tachyon");
+        if let Some(model) = bridge.effective_model_owned() {
+            Self::adopt_probed_endpoint_facts(
+                &mut bridge,
+                model,
+                is_vllm_route,
+                pins_scheduled_model,
+            )
+            .await;
         }
         bridge
     }
@@ -5832,36 +5797,15 @@ mod scheduled_model_tests {
     };
     use crate::platform::paths::tests::ENV_LOCK;
     use crate::platform::prefs::{ImageCapabilityOverride, ModelPreset, SavedModel};
+    use crate::platform::test_support::EnvRestore;
     use async_trait::async_trait;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
 
-    struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
-
-    impl EnvRestore {
-        fn capture(names: &[&'static str]) -> Self {
-            Self(
-                names
-                    .iter()
-                    .map(|name| (*name, std::env::var_os(name)))
-                    .collect(),
-            )
-        }
-    }
-
-    impl Drop for EnvRestore {
-        fn drop(&mut self) {
-            for (name, value) in self.0.drain(..) {
-                match value {
-                    // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
-                    Some(value) => unsafe { std::env::set_var(name, value) },
-                    // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
-                    None => unsafe { std::env::remove_var(name) },
-                }
-            }
-        }
-    }
+    // `EnvRestore`（快照 + Drop 恢复一组 env，SAFETY 前提是测试全程持有
+    // platform::paths::tests::ENV_LOCK）收敛到 `platform::test_support`，
+    // 与 engine.rs / multiagent 回归测试共用同一实现。
 
     fn isolated_eval_bridge() -> (Pinvou3Bridge, std::path::PathBuf, EnvRestore) {
         let restore = EnvRestore::capture(&[
@@ -11083,32 +11027,9 @@ mod probed_facts_wiring_tests {
     use crate::platform::credential_store::CredentialState;
     use crate::platform::paths::tests::ENV_LOCK;
     use crate::platform::prefs::{ImageCapabilityOverride, ModelPreset, SavedModel, UserPrefs};
+    use crate::platform::test_support::EnvRestore;
 
-    struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
-
-    impl EnvRestore {
-        fn capture(names: &[&'static str]) -> Self {
-            Self(
-                names
-                    .iter()
-                    .map(|name| (*name, std::env::var_os(name)))
-                    .collect(),
-            )
-        }
-    }
-
-    impl Drop for EnvRestore {
-        fn drop(&mut self) {
-            for (name, value) in self.0.drain(..) {
-                match value {
-                    // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
-                    Some(value) => unsafe { std::env::set_var(name, value) },
-                    // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
-                    None => unsafe { std::env::remove_var(name) },
-                }
-            }
-        }
-    }
+    // `EnvRestore` 复用 `platform::test_support` 的共享实现（同 tests 模块上方注释）。
 
     /// Isolates env vars related to base_url/api_key (`Pinvou3Bridge::
     /// base_url`/`api_key` prioritize env over session model); the returned

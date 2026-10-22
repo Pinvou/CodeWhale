@@ -274,7 +274,9 @@ test('only the Rust-verified remote projection renders the single ChatView timel
   // ChatBubble 顶部的 assistantHtml/assistantParsed（供 no-deps effect 复用同一
   // html 身份），pin 随之更新；钉住的意图不变——remote 回复仍走普通 Markdown/代码
   // 渲染管线，且不得在本地伪造 persona/question 动作。
-  assert.match(chat, /const assistantHtml = item\.type === 'assistant'\s*\?\s*\(\(!item\.streaming && item\.text\)\s*\?\s*renderLegacyMarkdownCached\(item, syntaxVersion\)/,
+  // #566 合并后形态适配：renderLegacyMarkdownCached 采纳上游 weak-cache 形态，
+  // 签名为 (item, text, syntaxVersion)，调用点显式传 item.text。
+  assert.match(chat, /const assistantHtml = item\.type === 'assistant'\s*\?\s*\(\(!item\.streaming && item\.text\)\s*\?\s*renderLegacyMarkdownCached\(item, item\.text, syntaxVersion\)/,
     'remote replies keep the ordinary ChatView Markdown and code renderer');
   assert.match(chat, /item\.remoteProxy\s*\?\s*\{ pd: \{ draft: null \}, cq: \{ q: null, html: assistantHtml \} \}/,
     'remote Markdown cannot manufacture local persona or question actions');

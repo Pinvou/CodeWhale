@@ -149,7 +149,7 @@ impl SessionConfigChange<'_> {
 
     async fn apply(&self, runtime: &AcpSession) -> Result<()> {
         match self {
-            Self::Model(model_id) => runtime.set_model(model_id).await,
+            Self::Model(model_id) => runtime.set_config_option("model", model_id).await,
             Self::Mode(mode_id) => runtime.set_mode(mode_id).await,
             Self::Option {
                 config_id,

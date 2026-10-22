@@ -165,27 +165,41 @@ pub fn user_home_dir() -> PathBuf {
 }
 
 pub fn validate_upload_location(canon: &Path) -> Result<(), String> {
-    let home_raw = user_home_dir();
-    let home = platform_compat_path(
-        &std::fs::canonicalize(&home_raw)
-            .unwrap_or_else(|_| home_raw.clone())
-            .to_string_lossy(),
-    );
-    if !canon.starts_with(&home) {
-        return Err(format!("path {} not under $HOME", canon.display()));
+    #[cfg(unix)]
+    {
+        super::posix::validate_upload_location_under_home(&user_home_dir(), canon)
     }
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        let home_raw = user_home_dir();
+        let home = platform_compat_path(
+            &std::fs::canonicalize(&home_raw)
+                .unwrap_or_else(|_| home_raw.clone())
+                .to_string_lossy(),
+        );
+        if !canon.starts_with(&home) {
+            return Err(format!("path {} not under $HOME", canon.display()));
+        }
+        Ok(())
+    }
 }
 
 // Unix 通用 helper 从 posix.rs 继承（Wave 3 去重，与 linux_path.rs 一致）。
 // `posix` 模块仅在 `#[cfg(unix)]` 编译，故这里必须守卫：macOS（unix）走
 // re-export；其余非 unix 兜底平台走本地等价实现，避免 E0432 未解析模块。
+// `path_component_eq` / `python_command` 在 macOS 由 mod.rs 经本模块 glob
+// 消费（未被显式 re-export 遮蔽），转发计为已用。
 #[cfg(unix)]
-pub use super::posix::{path_component_eq, platform_compat_path, python_command};
+pub use super::posix::{path_component_eq, python_command};
 
-// macOS 由 macos_path 提供自有实现（APFS 注释在案），经 glob 消费时被显式
-// re-export 遮蔽，这里的转发在其编译面上不可达；仅当 unsupported 自身作为
+// macOS 经 macos_path 直接 re-export posix 实现（经 mod.rs 显式 re-export 遮蔽
+// 本转发，unused_imports=deny 会拦），且 validate_upload_location 的 unix 臂现
+// 直调 posix helper、不再于本模块内消费该名字；仅当 unsupported 自身作为
 // platform（linux/windows/macos 之外的 unix 兜底目标）时才需要从 posix 继承。
+#[cfg(all(unix, not(target_os = "macos")))]
+pub use super::posix::platform_compat_path;
+
+// 同上：macOS 由 macos_path re-export posix 实现遮蔽，本转发仅服务兜底目标。
 #[cfg(all(unix, not(target_os = "macos")))]
 pub use super::posix::filesystem_path_identity_key;
 

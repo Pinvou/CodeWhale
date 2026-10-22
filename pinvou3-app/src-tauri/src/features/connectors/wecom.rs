@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 use tauri::{AppHandle, Manager};
 
 use crate::features::connectors::connector_cli::{self as cc, CliCtx, ConnectorConn};
-use crate::features::connectors::skill_gate::ConnectorSkillGate;
+use crate::features::connectors::skill_gate::{ConnectorGate, ConnectorSkillGate};
 
 /// 连接器 id(事件前缀 + ConnectorConn 槽位键 + 停用标志名)。
 const ID: &str = "wecom";
@@ -86,8 +86,8 @@ fn status_is_authorized(s: &str) -> bool {
     s.trim().eq_ignore_ascii_case("authorized")
 }
 
-/// `auth show --status` 判当前是否已连接(已授权)。会 spawn wecom-cli。
-fn is_ready() -> bool {
+/// `wecom-cli auth show --status` 判当前是否已连接(已授权)。会 spawn wecom-cli。
+pub(crate) fn is_ready() -> bool {
     if let Ok((ok, so, se)) = cc::run(wecom(&["auth", "show", "--status"])) {
         return ok && (status_is_authorized(&so) || status_is_authorized(&se));
     }
@@ -101,18 +101,13 @@ fn is_ready() -> bool {
 /// version; returns immediately when a sufficient CLI is present, and an
 /// old CLI in the managed directory is replaced outright on lock-hash mismatch.
 pub async fn wecom_ensure_cli() -> Result<Value, String> {
-    tokio::task::spawn_blocking(|| {
-        if wecom_cli_present() {
-            return Ok::<Value, String>(json!({ "ok": true, "already": true }));
-        }
-        crate::features::connectors::native_installer::ensure_native_cli("wecom-cli")?;
-        if !wecom_cli_present() {
-            return Err("企微 CLI 安装完成但无法执行，请重试".to_string());
-        }
-        Ok::<Value, String>(json!({ "ok": true, "already": false }))
-    })
+    cc::ensure_cli_with(
+        "wecom",
+        wecom_cli_present,
+        "企微 CLI 安装完成但无法执行，请重试",
+        || crate::features::connectors::native_installer::ensure_native_cli("wecom-cli"),
+    )
     .await
-    .map_err(|e| format!("spawn_blocking: {e}"))?
 }
 
 /// 查询当前企微连接状态:`wecom-cli auth show --status`。
@@ -422,6 +417,13 @@ pub fn wecom_skills_should_show() -> bool {
     !is_wecom_disabled() && is_ready()
 }
 
+/// 企微门控表项:停用标志 + 就绪探测;
+/// skills_state 命令公共体见 [`ConnectorGate`]。
+pub(crate) static WECOM_GATE: ConnectorGate = ConnectorGate {
+    disabled_filename: "wecom_disabled",
+    ready_probe: is_ready,
+};
+
 /// 按当前"应否可见"状态写 / 删技能文件。前端在连接成功 / 断开 / 切开关后调。
 pub async fn wecom_apply_skills() -> Result<Value, String> {
     let show = tokio::task::spawn_blocking(|| -> Result<bool, String> {
@@ -477,17 +479,7 @@ pub(crate) fn wecom_gate_step() -> Result<bool, String> {
 }
 
 pub async fn wecom_skills_state() -> Result<Value, String> {
-    tokio::task::spawn_blocking(|| {
-        let disabled = is_wecom_disabled();
-        let connected = is_ready();
-        Ok::<Value, String>(json!({
-            "connected": connected,
-            "enabled": !disabled,
-            "visible": connected && !disabled,
-        }))
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking: {e}"))?
+    WECOM_GATE.skills_state_command().await
 }
 
 #[cfg(test)]

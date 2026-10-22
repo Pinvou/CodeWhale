@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use tauri::{AppHandle, Manager};
 
 use crate::features::connectors::connector_cli::{self as cc, CliCtx, ConnectorConn};
-use crate::features::connectors::skill_gate::ConnectorSkillGate;
+use crate::features::connectors::skill_gate::{ConnectorGate, ConnectorSkillGate};
 
 const ID: &str = "tmeet";
 /// `pub` + the facade re-export: single-sourced with the CLI's connectors
@@ -164,20 +164,23 @@ fn install_tmeet_cli() -> Result<bool, String> {
 
 /// Bootstrap: ensure the tmeet CLI is installed and at least 1.0.18.
 pub async fn tmeet_ensure_cli() -> Result<Value, String> {
-    tokio::task::spawn_blocking(|| {
-        if tmeet_cli_present() {
-            return Ok::<Value, String>(json!({ "ok": true, "already": true }));
-        }
-        if !install_tmeet_cli()? {
-            return Err("腾讯会议 CLI 安装失败，请查看 ~/.pinvou3/cli-install.log".to_string());
-        }
-        if !tmeet_cli_present() {
-            return Err("腾讯会议 CLI 安装完成但无法执行，请重试或修复应用运行时".to_string());
-        }
-        Ok::<Value, String>(json!({ "ok": true, "already": false }))
-    })
+    cc::ensure_cli_with(
+        "tmeet",
+        tmeet_cli_present,
+        "腾讯会议 CLI 安装完成但无法执行，请重试或修复应用运行时",
+        // install_tmeet_cli 的 bool 语义：false = npm 安装失败（中国网络镜像重试
+        // 也失败），与「装完不可执行」是两种故障，分别报各自的用户文案。
+        || {
+            install_tmeet_cli().and_then(|installed| {
+                if installed {
+                    Ok(())
+                } else {
+                    Err("腾讯会议 CLI 安装失败，请查看 ~/.pinvou3/cli-install.log".to_string())
+                }
+            })
+        },
+    )
     .await
-    .map_err(|e| format!("spawn_blocking: {e}"))?
 }
 
 /// 查询当前腾讯会议连接状态。只返回布尔,不把身份 / token 信息带进 webview。
@@ -487,6 +490,13 @@ pub fn tmeet_skills_should_show() -> bool {
     !is_tmeet_disabled() && is_logged_in()
 }
 
+/// 腾讯会议门控表项:停用标志 + 就绪探测;
+/// skills_state 命令公共体见 [`ConnectorGate`]。
+pub(crate) static TMEET_GATE: ConnectorGate = ConnectorGate {
+    disabled_filename: "tmeet_disabled",
+    ready_probe: is_logged_in,
+};
+
 pub async fn tmeet_apply_skills() -> Result<Value, String> {
     let show = tokio::task::spawn_blocking(|| -> Result<bool, String> {
         let show = tmeet_skills_should_show();
@@ -540,17 +550,7 @@ pub(crate) fn tmeet_gate_step() -> Result<bool, String> {
 }
 
 pub async fn tmeet_skills_state() -> Result<Value, String> {
-    tokio::task::spawn_blocking(|| {
-        let disabled = is_tmeet_disabled();
-        let connected = is_logged_in();
-        Ok::<Value, String>(json!({
-            "connected": connected,
-            "enabled": !disabled,
-            "visible": connected && !disabled,
-        }))
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking: {e}"))?
+    TMEET_GATE.skills_state_command().await
 }
 
 #[cfg(test)]

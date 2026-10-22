@@ -667,6 +667,23 @@ pub fn build_tauri_context() -> tauri::Context {
     tauri::generate_context!()
 }
 
+/// 空转探针插件：只为在 Tauri 初始化到该位置时打一条 startup 计时点，把原本
+/// 不透明的插件初始化时间段暴露出来（主窗口在 setup hook 之前创建，见 run()
+/// 内首个 `.plugin(...)` 处的注释）。计时点名由插件名推导：
+/// `startup-probe-<x>` → `tauri:plugin_<x>_ready`（`-` 转 `_`）。
+fn startup_probe_plugin(name: &'static str) -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    let mark = format!(
+        "tauri:plugin_{}_ready",
+        name.trim_start_matches("startup-probe-").replace('-', "_")
+    );
+    tauri::plugin::Builder::<tauri::Wry, ()>::new(name)
+        .setup(move |_app, _api| {
+            startup::mark(&mark);
+            Ok(())
+        })
+        .build()
+}
+
 /// The startup-timeline signature of a failed knowledge init. The state is
 /// never managed on failure and nothing retries it in-process (whether the
 /// store was refused as too-new or the open failed transiently), so the
@@ -810,23 +827,9 @@ pub fn run() {
                 crate::platform::window_startup::activate_main_window(window, "single_instance");
             }
         }))
-        .plugin(
-            tauri::plugin::Builder::<_, ()>::new("startup-probe-single-instance")
-                .setup(|_app, _api| {
-                    startup::mark("tauri:plugin_single_instance_ready");
-                    Ok(())
-                })
-                .build(),
-        )
+        .plugin(startup_probe_plugin("startup-probe-single-instance"))
         .plugin(tauri_plugin_notification::init())
-        .plugin(
-            tauri::plugin::Builder::<_, ()>::new("startup-probe-notification")
-                .setup(|_app, _api| {
-                    startup::mark("tauri:plugin_notification_ready");
-                    Ok(())
-                })
-                .build(),
-        )
+        .plugin(startup_probe_plugin("startup-probe-notification"))
         .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri::plugin::Builder::<_, ()>::new("startup-probe-dialog")
@@ -1891,7 +1894,6 @@ pub fn run() {
             commands::codex::take_code_reader_pending,
             commands::settings::test_model_connection,
             commands::settings::test_image_input_capability,
-            commands::settings::test_search_provider,
             commands::voice::transcribe_voice_audio,
             commands::voice::postprocess_voice_text,
             commands::voice::reset_microphone_permission,
@@ -1987,7 +1989,6 @@ pub fn run() {
             commands::remote_control::desktop_remote_endpoint_profiles,
             commands::remote_control::desktop_remote_set_endpoint_profile,
             commands::remote_control::web_access_set_relay,
-            commands::remote_control::web_access_reset_relay,
             commands::remote_control::web_access_bridge_ready,
             commands::remote_control::web_access_rpc_begin,
             commands::remote_control::web_access_rpc_respond,
@@ -2173,7 +2174,6 @@ pub fn run() {
             commands::knowledge::kb_model_status,
             commands::knowledge::kb_model_load_after_first_frame,
             commands::knowledge::kb_model_download,
-            commands::knowledge::kb_model_cancel,
             commands::knowledge::session_mount_collection,
             commands::knowledge::session_add_mounted_collection,
             commands::knowledge::session_set_mounted_collection_enabled,

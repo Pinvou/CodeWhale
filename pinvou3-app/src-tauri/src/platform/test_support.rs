@@ -1,10 +1,12 @@
 //! 跨特性共享的测试 helper（全部条目 `#[cfg(test)]`，不进发布产物）。
 //!
-//! 进程级 env（PINVOU3_HOME 等）是 cargo test 并行执行下的隔离硬约束：所有
-//! 改写 env 的测试必须先持有 `platform::paths::tests::ENV_LOCK`（crate 唯一
-//! env 锁——本模块不另立锁源，只复用它），并在退出（含 panic 路径）时恢复
-//! 原值。`with_temp_home` 把「PINVOU3_HOME 指向干净临时目录跑闭包」收敛为
-//! 单一实现，供各特性测试复用，避免逐文件复制出细微漂移。
+//! 进程级 env（PINVOU3_HOME / DEEPSEEK_* 等）是 cargo test 并行执行下的隔离
+//! 硬约束：所有改写 env 的测试必须先持有 `platform::paths::tests::ENV_LOCK`
+//! （crate 唯一 env 锁——本模块不另立锁源，只复用它），并在退出（含 panic
+//! 路径）时恢复原值。本模块把「PINVOU3_HOME 指向干净临时目录跑闭包」（
+//! `with_temp_home`，叠加 keyring hermeticity 三件套）与「快照/恢复一组 env」（
+//! `EnvRestore` / `locked_env`）两个高频脚手架收敛为单一实现，供 assistant /
+//! connectors / marketplace / sessions 等各特性测试复用，避免逐文件复制出细微漂移。
 //!
 //! 模块声明位于 `platform/mod.rs`（`#[cfg(test)] pub(crate) mod test_support;`），
 //! 不进发布产物。
@@ -14,6 +16,8 @@ mod filesystem;
 
 #[cfg(all(test, unix))]
 pub(crate) use filesystem::plant_fifo;
+
+use std::ffi::OsString;
 
 /// 把 PINVOU3_HOME 指到干净临时目录跑闭包，跑完恢复并清理。目录名前缀由
 /// 调用方给出（按特性/用例区分，避免同 pid 下不同测试互删），并叠加进程 id
@@ -113,7 +117,6 @@ pub(crate) fn managed_connector_bin_dir_or_assert_unsupported() -> Option<std::p
 /// RAII 快照/恢复一组环境变量：`capture` 记录现值，`Drop`（含 panic 路径）
 /// 逐一恢复。调用方测试必须先持有 `platform::paths::tests::ENV_LOCK` 再
 /// capture，保证 env 写全程在锁内串行。
-use std::ffi::OsString;
 
 #[cfg(test)]
 pub(crate) struct EnvRestore {

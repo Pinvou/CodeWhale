@@ -67,6 +67,8 @@ const context = vm.createContext({
   TextDecoder,
 });
 
+// #566 共享模块移植：web bridge 的共享函数体在 bridge-shared-helpers.js，必须先加载。
+vm.runInContext(fs.readFileSync(path.join(root, 'src', 'shared', 'bridge-shared-helpers.js'), 'utf8'), context, { filename: 'shared/bridge-shared-helpers.js' });
 vm.runInContext(fs.readFileSync(path.join(webBridgeRoot, 'bridge.js'), 'utf8'), context, { filename: 'platform/web/bridge.js' });
 vm.runInContext(fs.readFileSync(path.join(webBridgeRoot, 'bridge', 'domain-adapter.js'), 'utf8'), context, { filename: 'platform/web/bridge/domain-adapter.js' });
 

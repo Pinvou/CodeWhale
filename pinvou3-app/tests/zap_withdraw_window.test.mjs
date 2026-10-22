@@ -30,6 +30,12 @@ function loadChatApi() {
     clearTimeout,
     console,
   });
+  // #566 共享模块移植：chat.js 的共享函数体在 bridge-shared-helpers.js，先于工厂加载。
+  vm.runInContext(
+    fs.readFileSync(path.join(appRoot, 'src', 'shared', 'bridge-shared-helpers.js'), 'utf8'),
+    context,
+    { filename: 'src/shared/bridge-shared-helpers.js' },
+  );
   vm.runInContext(
     fs.readFileSync(path.join(appRoot, 'src', 'platform', 'tauri', 'bridge', 'chat.js'), 'utf8'),
     context,

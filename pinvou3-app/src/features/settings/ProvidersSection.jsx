@@ -13,11 +13,12 @@ import {
   reseedDraftControlsAfterProviderSwitch,
 } from '../codex/acp-draft-controls.js';
 import { ProviderFormModal } from './ProviderFormModal.jsx';
+import { StatusChip } from './StatusChip.jsx';
 
 const AGENTS = [
-  { key: 'codex', agentId: 'codex' },
-  { key: 'claude', agentId: 'claude' },
-  { key: 'kimi', agentId: 'kimi' },
+  { key: 'codex' },
+  { key: 'claude' },
+  { key: 'kimi' },
 ];
 
 function WireBadge({ wireApi, agent, copy }) {
@@ -667,9 +668,9 @@ export function ProvidersSection({ t }) {
     (installLog ? installLog.agent === activeAgent : busy === 'install:' + activeAgent);
 
   const cardStyle = `rounded-[20px] p-4 bg-[#F0F4F9] dark:bg-white/[0.05]`;
-  const badge = (label, tone) => (
-    <span className={`rounded-md px-1.5 py-0.5 text-[10px] font-semibold ${tone}`}>{label}</span>
-  );
+  // Provider badge chip: shared implementation in StatusChip.jsx (the badge variant keeps
+  // this view's free-form tone class strings local to the call sites below).
+  const badge = (label, tone) => <StatusChip variant="badge" toneClass={tone}>{label}</StatusChip>;
   const activeBadge = badge(copy.current, 'bg-[#007AFF]/15 text-[#007AFF] dark:text-[#64B5F6]');
   const officialBadge = badge(copy.official, 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400');
 

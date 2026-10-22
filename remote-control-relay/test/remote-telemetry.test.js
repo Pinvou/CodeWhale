@@ -5,6 +5,7 @@ import { buildBehaviorOverview, buildStatsOverview, buildDeviceList, buildBehavi
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { RetentionFacts } from "../retention-store.js";
 
 const now = Date.parse("2026-10-20T06:00:00Z");
 const devices = ["A", "B"].map(device_id => ({ device_id, hardware_source: "installation_id", first_seen_at: now - 86400000, last_seen_at: now, platform: "windows" }));
@@ -22,6 +23,43 @@ function invocation() {
     event("controlled", "task_terminal", { occurred_at: now - 2000, remote_task_status: "success", remote_duration_ms: 8000, remote_model_source: "controlled" }),
     event("controller", "result_received", { occurred_at: now - 1000, remote_task_status: "success" })];
 }
+
+test("durable retention joins split remote batches without retaining passive B", t => {
+  let clock = now;
+  t.mock.method(Date, "now", () => clock);
+  const directory = mkdtempSync(join(tmpdir(), "pinvou-remote-retention-"));
+  const store = new TelemetryStore(directory, "remote-retention-fixture-pepper-at-least-24");
+  try {
+    for (const device of devices) store.devices.set(device.device_id, { ...device });
+    const first = invocation();
+    store.behaviorEvents = first.filter(row => row.remote_role === "controlled");
+    store.persistRetentionFacts(clock);
+    assert.equal(store.retentionFacts.rows.size, 0);
+    const controller = first.filter(row => row.remote_role === "controller");
+    store.behaviorEvents.push(...controller);
+    store.persistRetentionFacts(clock, controller);
+    assert.equal(store.retentionFacts.rows.has("A"), true);
+    assert.equal(store.retentionFacts.rows.has("B"), false);
+    clock += 86400000;
+    const next = invocation().map(row => ({ ...row, event_id: `next_${row.event_id}`,
+      remote_task_key: "b".repeat(64), occurred_at: row.occurred_at + 86400000 }));
+    const execution = next.filter(row => row.remote_role === "controlled");
+    store.behaviorEvents.push(...execution);
+    store.persistRetentionFacts(clock, execution);
+    assert.equal(store.retentionFacts.metrics(clock).d1.retained_installations, 0);
+    const received = next.filter(row => row.remote_role === "controller");
+    store.behaviorEvents.push(...received);
+    store.persistRetentionFacts(clock, received);
+    const restored = new RetentionFacts(directory, clock);
+    restored.observe([], devices, clock);
+    assert.equal(restored.metrics(clock).d1.retained_installations, 1);
+    assert.equal(restored.rows.has("B"), false);
+    assert.deepEqual(store.behaviorOverview("30").retention, restored.metrics(clock));
+  } finally {
+    clearTimeout(store.saveTimer);
+    rmSync(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+  }
+});
 
 function completedInvocations(count, completedAt = now - 20000) {
   return Array.from({ length: count }, (_, index) => {

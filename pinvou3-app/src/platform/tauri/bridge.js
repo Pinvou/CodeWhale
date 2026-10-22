@@ -2,31 +2,21 @@
  * tauri-bridge.js — Tauri 后端通信桥
  *
  * 封装所有 invoke/listen，维护前端状态，通过 pub/sub 推给 React。
- * 浏览器预览时（无 window.__TAURI__）自动降级。
+ * window.__TAURI__ 由先加载的 platform/web/bootstrap.js 保证存在（桌面为原生注入，Web 为客户端 shim），不再保留无 Tauri 的降级桩。
  */
 (function () {
   "use strict";
+
+let pinvouSharedtauriMainCache = null;
+function pinvouSharedtauriMain() {
+  if (!pinvouSharedtauriMainCache) pinvouSharedtauriMainCache = window.PinvouBridgeShared.create("tauriMain", { state, BT_TABLE, PINVOU_SCENE_EVENTS_STORAGE_PREFIX, invoke, startThinking, recordAuthoritySyncDiagnostic, getBuffer, runSyncOnSession, notify, scheduledRunSessionOwners, sessionStates });
+  return pinvouSharedtauriMainCache;
+}
 
   // Browser transport owns its own replay and persistence semantics.
   if (window.PinvouPlatform && (window.PinvouPlatform.kind === "web" || window.PinvouPlatform.isWeb === true)) return;
 
   const TAURI = window.__TAURI__;
-  if (!TAURI) {
-    console.warn("[TauriBridge] Tauri not available — browser preview mode");
-    window.TauriBridge = {
-      available: false,
-      lifecycle: { init: function () { return Promise.resolve(); } },
-      state: {
-        get: function () { return {}; },
-        getMany: function () { return {}; },
-        subscribe: function () { return function () {}; },
-        subscribeMany: function () { return function () {}; },
-      },
-      rendering: { renderMarkdown: function (text) { return String(text || ""); } },
-    };
-    return;
-  }
-
   var invokeErrorObserver = function () {};
   var modelAvailabilityError = function () { return null; };
   const rawInvoke = TAURI.core.invoke;
@@ -92,7 +82,7 @@
       console.warn("[platform] capability detection failed", error);
       state.platformCapabilities = Object.assign({}, state.platformCapabilities, { loaded: false, desktopRemoteControl: false });
     }
-    notify(["platform"]);
+    notify();
     if (state.platformCapabilities.desktopRemoteControl === true && desktopRemoteControlFeature) {
       desktopRemoteControlFeature.controllerStatus().catch(function () {});
     }
@@ -273,9 +263,7 @@
       work_context: [],
       current_focus: [],
       recent_activity: [],
-      recent_work: [],
       pending: [],
-      never: [],
       runtime: null,
       snapshot_path: "",
     },
@@ -427,7 +415,6 @@
     scheduledTaskBusyAction: null,
     scheduledTaskError: null,
     scheduledTaskErrorKind: null,
-    scheduledTaskDraft: null,
     scheduledTaskCreationSessionId: null,
     scheduledTaskAutoOpenId: null,
     scheduledRunContext: null,
@@ -478,29 +465,7 @@
       }
     } catch (_) {}
   }
-  function authoritySyncBufferSnapshot(sid, buf) {
-    return {
-      session_id: sid || "",
-      active_session_id: state.activeSessionId || "",
-      buffer_present: !!buf,
-      local_turn_owned: !!(buf && buf.localTurnOwned),
-      remote_turn_active: !!(buf && buf.remoteTurnActive),
-      remote_terminal_seen: !!(buf && buf.remoteTerminalSeen),
-      loaded_from_disk: !!(buf && buf.loadedFromDisk),
-      buffer_busy: !!(buf && buf.busy),
-      ui_busy: !!state.busy,
-      message_count: buf && Array.isArray(buf.messages) ? buf.messages.length : null,
-      chat_item_count: buf && Array.isArray(buf.chatItems) ? buf.chatItems.length : null,
-      queued_count: buf && Array.isArray(buf.queued) ? buf.queued.length : null,
-      session_revision: String(buf && buf.sessionRevision || ""),
-      committed_revision: String(buf && buf.remoteCommittedRevision || ""),
-      expected_assistant_key_length: String(buf && buf.remoteExpectedAssistantKey || "").length,
-      baseline_message_count: buf && buf.remoteBaselineMessageCount != null
-        ? Number(buf.remoteBaselineMessageCount)
-        : null,
-      baseline_trusted: !!(buf && buf.remoteBaselineTrusted),
-    };
-  }
+function authoritySyncBufferSnapshot(sid, buf) { return pinvouSharedtauriMain().authoritySyncBufferSnapshot(sid, buf); }
 
   // ── bridge 层 UI 文案（系统消息/状态标签）──────────────────────
   // bridge 在事件回调里生成文案,拿不到 React 的 t;按 state.settings.language 取词,中文兜底。
@@ -592,7 +557,6 @@
       voiceNoDeviceConnect: "No available microphone detected. Connect or enable a recording device, then try again.",
       voiceRecording: "Recording… tap again to finish",
       voicePermissionDeniedRetry: "Microphone permission was denied. Tap voice input again and choose Allow in the prompt; if it still fails, check the system microphone settings.",
-      scheduledDraftInvalid: "The scheduled task draft is missing a name, task description, or schedule rule",
       scheduledCreateFailed: "Failed to create scheduled task: ",
       scheduledTaskFallbackName: "Scheduled task",
       scheduledActionBusy: "Another scheduled task operation is still in progress",
@@ -702,7 +666,6 @@
       voiceNoDeviceConnect: "利用可能なマイクが見つかりません。録音デバイスを接続または有効にして再試行してください。",
       voiceRecording: "録音中です。もう一度タップすると終了します",
       voicePermissionDeniedRetry: "マイクの権限が拒否されています。もう一度音声入力をタップし、許可を選択してください。それでも失敗する場合はシステムのマイク設定を確認してください。",
-      scheduledDraftInvalid: "スケジュールタスクの下書きに名前・タスク説明・時間ルールのいずれかが不足しています",
       scheduledCreateFailed: "スケジュールタスクの作成に失敗：",
       scheduledTaskFallbackName: "スケジュールタスク",
       scheduledActionBusy: "別のスケジュールタスク操作がまだ実行中です",
@@ -812,7 +775,6 @@
       voiceNoDeviceConnect: "未检测到可用麦克风，请连接或启用录音设备后重试。",
       voiceRecording: "正在录音，再点一次结束",
       voicePermissionDeniedRetry: "麦克风权限已被拒绝，请再次点击语音输入并在授权提示中选择允许；若仍失败，请检查系统麦克风设置。",
-      scheduledDraftInvalid: "定时任务草稿缺少名称、任务说明或时间规则",
       scheduledCreateFailed: "定时任务创建失败：",
       scheduledTaskFallbackName: "定时任务",
       scheduledActionBusy: "另一个定时任务操作仍在进行中",
@@ -849,18 +811,10 @@
   }
   // 转交徽标从已持久化的消息正文恢复；消息沿用发送时的界面语言，
   // 因此回放必须同时匹配三语，而不能只匹配当前语言。
-  function textMatchesBtKey(text, key) {
-    return text.indexOf(BT_TABLE.zh[key]) >= 0
-      || text.indexOf(BT_TABLE.en[key]) >= 0
-      || text.indexOf(BT_TABLE.ja[key]) >= 0;
-  }
+function textMatchesBtKey(text, key) { return pinvouSharedtauriMain().textMatchesBtKey(text, key); }
   // 默认会话标题哨兵:三语兜底标题都视为占位(自动改名/显示映射的依据),
   // 与 web 桥和 main.jsx 的同款判断保持一致。
-  function isDefaultChatTitle(title) {
-    return title === BT_TABLE.zh.newChatFallbackTitle
-      || title === BT_TABLE.en.newChatFallbackTitle
-      || title === BT_TABLE.ja.newChatFallbackTitle;
-  }
+function isDefaultChatTitle(title) { return pinvouSharedtauriMain().isDefaultChatTitle(title); }
 
   // ── Per-session 工作集缓冲（多 session 并发）────────────────────
   // active session 的工作集 = state.* + 上面那批模块级 stream 变量(保持原逻辑零改动)。
@@ -908,48 +862,13 @@
   // sessionId → true:标题当前是「卡牌占位名」(加卡时自动取的),可被首条用户消息覆盖。
   // 卡牌名只在「加了卡但还没开口」时当临时标题;一旦开始对话,对话内容更能区分同卡会话。
   // 内存态(不持久化):重启后丢标记仅影响「加卡→重启→才发首条消息」这一冷门路径。
-  var personaPlaceholderTitles = {};
-  var PINVOU_SCENE_EVENTS_STORAGE_PREFIX = "pinvou_scene_events_v1:";
-  function normalizePinvouScene(scene) {
-    scene = String(scene || "").trim();
-    return /^(work:document-writing|work:personal-workbench|design:poster|design:data-visualization|design:ppt)$/.test(scene) ? scene : "";
-  }
-  function pinvouSceneStorageKey(sid) {
-    return PINVOU_SCENE_EVENTS_STORAGE_PREFIX + String(sid || "").trim();
-  }
-  function normalizePinvouSceneEvents(events) {
-    return (Array.isArray(events) ? events : []).map(function (event) {
-      var pos = Number(event && event.pos);
-      var scene = normalizePinvouScene(event && event.scene);
-      if (!Number.isFinite(pos) || pos < 0 || !scene) return null;
-      return { pos: Math.floor(pos), scene: scene };
-    }).filter(Boolean).sort(function (left, right) { return left.pos - right.pos; });
-  }
-  function loadPinvouSceneEventsForSession(sid) {
-    if (!sid || !window.localStorage) return [];
-    try {
-      return normalizePinvouSceneEvents(JSON.parse(window.localStorage.getItem(pinvouSceneStorageKey(sid)) || "[]"));
-    } catch (_) {
-      return [];
-    }
-  }
-  function savePinvouSceneEventsForSession(sid, events) {
-    if (!sid) return;
-    var normalized = normalizePinvouSceneEvents(events);
-    try {
-      if (window.localStorage) {
-        window.localStorage.setItem(pinvouSceneStorageKey(sid), JSON.stringify(normalized));
-      }
-    } catch (_) {
-      // localStorage 只作旧版本迁移和离线缓存，写失败不影响后端 sidecar。
-    }
-    Promise.resolve().then(function () {
-      return invoke("save_session_pinvou_scene_events", {
-        sessionId: sid,
-        events: normalized,
-      });
-    }).catch(function () {});
-  }
+  const personaPlaceholderTitles = {};
+  const PINVOU_SCENE_EVENTS_STORAGE_PREFIX = "pinvou_scene_events_v1:";
+
+function pinvouSceneStorageKey(sid) { return pinvouSharedtauriMain().pinvouSceneStorageKey(sid); }
+function normalizePinvouSceneEvents(events) { return pinvouSharedtauriMain().normalizePinvouSceneEvents(events); }
+function loadPinvouSceneEventsForSession(sid) { return pinvouSharedtauriMain().loadPinvouSceneEventsForSession(sid); }
+
   async function syncPinvouSceneEventsForSession(sid) {
     var cached = loadPinvouSceneEventsForSession(sid);
     if (!sid) return cached;
@@ -971,25 +890,8 @@
       return cached;
     }
   }
-  function recordPinvouSceneForMessage(sid, pos, scene) {
-    scene = normalizePinvouScene(scene);
-    pos = Number(pos);
-    if (!sid || !scene || !Number.isFinite(pos) || pos < 0) return;
-    pos = Math.floor(pos);
-    var events = normalizePinvouSceneEvents(state.pinvouSceneEvents)
-      .filter(function (event) { return event.pos !== pos; });
-    events.push({ pos: pos, scene: scene });
-    events = normalizePinvouSceneEvents(events);
-    state.pinvouSceneEvents = events;
-    savePinvouSceneEventsForSession(sid, events);
-  }
-  function pinvouSceneForMessagePos(pos) {
-    var events = normalizePinvouSceneEvents(state.pinvouSceneEvents);
-    for (var i = 0; i < events.length; i++) {
-      if (events[i].pos === pos) return events[i].scene;
-    }
-    return "";
-  }
+function recordPinvouSceneForMessage(sid, pos, scene) { return pinvouSharedtauriMain().recordPinvouSceneForMessage(sid, pos, scene); }
+function pinvouSceneForMessagePos(pos) { return pinvouSharedtauriMain().pinvouSceneForMessagePos(pos); }
   // ── Steered-message sidecar（mid-turn steer 位置标记）──────────────
   // steer 落盘与普通 admission 对齐、不含 <turn_meta> 块（Rust sanitize 统一
   // 剥离），重载投影无法再借信封反推"非 turn admission"，因此结算时把
@@ -1412,33 +1314,7 @@
   }
 
   // 事件监听器统一入口:按 payload.session_id 路由同步逻辑;后台变更后补一次 notify 刷新列表。
-  function markRemoteTurn(sid, buf, preserveCommittedRevision, cause) {
-    if (!sid || !buf || buf.localTurnOwned) return;
-    var wasActive = !!buf.remoteTurnActive;
-    if (!buf.remoteTurnActive) {
-      var meta = state.sessions.find(function (session) { return session.id === sid; });
-      buf.remoteBaselineTrusted = !!buf.loadedFromDisk;
-      buf.remoteBaselineMessageCount = buf.loadedFromDisk
-        ? (buf.messages || []).length
-        : Number(meta && meta.message_count);
-      if (!Number.isFinite(buf.remoteBaselineMessageCount)) buf.remoteBaselineMessageCount = null;
-      buf.remoteExpectedAssistantKey = "";
-      if (!preserveCommittedRevision) buf.remoteCommittedRevision = "";
-      buf.remoteTerminalSeen = false;
-    }
-    buf.remoteTurnActive = true;
-    buf.busy = true;
-    if (sid === state.activeSessionId) {
-      state.busy = true;
-      if (!state.thinking.active) startThinking();
-    }
-    if (!wasActive) {
-      recordAuthoritySyncDiagnostic("remote_turn_marked", Object.assign({
-        cause: String(cause || "unspecified"),
-        preserve_committed_revision: !!preserveCommittedRevision,
-      }, authoritySyncBufferSnapshot(sid, buf)));
-    }
-  }
+function markRemoteTurn(sid, buf, preserveCommittedRevision, cause) { return pinvouSharedtauriMain().markRemoteTurn(sid, buf, preserveCommittedRevision, cause); }
   function onSessionEvent(e, fn, options) {
     var sid = (e && e.payload && e.payload.session_id) || state.activeSessionId;
     if (sid) {
@@ -1453,14 +1329,7 @@
     runSyncOnSession(sid, fn);
     if (isBg && !(options && options.deferBackgroundNotify)) notify();
   }
-  function isScheduledRunSession(sid) {
-    return !!sid && (
-      sid.indexOf("sched-") === 0 ||
-      !!scheduledRunSessionOwners[sid] ||
-      !!(sessionStates[sid] && sessionStates[sid].scheduledRunSession) ||
-      !!(state.scheduledRunContext && state.scheduledRunContext.sessionId === sid)
-    );
-  }
+function isScheduledRunSession(sid) { return pinvouSharedtauriMain().isScheduledRunSession(sid); }
 
   // Transcript persistence is authoritative in Rust. The UI only persists the
   // presentation-side artifact index and derives the optional auto-title.
@@ -1515,15 +1384,7 @@
     } catch (e) { console.warn("persist failed", e); }
   }
 
-  function planCardHydrationKey(item) {
-    if (!item || item.type !== "plan_card") return "";
-    if (item.planMarkdown) return "markdown:" + String(item.planMarkdown);
-    try {
-      return "snapshot:" + JSON.stringify({ plan: item.plan || null, todos: item.todos || null });
-    } catch (_) {
-      return "";
-    }
-  }
+function planCardHydrationKey(item) { return pinvouSharedtauriMain().planCardHydrationKey(item); }
 
   async function reconcileRemoteTurn(sid) {
     if (!sid) return true;
@@ -1752,7 +1613,7 @@
     chat: ["activeSkill", "artifacts", "artifactChange", "attachments", "busy", "chatItems", "composerDraft", "composerPrefill", "messages", "modeState", "planSnapshot", "queued", "remoteProxyDraftError", "thinking", "tokens", "turnDirtyArtifacts", "turnPresentedArtifacts", "turnTimeline"],
     voice: ["voiceInput", "voiceAsrSetup"],
     knowledge: ["kbModelSetup", "mountedCollection", "mountedCollections", "mountedRemoteCollections", "mountedCollectionsRevision"],
-    scheduled: ["scheduledRunContext", "scheduledTaskAutoOpenId", "scheduledTaskBusyAction", "scheduledTaskCreationSessionId", "scheduledTaskDetail", "scheduledTaskDraft", "scheduledTaskError", "scheduledTaskErrorKind", "scheduledTaskLoading", "scheduledTaskPendingGuide", "scheduledTaskRecentRuns", "scheduledTaskRuns", "scheduledTasks", "scheduledTaskSelectionGeneration", "selectedScheduledTaskId"],
+    scheduled: ["scheduledRunContext", "scheduledTaskAutoOpenId", "scheduledTaskBusyAction", "scheduledTaskCreationSessionId", "scheduledTaskDetail", "scheduledTaskError", "scheduledTaskErrorKind", "scheduledTaskLoading", "scheduledTaskPendingGuide", "scheduledTaskRecentRuns", "scheduledTaskRuns", "scheduledTasks", "scheduledTaskSelectionGeneration", "selectedScheduledTaskId"],
     monitor: ["monitor", "monitorError"],
     settings: ["settings", "selectedPet", "behaviorTelemetry"],
     models: ["activeModelId", "currentSessionModelId", "effectiveModelConfig", "savedModels"],
@@ -1809,21 +1670,9 @@
   // and allocate only changed paths. Long transcripts therefore stay shared
   // between snapshots while an in-place streaming item mutation still produces
   // a stable new item for subscribers. get/getMany retain their deep-copy API.
-  function defineSubscriptionStateProperty(target, key, value) {
-    Object.defineProperty(target, key, {
-      configurable: true,
-      enumerable: true,
-      value: value,
-      writable: true,
-    });
-  }
-  function copySubscriptionStateObject(source) {
-    var result = {};
-    Object.keys(source).forEach(function (key) {
-      defineSubscriptionStateProperty(result, key, source[key]);
-    });
-    return result;
-  }
+function defineSubscriptionStateProperty(target, key, value) { return pinvouSharedtauriMain().defineSubscriptionStateProperty(target, key, value); }
+function copySubscriptionStateObject(source) { return pinvouSharedtauriMain().copySubscriptionStateObject(source); }
+  // eslint-disable-next-line sonarjs/cognitive-complexity -- legacy bridge; refactor tracked separately
   function subscriptionStateValue(value, previous, ancestors) {
     var valueType = typeof value;
     if (!value || valueType !== "object") {
@@ -1888,17 +1737,16 @@
       ancestors.delete(value);
     }
   }
-  // Slice caches are invalidated by the domains that actually changed. The
-  // legacy notify() path still invalidates every domain, so features can move
-  // to precise publication one audited boundary at a time without risking a
-  // stale snapshot in untouched call sites.
-  var subscriptionSliceRevisions = Object.create(null);
+  // Slice caches are invalidated by the single publication revision: #727
+  // replaced per-domain precise publication with one host-snapshot publish
+  // per notify, so every domain advances together.
   var subscriptionSliceCache = Object.create(null);
+  let subscriptionSliceRevision = 0;
   function subscriptionStateSlice(domain) {
     var fields = STATE_SLICE_FIELDS[domain];
     if (!fields) throw new Error("Unknown Tauri bridge state slice: " + domain);
     var cached = subscriptionSliceCache[domain];
-    var revision = subscriptionSliceRevisions[domain] || 0;
+    var revision = subscriptionSliceRevision;
     if (cached && cached.revision === revision) return cached.snapshot;
     var current = {};
     var source = domain === "desktopRemoteControl" ? state.desktopRemoteControl : state;
@@ -1938,39 +1786,16 @@
   // loaders therefore used to expose a succession of partial snapshots and
   // re-render the root once per completed IPC. Keep their state ownership and
   // parallelism, but publish the initialized state as one coherent revision.
-  var startupNotificationBatching = false;
-  function invalidatedSubscriptionDomains(changedDomains) {
-    var domains = changedDomains === undefined ? Object.keys(STATE_SLICE_FIELDS) : changedDomains;
-    if (!Array.isArray(domains) || domains.length === 0) {
-      throw new Error("Tauri bridge notify domains must be a non-empty array");
-    }
-    var invalidated = Object.create(null);
-    for (var i = 0; i < domains.length; i++) {
-      var domain = domains[i];
-      if (!STATE_SLICE_FIELDS[domain]) {
-        throw new Error("Unknown Tauri bridge notify domain: " + domain);
-      }
-      invalidated[domain] = true;
-    }
-    // chat busy is projected into sessions.sessionBusy. Any precise chat
-    // publication must therefore refresh the sessions slice as well.
-    if (invalidated.chat) invalidated.sessions = true;
-    return Object.keys(invalidated);
-  }
-  function notify(changedDomains) {
+  let startupNotificationBatching = false;
+  let refreshActiveStreamRender = null;
+  function notify() {
     if (suppressNotify || startupNotificationBatching) return;
-    var invalidatedDomains = invalidatedSubscriptionDomains(changedDomains);
-    if (invalidatedDomains.indexOf("sessions") >= 0) {
-      // 会话列表「工作中」指示:active 取活动工作集 state.busy,其余取各自 buffer.busy
-      state.sessionBusy = {};
-      for (var id in sessionStates) state.sessionBusy[id] = !!sessionStates[id].busy;
-      if (state.activeSessionId) state.sessionBusy[state.activeSessionId] = !!state.busy;
-    }
-    for (var domainIndex = 0; domainIndex < invalidatedDomains.length; domainIndex++) {
-      var invalidatedDomain = invalidatedDomains[domainIndex];
-      subscriptionSliceRevisions[invalidatedDomain] =
-        (subscriptionSliceRevisions[invalidatedDomain] || 0) + 1;
-    }
+    if (refreshActiveStreamRender) refreshActiveStreamRender();
+    // 会话列表「工作中」指示:active 取活动工作集 state.busy,其余取各自 buffer.busy
+    state.sessionBusy = {};
+    for (const id in sessionStates) state.sessionBusy[id] = !!sessionStates[id].busy;
+    if (state.activeSessionId) state.sessionBusy[state.activeSessionId] = !!state.busy;
+    subscriptionSliceRevision += 1;
     // Membership and state are fixed when a round is queued. Subscribe or
     // unsubscribe during a callback affects only rounds queued afterwards.
     var members = subscribers.slice();
@@ -1993,9 +1818,6 @@
     } finally {
       notificationDispatching = false;
     }
-  }
-  function notifyDomains(domains) {
-    notify(domains);
   }
   function subscribe(snapshot, callback) {
     var subscriber = { snapshot: snapshot, callback: callback };
@@ -2036,139 +1858,51 @@
     }, fn);
   }
 
-  var scheduledFeature = installBridgeFeature("scheduled", { state: state, notify: notify, invoke: invoke, bt: bt, runSyncOnSession: runSyncOnSession, addSystemItem: addSystemItem, rememberScheduledRunOwner: rememberScheduledRunOwner, isScheduledRunTerminal: isScheduledRunTerminal, purgeSessionBuffer: purgeSessionBuffer, createNewSession: createNewSession, prefillComposer: prefillComposer, sessionStates: sessionStates });
-  var loadScheduledTaskTemplateSources = scheduledFeature.loadScheduledTaskTemplateSources;
-  var persistScheduledTaskTemplateSources = scheduledFeature.persistScheduledTaskTemplateSources;
-  var rememberScheduledTaskTemplateSource = scheduledFeature.rememberScheduledTaskTemplateSource;
-  var forgetScheduledTaskTemplateSource = scheduledFeature.forgetScheduledTaskTemplateSource;
-  var attachScheduledTaskTemplateSource = scheduledFeature.attachScheduledTaskTemplateSource;
-  var attachAndPruneScheduledTaskTemplateSources = scheduledFeature.attachAndPruneScheduledTaskTemplateSources;
-  var upsertScheduledTask = scheduledFeature.upsertScheduledTask;
-  var applyScheduledRunViewed = scheduledFeature.applyScheduledRunViewed;
-  var invalidateScheduledTaskReads = scheduledFeature.invalidateScheduledTaskReads;
-  var invalidateScheduledRecentRuns = scheduledFeature.invalidateScheduledRecentRuns;
-  var invalidateScheduledRecentRunsForSession = scheduledFeature.invalidateScheduledRecentRunsForSession;
-  var scheduleScheduledRunRefresh = scheduledFeature.scheduleScheduledRunRefresh;
-  var scheduledTaskErrorText = scheduledFeature.scheduledTaskErrorText;
-  var setScheduledTaskError = scheduledFeature.setScheduledTaskError;
-  var dismissScheduledTaskError = scheduledFeature.dismissScheduledTaskError;
-  var clearScheduledTaskLoadError = scheduledFeature.clearScheduledTaskLoadError;
-  var beginScheduledTaskLoad = scheduledFeature.beginScheduledTaskLoad;
-  var endScheduledTaskLoad = scheduledFeature.endScheduledTaskLoad;
-  var scheduledTaskRequestStamp = scheduledFeature.scheduledTaskRequestStamp;
-  var isCurrentScheduledTaskRequest = scheduledFeature.isCurrentScheduledTaskRequest;
-  var selectScheduledTask = scheduledFeature.selectScheduledTask;
-  var clearScheduledTaskSelection = scheduledFeature.clearScheduledTaskSelection;
-  var extractBalancedJsonObject = scheduledFeature.extractBalancedJsonObject;
-  var parseLooseJsonObject = scheduledFeature.parseLooseJsonObject;
-  var normalizeScheduledTaskDraft = scheduledFeature.normalizeScheduledTaskDraft;
-  var activeScheduledTaskModelConfig = scheduledFeature.activeScheduledTaskModelConfig;
-  var lockScheduledTaskDraftModel = scheduledFeature.lockScheduledTaskDraftModel;
-  var parseScheduledTaskDraftFromText = scheduledFeature.parseScheduledTaskDraftFromText;
-  var clearScheduledTaskDraft = scheduledFeature.clearScheduledTaskDraft;
-  var confirmScheduledTaskDraft = scheduledFeature.confirmScheduledTaskDraft;
-  var scheduledTaskInputFromDraft = scheduledFeature.scheduledTaskInputFromDraft;
-  var autoCreateScheduledTaskDraft = scheduledFeature.autoCreateScheduledTaskDraft;
-  var loadScheduledTasks = scheduledFeature.loadScheduledTasks;
-  var readScheduledTask = scheduledFeature.readScheduledTask;
-  var mergeScheduledTaskRecentRuns = scheduledFeature.mergeScheduledTaskRecentRuns;
-  var loadScheduledTaskRuns = scheduledFeature.loadScheduledTaskRuns;
-  var loadScheduledTaskRecentRuns = scheduledFeature.loadScheduledTaskRecentRuns;
-  var refreshScheduledTaskData = scheduledFeature.refreshScheduledTaskData;
-  var refreshScheduledRunShortcutUntilLinked = scheduledFeature.refreshScheduledRunShortcutUntilLinked;
-  var upsertScheduledTaskRun = scheduledFeature.upsertScheduledTaskRun;
-  var runScheduledTaskAction = scheduledFeature.runScheduledTaskAction;
-  var scheduledTaskBackendInput = scheduledFeature.scheduledTaskBackendInput;
-  var createScheduledTask = scheduledFeature.createScheduledTask;
-  var updateScheduledTask = scheduledFeature.updateScheduledTask;
-  var pauseScheduledTask = scheduledFeature.pauseScheduledTask;
-  var resumeScheduledTask = scheduledFeature.resumeScheduledTask;
-  var toggleScheduledTaskPinned = scheduledFeature.toggleScheduledTaskPinned;
-  var deleteScheduledTask = scheduledFeature.deleteScheduledTask;
-  var runScheduledTaskNow = scheduledFeature.runScheduledTaskNow;
-  var startScheduledTaskChat = scheduledFeature.startScheduledTaskChat;
+  const scheduledFeature = installBridgeFeature("scheduled", { state, notify, invoke, bt, runSyncOnSession, addSystemItem, rememberScheduledRunOwner, isScheduledRunTerminal, purgeSessionBuffer, createNewSession, prefillComposer, sessionStates });
+  const applyScheduledRunViewed = scheduledFeature.applyScheduledRunViewed;
+  const invalidateScheduledTaskReads = scheduledFeature.invalidateScheduledTaskReads;
+  const invalidateScheduledRecentRunsForSession = scheduledFeature.invalidateScheduledRecentRunsForSession;
+  const scheduleScheduledRunRefresh = scheduledFeature.scheduleScheduledRunRefresh;
+  const setScheduledTaskError = scheduledFeature.setScheduledTaskError;
+  const dismissScheduledTaskError = scheduledFeature.dismissScheduledTaskError;
+  const selectScheduledTask = scheduledFeature.selectScheduledTask;
+  const clearScheduledTaskSelection = scheduledFeature.clearScheduledTaskSelection;
+  const parseScheduledTaskDraftFromText = scheduledFeature.parseScheduledTaskDraftFromText;
+  const autoCreateScheduledTaskDraft = scheduledFeature.autoCreateScheduledTaskDraft;
+  const loadScheduledTasks = scheduledFeature.loadScheduledTasks;
+  const readScheduledTask = scheduledFeature.readScheduledTask;
+  const loadScheduledTaskRuns = scheduledFeature.loadScheduledTaskRuns;
+  const loadScheduledTaskRecentRuns = scheduledFeature.loadScheduledTaskRecentRuns;
+  const refreshScheduledTaskData = scheduledFeature.refreshScheduledTaskData;
+  const createScheduledTask = scheduledFeature.createScheduledTask;
+  const updateScheduledTask = scheduledFeature.updateScheduledTask;
+  const pauseScheduledTask = scheduledFeature.pauseScheduledTask;
+  const resumeScheduledTask = scheduledFeature.resumeScheduledTask;
+  const toggleScheduledTaskPinned = scheduledFeature.toggleScheduledTaskPinned;
+  const deleteScheduledTask = scheduledFeature.deleteScheduledTask;
+  const runScheduledTaskNow = scheduledFeature.runScheduledTaskNow;
+  const startScheduledTaskChat = scheduledFeature.startScheduledTaskChat;
   // ── Session management ───────────────────────────────────────────
   var PLAN_TOOLS = new Set(["update_plan", "checklist_write", "todo_write"]);
 
   // tool_result.content 可能是 string 或 Anthropic content blocks 数组，归一成纯文本。
-  function toolResultText(content) {
-    if (typeof content === "string") return content;
-    if (Array.isArray(content)) {
-      return content.map(function (b) { return b && typeof b.text === "string" ? b.text : ""; }).join("");
-    }
-    return "";
-  }
+function toolResultText(content) { return pinvouSharedtauriMain().toolResultText(content); }
 
-  // CodeWhale may append model-only recovery guidance to a persisted tool result
-  // to preserve strict provider role ordering. Keep that guidance in durable/model
-  // context, but remove only the two known internal suffix kinds from tool cards.
-  function stripInternalToolRuntimeSuffix(value) {
-    var text = String(value == null ? "" : value);
-    var marker = "\n\n<codewhale:runtime_event";
-    while (true) {
-      var start = text.lastIndexOf(marker);
-      if (start < 0) return text;
-      var suffix = text.slice(start + 2);
-      var opening = suffix.match(/^<codewhale:runtime_event\b[^>]*>/i);
-      if (!opening || !/<\/codewhale:runtime_event>\s*$/i.test(suffix)) return text;
-      var tag = opening[0];
-      var knownKind = /\bkind=(["'])(?:stuck_guard|tool_error_degradation)\1/i.test(tag);
-      var internal = /\bvisibility=(["'])internal\1/i.test(tag);
-      if (!knownKind || !internal) return text;
-      text = text.slice(0, start);
-    }
-  }
 
-  function toolResultDisplayContent(content) {
-    if (typeof content === "string") return stripInternalToolRuntimeSuffix(content);
-    if (!Array.isArray(content)) return content;
-    return content.map(function (block) {
-      if (!block || typeof block.text !== "string") return block;
-      return Object.assign({}, block, { text: stripInternalToolRuntimeSuffix(block.text) });
-    });
-  }
+
+function toolResultDisplayContent(content) { return pinvouSharedtauriMain().toolResultDisplayContent(content); }
 
   // plan 类工具结果格式："...updated:\n{json}"——切第一个换行后 parse（与 engine.rs 一致）。
-  function parsePlanSnapshot(content) {
-    var txt = toolResultText(content);
-    var i = txt.indexOf("\n");
-    if (i < 0) return null;
-    try { return JSON.parse(txt.slice(i + 1)); } catch (_) { return null; }
-  }
+function parsePlanSnapshot(content) { return pinvouSharedtauriMain().parsePlanSnapshot(content); }
 
   // request_user_input 结果是纯 JSON {answers:[{id,label,value}]}（turn_loop.rs ToolResult::json）。
   // 按 question.id 匹配，还原成 UserInputCard 的 answers 数组（顺序对齐 questions）。
   // multi_select 多选保留全部同 id 答案、不塌缩（与 code-native-lane parseNativeUserAnswers 对齐）。
-  function parseUserAnswers(content, questions) {
-    var ans;
-    try { ans = JSON.parse(toolResultText(content)).answers; } catch (_) { return null; }
-    if (!Array.isArray(ans)) return null;
-    // 用无原型对象：question id 仅后端校验非空，constructor/toString/__proto__ 是合法输入，
-    // 普通 {} 会让这些键命中 Object.prototype 继承属性，.push 抛 TypeError（复核 P1）。
-    var byId = Object.create(null);
-    ans.forEach(function (a) { if (a && a.id != null) (byId[a.id] = byId[a.id] || []).push(a); });
-    var out = [];
-    for (var qi = 0; qi < questions.length; qi++) {
-      var q = questions[qi];
-      var matches = byId[q.id];
-      if (!matches || !matches.length) { out.push(null); continue; }
-      matches.forEach(function (a) { out.push({ id: q.id, label: a.label, value: a.value }); });
-    }
-    return out;
-  }
+function parseUserAnswers(content, questions) { return pinvouSharedtauriMain().parseUserAnswers(content, questions); }
 
   // careful hook 拦截结果(shell.rs BLOCKED 固定格式)→ 反解出 careful_blocked 卡所需 metadata。
   // metadata 不进持久化 messages,session 重载只能从 tool_result 文本识别,否则 🛑 红卡重启即丢。
-  function parseCarefulBlocked(text) {
-    if (typeof text !== "string" || text.indexOf("BLOCKED: This command was blocked for safety reasons") !== 0) return null;
-    var rm = text.match(/Reasons: ([^\n]*)/);
-    var sm = text.match(/Suggestions: ([^\n]*)/);
-    return {
-      safety_level: "dangerous", blocked: true,
-      reasons: rm && rm[1] ? rm[1].split("; ") : [],
-      suggestions: sm && sm[1] ? sm[1].split("; ") : [],
-    };
-  }
+function parseCarefulBlocked(text) { return pinvouSharedtauriMain().parseCarefulBlocked(text); }
 
   function isInternalUserMessage(blocks) {
     return window.PinvouBridgeMessages.isInternalUserMessage(blocks);
@@ -2211,7 +1945,14 @@
   // in-flight tools (tool_use not yet in messages), and clearing it would
   // leave the later chat:tool_end without its meta (stuck selection
   // card / degraded artifact card).
-  function rerenderFromMessages(opts) {
+  // eslint-disable-next-line sonarjs/cognitive-complexity -- legacy bridge; refactor tracked separately
+  function rerenderFromMessages(opts) {let pinvouSharedtauriMainN99856Cache = null;
+function pinvouSharedtauriMainN99856() {
+  if (!pinvouSharedtauriMainN99856Cache) pinvouSharedtauriMainN99856Cache = window.PinvouBridgeShared.create("tauriMain:99856", { pe, addChatItem, bt });
+  return pinvouSharedtauriMainN99856Cache;
+}
+
+
     state.chatItems = [];
     itemIdSeq = 0;
     // Replay rebuilds toolMeta only for historical tool_uses that still have a
@@ -2223,16 +1964,8 @@
     // their tool_result backfill lookup — nothing reads them afterwards.
     if (!(opts && opts.keepLiveToolMeta)) toolMeta = {};
     // 卡牌事件按 pos 插回原位(pos=事件发生时的 messages 数)。让重载历史不割裂。
-    var pe = Array.isArray(state.personaEvents) ? state.personaEvents : [];
-    function emitPersonaAt(atOrAfter, isTail) {
-      for (var k = 0; k < pe.length; k++) {
-        var ev = pe[k];
-        if (isTail ? (ev.pos < atOrAfter) : (ev.pos !== atOrAfter)) continue;
-        if (ev.kind === "equip" && ev.card) addChatItem({ type: "persona_equip", card: ev.card, time: "" });
-        else if (ev.kind === "unequip") addChatItem({ type: "system", text: bt("personaUnequipped") + (ev.name || ""), time: "" });
-        else if (ev.kind === "card_creator_intro") addChatItem({ type: "card_creator_intro", time: "" });
-      }
-    }
+    const pe = Array.isArray(state.personaEvents) ? state.personaEvents : [];
+function emitPersonaAt(atOrAfter, isTail) { return pinvouSharedtauriMainN99856().emitPersonaAt(atOrAfter, isTail); }
     // 预扫 tool_result：tool_use 在 assistant 消息、result 在后续 user 消息，需提前建映射
     // 才能在还原选择卡/方案卡时拿到结果（选项/快照）。
     var resultById = {};
@@ -2518,38 +2251,12 @@
   var reconcileBackgroundTerminalOutput = terminalFeature.reconcileBackgroundTerminalOutput;
   var appendToolItemOutput = terminalFeature.appendToolItemOutput;
   // 找最后一条匹配的 chat item（用于卡片状态机更新）
-  function patchLastItem(pred, patch) {
-    for (var i = state.chatItems.length - 1; i >= 0; i--) {
-      if (pred(state.chatItems[i])) {
-        Object.assign(state.chatItems[i], patch);
-        return state.chatItems[i];
-      }
-    }
-    return null;
-  }
+function patchLastItem(pred, patch) { return pinvouSharedtauriMain().patchLastItem(pred, patch); }
   // 是否已存在未处理（未 resolved）的某类型卡片 —— 防重复插入
-  function hasUnresolvedItem(type) {
-    return state.chatItems.some(function (it) { return it.type === type && !it.resolved; });
-  }
+function hasUnresolvedItem(type) { return pinvouSharedtauriMain().hasUnresolvedItem(type); }
 
   // ── Plan markdown 拼接（accept 时发给后端，与 main.js 对齐）────────
-  function composePlanMarkdown(snapshots) {
-    var lines = [];
-    var plan = snapshots && snapshots.plan;
-    var todos = snapshots && snapshots.todos;
-    function sym(s) { return s === "completed" ? "●" : s === "in_progress" ? "◎" : "○"; }
-    if (plan && Array.isArray(plan.items)) {
-      if (plan.explanation) { lines.push("**方案：**", plan.explanation, ""); }
-      lines.push("**步骤：**");
-      plan.items.forEach(function (item, i) { lines.push((i + 1) + ". " + sym(item.status) + " " + item.step); });
-      lines.push("");
-    }
-    if (todos && Array.isArray(todos.items)) {
-      lines.push("**细分待办：**");
-      todos.items.forEach(function (item, i) { lines.push((i + 1) + ". " + sym(item.status) + " " + item.content); });
-    }
-    return lines.length > 0 ? lines.join("\n") : "（plan 为空）";
-  }
+function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().composePlanMarkdown(snapshots); }
 
   async function cancelShellTask(sessionId, taskId) {
     if (!sessionId || !taskId) throw new Error("Missing shell task identity");
@@ -2637,8 +2344,9 @@
     get toolMeta() { return toolMeta; },
     set toolMeta(value) { toolMeta = value; },
   });
+  refreshActiveStreamRender = chatEventsFeature.refreshActiveStreamRender;
 
-  var monitorFeature = installBridgeFeature("monitor", { state: state, notify: notify, notifyDomains: notifyDomains, invoke: invoke, bt: bt, safeConsoleInfo: safeConsoleInfo, sessionStates: sessionStates });
+  var monitorFeature = installBridgeFeature("monitor", { state: state, notify: notify, invoke: invoke, bt: bt, safeConsoleInfo: safeConsoleInfo, sessionStates: sessionStates });
   var startMonitorPolling = monitorFeature.startMonitorPolling;
   var stopMonitorPolling = monitorFeature.stopMonitorPolling;
   var clearMonitorStats = monitorFeature.clearMonitorStats;
@@ -2859,7 +2567,6 @@
   var appendVoiceText = voiceFeature.appendVoiceText;
   var knowledgeModelFeature = installBridgeFeature("knowledge-model", { state: state, notify: notify, invoke: invoke, listen: listen });
   var downloadKbModel = knowledgeModelFeature.downloadKbModel;
-  var cancelKbModel = knowledgeModelFeature.cancelKbModel;
 
   const projectsFeature = installBridgeFeature("projects", { state, notify, invoke, listen });
   const loadProjects = projectsFeature.loadProjects;
@@ -2879,7 +2586,7 @@
     if (!selected) return [];
     return Array.isArray(selected) ? selected : [selected];
   }
-  // Shared system directory-picker scaffold for pickFolder / pickFolders /
+  // Shared system directory-picker scaffold for pickFolders /
   // sessions.pickDraftWorkspace: returns null when the dialog is unavailable
   // or the user cancels, otherwise the normalized array of selected paths.
   async function pickDirectory(options) {
@@ -2887,10 +2594,6 @@
     var selected = await dialogOpen({ directory: true, multiple: false, title: bt("pickFolderTitle") });
     if (!selected) return null;
     return Array.isArray(selected) ? selected : [selected];
-  }
-  async function pickFolder() {
-    const selected = await pickDirectory({ directory: true, multiple: false, title: bt("pickFolderTitle") });
-    return (selected && selected[0]) || null;
   }
   async function pickFolders() {
     if (!dialogOpen) return [];
@@ -3108,41 +2811,37 @@
       appendVoiceText: appendVoiceText,
     },
     knowledge: {
-      loadKnowledgeEmbedderAfterFirstFrame: loadKnowledgeEmbedderAfterFirstFrame,
-      downloadKbModel: downloadKbModel,
-      cancelKbModel: cancelKbModel,
-      mountCollection: mountCollection,
-      setCollectionEnabled: setCollectionEnabled,
-      removeCollection: removeCollection,
-      unmountCollection: unmountCollection,
-      mountRemoteCollection: mountRemoteCollection,
-      setRemoteCollectionEnabled: setRemoteCollectionEnabled,
-      removeRemoteCollection: removeRemoteCollection,
+      loadKnowledgeEmbedderAfterFirstFrame,
+      downloadKbModel,
+      mountCollection,
+      setCollectionEnabled,
+      removeCollection,
+      unmountCollection,
+      mountRemoteCollection,
+      setRemoteCollectionEnabled,
+      removeRemoteCollection,
       listCollections: function () { return invoke("kb_collection_list"); },
       kbModelStatus: function () { return invoke("kb_model_status"); },
     },
     scheduled: {
-      loadScheduledTasks: loadScheduledTasks,
-      readScheduledTask: readScheduledTask,
-      loadScheduledTaskRuns: loadScheduledTaskRuns,
-      loadScheduledTaskRecentRuns: loadScheduledTaskRecentRuns,
-      selectScheduledTask: selectScheduledTask,
-      refreshScheduledTaskData: refreshScheduledTaskData,
-      clearScheduledTaskSelection: clearScheduledTaskSelection,
-      dismissScheduledTaskError: dismissScheduledTaskError,
-      createScheduledTask: createScheduledTask,
-      updateScheduledTask: updateScheduledTask,
-      pauseScheduledTask: pauseScheduledTask,
-      resumeScheduledTask: resumeScheduledTask,
-      toggleScheduledTaskPinned: toggleScheduledTaskPinned,
-      deleteScheduledTask: deleteScheduledTask,
-      runScheduledTaskNow: runScheduledTaskNow,
-      pickFolder: pickFolder,
-      startScheduledTaskChat: startScheduledTaskChat,
-      confirmScheduledTaskDraft: confirmScheduledTaskDraft,
-      clearScheduledTaskDraft: clearScheduledTaskDraft,
-      openScheduledRunChat: openScheduledRunChat,
-      exitScheduledRunChat: exitScheduledRunChat,
+      loadScheduledTasks,
+      readScheduledTask,
+      loadScheduledTaskRuns,
+      loadScheduledTaskRecentRuns,
+      selectScheduledTask,
+      refreshScheduledTaskData,
+      clearScheduledTaskSelection,
+      dismissScheduledTaskError,
+      createScheduledTask,
+      updateScheduledTask,
+      pauseScheduledTask,
+      resumeScheduledTask,
+      toggleScheduledTaskPinned,
+      deleteScheduledTask,
+      runScheduledTaskNow,
+      startScheduledTaskChat,
+      openScheduledRunChat,
+      exitScheduledRunChat,
     },
     sessions: {
       createNewSession: createNewSession,
@@ -3261,7 +2960,6 @@
       refreshRemoteControlStatus: refreshRemoteControlStatus,
       getWebRelaySettings: remoteControlFeature.getWebRelaySettings,
       setWebRelayAddress: remoteControlFeature.setWebRelayAddress,
-      resetWebRelayAddress: remoteControlFeature.resetWebRelayAddress,
     },
     desktopRemoteControl: {
       controlledStart: desktopRemoteControlFeature.controlledStart,

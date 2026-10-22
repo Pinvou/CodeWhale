@@ -4,6 +4,9 @@
 //! 记忆回顾（features/memory）选 Anthropic preset 时走 Messages 原生协议，
 //! 鉴权与地址口径与上述探测一致。
 
+// R12 去重批次：`reaper`（空闲回收脚手架）与 `test_support`（跨特性测试脚
+// 手架）已分别收敛至 `core/reaper.rs` 与 `platform/test_support.rs`，本文件仅保留
+// 模型端点共用判定。
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -305,10 +308,9 @@ fn apply_bearer(req: reqwest::RequestBuilder, bearer: Option<&str>) -> reqwest::
     }
 }
 
-/// Process-wide HTTP client shared by probes: feature-endpoint probes reuse
-/// one connection pool instead of building a client per call (monitor's vLLM
-/// served-name probe shares this pool via [`fetch_v1_models`]). Two
-/// semantics aligned with the `features::monitor` probe singleton:
+/// Process-wide HTTP clients shared by probes: probes reuse one connection
+/// pool instead of building a client per call. Two semantics aligned with the
+/// `features::monitor` probe singleton:
 /// 1. The connection pool and proxy config are snapshotted at first build
 ///    and do not follow system proxy changes within the process;
 /// 2. A build failure is cached process-wide as `None` with no per-call
@@ -316,18 +318,40 @@ fn apply_bearer(req: reqwest::RequestBuilder, bearer: Option<&str>) -> reqwest::
 ///    "probe failure → fall back to Generic/configured value"
 ///    (`Client::default()` panics on the same failure and cannot serve as
 ///    the fallback).
-/// The per-request timeout stays at each probe's original 3 seconds;
-/// request-level errors are unaffected and still handled by callers.
+///
+/// `timeout` pins the client-level default request timeout. The crate uses
+/// exactly two forms and each form has its own singleton (first build wins
+/// per form):
+/// - `Some(Duration::from_secs(3))` — this module's probes keep their
+///   original client-level 3s timeout;
+/// - `None` — `features::monitor`'s probes, whose 3s timeout moves to
+///   per-request (its 1 Hz polling shares the no-timeout pool).
+/// Request-level errors are unaffected and still handled by callers.
+pub(crate) fn shared_probe_client_with_timeout(
+    timeout: Option<Duration>,
+) -> Option<&'static reqwest::Client> {
+    static WITH_TIMEOUT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
+    static WITHOUT_TIMEOUT: std::sync::OnceLock<Option<reqwest::Client>> =
+        std::sync::OnceLock::new();
+    let build = || {
+        let mut builder = reqwest::Client::builder();
+        if let Some(timeout) = timeout {
+            builder = builder.timeout(timeout);
+        }
+        builder.build().ok()
+    };
+    match timeout {
+        // 每种形态各自一个单例：core（客户端级 3s）与 monitor（无客户端级
+        // 超时、逐请求 3s）不会互相污染对方的超时语义。
+        Some(_) => WITH_TIMEOUT.get_or_init(build).as_ref(),
+        None => WITHOUT_TIMEOUT.get_or_init(build).as_ref(),
+    }
+}
+
+/// 本 crate 自有探测（连接测试 / 本地服务类型 / served-name / 模型列表）
+/// 共享的连接池：客户端级默认超时保持原有的 3 秒。
 fn shared_probe_client() -> Option<&'static reqwest::Client> {
-    static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            reqwest::Client::builder()
-                .timeout(Duration::from_secs(3))
-                .build()
-                .ok()
-        })
-        .as_ref()
+    shared_probe_client_with_timeout(Some(Duration::from_secs(3)))
 }
 
 /// 探测 Ollama：区分"已加载"（/api/ps）与"仅下载未加载"（/api/tags）。
@@ -833,14 +857,24 @@ pub fn strip_v1_suffix(url: &str) -> Option<String> {
 /// wire-identical SGLang / llama.cpp / KoboldCpp / LMDeploy / Docker Model
 /// Runner support off/low/medium/high effort tiers via
 /// `chat_template_kwargs.enable_thinking` + `reasoning_effort` (the bridge
-/// maps them uniformly to the engine vllm provider); LM Studio and generic
-/// OpenAI-compatible endpoints take the openai wire route, where the engine
-/// does not yet inject thinking control.
+/// maps them uniformly to the engine vllm provider); Tachyon (驭光) speaks
+/// the same wire family but with effective tiers none/low/medium/xhigh
+/// (`high` is rejected with 400, so the bridge maps it to its own engine
+/// tachyon provider, which never emits `high` and maps the deepest tier
+/// `max` to `xhigh`); LM Studio and generic OpenAI-compatible endpoints
+/// take the openai wire route, where the engine does not yet inject
+/// thinking control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalServerKind {
     /// vLLM：底座经 `chat_template_kwargs.enable_thinking` + `reasoning_effort`
     /// 支持 off/low/medium/high 档位。
     Vllm,
+    /// 驭光（Tachyon）：`owned_by == "tachyon"` in `/v1/models`；wire 与 vLLM
+    /// 同族（`enable_thinking` + `reasoning_effort`），但有效档为
+    /// none/low/medium/xhigh（`high` 会 400，最深档由底座映射 `xhigh`），
+    /// 新包另有 `/get_server_info` 会碰巧命中 SGLang 宽松签名，故本变体的
+    /// 判定优先级必须排在 Sglang 之前。
+    Tachyon,
     /// Ollama：底座经 `think` 布尔支持开关（off=think:false，其余 think:true）。
     Ollama,
     /// SGLang: signature endpoint `/get_server_info`; thinking-control wire
@@ -869,8 +903,9 @@ pub enum LocalServerKind {
 /// called; all candidate signature endpoints are probed in parallel
 /// (`tokio::join!`, shared 3s timeout, a hung endpoint costs ~3s at worst),
 /// and once all complete the result is picked by signature-exclusivity
-/// priority: Ollama (`/api/tags`) > LM Studio (`/api/v0/models`) > KoboldCpp
-/// (`/api/extra/version`) > LlamaCpp (`/props`) > Sglang
+/// priority: LM Studio (`/api/v0/models`) > KoboldCpp
+/// (`/api/extra/version`) > LlamaCpp (`/props`) > Tachyon (`owned_by` in
+/// `/v1/models`) > Sglang
 /// (`/get_server_info`) > LmDeploy (`owned_by` in `/v1/models`) > Vllm
 /// (`owned_by`) > Generic. The only exception is DockerModelRunner
 /// port-gate priority: DMR also exposes an Ollama-compatible `/api/tags`, so
@@ -1097,8 +1132,8 @@ struct ProbeCandidateHits {
     koboldcpp: bool,
     llamacpp: bool,
     sglang: bool,
-    /// `/v1/models` response body (one fetch shared by the LMDeploy and vLLM
-    /// owned_by decisions).
+    /// `/v1/models` response body (one fetch shared by the LMDeploy, Tachyon
+    /// and vLLM owned_by decisions).
     v1_models: Option<serde_json::Value>,
 }
 
@@ -1107,10 +1142,19 @@ struct ProbeCandidateHits {
 /// Ollama-compatible `/api/tags`; under the generic priority the Ollama
 /// branch would hit first and DockerModelRunner would be unreachable, so on
 /// port 12434 only, the management API shape is checked before the Ollama
-/// decision — a miss continues in the original order) > Ollama > LM Studio >
-/// KoboldCpp > LlamaCpp > Sglang > LmDeploy > Vllm > Generic. KoboldCpp is
-/// also compatible with llama.cpp's `/props`, so it must come before
-/// LlamaCpp; LMDeploy and vLLM share the owned_by signature, LMDeploy first.
+/// decision — a miss continues in the normal order) > LM Studio >
+/// KoboldCpp > LlamaCpp > Tachyon > Sglang > LmDeploy > Vllm > Ollama > Generic.
+/// KoboldCpp is also compatible with llama.cpp's `/props`, so it must come
+/// before LlamaCpp; Tachyon must come before Sglang (new Tachyon packages
+/// also expose `/get_server_info`, which coincidentally satisfies the loose
+/// SGLang signature — owned_by is the stronger identity evidence); LMDeploy
+/// and vLLM share the owned_by signature, LMDeploy first.
+/// Ollama is deliberately LAST among the specific signatures: `/api/tags`
+/// is the weakest signature — wrapped deployments (model-store containers,
+/// DMR) expose an Ollama-compatible shim on top of the real engine, and a
+/// first-place Ollama branch would shadow every one of them. A genuine
+/// Ollama server answers none of the stronger signatures, so demotion does
+/// not change its classification.
 fn select_local_server_kind(hits: ProbeCandidateHits) -> LocalServerKind {
     if hits.docker_port_gated && hits.docker_mgmt_shape {
         return LocalServerKind::DockerModelRunner;
@@ -1126,6 +1170,16 @@ fn select_local_server_kind(hits: ProbeCandidateHits) -> LocalServerKind {
     }
     if hits.llamacpp {
         return LocalServerKind::LlamaCpp;
+    }
+    // Tachyon（驭光）：/v1/models 响应中模型 `owned_by == "tachyon"`。必须排在
+    // Sglang 之前：新包同时暴露 `/get_server_info`（含 version 字段），会碰巧
+    // 命中 SGLang 的宽松签名，导致误标 SGLang；owned_by 是更强的身份证据。
+    if hits
+        .v1_models
+        .as_ref()
+        .is_some_and(|v| v1_models_owned_by_matches(v, "tachyon"))
+    {
+        return LocalServerKind::Tachyon;
     }
     if hits.sglang {
         return LocalServerKind::Sglang;
@@ -1157,8 +1211,8 @@ fn select_local_server_kind(hits: ProbeCandidateHits) -> LocalServerKind {
 /// hung endpoint costs ~3s at worst instead of accumulating serially;
 /// `fetch_v1_models`'s 404/405 root fallback adds at most one more request
 /// window — a hung primary times out once and is not retried);
-/// `/v1/models` is fetched only once, shared by the LMDeploy and vLLM
-/// `owned_by` decisions. Once all complete, the result is picked by
+/// `/v1/models` is fetched only once, shared by the LMDeploy, Tachyon and
+/// vLLM `owned_by` decisions. Once all complete, the result is picked by
 /// signature-exclusivity priority.
 /// See [`apply_bearer`] for `bearer` semantics.
 async fn probe_local_server_kind_uncached(base_url: &str, bearer: Option<&str>) -> LocalServerKind {
@@ -1437,8 +1491,9 @@ async fn probe_docker_model_runner(base_url: &str, bearer: Option<&str>) -> bool
 }
 
 /// Whether any model's `owned_by` in the `/v1/models` response body equals
-/// the expected value (case-insensitive). Lets vLLM (`"vllm"`) and LMDeploy
-/// (`"lmdeploy"`) identification share the same fetch result.
+/// the expected value (case-insensitive). Lets vLLM (`"vllm"`), LMDeploy
+/// (`"lmdeploy"`) and Tachyon (`"tachyon"`) identification share the same
+/// fetch result.
 fn v1_models_owned_by_matches(v: &serde_json::Value, expected: &str) -> bool {
     v.get("data")
         .and_then(Value::as_array)
@@ -3067,6 +3122,45 @@ pub(crate) mod tests {
         assert_eq!(
             probe_local_server_kind(&server.url, None).await,
             LocalServerKind::LmDeploy
+        );
+    }
+
+    /// Tachyon（驭光）命中：/v1/models 中 owned_by == "tachyon" → 判定
+    /// Tachyon。覆盖旧商店包（无 /get_server_info）的识别路径。
+    #[tokio::test]
+    async fn probe_local_kind_detects_tachyon_via_owned_by() {
+        let _state = PROBE_STATE_TEST_MUTEX.lock().await;
+        let server = spawn_probe_server(vec![(
+            "/v1/models",
+            r#"{"object":"list","data":[{"id":"qwen3.8","owned_by":"tachyon"}]}"#,
+        )])
+        .await;
+        assert_eq!(
+            probe_local_server_kind(&server.url, None).await,
+            LocalServerKind::Tachyon
+        );
+    }
+
+    /// 优先级：新 Tachyon 包同时暴露 /get_server_info（含 version 字段，
+    /// 会碰巧命中 SGLang 宽松签名）与 owned_by == "tachyon" → 必须判
+    /// Tachyon 而非 Sglang（Tachyon 分支排在 Sglang 之前）。
+    #[tokio::test]
+    async fn probe_local_kind_tachyon_wins_over_sglang_server_info() {
+        let _state = PROBE_STATE_TEST_MUTEX.lock().await;
+        let server = spawn_probe_server(vec![
+            (
+                "/get_server_info",
+                r#"{"version":"88251e38","model_path":"qwen3.8"}"#,
+            ),
+            (
+                "/v1/models",
+                r#"{"object":"list","data":[{"id":"qwen3.8","owned_by":"tachyon"}]}"#,
+            ),
+        ])
+        .await;
+        assert_eq!(
+            probe_local_server_kind(&server.url, None).await,
+            LocalServerKind::Tachyon
         );
     }
 

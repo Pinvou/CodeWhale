@@ -738,6 +738,10 @@ pub async fn web_access_upload_attachment_chunk(
     sha256: Option<String>,
     manager: State<'_, RemoteControlManager>,
 ) -> Result<Option<manager::WebAttachmentSummary>, String> {
+    // Base64 decode + 256 KiB chunk cap intentionally mirrors the desktop
+    // draft-upload command in app/commands/files.rs, but with its own cap
+    // constant (MAX_TRANSFER_CHUNK_BYTES) and wire copy; the flows enforce
+    // their caps in different layers and are not unified.
     let data = base64::engine::general_purpose::STANDARD
         .decode(data_base64)
         .map_err(|error| format!("decode attachment upload chunk: {error}"))?;
@@ -1335,8 +1339,6 @@ pub async fn web_access_respond_codex_acp_elicitation(
 fn project_acp_status_for_web(
     mut status: crate::features::codex_acp::CodexAcpStatus,
 ) -> crate::features::codex_acp::CodexAcpStatus {
-    status.adapter_path = None;
-    status.codex_path = None;
     status.login_url = None;
     status.login_code = None;
     status.error = None;

@@ -30,7 +30,7 @@ mod query;
 mod scanner;
 mod store;
 
-pub use exclude::Excluder;
+pub(crate) use exclude::Excluder;
 pub use import_jobs::{FailedImportFilePage, ImportJobState as IndexState};
 pub use kb_tool::{KbOpenSourceTool, KbSearchTool};
 pub use l1::{Collection, Document};
@@ -61,6 +61,8 @@ pub struct ScanState {
     /// refreshes L0 only on `done`, so `interrupted` cannot read as
     /// "scanned".
     pub phase: String,
+    /// `roots`（headless 面加入）报告本轮扫描根,GUI 今日忽略;CLI `scan status`
+    /// 渲染它。上游 #566 曾在无 CLI 消费的树上删字段,本仓 CLI 在用,恢复。
     pub roots: Vec<String>,
     pub scanned: u64,
     pub started_at: i64,
@@ -351,10 +353,7 @@ impl KnowledgeService {
             .latest_state()
             .ok()
             .flatten()
-            .unwrap_or_else(|| IndexState {
-                phase: "idle".into(),
-                ..Default::default()
-            })
+            .unwrap_or_default()
     }
 
     /// Import state of the NAMED job (not "the latest job").
@@ -767,7 +766,6 @@ impl KnowledgeService {
                 running: true,
                 phase: "scanning".into(),
                 roots: roots.iter().map(|p| p.display().to_string()).collect(),
-                started_at: now(),
                 ..Default::default()
             };
         }
@@ -1451,9 +1449,6 @@ fn merge_nl_rules(mut sq: SearchQuery) -> SearchQuery {
         if sq.mtime_after.is_none() {
             sq.mtime_after = parsed.mtime_after;
         }
-        if sq.mtime_before.is_none() {
-            sq.mtime_before = parsed.mtime_before;
-        }
         if sq.min_size.is_none() {
             sq.min_size = parsed.min_size;
         }
@@ -1872,11 +1867,11 @@ mod tests {
     #[test]
     fn scan_panic_guard_always_clears_the_running_flag() {
         let state = Mutex::new(ScanState {
+            roots: Vec::new(),
             raw_seen: 0,
             started_at: 0,
             running: true,
             phase: "scanning".into(),
-            roots: vec!["/tmp".into()],
             scanned: 7,
             finished_at: 0,
         });

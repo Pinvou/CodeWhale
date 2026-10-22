@@ -27,7 +27,6 @@ pub struct Pinvou3Bundle {
     pub root: PathBuf,
     pub instructions_md: PathBuf,
     pub skills_dir: PathBuf,
-    pub user_skills_dir: PathBuf,
     pub mcp_json: PathBuf,
     pub deny_sensitive_sh: PathBuf,
     pub deny_sensitive_ps1: PathBuf,
@@ -100,7 +99,6 @@ impl Pinvou3Bundle {
             root: paths::bundle_root(),
             instructions_md: paths::bundle_instructions(),
             skills_dir: paths::bundle_skills_dir(),
-            user_skills_dir: paths::user_skills_dir(),
             mcp_json: paths::bundle_mcp_json(),
             deny_sensitive_sh: paths::bundle_root().join("deny_sensitive_paths.sh"),
             deny_sensitive_ps1: paths::bundle_root().join("deny_sensitive_paths.ps1"),
@@ -113,9 +111,9 @@ impl Pinvou3Bundle {
     /// 比对 `bundle/VERSION` 与 [`BUNDLE_VERSION`]：相同跳过；
     /// 不同则覆写 bundle 内文件并更新 VERSION。**不动 user/ 和 settings.json**。
     ///
-    /// 解包时对 `INSTRUCTIONS_MD` 做模板替换，把 `{{PINVOU3_WORKSPACE}}` 占位符
-    /// 替换成 `~/.pinvou3/workspace/` 的实际绝对路径——让 AI 直接拿到完整路径
-    /// 给 write_file 用，避免先 exec_shell 探一遍 env var。
+    /// 引擎侧 system prompt 走 `mod.rs` 的 `instructions_md()` 内嵌渲染
+    /// （per-session locale / workspace / sudo 占位符在会话渲染层就地替换），
+    /// 不再落盘 `bundle/instructions.md` 副本。
     pub fn ensure_extracted(&self) -> std::io::Result<()> {
         let marketplace = crate::features::marketplace::MarketplaceManager::new();
         self.ensure_extracted_with_marketplace(&marketplace, |manager| {
@@ -242,10 +240,9 @@ impl Pinvou3Bundle {
             "rust",
             "bundle_extract:skills_migration:done",
             &format!(
-                "moved={} stale={} kept={}",
+                "moved={} stale={}",
                 migration.moved.len(),
-                migration.removed_stale.len(),
-                migration.kept.len()
+                migration.removed_stale.len()
             ),
         );
         // 自愈对账：认领错位归位/去重、孤儿副本、瘫记录、内置释放目录残旧收敛。
@@ -708,11 +705,14 @@ impl Pinvou3Bundle {
         paths::bundles_root().join(id).join("skills")
     }
 
-    /// CLI 连接器域技能门控的公共实现:`show` → 解包内嵌技能目录到
-    /// `bundles/<id>/skills/`;否则**删掉**技能目录 + NOTICE。幂等(删不存在
-    /// 的目录不报错)。可见性 = 目录在不在,引擎重刷系统提示时重扫即生效。
-    /// {feishu,wecom,dingtalk,tmeet} 四个 `apply_*_skills` 原本逐字重复
-    /// (仅内嵌目录 / 目录表 / NOTICE 文件名不同),收编为表驱动助手。
+    /// CLI 连接器技能门的共享实现：`show` 为真时把内嵌技能目录解包到
+    /// `bundles/<id>/skills/`；否则移除技能目录 + NOTICE。幂等（目录本就不存在
+    /// 时移除不算错误）。可见性 = 目录是否存在；引擎在下次 system-prompt
+    /// 刷新时重扫。
+    ///
+    /// 四个 `apply_*_skills` 包装器原是近似重复（差异仅在内嵌目录、目录表和
+    /// NOTICE 文件名），已折叠为这个表驱动助手。wecom 的包装器额外把
+    /// legacy 0.1.9 目录清理内联保留在本助手之外。
     fn apply_connector_skills(
         connector_id: &str,
         embedded_dir: &Dir<'_>,

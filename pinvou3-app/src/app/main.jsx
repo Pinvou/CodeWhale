@@ -1324,7 +1324,6 @@ const NAV_PREFETCH = {
       // bs.settings 加载后 useEffect 同步进来。
       const [searchProvider, setSearchProvider] = useState('bing');
       const [enabledSearchProviders, setEnabledSearchProviders] = useState(['bing']);
-      const [searchApiKey, setSearchApiKey] = useState('');
       const [searchKeyDrafts, setSearchKeyDrafts] = useState({});
       const [searchKeyActions, setSearchKeyActions] = useState({});
       // 模型配置（动态适配）——草稿模式，确认后才保存
@@ -1793,7 +1792,6 @@ const NAV_PREFETCH = {
           }
           setSearchProvider(saved.provider);
           setEnabledSearchProviders(saved.enabledProviders);
-          setSearchApiKey(drafts[saved.provider] || '');
           setSearchKeyDrafts(drafts);
           setSearchKeyActions(actions);
           savedSearchConfigRef.current = saved;
@@ -1839,13 +1837,13 @@ const NAV_PREFETCH = {
         const state = credential.credential_state || (credential.has_secret ? 'configured' : 'missing');
         return !!credential.has_secret || state === 'configured' || state === 'env_override';
       }
-      function searchProviderKeyAction(provider) {
-        return searchKeyActions[provider] || 'keep_existing';
-      }
       function searchProviderCredentialDirty(provider) {
         const action = searchProviderKeyAction(provider);
         const draft = searchKeyDrafts[provider] || '';
         return action === 'delete' || (action === 'replace' && !!draft.trim());
+      }
+      function searchProviderKeyAction(provider) {
+        return searchKeyActions[provider] || 'keep_existing';
       }
       function buildSearchSettingsPayload() {
         const baseSearch = (bs && bs.settings && bs.settings.search) || {};
@@ -3557,7 +3555,6 @@ const NAV_PREFETCH = {
         if (p === searchProvider) return;
         setEnabledSearchProviders(prev => Array.from(new Set(['bing', ...prev, p])));
         setSearchProvider(p);
-        setSearchApiKey(searchKeyDrafts[p] || '');
       }
 
       function handleAddSearchProvider(p) {
@@ -3576,16 +3573,8 @@ const NAV_PREFETCH = {
         if (searchProvider === p) handleSetSearchProvider('bing');
       }
 
-      function handleTestSearchProvider(p) {
-        if (!bridge.available || !bridge.settings.testSearchProvider) return Promise.resolve(t.uiMainApp.searchTestUnavailable);
-        const action = searchProviderKeyAction(p);
-        const draft = searchKeyDrafts[p] || '';
-        return bridge.settings.testSearchProvider(p, action === 'replace' ? draft : '');
-      }
-
       function handleSetSearchApiKey(k, providerOverride) {
         const targetProvider = providerOverride || searchProvider;
-        if (targetProvider === searchProvider) setSearchApiKey(k);
         setSearchKeyDrafts(prev => ({ ...prev, [targetProvider]: k }));
         setSearchKeyActions(prev => ({ ...prev, [targetProvider]: k.trim() ? 'replace' : 'keep_existing' }));
       }
@@ -3893,6 +3882,9 @@ const NAV_PREFETCH = {
       ].filter(Boolean).join('|');
       const browserOverlayPublicationReady = !!browserOverlayIntent
         && publishedBrowserOverlayIntent === browserOverlayIntent;
+      // Compact-shell drawer opens only after its overlay intent is published;
+      // defined once because the drawer style needs it for transform+visibility.
+      const mobileDrawerOpen = isCompactShell && isSidebarOpen && browserOverlayPublicationReady;
       // Keep the surface hidden while one already-published overlay hands off to
       // another. The replacement itself is still withheld until its own barrier
       // attempt has settled.
@@ -4120,13 +4112,24 @@ const NAV_PREFETCH = {
           >
           <div className={`flex flex-1 min-h-0 ${activeTheme === 'dark' ? (isSidebarOpen ? 'bg-[#1E1F20]' : 'bg-[#131314]') : 'bg-[#F0F4F9]'}`}>
 
-          {isWeb && isSidebarOpen && browserOverlayPublicationReady && (
+          {isWeb && (
             <button
               type="button"
               data-testid="mobile-navigation-close"
+              // Driven by mobileDrawerOpen, not isSidebarOpen, so the dim and the
+              // drawer clear the overlay publication barrier together instead of
+              // showing a dimmed screen with no drawer for the barrier window.
               aria-label={t.uiMainApp.closeNavigation}
-              onClick={() => setIsSidebarOpen(false)}
-              className="fixed inset-0 z-30 hidden bg-black/40 max-sm:block"
+              onClick={(event) => {
+                // A real pointer click leaves focus on this button; blur before
+                // it turns aria-hidden — ARIA forbids aria-hidden on the focused
+                // element, and the old unmount-based close dropped focus to <body>.
+                event.currentTarget.blur();
+                setIsSidebarOpen(false);
+              }}
+              aria-hidden={!mobileDrawerOpen}
+              tabIndex={mobileDrawerOpen ? 0 : -1}
+              className={`fixed inset-0 z-30 hidden bg-black/40 max-sm:block transition-opacity duration-300 motion-reduce:transition-none ${mobileDrawerOpen ? 'opacity-100' : 'pointer-events-none opacity-0'}`}
             />
           )}
 
@@ -4141,14 +4144,25 @@ const NAV_PREFETCH = {
               // z-40 sidebar).
               width: isSidebarOpen && !isCompactShell ? sidebarWidth : undefined,
               ...(isCompactShell ? {
-                display: isSidebarOpen && browserOverlayPublicationReady ? 'flex' : 'none',
+                // The drawer stays mounted: display:none cannot transition, so
+                // open/close animates transform while `visibility` (in the
+                // compact transition list below) flips only after the slide-out
+                // finishes and immediately on slide-in. Full height overlays the
+                // top bar and tab bar; the env() insets track the same top/bottom
+                // safe areas as the app root padding above (portrait notch /
+                // home indicator; landscape side insets are not tracked).
                 position: 'fixed',
                 left: 0,
-                top: 48,
-                bottom: 56,
+                top: 'env(safe-area-inset-top)',
+                bottom: 'env(safe-area-inset-bottom)',
+                transform: mobileDrawerOpen ? 'translateX(0)' : 'translateX(-100%)',
+                visibility: mobileDrawerOpen ? 'visible' : 'hidden',
               } : {}),
             }}
-            className={`${isSidebarOpen ? (isCompactShell ? 'w-[280px]' : '') : 'w-[68px]'} relative shrink-0 flex flex-col z-40 ${sidebarResizing ? '' : 'transition-all duration-300'} ${
+            // Compact transitions stay scoped to the slide: broad transition-all
+            // would also fade the dark open/closed shades on every toggle and
+            // animate height when env() insets change with device rotation.
+            className={`${isCompactShell ? 'w-[280px]' : (isSidebarOpen ? '' : 'w-[68px]')} relative shrink-0 flex flex-col z-40 ${sidebarResizing ? '' : (isCompactShell ? 'transition-[transform,visibility] duration-300 motion-reduce:transition-none' : 'transition-all duration-300 motion-reduce:transition-none')} ${
               activeTheme === 'light'
                 ? 'bg-[#F0F4F9]'
                 : (isSidebarOpen ? 'bg-[#1E1F20]' : 'bg-[#131314]')
@@ -4733,9 +4747,7 @@ const NAV_PREFETCH = {
                   enabledSearchProviders={enabledSearchProviders}
                   onAddSearchProvider={handleAddSearchProvider}
                   onDeleteSearchProvider={handleDeleteSearchProvider}
-                  onTestSearchProvider={handleTestSearchProvider}
-                  searchApiKey={searchApiKey} setSearchApiKey={handleSetSearchApiKey}
-                  searchHasSavedKey={searchHasSavedKey(searchProvider)}
+                  setSearchApiKey={handleSetSearchApiKey}
                   savedModels={(bs && bs.savedModels) || []}
                   activeModelId={bs && bs.activeModelId}
                   onSaveModel={(m) => bridge.available && bridge.models.saveModel(m)}
@@ -4866,7 +4878,7 @@ const NAV_PREFETCH = {
             {can('webAccessAdmin') && webAccessOpen && browserOverlayPublicationReady && (
               <ViewErrorBoundary t={t}>
               <Suspense fallback={null}>
-              <LazyWebAccessModal theme={activeTheme} bs={bs} t={t} onClose={() => setWebAccessOpen(false)} />
+              <LazyWebAccessModal bs={bs} t={t} onClose={() => setWebAccessOpen(false)} />
             </Suspense>
             </ViewErrorBoundary>
             )}
@@ -4903,7 +4915,7 @@ const NAV_PREFETCH = {
             {personaEditor && browserOverlayPublicationReady && (
               <ViewErrorBoundary t={t}>
               <Suspense fallback={null}>
-              <LazyPersonaEditorModal initial={personaEditor.initial} isDark={activeTheme === 'dark'} t={t}
+              <LazyPersonaEditorModal initial={personaEditor.initial} t={t}
                 onClose={() => setPersonaEditor(null)}
                 onSaved={(sum) => { const isEdit = personaEditor.initial && personaEditor.initial.id; setPersonaEditor(null); if (!isEdit) setSavedConfirm({ name: sum && sum.name }); }}
                 onDeleted={() => setPersonaEditor(null)} />

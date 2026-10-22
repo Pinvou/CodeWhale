@@ -6,6 +6,9 @@ import { bridge } from '../../hooks/useBridge.js';
 import { getSyntaxHighlightVersion, subscribeSyntaxHighlight } from '../../shared/syntax-highlighter.js';
 import { deptLabelFor, personaText, DEPT_ORDER, ALL_DEPT, DEPT_OPTIONS, deptColor, AppIcon, IOS_FONT_STACK } from './persona-shared.jsx';
 
+    // 三处弹层(Persona 详情/编辑器/造卡选择)的遮罩通用样式:半透明黑底 + 轻
+    // 模糊;字体栈按层各自补,造卡选择层不设(沿用文档默认,保持原渲染)。
+
     // 双击卡片打开的详情 modal —— FLIP 转场 + 拉取并展示完整人设正文(body)。
     // 唯一消费方是本文件,留在卡池 chunk;不进 persona-shared(主 chunk 常驻,
     // 会把弹层 + bridge.rendering 依赖一并拖进主 chunk)。

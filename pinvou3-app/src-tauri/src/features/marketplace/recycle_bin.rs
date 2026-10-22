@@ -53,7 +53,7 @@ pub(crate) const KIND_BUNDLE: &str = "bundle";
 // ---------------------------------------------------------------------------
 
 /// 清单条目：`record` 是回收时 bundles.json 原记录的快照（恢复重建登记用：
-/// source=Upload、原 installed_at、credential_keys 等一并保留）。
+/// source=Upload、原 installed_at 等一并保留）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct RecycledEntry {
     pub id: String,

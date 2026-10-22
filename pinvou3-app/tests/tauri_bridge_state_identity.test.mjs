@@ -65,7 +65,7 @@ const context = vm.createContext({
 // → bridge.js(顺序断言在 classic_startup_bundle.test.mjs;这里解析
 // index.html 取 bridge 脚本序,特性文件增减时自动跟随)。
 const indexHtml = fs.readFileSync(path.join(root, 'src/index.html'), 'utf8');
-const bridgeScripts = [...indexHtml.matchAll(/<script src="%BASE_URL%(shared\/bridge-messages\.js|features\/remote-control\/remote-control-state\.js|platform\/tauri\/bridge(?:\.js|\/[^"]+))"[^>]*><\/script>/g)]
+const bridgeScripts = [...indexHtml.matchAll(/<script src="%BASE_URL%(shared\/(?:bridge-messages|bridge-shared-helpers)\.js|features\/remote-control\/remote-control-state\.js|platform\/tauri\/bridge(?:\.js|\/[^"]+))"[^>]*><\/script>/g)]
   .map(match => match[1]);
 assert.ok(bridgeScripts.includes('platform/tauri/bridge.js'), 'index.html must load platform/tauri/bridge.js');
 for (const relative of bridgeScripts) {
@@ -122,30 +122,20 @@ assert.ok(Object.isFrozen(combinedSnapshots[2]), 'the rebuilt combined snapshot 
 assert.equal(combinedSnapshots[2].settings, combinedSnapshots[1].settings,
   'the unchanged settings slice must keep its identity inside the rebuilt combined snapshot');
 
-// 精确领域失效还必须跳过未变化领域的结构遍历，而不只是最终返回同一引用。
-// model 原始对象上的 getter 是确定性的遍历探针：models publication 会读取它；
-// 后续 monitor-only publication 仍调用 models 订阅回调，但应直接命中 models
-// slice 缓存，不能再次读取源对象。
-let modelProbeReads = 0;
-const modelWithTraversalProbe = { id: 'm2', name: 'Model Two' };
-Object.defineProperty(modelWithTraversalProbe, 'traversal_probe', {
-  enumerable: true,
-  get() {
-    modelProbeReads += 1;
-    return 'stable';
-  },
-});
+// #727 单修订发布语义：每次 publication 都推进同一 revision，各域切片随之
+// 一起重新物化（宿主快照一次发布），身份稳定性由 subscriptionStateValue 的
+// 结构化比较保证，而不再依赖按域缓存命中。monitor-only publication 因此仍
+// 会读取未变化的 models 源，但必须保住两条契约：回调每轮照常触发，且内容
+// 未变化时组合快照身份不变（React 借 Object.is 跳过无关渲染）。
 invokeResponse = async command => command === 'list_models'
-  ? { models: [modelWithTraversalProbe], active_model_id: 'm2' }
+  ? { models: [{ id: 'm2', name: 'Model Two' }], active_model_id: 'm2' }
   : {};
 await api.models.loadModels();
-assert.ok(modelProbeReads > 0, 'the models publication must materialize the models slice');
 // Drain unrelated fire-and-forget work started by earlier model APIs before
-// taking the traversal baseline for the monitor-only publication.
+// taking the baseline for the monitor-only publication.
 for (let attempt = 0; attempt < 5; attempt += 1) {
   await new Promise(resolve => setTimeout(resolve, 0));
 }
-const readsAfterModelsPublication = modelProbeReads;
 const combinedSnapshotBeforeMonitor = combinedSnapshots.at(-1);
 const combinedCallbackCountBeforeMonitor = combinedSnapshots.length;
 
@@ -170,11 +160,9 @@ for (let attempt = 0; attempt < 20
 assert.ok(monitorSnapshots.some(snapshot => snapshot.monitor?._fmt),
   'monitor polling must publish its first snapshot');
 assert.equal(combinedSnapshots.length, combinedCallbackCountBeforeMonitor + 1,
-  'precise invalidation must preserve the every-publication callback contract');
+  'monitor-only publication must preserve the every-publication callback contract');
 assert.equal(combinedSnapshots.at(-1), combinedSnapshotBeforeMonitor,
   'monitor-only publication must preserve the unrelated models snapshot identity');
-assert.equal(modelProbeReads, readsAfterModelsPublication,
-  'monitor-only publication must not traverse the unchanged models source');
 
 // Monitor owns the displayed snapshot, but a newly discovered context window
 // also updates chat.tokens.max. The precise publication must invalidate both

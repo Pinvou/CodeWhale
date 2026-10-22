@@ -10,6 +10,10 @@ const bridgeRoot = path.join(root, 'src', 'platform', 'tauri', 'bridge');
 function loadFactories() {
   const windowObject = {};
   const context = vm.createContext({ window: windowObject, console, setTimeout, clearTimeout });
+  const sharedRoot = path.join(root, 'src', 'shared');
+  // #566 共享模块移植：feature 工厂的共享函数体收敛在 bridge-shared-helpers.js，
+  // 必须先于任何 feature 工厂加载（与 index.html 的脚本顺序一致）。
+  vm.runInContext(fs.readFileSync(path.join(sharedRoot, 'bridge-shared-helpers.js'), 'utf8'), context, { filename: 'shared/bridge-shared-helpers.js' });
   for (const file of ['settings.js', 'chat.js']) {
     vm.runInContext(fs.readFileSync(path.join(bridgeRoot, file), 'utf8'), context, { filename: file });
   }

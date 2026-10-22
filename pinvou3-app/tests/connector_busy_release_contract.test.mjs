@@ -39,7 +39,9 @@ assert.equal(
 assert.equal(releaseBusy(null, 'eip'), null, '空槽位释放后仍为空');
 
 // ── 2. 契约：连接器事件监听块全部走 releaseBusy，没有裸 setBusyId(null) ──────
-const listenersStart = toolStoreSource.indexOf("ev.listen('wecom:qr'");
+// wecom 的组件级监听已并入 createConnectorFlow 工厂（events.qr/connected/error，
+// 见第 3 节）；组件级监听块只剩 eip/zhidao（本仓特有连接器），锚在 eip:sso_wait 上。
+const listenersStart = toolStoreSource.indexOf("ev.listen('eip:sso_wait'");
 // 收尾段用 unlisten.forEach 定位:该 effect 的 return 体量过（disposed 置位 + 释放监听）
 // 且随重构变动，锚在稳定的一行上。
 const listenersEnd = toolStoreSource.indexOf('unlisten.forEach', listenersStart);
@@ -51,7 +53,7 @@ assert.doesNotMatch(
   /setBusyId\(null\)/,
   '连接器完成/失败事件不得无条件清空共享 busyId（会抹掉别的工具未完成的忙碌态）',
 );
-for (const [toolId, handlers] of [['wecom', 2], ['eip', 2], ['zhidao', 2]]) {
+for (const [toolId, handlers] of [['eip', 2], ['zhidao', 2]]) {
   const scoped = listenerBlock.match(new RegExp(`releaseBusy\\(busy, '${toolId}'\\)`, 'g')) || [];
   assert.equal(
     scoped.length,
@@ -239,6 +241,14 @@ const startGuards = toolStoreSource.match(/if \(busyRef\.current\) return;/g) ||
 assert.ok(
   startGuards.length >= 3,
   `连接器 connect/disconnect（+handleAction 连接器/卸载分支）必须在忙碌期拒绝启动，实际 ${startGuards.length}`,
+);
+
+// wecom 释放必须走工厂（cfg.key）/订阅（toolId）通用路径；组件级字面量 'wecom'
+// 释放点禁止再次出现（历史上曾与工厂管线并存且漏改过一次）。
+assert.doesNotMatch(
+  toolStoreCode,
+  /setBusyId\(\(current\) => releaseBusy\(current, 'wecom'\)\)/,
+  "wecom releases must go through the factory (cfg.key) and subscription (toolId) paths only; no component-level literal-id release points",
 );
 
 // 无守卫历史重灾区：五个直接启动的操作入口必须在能力闸门同一行里拒绝忙碌期

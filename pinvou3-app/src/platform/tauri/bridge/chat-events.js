@@ -1,8 +1,15 @@
 (function () {
   "use strict";
 
-  var registry = window.__PINVOU_TAURI_BRIDGE_FEATURES__ = window.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
-  registry["chat-events"] = function (context) {
+  // biome-ignore lint/suspicious/noAssignInExpressions: registry bootstrap of the verbatim payload; splitting statements would diverge from the artifact
+  const registry = window.__PINVOU_TAURI_BRIDGE_FEATURES__ = window.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
+  registry["chat-events"] = function (context) {let pinvouSharedtauriChatEventsCache = null;
+function pinvouSharedtauriChatEvents() {
+  if (!pinvouSharedtauriChatEventsCache) pinvouSharedtauriChatEventsCache = window.PinvouBridgeShared.create("tauriChatEvents", { state });
+  return pinvouSharedtauriChatEventsCache;
+}
+
+
     var state = context.state;
     var recordAuthoritySyncDiagnostic = context.recordAuthoritySyncDiagnostic || function () {};
     var authoritySyncBufferSnapshot = context.authoritySyncBufferSnapshot || function () { return {}; };
@@ -55,10 +62,10 @@
 
     // Stream text can arrive much faster than a WebView can paint. Publish at
     // most once per animation frame, with a bounded timer fallback for hidden
-    // or throttled windows. Entries are isolated per session because active
-    // and background sessions may stream concurrently.
-    var STREAM_NOTIFY_MAX_WAIT_MS = 32;
-    var pendingStreamNotifications = Object.create(null);
+    // or throttled windows. Entries retain per-session cancellation, but one
+    // publication covers all pending streams in the visible host snapshot.
+    const STREAM_NOTIFY_MAX_WAIT_MS = 32;
+    const pendingStreamNotifications = Object.create(null);
 
     function cancelPendingStreamNotify(sid) {
       var pending = sid && pendingStreamNotifications[sid];
@@ -95,25 +102,16 @@
       pendingStreamNotifications[sid] = pending;
       function publish() {
         if (pendingStreamNotifications[sid] !== pending) return;
-        cancelPendingStreamNotify(sid);
-        var didRun = false;
-        var wasBackground = sid !== state.activeSessionId;
-        // A throwing subscriber must not escape as an unhandled rAF/timer
-        // error (the synchronous first-delta path keeps the dispatch-loop
-        // throw semantics). runSyncOnSession's finally restores the working
-        // set before the error lands here.
+        Object.keys(pendingStreamNotifications).forEach(cancelPendingStreamNotify);
+        // The synchronous event router has already saved every affected
+        // buffer and restored the visible working set before this callback.
+        // Publish that coherent host snapshot once, even if one of the
+        // original stream owners was evicted. Do not re-enter a background
+        // working set merely to issue a suppressed notification.
         try {
-          runSyncOnSession(sid, function () {
-            didRun = true;
-            immediateNotify();
-          });
+          immediateNotify();
         } catch (error) {
           console.error("[chat] coalesced stream notify failed", error);
-        }
-        // runSyncOnSession suppresses callbacks while a background working set
-        // is installed. Refresh the visible session list after it restores.
-        if (didRun && wasBackground) {
-          try { immediateNotify(); } catch (error) { console.error("[chat] coalesced stream notify failed", error); }
         }
       }
       if (typeof window.requestAnimationFrame === "function") {
@@ -665,32 +663,11 @@
     notify();
   }); });
 
-  function reasoningEventIndex(e) {
-    var value = e && e.payload && e.payload.index;
-    if (value === undefined || value === null || value === "") return null;
-    var parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : String(value);
-  }
+function reasoningEventIndex(e) { return pinvouSharedtauriChatEvents().reasoningEventIndex(e); }
 
-  function streamingReasoningItem(index) {
-    for (var itemIndex = state.chatItems.length - 1; itemIndex >= 0; itemIndex--) {
-      var item = state.chatItems[itemIndex];
-      if (!item || item.type !== "reasoning" || !item.streaming) continue;
-      if (index === undefined || index === null || item.reasoningIndex === index) return item;
-    }
-    return null;
-  }
+function streamingReasoningItem(index) { return pinvouSharedtauriChatEvents().streamingReasoningItem(index); }
 
-  function finalizeStreamingReasoning(index) {
-    var completedAt = Date.now();
-    for (var itemIndex = state.chatItems.length - 1; itemIndex >= 0; itemIndex--) {
-      var item = state.chatItems[itemIndex];
-      if (!item || item.type !== "reasoning" || !item.streaming) continue;
-      if (index !== undefined && index !== null && item.reasoningIndex !== index) continue;
-      item.streaming = false;
-      item.completedAt = completedAt;
-    }
-  }
+function finalizeStreamingReasoning(index) { return pinvouSharedtauriChatEvents().finalizeStreamingReasoning(index); }
 
   // ── Streaming markdown render throttle ────────────────────────────
   // Rust emits one chat:delta per engine delta (the forwarder does not
@@ -709,20 +686,24 @@
   // per session: active and background sessions can stream simultaneously,
   // and a shared timer would render the wrong working set.
   const STREAM_RENDER_THROTTLE_MS = 180;
+  const BACKGROUND_STREAM_RENDER_THROTTLE_MS = 1000;
   const streamRenderTimers = Object.create(null); // sid → trailing-edge render timer
+  const renderedStreamText = new WeakMap(); // bubble identity → last successfully rendered text
+  let lastForegroundSessionId = state.activeSessionId || null;
 
   function renderStreamItemHtml() {
     const item = state.chatItems.find(function (it) { return it.id === context.currentStreamId; });
     if (!item) return false;
     item.text = context.currentStreamText;
+    if (renderedStreamText.get(item) === context.currentStreamText) return false;
     item.html = renderMarkdown(context.currentStreamText);
+    renderedStreamText.set(item, context.currentStreamText);
     return true;
   }
 
-  // Only callable inside the synchronous body of
-  // onSessionEvent/runSyncOnSession: state.activeSessionId has been routed
-  // to the event's session there, making it a valid timer-table key that
-  // maps one-to-one onto the working set.
+  // The active session must name the installed working set: either inside
+  // onSessionEvent/runSyncOnSession, or in host notify after routing restores
+  // the foreground working set. That session is also the timer-table key.
   function flushPendingStreamRender() {
     const sid = state.activeSessionId;
     if (sid && streamRenderTimers[sid]) {
@@ -737,6 +718,26 @@
     return renderStreamItemHtml();
   }
 
+  // Called by the host after background routing has restored the visible
+  // working set, before subscribers capture it. A newly visible stream must
+  // never wait for its longer background preview timer. Ordinary same-session
+  // publications keep their existing foreground render budget.
+  function refreshActiveStreamRender() {
+    if (isNotifySuppressed()) return;
+    const sid = state.activeSessionId || null;
+    if (sid === lastForegroundSessionId) return;
+    if (!sid) { lastForegroundSessionId = null; return; }
+    try {
+      flushPendingStreamRender();
+    } catch (error) {
+      console.error("[chat] active stream preview refresh failed", error);
+      lastForegroundSessionId = null;
+      return; // retry on the next host publication without rejecting session activation
+    }
+    lastForegroundSessionId = sid;
+    cancelPendingStreamNotify(sid);
+  }
+
   function scheduleStreamRender(sid) {
     // Without a sid, or when the host has no timers (some test sandboxes),
     // fall back to the old render-per-delta behavior.
@@ -747,23 +748,22 @@
     if (streamRenderTimers[sid]) return; // a trailing edge is already pending: this delta only accumulates text
     streamRenderTimers[sid] = setTimeout(function () {
       delete streamRenderTimers[sid];
-      var rendered = false;
-      // A throwing subscriber must not escape as an unhandled timer error
-      // (same rationale as the coalesced publish guard above).
-      try {
-        // The timer fires at an event-loop idle point, so it must re-enter the
-        // session's working set before rendering; a terminated stream
-        // (currentStreamId reset) means a terminal path already flushed
-        // synchronously — skip.
-        runSyncOnSession(sid, function () {
-          if (!context.currentStreamId || !context.currentStreamText) return;
-          rendered = renderStreamItemHtml();
-        });
-        if (rendered) notify(); // background sessions are suppressed inside runSyncOnSession; notify once more
-      } catch (error) {
-        console.error("[chat] scheduled stream render failed", error);
+      let rendered = false;
+      // The timer fires at an event-loop idle point, so it must re-enter the
+      // session's working set before rendering; a terminated stream
+      // (currentStreamId reset) means a terminal path already flushed
+      // synchronously — skip.
+      runSyncOnSession(sid, function () {
+        if (!context.currentStreamId || !context.currentStreamText) return;
+        rendered = renderStreamItemHtml();
+      });
+      if (rendered) {
+        // Keep the visible preview's existing immediate publication after
+        // parsing; only background render completions share a later frame.
+        if (sid === state.activeSessionId) notify();
+        else scheduleStreamNotify(sid, false);
       }
-    }, STREAM_RENDER_THROTTLE_MS);
+    }, isNotifySuppressed() ? BACKGROUND_STREAM_RENDER_THROTTLE_MS : STREAM_RENDER_THROTTLE_MS);
   }
 
   function cancelStreamRenderTimers(purgedSid) {
@@ -858,19 +858,21 @@
       // The bubble's first delta (html still empty) renders immediately;
       // later deltas only accumulate text and leave the html to the
       // throttle's trailing edge
-      if (!item.html) item.html = renderMarkdown(context.currentStreamText);
+      if (!item.html) renderStreamItemHtml();
       item.streaming = true;
     } else {
       // New bubble needed (after tool card)
       context.currentStreamId = ++context.itemIdSeq;
-      state.chatItems.push({
+      const nextItem = {
         id: context.currentStreamId,
         type: "assistant",
         text: context.currentStreamText,
         html: renderMarkdown(context.currentStreamText),
         time: timeStr(),
         streaming: true,
-      });
+      };
+      renderedStreamText.set(nextItem, context.currentStreamText);
+      state.chatItems.push(nextItem);
     }
     scheduleStreamRender(e.payload && e.payload.session_id || state.activeSessionId);
     scheduleStreamNotify(e.payload && e.payload.session_id || state.activeSessionId, firstDelta);
@@ -1456,20 +1458,8 @@
   // 桌面端 chip 仍显旧状态直到用户切 session 强制重读。
   // 新 payload 带 collections；collection_id 保留给旧远程端兼容。
   // 只处理当前 active session 的变更(其他 session 的挂载不影响当前视图)。
-  var kbMountSyncGeneration = 0;
-  function normalizeMountedCollections(value) {
-    if (!Array.isArray(value)) return [];
-    var seen = Object.create(null);
-    return value.map(function (entry) {
-      if (entry == null) return null;
-      var collectionId = typeof entry === "object"
-        ? (entry.collectionId != null ? entry.collectionId : entry.collection_id)
-        : entry;
-      if (collectionId == null || seen[String(collectionId)]) return null;
-      seen[String(collectionId)] = true;
-      return { collectionId: collectionId, enabled: typeof entry === "object" ? entry.enabled !== false : true };
-    }).filter(Boolean);
-  }
+  let kbMountSyncGeneration = 0;
+function normalizeMountedCollections(value) { return pinvouSharedtauriChatEvents().normalizeMountedCollections(value); }
   function normalizeMountedRemoteCollections(value) {
     if (!Array.isArray(value)) return [];
     var seen = Object.create(null);
@@ -1618,7 +1608,8 @@
       refreshAuthoritativeTurnTimeline: refreshAuthoritativeTurnTimeline,
       // Called from bridge.js on session buffer eviction/deletion to cancel
       // the pending trailing edge for that sid
-      cancelStreamRenderTimers: cancelStreamRenderTimers,
+      cancelStreamRenderTimers,
+      refreshActiveStreamRender,
     };
   };
 })();

@@ -27,13 +27,25 @@ mod store;
 pub mod workspace;
 
 // 纯提取：连接池自身仍是本 facade 的 impl 块；安装、登录与 Kimi 内省的
-// 无副作用自由函数已迁入对应子模块，这里 glob 引入以保持调用点不变。
-#[allow(unused_imports)]
-use install::*;
-#[allow(unused_imports)]
-use introspect::*;
-#[allow(unused_imports)]
-use login::*;
+// 无副作用自由函数已迁入对应子模块，这里显式引入 mod.rs 实际使用的符号。
+use install::{
+    brew_install_args, brew_package_installed, bundled_adapter_candidates,
+    claude_version_supported, clear_install_outcome, clear_install_progress,
+    codex_path_for_adapter, codex_upgrade_required, codex_version_changed, command_version_output,
+    detect_install_source, fill_install_outcome, fill_install_progress, find_in_path,
+    install_action_for, installed_node_version, kimi_version_supported,
+    move_official_binaries_aside, node_major_version, npm_executable, npm_package,
+    official_script_supported, official_script_urls, parse_install_action, path_install_source,
+    record_install_outcome, resolve_adapter_from, resolve_claude_adapter_from, resolve_claude_cli,
+    resolve_codex_cli, resolve_kimi_path, run_brew_install, run_npm_global_upgrade,
+    run_official_install_script, script_url_reachable, settle_install_result,
+    stale_official_target,
+};
+use introspect::{kimi_diagnostic_cursor, kimi_failure_after};
+use login::{
+    agent_login_command, capture_agent_login_output, cli_status_success, kimi_login_failure_detail,
+    nonempty_env, setup_hint_message,
+};
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -309,17 +321,16 @@ const REAP_INTERVAL_SECS: u64 = 5 * 60;
 const RESOURCE_SAMPLE_INTERVAL_SECS: u64 = 60;
 
 /// 空闲回收判定（纯函数，便于单测）：busy（prompt 在途，含等待权限/问询的
-/// turn）、configuring（配置同步中）与当前 active 会话一律不回收。
+/// turn）、configuring（配置同步中）与当前 active 会话一律不回收。判定本体
+/// 与 EnginePool 侧共用 `core::reaper::should_reap_idle`，这里保留 ACP 的
+/// 参数语义命名。
 fn should_reap_idle_session(
     busy: bool,
     configuring: bool,
     is_active_session: bool,
     idle_for: Duration,
 ) -> bool {
-    !busy
-        && !configuring
-        && !is_active_session
-        && idle_for >= Duration::from_secs(IDLE_EVICT_AFTER_SECS)
+    crate::core::reaper::should_reap_idle(busy, configuring, is_active_session, idle_for)
 }
 
 /// `evict_if_idle` 的锁内复核 + 原子移除（泛型抽出以便用裸组件确定性测试）：
@@ -990,13 +1001,8 @@ pub struct CodexAcpStatus {
     /// Agent 明确报告必须升级；这是不可暂缓的动态门禁。
     pub update_required: bool,
     pub bridge_ready: bool,
-    pub adapter_path: Option<String>,
-    pub node_version: Option<String>,
     pub node_supported: bool,
-    pub npm_available: bool,
     pub codex_available: bool,
-    pub codex_path: Option<String>,
-    pub codex_version: Option<String>,
     pub runtime_source: Option<&'static str>,
     /// 该 Agent CLI 的最低版本要求（"0.144.6" / "2.0.0" / "0.9.0"）。
     pub min_version: &'static str,
@@ -1661,22 +1667,6 @@ impl AcpSession {
         }
     }
 
-    async fn set_model(&self, model_id: &str) -> Result<()> {
-        let mut options = self.config_options.read().clone();
-        apply_config_option(
-            &self.connection,
-            &self.acp_session_id,
-            &mut options,
-            "model",
-            model_id,
-        )
-        .await?;
-        let current_model = current_config_value(&options, "model");
-        *self.config_options.write() = options;
-        *self.current_model.write() = current_model;
-        Ok(())
-    }
-
     async fn set_config_option(&self, config_id: &str, value_id: &str) -> Result<()> {
         let mut options = self.config_options.read().clone();
         apply_config_option(
@@ -1791,6 +1781,9 @@ pub struct AcpPool {
 
 /// 后台巡检任务句柄：Drop 时先 cancel 再 abort，双保险停止巡检
 /// （参考 scheduled/tasks.rs ScheduledTaskState 的 Drop 清理模式）。
+/// 本仓保留本地实现（资源采样巡检节拍与生命周期特化的
+/// `take_session_if_still_idle` 都在本文手写，不上收 `core::reaper` 的
+/// 巡检循环；判定谓词仍经 [`should_reap_idle_session`] 共用 core::reaper）。
 struct IdleReaperGuard {
     cancel: tokio_util::sync::CancellationToken,
     handle: tauri::async_runtime::JoinHandle<()>,
@@ -2464,10 +2457,6 @@ impl AcpPool {
         }
     }
 
-    async fn status_async(&self) -> CodexAcpStatus {
-        self.status_for_async(AgentBackend::CodexAcp).await
-    }
-
     /// 「重新检测」入口：忽略探测缓存强制重新探测后返回最新状态，
     /// 供用户在 App 外手动安装/升级 CLI 后刷新（安装/升级成功路径
     /// 已通过 refresh_agent_cli_probe 自动失效缓存）。
@@ -2535,9 +2524,6 @@ impl AcpPool {
             // authenticated agent must not flash as unauthenticated.
             let guard_installing = self.install_operations.lock().is_active(backend);
             let installing = guard_installing || self.install_active.read().contains(&backend);
-            let kimi_path = kimi
-                .as_ref()
-                .map(|cli| cli.path.to_string_lossy().into_owned());
             let kimi_version = kimi.as_ref().and_then(|cli| cli.version.clone());
             let install_source = kimi
                 .as_ref()
@@ -2556,7 +2542,7 @@ impl AcpPool {
             let mut status = CodexAcpStatus {
                 agent_id: "kimi",
                 agent_name: "Kimi",
-                version: kimi_version.clone(),
+                version: kimi_version,
                 latest_version: None,
                 installed,
                 update_available: false,
@@ -2564,14 +2550,9 @@ impl AcpPool {
                 // Kimi 直接运行原生 CLI，不依赖独立 Bridge。CLI 是否可用由
                 // installed 单独表达，避免未安装时被前端 Bridge 错误分支截断。
                 bridge_ready: true,
-                adapter_path: kimi_path.clone(),
                 // Kimi 不经 Node bridge，Node 字段不适用；node_supported 视为无门槛满足。
-                node_version: None,
                 node_supported: true,
-                npm_available: npm_executable().is_some(),
                 codex_available: cli_ready,
-                codex_path: kimi_path,
-                codex_version: kimi_version,
                 runtime_source: kimi.as_ref().map(|_| "system"),
                 min_version: MIN_KIMI_VERSION,
                 install_action: if installed {
@@ -2707,29 +2688,14 @@ impl AcpPool {
         let mut status = CodexAcpStatus {
             agent_id,
             agent_name,
-            version: provider_version.clone(),
+            version: provider_version,
             latest_version: None,
             installed,
             update_available: false,
             update_required: dynamic_codex_upgrade_required,
             bridge_ready,
-            adapter_path: adapter
-                .as_ref()
-                .map(|path| path.to_string_lossy().into_owned()),
-            node_version,
             node_supported,
-            npm_available: npm_executable().is_some(),
             codex_available,
-            codex_path: if backend == AgentBackend::CodexAcp {
-                codex
-                    .as_ref()
-                    .map(|resolved| resolved.path.to_string_lossy().into_owned())
-            } else {
-                claude
-                    .as_ref()
-                    .map(|cli| cli.path.to_string_lossy().into_owned())
-            },
-            codex_version: provider_version,
             runtime_source: if backend == AgentBackend::CodexAcp {
                 codex.as_ref().map(|resolved| resolved.source.as_str())
             } else {
@@ -2907,7 +2873,7 @@ impl AcpPool {
     /// 验证 Codex Bridge 与 CLI 已就绪；不会隐式安装或执行外部脚本。
     async fn ensure_codex_ready(&self) -> Result<CodexAcpStatus> {
         self.refresh_runtime_probe(false).await;
-        let status = self.status_async().await;
+        let status = self.status_for_async(AgentBackend::CodexAcp).await;
         if !status.bridge_ready {
             bail!("Pinvou 安装包缺少可用的 Codex ACP Bridge，请重新安装或重新生成 Bridge Runtime");
         }
@@ -2945,7 +2911,7 @@ impl AcpPool {
             !self.codex_upgrade_required.load(Ordering::Acquire)
                 || codex_version_changed(
                     previous_codex_version.as_deref(),
-                    status.codex_version.as_deref(),
+                    status.version.as_deref(),
                 )
         } else {
             true
@@ -4316,8 +4282,9 @@ impl AcpPool {
     fn login_executable(&self, backend: AgentBackend) -> Option<PathBuf> {
         match backend {
             AgentBackend::CodexAcp => {
-                let adapter = self.resolve_adapter()?;
-                self.resolve_codex(&adapter).map(|resolved| resolved.path)
+                // Bridge adapter 存在性保留为 Codex 登录入口的前置检查。
+                self.resolve_adapter()?;
+                self.resolve_codex().map(|resolved| resolved.path)
             }
             AgentBackend::ClaudeAcp => {
                 let adapter = self.resolve_claude_adapter()?;
@@ -5752,7 +5719,7 @@ impl AcpPool {
             AgentBackend::CodexAcp => {
                 let adapter = self.resolve_adapter().context("Codex ACP 尚未安装")?;
                 let mut command = self.adapter_command(&adapter)?;
-                self.configure_codex_path(&mut command, &adapter)?;
+                self.configure_codex_path(&mut command)?;
                 self.configure_codex_provider_env(&mut command, pinvou_session_id)
                     .await?;
                 (
@@ -6353,7 +6320,7 @@ impl AcpPool {
         None
     }
 
-    fn resolve_codex(&self, _adapter: &Path) -> Option<ResolvedCodex> {
+    fn resolve_codex(&self) -> Option<ResolvedCodex> {
         self.runtime_probe.read().codex.clone()
     }
 
@@ -6361,9 +6328,9 @@ impl AcpPool {
         platform::adapter_command(adapter, self.resolve_node(adapter).as_deref())
     }
 
-    fn configure_codex_path(&self, command: &mut Command, adapter: &Path) -> Result<()> {
+    fn configure_codex_path(&self, command: &mut Command) -> Result<()> {
         let codex = self
-            .resolve_codex(adapter)
+            .resolve_codex()
             .context("未检测到可用 Codex；请通过官方方式安装或升级 Codex")?;
         command.env(
             "CODEX_PATH",

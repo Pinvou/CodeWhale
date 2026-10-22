@@ -145,6 +145,20 @@ export CXX_loongarch64_unknown_linux_gnu="$TOOLCHAIN_BIN/$TRIPLE-g++"
 export AR_loongarch64_unknown_linux_gnu="$TOOLCHAIN_BIN/$TRIPLE-gcc-ar"
 export RANLIB_loongarch64_unknown_linux_gnu="$TOOLCHAIN_BIN/$TRIPLE-gcc-ranlib"
 export STRIP="$TOOLCHAIN_BIN/$TRIPLE-strip"
+# RUSTFLAGS are workflow-owned (job-level, remap-only) and must stay that
+# way: a target-scoped CARGO_TARGET_*_RUSTFLAGS silently SHADOWS the
+# job-level RUSTFLAGS for the target units, and cargo-only target-scoped
+# flags are invisible to the rustc link smoke below — the 0.10.13 release
+# link lost its startfiles to exactly such a target-scoped --sysroot
+# link-arg. Fail closed at setup time if one is present.
+[ -z "${CARGO_TARGET_LOONGARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS+set}" ] \
+  || fail "CARGO_TARGET_LOONGARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS is set — remove it: RUSTFLAGS are workflow-owned (remap-only) and a target-scoped value silently shadows them for the target units"
+# The encoded spelling is cargo's one other rustflags env: alongside the
+# job-level RUSTFLAGS it makes cargo abort outright instead of building, so
+# reject it here with the policy message rather than letting a generic
+# cargo error surface mid-build.
+[ -z "${CARGO_ENCODED_RUSTFLAGS+set}" ] \
+  || fail "CARGO_ENCODED_RUSTFLAGS is set — remove it: RUSTFLAGS are workflow-owned (remap-only), and cargo refuses to build with the encoded and plain spellings set together"
 # Cargo links through the rust-lld wrapper (rustc's LLVM emits R_LARCH_CALL36
 # that the bundled bfd 2.41 cannot resolve; the wrapper keeps native cmake/cc
 # builds on bfd and the glibc 2.38 floor unchanged). The wrapper is
@@ -176,39 +190,59 @@ if [ -d /usr/lib/llvm-18/lib ]; then
 fi
 
 # ---- rust target --------------------------------------------------------------
-# Run from the repo root: rustup resolves the active toolchain per directory
-# (pinvou-knowledge and src-tauri float on "stable" via their
-# rust-toolchain.toml), and the cargo builds below run from this CWD too.
+# rustup resolves the toolchain per CWD and its ancestors only: the tauri
+# stage below runs inside src-tauri/, whose rust-toolchain.toml floats on
+# "stable", while every REPO_ROOT-cwd invocation (the target add here, the
+# link smoke, the knowledge build via --manifest-path) resolves the rustup
+# DEFAULT — a runner-image property nothing in this job controls, and the
+# release job has no "align the toolchain" step (pr-check does). Align the
+# default to the toolchain the rust-toolchain.toml pins first, so all
+# stages share one rustc and the std lands on the toolchain that actually
+# builds.
+pinned_toolchain="$(cd "$SRC_TAURI" && rustup show active-toolchain | awk '{print $1}')" \
+  || fail "cannot read the active toolchain from $SRC_TAURI (rustup show active-toolchain failed)"
+(cd "$REPO_ROOT" && rustup default "$pinned_toolchain") \
+  || fail "cannot align the rustup default to the rust-toolchain.toml toolchain ($pinned_toolchain)"
 (cd "$REPO_ROOT" && rustup target add "$TRIPLE") \
   || fail "cannot install the rust $TRIPLE std for the active toolchain"
 
 assert_loongarch_elf() {
   local elf="$1" machine
   [ -f "$elf" ] || fail "expected loong64 artifact missing: $elf"
-  machine="$(LC_ALL=C readelf -h "$elf" 2>/dev/null | sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')"
+  # `|| true`: a corrupt/non-ELF artifact makes readelf fail, and under
+  # pipefail that would abort BEFORE the fail() below — a silent exit
+  # instead of the precise message.
+  machine="$(LC_ALL=C readelf -h "$elf" 2>/dev/null | sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p' || true)"
   [ "$machine" = "LoongArch" ] \
     || fail "$elf is not a LoongArch64 ELF (readelf Machine: '${machine:-<none>}')"
 }
 
 # ---- link smoke (seconds; the release path's canary for the link env) ---------
 # The pr-check legs are check-only and never link, so without this probe the
-# release job's first link is a full knowledge-server compile — the worst
+# release job's first link was a full knowledge-server compile — the worst
 # place to discover a broken cross link environment. The tiny link exercises
-# the whole chain end to end: the wrapper linker exec chain (TRIPLE-gcc with
-# the lld-shim -B dir, whose runtime rustc-sysroot resolution is also
-# fail-closed), startfiles from the cross toolchain's bundled relocatable
-# glibc, and R_LARCH_CALL36 resolution through rust-lld. It reuses the same
-# flags the cargo builds below actually see — the job-level RUSTFLAGS remap
-# (see the workflow env; upstream #731's target-scoped rustflags/--sysroot
-# redesign is intentionally not ported: this repo links the bundled toolchain
-# glibc and keeps ld-script bare-name resolution in the sysroot script
-# instead). Word-splitting of RUSTFLAGS is intentional — cargo consumes it
-# the same way. Runs from the repo root so rustup resolves the same pinned
-# toolchain the cargo builds use.
+# the whole cargo-link chain end to end: the wrapper, the -B/-fuse-ld=lld
+# handoff into the lld shim, rust-lld resolved from the active rustc sysroot,
+# startfiles and the libc.so linker script from the toolchain's bundled
+# glibc 2.38 (no --sysroot is passed; the deepin tree serves the
+# cmake/bindgen/pkg-config side, and its resolution surface is what
+# verify_sysroot asserts) and libgcc from the toolchain. Runs from the repo
+# root on the aligned default toolchain (rust target step above) — the same
+# rustc the knowledge build uses; only the job's rustc-side
+# --remap-path-prefix RUSTFLAGS differs from a cargo link, and remap is not
+# a link input. (Note the smoke therefore validates the toolchain-sysroot
+# resolution; a production link that also carries deepin -L paths searches
+# those FIRST for every bare name, and the deepin-side presence of each
+# name is what the sysroot setup asserts statically.)
 smoke_dir="$(mktemp -d)"
+# Self-cleaning: the success path removes it below, and this trap covers
+# the failure paths (smoke link failure, wrong-arch artifact) so a broken
+# link environment doesn't litter mktemp dirs on the runner. The script is
+# executed (never sourced), so an EXIT trap stays scoped to this run.
+trap 'rm -rf -- "${smoke_dir:-}"' EXIT
 printf 'fn main() {}\n' > "$smoke_dir/hello.rs"
 (cd "$REPO_ROOT" && rustc --target "$TRIPLE" \
-  -C linker="$cargo_linker" ${RUSTFLAGS:-} \
+  -C linker="$CARGO_TARGET_LOONGARCH64_UNKNOWN_LINUX_GNU_LINKER" \
   -o "$smoke_dir/hello" "$smoke_dir/hello.rs") \
   || fail "cross link smoke failed: the loong64 link environment is broken (see the error above)"
 assert_loongarch_elf "$smoke_dir/hello"
@@ -299,11 +333,14 @@ toolchain: $toolchain_root
 sysroot: $sysroot
 # CI step exports (recompute at consumption time; see also the env blocks
 # printed by the two setup scripts):
-#   CC/CXX/AR/RANLIB_loongarch64_unknown_linux_gnu (+ verbatim-triple forms),
-#   CARGO_TARGET_LOONGARCH64_UNKNOWN_LINUX_GNU_LINKER, STRIP,
-#   PKG_CONFIG_LIBDIR, PKG_CONFIG_SYSROOT_DIR, CMAKE_TOOLCHAIN_FILE
+#   PINVOU_LOONG64_TOOLCHAIN_PREFIX,
+#   CC/CXX/AR/RANLIB_loongarch64_unknown_linux_gnu, STRIP,
+#   CARGO_TARGET_LOONGARCH64_UNKNOWN_LINUX_GNU_LINKER,
+#   PKG_CONFIG_LIBDIR, PKG_CONFIG_SYSROOT_DIR, CMAKE_TOOLCHAIN_FILE,
+#   BINDGEN_EXTRA_CLANG_ARGS, LIBCLANG_PATH (llvm-18 prefix when present)
 #   (all set inside this script for its children; a workflow that runs the
 #   setup scripts directly exports the same values from their output).
-#   RUSTFLAGS stay the workflow's decision; the pinned toolchain has no lld,
-#   so the arm64 -fuse-ld=lld flag must not be copied.
+#   RUSTFLAGS stay the workflow's decision (remap-only; a target-scoped
+#   CARGO_TARGET_*_RUSTFLAGS is rejected above); the pinned toolchain has
+#   no lld, so the arm64 -fuse-ld=lld flag must not be copied.
 EOF
