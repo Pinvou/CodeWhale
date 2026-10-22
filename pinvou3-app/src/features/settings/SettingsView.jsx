@@ -54,6 +54,7 @@ import {
 import { VoiceShortcutIntroModal } from '../voice-composer/VoiceShortcutIntroModal.jsx';
 import { ReasoningTierPicker, useModelReasoningTierState } from './local-server-tiers.jsx';
 import { StatusChip } from './StatusChip.jsx';
+import { isModelRouteUnchanged, modelRouteSnapshot } from './model-route-intent.js';
 
 function isReadonlyModel(model) {
   return !!(model && (model.readonly || model.system));
@@ -326,12 +327,15 @@ const formatMemoryTime = (item, copy) => {
       const [providerKey, setProviderKey] = useState(initialProvider ? initialProvider.key : '');
       const [providerKind, setProviderKind] = useState(initial.provider_kind || (initialProvider && initialProvider.providerKind) || (modelScope === 'cloud' ? PROVIDER_KIND_OFFICIAL_API : ''));
       const [vendor, setVendor] = useState(initial.vendor || (initialProvider && initialProvider.vendor) || '');
-      const [endpointMode, setEndpointMode] = useState((initialProvider && initialProvider.endpointMode) || '');
+      const [endpointMode, setEndpointMode] = useState(initial.endpoint_mode || (initialProvider && initialProvider.endpointMode) || '');
       const [model, setModel] = useState(initial.model || '');
       const [baseUrl, setBaseUrl] = useState(initial.base_url || '');
       const [storeRouteAtOpen] = useState(() => ({
         existing: !!initial.id && !initial.__new,
-        model: (initial.model || '').trim(), baseUrl: (initial.base_url || '').trim(),
+        route: modelRouteSnapshot({
+          preset, provider_kind: providerKind, vendor, endpoint_mode: endpointMode,
+          model, base_url: baseUrl,
+        }),
       }));
       const [contextWindow, setContextWindow] = useState(initial.context_window_tokens ? String(initial.context_window_tokens) : '');
       // 上下文字段的编辑意图:表单挂载时的快照可能是旧值(后台商店同步可能已
@@ -667,7 +671,10 @@ const formatMemoryTime = (item, copy) => {
             reasoning_effort: reasoningEffortTiers.length > 0 ? (reasoningEffort || null) : null,
             model: model.trim(), base_url: baseUrl.trim(),
             preserve_model_store_route: storeRouteAtOpen.existing
-              && model.trim() === storeRouteAtOpen.model && baseUrl.trim() === storeRouteAtOpen.baseUrl,
+              && isModelRouteUnchanged(storeRouteAtOpen.route, {
+                preset, provider_kind: providerKind, vendor, endpoint_mode: endpointMode,
+                model, base_url: baseUrl,
+              }),
             api_key: nextApiKey, credential_action: nextKeyAction,
             provider_kind: providerKind || null,
             vendor: vendor || null,

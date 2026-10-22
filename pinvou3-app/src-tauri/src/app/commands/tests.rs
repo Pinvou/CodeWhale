@@ -3653,6 +3653,153 @@ fn untouched_route_form_preserves_a_later_detach_or_different_card_link() {
 }
 
 #[test]
+fn untouched_route_form_preserves_a_later_responses_route_context_and_credentials() {
+    crate::platform::test_support::with_temp_home("store-form-latest-responses", || {
+        let mut original = model_deletion_test_model("latest-protocol", true);
+        original.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+        original.provider_kind = Some("custom".into());
+        original.model = "old-wire".into();
+        original.base_url = "http://127.0.0.1:8000/v1".into();
+        original.model_store_card_id = Some("old-card".into());
+        original.context_window_tokens = Some(32768);
+        seed_model_deletion_prefs(&[original.clone()]);
+        // The CLI can choose Responses through its supported OpenAI preset,
+        // official endpoint and a Responses model, while detaching the card.
+        UserPrefs::update_transaction(|prefs| {
+            let mut latest = original.clone();
+            latest.preset = crate::platform::prefs::ModelPreset::Openai;
+            latest.provider_kind = Some("official_api".into());
+            latest.vendor = Some("openai".into());
+            latest.endpoint_mode = Some("full_chat_completions".into());
+            latest.model = "gpt-6-sol".into();
+            latest.base_url = "https://api.openai.com/v1".into();
+            latest.model_store_card_id = None;
+            latest.model_store_link_detached = true;
+            latest.context_window_tokens = Some(262144);
+            prefs.upsert_model(latest);
+            prefs
+                .advanced
+                .model_store_context_repairs
+                .insert("latest-protocol".into(), "verified-256k-v1/old-card".into());
+            Ok(())
+        })
+        .unwrap();
+        let before = UserPrefs::load();
+        let latest = before.model_by_id("latest-protocol").unwrap().clone();
+        let mut stale_form = original;
+        stale_form.alias = Some("Edited alias".into());
+        stale_form.preserve_model_store_route = true;
+        stale_form.preserve_context_window_tokens = true;
+        let store = crate::platform::credential_store::RecordingCredentialStore::new();
+        super::settings::save_model_inner(stale_form, &store).unwrap();
+        let after = UserPrefs::load();
+        let saved = after.model_by_id("latest-protocol").unwrap();
+        let mut expected = latest;
+        expected.alias = Some("Edited alias".into());
+        assert_eq!(saved, &expected);
+        assert_eq!(
+            after.advanced.model_store_context_repairs,
+            before.advanced.model_store_context_repairs
+        );
+        assert_eq!(
+            crate::core::model_wire::model_route_wire_api(
+                saved.preset.as_str(),
+                saved.vendor.as_deref(),
+                &saved.model,
+                &saved.base_url,
+            ),
+            "openai_responses"
+        );
+        assert!(store.ops().is_empty());
+    });
+}
+
+#[test]
+fn route_preservation_keeps_latest_metadata_even_when_the_old_form_was_not_operator_owned() {
+    crate::platform::test_support::with_temp_home("store-form-old-official-route", || {
+        let original = model_deletion_test_model("changed-provider", false);
+        seed_model_deletion_prefs(&[original.clone()]);
+        UserPrefs::update_transaction(|prefs| {
+            let mut latest = original.clone();
+            latest.preset = crate::platform::prefs::ModelPreset::OpenaiResponses;
+            latest.provider_kind = Some("custom".into());
+            latest.vendor = Some("custom-vendor".into());
+            latest.endpoint_mode = Some("full_chat_completions".into());
+            latest.model = "custom-wire".into();
+            latest.base_url = "https://relay.example.test/v1".into();
+            latest.model_store_link_detached = true;
+            prefs.upsert_model(latest);
+            Ok(())
+        })
+        .unwrap();
+        let mut expected = UserPrefs::load()
+            .model_by_id("changed-provider")
+            .unwrap()
+            .clone();
+        expected.name = "Edited label".into();
+        let mut stale = original;
+        stale.name.clone_from(&expected.name);
+        stale.preserve_model_store_route = true;
+        let store = crate::platform::credential_store::RecordingCredentialStore::new();
+        super::settings::save_model_inner(stale, &store).unwrap();
+        assert_eq!(
+            UserPrefs::load().model_by_id("changed-provider"),
+            Some(&expected)
+        );
+        assert!(store.ops().is_empty());
+    });
+}
+
+#[test]
+fn explicit_protocol_metadata_edits_at_the_same_address_save_and_detach() {
+    use serde_json::json;
+    for (field, value) in [
+        ("preset", json!("openai_compatible")),
+        ("provider_kind", json!("official_api")),
+        ("vendor", json!("anthropic")),
+        ("endpoint_mode", json!("full_chat_completions")),
+    ] {
+        crate::platform::test_support::with_temp_home(&format!("route-edit-{field}"), || {
+            let mut original = model_deletion_test_model("protocol-edit", true);
+            original.preset = crate::platform::prefs::ModelPreset::OpenaiResponses;
+            original.provider_kind = Some("custom".into());
+            original.model = "custom-wire".into();
+            original.base_url = "http://127.0.0.1:8000/v1".into();
+            original.model_store_card_id = Some("old-card".into());
+            original.context_window_tokens = Some(262144);
+            seed_model_deletion_prefs(&[original.clone()]);
+            let before = UserPrefs::load()
+                .model_by_id("protocol-edit")
+                .unwrap()
+                .clone();
+            let mut request = serde_json::to_value(&before).unwrap();
+            request[field] = value.clone();
+            request["model_store_card_id"] = json!(null);
+            request["context_window_tokens"] = json!(32768);
+            request["preserve_context_window_tokens"] = json!(true);
+            // Missing legacy flags remain false: explicit route edits must
+            // never acquire the untouched-route behavior implicitly.
+            let incoming: SavedModel = serde_json::from_value(request).unwrap();
+            assert!(!incoming.preserve_model_store_route);
+            let store = crate::platform::credential_store::RecordingCredentialStore::new();
+            super::settings::save_model_inner(incoming, &store).unwrap();
+            let saved = UserPrefs::load()
+                .model_by_id("protocol-edit")
+                .unwrap()
+                .clone();
+            assert_eq!(serde_json::to_value(&saved).unwrap()[field], value);
+            assert_eq!(saved.model, before.model);
+            assert_eq!(saved.base_url, before.base_url);
+            assert!(saved.model_store_card_id.is_none());
+            assert!(saved.model_store_link_detached);
+            assert_eq!(saved.context_window_tokens, before.context_window_tokens);
+            assert_eq!(saved.credential_ref, before.credential_ref);
+            assert!(store.ops().is_empty());
+        });
+    }
+}
+
+#[test]
 fn reasoning_effort_only_intent_is_incoming_only_and_legacy_defaults_to_full_save() {
     let legacy = model_deletion_test_model("reasoning-intent", false);
     assert!(!legacy.reasoning_effort_only);

@@ -1323,18 +1323,7 @@ fn require_known_vision_model(
 /// per-session model binding and scheduled-task model pin that referenced the
 /// old one).
 fn apply_model_edit(model: &mut SavedModel, changes: &ModelEdit) {
-    if changes
-        .model
-        .as_ref()
-        .is_some_and(|value| value != &model.model)
-        || changes
-            .base_url
-            .as_ref()
-            .is_some_and(|value| value != &model.base_url)
-    {
-        model.model_store_card_id = None;
-        model.model_store_link_detached = true;
-    }
+    let previous_route = model.clone();
     if let Some(preset) = changes.preset {
         model.preset = preset;
     }
@@ -1370,6 +1359,10 @@ fn apply_model_edit(model: &mut SavedModel, changes: &ModelEdit) {
     }
     if let Some(value) = &changes.vision_model_id {
         model.vision_model_id = value.clone();
+    }
+    if !model.has_same_endpoint_route(&previous_route) {
+        model.model_store_card_id = None;
+        model.model_store_link_detached = true;
     }
 }
 
@@ -3880,6 +3873,58 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&model).unwrap()).unwrap();
         assert!(reloaded.model_store_link_detached);
     }
+    #[test]
+    fn store_card_link_detaches_for_protocol_metadata_changes_at_the_same_address() {
+        let original: SavedModel = serde_json::from_value(serde_json::json!({
+            "id":"local", "name":"Local", "preset":"openai_compatible",
+            "provider_kind":"custom", "model":"wire-model",
+            "base_url":"http://127.0.0.1:8000/v1", "model_store_card_id":"stable-card"
+        }))
+        .unwrap();
+        for changes in [
+            ModelEdit {
+                preset: Some(ModelPreset::Openai),
+                ..Default::default()
+            },
+            ModelEdit {
+                provider_kind: Some(Some("official_api".into())),
+                ..Default::default()
+            },
+            ModelEdit {
+                vendor: Some(Some("anthropic".into())),
+                ..Default::default()
+            },
+            ModelEdit {
+                endpoint_mode: Some(Some("full_chat_completions".into())),
+                ..Default::default()
+            },
+        ] {
+            let mut updated = original.clone();
+            apply_model_edit(&mut updated, &changes);
+            assert!(updated.model_store_card_id.is_none());
+            assert!(updated.model_store_link_detached);
+            assert_eq!(updated.model, original.model);
+            assert_eq!(updated.base_url, original.base_url);
+        }
+        let mut unchanged = original;
+        apply_model_edit(
+            &mut unchanged,
+            &ModelEdit {
+                preset: Some(ModelPreset::OpenaiCompatible),
+                // Clearing custom falls back to the same inferred provider kind.
+                provider_kind: Some(None),
+                vendor: Some(None),
+                endpoint_mode: Some(None),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            unchanged.model_store_card_id.as_deref(),
+            Some("stable-card")
+        );
+        assert!(!unchanged.model_store_link_detached);
+    }
+
     use pinvou3_lib::platform::credential_store::CredentialError;
 
     // The credential-lane tests all steer the product through the

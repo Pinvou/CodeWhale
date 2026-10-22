@@ -5219,7 +5219,8 @@ function enqueueSettingsWrite(write) { return pinvouSharedweb().enqueueSettingsW
   async function saveSettings(patch) {
     return enqueueSettingsWrite(async function () {
       try {
-        state.settings = await invoke(IS_WEB ? "web_access_update_settings" : "update_settings", { patch: patch });
+        const settings = await invoke(IS_WEB ? "web_access_update_settings" : "update_settings", { patch: patch });
+        window.PinvouBridgeShared.publishSettings(state, settings);
         notify();
         return true;
       } catch (e) {
@@ -5246,11 +5247,13 @@ function enqueueSettingsWrite(write) { return pinvouSharedweb().enqueueSettingsW
   async function saveSearchSettings(search) {
     return enqueueSettingsWrite(async function () {
       try {
+        let settings;
         if (IS_WEB) {
-          state.settings = await invoke("web_access_update_settings", { patch: { search: search } });
+          settings = await invoke("web_access_update_settings", { patch: { search: search } });
         } else {
-          state.settings = await invoke("update_search_settings", { search: search });
+          settings = await invoke("update_search_settings", { search: search });
         }
+        window.PinvouBridgeShared.publishSettings(state, settings);
         await loadEffectiveModelConfig();
         notify();
         return true;

@@ -464,11 +464,15 @@ pub(super) fn save_model_inner(
             let explicit_store_link_requested = model.model_store_link_requested
                 || (old.is_none() && model.model_store_card_id.is_some());
             model.model_store_link_requested = false;
-            if model.preserve_model_store_route
-                && !explicit_store_link_requested
-                && model.is_operator_owned_endpoint()
-            {
+            if model.preserve_model_store_route && !explicit_store_link_requested {
                 if let Some(latest) = old.as_ref() {
+                    // Endpoint identity includes protocol metadata. Combining a
+                    // latest Responses URL with an older Chat preset changes
+                    // the actual request route despite preserving its address.
+                    model.preset = latest.preset;
+                    model.provider_kind.clone_from(&latest.provider_kind);
+                    model.vendor.clone_from(&latest.vendor);
+                    model.endpoint_mode.clone_from(&latest.endpoint_mode);
                     model.base_url.clone_from(&latest.base_url);
                     model.model.clone_from(&latest.model);
                     model
@@ -482,7 +486,7 @@ pub(super) fn save_model_inner(
             // Keep it for non-route edits; a user-entered route change unlinks it.
             let same_route = old
                 .as_ref()
-                .is_some_and(|old| old.base_url == model.base_url && old.model == model.model);
+                .is_some_and(|old| old.has_same_endpoint_route(&model));
             let previous = old
                 .as_ref()
                 .filter(|old| !old.model_store_link_detached)
