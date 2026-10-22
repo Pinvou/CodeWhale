@@ -1,5 +1,5 @@
 // Command-layer tests borrow platform::paths::tests::ENV_LOCK (a std Mutex) to serialize global env; cargo test runs on multiple threads, but env-writing tests are serialized by the mutex, and within a current_thread runtime holding the lock across await has no reentrant path, so it cannot deadlock.
-// architecture-guard: allow-target-cfg -- artifact 调用链回归需用 Windows 独占句柄模拟 ReplaceFileW 1177 布局
+// architecture-guard: allow-target-cfg -- artifact 调用链需 Windows 独占句柄；模型保存集成回归需 Linux 商店真实数据库与平台校验
 
 use super::prelude::*;
 use super::{
@@ -3849,6 +3849,180 @@ fn explicit_protocol_metadata_edits_at_the_same_address_save_and_detach() {
             assert!(saved.model_store_link_detached);
             assert_eq!(saved.context_window_tokens, before.context_window_tokens);
             assert_eq!(saved.credential_ref, before.credential_ref);
+            assert!(store.ops().is_empty());
+        });
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn seed_running_store_card_for_model_save() -> rusqlite::Connection {
+    // Initialize the production schema through its public read boundary. The
+    // absent card returns before runtime/GPU inspection, with no HTTP or script.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let error = runtime
+        .block_on(crate::features::model_store::model_detail(
+            "running-card".into(),
+        ))
+        .unwrap_err();
+    assert!(error.contains("模型不存在"), "{error}");
+    let path = crate::platform::paths::pinvou3_home().join("model-store/models.db");
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.execute(
+        "INSERT INTO store_models \
+         (card_id,model_name,card_name,engine_name,status,running,downloaded_at,endpoint_url,endpoint_model) \
+         VALUES ('running-card','wire','Running card','native','deployed',1,'fixture', \
+                 'http://127.0.0.1:8000/v1','wire')",
+        [],
+    )
+    .unwrap();
+    assert!(crate::features::model_store::matches_current_model_route(
+        "running-card",
+        "http://127.0.0.1:8000/v1",
+        "wire"
+    ));
+    conn
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn full_object_model_save_detaches_six_field_route_edits_while_the_card_is_running() {
+    use serde_json::json;
+    for (field, value) in [
+        ("preset", json!("openai_responses")),
+        ("provider_kind", json!("official_api")),
+        ("vendor", json!("anthropic")),
+        ("endpoint_mode", json!("full_chat_completions")),
+        ("model", json!("another-wire")),
+        ("base_url", json!("http://127.0.0.1:8001/v1")),
+    ] {
+        crate::platform::test_support::with_temp_home(
+            &format!("running-route-edit-{field}"),
+            || {
+                let _conn = seed_running_store_card_for_model_save();
+                let mut original = model_deletion_test_model("full-object", true);
+                original.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+                original.provider_kind = Some("custom".into());
+                original.model = "wire".into();
+                original.base_url = "http://127.0.0.1:8000/v1".into();
+                original.model_store_card_id = Some("running-card".into());
+                seed_model_deletion_prefs(&[model_deletion_test_model("keep", false), original]);
+                let before = UserPrefs::load()
+                    .model_by_id("full-object")
+                    .unwrap()
+                    .clone();
+                let mut request = serde_json::to_value(&before).unwrap();
+                request[field] = value.clone();
+                // A full-object API client returns the old association as read.
+                assert_eq!(request["model_store_card_id"], "running-card");
+                let incoming: SavedModel = serde_json::from_value(request).unwrap();
+                assert!(!incoming.has_same_endpoint_route(&before));
+                assert!(!incoming.model_store_link_requested);
+                let store = crate::platform::credential_store::RecordingCredentialStore::new();
+                super::settings::save_model_inner(incoming, &store).unwrap();
+                let saved = UserPrefs::load()
+                    .model_by_id("full-object")
+                    .unwrap()
+                    .clone();
+                assert_eq!(serde_json::to_value(&saved).unwrap()[field], value);
+                assert!(saved.model_store_card_id.is_none(), "{field} must detach");
+                assert!(
+                    saved.model_store_link_detached,
+                    "{field} must stay detached"
+                );
+                assert_eq!(saved.credential_ref, before.credential_ref);
+                assert!(
+                    !super::settings::delete_model_if_store_link_inner(
+                        "full-object",
+                        "running-card",
+                        &store
+                    )
+                    .unwrap(),
+                    "a later uninstall must not remove the edited {field} route"
+                );
+                assert!(store.ops().is_empty());
+            },
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn full_object_model_option_saves_keep_links_with_or_without_card_id_and_when_stopped() {
+    for running in [true, false] {
+        for include_card_id in [true, false] {
+            crate::platform::test_support::with_temp_home("running-option-edit", || {
+                let conn = seed_running_store_card_for_model_save();
+                conn.execute(
+                    "UPDATE store_models SET running=?1 WHERE card_id='running-card'",
+                    [running],
+                )
+                .unwrap();
+                let mut original = model_deletion_test_model("full-options", true);
+                original.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+                original.provider_kind = Some("custom".into());
+                original.model = "wire".into();
+                original.base_url = "http://127.0.0.1:8000/v1".into();
+                original.model_store_card_id = Some("running-card".into());
+                seed_model_deletion_prefs(&[original]);
+                let mut request =
+                    serde_json::to_value(UserPrefs::load().model_by_id("full-options").unwrap())
+                        .unwrap();
+                request["name"] = serde_json::json!("Updated label");
+                if !include_card_id {
+                    request
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("model_store_card_id");
+                }
+                let store = crate::platform::credential_store::RecordingCredentialStore::new();
+                super::settings::save_model_inner(serde_json::from_value(request).unwrap(), &store)
+                    .unwrap();
+                let saved = UserPrefs::load()
+                    .model_by_id("full-options")
+                    .unwrap()
+                    .clone();
+                assert_eq!(saved.name, "Updated label");
+                assert_eq!(saved.model_store_card_id.as_deref(), Some("running-card"));
+                assert!(!saved.model_store_link_detached);
+                assert!(store.ops().is_empty());
+            });
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn full_object_model_save_keeps_explicit_relinks_and_new_card_associations() {
+    for (previous_card, explicit_link) in [
+        (Some("running-card"), true),
+        (Some("previous-card"), false),
+        (None, false),
+    ] {
+        crate::platform::test_support::with_temp_home("running-card-relink", || {
+            let _conn = seed_running_store_card_for_model_save();
+            let mut original = model_deletion_test_model("relink", true);
+            original.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+            original.provider_kind = Some("custom".into());
+            original.model = "wire".into();
+            original.base_url = "http://127.0.0.1:8000/v1".into();
+            original.model_store_card_id = previous_card.map(str::to_owned);
+            seed_model_deletion_prefs(&[original]);
+            let mut incoming = UserPrefs::load().model_by_id("relink").unwrap().clone();
+            incoming.preset = crate::platform::prefs::ModelPreset::OpenaiResponses;
+            incoming.model_store_card_id = Some("running-card".into());
+            incoming.model_store_link_requested = explicit_link;
+            let store = crate::platform::credential_store::RecordingCredentialStore::new();
+            super::settings::save_model_inner(incoming, &store).unwrap();
+            let saved = UserPrefs::load().model_by_id("relink").unwrap().clone();
+            assert_eq!(
+                saved.preset,
+                crate::platform::prefs::ModelPreset::OpenaiResponses
+            );
+            assert_eq!(saved.model_store_card_id.as_deref(), Some("running-card"));
+            assert!(!saved.model_store_link_detached);
             assert!(store.ops().is_empty());
         });
     }
