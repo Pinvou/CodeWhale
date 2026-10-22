@@ -210,26 +210,6 @@ pub struct EngineRemoval {
     pub summary: String,
 }
 
-/// 已下载的模型里，脚本比商店旧的那些。
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct OutdatedCard {
-    pub card_id: String,
-    pub card_name: String,
-    /// 已部署/运行中——刷新脚本后必须重新部署才会生效，光刷新没用
-    pub needs_redeploy: bool,
-    pub running: bool,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct StoreSyncResult {
-    /// 商店当前的卡片总数
-    pub total: usize,
-    /// 已下载但商店已下架的卡片名（本地仍可用，只是不能再重新下载）
-    pub delisted: Vec<String>,
-    /// 有脚本更新可用的已下载卡片
-    pub outdated: Vec<OutdatedCard>,
-}
-
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DiskSummary {
     pub managed_total_bytes: i64,
@@ -1880,62 +1860,6 @@ impl ModelManager {
     ///
     /// 设计意图保持不变：只读，不改任何本地副本——检测到有更新只是提醒用户，
     /// 换不换由用户点「检查卡片更新」决定，免得他正用着的部署脚本在背后被悄悄
-    /// 换掉。只发一个请求（列表接口已带 script_sha256），不用为每张卡再查一次
-    /// 详情。
-    pub fn sync_store_catalog(&self) -> Result<StoreSyncResult, ModelManagerError> {
-        let cards = self.store.list_cards()?;
-        let local = db::list_store_models().unwrap_or_default();
-
-        let store_ids: std::collections::HashSet<&str> =
-            cards.iter().map(|c| c.id.as_str()).collect();
-
-        // 已下载但商店里已经没有的卡片：本地仍可正常使用（脚本都固化在本地了），
-        // 只是不能再重新下载，值得让用户知道。
-        let delisted: Vec<String> = local
-            .iter()
-            .filter(|m| !store_ids.contains(m.card_id.as_str()))
-            .map(|m| m.card_name.clone())
-            .collect();
-
-        // 已下载、且商店的脚本哈希跟本地固化副本对不上的 —— 有更新可用
-        let mut outdated = Vec::new();
-        for m in &local {
-            if m.scripts_content.is_empty() {
-                continue; // 老记录还没固化过副本，不参与比对
-            }
-            let Some(card) = cards.iter().find(|c| c.id == m.card_id) else {
-                continue;
-            };
-            if card.script_sha256.is_empty() {
-                continue; // 商店没给哈希（老后台），无从比较
-            }
-            let changed = card
-                .script_sha256
-                .iter()
-                .any(|(t, h)| m.scripts_content.get(t).map(|b| &b.sha256) != Some(h));
-            if changed {
-                outdated.push(OutdatedCard {
-                    card_id: m.card_id.clone(),
-                    card_name: m.card_name.clone(),
-                    // 运行中的模型即使刷新了脚本也不会自动生效——脚本只是文件，
-                    // 已经起来的容器还是按旧参数在跑。提醒文案要说清楚这点。
-                    needs_redeploy: m.status == "deployed" || m.running,
-                    running: m.running,
-                });
-            }
-        }
-
-        Ok(StoreSyncResult {
-            total: cards.len(),
-            delisted,
-            outdated,
-        })
-    }
-
-    /// Explicit, non-executing update. Caller holds card and startup
-    /// locks; complete fetch/validation precedes one atomic DB transaction.
-    /// （「回退上次脚本」已随界面入口一并移除：更新永远向前取商店当前版本，
-    /// 历史快照不再保留。）
     pub fn change_card_scripts(
         &self,
         card_id: &str,

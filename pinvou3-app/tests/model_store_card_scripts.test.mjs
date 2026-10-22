@@ -29,7 +29,7 @@ async function fixture(t, { running = false, status = 'deployed', activeRuns = [
   const saved = new Map(['window', 'document', '__TAURI__', 'IS_REACT_ACT_ENVIRONMENT']
     .map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   const window = createWindow('<!doctype html><html><body><div id="root"></div></body></html>');
-  const record = { card_id: 'card', card_name: 'Test model', running, status, local_script_hashes: { enable: 'old' } };
+  const record = { card_id: 'card', card_name: 'Test model', running, status, weights_ready_at: '2026-10-01T00:00:00Z', local_script_hashes: { enable: 'old' } };
   const starts = [];
   const runs = new Map();
   const recoveringRuns = [...activeRuns];
@@ -285,3 +285,19 @@ for (const [status, running, action, disabled] of [
     assert.deepEqual(actions, disabled ? [] : [action]);
   });
 }
+
+// 评审 P2-1：权重未就绪（incomplete/cleanup_required/缺 weights_ready_at）的
+// 记录不给可点的「部署模型」——发起必然失败的部署只会产生看不懂的报错。
+test('no update: 权重未就绪时部署按钮禁用（不发起注定失败的部署）', async (t) => {
+  const ui = await fixture(t, { status: 'downloaded', running: false });
+  // 夹具默认带 weights_ready_at；这里模拟缺凭据的记录
+  const saved = ui.record;
+  saved.weights_ready_at = null;
+  await ui.render(React.createElement(ModelDetailDialog, {
+    cardId: 'card', copy: dict.zh.uiModelStore, theme: 'light', scriptUpdates: {},
+    onClose() {}, onUninstall: () => {}, onRedeploy: () => { throw new Error('不应发起部署'); },
+  }));
+  const btn = ui.container.querySelector('[data-testid="model-store-detail-action-deploy"]');
+  assert.ok(btn);
+  assert.equal(btn.disabled, true, '权重未就绪：部署按钮必须禁用');
+});

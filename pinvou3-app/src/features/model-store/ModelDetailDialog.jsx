@@ -11,7 +11,7 @@ import { LanSharingPanel } from './LanSharingPanel.jsx';
 import { lanError } from './lan-access.js';
 import { tryGetTauriBridge } from '../../platform/tauri/client.js';
 import { buildSavedModel, checkLinkable, findLinkedRows, pickApiKey } from './pinvou-model-link.js';
-import { formatBytes, libraryStatusOf } from './model-store-logic.js';
+import { formatBytes, libraryStateOf } from './model-store-logic.js';
 import {
   HOVER_SURFACE,
   MsButton,
@@ -26,7 +26,16 @@ import {
 
 const TITLE_ID = 'model-store-detail-title';
 
-const STATUS_LABEL_KEYS = { running: 'statusRunning', deployed: 'statusDeployed', pending: 'statusPending' };
+// 状态行六态映射（评审 P2-1：此前只有三键，incomplete/cleanup_required/
+// downloaded 三态渲染为空白行）。键与 libraryStateOf 的六态一一对应。
+const STATUS_LABEL_KEYS = {
+  running: 'statusRunning',
+  deployed: 'statusDeployed',
+  pending: 'statusPending',
+  downloaded: 'statusDownloaded',
+  incomplete: 'statusIncomplete',
+  cleanup_required: 'statusCleanupRequired',
+};
 
 /**
  * 一行可直接复制的接入信息。值必须是**对方那边原样粘贴就能生效**的东西,
@@ -301,7 +310,7 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
       {!error && detail ? (
         <>
           <div className="space-y-1">
-            <MsRow label={copy.detailStatus}>{copy[STATUS_LABEL_KEYS[libraryStatusOf(record)]]}</MsRow>
+            <MsRow label={copy.detailStatus}>{copy[STATUS_LABEL_KEYS[libraryStateOf(record)]] || copy.statusPending}</MsRow>
             <MsRow label={copy.detailEngine}>
               {record.engine_name}
               {record.engine_version ? ` ${record.engine_version}` : ''}
@@ -437,6 +446,10 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
               const hasUpdate = scriptUpdates?.[record.card_id];
               const isDeployed = record.status === 'deployed';
               const isRunning = record.running;
+              // 权重未就绪（评审 P2-1）：incomplete/cleanup_required 的记录
+              // 缺少一次成功校验的物理凭据（weights_ready_at），部署必然失败——
+              // 兜底按钮对这类记录禁用并说明原因，而不是发起注定失败的部署。
+              const weightsReady = !!record.weights_ready_at;
 
               if (hasUpdate) {
                 return (
@@ -462,6 +475,18 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
                     data-testid="model-store-detail-action-uninstall"
                   >
                     {copy.actionUninstall}
+                  </MsButton>
+                );
+              }
+              if (!weightsReady) {
+                return (
+                  <MsButton
+                    tone="ghost"
+                    disabled
+                    data-testid="model-store-detail-action-deploy"
+                    title={copy.statusIncomplete}
+                  >
+                    {copy.actionDeploy}
                   </MsButton>
                 );
               }

@@ -446,7 +446,7 @@ export const dictEn = {
           dualNoticeDownload:'Downloading only needs this device — no direct cable and no secondary machine required.',
           dualNoticeDeploy:'Deploying asks once for the secondary machine’s management IP, username, and password. Networking, package push, pairing, weight distribution, and startup are then fully automatic.',
           libraryEmpty:'No models downloaded yet — take a look at the marketplace',
-          statusRunning:'Running', statusDeployed:'Deployed', statusPending:'Not deployed', statusIncomplete:'Download incomplete', statusCleanupRequired:'Cleanup required',
+          statusRunning:'Running', statusDeployed:'Deployed', statusPending:'Not deployed', statusDownloaded:'Downloaded, ready to deploy', statusIncomplete:'Download incomplete', statusCleanupRequired:'Cleanup required',
           deploy:'Deploy', deploying:'Deploying…', redeploy:'Redeploy', resumeDownload:'Resume download', resumingDownload:'Resuming download…',
           enable:'Enable', enabling:'Enabling…', stop:'Stop', stopping:'Stopping…', uninstall:'Uninstall', uninstalling:'Uninstalling…', continueCleanup:'Continue cleanup', cleaningUp:'Cleaning…',
           taskDeploy:n=>`Deploying "${n}"`, taskEnable:n=>`Enabling "${n}"`, taskStop:n=>`Stopping "${n}"`, taskUninstall:n=>`Uninstalling "${n}"`,

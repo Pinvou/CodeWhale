@@ -824,6 +824,7 @@ export {
   etaSeconds,
   storeGuideState,
   libraryStatusOf,
+  libraryStateOf,
   filterStoreCards,
   MODEL_STATES,
   mergeModels,

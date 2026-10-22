@@ -444,7 +444,7 @@ const jaBase = {
           dualNoticeDownload:'ダウンロードはこの端末だけで完結します。直結ケーブルもセカンダリ機も不要です。',
           dualNoticeDeploy:'「デプロイ」時にセカンダリ機の管理 IP、ユーザー名、パスワードを一度だけ尋ねます。以降のネットワーク設定、パッケージ配布、ペアリング、重み配布、起動はすべて自動です。',
           libraryEmpty:'まだモデルをダウンロードしていません。モデルマーケットを見てみましょう',
-          statusRunning:'実行中', statusDeployed:'デプロイ済み', statusPending:'未デプロイ', statusIncomplete:'ダウンロードを続行', statusCleanupRequired:'クリーンアップが必要',
+          statusRunning:'実行中', statusDeployed:'デプロイ済み', statusPending:'未デプロイ', statusDownloaded:'ダウンロード済み・デプロイ待ち', statusIncomplete:'ダウンロードを続行', statusCleanupRequired:'クリーンアップが必要',
           deploy:'デプロイ', deploying:'デプロイ中…', redeploy:'再デプロイ', resumeDownload:'ダウンロードを続行', resumingDownload:'ダウンロードを続行中…',
           enable:'有効化', enabling:'有効化中…', stop:'停止', stopping:'停止中…', uninstall:'アンインストール', uninstalling:'アンインストール中…', continueCleanup:'クリーンアップを続行', cleaningUp:'クリーンアップ中…',
           taskDeploy:n=>`「${n}」をデプロイ`, taskEnable:n=>`「${n}」を有効化`, taskStop:n=>`「${n}」を停止`, taskUninstall:n=>`「${n}」をアンインストール`,
