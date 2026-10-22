@@ -2667,14 +2667,19 @@ impl EnginePool {
         // thinking control follows the detected foundation wire protocol; a
         // LocalVllm preset resolves provider from the preset arm instead, so
         // for those routes the kind feeds only the native served-window
-        // follow-up below. LocalVllm presets must probe too: discovery saves
+        // follow-up below — except Tachyon, which additionally flips the wire
+        // dialect (see below). LocalVllm presets must probe too: discovery saves
         // Ollama/LM Studio endpoints under that preset, and `/v1/models`
         // there never carries a window fact — without the kind probe the
         // native fetch below can never fire and the route keeps the 128K
-        // fallback while the monitor shows the real window. The probe result
-        // cannot flip the wire route for these presets (`provider()` resolves
-        // LocalVllm to "vllm" from the preset arm before ever consulting the
-        // probed kind), so a real vLLM classified `Vllm` is inert here.
+        // fallback while the monitor shows the real window. For LocalVllm the
+        // probe only flips the wire route when it identifies Tachyon
+        // (`provider()` follows the probed kind for the Tachyon dialect —
+        // its tier ladder differs, so riding the vllm arm would re-expose the
+        // 400-tier); a real vLLM classified `Vllm` is inert here.
+        // fork: 运行时模型供给(PinnedRuntime/RuntimeModelProvider)是本仓超集,
+        // 上游 #733 的 finalize 只做 session_model 赋值;这里的注入调用承载
+        // runtime_model_credential 与 provider 路由,必须先于端点探测。
         apply_prepared_runtime_model(&mut bridge, prepared);
         // A probe failure (service not started/timeout/auth failure) is
         // classified as generic, keeping the existing openai wire route. The
@@ -2712,22 +2717,25 @@ impl EnginePool {
         // engine loads B" chain break; only follow the served name on a
         // single-model server that does not expose the configured name.
         // Non-vLLM operator-owned routes do no name correction and adopt
-        // facts only when the configured name exactly hits the list
-        // (`adopts_probed_facts`) — a single-entry "borrowed name" returns
-        // facts belonging to another model and must not be misattributed.
-        // Cloud presets and coding_plan are not operator-owned and are not
-        // probed.
-        if !bridge.runtime_route_is_locked() {
-            let is_vllm_route = bridge.provider() == "vllm";
-            if let Some(model) = bridge.effective_model_owned() {
-                Self::adopt_probed_endpoint_facts(
-                    &mut bridge,
-                    model,
-                    is_vllm_route,
-                    pins_scheduled_model,
-                )
-                .await;
-            }
+        // facts only when the sent name is the served one
+        // (`adopts_probed_facts`): a kept multi-entry name trivially is
+        // (served == configured), while a single-entry "borrowed name"
+        // returns facts belonging to another model and must not be
+        // misattributed. Cloud presets and coding_plan are not
+        // operator-owned and are not probed.
+        // Tachyon rides the same served-name correction as vLLM: the wire
+        // family is identical (`/v1/models` listing, single-model rename),
+        // so a configured name that misses the served list gets the same
+        // rename/facts treatment instead of a hard model_not_found.
+        let is_vllm_route = matches!(bridge.provider().as_str(), "vllm" | "tachyon");
+        if let Some(model) = bridge.effective_model_owned() {
+            Self::adopt_probed_endpoint_facts(
+                &mut bridge,
+                model,
+                is_vllm_route,
+                pins_scheduled_model,
+            )
+            .await;
         }
         bridge
     }
