@@ -94,6 +94,19 @@ export function projectRemoteTasks(events, taskGroups = null) {
   return [...normalized, ...projected];
 }
 
+// Offline backups can split a task across batches/files, in either order. Keep
+// only the four facts the shared projection needs for attributed retention:
+// first submission, first authoritative terminal, selected receipt, first mode.
+// Selection delegates to the online join rather than inventing a second policy.
+export function collectRemoteRetentionEvidence(evidence, event) {
+  if (event.event_name !== "remote_control_event" || event.remote_projection) return;
+  const task = remoteTaskGroups([...(evidence.get(event.remote_task_key) || []), event])[0];
+  if (!task) return;
+  const mode = task.rows.find(row => ["assistant", "code"].includes(row.remote_mode));
+  const selected = [...new Set([task.submitted, task.authoritative, task.received, mode].filter(Boolean))];
+  if (selected.length) evidence.set(task.key, selected);
+}
+
 export function buildRemoteOverview(events, start, end, minimumSample = 30, countedTaskKeys = null, countedEvents = null, taskGroups = null) {
   const inWindow = event => time(event) >= start && time(event) <= end;
   const raw = namedBehaviorEvents(countedEvents || events, "remote_control_event").filter(inWindow);

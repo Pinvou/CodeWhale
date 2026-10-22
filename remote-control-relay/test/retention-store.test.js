@@ -7,6 +7,8 @@ import test from 'node:test';
 import { RetentionFacts, retentionDay } from '../retention-store.js';
 import { TelemetryStore, buildBehaviorOverview } from '../telemetry-service.js';
 import { backfillRetention } from '../scripts/backfill-retention.mjs';
+import { collectRemoteRetentionEvidence, projectRemoteTasks } from '../remote-telemetry.js';
+import { deletionSubjectHash, isSuccessfulCoreUserTask } from '../telemetry-primitives.js';
 
 const at = s => Date.parse(s + '+08:00');
 const DAY = 86400000;
@@ -14,6 +16,104 @@ const now = at('2026-10-20T10:00:00');
 const device = (id = 'fixture') => ({ device_id: id, hardware_hash:`fixture-hash-${id}`, device_token:`fixture-token-${id}`, hardware_source: 'installation_id', first_seen_at: at('2026-09-01T08:00:00') });
 const success = (time, id = 'fixture', extra = {}) => ({ device_id: id, event_id: `${id}_${time}`, attempt_id: `${id}_${time}`, event_name: 'task_finished', status: 'success', initiator_type: 'user', mode: 'assistant', occurred_at: at(time), received_at: at(time), ...extra });
 const fixtureStores = new Map();
+
+function remoteRetentionEvents() {
+  return ['2026-09-01T08:00:00', '2026-09-02T08:00:00'].flatMap((day, index) => {
+    const common = { event_name:'remote_control_event', remote_task_key:String(index).repeat(64),
+      remote_mode:'assistant', occurred_at:at(day), remote_outcome:'ok' };
+    return [
+      { ...common, device_id:'controller', identity_id:'controller', event_id:`remote_submit_${index}`,
+        remote_role:'controller', remote_stage:'task_submit', remote_task_status:'unknown' },
+      { ...common, device_id:'controlled', identity_id:'controlled', event_id:`remote_terminal_${index}`,
+        remote_role:'controlled', remote_stage:'task_terminal', remote_task_status:'success', occurred_at:at(day) + 1000 },
+    ];
+  });
+}
+
+test('backup-only remote retention joins across files without restoring raw events', async t => fixture(t, async dir => {
+  const devices = [device('controller'), device('controlled')];
+  writeFileSync(join(dir, 'devices.json'), JSON.stringify({devices}));
+  const initial = new RetentionFacts(dir, now); initial.flush();
+  const before = readFileSync(initial.path);
+  const events = remoteRetentionEvents();
+  const terminals = join(dir, 'terminals.jsonl'), submissions = join(dir, 'submissions.jsonl');
+  writeFileSync(terminals, [events[3], events[1]].map(JSON.stringify).join('\n'));
+  writeFileSync(submissions, [events[0], events[2], events[1]].map(JSON.stringify).join('\n'));
+  const options = {dataDir:dir, sources:[terminals, submissions], now};
+  const dry = await backfillRetention(options);
+  assert.equal(dry.after.d1.eligible_installations, 1);
+  assert.equal(dry.after.d1.retained_installations, 1);
+  assert.deepEqual(readFileSync(initial.path), before);
+  const applied = await backfillRetention({...options, apply:true});
+  assert.deepEqual(applied.after, dry.after);
+  assert.deepEqual([...new RetentionFacts(dir).rows.keys()], ['controller']);
+  assert.equal(existsSync(join(dir, 'behavior-events.jsonl')), false);
+  const saved = readFileSync(initial.path);
+  await backfillRetention({...options, apply:true});
+  assert.deepEqual(readFileSync(initial.path), saved);
+}));
+
+for (const boundary of ['B-only', 'deleted-A', 'deleted-B', 'ineligible-A', 'mismatched-A', 'future-A']) {
+  test(`remote backup retention excludes ${boundary}`, async t => fixture(t, async dir => {
+    const devices = [device('controller'), device('controlled')];
+    if (boundary === 'ineligible-A') devices[0].hardware_source = 'hostname';
+    writeFileSync(join(dir, 'devices.json'), JSON.stringify({devices}));
+    new RetentionFacts(dir, now).flush();
+    const pepper = 'fixture-retention-backfill-pepper';
+    if (boundary.startsWith('deleted-')) {
+      const id = boundary === 'deleted-A' ? 'controller' : 'controlled';
+      writeFileSync(join(dir, 'behavior-deletion-tombstones.json'), JSON.stringify({records:[{subject_hash:deletionSubjectHash(id, pepper)}]}));
+    }
+    const events = remoteRetentionEvents().filter(event => boundary !== 'B-only' || event.remote_role === 'controlled');
+    for (const event of events.filter(row => row.remote_role === 'controller')) {
+      if (boundary === 'mismatched-A') event.identity_id = 'controlled';
+      if (boundary === 'future-A') event.occurred_at = now + DAY;
+    }
+    const source = join(dir, 'backup.jsonl');
+    writeFileSync(source, events.map(JSON.stringify).join('\n'));
+    const result = await backfillRetention({dataDir:dir, sources:[source], now, pepper, apply:true});
+    assert.equal(result.after.d1.eligible_installations, 0);
+    assert.equal(new RetentionFacts(dir).rows.size, 0);
+  }));
+}
+
+test('remote backup retention spans local flush batches and matches online projection', async t => fixture(t, async dir => {
+  const devices = [device('controller'), device('controlled'), device('local')];
+  writeFileSync(join(dir, 'devices.json'), JSON.stringify({devices}));
+  new RetentionFacts(dir, now).flush();
+  const remote = remoteRetentionEvents();
+  const events = [remote[1], ...Array.from({length:1001}, (_, i) => success('2026-10-20T08:00:00', 'local', {event_id:`local_${i}`})), remote[0], remote[3], remote[2]];
+  const source = join(dir, 'backup.jsonl');
+  writeFileSync(source, events.map(JSON.stringify).join('\n'));
+  const online = new RetentionFacts(null, now);
+  online.observe(projectRemoteTasks(events), devices, now);
+  const result = await backfillRetention({dataDir:dir, sources:[source], now, apply:true});
+  assert.deepEqual(result.after, online.metrics(now));
+  assert.equal(result.after.d1.retained_installations, 1);
+  assert.equal(new RetentionFacts(dir).rows.has('controlled'), false);
+}));
+
+test('compact offline evidence preserves online terminal precedence and receipt ordering', () => {
+  const base = remoteRetentionEvents().slice(0, 2);
+  const extra = [
+    {...base[0], event_id:'mode_only', remote_stage:'connection', occurred_at:base[0].occurred_at - 1000},
+    {...base[0], event_id:'receipt_unknown', remote_stage:'result_received', remote_task_status:'unknown', occurred_at:base[0].occurred_at + 2000},
+    {...base[0], event_id:'receipt_success', remote_stage:'result_received', remote_task_status:'success', occurred_at:base[0].occurred_at + 3000},
+    {...base[0], event_id:'receipt_failed', remote_stage:'result_received', remote_task_status:'failed', occurred_at:base[0].occurred_at + 4000},
+  ];
+  for (const authoritative of [false, true]) {
+    const rows = [...(authoritative ? base : [base[0]]), ...extra];
+    for (let offset = 0; offset < rows.length; offset++) {
+      for (const ordered of [rows.slice(offset).concat(rows.slice(0, offset)), [...rows].reverse()]) {
+        const evidence = new Map();
+        for (const row of ordered) collectRemoteRetentionEvidence(evidence, row);
+        assert.ok([...evidence.values()].every(group => group.length <= 4));
+        const successes = events => projectRemoteTasks(events).filter(isSuccessfulCoreUserTask);
+        assert.deepEqual(successes([...evidence.values()].flat()), successes(rows));
+      }
+    }
+  }
+});
 function testStore(dir, pepper, options) {
   const store = new TelemetryStore(dir, pepper, options);
   fixtureStores.get(dir).add(store);
