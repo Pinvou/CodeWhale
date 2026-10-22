@@ -2330,6 +2330,22 @@ def _tool_plan_switch(args):
         }
     state, healthy = target.get("status"), target.get("healthy")
     ready = state == "running" and healthy is True
+    if target.get("managed") is not True and (ready or target.get("can_adopt") is not True):
+        can_adopt = target.get("can_adopt")
+        adoptable = target.get("managed") is False and can_adopt is True
+        read_only = target.get("managed") is False and can_adopt is False
+        return {
+            "summary": "%s%s，但尚未取得模型管理权；当前不能直接%s。" % (
+                card, "已在运行且健康" if ready else "仅被发现", "设为默认" if ready else "启用或切换"),
+            "data": {"ready": ready, "default_selected": active == runtime,
+                     "managed": target.get("managed"),
+                     "can_adopt": can_adopt if isinstance(can_adopt, bool) else None,
+                     "selection_permitted": False,
+                     "management_status": "adoption_required" if adoptable else "read_only" if read_only else "unconfirmed"},
+            "next": ("先说明接管会授予生命周期管理权并登记恢复意图；用户明确授权后用 cube_start_model 显式接管，再重新查询状态和切换计划。不要重装或执行旧脚本。" if adoptable else
+                     "此资源仅可观察，不能直接停止或设为默认；请在模型商店核实或修复标准部署，保留现有服务。" if read_only else
+                     "接管能力尚未核实；先重新查询模型与管理连接，不试探性提交启停、默认选择或安装。"),
+        }
     if active == runtime and ready:
         return {
             "summary": "%s 已是默认模型，且正在运行并通过健康检查，无需切换。" % card,
