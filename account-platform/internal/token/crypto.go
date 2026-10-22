@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	platformconfig "github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 )
 
@@ -71,7 +72,7 @@ func NewSecretProvider(config SecretProviderConfig) (SecretProvider, error) {
 		return nil, errors.New("dedicated CA configuration requires vault-transit mode")
 	}
 	if mode == "local" {
-		if environment == "production" || environment == "production-new" {
+		if platformconfig.IsProduction(environment) {
 			return nil, errors.New("production requires a KMS or Vault secret provider")
 		}
 		return NewLocalAESProvider(config.KeyID, config.LocalKey)
@@ -129,7 +130,7 @@ func NewRemoteEnvelopeProvider(environment, keyID, rawURL, token string) (*Remot
 	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || strings.TrimSpace(keyID) == "" || len(strings.TrimSpace(token)) < 32 {
 		return nil, ErrInvalidSecret
 	}
-	production := environment == "production" || environment == "production-new"
+	production := platformconfig.IsProduction(environment)
 	if (production && parsed.Scheme != "https") || (!production && parsed.Scheme != "https" && parsed.Scheme != "http") {
 		return nil, errors.New("remote secret provider requires HTTPS in production")
 	}

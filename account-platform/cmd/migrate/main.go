@@ -13,6 +13,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/accountschema"
 	"github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/Pinvou/pinvou3/account-platform/internal/simulatorschema"
 	"github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
@@ -31,7 +32,7 @@ type migrationEvidence struct {
 }
 
 func productionBackupEvidence(now time.Time) (string, string, string, error) {
-	if os.Getenv("PINVOU_DEPLOYMENT_ENVIRONMENT") != "production-new" {
+	if !config.IsProduction(os.Getenv("PINVOU_DEPLOYMENT_ENVIRONMENT")) {
 		return "", "", "", nil
 	}
 	id := strings.TrimSpace(os.Getenv("MIGRATION_BACKUP_EVIDENCE_ID"))

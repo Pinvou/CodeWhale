@@ -266,22 +266,7 @@ func main() {
 		runRequiredGovernanceSupervisor(ctx, stopWorker, &governanceStopped, governedWorkers.Run)
 	})
 	go observability.RunBackground(workerContext, "model-emergency-cancellation", token.NewEmergencyModelCancellationWorker(repository, service, 5*time.Second).Run)
-	ready := repository.Ping
-	if strings.EqualFold(cfg.Environment, "production") || strings.EqualFold(cfg.Environment, "production-new") {
-		ready = func(ctx context.Context) error {
-			if err := repository.Ping(ctx); err != nil {
-				return err
-			}
-			remaining, err := repository.SecretRotationRemaining(ctx)
-			if err != nil {
-				return err
-			}
-			if remaining != 0 {
-				return token.ErrSecretRotationPending
-			}
-			return nil
-		}
-	}
+	ready := tokenReadiness(cfg.Environment, repository.Ping, repository.SecretRotationRemaining)
 	handler := service.ManagementHandler(serviceCredential, verify)
 	handler = requestdeadline.TokenAdminMiddleware(handler, time.Now)
 	handler = token.TokenCredentialDeadlineMiddleware(handler)

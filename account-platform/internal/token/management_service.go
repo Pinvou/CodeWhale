@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 
@@ -148,7 +149,7 @@ func (p ProviderURLPolicy) Validate(rawURL string) error {
 	if err != nil || parsed.Scheme != "https" && parsed.Scheme != "http" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || !p.allowedHosts[strings.ToLower(parsed.Hostname())] {
 		return ErrInvalidSecret
 	}
-	if (p.environment == "production" || p.environment == "production-new") && parsed.Scheme != "https" {
+	if config.IsProduction(p.environment) && parsed.Scheme != "https" {
 		return ErrInvalidSecret
 	}
 	return nil
