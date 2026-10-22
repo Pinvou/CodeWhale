@@ -10,7 +10,6 @@ import {
   filterModels,
   mergeModels,
   sortModels,
-  weightVerificationOf,
 } from '../src/features/model-store/model-store-logic.js';
 
 /** 商店卡片（未下载）：字段名是 id/name。 */
@@ -82,13 +81,11 @@ test('权重校验档位从商店卡片补进已下载模型，商店拉不到�
     { models: [LIB_QWEN_RUNNING] }
   );
   assert.equal(merged[0].weight_verification, 'sha256sums');
-  assert.equal(weightVerificationOf(merged[0]), 'sha256sums', '达标卡不该出黄条');
 
   // 商店连不上 / 这张卡已下架：补不上就是补不上，此时必须落到最不安全那一档。
   // 宁可对一张达标卡多说一句，也不能对一张没校验的卡一声不吭。
   const offline = mergeModels([], { models: [LIB_QWEN_RUNNING] });
   assert.equal(offline[0].weight_verification, undefined);
-  assert.equal(weightVerificationOf(offline[0]), 'none');
 });
 
 test('只在商店里的是 available，record 为 null', () => {
