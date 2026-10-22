@@ -2066,12 +2066,24 @@ impl ModelManager {
             let snapshot = super::native_process::discover();
             if !snapshot.complete
                 || snapshot.processes.iter().any(|process| {
-                    process
+                    let fingerprint_match = process
                         .executable
                         .parent()
                         .and_then(std::path::Path::file_name)
                         .and_then(|p| p.to_str())
-                        == fingerprint.get(..8)
+                        == fingerprint.get(..8);
+                    if !fingerprint_match {
+                        return false;
+                    }
+                    // 同一引擎二进制被多张卡共用（两张驭光卡同指纹）：只有**属于
+                    // 本卡**的运行实例才拦（2026-10-22 用户实锤：Ornith 在跑时
+                    // 更新 Qwen 卡被误拦——纯脚本更新/卸载不碰引擎，跨引擎风险
+                    // 由 same_engine 检查单独把关）。归属无法确认（进程无
+                    // --model-id）的保守起见仍然拦。
+                    match process.model_id.as_deref() {
+                        None => true,
+                        Some(id) => Some(id) == Some(rec.model_name.as_str()),
+                    }
                 })
             {
                 return Err(ModelManagerError::new(format!(
