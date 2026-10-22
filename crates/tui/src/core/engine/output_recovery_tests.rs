@@ -1,4 +1,4 @@
-//! Exercise preservation through the real serial/parallel dispatch and fan-out.
+//! Exercise conditional preservation through all three dispatch/fan-out paths.
 
 use super::*;
 use crate::tools::spec::{ToolCapability, ToolContext, ToolSpec};
@@ -7,11 +7,38 @@ use std::sync::Arc;
 
 struct RecoveryFixture {
     parallel: bool,
+    chars: usize,
     rendezvous: Option<Arc<tokio::sync::Barrier>>,
 }
 
-fn fixture_output(tag: &str) -> String {
-    format!("{tag}:START\n{}\n{tag}:END 中文", "x".repeat(20_000))
+fn fixture_output(tag: &str, chars: usize) -> String {
+    format!("{tag}:START\n{}\n{tag}:END 中文", "x".repeat(chars))
+}
+
+#[derive(Clone, Copy)]
+enum DispatchCase {
+    Serial,
+    Parallel,
+    Envelope,
+}
+
+fn expected_output(case: DispatchCase, chars: usize, index: usize) -> String {
+    if matches!(case, DispatchCase::Envelope) {
+        ToolResult::json(&super::super::dispatch::ParallelToolResult {
+            results: (0..2)
+                .map(|index| super::super::dispatch::ParallelToolResultEntry {
+                    tool_name: "recovery_fixture".to_string(),
+                    success: true,
+                    content: fixture_output(&format!("call-{index}"), chars),
+                    error: None,
+                })
+                .collect(),
+        })
+        .expect("envelope DTO")
+        .content
+    } else {
+        fixture_output(&format!("call-{index}"), chars)
+    }
 }
 
 #[async_trait::async_trait]
@@ -42,11 +69,19 @@ impl ToolSpec for RecoveryFixture {
         }
         Ok(ToolResult::success(fixture_output(
             input["tag"].as_str().expect("fixture tag"),
+            self.chars,
         )))
     }
 }
 
-fn assert_dispatch_preserves_output(parallel: bool) {
+fn assert_dispatch_output(case: DispatchCase, chars: usize, needs_recovery: bool) {
+    let parallel = !matches!(case, DispatchCase::Serial);
+    let envelope = matches!(case, DispatchCase::Envelope);
+    let tool_name = if envelope {
+        MULTI_TOOL_PARALLEL_NAME
+    } else {
+        "recovery_fixture"
+    };
     let _env = lock_test_env();
     let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
     with_artifact_home(|home| {
@@ -71,16 +106,24 @@ fn assert_dispatch_preserves_output(parallel: bool) {
                 engine.active_route_limits = None;
                 assert_eq!(budget_128k(), 15_360);
 
-                // This output exceeds the model view but not adaptive/classic
-                // spillover. Only the turn-loop context-preservation wiring
-                // under test can publish its artifact before fan-out.
-                let mut unexecuted = ToolResult::success(fixture_output("preflight"));
-                assert!(view_128k("recovery_fixture", &unexecuted).needs_full_output_artifact);
+                // No fixture triggers adaptive/classic spillover. The large
+                // envelope is over budget only after its two inline children
+                // are combined. Only the turn-loop preservation connection
+                // can make those omitted bytes recoverable before fan-out.
+                if envelope {
+                    let child = ToolResult::success(fixture_output("call-0", chars));
+                    assert!(!view_128k("recovery_fixture", &child).needs_full_output_artifact);
+                }
+                let mut unexecuted = ToolResult::success(expected_output(case, chars, 0));
+                assert_eq!(
+                    view_128k(tool_name, &unexecuted).needs_full_output_artifact,
+                    needs_recovery,
+                );
                 assert!(
                     crate::tools::truncate::apply_spillover_with_artifact(
                         &mut unexecuted,
                         "preflight",
-                        "recovery_fixture",
+                        tool_name,
                         SESSION_6508,
                     )
                     .is_none()
@@ -91,6 +134,7 @@ fn assert_dispatch_preserves_output(parallel: bool) {
                 let mut registry = crate::tools::ToolRegistry::new(context.clone());
                 registry.register(Arc::new(RecoveryFixture {
                     parallel,
+                    chars,
                     rendezvous: parallel.then(|| Arc::new(tokio::sync::Barrier::new(2))),
                 }));
                 let mut catalog = registry.to_api_tools();
@@ -101,19 +145,28 @@ fn assert_dispatch_preserves_output(parallel: bool) {
                     crate::tui::approval::ApprovalMode::Suggest,
                 );
                 let mut active = policy.active_names.clone();
-                let count = if parallel { 2 } else { 1 };
+                let count = if parallel && !envelope { 2 } else { 1 };
                 let plans = (0..count)
                     .map(|index| ToolExecutionPlan {
                         index,
                         id: format!("recovery-{index}"),
-                        name: "recovery_fixture".to_string(),
-                        input: json!({"tag": format!("call-{index}")}),
+                        name: tool_name.to_string(),
+                        input: if envelope {
+                            json!({"tool_uses": (0..2).map(|child| json!({
+                                "recipient_name": "recovery_fixture",
+                                "parameters": {"tag": format!("call-{child}")},
+                            })).collect::<Vec<_>>()})
+                        } else {
+                            json!({"tag": format!("call-{index}")})
+                        },
                         caller: None,
                         interactive: false,
                         approval_required: false,
                         approval_description: String::new(),
                         approval_force_prompt: false,
-                        supports_parallel: parallel,
+                        // The envelope is a special branch in the serial arm,
+                        // distinct from ordinary parallel execution batches.
+                        supports_parallel: parallel && !envelope,
                         read_only: true,
                         detached_start: false,
                         resources: vec![],
@@ -158,12 +211,25 @@ fn assert_dispatch_preserves_output(parallel: bool) {
                         .terminal
                         .into_legacy_result()
                         .expect("fixture succeeded");
-                    let original = fixture_output(&format!("call-{index}"));
+                    let original = expected_output(case, chars, index);
                     assert_eq!(output.content, original);
                     let ui = completions[&outcome.id].as_ref().expect("UI completion");
                     assert_eq!(ui.content, output.content);
                     assert_eq!(ui.metadata, output.metadata);
-                    let view = view_128k("recovery_fixture", &output);
+                    let view = view_128k(tool_name, &output);
+                    if !needs_recovery {
+                        assert!(
+                            output
+                                .metadata
+                                .as_ref()
+                                .is_none_or(|metadata| metadata.get("artifact_id").is_none()),
+                            "complete dispatch output must not acquire an artifact",
+                        );
+                        assert_eq!(view.text, original);
+                        assert!(!view.needs_full_output_artifact);
+                        assert!(session_artifact_files(home).is_empty());
+                        continue;
+                    }
                     let reference =
                         output.metadata.as_ref().expect("preserved before fan-out")["artifact_id"]
                             .as_str()
@@ -190,17 +256,40 @@ fn assert_dispatch_preserves_output(parallel: bool) {
                         .expect("valid base64");
                     assert_eq!(bytes, original.as_bytes());
                 }
-                assert_eq!(session_artifact_files(home).len(), count);
+                assert_eq!(
+                    session_artifact_files(home).len(),
+                    if needs_recovery { count } else { 0 },
+                );
             });
     });
 }
 
 #[test]
 fn forkguard_turn_loop_serial_preserves_output_before_fanout() {
-    assert_dispatch_preserves_output(false);
+    assert_dispatch_output(DispatchCase::Serial, 20_000, true);
 }
 
 #[test]
 fn forkguard_turn_loop_parallel_preserves_output_before_fanout() {
-    assert_dispatch_preserves_output(true);
+    assert_dispatch_output(DispatchCase::Parallel, 20_000, true);
+}
+
+#[test]
+fn forkguard_turn_loop_envelope_preserves_output_before_fanout() {
+    assert_dispatch_output(DispatchCase::Envelope, 8_000, true);
+}
+
+#[test]
+fn forkguard_turn_loop_serial_keeps_complete_output_artifact_free() {
+    assert_dispatch_output(DispatchCase::Serial, 80, false);
+}
+
+#[test]
+fn forkguard_turn_loop_parallel_keeps_complete_output_artifact_free() {
+    assert_dispatch_output(DispatchCase::Parallel, 80, false);
+}
+
+#[test]
+fn forkguard_turn_loop_envelope_keeps_complete_output_artifact_free() {
+    assert_dispatch_output(DispatchCase::Envelope, 80, false);
 }
