@@ -8,6 +8,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const defaultCatalogPath = path.join(repositoryRoot, 'account-platform', 'deploy', 'authorization-entrypoints.json');
 const routePattern = /\b([A-Za-z][A-Za-z0-9_]*)\.(GET|POST|PUT|PATCH|DELETE|Any)\("([^"]+)"/g;
+const humanPermissionSources = Object.freeze([
+  'account-platform/internal/account/authorization.go',
+  'account-platform/internal/account/platform_roles.go',
+]);
 const scopePrefixes = Object.freeze({ personal: ['personal.'], platform: ['platform.'], organization: ['org.'], active: ['personal.', 'org.'] });
 
 function routeKey(item) {
@@ -54,7 +58,7 @@ async function knownHumanPermissions() {
   const directory = 'account-platform/migrations/account';
   const entries = await readdir(path.join(repositoryRoot, directory), { withFileTypes: true });
   const names = entries.filter(entry => entry.isFile() && entry.name.endsWith('.up.sql')).map(entry => `${directory}/${entry.name}`);
-  const texts = await Promise.all([...names, 'account-platform/internal/account/authorization.go'].map(source));
+  const texts = await Promise.all([...names, ...humanPermissionSources].map(source));
   const permissions = new Set();
   for (const match of texts.join('\n').matchAll(/["']((?:personal|platform|org)\.[a-z0-9._-]+)["']/g)) permissions.add(match[1]);
   return permissions;
@@ -244,7 +248,7 @@ async function discover(catalog) {
   const textBySource = new Map();
   const productionGo = [...(await productionGoSources('account-platform/internal')), ...(await productionGoSources('account-platform/cmd'))];
   const sources = new Set([
-    'account-platform/internal/account/authorization.go',
+    ...humanPermissionSources,
     ...productionGo.filter((relative) => relative.startsWith('account-platform/cmd/')),
     ...catalog.http_sources,
     ...catalog.tasks.map((item) => item.source),
@@ -287,7 +291,7 @@ export function validateCatalog(catalog, discovered, knownPermissions) {
   for (const relative of discoveredHTTPSourceSet) if (!registeredHTTPSourceSet.has(relative)) errors.push(`unregistered_http_source:${relative}`);
   for (const relative of registeredHTTPSourceSet) if (!discoveredHTTPSourceSet.has(relative)) errors.push(`stale_http_source:${relative}`);
   const constantValues = new Map();
-  const authorizationSource = discovered.textBySource.get('account-platform/internal/account/authorization.go') || '';
+  const authorizationSource = humanPermissionSources.map(relative => discovered.textBySource.get(relative) || '').join('\n');
   for (const match of authorizationSource.matchAll(/\b(Permission[A-Za-z0-9]+)\s*=\s*"([^"]+)"/g)) constantValues.set(match[1], match[2]);
 
   for (const route of discovered.routes) {

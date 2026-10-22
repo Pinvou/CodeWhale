@@ -3,6 +3,7 @@
   "http_sources": [
     "account-platform/cmd/event-relay/metrics.go",
     "account-platform/internal/account/service.go",
+    "account-platform/internal/account/platform_roles_http.go",
     "account-platform/internal/billing/service.go",
     "account-platform/internal/identityadapter/service.go",
     "account-platform/internal/paymentsim/service.go",

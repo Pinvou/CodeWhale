@@ -130,6 +130,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 		protected.GET("/v1/me/profile-change-requests/:request_id", s.requirePermission(PermissionPersonalProfileUpdate), httpserver.AdaptFunc(s.getProfileChange))
 	}
 	admin := protected.Group("/admin/v1")
+	s.registerPlatformRoleRoutes(admin)
 	admin.GET("/audit-logs", s.requirePermission(PermissionPlatformAuditRead), httpserver.AdaptFunc(s.adminAuditLogs))
 	admin.GET("/audit-logs/:audit_id", s.requirePermission(PermissionPlatformAuditRead), httpserver.AdaptFunc(s.adminAuditLog))
 	if s.auditExports != nil {

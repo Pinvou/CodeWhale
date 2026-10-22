@@ -1,3 +1,4 @@
+import { requirePlatformRoles, requirePlatformRoleBinding } from './platform-role-management.js';
 import { parseSystemStatusJSON } from './admin-system-status.js';
 import { parseUsageJSON, encodeUsageJSON } from './admin-usage-governance.js';
 import { parseFinanceJSON, encodeFinanceJSON, requireFinanceID, requirePaymentOrder, integerMoney } from './finance-contract.js';
@@ -308,6 +309,29 @@ export class AdminPlatformClient {
     const blob = await response.blob();
     if (!blob.size || blob.size > maxBytes || (length !== null && blob.size !== Number(length))) throw new Error('INVALID_AUDIT_EXPORT_DOWNLOAD');
     return blob;
+  }
+
+  async platformRoles(signal) {
+    return requirePlatformRoles(await this.request('account', '/admin/v1/roles', signal));
+  }
+  async platformRoleBindings(userID = '', signal) {
+    if (userID) requireFinanceID(userID);
+    const payload = await this.request('account', '/admin/v1/role-bindings' + (userID ? `?user_id=${encodeURIComponent(userID)}` : ''), signal);
+    if (!Array.isArray(payload?.items)) throw new Error('INVALID_ROLE_BINDINGS');
+    return payload.items.map(item => requirePlatformRoleBinding(item));
+  }
+  async grantPlatformRole(owner, body, signal) {
+    requireFinanceID(owner);
+    requireFinanceID(body?.user_id);
+    const result = await this.mutate('account', '/admin/v1/role-bindings', 'POST', body, body.idempotency_key, signal, 201);
+    return requirePlatformRoleBinding(result, { ...body, created_by: owner });
+  }
+  async revokePlatformRole(owner, bindingID, signal) {
+    requireFinanceID(owner);
+    requireFinanceID(bindingID);
+    const result = requirePlatformRoleBinding(await this.mutate('account', `/admin/v1/role-bindings/${bindingID}`, 'DELETE', undefined, '', signal, 200));
+    if (result.binding_id !== bindingID || !['REVOKED', 'EXPIRED'].includes(result.status) || result.status === 'REVOKED' && result.revoked_by !== owner) throw new Error('INVALID_ROLE_REVOKE_ACK');
+    return result;
   }
 
   users(searchOrFilters = '', signal, cursor = '') {

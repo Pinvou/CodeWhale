@@ -101,6 +101,8 @@ func buildPolicies() map[string]Policy {
 		"ACCOUNT_MEMBER_ADD":                            "platform.organizations.members.manage",
 		"ACCOUNT_MEMBER_REMOVE":                         "platform.organizations.members.manage",
 		"ACCOUNT_MEMBER_UNITS_REPLACE":                  "platform.organizations.members.manage",
+		"ACCOUNT_ROLE_BINDING_GRANT":                    "platform.roles.assign",
+		"ACCOUNT_ROLE_BINDING_REVOKE":                   "platform.roles.assign",
 		"ACCOUNT_MEMBER_ROLES_REPLACE":                  "platform.organizations.members.manage",
 		"ACCOUNT_ORGANIZATION_CREATE":                   "platform.organizations.create",
 		"ACCOUNT_ORGANIZATION_DELETE":                   "platform.organizations.delete",

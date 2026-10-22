@@ -1,0 +1,236 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Platform role administration",
+    "version": "1.0.0",
+    "description": "Restores ADM-05 under existing permissions, source/time/PII/high-privilege boundaries. Portal proxies these through authenticated session and CSRF. Unknown ACKs retain the original command; no replacement-key or cross-reload automatic retry."
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/admin/v1/roles": {
+      "get": {
+        "operationId": "adminPlatformRoles",
+        "x-required-permission": "platform.roles.read",
+        "responses": {
+          "200": {
+            "description": "Installed platform role definitions and delivered atomic permissions"
+          }
+        }
+      }
+    },
+    "/admin/v1/role-bindings": {
+      "get": {
+        "operationId": "adminPlatformRoleBindings",
+        "x-required-permission": "platform.roles.read",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "user_id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Optional exact target user; at most 500 platform associations."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Platform-only association projection"
+          }
+        }
+      },
+      "post": {
+        "operationId": "adminGrantPlatformRoleBinding",
+        "x-required-permission": "platform.roles.assign",
+        "x-command-type": "ACCOUNT_ROLE_BINDING_GRANT",
+        "x-approval-mode": "AUDIT_ONLY",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Grant"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Original grant current projection, including revoked/expired replay; no repeat write",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoleBinding"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "RECENT_AUTHENTICATION_REQUIRED is an explicit no-write first invocation rejection"
+          },
+          "403": {
+            "description": "Current human authority denied"
+          },
+          "409": {
+            "description": "ACCOUNT_CONFLICT for protected role, invalid scope/time or changed original intent"
+          }
+        }
+      }
+    },
+    "/admin/v1/role-bindings/{binding_id}": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "binding_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "delete": {
+        "operationId": "adminRevokePlatformRoleBinding",
+        "x-required-permission": "platform.roles.assign",
+        "x-command-type": "ACCOUNT_ROLE_BINDING_REVOKE",
+        "x-approval-mode": "AUDIT_ONLY",
+        "responses": {
+          "200": {
+            "description": "Authoritative revoked/expired projection; no role reactivation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoleBinding"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Current assign authority denied"
+          },
+          "409": {
+            "description": "Dedicated high privilege lifecycle required"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "Grant": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "user_id",
+          "role_code",
+          "idempotency_key"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "role_code": {
+            "type": "string"
+          },
+          "starts_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 120
+          },
+          "reason": {
+            "type": "string",
+            "description": "Trimmed, exact original reason. Temporary PII grants retain existing UTF-8 byte length 10..500 and recent-auth checks."
+          }
+        }
+      },
+      "RoleBinding": {
+        "type": "object",
+        "required": [
+          "binding_id",
+          "user_id",
+          "role_code",
+          "scope",
+          "starts_at",
+          "status",
+          "grant_source"
+        ],
+        "properties": {
+          "binding_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "user_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "role_code": {
+            "type": "string"
+          },
+          "scope": {
+            "const": "PLATFORM"
+          },
+          "starts_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "enum": [
+              "ACTIVE",
+              "SCHEDULED",
+              "EXPIRED",
+              "REVOKED"
+            ]
+          },
+          "grant_source": {
+            "type": "string"
+          },
+          "created_by": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revoked_by": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      }
+    }
+  }
+}

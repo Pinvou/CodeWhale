@@ -6,6 +6,7 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { accountPlatformCopy } from '../pinvou3-app/src/shared/account-platform-i18n.js';
 import { adminPlatformCopy } from '../pinvou3-app/src/shared/admin-platform-i18n.js';
+import { platformRoleCopy } from '../pinvou3-app/src/shared/platform-role-i18n.js';
 import { supportedLocales } from '../pinvou3-app/src/shared/supported-locales.js';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -15,6 +16,7 @@ const userInterfaceSources = [
   'pinvou3-app/src/features/account-platform/AccountPlatformPopover.jsx',
   'pinvou3-app/src/features/account-platform/AccountPlatformView.jsx',
   'pinvou3-app/src/features/account-platform/AdminPlatformView.jsx',
+  'pinvou3-app/src/features/account-platform/AdminRolesWorkspace.jsx',
   'pinvou3-app/src/app/account-main.jsx',
   'pinvou3-app/src/app/admin-main.jsx',
   'pinvou3-app/src/portal-session-handoff.html',
@@ -102,9 +104,20 @@ export function validateUserInterfaceSource(relative, source) {
   }
 }
 
-export async function builtJavaScript(root = portalStatic) {
+export function validatePlatformRoleUserInterfaceSource(source) {
+  const active = stripComments(source);
+  if (!/import\s*\{\s*platformRoleCopy\s*\}\s*from\s*['"]\.\.\/\.\.\/shared\/i18n\.js['"]/.test(active)
+    || !/\bconst\s+copy\s*=\s*platformRoleCopy\[language\]\s*;/.test(active)) {
+    throw new Error('i18n_platform_roles_source_mismatch');
+  }
+}
+
+const portalEntries = Object.freeze(['account.html', 'admin.html', 'portal-session-handoff.html']);
+
+export async function builtJavaScript(root = portalStatic, entries = portalEntries) {
   const pending = [];
-  for (const entry of ['account.html', 'admin.html', 'portal-session-handoff.html']) {
+  for (const entry of entries) {
+    if (!portalEntries.includes(entry)) throw new Error('i18n_artifact_entry_invalid');
     const html = await readFile(path.join(root, entry), 'utf8');
     for (const match of html.matchAll(/(?:src|href)=["']\/assets\/([^"']+\.js)["']/g)) pending.push(match[1]);
   }
@@ -158,6 +171,7 @@ export async function checkAccountPlatformI18n({ artifacts = true } = {}) {
   const catalogs = [
     ['account', accountPlatformCopy],
     ['admin', adminPlatformCopy],
+    ['platform-roles', platformRoleCopy],
   ];
   const validated = catalogs.map(([name, catalog]) => [name, validateCatalog(name, catalog)]);
   // The canonical handoff entry consumes this catalog directly. Vite emits
@@ -169,11 +183,17 @@ export async function checkAccountPlatformI18n({ artifacts = true } = {}) {
     || !handoff.includes('copy.sessionHandoff.')) throw new Error('i18n_handoff_source_mismatch');
   await validateIdentityTheme();
   for (const relative of userInterfaceSources) {
-    validateUserInterfaceSource(relative, await readFile(path.join(repositoryRoot, relative), 'utf8'));
+    const source = await readFile(path.join(repositoryRoot, relative), 'utf8');
+    validateUserInterfaceSource(relative, source);
+    if (relative.endsWith('/AdminRolesWorkspace.jsx')) validatePlatformRoleUserInterfaceSource(source);
   }
   if (artifacts) {
     const artifact = await builtJavaScript();
     for (const [name, strings] of validated) validateBuiltCatalog(name, strings, artifact);
+    // Role administration must ship through the actual admin entry graph;
+    // an account-only or stale unreferenced chunk cannot satisfy this check.
+    const adminArtifact = await builtJavaScript(portalStatic, ['admin.html']);
+    validateBuiltCatalog('platform-roles.admin', validated.find(([name]) => name === 'platform-roles')[1], adminArtifact);
   }
   return { catalogs: validated.length + 1, sources: userInterfaceSources.length };
 }

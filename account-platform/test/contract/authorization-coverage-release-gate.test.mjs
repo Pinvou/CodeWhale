@@ -22,7 +22,7 @@ async function rejectedMutation(mutate, expected) {
 
 test('authorization release gate classifies every HTTP task event callback and CLI entrypoint', async () => {
   const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
-  // The six existing Portal transports use Any, alongside the 380 verb-specific
+  // The six existing Portal transports use Any, alongside the 384 verb-specific
   // registrations. Keep the expected complete graph independent of its parser.
   const wildcardPaths = [
     '/api/account/*resource', '/api/token/*resource',
@@ -36,7 +36,46 @@ test('authorization release gate classifies every HTTP task event callback and C
   for (const route of wildcardPaths) assert.ok(portal.includes(`router.Any("${route}",`), `missing existing Portal transport ${route}`);
   // The real checker still rejects missing, stale, duplicate or mis-scoped
   // entries before returning these exact inventory sizes.
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 386, tasks: 32, events: 18, cli: 26 });
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 390, tasks: 32, events: 18, cli: 26 });
+});
+
+
+test('platform role management retains four exact human permission and AuditOnly bindings', async () => {
+  const source = 'account-platform/internal/account/platform_roles_http.go';
+  const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
+  assert.equal(catalog.http_sources.filter(item => item === source).length, 1);
+  assert.equal(catalog.http_policies.some(item => item.source === source), false);
+  const text = await readFile(new URL(`../../../${source}`, import.meta.url), 'utf8');
+  const routes = authorizationRoutes(source, text);
+  const expected = [
+    ['GET', '/roles', 'PermissionPlatformRolesRead', 'adminPlatformRoles'],
+    ['GET', '/role-bindings', 'PermissionPlatformRolesRead', 'adminPlatformRoleBindings'],
+    ['POST', '/role-bindings', 'PermissionPlatformRolesAssign', 'adminGrantPlatformRoleBinding', 'ACCOUNT_ROLE_BINDING_GRANT'],
+    ['DELETE', '/role-bindings/:binding_id', 'PermissionPlatformRolesAssign', 'adminRevokePlatformRoleBinding', 'ACCOUNT_ROLE_BINDING_REVOKE'],
+  ];
+  assert.equal(routes.length, expected.length);
+  for (const [method, routePath, permission, handler, policy] of expected) {
+    const matches = routes.filter(item => item.method === method && item.path === routePath);
+    assert.equal(matches.length, 1, `${method} ${routePath}`);
+    assert.equal(matches[0].receiver, 'admin');
+    const approval = policy ? `approvalpolicy.Require("${policy}", approvalpolicy.AuditOnly), ` : '';
+    assert.equal(matches[0].registration.trim(), `admin.${method}("${routePath}", s.requirePermission(${permission}), ${approval}httpserver.AdaptFunc(s.${handler}))`);
+  }
+  const service = await readFile(new URL('../../internal/account/service.go', import.meta.url), 'utf8');
+  const {code, masked} = goSource(service);
+  const groups = [...code.matchAll(/\badmin\s*:=\s*protected\.Group\("([^"]+)"\)/g)]
+    .filter(match => masked[match.index] !== ' ');
+  assert.deepEqual(groups.map(match => match[1]), ['/admin/v1']);
+  const registrations = [...code.matchAll(/\bs\.registerPlatformRoleRoutes\(admin\)/g)]
+    .filter(match => masked[match.index] !== ' ');
+  assert.equal(registrations.length, 1);
+  assert.ok(registrations[0].index > groups[0].index);
+  const definitions = await readFile(new URL('../../internal/account/platform_roles.go', import.meta.url), 'utf8');
+  assert.match(definitions, /\bPermissionPlatformRolesRead\s*=\s*"platform\.roles\.read"/);
+  assert.match(definitions, /\bPermissionPlatformRolesAssign\s*=\s*"platform\.roles\.assign"/);
+  await rejectedMutation(catalog => {
+    catalog.http_sources = catalog.http_sources.filter(item => item !== source);
+  }, /unregistered_http_source:account-platform\/internal\/account\/platform_roles_http\.go/);
 });
 
 test('usage waiver restores one human audit-only command and two distinct workload routes', async () => {

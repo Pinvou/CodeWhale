@@ -7,10 +7,11 @@ const root = path.resolve(import.meta.dirname, '../..');
 const read = relative => readFile(path.join(root, relative), 'utf8');
 
 test('audit export is server-generated, recently authenticated, redacted by default, and separately PII-authorized', async () => {
-  const [migration, service, roles, contract, ui] = await Promise.all([
+  const [migration, service, roles, roleValidation, contract, ui] = await Promise.all([
     read('migrations/account/000032_audit_export_protection.up.sql'),
     read('internal/account/audit_exports.go'),
     read('internal/account/role_bindings_admin.go'),
+    read('internal/account/platform_roles.go'),
     read('contracts/openapi/audit-export.json'),
     read('../pinvou3-app/src/features/account-platform/AdminPlatformView.jsx'),
   ]);
@@ -21,7 +22,9 @@ test('audit export is server-generated, recently authenticated, redacted by defa
   assert.match(service, /auditExportRecentAuth\s+= 15 \* time\.Minute/);
   assert.match(service, /PermissionPlatformAuditPIIExport/);
   assert.match(service, /subject_[\s\S]*hmacHex/);
-  assert.match(roles, /PLATFORM_AUDIT_PII_EXPORT[\s\S]*ExpiresAt[\s\S]*24\*time\.Hour/);
+  assert.match(roles, /if err = validatePlatformRoleGrant\(request, principal, validationNow\); err != nil/);
+  assert.match(roleValidation, /PLATFORM_AUDIT_PII_EXPORT[\s\S]*ExpiresAt[\s\S]*24\*time\.Hour/);
+  assert.match(roleValidation, /recentlyAuthenticated\(principal\.AuthenticatedAt, now\)/);
   assert.match(contract, /"\/admin\/v1\/audit-exports"\s*:/);
   assert.doesNotMatch(ui, /function exportAuditCSV/);
 });

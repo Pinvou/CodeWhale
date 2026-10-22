@@ -84,7 +84,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
 
     def run_main_fixture(self, *, existing_roles=False, user_objects=False, leftover=False,
                          owner_leftover=False, account_leftover=False, schema_leftover=False, provisioning_leftover=False, active_client=False, external_dependency=False,
-                         go_fail_phase=None, empty_phase=None, skipped_phase=None, missing_token_children=False):
+                         go_fail_phase=None, empty_phase=None, skipped_phase=None, missing_token_children=False, platform_role_evidence=None):
         writes, commands, phases, trace = [], [], [], []
         state = {"bootstrapped": False, "account_done": False, "owner_done": False, "schema_done": False, "provisioning_done": False, "retained_done": False}
 
@@ -140,6 +140,16 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                     for name in RUNNER.TOKEN_CHILD_REQUIRED:
                         events += [{"Action": "run", "Package": package, "Test": name + "/actual"},
                                    {"Action": "pass", "Package": package, "Test": name + "/actual"}]
+                if phase == "owner-account" and platform_role_evidence:
+                    name = "TestPlatformRoleManagementRuntimePostgres"
+                    if platform_role_evidence == "missing-root":
+                        events = [event for event in events if event.get("Test", "").split("/", 1)[0] != name]
+                    elif platform_role_evidence == "missing-children":
+                        events = [event for event in events if not event.get("Test", "").startswith(name + "/")]
+                    elif platform_role_evidence in {"skipped-root", "skipped-child"}:
+                        events.append({"Action": "skip", "Package": package, "Test": name + ("/actual" if platform_role_evidence == "skipped-child" else "")})
+                    else:
+                        raise AssertionError("unknown platform role evidence mutation")
                 if empty_phase == phase:
                     events = [{"Action": "pass", "Package": package}]
                 if skipped_phase == phase:
@@ -335,6 +345,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestProfileSessionRevocationRecoveryRuntimePostgres",
             "TestRegistrationCreateDispatchRuntimePostgres",
             "TestRegistrationIdentityRejectionRuntimePostgres",
+            "TestPlatformRoleManagementRuntimePostgres",
             "TestUserCodeLookupRuntimePostgres",
             "TestAuditSearchOriginalMigrationRuntimePostgres",
         })
@@ -414,6 +425,32 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                     ):
                         with self.assertRaises(RuntimeError):
                             RUNNER.verify_results(invalid, roots, package=package, require_children=True)
+
+    def test_platform_role_root_is_selected_and_requires_real_scoped_children(self):
+        name = "TestPlatformRoleManagementRuntimePostgres"
+        for evidence in ("missing-root", "missing-children", "skipped-root", "skipped-child"):
+            with self.subTest(main_evidence=evidence), self.assertRaises(RuntimeError):
+                self.run_main_fixture(platform_role_evidence=evidence)
+            self.assertEqual(self.fixture_phases, ["owner-account"])
+            self.assertEqual(self.fixture_writes, [])
+        self.run_main_fixture()
+        roots, package = RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        self.assertIn(name, roots)
+        self.assertIn(name, command[command.index("-run") + 1])
+        self.assertEqual(command[-1], "./internal/account")
+        valid = self.events(roots, package, children=True)
+        self.assertGreater(RUNNER.verify_results(valid, roots, package=package, require_children=True, exact_roots=True), 0)
+        invalid_cases = {
+            "missing-root": [event for event in valid if event.get("Test", "").split("/", 1)[0] != name],
+            "missing-children": [event for event in valid if not event.get("Test", "").startswith(name + "/")],
+            "skipped-root": valid + [{"Action": "skip", "Package": package, "Test": name}],
+            "skipped-child": valid + [{"Action": "skip", "Package": package, "Test": name + "/actual"}],
+            "wrong-package": [{**event, "Package": RUNNER.BILLING_PACKAGE} if event.get("Test", "").split("/", 1)[0] == name else event for event in valid],
+        }
+        for label, invalid in invalid_cases.items():
+            with self.subTest(case=label), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, roots, package=package, require_children=True, exact_roots=True)
 
     def test_registration_dispatch_root_requires_actual_completed_children(self):
         for name in ("TestRegistrationCreateDispatchRuntimePostgres", "TestRegistrationIdentityRejectionRuntimePostgres"):

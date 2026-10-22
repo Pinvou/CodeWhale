@@ -54,6 +54,7 @@ ACCOUNT_REQUIRED = {
     "TestProfileSessionRevocationRecoveryRuntimePostgres",
     "TestRegistrationCreateDispatchRuntimePostgres",
     "TestRegistrationIdentityRejectionRuntimePostgres",
+    "TestPlatformRoleManagementRuntimePostgres",
     "TestUserCodeLookupRuntimePostgres",
     "TestAuditSearchOriginalMigrationRuntimePostgres",
 }

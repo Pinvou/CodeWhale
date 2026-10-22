@@ -464,7 +464,20 @@ func (r *PostgresRepository) expireDirectRoleAssignment(ctx context.Context, bin
 	var userID uuid.UUID
 	var organizationID *uuid.UUID
 	var expiresAt time.Time
-	err = tx.QueryRow(ctx, `SELECT user_id,organization_id,expires_at FROM role_assignments WHERE id=$1 AND source<>'LEGACY_ROLE_BINDING' AND revoked_at IS NULL AND expires_at<=$2 FOR UPDATE`, bindingID, r.now()).Scan(&userID, &organizationID, &expiresAt)
+	// Closure and platform role writers take USER before assignment. Expiring an
+	// assignment also updates its authorization projection (and USER foreign-key
+	// locks), so it must join the same order before touching the assignment row.
+	err = tx.QueryRow(ctx, `SELECT user_id FROM role_assignments WHERE id=$1 AND source<>'LEGACY_ROLE_BINDING' AND revoked_at IS NULL AND expires_at<=$2`, bindingID, r.now()).Scan(&userID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, tx.Commit(ctx)
+	}
+	if err != nil {
+		return false, err
+	}
+	if _, err = tx.Exec(ctx, `SELECT id FROM users WHERE id=$1 FOR UPDATE`, userID); err != nil {
+		return false, err
+	}
+	err = tx.QueryRow(ctx, `SELECT user_id,organization_id,expires_at FROM role_assignments WHERE id=$1 AND source<>'LEGACY_ROLE_BINDING' AND revoked_at IS NULL AND expires_at<=$2 AND user_id=$3 FOR UPDATE`, bindingID, r.now(), userID).Scan(&userID, &organizationID, &expiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, tx.Commit(ctx)
 	}

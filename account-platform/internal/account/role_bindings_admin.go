@@ -25,7 +25,19 @@ func (r *PostgresRepository) AdminRoleBindings(ctx context.Context, userID, orga
 }
 
 func (r *PostgresRepository) AdminGrantRoleBinding(ctx context.Context, principal identity.Principal, request RoleBindingGrant) (RoleBinding, error) {
-	now := r.now()
+	return r.adminGrantRoleBinding(ctx, principal, request, false)
+}
+
+func (r *PostgresRepository) AdminGrantPlatformRoleBinding(ctx context.Context, principal identity.Principal, request RoleBindingGrant) (RoleBinding, error) {
+	if request.OrganizationID != nil || request.UnitID != nil {
+		return RoleBinding{}, ErrConflict
+	}
+	return r.adminGrantRoleBinding(ctx, principal, request, true)
+}
+
+func (r *PostgresRepository) adminGrantRoleBinding(ctx context.Context, principal identity.Principal, request RoleBindingGrant, platformOnly bool) (RoleBinding, error) {
+	explicitStartsAt := request.StartsAt != nil
+	now := r.now().UTC().Truncate(time.Microsecond)
 	request.RoleCode = strings.ToUpper(strings.TrimSpace(request.RoleCode))
 	request.IdempotencyKey = strings.TrimSpace(request.IdempotencyKey)
 	request.Reason = strings.TrimSpace(request.Reason)
@@ -35,32 +47,34 @@ func (r *PostgresRepository) AdminGrantRoleBinding(ctx context.Context, principa
 	if request.StartsAt == nil {
 		request.StartsAt = &now
 	} else {
-		value := request.StartsAt.UTC()
+		value := request.StartsAt.UTC().Truncate(time.Microsecond)
 		request.StartsAt = &value
 	}
 	if request.ExpiresAt != nil {
-		value := request.ExpiresAt.UTC()
+		value := request.ExpiresAt.UTC().Truncate(time.Microsecond)
 		request.ExpiresAt = &value
-		if !value.After(*request.StartsAt) || !value.After(now) {
-			return RoleBinding{}, ErrConflict
-		}
-	}
-	if request.RoleCode == "PLATFORM_AUDIT_PII_EXPORT" {
-		if request.ExpiresAt == nil || request.ExpiresAt.Sub(*request.StartsAt) > 24*time.Hour || len(request.Reason) < 10 || len(request.Reason) > 500 {
-			return RoleBinding{}, ErrConflict
-		}
-		if !recentlyAuthenticated(principal.AuthenticatedAt, now) {
-			return RoleBinding{}, ErrRecentAuthenticationRequired
-		}
+
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return RoleBinding{}, err
 	}
 	defer tx.Rollback(ctx)
+	// Serialize one admin grant key across target/scope namespaces. Serializable
+	// predicate reads also fail closed if a waiter began before the winning commit.
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "account:admin-role-grant:"+request.IdempotencyKey); err != nil {
+		return RoleBinding{}, err
+	}
 	actorID, err := adminActorID(ctx, tx, principal)
 	if err != nil {
 		return RoleBinding{}, err
+	}
+	if platformOnly {
+		actor, authErr := lockPlatformRoleWriter(ctx, tx, principal, request.UserID, true)
+		if authErr != nil {
+			return RoleBinding{}, authErr
+		}
+		actorID = &actor
 	}
 	var userStatus, scope string
 	var assignable bool
@@ -78,27 +92,34 @@ func (r *PostgresRepository) AdminGrantRoleBinding(ctx context.Context, principa
 		return RoleBinding{}, err
 	}
 	// Super administrator lifecycle and last-administrator protection belong to APT-007.
-	if !assignable || request.RoleCode == "PLATFORM_SUPER_ADMIN" || request.RoleCode == "OWNER" {
+	if !assignable || request.RoleCode == "PLATFORM_SUPER_ADMIN" || request.RoleCode == "OWNER" || platformOnly && scope != "PLATFORM" {
 		return RoleBinding{}, ErrConflict
 	}
 	if scope == "PERSONAL" {
 		return RoleBinding{}, ErrConflict
 	}
+	// Use the existing assignment and its transactionally written audit facts to
+	// compare the complete original intent, including cross-subject/scope replays.
+	existing, found, err := adminRoleGrantByKey(ctx, tx, request.IdempotencyKey)
+	if err != nil {
+		return RoleBinding{}, err
+	}
+	if found {
+		if err = matchAdminRoleGrantReplay(ctx, tx, existing, principal, request, actorID, explicitStartsAt); err != nil {
+			return RoleBinding{}, err
+		}
+		return existing, tx.Commit(ctx)
+	}
+	validationNow := now
+	if platformOnly {
+		validationNow = time.Now().UTC()
+	}
+	if err = validatePlatformRoleGrant(request, principal, validationNow); err != nil {
+		return RoleBinding{}, err
+	}
 	if scope == "PLATFORM" {
 		if request.OrganizationID != nil || request.UnitID != nil {
 			return RoleBinding{}, ErrConflict
-		}
-		var existingID uuid.UUID
-		err := tx.QueryRow(ctx, `SELECT id FROM role_assignments WHERE user_id=$1 AND organization_id IS NULL AND idempotency_key=$2`, request.UserID, request.IdempotencyKey).Scan(&existingID)
-		if err == nil {
-			item, err := roleBindingByID(ctx, tx, existingID)
-			if err != nil {
-				return RoleBinding{}, err
-			}
-			return item, tx.Commit(ctx)
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return RoleBinding{}, err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE role_assignments SET revoked_at=expires_at WHERE user_id=$1 AND role_code=$2 AND organization_id IS NULL AND revoked_at IS NULL AND expires_at<=$3`, request.UserID, request.RoleCode, now); err != nil {
 			return RoleBinding{}, err
@@ -132,11 +153,7 @@ func (r *PostgresRepository) AdminGrantRoleBinding(ctx context.Context, principa
 	} else if err != nil {
 		return RoleBinding{}, err
 	}
-	if existing, found, err := roleBindingByIdempotencyKey(ctx, tx, membershipID, request.IdempotencyKey); err != nil {
-		return RoleBinding{}, err
-	} else if found {
-		return existing, tx.Commit(ctx)
-	}
+
 	if request.UnitID != nil {
 		var exists bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM organization_units WHERE id=$1 AND organization_id=$2 AND status='ACTIVE')`, *request.UnitID, *request.OrganizationID).Scan(&exists); err != nil {
@@ -161,7 +178,7 @@ func (r *PostgresRepository) AdminGrantRoleBinding(ctx context.Context, principa
 	if err != nil {
 		return RoleBinding{}, err
 	}
-	if err := appendAdminAudit(ctx, tx, actorID, principal, request.OrganizationID, "admin.role.binding.grant", "role_binding", bindingID.String(), map[string]any{"user_id": request.UserID, "role_code": request.RoleCode, "unit_id": request.UnitID, "starts_at": request.StartsAt, "expires_at": request.ExpiresAt}); err != nil {
+	if err := appendAdminAudit(ctx, tx, actorID, principal, request.OrganizationID, "admin.role.binding.grant", "role_binding", bindingID.String(), map[string]any{"user_id": request.UserID, "role_code": request.RoleCode, "unit_id": request.UnitID, "starts_at": request.StartsAt, "expires_at": request.ExpiresAt, "reason": request.Reason}); err != nil {
 		return RoleBinding{}, err
 	}
 	if err := appendOutbox(ctx, tx, "account.role-binding.changed.v1", bindingID, version, map[string]any{"organization_id": request.OrganizationID, "user_id": request.UserID, "binding_id": bindingID, "status": "GRANTED", "authorization_cache_invalidated": true}); err != nil {
@@ -175,6 +192,12 @@ func (r *PostgresRepository) AdminGrantRoleBinding(ctx context.Context, principa
 }
 
 func (r *PostgresRepository) AdminRevokeRoleBinding(ctx context.Context, principal identity.Principal, bindingID uuid.UUID) (RoleBinding, error) {
+	return r.adminRevokeRoleBinding(ctx, principal, bindingID, false)
+}
+func (r *PostgresRepository) AdminRevokePlatformRoleBinding(ctx context.Context, principal identity.Principal, bindingID uuid.UUID) (RoleBinding, error) {
+	return r.adminRevokeRoleBinding(ctx, principal, bindingID, true)
+}
+func (r *PostgresRepository) adminRevokeRoleBinding(ctx context.Context, principal identity.Principal, bindingID uuid.UUID, platformOnly bool) (RoleBinding, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return RoleBinding{}, err
@@ -183,6 +206,19 @@ func (r *PostgresRepository) AdminRevokeRoleBinding(ctx context.Context, princip
 	actorID, err := adminActorID(ctx, tx, principal)
 	if err != nil {
 		return RoleBinding{}, err
+	}
+	if platformOnly {
+		var target uuid.UUID
+		if err = tx.QueryRow(ctx, `SELECT ra.user_id FROM role_assignments ra JOIN roles ro ON ro.code=ra.role_code WHERE ra.id=$1 AND ro.scope='PLATFORM' AND ra.organization_id IS NULL AND ra.unit_id IS NULL`, bindingID).Scan(&target); errors.Is(err, pgx.ErrNoRows) {
+			return RoleBinding{}, ErrNotFound
+		} else if err != nil {
+			return RoleBinding{}, err
+		}
+		actor, authErr := lockPlatformRoleWriter(ctx, tx, principal, target, false)
+		if authErr != nil {
+			return RoleBinding{}, authErr
+		}
+		actorID = &actor
 	}
 	var item RoleBinding
 	var source string
@@ -200,7 +236,7 @@ FROM role_assignments ra JOIN roles ro ON ro.code=ra.role_code WHERE ra.id=$1 FO
 	if err != nil {
 		return RoleBinding{}, err
 	}
-	if !assignable || item.RoleCode == "PLATFORM_SUPER_ADMIN" || item.RoleCode == "OWNER" {
+	if !assignable || item.RoleCode == "PLATFORM_SUPER_ADMIN" || item.RoleCode == "OWNER" || platformOnly && (item.Scope != "PLATFORM" || item.OrganizationID != nil || item.UnitID != nil) {
 		return RoleBinding{}, ErrConflict
 	}
 	if item.RevokedAt != nil {
