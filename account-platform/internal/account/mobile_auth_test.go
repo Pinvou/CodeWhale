@@ -251,7 +251,7 @@ func (f *mobileAuthRepositoryFake) CommitRegistration(_ context.Context, operati
 func (*mobileAuthRepositoryFake) ScheduleRegistrationRetry(context.Context, uuid.UUID, string) error {
 	return nil
 }
-func (f *mobileAuthRepositoryFake) CompensatePreIdentityRegistration(_ context.Context, _ uuid.UUID, code string) error {
+func (f *mobileAuthRepositoryFake) CompensatePreIdentityRegistration(_ context.Context, _ uuid.UUID, code string, _ int64) error {
 	f.operation.Status, f.operation.LastErrorCode = "COMPENSATED", code
 	return nil
 }
@@ -323,6 +323,16 @@ func (*identityProvisionerFake) FindMobileUserByRegistrationOperation(context.Co
 	return "", false, nil
 }
 
+func (f *identityProvisionerFake) CreateMobileUserFirstAttempt(ctx context.Context, id uuid.UUID, username, mobile, handle, policy string) (string, error) {
+	return f.CreateMobileUser(ctx, id, username, mobile, handle, policy)
+}
+func (f *mobileAuthRepositoryFake) MarkRegistrationCreateAttempted(context.Context, uuid.UUID) (bool, int64, error) {
+	first := f.operation.IdentityCreateAttemptedAt == nil
+	now := time.Now()
+	f.operation.IdentityCreateAttemptedAt = &now
+	f.operation.Version++
+	return first, f.operation.Version, nil
+}
 func (f *identityProvisionerFake) CreateMobileUser(_ context.Context, _ uuid.UUID, username, mobile, _, _ string) (string, error) {
 	f.createCalls++
 	f.username = username

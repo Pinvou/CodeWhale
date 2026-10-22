@@ -1002,6 +1002,16 @@
         "file": "900007_identity_recovery_claims.up.sql",
         "version": 900007,
         "sha256": "4dfba349debeb57f14fc9b2b77a2b4ad8a913e5533ec2cea62b6f0f0feb539ac"
+      },
+      {
+        "file": "900008_registration_create_dispatch.down.sql",
+        "version": 900008,
+        "sha256": "4d19d7ec30faa0064970635c065e60b2aa5d5e3f7011032f2d8120a246d327a5"
+      },
+      {
+        "file": "900008_registration_create_dispatch.up.sql",
+        "version": 900008,
+        "sha256": "016367fffffcb4b994ab4ac64840813fa19e99c45ef209e938d85024e4bb5ff9"
       }
     ],
     "billing": [

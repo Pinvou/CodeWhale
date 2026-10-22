@@ -307,6 +307,9 @@ type profileIdentityFake struct {
 func (*profileIdentityFake) ValidateMobileUser(context.Context, uuid.UUID, string, string, string, string) error {
 	return nil
 }
+func (*profileIdentityFake) CreateMobileUserFirstAttempt(context.Context, uuid.UUID, string, string, string, string) (string, error) {
+	return "", errors.New("unexpected registration create")
+}
 func (*profileIdentityFake) CreateMobileUser(context.Context, uuid.UUID, string, string, string, string) (string, error) {
 	return "", nil
 }

@@ -59,26 +59,27 @@ type SMSChallenge struct {
 }
 
 type RegistrationOperation struct {
-	RecoveryGeneration    int64      `json:"-"`
-	RecoveryLeaseUntil    *time.Time `json:"-"`
-	ID                    uuid.UUID  `json:"registration_operation_id"`
-	CandidateUserID       uuid.UUID  `json:"-"`
-	QueryTokenHash        []byte     `json:"-"`
-	RequestFingerprint    []byte     `json:"-"`
-	Username              string     `json:"-"`
-	Mobile                string     `json:"-"`
-	ChallengeID           uuid.UUID  `json:"-"`
-	PasswordPolicyVersion string     `json:"-"`
-	IdentitySubject       string     `json:"-"`
-	UserID                *uuid.UUID `json:"user_id,omitempty"`
-	UserCode              string     `json:"user_code,omitempty"`
-	Status                string     `json:"status"`
-	Version               int64      `json:"-"`
-	IdentityCreatedAt     *time.Time `json:"-"`
-	NextRetryAt           time.Time  `json:"next_retry_at"`
-	LastErrorCode         string     `json:"reason,omitempty"`
-	CreatedAt             time.Time  `json:"-"`
-	UpdatedAt             time.Time  `json:"updated_at"`
+	IdentityCreateAttemptedAt *time.Time `json:"-"`
+	RecoveryGeneration        int64      `json:"-"`
+	RecoveryLeaseUntil        *time.Time `json:"-"`
+	ID                        uuid.UUID  `json:"registration_operation_id"`
+	CandidateUserID           uuid.UUID  `json:"-"`
+	QueryTokenHash            []byte     `json:"-"`
+	RequestFingerprint        []byte     `json:"-"`
+	Username                  string     `json:"-"`
+	Mobile                    string     `json:"-"`
+	ChallengeID               uuid.UUID  `json:"-"`
+	PasswordPolicyVersion     string     `json:"-"`
+	IdentitySubject           string     `json:"-"`
+	UserID                    *uuid.UUID `json:"user_id,omitempty"`
+	UserCode                  string     `json:"user_code,omitempty"`
+	Status                    string     `json:"status"`
+	Version                   int64      `json:"-"`
+	IdentityCreatedAt         *time.Time `json:"-"`
+	NextRetryAt               time.Time  `json:"next_retry_at"`
+	LastErrorCode             string     `json:"reason,omitempty"`
+	CreatedAt                 time.Time  `json:"-"`
+	UpdatedAt                 time.Time  `json:"updated_at"`
 }
 
 type RegistrationResult struct {
@@ -111,7 +112,8 @@ type MobileAuthRepository interface {
 	MarkRegistrationIdentityCreated(context.Context, uuid.UUID, string) error
 	CommitRegistration(context.Context, uuid.UUID, string) (RegistrationOperation, error)
 	ScheduleRegistrationRetry(context.Context, uuid.UUID, string) error
-	CompensatePreIdentityRegistration(context.Context, uuid.UUID, string) error
+	MarkRegistrationCreateAttempted(context.Context, uuid.UUID) (bool, int64, error)
+	CompensatePreIdentityRegistration(context.Context, uuid.UUID, string, int64) error
 }
 
 type SMSRateLimitError struct {
@@ -488,14 +490,31 @@ func (s *MobileAuthService) resumeRegistration(ctx context.Context, operation Re
 			return RegistrationResult{}, err
 		}
 		subject, found, err := s.identities.FindMobileUserByRegistrationOperation(ctx, operation.ID)
+		var firstAttempt bool
+		var attemptVersion int64
 		if err == nil && !found {
-			subject, err = s.identities.CreateMobileUser(ctx, operation.ID, operation.Username, operation.Mobile, "", operation.PasswordPolicyVersion)
+			firstAttempt, attemptVersion, err = s.repository.MarkRegistrationCreateAttempted(ctx, operation.ID)
+			if err == nil && firstAttempt {
+				subject, err = s.identities.CreateMobileUserFirstAttempt(ctx, operation.ID, operation.Username, operation.Mobile, "", operation.PasswordPolicyVersion)
+			} else if err == nil {
+				// A missing lookup is not proof that the original dispatched call
+				// failed. Only the durable first grant may enter remote creation.
+				err = ErrIdentityCreateUnconfirmed
+			}
 		}
 		if err != nil {
-			if errors.Is(err, ErrPasswordReferenceInvalid) {
-				_ = s.repository.CompensatePreIdentityRegistration(context.WithoutCancel(ctx), operation.ID, "PASSWORD_REFERENCE_EXPIRED")
-				operation, _ = s.repository.RegistrationOperation(context.WithoutCancel(ctx), operation.ID)
-				return registrationResult(operation), ErrRegistrationRestart
+			if errors.Is(err, ErrIdentityCreateNotDispatched) && firstAttempt && attemptVersion > 0 {
+				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+				compensateErr := s.repository.CompensatePreIdentityRegistration(cleanupCtx, operation.ID, "IDENTITY_CREATE_NOT_DISPATCHED", attemptVersion)
+				if compensateErr == nil {
+					updated, readErr := s.repository.RegistrationOperation(cleanupCtx, operation.ID)
+					cancel()
+					if readErr != nil {
+						return RegistrationResult{}, readErr
+					}
+					return registrationResult(updated), ErrRegistrationRestart
+				}
+				cancel()
 			}
 			_ = s.repository.ScheduleRegistrationRetry(context.WithoutCancel(ctx), operation.ID, "IDENTITY_UNAVAILABLE")
 			operation, _ = s.repository.RegistrationOperation(context.WithoutCancel(ctx), operation.ID)

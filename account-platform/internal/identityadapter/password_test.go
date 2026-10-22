@@ -93,7 +93,7 @@ func TestPasswordReferenceBindsRegistrationAndCreatesExactlyOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		subject, createErr := vault.CreateMobileUser(context.Background(), operationID, "", reference.PolicyVersion, "pinvou", "+8613800138000")
+		subject, createErr := vault.CreateMobileUserFirstAttempt(context.Background(), operationID, "", reference.PolicyVersion, "pinvou", "+8613800138000", true)
 		if createErr != nil || subject != "identity-subject" {
 			t.Fatalf("subject=%q err=%v", subject, createErr)
 		}
@@ -117,8 +117,12 @@ func TestExpiredPasswordReferenceCannotCreateIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	operationID := uuid.New()
+	if err := vault.ValidateReference(operationID, reference.Handle, reference.PolicyVersion, "pinvou", "+8613800138000"); err != nil {
+		t.Fatal(err)
+	}
 	now = now.Add(16 * time.Minute)
-	if _, err := vault.CreateMobileUser(context.Background(), uuid.New(), reference.Handle, reference.PolicyVersion, "pinvou", "+8613800138000"); !errors.Is(err, ErrReferenceInvalid) {
+	if _, err := vault.CreateMobileUserFirstAttempt(context.Background(), operationID, reference.Handle, reference.PolicyVersion, "pinvou", "+8613800138000", true); !errors.Is(err, ErrCreateNotDispatched) {
 		t.Fatalf("expired reference=%v", err)
 	}
 }

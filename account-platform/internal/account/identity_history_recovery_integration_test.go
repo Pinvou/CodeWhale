@@ -90,7 +90,7 @@ func TestIdentityRecoveryClaimsRuntimePostgres(t *testing.T) {
 			func() error { return r.MarkRegistrationIdentityCreated(oldCtx, id, "controlled-subject") },
 			func() error { _, err := r.CommitRegistration(oldCtx, id, "https://identity.example.test"); return err },
 			func() error { return r.ScheduleRegistrationRetry(oldCtx, id, "STALE") },
-			func() error { return r.CompensatePreIdentityRegistration(oldCtx, id, "STALE") },
+			func() error { return r.CompensatePreIdentityRegistration(oldCtx, id, "STALE", 1) },
 		}
 		for i, write := range writes {
 			if err := write(); !errors.Is(err, ErrIdentityRecoveryClaimLost) {

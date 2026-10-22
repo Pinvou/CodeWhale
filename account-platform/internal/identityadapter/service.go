@@ -134,6 +134,7 @@ func (s *Service) precheckPassword(w http.ResponseWriter, r *http.Request) {
 }
 
 type registrationReferenceRequest struct {
+	FirstAttempt            *bool     `json:"first_attempt,omitempty"`
 	RegistrationOperationID uuid.UUID `json:"registration_operation_id"`
 	PasswordHandle          string    `json:"password_handle"`
 	PasswordPolicyVersion   string    `json:"password_policy_version"`
@@ -160,7 +161,11 @@ func (s *Service) createMobileUser(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "a complete JSON request is required", httpserver.RequestID(r.Context()))
 		return
 	}
-	subject, err := s.vault.CreateMobileUser(r.Context(), body.RegistrationOperationID, body.PasswordHandle, body.PasswordPolicyVersion, body.Username, body.Mobile)
+	if body.FirstAttempt == nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "explicit registration dispatch attestation is required", httpserver.RequestID(r.Context()))
+		return
+	}
+	subject, err := s.vault.CreateMobileUserFirstAttempt(r.Context(), body.RegistrationOperationID, body.PasswordHandle, body.PasswordPolicyVersion, body.Username, body.Mobile, *body.FirstAttempt)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -211,6 +216,10 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusBadRequest, "PASSWORD_EDGE_SPACE_NOT_ALLOWED", "password must not start or end with a space"
 	case errors.Is(err, ErrPasswordInvalid):
 		status, code, message = http.StatusBadRequest, "PASSWORD_INVALID", "password must be 8 to 128 printable ASCII characters and contain a letter and a digit"
+	case errors.Is(err, ErrCreateNotDispatched):
+		status, code, message = http.StatusGone, "IDENTITY_CREATE_NOT_DISPATCHED", "registration creation was fenced before dispatch"
+	case errors.Is(err, ErrCreateUnconfirmed):
+		status, code, message = http.StatusServiceUnavailable, "IDENTITY_CREATE_UNCONFIRMED", "registration creation requires correlation recovery"
 	case errors.Is(err, ErrReferenceInvalid):
 		status, code, message = http.StatusGone, "PASSWORD_REFERENCE_INVALID", "the password precheck has expired; restart registration"
 	case errors.Is(err, ErrReferenceConflict):

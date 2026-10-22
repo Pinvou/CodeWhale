@@ -17,10 +17,12 @@ import (
 const PasswordPolicyVersion = "user-v1"
 
 var (
-	ErrPasswordInvalid   = errors.New("password does not satisfy the active policy")
-	ErrPasswordEdgeSpace = errors.New("password must not start or end with a space")
-	ErrReferenceInvalid  = errors.New("password reference is invalid or expired")
-	ErrReferenceConflict = errors.New("password reference is bound to different registration data")
+	ErrPasswordInvalid     = errors.New("password does not satisfy the active policy")
+	ErrPasswordEdgeSpace   = errors.New("password must not start or end with a space")
+	ErrReferenceInvalid    = errors.New("password reference is invalid or expired")
+	ErrCreateNotDispatched = errors.New("registration create was fenced before dispatch")
+	ErrCreateUnconfirmed   = errors.New("registration create may have been dispatched")
+	ErrReferenceConflict   = errors.New("password reference is bound to different registration data")
 )
 
 // ValidatePrivilegedPassword applies the stronger policy used by bootstrap and
@@ -126,6 +128,8 @@ type passwordRecord struct {
 }
 
 type operationPasswordBinding struct {
+	dispatched  bool
+	cancelled   bool
 	fingerprint [32]byte
 	expiresAt   time.Time
 	username    string
@@ -142,14 +146,15 @@ const MaximumPasswordReferenceCapacity = 65536
 var ErrPasswordReferenceCapacity = errors.New("password reference capacity reached")
 
 type PasswordVault struct {
-	mu         sync.Mutex
-	records    map[string]*passwordRecord
-	operations map[uuid.UUID]operationPasswordBinding
-	hmacKey    []byte
-	directory  UserDirectory
-	now        func() time.Time
-	ttl        time.Duration
-	capacity   int
+	operationsMu sync.Mutex
+	mu           sync.Mutex
+	records      map[string]*passwordRecord
+	operations   map[uuid.UUID]operationPasswordBinding
+	hmacKey      []byte
+	directory    UserDirectory
+	now          func() time.Time
+	ttl          time.Duration
+	capacity     int
 }
 
 func NewPasswordVault(hmacKey []byte, directory UserDirectory) (*PasswordVault, error) {
@@ -231,12 +236,15 @@ func (v *PasswordVault) ValidateReference(operationID uuid.UUID, handle, policyV
 	if operationID == uuid.Nil {
 		return nil
 	}
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	v.removeExpiredLocked()
+	v.operationsMu.Lock()
+	defer v.operationsMu.Unlock()
+	v.removeExpiredOperationsLocked()
 	if existing, ok := v.operations[operationID]; ok {
 		if existing.username != username || existing.mobile != mobile || !hmac.Equal(existing.fingerprint[:], binding.fingerprint[:]) {
 			return ErrReferenceConflict
+		}
+		if existing.cancelled {
+			return ErrReferenceInvalid
 		}
 		return nil
 	}
@@ -244,25 +252,41 @@ func (v *PasswordVault) ValidateReference(operationID uuid.UUID, handle, policyV
 	return nil
 }
 
+// Legacy callers have no durable first-dispatch attestation. They can recover
+// an already correlated identity, but cannot initiate a new remote mutation.
 func (v *PasswordVault) CreateMobileUser(ctx context.Context, operationID uuid.UUID, handle, policyVersion, username, mobile string) (string, error) {
+	return v.CreateMobileUserFirstAttempt(ctx, operationID, handle, policyVersion, username, mobile, false)
+}
+
+func (v *PasswordVault) CreateMobileUserFirstAttempt(ctx context.Context, operationID uuid.UUID, handle, policyVersion, username, mobile string, firstAttempt bool) (string, error) {
 	if operationID == uuid.Nil {
 		return "", ErrReferenceInvalid
+	}
+	if err := v.registrationDispatchFence(operationID, handle, policyVersion, username, mobile, firstAttempt); err != nil {
+		return "", err
 	}
 	if subject, found, err := v.directory.FindMobileUserByRegistrationOperation(ctx, operationID); err != nil || found {
 		return subject, err
 	}
+	if !firstAttempt {
+		return "", ErrCreateUnconfirmed
+	}
+	v.operationsMu.Lock()
+	v.removeExpiredOperationsLocked()
+	binding, retained := v.operations[operationID]
+	v.operationsMu.Unlock()
+	if !retained {
+		return "", ErrCreateUnconfirmed
+	}
 	if handle == "" {
-		v.mu.Lock()
-		v.removeExpiredLocked()
-		handle = v.operations[operationID].handle
-		v.mu.Unlock()
+		handle = binding.handle
 	}
 	if err := v.ValidateReference(operationID, handle, policyVersion, username, mobile); err != nil {
-		return "", err
+		return "", v.registrationReferenceError(operationID, handle, policyVersion, username, mobile, firstAttempt, err)
 	}
 	record, err := v.record(handle, policyVersion)
 	if err != nil {
-		return "", err
+		return "", v.registrationReferenceError(operationID, handle, policyVersion, username, mobile, firstAttempt, err)
 	}
 	record.mu.Lock()
 	defer record.mu.Unlock()
@@ -277,13 +301,16 @@ func (v *PasswordVault) CreateMobileUser(ctx context.Context, operationID uuid.U
 		return record.subject, nil
 	}
 	if record.password == "" || v.now().After(record.expiresAt) {
-		return "", ErrReferenceInvalid
+		return "", v.registrationReferenceError(operationID, handle, policyVersion, username, mobile, firstAttempt, ErrReferenceInvalid)
 	}
 	currentFingerprint := v.fingerprint(record.password)
 	if !hmac.Equal(record.fingerprint[:], currentFingerprint[:]) {
 		return "", ErrReferenceConflict
 	}
 	if err := ValidatePassword(record.password); err != nil {
+		return "", err
+	}
+	if err := v.markRegistrationDispatch(operationID, username, mobile); err != nil {
 		return "", err
 	}
 	subject, err := v.directory.CreateMobileUser(ctx, operationID, username, mobile, record.password)
@@ -328,6 +355,11 @@ func (v *PasswordVault) record(handle, policyVersion string) (*passwordRecord, e
 }
 
 func (v *PasswordVault) removeExpiredLocked() {
+	// Preserve the existing cleanup triggers and 48-hour retention window.
+	// Release operation ownership before waiting on any plaintext record lock.
+	v.operationsMu.Lock()
+	v.removeExpiredOperationsLocked()
+	v.operationsMu.Unlock()
 	now := v.now()
 	for handle, record := range v.records {
 		if now.After(record.expiresAt) {
@@ -338,6 +370,10 @@ func (v *PasswordVault) removeExpiredLocked() {
 			delete(v.records, handle)
 		}
 	}
+}
+
+func (v *PasswordVault) removeExpiredOperationsLocked() {
+	now := v.now()
 	for operationID, binding := range v.operations {
 		if now.After(binding.expiresAt) {
 			delete(v.operations, operationID)

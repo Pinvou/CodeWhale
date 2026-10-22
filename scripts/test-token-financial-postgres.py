@@ -51,6 +51,7 @@ ACCOUNT_REQUIRED = {
     "TestOrdinaryDeadLetterReplayRuntimePostgres",
     "TestIdentityRecoveryClaimsRuntimePostgres",
     "TestProfileSessionRevocationRecoveryRuntimePostgres",
+    "TestRegistrationCreateDispatchRuntimePostgres",
 }
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"

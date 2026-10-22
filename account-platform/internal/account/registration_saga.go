@@ -172,7 +172,7 @@ const registrationOperationSelect = `
 SELECT ro.id,ro.candidate_user_id,ro.query_token_hash,ro.request_fingerprint,ro.username_normalized,ro.mobile_e164,
 ro.sms_challenge_id,ro.password_policy_version,COALESCE(ro.identity_subject,''),
 ro.committed_user_id,COALESCE(u.user_code,''),ro.status,ro.version,ro.identity_created_at,ro.next_retry_at,
-COALESCE(ro.last_error_code,''),ro.created_at,ro.updated_at,ro.recovery_generation,ro.recovery_lease_until
+COALESCE(ro.last_error_code,''),ro.created_at,ro.updated_at,ro.recovery_generation,ro.recovery_lease_until,ro.identity_create_attempted_at
 FROM registration_operations ro LEFT JOIN users u ON u.id=ro.committed_user_id`
 
 func scanRegistrationOperation(row pgx.Row) (RegistrationOperation, error) {
@@ -181,7 +181,7 @@ func scanRegistrationOperation(row pgx.Row) (RegistrationOperation, error) {
 	err := row.Scan(&operation.ID, &operation.CandidateUserID, &operation.QueryTokenHash, &operation.RequestFingerprint, &operation.Username, &operation.Mobile,
 		&operation.ChallengeID, &operation.PasswordPolicyVersion, &operation.IdentitySubject,
 		&operation.UserID, &rawUserCode, &operation.Status, &operation.Version, &operation.IdentityCreatedAt, &operation.NextRetryAt,
-		&operation.LastErrorCode, &operation.CreatedAt, &operation.UpdatedAt, &operation.RecoveryGeneration, &operation.RecoveryLeaseUntil)
+		&operation.LastErrorCode, &operation.CreatedAt, &operation.UpdatedAt, &operation.RecoveryGeneration, &operation.RecoveryLeaseUntil, &operation.IdentityCreateAttemptedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RegistrationOperation{}, ErrNotFound
 	}
@@ -409,13 +409,14 @@ WHERE id=$1 AND status IN ('REGISTRATION_IN_PROGRESS','IDENTITY_CREATING','IDENT
 	})
 }
 
-func (r *PostgresRepository) CompensatePreIdentityRegistration(ctx context.Context, operationID uuid.UUID, code string) error {
+func (r *PostgresRepository) CompensatePreIdentityRegistration(ctx context.Context, operationID uuid.UUID, code string, attemptVersion int64) error {
 	return r.identityRecoveryWrite(ctx, "registration", operationID, func(tx pgx.Tx) error {
 		command, err := tx.Exec(ctx, `
 UPDATE registration_operations SET status='COMPENSATED',lease_expires_at=NULL,next_retry_at=$2,
-last_error_code=$3,version=version+1,updated_at=$2
+last_error_code=$3,compensation_evidence=jsonb_build_object('authority','IDENTITY_ADAPTER','creation_never_dispatched',true,'attempt_version',$4::bigint),version=version+1,updated_at=$2
 WHERE id=$1 AND identity_subject IS NULL AND committed_user_id IS NULL
-  AND status IN ('SMS_PENDING','REGISTRATION_IN_PROGRESS','IDENTITY_CREATING')`, operationID, r.now(), code)
+  AND identity_create_attempted_at IS NOT NULL AND $3='IDENTITY_CREATE_NOT_DISPATCHED' AND version=$4 AND $4>0
+  AND status IN ('REGISTRATION_IN_PROGRESS','IDENTITY_CREATING')`, operationID, r.now(), code, attemptVersion)
 		if err != nil {
 			return err
 		}

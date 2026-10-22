@@ -17,11 +17,15 @@ import (
 	"github.com/google/uuid"
 )
 
+var ErrIdentityCreateNotDispatched = errors.New("identity creation was authoritatively fenced before dispatch")
+var ErrIdentityCreateUnconfirmed = errors.New("identity creation may have been dispatched and requires correlation recovery")
+
 var ErrIdentityRegistrationNotFound = errors.New("identity registration correlation was not found")
 
 type IdentityProvisioner interface {
 	ValidateMobileUser(context.Context, uuid.UUID, string, string, string, string) error
 	CreateMobileUser(context.Context, uuid.UUID, string, string, string, string) (string, error)
+	CreateMobileUserFirstAttempt(context.Context, uuid.UUID, string, string, string, string) (string, error)
 	FindMobileUserByRegistrationOperation(context.Context, uuid.UUID) (string, bool, error)
 	DisableUserAndConfirm(context.Context, string) error
 	UpdateUsername(context.Context, string, uuid.UUID, int64, string) error
@@ -75,11 +79,19 @@ func (p *HTTPIdentityProvisioner) ValidateMobileUser(ctx context.Context, operat
 }
 
 func (p *HTTPIdentityProvisioner) CreateMobileUser(ctx context.Context, operationID uuid.UUID, username, mobile, handle, policyVersion string) (string, error) {
+	return p.createMobileUser(ctx, operationID, username, mobile, handle, policyVersion, false)
+}
+
+func (p *HTTPIdentityProvisioner) CreateMobileUserFirstAttempt(ctx context.Context, operationID uuid.UUID, username, mobile, handle, policyVersion string) (string, error) {
+	return p.createMobileUser(ctx, operationID, username, mobile, handle, policyVersion, true)
+}
+
+func (p *HTTPIdentityProvisioner) createMobileUser(ctx context.Context, operationID uuid.UUID, username, mobile, handle, policyVersion string, firstAttempt bool) (string, error) {
 	var response struct {
 		Subject string `json:"subject"`
 	}
-	err := p.request(ctx, http.MethodPost, "/internal/v1/users/mobile", map[string]string{
-		"registration_operation_id": operationID.String(), "username": username, "mobile": mobile, "password_handle": handle, "password_policy_version": policyVersion,
+	err := p.request(ctx, http.MethodPost, "/internal/v1/users/mobile", map[string]any{
+		"registration_operation_id": operationID.String(), "username": username, "mobile": mobile, "password_handle": handle, "password_policy_version": policyVersion, "first_attempt": firstAttempt,
 	}, &response)
 	if err != nil {
 		return "", err
@@ -151,6 +163,13 @@ func (p *HTTPIdentityProvisioner) request(ctx context.Context, method, path stri
 			return ErrProfileChangeConflict
 		case "PROFILE_REVOCATION_UNCONFIRMED":
 			return ErrProfileSessionRevocationUnconfirmed
+		case "IDENTITY_CREATE_NOT_DISPATCHED":
+			if response.StatusCode == http.StatusGone {
+				return ErrIdentityCreateNotDispatched
+			}
+			return errors.New("identity adapter returned an invalid dispatch proof status")
+		case "IDENTITY_CREATE_UNCONFIRMED":
+			return ErrIdentityCreateUnconfirmed
 		case "PASSWORD_REFERENCE_INVALID":
 			return ErrPasswordReferenceInvalid
 		case "PASSWORD_REFERENCE_CONFLICT":
