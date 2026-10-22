@@ -4226,6 +4226,117 @@
         },
         "description": "Read-only assessment of unsettled usage and retained financial review facts."
       }
+    },
+    "/internal/v1/usage-waivers": {
+      "post": {
+        "operationId": "post_internal_usage_waiver",
+        "summary": "Coordinate an existing Billing usage waiver command",
+        "x-go-handler": "internalUsageWaiver",
+        "x-authority": {
+          "kind": "workload",
+          "all": [
+            "internal.token.usage.waive"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [],
+        "x-idempotency": {
+          "transport": "body",
+          "identity": "command_reference",
+          "fingerprint": "request_digest",
+          "matching_replay": "persisted_original_decision",
+          "conflicting_reference_status": 403,
+          "unknown_result_status": 503
+        },
+        "description": "This internal endpoint consumes the persisted command, not an administrator request or a new key. Same reference/digest replays the original decision; changed original facts are forbidden (403). Public Billing administrator Idempotency-Key conflicts remain409 in its separate contract; this route does not remap them or require that header. Rejected admission is a200 domain decision. Unknown execution/ACK is503 and requires original intent recovery, never a fresh financial command.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UsageWaiverCommand"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Exact original admission and optional matching result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageWaiverDecision"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed JSON, unknown fields or trailing JSON.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid workload authentication.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Wrong workload permission or original command reference/facts mismatch.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid versioned waiver command or fingerprint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Unavailable coordinator or original result remains unknown; do not issue a fresh intent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Other stable error envelope; not proof of no financial effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -6108,6 +6219,316 @@
             "minimum": 1
           }
         }
+      },
+      "UsageWaiverCommand": {
+        "type": "object",
+        "additionalProperties": false,
+        "x-go-source": "internal/platform/usagewaiver/contract.go",
+        "x-go-type": "Command",
+        "properties": {
+          "version": {
+            "type": "integer",
+            "const": 1
+          },
+          "command_reference": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "hold_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "usage_request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "wallet_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "maximum_microcredits": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "description": "Nonnegative int64 encoded as a JSON string by the existing Go wire DTO."
+          },
+          "allocation_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "actor_user_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "actor_issuer": {
+            "type": "string",
+            "minLength": 1
+          },
+          "actor_subject": {
+            "type": "string",
+            "minLength": 1
+          },
+          "authorization_version": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*$"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "request_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "version",
+          "command_reference",
+          "hold_id",
+          "usage_request_id",
+          "wallet_id",
+          "maximum_microcredits",
+          "allocation_digest",
+          "actor_user_id",
+          "actor_issuer",
+          "actor_subject",
+          "authorization_version",
+          "reason",
+          "created_at",
+          "request_digest"
+        ],
+        "description": "Billing supplies its immutable original command. Request digest is SHA256 of the exact existing Command JSON with request_digest empty; same reference replays the persisted decision only when original facts match. No Idempotency-Key HTTP header is used by this internal client."
+      },
+      "UsageWaiverDecision": {
+        "type": "object",
+        "additionalProperties": false,
+        "x-go-source": "internal/platform/usagewaiver/contract.go",
+        "x-go-type": "Decision",
+        "properties": {
+          "command_reference": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "request_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "admission": {
+            "type": "string",
+            "enum": [
+              "ADMITTED",
+              "REJECTED"
+            ]
+          },
+          "reason_code": {
+            "type": "string",
+            "enum": [
+              "",
+              "EXECUTION_ACTIVE",
+              "USAGE_IDENTITY_MISMATCH",
+              "DEADLINE_RELEASE_OWNS_RECOVERY",
+              "ANOTHER_WAIVER_INTENT",
+              "USAGE_NOT_ELIGIBLE",
+              "USAGE_NOT_FOUND"
+            ]
+          },
+          "result": {
+            "$ref": "#/components/schemas/UsageWaiverResult"
+          }
+        },
+        "required": [
+          "command_reference",
+          "request_digest",
+          "admission",
+          "reason_code"
+        ],
+        "description": "HTTP200 receipt: rejected carries no result and one stable rejection reason; admitted carries empty reason and the exact matching original financial result. Persisted intermediate admission without result is not a success HTTP receipt.",
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "admission": {
+                  "const": "ADMITTED"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "result"
+              ],
+              "properties": {
+                "reason_code": {
+                  "const": ""
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "admission": {
+                  "const": "REJECTED"
+                }
+              }
+            },
+            "then": {
+              "not": {
+                "required": [
+                  "result"
+                ]
+              },
+              "properties": {
+                "reason_code": {
+                  "enum": [
+                    "EXECUTION_ACTIVE",
+                    "USAGE_IDENTITY_MISMATCH",
+                    "DEADLINE_RELEASE_OWNS_RECOVERY",
+                    "ANOTHER_WAIVER_INTENT",
+                    "USAGE_NOT_ELIGIBLE",
+                    "USAGE_NOT_FOUND"
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      },
+      "UsageWaiverResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "x-go-source": "internal/platform/usagewaiver/contract.go",
+        "x-go-type": "Result",
+        "properties": {
+          "command_reference": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "request_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "hold_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "usage_request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "wallet_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "maximum_microcredits": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "description": "Nonnegative int64 encoded as a JSON string by the existing Go wire DTO."
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "WAIVED",
+              "COMMITTED",
+              "RELEASED_OTHER"
+            ]
+          },
+          "hold_status": {
+            "type": "string",
+            "enum": [
+              "COMMITTED",
+              "RELEASED"
+            ]
+          },
+          "actual_microcredits": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "description": "Nonnegative int64 encoded as a JSON string by the existing Go wire DTO."
+          },
+          "usage_snapshot": {},
+          "completed_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "command_reference",
+          "request_digest",
+          "hold_id",
+          "usage_request_id",
+          "wallet_id",
+          "maximum_microcredits",
+          "outcome",
+          "hold_status",
+          "usage_snapshot",
+          "completed_at"
+        ],
+        "description": "Exact financial-owner result. Identity, digest, hold, usage, wallet and maximum must match original Command. WAIVED means RELEASED and actual 0 with original admin waiver snapshot; COMMITTED keeps actual>=0; RELEASED_OTHER cannot claim a second waiver. An absent acknowledgement is unknown, not proof of no effect.",
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "outcome": {
+                  "const": "WAIVED"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "actual_microcredits"
+              ],
+              "properties": {
+                "hold_status": {
+                  "const": "RELEASED"
+                },
+                "actual_microcredits": {
+                  "const": "0"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "outcome": {
+                  "const": "COMMITTED"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "actual_microcredits"
+              ],
+              "properties": {
+                "hold_status": {
+                  "const": "COMMITTED"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "outcome": {
+                  "const": "RELEASED_OTHER"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "hold_status": {
+                  "const": "RELEASED"
+                },
+                "actual_microcredits": {
+                  "const": "0"
+                }
+              }
+            }
+          }
+        ]
       }
     }
   },

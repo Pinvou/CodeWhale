@@ -372,9 +372,34 @@ export function checkInvocationCoverage({ invocation, invocationSources }) {
   return routes.length;
 }
 
-export function checkCoverage({ routeSource, specSource, handlerSource, credentialSource, dtoSources, manifest, management, credential, organizationFinanceSource, organizationHandlerSource, organizationFinance, organizationAccountSource, memberUnits, invocation, invocationSources }) {
+function checkUsageWaiverContract(document, source) {
+  const op = document.paths['/internal/v1/usage-waivers']?.post;
+  assert.ok(op, 'usage waiver operation missing');
+  assert.equal(op.requestBody?.required, true, 'usage waiver body required');
+  assert.equal(op.requestBody?.content?.['application/json']?.schema?.$ref, '#/components/schemas/UsageWaiverCommand', 'usage waiver command DTO drift');
+  assert.equal(op.responses?.['200']?.content?.['application/json']?.schema?.$ref, '#/components/schemas/UsageWaiverDecision', 'usage waiver receipt DTO drift');
+  assert.deepEqual(Object.keys(op.responses).sort(), ['200', '400', '401', '403', '422', '503', 'default'], 'usage waiver status contract drift');
+  assert.deepEqual(op['x-idempotency'], { transport: 'body', identity: 'command_reference', fingerprint: 'request_digest', matching_replay: 'persisted_original_decision', conflicting_reference_status: 403, unknown_result_status: 503 }, 'usage waiver original identity drift');
+  assert.ok(!(op.parameters || []).some(p => p.in === 'header' && p.name.toLowerCase() === 'idempotency-key'), 'usage waiver cannot require a new key');
+  for (const name of ['UsageWaiverCommand', 'UsageWaiverDecision', 'UsageWaiverResult']) {
+    assert.equal(document.components.schemas[name]?.additionalProperties, false, 'usage waiver unknown fields drift');
+  }
+  const schemas = document.components.schemas;
+  assert.deepEqual(schemas.UsageWaiverDecision.allOf, [{"if": {"properties": {"admission": {"const": "ADMITTED"}}}, "then": {"required": ["result"], "properties": {"reason_code": {"const": ""}}}}, {"if": {"properties": {"admission": {"const": "REJECTED"}}}, "then": {"not": {"required": ["result"]}, "properties": {"reason_code": {"enum": ["EXECUTION_ACTIVE", "USAGE_IDENTITY_MISMATCH", "DEADLINE_RELEASE_OWNS_RECOVERY", "ANOTHER_WAIVER_INTENT", "USAGE_NOT_ELIGIBLE", "USAGE_NOT_FOUND"]}}}}], 'usage waiver admission receipt drift');
+  assert.deepEqual(schemas.UsageWaiverResult.allOf, [{"if": {"properties": {"outcome": {"const": "WAIVED"}}}, "then": {"required": ["actual_microcredits"], "properties": {"hold_status": {"const": "RELEASED"}, "actual_microcredits": {"const": "0"}}}}, {"if": {"properties": {"outcome": {"const": "COMMITTED"}}}, "then": {"required": ["actual_microcredits"], "properties": {"hold_status": {"const": "COMMITTED"}}}}, {"if": {"properties": {"outcome": {"const": "RELEASED_OTHER"}}}, "then": {"properties": {"hold_status": {"const": "RELEASED"}, "actual_microcredits": {"const": "0"}}}}], 'usage waiver financial outcome drift');
+  for (const [name, field] of [['UsageWaiverCommand', 'maximum_microcredits'], ['UsageWaiverCommand', 'authorization_version'], ['UsageWaiverResult', 'maximum_microcredits'], ['UsageWaiverResult', 'actual_microcredits']]) assert.equal(schemas[name]?.properties?.[field]?.type, 'string', 'usage waiver int64 wire drift');
+  assert.deepEqual(schemas.UsageWaiverResult.properties.outcome.enum, ['WAIVED', 'COMMITTED', 'RELEASED_OTHER'], 'usage waiver outcome drift');
+  const code = goSource(source).code;
+  assert.match(code, /var command usagewaiver\.Command/, 'usage waiver actual body binding missing');
+  assert.match(code, /api\.DecodeJSON\(w, r, &command\)/, 'usage waiver actual decoder missing');
+  assert.match(code, /if !command\.Valid\(\)/, 'usage waiver actual command validation missing');
+  for (const call of ['store.PrepareUsageWaiver(r.Context(), command)', 'writer.ExecuteUsageWaiver(r.Context(), command)', 'store.FinishUsageWaiver(r.Context(), command, result)']) assert.ok(code.includes(call), 'usage waiver actual original-command chain missing');
+}
+
+export function checkCoverage({ routeSource, specSource, handlerSource, credentialSource, dtoSources, manifest, management, credential, organizationFinanceSource, organizationHandlerSource, organizationFinance, organizationAccountSource, memberUnits, invocation, invocationSources, usageWaiverSource }) {
   checkInvocationCoverage({ invocation, invocationSources });
   checkMemberUnitsContract(memberUnits, organizationAccountSource);
+  checkUsageWaiverContract(management, usageWaiverSource);
   const routes = managementRoutes(routeSource);
   const organization = organizationFinanceRoutes(organizationFinanceSource, organizationHandlerSource);
   assert.deepEqual(sorted(manifest.organizationFinanceRoutes), organization, 'organization route authority coverage drift');
@@ -470,7 +495,8 @@ export function loadInputs(base = root) {
     specSource: read('account-platform/internal/token/command_governance.go'),
     handlerSource: read('account-platform/internal/token/governance_handlers.go'),
     credentialSource: read('account-platform/internal/token/credential_origin.go'),
-    dtoSources: Object.fromEntries(['command_governance.go', 'command_precheck.go', 'credential_isolation.go', 'lifecycle_plans.go', 'impact_precheck.go', 'account_provisioning_saga.go', 'approval_recovery_result.go', 'organization_lifecycle.go', 'organization_unit_blockers.go'].map((name) => ['internal/token/' + name, read('account-platform/internal/token/' + name)])),
+    usageWaiverSource: read('account-platform/internal/token/usage_waiver.go'),
+    dtoSources: { ...Object.fromEntries(['command_governance.go', 'command_precheck.go', 'credential_isolation.go', 'lifecycle_plans.go', 'impact_precheck.go', 'account_provisioning_saga.go', 'approval_recovery_result.go', 'organization_lifecycle.go', 'organization_unit_blockers.go'].map((name) => ['internal/token/' + name, read('account-platform/internal/token/' + name)])), 'internal/platform/usagewaiver/contract.go': read('account-platform/internal/platform/usagewaiver/contract.go') },
     manifest: json('account-platform/deploy/authorization-token-management-entrypoints.json'),
     management: json('account-platform/contracts/openapi/token-management.yaml'),
     credential: json('account-platform/contracts/openapi/token-credential-origin.yaml'),

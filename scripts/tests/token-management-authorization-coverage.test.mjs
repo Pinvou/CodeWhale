@@ -5,6 +5,58 @@ import { readFileSync } from 'node:fs';
 import { checkCoverage, loadInputs } from '../check-token-management-authorization-coverage.mjs';
 
 const inputs = loadInputs();
+
+test('actual usage waiver route retains body identity, exact workload permission and versioned DTOs', () => {
+  assert.doesNotThrow(() => checkCoverage(inputs));
+  const op = inputs.management.paths['/internal/v1/usage-waivers'].post;
+  assert.deepEqual(op.security, [{ WorkloadBearer: [] }]);
+  assert.deepEqual(op['x-authority'], { kind: 'workload', all: ['internal.token.usage.waive'] });
+  assert.equal(op['x-idempotency'].conflicting_reference_status, 403);
+  assert.equal(op['x-idempotency'].unknown_result_status, 503);
+});
+
+test('usage waiver inventory cannot omit the installed route or weaken its actual authority', () => {
+  const missing = structuredClone(inputs.manifest);
+  missing.routes = missing.routes.filter(route => route.path !== '/internal/v1/usage-waivers');
+  assert.throws(() => checkCoverage({ ...inputs, manifest: missing }), /management authority/);
+  for (const mutate of [
+    document => { delete document.paths['/internal/v1/usage-waivers']; },
+    document => { document.paths['/internal/v1/usage-waivers'].post.security = [{ UserBearer: [] }]; },
+    document => { document.paths['/internal/v1/usage-waivers'].post['x-authority'].all = ['internal.token.approval-proof.read']; },
+  ]) {
+    const management = structuredClone(inputs.management); mutate(management);
+    assert.throws(() => checkCoverage({ ...inputs, management }));
+  }
+});
+
+test('usage waiver rejects DTO, original-reference and HTTP status contract drift', () => {
+  for (const mutate of [
+    document => { document.paths['/internal/v1/usage-waivers'].post.requestBody.required = false; },
+    document => { document.paths['/internal/v1/usage-waivers'].post.responses['200'].content['application/json'].schema.$ref = '#/components/schemas/Error'; },
+    document => { const op = document.paths['/internal/v1/usage-waivers'].post; op.responses['409'] = op.responses['403']; delete op.responses['403']; },
+    document => { document.paths['/internal/v1/usage-waivers'].post['x-idempotency'].unknown_result_status = 200; },
+    document => { document.paths['/internal/v1/usage-waivers'].post.parameters.push({ in: 'header', name: 'Idempotency-Key', required: true }); },
+    document => { document.components.schemas.UsageWaiverCommand.properties.maximum_microcredits.type = 'number'; },
+    document => { delete document.components.schemas.UsageWaiverCommand.properties.request_digest; },
+    document => { document.components.schemas.UsageWaiverResult.properties.outcome.enum.push('UNKNOWN_SUCCESS'); },
+    document => { document.components.schemas.UsageWaiverDecision.additionalProperties = true; },
+    document => { document.components.schemas.UsageWaiverDecision.allOf = []; },
+    document => { document.components.schemas.UsageWaiverResult.allOf = []; },
+  ]) {
+    const management = structuredClone(inputs.management); mutate(management);
+    assert.throws(() => checkCoverage({ ...inputs, management }));
+  }
+});
+
+test('usage waiver DTO and actual command chain source must remain bound, not only comments', () => {
+  const dtoSources = { ...inputs.dtoSources };
+  dtoSources['internal/platform/usagewaiver/contract.go'] = dtoSources['internal/platform/usagewaiver/contract.go'].replace('json:"request_digest"', 'json:"changed_digest"');
+  assert.throws(() => checkCoverage({ ...inputs, dtoSources }), /DTO field coverage/);
+  const call = 'writer.ExecuteUsageWaiver(r.Context(), command)';
+  assert.ok(inputs.usageWaiverSource.includes(call));
+  const usageWaiverSource = inputs.usageWaiverSource.replace(call, 'writer.OtherOperation(r.Context(), command)') + '\n// ' + call;
+  assert.throws(() => checkCoverage({ ...inputs, usageWaiverSource }), /actual original-command chain/);
+});
 const closedGrantAuthority = 'resolved, org, _, ok := s.resolveOrganizationBilling(w, r, "org.grants.reclaim_closed")';
 const changedClosedGrantAuthority = 'resolved, org, _, ok := s.resolveOrganizationBilling(w, r, "org.grants.allocate")';
 assert.equal(inputs.organizationHandlerSource.split(closedGrantAuthority).length - 1, 1);

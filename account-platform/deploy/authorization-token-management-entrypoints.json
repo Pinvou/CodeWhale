@@ -889,6 +889,18 @@
         ]
       },
       "gates": []
+    },
+    {
+      "method": "post",
+      "path": "/internal/v1/usage-waivers",
+      "handler": "internalUsageWaiver",
+      "authority": {
+        "kind": "workload",
+        "all": [
+          "internal.token.usage.waive"
+        ]
+      },
+      "gates": []
     }
   ],
   "commands": [
