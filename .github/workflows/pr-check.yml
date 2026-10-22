@@ -252,6 +252,8 @@ jobs:
               - 'scripts/tests/test_token_financial_postgres.py'
               - 'scripts/test-account-closure-postgres.py'
               - 'scripts/tests/test_account_closure_postgres.py'
+              - 'scripts/tests/test_postgres_backup.py'
+              - 'scripts/tests/test_postgres_backup_job.py'
               - 'scripts/check-token-management-authorization-coverage.mjs'
               - 'scripts/tests/token-management-authorization-coverage.test.mjs'
               - 'scripts/tests/token-management-phase-coverage.test.mjs'
@@ -1137,6 +1139,15 @@ jobs:
           chmod 0755 "$tools/docker-compose"
           printf 'PINVOU_TEST_KMS_HELM_BINARY=%s\n' "$tools/linux-amd64/helm" >> "$GITHUB_ENV"
           printf 'PINVOU_TEST_KMS_COMPOSE_BINARY=%s\n' "$tools/docker-compose" >> "$GITHUB_ENV"
+
+      - name: Account Platform optional backup tool contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Unit contracts only; no Docker, backup job, timer or recovery is started.
+          npm --prefix account-platform run test:postgres-backup-tools 2>&1 | tee "$RUNNER_TEMP/account-backup-tools.log"
+          grep -Eq '^Ran [1-9][0-9]* tests? in ' "$RUNNER_TEMP/account-backup-tools.log"
+          grep -Eq '^OK$' "$RUNNER_TEMP/account-backup-tools.log"
 
       - name: Account Platform Node contracts
         env:

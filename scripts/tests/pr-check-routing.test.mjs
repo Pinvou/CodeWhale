@@ -233,7 +233,7 @@ test("container CI uses immutable official cache images without losing either bu
 
 test("Account Platform changes cannot bypass the Go gate at any PR or queue stage", () => {
   const paths = filterPaths(workflow, "account_platform");
-  for (const path of ["scripts/check-account-platform-authorization-coverage.mjs", "scripts/tests/account-platform-authorization-coverage.test.mjs"]) {
+  for (const path of ["scripts/check-account-platform-authorization-coverage.mjs", "scripts/tests/account-platform-authorization-coverage.test.mjs", "scripts/tests/test_postgres_backup.py", "scripts/tests/test_postgres_backup_job.py"]) {
     assert.ok(paths.includes(path), `authorization changes must trigger the Go gate: ${path}`);
   }
   for (const path of ["account-platform/**", "scripts/account-platform*", "scripts/check-account-platform*", "scripts/check-token-management-authorization-coverage.mjs", "scripts/tests/token-management-authorization-coverage.test.mjs", "scripts/tests/token-management-phase-coverage.test.mjs", ".github/workflows/pr-check.yml", "scripts/tests/pr-check-routing.test.mjs"]) {
@@ -269,6 +269,33 @@ test("Account Platform changes cannot bypass the Go gate at any PR or queue stag
     assert.equal(result.stdout, expectedOutput);
   }
   assert.doesNotMatch(job, /secrets\.|continue-on-error:/);
+});
+
+test("backup tool unit gate rejects zero, skipped, missing and failed evidence without running backup", () => {
+  const run = stepRun(jobBlock("account-platform-test"), "Account Platform optional backup tool contracts");
+  assert.match(run, /npm --prefix account-platform run test:postgres-backup-tools/);
+  assert.doesNotMatch(run, /docker|systemctl|account-platform-postgres-backup-job\.py/);
+  const directory = mkdtempSync(join(tmpdir(), "pinvou-backup-ci-"));
+  try {
+    for (const [output, status, expected] of [
+      ["Ran 34 tests in 0.1s\n\nOK\n", 0, 0],
+      ["Ran 0 tests in 0.1s\n\nOK\n", 0, 1],
+      ["Ran 34 tests in 0.1s\n\nOK (skipped=1)\n", 0, 1],
+      ["", 0, 1],
+      ["Ran 34 tests in 0.1s\n\nFAILED (failures=1)\n", 0, 1],
+      ["Ran 34 tests in 0.1s\n\nOK\n", 7, 7],
+    ]) {
+      const prefix = `npm() { printf '%s' '${output}'; return ${status}; };\n`;
+      const result = spawnSync(bash, ["-c", prefix + run], {
+        cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true,
+        env: { ...process.env, RUNNER_TEMP: directory.replaceAll("\\", "/") },
+      });
+      assert.equal(result.status, expected, `${status}/${output}: ${result.stderr}`);
+    }
+  } finally {
+    assert.ok(directory.startsWith(join(tmpdir(), "pinvou-backup-ci-")));
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("whole Account Platform authorization failures block the CI gate", () => {

@@ -14,6 +14,8 @@
 
 ## 1. 实际入口与依赖
 
+公开 TLS 与原生 KMS 的手动联验入口见 [安全门禁手册](native-kms-security-gate.md)。从仓库根执行 `npm --prefix account-platform run security:production-readiness`；原生 fresh-install 在人工轮换前显式执行 `security:prepare-native-rotation`，准备结果不表示 GO。两命令不执行部署、轮换或迁移，不能替代下列现场验收。
+
 ### 原生 KMS 的 Compose 配置（SECINF-04B1）
 
 使用 OpenBao 原生 Transit 时，在 `compose.yaml`、`compose.model-token.yaml` 之后显式叠加 `compose.kms-native.yaml`。不要为了旧模板补造静态 KMS token；原生覆盖层将两服务的静态 token/local KEK 清空，固定使用各自 Agent 的 token 文件和专用 CA。原 remote 配置仍使用既有协议与两个独立的受控凭据，空凭据由合并检查及启动校验拒绝。

@@ -21,7 +21,10 @@
     "test:auth-business": "node test/integration/auth-business-acceptance.mjs",
     "prepare:prometheus-fixtures": "node test/integration/prometheus-rule-fixtures.mjs",
     "test:prometheus-rules": "node ../scripts/account-platform-prometheus-rules.mjs",
-    "test:closure-contracts": "node --test test/contract/account-closure-saga.test.mjs test/contract/account-closure-cleanup.test.mjs"
+    "test:closure-contracts": "node --test test/contract/account-closure-saga.test.mjs test/contract/account-closure-cleanup.test.mjs",
+    "security:production-readiness": "node ../scripts/account-platform-production-security-gate.mjs",
+    "security:prepare-native-rotation": "node ../scripts/account-platform-production-security-gate.mjs --prepare-native-rotation",
+    "test:postgres-backup-tools": "python3 -m unittest discover -s ../scripts/tests -p \"test_postgres_backup*.py\""
   },
   "devDependencies": {
     "ajv": "8.17.1",

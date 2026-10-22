@@ -6,6 +6,8 @@
 
 数据库备份只是完整恢复集的一部分。能够重新启动 PostgreSQL 不等于账号平台已经恢复；NATS JetStream、独立模型网关、站点 Secret、边缘代理/证书/网络配置和目标 Commit 制品必须绑定同一个恢复集。完整新主机重建步骤见 [`full-redeployment.md`](full-redeployment.md)。
 
+可选的当前 PostgreSQL 依赖集群加密备份与受限调度工具见 [本机备份工具](local-backup-rollout.md)。它仅显式启用，保持独立风险接受和真实隔离恢复前提，不替代本手册完整恢复集或默认异机策略。
+
 ## 完整恢复集清单
 
 每次全量备份或重大发布前快照必须生成唯一 `<recovery-set-id>`，并在独立不可变存储中保存以下内容及 SHA-256：
