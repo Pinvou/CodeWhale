@@ -156,28 +156,52 @@ function buildWebBridgeContext() {
   console.log('✓ shared fallback escapes HTML when vendor globals are missing');
 }
 
-// ── Case 4: 守护两处 bridge 源码——最末级 fallback 不得退化为原文返回 ──
+// ── Case 4: 守护渲染入口——最末级 fallback 不得退化为原文返回 ──
 // 防止未来重构再次把 escapeHtml 抽走、留下 fail-open 的 `return String(text || "")`。
-for (const bridgeRel of [['src', 'platform', 'web', 'bridge.js'], ['src', 'platform', 'tauri', 'bridge.js']]) {
-  const src = readApp(...bridgeRel);
+// #701 T4a 壳化：web renderMarkdown/escapeHtml 已单源进 shared/bridge-shared-helpers.js
+// （安全原语单一实现），web lane 只保留 cluster 转发——守护转发面；
+// desktop bridge.js 核心壳化 defer T4b，最末级 fallback 本体仍在桌面 lane 就地钉。
+const sharedRenderSource = readApp('src', 'shared', 'bridge-shared-helpers.js');
+assert.match(
+  sharedRenderSource,
+  /return escapeHtml\(text \|\| ""\)/u,
+  'shared renderMarkdown final fallback must escape (not return raw text)',
+);
+assert.match(
+  sharedRenderSource,
+  /function escapeHtml\(s\)/u,
+  'shared helpers must define escapeHtml for the final fallback',
+);
+assert.match(
+  sharedRenderSource,
+  /window\.PinvouMarkdownRenderer\.renderMarkdown\(text\)/u,
+  'shared renderMarkdown must keep delegating to the vendor renderer',
+);
+assert.match(
+  readApp('src', 'platform', 'web', 'bridge.js'),
+  /function renderMarkdown\(text\) \{ return pinvouSharedweb/u,
+  'src/platform/web/bridge.js must keep forwarding renderMarkdown to the shared cluster',
+);
+console.log('✓ web bridge forwards renderMarkdown to the shared cluster');
+
+{
+  const src = readApp('src', 'platform', 'tauri', 'bridge.js');
   assert.match(
     src,
     /return escapeHtml\(text \|\| ""\)/u,
-    `${bridgeRel.join('/')} final fallback must escape (not return raw text)`,
+    'src/platform/tauri/bridge.js final fallback must escape (not return raw text)',
   );
-  // 同时守护 escapeHtml 的定义就地产于此文件（安全原语不依赖外部脚本）。
   assert.match(
     src,
     /function escapeHtml\(s\)/u,
-    `${bridgeRel.join('/')} must define its own escapeHtml for the final fallback`,
+    'src/platform/tauri/bridge.js must define its own escapeHtml for the final fallback',
   );
-  // 委托共享渲染器的主路径仍须保留（markdown_syntax_highlight 契约同样要求）。
   assert.match(
     src,
     /window\.PinvouMarkdownRenderer\.renderMarkdown\(text\)/u,
-    `${bridgeRel.join('/')} must keep delegating to the shared renderer`,
+    'src/platform/tauri/bridge.js must keep delegating to the shared renderer',
   );
-  console.log(`✓ ${bridgeRel.join('/')} keeps safe final fallback + renderer delegation`);
+  console.log('✓ tauri bridge keeps safe final fallback + renderer delegation (T4b 前就地钉)');
 }
 
 console.log('\nmarkdown bridge fallback safety: ok');
