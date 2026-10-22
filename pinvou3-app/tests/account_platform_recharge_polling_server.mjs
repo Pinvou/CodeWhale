@@ -71,7 +71,7 @@ try {
   vite = await createServer({ root, configFile: false, appType: 'mpa', clearScreen: false, logLevel: 'error', cacheDir: cache,
     plugins: [react(), { name: 'public-loopback-fixture-api', configureServer(server) { server.middlewares.use(fixtureAPI); } }], resolve: { alias: { react: dirname(require.resolve('react/package.json')), 'react-dom': dirname(require.resolve('react-dom/package.json')) } },
     optimizeDeps: { entries: ['tests/fixtures/account-platform-recharge-polling.html'] },
-    server: { host: '127.0.0.1', port, strictPort: true, watch: null, fs: { allow: [root, dirname(require.resolve('react/package.json')), dirname(require.resolve('react-dom/package.json')), dirname(require.resolve('scheduler/package.json'))] } } });
+    server: { host: '127.0.0.1', port, strictPort: true, watch: null, fs: { allow: [root, dirname(require.resolve('react/package.json')), dirname(require.resolve('react-dom/package.json'))] } } });
 
   await vite.listen();
   console.log(JSON.stringify({ url: `http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-recharge-polling.html`,

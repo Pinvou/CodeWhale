@@ -184,7 +184,9 @@
     "test:account-platform-entitlement-correction": "node --test tests/account_platform_entitlement_client.test.mjs tests/account_platform_entitlement_correction.test.mjs",
     "test:account-platform-entitlement-correction-ui": "node tests/account_platform_entitlement_production_smoke.mjs",
     "test:account-platform-desktop-reauthentication": "node --test tests/account_platform_desktop_reauthentication.test.mjs tests/account_platform_personal_recharge_reauthentication.test.mjs tests/account_platform_closure_host_transport.test.mjs && node tests/account_platform_desktop_reauthentication_ui_smoke.mjs",
-    "test:account-platform-installed-hosts-ui": "node tests/account_platform_installed_hosts_ui_smoke.mjs"
+    "test:account-platform-installed-hosts-ui": "node tests/account_platform_installed_hosts_ui_smoke.mjs",
+    "test:account-platform-user-code-ui": "node tests/account_platform_user_code_lookup_smoke.mjs",
+    "serve:account-platform-recharge-polling-fixture": "node tests/account_platform_recharge_polling_server.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.10",
