@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -44,8 +45,15 @@ type LegacyUsageWaiverRecord struct {
 func (r *PostgresRepository) LegacyUsageWaiver(ctx context.Context, holdID uuid.UUID, reason, key string, actor UsageWaiverActor) (LegacyUsageWaiverRecord, error) {
 	var record LegacyUsageWaiverRecord
 	facts, _ := json.Marshal([]string{holdID.String(), reason, actor.Issuer + "|" + actor.Subject})
-	expected := waiverHash(facts)
+	fixedExpected := waiverHash(facts)
+	originalReason, originalActor := strings.TrimSpace(reason), strings.TrimSpace(actor.Issuer+"|"+actor.Subject)
+	originalExpected := waiverHash([]byte(holdID.String() + "\x00" + originalReason + "\x00" + originalActor))
+	matchedKey := key
 	err := r.pool.QueryRow(ctx, `SELECT hold_id,request_fingerprint,reason,actor,before_status,id,after_status,allocation_snapshot,created_at FROM usage_hold_admin_actions WHERE action='SAFE_RELEASE' AND idempotency_key=$1`, key).Scan(&record.HoldID, &record.RequestFingerprint, &record.Reason, &record.Actor, &record.BeforeStatus, &record.ActionID, &record.AfterStatus, &record.AllocationSnapshot, &record.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) && key != strings.TrimSpace(key) {
+		matchedKey = strings.TrimSpace(key)
+		err = r.pool.QueryRow(ctx, `SELECT hold_id,request_fingerprint,reason,actor,before_status,id,after_status,allocation_snapshot,created_at FROM usage_hold_admin_actions WHERE action='SAFE_RELEASE' AND idempotency_key=$1`, strings.TrimSpace(key)).Scan(&record.HoldID, &record.RequestFingerprint, &record.Reason, &record.Actor, &record.BeforeStatus, &record.ActionID, &record.AfterStatus, &record.AllocationSnapshot, &record.CreatedAt)
+	}
 	if err == nil {
 		record.Completed = true
 	} else if !errors.Is(err, pgx.ErrNoRows) {
@@ -64,7 +72,12 @@ func (r *PostgresRepository) LegacyUsageWaiver(ctx context.Context, holdID uuid.
 			return record, err
 		}
 	}
-	if record.HoldID != holdID || record.RequestFingerprint != expected || record.Reason != reason || record.Actor != actor.Issuer+"|"+actor.Subject {
+	// O completed actions used trimmed NUL-delimited facts; F prepared and
+	// completed records used the unchanged JSON facts. Recognize each published
+	// writer without changing the stored fingerprint or creating a modern command.
+	fixedMatch := matchedKey == key && validIdempotencyKey(key, 120) && record.RequestFingerprint == fixedExpected && record.Reason == reason && record.Actor == actor.Issuer+"|"+actor.Subject
+	originalMatch := record.Completed && validOriginalWaiverKey(key) && originalReason != "" && len(originalReason) <= 500 && originalActor != "" && record.RequestFingerprint == originalExpected && record.Reason == originalReason && record.Actor == originalActor
+	if record.HoldID != holdID || (!fixedMatch && !originalMatch) {
 		return LegacyUsageWaiverRecord{}, ErrConflict
 	}
 	if record.Completed && (record.AfterStatus == nil || *record.AfterStatus != "RELEASED") {

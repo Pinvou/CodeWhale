@@ -508,6 +508,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestOrganizationPlanPurchaseLifecycleFencePostgres",
             "TestBillingLedgerAuditReadOnlyPublicPostgres",
             "TestBillingFinancialEventOutboxContractsPostgres",
+            "TestUsageWaiverOriginal828HTTPReplayPostgres",
         })
         valid = self.events(RUNNER.OWNER_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
         for name in RUNNER.OWNER_REQUIRED:

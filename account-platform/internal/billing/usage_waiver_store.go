@@ -23,6 +23,16 @@ type UsageWaiverActor struct {
 	AuthorizationVersion int64
 }
 
+// validOriginalWaiverKey is only a lookup boundary for the published O writer.
+// A matching completed O action is still required; this cannot prepare money.
+func validOriginalWaiverKey(key string) bool {
+	key = strings.TrimSpace(key)
+	return utf8.ValidString(key) && len(key) >= 8 && len(key) <= 120
+}
+func validWaiverKeyCandidate(key string) bool {
+	return validIdempotencyKey(key, 120) || validOriginalWaiverKey(key)
+}
+
 func waiverHash(raw []byte) string { sum := sha256.Sum256(raw); return hex.EncodeToString(sum[:]) }
 func waiverHumanFingerprint(hold uuid.UUID, reason string, actor UsageWaiverActor) string {
 	raw, _ := json.Marshal([]string{hold.String(), reason, actor.ID.String(), actor.Issuer, actor.Subject})
@@ -114,7 +124,7 @@ func readWaiverResult(ctx context.Context, q queryable, c usagewaiver.Command) (
 
 func (r *PostgresRepository) PrepareUsageWaiver(ctx context.Context, holdID uuid.UUID, reason, key string, actor UsageWaiverActor) (usagewaiver.Command, error) {
 	var zero usagewaiver.Command
-	if holdID == uuid.Nil || !validIdempotencyKey(key, 120) || !utf8.ValidString(reason) || strings.TrimSpace(reason) == "" || utf8.RuneCountInString(reason) > 500 || actor.ID == uuid.Nil || actor.AuthorizationVersion <= 0 || strings.TrimSpace(actor.Issuer) == "" || strings.TrimSpace(actor.Subject) == "" {
+	if holdID == uuid.Nil || !validWaiverKeyCandidate(key) || !utf8.ValidString(reason) || strings.TrimSpace(reason) == "" || utf8.RuneCountInString(reason) > 500 || actor.ID == uuid.Nil || actor.AuthorizationVersion <= 0 || strings.TrimSpace(actor.Issuer) == "" || strings.TrimSpace(actor.Subject) == "" {
 		return zero, ErrConflict
 	}
 	tx, err := r.pool.Begin(ctx)
@@ -144,11 +154,19 @@ func (r *PostgresRepository) PrepareUsageWaiver(ctx context.Context, holdID uuid
 		return zero, err
 	}
 	legacy, err := legacyWaiverKeyTx(ctx, tx, key)
+	if err == nil && !legacy && key != strings.TrimSpace(key) {
+		legacy, err = legacyWaiverKeyTx(ctx, tx, strings.TrimSpace(key))
+	}
 	if err != nil {
 		return zero, err
 	}
 	if legacy {
 		return zero, ErrLegacyWaiverRequiresReview
+	}
+	// The shorter/trimmed namespace is read-only compatibility, never authority
+	// to prepare a new modern command.
+	if !validIdempotencyKey(key, 120) {
+		return zero, ErrConflict
 	}
 	var usageID, walletID uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT usage_request_id,wallet_id FROM usage_holds WHERE id=$1`, holdID).Scan(&usageID, &walletID); errors.Is(err, pgx.ErrNoRows) {
