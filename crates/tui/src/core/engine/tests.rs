@@ -19615,6 +19615,51 @@ fn structured_run_tests_summary_is_recoverable_and_leads_with_failures() {
 }
 
 #[test]
+fn structured_run_tests_summary_bounds_metadata_and_scales_both_streams() {
+    let raw = json!({
+        "success": false,
+        "exit_code": 101,
+        "command": "cargo test",
+        "stdout": format!("{}STDOUT FAILURE", "ok\n".repeat(40_000)),
+        "stderr": format!("{}STDERR FAILURE", "warning\n".repeat(40_000)),
+    })
+    .to_string();
+    let output = ToolResult::success(raw).with_metadata(json!({
+        "summary": format!("failing_test: {}", "失败".repeat(20_000)),
+    }));
+    let mut previous_len = 0;
+    for window in [16_000, 128_000, 1_000_000] {
+        let view = super::context::tool_result_context_view(
+            ApiProvider::Deepseek,
+            ROUTE_128K,
+            Some(codewhale_config::route::RouteLimits {
+                context_tokens: Some(window),
+                ..Default::default()
+            }),
+            "run_tests",
+            &output,
+        );
+        assert!(view.needs_full_output_artifact);
+        let count = view.text.chars().count();
+        assert!(count <= crate::route_budget::route_inline_char_budget(Some(window as u32)));
+        assert!(
+            count > previous_len,
+            "stream detail should scale with route budget"
+        );
+        previous_len = count;
+        let summary = view
+            .text
+            .find("failure summary: failing_test:")
+            .expect("summary");
+        assert!(summary < view.text.find("stderr:").expect("stderr"));
+        assert!(summary < view.text.find("stdout:").expect("stdout"));
+        assert!(view.text.contains("STDOUT FAILURE"));
+        assert!(view.text.contains("STDERR FAILURE"));
+        assert!(view.text.contains("the full output could not be saved"));
+    }
+}
+
+#[test]
 fn display_compaction_never_writes_artifacts() {
     // The TUI builds its API-message copy with the same pure view.
     with_artifact_home(|home| {
@@ -19988,7 +20033,7 @@ fn forkguard_agent_receipt_passthrough_is_bounded() {
         "members": [{"member_id": "general", "description": huge_member}],
     })
     .to_string();
-    let output = ToolResult::success(roster);
+    let output = ToolResult::success(roster.clone());
 
     let context = compact_tool_result_for_context("deepseek-v4-pro", "agent", &output);
 
@@ -19996,14 +20041,65 @@ fn forkguard_agent_receipt_passthrough_is_bounded() {
         context.contains("[sub-agent receipt]") && context.contains("characters]"),
         "oversized receipts pass through bounded with a truncation note:\n{context}"
     );
+    let (receipt, recovery) = context
+        .split_once("\n[the full output could not be saved;")
+        .expect("unsaved receipt must explain recovery failure");
+    assert!(recovery.contains("retrieve_tool_result") || recovery.contains("re-run"));
     let prefix_len = "[sub-agent receipt]\n".len();
     assert!(
-        context.len()
+        receipt.chars().count()
             <= prefix_len
                 + super::context::SUBAGENT_RECEIPT_PASSTHROUGH_MAX_CHARS
                 + "[receipt truncated: showing 2000 of 18446744073709551615 characters]".len(),
         "passthrough must stay bounded:\n{context}"
     );
+    let budget = crate::route_budget::route_inline_char_budget_for_route(
+        ApiProvider::Deepseek,
+        "deepseek-v4-pro",
+        None,
+    );
+    assert!(context.chars().count() <= budget);
+    with_artifact_home(|home| {
+        let mut output = output.clone();
+        assert!(
+            crate::tools::truncate::preserve_full_output_for_model_context(
+                &mut output,
+                "call-receipt",
+                "agent",
+                SESSION_6508,
+            )
+        );
+        let view = super::context::tool_result_context_view(
+            ApiProvider::Deepseek,
+            "deepseek-v4-pro",
+            None,
+            "agent",
+            &output,
+        );
+        assert!(!view.needs_full_output_artifact);
+        assert!(view.text.chars().count() <= budget);
+        assert!(view.text.contains("ref=\"art_call-receipt\""));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let context = crate::tools::spec::ToolContext::new(home).with_state_namespace(SESSION_6508);
+        let retrieved = runtime
+            .block_on(crate::tools::spec::ToolSpec::execute(
+                &crate::tools::tool_result_retrieval::RetrieveToolResultTool,
+                json!({"ref": "art_call-receipt", "mode": "head", "line_count": 1}),
+                &context,
+            ))
+            .expect("retrieve full receipt");
+        assert!(retrieved.success, "{}", retrieved.content);
+        let payload: Value = serde_json::from_str(&retrieved.content).expect("retrieval payload");
+        assert!(
+            payload["excerpt"]
+                .as_str()
+                .expect("excerpt")
+                .contains(&roster)
+        );
+    });
 
     // The cap is inclusive and the note is exact: a receipt of exactly the
     // cap passes through verbatim, one character over it truncates.

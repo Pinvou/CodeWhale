@@ -524,15 +524,20 @@ fn json_number_text(value: &Value, key: &str) -> Option<String> {
         })
 }
 
-fn compact_run_tests_result_for_context(raw: &str) -> Option<String> {
+/// Space reserved for structured-summary framing and the recovery footer.
+const STRUCTURED_SUMMARY_FRAME_CHARS: usize = 1_000;
+
+fn compact_run_tests_result_for_context(
+    raw: &str,
+    metadata: Option<&Value>,
+    budget: usize,
+) -> Option<String> {
     let parsed: Value = serde_json::from_str(raw).ok()?;
     let success = parsed.get("success")?.as_bool()?;
     let exit_code = json_number_text(&parsed, "exit_code").unwrap_or_else(|| "?".to_string());
     let command = json_text(&parsed, "command").unwrap_or("(unknown command)");
     let stdout = json_text(&parsed, "stdout");
     let stderr = json_text(&parsed, "stderr");
-    let stream_limit = if success { 500 } else { 1_000 };
-
     let mut lines = vec![
         "[run_tests result summarized for context]".to_string(),
         format!(
@@ -541,6 +546,20 @@ fn compact_run_tests_result_for_context(raw: &str) -> Option<String> {
         ),
         format!("command: {}", summarize_text(command, 300)),
     ];
+    // Keep the failing test names ahead of noisy streams. Metadata is also
+    // bounded so it cannot consume the route budget or the recovery footer.
+    if let Some(summary) = metadata.and_then(|metadata| json_text(metadata, "summary")) {
+        lines.push(format!(
+            "failure summary: {}",
+            summarize_text(summary, TOOL_RESULT_METADATA_SUMMARY_CHARS)
+        ));
+    }
+    let header_chars: usize = lines.iter().map(|line| line.chars().count() + 1).sum();
+    let streams = usize::from(stderr.is_some()) + usize::from(stdout.is_some());
+    // Reserve framing and recovery space, then share the route's remaining
+    // detail budget between the present streams (including the failure tail).
+    let stream_limit =
+        budget.saturating_sub(header_chars + STRUCTURED_SUMMARY_FRAME_CHARS) / streams.max(1);
     if let Some(stderr) = stderr {
         lines.push(format!(
             "stderr: {}",
@@ -661,9 +680,14 @@ fn compact_task_gate_run_result_for_context(raw: &str) -> Option<String> {
     Some(lines.join("\n"))
 }
 
-fn compact_structured_tool_result_for_context(tool_name: &str, raw: &str) -> Option<String> {
+fn compact_structured_tool_result_for_context(
+    tool_name: &str,
+    raw: &str,
+    metadata: Option<&Value>,
+    budget: usize,
+) -> Option<String> {
     match tool_name {
-        "run_tests" => compact_run_tests_result_for_context(raw),
+        "run_tests" => compact_run_tests_result_for_context(raw, metadata, budget),
         "run_verifiers" => compact_run_verifiers_result_for_context(raw),
         // `tasks` is the unified durable-task tool (piagent phase B); its
         // gate_run action emits the same gate payload as the legacy
@@ -752,7 +776,7 @@ pub(crate) fn tool_result_context_view(
     let retrieval_ref = recovery.as_ref().and_then(|recovery| recovery.artifact_id);
 
     let summary = compact_subagent_tool_result_for_context(tool_name, raw)
-        .or_else(|| compact_structured_tool_result_for_context(tool_name, raw))
+        .or_else(|| compact_structured_tool_result_for_context(tool_name, raw, metadata, budget))
         .map(|text| ContextSummary {
             lossy: text != raw,
             text,
