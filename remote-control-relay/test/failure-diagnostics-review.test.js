@@ -46,6 +46,40 @@ test("credential renewal changes delivery authorization without changing confirm
   assert.throws(() => restored.append(renewed, packet({ report_id: "review_new_report" }), { ...rebound, diagnostic_id: undefined }, next), /metadata_missing/);
 });
 
+test("unfinished deletion survives receipt expiry, repeated compaction and restart before storage recovery", t => {
+  const path = directory(t), pepper = "review-deletion-expiry-pepper";
+  const stores = [];
+  const open = () => { const store = new TelemetryStore(path, pepper); stores.push(store); return store; };
+  t.after(() => { for (const store of stores) clearTimeout(store.saveTimer); });
+  let store = open();
+  const credential = store.register({hardware_claim:"review-expiry-hardware",
+    registration_secret:"review-expiry-registration-fixture", hardware_source:"installation_id"});
+  const owner = store.devices.get(credential.device_id);
+  const collection = store.startBehaviorCollection(owner, {request_id:"review_expiry_start"});
+  const ownIncident = {...incident, device_id:owner.device_id, collection_period_id:collection.collection_period_id};
+  store.failureReports.append(owner, packet({collection_period_id:collection.collection_period_id,
+    incident_period_id:collection.collection_period_id}), ownIncident);
+  clearTimeout(store.saveTimer); store.saveNow();
+  const before = readFileSync(store.failureReports.path);
+  const failure = t.mock.method(FailureReportStore.prototype, "prune", () => { throw new Error("fixture storage unavailable"); });
+  const deletion = store.deleteBehaviorData(owner, {request_id:"review_expiry_delete"});
+  assert.equal(deletion.status, "processing");
+  const future = deletion.accepted_at + 31 * 86400000;
+  for (let i=0; i<3; i++) store.compactExpiredData(future);
+  assert.deepEqual(readFileSync(store.failureReports.path), before);
+  store = open();
+  assert.equal(store.deletionStatus(deletion.deletion_request_id, credential.device_token, future).status, "processing");
+  assert.equal(store.priorDeletionResponse("review_expiry_delete", credential.device_token, future).status, "processing");
+  assert.equal(store.credentialWasRemoved(credential.device_token), true);
+  failure.mock.restore();
+  assert.equal(store.deletionStatus(deletion.deletion_request_id, credential.device_token, future).status, "completed");
+  assert.equal(JSON.parse(readFileSync(store.failureReports.path)).reports.length, 0);
+  assert.throws(() => store.deletionStatus(deletion.deletion_request_id, credential.device_token, future), /deletion_result_expired/);
+  store.compactDeletionTombstones(future);
+  assert.equal(store.deletionTombstones.some(row => row.deletion_request_id), false);
+  assert.equal(store.credentialWasRemoved(credential.device_token), true);
+});
+
 test("audit and triage persist before disclosure without rewriting or serializing stored material", t => {
   const path = directory(t), store = new FailureReportStore(path);
   store.append(device, packet(), incident);

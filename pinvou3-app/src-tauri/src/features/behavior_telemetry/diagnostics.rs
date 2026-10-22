@@ -7,6 +7,32 @@ use sha2::{Digest, Sha256};
 const NOTICE: &str = "failure-diagnostics-v1";
 const RETENTION: u64 = 14 * 24 * 60 * 60 * 1000;
 const MAX_STATE: usize = 16 * 1024 * 1024;
+const MAX_REPORT_BYTES: usize = 2300 * 1024;
+
+fn report_request_body(device_id: &str, period: &str, payload: &Value) -> Result<Value> {
+    let body = json!({"device_id":device_id,"collection_period_id":period,"report":payload});
+    anyhow::ensure!(
+        serde_json::to_vec(&body)?.len() <= MAX_REPORT_BYTES,
+        "diagnostic_report_too_large"
+    );
+    Ok(body)
+}
+
+fn sanitize_environment(environment: &mut serde_json::Map<String, Value>) {
+    environment.retain(|key, value| {
+        let allowed = |choices: &[&str]| value.as_str().is_some_and(|v| choices.contains(&v));
+        match key.as_str() {
+            "provider_key" => allowed(CONTROLLED_PROVIDER_KEYS),
+            "model_key" => allowed(CONTROLLED_MODEL_KEYS),
+            "tool_key" => allowed(CONTROLLED_TOOL_KEYS),
+            "routing" => allowed(&["local", "remote_controller", "remote_controlled"]),
+            "mode" => allowed(&["assistant", "code", "scheduled", "team", "system"]),
+            "input_type" => allowed(&["text", "voice", "attachment", "mixed", "system"]),
+            "has_attachment" => value.is_boolean(),
+            _ => false,
+        }
+    });
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct DiagnosticHint {
@@ -596,6 +622,9 @@ pub(super) fn enrich(
     if context.lease != *lease {
         return;
     }
+    // Loaded JSON is not proof that cached categories still satisfy the current
+    // registries. Extension corruption must not drop the base terminal event.
+    sanitize_environment(&mut context.environment);
     context.last_used = context.last_used.max(event.occurred_at);
     if let Some(turn) = field(event, "turn_id") {
         if context.turn.as_deref().is_some_and(|t| t != turn) {
@@ -969,10 +998,9 @@ pub(crate) fn preview_diagnostic(
     let payload = json!({"report_id": token("report_",24), "incident_id": request.incident_id,
         "collection_period_id": lease.collection_period_id, "incident_period_id": incident_period, "notice_version": NOTICE,
         "confirmed_at": now_ms(), "notes": redactor.bounded(&request.notes,6000,true), "attachments": attachments});
-    anyhow::ensure!(
-        serde_json::to_vec(&payload)?.len() <= 2300 * 1024,
-        "diagnostic_report_too_large"
-    );
+    // Reserve the full wire envelope, including the longest accepted identity
+    // and delivery-period fields; credentials can renew after this preview.
+    report_request_body(&"x".repeat(128), &"x".repeat(128), &payload)?;
     state.previews.clear();
     state.previews.push(Preview {
         token: preview_token.clone(),
@@ -1114,6 +1142,7 @@ pub(super) async fn run_report_worker(mut rx: mpsc::Receiver<()>, telemetry: Beh
                 {
                     if recovery.is_some() {
                         telemetry.state_healthy.store(false, Ordering::Release);
+                        telemetry.wake_control_worker();
                         pending.reason = "retry_pending".into();
                         pending.attempts = pending.attempts.saturating_add(1);
                         pending.next_attempt_at = now_ms()
@@ -1143,12 +1172,16 @@ pub(super) async fn run_report_worker(mut rx: mpsc::Receiver<()>, telemetry: Beh
                 .context("diagnostic_endpoint_unsupported")?
                 .to_owned()
                 + "diagnostics/report";
+            let body = report_request_body(
+                &credentials.device_id,
+                &report.lease.collection_period_id,
+                &report.payload,
+            )?;
             let mut response = telemetry
                 .client
                 .post(endpoint)
                 .bearer_auth(&credentials.device_token)
-                .json(&json!({"device_id":credentials.device_id,
-                    "collection_period_id":report.lease.collection_period_id,"report":report.payload}))
+                .json(&body)
                 .send()
                 .await?;
             let status = response.status();
@@ -1181,8 +1214,12 @@ pub(super) async fn run_report_worker(mut rx: mpsc::Receiver<()>, telemetry: Beh
             };
             Ok((
                 received,
-                matches!(conflict_code.as_str(), "diagnostic_report_conflict" | "collection_inactive" | "diagnostic_incident_period_mismatch")
-                    || matches!(status.as_u16(), 400 | 403 | 413 | 422),
+                matches!(
+                    conflict_code.as_str(),
+                    "diagnostic_report_conflict"
+                        | "collection_inactive"
+                        | "diagnostic_incident_period_mismatch"
+                ) || matches!(status.as_u16(), 400 | 403 | 413 | 422),
                 status.as_u16(),
                 match conflict_code.as_str() {
                     "collection_inactive" => "collection_inactive",
@@ -1237,6 +1274,35 @@ pub(super) async fn run_report_worker(mut rx: mpsc::Receiver<()>, telemetry: Beh
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn report_size_limit_includes_the_actual_wire_envelope() {
+        let empty = report_request_body("device", "period", &json!({"notes":""})).unwrap();
+        let overhead = serde_json::to_vec(&empty).unwrap().len();
+        let exact = json!({"notes":"x".repeat(MAX_REPORT_BYTES - overhead)});
+        assert_eq!(
+            serde_json::to_vec(&report_request_body("device", "period", &exact).unwrap())
+                .unwrap()
+                .len(),
+            MAX_REPORT_BYTES
+        );
+        assert!(
+            report_request_body(
+                "device",
+                "period",
+                &json!({"notes":"x".repeat(MAX_REPORT_BYTES - overhead + 1)})
+            )
+            .is_err()
+        );
+        // A bare payload at the transport cap can never be a valid envelope.
+        assert!(
+            report_request_body(
+                "device",
+                "period",
+                &json!({"notes":"x".repeat(MAX_REPORT_BYTES)})
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn classification_and_redaction_never_retain_raw_errors() {
         assert_eq!(

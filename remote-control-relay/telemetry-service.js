@@ -2054,8 +2054,11 @@ export class TelemetryStore {
     const tokenHash = this.deletionTokenHash(token);
     const record = this.deletionResultsByRequest
       .get(`${tokenHash}:${boundedText(requestId, 128)}`);
+    if (record?.status === "processing") {
+      this.finishPendingDeletions();
+      return this.publicDeletionResponse(record);
+    }
     if (record && Number(record.result_expires_at) <= now) return null;
-    if (record?.status === "processing") this.finishPendingDeletions();
     return record ? this.publicDeletionResponse(record) : null;
   }
 
@@ -2064,10 +2067,16 @@ export class TelemetryStore {
     const record = this.deletionResultsById
       .get(`${tokenHash}:${boundedText(deletionRequestId, 128)}`);
     if (!record) throw new TelemetryHttpError(404, "deletion_request_not_found");
+    // The receipt lifetime must not expire an unfinished cleanup intent.
+    // This request may acknowledge its recovery; later reads of a completed,
+    // expired receipt retain the existing 410 policy.
+    if (record.status === "processing") {
+      this.finishPendingDeletions();
+      return this.publicDeletionResponse(record);
+    }
     if (Number(record.result_expires_at) <= now) {
       throw new TelemetryHttpError(410, "deletion_result_expired");
     }
-    if (record.status === "processing") this.finishPendingDeletions();
     return this.publicDeletionResponse(record);
   }
 
@@ -2332,7 +2341,8 @@ export class TelemetryStore {
     const byFact = new Map();
     for (const record of this.deletionTombstones) {
       const active = Number(record.result_expires_at) > now;
-      const compact = active ? record : {
+      const retainRequest = active || Boolean(record.deletion_request_id && record.status !== "completed");
+      const compact = retainRequest ? record : {
           subject_hash: record.subject_hash,
           ...(record.token_hash ? { token_hash: record.token_hash } : {}),
           removal_reason: record.removal_reason || "deleted",
@@ -2346,7 +2356,7 @@ export class TelemetryStore {
       // and whether an earlier minimal record has an expiry field.
       const key = JSON.stringify([compact.subject_hash, compact.token_hash, compact.removal_reason,
         compact.hardware_hash, compact.registration_secret_hash,
-        active ? compact.deletion_request_id : null, active ? compact.request_id : null]);
+        retainRequest ? compact.deletion_request_id : null, retainRequest ? compact.request_id : null]);
       const prior = byFact.get(key);
       if (!prior || (active && Number(compact.result_expires_at) > Number(prior.result_expires_at))) byFact.set(key, compact);
     }

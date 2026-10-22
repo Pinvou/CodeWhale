@@ -1006,6 +1006,7 @@ class CiGatePolicyTests(unittest.TestCase):
         for path in [
             "pinvou3-app/src-tauri/src/features/behavior_telemetry/diagnostic_redaction.rs",
             "remote-control-relay/diagnostic-redaction.js",
+            "remote-control-relay/failure-diagnostics.js",
             "remote-control-relay/test/diagnostic-redaction.test.js",
             "remote-control-relay/eval/failure-redaction/native-runner.mjs",
             "remote-control-relay/eval/failure-redaction/native-runner.Cargo.lock",
@@ -1020,6 +1021,7 @@ class CiGatePolicyTests(unittest.TestCase):
         original = self.pr_workflow
         try:
             for old in ["              - 'remote-control-relay/diagnostic-redaction.js'\n",
+                        "              - 'remote-control-relay/failure-diagnostics.js'\n",
                         "          PINVOU_TEST_NATIVE_REDACTION: '1'\n"]:
                 self.pr_workflow = original.replace(old, "", 1)
                 self.assertNotEqual(self.pr_workflow, original)

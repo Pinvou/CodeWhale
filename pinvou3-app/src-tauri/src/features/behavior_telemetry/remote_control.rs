@@ -206,7 +206,7 @@ impl RemoteControlEvent {
         event
     }
 
-    fn into_behavior(self) -> BehaviorEvent {
+    pub(super) fn into_behavior(self) -> BehaviorEvent {
         let mut event = BehaviorEvent::new("remote_control_event")
             .string("remote_stage", self.stage.as_str())
             .string("remote_outcome", self.outcome.as_str())

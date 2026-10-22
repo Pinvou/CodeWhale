@@ -26,9 +26,13 @@ export default function DiagnosticsPanel({ copy, sessionId, turnId, compact = fa
     locked.current = true; setBusy(true); setMessage('');
     try { await action(); } catch (error) {
       const code = String(error?.message || error);
+      if (['diagnostic_preview_expired', 'diagnostic_authorization_changed', 'diagnostic_collection_disabled'].includes(code)) {
+        setPreview(null); setConsent(false);
+      }
       setMessage(code === 'diagnostic_preview_expired' ? copy.previewExpired
         : ['diagnostic_authorization_changed', 'diagnostic_collection_disabled'].includes(code) ? copy.authorizationChanged
-          : code === 'diagnostic_queue_full' ? copy.queueFull : copy.error);
+          : code === 'diagnostic_queue_full' ? copy.queueFull
+            : code === 'diagnostic_file_limit' ? copy.attachmentHint : copy.error);
     }
     finally { locked.current = false; setBusy(false); }
   };
@@ -56,7 +60,7 @@ export default function DiagnosticsPanel({ copy, sessionId, turnId, compact = fa
         <label className="block">{copy.notes}<textarea className="mt-1 w-full rounded-lg border p-2 text-black" maxLength={6000} rows={3} disabled={busy} value={notes} onChange={event => { invalidate(); setNotes(event.target.value); }} /></label>
         <p className="text-xs text-gray-500">{copy.attachmentHint}</p>
         <button type="button" disabled={busy} onClick={() => void run(async () => {
-          const chosen = await bridge.feedback.pickDiagnosticFiles();
+          const chosen = await bridge.feedback.pickDiagnosticFiles(copy.fileFilter);
           if (chosen.length > 3) throw new Error('diagnostic_file_limit');
           invalidate(); setFiles(chosen);
         })}>{copy.attachments}</button>
@@ -64,6 +68,7 @@ export default function DiagnosticsPanel({ copy, sessionId, turnId, compact = fa
         <button type="button" className="block rounded-lg bg-blue-600 px-3 py-2 text-white disabled:opacity-40" disabled={busy || !incident || !data.enabled} onClick={() => void run(async () => {
           const revision = ++request.current;
           const result = await bridge.feedback.previewFailureDiagnostic({ incident_id: selected, notes, attachments: files });
+          if (!result?.preview_token || !Array.isArray(result?.report?.attachments)) throw new Error('diagnostic_preview_invalid');
           if (revision === request.current) { setPreview(result); setConsent(false); }
         })}>{copy.preview}</button>
         {preview && <div className="space-y-2 rounded-xl border p-3">
@@ -73,7 +78,9 @@ export default function DiagnosticsPanel({ copy, sessionId, turnId, compact = fa
           <label className="flex gap-2"><input type="checkbox" checked={consent} disabled={busy} onChange={event => setConsent(event.target.checked)} /><span>{copy.consent}</span></label>
           <button type="button" className="rounded-lg bg-blue-600 px-3 py-2 text-white disabled:opacity-40" disabled={busy || !consent || !data.enabled} onClick={() => void run(async () => {
             await bridge.feedback.submitFailureDiagnostic(preview.preview_token);
-            invalidate(); setMessage(copy.queued); await refresh();
+            invalidate(); setMessage(copy.queued);
+            // A failed receipt refresh cannot undo successful local queueing.
+            try { await refresh(); } catch { setMessage(copy.queued); }
           })}>{copy.submit}</button>
         </div>}
       </>}

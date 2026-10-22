@@ -1,4 +1,5 @@
 export const failureDiagnosticsZh = {
+  fileFilter: '诊断日志、文本和图片',
   previewExpired: '预览已过期，请重新预览并确认。', authorizationChanged: '统计授权已变化，请刷新后重新预览。', queueFull: '待发送报告已满，请等待现有报告送达后重试。',
   incidentPeriodMismatch: '旧故障记录无法关联，本报告已停止重试。重新预览同一故障无法恢复；请通过现有反馈渠道手工报告，或在故障再次发生后选择新记录。',
   collectionInactive: '采集期已结束，本报告未发送；重新开启统计后，请重新预览并确认。',
@@ -17,6 +18,7 @@ export const failureDiagnosticsZh = {
   timeline: '结构化阶段证据',
 };
 export const failureDiagnosticsEn = {
+  fileFilter: 'Diagnostic logs, text and images',
   previewExpired: 'The preview expired. Create and confirm a new preview.', authorizationChanged: 'Analytics consent changed. Refresh and create a new preview.', queueFull: 'The report queue is full. Wait for pending reports to be delivered.',
   incidentPeriodMismatch: 'This legacy failure cannot be linked, so the report will not retry. Previewing the same failure cannot restore it. Use an existing feedback channel to report it manually, or select a new record if the failure happens again.',
   collectionInactive: 'The collection period ended and this report was not sent. Enable analytics, then create and confirm a new preview.',
@@ -35,6 +37,7 @@ export const failureDiagnosticsEn = {
   timeline: 'Structured stage evidence',
 };
 export const failureDiagnosticsJa = {
+  fileFilter: '診断ログ・テキスト・画像',
   previewExpired: 'プレビューの有効期限が切れました。再作成して確認してください。', authorizationChanged: '統計への同意が変更されました。更新して再度プレビューしてください。', queueFull: '送信待ちの報告が上限に達しました。送信完了を待ってください。',
   incidentPeriodMismatch: '古い障害記録を関連付けられないため、この報告は再試行しません。同じ障害を再プレビューしても復旧しません。既存の窓口から手動で報告するか、再発した際の新しい記録を選択してください。',
   collectionInactive: '収集期間が終了したため、この報告は未送信です。統計を有効にして再度プレビューし、確認してください。',

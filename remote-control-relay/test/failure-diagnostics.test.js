@@ -268,7 +268,11 @@ test("a full material quota reserves capacity for mandatory reads and issue upda
       try { store.append(device,report({report_id:`report_quota_fixture_${index}`,attachments}),witness({device_id:device.device_id}));accepted++; }
       catch(error){assert.match(error.message,/diagnostic_report_capacity/);break;}
     }
-    assert(accepted>=10 && accepted<20);
+    // Fourteen sets already exceed 28 MiB from base64 alone, before JSON
+    // metadata. A 32 MiB mutation admits fifteen and must fail this contract.
+    assert.equal(accepted, 13);
+    assert.equal(store.state.reports.length, 13);
+    assert(Buffer.byteLength(JSON.stringify(store.state.reports)) <= 28*1024*1024);
     const incident=witness({device_id:"device_quota_0"});
     assert.equal(store.detail(incident,"operator").reports.length,1);
     const fingerprint=failureGroups([incident])[0].fingerprint;

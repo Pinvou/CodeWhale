@@ -39,7 +39,7 @@ try {
   await page.waitForFunction(() => window.diagnosticTest.submitted.length === 1 && !document.querySelector('input[type=checkbox]'));
   await page.evaluate(() => { window.diagnosticTest.files = ['a.log', 'b.log', 'c.log', 'd.log']; });
   await click('Choose logs, text or screenshots');
-  await page.waitForFunction(() => document.body.textContent.includes('The operation failed'));
+  await page.waitForFunction(() => document.body.textContent.includes('Up to 3 files'));
   assert.equal(await page.evaluate(() => window.diagnosticTest.previews.length), 2);
   await page.evaluate(() => { window.diagnosticTest.previewError = 'diagnostic_preview_expired'; });
   await click('Create redacted preview');
@@ -51,6 +51,12 @@ try {
     await page.evaluate(code => { window.diagnosticTest.submitError = code; }, code);
     await click('Confirm and queue');
     await page.waitForFunction(text => document.body.textContent.includes(text), {}, text);
+    if (code === 'diagnostic_authorization_changed') {
+      assert.equal(await page.$('input[type=checkbox]'), null, 'invalid consent preview must be discarded');
+      await page.evaluate(() => { window.diagnosticTest.submitError = ''; });
+      await click('Create redacted preview'); await page.waitForSelector('input[type=checkbox]');
+      await page.click('input[type=checkbox]');
+    }
   }
   assert.equal(await page.evaluate(() => window.diagnosticTest.submitted.length), 1);
   await page.evaluate(() => {

@@ -79,12 +79,9 @@ struct TaskTelemetryDedupe {
 
 impl TaskTelemetryDedupe {
     fn decide(&mut self, event: &RemoteTaskEvent) -> Option<String> {
-        let lifecycle = match event.status.as_str() {
-            "admitted" => TaskTelemetryLifecycle::Admitted,
-            "succeeded" | "failed" | "cancelled" | "interrupted" => {
-                TaskTelemetryLifecycle::Terminal
-            }
-            _ => return None,
+        let lifecycle = match task_telemetry_stage(&event.status)?.0 {
+            RemoteStage::TaskAdmit => TaskTelemetryLifecycle::Admitted,
+            _ => TaskTelemetryLifecycle::Terminal,
         };
         if !self.tasks.contains_key(&event.task_id) {
             while self.tasks.len() >= TASK_TELEMETRY_DEDUPE_CAPACITY {
@@ -113,6 +110,34 @@ impl TaskTelemetryDedupe {
     }
 }
 
+// Share the accepted statuses with dedupe: accepting an unknown terminal in
+// the sink alone would still lose it at the second filter.
+fn task_telemetry_stage(status: &str) -> Option<(RemoteStage, RemoteOutcome, RemoteReason)> {
+    Some(match status {
+        "admitted" => (
+            RemoteStage::TaskAdmit,
+            RemoteOutcome::Ok,
+            RemoteReason::None,
+        ),
+        "succeeded" => (
+            RemoteStage::TaskTerminal,
+            RemoteOutcome::Ok,
+            RemoteReason::None,
+        ),
+        "failed" | "result_unknown" => (
+            RemoteStage::TaskTerminal,
+            RemoteOutcome::InternalError,
+            RemoteReason::Unknown,
+        ),
+        "cancelled" | "interrupted" => (
+            RemoteStage::TaskTerminal,
+            RemoteOutcome::Rejected,
+            RemoteReason::Unknown,
+        ),
+        _ => return None,
+    })
+}
+
 fn stable_task_telemetry_event_id(task_id: &str, lifecycle: TaskTelemetryLifecycle) -> String {
     let mut digest = Sha256::new();
     digest.update(b"pinvou-remote-task-telemetry-v1\0");
@@ -135,28 +160,8 @@ impl DesktopTaskEventSink {
     }
 
     fn track_task_once(&self, event: &RemoteTaskEvent) {
-        let (stage, outcome, reason) = match event.status.as_str() {
-            "admitted" => (
-                RemoteStage::TaskAdmit,
-                RemoteOutcome::Ok,
-                RemoteReason::None,
-            ),
-            "succeeded" => (
-                RemoteStage::TaskTerminal,
-                RemoteOutcome::Ok,
-                RemoteReason::None,
-            ),
-            "failed" => (
-                RemoteStage::TaskTerminal,
-                RemoteOutcome::InternalError,
-                RemoteReason::Unknown,
-            ),
-            "cancelled" | "interrupted" => (
-                RemoteStage::TaskTerminal,
-                RemoteOutcome::Rejected,
-                RemoteReason::Unknown,
-            ),
-            _ => return,
+        let Some((stage, outcome, reason)) = task_telemetry_stage(&event.status) else {
+            return;
         };
         let Some(event_id) = self.telemetry_seen.lock().decide(event) else {
             return;
@@ -1120,6 +1125,38 @@ mod tests {
         assert!(seen.decide(&task_event("task-1", "failed")).is_none());
         assert_ne!(admitted_id, terminal_id);
         assert_eq!(seen.tasks.len(), 1);
+    }
+
+    #[test]
+    fn result_unknown_crosses_both_filters_once_without_claiming_success() {
+        let mut seen = TaskTelemetryDedupe::default();
+        let mut event = task_event("unknown-task", "result_unknown");
+        event.outcome_unknown = true;
+        assert!(matches!(
+            task_telemetry_stage(&event.status),
+            Some((
+                RemoteStage::TaskTerminal,
+                RemoteOutcome::InternalError,
+                RemoteReason::Unknown
+            ))
+        ));
+        let id = seen
+            .decide(&event)
+            .expect("unknown terminal is a diagnostic witness");
+        assert_eq!(
+            id,
+            stable_task_telemetry_event_id("unknown-task", TaskTelemetryLifecycle::Terminal)
+        );
+        assert!(seen.decide(&event).is_none());
+        assert!(
+            seen.decide(&task_event("unknown-task", "admitted"))
+                .is_none()
+        );
+        assert!(
+            seen.decide(&task_event("unknown-task", "succeeded"))
+                .is_none()
+        );
+        assert!(task_telemetry_stage("running").is_none());
     }
 
     #[test]

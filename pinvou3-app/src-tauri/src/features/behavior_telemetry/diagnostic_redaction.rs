@@ -356,6 +356,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bounded_output_preserves_utf16_pairs_and_counts_expanded_bytes() {
+        let redactor = Redactor::new("bounded-test-scope");
+        let notes = redactor.bounded(
+            &format!("{}{}", "中".repeat(5986), "🦀".repeat(20)),
+            6000,
+            true,
+        );
+        assert_eq!(notes.encode_utf16().count(), 6000);
+        assert!(notes.ends_with("\n[truncated]"));
+        assert!(notes.contains('🦀'));
+        assert!(!notes.contains('\u{fffd}'));
+        let odd_boundary = redactor.bounded(
+            &format!("{}{}", "中".repeat(5987), "🦀".repeat(20)),
+            6000,
+            true,
+        );
+        assert_eq!(odd_boundary.encode_utf16().count(), 5999);
+        assert!(!odd_boundary.contains('🦀'));
+        assert!(odd_boundary.ends_with("\n[truncated]"));
+        let attachment = redactor.bounded(&"request_id=x\n".repeat(4000), 65536, false);
+        assert_eq!(attachment.len(), 65536);
+        assert!(attachment.ends_with("\n[truncated]"));
+        assert!(!attachment.contains("request_id=x"));
+        assert_eq!(redactor.bounded("短い説明", 6000, true), "短い説明");
+    }
+
+    #[test]
     fn structured_facts_survive_sensitive_parents_and_unknown_names() {
         let redactor = Redactor::new("private-test-scope");
         let value = redactor.redact(r#"{"http_status":4.01e2,"input_tokens":1e4,"error":{"code":"key_revoked"},"credentials":{"code":"PRIVATE_FIXTURE"},"PRIVATE_KEY_NAME":"PRIVATE_FIXTURE"}"#);

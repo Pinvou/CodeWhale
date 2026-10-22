@@ -2957,9 +2957,10 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       listFailureDiagnostics: function () { return invoke("list_failure_diagnostics"); },
       previewFailureDiagnostic: function (request) { return invoke("preview_failure_diagnostic", { request: request }); },
       submitFailureDiagnostic: function (previewToken) { return invoke("submit_failure_diagnostic", { previewToken: previewToken, confirmed: true }); },
-      pickDiagnosticFiles: async function () {
+      pickDiagnosticFiles: async function (filterName) {
         if (!dialogOpen) throw new Error("diagnostic_picker_unsupported");
-        var selected = await dialogOpen({ multiple: true, filters: [{ name: bt("fileMediaFilterName"), extensions: ["png", "jpg", "jpeg", "txt", "log"] }] });
+        if (typeof filterName !== "string" || !filterName.trim()) throw new Error("diagnostic_picker_unsupported");
+        var selected = await dialogOpen({ multiple: true, filters: [{ name: filterName, extensions: ["png", "jpg", "jpeg", "txt", "log"] }] });
         return selected ? (Array.isArray(selected) ? selected : [selected]) : [];
       },
     },

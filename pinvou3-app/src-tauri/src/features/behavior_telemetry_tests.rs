@@ -254,6 +254,26 @@ fn diagnostic_metadata_sampling_and_original_metrics_are_independent() {
 }
 
 #[test]
+fn remote_unknown_terminal_keeps_its_diagnosis_without_emitting_a_task_failure() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://localhost:1");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    let metric = RemoteControlEvent::new(RemoteStage::TaskTerminal, RemoteOutcome::InternalError)
+        .reason(RemoteReason::Unknown)
+        .diagnostic_task("unknown-remote-task", true)
+        .diagnostic_terminal(false, true);
+    telemetry.track(metric.into_behavior());
+    let outbox = telemetry.outbox.lock().unwrap();
+    assert_eq!(outbox.records.len(), 1);
+    let event = &outbox.records[0].event;
+    assert_eq!(event["event_name"], "remote_control_event");
+    assert_eq!(event["diagnostic_code"], "remote_result_unknown");
+    assert_eq!(event["diagnostic_site"], "remote_terminal");
+    assert!(event.get("status").is_none());
+    assert!(event.get("attempt_id").is_none());
+}
+
+#[test]
 fn diagnostic_preview_requires_exact_current_authorization_and_survives_restart_once_confirmed() {
     let _home = TestHome::new();
     let runtime = test_runtime("http://localhost:1");
@@ -692,6 +712,41 @@ fn diagnostic_environment_discards_invalid_current_and_persisted_values() {
             .get("input_type")
             .is_none()
     );
+    for key in [
+        "provider_key",
+        "model_key",
+        "tool_key",
+        "routing",
+        "has_attachment",
+        "unknown_cached_field",
+    ] {
+        let mut saved = serde_json::to_value(&*telemetry.diagnostics.lock().unwrap()).unwrap();
+        saved["contexts"]["environment_session"]["environment"][key] =
+            json!("private-invalid-cached-category");
+        // Exercise disk deserialization, then the actual enqueue path, rather
+        // than only testing a helper on a hand-built map.
+        filesystem::atomic_write_private(
+            &paths::pinvou3_home().join("failure-diagnostics.json"),
+            &serde_json::to_vec(&saved).unwrap(),
+        )
+        .unwrap();
+        *telemetry.diagnostics.lock().unwrap() = diagnostics::load();
+        let mut terminal = diagnostic_failure("environment_session", "environment_turn");
+        terminal.event_id = format!("environment_recovery_{key}");
+        terminal.fields.remove(key);
+        assert!(
+            telemetry.try_track_for_lease(terminal, &lease),
+            "base terminal must survive cached {key}"
+        );
+        let records = telemetry.outbox.lock().unwrap();
+        let environment = &records.records.last().unwrap().event["diagnostic_environment"];
+        if key == "routing" {
+            assert_eq!(environment[key], "local");
+        } else {
+            assert!(environment.get(key).is_none(), "{key}");
+        }
+        assert!(!environment.to_string().contains("private-invalid"));
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -186,9 +186,9 @@ export function diagnosticRedactor(
     const pairs = [];
     let offset = 0;
     while (offset < line.length) {
-      while (/\s/.test(line[offset] || "") && offset < line.length) offset++;
+      while (/[ \t\n\f\r]/.test(line[offset] || "") && offset < line.length) offset++;
       if (offset === line.length) break;
-      const head = /^([A-Za-z][A-Za-z0-9_-]{0,63})\s*[=:]\s*/.exec(line.slice(offset));
+      const head = /^([A-Za-z][A-Za-z0-9_-]{0,63})[ \t\n\f\r]*[=:][ \t\n\f\r]*/.exec(line.slice(offset));
       if (!head) return null;
       offset += head[0].length;
       const start = offset;
@@ -201,9 +201,9 @@ export function diagnosticRedactor(
         if (line[offset] !== '"') return null;
         offset++;
       } else {
-        while (offset < line.length && !/\s/.test(line[offset])) offset++;
+        while (offset < line.length && !/[ \t\n\f\r]/.test(line[offset])) offset++;
       }
-      if (start === offset || (offset < line.length && !/\s/.test(line[offset]))) return null;
+      if (start === offset || (offset < line.length && !/[ \t\n\f\r]/.test(line[offset]))) return null;
       const raw = line.slice(start, offset);
       let value;
       try {

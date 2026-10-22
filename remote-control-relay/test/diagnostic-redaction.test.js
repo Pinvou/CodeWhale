@@ -12,6 +12,18 @@ import { nativeRedact } from "../eval/failure-redaction/native-runner.mjs";
 // New formats and canaries, not the prototype's 13-family layout set.
 const cases = [
   {
+    name: "non-ASCII whitespace cannot create records inside unframed material",
+    text: "http_status\u00a0=401\nPRIVATE_HELDOUT_SPACE",
+    keep: [],
+    drop: ["401", "PRIVATE_HELDOUT"],
+  },
+  {
+    name: "ASCII tab record separators agree with native parsing",
+    text: "http_status\t=\t401\terror_code=key_revoked",
+    keep: ["401", "key_revoked"],
+    drop: [],
+  },
+  {
     name: "conflicting normalized aliases do not select a diagnosis by key order",
     text: '{"http_status":401,"httpStatus":"PRIVATE_HELDOUT_STATUS"}',
     keep: [],

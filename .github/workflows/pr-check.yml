@@ -282,6 +282,7 @@ jobs:
               # The Rust job executes native/Relay redaction parity. Either
               # implementation, the corpus or its native runner must select it.
               - 'remote-control-relay/diagnostic-redaction.js'
+              - 'remote-control-relay/failure-diagnostics.js'
               - 'remote-control-relay/test/diagnostic-redaction.test.js'
               - 'remote-control-relay/eval/failure-redaction/native-runner.mjs'
               - 'remote-control-relay/eval/failure-redaction/native-runner.Cargo.lock'
