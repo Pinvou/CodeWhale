@@ -104,6 +104,10 @@ fn file_digest(
                 bytes as f64 * 100.0 / before.len() as f64
             },
         ));
+        // 任务卡进度条协议行（与脚本下载进度同约定）：前端 reduceLogChunk
+        // 解析它驱动进度/速度，并把该行从可见日志中过滤——没有它，digest
+        // 阶段进度条只能停留在不确定态，字节进度要展开日志才看得到。
+        progress(&format!("LMM_PROGRESS_BYTES={}/{}", bytes, before.len()));
     };
     report(0, on_progress);
     let mut buffer = vec![0; 1024 * 1024];

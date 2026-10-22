@@ -46,6 +46,7 @@ import {
   formatBytes,
   lifecycleTaskKey,
   mergeModels,
+  operationWarningText,
   sortModels,
   storeGuideState,
   uninstallDoneText,
@@ -1184,9 +1185,9 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
         {forceRemove && forceRemove.stage === 'result' ? (
           <>
             <MsDialogTitle id="model-store-force-remove-title">{copy.forceRemoveResultTitle}</MsDialogTitle>
-            {/* warning 是 LMM 那边写好的、可以直接上界面的一句人话,原样显示。
-                自己再改写一遍只会让两边的说法慢慢对不上。 */}
-            <p className={`text-[13px] leading-6 ${TEXT_SECONDARY}`}>{forceRemove.result?.warning || ''}</p>
+            {/* 警告码经 operationWarningText 按当前语言渲染；未知字符串（旧结果/
+                测试桩的纯文本）原样显示。 */}
+            <p className={`text-[13px] leading-6 ${TEXT_SECONDARY}`}>{operationWarningText(copy, forceRemove.result?.warning)}</p>
             {forceRemove.result?.residual_paths?.length ? (
               <>
                 <div className={`mt-4 text-[13px] font-medium ${TEXT_PRIMARY}`}>
