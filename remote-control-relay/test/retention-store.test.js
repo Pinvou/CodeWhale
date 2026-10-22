@@ -644,6 +644,50 @@ for (const recovery of ['retry', 'restart']) {
   }));
 }
 
+for (const failStream of [false, true]) {
+  test(`pending deletion rewrites only dirty streams and retries failed disk commits (${failStream})`, t => fixture(t, dir => {
+    const { store, registered } = registeredStore(dir);
+    const other = store.register({ hardware_claim:'other-retention-fixture', registration_secret:'other-retention-secret-at-least-32', hardware_source:'installation_id' });
+    const rows = [registered.device_id, other.device_id].map((device_id, index) => ({
+      device_id, event_id:`dirty_stream_${index}`, event_name:'app_opened', occurred_at:now, received_at:now,
+    }));
+    store.events = rows.slice(); store.behaviorEvents = rows.slice(); store.behaviorPipelineEvents = rows.slice();
+    const streams = [store.eventsPath, store.behaviorEventsPath, store.behaviorPipelinePath];
+    for (const path of streams) writeFileSync(path, rows.map(row => JSON.stringify(row)).join('\n') + '\n');
+    const writes = [], rename = fs.renameSync;
+    let failNext = failStream;
+    const fault = t.mock.method(fs, 'renameSync', (source, target) => {
+      if (streams.includes(target)) writes.push(target);
+      if (failNext && target === store.behaviorEventsPath) { failNext = false; throw new Error('fixture stream disk failure'); }
+      return rename(source, target);
+    });
+    const prune = failStream ? null : t.mock.method(store.failureReports, 'prune', () => { throw new Error('fixture late cleanup failure'); });
+    syncBuiltinESMExports();
+    try {
+      const response = store.deleteBehaviorData(registered, { request_id:'delete_dirty_streams_fixture' });
+      assert.equal(response.status, 'processing');
+      if (failStream) {
+        assert.equal(store.behaviorEvents.length, 2, 'failed disk commit must not mark memory clean');
+        assert.match(readFileSync(store.behaviorEventsPath, 'utf8'), new RegExp(registered.device_id));
+      } else {
+        for (let count = 0; count < 3; count++) {
+          assert.equal(store.deletionStatus(response.deletion_request_id, registered.device_token).status, 'processing');
+        }
+        assert.deepEqual(writes, streams, 'late cleanup failure must not amplify already-clean stream writes');
+        prune.mock.restore();
+      }
+      assert.equal(store.deletionStatus(response.deletion_request_id, registered.device_token).status, 'completed');
+      assert.equal(writes.filter(path => path === store.eventsPath).length, 1);
+      for (const path of streams) {
+        const saved = readFileSync(path, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+        assert.deepEqual(saved.map(row => row.device_id), [other.device_id]);
+      }
+    } finally {
+      fault.mock.restore(); if (prune) prune.mock.restore(); syncBuiltinESMExports();
+    }
+  }));
+}
+
 for (const marker of [false, null, 'true']) {
   test(`online and offline inventory reject invalid required-ledger marker ${JSON.stringify(marker)}`, async t => fixture(t, async dir => {
     const { store } = registeredStore(dir);

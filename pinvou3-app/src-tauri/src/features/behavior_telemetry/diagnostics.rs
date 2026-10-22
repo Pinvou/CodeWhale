@@ -1084,9 +1084,50 @@ pub(super) async fn run_report_worker(mut rx: mpsc::Receiver<()>, telemetry: Beh
             continue;
         };
         if !telemetry.lease_is_current(&report.lease) {
-            // Renewal/revocation owns the pending state; do not busy-loop while
-            // its control transaction has temporarily unpublished the lease.
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            // Wait for an in-flight control operation before distinguishing a
+            // durable interrupted renewal from genuinely superseded consent.
+            let _gate = telemetry.control_gate.lock().await;
+            if telemetry.lease_is_current(&report.lease) {
+                continue;
+            }
+            let recovery = {
+                let mut guard = telemetry.state.lock().await;
+                guard
+                    .as_mut()
+                    .filter(|state| state.renewal_checkpoint_is_current(&telemetry.runtime))
+                    .map(|state| telemetry.finish_credential_renewal_checkpoint(state))
+            };
+            if matches!(recovery, Some(Ok(()))) {
+                if let Some(tx) = &telemetry.event_tx {
+                    let _ = tx.try_send(());
+                }
+                telemetry.flush_tool_install_terminals(
+                    telemetry.authorization_generation.load(Ordering::Acquire),
+                );
+                continue;
+            }
+            if let Ok(mut state) = telemetry.diagnostics.lock() {
+                if let Some(pending) = state
+                    .pending
+                    .iter_mut()
+                    .find(|p| p.payload["report_id"] == report.payload["report_id"])
+                {
+                    if recovery.is_some() {
+                        telemetry.state_healthy.store(false, Ordering::Release);
+                        pending.reason = "retry_pending".into();
+                        pending.attempts = pending.attempts.saturating_add(1);
+                        pending.next_attempt_at = now_ms()
+                            + (5u64.saturating_mul(1u64 << pending.attempts.min(6))).min(300)
+                                * 1000;
+                    } else {
+                        pending.status = "rejected".into();
+                        pending.reason = "authorization_changed".into();
+                        pending.payload["notes"] = json!("");
+                        pending.payload["attachments"] = json!([]);
+                    }
+                }
+                let _ = persist_reports(&state);
+            }
             continue;
         }
         let result: Result<(bool, bool, u16, &'static str)> = async {

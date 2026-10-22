@@ -616,6 +616,9 @@ struct PersistedState {
     registration_secret: String,
     device_id: Option<String>,
     device_token: Option<String>,
+    /// Durable redo intent, committed before any queue lease is rewritten.
+    #[serde(default)]
+    credential_renewal_checkpoint: Option<CollectionLease>,
     #[serde(default)]
     retired_endpoints: Vec<RetiredEndpointCredentials>,
     #[serde(default)]
@@ -1609,6 +1612,7 @@ impl PersistedState {
             registration_secret: token("rs_", 32),
             device_id: None,
             device_token: None,
+            credential_renewal_checkpoint: None,
             retired_endpoints: Vec::new(),
             control: CollectionControl::default(),
         }
@@ -1616,6 +1620,22 @@ impl PersistedState {
 
     fn has_pending_control(&self) -> bool {
         self.control.pending_request.is_some() || !self.control.pending_deletions.is_empty()
+    }
+
+    fn renewal_checkpoint_is_current(&self, runtime: &RuntimeConfig) -> bool {
+        runtime.enabled
+            && endpoint_matches_runtime(self, runtime)
+            && self.control.enabled
+            && !self.control.collection_blocked
+            && !self.has_pending_control()
+            && self
+                .credential_renewal_checkpoint
+                .as_ref()
+                .is_some_and(|lease| {
+                    lease.generation == self.control.generation
+                        && Some(&lease.collection_period_id)
+                            == self.control.collection_period_id.as_ref()
+                })
     }
 
     fn rebind_endpoint(mut self, runtime: &RuntimeConfig) -> Self {

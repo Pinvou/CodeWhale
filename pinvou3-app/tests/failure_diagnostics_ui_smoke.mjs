@@ -59,6 +59,12 @@ try {
   await click('Refresh');
   await page.waitForFunction(() => document.body.textContent.includes('The collection period ended and this report was not sent'));
   await page.evaluate(() => {
+    window.diagnosticTest.reports = [{ report_id: 'stale_lease_report', incident_id: 'incident_fixture_1', status: 'rejected', reason: 'authorization_changed' }];
+  });
+  await click('Refresh');
+  await page.waitForFunction(() => document.body.textContent.includes('Analytics consent changed. Refresh and create a new preview.'));
+  assert.equal(await page.evaluate(() => window.diagnosticTest.submitted.length), 1);
+  await page.evaluate(() => {
     window.diagnosticTest.reports = [{ report_id: 'legacy_report', incident_id: 'incident_fixture_1', status: 'rejected', reason: 'incident_period_mismatch' }];
   });
   await click('Refresh');

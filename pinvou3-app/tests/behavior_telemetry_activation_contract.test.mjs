@@ -129,7 +129,10 @@ test('retryable delivery and pending privacy controls keep bounded background re
   assert.match(rust, /async fn migrate_endpoint_locked/);
   assert.match(rust, /StatusCode::GONE[\s\S]*device_credentials_expired[\s\S]*recover_expired_credentials/);
   assert.match(rust, /async fn recover_expired_credentials/);
-  assert.match(rust, /diagnostics::origin_periods\(self, generation\)\?[\s\S]*rebind_period\(&started\.collection_period_id, generation, &origins\)/);
+  assert.match(rust, /fn finish_credential_renewal_checkpoint[\s\S]*diagnostics::origin_periods\(self, lease\.generation\)\?[\s\S]*rebind_period\(&lease\.collection_period_id, lease\.generation, &origins\)/);
+  const renewal = rust.match(/pub\(super\) async fn recover_expired_credentials_locked[\s\S]*?pub\(super\) fn finish_credential_renewal_checkpoint/)?.[0] || '';
+  assert.match(renewal, /checkpoint\.credential_renewal_checkpoint = Some[\s\S]*persist_state\(&checkpoint\)[\s\S]*\*state = checkpoint;[\s\S]*finish_credential_renewal_checkpoint\(state\)/);
+  assert.doesNotMatch(renewal, /rebind_period\(|rebind_lifecycle_state\(/, 'no child lease may change before the durable checkpoint');
   assert.match(rust, /device_data_deleted[\s\S]*handle_authoritative_deletion/);
   assert.match(rust, /async fn handle_authoritative_deletion_locked[\s\S]*collecting\.store\(false[\s\S]*persist_state\(&fresh\)[\s\S]*outbox\.clear\(\)[\s\S]*tasks\.clear\(\)/);
   assert.match(rust, /fn state_after_authoritative_deletion[\s\S]*PersistedState::fresh/);

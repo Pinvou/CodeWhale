@@ -36,23 +36,31 @@ impl BehaviorTelemetry {
         let active_generation = persisted
             .as_ref()
             .map_or(0, |state| state.control.generation);
+        let renewal_pending = state_healthy
+            && persisted
+                .as_ref()
+                .is_some_and(|state| state.renewal_checkpoint_is_current(&runtime));
         let collecting = Arc::new(AtomicBool::new(
-            runtime.enabled && state_healthy && active_period.is_some(),
+            runtime.enabled && state_healthy && active_period.is_some() && !renewal_pending,
         ));
         let collection_period_id = Arc::new(RwLock::new(active_period.clone()));
         let mut loaded_outbox = Outbox::load(outbox_path()).unwrap_or_else(|error| {
             log::debug!("[pinvou3][behavior] failed to load outbox: {error:#}");
             Outbox::empty(outbox_path())
         });
-        if let Err(error) = loaded_outbox.retain_period(active_period.as_deref(), active_generation)
-        {
-            log::debug!("[pinvou3][behavior] failed to sanitize outbox period: {error:#}");
+        if !renewal_pending {
+            if let Err(error) =
+                loaded_outbox.retain_period(active_period.as_deref(), active_generation)
+            {
+                log::debug!("[pinvou3][behavior] failed to sanitize outbox period: {error:#}");
+            }
         }
         let outbox = Arc::new(StdMutex::new(loaded_outbox));
         let recovered_tasks = load_task_attempts()
             .into_iter()
             .filter(|(_, attempt)| {
-                active_period.as_deref() == Some(attempt.collection_period_id.as_str())
+                (renewal_pending
+                    || active_period.as_deref() == Some(attempt.collection_period_id.as_str()))
                     && attempt.generation == active_generation
             })
             .collect::<HashMap<_, _>>();
@@ -109,7 +117,25 @@ impl BehaviorTelemetry {
             heartbeat_tx,
             report_tx: Some(report_tx),
         };
-        super::diagnostics::sanitize_authorization(&telemetry);
+        if renewal_pending {
+            // This state is not shared with workers yet; never block an async
+            // runtime thread while repairing the checkpoint before sanitizing.
+            let mut guard = telemetry
+                .state
+                .try_lock()
+                .expect("new telemetry state is uncontended");
+            if let Some(state) = guard.as_mut() {
+                if let Err(error) = telemetry.finish_credential_renewal_checkpoint(state) {
+                    telemetry.state_healthy.store(false, Ordering::Release);
+                    log::error!(
+                        "[pinvou3][behavior] credential renewal recovery deferred: {error:#}"
+                    );
+                }
+            }
+        }
+        if telemetry.state_healthy.load(Ordering::Acquire) {
+            super::diagnostics::sanitize_authorization(&telemetry);
+        }
         if let Some(rx) = heartbeat_rx {
             tauri::async_runtime::spawn(Self::run_heartbeat_worker(rx, telemetry.worker_clone()));
         }
@@ -152,6 +178,17 @@ impl BehaviorTelemetry {
                     ),
             );
         }
+        // A failed checkpoint retains task/diagnostic files for the worker's
+        // bounded retry or a later restart; do not clear them as stale leases.
+        let recovered_tasks = if telemetry.state_healthy.load(Ordering::Acquire) {
+            telemetry
+                .tasks
+                .lock()
+                .map(|tasks| tasks.clone())
+                .unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
         for (session_id, attempt) in recovered_tasks {
             if let Some(turn_id) = attempt.turn_id.as_deref() {
                 telemetry.track(
@@ -178,7 +215,9 @@ impl BehaviorTelemetry {
                 );
             }
         }
-        if let Ok(mut tasks) = telemetry.tasks.lock() {
+        if let Ok(mut tasks) = telemetry.tasks.lock()
+            && telemetry.state_healthy.load(Ordering::Acquire)
+        {
             tasks.clear();
             let _ = persist_task_attempts(&tasks);
         }
@@ -1001,26 +1040,75 @@ impl BehaviorTelemetry {
             generation,
         );
         self.collecting.store(false, Ordering::Release);
-        let origins = super::diagnostics::origin_periods(self, generation)?;
-        self.outbox
-            .lock()
-            .map_err(|_| anyhow::anyhow!("behavior outbox lock poisoned"))?
-            .rebind_period(&started.collection_period_id, generation, &origins)?;
-        self.rebind_lifecycle_state(generation, &started.collection_period_id)?;
-        state.device_id = Some(renewed.device_id);
-        state.device_token = Some(renewed.device_token);
-        state.control.enabled = true;
-        state.control.collection_period_id = Some(started.collection_period_id.clone());
-        state.control.generation = generation;
-        state.control.pending_request = None;
-        persist_state(state)?;
-        if let Ok(mut period) = self.collection_period_id.write() {
-            *period = Some(started.collection_period_id);
+        let mut checkpoint = state.clone();
+        checkpoint.device_id = Some(renewed.device_id);
+        checkpoint.device_token = Some(renewed.device_token);
+        checkpoint.control.enabled = true;
+        checkpoint.control.collection_period_id = Some(started.collection_period_id.clone());
+        checkpoint.control.generation = generation;
+        checkpoint.control.pending_request = None;
+        checkpoint.credential_renewal_checkpoint = Some(CollectionLease {
+            generation,
+            collection_period_id: started.collection_period_id,
+        });
+        // Failure here leaves all child files and the old in-memory state intact.
+        if let Err(error) = persist_state(&checkpoint) {
+            self.collecting
+                .store(snapshot.control.enabled, Ordering::Release);
+            return Err(error);
         }
-        self.collecting.store(true, Ordering::Release);
+        *state = checkpoint;
+        if let Err(error) = self.finish_credential_renewal_checkpoint(state) {
+            self.state_healthy.store(false, Ordering::Release);
+            return Err(error);
+        }
         renewal_transition.complete();
         self.flush_tool_install_terminals(generation);
         Ok(true)
+    }
+
+    pub(super) fn finish_credential_renewal_checkpoint(
+        &self,
+        state: &mut PersistedState,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            state.renewal_checkpoint_is_current(&self.runtime),
+            "credential renewal authorization changed"
+        );
+        let lease = state
+            .credential_renewal_checkpoint
+            .clone()
+            .context("credential renewal checkpoint missing")?;
+        anyhow::ensure!(
+            self.authorization_generation.load(Ordering::Acquire) == lease.generation,
+            "credential renewal generation changed"
+        );
+        let origins = super::diagnostics::origin_periods(self, lease.generation)?;
+        {
+            let mut outbox = self
+                .outbox
+                .lock()
+                .map_err(|_| anyhow::anyhow!("behavior outbox lock poisoned"))?;
+            // A checkpoint renews only its original consent generation, never a
+            // stale event left behind by withdrawal or another subject.
+            outbox
+                .records
+                .retain(|record| record.generation == lease.generation);
+            outbox.rebind_period(&lease.collection_period_id, lease.generation, &origins)?;
+        }
+        self.rebind_lifecycle_state(lease.generation, &lease.collection_period_id)?;
+        let mut committed = state.clone();
+        committed.credential_renewal_checkpoint = None;
+        persist_state(&committed)?;
+        *state = committed;
+        *self
+            .collection_period_id
+            .write()
+            .map_err(|_| anyhow::anyhow!("behavior period lock poisoned"))? =
+            Some(lease.collection_period_id);
+        self.state_healthy.store(true, Ordering::Release);
+        self.collecting.store(true, Ordering::Release);
+        Ok(())
     }
 
     pub async fn status(&self) -> BehaviorTelemetryStatus {

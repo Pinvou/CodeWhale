@@ -2744,12 +2744,16 @@ export class TelemetryStore {
       // Retention is another durable subject store: never complete a deletion
       // until its minimal facts are gone, including after a failed attempt.
       this.persistRetentionFacts();
-      this.events = this.events.filter(event => !this.subjectWasDeleted(event.device_id));
-      this.behaviorEvents = this.behaviorEvents.filter(event => !this.subjectWasDeleted(event.device_id));
-      this.behaviorPipelineEvents = this.behaviorPipelineEvents.filter(event => !this.subjectWasDeleted(event.device_id));
-      atomicWriteJsonLines(this.eventsPath, this.events);
-      atomicWriteJsonLines(this.behaviorEventsPath, this.behaviorEvents);
-      atomicWriteJsonLines(this.behaviorPipelinePath, this.behaviorPipelineEvents);
+      for (const [field, path] of [["events", this.eventsPath],
+        ["behaviorEvents", this.behaviorEventsPath], ["behaviorPipelineEvents", this.behaviorPipelinePath]]) {
+        const retained = this[field].filter(event => !this.subjectWasDeleted(event.device_id));
+        if (retained.length !== this[field].length) {
+          // Commit memory only after disk succeeds. A failed rewrite must
+          // remain dirty on retry; already-clean streams need no full rewrite.
+          atomicWriteJsonLines(path, retained);
+          this[field] = retained;
+        }
+      }
       this.failureReports.prune(this.devices);
       this.eventIds = new Set(this.events.map(event => event.event_id));
       this.behaviorEventIds = new Set(this.behaviorEvents.map(event => event.event_id));
