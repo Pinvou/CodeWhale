@@ -15,7 +15,7 @@ use crate::features::device::{
     self, DeviceSnapshot, DeviceState, ExternalModel, ExternalModelsView, RemoveOutcome,
     ServiceStatus,
 };
-use crate::features::monitor::MonitorState;
+use crate::features::monitor::{CpuSnapshot, GpuSnapshot, MonitorState, RamSnapshot};
 
 /// 设备管理页 2s 轮询的完整快照。
 #[tauri::command]
@@ -73,9 +73,16 @@ pub async fn device_doctor_prompt(
 
 /// 故障排查上下文（设计 §5 第 4 节）：设备快照（传感器/磁盘/网络/进程/GPU 扩展）
 /// + 运行状态（CPU/GPU/内存）+ 服务可达性 + 当前活动模型健康。键名英文 snake_case。
+///
+/// **逐字段白名单**（十四轮评审）：上下文随提示词送往（可能是云端的）模型后端，
+/// 每一节都按字段显式挑明——快照结构体未来新增字段不会自动进上下文，必须在此
+/// 显式加入才外发。安全要点"白名单字段，不含密钥"由此落地（此前是"全结构体
+/// −事后脱敏"，新增字段默认外泄）。MAC 地址在白名单外（结构性剔除；脱敏层
+/// 的剔除臂保留兜底）。
 async fn build_doctor_context(device: &DeviceState, monitor: &MonitorState) -> Value {
     // 三路来源互不依赖，并发采样。串行时 vLLM 三端口逐个 1.5s 超时 + docker 3s，
-    // 最坏 8-12s 用户点排查卡才开出会话（评审 P2）；并发后总耗时 ≈ 最慢一路。
+    // 最坏 8-12s 用户点排查卡才开出会话（评审 P2）；并发后总耗时 ≈ 最慢一路
+    // （vLLM 端口并发后为单端口 1.5s，十四轮评审）。
     let (device_snapshot, monitor_snapshot, services) = tokio::join!(
         device::sample_snapshot(device),
         crate::features::monitor::sample_all(monitor),
@@ -83,11 +90,11 @@ async fn build_doctor_context(device: &DeviceState, monitor: &MonitorState) -> V
     );
     let active_model = monitor_snapshot.vllm.as_ref().map(active_model_projection);
     let mut context = assemble_doctor_context(
-        json!(device_snapshot),
-        json!(monitor_snapshot.gpu),
-        json!(monitor_snapshot.cpu),
-        json!(monitor_snapshot.ram),
-        json!(services),
+        &device_snapshot,
+        monitor_snapshot.gpu.as_ref(),
+        monitor_snapshot.cpu.as_ref(),
+        monitor_snapshot.ram.as_ref(),
+        &services,
         active_model,
     );
     mask_context_privacy(
@@ -115,22 +122,167 @@ fn active_model_projection(model: &crate::features::monitor::VllmSnapshot) -> Va
 
 /// 上下文拼装（纯函数，测试直打键名契约）：提示词模板与前端都按这些键取数，
 /// 拼装与采样解耦后键名漂移才有测试可拦（第三轮评审：原"契约测试"自造字面量
-/// 自证，测不到真实函数）。
+/// 自证，测不到真实函数）。入参收**类型化快照**而非序列化后的 Value——白名单
+/// 由编译期形状保证，结构体加字段时这里不挑明就不外发（十四轮评审）。
 fn assemble_doctor_context(
-    device: Value,
-    gpu: Value,
-    cpu: Value,
-    ram: Value,
-    services: Value,
+    device: &DeviceSnapshot,
+    gpu: Option<&GpuSnapshot>,
+    cpu: Option<&CpuSnapshot>,
+    ram: Option<&RamSnapshot>,
+    services: &[ServiceStatus],
     active_model: Option<Value>,
 ) -> Value {
     json!({
-        "device": device,
-        "gpu": gpu,
-        "cpu": cpu,
-        "ram": ram,
-        "services": services,
+        "device": doctor_device_projection(device),
+        "gpu": gpu.map(doctor_gpu_projection),
+        "cpu": cpu.map(doctor_cpu_projection),
+        "ram": ram.map(doctor_ram_projection),
+        "services": services.iter().map(doctor_service_projection).collect::<Vec<_>>(),
         "active_model": active_model,
+    })
+}
+
+/// 设备快照投影（白名单逐字段）：传感器/磁盘/网络/进程/GPU 扩展全量条目都在
+/// 诊断面内，但**逐字段挑明**——网络条目不含 `mac`（稳定硬件指纹，原脱敏层
+/// 剔除臂保留兜底），挂载点/进程路径等文本仍靠脱敏层改写家目录前缀。
+fn doctor_device_projection(device: &DeviceSnapshot) -> Value {
+    json!({
+        "generated_at_ms": device.generated_at_ms,
+        "os": {
+            "product_name": device.os.product_name,
+            "pretty_name": device.os.pretty_name,
+            "kernel": device.os.kernel,
+            "arch": device.os.arch,
+        },
+        "sensors": device
+            .sensors
+            .iter()
+            .map(|group| {
+                json!({
+                    "chip": group.chip,
+                    "entries": group
+                        .entries
+                        .iter()
+                        .map(|entry| {
+                            json!({
+                                "kind": entry.kind,
+                                "name": entry.name,
+                                "value": entry.value,
+                                "critical": entry.critical,
+                                "max": entry.max,
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>(),
+        "disks": device
+            .disks
+            .iter()
+            .map(|disk| {
+                json!({
+                    "name": disk.name,
+                    "mount_point": disk.mount_point,
+                    "fs_type": disk.fs_type,
+                    "kind": disk.kind,
+                    "total_bytes": disk.total_bytes,
+                    "available_bytes": disk.available_bytes,
+                    "is_removable": disk.is_removable,
+                })
+            })
+            .collect::<Vec<_>>(),
+        "network": device
+            .network
+            .iter()
+            .map(|iface| {
+                json!({
+                    "name": iface.name,
+                    "iface_type": iface.iface_type,
+                    "is_up": iface.is_up,
+                    "rx_bytes": iface.rx_bytes,
+                    "tx_bytes": iface.tx_bytes,
+                    "rx_bytes_per_sec": iface.rx_bytes_per_sec,
+                    "tx_bytes_per_sec": iface.tx_bytes_per_sec,
+                })
+            })
+            .collect::<Vec<_>>(),
+        "processes": {
+            "top_cpu": device
+                .processes
+                .top_cpu
+                .iter()
+                .map(doctor_proc_projection)
+                .collect::<Vec<_>>(),
+            "top_memory": device
+                .processes
+                .top_memory
+                .iter()
+                .map(doctor_proc_projection)
+                .collect::<Vec<_>>(),
+        },
+        "gpu_ext": device.gpu_ext.as_ref().map(|ext| {
+            json!({
+                "driver_version": ext.driver_version,
+                "cuda_version": ext.cuda_version,
+                "compute_processes": ext
+                    .compute_processes
+                    .iter()
+                    .map(|proc| {
+                        json!({
+                            "pid": proc.pid,
+                            "name": proc.name,
+                            "used_mib": proc.used_mib,
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            })
+        }),
+    })
+}
+
+fn doctor_proc_projection(proc: &crate::features::device::ProcInfo) -> Value {
+    json!({
+        "pid": proc.pid,
+        "name": proc.name,
+        "cpu_pct": proc.cpu_pct,
+        "memory_bytes": proc.memory_bytes,
+    })
+}
+
+fn doctor_gpu_projection(gpu: &GpuSnapshot) -> Value {
+    json!({
+        "name": gpu.name,
+        "vram_used_mib": gpu.vram_used_mib,
+        "vram_total_mib": gpu.vram_total_mib,
+        "utilization_pct": gpu.utilization_pct,
+        "processor_utilization_pct": gpu.processor_utilization_pct,
+        "shared_memory_used_mib": gpu.shared_memory_used_mib,
+        "temperature_c": gpu.temperature_c,
+        "power_w": gpu.power_w,
+    })
+}
+
+fn doctor_cpu_projection(cpu: &CpuSnapshot) -> Value {
+    json!({
+        "name": cpu.name,
+        "total_usage_pct": cpu.total_usage_pct,
+    })
+}
+
+fn doctor_ram_projection(ram: &RamSnapshot) -> Value {
+    json!({
+        "total_kib": ram.total_kib,
+        "used_kib": ram.used_kib,
+        "swap_total_kib": ram.swap_total_kib,
+        "swap_used_kib": ram.swap_used_kib,
+    })
+}
+
+fn doctor_service_projection(service: &ServiceStatus) -> Value {
+    json!({
+        "key": service.key,
+        "running": service.running,
+        "detail": service.detail,
     })
 }
 
@@ -222,22 +374,183 @@ fn mask_path_text(text: &str, home: &str, username: &str) -> String {
 mod tests {
     use super::*;
 
+    /// 全字段填充的快照夹具：白名单测试用它钉"哪些字段获准进上下文"。
+    fn fixture_snapshot() -> DeviceSnapshot {
+        DeviceSnapshot {
+            generated_at_ms: 1,
+            os: crate::features::device::OsInfo {
+                product_name: Some("Ubuntu".into()),
+                pretty_name: Some("Ubuntu 24.04".into()),
+                kernel: "6.11".into(),
+                arch: "aarch64".into(),
+            },
+            sensors: vec![crate::features::device::SensorGroup {
+                chip: "coretemp".into(),
+                entries: vec![crate::features::device::SensorEntry {
+                    kind: "temperature".into(),
+                    name: "temp1".into(),
+                    value: 45.0,
+                    critical: Some(100.0),
+                    max: Some(46.0),
+                }],
+            }],
+            disks: vec![crate::features::device::DiskSnapshot {
+                name: Some("nvme0n1".into()),
+                mount_point: "/home/u/data".into(),
+                fs_type: "ext4".into(),
+                kind: "ssd".into(),
+                total_bytes: 1,
+                available_bytes: 2,
+                is_removable: false,
+            }],
+            network: vec![crate::features::device::NetIfaceSnapshot {
+                name: "eth0".into(),
+                iface_type: "ethernet".into(),
+                is_up: true,
+                mac: Some("aa:bb:cc:dd:ee:ff".into()),
+                rx_bytes: 3,
+                tx_bytes: 4,
+                rx_bytes_per_sec: 5.0,
+                tx_bytes_per_sec: 6.0,
+            }],
+            processes: crate::features::device::ProcessSummary {
+                top_cpu: vec![crate::features::device::ProcInfo {
+                    pid: 7,
+                    name: "ollama".into(),
+                    cpu_pct: 12.5,
+                    memory_bytes: 8,
+                }],
+                top_memory: Vec::new(),
+            },
+            gpu_ext: Some(crate::features::device::GpuExtSnapshot {
+                driver_version: Some("570.1".into()),
+                cuda_version: Some("13.0".into()),
+                compute_processes: vec![crate::features::device::GpuProcInfo {
+                    pid: 9,
+                    name: "/home/u/bin/python3".into(),
+                    used_mib: 64,
+                }],
+            }),
+        }
+    }
+
     #[test]
     fn doctor_context_assembles_the_documented_contract_keys() {
         // 键名契约直打真实拼装函数（设计 §5 第 4 节）：前端与提示词模板都按这些
-        // 键取数。此前这里用 json! 自造字面量自证，测不到 build_doctor_context。
+        // 键取数。此前这里用 json! 自造字面量自证，测不到真实函数。
+        let gpu = crate::features::monitor::GpuSnapshot {
+            name: "GPU".into(),
+            vram_used_mib: 1,
+            vram_total_mib: 2,
+            utilization_pct: 3,
+            processor_utilization_pct: None,
+            shared_memory_used_mib: None,
+            temperature_c: Some(45),
+            power_w: Some(6.5),
+        };
+        let cpu = crate::features::monitor::CpuSnapshot {
+            name: "CPU".into(),
+            total_usage_pct: Some(11.0),
+        };
+        let ram = crate::features::monitor::RamSnapshot {
+            total_kib: 10,
+            used_kib: 4,
+            swap_total_kib: 2,
+            swap_used_kib: 0,
+        };
         let context = assemble_doctor_context(
-            json!({"os": {"arch": "aarch64"}}),
-            json!(null),
-            json!(null),
-            json!(null),
-            json!([{"key": "ollama", "running": false}]),
+            &fixture_snapshot(),
+            Some(&gpu),
+            Some(&cpu),
+            Some(&ram),
+            &[ServiceStatus {
+                key: "ollama".into(),
+                running: false,
+                detail: Some("连接被拒绝".into()),
+            }],
             Some(json!({"model_id": "m", "health_status": "healthy"})),
         );
         for key in ["device", "gpu", "cpu", "ram", "services", "active_model"] {
             assert!(context.get(key).is_some(), "missing context key: {key}");
         }
         assert_eq!(context["device"]["os"]["arch"], "aarch64");
+        assert_eq!(context["gpu"]["vram_total_mib"], 2);
+        assert_eq!(context["cpu"]["total_usage_pct"], 11.0);
+        assert_eq!(context["ram"]["swap_used_kib"], 0);
+        assert_eq!(context["services"][0]["key"], "ollama");
+    }
+
+    #[test]
+    fn doctor_context_is_an_explicit_field_whitelist() {
+        // 白名单钉面（十四轮评审）：上下文送往可能是云端的模型后端，每一节只
+        // 放显式挑明的字段——结构体未来加字段时本测试不改就照绿（新字段不外
+        // 泄），挑进白名单则必须在这里同步钉面。网络条目不得携带 mac（结构性
+        // 剔除，脱敏层剔除臂保留兜底）。键序按 BTreeMap 字典序断言。
+        fn keys_sorted(value: &serde_json::Value) -> Vec<String> {
+            let mut keys: Vec<String> = value
+                .as_object()
+                .expect("expected a JSON object")
+                .keys()
+                .cloned()
+                .collect();
+            keys.sort();
+            keys
+        }
+        let expected = |items: &[&str]| -> Vec<String> {
+            let mut keys: Vec<String> = items.iter().map(|key| key.to_string()).collect();
+            keys.sort();
+            keys
+        };
+        let context = assemble_doctor_context(&fixture_snapshot(), None, None, None, &[], None);
+        let device = &context["device"];
+        assert_eq!(
+            keys_sorted(&device["network"][0]),
+            expected(&[
+                "name",
+                "iface_type",
+                "is_up",
+                "rx_bytes",
+                "tx_bytes",
+                "rx_bytes_per_sec",
+                "tx_bytes_per_sec",
+            ]),
+            "network whitelist drifted"
+        );
+        assert!(device["network"][0].get("mac").is_none());
+        assert_eq!(
+            keys_sorted(&device["os"]),
+            expected(&["product_name", "pretty_name", "kernel", "arch"])
+        );
+        assert_eq!(
+            keys_sorted(&device["disks"][0]),
+            expected(&[
+                "name",
+                "mount_point",
+                "fs_type",
+                "kind",
+                "total_bytes",
+                "available_bytes",
+                "is_removable",
+            ])
+        );
+        assert_eq!(
+            keys_sorted(&device["gpu_ext"]),
+            expected(&["driver_version", "cuda_version", "compute_processes"])
+        );
+        assert_eq!(
+            keys_sorted(&device["gpu_ext"]["compute_processes"][0]),
+            expected(&["pid", "name", "used_mib"])
+        );
+        assert_eq!(
+            keys_sorted(&device["processes"]["top_cpu"][0]),
+            expected(&["pid", "name", "cpu_pct", "memory_bytes"])
+        );
+        // 采样缺 GPU/CPU/RAM 时保持 null（与"全结构体直出"时代的 null 同形，
+        // 前端与模板都按缺省解读）。
+        assert!(context["gpu"].is_null());
+        assert!(context["cpu"].is_null());
+        assert!(context["ram"].is_null());
+        assert!(context["active_model"].is_null());
     }
 
     #[test]

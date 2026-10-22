@@ -50,8 +50,15 @@ pub(crate) fn store_model_name_checked(
     }
 }
 
-fn weights_roots_from(settings: &config::Settings) -> Vec<std::path::PathBuf> {
+/// 权重根收集（纯函数，测试直打）：返回**绝对**根集合与被拒的相对条目（回显
+/// 限长 64）。入口绝对路径校验上线前写入的存量 config（或手改文件）可能携带
+/// 相对路径——相对解析随消费方工作目录漂移，对绝对权重路径的前缀匹配必然
+/// 失配，混进根集合只是"看起来有保护"（十四轮评审）。宽松端跳过相对条目
+/// （与历史行为等价）；**破坏性的移除端必须据此 Err**（fail-closed），与
+/// `set_storage_settings` 的写入侧拒绝同一把 `is_absolute` 尺子。
+fn collect_weights_roots(settings: &config::Settings) -> (Vec<std::path::PathBuf>, Vec<String>) {
     let mut roots = vec![config::data_dir()];
+    let mut relative: Vec<String> = Vec::new();
     // 当前 models_dir + 历史用过的 models_dir（换目录不搬权重，老根下仍是商店
     // 在册模型，第六轮评审 P2：只看当前值的话改过目录的机器旧根裸奔）+
     // import_scan_dirs（下载脚本会在这些目录里**就地复用**已存在的权重——
@@ -68,6 +75,10 @@ fn weights_roots_from(settings: &config::Settings) -> Vec<std::path::PathBuf> {
             continue;
         }
         let root = std::path::PathBuf::from(trimmed);
+        if !root.is_absolute() {
+            relative.push(trimmed.chars().take(64).collect());
+            continue;
+        }
         if !roots.contains(&root) {
             roots.push(root);
         }
@@ -84,7 +95,7 @@ fn weights_roots_from(settings: &config::Settings) -> Vec<std::path::PathBuf> {
             roots.push(root);
         }
     }
-    roots
+    (roots, relative)
 }
 
 /// 商店权重的**全部**可能根目录。默认根是 store 数据根（`~/.pinvou3/model-store/`，
@@ -99,7 +110,7 @@ fn weights_roots_from(settings: &config::Settings) -> Vec<std::path::PathBuf> {
 /// 建出空库与 WAL 边车。调用方（features/device）已在 blocking 池中调用并接受
 /// 这些副作用；修改副作用语义前先核对这两个调用点。
 pub(crate) fn store_weights_roots() -> Vec<std::path::PathBuf> {
-    weights_roots_from(&config::load_settings())
+    collect_weights_roots(&config::load_settings()).0
 }
 
 /// [`store_weights_roots`] 的可失败版：settings 读取失败时 `Err` 而不是静默回退
@@ -107,7 +118,16 @@ pub(crate) fn store_weights_roots() -> Vec<std::path::PathBuf> {
 /// 的保护恰在配置读取失败的一拍失效，深度守卫照常放行、商店权重被删（五轮评审
 /// P3，与商店名单查询的 fail-closed 同口径）；宽松的登记端继续用原函数。
 pub(crate) fn store_weights_roots_checked() -> Result<Vec<std::path::PathBuf>, String> {
-    Ok(weights_roots_from(&config::try_load_settings()?))
+    let (roots, relative) = collect_weights_roots(&config::try_load_settings()?);
+    if relative.is_empty() {
+        return Ok(roots);
+    }
+    // 移除端收到的 Err 会被 external_models 的守卫链包上"本次移除已被拒绝"
+    // 人话后缀；这里把名单逐个回显，用户照着改设置即可恢复。
+    Err(format!(
+        "商店权重根设置含相对路径项（{}）：相对路径无法参与权重保护边界，请改为绝对路径",
+        relative.join("、")
+    ))
 }
 
 /// 本机 Ollama 守护进程基地址：默认 `http://127.0.0.1:11434`，可被商店设置里的
@@ -235,6 +255,48 @@ mod tests {
         assert!(store_weights_roots_checked().is_err());
         // 宽松版同场景维持历史行为：默认根集合（隔离改名后按默认设置回填）。
         assert!(!store_weights_roots().is_empty());
+    }
+
+    #[test]
+    fn legacy_relative_roots_fail_closed_on_checked_and_skip_on_lenient() {
+        let _ctx = TempHome::new();
+        // 入口校验上线前的存量 config（或手改文件绕过 set_storage_settings）：
+        // 相对条目对绝对权重路径的前缀匹配必然失配——checked 必须拒绝而不是
+        // 静默携带一个"永远匹配不上"的假保护根（十四轮评审）。
+        write_config(r#"{"import_scan_dirs": ["relative/dir"], "models_dir": "/data/abs"}"#);
+        let error = store_weights_roots_checked().expect_err("relative root must fail closed");
+        assert!(error.contains("relative/dir"), "unexpected error: {error}");
+        assert!(error.contains("绝对路径"), "unexpected error: {error}");
+        // 宽松端（登记）跳过相对条目：绝对条目与数据根照常在集合里，集合内
+        // 不再混有相对根（与修复前"相对根混入但永远匹配不上"的假保护不同）。
+        let roots = store_weights_roots();
+        assert!(roots.contains(&std::path::PathBuf::from("/data/abs")));
+        assert!(
+            roots.iter().all(|root| root.is_absolute()),
+            "lenient roots must not carry relative entries: {roots:?}"
+        );
+    }
+
+    #[test]
+    fn relative_yardstick_covers_every_settings_derived_root_source() {
+        let _ctx = TempHome::new();
+        // 四个设置来源（当前 models_dir / 历史 models_dir / import_scan_dirs /
+        // staging_dir）走同一把 is_absolute 尺子——只查 import_scan_dirs 会给
+        // 其余三路留静默缺口。
+        for config_json in [
+            r#"{"models_dir": "rel-models"}"#.to_string(),
+            r#"{"models_dir_history": ["rel-old"]}"#.to_string(),
+            r#"{"import_scan_dirs": ["rel-scan"]}"#.to_string(),
+            r#"{"staging_dir": "rel-staging"}"#.to_string(),
+        ] {
+            write_config(&config_json);
+            let error = store_weights_roots_checked()
+                .expect_err("every relative settings root must fail closed");
+            assert!(
+                error.contains("rel-"),
+                "config {config_json} must name the offending entry: {error}"
+            );
+        }
     }
 
     #[test]

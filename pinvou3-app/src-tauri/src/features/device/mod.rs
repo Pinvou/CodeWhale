@@ -800,14 +800,33 @@ async fn probe_ollama_service() -> ServiceStatus {
     }
 }
 
-/// vllm / lmstudio → 对候选端口逐个探测 `/v1/models`，任一 200 即 running。
+/// vllm / lmstudio → 对候选端口**并发**探测 `/v1/models`，任一 200 即 running。
+/// 串行时 vLLM 三个候选端口逐个 1.5s 超时最坏 4.5s，是 services 慢轮询与
+/// doctor 上下文里最慢的一路；并发后总预算 = 单端口超时（十四轮评审）。
+/// 结果折叠保持串行时代的确定语义，抽纯函数直打（[`fold_openai_port_probes`]）。
 async fn probe_openai_ports(key: &str, ports: &[u16]) -> ServiceStatus {
-    // 端口被占用但对不上协议的服务会回 HTTP 4xx：这时"连接被拒绝或超时"是
-    // 误导，把最具体的 HTTP 状态透给用户（第四轮评审 P3）。可判别分支见
-    // [`ProbeFailure`]——字符串前缀判断会被措辞改动静默击穿（五轮评审 P3）。
+    // join_all 保序：结果下标与 ports 一一对应，折叠才能按端口序取首个 HTTP
+    // 状态错误（与旧串行首见语义一致）。
+    let probes = futures_util::future::join_all(ports.iter().map(|&port| async move {
+        http_get_success(&format!("http://127.0.0.1:{port}/v1/models")).await
+    }))
+    .await;
+    fold_openai_port_probes(key, ports, probes)
+}
+
+/// 端口探测结果的确定性折叠（纯函数，测试直打）：端口被占用但对不上协议的
+/// 服务会回 HTTP 4xx——这时"连接被拒绝或超时"是误导，把最具体的 HTTP 状态
+/// 透给用户（第四轮评审 P3），多端口并发后按**端口序**取首个状态错误；可判
+/// 别分支见 [`ProbeFailure`]——字符串前缀判断会被措辞改动静默击穿（五轮评审
+/// P3）。全为传输层失败才给"未探测到"提示。
+fn fold_openai_port_probes(
+    key: &str,
+    ports: &[u16],
+    probes: Vec<Result<(), ProbeFailure>>,
+) -> ServiceStatus {
     let mut http_error: Option<String> = None;
-    for port in ports {
-        match http_get_success(&format!("http://127.0.0.1:{port}/v1/models")).await {
+    for result in probes {
+        match result {
             Ok(()) => {
                 return ServiceStatus {
                     key: key.to_string(),
@@ -968,6 +987,60 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fold_openai_port_probes_keeps_serial_era_semantics() {
+        // 任一 200 → running（端口序无关，先到先判）。
+        let ok = fold_openai_port_probes(
+            "vllm",
+            &[8000, 8001],
+            vec![Err(ProbeFailure::Transport("超时".into())), Ok(())],
+        );
+        assert!(ok.running);
+        assert_eq!(ok.detail, None);
+        // 多端口并发后仍按**端口序**取首个 HTTP 状态错误（旧串行首见语义）：
+        // 8000 的 404 优先于 8001 的 503。
+        let both_http = fold_openai_port_probes(
+            "vllm",
+            &[8000, 8001],
+            vec![
+                Err(ProbeFailure::HttpStatus(404)),
+                Err(ProbeFailure::HttpStatus(503)),
+            ],
+        );
+        assert!(!both_http.running);
+        assert_eq!(
+            both_http.detail.as_deref(),
+            Some("服务响应异常（HTTP 404）")
+        );
+        // 首端口传输层失败不吞掉后面端口的 HTTP 状态。
+        let mixed = fold_openai_port_probes(
+            "vllm",
+            &[8000, 8001, 8002],
+            vec![
+                Err(ProbeFailure::Transport("连接被拒绝".into())),
+                Err(ProbeFailure::HttpStatus(403)),
+                Err(ProbeFailure::Transport("超时".into())),
+            ],
+        );
+        assert!(!mixed.running);
+        assert_eq!(mixed.detail.as_deref(), Some("服务响应异常（HTTP 403）"));
+        // 全为传输层失败 → 人话"未探测到"，端口清单随入参。
+        let transports = fold_openai_port_probes(
+            "vllm",
+            &[8000, 8001, 8002],
+            vec![
+                Err(ProbeFailure::Transport("a".into())),
+                Err(ProbeFailure::Transport("b".into())),
+                Err(ProbeFailure::Transport("c".into())),
+            ],
+        );
+        assert!(!transports.running);
+        assert_eq!(
+            transports.detail.as_deref(),
+            Some("未在端口 8000/8001/8002 探测到服务（连接被拒绝或超时）")
+        );
+    }
 
     #[test]
     fn component_peak_above_current_drops_sysinfo_fallback_and_stale_peaks() {
