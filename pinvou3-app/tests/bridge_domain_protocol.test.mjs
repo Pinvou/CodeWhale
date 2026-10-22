@@ -261,7 +261,11 @@ for (const [domain, files] of Object.entries(protocolSources)) {
 // relocated out of the per-lane files, so the domain hashes above no longer
 // cover that text. Hash the shared file's surface with the same extractor to
 // pin payload edits inside the shared base the same way the lane files are.
-const expectedSharedBaseHash = '4e63e15a4ec6b41f2f38a667d9e94d9761c230ab927e91d0c5ae49f3c4abedb4';
+// T0-a (#701 桥接面对齐) 重算：helpers 纯搬运新增 10 个 invoke 命令面
+// （create_scheduled_task / save_session_artifacts / list_workspace_files /
+// get_monitor_snapshot / set_super_permission / get_memory_overview /
+// equip_persona / summon_pinvou / get_or_create_aux_session / reset_aux_session）。
+const expectedSharedBaseHash = '96fda42af5daf6a7f12f6e42702c7710b1698c7418c545fa9dd8b31b2086fc88';
 const sharedBaseSource = fs.readFileSync(path.join(root, 'src', 'shared', 'bridge-shared-helpers.js'), 'utf8');
 const sharedBaseSignatures = [
   ...extractCalls(sharedBaseSource, 'invoke').map(call => `shared/bridge-shared-helpers.js:invoke:${call}`),
