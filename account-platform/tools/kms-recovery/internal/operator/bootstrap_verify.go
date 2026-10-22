@@ -137,7 +137,7 @@ func (s *bootstrapSession) verifyCapabilities(role, token string) error {
 	var result struct {
 		Data map[string]json.RawMessage `json:"data"`
 	}
-	if s.call("sys/capabilities", map[string]any{"token": token, "paths": paths}, s.root, &result, 200) != nil {
+	if s.call("sys/capabilities", map[string]any{"token": token, "paths": paths}, string(s.root), &result, 200) != nil {
 		return ErrBootstrapVerify
 	}
 	for _, path := range paths {

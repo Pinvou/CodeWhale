@@ -137,25 +137,29 @@ func initResponse(cfg Config, caHash string, encrypted []byte, identity *age.X25
 	return envelope.Response, nil
 }
 
-func material(cfg Config, caHash string, encrypted []byte, identity *age.X25519Identity) (string, error) {
+func material(cfg Config, caHash string, encrypted []byte, identity *age.X25519Identity) ([]byte, error) {
 	response, err := initResponse(cfg, caHash, encrypted, identity)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer clear(response)
 	var m struct {
-		Keys []string `json:"keys_base64"`
+		Keys secretList `json:"keys_base64"`
 	}
-	if json.Unmarshal(response, &m) != nil || len(m.Keys) != 1 {
-		return "", ErrBinding
+	defer m.Keys.clear()
+	if json.Unmarshal(response, &m) != nil || len(m.Keys.values) != 1 {
+		return nil, ErrBinding
 	}
-	key, err := base64.StdEncoding.Strict().DecodeString(m.Keys[0])
+	key := make([]byte, base64.StdEncoding.DecodedLen(len(m.Keys.values[0])))
+	n, err := base64.StdEncoding.Strict().Decode(key, m.Keys.values[0])
 	defer clear(key)
-	if err != nil || len(key) < 32 || len(key) > 128 {
-		return "", ErrBinding
+	if err != nil || n < 32 || n > 128 {
+		return nil, ErrBinding
 	}
 	// Never parse or send the root token: ordinary unseal does not need it.
-	return m.Keys[0], nil
+	// Return a separate owned buffer: retained parser aliases are all cleared.
+	encoded := append([]byte(nil), m.Keys.values[0]...)
+	return encoded, nil
 }
 
 func request(ctx context.Context, c *http.Client, cfg Config, path string, body []byte) (int, []byte, error) {
@@ -226,6 +230,13 @@ func Unseal(ctx context.Context, cfg Config, encrypted []byte, identity *age.X25
 	if err != nil {
 		return false, err
 	}
+	return unsealWithMaterial(ctx, c, cfg, key)
+}
+
+// unsealWithMaterial takes ownership of the validated encoded material and
+// clears it on success, already-unsealed, preflight, and uncertain exits.
+func unsealWithMaterial(ctx context.Context, c *http.Client, cfg Config, key []byte) (bool, error) {
+	defer clear(key)
 	sealed, err := state(ctx, c, cfg)
 	if err != nil {
 		return false, ErrPreflight
@@ -233,7 +244,7 @@ func Unseal(ctx context.Context, cfg Config, encrypted []byte, identity *age.X25
 	if !sealed {
 		return false, nil
 	}
-	body, err := json.Marshal(map[string]string{"key": key})
+	body, err := json.Marshal(map[string]string{"key": string(key)})
 	if err != nil {
 		return false, ErrBinding
 	}

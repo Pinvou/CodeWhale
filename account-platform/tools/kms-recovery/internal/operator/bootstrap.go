@@ -48,7 +48,7 @@ type bootstrapSession struct {
 	client *http.Client
 	cfg    Config
 	caHash string
-	root   string
+	root   []byte
 }
 
 func newBootstrapSession(ctx context.Context, cfg Config, encrypted []byte, id *age.X25519Identity) (*bootstrapSession, error) {
@@ -63,13 +63,16 @@ func newBootstrapSession(ctx context.Context, cfg Config, encrypted []byte, id *
 	}
 	defer clear(response)
 	var material struct {
-		Root string `json:"root_token"`
+		Root secretBytes `json:"root_token"`
 	}
-	if json.Unmarshal(response, &material) != nil || !regexp.MustCompile(`^[A-Za-z0-9._-]{20,256}$`).MatchString(material.Root) {
+	defer func() { clear(material.Root) }()
+	if json.Unmarshal(response, &material) != nil || !regexp.MustCompile(`^[A-Za-z0-9._-]{20,256}$`).Match(material.Root) {
 		c.CloseIdleConnections()
 		return nil, ErrBinding
 	}
-	return &bootstrapSession{ctx: ctx, client: c, cfg: cfg, caHash: caHash, root: material.Root}, nil
+	root := material.Root
+	material.Root = nil // transfer the owned buffer to the session
+	return &bootstrapSession{ctx: ctx, client: c, cfg: cfg, caHash: caHash, root: root}, nil
 }
 
 func (s *bootstrapSession) call(path string, body any, token string, out any, want int) error {
@@ -104,14 +107,14 @@ func (s *bootstrapSession) fresh() error {
 			Policies []string `json:"policies"`
 		} `json:"data"`
 	}
-	if s.call("auth/token/lookup-self", nil, s.root, &lookup, 200) != nil || !slices.Equal(lookup.Data.Policies, []string{"root"}) {
+	if s.call("auth/token/lookup-self", nil, string(s.root), &lookup, 200) != nil || !slices.Equal(lookup.Data.Policies, []string{"root"}) {
 		return ErrBootstrapPreflight
 	}
 	for _, mount := range []struct{ path, name string }{{"sys/mounts", "transit/"}, {"sys/auth", "approle/"}} {
 		var result struct {
 			Data map[string]any `json:"data"`
 		}
-		if s.call(mount.path, nil, s.root, &result, 200) != nil || result.Data == nil {
+		if s.call(mount.path, nil, string(s.root), &result, 200) != nil || result.Data == nil {
 			return ErrBootstrapPreflight
 		}
 		if _, exists := result.Data[mount.name]; exists {
@@ -119,7 +122,7 @@ func (s *bootstrapSession) fresh() error {
 		}
 	}
 	for _, role := range roleNames {
-		if s.call("sys/policies/acl/"+role, nil, s.root, nil, 404) != nil {
+		if s.call("sys/policies/acl/"+role, nil, string(s.root), nil, 404) != nil {
 			return ErrBootstrapPreflight
 		}
 	}
@@ -204,7 +207,7 @@ func PrepareBootstrap(ctx context.Context, cfg Config, encrypted []byte, id *age
 	if err != nil {
 		return err
 	}
-	defer s.client.CloseIdleConnections()
+	defer s.close()
 	if !filepath.IsAbs(output) || filepath.Clean(output) != output || privateDirectory(filepath.Dir(output)) != nil {
 		return ErrConfig
 	}
@@ -229,17 +232,17 @@ func PrepareBootstrap(ctx context.Context, cfg Config, encrypted []byte, id *age
 		{"sys/auth/approle", map[string]any{"type": "approle"}, 204},
 		{keyPath, map[string]any{"type": "aes256-gcm96", "exportable": false, "allow_plaintext_backup": false, "derived": false}, 200},
 	} {
-		if err := s.call(step.path, step.body, s.root, nil, step.status); err != nil {
+		if err := s.call(step.path, step.body, string(s.root), nil, step.status); err != nil {
 			return err
 		}
 	}
 	envelope := bootstrapEnvelope{Version: 1, InstanceID: cfg.InstanceID, Endpoint: cfg.Endpoint, CASHA256: s.caHash,
 		RecipientSHA256: cfg.RecipientSHA256, CreatedAt: time.Now().UTC().Format(time.RFC3339), Roles: map[string]roleCredential{}}
 	for _, role := range roleNames {
-		if err := s.call("sys/policies/acl/"+role, map[string]any{"policy": rolePolicy(role), "cas": -1, "cas_required": true}, s.root, nil, 204); err != nil {
+		if err := s.call("sys/policies/acl/"+role, map[string]any{"policy": rolePolicy(role), "cas": -1, "cas_required": true}, string(s.root), nil, 204); err != nil {
 			return err
 		}
-		if err := s.call("auth/approle/role/"+role, roleSettings(role), s.root, nil, 204); err != nil {
+		if err := s.call("auth/approle/role/"+role, roleSettings(role), string(s.root), nil, 204); err != nil {
 			return err
 		}
 		var roleID struct {
@@ -247,12 +250,12 @@ func PrepareBootstrap(ctx context.Context, cfg Config, encrypted []byte, id *age
 				ID string `json:"role_id"`
 			} `json:"data"`
 		}
-		if s.call("auth/approle/role/"+role+"/role-id", nil, s.root, &roleID, 200) != nil {
+		if s.call("auth/approle/role/"+role+"/role-id", nil, string(s.root), &roleID, 200) != nil {
 			return ErrBootstrapPartial
 		}
 		// Save every nonempty one-time response even when the HTTP outcome or JSON
 		// is uncertain; the aggregate success package is never written on failure.
-		status, response, e := authenticatedRequest(ctx, s.client, cfg, "auth/approle/role/"+role+"/secret-id", []byte(`{}`), s.root)
+		status, response, e := authenticatedRequest(ctx, s.client, cfg, "auth/approle/role/"+role+"/secret-id", []byte(`{}`), string(s.root))
 		if len(response) > 0 {
 			capture, encErr := custody.Encrypt(response, id.Recipient())
 			if encErr != nil || writeNew(filepath.Join(output, role+"-response.age"), capture) != nil {
@@ -351,7 +354,7 @@ func FinalizeBootstrap(ctx context.Context, cfg Config, encrypted []byte, id *ag
 	if err != nil {
 		return err
 	}
-	defer s.client.CloseIdleConnections()
+	defer s.close()
 	envelope, b, err := loadRoles(s, output, id)
 	if err != nil {
 		return err
@@ -370,7 +373,7 @@ func FinalizeBootstrap(ctx context.Context, cfg Config, encrypted []byte, id *ag
 	if err != nil || sealed {
 		return ErrBootstrapVerify
 	}
-	status, response, err := authenticatedRequest(ctx, s.client, cfg, "auth/token/lookup-self", nil, s.root)
+	status, response, err := authenticatedRequest(ctx, s.client, cfg, "auth/token/lookup-self", nil, string(s.root))
 	clear(response)
 	if err != nil || (status != 200 && status != 403) {
 		return ErrBootstrapVerify
@@ -390,11 +393,11 @@ func FinalizeBootstrap(ctx context.Context, cfg Config, encrypted []byte, id *ag
 		return ErrBootstrapVerify
 	}
 	if status == 200 {
-		if s.call("auth/token/revoke-self", map[string]any{}, s.root, nil, 204) != nil {
+		if s.call("auth/token/revoke-self", map[string]any{}, string(s.root), nil, 204) != nil {
 			return ErrBootstrapFinalize
 		}
 	}
-	if s.call("auth/token/lookup-self", nil, s.root, nil, 403) != nil || s.verifyIdentities(envelope) != nil {
+	if s.call("auth/token/lookup-self", nil, string(s.root), nil, 403) != nil || s.verifyIdentities(envelope) != nil {
 		return ErrBootstrapFinalize
 	}
 	marker := []byte("BOOTSTRAP_FINALIZED_V1\n" + hash(b) + "\n")
@@ -422,7 +425,7 @@ func (s *bootstrapSession) verifyConfiguration() error {
 			Version    int    `json:"latest_version"`
 		} `json:"data"`
 	}
-	if s.call(keyPath, nil, s.root, &key, 200) != nil || key.Data.Type != "aes256-gcm96" || key.Data.Exportable == nil || *key.Data.Exportable || key.Data.Backup == nil || *key.Data.Backup || key.Data.Delete == nil || *key.Data.Delete || key.Data.Derived == nil || *key.Data.Derived || key.Data.Version < 1 {
+	if s.call(keyPath, nil, string(s.root), &key, 200) != nil || key.Data.Type != "aes256-gcm96" || key.Data.Exportable == nil || *key.Data.Exportable || key.Data.Backup == nil || *key.Data.Backup || key.Data.Delete == nil || *key.Data.Delete || key.Data.Derived == nil || *key.Data.Derived || key.Data.Version < 1 {
 		return ErrBootstrapVerify
 	}
 	for _, role := range roleNames {
@@ -431,13 +434,13 @@ func (s *bootstrapSession) verifyConfiguration() error {
 				Policy string `json:"policy"`
 			} `json:"data"`
 		}
-		if s.call("sys/policies/acl/"+role, nil, s.root, &policy, 200) != nil || strings.ReplaceAll(policy.Data.Policy, "\r\n", "\n") != strings.ReplaceAll(rolePolicy(role), "\r\n", "\n") {
+		if s.call("sys/policies/acl/"+role, nil, string(s.root), &policy, 200) != nil || strings.ReplaceAll(policy.Data.Policy, "\r\n", "\n") != strings.ReplaceAll(rolePolicy(role), "\r\n", "\n") {
 			return ErrBootstrapVerify
 		}
 		var settings struct {
 			Data map[string]any `json:"data"`
 		}
-		if s.call("auth/approle/role/"+role, nil, s.root, &settings, 200) != nil {
+		if s.call("auth/approle/role/"+role, nil, string(s.root), &settings, 200) != nil {
 			return ErrBootstrapVerify
 		}
 		for field, expected := range roleSettings(role) {

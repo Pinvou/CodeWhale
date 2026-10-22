@@ -16,12 +16,12 @@ func bootstrapProof(t *testing.T, cfg Config, id *age.X25519Identity, encrypted 
 	if err := PrepareBootstrap(ctx, cfg, encrypted, id, output); err != nil {
 		s, e := newBootstrapSession(ctx, cfg, encrypted, id)
 		if e == nil {
-			defer s.client.CloseIdleConnections()
+			defer s.close()
 			for _, path := range []string{"sys/mounts", "sys/auth"} {
 				var data struct {
 					Data map[string]any `json:"data"`
 				}
-				if s.call(path, nil, s.root, &data, 200) == nil {
+				if s.call(path, nil, string(s.root), &data, 200) == nil {
 					if _, ok := data.Data["transit/"]; ok {
 						t.Log("BOOTSTRAP_FIXTURE_TRANSIT_EXISTS")
 					}
@@ -30,7 +30,7 @@ func bootstrapProof(t *testing.T, cfg Config, id *age.X25519Identity, encrypted 
 					}
 				}
 			}
-			if s.call(keyPath, nil, s.root, nil, 200) == nil {
+			if s.call(keyPath, nil, string(s.root), nil, 200) == nil {
 				t.Log("BOOTSTRAP_FIXTURE_KEY_EXISTS")
 			}
 			if s.verifyConfiguration() != nil {
@@ -59,7 +59,7 @@ func bootstrapProof(t *testing.T, cfg Config, id *age.X25519Identity, encrypted 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.client.CloseIdleConnections()
+	defer s.close()
 	e, _, err := loadRoles(s, output, id)
 	if err != nil {
 		t.Fatal("encrypted roles failed readback")
@@ -80,7 +80,7 @@ func bootstrapProof(t *testing.T, cfg Config, id *age.X25519Identity, encrypted 
 	if err := FinalizeBootstrap(ctx, cfg, encrypted, id, output); err != nil {
 		t.Fatal("uncertain finalization not resumable", err)
 	}
-	if s.call("auth/token/lookup-self", nil, s.root, nil, 403) != nil {
+	if s.call("auth/token/lookup-self", nil, string(s.root), nil, 403) != nil {
 		t.Fatal("initial root survived")
 	}
 	rotationParent := t.TempDir()
