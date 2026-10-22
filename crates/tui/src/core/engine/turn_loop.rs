@@ -4819,10 +4819,41 @@ impl Engine {
                                 tool_exec_lock.clone(),
                                 tool_context_for_call(batch_tool_context.clone(), &tool_id),
                             ) => match result {
-                                Ok(rich) => (
-                                    ToolExecutionOutcome::from_legacy(Ok(rich.result)),
-                                    rich.content_blocks,
-                                ),
+                                Ok(mut rich) => {
+                                    // The combined envelope can exceed the route
+                                    // budget even when every child stays inline.
+                                    // Preserve it before completion/outcome fan-out,
+                                    // just like ordinary serial and parallel calls.
+                                    if let Some(path) = crate::tools::truncate::apply_spillover_with_artifact(
+                                        &mut rich.result,
+                                        &tool_id,
+                                        &tool_name,
+                                        &self.session.id,
+                                    ) {
+                                        emit_tool_audit_for_policy(
+                                            self.active_turn_tool_security.is_some(),
+                                            json!({
+                                                "event": "tool.spillover",
+                                                "tool_id": tool_id.clone(),
+                                                "tool_name": tool_name.clone(),
+                                                "path": path.display().to_string(),
+                                            }),
+                                        );
+                                    }
+                                    preserve_tool_output_for_context(
+                                        self.api_provider,
+                                        &self.session.model,
+                                        self.active_route_limits,
+                                        &self.session.id,
+                                        &tool_id,
+                                        &tool_name,
+                                        &mut rich,
+                                    );
+                                    (
+                                        ToolExecutionOutcome::from_legacy(Ok(rich.result)),
+                                        rich.content_blocks,
+                                    )
+                                },
                                 Err(err) => (
                                     ToolExecutionOutcome::from_legacy(Err(err)),
                                     Vec::new(),
