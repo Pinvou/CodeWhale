@@ -643,14 +643,6 @@ impl ModelStoreService {
             .collect()
     }
 
-    /// 测试专用：往活跃登记表里塞一条进行中的安装（orphan_dirs 的注册表
-    /// 排除路径需要它——回执落盘到 RunGuard 登记之间的窗口，注册表是唯一
-    /// 守卫，这条路径必须有测试能驱动到）。
-    #[cfg(test)]
-    pub(super) fn active_registry_for_tests(&self) -> &super::run_state::ActiveCardOps {
-        &self.active
-    }
-
     /// Operator escape for a lost receiver record. The accept gate serializes
     /// this tombstone with late requests using the same id. No running operation
     /// or orphan writer may exist; corrupt receipts never count as absence.
@@ -5665,5 +5657,19 @@ mod bounded_log_observation_tests {
             );
             assert_eq!(std::fs::read(path).unwrap(), before);
         }
+    }
+}
+
+// 注意：这个 test-only impl 块刻意放在文件**末尾**、全部任务 kind 字面量之后。
+// 前端 tests/megacube_view_model.test.mjs 以首个 `#[cfg(test)]` 为界截取本文件
+// 的「生产段」来枚举商店产出的任务 kind——任何更靠前的 test-only 代码都会把
+// version_stage 等字面量截出扫描区，那条门禁就会假性失败。
+#[cfg(test)]
+impl ModelStoreService {
+    /// 测试专用：往活跃登记表里塞一条进行中的安装（orphan_dirs 的注册表
+    /// 排除路径需要它——回执落盘到 RunGuard 登记之间的窗口，注册表是唯一
+    /// 守卫，这条路径必须有测试能驱动到）。
+    pub(super) fn active_registry_for_tests(&self) -> &super::run_state::ActiveCardOps {
+        &self.active
     }
 }

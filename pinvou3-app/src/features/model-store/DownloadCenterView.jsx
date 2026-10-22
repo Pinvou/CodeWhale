@@ -111,7 +111,7 @@ function OrphansSection({ copy, onToast }) {
         setResult(null);
       }
     } catch (failure) {
-      setRequestError(describe(failure));
+      setRequestError(describeOrphanError(copy, failure));
     } finally {
       setRemoving(false);
     }
