@@ -235,40 +235,63 @@ fn verify_pending_install(
 }
 
 pub(super) fn verify(record: &mut Record) -> Result<(), String> {
-    let properties = systemd::show(&record.unit)?;
-    if record.pending_install {
-        return verify_pending_install(record, &properties, &systemd::unit_directory());
-    }
-    if !record.installed {
-        return verify_absent(record, &properties, &systemd::unit_directory());
-    }
-    let current = capture_at(record, &properties, &systemd::unit_directory())?;
-    if let Some(saved) = record.registration.as_ref() {
-        if saved != &current {
-            return Err(drift());
+    for attempt in 0..3 {
+        let properties = systemd::show(&record.unit)?;
+        if record.pending_install {
+            return verify_pending_install(record, &properties, &systemd::unit_directory());
         }
-    } else {
-        verify_legacy(record, &current)?;
-    }
-    let pid = properties
-        .get("MainPID")
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(0);
-    if pid != 0 {
-        let live = systemd::bind_process(&record.unit, &record.socket, false)?;
-        if live.binary != record.binary
-            || live.config != record.config
-            || live.state != record.state
+        if !record.installed {
+            return verify_absent(record, &properties, &systemd::unit_directory());
+        }
+        let current = capture_at(record, &properties, &systemd::unit_directory())?;
+        if let Some(saved) = record.registration.as_ref() {
+            if saved != &current {
+                return Err(drift());
+            }
+        } else {
+            verify_legacy(record, &current)?;
+        }
+        let pid = properties
+            .get("MainPID")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0);
+        let observed = if pid != 0 {
+            systemd::bind_process(&record.unit, &record.socket, false).map(Some)
+        } else {
+            systemd::socket_peer(&record.socket).and_then(|peer| match peer {
+                None => Ok(None),
+                Some(_) => Err("service_socket_mismatch".into()),
+            })
+        };
+        let live = match observed {
+            Ok(live) => live,
+            Err(error) => {
+                // A restart can retire a process or publish a listener while
+                // capture checks the registration. A changed manager PID permits
+                // only another complete registration/process/peer verification.
+                // Stable mismatches and repeated churn remain explicit errors.
+                if attempt < 2
+                    && systemd::show(&record.unit)?
+                        .get("MainPID")
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .is_some_and(|current| current != pid)
+                {
+                    continue;
+                }
+                return Err(error);
+            }
+        };
+        if let Some(live) = live
+            && (live.binary != record.binary
+                || live.config != record.config
+                || live.state != record.state)
         {
             return Err(drift());
         }
-    } else if systemd::socket_peer(&record.socket)?.is_some() {
-        // No unit process can own this live socket. Never act on the peer by
-        // guessing that it is the failed service from the receipt.
-        return Err("service_socket_mismatch".into());
+        record.registration = Some(current);
+        return Ok(());
     }
-    record.registration = Some(current);
-    Ok(())
+    Err("service_process_changed: current service process did not stabilize".into())
 }
 
 fn verify_absent(
