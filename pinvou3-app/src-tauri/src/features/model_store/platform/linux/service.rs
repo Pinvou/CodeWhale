@@ -1128,8 +1128,19 @@ mod tests {
             "preset":"openai_compatible", "provider_kind":"custom", "model":"old-model",
             "base_url":"http://127.0.0.1:8000/v1", "context_window_tokens":131072}))
             .unwrap();
+        let mut responses = row.clone();
+        responses.id = "manual-responses".into();
+        responses.preset = crate::platform::prefs::ModelPreset::OpenaiResponses;
+        let mut messages = row.clone();
+        messages.id = "manual-messages".into();
+        messages.vendor = Some("anthropic".into());
+        let mut full_endpoint = row.clone();
+        full_endpoint.id = "manual-full-endpoint".into();
+        full_endpoint.endpoint_mode = Some("full_chat_completions".into());
+        let manual_rows = vec![responses, messages, full_endpoint];
         UserPrefs::update_transaction(|prefs| {
             prefs.advanced.saved_models.push(row);
+            prefs.advanced.saved_models.extend(manual_rows.clone());
             prefs.advanced.active_model_id = Some("stable-id".into());
             Ok(())
         })
@@ -1158,6 +1169,7 @@ mod tests {
                 .iter()
                 .any(|(ids, model)| ids == &["stable-id"] && model == "new-model")
         );
+        assert!(observations.iter().all(|(ids, _)| ids == &["stable-id"]));
         let reloaded = UserPrefs::load();
         let row = reloaded.model_by_id("stable-id").unwrap();
         assert_eq!(row.base_url, "http://127.0.0.1:8001/v1");
@@ -1166,6 +1178,17 @@ mod tests {
         assert_eq!(
             reloaded.advanced.active_model_id.as_deref(),
             Some("stable-id")
+        );
+        // Pre-enable binding and the post-enable sync must both leave manual
+        // protocols alone. Without provenance these rows also remain ineligible
+        // for the uninstall UI and its conditional store-link deletion command.
+        for expected in &manual_rows {
+            assert_eq!(reloaded.model_by_id(&expected.id), Some(expected));
+            assert!(expected.model_store_card_id.is_none());
+        }
+        assert_eq!(
+            super::super::linked_models::current_linked_ids("sync-card"),
+            ["stable-id"]
         );
         drop(observations);
         // A second enable keeps the exact same route. Its engine may now serve

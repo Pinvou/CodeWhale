@@ -692,7 +692,7 @@ assert.doesNotMatch(webSearchRestartBody, /invoke\("restart_app"/,
   'Web settings bridge must not invoke the native-only restart command');
 assert.match(main, /const saved = isWeb[\s\S]{0,180}saveSearchSettings\(search\)[\s\S]{0,180}saveSearchSettingsAndRestart\(search\)/,
   'the shared UI must save without requesting a desktop restart in WebUI');
-assert.match(webBridge, /state\.settings = await invoke\(IS_WEB \? "web_access_update_settings" : "update_settings"/,
+assert.match(webBridge, /const settings = await invoke\(IS_WEB \? "web_access_update_settings" : "update_settings", \{ patch: patch \}\);\s*window\.PinvouBridgeShared\.publishSettings\(state, settings\);/,
   'WebUI must keep the canonical settings returned by the desktop backend');
 assert.match(webBridge, /web_access_update_settings", \{ patch: \{ search: search \} \}/,
   'WebUI search saves must send a narrow patch instead of a full settings snapshot');

@@ -2083,7 +2083,8 @@ impl ModelManager {
         // Isolated weights belong to the host's version manager. The card only
         // removes its service; shared-reference/ownership/process checks must
         // succeed before the host, rather than the script, deletes any weights.
-        let script_purge = purge_weights && !versions::managed_storage(&rec)?;
+        let managed_purge = purge_weights && versions::managed_storage(&rec)?;
+        let script_purge = purge_weights && !managed_purge;
         if purge_weights {
             versions::current_purge_preflight(&rec, &self.settings.models_path())?;
         }
@@ -2108,7 +2109,11 @@ impl ModelManager {
         // 想知道"刚才那儿有多少字节"已经无处可查，只剩下 card.json 里那个标称
         // 值可以拿来充数——而那正是要杜绝的事。
         let candidates = self.candidate_paths(&rec);
-        let before = total_size(&candidates);
+        let before = if managed_purge {
+            versions::allocated_exclusive_paths(&candidates)?
+        } else {
+            total_size(&candidates)
+        };
 
         self.run_card_script(
             &source,
@@ -2137,11 +2142,30 @@ impl ModelManager {
                 .map_err(|e| ModelManagerError::new(format!("更新模型状态失败：{e}")))?;
         }
 
-        let after = total_size(&candidates);
-        let freed_bytes = before.saturating_sub(after);
+        let (freed_bytes, measurement_uncertain) = if managed_purge {
+            match versions::allocated_exclusive_paths(&candidates) {
+                Ok(after) => (before.saturating_sub(after), false),
+                // Deletion and its database commit already succeeded. An
+                // unreadable remainder cannot be treated as zero occupancy.
+                Err(error) => {
+                    on_progress(&format!(
+                        "无法确认清理后目录占用，释放量按 0 字节报告：{error}"
+                    ));
+                    (0, true)
+                }
+            }
+        } else {
+            (before.saturating_sub(total_size(&candidates)), false)
+        };
         let mut remaining_paths: Vec<String> = candidates
             .iter()
-            .filter(|p| p.exists())
+            .filter(|p| {
+                if managed_purge {
+                    residual_path_may_exist(p)
+                } else {
+                    p.exists()
+                }
+            })
             .map(|p| p.to_string_lossy().to_string())
             .collect();
         let mut shared_download_roots_remain = false;
@@ -2197,6 +2221,9 @@ impl ModelManager {
             summary.push_str(
                 "下载根目录可能包含缓存或其他模型；请先逐项确认归属，再清理对应文件，不要直接删除整个共享目录。",
             );
+        }
+        if measurement_uncertain {
+            summary.push_str("清理后的目录占用无法可靠核算，本次释放量保守按 0 字节报告。");
         }
 
         Ok(UninstallOutcome {
