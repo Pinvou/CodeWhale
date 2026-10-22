@@ -161,7 +161,12 @@ impl BehaviorTelemetry {
         if let Some(rx) = control_rx {
             let mut control_worker = telemetry.worker_clone();
             control_worker.control_tx = None;
-            tauri::async_runtime::spawn(Self::run_control_worker(rx, control_worker));
+            tauri::async_runtime::spawn(Self::run_control_worker(
+                rx,
+                control_worker,
+                telemetry.event_tx.as_ref().map(mpsc::Sender::downgrade),
+                telemetry.report_tx.as_ref().map(mpsc::Sender::downgrade),
+            ));
             if telemetry.has_pending_control_sync() || renewal_pending {
                 telemetry.wake_control_worker();
             }
@@ -577,7 +582,12 @@ impl BehaviorTelemetry {
         }
     }
 
-    pub(super) async fn run_control_worker(mut rx: mpsc::Receiver<()>, telemetry: Self) {
+    pub(super) async fn run_control_worker(
+        mut rx: mpsc::Receiver<()>,
+        telemetry: Self,
+        event_wake: Option<mpsc::WeakSender<()>>,
+        report_wake: Option<mpsc::WeakSender<()>>,
+    ) {
         while rx.recv().await.is_some() {
             let mut retry_delay = Duration::from_secs(1);
             while telemetry.has_pending_background_work().await {
@@ -599,6 +609,15 @@ impl BehaviorTelemetry {
                             }
                         }
                     }
+                }
+            }
+            // worker_clone deliberately owns no event/report senders. Use weak
+            // senders so recovery wakes waiting workers without creating a
+            // sender ownership cycle that would keep them alive after shutdown.
+            // Also wake if another worker completed the checkpoint first.
+            for sender in [&event_wake, &report_wake].into_iter().flatten() {
+                if let Some(sender) = sender.upgrade() {
+                    let _ = sender.try_send(());
                 }
             }
         }

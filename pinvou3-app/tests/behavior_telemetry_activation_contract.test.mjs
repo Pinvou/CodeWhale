@@ -124,6 +124,8 @@ test('retryable delivery and pending privacy controls keep bounded background re
   assert.match(rust, /async fn has_pending_background_work[\s\S]*state\.has_pending_control\(\) \|\| state\.renewal_checkpoint_is_current\(&self\.runtime\)/);
   assert.match(rust, /async fn retry_pending_control\(&self\)[\s\S]*self\.control_gate\.lock\(\)\.await[\s\S]*finish_credential_renewal_checkpoint\(state\)[\s\S]*self\.retry_pending_control_locked\(\)\.await/);
   assert.match(rust, /has_pending_control_sync\(\) \|\| renewal_pending/);
+  assert.match(rust, /Self::run_control_worker\([\s\S]*telemetry\.event_tx\.as_ref\(\)\.map\(mpsc::Sender::downgrade\)[\s\S]*telemetry\.report_tx\.as_ref\(\)\.map\(mpsc::Sender::downgrade\)/);
+  assert.match(rust, /async fn run_control_worker[\s\S]*sender\.upgrade\(\)[\s\S]*sender\.try_send\(\(\)\)/);
   assert.match(rust, /pending control retry deferred[\s\S]*tokio::select!/);
   assert.match(rust, /fn wake_control_worker[\s\S]*tx\.try_send/);
   assert.match(rust, /async fn retry_pending_control\(&self\)[\s\S]*self\.control_gate\.lock\(\)\.await/);

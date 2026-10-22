@@ -584,13 +584,19 @@ async fn credential_checkpoint_recovers_in_background_without_queued_reports() {
     telemetry.state_healthy.store(false, Ordering::Release);
     let (tx, rx) = mpsc::channel(1);
     // Only the control worker runs: no report, event or restart can rescue it.
+    let (event_tx, mut event_rx) = mpsc::channel(1);
+    let (report_tx, mut report_rx) = mpsc::channel(1);
     let worker = tokio::spawn(BehaviorTelemetry::run_control_worker(
         rx,
         telemetry.worker_clone(),
+        Some(event_tx.downgrade()),
+        Some(report_tx.downgrade()),
     ));
     tx.send(()).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(!telemetry.collecting.load(Ordering::Acquire));
+    assert!(event_rx.try_recv().is_err());
+    assert!(report_rx.try_recv().is_err());
     std::fs::remove_dir(state_path()).unwrap();
     std::fs::rename(backup, state_path()).unwrap();
     let recovered = tokio::time::timeout(Duration::from_secs(5), async {
@@ -602,6 +608,8 @@ async fn credential_checkpoint_recovers_in_background_without_queued_reports() {
     drop(tx);
     worker.await.unwrap();
     recovered.expect("disk recovery resumes collection without a queued report or restart");
+    assert_eq!(event_rx.try_recv(), Ok(()));
+    assert_eq!(report_rx.try_recv(), Ok(()));
     assert!(telemetry.state_healthy.load(Ordering::Acquire));
     assert!(
         load_state()
@@ -2862,7 +2870,7 @@ async fn registration_tombstone_merges_concurrent_control_state_before_worker_cl
     drop(telemetry.control_tx.take());
     tokio::time::timeout(
         Duration::from_secs(3),
-        BehaviorTelemetry::run_control_worker(control_rx, control_worker),
+        BehaviorTelemetry::run_control_worker(control_rx, control_worker, None, None),
     )
     .await
     .expect("control worker should drain merged installation deletion duties");
@@ -3166,7 +3174,7 @@ async fn max_generation_start_ends_new_remote_period_and_stays_blocked() {
     control_worker.control_tx = None;
     tokio::time::timeout(
         Duration::from_secs(3),
-        BehaviorTelemetry::run_control_worker(control_rx, control_worker),
+        BehaviorTelemetry::run_control_worker(control_rx, control_worker, None, None),
     )
     .await
     .expect("control worker should drain the queued End and stop");
