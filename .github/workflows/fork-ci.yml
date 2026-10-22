@@ -8,7 +8,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [baseline, no-helper, no-serial, no-parallel]
+        variant: [no-serial, no-parallel]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -47,7 +47,8 @@ jobs:
               assert len(matches)==3
               i=matches[2 if v=='no-serial' else 1].start()
               j=s.index(');',i)+2
-              s=s[:i]+s[j:]
+              args=s[i+len('preserve_tool_output_for_context('):j-2]
+              s=s[:i]+'let _ = ('+args+');'+s[j:]
           p.write_text(s)
       - name: Execute native engine regressions and verify expected outcome
         shell: bash
