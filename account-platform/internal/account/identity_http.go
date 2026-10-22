@@ -27,6 +27,7 @@ type IdentityProvisioner interface {
 	UpdateUsername(context.Context, string, uuid.UUID, int64, string) error
 	UpdateMobile(context.Context, string, uuid.UUID, int64, string) error
 	ResetPassword(context.Context, string, uuid.UUID, int64, string, string, string) error
+	RevokeProfileSessions(context.Context, string, uuid.UUID, bool) error
 	RevokeSessions(context.Context, string) error
 }
 
@@ -40,6 +41,10 @@ func (p *HTTPIdentityProvisioner) UpdateMobile(ctx context.Context, subject stri
 
 func (p *HTTPIdentityProvisioner) ResetPassword(ctx context.Context, subject string, operationID uuid.UUID, fenceVersion int64, mobile, handle, policyVersion string) error {
 	return p.request(ctx, http.MethodPost, "/internal/v1/users/"+url.PathEscape(subject)+"/password-resets", map[string]any{"operation_id": operationID, "fence_version": fenceVersion, "mobile": mobile, "password_handle": handle, "password_policy_version": policyVersion}, nil)
+}
+
+func (p *HTTPIdentityProvisioner) RevokeProfileSessions(ctx context.Context, subject string, operationID uuid.UUID, firstAttempt bool) error {
+	return p.request(ctx, http.MethodPost, "/internal/v1/users/"+url.PathEscape(subject)+"/profile-revocations", map[string]any{"operation_id": operationID, "first_attempt": firstAttempt}, nil)
 }
 
 func (p *HTTPIdentityProvisioner) RevokeSessions(ctx context.Context, subject string) error {
@@ -142,6 +147,10 @@ func (p *HTTPIdentityProvisioner) request(ctx context.Context, method, path stri
 			return ErrPasswordInvalid
 		case "PASSWORD_EDGE_SPACE_NOT_ALLOWED":
 			return ErrPasswordEdgeSpace
+		case "PROFILE_REVOCATION_CONFLICT":
+			return ErrProfileChangeConflict
+		case "PROFILE_REVOCATION_UNCONFIRMED":
+			return ErrProfileSessionRevocationUnconfirmed
 		case "PASSWORD_REFERENCE_INVALID":
 			return ErrPasswordReferenceInvalid
 		case "PASSWORD_REFERENCE_CONFLICT":

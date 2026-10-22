@@ -53,6 +53,9 @@ const memberQuotaBatchDownChecksum = "034594db8fcf381883b49a917c2b67b48efe4dbd17
 // numeric versions remains possible after the high-numbered fence is recorded.
 // The same validation is required before DownOne to prevent rollback-file edits.
 func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
+	if err := validateWalletReceipts(input); err != nil {
+		return nil, err
+	}
 	if err := validatePaymentRepairLookup(input); err != nil {
 		return nil, err
 	}
@@ -219,6 +222,9 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 }
 
 func Up(ctx context.Context, connection *pgx.Conn, input []migrations.Migration) error {
+	if _, err := knownOriginalWalletReceiptHistory(ctx, connection); err != nil {
+		return err
+	}
 	ordered, err := Ordered(input)
 	if err != nil {
 		return err

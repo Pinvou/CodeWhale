@@ -885,3 +885,13 @@ func TestAuthenticatedPasswordChangeRequiresRecentAuthentication(t *testing.T) {
 		t.Fatalf("identity calls=%v", identities.calls)
 	}
 }
+
+func (f *profileIdentityFake) RevokeProfileSessions(ctx context.Context, subject string, _ uuid.UUID, _ bool) error {
+	return f.RevokeSessions(ctx, subject)
+}
+func (f *profileStoreFake) StartProfileSessionRevocation(context.Context, uuid.UUID) (bool, error) {
+	first := f.change.SessionsRevocationStartedAt == nil
+	now := time.Now()
+	f.change.SessionsRevocationStartedAt = &now
+	return first, nil
+}

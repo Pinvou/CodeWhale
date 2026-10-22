@@ -633,3 +633,7 @@ func TestMobileAuthRegisterRejectsFailedProviderVerification(t *testing.T) {
 		t.Fatal("identity must not be provisioned after a failed SMS verification")
 	}
 }
+
+func (*identityProvisionerFake) RevokeProfileSessions(context.Context, string, uuid.UUID, bool) error {
+	return nil
+}

@@ -23,6 +23,22 @@ export class AccountPlatformBffClient {
     this.contextVersionListeners = new Set();
     this.authorizationVersions = {};
     this.authorizationVersionListeners = new Set();
+    this.versionObservationEpoch = 0;
+    this.versionObservationUserID = null;
+  }
+
+  resetObservedVersions() {
+    this.versionObservationEpoch++;
+    this.versionObservationUserID = null;
+    this.contextVersion = 0;
+    this.authorizationVersions = {};
+  }
+
+  bindObservedUser(payload) {
+    const userID = payload?.user_id;
+    if (typeof userID !== 'string' || !userID || userID === this.versionObservationUserID) return;
+    this.resetObservedVersions();
+    this.versionObservationUserID = userID;
   }
 
   onContextVersion(listener) {
@@ -56,16 +72,28 @@ export class AccountPlatformBffClient {
   }
 
   async session(signal) {
+    const epoch = this.versionObservationEpoch;
+    const binding = this.csrfToken;
     const response = await fetch(`${this.baseURL}/api/session`, {
       credentials: 'same-origin',
       cache: 'no-store',
       signal,
     });
     const payload = await response.json().catch(() => ({}));
-    if (response.status === 401) { if (this.csrfToken) this.financeSessionEpoch++; this.csrfToken = ''; return { authenticated: false }; }
+    if (response.status === 401) {
+      if (epoch === this.versionObservationEpoch && binding === this.csrfToken) {
+        if (this.csrfToken) this.financeSessionEpoch++;
+        this.csrfToken = ''; this.resetObservedVersions();
+      }
+      return { authenticated: false };
+    }
     if (!response.ok) throw errorFromResponse(response, payload);
     requireSession(payload);
-    if (this.csrfToken !== payload.csrf_token) this.financeSessionEpoch++;
+    if (epoch !== this.versionObservationEpoch || binding !== this.csrfToken) return payload;
+    if (this.csrfToken !== payload.csrf_token) {
+      this.financeSessionEpoch++;
+      this.resetObservedVersions();
+    }
     this.csrfToken = payload.csrf_token || '';
     return requireSession(payload);
   }
@@ -76,6 +104,7 @@ export class AccountPlatformBffClient {
     // The BFF preserves CSRF across ordinary refreshes. A different token is a
     // different browser login; an old operation must not follow that login.
     const binding = this.csrfToken;
+    const epoch = this.versionObservationEpoch;
     const send = async (csrfToken) => {
       const headers = { Accept: 'application/json', ...(options.headers || {}) };
       if (mutation) headers['X-CSRF-Token'] = csrfToken;
@@ -88,10 +117,13 @@ export class AccountPlatformBffClient {
         cache: 'no-store',
         signal: options.signal,
       });
-      this.observeContextVersion(response.headers.get('X-Context-Version'));
-      this.observeAuthorizationVersions(response.headers);
-      if (response.status === 204) return { response, payload: null };
-      return { response, payload: area === 'token' && resource.startsWith('/v1/me/balance') && response.ok ? parseBalanceJSON(await response.text()) : area === 'token' && resource.includes('/account-closed-grants') && response.ok ? parseClosedGrantsJSON(await response.text()) : area === 'token' && response.ok ? parseFinanceJSON(await response.text()) : await response.json().catch(() => ({})) };
+      const payload = response.status === 204 ? null : area === 'token' && resource.startsWith('/v1/me/balance') && response.ok ? parseBalanceJSON(await response.text()) : area === 'token' && resource.includes('/account-closed-grants') && response.ok ? parseClosedGrantsJSON(await response.text()) : area === 'token' && response.ok ? parseFinanceJSON(await response.text()) : await response.json().catch(() => ({}));
+      if (epoch === this.versionObservationEpoch && binding === this.csrfToken) {
+        if (response.ok && area === 'account' && resource === '/v1/me') this.bindObservedUser(payload);
+        this.observeContextVersion(response.headers.get('X-Context-Version'));
+        this.observeAuthorizationVersions(response.headers);
+      }
+      return { response, payload };
     };
 
     let result = await send(this.csrfToken);
@@ -180,6 +212,7 @@ export class AccountPlatformBffClient {
 
   async logout() {
     const binding = this.csrfToken;
+    const epoch = this.versionObservationEpoch;
     const send = async (csrfToken) => {
       const response = await fetch(`${this.baseURL}/api/logout`, {
         method: 'POST',
@@ -192,14 +225,18 @@ export class AccountPlatformBffClient {
     if (response.status === 403 && payload?.code === 'CSRF_REJECTED') {
       const session = await this.session();
       if (!session.authenticated) {
-        this.csrfToken = '';
+        if (epoch === this.versionObservationEpoch && binding === this.csrfToken) {
+          this.csrfToken = ''; this.resetObservedVersions();
+        }
         return null;
       }
       if (session.authenticated && binding && session.csrf_token === binding) ({ response, payload } = await send(binding));
     }
     if (!response.ok) throw errorFromResponse(response, payload);
-    this.financeSessionEpoch++;
-    this.csrfToken = '';
+    if (epoch === this.versionObservationEpoch && binding === this.csrfToken) {
+      this.financeSessionEpoch++;
+      this.csrfToken = ''; this.resetObservedVersions();
+    }
     return payload;
   }
 

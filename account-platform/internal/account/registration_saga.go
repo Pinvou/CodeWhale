@@ -172,7 +172,7 @@ const registrationOperationSelect = `
 SELECT ro.id,ro.candidate_user_id,ro.query_token_hash,ro.request_fingerprint,ro.username_normalized,ro.mobile_e164,
 ro.sms_challenge_id,ro.password_policy_version,COALESCE(ro.identity_subject,''),
 ro.committed_user_id,COALESCE(u.user_code,''),ro.status,ro.version,ro.identity_created_at,ro.next_retry_at,
-COALESCE(ro.last_error_code,''),ro.created_at,ro.updated_at
+COALESCE(ro.last_error_code,''),ro.created_at,ro.updated_at,ro.recovery_generation,ro.recovery_lease_until
 FROM registration_operations ro LEFT JOIN users u ON u.id=ro.committed_user_id`
 
 func scanRegistrationOperation(row pgx.Row) (RegistrationOperation, error) {
@@ -181,7 +181,7 @@ func scanRegistrationOperation(row pgx.Row) (RegistrationOperation, error) {
 	err := row.Scan(&operation.ID, &operation.CandidateUserID, &operation.QueryTokenHash, &operation.RequestFingerprint, &operation.Username, &operation.Mobile,
 		&operation.ChallengeID, &operation.PasswordPolicyVersion, &operation.IdentitySubject,
 		&operation.UserID, &rawUserCode, &operation.Status, &operation.Version, &operation.IdentityCreatedAt, &operation.NextRetryAt,
-		&operation.LastErrorCode, &operation.CreatedAt, &operation.UpdatedAt)
+		&operation.LastErrorCode, &operation.CreatedAt, &operation.UpdatedAt, &operation.RecoveryGeneration, &operation.RecoveryLeaseUntil)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RegistrationOperation{}, ErrNotFound
 	}
@@ -256,34 +256,38 @@ func registrationTransitionErrorCode(err error) string {
 }
 
 func (r *PostgresRepository) MarkRegistrationIdentityCreating(ctx context.Context, operationID uuid.UUID) error {
-	command, err := r.pool.Exec(ctx, `
+	return r.identityRecoveryWrite(ctx, "registration", operationID, func(tx pgx.Tx) error {
+		command, err := tx.Exec(ctx, `
 UPDATE registration_operations SET status='IDENTITY_CREATING',next_retry_at=$2::timestamptz+interval '5 seconds',version=version+1,updated_at=$2::timestamptz
 WHERE id=$1 AND status IN ('REGISTRATION_IN_PROGRESS','IDENTITY_CREATING')`, operationID, r.now())
-	if err != nil {
-		return err
-	}
-	if command.RowsAffected() == 0 {
-		return ErrRegistrationConflict
-	}
-	return nil
+		if err != nil {
+			return err
+		}
+		if command.RowsAffected() == 0 {
+			return ErrRegistrationConflict
+		}
+		return nil
+	})
 }
 
 func (r *PostgresRepository) MarkRegistrationIdentityCreated(ctx context.Context, operationID uuid.UUID, subject string) error {
-	if strings.TrimSpace(subject) == "" {
-		return ErrRegistrationConflict
-	}
-	now := r.now()
-	command, err := r.pool.Exec(ctx, `
+	return r.identityRecoveryWrite(ctx, "registration", operationID, func(tx pgx.Tx) error {
+		if strings.TrimSpace(subject) == "" {
+			return ErrRegistrationConflict
+		}
+		now := r.now()
+		command, err := tx.Exec(ctx, `
 UPDATE registration_operations SET status='IDENTITY_CREATED',identity_subject=$2,lease_expires_at=NULL,
 identity_created_at=COALESCE(identity_created_at,$3),next_retry_at=$3,version=version+1,last_error_code=NULL,updated_at=$3
 WHERE id=$1 AND status IN ('IDENTITY_CREATING','IDENTITY_CREATED') AND (identity_subject IS NULL OR identity_subject=$2)`, operationID, subject, now)
-	if err != nil {
-		return err
-	}
-	if command.RowsAffected() == 0 {
-		return ErrRegistrationConflict
-	}
-	return nil
+		if err != nil {
+			return err
+		}
+		if command.RowsAffected() == 0 {
+			return ErrRegistrationConflict
+		}
+		return nil
+	})
 }
 
 func (r *PostgresRepository) CommitRegistration(ctx context.Context, operationID uuid.UUID, issuer string) (RegistrationOperation, error) {
@@ -294,6 +298,9 @@ func (r *PostgresRepository) CommitRegistration(ctx context.Context, operationID
 	defer tx.Rollback(ctx)
 	operation, err := scanRegistrationOperation(tx.QueryRow(ctx, registrationOperationSelect+` WHERE ro.id=$1 FOR UPDATE OF ro`, operationID))
 	if err != nil {
+		return RegistrationOperation{}, err
+	}
+	if err = r.lockIdentityRecoveryClaim(ctx, tx, "registration", operationID); err != nil {
 		return RegistrationOperation{}, err
 	}
 	if operation.Status == "PROVISIONING" || operation.Status == "ACCOUNT_COMMITTED" {
@@ -390,29 +397,33 @@ version=version+1,last_error_code=NULL,updated_at=$3 WHERE id=$1`, operation.ID,
 }
 
 func (r *PostgresRepository) ScheduleRegistrationRetry(ctx context.Context, operationID uuid.UUID, code string) error {
-	now := r.now()
-	_, err := r.pool.Exec(ctx, `
+	return r.identityRecoveryWrite(ctx, "registration", operationID, func(tx pgx.Tx) error {
+		now := r.now()
+		_, err := tx.Exec(ctx, `
 UPDATE registration_operations SET
  status=CASE WHEN identity_created_at IS NOT NULL AND identity_created_at+interval '30 minutes'<=$2 THEN 'REPAIR_REQUIRED' ELSE status END,
- attempts=attempts+1,next_retry_at=$2+LEAST(interval '5 minutes',interval '5 seconds'*power(2,LEAST(attempts,6))),
+ attempts=attempts+1,next_retry_at=$2::timestamptz+LEAST(interval '5 minutes',interval '5 seconds'*power(2,LEAST(attempts,6))),
  last_error_code=$3,version=version+1,updated_at=$2
 WHERE id=$1 AND status IN ('REGISTRATION_IN_PROGRESS','IDENTITY_CREATING','IDENTITY_CREATED','ACCOUNT_COMMITTING','REPAIR_REQUIRED')`, operationID, now, code)
-	return err
+		return err
+	})
 }
 
 func (r *PostgresRepository) CompensatePreIdentityRegistration(ctx context.Context, operationID uuid.UUID, code string) error {
-	command, err := r.pool.Exec(ctx, `
+	return r.identityRecoveryWrite(ctx, "registration", operationID, func(tx pgx.Tx) error {
+		command, err := tx.Exec(ctx, `
 UPDATE registration_operations SET status='COMPENSATED',lease_expires_at=NULL,next_retry_at=$2,
 last_error_code=$3,version=version+1,updated_at=$2
 WHERE id=$1 AND identity_subject IS NULL AND committed_user_id IS NULL
   AND status IN ('SMS_PENDING','REGISTRATION_IN_PROGRESS','IDENTITY_CREATING')`, operationID, r.now(), code)
-	if err != nil {
-		return err
-	}
-	if command.RowsAffected() == 0 {
-		return ErrRegistrationConflict
-	}
-	return nil
+		if err != nil {
+			return err
+		}
+		if command.RowsAffected() == 0 {
+			return ErrRegistrationConflict
+		}
+		return nil
+	})
 }
 
 func (r *PostgresRepository) LeaseRegistrationRecoveries(ctx context.Context, limit int, lease time.Duration) ([]RegistrationOperation, error) {
@@ -424,7 +435,7 @@ func (r *PostgresRepository) LeaseRegistrationRecoveries(ctx context.Context, li
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	now := r.now()
+	now := r.now().Truncate(time.Microsecond)
 	if _, err := tx.Exec(ctx, `
 UPDATE registration_operations SET status='REPAIR_REQUIRED',last_error_code='FORWARD_RECOVERY_SLA_EXCEEDED',next_retry_at=$1,
 version=version+1,updated_at=$1
@@ -436,6 +447,7 @@ WHERE status IN ('IDENTITY_CREATED','ACCOUNT_COMMITTING') AND identity_created_a
    SELECT id FROM registration_operations
    WHERE status IN ('REGISTRATION_IN_PROGRESS','IDENTITY_CREATING','IDENTITY_CREATED','ACCOUNT_COMMITTING')
      AND next_retry_at<=$1
+      AND (recovery_lease_until IS NULL OR recovery_lease_until<=$1)
      AND (identity_created_at IS NULL OR identity_created_at+interval '30 minutes'>$1)
    ORDER BY next_retry_at,created_at FOR UPDATE SKIP LOCKED LIMIT $2
  ) ORDER BY ro.next_retry_at,ro.created_at`, now, limit)
@@ -458,9 +470,14 @@ WHERE status IN ('IDENTITY_CREATED','ACCOUNT_COMMITTING') AND identity_created_a
 	}
 	rows.Close()
 	if len(ids) > 0 {
-		if _, err := tx.Exec(ctx, `UPDATE registration_operations SET next_retry_at=$2+$3::interval,updated_at=$2 WHERE id=ANY($1)`, ids, now, lease.String()); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE registration_operations SET next_retry_at=$2::timestamptz+$3::interval,recovery_generation=recovery_generation+1,recovery_lease_until=$2::timestamptz+$3::interval,updated_at=$2 WHERE id=ANY($1)`, ids, now, lease.String()); err != nil {
 			return nil, err
 		}
+	}
+	for i := range operations {
+		operations[i].RecoveryGeneration++
+		until := now.Add(lease)
+		operations[i].RecoveryLeaseUntil = &until
 	}
 	return operations, tx.Commit(ctx)
 }

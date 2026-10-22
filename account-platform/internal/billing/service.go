@@ -116,6 +116,8 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected.POST("/internal/v1/registration-bonus-grants", serviceauth.Require("internal.billing.registration-bonus.provision"), httpserver.AdaptFunc(s.internalProvisionRegistrationBonus))
 	s.registerOrganizationRoutes(protected)
 	protected.POST("/internal/v1/wallets/ensure", serviceauth.Require("internal.billing.wallet.ensure"), httpserver.AdaptFunc(s.ensureWallet))
+	protected.POST("/internal/v1/token-account-wallet-provisioning-receipts", serviceauth.Require("internal.billing.token-account-wallet-provision.execute"), httpserver.AdaptFunc(s.provisionTokenAccountWallet))
+	protected.GET("/internal/v1/token-account-wallet-provisioning-receipts/:command_reference", serviceauth.Require("internal.billing.token-account-wallet-provision.read"), httpserver.AdaptFunc(s.getTokenAccountWalletProvisioningReceipt))
 	protected.GET("/internal/v1/wallets/:wallet_id/balance", serviceauth.Require("internal.billing.wallet.read"), httpserver.AdaptFunc(s.getBalance))
 	if _, supported := s.repository.(managementHoldRepository); supported {
 		protected.POST("/internal/v1/holds/reserve", serviceauth.Require("internal.billing.hold.reserve"), httpserver.AdaptFunc(s.reserve))

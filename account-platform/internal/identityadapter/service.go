@@ -13,9 +13,10 @@ import (
 )
 
 type Service struct {
-	vault        *PasswordVault
-	serviceToken string
-	tokenProxy   http.Handler
+	profileRevocations *profileSessionRevocations
+	vault              *PasswordVault
+	serviceToken       string
+	tokenProxy         http.Handler
 }
 
 func NewService(vault *PasswordVault, serviceToken string, tokenProxy ...http.Handler) (*Service, error) {
@@ -26,7 +27,7 @@ func NewService(vault *PasswordVault, serviceToken string, tokenProxy ...http.Ha
 	if vault == nil || (strings.TrimSpace(serviceToken) == "" && !workloadIdentityConfigured) {
 		return nil, errors.New("identity adapter is not fully configured")
 	}
-	service := &Service{vault: vault, serviceToken: strings.TrimSpace(serviceToken)}
+	service := &Service{vault: vault, serviceToken: strings.TrimSpace(serviceToken), profileRevocations: newProfileSessionRevocations(vault.directory)}
 	if len(tokenProxy) > 0 {
 		service.tokenProxy = tokenProxy[0]
 	}
@@ -49,6 +50,7 @@ func (s *Service) Handler() http.Handler {
 	internal.PUT("/users/:subject/username", serviceauth.Require("internal.identity.username.update"), httpserver.AdaptFunc(s.updateUsername))
 	internal.PUT("/users/:subject/mobile", serviceauth.Require("internal.identity.mobile.update"), httpserver.AdaptFunc(s.updateMobile))
 	internal.POST("/users/:subject/password-resets", serviceauth.Require("internal.identity.password.reset"), httpserver.AdaptFunc(s.resetPassword))
+	internal.POST("/users/:subject/profile-revocations", serviceauth.Require("internal.identity.sessions.revoke"), httpserver.AdaptFunc(s.revokeProfileSessions))
 	internal.POST("/users/:subject/revoke-sessions", serviceauth.Require("internal.identity.sessions.revoke"), httpserver.AdaptFunc(s.revokeSessions))
 	return router
 }

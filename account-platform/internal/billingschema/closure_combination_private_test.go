@@ -147,6 +147,23 @@ func TestClosurePrivatePublicCombination(t *testing.T) {
 
 	})
 	t.Run("durable-marker-runtime-cannot-erase-and-public-rollback-rejected", func(t *testing.T) {
+		// The 900006 rollback contract belongs to its historical delivery. Keep
+		// the full current Account installation above for the lifecycle checks;
+		// newer forward-only migrations must not be weakened to reach this one.
+		ac := f.database(t, ctx, "account", "account_service")
+		var historicalAccount []migrations.Migration
+		for _, migration := range am {
+			if migration.Version <= 900006 {
+				historicalAccount = append(historicalAccount, migration)
+			}
+		}
+		if err := accountschema.Up(ctx, ac, historicalAccount); err != nil {
+			t.Fatal("historical Account public Up", err)
+		}
+		if _, err := migrations.VerifyApplied(ctx, ac, historicalAccount); err != nil {
+			t.Fatal("historical Account history", err)
+		}
+		am := historicalAccount
 		var protected bool
 		if err = tc.QueryRow(ctx, `SELECT pg_get_userbyid(c.relowner)='token_schema_owner' AND has_table_privilege('token_gateway',c.oid,'SELECT') AND has_table_privilege('token_gateway',c.oid,'INSERT') AND NOT has_table_privilege('token_gateway',c.oid,'UPDATE') AND NOT has_table_privilege('token_gateway',c.oid,'DELETE') FROM pg_class c WHERE c.oid='usage_replay_anonymized_users'::regclass`).Scan(&protected); err != nil || !protected {
 			t.Fatal("marker owner/ACL not permanent", err)

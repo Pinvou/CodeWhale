@@ -107,7 +107,11 @@ func main() {
 		}
 		if err == nil {
 			var verification migrations.Verification
-			verification, err = migrations.VerifyApplied(ctx, connection, loaded)
+			if domain == "billing" {
+				verification, err = billingschema.VerifyApplied(ctx, connection, loaded)
+			} else {
+				verification, err = migrations.VerifyApplied(ctx, connection, loaded)
+			}
 			if err == nil {
 				evidence := migrationEvidence{
 					Event: "migration.post_verification", Domain: domain,

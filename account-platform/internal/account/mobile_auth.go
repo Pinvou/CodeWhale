@@ -59,6 +59,8 @@ type SMSChallenge struct {
 }
 
 type RegistrationOperation struct {
+	RecoveryGeneration    int64      `json:"-"`
+	RecoveryLeaseUntil    *time.Time `json:"-"`
 	ID                    uuid.UUID  `json:"registration_operation_id"`
 	CandidateUserID       uuid.UUID  `json:"-"`
 	QueryTokenHash        []byte     `json:"-"`

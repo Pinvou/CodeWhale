@@ -41,6 +41,9 @@ func applyBillingMigration(ctx context.Context, tx pgx.Tx, migration migrations.
 }
 
 func prepareBillingMigration(ctx context.Context, tx pgx.Tx, migration migrations.Migration) error {
+	if _, err := knownOriginalWalletReceiptHistory(ctx, tx); err != nil {
+		return err
+	}
 	var actor bool
 	if err := tx.QueryRow(ctx, `SELECT (session_user='billing_migrator' OR (SELECT rolsuper FROM pg_roles WHERE rolname=session_user)) AND pg_has_role(session_user,'billing_schema_owner','MEMBER') AND NOT pg_has_role('billing_service','billing_schema_owner','MEMBER') AND pg_has_role('billing_schema_owner','billing_service','USAGE') AND NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname IN ('billing_service','billing_schema_owner','billing_migrator') AND (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls)) AND EXISTS(SELECT 1 FROM pg_roles WHERE rolname='billing_schema_owner' AND NOT rolcanlogin) AND NOT EXISTS(SELECT 1 FROM pg_roles WHERE (rolsuper OR rolcreaterole OR rolcreatedb OR rolreplication OR rolbypassrls) AND pg_has_role('billing_service',oid,'MEMBER'))`).Scan(&actor); err != nil {
 		return err
@@ -78,12 +81,12 @@ GRANT CREATE ON SCHEMA public TO billing_service;
 DO $$ DECLARE object RECORD; BEGIN
  FOR object IN SELECT c.relname,c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
  WHERE n.nspname='public' AND pg_get_userbyid(c.relowner)='billing_schema_owner' AND c.relkind IN ('r','p','S','v','m')
- AND c.relname NOT IN ('schema_migrations','billing_runtime_hardening','billing_approval_command_activations','billing_approval_command_activation_history','billing_approval_proof_claims','entitlement_component_corrections') LOOP
+ AND c.relname NOT IN ('schema_migrations','billing_runtime_hardening','billing_approval_command_activations','billing_approval_command_activation_history','billing_approval_proof_claims','entitlement_component_corrections','token_account_wallet_provisioning_receipts') LOOP
  EXECUTE format('ALTER %s public.%I OWNER TO billing_service',CASE object.relkind WHEN 'S' THEN 'SEQUENCE' WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW' ELSE 'TABLE' END,object.relname);
  END LOOP;
  FOR object IN SELECT p.oid::regprocedure::text AS signature FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
  WHERE n.nspname='public' AND pg_get_userbyid(p.proowner)='billing_schema_owner'
- AND p.proname NOT IN ('harden_billing_runtime_objects','reject_billing_truncate') LOOP
+ AND p.proname NOT IN ('harden_billing_runtime_objects','reject_billing_truncate','reject_token_account_wallet_receipt_mutation') LOOP
  EXECUTE format('ALTER FUNCTION %s OWNER TO billing_service',object.signature);
  END LOOP;
 END $$;
@@ -125,6 +128,9 @@ DO $$ BEGIN
   ELSE
    REVOKE INSERT ON TABLE public.entitlement_component_corrections FROM billing_service;
   END IF;
+ END IF;
+ IF to_regclass('public.token_account_wallet_provisioning_receipts') IS NOT NULL AND (SELECT pg_get_userbyid(relowner)='billing_schema_owner' FROM pg_class WHERE oid=to_regclass('public.token_account_wallet_provisioning_receipts')) THEN
+  REVOKE UPDATE,DELETE ON TABLE public.token_account_wallet_provisioning_receipts FROM billing_service;
  END IF;
  IF to_regclass('public.ledger_repair_cases') IS NOT NULL THEN
   REVOKE UPDATE,DELETE ON TABLE public.ledger_repair_cases FROM billing_service;

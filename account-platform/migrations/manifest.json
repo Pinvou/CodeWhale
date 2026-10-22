@@ -992,6 +992,16 @@
         "file": "900006_organization_model_admin_binding.up.sql",
         "version": 900006,
         "sha256": "dfc80c505b064390fdc64160110b9ca6b7465a1a99ef09f574113d0e9ab87c37"
+      },
+      {
+        "file": "900007_identity_recovery_claims.down.sql",
+        "version": 900007,
+        "sha256": "33c41d26f0b9eabcf66bab5f41e2d9b922e54b64cb97c8c712dedacffc904e96"
+      },
+      {
+        "file": "900007_identity_recovery_claims.up.sql",
+        "version": 900007,
+        "sha256": "4dfba349debeb57f14fc9b2b77a2b4ad8a913e5533ec2cea62b6f0f0feb539ac"
       }
     ],
     "billing": [
@@ -1984,6 +1994,16 @@
         "file": "900022_member_quota_batch_commands.up.sql",
         "version": 900022,
         "sha256": "4b4574114cf0a5faa46e9478f5bf1a657fcfd72378f81cdea5069ef1579881c1"
+      },
+      {
+        "file": "900023_token_account_wallet_receipts.down.sql",
+        "version": 900023,
+        "sha256": "0d665405ae0c46461d72fc1c37a9b606cc9e2b5c9beeb6952f4b91d9c06422ce"
+      },
+      {
+        "file": "900023_token_account_wallet_receipts.up.sql",
+        "version": 900023,
+        "sha256": "32d1f3c0f449d2423744a4991bd59b438dfbaaaf33709823a29b9965c1b5cfda"
       }
     ],
     "payment-simulator": [

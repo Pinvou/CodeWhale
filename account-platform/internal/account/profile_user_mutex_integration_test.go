@@ -140,7 +140,7 @@ func TestF01ProfileCommitUsesUserMutex(t *testing.T) {
 					diagnosticCtx, diagnosticCancel := context.WithTimeout(ctx, time.Second)
 					defer diagnosticCancel()
 					var queryStates string
-					diagnosticErr := r.pool.QueryRow(diagnosticCtx, `SELECT COALESCE(string_agg(CASE WHEN query LIKE '%FROM users u JOIN identities i%' THEN 'CREATE_USER' WHEN query LIKE 'SELECT id FROM users%' THEN 'COMMIT_USER' WHEN query LIKE '%FROM profile_change_requests%' THEN 'PROFILE' ELSE 'OTHER' END || ':' || COALESCE(wait_event_type,'NONE') || ':' || COALESCE(wait_event,'NONE') || ':' || cardinality(pg_blocking_pids(pid))::text,','),'EMPTY') FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND state='active'`).Scan(&queryStates)
+					diagnosticErr := r.pool.QueryRow(diagnosticCtx, `SELECT COALESCE(string_agg(CASE WHEN query LIKE '%FROM users u JOIN identities i%' THEN 'CREATE_USER' WHEN query LIKE 'SELECT status FROM users%' THEN 'COMMIT_USER' WHEN query LIKE '%FROM profile_change_requests%' THEN 'PROFILE' ELSE 'OTHER' END || ':' || COALESCE(wait_event_type,'NONE') || ':' || COALESCE(wait_event,'NONE') || ':' || cardinality(pg_blocking_pids(pid))::text,','),'EMPTY') FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND state='active'`).Scan(&queryStates)
 					phase := "COMMIT_USER"
 					if fragment == "FROM users u JOIN identities i" {
 						phase = "CREATE_USER"
@@ -150,7 +150,7 @@ func TestF01ProfileCommitUsesUserMutex(t *testing.T) {
 					t.Fatalf("formal producer did not wait on USER: phase=%s commit=%s create=%s diagnostic=%s states=%s pool_total=%d pool_acquired=%d pool_idle=%d pool_constructing=%d pool_cancelled_acquires=%d", phase, commitResult, createResult, classify(diagnosticErr), queryStates, stats.TotalConns(), stats.AcquiredConns(), stats.IdleConns(), stats.ConstructingConns(), stats.CanceledAcquireCount())
 				}
 				go func() { committed <- r.CommitProfileChange(ctx, change.ID) }()
-				wait("SELECT id FROM users WHERE id=")
+				wait("SELECT status FROM users WHERE id=")
 				probe, err := r.pool.Begin(ctx)
 				if err != nil {
 					t.Fatal(err)

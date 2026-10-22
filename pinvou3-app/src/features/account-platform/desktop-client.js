@@ -32,6 +32,23 @@ export class AccountPlatformDesktopClient {
     this.contextVersionListeners = new Set();
     this.authorizationVersions = {};
     this.authorizationVersionListeners = new Set();
+    this.versionObservationEpoch = 0;
+    this.versionObservationUserID = null;
+    this.observedSessionAuthenticated = undefined;
+  }
+
+  resetObservedVersions() {
+    this.versionObservationEpoch++;
+    this.versionObservationUserID = null;
+    this.contextVersion = 0;
+    this.authorizationVersions = {};
+  }
+
+  bindObservedUser(payload) {
+    const userID = payload?.user_id;
+    if (typeof userID !== 'string' || !userID || userID === this.versionObservationUserID) return;
+    this.resetObservedVersions();
+    this.versionObservationUserID = userID;
   }
 
   onContextVersion(listener) {
@@ -64,7 +81,13 @@ export class AccountPlatformDesktopClient {
   }
 
   async session(signal) {
-    return requireSession(await this.call(() => this.transport.session(), signal));
+    const epoch = this.versionObservationEpoch;
+    const payload = requireSession(await this.call(() => this.transport.session(), signal));
+    if (epoch === this.versionObservationEpoch) {
+      if (this.observedSessionAuthenticated !== payload.authenticated) this.resetObservedVersions();
+      this.observedSessionAuthenticated = payload.authenticated;
+    }
+    return payload;
   }
 
   openPortal(language, signal) {
@@ -84,8 +107,15 @@ export class AccountPlatformDesktopClient {
     return this.call(() => this.transport.branchReplacementSession(input), signal);
   }
   async login(account, password, signal) {
+    // Native login retires the old identity before attempting the new grant.
+    this.resetObservedVersions();
+    this.observedSessionAuthenticated = undefined;
+    const epoch = this.versionObservationEpoch;
     const value = await this.call(() => this.transport.login({ account, password }), signal);
-    this.financeSessionEpoch++;
+    if (epoch === this.versionObservationEpoch) {
+      this.observedSessionAuthenticated = true;
+      this.financeSessionEpoch++;
+    }
     return value;
   }
 
@@ -142,8 +172,16 @@ export class AccountPlatformDesktopClient {
     return this.call(() => this.transport.registrationStatus(), signal);
   }
 
-  loginSms(mobile, challengeId, code, signal) {
-    return this.call(() => this.transport.loginSms({ mobile, challenge_id: challengeId, code }), signal);
+  async loginSms(mobile, challengeId, code, signal) {
+    this.resetObservedVersions();
+    this.observedSessionAuthenticated = undefined;
+    const epoch = this.versionObservationEpoch;
+    const value = await this.call(() => this.transport.loginSms({ mobile, challenge_id: challengeId, code }), signal);
+    if (epoch === this.versionObservationEpoch) {
+      this.observedSessionAuthenticated = true;
+      this.financeSessionEpoch++;
+    }
+    return value;
   }
 
   resetPassword(mobile, challengeId, code, password, signal) {
@@ -160,8 +198,13 @@ export class AccountPlatformDesktopClient {
   }
 
   async logout(signal) {
+    const epoch = this.versionObservationEpoch;
     const value = await this.call(() => this.transport.logout(), signal);
-    this.financeSessionEpoch++;
+    if (epoch === this.versionObservationEpoch) {
+      this.financeSessionEpoch++;
+      this.resetObservedVersions();
+      this.observedSessionAuthenticated = false;
+    }
     return value;
   }
 
@@ -175,6 +218,7 @@ export class AccountPlatformDesktopClient {
   }
 
   async request(area, resource, options = {}) {
+    const epoch = this.versionObservationEpoch;
     const response = await this.call(
       () =>
         this.transport.request({
@@ -186,8 +230,11 @@ export class AccountPlatformDesktopClient {
         }),
       options.signal,
     );
-    this.observeContextVersion(response.contextVersion);
-    this.observeAuthorizationVersions(response);
+    if (epoch === this.versionObservationEpoch) {
+      if (response.status >= 200 && response.status < 300 && area === 'account' && resource === '/v1/me') this.bindObservedUser(response.body);
+      this.observeContextVersion(response.contextVersion);
+      this.observeAuthorizationVersions(response);
+    }
     if (response.status < 200 || response.status >= 300) throw responseError(response);
     if (options.expectedStatus && !options.expectedStatus.includes(response.status)) { const error = new Error('UNKNOWN_ORGANIZATION_ACK'); error.code = 'COMMAND_RESULT_UNKNOWN'; throw error; }
     if (area === 'token' && resource.startsWith('/v1/me/balance')) {

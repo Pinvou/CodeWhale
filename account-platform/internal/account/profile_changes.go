@@ -22,25 +22,28 @@ var (
 )
 
 type ProfileChange struct {
-	ID                     uuid.UUID  `json:"profile_change_request_id"`
-	UserID                 uuid.UUID  `json:"-"`
-	IdentityIssuer         string     `json:"-"`
-	IdentitySubject        string     `json:"-"`
-	Field                  string     `json:"field"`
-	OldValue               string     `json:"-"`
-	NewValue               string     `json:"new_value"`
-	ExpectedProfileVersion int64      `json:"-"`
-	FenceVersion           int64      `json:"-"`
-	SMSChallengeID         *uuid.UUID `json:"sms_challenge_id,omitempty"`
-	SMSVerifiedAt          *time.Time `json:"-"`
-	IdentityUpdatedAt      *time.Time `json:"-"`
-	AccountCommittedAt     *time.Time `json:"-"`
-	SessionsRevokedAt      *time.Time `json:"-"`
-	Status                 string     `json:"status"`
-	NextAttemptAt          time.Time  `json:"next_retry_at"`
-	SLAExpiresAt           time.Time  `json:"sla_expires_at"`
-	Attempts               int        `json:"-"`
-	LastErrorCode          string     `json:"reason,omitempty"`
+	RecoveryGeneration          int64      `json:"-"`
+	RecoveryLeaseUntil          *time.Time `json:"-"`
+	SessionsRevocationStartedAt *time.Time `json:"-"`
+	ID                          uuid.UUID  `json:"profile_change_request_id"`
+	UserID                      uuid.UUID  `json:"-"`
+	IdentityIssuer              string     `json:"-"`
+	IdentitySubject             string     `json:"-"`
+	Field                       string     `json:"field"`
+	OldValue                    string     `json:"-"`
+	NewValue                    string     `json:"new_value"`
+	ExpectedProfileVersion      int64      `json:"-"`
+	FenceVersion                int64      `json:"-"`
+	SMSChallengeID              *uuid.UUID `json:"sms_challenge_id,omitempty"`
+	SMSVerifiedAt               *time.Time `json:"-"`
+	IdentityUpdatedAt           *time.Time `json:"-"`
+	AccountCommittedAt          *time.Time `json:"-"`
+	SessionsRevokedAt           *time.Time `json:"-"`
+	Status                      string     `json:"status"`
+	NextAttemptAt               time.Time  `json:"next_retry_at"`
+	SLAExpiresAt                time.Time  `json:"sla_expires_at"`
+	Attempts                    int        `json:"-"`
+	LastErrorCode               string     `json:"reason,omitempty"`
 }
 
 type PasswordResetOperation struct {
@@ -72,6 +75,7 @@ type ProfileChangeStore interface {
 	CommitProfileSMSVerification(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, bool) error
 	MarkProfileIdentityUpdated(context.Context, uuid.UUID) error
 	CommitProfileChange(context.Context, uuid.UUID) error
+	StartProfileSessionRevocation(context.Context, uuid.UUID) (bool, error)
 	MarkProfileSessionsRevoked(context.Context, uuid.UUID) error
 	CompleteProfileChange(context.Context, uuid.UUID) error
 	ScheduleProfileChangeRetry(context.Context, uuid.UUID, string) error
@@ -284,8 +288,12 @@ func (s *ProfileChangeService) resume(ctx context.Context, change ProfileChange)
 		change.AccountCommittedAt = ptrTime(s.now())
 	}
 	if change.SessionsRevokedAt == nil {
-		if err := s.identities.RevokeSessions(ctx, change.IdentitySubject); err != nil {
-			recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.ScheduleProfileChangeRetry(context.WithoutCancel(ctx), change.ID, "SESSION_REVOCATION_FAILED"))
+		first, err := s.store.StartProfileSessionRevocation(ctx, change.ID)
+		if err != nil {
+			return change, err
+		}
+		if err := s.identities.RevokeProfileSessions(ctx, change.IdentitySubject, change.ID, first); err != nil {
+			recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.ScheduleProfileChangeRetry(context.WithoutCancel(ctx), change.ID, profileRevocationErrorCode(err)))
 			return change, err
 		}
 		if err := s.store.MarkProfileSessionsRevoked(ctx, change.ID); err != nil {
@@ -468,8 +476,14 @@ func (w *ProfileChangeWorker) RunOnce(ctx context.Context) error {
 	if err != nil {
 		failures = append(failures, err)
 	} else if change != nil {
-		if _, err := w.service.resume(ctx, *change); err != nil {
-			failures = append(failures, err)
+		itemCtx, cancel, claimErr := withIdentityRecoveryClaim(ctx, "profile", change.ID, change.RecoveryGeneration, change.RecoveryLeaseUntil)
+		if claimErr != nil {
+			failures = append(failures, claimErr)
+		} else {
+			if _, err := w.service.resume(itemCtx, *change); err != nil {
+				failures = append(failures, err)
+			}
+			cancel()
 		}
 	}
 	reset, err := w.service.store.ClaimPasswordReset(ctx)
@@ -638,11 +652,11 @@ func (r *PostgresRepository) CreateProfileChange(ctx context.Context, principal 
 
 func scanProfileChange(row pgx.Row) (ProfileChange, error) {
 	var c ProfileChange
-	err := row.Scan(&c.ID, &c.UserID, &c.IdentityIssuer, &c.IdentitySubject, &c.Field, &c.OldValue, &c.NewValue, &c.ExpectedProfileVersion, &c.FenceVersion, &c.SMSChallengeID, &c.SMSVerifiedAt, &c.IdentityUpdatedAt, &c.AccountCommittedAt, &c.SessionsRevokedAt, &c.Status, &c.NextAttemptAt, &c.SLAExpiresAt, &c.Attempts, &c.LastErrorCode)
+	err := row.Scan(&c.ID, &c.UserID, &c.IdentityIssuer, &c.IdentitySubject, &c.Field, &c.OldValue, &c.NewValue, &c.ExpectedProfileVersion, &c.FenceVersion, &c.SMSChallengeID, &c.SMSVerifiedAt, &c.IdentityUpdatedAt, &c.AccountCommittedAt, &c.SessionsRevokedAt, &c.Status, &c.NextAttemptAt, &c.SLAExpiresAt, &c.Attempts, &c.LastErrorCode, &c.RecoveryGeneration, &c.RecoveryLeaseUntil, &c.SessionsRevocationStartedAt)
 	return c, err
 }
 
-const profileChangeSelect = `SELECT id,user_id,identity_issuer,identity_subject,field,old_value,new_value,expected_profile_version,fence_version,sms_challenge_id,sms_verified_at,identity_updated_at,account_committed_at,sessions_revoked_at,status,next_attempt_at,sla_expires_at,attempts,COALESCE(last_error_code,'') FROM profile_change_requests`
+const profileChangeSelect = `SELECT id,user_id,identity_issuer,identity_subject,field,old_value,new_value,expected_profile_version,fence_version,sms_challenge_id,sms_verified_at,identity_updated_at,account_committed_at,sessions_revoked_at,status,next_attempt_at,sla_expires_at,attempts,COALESCE(last_error_code,''),recovery_generation,recovery_lease_until,sessions_revocation_started_at FROM profile_change_requests`
 
 func (r *PostgresRepository) ProfileChange(ctx context.Context, id uuid.UUID, userID *uuid.UUID) (ProfileChange, error) {
 	query := profileChangeSelect + ` WHERE id=$1`
@@ -884,8 +898,10 @@ func (r *PostgresRepository) CommitProfileSMSVerification(ctx context.Context, i
 	return tx.Commit(ctx)
 }
 func (r *PostgresRepository) MarkProfileIdentityUpdated(ctx context.Context, id uuid.UUID) error {
-	_, err := r.pool.Exec(ctx, `UPDATE profile_change_requests SET identity_updated_at=COALESCE(identity_updated_at,$2),status='IDENTITY_UPDATED',version=version+1,updated_at=$2 WHERE id=$1 AND status IN ('PENDING','VERIFIED','RETRY','IDENTITY_UPDATED')`, id, r.now())
-	return err
+	return r.identityRecoveryWrite(ctx, "profile", id, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE profile_change_requests SET identity_updated_at=COALESCE(identity_updated_at,$2),status='IDENTITY_UPDATED',version=version+1,updated_at=$2 WHERE id=$1 AND status IN ('PENDING','VERIFIED','RETRY','IDENTITY_UPDATED')`, id, r.now())
+		return err
+	})
 }
 
 func (r *PostgresRepository) CommitProfileChange(ctx context.Context, id uuid.UUID) error {
@@ -906,6 +922,9 @@ func (r *PostgresRepository) CommitProfileChange(ctx context.Context, id uuid.UU
 	}
 	c, err := scanProfileChange(tx.QueryRow(ctx, profileChangeSelect+` WHERE id=$1 FOR UPDATE`, id))
 	if err != nil {
+		return err
+	}
+	if err = r.lockIdentityRecoveryClaim(ctx, tx, "profile", id); err != nil {
 		return err
 	}
 	if c.UserID != userID {
@@ -980,6 +999,9 @@ func (r *PostgresRepository) MarkProfileSessionsRevoked(ctx context.Context, id 
 	if err != nil {
 		return err
 	}
+	if err = r.lockIdentityRecoveryClaim(ctx, tx, "profile", id); err != nil {
+		return err
+	}
 	if c.UserID != lockedUserID {
 		return ErrConflict
 	}
@@ -996,32 +1018,63 @@ func (r *PostgresRepository) MarkProfileSessionsRevoked(ctx context.Context, id 
 }
 
 func (r *PostgresRepository) CompleteProfileChange(ctx context.Context, id uuid.UUID) error {
-	_, err := r.pool.Exec(ctx, `UPDATE profile_change_requests SET status='COMPLETED',last_error_code=NULL,version=version+1,updated_at=$2 WHERE id=$1 AND account_committed_at IS NOT NULL AND sessions_revoked_at IS NOT NULL AND status NOT IN ('COMPLETED','CANCELLED_ACCOUNT_CLOSURE')`, id, r.now())
-	return err
+	return r.identityRecoveryWrite(ctx, "profile", id, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE profile_change_requests SET status='COMPLETED',last_error_code=NULL,version=version+1,updated_at=$2 WHERE id=$1 AND account_committed_at IS NOT NULL AND sessions_revoked_at IS NOT NULL AND status NOT IN ('COMPLETED','CANCELLED_ACCOUNT_CLOSURE')`, id, r.now())
+		return err
+	})
 }
+
+func profileRevocationErrorCode(err error) string {
+	if errors.Is(err, ErrProfileSessionRevocationUnconfirmed) {
+		return "SESSION_REVOCATION_UNCONFIRMED"
+	}
+	return "SESSION_REVOCATION_FAILED"
+}
+
 func (r *PostgresRepository) ScheduleProfileChangeRetry(ctx context.Context, id uuid.UUID, code string) error {
-	now := r.now()
-	_, err := r.pool.Exec(ctx, `UPDATE profile_change_requests SET status=CASE WHEN sla_expires_at<=$2 THEN 'REPAIR_REQUIRED' ELSE 'RETRY' END,last_error_code=$3,next_attempt_at=$2+make_interval(secs=>LEAST(300,power(2,LEAST(attempts,8))::int)),version=version+1,updated_at=$2 WHERE id=$1 AND status IN ('VERIFIED','IDENTITY_UPDATED','ACCOUNT_COMMITTED','RETRY','REPAIR_REQUIRED')`, id, now, code)
-	return err
+	return r.profileRecoveryWrite(ctx, id, func(tx pgx.Tx) error {
+		var user uuid.UUID
+		var previous string
+		if err := tx.QueryRow(ctx, `SELECT user_id,status FROM profile_change_requests WHERE id=$1 FOR UPDATE`, id).Scan(&user, &previous); err != nil {
+			return err
+		}
+		var status string
+		err := tx.QueryRow(ctx, `UPDATE profile_change_requests SET status=CASE WHEN $3='SESSION_REVOCATION_UNCONFIRMED' OR sla_expires_at<=$2 THEN 'REPAIR_REQUIRED' ELSE 'RETRY' END,last_error_code=$3,next_attempt_at=$2+make_interval(secs=>LEAST(300,power(2,LEAST(attempts,8))::int)),version=version+1,updated_at=$2 WHERE id=$1 AND status IN ('VERIFIED','IDENTITY_UPDATED','ACCOUNT_COMMITTED','RETRY','REPAIR_REQUIRED') RETURNING status`, id, r.now(), code).Scan(&status)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if status == "REPAIR_REQUIRED" && previous != "REPAIR_REQUIRED" {
+			return appendAudit(ctx, tx, user, "", nil, "account.profile_change.repair_required", "profile_change", id.String(), "FAILED", map[string]any{"reason": code})
+		}
+		return nil
+	})
 }
+
 func (r *PostgresRepository) ClaimProfileChange(ctx context.Context) (*ProfileChange, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	c, err := scanProfileChange(tx.QueryRow(ctx, profileChangeSelect+` WHERE status IN ('VERIFIED','IDENTITY_UPDATED','ACCOUNT_COMMITTED','RETRY') AND next_attempt_at<=$1 ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT 1`, r.now()))
+	now := r.now().Truncate(time.Microsecond)
+	c, err := scanProfileChange(tx.QueryRow(ctx, profileChangeSelect+` WHERE status IN ('VERIFIED','IDENTITY_UPDATED','ACCOUNT_COMMITTED','RETRY') AND next_attempt_at<=$1 AND (recovery_lease_until IS NULL OR recovery_lease_until<=$1) ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT 1`, now))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, tx.Commit(ctx)
 	}
 	if err != nil {
 		return nil, err
 	}
-	_, err = tx.Exec(ctx, `UPDATE profile_change_requests SET attempts=attempts+1,next_attempt_at=$2::timestamptz+interval '30 seconds',updated_at=$2::timestamptz WHERE id=$1`, c.ID, r.now())
+	_, err = tx.Exec(ctx, `UPDATE profile_change_requests SET attempts=attempts+1,next_attempt_at=$2::timestamptz+interval '30 seconds',recovery_generation=recovery_generation+1,recovery_lease_until=$2::timestamptz+interval '30 seconds',updated_at=$2::timestamptz WHERE id=$1`, c.ID, now)
 	if err != nil {
 		return nil, err
 	}
 	c.Attempts++
+	c.RecoveryGeneration++
+	until := now.Add(30 * time.Second)
+	c.RecoveryLeaseUntil = &until
 	return &c, tx.Commit(ctx)
 }
 

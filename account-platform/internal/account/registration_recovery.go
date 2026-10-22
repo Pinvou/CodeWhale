@@ -48,7 +48,12 @@ func (w *RegistrationRecoveryWorker) RunOnce(ctx context.Context) error {
 		return err
 	}
 	for _, operation := range operations {
-		_, err := w.auth.resumeRegistration(ctx, operation)
+		itemCtx, cancel, err := withIdentityRecoveryClaim(ctx, "registration", operation.ID, operation.RecoveryGeneration, operation.RecoveryLeaseUntil)
+		if err != nil {
+			return err
+		}
+		_, err = w.auth.resumeRegistration(itemCtx, operation)
+		cancel()
 		if err != nil && !errors.Is(err, ErrRegistrationRecovering) && !errors.Is(err, ErrRegistrationRestart) {
 			return err
 		}

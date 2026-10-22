@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Run existing Token and scoped organization financial contracts on disposable PG.
 
-The Account fixture first owns its eight absent actors, then the wallet
-evidence fixture owns its absent Billing actors exclusively.
+The Account fixture first owns its eight absent actors, then wallet
+evidence and provisioning fixtures own their absent actors exclusively.
 After strict restoration, retained fixtures create their own UUID databases and
 Token actors while this runner owns the three Billing deployment actors. Only
 the three Billing deployment actors are bootstrapped here, using their existing
@@ -49,12 +49,19 @@ ACCOUNT_REQUIRED = {
     "TestF06OrganizationDeletionVersionAndTerminalScope",
     "TestF06Review5566377593PublicPostgres",
     "TestOrdinaryDeadLetterReplayRuntimePostgres",
+    "TestIdentityRecoveryClaimsRuntimePostgres",
+    "TestProfileSessionRevocationRecoveryRuntimePostgres",
 }
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
-SCHEMA_REQUIRED = {"TestF09EntitlementPackageIndexPublicMigration"}
-OWNER_REQUIRED = {"TestF06OrganizationWalletRequiresLifecycleEvidence"}
+SCHEMA_REQUIRED = {"TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres"}
+OWNER_REQUIRED = {
+    "TestF06OrganizationWalletRequiresLifecycleEvidence",
+    "TestTokenWalletReceiptSignedClientRecoveryPostgres",
+    "TestTokenWalletReceiptConservationAndLifecyclePostgres",
+}
+PROVISIONING_REQUIRED = {"TestTokenWalletSupplierActualProvisioningConsumerPostgres"}
 REFUND_REQUIRED = {
     "TestRefundPersistedSuccessReferenceUsesPublishedCanonicalIdentityPostgres",
     "TestReviewRefundReconcileRequiresTerminalProviderEvidence",
@@ -199,6 +206,11 @@ def main():
         command = [go, "test", "-p=1", "-race", "-tags=nomsgpack", "-mod=readonly", "-count=1", "-timeout=20m", "-json"]
         if scoped:
             command += ["-run", "^(" + "|".join(sorted(required)) + ")$"] if len(required) > 1 else ["-run", "^" + next(iter(required)) + "$"]
+        if label == "retained-token":
+            # This root already ran with absent Billing actors above. Do not
+            # rerun its exclusive fixture after bootstrapping those actors;
+            # keep every other original Token package test selected.
+            command += ["-skip", "^(" + "|".join(sorted(PROVISIONING_REQUIRED)) + ")$"]
         command.append(target)
         print(f"Financial phase: {label}", flush=True)
         result = subprocess.run(command, cwd=ROOT / "account-platform", env=env,
@@ -225,6 +237,10 @@ def main():
         assert_instance({user})
     try:
         run_phase("owner-schema", "./internal/billingschema", SCHEMA_PACKAGE, SCHEMA_REQUIRED, scoped=True)
+    finally:
+        assert_instance({user})
+    try:
+        run_phase("owner-provisioning", "./internal/token", TOKEN_PACKAGE, PROVISIONING_REQUIRED, scoped=True)
     finally:
         assert_instance({user})
 
