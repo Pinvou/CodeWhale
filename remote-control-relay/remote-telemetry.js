@@ -73,7 +73,12 @@ export function projectRemoteTasks(events, taskGroups = null) {
     const output = task.rows.find(e => e.remote_stage === "first_output");
     emit("task_first_output", output, { duration_ms: output?.remote_duration_ms, output_type: "text" });
     if (TERMINAL.has(task.status)) {
+      const ownerReceipt = task.received && identity(task.received) === identity(task.owner) ? task.received : null;
       emit("task_finished", task.terminal, { status: task.status,
+        // Keep execution timestamps for existing call diagnostics, but never
+        // persist the other installation's wall clock as A's cohort date.
+        retention_occurred_at: task.attributed
+          ? Math.max(time(task.submitted), time(ownerReceipt || task.submitted)) : undefined,
         duration_ms: task.authoritative ? task.terminal.remote_duration_ms : undefined,
         error_category: task.status === "success" ? undefined : task.status === "cancelled" ? "user_cancelled" : taskError(task.terminal.remote_reason) });
     }

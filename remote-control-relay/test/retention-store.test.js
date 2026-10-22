@@ -30,6 +30,51 @@ function remoteRetentionEvents() {
   });
 }
 
+test('online and offline remote retention never persist B clock skew into A cohort', async t => fixture(t, async dir => {
+  const initialized = at('2026-09-01T00:00:00');
+  const devices = [device('controller'), device('controlled')];
+  writeFileSync(join(dir, 'devices.json'), JSON.stringify({devices}));
+  new RetentionFacts(dir, initialized).flush();
+  const events = remoteRetentionEvents();
+  events[1].occurred_at -= 3 * DAY;
+  events[3].occurred_at += 3 * DAY;
+  const online = new RetentionFacts(null, initialized);
+  online.observe(projectRemoteTasks(events), devices, now);
+  assert.equal(online.rows.get('controller').first_success_day, retentionDay(events[0].occurred_at));
+  assert.equal(online.rows.get('controller').history_complete, true);
+  assert.equal(online.rows.has('controlled'), false);
+  assert.equal(online.metrics(now).d1.retained_installations, 1);
+  const source = join(dir, 'skewed-backup.jsonl');
+  writeFileSync(source, [...events].reverse().map(JSON.stringify).join('\n'));
+  const result = await backfillRetention({dataDir:dir, sources:[source], now, apply:true});
+  assert.deepEqual(result.after, online.metrics(now));
+  const restored = new RetentionFacts(dir);
+  restored.observe([], devices, now);
+  assert.equal(restored.rows.get('controller').history_complete, true);
+  assert.equal(restored.metrics(now).d1.history_unresolved_installations, 0);
+}));
+
+test('remote retention uses a matching owner receipt, bounded below by owner submission', () => {
+  const [submit, terminal] = remoteRetentionEvents();
+  terminal.occurred_at -= 3 * DAY;
+  for (const [receiptIdentity, offset, expected] of [
+    ['controller', DAY, submit.occurred_at + DAY],
+    ['controller', -DAY, submit.occurred_at],
+    ['unrelated', DAY, submit.occurred_at],
+  ]) {
+    const receipt = {...submit, device_id:receiptIdentity, identity_id:receiptIdentity,
+      event_id:'owner_receipt', remote_stage:'result_received', remote_task_status:'success', occurred_at:submit.occurred_at + offset};
+    const state = new RetentionFacts(null, at('2026-08-01T00:00:00'));
+    state.observe(projectRemoteTasks([terminal, receipt, submit]), [device('controller'), device('controlled'), device('unrelated')], now);
+    assert.equal(state.rows.get('controller').first_success_day, retentionDay(expected));
+  }
+  const state = facts([success('2026-08-30T08:00:00', 'controller')], [device('controller')]);
+  state.observe(projectRemoteTasks([submit, terminal]), [device('controller')], now);
+  assert.equal(state.rows.get('controller').history_complete, false, 'clock isolation cannot prove uncertain old history complete');
+  const missingOwnerClock = {...success('2026-09-01T08:00:00'), remote_projection:true};
+  assert.equal(facts([missingOwnerClock]).rows.size, 0, 'projected events without owner-clock evidence fail closed');
+});
+
 test('backup-only remote retention joins across files without restoring raw events', async t => fixture(t, async dir => {
   const devices = [device('controller'), device('controlled')];
   writeFileSync(join(dir, 'devices.json'), JSON.stringify({devices}));

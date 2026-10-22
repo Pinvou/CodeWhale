@@ -1,7 +1,7 @@
 // Durable, minimal retention facts. Raw telemetry can expire independently.
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { MIN_RELIABLE_SAMPLE, isSuccessfulCoreUserTask, normalizeUsageOccurredAt, statsDay as retentionDay, statsDayFromMilliseconds } from './telemetry-primitives.js';
+import { MIN_RELIABLE_SAMPLE, isSuccessfulCoreUserTask, retentionOccurredAt, statsDay as retentionDay, statsDayFromMilliseconds } from './telemetry-primitives.js';
 import { atomicWriteJson, atomicWritePrivateFile, enforcePrivateFile } from './telemetry-storage.js';
 export { statsDay as retentionDay } from './telemetry-primitives.js';
 
@@ -71,7 +71,7 @@ export class RetentionFacts {
       const device = eligible.get(id);
       if (!device || (event.identity_id && event.device_id && event.identity_id !== event.device_id)
         || !isSuccessfulCoreUserTask(event)) continue;
-      const timestamp = normalizeUsageOccurredAt(event.occurred_at);
+      const timestamp = retentionOccurredAt(event);
       const day = statsDayFromMilliseconds(timestamp);
       if (!validRetentionDay(day) || timestamp > now) continue;
       let row = this.rows.get(id);

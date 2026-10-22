@@ -3,7 +3,7 @@ import { createReadStream, existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { RetentionFacts, retentionDay } from '../retention-store.js';
-import { deletionSubjectHash, isSuccessfulCoreUserTask, normalizeUsageOccurredAt, statsDayFromMilliseconds } from '../telemetry-primitives.js';
+import { deletionSubjectHash, isSuccessfulCoreUserTask, normalizeUsageOccurredAt, retentionOccurredAt, statsDayFromMilliseconds } from '../telemetry-primitives.js';
 import { isDirectCliEntry } from '../cli-entrypoint.js';
 import { validDeviceInventory } from '../telemetry-storage.js';
 import { collectRemoteRetentionEvidence, projectRemoteTasks } from '../remote-telemetry.js';
@@ -67,8 +67,11 @@ export async function backfillRetention({ dataDir, sources = [], apply = false, 
           collectRemoteRetentionEvidence(remoteEvidence, { ...event, occurred_at:timestamp });
         }
         if (isSuccessfulCoreUserTask(event)) {
+          const successTimestamp = retentionOccurredAt(event);
+          const successDay = statsDayFromMilliseconds(successTimestamp);
+          if (!Number.isInteger(successDay) || successDay < 1 || successTimestamp > now) continue;
           if (!legacyActivity.has(id)) legacyActivity.set(id, new Set());
-          legacyActivity.get(id).add(day);
+          legacyActivity.get(id).add(successDay);
           chunk.push(event);
         }
         if (chunk.length >= 1000) { facts.observe(chunk, devices, now, wasDeleted); chunk = []; }
@@ -81,7 +84,8 @@ export async function backfillRetention({ dataDir, sources = [], apply = false, 
     for (const event of projectRemoteTasks(evidence)) {
       if (!isSuccessfulCoreUserTask(event)) continue;
       const id = event.identity_id || event.device_id;
-      const day = statsDayFromMilliseconds(normalizeUsageOccurredAt(event.occurred_at));
+      const day = statsDayFromMilliseconds(retentionOccurredAt(event));
+      if (!Number.isInteger(day) || day < 1 || retentionOccurredAt(event) > now) continue;
       if (!legacyActivity.has(id)) legacyActivity.set(id, new Set());
       legacyActivity.get(id).add(day);
       remoteChunk.push(event);
