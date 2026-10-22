@@ -39,6 +39,23 @@ function harness(source) {
     invoke: async (command, args) => { events.push({ command, ...args.request }); },
   };
   vm.createContext(context);
+  // #701 T0-c 壳化适配：切片内的操作生命周期函数已委托 helpers；沙箱按
+  // index.html 顺序补载共享基座并接好 lane 簇访问器（上游 baseSandbox 同形）。
+  vm.runInContext('this.window = this;', context);
+  vm.runInContext(read('src/shared/bridge-shared-helpers.js'), context);
+  vm.runInContext(`this.pinvouSharedtauriVoice = () => this.__voiceCluster || (this.__voiceCluster = window.PinvouBridgeShared.create("tauriVoice", {
+    state, notify, invoke,
+    activeVoiceInput: { get value() { return activeVoiceInput; }, set value(v) { activeVoiceInput = v; } },
+    stopMediaTracks() {}, bt: (k) => k, VOICE_DEVICE_REQUEST_TIMEOUT_MS: 8000, finishVoiceInput() {},
+    voiceOperations: { get value() { return voiceOperations; } },
+  }));`, context);
+  vm.runInContext(`this.pinvouSharedweb = () => this.__webCluster || (this.__webCluster = window.PinvouBridgeShared.create("web", {
+    state, invoke, notify: () => {}, bt: { get value() { return (k) => k; } },
+    voiceOperations: { get value() { return voiceOperations; } },
+    activeVoiceInput: { get value() { return activeVoiceInput; }, set value(v) { activeVoiceInput = v; } },
+    VOICE_DEVICE_REQUEST_TIMEOUT_MS: { get value() { return 8000; } },
+    finishVoiceInput() {}, stopMediaTracks() {},
+  }));`, context);
   vm.runInContext(`${source.slice(start, end)}\nthis.api = {
     rememberVoiceOperation, getVoiceOperationId, beginVoiceSubmission,
     completeVoiceSubmission, trackVoiceTerminal, dismissVoiceInput, voiceOperationSessionId,
@@ -325,7 +342,8 @@ test('desktop waits for Rust ownership and cannot open a microphone after a reje
   let microphoneProbes = 0;
   h.state.voiceAsrSetup = {};
   Object.assign(h.context, {
-    window: { AudioContext() {} }, navigator: { mediaDevices: { getUserMedia() {} } },
+    // T0-c 壳化适配：window 自引用承载共享基座（PinvouBridgeShared），覆盖时保留。
+    window: Object.assign(h.context.window, { AudioContext() {} }), navigator: { mediaDevices: { getUserMedia() {} } },
     normalizeVoiceMode: mode => mode, bt: key => key, emitVoiceDiagnostic() {},
     cleanupVoiceInputSession() {}, normalizeVoiceError: error => error,
     currentVoiceWindowLabel: () => 'detached-b', syncVoiceShortcutRecording: () => claim,
@@ -397,7 +415,26 @@ for (const navigation of ['none', 'session', 'new-draft', 'after-rollback']) {
     // #484 backflow: the merged ensureSession captures its materialization
     // payload through captureDraftWorkspaceBinding; load the real helper
     // (matching name from the merged source) alongside the sliced functions.
-    vm.runInContext(['captureDraftWorkspaceBinding', 'ensureSession', 'enterDraft'].map(name => bridgeFunction(sessionSource, name)).join('\n')
+    // #701 T0-c 壳化适配：prefillComposer/getComposerDraft 已委托 helpers，
+    // 沙箱按 index.html 顺序补载共享基座并接好 lane 簇访问器。
+    vm.runInContext('this.window = this;', ctx);
+        vm.runInContext(read('src/shared/bridge-shared-helpers.js'), ctx);
+        vm.runInContext(`this.pinvouSharedtauriChat = () => this.__chatCluster || (this.__chatCluster = window.PinvouBridgeShared.create("tauriChat", {
+          state, sessionStates, notify: (...cbArgs) => this.notify(...cbArgs), bt: (k) => k, invoke: async () => null,
+          addChatItem: (item) => { state.chatItems.push(item); },
+          sendMessage: (...args) => this.sendMessage(...args),
+          doSendFor: async () => true,
+          flushQueued: () => {},
+          getBuffer: (sid) => (sessionStates[sid] || null),
+          touchSessionBuffer: () => {},
+          ensureSessionBufferLoaded: async () => {},
+          runSyncOnSession: (_sid, fn) => fn(),
+          autoCreateScheduledTaskDraft: () => {},
+          pendingAssistantBlocks: { get value() { return []; } },
+          itemIdSeq: { get value() { return 0; }, set value(v) {} },
+          formatAttachmentDisplayText: (t) => t,
+        }));`, ctx);
+        vm.runInContext(['captureDraftWorkspaceBinding', 'ensureSession', 'enterDraft'].map(name => bridgeFunction(sessionSource, name)).join('\n')
       + '\n' + ['restoreTaskDraft', 'restoreSteerText', 'prefillComposer', 'getComposerDraft'].map(name => bridgeFunction(chatSource, name)).join('\n'), ctx);
     const owner = { sessionId: null, draftEpoch: 4, operationId: operation.operationId };
     const creating = ctx.ensureSession(owner);
@@ -470,7 +507,7 @@ for (const lane of ['desktop', 'web']) {
         const buffers = { 'original-session': { composerDraft: '', remoteTurnActive: outcome === 'switched' },
           'other-session': { composerDraft: 'other draft' } };
         Object.assign(h.state, { activeSessionId: origin, composerDraft: '', draftEpoch: 4,
-          composerPrefill: { id: 0, text: '' }, queued: [], chatItems: [],
+          composerPrefill: { id: 0, text: '' }, queued: [], chatItems: [], messages: [], sessions: [], pinvouReviews: [],
           attachments: outcome === 'false' ? [{ status: 'parsing' }] : [] });
         const operation = h.operation('voiceop-real-recovery', 'chat', origin);
         let unblock;
@@ -542,13 +579,36 @@ for (const lane of ['desktop', 'web']) {
         injectChatViewMentionScope(ctx, chat);
         ctx.__vdbg = [];
         // Official 适配：上游 #586 的恢复族依赖 stripMentionBlockForComposerRestore
-        // 与块感知信封（chat.js 本体内联实现），随恢复族一并提取进沙箱。
+        // 与块感知信封；#701 T0-c 壳化后信封/队列簇委托 helpers，沙箱按
+        // index.html 顺序补载共享基座并接好 lane 簇访问器，lane 壳与
+        // helpers 谓词体一起提取（queuedPayloadEnvelope 本体已不在
+        // chat.js，改从 helpers 提取）。
+        vm.runInContext('this.window = this;', ctx);
+        vm.runInContext(read('src/shared/bridge-shared-helpers.js'), ctx);
+        vm.runInContext(`this.pinvouSharedtauriChat = () => this.__chatCluster || (this.__chatCluster = window.PinvouBridgeShared.create("tauriChat", {
+          state, sessionStates, notify: (...cbArgs) => this.notify(...cbArgs), bt: (k) => k, invoke: async () => null,
+          addChatItem: (item) => { state.chatItems.push(item); },
+          sendMessage: (...args) => this.sendMessage(...args),
+          doSendFor: (...args) => this.doSendFor(...args),
+          flushQueued: (...args) => this.flushQueued(...args),
+          getBuffer: (sid) => (sessionStates[sid] || null),
+          touchSessionBuffer: () => {},
+          ensureSessionBufferLoaded: async () => {},
+          runSyncOnSession: (_sid, fn) => fn(),
+          autoCreateScheduledTaskDraft: () => {},
+          pendingAssistantBlocks: { get value() { return []; } },
+          itemIdSeq: { get value() { return 0; }, set value(v) {} },
+          formatAttachmentDisplayText: (t) => t,
+        }));`, ctx);
         const functions = ['getComposerDraft', 'setComposerDraft', 'prefillComposer', 'restoreTaskDraft',
-          'stripMentionBlockForComposerRestore', 'queuedPayloadEnvelope', 'makeQueuedMessage',
+          'stripMentionBlockForComposerRestore', 'makeQueuedMessage',
           'rebuiltQueuedPayload', 'rebuiltQueuedMetaPayload',
           lane === 'desktop' ? 'restoreSteerText' : 'restoreComposerText', 'sendMessage'];
         if (lane === 'web') functions.push('restoreAbortedMaterialization', 'maybeSubmitFirstWebTurn');
         vm.runInContext(functions.map(name => bridgeFunction(sendSource, name)).join('\n'), ctx);
+        // 信封函数经簇访问（其内部的 mention 拆分依赖注入的 window 域），
+        // 不再单独提取 helpers 谓词体。
+        vm.runInContext('this.queuedPayloadEnvelope = (...args) => this.pinvouSharedtauriChat().queuedPayloadEnvelope(...args);', ctx);
         const sentTargets = [];
         ctx.doSendFor = async sid => { sentTargets.push(sid); return true; };
         if (outcome.startsWith('draft-') && !preparing) {
@@ -592,6 +652,7 @@ for (const lane of ['desktop', 'web']) {
         const errorStart = hook.indexOf('function createVoiceTaskSendError(');
         const errorEnd = hook.indexOf('\n// Task-send teardown:', errorStart);
         vm.runInContext(`${hook.slice(errorStart, errorEnd)}\n${hook.slice(deliverStart, deliverEnd)}\n${hook.slice(resultStart, resultEnd)}\nthis.writeback = handleVoiceResult;`, ctx);
+        const __origRTD = ctx.restoreTaskDraft;
         const sending = ctx.writeback('voice-session', 'voice task', '', { mode: 'task', operationId: operation.operationId })
           .then(() => 'accepted', error => error.category);
         assert.equal(ctx.inputTextRef.current, '', 'owned writeback draft must be consumed before awaiting bridge');
@@ -684,6 +745,20 @@ function restoreHarness(source, lane, stateOverrides, boundSessionId = null) {
   sandbox.prefillComposer = (text, append) => calls.prefill.push({ text, append });
   const declStart = source.indexOf('  const pendingTaskDraftRecovery = { buffer: null };');
   assert.ok(declStart >= 0, `${lane} bridge must keep the retained recovery slot declaration`);
+  // #701 T0-c 壳化适配：截取区段内的 setComposerDraft 等已委托 helpers，
+  // 沙箱按 index.html 顺序补载共享基座并接好 lane 簇访问器。
+  vm.runInContext('this.window = this;', sandbox);
+  vm.runInContext(read('src/shared/bridge-shared-helpers.js'), sandbox);
+  vm.runInContext(`this.pinvouSharedtauriChat = () => this.__chatCluster || (this.__chatCluster = window.PinvouBridgeShared.create("tauriChat", {
+    state, notify: () => {}, bt: (k) => k, invoke: async () => null,
+    addChatItem: () => {}, sendMessage: () => {}, doSendFor: async () => true,
+    flushQueued: () => {}, getBuffer: () => null, touchSessionBuffer: () => {},
+    ensureSessionBufferLoaded: async () => {}, runSyncOnSession: (_sid, fn) => fn(),
+    autoCreateScheduledTaskDraft: () => {},
+    pendingAssistantBlocks: { get value() { return []; } },
+    itemIdSeq: { get value() { return 0; }, set value(v) {} },
+    formatAttachmentDisplayText: (t) => t,
+  }));`, sandbox);
   vm.runInContext(
     source.slice(declStart, source.indexOf('  function getComposerDraft(', declStart))
     + '\n' + bridgeFunction(source, 'getComposerDraft')

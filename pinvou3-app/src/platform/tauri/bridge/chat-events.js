@@ -5,7 +5,7 @@
   const registry = window.__PINVOU_TAURI_BRIDGE_FEATURES__ = window.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
   registry["chat-events"] = function (context) {let pinvouSharedtauriChatEventsCache = null;
 function pinvouSharedtauriChatEvents() {
-  if (!pinvouSharedtauriChatEventsCache) pinvouSharedtauriChatEventsCache = window.PinvouBridgeShared.create("tauriChatEvents", { state });
+  if (!pinvouSharedtauriChatEventsCache) pinvouSharedtauriChatEventsCache = window.PinvouBridgeShared.create("tauriChatEvents", { state, addChatItem, bt, flushPendingTextBlock, autoCreateScheduledTaskDraft, itemIdSeq: { get value() { return context.itemIdSeq; }, set value(v) { context.itemIdSeq = v; } }, pendingStreamNotifications: { get value() { return pendingStreamNotifications; } }, pendingAssistantText: { get value() { return context.pendingAssistantText; }, set value(v) { context.pendingAssistantText = v; } }, pendingAssistantBlocks: { get value() { return context.pendingAssistantBlocks; }, set value(v) { context.pendingAssistantBlocks = v; } }, finalizeAssistantStreamBeforeReasoning });;
   return pinvouSharedtauriChatEventsCache;
 }
 
@@ -35,6 +35,7 @@ function pinvouSharedtauriChatEvents() {
     var addAuthoritySyncNotice = context.addAuthoritySyncNotice;
     var timeStr = context.timeStr;
     var flushPendingTextBlock = context.flushPendingTextBlock;
+    var autoCreateScheduledTaskDraft = context.autoCreateScheduledTaskDraft;
     var flushAssistantMessageToHistory = context.flushAssistantMessageToHistory;
     var resetPendingAssistant = context.resetPendingAssistant;
     var flushQueued = context.flushQueued;
@@ -95,15 +96,7 @@ function pinvouSharedtauriChatEvents() {
       };
     }
 
-    function cancelPendingStreamNotify(sid) {
-      var pending = sid && pendingStreamNotifications[sid];
-      if (!pending) return;
-      if (pending.frame !== null && typeof window.cancelAnimationFrame === "function") {
-        window.cancelAnimationFrame(pending.frame);
-      }
-      if (pending.timer !== null && typeof clearTimeout === "function") clearTimeout(pending.timer);
-      delete pendingStreamNotifications[sid];
-    }
+    function cancelPendingStreamNotify(sid) { return pinvouSharedtauriChatEvents().cancelPendingStreamNotify(sid); }
 
     // Every semantic notification is a synchronous flush boundary. Its
     // snapshot already contains all accumulated deltas, so the pending frame
@@ -169,18 +162,7 @@ function pinvouSharedtauriChatEvents() {
       return Math.max(0, count - 1);
     }
 
-    function latestOpenTimelineStart() {
-      var events = state.turnTimeline || [];
-      var completed = Object.create(null);
-      events.forEach(function (event) {
-        if (event && event.event === "assistant_done") completed[event.turn_id] = true;
-      });
-      for (var index = events.length - 1; index >= 0; index--) {
-        var event = events[index];
-        if (event && event.event === "user_start" && !completed[event.turn_id]) return event;
-      }
-      return null;
-    }
+    function latestOpenTimelineStart() { return pinvouSharedtauriChatEvents().latestOpenTimelineStart(); }
 
     function recordTurnStarted() {
       if (state.activeTurnTimelineId) return;
@@ -213,9 +195,6 @@ function pinvouSharedtauriChatEvents() {
     }
 
     function recordTurnCompleted(payload) {
-      var openStart = latestOpenTimelineStart();
-      var turnId = state.activeTurnTimelineId || (openStart && openStart.turn_id);
-      if (!turnId) return null;
       if (payload && payload.error && !(payload.user_error || payload.userError)) {
         var messages = bridgeMessages();
         var userError = typeof messages.modelServiceUserError === "function"
@@ -226,28 +205,10 @@ function pinvouSharedtauriChatEvents() {
           payload.userError = userError;
         }
       }
-      var timestamp = Date.now();
-      var start = openStart || (state.turnTimeline || []).find(function (event) {
-        return event && event.turn_id === turnId && event.event === "user_start";
-      });
-      var record = {
-        turn_id: turnId,
-        event: "assistant_done",
-        timestamp: timestamp,
-        ts: new Date(timestamp).toISOString(),
-        status: payload && payload.status || (payload && payload.error ? "Failed" : "Completed"),
-        error: payload && payload.error || null,
-        user_error: payload && (payload.user_error || payload.userError) || null,
-        billing_notice: payload && payload.billing_notice || null,
-        ui_turn_index: start && start.ui_turn_index,
-      };
-      state.turnTimeline = (state.turnTimeline || []).concat([record]);
-      state.activeTurnTimelineId = null;
-      // The return value drives the terminal-bubble hiding decision: only a
-      // timeline terminal record that was actually written with an error
-      // lets the timeline error card take over (hiding otherwise = silent
-      // swallow).
-      return record;
+      var openStart = latestOpenTimelineStart();
+      // F-FE13-2：构建器统一在 shared/bridge-shared-helpers.js（web
+      // turn-terminal.js 同源），此处仅保留 openStart 取样与转发。
+      return window.PinvouBridgeShared.buildAssistantDoneTimelineRecord(state, openStart, payload);
     }
 
     function latestTimelineCompletion(events) {
@@ -385,38 +346,7 @@ function pinvouSharedtauriChatEvents() {
         }).finally(unsubscribe);
     }
 
-    function preserveInterruptedAssistantPresentation() {
-      var userItemIndex = -1;
-      var afterMessageIndex = -1;
-      var afterUserOrdinal = -1;
-      for (var index = 0; index < state.chatItems.length; index++) {
-        var candidate = state.chatItems[index];
-        if (!candidate || candidate.type !== "user") continue;
-        afterUserOrdinal += 1;
-        userItemIndex = index;
-        afterMessageIndex = -1;
-        if (Number.isFinite(Number(candidate.messageIndex))) {
-          afterMessageIndex = Number(candidate.messageIndex);
-        }
-      }
-      // 没有任何 user 气泡时无法锚定轮次;若把全部历史 assistant 项都标记为
-      // 仅展示,下次权威重载会在末尾追加整段历史的重复副本。此时放弃保留,
-      // 退化为修复前行为(重载后消失),但必须清空 pending 以免污染下一轮。
-      if (userItemIndex < 0) {
-        context.pendingAssistantText = "";
-        context.pendingAssistantBlocks = [];
-        return;
-      }
-      for (var itemIndex = userItemIndex + 1; itemIndex < state.chatItems.length; itemIndex++) {
-        var item = state.chatItems[itemIndex];
-        if (!item || item.type !== "assistant" || !item.html) continue;
-        item.interruptedDisplayOnly = true;
-        item.afterMessageIndex = afterMessageIndex;
-        item.afterUserOrdinal = afterUserOrdinal;
-      }
-      context.pendingAssistantText = "";
-      context.pendingAssistantBlocks = [];
-    }
+    function preserveInterruptedAssistantPresentation() { return pinvouSharedtauriChatEvents().preserveInterruptedAssistantPresentation(); }
     // chat:done terminal sweep: delete toolMeta entries that never got a
     // paired tool_result. The forwarder delivers mailbox events for a session
     // in order, and after done this turn sees no more chat:tool_end (the next
@@ -913,33 +843,9 @@ function finalizeStreamingReasoning(index) { return pinvouSharedtauriChatEvents(
     context.currentStreamId = 0;
   }
 
-  function startReasoningBlock(index) {
-    var existing = streamingReasoningItem(index);
-    if (existing) return existing;
-    finalizeStreamingReasoning();
-    finalizeAssistantStreamBeforeReasoning();
-    var item = {
-      type: "reasoning",
-      text: "",
-      time: timeStr(),
-      streaming: true,
-      startedAt: Date.now(),
-      completedAt: null,
-      reasoningIndex: index,
-    };
-    addChatItem(item);
-    // 用空 thinking block 记录明确的 Started 边界，使两个相邻的
-    // thinking content block 不会在持久化时被误合并。
-    context.pendingAssistantBlocks.push({ type: "thinking", thinking: "" });
-    return item;
-  }
+  function startReasoningBlock(index) { return pinvouSharedtauriChatEvents().startReasoningBlock(index); }
 
-  function appendReasoningBlock(text) {
-    var blocks = context.pendingAssistantBlocks;
-    var last = blocks[blocks.length - 1];
-    if (last && last.type === "thinking") last.thinking += text;
-    else blocks.push({ type: "thinking", thinking: text });
-  }
+  function appendReasoningBlock(text) { return pinvouSharedtauriChatEvents().appendReasoningBlock(text); }
 
   listen("chat:reasoning_start", function (e) { onSessionEvent(e, function () {
     startReasoningBlock(reasoningEventIndex(e));
@@ -1615,7 +1521,7 @@ function finalizeStreamingReasoning(index) { return pinvouSharedtauriChatEvents(
   // 桌面前端监听的 DOM CustomEvent 'pinvou:tools-changed'(tool-events.js / 类似入口),
   // 让 chip 上的工具开关计数立即同步。
   listen("remote_control:tools_changed", function () {
-    try { window.dispatchEvent(new CustomEvent('pinvou:tools-changed')); } catch (_) {}
+    try { window.PinvouToolStoreEvents.notifyComposerToolsChanged(); } catch { /* DOM event dispatch failure only affects the count refresh */ }
   });
 
   // 远程 mobile 挂载/摘挂 KB → Rust emit remote_control:kb_mount_changed → 这里同步

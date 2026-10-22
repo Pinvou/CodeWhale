@@ -231,6 +231,8 @@ const jaBase = {
         kbOutTodayPrefix: '今日', kbOutWeekdays: ['日','月','火','水','木','金','土'],
         kbOutPreview: 'プレビュー', kbOutOpenChat: 'チャットで開く', kbOutContinue: '続きを作る', kbOutNewProject: '新規プロジェクト', kbOutGallery: 'ギャラリー', kbOutList: 'リスト', kbOutOpenExt: 'システムで開く', kbOutOpenFolder: 'フォルダを開く',
         kbOutEmpty: '成果物はまだありません', kbOutEmptyHint: 'PINVOU とチャットして作ったものがここに表示されます。',
+        kbOutSkippedNotice: (n) => `${n} 件のセッション記録が大きすぎるか読み取れないため、その成果物は一覧に表示されません`,
+        kbOutScanError: '成果物インデックスを現在読み取れません', kbOutRetry: '再試行',
         kbOutContinuePrefill: (name) => `「${name}」を続けて改善`, kbOutRequirementLabel: '依頼内容：', kbOutFileCount: (n) => `${n} ファイル`,
         kbCatAll: 'すべて', kbCatDoc: '文書', kbCatSheet: '表', kbCatPpt: 'スライド', kbCatPdf: 'PDF', kbCatImg: '画像', kbCatZip: '圧縮',
         kbRecent: '最近の更新', kbAddToKb: '知識に追加', kbAdd: '追加', kbAddFiles: 'ファイル追加', kbAddFolder: 'フォルダーを追加', kbIndexing: '解析中',

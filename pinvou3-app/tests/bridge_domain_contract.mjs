@@ -4,7 +4,7 @@ export const desktopBridgeApi = {
   state: ['get', 'getMany', 'subscribe', 'subscribeMany'],
   platform: ['loadPlatformCapabilities', 'refreshConnectorAuthGates'],
   chat: ['cancelGeneration', 'cancelShellTask', 'editQueued', 'getComposerDraft', 'interruptAndSend', 'interruptAndSendQueued', 'prefillComposer', 'prioritizeQueued', 'removeQueued', 'restoreTaskDraft', 'retryFirstTurn', 'sendMessage', 'sendMessageToSession', 'setComposerDraft', 'steer'],
-  auxChat: ['discard', 'ensure', 'reset', 'send', 'snapshot'],
+  auxChat: ['ensure', 'reset', 'send', 'snapshot'],
   voice: ['abandonVoiceResult', 'appendVoiceText', 'beginVoiceSubmission', 'cancelVoiceAsrSetup', 'cancelVoiceInput', 'clearVoiceInput', 'closeVoiceAsrSetup', 'completeVoiceSubmission', 'dismissVoiceInput', 'getVoiceOperationId', 'hasVoiceSubmissionPending', 'installVoiceAsr', 'setVoiceShortcutEnabled', 'startVoiceInput', 'syncVoiceShortcutRecording'],
   knowledge: ['downloadKbModel', 'kbModelStatus', 'listCollections', 'loadKnowledgeEmbedderAfterFirstFrame', 'mountCollection', 'mountRemoteCollection', 'removeCollection', 'removeRemoteCollection', 'setCollectionEnabled', 'setRemoteCollectionEnabled', 'unmountCollection'],
   scheduled: ['clearScheduledTaskSelection', 'createScheduledTask', 'deleteScheduledTask', 'dismissScheduledTaskError', 'exitScheduledRunChat', 'loadScheduledTaskRecentRuns', 'loadScheduledTaskRuns', 'loadScheduledTasks', 'openScheduledRunChat', 'pauseScheduledTask', 'readScheduledTask', 'refreshScheduledTaskData', 'resumeScheduledTask', 'runScheduledTaskNow', 'selectScheduledTask', 'startScheduledTaskChat', 'toggleScheduledTaskPinned', 'updateScheduledTask'],
@@ -37,10 +37,9 @@ export const desktopBridgeApi = {
   ],
   artifacts: ['artifactInfo', 'downloadArtifact', 'listDeliverableIndex', 'openArtifactExternal', 'openContainingFolder', 'openExternalUrl', 'openInSystem', 'openScheduledTaskFolder', 'openUserExternalUrl', 'readArtifactImageB64', 'readArtifactText', 'readArtifactThumbnail', 'renderArtifactVisual', 'revealSessionFolder', 'writeArtifactText'],
   attachments: ['addAttachmentByPath', 'addPasteImage', 'addPasteImageFromClipboard', 'clearAttachments', 'openConversationAttachment', 'pickAndAttach', 'removeAttachment', 'resolveConversationAttachment', 'revealConversationAttachment', 'uploadDeviceFiles'],
-  resolutions: ['markResolved'],
   files: ['pickFeedbackFiles', 'pickFiles', 'pickFolders', 'pickManageFolder', 'pickRebindFolder', 'pickWorkspaceFolder'],
   personas: ['createPersona', 'deletePersona', 'equipPersona', 'getPersonas', 'loadPersonas', 'postCardCreatorIntro', 'readPersonaBody', 'unequipPersona', 'updatePersona'],
-  memory: ['archiveRecentWorkMemory', 'confirmMemoryCandidate', 'deleteMemoryItem', 'deleteMemoryPreference', 'ignoreMemoryCandidate', 'loadMemoryOverview', 'loadOrganizeHistory', 'neverMemoryCandidate', 'organizeMemory', 'saveMemoryProfilePatch', 'updateMemoryItem'],
+  memory: ['confirmMemoryCandidate', 'deleteMemoryItem', 'ignoreMemoryCandidate', 'loadMemoryOverview', 'loadOrganizeHistory', 'neverMemoryCandidate', 'organizeMemory', 'saveMemoryProfilePatch', 'updateMemoryItem'],
   updater: ['cancelUpdate', 'checkForUpdate', 'downloadAndInstallUpdate', 'restartApp'],
   dependencies: ['checkDependencies', 'installDependencies'],
   teamRelay: ['avatarSource', 'claim', 'createAction', 'createFirstTeam', 'createInvite', 'createTeam', 'createThread', 'disableJoinPassword', 'disconnect', 'dissolveTeam', 'downloadAttachment', 'getJoinPassword', 'joinTeam', 'leaveTeam', 'listDraftSourceSessions', 'load', 'markThreadRead', 'mountDraftMaterials', 'openPreparedMaterial', 'pickAgentWorkspace', 'pickDraftAttachments', 'prepareTaskWorkspace', 'readDraftSourceSession', 'refresh', 'registerAccount', 'removeAvatar', 'removeMember', 'revealPreparedMaterial', 'rotateJoinPassword', 'setJoinPasswordVisibility', 'setTaskAgentSession', 'setThreadPreference', 'switchTeam', 'taskWorkspaceStatus', 'transferOwner', 'updateProfile', 'uploadAvatar', 'verifyAccess'],
@@ -48,15 +47,13 @@ export const desktopBridgeApi = {
   // Computer use drives the local machine: the desktop backend exposes it, the
   // web surface carries only rejecting stubs (the RPC allowlist excludes the
   // commands entirely, same policy as browser:*).
-  computerUse: ['confirm', 'deny', 'getStatus', 'grant', 'permissionStatus', 'refreshStatus', 'requestPermissions', 'revoke', 'setEnabled', 'stop'],
+  computerUse: ['confirm', 'deny', 'grant', 'permissionStatus', 'refreshStatus', 'requestPermissions', 'revoke', 'setEnabled', 'stop'],
 };
 
 // These methods intentionally depend on desktop lifecycle or local machine
 // resources. Web may omit them, but every other desktop method must exist.
 export const desktopOnlyBridgeApi = {
   platform: ['loadPlatformCapabilities', 'refreshConnectorAuthGates'],
-  // Fork 保全：记忆整理回流的归档/偏好删除走桌面命令通道，Web 记忆域不投影。
-  memory: ['archiveRecentWorkMemory', 'deleteMemoryPreference'],
   voice: ['setVoiceShortcutEnabled', 'syncVoiceShortcutRecording'],
   knowledge: ['loadKnowledgeEmbedderAfterFirstFrame', 'mountRemoteCollection', 'removeRemoteCollection', 'setRemoteCollectionEnabled'],
   // 多智能体开关是桌面专属操作（ADR-0006）：Web 端只读呈现。

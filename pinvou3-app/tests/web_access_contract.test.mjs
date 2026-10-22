@@ -41,6 +41,10 @@ const desktopAuxChatBridge = readSource(
   path.join(bridgeRoot, 'bridge', 'aux-chat.js'),
   'utf8',
 );
+const sharedBridgeHelpers = readSource(
+  path.join(root, 'src', 'shared', 'bridge-shared-helpers.js'),
+  'utf8',
+);
 const desktopBridgeSources = [
   readSource(path.join(bridgeRoot, 'bridge.js'), 'utf8'),
   ...fs.readdirSync(path.join(bridgeRoot, 'bridge'))
@@ -226,8 +230,8 @@ assert.equal(
 );
 assert.match(
   webBridge,
-  /listen\("remote_control:tools_changed", function \(\) \{\s*try \{ window\.dispatchEvent\(new CustomEvent\("pinvou:tools-changed"\)\); \}/,
-  'web bridge must re-dispatch pinvou:tools-changed from remote_control:tools_changed (bounded to the adjacent dispatch line — round-23 asto minor 3: the old unbounded gap stayed green on a deleted dispatch)',
+  /listen\("remote_control:tools_changed", function \(\) \{\s*try \{ window\.PinvouToolStoreEvents\.notifyComposerToolsChanged\(\); \}/,
+  'web bridge must re-dispatch pinvou:tools-changed through the shared module from remote_control:tools_changed (bounded to the adjacent dispatch line — round-23 asto minor 3: the old unbounded gap stayed green on a deleted dispatch; round-9: FFE4-1 conversion completed, the web lane now matches the desktop chat-events.js twin)',
 );
 
 // Memory organize is a global action (no session scope, same surface as
@@ -343,14 +347,13 @@ assert.equal(allowed.has('list_sessions'), false,
 assert.equal(allowed.has('list_archived_sessions'), false,
   'Web must not call the native archived list that exposes host workspace metadata');
 
-// Aux chat domain: platform/web/bridge.js's auxChatEnsure/auxChatDiscard/
+// Aux chat domain: platform/web/bridge.js's auxChatEnsure/
 // auxChatReset invoke these commands directly; sending goes through the
 // existing web_access_chat (an aux session can be store.load'ed by id and is
 // not affected by the list_sessions filter). Missing any entry would make
 // the Web aux chat fail silently.
 for (const command of [
   'get_or_create_aux_session',
-  'discard_aux_session',
   'reset_aux_session',
 ]) {
   assert.equal(allowed.has(command), true, `${command} must be allowed on Web (aux chat)`);
@@ -718,29 +721,24 @@ assert.match(webBridge, /composerDraft: ""/,
   'WebUI must keep a per-session in-memory composer draft');
 assert.match(webDomainAdapter, /chat: domain\(\["sendMessage", "sendMessageToSession", "getComposerDraft", "setComposerDraft"/,
   'WebUI domain facade must expose the same composer draft API as desktop');
-assert.match(webDomainAdapter, /auxChat: domain\(\[\], \{\s*ensure: "auxChatEnsure",\s*send: "auxChatSend",\s*snapshot: "auxChatSnapshot",\s*discard: "auxChatDiscard",\s*reset: "auxChatReset"/,
+assert.match(webDomainAdapter, /auxChat: domain\(\[\], \{\s*ensure: "auxChatEnsure",\s*send: "auxChatSend",\s*snapshot: "auxChatSnapshot",\s*reset: "auxChatReset"/,
   'WebUI domain facade must expose the same auxChat domain as desktop');
-// Official-lane port note (community #433): upstream's M7 puts the auxChat
-// domain bodies in the shared bridge base (src/shared/bridge-shared-helpers.js,
-// window.PinvouBridgeShared); Official has no shared-cluster mechanism, so the
-// bodies live in the desktop aux-chat feature module and inline in the web
-// bridge. Renaming an operation on either lane must turn these pins red.
-assert.match(desktopAuxChatBridge, /registry\.auxChat = function \(context\)/,
-  'the desktop aux-chat feature module must register the auxChat factory');
-assert.match(desktopAuxChatBridge, /async function auxChatEnsure\(taskId\)/);
-assert.match(webBridge, /async function auxChatEnsure\(taskId\)/,
-  'the Web lane must carry the auxChat domain (inline equivalent of the shared cluster)');
-assert.match(desktopAuxChatBridge, /invoke\("get_or_create_aux_session", \{ sessionId: task \}\)/,
+// M7（#701 T0-c 壳化）：auxChat 域本体在共享桥基座（cluster "auxChat"），
+// 两 lane 只保留各自 genuine difference（send 分派）；改名必须把钉点打红。
+assert.match(sharedBridgeHelpers, /"auxChat": function \(deps\)/,
+  'the shared bridge base must register the auxChat cluster (M7)');
+assert.match(sharedBridgeHelpers, /async function auxChatEnsure\(taskId\)/);
+assert.match(webBridge, /PinvouBridgeShared\.create\("auxChat", \{/,
+  'the Web lane must consume the shared auxChat cluster (M7)');
+assert.match(desktopAuxChatBridge, /PinvouBridgeShared\.create\("auxChat", \{/,
+  'the desktop lane must consume the shared auxChat cluster (M7)');
+assert.match(sharedBridgeHelpers, /invoke\("get_or_create_aux_session", \{ sessionId: task \}\)/,
   'aux chat must create-or-fetch the aux session by task id');
-assert.match(webBridge, /invoke\("get_or_create_aux_session", \{ sessionId: task \}\)/);
 assert.match(webBridge, /invoke\("web_access_chat", \{ message, attachmentHandles: \[\], sessionId: sid, restrictTools: true \}\)/,
   'WebUI aux chat sends must ride the bounded web chat command with tools restricted');
-assert.match(desktopAuxChatBridge, /invoke\("discard_aux_session", \{ sessionId: task \}\)/);
-assert.match(webBridge, /invoke\("discard_aux_session", \{ sessionId: task \}\)/);
-assert.match(desktopAuxChatBridge, /async function auxChatReset\(taskId\)/);
-assert.match(desktopAuxChatBridge, /invoke\("reset_aux_session", \{ sessionId: task \}\)/,
+assert.match(sharedBridgeHelpers, /async function auxChatReset\(taskId\)/);
+assert.match(sharedBridgeHelpers, /invoke\("reset_aux_session", \{ sessionId: task \}\)/,
   'aux chat restart must ride the atomic reset command (M6)');
-assert.match(webBridge, /invoke\("reset_aux_session", \{ sessionId: task \}\)/);
 // M5: the aux id is a pure function of the task id (aux-<taskId>, round-30
 // B8), so both lanes derive it at the purge site — the redundant, never-pruned
 // auxIdByTask maps are gone.
@@ -748,9 +746,6 @@ assert.doesNotMatch(webBridge, /auxIdByTask/,
   'the WebUI aux id must be derived, not stored in an unbounded per-task map (M5)');
 assert.doesNotMatch(desktopAuxChatBridge, /auxIdByTask/,
   'the desktop aux id must be derived, not stored in an unbounded per-task map (M5)');
-assert.match(desktopAuxChatBridge, /purgeSessionBuffer\(`aux-\$\{task\}`\)/,
-  'aux discard must purge the derived aux buffer id');
-assert.match(webBridge, /purgeSessionBuffer\(`aux-\$\{task\}`\)/);
 assert.match(bridge, /registry\.auxChat = function \(context\)/,
   'the desktop bridge must register the auxChat feature module');
 assert.match(desktopAuxChatBridge, /invoke\("chat", \{ message, attachments: \[\], sessionId: sid, restrictTools: true \}\)/,
@@ -791,7 +786,10 @@ assert.match(bridge, /remoteAdmissionKeys/);
 assert.match(bridge, /var activePlanCards = Object\.create\(null\)/);
 assert.match(bridge, /var hydratedKey = planCardHydrationKey\(hydratedPlan\)/);
 assert.match(bridge, /hydratedPlan\.cardState = "active"/);
-assert.match(bridge, /if \(item\.type === "plan_card"\) return false/);
+// T0-b: the live-hydration filter moved into the shared payload; pin the
+// plan_card branch in helpers and the lane delegation instead of the inline copy.
+assert.match(readSource(path.join(root, "src", "shared", "bridge-shared-helpers.js"), "utf8"), /if \(item\.type === "plan_card"\) return false/);
+assert.match(webBridge, /liveChatItemKeptForHydration\(item\)/);
 assert.match(bridge, /action === "accept_plan"/);
 assert.match(bridge, /acceptedMode = payload\.mode_state \|\| payload\.modeState/);
 assert.match(bridge, /planNotActive = errorText\.indexOf\("plan_not_active"\)/);
@@ -888,10 +886,23 @@ assert.ok(
 // 提交信号由发送链路在后端受理新一轮后派发：常规发送（desktop/web doSendFor）、
 // Web 首轮提交、接受计划（desktop/web acceptPlan）、编辑重跑（desktop/web
 // editLastTurn）、原生代码车道发送与接受方案，缺任一处 pending 都不会转正。
-assert.match(bridge, /window\.dispatchEvent\(new CustomEvent\("pinvou:chat-round-committed", \{ detail: \{ scope: "plain" \} \}\)\)/);
+// FFE4-1：原始 dispatch 只存在于 shared/tool-store-events.js；platform 桥接层
+// 的 7 处发送/接受/重跑路径必须经 window.PinvouToolStoreEvents 调用。
+const toolStoreEventsShared = readSource(path.join(root, 'src', 'shared', 'tool-store-events.js'), 'utf8');
+assert.match(toolStoreEventsShared, /pinvou:chat-round-committed/);
+assert.match(toolStoreEventsShared, /pinvou:tools-changed/);
+assert.match(
+  bridge,
+  /window\.PinvouToolStoreEvents\.notifyChatRoundCommitted\(\)/,
+  'platform bridges must dispatch the round-committed event through the shared helper',
+);
 assert.ok(
-  (bridge.match(/pinvou:chat-round-committed/g) || []).length >= 7,
+  (bridge.match(/PinvouToolStoreEvents\.notifyChatRoundCommitted\(\)/g) || []).length >= 7,
   'desktop doSendFor/acceptPlan/editLastTurn and web doSendFor/first-turn/acceptPlan/editLastTurn must each dispatch the round-committed event',
+);
+assert.ok(
+  (bridge.match(/PinvouToolStoreEvents\.notifyComposerToolsChanged\(\)/g) || []).length >= 1,
+  'the desktop bridge must dispatch the tools-changed refresh through the shared helper',
 );
 assert.ok(
   (codexView.match(/notifyChatRoundCommitted\('code'\);/g) || []).length >= 2,

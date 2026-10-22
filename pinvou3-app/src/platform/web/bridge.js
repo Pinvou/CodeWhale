@@ -9,7 +9,7 @@
 
 let pinvouSharedwebCache = null;
 function pinvouSharedweb() {
-  if (!pinvouSharedwebCache) pinvouSharedwebCache = window.PinvouBridgeShared.create("web", { state, BT_TABLE: { get value() { return BT_TABLE; } }, PINVOU_SCENE_EVENTS_STORAGE_PREFIX: { get value() { return PINVOU_SCENE_EVENTS_STORAGE_PREFIX; } }, invoke, sessionStates: { get value() { return sessionStates; } }, freshBuffer, restoreEvictedSessionDraft, sessionBufferTouchClock: { get value() { return sessionBufferTouchClock; }, set value(v) { sessionBufferTouchClock = v; } }, pruneScheduledSessionBuffers, pruneSessionBuffers, scheduledRunSessionOwners: { get value() { return scheduledRunSessionOwners; } }, scheduledRunOwnerTouchClock: { get value() { return scheduledRunOwnerTouchClock; }, set value(v) { scheduledRunOwnerTouchClock = v; } }, MAX_SCHEDULED_RUN_SESSION_OWNERS: { get value() { return MAX_SCHEDULED_RUN_SESSION_OWNERS; } }, recordAuthoritySyncDiagnostic, runSyncOnSession, notify, SCHEDULED_TEMPLATE_SOURCE_STORAGE_KEY, scheduledTaskTemplateSources: { get value() { return scheduledTaskTemplateSources; } }, persistScheduledTaskTemplateSources, scheduledTaskRequestTokens: { get value() { return scheduledTaskRequestTokens; } }, scheduledTaskRefreshInFlight: { get value() { return scheduledTaskRefreshInFlight; }, set value(v) { scheduledTaskRefreshInFlight = v; } }, scheduledRecentRunsRequestToken: { get value() { return scheduledRecentRunsRequestToken; }, set value(v) { scheduledRecentRunsRequestToken = v; } }, scheduledRunEventRefreshTimer: { get value() { return scheduledRunEventRefreshTimer; }, set value(v) { scheduledRunEventRefreshTimer = v; } }, scheduledTaskPendingLoads: { get value() { return scheduledTaskPendingLoads; } }, scheduledTaskSelectionGeneration: { get value() { return scheduledTaskSelectionGeneration; }, set value(v) { scheduledTaskSelectionGeneration = v; } }, createScheduledTask, scheduledRunShortcutRefreshes: { get value() { return scheduledRunShortcutRefreshes; } }, SCHEDULED_LINK_POLL_DEADLINE_MS: { get value() { return SCHEDULED_LINK_POLL_DEADLINE_MS; } }, SCHEDULED_LINK_POLL_FAST_ATTEMPTS: { get value() { return SCHEDULED_LINK_POLL_FAST_ATTEMPTS; } }, SCHEDULED_LINK_POLL_FAST_MS: { get value() { return SCHEDULED_LINK_POLL_FAST_MS; } }, SCHEDULED_LINK_POLL_SLOW_MS: { get value() { return SCHEDULED_LINK_POLL_SLOW_MS; } }, scheduledTaskBackendInput, forgetScheduledTaskTemplateSource, scheduledTaskAutoCreateSeq: { get value() { return scheduledTaskAutoCreateSeq; }, set value(v) { scheduledTaskAutoCreateSeq = v; } }, messageHasToolBlock, addChatItem, enterDraft, hydratedMessageKey, switchToSessionInternal, openScheduledRunChatOnce, scheduledRunOpenInFlight: { get value() { return scheduledRunOpenInFlight; } }, loadWorkingSetFrom, purgeSessionBuffer, personaPlaceholderTitles: { get value() { return personaPlaceholderTitles; } }, refreshHistoryList, sessionSwitchRequestToken: { get value() { return sessionSwitchRequestToken; }, set value(v) { sessionSwitchRequestToken = v; } }, saveWorkingSetTo, SHELL_TOOL_NAMES: { get value() { return SHELL_TOOL_NAMES; } }, normalizeTerminalTail, latestShellToolIsWaitObserver, shellPollState: { get value() { return shellPollState; } }, DELIVERABLE_EXTS: { get value() { return DELIVERABLE_EXTS; } }, extractArtifactPaths, summonPinvou, parseToolResultPayload, monitorBaseline: { get value() { return monitorBaseline; }, set value(v) { monitorBaseline = v; } }, clearMonitorBaseline, monitorIntervalId: { get value() { return monitorIntervalId; }, set value(v) { monitorIntervalId = v; } }, gpuUtilHistory: { get value() { return gpuUtilHistory; }, set value(v) { gpuUtilHistory = v; } }, pollMonitor, settingsWriteQueue: { get value() { return settingsWriteQueue; }, set value(v) { settingsWriteQueue = v; } }, modelsLoadSeq: { get value() { return modelsLoadSeq; }, set value(v) { modelsLoadSeq = v; } }, loadSessionModel, setActiveModel, currentDraftModeState, loadMemoryOverview, memoryOverviewSeq: { get value() { return memoryOverviewSeq; }, set value(v) { memoryOverviewSeq = v; } }, setDraftMode, applyAuthoritativeModeState, sendMessage, pushUserEcho, flushAssistantMessageToHistory, dialogOpen, addAttachmentByPath, personaPoolCache: { get value() { return personaPoolCache; }, set value(v) { personaPoolCache = v; } }, deletedPersonaIds: { get value() { return deletedPersonaIds; } }, lastEquippedSid: { get value() { return lastEquippedSid; }, set value(v) { lastEquippedSid = v; } }, mountedCollectionDraftTarget: { get value() { return mountedCollectionDraftTarget; }, set value(v) { mountedCollectionDraftTarget = v; } }, ensureSession, mountedCollectionUpdate: { get value() { return mountedCollectionUpdate; }, set value(v) { mountedCollectionUpdate = v; } }, activeVoiceInput: { get value() { return activeVoiceInput; }, set value(v) { activeVoiceInput = v; } }, stopMediaTracks, VOICE_DEVICE_REQUEST_TIMEOUT_MS: { get value() { return VOICE_DEVICE_REQUEST_TIMEOUT_MS; } }, finishVoiceInput });
+  if (!pinvouSharedwebCache) pinvouSharedwebCache = window.PinvouBridgeShared.create("web", { artifactInfo, hasCommand: canInvoke, state, BT_TABLE: { get value() { return BT_TABLE; } }, PINVOU_SCENE_EVENTS_STORAGE_PREFIX: { get value() { return PINVOU_SCENE_EVENTS_STORAGE_PREFIX; } }, invoke, sessionStates: { get value() { return sessionStates; } }, freshBuffer, restoreEvictedSessionDraft, sessionBufferTouchClock: { get value() { return sessionBufferTouchClock; }, set value(v) { sessionBufferTouchClock = v; } }, pruneScheduledSessionBuffers, pruneSessionBuffers, scheduledRunSessionOwners: { get value() { return scheduledRunSessionOwners; } }, scheduledRunOwnerTouchClock: { get value() { return scheduledRunOwnerTouchClock; }, set value(v) { scheduledRunOwnerTouchClock = v; } }, MAX_SCHEDULED_RUN_SESSION_OWNERS: { get value() { return MAX_SCHEDULED_RUN_SESSION_OWNERS; } }, recordAuthoritySyncDiagnostic, runSyncOnSession, notify, SCHEDULED_TEMPLATE_SOURCE_STORAGE_KEY, scheduledTaskTemplateSources: { get value() { return scheduledTaskTemplateSources; } }, persistScheduledTaskTemplateSources, scheduledTaskRequestTokens: { get value() { return scheduledTaskRequestTokens; } }, scheduledTaskRefreshInFlight: { get value() { return scheduledTaskRefreshInFlight; }, set value(v) { scheduledTaskRefreshInFlight = v; } }, scheduledRecentRunsRequestToken: { get value() { return scheduledRecentRunsRequestToken; }, set value(v) { scheduledRecentRunsRequestToken = v; } }, scheduledRunEventRefreshTimer: { get value() { return scheduledRunEventRefreshTimer; }, set value(v) { scheduledRunEventRefreshTimer = v; } }, scheduledTaskPendingLoads: { get value() { return scheduledTaskPendingLoads; } }, scheduledTaskSelectionGeneration: { get value() { return scheduledTaskSelectionGeneration; }, set value(v) { scheduledTaskSelectionGeneration = v; } }, createScheduledTask, scheduledRunShortcutRefreshes: { get value() { return scheduledRunShortcutRefreshes; } }, SCHEDULED_LINK_POLL_DEADLINE_MS: { get value() { return SCHEDULED_LINK_POLL_DEADLINE_MS; } }, SCHEDULED_LINK_POLL_FAST_ATTEMPTS: { get value() { return SCHEDULED_LINK_POLL_FAST_ATTEMPTS; } }, SCHEDULED_LINK_POLL_FAST_MS: { get value() { return SCHEDULED_LINK_POLL_FAST_MS; } }, SCHEDULED_LINK_POLL_SLOW_MS: { get value() { return SCHEDULED_LINK_POLL_SLOW_MS; } }, scheduledTaskBackendInput, forgetScheduledTaskTemplateSource, scheduledTaskAutoCreateSeq: { get value() { return scheduledTaskAutoCreateSeq; }, set value(v) { scheduledTaskAutoCreateSeq = v; } }, messageHasToolBlock, addChatItem, candidateCardPatcher: patchItemByIdFor, enterDraft, hydratedMessageKey, switchToSessionInternal, openScheduledRunChatOnce, scheduledRunOpenInFlight: { get value() { return scheduledRunOpenInFlight; } }, loadWorkingSetFrom, purgeSessionBuffer, personaPlaceholderTitles: { get value() { return personaPlaceholderTitles; } }, refreshHistoryList, sessionSwitchRequestToken: { get value() { return sessionSwitchRequestToken; }, set value(v) { sessionSwitchRequestToken = v; } }, reportSidecarReadFailure, saveWorkingSetTo, SHELL_TOOL_NAMES: { get value() { return SHELL_TOOL_NAMES; } }, normalizeTerminalTail, latestShellToolIsWaitObserver, shellPollState: { get value() { return shellPollState; } }, DELIVERABLE_EXTS: { get value() { return DELIVERABLE_EXTS; } }, extractArtifactPaths, summonPinvou, parseToolResultPayload, monitorBaseline: { get value() { return monitorBaseline; }, set value(v) { monitorBaseline = v; } }, clearMonitorBaseline, monitorIntervalId: { get value() { return monitorIntervalId; }, set value(v) { monitorIntervalId = v; } }, gpuUtilHistory: { get value() { return gpuUtilHistory; }, set value(v) { gpuUtilHistory = v; } }, pollMonitor, settingsWriteQueue: { get value() { return settingsWriteQueue; }, set value(v) { settingsWriteQueue = v; } }, modelsLoadSeq: { get value() { return modelsLoadSeq; }, set value(v) { modelsLoadSeq = v; } }, loadSessionModel, setActiveModel, currentDraftModeState, loadMemoryOverview, memoryOverviewSeq: { get value() { return memoryOverviewSeq; }, set value(v) { memoryOverviewSeq = v; } }, setDraftMode, applyAuthoritativeModeState, sendMessage, pushUserEcho, flushAssistantMessageToHistory, dialogOpen, addAttachmentByPath, personaPoolCache: { get value() { return personaPoolCache; }, set value(v) { personaPoolCache = v; } }, deletedPersonaIds: { get value() { return deletedPersonaIds; } }, lastEquippedSid: { get value() { return lastEquippedSid; }, set value(v) { lastEquippedSid = v; } }, mountedCollectionDraftTarget: { get value() { return mountedCollectionDraftTarget; }, set value(v) { mountedCollectionDraftTarget = v; } }, ensureSession, mountedCollectionUpdate: { get value() { return mountedCollectionUpdate; }, set value(v) { mountedCollectionUpdate = v; } }, activeVoiceInput: { get value() { return activeVoiceInput; }, set value(v) { activeVoiceInput = v; } }, stopMediaTracks, VOICE_DEVICE_REQUEST_TIMEOUT_MS: { get value() { return VOICE_DEVICE_REQUEST_TIMEOUT_MS; } }, finishVoiceInput });
   return pinvouSharedwebCache;
 }
 
@@ -96,7 +96,13 @@ function pinvouSharedweb() {
     });
   }
   function normalizeVoiceMode(mode) {
-    return mode === "task" ? "task" : mode === "edit" ? "edit" : "dictation";
+    // 与 features/voice-composer/voice-ui-policy.mjs 和 tauri/bridge/voice.js
+    // 同一映射(voice_edit/draft_edit 是编辑模式的别名;web 拷贝曾漏掉它们,
+    // 把编辑模式误路由到听写后处理 —— round-9 review)。三方一致性由
+    // tests/voice_mode_parity.test.mjs 钉住。
+    if (mode === "task") return "task";
+    if (["edit", "voice_edit", "draft_edit"].includes(mode)) return "edit";
+    return "dictation";
   }
   function webRequestId(prefix) {
     if (window.crypto && typeof window.crypto.randomUUID === "function") {
@@ -132,6 +138,7 @@ function pinvouSharedweb() {
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
     });
   }
+
   function renderMarkdown(text) {
     if (window.PinvouMarkdownRenderer && typeof window.PinvouMarkdownRenderer.renderMarkdown === "function") {
       return window.PinvouMarkdownRenderer.renderMarkdown(text);
@@ -141,6 +148,7 @@ function pinvouSharedweb() {
     }
     return escapeHtml(text || "");
   }
+
 
 
   // The pet is a separate WebView and must not own a second copy of the main
@@ -936,6 +944,15 @@ function pinvouSceneStorageKey(sid) { return pinvouSharedweb().pinvouSceneStorag
 function normalizePinvouSceneEvents(events) { return pinvouSharedweb().normalizePinvouSceneEvents(events); }
 function loadPinvouSceneEventsForSession(sid) { return pinvouSharedweb().loadPinvouSceneEventsForSession(sid); }
 function savePinvouSceneEventsForSession(sid, events) { return pinvouSharedweb().savePinvouSceneEventsForSession(sid, events); }
+  // Mirrors the Tauri bridge: a missing sidecar is a normal empty result, and only
+  // unreadable/malformed durable data reaches the catch. Scene tags are decorative,
+  // so a bad sidecar must not make the session unopenable — but reporting it keeps a
+  // durable-data defect from looking like "no tags". The one-time localStorage→backend
+  // migration write is reported separately: the session switch path awaits this
+  // function bare, so a write error must degrade rather than abort the switch.
+  function reportSidecarReadFailure(kind, sid, error) {
+    console.warn(`[sidecar] ${kind} read failed for session ${sid}; falling back to the local cache`, error);
+  }
   async function syncPinvouSceneEventsForSession(sid) {
     var cached = loadPinvouSceneEventsForSession(sid);
     if (!sid) return cached;
@@ -957,6 +974,12 @@ function savePinvouSceneEventsForSession(sid, events) { return pinvouSharedweb()
       return cached;
     }
   }
+  // Persona events and pinvou reviews have no local migration cache, but the
+  // backend now fails a corrupt sidecar explicitly (missing stays []). Degrade
+  // to [] exactly as before, just not silently — report like the scene/steered
+  // readers so a durable-data defect cannot pose as "no data".
+  function loadPersonaEventsForSession(sid) { return pinvouSharedweb().loadPersonaEventsForSession(sid); }
+  function loadPinvouReviewsForSession(sid) { return pinvouSharedweb().loadPinvouReviewsForSession(sid); }
 function recordPinvouSceneForMessage(sid, pos, scene) { return pinvouSharedweb().recordPinvouSceneForMessage(sid, pos, scene); }
   function recordPinvouSceneForBufferMessage(sid, buffer, pos, scene) {
     scene = normalizePinvouScene(scene);
@@ -1442,8 +1465,8 @@ function rollbackScheduledOpenActivation(snapshot) { return pinvouSharedweb().ro
     // 快照 hydrate 会截断正在流式生成的内容，必须复检后放弃（审计）。
     if (buf.busy || buf.remoteTurnActive) return;
     hydrateWorkingSetFromSaved(buf, saved);
-    try { buf.personaEvents = await invoke("get_session_persona_events", { sessionId: sid }) || []; } catch (e) { buf.personaEvents = []; }
-    try { buf.pinvouReviews = await invoke("get_session_pinvou_reviews", { sessionId: sid }) || []; } catch (e) { buf.pinvouReviews = []; }
+    buf.personaEvents = await loadPersonaEventsForSession(sid);
+    buf.pinvouReviews = await loadPinvouReviewsForSession(sid);
     buf.pinvouSceneEvents = await syncPinvouSceneEventsForSession(sid);
     try { buf.turnTimeline = await invoke("get_session_timeline", { sessionId: sid }) || []; } catch (e) { buf.turnTimeline = []; }
     // 手机可能在桌面仍停留草稿页/其他 session 时先唤醒这个后台 session。
@@ -1716,16 +1739,7 @@ function isScheduledRunSession(sid) { return pinvouSharedweb().isScheduledRunSes
               if (!resolvedPlanTickets[key]) resolvedPlanTickets[key] = [];
               resolvedPlanTickets[key].push(String(item.planId));
             });
-            var liveChatItems = rawLiveChatItems.filter(function (item) {
-              if (!item || item.type === "user" || item.type === "tool") return false;
-              if (item.type === "assistant") return item.interruptedDisplayOnly === true;
-              if (item.turnErrorNotice && !item.legacyConversationOnly) return false;
-              // Plan cards need semantic matching by their plan snapshot. Their
-              // generic hydration key includes ticket/action state and would
-              // append an active live duplicate after the durable frozen card.
-              if (item.type === "plan_card") return false;
-              return true;
-            });
+            var liveChatItems = rawLiveChatItems.filter(function (item) { return pinvouSharedweb().liveChatItemKeptForHydration(item); });
             state.messages = saved.messages;
             state.artifacts = filterSessionArtifacts(
               mergeHydratedArtifacts(saved.artifacts, state.artifacts),
@@ -3063,8 +3077,8 @@ function pinvouSharedwebN158313() {
     try {
       var primary = await Promise.all([
         loadSessionForClient(id, !IS_WEB),
-        invoke("get_session_persona_events", { sessionId: id }).catch(function () { return []; }),
-        invoke("get_session_pinvou_reviews", { sessionId: id }).catch(function () { return []; }),
+        loadPersonaEventsForSession(id),
+        loadPinvouReviewsForSession(id),
         invoke("get_session_timeline", { sessionId: id }).catch(function () { return []; }),
       ]);
       saved = primary[0];
@@ -3412,6 +3426,12 @@ function isInternalUserMessageProvenance(provenance) { return pinvouSharedweb().
   // the later chat:tool_end without its meta (stuck selection card /
   // degraded artifact card).
   // eslint-disable-next-line sonarjs/cognitive-complexity -- legacy bridge; refactor tracked separately
+  // ── Rerender from messages (session restore) ─────────────────────
+  // opts.keepLiveToolMeta: passed when hydrating a live session
+  // (hydrateLiveSession) — toolMeta may hold entries for in-flight
+  // tools (tool_use not yet in messages), and clearing it would leave
+  // the later chat:tool_end without its meta (stuck selection card /
+  // degraded artifact card).
   function rerenderFromMessages(opts) {let pinvouSharedwebN189622Cache = null;
 function pinvouSharedwebN189622() {
   if (!pinvouSharedwebN189622Cache) pinvouSharedwebN189622Cache = window.PinvouBridgeShared.create("web:189622", { pe, addChatItem, bt });
@@ -3419,237 +3439,40 @@ function pinvouSharedwebN189622() {
 }
 
 
-    state.chatItems = [];
-    itemIdSeq = 0;
-    // Replay re-adds every historical tool_use's metadata (including
-    // write/patch's large args) to toolMeta for tool_result backfill and
-    // never deletes after backfill — the residue resides in the buffer
-    // with the working set, and memory is bounded by the 32-entry
-    // all-session LRU cap. Durable replay clears first (when not live
-    // hydrating), reclaiming only orphan entries left by interrupted
-    // turns (the live event path itself stays insert/delete balanced);
-    // the replay then rebuilds the needed entries for the historical
-    // tool_uses inside messages.
-    if (!(opts && opts.keepLiveToolMeta)) toolMeta = {};
     // 卡牌事件按 pos 插回原位(pos=事件发生时的 messages 数)。让重载历史不割裂。
     const pe = Array.isArray(state.personaEvents) ? state.personaEvents : [];
 function emitPersonaAt(atOrAfter, isTail) { return pinvouSharedwebN189622().emitPersonaAt(atOrAfter, isTail); }
-    // 预扫 tool_result：tool_use 在 assistant 消息、result 在后续 user 消息，需提前建映射
-    // 才能在还原选择卡/方案卡时拿到结果（选项/快照）。
-    var resultById = {};
-    for (var ri = 0; ri < state.messages.length; ri++) {
-      var rc = state.messages[ri].content;
-      if (!Array.isArray(rc)) continue;
-      for (var rj = 0; rj < rc.length; rj++) {
-        if (rc[rj].type === "tool_result") {
-          resultById[rc[rj].tool_use_id] = { content: rc[rj].content, is_error: !!rc[rj].is_error };
-        }
-      }
-    }
-    // 预扫:每个产物最后一次被 write/append/edit 改的 tool_use id → rerender 只在最后一次
-    // 续一张成品卡(与实时 chat:done 的一张对齐,不刷一堆)。
-    var lastDirtyArtifactId = {};
-    var writtenArtifacts = {}; // write/append 写过的 path=产物;没 present 时兜底补首卡
-    var presentedArtifacts = {}; // 整篇 present_artifact 过的 path → 别再兜底补首卡(present 会出卡,否则重复)
-    var presentedArtifactNames = {}; // path 可能一边相对一边绝对,basename 去重防重复卡
-    for (var di = 0; di < state.messages.length; di++) {
-      var dc = state.messages[di].content;
-      if (!Array.isArray(dc)) continue;
-      for (var dj = 0; dj < dc.length; dj++) {
-        var db = dc[dj];
-        var dbMutation = db.type === "tool_use" && fileMutationAction(db.name, db.input);
-        if (dbMutation) {
-          extractArtifactPaths(db.input).forEach(function (dap) {
-            lastDirtyArtifactId[dap] = db.id;
-            // 与实时 tool_end 同一门控:tmp/ 中间文件、非成品扩展名不记账,
-            // 否则实时不进面板的文件切 session 重放后反而兜底冒出成品卡。
-            if (dbMutation !== "edit" && isDeliverable(dap)) writtenArtifacts[dap] = true;
-          });
-        } else if (db.type === "tool_use" && isPresentArtifactTool(db.name)) {
-          var pap = extractArtifactPath(db.input);
-          var pres = resultById[db.id];
-          var pp = presentArtifactAbsPath(pres && pres.content, pap);
-          if (pp) {
-            presentedArtifacts[pp] = true;
-            presentedArtifactNames[basename(pp)] = true;
-          }
-        } else if (db.type === "tool_use" && shouldUseToolOutputAsArtifact(db.name)) {
-          var gres = resultById[db.id];
-          if (!(gres && gres.is_error)) {
-            var gp = artifactPathFromToolOutput(gres && gres.content);
-            if (gp && isDeliverable(gp)) {
-              lastDirtyArtifactId[gp] = db.id;
-              writtenArtifacts[gp] = true;
-            }
-          }
-        }
-      }
-    }
-    for (var mi = 0; mi < state.messages.length; mi++) {
-      emitPersonaAt(mi, false); // 该消息之前发生的卡牌事件先插
-      var m = state.messages[mi];
-      var blocks = Array.isArray(m.content) ? m.content : [];
-      if (m.role === "user") {
-        var utext = userMessageDisplayText(blocks, isScheduledRunSession(state.activeSessionId));
-        if (utext) {
-          // pinvouTransfer 是展示层标记、不在 messages → rerender 从转交固定措辞还原品/悟样式
-          var uitem2 = { type: "user", text: utext, time: "", messageIndex: mi };
-          var scene = pinvouSceneForMessagePos(mi);
-          if (scene) uitem2.pinvouScene = scene;
-          if (textMatchesBtKey(utext, "reviewFillHeader")) uitem2.pinvouTransfer = "悟";
-          else if (textMatchesBtKey(utext, "reviewFixHeader") || textMatchesBtKey(utext, "reviewAdoptHeader") || textMatchesBtKey(utext, "reviewAskHeader")) uitem2.pinvouTransfer = "品";
-          addChatItem(uitem2);
-        }
-        // tool_result（只回填普通工具卡；选择卡/方案卡的结果已在 tool_use 处还原）
-        for (var ci = 0; ci < blocks.length; ci++) {
-          var c = blocks[ci];
-          if (c.type !== "tool_result") continue;
-          var tm = toolMeta[c.tool_use_id];
-          if (tm) {
-            // careful hook 拦截 → 还原 🛑 红卡(实时由 tool_end metadata 插,重载从文本反解)
-            var blockedMd = parseCarefulBlocked(toolResultText(c.content));
-            if (blockedMd) {
-              updateToolItem(c.tool_use_id, toolResultDisplayContent(c.content), false); // 被拦=失败态,与实时一致
-              addChatItem({
-                type: "careful_blocked", toolCallId: c.tool_use_id,
-                args: tm.args, metadata: blockedMd, time: "",
-              });
-            } else {
-              // load_skill 同样脱敏：重载历史时也不还原 SKILL.md 全文，展开只见占位。
-              var contentForCard = (tm.name === "load_skill")
-                ? bt("skillContentHidden")
-                : toolResultDisplayContent(c.content);
-              updateToolItem(c.tool_use_id, contentForCard, !c.is_error);
-            }
-          }
-        }
-        continue;
-      }
-      if (m.role !== "assistant") continue;
-      var textBuf = "";
-      var planSnap = null, todosSnap = null, sawPlanTool = false;
-      for (var bi = 0; bi < blocks.length; bi++) {
-        var b = blocks[bi];
-        if (b.type === "text") {
-          textBuf += b.text;
-        } else if (b.type === "thinking") {
-          if (textBuf) {
-            addChatItem({ type: "assistant", text: textBuf, html: renderMarkdown(textBuf), time: "", streaming: false });
-            textBuf = "";
-          }
-          var reasoningText = String(b.thinking || b.text || "");
-          if (reasoningText) {
-            addChatItem({
-              type: "reasoning", text: reasoningText, time: "", streaming: false,
-              startedAt: null, completedAt: null,
-            });
-          }
-        } else if (b.type === "tool_use") {
-          if (textBuf) {
-            addChatItem({ type: "assistant", text: textBuf, html: renderMarkdown(textBuf), time: "", streaming: false });
-            textBuf = "";
-          }
-          toolMeta[b.id] = { name: b.name, args: b.input };
-          // request_user_input → 还原只读选择卡（问题来自 input，选项高亮来自 result）
-          if (b.name === "request_user_input") {
-            var qs = (b.input && b.input.questions) || [];
-            if (Array.isArray(qs) && qs.length) {
-              var res = resultById[b.id];
-              // 快照可能落在 turn 进行中（底座每次落盘）：tool_use 尚无对应
-              // tool_result，不能按历史恢复为 submitted。跳过，等
-              // chat:user_input_required 事件渲染可交互的 active 卡。
-              if (!res) continue;
-              addChatItem({
-                type: "user_input", toolCallId: b.id, questions: qs,
-                resolved: true, cardState: res.is_error ? "cancelled" : "submitted",
-                restoredAnswers: parseUserAnswers(res.content, qs), time: "",
-              });
-            }
-            continue;
-          }
-          // present_artifact → 还原成品卡(切会话不丢)。仅当工具成功时还原:
-          // 失败的调用回退成普通工具卡(下方 default addChatItem)。
-          if (isPresentArtifactTool(b.name)) {
-            var pares = resultById[b.id];
-            if (!(pares && pares.is_error)) {
-              var rpp = presentArtifactAbsPath(pares && pares.content, b.input && b.input.path);
-              var restoredCard = {
-                type: "artifact_card",
-                path: rpp,
-                title: (b.input && b.input.title) || "",
-                description: (b.input && b.input.description) || "",
-                time: "",
-                sessionId: state.activeSessionId,
-              };
-              if (!updatePresentedArtifact(restoredCard)) addChatItem(restoredCard);
-              continue;
-            }
-          }
-          // update_plan / checklist_write / todo_write → 收集快照，本条消息末尾还原方案卡
-          if (PLAN_TOOLS.has(b.name)) {
-            var snap = parsePlanSnapshot(resultById[b.id] && resultById[b.id].content);
-            if (snap) {
-              if (b.name === "update_plan") planSnap = snap; else todosSnap = snap;
-            }
-            sawPlanTool = true;
-            continue;
-          }
-          addChatItem({ type: "tool", toolId: b.id, name: b.name, args: b.input, output: null, success: null, state: "pending" });
-          if (shouldUseToolOutputAsArtifact(b.name)) {
-            var gres2 = resultById[b.id];
-            var gap = artifactPathFromToolOutput(gres2 && gres2.content);
-            if (!(gres2 && gres2.is_error) && gap && isDeliverable(gap) && lastDirtyArtifactId[gap] === b.id && !presentedArtifacts[gap] && !presentedArtifactNames[basename(gap)]) {
-              var gprev = findPresentedArtifact(gap);
-              if (gprev) {
-                var gcard = {
-                  type: "artifact_card", path: gprev.path, title: gprev.title,
-                  description: gprev.description, time: "", sessionId: state.activeSessionId,
-                };
-                if (!updatePresentedArtifact(gcard)) addChatItem(gcard);
-              } else if (writtenArtifacts[gap]) {
-                addChatItem({ type: "artifact_card", path: gap, title: basename(gap), description: "", time: "", sessionId: state.activeSessionId });
-              }
-            }
-          }
-          // 还原"自动续卡":File.write/File.edit 改的文件之前 present 过 → 续一张
-          // 成品卡(与实时 tool_end 的自动续逻辑对齐,切会话不丢)。present 的卡按
-          // 顺序在前(必须先 present 才进集合),此处 findPresentedArtifact 能命中。
-          if (fileMutationAction(b.name, b.input)) {
-            var wres = resultById[b.id];
-            extractArtifactPaths(b.input).forEach(function (wap) {
-              // 去重:同产物只在最后一次修改处补一张卡(与实时对齐)。
-              if ((wres && wres.is_error) || lastDirtyArtifactId[wap] !== b.id) return;
-              var wprev = findPresentedArtifact(wap);
-              if (wprev) {
-                var wcard = {
-                  type: "artifact_card", path: wprev.path, title: wprev.title,
-                  description: wprev.description, time: "", sessionId: state.activeSessionId,
-                };
-                if (!updatePresentedArtifact(wcard)) addChatItem(wcard);
-              } else if (writtenArtifacts[wap] && !presentedArtifacts[wap] && !presentedArtifactNames[basename(wap)]) {
-                // AI 写了产物但全程没 present_artifact → 兜底补首卡(与实时 chat:done 对齐)
-                addChatItem({ type: "artifact_card", path: wap, title: basename(wap), description: "", time: "", sessionId: state.activeSessionId });
-              }
-            });
-          }
-        }
-      }
-      if (textBuf) {
-        addChatItem({ type: "assistant", text: textBuf, html: renderMarkdown(textBuf), time: "", streaming: false });
-      }
-      // 本条 assistant 消息用过 plan 工具 → 还原一张只读历史方案卡
-      if (sawPlanTool && (planSnap || todosSnap)) {
-        var snaps = { plan: planSnap, todos: todosSnap };
-        addChatItem({
-          type: "plan_card", plan: planSnap, todos: todosSnap,
-          planMarkdown: composePlanMarkdown(snaps),
-          cardState: "frozen", resolved: true, statusLabel: bt("planHistorical"), time: "",
-        });
-      }
-    }
-    emitPersonaAt(state.messages.length, true); // 最后一条消息之后发生的卡牌事件(末尾加持/卸下)
+    // 重放主体在 shared/bridge-shared-helpers.js 的 rerenderFromMessagesCore；
+    // 以下为 web lane 的差异 hooks（无 steering / toolMeta 全量重建且不删 /
+    // careful_blocked 卡附 toolCallId / 无未决 sweep）。
+    return pinvouSharedweb().rerenderFromMessagesCore({
+      itemIdSeq: { get value() { return itemIdSeq; }, set value(v) { itemIdSeq = v; } },
+      toolMeta: { get value() { return toolMeta; }, set value(v) { toolMeta = v; } },
+      emitPersonaAt,
+      userMessageDisplayText,
+      updateToolItem,
+      PLAN_TOOLS,
+      renderMarkdown,
+      markSteered: function () {},
+      carefulBlockedItem: function (c, tm, blockedMd) {
+        return {
+          type: "careful_blocked", toolCallId: c.tool_use_id,
+          args: tm.args, metadata: blockedMd, time: "",
+        };
+      },
+      afterToolResultBackfill: function () {},
+      // Replay re-adds every historical tool_use's metadata (including
+      // write/patch's large args) to toolMeta for tool_result backfill and
+      // never deletes after backfill — the residue resides in the buffer
+      // with the working set, and memory is bounded by the 32-entry
+      // all-session LRU cap (desktop lane instead rebuilds only entries
+      // with a pending result and deletes right after consuming).
+      rebuildToolMeta: function (b) {
+        toolMeta[b.id] = { name: b.name, args: b.input };
+      },
+      sweepUnsettledTools: function () {},
+    }, opts);
   }
-
   function updateToolItem(toolId, output, success) {
     for (var i = 0; i < state.chatItems.length; i++) {
       if (state.chatItems[i].type === "tool" && state.chatItems[i].toolId === toolId) {
@@ -4259,8 +4082,8 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
       .then(function () {
         // 新一轮已被后端受理：会话中未提交的「打开」（pending enable）自此进入
         // 上下文并锁死（ComposerToolMenu 监听）。bridge 层不反向依赖 features，
-        // 与 pinvou:tools-changed 一样内联派发。
-        try { window.dispatchEvent(new CustomEvent("pinvou:chat-round-committed", { detail: { scope: "plain" } })); } catch (_) {}
+        // 经 shared/tool-store-events.js 派发。
+        try { window.PinvouToolStoreEvents.notifyChatRoundCommitted(); } catch { /* silently ignored */ }
         recordAuthoritySyncDiagnostic("local_turn_admitted", Object.assign({
           operation: "send",
         }, authoritySyncBufferSnapshot(sid, turnOwnerBuffer)));
@@ -4412,108 +4235,16 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
       ? invoke("web_access_chat", { message, attachmentHandles: [], sessionId: sid, restrictTools: true })
       : invoke("chat", { message, attachments: [], sessionId: sid, restrictTools: true });
   }
-  // Display-only and case-sensitive ON PURPOSE: it only gates ensure/send
-  // inputs on ids the backend itself minted (always lowercase `aux-`);
-  // identity and destructive paths decide in Rust, whose
-  // is_aux_session_id is deliberately case-insensitive. Never reuse this
-  // predicate for a security or destructive decision.
-  function auxChatIsAuxSession(id) {
-    return typeof id === "string" && id.indexOf("aux-") === 0;
-  }
-  function auxChatEmptySnapshot() {
-    return { chatItems: [], busy: false, queued: [] };
-  }
-  async function auxChatEnsure(taskId) {
-    const task = String(taskId || "").trim();
-    if (!task) throw new Error(bt("targetSessionMissing"));
-    const metadata = await invoke("get_or_create_aux_session", { sessionId: task });
-    const auxId = metadata && typeof metadata.id === "string" ? metadata.id : "";
-    if (!auxChatIsAuxSession(auxId)) throw new Error(bt("sessionDataInvalid"));
-    // Aux sessions never become active: they use the background-buffer
-    // load_session(setActive:false) path.
-    await ensureSessionBufferLoaded(auxId);
-    return auxId;
-  }
-  async function auxChatSend(auxId, text) {
-    const sid = String(auxId || "").trim();
-    const message = String(text || "").trim();
-    if (!auxChatIsAuxSession(sid)) throw new Error(bt("targetSessionMissing"));
-    if (!message) throw new Error(bt("replyContentEmpty"));
-    await ensureSessionBufferLoaded(sid);
-    const buf = sessionStates[sid];
-    // Aux sessions never queue (queue is user-input semantics): reject
-    // outright when busy or queued messages exist; the caller retries.
-    if (isBusyFor(sid) || (buf && Array.isArray(buf.queued) && buf.queued.length > 0)) {
-      throw new Error(bt("turnAlreadyInProgress"));
-    }
-    // 发送命令是 lane 真实差异（desktop: chat + attachments;Web:
-    // web_access_chat + attachmentHandles）,本 lane 以 auxChatSendDispatch 分派。
-    return auxChatSendDispatch(sid, message);
-  }
-  // Synchronous snapshot: when not loaded (no buffer) returns an empty
-  // structure — never throws and never triggers a load. Items are shallow-
-  // copied one by one: streaming deltas mutate buffer items in place (the
-  // item.text/html assignments in chat-events), so copying only the array
-  // would share object references and a caller comparing field by field
-  // could not detect changes; after copying, every poll gets fresh
-  // references, making field comparison a true content comparison.
-  function auxChatSnapshotItems(items) {
-    return (Array.isArray(items) ? items : []).map(function (item) {
-      return item && typeof item === "object" ? Object.assign({}, item) : item;
-    });
-  }
-  function auxChatSnapshot(auxId) {
-    const sid = String(auxId || "").trim();
-    if (!sid) return auxChatEmptySnapshot();
-    if (sid === state.activeSessionId) {
-      return {
-        chatItems: auxChatSnapshotItems(state.chatItems),
-        busy: !!state.busy,
-        queued: auxChatSnapshotItems(state.queued),
-      };
-    }
-    const buf = sessionStates[sid];
-    if (!buf) return auxChatEmptySnapshot();
-    // An always-open panel polling snapshot() counts as "reading": refresh
-    // LRU recency consistently with the getBuffer read paths, otherwise
-    // after 32+ session switches the buffer is evicted by capacity and the
-    // panel wrongly shows the empty state.
-    touchSessionBuffer(sid, buf, false);
-    return {
-      chatItems: auxChatSnapshotItems(buf.chatItems),
-      busy: !!buf.busy,
-      queued: auxChatSnapshotItems(buf.queued),
-    };
-  }
-  async function auxChatDiscard(taskId) {
-    const task = String(taskId || "").trim();
-    if (!task) throw new Error(bt("targetSessionMissing"));
-    await invoke("discard_aux_session", { sessionId: task });
-    // The aux id is a pure function of the task id (aux-<taskId>, round-30
-    // B8), so the buffer purge derives it — the old per-task id map was
-    // redundant state that was never pruned (M5). The session:deleted event
-    // fired by backend deletion is handled by the sessions domain as a
-    // fallback — belt and suspenders, and idempotent.
-    purgeSessionBuffer(`aux-${task}`);
-  }
-  // Atomic restart (M6): one backend command discards the old aux session
-  // (gated against its turns) and creates the fresh one — no two-invoke
-  // window for an orphaned discard to land in. The aux id is derived
-  // (aux-<taskId>, round-30 B8), so the stale buffer purge needs no
-  // per-task id map; the backend's session:deleted also purges through
-  // the sessions domain as a fallback.
-  async function auxChatReset(taskId) {
-    const task = String(taskId || "").trim();
-    if (!task) throw new Error(bt("targetSessionMissing"));
-    const metadata = await invoke("reset_aux_session", { sessionId: task });
-    const auxId = metadata && typeof metadata.id === "string" ? metadata.id : "";
-    if (!auxChatIsAuxSession(auxId)) throw new Error(bt("sessionDataInvalid"));
-    purgeSessionBuffer(auxId);
-    // Aux sessions never become active: they use the background-buffer
-    // load_session(setActive:false) path.
-    await ensureSessionBufferLoaded(auxId);
-    return auxId;
-  }
+  const auxChatShared = window.PinvouBridgeShared.create("auxChat", {
+    state, invoke, bt,
+    sessionStates: { get value() { return sessionStates; } },
+    ensureSessionBufferLoaded, purgeSessionBuffer, touchSessionBuffer, isBusyFor,
+    auxChatDispatch: auxChatSendDispatch,
+  });
+  const auxChatEnsure = auxChatShared.auxChatEnsure;
+  const auxChatSend = auxChatShared.auxChatSend;
+  const auxChatSnapshot = auxChatShared.auxChatSnapshot;
+  const auxChatReset = auxChatShared.auxChatReset;
 
   function findFirstTurnItem(clientMessageId) {
     return state.chatItems.find(function (item) {
@@ -4674,7 +4405,7 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
         submission.requestId,
       );
       // 首轮提交成功 = 新一轮已受理：未提交的「打开」转正锁死（同 doSendFor）。
-      try { window.dispatchEvent(new CustomEvent("pinvou:chat-round-committed", { detail: { scope: "plain" } })); } catch (_) {}
+      try { window.PinvouToolStoreEvents.notifyChatRoundCommitted(); } catch { /* silently ignored */ }
       if (submission.voiceOperationId && metadata && metadata.id) {
         completeVoiceSubmission(submission.voiceOperationId, metadata.id, true);
       }
@@ -6041,7 +5772,7 @@ function presentArtifactAbsPath(toolResultContent, fallbackPath) { return pinvou
   // DOM CustomEvent the desktop bridge (chat-events.js) produces so ChatView's
   // registry subscription hot-refreshes on browser clients too.
   listen("remote_control:tools_changed", function () {
-    try { window.dispatchEvent(new CustomEvent("pinvou:tools-changed")); } catch { /* DOM dispatch failure only affects the refresh timing */ }
+    try { window.PinvouToolStoreEvents.notifyComposerToolsChanged(); } catch { /* DOM dispatch failure only affects the refresh timing */ }
   });
 
   listen("chat:done", function (e) {
@@ -6750,12 +6481,12 @@ function enqueueSettingsWrite(write) { return pinvouSharedweb().enqueueSettingsW
     return await invoke("discover_local_vllm", { request: request || null });
   }
 
+  // 当前有效模型的图片输入能力(普通会话选图即时警告用);后端按会话模型绑定解析。
   async function getEffectiveModelConfig(sessionId) {
     return await invoke("get_effective_model_config", {
       sessionId: arguments.length ? (sessionId || null) : (state.activeSessionId || null),
     });
   }
-  // 当前有效模型的图片输入能力(普通会话选图即时警告用);后端按会话模型绑定解析。
   async function getImageInputCapability(sessionId) {
     return await invoke("get_image_input_capability", {
       sessionId: arguments.length ? (sessionId || null) : (state.activeSessionId || null),
@@ -6990,7 +6721,6 @@ function patchItemById(id, patch) { return pinvouSharedweb().patchItemById(id, p
     }
     return { item: item, message: message };
   }
-function markResolved(id, statusLabel) { return pinvouSharedweb().markResolved(id, statusLabel); }
 
   // ── Per-session UI 路由 ─────────────────────────────────────────
   // 卡片动作链路有多个 await 边界,用户可能中途切 session。所有 UI 写入(chatItem 增改、
@@ -7148,58 +6878,15 @@ function discardStaleLoad(seq) { return pinvouSharedweb().discardStaleLoad(seq);
       throw e;
     }
   }
+function resolveMemoryCandidate(command, args, chatItemId, statusLabel, errorKey) { return pinvouSharedweb().resolveMemoryCandidate(command, args, chatItemId, statusLabel, errorKey); }
   async function confirmMemoryCandidate(memoryId, chatItemId) {
-    if (!memoryId) return;
-    var sid = state.activeSessionId; // 入口捕获：候选卡 patch 与面板写入都定向回发起会话(与 tauri 对齐，审计补充)
-    try {
-      var result = await invoke("confirm_pending_memory", { id: memoryId, sessionId: sid });
-      if (sid === state.activeSessionId) {
-        applyMemoryWriteState(result, function (next) {
-          next.pending = (next.pending || []).filter(function (item) { return item.id !== memoryId; });
-        });
-      }
-      // patch 必须按发起会话路由(而非当前显示)：切走后写 B 的 chatItems 是
-      // no-op，A 的候选卡会永远停留在"可点击未决"态，切回再点会二次提交。
-      if (chatItemId) patchItemByIdFor(sid, chatItemId, { resolved: true, statusLabel: "已记住" });
-      await loadMemoryOverview();
-      notify();
-    } catch (e) {
-      if (sid === state.activeSessionId) addSystemItem(bt("memoryWriteFailed") + e);
-    }
+    return resolveMemoryCandidate("confirm_pending_memory", { id: memoryId, sessionId: state.activeSessionId }, chatItemId, "已记住", "memoryWriteFailed");
   }
   async function ignoreMemoryCandidate(memoryId, chatItemId) {
-    if (!memoryId) return;
-    var sid = state.activeSessionId; // 同 confirmMemoryCandidate：定向回发起会话(与 tauri 对齐，审计补充)
-    try {
-      var result = await invoke("ignore_pending_memory", { id: memoryId, sessionId: sid });
-      if (sid === state.activeSessionId) {
-        applyMemoryWriteState(result, function (next) {
-          next.pending = (next.pending || []).filter(function (item) { return item.id !== memoryId; });
-        });
-      }
-      if (chatItemId) patchItemByIdFor(sid, chatItemId, { resolved: true, statusLabel: "已忽略" });
-      await loadMemoryOverview();
-      notify();
-    } catch (e) {
-      if (sid === state.activeSessionId) addSystemItem(bt("memoryIgnoreFailed") + e);
-    }
+    return resolveMemoryCandidate("ignore_pending_memory", { id: memoryId, sessionId: state.activeSessionId }, chatItemId, "已忽略", "memoryIgnoreFailed");
   }
   async function neverMemoryCandidate(memoryId, chatItemId) {
-    if (!memoryId) return;
-    var sid = state.activeSessionId; // 同 confirmMemoryCandidate：定向回发起会话(与 tauri 对齐，审计补充)
-    try {
-      var result = await invoke("never_pending_memory", { id: memoryId, reason: "user_selected", sessionId: sid });
-      if (sid === state.activeSessionId) {
-        applyMemoryWriteState(result, function (next) {
-          next.pending = (next.pending || []).filter(function (item) { return item.id !== memoryId; });
-        });
-      }
-      if (chatItemId) patchItemByIdFor(sid, chatItemId, { resolved: true, statusLabel: "不再提示" });
-      await loadMemoryOverview();
-      notify();
-    } catch (e) {
-      if (sid === state.activeSessionId) addSystemItem(bt("memoryNeverFailed") + e);
-    }
+    return resolveMemoryCandidate("never_pending_memory", { id: memoryId, reason: "user_selected", sessionId: state.activeSessionId }, chatItemId, "不再提示", "memoryNeverFailed");
   }
   // AI organize memory ("AI 整理记忆"; same contract as tauri memory.js):
   // operates on global memory data; the entry point still captures the session
@@ -7288,7 +6975,7 @@ function isActionablePlanCard(sid, itemId, planId) { return pinvouSharedweb().is
         planId: planTicket,
       });
       // 接受计划 = 后端受理新一轮（reserve_turn + 重跑）：未提交的「打开」转正锁死。
-      try { window.dispatchEvent(new CustomEvent("pinvou:chat-round-committed", { detail: { scope: "plain" } })); } catch (_) {}
+      try { window.PinvouToolStoreEvents.notifyChatRoundCommitted(); } catch { /* silently ignored */ }
       if (planBuffer) planBuffer.deferredRemoteUserEvent = null;
       applyAuthoritativeModeState(sid, st);
     } catch (e) {
@@ -7335,6 +7022,7 @@ function isActionablePlanCard(sid, itemId, planId) { return pinvouSharedweb().is
     try {
       var st = await invoke("discard_plan", { sessionId: sid, planId: planTicket });
       applyAuthoritativeModeState(sid, st);
+      patchItemByIdFor(sid, itemId, { planResolutionConfirmed: true });
     } catch (e) {
       var errorText = String(e && e.message ? e.message : e || "");
       var planNotActive = errorText.indexOf("plan_not_active") >= 0;
@@ -7485,7 +7173,7 @@ async function submitUserInput(itemId, toolCallId, answers, questions) { return 
         retryReason: options && options.retryReason || "input_changed",
       });
       // 编辑重跑 = 后端受理新一轮：未提交的「打开」转正锁死（同 doSendFor）。
-      try { window.dispatchEvent(new CustomEvent("pinvou:chat-round-committed", { detail: { scope: "plain" } })); } catch (_) {}
+      try { window.PinvouToolStoreEvents.notifyChatRoundCommitted(); } catch { /* silently ignored */ }
       if (editBuffer) editBuffer.deferredRemoteUserEvent = null;
     } catch (e) {
       var errorText = String(e && e.message ? e.message : e || "");
@@ -7512,9 +7200,10 @@ async function submitUserInput(itemId, toolCallId, answers, questions) { return 
       flushQueued(sid);
     }
   }
-async function compactNow() { return pinvouSharedweb().compactNow(); }
 
   // ── 产物面板 ─────────────────────────────────────────────────────
+  async function compactNow() { return pinvouSharedweb().compactNow(); }
+
   function invokeArtifact(nativeCommand, webCommand, path, sessionId, extra) {
     var args = Object.assign({ path: path }, extra || {});
     if (IS_WEB) {
@@ -7581,40 +7270,8 @@ function sessionTitleById(sid) { return pinvouSharedweb().sessionTitleById(sid);
 function currentMemoryArtifacts() { return pinvouSharedweb().currentMemoryArtifacts(); }
   // 跨会话产出物索引:磁盘 session JSON 为主,再合并当前内存工作集。
   // 新产物在 chat:done/save_session_artifacts 前也能立刻出现在「产出物」一级入口。
-  async function listDeliverableIndex() {
-    var disk = await invoke("list_deliverable_index").catch(function () { return []; });
-    var byPath = {};
-    (disk || []).forEach(function (x) { if (x && x.path) byPath[x.path] = x; });
-    var mem = currentMemoryArtifacts().filter(function (x) { return x.path && !byPath[x.path]; });
-    var hydrated = await Promise.all(mem.map(async function (x) {
-      var path = x.path;
-      if (!isAbsPath(path) && x.sessionId) {
-        try {
-          var ws = await invoke("list_workspace_files", { sessionId: x.sessionId });
-          var bn = basename(path);
-          var resolved = (ws || []).find(function (p) { return basename(p) === bn; });
-          if (resolved) path = resolved;
-        } catch (_) {}
-      }
-      var info = null;
-      try { info = await artifactInfo(path, x.sessionId); } catch (_) {}
-      var ext = (String(path).split(".").pop() || "").toLowerCase();
-      return {
-        name: x.name || basename(path),
-        path: path,
-        ext: ext,
-        category: deliverableCategory(path),
-        sessionId: x.sessionId || "",
-        source: x.source || sessionTitleById(x.sessionId) || "",
-        mtime: info && info.modified ? info.modified : 0,
-        size: info && info.size ? info.size : 0,
-      };
-    }));
-    hydrated.forEach(function (x) { if (x && x.path) byPath[x.path] = x; });
-    return Object.keys(byPath).map(function (p) { return byPath[p]; }).sort(function (a, b) {
-      return (b.mtime || 0) - (a.mtime || 0) || String(a.name || "").localeCompare(String(b.name || ""));
-    });
-  }
+  // Existing desktop command capabilities choose v2 or the legacy array wire.
+  async function listDeliverableIndex() { return pinvouSharedweb().listDeliverableIndex(); }
   // 外部打开产物：HTML 走 Tauri 独立窗口（绕沙箱），其他走系统应用。
   // sessionId = 卡片携带的产物所属 session。后端 resolve_artifact_path 用它(而非全局
   // active_id)解析相对路径 —— 切回「有 buffer」的会话后端 active 不更新,只有卡片自带
@@ -9257,7 +8914,6 @@ function appendVoiceText(base, text) { return pinvouSharedweb().appendVoiceText(
     auxChatEnsure: auxChatEnsure,
     auxChatSend: auxChatSend,
     auxChatSnapshot: auxChatSnapshot,
-    auxChatDiscard: auxChatDiscard,
     auxChatReset: auxChatReset,
     onSessionDeleted: onSessionDeleted,
     getComposerDraft: getComposerDraft,
@@ -9398,7 +9054,6 @@ function appendVoiceText(base, text) { return pinvouSharedweb().appendVoiceText(
     resolveConversationAttachment: resolveConversationAttachment,
     openConversationAttachment: openConversationAttachment,
     revealConversationAttachment: revealConversationAttachment,
-    markResolved: markResolved,
     // 通用宿主文件选择器（知识库、反馈等功能继续复用）。
     pickFiles,
     pickFolders,

@@ -126,19 +126,17 @@ for (const [label, section] of [['tauri', tauriSection], ['web', webSection]]) {
   const windowRead = section.indexOf('e.payload.context_window');
   assert.ok(dirtyGuard !== -1 && windowRead !== -1, `${label}: chat:usage handler 片段完整`);
   assert.ok(windowRead < dirtyGuard, `${label}: context_window 消费必须先于 dirty guard（否则工具轮永不更新分母）`);
-  assert.ok(section.indexOf('windowTok !== state.tokens.max') !== -1, `${label}: 窗口变化才更新分母`);
-  assert.ok(section.indexOf('windowTok > 0') !== -1, `${label}: 窗口 0 守卫保留`);
+  assert.ok(section.includes('windowTok !== state.tokens.max'), `${label}: 窗口变化才更新分母`);
+  assert.ok(section.includes('windowTok > 0'), `${label}: 窗口 0 守卫保留`);
 }
 
-// Initial-state source assertions: neither bridge initializes with the 32K
-// fake denominator (unknown window = 0; the UI hides the meter).
+// ── Initial-state source assertions: neither bridge initializes with the
+// 32K fake denominator (unknown window = 0; the UI hides the meter) ──
 const tauriBridgeSource = read('src', 'platform', 'tauri', 'bridge.js');
-const tauriMonitorSource = read('src', 'platform', 'tauri', 'bridge', 'monitor.js');
 assert.ok(tauriBridgeSource.includes('tokens: { input: 0, max: 0 }'), 'tauri bridge initializes max=0 (unknown window)');
 assert.ok(webSource.includes('tokens: { input: 0, max: 0 }'), 'web bridge initializes max=0 (unknown window)');
-assert.ok(!/(var|let) maxModelLen = 32768/.test(webSource), 'web monitor must not fall back to a fake 32K window');
-assert.ok(tauriMonitorSource.includes('state.tokens.max = snap.vllm.max_model_len;'),
-  'tauri monitor must not fall back to a fake 32K window (only real snapshot max_model_len lands)');
-assert.ok(!tauriMonitorSource.includes('32768'), 'tauri monitor keeps no 32K fake denominator');
+assert.ok(!webSource.includes('let maxModelLen = 32768'), 'web monitor must not fall back to a fake 32K window');
+// Wave 1 moved pollMonitor into the shared base; pin the shared body.
+assert.ok((read('src', 'shared', 'bridge-shared-helpers.js')).includes('state.tokens.max = snap.vllm.max_model_len;'), 'tauri monitor must not fall back to a fake 32K window');
 
 console.log('chat_usage_context_window.test.mjs: OK');

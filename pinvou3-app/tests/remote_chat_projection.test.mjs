@@ -538,6 +538,19 @@ test('repeated live prompts follow their task order without display-to-raw compa
 function liveAdmissionHarness(tasks, history = []) {
   const window = {};
   const sandbox = vm.createContext({ window, console, Date, String });
+  // #701 T0-c 壳化适配：chat-events 流式通知簇已委托 helpers；沙箱按
+  // index.html 顺序补载共享基座并接好 lane 簇访问器。
+  vm.runInContext(readFileSync(new URL('../src/shared/bridge-shared-helpers.js', import.meta.url), 'utf8'), sandbox);
+  vm.runInContext('this.window = window;', sandbox);
+  vm.runInContext(`this.pinvouSharedtauriChatEvents = () => this.__ceCluster || (this.__ceCluster = window.PinvouBridgeShared.create("tauriChatEvents", {
+    state, addChatItem: () => {}, bt: (k) => k, flushPendingTextBlock: () => {},
+    autoCreateScheduledTaskDraft: () => {},
+    itemIdSeq: { get value() { return 0; }, set value(v) {} },
+    pendingStreamNotifications: { get value() { return pendingStreamNotifications; } },
+    pendingAssistantText: { get value() { return context.currentStreamText; }, set value(v) { context.currentStreamText = v; } },
+    pendingAssistantBlocks: { get value() { return []; } },
+    finalizeAssistantStreamBeforeReasoning: () => {},
+  }));`, sandbox);
   vm.runInContext(readFileSync(new URL('../src/features/remote-control/remote-control-state.js', import.meta.url), 'utf8'), sandbox);
   vm.runInContext(readFileSync(new URL('../src/platform/tauri/bridge/chat-events.js', import.meta.url), 'utf8'), sandbox);
   const listeners = new Map();

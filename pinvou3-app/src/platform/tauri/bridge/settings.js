@@ -5,7 +5,12 @@
 (function (root) {
   "use strict";
   var registry = root.__PINVOU_TAURI_BRIDGE_FEATURES__ = root.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
-  registry["settings"] = function (context) {
+  registry["settings"] = function (context) {let pinvouSharedtauriSettingsCache = null;
+function pinvouSharedtauriSettings() {
+  if (!pinvouSharedtauriSettingsCache) pinvouSharedtauriSettingsCache = window.PinvouBridgeShared.create("tauriSettings", { state, invoke, notify, settingsWriteQueue: { get value() { return settingsWriteQueue; }, set value(v) { settingsWriteQueue = v; } }, modelsLoadSeq: { get value() { return modelsLoadSeq; }, set value(v) { modelsLoadSeq = v; } }, loadSessionModel, setActiveModel });
+  return pinvouSharedtauriSettingsCache;
+}
+
   var state = context.state;
   var notify = context.notify;
   var invoke = context.invoke;
@@ -58,29 +63,7 @@
     }
   });
 
-  async function loadSettings() {
-    try {
-      state.settings = await invoke("get_settings");
-      // The computer_use master switch is persisted via the dedicated command through
-      // prefs (not the update_settings patch); at cold start with no session yet, the
-      // persisted value lands first (a session-less computer_use_get_status read fills
-      // the rest of the slice from the settings page's mount refresh).
-      // Note: this mirror runs on every settings reload (loadSettings is
-      // re-invoked after model save/delete/switch too) — it stays idempotent
-      // because the persisted value always matches the last accepted
-      // computer_use_set_enabled, and the runtime toggle's optimistic flip is
-      // reverted by the bridge on failure.
-      const persistedEnabled = !!(state.settings && state.settings.computer_use && state.settings.computer_use.enabled);
-      if (state.computerUse && state.computerUse.enabled !== persistedEnabled) {
-        state.computerUse = Object.assign({}, state.computerUse, { enabled: persistedEnabled });
-      }
-    } catch (e) {
-      // Backend unreachable = nothing to judge; fall back to following the
-      // system for the color scheme (color_scheme: system).
-      state.settings = { theme: "genesis", color_scheme: "system", language: "zh-Hans" };
-    }
-    notify();
-  }
+  async function loadSettings() { return pinvouSharedtauriSettings().loadSettings(); }
   async function loadBehaviorTelemetryStatus() {
     try {
       state.behaviorTelemetry = await invoke("get_behavior_telemetry_status");
@@ -108,17 +91,8 @@
     scheduleBehaviorTelemetryStatusPoll();
     return state.behaviorTelemetry;
   }
-  async function loadSelectedPet() {
-    try {
-      state.selectedPet = await invoke("get_selected_pet");
-    } catch (e) {
-      state.selectedPet = "lingling";
-    }
-    notify();
-  }
-  async function setSelectedPet(id) {
-    return await invoke("set_selected_pet", { id: id });
-  }
+  async function loadSelectedPet() { return pinvouSharedtauriSettings().loadSelectedPet(); }
+  async function setSelectedPet(id) { return pinvouSharedtauriSettings().setSelectedPet(id); }
   var effectiveModelLoadSeq = 0;
   async function loadEffectiveModelConfig(sessionId) {
     var seq = ++effectiveModelLoadSeq;
@@ -138,11 +112,7 @@
     return true;
   }
   var settingsWriteQueue = Promise.resolve();
-  function enqueueSettingsWrite(write) {
-    var pending = settingsWriteQueue.then(write, write);
-    settingsWriteQueue = pending.then(function () {}, function () {});
-    return pending;
-  }
+  function enqueueSettingsWrite(write) { return pinvouSharedtauriSettings().enqueueSettingsWrite(write); }
   async function saveSettings(patch) {
     return enqueueSettingsWrite(async function () {
       try {
@@ -192,24 +162,16 @@
     });
   }
 
-  async function submitFeedback(request) {
-    return await invoke("submit_feedback", { request: request });
-  }
-  async function discoverLocalVllm(request) {
-    return await invoke("discover_local_vllm", { request: request || null });
-  }
+  async function submitFeedback(request) { return pinvouSharedtauriSettings().submitFeedback(request); }
+  async function discoverLocalVllm(request) { return pinvouSharedtauriSettings().discoverLocalVllm(request); }
 
+  // 当前有效模型的图片输入能力(普通会话选图即时警告用);后端按会话模型绑定解析。
   async function getEffectiveModelConfig(sessionId) {
     return await invoke("get_effective_model_config", {
       sessionId: arguments.length ? (sessionId || null) : (state.activeSessionId || null),
     });
   }
-  // 当前有效模型的图片输入能力(普通会话选图即时警告用);后端按会话模型绑定解析。
-  async function getImageInputCapability(sessionId) {
-    return await invoke("get_image_input_capability", {
-      sessionId: arguments.length ? (sessionId || null) : (state.activeSessionId || null),
-    });
-  }
+  async function getImageInputCapability(sessionId) { return pinvouSharedtauriSettings().getImageInputCapability(sessionId); }
 
   // ── 模型列表(「添加模型」方案)─────────────────────────────────
   // 整表覆盖加载：保存/删除/切换链式 loadModels 并发时旧列表不得覆盖新列表
@@ -296,9 +258,7 @@
      throw error;
    }
  }
- async function revealModelApiKey(id) {
-   return await invoke("reveal_model_api_key", { id: id });
- }
+ async function revealModelApiKey(id) { return pinvouSharedtauriSettings().revealModelApiKey(id); }
  async function deleteModel(id) {
    await invoke("delete_model", { id: id });
    await loadModels();
@@ -361,9 +321,7 @@
   }
   // 测试图片输入能力(设计 §7.3):用当前表单的 model/base_url/key 发一张内置纯色图,
   // 仅由模型编辑弹窗主动点击触发,无任何启动/定时自动测试。
-  async function testImageInputCapability(model, baseUrl, apiKey, modelId) {
-    return await invoke("test_image_input_capability", { model: model, baseUrl: baseUrl, apiKey: apiKey, modelId: modelId || null });
-  }
+  async function testImageInputCapability(model, baseUrl, apiKey, modelId) { return pinvouSharedtauriSettings().testImageInputCapability(model, baseUrl, apiKey, modelId); }
   async function probeLocalServerKind(baseUrl, apiKey, modelId) {
     // 本地/内网 OpenAI 兼容端点的服务类型探测（vllm/ollama/lmstudio/generic）。
     // Rust 侧按 base_url TTL 缓存；命令失败（老版本桌面/命令被拒）在这里 reject，

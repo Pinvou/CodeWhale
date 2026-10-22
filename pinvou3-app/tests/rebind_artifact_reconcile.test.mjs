@@ -26,9 +26,11 @@ const read = relative => fs.readFileSync(new URL(`../src/${relative}`, import.me
 
 const windowObject = {};
 const context = vm.createContext({ window: windowObject, console });
-// Official 适配：社区主线把 tracker 函数体抽取进 bridge-shared-helpers.js，
-// Official 仍是各桥自包含实现 —— tracker 的变换本体就在
-// bridge/artifact-tracker.js 内，harness 只需加载该文件即可。
+// #701 T0-c 壳化：tracker 变换本体已入共享基座，沙箱按 index.html 顺序
+// 先载 helpers 再载 lane（lane 壳的簇访问器随之可用）。
+vm.runInContext(read('shared/bridge-shared-helpers.js'), context, {
+  filename: 'shared/bridge-shared-helpers.js',
+});
 vm.runInContext(read('platform/tauri/bridge/artifact-tracker.js'), context, {
   filename: 'bridge/artifact-tracker.js',
 });
@@ -75,26 +77,26 @@ for (const [host, source] of [
     `${host} must stamp the rebind mark exactly once inside the session:list_changed listener`,
   );
 }
-// The stamp semantics (community pins them on the shared base; Official pins
-// the tauri sessions.js implementation — the web bridge carries the same
-// semantics inline and is exercised by its own transform pins below).
+// The stamp semantics (#701 T0-c 壳化)：applyWorkspaceReboundMark 本体已入
+// 共享基座（与 community 同钉 shared base）；sessions.js 只留监听器内的调用点。
+const sharedRebindSource = read('shared/bridge-shared-helpers.js');
 assert.match(
-  sessionsSource,
+  sharedRebindSource,
   /payload\.action !== "workspace_rebound" \|\| !payload\.id \|\| !payload\.from \|\| !payload\.to/,
   'the stamp must require the rebind geometry',
 );
 assert.match(
-  sessionsSource,
+  sharedRebindSource,
   /else if \(existing\)/,
   'chained and non-contiguous rebinds must APPEND so every buffer vintage resolves',
 );
 assert.match(
-  sessionsSource,
+  sharedRebindSource,
   /last\.from === payload\.from && last\.to === payload\.to/,
   'an identical retry must refresh the window without resetting the chain',
 );
 assert.match(
-  sessionsSource,
+  sharedRebindSource,
   /chain: \[\{ from: payload\.from, to: payload\.to \}\]/,
   'the mark must carry the timestamp and the segment chain',
 );
@@ -467,6 +469,7 @@ const MARK = { at: Date.now(), chain: [{ from: '/old/root', to: '/new/root' }] }
     isScheduledRunSession: () => false,
   });
   const sessionsRealm = vm.createContext({ window: {}, console });
+  vm.runInContext(read('shared/bridge-shared-helpers.js'), sessionsRealm, { filename: 'shared/bridge-shared-helpers.js' });
   vm.runInContext(sessionsSource, sessionsRealm, { filename: 'bridge/sessions.js' });
   const sessionsFactory = sessionsRealm.window.__PINVOU_TAURI_BRIDGE_FEATURES__.sessions;
   assert.equal(typeof sessionsFactory, 'function', 'sessions feature must register');
@@ -522,8 +525,9 @@ console.log('rebind artifact reconcile contract passed');
     path.join(root, 'src-tauri', 'src', 'app', 'commands', 'projects.rs'),
     'utf8',
   );
+  // #701 T0-c 壳化：applyWorkspaceReboundMark 的监听器过滤本体在共享基座。
   const consumer = fs.readFileSync(
-    path.join(root, 'src', 'platform', 'tauri', 'bridge', 'sessions.js'),
+    path.join(root, 'src', 'shared', 'bridge-shared-helpers.js'),
     'utf8',
   );
   const emitterStart = rust.indexOf('fn emit_workspace_rebound_events');

@@ -171,7 +171,6 @@ function patchItemById(id, patch) { return pinvouSharedtauriInteraction().patchI
     }
     return { item: item, message: message };
   }
-function markResolved(id, statusLabel) { return pinvouSharedtauriInteraction().markResolved(id, statusLabel); }
 
   // ── Per-session UI 路由 ─────────────────────────────────────────
   // 卡片动作链路有多个 await 边界,用户可能中途切 session。所有 UI 写入(chatItem 增改、
@@ -237,7 +236,7 @@ function isActionablePlanCard(sid, itemId, planId) { return pinvouSharedtauriInt
         displayMessage: displayEcho,
       });
       // 接受计划 = 后端受理新一轮（reserve_turn + 重跑）：未提交的「打开」转正锁死。
-      try { window.dispatchEvent(new CustomEvent("pinvou:chat-round-committed", { detail: { scope: "plain" } })); } catch (_) {}
+      try { window.PinvouToolStoreEvents.notifyChatRoundCommitted(); } catch { /* silently ignored */ }
       if (planBuffer) planBuffer.deferredRemoteUserEvent = null;
       applyAuthoritativeModeState(sid, st);
     } catch (e) {
@@ -497,7 +496,7 @@ async function submitUserInput(itemId, toolCallId, answers, questions) { return 
         retryReason: options && options.retryReason || "input_changed",
       });
       // 编辑重跑 = 后端受理新一轮：未提交的「打开」转正锁死（同 doSendFor）。
-      try { window.dispatchEvent(new CustomEvent("pinvou:chat-round-committed", { detail: { scope: "plain" } })); } catch (_) {}
+      try { window.PinvouToolStoreEvents.notifyChatRoundCommitted(); } catch { /* silently ignored */ }
     } catch (e) {
       // 失败恢复必须定向触发会话（web 对齐）：直接写全局会把 busy/错误提示
       // 砸进别的会话（编辑是在 sid 上发起的）。
@@ -514,8 +513,9 @@ async function submitUserInput(itemId, toolCallId, answers, questions) { return 
       notify();
     }
   }
-async function compactNow() { return pinvouSharedtauriInteraction().compactNow(); }
 
+
+    async function compactNow() { return pinvouSharedtauriInteraction().compactNow(); }
 
     return {
       refreshSuperPerm,
@@ -523,7 +523,6 @@ async function compactNow() { return pinvouSharedtauriInteraction().compactNow()
       syncModeState,
       patchItemById,
       pushUserEcho,
-      markResolved,
       runOnSession,
       addSystemItemFor,
       patchItemByIdFor,

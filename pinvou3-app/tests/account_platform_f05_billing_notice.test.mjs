@@ -64,7 +64,7 @@ function liveBillingNotices() {
   const purge = vm.runInNewContext(`(${bridge.slice(hookStart, hookEnd)})`, {
     modeStateEpochs: {}, window: {}, chatFeature: {}, chatEventsFeature: feature,
   });
-  const sessionWindow = {};
+  const sessionWindow = { PinvouBridgeShared: window.PinvouBridgeShared };
   const sessionListeners = new Map();
   vm.runInNewContext(readFileSync(new URL('../src/platform/tauri/bridge/sessions.js', import.meta.url), 'utf8'), {
     window: sessionWindow, setTimeout, clearTimeout,

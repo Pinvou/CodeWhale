@@ -8,7 +8,7 @@
   const registry = root.__PINVOU_TAURI_BRIDGE_FEATURES__ = root.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
   registry["memory"] = function (context) {let pinvouSharedtauriMemoryCache = null;
 function pinvouSharedtauriMemory() {
-  if (!pinvouSharedtauriMemoryCache) pinvouSharedtauriMemoryCache = window.PinvouBridgeShared.create("tauriMemory", { state, runOnSession, invoke, notify, timeStr, addChatItem, loadMemoryOverview, memoryOverviewSeq: { get value() { return memoryOverviewSeq; }, set value(v) { memoryOverviewSeq = v; } } });
+  if (!pinvouSharedtauriMemoryCache) pinvouSharedtauriMemoryCache = window.PinvouBridgeShared.create("tauriMemory", { state, runOnSession, invoke, notify, bt, addSystemItem, candidateCardPatcher: patchItemByIdFor, timeStr, addChatItem, itemIdSeq: { get value() { return context.itemIdSeq; }, set value(v) { context.itemIdSeq = v; } }, memoryOverviewSeq: { get value() { return memoryOverviewSeq; }, set value(v) { memoryOverviewSeq = v; } } });
   return pinvouSharedtauriMemoryCache;
 }
 
@@ -27,34 +27,6 @@ function pinvouSharedtauriMemory() {
 
 function handleMemoryWrite(payload) { return pinvouSharedtauriMemory().handleMemoryWrite(payload); }
 
-  function applyMemoryOverview(overview) {
-    var previous = state.memory || {};
-    var sourceStates = overview && overview.sources || {};
-    // stateKey:后端 source 名与前端 state 字段名通常一致,但 snapshot 源对应
-    // state.memory.snapshot_path,两者不同;保留上次值时按 state 字段名查找。
-    function sourceValue(source, value, fallback, stateKey) {
-      var status = sourceStates[source];
-      if (status && status.available === false) {
-        var key = stateKey || source;
-        return Object.prototype.hasOwnProperty.call(previous, key) ? previous[key] : fallback;
-      }
-      return value;
-    }
-    state.memory = {
-      loading: false,
-      error: null,
-      profile: sourceValue("profile", overview && overview.profile || null, null),
-      preferences: sourceValue("preferences", overview && Array.isArray(overview.preferences) ? overview.preferences : [], []),
-      work_context: sourceValue("work_context", overview && Array.isArray(overview.work_context) ? overview.work_context : [], []),
-      current_focus: sourceValue("current_focus", overview && Array.isArray(overview.current_focus) ? overview.current_focus : [], []),
-      recent_activity: sourceValue("recent_activity", overview && Array.isArray(overview.recent_activity) ? overview.recent_activity : [], []),
-      pending: sourceValue("pending", overview && Array.isArray(overview.pending) ? overview.pending : [], []),
-      runtime: sourceValue("runtime", overview && overview.runtime || null, null),
-      snapshot_path: sourceValue("snapshot", overview && overview.snapshot_path || "", "", "snapshot_path"),
-      warnings: orderedMemoryWarnings(overview && overview.warnings),
-      sources: sourceStates,
-    };
-  }
 function orderedMemoryWarnings(warnings) { return pinvouSharedtauriMemory().orderedMemoryWarnings(warnings); }
 function applyMemoryProfileState(result) { return pinvouSharedtauriMemory().applyMemoryProfileState(result); }
 function applyMemoryWriteState(result, update) { return pinvouSharedtauriMemory().applyMemoryWriteState(result, update); }
@@ -67,28 +39,7 @@ function rehydratePendingMemoryCandidates(overview) { return pinvouSharedtauriMe
   // runtime 属于别的会话)，也不得把候选卡 rehydrate 进当前对话流(串台)。
   // 任何新加载都会递增序号使在途读取作废(审计)。
   var memoryOverviewSeq = 0;
-  async function loadMemoryOverview(options) {
-    if (!invoke) return null;
-    options = options || {};
-    var sid = state.activeSessionId;
-    var seq = ++memoryOverviewSeq;
-    state.memory = Object.assign({}, state.memory, { loading: true, error: null });
-    notify();
-    try {
-      // invoke 形状保持原样（协议指纹按文本计算）；发起瞬间 activeSessionId === sid。
-      var overview = await invoke("get_memory_overview", { sessionId: state.activeSessionId });
-      if (sid !== state.activeSessionId || seq !== memoryOverviewSeq) return discardStaleLoad(seq);
-      applyMemoryOverview(overview);
-      if (options.rehydratePending) rehydratePendingMemoryCandidates(overview);
-      notify();
-      return overview;
-    } catch (e) {
-      if (sid !== state.activeSessionId || seq !== memoryOverviewSeq) return discardStaleLoad(seq);
-      state.memory = Object.assign({}, state.memory, { loading: false, error: String(e) });
-      notify();
-      return null;
-    }
-  }
+  async function loadMemoryOverview(options) { return pinvouSharedtauriMemory().loadMemoryOverview(options); }
   // 守卫命中的善后：序号已被更新加载接管时由它负责收尾 loading；仅会话
   // 变化、无人接管时(如切草稿不续发加载)必须自己清掉 loading，否则面板
   // 永远停在"同步中"(审计补充)。
@@ -111,156 +62,17 @@ function discardStaleLoad(seq) { return pinvouSharedtauriMemory().discardStaleLo
       throw e;
     }
   }
-  async function deleteMemoryPreference(id) {
-    if (!id || !invoke) return false;
-    var sid = state.activeSessionId; // 同 saveMemoryProfilePatch：切走后不写 B 的面板(审计补充)
-    try {
-      var res = await invoke("delete_memory_preference", { id: id, sessionId: state.activeSessionId });
-      if (sid === state.activeSessionId) {
-        applyMemoryWriteState(res, function (next, changed) {
-          if (changed) next.preferences = (next.preferences || []).filter(function (item) { return item.id !== id; });
-        });
-      }
-      await loadMemoryOverview();
-      return !!(res && res.value);
-    } catch (e) {
-      if (sid === state.activeSessionId) {
-        state.memory = Object.assign({}, state.memory, { error: String(e) });
-        notify();
-      }
-      throw e;
-    }
-  }
-  async function updateMemoryItem(kind, id, patch) {
-    if (!id || !invoke) return null;
-    var sid = state.activeSessionId; // 同 saveMemoryProfilePatch：切走后不写 B 的面板(审计补充)
-    try {
-      var command = kind === "preference" ? "update_memory_preference"
-        : kind === "work_context" ? "update_work_context_memory"
-        : (kind === "current_focus" || kind === "recent_activity") ? "update_timed_memory"
-        : null;
-      if (!command) return null;
-      var args = { id: id, patch: patch || {}, sessionId: state.activeSessionId };
-      if (command === "update_timed_memory") args.kind = kind;
-      var res = await invoke(command, args);
-      if (sid === state.activeSessionId) {
-        applyMemoryWriteState(res, function (next, value) {
-          if (!value) return;
-          var source = kind === "preference" ? "preferences" : kind;
-          next[source] = upsertMemoryValue(next[source], value, id);
-        });
-      }
-      await loadMemoryOverview();
-      return res && res.value;
-    } catch (e) {
-      if (sid === state.activeSessionId) {
-        state.memory = Object.assign({}, state.memory, { error: String(e) });
-        notify();
-      }
-      throw e;
-    }
-  }
-  async function deleteMemoryItem(kind, id) {
-    if (!id || !invoke) return false;
-    var sid = state.activeSessionId; // 同 saveMemoryProfilePatch：切走后不写 B 的面板(审计补充)
-    try {
-      var command = kind === "preference" ? "delete_memory_preference"
-        : kind === "work_context" ? "delete_work_context_memory"
-        : (kind === "current_focus" || kind === "recent_activity") ? "delete_timed_memory"
-        : null;
-      if (!command) return false;
-      var args = { id: id, sessionId: state.activeSessionId };
-      if (command === "delete_timed_memory") args.kind = kind;
-      var res = await invoke(command, args);
-      if (sid === state.activeSessionId) {
-        applyMemoryWriteState(res, function (next, changed) {
-          if (!changed) return;
-          var source = kind === "preference" ? "preferences" : kind;
-          next[source] = (next[source] || []).filter(function (item) { return item.id !== id; });
-        });
-      }
-      await loadMemoryOverview();
-      return !!(res && res.value);
-    } catch (e) {
-      if (sid === state.activeSessionId) {
-        state.memory = Object.assign({}, state.memory, { error: String(e) });
-        notify();
-      }
-      throw e;
-    }
-  }
-  async function archiveRecentWorkMemory(id) {
-    if (!id || !invoke) return false;
-    var sid = state.activeSessionId; // 同 saveMemoryProfilePatch：切走后不写 B 的面板(审计补充)
-    try {
-      var res = await invoke("archive_recent_work_memory", { id: id, sessionId: state.activeSessionId });
-      if (sid === state.activeSessionId) {
-        applyMemoryWriteState(res, function (next, changed) {
-          if (changed) next.recent_work = (next.recent_work || []).filter(function (item) { return item.id !== id; });
-        });
-      }
-      await loadMemoryOverview();
-      return !!(res && res.value);
-    } catch (e) {
-      if (sid === state.activeSessionId) {
-        state.memory = Object.assign({}, state.memory, { error: String(e) });
-        notify();
-      }
-      throw e;
-    }
-  }
+  async function updateMemoryItem(kind, id, patch) { return pinvouSharedtauriMemory().updateMemoryItem(kind, id, patch); }
+  async function deleteMemoryItem(kind, id) { return pinvouSharedtauriMemory().deleteMemoryItem(kind, id); }
+function resolveMemoryCandidate(command, args, chatItemId, statusLabel, errorKey) { return pinvouSharedtauriMemory().resolveMemoryCandidate(command, args, chatItemId, statusLabel, errorKey); }
   async function confirmMemoryCandidate(memoryId, chatItemId) {
-    if (!memoryId) return;
-    var sid = state.activeSessionId; // 入口捕获：候选卡 patch 与面板写入都定向回发起会话(审计补充)
-    try {
-      var result = await invoke("confirm_pending_memory", { id: memoryId, sessionId: sid });
-      if (sid === state.activeSessionId) {
-        applyMemoryWriteState(result, function (next) {
-          next.pending = (next.pending || []).filter(function (item) { return item.id !== memoryId; });
-        });
-      }
-      // patch 必须按发起会话路由(而非当前显示)：切走后写 B 的 chatItems 是
-      // no-op，A 的候选卡会永远停留在"可点击未决"态，切回再点会二次提交。
-      if (chatItemId) patchItemByIdFor(sid, chatItemId, { resolved: true, statusLabel: "已记住" });
-      await loadMemoryOverview();
-      notify();
-    } catch (e) {
-      if (sid === state.activeSessionId) addSystemItem(bt("memoryWriteFailed") + e);
-    }
+    return resolveMemoryCandidate("confirm_pending_memory", { id: memoryId, sessionId: state.activeSessionId }, chatItemId, "已记住", "memoryWriteFailed");
   }
   async function ignoreMemoryCandidate(memoryId, chatItemId) {
-    if (!memoryId) return;
-    var sid = state.activeSessionId; // 同 confirmMemoryCandidate：定向回发起会话(审计补充)
-    try {
-      var result = await invoke("ignore_pending_memory", { id: memoryId, sessionId: sid });
-      if (sid === state.activeSessionId) {
-        applyMemoryWriteState(result, function (next) {
-          next.pending = (next.pending || []).filter(function (item) { return item.id !== memoryId; });
-        });
-      }
-      if (chatItemId) patchItemByIdFor(sid, chatItemId, { resolved: true, statusLabel: "已忽略" });
-      await loadMemoryOverview();
-      notify();
-    } catch (e) {
-      if (sid === state.activeSessionId) addSystemItem(bt("memoryIgnoreFailed") + e);
-    }
+    return resolveMemoryCandidate("ignore_pending_memory", { id: memoryId, sessionId: state.activeSessionId }, chatItemId, "已忽略", "memoryIgnoreFailed");
   }
   async function neverMemoryCandidate(memoryId, chatItemId) {
-    if (!memoryId) return;
-    var sid = state.activeSessionId; // 同 confirmMemoryCandidate：定向回发起会话(审计补充)
-    try {
-      var result = await invoke("never_pending_memory", { id: memoryId, reason: "user_selected", sessionId: sid });
-      if (sid === state.activeSessionId) {
-        applyMemoryWriteState(result, function (next) {
-          next.pending = (next.pending || []).filter(function (item) { return item.id !== memoryId; });
-        });
-      }
-      if (chatItemId) patchItemByIdFor(sid, chatItemId, { resolved: true, statusLabel: "不再提示" });
-      await loadMemoryOverview();
-      notify();
-    } catch (e) {
-      if (sid === state.activeSessionId) addSystemItem(bt("memoryNeverFailed") + e);
-    }
+    return resolveMemoryCandidate("never_pending_memory", { id: memoryId, reason: "user_selected", sessionId: state.activeSessionId }, chatItemId, "不再提示", "memoryNeverFailed");
   }
   // AI organize memory ("AI 整理记忆"): operates on global memory data and does
   // not depend on the current session; the entry point still captures the
@@ -290,10 +102,8 @@ async function loadOrganizeHistory() { return pinvouSharedtauriMemory().loadOrga
       handleMemoryWrite: handleMemoryWrite,
       loadMemoryOverview: loadMemoryOverview,
       saveMemoryProfilePatch: saveMemoryProfilePatch,
-      deleteMemoryPreference: deleteMemoryPreference,
       updateMemoryItem: updateMemoryItem,
       deleteMemoryItem: deleteMemoryItem,
-      archiveRecentWorkMemory: archiveRecentWorkMemory,
       confirmMemoryCandidate: confirmMemoryCandidate,
       ignoreMemoryCandidate: ignoreMemoryCandidate,
       neverMemoryCandidate: neverMemoryCandidate,
