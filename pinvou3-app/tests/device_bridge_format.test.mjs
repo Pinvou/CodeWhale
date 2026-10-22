@@ -245,8 +245,12 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 }
 
 // bridge 不新增中文字面量：可本地化词全部住在视图 i18n（设计 §3.1/§8）。
-// 中文注释合法（与 monitor.js 一致），故剥离注释后再扫。
+// 中文注释合法（与 monitor.js 一致），故剥离注释后再扫。剥离须先归一换行
+// （与 aux_chat_panel_contract 同款）：Windows checkout（autocrlf）把源码读成
+// CRLF 后，逐行 `//` 剥离的正则对行尾 \r 失配，中文注释残留会让扫描误红
+// （评审环境连续三轮实录的失败点）。
 const stripComments = text => text
+  .replace(/\r\n?/g, '\n')
   .replace(/\/\*[\s\S]*?\*\//g, comment => comment.replace(/[^\n]/g, ''))
   .split('\n')
   .map(line => line.replace(/\/\/.*$/, ''))
@@ -256,6 +260,13 @@ assert.doesNotMatch(
   /[\u{4e00}-\u{9fff}]/u,
   'device bridge must stay free of Chinese literals',
 );
+// 钉死 CRLF 输入与 LF 等价：归一被删掉时本断言先红（而不是等某个 Windows
+// 环境的源码扫描）。
+{
+  const lf = 'const a = 1; // 中文注释\n/* 块注\n释 */\nconst b = 2;\n';
+  assert.doesNotMatch(stripComments(lf.replace(/\n/g, '\r\n')), /[\u{4e00}-\u{9fff}]/u);
+  assert.equal(stripComments(lf), stripComments(lf.replace(/\n/g, '\r\n')));
+}
 
 // ── 显示等价抑制（deviceFmtEqual） ────────────────────────────────
 {
