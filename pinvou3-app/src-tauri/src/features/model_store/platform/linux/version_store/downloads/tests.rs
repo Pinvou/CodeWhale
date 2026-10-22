@@ -10,6 +10,7 @@ fn setup() -> super::super::super::config::TempHome {
 fn complete_download(card_id: &str, root: &Path, size: u64) {
     let mut download = DownloadReservation::acquire(card_id, root, || false, || {}).unwrap();
     download.publish(size).unwrap();
+    download.start_scripts().unwrap();
     fs::write(
         root.join(format!("{card_id}-weights")),
         vec![0; size as usize],
@@ -46,9 +47,11 @@ fn ordinary_downloads_share_live_quota_and_failed_files_survive_plan_release() {
     let root = home.path().join("models");
     let first = DownloadReservation::acquire("first", &root, || false, || {}).unwrap();
     first.publish(80).unwrap();
+    first.start_scripts().unwrap();
     assert_eq!(super::super::retained_bytes().unwrap(), 80);
     let second = DownloadReservation::acquire("second", &root, || false, || {}).unwrap();
     second.publish(80).unwrap();
+    second.start_scripts().unwrap();
     assert_eq!(super::super::retained_bytes().unwrap(), 160);
     fs::write(root.join("partial"), vec![0; 10]).unwrap();
     drop(first);
@@ -64,6 +67,7 @@ fn ordinary_download_crash_recovery_releases_only_plan_and_keeps_registered_root
     let root = home.path().join("original");
     let mut interrupted = DownloadReservation::acquire("first", &root, || false, || {}).unwrap();
     interrupted.publish(80).unwrap();
+    interrupted.start_scripts().unwrap();
     fs::write(root.join("partial"), vec![0; 10]).unwrap();
     // Releasing the lease without running the cleanup models process death.
     interrupted.finished = true;
@@ -74,6 +78,55 @@ fn ordinary_download_crash_recovery_releases_only_plan_and_keeps_registered_root
     let retry = DownloadReservation::acquire("first", &moved_default, || false, || {}).unwrap();
     assert_eq!(retry.root, root);
     assert!(!moved_default.exists());
+}
+
+#[test]
+fn unstarted_crash_recovery_keeps_root_bytes_without_reusing_the_target() {
+    for recover_by_scan in [false, true] {
+        let home = setup();
+        let root = home.path().join("unstarted");
+        let mut pending = DownloadReservation::acquire("first", &root, || false, || {}).unwrap();
+        fs::write(root.join("preexisting-cache"), vec![0; 7]).unwrap();
+        pending.publish(80).unwrap();
+        assert_eq!(super::super::retained_bytes().unwrap(), 87);
+        // Process death before scripts: keep the persisted admission marker,
+        // but release the lease without invoking the normal Drop cleanup.
+        pending.finished = true;
+        drop(pending);
+        if recover_by_scan {
+            assert_eq!(super::super::retained_bytes().unwrap(), 7);
+            assert!(downloads().unwrap().is_empty());
+        }
+        let next_root = home.path().join("next");
+        let next = DownloadReservation::acquire("first", &next_root, || false, || {}).unwrap();
+        assert_eq!(next.root, next_root);
+        assert_eq!(retained_roots(Some("first")).unwrap(), [root.clone()]);
+        assert_eq!(super::super::retained_bytes().unwrap(), 7);
+        assert!(root.join("preexisting-cache").exists());
+    }
+}
+
+#[test]
+fn unstarted_target_retirement_is_atomic_and_failure_blocks_retargeting() {
+    let home = setup();
+    let root = home.path().join("unstarted");
+    let pending = DownloadReservation::acquire("first", &root, || false, || {}).unwrap();
+    fs::write(root.join("preexisting-cache"), vec![0; 7]).unwrap();
+    pending.publish(80).unwrap();
+    let conn = connection().unwrap();
+    conn.execute_batch("CREATE TRIGGER refuse_pending_retirement BEFORE DELETE ON model_download_reservations BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+    drop(pending);
+    assert_eq!(downloads().unwrap().len(), 1);
+    assert!(retained_roots(Some("first")).unwrap().is_empty());
+    let next_root = home.path().join("next");
+    assert!(DownloadReservation::acquire("first", &next_root, || false, || {}).is_err());
+    assert!(!next_root.exists());
+    assert!(root.join("preexisting-cache").exists());
+    conn.execute_batch("DROP TRIGGER refuse_pending_retirement")
+        .unwrap();
+    let next = DownloadReservation::acquire("first", &next_root, || false, || {}).unwrap();
+    assert_eq!(next.root, next_root);
+    assert_eq!(super::super::retained_bytes().unwrap(), 7);
 }
 
 #[test]
@@ -99,6 +152,14 @@ fn retained_root_schema_preserves_existing_ordinary_retry_reservations() {
     assert_eq!(retry.root, root);
     assert_eq!(downloads().unwrap().len(), 1);
     assert!(retained_roots(None).unwrap().is_empty());
+    assert!(
+        conn.query_row(
+            "SELECT target_started FROM model_download_reservations WHERE card_id='card'",
+            [],
+            |row| row.get::<_, bool>(0)
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -210,6 +271,7 @@ fn full_delete_releases_install_target_but_keeps_each_old_roots_residuals_charge
     let failed = DownloadReservation::acquire("card", &third, || false, || {}).unwrap();
     assert_eq!(failed.root, third);
     failed.publish(10).unwrap();
+    failed.start_scripts().unwrap();
     fs::write(third.join("partial"), vec![0; 2]).unwrap();
     drop(failed);
     assert_eq!(super::super::retained_bytes().unwrap(), 12);
@@ -305,6 +367,7 @@ fn cancelling_ordinary_download_wait_does_not_replace_an_active_plan() {
     let root = home.path().join("models");
     let first = DownloadReservation::acquire("first", &root, || false, || {}).unwrap();
     first.publish(80).unwrap();
+    first.start_scripts().unwrap();
     let cancelled = DownloadReservation::acquire("first", &root, || true, || {});
     assert!(cancelled.err().unwrap().contains("已取消"));
     assert_eq!(super::super::retained_bytes().unwrap(), 80);
@@ -363,6 +426,7 @@ fn first_download_resolves_user_selected_symlink_and_retries_pin_the_real_root()
     let first = DownloadReservation::acquire("first", &selected, || false, || {}).unwrap();
     assert_eq!(first.root, real);
     first.publish(80).unwrap();
+    first.start_scripts().unwrap();
     drop(first);
     fs::remove_file(&selected).unwrap();
     let other = home.path().join("other");

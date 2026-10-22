@@ -1093,7 +1093,8 @@ impl ModelManager {
 
         // Publish under the same short cross-process lock used by version
         // staging. Admission sees every in-flight ordinary download as well as
-        // retained files; the lease releases only the plan on error/cancellation.
+        // retained files. Before the first script stage, a rejected new target
+        // becomes a residual-only root; an existing retry target stays fixed.
         let quota_lock = super::version_store::wait_quota_reservation_lock(
             || control.cancelled(),
             || on_progress("等待其他模型下载登记存储配额，可取消…"),
@@ -1122,6 +1123,12 @@ impl ModelManager {
             "检查 {} 引擎是否已安装…",
             card.summary.engine_name
         ));
+        if control.cancelled() {
+            return Err(ModelManagerError::new("已取消"));
+        }
+        reservation
+            .start_scripts()
+            .map_err(ModelManagerError::new)?;
         // install_engine 需要 root（pkexec，每次都要输管理员密码）。所以先以普通
         // 用户身份跑一个只读探针（install_engine 读到 LMM_PROBE_ONLY=1 时只做
         // "装没装"检查、不发任何安装动作）：命中就跳过 root 步，避免每次下载都为
@@ -4046,6 +4053,184 @@ echo '权重就绪'
             record.assets_content["native_engine_process.py"].content,
             "tampered-controller"
         );
+    }
+
+    #[test]
+    fn unstarted_first_download_can_change_roots_after_rejection_or_cancellation() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        for failure in ["space", "quota", "io", "cancel"] {
+            let tmp = setup_temp_db();
+            let first = tmp.path().join("first");
+            std::fs::create_dir_all(&first).unwrap();
+            std::fs::write(first.join("preexisting-cache"), vec![0; 7]).unwrap();
+            let scripts = tmp.path().join("scripts");
+            let mut card = local_script_card(&scripts, None);
+            let install = FAKE_INSTALL_ENGINE.replacen(
+                "#!/bin/sh\n",
+                "#!/bin/sh\nprintf ran >> \"$LMM_MODELS_DIR/script-entered\"\n",
+                1,
+            );
+            std::fs::write(scripts.join("install_engine.sh"), &install).unwrap();
+            card.script_sha256
+                .as_mut()
+                .unwrap()
+                .insert("install_engine".into(), script_runner::sha256_hex(&install));
+            let mut settings = download_settings(&first);
+            let blocked = first.join("unreadable");
+            match failure {
+                "space" => settings.min_free_space_gb = 1_000_000.0,
+                // The preexisting bytes and the complete plan must both be
+                // charged before admission, even on an unstarted new target.
+                "quota" => settings.storage_quota_gb = Some(4102.0 / 1073741824.0),
+                "io" => {
+                    assert_ne!(std::fs::metadata("/proc/self").unwrap().uid(), 0);
+                    settings.storage_quota_gb = Some(1.0);
+                    std::fs::create_dir(&blocked).unwrap();
+                    std::fs::write(blocked.join("cache"), vec![0; 5]).unwrap();
+                    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000))
+                        .unwrap();
+                }
+                _ => {}
+            }
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let control = script_runner::RunControl {
+                cancel: Some(Arc::clone(&cancelled)),
+                ..Default::default()
+            };
+            let error = manager_with_card(settings, card.clone())
+                .download_from_store(
+                    "card-dl",
+                    &mut |line| {
+                        // This callback happens after publishing and admission,
+                        // immediately before the first engine probe can run.
+                        if failure == "cancel" && line.starts_with("检查 vllm 引擎") {
+                            cancelled.store(true, Ordering::SeqCst);
+                        }
+                    },
+                    control,
+                    None,
+                )
+                .unwrap_err();
+            let expected = match failure {
+                "space" => "可用空间不足",
+                "quota" => "超出存储配额",
+                "io" => "无法核算版本目录配额",
+                _ => "已取消",
+            };
+            assert!(error.to_string().contains(expected), "{failure}: {error}");
+            if failure == "io" {
+                std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            assert!(db::get_store_model("card-dl").unwrap().is_none());
+            assert!(!first.join("script-entered").exists());
+            assert!(!first.join("download-ran").exists());
+            let retained = if failure == "io" { 12 } else { 7 };
+            assert_eq!(
+                super::super::version_store::retained_bytes().unwrap(),
+                retained
+            );
+            assert_eq!(
+                std::fs::read(first.join("preexisting-cache")).unwrap(),
+                vec![0; 7]
+            );
+
+            let next = tmp.path().join("next");
+            let mut next_settings = download_settings(&next);
+            next_settings.storage_quota_gb = Some(1.0);
+            manager_with_card(next_settings, card)
+                .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+                .unwrap();
+            let record = db::get_store_model("card-dl").unwrap().unwrap();
+            assert_eq!(record.models_root.as_deref(), next.to_str(), "{failure}");
+            assert_eq!(ran_times(&next.join("download-ran")), 1);
+            assert!(next.join("script-entered").exists());
+            assert!(!first.join("script-entered").exists());
+            assert_eq!(
+                super::super::version_store::retained_bytes().unwrap(),
+                retained
+            );
+            assert!(
+                super::super::version_store::download_paths("card-dl")
+                    .unwrap()
+                    .contains(&first)
+            );
+        }
+    }
+
+    #[test]
+    fn existing_download_targets_stay_pinned_through_pre_script_rejection() {
+        for existing in ["reservation", "installed", "failed-script"] {
+            let tmp = setup_temp_db();
+            let first = tmp.path().join("first");
+            let scripts = tmp.path().join("scripts");
+            let card = local_script_card(&scripts, None);
+            match existing {
+                "reservation" => {
+                    let reservation = super::super::version_store::DownloadReservation::acquire(
+                        "card-dl",
+                        &first,
+                        || false,
+                        || {},
+                    )
+                    .unwrap();
+                    reservation.publish(card.summary.size_bytes).unwrap();
+                    reservation.start_scripts().unwrap();
+                    std::fs::write(first.join("partial"), b"partial").unwrap();
+                }
+                "installed" => {
+                    manager_with_card(download_settings(&first), card.clone())
+                        .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+                        .unwrap();
+                    // Isolate the fixed store_models root from any reservation.
+                    db::connect()
+                        .unwrap()
+                        .execute(
+                            "DELETE FROM model_download_reservations WHERE card_id='card-dl'",
+                            [],
+                        )
+                        .unwrap();
+                }
+                _ => {
+                    let body = "#!/bin/sh\nprintf partial > \"$LMM_MODELS_DIR/partial\"\necho '完整性校验失败' >&2\nexit 1\n";
+                    let mut failing_card = card.clone();
+                    std::fs::write(scripts.join("download_model.sh"), body).unwrap();
+                    failing_card
+                        .script_sha256
+                        .as_mut()
+                        .unwrap()
+                        .insert("download_model".into(), script_runner::sha256_hex(body));
+                    let error = manager_with_card(download_settings(&first), failing_card)
+                        .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+                        .unwrap_err();
+                    assert!(error.to_string().contains("完整性校验失败"), "{error}");
+                    assert_eq!(std::fs::read(first.join("partial")).unwrap(), b"partial");
+                    std::fs::write(scripts.join("download_model.sh"), FAKE_DOWNLOAD_MODEL).unwrap();
+                }
+            }
+            let next = tmp.path().join("next");
+            let mut tight = download_settings(&next);
+            tight.min_free_space_gb = 1_000_000.0;
+            let error = manager_with_card(tight, card.clone())
+                .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+                .unwrap_err();
+            assert!(error.to_string().contains("可用空间不足"), "{error}");
+            manager_with_card(download_settings(&next), card)
+                .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+                .unwrap();
+            let record = db::get_store_model("card-dl").unwrap().unwrap();
+            assert_eq!(record.models_root.as_deref(), first.to_str(), "{existing}");
+            assert_eq!(ran_times(&next.join("download-ran")), 0);
+            assert_eq!(
+                ran_times(&first.join("download-ran")),
+                if existing == "installed" { 2 } else { 1 }
+            );
+            if existing != "installed" {
+                assert_eq!(std::fs::read(first.join("partial")).unwrap(), b"partial");
+            }
+        }
     }
 
     /// 防的是「下载中途失败，库里却留下一条说它已经好了的记录」。
