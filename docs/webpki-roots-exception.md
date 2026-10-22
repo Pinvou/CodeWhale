@@ -55,3 +55,6 @@ python3 scripts/guard-webpki-roots-exception.py && cargo deny --locked --manifes
 所有安全风险均已消除，也不替代后续依赖升级。CI 契约检查器只支持其明确识别的
 `run:` 标量形式；多行 plain 标量、带块头注释、缩进标记、tag/anchor 等未支持形式须先更新测试，
 当前显式失败，不允许把它们静默当作不含审计命令的普通行。
+对已识别的标量，检查器按 shell 单词去除引号和转义并识别命令分隔符，
+因此 `'cargo' 'deny'`、相邻引号和续行不会漏掉新增扫描。该静态检查不执行 shell，
+也不声称能求值变量、`eval` 或外部脚本；引入动态审计入口时必须显式扩展入口契约。

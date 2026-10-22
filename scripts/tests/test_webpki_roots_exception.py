@@ -2,6 +2,7 @@ import importlib.util
 import json
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -237,7 +238,17 @@ def cargo_deny_commands(workflow):
                 scalar = scalar[1:-1].replace("''", "'")
             elif not scalar or scalar.startswith(('*', '&', '{', '[', '|', '>', '!', '#')):
                 raise AssertionError('unrecognized run scalar; inspect its cargo-deny coverage')
-        commands.extend(re.findall(r'\bcargo\s+deny\b', scalar))
+        # Bash removes quotes/escapes from command words before execution.
+        # Searching source text misses e.g. 'cargo' 'deny' or ca"rgo" deny.
+        # This is lexical change control, not an arbitrary-shell evaluator.
+        try:
+            lexer = shlex.shlex(scalar.replace('\\\n', ''), posix=True, punctuation_chars=True)
+            lexer.whitespace_split = True
+            words = list(lexer)
+        except ValueError as error:
+            raise AssertionError('unrecognized shell words; inspect cargo-deny coverage') from error
+        commands.extend('cargo deny' for first, second in zip(words, words[1:])
+                        if first == 'cargo' and second == 'deny')
     return commands
 
 
@@ -305,6 +316,22 @@ class WebpkiCiContractTests(unittest.TestCase):
             with self.subTest(body=body):
                 changed = workflow + '\n  unguarded-audit:\n    steps:\n' + body
                 with self.assertRaisesRegex(AssertionError, 'multiline run scalar'):
+                    self.verify_workflow(changed)
+
+    def test_shell_quoting_cannot_hide_an_unguarded_scan(self):
+        workflow = WORKFLOW.read_text(encoding='utf-8')
+        for command in ["'cargo' 'deny' check advisories", '"cargo" "deny" check advisories',
+                        'ca"rgo" d"eny" check advisories', r'ca\rgo de\ny check advisories',
+                        'cargo\\\n deny check advisories',
+                        "true;'cargo' 'deny' check advisories",
+                        'true&&cargo deny check advisories']:
+            with self.subTest(command=command):
+                # json.dumps produces a real double-quoted YAML scalar, not
+                # a shell-quoted YAML approximation.
+                changed = workflow + ('\n  unguarded-audit:\n    steps:\n'
+                                      f'      - run: {json.dumps(command)}\n')
+                self.assertEqual(len(cargo_deny_commands(changed)), 3)
+                with self.assertRaisesRegex(AssertionError, 'new cargo-deny entry'):
                     self.verify_workflow(changed)
 
     def test_guarded_scans_cannot_inherit_a_non_fail_fast_shell(self):
