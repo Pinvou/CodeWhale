@@ -23,13 +23,15 @@
 | --- | --- |
 | Account | `DATABASE_URL`（TLS verify-full）、`WORKLOAD_IDENTITY_RULES_JSON`、`REGISTRATION_QUERY_HMAC_KEY_BASE64`、`SMS_VERIFICATION_HMAC_KEY_BASE64`、`SMS_PROVIDER` 及对应 Aliyun/HTTP provider 的真实凭证和四种用途模板；F04 起还须提供独立的 `OWNER_CANDIDATE_CURSOR_HMAC_KEY_BASE64`（标准 Base64，解码后恰好 32 字节）；钱包策略版本与 1–1440 分钟 SLA 可沿既有默认。 |
 | Identity | `IDENTITY_PASSWORD_HMAC_KEY_BASE64`、`AUTH_RISK_REDIS_URL`（identity ACL 用户、TLS）、`AUTH_RISK_HMAC_KEY_BASE64`、`WORKLOAD_IDENTITY_RULES_JSON`；挂载 Keycloak provisioner client-secret。没有风险 Redis 就无法提供必需的 OIDC token proxy，不可当作可运行装配。 |
-| Billing | `DATABASE_URL`（TLS verify-full）、仅本阶段钱包权限的 `WORKLOAD_IDENTITY_RULES_JSON`。 |
+| Billing | `DATABASE_URL`（TLS verify-full）、仅本阶段钱包权限的 `WORKLOAD_IDENTITY_RULES_JSON`；同一当前 Billing 二进制仍须实际 `MANUAL_REVIEW_ON_CALL_USER_IDS`、`HUMAN_DELEGATION_VERIFICATION_KEYS_JSON`、显式 `BILLING_PAYMENT_PROVIDER` 与该已安装适配器要求的既有私有配置，见 [Finance 私有配置](README.finance.md#数据库和私有配置)。不能把本行原钱包业务范围当作二进制启动最小配置。 |
 | Token | 出站 workload token；只有个人余额 facade，无数据库、模型路由或 readiness GO。 |
 | Portal | `REDIS_URL`（portal ACL 用户、TLS）；挂载专属 handoff client-secret。公开 origin 和四个 OIDC endpoint 必须一致，公开及 OIDC 使用 HTTPS。 |
 | 迁移作业 | 独立 `DATABASE_URL`、`MIGRATION_ROLE`、实际 `MIGRATION_BACKUP_EVIDENCE_ID`、`MIGRATION_BACKUP_COMPLETED_AT`、`MIGRATION_BACKUP_SHA256`，以及独立 pgpass。Account 必须走实际 `accountschema.Up`；不能用通用顺序绕过阶段桥。 |
 | relay | 仅 Account DSN、pgpass 和 relay NKey seed；TLS NATS origin/CA。没有审批 relay、manual replay 或自动资源修复。 |
 
 五个 HTTP 进程和普通 relay 的生产启动还必须设置 `OTEL_EXPORTER_OTLP_ENDPOINT` 为经验证、无 URI 凭证的 HTTPS OTLP endpoint，使用已挂载 CA；站点如需认证，仅在对应私有环境文件配置，禁止记录凭证或原 exporter 错误。这里不创建 collector。
+
+当前使用同一 Billing 二进制，不另造 personal factory，不自动选择 H3C、商户或收款策略。其现有支付、审批与 NATS 初始化仍须满足当前运行合同；按所选阶段组合既有 Finance 资源与私有配置。明确安装的 TestOnly 适配器可用于既有受控启动边界，不能因此正式收款或放宽价格/支付准入。手动 [生产配置预检](../runbooks/production-render-preflight.md) 只检查当前固定模板和已提供输入，返回 `ENV_PENDING`；渲染成功不证明 Billing 或其他服务已经启动。
 
 `TRUSTED_TIME_SOURCES` 至少提供三项已验证独立时间源。就绪检查只覆盖当前实际实现：Account 检查仓库，Identity 联合 Keycloak/风险 Redis，Billing 检查数据库，Portal 检查 Redis，Token 仅宿主基础门禁；不能推定持续检查所有上游。Compose 的依赖健康与 agent 检查只约束初始启动，之后每次业务调用和 JWT 到期验证仍按真实失败返回 unavailable/拒绝，不伪造成功。迁移成功后才启动相应服务。数据库 schema/角色与阶段迁移证明由 Account/Billing 的独立审核记录约束，不能根据进程编译成功推定它们已正确部署。
 

@@ -25,7 +25,10 @@
     "security:production-readiness": "node ../scripts/account-platform-production-security-gate.mjs",
     "security:prepare-native-rotation": "node ../scripts/account-platform-production-security-gate.mjs --prepare-native-rotation",
     "test:postgres-backup-tools": "python3 -m unittest discover -s ../scripts/tests -p \"test_postgres_backup*.py\"",
-    "test:user-realm-tools": "python3 -m unittest discover -s ../scripts/tests -p \"test_user_realm.py\""
+    "test:user-realm-tools": "python3 -m unittest discover -s ../scripts/tests -p \"test_user_realm.py\"",
+    "check:production-business": "node ../scripts/account-platform-business-compose-check.mjs",
+    "check:production-migrations": "node ../scripts/account-platform-business-migrations-check.mjs",
+    "check:production-keycloak": "node ../scripts/account-platform-keycloak-helm-check.mjs"
   },
   "devDependencies": {
     "ajv": "8.17.1",

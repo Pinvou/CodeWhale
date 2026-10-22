@@ -56,7 +56,9 @@ services:
       PINVOU_DEPLOYMENT_ENVIRONMENT: production-new
       PGPASSFILE: /run/pinvou/database/pgpass
       SSL_CERT_FILE: /run/pinvou/trust/ca.crt
-    volumes: [*trust, *database]
+    volumes:
+      - *trust
+      - {type: bind, source: "${TOKEN_MIGRATION_DATABASE_DIRECTORY:?set only Token migrator pgpass directory}", target: /run/pinvou/database, read_only: true, bind: {create_host_path: false}}
     healthcheck: {disable: true}
   account-service:
     environment:
