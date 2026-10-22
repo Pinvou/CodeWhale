@@ -196,6 +196,43 @@ class Transfer:
         self.completed_bytes = 0
         self.previous_artifacts = {a["path"]: a for a in state.get("artifacts", [])}
 
+    def prepare_resume(self):
+        # Public artifacts describe this attempt only. Preserve the hashes of
+        # earlier completed files separately before clearing that public view.
+        path = self.directory / "resume-artifacts.json"
+        retained = read_json(path) if path.exists() else {"version": 1, "artifacts": []}
+        if (not isinstance(retained, dict) or retained.get("version") != 1
+                or not isinstance(retained.get("artifacts"), list)
+                or len(retained["artifacts"]) > 10000):
+            raise ToolError("INVALID_RESUME_EVIDENCE", "下载恢复摘要记录损坏，请保留文件并核查原任务。")
+        previous = {}
+        for artifact in retained["artifacts"]:
+            if (not isinstance(artifact, dict) or not isinstance(artifact.get("path"), str)
+                    or not isinstance(artifact.get("sha256"), str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", artifact["sha256"])):
+                raise ToolError("INVALID_RESUME_EVIDENCE", "下载恢复摘要记录损坏，请保留文件并核查原任务。")
+            previous[artifact["path"]] = artifact
+        # The most recent positive verification supersedes an older receipt.
+        previous.update(self.previous_artifacts)
+        self.previous_artifacts = previous
+        self.save_resume()
+
+    def save_resume(self):
+        write_json(self.directory / "resume-artifacts.json", {"version": 1, "artifacts": [
+            {"path": path, "sha256": artifact["sha256"]}
+            for path, artifact in self.previous_artifacts.items()]})
+        # Persist the receipt rename before the attempt may replace state.json
+        # or publish a new target. A failed receipt write leaves old state intact.
+        descriptor = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def remember_artifact(self, artifact):
+        self.previous_artifacts[artifact["path"]] = artifact
+        self.save_resume()
+
     def cancel(self):
         if (self.directory / "cancel").exists():
             raise Cancelled()
@@ -236,8 +273,10 @@ class Transfer:
             expected = item["sha256"] or previous.get("sha256")
             if not expected or digest != expected or (item["size_bytes"] is not None and target.stat().st_size != item["size_bytes"]):
                 raise ToolError("EXISTING_FILE_CONFLICT", "目标文件已存在但无法确认一致；保留原文件，请校验或选择其他位置。")
-            return {"path": str(target), "size_bytes": target.stat().st_size, "sha256": digest,
-                    "verification": "expected_sha256" if item["sha256"] else "computed_only"}
+            artifact = {"path": str(target), "size_bytes": target.stat().st_size, "sha256": digest,
+                        "verification": "expected_sha256" if item["sha256"] else "computed_only"}
+            self.remember_artifact(artifact)
+            return artifact
         key = hashlib.sha256((item["url"] + (item["sha256"] or "")).encode()).hexdigest()[:16]
         part_name = ".%s.megacube-%s.part" % (target.name, key)
         part = target_file(target.parent, part_name)
@@ -322,13 +361,17 @@ class Transfer:
                     meta_path.unlink(missing_ok=True)
                     raise ToolError("HASH_MISMATCH", "文件摘要不匹配；不发布为完整产物。请检查来源或用新目录重新下载。")
                 self.cancel()
+                artifact = {"path": str(target), "size_bytes": size, "sha256": digest,
+                            "verification": "expected_sha256" if item["sha256"] else "computed_only",
+                            "source_url": public_url(item["url"])}
+                # A receipt is not current completion. It only permits a fresh
+                # hash comparison if publication or the state save is interrupted.
+                self.remember_artifact(artifact)
                 # Atomic publication without replacing a file created during download.
                 os.link(part, target)
                 part.unlink()
                 meta_path.unlink(missing_ok=True)
-                return {"path": str(target), "size_bytes": size, "sha256": digest,
-                        "verification": "expected_sha256" if item["sha256"] else "computed_only",
-                        "source_url": public_url(item["url"])}
+                return artifact
             except (OSError, ToolError, http.client.HTTPException) as exc:
                 code = getattr(exc, "code", None)
                 retryable = (isinstance(exc, (TimeoutError, ConnectionError, http.client.HTTPException))
@@ -356,6 +399,8 @@ def run_worker(directory):
         try:
             request = read_json(directory / "request.json")
             destination = absolute_dir(request["directory"])
+            if request.get("operation") != "verify":
+                transfer.prepare_resume()
             state.update(status="running", pid=os.getpid(), process_identity=process_identity(os.getpid()),
                          phase="download", artifacts=[], files_completed=0, progress_done_bytes=0, error=None)
             state.pop("error_code", None)

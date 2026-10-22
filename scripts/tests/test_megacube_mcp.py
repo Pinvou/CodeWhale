@@ -24,6 +24,9 @@ class MegaCubeMcpTests(unittest.TestCase):
     def test_atomic_acquisition_and_external_artifacts(self):
         self.run_suite("megacube_atomic_tools_test.py")
 
+    def test_independent_resume_keeps_verified_artifact_receipts(self):
+        self.run_suite("megacube_resume_receipts_test.py")
+
     def test_installation_workflow_and_local_reuse(self):
         self.run_suite("megacube_installation_workflow_test.py")
 
