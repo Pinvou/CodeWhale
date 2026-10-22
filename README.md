@@ -86,6 +86,10 @@ PINVOU 不只是一个聊天界面。它把通用工作、视觉设计和软件�
   </tr>
 </table>
 
+## MegaCube 单机管理
+
+Linux 用户级服务可通过 Pinvou 管理 Cube Manage Software、后台模型商店和持久模型任务。部署与救援见[单机管理](docs/megacube-single-node.md)，职责、设计取舍和验收边界见[最终决策与实现说明](docs/megacube-single-node-decisions.md)。
+
 ## 模型接入
 
 PINVOU 支持本地 vLLM 和 OpenAI-compatible API。应用内可保存多个模型配置，为云端配置设置可选的显示别名，并在不同会话间快速切换；显示别名不会改变发送给模型服务商的模型标识。当前提供本地 vLLM、DeepSeek、Kimi、通义千问、豆包、MiniMax、智谱、MiMo 等配置模板，也可以填写自定义兼容端点。
