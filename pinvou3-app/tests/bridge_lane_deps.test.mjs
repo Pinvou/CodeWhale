@@ -192,11 +192,12 @@ let m;
 while ((m = clusterRe.exec(helpers)) !== null) {
   snapshot.clusters[m[1]] = [...m[2].matchAll(/([\w$]+): b\.([\w$]+)/g)].map((p) => `${p[1]}:${p[2]}`);
 }
-// Combined 314 = main 313 + retained public compactNow; dependency audit below.
-// Official 313 = upstream 312 + clearVoiceInput（官方合并体保留在基座，裁决②
-// 旁路的 F/X 双重身份面；T0-e 台账登记）。
+// Combined 315 = branch 314 (main T0 313 + retained public compactNow)
+// + T2 private applyToolItemResult; main T2 is 314. The new writer has only
+// parameter dependencies; replay adds an invocation-local Map. The complete
+// AST dependency/key/forwarder audit below remains unchanged.
 const EXPECTED_SURFACE = {
-  sharedFnCount: 314,
+  sharedFnCount: 315,
 };
 
 assert.equal(

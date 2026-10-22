@@ -455,3 +455,19 @@ compactNow 调用面继续保留，并未沿主线旧消费者清单静默退休
 组合回归位于 `account_bridge_shared_composition.test.mjs`，执行实际共享实现和 Web
 domain adapter；桌面 terminal 测试提取实际生产函数并使用受控依赖。此类 Node 验证
 不等同完整原生构建、真实 Engine 或浏览器验收；先前现场与原生未验证边界保持。
+
+### 14.4 T2（community#746 tool 卡重放索引回流，本批）
+
+下列 T2 说明与计数保留 main #2076 当时的历史语境，包括当时的 llmapi 启动桩差异；它们不是当前 Account 组合的新增验收，也不恢复已退休的旧模型权威。当前组合另见末尾 2026-10-23 记录。
+
+- 移植基准 community `0baf7fa6c`（#746 合并版）对 helpers 的全部 4 个 hunk，落到 T0 之后的树（helpers 簇即 #746 前夜 `ef98a715ee` 形态，逐字落位、零冲突）：① `updateToolItem` 的结果写入器抽为共享私有函数 `applyToolItemResult`（web+tauriTerminal 簇内）；② `rerenderFromMessagesCore` 重放期建 `firstToolItemById` Map 并经 `backfillToolItem` 回填——普通 string toolId 走 Map 首卡匹配（与 `updateToolItem` 语义一致，不再全量扫描 chatItems），legacy 非 string ID 委托 lane.updateToolItem 保留严格相等扫描；③ 重放工具卡 `addChatItem` 时登记首卡；④ careful 拦截与 load_skill 两处结果回填改走 `backfillToolItem`。官方挂起回流项 #2044（community#746）由此解锁。无 invoke/listen 命令面增删，`bridge_domain_protocol` 全量实测通过，expectedSharedBaseHash 无需重算。
+- 测试移植（3 文件 + 1 新文件）：`conversation_replay_tool_backfill.test.mjs` 上游逐字新文件（tauri/web ×7 共 14 tests，真实 helpers + host hooks vm 装载：完整卡保序/首重复卡/工具卡 meta 生命周期、legacy ID 严格相等、结构化输出身份、专用卡排除、重放/renderer 失败后索引重建、string 回填不回扫先序卡、host 特有未决 sweep）；`session_nav_race_web` +1（web 冷重放重复 ID 首卡匹配 + 缓存会话导航往返）；`tauri_bridge_state_identity` 追加重放段（桌面公开冷载路径 + 重复 ID + 不可变订阅 + 旧发布工具卡不被后续导航变异）。
+- 官方 F 面适配（本批唯一 fork 差异点）：官方 tauri 启动链独有 llmapi 刷新循环（上游无 `refreshLlmApiOnStartup`），且 vm 沙箱注入的是真 `setTimeout`——追加段逐字桩对 `get_llmapi_status` 返 `null` 时该循环以 2s/5s/10s/30s 封顶间隔永不退出，钉死 `node --test` 子进程（全套件挂死）。桩对该命令改应答 `{}`（`llmApiBackendUserState` 兜底判 `not_exists` 已知终态，循环即退出），与本文件既有段"未接管命令返 `{}`"的桩约定一致；其余逐字保持。
+- lane 依赖门：`bridge_lane_deps` `sharedFnCount` 313→314（上游 #746 后 312→313 + 官方基座 `clearVoiceInput`；新增 `applyToolItemResult` 为私有、仅参数依赖——AST 范围审计 `updateToolItem` 只新增该 helper、replay 另加标准 Map，无新簇依赖/导出/转发，REQUIRED 不变）。官方 F 面与 T0 固化形态零回退：cn_name 兜底、modelAvailabilityError 熔断、clearVoiceInput 门注释均保持；#749 artifact 快路径仍按拆批边界留 T3。
+- 测试结果：全量 `npm run test:node` 1872 tests / 1855 pass / 0 fail / 17 skipped（较 T0-e 基线 1857/1840/0/17 净增 15 且全过：conversation_replay_tool_backfill +14、session_nav_race_web +1；build 产物就位后 skip 数持平）；build:ui 后 ui_smoke 58/58、kb_smoke 55/55；biome 改动文件 0 error（tests 目录在 biome 忽略域，helpers 实测通过）。
+
+### 2026-10-23 主线 #2076 T2 与 Account 桥接组合
+
+本次组合同时保留上面的 Account 模型引用、权威目录快照、typed selection、草稿导航及 compactNow 公共面，与 14.4 的工具卡重放索引。共享顶层函数计数为 315（本分支 314 + 私有 applyToolItemResult；main 为 314），新结果写入器只依赖参数，Map 仅属于单次重放，不改变各 lane 的 deps/forwarders/导出。
+
+组合验证继续使用 conversation_replay_tool_backfill、session_nav_race_web、tauri_bridge_state_identity、account_bridge_shared_composition、bridge_lane_deps 和 bridge_domain_protocol 等实际生产实现回归。无 invoke/listen 命令面或 CodeWhale gitlink/Rust 改动，协议摘要、既有 fork 指纹和行为名保持；没有为计数变化伪造新命令摘要。作者证据及私有因果控制另存，不继承 14.4 的历史全量结果，也不冒称本组合完成真实原生、Engine、浏览器或现场验收。
