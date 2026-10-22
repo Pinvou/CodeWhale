@@ -24,6 +24,22 @@ function invocation() {
     event("controller", "result_received", { occurred_at: now - 1000, remote_task_status: "success" })];
 }
 
+test("local attempt IDs cannot suppress a remote projection with the same text", () => {
+  const rows = invocation();
+  const local = ['task_submitted', 'task_finished'].map(event_name => ({
+    device_id: 'A', event_id: `local_collision_${event_name}`, event_name,
+    attempt_id: `remote_${key}`, mode: 'assistant', initiator_type: 'user',
+    status: 'failed', occurred_at: now - 5000,
+  }));
+  for (const events of [[...local, ...rows], [...rows, ...local]]) {
+    const report = buildBehaviorOverview(devices, [], events, 'today', now);
+    assert.equal(report.metrics.task_submitted_count, 2);
+    assert.equal(report.metrics.task_finished_count, 2);
+    assert.equal(report.remote_control.task_count, 1);
+    assert.equal(report.remote_control.succeeded_count, 1);
+  }
+});
+
 test("durable retention joins split remote batches without retaining passive B", t => {
   let clock = now;
   t.mock.method(Date, "now", () => clock);

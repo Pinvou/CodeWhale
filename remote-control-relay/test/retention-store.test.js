@@ -54,11 +54,11 @@ test('online and offline remote retention never persist B clock skew into A coho
   assert.equal(restored.metrics(now).d1.history_unresolved_installations, 0);
 }));
 
-test('remote retention uses a matching owner receipt, bounded below by owner submission', () => {
+test('remote retention keeps the initiating date regardless of later receipt clocks', () => {
   const [submit, terminal] = remoteRetentionEvents();
   terminal.occurred_at -= 3 * DAY;
   for (const [receiptIdentity, offset, expected] of [
-    ['controller', DAY, submit.occurred_at + DAY],
+    ['controller', DAY, submit.occurred_at],
     ['controller', -DAY, submit.occurred_at],
     ['unrelated', DAY, submit.occurred_at],
   ]) {
@@ -74,6 +74,39 @@ test('remote retention uses a matching owner receipt, bounded below by owner sub
   const missingOwnerClock = {...success('2026-09-01T08:00:00'), remote_projection:true};
   assert.equal(facts([missingOwnerClock]).rows.size, 0, 'projected events without owner-clock evidence fail closed');
 });
+
+test('one remote success has one durable date across late receipts, restart and backup permutations', async t => fixture(t, async dir => {
+  const initialized = at('2026-09-01T00:00:00');
+  const devices = [device('controller'), device('controlled')];
+  const [submit, terminal] = remoteRetentionEvents();
+  const receipt = {...submit, event_id:'late_owner_receipt', remote_stage:'result_received',
+    remote_task_status:'success', occurred_at:submit.occurred_at + DAY};
+  const events = [submit, terminal, receipt];
+  for (const order of [[0,1,2], [0,2,1], [1,0,2], [1,2,0], [2,0,1], [2,1,0]]) {
+    const onlineDir = join(dir, `online-${order.join('')}`), backupDir = join(dir, `backup-${order.join('')}`);
+    for (const path of [onlineDir, backupDir]) {
+      fs.mkdirSync(path); writeFileSync(join(path, 'devices.json'), JSON.stringify({devices}));
+      new RetentionFacts(path, initialized).flush();
+    }
+    const prefix = [];
+    for (const index of order) {
+      prefix.push(events[index]);
+      const facts = new RetentionFacts(onlineDir);
+      // Replay the complete retained snapshot as online ingest does; every
+      // batch also duplicates the new fact, and every next batch reloads disk.
+      facts.observe(projectRemoteTasks([...prefix, events[index]]), devices, now);
+      facts.flush();
+    }
+    const online = new RetentionFacts(onlineDir);
+    const source = join(backupDir, 'backup.jsonl');
+    writeFileSync(source, order.flatMap(index => [events[index], events[index]]).map(JSON.stringify).join('\n'));
+    const backfilled = await backfillRetention({dataDir:backupDir, sources:[source], now, apply:true});
+    assert.deepEqual(online.rows.get('controller').successful_days, [retentionDay(submit.occurred_at)]);
+    assert.equal(online.metrics(now).d1.retained_installations, 0, 'one task cannot create next-day activity');
+    assert.deepEqual([...new RetentionFacts(backupDir).rows], [...online.rows]);
+    assert.deepEqual(backfilled.after, online.metrics(now));
+  }
+}));
 
 test('backup-only remote retention joins across files without restoring raw events', async t => fixture(t, async dir => {
   const devices = [device('controller'), device('controlled')];

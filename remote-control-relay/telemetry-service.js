@@ -256,7 +256,10 @@ function installationBehaviorEvents(devices, behaviorEvents) {
 function attemptIdentityKey(event) {
   const identity = eventIdentity(event);
   const attempt = boundedText(event?.attempt_id || event?.turn_id || event?.event_id, 128);
-  return identity && attempt ? `${identity}\u001f${attempt}` : "";
+  // Projection IDs are server-generated, while a client may choose identical
+  // text for a local attempt. Keep their aggregation namespaces independent.
+  const source = event?.remote_projection ? 'remote' : 'local';
+  return identity && attempt ? `${identity}\u001f${source}\u001f${attempt}` : "";
 }
 
 function scopedEventKey(event, value, maxLength = 256) {
