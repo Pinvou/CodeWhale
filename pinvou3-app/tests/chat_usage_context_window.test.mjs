@@ -133,7 +133,8 @@ for (const [label, section] of [['tauri', tauriSection], ['web', webSection]]) {
 // Initial-state source assertions: neither bridge initializes with the 32K
 // fake denominator (unknown window = 0; the UI hides the meter).
 const tauriBridgeSource = read('src', 'platform', 'tauri', 'bridge.js');
-const tauriMonitorSource = read('src', 'platform', 'tauri', 'bridge', 'monitor.js');
+// #701 T0-c 壳化：tauri monitor 的 pollMonitor 已委托 helpers，窗口分母本体在共享基座。
+const tauriMonitorSource = read('src', 'shared', 'bridge-shared-helpers.js');
 assert.ok(tauriBridgeSource.includes('tokens: { input: 0, max: 0 }'), 'tauri bridge initializes max=0 (unknown window)');
 assert.ok(webSource.includes('tokens: { input: 0, max: 0 }'), 'web bridge initializes max=0 (unknown window)');
 assert.ok(!/(var|let) maxModelLen = 32768/.test(webSource), 'web monitor must not fall back to a fake 32K window');

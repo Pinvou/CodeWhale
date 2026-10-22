@@ -104,40 +104,7 @@ function sessionTitleById(sid) { return pinvouSharedtauriArtifacts().sessionTitl
 function currentMemoryArtifacts() { return pinvouSharedtauriArtifacts().currentMemoryArtifacts(); }
   // 跨会话产出物索引:磁盘 session JSON 为主,再合并当前内存工作集。
   // 新产物在 chat:done/save_session_artifacts 前也能立刻出现在「产出物」一级入口。
-  async function listDeliverableIndex() {
-    var disk = await invoke("list_deliverable_index").catch(function () { return []; });
-    var byPath = {};
-    (disk || []).forEach(function (x) { if (x && x.path) byPath[x.path] = x; });
-    var mem = currentMemoryArtifacts().filter(function (x) { return x.path && !byPath[x.path]; });
-    var hydrated = await Promise.all(mem.map(async function (x) {
-      var path = x.path;
-      if (!isAbsPath(path) && x.sessionId) {
-        try {
-          var ws = await invoke("list_workspace_files", { sessionId: x.sessionId });
-          var bn = basename(path);
-          var resolved = (ws || []).find(function (p) { return basename(p) === bn; });
-          if (resolved) path = resolved;
-        } catch (_) {}
-      }
-      var info = null;
-      try { info = await artifactInfo(path); } catch (_) {}
-      var ext = (String(path).split(".").pop() || "").toLowerCase();
-      return {
-        name: x.name || basename(path),
-        path: path,
-        ext: ext,
-        category: deliverableCategory(path),
-        sessionId: x.sessionId || "",
-        source: x.source || sessionTitleById(x.sessionId) || "",
-        mtime: info && info.modified ? info.modified : 0,
-        size: info && info.size ? info.size : 0,
-      };
-    }));
-    hydrated.forEach(function (x) { if (x && x.path) byPath[x.path] = x; });
-    return Object.keys(byPath).map(function (p) { return byPath[p]; }).sort(function (a, b) {
-      return (b.mtime || 0) - (a.mtime || 0) || String(a.name || "").localeCompare(String(b.name || ""));
-    });
-  }
+  async function listDeliverableIndex() { return pinvouSharedtauriArtifacts().listDeliverableIndex(); }
   // 外部打开产物：HTML 走 Tauri 独立窗口（绕沙箱），其他走系统应用。
   // sessionId = 卡片携带的产物所属 session。后端 resolve_artifact_path 用它(而非全局
   // active_id)解析相对路径 —— 切回「有 buffer」的会话后端 active 不更新,只有卡片自带

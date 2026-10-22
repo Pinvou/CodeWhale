@@ -1557,38 +1557,20 @@ test('cascade wiring contract: ChatView gates all four layers, stops the block w
 // ── Round-5: queued-edit envelope, chip draft store, splitter hardening ──
 
 /**
- * Official 适配：社区主线把共享桥接工具收敛在 bridge-shared-helpers.js 的
- * PinvouBridgeShared 集群里；Official 仍是各桥自包含实现 —— 这里直接装载
- * 自包含的 tauri chat.js 本体并从其导出取信封函数族。
- * Load the real lane implementation with the real splitter wired in.
+ * T0-c 壳化适配：信封函数族已收敛进 bridge-shared-helpers.js 的 tauriChat
+ * 集群；沙箱按 index.html 顺序先载共享基座，再直接从集群取信封函数族
+ * （上游同形态），chat.js 本体不再单独装载。
+ * Load the real shared helpers with the real splitter wired in.
  */
 function loadSharedHelpers() {
   const ctx = { window: {}, console };
   vm.createContext(ctx);
   vm.runInContext(
-    readFileSync(new URL('../src/platform/tauri/bridge/chat.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n'),
+    readFileSync(new URL('../src/shared/bridge-shared-helpers.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n'),
     ctx,
   );
   ctx.window.__PINVOU_SESSION_MENTION__ = { splitSessionMentionBlock, buildSessionMentionBlock };
-  const factory = ctx.window.__PINVOU_TAURI_BRIDGE_FEATURES__.chat;
-  const api = factory({
-    state: { chatItems: [], queued: [], composerDraft: '', draftEpoch: 0, sessions: [], attachments: [], activeSessionId: 'A' },
-    sessionStates: {},
-    invoke: () => Promise.resolve({}),
-    notify() {},
-    bt(key) { return key; },
-    runSyncOnSession(_sid, fn) { fn(); },
-    getBuffer() { return null; },
-    timeStr() { return ''; },
-    TAURI: true,
-  });
-  return { ctx, shared: {
-    queuedPayloadEnvelope: api.queuedPayloadEnvelope,
-    makeQueuedMessage: api.makeQueuedMessage,
-    rebuiltQueuedPayload: api.rebuiltQueuedPayload,
-    rebuiltQueuedMetaPayload: api.rebuiltQueuedMetaPayload,
-    stripMentionBlockForComposerRestore: api.stripMentionBlockForComposerRestore,
-  } };
+  return { ctx, shared: ctx.window.PinvouBridgeShared.create('tauriChat', {}) };
 }
 
 test('queued envelope is block-aware for scene payloads embedding the body mid-template (round-5 M-A)', () => {
@@ -1845,9 +1827,13 @@ test('pre-dispatch abandon paths resolve on the restore verdict (round-8 M1)', (
   assert.match(sendTaskSlice, /settleSessionRefSend\(refsAtSend, draftKeyAtSend, result\);/);
   assert.match(sendTaskSlice, /settleSessionRefSend\(refsAtSend, draftKeyAtSend\);/);
   // The strip-on-restore rule lives once, in the shared helpers (minor 10).
-  // Official 适配：社区主线的 strip 闸门收敛在 bridge-shared-helpers.js，两侧
-  // 桥是委托 shim；Official 的两条 lane 各自内联同语义实现 —— 分别钉本体。
-  assert.match(chatSource, /function stripMentionBlockForComposerRestore\(text\) \{[\s\S]{0,300}?window\.__PINVOU_SESSION_MENTION__/);
+  // Official 适配：社区主线的 strip 闸门收敛在 bridge-shared-helpers.js；#701
+  // T0-c 后 desktop 桥改委托 shim + helpers 本体双钉，web lane 仍内联钉本体。
+  const helpersSource = readFileSync(new URL('../src/shared/bridge-shared-helpers.js', import.meta.url), 'utf8');
+  assert.match(chatSource, /function stripMentionBlockForComposerRestore\(text\) \{ return pinvouSharedtauriChat\(\)\.stripMentionBlockForComposerRestore\(text\); \}/);
+  // helpers 本体经 sessionMentionSplitter 读取 window 域拆分器（上游同形）。
+  assert.match(helpersSource, /function stripMentionBlockForComposerRestore\(text\) \{[\s\S]{0,120}?sessionMentionSplitter\(\);/);
+  assert.match(helpersSource, /function sessionMentionSplitter\(\) \{[\s\S]{0,300}?window\.__PINVOU_SESSION_MENTION__/);
   assert.match(webSource, /function stripMentionBlockForComposerRestore\(text\) \{[\s\S]{0,300}?window\.__PINVOU_SESSION_MENTION__/);
   // web restoreComposerText mirrors the tauri boolean verdict.
   assert.match(webSource, /function restoreComposerText\(sid, text\) \{[\s\S]*?if \(!sid \|\| !value\) return false;/);

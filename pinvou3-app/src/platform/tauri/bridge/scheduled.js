@@ -5,7 +5,7 @@
   const registry = root.__PINVOU_TAURI_BRIDGE_FEATURES__ = root.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
   registry.scheduled = function (context) {let pinvouSharedtauriScheduledCache = null;
 function pinvouSharedtauriScheduled() {
-  if (!pinvouSharedtauriScheduledCache) pinvouSharedtauriScheduledCache = window.PinvouBridgeShared.create("tauriScheduled", { SCHEDULED_TEMPLATE_SOURCE_STORAGE_KEY, scheduledTaskTemplateSources: { get value() { return scheduledTaskTemplateSources; } }, persistScheduledTaskTemplateSources, state, scheduledTaskRequestTokens: { get value() { return scheduledTaskRequestTokens; } }, scheduledTaskRefreshInFlight: { get value() { return scheduledTaskRefreshInFlight; }, set value(v) { scheduledTaskRefreshInFlight = v; } }, scheduledRecentRunsRequestToken: { get value() { return scheduledRecentRunsRequestToken; }, set value(v) { scheduledRecentRunsRequestToken = v; } }, scheduledRunEventRefreshTimer: { get value() { return scheduledRunEventRefreshTimer; }, set value(v) { scheduledRunEventRefreshTimer = v; } }, notify, scheduledTaskPendingLoads: { get value() { return scheduledTaskPendingLoads; } }, scheduledTaskSelectionGeneration: { get value() { return scheduledTaskSelectionGeneration; }, set value(v) { scheduledTaskSelectionGeneration = v; } }, bt, createScheduledTask, invoke, rememberScheduledRunOwner, scheduledRunShortcutRefreshes: { get value() { return scheduledRunShortcutRefreshes; } }, SCHEDULED_LINK_POLL_DEADLINE_MS: { get value() { return SCHEDULED_LINK_POLL_DEADLINE_MS; } }, SCHEDULED_LINK_POLL_FAST_ATTEMPTS: { get value() { return SCHEDULED_LINK_POLL_FAST_ATTEMPTS; } }, SCHEDULED_LINK_POLL_FAST_MS: { get value() { return SCHEDULED_LINK_POLL_FAST_MS; } }, SCHEDULED_LINK_POLL_SLOW_MS: { get value() { return SCHEDULED_LINK_POLL_SLOW_MS; } }, isScheduledRunTerminal, scheduledTaskBackendInput, forgetScheduledTaskTemplateSource, scheduledTaskAutoCreateSeq: { get value() { return scheduledTaskAutoCreateSeq; }, set value(v) { scheduledTaskAutoCreateSeq = v; } }, createNewSession, prefillComposer });
+  if (!pinvouSharedtauriScheduledCache) pinvouSharedtauriScheduledCache = window.PinvouBridgeShared.create("tauriScheduled", { SCHEDULED_TEMPLATE_SOURCE_STORAGE_KEY, scheduledTaskTemplateSources: { get value() { return scheduledTaskTemplateSources; } }, persistScheduledTaskTemplateSources, state, scheduledTaskRequestTokens: { get value() { return scheduledTaskRequestTokens; } }, scheduledTaskRefreshInFlight: { get value() { return scheduledTaskRefreshInFlight; }, set value(v) { scheduledTaskRefreshInFlight = v; } }, scheduledRecentRunsRequestToken: { get value() { return scheduledRecentRunsRequestToken; }, set value(v) { scheduledRecentRunsRequestToken = v; } }, scheduledRunEventRefreshTimer: { get value() { return scheduledRunEventRefreshTimer; }, set value(v) { scheduledRunEventRefreshTimer = v; } }, notify, scheduledTaskPendingLoads: { get value() { return scheduledTaskPendingLoads; } }, scheduledTaskSelectionGeneration: { get value() { return scheduledTaskSelectionGeneration; }, set value(v) { scheduledTaskSelectionGeneration = v; } }, bt, createScheduledTask, invoke, rememberScheduledRunOwner, scheduledRunShortcutRefreshes: { get value() { return scheduledRunShortcutRefreshes; } }, SCHEDULED_LINK_POLL_DEADLINE_MS: { get value() { return SCHEDULED_LINK_POLL_DEADLINE_MS; } }, SCHEDULED_LINK_POLL_FAST_ATTEMPTS: { get value() { return SCHEDULED_LINK_POLL_FAST_ATTEMPTS; } }, SCHEDULED_LINK_POLL_FAST_MS: { get value() { return SCHEDULED_LINK_POLL_FAST_MS; } }, SCHEDULED_LINK_POLL_SLOW_MS: { get value() { return SCHEDULED_LINK_POLL_SLOW_MS; } }, isScheduledRunTerminal, scheduledTaskBackendInput, forgetScheduledTaskTemplateSource, scheduledTaskAutoCreateSeq: { get value() { return scheduledTaskAutoCreateSeq; }, set value(v) { scheduledTaskAutoCreateSeq = v; } }, scheduledTaskAutoCreateInFlight: { get value() { return scheduledTaskAutoCreateInFlight; } }, runSyncOnSession, addSystemItem, createNewSession, prefillComposer });
   return pinvouSharedtauriScheduledCache;
 }
 
@@ -114,15 +114,7 @@ function clearScheduledTaskSelection() { return pinvouSharedtauriScheduled().cle
 
 function extractBalancedJsonObject(text) { return pinvouSharedtauriScheduled().extractBalancedJsonObject(text); }
 
-  function parseLooseJsonObject(text) {
-    try { return JSON.parse(text); } catch (_) {}
-    try { return JSON.parse(String(text || "").replace(/,(\s*[}\]])/g, "$1")); } catch (_) {}
-    var balanced = extractBalancedJsonObject(String(text || ""));
-    if (!balanced) return null;
-    try { return JSON.parse(balanced); } catch (_) {}
-    try { return JSON.parse(balanced.replace(/,(\s*[}\]])/g, "$1")); } catch (_) {}
-    return null;
-  }
+function parseLooseJsonObject(text) { return pinvouSharedtauriScheduled().parseLooseJsonObject(text); }
 
 function normalizeScheduledTaskDraft(value) { return pinvouSharedtauriScheduled().normalizeScheduledTaskDraft(value); }
 
@@ -130,24 +122,7 @@ function activeScheduledTaskModelConfig() { return pinvouSharedtauriScheduled().
 
 function lockScheduledTaskDraftModel(draft) { return pinvouSharedtauriScheduled().lockScheduledTaskDraftModel(draft); }
 
-  function parseScheduledTaskDraftFromText(text) {
-    if (!text || text.indexOf("{") < 0) return null;
-    var preferred = null;
-    var fallback = null;
-    var re = /```([^\n`]*)\n([\s\S]*?)```/g;
-    var match;
-    while ((match = re.exec(text))) {
-      var label = String(match[1] || "").trim().toLowerCase();
-      var raw = String(match[2] || "").trim();
-      if (!raw || raw.charAt(0) !== "{") continue;
-      var candidate = normalizeScheduledTaskDraft(parseLooseJsonObject(raw));
-      if (!candidate) continue;
-      if (label === "scheduled-task-draft") return candidate;
-      if ((label === "json" || !label) && !fallback) fallback = candidate;
-      if (!preferred) preferred = candidate;
-    }
-    return fallback || preferred;
-  }
+function parseScheduledTaskDraftFromText(text) { return pinvouSharedtauriScheduled().parseScheduledTaskDraftFromText(text); }
 
 function scheduledTaskInputFromDraft(draft) { return pinvouSharedtauriScheduled().scheduledTaskInputFromDraft(draft); }
 
@@ -155,41 +130,8 @@ function scheduledTaskInputFromDraft(draft) { return pinvouSharedtauriScheduled(
   // autoOpenId 全局 last-writer：两会话并发创建时后完成者覆盖，且
   // startScheduledTaskChat 清空后陈旧 completion 会复活 auto-open（审计 f）。
   // 全局单调创建序号，仅最新意图可写。
-  var scheduledTaskAutoCreateSeq = 0;
-  function autoCreateScheduledTaskDraft(draft, creationSessionId) {
-    if (!draft || !creationSessionId || scheduledTaskAutoCreateInFlight[creationSessionId]) return;
-    const lockedDraft = lockScheduledTaskDraftModel(draft);
-    const creationSeq = ++scheduledTaskAutoCreateSeq;
-    const creation = Promise.resolve()
-      .then(function () {
-        return createScheduledTask(scheduledTaskInputFromDraft(lockedDraft));
-      })
-      .then(function (created) {
-        if (state.scheduledTaskCreationSessionId === creationSessionId) {
-          state.scheduledTaskCreationSessionId = null;
-        }
-        if (created && created.id && creationSeq === scheduledTaskAutoCreateSeq) state.scheduledTaskAutoOpenId = created.id;
-        notify();
-        return created;
-      })
-      .catch(function (error) {
-        // createScheduledTask 通常已记录错误；忙锁在进入 action 前抛出时在这里补记，且不产生未处理 Promise。
-        if (!state.scheduledTaskError) setScheduledTaskError(error, "action");
-        runSyncOnSession(creationSessionId, function () {
-          addSystemItem(bt("scheduledCreateFailed") + scheduledTaskErrorText(error), {
-            scheduledTaskCreationError: true,
-          });
-        });
-        notify();
-        return null;
-      })
-      .finally(function () {
-        if (scheduledTaskAutoCreateInFlight[creationSessionId] === creation) {
-          delete scheduledTaskAutoCreateInFlight[creationSessionId];
-        }
-      });
-    scheduledTaskAutoCreateInFlight[creationSessionId] = creation;
-  }
+  let scheduledTaskAutoCreateSeq = 0;
+function autoCreateScheduledTaskDraft(draft, creationSessionId) { return pinvouSharedtauriScheduled().autoCreateScheduledTaskDraft(draft, creationSessionId); }
 
 async function loadScheduledTasks() { return pinvouSharedtauriScheduled().loadScheduledTasks(); }
 
@@ -316,70 +258,7 @@ function refreshScheduledTaskData(limit) { return pinvouSharedtauriScheduled().r
   // 停止条件按 run 自身状态,不用固定次数:TaskManager 只有 1 个 worker,前一个任务
   // 正在跑 LLM turn 时,新 run 排队几分钟是常态,固定 20 次(20 秒)会提前放弃,
   // watcher 是主路径；这里保留较长窗口只为覆盖事件丢失和链接时序空窗。
-  function refreshScheduledRunShortcutUntilLinked(automationId, runId) {
-    if (!automationId || !runId) return;
-    var key = automationId + ":" + runId;
-    if (scheduledRunShortcutRefreshes[key]) return;
-    scheduledRunShortcutRefreshes[key] = true;
-    var deadline = Date.now() + SCHEDULED_LINK_POLL_DEADLINE_MS;
-
-    function stop() {
-      delete scheduledRunShortcutRefreshes[key];
-    }
-    function again(attempt) {
-      if (Date.now() >= deadline) {
-        stop();
-        return;
-      }
-      setTimeout(function () { poll(attempt + 1); }, attempt < SCHEDULED_LINK_POLL_FAST_ATTEMPTS
-        ? SCHEDULED_LINK_POLL_FAST_MS
-        : SCHEDULED_LINK_POLL_SLOW_MS);
-    }
-
-    function taskStillListed() {
-      return (state.scheduledTasks || []).some(function (item) {
-        return item && item.id === automationId;
-      });
-    }
-
-    function poll(attempt) {
-      invoke("list_scheduled_task_runs", { id: automationId }).then(function (runs) {
-        // 任务已被删除时不再回填：陈旧轮询响应会把已删任务以 fallback 名
-        // 复活回侧边栏（审计 R1）。任务不在列表即收工，不 merge、不续排。
-        var task = (state.scheduledTasks || []).find(function (item) {
-          return item && item.id === automationId;
-        });
-        if (!task) {
-          stop();
-          return;
-        }
-        mergeScheduledTaskRecentRuns(task, runs);
-        notify();
-        // 必须看原始响应:mergeScheduledTaskRecentRuns 会滤掉尚无 sessionId 的记录,
-        // 从合并结果里读不到目标 run 的状态。
-        var target = (Array.isArray(runs) ? runs : []).find(function (run) {
-          return run && run.id === runId;
-        });
-        // 会话已挂上 → 记录已进侧边栏;run 已终态却仍无会话 → 会话没建起来,再等也不会有;
-        // run 记录消失(被删或被 retention 清掉)→ 没有等待对象。三种情况都收工。
-        if (!target || target.sessionId || isScheduledRunTerminal(target.status)) {
-          stop();
-          return;
-        }
-        again(attempt);
-      }).catch(function () {
-        // 已删任务的后端响应是 Err 而非空列表（get_automation 文件已移除）。
-        // 任务不在列表即收工，否则会以 1s/5s 空转重试到 30 分钟兜底。
-        if (!taskStillListed()) {
-          stop();
-          return;
-        }
-        again(attempt);
-      });
-    }
-
-    poll(0);
-  }
+function refreshScheduledRunShortcutUntilLinked(automationId, runId) { return pinvouSharedtauriScheduled().refreshScheduledRunShortcutUntilLinked(automationId, runId); }
 
 function upsertScheduledTaskRun(run) {
   if (run) trackScheduledRunFinished(run);

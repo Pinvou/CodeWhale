@@ -132,6 +132,7 @@ function pinvouSharedweb() {
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
     });
   }
+
   function renderMarkdown(text) {
     if (window.PinvouMarkdownRenderer && typeof window.PinvouMarkdownRenderer.renderMarkdown === "function") {
       return window.PinvouMarkdownRenderer.renderMarkdown(text);
@@ -141,6 +142,7 @@ function pinvouSharedweb() {
     }
     return escapeHtml(text || "");
   }
+
 
 
   // The pet is a separate WebView and must not own a second copy of the main
@@ -4180,108 +4182,16 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
       ? invoke("web_access_chat", { message, attachmentHandles: [], sessionId: sid, restrictTools: true })
       : invoke("chat", { message, attachments: [], sessionId: sid, restrictTools: true });
   }
-  // Display-only and case-sensitive ON PURPOSE: it only gates ensure/send
-  // inputs on ids the backend itself minted (always lowercase `aux-`);
-  // identity and destructive paths decide in Rust, whose
-  // is_aux_session_id is deliberately case-insensitive. Never reuse this
-  // predicate for a security or destructive decision.
-  function auxChatIsAuxSession(id) {
-    return typeof id === "string" && id.indexOf("aux-") === 0;
-  }
-  function auxChatEmptySnapshot() {
-    return { chatItems: [], busy: false, queued: [] };
-  }
-  async function auxChatEnsure(taskId) {
-    const task = String(taskId || "").trim();
-    if (!task) throw new Error(bt("targetSessionMissing"));
-    const metadata = await invoke("get_or_create_aux_session", { sessionId: task });
-    const auxId = metadata && typeof metadata.id === "string" ? metadata.id : "";
-    if (!auxChatIsAuxSession(auxId)) throw new Error(bt("sessionDataInvalid"));
-    // Aux sessions never become active: they use the background-buffer
-    // load_session(setActive:false) path.
-    await ensureSessionBufferLoaded(auxId);
-    return auxId;
-  }
-  async function auxChatSend(auxId, text) {
-    const sid = String(auxId || "").trim();
-    const message = String(text || "").trim();
-    if (!auxChatIsAuxSession(sid)) throw new Error(bt("targetSessionMissing"));
-    if (!message) throw new Error(bt("replyContentEmpty"));
-    await ensureSessionBufferLoaded(sid);
-    const buf = sessionStates[sid];
-    // Aux sessions never queue (queue is user-input semantics): reject
-    // outright when busy or queued messages exist; the caller retries.
-    if (isBusyFor(sid) || (buf && Array.isArray(buf.queued) && buf.queued.length > 0)) {
-      throw new Error(bt("turnAlreadyInProgress"));
-    }
-    // 发送命令是 lane 真实差异（desktop: chat + attachments;Web:
-    // web_access_chat + attachmentHandles）,本 lane 以 auxChatSendDispatch 分派。
-    return auxChatSendDispatch(sid, message);
-  }
-  // Synchronous snapshot: when not loaded (no buffer) returns an empty
-  // structure — never throws and never triggers a load. Items are shallow-
-  // copied one by one: streaming deltas mutate buffer items in place (the
-  // item.text/html assignments in chat-events), so copying only the array
-  // would share object references and a caller comparing field by field
-  // could not detect changes; after copying, every poll gets fresh
-  // references, making field comparison a true content comparison.
-  function auxChatSnapshotItems(items) {
-    return (Array.isArray(items) ? items : []).map(function (item) {
-      return item && typeof item === "object" ? Object.assign({}, item) : item;
-    });
-  }
-  function auxChatSnapshot(auxId) {
-    const sid = String(auxId || "").trim();
-    if (!sid) return auxChatEmptySnapshot();
-    if (sid === state.activeSessionId) {
-      return {
-        chatItems: auxChatSnapshotItems(state.chatItems),
-        busy: !!state.busy,
-        queued: auxChatSnapshotItems(state.queued),
-      };
-    }
-    const buf = sessionStates[sid];
-    if (!buf) return auxChatEmptySnapshot();
-    // An always-open panel polling snapshot() counts as "reading": refresh
-    // LRU recency consistently with the getBuffer read paths, otherwise
-    // after 32+ session switches the buffer is evicted by capacity and the
-    // panel wrongly shows the empty state.
-    touchSessionBuffer(sid, buf, false);
-    return {
-      chatItems: auxChatSnapshotItems(buf.chatItems),
-      busy: !!buf.busy,
-      queued: auxChatSnapshotItems(buf.queued),
-    };
-  }
-  async function auxChatDiscard(taskId) {
-    const task = String(taskId || "").trim();
-    if (!task) throw new Error(bt("targetSessionMissing"));
-    await invoke("discard_aux_session", { sessionId: task });
-    // The aux id is a pure function of the task id (aux-<taskId>, round-30
-    // B8), so the buffer purge derives it — the old per-task id map was
-    // redundant state that was never pruned (M5). The session:deleted event
-    // fired by backend deletion is handled by the sessions domain as a
-    // fallback — belt and suspenders, and idempotent.
-    purgeSessionBuffer(`aux-${task}`);
-  }
-  // Atomic restart (M6): one backend command discards the old aux session
-  // (gated against its turns) and creates the fresh one — no two-invoke
-  // window for an orphaned discard to land in. The aux id is derived
-  // (aux-<taskId>, round-30 B8), so the stale buffer purge needs no
-  // per-task id map; the backend's session:deleted also purges through
-  // the sessions domain as a fallback.
-  async function auxChatReset(taskId) {
-    const task = String(taskId || "").trim();
-    if (!task) throw new Error(bt("targetSessionMissing"));
-    const metadata = await invoke("reset_aux_session", { sessionId: task });
-    const auxId = metadata && typeof metadata.id === "string" ? metadata.id : "";
-    if (!auxChatIsAuxSession(auxId)) throw new Error(bt("sessionDataInvalid"));
-    purgeSessionBuffer(auxId);
-    // Aux sessions never become active: they use the background-buffer
-    // load_session(setActive:false) path.
-    await ensureSessionBufferLoaded(auxId);
-    return auxId;
-  }
+  const auxChatShared = window.PinvouBridgeShared.create("auxChat", {
+    state, invoke, bt,
+    sessionStates: { get value() { return sessionStates; } },
+    ensureSessionBufferLoaded, purgeSessionBuffer, touchSessionBuffer, isBusyFor,
+    auxChatDispatch: auxChatSendDispatch,
+  });
+  const auxChatEnsure = auxChatShared.auxChatEnsure;
+  const auxChatSend = auxChatShared.auxChatSend;
+  const auxChatSnapshot = auxChatShared.auxChatSnapshot;
+  const auxChatReset = auxChatShared.auxChatReset;
 
   function findFirstTurnItem(clientMessageId) {
     return state.chatItems.find(function (item) {
@@ -6514,11 +6424,6 @@ function enqueueSettingsWrite(write) { return pinvouSharedweb().enqueueSettingsW
     return await invoke("discover_local_vllm", { request: request || null });
   }
 
-  async function getEffectiveModelConfig(sessionId) {
-    return await invoke("get_effective_model_config", {
-      sessionId: arguments.length ? (sessionId || null) : (state.activeSessionId || null),
-    });
-  }
   // 当前有效模型的图片输入能力(普通会话选图即时警告用);后端按会话模型绑定解析。
   async function getImageInputCapability(sessionId) {
     return await invoke("get_image_input_capability", {
@@ -6706,7 +6611,6 @@ function patchItemById(id, patch) { return pinvouSharedweb().patchItemById(id, p
     }
     return { item: item, message: message };
   }
-function markResolved(id, statusLabel) { return pinvouSharedweb().markResolved(id, statusLabel); }
 
   // ── Per-session UI 路由 ─────────────────────────────────────────
   // 卡片动作链路有多个 await 边界,用户可能中途切 session。所有 UI 写入(chatItem 增改、
@@ -7185,7 +7089,6 @@ async function submitUserInput(itemId, toolCallId, answers, questions) { return 
       flushQueued(sid);
     }
   }
-async function compactNow() { return pinvouSharedweb().compactNow(); }
 
   // ── 产物面板 ─────────────────────────────────────────────────────
   function invokeArtifact(nativeCommand, webCommand, path, sessionId, extra) {
@@ -8930,7 +8833,6 @@ function appendVoiceText(base, text) { return pinvouSharedweb().appendVoiceText(
     auxChatEnsure: auxChatEnsure,
     auxChatSend: auxChatSend,
     auxChatSnapshot: auxChatSnapshot,
-    auxChatDiscard: auxChatDiscard,
     auxChatReset: auxChatReset,
     onSessionDeleted: onSessionDeleted,
     getComposerDraft: getComposerDraft,
@@ -8996,7 +8898,6 @@ function appendVoiceText(base, text) { return pinvouSharedweb().appendVoiceText(
     saveSearchSettingsAndRestart: saveSearchSettingsAndRestart,
     submitFeedback: submitFeedback,
     discoverLocalVllm: discoverLocalVllm,
-    getEffectiveModelConfig: getEffectiveModelConfig,
    loadModels: loadModels,
    saveModel: saveModel,
    revealModelApiKey: revealModelApiKey,
@@ -9042,7 +8943,6 @@ function appendVoiceText(base, text) { return pinvouSharedweb().appendVoiceText(
     dismissPinvouReview: dismissPinvouReview,
     // 编辑/压缩
     editLastTurn: editLastTurn,
-    compactNow: compactNow,
     // 产物
     artifactInfo: artifactInfo,
     readArtifactText: readArtifactText,
@@ -9069,7 +8969,6 @@ function appendVoiceText(base, text) { return pinvouSharedweb().appendVoiceText(
     resolveConversationAttachment: resolveConversationAttachment,
     openConversationAttachment: openConversationAttachment,
     revealConversationAttachment: revealConversationAttachment,
-    markResolved: markResolved,
     // 通用宿主文件选择器（知识库、反馈等功能继续复用）。
     pickFiles,
     pickFolders,

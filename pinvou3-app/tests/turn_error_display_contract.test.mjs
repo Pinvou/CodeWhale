@@ -185,6 +185,13 @@ const desktopContext = vm.createContext({
 });
 // Execute the shipped desktop localization table and error-display block.
 // Surrounding turn mutation is excluded: it is exercised by error-isolation tests.
+// #701 T0-c 壳化适配：bt 已委托 helpers；沙箱按 index.html 顺序补载共享基座
+// 并接好 tauriMain 访问器。
+vm.runInContext(read('src', 'shared', 'bridge-shared-helpers.js'), desktopContext, { filename: 'src/shared/bridge-shared-helpers.js' });
+vm.runInContext(`this.pinvouSharedtauriMain = () => this.__mainCluster || (this.__mainCluster = window.PinvouBridgeShared.create("tauriMain", {
+  state, BT_TABLE: { get value() { return BT_TABLE; } }, invoke: async () => null,
+  notify: () => {}, addChatItem: () => {},
+}));`, desktopContext);
 vm.runInContext(desktopBridgeSource.slice(
   desktopBridgeSource.indexOf('var BT_TABLE ='),
   desktopBridgeSource.indexOf('function textMatchesBtKey'),

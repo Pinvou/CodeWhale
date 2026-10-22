@@ -41,6 +41,10 @@ const desktopAuxChatBridge = readSource(
   path.join(bridgeRoot, 'bridge', 'aux-chat.js'),
   'utf8',
 );
+const sharedBridgeHelpers = readSource(
+  path.join(root, 'src', 'shared', 'bridge-shared-helpers.js'),
+  'utf8',
+);
 const desktopBridgeSources = [
   readSource(path.join(bridgeRoot, 'bridge.js'), 'utf8'),
   ...fs.readdirSync(path.join(bridgeRoot, 'bridge'))
@@ -343,14 +347,13 @@ assert.equal(allowed.has('list_sessions'), false,
 assert.equal(allowed.has('list_archived_sessions'), false,
   'Web must not call the native archived list that exposes host workspace metadata');
 
-// Aux chat domain: platform/web/bridge.js's auxChatEnsure/auxChatDiscard/
+// Aux chat domain: platform/web/bridge.js's auxChatEnsure/
 // auxChatReset invoke these commands directly; sending goes through the
 // existing web_access_chat (an aux session can be store.load'ed by id and is
 // not affected by the list_sessions filter). Missing any entry would make
 // the Web aux chat fail silently.
 for (const command of [
   'get_or_create_aux_session',
-  'discard_aux_session',
   'reset_aux_session',
 ]) {
   assert.equal(allowed.has(command), true, `${command} must be allowed on Web (aux chat)`);
@@ -718,29 +721,24 @@ assert.match(webBridge, /composerDraft: ""/,
   'WebUI must keep a per-session in-memory composer draft');
 assert.match(webDomainAdapter, /chat: domain\(\["sendMessage", "sendMessageToSession", "getComposerDraft", "setComposerDraft"/,
   'WebUI domain facade must expose the same composer draft API as desktop');
-assert.match(webDomainAdapter, /auxChat: domain\(\[\], \{\s*ensure: "auxChatEnsure",\s*send: "auxChatSend",\s*snapshot: "auxChatSnapshot",\s*discard: "auxChatDiscard",\s*reset: "auxChatReset"/,
+assert.match(webDomainAdapter, /auxChat: domain\(\[\], \{\s*ensure: "auxChatEnsure",\s*send: "auxChatSend",\s*snapshot: "auxChatSnapshot",\s*reset: "auxChatReset"/,
   'WebUI domain facade must expose the same auxChat domain as desktop');
-// Official-lane port note (community #433): upstream's M7 puts the auxChat
-// domain bodies in the shared bridge base (src/shared/bridge-shared-helpers.js,
-// window.PinvouBridgeShared); Official has no shared-cluster mechanism, so the
-// bodies live in the desktop aux-chat feature module and inline in the web
-// bridge. Renaming an operation on either lane must turn these pins red.
-assert.match(desktopAuxChatBridge, /registry\.auxChat = function \(context\)/,
-  'the desktop aux-chat feature module must register the auxChat factory');
-assert.match(desktopAuxChatBridge, /async function auxChatEnsure\(taskId\)/);
-assert.match(webBridge, /async function auxChatEnsure\(taskId\)/,
-  'the Web lane must carry the auxChat domain (inline equivalent of the shared cluster)');
-assert.match(desktopAuxChatBridge, /invoke\("get_or_create_aux_session", \{ sessionId: task \}\)/,
+// M7（#701 T0-c 壳化）：auxChat 域本体在共享桥基座（cluster "auxChat"），
+// 两 lane 只保留各自 genuine difference（send 分派）；改名必须把钉点打红。
+assert.match(sharedBridgeHelpers, /"auxChat": function \(deps\)/,
+  'the shared bridge base must register the auxChat cluster (M7)');
+assert.match(sharedBridgeHelpers, /async function auxChatEnsure\(taskId\)/);
+assert.match(webBridge, /PinvouBridgeShared\.create\("auxChat", \{/,
+  'the Web lane must consume the shared auxChat cluster (M7)');
+assert.match(desktopAuxChatBridge, /PinvouBridgeShared\.create\("auxChat", \{/,
+  'the desktop lane must consume the shared auxChat cluster (M7)');
+assert.match(sharedBridgeHelpers, /invoke\("get_or_create_aux_session", \{ sessionId: task \}\)/,
   'aux chat must create-or-fetch the aux session by task id');
-assert.match(webBridge, /invoke\("get_or_create_aux_session", \{ sessionId: task \}\)/);
 assert.match(webBridge, /invoke\("web_access_chat", \{ message, attachmentHandles: \[\], sessionId: sid, restrictTools: true \}\)/,
   'WebUI aux chat sends must ride the bounded web chat command with tools restricted');
-assert.match(desktopAuxChatBridge, /invoke\("discard_aux_session", \{ sessionId: task \}\)/);
-assert.match(webBridge, /invoke\("discard_aux_session", \{ sessionId: task \}\)/);
-assert.match(desktopAuxChatBridge, /async function auxChatReset\(taskId\)/);
-assert.match(desktopAuxChatBridge, /invoke\("reset_aux_session", \{ sessionId: task \}\)/,
+assert.match(sharedBridgeHelpers, /async function auxChatReset\(taskId\)/);
+assert.match(sharedBridgeHelpers, /invoke\("reset_aux_session", \{ sessionId: task \}\)/,
   'aux chat restart must ride the atomic reset command (M6)');
-assert.match(webBridge, /invoke\("reset_aux_session", \{ sessionId: task \}\)/);
 // M5: the aux id is a pure function of the task id (aux-<taskId>, round-30
 // B8), so both lanes derive it at the purge site — the redundant, never-pruned
 // auxIdByTask maps are gone.
@@ -748,9 +746,6 @@ assert.doesNotMatch(webBridge, /auxIdByTask/,
   'the WebUI aux id must be derived, not stored in an unbounded per-task map (M5)');
 assert.doesNotMatch(desktopAuxChatBridge, /auxIdByTask/,
   'the desktop aux id must be derived, not stored in an unbounded per-task map (M5)');
-assert.match(desktopAuxChatBridge, /purgeSessionBuffer\(`aux-\$\{task\}`\)/,
-  'aux discard must purge the derived aux buffer id');
-assert.match(webBridge, /purgeSessionBuffer\(`aux-\$\{task\}`\)/);
 assert.match(bridge, /registry\.auxChat = function \(context\)/,
   'the desktop bridge must register the auxChat feature module');
 assert.match(desktopAuxChatBridge, /invoke\("chat", \{ message, attachments: \[\], sessionId: sid, restrictTools: true \}\)/,

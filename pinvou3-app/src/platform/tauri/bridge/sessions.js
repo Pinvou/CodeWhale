@@ -5,7 +5,7 @@
   const registry = root.__PINVOU_TAURI_BRIDGE_FEATURES__ = root.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
   registry.sessions = function (context) {let pinvouSharedtauriSessionsCache = null;
 function pinvouSharedtauriSessions() {
-  if (!pinvouSharedtauriSessionsCache) pinvouSharedtauriSessionsCache = window.PinvouBridgeShared.create("tauriSessions", { sessionStates, freshBuffer, restoreEvictedSessionDraft, state, sessionBufferTouchClock: { get value() { return sessionBufferTouchClock; }, set value(v) { sessionBufferTouchClock = v; } }, pruneScheduledSessionBuffers, pruneSessionBuffers, scheduledRunSessionOwners, scheduledRunOwnerTouchClock: { get value() { return scheduledRunOwnerTouchClock; }, set value(v) { scheduledRunOwnerTouchClock = v; } }, MAX_SCHEDULED_RUN_SESSION_OWNERS, enterDraft, setScheduledTaskError, notify, addSystemItem, bt, hydratedMessageKey, basename, switchToSessionInternal, openScheduledRunChatOnce, scheduledRunOpenInFlight, loadWorkingSetFrom, invalidateScheduledRecentRunsForSession, purgeSessionBuffer, invoke, personaPlaceholderTitles, refreshHistoryList, sessionSwitchRequestToken: { get value() { return sessionSwitchRequestToken; }, set value(v) { sessionSwitchRequestToken = v; } }, saveWorkingSetTo, loadScheduledTaskRecentRuns, reportSidecarReadFailure });
+  if (!pinvouSharedtauriSessionsCache) pinvouSharedtauriSessionsCache = window.PinvouBridgeShared.create("tauriSessions", { sessionStates, restoreEvictedSessionDraft, state, userMessageDisplayText, evictedSessionDrafts: { get value() { return evictedSessionDrafts; } }, MAX_EVICTED_SESSION_DRAFT_CHARS: { get value() { return MAX_EVICTED_SESSION_DRAFT_CHARS; } }, MAX_EVICTED_SESSION_DRAFTS: { get value() { return MAX_EVICTED_SESSION_DRAFTS; } }, sessionBufferTouchClock: { get value() { return sessionBufferTouchClock; }, set value(v) { sessionBufferTouchClock = v; } }, pruneScheduledSessionBuffers, pruneSessionBuffers, scheduledRunSessionOwners, scheduledRunOwnerTouchClock: { get value() { return scheduledRunOwnerTouchClock; }, set value(v) { scheduledRunOwnerTouchClock = v; } }, MAX_SCHEDULED_RUN_SESSION_OWNERS, enterDraft, setScheduledTaskError, notify, addSystemItem, bt, basename, switchToSessionInternal, openScheduledRunChatOnce, scheduledRunOpenInFlight, invalidateScheduledRecentRunsForSession, purgeSessionBuffer, invoke, personaPlaceholderTitles, refreshHistoryList, sessionSwitchRequestToken: { get value() { return sessionSwitchRequestToken; }, set value(v) { sessionSwitchRequestToken = v; } }, loadScheduledTaskRecentRuns, reportSidecarReadFailure, historyRefreshTimer: { get value() { return historyRefreshTimer; }, set value(v) { historyRefreshTimer = v; } }, historyRefreshPending: { get value() { return historyRefreshPending; }, set value(v) { historyRefreshPending = v; } }, currentStreamText: { get value() { return context.currentStreamText; }, set value(v) { context.currentStreamText = v; } }, currentStreamId: { get value() { return context.currentStreamId; }, set value(v) { context.currentStreamId = v; } }, pendingAssistantText: { get value() { return context.pendingAssistantText; }, set value(v) { context.pendingAssistantText = v; } }, pendingAssistantBlocks: { get value() { return context.pendingAssistantBlocks; }, set value(v) { context.pendingAssistantBlocks = v; } }, itemIdSeq: { get value() { return context.itemIdSeq; }, set value(v) { context.itemIdSeq = v; } }, toolMeta: { get value() { return context.toolMeta; }, set value(v) { context.toolMeta = v; } } });
   return pinvouSharedtauriSessionsCache;
 }
 
@@ -105,60 +105,20 @@ function pinvouSharedtauriSessions() {
   // SessionStore. This prevents local working-set persistence for a proxy.
   var activeRemoteProxyId = null;
   var evictedSessionDrafts = Object.create(null);
+  // Factory scope so the shared scheduleHistoryRefresh cell (deps literal)
+  // can close over them.
+  let historyRefreshTimer = null;
+  let historyRefreshPending = false;
   // Returns true when the buffer's non-rehydratable state is safely retained
   // (or empty) and the caller may drop the buffer; false means eviction must
   // be skipped so the draft stays in the live buffer.
-  function stashEvictedSessionDraft(id, buf) {
-    if (!id || !buf) return true;
-    var draft = String(buf.composerDraft || "");
-    if (!draft) {
-      delete evictedSessionDrafts[id]; // input was cleared; a stale stash must not resurrect it
-      return true;
-    }
-    if (draft.length > MAX_EVICTED_SESSION_DRAFT_CHARS) return false;
-    if (!evictedSessionDrafts[id]
-        && Object.keys(evictedSessionDrafts).length >= MAX_EVICTED_SESSION_DRAFTS) return false;
-    delete evictedSessionDrafts[id]; // re-stashing moves the entry to the table tail
-    evictedSessionDrafts[id] = draft;
-    return true;
-  }
+  function stashEvictedSessionDraft(id, buf) { return pinvouSharedtauriSessions().stashEvictedSessionDraft(id, buf); }
   function restoreEvictedSessionDraft(id, buf) {
     if (!id || !buf || buf.composerDraft) return;
     var draft = evictedSessionDrafts[id];
     if (draft) buf.composerDraft = draft;
   }
-  function freshBuffer() {
-    return {
-      messages: [], chatItems: [], composerDraft: "", turnTimeline: [], activeTurnTimelineId: null, personaEvents: [], pinvouReviews: [], pinvouSceneEvents: [], artifacts: [], busy: false, queued: [],
-      loadedFromDisk: false,
-      localTurnOwned: false,
-      remoteTurnActive: false,
-      remoteTerminalSeen: false,
-      remoteAdmissionKeys: [],
-      deferredRemoteUserEvent: null,
-      remoteBaselineMessageCount: null,
-      remoteBaselineTrusted: false,
-      remoteExpectedAssistantKey: "",
-      remoteCommittedRevision: "",
-      sessionRevision: "",
-      planSnapshot: { plan: null, todos: null },
-      modeState: { mode: "yolo" },
-      thinking: { active: false, phase: "thinking", toolName: "", startedAt: 0 },
-      tokens: { input: 0, max: state.tokens.max },
-      activePersona: null, // 卡片池: 该 session 加持的专家面具(挂件用)
-      mountedCollection: null, // 知识库: 该 session 挂载的知识集 id 或 null
-      mountedCollections: [], // 多知识库挂载项 [{ collectionId, enabled }]
-      mountedCollectionsRevision: 0,
-      scheduledRunSession: false,
-      scheduledInitialTurnPhase: null,
-      lastTouched: 0,
-
-      stream: {
-        currentStreamText: "", currentStreamId: 0, pendingAssistantText: "",
-        pendingAssistantBlocks: [], itemIdSeq: 0, toolMeta: {},
-      },
-    };
-  }
+  function freshBuffer() { return pinvouSharedtauriSessions().freshBuffer(); }
 function getBuffer(id) { return pinvouSharedtauriSessions().getBuffer(id); }
 function isProtectedScheduledBuffer(id, buf) { return pinvouSharedtauriSessions().isProtectedScheduledBuffer(id, buf); }
   function pruneScheduledSessionBuffers(keepId) {
@@ -255,56 +215,8 @@ function markScheduledInitialTurnActive(id) { return pinvouSharedtauriSessions()
 function markScheduledInitialTurnTerminal(id) { return pinvouSharedtauriSessions().markScheduledInitialTurnTerminal(id); }
 function beginScheduledOpenActivation(id) { return pinvouSharedtauriSessions().beginScheduledOpenActivation(id); }
 function rollbackScheduledOpenActivation(snapshot) { return pinvouSharedtauriSessions().rollbackScheduledOpenActivation(snapshot); }
-  function saveWorkingSetTo(buf) {
-    if (!buf) return;
-    buf.messages = state.messages; buf.chatItems = state.chatItems; buf.artifacts = state.artifacts;
-    buf.composerDraft = state.composerDraft || "";
-    buf.turnTimeline = state.turnTimeline;
-    buf.activeTurnTimelineId = state.activeTurnTimelineId;
-    buf.personaEvents = state.personaEvents;
-    buf.pinvouReviews = state.pinvouReviews;
-    buf.pinvouSceneEvents = state.pinvouSceneEvents;
-    buf.steeredMessages = state.steeredMessages;
-    buf.busy = buf.scheduledInitialTurnPhase === "active" ? true : state.busy;
-    buf.planSnapshot = state.planSnapshot; buf.modeState = state.modeState;
-    buf.thinking = state.thinking; buf.tokens = state.tokens; buf.queued = state.queued;
-    buf.activePersona = state.activePersona;
-    buf.mountedCollection = state.mountedCollection;
-    buf.mountedCollections = state.mountedCollections;
-    buf.mountedCollectionsRevision = state.mountedCollectionsRevision;
-    buf.stream = {
-      currentStreamText: context.currentStreamText, currentStreamId: context.currentStreamId,
-      pendingAssistantText: context.pendingAssistantText, pendingAssistantBlocks: context.pendingAssistantBlocks,
-      itemIdSeq: context.itemIdSeq, toolMeta: context.toolMeta,
-    };
-  }
-  function loadWorkingSetFrom(buf) {
-    if (!buf) return;
-    state.messages = buf.messages; state.chatItems = buf.chatItems; state.artifacts = buf.artifacts;
-    state.composerDraft = buf.composerDraft || "";
-    state.turnTimeline = buf.turnTimeline || [];
-    state.activeTurnTimelineId = buf.activeTurnTimelineId || null;
-    state.personaEvents = buf.personaEvents || [];
-    state.pinvouReviews = buf.pinvouReviews || [];
-    state.pinvouSceneEvents = buf.pinvouSceneEvents || [];
-    state.steeredMessages = buf.steeredMessages || [];
-    state.pinvouModal = null; // 切 session 关掉检阅弹窗
-    state.turnDirtyArtifacts = []; // turn 临时态,切 session 清空,别串到新 session
-    state.turnPresentedArtifacts = [];
-    state.busy = buf.scheduledInitialTurnPhase === "active" ? true : buf.busy;
-    state.planSnapshot = buf.planSnapshot; state.modeState = buf.modeState;
-    state.thinking = buf.thinking; state.tokens = buf.tokens; state.queued = buf.queued || [];
-    state.activePersona = buf.activePersona || null;
-    state.mountedCollection = buf.mountedCollection || null;
-    state.mountedCollections = Array.isArray(buf.mountedCollections)
-      ? buf.mountedCollections
-      : (state.mountedCollection == null ? [] : [{ collectionId: state.mountedCollection, enabled: true }]);
-    state.mountedCollectionsRevision = Number(buf.mountedCollectionsRevision || 0);
-    const s = buf.stream || {};
-    context.currentStreamText = s.currentStreamText || ""; context.currentStreamId = s.currentStreamId || 0;
-    context.pendingAssistantText = s.pendingAssistantText || ""; context.pendingAssistantBlocks = s.pendingAssistantBlocks || [];
-    context.itemIdSeq = s.itemIdSeq || 0; context.toolMeta = s.toolMeta || {};
-  }
+  function saveWorkingSetTo(buf) { return pinvouSharedtauriSessions().saveWorkingSetTo(buf); }
+  function loadWorkingSetFrom(buf) { return pinvouSharedtauriSessions().loadWorkingSetFrom(buf); }
   function hydrateWorkingSetFromSaved(buf, saved) {
     if (!buf || !saved) return;
     var completedRemoteTurn = !!buf.remoteTerminalSeen || (!!buf.remoteTurnActive && !buf.busy);
@@ -800,47 +712,11 @@ async function createNewSession() { return pinvouSharedtauriSessions().createNew
 
 function reportSessionSwitchFailure(error, errorScope) { return pinvouSharedtauriSessions().reportSessionSwitchFailure(error, errorScope); }
 
-  function hydratedMessageKey(message, hideInternalEnvelope) {
-    var blocks = message && Array.isArray(message.content) ? message.content : [];
-    if (message && message.role === "user") {
-      var resultIds = blocks.filter(function (block) {
-        return block && block.type === "tool_result" && block.tool_use_id;
-      }).map(function (block) { return block.tool_use_id; }).sort();
-      if (resultIds.length) return "user:tool_results:" + resultIds.join("|");
-      return "user:text:" + userMessageDisplayText(blocks, hideInternalEnvelope);
-    }
-    if (message && message.role === "assistant") {
-      var toolIds = blocks.filter(function (block) {
-        return block && block.type === "tool_use" && block.id;
-      }).map(function (block) { return block.id; }).sort();
-      if (toolIds.length) return "assistant:tool_uses:" + toolIds.join("|");
-      blocks = blocks.filter(function (block) { return !block || block.type !== "thinking"; });
-      try { return "assistant:" + JSON.stringify(blocks); } catch (_) {}
-    }
-    try { return JSON.stringify(message); } catch (_) { return String(message); }
-  }
+  function hydratedMessageKey(message, hideInternalEnvelope) { return pinvouSharedtauriSessions().hydratedMessageKey(message, hideInternalEnvelope); }
 
 function mergeHydratedMessages(durableMessages, liveMessages, hideInternalEnvelope) { return pinvouSharedtauriSessions().mergeHydratedMessages(durableMessages, liveMessages, hideInternalEnvelope); }
 
-  function mergeHydratedArtifacts(durableArtifacts, liveArtifacts) {
-    var merged = [];
-    var seen = Object.create(null);
-    (durableArtifacts || []).concat(liveArtifacts || []).forEach(function (artifact) {
-      var path = typeof artifact === "string" ? artifact : (artifact && (artifact.path || artifact.storage_path)) || "";
-      var identity = basename(path);
-      if (!path || !identity) return;
-      if (seen[identity] !== undefined) {
-        var existingIndex = seen[identity];
-        if (isAbsPath(path) && !isAbsPath(merged[existingIndex].path)) {
-          merged[existingIndex] = { path: path, basename: identity };
-        }
-        return;
-      }
-      seen[identity] = merged.length;
-      merged.push({ path: path, basename: identity });
-    });
-    return merged;
-  }
+  function mergeHydratedArtifacts(durableArtifacts, liveArtifacts) { return pinvouSharedtauriSessions().mergeHydratedArtifacts(durableArtifacts, liveArtifacts); }
 
 function hydratedChatItemKey(item) { return pinvouSharedtauriSessions().hydratedChatItemKey(item); }
 
@@ -1149,15 +1025,7 @@ function recentScheduledRunForSession(id) { return pinvouSharedtauriSessions().r
   // 才渲染返回按钮;只清 active 会卡在「定时路由下的空白页且没有返回按钮」。
   // 清掉之后 currentView 仍是 'scheduled',界面自然落回定时任务列表。
   // 不负责 buffer:删除要丢弃 buffer,收纳要保留 buffer,由调用方各自处理。
-  function leaveSessionView(id) {
-    if (state.scheduledRunContext && state.scheduledRunContext.sessionId === id) {
-      state.scheduledRunContext = null;
-    }
-    if (state.activeSessionId !== id) return;
-    state.activeSessionId = null;
-    activeRemoteProxyId = null;
-    loadWorkingSetFrom(freshBuffer());
-  }
+  function leaveSessionView(id) { return pinvouSharedtauriSessions().leaveSessionView(id); }
 
   // session:deleted fan-out: applyDeletedSession is the ONE path that
   // observes every deleted id — list_sessions excludes code-mode sessions
@@ -1166,31 +1034,8 @@ function recentScheduledRunForSession(id) { return pinvouSharedtauriSessions().r
   // this module's scope, so the feature-layer consumer (the aux-chat purge
   // wiring) registers a listener here instead of the sessions domain pushing.
   var sessionDeletedListeners = new Set();
-  function onSessionDeleted(listener) {
-    if (typeof listener !== "function") return function () {};
-    sessionDeletedListeners.add(listener);
-    return function () { sessionDeletedListeners.delete(listener); };
-  }
-  function applyDeletedSession(id) {
-    if (typeof id !== "string" || !id) return false;
-    invalidateScheduledRecentRunsForSession(id);
-    purgeSessionBuffer(id);
-    state.sessions = state.sessions.filter(function (session) { return session.id !== id; });
-    state.archivedSessions = (state.archivedSessions || []).filter(function (session) {
-      return session.id !== id;
-    });
-    state.scheduledTaskRecentRuns = (state.scheduledTaskRecentRuns || []).filter(function (run) {
-      return !run || run.sessionId !== id;
-    });
-    state.scheduledTaskRuns = (state.scheduledTaskRuns || []).filter(function (run) {
-      return !run || run.sessionId !== id;
-    });
-    for (const listener of sessionDeletedListeners) {
-      try { listener(id); } catch (error) { console.warn("session:deleted listener failed", error); }
-    }
-    notify();
-    return true;
-  }
+  function onSessionDeleted(listener) { return pinvouSharedtauriSessions().onSessionDeleted(listener); }
+  function applyDeletedSession(id) { return pinvouSharedtauriSessions().applyDeletedSession(id); }
 
   // Stamps the workspace_rebound mark the rebind command emits for the
   // sessions whose persisted artifact paths its lanes rebased (rebound,
@@ -1205,32 +1050,7 @@ function recentScheduledRunForSession(id) { return pinvouSharedtauriSessions().r
   // the save transform is prefix-exact and must outlive the reconcile window
   // for the whole process lifetime (a restart starts from the already-rebased
   // JSON with no marks).
-  function applyWorkspaceReboundMark(payload) {
-    if (!payload || payload.action !== "workspace_rebound" || !payload.id || !payload.from || !payload.to) {
-      return;
-    }
-    state.reboundSessionIds = state.reboundSessionIds || {};
-    var existing = state.reboundSessionIds[payload.id];
-    var last = existing && existing.chain && existing.chain[existing.chain.length - 1];
-    if (existing && last && last.from === payload.from && last.to === payload.to) {
-      // Identical retry of the last segment: refresh the view-heal window
-      // only (an older vintage may still be buffered; the chain must
-      // survive).
-      existing.at = Date.now();
-    } else if (existing) {
-      // Chained (last.to === payload.from) or non-contiguous: append. A
-      // non-matching segment is inert for the ordered prefix transform, and
-      // appending keeps every older vintage resolvable (review #463 round-E
-      // minor — the previous replace branch dropped them).
-      existing.chain.push({ from: payload.from, to: payload.to });
-      existing.at = Date.now();
-    } else {
-      state.reboundSessionIds[payload.id] = {
-        at: Date.now(),
-        chain: [{ from: payload.from, to: payload.to }],
-      };
-    }
-  }
+  function applyWorkspaceReboundMark(payload) { return pinvouSharedtauriSessions().applyWorkspaceReboundMark(payload); }
 
   if (typeof listen === "function") {
     listen("session:deleted", function (event) {
@@ -1247,31 +1067,7 @@ function recentScheduledRunForSession(id) { return pinvouSharedtauriSessions().r
     // event refreshes immediately (single-event semantics unchanged), events
     // inside the window set a pending flag collapsed into ONE trailing
     // refresh. Harnesses without timers fall back to the immediate refresh.
-    let historyRefreshTimer = null;
-    let historyRefreshPending = false;
-    function scheduleHistoryRefresh() {
-      function runRefresh() {
-        refreshHistoryList().catch(function (error) {
-          console.error("[sessions] session:list_changed refresh failed", error);
-        });
-      }
-      if (typeof setTimeout !== "function") {
-        runRefresh();
-        return;
-      }
-      if (historyRefreshTimer) {
-        historyRefreshPending = true;
-        return;
-      }
-      runRefresh();
-      historyRefreshTimer = setTimeout(function () {
-        historyRefreshTimer = null;
-        if (historyRefreshPending) {
-          historyRefreshPending = false;
-          scheduleHistoryRefresh();
-        }
-      }, 200);
-    }
+    function scheduleHistoryRefresh() { return pinvouSharedtauriSessions().scheduleHistoryRefresh(); }
     listen("session:list_changed", function (event) {
       const payload = event && event.payload || {};
       // The rebind command stamps the sessions whose persisted artifact paths
@@ -1351,6 +1147,7 @@ function recentScheduledRunForSession(id) { return pinvouSharedtauriSessions().r
     }
   }
 
+
   async function toggleSessionPinned(id, pinned) {
     if (isKnownRemoteProxy(id)) return false;
     invalidateScheduledRecentRunsForSession(id);
@@ -1385,6 +1182,7 @@ function recentScheduledRunForSession(id) { return pinvouSharedtauriSessions().r
       await refreshHistoryList();
     }
   }
+
 
   // One-click full session log export: the backend opens the native save
   // dialog and packs the full-fidelity session record (system prompt, all
@@ -1481,29 +1279,8 @@ function recentScheduledRunForSession(id) { return pinvouSharedtauriSessions().r
     }
   }
 
-  async function restoreArchivedSession(id) {
-    var idx = (state.archivedSessions || []).findIndex(function (s) { return s.id === id; });
-    if (idx < 0) return false;
-    var s = state.archivedSessions[idx];
-    invalidateScheduledRecentRunsForSession(id);
-    var restored = Object.assign({}, s, { archived: false, archived_at: null });
-    state.archivedSessions.splice(idx, 1);
-    state.sessions = [restored].concat(state.sessions || []);
-    notify();
-    try {
-      await invoke("set_session_archived", { id: id, archived: false });
-      await refreshHistoryList();
-      // 还原的定时运行会话回侧边栏"定时任务记录"(refreshHistoryList 只管普通会话)。
-      if (String(id).indexOf("sched-") === 0) loadScheduledTaskRecentRuns().catch(function () {});
-      return true;
-    } catch (e) {
-      state.archivedSessions.splice(idx, 0, s);
-      state.sessions = (state.sessions || []).filter(function (x) { return x.id !== id; });
-      console.warn("restore archived session failed", e);
-      notify();
-      return false;
-    }
-  }
+
+  async function restoreArchivedSession(id) { return pinvouSharedtauriSessions().restoreArchivedSession(id); }
 
   // 实时态有专属气泡的工具（方案卡），重建时要还原成原卡而非普通工具卡。
 

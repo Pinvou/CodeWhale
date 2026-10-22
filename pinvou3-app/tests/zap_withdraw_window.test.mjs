@@ -250,6 +250,14 @@ test('lost-message notices stay translated before backend language chunks load',
       state: { settings: { language } }, uiDictionary: CHAT_RECOVERY_COPY,
       BT_TABLE: { en: {}, ja: {}, zh: {} },
     });
+    // #701 T0-c 壳化适配：bt 已委托 helpers，切片内出现簇访问器；沙箱按
+    // index.html 顺序补载共享基座并接好 tauriMain 访问器（BT_TABLE 为 cell）。
+    vm.runInContext('this.window = this;', context);
+    vm.runInContext(fs.readFileSync(path.join(appRoot, 'src', 'shared', 'bridge-shared-helpers.js'), 'utf8'), context);
+    vm.runInContext(`this.pinvouSharedtauriMain = () => this.__mainCluster || (this.__mainCluster = window.PinvouBridgeShared.create("tauriMain", {
+      state, BT_TABLE: { get value() { return BT_TABLE; } }, invoke: async () => null,
+      notify: () => {}, addChatItem: () => {},
+    }));`, context);
     vm.runInContext(source.slice(start, end), context);
     assert.equal(vm.runInContext('bt("steerFailedLost")', context), dict[expectedLanguage].steerFailedLost);
     assert.ok(Object.hasOwn(dict[expectedLanguage], 'steerFailedLost'), 'no other-language fallback');

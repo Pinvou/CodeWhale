@@ -38,17 +38,21 @@ test('auxChatBusy uses the same criteria as the real bridge send busy-rejection 
 // false): here we drive the real aux-chat.js factory, set busy / queued, and
 // assert send throws turnAlreadyInProgress — the panel-level auxChatBusy
 // precheck and the bridge's rejection must cover the same set of states.
-// Official-lane port note (community #433): upstream's M7 delegates the
-// domain bodies to the shared PinvouBridgeShared cluster (bridge-shared-
-// helpers.js loaded first); Official has no shared-cluster mechanism, so
-// aux-chat.js is self-contained and loads alone.
+// Since M7 the factory delegates the domain bodies to the shared lane, so the
+// harness loads bridge-shared-helpers.js into the same context first (the
+// production script order in index.html).
 function loadTauriAuxChatWithBusy({ busyFor, queued }) {
   const root = { __PINVOU_SHARED_I18N__: {} };
+  const sharedSrc = fs.readFileSync(
+    path.join(here, '..', 'src', 'shared', 'bridge-shared-helpers.js'),
+    'utf8',
+  );
   const src = fs.readFileSync(
     path.join(here, '..', 'src', 'platform', 'tauri', 'bridge', 'aux-chat.js'),
     'utf8',
   );
   const context = { window: root, globalThis: root, setTimeout, clearTimeout };
+  vm.runInNewContext(sharedSrc, context);
   vm.runInNewContext(src, context);
   return root.__PINVOU_TAURI_BRIDGE_FEATURES__.auxChat({
     state: { activeSessionId: null },

@@ -140,11 +140,13 @@ function pinvouSharedtauriMain() {
   // 最末级 fallback 必须自带 escapeHtml：共享脚本未加载时 renderMarkdown 仍会被
   // dangerouslySetInnerHTML 消费，原文返回即 fail-open。escapeHtml 作为安全原语保留在本文件
   // （不依赖任何外部脚本），仅 marked.parse+sanitize 这段较重的兜底被抽到共享文件。
+
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, function (c) {
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
     });
   }
+
   function renderMarkdown(text) {
     if (window.PinvouMarkdownRenderer && typeof window.PinvouMarkdownRenderer.renderMarkdown === "function") {
       return window.PinvouMarkdownRenderer.renderMarkdown(text);
@@ -154,6 +156,7 @@ function pinvouSharedtauriMain() {
     }
     return escapeHtml(text || "");
   }
+
 
 
   // The pet is a separate WebView and must not own a second copy of the main
@@ -820,6 +823,7 @@ function authoritySyncBufferSnapshot(sid, buf) { return pinvouSharedtauriMain().
     var m = lang === "en" ? BT_TABLE.en : lang === "ja" ? BT_TABLE.ja : BT_TABLE.zh;
     return m[key] !== undefined ? m[key] : BT_TABLE.zh[key];
   }
+
   // 转交徽标从已持久化的消息正文恢复；消息沿用发送时的界面语言，
   // 因此回放必须同时匹配三语，而不能只匹配当前语言。
 function textMatchesBtKey(text, key) { return pinvouSharedtauriMain().textMatchesBtKey(text, key); }
@@ -1048,6 +1052,9 @@ function pinvouSceneForMessagePos(pos) { return pinvouSharedtauriMain().pinvouSc
     isDefaultChatTitle: isDefaultChatTitle,
     notify: function () { return notify.apply(null, arguments); },
     runSyncOnSession: function () { return runSyncOnSession.apply(null, arguments); },
+    // 壳化（#701 T0-c）：chat 域 sendMessageToSession 委托 helpers 后，共享实现
+    // 需要触碰 LRU 时钟；惰性转发（sessionsFeature 在其后安装）。
+    touchSessionBuffer: function () { return touchSessionBuffer.apply(null, arguments); },
     startThinking: function () { return startThinking.apply(null, arguments); },
     stopThinking: function () { return stopThinking.apply(null, arguments); },
     ensureSessionBufferLoaded: function () { return ensureSessionBufferLoaded.apply(null, arguments); },
@@ -1364,10 +1371,12 @@ function markRemoteTurn(sid, buf, preserveCommittedRevision, cause) { return pin
     runSyncOnSession(sid, fn);
     if (isBg && !(options && options.deferBackgroundNotify)) notify();
   }
+
 function isScheduledRunSession(sid) { return pinvouSharedtauriMain().isScheduledRunSession(sid); }
 
   // Transcript persistence is authoritative in Rust. The UI only persists the
   // presentation-side artifact index and derives the optional auto-title.
+
   async function persistMessagesFor(sid) {
     if (!sid) return;
     if (isScheduledRunSession(sid)) return;
@@ -1418,6 +1427,7 @@ function isScheduledRunSession(sid) { return pinvouSharedtauriMain().isScheduled
       }
     } catch (e) { console.warn("persist failed", e); }
   }
+
 
 function planCardHydrationKey(item) { return pinvouSharedtauriMain().planCardHydrationKey(item); }
 
@@ -1765,6 +1775,7 @@ function copySubscriptionStateObject(source) { return pinvouSharedtauriMain().co
       ancestors.delete(value);
     }
   }
+
   // Slice caches are invalidated by the single publication revision: #727
   // replaced per-domain precise publication with one host-snapshot publish
   // per notify, so every domain advances together.
@@ -1948,6 +1959,7 @@ function parseCarefulBlocked(text) { return pinvouSharedtauriMain().parseCareful
   // 子智能体完成交接同理：结果必须留在父模型上下文，但不能冒充用户消息上屏。
   // 原始 blocks 必须保留给模型续聊；展示层只隐藏该内部消息，避免伪装成用户气泡/新 Turn。
   // 定时会话还会过滤送模 envelope，只投影真实任务正文。
+
   function userMessageDisplayText(blocks, hideInternalEnvelope) {
     var textParts = (Array.isArray(blocks) ? blocks : [])
       .filter(function (block) { return block && block.type === "text"; })
@@ -1966,6 +1978,7 @@ function parseCarefulBlocked(text) { return pinvouSharedtauriMain().parseCareful
       return text.replace(/^\s*<system-reminder>[\s\S]*?<\/system-reminder>\s*/, "");
     }).join("");
   }
+
 
   // ── Rerender from messages (session restore) ─────────────────────
   // opts.keepLiveToolMeta: passed when hydrating a live session
@@ -2113,6 +2126,8 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
     toolCallAlreadyFinished: toolCallAlreadyFinished,
     hasChatItemForTool: hasChatItemForTool,
     flushPendingTextBlock: flushPendingTextBlock,
+    // 壳化（#701 T0-c）：chat-events 域流式通知簇委托 helpers 后的共享依赖。
+    autoCreateScheduledTaskDraft: function () { return autoCreateScheduledTaskDraft.apply(null, arguments); },
     flushAssistantMessageToHistory: flushAssistantMessageToHistory,
     resetPendingAssistant: resetPendingAssistant, flushQueued: flushQueued,
     isBusyFor: isBusyFor, doSendFor: doSendFor,
@@ -2207,7 +2222,6 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
   var saveSearchSettingsAndRestart = settingsFeature.saveSearchSettingsAndRestart;
   var submitFeedback = settingsFeature.submitFeedback;
   var discoverLocalVllm = settingsFeature.discoverLocalVllm;
-  var getEffectiveModelConfig = settingsFeature.getEffectiveModelConfig;
   var loadModels = settingsFeature.loadModels;
   var saveModel = settingsFeature.saveModel;
   var revealModelApiKey = settingsFeature.revealModelApiKey;
@@ -2259,7 +2273,6 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
   var syncModeState = interactionFeature.syncModeState;
   var patchItemById = interactionFeature.patchItemById;
   var pushUserEcho = interactionFeature.pushUserEcho;
-  var markResolved = interactionFeature.markResolved;
   var runOnSession = interactionFeature.runOnSession;
   var addSystemItemFor = interactionFeature.addSystemItemFor;
   var patchItemByIdFor = interactionFeature.patchItemByIdFor;
@@ -2282,16 +2295,13 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
   var submitUserInput = interactionFeature.submitUserInput;
   var cancelUserInput = interactionFeature.cancelUserInput;
   var editLastTurn = interactionFeature.editLastTurn;
-  var compactNow = interactionFeature.compactNow;
 
-  var memoryFeature = installBridgeFeature("memory", { state: state, notify: notify, invoke: invoke, bt: bt, addSystemItem: addSystemItem, runSyncOnSession: runSyncOnSession, patchItemById: patchItemById, patchItemByIdFor: patchItemByIdFor, runOnSession: runOnSession, addChatItem: addChatItem, timeStr: timeStr });
+  var memoryFeature = installBridgeFeature("memory", { state: state, notify: notify, invoke: invoke, bt: bt, addSystemItem: addSystemItem, runSyncOnSession: runSyncOnSession, patchItemById: patchItemById, patchItemByIdFor: patchItemByIdFor, runOnSession: runOnSession, addChatItem: addChatItem, timeStr: timeStr , get itemIdSeq() { return itemIdSeq; }, set itemIdSeq(value) { itemIdSeq = value; } });
   var handleMemoryWrite = memoryFeature.handleMemoryWrite;
   var loadMemoryOverview = memoryFeature.loadMemoryOverview;
   var saveMemoryProfilePatch = memoryFeature.saveMemoryProfilePatch;
-  var deleteMemoryPreference = memoryFeature.deleteMemoryPreference;
   var updateMemoryItem = memoryFeature.updateMemoryItem;
   var deleteMemoryItem = memoryFeature.deleteMemoryItem;
-  var archiveRecentWorkMemory = memoryFeature.archiveRecentWorkMemory;
   var confirmMemoryCandidate = memoryFeature.confirmMemoryCandidate;
   var ignoreMemoryCandidate = memoryFeature.ignoreMemoryCandidate;
   var neverMemoryCandidate = memoryFeature.neverMemoryCandidate;
@@ -2324,7 +2334,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
   var resolveConversationAttachment = artifactsFeature.resolveConversationAttachment;
   var openConversationAttachment = artifactsFeature.openConversationAttachment;
   var revealConversationAttachment = artifactsFeature.revealConversationAttachment;
-  var personasFeature = installBridgeFeature("personas", { state: state, sessionStates: sessionStates, notify: notify, invoke: invoke, listen: listen, bt: bt, isDefaultChatTitle: isDefaultChatTitle, addSystemItem: addSystemItem, addChatItem: addChatItem, timeStr: timeStr, ensureSession: ensureSession, runOnSession: runOnSession, personaPlaceholderTitles: personaPlaceholderTitles });
+  var personasFeature = installBridgeFeature("personas", { state: state, sessionStates: sessionStates, notify: notify, invoke: invoke, listen: listen, bt: bt, isDefaultChatTitle: isDefaultChatTitle, addSystemItem: addSystemItem, addChatItem: addChatItem, timeStr: timeStr, ensureSession: ensureSession, runOnSession: runOnSession, personaPlaceholderTitles: personaPlaceholderTitles , get itemIdSeq() { return itemIdSeq; }, set itemIdSeq(value) { itemIdSeq = value; } });
   var loadPersonas = personasFeature.loadPersonas;
   var getPersonas = personasFeature.getPersonas;
   var createPersona = personasFeature.createPersona;
@@ -2642,7 +2652,6 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       ensure: auxChatFeature.ensure,
       send: auxChatFeature.send,
       snapshot: auxChatFeature.snapshot,
-      discard: auxChatFeature.discard,
       reset: auxChatFeature.reset,
     },
     voice: {
@@ -2774,7 +2783,6 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       discoverLocalVllm: discoverLocalVllm,
     },
     models: {
-      getEffectiveModelConfig: getEffectiveModelConfig,
       loadModels: loadModels,
       saveModel: saveModel,
       revealModelApiKey: revealModelApiKey,
@@ -2814,7 +2822,6 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
     dismissPinvouReview: dismissPinvouReview,
     // 编辑/压缩
     editLastTurn: editLastTurn,
-      compactNow: compactNow,
     },
     rendering: { renderMarkdown: renderMarkdown },
     remoteControl: {
@@ -2899,13 +2906,11 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       openConversationAttachment: openConversationAttachment,
       revealConversationAttachment: revealConversationAttachment,
     },
-    resolutions: { markResolved: markResolved },
     multiAgent: {
       listSubagentTranscripts: listMultiAgentSubagents,
       readSubagentTranscript: readMultiAgentSubagent,
     },
     computerUse: {
-      getStatus: computerUseFeature.getStatus,
       refreshStatus: computerUseFeature.refreshStatus,
       grant: computerUseFeature.grant,
       revoke: computerUseFeature.revoke,
@@ -2938,10 +2943,8 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
     memory: {
       loadMemoryOverview: loadMemoryOverview,
       saveMemoryProfilePatch: saveMemoryProfilePatch,
-      deleteMemoryPreference: deleteMemoryPreference,
       updateMemoryItem: updateMemoryItem,
       deleteMemoryItem: deleteMemoryItem,
-      archiveRecentWorkMemory: archiveRecentWorkMemory,
       confirmMemoryCandidate: confirmMemoryCandidate,
       ignoreMemoryCandidate: ignoreMemoryCandidate,
       neverMemoryCandidate: neverMemoryCandidate,

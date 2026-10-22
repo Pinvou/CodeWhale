@@ -591,13 +591,12 @@ test('web late chat:usage event: buffer rebuilt by the event via getBuffer, draf
 
 function loadTauriAuxChatFeature(sessionsBoot) {
   const root = { __PINVOU_SHARED_I18N__: {} };
-  // Official-lane port note (community #433): upstream's M7 delegates the
-  // domain bodies to the shared PinvouBridgeShared cluster (bridge-shared-
-  // helpers.js loaded first); Official has no shared-cluster mechanism, so
-  // aux-chat.js is self-contained and loads alone.
+  // M7（#701 T0-c 壳化）：域本体在共享簇（bridge-shared-helpers.js 先载，
+  // 与 index.html 脚本序一致），aux-chat.js 只保留 lane send 分派。
+  const sharedHelpers = fs.readFileSync(path.join(here, '..', 'src', 'shared', 'bridge-shared-helpers.js'), 'utf8');
   const src = fs.readFileSync(path.join(bridgeDir, 'aux-chat.js'), 'utf8');
   const context = { window: root, globalThis: root, setTimeout, clearTimeout };
-  vm.runInNewContext(src, context);
+  vm.runInNewContext(sharedHelpers + '\n' + src, context);
   const factory = root.__PINVOU_TAURI_BRIDGE_FEATURES__.auxChat;
   return factory({
     state: sessionsBoot.state,

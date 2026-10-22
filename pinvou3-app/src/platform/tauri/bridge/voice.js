@@ -7,7 +7,7 @@
   var registry = root.__PINVOU_TAURI_BRIDGE_FEATURES__ = root.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
   registry["voice"] = function (context) {let pinvouSharedtauriVoiceCache = null;
 function pinvouSharedtauriVoice() {
-  if (!pinvouSharedtauriVoiceCache) pinvouSharedtauriVoiceCache = window.PinvouBridgeShared.create("tauriVoice", { state, notify, activeVoiceInput: { get value() { return activeVoiceInput; }, set value(v) { activeVoiceInput = v; } }, stopMediaTracks, bt, VOICE_DEVICE_REQUEST_TIMEOUT_MS, finishVoiceInput });
+  if (!pinvouSharedtauriVoiceCache) pinvouSharedtauriVoiceCache = window.PinvouBridgeShared.create("tauriVoice", { state, notify, activeVoiceInput: { get value() { return activeVoiceInput; }, set value(v) { activeVoiceInput = v; } }, stopMediaTracks, bt, VOICE_DEVICE_REQUEST_TIMEOUT_MS, finishVoiceInput, voiceOperations: { get value() { return voiceOperations; } } });
   return pinvouSharedtauriVoiceCache;
 }
 
@@ -38,12 +38,7 @@ function pinvouSharedtauriVoice() {
     return Math.max(0, Math.min(86400000, Date.now() - Number(session && session.startedAt || Date.now())));
   }
 
-  function voiceFlowError(category, stage, message) {
-    var error = new Error(message);
-    error.category = category;
-    error.stage = stage;
-    return error;
-  }
+  function voiceFlowError(category, stage, message) { return pinvouSharedtauriVoice().voiceFlowError(category, stage, message); }
 
   function voiceTelemetryErrorCategory(category) {
     if (category === "permission_denied") return "permission_denied";
@@ -59,32 +54,9 @@ function pinvouSharedtauriVoice() {
   // share this record; dismissing a notice cannot revive or cancel a submitted operation.
   var voiceOperations = new Map();
 
-  function rememberVoiceOperation(session) {
-    if (!session.sessionId && session.ownerKind === "chat") {
-      session.draftEpoch = Number(state.draftEpoch || 0);
-    }
-    for (var entry of voiceOperations) {
-      var item = entry[1];
-      // Terminal entries are done; a dismissed entry stays adoptable for a
-      // manual retry until the next recording starts, then it is swept —
-      // a never-sent dismissal must not leak its audio chunks forever.
-      if (item.telemetryTerminal || (item.dismissed && !item.pendingSubmission)) {
-        voiceOperations.delete(entry[0]);
-      }
-    }
-    voiceOperations.set(session.operationId, session);
-  }
+  function rememberVoiceOperation(session) { return pinvouSharedtauriVoice().rememberVoiceOperation(session); }
 
-  function getVoiceOperationId(sessionId, ownerKind) {
-    var candidates = Array.from(voiceOperations.values()).reverse();
-    var operation = candidates.find(function (item) {
-      return !item.telemetryTerminal && !item.pendingSubmission && item.voiceResultReady
-        && (item.sessionId || null) === (sessionId || null)
-        && (item.sessionId || item.ownerKind !== "chat" || item.draftEpoch === Number(state.draftEpoch || 0))
-        && item.ownerKind === (ownerKind || "chat");
-    });
-    return operation ? operation.operationId : null;
-  }
+  function getVoiceOperationId(sessionId, ownerKind) { return pinvouSharedtauriVoice().getVoiceOperationId(sessionId, ownerKind); }
 
   // Whether the composer's current voice operation is parked on an in-flight
   // send admission. The composer hook skips its identity-change auto-cancel
@@ -92,24 +64,11 @@ function pinvouSharedtauriVoice() {
   // identity mid-send, and cancelling here would only kill the completion
   // notice of a message that still lands. A context switch before the park
   // still cancels — that is the wrong-session auto-send protection.
-  function hasVoiceSubmissionPending() {
-    var operation = voiceOperations.get((state.voiceInput || {}).operationId);
-    return !!(operation && operation.pendingSubmission);
-  }
+  function hasVoiceSubmissionPending() { return pinvouSharedtauriVoice().hasVoiceSubmissionPending(); }
 
-  function beginVoiceSubmission(operationId, sessionId) {
-    var operation = voiceOperations.get(operationId);
-    if (!operation || operation.telemetryTerminal) return;
-    operation.pendingSubmission = true;
-    if (sessionId && !operation.sessionId) {
-      operation.sessionId = sessionId;
-      operation.telemetrySessionId = sessionId;
-    }
-  }
+  function beginVoiceSubmission(operationId, sessionId) { return pinvouSharedtauriVoice().beginVoiceSubmission(operationId, sessionId); }
 
-  function voiceOperationSessionId(operationId) {
-    return voiceOperations.get(operationId)?.sessionId || null;
-  }
+  function voiceOperationSessionId(operationId) { return pinvouSharedtauriVoice().voiceOperationSessionId(operationId); }
 
   // Only ensureSession's proven same-draft rollback may advance this binding.
   function rebindVoiceDraftAfterRollback(operationId, fromEpoch, toEpoch) {
@@ -128,13 +87,7 @@ function pinvouSharedtauriVoice() {
   // recording-time epoch (unadoptable, and unreachable by the keyed abandon).
   // Restricted to unsubmitted draft operations (no session binding, chat
   // kind), mirroring the rollback rebind; terminal operations never rebind.
-  function rebindVoiceOperationToDraft(operationId, toEpoch) {
-    var operation = voiceOperations.get(operationId);
-    if (!operation || operation.telemetryTerminal || operation.pendingSubmission
-      || operation.sessionId || operation.ownerKind !== "chat") return false;
-    operation.draftEpoch = Number(toEpoch);
-    return true;
-  }
+  function rebindVoiceOperationToDraft(operationId, toEpoch) { return pinvouSharedtauriVoice().rebindVoiceOperationToDraft(operationId, toEpoch); }
 
   function completeVoiceSubmission(operationId, sessionId, accepted) {
     var operation = voiceOperations.get(operationId);
@@ -164,6 +117,7 @@ function pinvouSharedtauriVoice() {
     }
   }
 
+
   function dismissVoiceInput() {
     // Applying an edit or dismissing a finished notice retains the draft's provenance.
     // An in-flight recording is still an explicit cancellation.
@@ -189,6 +143,7 @@ function pinvouSharedtauriVoice() {
     session.telemetryTerminal = true;
     trackVoiceEvent(eventName, session, fields);
   }
+
 
   function abandonCompletedVoiceResult(stage) {
     var current = state.voiceInput || {};
@@ -483,28 +438,9 @@ function pinvouSharedtauriVoice() {
     } catch { /* diagnostics persistence is best-effort */ }
   }
 
-  function setVoiceInputStatus(status, patch) {
-    var next = Object.assign({}, state.voiceInput, patch || {});
-    next.status = status;
-    if (status !== "failed") {
-      next.error = null;
-      next.category = null;
-    }
-    state.voiceInput = next;
-    notify();
-  }
+  function setVoiceInputStatus(status, patch) { return pinvouSharedtauriVoice().setVoiceInputStatus(status, patch); }
 
-  function emitVoiceDiagnostic(stage, level, message, userMessage, category) {
-    var event = {
-      stage: stage,
-      level: level,
-      message: message,
-      user_message: userMessage || "",
-      category: category || "",
-    };
-    var fn = level === "error" ? console.error : level === "warn" ? console.warn : console.info;
-    fn.call(console, "[voice-input]", event);
-  }
+  function emitVoiceDiagnostic(stage, level, message, userMessage, category) { return pinvouSharedtauriVoice().emitVoiceDiagnostic(stage, level, message, userMessage, category); }
 
   // Stable VoiceCommandError codes from the Rust side → trilingual copy keys inside the
   // bridge. Codes take precedence over rawMessage: the Rust message is Chinese engineering
@@ -654,92 +590,13 @@ function pinvouSharedtauriVoice() {
     }
   }
 
-  function requestVoiceMedia(session, constraints, timeoutMs) {
-    var abandoned = false;
-    var mediaPromise = navigator.mediaDevices.getUserMedia(constraints).then(function (stream) {
-      if (abandoned || activeVoiceInput !== session) {
-        stopMediaTracks(stream);
-        throw { category: "cancelled", stage: "permission", message: bt("voiceCancelled") };
-      }
-      return stream;
-    });
-    var timeoutPromise = new Promise(function (_, reject) {
-      session.permissionTimeoutId = setTimeout(function () {
-        abandoned = true;
-        reject({
-          category: "device_unavailable",
-          stage: "device",
-          message: bt("voiceDeviceTimeout"),
-        });
-      }, timeoutMs || VOICE_DEVICE_REQUEST_TIMEOUT_MS);
-    });
-    var cancelPromise = new Promise(function (_, reject) {
-      session.cancelPermissionRequest = function () {
-        abandoned = true;
-        reject({ category: "cancelled", stage: "permission", message: bt("voiceCancelled") });
-      };
-    });
-    return Promise.race([mediaPromise, timeoutPromise, cancelPromise]).finally(function () {
-      if (session.permissionTimeoutId) clearTimeout(session.permissionTimeoutId);
-      session.permissionTimeoutId = null;
-      session.cancelPermissionRequest = null;
-    });
-  }
+  function requestVoiceMedia(session, constraints, timeoutMs) { return pinvouSharedtauriVoice().requestVoiceMedia(session, constraints, timeoutMs); }
 
-  function mergeFloatChunks(chunks) {
-    var total = chunks.reduce(function (sum, chunk) { return sum + chunk.length; }, 0);
-    var out = new Float32Array(total);
-    var offset = 0;
-    chunks.forEach(function (chunk) {
-      out.set(chunk, offset);
-      offset += chunk.length;
-    });
-    return out;
-  }
+  function mergeFloatChunks(chunks) { return pinvouSharedtauriVoice().mergeFloatChunks(chunks); }
 
-  function downsamplePcm(samples, sourceRate, targetRate) {
-    if (!samples.length || sourceRate === targetRate) return samples;
-    var ratio = sourceRate / targetRate;
-    var len = Math.max(1, Math.round(samples.length / ratio));
-    var out = new Float32Array(len);
-    for (var i = 0; i < len; i++) {
-      var start = Math.floor(i * ratio);
-      var end = Math.min(samples.length, Math.floor((i + 1) * ratio));
-      var sum = 0;
-      var count = 0;
-      for (var j = start; j < end; j++) { sum += samples[j]; count++; }
-      out[i] = count ? sum / count : samples[Math.min(start, samples.length - 1)];
-    }
-    return out;
-  }
+  function downsamplePcm(samples, sourceRate, targetRate) { return pinvouSharedtauriVoice().downsamplePcm(samples, sourceRate, targetRate); }
 
-  function encodeWav(samples, sampleRate) {
-    var dataSize = samples.length * 2;
-    var buffer = new ArrayBuffer(44 + dataSize);
-    var view = new DataView(buffer);
-    function writeString(offset, value) {
-      for (var i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i));
-    }
-    writeString(0, "RIFF");
-    view.setUint32(4, 36 + dataSize, true);
-    writeString(8, "WAVE");
-    writeString(12, "fmt ");
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
-    view.setUint16(22, 1, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * 2, true);
-    view.setUint16(32, 2, true);
-    view.setUint16(34, 16, true);
-    writeString(36, "data");
-    view.setUint32(40, dataSize, true);
-    var offset = 44;
-    for (var i = 0; i < samples.length; i++, offset += 2) {
-      var s = Math.max(-1, Math.min(1, samples[i]));
-      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-    }
-    return buffer;
-  }
+  function encodeWav(samples, sampleRate) { return pinvouSharedtauriVoice().encodeWav(samples, sampleRate); }
 
   // A 60s 16kHz 16bit WAV is ~1.9MB; shipping it across IPC as a JSON number array means
   // ~1.92M elements, multiple copies, ~25MB peak memory. Use a standard base64 string
@@ -1332,13 +1189,7 @@ function cancelVoiceInput() { return pinvouSharedtauriVoice().cancelVoiceInput()
     if (!operationId) abandonCompletedVoiceResult("recognition");
   }
 
-  function appendVoiceText(base, text) {
-    var left = String(base || "").trimEnd();
-    var right = String(text || "").trim();
-    if (!left) return right;
-    if (!right) return left;
-    return left + (/[。！？.!?，,;；:]$/.test(left) ? " " : "\n") + right;
-  }
+  function appendVoiceText(base, text) { return pinvouSharedtauriVoice().appendVoiceText(base, text); }
 
   // The same Rust owner guards both button/shortcut starts and cross-window Alt routing.
   // Missing native support fails closed before microphone acquisition.

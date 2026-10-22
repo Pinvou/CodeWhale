@@ -5,7 +5,7 @@
   const registry = window.__PINVOU_TAURI_BRIDGE_FEATURES__ = window.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
   registry.chat = function (context) {let pinvouSharedtauriChatCache = null;
 function pinvouSharedtauriChat() {
-  if (!pinvouSharedtauriChatCache) pinvouSharedtauriChatCache = window.PinvouBridgeShared.create("tauriChat", { state, sessionStates, messageHasToolBlock, addChatItem, notify, bt, summonPinvou, invoke });
+  if (!pinvouSharedtauriChatCache) pinvouSharedtauriChatCache = window.PinvouBridgeShared.create("tauriChat", { state, sessionStates, addChatItem, notify, bt, sendMessage, invoke, pendingAssistantBlocks: { get value() { return context.pendingAssistantBlocks; }, set value(v) { context.pendingAssistantBlocks = v; } }, flushPendingTextBlock, autoCreateScheduledTaskDraft, runSyncOnSession, ensureSessionBufferLoaded, getBuffer, touchSessionBuffer, recordAuthoritySyncDiagnostic, reconcileRemoteTurn, doSendFor, flushQueued, itemIdSeq: { get value() { return context.itemIdSeq; }, set value(v) { context.itemIdSeq = v; } } });
   return pinvouSharedtauriChatCache;
 }
 
@@ -33,6 +33,7 @@ function pinvouSharedtauriChat() {
     var ensureSessionBufferLoaded = context.ensureSessionBufferLoaded;
     var ensureSession = context.ensureSession;
     var getBuffer = context.getBuffer;
+    var touchSessionBuffer = context.touchSessionBuffer;
     var recordPinvouSceneForMessage = context.recordPinvouSceneForMessage || function () {};
     var recordSteeredMessages = context.recordSteeredMessages || function () {};
     var reconcileRemoteTurn = context.reconcileRemoteTurn;
@@ -74,6 +75,9 @@ function pinvouSharedtauriChat() {
     }
     return String(state.composerDraft || "");
   }
+  // F（官方 remote proxy 面）：上游 setComposerDraft 无代理视图草稿镜像；
+  // 官方版在 proxy 视图写 remoteProxyDrafts 侧表并管理 remoteProxyDraftError
+  // （fork 必须差异，勿随上游壳化，T0-c）。
   function setComposerDraft(value) {
     var text = value == null ? "" : String(value);
     state.composerDraft = text;
@@ -92,6 +96,7 @@ function pinvouSharedtauriChat() {
     return text;
   }
 
+
   // Single observable, session-scoped path for restoring dropped/failed steer
   // text (self-review P0 + re-review #1) and send text abandoned by a session
   // switch mid-send (issue #406). A bare setComposerDraft is invisible
@@ -109,14 +114,7 @@ function pinvouSharedtauriChat() {
   // abort) strip the injection block on restore; the splitter is published on
   // the window global by features/chat/session-mention.js (classic-script
   // bridges do not import features back).
-  function stripMentionBlockForComposerRestore(text) {
-    const raw = String(text || "");
-    const splitMention = (typeof window !== "undefined") && window.__PINVOU_SESSION_MENTION__ &&
-      window.__PINVOU_SESSION_MENTION__.splitSessionMentionBlock;
-    if (typeof splitMention !== "function") return raw;
-    const split = splitMention(raw);
-    return split && split.matched ? split.text.trim() : raw;
-  }
+  function stripMentionBlockForComposerRestore(text) { return pinvouSharedtauriChat().stripMentionBlockForComposerRestore(text); }
 
   // Returns whether anything went back: a refs-only message strips to ""
   // (nothing recoverable to hand back), an attachment-only chip has no text,
@@ -246,29 +244,7 @@ function pinvouSharedtauriChat() {
     item.id = ++context.itemIdSeq;
     state.chatItems.push(item);
   }
-  function messageHasToolBlock(type, toolCallId) {
-    if (!toolCallId) return false;
-    for (var i = state.messages.length - 1; i >= 0; i--) {
-      var blocks = state.messages[i] && state.messages[i].content;
-      if (!Array.isArray(blocks)) continue;
-      for (var j = blocks.length - 1; j >= 0; j--) {
-        var block = blocks[j];
-        if (!block || block.type !== type) continue;
-        if ((type === "tool_use" ? block.id : block.tool_use_id) === toolCallId) return true;
-      }
-    }
-    return false;
-  }
-  function toolCallAlreadyStarted(toolCallId) {
-    if (!toolCallId) return false;
-    if ((context.pendingAssistantBlocks || []).some(function (block) {
-      return block && block.type === "tool_use" && block.id === toolCallId;
-    })) return true;
-    if (state.chatItems.some(function (item) {
-      return item && item.type === "tool" && item.toolId === toolCallId;
-    })) return true;
-    return messageHasToolBlock("tool_use", toolCallId);
-  }
+  function toolCallAlreadyStarted(toolCallId) { return pinvouSharedtauriChat().toolCallAlreadyStarted(toolCallId); }
 function toolCallAlreadyFinished(toolCallId) { return pinvouSharedtauriChat().toolCallAlreadyFinished(toolCallId); }
 function hasChatItemForTool(type, toolCallId) { return pinvouSharedtauriChat().hasChatItemForTool(type, toolCallId); }
 function addSystemItem(text, meta) { return pinvouSharedtauriChat().addSystemItem(text, meta); }
@@ -285,23 +261,7 @@ function timeStr() { return pinvouSharedtauriChat().timeStr(); }
       context.pendingAssistantText = "";
     }
   }
-  function flushAssistantMessageToHistory() {
-    flushPendingTextBlock();
-    if (context.pendingAssistantBlocks.length) {
-      var assistantText = context.pendingAssistantBlocks
-        .filter(function (block) { return block && block.type === "text" && block.text; })
-        .map(function (block) { return block.text; })
-        .join("\n\n");
-      if (state.activeSessionId && state.activeSessionId === state.scheduledTaskCreationSessionId) {
-        var scheduledTaskDraft = parseScheduledTaskDraftFromText(assistantText);
-        if (scheduledTaskDraft) {
-          autoCreateScheduledTaskDraft(scheduledTaskDraft, state.activeSessionId);
-        }
-      }
-      state.messages.push({ role: "assistant", content: context.pendingAssistantBlocks });
-      context.pendingAssistantBlocks = [];
-    }
-  }
+  function flushAssistantMessageToHistory() { return pinvouSharedtauriChat().flushAssistantMessageToHistory(); }
   function resetPendingAssistant() {
     context.pendingAssistantText = "";
     context.pendingAssistantBlocks = [];
@@ -312,139 +272,20 @@ function timeStr() { return pinvouSharedtauriChat().timeStr(); }
 
   // ── Send message ─────────────────────────────────────────────────
   // 指定 session 是否正在生成(active 看工作集 busy,后台看其 buffer)。
-  function isBusyFor(sid) {
-    return sid === state.activeSessionId ? state.busy : !!(sessionStates[sid] && sessionStates[sid].busy);
-  }
-  function formatAttachmentDisplayText(text, attachments) {
-    var names = (attachments || []).map(function (attachment) {
-      return typeof attachment === "string" ? attachment : attachment && attachment.basename;
-    }).filter(Boolean).map(String);
-    if (!names.length) return String(text || "");
-    var attachmentLine = "📎 " + JSON.stringify(names);
-    return String(text || "").trim()
-      ? String(text) + "\n\n" + attachmentLine
-      : attachmentLine;
-  }
+  function isBusyFor(sid) { return pinvouSharedtauriChat().isBusyFor(sid); }
+  function formatAttachmentDisplayText(text, attachments) { return pinvouSharedtauriChat().formatAttachmentDisplayText(text, attachments); }
   // Queue chips expose only the user's editable text. The model payload may
   // additionally contain a scheduled-task guide or scene instructions, so
   // keep it separately and remember the exact envelope around the original
   // user text. Editing can then rebuild the payload without exposing or
   // discarding those internal constraints.
-  function queuedPayloadEnvelope(userText, payloadText, meta) {
-    const user = String(userText || "");
-    const payload = String(payloadText == null ? user : payloadText);
-    if (!user) return { before: payload, after: "" };
-    const requested = meta && meta.pinvouPayloadText
-      ? String(meta.pinvouPayloadText).trim()
-      : "";
-    let index = -1;
-    if (requested) {
-      const requestedIndex = payload.indexOf(requested);
-      let userIndex = -1;
-      if (requested.startsWith(user)) userIndex = 0;
-      else if (requested.endsWith(user)) userIndex = requested.length - user.length;
-      else if (requested.indexOf(user) === requested.lastIndexOf(user)) userIndex = requested.indexOf(user);
-      if (requestedIndex >= 0 && userIndex >= 0) index = requestedIndex + userIndex;
-    } else if (payload === user || payload.endsWith(user)) {
-      index = payload.length - user.length;
-    } else if (payload.indexOf(user) === payload.lastIndexOf(user)) {
-      index = payload.indexOf(user);
-    }
-    if (index < 0) {
-      // Session-mention block-aware fallback: a queued scene send stores the
-      // text as <block><body> while a scene payload embeds the body inside
-      // its template (the personal workbench default prompt sandwiches it as
-      // `PROMPT…\n用户需求：\n<body>`), so the literal substring match above
-      // fails. Split the envelope into the block prefix, the scaffold between
-      // block and body, and the tail: the rebuild swaps in the EDITED block
-      // and body (rebuiltQueuedFromEnvelope) so the payload keeps the
-      // send-time shape — block at the head, body at its original anchor —
-      // with the edited refs honored instead of the queued ones.
-      const blockEnvelope = blockAwarePayloadEnvelope(user, payload);
-      if (blockEnvelope) return blockEnvelope;
-      return payload === user ? { before: "", after: "" } : null;
-    }
-    return {
-      before: payload.slice(0, index),
-      after: payload.slice(index + user.length),
-    };
-  }
   // Block-aware part of queuedPayloadEnvelope: splits <block><body> user text
   // against a payload that really carries the block at its head. Returns null
   // when the shape does not apply (no parser, no refs, refs-only text,
   // prefixed payload, ambiguous body anchor).
-  function blockAwarePayloadEnvelope(user, payload) {
-    const splitMention = (typeof window !== "undefined") && window.__PINVOU_SESSION_MENTION__ &&
-      window.__PINVOU_SESSION_MENTION__.splitSessionMentionBlock;
-    if (typeof splitMention !== "function") return null;
-    const split = splitMention(user);
-    if (!split || !split.refs.length || !split.text) return null;
-    const blockText = user.slice(0, user.length - split.text.length);
-    // The block-aware shape only exists when the queued payload really
-    // carries the block at its head: a guide/scaffold-prefixed payload
-    // anchors the block later, and slicing from blockText.length then
-    // cuts into the middle of the original block's JSON (round-8 M2).
-    // The body anchor is the TRIMMED body — interior leading whitespace
-    // in the stored body survives the whole-string trim, so the
-    // untrimmed form never matched the payload's embed and made the
-    // queued edit deterministically impossible. Anything else falls
-    // back to the legacy refusal instead of a corrupt envelope.
-    const body = split.text.trim();
-    if (!body || !payload.startsWith(blockText)) return null;
-    // Anchor on the FIRST occurrence after the block, and only when it
-    // is unique — the legacy exact-match path refused ambiguous
-    // payloads, and a body string that also occurs inside the template
-    // scaffold would silently land the edit at the boilerplate spot.
-    const bodyIndex = payload.indexOf(body, blockText.length);
-    if (bodyIndex < blockText.length || payload.includes(body, bodyIndex + 1)) return null;
-    return {
-      blockPrefix: blockText,
-      before: payload.slice(blockText.length, bodyIndex),
-      after: payload.slice(bodyIndex + body.length),
-      blockAware: true,
-    };
-  }
-  function makeQueuedMessage(id, userText, payloadText, displayText, attachments, meta, restrictTools) {
-    return {
-      id,
-      text: userText,
-      payloadText,
-      payloadEnvelope: queuedPayloadEnvelope(userText, payloadText, meta),
-      metaPayloadEnvelope: meta && meta.pinvouPayloadText
-        ? queuedPayloadEnvelope(userText, meta.pinvouPayloadText, meta)
-        : null,
-      displayText,
-      attachments,
-      meta,
-      restrictTools,
-    };
-  }
-  function rebuiltQueuedFromEnvelope(envelope, userText) {
-    const raw = String(userText == null ? "" : userText);
-    if (envelope.blockAware) {
-      const splitMention = (typeof window !== "undefined") && window.__PINVOU_SESSION_MENTION__ &&
-        window.__PINVOU_SESSION_MENTION__.splitSessionMentionBlock;
-      const split = typeof splitMention === "function" ? splitMention(raw) : null;
-      let block = "";
-      let body = raw;
-      if (split && split.matched) {
-        block = raw.slice(0, raw.length - split.text.length);
-        body = split.text;
-      }
-      return block + envelope.before + body + envelope.after;
-    }
-    return envelope.before + raw + envelope.after;
-  }
-  function rebuiltQueuedPayload(item, userText) {
-    const envelope = item && item.payloadEnvelope;
-    if (!envelope || typeof envelope.before !== "string" || typeof envelope.after !== "string") return null;
-    return rebuiltQueuedFromEnvelope(envelope, userText);
-  }
-  function rebuiltQueuedMetaPayload(item, userText) {
-    const envelope = item && item.metaPayloadEnvelope;
-    if (!envelope || typeof envelope.before !== "string" || typeof envelope.after !== "string") return null;
-    return rebuiltQueuedFromEnvelope(envelope, userText);
-  }
+  function makeQueuedMessage(id, userText, payloadText, displayText, attachments, meta, restrictTools) { return pinvouSharedtauriChat().makeQueuedMessage(id, userText, payloadText, displayText, attachments, meta, restrictTools); }
+  function rebuiltQueuedPayload(item, userText) { return pinvouSharedtauriChat().rebuiltQueuedPayload(item, userText); }
+  function rebuiltQueuedMetaPayload(item, userText) { return pinvouSharedtauriChat().rebuiltQueuedMetaPayload(item, userText); }
   function queuedMetaNeedsAdmission(meta) {
     if (!meta || typeof meta !== "object") return false;
     if (meta.voiceOperationId) return true;
@@ -662,51 +503,7 @@ function timeStr() { return pinvouSharedtauriChat().timeStr(); }
       });
   }
 
-  async function sendMessageToSession(sessionId, text, meta) {
-    var sid = String(sessionId || "").trim();
-    var content = String(text || "").trim();
-    if (!sid) throw new Error(bt("targetSessionMissing"));
-    if (!content) throw new Error(bt("replyContentEmpty"));
-    var exists = state.sessions.some(function (session) { return String(session.id) === sid; });
-    if (!exists) throw new Error(bt("targetSessionMissing"));
-
-    await ensureSessionBufferLoaded(sid);
-    var targetBuffer = getBuffer(sid);
-    var targetQueue = targetBuffer && targetBuffer.queued;
-    if (isBusyFor(sid) || (targetQueue && targetQueue.length > 0)) {
-      runSyncOnSession(sid, function () {
-        state.queued.push(makeQueuedMessage(
-          ++context.itemIdSeq, content, content, content, [], meta || null, false
-        ));
-      });
-      notify();
-      if (!isBusyFor(sid)) flushQueued(sid);
-      return { accepted: true, queued: true };
-    }
-    if (targetBuffer && targetBuffer.remoteTurnActive && !(await reconcileRemoteTurn(sid))) {
-      recordAuthoritySyncDiagnostic("remote_sync_blocked_action", Object.assign({
-        operation: "send_to_session",
-      }, authoritySyncBufferSnapshot(sid, targetBuffer)));
-      throw new Error(bt("targetSessionSyncing"));
-    }
-    targetBuffer = getBuffer(sid);
-    if (isBusyFor(sid) || (targetBuffer.queued && targetBuffer.queued.length > 0)) {
-      runSyncOnSession(sid, function () {
-        state.queued.push(makeQueuedMessage(
-          ++context.itemIdSeq, content, content, content, [], meta || null, false
-        ));
-      });
-      notify();
-      if (!isBusyFor(sid)) flushQueued(sid);
-      return { accepted: true, queued: true };
-    }
-    var completion = doSendFor(sid, content, content, [], meta || null, false, true)
-      .then(
-        function () { return { ok: true }; },
-        function (error) { return { ok: false, error: error }; }
-      );
-    return { accepted: true, queued: false, completion: completion };
-  }
+  async function sendMessageToSession(sessionId, text, meta) { return pinvouSharedtauriChat().sendMessageToSession(sessionId, text, meta); }
 
   // Backfill once the steer invoke resolves with a steer_id: settle any
   // committed/dropped events that arrived early; if the chip was taken by
@@ -1140,14 +937,7 @@ function restoreUiTurnState(consumed) { return pinvouSharedtauriChatN31666().res
   // recovery passes append=true to APPEND with a "\n" separator so a draft
   // the user started typing during the await window is not clobbered.
   // ChatView consumes the flag through the prefillAppend prop.
-  function prefillComposer(text, append) {
-    state.composerPrefill = {
-      id: (state.composerPrefill.id || 0) + 1,
-      text: String(text || ""),
-      append: !!append,
-    };
-    notify();
-  }
+  function prefillComposer(text, append) { return pinvouSharedtauriChat().prefillComposer(text, append); }
   function restoreTaskDraft(text, owner) {
     if (!owner || owner.restored) return false;
     if (owner.operationId && owner.rollbackFromDraftEpoch !== undefined) {
@@ -1472,28 +1262,7 @@ function restoreUiTurnState(consumed) { return pinvouSharedtauriChatN31666().res
   // ── Pinvou v4 召唤式检阅:Boss 主动呼叫,审当前 session 前面的工作 ──
   // 纯召唤、不替 Boss 决策。
   // 审查卡进 chatItems(当前会话可见);跨会话持久化(进 messages/独立存储)是后续增强。
-  async function summonPinvou(focus, mode) {
-    if (!state.activeSessionId) { addSystemItem(bt("summonNeedsSession")); return; }
-    if (state.pinvouSummoning) return;
-    state.pinvouSummoning = true;
-    var sid = state.activeSessionId; // 召唤发起时的 session;await 返回后校验,防跨 session 串(召唤慢+切走)
-    // 检阅结果弹 modal(不进对话流):一次只一个,裁决/跳过直接操作 state.pinvouModal.review、
-    // 不靠 pos 定位(根治连续召唤 pos 重复串卡)。
-    state.pinvouModal = { loading: true, coverage: mode === "coverage" };
-    notify();
-    try {
-      // focus=产出物 path(品=审产物); mode="coverage"=悟(通盘体检)。
-      var review = await invoke("summon_pinvou", { sessionId: sid, focus: focus || null, mode: mode || null });
-      if (state.activeSessionId !== sid) return; // 召唤期间切了 session → 丢弃,绝不 record/写进别的 session
-      recordPinvouReview(review); // 存 sidecar(供核账读上轮账目);modal.review 同引用,裁决写它=写 sidecar
-      if (state.pinvouModal) { state.pinvouModal.loading = false; state.pinvouModal.review = review; }
-    } catch (e) {
-      if (state.activeSessionId === sid && state.pinvouModal) { state.pinvouModal.loading = false; state.pinvouModal.error = String(e && e.message ? e.message : e); }
-    } finally {
-      state.pinvouSummoning = false;
-      notify();
-    }
-  }
+  async function summonPinvou(focus, mode) { return pinvouSharedtauriChat().summonPinvou(focus, mode); }
 
   // 通盘体检(覆盖镜头):查产物"全不全"=缺哪些完整性维度。独立入口,走 mode=coverage。
 function inspectPinvou(focus) { return pinvouSharedtauriChat().inspectPinvou(focus); }
@@ -1504,59 +1273,7 @@ function recordPinvouReview(review) { return pinvouSharedtauriChat().recordPinvo
 
   // §2 按勾选裁决:resolution 已由前端写回 review 对象(引用→sidecar),这里持久化 +
   // 把勾「让AI改」的条目走 B1 发定向修订指令(只改对应段落、禁全文重写)。Boss 驾驶,非自动。
-  async function resolvePinvouReview(resolutions, actions) {
-    // 检阅发生的会话归属捕获：persist 挂起期间用户可能切走，修订指令必须发回
-    // 检阅会话，不得漂进当前 active 会话（审计）。
-    var reviewSid = state.activeSessionId;
-    // 弹窗只一个 review(state.pinvouModal.review),直接在它上面写 resolution——不靠 pos 定位
-    // (根治连续召唤 pos 重复串卡)。它和 sidecar entry.review 同引用,写它=写 sidecar。
-    var isWu = !!(state.pinvouModal && state.pinvouModal.coverage); // 关窗前取,供转交标品/悟
-    var review = state.pinvouModal && state.pinvouModal.review;
-    if (review && resolutions) {
-      (review.recommendations || []).forEach(function (r, k) { if (resolutions.recs && resolutions.recs[k]) r.resolution = resolutions.recs[k]; });
-      (review.issues || []).forEach(function (x, k) { if (resolutions.issues && resolutions.issues[k]) x.resolution = resolutions.issues[k]; });
-      (review.coverage || []).forEach(function (g, k) { if (resolutions.coverage && resolutions.coverage[k]) g.resolution = resolutions.coverage[k]; });
-    }
-    await persistPinvouReviews(); // 落盘,配合后端 preserve_resolutions 防覆盖
-    state.pinvouModal = null; // 裁决完关窗
-    notify();
-    if (!actions || !actions.length) return;
-    // 按动作类型分组,组装一条 Boss 消息发给主 AI(Boss 驾驶,非自动回传):
-    //   fix/verify=产物缺陷定向修订(verify 先核实);adopt=Boss 已定的决策;ask=让 AI 正式问。
-    var fix = actions.filter(function (a) { return a.t === "fix"; });
-    var verify = actions.filter(function (a) { return a.t === "verify"; });
-    var adopt = actions.filter(function (a) { return a.t === "adopt"; });
-    var ask = actions.filter(function (a) { return a.t === "ask"; });
-    var parts = [];
-    if (fix.length) {
-      parts.push(bt("reviewFixHeader"));
-      fix.forEach(function (a) { parts.push("- " + a.text); });
-    }
-    if (verify.length) {
-      if (parts.length) parts.push("");
-      parts.push(bt("reviewVerifyHeader"));
-      verify.forEach(function (a) { parts.push("- " + a.text); });
-    }
-    if (adopt.length) {
-      if (parts.length) parts.push("");
-      parts.push(bt("reviewAdoptHeader"));
-      adopt.forEach(function (a) { parts.push("- " + (a.topic ? a.topic + "：" : "") + a.pick); });
-    }
-    if (ask.length) {
-      if (parts.length) parts.push("");
-      parts.push(bt("reviewAskHeader"));
-      ask.forEach(function (a) { parts.push("- " + a.topic); });
-    }
-    var fill = actions.filter(function (a) { return a.t === "fill"; });
-    if (fill.length) {
-      if (parts.length) parts.push("");
-      parts.push(bt("reviewFillHeader"));
-      fill.forEach(function (a) { parts.push("- " + a.dimension + (a.suggestion ? "：" + a.suggestion : "")); });
-      parts.push(bt("reviewFillFooter"));
-    }
-    // 已切走则放弃发指令（修订指令属于检阅会话，漂进别的会话会误导其上下文）。
-    if (parts.length && reviewSid && state.activeSessionId === reviewSid) sendMessage(parts.join("\n"), { pinvouTransfer: isWu ? "悟" : "品" });
-  }
+  async function resolvePinvouReview(resolutions, actions) { return pinvouSharedtauriChat().resolvePinvouReview(resolutions, actions); }
 
   // 整卡跳过:Boss 看了不处理这次检阅 → 直接关窗(sidecar entry 留着、无 resolution,无害)。
 function dismissPinvouReview() { return pinvouSharedtauriChat().dismissPinvouReview(); }
@@ -2733,7 +2450,8 @@ function persistPinvouReviews() { return pinvouSharedtauriChat().persistPinvouRe
       settleSteerCommitted: settleSteerCommitted,
       settleSteerDropped: settleSteerDropped,
       onSteerFailure: onSteerFailure,
-      queuedPayloadEnvelope: queuedPayloadEnvelope,
+      // T0-c 壳化：本体在 helpers（tauriChat 簇），保留 facade 导出名供官方测试消费。
+      queuedPayloadEnvelope: function (userText, payloadText, meta) { return pinvouSharedtauriChat().queuedPayloadEnvelope(userText, payloadText, meta); },
       makeQueuedMessage: makeQueuedMessage,
       rebuiltQueuedPayload: rebuiltQueuedPayload,
       rebuiltQueuedMetaPayload: rebuiltQueuedMetaPayload,

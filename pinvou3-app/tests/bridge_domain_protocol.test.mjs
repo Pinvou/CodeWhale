@@ -100,7 +100,7 @@ const expectedProtocolHashes = {
   // PinvouBridgeShared cluster; Official has no shared-cluster mechanism, so
   // the domain bodies live in this module and the hash was recomputed for the
   // self-contained Official-lane file.
-  auxChat: '822fb84758b20d045f2fc34673e88c0f9e7aa2acb48e420c0a8b0cdafd93c37a',
+  auxChat: '559070c284d5738a8fb60664487eb1ce96e766b92fcd786e8baa9dc7a8d461a8',
   multiAgent: '6896409bb406f1ba54ca496dd78c04549cc78ff5490ae771d9cf60586368a8a8',
   // Recomputed for the rebind wave (community #463): bridge.js's wholesale
   // artifact save now rewrites SavedSession.artifacts[].storage_path along
@@ -122,7 +122,7 @@ const expectedProtocolHashes = {
   // stale-absolute heal arm + rebasing save — same command surface, no new
   // invoke or listen entries (the extractor scans raw source, so
   // body/comment text is part of the digest).
-  artifacts: 'd227317f84f5ef929e020d051d96287e9b61c7514d41169c20cffd57aabaa3fe',
+  artifacts: 'd6fd511aaf84df324f7dfcadf6e651b3304c72cf297419934f31a339ed2c3e05',
 // New domain: computer-use consent commands/events (desktop-only; the web
   // RPC allowlist excludes them, same policy as browser:*).
   // Recomputed when the 30s deny-suppression cooldown was removed: a deny now
@@ -150,7 +150,7 @@ const expectedProtocolHashes = {
   // Recomputed for the permission onboarding row: the new
   // computer_use_permission_status invoke (settings permissionStatus) joins
   // the domain's call set.
-  computerUse: 'a681a541d4352b99d8e964e5a19f9cbaf45fd9fa9d56d5395d6c9e6c88459843',
+  computerUse: 'e0f4aadbba8ab68e1dd54f9ab172680657958d548e3c3da50a489931cf525388',
   // Recomputed for #308 follow-ups: prefillComposer(text, append) recovery
   // entry + comment translations touching `invoke(` mentions (the extractor
   // scans raw source, so comment wording is part of the digest). Recomputed
@@ -187,7 +187,7 @@ const expectedProtocolHashes = {
   // now opts into deferBackgroundNotify so background output chunks ride the
   // existing terminal 50ms publication timer; invoke and event wire shapes
   // stay unchanged (publication timing is the deliberate change).
-  chat: 'd494f576c5484c6af93a4b37c949a1844d5055b46043eb7f5ccdad6850896a42',
+  chat: '2d422ec19d39e95905ed1a3e8b7661f31f5ceca4dd48ecdab1a4c45f5a555b46',
   dependencies: 'd39f5a46b8e34c1c30d8f8e08ef62baccfe822ffb7fad8dbf3301c69c566e31c',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.
@@ -199,11 +199,11 @@ const expectedProtocolHashes = {
   // T0-b (#701 桥接面对齐) 重算：confirm/ignore/never 三支 invoke 移入
   // shared/bridge-shared-helpers.js 的 resolveMemoryCandidate（memory.js 留
   // 参数化薄包装），命令面无增删。
-  memory: '6898f26c4d4a9c57bba0752cf80cb0f399df60007baac4dd35d577d9d09cdc58',
-  monitor: '01bf9a7c9b9b3f313cf49e975e6503627ff373caed0f4b3be07a6a98492a7c43',
-  personas: '08b63778c3da39e2e551d555c860919887d2652450894d2d5359d7e23fb71ca7',
+  memory: 'ca88a71d9f0f9b15f1df52cf80218694f76b2295add98e65a0d167fc88b627c8',
+  monitor: 'e63e8d5d4edf813640e08c9951a12abdbc3cad4991763d3dd956e883e277fb1c',
+  personas: '33efcab9c42a6830ade35861b8a6c60891da9cb282954e78c3bda42091e2474d',
   remoteControl: '8a47f7ef3fbf569a6ae380153f84640d245025e0beb2215eb365287fe06aa00c',
-  scheduled: '3c95cd9aa37173dd5a3490da45191aad1ee608107d8a513e458561ba62ae95cb',
+  scheduled: '9081c503ef3600f83a0cfd2506955990f6556b196d9ba3903ad08b308b2966b1',
   // Recomputed for the combined session archive and #445 workspace binding
   // surfaces while retaining Official's materialization behavior.
   // Recomputed for the rebind wave (community #463): the session:list_changed
@@ -222,7 +222,7 @@ const expectedProtocolHashes = {
   // get_session_pinvou_reviews 两支 invoke 移入 helpers 的
   // loadPersonaEventsForSession / loadPinvouReviewsForSession（sessions.js 留
   // 转发壳 + reportSidecarReadFailure 注入），命令面无增删。
-  sessions: '30af777ca0a8e69f56ff0a7d90d4603168befbaded8e6342f919df97fef05b50',
+  sessions: 'dbaca4e95cd63b5fa5498eca5d7170eefbd17f52eb4ada9e8c7d40d9cdc79e9c',
   // Recomputed for the builtin feature toggle hook: settings.js gains the
   // list_builtin_features / set_builtin_feature_enabled invoke wrappers (the
   // session-mention feature gate reads the list; the setter is the contract
@@ -231,8 +231,8 @@ const expectedProtocolHashes = {
   // the set_global_shortcut_config invoke (the dedicated command owns both
   // the plugin registration and the prefs persistence; update_settings
   // stays untouched).
-  settings: '3c1b77d8cc6494021baae197d9e08a640c8422156b26bd937431aa80abb651c8',
-  updater: '30a3762ee45f378d476efec934dc4be50522a02a5b9a97111191496510d4d7d4',
+  settings: 'afdc9da9a5343f61bf90f2d4adcf4e7677df117537c7a8bfc15c2469c450e31c',
+  updater: 'e5d3ffaed0548bca3a40ee4c8138a59f9a2add9474477d924d4ecd7b8efd73e6',
   // Official's bridge/voice.js is untouched by this backflow, so the hash
   // stays at the Official base value (the community value differs only via
   // comment differences inside its own voice.js; no invoke/listen surface).
@@ -275,7 +275,7 @@ for (const [domain, files] of Object.entries(protocolSources)) {
 // T0-b 重算：helpers 新增 3 个 invoke 面（get_session_persona_events /
 // get_session_pinvou_reviews / resolveMemoryCandidate 的 invoke(command, args)
 // 参数化入口），合计 74 个签名。
-const expectedSharedBaseHash = '67958905304ecdc1c4f6bb077ac357d0289eb7d8897a84c273683991778af224';
+const expectedSharedBaseHash = '6beead90f5cc96b367c4df834d14369856280c14a715e7c0f806c7c15957b47e';
 const sharedBaseSource = fs.readFileSync(path.join(root, 'src', 'shared', 'bridge-shared-helpers.js'), 'utf8');
 const sharedBaseSignatures = [
   ...extractCalls(sharedBaseSource, 'invoke').map(call => `shared/bridge-shared-helpers.js:invoke:${call}`),

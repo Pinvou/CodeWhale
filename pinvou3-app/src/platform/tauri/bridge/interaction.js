@@ -171,7 +171,6 @@ function patchItemById(id, patch) { return pinvouSharedtauriInteraction().patchI
     }
     return { item: item, message: message };
   }
-function markResolved(id, statusLabel) { return pinvouSharedtauriInteraction().markResolved(id, statusLabel); }
 
   // ── Per-session UI 路由 ─────────────────────────────────────────
   // 卡片动作链路有多个 await 边界,用户可能中途切 session。所有 UI 写入(chatItem 增改、
@@ -514,7 +513,6 @@ async function submitUserInput(itemId, toolCallId, answers, questions) { return 
       notify();
     }
   }
-async function compactNow() { return pinvouSharedtauriInteraction().compactNow(); }
 
 
     return {
@@ -523,7 +521,6 @@ async function compactNow() { return pinvouSharedtauriInteraction().compactNow()
       syncModeState,
       patchItemById,
       pushUserEcho,
-      markResolved,
       runOnSession,
       addSystemItemFor,
       patchItemByIdFor,
@@ -546,7 +543,6 @@ async function compactNow() { return pinvouSharedtauriInteraction().compactNow()
       submitUserInput,
       cancelUserInput,
       editLastTurn,
-      compactNow,
     };
   };
 })();

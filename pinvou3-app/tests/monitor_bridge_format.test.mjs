@@ -10,8 +10,10 @@ const read = (...parts) => fs.readFileSync(path.join(root, ...parts), 'utf8');
 // 两份 bridge(tauri 桌面 / web)的 TTFT/TPS 无数据回退必须统一为「—」,
 // 与 MonitorView.jsx 的 MonitorMetricCard(值为 — 时不渲染 unit)配套。
 // 防止某一侧单独回退成字面 "0 s"/"0 tok/s" 造成桌面/网页显示漂移。
+// #701 T0-c 壳化：tauri monitor 的 pollMonitor 已委托 helpers（格式化本体在
+// 共享基座），桌面侧改钉 helpers；web 侧仍内联钉本体。
 const bridges = {
-  tauri: read('src', 'platform', 'tauri', 'bridge', 'monitor.js'),
+  tauri: read('src', 'shared', 'bridge-shared-helpers.js'),
   web: read('src', 'platform', 'web', 'bridge.js'),
 };
 
