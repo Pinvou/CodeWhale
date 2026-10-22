@@ -1,4 +1,5 @@
 import { secureRequestID } from './request-id.js';
+import { requireFinanceID } from './finance-contract.js';
 const id = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) && value !== '00000000-0000-0000-0000-000000000000';
 const protectedCodes = new Set(['PLATFORM_SUPER_ADMIN', 'OWNER', 'PERSONAL_USER']);
 export function grantablePlatformRole(role) { return role?.scope === 'PLATFORM' && role.assignable === true && !protectedCodes.has(role.code); }
@@ -13,13 +14,14 @@ export function requirePlatformRoleBinding(value, expected = null) {
 }
 export function platformRoleGrantIntent(owner, fields, role, now = new Date()) {
   if (!id(owner) || !id(fields.user_id) || !grantablePlatformRole(role) || role.code !== fields.role_code) throw new Error('INVALID_ROLE_GRANT');
+  const userID = requireFinanceID(fields.user_id.toLowerCase());
   const starts = fields.starts_at ? new Date(fields.starts_at).toISOString() : now.toISOString();
   const expires = fields.expires_at ? new Date(fields.expires_at).toISOString() : null;
   const reason = String(fields.reason || '').trim();
   if (expires && (Date.parse(expires) <= Date.parse(starts) || Date.parse(expires) <= now.getTime())) throw new Error('INVALID_ROLE_GRANT');
   const reasonBytes = new TextEncoder().encode(reason).length;
   if (role.code === 'PLATFORM_AUDIT_PII_EXPORT' && (!expires || Date.parse(expires) - Date.parse(starts) > 86400000 || reasonBytes < 10 || reasonBytes > 500)) throw new Error('INVALID_ROLE_GRANT');
-  return Object.freeze({ owner, body: Object.freeze({ user_id: fields.user_id, role_code: role.code, starts_at: starts, expires_at: expires, reason, idempotency_key: secureRequestID() }) });
+  return Object.freeze({ owner, body: Object.freeze({ user_id: userID, role_code: role.code, starts_at: starts, expires_at: expires, reason, idempotency_key: secureRequestID() }) });
 }
 // Retain one uncertain command per client+human, including navigation away and
 // back. It is not transferred across a different authenticated user or client.

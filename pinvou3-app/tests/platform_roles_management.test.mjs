@@ -32,7 +32,8 @@ test('actual Admin client HTTP preserves original grant command after unknown AC
   server.listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => new Promise(resolve => server.close(resolve)));
   const client = new AdminPlatformClient(`http://127.0.0.1:${server.address().port}`); client.csrfToken = 'controlled-csrf';
   assert.deepEqual(await client.platformRoles(), [role]);
-  const command = intent(); platformRolePending(client, owner, command);
+  const command = intent({ user_id: user.toUpperCase() }); platformRolePending(client, owner, command);
+  assert.equal(command.body.user_id, user);
   await assert.rejects(client.grantPlatformRole(owner, command.body));
   assert.equal(platformRolePending(client, owner), command);
   assert.equal(platformRolePending(client, user), null);
@@ -40,7 +41,7 @@ test('actual Admin client HTTP preserves original grant command after unknown AC
   assert.equal(result.user_id, user); assert.equal(writes, 1);
   const posts = requests.filter(item => item.method === 'POST');
   assert.equal(posts.length, 2); assert.deepEqual(posts[0], posts[1]); assert.equal(posts[0].csrf, 'controlled-csrf'); assert.equal(posts[0].key, command.body.idempotency_key);
-  const listed = await client.platformRoleBindings(user); assert.equal(listed[0].binding_id, result.binding_id);
+  const listed = await client.platformRoleBindings(` ${user.toUpperCase()} `); assert.equal(listed[0].binding_id, result.binding_id);
   assert.ok(requests.some(item => item.url.endsWith('?user_id=' + user)));
   assert.equal((await client.revokePlatformRole(owner, result.binding_id)).status, 'REVOKED');
   assert.equal((await client.platformRoleBindings(user))[0].status, 'REVOKED');
@@ -51,6 +52,7 @@ test('role form and ACK contracts preserve existing scope, expiry and source res
   await t.test('protected and foreign-scope roles never become grantable', () => {
     for (const item of [{ ...role, scope: 'PERSONAL' }, { ...role, scope: 'ORGANIZATION' }, { ...role, assignable: false }, { ...role, code: 'PLATFORM_SUPER_ADMIN' }]) { assert.equal(grantablePlatformRole(item), false); assert.throws(() => intent({}, item)); }
     assert.throws(() => requirePlatformRoles({ items: [{ ...role, scope: 'ORGANIZATION' }] }));
+    assert.throws(() => intent({ user_id: '0199a100-0001-0000-0000-000000000202' }));
   });
   await t.test('PII expiry reason and immutable original body', () => {
     const pii = { ...role, code: 'PLATFORM_AUDIT_PII_EXPORT' };

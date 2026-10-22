@@ -89,6 +89,7 @@ func (s *Service) adminGrantPlatformRoleBinding(w http.ResponseWriter, r *http.R
 		Reason         string     `json:"reason"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_JSON", "request body is invalid", httpserver.RequestID(r.Context()))
 		return
 	}
 	item, err := repository.AdminGrantPlatformRoleBinding(r.Context(), mustPrincipal(r.Context()), RoleBindingGrant{UserID: body.UserID, RoleCode: body.RoleCode, OrganizationID: body.OrganizationID, UnitID: body.UnitID, StartsAt: body.StartsAt, ExpiresAt: body.ExpiresAt, IdempotencyKey: body.IdempotencyKey, Reason: body.Reason})

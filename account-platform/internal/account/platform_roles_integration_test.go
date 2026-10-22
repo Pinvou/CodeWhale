@@ -27,6 +27,82 @@ func TestPlatformRoleManagementRuntimePostgres(t *testing.T) {
 	userCodeLookupTestGuard(t)
 	f := retainedWalletFenceActors(t)
 	ctx := context.Background()
+	t.Run("actual-http-invalid-json-is-explicit-no-write", func(t *testing.T) {
+		r := f.repository(t)
+		admin, _, _ := userCodeActor(t, r, "invalid-json-admin")
+		target := seedEntitlementApprovalActor(t, ctx, r.pool, "PERSONAL_USER", "invalid-json-target")
+		h := userCodeHandler(r, map[string]identity.Principal{"admin": admin, "target": entitlementApprovalPrincipal(target)})
+		marker := "controlled-private-input-" + uuid.NewString()
+		key := uuid.NewString()
+		valid, err := json.Marshal(map[string]any{"user_id": target.ID, "role_code": "PLATFORM_MODEL_ADMIN", "idempotency_key": key, "reason": marker})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := func(token, raw string) *httptest.ResponseRecorder {
+			q := httptest.NewRequest(http.MethodPost, "/admin/v1/role-bindings", strings.NewReader(raw))
+			if token != "" {
+				q.Header.Set("Authorization", "Bearer "+token)
+			}
+			q.Header.Set("Content-Type", "application/json")
+			out := httptest.NewRecorder()
+			h.ServeHTTP(out, q)
+			return out
+		}
+		snapshot := func() string {
+			var value string
+			if err := r.pool.QueryRow(ctx, `SELECT jsonb_build_object('users',(SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM users x),'assignments',(SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM role_assignments x),'bindings',(SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM role_bindings x),'versions',(SELECT jsonb_agg(to_jsonb(x) ORDER BY user_id,scope,scope_id) FROM authorization_versions x),'audit',(SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM audit_logs x),'events',(SELECT jsonb_agg(to_jsonb(x) ORDER BY event_id) FROM outbox_events x))::text`).Scan(&value); err != nil {
+				t.Fatal(err)
+			}
+			return value
+		}
+		before := snapshot()
+		for _, test := range []struct{ name, raw string }{
+			{"malformed", strings.TrimSuffix(string(valid), "}")},
+			{"unknown-field", strings.TrimSuffix(string(valid), "}") + `,"unexpected":"` + marker + `"}`},
+			{"multiple-values", string(valid) + ` {}`},
+			{"wrong-type", strings.Replace(string(valid), `"role_code":"PLATFORM_MODEL_ADMIN"`, `"role_code":17`, 1)},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				out := request("admin", test.raw)
+				var body struct {
+					Code    string `json:"code"`
+					Message string `json:"message"`
+				}
+				if out.Code != http.StatusBadRequest || json.Unmarshal(out.Body.Bytes(), &body) != nil || body.Code != "INVALID_JSON" || body.Message != "request body is invalid" {
+					t.Fatal("invalid JSON did not return explicit safe400", out.Code, out.Body.String())
+				}
+				if out.Header().Get("Content-Type") != "application/json" || out.Header().Get("Cache-Control") != "no-store" || strings.Contains(out.Body.String(), marker) {
+					t.Fatal("invalid JSON response leaked input or changed API headers", out.Header(), out.Body.String())
+				}
+				if snapshot() != before {
+					t.Fatal("invalid JSON request changed authorization or audit/outbox facts")
+				}
+			})
+		}
+		for _, boundary := range []struct {
+			token string
+			code  int
+		}{{"", http.StatusUnauthorized}, {"target", http.StatusForbidden}} {
+			out := request(boundary.token, "{")
+			if out.Code != boundary.code {
+				t.Fatal("authentication or permission boundary changed", out.Code)
+			}
+		}
+		var grants, deniedAudits int
+		if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM role_assignments WHERE idempotency_key=$1`, key).Scan(&grants); err != nil || grants != 0 {
+			t.Fatal("authentication/permission refusal wrote grant", grants, err)
+		}
+		if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM audit_logs WHERE action='authorization.permission.denied' AND resource_id='/admin/v1/role-bindings'`).Scan(&deniedAudits); err != nil || deniedAudits != 1 {
+			t.Fatal("existing permission-denial audit changed", deniedAudits, err)
+		}
+
+		out := request("admin", string(valid))
+		var binding RoleBinding
+		if out.Code != http.StatusCreated || json.Unmarshal(out.Body.Bytes(), &binding) != nil || binding.UserID != target.ID || binding.RoleCode != "PLATFORM_MODEL_ADMIN" || binding.GrantSource != "ADMIN" {
+			t.Fatal("valid original intent no longer grants exact target/role", out.Code, out.Body.String())
+		}
+	})
+
 	t.Run("actual-http-catalog-grant-original-key-revoke-live-authority", func(t *testing.T) {
 		r := f.repository(t)
 		admin, _, _ := userCodeActor(t, r, "role-admin")

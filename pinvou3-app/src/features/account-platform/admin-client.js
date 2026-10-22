@@ -315,6 +315,7 @@ export class AdminPlatformClient {
     return requirePlatformRoles(await this.request('account', '/admin/v1/roles', signal));
   }
   async platformRoleBindings(userID = '', signal) {
+    if (typeof userID === 'string') userID = userID.trim().toLowerCase();
     if (userID) requireFinanceID(userID);
     const payload = await this.request('account', '/admin/v1/role-bindings' + (userID ? `?user_id=${encodeURIComponent(userID)}` : ''), signal);
     if (!Array.isArray(payload?.items)) throw new Error('INVALID_ROLE_BINDINGS');
