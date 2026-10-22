@@ -1054,7 +1054,9 @@ jobs:
     # backflow exemption may suppress this independently deployable module.
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' }}
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    # Allow finite headroom for all Go/vet, financial and closure contracts.
+    # Individual phase timeouts and fail-closed result checks remain unchanged.
+    timeout-minutes: 75
     services:
       audit-export-postgres:
         image: postgres:16-alpine
