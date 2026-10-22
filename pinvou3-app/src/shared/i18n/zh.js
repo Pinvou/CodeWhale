@@ -233,6 +233,8 @@ export const dictZh = {
         kbOutTodayPrefix: '今天', kbOutWeekdays: ['周日','周一','周二','周三','周四','周五','周六'],
         kbOutPreview: '预览', kbOutOpenChat: '在对话打开', kbOutContinue: '续写', kbOutNewProject: '新项目', kbOutGallery: '平铺式', kbOutList: '列表式', kbOutOpenExt: '在系统中打开', kbOutOpenFolder: '打开所在文件夹',
         kbOutEmpty: '还没有产出物', kbOutEmptyHint: '和 PINVOU 聊聊，一起做出来的东西会出现在这里。',
+        kbOutSkippedNotice: (n) => `${n} 个会话的记录过大或不可读，其产出物未能列入下表`,
+        kbOutScanError: '产出物索引暂时无法读取', kbOutRetry: '重试',
         kbOutContinuePrefill: (name) => `继续完善「${name}」`, kbOutRequirementLabel: '我的要求：', kbOutFileCount: (n) => `${n} 个文件`,
         kbCatAll: '全部', kbCatDoc: '文档', kbCatSheet: '表格', kbCatPpt: '演示', kbCatPdf: 'PDF', kbCatImg: '图片', kbCatZip: '压缩包',
         kbRecent: '最近修改', kbAddToKb: '加入知识库', kbAdd: '添加', kbAddFiles: '添加文件', kbAddFolder: '添加文件夹', kbIndexing: '解析中',
