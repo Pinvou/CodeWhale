@@ -621,6 +621,9 @@ pub fn reject_task_submission(
 }
 
 pub fn admit_task(app: &tauri::AppHandle, session_id: &str, turn_id: &str) {
+    if super::remote_execution::observe(app, session_id, turn_id, RemoteStage::TaskRunning, None) {
+        return;
+    }
     let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
         return;
     };
@@ -666,6 +669,9 @@ pub fn admit_task(app: &tauri::AppHandle, session_id: &str, turn_id: &str) {
 }
 
 pub fn task_first_output(app: &tauri::AppHandle, session_id: &str, turn_id: &str) {
+    if super::remote_execution::observe(app, session_id, turn_id, RemoteStage::FirstOutput, None) {
+        return;
+    }
     let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
         return;
     };
@@ -757,27 +763,30 @@ pub fn finish_task(
             continue;
         }
         telemetry.track_for_lease(
-            BehaviorEvent::new("tool_call_completed")
-                .session(session_id)
-                .turn(&operation.turn_id)
-                .string("operation_id", operation.operation_id)
-                .integer("attempt_index", 1)
-                .tool(
-                    operation.tool_key,
-                    &operation.tool_name,
-                    operation.tool_type,
-                )
-                .success(false)
-                .diagnostic_cancellation(matches!(status, "cancelled" | "interrupted"))
-                .integer("duration_ms", now_ms().saturating_sub(operation.started_at))
-                .string(
-                    "error_category",
-                    if matches!(status, "cancelled" | "interrupted") {
-                        "user_cancelled"
-                    } else {
-                        "tool_error"
-                    },
-                ),
+            execution_fields(
+                BehaviorEvent::new("tool_call_completed")
+                    .session(session_id)
+                    .turn(&operation.turn_id)
+                    .string("operation_id", operation.operation_id)
+                    .integer("attempt_index", 1)
+                    .tool(
+                        operation.tool_key,
+                        &operation.tool_name,
+                        operation.tool_type,
+                    )
+                    .success(false)
+                    .diagnostic_cancellation(matches!(status, "cancelled" | "interrupted"))
+                    .integer("duration_ms", now_ms().saturating_sub(operation.started_at))
+                    .string(
+                        "error_category",
+                        if matches!(status, "cancelled" | "interrupted") {
+                            "user_cancelled"
+                        } else {
+                            "tool_error"
+                        },
+                    ),
+                operation.execution_task_key.as_deref(),
+            ),
             &operation.lease,
         );
     }
@@ -860,6 +869,7 @@ pub fn track_tool_call_started(
         tool_name: normalized_tool_name(tool_name, tool_key),
         tool_type,
         lease: lease.clone(),
+        execution_task_key: super::remote_execution::tool_task_key(&telemetry, session_id, turn_id),
     };
     if let Ok(mut calls) = telemetry.tool_calls.lock() {
         let key = tool_operation_key(session_id, call_id);
@@ -871,12 +881,15 @@ pub fn track_tool_call_started(
         return;
     }
     telemetry.track_for_lease(
-        BehaviorEvent::new("tool_call_started")
-            .session(session_id)
-            .turn(turn_id)
-            .string("operation_id", &operation.operation_id)
-            .integer("attempt_index", 1)
-            .tool(operation.tool_key, &operation.tool_name, tool_type),
+        execution_fields(
+            BehaviorEvent::new("tool_call_started")
+                .session(session_id)
+                .turn(turn_id)
+                .string("operation_id", &operation.operation_id)
+                .integer("attempt_index", 1)
+                .tool(operation.tool_key, &operation.tool_name, tool_type),
+            operation.execution_task_key.as_deref(),
+        ),
         &lease,
     );
 }
@@ -923,7 +936,17 @@ pub fn track_tool_call_completed(
             event = event.diagnostic_error(error, "tool_result");
         }
     }
-    telemetry.track_for_lease(event, &operation.lease);
+    telemetry.track_for_lease(
+        execution_fields(event, operation.execution_task_key.as_deref()),
+        &operation.lease,
+    );
+}
+
+fn execution_fields(event: BehaviorEvent, key: Option<&str>) -> BehaviorEvent {
+    match key {
+        Some(key) => event.string("execution_task_key", key),
+        None => event,
+    }
 }
 
 pub fn begin_tool_install(
@@ -967,6 +990,15 @@ pub fn track_model_used_keys(
     model: &str,
     selection_source: &str,
 ) {
+    if super::remote_execution::observe(
+        app,
+        session_id,
+        turn_id,
+        RemoteStage::ModelUsed,
+        Some((provider, model)),
+    ) {
+        return;
+    }
     let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
         return;
     };

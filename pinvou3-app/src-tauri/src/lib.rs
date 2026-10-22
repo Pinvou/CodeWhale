@@ -1581,6 +1581,7 @@ pub fn run() {
                                 RemoteControlEvent::new(RemoteStage::Permission, outcome)
                                     .reason(reason)
                                     .permission_step(step)
+                                    .role(true)
                                     .latency_ms(metric.latency_ms));
                         }));
                         handle.manage(permission_authority.clone());
@@ -1632,6 +1633,7 @@ pub fn run() {
                             commands::desktop_remote_journal::DesktopTaskEventSink::new(
                                 handle.clone(),
                                 desktop_history.journal().clone(),
+                                desktop_task_runtime.ledger(),
                             ),
                         ));
                         let recovered = desktop_task_runtime.recover_after_restart();
@@ -2240,6 +2242,7 @@ pub fn run() {
             commands::artifacts::read_artifact_text,
             commands::artifacts::write_artifact_text,
             commands::artifacts::list_deliverable_index,
+            commands::artifacts::list_deliverable_index_v2,
             commands::artifacts::artifact_info,
             commands::artifacts::render_artifact_visual,
             commands::artifacts::read_artifact_image_b64,

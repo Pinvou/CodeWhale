@@ -82,6 +82,13 @@ try {
   await click('Refresh');
   await page.waitForFunction(() => document.body.textContent.includes('A new preview may not restore a legacy failure association'));
   assert.equal(await page.evaluate(() => window.diagnosticTest.submitted.length), 1);
+  for (const attachments of [[null], [{ kind: 'image/svg+xml', content: '<svg />' }]]) {
+    await page.evaluate(attachments => { window.diagnosticTest.previewAttachments = attachments; }, attachments);
+    await click('Create redacted preview');
+    await page.waitForFunction(() => document.body.textContent.includes('The operation failed. Check analytics status'));
+    assert.equal(await page.$('input[type=checkbox]'), null, 'malformed previews discard previous consent');
+    assert.equal(await page.evaluate(() => window.diagnosticTest.submitted.length), 1);
+  }
   await page.evaluate(() => { window.diagnosticTest.enabled = false; }); await click('Refresh');
   await page.waitForFunction(() => document.body.textContent.includes('Usage analytics is off'));
   assert.equal(await page.$$eval('button', buttons => buttons.find(item => item.textContent === 'Create redacted preview').disabled), true);

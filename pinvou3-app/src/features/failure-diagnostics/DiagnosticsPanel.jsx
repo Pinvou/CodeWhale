@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from 'react';
 import { bridge, usePlatformCapability } from '../../hooks/useBridge.js';
+import { isDiagnosticPreview } from './preview.js';
 
 export default function DiagnosticsPanel({ copy, sessionId, turnId, compact = false }) {
   const supported = usePlatformCapability('failureDiagnostics');
@@ -68,7 +69,7 @@ export default function DiagnosticsPanel({ copy, sessionId, turnId, compact = fa
         <button type="button" className="block rounded-lg bg-blue-600 px-3 py-2 text-white disabled:opacity-40" disabled={busy || !incident || !data.enabled} onClick={() => void run(async () => {
           const revision = ++request.current;
           const result = await bridge.feedback.previewFailureDiagnostic({ incident_id: selected, notes, attachments: files });
-          if (!result?.preview_token || !Array.isArray(result?.report?.attachments)) throw new Error('diagnostic_preview_invalid');
+          if (!isDiagnosticPreview(result)) { setPreview(null); setConsent(false); throw new Error('diagnostic_preview_invalid'); }
           if (revision === request.current) { setPreview(result); setConsent(false); }
         })}>{copy.preview}</button>
         {preview && <div className="space-y-2 rounded-xl border p-3">

@@ -9,6 +9,8 @@ if (scenario === 'queue-full') window.diagnosticTest.submitError = 'diagnostic_q
 if (scenario === 'expired') window.diagnosticTest.previewError = 'diagnostic_preview_expired';
 if (scenario === 'four-files') window.diagnosticTest.files = ['a.log', 'b.log', 'c.log', 'd.log'];
 if (scenario === 'disabled') window.diagnosticTest.enabled = false;
+if (scenario === 'malformed-null') window.diagnosticTest.previewAttachments = [null];
+if (scenario === 'malformed-kind') window.diagnosticTest.previewAttachments = [{ kind: 'image/svg+xml', content: '<svg />' }];
 window.TauriBridge = {
   available: true,
   state: { getMany: () => ({ platformCapabilities: { failureDiagnosticsSupported: true } }), subscribe: () => () => {} },
@@ -24,7 +26,7 @@ window.TauriBridge = {
     previewFailureDiagnostic: async request => {
       if (window.diagnosticTest.previewError) throw new Error(window.diagnosticTest.previewError);
       window.diagnosticTest.previews.push(request);
-      return { preview_token: 'preview_fixture_1', report: { notes: request.notes, attachments: [] } };
+      return { preview_token: 'preview_fixture_1', report: { notes: request.notes, attachments: window.diagnosticTest.previewAttachments ?? [] } };
     },
     submitFailureDiagnostic: async token => {
       if (window.diagnosticTest.submitError) throw new Error(window.diagnosticTest.submitError);

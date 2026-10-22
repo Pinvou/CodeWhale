@@ -51,6 +51,54 @@ test("privacy thresholds apply to version subgroups and account subjects",()=>{
   assert.equal(failureGroups(events,{},1)[0].versions["one-off-version"],1);
 });
 
+test("sampled detail counts exclude unsampled faults while fault and subject counts remain complete", () => {
+  const events = [true, false, undefined].map((diagnostic_sampled, index) => witness({
+    device_id:`sampled_device_${index}`, diagnostic_id:`sampled_incident_${index}`,
+    diagnostic_sampled,
+  }));
+  const group = failureGroups([...events, ...events])[0];
+  assert.equal(group.count, 3);
+  assert.equal(group.installations, 3);
+  assert.equal(group.sampled_details, 2, 'old clients without sampling metadata retain existing detail semantics');
+  for (const flag of [true, false]) assert.equal(validateBehaviorEventShape(witness({diagnostic_sampled:flag})).ok, true);
+  assert.equal(validateBehaviorEventShape(witness({diagnostic_sampled:'private-flag'})).ok, false);
+});
+
+test("report rate and inventory caps reject only new reports and keep prior receipts readable", t => {
+  const directory=mkdtempSync(join(tmpdir(),'pinvou-diag-rate-'));
+  t.after(()=>{assert(directory.startsWith(join(tmpdir(),'pinvou-diag-rate-')));rmSync(directory,{recursive:true,force:true});});
+  const store=new FailureReportStore(directory);
+  const device={device_id:'rate_device',behavior_collection:{status:'active',collection_period_id:'fixture_collection_period'}};
+  const incident=witness({device_id:device.device_id});
+  const packets=Array.from({length:10},(_,i)=>report({report_id:`rate_report_fixture_${i}`}));
+  for(const packet of packets)store.append(device,packet,incident);
+  assert.throws(()=>store.append(device,report({report_id:'rate_report_fixture_10'}),incident),/report_rate_limited/);
+  assert.equal(store.append(device,packets[0],incident).status,'received');
+  const other={...device,device_id:'other_device'},otherIncident={...incident,device_id:other.device_id};
+  assert.equal(store.append(other,report({report_id:'other_report_fixture'}),otherIncident).status,'received');
+  const now=Date.now();
+  // The quota is a rolling day, independent of calendar boundaries.
+  store.save({...store.state,reports:store.state.reports.map(row=>({...row,received_at:now-86400000-1000}))});
+  assert.equal(store.append(device,report({report_id:'rate_report_next_day'}),incident).status,'received');
+  // Seed valid persisted material to reach the inventory boundary without 1000
+  // unrelated synchronous disk writes; admission still runs production append.
+  const seed=store.state.reports[0];
+  store.save({...store.state,reports:Array.from({length:1000},(_,i)=>({...seed,
+    device_id:`inventory_device_${i}`,report_id:`inventory_report_${i}`}))});
+  const full=new FailureReportStore(directory);
+  assert.equal(full.healthy,true);
+  assert.throws(()=>full.append(other,report({report_id:'inventory_overflow_fixture'}),otherIncident),/report_rate_limited/);
+  assert.equal(full.state.reports.length,1000);
+  full.audit('detail','inventory_fixture','operator');
+  assert.equal(full.state.audit.length,1);
+  full.saveMetadata({...full.state,audit:Array.from({length:2000},(_,i)=>({at:now,action:'detail',target:`audit_${i}`,actor:'operator'}))});
+  full.audit('detail','audit_newest','operator');
+  const reopened=new FailureReportStore(directory);
+  assert.equal(reopened.state.audit.length,2000);
+  assert.equal(reopened.state.audit[0].target,'audit_1');
+  assert.equal(reopened.state.audit.at(-1).target,'audit_newest');
+});
+
 test("deletion remains processing across storage failure and restart until reports are durably removed",async()=>{
   const directory=mkdtempSync(join(tmpdir(),"pinvou-diag-delete-recovery-"));
   const originalPrune=FailureReportStore.prototype.prune;
@@ -345,11 +393,16 @@ test("HTTP closes the collection/authorization/admin/CSRF/delete loop without pu
   const server=http.createServer((req,res)=>{void service.handleHttp(req,res,new URL(req.url,"http://localhost").pathname).then(handled=>{if(!handled){res.writeHead(404);res.end();}});});
   await new Promise(resolve=>server.listen(0,"127.0.0.1",resolve)); const base=`http://127.0.0.1:${server.address().port}`;
   t.after(async()=>{service.close();await new Promise(resolve=>server.close(resolve));for(const[k,v]of Object.entries(previous)){if(v===undefined)delete process.env[k];else process.env[k]=v;}rmSync(directory,{recursive:true,force:true});});
-  async function call(path,body,headers={}) {const response=await fetch(base+path,{method:body===undefined?"GET":"POST",headers:{"content-type":"application/json",...headers},...(body===undefined?{}:{body:JSON.stringify(body)})});return {status:response.status,json:await response.json(),cookie:response.headers.get("set-cookie")?.split(";")[0]};}
+  async function call(path,body,headers={}) {const response=await fetch(base+path,{method:body===undefined?"GET":"POST",headers:{"content-type":"application/json",connection:"close",...headers},...(body===undefined?{}:{body:JSON.stringify(body)})});return {status:response.status,json:await response.json(),cookie:response.headers.get("set-cookie")?.split(";")[0]};}
   const prefix="/pinvou3/stats/api";
   const registered=await call("/pinvou3/telemetry/v1/register",{enrollment_token:environment.PINVOU_TELEMETRY_ENROLLMENT_TOKEN,hardware_claim:"installation-diag-fixture",hardware_source:"installation_id",registration_secret:"installation-diag-secret-fixture",identity_quality:"installation_only",app_version:"0.10.12",platform:"windows",arch:"x86_64"});
   assert.equal(registered.status,200);
   const creds=registered.json, auth={authorization:`Bearer ${creds.device_token}`};
+  for (const malformed of [null, [], "invalid"]) {
+    const result=await call(prefix+"/diagnostics/report",malformed,auth);
+    assert.equal(result.status,400);
+    assert.equal(result.json.error,'invalid_diagnostic_report');
+  }
   const collection=await call(prefix+"/behavior/collection/start",{device_id:creds.device_id,request_id:"fixture_start_request_1"},auth);
   const event=witness({collection_period_id:collection.json.collection_period_id});
   const accepted=await call(prefix+"/behavior/events",{device_id:creds.device_id,events:[event]},auth);assert.equal(accepted.status,200);
@@ -365,8 +418,21 @@ test("HTTP closes the collection/authorization/admin/CSRF/delete loop without pu
   const fingerprint=groups.json.rows[0].fingerprint;
   assert.equal((await call(prefix+`/diagnostics/samples?fingerprint=${fingerprint}`,undefined,{cookie:analyst.cookie})).status,403);
   const samples=await call(prefix+`/diagnostics/samples?fingerprint=${fingerprint}`,undefined,{cookie:admin.cookie});assert.equal(samples.json.incidents.length,1);
-  const packet=report({collection_period_id:collection.json.collection_period_id});
+  const png=Buffer.alloc(512*1024,0);Buffer.from('89504e470d0a1a0a','hex').copy(png);
+  const packet=report({collection_period_id:collection.json.collection_period_id,
+    attachments:Array.from({length:3},()=>({kind:'image/png',content:png.toString('base64')}))});
+  const wire=JSON.stringify({device_id:creds.device_id,report:packet});
+  assert(Buffer.byteLength(wire)>512*1024 && Buffer.byteLength(wire)<=2300*1024);
   assert.equal((await call(prefix+"/diagnostics/report",{device_id:creds.device_id,report:packet},auth)).status,200);
+  // Breaking the request iterator on overflow may close the connection before
+  // the 413 reaches fetch. Both outcomes reject the upload; neither may append.
+  try {
+    assert.equal((await call(prefix+"/diagnostics/report",{device_id:creds.device_id,
+      report:{...packet,report_id:'oversized_report_fixture',notes:'x'.repeat(2300*1024)}},auth)).status,413);
+  } catch(error) {
+    assert.equal(error?.cause?.code,'ECONNRESET');
+  }
+  assert.equal(JSON.parse(readFileSync(join(directory,'failure-diagnostic-reports.json'),'utf8')).reports.length,1);
   const rebound = witness({event_id:"beh_renewed_incident_fixture",diagnostic_id:"beh_renewed_incident_fixture",
     collection_period_id:collection.json.collection_period_id,diagnostic_origin_period_id:"fixture_original_period"});
   const reboundReceipt = await call(prefix+"/behavior/events",{device_id:creds.device_id,events:[rebound]},auth);

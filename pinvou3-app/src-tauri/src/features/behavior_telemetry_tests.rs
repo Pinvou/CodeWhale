@@ -124,6 +124,7 @@ fn test_telemetry(runtime: RuntimeConfig, state: PersistedState) -> BehaviorTele
         outbox: Arc::new(StdMutex::new(Outbox::empty(outbox_path()))),
         tasks: Arc::new(StdMutex::new(HashMap::new())),
         diagnostics: Arc::new(StdMutex::new(Default::default())),
+        remote_executions: Arc::new(StdMutex::new(Default::default())),
         team_sessions: Arc::new(StdMutex::new(HashMap::new())),
         tool_calls: Arc::new(StdMutex::new(HashMap::new())),
         voice_submissions: Arc::new(StdMutex::new(HashMap::new())),
@@ -260,7 +261,8 @@ fn remote_unknown_terminal_keeps_its_diagnosis_without_emitting_a_task_failure()
     let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
     let metric = RemoteControlEvent::new(RemoteStage::TaskTerminal, RemoteOutcome::InternalError)
         .reason(RemoteReason::Unknown)
-        .diagnostic_task("unknown-remote-task", true)
+        .task("unknown-remote-task", true, Some("chat"))
+        .status("unknown")
         .diagnostic_terminal(false, true);
     telemetry.track(metric.into_behavior());
     let outbox = telemetry.outbox.lock().unwrap();
@@ -269,6 +271,10 @@ fn remote_unknown_terminal_keeps_its_diagnosis_without_emitting_a_task_failure()
     assert_eq!(event["event_name"], "remote_control_event");
     assert_eq!(event["diagnostic_code"], "remote_result_unknown");
     assert_eq!(event["diagnostic_site"], "remote_terminal");
+    assert_eq!(event["remote_task_status"], "unknown");
+    assert_eq!(event["remote_role"], "controlled");
+    assert_eq!(event["remote_mode"], "assistant");
+    assert!(event["remote_task_key"].as_str().unwrap().len() == 64);
     assert!(event.get("status").is_none());
     assert!(event.get("attempt_id").is_none());
 }
@@ -767,6 +773,15 @@ async fn diagnostic_rebound_report_sends_frozen_preview_with_current_delivery_au
             "collection_inactive",
         ),
         (409, "diagnostic_report_conflict", "rejected", ""),
+        (404, "not_found", "queued", "server_upgrade_required"),
+        (409, "unrecognized_conflict", "queued", "incident_pending"),
+        (400, "bad_request", "rejected", ""),
+        (403, "forbidden", "rejected", ""),
+        (413, "payload_too_large", "rejected", ""),
+        (422, "invalid_report", "rejected", ""),
+        (410, "unrecognized_gone", "queued", "retry_pending"),
+        (429, "rate_limited", "queued", "retry_pending"),
+        (503, "unavailable", "queued", "retry_pending"),
     ] {
         let runtime = test_runtime("http://localhost:1");
         let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
@@ -837,6 +852,111 @@ async fn diagnostic_rebound_report_sends_frozen_preview_with_current_delivery_au
             let reports = diagnostics::diagnostic_incidents(&telemetry).unwrap();
             assert_eq!(reports["reports"][0]["status"], expected);
             assert_eq!(reports["reports"][0]["reason"], reason);
+            // load() obtains report material from its separate durable file.
+            // Settled material must be erased there; retryable bodies stay frozen.
+            let material = std::fs::read_to_string(
+                paths::pinvou3_home().join("failure-diagnostic-reports.json"),
+            )
+            .unwrap();
+            assert_eq!(
+                material.contains("reproduce empty response"),
+                expected == "queued"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn diagnostic_report_gone_renews_credentials_or_honors_authoritative_deletion() {
+    let _home = TestHome::new();
+    for deleted in [false, true] {
+        let responses = if deleted {
+            vec![(410, r#"{"error":"device_data_deleted"}"#)]
+        } else {
+            vec![
+                (410, r#"{"error":"device_credentials_expired"}"#),
+                (
+                    200,
+                    r#"{"device_id":"renewed_device","device_token":"renewed_token"}"#,
+                ),
+                (200, r#"{"collection_period_id":"renewed_period"}"#),
+            ]
+        };
+        let (base, server) = mock_http(responses).await;
+        let mut runtime = test_runtime(&base);
+        runtime.behavior_events_url = format!("{base}/behavior/events");
+        let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+        let failure = diagnostic_failure("gone_session", "gone_turn");
+        let incident_id = failure.event_id.clone();
+        telemetry.track(failure);
+        let preview = diagnostics::preview_diagnostic(
+            &telemetry,
+            DiagnosticPreviewRequest {
+                incident_id,
+                notes: "gone recovery material".into(),
+                attachments: vec![],
+            },
+        )
+        .unwrap();
+        diagnostics::confirm_diagnostic(
+            &telemetry,
+            preview["preview_token"].as_str().unwrap(),
+            true,
+        )
+        .unwrap();
+        let (tx, rx) = mpsc::channel(1);
+        let worker = tokio::spawn(diagnostics::run_report_worker(rx, telemetry.worker_clone()));
+        let requests = tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(tx);
+        tokio::time::timeout(Duration::from_secs(3), worker)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(requests[0].starts_with("POST /diagnostics/report "));
+        let state = telemetry.state.lock().await.clone().unwrap();
+        if deleted {
+            assert_eq!(requests.len(), 1, "deleted devices must not register again");
+            assert!(state.control.collection_blocked);
+            assert!(!telemetry.collecting.load(Ordering::Acquire));
+            assert_eq!(
+                diagnostics::diagnostic_incidents(&telemetry).unwrap()["reports"],
+                json!([])
+            );
+            assert!(
+                !std::fs::read_to_string(
+                    paths::pinvou3_home().join("failure-diagnostic-reports.json")
+                )
+                .unwrap()
+                .contains("gone recovery material")
+            );
+        } else {
+            assert_eq!(requests.len(), 3);
+            assert!(requests[1].starts_with("POST /v1/register "));
+            assert!(requests[2].starts_with("POST /collection/start "));
+            assert_eq!(state.device_id.as_deref(), Some("renewed_device"));
+            assert!(telemetry.collecting.load(Ordering::Acquire));
+            assert!(state.credential_renewal_checkpoint.is_none());
+            for reload in [false, true] {
+                if reload {
+                    *telemetry.diagnostics.lock().unwrap() = diagnostics::load();
+                }
+                let reports = diagnostics::diagnostic_incidents(&telemetry).unwrap();
+                assert_eq!(reports["reports"].as_array().unwrap().len(), 1);
+                assert_eq!(reports["reports"][0]["status"], "queued");
+                let persisted: Value = serde_json::from_slice(
+                    &std::fs::read(paths::pinvou3_home().join("failure-diagnostic-reports.json"))
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    persisted[0]["lease"]["collection_period_id"],
+                    "renewed_period"
+                );
+                assert_eq!(persisted[0]["payload"], preview["report"]);
+            }
         }
     }
 }
@@ -1590,6 +1710,346 @@ async fn installation_heartbeat_expired_credentials_renew_same_installation() {
     assert!(requests[2].starts_with("POST /collection/start "));
     assert!(requests[3].starts_with("POST /v1/heartbeat "));
     assert!(requests[3].contains("Bearer renewed_token"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn deleting_behavior_data_clears_remote_contexts_in_memory_and_after_restart() {
+    let _home = TestHome::new();
+    for remote in [false, true] {
+        let runtime = test_runtime("http://127.0.0.1:1");
+        let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+        let lease = telemetry.current_lease().unwrap();
+        let contexts = json!({
+            "executions": { "private-session": {
+                "task_id": "private-task", "mode": "assistant", "started_at": now_ms(),
+                "turn_id": "owned-turn", "first_output": false, "lease": lease,
+            }},
+            "origins": { "private-task": {
+                "mode": "assistant", "started_at": now_ms(), "lease": lease,
+            }},
+        });
+        *telemetry.remote_executions.lock().unwrap() =
+            serde_json::from_value(contexts.clone()).unwrap();
+        let path = paths::pinvou3_home().join("behavior-telemetry-remote-tasks.json");
+        filesystem::atomic_write_private(&path, &serde_json::to_vec(&contexts).unwrap()).unwrap();
+        if remote {
+            telemetry.delete_remote_data().await.unwrap();
+            assert!(!telemetry.collecting.load(Ordering::Acquire));
+        } else {
+            telemetry.delete_local_data().await.unwrap();
+            assert!(telemetry.lease_is_current(&lease));
+        }
+        let empty = json!({"executions": {}, "origins": {}});
+        assert_eq!(
+            serde_json::to_value(&*telemetry.remote_executions.lock().unwrap()).unwrap(),
+            empty
+        );
+        assert_eq!(
+            serde_json::to_value(super::remote_execution::load_state()).unwrap(),
+            empty
+        );
+        let persisted = std::fs::read_to_string(path).unwrap();
+        assert!(!persisted.contains("private-task"));
+        assert!(!persisted.contains("private-session"));
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn admitted_installation_failure_reports_one_terminal_without_rejection() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://127.0.0.1:1");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    let lease = super::remote_execution::capture_execution_lease(&telemetry).unwrap();
+    // The actual admission callback registers before resource installation;
+    // failed installation never publishes the ordinary "admitted" event.
+    super::remote_execution::register_execution(&telemetry, "session", "task", "chat", &lease);
+    let terminal = || {
+        RemoteControlEvent::from_result::<()>(
+            RemoteStage::TaskTerminal,
+            &Err("model_runtime_unavailable".into()),
+            0,
+        )
+        .task("task", true, Some("chat"))
+        .status("failed")
+    };
+    super::remote_execution::track_execution_event(&telemetry, "session", "task", terminal());
+    let outbox = telemetry.outbox.lock().unwrap();
+    assert_eq!(outbox.records.len(), 1);
+    assert_eq!(outbox.records[0].event["remote_stage"], "task_terminal");
+    assert_eq!(outbox.records[0].event["remote_task_status"], "failed");
+    assert!(
+        !outbox
+            .records
+            .iter()
+            .any(|row| row.event["remote_stage"] == "task_rejected")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn deletion_and_withdrawal_invalidate_pending_admission_and_terminal_contexts() {
+    let _home = TestHome::new();
+    for action in ["local_delete", "remote_delete", "withdraw"] {
+        let runtime = test_runtime("http://127.0.0.1:1");
+        let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+        let old_lease = telemetry.current_lease().unwrap();
+        let pending = super::remote_execution::capture_execution_lease(&telemetry).unwrap();
+        super::remote_execution::register_execution(
+            &telemetry,
+            "existing-session",
+            "existing-task",
+            "chat",
+            &pending,
+        );
+        super::remote_execution::register_origin(
+            &telemetry,
+            "existing-origin",
+            Some("chat"),
+            &pending,
+        );
+        match action {
+            "local_delete" => {
+                telemetry.delete_local_data().await.unwrap();
+            }
+            "remote_delete" => {
+                telemetry.delete_remote_data().await.unwrap();
+            }
+            _ => {
+                telemetry.set_collection_enabled(false).await.unwrap();
+            }
+        }
+        if action == "local_delete" {
+            assert!(
+                telemetry.lease_is_current(&old_lease),
+                "local deletion preserves collection"
+            );
+        } else {
+            // Model a later consent period without allowing any old work to
+            // inherit it. Its original token must remain invalid.
+            telemetry
+                .authorization_generation
+                .fetch_add(1, Ordering::AcqRel);
+            *telemetry.collection_period_id.write().unwrap() = Some("new-consent".into());
+            telemetry.collecting.store(true, Ordering::Release);
+        }
+        super::remote_execution::register_execution(
+            &telemetry,
+            "late-session",
+            "late-task",
+            "chat",
+            &pending,
+        );
+        super::remote_execution::register_origin(&telemetry, "late-origin", Some("chat"), &pending);
+        for (session, task) in [
+            ("existing-session", "existing-task"),
+            ("late-session", "late-task"),
+        ] {
+            super::remote_execution::track_execution_event(
+                &telemetry,
+                session,
+                task,
+                RemoteControlEvent::new(RemoteStage::TaskTerminal, RemoteOutcome::InternalError)
+                    .task(task, true, Some("chat"))
+                    .status("failed"),
+            );
+        }
+        assert!(
+            telemetry.outbox.lock().unwrap().records.is_empty(),
+            "{action}"
+        );
+        let empty = json!({"executions": {}, "origins": {}});
+        assert_eq!(
+            serde_json::to_value(&*telemetry.remote_executions.lock().unwrap()).unwrap(),
+            empty
+        );
+        assert_eq!(
+            serde_json::to_value(super::remote_execution::load_state()).unwrap(),
+            empty
+        );
+        // New work can use current consent; invalidating captured work does
+        // not permanently disable collection or poison future admissions.
+        let fresh = super::remote_execution::capture_execution_lease(&telemetry).unwrap();
+        super::remote_execution::register_origin(&telemetry, "fresh-origin", Some("chat"), &fresh);
+        assert!(
+            serde_json::to_value(super::remote_execution::load_state()).unwrap()["origins"]
+                .get("fresh-origin")
+                .is_some()
+        );
+        super::remote_execution::register_execution(
+            &telemetry,
+            "fresh-session",
+            "fresh-task",
+            "chat",
+            &fresh,
+        );
+        super::remote_execution::track_execution_event(
+            &telemetry,
+            "fresh-session",
+            "fresh-task",
+            RemoteControlEvent::new(RemoteStage::TaskTerminal, RemoteOutcome::Ok)
+                .task("fresh-task", true, Some("chat"))
+                .status("success"),
+        );
+        assert_eq!(
+            telemetry.outbox.lock().unwrap().records.len(),
+            1,
+            "{action}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn remote_observers_require_task_owned_turn_binding_and_leave_local_turns_alone() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://127.0.0.1:1");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    let lease = telemetry.current_lease().unwrap();
+    *telemetry.remote_executions.lock().unwrap() = serde_json::from_value(json!({
+        "executions": { "shared-session": {
+            "task_id": "remote-task", "mode": "assistant", "started_at": now_ms(),
+            "turn_id": null, "first_output": false, "lease": lease,
+        }},
+        "origins": {},
+    }))
+    .unwrap();
+    let observe = |turn, stage| {
+        super::remote_execution::observe_execution(
+            &telemetry,
+            "shared-session",
+            turn,
+            stage,
+            Some(("openai", "gpt-5")),
+        )
+    };
+    for stage in [
+        RemoteStage::TaskRunning,
+        RemoteStage::FirstOutput,
+        RemoteStage::ModelUsed,
+    ] {
+        assert!(!observe("local-turn", stage));
+    }
+    super::remote_execution::bind_execution_turn(
+        &telemetry,
+        "shared-session",
+        "stale-task",
+        "local-turn",
+    );
+    assert!(!observe("local-turn", RemoteStage::TaskRunning));
+    assert!(telemetry.outbox.lock().unwrap().records.is_empty());
+
+    super::remote_execution::bind_execution_turn(
+        &telemetry,
+        "shared-session",
+        "remote-task",
+        "remote-turn",
+    );
+    // A later bind cannot steal the reserved remote turn either.
+    super::remote_execution::bind_execution_turn(
+        &telemetry,
+        "shared-session",
+        "remote-task",
+        "local-turn",
+    );
+    assert!(!observe("local-turn", RemoteStage::FirstOutput));
+    assert!(observe("remote-turn", RemoteStage::TaskRunning));
+    assert!(observe("remote-turn", RemoteStage::ModelUsed));
+    assert!(observe("remote-turn", RemoteStage::FirstOutput));
+    assert!(observe("remote-turn", RemoteStage::FirstOutput));
+    assert_eq!(telemetry.outbox.lock().unwrap().records.len(), 3);
+    assert!(
+        super::remote_execution::tool_task_key(&telemetry, "shared-session", "local-turn")
+            .is_none()
+    );
+    assert!(
+        super::remote_execution::tool_task_key(&telemetry, "shared-session", "remote-turn")
+            .is_some()
+    );
+    telemetry
+        .authorization_generation
+        .fetch_add(1, Ordering::AcqRel);
+    assert!(!observe("remote-turn", RemoteStage::ModelUsed));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn remote_contexts_follow_credential_renewal_but_never_cross_consent_generations() {
+    let _home = TestHome::new();
+    let (base, server) = mock_http(vec![
+        (410, r#"{"error":"device_credentials_expired"}"#),
+        (
+            200,
+            r#"{"device_id":"renewed_device","device_token":"renewed_token"}"#,
+        ),
+        (200, r#"{"collection_period_id":"renewed_period"}"#),
+    ])
+    .await;
+    let runtime = test_runtime(&base);
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    let original = telemetry.current_lease().unwrap();
+    let foreign = CollectionLease {
+        generation: original.generation + 1,
+        collection_period_id: "foreign_period".into(),
+    };
+    let execution = |lease: &CollectionLease| {
+        json!({
+            "task_id": "random-task", "mode": "assistant", "started_at": now_ms(),
+            "turn_id": "turn", "first_output": false, "lease": lease,
+        })
+    };
+    let origin = |lease: &CollectionLease| json!({ "mode": "assistant", "started_at": now_ms(), "lease": lease });
+    *telemetry.remote_executions.lock().unwrap() = serde_json::from_value(json!({
+        "executions": { "session": execution(&original), "foreign": execution(&foreign) },
+        "origins": { "random-task": origin(&original), "foreign": origin(&foreign) },
+    }))
+    .unwrap();
+
+    // Exercise the real 410 -> registration -> collection/start transition.
+    telemetry.send_heartbeat().await.unwrap();
+    assert_eq!(server.await.unwrap().len(), 3);
+    let renewed = telemetry.current_lease().unwrap();
+    assert_eq!(renewed.generation, original.generation);
+    assert_eq!(renewed.collection_period_id, "renewed_period");
+    assert!(!telemetry.lease_is_current(&original));
+    let restored = serde_json::to_value(super::remote_execution::load_state()).unwrap();
+    for (kind, key) in [("executions", "session"), ("origins", "random-task")] {
+        let bound: CollectionLease =
+            serde_json::from_value(restored[kind][key]["lease"].clone()).unwrap();
+        assert_eq!(bound, renewed);
+        assert!(telemetry.lease_is_current(&bound));
+    }
+    for kind in ["executions", "origins"] {
+        assert_eq!(restored[kind]["foreign"]["lease"], json!(foreign));
+    }
+    for (stage, controlled) in [
+        (RemoteStage::TaskTerminal, true),
+        (RemoteStage::ResultReceived, false),
+    ] {
+        assert!(
+            telemetry.try_track_for_lease(
+                RemoteControlEvent::new(stage, RemoteOutcome::Ok)
+                    .task("random-task", controlled, Some("chat"))
+                    .status("success")
+                    .into_behavior(),
+                &renewed
+            )
+        );
+    }
+    assert_eq!(telemetry.outbox.lock().unwrap().records.len(), 2);
+
+    // Explicit reauthorization has a different generation. Old work must not
+    // acquire the new consent even if a lifecycle migration is requested.
+    let next_generation = original.generation + 2;
+    telemetry
+        .rebind_lifecycle_state(next_generation, "new_consent_period")
+        .unwrap();
+    telemetry
+        .authorization_generation
+        .store(next_generation, Ordering::Release);
+    *telemetry.collection_period_id.write().unwrap() = Some("new_consent_period".into());
+    assert!(!telemetry.lease_is_current(&renewed));
+    let restored = serde_json::to_value(super::remote_execution::load_state()).unwrap();
+    assert_eq!(restored["origins"]["random-task"]["lease"], json!(renewed));
+    assert!(telemetry.clear_local_transient_state().is_empty());
+    let cleared = serde_json::to_value(super::remote_execution::load_state()).unwrap();
+    assert_eq!(cleared, json!({"executions": {}, "origins": {}}));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -3988,4 +4448,24 @@ fn tool_names_are_normalized_at_the_event_boundary() {
         let event = BehaviorEvent::new("tool_call_started").tool("mcp_custom", raw_name, "mcp");
         assert_eq!(event.fields.get("tool_name"), Some(&json!(expected_name)));
     }
+}
+
+#[test]
+fn remote_fields_use_the_dedicated_gateway_and_cannot_enter_generic_events() {
+    let event = RemoteControlEvent::new(RemoteStage::TaskSubmit, RemoteOutcome::Ok)
+        .task("gateway_fixture_task", false, Some("assistant"))
+        .into_behavior();
+    validate_client_event_fields(&event).unwrap();
+    for (field, value) in &event.fields {
+        assert!(field.starts_with("remote_"));
+        assert!(!client_event_field_allowed(field));
+        let mut generic = BehaviorEvent::new("task_submitted");
+        generic.fields.insert(field.clone(), value.clone());
+        assert!(validate_client_event_fields(&generic).is_err());
+    }
+    let mut private = event;
+    private
+        .fields
+        .insert("file_path".into(), json!("private-fixture"));
+    assert!(validate_client_event_fields(&private).is_err());
 }

@@ -106,6 +106,7 @@ impl BehaviorTelemetry {
             outbox,
             tasks,
             diagnostics: Arc::new(StdMutex::new(super::diagnostics::load())),
+            remote_executions: Arc::new(StdMutex::new(super::remote_execution::load_state())),
             team_sessions: Arc::new(StdMutex::new(HashMap::new())),
             tool_calls: Arc::new(StdMutex::new(HashMap::new())),
             voice_submissions: Arc::new(StdMutex::new(HashMap::new())),
@@ -463,6 +464,7 @@ impl BehaviorTelemetry {
         persist_task_attempts(&tasks)?;
         drop(tasks);
         super::diagnostics::rebind(self, generation, period_id)?;
+        super::remote_execution::rebind(self, generation, period_id)?;
         if let Ok(mut sessions) = self.team_sessions.lock() {
             sessions.values_mut().for_each(rebind);
         }
@@ -547,6 +549,7 @@ impl BehaviorTelemetry {
             outbox: self.outbox.clone(),
             tasks: self.tasks.clone(),
             diagnostics: self.diagnostics.clone(),
+            remote_executions: self.remote_executions.clone(),
             team_sessions: self.team_sessions.clone(),
             tool_calls: self.tool_calls.clone(),
             voice_submissions: self.voice_submissions.clone(),
@@ -930,6 +933,9 @@ impl BehaviorTelemetry {
         let mut failures = Vec::new();
         if let Err(error) = super::diagnostics::clear(self) {
             failures.push(format!("clear diagnostics: {error:#}"));
+        }
+        if let Err(error) = super::remote_execution::clear(self) {
+            failures.push(format!("clear remote telemetry: {error:#}"));
         }
         match self.outbox.lock() {
             Ok(mut outbox) => {
@@ -1366,22 +1372,12 @@ impl BehaviorTelemetry {
     }
 
     pub async fn delete_local_data(&self) -> Result<BehaviorTelemetryStatus> {
-        self.outbox
-            .lock()
-            .map_err(|_| anyhow::anyhow!("behavior outbox lock poisoned"))?
-            .clear()?;
-        if let Ok(mut tasks) = self.tasks.lock() {
-            tasks.clear();
-            persist_task_attempts(&tasks)?;
-        }
-        if let Ok(mut submissions) = self.voice_submissions.lock() {
-            submissions.clear();
-        }
-        if let Ok(mut artifacts) = self.artifacts.lock() {
-            artifacts.clear();
-        }
-        if let Ok(mut latest_turns) = self.latest_turns.lock() {
-            latest_turns.clear();
+        let failures = self.clear_local_transient_state();
+        if !failures.is_empty() {
+            anyhow::bail!(
+                "delete local behavior data cleanup incomplete: {}",
+                failures.join("; ")
+            );
         }
         Ok(self.status().await)
     }

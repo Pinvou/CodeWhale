@@ -286,10 +286,36 @@ mod tests {
             .map(|offset| submit_start + offset)
             .unwrap();
         let submit = &task_source[submit_start..submit_end];
-        let normalized_submit = submit.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(
-            normalized_submit
-                .contains("service, controlled_monotonic_millis(), local_attachments,")
-        );
+        let uses_controlled_admission_clock = |source: &str| {
+            let Some((_, call)) = source.split_once("let result = admit_and_dispatch(") else {
+                return false;
+            };
+            let Some((arguments, _)) = call.split_once(");") else {
+                return false;
+            };
+            let arguments: Vec<_> = arguments
+                .split(',')
+                .map(str::trim)
+                .filter(|argument| !argument.is_empty())
+                .collect();
+            // Pin the actual clock parameter, independently of whether the
+            // preceding Arc is moved or cloned. These arguments have no
+            // comma-bearing nested expressions.
+            arguments.len() == 12
+                && arguments[8] == "controlled_monotonic_millis()"
+                && arguments[9] == "local_attachments"
+        };
+        assert!(uses_controlled_admission_clock(submit));
+        for wrong_clock in ["monotonic_millis()", "0"] {
+            let mutated = submit.replace("controlled_monotonic_millis()", wrong_clock);
+            assert!(
+                !uses_controlled_admission_clock(&mutated),
+                "a different clock must fail the admission contract"
+            );
+        }
+        assert!(!uses_controlled_admission_clock(&submit.replace(
+            "let result = admit_and_dispatch(",
+            "let result = other_dispatch("
+        )));
     }
 }

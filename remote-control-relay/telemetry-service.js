@@ -32,6 +32,8 @@ import {
   validateBehaviorEventShape,
 } from "./behavior-telemetry-schema.js";
 import { normalizeSnapshot as normalizeControllerTelemetrySnapshot } from "./controller-telemetry.js";
+import { projectRemoteTasks, remoteTaskGroups, buildRemoteOverview } from "./remote-telemetry.js";
+import { prepareBehaviorEventView, isBehaviorEventView, namedBehaviorEvents, windowedBehaviorEvents } from "./behavior-event-view.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TELEMETRY_PREFIX = "/pinvou3/telemetry";
@@ -230,18 +232,36 @@ function isBehaviorInstallationDevice(device) {
   return device?.hardware_source === "installation_id";
 }
 
+// Only arrays created here carry a prepared snapshot. Public builder inputs
+// remain ordinary mutable arrays; their callers cannot accidentally reuse a stale
+// projection. Sub-builders share the immutable report snapshot and its task join.
+const installationEventSnapshots = new WeakMap();
+const installationIdentityKey = devices => devices.filter(isBehaviorInstallationDevice)
+  .map(device => boundedText(device.device_id, 128)).filter(Boolean).sort().join("\u001f");
+
 function installationBehaviorEvents(devices, behaviorEvents) {
-  const installationIds = new Set(devices
-    .filter(isBehaviorInstallationDevice)
-    .map((device) => boundedText(device.device_id, 128))
-    .filter(Boolean));
-  return behaviorEvents.filter((event) => installationIds.has(eventIdentity(event)));
+  const installationKey = installationIdentityKey(devices);
+  const previous = installationEventSnapshots.get(behaviorEvents);
+  if (previous?.installationKey === installationKey) return behaviorEvents;
+  const installationIds = new Set(devices.filter(isBehaviorInstallationDevice)
+    .map(device => boundedText(device.device_id, 128)).filter(Boolean));
+  // If the installation set changes, rebuild from raw facts rather than keeping
+  // an attribution projected from an installation which has since been deleted.
+  const rawEvents = (previous?.rawEvents || behaviorEvents)
+    .filter(event => installationIds.has(eventIdentity(event)));
+  const taskGroups = remoteTaskGroups(rawEvents);
+  const events = projectRemoteTasks(rawEvents, taskGroups);
+  installationEventSnapshots.set(events, { installationKey, rawEvents, taskGroups });
+  return prepareBehaviorEventView(events);
 }
 
 function attemptIdentityKey(event) {
   const identity = eventIdentity(event);
   const attempt = boundedText(event?.attempt_id || event?.turn_id || event?.event_id, 128);
-  return identity && attempt ? `${identity}\u001f${attempt}` : "";
+  // Projection IDs are server-generated, while a client may choose identical
+  // text for a local attempt. Keep their aggregation namespaces independent.
+  const source = event?.remote_projection ? 'remote' : 'local';
+  return identity && attempt ? `${identity}\u001f${source}\u001f${attempt}` : "";
 }
 
 function scopedEventKey(event, value, maxLength = 256) {
@@ -257,13 +277,19 @@ function sessionTurnIdentityKey(event) {
   return identity && session && turn ? `${identity}\u001f${session}\u001f${turn}` : "";
 }
 
+const coreFinishedSnapshots = new WeakMap();
 function coreTaskFinishedEvents(devices, behaviorEvents, startDay, endDay) {
-  const eligible = installationBehaviorEvents(devices, behaviorEvents).filter((event) => {
-    if (!isCoreUserTask(event, "task_finished")) return false;
-    const day = statsDay(event.occurred_at);
-    return day >= startDay && day <= endDay;
-  });
-  return uniqueAttempts(clipDailySubjectContributions(eligible).events, "task_finished");
+  const windowRows = filteredBehaviorEvents(installationBehaviorEvents(devices, behaviorEvents),
+    { startDay, endDay }, "task_finished");
+  const cached = coreFinishedSnapshots.get(windowRows);
+  if (cached) return cached;
+  // Filter core tasks before clipping, preserving this metric's existing cap
+  // semantics even when system tasks share the same installation/event name.
+  const filtered = windowRows.filter(event => isCoreUserTask(event, "task_finished"));
+  const eligible = prepareBehaviorEventView(filtered.length === windowRows.length ? windowRows : filtered);
+  const result = uniqueAttempts(clipDailySubjectContributions(eligible).events, "task_finished");
+  coreFinishedSnapshots.set(windowRows, result);
+  return result;
 }
 
 function prepareStatsTaskEvents(devices, behaviorEvents, startDay, endDay, now) {
@@ -271,7 +297,7 @@ function prepareStatsTaskEvents(devices, behaviorEvents, startDay, endDay, now) 
   // Keep submissions outside either chart window when identifying orphaned terminals.
   // The earliest timestamp also distinguishes future-only submissions for the hour chart.
   const submittedAttempts = new Map();
-  for (const event of installationEvents) {
+  for (const event of namedBehaviorEvents(installationEvents, "task_submitted")) {
     if (!isCoreUserTask(event, "task_submitted")) continue;
     const key = attemptIdentityKey(event);
     if (!key) continue;
@@ -288,8 +314,8 @@ function prepareStatsTaskEvents(devices, behaviorEvents, startDay, endDay, now) 
     if (!submitted && !finished) continue;
     const occurredAt = normalizeUsageOccurredAt(event.occurred_at);
     const key = attemptIdentityKey(event);
-    if (submitted || !submittedAttempts.has(key)) activity.push(event);
-    if (occurredAt <= now && (submitted || !(submittedAttempts.get(key) <= now))) {
+    if (!event.remote_attribution_unknown && (submitted || !submittedAttempts.has(key))) activity.push(event);
+    if (!event.remote_attribution_unknown && occurredAt <= now && (submitted || !(submittedAttempts.get(key) <= now))) {
       observedActivity.push(event);
     }
     const day = statsDay(event.occurred_at);
@@ -340,6 +366,7 @@ function taskActivityByDay(activityEvents, startDay, endDay) {
   const rows = new Map();
   for (let day = startDay; day <= endDay; day += 1) rows.set(day, new Set());
   for (const event of activityEvents) {
+    if (event.remote_attribution_unknown) continue;
     const day = statsDay(event.occurred_at);
     const identity = eventIdentity(event);
     if (rows.has(day) && identity) rows.get(day).add(identity);
@@ -349,12 +376,11 @@ function taskActivityByDay(activityEvents, startDay, endDay) {
 
 function coreTaskActivityByDay(devices, behaviorEvents, startDay, endDay) {
   const installationEvents = installationBehaviorEvents(devices, behaviorEvents);
-  const submittedAttempts = new Set(installationEvents
-    .filter((event) => isCoreUserTask(event, "task_submitted"))
-    .map(attemptIdentityKey)
-    .filter(Boolean));
-  const activity = installationEvents.filter((event) => isCoreUserTask(event, "task_submitted")
-    || (isCoreUserTask(event, "task_finished") && !submittedAttempts.has(attemptIdentityKey(event))));
+  const submissions = namedBehaviorEvents(installationEvents, "task_submitted")
+    .filter((event) => isCoreUserTask(event, "task_submitted"));
+  const submittedAttempts = new Set(submissions.map(attemptIdentityKey).filter(Boolean));
+  const activity = submissions.concat(namedBehaviorEvents(installationEvents, "task_finished")
+    .filter(event => isCoreUserTask(event, "task_finished") && !submittedAttempts.has(attemptIdentityKey(event))));
   return taskActivityByDay(activity, startDay, endDay);
 }
 
@@ -565,11 +591,8 @@ function activeIdentityByDay(_devices, _usageEvents, behaviorEvents, window) {
 }
 
 function filteredBehaviorEvents(events, window, eventName = null) {
-  return events.filter((event) => {
-    if (eventName && event.event_name !== eventName) return false;
-    const day = statsDay(event.occurred_at);
-    return day >= window.startDay && day <= window.endDay;
-  });
+  const rows = windowedBehaviorEvents(events, window, statsDay);
+  return eventName ? namedBehaviorEvents(rows, eventName) : rows;
 }
 
 function perActiveInstallationDay(events, activeByDay) {
@@ -581,14 +604,22 @@ function perActiveInstallationDay(events, activeByDay) {
   };
 }
 
+const uniqueAttemptSnapshots = new WeakMap();
 function uniqueAttempts(events, eventName) {
+  const cached = uniqueAttemptSnapshots.get(events)?.get(eventName);
+  if (cached) return cached;
   const attempts = new Map();
-  for (const event of events) {
-    if (event.event_name !== eventName) continue;
+  for (const event of namedBehaviorEvents(events, eventName)) {
     const key = attemptIdentityKey(event);
     if (key && !attempts.has(key)) attempts.set(key, event);
   }
-  return [...attempts.values()];
+  const result = [...attempts.values()];
+  if (isBehaviorEventView(events)) {
+    let names = uniqueAttemptSnapshots.get(events);
+    if (!names) uniqueAttemptSnapshots.set(events, names = new Map());
+    names.set(eventName, result);
+  }
+  return result;
 }
 
 function periodActiveCount(activeByDay) {
@@ -604,9 +635,9 @@ function rate(part, total) {
 }
 
 function successfulActiveIdentities(behaviorEvents, window) {
-  const windowEvents = filteredBehaviorEvents(behaviorEvents, window);
+  const windowEvents = filteredBehaviorEvents(behaviorEvents, window, "task_finished");
   return new Set(windowEvents
-    .filter(isSuccessfulCoreUserTask)
+    .filter(event => !event.remote_attribution_unknown && isSuccessfulCoreUserTask(event))
     .map(eventIdentity)
     .filter(Boolean));
 }
@@ -731,7 +762,10 @@ function contributionLimit(eventName) {
   return 100;
 }
 
+const contributionSnapshots = new WeakMap();
 function clipDailySubjectContributions(events) {
+  const cached = contributionSnapshots.get(events);
+  if (cached) return cached;
   const counts = new Map();
   const subjects = new Set();
   const clippedSubjects = new Set();
@@ -752,12 +786,19 @@ function clipDailySubjectContributions(events) {
     counts.set(key, count + 1);
     retained.push(event);
   }
-  return {
+  const result = {
     events: retained,
     subject_count: subjects.size,
     clipped_subject_count: clippedSubjects.size,
     clipped_subject_rate: rate(clippedSubjects.size, subjects.size),
   };
+  if (isBehaviorEventView(events)) {
+    // With no clipping, the immutable input already represents this exact view.
+    // Reuse its named index rather than retaining a duplicate array and index.
+    result.events = retained.length === events.length ? events : prepareBehaviorEventView(retained);
+    contributionSnapshots.set(events, result);
+  }
+  return result;
 }
 
 function buildVersionQuality(windowEvents) {
@@ -872,8 +913,8 @@ function currentBeijingWeek(now) {
 export function buildWeeklyExplicitValueMetric(behaviorEvents, now = Date.now()) {
   const week = currentBeijingWeek(now);
   const latestFeedback = new Map();
-  for (const event of behaviorEvents) {
-    if (event.event_name !== "response_feedback_changed" || Number(event.occurred_at) > now) continue;
+  for (const event of namedBehaviorEvents(behaviorEvents, "response_feedback_changed")) {
+    if (Number(event.occurred_at) > now) continue;
     const turnKey = sessionTurnIdentityKey(event);
     const key = event.feedback_id && turnKey ? `${turnKey}\u001f${event.feedback_id}` : turnKey;
     const current = latestFeedback.get(key);
@@ -891,12 +932,12 @@ export function buildWeeklyExplicitValueMetric(behaviorEvents, now = Date.now())
       && event.feedback_action === "set"
       && event.rating === "positive";
   });
-  const successfulTasks = uniqueAttempts(behaviorEvents.filter((event) => (
-    isSuccessfulCoreUserTask(event)
+  const successfulTasks = uniqueAttempts(namedBehaviorEvents(behaviorEvents, "task_finished").filter((event) => (
+    !event.remote_attribution_unknown && isSuccessfulCoreUserTask(event)
       && Number(event.occurred_at) >= week.start
       && Number(event.occurred_at) <= week.end
   )), "task_finished");
-  const diagnosticTaskTerminals = behaviorEvents.filter((event) => (
+  const diagnosticTaskTerminals = namedBehaviorEvents(behaviorEvents, "task_finished").filter((event) => (
     isCoreUserTask(event, "task_finished") && Number(event.occurred_at) <= now
   ));
   const diagnosticTerminalsByIdentity = new Map();
@@ -907,7 +948,10 @@ export function buildWeeklyExplicitValueMetric(behaviorEvents, now = Date.now())
     tasks.push(task);
     diagnosticTerminalsByIdentity.set(identity, tasks);
   }
-  const joinableSuccessfulTasks = successfulTasks.filter(task => sessionTurnIdentityKey(task));
+  // Remote task correlation does not prove which response a user copied or
+  // rated in their local proxy. Keep it out of the explicit-value denominator
+  // until an actual value-signal binding exists.
+  const joinableSuccessfulTasks = successfulTasks.filter(task => !task.remote_projection && sessionTurnIdentityKey(task));
   const weeklySuccessfulInstallations = new Set(successfulTasks.map(eventIdentity).filter(Boolean));
   const explicitValueSampleInstallations = new Set(joinableSuccessfulTasks.map(eventIdentity).filter(Boolean));
   const explicitValueIneligibleInstallations = new Set(
@@ -984,7 +1028,7 @@ function buildActivationFunnel(behaviorEvents, window, now) {
   const eventsByIdentity = new Map();
   for (const event of behaviorEvents) {
     const identity = eventIdentity(event);
-    if (!identity) continue;
+    if (!identity || event.remote_attribution_unknown) continue;
     const entries = eventsByIdentity.get(identity) || [];
     entries.push(event);
     eventsByIdentity.set(identity, entries);
@@ -1050,7 +1094,7 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
   const taskSubmitted = uniqueAttempts(windowEvents, "task_submitted")
     .filter((event) => isCoreUserTask(event, "task_submitted"));
   const coreAttemptKeys = new Set(taskSubmitted.map(attemptIdentityKey));
-  const activeTaskSubmitted = taskSubmitted;
+  const activeTaskSubmitted = taskSubmitted.filter(event => !event.remote_attribution_unknown);
   const taskAdmitted = uniqueAttempts(windowEvents, "task_admitted")
     .filter((event) => coreAttemptKeys.has(attemptIdentityKey(event)));
   const taskRejected = uniqueAttempts(windowEvents, "task_rejected")
@@ -1085,7 +1129,7 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
   const voiceAdopters = intersectionSize(voiceUsers, successfulActiveInstallations);
   const firstValueWithin24h = new Set();
   for (const event of taskFinished) {
-    if (event.status !== "success" || event.initiator_type !== "user"
+    if (event.remote_attribution_unknown || event.status !== "success" || event.initiator_type !== "user"
       || !["assistant", "code", "team"].includes(event.mode)) continue;
     const identity = eventIdentity(event);
     const cohort = maturedCohorts.get(identity);
@@ -1105,19 +1149,19 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
   const compensatedCount = [...taskRejected, ...taskFinished]
     .filter((event) => event.stage === "shutdown").length;
   const activeDayMetric = perActiveInstallationDay(activeTaskSubmitted, activeByDay);
-  const toolCallStarted = uniqueAttempts(windowEvents.map((event) => ({
+  const toolCallStarted = uniqueAttempts(namedBehaviorEvents(windowEvents, "tool_call_started").map((event) => ({
     ...event,
     attempt_id: event.operation_id,
   })), "tool_call_started");
-  const toolCallCompleted = uniqueAttempts(windowEvents.map((event) => ({
+  const toolCallCompleted = uniqueAttempts(namedBehaviorEvents(windowEvents, "tool_call_completed").map((event) => ({
     ...event,
     attempt_id: event.operation_id,
   })), "tool_call_completed");
-  const toolInstallStarted = uniqueAttempts(windowEvents.map((event) => ({
+  const toolInstallStarted = uniqueAttempts(namedBehaviorEvents(windowEvents, "tool_install_started").map((event) => ({
     ...event,
     attempt_id: event.operation_id,
   })), "tool_install_started");
-  const toolInstallCompleted = uniqueAttempts(windowEvents.map((event) => ({
+  const toolInstallCompleted = uniqueAttempts(namedBehaviorEvents(windowEvents, "tool_install_completed").map((event) => ({
     ...event,
     attempt_id: event.operation_id,
   })), "tool_install_completed");
@@ -1148,48 +1192,6 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
   const voiceFunnel = buildVoiceFunnel(windowEvents, taskFinished);
   const activationFunnel = buildActivationFunnel(behaviorEvents, window, now);
   const versionQuality = buildVersionQuality(windowEvents);
-  const remoteEvents = windowEvents.filter((event) => event.event_name === "remote_control_event");
-  const remoteGroups = new Map();
-  const remoteLatencyBuckets = new Map();
-  const remoteModelSources = new Map();
-  const remoteSizeBuckets = new Map();
-  const remotePermissionSteps = new Map([
-    ["request", 0], ["allowed", 0], ["denied", 0], ["expired", 0],
-  ]);
-  for (const event of remoteEvents) {
-    const key = [event.remote_stage, event.remote_outcome, event.remote_reason].join("|");
-    const row = remoteGroups.get(key) || {
-      stage: event.remote_stage,
-      outcome: event.remote_outcome,
-      reason: event.remote_reason,
-      count: 0,
-    };
-    row.count += 1;
-    remoteGroups.set(key, row);
-    remoteLatencyBuckets.set(
-      event.remote_latency_bucket,
-      (remoteLatencyBuckets.get(event.remote_latency_bucket) || 0) + 1,
-    );
-    if (event.remote_model_source) {
-      remoteModelSources.set(
-        event.remote_model_source,
-        (remoteModelSources.get(event.remote_model_source) || 0) + 1,
-      );
-    }
-    if (event.remote_size_bucket) {
-      remoteSizeBuckets.set(
-        event.remote_size_bucket,
-        (remoteSizeBuckets.get(event.remote_size_bucket) || 0) + 1,
-      );
-    }
-    if (event.remote_permission_step) {
-      remotePermissionSteps.set(
-        event.remote_permission_step,
-        (remotePermissionSteps.get(event.remote_permission_step) || 0) + 1,
-      );
-    }
-  }
-  // Event capacity can exceed the engine's function argument limit.
   const latestReceivedAt = behaviorEvents.reduce(
     (latest, event) => Math.max(latest, Number(event.received_at || event.occurred_at) || 0),
     0,
@@ -1277,22 +1279,13 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
     funnels: { activation: activationFunnel, voice: voiceFunnel },
     version_quality: versionQuality,
     error_categories: taskErrors,
-    remote_control: {
-      event_count: remoteEvents.length,
-      rows: [...remoteGroups.values()].sort((left, right) => (
-        left.stage.localeCompare(right.stage)
-          || left.outcome.localeCompare(right.outcome)
-          || left.reason.localeCompare(right.reason)
-      )),
-      latency_buckets: Object.fromEntries([...remoteLatencyBuckets.entries()].sort()),
-      model_sources: Object.fromEntries([...remoteModelSources.entries()].sort()),
-      size_buckets: Object.fromEntries([...remoteSizeBuckets.entries()].sort()),
-      permission_funnel: Object.fromEntries(remotePermissionSteps),
-      success_rate: reliableRate(
-        remoteEvents.filter((event) => event.remote_outcome === "ok").length,
-        remoteEvents.length,
-      ),
-    },
+    remote_control: buildRemoteOverview(behaviorEvents, window.startDay * DAY_MS - STATS_TIMEZONE_OFFSET_MS,
+      Math.min(now, (window.endDay + 1) * DAY_MS - STATS_TIMEZONE_OFFSET_MS - 1), {
+        minimumSample: MIN_RELIABLE_SAMPLE,
+        countedTaskKeys: new Set(coreTaskFinished.filter(e => e.remote_projection).map(e => e.remote_task_key)),
+        countedEvents: windowEvents,
+        taskGroups: installationEventSnapshots.get(behaviorEvents)?.taskGroups,
+      }),
     data_quality: {
       minimum_reliable_sample: MIN_RELIABLE_SAMPLE,
       minimum_group_subjects: MIN_PRIVACY_GROUP_SUBJECTS,
@@ -1346,7 +1339,7 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
   const clippedWindowEvents = clipDailySubjectContributions(
     filteredBehaviorEvents(behaviorEvents, window),
   ).events;
-  for (const event of clippedWindowEvents.filter(event => event.event_name === eventName)) {
+  for (const event of namedBehaviorEvents(clippedWindowEvents, eventName)) {
     if (eventName === "tool_install_completed" && event.success !== true) continue;
     const toolKey = controlledKey(event.tool_key, CONTROLLED_TOOL_KEYS);
     const toolName = normalizedToolName(event.tool_name) || toolKey;
@@ -1519,8 +1512,7 @@ export function buildBehaviorSceneRanking(devices, usageEvents, behaviorEvents, 
   const finishedByAttempt = new Map(uniqueAttempts(windowEvents, "task_finished")
     .map(event => [attemptIdentityKey(event), event]));
   const latestFeedbackByTurn = new Map();
-  for (const event of windowEvents) {
-    if (event.event_name !== "response_feedback_changed") continue;
+  for (const event of namedBehaviorEvents(windowEvents, "response_feedback_changed")) {
     const turnKey = sessionTurnIdentityKey(event);
     if (!turnKey) continue;
     const previous = latestFeedbackByTurn.get(turnKey);
@@ -1626,7 +1618,7 @@ export function buildBehaviorModelRanking(devices, usageEvents, behaviorEvents, 
   ).events;
   const finishedByAttempt = new Map(uniqueAttempts(windowEvents, "task_finished")
     .map(event => [attemptIdentityKey(event), event]));
-  for (const event of windowEvents.filter(event => event.event_name === "model_used")) {
+  for (const event of namedBehaviorEvents(windowEvents, "model_used")) {
     const modelId = controlledKey(event.model_key, CONTROLLED_MODEL_KEYS);
     const providerKey = controlledKey(event.provider_key, CONTROLLED_PROVIDER_KEYS);
     const key = `${providerKey}:${modelId}`;
@@ -1795,6 +1787,7 @@ export class TelemetryStore {
     this.events = [];
     this.eventIds = new Set();
     this.behaviorEvents = [];
+    this.behaviorProjectionSnapshot = null;
     this.behaviorEventIds = new Set();
     this.behaviorPipelineEvents = [];
     this.deletionTombstones = [];
@@ -2004,6 +1997,12 @@ export class TelemetryStore {
   persistRetentionFacts(now = Date.now(), events = this.behaviorEvents) {
     const devices = [...this.devices.values()].filter(device => !this.subjectWasDeleted(device.device_id));
     try {
+      // Remote admission/terminal facts can arrive in separate batches. Reuse
+      // the full joined snapshot before recording the durable first success;
+      // passive executions without an attributed controller never activate B.
+      if (events === this.behaviorEvents || events.some(event => event.event_name === "remote_control_event")) {
+        events = this.preparedBehaviorEvents(devices);
+      }
       this.retentionFacts.observe(events, devices, now, id => this.subjectWasDeleted(id));
     } catch {
       console.error("[telemetry-error] retention_facts_persist_failed");
@@ -2374,9 +2373,11 @@ export class TelemetryStore {
     let retained = this.behaviorEvents.filter((event) => Number(event.received_at || event.occurred_at) >= cutoff);
     if (retained.length > this.maxEvents) retained = retained.slice(-this.eventCompactionTarget);
     const changed = force || retained.length !== this.behaviorEvents.length;
-    this.behaviorEvents = retained;
-    this.behaviorEventIds = new Set(retained.map((event) => event.event_id));
-    if (changed) atomicWriteJsonLines(this.behaviorEventsPath, retained);
+    if (changed) {
+      this.behaviorEvents = retained;
+      this.behaviorEventIds = new Set(retained.map((event) => event.event_id));
+      atomicWriteJsonLines(this.behaviorEventsPath, retained);
+    }
     return changed;
   }
 
@@ -2789,10 +2790,26 @@ export class TelemetryStore {
     };
   }
 
+  preparedBehaviorEvents(devices) {
+    const installationKey = installationIdentityKey(devices);
+    const previous = this.behaviorProjectionSnapshot;
+    // Stored events are append-only. Ingestion grows this array; retention and
+    // deletion replace it. Include the installation set for identity upgrades
+    // and deletion. Derived views cache calendar selections only; wall-clock
+    // maturity, hourly and active-collection results are recomputed per request.
+    if (previous?.source === this.behaviorEvents && previous.length === this.behaviorEvents.length
+      && previous.installationKey === installationKey) return previous.events;
+    const events = installationBehaviorEvents(devices, this.behaviorEvents);
+    this.behaviorProjectionSnapshot = { source: this.behaviorEvents,
+      length: this.behaviorEvents.length, installationKey, events };
+    return events;
+  }
+
   overview() {
     if (this.compactExpiredEventsIfDue()) this.rebuildUsageCounters();
+    const devices = [...this.devices.values()];
     return {
-      ...buildStatsOverview([...this.devices.values()], this.events, this.behaviorEvents),
+      ...buildStatsOverview(devices, this.events, this.preparedBehaviorEvents(devices)),
       registration_capacity: {
         used: this.devices.size,
         limit: this.maxDevices,
@@ -2804,38 +2821,36 @@ export class TelemetryStore {
 
   deviceList() {
     if (this.compactExpiredEventsIfDue()) this.rebuildUsageCounters();
-    return buildDeviceList([...this.devices.values()], this.events, this.behaviorEvents);
+    const devices = [...this.devices.values()];
+    return buildDeviceList(devices, this.events, this.preparedBehaviorEvents(devices));
   }
 
   behaviorOverview(range) {
     if (this.compactExpiredEventsIfDue()) this.rebuildUsageCounters();
     const now = Date.now();
     this.persistRetentionFacts(now);
-    return buildBehaviorOverview(
-      [...this.devices.values()],
-      this.events,
-      this.behaviorEvents,
-      range,
-      now,
-      this.behaviorPipelineEvents,
-      this.retentionFacts.metrics(now),
-      this.retentionFacts.metricVersionStartedAt,
-    );
+    const devices = [...this.devices.values()];
+    return buildBehaviorOverview(devices, this.events, this.preparedBehaviorEvents(devices),
+      range, now, this.behaviorPipelineEvents, this.retentionFacts.metrics(now),
+      this.retentionFacts.metricVersionStartedAt);
   }
 
   behaviorTools(range, type) {
     if (this.compactExpiredEventsIfDue()) this.rebuildUsageCounters();
-    return buildBehaviorToolRanking([...this.devices.values()], this.events, this.behaviorEvents, range, type);
+    const devices = [...this.devices.values()];
+    return buildBehaviorToolRanking(devices, this.events, this.preparedBehaviorEvents(devices), range, type);
   }
 
   behaviorScenes(range) {
     if (this.compactExpiredEventsIfDue()) this.rebuildUsageCounters();
-    return buildBehaviorSceneRanking([...this.devices.values()], this.events, this.behaviorEvents, range);
+    const devices = [...this.devices.values()];
+    return buildBehaviorSceneRanking(devices, this.events, this.preparedBehaviorEvents(devices), range);
   }
 
   behaviorModels(range) {
     if (this.compactExpiredEventsIfDue()) this.rebuildUsageCounters();
-    return buildBehaviorModelRanking([...this.devices.values()], this.events, this.behaviorEvents, range);
+    const devices = [...this.devices.values()];
+    return buildBehaviorModelRanking(devices, this.events, this.preparedBehaviorEvents(devices), range);
   }
 
   commercialOverview(range) {
@@ -3025,6 +3040,7 @@ export function createTelemetryService(options = {}) {
       if (req.method === "POST" && routePath === `${STATS_PREFIX}/api/diagnostics/report`) {
         if (rateLimited(invalidCredentialAttempts, `diagnostic:${requestIp}`, 30)) throw new DiagnosticError(429, "rate_limited");
         const input = await readJson(req, 2300 * 1024, 15000);
+        if (!input || typeof input !== "object" || Array.isArray(input)) throw new DiagnosticError(400, "invalid_diagnostic_report");
         const device = store.authenticate(input.device_id, bearer(req));
         if (!device) { rejectUnknownDevice(res, bearer(req), requestIp); return true; }
         store.failureReports.prune(store.devices);

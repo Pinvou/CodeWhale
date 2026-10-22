@@ -235,6 +235,8 @@ export const dictEn = {
         kbOutTodayPrefix: 'Today', kbOutWeekdays: ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'],
         kbOutPreview: 'Preview', kbOutOpenChat: 'Open in chat', kbOutContinue: 'Continue', kbOutNewProject: 'New project', kbOutGallery: 'Gallery', kbOutList: 'List', kbOutOpenExt: 'Open in system', kbOutOpenFolder: 'Open folder',
         kbOutEmpty: 'No outputs yet', kbOutEmptyHint: 'Chat with PINVOU — things you make together will appear here.',
+        kbOutSkippedNotice: (n) => `${n} session record${n === 1 ? '' : 's'} too large or unreadable — their outputs are not listed`,
+        kbOutScanError: 'The deliverables index could not be read just now', kbOutRetry: 'Retry',
         kbOutContinuePrefill: (name) => `Continue refining "${name}"`, kbOutRequirementLabel: 'My request:', kbOutFileCount: (n) => `${n} files`,
         kbCatAll: 'All', kbCatDoc: 'Docs', kbCatSheet: 'Sheets', kbCatPpt: 'Slides', kbCatPdf: 'PDF', kbCatImg: 'Images', kbCatZip: 'Archives',
         kbRecent: 'Recently modified', kbAddToKb: 'Add to knowledge', kbAdd: 'Add', kbAddFiles: 'Add files', kbAddFolder: 'Add folder', kbIndexing: 'Parsing',

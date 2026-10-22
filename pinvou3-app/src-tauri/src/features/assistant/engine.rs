@@ -155,6 +155,9 @@ struct TurnLifecycleState {
     /// this field's lifetime: arming stores the token and the forwarder
     /// matches the event echo against it.
     submission_id: Option<String>,
+    /// Exact reserved submission that owns remote telemetry, never the first
+    /// arbitrary TurnStarted arriving for this session.
+    remote_telemetry_submission: Option<(u64, String, String)>,
 }
 
 /// The durable, user-visible meaning of a submitted engine operation.
@@ -271,6 +274,7 @@ pub(crate) struct TurnReservation {
     base_transcript_revision: Option<String>,
     transcript: Option<ReservedTranscript>,
     admission_metadata: Option<TurnAdmissionMetadata>,
+    remote_task_id: Option<String>,
     submitted: bool,
 }
 
@@ -283,6 +287,7 @@ impl TurnReservation {
             base_transcript_revision: None,
             transcript: None,
             admission_metadata: None,
+            remote_task_id: None,
             submitted: false,
         }
     }
@@ -299,6 +304,28 @@ impl TurnReservation {
     /// this survives persistence compaction and is unique for the session.
     pub(crate) fn generation(&self) -> u64 {
         self.generation
+    }
+
+    pub(crate) fn set_remote_task_id(&mut self, task_id: &str) {
+        self.remote_task_id = Some(task_id.to_owned());
+    }
+
+    fn bind_remote_submission(&self, submission_id: Option<&str>) -> Result<()> {
+        let Some(task_id) = self.remote_task_id.as_ref() else {
+            return Ok(());
+        };
+        let submission_id = submission_id
+            .ok_or_else(|| anyhow::anyhow!("remote turn requires a submission identity"))?;
+        let mut state = self.lifecycle.state.lock();
+        if !state.active || state.active_reservation_id != Some(self.reservation_id) {
+            anyhow::bail!("turn reservation invalidated or no longer active");
+        }
+        state.remote_telemetry_submission = Some((
+            self.reservation_id,
+            submission_id.to_owned(),
+            task_id.clone(),
+        ));
+        Ok(())
     }
 
     pub(crate) fn set_transcript(
@@ -754,6 +781,7 @@ impl TurnLifecycle {
             state.active_reservation_id = Some(reservation_id);
             state.pending_cancel = None;
             state.submission_id = None;
+            state.remote_telemetry_submission = None;
             (reservation_id, state.turn_epoch)
         };
         crate::features::connectors::visibility::turn_submitted();
@@ -849,6 +877,13 @@ impl TurnLifecycle {
 
     fn on_reservation_failed(&self, reservation_id: u64) {
         let mut state = self.state.lock();
+        if state
+            .remote_telemetry_submission
+            .as_ref()
+            .is_some_and(|(owner, _, _)| *owner == reservation_id)
+        {
+            state.remote_telemetry_submission = None;
+        }
         if let Some(index) = state
             .transcript_rules
             .iter()
@@ -875,6 +910,7 @@ impl TurnLifecycle {
         state.active = false;
         state.submitted = false;
         state.active_reservation_id = None;
+        state.remote_telemetry_submission = None;
         drop(state);
         crate::features::connectors::visibility::turn_finished();
     }
@@ -1091,6 +1127,21 @@ impl TurnLifecycle {
         true
     }
 
+    fn take_remote_task_for_submission(&self, submission_id: Option<&str>) -> Option<String> {
+        let mut state = self.state.lock();
+        let (_, submitted, _) = state.remote_telemetry_submission.as_ref()?;
+        if submission_id != Some(submitted.as_str()) {
+            return None;
+        }
+        // An autonomous turn can finish before this submitted operation starts,
+        // clearing active_reservation_id. Its terminal does not revoke the
+        // queued operation; only the exact submission echo consumes its owner.
+        state
+            .remote_telemetry_submission
+            .take()
+            .map(|(_, _, task)| task)
+    }
+
     fn claim_terminal_transition(&self) -> Option<TerminalTransition> {
         let transition = {
             let mut state = self.state.lock();
@@ -1131,6 +1182,7 @@ impl TurnLifecycle {
             let admission = Self::take_admission_locked(&mut state);
             let fallback = Self::active_transcript_fallback_locked(&state);
             state.reclaimed = true;
+            state.remote_telemetry_submission = None;
             state.terminal_emitted = true;
             state.terminal_closing = true;
             state.active = false;
@@ -1240,6 +1292,7 @@ impl TurnLifecycle {
             return false;
         }
         state.reclaimed = true;
+        state.remote_telemetry_submission = None;
         if let Some(reservation_id) = state.active_reservation_id.take() {
             Self::remove_unsubmitted_rule_locked(&mut state, reservation_id);
         }
@@ -1278,6 +1331,7 @@ impl TurnLifecycle {
             return false;
         }
         state.reclaimed = true;
+        state.remote_telemetry_submission = None;
         if let Some(reservation_id) = state.active_reservation_id.take() {
             Self::remove_unsubmitted_rule_locked(&mut state, reservation_id);
         }
@@ -2228,6 +2282,7 @@ impl AppEngine {
             _ => anyhow::bail!("reserved turn requires a user-message operation"),
         };
         reservation.prepare_actual_user_content(actual_user_content)?;
+        reservation.bind_remote_submission(submission_id.as_deref())?;
         let shell_scope = match self.turn_shell_tasks.as_ref() {
             Some(registry) => Some(
                 registry
@@ -2769,6 +2824,131 @@ mod turn_lifecycle_tests {
         );
         // 消费 reservation 避免 Drop 副作用。
         reservation.mark_submitted(None);
+    }
+
+    #[test]
+    fn remote_telemetry_ownership_requires_the_exact_reserved_submission() {
+        let lifecycle = Arc::new(TurnLifecycle::default());
+        let mut remote = lifecycle.reserve().unwrap();
+        remote.set_remote_task_id("remote-task-1");
+        assert!(remote.bind_remote_submission(None).is_err());
+        remote
+            .bind_remote_submission(Some("remote-submission-1"))
+            .unwrap();
+        // A local/autonomous turn arriving first cannot consume this owner.
+        assert_eq!(lifecycle.take_remote_task_for_submission(None), None);
+        assert_eq!(
+            lifecycle.take_remote_task_for_submission(Some("local-submission")),
+            None
+        );
+        assert_eq!(
+            lifecycle
+                .take_remote_task_for_submission(Some("remote-submission-1"))
+                .as_deref(),
+            Some("remote-task-1")
+        );
+        drop(remote);
+        assert_eq!(
+            lifecycle.take_remote_task_for_submission(Some("remote-submission-1")),
+            None
+        );
+        let local = lifecycle.reserve().unwrap();
+        assert_eq!(
+            lifecycle.take_remote_task_for_submission(Some("remote-submission-1")),
+            None
+        );
+        drop(local);
+    }
+
+    #[test]
+    fn remote_telemetry_owner_survives_an_overtaking_autonomous_terminal() {
+        let lifecycle = Arc::new(TurnLifecycle::default());
+        let mut remote = lifecycle.reserve().unwrap();
+        remote.set_remote_task_id("remote-task");
+        remote
+            .bind_remote_submission(Some("remote-submission"))
+            .unwrap();
+        remote.mark_submitted(Some("remote-submission".into()));
+
+        lifecycle.on_started("autonomous-turn".into());
+        assert_eq!(lifecycle.take_remote_task_for_submission(None), None);
+        assert_eq!(
+            lifecycle.claim_terminal().unwrap().turn_id.as_deref(),
+            Some("autonomous-turn")
+        );
+        lifecycle.finish_terminal_emission();
+        assert!(lifecycle.state.lock().active_reservation_id.is_none());
+
+        lifecycle.on_started("remote-turn".into());
+        assert_eq!(
+            lifecycle
+                .take_remote_task_for_submission(Some("remote-submission"))
+                .as_deref(),
+            Some("remote-task")
+        );
+        assert_eq!(
+            lifecycle.take_remote_task_for_submission(Some("remote-submission")),
+            None
+        );
+        lifecycle.claim_terminal().unwrap();
+        lifecycle.finish_terminal_emission();
+    }
+
+    #[test]
+    fn remote_telemetry_pending_owner_is_revoked_by_failed_cancelled_or_replaced_turns() {
+        for boundary in ["drop", "cancel", "invalidate", "reclaim", "replacement"] {
+            let lifecycle = Arc::new(TurnLifecycle::default());
+            let mut remote = lifecycle.reserve().unwrap();
+            remote.set_remote_task_id("remote-task");
+            remote
+                .bind_remote_submission(Some("remote-submission"))
+                .unwrap();
+            match boundary {
+                "drop" => drop(remote),
+                "cancel" => {
+                    assert!(lifecycle.claim_unsubmitted_terminal());
+                    drop(remote);
+                    lifecycle.finish_terminal_emission();
+                }
+                "invalidate" => {
+                    assert!(lifecycle.invalidate_unsubmitted_reservation());
+                    drop(remote);
+                }
+                "reclaim" => {
+                    remote.mark_submitted(Some("remote-submission".into()));
+                    assert!(lifecycle.claim_reclaimed_once());
+                    lifecycle.finish_terminal_emission();
+                }
+                "replacement" => {
+                    remote.mark_submitted(Some("remote-submission".into()));
+                    lifecycle.on_started("autonomous-turn".into());
+                    lifecycle.claim_terminal().unwrap();
+                    lifecycle.finish_terminal_emission();
+                    let newer = lifecycle.reserve().unwrap();
+                    // A late failure of the old reservation cannot clear the
+                    // current reservation's identity.
+                    let mut newer = newer;
+                    newer.set_remote_task_id("new-task");
+                    newer
+                        .bind_remote_submission(Some("new-submission"))
+                        .unwrap();
+                    lifecycle.on_reservation_failed(1);
+                    assert_eq!(
+                        lifecycle
+                            .take_remote_task_for_submission(Some("new-submission"))
+                            .as_deref(),
+                        Some("new-task")
+                    );
+                    drop(newer);
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                lifecycle.take_remote_task_for_submission(Some("remote-submission")),
+                None,
+                "{boundary} must revoke the old pending owner"
+            );
+        }
     }
 
     #[test]

@@ -380,6 +380,8 @@ fn log_task_submit_boundary(stage: &str) {
 struct DesktopControlledSubmitBackend {
     app: AppHandle,
     budget: TurnBudget,
+    // Per-call observation only; the ledger remains the admission authority.
+    diagnostic_task: Arc<parking_lot::Mutex<Option<String>>>,
 }
 
 impl DesktopControlledSubmitBackend {
@@ -705,6 +707,7 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
     }
 
     fn admit_and_dispatch(&self, prepared: PreparedControlledTask) -> Result<Value, UseCaseError> {
+        *self.diagnostic_task.lock() = Some(prepared.task_id.clone());
         log_task_submit_boundary("controlled_submission_admission_entered");
         route_prepared_controlled_task(
             prepared,
@@ -794,36 +797,73 @@ async fn submit_controlled_on_worker(
     app: AppHandle,
     request: ControlledInput,
 ) -> Result<ControlledSubmissionResult, UseCaseError> {
-    let attachment_cleanup = match &request {
-        ControlledInput::Local(input) => {
-            super::desktop_remote_task::LocalAttachmentCleanup::new(Some(&input.attachments))
-        }
-        ControlledInput::Remote(_) => super::desktop_remote_task::LocalAttachmentCleanup::new(None),
-    };
-    // Blocking workers do not inherit task-local budgets. Freeze this deadline
-    // before queueing and pass it explicitly through admission to the ticket.
-    let budget = TurnBudget::from_environment().map_err(|code| submit_error(&code))?;
-    run_controlled_submission_worker(budget, move |budget| {
-        let _attachment_cleanup = attachment_cleanup;
-        let backend = DesktopControlledSubmitBackend { app, budget };
-        match request {
-            ControlledInput::Local(request) => {
-                ControlledSubmission::new(backend).submit_sync(ControlledInput::Local(request))
+    let local = matches!(&request, ControlledInput::Local(_));
+    let started = std::time::Instant::now();
+    let diagnostic_task = Arc::new(parking_lot::Mutex::new(None));
+    let observation = diagnostic_task.clone();
+    let worker_app = app.clone();
+    let result = async {
+        let attachment_cleanup = match &request {
+            ControlledInput::Local(input) => {
+                super::desktop_remote_task::LocalAttachmentCleanup::new(Some(&input.attachments))
             }
-            ControlledInput::Remote(request) => {
-                // A malformed frame must not allocate a B session.
-                let (lease, caps) = backend.live_context()?;
-                if lease.remote_control_generation != request.generation {
-                    return Err(UseCaseError::new("task_session_generation_stale", true));
+            ControlledInput::Remote(_) => {
+                super::desktop_remote_task::LocalAttachmentCleanup::new(None)
+            }
+        };
+        // Blocking workers do not inherit task-local budgets. Freeze this deadline
+        // before queueing and pass it explicitly through admission to the ticket.
+        let budget = TurnBudget::from_environment().map_err(|code| submit_error(&code))?;
+        run_controlled_submission_worker(budget, move |budget| {
+            let _attachment_cleanup = attachment_cleanup;
+            let backend = DesktopControlledSubmitBackend {
+                app: worker_app,
+                budget,
+                diagnostic_task,
+            };
+            match request {
+                ControlledInput::Local(request) => {
+                    ControlledSubmission::new(backend).submit_sync(ControlledInput::Local(request))
                 }
-                log_task_submit_boundary("task_submit_context_validated");
-                let validated = backend.validate_payload(&request.payload, &lease, &caps)?;
-                log_task_submit_boundary("task_submit_payload_validated");
-                submit_prevalidated_remote(backend, request, validated)
+                ControlledInput::Remote(request) => {
+                    // A malformed frame must not allocate a B session.
+                    let (lease, caps) = backend.live_context()?;
+                    if lease.remote_control_generation != request.generation {
+                        return Err(UseCaseError::new("task_session_generation_stale", true));
+                    }
+                    log_task_submit_boundary("task_submit_context_validated");
+                    let validated = backend.validate_payload(&request.payload, &lease, &caps)?;
+                    log_task_submit_boundary("task_submit_payload_validated");
+                    submit_prevalidated_remote(backend, request, validated)
+                }
             }
+        })
+        .await
+    }
+    .await;
+    if let (true, Err(submit_failure)) = (local, &result) {
+        let ledger = app.state::<Arc<RemoteTaskLedger>>();
+        if should_report_unbound_local_failure(&ledger, observation.lock().as_deref()) {
+            use crate::features::behavior_telemetry::{
+                RemoteControlEvent, RemoteStage, track_remote_control,
+            };
+            let error = Err::<(), _>(submit_failure.code().to_owned());
+            track_remote_control(
+                &app,
+                RemoteControlEvent::from_result(
+                    RemoteStage::TaskSubmit,
+                    &error,
+                    started.elapsed().as_millis() as u64,
+                )
+                .role(true),
+            );
         }
-    })
-    .await
+    }
+    result
+}
+
+fn should_report_unbound_local_failure(ledger: &RemoteTaskLedger, task_id: Option<&str>) -> bool {
+    task_id.is_none_or(|task_id| ledger.confirms_absence(task_id))
 }
 
 impl ControlledExecutionPort for DesktopControlledExecutionAdapter {
@@ -1252,20 +1292,37 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
             }
             Err(error) => log_controlled_port_error("task_submit_business_rejected", *error),
         }
-        result
-            .map(|outcome| outcome.status)
-            .map_err(|error| {
-                let code = error.code();
-                if crate::features::remote_control::controller::task_rejection::is_definite(code) {
-                    // A retry can fail a now-changed policy after an earlier
-                    // attempt was already admitted. Never call that rejection.
-                    let ledger = self.app.state::<Arc<RemoteTaskLedger>>();
-                    if !matches!(ledger.record(&field("task_id")), Err(ref lookup) if lookup.code == "task_not_found") {
-                        return "task_request_conflict".to_owned();
-                    }
+        result.map(|outcome| outcome.status).map_err(|error| {
+            let code = error.code();
+            if crate::features::remote_control::controller::task_rejection::is_definite(code) {
+                // A retry can fail a now-changed policy after an earlier
+                // attempt was already admitted. Never call that rejection.
+                let ledger = self.app.state::<Arc<RemoteTaskLedger>>();
+                if !ledger.confirms_absence(&field("task_id")) {
+                    return "task_request_conflict".to_owned();
                 }
-                code.to_owned()
-            })
+                // B owns the admission decision even when A opted out or
+                // disconnected before its rejection receipt arrived. This
+                // is not a B-origin submission or an executed invocation.
+                use crate::features::behavior_telemetry::{
+                    RemoteControlEvent, RemoteStage, track_remote_control,
+                };
+                track_remote_control(
+                    &self.app,
+                    RemoteControlEvent::from_result::<()>(
+                        RemoteStage::TaskRejected,
+                        &Err(code.to_owned()),
+                        0,
+                    )
+                    .task(
+                        &field("task_id"),
+                        true,
+                        payload.get("mode").and_then(Value::as_str),
+                    ),
+                );
+            }
+            code.to_owned()
+        })
     }
 
     async fn task_status(
@@ -1693,6 +1750,68 @@ mod dev19_replay_tests {
             relay_epoch: "relay-1".into(),
             remote_control_generation: "generation-1".into(),
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_failure_diagnostic_requires_confirmed_absence_from_admission() {
+        let ledger = RemoteTaskLedger::in_memory();
+        let preparation = run_controlled_submission_worker(
+            TurnBudget::for_test(std::time::Duration::from_secs(5)),
+            |_| validated_local_text("").map(|_| ()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(preparation.code(), "task_input_invalid");
+        assert!(
+            should_report_unbound_local_failure(&ledger, None),
+            "preparation failed before any task was generated"
+        );
+        assert!(should_report_unbound_local_failure(&ledger, Some("task-1")));
+        let lease = lease();
+        let request = RemoteTaskRequest::from_payload(&json!({
+            "connection_id": lease.connection_id,
+            "controller_lease_id": lease.controller_lease_id,
+            "lease_epoch": lease.lease_epoch, "relay_epoch": lease.relay_epoch,
+            "remote_control_generation": lease.remote_control_generation,
+            "task_id": "task-1", "client_request_id": "client-1",
+            "session_id": "session-1", "capability_revision": "1",
+            "mode": "chat", "model_source": "controlled_device",
+            "input_digest": remote_task_input_digest("hello", &[], &[]),
+            "input": {"text": "hello", "attachment_ids": [], "skill_ids": []},
+        }))
+        .unwrap();
+        ledger.admit(&lease, &request, 100).unwrap();
+        assert!(!should_report_unbound_local_failure(
+            &ledger,
+            Some("task-1")
+        ));
+        // parking_lot has no poison fallback: even a worker unwind preserves
+        // the identity, never replacing it with None ("not prepared yet").
+        let observed = parking_lot::Mutex::new(Some("task-1".to_owned()));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _locked = observed.lock();
+            panic!("worker failed after recording its task identity");
+        }));
+        assert!(!should_report_unbound_local_failure(
+            &ledger,
+            observed.lock().as_deref()
+        ));
+        ledger
+            .complete(
+                "task-1",
+                crate::features::remote_control::controller::task::RemoteTaskTerminal::Failed,
+                None,
+                150,
+            )
+            .unwrap();
+        assert!(!should_report_unbound_local_failure(
+            &ledger,
+            observed.lock().as_deref()
+        ));
+        assert!(should_report_unbound_local_failure(
+            &ledger,
+            Some("another-task")
+        ));
     }
 
     #[test]

@@ -78,6 +78,11 @@ function injectSource() {
         case 'list_marketplace_tools': return Promise.resolve([]);
         case 'get_mode_state': return Promise.resolve({mode:'yolo',plan_phase:'none'});
         case 'get_active_persona': return Promise.resolve(null);
+        // v2 returns DeliverableIndex { rows, skipped }: the panel renders
+        // rows and surfaces skipped as a partial-result notice. The legacy
+        // command keeps the bare-array contract the artifacts facade
+        // (bridge.artifacts.listDeliverableIndex) negotiates on desktop.
+        case 'list_deliverable_index_v2': return Promise.resolve({rows: OUTPUTS, skipped: []});
         case 'list_deliverable_index': return Promise.resolve(OUTPUTS);
         // ---- kb_* ----
         case 'kb_scan_status': return Promise.resolve({running:false,phase:'done',scanned:1248});

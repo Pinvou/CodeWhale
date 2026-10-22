@@ -680,7 +680,7 @@ test("behavior analytics views render alongside the device dashboard", async () 
       [...document.querySelectorAll(".behavior-range[data-behavior-section]")]
         .map(control => control.dataset.behaviorSection)
         .sort(),
-      ["activation", "errors", "models", "scenes", "summary", "toolCalls", "toolInstalls", "versions", "voice"],
+      ["activation", "errors", "models", "remote", "scenes", "summary", "toolCalls", "toolInstalls", "versions", "voice"],
     );
     assert.match(statsHtml, /WEVTA 是可观测价值下界/);
     assert.match(statsHtml, /固定口径/);

@@ -64,6 +64,9 @@ test("unfinished deletion survives receipt expiry, repeated compaction and resta
   const failure = t.mock.method(FailureReportStore.prototype, "prune", () => { throw new Error("fixture storage unavailable"); });
   const deletion = store.deleteBehaviorData(owner, {request_id:"review_expiry_delete"});
   assert.equal(deletion.status, "processing");
+  const ledger=JSON.parse(readFileSync(store.deletionTombstonesPath,'utf8'));
+  assert.equal(ledger.version,3);
+  assert(ledger.records.some(row=>row.deletion_request_id===deletion.deletion_request_id));
   const future = deletion.accepted_at + 31 * 86400000;
   for (let i=0; i<3; i++) store.compactExpiredData(future);
   assert.deepEqual(readFileSync(store.failureReports.path), before);
