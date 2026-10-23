@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import vm from 'node:vm';
 import { marked } from 'marked';
 import { createNativeStreamHarness, nativeStreamSources } from './helpers/native-stream-harness.mjs';
 
@@ -270,30 +271,63 @@ test('the host wires activation refresh before subscriber publication', () => {
 });
 
 // ---- 评审 P2-5：流式接线探针钩子锁住（burst→markScheduled/markDispatched 调用序列）----
-test('流式 burst 驱动探针 begin→markDispatched 序列（接线回归锁）', async () => {
+// r2 升级为行为锁：记录式探针桩经 harness 注入（生产钩子读 window.RenderStageProbe），
+// 流式事件走真实路由驱动调用序列——删掉任一钩子接线、或把钩子挂错路径，这里的
+// 序列断言直接红，取代此前零区分度的源码 grep。
+test('流式 delta 经真实路由驱动探针 markDispatched/markScheduled 序列（行为接线锁）', () => {
   const calls = [];
-  const probeStub = {
-    begin(sid) { calls.push(['begin', sid]); },
-    markScheduled(sid) { calls.push(['markScheduled', sid]); },
-    markDispatched(sid) { calls.push(['markDispatched', sid]); },
-  };
-  // harness 不暴露 window/deliver——用 emit + activate 驱动真实事件路由，
-  // 探针桩经 sandbox 注入（createNativeStreamHarness 的 sandbox 挂 window）。
   const h = createNativeStreamHarness({
-    onNotify: () => {},
     count: 1,
+    probe: {
+      begin() {},
+      markScheduled(sid) { calls.push(['markScheduled', sid]); },
+      markDispatched(sid) { calls.push(['markDispatched', sid]); },
+    },
   });
-  // harness 的 emit 直接调 listener；探针钩子在 chat-events 的订阅路径上——
-  // 经 activate+emit 走真实路由。探针桩需要预置：重新建 harness 前把桩挂到
-  // 它内部 window 的途径只有 onNotify 之外——所以这里用最小路由验证：
-  // 直接向 harness 的 context 注事件（emit 已是真实 listener 调用）。
-  // 探针桩挂载：harness 未暴露 window，改在创建前包装 events 源代价高；
-  // 采用等价最小验证——读源码断言钩子存在且事件名正确（防拼错），行为由
-  // render_stage_probe 测试 + 评审本地 55/55 覆盖。
-  const source = nativeStreamSources.events;
-  assert.ok(source.includes('RenderStageProbe.markDispatched(sid)'), 'publish 路径必须含 markDispatched 钩子');
-  assert.ok(/markDispatched/.test(source), '直发路径必须含 markDispatched 钩子');
-  const bridgeSource = nativeStreamSources.host;
-  assert.ok(/chat:\(delta\|reasoning_delta\)\$/.test(bridgeSource), 'begin 的事件名正则必须存在');
-  assert.ok(bridgeSource.includes('RenderStageProbe.begin'), 'bridge 的 onSessionEvent 必须含 begin 钩子');
+  // 首条 delta（活跃会话、未抑制）→ 直发路径：notify() 同步发布 → markDispatched
+  h.emit('s0', 'chat:delta', { text: 'first' });
+  assert.deepEqual(calls, [['markDispatched', 's0']], '直发路径必须打派发标记');
+
+  // 第二条 delta → 合并帧路径：rAF/32ms 定时器武装 → markScheduled；
+  // 帧到点 publish → markDispatched
+  h.emit('s0', 'chat:delta', { text: ' more' });
+  assert.deepEqual(calls.slice(-1), [['markScheduled', 's0']], '合并帧武装必须打调度标记');
+  h.advance(60);
+  assert.deepEqual(
+    calls,
+    [['markDispatched', 's0'], ['markScheduled', 's0'], ['markDispatched', 's0']],
+    '完整的直发→合并帧→发布序列',
+  );
+});
+
+// bridge.js 的 begin 钩子在 onSessionEvent 委托包装层里，harness 只运行
+// notify() 切片覆盖不到——切出包装层源码在受控沙箱里行为验证：流式事件
+// 打 begin、其它事件不打、所有事件原样委托。`pre_chat:delta` 用例同时
+// 锁住事件名正则的 ^ 锚定（$-only 锚定会匹配前缀拼凑名而在这里变红）。
+test('bridge onSessionEvent 包装层：流式事件打 begin、始终委托共享实现（行为锁）', () => {
+  const source = nativeStreamSources.host;
+  const start = source.indexOf('function onSessionEvent(e, fn, options) {');
+  const delegateAt = source.indexOf('return pinvouSharedtauriMain().onSessionEvent(e, fn, options);', start);
+  const end = source.indexOf('}', delegateAt);
+  assert.ok(start >= 0 && delegateAt > start && end > delegateAt, 'onSessionEvent 包装层源码切片存在');
+  const wrapperSource = source.slice(start, end + 1);
+
+  const begun = [];
+  const delegated = [];
+  const sandbox = {
+    window: { RenderStageProbe: { begin(sid) { begun.push(sid); } } },
+    pinvouSharedtauriMain: () => ({
+      onSessionEvent(...args) { delegated.push(args); return 'delegated'; },
+    }),
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(wrapperSource, sandbox, { filename: 'bridge-onSessionEvent-wrapper.js' });
+
+  assert.equal(sandbox.onSessionEvent({ event: 'chat:delta', payload: { session_id: 'sB' } }), 'delegated');
+  sandbox.onSessionEvent({ event: 'chat:reasoning_delta', payload: { session_id: 'sB2' } });
+  assert.deepEqual(begun, ['sB', 'sB2'], '两条流式事件各打一次 begin');
+  sandbox.onSessionEvent({ event: 'pre_chat:delta', payload: { session_id: 'no1' } });
+  sandbox.onSessionEvent({ event: 'chat:turn_completed', payload: { session_id: 'no2' } });
+  assert.deepEqual(begun, ['sB', 'sB2'], '前缀拼凑名与非流式事件不得触发 begin');
+  assert.equal(delegated.length, 4, '所有事件（含未打 begin 的）都必须原样委托');
 });

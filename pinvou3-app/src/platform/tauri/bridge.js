@@ -1351,7 +1351,7 @@ function onSessionEvent(e, fn, options) {
   // 上报一条无内容记录；失败路径见 shared/render-stage-probe.js。实现在共享
   // 模块（评审 rebase 指示），这里在委托外面包一层，不侵入其内部结构。
   var eventNameForProbe = String((e && e.event) || "");
-  if (/chat:(delta|reasoning_delta)$/.test(eventNameForProbe) && window.RenderStageProbe) {
+  if (/^chat:(delta|reasoning_delta)$/.test(eventNameForProbe) && window.RenderStageProbe) {
     try { window.RenderStageProbe.begin(e && e.payload && e.payload.session_id); } catch (_) {}
   }
   return pinvouSharedtauriMain().onSessionEvent(e, fn, options);

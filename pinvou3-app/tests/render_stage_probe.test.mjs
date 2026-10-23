@@ -10,16 +10,15 @@ const source = fs.readFileSync(path.join(root, 'src/shared/render-stage-probe.js
 
 function harness({ stallRecorded = true, visibility = 'visible' } = {}) {
   const recorded = [];
-  const rafQueue = [];
+  // rAF 桩用「++序号发句柄 + Map 按句柄删除」的真实浏览器语义（r2 P2-5④）：
+  // 句柄不复用、取消按身份删——按数组下标/位置删的桩会让「取消了错误回调」
+  // 的实现假绿。
+  const rafByHandle = new Map();
+  let rafSeq = 0;
   const cancelled = new Set();
   const window = {
-    requestAnimationFrame: fn => { rafQueue.push(fn); return rafQueue.length; },
-    cancelAnimationFrame: handle => {
-      cancelled.add(handle);
-      // 真取消语义（P2-1/P2-4 断言需要）：句柄已取消的回调不再可触发。
-      const index = handle - 1;
-      if (index >= 0 && index < rafQueue.length) rafQueue.splice(index, 1);
-    },
+    requestAnimationFrame: fn => { const handle = ++rafSeq; rafByHandle.set(handle, fn); return handle; },
+    cancelAnimationFrame: handle => { cancelled.add(handle); rafByHandle.delete(handle); },
     // 探针模块以 window 为 root（浏览器侧），诊断桩必须挂在同一对象上
     PinvouAuthoritySyncDiagnostics: stallRecorded ? { record: (event, details) => recorded.push({ event, details }) } : undefined,
   };
@@ -32,12 +31,17 @@ function harness({ stallRecorded = true, visibility = 'visible' } = {}) {
   const sandbox = { window, document, Event: class { constructor(type) { this.type = type; } } };
   vm.createContext(sandbox);
   vm.runInContext(source, sandbox, { filename: 'render-stage-probe.js' });
-  return { probe: window.RenderStageProbe || sandbox.globalThis.RenderStageProbe, recorded, rafQueue, cancelled, window, document: sandbox.document };
+  return {
+    probe: window.RenderStageProbe || sandbox.globalThis.RenderStageProbe,
+    recorded, cancelled, window, document: sandbox.document,
+    rafCount: () => rafByHandle.size,
+    rafCallbacks: () => [...rafByHandle.values()],
+    takeRafs() { const fns = [...rafByHandle.values()]; rafByHandle.clear(); return fns; },
+  };
 }
 
 function flushFrames(h) {
-  const queue = h.rafQueue.splice(0);
-  for (const fn of queue) if (fn) fn();
+  for (const fn of h.takeRafs()) if (fn) fn();
 }
 
 test('正常速度的周期不上报', () => {
@@ -140,20 +144,27 @@ test('持续卡顿按会话节流：同一会话 10 秒内不重复，不同会�
   assert.equal(h.recorded.length, 2, '另一会话的真实 stall 不被 t1 的节流压制');
 });
 
-// P2-1：隐藏→恢复可见不再产生横跨隐藏期的假 stall——窗口隐藏瞬间收尾武装条目
+// P2-1：隐藏→恢复可见不再产生横跨隐藏期的假 stall——窗口隐藏瞬间收尾武装条目。
+// r2 P2-5：旧版此处的 `h.flushFrames && h.flushFrames()` 是 no-op（flushFrames
+// 是模块函数而非 h 属性），「恢复可见补触发」分支从未真正执行。这里直接持有
+// 武装回调并在恢复可见后手动触发——等价于无 cancelAnimationFrame 环境里仍会
+// 进来的迟到回调，行为锁同时覆盖 markFrame 的 finalized 守卫。
 test('窗口隐藏时收尾武装条目，恢复可见的补触发 rAF 不再量到隐藏期（P2-1）', () => {
   const h = harness();
   h.probe.begin('vis1');
   h.probe.markDispatched('vis1');          // rAF 已武装，尚未触发
-  assert.equal(h.rafQueue.length, 1);
+  assert.equal(h.rafCount(), 1);
+  const stale = h.rafCallbacks()[0];       // 收尾取消前先拿到回调引用
   // 窗口隐藏 → 收尾：此刻的时间差都落在可见期，未超阈值不上报
   h.document.visibilityState = 'hidden';
   h.document.dispatchEvent(new Event('visibilitychange'));
-  assert.equal(h.rafQueue.length, 0, '隐藏时收尾应取消武装的 rAF');
-  // 恢复可见后旧 rAF 即使补触发也无效（已 finalize）
+  assert.equal(h.rafCount(), 0, '隐藏时收尾应取消武装的 rAF');
+  // 恢复可见后旧 rAF 即使补触发也无效（已 finalize，不得改写段值/上报）
   h.document.visibilityState = 'visible';
-  h.flushFrames && h.flushFrames();
+  stale();
   assert.equal(h.recorded.length, 0, '正常速度周期的隐藏切换不产生假 stall');
+  assert.equal(h.probe.snapshot()[0].dispatch_to_frame_ms, null,
+    '迟到回调不得污染已收尾条目的段值');
 });
 
 // P2-2：流式中被下一条 begin 中止的超阈值帧等待要补报
@@ -173,27 +184,27 @@ test('周期被下一事件收尾时，已武装的帧回调被取消（隐藏�
   const h = harness();
   h.probe.begin('leak');
   h.probe.markDispatched('leak'); // 武装了 rAF，还没触发
-  const armed = h.rafQueue.length;
-  assert.equal(armed, 1);
+  assert.equal(h.rafCount(), 1);
   h.probe.begin('leak'); // 下一周期到达 → finalize 上一条 → 取消其 rAF
   assert.ok(h.cancelled.size >= 1, '收尾时调用了 cancelAnimationFrame');
+  assert.equal(h.rafCount(), 0, '取消按句柄删除，无残留回调');
   const entry = h.probe._liveEntry('leak');
   assert.equal(entry.rafHandle, null, '新条目没有遗留句柄');
 });
 
 
 // r2 P2-5①：markDispatched 覆盖旧句柄前必须 cancel——同一 entry 双派发场景。
-// harness cancel 已改为按句柄删除（真取消语义），此测试在旧实现（不 cancel
-// 直接覆盖）下必红。
+// 桩按句柄删除（真取消语义），此测试在旧实现（不 cancel 直接覆盖）下必红。
 test('同一周期二次 markDispatched 时旧 rAF 句柄被取消（P2-5 行为锁）', () => {
   const h = harness();
   h.probe.begin('dbl');
   h.probe.markDispatched('dbl');
-  assert.equal(h.rafQueue.length, 1);
-  const stale = h.rafQueue[0];
+  assert.equal(h.rafCount(), 1);
+  const stale = h.rafCallbacks()[0];
   h.probe.markDispatched('dbl');
-  assert.equal(h.rafQueue.length, 1, '二次派发不应堆积两个 rAF');
-  assert.notEqual(h.rafQueue[0], stale, '旧回调应已被替换而非残留');
+  assert.equal(h.rafCount(), 1, '二次派发不应堆积两个 rAF');
+  assert.notEqual(h.rafCallbacks()[0], stale, '旧回调应已被替换而非残留');
+  assert.ok(h.cancelled.size >= 1, '覆盖前调用了 cancelAnimationFrame');
 });
 
 // r2 P1-1 行为锁：窗口隐藏期间的 markDispatched 不武装 rAF（同步收尾），
@@ -204,7 +215,7 @@ test('隐藏期间的 markDispatched 不武装 rAF，恢复可见不补触发（
   const entry = h.probe._liveEntry('hid1');
   entry.t_recv -= 200;
   h.probe.markDispatched('hid1');
-  assert.equal(h.rafQueue.length, 0, '隐藏期不武装 rAF');
+  assert.equal(h.rafCount(), 0, '隐藏期不武装 rAF');
   h.document.visibilityState = 'visible';
   h.probe.begin('hid1');
   assert.equal(h.recorded.length, 0, '隐藏期收尾被豁免，不产假 stall');

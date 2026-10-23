@@ -21,7 +21,7 @@ function notificationSource(source) {
 /** Real handler/router/host-notify execution; transport, storage and buffers are isolated. */
 export function createNativeStreamHarness({ count = 2, events = eventSource, host = hostSource,
   frames = true, timers = true, render = text => marked.parse(text), recordSnapshots = true,
-  onNotify = () => {} } = {}) {
+  onNotify = () => {}, probe = null } = {}) {
   let now = 0;
   let timerId = 0;
   let suppressed = 0;
@@ -39,6 +39,9 @@ export function createNativeStreamHarness({ count = 2, events = eventSource, hos
     return id;
   };
   const window = { __PINVOU_TAURI_BRIDGE_FEATURES__: {} };
+  // 记录式探针桩（r2 P2-5）：生产钩子读 window.RenderStageProbe——注入后
+  // 流式事件经真实路由驱动探针调用序列，接线锁从 grep 断言升级为行为断言。
+  if (probe) window.RenderStageProbe = probe;
   if (frames) {
     window.requestAnimationFrame = callback => later(callback, 16);
     window.cancelAnimationFrame = id => jobs.delete(id);
