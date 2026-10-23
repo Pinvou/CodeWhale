@@ -193,7 +193,7 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
         baseUrl: record.endpoint_url,
         cardId,
         contextWindow: null,
-        // 已经接入过就**沿用那一行的 id**，让这次保存变成更新而不是新增。
+        // 已经接入过就沿用 id，并由后端窄事务保留最新用户参数与凭据。
         //
         // 不查重的话，`makeModelId()` 每次都生成新 id：用户连点两次、或者隔天
         // 再点一次，品悟的模型列表里就多一行指向同一个本地服务的重复项，而且

@@ -57,9 +57,11 @@ test('接入时记录稳定卡片关联，升级后仍沿用保存模型 id', ()
   const row = buildSavedModel({ ...OK, cardId: 'stable-card', existingId: 'saved-id' });
   assert.equal(row.model_store_card_id, 'stable-card');
   assert.equal(row.model_store_link_requested, true);
+  assert.equal(row.model_store_link_only, true);
   assert.equal(row.id, 'saved-id');
   assert.equal(buildSavedModel(OK).model_store_card_id, null);
   assert.equal(buildSavedModel(OK).model_store_link_requested, false);
+  assert.equal(buildSavedModel(OK).model_store_link_only, false);
 });
 
 test('缺任何一个必要取值都要当场报错，不能拼出半截配置', () => {

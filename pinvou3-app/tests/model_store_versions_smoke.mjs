@@ -204,25 +204,37 @@ try {
     const pending = new Map();
     let serial = 0;
     window.versionRuns = [];
-    window.finishVersionRun = (runId, result = {}) => {
-      const chunk = { done: true, ok: true, lines: [], next: 0, result };
+    window.versionCancelRequests = [];
+    window.versionLibraryLoads = 0;
+    window.versionCanSwitch = false;
+    window.versionTaskCopy = dictZh.uiModelStore;
+    window.finishVersionRun = (runId, result = {}, cancelled = false) => {
+      const chunk = { done: true, ok: true, cancelled, lines: [], next: 0, result };
       completed.set(runId, chunk);
       pending.get(runId)?.(chunk);
     };
     window.__TAURI__ = { core: { invoke: async (command, payload) => {
       if (command === 'model_store_availability') return { available: true };
       if (command === 'model_store_cards' || command === 'model_store_active_runs') return [];
-      if (command === 'model_store_library') return { models: records, corrected: [] };
+      if (command === 'model_store_library') {
+        window.versionLibraryLoads += 1;
+        return { models: records, corrected: [] };
+      }
       if (command === 'model_store_test_store_state') return { enabled: false };
       if (command === 'model_store_take_startup_cleanup') return null;
       if (command === 'model_store_check_card_update') return { changed: true, revision: 'new',
         compatibility: { kind: 'weights_changed', can_stage: true, can_update: false } };
       if (command === 'model_store_versions') return [{ version_id: `${payload.cardId}-old`,
-        filename: 'old.weights', state: 'history', can_delete: true, size_bytes: 128 }];
+        filename: 'old.weights', state: window.versionCanSwitch ? 'ready' : 'history',
+        can_switch: window.versionCanSwitch, can_delete: true, size_bytes: 128 }];
       if (command === 'model_store_start_version_action') {
         const runId = `${payload.cardId}-${payload.action}-${++serial}`;
         window.versionRuns.push(runId);
         return { run_id: runId };
+      }
+      if (command === 'model_store_cancel_run') {
+        window.versionCancelRequests.push(payload.runId);
+        return { ok: true };
       }
       if (command === 'model_store_start_lifecycle' && payload.action === 'uninstall') return { run_id: `failed-uninstall-${payload.cardId}` };
       if (command === 'model_store_force_remove') {
@@ -331,6 +343,77 @@ try {
   assert.deepEqual(await page.$$eval('[data-testid="model-version-cleanup-result"] li',
     (items) => items.map((item) => item.textContent)), ['/beta/retained.weights'],
   'closing the force-remove result only acknowledges its own queued disclosure');
+  await page.$$eval('[data-testid="model-version-operation-result"] button', (buttons) => buttons.forEach((button) => button.click()));
+  await page.waitForFunction(() => !document.querySelector('[data-testid="model-version-results"]'));
+  await page.evaluate(() => { window.versionCanSwitch = true; });
+  const beginVersionAction = async (action) => {
+    if (action === 'stage') await openStage();
+    else {
+      await openHistory('alpha');
+      await page.evaluate((requested) => {
+        const label = requested === 'switch' ? window.versionTaskCopy.versionSwitch : window.versionTaskCopy.versionDelete;
+        [...document.querySelectorAll('[data-testid="model-version-row"] button')]
+          .find((button) => button.textContent === label).click();
+      }, action);
+      if (action === 'delete') {
+        await page.waitForSelector('[data-testid="model-version-delete-confirm"]');
+        await page.$eval('[data-testid="model-version-delete-confirm"]', (element) => element.querySelectorAll('button')[1].click());
+      }
+    }
+    await page.waitForSelector(`[data-task-kind="version_${action}"][data-task-status="running"]`);
+    return page.evaluate(() => window.versionRuns.at(-1));
+  };
+  // The real task card exposes Close only after a terminal state. Calling the
+  // low-level dismiss helper during a running operation is not a user UI path.
+  for (const action of ['stage', 'delete', 'switch']) {
+    const runId = await beginVersionAction(action);
+    const taskSelector = `[data-testid="model-store-task"][data-task-kind="version_${action}"]`;
+    const actions = () => page.$eval(taskSelector, (element) => ({
+      close: [...element.querySelectorAll('button')].some((button) => button.textContent === window.versionTaskCopy.taskClose),
+      cancel: element.querySelector('[data-testid="model-store-task-cancel"]')?.disabled ?? null,
+    }));
+    assert.deepEqual(await actions(), { close: false, cancel: false }, `${action}: running tasks can only be cancelled`);
+    await page.click(`${taskSelector} [data-testid="model-store-task-cancel"]`);
+    await page.waitForSelector(`${taskSelector}[data-task-status="cancelling"]`);
+    assert.deepEqual(await actions(), { close: false, cancel: true }, `${action}: cancelling tasks cannot be dismissed`);
+    await page.waitForFunction((id) => window.versionCancelRequests.includes(id), {}, runId);
+    const before = await page.evaluate(() => ({ loads: window.versionLibraryLoads,
+      toast: document.querySelector('[data-testid="model-store-toast"]')?.textContent ?? null }));
+    // A late cancel can coexist with ok=true; the real task driver must still
+    // treat it as cancelled and never publish a success disclosure.
+    await page.evaluate((id) => window.finishVersionRun(id, {
+      freed_bytes: 128, remaining_paths: ['/cancelled/must-not-report-success'],
+    }, true), runId);
+    await page.waitForSelector(`${taskSelector}[data-task-status="cancelled"]`);
+    await page.waitForFunction((loads) => window.versionLibraryLoads > loads, {}, before.loads);
+    assert.deepEqual(await actions(), { close: true, cancel: null });
+    assert.equal(await page.$('[data-testid="model-version-operation-result"]'), null);
+    const toast = await page.$eval('[data-testid="model-store-view"]', () =>
+      document.querySelector('[data-testid="model-store-toast"]')?.textContent ?? null);
+    assert.ok(toast === null || toast === before.toast, `${action}: cancellation must not emit a success toast`);
+    await page.$eval(taskSelector, (element) => [...element.querySelectorAll('button')]
+      .find((button) => button.textContent === window.versionTaskCopy.taskClose).click());
+    await page.waitForFunction((selector) => !document.querySelector(selector), {}, taskSelector);
+    assert.equal(await page.$('[data-testid="model-version-operation-result"]'), null);
+  }
+  for (const action of ['stage', 'delete', 'switch']) {
+    const runId = await beginVersionAction(action);
+    const loads = await page.evaluate(() => window.versionLibraryLoads);
+    await page.evaluate(({ id, kind }) => window.finishVersionRun(id, {
+      freed_bytes: 3 * 1024 ** 3, remaining_paths: [`/${kind}/retained.weights`],
+    }), { id: runId, kind: action });
+    const resultSelector = `[data-testid="model-version-operation-result"][data-operation-kind="version_${action}"]`;
+    await page.waitForSelector(resultSelector);
+    await page.waitForFunction((before) => window.versionLibraryLoads > before, {}, loads);
+    assert.deepEqual(await page.$$eval(`${resultSelector} li`, (items) => items.map((item) => item.textContent)),
+      [`/${action}/retained.weights`], `${action}: completion must retain its actual result`);
+    assert.equal(await page.$eval(`${resultSelector} [role="status"]`, (element) => element.textContent),
+      await page.evaluate((kind) => kind === 'delete' ? window.versionTaskCopy.versionDeleted(3)
+        : (kind === 'stage' ? window.versionTaskCopy.versionStaged : window.versionTaskCopy.versionSwitched), action));
+    assert.equal(await page.$(`[data-task-kind="version_${action}"]`), null);
+    await page.click(`${resultSelector} button`);
+    await page.waitForFunction((selector) => !document.querySelector(selector), {}, resultSelector);
+  }
   await page.reload();
   await page.evaluate(async () => {
     /* eslint-disable import-x/no-unresolved, n/no-missing-import */
@@ -389,6 +472,7 @@ try {
   assert.equal(staleDetailLink.model, 'old-wire');
   assert.equal(staleDetailLink.base_url, 'http://127.0.0.1:8911/v1');
   assert.equal(staleDetailLink.model_store_link_requested, true);
+  assert.equal(staleDetailLink.model_store_link_only, true);
   assert.equal(await page.evaluate(() => window.detailActiveCalls), 0);
   // Restoring automatic context is a narrow backend patch. It must not re-import
   // the model, replace other options, or change global/session selection.
@@ -607,6 +691,7 @@ try {
   console.log('PASS: staging preserves other cards’ dialogs; concurrent cleanup disclosures survive navigation and individual acknowledgement');
   console.log('PASS: force-remove results survive navigation; closing one result preserves other unread cleanup paths');
   console.log('PASS: late context/key/link results cannot refresh another card, overwrite its busy state, or show stale toasts');
+  console.log('PASS: version stage/delete/switch expose Close only after cancellation; cancellation never reports success and normal completion retains results and refreshes the library');
 } finally {
   await browser?.close();
   await vite?.close();
