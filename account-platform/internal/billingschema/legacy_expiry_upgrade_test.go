@@ -165,6 +165,48 @@ func TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres(t *testing.T) {
 				if err := Up(ctx, c, input); err != nil {
 					t.Fatal("replay", err)
 				}
+				// 060 replaces the CHECK again. A successful 025 boundary alone
+				// is not a successful upgrade to the delivered application.
+				full, err := migrations.Load("../../migrations/billing")
+				if err != nil {
+					t.Fatal(err)
+				}
+				beforeFullFacts := legacyExpiryFacts(t, ctx, c)
+				beforeFullHistory := stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`)
+				if err := Up(ctx, c, full); err != nil {
+					t.Fatal("complete delivered upgrade", err)
+				}
+				if _, err := VerifyApplied(ctx, c, full); err != nil {
+					t.Fatal("complete delivered verification", err)
+				}
+				if beforeFullFacts != legacyExpiryFacts(t, ctx, c) || beforeFullHistory != stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version<=25 OR version IN (900001,900011)`) {
+					t.Fatal("full upgrade rewrote original financial facts or installed migration records")
+				}
+				if err := c.QueryRow(ctx, `SELECT convalidated FROM pg_constraint WHERE conrelid='journal_entries'::regclass AND conname='journal_entries_entry_type_check'`).Scan(&validated); err != nil || validated == old {
+					t.Fatalf("final conditional validation=%v old=%v err=%v", validated, old, err)
+				}
+				if err := c.QueryRow(ctx, `SELECT checksum FROM schema_migrations WHERE version=60`).Scan(&installed); err != nil || installed != repairedExpiryChecksum {
+					t.Fatalf("060 ledger identity=%s err=%v", installed, err)
+				}
+				if _, err := c.Exec(ctx, `INSERT INTO journal_entries(id,entry_type,business_reference,description,created_at) VALUES($1,'EXPIRE',$2,'forbidden after complete upgrade',now())`, uuid.New(), uuid.NewString()); err == nil {
+					t.Fatal("full upgrade accepted new EXPIRE")
+				} else {
+					var pg *pgconn.PgError
+					if !errorsAsCheck(err, &pg) {
+						t.Fatalf("final CHECK rejection missing: %v", err)
+					}
+				}
+				if _, err := c.Exec(ctx, `INSERT INTO journal_entries(id,entry_type,business_reference,description,created_at) VALUES($1,'EXPIRY',$2,'current expiry after complete upgrade',now())`, uuid.New(), uuid.NewString()); err != nil {
+					t.Fatal("full upgrade rejected EXPIRY", err)
+				}
+				finalFacts := legacyExpiryFacts(t, ctx, c)
+				finalHistory := stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`)
+				if err := Up(ctx, c, full); err != nil {
+					t.Fatal("complete delivered replay", err)
+				}
+				if finalFacts != legacyExpiryFacts(t, ctx, c) || finalHistory != stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`) {
+					t.Fatal("full migration replay changed financial facts or migration records")
+				}
 			})
 		}
 	}
@@ -175,29 +217,31 @@ func errorsAsCheck(err error, target **pgconn.PgError) bool {
 }
 
 func TestLegacyExpiry025IdentityRejectedBeforeConnection(t *testing.T) {
-	for _, field := range []string{"version", "name", "checksum", "sql", "sql-and-checksum"} {
-		t.Run(field, func(t *testing.T) {
-			input := legacyExpiryInput(t, 25)
-			for i := range input {
-				if input[i].Version == 25 {
-					switch field {
-					case "version":
-						input[i].Version = 26
-					case "name":
-						input[i].Name = "different"
-					case "checksum":
-						input[i].Checksum = strings.Repeat("a", 64)
-					case "sql":
-						input[i].UpSQL += "\n-- changed"
-					case "sql-and-checksum":
-						input[i].UpSQL += "\n-- changed"
-						input[i].Checksum = sqlChecksum(input[i].UpSQL)
+	for _, version := range []int64{25, 60} {
+		for _, field := range []string{"version", "name", "checksum", "sql", "sql-and-checksum"} {
+			t.Run(fmt.Sprintf("%03d/%s", version, field), func(t *testing.T) {
+				input := legacyExpiryInput(t, version)
+				for i := range input {
+					if input[i].Version == version {
+						switch field {
+						case "version":
+							input[i].Version = version + 1
+						case "name":
+							input[i].Name = "different"
+						case "checksum":
+							input[i].Checksum = strings.Repeat("a", 64)
+						case "sql":
+							input[i].UpSQL += "\n-- changed"
+						case "sql-and-checksum":
+							input[i].UpSQL += "\n-- changed"
+							input[i].Checksum = sqlChecksum(input[i].UpSQL)
+						}
 					}
 				}
-			}
-			if err := Up(context.Background(), nil, input); err == nil || !strings.Contains(err.Error(), "025 expiry compatibility") {
-				t.Fatalf("identity changed without early rejection: %v", err)
-			}
-		})
+				if err := Up(context.Background(), nil, input); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("%03d expiry compatibility", version)) {
+					t.Fatalf("identity changed without early rejection: %v", err)
+				}
+			})
+		}
 	}
 }

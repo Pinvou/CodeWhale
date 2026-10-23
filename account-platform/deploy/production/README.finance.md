@@ -34,7 +34,7 @@ F01 TLS edge 只新增两个精确 POST 回调入口 `/api/v1/payment-callback/t
 
 ## Billing 数据库权限前置
 
-原始 016–024 已安装、尚未应用 025 的数据库可以保留已入账的 `EXPIRE` 历史。Billing 迁移包装器在纯输入阶段核验 025 的版本、名称和原始 SQL 校验和；应用时先锁定 `journal_entries`，仅在发现旧 `EXPIRE` 行时将 025 的新类型 CHECK 安装为 `NOT VALID`，不改写旧分录、过账或迁移账本。新写入仍必须使用 `EXPIRY`，`NOT VALID` 不豁免新行检查。没有旧行时正常安装已验证 CHECK。
+原始 016–024 已安装、尚未应用 025 的数据库可以保留已入账的 `EXPIRE` 历史并完成到当前完整版本的升级。Billing 迁移包装器在纯输入阶段分别核验 025、060 的版本、名称和原始 SQL 校验和；两处重建类型 CHECK 时都先锁定 `journal_entries`，仅在发现旧 `EXPIRE` 行时将新 CHECK 安装为 `NOT VALID`，不改写旧分录、过账或迁移账本。新写入仍必须使用 `EXPIRY`，`NOT VALID` 不豁免新行检查。没有旧行时正常安装已验证 CHECK。不能仅凭升级到 025 成功判断整条迁移链已收口；正式 PostgreSQL 回归逐一覆盖原始 016–024 的有/无旧行形态，继续运行完整迁移、完整版本校验及重放。
 
 存在旧行的 CHECK 将保持 `convalidated=false`，不能直接运行 `VALIDATE CONSTRAINT` 并宣称历史已符合新枚举，也不能为消除该标记修改不可变旧账本。本兼容层保留原始迁移文件和账本身份，不扩大 016 之前历史的升级准入，不提供旧写方继续写 `EXPIRE` 的兼容；升级前须停止旧写方。
 
