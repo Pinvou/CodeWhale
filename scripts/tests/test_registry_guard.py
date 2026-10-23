@@ -2719,5 +2719,64 @@ class Round20PackedWiringTests(GuardFixture):
         self.assertEqual(code, 0)
 
 
+class Round21TerseParseContractTests(unittest.TestCase):
+    """The registry half of the guard rides on two things no earlier test
+    pinned (round-21 review mutations m9/m9b survived the whole suite):
+    the `-- --list --format terse` argv tail, and the parse loop that keeps
+    only `<path>: test` lines. Every main()-level test replaces list_tests
+    wholesale and the one subprocess test feeds empty stdout, so a parser
+    that accepted any non-empty line, or an argv that dropped `--format
+    terse` (letting libtest's summary line and `: benchmark` entries into
+    the registry), stayed green here while CI's real cargo would diverge.
+    """
+
+    def _list(self, stdout):
+        class FakeResult:
+            returncode = 0
+            stderr = ""
+
+        FakeResult.stdout = stdout
+        captured = {}
+
+        def fake_run(cmd, capture_output, text, env):
+            captured["cmd"] = cmd
+            return FakeResult()
+
+        with patch.object(guard.subprocess, "run", side_effect=fake_run):
+            paths = guard.list_tests()
+        return paths, captured["cmd"]
+
+    def test_argv_tail_is_exactly_list_format_terse(self):
+        _, cmd = self._list("a::b: test\n")
+        self.assertIn("--", cmd)
+        self.assertEqual(cmd[cmd.index("--") + 1 :], ["--list", "--format", "terse"])
+
+    def test_parses_terse_test_lines_verbatim(self):
+        paths, _ = self._list("alpha::beta::t1: test\nalpha::t2: test\n")
+        self.assertEqual(paths, ["alpha::beta::t1", "alpha::t2"])
+
+    def test_only_test_lines_enter_the_registry(self):
+        # Shape of the non-terse (pretty) listing: benchmarks, a blank
+        # line and libtest's "N tests, M benchmarks" summary. None of them
+        # may become a registry path — a parser that keeps any non-empty
+        # line would let the summary pass as a phantom test and let a
+        # benchmark masquerade as a registered test.
+        paths, _ = self._list(
+            "alpha::beta::t1: test\n"
+            "alpha::bench_x: benchmark\n"
+            "\n"
+            "1 test, 1 benchmark\n"
+        )
+        self.assertEqual(paths, ["alpha::beta::t1"])
+
+    def test_raw_identifier_paths_are_kept_as_libtest_prints_them(self):
+        # libtest keeps the r# prefix on raw-identifier module segments;
+        # the registry side must not normalize it away (the source scanner
+        # cannot produce such a path, so a REQUIRED_PIN there hits the
+        # attribution fail-closed net instead of matching a stripped key).
+        paths, _ = self._list("r4::r#async::t: test\n")
+        self.assertEqual(paths, ["r4::r#async::t"])
+
+
 if __name__ == "__main__":
     unittest.main()
