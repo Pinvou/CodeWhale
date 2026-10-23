@@ -4,6 +4,9 @@ use std::sync::MutexGuard;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+#[path = "behavior_telemetry/shell_producer_tests.rs"]
+pub(crate) mod shell_producer;
+
 struct TestHome {
     _lock: MutexGuard<'static, ()>,
     previous: Option<OsString>,
@@ -1165,6 +1168,106 @@ fn diagnostic_failed_stream_is_not_discarded_as_a_user_cancellation() {
         telemetry.outbox.lock().unwrap().records[1].event["diagnostic_code"],
         "connection_reset"
     );
+}
+
+#[test]
+fn diagnostic_tool_metadata_survives_enrichment_validation_and_persistence() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://localhost:1");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    assert_eq!(tool_registry_key("bash"), "shell");
+    assert_eq!(classify_tool("bash"), "cli");
+    let event = BehaviorEvent::new("tool_call_completed")
+        .session("structured_tool_session")
+        .turn("structured_tool_turn")
+        .string("operation_id", "structured_tool_operation")
+        .integer("attempt_index", 1)
+        .tool("shell", "bash", "cli")
+        .success(false)
+        .integer("duration_ms", 1765)
+        .string("error_category", "tool_error")
+        .diagnostic_tool_metadata(Some(
+            &json!({"exit_code":3221225477_i64,"status":"Failed", "command":"PRIVATE_COMMAND"}),
+        ));
+    telemetry.track(event);
+    let outbox = telemetry.outbox.lock().unwrap();
+    let event = &outbox.records[0].event;
+    assert_eq!(event["diagnostic_code"], "process_failed");
+    assert_eq!(event["diagnostic_exit_code"], 3221225477_i64);
+    let persisted =
+        std::fs::read_to_string(paths::pinvou3_home().join("failure-diagnostics.json")).unwrap();
+    assert!(persisted.contains("3221225477"));
+    assert!(!persisted.contains("PRIVATE_COMMAND"));
+}
+
+#[test]
+fn diagnostic_exit_hint_cannot_drop_cancelled_or_late_base_tool_terminals() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://localhost:1");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    let lease = telemetry.current_lease().unwrap();
+    for (session, original, current, cancelled) in [
+        (
+            "cancelled_shell_session",
+            "shell_turn_fixture",
+            "shell_turn_fixture",
+            true,
+        ),
+        (
+            "late_shell_session",
+            "old_shell_turn_fixture",
+            "new_shell_turn_fixture",
+            false,
+        ),
+    ] {
+        diagnostics::enrich(
+            &telemetry,
+            &mut BehaviorEvent::new("task_submitted")
+                .session(session)
+                .turn(current),
+            &lease,
+        );
+        if cancelled {
+            diagnostics::enrich(
+                &telemetry,
+                &mut BehaviorEvent::new("task_cancel_requested")
+                    .session(session)
+                    .turn(current),
+                &lease,
+            );
+        }
+        for exit in [0, 1] {
+            telemetry.track(
+                BehaviorEvent::new("tool_call_completed")
+                    .session(session)
+                    .turn(original)
+                    .string("operation_id", format!("shell_operation_fixture_{exit}"))
+                    .integer("attempt_index", 1)
+                    .tool("shell", "bash", "cli")
+                    .success(false)
+                    .integer("duration_ms", 1)
+                    .string("error_category", "tool_error")
+                    .diagnostic_tool_metadata(Some(&json!({"status":"Failed","exit_code":exit}))),
+            );
+        }
+    }
+    let outbox = telemetry.outbox.lock().unwrap();
+    assert_eq!(
+        outbox.records.len(),
+        4,
+        "diagnostic suppression must preserve every base terminal"
+    );
+    for record in &outbox.records {
+        assert_eq!(record.event["event_name"], "tool_call_completed");
+        assert!(
+            !record
+                .event
+                .as_object()
+                .unwrap()
+                .keys()
+                .any(|key| key.starts_with("diagnostic_"))
+        );
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

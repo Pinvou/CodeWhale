@@ -600,7 +600,24 @@ pub(crate) fn spawn_event_forwarder(
                     // 携带 metadata 让前端识别 careful hook 拦截 (safety_level=="dangerous")
                     let (output, success, metadata) = tool_call_result_parts(result);
                     if let Some(turn_id) = current_turn_id.as_deref() {
-                        crate::features::behavior_telemetry::track_tool_call_completed(
+                        // The default lowercase bash error has no ToolResult
+                        // metadata. Observe only its exact Engine-owned job;
+                        // do not parse command output or guess legacy origins.
+                        let shell_metadata = (!success
+                            && metadata.is_none()
+                            && crate::features::assistant::shell_output::is_shell_execution_tool(
+                                &name,
+                            ))
+                        .then(|| {
+                            crate::features::assistant::shell_diagnostics::failed_shell_metadata(
+                                &shell_manager,
+                                &session_id,
+                                turn_id,
+                                &id,
+                            )
+                        })
+                        .flatten();
+                        crate::features::behavior_telemetry::track_tool_call_completed_with_metadata(
                             &app,
                             &session_id,
                             turn_id,
@@ -611,6 +628,7 @@ pub(crate) fn spawn_event_forwarder(
                                 crate::features::behavior_telemetry::error_category(Some(&output))
                             }),
                             (!success).then_some(output.as_str()),
+                            metadata.as_ref().or(shell_metadata.as_ref()),
                         );
                     }
                     #[cfg(feature = "benchmark-hooks")]

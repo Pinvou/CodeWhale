@@ -84,3 +84,14 @@ mod features {
 
 #[path = "../src/features/behavior_telemetry.rs"]
 mod behavior_telemetry;
+
+#[path = "../src/features/assistant/shell_diagnostics.rs"]
+mod shell_diagnostics;
+
+#[tokio::test]
+async fn diagnostic_real_engine_default_bash_produces_exact_exit_facts() {
+    behavior_telemetry::tests::shell_producer::run_shell_producer_fixture(
+        shell_diagnostics::failed_shell_metadata,
+    )
+    .await;
+}

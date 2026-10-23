@@ -12,7 +12,8 @@ const connectors = readFileSync(new URL('../src-tauri/src/app/commands/connector
 
 test('assistant and ACP tool calls emit correlated start and terminal events', () => {
   assert(forwarder.includes('track_tool_call_started('));
-  assert(forwarder.includes('track_tool_call_completed('));
+  assert(forwarder.includes('track_tool_call_completed_with_metadata('));
+  assert.match(forwarder, /track_tool_call_completed_with_metadata\([\s\S]*?metadata\.as_ref\(\)/);
   assert(acp.includes('track_tool_call_started('));
   assert(acp.includes('track_tool_call_completed('));
   assert(telemetry.includes('calls.remove(&tool_operation_key(session_id, call_id))'));
