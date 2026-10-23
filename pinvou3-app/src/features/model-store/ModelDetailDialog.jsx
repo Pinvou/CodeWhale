@@ -12,6 +12,7 @@ import { lanError } from './lan-access.js';
 import { tryGetTauriBridge } from '../../platform/tauri/client.js';
 import { buildSavedModel, checkLinkable, findLinkedRows, pickApiKey } from './pinvou-model-link.js';
 import { formatBytes, libraryStateOf } from './model-store-logic.js';
+import { setAutoStart } from './model-store-api.js';
 import {
   HOVER_SURFACE,
   MsButton,
@@ -311,6 +312,16 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
         <>
           <div className="space-y-1">
             <MsRow label={copy.detailStatus}>{copy[STATUS_LABEL_KEYS[libraryStateOf(record)]] || copy.statusPending}</MsRow>
+            {record.status === 'deployed' ? (
+              <MsRow label={copy.autoStartLabel}>
+                <input
+                  type="checkbox"
+                  checked={record.auto_start !== false}
+                  onChange={async (event) => { await setAutoStart(record.card_id, event.target.checked); }}
+                  data-testid="model-store-auto-start-toggle"
+                />
+              </MsRow>
+            ) : null}
             <MsRow label={copy.detailEngine}>
               {record.engine_name}
               {record.engine_version ? ` ${record.engine_version}` : ''}

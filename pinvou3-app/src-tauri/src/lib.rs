@@ -2024,6 +2024,7 @@ pub fn run() {
             commands::model_store::model_store_lan_status,
             commands::model_store::model_store_set_lan_sharing,
             commands::model_store::model_store_revoke_api_key,
+            commands::model_store::model_store_set_auto_start,
             commands::model_store::model_store_take_startup_cleanup,
             commands::model_store::model_store_storage_settings,
             commands::model_store::model_store_set_storage_settings,

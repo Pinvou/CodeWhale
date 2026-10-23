@@ -115,6 +115,10 @@ const MIGRATION_COLUMNS: &[(&str, &[(&str, &str)])] = &[
             ("scripts_fetched_at", "TEXT"),
             // 上次成功部署时用的 deploy 脚本哈希（见 deployed_script_sha256）
             ("deployed_script_sha256", "TEXT"),
+            // 开机自启的用户意愿（2026-10-23 产品拍板默认开）：1=开（默认，
+            // ADD COLUMN 带 DEFAULT 1 使存量行也开）0=用户显式关。与停用/关机
+            // 那一刻的 running 求交——上次运行中的已部署卡才真的被拉起。
+            ("auto_start", "INTEGER NOT NULL DEFAULT 1"),
             // 这张卡需要几台设备（"single" / "dual"），见 store_client::DeployTopology
             ("deploy_topology", "TEXT"),
             // 附属文件的本地固化副本（相对路径 -> 正文+哈希），见 assets_content
@@ -721,6 +725,8 @@ pub struct StoreModelRecord {
     /// 一比就知道。以前界面对所有已部署模型都常驻一个「重新部署」按钮，用户
     /// 根本不知道自己为什么要点它。
     pub deployed_script_sha256: Option<String>,
+    /// 开机自启意愿（默认开）。与停用时的 running 求交决定是否拉起。
+    pub auto_start: bool,
     /// 卡片下发的运行内存需求。空结构表示当前卡片尚未提供可信预算。
     pub resource_requirements: ResourceRequirements,
 }
@@ -790,6 +796,7 @@ impl StoreModelRecord {
                 .and_then(|s| serde_json::from_value(serde_json::Value::String(s)).ok())
                 .unwrap_or_default(),
             deployed_script_sha256: row.get("deployed_script_sha256")?,
+            auto_start: row.get::<_, Option<i64>>("auto_start")?.unwrap_or(1) != 0,
             resource_requirements: row
                 .get::<_, Option<String>>("resource_requirements_json")?
                 .and_then(|raw| serde_json::from_str(&raw).ok())
@@ -1186,6 +1193,28 @@ pub fn list_store_models_light() -> rusqlite::Result<Vec<LibraryRow>> {
                 script_hashes,
             })
         })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// 读/写单卡的开机自启意愿（详情页开关用）。
+pub fn set_auto_start(card_id: &str, enabled: bool) -> rusqlite::Result<()> {
+    let conn = connect()?;
+    conn.execute(
+        "UPDATE store_models SET auto_start = ?1 WHERE card_id = ?2",
+        params![i64::from(enabled), card_id],
+    )?;
+    Ok(())
+}
+
+/// 恢复器/拉起判定用：开机应自启的卡（用户意愿开 × 上次运行中 × 已部署）。
+pub fn list_autostart_cards() -> rusqlite::Result<Vec<StoreModelRecord>> {
+    let conn = connect()?;
+    let mut stmt = conn.prepare(
+        "SELECT * FROM store_models          WHERE auto_start = 1 AND running = 1 AND status = 'deployed'          ORDER BY downloaded_at DESC",
+    )?;
+    let rows = stmt
+        .query_map([], StoreModelRecord::from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }

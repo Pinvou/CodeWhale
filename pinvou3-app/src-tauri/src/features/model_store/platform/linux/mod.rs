@@ -56,8 +56,8 @@ pub use service::{
     ModelStoreService, active_runs, answer_run, api_keys, cancel_run, create_api_key,
     delete_engine, export_run_log, force_remove, installed_engines, library, list_cards,
     local_resources, memory_admission, model_detail, reveal_run_logs_dir, run_log,
-    run_startup_cleanup, set_storage_settings, start_card_scripts, start_deploy, start_download,
-    start_lifecycle, storage_settings, take_startup_cleanup,
+    run_startup_cleanup, set_auto_start, set_storage_settings, start_card_scripts, start_deploy,
+    start_download, start_lifecycle, storage_settings, take_startup_cleanup,
 };
 
 /// Linux 上模型商店总是可用的。

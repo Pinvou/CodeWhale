@@ -471,6 +471,7 @@ fn library_payload(rows: Vec<db::LibraryRow>) -> Value {
             Value::Object(map)
         })
         .collect();
+    let auto_starts: Vec<bool> = rows.iter().map(|row| row.record.auto_start).collect();
     let models: Vec<db::StoreModelRecord> = rows.into_iter().map(|row| row.record).collect();
     let mut value = strip_bulky_fields(models);
     if let Some(items) = value.as_array_mut() {
@@ -478,6 +479,8 @@ fn library_payload(rows: Vec<db::LibraryRow>) -> Value {
             if let Some(obj) = item.as_object_mut() {
                 obj.insert("needs_redeploy".to_string(), Value::Bool(flags[i]));
                 obj.insert("local_script_hashes".to_string(), local_hashes[i].clone());
+                // 开机自启意愿（详情页开关默认开）
+                obj.insert("auto_start".to_string(), Value::Bool(auto_starts[i]));
             }
         }
     }
@@ -1036,6 +1039,55 @@ pub fn reveal_run_logs_dir() -> Result<Value, String> {
 pub fn export_run_log(run_id: String) -> Result<Value, String> {
     let (path, text) = run_log_store::export_run_log(&run_id)?;
     Ok(json!({ "path": path.to_string_lossy(), "text": text }))
+}
+
+/// 详情页「开机自启」开关（默认开）。只改意愿位，不动运行状态。
+pub fn set_auto_start(card_id: String, enabled: bool) -> Result<Value, String> {
+    db::set_auto_start(&card_id, enabled).map_err(|e| e.to_string())?;
+    Ok(json!({ "card_id": card_id, "auto_start": enabled }))
+}
+
+/// 恢复器入口（开机自启，2026-10-23）：把上次运行中且用户未关闭自启的已部署卡
+/// 逐张拉起。给两个消费方用：GUI 启动时的托管拉起、systemd user 服务的
+/// headless 拉起。串行执行（内存准入一次一张），每张独立成败——一张失败不停
+/// 后面的，失败结果落库供 GUI 弹窗（要求②：任何问题都有解决方法提示）。
+pub async fn autostart_pending(_service: Arc<ModelStoreService>) -> Value {
+    let rows = match tokio::task::spawn_blocking(db::list_autostart_cards).await {
+        Ok(Ok(rows)) => rows,
+        Ok(Err(e)) => return json!({ "ok": false, "error": format!("读取自启清单失败：{e}") }),
+        Err(e) => return json!({ "ok": false, "error": format!("自启任务异常：{e}") }),
+    };
+    let mut results: Vec<Value> = Vec::new();
+    for rec in rows {
+        let card_id = rec.card_id.clone();
+        let card_name = rec.card_name.clone();
+        let attempt_card = card_id.clone();
+        let attempt = tokio::task::spawn_blocking(move || {
+            // 复用既有 enable 长操作：身份协议/健康检查/容器登记全部一致
+            let mgr = ModelManager::new(None, None);
+            let mut sink: Vec<String> = Vec::new();
+            let mut cb = |line: &str| sink.push(line.to_string());
+            let control = script_runner::RunControl::default();
+            mgr.enable(&attempt_card, &mut cb, control)
+                .map_err(|e| e.to_string())
+        })
+        .await;
+        let entry = match attempt {
+            Ok(Ok(())) => json!({ "card_id": card_id, "card_name": card_name, "ok": true }),
+            Ok(Err(e)) => {
+                json!({ "card_id": card_id, "card_name": card_name, "ok": false, "error": e })
+            }
+            Err(e) => {
+                json!({ "card_id": card_id, "card_name": card_name, "ok": false, "error": format!("任务异常：{e}") })
+            }
+        };
+        results.push(entry);
+    }
+    let failed = results
+        .iter()
+        .filter(|r| r.get("ok") != Some(&Value::Bool(true)))
+        .count();
+    json!({ "ok": failed == 0, "failed": failed, "results": results })
 }
 
 pub fn cancel_run(service: &Arc<ModelStoreService>, run_id: String) -> Result<Value, String> {
