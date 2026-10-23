@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, cpSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -24,25 +24,17 @@ try {
 copyFileSync(path.join(here, '..', 'src', 'shared', 'registration-bonus-i18n.js'), path.join(dir, 'shared', 'registration-bonus-i18n.js'));
 copyFileSync(path.join(here, '..', 'src', 'shared', 'account-closure-i18n.js'), path.join(dir, 'shared', 'account-closure-i18n.js'));
 copyFileSync(path.join(here, '..', 'src', 'shared', 'account-closed-grants-i18n.js'), path.join(dir, 'shared', 'account-closed-grants-i18n.js'));
-  copyFileSync(path.join(here, '..', 'src', 'shared', 'entitlement-correction-i18n.js'), path.join(dir, 'shared', 'entitlement-correction-i18n.js'));
-  copyFileSync(path.join(here, '..', 'src', 'shared', 'finance-i18n.js'), path.join(dir, 'shared', 'finance-i18n.js'));
-  copyFileSync(path.join(here, '..', 'src', 'shared', 'reconciliation-i18n.js'), path.join(dir, 'shared', 'reconciliation-i18n.js'));
-  copyFileSync(path.join(here, '..', 'src', 'shared', 'token-management-i18n.js'), path.join(dir, 'shared', 'token-management-i18n.js'));
-  copyFileSync(path.join(here, '..', 'src', 'shared', 'ledger-repair-i18n.js'), path.join(dir, 'shared', 'ledger-repair-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'entitlement-correction-i18n.js'), path.join(dir, 'shared', 'entitlement-correction-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'finance-i18n.js'), path.join(dir, 'shared', 'finance-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'reconciliation-i18n.js'), path.join(dir, 'shared', 'reconciliation-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'token-management-i18n.js'), path.join(dir, 'shared', 'token-management-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'ledger-repair-i18n.js'), path.join(dir, 'shared', 'ledger-repair-i18n.js'));
 // Include every current shared/i18n.js domain re-export in the isolated tree.
 for (const name of ['organization-i18n.js', 'model-usage-i18n.js', 'account-closure-i18n.js', 'entitlement-correction-i18n.js', 'account-closed-grants-i18n.js', 'audit-i18n.js', 'platform-role-i18n.js']) {
   copyFileSync(path.join(here, '..', 'src', 'shared', name), path.join(dir, 'shared', name));
 }
-  // i18n.js is split by locale with zh imported directly, so the temporary copy must include
-  // zh and its shared browser dictionary.
-  mkdirSync(path.join(dir, 'shared', 'i18n'), { recursive: true });
-  for (const f of ['zh.js', 'browser.js', 'chat-recovery.js']) {
-    copyFileSync(
-      path.join(here, '..', 'src', 'shared', 'i18n', f),
-      path.join(dir, 'shared', 'i18n', f),
-    );
-  }
-  const cards = await import(`${pathToFileURL(tmp).href}?t=${Date.now()}`);
+// Preserve the locale modules' transitive imports as dictionaries evolve.
+  cpSync(path.join(here, '..', 'src', 'shared', 'i18n'), path.join(dir, 'shared', 'i18n'), { recursive: true });  const cards = await import(`${pathToFileURL(tmp).href}?t=${Date.now()}`);
 
   const initial = cards.createPetCardUiState();
   const expanded = cards.petCardUiReducer(initial, { type: 'toggle-expand', sessionId: 'a' });

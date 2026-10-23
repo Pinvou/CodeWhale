@@ -750,10 +750,13 @@ assert.match(bridge, /registry\.auxChat = function \(context\)/,
   'the desktop bridge must register the auxChat feature module');
 assert.match(desktopAuxChatBridge, /invoke\("chat", \{ message, attachments: \[\], sessionId: sid, restrictTools: true \}\)/,
   'desktop aux chat sends must restrict tools and skip attachments');
-assert.match(webBridge, /buf\.composerDraft = state\.composerDraft/,
-  'WebUI session switching must save the active composer draft');
-assert.match(webBridge, /state\.composerDraft = buf\.composerDraft/,
-  'WebUI session switching must restore the destination composer draft');
+// T4a（#701）：草稿存取随 switch 簇并入共享基座，钉随本体走 helpers（上游同形）。
+assert.match(sharedBridgeHelpers, /buf\.composerDraft = state\.composerDraft/,
+  'session switching must save the active composer draft (shared base)');
+assert.match(sharedBridgeHelpers, /state\.composerDraft = buf\.composerDraft/,
+  'session switching must restore the destination composer draft (shared base)');
+assert.match(webBridge, /function switchToSessionInternal\(/,
+  'web lane must keep the session-switch entry the shared draft pins ride on');
 assert.match(webBridge, /var draftComposer = realId \? "" : \(state\.composerDraft \|\| ""\)/,
   'WebUI background session events must snapshot an unmaterialized draft');
 assert.match(webBridge, /if \(!realId\) restoreBuffer\.composerDraft = draftComposer/,

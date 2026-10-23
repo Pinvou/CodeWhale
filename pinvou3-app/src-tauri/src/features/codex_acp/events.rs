@@ -913,6 +913,14 @@ impl EventBridge {
             "Interrupted" => "interrupted",
             _ => "failed",
         };
+        if let Some(error) = error {
+            crate::features::behavior_telemetry::capture_failure_context(
+                &self.app,
+                &self.pinvou_session_id,
+                error,
+                true,
+            );
+        }
         crate::features::behavior_telemetry::finish_task(
             &self.app,
             &self.pinvou_session_id,
@@ -1163,6 +1171,7 @@ impl EventBridge {
                 &call.title,
                 matches!(call.status, ToolCallStatus::Completed),
                 Some("tool_error"),
+                None,
             );
         }
     }

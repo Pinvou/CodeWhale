@@ -27,6 +27,7 @@ import {
 } from './assistant-response-export.js';
 import { copyClipboardText } from '../../shared/clipboard.js';
 import { normalizeAssistantMessageText } from './structured-assistant-content.js';
+import DiagnosticsPanel from '../failure-diagnostics/DiagnosticsPanel.jsx';
 
 const SHARE_TARGETS = Object.freeze(['wechat', 'wecom', 'feishu', 'dingtalk', 'qq']);
 const responseRatings = new Map();
@@ -338,6 +339,7 @@ export function AssistantMessageActions({ text, resolveText, copy, sessionId, tu
             <ThumbsDown size={14} />
           </button>
         </>}
+        {rating === 'negative' && copy.failureDiagnostics && <DiagnosticsPanel copy={copy.failureDiagnostics} sessionId={sessionId} turnId={telemetryTurnId} compact />}
         {typeof onRetry === 'function' && (
           <button type="button" data-testid="assistant-message-retry" onClick={onRetry} title={copy.retryReply} aria-label={copy.retryReply} className={actionClass}>
             <RotateCcw size={14} />

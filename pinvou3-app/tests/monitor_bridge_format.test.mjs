@@ -10,13 +10,18 @@ const read = (...parts) => fs.readFileSync(path.join(root, ...parts), 'utf8');
 // 两份 bridge(tauri 桌面 / web)的 TTFT/TPS 无数据回退必须统一为「—」,
 // 与 MonitorView.jsx 的 MonitorMetricCard(值为 — 时不渲染 unit)配套。
 // 防止某一侧单独回退成字面 "0 s"/"0 tok/s" 造成桌面/网页显示漂移。
-// #701 T0-a/C 壳化：桌面 monitor 的 pollMonitor 已委托 helpers（格式化本体在
-// 共享基座），桌面侧钉 helpers；web 侧大 C 面壳化 defer 到 T4 reconcile，
-// 仍内联钉本体（格式化字面量逐字同源）。
+// #701 T0-a/C 壳化 + T4a web 大 C 面壳化：两侧 pollMonitor 均已委托
+// helpers（格式化本体在共享基座），两 lane 都钉共享基座（上游同形）。
 const bridges = {
   tauri: read('src', 'shared', 'bridge-shared-helpers.js'),
-  web: read('src', 'platform', 'web', 'bridge.js'),
+  web: read('src', 'shared', 'bridge-shared-helpers.js'),
 };
+// T4a：web pollMonitor 壳必须保留（转发面结构钉）。
+assert.match(
+  read('src', 'platform', 'web', 'bridge.js'),
+  /async function pollMonitor\(\) \{ return pinvouSharedweb\(\)\.pollMonitor\(\); \}/,
+  'web pollMonitor must forward to the shared cluster',
+);
 
 // pollBackendStatus 仍是两条 lane 各自声明的手抄体(round-9 review R2:仅
 // 对齐语义,未单源)。钉住在飞守卫 —— get_backend_status 挂起时,10 秒间隔的

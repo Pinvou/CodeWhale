@@ -99,6 +99,25 @@
           <article class="metric" style="--accent:#c54848;--tint:#fff0f0"><div class="metric-head"><span>任务失败</span><span class="metric-icon">!</span></div><div class="metric-main"><div><div class="number"><span id="taskFailed">—</span><span class="number-unit">次</span></div><div class="note">任务终态为 failed</div></div><span class="trend">终态统计</span></div></article>
         </section>
         <div class="quality-banner" id="behaviorQuality">正在检查样本量与数据质量…</div>
+        <article class="card" id="failurePanel" style="margin-bottom:16px">
+          <h2>故障诊断</h2><p>故障观测按指纹聚类；任务成功率仍使用原任务口径。明细和用户授权材料仅向运营管理员开放。</p>
+          <form id="failureFilters" style="display:flex;flex-wrap:wrap;gap:8px;margin:12px 0">
+            <input id="failureVersion" aria-label="故障版本" placeholder="版本（留空为全部）" maxlength="48">
+            <input id="failureCode" aria-label="具体错误码" placeholder="具体错误码" maxlength="64">
+            <input id="failureProvider" aria-label="提供商分类" placeholder="提供商分类" maxlength="48">
+            <select id="failurePlatform" aria-label="故障平台"><option value="">全部平台</option><option>windows</option><option>macos</option><option>linux</option><option>web</option></select>
+            <select id="failureMode" aria-label="故障模式"><option value="">全部模式</option><option>assistant</option><option>code</option><option>team</option><option>scheduled</option></select>
+            <select id="failureDays" aria-label="故障周期"><option value="1">24 小时</option><option value="7" selected>7 日</option><option value="30">30 日</option></select>
+            <button type="submit">查看故障</button>
+          </form>
+          <p id="failureStatus" role="status">点击查看故障；低于最小群体阈值的分组仅管理员可查看。</p>
+          <div class="table-wrap"><table><thead><tr><th>错误码 / 组件 / 阶段</th><th>观测数 / 安装数</th><th>受影响版本</th><th>首次 / 最近</th><th>处理状态</th><th>操作</th></tr></thead><tbody id="failureRows"></tbody></table></div>
+          <div id="failureAdmin" class="hidden">
+            <p>最多 50 个脱敏样本（优先展示有阶段详情的样本）</p><div id="failureSamples"></div>
+            <form id="failureIssueForm"><select id="failureIssueStatus" aria-label="故障处理状态"><option value="open">待定位</option><option value="reproduced">已复现</option><option value="fixed">已修复</option></select><input id="failureFixedVersion" aria-label="修复版本" placeholder="修复版本" maxlength="48"><button type="submit">保存处理状态</button></form>
+            <pre id="failureEvidence" style="max-height:440px;overflow:auto;white-space:pre-wrap;word-break:break-word"></pre><div id="failureImages"></div>
+          </div>
+        </article>
         <section class="metrics">
           <article class="metric" style="--accent:#3267e3;--tint:#eef3ff"><div class="metric-head"><span>WSTA 技术成功</span><span class="metric-icon">✓</span></div><div class="metric-main"><div><div class="number"><span id="valueWsta">—</span><span class="number-unit">台</span></div><div class="note"><span class="fixed-range-note">固定口径</span> · 北京自然周技术成功安装实例</div></div></div></article>
           <article class="metric" style="--accent:#1d9b70;--tint:#eaf8f2"><div class="metric-head"><span>WEVTA 显性价值</span><span class="metric-icon">◆</span></div><div class="metric-main"><div><div class="number"><span id="valueWevta">—</span><span class="number-unit">台</span></div><div class="note"><span class="fixed-range-note">固定口径</span> · 北京自然周、同一回合 30 分钟</div></div><span class="trend" id="valueWevtaRate">—</span></div></article>
@@ -174,7 +193,7 @@
   const statsDay=value=>Math.floor((Number(value)+STATS_TIMEZONE_OFFSET_MS)/DAY_MS);
   const statsDayLabel=day=>new Date(day*DAY_MS).toISOString().slice(0,10);
   async function api(path,options={}){const response=await fetch(`/pinvou3/stats/api/${path}`,{...options,headers:{'content-type':'application/json',...(options.headers||{})}});if(response.status===401)throw new Error('unauthorized');if(response.status===403)throw new Error('forbidden');if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.json()}
-  function showLogin(message=''){if(state.timer)clearInterval(state.timer);state.timer=null;$('loginLayer').classList.remove('hidden');$('loginError').textContent=message;setTimeout(()=>$('password').focus(),60)}
+  function showLogin(message=''){failureRevision++;clearFailureDetail();$('failureRows').replaceChildren();if(state.timer)clearInterval(state.timer);state.timer=null;$('loginLayer').classList.remove('hidden');$('loginError').textContent=message;setTimeout(()=>$('password').focus(),60)}
   function linePath(values,max,left=35,right=770,top=22,bottom=184){
     let connected=false;
     return values.map((value,index)=>{
@@ -394,6 +413,7 @@
     try{
       const session=await api('session');
       if(!isCurrent())return;
+      if(state.role!==session.role){failureRevision++;clearFailureDetail();$('failureRows').replaceChildren()}
       state.role=session.role;
       if(state.role==='behavior_analyst'){
         if(!['behavior','remote'].includes(state.view))state.view='behavior';$('loginLayer').classList.add('hidden');renderPageTabs();await refreshBehavior();
@@ -417,6 +437,37 @@
   $('deviceSearch').addEventListener('input',event=>{state.query=event.target.value.trim();renderDevices()});
   document.querySelectorAll('th.sortable[data-sort]').forEach(header=>header.addEventListener('click',()=>{const sort=header.dataset.sort;if(state.deviceSort===sort)state.deviceSortDirection=state.deviceSortDirection==='desc'?'asc':'desc';else{state.deviceSort=sort;state.deviceSortDirection='desc'}renderDevices()}));
   $('statusFilter').addEventListener('click',()=>{state.status=state.status==='all'?'online':state.status==='online'?'offline':'all';$('statusFilter').textContent={all:'全部状态⌄',online:'仅在线⌄',offline:'仅离线⌄'}[state.status];renderDevices()});
+  let failureRevision=0,selectedFailure=null;
+  function clearFailureDetail(){selectedFailure=null;$('failureAdmin').classList.add('hidden');$('failureEvidence').textContent='';$('failureImages').replaceChildren();$('failureSamples').replaceChildren()}
+  async function diagnosticApi(path,options){try{return await api(path,options)}catch(error){if(error.message==='unauthorized')showLogin();else if(error.message==='forbidden'){failureRevision++;clearFailureDetail();$('failureRows').replaceChildren();$('failureStatus').textContent='权限已改变，请刷新后重试。'}throw error}}
+  function failureFilterParams(){return new URLSearchParams({days:$('failureDays').value,app_version:$('failureVersion').value.trim(),diagnostic_code:$('failureCode').value.trim(),provider_key:$('failureProvider').value.trim(),platform:$('failurePlatform').value,mode:$('failureMode').value})}
+  async function loadFailures(){
+    const revision=++failureRevision;clearFailureDetail();$('failureRows').replaceChildren();$('failureStatus').textContent='加载中…';
+    const params=failureFilterParams();
+    try{const report=await diagnosticApi(`behavior/failures?${params}`);if(revision!==failureRevision)return;
+      $('failureStatus').textContent=report.rows.length?'点击样本查看证据；工具错误可能已被任务恢复，不能直接等同任务失败。':'当前条件无可展示记录，旧客户端未提供证据时不会反推原因。';
+      renderSimpleRows('failureRows',report.rows,[r=>escapeHtml(`${r.code} / ${r.component} / ${r.stage}`),r=>`${nf.format(r.count)} / ${nf.format(r.installations)}`,r=>escapeHtml(JSON.stringify(r.versions)),r=>escapeHtml(`${new Date(r.first_seen).toLocaleString()} / ${new Date(r.last_seen).toLocaleString()}`),r=>escapeHtml(`${({open:'待定位',reproduced:'已复现',fixed:'已修复'})[r.status]||r.status} ${r.fixed_version||''}`),r=>report.detail_allowed?`<button data-failure-group="${escapeHtml(r.fingerprint)}" data-failure-state="${escapeHtml(r.status)}" data-fixed-version="${escapeHtml(r.fixed_version||'')}">查看样本</button>`:'仅汇总']);
+    }catch{if(revision===failureRevision)$('failureStatus').textContent='故障诊断加载失败，请检查权限或服务端版本后重试。'}
+  }
+  $('failureFilters').addEventListener('submit',event=>{event.preventDefault();void loadFailures()});
+  $('failureRows').addEventListener('click',async event=>{
+    const button=event.target.closest('[data-failure-group]');if(!button||state.role!=='operations_admin')return;
+    const revision=++failureRevision;clearFailureDetail();selectedFailure=button.dataset.failureGroup;$('failureAdmin').classList.remove('hidden');$('failureIssueStatus').value=button.dataset.failureState;$('failureFixedVersion').value=button.dataset.fixedVersion;
+    try{const result=await diagnosticApi(`diagnostics/samples?${failureFilterParams()}&fingerprint=${encodeURIComponent(selectedFailure)}`);if(revision!==failureRevision)return;
+      for(const item of result.incidents){const sample=document.createElement('button');sample.type='button';sample.textContent=`${new Date(item.at).toLocaleString()} · ${item.version} · ${item.mode||'—'} · ${item.code}`;sample.dataset.failureIncident=item.id;$('failureSamples').append(sample,document.createElement('br'))}
+    }catch{if(revision===failureRevision)$('failureStatus').textContent='样本读取失败，请重试。'}
+  });
+  $('failureSamples').addEventListener('click',async event=>{
+    const button=event.target.closest('[data-failure-incident]');if(!button||state.role!=='operations_admin')return;
+    const revision=++failureRevision;$('failureEvidence').textContent='加载中…';$('failureImages').replaceChildren();
+    try{const result=await diagnosticApi(`diagnostics/incident?id=${encodeURIComponent(button.dataset.failureIncident)}`);if(revision!==failureRevision)return;
+      const textReports=result.reports.map(report=>({...report,attachments:report.attachments.map(item=>({kind:item.kind,...(item.kind==='text'?{content:item.content}:{})}))}));
+      $('failureEvidence').textContent=JSON.stringify({incident:result.incident,timeline:result.timeline,related:result.related,reports:textReports},null,2);
+      for(const report of result.reports)for(const item of report.attachments){if(!['image/png','image/jpeg'].includes(item.kind))continue;const img=document.createElement('img');img.src=`data:${item.kind};base64,${item.content}`;img.alt='用户逐次授权的诊断截图';img.style.maxWidth='100%';img.style.maxHeight='480px';$('failureImages').append(img)}
+    }catch{if(revision===failureRevision)$('failureEvidence').textContent='证据读取失败或已过期。'}
+  });
+  $('failureIssueForm').addEventListener('submit',async event=>{event.preventDefault();if(!selectedFailure||state.role!=='operations_admin')return;const revision=failureRevision;try{await diagnosticApi('diagnostics/issue',{method:'POST',headers:{'X-Pinvou-Diagnostics':'1'},body:JSON.stringify({fingerprint:selectedFailure,issue:{status:$('failureIssueStatus').value,fixed_version:$('failureFixedVersion').value.trim()}})});if(revision===failureRevision)await loadFailures()}catch{if(revision===failureRevision)$('failureStatus').textContent='处理状态保存失败，标记已修复时须填写有效修复版本。'}});
+  $('logout').addEventListener('click',()=>{failureRevision++;clearFailureDetail();$('failureRows').replaceChildren();$('failureStatus').textContent='请登录后查看故障诊断。'},true);
   $('refreshButton').addEventListener('click',()=>refreshData(true));
   $('loginForm').addEventListener('submit',async event=>{event.preventDefault();$('loginError').textContent='';try{await api('login',{method:'POST',body:JSON.stringify({password:$('password').value})});$('password').value='';$('loginLayer').classList.add('hidden');await refreshData();if(!state.timer)state.timer=setInterval(refreshData,30000)}catch(error){showLogin(error.message==='unauthorized'?'密码不正确，请重试':'登录失败，请稍后重试')}});
   $('logout').addEventListener('click',async()=>{try{await api('logout',{method:'POST',body:'{}'})}catch{}state.role=null;showLogin()});

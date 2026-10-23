@@ -64,6 +64,7 @@ pub struct PlatformCapabilities {
     /// Windows-only desktop dual-end remote control (A control / B controlled).
     /// Every other target reports `false` and hides the entry points.
     pub desktop_remote_control_supported: bool,
+    pub failure_diagnostics_supported: bool,
     pub paste_image_clipboard_read: bool,
     pub local_embed_supported: bool,
     pub global_shortcuts_available: bool,
@@ -102,6 +103,7 @@ impl PlatformCapabilities {
             browser_native_display: browser_ready,
             voice_shortcut_native: capabilities.voice_shortcut_native,
             desktop_remote_control_supported: capabilities.desktop_remote_control_supported,
+            failure_diagnostics_supported: true,
             paste_image_clipboard_read: capabilities.paste_image_clipboard_read,
             local_embed_supported: capabilities.local_embed_supported,
             global_shortcuts_available: capabilities.global_shortcuts_available,

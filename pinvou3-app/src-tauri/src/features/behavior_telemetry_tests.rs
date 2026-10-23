@@ -123,6 +123,7 @@ fn test_telemetry(runtime: RuntimeConfig, state: PersistedState) -> BehaviorTele
         collection_period_id: Arc::new(RwLock::new(active_period)),
         outbox: Arc::new(StdMutex::new(Outbox::empty(outbox_path()))),
         tasks: Arc::new(StdMutex::new(HashMap::new())),
+        diagnostics: Arc::new(StdMutex::new(Default::default())),
         remote_executions: Arc::new(StdMutex::new(Default::default())),
         team_sessions: Arc::new(StdMutex::new(HashMap::new())),
         tool_calls: Arc::new(StdMutex::new(HashMap::new())),
@@ -133,7 +134,1201 @@ fn test_telemetry(runtime: RuntimeConfig, state: PersistedState) -> BehaviorTele
         event_tx: None,
         control_tx: None,
         heartbeat_tx: None,
+        report_tx: None,
     }
+}
+
+#[test]
+fn client_privacy_allowlist_keeps_diagnostic_delegation_bounded() {
+    let schema: Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/schemas/behavior-telemetry-v1.schema.json"
+    )))
+    .unwrap();
+    for field in schema["x-client-optional-fields"].as_array().unwrap() {
+        let field = field.as_str().unwrap();
+        // Remote fields belong to the event-specific gateway, never the
+        // general allowlist. Diagnostic extensions still delegate by name.
+        assert_eq!(
+            client_event_field_allowed(field),
+            !field.starts_with("remote_"),
+            "{field}"
+        );
+        assert_eq!(
+            diagnostics::known_field(field),
+            field.starts_with("diagnostic_")
+        );
+    }
+    let mut remote =
+        RemoteControlEvent::new(RemoteStage::TaskTerminal, RemoteOutcome::InternalError)
+            .task("privacy_gateway_fixture", true, Some("chat"))
+            .status("unknown")
+            .into_behavior();
+    assert!(validate_client_event_fields(&remote).is_ok());
+    // The same valid fields must be rejected when reused on an ordinary event.
+    remote.event_name = "task_finished";
+    assert!(validate_client_event_fields(&remote).is_err());
+    for field in schema["x-server-injected-fields"].as_array().unwrap() {
+        assert!(!client_event_field_allowed(field.as_str().unwrap()));
+    }
+    for field in [
+        "message",
+        "content",
+        "file_path",
+        "raw_error",
+        "diagnostic_raw_error",
+    ] {
+        assert!(!client_event_field_allowed(field), "{field}");
+        assert!(
+            validate_client_event_fields(
+                &BehaviorEvent::new("task_finished").string(field, "private fixture")
+            )
+            .is_err()
+        );
+    }
+    // Known field names alone do not authorize orphaned or untyped evidence.
+    assert!(
+        validate_client_event_fields(
+            &BehaviorEvent::new("task_finished").string("diagnostic_steps", "private fixture")
+        )
+        .is_err()
+    );
+}
+
+fn diagnostic_failure(session: &str, turn: &str) -> BehaviorEvent {
+    BehaviorEvent::new("task_finished")
+        .session(session)
+        .turn(turn)
+        .string("attempt_id", "attempt_diagnostic_test")
+        .string("mode", "assistant")
+        .string("initiator_type", "user")
+        .input_type("text")
+        .boolean("has_attachment", false)
+        .status("failed")
+        .integer("duration_ms", 1000)
+        .string("error_category", "model_error")
+        .diagnostic_error(
+            "HTTP 429 private-user-prompt api_key=not-a-real-key",
+            "assistant_error",
+        )
+}
+
+#[test]
+fn diagnostic_metadata_sampling_and_original_metrics_are_independent() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://localhost:1");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    for index in 0..7 {
+        let session = format!("session_diagnostic_{index}");
+        telemetry.track(
+            BehaviorEvent::new("model_used")
+                .session(&session)
+                .turn("turn_diagnostic")
+                .string("attempt_id", "attempt_diagnostic")
+                .model("openai", "gpt_5")
+                .string("selection_source", "session"),
+        );
+        telemetry.track(diagnostic_failure(&session, "turn_diagnostic"));
+    }
+    let outbox = telemetry.outbox.lock().unwrap();
+    let failures: Vec<_> = outbox
+        .records
+        .iter()
+        .filter(|r| r.event["event_name"] == "task_finished")
+        .collect();
+    assert_eq!(failures.len(), 7);
+    assert_eq!(
+        failures
+            .iter()
+            .filter(|r| r.event["diagnostic_sampled"] == true)
+            .count(),
+        5
+    );
+    assert_eq!(
+        failures[0].event["diagnostic_environment"]["model_key"],
+        "gpt_5"
+    );
+    assert_eq!(failures[0].event["diagnostic_code"], "rate_limited");
+    assert_eq!(failures[0].event["diagnostic_http_status"], 429);
+    assert!(failures[6].event.get("diagnostic_steps").is_none());
+    let serialized = serde_json::to_string(&failures[0].event).unwrap();
+    assert!(!serialized.contains("private-user-prompt"));
+    assert!(!serialized.contains("not-a-real-key"));
+    assert!(
+        !std::fs::read_to_string(paths::pinvou3_home().join("failure-diagnostics.json"))
+            .unwrap()
+            .contains("private-user-prompt")
+    );
+    drop(outbox);
+    let lease = telemetry.current_lease().unwrap();
+    telemetry.collecting.store(false, Ordering::Release);
+    assert!(!telemetry.try_track_for_lease(diagnostic_failure("old", "old"), &lease));
+    assert_eq!(
+        diagnostics::diagnostic_incidents(&telemetry).unwrap()["incidents"],
+        json!([])
+    );
+}
+
+#[test]
+fn remote_unknown_terminal_keeps_its_diagnosis_without_emitting_a_task_failure() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://localhost:1");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    let metric = RemoteControlEvent::new(RemoteStage::TaskTerminal, RemoteOutcome::InternalError)
+        .reason(RemoteReason::Unknown)
+        .task("unknown-remote-task", true, Some("chat"))
+        .status("unknown")
+        .diagnostic_terminal(false, true);
+    telemetry.track(metric.into_behavior());
+    let outbox = telemetry.outbox.lock().unwrap();
+    assert_eq!(outbox.records.len(), 1);
+    let event = &outbox.records[0].event;
+    assert_eq!(event["event_name"], "remote_control_event");
+    assert_eq!(event["diagnostic_code"], "remote_result_unknown");
+    assert_eq!(event["diagnostic_site"], "remote_terminal");
+    assert_eq!(event["remote_task_status"], "unknown");
+    assert_eq!(event["remote_role"], "controlled");
+    assert_eq!(event["remote_mode"], "assistant");
+    assert!(event["remote_task_key"].as_str().unwrap().len() == 64);
+    assert!(event.get("status").is_none());
+    assert!(event.get("attempt_id").is_none());
+}
+
+#[test]
+fn diagnostic_preview_requires_exact_current_authorization_and_survives_restart_once_confirmed() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://localhost:1");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    let failure = diagnostic_failure("session_diagnostic", "turn_diagnostic");
+    let id = failure.event_id.clone();
+    telemetry.track(failure);
+    let preview = |notes: &str| {
+        diagnostics::preview_diagnostic(
+            &telemetry,
+            DiagnosticPreviewRequest {
+                incident_id: id.clone(),
+                notes: notes.into(),
+                attachments: vec![],
+            },
+        )
+        .unwrap()
+    };
+    let first = preview("Authorization: Bearer fake-secret\nreproduce empty response");
+    assert!(
+        !first["report"]["notes"]
+            .as_str()
+            .unwrap()
+            .contains("fake-secret")
+    );
+    assert!(
+        diagnostics::confirm_diagnostic(
+            &telemetry,
+            first["preview_token"].as_str().unwrap(),
+            false
+        )
+        .is_err()
+    );
+    let second = preview("new reproduction");
+    assert!(
+        diagnostics::confirm_diagnostic(&telemetry, first["preview_token"].as_str().unwrap(), true)
+            .is_err()
+    );
+    let confirmation = diagnostics::confirm_diagnostic(
+        &telemetry,
+        second["preview_token"].as_str().unwrap(),
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        confirmation,
+        diagnostics::confirm_diagnostic(
+            &telemetry,
+            second["preview_token"].as_str().unwrap(),
+            true
+        )
+        .unwrap()
+    );
+    *telemetry.diagnostics.lock().unwrap() = diagnostics::load();
+    assert_eq!(
+        diagnostics::diagnostic_incidents(&telemetry).unwrap()["reports"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let third = preview("after restart");
+    diagnostics::rebind(&telemetry, 0, "renewed_collection_period").unwrap();
+    assert!(
+        diagnostics::confirm_diagnostic(&telemetry, third["preview_token"].as_str().unwrap(), true)
+            .is_err()
+    );
+    diagnostics::clear(&telemetry).unwrap();
+    *telemetry.diagnostics.lock().unwrap() = diagnostics::load();
+    assert_eq!(
+        diagnostics::diagnostic_incidents(&telemetry).unwrap()["reports"],
+        json!([])
+    );
+}
+
+#[test]
+fn diagnostic_renewal_freezes_confirmed_bytes_and_restores_legacy_event_origin() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://localhost:1");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    let failure = diagnostic_failure("renew_session", "renew_turn");
+    let id = failure.event_id.clone();
+    telemetry.track(failure);
+    let preview = diagnostics::preview_diagnostic(
+        &telemetry,
+        DiagnosticPreviewRequest {
+            incident_id: id.clone(),
+            notes: "reproduce empty response".into(),
+            attachments: vec![],
+        },
+    )
+    .unwrap();
+    diagnostics::confirm_diagnostic(&telemetry, preview["preview_token"].as_str().unwrap(), true)
+        .unwrap();
+    let original = preview["report"].clone();
+    // Simulate an earlier client's defective rebind: the queued wire period
+    // already moved, but the local incident and confirmed bytes are intact.
+    {
+        let mut outbox = telemetry.outbox.lock().unwrap();
+        let event = outbox.records[0].event.as_object_mut().unwrap();
+        event.remove("diagnostic_origin_period_id");
+        event.insert(
+            "collection_period_id".into(),
+            json!("already_renewed_period"),
+        );
+    }
+    let lease = telemetry.current_lease().unwrap();
+    let origins = diagnostics::origin_periods(&telemetry, lease.generation).unwrap();
+    telemetry
+        .outbox
+        .lock()
+        .unwrap()
+        .rebind_period("second_renewed_period", lease.generation, &origins)
+        .unwrap();
+    diagnostics::rebind(&telemetry, lease.generation, "second_renewed_period").unwrap();
+    let event = telemetry.outbox.lock().unwrap().records[0].event.clone();
+    assert_eq!(event["collection_period_id"], "second_renewed_period");
+    assert_eq!(
+        event["diagnostic_origin_period_id"],
+        original["incident_period_id"]
+    );
+    let reports: Value = serde_json::from_slice(
+        &std::fs::read(paths::pinvou3_home().join("failure-diagnostic-reports.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(reports[0]["payload"], original);
+    assert_eq!(
+        reports[0]["lease"]["collection_period_id"],
+        "second_renewed_period"
+    );
+    assert!(
+        diagnostics::origin_periods(&telemetry, lease.generation + 1)
+            .unwrap()
+            .is_empty()
+    );
+    let mut conflicting = origins;
+    conflicting.insert(id, "conflicting_origin_period".into());
+    let mut outbox = telemetry.outbox.lock().unwrap();
+    assert!(
+        outbox
+            .rebind_period("third_renewed_period", lease.generation, &conflicting)
+            .is_err()
+    );
+    assert_eq!(outbox.records[0].event, event);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn diagnostic_renewal_checkpoint_survives_each_interrupted_write_on_real_startup() {
+    for stage in 0..4 {
+        let home = TestHome::new();
+        let (base, heartbeat_server) = mock_http(vec![(200, "{}")]).await;
+        let (events_base, _events_seen, release_events, events_server) =
+            controlled_http(503, "{}").await;
+        let events_url = format!("{events_base}/events");
+        let _env = EnvRestore::set(
+            &home,
+            &[
+                ("PINVOU_BEHAVIOR_TELEMETRY_ENABLED", "true"),
+                ("PINVOU_TELEMETRY_BASE_URL", &base),
+                ("PINVOU_BEHAVIOR_EVENTS_URL", &events_url),
+                (
+                    "PINVOU_TELEMETRY_ENROLLMENT_TOKEN",
+                    "test-enrollment-token-1234567890",
+                ),
+            ],
+        );
+        let runtime = RuntimeConfig::from_env();
+        let mut state = heartbeat_state(&runtime);
+        let telemetry = test_telemetry(runtime, state.clone());
+        let failure = diagnostic_failure("checkpoint_session", "checkpoint_turn");
+        let incident_id = failure.event_id.clone();
+        telemetry.track(failure);
+        let preview = diagnostics::preview_diagnostic(
+            &telemetry,
+            DiagnosticPreviewRequest {
+                incident_id,
+                notes: "reproduce empty response".into(),
+                attachments: vec![],
+            },
+        )
+        .unwrap();
+        diagnostics::confirm_diagnostic(
+            &telemetry,
+            preview["preview_token"].as_str().unwrap(),
+            true,
+        )
+        .unwrap();
+        let frozen = preview["report"].clone();
+        state.device_token = Some("renewed_checkpoint_token".into());
+        state.control.collection_period_id = Some("renewed_checkpoint_period".into());
+        state.credential_renewal_checkpoint = Some(CollectionLease {
+            generation: state.control.generation,
+            collection_period_id: "renewed_checkpoint_period".into(),
+        });
+        persist_state(&state).unwrap();
+        if stage >= 1 {
+            let origins =
+                diagnostics::origin_periods(&telemetry, state.control.generation).unwrap();
+            telemetry
+                .outbox
+                .lock()
+                .unwrap()
+                .rebind_period(
+                    "renewed_checkpoint_period",
+                    state.control.generation,
+                    &origins,
+                )
+                .unwrap();
+        }
+        if stage >= 2 {
+            telemetry
+                .rebind_lifecycle_state(state.control.generation, "renewed_checkpoint_period")
+                .unwrap();
+        }
+        if stage == 3 {
+            // Inject failure of the final state commit after every child file
+            // was rewritten. Restore the original durable checkpoint for reboot.
+            let backup = state_path().with_extension("checkpoint-backup");
+            std::fs::rename(state_path(), &backup).unwrap();
+            std::fs::create_dir(state_path()).unwrap();
+            assert!(
+                telemetry
+                    .finish_credential_renewal_checkpoint(&mut state)
+                    .is_err()
+            );
+            std::fs::remove_dir(state_path()).unwrap();
+            std::fs::rename(backup, state_path()).unwrap();
+        }
+        drop(telemetry);
+        // Exercise the actual startup ordering: redo before outbox retention
+        // and diagnostic authorization sanitization, with real persisted files.
+        let restarted = BehaviorTelemetry::new();
+        let workers = Arc::downgrade(&restarted.state);
+        let reports: Value = serde_json::from_slice(
+            &std::fs::read(paths::pinvou3_home().join("failure-diagnostic-reports.json")).unwrap(),
+        )
+        .unwrap();
+        let report_preserved = reports.as_array().is_some_and(|rows| rows.len() == 1)
+            && reports[0]["payload"] == frozen
+            && reports[0]["lease"]["collection_period_id"] == "renewed_checkpoint_period";
+        let committed = load_state().unwrap().unwrap();
+        let events = Outbox::load(outbox_path()).unwrap();
+        let event_preserved = events.records.iter().any(|row| {
+            row.event["diagnostic_id"] == frozen["incident_id"]
+                && row.event["diagnostic_origin_period_id"] == frozen["incident_period_id"]
+                && row.collection_period_id == "renewed_checkpoint_period"
+        });
+        restarted.collecting.store(false, Ordering::Release);
+        drop(restarted);
+        let _ = release_events.send(());
+        events_server.abort();
+        let _ = events_server.await;
+        heartbeat_server.abort();
+        let _ = heartbeat_server.await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while workers.upgrade().is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("drain workers before restoring the synthetic home");
+        assert!(
+            report_preserved,
+            "confirmed report must survive interruption stage {stage}"
+        );
+        assert!(
+            event_preserved,
+            "original incident must survive interruption stage {stage}"
+        );
+        assert!(committed.credential_renewal_checkpoint.is_none());
+    }
+}
+
+#[test]
+fn diagnostic_checkpoint_cannot_restore_withdrawn_or_different_authorization() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://localhost:1");
+    for boundary in ["disabled", "deleted", "generation", "endpoint"] {
+        let mut state = heartbeat_state(&runtime);
+        state.credential_renewal_checkpoint = Some(CollectionLease {
+            generation: state.control.generation,
+            collection_period_id: "installation_period".into(),
+        });
+        match boundary {
+            "disabled" => state.control.enabled = false,
+            "deleted" => state.control.collection_blocked = true,
+            "generation" => state.control.generation += 1,
+            "endpoint" => state.behavior_events_url = "http://localhost:2/events".into(),
+            _ => unreachable!(),
+        }
+        let telemetry = test_telemetry(runtime.clone(), state.clone());
+        assert!(!state.renewal_checkpoint_is_current(&runtime), "{boundary}");
+        assert!(
+            telemetry
+                .finish_credential_renewal_checkpoint(&mut state)
+                .is_err(),
+            "{boundary}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn credential_checkpoint_recovers_in_background_without_queued_reports() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://localhost:1");
+    let mut state = heartbeat_state(&runtime);
+    state.control.collection_period_id = Some("renewed_empty_queue_period".into());
+    state.credential_renewal_checkpoint = Some(CollectionLease {
+        generation: state.control.generation,
+        collection_period_id: "renewed_empty_queue_period".into(),
+    });
+    persist_state(&state).unwrap();
+    let telemetry = test_telemetry(runtime, state.clone());
+    assert_eq!(
+        diagnostics::diagnostic_incidents(&telemetry).unwrap()["reports"],
+        json!([])
+    );
+    assert!(telemetry.outbox.lock().unwrap().records.is_empty());
+    telemetry.collecting.store(false, Ordering::Release);
+    let backup = state_path().with_extension("checkpoint-backup");
+    std::fs::rename(state_path(), &backup).unwrap();
+    std::fs::create_dir(state_path()).unwrap();
+    assert!(
+        telemetry
+            .finish_credential_renewal_checkpoint(&mut state)
+            .is_err()
+    );
+    telemetry.state_healthy.store(false, Ordering::Release);
+    let (tx, rx) = mpsc::channel(1);
+    // Only the control worker runs: no report, event or restart can rescue it.
+    let (event_tx, mut event_rx) = mpsc::channel(1);
+    let (report_tx, mut report_rx) = mpsc::channel(1);
+    let worker = tokio::spawn(BehaviorTelemetry::run_control_worker(
+        rx,
+        telemetry.worker_clone(),
+        Some(event_tx.downgrade()),
+        Some(report_tx.downgrade()),
+    ));
+    tx.send(()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!telemetry.collecting.load(Ordering::Acquire));
+    assert!(event_rx.try_recv().is_err());
+    assert!(report_rx.try_recv().is_err());
+    std::fs::remove_dir(state_path()).unwrap();
+    std::fs::rename(backup, state_path()).unwrap();
+    let recovered = tokio::time::timeout(Duration::from_secs(5), async {
+        while !telemetry.collecting.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    drop(tx);
+    worker.await.unwrap();
+    recovered.expect("disk recovery resumes collection without a queued report or restart");
+    assert_eq!(event_rx.try_recv(), Ok(()));
+    assert_eq!(report_rx.try_recv(), Ok(()));
+    assert!(telemetry.state_healthy.load(Ordering::Acquire));
+    assert!(
+        load_state()
+            .unwrap()
+            .unwrap()
+            .credential_renewal_checkpoint
+            .is_none()
+    );
+    assert_eq!(
+        telemetry.current_lease().unwrap().collection_period_id,
+        "renewed_empty_queue_period"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn diagnostic_worker_settles_a_stale_lease_without_a_renewal_checkpoint() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://localhost:1");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    let failure = diagnostic_failure("stale_session", "stale_turn");
+    let id = failure.event_id.clone();
+    telemetry.track(failure);
+    let preview = diagnostics::preview_diagnostic(
+        &telemetry,
+        DiagnosticPreviewRequest {
+            incident_id: id,
+            notes: "reproduce empty response".into(),
+            attachments: vec![],
+        },
+    )
+    .unwrap();
+    diagnostics::confirm_diagnostic(&telemetry, preview["preview_token"].as_str().unwrap(), true)
+        .unwrap();
+    *telemetry.collection_period_id.write().unwrap() = Some("superseding_period".into());
+    let (tx, rx) = mpsc::channel(1);
+    let worker = tokio::spawn(diagnostics::run_report_worker(rx, telemetry.worker_clone()));
+    tx.send(()).await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let snapshot = diagnostics::diagnostic_incidents(&telemetry).unwrap();
+            if snapshot["reports"][0]["status"] == "rejected" {
+                break snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    drop(tx);
+    worker.await.unwrap();
+    let snapshot =
+        result.expect("stale lease must settle without network or a five-second polling cycle");
+    assert_eq!(snapshot["reports"][0]["reason"], "authorization_changed");
+}
+
+#[test]
+fn diagnostic_environment_discards_invalid_current_and_persisted_values() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://localhost:1");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    let lease = telemetry.current_lease().unwrap();
+    let mut first = diagnostic_failure("environment_session", "environment_turn")
+        .string("mode", "private-invalid-mode")
+        .string("input_type", "private-invalid-input");
+    diagnostics::enrich(&telemetry, &mut first, &lease);
+    assert!(diagnostics::validate(&first).is_ok());
+    let environment = first.fields["diagnostic_environment"].as_object().unwrap();
+    assert!(!environment.contains_key("mode"));
+    assert!(!environment.contains_key("input_type"));
+    // Upgrading must also recover a context written by the old implementation.
+    let mut persisted = serde_json::to_value(&*telemetry.diagnostics.lock().unwrap()).unwrap();
+    persisted["contexts"]["environment_session"]["environment"]["input_type"] =
+        json!("private-stored-input");
+    *telemetry.diagnostics.lock().unwrap() = serde_json::from_value(persisted).unwrap();
+    let mut next = diagnostic_failure("environment_session", "environment_turn");
+    next.fields.remove("input_type");
+    diagnostics::enrich(&telemetry, &mut next, &lease);
+    assert!(diagnostics::validate(&next).is_ok());
+    assert!(
+        next.fields["diagnostic_environment"]
+            .get("input_type")
+            .is_none()
+    );
+    for key in [
+        "provider_key",
+        "model_key",
+        "tool_key",
+        "routing",
+        "has_attachment",
+        "unknown_cached_field",
+    ] {
+        let mut saved = serde_json::to_value(&*telemetry.diagnostics.lock().unwrap()).unwrap();
+        saved["contexts"]["environment_session"]["environment"][key] =
+            json!("private-invalid-cached-category");
+        // Exercise disk deserialization, then the actual enqueue path, rather
+        // than only testing a helper on a hand-built map.
+        filesystem::atomic_write_private(
+            &paths::pinvou3_home().join("failure-diagnostics.json"),
+            &serde_json::to_vec(&saved).unwrap(),
+        )
+        .unwrap();
+        *telemetry.diagnostics.lock().unwrap() = diagnostics::load();
+        let mut terminal = diagnostic_failure("environment_session", "environment_turn");
+        terminal.event_id = format!("environment_recovery_{key}");
+        terminal.fields.remove(key);
+        assert!(
+            telemetry.try_track_for_lease(terminal, &lease),
+            "base terminal must survive cached {key}"
+        );
+        let records = telemetry.outbox.lock().unwrap();
+        let environment = &records.records.last().unwrap().event["diagnostic_environment"];
+        if key == "routing" {
+            assert_eq!(environment[key], "local");
+        } else {
+            assert!(environment.get(key).is_none(), "{key}");
+        }
+        assert!(!environment.to_string().contains("private-invalid"));
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn diagnostic_rebound_report_sends_frozen_preview_with_current_delivery_authorization() {
+    let _home = TestHome::new();
+    for (http, conflict, expected, reason) in [
+        (200, "", "received", ""),
+        (
+            409,
+            "diagnostic_incident_period_mismatch",
+            "rejected",
+            "incident_period_mismatch",
+        ),
+        (
+            409,
+            "collection_inactive",
+            "rejected",
+            "collection_inactive",
+        ),
+        (409, "diagnostic_report_conflict", "rejected", ""),
+        (404, "not_found", "queued", "server_upgrade_required"),
+        (409, "unrecognized_conflict", "queued", "incident_pending"),
+        (400, "bad_request", "rejected", ""),
+        (403, "forbidden", "rejected", ""),
+        (413, "payload_too_large", "rejected", ""),
+        (422, "invalid_report", "rejected", ""),
+        (410, "unrecognized_gone", "queued", "retry_pending"),
+        (429, "rate_limited", "queued", "retry_pending"),
+        (503, "unavailable", "queued", "retry_pending"),
+    ] {
+        let runtime = test_runtime("http://localhost:1");
+        let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+        let failure = diagnostic_failure("delivery_session", "delivery_turn");
+        let id = failure.event_id.clone();
+        telemetry.track(failure);
+        let preview = diagnostics::preview_diagnostic(
+            &telemetry,
+            DiagnosticPreviewRequest {
+                incident_id: id,
+                notes: "reproduce empty response".into(),
+                attachments: vec![],
+            },
+        )
+        .unwrap();
+        diagnostics::confirm_diagnostic(
+            &telemetry,
+            preview["preview_token"].as_str().unwrap(),
+            true,
+        )
+        .unwrap();
+        let lease = telemetry.current_lease().unwrap();
+        let origins = diagnostics::origin_periods(&telemetry, lease.generation).unwrap();
+        telemetry
+            .outbox
+            .lock()
+            .unwrap()
+            .rebind_period("current_delivery_period", lease.generation, &origins)
+            .unwrap();
+        diagnostics::rebind(&telemetry, lease.generation, "current_delivery_period").unwrap();
+        *telemetry.collection_period_id.write().unwrap() = Some("current_delivery_period".into());
+        let receipt: &'static str = Box::leak(
+            (if http == 200 {
+                json!({"report_id":preview["report"]["report_id"],"status":"received"})
+            } else {
+                json!({"error":conflict})
+            })
+            .to_string()
+            .into_boxed_str(),
+        );
+        let (base, server) = mock_http(vec![(http, receipt)]).await;
+        {
+            let mut state = telemetry.state.lock().await;
+            let state = state.as_mut().unwrap();
+            state.behavior_events_url = format!("{base}/behavior/events");
+            state.control.collection_period_id = Some("current_delivery_period".into());
+        }
+        let mut worker_telemetry = telemetry.worker_clone();
+        let mut runtime = (*worker_telemetry.runtime).clone();
+        runtime.behavior_events_url = format!("{base}/behavior/events");
+        worker_telemetry.runtime = Arc::new(runtime);
+        let (tx, rx) = mpsc::channel(1);
+        let worker = tokio::spawn(diagnostics::run_report_worker(rx, worker_telemetry));
+        let requests = tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(tx);
+        worker.await.unwrap();
+        let body: Value =
+            serde_json::from_str(requests[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["collection_period_id"], "current_delivery_period");
+        assert_eq!(body["report"], preview["report"]);
+        for reload in [false, true] {
+            if reload {
+                *telemetry.diagnostics.lock().unwrap() = diagnostics::load();
+            }
+            let reports = diagnostics::diagnostic_incidents(&telemetry).unwrap();
+            assert_eq!(reports["reports"][0]["status"], expected);
+            assert_eq!(reports["reports"][0]["reason"], reason);
+            // load() obtains report material from its separate durable file.
+            // Settled material must be erased there; retryable bodies stay frozen.
+            let material = std::fs::read_to_string(
+                paths::pinvou3_home().join("failure-diagnostic-reports.json"),
+            )
+            .unwrap();
+            assert_eq!(
+                material.contains("reproduce empty response"),
+                expected == "queued"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn diagnostic_report_gone_renews_credentials_or_honors_authoritative_deletion() {
+    let _home = TestHome::new();
+    for deleted in [false, true] {
+        let responses = if deleted {
+            vec![(410, r#"{"error":"device_data_deleted"}"#)]
+        } else {
+            vec![
+                (410, r#"{"error":"device_credentials_expired"}"#),
+                (
+                    200,
+                    r#"{"device_id":"renewed_device","device_token":"renewed_token"}"#,
+                ),
+                (200, r#"{"collection_period_id":"renewed_period"}"#),
+            ]
+        };
+        let (base, server) = mock_http(responses).await;
+        let mut runtime = test_runtime(&base);
+        runtime.behavior_events_url = format!("{base}/behavior/events");
+        let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+        let failure = diagnostic_failure("gone_session", "gone_turn");
+        let incident_id = failure.event_id.clone();
+        telemetry.track(failure);
+        let preview = diagnostics::preview_diagnostic(
+            &telemetry,
+            DiagnosticPreviewRequest {
+                incident_id,
+                notes: "gone recovery material".into(),
+                attachments: vec![],
+            },
+        )
+        .unwrap();
+        diagnostics::confirm_diagnostic(
+            &telemetry,
+            preview["preview_token"].as_str().unwrap(),
+            true,
+        )
+        .unwrap();
+        let (tx, rx) = mpsc::channel(1);
+        let worker = tokio::spawn(diagnostics::run_report_worker(rx, telemetry.worker_clone()));
+        let requests = tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(tx);
+        tokio::time::timeout(Duration::from_secs(3), worker)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(requests[0].starts_with("POST /diagnostics/report "));
+        let state = telemetry.state.lock().await.clone().unwrap();
+        if deleted {
+            assert_eq!(requests.len(), 1, "deleted devices must not register again");
+            assert!(state.control.collection_blocked);
+            assert!(!telemetry.collecting.load(Ordering::Acquire));
+            assert_eq!(
+                diagnostics::diagnostic_incidents(&telemetry).unwrap()["reports"],
+                json!([])
+            );
+            assert!(
+                !std::fs::read_to_string(
+                    paths::pinvou3_home().join("failure-diagnostic-reports.json")
+                )
+                .unwrap()
+                .contains("gone recovery material")
+            );
+        } else {
+            assert_eq!(requests.len(), 3);
+            assert!(requests[1].starts_with("POST /v1/register "));
+            assert!(requests[2].starts_with("POST /behavior/collection/start "));
+            assert_eq!(state.device_id.as_deref(), Some("renewed_device"));
+            assert!(telemetry.collecting.load(Ordering::Acquire));
+            assert!(state.credential_renewal_checkpoint.is_none());
+            for reload in [false, true] {
+                if reload {
+                    *telemetry.diagnostics.lock().unwrap() = diagnostics::load();
+                }
+                let reports = diagnostics::diagnostic_incidents(&telemetry).unwrap();
+                assert_eq!(reports["reports"].as_array().unwrap().len(), 1);
+                assert_eq!(reports["reports"][0]["status"], "queued");
+                let persisted: Value = serde_json::from_slice(
+                    &std::fs::read(paths::pinvou3_home().join("failure-diagnostic-reports.json"))
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    persisted[0]["lease"]["collection_period_id"],
+                    "renewed_period"
+                );
+                assert_eq!(persisted[0]["payload"], preview["report"]);
+            }
+        }
+    }
+}
+
+#[test]
+fn diagnostic_context_capacity_evicts_one_cold_trace_without_stateless_pollution() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://localhost:1");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    let lease = telemetry.current_lease().unwrap();
+    let started = now_ms().saturating_sub(10000);
+    for index in 0..128 {
+        let mut event = BehaviorEvent::new("model_used").session(&format!("session_{index}"));
+        event.occurred_at = started + index;
+        diagnostics::enrich(&telemetry, &mut event, &lease);
+    }
+    let mut active = BehaviorEvent::new("task_first_output").session("session_0");
+    diagnostics::enrich(&telemetry, &mut active, &lease);
+    for _ in 0..140 {
+        diagnostics::enrich(
+            &telemetry,
+            &mut BehaviorEvent::new("model_selected"),
+            &lease,
+        );
+    }
+    let mut added = BehaviorEvent::new("model_used").session("new_session");
+    diagnostics::enrich(&telemetry, &mut added, &lease);
+    let state = serde_json::to_value(&*telemetry.diagnostics.lock().unwrap()).unwrap();
+    let contexts = state["contexts"].as_object().unwrap();
+    assert_eq!(contexts.len(), 128);
+    assert!(contexts.contains_key("session_0"));
+    assert!(contexts.contains_key("new_session"));
+    assert!(!contexts.contains_key("session_1"));
+    assert_eq!(contexts["session_0"]["steps"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn diagnostic_preview_correlates_notes_and_attachments_without_linking_separate_reports() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://localhost:1");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    let failure = diagnostic_failure("session_scope_fixture", "turn_scope_fixture");
+    let id = failure.event_id.clone();
+    telemetry.track(failure);
+    let attachment = paths::pinvou3_home().join("scope-fixture.log");
+    filesystem::atomic_write_private(
+        &attachment,
+        b"request_id=PRIVATE_SCOPE_FIXTURE error_code=EACCES op=write",
+    )
+    .unwrap();
+    let preview = || {
+        diagnostics::preview_diagnostic(
+            &telemetry,
+            DiagnosticPreviewRequest {
+                incident_id: id.clone(),
+                notes: "request_id=PRIVATE_SCOPE_FIXTURE http_status=403".into(),
+                attachments: vec![attachment.to_string_lossy().into_owned()],
+            },
+        )
+        .unwrap()
+    };
+    let first = preview();
+    let notes: Value = serde_json::from_str(first["report"]["notes"].as_str().unwrap()).unwrap();
+    let log: Value = serde_json::from_str(
+        first["report"]["attachments"][0]["content"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(notes["request_id"], log["request_id"]);
+    assert_eq!(notes["http_status"], 403);
+    assert_eq!(log["error_code"], "EACCES");
+    assert!(!first.to_string().contains("PRIVATE_SCOPE_FIXTURE"));
+    assert!(!first.to_string().contains("redaction_"));
+    let second = preview();
+    let next: Value = serde_json::from_str(second["report"]["notes"].as_str().unwrap()).unwrap();
+    assert_ne!(notes["request_id"], next["request_id"]);
+}
+
+#[test]
+fn diagnostic_queue_rolls_back_a_failed_private_write_before_retrying_confirmation() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://localhost:1");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    let failure = diagnostic_failure("diagnostic_storage", "diagnostic_storage");
+    let id = failure.event_id.clone();
+    telemetry.track(failure);
+    let preview = diagnostics::preview_diagnostic(
+        &telemetry,
+        DiagnosticPreviewRequest {
+            incident_id: id,
+            notes: "storage retry".into(),
+            attachments: vec![],
+        },
+    )
+    .unwrap();
+    let report_path = paths::pinvou3_home().join("failure-diagnostic-reports.json");
+    std::fs::create_dir(&report_path).unwrap();
+    assert!(
+        diagnostics::confirm_diagnostic(
+            &telemetry,
+            preview["preview_token"].as_str().unwrap(),
+            true
+        )
+        .is_err()
+    );
+    assert_eq!(
+        diagnostics::diagnostic_incidents(&telemetry).unwrap()["reports"],
+        json!([])
+    );
+    std::fs::remove_dir(&report_path).unwrap();
+    let confirmed = diagnostics::confirm_diagnostic(
+        &telemetry,
+        preview["preview_token"].as_str().unwrap(),
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        confirmed,
+        diagnostics::confirm_diagnostic(
+            &telemetry,
+            preview["preview_token"].as_str().unwrap(),
+            true
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        diagnostics::diagnostic_incidents(&telemetry).unwrap()["reports"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn diagnostic_cancel_and_quality_observations_do_not_rewrite_task_outcomes() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://localhost:1");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    telemetry.track(
+        diagnostic_failure("cancel", "cancel")
+            .status("cancelled")
+            .string("error_category", "user_cancelled"),
+    );
+    telemetry.track(
+        BehaviorEvent::new("response_feedback_changed")
+            .session("old_session")
+            .turn("old_turn")
+            .string("feedback_id", "feedback_diagnostic_test")
+            .string("feedback_action", "set")
+            .string("rating", "negative"),
+    );
+    let events = telemetry.outbox.lock().unwrap();
+    assert!(events.records[0].event.get("diagnostic_id").is_none());
+    assert_eq!(
+        events.records[1].event["diagnostic_code"],
+        "user_reported_quality"
+    );
+    assert!(events.records[1].event.get("status").is_none());
+}
+
+#[test]
+fn diagnostic_failed_stream_is_not_discarded_as_a_user_cancellation() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://localhost:1");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    let error = "stream interrupted: connection reset by peer";
+    telemetry.track(
+        diagnostic_failure("failed_stream", "failed_stream")
+            .string("error_category", error_category(Some(error)))
+            .diagnostic_error(error, "assistant_error"),
+    );
+    assert_eq!(
+        telemetry.outbox.lock().unwrap().records[0].event["diagnostic_code"],
+        "connection_reset"
+    );
+    telemetry.track(
+        BehaviorEvent::new("tool_call_completed")
+            .session("tool_session")
+            .turn("tool_turn")
+            .string("operation_id", "tool_operation_fixture")
+            .integer("attempt_index", 1)
+            .tool("shell", "shell", "cli")
+            .success(false)
+            .integer("duration_ms", 1)
+            .string("error_category", error_category(Some(error)))
+            .diagnostic_error(error, "tool_result"),
+    );
+    assert_eq!(
+        telemetry.outbox.lock().unwrap().records[1].event["diagnostic_code"],
+        "connection_reset"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn diagnostic_reply_limit_applies_to_chunked_bodies_without_content_length() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0u8; 1024];
+        let _ = socket.read(&mut request).await;
+        let _=socket.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n1001\r\n").await;
+        let _ = socket.write_all(&vec![b'x'; 4097]).await;
+        // No terminating chunk: a bounded reader must reject before waiting for EOF.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    });
+    let mut response = reqwest::get(format!("http://{address}/receipt"))
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        diagnostics::bounded_reply(&mut response),
+    )
+    .await
+    .unwrap();
+    assert!(result.is_err());
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn diagnostic_old_collector_fallback_preserves_id_and_business_event() {
+    let _home = TestHome::new();
+    let failure = diagnostic_failure("session_diagnostic", "turn_diagnostic");
+    let id = failure.event_id.clone();
+    let first: &'static str = Box::leak(
+        json!({"results":[{"event_id":id,"status":"rejected","reason_code":"invalid_field"}]})
+            .to_string()
+            .into_boxed_str(),
+    );
+    let second: &'static str = Box::leak(
+        json!({"results":[{"event_id":id,"status":"accepted","reason_code":null}]})
+            .to_string()
+            .into_boxed_str(),
+    );
+    let (base, server) = mock_http(vec![(200, first), (200, second)]).await;
+    let runtime = test_runtime(&base);
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    telemetry.track(failure);
+    let batch = telemetry.outbox.lock().unwrap().batch();
+    let results = telemetry.send_events(&batch).await.unwrap();
+    assert_eq!(results[&id].0, DeliveryStatus::Accepted);
+    let requests = server.await.unwrap();
+    let packet = |request: &str| {
+        serde_json::from_str::<Value>(request.split_once("\r\n\r\n").unwrap().1).unwrap()
+    };
+    assert!(
+        packet(&requests[0])["events"][0]
+            .get("diagnostic_code")
+            .is_some()
+    );
+    assert!(
+        packet(&requests[1])["events"][0]
+            .get("diagnostic_code")
+            .is_none()
+    );
+    assert_eq!(
+        packet(&requests[0])["events"][0]["event_id"],
+        packet(&requests[1])["events"][0]["event_id"]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn diagnostic_delivery_is_fair_requires_matching_receipt_and_clears_delivered_material() {
+    let _home = TestHome::new();
+    let (base, invalid_server) = mock_http(vec![(
+        200,
+        "{\"report_id\":\"wrong_report_id\",\"status\":\"received\"}",
+    )])
+    .await;
+    let mut runtime = test_runtime(&base);
+    runtime.behavior_events_url = format!("{base}/behavior/events");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    let failure = diagnostic_failure("diagnostic", "diagnostic");
+    let id = failure.event_id.clone();
+    telemetry.track(failure);
+    let preview = diagnostics::preview_diagnostic(
+        &telemetry,
+        DiagnosticPreviewRequest {
+            incident_id: id,
+            notes: "first pending reproduction".into(),
+            attachments: vec![],
+        },
+    )
+    .unwrap();
+    diagnostics::confirm_diagnostic(&telemetry, preview["preview_token"].as_str().unwrap(), true)
+        .unwrap();
+    let (tx, rx) = mpsc::channel(1);
+    tx.send(()).await.unwrap();
+    let worker = tokio::spawn(diagnostics::run_report_worker(rx, telemetry.worker_clone()));
+    let requests = tokio::time::timeout(Duration::from_secs(3), invalid_server)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(requests[0].starts_with("POST /diagnostics/report "));
+    drop(tx);
+    worker.await.unwrap();
+    assert_eq!(
+        diagnostics::diagnostic_incidents(&telemetry).unwrap()["reports"][0]["status"],
+        "queued"
+    );
+    let second_failure = diagnostic_failure("second_diagnostic", "second_diagnostic");
+    let second_id = second_failure.event_id.clone();
+    telemetry.track(second_failure);
+    let preview = diagnostics::preview_diagnostic(
+        &telemetry,
+        DiagnosticPreviewRequest {
+            incident_id: second_id,
+            notes: "reviewed reproduction".into(),
+            attachments: vec![],
+        },
+    )
+    .unwrap();
+    let queued = diagnostics::confirm_diagnostic(
+        &telemetry,
+        preview["preview_token"].as_str().unwrap(),
+        true,
+    )
+    .unwrap();
+    let receipt: &'static str = Box::leak(
+        json!({"report_id":queued["report_id"],"status":"received"})
+            .to_string()
+            .into_boxed_str(),
+    );
+    let (base, valid_server) = mock_http(vec![(200, receipt)]).await;
+    {
+        let mut persisted = telemetry.state.lock().await;
+        persisted.as_mut().unwrap().behavior_events_url = format!("{base}/behavior/events");
+    }
+    let mut worker_telemetry = telemetry.worker_clone();
+    let mut runtime = (*worker_telemetry.runtime).clone();
+    runtime.behavior_events_url = format!("{base}/behavior/events");
+    worker_telemetry.runtime = Arc::new(runtime);
+    let (tx, rx) = mpsc::channel(1);
+    tx.send(()).await.unwrap();
+    let worker = tokio::spawn(diagnostics::run_report_worker(rx, worker_telemetry));
+    tokio::time::timeout(Duration::from_secs(3), valid_server)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(tx);
+    worker.await.unwrap();
+    assert_eq!(
+        diagnostics::diagnostic_incidents(&telemetry).unwrap()["reports"][1]["status"],
+        "received"
+    );
+    assert_eq!(
+        diagnostics::diagnostic_incidents(&telemetry).unwrap()["reports"][0]["status"],
+        "queued"
+    );
+    assert!(
+        !std::fs::read_to_string(paths::pinvou3_home().join("failure-diagnostic-reports.json"))
+            .unwrap()
+            .contains("reviewed reproduction")
+    );
 }
 
 async fn mock_http(
@@ -1317,7 +2512,9 @@ fn outbox_rebinds_pending_events_after_server_identity_expiry() {
     outbox
         .enqueue(outbox_record("event_rebind", "period_expired", now_ms()))
         .unwrap();
-    outbox.rebind_period("period_renewed", 2).unwrap();
+    outbox
+        .rebind_period("period_renewed", 2, &HashMap::new())
+        .unwrap();
     assert_eq!(outbox.records[0].collection_period_id, "period_renewed");
     assert_eq!(outbox.records[0].generation, 2);
     assert_eq!(
@@ -2203,7 +3400,7 @@ async fn registration_tombstone_merges_concurrent_control_state_before_worker_cl
     drop(telemetry.control_tx.take());
     tokio::time::timeout(
         Duration::from_secs(3),
-        BehaviorTelemetry::run_control_worker(control_rx, control_worker),
+        BehaviorTelemetry::run_control_worker(control_rx, control_worker, None, None),
     )
     .await
     .expect("control worker should drain merged installation deletion duties");
@@ -2507,7 +3704,7 @@ async fn max_generation_start_ends_new_remote_period_and_stays_blocked() {
     control_worker.control_tx = None;
     tokio::time::timeout(
         Duration::from_secs(3),
-        BehaviorTelemetry::run_control_worker(control_rx, control_worker),
+        BehaviorTelemetry::run_control_worker(control_rx, control_worker, None, None),
     )
     .await
     .expect("control worker should drain the queued End and stop");

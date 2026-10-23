@@ -600,15 +600,40 @@ for (const lane of ['desktop', 'web']) {
           itemIdSeq: { get value() { return 0; }, set value(v) {} },
           formatAttachmentDisplayText: (t) => t,
         }));`, ctx);
-        const functions = ['getComposerDraft', 'setComposerDraft', 'prefillComposer', 'restoreTaskDraft',
-          'stripMentionBlockForComposerRestore', 'makeQueuedMessage',
-          'rebuiltQueuedPayload', 'rebuiltQueuedMetaPayload',
-          lane === 'desktop' ? 'restoreSteerText' : 'restoreComposerText', 'sendMessage'];
+        // #701 T4a 壳化适配：web lane 的 setComposerDraft/prefillComposer/
+        // stripMentionBlockForComposerRestore/makeQueuedMessage/rebuiltQueued*
+        // 已委托共享基座；voice 切片簇（harness 内）依赖集不覆盖发送族，
+        // 这里按 index.html 顺序另接一个发送簇（惰性创建，此时 ctx 的
+        // sessionStates/itemIdSeq 等已就位），并把六个壳名直接绑到该簇。
+        vm.runInContext(`this.pinvouSharedwebSend = () => this.__webClusterSend || (this.__webClusterSend = window.PinvouBridgeShared.create("web", {
+          state, sessionStates, notify: (...cbArgs) => this.notify(...cbArgs), bt: { get value() { return (k) => k; } }, invoke: async () => null,
+          addChatItem: (item) => { state.chatItems.push(item); },
+          sendMessage: (...args) => this.sendMessage(...args),
+          doSendFor: (...args) => this.doSendFor(...args),
+          flushQueued: (...args) => this.flushQueued(...args),
+          getBuffer: (sid) => (sessionStates[sid] || null),
+          touchSessionBuffer: () => {},
+          ensureSessionBufferLoaded: async () => {},
+          runSyncOnSession: (_sid, fn) => fn(),
+          autoCreateScheduledTaskDraft: () => {},
+          pendingAssistantBlocks: { get value() { return []; } },
+          itemIdSeq: { get value() { return 0; }, set value(v) {} },
+          formatAttachmentDisplayText: (t) => t,
+        }));`, ctx);
+        const functions = ['getComposerDraft', 'restoreTaskDraft', 'sendMessage',
+          lane === 'desktop' ? 'setComposerDraft' : 'restoreComposerText'];
+        if (lane === 'desktop') functions.push('prefillComposer', 'stripMentionBlockForComposerRestore', 'makeQueuedMessage',
+          'rebuiltQueuedPayload', 'rebuiltQueuedMetaPayload', 'restoreSteerText');
+        if (lane === 'web') {
+          vm.runInContext(['setComposerDraft', 'prefillComposer', 'stripMentionBlockForComposerRestore',
+            'makeQueuedMessage', 'rebuiltQueuedPayload', 'rebuiltQueuedMetaPayload']
+            .map(name => `this.${name} = (...args) => this.pinvouSharedwebSend().${name}(...args);`).join('\n'), ctx);
+        }
         if (lane === 'web') functions.push('restoreAbortedMaterialization', 'maybeSubmitFirstWebTurn');
         vm.runInContext(functions.map(name => bridgeFunction(sendSource, name)).join('\n'), ctx);
         // 信封函数经簇访问（其内部的 mention 拆分依赖注入的 window 域），
         // 不再单独提取 helpers 谓词体。
-        vm.runInContext('this.queuedPayloadEnvelope = (...args) => this.pinvouSharedtauriChat().queuedPayloadEnvelope(...args);', ctx);
+        vm.runInContext('this.queuedPayloadEnvelope = (...args) => (lane === \'desktop\' ? this.pinvouSharedtauriChat() : this.pinvouSharedweb()).queuedPayloadEnvelope(...args);', ctx);
         const sentTargets = [];
         ctx.doSendFor = async sid => { sentTargets.push(sid); return true; };
         if (outcome.startsWith('draft-') && !preparing) {

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, cpSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -32,15 +32,8 @@ copyFileSync(path.join(here, '..', 'src', 'shared', 'ledger-repair-i18n.js'), pa
 for (const name of ['organization-i18n.js', 'model-usage-i18n.js', 'account-closure-i18n.js', 'entitlement-correction-i18n.js', 'account-closed-grants-i18n.js', 'audit-i18n.js', 'platform-role-i18n.js']) {
   copyFileSync(path.join(here, '..', 'src', 'shared', name), path.join(dir, 'shared', name));
 }
-// i18n.js 现按语言拆分（zh 内嵌），临时副本需带上 zh 词典才能解析。
-mkdirSync(path.join(dir, 'shared', 'i18n'), { recursive: true });
-for (const f of ['zh.js', 'browser.js', 'chat-recovery.js']) {
-  copyFileSync(
-    path.join(here, '..', 'src', 'shared', 'i18n', f),
-    path.join(dir, 'shared', 'i18n', f),
-  );
-}
-// zh moved behind i18n.js's lazy loader (startup budget): seed the staged
+// Preserve the locale modules' transitive imports as dictionaries evolve.
+  cpSync(path.join(here, '..', 'src', 'shared', 'i18n'), path.join(dir, 'shared', 'i18n'), { recursive: true });// zh moved behind i18n.js's lazy loader (startup budget): seed the staged
 // copy synchronously so the imported module reads a filled dict.zh.
 {
   const { readFileSync, writeFileSync } = await import('node:fs');

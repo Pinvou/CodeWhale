@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { DiagnosticError, FailureReportStore, diagnosticFingerprint, failureGroups, failureSamples } from "./failure-diagnostics.js";
 import { RetentionFacts, retentionFromEvents } from "./retention-store.js";
 import {
   DAY_MS, STATS_TIMEZONE_OFFSET_MS, MIN_RELIABLE_SAMPLE,
@@ -6,6 +7,7 @@ import {
   normalizeUsageOccurredAt, statsDay,
 } from "./telemetry-primitives.js";
 import { atomicWriteJson, atomicWriteJsonLines, enforcePrivateFile, validDeviceInventory } from "./telemetry-storage.js";
+
 import { isIP } from "node:net";
 import {
   appendFileSync,
@@ -1723,13 +1725,26 @@ function readCookies(req) {
   return values;
 }
 
-async function readJson(req) {
+async function readJson(req, limit = MAX_JSON_BYTES, idleTimeoutMs = 0) {
   const chunks = [];
   let size = 0;
-  for await (const chunk of req) {
-    size += chunk.length;
-    if (size > MAX_JSON_BYTES) throw new Error("payload_too_large");
-    chunks.push(chunk);
+  let timeout;
+  const armTimeout = () => {
+    if (idleTimeoutMs <= 0) return;
+    clearTimeout(timeout);
+    timeout = setTimeout(() => req.destroy(new Error("request_body_timeout")), idleTimeoutMs);
+    timeout.unref?.();
+  };
+  armTimeout();
+  try {
+    for await (const chunk of req) {
+      armTimeout();
+      size += chunk.length;
+      if (size > limit) throw new Error("payload_too_large");
+      chunks.push(chunk);
+    }
+  } finally {
+    clearTimeout(timeout);
   }
   try {
     return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
@@ -1750,6 +1765,7 @@ function loadJson(path, fallback, validate) {
     throw new TelemetryHttpError(503, "telemetry_storage_unavailable");
   }
 }
+
 
 export class TelemetryStore {
   constructor(dataDir, pepper, options = {}) {
@@ -1775,6 +1791,7 @@ export class TelemetryStore {
     this.behaviorEventIds = new Set();
     this.behaviorPipelineEvents = [];
     this.deletionTombstones = [];
+    this.deletionLedgerPersisted = false;
     this.removedSubjectHashes = new Set();
     this.removedCredentialReasons = new Map();
     this.deletedRegistrationIdentities = new Set();
@@ -1807,24 +1824,29 @@ export class TelemetryStore {
       1_000_000,
     );
 
-    // Unknown inventory is never authorization to prune durable retention.
-    // Validate before tombstone migration, raw compaction or authority writes.
+    // Absence is only a fresh deployment when no dependent inventory exists.
+    // Unknown/partial identity state must never authorize report/retention pruning or
+    // overwrite the evidence needed for an operator to recover the store.
     let saved = loadJson(this.devicesPath, null, validDeviceInventory);
     if (saved === null && [this.eventsPath, this.behaviorEventsPath, this.behaviorPipelinePath,
-      this.deletionTombstonesPath, join(dataDir, "retention-facts.json"),
+      this.deletionTombstonesPath, join(dataDir, "failure-diagnostic-reports.json"),
+      join(dataDir, "failure-diagnostic-metadata.json"), join(dataDir, "retention-facts.json"),
       join(dataDir, "retention-facts.initialized")].some(path => existsSync(path))) {
+      console.error("[telemetry-error] persistence_read_failed");
       throw new TelemetryHttpError(503, "telemetry_storage_unavailable");
     }
     if (saved === null) {
-      // Anchor a proven-fresh inventory before creating dependent authority.
-      saved = { version: 2, devices: [] };
+      // Anchor a proven-fresh inventory before creating dependent files, so
+      // an interrupted first startup can safely repeat the ledger migration.
+      saved = {version: 2, devices: []};
       atomicWriteJson(this.devicesPath, saved);
     }
-    this.loadDeletionTombstones();
+    this.loadDeletionTombstones(saved?.deletion_ledger_required === true);
     let restoredDeletedDevice = false;
     let restoredTimestampDevice = false;
     const loadedAt = Date.now();
-    for (const device of saved.devices) {
+    for (const device of saved?.devices ?? []) {
+
       if (this.removedSubjectHashes.has(this.deletionSubjectHash(device.device_id))) {
         restoredDeletedDevice = true;
         continue;
@@ -1857,25 +1879,21 @@ export class TelemetryStore {
       this.devices.set(device.device_id, normalized);
       this.devicesByHardwareHash.set(device.hardware_hash, normalized);
     }
+    // Migrate legacy installations only after a durable ledger exists, and
+    // before report migration or any event rewrite. Interrupted migration is
+    // repeatable; the device file never requires a ledger that was not saved.
+    if (saved.deletion_ledger_required !== true) this.saveNow();
+    this.failureReports = new FailureReportStore(dataDir);
     this.rebuildDeletionIndexes();
     this.retentionFacts = new RetentionFacts(dataDir, loadedAt);
     this.loadEvents();
     this.loadBehaviorEvents();
     this.persistRetentionFacts(loadedAt);
     this.loadBehaviorPipelineEvents();
-    const recoveredDeletion = this.deletionTombstones.some((record) => (
-      record.deletion_request_id && record.status !== "completed"
-    ));
-    if (recoveredDeletion) {
-      const completedAt = Date.now();
-      for (const record of this.deletionTombstones) {
-        if (record.deletion_request_id && record.status !== "completed") {
-          record.status = "completed";
-          record.completed_at = completedAt;
-        }
-      }
-      this.saveDeletionTombstones();
-    }
+    this.finishPendingDeletions();
+    // Completed tombstones must also defeat a restored pre-deletion backup.
+    // Detail endpoints repeat this gate and fail closed if storage is unwritable.
+    try { this.failureReports.prune(this.devices); } catch { console.error("[telemetry-error] diagnostic_compaction_failed"); }
     if (restoredDeletedDevice || restoredTimestampDevice) this.saveNow();
     this.enforcePrivateStoragePermissions();
   }
@@ -1890,20 +1908,25 @@ export class TelemetryStore {
       .digest("hex");
   }
 
-  loadDeletionTombstones() {
-    const saved = loadJson(this.deletionTombstonesPath, { records: [] }, value => value
+  loadDeletionTombstones(required = false) {
+    const saved = loadJson(this.deletionTombstonesPath, null, value => value
       && typeof value === "object" && !Array.isArray(value) && Array.isArray(value.records)
       && value.records.every(record => record && typeof record === "object" && !Array.isArray(record)
         && typeof record.subject_hash === "string" && record.subject_hash.length > 0));
-    this.deletionTombstones = saved.records
+    if (saved === null && required) {
+      console.error("[telemetry-error] persistence_read_failed");
+      throw new TelemetryHttpError(503, "telemetry_storage_unavailable");
+    }
+    this.deletionLedgerPersisted = saved !== null;
+    this.deletionTombstones = (saved?.records ?? [])
+
       .map((record) => ({
         ...record,
         removal_reason: record.removal_reason
           || (record.deletion_request_id || record.request_id ? "deleted" : "expired"),
       }));
     this.rebuildDeletionIndexes();
-    if (existsSync(this.deletionTombstonesPath)
-      && JSON.stringify(this.deletionTombstones) !== JSON.stringify(saved.records || [])) {
+    if (saved === null || JSON.stringify(this.deletionTombstones) !== JSON.stringify(saved.records)) {
       this.saveDeletionTombstones();
     }
   }
@@ -1917,7 +1940,12 @@ export class TelemetryStore {
     for (const record of this.deletionTombstones) {
       this.removedSubjectHashes.add(record.subject_hash);
       if (record.token_hash) {
-        this.removedCredentialReasons.set(record.token_hash, record.removal_reason || "deleted");
+        const reason = record.removal_reason || "deleted";
+        // A historical expiry row must never downgrade a known deletion to
+        // renewable credentials when both facts survive compaction.
+        if (!this.removedCredentialReasons.has(record.token_hash) || reason === "deleted") {
+          this.removedCredentialReasons.set(record.token_hash, reason);
+        }
       }
       if (record.removal_reason === "deleted"
         && record.hardware_hash && record.registration_secret_hash) {
@@ -1940,6 +1968,7 @@ export class TelemetryStore {
       version: 3,
       records: this.deletionTombstones,
     });
+    this.deletionLedgerPersisted = true;
   }
 
   enforcePrivateStoragePermissions() {
@@ -1950,8 +1979,11 @@ export class TelemetryStore {
       this.behaviorEventsPath,
       this.behaviorPipelinePath,
       this.deletionTombstonesPath,
+      join(this.dataDir, "failure-diagnostic-reports.json"),
+      join(this.dataDir, "failure-diagnostic-metadata.json"),
       this.retentionFacts.path,
       this.retentionFacts.marker,
+
     ]) {
       if (existsSync(path)) enforcePrivateFile(path);
     }
@@ -2021,6 +2053,10 @@ export class TelemetryStore {
     const tokenHash = this.deletionTokenHash(token);
     const record = this.deletionResultsByRequest
       .get(`${tokenHash}:${boundedText(requestId, 128)}`);
+    if (record?.status === "processing") {
+      this.finishPendingDeletions();
+      return this.publicDeletionResponse(record);
+    }
     if (record && Number(record.result_expires_at) <= now) return null;
     return record ? this.publicDeletionResponse(record) : null;
   }
@@ -2030,6 +2066,13 @@ export class TelemetryStore {
     const record = this.deletionResultsById
       .get(`${tokenHash}:${boundedText(deletionRequestId, 128)}`);
     if (!record) throw new TelemetryHttpError(404, "deletion_request_not_found");
+    // The receipt lifetime must not expire an unfinished cleanup intent.
+    // This request may acknowledge its recovery; later reads of a completed,
+    // expired receipt retain the existing 410 policy.
+    if (record.status === "processing") {
+      this.finishPendingDeletions();
+      return this.publicDeletionResponse(record);
+    }
     if (Number(record.result_expires_at) <= now) {
       throw new TelemetryHttpError(410, "deletion_result_expired");
     }
@@ -2144,7 +2187,8 @@ export class TelemetryStore {
   }
 
   saveNow() {
-    atomicWriteJson(this.devicesPath, { version: 2, devices: [...this.devices.values()] });
+    if (!this.deletionLedgerPersisted || !existsSync(this.deletionTombstonesPath)) this.saveDeletionTombstones();
+    atomicWriteJson(this.devicesPath, { version: 2, deletion_ledger_required: true, devices: [...this.devices.values()] });
   }
 
   updateRegion(device, region, now = Date.now()) {
@@ -2282,6 +2326,7 @@ export class TelemetryStore {
   }
 
   compactExpiredData(now = Date.now()) {
+    try { this.failureReports.prune(this.devices, now); } catch { console.error("[telemetry-error] diagnostic_compaction_failed"); }
     const usageChanged = this.compactEvents(now);
     const behaviorChanged = this.compactBehaviorEvents(now);
     const pipelineChanged = this.compactBehaviorPipelineEvents(now);
@@ -2292,13 +2337,11 @@ export class TelemetryStore {
   }
 
   compactDeletionTombstones(now = Date.now()) {
-    const bySubject = new Map();
+    const byFact = new Map();
     for (const record of this.deletionTombstones) {
-      const current = bySubject.get(record.subject_hash);
-      if (Number(record.result_expires_at) > now) {
-        bySubject.set(record.subject_hash, record);
-      } else if (!current || Number(current.result_expires_at) <= now) {
-        bySubject.set(record.subject_hash, {
+      const active = Number(record.result_expires_at) > now;
+      const retainRequest = active || Boolean(record.deletion_request_id && record.status !== "completed");
+      const compact = retainRequest ? record : {
           subject_hash: record.subject_hash,
           ...(record.token_hash ? { token_hash: record.token_hash } : {}),
           removal_reason: record.removal_reason || "deleted",
@@ -2306,10 +2349,17 @@ export class TelemetryStore {
           ...(record.registration_secret_hash
             ? { registration_secret_hash: record.registration_secret_hash }
             : {}),
-        });
-      }
+        };
+      // A subject may have multiple removed credentials or registration
+      // identities. Preserve every blocking fact, independently of row order
+      // and whether an earlier minimal record has an expiry field.
+      const key = JSON.stringify([compact.subject_hash, compact.token_hash, compact.removal_reason,
+        compact.hardware_hash, compact.registration_secret_hash,
+        retainRequest ? compact.deletion_request_id : null, retainRequest ? compact.request_id : null]);
+      const prior = byFact.get(key);
+      if (!prior || (active && Number(compact.result_expires_at) > Number(prior.result_expires_at))) byFact.set(key, compact);
     }
-    const compacted = [...bySubject.values()];
+    const compacted = [...byFact.values()];
     if (JSON.stringify(compacted) === JSON.stringify(this.deletionTombstones)) return false;
     this.deletionTombstones = compacted;
     this.saveDeletionTombstones();
@@ -2688,25 +2738,46 @@ export class TelemetryStore {
     };
     this.deletionTombstones.push(tombstone);
     this.saveDeletionTombstones();
-    this.persistRetentionFacts(now);
-    this.events = this.events.filter((event) => event.device_id !== device.device_id);
-    this.eventIds = new Set(this.events.map((event) => event.event_id));
-    this.behaviorEvents = this.behaviorEvents.filter((event) => event.device_id !== device.device_id);
-    this.behaviorEventIds = new Set(this.behaviorEvents.map((event) => event.event_id));
-    this.behaviorPipelineEvents = this.behaviorPipelineEvents
-      .filter((entry) => entry.device_id !== device.device_id);
-    atomicWriteJsonLines(this.eventsPath, this.events);
-    atomicWriteJsonLines(this.behaviorEventsPath, this.behaviorEvents);
-    atomicWriteJsonLines(this.behaviorPipelinePath, this.behaviorPipelineEvents);
-    this.devices.delete(device.device_id);
-    this.devicesByHardwareHash.delete(device.hardware_hash);
-    this.eventRateBuckets.delete(device.device_id);
-    this.rebuildUsageCounters();
-    this.saveNow();
-    tombstone.status = "completed";
-    tombstone.completed_at = Date.now();
-    this.saveDeletionTombstones();
+    this.finishPendingDeletions();
+
     return this.publicDeletionResponse(tombstone);
+  }
+
+  finishPendingDeletions() {
+    const pending = this.deletionTombstones.filter(record => record.deletion_request_id && record.status !== "completed");
+    if (!pending.length) return;
+    try {
+      for (const [id, device] of this.devices) {
+        if (this.subjectWasDeleted(id)) {
+          this.devices.delete(id); this.devicesByHardwareHash.delete(device.hardware_hash); this.eventRateBuckets.delete(id);
+        }
+      }
+      // Retention is another durable subject store: never complete a deletion
+      // until its minimal facts are gone, including after a failed attempt.
+      this.persistRetentionFacts();
+      for (const [field, path] of [["events", this.eventsPath],
+        ["behaviorEvents", this.behaviorEventsPath], ["behaviorPipelineEvents", this.behaviorPipelinePath]]) {
+        const retained = this[field].filter(event => !this.subjectWasDeleted(event.device_id));
+        if (retained.length !== this[field].length) {
+          // Commit memory only after disk succeeds. A failed rewrite must
+          // remain dirty on retry; already-clean streams need no full rewrite.
+          atomicWriteJsonLines(path, retained);
+          this[field] = retained;
+        }
+      }
+      this.failureReports.prune(this.devices);
+      this.eventIds = new Set(this.events.map(event => event.event_id));
+      this.behaviorEventIds = new Set(this.behaviorEvents.map(event => event.event_id));
+      this.rebuildUsageCounters(); this.saveNow();
+      const completedAt = Date.now();
+      for (const record of pending) { record.status = "completed"; record.completed_at = completedAt; }
+      try { this.saveDeletionTombstones(); }
+      catch (error) { for (const record of pending) { record.status="processing";record.completed_at=null; } throw error; }
+    } catch {
+      // A durable tombstone blocks re-creation immediately. Never acknowledge
+      // completion before every associated data store has been cleaned.
+      console.error("[telemetry-error] deletion_cleanup_pending");
+    }
   }
 
   behaviorCollectionStatus(device) {
@@ -2870,6 +2941,8 @@ export function createTelemetryService(options = {}) {
     }
     return session;
   }
+  const diagnosticCaseId = event => crypto.createHmac("sha256", devicePepper)
+    .update(`${event.device_id}:${event.diagnostic_id}`).digest("hex");
 
   function rateLimited(buckets, key, limit) {
     const now = Date.now();
@@ -2962,6 +3035,17 @@ export function createTelemetryService(options = {}) {
           return true;
         }
         json(res, 200, store.appendBehaviorEvents(device, events, input.batch_id));
+        return true;
+      }
+      if (req.method === "POST" && routePath === `${STATS_PREFIX}/api/diagnostics/report`) {
+        if (rateLimited(invalidCredentialAttempts, `diagnostic:${requestIp}`, 30)) throw new DiagnosticError(429, "rate_limited");
+        const input = await readJson(req, 2300 * 1024, 15000);
+        if (!input || typeof input !== "object" || Array.isArray(input)) throw new DiagnosticError(400, "invalid_diagnostic_report");
+        const device = store.authenticate(input.device_id, bearer(req));
+        if (!device) { rejectUnknownDevice(res, bearer(req), requestIp); return true; }
+        store.failureReports.prune(store.devices);
+        const incident = store.behaviorEvents.find(e => e.device_id === device.device_id && (e.diagnostic_id === input.report?.incident_id || e.event_id === input.report?.incident_id));
+        json(res, 200, store.failureReports.append(device, input.report, incident, input.collection_period_id ?? input.report?.collection_period_id));
         return true;
       }
       if (req.method === "POST" && routePath === `${STATS_PREFIX}/api/behavior/collection/start`) {
@@ -3073,6 +3157,48 @@ export function createTelemetryService(options = {}) {
         });
         return true;
       }
+      if (routePath === `${STATS_PREFIX}/api/behavior/failures` && req.method === "GET") {
+        const session = adminAuthorized(req);
+        const filters = Object.fromEntries([...new URL(req.url, "http://localhost").searchParams]
+          .filter(([key]) => ["days", "app_version", "platform", "mode", "provider_key", "diagnostic_code"].includes(key)));
+        const rows = failureGroups(store.behaviorEvents, filters, session.role === "operations_admin" ? 1 : Math.max(20, MIN_PRIVACY_GROUP_SUBJECTS));
+        json(res, 200, { rows: rows.map(row => ({ ...row, ...store.failureReports.issue(row.fingerprint) })), detail_allowed: session.role === "operations_admin" });
+        return true;
+      }
+      if (routePath.startsWith(`${STATS_PREFIX}/api/diagnostics/`)) {
+        const session = adminAuthorized(req);
+        if (session?.role !== "operations_admin") throw new DiagnosticError(403, "forbidden");
+        store.failureReports.prune(store.devices);
+        const actor = crypto.createHash("sha256").update(readCookies(req).pinvou_stats_session).digest("hex");
+        const params = new URL(req.url, "http://localhost").searchParams;
+        if (routePath.endsWith("/samples") && req.method === "GET") {
+          const fingerprint = params.get("fingerprint");
+          store.failureReports.audit("samples_read", /^[a-f0-9]{64}$/.test(fingerprint || "") ? fingerprint : "invalid", actor);
+          const incidents = failureSamples(store.behaviorEvents, fingerprint, Object.fromEntries(params))
+            .map(e => ({ id: diagnosticCaseId(e), at: e.occurred_at, version: e.app_version, mode: e.mode, platform: e.platform, code: e.diagnostic_code }));
+          json(res, 200, { incidents }); return true;
+        }
+        if (routePath.endsWith("/incident") && req.method === "GET") {
+          const incident = store.behaviorEvents.find(e => e.diagnostic_id && diagnosticCaseId(e) === params.get("id"));
+          if (!incident) throw new DiagnosticError(404, "diagnostic_incident_not_found");
+          const detail = store.failureReports.detail(incident, actor);
+          const timeline = store.behaviorEvents.filter(e => e.device_id === incident.device_id && (
+            (incident.turn_id && e.turn_id === incident.turn_id)
+            || (incident.attempt_id && e.attempt_id === incident.attempt_id)
+            || (incident.operation_id && e.operation_id === incident.operation_id)))
+            .sort((a,b)=>a.occurred_at-b.occurred_at).slice(-32).map(e=>Object.fromEntries(
+              ["event_name","occurred_at","status","success","stage","error_category","provider_key","model_key","tool_key","duration_ms","diagnostic_code"].filter(k=>e[k]!==undefined).map(k=>[k,e[k]])));
+          const related = store.behaviorEvents.filter(e => e.diagnostic_id && e.diagnostic_trace_id === incident.diagnostic_trace_id && e !== incident).slice(-24)
+            .map(e => ({id:diagnosticCaseId(e),code:e.diagnostic_code,component:e.diagnostic_component,at:e.occurred_at,routing:e.diagnostic_environment?.routing}));
+          json(res, 200, { ...detail, timeline, related }); return true;
+        }
+        if (routePath.endsWith("/issue") && req.method === "POST") {
+          if (req.headers["x-pinvou-diagnostics"] !== "1") throw new DiagnosticError(403, "diagnostic_csrf_rejected");
+          const input = await readJson(req);
+          if (!store.behaviorEvents.some(e => e.diagnostic_id && diagnosticFingerprint(e) === input.fingerprint)) throw new DiagnosticError(404, "diagnostic_issue_not_found");
+          json(res, 200, store.failureReports.update(input.fingerprint, input.issue, actor)); return true;
+        }
+      }
       if (req.method === "GET" && routePath === `${STATS_PREFIX}/api/devices`) {
         json(res, 200, { devices: store.deviceList() });
         return true;
@@ -3103,7 +3229,7 @@ export function createTelemetryService(options = {}) {
     } catch (error) {
       const code = Number(error?.status)
         || (error?.message === "payload_too_large" ? 413 : 400);
-      if (!(error instanceof TelemetryHttpError)) {
+      if (!(error instanceof TelemetryHttpError) && !(error instanceof DiagnosticError)) {
         console.error("[telemetry-error] request_failed");
       }
       json(res, code, { error: error?.message || "bad_request" });

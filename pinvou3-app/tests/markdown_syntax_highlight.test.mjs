@@ -244,16 +244,23 @@ for (const selector of [
   assert.ok(css.includes(selector), `missing language-specific style: ${selector}`);
 }
 
-for (const bridgePath of [
-  ['src', 'platform', 'tauri', 'bridge.js'],
-  ['src', 'platform', 'web', 'bridge.js'],
-]) {
-  assert.match(
-    readApp(...bridgePath),
-    /window\.PinvouMarkdownRenderer\.renderMarkdown\(text\)/u,
-    `${bridgePath.join('/')} must delegate to the shared renderer`,
-  );
-}
+// #701 T4a/T4b 壳化：两条 lane 的 renderMarkdown 均已委托共享基座，委托链本体
+// 只在 helpers；lane 侧分别钉簇转发。
+assert.match(
+  readApp('src', 'shared', 'bridge-shared-helpers.js'),
+  /window\.PinvouMarkdownRenderer\.renderMarkdown\(text\)/u,
+  'src/shared/bridge-shared-helpers.js must delegate to the shared renderer',
+);
+assert.match(
+  readApp('src', 'platform', 'tauri', 'bridge.js'),
+  /function renderMarkdown\(text\) \{ return pinvouSharedtauriMain\(\)\.renderMarkdown\(text\); \}/u,
+  'src/platform/tauri/bridge.js must forward renderMarkdown to the shared cluster',
+);
+assert.match(
+  readApp('src', 'platform', 'web', 'bridge.js'),
+  /function renderMarkdown\(text\) \{ return pinvouSharedweb\(\)\.renderMarkdown\(text\); \}/u,
+  'src/platform/web/bridge.js must forward renderMarkdown to the shared cluster',
+);
 assert.match(
   readApp('src', 'features', 'conversation', 'ConversationTimeline.jsx'),
   /import \{ renderMarkdown \} from '\.\.\/\.\.\/shared\/markdown-renderer\.js'/u,

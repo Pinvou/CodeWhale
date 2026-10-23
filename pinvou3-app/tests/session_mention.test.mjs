@@ -1835,13 +1835,15 @@ test('pre-dispatch abandon paths resolve on the restore verdict (round-8 M1)', (
   assert.match(sendTaskSlice, /settleSessionRefSend\(refsAtSend, draftKeyAtSend\);/);
   // The strip-on-restore rule lives once, in the shared helpers (minor 10).
   // Official 适配：社区主线的 strip 闸门收敛在 bridge-shared-helpers.js；#701
-  // T0-c 后 desktop 桥改委托 shim + helpers 本体双钉，web lane 仍内联钉本体。
+  // T0-c 后 desktop 桥改委托 shim + helpers 本体双钉，#701 T4a 起 web lane
+  // 同形（壳 + helpers 本体双钉）。
   const helpersSource = readFileSync(new URL('../src/shared/bridge-shared-helpers.js', import.meta.url), 'utf8');
   assert.match(chatSource, /function stripMentionBlockForComposerRestore\(text\) \{ return pinvouSharedtauriChat\(\)\.stripMentionBlockForComposerRestore\(text\); \}/);
   // helpers 本体经 sessionMentionSplitter 读取 window 域拆分器（上游同形）。
   assert.match(helpersSource, /function stripMentionBlockForComposerRestore\(text\) \{[\s\S]{0,120}?sessionMentionSplitter\(\);/);
   assert.match(helpersSource, /function sessionMentionSplitter\(\) \{[\s\S]{0,300}?window\.__PINVOU_SESSION_MENTION__/);
-  assert.match(webSource, /function stripMentionBlockForComposerRestore\(text\) \{[\s\S]{0,300}?window\.__PINVOU_SESSION_MENTION__/);
+  // #701 T4a 壳化：web lane 改“壳 + helpers 本体”双钉（与 desktop 同形）。
+  assert.match(webSource, /function stripMentionBlockForComposerRestore\(text\) \{ return pinvouSharedweb\(\)\.stripMentionBlockForComposerRestore\(text\); \}/);
   // web restoreComposerText mirrors the tauri boolean verdict.
   assert.match(webSource, /function restoreComposerText\(sid, text\) \{[\s\S]*?if \(!sid \|\| !value\) return false;/);
 });

@@ -72,12 +72,12 @@ struct TaskTelemetryDedupe {
 
 impl TaskTelemetryDedupe {
     fn decide(&mut self, event: &RemoteTaskEvent) -> bool {
-        let lifecycle = match event.status.as_str() {
-            "admitted" => TaskTelemetryLifecycle::Admitted,
-            "succeeded" | "failed" | "cancelled" | "interrupted" | "result_unknown" => {
-                TaskTelemetryLifecycle::Terminal
-            }
-            _ => return false,
+        let Some((stage, _, _)) = task_telemetry_stage(&event.status) else {
+            return false;
+        };
+        let lifecycle = match stage {
+            RemoteStage::TaskAdmit => TaskTelemetryLifecycle::Admitted,
+            _ => TaskTelemetryLifecycle::Terminal,
         };
         if !self.tasks.contains_key(&event.task_id) {
             while self.tasks.len() >= TASK_TELEMETRY_DEDUPE_CAPACITY {
@@ -103,6 +103,34 @@ impl TaskTelemetryDedupe {
             _ => false,
         }
     }
+}
+
+// Share the accepted statuses with dedupe: accepting an unknown terminal in
+// the sink alone would still lose it at the second filter.
+fn task_telemetry_stage(status: &str) -> Option<(RemoteStage, RemoteOutcome, RemoteReason)> {
+    Some(match status {
+        "admitted" => (
+            RemoteStage::TaskAdmit,
+            RemoteOutcome::Ok,
+            RemoteReason::None,
+        ),
+        "succeeded" => (
+            RemoteStage::TaskTerminal,
+            RemoteOutcome::Ok,
+            RemoteReason::None,
+        ),
+        "failed" | "result_unknown" => (
+            RemoteStage::TaskTerminal,
+            RemoteOutcome::InternalError,
+            RemoteReason::Unknown,
+        ),
+        "cancelled" | "interrupted" => (
+            RemoteStage::TaskTerminal,
+            RemoteOutcome::Rejected,
+            RemoteReason::Unknown,
+        ),
+        _ => return None,
+    })
 }
 
 /// Recovery rewrites updated_at_ms using a new process's monotonic origin.
@@ -134,28 +162,8 @@ impl DesktopTaskEventSink {
         event: &RemoteTaskEvent,
         record: &crate::features::remote_control::controller::task::RemoteTaskRecord,
     ) {
-        let (stage, outcome, reason) = match event.status.as_str() {
-            "admitted" => (
-                RemoteStage::TaskAdmit,
-                RemoteOutcome::Ok,
-                RemoteReason::None,
-            ),
-            "succeeded" => (
-                RemoteStage::TaskTerminal,
-                RemoteOutcome::Ok,
-                RemoteReason::None,
-            ),
-            "failed" | "result_unknown" => (
-                RemoteStage::TaskTerminal,
-                RemoteOutcome::InternalError,
-                RemoteReason::Unknown,
-            ),
-            "cancelled" | "interrupted" => (
-                RemoteStage::TaskTerminal,
-                RemoteOutcome::Rejected,
-                RemoteReason::Unknown,
-            ),
-            _ => return,
+        let Some((stage, outcome, reason)) = task_telemetry_stage(&event.status) else {
+            return;
         };
         if !self.telemetry_seen.lock().decide(event) {
             return;
@@ -189,6 +197,7 @@ impl DesktopTaskEventSink {
         if let Some(duration) = task_telemetry_duration_ms(event, record) {
             metric = metric.duration_ms(duration);
         }
+        metric = metric.diagnostic_terminal(event.status == "cancelled", event.outcome_unknown);
         track_remote_execution_event(&self.app, &event.session_id, &event.task_id, metric);
         if stage == RemoteStage::TaskTerminal {
             unregister_remote_execution(&self.app, &event.session_id, &event.task_id);
@@ -1260,6 +1269,26 @@ mod tests {
         assert!(!seen.decide(&task_event("task-1", "failed")));
         assert!(!seen.decide(&task_event("task-1", "running")));
         assert_eq!(seen.tasks.len(), 1);
+    }
+
+    #[test]
+    fn result_unknown_crosses_both_filters_once_without_claiming_success() {
+        let mut seen = TaskTelemetryDedupe::default();
+        let mut event = task_event("unknown-task", "result_unknown");
+        event.outcome_unknown = true;
+        assert!(matches!(
+            task_telemetry_stage(&event.status),
+            Some((
+                RemoteStage::TaskTerminal,
+                RemoteOutcome::InternalError,
+                RemoteReason::Unknown
+            ))
+        ));
+        assert!(seen.decide(&event));
+        assert!(!seen.decide(&event));
+        assert!(!seen.decide(&task_event("unknown-task", "admitted")));
+        assert!(!seen.decide(&task_event("unknown-task", "succeeded")));
+        assert!(task_telemetry_stage("running").is_none());
     }
 
     #[test]

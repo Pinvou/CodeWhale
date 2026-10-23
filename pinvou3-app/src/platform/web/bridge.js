@@ -9,7 +9,7 @@
 
 let pinvouSharedwebCache = null;
 function pinvouSharedweb() {
-  if (!pinvouSharedwebCache) pinvouSharedwebCache = window.PinvouBridgeShared.create("web", { artifactInfo, hasCommand: canInvoke, state, BT_TABLE: { get value() { return BT_TABLE; } }, PINVOU_SCENE_EVENTS_STORAGE_PREFIX: { get value() { return PINVOU_SCENE_EVENTS_STORAGE_PREFIX; } }, invoke, sessionStates: { get value() { return sessionStates; } }, freshBuffer, restoreEvictedSessionDraft, sessionBufferTouchClock: { get value() { return sessionBufferTouchClock; }, set value(v) { sessionBufferTouchClock = v; } }, pruneScheduledSessionBuffers, pruneSessionBuffers, scheduledRunSessionOwners: { get value() { return scheduledRunSessionOwners; } }, scheduledRunOwnerTouchClock: { get value() { return scheduledRunOwnerTouchClock; }, set value(v) { scheduledRunOwnerTouchClock = v; } }, MAX_SCHEDULED_RUN_SESSION_OWNERS: { get value() { return MAX_SCHEDULED_RUN_SESSION_OWNERS; } }, recordAuthoritySyncDiagnostic, runSyncOnSession, notify, SCHEDULED_TEMPLATE_SOURCE_STORAGE_KEY, scheduledTaskTemplateSources: { get value() { return scheduledTaskTemplateSources; } }, persistScheduledTaskTemplateSources, scheduledTaskRequestTokens: { get value() { return scheduledTaskRequestTokens; } }, scheduledTaskRefreshInFlight: { get value() { return scheduledTaskRefreshInFlight; }, set value(v) { scheduledTaskRefreshInFlight = v; } }, scheduledRecentRunsRequestToken: { get value() { return scheduledRecentRunsRequestToken; }, set value(v) { scheduledRecentRunsRequestToken = v; } }, scheduledRunEventRefreshTimer: { get value() { return scheduledRunEventRefreshTimer; }, set value(v) { scheduledRunEventRefreshTimer = v; } }, scheduledTaskPendingLoads: { get value() { return scheduledTaskPendingLoads; } }, scheduledTaskSelectionGeneration: { get value() { return scheduledTaskSelectionGeneration; }, set value(v) { scheduledTaskSelectionGeneration = v; } }, createScheduledTask, scheduledRunShortcutRefreshes: { get value() { return scheduledRunShortcutRefreshes; } }, SCHEDULED_LINK_POLL_DEADLINE_MS: { get value() { return SCHEDULED_LINK_POLL_DEADLINE_MS; } }, SCHEDULED_LINK_POLL_FAST_ATTEMPTS: { get value() { return SCHEDULED_LINK_POLL_FAST_ATTEMPTS; } }, SCHEDULED_LINK_POLL_FAST_MS: { get value() { return SCHEDULED_LINK_POLL_FAST_MS; } }, SCHEDULED_LINK_POLL_SLOW_MS: { get value() { return SCHEDULED_LINK_POLL_SLOW_MS; } }, scheduledTaskBackendInput, forgetScheduledTaskTemplateSource, scheduledTaskAutoCreateSeq: { get value() { return scheduledTaskAutoCreateSeq; }, set value(v) { scheduledTaskAutoCreateSeq = v; } }, messageHasToolBlock, addChatItem, candidateCardPatcher: patchItemByIdFor, enterDraft, hydratedMessageKey, switchToSessionInternal, openScheduledRunChatOnce, scheduledRunOpenInFlight: { get value() { return scheduledRunOpenInFlight; } }, loadWorkingSetFrom, purgeSessionBuffer, personaPlaceholderTitles: { get value() { return personaPlaceholderTitles; } }, refreshHistoryList, sessionSwitchRequestToken: { get value() { return sessionSwitchRequestToken; }, set value(v) { sessionSwitchRequestToken = v; } }, reportSidecarReadFailure, saveWorkingSetTo, SHELL_TOOL_NAMES: { get value() { return SHELL_TOOL_NAMES; } }, normalizeTerminalTail, latestShellToolIsWaitObserver, shellPollState: { get value() { return shellPollState; } }, DELIVERABLE_EXTS: { get value() { return DELIVERABLE_EXTS; } }, extractArtifactPaths, summonPinvou, parseToolResultPayload, monitorBaseline: { get value() { return monitorBaseline; }, set value(v) { monitorBaseline = v; } }, clearMonitorBaseline, monitorIntervalId: { get value() { return monitorIntervalId; }, set value(v) { monitorIntervalId = v; } }, gpuUtilHistory: { get value() { return gpuUtilHistory; }, set value(v) { gpuUtilHistory = v; } }, pollMonitor, settingsWriteQueue: { get value() { return settingsWriteQueue; }, set value(v) { settingsWriteQueue = v; } }, modelsLoadSeq: { get value() { return modelsLoadSeq; }, set value(v) { modelsLoadSeq = v; } }, loadSessionModel, setActiveModel, currentDraftModeState, loadMemoryOverview, memoryOverviewSeq: { get value() { return memoryOverviewSeq; }, set value(v) { memoryOverviewSeq = v; } }, setDraftMode, applyAuthoritativeModeState, sendMessage, pushUserEcho, flushAssistantMessageToHistory, dialogOpen, addAttachmentByPath, personaPoolCache: { get value() { return personaPoolCache; }, set value(v) { personaPoolCache = v; } }, deletedPersonaIds: { get value() { return deletedPersonaIds; } }, lastEquippedSid: { get value() { return lastEquippedSid; }, set value(v) { lastEquippedSid = v; } }, mountedCollectionDraftTarget: { get value() { return mountedCollectionDraftTarget; }, set value(v) { mountedCollectionDraftTarget = v; } }, ensureSession, mountedCollectionUpdate: { get value() { return mountedCollectionUpdate; }, set value(v) { mountedCollectionUpdate = v; } }, activeVoiceInput: { get value() { return activeVoiceInput; }, set value(v) { activeVoiceInput = v; } }, stopMediaTracks, VOICE_DEVICE_REQUEST_TIMEOUT_MS: { get value() { return VOICE_DEVICE_REQUEST_TIMEOUT_MS; } }, finishVoiceInput });
+  if (!pinvouSharedwebCache) pinvouSharedwebCache = window.PinvouBridgeShared.create("web", { state, BT_TABLE: { get value() { return BT_TABLE; } }, PINVOU_SCENE_EVENTS_STORAGE_PREFIX: { get value() { return PINVOU_SCENE_EVENTS_STORAGE_PREFIX; } }, invoke, sessionStates: { get value() { return sessionStates; } }, restoreEvictedSessionDraft, sessionBufferTouchClock: { get value() { return sessionBufferTouchClock; }, set value(v) { sessionBufferTouchClock = v; } }, pruneScheduledSessionBuffers, pruneSessionBuffers, scheduledRunSessionOwners: { get value() { return scheduledRunSessionOwners; } }, scheduledRunOwnerTouchClock: { get value() { return scheduledRunOwnerTouchClock; }, set value(v) { scheduledRunOwnerTouchClock = v; } }, MAX_SCHEDULED_RUN_SESSION_OWNERS: { get value() { return MAX_SCHEDULED_RUN_SESSION_OWNERS; } }, recordAuthoritySyncDiagnostic, runSyncOnSession, notify, SCHEDULED_TEMPLATE_SOURCE_STORAGE_KEY, scheduledTaskTemplateSources: { get value() { return scheduledTaskTemplateSources; } }, persistScheduledTaskTemplateSources, scheduledTaskRequestTokens: { get value() { return scheduledTaskRequestTokens; } }, scheduledTaskRefreshInFlight: { get value() { return scheduledTaskRefreshInFlight; }, set value(v) { scheduledTaskRefreshInFlight = v; } }, scheduledRecentRunsRequestToken: { get value() { return scheduledRecentRunsRequestToken; }, set value(v) { scheduledRecentRunsRequestToken = v; } }, scheduledRunEventRefreshTimer: { get value() { return scheduledRunEventRefreshTimer; }, set value(v) { scheduledRunEventRefreshTimer = v; } }, scheduledTaskPendingLoads: { get value() { return scheduledTaskPendingLoads; } }, scheduledTaskSelectionGeneration: { get value() { return scheduledTaskSelectionGeneration; }, set value(v) { scheduledTaskSelectionGeneration = v; } }, scheduledRunShortcutRefreshes: { get value() { return scheduledRunShortcutRefreshes; } }, SCHEDULED_LINK_POLL_DEADLINE_MS: { get value() { return SCHEDULED_LINK_POLL_DEADLINE_MS; } }, SCHEDULED_LINK_POLL_FAST_ATTEMPTS: { get value() { return SCHEDULED_LINK_POLL_FAST_ATTEMPTS; } }, SCHEDULED_LINK_POLL_FAST_MS: { get value() { return SCHEDULED_LINK_POLL_FAST_MS; } }, SCHEDULED_LINK_POLL_SLOW_MS: { get value() { return SCHEDULED_LINK_POLL_SLOW_MS; } }, scheduledTaskBackendInput, forgetScheduledTaskTemplateSource, scheduledTaskAutoCreateSeq: { get value() { return scheduledTaskAutoCreateSeq; }, set value(v) { scheduledTaskAutoCreateSeq = v; } }, scheduledTaskAutoCreateInFlight: { get value() { return scheduledTaskAutoCreateInFlight; } }, personaSyncSeq: { get value() { return personaSyncSeq; }, set value(v) { personaSyncSeq = v; } }, addChatItem, candidateCardPatcher: patchItemByIdFor, enterDraft, evictedSessionDrafts: { get value() { return evictedSessionDrafts; } }, MAX_EVICTED_SESSION_DRAFT_CHARS: { get value() { return MAX_EVICTED_SESSION_DRAFT_CHARS; } }, MAX_EVICTED_SESSION_DRAFTS: { get value() { return MAX_EVICTED_SESSION_DRAFTS; } }, switchToSessionInternal, openScheduledRunChatOnce, scheduledRunOpenInFlight: { get value() { return scheduledRunOpenInFlight; } }, purgeSessionBuffer, personaPlaceholderTitles: { get value() { return personaPlaceholderTitles; } }, refreshHistoryList, sessionSwitchRequestToken: { get value() { return sessionSwitchRequestToken; }, set value(v) { sessionSwitchRequestToken = v; } }, reportSidecarReadFailure, historyRefreshTimer: { get value() { return historyRefreshTimer; }, set value(v) { historyRefreshTimer = v; } }, historyRefreshPending: { get value() { return historyRefreshPending; }, set value(v) { historyRefreshPending = v; } }, currentStreamText: { get value() { return currentStreamText; }, set value(v) { currentStreamText = v; } }, currentStreamId: { get value() { return currentStreamId; }, set value(v) { currentStreamId = v; } }, toolMeta: { get value() { return toolMeta; }, set value(v) { toolMeta = v; } }, SHELL_TOOL_NAMES: { get value() { return SHELL_TOOL_NAMES; } }, normalizeTerminalTail, latestShellToolIsWaitObserver, shellPollState: { get value() { return shellPollState; } }, DELIVERABLE_EXTS: { get value() { return DELIVERABLE_EXTS; } }, hasCommand: canInvoke, artifactInfo, monitorBaseline: { get value() { return monitorBaseline; }, set value(v) { monitorBaseline = v; } }, clearMonitorBaseline, monitorIntervalId: { get value() { return monitorIntervalId; }, set value(v) { monitorIntervalId = v; } }, gpuUtilHistory: { get value() { return gpuUtilHistory; }, set value(v) { gpuUtilHistory = v; } }, monitorPollInFlight: { get value() { return monitorPollInFlight; }, set value(v) { monitorPollInFlight = v; } }, settingsWriteQueue: { get value() { return settingsWriteQueue; }, set value(v) { settingsWriteQueue = v; } }, modelsLoadSeq: { get value() { return modelsLoadSeq; }, set value(v) { modelsLoadSeq = v; } }, loadSessionModel, setActiveModel, currentDraftModeState, memoryOverviewSeq: { get value() { return memoryOverviewSeq; }, set value(v) { memoryOverviewSeq = v; } }, setDraftMode, applyAuthoritativeModeState, sendMessage, pushUserEcho, dialogOpen, addAttachmentByPath, personaPoolCache: { get value() { return personaPoolCache; }, set value(v) { personaPoolCache = v; } }, deletedPersonaIds: { get value() { return deletedPersonaIds; } }, lastEquippedSid: { get value() { return lastEquippedSid; }, set value(v) { lastEquippedSid = v; } }, mountedCollectionDraftTarget: { get value() { return mountedCollectionDraftTarget; }, set value(v) { mountedCollectionDraftTarget = v; } }, ensureSession, mountedCollectionUpdate: { get value() { return mountedCollectionUpdate; }, set value(v) { mountedCollectionUpdate = v; } }, activeVoiceInput: { get value() { return activeVoiceInput; }, set value(v) { activeVoiceInput = v; } }, stopMediaTracks, VOICE_DEVICE_REQUEST_TIMEOUT_MS: { get value() { return VOICE_DEVICE_REQUEST_TIMEOUT_MS; } }, voiceOperations: { get value() { return voiceOperations; } }, pendingStreamNotifications: { get value() { return pendingStreamNotifications; } }, pendingAssistantText: { get value() { return pendingAssistantText; }, set value(v) { pendingAssistantText = v; } }, pendingAssistantBlocks: { get value() { return pendingAssistantBlocks; }, set value(v) { pendingAssistantBlocks = v; } }, finalizeAssistantStreamBeforeReasoning, flushPendingTextBlock, finishVoiceInput, ensureSessionBufferLoaded, reconcileRemoteTurn, doSendFor, flushQueued, itemIdSeq: { get value() { return itemIdSeq; }, set value(v) { itemIdSeq = v; } }  , freshBuffer, createScheduledTask, messageHasToolBlock, hydratedMessageKey, loadWorkingSetFrom, saveWorkingSetTo, extractArtifactPaths, summonPinvou, parseToolResultPayload, pollMonitor, loadMemoryOverview, flushAssistantMessageToHistory });
   return pinvouSharedwebCache;
 }
 
@@ -129,26 +129,9 @@ function pinvouSharedweb() {
   // 优先委托共享渲染器 window.PinvouMarkdownRenderer（npm 版，含语法高亮）；在其尚未安装的
   // 短暂窗口退回 vendor 全局兜底。兜底实现已收敛到 shared/markdown-bridge-fallback.js
   // （随 index.html 以普通脚本加载，暴露 window.PinvouMarkdownBridgeFallback），消除两份逐字复制。
-  // 最末级 fallback 必须自带 escapeHtml：远程 Web 部署缓存错配/资源缺失导致共享脚本未加载时，
-  // renderMarkdown 仍会被 ChatView.jsx 的 dangerouslySetInnerHTML 消费，原文返回即 fail-open。
-  // 因此 escapeHtml 作为安全原语保留在本文件（不依赖任何外部脚本），仅 marked.parse+sanitize
-  // 这段较重的兜底被抽到共享文件。
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, function (c) {
-      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
-    });
-  }
-
-  function renderMarkdown(text) {
-    if (window.PinvouMarkdownRenderer && typeof window.PinvouMarkdownRenderer.renderMarkdown === "function") {
-      return window.PinvouMarkdownRenderer.renderMarkdown(text);
-    }
-    if (window.PinvouMarkdownBridgeFallback && typeof window.PinvouMarkdownBridgeFallback.renderMarkdown === "function") {
-      return window.PinvouMarkdownBridgeFallback.renderMarkdown(text);
-    }
-    return escapeHtml(text || "");
-  }
-
+  // #701 T4a 壳化：渲染入口与最末级 escapeHtml 安全原语单源进 bridge-shared-helpers.js，
+  // 本文件只保留 cluster 转发（markdown_bridge_fallback_safety / markdown_syntax_highlight 钉）。
+  function renderMarkdown(text) { return pinvouSharedweb().renderMarkdown(text); }
 
 
   // The pet is a separate WebView and must not own a second copy of the main
@@ -513,6 +496,7 @@ function pinvouSharedweb() {
       sessionIdMissing: "The desktop app returned no new session ID",
       turnSyncRetry: "⚠️ This session is still syncing a turn completed elsewhere. Please try again shortly",
       pinvouNeedSession: "Start a chat first, then summon Pinvou for review.",
+      summonNeedsSession: "Start a conversation first, then summon Pinvou to review.",
       remoteDoneUnsynced: "⚠️ The chat finished on the desktop, but the authoritative record is not synced yet. Retry after reconnecting.",
       unknownReason: "unknown reason",
       materialsAdded: (count, names) => "✅ Added " + count + " materials to run materials: " + names.join(", "),
@@ -645,6 +629,7 @@ function pinvouSharedweb() {
       sessionIdMissing: "デスクトップ側が新しいセッション ID を返しませんでした",
       turnSyncRetry: "⚠️ このセッションは別端末で完了したターンをまだ同期中です。しばらくしてから再試行してください",
       pinvouNeedSession: "先にチャットを開始してから Pinvou レビューを呼び出してください。",
+      summonNeedsSession: "先に会話を始めてから Pinvou レビューを召喚してください。",
       remoteDoneUnsynced: "⚠️ チャットはデスクトップ側で完了しましたが、正式な記録がまだ同期されていません。接続回復後に再試行できます。",
       unknownReason: "不明な原因",
       materialsAdded: (count, names) => "✅ 素材を " + count + " 件、配套材料に追加しました：" + names.join("、"),
@@ -777,6 +762,7 @@ function pinvouSharedweb() {
       sessionIdMissing: "桌面端未返回新会话 ID",
       turnSyncRetry: "⚠️ 该会话仍在同步另一端完成的回合，请稍后重试",
       pinvouNeedSession: "先开始一个对话,再召唤 Pinvou 检阅。",
+      summonNeedsSession: "先开始一个对话,再召唤 Pinvou 检阅。",
       remoteDoneUnsynced: "⚠️ 对话已在桌面端完成，但权威记录暂未同步；恢复连接后可重试。",
       unknownReason: "未知原因",
       materialsAdded: (count, names) => "✅ 已添加 " + count + " 个素材到配套材料：" + names.join("、"),
@@ -908,20 +894,7 @@ function authoritySyncBufferSnapshot(sid, buf) { return pinvouSharedweb().author
   // Returns true when the buffer's non-rehydratable state is safely retained
   // (or empty) and the caller may drop the buffer; false means eviction must
   // be skipped so the draft stays in the live buffer.
-  function stashEvictedSessionDraft(id, buf) {
-    if (!id || !buf) return true;
-    var draft = String(buf.composerDraft || "");
-    if (!draft) {
-      delete evictedSessionDrafts[id]; // input was cleared; a stale stash must not resurrect it
-      return true;
-    }
-    if (draft.length > MAX_EVICTED_SESSION_DRAFT_CHARS) return false;
-    if (!evictedSessionDrafts[id]
-        && Object.keys(evictedSessionDrafts).length >= MAX_EVICTED_SESSION_DRAFTS) return false;
-    delete evictedSessionDrafts[id]; // re-stashing moves the entry to the table tail
-    evictedSessionDrafts[id] = draft;
-    return true;
-  }
+  function stashEvictedSessionDraft(id, buf) { return pinvouSharedweb().stashEvictedSessionDraft(id, buf); }
   function restoreEvictedSessionDraft(id, buf) {
     if (!id || !buf || buf.composerDraft) return;
     var draft = evictedSessionDrafts[id];
@@ -994,38 +967,7 @@ function recordPinvouSceneForMessage(sid, pos, scene) { return pinvouSharedweb()
     savePinvouSceneEventsForSession(sid, events);
   }
 function pinvouSceneForMessagePos(pos) { return pinvouSharedweb().pinvouSceneForMessagePos(pos); }
-  function freshBuffer() {
-    return {
-      messages: [], chatItems: [], composerDraft: "", turnTimeline: [], activeTurnTimelineId: null, personaEvents: [], pinvouReviews: [], pinvouSceneEvents: [], artifacts: [], busy: false, queued: [],
-      loadedFromDisk: false,
-      localTurnOwned: false,
-      remoteTurnActive: false,
-      remoteTerminalSeen: false,
-      remoteAdmissionKeys: [],
-      deferredRemoteUserEvent: null,
-      remoteBaselineMessageCount: null,
-      remoteBaselineTrusted: false,
-      remoteExpectedAssistantKey: "",
-      remoteCommittedRevision: "",
-      sessionRevision: "",
-      planSnapshot: { plan: null, todos: null },
-      modeState: { mode: "yolo" },
-      thinking: { active: false, phase: "thinking", toolName: "", startedAt: 0 },
-      tokens: { input: 0, max: 0 },
-      activePersona: null, // 卡片池: 该 session 加持的专家面具(挂件用)
-      mountedCollection: null, // 知识库: 该 session 挂载的知识集 id 或 null
-      mountedCollections: [], // 多知识库挂载项 [{ collectionId, enabled }]
-      mountedCollectionsRevision: 0,
-      scheduledRunSession: false,
-      scheduledInitialTurnPhase: null,
-      lastTouched: 0,
-
-      stream: {
-        currentStreamText: "", currentStreamId: 0, pendingAssistantText: "",
-        pendingAssistantBlocks: [], itemIdSeq: 0, toolMeta: {},
-      },
-    };
-  }
+  function freshBuffer() { return pinvouSharedweb().freshBuffer(); }
 function getBuffer(id) { return pinvouSharedweb().getBuffer(id); }
 function isProtectedScheduledBuffer(id, buf) { return pinvouSharedweb().isProtectedScheduledBuffer(id, buf); }
   function pruneScheduledSessionBuffers(keepId) {
@@ -1120,63 +1062,14 @@ function touchSessionBuffer(id, buf, scheduled) { return pinvouSharedweb().touch
   }
 
 
-
-
-
 function rememberScheduledRunOwner(run) { return pinvouSharedweb().rememberScheduledRunOwner(run); }
 function scheduledRunBuffer(id) { return pinvouSharedweb().scheduledRunBuffer(id); }
 
 function markScheduledInitialTurnTerminal(id) { return pinvouSharedweb().markScheduledInitialTurnTerminal(id); }
 function beginScheduledOpenActivation(id) { return pinvouSharedweb().beginScheduledOpenActivation(id); }
 function rollbackScheduledOpenActivation(snapshot) { return pinvouSharedweb().rollbackScheduledOpenActivation(snapshot); }
-  function saveWorkingSetTo(buf) {
-    if (!buf) return;
-    buf.messages = state.messages; buf.chatItems = state.chatItems; buf.artifacts = state.artifacts;
-    buf.composerDraft = state.composerDraft || "";
-    buf.turnTimeline = state.turnTimeline;
-    buf.activeTurnTimelineId = state.activeTurnTimelineId;
-    buf.personaEvents = state.personaEvents;
-    buf.pinvouReviews = state.pinvouReviews;
-    buf.pinvouSceneEvents = state.pinvouSceneEvents;
-    buf.busy = buf.scheduledInitialTurnPhase === "active" ? true : state.busy;
-    buf.planSnapshot = state.planSnapshot; buf.modeState = state.modeState;
-    buf.thinking = state.thinking; buf.tokens = state.tokens; buf.queued = state.queued;
-    buf.activePersona = state.activePersona;
-    buf.mountedCollection = state.mountedCollection;
-    buf.mountedCollections = state.mountedCollections;
-    buf.mountedCollectionsRevision = state.mountedCollectionsRevision;
-    buf.stream = {
-      currentStreamText: currentStreamText, currentStreamId: currentStreamId,
-      pendingAssistantText: pendingAssistantText, pendingAssistantBlocks: pendingAssistantBlocks,
-      itemIdSeq: itemIdSeq, toolMeta: toolMeta,
-    };
-  }
-  function loadWorkingSetFrom(buf) {
-    if (!buf) return;
-    state.messages = buf.messages; state.chatItems = buf.chatItems; state.artifacts = buf.artifacts;
-    state.composerDraft = buf.composerDraft || "";
-    state.turnTimeline = buf.turnTimeline || [];
-    state.activeTurnTimelineId = buf.activeTurnTimelineId || null;
-    state.personaEvents = buf.personaEvents || [];
-    state.pinvouReviews = buf.pinvouReviews || [];
-    state.pinvouSceneEvents = buf.pinvouSceneEvents || [];
-    state.pinvouModal = null; // 切 session 关掉检阅弹窗
-    state.turnDirtyArtifacts = []; // turn 临时态,切 session 清空,别串到新 session
-    state.turnPresentedArtifacts = [];
-    state.busy = buf.scheduledInitialTurnPhase === "active" ? true : buf.busy;
-    state.planSnapshot = buf.planSnapshot; state.modeState = buf.modeState;
-    state.thinking = buf.thinking; state.tokens = buf.tokens; state.queued = buf.queued || [];
-    state.activePersona = buf.activePersona || null;
-    state.mountedCollection = buf.mountedCollection || null;
-    state.mountedCollections = Array.isArray(buf.mountedCollections)
-      ? buf.mountedCollections
-      : (state.mountedCollection == null ? [] : [{ collectionId: state.mountedCollection, enabled: true }]);
-    state.mountedCollectionsRevision = Number(buf.mountedCollectionsRevision || 0);
-    const s = buf.stream || {};
-    currentStreamText = s.currentStreamText || ""; currentStreamId = s.currentStreamId || 0;
-    pendingAssistantText = s.pendingAssistantText || ""; pendingAssistantBlocks = s.pendingAssistantBlocks || [];
-    itemIdSeq = s.itemIdSeq || 0; toolMeta = s.toolMeta || {};
-  }
+  function saveWorkingSetTo(buf) { return pinvouSharedweb().saveWorkingSetTo(buf); }
+  function loadWorkingSetFrom(buf) { return pinvouSharedweb().loadWorkingSetFrom(buf); }
   function hydrateWorkingSetFromSaved(buf, saved) {
     if (!buf || !saved) return;
     var completedRemoteTurn = !!buf.remoteTerminalSeen || (!!buf.remoteTurnActive && !buf.busy);
@@ -1538,24 +1431,15 @@ function rollbackScheduledOpenActivation(snapshot) { return pinvouSharedweb().ro
   }
   // 事件监听器统一入口:按 payload.session_id 路由同步逻辑;后台变更后补一次 notify 刷新列表。
 function markRemoteTurn(sid, buf, preserveCommittedRevision, cause) { return pinvouSharedweb().markRemoteTurn(sid, buf, preserveCommittedRevision, cause); }
-  function onSessionEvent(e, fn, options) {
-    var sid = (e && e.payload && e.payload.session_id) || state.activeSessionId;
-    if (sid) {
-      var eventBuffer = getBuffer(sid);
-      var eventName = String((e && e.event) || "");
-      var isTurnEvent = /chat:(user_message|turn_started|delta|reasoning_start|reasoning_delta|reasoning_done|tool_start|tool_end|user_input_required|transient_error)$/.test(eventName);
-      if (eventBuffer && !eventBuffer.localTurnOwned && (eventBuffer.busy || isTurnEvent)) {
-        markRemoteTurn(sid, eventBuffer, false, "event:" + eventName);
-      }
-    }
-    var isBg = sid && sid !== state.activeSessionId;
-    runSyncOnSession(sid, fn);
-    if (isBg && !(options && options.deferBackgroundNotify)) notify();
-  }
+  function onSessionEvent(e, fn, options) { return pinvouSharedweb().onSessionEvent(e, fn, options); }
 function isScheduledRunSession(sid) { return pinvouSharedweb().isScheduledRunSession(sid); }
 
   // Transcript persistence is authoritative in Rust. The UI only persists the
   // presentation-side artifact index and derives the optional auto-title.
+  // T4a 保留 lane 本体（不壳化）：官方 persistMessagesFor 自动标题按 user 轮次
+  // 落空即顺延到下一条可展示 user 消息（scheduled_tasks_unit 场景 1b 钉住），
+  // helpers/upstream 版只取首条 user——上游采纳前 web lane 不回退；helpers
+  // 收敛后（含 tauri bridge.js 核心 defer T4b）再统一。
   async function persistMessagesFor(sid) {
     if (!sid) return;
     if (isScheduledRunSession(sid)) return;
@@ -1845,70 +1729,7 @@ function isScheduledRunSession(sid) { return pinvouSharedweb().isScheduledRunSes
 function defineSubscriptionStateProperty(target, key, value) { return pinvouSharedweb().defineSubscriptionStateProperty(target, key, value); }
 function copySubscriptionStateObject(source) { return pinvouSharedweb().copySubscriptionStateObject(source); }
   // eslint-disable-next-line sonarjs/cognitive-complexity -- legacy bridge; refactor tracked separately
-  function subscriptionStateValue(value, previous, ancestors) {
-    var valueType = typeof value;
-    if (!value || valueType !== "object") {
-      if (valueType === "function" || valueType === "symbol" || valueType === "bigint") {
-        throw new TypeError("Subscription state only supports JSON-like scalar values");
-      }
-      return value;
-    }
-    var isArray = Array.isArray(value);
-    if (!isArray) {
-      var prototype = Object.getPrototypeOf(value);
-      var isPlainObject = prototype === null || (
-        Object.getPrototypeOf(prototype) === null &&
-        Object.prototype.hasOwnProperty.call(prototype, "constructor") &&
-        prototype.constructor && prototype.constructor.name === "Object"
-      );
-      if (!isPlainObject) {
-        throw new TypeError("Subscription state only supports arrays and plain objects");
-      }
-    }
-    ancestors = ancestors || new WeakSet();
-    if (ancestors.has(value)) throw new TypeError("Subscription state must not contain cycles");
-    ancestors.add(value);
-    try {
-      if (isArray) {
-        var previousArray = Array.isArray(previous) ? previous : null;
-        if (!previousArray) {
-          return Object.freeze(value.map(function (item) {
-            return subscriptionStateValue(item, undefined, ancestors);
-          }));
-        }
-        var nextArray = value.length === previousArray.length ? null : previousArray.slice(0, value.length);
-        for (var arrayIndex = 0; arrayIndex < value.length; arrayIndex++) {
-          var nextItem = subscriptionStateValue(value[arrayIndex], previousArray[arrayIndex], ancestors);
-          if (!Object.is(nextItem, previousArray[arrayIndex])) {
-            if (!nextArray) nextArray = previousArray.slice();
-            nextArray[arrayIndex] = nextItem;
-          }
-        }
-        return nextArray ? Object.freeze(nextArray) : previousArray;
-      }
-
-      var keys = Object.keys(value);
-      var previousObject = previous && typeof previous === "object" && !Array.isArray(previous)
-        ? previous
-        : null;
-      var previousKeys = previousObject ? Object.keys(previousObject) : [];
-      var sameShape = !!previousObject && keys.length === previousKeys.length && keys.every(function (key) {
-        return Object.prototype.hasOwnProperty.call(previousObject, key);
-      });
-      var nextObject = sameShape ? null : {};
-      for (var objectIndex = 0; objectIndex < keys.length; objectIndex++) {
-        var key = keys[objectIndex];
-        var nextValue = subscriptionStateValue(value[key], previousObject && previousObject[key], ancestors);
-        if (!sameShape || !Object.is(nextValue, previousObject[key])) {
-          if (!nextObject) nextObject = copySubscriptionStateObject(previousObject);
-          defineSubscriptionStateProperty(nextObject, key, nextValue);
-        }
-      }
-      return nextObject ? Object.freeze(nextObject) : previousObject;
-    } finally {
-      ancestors.delete(value);
-    }
-  }
+  function subscriptionStateValue(value, previous, ancestors) { return pinvouSharedweb().subscriptionStateValue(value, previous, ancestors); }
   var subscriptionSnapshot = null;
   function subscriptionState() {
     subscriptionSnapshot = subscriptionStateValue(state, subscriptionSnapshot);
@@ -1983,22 +1804,7 @@ function rememberScheduledTaskTemplateSource(taskId, templateId) { return pinvou
 
 function attachScheduledTaskTemplateSource(task) { return pinvouSharedweb().attachScheduledTaskTemplateSource(task); }
 
-  function attachAndPruneScheduledTaskTemplateSources(tasks) {
-    var activeIds = Object.create(null);
-    (tasks || []).forEach(function (task) {
-      if (!task || !task.id) return;
-      activeIds[task.id] = true;
-      attachScheduledTaskTemplateSource(task);
-    });
-    var changed = false;
-    Object.keys(scheduledTaskTemplateSources).forEach(function (taskId) {
-      if (activeIds[taskId]) return;
-      delete scheduledTaskTemplateSources[taskId];
-      changed = true;
-    });
-    if (changed) persistScheduledTaskTemplateSources();
-    return tasks;
-  }
+  function attachAndPruneScheduledTaskTemplateSources(tasks) { return pinvouSharedweb().attachAndPruneScheduledTaskTemplateSources(tasks); }
 
 
 function upsertScheduledTask(task) { return pinvouSharedweb().upsertScheduledTask(task); }
@@ -2008,75 +1814,23 @@ function applyScheduledRunViewed(automationId, runId, receipt) { return pinvouSh
 function invalidateScheduledTaskReads(automationId) { return pinvouSharedweb().invalidateScheduledTaskReads(automationId); }
 
 
-
 function invalidateScheduledRecentRunsForSession(id) { return pinvouSharedweb().invalidateScheduledRecentRunsForSession(id); }
 
 function scheduleScheduledRunRefresh() { return pinvouSharedweb().scheduleScheduledRunRefresh(); }
 
 function scheduledTaskErrorText(error) { return pinvouSharedweb().scheduledTaskErrorText(error); }
 
-  function invalidateScheduledRecentRuns() {
-    scheduledRecentRunsRequestToken += 1;
-  }
-  function isScheduledRunTerminal(status) {
-    var value = String(status || "").toLowerCase();
-    return value === "completed" || value === "failed" || value === "canceled";
-  }
-  function isCurrentScheduledTaskRequest(stamp) {
-    if (!stamp || stamp.generation !== scheduledTaskSelectionGeneration) return false;
-    if (scheduledTaskRequestTokens[stamp.kind] !== stamp.token) return false;
-    // id 检查省略：selectedScheduledTaskId 唯一写者是 selectScheduledTask（每次
-    // 改写前 generation+1），id 变化必然被上方 generation 检查拦截（审计清理）。
-    return true;
-  }
-  function setScheduledTaskError(error, kind) {
-    state.scheduledTaskError = error ? scheduledTaskErrorText(error) : null;
-    state.scheduledTaskErrorKind = error ? (kind || "load") : null;
-  }
-  function dismissScheduledTaskError() {
-    setScheduledTaskError(null);
-    notify();
-  }
-  function clearScheduledTaskLoadError() {
-    if (state.scheduledTaskErrorKind === "load") setScheduledTaskError(null);
-  }
-  function beginScheduledTaskLoad(stamp) {
-    var generation = stamp.generation;
-    scheduledTaskPendingLoads[generation] = (scheduledTaskPendingLoads[generation] || 0) + 1;
-    if (generation === scheduledTaskSelectionGeneration) {
-      state.scheduledTaskLoading = true;
-      clearScheduledTaskLoadError();
-      notify();
-    }
-  }
+  function invalidateScheduledRecentRuns() { return pinvouSharedweb().invalidateScheduledRecentRuns(); }
+  function isScheduledRunTerminal(status) { return pinvouSharedweb().isScheduledRunTerminal(status); }
+  function isCurrentScheduledTaskRequest(stamp) { return pinvouSharedweb().isCurrentScheduledTaskRequest(stamp); }
+  function setScheduledTaskError(error, kind) { return pinvouSharedweb().setScheduledTaskError(error, kind); }
+  function dismissScheduledTaskError() { return pinvouSharedweb().dismissScheduledTaskError(); }
+  function clearScheduledTaskLoadError() { return pinvouSharedweb().clearScheduledTaskLoadError(); }
+  function beginScheduledTaskLoad(stamp) { return pinvouSharedweb().beginScheduledTaskLoad(stamp); }
 
-  function endScheduledTaskLoad(stamp) {
-    var generation = stamp.generation;
-    scheduledTaskPendingLoads[generation] = Math.max(0, (scheduledTaskPendingLoads[generation] || 0) - 1);
-    if (!scheduledTaskPendingLoads[generation]) delete scheduledTaskPendingLoads[generation];
-    if (generation === scheduledTaskSelectionGeneration) {
-      state.scheduledTaskLoading = !!scheduledTaskPendingLoads[generation];
-      notify();
-    }
-  }
+  function endScheduledTaskLoad(stamp) { return pinvouSharedweb().endScheduledTaskLoad(stamp); }
 
-  function scheduledTaskRequestStamp(kind, id) {
-    scheduledTaskRequestTokens[kind] += 1;
-    return {
-      kind: kind,
-      token: scheduledTaskRequestTokens[kind],
-      generation: scheduledTaskSelectionGeneration,
-      id: id || null,
-    };
-  }
-
-
-
-
-
-
-
-
+  function scheduledTaskRequestStamp(kind, id) { return pinvouSharedweb().scheduledTaskRequestStamp(kind, id); }
 
 
 function selectScheduledTask(id) { return pinvouSharedweb().selectScheduledTask(id); }
@@ -2085,40 +1839,14 @@ function clearScheduledTaskSelection() { return pinvouSharedweb().clearScheduled
 
 function extractBalancedJsonObject(text) { return pinvouSharedweb().extractBalancedJsonObject(text); }
 
-  function parseLooseJsonObject(text) {
-    try { return JSON.parse(text); } catch (_) {}
-    try { return JSON.parse(String(text || "").replace(/,(\s*[}\]])/g, "$1")); } catch (_) {}
-    var balanced = extractBalancedJsonObject(String(text || ""));
-    if (!balanced) return null;
-    try { return JSON.parse(balanced); } catch (_) {}
-    try { return JSON.parse(balanced.replace(/,(\s*[}\]])/g, "$1")); } catch (_) {}
-    return null;
-  }
+  function parseLooseJsonObject(text) { return pinvouSharedweb().parseLooseJsonObject(text); }
 
 function normalizeScheduledTaskDraft(value) { return pinvouSharedweb().normalizeScheduledTaskDraft(value); }
 
 
-
 function lockScheduledTaskDraftModel(draft) { return pinvouSharedweb().lockScheduledTaskDraftModel(draft); }
 
-  function parseScheduledTaskDraftFromText(text) {
-    if (!text || text.indexOf("{") < 0) return null;
-    var preferred = null;
-    var fallback = null;
-    var re = /```([^\n`]*)\n([\s\S]*?)```/g;
-    var match;
-    while ((match = re.exec(text))) {
-      var label = String(match[1] || "").trim().toLowerCase();
-      var raw = String(match[2] || "").trim();
-      if (!raw || raw.charAt(0) !== "{") continue;
-      var candidate = normalizeScheduledTaskDraft(parseLooseJsonObject(raw));
-      if (!candidate) continue;
-      if (label === "scheduled-task-draft") return candidate;
-      if ((label === "json" || !label) && !fallback) fallback = candidate;
-      if (!preferred) preferred = candidate;
-    }
-    return fallback || preferred;
-  }
+  function parseScheduledTaskDraftFromText(text) { return pinvouSharedweb().parseScheduledTaskDraftFromText(text); }
 
 function scheduledTaskInputFromDraft(draft) { return pinvouSharedweb().scheduledTaskInputFromDraft(draft); }
 
@@ -2126,41 +1854,7 @@ function scheduledTaskInputFromDraft(draft) { return pinvouSharedweb().scheduled
   // autoOpenId 全局 last-writer：两会话并发创建时后完成者覆盖，且 startScheduledTaskChat
   // 清空后陈旧 completion 会复活 auto-open（审计 f）。全局单调创建序号，仅最新意图可写。
   var scheduledTaskAutoCreateSeq = 0;
-  function autoCreateScheduledTaskDraft(draft, creationSessionId) {
-    if (!draft || !creationSessionId || scheduledTaskAutoCreateInFlight[creationSessionId]) return;
-    const lockedDraft = lockScheduledTaskDraftModel(draft);
-    const creationSeq = ++scheduledTaskAutoCreateSeq;
-    const creation = Promise.resolve()
-      .then(function () {
-        return createScheduledTask(scheduledTaskInputFromDraft(lockedDraft));
-      })
-      .then(function (created) {
-        if (state.scheduledTaskCreationSessionId === creationSessionId) {
-          state.scheduledTaskCreationSessionId = null;
-        }
-        // 仅最新创建意图可写 autoOpenId（陈旧 completion 不得复活 auto-open，审计 f）
-        if (created && created.id && creationSeq === scheduledTaskAutoCreateSeq) state.scheduledTaskAutoOpenId = created.id;
-        notify();
-        return created;
-      })
-      .catch(function (error) {
-        // createScheduledTask 通常已记录错误；忙锁在进入 action 前抛出时在这里补记，且不产生未处理 Promise。
-        if (!state.scheduledTaskError) setScheduledTaskError(error, "action");
-        runSyncOnSession(creationSessionId, function () {
-          addSystemItem(bt("scheduledCreateFailed") + scheduledTaskErrorText(error), {
-            scheduledTaskCreationError: true,
-          });
-        });
-        notify();
-        return null;
-      })
-      .finally(function () {
-        if (scheduledTaskAutoCreateInFlight[creationSessionId] === creation) {
-          delete scheduledTaskAutoCreateInFlight[creationSessionId];
-        }
-      });
-    scheduledTaskAutoCreateInFlight[creationSessionId] = creation;
-  }
+  function autoCreateScheduledTaskDraft(draft, creationSessionId) { return pinvouSharedweb().autoCreateScheduledTaskDraft(draft, creationSessionId); }
 
   async function loadScheduledTasks() {
     var stamp = scheduledTaskRequestStamp("tasks", null);
@@ -2185,26 +1879,7 @@ function scheduledTaskInputFromDraft(draft) { return pinvouSharedweb().scheduled
     return state.scheduledTasks;
   }
 
-  async function readScheduledTask(id) {
-    if (!id) {
-      clearScheduledTaskSelection();
-      return null;
-    }
-    if (state.selectedScheduledTaskId !== id) selectScheduledTask(id);
-    var stamp = scheduledTaskRequestStamp("detail", id);
-    beginScheduledTaskLoad(stamp);
-    try {
-      var detail = await invoke("read_scheduled_task", { id: id });
-      if (!isCurrentScheduledTaskRequest(stamp)) return state.scheduledTaskDetail;
-      state.scheduledTaskDetail = attachScheduledTaskTemplateSource(detail) || null;
-      upsertScheduledTask(detail);
-    } catch (e) {
-      if (isCurrentScheduledTaskRequest(stamp)) setScheduledTaskError(e, "load");
-    } finally {
-      endScheduledTaskLoad(stamp);
-    }
-    return state.scheduledTaskDetail;
-  }
+  async function readScheduledTask(id) { return pinvouSharedweb().readScheduledTask(id); }
 
   // 按 run.id upsert 单个任务的运行到侧边栏快捷列表。不裁剪条数(侧边栏显示所有
   // 现存定时运行,后端 retention 已按 automation 限制终态运行上限);传入窗口有限
@@ -2311,25 +1986,7 @@ function scheduledTaskInputFromDraft(draft) { return pinvouSharedweb().scheduled
     }
   }
 
-  function refreshScheduledTaskData(limit) {
-    var generation = scheduledTaskSelectionGeneration;
-    if (scheduledTaskRefreshInFlight && scheduledTaskRefreshInFlight.generation === generation) {
-      return scheduledTaskRefreshInFlight.promise;
-    }
-    var selectedId = state.selectedScheduledTaskId;
-    var requests = [loadScheduledTasks()];
-    if (selectedId) {
-      requests.push(readScheduledTask(selectedId));
-      requests.push(loadScheduledTaskRuns(selectedId, limit || 20));
-    }
-    var promise = Promise.all(requests).finally(function () {
-      if (scheduledTaskRefreshInFlight && scheduledTaskRefreshInFlight.promise === promise) {
-        scheduledTaskRefreshInFlight = null;
-      }
-    });
-    scheduledTaskRefreshInFlight = { generation: generation, promise: promise };
-    return promise;
-  }
+  function refreshScheduledTaskData(limit) { return pinvouSharedweb().refreshScheduledTaskData(limit); }
 
   var scheduledRunShortcutRefreshes = Object.create(null);
   var SCHEDULED_LINK_POLL_FAST_MS = 1000;
@@ -2347,70 +2004,7 @@ function scheduledTaskInputFromDraft(draft) { return pinvouSharedweb().scheduled
   // 停止条件按 run 自身状态,不用固定次数:TaskManager 只有 1 个 worker,前一个任务
   // 正在跑 LLM turn 时,新 run 排队几分钟是常态,固定 20 次(20 秒)会提前放弃,
   // watcher 是主路径；这里保留较长窗口只为覆盖事件丢失和链接时序空窗。
-  function refreshScheduledRunShortcutUntilLinked(automationId, runId) {
-    if (!automationId || !runId) return;
-    var key = automationId + ":" + runId;
-    if (scheduledRunShortcutRefreshes[key]) return;
-    scheduledRunShortcutRefreshes[key] = true;
-    var deadline = Date.now() + SCHEDULED_LINK_POLL_DEADLINE_MS;
-
-    function stop() {
-      delete scheduledRunShortcutRefreshes[key];
-    }
-    function again(attempt) {
-      if (Date.now() >= deadline) {
-        stop();
-        return;
-      }
-      setTimeout(function () { poll(attempt + 1); }, attempt < SCHEDULED_LINK_POLL_FAST_ATTEMPTS
-        ? SCHEDULED_LINK_POLL_FAST_MS
-        : SCHEDULED_LINK_POLL_SLOW_MS);
-    }
-
-    function taskStillListed() {
-      return (state.scheduledTasks || []).some(function (item) {
-        return item && item.id === automationId;
-      });
-    }
-
-    function poll(attempt) {
-      invoke("list_scheduled_task_runs", { id: automationId }).then(function (runs) {
-        // 任务已被删除时不再回填：陈旧轮询响应会把已删任务以 fallback 名
-        // 复活回侧边栏（审计 R1）。任务不在列表即收工，不 merge、不续排。
-        var task = (state.scheduledTasks || []).find(function (item) {
-          return item && item.id === automationId;
-        });
-        if (!task) {
-          stop();
-          return;
-        }
-        mergeScheduledTaskRecentRuns(task, runs);
-        notify();
-        // 必须看原始响应:mergeScheduledTaskRecentRuns 会滤掉尚无 sessionId 的记录,
-        // 从合并结果里读不到目标 run 的状态。
-        var target = (Array.isArray(runs) ? runs : []).find(function (run) {
-          return run && run.id === runId;
-        });
-        // 会话已挂上 → 记录已进侧边栏;run 已终态却仍无会话 → 会话没建起来,再等也不会有;
-        // run 记录消失(被删或被 retention 清掉)→ 没有等待对象。三种情况都收工。
-        if (!target || target.sessionId || isScheduledRunTerminal(target.status)) {
-          stop();
-          return;
-        }
-        again(attempt);
-      }).catch(function () {
-        // 已删任务的后端响应是 Err 而非空列表（get_automation 文件已移除）。
-        // 任务不在列表即收工，否则会以 1s/5s 空转重试到 30 分钟兜底。
-        if (!taskStillListed()) {
-          stop();
-          return;
-        }
-        again(attempt);
-      });
-    }
-
-    poll(0);
-  }
+  function refreshScheduledRunShortcutUntilLinked(automationId, runId) { return pinvouSharedweb().refreshScheduledRunShortcutUntilLinked(automationId, runId); }
 
 
   function upsertScheduledTaskRun(run) {
@@ -2488,25 +2082,7 @@ async function toggleScheduledTaskPinned(id, pinned) { return pinvouSharedweb().
 
 async function deleteScheduledTask(id) { return pinvouSharedweb().deleteScheduledTask(id); }
 
-  async function runScheduledTaskNow(id) {
-    return runScheduledTaskAction("run-now", async function () {
-      var run = await invoke("run_scheduled_task_now", { id: id });
-      invalidateScheduledTaskReads(id);
-      upsertScheduledTaskRun(run);
-      var runStatus = String(run && run.status || "").toLowerCase();
-      if (runStatus === "queued" || runStatus === "running") {
-        state.scheduledTasks = (state.scheduledTasks || []).map(function (task) {
-          return task.id === id ? Object.assign({}, task, { isRunning: true }) : task;
-        });
-        if (state.scheduledTaskDetail && state.scheduledTaskDetail.id === id) {
-          state.scheduledTaskDetail = Object.assign({}, state.scheduledTaskDetail, { isRunning: true });
-        }
-      }
-      notify();
-      refreshScheduledRunShortcutUntilLinked(id, run && run.id);
-      return run;
-    });
-  }
+  async function runScheduledTaskNow(id) { return pinvouSharedweb().runScheduledTaskNow(id); }
 
   // 不直接替用户发消息:引导词存为 pending,预填一句短话进输入框,由用户编辑后自己发送。
 async function startScheduledTaskChat() { return pinvouSharedweb().startScheduledTaskChat(); }
@@ -2516,31 +2092,8 @@ async function startScheduledTaskChat() { return pinvouSharedweb().startSchedule
     item.id = ++itemIdSeq;
     state.chatItems.push(item);
   }
-  function messageHasToolBlock(type, toolCallId) {
-    if (!toolCallId) return false;
-    // Replayed events belong to the current tail in practice. Scan backwards so
-    // long-running Sessions do not pay a full-history walk on every tool frame.
-    for (var i = state.messages.length - 1; i >= 0; i--) {
-      var blocks = state.messages[i] && state.messages[i].content;
-      if (!Array.isArray(blocks)) continue;
-      for (var j = blocks.length - 1; j >= 0; j--) {
-        var block = blocks[j];
-        if (!block || block.type !== type) continue;
-        if ((type === "tool_use" ? block.id : block.tool_use_id) === toolCallId) return true;
-      }
-    }
-    return false;
-  }
-  function toolCallAlreadyStarted(toolCallId) {
-    if (!toolCallId) return false;
-    if ((pendingAssistantBlocks || []).some(function (block) {
-      return block && block.type === "tool_use" && block.id === toolCallId;
-    })) return true;
-    if (state.chatItems.some(function (item) {
-      return item && item.type === "tool" && item.toolId === toolCallId;
-    })) return true;
-    return messageHasToolBlock("tool_use", toolCallId);
-  }
+  function messageHasToolBlock(type, toolCallId) { return pinvouSharedweb().messageHasToolBlock(type, toolCallId); }
+  function toolCallAlreadyStarted(toolCallId) { return pinvouSharedweb().toolCallAlreadyStarted(toolCallId); }
 function toolCallAlreadyFinished(toolCallId) { return pinvouSharedweb().toolCallAlreadyFinished(toolCallId); }
 function hasChatItemForTool(type, toolCallId) { return pinvouSharedweb().hasChatItemForTool(type, toolCallId); }
 function addSystemItem(text, meta) { return pinvouSharedweb().addSystemItem(text, meta); }
@@ -2557,23 +2110,7 @@ function timeStr() { return pinvouSharedweb().timeStr(); }
       pendingAssistantText = "";
     }
   }
-  function flushAssistantMessageToHistory() {
-    flushPendingTextBlock();
-    if (pendingAssistantBlocks.length) {
-      var assistantText = pendingAssistantBlocks
-        .filter(function (block) { return block && block.type === "text" && block.text; })
-        .map(function (block) { return block.text; })
-        .join("\n\n");
-      if (state.activeSessionId && state.activeSessionId === state.scheduledTaskCreationSessionId) {
-        var scheduledTaskDraft = parseScheduledTaskDraftFromText(assistantText);
-        if (scheduledTaskDraft) {
-          autoCreateScheduledTaskDraft(scheduledTaskDraft, state.activeSessionId);
-        }
-      }
-      state.messages.push({ role: "assistant", content: pendingAssistantBlocks });
-      pendingAssistantBlocks = [];
-    }
-  }
+  function flushAssistantMessageToHistory() { return pinvouSharedweb().flushAssistantMessageToHistory(); }
   function resetPendingAssistant() {
     pendingAssistantText = "";
     pendingAssistantBlocks = [];
@@ -2886,50 +2423,11 @@ function reportSessionSwitchFailure(error, errorScope) { return pinvouSharedweb(
     notify();
   }
 
-  function hydratedMessageKey(message, hideInternalEnvelope) {
-    var blocks = message && Array.isArray(message.content) ? message.content : [];
-    if (message && message.role === "user") {
-      var resultIds = blocks.filter(function (block) {
-        return block && block.type === "tool_result" && block.tool_use_id;
-      }).map(function (block) { return block.tool_use_id; }).sort();
-      if (resultIds.length) return "user:tool_results:" + resultIds.join("|");
-      return "user:text:" + userMessageDisplayText(blocks, hideInternalEnvelope);
-    }
-    if (message && message.role === "assistant") {
-      var toolIds = blocks.filter(function (block) {
-        return block && block.type === "tool_use" && block.id;
-      }).map(function (block) { return block.id; }).sort();
-      if (toolIds.length) return "assistant:tool_uses:" + toolIds.join("|");
-      blocks = blocks.filter(function (block) { return !block || block.type !== "thinking"; });
-      try { return "assistant:" + JSON.stringify(blocks); } catch (_) {}
-    }
-    try { return JSON.stringify(message); } catch (_) { return String(message); }
-  }
+  function hydratedMessageKey(message, hideInternalEnvelope) { return pinvouSharedweb().hydratedMessageKey(message, hideInternalEnvelope); }
 
 function mergeHydratedMessages(durableMessages, liveMessages, hideInternalEnvelope) { return pinvouSharedweb().mergeHydratedMessages(durableMessages, liveMessages, hideInternalEnvelope); }
 
-  function mergeHydratedArtifacts(durableArtifacts, liveArtifacts) {
-    var merged = [];
-    var seen = Object.create(null);
-    (durableArtifacts || []).concat(liveArtifacts || []).forEach(function (artifact) {
-      var path = typeof artifact === "string" ? artifact : (artifact && (artifact.path || artifact.storage_path)) || "";
-      var identity = basename(path);
-      if (!path || !identity) return;
-      if (seen[identity] !== undefined) {
-        // The durable transcript commonly stores a relative write_file path while
-        // artifact:disk has already supplied the absolute path. They are the same
-        // presentation object; retain the path that can actually be opened.
-        var existingIndex = seen[identity];
-        if (isAbsPath(path) && !isAbsPath(merged[existingIndex].path)) {
-          merged[existingIndex] = { path: path, basename: identity };
-        }
-        return;
-      }
-      seen[identity] = merged.length;
-      merged.push({ path: path, basename: identity });
-    });
-    return merged;
-  }
+  function mergeHydratedArtifacts(durableArtifacts, liveArtifacts) { return pinvouSharedweb().mergeHydratedArtifacts(durableArtifacts, liveArtifacts); }
 
 function hydratedChatItemKey(item) { return pinvouSharedweb().hydratedChatItemKey(item); }
 
@@ -3302,9 +2800,6 @@ function openScheduledRunChat(run, task) { return pinvouSharedweb().openSchedule
 async function exitScheduledRunChat() { return pinvouSharedweb().exitScheduledRunChat(); }
 
 
-
-
-
   // Session storage is authoritative in Rust, but every desktop/Web frontend
   // owns a separate presentation index. Apply the committed deletion event
   // idempotently in either client so a remote delete cannot leave an ENOENT
@@ -3315,31 +2810,8 @@ async function exitScheduledRunChat() { return pinvouSharedweb().exitScheduledRu
   // consumer never learns a code task was deleted. Feature code (the aux-chat
   // purge wiring) registers a listener here instead of the bridge pushing.
   var sessionDeletedListeners = new Set();
-  function onSessionDeleted(listener) {
-    if (typeof listener !== "function") return function () {};
-    sessionDeletedListeners.add(listener);
-    return function () { sessionDeletedListeners.delete(listener); };
-  }
-  function applyDeletedSession(id) {
-    if (typeof id !== "string" || !id) return false;
-    invalidateScheduledRecentRunsForSession(id);
-    purgeSessionBuffer(id);
-    state.sessions = state.sessions.filter(function (session) { return session.id !== id; });
-    state.archivedSessions = (state.archivedSessions || []).filter(function (session) {
-      return session.id !== id;
-    });
-    state.scheduledTaskRecentRuns = (state.scheduledTaskRecentRuns || []).filter(function (run) {
-      return !run || run.sessionId !== id;
-    });
-    state.scheduledTaskRuns = (state.scheduledTaskRuns || []).filter(function (run) {
-      return !run || run.sessionId !== id;
-    });
-    for (const listener of sessionDeletedListeners) {
-      try { listener(id); } catch (error) { console.warn("session:deleted listener failed", error); }
-    }
-    notify();
-    return true;
-  }
+  function onSessionDeleted(listener) { return pinvouSharedweb().onSessionDeleted(listener); }
+  function applyDeletedSession(id) { return pinvouSharedweb().applyDeletedSession(id); }
 
   async function deleteSession(id) {
     invalidateScheduledRecentRunsForSession(id);
@@ -3368,7 +2840,6 @@ async function restoreArchivedSession(id) { return pinvouSharedweb().restoreArch
 
   // tool_result.content 可能是 string 或 Anthropic content blocks 数组，归一成纯文本。
 function toolResultText(content) { return pinvouSharedweb().toolResultText(content); }
-
 
 
 function toolResultDisplayContent(content) { return pinvouSharedweb().toolResultDisplayContent(content); }
@@ -3473,17 +2944,7 @@ function emitPersonaAt(atOrAfter, isTail) { return pinvouSharedwebN189622().emit
       sweepUnsettledTools: function () {},
     }, opts);
   }
-  function updateToolItem(toolId, output, success) {
-    for (var i = 0; i < state.chatItems.length; i++) {
-      if (state.chatItems[i].type === "tool" && state.chatItems[i].toolId === toolId) {
-        state.chatItems[i].output = output;
-        state.chatItems[i].success = success;
-        state.chatItems[i].state = success ? "done" : "failed";
-        return state.chatItems[i];
-      }
-    }
-    return null;
-  }
+  function updateToolItem(toolId, output, success) { return pinvouSharedweb().updateToolItem(toolId, output, success); }
 
   // keep in sync with tauri/bridge/terminal.js
   const SHELL_TOOL_NAMES = ["bash", "exec_shell", "exec_shell_wait", "exec_wait", "task_shell_start", "task_shell_wait", "shell", "Bash"];
@@ -3515,7 +2976,6 @@ function isShellExecutionTool(name) { return pinvouSharedweb().isShellExecutionT
   }
 
 
-
   // Shell snapshots are a tail view, not an append-only byte stream. Normalize
   // terminal control sequences and state omissions explicitly instead of
   // pretending the visible tail is the complete log.
@@ -3540,17 +3000,7 @@ function isShellExecutionTool(name) { return pinvouSharedweb().isShellExecutionT
   }
 
 
-
-
-
-
-
-
-
-
-
 function scheduleShellPoll(sid, immediate) { return pinvouSharedweb().scheduleShellPoll(sid, immediate); }
-
 
 
   async function cancelShellTask(sessionId, taskId) {
@@ -3570,16 +3020,7 @@ function hasUnresolvedItem(type) { return pinvouSharedweb().hasUnresolvedItem(ty
 
   // ── 产物跟踪 ─────────────────────────────────────────────────────
 function basename(p) { return pinvouSharedweb().basename(p); }
-  function isAbsPath(p) {
-    // UNC network-share paths (\\server\\share\...) are absolute too —
-    // validate_codex_project_workspace stores them after platform_compat_path,
-    // and without this arm the rebase transform returned them unmapped
-    // (review #463 round-20 minor 6; Windows network-share workspaces only).
-    return (
-      typeof p === "string"
-        && (p.charAt(0) === "/" || /^[A-Za-z]:[\\/]/.test(p) || /^\\\\[^\\]/.test(p))
-    );
-  }
+  function isAbsPath(p) { return pinvouSharedweb().isAbsPath(p); }
 function normalizedPath(p) { return pinvouSharedweb().normalizedPath(p); }
   // Stamps the workspace_rebound mark the rebind command emits for the
   // sessions whose persisted artifact paths its lanes rebased (rebound,
@@ -3598,32 +3039,7 @@ function normalizedPath(p) { return pinvouSharedweb().normalizedPath(p); }
   // the whole process lifetime (a restart starts from the already-rebased
   // JSON with no marks). Consumed by rebaseArtifactPathsForRebind /
   // sessionRecentlyRebound below.
-  function applyWorkspaceReboundMark(payload) {
-    if (!payload || payload.action !== "workspace_rebound" || !payload.id || !payload.from || !payload.to) {
-      return;
-    }
-    state.reboundSessionIds = state.reboundSessionIds || {};
-    const existing = state.reboundSessionIds[payload.id];
-    const last = existing && existing.chain && existing.chain[existing.chain.length - 1];
-    if (existing && last && last.from === payload.from && last.to === payload.to) {
-      // Identical retry of the last segment: refresh the view-heal window
-      // only (an older vintage may still be buffered; the chain must
-      // survive).
-      existing.at = Date.now();
-    } else if (existing) {
-      // Chained (last.to === payload.from) or non-contiguous: append. A
-      // non-matching segment is inert for the ordered prefix transform, and
-      // appending keeps every older vintage resolvable (review #463 round-E
-      // minor — the previous replace branch dropped them).
-      existing.chain.push({ from: payload.from, to: payload.to });
-      existing.at = Date.now();
-    } else {
-      state.reboundSessionIds[payload.id] = {
-        at: Date.now(),
-        chain: [{ from: payload.from, to: payload.to }],
-      };
-    }
-  }
+  function applyWorkspaceReboundMark(payload) { return pinvouSharedweb().applyWorkspaceReboundMark(payload); }
   // Freshness window for the workspace_rebound mark's VIEW heal (the
   // basename-based reconcile arm): generous enough to cover the rebind
   // dialog's retry flow, short enough that an old mark cannot misfire the
@@ -3634,13 +3050,7 @@ function normalizedPath(p) { return pinvouSharedweb().normalizedPath(p); }
   // survive while the session's buffer may still hold stale paths — pruning
   // here re-armed the durable revert the transform exists to prevent.
   var REBIND_RECONCILE_WINDOW_MS = 10 * 60 * 1000;
-  function sessionRecentlyRebound(sid) {
-    var marks = state.reboundSessionIds;
-    if (!marks || !sid) return false;
-    var mark = marks[sid];
-    if (!mark || !mark.at) return false;
-    return Date.now() - mark.at <= REBIND_RECONCILE_WINDOW_MS;
-  }
+  function sessionRecentlyRebound(sid) { return pinvouSharedweb().sessionRecentlyRebound(sid); }
   // Rebases absolute artifact paths along the session's rebind SEGMENT CHAIN
   // while a workspace_rebound mark exists (review #463 round-B Major 1 + the
   // round-D vintage fix): a post-rebind wholesale save of a chat turn's
@@ -3654,11 +3064,7 @@ function normalizedPath(p) { return pinvouSharedweb().normalizedPath(p); }
   // from the already-rebased JSON with no marks and this is a no-op. Strips
   // trailing separators without a regex (the ESLint deny gate flags the
   // previous /\/+$/ form as super-linear).
-  function trimTrailingSlashes(p) {
-    var s = normalizedPath(p);
-    while (s.endsWith("/")) s = s.slice(0, -1);
-    return s;
-  }
+
   // Locates the folded prefix match in the ORIGINAL string and returns the
   // code-unit length to cut there, or -1 when no prefix of `original` folds
   // to `foldedKey`. The fold is for the comparison only — the cut must NOT
@@ -3669,65 +3075,14 @@ function normalizedPath(p) { return pinvouSharedweb().normalizedPath(p); }
   // "/data/İstanbul/a.txt" used to save as "<to>a.txt"). Lowercasing never
   // shrinks a string, so the scan can stop once the folded prefix outgrows
   // the key.
-  function foldedPrefixCutLength(original, foldedKey) {
-    for (var cut = 0; cut <= original.length; cut++) {
-      var folded = original.slice(0, cut).toLowerCase();
-      if (folded === foldedKey) return cut;
-      if (folded.length >= foldedKey.length) return -1;
-    }
-    return -1;
-  }
-  function rebaseArtifactPathsForRebind(sid, paths) {
-    var marks = state.reboundSessionIds;
-    var mark = marks && sid ? marks[sid] : null;
-    if (!mark || !Array.isArray(mark.chain) || !mark.chain.length || !Array.isArray(paths)) {
-      return paths;
-    }
-    var segments = mark.chain
-      .map(function (segment) {
-        return {
-          // The case fold is unconditional (review #463 round-13): the
-          // bridges have no filesystem-case-sensitivity capability to gate
-          // it on — adding one would span the Rust capability surface, both
-          // lanes' platform wiring and this factory's deps, which is not a
-          // small change. On a case-sensitive filesystem two roots differing
-          // only in case are indistinguishable HERE while the POSIX backend
-          // identity key stays case-sensitive — the fold is this transform's
-          // own trade-off (the backend folds unconditionally only on
-          // Windows); reworded per round-24 minor 15, capability-gating
-          // stays the recorded later option.
-          fromKey: trimTrailingSlashes(segment.from).toLowerCase(),
-          toKey: trimTrailingSlashes(segment.to),
-        };
-      })
-      .filter(function (segment) { return segment.fromKey; });
-    if (!segments.length) return paths;
-    return paths.map(function (p) {
-      if (typeof p !== "string" || !isAbsPath(p)) return p;
-      var norm = normalizedPath(p);
-      var mapped = false;
-      for (var i = 0; i < segments.length; i++) {
-        var cut = foldedPrefixCutLength(norm, segments[i].fromKey);
-        if (cut >= 0 && (cut === norm.length || norm.charAt(cut) === "/")) {
-          norm = segments[i].toKey + norm.slice(cut);
-          mapped = true;
-        }
-      }
-      return mapped ? norm : p;
-    });
-  }
+
+  function rebaseArtifactPathsForRebind(sid, paths) { return pinvouSharedweb().rebaseArtifactPathsForRebind(sid, paths); }
   // Whether the path still points at a PRE-rebind location on this
   // session's rebind chain (review #463 round-24 minor 3): the reconcile's
   // stale-absolute heal arm is gated on it, so an unrelated live absolute
   // entry whose basename collides cannot be taken over and the wrong path
   // persisted.
-  function pathIsRebindStale(sid, path) {
-    var marks = state.reboundSessionIds;
-    var mark = marks && sid ? marks[sid] : null;
-    if (!mark || !Array.isArray(mark.chain) || !mark.chain.length) return false;
-    var mapped = rebaseArtifactPathsForRebind(sid, [path]);
-    return Array.isArray(mapped) && normalizedPath(mapped[0]) !== normalizedPath(path);
-  }
+  function pathIsRebindStale(sid, path) { return pinvouSharedweb().pathIsRebindStale(sid, path); }
 function noteArtifactChange(path, event, sessionId) { return pinvouSharedweb().noteArtifactChange(path, event, sessionId); }
 function isSharedMcpArtifactPath(path) { return pinvouSharedweb().isSharedMcpArtifactPath(path); }
 function artifactBelongsToSession(path, sid) { return pinvouSharedweb().artifactBelongsToSession(path, sid); }
@@ -3805,62 +3160,9 @@ function findPresentedArtifact(path) { return pinvouSharedweb().findPresentedArt
 function updatePresentedArtifact(card) { return pinvouSharedweb().updatePresentedArtifact(card); }
   // 切换 session 时对账:扫 workspace 磁盘,把实际存在、但跟踪列表里没有的文件补进来。
   // 修「文件已生成在盘上、却因 app 中途重启/跟踪遗漏而不在产物面板」(以磁盘为准)。
-  async function reconcileArtifacts(sid) {
-    if (!sid) return;
-    if (isScheduledRunSession(sid)) return;
-    try {
-      var files = await invoke("list_workspace_files", { sessionId: sid });
-      if (sid !== state.activeSessionId) return; // 已切走,放弃(避免写错 session)
-      var byName = {};
-      state.artifacts.forEach(function (a) { byName[basename(a.path)] = a; });
-      var added = false;
-      files.forEach(function (p) {
-        var bn = basename(p);
-        var ex = byName[bn];
-        // 已 present_artifact 过的成品在 saved.artifacts(ex 命中);扫盘只「新增」成品型文件,
-        // 不再把所有过程文件全扫进面板(修「飞书 CLI scratch 全暴露成产物」)。
-        if (!ex) {
-          if (!isDeliverable(p)) return;
-          var na = { path: p, basename: bn }; state.artifacts.push(na); byName[bn] = na; added = true;
-        }
-        // Relative→absolute opens reliably; an absolute stale entry may
-        // take over the same-basename live workspace file ONLY inside the
-        // sessionRecentlyRebound window AND only when the stored entry is
-        // real stale rebind geometry (pathIsRebindStale — round-24 minor 3,
-        // the tauri artifact-tracker's identical heal arm: the mark alone
-        // let an unrelated live absolute entry whose basename collides be
-        // taken over and the wrong path persisted; review #463 round-20
-        // minor 9 records the never-called-condition history).
-        else if (isAbsPath(p) && (!isAbsPath(ex.path) || (normalizedPath(ex.path) !== normalizedPath(p) && sessionRecentlyRebound(sid) && pathIsRebindStale(sid, ex.path)))) { ex.path = p; added = true; }
-      });
-      if (added) {
-        notify();
-        try { await invoke("save_session_artifacts", { id: sid, paths: rebaseArtifactPathsForRebind(sid, state.artifacts.map(function (a) { return a.path; })) }); } catch (_) {}
-      }
-    } catch (e) { /* workspace 不存在(新 session)等,忽略 */ }
-  }
+  async function reconcileArtifacts(sid) { return pinvouSharedweb().reconcileArtifacts(sid); }
 function pushArtifactPath(paths, path) { return pinvouSharedweb().pushArtifactPath(paths, path); }
-  function extractArtifactPaths(args) {
-    if (!args) return [];
-    if (typeof args === "string") {
-      try { args = JSON.parse(args); } catch (e) { return []; }
-    }
-    var paths = [];
-    pushArtifactPath(paths, args.path || args.file_path || args.filename);
-    [args.replace, args.changes].forEach(function (changes) {
-      if (!Array.isArray(changes)) return;
-      changes.forEach(function (change) {
-        if (change && typeof change === "object") pushArtifactPath(paths, change.path || change.file_path || change.filename);
-      });
-    });
-    String(args.patch || "").split(/\r?\n/).forEach(function (line) {
-      var custom = /^\*\*\* (?:Add|Update|Delete) File:\s*(.+?)\s*$/.exec(line);
-      if (custom) { pushArtifactPath(paths, custom[1]); return; }
-      var unified = /^\+\+\+\s+(?:b\/)?(.+?)\s*$/.exec(line);
-      if (unified && unified[1] !== "/dev/null") pushArtifactPath(paths, unified[1]);
-    });
-    return paths;
-  }
+  function extractArtifactPaths(args) { return pinvouSharedweb().extractArtifactPaths(args); }
 function extractArtifactPath(args) { return pinvouSharedweb().extractArtifactPath(args); }
 
 function fileMutationAction(name, args) { return pinvouSharedweb().fileMutationAction(name, args); }
@@ -3872,104 +3174,17 @@ function composePlanMarkdown(snapshots) { return pinvouSharedweb().composePlanMa
   // 指定 session 是否正在生成(active 看工作集 busy,后台看其 buffer)。
 function isBusyFor(sid) { return pinvouSharedweb().isBusyFor(sid); }
 function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb().formatAttachmentDisplayText(text, attachments); }
-  function queuedPayloadEnvelope(userText, payloadText, meta) {
-    const user = String(userText || "");
-    const payload = String(payloadText == null ? user : payloadText);
-    if (!user) return { before: payload, after: "" };
-    const requested = meta && meta.pinvouPayloadText
-      ? String(meta.pinvouPayloadText).trim()
-      : "";
-    let index = -1;
-    if (requested) {
-      const requestedIndex = payload.indexOf(requested);
-      let userIndex = -1;
-      if (requested.startsWith(user)) userIndex = 0;
-      else if (requested.endsWith(user)) userIndex = requested.length - user.length;
-      else if (requested.indexOf(user) === requested.lastIndexOf(user)) userIndex = requested.indexOf(user);
-      if (requestedIndex >= 0 && userIndex >= 0) index = requestedIndex + userIndex;
-    } else if (payload === user || payload.endsWith(user)) {
-      index = payload.length - user.length;
-    } else if (payload.indexOf(user) === payload.lastIndexOf(user)) {
-      index = payload.indexOf(user);
-    }
-    if (index < 0) {
-      // Session-mention block-aware fallback (web lane carries the same
-      // implementation as the tauri chat bridge): a queued scene send stores
-      // the text as <block><body> while a scene payload embeds the body
-      // inside its template, so the literal substring match above fails.
-      // The rebuild swaps in the EDITED block and body
-      // (rebuiltQueuedFromEnvelope) so the payload keeps the send-time shape.
-      const blockEnvelope = blockAwarePayloadEnvelope(user, payload);
-      if (blockEnvelope) return blockEnvelope;
-      return payload === user ? { before: "", after: "" } : null;
-    }
-    return {
-      before: payload.slice(0, index),
-      after: payload.slice(index + user.length),
-    };
-  }
+  function queuedPayloadEnvelope(userText, payloadText, meta) { return pinvouSharedweb().queuedPayloadEnvelope(userText, payloadText, meta); }
   // Block-aware part of queuedPayloadEnvelope (web lane copy of the tauri
   // chat bridge's implementation): splits <block><body> user text against a
   // payload that really carries the block at its head. Returns null when the
   // shape does not apply (no parser, no refs, refs-only text, prefixed
   // payload, ambiguous body anchor).
-  function blockAwarePayloadEnvelope(user, payload) {
-    const splitMention = window.__PINVOU_SESSION_MENTION__ && window.__PINVOU_SESSION_MENTION__.splitSessionMentionBlock;
-    if (typeof splitMention !== "function") return null;
-    const split = splitMention(user);
-    if (!split || !split.refs.length || !split.text) return null;
-    const blockText = user.slice(0, user.length - split.text.length);
-    const body = split.text.trim();
-    if (!body || !payload.startsWith(blockText)) return null;
-    const bodyIndex = payload.indexOf(body, blockText.length);
-    if (bodyIndex < blockText.length || payload.includes(body, bodyIndex + 1)) return null;
-    return {
-      blockPrefix: blockText,
-      before: payload.slice(blockText.length, bodyIndex),
-      after: payload.slice(bodyIndex + body.length),
-      blockAware: true,
-    };
-  }
-  function makeQueuedMessage(id, userText, payloadText, displayText, attachments, meta, restrictTools) {
-    return {
-      id,
-      text: userText,
-      payloadText,
-      payloadEnvelope: queuedPayloadEnvelope(userText, payloadText, meta),
-      metaPayloadEnvelope: meta && meta.pinvouPayloadText
-        ? queuedPayloadEnvelope(userText, meta.pinvouPayloadText, meta)
-        : null,
-      displayText,
-      attachments,
-      meta,
-      restrictTools,
-    };
-  }
-  function rebuiltQueuedFromEnvelope(envelope, userText) {
-    const raw = String(userText == null ? "" : userText);
-    if (envelope.blockAware) {
-      const splitMention = window.__PINVOU_SESSION_MENTION__ && window.__PINVOU_SESSION_MENTION__.splitSessionMentionBlock;
-      const split = typeof splitMention === "function" ? splitMention(raw) : null;
-      let block = "";
-      let body = raw;
-      if (split && split.matched) {
-        block = raw.slice(0, raw.length - split.text.length);
-        body = split.text;
-      }
-      return block + envelope.before + body + envelope.after;
-    }
-    return envelope.before + raw + envelope.after;
-  }
-  function rebuiltQueuedPayload(item, userText) {
-    const envelope = item && item.payloadEnvelope;
-    if (!envelope || typeof envelope.before !== "string" || typeof envelope.after !== "string") return null;
-    return rebuiltQueuedFromEnvelope(envelope, userText);
-  }
-  function rebuiltQueuedMetaPayload(item, userText) {
-    const envelope = item && item.metaPayloadEnvelope;
-    if (!envelope || typeof envelope.before !== "string" || typeof envelope.after !== "string") return null;
-    return rebuiltQueuedFromEnvelope(envelope, userText);
-  }
+
+  function makeQueuedMessage(id, userText, payloadText, displayText, attachments, meta, restrictTools) { return pinvouSharedweb().makeQueuedMessage(id, userText, payloadText, displayText, attachments, meta, restrictTools); }
+
+  function rebuiltQueuedPayload(item, userText) { return pinvouSharedweb().rebuiltQueuedPayload(item, userText); }
+  function rebuiltQueuedMetaPayload(item, userText) { return pinvouSharedweb().rebuiltQueuedMetaPayload(item, userText); }
   // 桌宠窗口靠全局事件感知回合起止。turn_start 补齐"发送 → 首 token"的空窗
   // (chat:delta 之前引擎在思考,宠物不该干站着);turn_end 只兜 invoke 直接失败
   // 这种不会有 chat:done 的路径。JS emit 是全局广播,宠物窗口 listen 收得到。
@@ -4168,51 +3383,7 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
       });
   }
 
-  async function sendMessageToSession(sessionId, text, meta) {
-    var sid = String(sessionId || "").trim();
-    var content = String(text || "").trim();
-    if (!sid) throw new Error(bt("targetSessionMissing"));
-    if (!content) throw new Error(bt("replyContentEmpty"));
-    var exists = state.sessions.some(function (session) { return String(session.id) === sid; });
-    if (!exists) throw new Error(bt("targetSessionMissing"));
-
-    await ensureSessionBufferLoaded(sid);
-    var targetBuffer = getBuffer(sid);
-    var targetQueue = targetBuffer && targetBuffer.queued;
-    if (isBusyFor(sid) || (targetQueue && targetQueue.length > 0)) {
-      runSyncOnSession(sid, function () {
-        state.queued.push(makeQueuedMessage(
-          ++itemIdSeq, content, content, content, [], meta || null, false
-        ));
-      });
-      notify();
-      if (!isBusyFor(sid)) flushQueued(sid);
-      return { accepted: true, queued: true };
-    }
-    if (targetBuffer && targetBuffer.remoteTurnActive && !(await reconcileRemoteTurn(sid))) {
-      recordAuthoritySyncDiagnostic("remote_sync_blocked_action", Object.assign({
-        operation: "send_to_session",
-      }, authoritySyncBufferSnapshot(sid, targetBuffer)));
-      throw new Error(bt("targetSessionSyncing"));
-    }
-    targetBuffer = getBuffer(sid);
-    if (isBusyFor(sid) || (targetBuffer.queued && targetBuffer.queued.length > 0)) {
-      runSyncOnSession(sid, function () {
-        state.queued.push(makeQueuedMessage(
-          ++itemIdSeq, content, content, content, [], meta || null, false
-        ));
-      });
-      notify();
-      if (!isBusyFor(sid)) flushQueued(sid);
-      return { accepted: true, queued: true };
-    }
-    var completion = doSendFor(sid, content, content, [], meta || null, false, true)
-      .then(
-        function () { return { ok: true }; },
-        function (error) { return { ok: false, error: error }; }
-      );
-    return { accepted: true, queued: false, completion: completion };
-  }
+  async function sendMessageToSession(sessionId, text, meta) { return pinvouSharedweb().sendMessageToSession(sessionId, text, meta); }
 
   // ── Aux chat ─────────────────────────────────────────────────────
   // Community #433 port note: upstream's M7 refactor moved these domain
@@ -4722,24 +3893,11 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
     }
     return String(state.composerDraft || "");
   }
-  function setComposerDraft(value) {
-    var text = value == null ? "" : String(value);
-    state.composerDraft = text;
-    var activeBuffer = state.activeSessionId && sessionStates[state.activeSessionId];
-    if (activeBuffer) activeBuffer.composerDraft = text;
-    return text;
-  }
+  function setComposerDraft(value) { return pinvouSharedweb().setComposerDraft(value); }
   // Mirrors the tauri bridge: template/navigation prefills replace the draft;
   // failure recovery passes append=true for separator-joined appending
   // (re-review #4 parity).
-  function prefillComposer(text, append) {
-    state.composerPrefill = {
-      id: (state.composerPrefill.id || 0) + 1,
-      text: String(text || ""),
-      append: !!append,
-    };
-    notify();
-  }
+  function prefillComposer(text, append) { return pinvouSharedweb().prefillComposer(text, append); }
   function restoreTaskDraft(text, owner) {
     if (!owner || owner.restored) return false;
     const sid = owner.sessionId || owner.createdSessionId || voiceOperationSessionId(owner.operationId);
@@ -4793,14 +3951,7 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
   // Composer restores strip the injection block on restore — the splitter is
   // published on the window global by features/chat/session-mention.js
   // (classic-script bridges do not import features back).
-  function stripMentionBlockForComposerRestore(text) {
-    const raw = String(text || "");
-    const splitMention = (typeof window !== "undefined") && window.__PINVOU_SESSION_MENTION__ &&
-      window.__PINVOU_SESSION_MENTION__.splitSessionMentionBlock;
-    if (typeof splitMention !== "function") return raw;
-    const split = splitMention(raw);
-    return split && split.matched ? split.text.trim() : raw;
-  }
+  function stripMentionBlockForComposerRestore(text) { return pinvouSharedweb().stripMentionBlockForComposerRestore(text); }
 
   // Session-scoped composer text restore for sends abandoned by a session
   // switch mid-send (issue #406; mirrors the tauri bridge's restoreSteerText,
@@ -4899,28 +4050,7 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
   // ── Pinvou v4 召唤式检阅:Boss 主动呼叫,审当前 session 前面的工作 ──
   // 纯召唤、不替 Boss 决策。
   // 审查卡进 chatItems(当前会话可见);跨会话持久化(进 messages/独立存储)是后续增强。
-  async function summonPinvou(focus, mode) {
-    if (!state.activeSessionId) { addSystemItem(bt("pinvouNeedSession")); return; }
-    if (state.pinvouSummoning) return;
-    state.pinvouSummoning = true;
-    var sid = state.activeSessionId; // 召唤发起时的 session;await 返回后校验,防跨 session 串(召唤慢+切走)
-    // 检阅结果弹 modal(不进对话流):一次只一个,裁决/跳过直接操作 state.pinvouModal.review、
-    // 不靠 pos 定位(根治连续召唤 pos 重复串卡)。
-    state.pinvouModal = { loading: true, coverage: mode === "coverage" };
-    notify();
-    try {
-      // focus=产出物 path(品=审产物); mode="coverage"=悟(通盘体检)。
-      var review = await invoke("summon_pinvou", { sessionId: sid, focus: focus || null, mode: mode || null });
-      if (state.activeSessionId !== sid) return; // 召唤期间切了 session → 丢弃,绝不 record/写进别的 session
-      recordPinvouReview(review); // 存 sidecar(供核账读上轮账目);modal.review 同引用,裁决写它=写 sidecar
-      if (state.pinvouModal) { state.pinvouModal.loading = false; state.pinvouModal.review = review; }
-    } catch (e) {
-      if (state.activeSessionId === sid && state.pinvouModal) { state.pinvouModal.loading = false; state.pinvouModal.error = String(e && e.message ? e.message : e); }
-    } finally {
-      state.pinvouSummoning = false;
-      notify();
-    }
-  }
+  async function summonPinvou(focus, mode) { return pinvouSharedweb().summonPinvou(focus, mode); }
 
   // 通盘体检(覆盖镜头):查产物"全不全"=缺哪些完整性维度。独立入口,走 mode=coverage。
 function inspectPinvou(focus) { return pinvouSharedweb().inspectPinvou(focus); }
@@ -4931,61 +4061,7 @@ function recordPinvouReview(review) { return pinvouSharedweb().recordPinvouRevie
 
   // §2 按勾选裁决:resolution 已由前端写回 review 对象(引用→sidecar),这里持久化 +
   // 把勾「让AI改」的条目走 B1 发定向修订指令(只改对应段落、禁全文重写)。Boss 驾驶,非自动。
-  async function resolvePinvouReview(resolutions, actions) {
-    // 检阅发生的会话归属捕获：persist 挂起期间用户可能切走，修订指令必须发回
-    // 检阅会话，不得漂进当前 active 会话（与 tauri 版对齐，二审 F2）。
-    var reviewSid = state.activeSessionId;
-    // 弹窗只一个 review(state.pinvouModal.review),直接在它上面写 resolution——不靠 pos 定位
-    // (根治连续召唤 pos 重复串卡)。它和 sidecar entry.review 同引用,写它=写 sidecar。
-    var isWu = !!(state.pinvouModal && state.pinvouModal.coverage); // 关窗前取,供转交标品/悟
-    var review = state.pinvouModal && state.pinvouModal.review;
-    if (review && resolutions) {
-      (review.recommendations || []).forEach(function (r, k) { if (resolutions.recs && resolutions.recs[k]) r.resolution = resolutions.recs[k]; });
-      (review.issues || []).forEach(function (x, k) { if (resolutions.issues && resolutions.issues[k]) x.resolution = resolutions.issues[k]; });
-      (review.coverage || []).forEach(function (g, k) { if (resolutions.coverage && resolutions.coverage[k]) g.resolution = resolutions.coverage[k]; });
-    }
-    await persistPinvouReviews(); // 落盘,配合后端 preserve_resolutions 防覆盖
-    state.pinvouModal = null; // 裁决完关窗
-    notify();
-    if (!actions || !actions.length) return;
-    // 按动作类型分组,组装一条 Boss 消息发给主 AI(Boss 驾驶,非自动回传):
-    // fix/verify=产物缺陷定向修订(verify 先核实);adopt=Boss 已定的决策;ask=让 AI 正式问。
-    var fix = actions.filter(function (a) { return a.t === "fix"; });
-    var verify = actions.filter(function (a) { return a.t === "verify"; });
-    var adopt = actions.filter(function (a) { return a.t === "adopt"; });
-    var ask = actions.filter(function (a) { return a.t === "ask"; });
-    var parts = [];
-    if (fix.length) {
-      parts.push(bt("reviewFixHeader"));
-      fix.forEach(function (a) { parts.push("- " + a.text); });
-    }
-    if (verify.length) {
-      if (parts.length) parts.push("");
-      parts.push(bt("reviewVerifyHeader"));
-      verify.forEach(function (a) { parts.push("- " + a.text); });
-    }
-    if (adopt.length) {
-      if (parts.length) parts.push("");
-      parts.push(bt("reviewAdoptHeader"));
-      adopt.forEach(function (a) { parts.push("- " + (a.topic ? a.topic + "：" : "") + a.pick); });
-    }
-    if (ask.length) {
-      if (parts.length) parts.push("");
-      parts.push(bt("reviewAskHeader"));
-      ask.forEach(function (a) { parts.push("- " + a.topic); });
-    }
-    var fill = actions.filter(function (a) { return a.t === "fill"; });
-    if (fill.length) {
-      if (parts.length) parts.push("");
-      parts.push(bt("reviewFillHeader"));
-      fill.forEach(function (a) { parts.push("- " + a.dimension + (a.suggestion ? "：" + a.suggestion : "")); });
-      parts.push(bt("reviewFillFooter"));
-    }
-    // 已切走则放弃发指令（修订指令属于检阅会话，漂进别的会话会误导其上下文）；
-    // reviewSid 为 null 的防御：草稿态本不该有检阅，双 null 通过会把指令发给
-    // ensureSession 新建的空会话。
-    if (parts.length && reviewSid && state.activeSessionId === reviewSid) sendMessage(parts.join("\n"), { pinvouTransfer: isWu ? "悟" : "品" });
-  }
+  async function resolvePinvouReview(resolutions, actions) { return pinvouSharedweb().resolvePinvouReview(resolutions, actions); }
 
   // 整卡跳过:Boss 看了不处理这次检阅 → 直接关窗(sidecar entry 留着、无 resolution,无害)。
 function dismissPinvouReview() { return pinvouSharedweb().dismissPinvouReview(); }
@@ -5034,29 +4110,7 @@ function persistPinvouReviews() { return pinvouSharedweb().persistPinvouReviews(
   // refresh. Harnesses without timers fall back to the immediate refresh.
   var historyRefreshTimer = null;
   var historyRefreshPending = false;
-  function scheduleHistoryRefresh() {
-    function runRefresh() {
-      refreshHistoryList().catch(function (error) {
-        console.error("[sessions] session:list_changed refresh failed", error);
-      });
-    }
-    if (typeof setTimeout !== "function") {
-      runRefresh();
-      return;
-    }
-    if (historyRefreshTimer) {
-      historyRefreshPending = true;
-      return;
-    }
-    runRefresh();
-    historyRefreshTimer = setTimeout(function () {
-      historyRefreshTimer = null;
-      if (historyRefreshPending) {
-        historyRefreshPending = false;
-        scheduleHistoryRefresh();
-      }
-    }, 200);
-  }
+  function scheduleHistoryRefresh() { return pinvouSharedweb().scheduleHistoryRefresh(); }
   listen("session:list_changed", function (e) {
     var payload = e && e.payload || {};
     // The rebind command's mark (review #463 round-B Major 1 + round-C
@@ -5209,77 +4263,13 @@ function planCardHydrationKey(item) { return pinvouSharedweb().planCardHydration
     }
   });
 
-  function visibleUserTurnIndex() {
-    var count = state.chatItems.filter(function (item) { return item && item.type === "user"; }).length;
-    return Math.max(0, count - 1);
-  }
+  function visibleUserTurnIndex() { return pinvouSharedweb().visibleUserTurnIndex(); }
 
-  function latestOpenTimelineStart() {
-    var events = state.turnTimeline || [];
-    var completed = Object.create(null);
-    events.forEach(function (event) {
-      if (event && event.event === "assistant_done") completed[event.turn_id] = true;
-    });
-    for (var index = events.length - 1; index >= 0; index--) {
-      var event = events[index];
-      if (event && event.event === "user_start" && !completed[event.turn_id]) return event;
-    }
-    return null;
-  }
+  function latestOpenTimelineStart() { return pinvouSharedweb().latestOpenTimelineStart(); }
 
-  function recordTurnStarted() {
-    if (state.activeTurnTimelineId) return;
-    var timestamp = Date.now();
-    var turnIndex = visibleUserTurnIndex();
-    var existing = latestOpenTimelineStart();
-    if (existing && Math.abs(timestamp - Number(existing.timestamp || 0)) < 60000) {
-      existing.ui_turn_index = turnIndex;
-      state.activeTurnTimelineId = existing.turn_id;
-      return;
-    }
-    var turnId = "ui_" + String(state.activeSessionId || "session") + "_" + timestamp + "_" + turnIndex;
-    state.activeTurnTimelineId = turnId;
-    state.turnTimeline = (state.turnTimeline || []).concat([{
-      turn_id: turnId,
-      event: "user_start",
-      timestamp: timestamp,
-      ts: new Date(timestamp).toISOString(),
-      ui_turn_index: turnIndex,
-    }]);
-  }
+  function recordTurnStarted() { return pinvouSharedweb().recordTurnStarted(); }
 
-  function preserveInterruptedAssistantPresentation() {
-    var userItemIndex = -1;
-    var afterMessageIndex = -1;
-    var afterUserOrdinal = -1;
-    for (var index = 0; index < state.chatItems.length; index++) {
-      var candidate = state.chatItems[index];
-      if (!candidate || candidate.type !== "user") continue;
-      afterUserOrdinal += 1;
-      userItemIndex = index;
-      afterMessageIndex = -1;
-      if (Number.isFinite(Number(candidate.messageIndex))) {
-        afterMessageIndex = Number(candidate.messageIndex);
-      }
-    }
-    // 没有任何 user 气泡时无法锚定轮次;若把全部历史 assistant 项都标记为
-    // 仅展示,下次权威重载会在末尾追加整段历史的重复副本。此时放弃保留,
-    // 退化为修复前行为(重载后消失),但必须清空 pending 以免污染下一轮。
-    if (userItemIndex < 0) {
-      pendingAssistantText = "";
-      pendingAssistantBlocks = [];
-      return;
-    }
-    for (var itemIndex = userItemIndex + 1; itemIndex < state.chatItems.length; itemIndex++) {
-      var item = state.chatItems[itemIndex];
-      if (!item || item.type !== "assistant" || !item.html) continue;
-      item.interruptedDisplayOnly = true;
-      item.afterMessageIndex = afterMessageIndex;
-      item.afterUserOrdinal = afterUserOrdinal;
-    }
-    pendingAssistantText = "";
-    pendingAssistantBlocks = [];
-  }
+  function preserveInterruptedAssistantPresentation() { return pinvouSharedweb().preserveInterruptedAssistantPresentation(); }
 
   listen("chat:turn_started", function (e) { onSessionEvent(e, function () {
     state.busy = true;
@@ -5300,16 +4290,7 @@ function finalizeStreamingReasoning(index) { return pinvouSharedweb().finalizeSt
   // background streams cannot overwrite the visible working set.
   var STREAM_NOTIFY_MAX_WAIT_MS = 32;
   var pendingStreamNotifications = Object.create(null);
-  function cancelPendingStreamNotify(sid) {
-    if (!pendingStreamNotifications) return;
-    var pending = sid && pendingStreamNotifications[sid];
-    if (!pending) return;
-    if (pending.frame !== null && typeof window.cancelAnimationFrame === "function") {
-      window.cancelAnimationFrame(pending.frame);
-    }
-    if (pending.timer !== null && typeof clearTimeout === "function") clearTimeout(pending.timer);
-    delete pendingStreamNotifications[sid];
-  }
+  function cancelPendingStreamNotify(sid) { return pinvouSharedweb().cancelPendingStreamNotify(sid); }
   function scheduleStreamNotify(sid, firstDelta) {
     // A first delta publishes immediately so the visible bubble paints
     // without waiting for a frame. Inside a background working set the
@@ -5418,30 +4399,9 @@ function finalizeStreamingReasoning(index) { return pinvouSharedweb().finalizeSt
     currentStreamId = 0;
   }
 
-  function startReasoningBlock(index) {
-    var existing = streamingReasoningItem(index);
-    if (existing) return existing;
-    finalizeStreamingReasoning();
-    finalizeAssistantStreamBeforeReasoning();
-    var item = {
-      type: "reasoning",
-      text: "",
-      time: timeStr(),
-      streaming: true,
-      startedAt: Date.now(),
-      completedAt: null,
-      reasoningIndex: index,
-    };
-    addChatItem(item);
-    pendingAssistantBlocks.push({ type: "thinking", thinking: "" });
-    return item;
-  }
+  function startReasoningBlock(index) { return pinvouSharedweb().startReasoningBlock(index); }
 
-  function appendReasoningBlock(text) {
-    var last = pendingAssistantBlocks[pendingAssistantBlocks.length - 1];
-    if (last && last.type === "thinking") last.thinking += text;
-    else pendingAssistantBlocks.push({ type: "thinking", thinking: text });
-  }
+  function appendReasoningBlock(text) { return pinvouSharedweb().appendReasoningBlock(text); }
 
   listen("chat:reasoning_start", function (e) { onSessionEvent(e, function () {
     startReasoningBlock(reasoningEventIndex(e));
@@ -5518,21 +4478,7 @@ function isPresentArtifactTool(name) { return pinvouSharedweb().isPresentArtifac
   // 模型常给相对路径,直接拿 args.path 渲染会让卡片 path 是相对,点 Open 报「path must be
   // absolute」,且模型可能重试再 present 一次出双卡。取不到 abs_path 才回退原始 path。
   // 兼容两种结果格式:直接 payload {abs_path} / MCP content 数组 {content:[{text}]} 包一层。
-  function parseToolResultPayload(toolResultContent) {
-    try {
-      var raw = typeof toolResultContent === "string" ? toolResultContent : JSON.stringify(toolResultContent || {});
-      var obj = JSON.parse(raw);
-      if (obj && obj.content && obj.content[0] && typeof obj.content[0].text === "string") {
-        try {
-          var inner = JSON.parse(obj.content[0].text);
-          if (inner && typeof inner === "object") return inner;
-        } catch (_) {}
-      }
-      return obj;
-    } catch (_) {
-      return null;
-    }
-  }
+  function parseToolResultPayload(toolResultContent) { return pinvouSharedweb().parseToolResultPayload(toolResultContent); }
 function artifactPathFromToolOutput(toolResultContent) { return pinvouSharedweb().artifactPathFromToolOutput(toolResultContent); }
 function shouldUseToolOutputAsArtifact(name) { return pinvouSharedweb().shouldUseToolOutputAsArtifact(name); }
 function presentArtifactAbsPath(toolResultContent, fallbackPath) { return pinvouSharedweb().presentArtifactAbsPath(toolResultContent, fallbackPath); }
@@ -6178,21 +5124,6 @@ function adjustCounters(sp, v) { return pinvouSharedweb().adjustCounters(sp, v);
     return true;
   }
 
-  function appQueueSnapshot() {
-    var running = 0;
-    var waiting = state.queued ? state.queued.length : 0;
-    var busyMap = {};
-    for (var id in sessionStates) {
-      if (!Object.prototype.hasOwnProperty.call(sessionStates, id)) continue;
-      if (id === state.activeSessionId) continue;
-      var buf = sessionStates[id] || {};
-      if (buf.busy) busyMap[id] = true;
-      if (Array.isArray(buf.queued)) waiting += buf.queued.length;
-    }
-    if (state.activeSessionId && state.busy) busyMap[state.activeSessionId] = true;
-    running = Object.keys(busyMap).length;
-    return { running: running, waiting: waiting };
-  }
 
   // MonitorView only consumes state.monitor._fmt (plus one level of vllmRaw
   // nesting), so shallow equality means display equivalence. The poll runs
@@ -6237,109 +5168,7 @@ function adjustCounters(sp, v) { return pinvouSharedweb().adjustCounters(sp, v);
   }
 
   // eslint-disable-next-line sonarjs/cognitive-complexity -- legacy bridge; refactor tracked separately
-  async function pollMonitor() {
-    if (monitorPollInFlight) return;
-    monitorPollInFlight = true;
-    try {
-      var snap = await invoke("get_monitor_snapshot");
-      // The previous round errored → this round must notify once so the
-      // "read failed" banner switches back to the normal panel.
-      const hadMonitorError = !!state.monitorError;
-      state.monitorError = null;
-      // GPU util sliding window
-      if (snap.gpu) {
-        gpuUtilHistory.push(snap.gpu.utilization_pct);
-        if (gpuUtilHistory.length > 5) gpuUtilHistory.shift();
-        snap.gpu._utilMax = Math.max.apply(null, [0].concat(gpuUtilHistory));
-      }
-      // 监控页「后 4 项」累计指标：TTFT/TPS/tokens 来自 app 侧自测(snap.self_perf,
-      // 任何后端都有);KV 混合(本地 vLLM prefix_cache 优先,否则 usage 口径)。
-      // 按「清除统计」基准点换算成区间值后再格式化。
-      var sadj = adjustCounters(snap.self_perf, snap.vllm);
-      // KV 显示值:本地 vLLM 的 /metrics prefix_cache 优先,拿不到用 usage cache 口径(云端)。
-      var kvShown = sadj ? (sadj.vllmKvPct != null ? sadj.vllmKvPct
-        : (sadj.selfKvPct != null ? sadj.selfKvPct : null)) : null;
-      // Format values for display
-      var vllm = snap.vllm || null;
-      var metricsApplicable = vllm ? vllm.metrics_applicable !== false : false;
-      var metricNotApplicableText = bt("metricNotApplicable");
-      var metricUnavailableText = bt("metricUnavailable");
-      var diagnostic = vllm && vllm.diagnostic ? vllm.diagnostic : null;
-      var metricDiagnostic = vllm && vllm.metric_diagnostics && vllm.metric_diagnostics.length
-        ? vllm.metric_diagnostics[0] : null;
-      var targetKind = vllm && vllm.target_kind ? vllm.target_kind : "invalid";
-      var targetKindLabel = targetKind === "remote" ? bt("targetKindRemote") : (targetKind === "local" ? bt("targetKindLocal") : bt("targetKindInvalid"));
-      var vllmDisplayModel = vllm ? (vllm.model || vllm.configured_model || "—") : "—";
-      var healthStatus = vllm && vllm.health_status ? vllm.health_status : (vllm ? "verified" : "offline");
-      var appQueue = appQueueSnapshot();
-      snap._fmt = {
-        gpuName: snap.gpu ? snap.gpu.name : bt("gpuUnavailable"),
-        gpuVramPct: snap.gpu && snap.gpu.vram_total_mib > 0
-          ? Math.round(snap.gpu.vram_used_mib / snap.gpu.vram_total_mib * 100) : 0,
-        gpuUtilPct: snap.gpu ? snap.gpu._utilMax : 0,
-        processorUtilPct: snap.gpu && snap.gpu.processor_utilization_pct != null ? snap.gpu.processor_utilization_pct : 0,
-        gpuSharedMemory: snap.gpu && snap.gpu.shared_memory_used_mib != null ? fmtMiB(snap.gpu.shared_memory_used_mib) : "—",
-        gpuTemp: snap.gpu && snap.gpu.temperature_c != null ? snap.gpu.temperature_c + "°C" : null,
-        gpuPower: snap.gpu && snap.gpu.power_w != null ? snap.gpu.power_w.toFixed(1) + " W" : null,
-        gpuAvailable: !!snap.gpu,
-        gpuHasVram: !!(snap.gpu && snap.gpu.vram_total_mib > 0),
-        ramTotal: snap.ram ? fmtKiB(snap.ram.total_kib) : "—",
-        ramPct: snap.ram && snap.ram.total_kib > 0 ? Math.round(snap.ram.used_kib / snap.ram.total_kib * 100) : 0,
-        ramUsedGiB: snap.ram ? (snap.ram.used_kib / 1024 / 1024).toFixed(1) : "—",
-        swapUsed: snap.ram ? fmtKiB(snap.ram.swap_used_kib) : "—",
-        swapTotal: snap.ram ? fmtKiB(snap.ram.swap_total_kib) : "—",
-        swapPct: snap.ram && snap.ram.swap_total_kib > 0 ? Math.round(snap.ram.swap_used_kib / snap.ram.swap_total_kib * 100) : 0,
-        vllmModel: vllmDisplayModel,
-        vllmHealthStatus: healthStatus,
-        vllmOnline: vllm ? (healthStatus === "verified" && (vllm.status === "ready" || vllm.status === "busy")) : false,
-        // 云端(remote)不做健康探测(无 auth 的 /v1/models 必 401)→ 不显示 OFFLINE。
-        // 暴露原始 kind 供前端判定(别比本地化 label)。
-        vllmIsRemote: targetKind === "remote",
-        vllmMaxLen: vllm ? (metricsApplicable ? (vllm.max_model_len || "—") : (vllm.max_model_len || metricUnavailableText)) : "—",
-        // 本地推理引擎(target_kind=local)且探测窗口 < 128k(131072):监控卡给告警。
-        // 云端(remote)/v1/models 不返回 max_model_len,自然不触发。传原始值供前端拼文案。
-        vllmQueue: appQueue.running + " / " + appQueue.waiting,
-        // TTFT/TPS/tokens 一律用 app 侧自测——任何后端(vLLM/LM Studio/Ollama/云端)都有值,
-        // 不再受 metricsApplicable 门控。KV 见 kvShown(本地 prefix_cache / 云端 usage 口径),
-        // 拿不到则 "—"。队列仍归 vLLM(见 vllmQueue)。
-        vllmKv: kvShown != null ? kvShown.toFixed(1) + "%" : "0%",
-        vllmKvHasData: kvShown != null,
-        vllmTtft: sadj && sadj.ttft_count > 0
-          ? (sadj.ttft_sum_s / sadj.ttft_count).toFixed(2) + " s" : "—",
-        vllmTps: sadj && sadj.tps_time_s > 0
-          ? (sadj.tps_tokens / sadj.tps_time_s).toFixed(1) + " tok/s" : "—",
-        vllmTokTotal: sadj
-          ? fmtTok(sadj.gen) + " / " + fmtTok(sadj.prompt) : "—",
-        // 区间原始数值（已扣基准），供前端「长按清除」的数字归零插值动画用。
-        vllmRaw: sadj ? {
-          kvPct: kvShown,
-          ttftS: sadj.ttft_count > 0 ? sadj.ttft_sum_s / sadj.ttft_count : null,
-          tps: sadj.tps_time_s > 0 ? sadj.tps_tokens / sadj.tps_time_s : null,
-          gen: sadj.gen != null ? sadj.gen : null,
-          prompt: sadj.prompt != null ? sadj.prompt : null,
-        } : null,
-        appVersion: snap.app ? snap.app.pinvou3_version + bt("betaTag") : "—",
-        uptime: snap.app ? fmtDuration(snap.app.session_uptime_secs) : "—",
-        updatedAt: snap.generated_at_ms ? new Date(snap.generated_at_ms).toLocaleTimeString() : "—",
-      };
-      if (snap.vllm && snap.vllm.max_model_len) {
-        state.tokens.max = snap.vllm.max_model_len;
-      }
-      // Display-equivalent snapshots neither overwrite state.monitor nor
-      // notify (must send on the first frame or after an errored round).
-      const prevFmt = state.monitor && state.monitor._fmt;
-      if (hadMonitorError || !prevFmt || !monitorFmtEqual(prevFmt, snap._fmt)) {
-        state.monitor = snap;
-        notify();
-      }
-    } catch (e) {
-      state.monitorError = e && e.message ? e.message : String(e || "monitor poll failed");
-      console.warn("monitor poll failed", e);
-      notify();
-    } finally {
-      monitorPollInFlight = false;
-    }
-  }
+  async function pollMonitor() { return pinvouSharedweb().pollMonitor(); }
 
 function startMonitorPolling() { return pinvouSharedweb().startMonitorPolling(); }
 function stopMonitorPolling() { return pinvouSharedweb().stopMonitorPolling(); }
@@ -6474,12 +5303,8 @@ function enqueueSettingsWrite(write) { return pinvouSharedweb().enqueueSettingsW
       }
     });
   }
-  async function submitFeedback(request) {
-    return await invoke("submit_feedback", { request: request });
-  }
-  async function discoverLocalVllm(request) {
-    return await invoke("discover_local_vllm", { request: request || null });
-  }
+  async function submitFeedback(request) { return pinvouSharedweb().submitFeedback(request); }
+  async function discoverLocalVllm(request) { return pinvouSharedweb().discoverLocalVllm(request); }
 
   // 当前有效模型的图片输入能力(普通会话选图即时警告用);后端按会话模型绑定解析。
   async function getEffectiveModelConfig(sessionId) {
@@ -6487,11 +5312,7 @@ function enqueueSettingsWrite(write) { return pinvouSharedweb().enqueueSettingsW
       sessionId: arguments.length ? (sessionId || null) : (state.activeSessionId || null),
     });
   }
-  async function getImageInputCapability(sessionId) {
-    return await invoke("get_image_input_capability", {
-      sessionId: arguments.length ? (sessionId || null) : (state.activeSessionId || null),
-    });
-  }
+  async function getImageInputCapability(...args) { return pinvouSharedweb().getImageInputCapability(...args); }
 
   // ── 模型列表(「添加模型」方案)─────────────────────────────────
   // 整表覆盖加载：保存/删除/切换链式 loadModels 并发时旧列表不得覆盖新列表
@@ -6616,22 +5437,7 @@ async function testImageInputCapability(model, baseUrl, apiKey, modelId) { retur
 
   // ── Super permission ─────────────────────────────────────────────
 async function refreshSuperPerm() { return pinvouSharedweb().refreshSuperPerm(); }
-  async function toggleSuperPerm() {
-    var target = !state.superPermEnabled;
-    try {
-      state.superPermEnabled = !!(await invoke("set_super_permission", { enabled: target }));
-      addSystemItem(state.superPermEnabled
-        ? bt("superOn")
-        : bt("superOff"));
-      notify();
-      return { ok: state.superPermEnabled === target, enabled: state.superPermEnabled };
-    } catch (e) {
-      addSystemItem("⚠️ " + e);
-      try { state.superPermEnabled = !!(await invoke("get_super_permission_status")); } catch (e2) {}
-      notify();
-      return { ok: false, enabled: state.superPermEnabled, error: String(e) };
-    }
-  }
+  async function toggleSuperPerm() { return pinvouSharedweb().toggleSuperPerm(); }
 
   // ── Mode state ───────────────────────────────────────────────────
   // 会话级读取：await 挂起期间用户可能已切走，响应返回后必须校验发起时的
@@ -6732,38 +5538,9 @@ function addSystemItemFor(sid, text) { return pinvouSharedweb().addSystemItemFor
 function patchItemByIdFor(sid, id, patch) { return pinvouSharedweb().patchItemByIdFor(sid, id, patch); }
 
 
-
-
 function handleMemoryWrite(payload) { return pinvouSharedweb().handleMemoryWrite(payload); }
 
-  function applyMemoryOverview(overview) {
-    var previous = state.memory || {};
-    var sourceStates = overview && overview.sources || {};
-    // stateKey:后端 source 名与前端 state 字段名通常一致,但 snapshot 源对应
-    // state.memory.snapshot_path,两者不同;保留上次值时按 state 字段名查找。
-    function sourceValue(source, value, fallback, stateKey) {
-      var status = sourceStates[source];
-      if (status && status.available === false) {
-        var key = stateKey || source;
-        return Object.prototype.hasOwnProperty.call(previous, key) ? previous[key] : fallback;
-      }
-      return value;
-    }
-    state.memory = {
-      loading: false,
-      error: null,
-      profile: sourceValue("profile", overview && overview.profile || null, null),
-      preferences: sourceValue("preferences", overview && Array.isArray(overview.preferences) ? overview.preferences : [], []),
-      work_context: sourceValue("work_context", overview && Array.isArray(overview.work_context) ? overview.work_context : [], []),
-      current_focus: sourceValue("current_focus", overview && Array.isArray(overview.current_focus) ? overview.current_focus : [], []),
-      recent_activity: sourceValue("recent_activity", overview && Array.isArray(overview.recent_activity) ? overview.recent_activity : [], []),
-      pending: sourceValue("pending", overview && Array.isArray(overview.pending) ? overview.pending : [], []),
-      runtime: sourceValue("runtime", overview && overview.runtime || null, null),
-      snapshot_path: sourceValue("snapshot", overview && overview.snapshot_path || "", "", "snapshot_path"),
-      warnings: orderedMemoryWarnings(overview && overview.warnings),
-      sources: sourceStates,
-    };
-  }
+  function applyMemoryOverview(overview) { return pinvouSharedweb().applyMemoryOverview(overview); }
 function orderedMemoryWarnings(warnings) { return pinvouSharedweb().orderedMemoryWarnings(warnings); }
 function applyMemoryProfileState(result) { return pinvouSharedweb().applyMemoryProfileState(result); }
 function applyMemoryWriteState(result, update) { return pinvouSharedweb().applyMemoryWriteState(result, update); }
@@ -6776,27 +5553,7 @@ function rehydratePendingMemoryCandidates(overview) { return pinvouSharedweb().r
   // 响应不得覆盖当前显示(尤其 runtime 属于别的会话)，也不得把候选卡
   // rehydrate 进当前对话流。
   var memoryOverviewSeq = 0;
-  async function loadMemoryOverview(options) {
-    if (!invoke) return null;
-    options = options || {};
-    var sid = state.activeSessionId;
-    var seq = ++memoryOverviewSeq;
-    state.memory = Object.assign({}, state.memory, { loading: true, error: null });
-    notify();
-    try {
-      var overview = await invoke("get_memory_overview", { sessionId: state.activeSessionId });
-      if (sid !== state.activeSessionId || seq !== memoryOverviewSeq) return discardStaleLoad(seq);
-      applyMemoryOverview(overview);
-      if (options.rehydratePending) rehydratePendingMemoryCandidates(overview);
-      notify();
-      return overview;
-    } catch (e) {
-      if (sid !== state.activeSessionId || seq !== memoryOverviewSeq) return discardStaleLoad(seq);
-      state.memory = Object.assign({}, state.memory, { loading: false, error: String(e) });
-      notify();
-      return null;
-    }
-  }
+  async function loadMemoryOverview(options) { return pinvouSharedweb().loadMemoryOverview(options); }
   // 守卫命中的善后：序号已被更新加载接管时由它负责收尾 loading；仅会话
   // 变化、无人接管时(如切草稿不续发加载)必须自己清掉 loading，否则面板
   // 永远停在"同步中"(与 tauri 对齐，审计补充)。
@@ -6820,64 +5577,8 @@ function discardStaleLoad(seq) { return pinvouSharedweb().discardStaleLoad(seq);
     }
   }
 
-  async function updateMemoryItem(kind, id, patch) {
-    if (!id || !invoke) return null;
-    var sid = state.activeSessionId; // 同 saveMemoryProfilePatch：切走后不写 B 的面板(与 tauri 对齐，审计补充)
-    try {
-      var command = kind === "preference" ? "update_memory_preference"
-        : kind === "work_context" ? "update_work_context_memory"
-        : (kind === "current_focus" || kind === "recent_activity") ? "update_timed_memory"
-        : null;
-      if (!command) return null;
-      var args = { id: id, patch: patch || {}, sessionId: state.activeSessionId };
-      if (command === "update_timed_memory") args.kind = kind;
-      var res = await invoke(command, args);
-      if (sid === state.activeSessionId) {
-        applyMemoryWriteState(res, function (next, value) {
-          if (!value) return;
-          var source = kind === "preference" ? "preferences" : kind;
-          next[source] = upsertMemoryValue(next[source], value, id);
-        });
-      }
-      await loadMemoryOverview();
-      return res && res.value;
-    } catch (e) {
-      if (sid === state.activeSessionId) {
-        state.memory = Object.assign({}, state.memory, { error: String(e) });
-        notify();
-      }
-      throw e;
-    }
-  }
-  async function deleteMemoryItem(kind, id) {
-    if (!id || !invoke) return false;
-    var sid = state.activeSessionId; // 同 saveMemoryProfilePatch：切走后不写 B 的面板(与 tauri 对齐，审计补充)
-    try {
-      var command = kind === "preference" ? "delete_memory_preference"
-        : kind === "work_context" ? "delete_work_context_memory"
-        : (kind === "current_focus" || kind === "recent_activity") ? "delete_timed_memory"
-        : null;
-      if (!command) return false;
-      var args = { id: id, sessionId: state.activeSessionId };
-      if (command === "delete_timed_memory") args.kind = kind;
-      var res = await invoke(command, args);
-      if (sid === state.activeSessionId) {
-        applyMemoryWriteState(res, function (next, changed) {
-          if (!changed) return;
-          var source = kind === "preference" ? "preferences" : kind;
-          next[source] = (next[source] || []).filter(function (item) { return item.id !== id; });
-        });
-      }
-      await loadMemoryOverview();
-      return !!(res && res.value);
-    } catch (e) {
-      if (sid === state.activeSessionId) {
-        state.memory = Object.assign({}, state.memory, { error: String(e) });
-        notify();
-      }
-      throw e;
-    }
-  }
+  async function updateMemoryItem(kind, id, patch) { return pinvouSharedweb().updateMemoryItem(kind, id, patch); }
+  async function deleteMemoryItem(kind, id) { return pinvouSharedweb().deleteMemoryItem(kind, id); }
 function resolveMemoryCandidate(command, args, chatItemId, statusLabel, errorKey) { return pinvouSharedweb().resolveMemoryCandidate(command, args, chatItemId, statusLabel, errorKey); }
   async function confirmMemoryCandidate(memoryId, chatItemId) {
     return resolveMemoryCandidate("confirm_pending_memory", { id: memoryId, sessionId: state.activeSessionId }, chatItemId, "已记住", "memoryWriteFailed");
@@ -7234,18 +5935,6 @@ async function submitUserInput(itemId, toolCallId, answers, questions) { return 
 function openContainingFolder(path) { return pinvouSharedweb().openContainingFolder(path); }
 function revealSessionFolder(sessionId) { return pinvouSharedweb().revealSessionFolder(sessionId); }
 function openScheduledTaskFolder(automationId) { return pinvouSharedweb().openScheduledTaskFolder(automationId); }
-  function openInSystem(path) {
-    if (IS_WEB) return downloadArtifact(path, null);
-    return invoke("open_in_system", { path: path }).catch(function (e) { addSystemItem(bt("openFailed") + e); });
-  }
-  // 仅放白名单 URL (metaso.cn / open.bochaai.com),后端 open_external_url 强制校验。
-  function openExternalUrl(url) {
-    if (IS_WEB) {
-      var opened = window.open(url, "_blank", "noopener,noreferrer");
-      return Promise.resolve(!!opened);
-    }
-    return invoke("open_external_url", { url: url }).catch(function (e) { addSystemItem(bt("openFailed") + e); });
-  }
   function openUserExternalUrl(url) {
     try {
       var rawUrl = String(url || "").trim();
@@ -7270,7 +5959,7 @@ function sessionTitleById(sid) { return pinvouSharedweb().sessionTitleById(sid);
 function currentMemoryArtifacts() { return pinvouSharedweb().currentMemoryArtifacts(); }
   // 跨会话产出物索引:磁盘 session JSON 为主,再合并当前内存工作集。
   // 新产物在 chat:done/save_session_artifacts 前也能立刻出现在「产出物」一级入口。
-  // Existing desktop command capabilities choose v2 or the legacy array wire.
+
   async function listDeliverableIndex() { return pinvouSharedweb().listDeliverableIndex(); }
   // 外部打开产物：HTML 走 Tauri 独立窗口（绕沙箱），其他走系统应用。
   // sessionId = 卡片携带的产物所属 session。后端 resolve_artifact_path 用它(而非全局
@@ -7620,12 +6309,6 @@ function conversationAttachmentArgs(reference) { return pinvouSharedweb().conver
     releaseAttachmentOnDesktop(removed);
     notify();
   }
-  function clearAttachments() {
-    var removed = state.attachments.slice();
-    state.attachments = [];
-    removed.forEach(function (attachment) { finishAttachmentTelemetry(attachment, false, "user_cancelled"); });
-    removed.forEach(releaseAttachmentOnDesktop);
-  }
   // 打开系统文件选择器并摄入为附件
 async function pickAndAttach() { return pinvouSharedweb().pickAndAttach(); }
 
@@ -7712,61 +6395,7 @@ async function deletePersona(personaId) { return pinvouSharedweb().deletePersona
 function personaName(p) { return pinvouSharedweb().personaName(p); }
   // 记一条卡牌事件到时间线 sidecar(pos=当前 messages 数),并落盘。重载历史时按 pos 插回。
 function recordPersonaEvent(ev) { return pinvouSharedweb().recordPersonaEvent(ev); }
-  async function equipPersona(personaId) {
-    if (!state.activeSessionId) {
-      // 草稿态加卡 → 先物化 session(lazy session)。用返回值判空：切走场景
-      // ensureSession 返回 null 但 activeSessionId 非空，会把卡加进新会话。
-      var materialized = await ensureSession();
-      if (!materialized) return; // 物化失败/切走,放弃
-    }
-    // 入口捕获触发会话：await 期间用户可能切走，UI 写入不得落进别的会话
-    // （错误会话被重命名/插卡是持久化污染，不可自愈）。后端已按发起会话
-    // 定向；切走后放弃前端播报，挂件靠 syncActivePersona 恢复（与 tauri
-    // personas.js 对齐，审计）。
-    var sid = state.activeSessionId;
-    try {
-      var card = await invoke("equip_persona", { sessionId: state.activeSessionId, personaId: personaId });
-      if (deletedPersonaIds.has(personaId)) return null;
-      lastEquippedSid = sid; // 成功加持的目标会话(即使已切走)：供紧随其后的引导卡定向(与 tauri 对齐，审计补充)
-      if (sid !== state.activeSessionId) return card; // 已切走：不写当前显示
-      // 标题仍是默认占位(三语哨兵,见 isDefaultChatTitle)→ 用卡牌名命名(无论草稿态物化还是遗留空会话;
-      // 用户已主动改名 / 已被首条消息命名的会话不动)。决策:卡牌优先于首条消息。
-      var m = state.sessions.find(function (s) { return s.id === sid; });
-      // 标题还是默认值 / 仍是卡牌占位(换卡场景)→ 用(新)卡牌名命名,并标记为占位。
-      // 占位名会被首条用户消息覆盖(见 persistMessages*),让同卡会话靠对话内容区分。
-      if (m && (isDefaultChatTitle(m.title) || personaPlaceholderTitles[sid])) {
-        var newTitle = personaName(card);
-        if (newTitle) {
-          try { await invoke("rename_session", { id: sid, title: newTitle }); } catch (_) {}
-          if (sid !== state.activeSessionId) return card; // rename 挂起期间切走:放弃后续 UI 写入(审计补充)
-          m.title = newTitle;
-          personaPlaceholderTitles[sid] = true;
-        }
-      }
-      // 同 session 换了一张不同的卡 → 先弹一条"已卸下旧专家",再弹新加持。
-      // 旧专家在写点复核而非入口捕获：同会话快速连续换卡时,入口值可能已被
-      // 上一次 equip 的权威写覆盖,陈旧值会播报错误的"已卸下"(与 tauri 对齐,二审补充)。
-      if (deletedPersonaIds.has(personaId)) return null;
-      var prev = state.activePersona;
-      if (prev && prev.id !== card.id) {
-        addChatItem({ type: "system", text: bt("personaUnequipped") + personaName(prev), time: timeStr() });
-        recordPersonaEvent({ kind: "unequip", name: personaName(prev) });
-      }
-      personaSyncSeq++; // 权威写前 bump：作废在途 syncActivePersona 的旧快照(与 tauri 对齐，审计补充)
-      state.activePersona = card;
-      addChatItem({ type: "persona_equip", card: card, time: timeStr() });
-      recordPersonaEvent({ kind: "equip", card: card });
-      notify();
-      return card;
-    } catch (e) {
-      // 失败也守住归属：失败气泡只落发起会话,不得插进 await 窗口内切到的
-      // 会话(addSystemItem 随消息流持久化);同时作废 lastEquippedSid——失败
-      // equip 后紧随的引导卡不得回退定向到历史成功 equip 的无关会话(与 tauri 对齐,二审补充)。
-      lastEquippedSid = null;
-      if (sid === state.activeSessionId) addSystemItem(bt("equipFailed") + e);
-      return null;
-    }
-  }
+  async function equipPersona(personaId) { return pinvouSharedweb().equipPersona(personaId); }
   // 摘下当前 session 的专家面具。
   async function unequipPersona() {
     if (!state.activeSessionId) return;
@@ -8034,12 +6663,7 @@ async function checkDependencies() { return pinvouSharedweb().checkDependencies(
     return Math.max(0, Math.min(86400000, Date.now() - Number(session && session.startedAt || Date.now())));
   }
 
-  function voiceFlowError(category, stage, message) {
-    var error = new Error(message);
-    error.category = category;
-    error.stage = stage;
-    return error;
-  }
+  function voiceFlowError(category, stage, message) { return pinvouSharedweb().voiceFlowError(category, stage, message); }
 
   function voiceTelemetryErrorCategory(category) {
     if (category === "permission_denied") return "permission_denied";
@@ -8055,32 +6679,9 @@ async function checkDependencies() { return pinvouSharedweb().checkDependencies(
   // share this record; dismissing a notice cannot revive or cancel a submitted operation.
   var voiceOperations = new Map();
 
-  function rememberVoiceOperation(session) {
-    if (!session.sessionId && session.ownerKind === "chat") {
-      session.draftEpoch = Number(state.draftEpoch || 0);
-    }
-    for (var entry of voiceOperations) {
-      var item = entry[1];
-      // Terminal entries are done; a dismissed entry stays adoptable for a
-      // manual retry until the next recording starts, then it is swept —
-      // a never-sent dismissal must not leak its audio chunks forever.
-      if (item.telemetryTerminal || (item.dismissed && !item.pendingSubmission)) {
-        voiceOperations.delete(entry[0]);
-      }
-    }
-    voiceOperations.set(session.operationId, session);
-  }
+  function rememberVoiceOperation(session) { return pinvouSharedweb().rememberVoiceOperation(session); }
 
-  function getVoiceOperationId(sessionId, ownerKind) {
-    var candidates = Array.from(voiceOperations.values()).reverse();
-    var operation = candidates.find(function (item) {
-      return !item.telemetryTerminal && !item.pendingSubmission && item.voiceResultReady
-        && (item.sessionId || null) === (sessionId || null)
-        && (item.sessionId || item.ownerKind !== "chat" || item.draftEpoch === Number(state.draftEpoch || 0))
-        && item.ownerKind === (ownerKind || "chat");
-    });
-    return operation ? operation.operationId : null;
-  }
+  function getVoiceOperationId(sessionId, ownerKind) { return pinvouSharedweb().getVoiceOperationId(sessionId, ownerKind); }
 
   // Whether the composer's current voice operation is parked on an in-flight
   // send admission. The composer hook skips its identity-change auto-cancel
@@ -8088,10 +6689,7 @@ async function checkDependencies() { return pinvouSharedweb().checkDependencies(
   // identity mid-send, and cancelling here would only kill the completion
   // notice of a message that still lands. A context switch before the park
   // still cancels — that is the wrong-session auto-send protection.
-  function hasVoiceSubmissionPending() {
-    var operation = voiceOperations.get((state.voiceInput || {}).operationId);
-    return !!(operation && operation.pendingSubmission);
-  }
+  function hasVoiceSubmissionPending() { return pinvouSharedweb().hasVoiceSubmissionPending(); }
 
   function beginVoiceSubmission(operationId, sessionId) {
     var operation = voiceOperations.get(operationId);
@@ -8103,9 +6701,7 @@ async function checkDependencies() { return pinvouSharedweb().checkDependencies(
     }
   }
 
-  function voiceOperationSessionId(operationId) {
-    return voiceOperations.get(operationId)?.sessionId || null;
-  }
+  function voiceOperationSessionId(operationId) { return pinvouSharedweb().voiceOperationSessionId(operationId); }
 
   function completeVoiceSubmission(operationId, sessionId, accepted) {
     var operation = voiceOperations.get(operationId);
@@ -8142,13 +6738,7 @@ async function checkDependencies() { return pinvouSharedweb().checkDependencies(
   // recording-time epoch. Restricted to unsubmitted draft operations (no
   // session binding, chat kind), mirroring the desktop lane's rollback and
   // draft-return rebinds; terminal operations never rebind.
-  function rebindVoiceOperationToDraft(operationId, toEpoch) {
-    var operation = voiceOperations.get(operationId);
-    if (!operation || operation.telemetryTerminal || operation.pendingSubmission
-      || operation.sessionId || operation.ownerKind !== "chat") return false;
-    operation.draftEpoch = Number(toEpoch);
-    return true;
-  }
+  function rebindVoiceOperationToDraft(operationId, toEpoch) { return pinvouSharedweb().rebindVoiceOperationToDraft(operationId, toEpoch); }
 
   function dismissVoiceInput() {
     // Applying an edit or dismissing a finished notice retains the draft's provenance.
@@ -8334,33 +6924,7 @@ function mergeFloatChunks(chunks) { return pinvouSharedweb().mergeFloatChunks(ch
 
 function downsamplePcm(samples, sourceRate, targetRate) { return pinvouSharedweb().downsamplePcm(samples, sourceRate, targetRate); }
 
-  function encodeWav(samples, sampleRate) {
-    var dataSize = samples.length * 2;
-    var buffer = new ArrayBuffer(44 + dataSize);
-    var view = new DataView(buffer);
-    function writeString(offset, value) {
-      for (var i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i));
-    }
-    writeString(0, "RIFF");
-    view.setUint32(4, 36 + dataSize, true);
-    writeString(8, "WAVE");
-    writeString(12, "fmt ");
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
-    view.setUint16(22, 1, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * 2, true);
-    view.setUint16(32, 2, true);
-    view.setUint16(34, 16, true);
-    writeString(36, "data");
-    view.setUint32(40, dataSize, true);
-    var offset = 44;
-    for (var i = 0; i < samples.length; i++, offset += 2) {
-      var s = Math.max(-1, Math.min(1, samples[i]));
-      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-    }
-    return buffer;
-  }
+  function encodeWav(samples, sampleRate) { return pinvouSharedweb().encodeWav(samples, sampleRate); }
 
   async function finishVoiceInput(cancelled, timedOut) {
     var session = activeVoiceInput;
@@ -9038,17 +7602,14 @@ function appendVoiceText(base, text) { return pinvouSharedweb().appendVoiceText(
     openContainingFolder: openContainingFolder,
     revealSessionFolder: revealSessionFolder,
     openScheduledTaskFolder: openScheduledTaskFolder,
-    openInSystem: openInSystem,
     openArtifactExternal: openArtifactExternal,
     downloadArtifact: downloadArtifact,
     listDeliverableIndex: listDeliverableIndex,
-    openExternalUrl: openExternalUrl,
     openUserExternalUrl: openUserExternalUrl,
     // 附件
     addAttachmentByPath: addAttachmentByPath,
     addPasteImage: addPasteImage,
     removeAttachment: removeAttachment,
-    clearAttachments: clearAttachments,
     pickAndAttach: pickAndAttach,
     uploadDeviceFiles: uploadDeviceFiles,
     resolveConversationAttachment: resolveConversationAttachment,
