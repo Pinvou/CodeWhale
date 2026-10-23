@@ -3,11 +3,21 @@
  *
  * 背景：客户现场的 UI「冻结」只有主线程栈和后端日志，分不清事件投递、JS
  * 调度、React 提交、最终呈现哪一段停了。这里在最热的流式路径上打四个时间
- * 戳，回答「卡在哪段」。设计约束（不可违反）：
+ * 戳。设计约束（不可违反）：
  *   - **无内容**：只记 session id、序号和时间差，绝不接触消息文本；
  *   - **有界**：环形缓冲只留最近若干个周期，全量数据不出内存；
  *   - **异常触发上报**：仅当段间隔超过阈值时才推一条记录到
  *     authority-sync 诊断流（该流本身再有界落盘）。
+ *
+ * 实现边界（r2 评审 P2-3/P2-4，正文与这里保持一致，勿超出边界表述）：
+ *   - 独立上报的段差只有两段：recv→dispatch、dispatch→frame。t_sched 仅在
+ *     同步直发路径补齐（不差量、不独立上报）；React 提交与最终呈现合并在
+ *     dispatch→frame 一段里，测不出二者之间的停顿。
+ *   - 后台会话（合并帧 publish 时非活跃 sid）的 publish 不打派发标记，
+ *     其 recv→dispatch 段当前不量（纯失测、不产假报）；会话激活的真实发布
+ *     路径同样未打标记。后台流式卡顿定位靠切回前台后的周期。
+ *   - 长任务阻塞期间「未派发即被取代」的周期只有恰处已派发帧未回相位才
+ *     补报一条（begin 的 supersede 补报），其余静默收尾。
  */
 (function (root) {
   "use strict";
@@ -83,6 +93,10 @@
 
   function markFrame(entry) {
     return function () {
+      // 无 cancelAnimationFrame 的老 webview 里，迟到于收尾的补触发回调仍会
+      // 进来（句柄没被真正取消）——此时条目已完结，再写 t_frame 只会污染
+      // snapshot()（上报不受影响，finalize 幂等），守一道。
+      if (entry.finalized) return;
       entry.rafHandle = null;
       entry.t_frame = now();
       finalize(entry);

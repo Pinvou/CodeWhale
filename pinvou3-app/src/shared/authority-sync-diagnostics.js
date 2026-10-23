@@ -21,7 +21,7 @@
     "local_turn_admission_failed", "local_turn_admitted", "local_turn_claimed",
     "reconcile_attempt_failed", "reconcile_attempt_rejected", "reconcile_deferred_busy",
     "reconcile_exhausted", "reconcile_joined_inflight", "reconcile_started",
-    "reconcile_succeeded", "remote_sync_blocked_action", "render_stage_stall", "remote_turn_marked",
+    "reconcile_succeeded", "remote_sync_blocked_action", "remote_turn_marked", "render_stage_stall",
     "session_download_capability_wait_failed", "session_download_cleanup",
     "transcript_committed_event_received",
   ]);
