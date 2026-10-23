@@ -194,7 +194,7 @@ max_admitted = 12
 
 ## 对外公布的 agent 工具字段（v0.9.9）
 
-面向模型的 `agent` 工具 schema 正好公布 **14 个字段**（#5324、#5123；T7 后来加入 `profile_query`，即 roster 的宿主 profile 关键字过滤；`timeout_secs` 因 `action=wait` 重新公布——见下文）：
+面向模型的 `agent` 工具 schema 正好公布 **14 个字段**（#5324、#5123；T7 后来加入 `profile_query`，即 roster 的宿主 profile 关键字过滤；`timeout_secs` 为 `action=wait` 重新公布——见下文）：
 
 `action`、`prompt`、`type`、`profile`、`profile_query`、`name`、`agent_id`、`message`、`until`、`timeout_secs`、`detached`、`worktree`、`write_roots`、`resume_from`
 
@@ -211,6 +211,12 @@ max_admitted = 12
 - 生命周期附加：`reason`（interrupt）、`include_archived`（status）以及 `token_budget`；wait 别名 `timeout`（与 `timeout_secs` 同义）
 
 权限绝不会变宽：#5426/#5435 的遏制钳制不变——`write_authority` 移到角色/profile，委派只能收窄继承的权限。
+
+### 会话名与并行只读扇出
+
+传给 `action=start` 的 `name` 只在其持有者仍然存活时被保留：运行中，或已中断（挂起，checkpoint 未必能被 `followup` 唤醒）。子代理一旦落定（completed、failed、cancelled、budget-exhausted）即释放名字，因此同名的"取消后重试"可以直接成功，不必另造后缀。若一个已落定与一个存活的子代理共用同名，该名字解析到存活的那一个；当只剩已落定的持有者时，解析到最近一次启动的那一个。从更早引导水合来的记录对解析同样是历史——绝不会盖过当前引导的子代理——因此裸名的"ambiguous（歧义）"拒绝只守护 spawn 无法产生的状态；真遇到时请改用 `agent_id`。
+
+`type=general` 与 `type=implement` 具备写能力，除非用 `write_roots` 收窄，否则会申明整个父工作区，因此多个未用互斥 `write_roots` 启动的实例即使都不写入也会在该申明上相撞。并行研究或检查请改用只读角色（`explore`、`planner`、`reviewer`、`test`、`advisor`）、仅提示词的启动（只传 `prompt`），或不声明写权限的 `type=custom`（此时它以只读启动）：只读子代理不申明任何范围、永不争用。spawn 时的争用拒绝会指明这条路径。
 
 ## 子代理预算（步数、墙钟时间）
 

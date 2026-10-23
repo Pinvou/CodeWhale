@@ -82,7 +82,8 @@ use crate::worker_profile::{
 };
 use coord::{
     CoordinationDetailMetrics, CoordinationHotPath, CoordinationLedger, DecisionRecord,
-    DecisionStatus, PersistedWriteClaim, ReconciliationReceipt, WriteScopeClaim,
+    DecisionStatus, PersistedWriteClaim, ReconciliationReceipt, WRITE_SCOPE_CONTENTION_PREFIX,
+    WriteScopeClaim,
 };
 
 pub mod advisor;
@@ -4200,11 +4201,21 @@ impl SubAgentManager {
     /// so it must not reserve the name either (cloud-agent e2e, 2026-08-30:
     /// a fresh `exec` in the same workspace could not spawn `worker-a` again).
     fn reserved_session_name_holder(&self, name: &str) -> Option<&SubAgent> {
+        // At most one holder can pass this filter: the spawn gate refuses a
+        // second live spawn under a taken name, so first match on the
+        // unordered map is deterministic in effect.
         self.agents.values().find(|existing| {
-            existing.session_name == name
-                && !self.is_from_prior_session(existing)
-                && Self::session_name_is_reserved(&existing.status)
+            existing.session_name == name && self.is_live_session_name_holder(existing)
         })
+    }
+
+    /// The liveness predicate both the spawn gate and name resolution filter
+    /// on, spelled once so the two cannot drift: running, or interrupted
+    /// (parked), and this boot's record — a worker hydrated from a previous
+    /// boot is terminal history that neither reserves a name nor outranks
+    /// this boot's child in resolution.
+    fn is_live_session_name_holder(&self, agent: &SubAgent) -> bool {
+        Self::session_name_is_reserved(&agent.status) && !self.is_from_prior_session(agent)
     }
 
     #[must_use]
@@ -7014,13 +7025,14 @@ impl SubAgentManager {
         // `reserved_session_name_holder`), so a retried spawn can leave a
         // settled and a live child sharing one name. The live holder is the
         // one the name means now; among settled-only holders the newest
-        // spawn is the one the parent just retried. Liveness is boot-scoped
-        // here exactly as in the spawn gate: an interrupted record hydrated
-        // from a previous boot is terminal history, not the name's live
-        // holder, so it can never outrank this boot's child.
-        let mut live = matches.iter().filter(|agent| {
-            Self::session_name_is_reserved(&agent.status) && !self.is_from_prior_session(agent)
-        });
+        // spawn is the one the parent just retried. Liveness is the spawn
+        // gate's own predicate (`is_live_session_name_holder`): an
+        // interrupted record hydrated from a previous boot is terminal
+        // history, not the name's live holder, so it can never outrank this
+        // boot's child.
+        let mut live = matches
+            .iter()
+            .filter(|agent| self.is_live_session_name_holder(agent));
         if let Some(agent) = live.next() {
             if live.next().is_some() {
                 return Err(anyhow!(
@@ -9272,6 +9284,16 @@ const SUBAGENT_WAIT_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 /// engine turn's cancel token interrupts the block, and no lock is held
 /// across an await.
 ///
+/// The wait bound as the `until=completion` face reads it: the advertised
+/// `timeout_secs` plus its parse-accepted `timeout` alias. The alias is a
+/// documented compat contract (docs/SUBAGENTS.md), so the read lives in this
+/// one function and the alias pin test calls it directly — dropping the
+/// alias must fail loudly there instead of silently defaulting saved
+/// transcripts to 30s.
+fn wait_timeout_secs(input: &Value) -> Result<Option<u64>, ToolError> {
+    parse_optional_u64(input, &["timeout_secs", "timeout"])
+}
+
 /// This is the `until=completion` arm only. `until=all` — the fan-out join
 /// that blocks for *every* watched child — lives in
 /// [`coord::dispatch_wait`]; both arms are reachable from `agents/wait` and
@@ -9281,7 +9303,7 @@ async fn wait_for_subagents_from_input(
     manager: SharedSubAgentManager,
     context: &ToolContext,
 ) -> Result<ToolResult, ToolError> {
-    let timeout_secs = parse_optional_u64(input, &["timeout_secs", "timeout"])?
+    let timeout_secs = wait_timeout_secs(input)?
         .unwrap_or(SUBAGENT_WAIT_DEFAULT_TIMEOUT_SECS)
         .clamp(
             SUBAGENT_WAIT_MIN_TIMEOUT_SECS,
@@ -9850,10 +9872,6 @@ fn mint_child_route_receipt(
     }
     Ok(receipt)
 }
-
-/// Marker the coordination ledger puts at the head of a write-scope
-/// contention refusal; the spawn path keys its recovery guidance on it.
-const WRITE_SCOPE_CONTENTION_PREFIX: &str = "write-scope contention";
 
 /// Recovery guidance for a spawn refused by write-scope contention.
 ///

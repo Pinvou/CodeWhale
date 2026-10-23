@@ -5623,10 +5623,11 @@ fn wait_bound_constants_agree_across_both_wait_faces() {
 fn wait_timeout_alias_stays_parse_accepted() {
     // docs/SUBAGENTS.md pins the `timeout` alias (same meaning as
     // `timeout_secs`) as parse-accepted compat, but no schema list covers
-    // it — pin the read so dropping the alias fails loudly.
-    let read = |input: serde_json::Value| {
-        super::parse_optional_u64(&input, &["timeout_secs", "timeout"]).expect("parse ok")
-    };
+    // it. The test calls the production read (`wait_timeout_secs`, the
+    // function the until=completion arm uses), so dropping the alias from
+    // that key list fails right here instead of silently defaulting saved
+    // transcripts to 30s.
+    let read = |input: serde_json::Value| super::wait_timeout_secs(&input).expect("parse ok");
     assert_eq!(read(json!({"timeout_secs": 5})), Some(5));
     assert_eq!(read(json!({"timeout": 7})), Some(7));
     assert_eq!(read(json!({})), None);
