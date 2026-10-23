@@ -543,7 +543,17 @@ const App = () => {
         const sessionCommandToken = tracksCommandEcho
           ? browserSessionCommandEchoGuard.begin(
             options.sessionTarget,
-            bsRef.current?.activeSessionId || null,
+            // sessionBaseline override (round-20 review P2): the device doctor
+            // flow materializes its session BEFORE entering the transition, so
+            // the bridge's activeSessionId is already the null draft when the
+            // token begins. With the stale bsRef baseline, a late-flushed draft
+            // render observing `null` matched neither target nor baseline, got
+            // classified external, and superseded the in-flight transition —
+            // the message was delivered but the navigation was silently
+            // skipped while isCurrent() still reported true.
+            Object.prototype.hasOwnProperty.call(options, 'sessionBaseline')
+              ? options.sessionBaseline
+              : (bsRef.current?.activeSessionId || null),
           )
           : null;
         if (tracksSession) browserSessionTransitionPendingRef.current += 1;
@@ -960,6 +970,13 @@ const App = () => {
       // MegaCube 一体机：原「运行状态」入口替换为「设备管理」（渲染开关在
       // currentView === 'monitor' 处，导航 label 同步条件化）。
       const megacubeDevice = !!platformCapabilities.megacubeDevice;
+      // 拆离门禁在能力位装载完成前 fail-closed（第二十轮评审 P2）：
+      // megacubeDevice 是异步切片、播种恒 false——boot 窗口里 MegaCube 机器会
+      // 短暂看到「运行状态」入口且可拖拽拆出旧视图；装载失败时保持拆离关闭
+      // （入口 label 短暂回退到旧文案可接受，拆出旧视图不可接受）。
+      const megacubeDetachAllowed = !megacubeDevice
+        && platformCapabilities.loaded === true
+        && can('detachWindows');
       const codexAcpSupported = usePlatformCapability('acpCodeMode') && (isWeb || !!platformCapabilities.codexAcpSupported);
       const teamRelayAvailable = teamRelayEnabled && platformCapabilities.teamRelaySupported === true;
       const teamRelayUnread = teamRelayHasUnread(bs && bs.teamRelay && bs.teamRelay.snapshot);
@@ -3063,6 +3080,9 @@ const App = () => {
             hideMode: 'workspace',
             serialize: true,
             sessionTarget: sid,
+            // materializeSession already left the bridge in the null draft;
+            // the draft observation is ours, not an external divergence.
+            sessionBaseline: null,
           });
           return sent === true;
         } catch (error) {
@@ -4697,7 +4717,7 @@ const App = () => {
                 onPointerEnter={megacubeDevice ? NAV_PREFETCH.deviceManager : NAV_PREFETCH.monitor}
                 onFocus={megacubeDevice ? NAV_PREFETCH.deviceManager : NAV_PREFETCH.monitor}
                 onClick={navNavigateHandlers.monitor}
-                dragKind={!megacubeDevice && canDetachWindows ? 'monitor' : undefined} dragging={!megacubeDevice && canDetachWindows && !!dragAvatar && dragAvatar.key === 'monitor:'} onPickUp={!megacubeDevice && canDetachWindows ? navPickUpHandlers.monitor : undefined}
+                dragKind={megacubeDetachAllowed ? 'monitor' : undefined} dragging={megacubeDetachAllowed && !!dragAvatar && dragAvatar.key === 'monitor:'} onPickUp={megacubeDetachAllowed ? navPickUpHandlers.monitor : undefined}
               />
               <NavItem
                 icon={NAV_ICON_TOOL_STORE} label={t.toolStore}

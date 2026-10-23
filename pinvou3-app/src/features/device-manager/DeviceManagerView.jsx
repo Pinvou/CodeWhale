@@ -450,7 +450,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   // Polling lifecycle mirrors MonitorView: start on mount (with one immediate
   // services probe + external-model fetch), stop on unmount. The services
   // probe keeps its slow 10s cadence for as long as the page stays mounted.
-  const deviceApiReady = !!((window.TauriBridge || bridge)?.device?.startDevicePolling);
+  const deviceApiReady = !!(bridge?.device?.startDevicePolling);
   // Display strings go through a ref: the mount effect must not depend on
   // `copy`, or a language switch would stop/restart polling, re-fetch external
   // models and re-toast a failure (round-5 review P3). showToast is a stable
@@ -460,7 +460,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     copyRef.current = copy;
   }, [copy]);
   useEffect(() => {
-    const liveBridge = window.TauriBridge || bridge;
+    const liveBridge = bridge;
     const dev = liveBridge?.device;
     if (!dev || typeof dev.startDevicePolling !== 'function') {
       console.warn('[device-manager] TauriBridge device API unavailable');
@@ -500,7 +500,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   // Read-failure retry: stop+start makes the facade poll immediately (the raw
   // pollDevice stays feature-internal), then refresh the slow services probe.
   const retryPoll = useCallback(() => {
-    const dev = (window.TauriBridge || bridge)?.device;
+    const dev = bridge?.device;
     if (!dev) return;
     if (typeof dev.stopDevicePolling === 'function') {
       Promise.resolve(dev.stopDevicePolling()).catch(() => {});
@@ -512,7 +512,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   }, []);
 
   const refreshExternal = useCallback(() => {
-    const dev = (window.TauriBridge || bridge)?.device;
+    const dev = bridge?.device;
     if (!dev?.fetchExternalModels) return;
     // Swallowing the rejection makes Refresh look dead: surface a human-readable failure.
     dev.fetchExternalModels()
@@ -578,14 +578,17 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   // (round-4 review P3).
   const [externalFetchError, setExternalFetchError] = useState(null);
 
-  // Identity for armed/busy keys: source+kind-qualified row name. The NAME (not
-  // the id) stays the user-facing identity through the quiet re-register id swap
-  // (round-3 review P2); the source qualifier keeps a registry row and an
-  // Ollama-listing row that share a name from arming/busying together, and the
-  // kind qualifier keeps two registry rows that share a name across kinds
-  // separate (the registry does not enforce name uniqueness — round-4/5 review
-  // P3). Kind never changes for a row, so the identity survives the id swap.
-  const rowKey = (row) => `${row.source || 'registry'}:${row.kind || ''}:${row.name}`;
+  // armed/busy/list identity: kind+name (round-20 review P3). The quiet
+  // re-register flips a daemon row's source (ollama listing -> registry) while
+  // confirmRemove runs, and the previous source-qualified identity let the
+  // armed panel collapse mid-confirmation and orphaned the busyKey CAS clear.
+  // Kind+name is collision-free across the merged list: daemon rows always
+  // carry `:tag`, and push_ollama_daemon_rows drops daemon rows whose effective
+  // identity matches a registry row; the kind qualifier keeps two registry rows
+  // that share a name across kinds separate (the registry does not enforce
+  // name uniqueness — round-4/5 review P3). Kind never changes for a row, so
+  // the identity also survives the quiet re-register id swap (round-3 P2).
+  const rowIdentity = (row) => `${row.kind || ''}:${row.name}`;
 
   // Endpoint-precise button state (round-10 review P2): two inference
   // services on one machine can serve the same model name, so "linked" only
@@ -597,7 +600,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   // shared pinvou-model-link helpers, save it, and make it the active model
   // (only affects new chats).
   const linkExternal = useCallback(async (row) => {
-    const liveBridge = window.TauriBridge || bridge;
+    const liveBridge = bridge;
     if (!liveBridge?.models?.saveModel) {
       showToast(t.uiModelStore.linkBridgeMissing);
       return;
@@ -616,7 +619,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     // otherRowBusy disable — keeps a stale-closure click from overwriting
     // the busy slot while another row's saveModel/remove is still in flight.
     if (busyKey) return;
-    setBusyKey(`link:${rowKey(row)}`);
+    setBusyKey(`link:${rowIdentity(row)}`);
     try {
       // findLinkedRowsForEndpoint takes (...names): pass both the registry
       // model and the listing name so a relink updates THIS record's row in
@@ -643,7 +646,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
       // P2): linkExternal's own finally cleared unconditionally, which would
       // revive the other row's buttons if the two guards ever raced
       // (round-7 review P3 alignment).
-      setBusyKey((current) => (current === `link:${rowKey(row)}` ? null : current));
+      setBusyKey((current) => (current === `link:${rowIdentity(row)}` ? null : current));
     }
   }, [bs, busyKey, copy, showToast, t]);
 
@@ -658,7 +661,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     setConfirmGateReady(false);
     if (confirmGateTimerRef.current) clearTimeout(confirmGateTimerRef.current);
     confirmGateTimerRef.current = setTimeout(() => setConfirmGateReady(true), CONFIRM_GATE_MS);
-    setArmedRemoveId(rowKey(row));
+    setArmedRemoveId(rowIdentity(row));
   }, []);
   const cancelRemove = useCallback(() => {
     setArmedRemoveId(null);
@@ -673,7 +676,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   // so the same guard chain (store boundary, weights sandbox, confirm name)
   // applies to them too.
   const confirmRemove = useCallback(async (row) => {
-    const dev = (window.TauriBridge || bridge)?.device;
+    const dev = bridge?.device;
     // Bridge missing is a silent no-op otherwise: the armed panel already
     // collapsed on click, so the user would watch the row stay with no
     // feedback at all (round-7 review P3).
@@ -683,7 +686,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     }
     // Cross-row mutex entry guard (round-6 review P2): see linkExternal.
     if (busyKey) return;
-    setBusyKey(`remove:${rowKey(row)}`);
+    setBusyKey(`remove:${rowIdentity(row)}`);
     try {
       let id = row.id;
       if (row.source === 'ollama' && !row.registered) {
@@ -725,7 +728,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
           row.model,
           row.name
         );
-        const liveBridge = window.TauriBridge || bridge;
+        const liveBridge = bridge;
         // Assign the OUTER variable (an inner `let` here used to shadow it and
         // every cleanup failure surfaced as "unknown" — round-3 review P2).
         // Reasons are localized (round-7 review P3): the raw tokens used to
@@ -750,7 +753,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
         cleanupErrorText = copy.linkReasonBridge;
         cleanupOk = false;
       }
-      const completedKey = rowKey(row);
+      const completedKey = rowIdentity(row);
       if (armedRemoveId === completedKey) {
         setArmedRemoveId(null);
         setDeleteWeights(false);
@@ -781,7 +784,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
       // the whole page — an unconditional clear would revive the other row's
       // buttons while its own operation is still in flight, allowing a concurrent
       // second saveModel / removeExternalModel.
-      setBusyKey((current) => (current === `remove:${rowKey(row)}` ? null : current));
+      setBusyKey((current) => (current === `remove:${rowIdentity(row)}` ? null : current));
     }
   }, [armedRemoveId, bs, busyKey, copy, deleteWeights, showToast, t]);
 
@@ -789,7 +792,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   const [doctorBusy, setDoctorBusy] = useState(null);
   const [question, setQuestion] = useState('');
   const runDoctor = useCallback(async (kind, questionText = null, onDone = null) => {
-    const dev = (window.TauriBridge || bridge)?.device;
+    const dev = bridge?.device;
     // Same surface discipline as confirmRemove/linkExternal: a bridge-missing
     // entry is toasted, not a silent no-op the user watches do nothing
     // (round-8 review P3).
@@ -1185,10 +1188,10 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                     const target = linkTargetOf(row);
                     const linkable = !!(target.model && target.baseUrl && isLocalGatewayUrl(target.baseUrl));
                     const remoteOnly = !!(target.model && target.baseUrl && !isLocalGatewayUrl(target.baseUrl));
-                    const rowIdentity = rowKey(row);
-                    const armed = armedRemoveId === rowIdentity;
+                    const identity = rowIdentity(row);
+                    const armed = armedRemoveId === identity;
                     const kindLabel = copy[KIND_LABEL_KEYS[row.kind] || 'kindOther'];
-                    const rowBusy = busyKey === `link:${rowIdentity}` || busyKey === `remove:${rowIdentity}`;
+                    const rowBusy = busyKey === `link:${identity}` || busyKey === `remove:${identity}`;
                     // Cross-row mutex (round-6 review P2): busyKey is a single
                     // slot for the whole page. Without this, confirming row B
                     // while row A's remove is in flight overwrites the slot and
@@ -1279,13 +1282,21 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                           ) : (linkable && (
                             <MsButton
                               tone="ghost"
-                              busy={busyKey === `link:${rowIdentity}`}
+                              busy={busyKey === `link:${identity}`}
                               // Never link an unreachable model: linking also
                               // makes it the default model, and an unreachable
                               // default breaks every new chat (same reasoning
                               // as pinvou-model-link.checkLinkable).
-                              disabled={rowBusy || otherRowBusy || row.status === 'unreachable'}
-                              title={row.status === 'unreachable' ? copy.linkDisabledUnreachable : undefined}
+                              // Store-managed rows stay unlinkable here too
+                              // (round-20 review P2): remove is disabled for
+                              // them (the store owns their lifecycle), so a
+                              // link created from this row could never be
+                              // recycled and would linger as a dead default
+                              // once the daemon model goes away.
+                              disabled={rowBusy || otherRowBusy || !!doctorBusy || managedByStore || row.status === 'unreachable'}
+                              title={managedByStore
+                                ? copy.storeManaged
+                                : (row.status === 'unreachable' ? copy.linkDisabledUnreachable : undefined)}
                               onClick={() => linkExternal(row)}
                               data-testid="device-manager-link"
                             >
@@ -1324,7 +1335,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                               )}
                               <MsButton
                                 tone="danger"
-                                busy={busyKey === `remove:${rowIdentity}`}
+                                busy={busyKey === `remove:${identity}`}
                                 disabled={rowBusy || otherRowBusy || !confirmGateReady}
                                 onClick={() => confirmRemove(row)}
                                 data-testid="device-manager-remove-confirm"
@@ -1343,7 +1354,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                           ) : (
                             <MsButton
                               tone="danger"
-                              disabled={rowBusy || otherRowBusy || managedByStore}
+                              disabled={rowBusy || otherRowBusy || !!doctorBusy || managedByStore}
                               title={managedByStore ? copy.storeManaged : undefined}
                               onClick={() => armRemove(row)}
                               data-testid="device-manager-remove"
@@ -1371,7 +1382,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                   not degrade into the "nothing installed" fact — show the real
                   failure with a retry (round-4 review P3). */}
               {storeRows.length === 0 && externalModels.length === 0 && (
-                storeState === 'loading' && !external ? (
+                !external ? (
                   <div className={`py-4 text-center text-[13px] ${MUTED_TEXT}`}>{copy.loading}</div>
                 ) : externalFetchError ? (
                   <div

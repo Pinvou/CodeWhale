@@ -41,6 +41,15 @@ assert.match(
   /Object\.prototype\.hasOwnProperty\.call\(sessionStates\.value, sid\)/,
   'ruler 2: local buffer (own-property check, prototype-safe)',
 );
+// 第二把尺子必须排除 aux id：aux 会话就住 sessionStates（后端把它们过滤在
+// list_sessions 之外），无条件放行会把 aux-chat 的隔离不变量（sendMessageToSession
+// 要求 sid ∈ state.sessions，auxChatSend 才带 restrictTools）打穿（第二十轮评审
+// P2）。把 `!auxChatIsAuxSession(sid) &&` 守卫删掉时本断言必须变红。
+assert.match(
+  sendBody,
+  /!auxChatIsAuxSession\(sid\)\s*\n?[\s\S]{0,40}&&\s*Object\.prototype\.hasOwnProperty\.call\(sessionStates\.value, sid\)/,
+  'ruler 2 must exclude aux ids (aux isolation invariant)',
+);
 
 const purgeStart = sessionsBridge.indexOf('function purgeSessionBuffer');
 assert.ok(purgeStart >= 0, 'purgeSessionBuffer not found in sessions.js');

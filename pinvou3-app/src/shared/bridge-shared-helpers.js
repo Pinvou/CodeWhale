@@ -3632,7 +3632,12 @@
     // 本地 buffer 即物化事实，放行；下游 getBuffer/排队机制本就按
     // sessionStates 工作，后端拒绝仍由 doSendFor 的 completion 上报。
     const exists = state.sessions.some(function (session) { return String(session.id) === sid; })
-      || Object.prototype.hasOwnProperty.call(sessionStates.value, sid);
+      // aux 会话就住 sessionStates（后端刻意把它们过滤在 list_sessions 之外），
+      // 第二把尺子若无条件放行就把 aux-chat 赖以成立的隔离不变量打穿了——
+      // 全工具链的普通发送通道会绕过 auxChatSend 的 restrictTools 直进 aux
+      // 会话（第二十轮评审 P2）。今天没有调用方传 aux id，这里把防线钉回去。
+      || (!auxChatIsAuxSession(sid)
+          && Object.prototype.hasOwnProperty.call(sessionStates.value, sid));
     if (!exists) throw new Error(bt("targetSessionMissing"));
 
     await ensureSessionBufferLoaded(sid);

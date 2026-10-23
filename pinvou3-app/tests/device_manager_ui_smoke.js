@@ -536,6 +536,13 @@ async function clickTestId(page, testId) {
         const remove = tagged?.querySelector('[data-testid="device-manager-remove"]');
         return !!remove && remove.disabled && (remove.title || '').includes('由模型商店管理');
       })(),
+      // 商店管理行同时禁用接入（第二十轮评审 P2）：移除/回收都归商店管，本页
+      // 接入会造出永远无法回收的死配置（daemon 模型删掉后残留死默认模型）。
+      storeTaggedRowLinkBlocked: (() => {
+        const tagged = externalRows[3];
+        const link = tagged?.querySelector('[data-testid="device-manager-link"]');
+        return !!link && link.disabled && (link.title || '').includes('由模型商店管理');
+      })(),
     };
   });
   rec('⑤ 商店行锁定态与外部模型行徽标齐全', Object.values(modelSection).every(Boolean), JSON.stringify(modelSection));
