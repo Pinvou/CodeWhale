@@ -6,13 +6,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { KeyRound, Plus } from '../../components/icons.jsx';
 import { EmptyState } from '../../components/EmptyState.jsx';
 import { Spinner } from '../../components/Spinner.jsx';
-import { createApiKey, fetchApiKeys, fetchModelDetail, revokeApiKey } from './model-store-api.js';
+import { createApiKey, fetchApiKeys, fetchModelDetail, revokeApiKey, setAutoStart } from './model-store-api.js';
 import { LanSharingPanel } from './LanSharingPanel.jsx';
 import { lanError } from './lan-access.js';
 import { tryGetTauriBridge } from '../../platform/tauri/client.js';
 import { buildSavedModel, checkLinkable, findLinkedRows, pickApiKey } from './pinvou-model-link.js';
 import { formatBytes, libraryStateOf } from './model-store-logic.js';
-import { setAutoStart } from './model-store-api.js';
 import {
   HOVER_SURFACE,
   MsButton,
