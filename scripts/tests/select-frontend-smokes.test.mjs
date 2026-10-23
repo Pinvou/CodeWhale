@@ -137,3 +137,10 @@ test("team relay changes select its action smoke", () => {
     ["npm:test:ui-smoke", "npm:test:team-relay-ui"],
   );
 });
+
+test("wrapper-only changes select the web UI smoke plus the core smoke", () => {
+  assert.deepEqual(
+    labels(selectFrontendSmokes(["pinvou3-app/scripts/run-webui-smoke.mjs"])),
+    ["npm:test:ui-smoke", "npm:test:webui"],
+  );
+});
