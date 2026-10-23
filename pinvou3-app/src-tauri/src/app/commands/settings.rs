@@ -443,6 +443,46 @@ pub(super) fn save_model_inner(
     UserPrefs::update_transaction_with_post_commit(
         |prefs| {
             let old = prefs.model_by_id(&model.id).cloned();
+            // A repeated store import selects a route, not replacement values
+            // for the user's existing model. Resolve it against the latest row
+            // under the prefs lock rather than spreading a client snapshot.
+            if std::mem::take(&mut model.model_store_link_only) {
+                let requested_card = model.model_store_card_id.as_deref();
+                let latest = old.as_ref().filter(|latest| {
+                    model.model_store_link_requested
+                        && !model.reasoning_effort_only
+                        && !model.model_store_link_detached
+                        && requested_card.is_some()
+                        && latest.model_store_card_id.as_deref() == requested_card
+                        && !latest.model_store_link_detached
+                        && !latest.is_builtin_llmapi()
+                        && latest.is_operator_owned_endpoint()
+                });
+                let Some(latest) = latest else {
+                    return Err(
+                        "model store endpoint changed or is unavailable; refresh the card and retry"
+                            .to_string(),
+                    );
+                };
+                let mut linked = latest.clone();
+                linked.preset = model.preset;
+                linked.provider_kind = model.provider_kind.take();
+                linked.vendor = model.vendor.take();
+                linked.endpoint_mode = model.endpoint_mode.take();
+                linked.base_url = std::mem::take(&mut model.base_url);
+                linked.model = std::mem::take(&mut model.model);
+                linked.model_store_card_id = model.model_store_card_id.take();
+                linked.model_store_link_detached = false;
+                linked.model_store_link_requested = true;
+                linked.model_store_link_only = false;
+                linked.preserve_model_store_route = false;
+                linked.preserve_context_window_tokens = false;
+                linked.context_window_edit_requested = false;
+                linked.reasoning_effort_only = false;
+                linked.api_key.clear();
+                linked.credential_action = Some(CredentialEditAction::KeepExisting);
+                model = linked;
+            }
             // Only a new client's explicit context-field edit records a user
             // choice. Untouched-field and reasoning-only intent take precedence
             // over inconsistent payloads; legacy/machine defaults do not opt out.
@@ -2194,6 +2234,7 @@ mod tests {
             model_store_card_id: None,
             model_store_link_detached: false,
             model_store_link_requested: false,
+            model_store_link_only: false,
             preserve_model_store_route: false,
             preserve_context_window_tokens: false,
             context_window_edit_requested: false,

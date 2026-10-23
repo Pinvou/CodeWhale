@@ -1251,6 +1251,7 @@ fn add<S: CredentialStore>(
         model_store_card_id: None,
         model_store_link_detached: true,
         model_store_link_requested: false,
+        model_store_link_only: false,
         preserve_model_store_route: false,
         preserve_context_window_tokens: false,
         context_window_edit_requested: false,

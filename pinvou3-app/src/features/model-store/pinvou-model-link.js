@@ -64,6 +64,9 @@ function buildSavedModel({
     model_store_card_id: cardId,
     model_store_link_detached: false,
     model_store_link_requested: !!cardId,
+    // Repeated import changes only the validated store route. The backend
+    // preserves the latest user options and credential under its settings lock.
+    model_store_link_only: !!(existingId && cardId),
     context_window_tokens: contextWindow || null,
     max_output_tokens: null,
     reasoning_effort: null,
