@@ -6,13 +6,18 @@ Two failure classes are pinned here:
 1. `resolved` URLs pointing at a registry mirror — mirrors are slow and
    cross-border single points; `npm ci` consumes lock URLs verbatim, so
    every mirror URL is a latency/flake dependency on every build. The
-   two repo locks that are consumed by CI (team-relay-hub,
-   codex-bridge-runtime) carried 134 npmmirror URLs in total before the
-   #1518 cleanup; the blocklist covers npmmirror plus the other common
-   CN mirrors (round-11 review: matching only registry.npmmirror.com let
-   the same lock-regen creep back in via a taobao/tencent/huawei/cnpm
-   mirror in a contributor's npmrc). Matching is case-insensitive —
-   hosts serialize lowercase in practice, but nothing forces it.
+   CI-consumed repo locks carried npmmirror URLs before the #1518
+   cleanup (14 in team-relay-hub alone at the cleanup commit's parent;
+   the PR diff clears the last 15); the blocklist covers npmmirror plus
+   the other common CN mirrors (round-11 review: matching only
+   registry.npmmirror.com let the same lock-regen creep back in via a
+   taobao/tencent/huawei/cnpm mirror in a contributor's npmrc). Matching
+   is case-insensitive — hosts serialize lowercase in practice, but
+   nothing forces it. Scope honesty (round-20 review): this is a
+   BLOCKLIST, not an official-registry whitelist — a non-https or
+   lookalike-domain form (http://registry.npmjs.org,
+   registry.npmjs.org.evil.example) or a mirror host outside the marker
+   list is not caught; the failure message below says the same.
 
 2. Missing or wrong `libc` fields on the @img/* platform packages in
    team-relay-hub/package-lock.json — npm's arborist did not serialize
@@ -147,8 +152,9 @@ def main():
         if mirror_urls:
             failures.append(
                 f"{rel}: {len(mirror_urls)} resolved URLs point at a "
-                f"registry mirror (locks must resolve against the official "
-                f"registry, registry.npmjs.org):\n  "
+                f"known npm registry mirror (this guard is a mirror "
+                f"blocklist, not an official-registry whitelist — it "
+                f"catches the marker hosts below on any resolved URL):\n  "
                 + "\n  ".join(mirror_urls)
             )
         if rel == os.path.join("team-relay-hub", "package-lock.json"):
