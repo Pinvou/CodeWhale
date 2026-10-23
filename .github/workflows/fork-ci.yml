@@ -8,7 +8,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [baseline, old-body-cut, public-permissions]
+        variant: [baseline, old-body-cut, public-permissions, no-activation]
     runs-on: ubuntu-latest
     timeout-minutes: 70
     env:
@@ -49,6 +49,12 @@ jobs:
               s = p.read_text()
               assert s.count('options.mode(0o600);') == 1
               p.write_text(s.replace('options.mode(0o600);', 'options.mode(0o666);'))
+          elif v == 'no-activation':
+              p = pathlib.Path('crates/tui/src/core/engine/tool_catalog.rs')
+              s = p.read_text()
+              old = 'id.starts_with("art_")'
+              assert s.count(old) == 1
+              p.write_text(s.replace(old, 'id.starts_with("disabled_artifact_")'))
       - name: Execute contracts and verify targeted counterexamples
         shell: bash
         run: |
@@ -58,23 +64,28 @@ jobs:
           fetch_status=$?
           cargo test -p codewhale-tui --lib --all-features --locked forkguard_immutable_artifacts_are_private_and_replay_safe -- --test-threads=1 > private.log 2>&1
           private_status=$?
-          cat fetch.log private.log
-          export FETCH_TEST_EXIT="$fetch_status" PRIVATE_TEST_EXIT="$private_status"
+          cargo test -p codewhale-tui --lib --all-features --locked forkguard_preserved_output_activates_only_available_retrieval_schema -- --test-threads=1 > activation.log 2>&1
+          activation_status=$?
+          cat fetch.log private.log activation.log
+          export FETCH_TEST_EXIT="$fetch_status" PRIVATE_TEST_EXIT="$private_status" ACTIVATION_TEST_EXIT="$activation_status"
           python3 - <<'PY'
           import os, pathlib, re
           v = os.environ['VARIANT']
           f = re.sub(r'\x1b\[[0-9;]*m', '', pathlib.Path('fetch.log').read_text())
           p = re.sub(r'\x1b\[[0-9;]*m', '', pathlib.Path('private.log').read_text())
+          a = re.sub(r'\x1b\[[0-9;]*m', '', pathlib.Path('activation.log').read_text())
           expected = {
               'forkguard_fetch_url_full_envelope_round_trips_before_context_cut': v == 'old-body-cut',
               'forkguard_fetch_url_small_envelope_stays_parseable_and_artifact_free': False,
               'forkguard_immutable_artifacts_are_private_and_replay_safe': v == 'public-permissions',
+              'forkguard_preserved_output_activates_only_available_retrieval_schema': v == 'no-activation',
           }
           for name, fail in expected.items():
-              matches = re.findall(r'::' + name + r' \.\.\. (ok|FAILED)', f + p)
+              matches = re.findall(r'::' + name + r' \.\.\. (ok|FAILED)', f + p + a)
               assert matches == [('FAILED' if fail else 'ok')], (v, name, matches)
           assert int(os.environ['FETCH_TEST_EXIT']) == (101 if v == 'old-body-cut' else 0)
           assert int(os.environ['PRIVATE_TEST_EXIT']) == (101 if v == 'public-permissions' else 0)
+          assert int(os.environ['ACTIVATION_TEST_EXIT']) == (101 if v == 'no-activation' else 0)
           print('Verified exact native contract outcomes:', v)
           PY
           status=$?
@@ -84,7 +95,8 @@ jobs:
             cargo test -p codewhale-tui --lib --all-features --locked tools::fetch_url:: -- --test-threads=1 > fetch-suite.log 2>&1
             cargo test -p codewhale-tui --lib --all-features --locked artifacts::tests:: -- --test-threads=1 > artifact-suite.log 2>&1
             cargo test -p codewhale-tui --lib --all-features --locked output_recovery_tests:: -- --test-threads=1 > dispatch-suite.log 2>&1
-            cat fetch-suite.log artifact-suite.log dispatch-suite.log
+            cargo test -p codewhale-tui --lib --all-features --locked tool_catalog::synthetic_name_tests:: -- --test-threads=1 > catalog-suite.log 2>&1
+            cat fetch-suite.log artifact-suite.log dispatch-suite.log catalog-suite.log
           fi
       - uses: actions/upload-artifact@v4
         if: always()
