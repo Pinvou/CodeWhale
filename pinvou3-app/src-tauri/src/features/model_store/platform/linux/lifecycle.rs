@@ -720,6 +720,7 @@ fn tighten_store_directory_permissions(settings: &Settings) {
     use std::os::unix::fs::MetadataExt;
     use std::os::unix::fs::PermissionsExt;
 
+    // SAFETY: getuid() 无参数、无失败路径（libc 直接读进程凭证），调用安全。
     let uid = unsafe { libc::getuid() };
     let mut roots = vec![
         config::data_dir(),

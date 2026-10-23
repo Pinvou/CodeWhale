@@ -882,11 +882,19 @@ pub(crate) fn remove_agents_index_entry(
 /// 结构化结果落 JSON 到卡片库旁（GUI 启动后读取并按结果弹窗——要求②：
 /// 任何问题都有解决方法提示）。
 pub fn run_model_store_autostart() {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
-        .expect("autostart: tokio runtime");
+    {
+        Ok(runtime) => runtime,
+        // headless 入口（systemd 调起）：连 runtime 都建不起来时没有 GUI 可弹，
+        // 报到 journal 即退（非零退出码让 systemd 单元显示 failed，便于发现）。
+        Err(error) => {
+            eprintln!("[pinvou3-app] model-store autostart: tokio runtime build failed: {error}");
+            std::process::exit(1);
+        }
+    };
     let report = runtime.block_on(async {
         let service = std::sync::Arc::new(features::model_store::ModelStoreService::new());
         features::model_store::autostart_pending(service).await

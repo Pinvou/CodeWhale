@@ -517,7 +517,7 @@ async fn cancelled(mut signal: watch::Receiver<Option<ApiError>>) -> ApiError {
 async fn route_check_fresh(app: &App, card: &str) -> bool {
     const FRESH_FOR: Duration = Duration::from_secs(1);
     {
-        let cache = app.route_checks.lock().unwrap();
+        let cache = app.route_checks.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(last) = cache.get(card) {
             if last.elapsed() < FRESH_FOR {
                 return true;
@@ -529,7 +529,7 @@ async fn route_check_fresh(app: &App, card: &str) -> bool {
     }
     app.route_checks
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .insert(card.to_string(), std::time::Instant::now());
     true
 }
