@@ -1451,6 +1451,64 @@ test('leased dispatch always closes the host operation window after failure or c
     assert.equal(refreshes, settledRefreshes, 'no heartbeat may outlive endOperation');
   });
 
+  await t.test('serial heartbeat includes host latency and settles before ending the operation', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+    const flushAsyncWork = () => new Promise((resolve) => setImmediate(resolve));
+    const refreshStarts = [];
+    let activeRefreshes = 0;
+    let maxActiveRefreshes = 0;
+    let ended = false;
+    let finishExecution;
+    const upstream = new Promise((resolve) => { finishExecution = resolve; });
+    t.after(() => finishExecution('cleanup'));
+    const dispatch = runLeasedHostDispatch({
+      activationLease,
+      emitsTrustedInput: true,
+      heartbeatIntervalMs: 250,
+      beginOperation: async () => {},
+      refreshOperation: async () => {
+        refreshStarts.push(Date.now());
+        activeRefreshes += 1;
+        maxActiveRefreshes = Math.max(maxActiveRefreshes, activeRefreshes);
+        await new Promise((resolve) => setTimeout(resolve, 220));
+        activeRefreshes -= 1;
+      },
+      execute: () => upstream,
+      endOperation: async () => {
+        assert.equal(activeRefreshes, 0, 'refresh acknowledgement must settle before end');
+        ended = true;
+      },
+    });
+    await flushAsyncWork();
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      t.mock.timers.tick(250);
+      await flushAsyncWork();
+      t.mock.timers.tick(220);
+      await flushAsyncWork();
+    }
+    t.mock.timers.tick(190);
+    await flushAsyncWork();
+    assert.equal(Date.now(), 1_600);
+    assert.deepEqual(refreshStarts, [250, 720, 1_190]);
+    assert.ok(refreshStarts.every((at, index) => at - (refreshStarts[index - 1] || 0) < 750));
+    assert.equal(maxActiveRefreshes, 1, 'slow acknowledgements must never overlap refreshes');
+
+    t.mock.timers.tick(60);
+    await flushAsyncWork();
+    assert.equal(activeRefreshes, 1);
+    finishExecution('clicked');
+    await flushAsyncWork();
+    assert.equal(ended, false, 'an in-flight refresh must delay endOperation');
+    t.mock.timers.tick(220);
+    await flushAsyncWork();
+    assert.equal(await dispatch, 'clicked');
+    assert.equal(ended, true);
+    const finalRefreshCount = refreshStarts.length;
+    t.mock.timers.tick(5_000);
+    await flushAsyncWork();
+    assert.equal(refreshStarts.length, finalRefreshCount, 'no refresh may survive endOperation');
+  });
+
   await t.test('preserves a committed result when heartbeat fails after upstream success', async () => {
     let executions = 0;
     const result = await runLeasedHostDispatch({
