@@ -194,11 +194,13 @@ max_admitted = 12
 
 ## 对外公布的 agent 工具字段（v0.9.9）
 
-面向模型的 `agent` 工具 schema 正好公布 **12 个字段**（#5324、#5123）：
+面向模型的 `agent` 工具 schema 正好公布 **14 个字段**（#5324、#5123；T7 后来加入 `profile_query`，即 roster 的宿主 profile 关键字过滤；`timeout_secs` 因 `action=wait` 重新公布——见下文）：
 
-`action`、`prompt`、`type`、`profile`、`name`、`agent_id`、`message`、`until`、`detached`、`worktree`、`write_roots`、`resume_from`
+`action`、`prompt`、`type`、`profile`、`profile_query`、`name`、`agent_id`、`message`、`until`、`timeout_secs`、`detached`、`worktree`、`write_roots`、`resume_from`
 
 外加按 action 区分的 `dependentSchemas` 树（`start` 需要 `prompt`；`message`/`followup` 需要目标和 `message`；`peek`/`interrupt`/`cancel` 需要目标）。schema 变更是钉死的提示词前缀的一部分，所以升级会在每个会话中重新填充一次 provider KV 前缀（docs/CACHE.md；在 v0.9.9 边界接受）。
+
+`timeout_secs`（整数，1..=120，默认 30）限制单次 `action=wait` 阻塞的时长。它曾随其他生命周期附加字段一起被移出公布的 schema，但 `until` 文案仍承诺"默认 30 秒、上限 120 秒"：拿不到任何字段去触及上限的模型只会反复做 30 秒的等待。重新公布后，父代理可以按整个批次来设定一次等待。
 
 **解析接受但未公布（兼容）。** 以下输入已从公布的 schema 中移除，但仍保持解析接受并按原样生效，因此已保存的转录、ACP/MCP 客户端和 Fleet 配置照旧重放——`token_budget` 已经遵循的正是同一个契约：
 
@@ -206,7 +208,7 @@ max_admitted = 12
 - 路由：`model`、`model_strength`、`thinking`（`profile` 钉死路由和思维层级；没有它时子代理继承操作者模型）
 - workspace/隔离：`workspace_policy`、`write_authority`、`fork_context`、`cwd`、`worktree_path`、`worktree_branch`、`worktree_base`
 - 发起契约：`deliberate`、`dependencies`、`acceptance`、`expected_artifact`、`exact_files`、`coordination_contracts`
-- 生命周期附加：`timeout_secs`（wait）、`reason`（interrupt）、`include_archived`（status）以及 `token_budget`
+- 生命周期附加：`reason`（interrupt）、`include_archived`（status）以及 `token_budget`；wait 别名 `timeout`（与 `timeout_secs` 同义）
 
 权限绝不会变宽：#5426/#5435 的遏制钳制不变——`write_authority` 移到角色/profile，委派只能收窄继承的权限。
 

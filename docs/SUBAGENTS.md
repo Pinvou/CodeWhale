@@ -431,19 +431,23 @@ inherited authority.
 ### Session names and parallel read-only fan-outs
 
 A `name` passed to `action=start` is reserved only while its holder is live:
-running, or interrupted with a wakeable checkpoint. Once the child settles
-(completed, failed, cancelled, budget-exhausted) the name is free, so a
-cancel-and-retry under the same name succeeds. If a settled and a live child
-share a name, the name resolves to the live one; among settled-only holders
-it resolves to the most recent spawn. Only two live holders (possible after
-hydrating an older ledger) leave a bare name ambiguous — use the `agent_id`.
+running, or interrupted (parked). Once the child settles (completed, failed,
+cancelled, budget-exhausted) the name is free, so a cancel-and-retry under
+the same name succeeds. If a settled and a live child share a name, the name
+resolves to the live one; among settled-only holders it resolves to the most
+recent spawn. A record hydrated from an older boot is history for resolution
+too — it never outranks the current boot's child — so the bare-name
+"ambiguous" refusal only guards state spawn cannot produce; use the
+`agent_id` if you ever meet it.
 
-`type=general` is write-capable and claims the whole parent workspace unless
-`write_roots` narrows it, so several generals started without disjoint
-`write_roots` collide on that claim even when none of them writes. For
-parallel research or inspection use a read-only role (`explore`, `planner`,
-`reviewer`, `advisor`) or a prompt-only start: read-only children claim no
-scope and never contend. The spawn-time contention refusal names this path.
+`type=general` and `type=implement` are write-capable and claim the whole
+parent workspace unless `write_roots` narrows them, so several started
+without disjoint `write_roots` collide on that claim even when none of them
+writes. For parallel research or inspection use a read-only role (`explore`,
+`planner`, `reviewer`, `test`, `advisor`), a prompt-only start, or
+`type=custom` without declared write authority (it then starts read-only):
+read-only children claim no scope and never contend. The spawn-time
+contention refusal names this path.
 
 ## Child budgets (steps, wall time)
 

@@ -5620,6 +5620,19 @@ fn wait_bound_constants_agree_across_both_wait_faces() {
 }
 
 #[test]
+fn wait_timeout_alias_stays_parse_accepted() {
+    // docs/SUBAGENTS.md pins the `timeout` alias (same meaning as
+    // `timeout_secs`) as parse-accepted compat, but no schema list covers
+    // it — pin the read so dropping the alias fails loudly.
+    let read = |input: serde_json::Value| {
+        super::parse_optional_u64(&input, &["timeout_secs", "timeout"]).expect("parse ok")
+    };
+    assert_eq!(read(json!({"timeout_secs": 5})), Some(5));
+    assert_eq!(read(json!({"timeout": 7})), Some(7));
+    assert_eq!(read(json!({})), None);
+}
+
+#[test]
 fn agent_tool_unadvertised_fields_remain_parse_accepted() {
     // #5324 compat: the fields removed from the advertised schema must stay
     // parse-accepted and honored unchanged — saved transcripts, ACP/MCP
@@ -5881,10 +5894,10 @@ fn agent_tool_schema_advertises_lifecycle_and_coordination_actions() {
     assert!(action.contains("cancel"));
     assert!(agent_schema["properties"].get("agent_id").is_some());
     assert!(agent_schema["properties"].get("message").is_some());
-    // `reason` (interrupt), `timeout_secs` (wait) and `include_archived`
-    // (status) moved off the advertised schema with #5324; the pinning test
-    // above asserts their absence and the compat test below their continued
-    // parse-acceptance.
+    // `reason` (interrupt) and `include_archived` (status) moved off the
+    // advertised schema with #5324 and the pinning test above asserts their
+    // absence; `timeout_secs` returned to the advertised surface in #119,
+    // and the compat test below still covers both plus the `timeout` alias.
 }
 
 #[test]
@@ -9759,8 +9772,10 @@ async fn spawn_session_name_released_once_same_session_holder_settles() {
 
 #[tokio::test]
 async fn spawn_session_name_still_held_by_interrupted_same_session_child() {
-    // An interrupted child is parked, not finished: `followup` can still wake
-    // it, so its name stays reserved and the refusal names the live holder.
+    // An interrupted child is parked, not finished: its name stays reserved
+    // and the refusal names the live holder plus the advice its status can
+    // actually act on. Cancel only touches Running children and the
+    // completion event has already fired, so neither may be advised here.
     let tmp = tempdir().expect("tempdir");
     let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 5);
     let holder_id = seed_named_same_session_agent(
@@ -9799,8 +9814,55 @@ async fn spawn_session_name_still_held_by_interrupted_same_session_child() {
         "names the holder status: {msg}"
     );
     assert!(
-        msg.contains("cancel it"),
-        "tells the parent how to free the name: {msg}"
+        msg.contains("action=followup"),
+        "points the parent at the resume path for a parked child: {msg}"
+    );
+    assert!(
+        !msg.contains("cancel it"),
+        "cancel is a silent no-op on an interrupted child: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn spawn_session_name_running_holder_advises_wait_or_cancel() {
+    // A running holder can be waited out or cancelled; the refusal must keep
+    // naming both escapes (the interrupted branch above drops them).
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 5);
+    let holder_id = seed_named_same_session_agent(
+        &manager,
+        tmp.path(),
+        "test_agent_live",
+        "macro-policy",
+        SubAgentStatus::Running,
+    )
+    .await;
+
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+    runtime.context = ToolContext::new(tmp.path());
+    let err = {
+        let mut guard = manager.write().await;
+        guard
+            .spawn_background_with_assignment_options(
+                manager.clone(),
+                runtime,
+                FleetRole::Scout,
+                "retry".to_string(),
+                make_assignment(),
+                Some(vec!["read_file".to_string()]),
+                SubAgentSpawnOptions {
+                    name: Some("macro-policy".to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect_err("a running holder keeps its session name")
+    };
+    let msg = err.to_string();
+    assert!(msg.contains(&holder_id), "names the live holder: {msg}");
+    assert!(
+        msg.contains("completion event") && msg.contains("cancel it"),
+        "a running holder can be waited out or cancelled: {msg}"
     );
 }
 
@@ -9851,6 +9913,60 @@ fn session_name_resolution_prefers_live_holder_then_newest_settled() {
             .resolve_agent_ref("shared")
             .expect("interrupted holder is live"),
         older_id
+    );
+}
+
+#[test]
+fn session_name_resolution_ignores_prior_boot_interrupted_ghost() {
+    // Hydration rewrites a child that was Running at shutdown into a
+    // prior-boot Interrupted record. The spawn gate already excludes prior
+    // boots (`reserved_session_name_holder`); resolution must exclude them
+    // from its live filter too, or the ghost would silently outrank this
+    // boot's child once the retry settles.
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = SubAgentManager::new(tmp.path().to_path_buf(), 4);
+    let ghost_id = manager.insert_test_running_agent("ghost", tmp.path());
+    {
+        let ghost = manager.agents.get_mut(&ghost_id).expect("ghost");
+        ghost.session_name = "shared".to_string();
+        ghost.session_boot_id = "boot_prior".to_string();
+        ghost.status = SubAgentStatus::Interrupted("restart".to_string());
+        ghost.started_at = Instant::now() - Duration::from_secs(300);
+    }
+    assert!(manager.is_from_prior_session(&manager.agents[&ghost_id]));
+
+    // A lone ghost still resolves — `resume_from` reaches the pre-restart
+    // checkpoint through exactly this path.
+    assert_eq!(
+        manager
+            .resolve_agent_ref("shared")
+            .expect("lone ghost stays resolvable"),
+        ghost_id
+    );
+
+    // The current boot respawns the name: the live retry wins outright
+    // instead of reading as ambiguous against the ghost.
+    let retry_id = manager.insert_test_running_agent("retry", tmp.path());
+    {
+        let retry = manager.agents.get_mut(&retry_id).expect("retry");
+        retry.session_name = "shared".to_string();
+        retry.started_at = Instant::now() - Duration::from_secs(60);
+    }
+    assert_eq!(
+        manager
+            .resolve_agent_ref("shared")
+            .expect("current-boot live holder beats the prior-boot ghost"),
+        retry_id
+    );
+
+    // The regression: once the retry settles, the ghost must not hijack the
+    // name — the settled retry is what the parent just waited on.
+    manager.agents.get_mut(&retry_id).expect("retry").status = SubAgentStatus::Completed;
+    assert_eq!(
+        manager
+            .resolve_agent_ref("shared")
+            .expect("settled current-boot retry outranks the prior-boot ghost"),
+        retry_id
     );
 }
 
@@ -9962,6 +10078,18 @@ async fn shared_write_claim_is_registered_before_parallel_launch_and_manifested(
     assert!(
         contention.contains("contention") && contention.contains(&first_id),
         "{contention}"
+    );
+    // Guidance contract, pinned end-to-end: the ledger refusal keeps the
+    // prefix the spawn path keys on, and the spawn path appends the
+    // read-only recovery. Rewording either side must fail here loudly
+    // instead of silently disabling the guidance.
+    assert!(
+        contention.starts_with(super::WRITE_SCOPE_CONTENTION_PREFIX),
+        "the spawn guidance keys on this ledger prefix: {contention}"
+    );
+    assert!(
+        contention.contains("Read-only children never contend"),
+        "a spawn-path contention refusal must carry the read-only guidance: {contention}"
     );
     let guard = manager.read().await;
     let record = guard.get_worker_record(&first_id).expect("worker record");
