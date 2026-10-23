@@ -881,6 +881,10 @@ pub(crate) fn remove_agents_index_entry(
 /// 不启 GUI：拉起上次运行中且用户未关闭自启的已部署卡（autostart_pending），
 /// 结构化结果落 JSON 到卡片库旁（GUI 启动后读取并按结果弹窗——要求②：
 /// 任何问题都有解决方法提示）。
+// process::exit 的定点豁免（clippy::exit）：这是 systemd 调起的 headless 入口，
+// runtime 构建失败时唯一可用的报告通道就是非零退出码（journal 里可见）；
+// 库内其余路径仍禁止 exit。
+#[allow(clippy::exit)]
 pub fn run_model_store_autostart() {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
