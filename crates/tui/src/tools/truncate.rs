@@ -382,7 +382,9 @@ pub(crate) fn spillover_recovery_instruction(retrieval_ref: Option<&str>) -> Str
         None => format!(
             "{SPILLOVER_RECOVERY_HINT} full copy kept out of context; read it back with \
              retrieve_tool_result using this call's id or the spillover path — re-run the \
-             command with narrower output (a tighter filter, or head/tail) if you need it fresh"
+             command with narrower output (a tighter filter, or head/tail) if you need it fresh. \
+             If retrieve_tool_result is absent, activate it via tool_search first; if neither \
+             route is available, use the narrower rerun"
         ),
     }
 }
@@ -1120,6 +1122,11 @@ mod tests {
             "{footer}"
         );
         assert!(footer.contains("re-run the command"), "{footer}");
+        assert!(
+            footer.contains("activate it via tool_search first"),
+            "{footer}"
+        );
+        assert!(footer.contains("if neither route is available"), "{footer}");
         assert!(!footer.contains("read_file"), "{footer}");
         assert!(!footer.contains("sed"), "{footer}");
     }

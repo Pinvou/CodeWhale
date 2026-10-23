@@ -138,6 +138,9 @@ fn assert_dispatch_output(case: DispatchCase, chars: usize, needs_recovery: bool
                     rendezvous: parallel.then(|| Arc::new(tokio::sync::Barrier::new(2))),
                 }));
                 let mut catalog = registry.to_api_tools();
+                let mut retrieval = catalog_tool("retrieve_tool_result");
+                retrieval.defer_loading = Some(true);
+                catalog.push(retrieval);
                 let policy = policy_for_catalog(
                     catalog.clone(),
                     None,
@@ -145,6 +148,7 @@ fn assert_dispatch_output(case: DispatchCase, chars: usize, needs_recovery: bool
                     crate::tui::approval::ApprovalMode::Suggest,
                 );
                 let mut active = policy.active_names.clone();
+                assert!(!active.contains("retrieve_tool_result"));
                 let count = if parallel && !envelope { 2 } else { 1 };
                 let plans = (0..count)
                     .map(|index| ToolExecutionPlan {
@@ -205,12 +209,9 @@ fn assert_dispatch_output(case: DispatchCase, chars: usize, needs_recovery: bool
                     .collect();
                 assert_eq!(completions.len(), count);
                 let mut refs = HashSet::new();
-                for (index, outcome) in outcomes.into_iter().enumerate() {
-                    let outcome = outcome.expect("dispatched result");
-                    let output = outcome
-                        .terminal
-                        .into_legacy_result()
-                        .expect("fixture succeeded");
+                for (index, outcome) in outcomes.iter().enumerate() {
+                    let outcome = outcome.as_ref().expect("dispatched result");
+                    let output = outcome.terminal.legacy_result().expect("fixture succeeded");
                     let original = expected_output(case, chars, index);
                     assert_eq!(output.content, original);
                     let ui = completions[&outcome.id].as_ref().expect("UI completion");
@@ -256,6 +257,24 @@ fn assert_dispatch_output(case: DispatchCase, chars: usize, needs_recovery: bool
                         .expect("valid base64");
                     assert_eq!(bytes, original.as_bytes());
                 }
+                // Follow dispatch through the real result-recording seam and
+                // inspect the next provider surface, not just the helper.
+                engine
+                    .process_tool_results(
+                        outcomes,
+                        &mut catalog,
+                        &mut active,
+                        &HashMap::new(),
+                        &policy,
+                    )
+                    .await;
+                assert_eq!(
+                    active_tools_for_step(&catalog, &active)
+                        .iter()
+                        .any(|tool| tool.name == "retrieve_tool_result"),
+                    needs_recovery,
+                    "only preserved outputs activate retrieval for the next step",
+                );
                 assert_eq!(
                     session_artifact_files(home).len(),
                     if needs_recovery { count } else { 0 },

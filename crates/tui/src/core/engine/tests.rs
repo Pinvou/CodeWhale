@@ -19721,6 +19721,21 @@ fn forkguard_task_stream_summaries_are_inline_or_recoverable() {
         "short gate result silently lost stdout: {}",
         view.text
     );
+    // Keep the gate's own summary short so only the distinct stream field
+    // crosses its 800-character cut. Losing that field's lossy flag must fail.
+    for stream in ["stdout_summary", "stderr_summary"] {
+        let mut payload = json!({"gate": {"summary": "short gate summary"}});
+        payload[stream] = json!("stream detail ".repeat(100));
+        let raw = payload.to_string();
+        assert!(raw.chars().count() < budget_128k());
+        let view = view_128k("tasks", &ToolResult::success(raw));
+        assert!(
+            view.needs_full_output_artifact,
+            "cut {stream}: {}",
+            view.text
+        );
+        assert!(view.text.contains("the full output could not be saved"));
+    }
 }
 
 #[test]

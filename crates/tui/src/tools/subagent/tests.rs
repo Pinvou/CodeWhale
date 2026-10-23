@@ -11404,6 +11404,11 @@ fn stamp_subagent_summary_truncates_when_over_budget() {
         stamped.chars().filter(|c| *c == 'a').count() < big.chars().count(),
         "truncation removed middle characters"
     );
+    let (saved, truncated) = stamp_subagent_summary_with_ref(&big, Some("art_sa_child_report"));
+    assert!(truncated);
+    assert!(saved.contains("artifact art_sa_child_report"));
+    assert!(saved.contains("activate it via tool_search first"));
+    assert!(saved.contains("if neither route is available"));
 }
 
 #[test]
