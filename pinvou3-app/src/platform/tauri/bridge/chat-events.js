@@ -77,6 +77,11 @@ function pinvouSharedtauriChatEvents() {
     function notify() {
       cancelPendingStreamNotify(state.activeSessionId);
       immediateNotify();
+      // 直发（无合并帧）路径的派发标记；仅对有探针条目的流式 session 生效，
+      // 其它事件是空操作。
+      if (window.RenderStageProbe) {
+        try { window.RenderStageProbe.markDispatched(state.activeSessionId); } catch (_) {}
+      }
     }
 
     function scheduleStreamNotify(sid, firstDelta) {
@@ -103,6 +108,11 @@ function pinvouSharedtauriChatEvents() {
         // working set merely to issue a suppressed notification.
         try {
           immediateNotify();
+          // 流式合并帧发布后打「派发」段标记（评审 rebase 指示：放在 main 新
+          // publish() 结构的 immediateNotify() 之后、既有 try 块内）。
+          if (window.RenderStageProbe) {
+            try { window.RenderStageProbe.markDispatched(sid); } catch (_) {}
+          }
         } catch (error) {
           console.error("[chat] coalesced stream notify failed", error);
         }
@@ -111,6 +121,9 @@ function pinvouSharedtauriChatEvents() {
         pending.frame = window.requestAnimationFrame(publish);
       }
       pending.timer = setTimeout(publish, STREAM_NOTIFY_MAX_WAIT_MS);
+      if (window.RenderStageProbe) {
+        try { window.RenderStageProbe.markScheduled(sid); } catch (_) {}
+      }
     }
 
     function refreshEffectiveModelConfigAfterAuthError(error) {
