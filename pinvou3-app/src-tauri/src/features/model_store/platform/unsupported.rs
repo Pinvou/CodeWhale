@@ -18,6 +18,12 @@ use super::super::UNSUPPORTED_REASON;
 #[derive(Default)]
 pub struct ModelStoreService;
 
+impl ModelStoreService {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
 pub(crate) fn available() -> bool {
     false
 }
@@ -166,6 +172,25 @@ pub fn force_remove(
 }
 
 pub fn storage_settings() -> Result<Value, String> {
+    nope()
+}
+
+/// 模块商店在非 Linux 平台没有 config 模块；顶层桥接函数需要一个路径出口。
+pub mod config {
+    pub fn data_dir() -> std::path::PathBuf {
+        std::path::PathBuf::new()
+    }
+}
+
+pub fn set_auto_start(_card_id: String, _enabled: bool) -> Result<Value, String> {
+    nope()
+}
+
+pub async fn autostart_pending(_service: std::sync::Arc<ModelStoreService>) -> Value {
+    Value::Null
+}
+
+pub fn take_autostart_report() -> Result<Value, String> {
     nope()
 }
 
