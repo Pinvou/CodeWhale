@@ -40,6 +40,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": {}
+    "resources": {},
+    "linux": {
+      "deb": {
+        "files": {
+          "/usr/lib/systemd/user/pinvou3-model-store-autostart.service": "packaging/linux/systemd/pinvou3-model-store-autostart.service"
+        }
+      }
+    }
   }
 }
