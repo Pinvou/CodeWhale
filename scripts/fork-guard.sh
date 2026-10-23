@@ -314,6 +314,38 @@ fingerprints=(
   "APP|code-session marker, writer-side literal    |pinvou3-app/src-tauri/src/features/codex_acp/store.rs|join(\"code-session.json\")"
   "APP|title sentinel, Rust-side literal          |pinvou3-app/src-tauri/src/features/sessions/store.rs|const NEW_CHAT_TITLE: &str = \"新对话\""
   "APP|title sentinel, frontend dict literal      |pinvou3-app/src/shared/i18n.js|DEFAULT_CHAT_TITLES = new Set(['新对话', 'New chat', '新しいチャット'])"
+
+  # ── #701 对齐后 app 层 F 面存在性门禁（a7-f-registry M6 最小集；
+  # 语义登记见 docs/fork-modifications.md §12 分歧 5-8 / 分歧 1）──
+  "APP|F-A1 team-relay 桥整文件             |pinvou3-app/src/platform/tauri/bridge/team-relay.js|registry[\"team-relay\"] = function (context)"
+  "APP|F-A2 desktop-remote-control 桥整文件      |pinvou3-app/src/platform/tauri/bridge/desktop-remote-control.js|registry[\"desktop-remote-control\"] = function (context)"
+  "APP|F-A3 remote-control-state 整文件        |pinvou3-app/src/features/remote-control/remote-control-state.js|function createControlledDevice("
+  # F-B1（llmApi 闭源服务面 prepareBackendManagedModel/modelAvailabilityError）
+  # 已随 Account Platform 集成（PR #2053）整体退役：旧 llmapi_hub 的 JS 面由
+  # Account 模型门禁（getEffectiveModelConfig/loadEffectiveModelConfig）替代，
+  # 登记见 docs/fork-modifications.md §13；此两条钉子随之撤销，其余 F 面钉保留。
+  "APP|F-B2 web access/relay（web lane）       |pinvou3-app/src/platform/web/bridge.js|async function refreshWebAccessStatus("
+  "APP|F-B2 web relay 设置（tauri lane）        |pinvou3-app/src/platform/tauri/bridge/remote-control.js|async function getWebRelaySettings("
+  "APP|F-B3 remote proxy 会话视图            |pinvou3-app/src/platform/tauri/bridge/sessions.js|function isKnownRemoteProxy(id)"
+  "APP|F-B4 materializeSession              |pinvou3-app/src/platform/tauri/bridge/sessions.js|async function materializeSession("
+  "APP|F-C1 bridge-messages prompt-cache 谓词    |pinvou3-app/src/shared/bridge-messages.js|function isContextUpdateRuntimeMessage(value)"
+  "APP|F-C1 bridge-messages turn_meta 谓词      |pinvou3-app/src/shared/bridge-messages.js|function isKnownInternalMetadataBlock(value)"
+  "APP|裁决① personaName cn_name 兜底         |pinvou3-app/src/shared/bridge-shared-helpers.js|return (p.name || p.cn_name) || \"\";"
+
+  "T9|Custom route honors the config wire channel |CodeWhale/crates/config/src/route/resolver.rs|pub wire_override: Option<RequestProtocol>"
+  "T9|Custom wire dialect parsed at a single source |CodeWhale/crates/config/src/provider.rs|pub fn wire_dialect_override"
+  "T9|Custom wire dialect read at a single source   |CodeWhale/crates/tui/src/route_runtime.rs|pub(crate) fn custom_wire_override_for"
+  "T9|Runtime candidate reads the dialect by identity |CodeWhale/crates/tui/src/route_runtime.rs|custom_wire_override_for(&route_config)"
+  "T9|Runtime candidate carries the true wire         |CodeWhale/crates/tui/src/route_runtime.rs|fn forkguard_named_table_wire_responses_reaches_the_runtime_candidate"
+  "T9|Unrecognized dialect degrades to Chat           |CodeWhale/crates/tui/src/route_runtime.rs|fn forkguard_named_table_unrecognized_wire_keeps_the_chat_default"
+  "T9|Per-turn client pins /responses                 |CodeWhale/crates/tui/src/client.rs|fn forkguard_custom_responses_route_turn_client_posts_to_the_responses_endpoint"
+  "T9|Replay tag scoped to provider identity          |CodeWhale/crates/tui/src/client.rs|fn reasoning_provider_tag"
+  "T9|Ingress fails closed on non-Chat custom wire    |CodeWhale/crates/app-server/src/chat_completions.rs|wire_dialect_override(\"custom\", provider_cfg.wire.as_deref())"
+  "T9|Preflight validates the table's own dialect     |CodeWhale/crates/tui/src/provider_readiness.rs|codewhale_config::provider::wire_dialect_override("
+  "T9|Custom Responses encrypted-reasoning capture    |CodeWhale/crates/tui/src/client/responses/tests.rs|fn forkguard_custom_responses_stream_captures_encrypted_reasoning_as_opaque_state"
+  "T9|Custom Responses exact-model replay             |CodeWhale/crates/tui/src/client/responses/tests.rs|fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state"
+  "T9|Chat wire never captures encrypted reasoning    |CodeWhale/crates/tui/src/client/responses/tests.rs|fn forkguard_custom_chat_stream_does_not_capture_encrypted_reasoning"
+  "T9|Empty encrypted content skips without breaking the stream |CodeWhale/crates/tui/src/client/responses/tests.rs|fn forkguard_custom_responses_capture_tolerates_missing_or_empty_encrypted_content"
   "APP|unified 2000-step budget default           |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|const HOST_STEP_BUDGET: u32 = 2_000;"
   "APP|2000-step budget behavior regression       |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|fn engine_config_defaults_to_unified_step_budget_and_respects_override"
 )

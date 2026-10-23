@@ -192,12 +192,11 @@ let m;
 while ((m = clusterRe.exec(helpers)) !== null) {
   snapshot.clusters[m[1]] = [...m[2].matchAll(/([\w$]+): b\.([\w$]+)/g)].map((p) => `${p[1]}:${p[2]}`);
 }
-// Combined 315 = branch 314 (main T0 313 + retained public compactNow)
-// + T2 private applyToolItemResult; main T2 is 314. The new writer has only
-// parameter dependencies; replay adds an invocation-local Map. The complete
-// AST dependency/key/forwarder audit below remains unchanged.
+// Combined base: main T4b 313 (裁决③ clearVoiceInput 整删后的 Official 形态)
+// + Account 组合新增公共 compactNow(+loadEffectiveModelConfig 视实测)。合并树
+// 实测值见下行；applyToolItemResult 为私有、仅参数依赖。
 const EXPECTED_SURFACE = {
-  sharedFnCount: 315,
+  sharedFnCount: 314,
 };
 
 assert.equal(
@@ -248,8 +247,9 @@ const EXPECTED_CLUSTER_KEYS = {
     'touchSessionBuffer',
   ],
   'tauriArtifactTracker': ['DELIVERABLE_EXTS', 'invoke', 'isScheduledRunSession', 'notify', 'state'],
-  // Version-locked desktop needs no capability predicate: the shared body uses v2.
-  // Web supplies artifactInfo and hasCommand to preserve hydration and old-host fallback.
+  // Official：无 hasCommand——桌面 webview 与后端同包发布（version-locked），
+  // T4b 起 listDeliverableIndex 委托共享核 v2 协商，缺键按 v2 可用处理
+  //（helpers typeof 守卫）。Web 传 artifactInfo+hasCommand 保留水合与旧宿主回退。
   'tauriArtifacts': [
     'addAttachmentByPath',
     'addSystemItem',
@@ -491,9 +491,18 @@ const EXPECTED_CLUSTER_KEYS = {
   // 等，FORWARDER_DEP_NAMES 同步扩名列）与 createScheduledTask F 面；上游的
   // 24 个键（doSendFor/toolMeta/voiceOperations 等）官方 lane 尚不按簇消费，
   // 待 web C 面批次迁移后对齐。
+  // T4a（#701 对齐）：web 大 C 面壳化落地，create deps 已与上游 349569ac6
+  // 的 web 簇字面量逐键对齐（含 hasCommand: canInvoke——helpers
+  // listDeliverableIndex v2 协商用）；官方 F 路由前向器（freshBuffer 等 9 名）
+  // 与 createScheduledTask no-op 键随壳化移除，与上游集一致。
+  // Account 组合（PR #2053 复审对齐）沿用 main T4b 形态：lane 侧同名函数均为
+  // 委托壳，不得作为 forwarder dep 传回共享核（否则 base 重绑定到壳产生
+  // 自引用递归——freshBuffer 栈溢出实测）；共享核函数体即生效实现。
   'web': [
     'BT_TABLE',
     'DELIVERABLE_EXTS',
+    'MAX_EVICTED_SESSION_DRAFTS',
+    'MAX_EVICTED_SESSION_DRAFT_CHARS',
     'MAX_SCHEDULED_RUN_SESSION_OWNERS',
     'PINVOU_SCENE_EVENTS_STORAGE_PREFIX',
     'SCHEDULED_LINK_POLL_DEADLINE_MS',
@@ -510,57 +519,64 @@ const EXPECTED_CLUSTER_KEYS = {
     'artifactInfo',
     'candidateCardPatcher',
     'clearMonitorBaseline',
-    'createScheduledTask',
     'currentDraftModeState',
+    'currentStreamId',
+    'currentStreamText',
     'deletedPersonaIds',
     'dialogOpen',
+    'doSendFor',
     'ensureSession',
+    'ensureSessionBufferLoaded',
     'enterDraft',
-    'extractArtifactPaths',
+    'evictedSessionDrafts',
+    'finalizeAssistantStreamBeforeReasoning',
     'finishVoiceInput',
-    'flushAssistantMessageToHistory',
+    'flushPendingTextBlock',
+    'flushQueued',
     'forgetScheduledTaskTemplateSource',
-    'freshBuffer',
     'gpuUtilHistory',
     'hasCommand',
-    'hydratedMessageKey',
+    'historyRefreshPending',
+    'historyRefreshTimer',
     'invoke',
+    'itemIdSeq',
     'lastEquippedSid',
     'latestShellToolIsWaitObserver',
-    'loadMemoryOverview',
     'loadSessionModel',
-    'loadWorkingSetFrom',
     'memoryOverviewSeq',
-    'messageHasToolBlock',
     'modelsLoadSeq',
     'monitorBaseline',
     'monitorIntervalId',
+    'monitorPollInFlight',
     'mountedCollectionDraftTarget',
     'mountedCollectionUpdate',
     'normalizeTerminalTail',
     'notify',
     'openScheduledRunChatOnce',
-    'parseToolResultPayload',
+    'pendingAssistantBlocks',
+    'pendingAssistantText',
+    'pendingStreamNotifications',
     'persistScheduledTaskTemplateSources',
     'personaPlaceholderTitles',
     'personaPoolCache',
-    'pollMonitor',
+    'personaSyncSeq',
     'pruneScheduledSessionBuffers',
     'pruneSessionBuffers',
     'purgeSessionBuffer',
     'pushUserEcho',
+    'reconcileRemoteTurn',
     'recordAuthoritySyncDiagnostic',
     'refreshHistoryList',
     'reportSidecarReadFailure',
     'restoreEvictedSessionDraft',
     'runSyncOnSession',
-    'saveWorkingSetTo',
     'scheduledRecentRunsRequestToken',
     'scheduledRunEventRefreshTimer',
     'scheduledRunOpenInFlight',
     'scheduledRunOwnerTouchClock',
     'scheduledRunSessionOwners',
     'scheduledRunShortcutRefreshes',
+    'scheduledTaskAutoCreateInFlight',
     'scheduledTaskAutoCreateSeq',
     'scheduledTaskBackendInput',
     'scheduledTaskPendingLoads',
@@ -578,10 +594,10 @@ const EXPECTED_CLUSTER_KEYS = {
     'shellPollState',
     'state',
     'stopMediaTracks',
-    'summonPinvou',
     'switchToSessionInternal',
-  ],
-  'web:158313': ['state'],
+    'toolMeta',
+    'voiceOperations',
+  ],  'web:158313': ['state'],
   'web:189622': ['addChatItem', 'bt', 'pe'],
 };
 

@@ -148,7 +148,11 @@
     sessions: domain(["createNewSession", "materializeSession", "switchToSession", "deleteSession", "renameSession", "toggleSessionPinned", "archiveSession", "restoreArchivedSession", "onSessionDeleted", "getSessionWorkspaceBinding"]),
     monitor: domain(["startMonitorPolling", "stopMonitorPolling", "clearMonitorStats"]),
     settings: domain(["loadBehaviorTelemetryStatus", "setBehaviorTelemetryEnabled", "setSelectedPet", "saveSettings", "saveSettingsAndRestart", "saveSearchSettings", "saveSearchSettingsAndRestart", "testSearchProvider", "listBuiltinFeatures"]),
-    feedback: domain(["submitFeedback"]),
+    feedback: Object.assign(domain(["submitFeedback"]), Object.fromEntries(
+      ["listFailureDiagnostics", "previewFailureDiagnostic", "submitFailureDiagnostic", "pickDiagnosticFiles"].map(function (name) {
+        return [name, function () { return Promise.reject(new Error("diagnostic_platform_unsupported")); }];
+      })
+    )),
     vllm: domain(["discoverLocalVllm"]),
     models: domain(["getEffectiveModelConfig", "loadEffectiveModelConfig", "loadModels", "saveModel", "revealModelApiKey", "deleteModel", "setActiveModel", "loadSessionModel", "switchModel", "switchModelRef", "testModelConnection", "getImageInputCapability", "testImageInputCapability", "probeLocalServerKind"]),
     interaction: domain(["toggleSuperPerm", "acceptPlan", "discardPlan", "exitPlanToYolo", "setPlanModeNext", "setDraftMode", "setModeLane", "refreshModeDefaults", "getCodePermissionPrefs", "confirmCodeYolo", "syncModeState", "planStuckReplan", "planStuckGo", "submitUserInput", "cancelUserInput", "summonPinvou", "inspectPinvou", "resolvePinvouReview", "dismissPinvouReview", "editLastTurn", "compactNow"]),
@@ -159,8 +163,8 @@
       refreshRemoteControlQr: "rotateWebAccessLink",
       refreshRemoteControlStatus: "refreshWebAccessStatus"
     }),
-    artifacts: domain(["artifactInfo", "readArtifactText", "writeArtifactText", "readArtifactImageB64", "readArtifactThumbnail", "renderArtifactVisual", "openContainingFolder", "revealSessionFolder", "openScheduledTaskFolder", "openInSystem", "openArtifactExternal", "downloadArtifact", "listDeliverableIndex", "openExternalUrl", "openUserExternalUrl"]),
-    attachments: domain(["addAttachmentByPath", "addPasteImage", "removeAttachment", "clearAttachments", "pickAndAttach", "uploadDeviceFiles", "resolveConversationAttachment", "openConversationAttachment", "revealConversationAttachment"]),
+    artifacts: domain(["artifactInfo", "readArtifactText", "writeArtifactText", "readArtifactImageB64", "readArtifactThumbnail", "renderArtifactVisual", "openContainingFolder", "revealSessionFolder", "openScheduledTaskFolder", "openArtifactExternal", "downloadArtifact", "listDeliverableIndex", "openUserExternalUrl"]),
+    attachments: domain(["addAttachmentByPath", "addPasteImage", "removeAttachment", "pickAndAttach", "uploadDeviceFiles", "resolveConversationAttachment", "openConversationAttachment", "revealConversationAttachment"]),
     files: domain(["pickFiles", "pickFolders", "pickManageFolder", "pickRebindFolder", "pickWorkspaceFolder", "pickFeedbackFiles"]),
     personas: domain(["loadPersonas", "getPersonas", "readPersonaBody", "equipPersona", "unequipPersona", "postCardCreatorIntro", "createPersona", "updatePersona", "deletePersona"]),
     memory: domain(["loadMemoryOverview", "saveMemoryProfilePatch", "updateMemoryItem", "deleteMemoryItem", "confirmMemoryCandidate", "ignoreMemoryCandidate", "neverMemoryCandidate", "organizeMemory", "loadOrganizeHistory"]),

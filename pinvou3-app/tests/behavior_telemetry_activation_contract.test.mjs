@@ -5,6 +5,7 @@ import test from 'node:test';
 import { behaviorTelemetryRust } from './behavior_telemetry_source.mjs';
 
 const rust = behaviorTelemetryRust;
+const diagnosticRust = readFileSync(new URL('../src-tauri/src/features/behavior_telemetry/diagnostics.rs', import.meta.url), 'utf8');
 const usageRust = readFileSync(new URL('../src-tauri/src/platform/telemetry.rs', import.meta.url), 'utf8');
 const command = readFileSync(new URL('../src-tauri/src/app/commands/behavior_telemetry.rs', import.meta.url), 'utf8');
 const settingsBridge = readFileSync(new URL('../src/platform/tauri/bridge/settings.js', import.meta.url), 'utf8');
@@ -103,7 +104,10 @@ test('provider setup and first task environment use the v1 lifecycle events', ()
 
 test('client privacy allowlist stays aligned with schema and excludes server identity', () => {
   const allowlistBody = rust.match(/fn client_event_field_allowed[\s\S]*?fn validate_client_event_fields/)?.[0] || '';
-  const actual = Array.from(allowlistBody.matchAll(/\|?\s*"([a-z0-9_]+)"/g), match => match[1])
+  assert.match(allowlistBody, /if diagnostics::known_field\(field\)\s*\{\s*return true;/);
+  const diagnosticAllowlist = diagnosticRust.match(/fn known_field[\s\S]*?pub\(super\) fn validate/)?.[0] || '';
+  assert.notEqual(diagnosticAllowlist, '', 'the delegated diagnostic allowlist must be inspected');
+  const actual = Array.from(`${allowlistBody}\n${diagnosticAllowlist}`.matchAll(/\|?\s*"([a-z0-9_]+)"/g), match => match[1])
     .toSorted((left, right) => left.localeCompare(right));
   const expected = schema['x-client-optional-fields'].filter(field => !field.startsWith('remote_')).toSorted((left, right) => left.localeCompare(right));
   assert.deepEqual(actual, expected);
@@ -117,7 +121,12 @@ test('client privacy allowlist stays aligned with schema and excludes server ide
 test('retryable delivery and pending privacy controls keep bounded background retry loops', () => {
   assert.match(rust, /let retryable_remains = telemetry\.outbox[\s\S]*if retryable_remains \{[\s\S]*tokio::time::sleep/);
   assert.match(rust, /retry_delay = retry_delay\.saturating_mul\(2\)\.min\(RETRY_MAX_DELAY\)/);
-  assert.match(rust, /async fn run_control_worker[\s\S]*while telemetry\.has_pending_control\(\)\.await/);
+  assert.match(rust, /async fn run_control_worker[\s\S]*while telemetry\.has_pending_background_work\(\)\.await[\s\S]*retry_pending_control\(\)\.await/);
+  assert.match(rust, /async fn has_pending_background_work[\s\S]*state\.has_pending_control\(\) \|\| state\.renewal_checkpoint_is_current\(&self\.runtime\)/);
+  assert.match(rust, /async fn retry_pending_control\(&self\)[\s\S]*self\.control_gate\.lock\(\)\.await[\s\S]*finish_credential_renewal_checkpoint\(state\)[\s\S]*self\.retry_pending_control_locked\(\)\.await/);
+  assert.match(rust, /has_pending_control_sync\(\) \|\| renewal_pending/);
+  assert.match(rust, /Self::run_control_worker\([\s\S]*telemetry\.event_tx\.as_ref\(\)\.map\(mpsc::Sender::downgrade\)[\s\S]*telemetry\.report_tx\.as_ref\(\)\.map\(mpsc::Sender::downgrade\)/);
+  assert.match(rust, /async fn run_control_worker[\s\S]*sender\.upgrade\(\)[\s\S]*sender\.try_send\(\(\)\)/);
   assert.match(rust, /pending control retry deferred[\s\S]*tokio::select!/);
   assert.match(rust, /fn wake_control_worker[\s\S]*tx\.try_send/);
   assert.match(rust, /async fn retry_pending_control\(&self\)[\s\S]*self\.control_gate\.lock\(\)\.await/);
@@ -126,7 +135,11 @@ test('retryable delivery and pending privacy controls keep bounded background re
   assert.match(rust, /async fn migrate_endpoint_locked/);
   assert.match(rust, /StatusCode::GONE[\s\S]*device_credentials_expired[\s\S]*recover_expired_credentials/);
   assert.match(rust, /async fn recover_expired_credentials/);
-  assert.match(rust, /rebind_period\(&started\.collection_period_id, generation\)/);
+  assert.match(rust, /fn finish_credential_renewal_checkpoint[\s\S]*diagnostics::origin_periods\(self, lease\.generation\)\?[\s\S]*rebind_period\(&lease\.collection_period_id, lease\.generation, &origins\)/);
+  const renewal = rust.match(/pub\(super\) async fn recover_expired_credentials_locked[\s\S]*?pub\(super\) fn finish_credential_renewal_checkpoint/)?.[0] || '';
+  assert.match(renewal, /checkpoint\.credential_renewal_checkpoint = Some[\s\S]*persist_state\(&checkpoint\)[\s\S]*\*state = checkpoint;[\s\S]*finish_credential_renewal_checkpoint\(state\)/);
+  assert.doesNotMatch(renewal, /rebind_period\(|rebind_lifecycle_state\(/, 'no child lease may change before the durable checkpoint');
+  assert.match(renewal, /finish_credential_renewal_checkpoint\(state\)[\s\S]*self\.wake_control_worker\(\)/);
   assert.match(rust, /device_data_deleted[\s\S]*handle_authoritative_deletion/);
   assert.match(rust, /async fn handle_authoritative_deletion_locked[\s\S]*collecting\.store\(false[\s\S]*persist_state\(&fresh\)[\s\S]*outbox\.clear\(\)[\s\S]*tasks\.clear\(\)/);
   assert.match(rust, /fn state_after_authoritative_deletion[\s\S]*PersistedState::fresh/);

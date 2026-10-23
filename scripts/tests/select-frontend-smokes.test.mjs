@@ -31,6 +31,32 @@ test("system status participates in full and feature-local Account Platform brow
   assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/features/account-platform/AdminSystemStatusWorkspace.jsx"])).includes(status));
 });
 
+test("diagnostics consent smoke is executable and selected for all entry points", () => {
+  const packageJson = JSON.parse(readFileSync(
+    new URL("../../pinvou3-app/package.json", import.meta.url), "utf8",
+  ));
+  const knip = JSON.parse(readFileSync(
+    new URL("../../pinvou3-app/knip.json", import.meta.url), "utf8",
+  ));
+  const smoke = "npm:test:failure-diagnostics-ui";
+  assert.equal(
+    packageJson.scripts["test:failure-diagnostics-ui"],
+    "node tests/failure_diagnostics_ui_smoke.mjs",
+  );
+  assert.ok(!knip.ignore.includes("tests/failure_diagnostics_ui_smoke.mjs"));
+  assert.ok(fullLabels.includes(smoke));
+  for (const changedPath of [
+    "pinvou3-app/src/features/failure-diagnostics/DiagnosticsPanel.jsx",
+    "pinvou3-app/src/features/settings/SettingsView.jsx",
+    "pinvou3-app/src/features/conversation/ConversationTimeline.jsx",
+    "pinvou3-app/tests/failure_diagnostics_ui_smoke.mjs",
+    "pinvou3-app/tests/fixtures/failure_diagnostics.jsx",
+    "pinvou3-app/src/shared/i18n/failure-diagnostics.js",
+  ]) {
+    assert.ok(labels(selectFrontendSmokes([changedPath])).includes(smoke), changedPath);
+  }
+});
+
 const fullSuiteCases = [
   [
     "shared frontend paths fail closed to the full browser suite",
@@ -84,6 +110,7 @@ test("feature-local changes select core and feature smokes", () => {
       "npm:test:settings-ui",
       "npm:test:composer-tools-smoke",
       "npm:test:composer-pending-enable-smoke",
+      "npm:test:failure-diagnostics-ui",
       "node:tests/pet_selector_ui_smoke.js",
     ],
   );

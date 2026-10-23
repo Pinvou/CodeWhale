@@ -113,7 +113,8 @@ const expectedProtocolHashes = {
   // consumed from the artifact-tracker feature); same command surface, no new
   // invoke or listen entries (the extractor scans raw source, so body/comment
   // text is part of the digest).
-  orchestration: '11cea82864c529488140a447fbf46e3153a6005ddb6fc42603af1e82bc573bb3',
+  // Recomputed from the merged main shared-helper surface plus diagnostic wrappers.
+  orchestration: "ea8b35e2f9997a51a527387e5cddc94d1ece231dd546529e79eb108fdae18045",
   // Recomputed for artifact export telemetry after a successful external open;
   // attribution is now isolated to the explicitly targeted session.
   // Recomputed again for the Linux clipboard-image paste fallback (community
@@ -127,12 +128,14 @@ const expectedProtocolHashes = {
   // stale-absolute heal arm + rebasing save — same command surface, no new
   // invoke or listen entries (the extractor scans raw source, so
   // body/comment text is part of the digest).
-  // T0-fix 重算：listDeliverableIndex 恢复官方 lane 本地实现（上游共享核走
-  // list_deliverable_index_v2 协商，官方已推迟 v2 命令且视图消费 legacy 数组），
-  // list_deliverable_index / list_workspace_files 两个 invoke 面随之回到 artifacts
-  // 域 —— 命令集与官方 pre-壳化 形态一致，无增删命令。
-  // Facade delegates the deliverable index to shared v2/legacy negotiation; both original commands remain pinned in the shared base.
-  artifacts: 'd6fd511aaf84df324f7dfcadf6e651b3304c72cf297419934f31a339ed2c3e05',
+  // T4b 重算（main）：listDeliverableIndex 委托回共享核 v2 协商（官方 v2 命令已随 TB
+  // 入主线），list_deliverable_index / list_workspace_files 两个 invoke 面随之
+  // 回到 helpers 共享基座；裁决⑤ 定案删除 open_in_system / open_external_url
+  // 包装位（Rust 命令有 features 层消费，仅删 JS 面）。同批改动见
+  // artifacts.js / tauri/bridge.js facade / web bridge。
+  // 与 main T4b 态一致（实测 e4cd72cc… 无变化）：Account 组合未增删 artifacts 域
+  // invoke/listen 面，compactNow 等新公共面不落在该域。
+  artifacts: 'e4cd72cc8f6953c8e27cba48f24659e28cbe2c68b3b27e35ff3d5237dbbb9db1',
 // New domain: computer-use consent commands/events (desktop-only; the web
   // RPC allowlist excludes them, same policy as browser:*).
   // Recomputed when the 30s deny-suppression cooldown was removed: a deny now

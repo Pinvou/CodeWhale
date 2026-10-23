@@ -36,23 +36,31 @@ impl BehaviorTelemetry {
         let active_generation = persisted
             .as_ref()
             .map_or(0, |state| state.control.generation);
+        let renewal_pending = state_healthy
+            && persisted
+                .as_ref()
+                .is_some_and(|state| state.renewal_checkpoint_is_current(&runtime));
         let collecting = Arc::new(AtomicBool::new(
-            runtime.enabled && state_healthy && active_period.is_some(),
+            runtime.enabled && state_healthy && active_period.is_some() && !renewal_pending,
         ));
         let collection_period_id = Arc::new(RwLock::new(active_period.clone()));
         let mut loaded_outbox = Outbox::load(outbox_path()).unwrap_or_else(|error| {
             log::debug!("[pinvou3][behavior] failed to load outbox: {error:#}");
             Outbox::empty(outbox_path())
         });
-        if let Err(error) = loaded_outbox.retain_period(active_period.as_deref(), active_generation)
-        {
-            log::debug!("[pinvou3][behavior] failed to sanitize outbox period: {error:#}");
+        if !renewal_pending {
+            if let Err(error) =
+                loaded_outbox.retain_period(active_period.as_deref(), active_generation)
+            {
+                log::debug!("[pinvou3][behavior] failed to sanitize outbox period: {error:#}");
+            }
         }
         let outbox = Arc::new(StdMutex::new(loaded_outbox));
         let recovered_tasks = load_task_attempts()
             .into_iter()
             .filter(|(_, attempt)| {
-                active_period.as_deref() == Some(attempt.collection_period_id.as_str())
+                (renewal_pending
+                    || active_period.as_deref() == Some(attempt.collection_period_id.as_str()))
                     && attempt.generation == active_generation
             })
             .collect::<HashMap<_, _>>();
@@ -79,6 +87,7 @@ impl BehaviorTelemetry {
         } else {
             (None, None)
         };
+        let (report_tx, report_rx) = mpsc::channel(1);
         let telemetry = Self {
             client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(5))
@@ -96,6 +105,7 @@ impl BehaviorTelemetry {
             collection_period_id,
             outbox,
             tasks,
+            diagnostics: Arc::new(StdMutex::new(super::diagnostics::load())),
             remote_executions: Arc::new(StdMutex::new(super::remote_execution::load_state())),
             team_sessions: Arc::new(StdMutex::new(HashMap::new())),
             tool_calls: Arc::new(StdMutex::new(HashMap::new())),
@@ -106,9 +116,36 @@ impl BehaviorTelemetry {
             event_tx,
             control_tx,
             heartbeat_tx,
+            report_tx: Some(report_tx),
         };
+        if renewal_pending {
+            // This state is not shared with workers yet; never block an async
+            // runtime thread while repairing the checkpoint before sanitizing.
+            let recovery = match telemetry.state.try_lock() {
+                Ok(mut guard) => match guard.as_mut() {
+                    Some(state) => telemetry.finish_credential_renewal_checkpoint(state),
+                    None => Err(anyhow::anyhow!("credential renewal state missing")),
+                },
+                Err(error) => Err(anyhow::anyhow!(
+                    "credential renewal state unavailable: {error}"
+                )),
+            };
+            if let Err(error) = recovery {
+                telemetry.state_healthy.store(false, Ordering::Release);
+                log::error!("[pinvou3][behavior] credential renewal recovery deferred: {error:#}");
+            }
+        }
+        if telemetry.state_healthy.load(Ordering::Acquire) {
+            super::diagnostics::sanitize_authorization(&telemetry);
+        }
         if let Some(rx) = heartbeat_rx {
             tauri::async_runtime::spawn(Self::run_heartbeat_worker(rx, telemetry.worker_clone()));
+        }
+        if telemetry.runtime.enabled {
+            tauri::async_runtime::spawn(super::diagnostics::run_report_worker(
+                report_rx,
+                telemetry.worker_clone(),
+            ));
         }
         if let Some(rx) = event_rx {
             tauri::async_runtime::spawn(Self::run_worker(rx, telemetry.worker_clone()));
@@ -125,8 +162,13 @@ impl BehaviorTelemetry {
         if let Some(rx) = control_rx {
             let mut control_worker = telemetry.worker_clone();
             control_worker.control_tx = None;
-            tauri::async_runtime::spawn(Self::run_control_worker(rx, control_worker));
-            if telemetry.has_pending_control_sync() {
+            tauri::async_runtime::spawn(Self::run_control_worker(
+                rx,
+                control_worker,
+                telemetry.event_tx.as_ref().map(mpsc::Sender::downgrade),
+                telemetry.report_tx.as_ref().map(mpsc::Sender::downgrade),
+            ));
+            if telemetry.has_pending_control_sync() || renewal_pending {
                 telemetry.wake_control_worker();
             }
         }
@@ -143,6 +185,17 @@ impl BehaviorTelemetry {
                     ),
             );
         }
+        // A failed checkpoint retains task/diagnostic files for the worker's
+        // bounded retry or a later restart; do not clear them as stale leases.
+        let recovered_tasks = if telemetry.state_healthy.load(Ordering::Acquire) {
+            telemetry
+                .tasks
+                .lock()
+                .map(|tasks| tasks.clone())
+                .unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
         for (session_id, attempt) in recovered_tasks {
             if let Some(turn_id) = attempt.turn_id.as_deref() {
                 telemetry.track(
@@ -169,7 +222,9 @@ impl BehaviorTelemetry {
                 );
             }
         }
-        if let Ok(mut tasks) = telemetry.tasks.lock() {
+        if let Ok(mut tasks) = telemetry.tasks.lock()
+            && telemetry.state_healthy.load(Ordering::Acquire)
+        {
             tasks.clear();
             let _ = persist_task_attempts(&tasks);
         }
@@ -242,9 +297,10 @@ impl BehaviorTelemetry {
 
     pub(super) fn try_track_for_lease(
         &self,
-        event: BehaviorEvent,
+        mut event: BehaviorEvent,
         lease: &CollectionLease,
     ) -> bool {
+        super::diagnostics::enrich(self, &mut event, lease);
         let record = match self.prepare_record(event, lease) {
             Ok(record) => record,
             Err(error) => {
@@ -407,6 +463,7 @@ impl BehaviorTelemetry {
         }
         persist_task_attempts(&tasks)?;
         drop(tasks);
+        super::diagnostics::rebind(self, generation, period_id)?;
         super::remote_execution::rebind(self, generation, period_id)?;
         if let Ok(mut sessions) = self.team_sessions.lock() {
             sessions.values_mut().for_each(rebind);
@@ -491,6 +548,7 @@ impl BehaviorTelemetry {
             collection_period_id: self.collection_period_id.clone(),
             outbox: self.outbox.clone(),
             tasks: self.tasks.clone(),
+            diagnostics: self.diagnostics.clone(),
             remote_executions: self.remote_executions.clone(),
             team_sessions: self.team_sessions.clone(),
             tool_calls: self.tool_calls.clone(),
@@ -501,6 +559,7 @@ impl BehaviorTelemetry {
             event_tx: None,
             control_tx: self.control_tx.clone(),
             heartbeat_tx: None,
+            report_tx: None,
         }
     }
 
@@ -526,10 +585,15 @@ impl BehaviorTelemetry {
         }
     }
 
-    pub(super) async fn run_control_worker(mut rx: mpsc::Receiver<()>, telemetry: Self) {
+    pub(super) async fn run_control_worker(
+        mut rx: mpsc::Receiver<()>,
+        telemetry: Self,
+        event_wake: Option<mpsc::WeakSender<()>>,
+        report_wake: Option<mpsc::WeakSender<()>>,
+    ) {
         while rx.recv().await.is_some() {
             let mut retry_delay = Duration::from_secs(1);
-            while telemetry.has_pending_control().await {
+            while telemetry.has_pending_background_work().await {
                 match telemetry.retry_pending_control().await {
                     Ok(()) => retry_delay = Duration::from_secs(1),
                     Err(error) => {
@@ -550,7 +614,50 @@ impl BehaviorTelemetry {
                     }
                 }
             }
+            // worker_clone deliberately owns no event/report senders. Use weak
+            // senders so recovery wakes waiting workers without creating a
+            // sender ownership cycle that would keep them alive after shutdown.
+            // Also wake if another worker completed the checkpoint first.
+            for sender in [&event_wake, &report_wake].into_iter().flatten() {
+                if let Some(sender) = sender.upgrade() {
+                    let _ = sender.try_send(());
+                }
+            }
         }
+    }
+
+    async fn has_pending_background_work(&self) -> bool {
+        self.state.lock().await.as_ref().is_some_and(|state| {
+            state.has_pending_control() || state.renewal_checkpoint_is_current(&self.runtime)
+        })
+    }
+
+    pub(super) async fn retry_pending_control(&self) -> Result<()> {
+        let _control_guard = self.control_gate.lock().await;
+        let recovered_generation = {
+            let mut guard = self.state.lock().await;
+            if let Some(state) = guard.as_mut()
+                && state.renewal_checkpoint_is_current(&self.runtime)
+            {
+                if let Err(error) = self.finish_credential_renewal_checkpoint(state) {
+                    self.state_healthy.store(false, Ordering::Release);
+                    return Err(error);
+                }
+                Some(state.control.generation)
+            } else {
+                None
+            }
+        };
+        if let Some(generation) = recovered_generation {
+            self.flush_tool_install_terminals(generation);
+            if let Some(tx) = &self.event_tx {
+                let _ = tx.try_send(());
+            }
+            if let Some(tx) = &self.report_tx {
+                let _ = tx.try_send(());
+            }
+        }
+        self.retry_pending_control_locked().await
     }
 
     pub(super) async fn run_worker(mut rx: mpsc::Receiver<()>, telemetry: Self) {
@@ -660,7 +767,45 @@ impl BehaviorTelemetry {
             .json()
             .await
             .context("parse behavior event delivery response")?;
-        Ok(delivery_results(records, response))
+        let mut results = delivery_results(records, response);
+        // Additive diagnostics must not cost a terminal event on older relays.
+        // Only rejected IDs are retried, preserving deduplication and counts.
+        let fallback = records
+            .iter()
+            .filter(|record| {
+                record.event.get("diagnostic_id").is_some()
+                    && results
+                        .get(&record.event_id)
+                        .is_some_and(|(status, reason)| {
+                            *status == DeliveryStatus::Rejected
+                                && reason.as_deref() == Some("invalid_field")
+                        })
+            })
+            .cloned()
+            .map(|mut record| {
+                if let Some(fields) = record.event.as_object_mut() {
+                    fields.retain(|key, _| !key.starts_with("diagnostic_"));
+                }
+                record
+            })
+            .collect::<Vec<_>>();
+        if !fallback.is_empty() {
+            match Box::pin(self.send_events(&fallback)).await {
+                Ok(plain) => results.extend(plain),
+                Err(_) => {
+                    for record in fallback {
+                        results.insert(
+                            record.event_id,
+                            (
+                                DeliveryStatus::Retryable,
+                                Some("network_unavailable".into()),
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+        Ok(results)
     }
 
     pub(super) async fn recover_expired_credentials(&self, expired: &Credentials) -> Result<bool> {
@@ -786,6 +931,9 @@ impl BehaviorTelemetry {
 
     pub(super) fn clear_local_transient_state(&self) -> Vec<String> {
         let mut failures = Vec::new();
+        if let Err(error) = super::diagnostics::clear(self) {
+            failures.push(format!("clear diagnostics: {error:#}"));
+        }
         if let Err(error) = super::remote_execution::clear(self) {
             failures.push(format!("clear remote telemetry: {error:#}"));
         }
@@ -952,25 +1100,76 @@ impl BehaviorTelemetry {
             generation,
         );
         self.collecting.store(false, Ordering::Release);
-        self.outbox
-            .lock()
-            .map_err(|_| anyhow::anyhow!("behavior outbox lock poisoned"))?
-            .rebind_period(&started.collection_period_id, generation)?;
-        self.rebind_lifecycle_state(generation, &started.collection_period_id)?;
-        state.device_id = Some(renewed.device_id);
-        state.device_token = Some(renewed.device_token);
-        state.control.enabled = true;
-        state.control.collection_period_id = Some(started.collection_period_id.clone());
-        state.control.generation = generation;
-        state.control.pending_request = None;
-        persist_state(state)?;
-        if let Ok(mut period) = self.collection_period_id.write() {
-            *period = Some(started.collection_period_id);
+        let mut checkpoint = state.clone();
+        checkpoint.device_id = Some(renewed.device_id);
+        checkpoint.device_token = Some(renewed.device_token);
+        checkpoint.control.enabled = true;
+        checkpoint.control.collection_period_id = Some(started.collection_period_id.clone());
+        checkpoint.control.generation = generation;
+        checkpoint.control.pending_request = None;
+        checkpoint.credential_renewal_checkpoint = Some(CollectionLease {
+            generation,
+            collection_period_id: started.collection_period_id,
+        });
+        // Failure here leaves all child files and the old in-memory state intact.
+        if let Err(error) = persist_state(&checkpoint) {
+            self.collecting
+                .store(snapshot.control.enabled, Ordering::Release);
+            return Err(error);
         }
-        self.collecting.store(true, Ordering::Release);
+        *state = checkpoint;
+        if let Err(error) = self.finish_credential_renewal_checkpoint(state) {
+            self.state_healthy.store(false, Ordering::Release);
+            self.wake_control_worker();
+            return Err(error);
+        }
         renewal_transition.complete();
         self.flush_tool_install_terminals(generation);
         Ok(true)
+    }
+
+    pub(super) fn finish_credential_renewal_checkpoint(
+        &self,
+        state: &mut PersistedState,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            state.renewal_checkpoint_is_current(&self.runtime),
+            "credential renewal authorization changed"
+        );
+        let lease = state
+            .credential_renewal_checkpoint
+            .clone()
+            .context("credential renewal checkpoint missing")?;
+        anyhow::ensure!(
+            self.authorization_generation.load(Ordering::Acquire) == lease.generation,
+            "credential renewal generation changed"
+        );
+        let origins = super::diagnostics::origin_periods(self, lease.generation)?;
+        {
+            let mut outbox = self
+                .outbox
+                .lock()
+                .map_err(|_| anyhow::anyhow!("behavior outbox lock poisoned"))?;
+            // A checkpoint renews only its original consent generation, never a
+            // stale event left behind by withdrawal or another subject.
+            outbox
+                .records
+                .retain(|record| record.generation == lease.generation);
+            outbox.rebind_period(&lease.collection_period_id, lease.generation, &origins)?;
+        }
+        self.rebind_lifecycle_state(lease.generation, &lease.collection_period_id)?;
+        let mut committed = state.clone();
+        committed.credential_renewal_checkpoint = None;
+        persist_state(&committed)?;
+        *state = committed;
+        *self
+            .collection_period_id
+            .write()
+            .map_err(|_| anyhow::anyhow!("behavior period lock poisoned"))? =
+            Some(lease.collection_period_id);
+        self.state_healthy.store(true, Ordering::Release);
+        self.collecting.store(true, Ordering::Release);
+        Ok(())
     }
 
     pub async fn status(&self) -> BehaviorTelemetryStatus {
@@ -1229,11 +1428,6 @@ impl BehaviorTelemetry {
             self.wake_control_worker();
         }
         self.delete_local_data().await
-    }
-
-    pub(super) async fn retry_pending_control(&self) -> Result<()> {
-        let _control_guard = self.control_gate.lock().await;
-        self.retry_pending_control_locked().await
     }
 
     pub(super) async fn retry_pending_control_locked(&self) -> Result<()> {

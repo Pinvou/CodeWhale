@@ -26,7 +26,7 @@ function usePlatformCapability(capability) {
   useEffect(() => {
     const refresh = () => setSupported(can(capability));
     if (!isWeb) {
-      if (capability !== 'desktopRemoteControl' || !bridge.available || !bridge.state) return undefined;
+      if (!['desktopRemoteControl', 'failureDiagnostics'].includes(capability) || !bridge.available || !bridge.state) return undefined;
       return bridge.state.subscribe('platform', refresh);
     }
     window.addEventListener('pinvou:web-capabilities', refresh);

@@ -4,8 +4,13 @@ import test from 'node:test';
 import vm from 'node:vm';
 const bridge = readFileSync(new URL('../src/platform/tauri/bridge.js', import.meta.url), 'utf8');
 const fallback = readFileSync(new URL('../src/shared/markdown-bridge-fallback.js', import.meta.url), 'utf8');
+// #701 T4b 壳化后 renderMarkdown 等委托 window.PinvouBridgeShared（index.html
+// 在两个桥之前先载共享包）；vm 装载须遵循同一载入序。独立预览 facade 的
+// 安全合同（无后端能力、escapeHtml 转义、渲染器优先级）保持原断言。
+const sharedHelpers = readFileSync(new URL('../src/shared/bridge-shared-helpers.js', import.meta.url), 'utf8');
 function load(window, before) {
   const context = vm.createContext({ window, console: { warn() {} } });
+  vm.runInContext(sharedHelpers, context, { timeout: 1000 });
   if (before) vm.runInContext(before, context, { timeout: 1000 });
   vm.runInContext(bridge, context, { timeout: 1000 });
   return window.TauriBridge;

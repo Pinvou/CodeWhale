@@ -20,6 +20,20 @@ function pinvouSharedtauriMain() {
   const TAURI = window.__TAURI__;
   if (!TAURI) {
     console.warn("[TauriBridge] Tauri not available — browser preview mode");
+    // 独立预览不经共享核：壳化的 renderMarkdown 依赖 index.html 先载的
+    // PinvouBridgeShared，且早退分支之后声明的桥内常量处于 TDZ——本地保底
+    // 渲染链（权威渲染器 → 共享 fallback → 内联转义）保持预览自包含且安全。
+    function standaloneSafeRenderMarkdown(text) {
+      if (window.PinvouMarkdownRenderer && typeof window.PinvouMarkdownRenderer.renderMarkdown === "function") {
+        return window.PinvouMarkdownRenderer.renderMarkdown(text);
+      }
+      if (window.PinvouMarkdownBridgeFallback && typeof window.PinvouMarkdownBridgeFallback.renderMarkdown === "function") {
+        return window.PinvouMarkdownBridgeFallback.renderMarkdown(text);
+      }
+      return String(text == null ? "" : text).replace(/[&<>"']/g, function (c) {
+        return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+      });
+    }
     window.TauriBridge = {
       available: false,
       lifecycle: { init: function () { return Promise.resolve(); } },
@@ -29,7 +43,7 @@ function pinvouSharedtauriMain() {
         subscribe: function () { return function () {}; },
         subscribeMany: function () { return function () {}; },
       },
-      rendering: { renderMarkdown: renderMarkdown },
+      rendering: { renderMarkdown: standaloneSafeRenderMarkdown },
     };
     return;
   }
@@ -146,25 +160,10 @@ function pinvouSharedtauriMain() {
   // 优先委托共享渲染器 window.PinvouMarkdownRenderer（npm 版，含语法高亮）；在其尚未安装的
   // 短暂窗口退回 vendor 全局兜底。兜底实现已收敛到 shared/markdown-bridge-fallback.js
   // （随 index.html 以普通脚本加载，暴露 window.PinvouMarkdownBridgeFallback），消除两份逐字复制。
-  // 最末级 fallback 必须自带 escapeHtml：共享脚本未加载时 renderMarkdown 仍会被
-  // dangerouslySetInnerHTML 消费，原文返回即 fail-open。escapeHtml 作为安全原语保留在本文件
-  // （不依赖任何外部脚本），仅 marked.parse+sanitize 这段较重的兜底被抽到共享文件。
-
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, function (c) {
-      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
-    });
-  }
-
-  function renderMarkdown(text) {
-    if (window.PinvouMarkdownRenderer && typeof window.PinvouMarkdownRenderer.renderMarkdown === "function") {
-      return window.PinvouMarkdownRenderer.renderMarkdown(text);
-    }
-    if (window.PinvouMarkdownBridgeFallback && typeof window.PinvouMarkdownBridgeFallback.renderMarkdown === "function") {
-      return window.PinvouMarkdownBridgeFallback.renderMarkdown(text);
-    }
-    return escapeHtml(text || "");
-  }
+  // 整条 fallback 链（含最末级的 escapeHtml fail-open）都在 shared/bridge-shared-helpers.js
+  // 的 renderMarkdown 里；本文件只剩转发 —— 共享基座未加载时这里直接抛错（加载期即暴露），
+  // 而不是静默 fail-open（round-9 review：原文注释仍声称 escapeHtml 保留在本文件）。
+function renderMarkdown(text) { return pinvouSharedtauriMain().renderMarkdown(text); }
 
 
 
@@ -824,6 +823,10 @@ function authoritySyncBufferSnapshot(sid, buf) { return pinvouSharedtauriMain().
       newChatFallbackTitle: "新对话",
     },
   };
+  // T4b 保留 lane 本体（不壳化）：官方 bt 在 BT_TABLE 之外叠加 uiDictionary
+  // （init 时由 useBridge 注入 CHAT_RECOVERY_COPY）兜底——后端语言 chunk 懒载
+  // 窗口内 steerFailedLost 仍按当前语言出文案（zap_withdraw_window 钉住）；
+  // 上游 bt 为纯簇转发、无此分支，上游采纳前不回退。
   function bt(key) {
     var lang = state.settings && state.settings.language;
     // Shared UI copy is loaded before render; normalize the backend Chinese tag too.
@@ -1370,26 +1373,16 @@ function pinvouSceneForMessagePos(pos) { return pinvouSharedtauriMain().pinvouSc
 
   // 事件监听器统一入口:按 payload.session_id 路由同步逻辑;后台变更后补一次 notify 刷新列表。
 function markRemoteTurn(sid, buf, preserveCommittedRevision, cause) { return pinvouSharedtauriMain().markRemoteTurn(sid, buf, preserveCommittedRevision, cause); }
-  function onSessionEvent(e, fn, options) {
-    var sid = (e && e.payload && e.payload.session_id) || state.activeSessionId;
-    if (sid) {
-      var eventBuffer = getBuffer(sid);
-      var eventName = String((e && e.event) || "");
-      var isTurnEvent = /chat:(user_message|turn_started|delta|reasoning_start|reasoning_delta|reasoning_done|tool_start|tool_end|user_input_required|transient_error)$/.test(eventName);
-      if (eventBuffer && !eventBuffer.localTurnOwned && (eventBuffer.busy || isTurnEvent)) {
-        markRemoteTurn(sid, eventBuffer, false, "event:" + eventName);
-      }
-    }
-    var isBg = sid && sid !== state.activeSessionId;
-    runSyncOnSession(sid, fn);
-    if (isBg && !(options && options.deferBackgroundNotify)) notify();
-  }
+function onSessionEvent(e, fn, options) { return pinvouSharedtauriMain().onSessionEvent(e, fn, options); }
 
 function isScheduledRunSession(sid) { return pinvouSharedtauriMain().isScheduledRunSession(sid); }
 
   // Transcript persistence is authoritative in Rust. The UI only persists the
   // presentation-side artifact index and derives the optional auto-title.
-
+  // T4b 保留 lane 本体（不壳化）：官方 persistMessagesFor 自动标题按 user 轮次
+  // 落空即顺延到下一条可展示 user 消息（scheduled_tasks_unit 场景 1b 钉住），
+  // helpers/upstream 版只取首条 user——上游采纳前 tauri lane 不回退；与 T4a
+  // 保留的 web lane 本体同判，fork-modifications §12 分歧登记随迁。
   async function persistMessagesFor(sid) {
     if (!sid) return;
     if (isScheduledRunSession(sid)) return;
@@ -1685,71 +1678,7 @@ function planCardHydrationKey(item) { return pinvouSharedtauriMain().planCardHyd
   // a stable new item for subscribers. get/getMany retain their deep-copy API.
 function defineSubscriptionStateProperty(target, key, value) { return pinvouSharedtauriMain().defineSubscriptionStateProperty(target, key, value); }
 function copySubscriptionStateObject(source) { return pinvouSharedtauriMain().copySubscriptionStateObject(source); }
-  // eslint-disable-next-line sonarjs/cognitive-complexity -- legacy bridge; refactor tracked separately
-  function subscriptionStateValue(value, previous, ancestors) {
-    var valueType = typeof value;
-    if (!value || valueType !== "object") {
-      if (valueType === "function" || valueType === "symbol" || valueType === "bigint") {
-        throw new TypeError("Subscription state only supports JSON-like scalar values");
-      }
-      return value;
-    }
-    var isArray = Array.isArray(value);
-    if (!isArray) {
-      var prototype = Object.getPrototypeOf(value);
-      var isPlainObject = prototype === null || (
-        Object.getPrototypeOf(prototype) === null &&
-        Object.prototype.hasOwnProperty.call(prototype, "constructor") &&
-        prototype.constructor && prototype.constructor.name === "Object"
-      );
-      if (!isPlainObject) {
-        throw new TypeError("Subscription state only supports arrays and plain objects");
-      }
-    }
-    ancestors = ancestors || new WeakSet();
-    if (ancestors.has(value)) throw new TypeError("Subscription state must not contain cycles");
-    ancestors.add(value);
-    try {
-      if (isArray) {
-        var previousArray = Array.isArray(previous) ? previous : null;
-        if (!previousArray) {
-          return Object.freeze(value.map(function (item) {
-            return subscriptionStateValue(item, undefined, ancestors);
-          }));
-        }
-        var nextArray = value.length === previousArray.length ? null : previousArray.slice(0, value.length);
-        for (var arrayIndex = 0; arrayIndex < value.length; arrayIndex++) {
-          var nextItem = subscriptionStateValue(value[arrayIndex], previousArray[arrayIndex], ancestors);
-          if (!Object.is(nextItem, previousArray[arrayIndex])) {
-            if (!nextArray) nextArray = previousArray.slice();
-            nextArray[arrayIndex] = nextItem;
-          }
-        }
-        return nextArray ? Object.freeze(nextArray) : previousArray;
-      }
-
-      var keys = Object.keys(value);
-      var previousObject = previous && typeof previous === "object" && !Array.isArray(previous)
-        ? previous
-        : null;
-      var previousKeys = previousObject ? Object.keys(previousObject) : [];
-      var sameShape = !!previousObject && keys.length === previousKeys.length && keys.every(function (key) {
-        return Object.prototype.hasOwnProperty.call(previousObject, key);
-      });
-      var nextObject = sameShape ? null : {};
-      for (var objectIndex = 0; objectIndex < keys.length; objectIndex++) {
-        var key = keys[objectIndex];
-        var nextValue = subscriptionStateValue(value[key], previousObject && previousObject[key], ancestors);
-        if (!sameShape || !Object.is(nextValue, previousObject[key])) {
-          if (!nextObject) nextObject = copySubscriptionStateObject(previousObject);
-          defineSubscriptionStateProperty(nextObject, key, nextValue);
-        }
-      }
-      return nextObject ? Object.freeze(nextObject) : previousObject;
-    } finally {
-      ancestors.delete(value);
-    }
-  }
+function subscriptionStateValue(value, previous, ancestors) { return pinvouSharedtauriMain().subscriptionStateValue(value, previous, ancestors); }
 
   // Slice caches are invalidated by the single publication revision: #727
   // replaced per-domain precise publication with one host-snapshot publish
@@ -1934,7 +1863,10 @@ function parseCarefulBlocked(text) { return pinvouSharedtauriMain().parseCareful
   // 子智能体完成交接同理：结果必须留在父模型上下文，但不能冒充用户消息上屏。
   // 原始 blocks 必须保留给模型续聊；展示层只隐藏该内部消息，避免伪装成用户气泡/新 Turn。
   // 定时会话还会过滤送模 envelope，只投影真实任务正文。
-
+  // T4b 保留 lane 本体（不壳化）：官方版以 isInternalUserMessage(blocks) +
+  // isKnownInternalMetadataBlock（bridge-messages F 谓词）判定并就地过滤元数据块，
+  // helpers/upstream 版走 isInternalRuntimeUserMessage/provenance 且不滤
+  // isKnownInternalMetadataBlock——桥消息 F 面（t4-ledger），上游采纳前不回退。
   function userMessageDisplayText(blocks, hideInternalEnvelope) {
     var textParts = (Array.isArray(blocks) ? blocks : [])
       .filter(function (block) { return block && block.type === "text"; })
@@ -2282,17 +2214,14 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
   var openContainingFolder = artifactsFeature.openContainingFolder;
   var revealSessionFolder = artifactsFeature.revealSessionFolder;
   var openScheduledTaskFolder = artifactsFeature.openScheduledTaskFolder;
-  var openInSystem = artifactsFeature.openInSystem;
   var openArtifactExternal = artifactsFeature.openArtifactExternal;
   var downloadArtifact = artifactsFeature.downloadArtifact;
   var listDeliverableIndex = artifactsFeature.listDeliverableIndex;
-  var openExternalUrl = artifactsFeature.openExternalUrl;
   var openUserExternalUrl = artifactsFeature.openUserExternalUrl;
   var addAttachmentByPath = artifactsFeature.addAttachmentByPath;
   var addPasteImage = artifactsFeature.addPasteImage;
   var addPasteImageFromClipboard = artifactsFeature.addPasteImageFromClipboard;
   var removeAttachment = artifactsFeature.removeAttachment;
-  var clearAttachments = artifactsFeature.clearAttachments;
   var pickAndAttach = artifactsFeature.pickAndAttach;
   var uploadDeviceFiles = artifactsFeature.uploadDeviceFiles;
   var adoptManagedAttachments = artifactsFeature.adoptManagedAttachments;
@@ -2731,7 +2660,18 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       listBuiltinFeatures,
       setBuiltinFeatureEnabled: setBuiltinFeatureEnabled,
     },
-    feedback: { submitFeedback: submitFeedback },
+    feedback: {
+      submitFeedback: submitFeedback,
+      listFailureDiagnostics: function () { return invoke("list_failure_diagnostics"); },
+      previewFailureDiagnostic: function (request) { return invoke("preview_failure_diagnostic", { request: request }); },
+      submitFailureDiagnostic: function (previewToken) { return invoke("submit_failure_diagnostic", { previewToken: previewToken, confirmed: true }); },
+      pickDiagnosticFiles: async function (filterName) {
+        if (!dialogOpen) throw new Error("diagnostic_picker_unsupported");
+        if (typeof filterName !== "string" || !filterName.trim()) throw new Error("diagnostic_picker_unsupported");
+        var selected = await dialogOpen({ multiple: true, filters: [{ name: filterName, extensions: ["png", "jpg", "jpeg", "txt", "log"] }] });
+        return selected ? (Array.isArray(selected) ? selected : [selected]) : [];
+      },
+    },
     vllm: {
       discoverLocalVllm: discoverLocalVllm,
     },
@@ -2844,11 +2784,9 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       openContainingFolder: openContainingFolder,
       revealSessionFolder: revealSessionFolder,
       openScheduledTaskFolder: openScheduledTaskFolder,
-      openInSystem: openInSystem,
       openArtifactExternal: openArtifactExternal,
       downloadArtifact: downloadArtifact,
       listDeliverableIndex: listDeliverableIndex,
-      openExternalUrl: openExternalUrl,
       openUserExternalUrl: openUserExternalUrl,
     },
     attachments: {
@@ -2856,7 +2794,6 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       addPasteImage: addPasteImage,
       addPasteImageFromClipboard: addPasteImageFromClipboard,
       removeAttachment: removeAttachment,
-      clearAttachments: clearAttachments,
       pickAndAttach: pickAndAttach,
       uploadDeviceFiles: uploadDeviceFiles,
       resolveConversationAttachment: resolveConversationAttachment,

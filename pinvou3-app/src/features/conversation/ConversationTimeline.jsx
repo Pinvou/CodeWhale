@@ -31,6 +31,7 @@ import {
   workspaceMarkdownResource,
 } from './conversation-model.js';
 import { AssistantMessageActions, AssistantMessageFooter } from './AssistantMessageActions.jsx';
+import DiagnosticsPanel from '../failure-diagnostics/DiagnosticsPanel.jsx';
 import {
   codeBlockCopyLabels,
   copyCodeBlockFromButton,
@@ -1083,6 +1084,7 @@ function ConversationTurnView({
                   </div>
                 </div>
               ) : turn.error && <span className="text-[11px] text-red-500">{turn.error}</span>}
+              {['failed', 'interrupted'].includes(turn.status) && c.failureDiagnostics && <DiagnosticsPanel copy={c.failureDiagnostics} sessionId={sessionId} turnId={turn.behaviorTurnId} compact />}
             </>}
           </AssistantMessageFooter>}
         </div>

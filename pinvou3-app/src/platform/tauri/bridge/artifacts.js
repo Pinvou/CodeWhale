@@ -21,7 +21,6 @@ function pinvouSharedtauriArtifacts() {
     var dialogOpen = context.dialogOpen;
     var basename = context.basename;
     var isDeliverable = context.isDeliverable;
-    var isAbsPath = context.isAbsPath;
     var sessionStates = context.sessionStates;
     var discardManagedAttachment = context.discardManagedAttachment || function () { return Promise.resolve(); };
     var attachIdSeq = 0;
@@ -94,18 +93,15 @@ function pinvouSharedtauriArtifacts() {
 function openContainingFolder(path) { return pinvouSharedtauriArtifacts().openContainingFolder(path); }
 function revealSessionFolder(sessionId) { return pinvouSharedtauriArtifacts().revealSessionFolder(sessionId); }
 function openScheduledTaskFolder(automationId) { return pinvouSharedtauriArtifacts().openScheduledTaskFolder(automationId); }
-  function openInSystem(path) { return invoke("open_in_system", { path }).catch(function (e) { addSystemItem(bt("openFailed") + e); }); }
-  // 仅放白名单 URL (metaso.cn / open.bochaai.com),后端 open_external_url 强制校验。
-  function openExternalUrl(url) { return invoke("open_external_url", { url: url }).catch(function (e) { addSystemItem(bt("openFailed") + e); }); }
   // ACP 消息/产物预览里由用户亲自点击的 HTTP(S) 外链；后端与工具白名单入口分开校验。
   function openUserExternalUrl(url) { return invoke("open_user_external_url", { url }).catch(function (e) { addSystemItem(bt("openFailed") + e); }); }
-function deliverableCategory(path) { return pinvouSharedtauriArtifacts().deliverableCategory(path); }
-function sessionTitleById(sid) { return pinvouSharedtauriArtifacts().sessionTitleById(sid); }
-function currentMemoryArtifacts() { return pinvouSharedtauriArtifacts().currentMemoryArtifacts(); }
   // 跨会话产出物索引:磁盘 session JSON 为主,再合并当前内存工作集。
   // 新产物在 chat:done/save_session_artifacts 前也能立刻出现在「产出物」一级入口。
-  // Version-locked desktop uses the current v2 command; shared merging preserves
-  // skipped records and lets total scan failures reach the Knowledge view.
+  // #701 T4b 壳化：官方 v2 命令（list_deliverable_index_v2）已随 TB 入主线
+  //（src-tauri/src/app/commands/artifacts.rs + lib.rs 注册），KnowledgeView 亦为
+  // accept-both 双形状 —— lane 改委托共享核（helpers v2 协商版；桌面 webview
+  // 与后端同包发布、version-locked，lane 不传 hasCommand 时按 v2 可用处理）。
+  // 共享合并核保留跳过记录，整体扫描失败如实上抛到 Knowledge 视图。
   async function listDeliverableIndex() { return pinvouSharedtauriArtifacts().listDeliverableIndex(); }
   // 外部打开产物：HTML 走 Tauri 独立窗口（绕沙箱），其他走系统应用。
   // sessionId = 卡片携带的产物所属 session。后端 resolve_artifact_path 用它(而非全局
@@ -282,16 +278,6 @@ function conversationAttachmentArgs(reference) { return pinvouSharedtauriArtifac
     state.attachments = state.attachments.filter(function (a) { return a.id !== id; });
     notify();
   }
-  function clearAttachments() {
-    state.attachments.forEach(function (attachment) {
-      attachment.cancelled = true;
-      finishAttachmentTelemetry(attachment, false, "user_cancelled");
-      if (attachment.status === "ready" && attachment.result) {
-        discardManagedAttachment(attachment.result);
-      }
-    });
-    state.attachments = [];
-  }
   // 打开系统文件选择器并摄入为附件
 async function pickAndAttach() { return pinvouSharedtauriArtifacts().pickAndAttach(); }
   // 文件选择按钮在桌面仍走原生路径；HTML5 拖放拿不到路径时通过同一域方法
@@ -336,17 +322,14 @@ async function pickAndAttach() { return pinvouSharedtauriArtifacts().pickAndAtta
       openContainingFolder: openContainingFolder,
       revealSessionFolder: revealSessionFolder,
       openScheduledTaskFolder: openScheduledTaskFolder,
-      openInSystem: openInSystem,
       openArtifactExternal: openArtifactExternal,
       downloadArtifact: downloadArtifact,
       listDeliverableIndex: listDeliverableIndex,
-      openExternalUrl: openExternalUrl,
       openUserExternalUrl: openUserExternalUrl,
       addAttachmentByPath: addAttachmentByPath,
       addPasteImage: addPasteImage,
       addPasteImageFromClipboard: addPasteImageFromClipboard,
       removeAttachment: removeAttachment,
-      clearAttachments: clearAttachments,
       pickAndAttach: pickAndAttach,
       uploadDeviceFiles: uploadDeviceFiles,
       adoptManagedAttachments: adoptManagedAttachments,

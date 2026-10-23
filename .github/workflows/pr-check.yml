@@ -307,11 +307,19 @@ jobs:
               - 'CodeWhale'
               - 'pinvou3-app/src-tauri/rust-toolchain.toml'
               - 'pinvou3-app/src-tauri/**/*.rs'
-              # behavior_telemetry_tests.rs include_str! 根目录遥测 registries
-              # 做跨语言契约断言;不列出则 registries-only 改动会静默跳过
-              # rust-test(test_ci_gate_policy 锁定此路由)。v1 schema 无 Rust
-              # 消费方,只由 frontend 的 node 门禁读取,故不在此登记。
+              # diagnostics.rs 在生产校验中 include_str! v1 schema，
+              # behavior_telemetry_tests.rs 同时嵌入 schema 与 registries。
+              # 精确登记编译输入，schema-only Ready PR/MQ 也须执行 Rust 回归
+              # (test_ci_gate_policy 从实际消费者锁定此路由)。
+              - 'docs/schemas/behavior-telemetry-v1.schema.json'
               - 'docs/schemas/behavior-telemetry-registries.json'
+              # The Rust job executes native/Relay redaction parity. Either
+              # implementation, the corpus or its native runner must select it.
+              - 'remote-control-relay/diagnostic-redaction.js'
+              - 'remote-control-relay/failure-diagnostics.js'
+              - 'remote-control-relay/test/diagnostic-redaction.test.js'
+              - 'remote-control-relay/eval/failure-redaction/native-runner.mjs'
+              - 'remote-control-relay/eval/failure-redaction/native-runner.Cargo.lock'
               - '!pinvou3-app/src-tauri/src/features/feedback/**'
               - '!pinvou3-app/src-tauri/src/features/personas/**'
               - '!pinvou3-app/src-tauri/src/features/pet/**'
@@ -2075,6 +2083,12 @@ jobs:
             --test behavior_telemetry \
             --features behavior-telemetry-test \
             -- --test-threads=1
+
+      - name: Native and Relay diagnostic redaction parity
+        if: ${{ github.event_name != 'push' }}
+        env:
+          PINVOU_TEST_NATIVE_REDACTION: '1'
+        run: node --test remote-control-relay/test/diagnostic-redaction.test.js
 
       # push(main) 唯一目的是暖 cache(Swatinem/rust-cache save-if main)。
       # MQ 已对同一代码跑过完整 lib 测试,squash 合并后的 push 不再重复执行测试;
