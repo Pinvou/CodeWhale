@@ -141,6 +141,19 @@ fn path_has_ollama_blob_component(weights: &str) -> bool {
         .any(|component| component.as_os_str() == std::ffi::OsStr::new("blobs"))
 }
 
+/// blob 布局签名的 canonical 复查（十九轮评审 P1）：原始分量不含 `blobs` 的
+/// 路径，末分量可以是指向 daemon blob 存储（含 systemd `OLLAMA_MODELS` 迁移根，
+/// 环境臂对它失明）的符号链接——canonical 目标才露出 `…/models/blobs` 布局。
+/// 目录不存在/不可解析时按 false（登记容许"先登记后建目录"；路径真身落在
+/// blob 布局时，移除端守卫对 canonical 的复查兜底拒绝）。pub(crate) 供平台
+/// 适配层的 symlink 测试直打（features 层不能写 cfg，见 platform/linux.rs）。
+pub(crate) fn canonicalized_has_blob_layout(weights: &str) -> bool {
+    Path::new(weights)
+        .canonicalize()
+        .map(|canonical| path_has_ollama_blob_component(canonical.to_string_lossy().as_ref()))
+        .unwrap_or(false)
+}
+
 // ---------------------------------------------------------------- 视图
 
 /// 本机全部外部模型：注册表 + Ollama 在线列表（去重已注册者）。
@@ -394,33 +407,49 @@ pub async fn register_external_model(
     // 商店名单查询（sqlite connect）与权重根收集（读 settings）、daemon 模型目录
     // 判定（canonicalize）都是阻塞 IO，先在 blocking 池里把四个边界事实一次查全，
     // 再走纯校验，不占 async worker。
-    let (name_hit, model_hit, weights_hit, ollama_root_hit) = tokio::task::spawn_blocking({
-        let name = name.clone();
-        let effective_ollama_name = effective_ollama_name.clone();
-        let weights_path = weights_path.clone();
-        move || {
-            // 登记端维持宽松口径（查询出错按未命中），但 Ollama 有效删除名臂
-            // 同样大小写不敏感：早一步给出"由模型商店管理"的明确报错，好过登记
-            // 成一条之后永远移除不掉的记录。
-            let name_hit = crate::features::model_store::store_model_name(&name);
-            let model_hit = effective_ollama_name.as_deref().and_then(|name| {
-                crate::features::model_store::store_model_name_checked(name, true)
-                    .ok()
-                    .flatten()
-            });
-            let weights_hit = weights_path
-                .as_deref()
-                .map(weights_in_store)
-                .unwrap_or(false);
-            let ollama_root_hit = weights_path
-                .as_deref()
-                .map(weights_under_ollama_root)
-                .unwrap_or(false);
-            (name_hit, model_hit, weights_hit, ollama_root_hit)
-        }
-    })
-    .await
-    .map_err(|error| format!("商店边界查询失败：{error}"))?;
+    let (name_hit, model_hit, weights_hit, ollama_root_hit, canonical_blob_hit) =
+        tokio::task::spawn_blocking({
+            let name = name.clone();
+            let effective_ollama_name = effective_ollama_name.clone();
+            let weights_path = weights_path.clone();
+            move || {
+                // 登记端维持宽松口径（查询出错按未命中），但 Ollama 有效删除名臂
+                // 同样大小写不敏感：早一步给出"由模型商店管理"的明确报错，好过登记
+                // 成一条之后永远移除不掉的记录。
+                let name_hit = crate::features::model_store::store_model_name(&name);
+                let model_hit = effective_ollama_name.as_deref().and_then(|name| {
+                    crate::features::model_store::store_model_name_checked(name, true)
+                        .ok()
+                        .flatten()
+                });
+                let weights_hit = weights_path
+                    .as_deref()
+                    .map(weights_in_store)
+                    .unwrap_or(false);
+                let ollama_root_hit = weights_path
+                    .as_deref()
+                    .map(weights_under_ollama_root)
+                    .unwrap_or(false);
+                // 上面的签名臂按原始分量判定；末分量是指向 daemon blob 存储的
+                // 符号链接时，canonical 目标才露出 blobs 布局（systemd
+                // OLLAMA_MODELS 迁移根对环境臂失明，正是签名臂要兜底的场景）——
+                // 登记端同样对 canonical 复查，不然这种记录今天就能登记成功
+                // （十九轮评审 P1）。canonicalize 与上面两臂同类阻塞 IO，同池。
+                let canonical_blob_hit = weights_path
+                    .as_deref()
+                    .map(canonicalized_has_blob_layout)
+                    .unwrap_or(false);
+                (
+                    name_hit,
+                    model_hit,
+                    weights_hit,
+                    ollama_root_hit,
+                    canonical_blob_hit,
+                )
+            }
+        })
+        .await
+        .map_err(|error| format!("商店边界查询失败：{error}"))?;
     if let Some(store_name) = name_hit {
         return Err(format!(
             "“{name}”由模型商店管理（商店记录：{store_name}），不能登记为外部模型；请前往模型商店操作"
@@ -447,6 +476,14 @@ pub async fn register_external_model(
     if ollama_root_hit {
         return Err(format!(
             "“{}”位于本机 Ollama 守护进程的模型目录之内，权重由守护进程统一管理，不能登记为权重路径",
+            weights_path.unwrap_or_default()
+        ));
+    }
+    // canonical 签名复查（十九轮评审 P1）：原始分量不含 blobs、末分量指向
+    // daemon blob 存储的符号链接，在这里与移除端守卫同一口径拒绝。
+    if canonical_blob_hit {
+        return Err(format!(
+            "“{}”解析后指向 Ollama 守护进程的 blob 存储布局（models/blobs/…），权重由守护进程统一管理，不能登记为权重路径",
             weights_path.unwrap_or_default()
         ));
     }
@@ -914,6 +951,19 @@ pub(crate) fn weights_deletion_guard(
             target.display()
         ));
     }
+    // 签名复查（十九轮评审 P1）：上面的签名臂按**原始**路径分量判定，而
+    // weights_path 的原始分量可以不含 blobs、末分量是指向 daemon blob 存储
+    // （含 systemd `OLLAMA_MODELS` 迁移根——环境臂对它失明，正是签名臂要兜底
+    // 的场景）的符号链接；此时 canonical 目标才露出 `…/models/blobs` 布局，
+    // 根臂落空、深度恰 3 层放行。凡是在原始路径上做的判定，解析后都要复查
+    // 一次；误伤方向只是"用户自管的目录恰好叫 blobs 被拒"，与该臂既有取舍
+    // 一致。登记端对 canonical 的同款复查见 register_external_model。
+    if path_has_ollama_blob_component(target.to_string_lossy().as_ref()) {
+        return Err(
+            "拒绝删除：权重路径解析后指向 Ollama 守护进程的 blob 存储布局（models/blobs/…），权重由守护进程统一管理"
+                .to_string(),
+        );
+    }
     if let Some(protected) = protected_root {
         // 解析失败不能跳过保护：注册表目录就在保护根内，正常机器上必可解析，
         // 解析不了说明环境异常——按拒绝处理（与"无法解析家目录"臂同口径，
@@ -1132,7 +1182,17 @@ fn read_registry(dir: &Path) -> (Vec<ExternalModel>, Vec<String>) {
     // MAX_REGISTRY_FILES 挤出的文件永远得不到收敛）。
     super::platform::harden_dir_owner_only(dir);
     for path in &paths {
-        super::platform::harden_file_owner_only(path);
+        // 符号链接条目跳过收敛：harden 的 set_permissions 跟随链接，会把链接
+        // **目标**（用户自己的任意文件/目录）chmod 成 0600——目录目标会因此
+        // 丢掉 x 位无法进入，且成功路径静默无提示（十九轮评审 P2）。链接记录
+        // 的读取不受影响（read_record 跟随读），只是不对其目标执行 chmod。
+        let is_regular = path
+            .symlink_metadata()
+            .map(|meta| !meta.file_type().is_symlink())
+            .unwrap_or(false);
+        if is_regular {
+            super::platform::harden_file_owner_only(path);
+        }
     }
     if paths.len() > MAX_REGISTRY_FILES {
         warnings.push(format!(
@@ -1332,6 +1392,12 @@ async fn ollama_delete(model: &str) -> Result<(), String> {
         .await
         .map_err(human_probe_error)?;
     if response.status().is_success() {
+        Ok(())
+    } else if response.status() == reqwest::StatusCode::NOT_FOUND {
+        // 404 = 模型已不存在（重复移除/上次删除成功但警告过）：按幂等成功处理，
+        // 不再报"服务响应异常（HTTP 404）"诱导用户去手动清理已经不存在的东西
+        // （十九轮评审 P3）。连接层失败（守护进程整个不在）走 human_probe_error，
+        // 不会落到这里。
         Ok(())
     } else {
         Err(format!(
@@ -2118,6 +2184,27 @@ mod tests {
         std::fs::create_dir_all(&normal).expect("create normal");
         assert!(weights_deletion_guard(home.path(), None, None, &normal).is_ok());
     }
+
+    #[test]
+    fn weights_deletion_guard_fails_closed_when_the_protected_root_cannot_be_resolved() {
+        // 保护根 canonicalize 失败臂（十九轮评审：此前零测试触达，退回
+        // `if let Ok` 静默放行整棵应用树时现有套件照绿）。根不存在 → 必须
+        // 整单拒绝并给出可执行出路，而不是跳过保护。
+        let home = TempDir::new("guard-protect-unresolvable");
+        let weights = home.path().join("deep").join("a").join("b");
+        std::fs::create_dir_all(&weights).expect("create weights dir");
+        let missing_root = home.path().join("no-such-protected-root");
+        let error =
+            weights_deletion_guard(home.path(), Some(&missing_root), None, &weights).unwrap_err();
+        assert!(
+            error.contains("无法解析应用数据目录"),
+            "unexpected error: {error}"
+        );
+    }
+
+    // canonical blobs 复查的两枚符号链接用例（十九轮评审 P1：canonical 目标
+    // 复查签名/登记端 canonical 助手）按架构约定落平台适配层——features 层
+    // 不能写 cfg，见 platform/linux.rs 的 tests 模块。
 
     #[test]
     fn weights_deletion_guard_refuses_degenerate_home_root() {

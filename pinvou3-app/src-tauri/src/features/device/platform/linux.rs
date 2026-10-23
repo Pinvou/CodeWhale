@@ -397,6 +397,63 @@ mod tests {
         );
     }
 
+    // 十九轮评审 P1：原始分量不含 blobs、末分量指向 daemon blob 存储的符号
+    // 链接——canonical 目标才露出 blobs 布局，而环境臂对 systemd
+    // OLLAMA_MODELS 迁移根（此处 decoy_root 是应用推导出的、与 daemon 真身
+    // 无关的根）失明、深度恰 3 层放行。守卫必须对 canonical 目标复查签名
+    // （修复前该用例 APPROVED，整删 daemon blobs；摘除复查变异核验必红）。
+    // 与上一条同款落在平台适配层：features 层不能写 cfg。
+    #[test]
+    fn weights_deletion_guard_rechecks_blob_signature_on_the_canonicalized_target() {
+        use crate::features::device::external_models::weights_deletion_guard;
+        let home = std::env::temp_dir().join(format!("guard-canon-blobs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let decoy_root = home.join("mnt").join("ollama-models");
+        std::fs::create_dir_all(&decoy_root).expect("create decoy root");
+        let blobs = home.join(".ollama").join("models").join("blobs");
+        std::fs::create_dir_all(&blobs).expect("create daemon blobs");
+        let link_dir = home.join("deep").join("a").join("b");
+        std::fs::create_dir_all(&link_dir).expect("create link dir");
+        let smuggled = link_dir.join("weights");
+        std::os::unix::fs::symlink(&blobs, &smuggled).expect("create symlink");
+        let error = weights_deletion_guard(&home, None, Some(&decoy_root), &smuggled)
+            .expect_err("canonical blob layout must be re-checked");
+        assert!(error.contains("blob"), "unexpected error: {error}");
+        // 对照：同一形状、指向普通目录的符号链接照常放行（签名复查不误伤；
+        // canonical 目标自身仍须过深度臂，故给足 3 层）。
+        let plain = home.join("mnt").join("store").join("plain-weights");
+        std::fs::create_dir_all(&plain).expect("create plain weights");
+        let plain_link = link_dir.join("plain");
+        std::os::unix::fs::symlink(&plain, &plain_link).expect("create plain symlink");
+        assert!(
+            weights_deletion_guard(&home, None, Some(&decoy_root), &plain_link).is_ok(),
+            "plain symlinked weights must still pass"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // 登记端 canonical 签名复查（十九轮评审 P1）：原始路径无 blobs 分量、
+    // 末分量指向 blob 存储的符号链接必须命中；不存在的路径按 false（登记
+    // 容许先登记后建目录，移除端守卫兜底）。
+    #[test]
+    fn canonicalized_has_blob_layout_follows_the_final_symlink() {
+        use crate::features::device::external_models::canonicalized_has_blob_layout;
+        let home =
+            std::env::temp_dir().join(format!("register-canon-blobs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let blobs = home.join("migrated").join("models").join("blobs");
+        std::fs::create_dir_all(&blobs).expect("create blobs");
+        let smuggled = home.join("weights-link");
+        std::os::unix::fs::symlink(&blobs, &smuggled).expect("create symlink");
+        assert!(canonicalized_has_blob_layout(
+            smuggled.to_string_lossy().as_ref()
+        ));
+        assert!(!canonicalized_has_blob_layout(
+            home.join("not-created-yet").to_string_lossy().as_ref()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     #[test]
     fn extra_sensors_reads_the_host_hwmon_tree_without_panicking() {
         // 集成冒烟：真机上跑通即可；无 hwmon（或全为温度通道）时为空也合法。

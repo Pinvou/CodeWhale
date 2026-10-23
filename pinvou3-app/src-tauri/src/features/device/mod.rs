@@ -530,7 +530,12 @@ fn collect_processes(state: &DeviceStateInner) -> ProcessSummary {
             true,
             ProcessRefreshKind::nothing().with_cpu().with_memory(),
         );
-        *state.last_process_poll.lock() = Some(now);
+        // 记录时刻必须在 refresh **返回之后**：sysinfo 的内部窗口以刷新结束
+        // 时刻为基准（先遍历 /proc 全表、末尾才置自己的 last_update）。若记
+        // 刷新前的时刻，上一拍遍历耗时 ≥200ms 时下一拍会同时满足本守卫、又
+        // 落不进 sysinfo 内部窗口——全局 /proc/stat 不重读而 per-process 时间
+        // 照常前进，整表 CPU% 被封顶成核数×100（十九轮评审 P2）。
+        *state.last_process_poll.lock() = Some(Instant::now());
     }
     let procs: Vec<ProcInfo> = system
         .processes()
@@ -901,11 +906,17 @@ fn probe_docker_service() -> ServiceStatus {
                 output.status.code().unwrap_or(-1)
             )),
         },
-        Err(error) => ServiceStatus {
-            key: "docker".to_string(),
-            running: false,
-            detail: Some(format!("docker 命令不可用：{error}")),
-        },
+        Err(error) => {
+            // detail 会进 UI tooltip 与 doctor 上下文：platform 层的超时/超限
+            // 错误串内嵌截断到 4000 字符的子进程输出，与成功臂版本号同一 64
+            // 字符纪律限长（十九轮评审 P3）。
+            let reason: String = error.to_string().chars().take(64).collect();
+            ServiceStatus {
+                key: "docker".to_string(),
+                running: false,
+                detail: Some(format!("docker 命令不可用：{reason}")),
+            }
+        }
     }
 }
 

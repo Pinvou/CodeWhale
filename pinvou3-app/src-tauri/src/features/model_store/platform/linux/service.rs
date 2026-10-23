@@ -1003,6 +1003,43 @@ mod tests {
     }
 
     #[test]
+    fn models_dir_history_evicts_the_oldest_root_past_the_cap() {
+        // 溢出裁剪方向（十九轮评审：`drain(..keep)` 丢最老端此前零钉——把它
+        // 改成丢最新端、或把上限改成任意值，现有用例照绿）。钉住：历史恰为
+        // 上限长、被挤出的是**最老**的根；被挤出的根同时脱出
+        // store_weights_roots 保护集（在册模型只剩名字臂，属既定容量取舍，
+        // 见 config 字段注释）。
+        let ctx = super::config::TempHome::new();
+        let path_of = |p: &std::path::Path| p.to_string_lossy().to_string();
+        for index in 0..=(super::config::MAX_MODELS_DIR_HISTORY + 1) {
+            let dir = ctx.path().join(format!("weights-{index:03}"));
+            set_storage_settings(Some(path_of(&dir)), None).expect("set models_dir");
+        }
+        let cap = super::config::MAX_MODELS_DIR_HISTORY;
+        let settings = super::config::load_settings();
+        assert_eq!(
+            settings.models_dir_history.len(),
+            cap,
+            "历史长度必须钉在 MAX_MODELS_DIR_HISTORY"
+        );
+        let dir = |index: usize| path_of(&ctx.path().join(format!("weights-{index:03}")));
+        // 第 18 次换入挤出的是最老端（000），次老的 001 与最新入史的 016 仍在；
+        // 当前值 017 不在历史里。
+        assert!(
+            !settings.models_dir_history.contains(&dir(0)),
+            "最老的根应被挤出历史"
+        );
+        assert!(settings.models_dir_history.contains(&dir(1)));
+        assert!(settings.models_dir_history.contains(&(dir(cap))));
+        assert!(!settings.models_dir_history.contains(&dir(cap + 1)));
+        // 保护集联动：留存的最新历史根在 store_weights_roots 里，被挤出的
+        // 最老根已不在（有意取舍，此断言钉住"溢出即失去路径臂保护"语义）。
+        let roots = crate::features::model_store::store_weights_roots();
+        assert!(roots.contains(&std::path::PathBuf::from(dir(cap - 1))));
+        assert!(!roots.contains(&std::path::PathBuf::from(dir(0))));
+    }
+
+    #[test]
     fn import_scan_dirs_must_be_absolute() {
         let ctx = super::config::TempHome::new();
         // 相对扫描目录的解析随调用方工作目录漂移，设备侧移除守卫的前缀匹配

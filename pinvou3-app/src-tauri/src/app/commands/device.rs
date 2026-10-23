@@ -82,7 +82,10 @@ pub async fn device_doctor_prompt(
 async fn build_doctor_context(device: &DeviceState, monitor: &MonitorState) -> Value {
     // 三路来源互不依赖，并发采样。串行时 vLLM 三端口逐个 1.5s 超时 + docker 3s，
     // 最坏 8-12s 用户点排查卡才开出会话（评审 P2）；并发后总耗时 ≈ 最慢一路
-    // （vLLM 端口并发后为单端口 1.5s，十四轮评审）。
+    // （vLLM 端口并发后为单端口 1.5s，十四轮评审）。上面 8-12s 不含 nvidia-smi
+    // 挂死的最坏路径：GPU 扩展最坏 2 次调用 × 3 候选 × 10s ≈ 60s，且
+    // sample_snapshot 与 GPU 扩展同一 join，nvidia-smi 挂死时排查卡等待预算
+    // 一并拉长（设备页注释已声明为后续架构项，十九轮评审补记）。
     let (device_snapshot, monitor_snapshot, services) = tokio::join!(
         device::sample_snapshot(device),
         crate::features::monitor::sample_all(monitor),
