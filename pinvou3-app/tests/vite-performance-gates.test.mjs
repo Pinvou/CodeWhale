@@ -8,6 +8,7 @@ import createViteConfig, {
   assertLazyChunks,
   assertMainEntryBudget,
   lazyChunkContracts,
+  lazyToolChunkContracts,
 } from '../vite.config.mjs';
 
 function chunk({ name, modules = {}, isEntry = false, code = '' }) {
@@ -48,6 +49,20 @@ test('every view loader and the tool welcome card have explicit lazy chunk contr
     chatSource,
     /<ViewErrorBoundary t=\{t\}>\s*<React\.Suspense fallback=\{null\}>\s*<LazyToolWelcomeCard/u,
   );
+});
+
+test('scheduled task cards have a production lazy-chunk gate', () => {
+  assert.deepEqual(lazyToolChunkContracts.scheduledTaskCard,
+    ['features/tools/scheduled-task-card.jsx', 'ScheduledTaskToolCard']);
+  const views = Object.fromEntries(Object.entries(lazyChunkContracts).map(([key, [suffix, name]]) =>
+    [key, chunk({ name, modules: { [`/repo/src/${suffix}`]: {} } })]));
+  assert.doesNotThrow(() => assertLazyChunks(views, lazyChunkContracts));
+  assert.throws(() => assertLazyChunks(views), /ScheduledTaskToolCard lazy module was not emitted/);
+  const complete = { ...views, scheduledTaskCard: chunk({ name: 'ScheduledTaskToolCard',
+    modules: { '/repo/src/features/tools/scheduled-task-card.jsx': {} } }) };
+  assert.doesNotThrow(() => assertLazyChunks(complete));
+  complete.scheduledTaskCard.isEntry = true;
+  assert.throws(() => assertLazyChunks(complete), /non-entry lazy chunk/);
 });
 
 test('rare global overlays stay out of the startup module graph', () => {
