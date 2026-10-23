@@ -368,6 +368,30 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
 /// 它是一条**派生判定**，不在 `StoreModelRecord`（那是库表的投影）里。界面靠它
 /// 决定「重新部署」按钮出不出现——没有它就只能对所有已部署模型常驻这个按钮，
 /// 用户根本不知道自己为什么要点。
+/// 轻量版判定（P2-4）：deploy 脚本哈希从摘要映射取，其余判据与
+/// [`needs_redeploy`] 相同（含老记录的时间戳回退）。
+fn needs_redeploy_light(
+    record: &db::StoreModelRecord,
+    hashes: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    if record.status != "deployed" {
+        return false;
+    }
+    if let (Some(deployed), Some(current)) = (
+        record.deployed_script_sha256.as_deref(),
+        hashes.get("deploy").map(|s| s.as_str()),
+    ) {
+        return deployed != current;
+    }
+    match (
+        record.scripts_fetched_at.as_deref(),
+        record.deployed_at.as_deref(),
+    ) {
+        (Some(fetched), Some(deployed_at)) => fetched > deployed_at,
+        _ => false,
+    }
+}
+
 fn needs_redeploy(record: &db::StoreModelRecord) -> bool {
     if record.status != "deployed" {
         return false;
@@ -427,21 +451,27 @@ fn strip_bulky_fields<T: serde::Serialize>(models: T) -> Value {
 /// `strip_bulky_fields` 正是要把 `scripts_content` 摘掉。先摘后算的话这个字段会
 /// 永远是 false，界面上「重新部署」就永远不出现——比常驻还糟，因为脚本真的更新了
 /// 也没人提示。
-fn library_payload(models: Vec<db::StoreModelRecord>) -> Value {
-    // 先算两个派生判定再瘦身：它们要读 scripts_content，而 strip 会摘掉它。
-    let flags: Vec<bool> = models.iter().map(needs_redeploy).collect();
+fn library_payload(rows: Vec<db::LibraryRow>) -> Value {
+    // r5 评审 P2-4：改走 `list_store_models_light`——正文一个字节不出库（此前
+    // SELECT * 读入 ~8.6MB 再在应用层丢掉，且每次界面操作都触发）。两个派生
+    // 判定从轻量行的 sha256 摘要算，语义与原先读正文时一致。
+    let flags: Vec<bool> = rows
+        .iter()
+        .map(|row| needs_redeploy_light(&row.record, &row.script_hashes))
+        .collect();
     // 本地脚本哈希摘要（script_type -> sha256）。前端拿它跟卡片列表的
     // script_sha256 比对，自动检测「服务器有更新」——用户不需要手动检查。
-    let local_hashes: Vec<Value> = models
+    let local_hashes: Vec<Value> = rows
         .iter()
-        .map(|m| {
+        .map(|row| {
             let mut map = serde_json::Map::new();
-            for (kind, blob) in &m.scripts_content {
-                map.insert(kind.clone(), Value::String(blob.sha256.clone()));
+            for (kind, sha) in &row.script_hashes {
+                map.insert(kind.clone(), Value::String(sha.clone()));
             }
             Value::Object(map)
         })
         .collect();
+    let models: Vec<db::StoreModelRecord> = rows.into_iter().map(|row| row.record).collect();
     let mut value = strip_bulky_fields(models);
     if let Some(items) = value.as_array_mut() {
         for (i, item) in items.iter_mut().enumerate() {
@@ -587,9 +617,9 @@ pub async fn library() -> Result<Value, String> {
         // 先按实际容器状态纠正一次 running：设备可能是重启之后才起的应用，
         // 库里的 running 标记这时候是过期的。
         let corrected = mgr.reconcile_running_status();
-        let models = db::list_store_models().map_err(|e| e.to_string())?;
+        let rows = db::list_store_models_light().map_err(|e| e.to_string())?;
         Ok(json!({
-            "models": library_payload(models),
+            "models": library_payload(rows),
             "corrected": corrected,
         }))
     })

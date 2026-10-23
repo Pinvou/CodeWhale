@@ -1154,6 +1154,42 @@ pub fn list_store_models() -> rusqlite::Result<Vec<StoreModelRecord>> {
     Ok(rows)
 }
 
+/// 列表接口专用轻量行（r5 评审 P2-4）：不带两个 MB 级大字段（scripts/assets
+/// 正文），只带每脚本 sha256 摘要——由 SQLite 的 json_each 在库内提取，正文
+/// 一个字节不出库。此前 SELECT * 读入全部正文再在应用层丢掉，5 张卡 ≈ 8.6MB/次，
+/// 且每次界面操作都触发列表刷新。
+pub struct LibraryRow {
+    pub record: StoreModelRecord,
+    pub script_hashes: std::collections::BTreeMap<String, String>,
+}
+
+pub fn list_store_models_light() -> rusqlite::Result<Vec<LibraryRow>> {
+    let conn = connect()?;
+    let mut stmt = conn.prepare(
+        "SELECT * EXCLUDE (scripts_content_json, assets_content_json),
+                COALESCE((SELECT json_group_object(j.key, json_extract(j.value, '$.sha256'))
+                          FROM json_each(m.scripts_content_json) j), '{}') AS script_hashes_json
+         FROM store_models m ORDER BY downloaded_at DESC",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            let hashes_raw: Option<String> = row.get("script_hashes_json")?;
+            let script_hashes = hashes_raw
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            let mut record = StoreModelRecord::from_row(row)?;
+            // 正文本就不该被这一路径读到；防御性清空防调用方误依赖
+            record.scripts_content = Default::default();
+            record.assets_content = Default::default();
+            Ok(LibraryRow {
+                record,
+                script_hashes,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 pub fn get_store_model(card_id: &str) -> rusqlite::Result<Option<StoreModelRecord>> {
     let conn = connect()?;
     conn.query_row(
