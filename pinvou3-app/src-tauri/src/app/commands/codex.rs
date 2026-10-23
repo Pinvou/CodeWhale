@@ -1565,6 +1565,7 @@ mod tests {
                     workspace_path: workspace.to_string(),
                     workspace_available: true,
                 },
+                workspace_roots: roots.iter().map(|root| (*root).to_string()).collect(),
                 agent_id: "codex".to_string(),
                 agent_name: "Codex".to_string(),
             };
@@ -1586,13 +1587,27 @@ mod tests {
             assert_eq!(serde_json::to_value(&native).unwrap(), native_before);
         }
 
-        let legacy = redact_session_metadata_for_web(metadata_with_workspace("/fixture/main"));
+        // Legacy single-root metadata (no workspace_roots key): the field
+        // deserializes to an empty set and must stay empty after redaction,
+        // and serialization must omit it (skip_serializing_if) — the web wire
+        // carries no roots key for pre-multi-root sessions.
+        let legacy_input: SessionMetadata = serde_json::from_value(serde_json::json!({
+            "id": "session-web-projection-legacy",
+            "title": "Web projection legacy",
+            "created_at": "2026-08-17T00:00:00Z",
+            "updated_at": "2026-08-17T00:00:00Z",
+            "message_count": 0,
+            "total_tokens": 0,
+            "model": "test-model",
+            "workspace": "/fixture/main"
+        }))
+        .expect("valid legacy SessionMetadata fixture");
+        assert!(legacy_input.workspace_roots.is_empty());
+        let legacy = redact_session_metadata_for_web(legacy_input);
         assert!(legacy.workspace_roots.is_empty());
         assert!(
-            serde_json::to_value(legacy)
-                .unwrap()
-                .get("workspace_roots")
-                .is_none()
+            serde_json::to_value(&legacy).unwrap().get("workspace_roots").is_none(),
+            "serialized legacy metadata must omit the empty roots key"
         );
     }
 
