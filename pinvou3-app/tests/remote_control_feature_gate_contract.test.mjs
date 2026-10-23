@@ -78,7 +78,8 @@ test('compiled production gate is immutable under runtime environment overrides'
     const unitWrapper = join(directory, `unit-wrapper-${buildFlag}.rs`);
     await writeFile(unitWrapper, includeBoth);
     rustc(['--test', unitWrapper, '-o', unit], env);
-    assert.match(run(unit, env), /17 passed; 0 failed/u);
+    // 17→18（第二十轮评审）：dmi 新增限长测试 dmi_text_is_capped_at_64_chars。
+    assert.match(run(unit, env), /18 passed; 0 failed/u);
     const binary = executable(`artifact-${buildFlag}`);
     rustc([host, '-o', binary], env);
     for (const runtimeFlag of [undefined, '0', '1', 'true']) {

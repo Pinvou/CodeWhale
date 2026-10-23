@@ -609,7 +609,14 @@ fn gpu_ext_cached() -> Option<GpuExtSnapshot> {
         .try_lock()
     {
         Some(mut guard) => {
-            let value = refresh_gpu_ext_cache(&mut guard, Instant::now(), gpu_ext_snapshot);
+            // TTL 锚定在采样**完成**时刻（与 monitor TtlSnapshotCache 同口径，
+            // 第二十轮评审 P2）：锚在开始时刻时，nvidia-smi 探测落入 ≥1s 的慢带
+            // 会让 3s TTL 在下一拍（2s 轮询）恒判过期、每拍重拉子进程，缓存
+            // "不必每拍都拉 nvidia-smi"的设计目的在该耗时带完全落空。
+            let value = refresh_gpu_ext_cache(&mut guard, Instant::now(), || {
+                let value = gpu_ext_snapshot();
+                (value, Instant::now())
+            });
             *last.write() = value.clone();
             value
         }
@@ -622,11 +629,13 @@ fn gpu_ext_cached() -> Option<GpuExtSnapshot> {
 /// 采样成功用新值、失败保留旧值只刷时间戳（monitor TtlSnapshotCache 的失败
 /// 保旧同款——一次抖动不该让 compute 列表/驱动徽章在页面上闪没，第三轮评审
 /// P3）；首拍就失败保持 None。抽成纯函数是因为原先这条最关键的保旧分支锁在
-/// OnceLock + 真子进程后面，零覆盖（第四轮评审 P3）。
+/// OnceLock + 真子进程后面，零覆盖（第四轮评审 P3）。`sample` 返回
+/// `(值, 完成时刻)`：时间戳取**完成**时刻而非进入本函数的时刻（第二十轮评审
+/// P2），慢探测不再把 TTL 窗口从内侧啃掉。
 fn refresh_gpu_ext_cache(
     cache: &mut GpuExtCache,
     now: Instant,
-    sample: impl FnOnce() -> Option<GpuExtSnapshot>,
+    sample: impl FnOnce() -> (Option<GpuExtSnapshot>, Instant),
 ) -> Option<GpuExtSnapshot> {
     if cache
         .sampled_at
@@ -634,8 +643,8 @@ fn refresh_gpu_ext_cache(
     {
         return cache.value.clone();
     }
-    let value = sample();
-    cache.sampled_at = Some(now);
+    let (value, completed_at) = sample();
+    cache.sampled_at = Some(completed_at);
     if value.is_some() || cache.value.is_none() {
         cache.value = value;
     }
@@ -935,7 +944,10 @@ pub(crate) async fn ollama_base() -> String {
         .unwrap_or_else(|_| OLLAMA_BASE.to_string())
 }
 
-/// 短超时探测客户端（OnceLock 共享；构建失败降级为每次现建，仍失败返回 None）。
+/// 短超时探测客户端（OnceLock 共享）。构建失败（TLS 后端初始化失败等持久性
+/// 故障，极罕见）按 None **负缓存**：进程内不再重试构建，需重启恢复——Client
+/// 构建失败不是暂态抖动，负缓存避免每次探测重付构建成本（注释曾承诺"失败降级
+/// 为每次现建"但实现从未如此，第二十轮评审 P3 订正注释与实现对齐）。
 /// 显式禁用代理：默认目标 127.0.0.1（ollama 还可能指向自定义 `ollama_host`，
 /// 见 `ollama_base()`），reqwest 0.13 的 `system-proxy` feature 会吃
 /// `http_proxy` 环境变量且对 loopback 无隐式豁免——宿主设了代理而 no_proxy
@@ -1251,7 +1263,7 @@ mod tests {
         // 首拍成功落值。
         let first = refresh_gpu_ext_cache(&mut cache, start, || {
             calls.set(calls.get() + 1);
-            make_value("580.02")
+            (make_value("580.02"), start)
         });
         assert_eq!(
             first
@@ -1266,7 +1278,7 @@ mod tests {
             start + GPU_EXT_CACHE_TTL - Duration::from_millis(1),
             || {
                 calls.set(calls.get() + 1);
-                make_value("999")
+                (make_value("999"), start)
             },
         );
         assert_eq!(
@@ -1279,7 +1291,7 @@ mod tests {
         // 过期 + 采样失败（瞬时超时/驱动忙）：保留旧值，只刷时间戳（第三轮 P3）。
         let kept = refresh_gpu_ext_cache(&mut cache, start + GPU_EXT_CACHE_TTL, || {
             calls.set(calls.get() + 1);
-            None
+            (None, start + GPU_EXT_CACHE_TTL)
         });
         assert_eq!(
             kept.as_ref()
@@ -1293,14 +1305,14 @@ mod tests {
             start + GPU_EXT_CACHE_TTL + Duration::from_millis(1),
             || {
                 calls.set(calls.get() + 1);
-                None
+                (None, start + GPU_EXT_CACHE_TTL)
             },
         );
         assert_eq!(calls.get(), 2, "kept-old refresh must still be TTL-cached");
         // 过期后采样恢复 → 换上新值。
         let recovered = refresh_gpu_ext_cache(&mut cache, start + 2 * GPU_EXT_CACHE_TTL, || {
             calls.set(calls.get() + 1);
-            make_value("590.01")
+            (make_value("590.01"), start + 2 * GPU_EXT_CACHE_TTL)
         });
         assert_eq!(
             recovered
@@ -1310,8 +1322,45 @@ mod tests {
         );
         // 首拍即失败：保持 None（“本机无 NVIDIA”降级）。
         let mut fresh = GpuExtCache::default();
-        let none = refresh_gpu_ext_cache(&mut fresh, start, || None);
+        let none = refresh_gpu_ext_cache(&mut fresh, start, || (None, start));
         assert!(none.is_none());
+    }
+
+    #[test]
+    fn gpu_ext_cache_ttl_is_anchored_at_sampling_completion_not_start() {
+        // TTL 锚定（第二十轮评审 P2）：慢探测（完成时刻比进入时刻晚 ≥1s）不得把
+        // TTL 窗口从内侧啃掉——旧实现把 sampled_at 记成进入时刻，探测耗时 ≥1s 时
+        // 下一拍（2s 轮询）恒判过期、每拍重拉 nvidia-smi。
+        let make_value = |driver: &str| {
+            Some(GpuExtSnapshot {
+                driver_version: Some(driver.to_string()),
+                cuda_version: None,
+                compute_processes: Some(Vec::new()),
+            })
+        };
+        let start = Instant::now();
+        let probe_took = Duration::from_millis(1500);
+        let mut cache = GpuExtCache::default();
+        let first = refresh_gpu_ext_cache(&mut cache, start, || {
+            (make_value("580.02"), start + probe_took)
+        });
+        assert_eq!(
+            first
+                .as_ref()
+                .and_then(|value| value.driver_version.as_deref()),
+            Some("580.02")
+        );
+        // 下一拍（2s 轮询）：距完成时刻仅 0.5s，TTL 仍有效——旧锚定下
+        // sampled_at=start，此刻已过期并会重拉。
+        let cached = refresh_gpu_ext_cache(&mut cache, start + Duration::from_secs(2), || {
+            panic!("TTL anchored at completion must not re-sample within the window")
+        });
+        assert_eq!(
+            cached
+                .as_ref()
+                .and_then(|value| value.driver_version.as_deref()),
+            Some("580.02")
+        );
     }
 
     #[test]

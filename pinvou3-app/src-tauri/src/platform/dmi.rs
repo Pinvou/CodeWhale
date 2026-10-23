@@ -12,11 +12,19 @@
 /// DMI id 字段候选（`/sys/class/dmi/id/<field>`），顺序即优先级。
 const DMI_ID_FIELDS: &[&str] = &["product_name", "product_family", "board_name"];
 
-/// 读单个 DMI 字段并 trim；缺失/为空 → None。
+/// 读单个 DMI 字段并 trim，限长 64（SMBIOS 规范单字符串上限 64 字节，但固件可
+/// 违反，且内核支持 `dmi_product_name=` 启动参数覆写为任意自由文本——该值进每拍
+/// 快照 JSON 与 doctor 云端上下文，与本仓对同类"环境不可信文本"的 64 字符上限
+/// 纪律对齐，第二十轮评审 P3）；缺失/为空 → None。
 pub(crate) fn dmi_field(field: &str) -> Option<String> {
     let text = std::fs::read_to_string(format!("/sys/class/dmi/id/{field}")).ok()?;
     let trimmed = text.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
+    (!trimmed.is_empty()).then(|| cap_dmi_text(trimmed))
+}
+
+/// 限长口径（纯函数，测试直打）：生产路径 [`dmi_field`] 的唯一出口。
+fn cap_dmi_text(trimmed: &str) -> String {
+    trimmed.chars().take(64).collect()
 }
 
 /// 第一个非空字段值（设备页头部展示用）。
@@ -96,5 +104,18 @@ mod tests {
             DMI_ID_FIELDS,
             &["product_name", "product_family", "board_name"]
         );
+    }
+
+    #[test]
+    fn dmi_text_is_capped_at_64_chars() {
+        // 限长纪律（第二十轮评审 P3）：该值进每拍快照与 doctor 云端上下文，
+        // 固件/内核覆写的超长自由文本不得原样外发。直打生产路径的唯一出口。
+        let overlong: String = "A".repeat(200);
+        let capped = cap_dmi_text(&overlong);
+        assert_eq!(capped.chars().count(), 64);
+        assert!(capped.starts_with("AAAA"));
+        // 恰好 64 与更短的原样通过。
+        assert_eq!(cap_dmi_text(&"B".repeat(64)).chars().count(), 64);
+        assert_eq!(cap_dmi_text("GB10"), "GB10");
     }
 }

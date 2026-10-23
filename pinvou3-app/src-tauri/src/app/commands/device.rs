@@ -17,21 +17,38 @@ use crate::features::device::{
 };
 use crate::features::monitor::{CpuSnapshot, GpuSnapshot, MonitorState, RamSnapshot};
 
+/// 设备命令族的能力门禁（第二十轮评审 P2）：`megacubeDevice` 能力位此前只是
+/// 前端入口开关，渲染层（含被攻破的网页层）可以直接 invoke 任意命令——读面是
+/// 全量设备遥测，破坏面是"家目录深度 ≥3 目录删除 + daemon DELETE"。命令层
+/// 显式拒非 MegaCube 平台，与 `desktop_remote_control` 的 `ensure_*_enabled`
+/// fail-closed 先例同口径；开发/自动化经 `PINVOU3_MEGACUBE_DEVICE=1` 逃生
+/// （ OnceLock 进程缓存，2s 轮询零开销）。
+fn ensure_device_supported() -> Result<(), String> {
+    if crate::platform::capabilities::is_megacube_device() {
+        Ok(())
+    } else {
+        Err("设备管理仅支持 MegaCube 一体机".to_string())
+    }
+}
+
 /// 设备管理页 2s 轮询的完整快照。
 #[tauri::command]
 pub async fn get_device_snapshot(device: State<'_, DeviceState>) -> Result<DeviceSnapshot, String> {
+    ensure_device_supported()?;
     Ok(device::sample_snapshot(&device).await)
 }
 
 /// 模型服务可达性（慢轮询 10s / 手动刷新；docker 探测带 3s 子进程预算）。
 #[tauri::command]
 pub async fn get_device_services() -> Result<Vec<ServiceStatus>, String> {
+    ensure_device_supported()?;
     Ok(device::probe_services().await)
 }
 
 /// 本机全部外部模型（注册表 + Ollama 在线列表；坏注册表文件跳过进 warnings）。
 #[tauri::command]
 pub async fn get_external_models() -> Result<ExternalModelsView, String> {
+    ensure_device_supported()?;
     device::get_external_models().await
 }
 
@@ -44,6 +61,7 @@ pub async fn device_register_external_model(
     model: Option<String>,
     weights_path: Option<String>,
 ) -> Result<ExternalModel, String> {
+    ensure_device_supported()?;
     device::register_external_model(name, kind, base_url, model, weights_path).await
 }
 
@@ -54,6 +72,7 @@ pub async fn device_remove_external_model(
     delete_weights: bool,
     confirm_name: String,
 ) -> Result<RemoveOutcome, String> {
+    ensure_device_supported()?;
     device::remove_external_model(id, delete_weights, confirm_name).await
 }
 
@@ -66,6 +85,7 @@ pub async fn device_doctor_prompt(
     device: State<'_, DeviceState>,
     monitor: State<'_, MonitorState>,
 ) -> Result<String, String> {
+    ensure_device_supported()?;
     let parsed_kind = device::DoctorKind::parse(&kind)?;
     let context = build_doctor_context(&device, &monitor).await;
     device::build_doctor_prompt(parsed_kind, question.as_deref(), &context)
@@ -246,15 +266,32 @@ fn doctor_proc_projection(proc: &crate::features::device::ProcInfo) -> Value {
 }
 
 fn doctor_gpu_projection(gpu: &GpuSnapshot) -> Value {
+    // 统一内存架构（GB10——本产品的目标硬件）上 nvidia-smi 对显存/利用率返回
+    // [N/A]，monitor 解析层降级为 0（UI 以 vram_total_mib==0 切换显示形态）。
+    // doctor 上下文的契约是"null=不可知，不得读成零"（与 compute_processes 同一
+    // 教义）：否则目标硬件上每一份排查上下文都是"显存 0MiB / 利用率 0%"，模型
+    // 会据此拒绝推荐本地模型或误诊驱动/显存故障（第二十轮评审 P2）。真实读数
+    // 原样透传；unified_memory_na 显式告知降级原因。
+    let unified_memory_na = gpu.vram_total_mib == 0;
+    let (vram_used, vram_total, utilization) = if unified_memory_na {
+        (None, None, None)
+    } else {
+        (
+            Some(gpu.vram_used_mib),
+            Some(gpu.vram_total_mib),
+            Some(gpu.utilization_pct),
+        )
+    };
     json!({
         "name": gpu.name,
-        "vram_used_mib": gpu.vram_used_mib,
-        "vram_total_mib": gpu.vram_total_mib,
-        "utilization_pct": gpu.utilization_pct,
+        "vram_used_mib": vram_used,
+        "vram_total_mib": vram_total,
+        "utilization_pct": utilization,
         "processor_utilization_pct": gpu.processor_utilization_pct,
         "shared_memory_used_mib": gpu.shared_memory_used_mib,
         "temperature_c": gpu.temperature_c,
         "power_w": gpu.power_w,
+        "unified_memory_na": unified_memory_na,
     })
 }
 
@@ -345,6 +382,12 @@ fn sanitize_context_strings(value: &mut Value, home: &str, username: &str) {
 /// 路径不会被脱敏——那是仅在开发机上有意义的组合，不追求覆盖（第七轮评审
 /// P3 记录该假设）。
 fn mask_path_text(text: &str, home: &str, username: &str) -> String {
+    // HOME 被设为**空串**（未设时平台层有 /tmp 兜底，不在此列）时，下面的
+    // `"/"` 前缀臂会把一切绝对路径改写成 `~/…`，脱敏反而毁掉全部路径信息——
+    // 家目录未知时跳过前缀脱敏，好过全面误伤（第二十轮评审 P3）。
+    if home.is_empty() {
+        return text.to_string();
+    }
     if text == home {
         return "~".to_string();
     }
@@ -688,5 +731,51 @@ mod tests {
             context["device"]["disks"][0]["mount_point"],
             "/media/~/'''evil'''"
         );
+    }
+
+    #[test]
+    fn mask_path_text_skips_masking_when_home_is_empty() {
+        // HOME 为空串（env 置空）时跳过前缀脱敏：`"/"` 前缀臂会把一切绝对路径
+        // 改写成 ~/…，脱敏反而毁掉路径信息（第二十轮评审 P3）。
+        assert_eq!(mask_path_text("/mnt/data", "", ""), "/mnt/data");
+        assert_eq!(mask_path_text("/media/u/usb", "", "u"), "/media/u/usb");
+    }
+
+    #[test]
+    fn doctor_gpu_projection_maps_unified_memory_na_to_null() {
+        // GB10（目标硬件）上 nvidia-smi 对显存/利用率返 [N/A]，monitor 解析层
+        // 降级为 0——doctor 上下文必须按"null=不可知"教义外发，否则模型把
+        // "显存 0MiB"当真实读数（第二十轮评审 P2）。温度/功耗本来就是 .ok()
+        // 语义（N/A→null），不受影响。
+        let na_gpu = GpuSnapshot {
+            name: "NVIDIA GB10".to_string(),
+            vram_used_mib: 0,
+            vram_total_mib: 0,
+            utilization_pct: 0,
+            processor_utilization_pct: None,
+            shared_memory_used_mib: None,
+            temperature_c: Some(52),
+            power_w: Some(31.0),
+        };
+        let projected = doctor_gpu_projection(&na_gpu);
+        assert_eq!(projected["vram_used_mib"], Value::Null);
+        assert_eq!(projected["vram_total_mib"], Value::Null);
+        assert_eq!(projected["utilization_pct"], Value::Null);
+        assert_eq!(projected["unified_memory_na"], Value::Bool(true));
+        assert_eq!(projected["temperature_c"], json!(52));
+        // 真实读数（vram_total > 0）原样透传，unified_memory_na=false。
+        let real_gpu = GpuSnapshot {
+            vram_used_mib: 1024,
+            vram_total_mib: 8192,
+            utilization_pct: 37,
+            temperature_c: None,
+            power_w: None,
+            ..na_gpu
+        };
+        let projected = doctor_gpu_projection(&real_gpu);
+        assert_eq!(projected["vram_used_mib"], json!(1024));
+        assert_eq!(projected["vram_total_mib"], json!(8192));
+        assert_eq!(projected["utilization_pct"], json!(37));
+        assert_eq!(projected["unified_memory_na"], Value::Bool(false));
     }
 }
