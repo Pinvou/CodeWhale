@@ -31,6 +31,12 @@ Two failure classes are pinned here:
    binary), so both the strip and the swap turn red here instead of being
    discovered as install-bloat or odd crashes later. If the @img platform
    set legitimately changes, update EXPECTED_TEAM_RELAY_HUB_LIBC.
+   The pinned table only sees packages it lists, so a strip on a platform
+   package that a later sharp bump ADDS would slip past it (round-21
+   review); a structural rule closes that: every @img/* package whose
+   `os` is `["linux"]` must carry `libc` — npm never strips `os`, only
+   `libc`, so the pair "linux without libc" is the strip signature
+   regardless of what the table knows.
 
 3. Lockfile format downgrades — the mirror scan walks the v3 `packages`
    map; a lock rewritten at lockfileVersion != 3 (an npm-old regen) would
@@ -110,6 +116,7 @@ def main():
     if not lock_files:
         failures.append("no package-lock.json found — guard ran against the wrong tree?")
     hub_libc = None
+    hub_linux_without_libc = []
     hub_seen = False
     for path in lock_files:
         rel = os.path.relpath(path, REPO_ROOT)
@@ -160,12 +167,15 @@ def main():
         if rel == os.path.join("team-relay-hub", "package-lock.json"):
             hub_libc = {}
             for pkg, entry in lock.get("packages", {}).items():
-                if not isinstance(entry, dict) or "libc" not in entry:
+                if not isinstance(entry, dict):
                     continue
                 marker = pkg.find("@img/")
                 if marker < 0:
                     continue
-                hub_libc[pkg[marker:]] = entry["libc"]
+                if "libc" in entry:
+                    hub_libc[pkg[marker:]] = entry["libc"]
+                elif entry.get("os") == ["linux"]:
+                    hub_linux_without_libc.append(pkg[marker:])
     if hub_libc is None:
         # Round-13 review: distinguish "absent" from "present but
         # unreadable" — the unreadable path above already reported the
@@ -195,6 +205,18 @@ def main():
                 f"team-relay-hub/package-lock.json: unexpected @img/* libc "
                 f"package {pkg} (libc={hub_libc[pkg]}) — if the @img platform "
                 f"set legitimately changed, update EXPECTED_TEAM_RELAY_HUB_LIBC"
+            )
+        # Packages the table already lists are reported as "stripped" above;
+        # this catches the strip on a linux platform package the table has
+        # never heard of (a sharp bump that adds one), where the set
+        # difference alone stays silent.
+        for pkg in sorted(set(hub_linux_without_libc) - set(expected)):
+            failures.append(
+                f"team-relay-hub/package-lock.json: linux @img/* package {pkg} "
+                f"carries no libc field (os=[\"linux\"] without libc is the "
+                f"npm < 11.11 strip signature) — regenerate with npm >= 11.11 "
+                f"or restore the field, then add the package to "
+                f"EXPECTED_TEAM_RELAY_HUB_LIBC"
             )
         for pkg in sorted(set(expected) & set(hub_libc)):
             if hub_libc[pkg] != expected[pkg]:

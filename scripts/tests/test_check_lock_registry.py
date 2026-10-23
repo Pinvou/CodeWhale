@@ -10,7 +10,9 @@ without the real lockfiles:
 - mirror blacklist: npmmirror (host AND bare-domain tarball form), taobao,
   tencent, huawei, cnpmjs, aliyun, ustc, 163, tuna — case- and port-insensitive;
 - official registry passes clean;
-- libc: strip and value-swap fail, exact mapping passes;
+- libc: strip and value-swap fail, exact mapping passes; a linux @img
+  package the table does not list fails structurally when it lacks libc
+  (round-21) and as "unexpected" when it carries one;
 - lockfileVersion != 3 and malformed JSON fail closed;
 - a tree with zero locks and a missing hub lock fail closed.
 """
@@ -141,6 +143,39 @@ class LockRegistryGuardTests(unittest.TestCase):
         )
         self.assertEqual(code, 1)
         self.assertIn("libc value drift", err)
+
+    def test_new_linux_img_package_without_libc_fails(self):
+        # Round-21 review: the frozen table cannot see a platform package it
+        # does not list, so a sharp bump that ADDS a linux @img entry and a
+        # rewrite that strips its libc would slip past the set difference.
+        # The structural rule (os=["linux"] without libc) must catch it.
+        bumped = _lock()
+        bumped["packages"]["node_modules/@img/sharp-linux-loong64"] = {
+            "resolved": "https://registry.npmjs.org/@img/sharp-linux-loong64/-/sharp-linux-loong64-0.36.0.tgz",
+            "os": ["linux"],
+        }
+        code, err = self._run(
+            {"team-relay-hub/package-lock.json": json.dumps(bumped)}
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("no libc field", err)
+        self.assertIn("sharp-linux-loong64", err)
+
+    def test_new_linux_img_package_with_libc_is_reported_as_unexpected(self):
+        # Same bump, healthy lock: not the strip signature — it stays on the
+        # "unexpected package" path that asks for a table update instead.
+        bumped = _lock()
+        bumped["packages"]["node_modules/@img/sharp-linux-loong64"] = {
+            "resolved": "https://registry.npmjs.org/@img/sharp-linux-loong64/-/sharp-linux-loong64-0.36.0.tgz",
+            "os": ["linux"],
+            "libc": ["glibc"],
+        }
+        code, err = self._run(
+            {"team-relay-hub/package-lock.json": json.dumps(bumped)}
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("unexpected @img/* libc package", err)
+        self.assertNotIn("no libc field", err)
 
     def test_lockfile_version_downgrade_fails(self):
         lock = _lock()
