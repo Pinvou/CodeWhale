@@ -815,9 +815,11 @@ def _scan_graph():
     resolving beside it rather than under `<stem>/` — round-16; an
     explicit-path declaration resolves ONLY through its attribute target,
     never the conventional candidates, and the scan context is the
-    (physical file, module path) pair so one file wired under two module
-    names is scanned under each libtest path it produces, with module
-    cycles failing closed like rustc's loader — round-17), so it covers
+    (physical file, module path, ownership) triple so one file wired under
+    two module names is scanned under each libtest path it produces, a
+    cfg-mutex wired/plain twin pair reaching one file under one module
+    path is scanned under both directory ownerships, and module
+    cycles fail closed like rustc's loader — round-17/19), so it covers
     exactly the lib crate that `cargo test --lib --list` reports — bin-only
     files (`main.rs`, undeclared strays) are never scanned and cannot alias
     a pin's path. Hits are keyed by their FULL libtest module path: the
@@ -848,10 +850,15 @@ def _scan_graph():
     by_path = {}
     unattributable = {}
     attributable = set()
-    # Visited holds (realpath, module path) scan contexts, not bare
-    # physical files (round-17 review): a #[path] wiring reaching one file
-    # under two module names must be scanned under each libtest path it
-    # produces.
+    # Visited holds (realpath, module path, ownership) scan contexts, not
+    # bare physical files (round-17 review): a #[path] wiring reaching one
+    # file under two module names must be scanned under each libtest path
+    # it produces. The ownership tag rides in the key (round-19 review): a
+    # cfg-mutex wired/plain twin pair can reach the SAME file under the
+    # SAME module path with different directory ownership — the wired side
+    # is mod.rs-like and resolves children beside the file, the plain side
+    # opens the `<stem>/` directory — so the FIFO race between the two
+    # enqueues must not drop either context.
     visited = set()
     # The fourth queue element marks files rustc loaded through an
     # explicit `#[path]`: mod_file_path returns DirOwnership
@@ -873,17 +880,23 @@ def _scan_graph():
     # (four-control 0/1/0/1 instead of 1/0/0/1). Two fixes: an
     # explicit-path declaration is resolved ONLY through its attribute
     # target (the wired loop owns it; rustc never loads the conventional
-    # spot for it), and the visited key is the (realpath, module path)
-    # scan CONTEXT — one physical file wired under two module names is
-    # two libtest paths (rustc 1.99 probe: `#[path = "shared.rs"]
+    # spot for it), and the visited key is the (realpath, module path,
+    # ownership) scan CONTEXT — one physical file wired under two module
+    # names is two libtest paths (rustc 1.99 probe: `#[path = "shared.rs"]
     # mod alpha;` + `mod beta;` lists alpha::inner::t AND beta::inner::t),
     # while the ancestor chain carried alongside rejects circular module
     # graphs exactly where rustc's own loader stops (circular modules).
+    # Round-19 review: the ownership tag is part of that context — a
+    # cfg-mutex wired/plain twin pair resolving to the same physical file
+    # under the same module path differs ONLY in directory ownership, and
+    # dropping the loser deleted the branch rustc loads on the other host
+    # (the wired context's `mod inner;` reads src/inner.rs, the plain
+    # context's reads src/shared/inner.rs).
     queue = [(lib_root, [], True, False, frozenset())]
     while queue:
         path, base, is_crate_root, path_loaded, ancestors = queue.pop(0)
         real = os.path.realpath(path)
-        context = (real, tuple(base))
+        context = (real, tuple(base), path_loaded)
         if context in visited:
             continue
         visited.add(context)
@@ -982,10 +995,38 @@ def _scan_graph():
         # declaration rustc actually loads on the other host, so its
         # conventional file must keep its probe; the name-keyed set
         # silenced exactly that branch and a required pin `#[ignore]`d
-        # there scanned green.
-        wired_names = {
+        # there scanned green. Round-19 review: the line is only a sound
+        # identity while every same-line same-name declaration behind a
+        # run is wired — a `#[rustfmt::skip]` line hosting
+        # `mod shared; #[cfg(windows) mod shared;` beside the run shares
+        # ONE (name, line) across both, and the keyed exclusion silenced
+        # the plain twin's probe (a required pin `#[ignore]`d in the
+        # Windows source passed). The lexer cannot tell which token the
+        # run wired, so a line with more same-name declarations than the
+        # run can wire fails closed instead of excluding by a guessed
+        # identity (the round-15 ambiguity precedent); rustfmt's own
+        # layout puts each declaration on its line and never trips this.
+        wired_by_decl = collections.Counter(
             (name, decl_idx) for name, _rel, _estack, decl_idx in wired
-        }
+        )
+        external_by_decl = collections.Counter(
+            (name, decl_idx) for name, _estack, decl_idx in externals
+        )
+        for (name, decl_idx), wired_count in sorted(
+            wired_by_decl.items(), key=lambda item: item[0][1]
+        ):
+            if external_by_decl[(name, decl_idx)] > wired_count:
+                raise SystemExit(
+                    "test-registry-guard: ambiguous mod declarations at "
+                    f"{path}:{decl_idx + 1} — module '{name}' is declared "
+                    f"{external_by_decl[(name, decl_idx)]} times on one "
+                    f"line but only {wired_count} of them sit behind the "
+                    "#[path] run, so the wired declaration cannot be told "
+                    "apart from its same-line twin and the conventional "
+                    "probe cannot be scoped per declaration — put each "
+                    "mod on its own line"
+                )
+        wired_names = set(wired_by_decl)
         for name, estack, decl_idx in externals:
             if (name, decl_idx) in wired_names:
                 continue
@@ -1022,9 +1063,11 @@ def _scan_graph():
         # The conventional candidates do not exist for wirings — an
         # explicit-path declaration is excluded from that probing above
         # (round-17 review) — so both resolutions coexist without double
-        # visits (the graph dedups by the (realpath, module path) scan
-        # context, so one physical file wired under two module names is
-        # scanned under each libtest path it produces).
+        # visits (the graph dedups by the (realpath, module path,
+        # ownership) scan context, so one physical file wired under two
+        # module names is scanned under each libtest path it produces,
+        # and a cfg-mutex wired/plain twin pair reaching one file under
+        # one module path is scanned under both ownerships — round-19).
         for name, rel, estack, _decl_idx in wired:
             if estack:
                 candidate = os.path.normpath(

@@ -46,6 +46,14 @@ tree, not in one-off manual runs:
     cfg-mutex plain twin of a wired declaration keeps its conventional
     scan (name-keyed exclusion silenced exactly the branch rustc loads
     on the other host, green-lighting a pin `#[ignore]`d there);
+  - round-19 review: the visited scan context carries the directory
+    ownership alongside (realpath, module path) — a cfg-mutex wired/plain
+    twin pair reaching one file under one module path differs only in
+    ownership (children beside the file vs under `<stem>/`), and the
+    FIFO race must not drop the branch rustc loads on the other host;
+    and a declaration line hosting more same-name declarations than the
+    `#[path]` run can wire is refused (ambiguous identity) instead of
+    the keyed exclusion silencing the plain twin's probe;
   - main()'s duplicate-#[test] detection — the guard's original purpose —
     is pinned against a mocked `cargo test --list` registry.
 
@@ -2317,6 +2325,224 @@ class Round18CfgTwinExternalTests(GuardFixture):
         )
         self.assertEqual(code, 0)
         self.assertNotIn(str(Path("shared.rs")), err)
+
+
+class Round19OwnershipContextTests(GuardFixture):
+    """Round-19 review P2 (review of head 49efdd36, 2026-10-22): the
+    visited set keyed (realpath, module path) dropped the ownership half —
+    `#[cfg(unix)] #[path = "shared.rs"] mod shared;` beside
+    `#[cfg(windows)] mod shared;` both reach src/shared.rs under the SAME
+    module path, the plain enqueue wins the FIFO race (the externals loop
+    precedes the wired loop), and the wired context is discarded: its
+    mod.rs-like ownership resolves `mod inner;` to src/inner.rs while the
+    surviving plain context opens `shared/` — so the pin's real ignored
+    source src/inner.rs never entered the scan and the live stem child
+    src/shared/inner.rs answered for it (the review's four-control ran
+    0/1/0/1). The context now carries the ownership tag and both branches
+    are scanned; any candidate source's #[ignore] fails the pin — the
+    conservative direction the round-18 cfg-twin fix established."""
+
+    _LIB = (
+        "#[cfg(unix)]\n"
+        '#[path = "shared.rs"]\n'
+        "mod shared;\n"
+        "\n"
+        "#[cfg(windows)]\n"
+        "mod shared;\n"
+    )
+    _SWAPPED = (
+        "#[cfg(windows)]\n"
+        "mod shared;\n"
+        "\n"
+        "#[cfg(unix)]\n"
+        '#[path = "shared.rs"]\n'
+        "mod shared;\n"
+    )
+    _PIN = "shared::inner::tests::critical_pin"
+    _run_main = DuplicateRegistrationTests._run_main
+
+    def _files(self, real, stem):
+        return {
+            "lib.rs": self._LIB,
+            "shared.rs": "mod inner;\n",
+            "inner.rs": real,
+            "shared/inner.rs": stem,
+        }
+
+    def test_wired_child_ignored_fails_at_real_sibling_source(self):
+        # The review's false green: src/inner.rs (the wired context's
+        # child — the file rustc loads on unix) carries the #[ignore],
+        # the stem child src/shared/inner.rs is live. The scan must
+        # attribute the pin AT src/inner.rs and main must fail there
+        # (pre-fix the wired context was visited-dropped → return 0).
+        files = self._files(_IGNORED_PIN, _LIVE_PIN)
+        root = self._crate_root(files)
+        by_path, unattributable = self._scan(root)
+        self.assertEqual(unattributable, {})
+        self.assertEqual(
+            by_path[self._PIN], [self._src_path(root, "inner.rs") + ":4"]
+        )
+        code, err = self._run_main(
+            [self._PIN],
+            source=self._LIB,
+            required=[self._PIN],
+            files=files,
+        )
+        self.assertEqual(code, 1)
+        self.assertIn(f"required pin {self._PIN} is #[ignore]d at", err)
+        self.assertIn(str(Path("inner.rs")) + ":4", err)
+        self.assertNotIn(str(Path("shared") / "inner.rs"), err)
+        self.assertNotIn("outside the scanned lib module graph", err)
+
+    def test_plain_child_ignored_fails_at_stem_source(self):
+        # Reverse half of the four-control: the stem child (the plain
+        # context's child — the file rustc loads on windows) carries the
+        # #[ignore], the wired sibling is live — main must fail AT the
+        # stem source (pre-fix this control passed with the wired context
+        # alone doing the scanning; the fixed scan keeps both).
+        files = self._files(_LIVE_PIN, _IGNORED_PIN)
+        root = self._crate_root(files)
+        by_path, unattributable = self._scan(root)
+        self.assertEqual(unattributable, {})
+        self.assertEqual(
+            by_path[self._PIN],
+            [self._src_path(root, "shared/inner.rs") + ":4"],
+        )
+        code, err = self._run_main(
+            [self._PIN],
+            source=self._LIB,
+            required=[self._PIN],
+            files=files,
+        )
+        self.assertEqual(code, 1)
+        self.assertIn(f"required pin {self._PIN} is #[ignore]d at", err)
+        self.assertIn(str(Path("shared") / "inner.rs") + ":4", err)
+        self.assertNotIn("outside the scanned lib module graph", err)
+
+    def test_both_live_pass(self):
+        code, err = self._run_main(
+            [self._PIN],
+            source=self._LIB,
+            required=[self._PIN],
+            files=self._files(_LIVE_PIN, _LIVE_PIN),
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn("is #[ignore]d", err)
+
+    def test_both_ignored_fail(self):
+        code, err = self._run_main(
+            [self._PIN],
+            source=self._LIB,
+            required=[self._PIN],
+            files=self._files(_IGNORED_PIN, _IGNORED_PIN),
+        )
+        self.assertEqual(code, 1)
+        self.assertIn(f"required pin {self._PIN} is #[ignore]d at", err)
+        self.assertIn(str(Path("inner.rs")) + ":4", err)
+        self.assertIn(str(Path("shared") / "inner.rs") + ":4", err)
+
+    def test_swapped_declaration_order_same_outcome(self):
+        # The pre-fix visit was FIFO luck, so the fix must not depend on
+        # enqueue order either: with the twin declarations swapped in the
+        # source, the wired child's #[ignore] still fails at src/inner.rs.
+        code, err = self._run_main(
+            [self._PIN],
+            source=self._SWAPPED,
+            required=[self._PIN],
+            files=self._files(_IGNORED_PIN, _LIVE_PIN),
+        )
+        self.assertEqual(code, 1)
+        self.assertIn(f"required pin {self._PIN} is #[ignore]d at", err)
+        self.assertIn(str(Path("inner.rs")) + ":4", err)
+        self.assertNotIn(str(Path("shared") / "inner.rs"), err)
+
+
+class Round19DeclLineAmbiguityTests(GuardFixture):
+    """Round-19 review P2 (review of head 49efdd36, 2026-10-22): the wired
+    exclusion keyed (module name, declaration LINE) is only a sound
+    declaration identity while every same-line same-name declaration is
+    wired — a `#[rustfmt::skip]` line hosting
+    `mod shared; #[cfg(windows)] mod shared;` behind the run shares ONE
+    (name, line) across both, the keyed exclusion silenced the plain
+    twin's conventional probe as well, and a required pin `#[ignore]`d in
+    the Windows source passed (the review's wired-live/plain-ignored
+    control returned 0). The lexer cannot tell which token the run wired,
+    so a line with more same-name declarations than the run can wire now
+    fails closed instead of excluding by a guessed identity (the
+    round-15 ambiguity precedent); rustfmt's own layout puts each
+    declaration on its line and never trips the refusal."""
+
+    _LIB = (
+        "#[rustfmt::skip]\n"
+        "mod wrapper {\n"
+        '#[cfg(unix)] #[path = "unix.rs"]\n'
+        "mod shared; #[cfg(windows)] mod shared;\n"
+        "}\n"
+    )
+    _SPLIT = (
+        "#[rustfmt::skip]\n"
+        "mod wrapper {\n"
+        '#[cfg(unix)] #[path = "unix.rs"]\n'
+        "mod shared;\n"
+        "#[cfg(windows)] mod shared;\n"
+        "}\n"
+    )
+    _PIN = "wrapper::shared::tests::critical_pin"
+    _run_main = DuplicateRegistrationTests._run_main
+
+    def test_same_line_twin_fails_closed(self):
+        # The refusal is about the unresolvable identity, not the pin
+        # state: it must fire with the plain source ignored AND with both
+        # branches live — a silent green there would leave the
+        # exclusion's reach unproven.
+        for files in (
+            {"wrapper/unix.rs": _LIVE_PIN, "wrapper/shared.rs": _IGNORED_PIN},
+            {"wrapper/unix.rs": _LIVE_PIN, "wrapper/shared.rs": _LIVE_PIN},
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                self._run_main(
+                    [self._PIN],
+                    source=self._LIB,
+                    required=[self._PIN],
+                    files=files,
+                )
+            message = str(ctx.exception)
+            self.assertIn("ambiguous mod declarations", message)
+            self.assertIn("lib.rs:4", message)
+            self.assertIn("module 'shared'", message)
+            self.assertIn("put each mod on its own line", message)
+
+    def test_split_line_twin_scans_both_branches(self):
+        # Positive control: the identical modules split onto separate
+        # lines keep the round-18 per-declaration exclusion — both
+        # branches probed, any #[ignore] red, both live green.
+        code, err = self._run_main(
+            [self._PIN],
+            source=self._SPLIT,
+            required=[self._PIN],
+            files={"wrapper/unix.rs": _LIVE_PIN, "wrapper/shared.rs": _IGNORED_PIN},
+        )
+        self.assertEqual(code, 1)
+        self.assertIn(f"required pin {self._PIN} is #[ignore]d at", err)
+        self.assertIn(str(Path("wrapper") / "shared.rs") + ":4", err)
+
+        code, err = self._run_main(
+            [self._PIN],
+            source=self._SPLIT,
+            required=[self._PIN],
+            files={"wrapper/unix.rs": _IGNORED_PIN, "wrapper/shared.rs": _LIVE_PIN},
+        )
+        self.assertEqual(code, 1)
+        self.assertIn(str(Path("wrapper") / "unix.rs") + ":4", err)
+
+        code, err = self._run_main(
+            [self._PIN],
+            source=self._SPLIT,
+            required=[self._PIN],
+            files={"wrapper/unix.rs": _LIVE_PIN, "wrapper/shared.rs": _LIVE_PIN},
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn("is #[ignore]d", err)
 
 
 if __name__ == "__main__":
