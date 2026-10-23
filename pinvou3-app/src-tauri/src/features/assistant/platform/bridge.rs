@@ -5508,9 +5508,8 @@ mod tests {
         // counts every assistant→marketplace reference as cyclic debt, and
         // the file-level pin is the stronger coupling anyway (see the
         // messaging test for why this lives in assistant).
-        let manifest_json = include_str!(
-            "../../../../../resources/mcp-servers/app-automations/manifest.json"
-        );
+        let manifest_json =
+            include_str!("../../../../../resources/mcp-servers/app-automations/manifest.json");
         let manifest: serde_json::Value =
             serde_json::from_str(manifest_json).expect("app-automations manifest is valid JSON");
         assert!(
