@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { FileTypeIcon } from '../../components/files/FileTypeIcon.jsx';
 import { ChevronDown, Code, TrendingDown, TrendingUp } from '../../components/icons.jsx';
+import { SCHEDULED_TASK_CREATE_TOOL, SCHEDULED_TASK_DELETE_TOOL, SCHEDULED_TASK_LIST_TOOL, SCHEDULED_TASK_UPDATE_TOOL, scheduledTaskCreateSummary, scheduledTaskDeleteSummary, scheduledTaskListSummary, scheduledTaskUpdateSummary } from './scheduled-task-tool-logic.js';
 import { bridge } from '../../hooks/useBridge.js';
 import { _ARTIFACT_FMT, _artifactKind } from '../../shared/artifact-utils.js';
 import { can, isWeb } from '../../shared/platform.js';
@@ -207,6 +208,17 @@ const tc = (t) => (t && t.uiToolCommon) || zhDict().uiToolCommon || t || {};
           return args.status === 'completed' ? t.tsDone
             : args.status === 'in_progress' ? t.tsInProgress
             : args.status === 'pending' ? t.tsPending : '';
+        // app-automations (scheduled tasks): create summary = task name +
+        // rrule; update = target id + changed fields; delete = target id;
+        // list = the localized verb plus the requested limit.
+        case SCHEDULED_TASK_CREATE_TOOL:
+          return scheduledTaskCreateSummary(args, t.uiScheduledTaskTool.nameQuote);
+        case SCHEDULED_TASK_UPDATE_TOOL:
+          return scheduledTaskUpdateSummary(args);
+        case SCHEDULED_TASK_DELETE_TOOL:
+          return scheduledTaskDeleteSummary(args);
+        case SCHEDULED_TASK_LIST_TOOL:
+          return scheduledTaskListSummary(args, t.uiScheduledTaskTool.listLabel, t.uiScheduledTaskTool.limitSuffix);
         default:
           return '';
       }
@@ -243,6 +255,16 @@ const tc = (t) => (t && t.uiToolCommon) || zhDict().uiToolCommon || t || {};
 
     // ── 每工具定制结果视图（仿 Claude Code）：解析失败一律 fallback 纯文本，永不崩 ──
     const tryParseJson = (text) => { try { return JSON.parse(text); } catch (_) { return null; } };
+    // MCP text envelope unwrap (shared by MCP tool card output preprocessing): when output is
+    // the { content: [{ type: 'text', text }] } structure, take the inner text; otherwise return it as-is.
+    const unwrapMcpTextEnvelope = (out) => {
+      const envelope = tryParseJson(out);
+      if (envelope && Array.isArray(envelope.content)) {
+        const txt = envelope.content.find(c => c.type === 'text');
+        if (txt && txt.text) return txt.text;
+      }
+      return out;
+    };
     // checklist/plan 输出是「摘要行\n{json}」，切首个换行后 parse
     const tryTailJson = (text) => {
       if (typeof text !== 'string') return null;
@@ -614,4 +636,4 @@ const tc = (t) => (t && t.uiToolCommon) || zhDict().uiToolCommon || t || {};
 
 
 
-export { AcShieldCheck, AcSparkles, AcArrowUpRight, AcFolder, ArtifactCard, QUIET_TOOLS, isQuietTool, toolBasename, toolSummary, isReceipt, parseReceipt, ReceiptBlock, tryParseJson, tryTailJson, looksDiff, outBox, TODO_SYM, TODO_TOOLS, OutputPre, OutputError, ListDirView, GrepView, DiffView, ShellView, ShellTextView, TodoView, weatherIconSvg, WeatherCard, isWeatherTool, isStockQuoteTool, StockQuoteCard };
+export { AcShieldCheck, AcSparkles, AcArrowUpRight, AcFolder, ArtifactCard, QUIET_TOOLS, isQuietTool, toolBasename, toolSummary, isReceipt, parseReceipt, ReceiptBlock, tryParseJson, tryTailJson, unwrapMcpTextEnvelope, looksDiff, outBox, TODO_SYM, TODO_TOOLS, OutputPre, OutputError, ListDirView, GrepView, DiffView, ShellView, ShellTextView, TodoView, weatherIconSvg, WeatherCard, isWeatherTool, isStockQuoteTool, StockQuoteCard };
