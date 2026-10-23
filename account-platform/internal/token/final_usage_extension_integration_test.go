@@ -85,15 +85,15 @@ func TestF05AdditionalReservationProjectionPublicPostgres(t *testing.T) {
 	if err != nil || actual <= c.usage.MaximumMicrocredits || actual > 1000 {
 		t.Fatal("fixture requires a backed positive extension", actual, err)
 	}
-	authorize := func() {
+	authorize := func(expectedNotice string) {
 		t.Helper()
 		maximum, notice, ok := c.service.authorizeAdditional(ctx, c.usage.ID, *c.usage.HoldID, c.price, usage, c.usage.MaximumMicrocredits)
-		if !ok || maximum != actual || notice != "" {
+		if !ok || maximum != actual || notice != expectedNotice {
 			t.Fatal("unexpected final usage authorization", maximum, notice, ok)
 		}
 	}
 	loseACK.Store(true)
-	authorize()
+	authorize(additionalReservationUnconfirmed)
 	afterLost, err := r.GetUsage(ctx, c.usage.ID)
 	if err != nil || afterLost.MaximumMicrocredits != c.usage.MaximumMicrocredits {
 		t.Fatal("unknown ACK was projected", afterLost, err)
@@ -103,12 +103,12 @@ func TestF05AdditionalReservationProjectionPublicPostgres(t *testing.T) {
 		t.Fatal("lost ACK did not follow a real committed extension", holdMaximum, err)
 	}
 	money := f05DeadlineBillingFacts(t, ctx, pool)
-	authorize()
+	authorize("")
 	confirmed, err := r.GetUsage(ctx, c.usage.ID)
 	if err != nil || confirmed.MaximumMicrocredits != actual {
 		t.Fatal("confirmed target not projected", confirmed, err)
 	}
-	authorize()
+	authorize("")
 	replay, err := r.GetUsage(ctx, c.usage.ID)
 	if err != nil || replay.MaximumMicrocredits != actual || !replay.UpdatedAt.Equal(confirmed.UpdatedAt) {
 		t.Fatal("replayed ACK added or rewrote local projection", replay, err)
