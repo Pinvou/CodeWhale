@@ -1792,6 +1792,65 @@ class CiGatePolicyTests(unittest.TestCase):
             "silently override the strict value",
         )
 
+    def test_deny_toml_unused_ignore_self_enforcement_pinned(self):
+        # Round-20 review: `unused-ignored-advisory = "deny"` is the field
+        # that makes an expired exception LOUD — once upstream resolves the
+        # advisories the three id-level ignores cover, cargo-deny itself
+        # fails until they are removed. Dropping the field passed every
+        # gate-policy test (only comments mentioned it), so a future
+        # expired exception would sit green forever. Pin it on an
+        # executable line next to the yanked value.
+        deny_toml = (
+            ROOT / "pinvou3-app/src-tauri/deny.toml"
+        ).read_text(encoding="utf-8")
+        deny_code = "\n".join(
+            line
+            for line in deny_toml.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        self.assertIn(
+            'unused-ignored-advisory = "deny"',
+            deny_code,
+            "deny.toml must keep unused-ignored-advisory = \"deny\" on an "
+            "executable line — without it an advisory ignore outliving its "
+            "advisory is silent instead of failing the deny gate",
+        )
+
+    def test_zip_lockfiles_sit_inside_the_assessed_advisory_window(self):
+        # Round-20 review: the RUSTSEC id-level ignores in deny.toml have no
+        # version dimension — they silence those advisories for ANY zip
+        # version, so an in-band lock drift (8.6.0 → 8.7.0, or a downgrade)
+        # passes cargo-deny without the "Reassess on bump" the ignore
+        # reasons promise. Pin every repo lock's zip to the exact assessed
+        # version: any bump fails HERE first and forces the reassessment
+        # and the ignore update to land in the same change.
+        zip_locks = []
+        for lock in sorted(ROOT.glob("**/Cargo.lock")):
+            if "CodeWhale" in str(lock):
+                continue  # the public base governs its own locks
+            versions = re.findall(
+                r'name = "zip"\nversion = "([^"]+)"',
+                lock.read_text(encoding="utf-8"),
+            )
+            if versions:
+                zip_locks.append((lock, versions))
+        self.assertTrue(
+            zip_locks,
+            "expected at least one repo lock to carry zip — if the "
+            "dependency is gone, remove the advisory ignores and this pin "
+            "together",
+        )
+        for lock, versions in zip_locks:
+            for version in versions:
+                self.assertEqual(
+                    version,
+                    "8.6.0",
+                    f"{lock}: zip {version} is outside the assessed 8.6.0 "
+                    "window — the deny.toml advisory ignores have no "
+                    "version dimension, so reassess them for the new "
+                    "version and update this pin in the same change",
+                )
+
     def test_rust_lint_disk_step_is_draft_gated_and_precedes_zram(self):
         # PR #1518 round-5 review: the rust-lint disk cleanup is only needed
         # for the heavy (non-draft) compile, so it must stay draft-gated —
@@ -1828,6 +1887,34 @@ class CiGatePolicyTests(unittest.TestCase):
             ),
             "pinned command must appear as an executable (non-comment) line",
         )
+        # Round-20 review: only the command's existence was pinned, not its
+        # arguments — appending `--min-free-gib 1` (ENOSPC gate at an
+        # empty-disk level) kept every gate-policy test green. Pin the
+        # exact recipe the way the rust-test sibling steps do.
+        body = "\n".join(
+            line
+            for line in disk_step.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        self.assertIn(
+            "run: |\n"
+            '          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \\\n'
+            '            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \\\n'
+            "            python3 scripts/ci-rust-disk.py",
+            body,
+            "rust-lint's disk step must keep the sibling recipe shape "
+            "(sudo env prefix, script with no flags)",
+        )
+        for line in body.splitlines():
+            if "ci-rust-disk.py" in line:
+                self.assertEqual(
+                    line.strip(),
+                    "python3 scripts/ci-rust-disk.py",
+                    "the disk-clean command must stay argument-free — an "
+                    "argument (e.g. --min-free-gib) retunes the ENOSPC gate "
+                    "with no other test noticing; change it here and in the "
+                    "rust-test recipe together",
+                )
         self.assertNotIn("|| true", disk_step)
 
     def test_fast_gate_runner_line_is_pinned(self):
@@ -5000,9 +5087,17 @@ class CiGatePolicyTests(unittest.TestCase):
             for line in step.splitlines()
             if not line.lstrip().startswith("#")
         )
+        # Round-20 review: two of the probe's five assertions were pinned —
+        # deleting the three per-argv content greps kept every gate-policy
+        # test green, so a "same arg count, different args" edit (the
+        # delegation contract's other half) regressed silently. Pin all
+        # five on executable lines.
         for probe in (
             "grep -Fqx 'chain_probe_stack=[16777216]'",
             "grep -Fqx 'chain_probe_argc=3'",
+            "grep -Fqx 'chain_probe_arg=[rustc]'",
+            "grep -Fqx 'chain_probe_arg=[--version]'",
+            "grep -Fqx 'chain_probe_arg=[--verbose]'",
         ):
             self.assertIn(
                 probe,
