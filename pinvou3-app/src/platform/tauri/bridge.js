@@ -1346,7 +1346,16 @@ function pinvouSceneForMessagePos(pos) { return pinvouSharedtauriMain().pinvouSc
 
   // 事件监听器统一入口:按 payload.session_id 路由同步逻辑;后台变更后补一次 notify 刷新列表。
 function markRemoteTurn(sid, buf, preserveCommittedRevision, cause) { return pinvouSharedtauriMain().markRemoteTurn(sid, buf, preserveCommittedRevision, cause); }
-function onSessionEvent(e, fn, options) { return pinvouSharedtauriMain().onSessionEvent(e, fn, options); }
+function onSessionEvent(e, fn, options) {
+  // 流式热路径打分段探针（接收→调度→派发→下一帧），只在段间隔超阈值时
+  // 上报一条无内容记录；失败路径见 shared/render-stage-probe.js。实现在共享
+  // 模块（评审 rebase 指示），这里在委托外面包一层，不侵入其内部结构。
+  var eventNameForProbe = String((e && e.event) || "");
+  if (/chat:(delta|reasoning_delta)$/.test(eventNameForProbe) && window.RenderStageProbe) {
+    try { window.RenderStageProbe.begin(e && e.payload && e.payload.session_id); } catch (_) {}
+  }
+  return pinvouSharedtauriMain().onSessionEvent(e, fn, options);
+}
 
 function isScheduledRunSession(sid) { return pinvouSharedtauriMain().isScheduledRunSession(sid); }
 
