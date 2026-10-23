@@ -30,7 +30,7 @@ const SESSION_TOKEN = '0123456789abcdef';
 const OTHER_SESSION_TOKEN = 'fedcba9876543210';
 
 const FAKE_MCP = String.raw`
-import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 
 const workspacePath = process.env.FAKE_BROWSER_WORKSPACE;
 const modePath = process.env.FAKE_BROWSER_MCP_MODE;
@@ -76,6 +76,18 @@ function result(id, value) {
 
 function error(id, message) {
   write({ jsonrpc: '2.0', id, error: { code: -32000, message } });
+}
+
+function scheduleToolCompletion(id, complete, delayMs, releasePath) {
+  const completeWhenReleased = () => {
+    if (releasePath && !existsSync(releasePath)) {
+      pendingToolTimers.set(id, setTimeout(completeWhenReleased, 10));
+      return;
+    }
+    complete();
+  };
+  if (delayMs > 0) pendingToolTimers.set(id, setTimeout(completeWhenReleased, delayMs));
+  else completeWhenReleased();
 }
 
 audit({ kind: 'start' });
@@ -254,11 +266,7 @@ process.stdin.on('data', (chunk) => {
         else result(message.id, { content: [{ type: 'text', text: 'clicked' }] });
       };
       const delayMs = Number(currentMode.clickDelayMs) || 0;
-      if (delayMs > 0) {
-        pendingToolTimers.set(message.id, setTimeout(complete, delayMs));
-      } else {
-        complete();
-      }
+      scheduleToolCompletion(message.id, complete, delayMs, currentMode.clickReleasePath);
       continue;
     }
     if (name === 'type_text' || name === 'evaluate_script') {
@@ -292,11 +300,7 @@ process.stdin.on('data', (chunk) => {
         } else result(message.id, { content: [{ type: 'text', text: 'snapshot' }] });
       };
       const delayMs = Number(currentMode.snapshotDelayMs) || 0;
-      if (delayMs > 0) {
-        pendingToolTimers.set(message.id, setTimeout(complete, delayMs));
-      } else {
-        complete();
-      }
+      scheduleToolCompletion(message.id, complete, delayMs, currentMode.snapshotReleasePath);
       continue;
     }
     error(message.id, 'unexpected tool: ' + name);
@@ -391,7 +395,7 @@ async function waitUntil(predicate, message, timeoutMs = 3_000) {
     if (predicate()) return;
     await sleep(10);
   }
-  assert.fail(message);
+  assert.fail(typeof message === 'function' ? message() : message);
 }
 
 async function makeFixture() {
@@ -1285,6 +1289,34 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
   const host = createFakeHost(fixture);
   const wrapper = driveWrapper(fixture);
 
+  const releaseAfterRefreshes = async ({ request, before, operation, count, releasePath }) => {
+    try {
+      await Promise.race([
+        waitUntil(
+          () => (host.state.operationCalls.get(operation) || 0) - before.refresh >= count,
+          () => 'heartbeat barrier timed out: ' + JSON.stringify({
+            operation,
+            expectedRefreshes: count,
+            observedRefreshes: (host.state.operationCalls.get(operation) || 0) - before.refresh,
+            hostError: host.state.failure?.message,
+            operations: host.state.operationTimeline.slice(before.log),
+            audit: readAudit(fixture.auditPath).slice(-20),
+          }),
+          10_000,
+        ),
+        request.then(() => assert.fail('tool completed before its release barrier')),
+      ]);
+      assert.equal(
+        (host.state.operationCalls.get('end_agent_operation') || 0) - before.end,
+        0,
+        'the operation must remain active while the tool waits for release',
+      );
+    } finally {
+      writeFileSync(releasePath, 'release');
+    }
+    return await request;
+  };
+
   try {
     const initialized = await initializeWrapper(wrapper, 'windows-lifecycle-test');
     assert.equal(initialized.result.serverInfo.name, 'fake-windows-mcp');
@@ -1330,10 +1362,12 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
     });
     assert.equal(recoveredAgain.result.structuredContent.pages[0].id, 3);
 
-    // A >1.5s official-MCP input tool keeps one begin/end operation alive via
-    // serial refreshes. The heartbeat stops before end and never becomes a
-    // background lease-renewal loop after the tool response.
-    writeFileSync(fixture.modePath, JSON.stringify({ clickDelayMs: 1_600 }));
+    // Hold a >1.5s input tool until multiple real refreshes have arrived. Each
+    // serial refresh also includes host-file round-trip time, so a fixed 1.6s
+    // duration cannot guarantee four refreshes on a loaded Windows runner.
+    // The bounded barrier must fail if the wrapper stops refreshing entirely.
+    const clickReleasePath = join(fixture.root, 'long-input.release');
+    writeFileSync(fixture.modePath, JSON.stringify({ clickDelayMs: 1_600, clickReleasePath }));
     const longInputBefore = {
       begin: host.state.operationCalls.get('begin_agent_operation') || 0,
       refresh: host.state.operationCalls.get('refresh_agent_input') || 0,
@@ -1342,9 +1376,16 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
       clicks: readAudit(fixture.auditPath)
         .filter((entry) => entry.kind === 'tool' && entry.name === 'click').length,
     };
-    const longInput = await wrapper.request('tools/call', {
+    const longInputRequest = wrapper.request('tools/call', {
       name: 'click',
       arguments: { uid: 'slow-button' },
+    });
+    const longInput = await releaseAfterRefreshes({
+      request: longInputRequest,
+      before: longInputBefore,
+      operation: 'refresh_agent_input',
+      count: 4,
+      releasePath: clickReleasePath,
     });
     assert.equal(longInput.result.content[0].text, 'clicked');
     assert.equal(
@@ -1353,7 +1394,7 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
     );
     assert.ok(
       (host.state.operationCalls.get('refresh_agent_input') || 0) - longInputBefore.refresh >= 4,
-      'a 1.6s trusted-input tool should refresh the 750ms window several times',
+      'a held input tool must receive multiple real heartbeat refreshes',
     );
     assert.equal(
       (host.state.operationCalls.get('end_agent_operation') || 0) - longInputBefore.end,
@@ -1383,17 +1424,25 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
     // Slow non-input/DOM work uses the generic 5s operation heartbeat. It must
     // neither borrow the trusted-input suppression endpoint nor leave a timer
     // running after the host operation is ended.
-    writeFileSync(fixture.modePath, JSON.stringify({ snapshotDelayMs: 5_500 }));
+    const snapshotReleasePath = join(fixture.root, 'slow-snapshot.release');
+    writeFileSync(fixture.modePath, JSON.stringify({ snapshotDelayMs: 5_500, snapshotReleasePath }));
     const slowSnapshotBefore = {
       begin: host.state.operationCalls.get('begin_agent_operation') || 0,
-      genericRefresh: host.state.operationCalls.get('refresh_agent_operation') || 0,
+      refresh: host.state.operationCalls.get('refresh_agent_operation') || 0,
       inputRefresh: host.state.operationCalls.get('refresh_agent_input') || 0,
       end: host.state.operationCalls.get('end_agent_operation') || 0,
       log: host.state.operationLog.length,
     };
-    const slowSnapshot = await wrapper.request('tools/call', {
+    const slowSnapshotRequest = wrapper.request('tools/call', {
       name: 'take_snapshot',
       arguments: {},
+    });
+    const slowSnapshot = await releaseAfterRefreshes({
+      request: slowSnapshotRequest,
+      before: slowSnapshotBefore,
+      operation: 'refresh_agent_operation',
+      count: 1,
+      releasePath: snapshotReleasePath,
     });
     assert.equal(slowSnapshot.result.content[0].text, 'snapshot');
     assert.equal(
@@ -1402,7 +1451,7 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
     );
     assert.ok(
       (host.state.operationCalls.get('refresh_agent_operation') || 0) -
-        slowSnapshotBefore.genericRefresh >= 1,
+        slowSnapshotBefore.refresh >= 1,
       'a slow non-input tool must refresh the generic operation lease',
     );
     assert.equal(
