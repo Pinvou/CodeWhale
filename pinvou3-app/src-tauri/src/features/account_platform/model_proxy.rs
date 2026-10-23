@@ -82,6 +82,7 @@ struct ProxyRegistry {
 
 #[derive(Clone)]
 struct ProxyTarget {
+    authorization: Option<Arc<dyn super::ModelAuthorization>>,
     session_id: String,
     incarnation: Arc<super::model_cancellation::Incarnation>,
     upstream: Url,
@@ -215,12 +216,31 @@ impl ModelGatewayProxy {
         }
     }
 
+    #[cfg(test)]
     pub(super) async fn register_session(
         &self,
         session_id: &str,
         upstream_base_url: &str,
         gateway_model_id: &str,
         maximum_output_tokens: u32,
+    ) -> Result<String> {
+        self.register_authorized_session(
+            session_id,
+            upstream_base_url,
+            gateway_model_id,
+            maximum_output_tokens,
+            None,
+        )
+        .await
+    }
+
+    pub(super) async fn register_authorized_session(
+        &self,
+        session_id: &str,
+        upstream_base_url: &str,
+        gateway_model_id: &str,
+        maximum_output_tokens: u32,
+        authorization: Option<Arc<dyn super::ModelAuthorization>>,
     ) -> Result<String> {
         let upstream = Url::parse(upstream_base_url)
             .context("account platform model gateway URL is invalid")?;
@@ -246,6 +266,26 @@ impl ModelGatewayProxy {
                 .registry
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let changed_authority = registry
+                .session_routes
+                .get(session_id)
+                .and_then(|route| registry.targets.get(route))
+                .is_some_and(|target| match (&target.authorization, &authorization) {
+                    (Some(previous), Some(current)) => match (previous.scope(), current.scope()) {
+                        (Some(previous), Some(current)) => previous != current,
+                        _ => !Arc::ptr_eq(previous, current),
+                    },
+                    (None, None) => false,
+                    _ => true,
+                });
+            if changed_authority {
+                if let Some(route) = registry.session_routes.remove(session_id) {
+                    registry.targets.remove(&route);
+                }
+                // An old Engine may still retain its URL or an admitted target.
+                // A new login never upgrades either handle to a new principal.
+                server.state.calls.forget_session(session_id);
+            }
             let route = registry
                 .session_routes
                 .entry(session_id.to_string())
@@ -255,12 +295,14 @@ impl ModelGatewayProxy {
                 .targets
                 .entry(route.clone())
                 .and_modify(|target| {
+                    target.authorization = authorization.clone();
                     target.session_id = session_id.to_string();
                     target.upstream = upstream.clone();
                     target.gateway_model_id = gateway_model_id.to_string();
                     target.maximum_output_tokens = maximum_output_tokens;
                 })
                 .or_insert(ProxyTarget {
+                    authorization,
                     session_id: session_id.to_string(),
                     incarnation: server.state.calls.incarnation(session_id),
                     upstream,
@@ -467,23 +509,28 @@ async fn forward(
             "model transport incarnation is retired",
         );
     }
+    // Capture the timing owner before authorization may wait for token refresh.
+    let timing_turn_id = crate::features::assistant::timing::current_turn_id(&target.session_id);
+    let mut bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
     let delivery = if let Some(key) = idempotency_key {
-        let Some(bearer) = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-        else {
+        if bearer.is_empty() {
             return proxy_error(
                 StatusCode::UNAUTHORIZED,
                 "model invocation authorization is missing",
             );
-        };
-        match state.calls.track(
+        }
+        match state.calls.track_authorized(
             &target.incarnation,
             target.turn_generation,
             target.upstream.clone(),
-            bearer,
+            &bearer,
             key,
             state.client.clone(),
+            target.authorization.clone(),
         ) {
             Ok(delivery) => Some(delivery),
             Err(_) => {
@@ -503,33 +550,50 @@ async fn forward(
         Ok(target) => target,
         Err(_) => return proxy_error(StatusCode::BAD_GATEWAY, "invalid upstream route"),
     };
-    // Freeze the admitted timing owner before the first network await.
-    let timing_turn_id = crate::features::assistant::timing::current_turn_id(&target.session_id);
     let mut last_error = None;
     let mut upstream_response = None;
     // A transport error can happen after the gateway accepted the request but
     // before response headers reach the desktop. Reusing the same generated
     // Idempotency-Key makes one bounded retry safe for chat requests; GET is
-    // naturally idempotent. Application HTTP responses are never retried.
-    for attempt in 1..=2 {
+    // naturally idempotent. A 401 gets one refresh of this route's original
+    // authenticated session; other application responses are never retried.
+    let mut transport_failures = 0;
+    let mut refreshed = false;
+    for attempt in 1..=3 {
         if delivery.as_ref().is_some_and(|delivery| delivery.stopped()) {
             return proxy_error(StatusCode::CONFLICT, "model delivery cancelled");
+        }
+        if let Some(supplier) = &target.authorization {
+            let authorization = if let Some(delivery) = &delivery {
+                tokio::select! {
+                    biased;
+                    _ = delivery.cancelled() => return proxy_error(StatusCode::CONFLICT, "model delivery cancelled"),
+                    result = supplier.bearer(None) => result,
+                }
+            } else {
+                supplier.bearer(None).await
+            };
+            match authorization {
+                Ok(current) => bearer = current,
+                Err(_) => {
+                    return proxy_error(
+                        StatusCode::UNAUTHORIZED,
+                        "model authorization expired or changed",
+                    );
+                }
+            }
         }
         let mut builder = model_request_budget(
             state.client.request(method.clone(), target_url.clone()),
             resource,
             &method,
         );
-        for name in [
-            header::AUTHORIZATION,
-            header::CONTENT_TYPE,
-            header::ACCEPT,
-            header::USER_AGENT,
-        ] {
+        for name in [header::CONTENT_TYPE, header::ACCEPT, header::USER_AGENT] {
             if let Some(value) = headers.get(&name) {
                 builder = builder.header(name, value);
             }
         }
+        builder = builder.header(header::AUTHORIZATION, &bearer);
         if let Some(value) = headers.get("x-pinvou-client-version") {
             builder = builder.header("x-pinvou-client-version", value);
         }
@@ -556,6 +620,29 @@ async fn forward(
         };
         match result {
             Ok(response) => {
+                if response.status() == StatusCode::UNAUTHORIZED && !refreshed {
+                    if let Some(supplier) = &target.authorization {
+                        refreshed = true;
+                        let authorization = if let Some(delivery) = &delivery {
+                            tokio::select! {
+                                biased;
+                                _ = delivery.cancelled() => return proxy_error(StatusCode::CONFLICT, "model delivery cancelled"),
+                                result = supplier.bearer(Some(&bearer)) => result,
+                            }
+                        } else {
+                            supplier.bearer(Some(&bearer)).await
+                        };
+                        match authorization {
+                            Ok(_) => continue,
+                            Err(_) => {
+                                return proxy_error(
+                                    StatusCode::UNAUTHORIZED,
+                                    "model authorization expired or changed",
+                                );
+                            }
+                        }
+                    }
+                }
                 upstream_response = Some(response);
                 break;
             }
@@ -565,8 +652,11 @@ async fn forward(
                     transport_error_kind(&error)
                 );
                 last_error = Some(error);
-                if attempt == 1 {
+                transport_failures += 1;
+                if transport_failures == 1 {
                     sleep(Duration::from_millis(150)).await;
+                } else {
+                    break;
                 }
             }
         }
@@ -851,7 +941,9 @@ fn observe_sse_lines(
                         }
                     } else if serde_json::from_slice::<serde_json::Value>(data)
                         .ok()
-                        .is_some_and(|value| value.get("error").is_some())
+                        .is_some_and(|value| {
+                            value.get("error").is_some_and(|error| !error.is_null())
+                        })
                     {
                         *saw_terminal_error = true;
                     }
@@ -1311,6 +1403,21 @@ mod tests {
         let explicit_error = require_sse_done(explicit_error).collect::<Vec<_>>().await;
         assert_eq!(explicit_error.len(), 1);
         assert!(explicit_error[0].is_ok());
+        for data in [
+            b"data: {\"choices\":[],\"error\":null}\n\n".as_slice(),
+            b"data: {\"choices\":[],\"error\":null}\r\n\r\n".as_slice(),
+        ] {
+            let chunks = require_sse_done(stream::iter(vec![Ok::<_, io::Error>(
+                Bytes::copy_from_slice(data),
+            )]))
+            .collect::<Vec<_>>()
+            .await;
+            assert_eq!(chunks.len(), 2);
+            assert_eq!(
+                chunks[1].as_ref().unwrap_err().kind(),
+                io::ErrorKind::UnexpectedEof
+            );
+        }
     }
 
     #[test]
@@ -2265,6 +2372,412 @@ mod cancellation_integration_tests {
             let keys = f.posts.lock().unwrap();
             assert_eq!(keys[0], keys[1]);
             task.abort();
+        }
+    }
+}
+
+#[cfg(test)]
+mod authorization_retry_tests {
+    use super::tests::TestTurnAuthority;
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    struct WaitingAuthorization(tokio::sync::Notify);
+    #[async_trait::async_trait]
+    impl super::super::ModelAuthorization for WaitingAuthorization {
+        async fn bearer(&self, _: Option<&str>) -> Result<String, String> {
+            self.0.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn local_stop_interrupts_authorization_refresh_before_upstream() {
+        let proxy = ModelGatewayProxy::default();
+        let authority = Arc::new(TestTurnAuthority::default());
+        authority.set(Some(7));
+        proxy.bind_turn_authority(authority).unwrap();
+        let supplier = Arc::new(WaitingAuthorization(tokio::sync::Notify::new()));
+        let base = proxy
+            .register_authorized_session(
+                "waiting-session",
+                "http://127.0.0.1:1/v1",
+                "public-model",
+                128,
+                Some(supplier.clone()),
+            )
+            .await
+            .unwrap();
+        let pending = tokio::spawn(async move {
+            reqwest::Client::new()
+                .post(format!("{base}/chat/completions"))
+                .bearer_auth("expired-engine-token")
+                .header("Idempotency-Key", "operation-waiting-authorization")
+                .json(&json!({"messages":[],"stream":true}))
+                .send()
+                .await
+                .unwrap()
+        });
+        tokio::time::timeout(Duration::from_secs(2), supplier.0.notified())
+            .await
+            .unwrap();
+        proxy.cancel_turn("waiting-session", 7);
+        let response = tokio::time::timeout(Duration::from_secs(1), pending)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    struct RotatingAuthorization {
+        token: AtomicUsize,
+        retired: AtomicBool,
+        fail_refresh: AtomicBool,
+    }
+
+    struct ScopedAuthorization(&'static str);
+    #[async_trait::async_trait]
+    impl super::super::ModelAuthorization for ScopedAuthorization {
+        fn scope(&self) -> Option<&str> {
+            Some(self.0)
+        }
+        async fn bearer(&self, _: Option<&str>) -> Result<String, String> {
+            Ok(format!("Bearer {}", self.0))
+        }
+    }
+
+    #[tokio::test]
+    async fn registering_new_login_retires_old_url_cached_target_and_cancel_scope() {
+        let captures = Arc::new(StdMutex::new(Vec::new()));
+        let router = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let captures = captures.clone();
+                move |headers: axum::http::HeaderMap| {
+                    let captures = captures.clone();
+                    async move {
+                        captures
+                            .lock()
+                            .unwrap()
+                            .push(headers[header::AUTHORIZATION].to_str().unwrap().to_string());
+                        (
+                            [(header::CONTENT_TYPE, "text/event-stream")],
+                            "data: [DONE]\n\n",
+                        )
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream = format!("http://{}/v1", listener.local_addr().unwrap());
+        let peer = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let proxy = ModelGatewayProxy::default();
+        let authority = Arc::new(TestTurnAuthority::default());
+        authority.set(Some(7));
+        proxy.bind_turn_authority(authority).unwrap();
+        let old = proxy
+            .register_authorized_session(
+                "same-session",
+                &upstream,
+                "public-model",
+                128,
+                Some(Arc::new(ScopedAuthorization("user-a-session-1"))),
+            )
+            .await
+            .unwrap();
+        let old_scope = proxy.cancellation_scope("same-session");
+        let mut cached = proxy
+            .server
+            .get()
+            .unwrap()
+            .state
+            .registry
+            .lock()
+            .unwrap()
+            .targets[old.split('/').nth(3).unwrap()]
+        .clone();
+        cached.turn_generation = 7;
+        let new = proxy
+            .register_authorized_session(
+                "same-session",
+                &upstream,
+                "public-model",
+                128,
+                Some(Arc::new(ScopedAuthorization("user-b-session-2"))),
+            )
+            .await
+            .unwrap();
+        assert_ne!(old, new);
+        assert_ne!(old_scope, proxy.cancellation_scope("same-session"));
+        // Token rotation within this original login does not retire its route.
+        let rotated = proxy
+            .register_authorized_session(
+                "same-session",
+                &upstream,
+                "public-model",
+                128,
+                Some(Arc::new(ScopedAuthorization("user-b-session-2"))),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rotated, new);
+        let body = json!({"messages":[],"stream":true});
+        let client = reqwest::Client::new();
+        let stale = client
+            .post(format!("{old}/chat/completions"))
+            .bearer_auth("old-engine-token")
+            .header("Idempotency-Key", "operation-old-login")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stale.status(), StatusCode::NOT_FOUND);
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            "Bearer old-engine-token".parse().unwrap(),
+        );
+        let stale_cached = forward(
+            &proxy.server.get().unwrap().state,
+            cached,
+            "chat/completions",
+            reqwest::Method::POST,
+            &headers,
+            Some(Bytes::from(body.to_string())),
+            Some("operation-old-login"),
+            None,
+            true,
+        )
+        .await;
+        assert_eq!(stale_cached.status(), StatusCode::CONFLICT);
+        proxy.cancel_turn_bound("same-session", 7, old_scope.as_deref());
+        let fresh = client
+            .post(format!("{new}/chat/completions"))
+            .bearer_auth("new-engine-token")
+            .header("Idempotency-Key", "operation-new-login")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(fresh.status(), StatusCode::OK);
+        assert!(fresh.text().await.unwrap().contains("[DONE]"));
+        assert_eq!(*captures.lock().unwrap(), vec!["Bearer user-b-session-2"]);
+        peer.abort();
+    }
+    #[async_trait::async_trait]
+    impl super::super::ModelAuthorization for RotatingAuthorization {
+        async fn bearer(&self, rejected: Option<&str>) -> Result<String, String> {
+            if self.retired.load(Ordering::SeqCst)
+                || (rejected.is_some() && self.fail_refresh.load(Ordering::SeqCst))
+            {
+                return Err("authentication_required".into());
+            }
+            if rejected.is_some() {
+                self.token.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(format!(
+                "Bearer original-user-token-{}",
+                self.token.load(Ordering::SeqCst)
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_refreshes_original_authority_and_preserves_both_keys() {
+        let captures = Arc::new(StdMutex::new(Vec::new()));
+        let usage_id = uuid::Uuid::new_v4();
+        let router = Router::new().fallback({
+            let captures = captures.clone();
+            move |request: Request<Body>| {
+                let captures = captures.clone();
+                async move {
+                    let bearer = request.headers()[header::AUTHORIZATION].to_str().unwrap().to_string();
+                    let key = request.headers()["idempotency-key"].to_str().unwrap().to_string();
+                    let method = request.method().clone();
+                    captures.lock().unwrap().push((method.clone(), bearer.clone(), key));
+                    if bearer.ends_with("-2") { return StatusCode::UNAUTHORIZED.into_response(); }
+                    assert_eq!(bearer, "Bearer original-user-token-3");
+                    if method == reqwest::Method::POST { StatusCode::OK.into_response() }
+                    else { Json(json!({"usage_request_id":usage_id,"cancel_status":"PROVIDER_CONFIRMED"})).into_response() }
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream =
+            Url::parse(&format!("http://{}/v1", listener.local_addr().unwrap())).unwrap();
+        let peer = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let supplier = Arc::new(RotatingAuthorization {
+            token: AtomicUsize::new(1),
+            retired: AtomicBool::new(false),
+            fail_refresh: AtomicBool::new(false),
+        });
+        let calls = super::super::model_cancellation::Calls::default();
+        let incarnation = calls.incarnation("cancel-session");
+        let delivery = calls
+            .track_authorized(
+                &incarnation,
+                7,
+                upstream,
+                "Bearer expired-engine-snapshot",
+                "original-operation-key",
+                reqwest::Client::new(),
+                Some(supplier.clone()),
+            )
+            .unwrap();
+        delivery.observe_usage(Some(&usage_id.to_string()));
+        // A tool/approval wait outlives the token originally injected into Engine.
+        supplier.token.store(2, Ordering::SeqCst);
+        calls.cancel_turn("cancel-session", 7);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if captures.lock().unwrap().len() >= 3 {
+                    break;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let requests = captures.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].0, reqwest::Method::POST);
+        assert_eq!(requests[1].0, reqwest::Method::POST);
+        assert_eq!(requests[0].2, requests[1].2);
+        assert_eq!(requests[2].2, "original-operation-key");
+        assert_eq!(requests[0].1, "Bearer original-user-token-2");
+        assert_eq!(requests[1].1, "Bearer original-user-token-3");
+        assert_eq!(requests[2].1, "Bearer original-user-token-3");
+        peer.abort();
+    }
+    // A real HTTP peer consumes the entire operation, then loses the first ACK.
+    // Request bytes prove that retry does not mint a second operation or turn.
+    #[tokio::test]
+    async fn transport_retry_and_401_keep_operation_body_and_original_authority() {
+        for fail_refresh in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let upstream = format!("http://{}/v1", listener.local_addr().unwrap());
+            let captured = Arc::new(StdMutex::new(Vec::<String>::new()));
+            let captured_server = captured.clone();
+            let peer = tokio::spawn(async move {
+                for reply in [None, Some("401 Unauthorized"), Some("200 OK")] {
+                    if fail_refresh && reply == Some("200 OK") {
+                        break;
+                    }
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut data = Vec::new();
+                    loop {
+                        let mut buffer = [0; 4096];
+                        let count = socket.read(&mut buffer).await.unwrap();
+                        assert_ne!(count, 0);
+                        data.extend_from_slice(&buffer[..count]);
+                        if let Some(end) = data.windows(4).position(|v| v == b"\r\n\r\n") {
+                            let header = String::from_utf8_lossy(&data[..end]);
+                            let length = header
+                                .lines()
+                                .find_map(|line| {
+                                    line.to_ascii_lowercase()
+                                        .strip_prefix("content-length: ")
+                                        .and_then(|v| v.parse::<usize>().ok())
+                                })
+                                .unwrap();
+                            if data.len() >= end + 4 + length {
+                                break;
+                            }
+                        }
+                    }
+                    captured_server
+                        .lock()
+                        .unwrap()
+                        .push(String::from_utf8(data).unwrap());
+                    if let Some(status) = reply {
+                        let body = if status.starts_with("200") {
+                            "data: [DONE]\n\n"
+                        } else {
+                            "{}"
+                        };
+                        let response = format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        socket.write_all(response.as_bytes()).await.unwrap();
+                    }
+                }
+            });
+            let proxy = ModelGatewayProxy::default();
+            let authority = Arc::new(TestTurnAuthority::default());
+            authority.set(Some(7));
+            proxy.bind_turn_authority(authority).unwrap();
+            let supplier = Arc::new(RotatingAuthorization {
+                token: AtomicUsize::new(1),
+                retired: AtomicBool::new(false),
+                fail_refresh: AtomicBool::new(fail_refresh),
+            });
+            let base = proxy
+                .register_authorized_session(
+                    "refresh-session",
+                    &upstream,
+                    "public-model",
+                    128,
+                    Some(supplier.clone()),
+                )
+                .await
+                .unwrap();
+            let client = reqwest::Client::new();
+            let body = json!({"model":"engine-model","messages":[],"stream":true});
+            let response = client
+                .post(format!("{base}/chat/completions"))
+                .bearer_auth("expired-engine-snapshot")
+                .header("Idempotency-Key", "operation-stable-on-retry")
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                if fail_refresh {
+                    StatusCode::UNAUTHORIZED
+                } else {
+                    StatusCode::OK
+                }
+            );
+            let _ = response.text().await.unwrap();
+            peer.await.unwrap();
+            let requests = captured.lock().unwrap();
+            assert_eq!(requests.len(), if fail_refresh { 2 } else { 3 });
+            let payload = requests[0].split("\r\n\r\n").nth(1).unwrap();
+            let turn = requests[0]
+                .lines()
+                .find(|line| {
+                    line.to_ascii_lowercase()
+                        .starts_with("x-pinvou-logical-turn-id:")
+                })
+                .unwrap();
+            for (index, request) in requests.iter().enumerate() {
+                assert_eq!(request.split("\r\n\r\n").nth(1).unwrap(), payload);
+                assert!(request.contains("idempotency-key: operation-stable-on-retry"));
+                assert!(request.contains(turn));
+                assert!(request.contains(&format!(
+                    "authorization: Bearer original-user-token-{}",
+                    if index == 2 { 2 } else { 1 }
+                )));
+                assert!(!request.contains("expired-engine-snapshot"));
+            }
+            drop(requests);
+            supplier.retired.store(true, Ordering::SeqCst);
+            let denied = client
+                .post(format!("{base}/chat/completions"))
+                .bearer_auth("new-user-token")
+                .header("Idempotency-Key", "operation-after-login-change")
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(
+                captured.lock().unwrap().len(),
+                if fail_refresh { 2 } else { 3 }
+            );
         }
     }
 }

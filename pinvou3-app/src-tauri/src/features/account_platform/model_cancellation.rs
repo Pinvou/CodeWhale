@@ -34,6 +34,7 @@ struct Invocation {
     generation: u64,
     origin: Url,
     bearer: String,
+    authorization: Option<Arc<dyn super::ModelAuthorization>>,
     operation_key: String,
     cancel_key: String,
     usage_id: Mutex<Option<uuid::Uuid>>,
@@ -86,6 +87,7 @@ impl Calls {
             entry.stop();
         }
     }
+    #[cfg(test)]
     pub(super) fn track(
         &self,
         incarnation: &Arc<Incarnation>,
@@ -94,6 +96,19 @@ impl Calls {
         bearer: &str,
         key: &str,
         client: Client,
+    ) -> anyhow::Result<Delivery> {
+        self.track_authorized(incarnation, generation, origin, bearer, key, client, None)
+    }
+
+    pub(super) fn track_authorized(
+        &self,
+        incarnation: &Arc<Incarnation>,
+        generation: u64,
+        origin: Url,
+        bearer: &str,
+        key: &str,
+        client: Client,
+        authorization: Option<Arc<dyn super::ModelAuthorization>>,
     ) -> anyhow::Result<Delivery> {
         let mut registry = self
             .0
@@ -118,6 +133,7 @@ impl Calls {
             generation,
             origin,
             bearer: bearer.into(),
+            authorization,
             operation_key: key.into(),
             cancel_key,
             usage_id: Mutex::new(None),
@@ -295,14 +311,9 @@ impl Invocation {
                     return false;
                 };
                 let response = self
-                    .client
-                    .post(endpoint)
-                    .header("Authorization", &self.bearer)
-                    .header("Idempotency-Key", &self.cancel_key)
-                    .timeout(Duration::from_secs(5))
-                    .send()
+                    .authorized_request(reqwest::Method::POST, endpoint, Some(&self.cancel_key))
                     .await;
-                if let Ok(response) = response {
+                if let Some(response) = response {
                     if response.status().is_success() {
                         // The reply alone is not a local settlement or release decision.
                         let receipt = self
@@ -337,15 +348,9 @@ impl Invocation {
         false
     }
     async fn read_usage(&self, resource: &str, key: Option<&str>) -> Option<serde_json::Value> {
-        let mut request = self
-            .client
-            .get(self.endpoint(resource).ok()?)
-            .header("Authorization", &self.bearer)
-            .timeout(Duration::from_secs(5));
-        if let Some(key) = key {
-            request = request.header("Idempotency-Key", key)
-        }
-        let response = request.send().await.ok()?;
+        let response = self
+            .authorized_request(reqwest::Method::GET, self.endpoint(resource).ok()?, key)
+            .await?;
         if !response.status().is_success() {
             return None;
         }
@@ -362,6 +367,43 @@ impl Invocation {
             bytes.extend_from_slice(&chunk)
         }
         serde_json::from_slice(&bytes).ok()
+    }
+
+    async fn authorized_request(
+        &self,
+        method: reqwest::Method,
+        url: Url,
+        key: Option<&str>,
+    ) -> Option<reqwest::Response> {
+        let mut bearer = self.bearer.clone();
+        for attempt in 0..2 {
+            if let Some(supplier) = &self.authorization {
+                bearer = tokio::time::timeout(Duration::from_secs(5), supplier.bearer(None))
+                    .await
+                    .ok()?
+                    .ok()?;
+            }
+            let mut request = self
+                .client
+                .request(method.clone(), url.clone())
+                .header("Authorization", &bearer)
+                .timeout(Duration::from_secs(5));
+            if let Some(key) = key {
+                request = request.header("Idempotency-Key", key);
+            }
+            let response = request.send().await.ok()?;
+            if response.status() == reqwest::StatusCode::UNAUTHORIZED && attempt == 0 {
+                if let Some(supplier) = &self.authorization {
+                    tokio::time::timeout(Duration::from_secs(5), supplier.bearer(Some(&bearer)))
+                        .await
+                        .ok()?
+                        .ok()?;
+                    continue;
+                }
+            }
+            return Some(response);
+        }
+        None
     }
 }
 impl Delivery {

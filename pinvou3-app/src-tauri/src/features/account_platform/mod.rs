@@ -1020,7 +1020,30 @@ impl AccountPlatformState {
             base_url: token_gateway_openai_base(gateway),
             access_token: token,
             revision: format!("oidc-user-{user_id}-session-{generation}"),
+            user_id,
+            generation,
         })
+    }
+
+    async fn bound_model_token(
+        &self,
+        authorization: &ChatRuntimeAuthorization,
+        rejected: Option<&str>,
+    ) -> Result<String, String> {
+        self.require_generation(authorization.generation).await?;
+        let config = AccountPlatformConfig::current()?;
+        let token = self
+            .access_token_in_session(&config, rejected, Some(authorization.generation))
+            .await?;
+        let session = self.session.lock().await;
+        if !session.as_ref().is_some_and(|session| {
+            session.generation == authorization.generation
+                && session.account_user_id.as_deref() == Some(authorization.user_id.as_str())
+                && session.access_token == token
+        }) {
+            return Err("authentication_required: account session changed".into());
+        }
+        Ok(format!("Bearer {token}"))
     }
 
     pub(crate) async fn chat_catalog_for_authorization(
@@ -1602,10 +1625,63 @@ fn random_urlsafe(bytes: usize) -> String {
 }
 
 /// Sensitive runtime authorization is deliberately not serializable or Debug.
+#[derive(Clone)]
 pub(crate) struct ChatRuntimeAuthorization {
     pub(crate) base_url: String,
     pub(crate) access_token: String,
     pub(crate) revision: String,
+    user_id: String,
+    generation: u64,
+}
+
+/// A route retains its original authenticated principal across token rotation.
+#[async_trait::async_trait]
+pub(super) trait ModelAuthorization: Send + Sync {
+    fn scope(&self) -> Option<&str> {
+        None
+    }
+    async fn bearer(&self, rejected: Option<&str>) -> Result<String, String>;
+}
+
+struct BoundModelAuthorization {
+    app: tauri::AppHandle,
+    authorization: ChatRuntimeAuthorization,
+}
+
+impl ChatRuntimeAuthorization {
+    fn supplier(&self, app: tauri::AppHandle) -> Arc<dyn ModelAuthorization> {
+        Arc::new(BoundModelAuthorization {
+            app,
+            authorization: self.clone(),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelAuthorization for BoundModelAuthorization {
+    fn scope(&self) -> Option<&str> {
+        Some(&self.authorization.revision)
+    }
+    async fn bearer(&self, rejected: Option<&str>) -> Result<String, String> {
+        use tauri::Manager;
+        let app = self.app.clone();
+        let authorization = self.authorization.clone();
+        let rejected = rejected
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .map(str::to_owned);
+        // Stopping delivery must not drop an in-flight refresh after the IdP
+        // rotated its refresh token. Its original session owns completion.
+        tokio::spawn(async move {
+            let state = app
+                .try_state::<AccountPlatformState>()
+                .ok_or_else(|| "authentication_required: account state unavailable".to_string())?;
+            state
+                .bound_model_token(&authorization, rejected.as_deref())
+                .await
+        })
+        .await
+        .map_err(|_| "authentication_required: authorization task failed".to_string())?
+    }
 }
 
 fn token_gateway_openai_base(base: &Url) -> String {
@@ -3524,6 +3600,75 @@ mod tests {
             Some(r#"{"items":[{"total_microcredits":9223372036854775807}]}"#)
         );
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bound_model_credentials_refresh_expiry_and_rejection_without_crossing_login() {
+        let _env = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _snapshot = AccountEnvSnapshot::take();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        independent_env_config(&url);
+        unsafe {
+            std::env::set_var(TOKEN_GATEWAY_URL_ENV, url.as_str());
+        }
+        let server = thread::spawn(move || {
+            for (status, body) in [
+                (
+                    200,
+                    r#"{"access_token":"rotated-one","refresh_token":"refresh-one","expires_in":3600}"#,
+                ),
+                (
+                    200,
+                    r#"{"access_token":"rotated-two","refresh_token":"refresh-two","expires_in":3600}"#,
+                ),
+                (503, r#"{"error":"temporarily_unavailable"}"#),
+            ] {
+                let (mut socket, _) = listener.accept().unwrap();
+                let request = independent_read_request(&mut socket);
+                assert!(request.starts_with("POST / "));
+                assert!(request.contains("grant_type=refresh_token"));
+                independent_write_response(&mut socket, status, body);
+            }
+        });
+        let state = portal_test_state(
+            Arc::new(MemoryCredentialStore::default()),
+            Some(portal_runtime_session("initial-token", "initial-refresh")),
+        );
+        state.session_generation.store(1, Ordering::Relaxed);
+        state.session.lock().await.as_mut().unwrap().account_user_id =
+            Some("11111111-1111-4111-8111-111111111111".into());
+        let original = state.chat_runtime_authorization().await.unwrap();
+        state.session.lock().await.as_mut().unwrap().expires_at = Instant::now();
+        assert_eq!(
+            state.bound_model_token(&original, None).await.unwrap(),
+            "Bearer rotated-one"
+        );
+        assert_eq!(
+            state
+                .bound_model_token(&original, Some("rotated-one"))
+                .await
+                .unwrap(),
+            "Bearer rotated-two"
+        );
+        assert!(
+            state
+                .bound_model_token(&original, Some("rotated-two"))
+                .await
+                .is_err()
+        );
+        server.join().unwrap();
+        // No network may be reached after either logout or another explicit login,
+        // including a later login of the same account user.
+        *state.session.lock().await = None;
+        assert!(state.bound_model_token(&original, None).await.is_err());
+        let mut replacement = portal_runtime_session("new-login-token", "new-login-refresh");
+        replacement.generation = 2;
+        replacement.account_user_id = Some(original.user_id.clone());
+        *state.session.lock().await = Some(replacement);
+        assert!(state.bound_model_token(&original, None).await.is_err());
+    }
+
     async fn independent_catalog_fixture(
         mode: &str,
     ) -> Result<(ApiResponse, ChatRuntimeAuthorization), String> {

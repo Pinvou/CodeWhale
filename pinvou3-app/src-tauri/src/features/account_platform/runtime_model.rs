@@ -19,7 +19,8 @@ struct RuntimeCatalog {
 #[derive(Debug, Deserialize)]
 struct RuntimeCatalogItem {
     model_id: String,
-    display_name: String,
+    #[serde(rename = "display_name")]
+    _display_name: String,
     model_capability_version_id: String,
     context_length: u64,
     maximum_output_tokens: u64,
@@ -132,8 +133,6 @@ fn runtime_model_limits(body: serde_json::Value, model_id: &str) -> Result<Runti
         .find(|item| {
             item.model_id
                 .eq_ignore_ascii_case(canonical_reference.as_deref().unwrap_or(reference))
-                || (canonical_reference.is_none()
-                    && item.display_name.trim().eq_ignore_ascii_case(reference))
         })
         .ok_or_else(|| {
             // A legacy name never changes to a different model automatically.
@@ -286,11 +285,12 @@ impl RuntimeModelProvider for AccountPlatformRuntimeModelProvider {
         model.max_output_tokens = Some(limits.output_tokens);
         model.base_url = self
             .model_proxy
-            .register_session(
+            .register_authorized_session(
                 &request.session_id,
                 &authorization.base_url,
                 &limits.gateway_model_id,
                 limits.output_tokens,
+                Some(authorization.supplier(self.app.clone())),
             )
             .await
             .context("start account platform model proxy")?;
@@ -394,12 +394,12 @@ mod tests {
                 .is_some()
         );
         assert!(error.downcast_ref::<super::BoundModelAbsent>().is_none());
-        // The existing exact current-name lookup still works; absence never
-        // changes a saved old name into the newer similar directory name.
-        let current = runtime_model_limits(catalog, "deepseek-flash").unwrap();
-        assert_eq!(
-            current.gateway_model_id,
-            "0199a100-0001-7000-8000-000000000107"
+        // Display names are mutable labels, never identity migration evidence.
+        let current = runtime_model_limits(catalog, "deepseek-flash").unwrap_err();
+        assert!(
+            current
+                .downcast_ref::<super::BoundLegacyModelAbsent>()
+                .is_some()
         );
         assert_eq!(legacy, "deepseek-v4-flash");
         for name in ["deepseek-chat", "abcdefghijklmnopqrstuvwxyzabcdef"] {
@@ -618,7 +618,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_limits_resolve_current_display_name_to_stable_model_id() {
+    fn runtime_limits_reject_current_display_name_without_explicit_binding() {
         let limits = runtime_model_limits(
             json!({
                 "catalog_version": 8,
@@ -632,16 +632,11 @@ mod tests {
             }),
             "deepseek-flash",
         )
-        .expect("current model display name");
-
-        assert_eq!(
-            limits.gateway_model_id,
-            "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c"
-        );
-        assert_eq!(limits.engine_model, "deepseek-v4-flash");
-        assert_eq!(
-            limits.capability_version_id,
-            "0199a100-0001-7000-8000-000000000203"
+        .unwrap_err();
+        assert!(
+            limits
+                .downcast_ref::<super::BoundLegacyModelAbsent>()
+                .is_some()
         );
     }
 
@@ -658,7 +653,7 @@ mod tests {
                     "maximum_output_tokens": 8192
                 }]
             }),
-            "future-model",
+            "00000000-0000-7000-8000-000000000099",
         )
         .expect("future model limits");
 
