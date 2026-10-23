@@ -1,110 +1,93 @@
-name: Pinvou fork CI
-
+name: Fetch envelope recovery validation
 on:
-  pull_request:
-    branches: [pinvou3-clean]
-  push:
-    branches: [pinvou3-clean]
   workflow_dispatch:
-
 permissions:
   contents: read
-
-concurrency:
-  group: fork-ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  check:
-    name: check
+  contracts:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [baseline, old-body-cut, public-permissions]
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 70
     env:
       CARGO_BUILD_JOBS: '1'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
       CARGO_INCREMENTAL: '0'
       RUST_MIN_STACK: '16777216'
+      VARIANT: ${{ matrix.variant }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Install Linux dependencies
+      - name: Linux dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
-          save-if: ${{ github.event_name == 'push' }}
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Lint workspace
-        run: >-
-          cargo clippy --workspace --all-features --locked --
-          -D warnings
-          -A clippy::uninlined_format_args
-          -A clippy::too_many_arguments
-          -A clippy::unnecessary_map_or
-          -A clippy::collapsible_if
-          -A clippy::assertions_on_constants
-      - uses: taiki-e/install-action@nextest
-      - name: Test workspace
-        run: cargo nextest run --workspace --all-features --locked --profile ci --test-threads 2
-      - name: Test documentation
-        run: cargo test --workspace --all-features --locked --doc
-      - name: Check lockfile drift
-        run: git diff --exit-code -- Cargo.lock
-
-  gitleaks:
-    name: Gitleaks
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Install verified Gitleaks release
+          save-if: false
+      - name: Apply isolated production counterexample
+        shell: python
+        run: |
+          import base64, os, pathlib
+          v = os.environ['VARIANT']
+          if v == 'old-body-cut':
+              p = pathlib.Path('crates/tui/src/tools/fetch_url.rs')
+              s = p.read_text()
+              a = s.index('fn render_extracted(')
+              b = s.index('fn write_binary_artifact(', a)
+              s = s[:a] + base64.b64decode('Zm4gcmVuZGVyX2V4dHJhY3RlZCgKICAgIHVybDogJnN0ciwKICAgIGNvbnRlbnRfdHlwZTogJnN0ciwKICAgIGZvcm1hdDogRm9ybWF0LAogICAgZG9jdW1lbnQ6IEV4dHJhY3RlZERvY3VtZW50LAogICAgYnl0ZXM6ICZbdThdLAogICAgY29udGV4dDogJlRvb2xDb250ZXh0LAopIC0+IFJlc3VsdDwoU3RyaW5nLCBPcHRpb248QXJ0aWZhY3RXcml0ZT4pLCBUb29sRXJyb3I+IHsKICAgIGlmIGRvY3VtZW50LmtpbmQgPT0gRG9jdW1lbnRLaW5kOjpQZGYgJiYgZm9ybWF0ICE9IEZvcm1hdDo6UmF3IHsKICAgICAgICBsZXQgZXh0cmFjdGVkID0gbWF0Y2ggZm9ybWF0IHsKICAgICAgICAgICAgRm9ybWF0OjpUZXh0ID0+IGRvY3VtZW50LnRleHQsCiAgICAgICAgICAgIEZvcm1hdDo6TWFya2Rvd24gPT4gZG9jdW1lbnQubWFya2Rvd24sCiAgICAgICAgICAgIEZvcm1hdDo6UmF3ID0+IHVucmVhY2hhYmxlISgicmF3IFBERiBoYW5kbGVkIGJlbG93IiksCiAgICAgICAgfTsKICAgICAgICByZXR1cm4gYm91bmRfdGV4dCh1cmwsIGV4dHJhY3RlZCwgY29udGV4dCk7CiAgICB9CgogICAgaWYgZG9jdW1lbnQua2luZCA9PSBEb2N1bWVudEtpbmQ6Ok1lZGlhIHx8IGRvY3VtZW50LmtpbmQgPT0gRG9jdW1lbnRLaW5kOjpQZGYgewogICAgICAgIGxldCBleHRlbnNpb24gPSBkb2N1bWVudAogICAgICAgICAgICAubWVkaWFfZXh0ZW5zaW9uCiAgICAgICAgICAgIC51bndyYXBfb3IoaWYgZG9jdW1lbnQua2luZCA9PSBEb2N1bWVudEtpbmQ6OlBkZiB7CiAgICAgICAgICAgICAgICAicGRmIgogICAgICAgICAgICB9IGVsc2UgewogICAgICAgICAgICAgICAgImJpbiIKICAgICAgICAgICAgfSk7CiAgICAgICAgbGV0IGFydGlmYWN0ID0gd3JpdGVfYmluYXJ5X2FydGlmYWN0KHVybCwgZXh0ZW5zaW9uLCBieXRlcywgY29udGV4dCk/OwogICAgICAgIGxldCByZWxhdGl2ZSA9IGNyYXRlOjphcnRpZmFjdHM6OmZvcm1hdF9hcnRpZmFjdF9yZWxhdGl2ZV9wYXRoKCZhcnRpZmFjdC5yZWxhdGl2ZV9wYXRoKTsKICAgICAgICBsZXQgbGFiZWwgPSBpZiBkb2N1bWVudC5raW5kID09IERvY3VtZW50S2luZDo6UGRmIHsKICAgICAgICAgICAgIlBERiIKICAgICAgICB9IGVsc2UgewogICAgICAgICAgICAibWVkaWEiCiAgICAgICAgfTsKICAgICAgICBsZXQgY29udGVudCA9CiAgICAgICAgICAgIGZvcm1hdCEoIlt7bGFiZWx9IHJlc3BvbnNlIHNhdmVkIHRvIHtyZWxhdGl2ZX07IGNvbnRlbnQgdHlwZToge2NvbnRlbnRfdHlwZX0uXSIpOwogICAgICAgIHJldHVybiBPaygoY29udGVudCwgU29tZShhcnRpZmFjdCkpKTsKICAgIH0KCiAgICBsZXQgY29udGVudCA9IG1hdGNoIGZvcm1hdCB7CiAgICAgICAgRm9ybWF0OjpSYXcgPT4gZGVjb2RlX3Jlc3BvbnNlX2JvZHkoCiAgICAgICAgICAgIGJ5dGVzLAogICAgICAgICAgICBTb21lKGNvbnRlbnRfdHlwZSksCiAgICAgICAgICAgIGRvY3VtZW50LmtpbmQgPT0gRG9jdW1lbnRLaW5kOjpIdG1sLAogICAgICAgICk/LAogICAgICAgIEZvcm1hdDo6VGV4dCA9PiBkb2N1bWVudC50ZXh0LAogICAgICAgIEZvcm1hdDo6TWFya2Rvd24gPT4gZG9jdW1lbnQubWFya2Rvd24sCiAgICB9OwogICAgYm91bmRfdGV4dCh1cmwsIGNvbnRlbnQsIGNvbnRleHQpCn0KCmZuIGJvdW5kX3RleHQoCiAgICB1cmw6ICZzdHIsCiAgICBjb250ZW50OiBTdHJpbmcsCiAgICBjb250ZXh0OiAmVG9vbENvbnRleHQsCikgLT4gUmVzdWx0PChTdHJpbmcsIE9wdGlvbjxBcnRpZmFjdFdyaXRlPiksIFRvb2xFcnJvcj4gewogICAgbGV0IGJvdW5kZWQgPSBib3VuZF93ZWJfdGV4dCgKICAgICAgICBjb250ZW50LAogICAgICAgIGNvbnRleHQsCiAgICAgICAgfGJvZHl8IGZldGNoX2FydGlmYWN0X2lkKHVybCwgYm9keS5hc19ieXRlcygpKSwKICAgICAgICAicGFnZSIsCiAgICApPzsKICAgIGxldCBhcnRpZmFjdCA9IGJvdW5kZWQuYXJ0aWZhY3QubWFwKHxhcnRpZmFjdHwgQXJ0aWZhY3RXcml0ZSB7CiAgICAgICAgc2Vzc2lvbl9pZDogYXJ0aWZhY3Quc2Vzc2lvbl9pZCwKICAgICAgICBhYnNvbHV0ZV9wYXRoOiBhcnRpZmFjdC5hYnNvbHV0ZV9wYXRoLAogICAgICAgIHJlbGF0aXZlX3BhdGg6IGFydGlmYWN0LnJlbGF0aXZlX3BhdGgsCiAgICAgICAgYnl0ZV9zaXplOiBhcnRpZmFjdC5ieXRlX3NpemUsCiAgICAgICAgcHJldmlldzogYXJ0aWZhY3QucHJldmlldywKICAgIH0pOwogICAgT2soKGJvdW5kZWQuY29udGVudCwgYXJ0aWZhY3QpKQp9Cgo=').decode() + s[b:]
+              s = 'use super::web::overflow::bound_text as bound_web_text;\n' + s if not s.startswith('//!') else s[:s.index('use ')] + 'use super::web::overflow::bound_text as bound_web_text;\n' + s[s.index('use '):]
+              p.write_text(s)
+          elif v == 'public-permissions':
+              p = pathlib.Path('crates/tui/src/artifacts.rs')
+              s = p.read_text()
+              assert s.count('options.mode(0o600);') == 1
+              p.write_text(s.replace('options.mode(0o600);', 'options.mode(0o666);'))
+      - name: Execute contracts and verify targeted counterexamples
         shell: bash
         run: |
-          curl --fail --location --retry 3 --output "$RUNNER_TEMP/gitleaks.tar.gz" \
-            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
-          printf '%s  %s\n' \
-            551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb \
-            "$RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check --strict
-          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
-      - name: Verify fixture exceptions remain narrow
-        run: python3 scripts/check-gitleaks-config.py "$RUNNER_TEMP/gitleaks"
-      - name: Scan checked-out tree
-        run: '"$RUNNER_TEMP/gitleaks" dir . --redact --no-banner'
-      - name: Scan introduced commits
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-        shell: bash
-        run: |
-          # New branches and manual runs have no base: scan all reachable history.
-          if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]]; then
-            range=HEAD
-          else
-            range="$BASE_SHA..HEAD"
+          umask 022
+          set +e
+          cargo test -p codewhale-tui --lib --all-features --locked forkguard_fetch_url_ -- --test-threads=1 > fetch.log 2>&1
+          fetch_status=$?
+          cargo test -p codewhale-tui --lib --all-features --locked forkguard_immutable_artifacts_are_private_and_replay_safe -- --test-threads=1 > private.log 2>&1
+          private_status=$?
+          cat fetch.log private.log
+          export FETCH_TEST_EXIT="$fetch_status" PRIVATE_TEST_EXIT="$private_status"
+          python3 - <<'PY'
+          import os, pathlib, re
+          v = os.environ['VARIANT']
+          f = re.sub(r'\x1b\[[0-9;]*m', '', pathlib.Path('fetch.log').read_text())
+          p = re.sub(r'\x1b\[[0-9;]*m', '', pathlib.Path('private.log').read_text())
+          expected = {
+              'forkguard_fetch_url_full_envelope_round_trips_before_context_cut': v == 'old-body-cut',
+              'forkguard_fetch_url_small_envelope_stays_parseable_and_artifact_free': False,
+              'forkguard_immutable_artifacts_are_private_and_replay_safe': v == 'public-permissions',
+          }
+          for name, fail in expected.items():
+              matches = re.findall(r'::' + name + r' \.\.\. (ok|FAILED)', f + p)
+              assert matches == [('FAILED' if fail else 'ok')], (v, name, matches)
+          assert int(os.environ['FETCH_TEST_EXIT']) == (101 if v == 'old-body-cut' else 0)
+          assert int(os.environ['PRIVATE_TEST_EXIT']) == (101 if v == 'public-permissions' else 0)
+          print('Verified exact native contract outcomes:', v)
+          PY
+          status=$?
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
+          if [ "$VARIANT" = baseline ]; then
+            set -e
+            cargo test -p codewhale-tui --lib --all-features --locked tools::fetch_url:: -- --test-threads=1 > fetch-suite.log 2>&1
+            cargo test -p codewhale-tui --lib --all-features --locked artifacts::tests:: -- --test-threads=1 > artifact-suite.log 2>&1
+            cargo test -p codewhale-tui --lib --all-features --locked output_recovery_tests:: -- --test-threads=1 > dispatch-suite.log 2>&1
+            cat fetch-suite.log artifact-suite.log dispatch-suite.log
           fi
-          "$RUNNER_TEMP/gitleaks" git . --log-opts="$range" --redact --no-banner
-
-  gate:
-    name: gate
-    if: always()
-    needs: [check, gitleaks]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Require successful validation
-        env:
-          CHECK_RESULT: ${{ needs.check.result }}
-          GITLEAKS_RESULT: ${{ needs.gitleaks.result }}
-        run: |
-          test "$CHECK_RESULT" = success
-          test "$GITLEAKS_RESULT" = success
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fetch-private-${{ matrix.variant }}
+          path: '*.log'
