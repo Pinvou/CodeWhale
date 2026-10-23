@@ -153,8 +153,12 @@ test('desktop bridge keeps legacy switch payloads and carries idle/CAS guards on
   const root = { CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options.detail; } },
     dispatchEvent: event => manual.push(event.detail) };
   const calls = [];
-  vm.runInNewContext(fs.readFileSync(new URL('../src/platform/tauri/bridge/settings.js', import.meta.url), 'utf8'),
-    { window: root, console, setTimeout, clearTimeout });
+  // settings.js's post-switch refresh goes through window.PinvouBridgeShared
+  // (the shared lane helpers), so both scripts must share one sandbox context.
+  const sandbox = { window: root, console, setTimeout, clearTimeout };
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(new URL('../src/shared/bridge-shared-helpers.js', import.meta.url), 'utf8'), sandbox);
+  vm.runInContext(fs.readFileSync(new URL('../src/platform/tauri/bridge/settings.js', import.meta.url), 'utf8'), sandbox);
   const feature = root.__PINVOU_TAURI_BRIDGE_FEATURES__.settings({
     state: { activeSessionId: 'session', savedModels: [] }, notify() {}, listen() {},
     async invoke(command, value) { calls.push({ command, value }); return null; },
