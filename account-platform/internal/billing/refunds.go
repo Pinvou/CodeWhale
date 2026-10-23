@@ -255,12 +255,8 @@ func (p *PaymentCoordinator) processRefund(ctx context.Context, refundID uuid.UU
 	}
 	// Persist the possible-dispatch boundary before taking the financial gate.
 	// The stable merchant refund number is the provider's idempotency key.
-	claimed, err := p.repository.pool.Exec(ctx, `UPDATE refunds SET dispatch_state='IN_PROGRESS',dispatch_started_at=COALESCE(dispatch_started_at,$2),dispatch_lease_until=$2+interval '2 minutes' WHERE id=$1 AND status IN ('REQUESTED','MANUAL_REVIEW') AND (dispatch_lease_until IS NULL OR dispatch_lease_until<$2)`, refundID, p.now())
-	if err != nil {
+	if err := p.claimUnstartedRefund(ctx, refundID); err != nil {
 		return refund, err
-	}
-	if claimed.RowsAffected() != 1 {
-		return refund, ErrConflict
 	}
 	tx, err := p.repository.pool.Begin(ctx)
 	if err != nil {
@@ -329,9 +325,8 @@ func (p *PaymentCoordinator) processRefund(ctx context.Context, refundID uuid.UU
 		return p.provider.Refund(ctx, merchantOrderNo, refund.MerchantRefundNo, refund.AmountFen)
 	})
 	if providerErr != nil {
-		// JetStream may redeliver this event. The stable merchant refund number
-		// makes that safe only because the selected Provider explicitly declared
-		// refund idempotency support.
+		// JetStream may redeliver this event. Retain the possible dispatch so
+		// recovery only queries the original refund and never repeats creation.
 		if _, err := tx.Exec(ctx, `UPDATE refunds SET dispatch_state='RESULT_UNKNOWN',dispatch_lease_until=NULL WHERE id=$1`, refundID); err != nil {
 			return refund, err
 		}
@@ -388,6 +383,16 @@ func (p *PaymentCoordinator) reserveRefund(ctx context.Context, orderID, request
 		return Refund{}, false, ErrNotFound
 	}
 	if err != nil || order.FulfillmentStatus != "CREDITED" || (order.Status != "PAID" && order.Status != "PAID_LATE") {
+		return Refund{}, false, ErrConflict
+	}
+	// Refund policy follows the order's frozen commercial facts, never the
+	// current product catalog or its mutable display name.
+	var orderSnapshot []byte
+	var mappingID *uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT product_snapshot,product_mapping_id FROM payment_orders WHERE id=$1`, order.ID).Scan(&orderSnapshot, &mappingID); err != nil {
+		return Refund{}, false, err
+	}
+	if !ordinaryRefundLegacyOrder(order, orderSnapshot, mappingID) {
 		return Refund{}, false, ErrConflict
 	}
 	wallet, err := getWallet(ctx, tx, order.WalletID, true)

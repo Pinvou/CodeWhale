@@ -62,9 +62,13 @@
 | 退款单事实 | `refunds.status='MANUAL_REVIEW'`、`credit_microcredits>0`、组件/配额预留行仍完整存在且合计等于 `credit_microcredits` |
 | 异常事实 | 存在 `payment_anomaly_cases`：`anomaly_type='REFUND_FAILURE'`、`dedupe_key='refund:<refund_id>:local-conflict'`、`financial_action_status='PENDING'`，其 `version` 参与 CAS |
 | 本地未冲销 | 不存在 `business_reference='refund-repair:'||refund_id` 的 journal、不存在 `source_reference='refund-repair:'||refund_id` 的应收、`refund_exception_repair_cases` 无该退款行 |
-| 无冲突事实 | 同一 package 不存在强制退款案（`forced_refund_cases`）或拒付案（`chargeback_cases`）；现有判据不按已结案状态放行 |
+| 无冲突事实 | 同一 package 不存在强制退款案（`forced_refund_cases`）或拒付案（`chargeback_cases`），或每一历史案均满足下述严格驳回零效果例外；仅凭已结案状态不得放行 |
 
 判据全部由 Billing 从持久事实重算；proof 不接受浏览器提供的金额、`revoked/shortfall` 拆分、账户或 Provider 文本。
+
+2026-10-23 确认的严格历史案例外：拒付案必须为 `DISMISSED/DISMISS`，强制退款案必须为 `RESOLVED/DISMISS`，版本大于 1 且有结案时间；关联异常必须精确匹配案件类型、订单、交易、证据、package 钱包及反向 case 引用，状态为 `RESOLVED/DISMISS/NONE`，并有不可变 `payment_anomaly_commands.action='DISMISS'` 回执，其结果快照也明确记录同一异常的驳回与 `NONE`。两类案件的 `receivable_id` 必须为空，`revoked_base_microcredits/revoked_bonus_microcredits` 必须均为零；任何显式关联应收（包括已结清或核销）、同 package 或交易身份下的应收均拒绝，不依赖 `source_reference` 的拼写。普通拒付/强制退款及拒付补偿的业务引用不得存在 journal 或应收；同 package credit lot 上的拒付/强退 journal postings 及同 package 拒付财务修复 receipt 也拒绝，不因历史引用命名不同而放行。关联应收的不可变 allocations/journal 外键链随该应收一起被排除。缺失回执、未知或待处理财务状态、其他结案方式、已生效或历史财务修复继续 `PROOF_DENY`。此例外只允许重新生成当前真实退款修复计划，不改判原异常、不清除 `PENDING`，也不豁免注销资金门禁。
+
+例外证明的完整案件、异常与驳回回执按稳定顺序纳入 `facts_digest`；执行在既有 wallet → order → refund 门禁内重读并比较。因此原审批不能默默获得后来新增或漂移的历史案资格，必须用新快照重新审批。无历史案时保持原摘要输入不变。修复成功仍仅由原退款冲销事务写 journal/应收、回收权益、推进退款和异常为 `APPLIED`；注销随后按实际余额、应收及其他案件重新评估。缺少后继拒付修复设施的受支持旧阶段不因新增读依赖失效，设施已安装但无法读取时失败关闭。
 
 ## 6. closed command / snapshot / proof / presenter（冻结）
 
@@ -122,7 +126,7 @@
 | 情形 | 分类 | 行为 |
 |---|---|---|
 | activation 非 `ACTIVE`、policy/schema/版本不匹配 | `POLICY_OR_SCHEMA_MISMATCH` | 失败关闭、零写入、终态 |
-| 缺 `channel_refund_id`、缺 Provider 退款证据、证据与退款不一致、退款非 `MANUAL_REVIEW`、异常未升级或 `version` 漂移、存在同包拒付/强制退款案 | `PROOF_DENY` | 失败关闭、零写入、终态 |
+| 缺 `channel_refund_id`、缺 Provider 退款证据、证据与退款不一致、退款非 `MANUAL_REVIEW`、异常未升级或 `version` 漂移、同包拒付/强制退款历史不满足严格驳回零效果例外 | `PROOF_DENY` | 失败关闭、零写入、终态 |
 | 已有同退款 case/journal/应收 | 幂等命中 | 读回既有结果，零新写入 |
 | 5 分钟执行窗口过期 | `EXECUTION_WINDOW_EXPIRED` | 终态，零写入 |
 | 可重试领域故障（序列化失败、死锁、连接失败） | 按 GSA-16 分类 | 沿用现有 consumer 的 proof-era 单次认领与恢复分类；需要恢复时只读查询 owner 收据，禁止未知结果重新执行。历史通用最多 12 次重试不适用于本命令的财务认领 |

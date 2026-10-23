@@ -34,4 +34,8 @@ F01 TLS edge 只新增两个精确 POST 回调入口 `/api/v1/payment-callback/t
 
 ## Billing 数据库权限前置
 
+原始 016–024 已安装、尚未应用 025 的数据库可以保留已入账的 `EXPIRE` 历史。Billing 迁移包装器在纯输入阶段核验 025 的版本、名称和原始 SQL 校验和；应用时先锁定 `journal_entries`，仅在发现旧 `EXPIRE` 行时将 025 的新类型 CHECK 安装为 `NOT VALID`，不改写旧分录、过账或迁移账本。新写入仍必须使用 `EXPIRY`，`NOT VALID` 不豁免新行检查。没有旧行时正常安装已验证 CHECK。
+
+存在旧行的 CHECK 将保持 `convalidated=false`，不能直接运行 `VALIDATE CONSTRAINT` 并宣称历史已符合新枚举，也不能为消除该标记修改不可变旧账本。本兼容层保留原始迁移文件和账本身份，不扩大 016 之前历史的升级准入，不提供旧写方继续写 `EXPIRE` 的兼容；升级前须停止旧写方。
+
 启动 Compose 迁移作业前，数据库管理员须按 [Billing 数据库运行说明](../postgres/README.md) 在独立 Billing 数据库执行角色初始化。`billing-migrate` 私有环境文件使用 `billing_migrator` 的 DSN 和 `MIGRATION_ROLE=billing_service`；Billing 与 relay 只使用 runtime `billing_service` 连接，不得共用管理员或迁移凭据。已有部署同样先预配 owner 和单向成员关系，再提供备份回执执行前向硬化。Compose 不包含管理员数据库密码，不自动运行角色初始化；缺少角色会明确拒绝迁移。

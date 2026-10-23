@@ -235,18 +235,20 @@ FROM payment_anomaly_cases WHERE id=$1`, input.AnomalyCaseID).
 		return RefundExceptionRepairPlan{}, ErrApprovalSnapshotMismatch
 	}
 	// Zero facts: no previous repair journal, receivable or case for this refund.
-	var journalExists, receivableExists, caseExists, conflictCase bool
+	var journalExists, receivableExists, caseExists bool
 	if err := source.QueryRow(ctx, `SELECT
  EXISTS(SELECT 1 FROM journal_entries WHERE business_reference=$2),
  EXISTS(SELECT 1 FROM receivables WHERE source_type='FORCED_REFUND' AND source_reference=$2),
- EXISTS(SELECT 1 FROM refund_exception_repair_cases WHERE refund_id=$1),
- EXISTS(SELECT 1 FROM forced_refund_cases WHERE entitlement_package_id=$3) OR
- EXISTS(SELECT 1 FROM chargeback_cases WHERE entitlement_package_id=$3)`,
-		plan.RefundID, "refund-repair:"+plan.RefundID.String(), plan.PackageID).Scan(&journalExists, &receivableExists, &caseExists, &conflictCase); err != nil {
+ EXISTS(SELECT 1 FROM refund_exception_repair_cases WHERE refund_id=$1)`,
+		plan.RefundID, "refund-repair:"+plan.RefundID.String()).Scan(&journalExists, &receivableExists, &caseExists); err != nil {
 		return RefundExceptionRepairPlan{}, err
 	}
-	if journalExists || receivableExists || caseExists || conflictCase {
+	if journalExists || receivableExists || caseExists {
 		return RefundExceptionRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	disprovedHistory, err := refundExceptionDisprovedHistory(ctx, source, plan.PackageID)
+	if err != nil {
+		return RefundExceptionRepairPlan{}, err
 	}
 	// Recompute which reserved components can still be reclaimed in full, using
 	// exactly the frozen-value CAS the existing success path applies.
@@ -332,7 +334,8 @@ WHERE reservation.refund_id=$1 ORDER BY reservation.component_id`, plan.RefundID
  'package',(SELECT to_jsonb(p) FROM entitlement_packages p WHERE p.id=$4),
  'wallet',(SELECT to_jsonb(w) FROM wallets w WHERE w.id=$5),
  'components',COALESCE((SELECT jsonb_agg(jsonb_build_object('reservation',to_jsonb(r),'component',to_jsonb(c),'lot',to_jsonb(l)) ORDER BY r.component_id) FROM refund_component_reservations r JOIN entitlement_components c ON c.id=r.component_id JOIN credit_lots l ON l.id=r.credit_lot_id WHERE r.refund_id=$1),'[]'::jsonb),
- 'grants',COALESCE((SELECT jsonb_agg(jsonb_build_object('reservation',to_jsonb(r),'grant',to_jsonb(g)) ORDER BY r.grant_id) FROM refund_grant_reservations r JOIN member_quota_grants g ON g.id=r.grant_id WHERE r.refund_id=$1),'[]'::jsonb))`, plan.RefundID, plan.EvidenceID, plan.AnomalyCaseID, plan.PackageID, plan.WalletID).Scan(&ownerRaw); err != nil {
+ 'grants',COALESCE((SELECT jsonb_agg(jsonb_build_object('reservation',to_jsonb(r),'grant',to_jsonb(g)) ORDER BY r.grant_id) FROM refund_grant_reservations r JOIN member_quota_grants g ON g.id=r.grant_id WHERE r.refund_id=$1),'[]'::jsonb))
+ || CASE WHEN $6::jsonb='[]'::jsonb THEN '{}'::jsonb ELSE jsonb_build_object('disproved_financial_history',$6::jsonb) END`, plan.RefundID, plan.EvidenceID, plan.AnomalyCaseID, plan.PackageID, plan.WalletID, disprovedHistory).Scan(&ownerRaw); err != nil {
 		return RefundExceptionRepairPlan{}, err
 	}
 	ownerSnapshot, err := paymentRepairJSONSnapshot(ownerRaw)
@@ -341,7 +344,9 @@ WHERE reservation.refund_id=$1 ORDER BY reservation.component_id`, plan.RefundID
 	}
 	encoded, err := json.Marshal(map[string]any{
 		"command_type": refundExceptionRepairCommand, "complete_owner_snapshot": ownerSnapshot,
-		"zero_facts": []bool{journalExists, receivableExists, caseExists, conflictCase},
+		// Preserve the original four-slot digest for history-free approvals.
+		// Disproved history is frozen separately in complete_owner_snapshot.
+		"zero_facts": []bool{journalExists, receivableExists, caseExists, false},
 		"refund_id":  plan.RefundID.String(), "payment_order_id": plan.PaymentOrderID.String(),
 		"payment_transaction_id": plan.PaymentTransactionID.String(), "package_id": plan.PackageID.String(),
 		"wallet_id": plan.WalletID.String(), "wallet_posted_microcredits": plan.WalletPosted, "wallet_version": plan.WalletVersion,

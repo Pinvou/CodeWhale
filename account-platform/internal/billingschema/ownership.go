@@ -13,6 +13,24 @@ import (
 const legacyAnomalyChecksum = "849e4ae4ff57132486992216005fc56a3f9a06c31a3cc84bc14c60c5fbe9bedb"
 const chargebackStatusCheck = "ADD CONSTRAINT chargeback_cases_status_check CHECK (status IN ('REVIEW_REQUIRED','CONFIRMED','DISMISSED'))"
 
+// Original 025 changed the expiry spelling. Keep posted EXPIRE facts intact;
+// the conditional NOT VALID check still rejects new rows using that spelling.
+const legacyExpiryChecksum = "a5015c7fdaa8948820967a887c556cf55ca70be5078d4378fb5457dca9dec23d"
+const journalExpiryCheck = "ADD CONSTRAINT journal_entries_entry_type_check\n    CHECK (entry_type IN ('RECHARGE','USAGE','REFUND','REVERSAL','ADJUSTMENT','EXPIRY','RECEIVABLE','CHARGEBACK'))"
+
+func validateLegacyExpiryMigration(input []migrations.Migration) error {
+	for _, migration := range input {
+		if migration.Version != 25 && migration.Name != "receivables_and_context_freeze" && migration.Checksum != legacyExpiryChecksum {
+			continue
+		}
+		sql := strings.ReplaceAll(strings.ReplaceAll(migration.UpSQL, "\r\n", "\n"), "\r", "\n")
+		if migration.Version != 25 || migration.Name != "receivables_and_context_freeze" || migration.Checksum != legacyExpiryChecksum || sqlChecksum(sql) != legacyExpiryChecksum || strings.Count(sql, journalExpiryCheck) != 1 {
+			return errors.New("billing 025 expiry compatibility requires the exact retained migration")
+		}
+	}
+	return nil
+}
+
 // Match the original effect migration, including the retained runner's legacy
 // CRLF ledger representation. An unrelated version 58 cannot open the phase.
 const entitlementEffectChecksum = "a6ff23901e5c01f83dfcb09ad6e0a4f4ec47b93658d094c4c3767ce92b2a45a7"
@@ -20,6 +38,22 @@ const entitlementEffectLegacyChecksum = "31d2dabe3d1f0c865c7db413279eaee60343c8e
 
 func applyBillingMigration(ctx context.Context, tx pgx.Tx, migration migrations.Migration) error {
 	sql := migration.UpSQL
+	if migration.Version == 25 {
+		sql = strings.ReplaceAll(strings.ReplaceAll(sql, "\r\n", "\n"), "\r", "\n")
+		if err := validateLegacyExpiryMigration([]migrations.Migration{migration}); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `LOCK TABLE journal_entries IN ACCESS EXCLUSIVE MODE`); err != nil {
+			return err
+		}
+		var legacy bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM journal_entries WHERE entry_type='EXPIRE')`).Scan(&legacy); err != nil {
+			return err
+		}
+		if legacy {
+			sql = strings.Replace(sql, journalExpiryCheck, journalExpiryCheck+" NOT VALID", 1)
+		}
+	}
 	if migration.Version == 29 {
 		if sqlChecksum(sql) != legacyAnomalyChecksum || strings.Count(sql, chargebackStatusCheck) != 1 {
 			return errors.New("billing 029 compatibility requires the exact retained migration")
