@@ -20,6 +20,20 @@ function pinvouSharedtauriMain() {
   const TAURI = window.__TAURI__;
   if (!TAURI) {
     console.warn("[TauriBridge] Tauri not available — browser preview mode");
+    // 独立预览不经共享核：壳化的 renderMarkdown 依赖 index.html 先载的
+    // PinvouBridgeShared，且早退分支之后声明的桥内常量处于 TDZ——本地保底
+    // 渲染链（权威渲染器 → 共享 fallback → 内联转义）保持预览自包含且安全。
+    function standaloneSafeRenderMarkdown(text) {
+      if (window.PinvouMarkdownRenderer && typeof window.PinvouMarkdownRenderer.renderMarkdown === "function") {
+        return window.PinvouMarkdownRenderer.renderMarkdown(text);
+      }
+      if (window.PinvouMarkdownBridgeFallback && typeof window.PinvouMarkdownBridgeFallback.renderMarkdown === "function") {
+        return window.PinvouMarkdownBridgeFallback.renderMarkdown(text);
+      }
+      return String(text == null ? "" : text).replace(/[&<>"']/g, function (c) {
+        return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+      });
+    }
     window.TauriBridge = {
       available: false,
       lifecycle: { init: function () { return Promise.resolve(); } },
@@ -29,7 +43,7 @@ function pinvouSharedtauriMain() {
         subscribe: function () { return function () {}; },
         subscribeMany: function () { return function () {}; },
       },
-      rendering: { renderMarkdown: renderMarkdown },
+      rendering: { renderMarkdown: standaloneSafeRenderMarkdown },
     };
     return;
   }
