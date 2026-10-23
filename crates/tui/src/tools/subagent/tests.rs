@@ -5463,9 +5463,12 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
     }
     assert!(agent_schema["properties"].get("role").is_none());
     // #5324/#5123: the advertised surface stays minimal — the 12 post-#5324
-    // fields plus the T7 roster discovery filter `profile_query`. Budgets,
+    // fields plus the T7 roster discovery filter `profile_query`, plus the
+    // re-advertised wait bound `timeout_secs` (a model told "default 30s, max
+    // 120s" with no field to reach the max just repeats 30s waits; the
+    // 2026-10-23 four-child research fan-out needed eight of them). Budgets,
     // model/thinking overrides, worktree-path knobs and spawn-contract
-    // ceremony moved off the schema; the parser still accepts them for
+    // ceremony stay off the schema; the parser still accepts them for
     // replay compat (pinned by
     // `agent_tool_unadvertised_fields_remain_parse_accepted` below).
     let mut advertised: Vec<&str> = agent_schema["properties"]
@@ -5485,6 +5488,7 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
         "profile_query",
         "prompt",
         "resume_from",
+        "timeout_secs",
         "type",
         "until",
         "worktree",
@@ -5493,7 +5497,7 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
     expected.sort_unstable();
     assert_eq!(
         advertised, expected,
-        "the agent tool must advertise exactly the 13-field surface: {}",
+        "the agent tool must advertise exactly the 14-field surface: {}",
         agent_schema["properties"]
     );
     for unadvertised in [
@@ -5516,7 +5520,6 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
         "expected_artifact",
         "exact_files",
         "coordination_contracts",
-        "timeout_secs",
         "reason",
         "include_archived",
         // Pre-#5324 precedent: parse-accepted but never advertised.
@@ -5554,6 +5557,34 @@ fn wait_schema_text_discloses_timeout_bound_and_timed_out_receipt() {
         )) && until.contains("timed_out"),
         "agent(action=wait) until description must disclose the runtime \
          timeout bound and the timed_out receipt:\n{until}"
+    );
+    // The bound is only honest if the model can actually reach the max: the
+    // advertised `timeout_secs` carries the same constants as range and text.
+    assert!(
+        until.contains("timeout_secs"),
+        "until description must name the field that sets the bound:\n{until}"
+    );
+    let timeout_field = &agent_schema["properties"]["timeout_secs"];
+    assert_eq!(timeout_field["type"], "integer", "{timeout_field}");
+    assert_eq!(
+        timeout_field["minimum"],
+        json!(super::SUBAGENT_WAIT_MIN_TIMEOUT_SECS),
+        "{timeout_field}"
+    );
+    assert_eq!(
+        timeout_field["maximum"],
+        json!(super::SUBAGENT_WAIT_MAX_TIMEOUT_SECS),
+        "{timeout_field}"
+    );
+    let timeout_description = schema_property_description(&agent_schema, "timeout_secs");
+    assert!(
+        timeout_description.contains(&format!(
+            "Default {}, max {}",
+            super::SUBAGENT_WAIT_DEFAULT_TIMEOUT_SECS,
+            super::SUBAGENT_WAIT_MAX_TIMEOUT_SECS
+        )) && timeout_description.contains("timed_out"),
+        "timeout_secs description must disclose the default/max and the \
+         timed_out receipt:\n{timeout_description}"
     );
 
     let wait_tool = AgentsWaitTool::new(manager);
@@ -9623,6 +9654,256 @@ async fn spawn_session_name_held_by_prior_session_agent_does_not_collide() {
         .expect("fresh agent registered");
     assert_eq!(fresh.session_name, "researcher");
     assert!(!guard.is_from_prior_session(fresh));
+}
+
+/// Seed a same-session child holding `name` in the given status; returns its
+/// agent id. Shared by the name-release tests below.
+async fn seed_named_same_session_agent(
+    manager: &SharedSubAgentManager,
+    workspace: &Path,
+    agent_id: &str,
+    name: &str,
+    status: SubAgentStatus,
+) -> String {
+    let boot_id = manager.read().await.session_boot_id().to_string();
+    let (input_tx, _input_rx) = mpsc::unbounded_channel();
+    let mut holder = SubAgent::new(
+        agent_id.to_string(),
+        FleetRole::Scout,
+        "scan".to_string(),
+        make_assignment(),
+        "deepseek-v4-flash".to_string(),
+        Some("Blue".to_string()),
+        Some(vec!["read_file".to_string()]),
+        input_tx,
+        workspace.to_path_buf(),
+        boot_id,
+    );
+    holder.session_name = name.to_string();
+    holder.status = status;
+    // Older than any child the test spawns afterwards, so "newest" is
+    // unambiguous even on coarse clocks.
+    holder.started_at = Instant::now() - Duration::from_secs(60);
+    let id = holder.id.clone();
+    let mut guard = manager.write().await;
+    guard.agents.insert(id.clone(), holder);
+    assert!(!guard.is_from_prior_session(&guard.agents[&id]));
+    id
+}
+
+#[tokio::test]
+async fn spawn_session_name_released_once_same_session_holder_settles() {
+    // 2026-10-23 research fan-out: the parent cancelled `macro-policy`, got
+    // its completion sentinel, and immediately re-launched under the same
+    // name — refused with "already in use ... (status: cancelled) ... wait for
+    // its completion event". A settled child must release its name; only a
+    // live one (running, or interrupted with a wakeable checkpoint) holds it.
+    for settled in [
+        SubAgentStatus::Cancelled,
+        SubAgentStatus::Completed,
+        SubAgentStatus::Failed("tool error".to_string()),
+        SubAgentStatus::BudgetExhausted,
+    ] {
+        let tmp = tempdir().expect("tempdir");
+        let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 5);
+        let settled_label = subagent_status_name(&settled);
+        let settled_id = seed_named_same_session_agent(
+            &manager,
+            tmp.path(),
+            "test_agent_settled",
+            "macro-policy",
+            settled,
+        )
+        .await;
+
+        let mut runtime = stub_runtime();
+        runtime.manager = Arc::clone(&manager);
+        runtime.context = ToolContext::new(tmp.path());
+        let spawned = {
+            let mut guard = manager.write().await;
+            guard
+                .spawn_background_with_assignment_options(
+                    manager.clone(),
+                    runtime,
+                    FleetRole::Scout,
+                    "retry the macro-policy sweep".to_string(),
+                    make_assignment(),
+                    Some(vec!["read_file".to_string()]),
+                    SubAgentSpawnOptions {
+                        name: Some("macro-policy".to_string()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap_or_else(|err| {
+                    panic!("a {settled_label} holder must release its session name: {err}")
+                })
+        };
+        assert_ne!(spawned.agent_id, settled_id);
+
+        let guard = manager.read().await;
+        let fresh = guard
+            .agents
+            .get(&spawned.agent_id)
+            .expect("fresh agent registered");
+        assert_eq!(fresh.session_name, "macro-policy");
+        // The name now means the live retry, not the settled history entry.
+        assert_eq!(
+            guard
+                .resolve_agent_ref("macro-policy")
+                .expect("re-used name resolves instead of reading as ambiguous"),
+            spawned.agent_id,
+            "{settled_label} holder must not shadow the live retry"
+        );
+    }
+}
+
+#[tokio::test]
+async fn spawn_session_name_still_held_by_interrupted_same_session_child() {
+    // An interrupted child is parked, not finished: `followup` can still wake
+    // it, so its name stays reserved and the refusal names the live holder.
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 5);
+    let holder_id = seed_named_same_session_agent(
+        &manager,
+        tmp.path(),
+        "test_agent_parked",
+        "macro-policy",
+        SubAgentStatus::Interrupted("needs input".to_string()),
+    )
+    .await;
+
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+    runtime.context = ToolContext::new(tmp.path());
+    let err = {
+        let mut guard = manager.write().await;
+        guard
+            .spawn_background_with_assignment_options(
+                manager.clone(),
+                runtime,
+                FleetRole::Scout,
+                "retry".to_string(),
+                make_assignment(),
+                Some(vec!["read_file".to_string()]),
+                SubAgentSpawnOptions {
+                    name: Some("macro-policy".to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect_err("an interrupted holder keeps its session name")
+    };
+    let msg = err.to_string();
+    assert!(msg.contains(&holder_id), "names the live holder: {msg}");
+    assert!(
+        msg.contains("interrupted"),
+        "names the holder status: {msg}"
+    );
+    assert!(
+        msg.contains("cancel it"),
+        "tells the parent how to free the name: {msg}"
+    );
+}
+
+#[test]
+fn session_name_resolution_prefers_live_holder_then_newest_settled() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = SubAgentManager::new(tmp.path().to_path_buf(), 4);
+    let older_id = manager.insert_test_running_agent("older", tmp.path());
+    let newer_id = manager.insert_test_running_agent("newer", tmp.path());
+    for (id, age_secs) in [(&older_id, 120), (&newer_id, 60)] {
+        let agent = manager.agents.get_mut(id).expect("seeded agent");
+        agent.session_name = "shared".to_string();
+        agent.started_at = Instant::now() - Duration::from_secs(age_secs);
+    }
+
+    // Two live holders cannot arise through `spawn`, but a hydrated ledger
+    // could carry them: that is the one case a bare name stays ambiguous.
+    let err = manager
+        .resolve_agent_ref("shared")
+        .expect_err("two live holders stay ambiguous");
+    assert!(err.to_string().contains("ambiguous"), "{err}");
+
+    // The older holder settles: the live one is what the name means.
+    manager.agents.get_mut(&older_id).expect("older").status = SubAgentStatus::Cancelled;
+    assert_eq!(
+        manager
+            .resolve_agent_ref("shared")
+            .expect("live holder wins"),
+        newer_id
+    );
+
+    // Only settled holders left: the most recently started one wins, so a
+    // parent that retried under the same name reads the retry's result.
+    manager.agents.get_mut(&newer_id).expect("newer").status = SubAgentStatus::Completed;
+    assert_eq!(
+        manager
+            .resolve_agent_ref("shared")
+            .expect("newest settled holder wins"),
+        newer_id
+    );
+
+    // An interrupted holder is live for name purposes even though `wait`
+    // treats it as settled.
+    manager.agents.get_mut(&older_id).expect("older").status =
+        SubAgentStatus::Interrupted("parked".to_string());
+    assert_eq!(
+        manager
+            .resolve_agent_ref("shared")
+            .expect("interrupted holder is live"),
+        older_id
+    );
+}
+
+#[test]
+fn spawn_contention_error_names_the_read_only_path() {
+    // The ledger text is written for writers. The refusal seen in the
+    // 2026-10-23 fan-out was four `type=general` research children with no
+    // write_roots, none of which needed to write; the recovery the parent
+    // actually needs is the read-only path, so the spawn refusal names it.
+    let ledger_error = "write-scope contention with agent_7e2950c4 (roots: [\".\"], files: [], contracts: []); serialize the work, narrow the claim, or use worktree isolation".to_string();
+    let guided = spawn_claim_error_with_guidance(ledger_error.clone());
+    assert!(guided.starts_with(&ledger_error), "{guided}");
+    assert!(
+        guided.contains("Read-only children never contend"),
+        "{guided}"
+    );
+    for role in ["explore", "planner", "reviewer", "advisor"] {
+        assert!(guided.contains(role), "guidance must name {role}: {guided}");
+    }
+    assert!(
+        guided.contains("write_roots") && guided.contains("worktree=true"),
+        "{guided}"
+    );
+
+    // Other claim failures (capacity, schema) keep their own text.
+    let other = "write-claim capacity is 64 active owners; complete, serialize, or isolate existing work before admitting another writer".to_string();
+    assert_eq!(spawn_claim_error_with_guidance(other.clone()), other);
+}
+
+#[test]
+fn general_role_text_discloses_workspace_claim_and_read_only_alternative() {
+    // The roster entry, the type enum text and the tool description are the
+    // three places a model reads before picking `general` for a research
+    // fan-out; each must say that generals claim the workspace and that the
+    // read-only roles never contend.
+    let roster = FleetRole::Worker.description();
+    assert!(roster.contains("claims the parent workspace"), "{roster}");
+    assert!(roster.contains("read-only role"), "{roster}");
+
+    assert!(
+        SUBAGENT_TYPE_DESCRIPTION.contains("claims the parent workspace")
+            && SUBAGENT_TYPE_DESCRIPTION.contains("contend"),
+        "{SUBAGENT_TYPE_DESCRIPTION}"
+    );
+
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 1);
+    let tool = AgentTool::new(manager, stub_runtime());
+    let description = tool.description();
+    assert!(
+        description.contains("never contend") && description.contains("type=general"),
+        "{description}"
+    );
 }
 
 #[tokio::test]

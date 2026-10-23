@@ -381,18 +381,28 @@ provider's resolved fanout, depth, and timeout profile.
 
 ## Advertised agent-tool fields (v0.9.9)
 
-The model-facing `agent` tool schema advertises exactly **13 fields**
+The model-facing `agent` tool schema advertises exactly **14 fields**
 (#5324, #5123; T7 later added `profile_query`, the roster host-profile
-keyword filter):
+keyword filter; `timeout_secs` was re-advertised for `action=wait` — see
+below):
 
 `action`, `prompt`, `type`, `profile`, `profile_query`, `name`, `agent_id`,
-`message`, `until`, `detached`, `worktree`, `write_roots`, `resume_from`
+`message`, `until`, `timeout_secs`, `detached`, `worktree`, `write_roots`,
+`resume_from`
 
 plus the action-discriminated `dependentSchemas` tree (`start` requires
 `prompt`; `message`/`followup` require a target and `message`; `peek`/
 `interrupt`/`cancel` require a target). The schema change is part of the
 pinned prompt prefix, so upgrading re-fills the provider KV prefix once per
 session (docs/CACHE.md; accepted at the v0.9.9 boundary).
+
+`timeout_secs` (integer, 1..=120, default 30) bounds a single `action=wait`
+block. It had been dropped with the other lifecycle extras, but the `until`
+text kept promising "default 30s, max 120s": a model with no field to reach
+the max simply repeated 30-second waits — a four-child research fan-out
+observed on 2026-10-23 needed eight of them while the receipt kept saying
+"do not poll". Advertising the bound lets the parent size one wait to the
+batch.
 
 **Parse-accepted but unadvertised (compat).** The following inputs were
 removed from the advertised schema but remain accepted for saved transcripts,
@@ -411,12 +421,29 @@ intersects them with live policy:
   `cwd`, `worktree_path`, `worktree_branch`, `worktree_base`
 - spawn contract: `deliberate`, `dependencies`, `acceptance`,
   `expected_artifact`, `exact_files`, `coordination_contracts`
-- lifecycle extras: `timeout_secs` (wait), `reason` (interrupt),
-  `include_archived` (status), and `token_budget`
+- lifecycle extras: `reason` (interrupt), `include_archived` (status), and
+  `token_budget`; the wait alias `timeout` (same meaning as `timeout_secs`)
 
 Authority never widens: the #5426/#5435 containment clamps are unchanged —
 `write_authority` moves to roles/profiles, and delegation can only narrow
 inherited authority.
+
+### Session names and parallel read-only fan-outs
+
+A `name` passed to `action=start` is reserved only while its holder is live:
+running, or interrupted with a wakeable checkpoint. Once the child settles
+(completed, failed, cancelled, budget-exhausted) the name is free, so a
+cancel-and-retry under the same name succeeds. If a settled and a live child
+share a name, the name resolves to the live one; among settled-only holders
+it resolves to the most recent spawn. Only two live holders (possible after
+hydrating an older ledger) leave a bare name ambiguous — use the `agent_id`.
+
+`type=general` is write-capable and claims the whole parent workspace unless
+`write_roots` narrows it, so several generals started without disjoint
+`write_roots` collide on that claim even when none of them writes. For
+parallel research or inspection use a read-only role (`explore`, `planner`,
+`reviewer`, `advisor`) or a prompt-only start: read-only children claim no
+scope and never contend. The spawn-time contention refusal names this path.
 
 ## Child budgets (steps, wall time)
 

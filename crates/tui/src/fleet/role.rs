@@ -181,7 +181,9 @@ impl FleetRole {
     #[must_use]
     pub fn description(&self) -> &'static str {
         match self {
-            Self::Worker => "General-purpose agent with full tool access for multi-step tasks.",
+            Self::Worker => {
+                "General-purpose agent with full tool access for multi-step tasks. Write-capable: claims the parent workspace unless write_roots narrows it, so parallel generals contend — pick a read-only role for research."
+            }
             Self::Scout => "Fast read-only exploration for codebase search and analysis.",
             Self::Planner => {
                 "Grounded strategy: reads the workspace and the web, runs read-only probes, never mutates."
