@@ -5430,7 +5430,7 @@ impl Engine {
                         content: tool_result_message_content(
                             outcome.id,
                             output_for_context,
-                            None,
+                            (!output.success).then_some(true),
                             output.metadata.as_ref(),
                             (!content_blocks.is_empty()).then_some(content_blocks),
                         ),
