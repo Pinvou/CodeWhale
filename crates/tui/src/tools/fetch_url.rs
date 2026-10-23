@@ -510,14 +510,6 @@ mod tests {
     use crate::tools::spec::ToolContext;
     use std::path::PathBuf;
 
-    struct ArtifactRootRestore(Option<PathBuf>);
-
-    impl Drop for ArtifactRootRestore {
-        fn drop(&mut self) {
-            crate::artifacts::set_test_artifact_sessions_root(self.0.take());
-        }
-    }
-
     fn ctx() -> ToolContext {
         ToolContext::new(PathBuf::from("."))
     }
